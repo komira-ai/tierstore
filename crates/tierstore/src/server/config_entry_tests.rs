@@ -12,7 +12,9 @@ use super::super::config::{TierTable, from_text};
 use super::super::config_testing::{DEFAULTS, MINIMAL};
 use super::super::config_unknown::fields_of;
 use super::EntryTuning;
-use crate::{EntryReconcilerConfig, ProxyConfig, ReconcilerConfig, SystemClock};
+use crate::{
+    EntryReconcilerConfig, MarkReads, ProxyConfig, ReconcilerConfig, StepRetry, SystemClock,
+};
 
 /// `MINIMAL` with `lines` as more keys of `[hot_store]`.
 fn with_hot(lines: &str) -> String {
@@ -47,7 +49,10 @@ const ALL: &str = "retry_min = \"2s\"\nretry_max = \"90s\"\nstray_grace = \"20m\
     usage_interval = \"4s\"\nusage_scan_interval = \"6h\"\nscan_pages = 13\n\
     candidate_limit = 17\ntag_record_limit = 19\nproxy_usage_stale_after = \"45s\"\n\
     format_refresh = \"3s\"\nentry_rounds = 5\ndelete_wait = \"40s\"\ndelete_poll_min = \"2s\"\n\
-    delete_poll_max = \"8s\"";
+    delete_poll_max = \"8s\"\nheld_ttl = \"2h\"\nstep_attempts = 6\n\
+    step_retry_min = \"50ms\"\nstep_retry_max = \"3s\"\nread_window = \"2s\"\nread_retries = 2\n\
+    list_marker_pages = 6\nwant_retry = \"30s\"\nwant_recent_limit = 50\n\
+    copy_back_max_bytes = \"1MiB\"";
 
 /// A file that gives none of the keys has the values the code had before they were keys, in the
 /// file's settings and in what `build` makes of them: the same as the defaults of the proxy and of
@@ -62,6 +67,10 @@ fn a_file_that_gives_none_of_the_keys_has_the_old_values() {
     assert_eq!(built.proxy.format_refresh, old.format_refresh);
     assert_eq!(built.proxy.entry_rounds, old.entry_rounds);
     assert_eq!(built.proxy.delete_wait, old.delete_wait);
+    assert_eq!(built.proxy.step_retry, old.step_retry);
+    assert_eq!(built.proxy.step_retry, StepRetry::new());
+    assert_eq!(built.proxy.mark_reads, old.mark_reads);
+    assert_eq!(built.proxy.mark_reads, MarkReads::default());
     let base = ReconcilerConfig::new("p1/reconciler", 1000, std::sync::Arc::new(SystemClock));
     let before = EntryReconcilerConfig::new(base);
     let after = reconciler_of(&built);
@@ -77,6 +86,8 @@ fn a_file_that_gives_none_of_the_keys_has_the_old_values() {
     assert_eq!(after.scan_pages, before.scan_pages);
     assert_eq!(after.candidate_limit, before.candidate_limit);
     assert_eq!(after.tag_record_limit, before.tag_record_limit);
+    assert_eq!(after.held_ttl, before.held_ttl);
+    assert_eq!(after.held_ttl, Duration::from_secs(3600));
 }
 
 /// Every key parses, and a value that is not the default reaches the setting of the reconciler or
@@ -99,12 +110,25 @@ fn every_key_reaches_the_setting_it_stands_for() {
     assert_eq!(config.scan_pages, 13);
     assert_eq!(config.candidate_limit, 17);
     assert_eq!(config.tag_record_limit, 19);
+    assert_eq!(config.held_ttl, secs(2 * 3600));
     assert_eq!(built.proxy.usage_stale_after, secs(45));
     assert_eq!(built.proxy.format_refresh, secs(3));
     assert_eq!(built.proxy.entry_rounds, 5);
     assert_eq!(built.proxy.delete_wait.wait, secs(40));
     assert_eq!(built.proxy.delete_wait.poll_min, secs(2));
     assert_eq!(built.proxy.delete_wait.poll_max, secs(8));
+    assert_eq!(built.proxy.step_retry.attempts, 6);
+    assert_eq!(built.proxy.step_retry.delay, Duration::from_millis(50));
+    assert_eq!(built.proxy.step_retry.delay_max, secs(3));
+    let reads = MarkReads {
+        read_window: secs(2),
+        read_retries: 2,
+        list_marker_pages: 6,
+        want_retry: secs(30),
+        want_recent_limit: 50,
+        copy_back_max_bytes: 1 << 20,
+    };
+    assert_eq!(built.proxy.mark_reads, reads);
 }
 
 /// The key `usage_stale_after`, which sets the limit of `/usagez`, is not the proxy's limit: setting
@@ -153,6 +177,11 @@ fn a_duration_out_of_range_is_refused_by_name_and_the_ends_are_taken() {
         ("delete_wait", HOURS, "61m"),
         ("delete_poll_min", HOURS, "61m"),
         ("delete_poll_max", HOURS, "61m"),
+        ("held_ttl", YEAR, "8761h"),
+        ("step_retry_min", HOURS, "61m"),
+        ("step_retry_max", HOURS, "61m"),
+        ("read_window", HOURS, "61m"),
+        ("want_retry", YEAR, "8761h"),
     ];
     for (key, high, over) in keys {
         assert_eq!(
@@ -193,14 +222,15 @@ fn a_duration_out_of_range_is_refused_by_name_and_the_ends_are_taken() {
         let kept: Vec<_> = low.iter().chain(&[(key, value)]).copied().collect();
         from_text(&with_keys(&kept), DEFAULTS).unwrap();
     }
-    for key in year {
+    for key in year.into_iter().chain(["want_retry"]) {
         from_text(&with_keys(&[(key, "8760h")]), DEFAULTS).unwrap();
         from_text(&with_keys(&[(key, "1ms")]), DEFAULTS).unwrap();
     }
-    for key in ["usage_interval", "format_refresh"] {
+    for key in ["usage_interval", "format_refresh", "read_window"] {
         from_text(&with_keys(&[(key, "1ms")]), DEFAULTS).unwrap();
     }
     from_text(&with_keys(&[("format_refresh", "1h")]), DEFAULTS).unwrap();
+    from_text(&with_keys(&[("read_window", "1h")]), DEFAULTS).unwrap();
     for key in one_ms {
         from_text(&with_keys(&[(key, "1ms"), low[0], low[1]]), DEFAULTS).unwrap();
     }
@@ -218,6 +248,10 @@ fn a_count_out_of_range_is_refused_by_name_and_the_ends_are_taken() {
         ("candidate_limit", 10_000_000),
         ("tag_record_limit", 100_000_000),
         ("entry_rounds", 100),
+        ("step_attempts", 100),
+        ("read_retries", 100),
+        ("list_marker_pages", 100),
+        ("want_recent_limit", 100_000_000),
     ];
     for (key, high) in counts {
         let zero = refusal(&with_hot(&format!("{key} = 0")));
@@ -234,6 +268,33 @@ fn a_count_out_of_range_is_refused_by_name_and_the_ends_are_taken() {
             let cli = from_text(&with_hot(&format!("{key} = {value}")), DEFAULTS);
             assert!(cli.is_ok(), "{key} at {value}");
         }
+    }
+}
+
+/// A size outside the range of `copy_back_max_bytes` is refused, naming the key, and the ends of
+/// the range are taken.
+#[test]
+fn a_copy_back_size_out_of_range_is_refused_by_name_and_the_ends_are_taken() {
+    let tib: u64 = 1 << 40;
+    let zero = refusal(&with_hot("copy_back_max_bytes = 0"));
+    assert_eq!(
+        zero,
+        format!("hot_store.copy_back_max_bytes: 0 is not between 1 and {tib}")
+    );
+    let over = refusal(&with_hot(&format!("copy_back_max_bytes = {}", tib + 1)));
+    assert_eq!(
+        over,
+        format!(
+            "hot_store.copy_back_max_bytes: {} is not between 1 and {tib}",
+            tib + 1
+        )
+    );
+    for text in ["1", "\"1TiB\""] {
+        let cli = from_text(
+            &with_hot(&format!("copy_back_max_bytes = {text}")),
+            DEFAULTS,
+        );
+        assert!(cli.is_ok(), "{text}");
     }
 }
 
@@ -265,9 +326,52 @@ fn the_relations_between_keys_are_refused_by_name() {
         "hot_store.proxy_usage_stale_after: 5000ms must be longer than usage_interval, which is \
          10000ms, or the proxy ignores a usage that is current"
     );
+    assert_eq!(
+        refusal(&with_hot("step_retry_min = \"3s\"")),
+        "hot_store.step_retry_max: 2000ms is below step_retry_min, which is 3000ms"
+    );
+    // Equal retry sleeps are taken, and so are the ends of their range.
+    let same = "step_retry_min = \"1ms\"\nstep_retry_max = \"1ms\"";
+    assert!(from_text(&with_hot(same), DEFAULTS).is_ok());
+    let hour = "step_retry_min = \"1h\"\nstep_retry_max = \"1h\"";
+    assert!(from_text(&with_hot(hour), DEFAULTS).is_ok());
     // Equal polls and a wait equal to a poll are taken.
     let equal = "retry_min = \"60s\"\ndelete_poll_min = \"10s\"\ndelete_wait = \"10s\"";
     assert!(from_text(&with_hot(equal), DEFAULTS).is_ok());
+}
+
+/// A `held_ttl` the file sets must be longer than `lease_ttl` and than `departure` (the longest a
+/// delete holds its entry), or an entry of a live owner could be reaped while its operation runs:
+/// a value at or below either is refused naming the key, the value and the one it must exceed, one
+/// millisecond over is taken, and a file that leaves it out is not checked against them (the
+/// default of an hour is below a `departure` of two hours, which loads as before).
+#[test]
+fn a_held_ttl_not_longer_than_the_lease_or_the_departure_is_refused() {
+    let lease = "lease_ttl = \"90s\"\nheld_ttl = \"90s\"";
+    assert_eq!(
+        refusal(&with_hot(lease)),
+        "hot_store.held_ttl: 90000ms must be longer than lease_ttl, which is 90000ms, or an \
+         entry of a live owner is reaped while its operation runs"
+    );
+    assert_eq!(
+        refusal(&with_hot("held_ttl = \"30s\"")),
+        "hot_store.held_ttl: 30000ms must be longer than lease_ttl, which is 30000ms, or an \
+         entry of a live owner is reaped while its operation runs"
+    );
+    let departure = "departure = \"120s\"\nheld_ttl = \"119s\"";
+    assert_eq!(
+        refusal(&with_hot(&format!("lease_ttl = \"10s\"\n{departure}"))),
+        "hot_store.held_ttl: 119000ms must be longer than departure, which is 120000ms, or an \
+         entry of a live owner is reaped while its operation runs"
+    );
+    let default_departure = "lease_ttl = \"10s\"\nheld_ttl = \"60s\"";
+    assert!(refusal(&with_hot(default_departure)).contains("departure, which is 60000ms"));
+    let just_over = "lease_ttl = \"10s\"\nheld_ttl = \"60001ms\"";
+    let cli = from_text(&with_hot(just_over), DEFAULTS).unwrap();
+    assert_eq!(cli.entry_tuning.held_ttl, Duration::from_millis(60_001));
+    let long_departure = "heartbeat = \"10s\"\ndeparture = \"2h\"";
+    let cli = from_text(&with_hot(long_departure), DEFAULTS).unwrap();
+    assert_eq!(cli.entry_tuning.held_ttl, Duration::from_secs(3600));
 }
 
 /// Every key is a key of `[hot_store]` only: `[cold_store]` refuses it, naming it.

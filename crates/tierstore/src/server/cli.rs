@@ -210,6 +210,11 @@ pub struct Cli {
     /// directory, made if it does not exist) or `s3:<bucket>` (a bucket of an S3-compatible
     /// store, which needs `hot_store.endpoint` and `hot_store.credentials_file`).
     pub hot: String,
+    /// The tier of the markers of the hot store (the marks bucket, `hot_store.marks_bucket`), in
+    /// the form of `hot`: `s3:<bucket>` with the endpoint, region and credentials of the hot tier
+    /// (`<hot bucket>-marks` unless the key names another), `dir:<hot path>-marks` beside the hot
+    /// directory, or `memory` for a hot tier that is.
+    pub hot_marks: String,
     /// The cold tier: `memory`, `dir:<path>` or `s3:<bucket>` (which needs `cold_store.endpoint`
     /// and `cold_store.credentials_file`). Multipart uploads go straight to it, part by part, so it
     /// must do them; all three kinds do.
@@ -573,6 +578,24 @@ pub(super) fn open_tier(
     }
 }
 
+/// The second handle on the hot store, for its marks bucket: the tier `cli.hot_marks` names, with
+/// the endpoint, region and credentials of the hot tier. Nothing in this release calls it. A bucket
+/// of an S3 store is reached when it is first used, so this asks the store nothing; a `dir` hot
+/// tier has none yet (`None`): opening its directory beside the hot one makes it, and a unit with
+/// `ProtectSystem=strict` and the hot directory alone in `ReadWritePaths=` could not, so the
+/// release that uses it opens it.
+///
+/// # Errors
+/// As [`open_tier`], for the form that is not a `dir`.
+pub(super) fn open_marks(cli: &Cli, timeout: Duration) -> Result<Option<Arc<dyn Backend>>, String> {
+    if cli.hot_marks.starts_with("dir:") {
+        return Ok(None);
+    }
+    let spec = &cli.hot_marks;
+    let marks = open_tier("--hot", spec, &cli.hot_s3(), timeout, &cli.s3_client)?;
+    Ok(Some(marks))
+}
+
 /// Refuses `false` as the conditional-delete setting of a `memory` or `dir:<path>` tier, which
 /// delete conditionally in one atomic step: flags that cannot go together (exit status 2).
 ///
@@ -707,7 +730,9 @@ pub(super) fn build(cli: &Cli) -> Result<Built, Error> {
     check_conditional_delete("--cold", &cli.cold, cli.cold_conditional_delete)?;
     let hot = open_tier("--hot", &cli.hot, &cli.hot_s3(), timeout, &cli.s3_client)?;
     let cold = open_tier("--cold", &cli.cold, &cli.cold_s3(), timeout, &cli.s3_client)?;
+    let marks = open_marks(cli, timeout)?;
     let mut proxy = ProxyConfig::new(&cli.proxy_id, cli.hot_bytes, Arc::clone(&clock));
+    proxy.marks = marks;
     proxy.critical = share(cli.critical);
     let tuning = &cli.hot_tuning;
     proxy.usage_refresh = tuning.usage_refresh;

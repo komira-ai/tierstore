@@ -315,7 +315,7 @@ pub(super) async fn complete_with(
 /// the entity tag `etag` (`If-Match`, sent as it is): another tag is a 412
 /// [`ObjectStoreError::Service`], no object is [`ObjectStoreError::NotFound`] (the 404 whose code
 /// is `NoSuchKey`), and the upload stays open.
-async fn complete_replacing(
+pub(super) async fn complete_replacing(
     conn: &Conn,
     key: &ObjectKey,
     id: &str,

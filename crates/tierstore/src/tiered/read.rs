@@ -3,6 +3,7 @@
 
 use std::sync::Arc;
 
+use super::mark_reads::Missed;
 use super::{Inner, Level};
 use crate::metrics::{Read, Skipped, Tier};
 use crate::{Error, Opened, ReadBody, Span, Window};
@@ -23,6 +24,15 @@ impl Inner {
     /// (see `copy_back.rs`): the cold object is read once, nothing is held whole, and the ask
     /// neither delays nor fails the read. Bytes of the cold read are counted when it opens, from the meta, and a body that
     /// fails later counts an error as well.
+    ///
+    /// Where markers may be in force (see `mark_reads.rs`) a miss reads the marker of the key in
+    /// parallel with the cold open, and a marker that says the key is deleted makes the answer the
+    /// hot tier's second read or `NotFound`, whatever the cold tier gave; the ask for the copy-back
+    /// is then the creation of a `WANT` marker, not an entry.
+    ///
+    /// The hot tier's level is looked at only once the cold tier has opened the read, since only a
+    /// cold hit has a use for it (to count the skipped copy-back and to decide the ask): a key
+    /// that neither tier has costs the two reads and no read of the usage object.
     pub(super) async fn open_object(
         self: &Arc<Self>,
         key: &str,
@@ -30,10 +40,7 @@ impl Inner {
     ) -> Result<Opened, Error> {
         match self.hot.open_read(key, span).await {
             Ok(opened) => {
-                let served = opened.served() as usize;
-                self.counters.hit(Tier::Hot, Read::Get);
-                self.counters.bytes_read(Tier::Hot, served);
-                self.counters.served(Tier::Hot, served);
+                self.count_hot_open(&opened);
                 return Ok(opened);
             }
             Err(Error::NotFound(_)) => self.counters.miss(Tier::Hot, Read::Get),
@@ -42,15 +49,21 @@ impl Inner {
                 return Err(error);
             }
         }
-        let critical = self.level().await >= Level::Critical;
-        if critical {
-            self.counters.skipped(Skipped::Critical);
-        }
+        let cold = move || self.cold_open(key, span);
+        let hot_again = move || self.hot.open_read(key, span);
+        let (cold, copy_back) = match self.miss_read(key, cold, hot_again).await? {
+            Missed::Hot(opened) => {
+                self.count_hot_open(&opened);
+                return Ok(opened);
+            }
+            Missed::Cold { found, copy_back } => (found, copy_back),
+        };
+        let Opened { meta, window, body } = cold;
         if span.is_some() {
             // A read of a part asks the cold tier for that part alone and asks for no copy-back: a
             // whole read per chunk of a long blob would be quadratic, and the memory of a read is
             // its range.
-            let Opened { meta, window, body } = self.cold_open(key, span).await?;
+            self.note_critical().await;
             let served = window.bytes(meta.size) as usize;
             self.counters.hit(Tier::Cold, Read::Get);
             self.counters.bytes_read(Tier::Cold, served);
@@ -61,20 +74,36 @@ impl Inner {
                 body: self.counting_errors(body),
             });
         }
-        let Opened { meta, body, .. } = self.cold_open(key, None).await?;
         self.counters.hit(Tier::Cold, Read::Get);
         self.counters.bytes_read(Tier::Cold, meta.size as usize);
         self.counters.served(Tier::Cold, meta.size as usize);
-        if !critical && self.entries_active().await {
-            // The copy is the reconciler's, under the entry; the read is the one read of the cold
-            // object, and no entry is read.
-            self.ask_copy_back(key);
+        if !self.note_critical().await {
+            self.ask_copy_back_of(copy_back, key, meta.size).await;
         }
         Ok(Opened {
             meta,
             window: Window::Whole,
             body: self.counting_errors(body),
         })
+    }
+
+    /// Counts a read the hot tier opened: a hit, and the bytes of its window.
+    fn count_hot_open(&self, opened: &Opened) {
+        let served = opened.served() as usize;
+        self.counters.hit(Tier::Hot, Read::Get);
+        self.counters.bytes_read(Tier::Hot, served);
+        self.counters.served(Tier::Hot, served);
+    }
+
+    /// Whether the hot tier is at its critical mark, counted as a read for which no copy-back is
+    /// asked when it is. It is asked only of a cold read that opened: a read the cold tier does not
+    /// have, or fails, has no use for the level, and the level can cost a read of the usage object.
+    pub(super) async fn note_critical(&self) -> bool {
+        let critical = self.level().await >= Level::Critical;
+        if critical {
+            self.counters.skipped(Skipped::Critical);
+        }
+        critical
     }
 
     /// The body of a cold read, which counts an error of the cold tier each time it ends with one.

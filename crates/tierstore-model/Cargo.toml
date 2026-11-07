@@ -1,0 +1,17 @@
+[package]
+name = "tierstore-model"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+repository.workspace = true
+publish = false
+description = "Exhaustive model check of the put/delete/reconcile protocols of docs/design/put-without-lock.md (and of today's entry protocol as a baseline)."
+
+# No dependency on the `tierstore` crate or on any other crate: the explorer is a plain
+# breadth-first search with state hashing (stateright is not in the dependency set and the
+# model needs none of it).
+[dependencies]
+
+[lints]
+workspace = true

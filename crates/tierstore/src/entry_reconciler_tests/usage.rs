@@ -5,6 +5,7 @@
 use super::evict::published;
 use super::*;
 use crate::entry_reconciler::usage::Tally;
+use crate::journal::{USAGE_KEY, Usage};
 
 /// Asserts the rules of the count on the tally alone: before the listing reaches a key, or when
 /// the listing read it at the size of the copy, or when it was written before the listing started,
@@ -204,4 +205,102 @@ async fn an_object_that_replaced_a_listed_one_is_counted_at_its_own_size() {
     r.step().await;
     assert!(rig.cold_has("a").await);
     assert_eq!(published(&rig).await.hot_bytes, 100);
+}
+
+/// A reconciler `r1` over a hot tier behind a fault injector, and the injector.
+fn counted(rig: &Rig) -> (EntryReconciler, Arc<FaultyBackend>) {
+    let hot = Arc::new(FaultyBackend::new(rig.hot.clone()));
+    let reconciler = rig.over(hot.clone(), rig.cold.clone(), "r1", |_| {});
+    (reconciler, hot)
+}
+
+/// Asserts that the usage is rewritten over the tag the leader's last write gave, with no HEAD: the
+/// first publication creates the object (one HEAD found none), and the second is one conditional
+/// put, which replaces the figure.
+#[tokio::test]
+async fn the_usage_is_rewritten_over_the_tag_of_the_last_write_with_no_head() {
+    let rig = Rig::new();
+    rig.activate().await;
+    let (mut r, hot) = counted(&rig);
+    r.step().await;
+    let first = published(&rig).await;
+    assert_eq!(hot.calls_on(Op::Put, USAGE_KEY), 1);
+    assert_eq!(hot.calls_on(Op::PutIfMatch, USAGE_KEY), 0);
+    let heads = hot.calls_on(Op::Head, USAGE_KEY);
+
+    rig.clock.advance(5);
+    rig.mono.advance(Duration::from_secs(10));
+    assert!(r.step().await.failed.is_empty());
+    assert_eq!(hot.calls_on(Op::Head, USAGE_KEY), heads);
+    assert_eq!(hot.calls_on(Op::PutIfMatch, USAGE_KEY), 1);
+    let second = published(&rig).await;
+    assert_eq!(second.time, first.time + 5);
+}
+
+/// Asserts that a usage object another writer replaced since the leader wrote it is still
+/// rewritten, at the cost of one HEAD: the conditional put over the old tag is refused, the HEAD
+/// gives the new one, and the leader's figure replaces the other's.
+#[tokio::test]
+async fn a_usage_replaced_by_another_writer_is_rewritten_after_one_head() {
+    let rig = Rig::new();
+    rig.activate().await;
+    let (mut r, hot) = counted(&rig);
+    r.step().await;
+    let other = Usage {
+        hot_bytes: 999,
+        copy_lag: 7,
+        time: 1,
+    };
+    let tag = rig.hot.head(USAGE_KEY).await.unwrap().tag;
+    let body = Bytes::from(serde_json::to_vec(&other).unwrap());
+    rig.hot.put_if_match(USAGE_KEY, body, &tag).await.unwrap();
+    let heads = hot.calls_on(Op::Head, USAGE_KEY);
+
+    rig.mono.advance(Duration::from_secs(10));
+    assert!(r.step().await.failed.is_empty());
+    assert_eq!(hot.calls_on(Op::Head, USAGE_KEY), heads + 1);
+    assert_eq!(hot.calls_on(Op::PutIfMatch, USAGE_KEY), 2);
+    let now = published(&rig).await;
+    assert_eq!((now.hot_bytes, now.copy_lag), (0, 0));
+    assert_ne!(now.time, 1);
+}
+
+/// Asserts that a usage object that was removed since the leader wrote it is made again: the
+/// conditional put finds none, the HEAD finds none, and a create-only put writes it.
+#[tokio::test]
+async fn a_usage_that_was_removed_is_created_again() {
+    let rig = Rig::new();
+    rig.activate().await;
+    let (mut r, hot) = counted(&rig);
+    r.step().await;
+    rig.hot.delete(USAGE_KEY).await.unwrap();
+    let heads = hot.calls_on(Op::Head, USAGE_KEY);
+
+    rig.mono.advance(Duration::from_secs(10));
+    assert!(r.step().await.failed.is_empty());
+    assert_eq!(hot.calls_on(Op::PutIfMatch, USAGE_KEY), 1);
+    assert_eq!(hot.calls_on(Op::Head, USAGE_KEY), heads + 1);
+    assert_eq!(hot.calls_on(Op::Put, USAGE_KEY), 2);
+    assert_eq!(published(&rig).await.hot_bytes, 0);
+}
+
+/// Asserts that a conditional put that fails for another reason is the step's failure, and that the
+/// leader does not trust its tag after it: the next step, which retries at once since the figure
+/// was not published, reads the tag with a HEAD.
+#[tokio::test]
+async fn a_failed_rewrite_of_the_usage_is_tried_again_with_a_head() {
+    let rig = Rig::new();
+    rig.activate().await;
+    let (mut r, hot) = counted(&rig);
+    r.step().await;
+    let error = Error::Unavailable("put".to_owned());
+    hot.fail_next_on(Op::PutIfMatch, USAGE_KEY, error.clone());
+    let heads = hot.calls_on(Op::Head, USAGE_KEY);
+
+    rig.mono.advance(Duration::from_secs(10));
+    assert_eq!(r.step().await.failed, [error]);
+    assert_eq!(hot.calls_on(Op::Head, USAGE_KEY), heads);
+    assert!(r.step().await.failed.is_empty());
+    assert_eq!(hot.calls_on(Op::Head, USAGE_KEY), heads + 1);
+    assert_eq!(hot.calls_on(Op::PutIfMatch, USAGE_KEY), 2);
 }

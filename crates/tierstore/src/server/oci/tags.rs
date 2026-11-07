@@ -30,15 +30,16 @@
 //! A push lists the tag's first version (the newest), reads it, and creates the version after it
 //! (the first, if there is none). A push of the digest the newest version holds still writes a
 //! version of its own: that version may be one another push has made and not yet acknowledged
-//! (through the proxy it is visible before its push is acknowledged and is removed if the push
-//! fails), so only a version this push made is evidence that its tag was moved. Of pushes that read the same newest version, the create of one key is won by
+//! (through the proxy it is visible before its push is acknowledged, and it stays if that push then
+//! fails: a landed put is never removed), so only a version this push made is evidence that its
+//! tag was moved. Of pushes that read the same newest version, the create of one key is won by
 //! exactly one: a loser reads the key back, and if the winner holds another digest it is 409
 //! `TAG_CONFLICT`, which changes nothing but the manifest it stored by digest, which is harmless
 //! and is still pulled by that digest (a client that wants its manifest tagged pushes again; if
 //! the winner is then not acknowledged, the 409 was a push to repeat and no tag was lost). If the
 //! winner holds the digest the loser pushed, the loser does not answer 201 from the winner's
-//! version: through the proxy that version is visible before its push is acknowledged and is
-//! removed if the push fails. The loser writes the version after it, with the same create-only
+//! version: through the proxy that version is visible before its push is acknowledged, and it
+//! stays if that push fails, so it is not this push's evidence. The loser writes the version after it, with the same create-only
 //! write, and is 201 when that is its own. A push whose create's answer is unclear (the store said
 //! `Unavailable` and the write may have landed, as an S3 conflict does) reads the key back: the
 //! key holding another digest is 409, a key that is not there is 503 (the push may be retried),
@@ -126,9 +127,9 @@ fn before(inv: u64, key: &str) -> Result<u64, Error> {
 /// with the create-only write, also when the newest already holds `digest`.
 ///
 /// A create that finds the key taken by a version that holds `digest` is not taken as done: on
-/// the proxy a version is visible in the hot tier before the push that made it is acknowledged,
-/// and is removed if that push then fails, so the loser writes the version after it, which it
-/// owns, and which is the newest whatever becomes of the other. A taken key that holds another
+/// the proxy a version is visible in the hot tier before the push that made it is acknowledged
+/// (and stays if that push then fails: a landed put is never removed), so the loser writes the
+/// version after it, which it owns, and which is the newest whatever becomes of the other. A taken key that holds another
 /// digest is lost.
 ///
 /// # Errors
@@ -187,8 +188,8 @@ pub(super) async fn create_first(
 
 /// Reads back a create of `key` answered [`Error::Unavailable`] (`unclear`), which does not say
 /// whether the write landed or whose it is. `Ok` if the object holds `digest`: that is not
-/// this push's write, as far as can be told (it may be another push's, not yet acknowledged and
-/// removed if that push fails), so the caller writes the version after it. Lost if it holds
+/// this push's write, as far as can be told (it may be another push's, not yet acknowledged, which
+/// stays if that push fails), so the caller writes the version after it. Lost if it holds
 /// another digest, and still `unclear` if it is not there (the write did not land, as far as
 /// can be told).
 async fn settle(

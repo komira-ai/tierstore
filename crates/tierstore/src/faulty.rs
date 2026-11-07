@@ -35,7 +35,7 @@ pub enum Op {
     CreateUpload,
     /// [`Backend::upload_part`].
     UploadPart,
-    /// [`Backend::complete_upload`].
+    /// [`Backend::complete_upload`] and [`Backend::complete_upload_if_match`].
     CompleteUpload,
     /// [`Backend::abort_upload`].
     AbortUpload,
@@ -444,6 +444,19 @@ impl Backend for FaultyBackend {
     ) -> Result<String, Error> {
         self.enter(Op::CompleteUpload, key).await?;
         self.inner.complete_upload(key, id, parts).await
+    }
+
+    /// A conditional completion is a call of kind [`Op::CompleteUpload`], as a completion is.
+    async fn complete_upload_if_match(
+        &self,
+        key: &str,
+        id: &str,
+        parts: &[(u32, String)],
+        etag: &str,
+    ) -> Result<String, Error> {
+        self.enter(Op::CompleteUpload, key).await?;
+        let inner = &self.inner;
+        inner.complete_upload_if_match(key, id, parts, etag).await
     }
 
     async fn abort_upload(&self, key: &str, id: &str) -> Result<(), Error> {

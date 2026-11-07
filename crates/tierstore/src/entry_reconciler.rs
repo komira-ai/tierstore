@@ -40,7 +40,9 @@
 //!      registration is gone, or has stood unchanged for [`EntryReconcilerConfig::departure`] on
 //!      this process's monotonic clock, counted from the first time it was seen), the entry is
 //!      reaped to `(op, PENDING)` and, for a put, the open multipart uploads of the key are aborted
-//!      on both tiers.
+//!      on both tiers. An entry of a live owner that has stood held and unchanged for
+//!      [`EntryReconcilerConfig::held_ttl`] (a proxy that failed to hand over or remove it and goes
+//!      on beating) is reaped the same way.
 //!    - An entry of an operation or state this release does not know is left alone.
 //! 5. Keeps the usage figure and evicts, as the modules `usage` and `evict` say: reads the figure
 //!    of the leader before it at takeover, lists the hot tier a few pages a step (at takeover and
@@ -115,6 +117,12 @@ pub struct EntryReconcilerConfig {
     /// How long the registration of an owner must have stood unchanged, by the monotonic clock of
     /// this process, for the owner to count as departed. At least six times the proxies' heartbeat.
     pub departure: Duration,
+    /// How long a held put or delete of a live owner may stand unchanged, by the monotonic clock
+    /// of this process from the first step that sees it so, before it is reaped as if its owner had
+    /// departed. A proxy that cannot hand over or remove an entry (the hot tier failed the write)
+    /// leaves it held, and its registration goes on beating, so its owner never departs. Longer than
+    /// a put or a delete can take.
+    pub held_ttl: Duration,
     /// The shortest wait of the loop; starts from `base.idle_min`.
     pub idle_min: Duration,
     /// The longest wait of the loop when nothing is to be done; starts from `base.idle_max`.
@@ -162,7 +170,7 @@ pub struct EntryReconcilerConfig {
 }
 
 impl EntryReconcilerConfig {
-    /// The settings over `base`, with a departure of 60 seconds, an idle wait of 1 to 10 seconds,
+    /// The settings over `base`, with a departure of 60 seconds, a held entry of a live owner reaped after an hour, an idle wait of 1 to 10 seconds,
     /// a retry delay of 1 to 60 seconds, comparisons in ranges of `base.compare_range` (1 MiB), a stray grace of 10
     /// minutes, a sweep every 24 hours at up to 100 lookups a second (which aborts no upload of the
     /// hot tier unless `abandoned_upload_after` is set), copy-backs kept for 10
@@ -177,6 +185,7 @@ impl EntryReconcilerConfig {
         Self {
             base,
             departure: Duration::from_secs(60),
+            held_ttl: Duration::from_secs(3600),
             idle_min,
             idle_max,
             retry_min: Duration::from_secs(1),
@@ -260,6 +269,12 @@ pub struct EntryReconciler {
     copy_backs: BTreeMap<String, (String, u64)>,
     /// The keys whose copy-back this step drops without a copy (too old, or over the maximum).
     copy_back_drops: BTreeSet<String>,
+    /// The held puts and deletes of other owners by key: the nonce of the entry and when it was
+    /// first seen so.
+    helds: BTreeMap<String, (String, u64)>,
+    /// The keys whose held entry has stood unchanged for [`EntryReconcilerConfig::held_ttl`]: reaped
+    /// although the owner is live.
+    held_expired: BTreeSet<String>,
     /// The usage figure and the listing that gives it.
     books: Books,
     /// What the pool tells the step about the usage.
@@ -300,6 +315,8 @@ impl EntryReconciler {
             strays_adopted: 0,
             copy_backs: BTreeMap::new(),
             copy_back_drops: BTreeSet::new(),
+            helds: BTreeMap::new(),
+            held_expired: BTreeSet::new(),
             books: Books::default(),
             tally: Tally::default(),
             tags: Mutex::default(),
@@ -332,6 +349,8 @@ impl EntryReconciler {
         self.sweep_at = None;
         self.copy_backs.clear();
         self.copy_back_drops.clear();
+        self.helds.clear();
+        self.held_expired.clear();
         self.books = Books::default();
         self.tally.clear();
         self.tags().clear();
@@ -380,6 +399,7 @@ impl EntryReconciler {
         self.retries.retain(|path, _| listed.contains(path));
         self.copy_backs
             .retain(|key, _| listed.contains(&entry_key(key)));
+        self.helds.retain(|key, _| listed.contains(&entry_key(key)));
         let waiting = |path: &String| self.retries.get(path).is_some_and(|r| r.until > now);
         let (backed_off, due): (Vec<String>, Vec<String>) =
             paths.iter().cloned().partition(waiting);
@@ -414,6 +434,7 @@ impl EntryReconciler {
         }
         items.sort_by_key(|(_, seen)| seen.entry.op == EntryOp::Cb);
         self.note_copy_backs(&items, now);
+        self.note_helds(&items, now);
         let this = &*self;
         let steps = stream::iter(items).map(|(path, seen)| async move {
             let verdict = this.process(&seen, now).await;

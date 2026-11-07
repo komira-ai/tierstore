@@ -27,6 +27,8 @@ mod copy;
 mod copy_back;
 #[path = "entry_reconciler_tests/evict.rs"]
 mod evict;
+#[path = "entry_reconciler_tests/evict_calls.rs"]
+mod evict_calls;
 #[path = "entry_reconciler_tests/races.rs"]
 mod races;
 #[path = "entry_reconciler_tests/sweep.rs"]
@@ -95,11 +97,28 @@ impl Rig {
     }
 
     async fn activate(&self) {
-        let body = format_body(&Format {
-            phase: FormatPhase::Active,
+        self.set_phase(FormatPhase::Active).await;
+    }
+
+    /// The format object of the hot store, replaced by one in `phase` with no epoch.
+    async fn set_phase(&self, phase: FormatPhase) {
+        let format = Format {
+            phase,
             epoch: None,
-        });
+            marks_bucket: None,
+        };
+        self.hot.delete(FORMAT_KEY).await.ok();
+        let body = format_body(&format);
         self.hot.put(FORMAT_KEY, body).await.unwrap();
+    }
+
+    /// One heartbeat of the proxy `id` after `secs` seconds: the clocks move on and its
+    /// registration is written again, so that the reconciler sees it change.
+    async fn beat(&self, id: &str, secs: u64) {
+        self.mono.advance(Duration::from_secs(secs));
+        self.clock.advance(secs * 1000);
+        self.hot.delete(&proxy_key(id)).await.unwrap();
+        self.register(id).await;
     }
 
     /// The calls of the proxy `id`, as its entries.
@@ -191,9 +210,7 @@ async fn nothing_is_done_until_the_format_is_active() {
     let mut r = rig.reconciler();
     assert_eq!(r.step().await, StepReport::default());
     for phase in [FormatPhase::Drain, FormatPhase::Drained] {
-        let body = format_body(&Format { phase, epoch: None });
-        rig.hot.delete(FORMAT_KEY).await.ok();
-        rig.hot.put(FORMAT_KEY, body).await.unwrap();
+        rig.set_phase(phase).await;
         assert_eq!(r.step().await, StepReport::default());
     }
     assert!(!rig.cold_has("k").await);
@@ -402,6 +419,71 @@ async fn a_held_entry_is_waited_for_until_its_owner_has_departed_and_then_reaped
     assert!(rig.cold_has("k").await && rig.entry("k").await.is_none());
 }
 
+/// Asserts that a put left held by a proxy that goes on beating (it could not hand the entry over
+/// when the hot tier failed its write) is waited for until it has stood unchanged for
+/// `held_ttl`, by the reconciler's monotonic clock, and then reaped and copied to the cold tier.
+/// Catches an entry that stays held for as long as its owner is live, so that the key can be
+/// neither put nor deleted again.
+#[tokio::test]
+async fn a_held_put_of_an_owner_that_goes_on_beating_is_reaped_after_the_held_ttl() {
+    let rig = Rig::new();
+    rig.activate().await;
+    rig.hot.put("k", bytes("v")).await.unwrap();
+    rig.register("p1").await;
+    rig.client("p1").create("k", Take::Put).await.unwrap();
+    let ttl = Duration::from_secs(300);
+    let mut r = rig.over(rig.hot.clone(), rig.cold.clone(), "r1", |config| {
+        config.held_ttl = ttl;
+    });
+    assert_eq!(r.step().await.pinned, 1);
+    for _ in 1..30 {
+        rig.beat("p1", 10).await;
+        assert_eq!(r.step().await.pinned, 1);
+    }
+    rig.beat("p1", 10).await;
+    assert_eq!(r.step().await, report(1));
+    assert_eq!(
+        rig.shape("k").await,
+        Some((EntryOp::Put, EntryState::Pending, None))
+    );
+    assert_eq!(r.step().await, report(1));
+    assert!(rig.cold_has("k").await && rig.entry("k").await.is_none());
+}
+
+/// Asserts that the time a held entry has stood is counted from its latest write: an entry that is
+/// removed and made again by the live owner starts the count again, and a delete is reaped as a
+/// put is.
+#[tokio::test]
+async fn the_held_ttl_counts_from_the_latest_write_of_the_entry() {
+    let rig = Rig::new();
+    rig.activate().await;
+    rig.register("p1").await;
+    let client = rig.client("p1");
+    let Created::Taken(first) = client.create("k", Take::Del).await.unwrap() else {
+        panic!("the entry exists");
+    };
+    let mut r = rig.over(rig.hot.clone(), rig.cold.clone(), "r1", |config| {
+        config.held_ttl = Duration::from_secs(100);
+    });
+    assert_eq!(r.step().await.pinned, 1);
+    for _ in 0..8 {
+        rig.beat("p1", 10).await;
+        assert_eq!(r.step().await.pinned, 1);
+    }
+    client.release(&first).await.unwrap();
+    assert!(client.create("k", Take::Del).await.is_ok());
+    for _ in 0..10 {
+        rig.beat("p1", 10).await;
+        assert_eq!(r.step().await.pinned, 1, "the count started again");
+    }
+    rig.beat("p1", 10).await;
+    assert_eq!(r.step().await, report(1));
+    assert_eq!(
+        rig.shape("k").await,
+        Some((EntryOp::Del, EntryState::Pending, None))
+    );
+}
+
 /// Asserts that an entry whose owner has no registration is reaped at once, a put to
 /// `(PUT, PENDING)` and a delete to `(DEL, PENDING)`, which the next step finishes.
 #[tokio::test]
@@ -490,6 +572,45 @@ async fn a_reap_whose_upload_cleanup_failed_aborts_the_uploads_on_the_retry() {
     for tier in [&rig.hot, &rig.cold] {
         assert!(tier.list_uploads("k", None, 10).await.unwrap().is_empty());
     }
+    assert_eq!(
+        rig.shape("k").await,
+        Some((EntryOp::Put, EntryState::Pending, None))
+    );
+}
+
+/// Asserts that the age of a held entry of a live owner survives the steps in which the entry is
+/// not looked at: a reap for age whose upload cleanup fails puts the entry in its retry delay, the
+/// steps inside the delay leave it held, and the first step after the delay reaps it without the
+/// count of `held_ttl` starting again.
+#[tokio::test]
+async fn the_age_of_a_held_entry_is_kept_while_its_retry_delay_runs() {
+    let rig = Rig::new();
+    rig.activate().await;
+    rig.register("p1").await;
+    rig.client("p1").create("k", Take::Put).await.unwrap();
+    let faulty = Arc::new(FaultyBackend::new(rig.cold.clone()));
+    let mut r = rig.over(rig.hot.clone(), faulty.clone(), "r1", |config| {
+        config.held_ttl = Duration::from_secs(100);
+    });
+    assert_eq!(r.step().await.pinned, 1);
+    for _ in 0..9 {
+        rig.beat("p1", 10).await;
+        assert_eq!(r.step().await.pinned, 1);
+    }
+    faulty.fail_next_with(Op::ListUploads, Error::Unavailable("uploads".to_owned()));
+    rig.beat("p1", 10).await;
+    assert_eq!(r.step().await.failed.len(), 1);
+    let waiting = r.step().await;
+    assert_eq!(
+        (waiting.changed, waiting.pinned, waiting.failed.len()),
+        (0, 0, 0)
+    );
+    assert_eq!(
+        rig.shape("k").await,
+        Some((EntryOp::Put, EntryState::Held, Some("p1".to_owned())))
+    );
+    rig.beat("p1", 1).await;
+    assert_eq!(r.step().await, report(1));
     assert_eq!(
         rig.shape("k").await,
         Some((EntryOp::Put, EntryState::Pending, None))
@@ -645,7 +766,7 @@ async fn a_failing_item_waits_its_own_delay_and_the_delay_doubles() {
     let hot = Arc::new(FaultyBackend::new(rig.hot.clone()));
     rig.plant("again", EntryOp::Cb, EntryState::Pending, None)
         .await;
-    hot.fail_next_on(Op::Head, ENTRIES_PREFIX, unavailable());
+    hot.fail_next_on(Op::Get, ENTRIES_PREFIX, unavailable());
     let mut r = rig.over(hot, rig.cold.clone(), "r1", |_| {});
     assert_eq!(r.step().await.failed.len(), 1);
 }
@@ -657,7 +778,7 @@ async fn an_entry_removed_between_the_listing_and_the_read_is_skipped() {
     rig.activate().await;
     rig.plant("k", EntryOp::Cb, EntryState::Pending, None).await;
     let gated = Arc::new(GateBackend::new(rig.hot.clone()));
-    let gate = gated.gate(Op::Head, ENTRIES_PREFIX, Phase::Pre);
+    let gate = gated.gate(Op::Get, ENTRIES_PREFIX, Phase::Pre);
     let mut r = rig.over(gated, rig.cold.clone(), "r1", |_| {});
     let mut step = Box::pin(r.step());
     park(&mut step, &gate).await;
@@ -798,7 +919,7 @@ async fn a_halt_cuts_a_step_that_is_running_and_gives_the_lease_up() {
     rig.activate().await;
     rig.plant("k", EntryOp::Cb, EntryState::Pending, None).await;
     let gated = Arc::new(GateBackend::new(rig.hot.clone()));
-    let gate = gated.gate(Op::Head, ENTRIES_PREFIX, Phase::Pre);
+    let gate = gated.gate(Op::Get, ENTRIES_PREFIX, Phase::Pre);
     let mut r = rig.over(gated, rig.cold.clone(), "r1", |_| {});
     let halt = Notify::new();
     let watcher = async {
@@ -867,6 +988,7 @@ fn the_settings_default_to_the_values_the_design_names() {
     let config = Rig::new().config("r1");
     let secs = Duration::from_secs;
     assert_eq!(config.departure, secs(60));
+    assert_eq!(config.held_ttl, secs(3600));
     assert_eq!((config.idle_min, config.idle_max), (secs(1), secs(10)));
     assert_eq!((config.retry_min, config.retry_max), (secs(1), secs(60)));
     assert_eq!(config.compare_range, 1 << 20);

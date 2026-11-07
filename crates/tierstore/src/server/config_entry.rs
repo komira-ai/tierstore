@@ -1,7 +1,11 @@
 //! The keys of `[hot_store]` that set the waits, delays and limits of the entry protocol: the
 //! entry reconciler's retry delays, stray sweep, copy-back limits and usage and listing work, and
 //! the proxy's side of it (how long the usage object stands, how often the format object is read,
-//! how many looks at an entry, and how long a delete waits for the reconciler).
+//! how many looks at an entry, how long a delete waits for the reconciler, and how often and how
+//! fast the last step of a put or a delete is tried again), and the keys of the proxy's reads and
+//! listings that read the markers of `docs/design/put-without-lock.md` (`read_window`,
+//! `read_retries`, `list_marker_pages`, `want_retry`, `want_recent_limit` and
+//! `copy_back_max_bytes`).
 //!
 //! Each has the value that was a constant of the code before it was a key as its default, and a
 //! range, and the relations between keys are checked here once, when the file is read, each
@@ -9,11 +13,15 @@
 
 use std::time::Duration;
 
-use crate::{DeleteWait, EntryReconcilerConfig, ProxyConfig};
+use crate::{DeleteWait, EntryReconcilerConfig, MarkReads, ProxyConfig, StepRetry};
 
-use super::config::{ConfigError, TierTable, invalid, within};
+use super::cli_heartbeat::DEPARTURE;
+use super::config::{ConfigError, TierTable, duration, invalid, within};
 use super::config_tuning::{HOUR, MS, span};
-use super::config_units::Dur;
+use super::config_units::{Dur, Size};
+
+/// A bound on the largest size of a key: a tebibyte.
+const TIB: u64 = 1 << 40;
 
 /// A bound on the longest interval of a key: a year.
 const YEAR: Duration = Duration::from_secs(365 * 24 * 3600);
@@ -58,6 +66,49 @@ pub struct EntryTuning {
     pub delete_poll_min: Duration,
     /// `hot_store.delete_poll_max`: the longest sleep of that wait.
     pub delete_poll_max: Duration,
+    /// `hot_store.step_attempts`: the most tries of the last step of a put or a delete (the
+    /// landing of a put, the hand-over of a delete, the removal of an entry), the first included.
+    pub step_attempts: u32,
+    /// `hot_store.step_retry_min`: the sleep before the second try of that step.
+    pub step_retry_min: Duration,
+    /// `hot_store.step_retry_max`: the longest sleep between two tries; each is twice the one
+    /// before.
+    pub step_retry_max: Duration,
+    /// `hot_store.held_ttl`: how long a held put or delete of a live owner may stand unchanged
+    /// before the reconciler reaps it.
+    ///
+    /// A held entry is only ever written by its owner (create, then one replace or delete to end
+    /// it), so an entry that has not changed for this long was abandoned, or its operation is
+    /// still running. It is reaped by a replace on the tag it was read at, so it can never undo
+    /// an operation that finished: an owner that ends its operation first wins the replace, and an
+    /// owner that comes back after the reap finds the entry changed and writes nothing. What a
+    /// reap can cut short is an operation that is still running, so the value must be longer than
+    /// any operation holds its entry: a delete holds it for at most four calls, each cut at
+    /// `deadline_margin` (which is at most a quarter of `departure`), so `departure` bounds it
+    /// when no step is tried again; with `step_attempts` tries of each of two of its calls (the
+    /// removal of its entry and the hand-over; the two `delete_data` calls are not tried again) it
+    /// holds it for up to `2 + 2 * step_attempts` calls and the sleeps between tries, which the
+    /// default of an hour is far above (a value in the file is checked against `departure` and
+    /// not against that sum);
+    /// a put holds it for as long as its body takes, and a put that outlives `held_ttl` is not
+    /// acknowledged (its landing finds the entry changed and answers 503). A value given in the
+    /// file must also be longer than `lease_ttl`, so that an entry the previous holder of the
+    /// lease left held while it copied is not reaped before that lease would have lapsed.
+    pub held_ttl: Duration,
+    /// `hot_store.read_window`: the longest a hot-miss pair, or the reads of a listing after its
+    /// cold page, may take before they are read again.
+    pub read_window: Duration,
+    /// `hot_store.read_retries`: how many times such a read is read again before it is 503.
+    pub read_retries: u32,
+    /// `hot_store.list_marker_pages`: the pages of marker names one round of a listing reads
+    /// beyond its first.
+    pub list_marker_pages: u32,
+    /// `hot_store.want_retry`: how long a proxy waits to ask again for the copy-back of a key.
+    pub want_retry: Duration,
+    /// `hot_store.want_recent_limit`: the most keys a proxy remembers it asked a copy-back of.
+    pub want_recent_limit: u32,
+    /// `hot_store.copy_back_max_bytes`: the largest object a read asks to have copied back.
+    pub copy_back_max_bytes: u64,
 }
 
 impl Default for EntryTuning {
@@ -81,6 +132,16 @@ impl Default for EntryTuning {
             delete_wait: Duration::from_secs(30),
             delete_poll_min: Duration::from_secs(1),
             delete_poll_max: Duration::from_secs(10),
+            step_attempts: StepRetry::new().attempts,
+            step_retry_min: StepRetry::new().delay,
+            step_retry_max: StepRetry::new().delay_max,
+            held_ttl: Duration::from_secs(3600),
+            read_window: MarkReads::default().read_window,
+            read_retries: MarkReads::default().read_retries,
+            list_marker_pages: MarkReads::default().list_marker_pages,
+            want_retry: MarkReads::default().want_retry,
+            want_recent_limit: 100_000,
+            copy_back_max_bytes: MarkReads::default().copy_back_max_bytes,
         }
     }
 }
@@ -100,6 +161,7 @@ impl EntryTuning {
         config.scan_pages = self.scan_pages as usize;
         config.candidate_limit = self.candidate_limit as usize;
         config.tag_record_limit = self.tag_record_limit as usize;
+        config.held_ttl = self.held_ttl;
     }
 
     /// Gives the values to the settings of the proxy.
@@ -111,6 +173,19 @@ impl EntryTuning {
             wait: self.delete_wait,
             poll_min: self.delete_poll_min,
             poll_max: self.delete_poll_max,
+        };
+        proxy.step_retry = StepRetry {
+            attempts: self.step_attempts,
+            delay: self.step_retry_min,
+            delay_max: self.step_retry_max,
+        };
+        proxy.mark_reads = MarkReads {
+            read_window: self.read_window,
+            read_retries: self.read_retries,
+            list_marker_pages: self.list_marker_pages,
+            want_retry: self.want_retry,
+            want_recent_limit: self.want_recent_limit as usize,
+            copy_back_max_bytes: self.copy_back_max_bytes,
         };
     }
 }
@@ -144,8 +219,27 @@ fn ordered(high_key: &str, low: (&str, Duration), high: Duration) -> Result<(), 
     Ok(())
 }
 
-/// The entry settings `[hot_store]` gives, or the defaults of those it leaves out.
-pub(super) fn entry_tuning(hot: &TierTable) -> Result<EntryTuning, ConfigError> {
+/// Refuses a `held_ttl` that the file sets at or below `longer` (`lease_ttl` or `departure`, and
+/// its value): a live owner's operation could be reaped while it runs.
+fn longer_than(held_ttl: Duration, key: &str, longer: Duration) -> Result<(), ConfigError> {
+    if held_ttl <= longer {
+        let why = format!(
+            "{}ms must be longer than {key}, which is {}ms, or an entry of a live owner is reaped \
+             while its operation runs",
+            held_ttl.as_millis(),
+            longer.as_millis()
+        );
+        return Err(invalid("hot_store.held_ttl", why));
+    }
+    Ok(())
+}
+
+/// The entry settings `[hot_store]` gives, or the defaults of those it leaves out, checked against
+/// `lease_ttl`.
+pub(super) fn entry_tuning(
+    hot: &TierTable,
+    lease_ttl: Duration,
+) -> Result<EntryTuning, ConfigError> {
     let old = EntryTuning::default();
     let tuning = EntryTuning {
         retry_min: time("retry_min", hot.retry_min, old.retry_min, HOUR)?,
@@ -216,12 +310,51 @@ pub(super) fn entry_tuning(hot: &TierTable) -> Result<EntryTuning, ConfigError> 
             old.delete_poll_max,
             HOUR,
         )?,
+        step_attempts: count("step_attempts", hot.step_attempts, old.step_attempts, 100)?,
+        step_retry_min: time(
+            "step_retry_min",
+            hot.step_retry_min,
+            old.step_retry_min,
+            HOUR,
+        )?,
+        step_retry_max: time(
+            "step_retry_max",
+            hot.step_retry_max,
+            old.step_retry_max,
+            HOUR,
+        )?,
+        held_ttl: time("held_ttl", hot.held_ttl, old.held_ttl, YEAR)?,
+        read_window: time("read_window", hot.read_window, old.read_window, HOUR)?,
+        read_retries: count("read_retries", hot.read_retries, old.read_retries, 100)?,
+        list_marker_pages: count(
+            "list_marker_pages",
+            hot.list_marker_pages,
+            old.list_marker_pages,
+            100,
+        )?,
+        want_retry: time("want_retry", hot.want_retry, old.want_retry, YEAR)?,
+        want_recent_limit: count(
+            "want_recent_limit",
+            hot.want_recent_limit,
+            old.want_recent_limit,
+            100_000_000,
+        )?,
+        copy_back_max_bytes: within(
+            "hot_store",
+            "copy_back_max_bytes",
+            hot.copy_back_max_bytes
+                .map_or(old.copy_back_max_bytes, |size: Size| size.0),
+            1,
+            TIB,
+        )?,
     };
     let low = ("retry_min", tuning.retry_min);
     ordered("retry_max", low, tuning.retry_max)?;
     let low = ("delete_poll_min", tuning.delete_poll_min);
     ordered("delete_poll_max", low, tuning.delete_poll_max)?;
     ordered("delete_wait", low, tuning.delete_wait)?;
+    let low = ("step_retry_min", tuning.step_retry_min);
+    ordered("step_retry_max", low, tuning.step_retry_max)?;
     if tuning.proxy_usage_stale_after <= tuning.usage_interval {
         let why = format!(
             "{}ms must be longer than usage_interval, which is {}ms, or the proxy ignores a usage \
@@ -230,6 +363,11 @@ pub(super) fn entry_tuning(hot: &TierTable) -> Result<EntryTuning, ConfigError> 
             tuning.usage_interval.as_millis()
         );
         return Err(invalid("hot_store.proxy_usage_stale_after", why));
+    }
+    if hot.held_ttl.is_some() {
+        let departure = duration(hot.departure, DEPARTURE);
+        longer_than(tuning.held_ttl, "lease_ttl", lease_ttl)?;
+        longer_than(tuning.held_ttl, "departure", departure)?;
     }
     Ok(tuning)
 }

@@ -29,11 +29,17 @@
 //!    live when the replace has answered, the put is not acknowledged either ([`Error::Unavailable`]),
 //!    and the entry stays pending.
 //!
+//! The replace of step 6 and the removal of an entry (below) are tried again when the hot tier
+//! fails them ambiguously ([`StepRetry`](super::StepRetry); `entry_retry.rs` says how). The put is
+//! acknowledged only when a try is known to have landed, by the store's answer or by the nonce
+//! of the entry read back.
+//!
 //! A put that fails before the object landed removes its entry and leaves nothing. A put whose
 //! landing may have happened (the store did not answer) makes the entry pending all the same, and
-//! fails, and the entry stays pending. A put that cannot reach the entry again leaves it held.
-//! Copying, removing and taking over such entries is the work of `EntryReconciler`: it copies a
-//! pending one, finishes a held one once its owner has departed, and removes it.
+//! fails, and the entry stays pending. A put that cannot reach the entry in any of its tries
+//! leaves it held. Copying, removing and taking over such entries is the work of
+//! `EntryReconciler`: it copies a pending one, finishes a held one once its owner has departed or
+//! it has stood unchanged for `held_ttl`, and removes it.
 
 use std::future::Future;
 
@@ -42,7 +48,7 @@ use bytes::Bytes;
 use super::put::Offered;
 use super::{Inner, Level};
 use crate::entry::{Created, Entry, EntryOp, EntryState, Outcome, Seen, Step, Take};
-use crate::{Error, PartBody};
+use crate::{Error, PartBody, PutAnswer};
 
 /// Why an object did not land.
 pub(super) enum Failed {
@@ -124,15 +130,11 @@ impl Inner {
     }
 
     /// Removes the entry of a put that ended before landing, if this proxy may still destroy:
-    /// the call is cut when it has not answered within the margin. An entry that is left is
-    /// taken by the reconciler once this proxy is gone.
-    async fn drop_entry(&self, seen: &Seen) {
-        let deadline = &self.heartbeat.deadline;
-        if !deadline.allows_start() {
-            return;
-        }
-        let limit = deadline.margin().min(deadline.remaining());
-        let _ = tokio::time::timeout(limit, self.entries.release(seen)).await;
+    /// each try is cut when it has not answered within the margin, and a failed one is tried
+    /// again. An entry that is left is taken by the reconciler once this proxy is gone or the entry
+    /// has stood unchanged for `held_ttl`.
+    async fn drop_entry(&self, key: &str, seen: &Seen) {
+        let _ = self.release_retrying(key, seen).await;
     }
 
     /// The acknowledgement of a put: `(PUT, HELD, me)` to `(PUT, PENDING)`, if this proxy is still
@@ -140,10 +142,13 @@ impl Inner {
     /// has answered: a proxy that is no longer live then does not acknowledge, and the entry stays
     /// pending for the reconciler.
     async fn land_put(&self, key: &str, seen: &Seen) -> Result<(), Error> {
-        if !self.heartbeat.deadline.is_live() {
-            return Err(retry(key, "this proxy's registration is no longer live"));
-        }
-        match self.entries.advance(seen, Step::LandPut).await {
+        let once = || async {
+            if !self.heartbeat.deadline.is_live() {
+                return Err(retry(key, "this proxy's registration is no longer live"));
+            }
+            self.entries.try_advance(seen, Step::LandPut).await
+        };
+        match self.advance_retrying(seen, once).await {
             Ok(Outcome::Done(_)) if !self.heartbeat.deadline.is_live() => Err(retry(
                 key,
                 "this proxy's registration stopped being live while the entry was written",
@@ -178,7 +183,7 @@ impl Inner {
         match landed {
             Ok(value) => self.land_put(key, &seen).await.map(|()| value),
             Err(Failed::Definite(error)) => {
-                self.drop_entry(&seen).await;
+                self.drop_entry(key, &seen).await;
                 Err(error)
             }
             Err(Failed::Maybe(error)) => {
@@ -223,14 +228,16 @@ impl Inner {
     }
 
     /// The put of a streamed body on its entry; `hot_only` is a presigned put, which is never
-    /// written to the cold tier.
+    /// written to the cold tier. Gives what the hot tier's answer to the write says of the object
+    /// (see [`Backend::put_stream_answered`]), or `None` when the object went to the cold tier or
+    /// the hot tier's answer says nothing.
     pub(super) async fn put_streamed_on_entry(
         &self,
         key: &str,
         len: Option<u64>,
         body: PartBody<'_>,
         hot_only: bool,
-    ) -> Result<(), Error> {
+    ) -> Result<Option<PutAnswer>, Error> {
         let offered = Offered::new(body);
         self.put_on_entry(key, || async move {
             let full = || Failed::Definite(Error::Full(key.to_owned()));
@@ -239,16 +246,23 @@ impl Inner {
                     return Err(full());
                 }
                 let cold = self.cold.put_stream(key, len, offered.view()).await;
-                return cold.map_err(|error| self.sort(&offered, error));
+                return cold
+                    .map(|()| None)
+                    .map_err(|error| self.sort(&offered, error));
             }
-            match self.hot.put_stream(key, len, offered.view()).await {
+            let hot = self
+                .hot
+                .put_stream_answered(key, len, offered.view(), false)
+                .await;
+            match hot {
                 Err(Error::Full(_)) => {
                     self.latch_full();
                     if hot_only || offered.taken() > 0 {
                         return Err(full());
                     }
                     let cold = self.cold.put_stream(key, len, offered.view()).await;
-                    cold.map_err(|error| self.sort(&offered, error))
+                    cold.map(|()| None)
+                        .map_err(|error| self.sort(&offered, error))
                 }
                 other => other.map_err(|error| self.sort(&offered, error)),
             }

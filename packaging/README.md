@@ -557,6 +557,7 @@ put 403.
 | `local_cache.forget_limit` | the most keys a read-only cache remembers it deleted or replaced through the upstream (1 to 100000000, default 65536); past it the cache is emptied when it takes the lock |
 | `local_cache.fill_chunk` | the bytes a fill reads from the upstream at a time (4KiB to 1GiB, default `8MiB`) |
 | `local_cache.keep_queue_bytes` | the most bytes of a put's body that may wait for the disk before its copy is dropped (1 byte to 1GiB, default `4MiB`) |
+| `local_cache.revalidate_after` | how old a hit may be (since its entry was filled or last checked) before one HEAD to the upstream checks it, comparing the version and never reading the body; unset, the default, never checks, and `0s` checks every hit. A changed or missing object drops the entry and the read goes upstream; a HEAD that fails serves the cached copy and is logged and counted |
 | `cold_store.endpoints` | a list of exactly one endpoint, in place of `endpoint`: several are refused as not supported yet, since the cache reads from one upstream |
 
 `[cold_store]` is the upstream: any `kind` (an `s3` bucket, with `endpoint` and a `credentials_file`
@@ -957,7 +958,7 @@ first; no stored object is overwritten, and the tag is the newest version. Of tw
 201 and the other 409 `TAG_CONFLICT` (the loser pushes again); pushes of the same digest are both 201. A pull by tag lists the versions of that tag and
 reads one 71-byte object before the manifest, and `tags/list` reads every version of the name; old versions are kept (nothing deletes them yet),
 one 71-byte object per move. The store must list consistently with the writes before the listing (S3 and MinIO do); on a `dir:` tier the whole
-key, `oci/tags/<name>/<tag>/` and 20 digits, is one file name of at most 255 bytes. The repository name (`library/app`) is any name that
+key, `oci/tags/<name>/<tag>/` and 20 digits, is one file, hashed if its name would be over 255 bytes. The repository name (`library/app`) is any name that
 fits the grammar. Blobs and manifests are shared by digest whatever the name; tags are scoped to the name. A registry on another port than 443 is written
 `192.0.2.10:8443/library/app@sha256:...` and its directory is `certs.d/192.0.2.10:8443`.
 

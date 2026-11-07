@@ -2,11 +2,14 @@
 //! operation and state. Every step is idempotent, so that a step that was cut off, or that a new
 //! leader finds half done, is done again from the start.
 
-use super::EntryReconciler;
+use std::collections::{BTreeMap, BTreeSet};
+
 use futures::StreamExt;
 
+use super::EntryReconciler;
 use crate::backend::{ByteRange, ReadBody};
-use crate::entry::{EntryOp, EntryState, Outcome, Seen, Step};
+use crate::deadline::millis;
+use crate::entry::{Entry, EntryOp, EntryState, Outcome, Seen, Step};
 use crate::{Error, Meta};
 
 /// What a look at one entry came to.
@@ -31,6 +34,13 @@ pub(super) enum Replicated {
     Differs,
 }
 
+/// Whether `entry` is a put or a delete held by an owner other than `holder`.
+fn is_held_by_other(entry: &Entry, holder: &str) -> bool {
+    matches!(entry.op, EntryOp::Put | EntryOp::Del)
+        && entry.st == EntryState::Held
+        && entry.owner.as_deref().is_some_and(|owner| owner != holder)
+}
+
 /// A missing object is as good as a deleted one.
 fn ignore_missing(answer: Result<(), Error>) -> Result<(), Error> {
     match answer {
@@ -40,6 +50,34 @@ fn ignore_missing(answer: Result<(), Error>) -> Result<(), Error> {
 }
 
 impl EntryReconciler {
+    /// Notes the held puts and deletes of other owners in `items`: when each was first seen so (a
+    /// new write of the entry, by its nonce, starts again), and which have stood so for
+    /// [`EntryReconcilerConfig::held_ttl`](super::EntryReconcilerConfig) or more, which this step
+    /// reaps although the owner is live.
+    pub(super) fn note_helds(&mut self, items: &[(String, Seen)], now: u64) {
+        let holder = self.config.base.holder.as_str();
+        let held: BTreeMap<&String, &String> = items
+            .iter()
+            .filter(|(_, seen)| is_held_by_other(&seen.entry, holder))
+            .map(|(_, seen)| (&seen.entry.key, &seen.entry.nonce))
+            .collect();
+        let read: BTreeSet<&String> = items.iter().map(|(_, seen)| &seen.entry.key).collect();
+        self.helds
+            .retain(|key, (nonce, _)| !read.contains(key) || held.get(key) == Some(&&*nonce));
+        for (key, nonce) in held {
+            if !self.helds.contains_key(key) {
+                self.helds.insert(key.clone(), (nonce.clone(), now));
+            }
+        }
+        let ttl = millis(self.config.held_ttl);
+        self.held_expired = self
+            .helds
+            .iter()
+            .filter(|(_, (_, first))| now.saturating_sub(*first) >= ttl)
+            .map(|(key, _)| key.clone())
+            .collect();
+    }
+
     /// Does the step the table gives for `seen`, at `now` on the monotonic clock.
     pub(super) async fn process(&self, seen: &Seen, now: u64) -> Result<Verdict, Error> {
         match (seen.entry.op, seen.entry.st) {
@@ -73,10 +111,10 @@ impl EntryReconciler {
                 _ => Ok(Verdict::Skipped),
             };
         }
-        if !self
+        let departed = self
             .registrations
-            .departed(owner, now, self.config.departure)
-        {
+            .departed(owner, now, self.config.departure);
+        if !departed && !self.held_expired.contains(&entry.key) {
             return Ok(Verdict::Pinned);
         }
         if entry.op == EntryOp::Put {

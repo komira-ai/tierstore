@@ -22,6 +22,7 @@ pub(super) async fn start_format(cli: &Cli, hot: &dyn Backend) -> Result<(), Err
     let active = Format {
         phase: FormatPhase::Active,
         epoch: Some(ENTRIES_EPOCH),
+        marks_bucket: None,
     };
     hot.put(FORMAT_KEY, format_body(&active))
         .await

@@ -177,6 +177,22 @@ impl MemoryBackend {
         self.uploads.lock().unwrap_or_else(PoisonError::into_inner)
     }
 
+    /// The bytes of the parts named, joined in the order given, of the upload `id` of `key`.
+    fn joined_parts(&self, key: &str, id: &str, parts: &[(u32, String)]) -> Result<Bytes, Error> {
+        let uploads = self.uploads();
+        let upload = uploads.open.get(id).filter(|up| up.key == key);
+        let upload = upload.ok_or_else(|| Error::NotFound(id.to_owned()))?;
+        let mut whole = BytesMut::new();
+        for (number, tag) in parts {
+            let named = upload.parts.get(number).filter(|held| held.tag == *tag);
+            let Some(part) = named else {
+                return Err(Error::InvalidPart(format!("part {number}")));
+            };
+            whole.extend_from_slice(&part.bytes);
+        }
+        Ok(whole.freeze())
+    }
+
     /// Whether the upload `id` is open and is for `key`.
     fn check_upload(&self, key: &str, id: &str) -> Result<(), Error> {
         let uploads = self.uploads();
@@ -354,22 +370,22 @@ impl Backend for MemoryBackend {
         id: &str,
         parts: &[(u32, String)],
     ) -> Result<String, Error> {
-        let mut whole = BytesMut::new();
-        {
-            let uploads = self.uploads();
-            let upload = uploads.open.get(id).filter(|up| up.key == key);
-            let upload = upload.ok_or_else(|| Error::NotFound(id.to_owned()))?;
-            for (number, tag) in parts {
-                let named = upload.parts.get(number).filter(|held| held.tag == *tag);
-                let Some(part) = named else {
-                    return Err(Error::InvalidPart(format!("part {number}")));
-                };
-                whole.extend_from_slice(&part.bytes);
-            }
-        }
-        let object = whole.freeze();
+        let object = self.joined_parts(key, id, parts)?;
         let tag = tag_of(&object);
         self.put(key, object).await?;
+        self.uploads().open.remove(id);
+        Ok(tag)
+    }
+
+    async fn complete_upload_if_match(
+        &self,
+        key: &str,
+        id: &str,
+        parts: &[(u32, String)],
+        etag: &str,
+    ) -> Result<String, Error> {
+        let object = self.joined_parts(key, id, parts)?;
+        let tag = self.replace(key, object, etag)?;
         self.uploads().open.remove(id);
         Ok(tag)
     }

@@ -274,6 +274,7 @@ mod config_cache_tuning;
 mod config_combined;
 mod config_entry;
 mod config_handoff;
+mod config_hot_only;
 mod config_interface;
 mod config_io;
 mod config_load;
@@ -382,6 +383,8 @@ mod gc_server_tests;
 #[cfg(test)]
 mod gc_tests;
 #[cfg(test)]
+mod header_timeout_tests;
+#[cfg(test)]
 mod hosted_tests;
 #[cfg(test)]
 mod idle_tests;
@@ -389,6 +392,8 @@ mod idle_tests;
 mod key_rules_tests;
 #[cfg(test)]
 mod list_delimiter_tests;
+#[cfg(test)]
+mod list_marks_tests;
 #[cfg(test)]
 mod list_objects_v1_tests;
 #[cfg(test)]

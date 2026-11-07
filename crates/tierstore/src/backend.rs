@@ -782,6 +782,33 @@ pub trait Backend: Send + Sync {
         Err(not_supported("complete_upload"))
     }
 
+    /// As [`Backend::complete_upload`], for an object that is to replace the one in the key: the
+    /// completion makes the object `key` from the parts named only if the object that is there
+    /// has the content tag `etag` (`If-Match`), and gives the content tag of the new object, which
+    /// [`Backend::head`] gives it too. Where the tag does not match, or there is no object, the
+    /// upload is left open and the object as it was.
+    ///
+    /// The provided implementation is [`Error::Unsupported`], as for [`Backend::put_stream_if_match`]:
+    /// a backend that wraps another forwards the call, and one that keeps a copy of what it
+    /// reads (a cache) forgets the key.
+    ///
+    /// # Errors
+    /// As [`Backend::complete_upload`], except that [`Error::AlreadyExists`] is never given.
+    /// [`Error::NotFound`] naming the key if no object has it (naming the id if no upload `id`
+    /// of `key` is open). [`Error::PreconditionFailed`] if the object has another content tag.
+    /// [`Error::Unsupported`] unless the backend overrides this call.
+    async fn complete_upload_if_match(
+        &self,
+        _key: &str,
+        _id: &str,
+        _parts: &[(u32, String)],
+        _etag: &str,
+    ) -> Result<String, Error> {
+        Err(Error::Unsupported(
+            "complete_upload_if_match: this backend does not do it".to_owned(),
+        ))
+    }
+
     /// Drops the upload `id` of `key` and the parts it holds.
     ///
     /// # Errors
