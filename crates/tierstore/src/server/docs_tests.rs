@@ -130,6 +130,7 @@ const FLAGLESS_KEYS: &[&str] = &[
     "hot_store.delete_wait",
     "hot_store.delete_poll_min",
     "hot_store.delete_poll_max",
+    "hot_store.emergency_cold_landing",
     "hot_store.step_attempts",
     "hot_store.step_retry_min",
     "hot_store.step_retry_max",

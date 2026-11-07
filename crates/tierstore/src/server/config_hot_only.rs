@@ -55,6 +55,10 @@ pub(super) fn refuse_hot_keys(cold: &TierTable) -> Result<(), ConfigError> {
         ("heartbeat", cold.heartbeat.is_some()),
         ("departure", cold.departure.is_some()),
         ("held_ttl", cold.held_ttl.is_some()),
+        (
+            "emergency_cold_landing",
+            cold.emergency_cold_landing.is_some(),
+        ),
         ("step_attempts", cold.step_attempts.is_some()),
         ("step_retry_min", cold.step_retry_min.is_some()),
         ("step_retry_max", cold.step_retry_max.is_some()),

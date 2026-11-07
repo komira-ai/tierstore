@@ -66,6 +66,10 @@ pub struct EntryTuning {
     pub delete_poll_min: Duration,
     /// `hot_store.delete_poll_max`: the longest sleep of that wait.
     pub delete_poll_max: Duration,
+    /// `hot_store.emergency_cold_landing`: whether a plain put that the hot tier refuses with
+    /// `Full` before it took a byte lands in the cold tier under a lock, and not 503 (only under
+    /// the format `active-marks`; residual R6' of `docs/design/put-without-lock.md`).
+    pub emergency_cold_landing: bool,
     /// `hot_store.step_attempts`: the most tries of the last step of a put or a delete (the
     /// landing of a put, the hand-over of a delete, the removal of an entry), the first included.
     pub step_attempts: u32,
@@ -132,6 +136,7 @@ impl Default for EntryTuning {
             delete_wait: Duration::from_secs(30),
             delete_poll_min: Duration::from_secs(1),
             delete_poll_max: Duration::from_secs(10),
+            emergency_cold_landing: false,
             step_attempts: StepRetry::new().attempts,
             step_retry_min: StepRetry::new().delay,
             step_retry_max: StepRetry::new().delay_max,
@@ -174,6 +179,7 @@ impl EntryTuning {
             poll_min: self.delete_poll_min,
             poll_max: self.delete_poll_max,
         };
+        proxy.emergency_cold_landing = self.emergency_cold_landing;
         proxy.step_retry = StepRetry {
             attempts: self.step_attempts,
             delay: self.step_retry_min,
@@ -310,6 +316,9 @@ pub(super) fn entry_tuning(
             old.delete_poll_max,
             HOUR,
         )?,
+        emergency_cold_landing: hot
+            .emergency_cold_landing
+            .unwrap_or(old.emergency_cold_landing),
         step_attempts: count("step_attempts", hot.step_attempts, old.step_attempts, 100)?,
         step_retry_min: time(
             "step_retry_min",

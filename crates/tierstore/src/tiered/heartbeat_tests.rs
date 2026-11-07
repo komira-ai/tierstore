@@ -492,7 +492,7 @@ async fn a_request_that_comes_during_a_look_at_the_format_waits_for_it_and_uses_
         .unwrap();
 
     let inner = Arc::clone(&proxy.inner);
-    let request = tokio::spawn(async move { inner.admit_write("k").await });
+    let request = tokio::spawn(async move { inner.route_write("k").await.map(|_| ()) });
     tokio::task::yield_now().await;
     tokio::task::yield_now().await;
     assert!(!request.is_finished());
