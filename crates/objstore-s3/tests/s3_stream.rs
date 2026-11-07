@@ -773,3 +773,90 @@ async fn a_multipart_create_gives_the_etag_of_the_completion_and_no_time() {
     let got = put.await.unwrap();
     assert_eq!((got.etag, got.modified_millis), (None, None));
 }
+
+/// Asserts that a plain streamed write is one PUT with no condition at all (neither `If-None-Match`
+/// nor `If-Match`, also on a store that claims conditional writes), that it gives the `ETag` and
+/// the `Last-Modified` of the answer when it has them, that it works on a store without
+/// conditional writes, and that a 412 is the store's refusal as it is (a `Service` error, not an
+/// `AlreadyExists`: nothing was asked to be new).
+#[tokio::test]
+async fn a_plain_streamed_write_is_one_put_with_no_condition_and_gives_the_answer() {
+    let stamp = "last-modified: Tue, 03 Nov 2026 08:49:37 GMT";
+    let both = answer("200 OK", &["etag: \"made\"", stamp], "");
+    let (endpoint, seen) = script(vec![both]).await;
+    let s = store(endpoint);
+    let got = s
+        .put_stream_replacing_answered(key(), 3, zeros(3, None))
+        .await
+        .unwrap();
+    assert_eq!(got.etag.as_deref(), Some("\"made\""));
+    assert_eq!(got.modified_millis, Some(1_793_695_777_000));
+    let head = seen.lock().unwrap()[0].to_ascii_lowercase();
+    assert!(head.starts_with("put "), "{head}");
+    assert!(!head.contains("if-none-match"), "{head}");
+    assert!(!head.contains("if-match"), "{head}");
+
+    let (endpoint, seen) = script(vec![answer("200 OK", &[], "")]).await;
+    let mut unconditional = config(endpoint);
+    unconditional.capabilities = Capabilities::default();
+    let s = S3Store::new(unconditional).unwrap();
+    let got = s
+        .put_stream_replacing_answered(key(), 3, zeros(3, None))
+        .await
+        .unwrap();
+    assert_eq!((got.etag, got.modified_millis), (None, None));
+    assert_eq!(seen.lock().unwrap().len(), 1);
+
+    let refused = answer(
+        "412 Precondition Failed",
+        &[],
+        "<Error><Code>PreconditionFailed</Code></Error>",
+    );
+    let (endpoint, _) = script(vec![refused]).await;
+    let s = store(endpoint);
+    let put = s.put_stream_replacing_answered(key(), 3, zeros(3, None));
+    let err = put.await.unwrap_err();
+    assert!(
+        matches!(err, ObjectStoreError::Service { status: 412, .. }),
+        "{err}"
+    );
+}
+
+/// Asserts that a plain streamed write of more than one PUT's size is a multipart upload whose
+/// completion carries no condition (the requests before it carry none either), that it gives the
+/// `ETag` the completion names and no time, and that a completion the store refuses is its error
+/// and aborts the upload.
+#[tokio::test]
+async fn a_large_plain_streamed_write_is_completed_with_no_condition_and_aborted_on_failure() {
+    let ok =
+        "<CompleteMultipartUploadResult><ETag>\"joined-2\"</ETag></CompleteMultipartUploadResult>";
+    let (endpoint, seen) = script(upload_answers(answer("200 OK", &[], ok), false)).await;
+    let s = store_cut_at_a_part(endpoint);
+    let put = s.put_stream_replacing_answered(key(), OVER_ONE_PUT, zeros(OVER_ONE_PUT, None));
+    let got = put.await.unwrap();
+    assert_eq!(got.etag.as_deref(), Some("\"joined-2\""));
+    assert_eq!(got.modified_millis, None);
+    let requests = seen.lock().unwrap().clone();
+    assert_eq!(requests.len(), 4);
+    assert!(requests[3].starts_with("POST "), "{}", requests[3]);
+    for request in &requests {
+        let request = request.to_ascii_lowercase();
+        assert!(!request.contains("if-none-match"), "{request}");
+        assert!(!request.contains("if-match"), "{request}");
+    }
+
+    let denied = answer(
+        "403 Forbidden",
+        &[],
+        "<Error><Code>AccessDenied</Code></Error>",
+    );
+    let (endpoint, seen) = script(upload_answers(denied, true)).await;
+    let s = store_cut_at_a_part(endpoint);
+    let put = s.put_stream_replacing_answered(key(), OVER_ONE_PUT, zeros(OVER_ONE_PUT, None));
+    let err = put.await.unwrap_err();
+    assert!(
+        matches!(err, ObjectStoreError::Service { status: 403, .. }),
+        "{err}"
+    );
+    assert!(seen.lock().unwrap()[4].starts_with("DELETE "));
+}

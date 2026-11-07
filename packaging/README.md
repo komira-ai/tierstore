@@ -365,15 +365,19 @@ the body is read. The key files of `[server]` are those of the front, as for a s
 
 With `write_through = true` in `[local_cache]` (default `false`) the node takes the writes its keys
 may do and sends each to the upstream; the answer is given only after the upstream has the object,
-and a create-only put under a `cache = true` policy is also kept on the node, so the next read of
+and a put (create-only or plain) under a `cache = true` policy is also kept on the node, so the next read of
 it is a hit (a multipart upload is not kept: the first read fills it; see "What a put keeps"
 below). Create-only
-puts (with or without `If-None-Match: *`), presigned PUTs, multipart uploads (start, part,
+puts (`If-None-Match: *`), plain puts (no `If-None-Match`), presigned PUTs, multipart uploads (start, part,
 completion, abort) and deletes go to the upstream; the roles of the full, read-only, scoped,
-presigning and GC keys apply as on a storage node, and a put that replaces (`If-Match`) and a copy
+presigning and GC keys apply as on a storage node, and a put that replaces on a tag (`If-Match`) and a copy
 are still refused. A create-only put makes one HEAD of the key at the upstream before the body is
 read, and answers 412 at once if the object is there; the upstream's conditional put is the
-arbiter of two writers. A full upstream (507) is 503 `SlowDown` with `Retry-After`; an upstream that
+arbiter of two writers. A plain put makes no HEAD: it is sent to the upstream as its plain put and
+replaces the object where the upstream does (a proxy on `active-marks`, an S3 bucket; a proxy on the
+entry protocol creates only and answers 412 for a key it holds). The cache forgets its older copy of
+the key before the put and when the upstream has answered, also when it refused, and keeps the new
+copy under the tag the upstream answered; two puts of one key at once, one of them plain, keep no copy. A full upstream (507) is 503 `SlowDown` with `Retry-After`; an upstream that
 does not answer is 503. A delete drops the cache's copy and then deletes at the upstream, and a fill
 that was reading the object does not keep it; the completion of an upload drops the cache's copy of
 the key. Listings leave out the keys under `_journal/`, `_tiering/` and `_entries/`, always. The upstream key
@@ -383,13 +387,14 @@ key that may not write shows as the failure of the first write, and an upstream 
 reached as the error of the first request. The upstream's key is also the cache's: only the front's roles keep one client from another's objects.
 The start line then says `mode=write-through-cache`.
 
-What a put keeps. The body of a create-only put under a `cache = true` policy is copied into
+What a put keeps. The body of a put (create-only or plain) under a `cache = true` policy is copied into
 `.stage/` as it streams to the upstream. When the upstream has acknowledged the object, the node
-asks it for the object's tag and time (one HEAD, so the tag in the cache is the one the upstream
-gave, which for a large body is not an MD5), puts the copy in the cache, and then answers 200. The
+takes the object's tag from the upstream's answer to the put (S3's `ETag`, which for a large body is
+not an MD5; where the answer has none, one HEAD asks for it), puts the copy in the cache, and then
+answers 200. The
 copy is best effort and never fails the put: if every keep slot is busy (`max_concurrent_keeps`),
 the object does not fit the budget, the stage directory cannot be written, the HEAD fails, the disk
-falls behind the body, or the object was deleted meanwhile, the copy is dropped, the put is still
+falls behind the body, or the object was deleted or replaced meanwhile, the copy is dropped, the put is still
 200 with the object at the upstream, and the skip is counted. The body is written to the stage file
 by a task of its own through a queue of at most 16 chunks and 4 MiB (the bytes bound the memory,
 whatever the size of the chunks; at most `max_concurrent_keeps` times 4 MiB in all), so a slow or

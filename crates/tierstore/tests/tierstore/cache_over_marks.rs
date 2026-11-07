@@ -9,7 +9,8 @@ use std::sync::Arc;
 
 use tierstore::server::local_cache::{CacheConfig, KeepObserver, LocalCache, SystemDisk};
 use tierstore::{
-    Backend, Clock, FaultyBackend, MemoryBackend, Op, Proxy, ProxyConfig, SystemClock, TestClock,
+    Backend, Clock, Error, FaultyBackend, MemoryBackend, Op, Proxy, ProxyConfig, SystemClock,
+    TestClock,
 };
 use tierstore_testkit::dir::TestDir;
 use tokio::sync::Notify;
@@ -69,6 +70,23 @@ impl Stores {
         }
         all
     }
+}
+
+/// The requests of `after` that `before` (an earlier `requests()`) did not have, store by store.
+fn since(before: &[Request], after: Vec<Request>) -> Vec<Request> {
+    let mut skip: Vec<(&str, usize)> = ["hot", "marks", "cold"]
+        .into_iter()
+        .map(|store| (store, before.iter().filter(|r| r.0 == store).count()))
+        .collect();
+    let mut news = Vec::new();
+    for item in after {
+        let slot = skip.iter_mut().find(|(store, _)| *store == item.0);
+        match slot {
+            Some((_, left)) if *left > 0 => *left -= 1,
+            _ => news.push(item),
+        }
+    }
+    news
 }
 
 fn request(store: &'static str, op: Op, key: &str) -> Request {
@@ -140,5 +158,76 @@ async fn a_put_through_makes_no_head_before_and_none_after_when_the_proxy_answer
             wanted,
             "head_before_put {head_before_put}"
         );
+    }
+}
+
+/// Asserts what an overwrite through a cache costs the stores behind a marks proxy, and what the
+/// cache serves after it: the plain put goes to the proxy as its plain put and the cache makes no
+/// HEAD of its own, with `head_before_put` on or off, so the requests are the proxy's own for an
+/// overwrite (the hot HEAD that finds the key, the marker read under the lock and its writes, the
+/// hot PUT) and none after it; the next read is the new bytes served from the cache's disk with no
+/// request, also in a cache opened again over the same directory; and a create-only put of the key
+/// is still refused as `AlreadyExists`, the cached copy left as it was.
+#[tokio::test(start_paused = true)]
+async fn an_overwrite_through_a_cache_makes_the_proxys_plain_put_and_is_served_locally() {
+    for head_before_put in [true, false] {
+        let stores = Stores::new().await;
+        let proxy = stores.proxy().await;
+        let kept = Arc::new(Notify::new());
+        let told = Arc::clone(&kept);
+        let observer: KeepObserver = Arc::new(move || told.notify_one());
+        let dir = TestDir::under(
+            env!("CARGO_TARGET_TMPDIR"),
+            "tierstore-cache-over-marks-put",
+        );
+        let policies = vec![("img/".to_owned(), true)];
+        let mut config = CacheConfig::new(dir.path().join("cache"), 1 << 20, policies);
+        config.write_through = true;
+        config.head_before_put = head_before_put;
+        let clock: Arc<dyn Clock> = Arc::new(SystemClock);
+        let upstream: Arc<dyn Backend> = proxy;
+        let opened = LocalCache::open_observed(
+            config.clone(),
+            Arc::clone(&upstream),
+            Arc::new(SystemDisk),
+            Arc::clone(&clock),
+            Some(observer),
+        );
+        let cache = opened.unwrap();
+        cache
+            .put_stream("img/p", Some(3), chunks(&["old"]))
+            .await
+            .unwrap();
+        kept.notified().await;
+        let before = stores.requests();
+
+        let claim = tierstore::PutClaim::default();
+        let made = cache.put_stream_replacing("img/p", Some(3), chunks(&["new"]), &claim);
+        made.await.unwrap();
+        kept.notified().await;
+        let overwrite = [
+            request("hot", Op::Head, "img/p"),
+            request("hot", Op::Head, "img/p"),
+            request("hot", Op::PutIfMatch, "img/p"),
+            request("marks", Op::Get, "img/p"),
+            request("marks", Op::PutIfMatch, "img/p"),
+            request("marks", Op::PutIfMatch, "img/p"),
+        ];
+        let after = stores.requests();
+        assert_eq!(since(&before, after), overwrite, "{head_before_put}");
+
+        let settled = stores.requests();
+        assert_eq!(cache.get("img/p", None).await.unwrap(), body("new"));
+        assert_eq!(stores.requests(), settled, "{head_before_put}");
+        let again = LocalCache::open(config, upstream, Arc::new(SystemDisk), clock);
+        let again = again.unwrap();
+        assert_eq!(again.get("img/p", None).await.unwrap(), body("new"));
+        assert_eq!(stores.requests(), settled, "{head_before_put}");
+
+        let refused = cache.put_stream("img/p", Some(3), chunks(&["xyz"])).await;
+        assert_eq!(refused, Err(Error::AlreadyExists("img/p".to_owned())));
+        let settled = stores.requests();
+        assert_eq!(cache.get("img/p", None).await.unwrap(), body("new"));
+        assert_eq!(stores.requests(), settled, "{head_before_put}");
     }
 }

@@ -17,7 +17,7 @@ use super::metrics::read;
 use super::testing::{digest, never_expires, pattern};
 use super::{CacheConfig, LocalCache, SystemDisk};
 use crate::s3::{Capabilities, Credentials, S3Config, S3Tuning};
-use crate::{Backend, FaultyBackend, Op, PartBody, S3Backend, TestClock};
+use crate::{Backend, Error, FaultyBackend, Op, PartBody, PutClaim, S3Backend, TestClock};
 
 /// A body of `bytes` in pieces of a mebibyte.
 fn pieces(bytes: &[u8]) -> PartBody<'static> {
@@ -314,5 +314,74 @@ async fn a_cut_multipart_sized_body_leaves_nothing_over_s3() {
     assert_eq!(s3.incomplete_uploads(), 0);
     assert_eq!(cache.held(), (0, 0));
     assert_eq!(cache.inner.reserved.load(Ordering::SeqCst), 0);
+    drained(&config).await;
+}
+
+/// Asserts that a plain put through the cache over an S3 bucket replaces an object the bucket
+/// holds, for a body sent as one PUT and for one sent as a multipart upload, with no HEAD (the
+/// bucket is asked for nothing but the write), and that the copy the cache keeps has the tag the
+/// bucket's answer to the write gave: the sidecar tag is what a later HEAD of the bucket gives
+/// (the multipart one has a dash), and the next read is the new bytes, a hit with no call of the
+/// upstream. A create-only put of the same keys is still refused.
+#[tokio::test]
+async fn a_plain_put_over_s3_replaces_the_object_and_keeps_the_upstreams_tag_also_as_parts() {
+    let s3 = FakeS3::start().await;
+    let backend = s3_backend(&s3);
+    let upstream = Arc::new(FaultyBackend::new(backend.clone()));
+    let dir = TestDir::under(std::env::temp_dir(), "tscache-keep-s3-replace");
+    let policies = vec![("cas/".to_owned(), true)];
+    let mut config = CacheConfig::new(dir.path().join("cache"), 64 << 20, policies);
+    config.write_through = true;
+    config.keep_queue_bytes = 64 << 20;
+    never_expires(&mut config);
+    let clock = Arc::new(TestClock::new());
+    let cache = LocalCache::open(
+        config.clone(),
+        upstream.clone(),
+        Arc::new(SystemDisk),
+        clock,
+    );
+    let cache = cache.unwrap();
+
+    let old_large = pattern(17 << 20);
+    let old_small = pattern(3 << 20);
+    let new_large: Vec<u8> = old_large.iter().rev().copied().collect();
+    let new_small: Vec<u8> = old_small.iter().rev().copied().collect();
+    for (key, bytes) in [("cas/b/parts", &old_large), ("cas/b/single", &old_small)] {
+        let made = cache.put_stream(key, Some(bytes.len() as u64), pieces(bytes));
+        assert_eq!(made.await, Ok(()), "{key}");
+    }
+    let (heads, before) = (upstream.calls(Op::Head), s3.stats());
+
+    let claim = PutClaim::default();
+    for (key, bytes) in [("cas/b/parts", &new_large), ("cas/b/single", &new_small)] {
+        let len = Some(bytes.len() as u64);
+        let made = cache.put_stream_replacing(key, len, pieces(bytes), &claim);
+        assert_eq!(made.await, Ok(None), "{key}");
+    }
+    let stats = s3.stats();
+    assert_eq!(stats.completed, before.completed + 1);
+    assert_eq!(stats.single_puts, before.single_puts + 1);
+    assert_eq!(upstream.calls(Op::Head), heads);
+
+    for (key, bytes) in [("cas/b/parts", &new_large), ("cas/b/single", &new_small)] {
+        let path = meta_path(&config.path, &name_of(key).hex);
+        let kept: Sidecar = serde_json::from_slice(&std::fs::read(path).unwrap()).unwrap();
+        assert_eq!(kept.tag, backend.head(key).await.unwrap().tag, "{key}");
+        assert_eq!(kept.sha256, digest(bytes), "{key}");
+    }
+    assert!(backend.head("cas/b/parts").await.unwrap().tag.contains('-'));
+    let gets = upstream.calls(Op::Get);
+    assert_eq!(cache.get("cas/b/parts", None).await.unwrap(), new_large);
+    assert_eq!(cache.get("cas/b/single", None).await.unwrap(), new_small);
+    assert_eq!(upstream.calls(Op::Get), gets);
+    for key in ["cas/b/parts", "cas/b/single"] {
+        let again = cache.put_stream(key, Some(3), pieces(b"abc"));
+        assert_eq!(
+            again.await,
+            Err(Error::AlreadyExists(key.to_owned())),
+            "{key}"
+        );
+    }
     drained(&config).await;
 }

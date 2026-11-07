@@ -237,11 +237,11 @@ impl Backend for CachedStore {
         len: Option<u64>,
         body: PartBody<'_>,
         claim: &PutClaim,
-    ) -> Result<(), Error> {
+    ) -> Result<Option<PutAnswer>, Error> {
         let inner = &self.inner;
-        inner.put_stream_replacing(key, len, body, claim).await?;
+        let answer = inner.put_stream_replacing(key, len, body, claim).await?;
         self.cache().drop_key(key);
-        Ok(())
+        Ok(answer)
     }
 
     async fn put_if_match(&self, key: &str, body: Bytes, etag: &str) -> Result<String, Error> {

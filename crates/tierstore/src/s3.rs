@@ -20,6 +20,9 @@
 //!   a body that ends with an error, or is cut short, leaves no object and no staged key, and
 //!   at most one part of the body is held at a time (a few chunks for a single PUT). A key that exists is
 //!   [`Error::AlreadyExists`].
+//! - `put_stream_replacing` is a plain PUT, the same streamed write with no `If-None-Match` (a
+//!   multipart upload completes with none either), so a key that exists is replaced; it works on
+//!   a store without conditional writes too, and gives the answer of `put_stream_answered`.
 //! - `put_if_match` is a PUT with `If-Match: "<tag>"` (a tag given in quotes is not quoted
 //!   twice); the 412 is [`Error::PreconditionFailed`] and a 404 is [`Error::NotFound`]. It
 //!   gives the `ETag` of the answer, without its quotes.
@@ -148,8 +151,8 @@ use tokio::sync::mpsc;
 
 use crate::backend::open_by_head;
 use crate::{
-    Backend, ByteRange, Error, Listed, Meta, OpenUpload, Opened, PartBody, PutAnswer, ReadBody,
-    Span, UploadedPart, UploadsAfter, Window,
+    Backend, ByteRange, Error, Listed, Meta, OpenUpload, Opened, PartBody, PutAnswer, PutClaim,
+    ReadBody, Span, UploadedPart, UploadsAfter, Window,
 };
 
 pub use objstore_s3::Capabilities;
@@ -436,6 +439,15 @@ fn unquoted(etag: &str) -> String {
     etag.trim_matches('"').to_owned()
 }
 
+/// What the answer to a write says of the object: its tag without quotes and its time, if the
+/// answer has a tag.
+fn put_answer(answer: objstore_s3::s3::PutAnswer) -> Option<PutAnswer> {
+    answer.etag.map(|etag| PutAnswer {
+        tag: unquoted(&etag),
+        modified: answer.modified_millis,
+    })
+}
+
 /// What a read opens: the chunks of its body and the entity tag (as the store sends it,
 /// if it sends one) of the answer they come from.
 type Answered = (ReadBody, Option<String>);
@@ -604,10 +616,26 @@ impl Backend for S3Backend {
         let sending = |len, source| store.put_stream_new_answered(&object, len, source);
         let sent = streamed(body, len, self.chunks_waiting, sending).await?;
         let answer = sent.map_err(|e| map_error(e, key))?;
-        Ok(answer.etag.map(|etag| PutAnswer {
-            tag: unquoted(&etag),
-            modified: answer.modified_millis,
-        }))
+        Ok(put_answer(answer))
+    }
+
+    /// A plain `PUT`: the request carries no `If-None-Match` and no `If-Match`, so the store
+    /// replaces a key that exists, and `claim` (which names tags for a proxy's hot tier) is not
+    /// used. A body longer than `server.s3_single_put_max` is a multipart upload whose completion
+    /// carries no condition. The answer is the one of `put_stream_answered`.
+    async fn put_stream_replacing(
+        &self,
+        key: &str,
+        len: Option<u64>,
+        body: PartBody<'_>,
+        _claim: &PutClaim,
+    ) -> Result<Option<PutAnswer>, Error> {
+        let object = object_key(key)?;
+        let store = &self.store;
+        let sending = |len, source| store.put_stream_replacing_answered(&object, len, source);
+        let sent = streamed(body, len, self.chunks_waiting, sending).await?;
+        let answer = sent.map_err(|e| map_error(e, key))?;
+        Ok(put_answer(answer))
     }
 
     async fn put_if_match(&self, key: &str, body: Bytes, etag: &str) -> Result<String, Error> {
