@@ -21,6 +21,8 @@ impl Rig {
             boot: boot.to_owned(),
             hb,
             peers,
+            phase: None,
+            writes_in_flight: None,
         }
         .encode();
         self.hot.delete(&proxy_key(id)).await.ok();

@@ -123,6 +123,22 @@ fn the_new_key_is_read_here_and_refused_by_the_release_before() {
     assert_eq!(both(&node.file("", "", "")), (ok.clone(), ok));
 }
 
+/// Asserts that a file that sets `hot_store.marks_bucket` on an S3 hot tier is read by this release
+/// and refused by the release before with status 2 (it refuses a key it does not know), so a host
+/// that may roll back leaves the key out until every process has this release; that the same key
+/// in `[cold_store]` is refused by both; and that the file without the key is loaded by both.
+#[test]
+fn the_marks_bucket_key_is_read_here_and_refused_by_the_release_before() {
+    let node = Node::new("compat-config-marks-bucket");
+    let ok = status(ExitCode::SUCCESS);
+    let refused = status(ExitCode::from(2));
+    let file = node.file("", "marks_bucket = \"hot-markers\"", "");
+    assert_eq!(both(&file), (ok.clone(), refused.clone()));
+    let cold = node.file("", "", "marks_bucket = \"cold-markers\"");
+    assert_eq!(both(&cold), (refused.clone(), refused));
+    assert_eq!(both(&node.file("", "", "")), (ok.clone(), ok));
+}
+
 /// Asserts that a file written for the release before, which sets `backend_check_wait` in
 /// `[server]` and `skip_checks` in `[cold_store]`, is loaded by this release as it is by the
 /// release before: the two keys are kept, accepted and ignored.

@@ -599,7 +599,8 @@ impl Inner {
             }
             return Err(SkippedKeep::ReadOnly);
         }
-        locked(&self.index).insert(&name.hex, size, meta.tag, meta.modified);
+        let checked = Some(self.clock.now());
+        locked(&self.index).insert(&name.hex, (size, meta.tag, meta.modified), checked);
         // A delete that finished after the HEAD marked this keep (see `forget`), and may have
         // dropped nothing because the entry was not in yet: the object is gone from the
         // upstream. The mark is looked for after the entry is in the index.

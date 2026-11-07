@@ -13,7 +13,7 @@ use tokio::io::{AsyncReadExt, AsyncSeekExt, AsyncWriteExt};
 
 use crate::{Error, PartBody};
 
-use super::{PLAIN_MODE, TAG_LEN, finish, io_error};
+use super::{PLAIN_MODE, TAG_LEN, finish, io_error, stored_parts};
 
 /// Makes the new file at `path`, for writing, with the mode [`PLAIN_MODE`] (less the umask). It is
 /// an error if the name is taken, so that two writers never write to one file.
@@ -50,6 +50,26 @@ pub(super) async fn write_stream(
     let flushed = file.flush().await;
     flushed.and(file.sync_all().await).map_err(&fail)?;
     Ok(finish(hasher))
+}
+
+/// The files of the parts of the upload in `dir` that `parts` names, in the order given.
+///
+/// # Errors
+/// [`Error::InvalidPart`] if a part named is not stored, or is stored with another content tag.
+pub(super) async fn named_part_files(
+    dir: &Path,
+    parts: &[(u32, String)],
+) -> Result<Vec<PathBuf>, Error> {
+    let stored = stored_parts(dir).await?;
+    let mut files = Vec::new();
+    for (number, tag) in parts {
+        let found = stored.iter().find(|part| part.is(*number, tag));
+        let Some(found) = found else {
+            return Err(Error::InvalidPart(format!("part {number}")));
+        };
+        files.push(dir.join(&found.name));
+    }
+    Ok(files)
 }
 
 /// Makes the new file at `path` and writes room for the content tag and then `header` to it.

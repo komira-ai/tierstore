@@ -5,7 +5,9 @@
 //! reconciler, which compares nothing across machines, sees the object change while its owner is
 //! alive. Unknown fields are ignored, and a body that is empty or is not this object (a
 //! registration of a release before this one) reads as none, so both directions of a rolling
-//! update work: an older reconciler lists the names and never reads the body.
+//! update work: an older reconciler lists the names and never reads the body. The two optional
+//! fields `phase` and `writes_in_flight` are left out of the body when they are not set, so that a
+//! registration that does not set them is the bytes it always was.
 //!
 //! `peers` is how a restart is told from two processes that run side by side under one proxy id (a
 //! hand-off, a new process that takes the sockets of an old one that drains): both write this
@@ -20,12 +22,20 @@ use std::collections::BTreeSet;
 use bytes::Bytes;
 use serde::{Deserialize, Serialize};
 
+use crate::format::FormatPhase;
 use crate::journal::to_body;
 
-/// The `proto` of the registrations this release writes: 2, the protocol of one journal entry for
+/// The `proto` of the registrations of a proxy with no marks bucket: 2, the protocol of one journal entry for
 /// each key (the registrations of the release before, which heartbeats but writes journals, say 1;
 /// `tierstore format-epoch --activate` refuses while one of them is live).
 pub(crate) const PROTO: u32 = 2;
+
+/// The `proto` of a proxy that has a marks bucket, so reads the marker of a key on a hot miss in
+/// every phase from which a marker can be in force (`docs/design/put-without-lock.md`, 5.7 and
+/// 8.1): `tierstore format-epoch --activate-marks` takes 3 to mean that. A proxy with no marks
+/// bucket (a library user's, and a server over a `dir` hot tier) says [`PROTO`], because it reads
+/// no marker.
+pub(crate) const PROTO_MARKS: u32 = 3;
 
 /// What a registration says.
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
@@ -43,6 +53,15 @@ pub(crate) struct Registration {
     /// them; empty when it knows none. Absent from a body written by a release before this field.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub(crate) peers: Option<Vec<String>>,
+    /// The format phase the proxy acts on, as it last read the format object: what the operator's
+    /// rollback waits for (`drained`) before it empties the marks bucket. Absent in the
+    /// registration of a release that does not write it.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub(crate) phase: Option<FormatPhase>,
+    /// The number of writes the proxy has begun and not ended, so that the rollback can tell that
+    /// none is in flight. Absent in the registration of a release that does not write it.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub(crate) writes_in_flight: Option<u64>,
 }
 
 impl Registration {

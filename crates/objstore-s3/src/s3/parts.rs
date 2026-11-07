@@ -239,6 +239,32 @@ impl S3Store {
         })
     }
 
+    /// CompleteMultipartUpload that replaces the object `key` only if its entity tag is `etag`
+    /// (`If-Match`, the tag sent as it is), with the parts named as
+    /// [`complete_multipart`](Self::complete_multipart) takes them. Gives the `ETag` of the new
+    /// object as the answer names it, quotes included. A tag that does not match, or no object,
+    /// leaves the upload open.
+    ///
+    /// # Errors
+    /// [`ObjectStoreError::NotFound`] if no object has the key (the 404 whose code is
+    /// `NoSuchKey`), [`ObjectStoreError::Service`] if the store refuses (status 412 for another
+    /// tag, `NoSuchUpload`, `InvalidPart`, `EntityTooSmall`) or answers 200 and then an error,
+    /// [`ObjectStoreError::Transport`] if the request does not complete,
+    /// [`ObjectStoreError::Protocol`] if the answer names no `ETag` (the object is replaced).
+    pub async fn complete_multipart_if_match(
+        &self,
+        key: &ObjectKey,
+        upload_id: &str,
+        parts: &[(u32, String)],
+        etag: &str,
+    ) -> Result<String, ObjectStoreError> {
+        let request = xml::complete_parts_request(parts);
+        let complete = multipart::complete_replacing(&self.conn, key, upload_id, request, etag);
+        complete.await?.ok_or_else(|| {
+            ObjectStoreError::Protocol(format!("completion of {key}: no ETag in the answer"))
+        })
+    }
+
     /// AbortMultipartUpload: drops the upload and the parts sent to it.
     ///
     /// # Errors

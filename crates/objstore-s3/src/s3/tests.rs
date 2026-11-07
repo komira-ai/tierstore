@@ -378,9 +378,11 @@ fn a_body_is_one_put_up_to_the_single_put_max_and_never_past_s3s_limit() {
     let small = S3Store::new_tuned(c.clone(), tuned(8 << 20)).unwrap();
     assert!(small.sends_whole(8 << 20));
     assert!(!small.sends_whole((8 << 20) + 1));
+    assert_eq!(small.single_put_max(), 8 << 20);
     let past = S3Store::new_tuned(c.clone(), tuned(u64::MAX)).unwrap();
     assert!(past.sends_whole(SINGLE_PUT_MAX));
     assert!(!past.sends_whole(SINGLE_PUT_MAX + 1));
+    assert_eq!(past.single_put_max(), SINGLE_PUT_MAX);
     let default = S3Store::new(c).unwrap();
     assert!(default.sends_whole(SINGLE_PUT_MAX));
     assert!(!default.sends_whole(SINGLE_PUT_MAX + 1));

@@ -16,5 +16,6 @@ mod entry_objects;
 mod format_object;
 mod hook_records;
 mod local_cache_sidecar;
+mod marker_objects;
 mod support;
 mod tier_objects;

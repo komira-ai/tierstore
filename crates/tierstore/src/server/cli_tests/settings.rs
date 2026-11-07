@@ -1,6 +1,7 @@
 //! The settings, servers, tiers and key files made of the flags.
 
 use super::*;
+use crate::server::cli::marks_name;
 
 /// Asserts that percents are shares of a whole.
 #[test]
@@ -57,6 +58,7 @@ fn the_settings_are_made_from_the_flags() {
     assert_eq!(built.proxy.proxy_id, "p1");
     assert_eq!(built.proxy.hot_budget, 1000);
     assert_eq!(built.proxy.critical, 0.95);
+    assert_eq!(built.proxy.marks_name, marks_name(&cli.hot_marks));
     assert_eq!(built.reconciler.holder, "p1/reconciler");
     assert_eq!(built.reconciler.hot_budget, 1000);
     assert_eq!(built.reconciler.high_water, 0.8);
@@ -261,6 +263,7 @@ fn an_s3_tier_is_built_from_the_flags_of_its_tier() {
     let cold_key = key_file(&dir, "cold-key", "COLDID\ncold-secret\n", 0o600);
     let mut cli = cli(&dir);
     cli.hot = "s3:hot-bucket".to_owned();
+    cli.hot_marks = "s3:hot-bucket-marks".to_owned();
     cli.hot_endpoint = Some("http://127.0.0.1:9000".to_owned());
     cli.hot_credentials_file = Some(hot_key.clone());
     cli.cold = "s3:cold-bucket".to_owned();

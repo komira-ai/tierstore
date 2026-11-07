@@ -185,7 +185,14 @@ impl S3Store {
     /// Whether a body of `len` bytes is sent as one PUT: it is no longer than the store's
     /// `single_put_max`, which is kept to what S3 takes in one.
     pub(super) fn sends_whole(&self, len: u64) -> bool {
-        len <= self.conn.tuning.single_put_max.min(SINGLE_PUT_MAX)
+        len <= self.single_put_max()
+    }
+
+    /// The longest body, in bytes, that is sent as one PUT: the store's `single_put_max`, kept to
+    /// what S3 takes in one.
+    #[must_use]
+    pub fn single_put_max(&self) -> u64 {
+        self.conn.tuning.single_put_max.min(SINGLE_PUT_MAX)
     }
 
     /// The condition of a create-only write: `If-None-Match: *`, if the store claims conditional

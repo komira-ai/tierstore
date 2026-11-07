@@ -203,6 +203,10 @@ impl Backend for GateBackend {
         self.inner.needs_length()
     }
 
+    fn single_put_max(&self) -> Option<u64> {
+        self.inner.single_put_max()
+    }
+
     /// A streamed put is a call of kind [`Op::Put`].
     async fn put_stream(
         &self,
@@ -340,6 +344,18 @@ impl Backend for GateBackend {
         parts: &[(u32, String)],
     ) -> Result<String, Error> {
         let call = self.inner.complete_upload(key, id, parts);
+        self.through(Op::CompleteUpload, key, call).await
+    }
+
+    /// A conditional completion is a call of kind [`Op::CompleteUpload`].
+    async fn complete_upload_if_match(
+        &self,
+        key: &str,
+        id: &str,
+        parts: &[(u32, String)],
+        etag: &str,
+    ) -> Result<String, Error> {
+        let call = self.inner.complete_upload_if_match(key, id, parts, etag);
         self.through(Op::CompleteUpload, key, call).await
     }
 

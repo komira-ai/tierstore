@@ -10,6 +10,8 @@ fn found(boot: &str, peers: Option<&[&str]>) -> Registration {
         boot: boot.to_owned(),
         hb: 5,
         peers: peers.map(|boots| boots.iter().map(|boot| (*boot).to_owned()).collect()),
+        phase: None,
+        writes_in_flight: None,
     }
 }
 

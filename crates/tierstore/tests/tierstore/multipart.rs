@@ -165,6 +165,64 @@ pub async fn contract(backend: &dyn Backend, part_tag: PartTag) {
     assert_eq!(keys(backend).await, ["big"]);
 }
 
+/// Holds the conditional completion of `backend` to what the trait says: a completion with the
+/// tag of the object in the key replaces it with the parts joined and gives the tag a head gives
+/// the new object; a tag that does not match, a key with no object, parts named wrongly and an
+/// upload that is not held are each refused as the trait says, and leave the object as it was and
+/// the upload open, so that the same completion with the right tag still succeeds; the old tag is
+/// then refused; and the completion ends the upload.
+pub async fn conditional_contract(backend: &dyn Backend) {
+    let old = backend.put_tagged("k", body("old")).await.unwrap();
+    let id = backend.create_upload("k").await.unwrap();
+    let one = part(backend, "k", &id, 1, &["new "]).await.unwrap();
+    let two = part(backend, "k", &id, 2, &["bytes"]).await.unwrap();
+    let parts = [(1, one.clone()), (2, two)];
+    let finish = |parts: &[(u32, String)], etag: &str| {
+        let (parts, etag) = (parts.to_vec(), etag.to_owned());
+        let id = id.clone();
+        async move {
+            backend
+                .complete_upload_if_match("k", &id, &parts, &etag)
+                .await
+        }
+    };
+
+    let wrong = finish(&parts, "not-the-tag").await;
+    assert_eq!(wrong, Err(Error::PreconditionFailed("k".to_owned())));
+    let named_wrongly = finish(&[(2, one.clone())], &old).await;
+    assert!(matches!(named_wrongly, Err(Error::InvalidPart(_))));
+    let unheld = backend.complete_upload_if_match("k", "nope", &parts, &old);
+    assert_eq!(unheld.await, Err(Error::NotFound("nope".to_owned())));
+    assert_eq!(text(backend, "k").await, "old");
+    assert_eq!(backend.head("k").await.unwrap().tag, old);
+
+    let absent_id = backend.create_upload("absent").await.unwrap();
+    let kept = part(backend, "absent", &absent_id, 1, &["x"])
+        .await
+        .unwrap();
+    let named = [(1, kept)];
+    let missing = backend.complete_upload_if_match("absent", &absent_id, &named, &old);
+    assert_eq!(missing.await, Err(Error::NotFound("absent".to_owned())));
+    assert_absent(backend, "absent").await;
+    backend.abort_upload("absent", &absent_id).await.unwrap();
+
+    let made = finish(&parts, &old).await.unwrap();
+    assert_ne!(made, old);
+    assert_eq!(backend.head("k").await.unwrap().tag, made);
+    assert_eq!(text(backend, "k").await, "new bytes");
+    assert_eq!(keys(backend).await, ["k"]);
+    let ended = finish(&parts, &made).await;
+    assert_eq!(ended, Err(Error::NotFound(id.clone())));
+
+    let again = backend.create_upload("k").await.unwrap();
+    let part_again = part(backend, "k", &again, 1, &["third"]).await.unwrap();
+    let named = [(1, part_again)];
+    let stale = backend.complete_upload_if_match("k", &again, &named, &old);
+    assert_eq!(stale.await, Err(Error::PreconditionFailed("k".to_owned())));
+    assert_eq!(text(backend, "k").await, "new bytes");
+    backend.abort_upload("k", &again).await.unwrap();
+}
+
 /// A part larger than the pieces the backend joins parts in, and one after it: the object is
 /// their join byte for byte. Gives the bytes of the object, which is left in the backend under
 /// the key `large`.
@@ -227,6 +285,80 @@ async fn the_directory_backend_does_multipart_uploads() {
     }
     names.sort();
     assert_eq!(names, [".uploads", "big", "large"]);
+}
+
+/// Asserts that the in-memory backend completes an upload over an existing object only if the
+/// object has the tag named, as the trait says.
+#[tokio::test]
+async fn the_memory_backend_completes_an_upload_over_the_object_with_the_tag() {
+    conditional_contract(&MemoryBackend::new()).await;
+}
+
+/// Asserts that the directory backend completes an upload over an existing object only if the
+/// object has the tag named, as the trait says, and keeps nothing of the upload (or of the
+/// temporary file of the join) in any of those outcomes but the one that leaves it open.
+#[tokio::test]
+async fn the_directory_backend_completes_an_upload_over_the_object_with_the_tag() {
+    let dir = TestDir::under(env!("CARGO_TARGET_TMPDIR"), "multipart-dir-match");
+    let backend = DirBackend::open(dir.path()).unwrap();
+    conditional_contract(&backend).await;
+    let uploads = std::fs::read_dir(dir.path().join(".uploads")).unwrap();
+    assert_eq!(uploads.count(), 0);
+    let mut names = Vec::new();
+    for entry in std::fs::read_dir(dir.path()).unwrap() {
+        names.push(entry.unwrap().file_name().to_string_lossy().into_owned());
+    }
+    names.sort();
+    assert_eq!(names, [".uploads", "k"]);
+}
+
+/// Asserts that a backend that does not override the conditional completion answers
+/// `Unsupported` naming the call, and that the fault injector counts the conditional completion
+/// as a completion and fails it as it fails any, passing it on otherwise.
+#[tokio::test]
+async fn the_conditional_completion_is_unsupported_by_default_and_counted_by_the_injector() {
+    let refused = Plain.complete_upload_if_match("k", "u", &[], "tag").await;
+    assert_unsupported(&refused.unwrap_err(), "complete_upload_if_match");
+
+    let rig = Rig::new();
+    let cold = rig.cold.clone();
+    let old = cold.put_tagged("k", body("old")).await.unwrap();
+    let id = cold.create_upload("k").await.unwrap();
+    let tag = part(cold.as_ref(), "k", &id, 1, &["new"]).await.unwrap();
+    let parts = [(1, tag)];
+    cold.fail_next(Op::CompleteUpload, 1);
+    let failed = cold.complete_upload_if_match("k", &id, &parts, &old).await;
+    assert!(failed.unwrap_err().is_unavailable());
+    assert_eq!(text(rig.cold_mem.as_ref(), "k").await, "old");
+    cold.complete_upload_if_match("k", &id, &parts, &old)
+        .await
+        .unwrap();
+    assert_eq!(text(rig.cold_mem.as_ref(), "k").await, "new");
+    assert_eq!(cold.calls(Op::CompleteUpload), 2);
+}
+
+/// Asserts that the read cache forgets the key when a conditional completion replaces it: a read
+/// after it gives the new bytes and not the cached old ones, and a refused completion leaves the
+/// cached bytes in place.
+#[tokio::test]
+async fn the_cache_forgets_a_key_that_a_conditional_completion_replaced() {
+    let cache = CachedStore::new(Arc::new(MemoryBackend::new()), 1 << 20);
+    let old = cache.put_tagged("k", body("old")).await.unwrap();
+    assert_eq!(read(&cache, "k").await, "old");
+    assert_eq!(cache.cached_bytes(), 3);
+    let id = cache.create_upload("k").await.unwrap();
+    let one = part(&cache, "k", &id, 1, &["fresh"]).await.unwrap();
+    let parts = [(1, one)];
+    let refused = cache
+        .complete_upload_if_match("k", &id, &parts, "nope")
+        .await;
+    assert_eq!(refused, Err(Error::PreconditionFailed("k".to_owned())));
+    assert_eq!(cache.cached_bytes(), 3);
+    cache
+        .complete_upload_if_match("k", &id, &parts, &old)
+        .await
+        .unwrap();
+    assert_eq!(read(&cache, "k").await, "fresh");
 }
 
 /// Asserts that a part whose upload is aborted while the part arrives is refused by the in-memory

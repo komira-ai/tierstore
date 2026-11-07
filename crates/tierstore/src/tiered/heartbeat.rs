@@ -30,7 +30,7 @@ use super::peers::Peers;
 use super::{Inner, Proxy, locked};
 use crate::deadline::millis;
 use crate::lease::new_nonce;
-use crate::registration::{PROTO, Registration};
+use crate::registration::{PROTO, PROTO_MARKS, Registration};
 use crate::{Backend, Bounded, Clock, Deadline, Error, ProxyConfig, Sleeper};
 
 /// Where the heartbeat of a proxy is.
@@ -49,6 +49,9 @@ enum State {
 /// What a proxy keeps of its heartbeat.
 pub(super) struct Heartbeat {
     pub(super) deadline: Arc<Deadline>,
+    /// The `proto` of every body of the registration: [`PROTO_MARKS`] for a proxy that reads
+    /// markers (it has a marks bucket), [`PROTO`] for one that does not.
+    pub(super) proto: u32,
     /// Random at the start of the process, in every body of its registration.
     pub(super) boot: String,
     /// The other processes of this proxy id the registration found at open names, which the
@@ -64,6 +67,11 @@ impl Heartbeat {
                 Arc::clone(&config.mono),
                 config.deadline_margin,
             )),
+            proto: if config.marks.is_some() {
+                PROTO_MARKS
+            } else {
+                PROTO
+            },
             boot: new_nonce(),
             peers: Mutex::new(Peers::new(beats_in(config.departure, config.heartbeat))),
             state: Mutex::new(State::Idle),
@@ -72,13 +80,13 @@ impl Heartbeat {
 
     /// The registration of a process that has not beaten yet.
     pub(super) fn first_body(&self) -> Bytes {
-        let (proto, boot, hb) = (PROTO, self.boot.clone(), 0);
-        let peers = Some(locked(&self.peers).names());
         Registration {
-            proto,
-            boot,
-            hb,
-            peers,
+            proto: self.proto,
+            boot: self.boot.clone(),
+            hb: 0,
+            peers: Some(locked(&self.peers).names()),
+            phase: None,
+            writes_in_flight: None,
         }
         .encode()
     }
@@ -111,6 +119,7 @@ impl Heartbeat {
 struct Beater {
     hot: Bounded,
     key: String,
+    proto: u32,
     boot: String,
     mono: Arc<dyn Clock>,
     deadline: Arc<Deadline>,
@@ -168,10 +177,12 @@ impl Beater {
     /// The body of beat `count`.
     fn body(&self, count: u64) -> Bytes {
         Registration {
-            proto: PROTO,
+            proto: self.proto,
             boot: self.boot.clone(),
             hb: count,
             peers: Some(self.peers.names()),
+            phase: None,
+            writes_in_flight: None,
         }
         .encode()
     }
@@ -236,6 +247,7 @@ impl Proxy {
         let beater = Beater {
             hot: Bounded::new(Arc::clone(&inner.hot), config.heartbeat),
             key: crate::journal::proxy_key(&config.proxy_id),
+            proto: inner.heartbeat.proto,
             boot: inner.heartbeat.boot.clone(),
             mono: Arc::clone(&config.mono),
             deadline: Arc::clone(&inner.heartbeat.deadline),

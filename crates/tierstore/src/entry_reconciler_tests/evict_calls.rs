@@ -78,9 +78,10 @@ async fn a_key_this_leader_copied_is_evicted_by_two_heads_one_create_and_two_del
 }
 
 /// Asserts what an eviction of a key that must be compared asks of each tier, in order: the hot
-/// tier is headed once, the entry is looked up once before any bytes are read, then both objects
-/// are read once, the entry is created, the hot object is deleted on its tag and the entry is
-/// removed; the cold tier is headed, read, and headed under the entry.
+/// tier is headed once, the entry is looked up once before any bytes are read (one tagged get,
+/// which answers not found), then both objects are read once, the entry is created, the hot
+/// object is deleted on its tag and the entry is removed; the cold tier is headed, read, and
+/// headed under the entry.
 #[tokio::test]
 async fn a_key_that_is_compared_is_looked_up_for_an_entry_once_before_its_bytes_are_read() {
     let rig = Rig::new();
@@ -92,7 +93,7 @@ async fn a_key_that_is_compared_is_looked_up_for_an_entry_once_before_its_bytes_
     let hot_calls = on_key(hot.call_log(), "a");
     let want = [
         (Op::Head, "object"),
-        (Op::Head, "entry"),
+        (Op::Get, "entry"),
         (Op::Get, "object"),
         (Op::Put, "entry"),
         (Op::DeleteIfMatch, "object"),

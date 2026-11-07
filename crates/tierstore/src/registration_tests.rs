@@ -1,5 +1,6 @@
 //! The body of a registration: what is written, what reads back, and what reads as none.
 
+use crate::format::FormatPhase;
 use crate::registration::{PROTO, Registration};
 
 fn registration(hb: u64) -> Registration {
@@ -8,6 +9,8 @@ fn registration(hb: u64) -> Registration {
         boot: "b".into(),
         hb,
         peers: None,
+        phase: None,
+        writes_in_flight: None,
     }
 }
 
@@ -102,4 +105,52 @@ fn an_older_or_damaged_body_reads_as_none() {
     ] {
         assert_eq!(Registration::decode(body), None, "{body:?}");
     }
+}
+
+/// Asserts that the two optional fields are written when they are set, after `hb` and in the order
+/// `phase`, `writes_in_flight`, and that the body reads back as it was written.
+#[test]
+fn the_phase_and_the_writes_in_flight_are_written_after_hb_and_read_back() {
+    let set = Registration {
+        phase: Some(FormatPhase::ActiveMarks),
+        writes_in_flight: Some(3),
+        ..registration(2)
+    };
+    let body = set.encode();
+    let want = br#"{"proto":2,"boot":"b","hb":2,"phase":"active-marks","writes_in_flight":3}"#;
+    assert_eq!(&body[..], want);
+    assert_eq!(Registration::decode(&body), Some(set));
+}
+
+/// Asserts that the body of a registration that sets neither field is the bytes of the release
+/// before the fields, and that those bytes, and a body with only one of the two, read with the
+/// other as none: an older proxy's registration is read by this release, and the registration of a
+/// proxy that sets one field is not taken for one that sets both.
+#[test]
+fn a_registration_without_the_optional_fields_is_unchanged_and_reads_with_none() {
+    let old = br#"{"proto":2,"boot":"b","hb":5}"#;
+    assert_eq!(&registration(5).encode()[..], old);
+    let read = Registration::decode(old).unwrap();
+    assert_eq!((read.phase, read.writes_in_flight), (None, None));
+
+    let only_phase = br#"{"proto":3,"boot":"b","hb":5,"phase":"drained"}"#;
+    let read = Registration::decode(only_phase).unwrap();
+    assert_eq!(
+        (read.phase, read.writes_in_flight),
+        (Some(FormatPhase::Drained), None)
+    );
+    let only_writes = br#"{"proto":3,"boot":"b","hb":5,"writes_in_flight":0}"#;
+    let read = Registration::decode(only_writes).unwrap();
+    assert_eq!((read.phase, read.writes_in_flight), (None, Some(0)));
+}
+
+/// Asserts that a phase word this release does not know reads as the phase `Unknown` and does not
+/// make the registration unreadable, so a proxy of a later release that reports a later phase is
+/// still seen to beat.
+#[test]
+fn a_phase_this_release_does_not_know_reads_as_unknown() {
+    let body = br#"{"proto":4,"boot":"b","hb":1,"phase":"someday","writes_in_flight":1}"#;
+    let read = Registration::decode(body).unwrap();
+    assert_eq!(read.phase, Some(FormatPhase::Unknown));
+    assert!(read.hb > 0);
 }

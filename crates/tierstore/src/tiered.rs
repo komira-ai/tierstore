@@ -12,10 +12,14 @@ use tokio::time::Instant;
 use crate::journal::{USAGE_KEY, Usage, is_reserved, proxy_key};
 use crate::metrics::{Counters, Read, Tier};
 use crate::{
-    Backend, ByteRange, Clock, Entries, Error, Listed, Meta, MonotonicClock, OpenUpload, Opened,
-    PartBody, ReadBody, Sleeper, Span, TokioSleeper, UploadedPart, UploadsAfter, Window,
+    Backend, ByteRange, Clock, Entries, Error, Listed, Markers, Meta, MonotonicClock, OpenUpload,
+    Opened, PartBody, PutAnswer, ReadBody, Sleeper, Span, TokioSleeper, UploadedPart, UploadsAfter,
+    Window,
 };
 
+mod cold_land;
+#[cfg(test)]
+mod cold_land_tests;
 mod copy_back;
 #[cfg(test)]
 mod copy_back_tests;
@@ -32,10 +36,37 @@ mod heartbeat;
 #[cfg(test)]
 mod heartbeat_tests;
 mod listing;
+mod lock_hold;
+#[cfg(test)]
+mod lock_hold_tests;
+mod mark_listing;
+mod mark_reads;
+#[cfg(test)]
+mod mark_rig;
+mod marked_put;
+#[cfg(test)]
+mod marked_put_crash_tests;
+#[cfg(test)]
+mod marked_put_rig;
+#[cfg(test)]
+mod marked_put_tests;
+#[cfg(test)]
+mod marked_put_wave_tests;
+mod marks_delete;
+#[cfg(test)]
+mod marks_delete_failure_tests;
+#[cfg(test)]
+pub(crate) mod marks_delete_tests;
+mod overwrite;
+#[cfg(test)]
+mod overwrite_tests;
 mod pause;
 mod peers;
 #[cfg(test)]
 mod peers_tests;
+mod plain_put;
+#[cfg(test)]
+mod plain_put_tests;
 mod put;
 mod read;
 #[cfg(test)]
@@ -47,6 +78,11 @@ mod uploads_tests;
 pub use entry_delete::DeleteWait;
 pub use entry_retry::StepRetry;
 use heartbeat::Heartbeat;
+pub use mark_reads::MarkReads;
+use mark_reads::Missed;
+pub use marked_put::MarkedPutConfig;
+pub use overwrite::{PlainPut, PutBody, PutClaim};
+use pause::WriteRoute;
 
 /// The settings of a [`Proxy`].
 #[derive(Clone)]
@@ -99,6 +135,29 @@ pub struct ProxyConfig {
     pub entry_rounds: u32,
     /// How a delete that met a copy in flight waits for the reconciler to release the entry.
     pub delete_wait: DeleteWait,
+    /// The marks bucket of the hot store (`hot_store.marks_bucket`): the second handle on the hot
+    /// store, for the markers of `docs/design/put-without-lock.md`. A read that misses the hot
+    /// tier, and a listing, read it in the phases of the format from which a marker can be in force
+    /// (see `mark_reads.rs`); the proxy writes to it (a put, a delete) only while the format
+    /// object says `active-marks` and records [`ProxyConfig::marks_name`]. `None` is a proxy with no marks
+    /// bucket (every proxy of a library user, and a server over a `dir` hot tier, whose directory
+    /// of markers is opened by the release that uses it): it reads no marker, makes no write under
+    /// that phase, and its registration says `proto` 2.
+    pub marks: Option<Arc<dyn Backend>>,
+    /// The name of the marks bucket `marks` is the handle on, as the format object records it
+    /// (`marks_bucket`): a proxy whose name is not the recorded one makes no write under
+    /// `active-marks`, so that two names are never in use at once. `None` is no name, which is
+    /// never the recorded one.
+    pub marks_name: Option<String>,
+    /// The waits and limits of the puts made on markers, and the waits and the lease of the calls
+    /// on markers (`marks_put.markers`).
+    pub marks_put: MarkedPutConfig,
+    /// The settings of the reads and listings that read markers.
+    pub mark_reads: MarkReads,
+    /// Whether a plain put that the hot store refuses with `Full` before it took a byte lands in
+    /// the cold tier under a lock (`emergency_cold_landing`, 5.5 of the design, residual R6');
+    /// false answers it 503. Only under the format `active-marks`.
+    pub emergency_cold_landing: bool,
     /// How often and how fast the last step of a put or a delete (the landing of a put, the
     /// hand-over of a delete, the removal of an entry) is tried again when the hot tier fails it
     /// ambiguously.
@@ -131,6 +190,11 @@ impl ProxyConfig {
             deadline_margin: Duration::from_secs(10),
             entry_rounds: 3,
             delete_wait: DeleteWait::new(),
+            marks: None,
+            marks_name: None,
+            marks_put: MarkedPutConfig::new(),
+            mark_reads: MarkReads::default(),
+            emergency_cold_landing: false,
             step_retry: StepRetry::new(),
             sleeper: Arc::new(TokioSleeper),
         }
@@ -198,7 +262,9 @@ fn refuse_reserved(key: &str) -> Result<(), Error> {
 /// `drain` or `drained`, a put, a delete, and the create, part upload and completion of a
 /// multipart upload are answered with [`Error::Unavailable`] (a 503 at the S3 front), and reads
 /// are served. The format is read at most every [`ProxyConfig::format_refresh`], and at each
-/// heartbeat.
+/// heartbeat. Under `{"epoch": 3, "phase": "active-marks", "marks_bucket": ..}`, with the bucket
+/// of [`ProxyConfig::marks_bucket`], a delete is made on markers and every other write is still
+/// answered with [`Error::Unavailable`] (the puts of that protocol are not built yet).
 ///
 /// - **Get** reads the hot tier, else the cold tier, and reads no entry. An object it read from
 ///   the cold tier is not copied by the read: when the hot tier is below the critical mark the
@@ -210,6 +276,13 @@ fn refuse_reserved(key: &str) -> Result<(), Error> {
 ///   range alone and asks for no copy-back: the memory of a read is its range, whatever the size of
 ///   the object. A failed ask does not fail the read.
 /// - **Head** reads the hot tier, else the cold tier, and asks for no copy-back.
+/// - **Markers.** Where the format object names a phase from which markers can be in force (see
+///   `mark_reads.rs`) and the proxy has a marks bucket ([`ProxyConfig::marks`]), a get or a head the
+///   hot tier misses reads the marker of the key in parallel with the cold read, and a marker that
+///   says the key is deleted makes the answer the hot tier's second read or not found, whatever the
+///   cold tier has; a listing reads a page of marker names beside the hot page and drops the keys
+///   only the cold tier lists that a marker says are deleted (`mark_listing.rs`). Under the entry
+///   protocol's `active` phase, or with no format object, none of this is done.
 /// - **Put** is refused if the key exists in either tier, is written to the hot tier create-only,
 ///   and is acknowledged when its entry says so (`entry_put.rs`): the entry is created
 ///   `(PUT, HELD)` before the object is written, so that no other put, delete or copy of the key
@@ -217,6 +290,12 @@ fn refuse_reserved(key: &str) -> Result<(), Error> {
 ///   A put whose entry cannot be made or kept is refused with [`Error::Unavailable`] and a client
 ///   retries it; a key that exists is [`Error::AlreadyExists`]. A cold tier that cannot be asked
 ///   whether it holds the key is [`Error::Unavailable`]: a new key is not accepted while it is down.
+/// - **Plain put** ([`Proxy::put_plain`]) and **landing in cold** ([`Proxy::land_in_cold`]) are
+///   not [`Backend`] calls and are made only under the format `active-marks` (`marked_put.rs`): a
+///   plain put of a key the hot tier holds replaces the object under a lock on the key's marker,
+///   and a put the hot tier refused with [`Error::Full`] lands in the cold tier if
+///   [`ProxyConfig::emergency_cold_landing`] is set. Under any other format they are answered
+///   [`Error::Unavailable`] without a request.
 /// - **Streamed put** ([`Backend::put_stream`]) is a put whose body arrives as chunks and is
 ///   never held whole: the chunks go on to the hot tier's own streamed put (or the cold tier's,
 ///   where the hot tier is full), which makes the object visible, create-only, only after the
@@ -229,7 +308,10 @@ fn refuse_reserved(key: &str) -> Result<(), Error> {
 /// - **Delete** (`entry_delete.rs`) deletes the object from the cold tier at once and amends,
 ///   claims or creates the entry of the key; a delete that meets a copy in flight (an entry the
 ///   reconciler holds or has sealed) waits for the reconciler's release ([`DeleteWait`]) and is
-///   answered 503 at the request deadline.
+///   answered 503 at the request deadline. Under the format phase `active-marks` (and only
+///   there) a delete is made on the marker of the key instead (`marks_delete.rs`): a lock on the
+///   marker, a hot HEAD, `gone` written into the lock, a plain hot DELETE, and the answer, with no
+///   request to the cold tier, which the leader deletes from later.
 /// - **List** is the union of both tiers without duplicates (the hot tier's entry where both
 ///   hold the key), in key order, without the keys under the reserved prefixes `_journal/`,
 ///   `_tiering/` and `_entries/` (whichever tier holds them). [`Backend::list_page`] pages through
@@ -254,6 +336,16 @@ fn refuse_reserved(key: &str) -> Result<(), Error> {
 ///   lists the open uploads of both tiers (the cold tier's uploads of a key first): the proxy keeps
 ///   no state of an upload. The reconciler aborts an upload of the hot tier that has stood open
 ///   for `abandoned_upload_after`.
+///
+/// **Markers.** While the format object says `{"phase": "active-marks"}` and records the marks
+/// bucket this proxy has ([`ProxyConfig::marks_name`]), the puts (a put, a streamed put, a
+/// presigned put, and the parts and the completion of a multipart upload) are made on markers
+/// instead of entries, by the fast path of `docs/design/put-without-lock.md` section 5.1
+/// (`marked_put.rs`): a hot, a cold and a marker read together, then the object (to the hot tier
+/// alone, at any level) and a `DIRTY` marker together. A key that exists is [`Error::AlreadyExists`]
+/// after one more look at its marker, which makes it [`Error::Conflict`] while a delete holds or
+/// has just removed the key. A delete, and a put by a proxy with another marks bucket or none, is
+/// answered [`Error::Unavailable`], as for any format that is not active. Reads are as they are.
 ///
 /// **Capacity.** The proxy reads the usage that the reconciler publishes (`_tiering/usage`,
 /// at most every [`ProxyConfig::usage_refresh`]); a usage that is missing, unreadable or
@@ -296,6 +388,10 @@ struct Inner {
     format_gate: Arc<AsyncMutex<()>>,
     counters: Counters,
     heartbeat: Heartbeat,
+    /// The calls on the markers of keys, as this proxy: present when `config.marks` is.
+    markers: Option<Arc<Markers>>,
+    /// The copy-backs this proxy asked for lately.
+    wants: mark_reads::Wants,
 }
 
 impl Proxy {
@@ -305,7 +401,8 @@ impl Proxy {
     /// rewrites at each heartbeat.
     ///
     /// # Errors
-    /// [`Error::Other`] if the proxy id is empty or has a `/`; the error of the hot tier if it
+    /// [`Error::Other`] if the proxy id is empty or has a `/`, or if the settings of the puts on
+    /// markers do not hold together (nothing is written then); the error of the hot tier if it
     /// fails the write of the registration.
     pub async fn open(
         hot: Arc<dyn Backend>,
@@ -316,6 +413,7 @@ impl Proxy {
         if id.is_empty() || id.contains('/') {
             return Err(Error::Other(format!("invalid proxy id {id:?}")));
         }
+        let markers = Self::markers(&config)?;
         let heartbeat = Heartbeat::new(&config);
         heartbeat.register(hot.as_ref(), &proxy_key(id)).await?;
         #[cfg(feature = "server")]
@@ -332,10 +430,31 @@ impl Proxy {
             format_gate: Arc::default(),
             counters: Counters::default(),
             heartbeat,
+            markers,
+            wants: mark_reads::Wants::default(),
         };
         Ok(Self {
             inner: Arc::new(inner),
         })
+    }
+
+    /// The calls on the markers of `config.marks`, if it has any, after the settings of the puts
+    /// made on markers were checked.
+    fn markers(config: &ProxyConfig) -> Result<Option<Arc<Markers>>, Error> {
+        config.marks_put.check().map_err(Error::Other)?;
+        let Some(marks) = &config.marks else {
+            return Ok(None);
+        };
+        let markers = Markers::new(
+            Arc::clone(marks),
+            config.proxy_id.as_str(),
+            config.marks_put.markers.clone(),
+            Arc::clone(&config.mono),
+            Arc::clone(&config.sleeper),
+        );
+        markers
+            .map(|markers| Some(Arc::new(markers)))
+            .map_err(|error| Error::Other(format!("invalid marker settings: {error}")))
     }
 
     /// How long the usage object (`_tiering/usage`) has stood unchanged, by the monotonic clock
@@ -465,9 +584,7 @@ impl Inner {
         refuse_reserved(key)?;
         match self.hot.get(key, range).await {
             Ok(body) => {
-                self.counters.hit(Tier::Hot, Read::Get);
-                self.counters.bytes_read(Tier::Hot, body.len());
-                self.counters.served(Tier::Hot, body.len());
+                self.count_hot_get(&body);
                 return Ok(body);
             }
             Err(Error::NotFound(_)) => self.counters.miss(Tier::Hot, Read::Get),
@@ -476,23 +593,34 @@ impl Inner {
                 return Err(error);
             }
         }
-        if let Some(part) = range {
+        let cold = move || async move { Ok(self.cold_get(key, range).await?.0) };
+        let hot_again = move || self.hot.get(key, range);
+        let (body, copy_back) = match self.miss_read(key, cold, hot_again).await? {
+            Missed::Hot(body) => {
+                self.count_hot_get(&body);
+                return Ok(body);
+            }
+            Missed::Cold { found, copy_back } => (found, copy_back),
+        };
+        if range.is_some() {
             // A read of a part asks the cold tier for that part alone and copies nothing back: a
             // whole read per chunk of a long blob would be quadratic, and would hold the whole of
             // the object in memory for a read of a part of it.
-            let (body, _) = self.cold_get(key, Some(part)).await?;
             self.note_critical().await;
-            self.counters.served(Tier::Cold, body.len());
-            return Ok(body);
-        }
-        let (body, _) = self.cold_get(key, None).await?;
-        // The level is looked at once the cold tier has the object: a key that neither tier has
-        // needs none, and the level can cost a read of the usage object.
-        if !self.note_critical().await && self.entries_active().await {
-            self.ask_copy_back(key);
+        } else if !self.note_critical().await {
+            // The level is looked at once the cold tier has the object: a key that neither tier
+            // has needs none, and the level can cost a read of the usage object.
+            self.ask_copy_back_of(copy_back, key, body.len() as u64)
+                .await;
         }
         self.counters.served(Tier::Cold, body.len());
         Ok(body)
+    }
+
+    fn count_hot_get(&self, body: &Bytes) {
+        self.counters.hit(Tier::Hot, Read::Get);
+        self.counters.bytes_read(Tier::Hot, body.len());
+        self.counters.served(Tier::Hot, body.len());
     }
 
     async fn head_object(&self, key: &str) -> Result<Meta, Error> {
@@ -508,6 +636,19 @@ impl Inner {
                 return Err(error);
             }
         }
+        let cold = || self.cold_head(key);
+        let hot_again = || self.hot.head(key);
+        match self.miss_read(key, cold, hot_again).await? {
+            Missed::Hot(meta) => {
+                self.counters.hit(Tier::Hot, Read::Head);
+                Ok(meta)
+            }
+            Missed::Cold { found, .. } => Ok(found),
+        }
+    }
+
+    /// A head of the cold tier, counted as a hit, a miss or an error of it.
+    async fn cold_head(&self, key: &str) -> Result<Meta, Error> {
         match self.cold.head(key).await {
             Ok(meta) => {
                 self.counters.hit(Tier::Cold, Read::Head);
@@ -524,11 +665,14 @@ impl Inner {
         }
     }
 
-    /// Deletes the object on the entry of its key (see `entry_delete.rs`): refused with
-    /// [`Error::Unavailable`] while writes are paused or the format is not active.
-    async fn delete_object(&self, key: &str) -> Result<(), Error> {
-        self.admit_write(key).await?;
-        self.delete_on_entry(key).await
+    /// Deletes the object on the entry of its key (see `entry_delete.rs`) under the format
+    /// `active`, and on the marker of its key (see `marks_delete.rs`) under `active-marks`: refused
+    /// with [`Error::Unavailable`] while writes are paused or the format is neither.
+    async fn delete_object(self: &Arc<Self>, key: &str) -> Result<(), Error> {
+        match self.route_write(key).await? {
+            WriteRoute::Entries => self.delete_on_entry(key).await,
+            WriteRoute::Marks(markers) => self.delete_on_marker(Arc::clone(markers), key).await,
+        }
     }
 }
 
@@ -552,7 +696,26 @@ impl Backend for Proxy {
         len: Option<u64>,
         body: PartBody<'_>,
     ) -> Result<(), Error> {
-        self.inner.put_object_stream(key, len, body, false).await
+        self.inner
+            .put_object_stream(key, len, body, false)
+            .await
+            .map(drop)
+    }
+
+    /// The put of [`put_stream`](Backend::put_stream) (or of
+    /// [`put_stream_hot_only`](Backend::put_stream_hot_only) for `hot_only`) that gives the tag the
+    /// hot tier's answer names, when the object was written to the hot tier and the tier says it
+    /// (an S3 hot tier does, in the `ETag` of its answer to the PUT, which is the tag a HEAD of
+    /// the object gives while it is there). An object that went to the cold tier gives `None`:
+    /// the tag of a HEAD changes when the object is copied the other way.
+    async fn put_stream_answered(
+        &self,
+        key: &str,
+        len: Option<u64>,
+        body: PartBody<'_>,
+        hot_only: bool,
+    ) -> Result<Option<PutAnswer>, Error> {
+        self.inner.put_object_stream(key, len, body, hot_only).await
     }
 
     async fn put_stream_hot_only(
@@ -561,7 +724,10 @@ impl Backend for Proxy {
         len: Option<u64>,
         body: PartBody<'_>,
     ) -> Result<(), Error> {
-        self.inner.put_object_stream(key, len, body, true).await
+        self.inner
+            .put_object_stream(key, len, body, true)
+            .await
+            .map(drop)
     }
 
     /// The proxy keeps objects immutable: it never replaces one.

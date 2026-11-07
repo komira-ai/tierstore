@@ -222,3 +222,24 @@ fn the_keys_are_known_to_the_table() {
         assert!(fields.contains(&key), "{key}");
     }
 }
+
+/// Asserts that `revalidate_after` is never when the file leaves it out (a hit is served from the
+/// disk until the entry is evicted, as before the key), is the duration the file gives, and may
+/// be `0s` (check every hit); that it is a field of the table; and that a value that is not a
+/// duration is refused naming the key and not showing the value.
+#[test]
+fn revalidate_after_is_never_unless_the_file_gives_a_duration() {
+    assert_eq!(cache_of("").cache.revalidate_after, None);
+    assert_eq!(
+        CacheConfig::new("/c", 1000, Vec::new()).revalidate_after,
+        None
+    );
+    let hour = cache_of("revalidate_after = \"1h\"").cache.revalidate_after;
+    assert_eq!(hour, Some(Duration::from_secs(3600)));
+    let every = cache_of("revalidate_after = \"0s\"").cache.revalidate_after;
+    assert_eq!(every, Some(Duration::ZERO));
+    assert!(fields_of::<LocalCacheTable>().contains(&"revalidate_after"));
+    let why = refusal("revalidate_after = \"sometimes\"");
+    assert!(why.contains("revalidate_after"), "{why}");
+    assert!(!why.contains("sometimes"), "{why}");
+}

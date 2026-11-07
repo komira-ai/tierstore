@@ -78,10 +78,22 @@ fn each_failure_of_the_store_has_its_status_and_code() {
         None,
     );
     check(
+        Error::Conflict(k()),
+        409,
+        "ConditionalRequestConflict",
+        None,
+    );
+    check(
         Error::Full(k()),
         503,
         "SlowDown",
         Some("The store has no room for this request."),
+    );
+    check(
+        Error::SlowDown(k()),
+        503,
+        "SlowDown",
+        Some("The key is being changed by another request; retry."),
     );
     check(Error::Reserved(k()), 403, "AccessDenied", None);
     check(Error::InvalidKey(k()), 400, "KeyTooLongError", None);
@@ -104,6 +116,22 @@ fn each_failure_of_the_store_has_its_status_and_code() {
         "InternalError",
         Some("We encountered an internal error."),
     );
+}
+
+/// Asserts that a busy key is answered as a throttle is, with `Retry-After: 1`, and that the text
+/// the client reads does not name the key or the reason, which go to the log.
+#[test]
+fn a_busy_key_is_answered_slowdown_with_retry_after() {
+    let failed = S3Error::from(Error::SlowDown(
+        "a lock outlasted lock_wait for k".to_owned(),
+    ));
+    assert_eq!(
+        failed.detail(),
+        Some("busy: a lock outlasted lock_wait for k")
+    );
+    let sent = failed.into_answer("/b/k", "ID");
+    assert_eq!(sent.status(), StatusCode::SERVICE_UNAVAILABLE);
+    assert_eq!(sent.headers()["retry-after"], "1");
 }
 
 /// Asserts that a request whose body stalled is `RequestTimeout` (400) with `Connection: close`
