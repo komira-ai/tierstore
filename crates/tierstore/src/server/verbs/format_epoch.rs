@@ -6,6 +6,8 @@
 //! tierstore format-epoch --drain    --hot <tier> [--departed <id>]... [--apply]
 //! tierstore format-epoch --cancel   --hot <tier> [--apply]
 //! tierstore format-epoch --activate --hot <tier> [--departed <id>]... [--apply]
+//! tierstore format-epoch --activate-marks  --hot <tier> [--marks-bucket <name>] --old-release-fenced [--apply]
+//! tierstore format-epoch --restore-entries --hot <tier> [--marks-bucket <name>] [--apply]
 //! ```
 //!
 //! - `--check` reads the format object, the registrations and the open entries, prints them, and
@@ -25,8 +27,13 @@
 //!   creates the object, if the store has no journal object of the releases before the entries
 //!   (`_journal/`): a store that has one is drained by the bridge release first.
 //!
-//! Without `--apply`, the three that write check, print what they would write and write nothing;
+//! - `--activate-marks`, `--restore-entries` and `--drain` over `active-marks` move the store onto
+//!   the markers of `docs/design/put-without-lock.md` and back; they are the module [`marks`].
+//!
+//! Without `--apply`, the ones that write check, print what they would write and write nothing;
 //! `--drain` still waits if the format already says `drain`, since waiting changes nothing.
+
+mod marks;
 
 use std::ffi::OsString;
 use std::io::Write;
@@ -35,6 +42,7 @@ use std::time::Duration;
 
 use clap::{Args, Parser};
 
+use self::marks::Marks;
 use super::registrations::{self, Registration, check_departed, check_protocol};
 use super::{Hot, VerbError, block_on, finished, parse_duration, parsed};
 use crate::format::{Format, FormatPhase, format_body, read_format_tagged};
@@ -52,9 +60,6 @@ const ACTIVE_PROTO: u32 = 2;
 /// What to say when the format object is not the one that was read.
 const CHANGED: &str =
     "the format object changed while it was being written; run --check and try again";
-
-/// What to say of the phase `active-marks`, which this release reads and does not leave.
-const MARKS: &str = "the format object says active-marks, a phase this release does not leave; use the tool of the release that wrote it";
 
 /// What to say of a phase that this release does not know.
 const UNKNOWN: &str = "the format object has a phase this release does not know; use the tool of the release that wrote it";
@@ -74,6 +79,15 @@ pub(super) struct Cli {
     /// write.
     #[arg(long)]
     apply: bool,
+    /// The marks bucket of the hot store, `hot_store.marks_bucket`, for an `s3:<bucket>` hot tier:
+    /// `<hot bucket>-marks` unless named. The verbs of the markers use it, and
+    /// `--activate-marks` records it in the format object.
+    #[arg(long, value_name = "NAME")]
+    marks_bucket: Option<String>,
+    /// Say that the credential the release before the markers uses has been rotated, so that a
+    /// process of it that starts after `--activate-marks` cannot reach the store.
+    #[arg(long)]
+    old_release_fenced: bool,
     /// The id of a registration whose process the operator has checked is not running; repeat the
     /// flag or separate ids by commas.
     #[arg(long, value_name = "ID", value_delimiter = ',')]
@@ -106,6 +120,12 @@ struct Action {
     /// Write the active epoch over `drained`.
     #[arg(long)]
     activate: bool,
+    /// Write `active-marks` over `drained`: writes are made on markers from then.
+    #[arg(long)]
+    activate_marks: bool,
+    /// Write the active epoch 2 over `drained` once the markers are done: the way back.
+    #[arg(long)]
+    restore_entries: bool,
 }
 
 /// What the format object is, with the content tag it was read at.
@@ -117,6 +137,8 @@ struct Work<'a> {
     hot: &'a dyn Backend,
     clock: &'a dyn Clock,
     sleeper: &'a dyn Sleeper,
+    /// The marks bucket of the hot store; none for a hot tier that has no marks bucket.
+    marks: Option<Marks<'a>>,
 }
 
 /// The verb: `args` are the program name, `format-epoch` and the flags. Returns the exit status:
@@ -132,13 +154,21 @@ pub(super) fn run(
         Ok(cli) => cli,
         Err(status) => return status,
     };
-    let result = match cli.hot.open() {
-        Ok(hot) => block_on(act(
+    let opened = cli
+        .hot
+        .open()
+        .and_then(|hot| Ok((hot, cli.hot.open_marks(cli.marks_bucket.as_deref())?)));
+    let result = match opened {
+        Ok((hot, marks)) => block_on(act(
             Work {
                 cli: &cli,
                 hot: hot.as_ref(),
                 clock,
                 sleeper,
+                marks: marks.as_ref().map(|(name, store)| Marks {
+                    store: store.as_ref(),
+                    name,
+                }),
             },
             out,
         )),
@@ -155,6 +185,10 @@ async fn act(work: Work<'_>, out: &mut dyn Write) -> Result<(), VerbError> {
         drain(&work, out).await
     } else if action.cancel {
         cancel(&work, out).await
+    } else if action.activate_marks {
+        marks::activate(&work, out).await
+    } else if action.restore_entries {
+        marks::restore(&work, out).await
     } else {
         activate(&work, out).await
     }
@@ -192,12 +226,17 @@ fn drain_gate(
     registrations: &[Registration],
     departed: &[String],
 ) -> Result<(), VerbError> {
-    match phase_name(found) {
-        "unknown" => return Err(VerbError::Refused(UNKNOWN.to_owned())),
-        "active-marks" => return Err(VerbError::Refused(MARKS.to_owned())),
-        _ => {}
+    if phase_name(found) == "unknown" {
+        return Err(VerbError::Refused(UNKNOWN.to_owned()));
     }
     check_departed(registrations, departed, "drain")
+}
+
+/// Says why the wait goes on, and waits one poll.
+async fn still_waiting(work: &Work<'_>, out: &mut dyn Write, why: &str) -> Result<(), VerbError> {
+    writeln!(out, "still waiting: {why}")?;
+    work.sleeper.sleep(work.cli.poll).await;
+    Ok(())
 }
 
 async fn check(work: &Work<'_>, out: &mut dyn Write) -> Result<(), VerbError> {
@@ -224,15 +263,23 @@ async fn check(work: &Work<'_>, out: &mut dyn Write) -> Result<(), VerbError> {
 
 async fn drain(work: &Work<'_>, out: &mut dyn Write) -> Result<(), VerbError> {
     let found = current(work.hot).await?;
-    match found.as_ref().map(|(format, _)| format.phase) {
-        Some(FormatPhase::Drained) => {
+    match found.as_ref() {
+        Some((format, _)) if format.phase == FormatPhase::Drained => {
             writeln!(
                 out,
                 "the format is already drained: writes are paused and every journal is applied"
             )?;
             return Ok(());
         }
-        Some(FormatPhase::Drain) => writeln!(out, "the format already says drain")?,
+        Some((format, _)) if format.rolls_back_marks() => {
+            return marks::resume_rollback(work, format, out).await;
+        }
+        Some((format, tag)) if format.phase == FormatPhase::ActiveMarks => {
+            return marks::begin_rollback(work, format, tag, out).await;
+        }
+        Some((format, _)) if format.phase == FormatPhase::Drain => {
+            writeln!(out, "the format already says drain")?;
+        }
         _ => {
             let registrations = registrations_of(work).await?;
             drain_gate(&found, &registrations, &work.cli.departed)?;
@@ -299,11 +346,8 @@ async fn wait(work: &Work<'_>, out: &mut dyn Write) -> Result<(), VerbError> {
             }
         }
         let registered = count(work.hot, PROXIES_PREFIX).await?;
-        writeln!(
-            out,
-            "still waiting: the format says drain; {registered} registrations"
-        )?;
-        work.sleeper.sleep(work.cli.poll).await;
+        let why = format!("the format says drain; {registered} registrations");
+        still_waiting(work, out, &why).await?;
     }
 }
 
@@ -319,11 +363,21 @@ async fn cancel(work: &Work<'_>, out: &mut dyn Write) -> Result<(), VerbError> {
             phase_name(&found)
         )));
     };
-    let restored = format.epoch.map(|epoch| Format {
-        phase: FormatPhase::Active,
-        epoch: Some(epoch),
-        marks_bucket: None,
-    });
+    // The pause of a rollback from `active-marks` is put back as `active-marks`: `active` at its
+    // epoch 3 would make the proxies write on entries beside the markers.
+    let restored = if format.rolls_back_marks() {
+        Some(Format {
+            phase: FormatPhase::ActiveMarks,
+            epoch: format.epoch,
+            marks_bucket: format.marks_bucket.clone(),
+        })
+    } else {
+        format.epoch.map(|epoch| Format {
+            phase: FormatPhase::Active,
+            epoch: Some(epoch),
+            marks_bucket: None,
+        })
+    };
     if !work.cli.apply {
         let what = match &restored {
             Some(_) => "write the active format back",

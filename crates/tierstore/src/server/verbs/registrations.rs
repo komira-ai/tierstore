@@ -14,7 +14,9 @@ use std::time::Duration;
 use serde::Deserialize;
 
 use super::VerbError;
+use crate::format::FormatPhase;
 use crate::journal::PROXIES_PREFIX;
+use crate::registration::PROTO_MARKS;
 use crate::{Backend, Error};
 
 /// What a registration says of its process.
@@ -38,19 +40,53 @@ pub(super) struct Registration {
     pub(super) class: Class,
     /// Milliseconds since the object was last written.
     pub(super) age_ms: u64,
+    /// The phase of the format object the proxy says it acts on, if its body says one.
+    pub(super) phase: Option<FormatPhase>,
+    /// The number of writes the proxy says it has begun and not ended, if its body says one.
+    pub(super) writes_in_flight: Option<u64>,
 }
 
 impl Registration {
     /// One line for the operator.
     pub(super) fn describe(&self) -> String {
         let seconds = self.age_ms / 1000;
+        let reports = self.reports();
         match self.class {
-            Class::Live { proto } => format!("live, protocol {proto}, written {seconds}s ago"),
+            Class::Live { proto } => {
+                format!("live, protocol {proto}{reports}, written {seconds}s ago")
+            }
             Class::Silent { proto } => {
-                format!("silent, protocol {proto}, written {seconds}s ago")
+                format!("silent, protocol {proto}{reports}, written {seconds}s ago")
             }
             Class::Unlabelled => format!("unlabelled, no heartbeat, written {seconds}s ago"),
         }
+    }
+
+    /// What the body says of the phase and the writes, as the end of a line: nothing for a body
+    /// that says neither.
+    fn reports(&self) -> String {
+        let phase = self
+            .phase
+            .map(|phase| format!(", phase {}", phase_word(phase)));
+        let writes = self
+            .writes_in_flight
+            .map(|writes| format!(", {writes} writes in flight"));
+        format!(
+            "{}{}",
+            phase.unwrap_or_default(),
+            writes.unwrap_or_default()
+        )
+    }
+}
+
+/// The word of `phase` in the format object, for the operator.
+pub(super) fn phase_word(phase: FormatPhase) -> &'static str {
+    match phase {
+        FormatPhase::Drain => "drain",
+        FormatPhase::Drained => "drained",
+        FormatPhase::Active => "active",
+        FormatPhase::ActiveMarks => "active-marks",
+        FormatPhase::Unknown => "unknown",
     }
 }
 
@@ -58,6 +94,8 @@ impl Registration {
 #[derive(Deserialize)]
 struct Beat {
     proto: Option<u32>,
+    phase: Option<FormatPhase>,
+    writes_in_flight: Option<u64>,
 }
 
 /// Every registration in the hot tier, in the order of the ids, classified at the time `now`
@@ -80,9 +118,8 @@ pub(super) async fn read(
             Err(error) => return Err(error),
         };
         let age_ms = now.saturating_sub(object.modified);
-        let proto = serde_json::from_slice::<Beat>(&body)
-            .ok()
-            .and_then(|beat| beat.proto);
+        let beat = serde_json::from_slice::<Beat>(&body).ok();
+        let proto = beat.as_ref().and_then(|beat| beat.proto);
         let class = match proto {
             Some(proto) if age_ms < fresh_ms => Class::Live { proto },
             Some(proto) => Class::Silent { proto },
@@ -96,6 +133,8 @@ pub(super) async fn read(
             id: id.to_owned(),
             class,
             age_ms,
+            phase: beat.as_ref().and_then(|beat| beat.phase),
+            writes_in_flight: beat.and_then(|beat| beat.writes_in_flight),
         });
     }
     Ok(found)
@@ -165,6 +204,48 @@ pub(super) fn check_protocol(
         "refusing to activate: registrations below protocol {minimum}: {}",
         behind.join(", ")
     )))
+}
+
+/// What stops the live registrations that read markers from being at rest under a pause: for each
+/// live registration of protocol 3 or later, why its proxy may still write on markers or has not
+/// said that it does not. A registration of an earlier protocol makes no marker write, and one
+/// that is not live is for [`check_departed`]. Empty when every such proxy says that it acts on
+/// `drain` or `drained` and has no write in flight.
+pub(super) fn not_at_rest(registrations: &[Registration]) -> Vec<String> {
+    let mut why = Vec::new();
+    for found in registrations {
+        if !matches!(found.class, Class::Live { proto } if proto >= PROTO_MARKS) {
+            continue;
+        }
+        let id = &found.id;
+        match found.phase {
+            None => why.push(format!("{id} reports no phase")),
+            Some(FormatPhase::Drain | FormatPhase::Drained) => {}
+            Some(phase) => why.push(format!("{id} acts on {}", phase_word(phase))),
+        }
+        match found.writes_in_flight {
+            None => why.push(format!("{id} reports no count of writes in flight")),
+            Some(0) => {}
+            Some(writes) => why.push(format!("{id} has {writes} writes in flight")),
+        }
+    }
+    why
+}
+
+/// What stops the live registrations from having seen `drained`, for the activation: for each
+/// live registration (the protocol is checked by [`check_protocol`]), why its proxy has not yet
+/// said that it acts on `drained`. A proxy that acts on any other phase may still skip the marker
+/// on a hot miss (`docs/design/put-without-lock.md`, 8.2, step 2).
+pub(super) fn not_drained(registrations: &[Registration]) -> Vec<String> {
+    registrations
+        .iter()
+        .filter(|found| matches!(found.class, Class::Live { .. }))
+        .filter(|found| found.phase != Some(FormatPhase::Drained))
+        .map(|found| match found.phase {
+            None => format!("{} reports no phase", found.id),
+            Some(phase) => format!("{} acts on {}", found.id, phase_word(phase)),
+        })
+        .collect()
 }
 
 #[cfg(test)]
