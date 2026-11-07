@@ -1,6 +1,7 @@
 //! The keys only `[hot_store]` has, which `[cold_store]` refuses.
 
 use super::config::{ConfigError, TierTable, refuse};
+use super::config_entry::refuse_marks_keys;
 
 /// Refuses the keys only `[hot_store]` has, in `cold`.
 pub(super) fn refuse_hot_keys(cold: &TierTable) -> Result<(), ConfigError> {
@@ -55,6 +56,10 @@ pub(super) fn refuse_hot_keys(cold: &TierTable) -> Result<(), ConfigError> {
         ("heartbeat", cold.heartbeat.is_some()),
         ("departure", cold.departure.is_some()),
         ("held_ttl", cold.held_ttl.is_some()),
+        (
+            "emergency_cold_landing",
+            cold.emergency_cold_landing.is_some(),
+        ),
         ("step_attempts", cold.step_attempts.is_some()),
         ("step_retry_min", cold.step_retry_min.is_some()),
         ("step_retry_max", cold.step_retry_max.is_some()),
@@ -79,5 +84,6 @@ pub(super) fn refuse_hot_keys(cold: &TierTable) -> Result<(), ConfigError> {
         ("lock_retry", cold.lock_retry.is_some()),
         ("first_beat_poll", cold.first_beat_poll.is_some()),
     ];
-    refuse("cold_store", "only [hot_store] has it", &cold_has)
+    refuse("cold_store", "only [hot_store] has it", &cold_has)?;
+    refuse_marks_keys(cold)
 }

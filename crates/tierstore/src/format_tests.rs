@@ -3,7 +3,9 @@
 use bytes::Bytes;
 
 use crate::faulty::{FaultyBackend, Op};
-use crate::format::{Format, FormatPhase, format_body, read_format, read_format_tagged};
+use crate::format::{
+    Format, FormatPhase, format_body, marks_run_in, read_format, read_format_tagged,
+};
 use crate::journal::FORMAT_KEY;
 use crate::{Backend, Error, MemoryBackend};
 
@@ -126,6 +128,68 @@ fn only_active_with_epoch_2_or_more_runs_entries() {
     }
 }
 
+/// Asserts that only the phase `active-marks`, at epoch 3 or later and with the bucket named, makes
+/// a proxy write on markers: not a record without the epoch or the name, not `active` at any epoch,
+/// not a pause, not a phase it does not know.
+#[test]
+fn only_active_marks_runs_marks() {
+    let cases = [
+        (r#"{"phase":"active-marks"}"#, None),
+        (
+            r#"{"epoch":3,"marks_bucket":"b","phase":"active-marks"}"#,
+            Some("b"),
+        ),
+        (r#"{"epoch":3,"phase":"active"}"#, None),
+        (r#"{"phase":"drain"}"#, None),
+        (r#"{"phase":"someday"}"#, None),
+    ];
+    for (json, runs) in cases {
+        let format = decoded(json);
+        assert_eq!(format.runs_marks(), runs, "{json}");
+    }
+}
+
+/// Asserts that a leader's pass over markers is active only for the phase `active-marks` at epoch 3
+/// or later with the record naming the bucket the pass was given, and that `marks_run_in` reads it
+/// from the hot tier: no object, another phase, a phase this release does not know, no epoch, an
+/// epoch below 3, no name and another name are false, and a hot tier that fails the read is that
+/// error.
+#[tokio::test]
+async fn only_active_marks_naming_the_passes_bucket_runs_the_markers() {
+    for (json, runs) in [
+        (
+            r#"{"epoch":3,"phase":"active-marks","marks_bucket":"m"}"#,
+            true,
+        ),
+        (
+            r#"{"epoch":4,"phase":"active-marks","marks_bucket":"m"}"#,
+            true,
+        ),
+        (r#"{"phase":"active-marks","marks_bucket":"m"}"#, false),
+        (
+            r#"{"epoch":2,"phase":"active-marks","marks_bucket":"m"}"#,
+            false,
+        ),
+        (r#"{"epoch":3,"phase":"active-marks"}"#, false),
+        (
+            r#"{"epoch":3,"phase":"active-marks","marks_bucket":"n"}"#,
+            false,
+        ),
+        (r#"{"epoch":3,"phase":"active","marks_bucket":"m"}"#, false),
+        (r#"{"phase":"drained","marks_bucket":"m"}"#, false),
+        (r#"{"phase":"someday","marks_bucket":"m"}"#, false),
+    ] {
+        let hot = MemoryBackend::new();
+        hot.put(FORMAT_KEY, Bytes::from(json)).await.unwrap();
+        assert_eq!(marks_run_in(&hot, "m").await, Ok(runs), "{json}");
+    }
+    let empty = MemoryBackend::new();
+    assert_eq!(marks_run_in(&empty, "m").await, Ok(false));
+    let corrupt = MemoryBackend::new();
+    corrupt.put(FORMAT_KEY, Bytes::from("{")).await.unwrap();
+    assert!(marks_run_in(&corrupt, "m").await.is_err());
+}
+
 /// The fixture of the format object of the phase `active-marks`.
 const ACTIVE_MARKS: &str =
     include_str!("../tests/stored_formats/fixtures/format_active_marks.json");
@@ -173,4 +237,26 @@ fn only_the_hyphenated_word_is_the_phase_active_marks() {
         let format = decoded(&format!(r#"{{"phase":"{word}"}}"#));
         assert_eq!(format.phase, FormatPhase::Unknown, "{word}");
     }
+}
+
+/// Asserts when a record opens writes on markers and to which bucket: the phase `active-marks`, an
+/// epoch of 3 or more, and a name for the bucket, all three; not the phase `active`, not an epoch
+/// below 3 or none, not a record without a name.
+#[test]
+fn a_record_opens_writes_on_markers_only_with_the_phase_the_epoch_and_the_bucket() {
+    let opens = decoded(r#"{"phase":"active-marks","epoch":3,"marks_bucket":"m"}"#);
+    assert_eq!(opens.runs_marks(), Some("m"));
+    let later = decoded(r#"{"phase":"active-marks","epoch":4,"marks_bucket":"m"}"#);
+    assert_eq!(later.runs_marks(), Some("m"));
+    let shut = [
+        r#"{"phase":"active-marks","epoch":2,"marks_bucket":"m"}"#,
+        r#"{"phase":"active-marks","marks_bucket":"m"}"#,
+        r#"{"phase":"active-marks","epoch":3}"#,
+        r#"{"phase":"active","epoch":3,"marks_bucket":"m"}"#,
+    ];
+    for json in shut {
+        assert_eq!(decoded(json).runs_marks(), None, "{json}");
+    }
+    assert!(!opens.runs_entries());
+    assert!(!opens.pauses_writes());
 }

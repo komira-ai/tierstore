@@ -94,8 +94,9 @@
 //!
 //! - A key is the client's [`ObjectKey`], which follows S3's rules (`objstore_s3::key_rules`):
 //!   any text of 1 to 1024 bytes, space, `+`, `%`, `&`, `<`, `?`, `#` and non-ASCII text
-//!   included, escaped by the client; a key or a prefix the rules refuse (over 1024 bytes, or a
-//!   `.` or `..` segment) is [`Error::InvalidKey`] (S3 answer 400 `KeyTooLongError`).
+//!   included, escaped by the client; a key or a prefix the rules refuse (empty, or over 1024
+//!   bytes) is [`Error::InvalidKey`] (S3 answer 400 `KeyTooLongError`), and a key with a `.` or
+//!   `..` segment is [`Error::InvalidSegment`] (400 `InvalidArgument`, naming the rule).
 //! - S3 answers 416 to a range that starts at or past the end of the object, and a range of
 //!   length zero is no request at all. The trait wants no bytes for a range starting at the
 //!   end and an [`Error::Other`] for one starting past it, so a HEAD decides both, and finds
@@ -141,7 +142,7 @@ use futures::future;
 use futures::stream;
 use objstore_s3::s3::{S3Store, StampedObject};
 use objstore_s3::{
-    BodyStream, KeyPrefix, ListToken, ObjectKey, ObjectStore, ObjectStoreError, PageSize,
+    BodyStream, KeyError, KeyPrefix, ListToken, ObjectKey, ObjectStore, ObjectStoreError, PageSize,
 };
 use tokio::sync::mpsc;
 
@@ -334,10 +335,14 @@ fn client_range(range: ByteRange) -> Option<objstore_s3::ByteRange> {
     objstore_s3::ByteRange::new(range.offset(), len)
 }
 
-/// The key as the client names it, or [`Error::InvalidKey`] if S3's rules refuse it (see
-/// `objstore_s3::key_rules`: empty, over 1024 bytes, or a `.` or `..` segment).
+/// The key as the client names it, or the error for the rule that refuses it (see
+/// `objstore_s3::key_rules`): [`Error::InvalidSegment`] for a `.` or `..` segment, otherwise
+/// [`Error::InvalidKey`] (empty, or over 1024 bytes).
 fn object_key(key: &str) -> Result<ObjectKey, Error> {
-    ObjectKey::new(key).map_err(|_| Error::InvalidKey(key.to_owned()))
+    ObjectKey::new(key).map_err(|refused| match refused {
+        KeyError::Segment(_) => Error::InvalidSegment(key.to_owned()),
+        KeyError::Empty | KeyError::TooLong(_) => Error::InvalidKey(key.to_owned()),
+    })
 }
 
 /// An object of a listing of the client as one of this crate.
@@ -533,6 +538,11 @@ impl Backend for S3Backend {
     /// S3 takes no request of unknown length: given none, the backend holds the body first.
     fn needs_length(&self) -> bool {
         true
+    }
+
+    /// The `server.s3_single_put_max` of the store, kept to S3's limit for one PUT.
+    fn single_put_max(&self) -> Option<u64> {
+        Some(self.store.single_put_max())
     }
 
     async fn put(&self, key: &str, body: Bytes) -> Result<(), Error> {
@@ -894,105 +904,5 @@ impl Backend for S3Backend {
 }
 
 #[cfg(test)]
-mod tests {
-    use std::sync::Arc;
-
-    use super::*;
-
-    fn service(status: u16) -> ObjectStoreError {
-        ObjectStoreError::Service {
-            status,
-            code: "Code".to_owned(),
-            message: "message".to_owned(),
-        }
-    }
-
-    /// Asserts that the number of chunks given is how many wait for the request that sends them:
-    /// the feeder takes that many chunks of the body and one more (in hand, blocked) while the
-    /// request has taken none, for one, four and nine.
-    #[tokio::test]
-    async fn the_chunks_waiting_given_are_how_many_chunks_wait_for_the_request() {
-        use std::sync::atomic::{AtomicUsize, Ordering};
-
-        for (waiting, held) in [(1_usize, 1_usize), (4, 4), (9, 9)] {
-            let pulled = Arc::new(AtomicUsize::new(0));
-            let counted = Arc::clone(&pulled);
-            let chunks = stream::iter((0..30).map(|_| Ok(Bytes::from_static(b"x"))));
-            let body: PartBody<'_> = chunks
-                .inspect(move |_| {
-                    counted.fetch_add(1, Ordering::SeqCst);
-                })
-                .boxed();
-            let request = |source| async move {
-                for _ in 0..50 {
-                    tokio::task::yield_now().await;
-                }
-                drop(source);
-                Ok::<usize, ObjectStoreError>(pulled.load(Ordering::SeqCst))
-            };
-            let seen = flowing(body, waiting, request).await;
-            assert_eq!(seen.unwrap().unwrap(), held + 1, "{waiting}");
-        }
-    }
-
-    /// Asserts that a backend made with `with_chunks_waiting(0)` holds one chunk, not none: the
-    /// channel of the bodies is never made with a depth of zero, which it refuses.
-    #[test]
-    fn a_depth_of_zero_chunks_waiting_is_one() {
-        let config = S3Config {
-            endpoint: "http://127.0.0.1:9".to_owned(),
-            region: "us-east-1".to_owned(),
-            bucket: "tierstore-test".to_owned(),
-            credentials: Credentials::new("k", "s"),
-            capabilities: Capabilities::default(),
-            connect_timeout: std::time::Duration::from_secs(1),
-            request_timeout: std::time::Duration::from_secs(1),
-            min_body_rate: None,
-        };
-        let backend = S3Backend::new(config).unwrap();
-        assert_eq!(backend.chunks_waiting, CHUNKS_WAITING);
-        assert_eq!(backend.with_chunks_waiting(0).chunks_waiting, 1);
-    }
-
-    /// Asserts that each answer of the client is the error of this crate the trait documents
-    /// for it: not found, already exists and a failed precondition name the key, a request
-    /// that did not complete and the statuses 408, 429 and every 5xx but 501 and 507 are
-    /// unavailable, 507 is full, and any other answer (501 among them) is an other error that
-    /// says what it was.
-    #[test]
-    fn answers_of_the_client_are_the_errors_the_trait_documents() {
-        let key = ObjectKey::new("k").unwrap();
-        let name = "k".to_owned();
-        let found = map_error(ObjectStoreError::NotFound(key.clone()), "k");
-        assert_eq!(found, Error::NotFound(name.clone()));
-        let exists = map_error(ObjectStoreError::AlreadyExists(key), "k");
-        assert_eq!(exists, Error::AlreadyExists(name.clone()));
-        let failed = map_error(service(412), "k");
-        assert_eq!(failed, Error::PreconditionFailed(name));
-
-        let reset = Arc::new(std::io::Error::other("reset"));
-        let down = map_error(ObjectStoreError::Transport(reset), "k");
-        assert!(down.is_unavailable(), "{down}");
-        for status in [408, 429, 500, 502, 503, 504, 505, 506, 508, 599] {
-            let down = map_error(service(status), "k");
-            assert!(down.is_unavailable(), "{status}");
-        }
-        let full = map_error(service(507), "k");
-        assert!(matches!(full, Error::Full(_)), "{full}");
-        for status in [400, 403, 409, 501] {
-            let other = map_error(service(status), "k");
-            assert!(matches!(other, Error::Other(_)), "{status}: {other}");
-        }
-        // Two writers racing a create-only put: the store does not say who won, so the answer
-        // is retryable; a 409 of any other code is still an other error.
-        let racing = ObjectStoreError::Service {
-            status: 409,
-            code: "ConditionalRequestConflict".to_owned(),
-            message: "conflict".to_owned(),
-        };
-        let conflict = map_error(racing, "k");
-        assert!(conflict.is_unavailable(), "{conflict}");
-        let odd = map_error(ObjectStoreError::Protocol("odd".to_owned()), "k");
-        assert!(odd.to_string().contains("odd"), "{odd}");
-    }
-}
+#[path = "s3_tests.rs"]
+mod tests;

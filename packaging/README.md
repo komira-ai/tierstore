@@ -154,7 +154,7 @@ start):
 ```
 
 A URL is good for one `PUT` of a key that starts with the prefix (after the path is decoded: no
-`..`, no `.` segment, no control character, never `_journal/`, `_tiering/` or `_entries/`), with an
+`..` or `.` segment, no character XML 1.0 forbids, never `_journal/`, `_tiering/` or `_entries/`), with an
 `X-Amz-Expires` of at most the smaller of `max_expires_secs` and `server.presign_max_expires` (default
 15m), and a body of at most `max_object_bytes` (5 GiB at most, the S3 single-PUT limit; each key file chooses its own), checked on
 `Content-Length` and on the bytes received (and held to `server.max_request_bytes`, 256 MiB by default, too: a key with a larger
@@ -222,9 +222,11 @@ keys: two keys with one id are refused with exit status 2 (the command line does
 `ServerConfig` built in code, as a library user does, is not checked for distinct ids by the server).
 
 A call is allowed only for a key (or, for a listing, a `prefix` parameter) that starts with a prefix
-of the list the call needs, after the path is percent-decoded and with no `..`, no `.` segment and
-no control character in it. A key must be longer than the prefix: the prefix itself is not an object.
-A key or a listing `prefix` that has `..` anywhere in it, even inside a prefix, is refused.
+of the list the call needs, after the path is percent-decoded and with no `..` or `.` segment (a path
+segment, text between `/`, that is exactly that) and no character XML 1.0 forbids (U+0000-U+0008, U+000B, U+000C,
+U+000E-U+001F, U+FFFE, U+FFFF) in it. A key must be longer than the prefix: the prefix itself is not an object.
+A key or a listing `prefix` with such a segment or character is refused, even inside a prefix; a name that only has dots
+in it (`a..b`, `.hidden`) is a name, and tab, line feed, carriage return, U+007F and the C1 controls are allowed.
 
 | call | list | allowed |
 |---|---|---|

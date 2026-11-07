@@ -494,6 +494,10 @@ pub(super) struct Built {
     pub(super) entry: EntryTuning,
     pub(super) hot: Arc<dyn Backend>,
     pub(super) cold: Arc<dyn Backend>,
+    /// The marks bucket of the hot store and its name (the bucket of an `s3` tier, `memory` for a
+    /// memory tier), if the node has one: the leader works the markers under the format
+    /// `active-marks` that names it.
+    pub(super) marks: Option<(String, Arc<dyn Backend>)>,
     pub(super) oci: Option<OciSetup>,
 }
 
@@ -579,7 +583,8 @@ pub(super) fn open_tier(
 }
 
 /// The second handle on the hot store, for its marks bucket: the tier `cli.hot_marks` names, with
-/// the endpoint, region and credentials of the hot tier. Nothing in this release calls it. A bucket
+/// the endpoint, region and credentials of the hot tier. The proxy calls it only while the format
+/// object says `active-marks` and records [`marks_name`]. A bucket
 /// of an S3 store is reached when it is first used, so this asks the store nothing; a `dir` hot
 /// tier has none yet (`None`): opening its directory beside the hot one makes it, and a unit with
 /// `ProtectSystem=strict` and the hot directory alone in `ReadWritePaths=` could not, so the
@@ -594,6 +599,15 @@ pub(super) fn open_marks(cli: &Cli, timeout: Duration) -> Result<Option<Arc<dyn 
     let spec = &cli.hot_marks;
     let marks = open_tier("--hot", spec, &cli.hot_s3(), timeout, &cli.s3_client)?;
     Ok(Some(marks))
+}
+
+/// The name the format record gives the marks bucket that `spec` (`cli.hot_marks`) opens: the bucket
+/// of `s3:<bucket>`, and `memory` for a memory tier's. A `dir` tier has no handle yet, so no name.
+pub(super) fn marks_name(spec: &str) -> Option<String> {
+    let bucket = spec.strip_prefix("s3:");
+    bucket
+        .or_else(|| (spec == "memory").then_some(spec))
+        .map(str::to_owned)
 }
 
 /// Refuses `false` as the conditional-delete setting of a `memory` or `dir:<path>` tier, which
@@ -732,7 +746,8 @@ pub(super) fn build(cli: &Cli) -> Result<Built, Error> {
     let cold = open_tier("--cold", &cli.cold, &cli.cold_s3(), timeout, &cli.s3_client)?;
     let marks = open_marks(cli, timeout)?;
     let mut proxy = ProxyConfig::new(&cli.proxy_id, cli.hot_bytes, Arc::clone(&clock));
-    proxy.marks = marks;
+    proxy.marks.clone_from(&marks);
+    proxy.marks_name = marks_name(&cli.hot_marks);
     proxy.critical = share(cli.critical);
     let tuning = &cli.hot_tuning;
     proxy.usage_refresh = tuning.usage_refresh;
@@ -757,6 +772,9 @@ pub(super) fn build(cli: &Cli) -> Result<Built, Error> {
         entry: cli.entry_tuning,
         hot,
         cold,
+        marks: marks
+            .zip(marks_name(&cli.hot_marks))
+            .map(|(store, name)| (name, store)),
         oci,
     })
 }

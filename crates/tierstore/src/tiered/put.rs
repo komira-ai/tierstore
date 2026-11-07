@@ -9,6 +9,7 @@ use futures::stream;
 use tokio::sync::Mutex as AsyncMutex;
 
 use super::Inner;
+use super::pause::WriteRoute;
 use crate::{Error, PartBody, PutAnswer};
 use futures::StreamExt;
 
@@ -71,8 +72,10 @@ impl<'a> Offered<'a> {
 impl Inner {
     /// Puts a held body on the entry of `key`.
     pub(super) async fn put_object(&self, key: &str, body: Bytes) -> Result<(), Error> {
-        self.admit_write(key).await?;
-        self.put_held_on_entry(key, body).await
+        match self.route_write(key).await? {
+            WriteRoute::Entries => self.put_held_on_entry(key, body).await,
+            WriteRoute::Marks(markers) => self.put_held_marked(markers, key, body).await,
+        }
     }
 
     /// As `put_object`, for a body that arrives as chunks: it goes to the hot tier, or to the
@@ -85,7 +88,9 @@ impl Inner {
         body: PartBody<'_>,
         hot_only: bool,
     ) -> Result<Option<PutAnswer>, Error> {
-        self.admit_write(key).await?;
-        self.put_streamed_on_entry(key, len, body, hot_only).await
+        match self.route_write(key).await? {
+            WriteRoute::Entries => self.put_streamed_on_entry(key, len, body, hot_only).await,
+            WriteRoute::Marks(markers) => self.put_streamed_marked(markers, key, len, body).await,
+        }
     }
 }

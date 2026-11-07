@@ -12,11 +12,14 @@ use tokio::time::Instant;
 use crate::journal::{USAGE_KEY, Usage, is_reserved, proxy_key};
 use crate::metrics::{Counters, Read, Tier};
 use crate::{
-    Backend, ByteRange, Clock, Entries, Error, Listed, Markers, MarkersConfig, Meta,
-    MonotonicClock, OpenUpload, Opened, PartBody, PutAnswer, ReadBody, Sleeper, Span, TokioSleeper,
-    UploadedPart, UploadsAfter, Window,
+    Backend, ByteRange, Clock, Entries, Error, Listed, Markers, Meta, MonotonicClock, OpenUpload,
+    Opened, PartBody, PutAnswer, ReadBody, Sleeper, Span, TokioSleeper, UploadedPart, UploadsAfter,
+    Window,
 };
 
+mod cold_land;
+#[cfg(test)]
+mod cold_land_tests;
 mod copy_back;
 #[cfg(test)]
 mod copy_back_tests;
@@ -33,11 +36,34 @@ mod heartbeat;
 #[cfg(test)]
 mod heartbeat_tests;
 mod listing;
+mod lock_hold;
+#[cfg(test)]
+mod lock_hold_tests;
 mod mark_listing;
 mod mark_reads;
 #[cfg(test)]
 mod mark_rig;
+mod marked_put;
+#[cfg(test)]
+mod marked_put_crash_tests;
+#[cfg(test)]
+mod marked_put_rig;
+#[cfg(test)]
+mod marked_put_tests;
+#[cfg(test)]
+mod marked_put_wave_tests;
+mod marks_delete;
+#[cfg(test)]
+mod marks_delete_failure_tests;
+#[cfg(test)]
+pub(crate) mod marks_delete_tests;
+mod overwrite;
+#[cfg(test)]
+mod overwrite_tests;
 mod pause;
+mod plain_put;
+#[cfg(test)]
+mod plain_put_tests;
 mod put;
 mod read;
 mod uploads;
@@ -49,6 +75,9 @@ pub use entry_retry::StepRetry;
 use heartbeat::Heartbeat;
 pub use mark_reads::MarkReads;
 use mark_reads::Missed;
+pub use marked_put::MarkedPutConfig;
+pub use overwrite::{PlainPut, PutBody, PutClaim};
+use pause::WriteRoute;
 
 /// The settings of a [`Proxy`].
 #[derive(Clone)]
@@ -102,18 +131,28 @@ pub struct ProxyConfig {
     /// How a delete that met a copy in flight waits for the reconciler to release the entry.
     pub delete_wait: DeleteWait,
     /// The marks bucket of the hot store (`hot_store.marks_bucket`): the second handle on the hot
-    /// store, for the markers of `docs/design/put-without-lock.md`. This release reads it, on a
-    /// hot miss and in a listing, in the phases of the format from which a marker can be in force
-    /// (see `mark_reads.rs`); it writes to it only a `WANT` marker, in the phase `active-marks`.
-    /// `None` is a proxy with no marks bucket (every proxy of a library user, and a server over a
-    /// `dir` hot tier, whose directory of markers is opened by the release that uses it): it reads
-    /// no marker, and its registration says `proto` 2.
+    /// store, for the markers of `docs/design/put-without-lock.md`. A read that misses the hot
+    /// tier, and a listing, read it in the phases of the format from which a marker can be in force
+    /// (see `mark_reads.rs`); the proxy writes to it (a put, a delete) only while the format
+    /// object says `active-marks` and records [`ProxyConfig::marks_name`]. `None` is a proxy with no marks
+    /// bucket (every proxy of a library user, and a server over a `dir` hot tier, whose directory
+    /// of markers is opened by the release that uses it): it reads no marker, makes no write under
+    /// that phase, and its registration says `proto` 2.
     pub marks: Option<Arc<dyn Backend>>,
-    /// The waits and the lease of the calls on markers. This release only reads markers, so it
-    /// uses none of them; the config of the server sets them in the release that waits for a lock.
-    pub markers: MarkersConfig,
+    /// The name of the marks bucket `marks` is the handle on, as the format object records it
+    /// (`marks_bucket`): a proxy whose name is not the recorded one makes no write under
+    /// `active-marks`, so that two names are never in use at once. `None` is no name, which is
+    /// never the recorded one.
+    pub marks_name: Option<String>,
+    /// The waits and limits of the puts made on markers, and the waits and the lease of the calls
+    /// on markers (`marks_put.markers`).
+    pub marks_put: MarkedPutConfig,
     /// The settings of the reads and listings that read markers.
     pub mark_reads: MarkReads,
+    /// Whether a plain put that the hot store refuses with `Full` before it took a byte lands in
+    /// the cold tier under a lock (`emergency_cold_landing`, 5.5 of the design, residual R6');
+    /// false answers it 503. Only under the format `active-marks`.
+    pub emergency_cold_landing: bool,
     /// How often and how fast the last step of a put or a delete (the landing of a put, the
     /// hand-over of a delete, the removal of an entry) is tried again when the hot tier fails it
     /// ambiguously.
@@ -147,8 +186,10 @@ impl ProxyConfig {
             entry_rounds: 3,
             delete_wait: DeleteWait::new(),
             marks: None,
-            markers: MarkersConfig::default(),
+            marks_name: None,
+            marks_put: MarkedPutConfig::new(),
             mark_reads: MarkReads::default(),
+            emergency_cold_landing: false,
             step_retry: StepRetry::new(),
             sleeper: Arc::new(TokioSleeper),
         }
@@ -216,7 +257,9 @@ fn refuse_reserved(key: &str) -> Result<(), Error> {
 /// `drain` or `drained`, a put, a delete, and the create, part upload and completion of a
 /// multipart upload are answered with [`Error::Unavailable`] (a 503 at the S3 front), and reads
 /// are served. The format is read at most every [`ProxyConfig::format_refresh`], and at each
-/// heartbeat.
+/// heartbeat. Under `{"epoch": 3, "phase": "active-marks", "marks_bucket": ..}`, with the bucket
+/// of [`ProxyConfig::marks_bucket`], a delete is made on markers and every other write is still
+/// answered with [`Error::Unavailable`] (the puts of that protocol are not built yet).
 ///
 /// - **Get** reads the hot tier, else the cold tier, and reads no entry. An object it read from
 ///   the cold tier is not copied by the read: when the hot tier is below the critical mark the
@@ -242,6 +285,12 @@ fn refuse_reserved(key: &str) -> Result<(), Error> {
 ///   A put whose entry cannot be made or kept is refused with [`Error::Unavailable`] and a client
 ///   retries it; a key that exists is [`Error::AlreadyExists`]. A cold tier that cannot be asked
 ///   whether it holds the key is [`Error::Unavailable`]: a new key is not accepted while it is down.
+/// - **Plain put** ([`Proxy::put_plain`]) and **landing in cold** ([`Proxy::land_in_cold`]) are
+///   not [`Backend`] calls and are made only under the format `active-marks` (`marked_put.rs`): a
+///   plain put of a key the hot tier holds replaces the object under a lock on the key's marker,
+///   and a put the hot tier refused with [`Error::Full`] lands in the cold tier if
+///   [`ProxyConfig::emergency_cold_landing`] is set. Under any other format they are answered
+///   [`Error::Unavailable`] without a request.
 /// - **Streamed put** ([`Backend::put_stream`]) is a put whose body arrives as chunks and is
 ///   never held whole: the chunks go on to the hot tier's own streamed put (or the cold tier's,
 ///   where the hot tier is full), which makes the object visible, create-only, only after the
@@ -254,7 +303,10 @@ fn refuse_reserved(key: &str) -> Result<(), Error> {
 /// - **Delete** (`entry_delete.rs`) deletes the object from the cold tier at once and amends,
 ///   claims or creates the entry of the key; a delete that meets a copy in flight (an entry the
 ///   reconciler holds or has sealed) waits for the reconciler's release ([`DeleteWait`]) and is
-///   answered 503 at the request deadline.
+///   answered 503 at the request deadline. Under the format phase `active-marks` (and only
+///   there) a delete is made on the marker of the key instead (`marks_delete.rs`): a lock on the
+///   marker, a hot HEAD, `gone` written into the lock, a plain hot DELETE, and the answer, with no
+///   request to the cold tier, which the leader deletes from later.
 /// - **List** is the union of both tiers without duplicates (the hot tier's entry where both
 ///   hold the key), in key order, without the keys under the reserved prefixes `_journal/`,
 ///   `_tiering/` and `_entries/` (whichever tier holds them). [`Backend::list_page`] pages through
@@ -279,6 +331,16 @@ fn refuse_reserved(key: &str) -> Result<(), Error> {
 ///   lists the open uploads of both tiers (the cold tier's uploads of a key first): the proxy keeps
 ///   no state of an upload. The reconciler aborts an upload of the hot tier that has stood open
 ///   for `abandoned_upload_after`.
+///
+/// **Markers.** While the format object says `{"phase": "active-marks"}` and records the marks
+/// bucket this proxy has ([`ProxyConfig::marks_name`]), the puts (a put, a streamed put, a
+/// presigned put, and the parts and the completion of a multipart upload) are made on markers
+/// instead of entries, by the fast path of `docs/design/put-without-lock.md` section 5.1
+/// (`marked_put.rs`): a hot, a cold and a marker read together, then the object (to the hot tier
+/// alone, at any level) and a `DIRTY` marker together. A key that exists is [`Error::AlreadyExists`]
+/// after one more look at its marker, which makes it [`Error::Conflict`] while a delete holds or
+/// has just removed the key. A delete, and a put by a proxy with another marks bucket or none, is
+/// answered [`Error::Unavailable`], as for any format that is not active. Reads are as they are.
 ///
 /// **Capacity.** The proxy reads the usage that the reconciler publishes (`_tiering/usage`,
 /// at most every [`ProxyConfig::usage_refresh`]); a usage that is missing, unreadable or
@@ -321,7 +383,7 @@ struct Inner {
     format_gate: Arc<AsyncMutex<()>>,
     counters: Counters,
     heartbeat: Heartbeat,
-    /// The calls on the markers of this proxy: none if it has no marks bucket.
+    /// The calls on the markers of keys, as this proxy: present when `config.marks` is.
     markers: Option<Arc<Markers>>,
     /// The copy-backs this proxy asked for lately.
     wants: mark_reads::Wants,
@@ -334,7 +396,8 @@ impl Proxy {
     /// rewrites at each heartbeat.
     ///
     /// # Errors
-    /// [`Error::Other`] if the proxy id is empty or has a `/`; the error of the hot tier if it
+    /// [`Error::Other`] if the proxy id is empty or has a `/`, or if the settings of the puts on
+    /// markers do not hold together (nothing is written then); the error of the hot tier if it
     /// fails the write of the registration.
     pub async fn open(
         hot: Arc<dyn Backend>,
@@ -345,22 +408,7 @@ impl Proxy {
         if id.is_empty() || id.contains('/') {
             return Err(Error::Other(format!("invalid proxy id {id:?}")));
         }
-        let markers = config
-            .marks
-            .as_ref()
-            .map(|marks| {
-                let (clock, sleeper) = (Arc::clone(&config.mono), Arc::clone(&config.sleeper));
-                Markers::new(
-                    Arc::clone(marks),
-                    id,
-                    config.markers.clone(),
-                    clock,
-                    sleeper,
-                )
-            })
-            .transpose()
-            .map_err(|error| Error::Other(format!("invalid marker settings: {error}")))?
-            .map(Arc::new);
+        let markers = Self::markers(&config)?;
         let heartbeat = Heartbeat::new(&config);
         heartbeat.register(hot.as_ref(), &proxy_key(id)).await?;
         #[cfg(feature = "server")]
@@ -382,6 +430,25 @@ impl Proxy {
         Ok(Self {
             inner: Arc::new(inner),
         })
+    }
+
+    /// The calls on the markers of `config.marks`, if it has any, after the settings of the puts
+    /// made on markers were checked.
+    fn markers(config: &ProxyConfig) -> Result<Option<Arc<Markers>>, Error> {
+        config.marks_put.check().map_err(Error::Other)?;
+        let Some(marks) = &config.marks else {
+            return Ok(None);
+        };
+        let markers = Markers::new(
+            Arc::clone(marks),
+            config.proxy_id.as_str(),
+            config.marks_put.markers.clone(),
+            Arc::clone(&config.mono),
+            Arc::clone(&config.sleeper),
+        );
+        markers
+            .map(|markers| Some(Arc::new(markers)))
+            .map_err(|error| Error::Other(format!("invalid marker settings: {error}")))
     }
 
     /// How long the usage object (`_tiering/usage`) has stood unchanged, by the monotonic clock
@@ -592,11 +659,14 @@ impl Inner {
         }
     }
 
-    /// Deletes the object on the entry of its key (see `entry_delete.rs`): refused with
-    /// [`Error::Unavailable`] while writes are paused or the format is not active.
-    async fn delete_object(&self, key: &str) -> Result<(), Error> {
-        self.admit_write(key).await?;
-        self.delete_on_entry(key).await
+    /// Deletes the object on the entry of its key (see `entry_delete.rs`) under the format
+    /// `active`, and on the marker of its key (see `marks_delete.rs`) under `active-marks`: refused
+    /// with [`Error::Unavailable`] while writes are paused or the format is neither.
+    async fn delete_object(self: &Arc<Self>, key: &str) -> Result<(), Error> {
+        match self.route_write(key).await? {
+            WriteRoute::Entries => self.delete_on_entry(key).await,
+            WriteRoute::Marks(markers) => self.delete_on_marker(Arc::clone(markers), key).await,
+        }
     }
 }
 
@@ -701,7 +771,8 @@ impl Backend for Proxy {
     /// the object from one tier to the other, so versions are told apart by size alone: the proxy
     /// never replaces an object. Limit: a key that is deleted and put again with a body of the
     /// same size between two HEADs is not seen. A key named by its content (`cas/l/<digest>`) is
-    /// not affected, as its bytes are checked against the digest.
+    /// not affected, as its bytes are checked against the digest. The check of an old hit in the
+    /// local cache (`local_cache.revalidate_after`) does not ask this: it compares the tag as well.
     fn same_version(&self, a: &Meta, b: &Meta) -> bool {
         a.size == b.size
     }

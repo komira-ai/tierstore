@@ -1074,7 +1074,7 @@ dependencies = [
 [[package]]
 name = "hostkeeper-config"
 version = "0.1.0"
-source = "git+https://github.com/komira-ai/hostkeeper?rev=33fa4fb9357ab6ccdbe3c5040eaa5e38a7816a90#33fa4fb9357ab6ccdbe3c5040eaa5e38a7816a90"
+source = "git+https://github.com/komira-ai/hostkeeper?rev=383c5cd6aae6c86d877f8e96d6ba7375ad8e723d#383c5cd6aae6c86d877f8e96d6ba7375ad8e723d"
 dependencies = [
  "libc",
  "serde",
@@ -1084,19 +1084,9 @@ dependencies = [
 ]
 
 [[package]]
-name = "hostkeeper-config"
-version = "0.1.0"
-source = "git+https://github.com/komira-ai/hostkeeper?rev=c3b777cd40e400676c43debeb7e4ae5de848083c#c3b777cd40e400676c43debeb7e4ae5de848083c"
-dependencies = [
- "libc",
- "thiserror",
- "toml",
-]
-
-[[package]]
 name = "hostkeeper-hook"
 version = "0.1.0"
-source = "git+https://github.com/komira-ai/hostkeeper?rev=33fa4fb9357ab6ccdbe3c5040eaa5e38a7816a90#33fa4fb9357ab6ccdbe3c5040eaa5e38a7816a90"
+source = "git+https://github.com/komira-ai/hostkeeper?rev=383c5cd6aae6c86d877f8e96d6ba7375ad8e723d#383c5cd6aae6c86d877f8e96d6ba7375ad8e723d"
 dependencies = [
  "serde",
  "serde_json",
@@ -1107,9 +1097,9 @@ dependencies = [
 [[package]]
 name = "hostkeeper-placed"
 version = "0.1.0"
-source = "git+https://github.com/komira-ai/hostkeeper?rev=c3b777cd40e400676c43debeb7e4ae5de848083c#c3b777cd40e400676c43debeb7e4ae5de848083c"
+source = "git+https://github.com/komira-ai/hostkeeper?rev=383c5cd6aae6c86d877f8e96d6ba7375ad8e723d#383c5cd6aae6c86d877f8e96d6ba7375ad8e723d"
 dependencies = [
- "hostkeeper-config 0.1.0 (git+https://github.com/komira-ai/hostkeeper?rev=c3b777cd40e400676c43debeb7e4ae5de848083c)",
+ "hostkeeper-config",
  "libc",
  "serde",
  "serde_json",
@@ -1119,9 +1109,9 @@ dependencies = [
 [[package]]
 name = "hostkeeper-steps"
 version = "0.1.0"
-source = "git+https://github.com/komira-ai/hostkeeper?rev=33fa4fb9357ab6ccdbe3c5040eaa5e38a7816a90#33fa4fb9357ab6ccdbe3c5040eaa5e38a7816a90"
+source = "git+https://github.com/komira-ai/hostkeeper?rev=383c5cd6aae6c86d877f8e96d6ba7375ad8e723d#383c5cd6aae6c86d877f8e96d6ba7375ad8e723d"
 dependencies = [
- "hostkeeper-config 0.1.0 (git+https://github.com/komira-ai/hostkeeper?rev=33fa4fb9357ab6ccdbe3c5040eaa5e38a7816a90)",
+ "hostkeeper-config",
  "hostkeeper-hook",
  "rustix",
  "serde",
@@ -1133,10 +1123,10 @@ dependencies = [
 [[package]]
 name = "hostkeeper-unpack"
 version = "0.1.0"
-source = "git+https://github.com/komira-ai/hostkeeper?rev=33fa4fb9357ab6ccdbe3c5040eaa5e38a7816a90#33fa4fb9357ab6ccdbe3c5040eaa5e38a7816a90"
+source = "git+https://github.com/komira-ai/hostkeeper?rev=383c5cd6aae6c86d877f8e96d6ba7375ad8e723d#383c5cd6aae6c86d877f8e96d6ba7375ad8e723d"
 dependencies = [
  "hex",
- "hostkeeper-config 0.1.0 (git+https://github.com/komira-ai/hostkeeper?rev=33fa4fb9357ab6ccdbe3c5040eaa5e38a7816a90)",
+ "hostkeeper-config",
  "hostkeeper-hook",
  "hostkeeper-steps",
  "rustix",
@@ -2861,8 +2851,7 @@ dependencies = [
  "clap",
  "flate2",
  "hex",
- "hostkeeper-config 0.1.0 (git+https://github.com/komira-ai/hostkeeper?rev=33fa4fb9357ab6ccdbe3c5040eaa5e38a7816a90)",
- "hostkeeper-config 0.1.0 (git+https://github.com/komira-ai/hostkeeper?rev=c3b777cd40e400676c43debeb7e4ae5de848083c)",
+ "hostkeeper-config",
  "hostkeeper-placed",
  "hostkeeper-unpack",
  "lzma-rs",

@@ -15,6 +15,7 @@ use crate::Error;
 use crate::journal::is_reserved;
 
 use super::Server;
+use super::digests::Algorithm;
 use super::ops::detached;
 use super::reply::{Answer, S3Error, xml_answer};
 use super::request::{BoxError, Check, Reader};
@@ -26,16 +27,6 @@ pub(super) const DELETE_KEYS: usize = 1000;
 /// The most bytes of the document of a call: 1000 keys of the longest key S3 takes (1024 bytes,
 /// each byte at worst the six bytes of `&quot;`), with room for the elements around each.
 pub(super) const DELETE_BODY_LIMIT: usize = DELETE_KEYS * (1024 * 6 + 128);
-
-/// The headers that carry a hash of the document, one of which S3 needs on this call.
-const INTEGRITY: [&str; 6] = [
-    "content-md5",
-    "x-amz-checksum-crc32",
-    "x-amz-checksum-crc32c",
-    "x-amz-checksum-crc64nvme",
-    "x-amz-checksum-sha1",
-    "x-amz-checksum-sha256",
-];
 
 /// What the call says to do with one key of its document, once the keys that cannot be deleted
 /// are told from the rest.
@@ -67,7 +58,9 @@ fn failed(error: Error) -> Outcome {
 
 /// Whether the request has a header that carries a hash of its body.
 fn has_integrity(headers: &HeaderMap) -> bool {
-    INTEGRITY.iter().any(|name| headers.contains_key(*name))
+    Algorithm::ALL
+        .iter()
+        .any(|algorithm| headers.contains_key(algorithm.header()))
 }
 
 fn malformed() -> S3Error {

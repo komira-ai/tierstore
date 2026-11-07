@@ -59,6 +59,23 @@ fn assert_invalid<T: std::fmt::Debug>(result: Result<T, Error>) {
     assert!(matches!(result, Err(Error::InvalidKey(_))), "{result:?}");
 }
 
+/// Asserts that a call failed with `Error::InvalidSegment` for `key`.
+fn assert_segment<T: std::fmt::Debug>(key: &str, result: Result<T, Error>) {
+    assert_eq!(result.unwrap_err(), Error::InvalidSegment(key.to_owned()));
+}
+
+/// Asserts that a call failed because `key` is refused: with `Error::InvalidSegment` for a key
+/// that has `..` in it (the keys of the tests that have a dot segment have this one), with
+/// `Error::InvalidKey` for an empty key or a key over 1024 bytes.
+fn assert_refused<T: std::fmt::Debug>(key: &str, result: Result<T, Error>) {
+    let expected = if key.contains("..") {
+        Error::InvalidSegment(key.to_owned())
+    } else {
+        Error::InvalidKey(key.to_owned())
+    };
+    assert_eq!(result.unwrap_err(), expected);
+}
+
 /// Asserts that a call failed with `Error::Other`.
 fn assert_other<T: std::fmt::Debug>(result: Result<T, Error>) {
     assert!(matches!(result, Err(Error::Other(_))), "{result:?}");
@@ -347,27 +364,27 @@ async fn a_listing_of_more_than_one_s3_page_is_followed_across_pages() {
     assert_eq!(page(&backend, Some("k0001"), 2).await, ["k0002", "k0003"]);
 }
 
-/// Asserts that a key S3's rules refuse (a `..` segment, which the client cannot send; the
-/// empty key; one over 1024 bytes) is `InvalidKey` for every call that takes one, also as a
-/// start-after key, that a prefix over 1024 bytes is too, and that no request reaches the
-/// service. (Replaces the test that pinned `a b` as a key the client cannot name.)
+/// Asserts that a key S3's rules refuse (the empty key, one over 1024 bytes) is `InvalidKey`, and a
+/// key the client cannot send (a `..` segment) is `InvalidSegment`, for every call that takes one,
+/// also as a start-after key; that a prefix over 1024 bytes is `InvalidKey`; and that no request
+/// reaches the service. (Replaces the test that pinned `a b` as a key the client cannot name.)
 #[tokio::test]
 async fn a_key_the_client_cannot_name_is_refused_before_any_request() {
     let (s3, backend) = backend().await;
     let range = Some(ByteRange::new(0, 1));
     let long = "k".repeat(1025);
     for key in ["a/../b", "", long.as_str()] {
-        assert_invalid(backend.put(key, body("v")).await);
-        assert_invalid(backend.put_if_match(key, body("v"), "tag").await);
-        assert_invalid(backend.get(key, None).await);
-        assert_invalid(backend.get(key, range).await);
-        assert_invalid(backend.head(key).await);
-        assert_invalid(backend.delete(key).await);
-        assert_invalid(backend.list_page("", Some(key), 5).await);
-        assert_invalid(backend.create_upload(key).await);
-        assert_invalid(backend.upload_part(key, "u", 1, chunks(&["x"])).await);
-        assert_invalid(backend.complete_upload(key, "u", &[]).await);
-        assert_invalid(backend.abort_upload(key, "u").await);
+        assert_refused(key, backend.put(key, body("v")).await);
+        assert_refused(key, backend.put_if_match(key, body("v"), "tag").await);
+        assert_refused(key, backend.get(key, None).await);
+        assert_refused(key, backend.get(key, range).await);
+        assert_refused(key, backend.head(key).await);
+        assert_refused(key, backend.delete(key).await);
+        assert_refused(key, backend.list_page("", Some(key), 5).await);
+        assert_refused(key, backend.create_upload(key).await);
+        assert_refused(key, backend.upload_part(key, "u", 1, chunks(&["x"])).await);
+        assert_refused(key, backend.complete_upload(key, "u", &[]).await);
+        assert_refused(key, backend.abort_upload(key, "u").await);
     }
     assert_invalid(backend.list(&long).await);
     assert_eq!(s3.requests(), Vec::<String>::new());
@@ -648,7 +665,7 @@ async fn a_listing_of_parts_that_fails_is_an_error() {
 
     let (endpoint, seen) = scripted(vec![]);
     let store = S3Backend::new(config(&endpoint)).unwrap();
-    assert_invalid(store.list_parts("a/../b", "u", None, 10).await);
+    assert_segment("a/../b", store.list_parts("a/../b", "u", None, 10).await);
     assert!(seen.lock().unwrap().is_empty());
 }
 
@@ -791,7 +808,11 @@ async fn a_proxy_needs_the_length_of_a_body_when_either_tier_is_s3() {
     let (_s3, s3) = backend().await;
     assert!(s3.needs_length());
     assert!(!tierstore::MemoryBackend::new().needs_length());
+    assert_eq!(s3.single_put_max(), Some(5 << 30));
+    assert_eq!(tierstore::MemoryBackend::new().single_put_max(), None);
     let s3: Arc<dyn Backend> = Arc::new(s3);
+    let cached = tierstore::CachedStore::new(s3.clone(), 1000);
+    assert_eq!(cached.single_put_max(), Some(5 << 30));
     let memory = || -> Arc<dyn Backend> { Arc::new(tierstore::MemoryBackend::new()) };
     let open = |hot: Arc<dyn Backend>, cold: Arc<dyn Backend>| async move {
         let clock = Arc::new(SystemClock);
@@ -806,8 +827,9 @@ async fn a_proxy_needs_the_length_of_a_body_when_either_tier_is_s3() {
 
 /// Asserts that a streamed put through the proxy over an S3 hot tier is answered with the tag the
 /// hot tier gave the object, which a HEAD through the proxy then gives, whether the length of the
-/// body is told or not; that a hot tier that does not say (the in-memory one) gives no answer;
-/// and that the same put with `hot_only` written to the hot tier is answered as well.
+/// body is told or not; that the in-memory hot tier answers with the tag of the bytes it wrote,
+/// which a HEAD through the proxy gives too; and that the same put with `hot_only` written to the
+/// hot tier is answered as well.
 #[tokio::test]
 async fn a_streamed_put_through_the_proxy_is_answered_with_the_tag_of_the_hot_object() {
     let (_s3, hot) = backend().await;
@@ -835,8 +857,12 @@ async fn a_streamed_put_through_the_proxy_is_answered_with_the_tag_of_the_hot_ob
     .await
     .unwrap();
     let chunks: PartBody<'static> = stream::once(async { Ok(body("abc")) }).boxed();
-    let unsaid = proxy.put_stream_answered("k", Some(3), chunks, false).await;
-    assert_eq!(unsaid, Ok(None));
+    let said = proxy
+        .put_stream_answered("k", Some(3), chunks, false)
+        .await
+        .unwrap()
+        .unwrap();
+    assert_eq!(said.tag, proxy.head("k").await.unwrap().tag);
     assert_eq!(read_text(&proxy, "k").await, "abc");
 }
 

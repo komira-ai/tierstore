@@ -84,6 +84,13 @@ pub(super) fn checksum(name: &str, body: &[u8]) -> String {
     STANDARD.encode(hash)
 }
 
+/// A key of segments (text between `/`) of `lens` characters of `ch` each, joined by `/`. The
+/// tests of the limits of a key use it to make a key of exact length with no long segment.
+pub(super) fn segmented(ch: char, lens: &[usize]) -> String {
+    let segments: Vec<String> = lens.iter().map(|len| ch.to_string().repeat(*len)).collect();
+    segments.join("/")
+}
+
 /// The text of every element called `name` in `xml`, in document order.
 pub(super) fn texts(xml: &str, name: &str) -> Vec<String> {
     let doc = Document::parse(xml).expect("well-formed XML");

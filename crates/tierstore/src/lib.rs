@@ -70,7 +70,22 @@
 //! - [`Markers`] are the calls on the marker of one key, the object named by the key in the marks
 //!   bucket of the hot tier: a create-only create ([`MarkBirth`]), a change on the content tag for
 //!   each [`MarkMove`] of the transition table, a remove, a read, a wait for a lock to end, and the
-//!   lease a holder keeps its lock alive by. The body is a [`Marker`]. Nothing calls them yet.
+//!   lease a holder keeps its lock alive by. The body is a [`Marker`]. The puts and the deletes of a
+//!   [`Proxy`] call them while `_tiering/format` says `active-marks` and records the proxy's marks
+//!   bucket, and so do the plain puts (`put_plain`, `land_in_cold`), which no server code calls yet.
+//!   The [`EntryReconciler`] calls them too, under the same format and once it was given the marks
+//!   bucket ([`EntryReconciler::with_marks`]): it copies the `DIRTY` markers' keys to the cold tier,
+//!   holds a deleted key's marker until no reader can still be served its cold copy, clears the
+//!   markers of puts that left nothing behind, and reaps the locks of owners that are gone.
+//!   The leader's eviction, copy-back and stray sweep below call them too, and nothing the server
+//!   runs calls those yet.
+//! - [`MarkEvictor`], [`CopyBacker`] and [`StraySweep`] are the leader's eviction, copy-back and
+//!   stray sweep over markers (`docs/design/put-without-lock.md`, 5.10 to 5.12), and [`WantRequests`]
+//!   is the ask a proxy's cold read makes for a copy-back. [`LeaderLease`] is the lease they ask the
+//!   margin of, and [`CopyRecords`] the pairs of tags the copier will record for the eviction and the
+//!   sweep. Each pass reads `_tiering/format` and does nothing unless it says `active-marks` at
+//!   epoch 3 or later and names the marks bucket it was given; the leader's step that calls the
+//!   first three comes with pull request 10 of the design.
 //! - [`CachedStore`] answers repeated reads of an object's ranges from RAM in front of any
 //!   backend, typically a [`Proxy`]. It is a cache of the node it runs on, not state.
 //!
@@ -135,12 +150,26 @@ mod marker;
 #[cfg(test)]
 mod marker_tests;
 mod marks;
+mod marks_copy_back;
+#[cfg(test)]
+mod marks_copy_back_tests;
+mod marks_evict;
+#[cfg(test)]
+mod marks_evict_tests;
+mod marks_leader;
+#[cfg(test)]
+mod marks_leader_tests;
 #[cfg(test)]
 mod marks_moves_tests;
+mod marks_sweep;
+#[cfg(test)]
+mod marks_sweep_tests;
 #[cfg(test)]
 mod marks_tests;
 #[cfg(test)]
 mod marks_wait_tests;
+#[cfg(test)]
+mod marks_want_tests;
 mod memory;
 mod metrics;
 #[cfg(test)]
@@ -187,9 +216,18 @@ pub use marks::{
     Creation, MarkBirth, MarkMove, MarkSeen, Markers, MarkersConfig, MarkersConfigError, Waited,
     Written,
 };
+pub use marks_copy_back::{
+    ColdRead, CopiedBack, CopyBackConfig, CopyBackReport, CopyBacker, Skip, WantRequests, Wanted,
+};
+pub use marks_evict::{CopyRecord, CopyRecords, EvictConfig, EvictReport, Evicted, MarkEvictor};
+pub use marks_leader::LeaderLease;
+pub use marks_sweep::{StraySweep, SweepConfig, SweepReport, SweepTime};
 pub use memory::{MemoryBackend, TestClock};
 pub use reconciler::ReconcilerConfig;
 #[cfg(feature = "s3")]
 pub use s3::S3Backend;
 pub use sleeper::{RecordingSleeper, Sleeper, TokioSleeper};
-pub use tiered::{DeleteWait, MarkReads, Proxy, ProxyConfig, StepRetry};
+pub use tiered::{
+    DeleteWait, MarkReads, MarkedPutConfig, PlainPut, Proxy, ProxyConfig, PutBody, PutClaim,
+    StepRetry,
+};
