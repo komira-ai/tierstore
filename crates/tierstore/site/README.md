@@ -20,13 +20,14 @@ The site lives with the crate (`crates/tierstore/site`). The tests find the repo
 and `node-version-file`), `.github/workflows/tierstore-site-publish.yml` in those, in the artifact path and in the two
 files its deploy job checks out, and `test/supply-chain.test.ts` checks that the workflows and the site agree. The test
 `csp.test.ts` reads the Content-Security-Policy from `served-policy.ts`, a copy of the policy the site's hosting sets as
-the header; a change to it there is made here in the same step.
+the header (`CONTENT_SECURITY_POLICY` in `infra/site/lib/site-stack.ts`); the infrastructure's own test fails when the two
+differ, so a change is made in both in the same pull request.
 
 | Path | What |
 |---|---|
 | `../docs/*.md` | the operator guide, rendered by `tools/docs.ts` into `/docs/` and `/docs/<name>/` (a page for each file, so a new file is a new page; `Not in a release yet` sections are marked). The crate's test `src/server/docs_tests.rs` holds the guide to the code, so the pages cannot say what the code does not. A minimal renderer for the subset the guide uses, no dependency; it refuses what it does not read |
 | `content/*.html` | the page copy: the inside of each page's `<main>`. Each claim comes from the crate's documentation, `packaging/README.md` or the code; a page says where |
-| `served-policy.ts` | the Content-Security-Policy the site is served under, a copy of the policy the site's hosting sets as the header |
+| `served-policy.ts` | the Content-Security-Policy the site is served under, a copy of the policy `infra/site` sets as the header (`infra/site/test/site-stack.test.ts` holds the two equal) |
 | `static/theme.css` | the theme; `test/theme.test.ts` pins its sha256 |
 | `static/site.css` | this site's own rules, loaded after the theme |
 | `src/copy.ts` | copy buttons on command blocks |
@@ -75,7 +76,7 @@ merge that changes nothing under the site's paths does not start it at all.
 The settings are three variables of the environment `prod-site-tierstore`, set once by whoever sets the site up
 (`TIERSTORE_SITE_BUCKET`, `TIERSTORE_SITE_DISTRIBUTION_ID`, `TIERSTORE_SITE_PUBLISH_ROLE_ARN`); there is no secret. An unset
 variable is an empty flag, which the program refuses. The environment, the role and its trust, the bucket, the distribution and
-the certificate are created once by an operator with their own AWS credentials (`infra/site`); the workflow only publishes.
+the certificate are created once by an operator with their own AWS credentials, from this repository's `infra/site` (its README lists the steps); the workflow only publishes.
 
 The workflow lint (`cargo test -p xtask --test workflows`) allows `id-token: write` for this job and this environment alone.
 
