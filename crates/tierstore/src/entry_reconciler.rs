@@ -40,7 +40,11 @@
 //!      registration is gone, or has stood unchanged for [`EntryReconcilerConfig::departure`] on
 //!      this process's monotonic clock, counted from the first time it was seen), the entry is
 //!      reaped to `(op, PENDING)` and, for a put, the open multipart uploads of the key are aborted
-//!      on both tiers. An entry of a live owner that has stood held and unchanged for
+//!      on both tiers. So is an entry whose owner's process has restarted: the entry names the
+//!      boot of the process that made it, and the registration of the owner (read once for each
+//!      owner in the step, after the entries) names neither that boot nor, as a peer, any other
+//!      process that may still be alive (the module `restart`). An entry of a live
+//!      owner that has stood held and unchanged for
 //!      [`EntryReconcilerConfig::held_ttl`] (a proxy that failed to hand over or remove it and goes
 //!      on beating) is reaped the same way.
 //!    - An entry of an operation or state this release does not know is left alone.
@@ -108,6 +112,7 @@ mod evict;
 mod marks;
 mod passes;
 mod reap;
+mod restart;
 mod sweep;
 mod usage;
 mod work;
@@ -135,7 +140,9 @@ pub struct EntryReconcilerConfig {
     /// of this process from the first step that sees it so, before it is reaped as if its owner had
     /// departed. A proxy that cannot hand over or remove an entry (the hot tier failed the write)
     /// leaves it held, and its registration goes on beating, so its owner never departs. Longer than
-    /// a put or a delete can take.
+    /// a put or a delete can take. An entry whose owner's process has restarted is not waited for
+    /// this long: it is reaped at the next step after the owner's registration stops naming that
+    /// process, which the restarted proxy does after the departure time in beats.
     pub held_ttl: Duration,
     /// The shortest wait of the loop; starts from `base.idle_min`.
     pub idle_min: Duration,
@@ -317,6 +324,9 @@ pub struct EntryReconciler {
     /// The keys whose held entry has stood unchanged for [`EntryReconcilerConfig::held_ttl`]: reaped
     /// although the owner is live.
     held_expired: BTreeSet<String>,
+    /// The boots that the registration of each owner of a held entry names, as read by this step
+    /// (see `restart.rs`).
+    boots: BTreeMap<String, BTreeSet<String>>,
     /// The usage figure and the listing that gives it.
     books: Books,
     /// What the pool tells the step about the usage.
@@ -363,6 +373,7 @@ impl EntryReconciler {
             copy_back_drops: BTreeSet::new(),
             helds: BTreeMap::new(),
             held_expired: BTreeSet::new(),
+            boots: BTreeMap::new(),
             books: Books::default(),
             tally: Tally::default(),
             tags: Mutex::default(),
@@ -399,6 +410,7 @@ impl EntryReconciler {
         self.copy_back_drops.clear();
         self.helds.clear();
         self.held_expired.clear();
+        self.boots.clear();
         self.books = Books::default();
         self.tally.clear();
         self.tags().clear();
@@ -501,6 +513,9 @@ impl EntryReconciler {
         items.sort_by_key(|(_, seen)| seen.entry.op == EntryOp::Cb);
         self.note_copy_backs(&items, now);
         self.note_helds(&items, now);
+        let (boots, unread) = self.read_boots(&items).await;
+        self.boots = boots;
+        report.failed.extend(unread);
         let this = &*self;
         let steps = stream::iter(items).map(|(path, seen)| async move {
             let verdict = this.process(&seen, now).await;
