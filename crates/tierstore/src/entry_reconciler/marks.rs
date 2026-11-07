@@ -1,9 +1,10 @@
 //! The pass of the leader over the markers of the put-without-lock design
 //! (`docs/design/put-without-lock.md`, 5.9, 5.13 and 5.14), which a step does in place of the pass
 //! over the entries when the format says `active-marks` and the reconciler has the marks bucket
-//! and its name ([`EntryReconciler::with_marks`]) and the name is the one the format records. Under
-//! any other phase, or with another name, nothing here runs: the pass over the markers is inert
-//! until the activation.
+//! and its name ([`EntryReconciler::with_marks`]) and the name is the one the format records. It
+//! goes on under the pause of a rollback from `active-marks` (`drain` with the name still recorded),
+//! until the markers are done. Under any other phase, or with another name, nothing here runs: the
+//! pass over the markers is inert until the activation.
 //!
 //! A pass lists the marks bucket in pages of [`EntryReconcilerConfig::marks_page`], reads the
 //! markers of a page (one GET each, which is the version `a` of the marker) and works them on a
@@ -172,12 +173,13 @@ impl EntryReconciler {
         Ok(self)
     }
 
-    /// The marks bucket, if the markers are worked under `format`: it says `active-marks`, and
-    /// names the marks bucket this reconciler has.
+    /// The marks bucket, if the markers are worked under `format`: it says `active-marks` or is
+    /// the pause of a rollback from it ([`Format::rolls_back_marks`]), and names the marks bucket
+    /// this reconciler has.
     pub(super) fn runs_marks(&self, format: &Format) -> Option<Arc<MarkSide>> {
         let named = format.marks_bucket.as_deref();
         let side = self.marks.as_ref()?;
-        let active = format.phase == FormatPhase::ActiveMarks;
+        let active = format.phase == FormatPhase::ActiveMarks || format.rolls_back_marks();
         (active && named == Some(side.bucket.as_str())).then(|| Arc::clone(side))
     }
 

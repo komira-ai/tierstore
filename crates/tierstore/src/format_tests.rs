@@ -246,3 +246,29 @@ fn a_record_opens_writes_on_markers_only_with_the_phase_the_epoch_and_the_bucket
     assert!(!opens.runs_entries());
     assert!(!opens.pauses_writes());
 }
+
+/// Asserts that only `drain` with the marks bucket still named is the pause of a rollback from
+/// `active-marks`: it gives the leader a pass over the markers, pauses writes, and runs neither
+/// the entries nor the markers for a proxy; the `drain` that precedes the activation (no name),
+/// `drained` with a name and `active-marks` are not it.
+#[test]
+fn only_drain_that_names_the_marks_bucket_is_the_pause_of_a_rollback() {
+    let rollback = decoded(r#"{"phase":"drain","epoch":3,"marks_bucket":"m"}"#);
+    assert!(rollback.rolls_back_marks());
+    assert!(rollback.runs_a_pass());
+    assert!(rollback.pauses_writes());
+    assert_eq!(rollback.runs_marks(), None);
+    assert!(!rollback.runs_entries());
+    for json in [
+        r#"{"phase":"drain"}"#,
+        r#"{"phase":"drain","epoch":2}"#,
+        r#"{"phase":"drained","marks_bucket":"m"}"#,
+    ] {
+        let format = decoded(json);
+        assert!(!format.rolls_back_marks(), "{json}");
+        assert!(!format.runs_a_pass(), "{json}");
+    }
+    let active_marks = decoded(r#"{"phase":"active-marks"}"#);
+    assert!(active_marks.runs_a_pass());
+    assert!(!active_marks.rolls_back_marks());
+}
