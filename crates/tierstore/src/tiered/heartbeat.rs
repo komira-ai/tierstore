@@ -26,6 +26,7 @@ use futures::future::{Either, select};
 use tokio::sync::{Mutex as AsyncMutex, watch};
 
 use super::pause::{self, Pause};
+use super::peers::Peers;
 use super::{Inner, Proxy, locked};
 use crate::deadline::millis;
 use crate::lease::new_nonce;
@@ -53,6 +54,9 @@ pub(super) struct Heartbeat {
     pub(super) proto: u32,
     /// Random at the start of the process, in every body of its registration.
     pub(super) boot: String,
+    /// The other processes of this proxy id the registration found at open names, which the
+    /// heartbeat takes over when it starts.
+    peers: Mutex<Peers>,
     state: Mutex<State>,
 }
 
@@ -69,6 +73,7 @@ impl Heartbeat {
                 PROTO
             },
             boot: new_nonce(),
+            peers: Mutex::new(Peers::new(beats_in(config.departure, config.heartbeat))),
             state: Mutex::new(State::Idle),
         }
     }
@@ -79,6 +84,7 @@ impl Heartbeat {
             proto: self.proto,
             boot: self.boot.clone(),
             hb: 0,
+            peers: Some(locked(&self.peers).names()),
             phase: None,
             writes_in_flight: None,
         }
@@ -86,10 +92,14 @@ impl Heartbeat {
     }
 
     /// Writes this process's registration at open: create-only. One that exists is left as it is,
-    /// except that of an earlier process that beat: this process does not beat until it starts
-    /// its heartbeat, perhaps never, so that registration is replaced by this process's own count
-    /// of zero. Left, it would stop changing and be taken for the registration of a departed
-    /// owner while this process, which may hold entries, is alive.
+    /// except that of an earlier process of this release (a body that reads as a registration):
+    /// this process does not beat until it starts its heartbeat, perhaps never, so that
+    /// registration is replaced by this process's own, with its own boot and a count of zero. Left,
+    /// one that beat would stop changing and be taken for the registration of a departed owner
+    /// while this process, which may hold entries, is alive; and one that did not beat would keep
+    /// the boot of the earlier process, so that the entries of this one, which name its own boot,
+    /// would look like those of a process that has restarted. The boot of the earlier process,
+    /// and those it names, stay named in `peers` (see `peers.rs`): it may be alive.
     pub(super) async fn register(&self, hot: &dyn Backend, key: &str) -> Result<(), Error> {
         match hot.put(key, self.first_body()).await {
             Err(Error::AlreadyExists(_)) => {}
@@ -97,7 +107,8 @@ impl Heartbeat {
         }
         let meta = hot.head(key).await?;
         let body = hot.get(key, None).await?;
-        if Registration::decode(&body).is_some_and(|found| found.beats()) {
+        if let Some(found) = Registration::decode(&body) {
+            locked(&self.peers).found_at_open(&self.boot, &found);
             hot.put_if_match(key, self.first_body(), &meta.tag).await?;
         }
         Ok(())
@@ -117,6 +128,8 @@ struct Beater {
     span: u64,
     /// The beats written so far.
     count: u64,
+    /// The other processes of this proxy id that may be alive, for `peers` of every body.
+    peers: Peers,
     /// The content tag of the registration as this process last wrote it. None before the first
     /// beat and after a beat that failed: the next beat reads the object again.
     etag: Option<String>,
@@ -141,20 +154,16 @@ impl Beater {
     async fn beat(&mut self) -> Result<(), Error> {
         let sent = self.mono.now();
         let count = self.count + 1;
-        let body = Registration {
-            proto: self.proto,
-            boot: self.boot.clone(),
-            hb: count,
-            phase: None,
-            writes_in_flight: None,
-        }
-        .encode();
         let tag = match self.etag.take() {
-            Some(etag) => self.hot.put_if_match(&self.key, body, &etag).await?,
-            None => self.adopt(body).await?,
+            Some(etag) => {
+                let body = self.body(count);
+                self.hot.put_if_match(&self.key, body, &etag).await?
+            }
+            None => self.adopt(count).await?,
         };
         self.etag = Some(tag);
         self.count = count;
+        self.peers.beat();
         self.deadline.extend_to(sent.saturating_add(self.span));
         Ok(())
     }
@@ -165,11 +174,36 @@ impl Beater {
         pause::refresh(&self.seen, &self.gate, self.plain.as_ref(), self.limit).await;
     }
 
-    /// Writes `body` over the registration that is there, whoever wrote it, or creates it.
-    async fn adopt(&self, body: Bytes) -> Result<String, Error> {
+    /// The body of beat `count`.
+    fn body(&self, count: u64) -> Bytes {
+        Registration {
+            proto: self.proto,
+            boot: self.boot.clone(),
+            hb: count,
+            peers: Some(self.peers.names()),
+            phase: None,
+            writes_in_flight: None,
+        }
+        .encode()
+    }
+
+    /// Writes beat `count` over the registration that is there, whoever wrote it, or creates it.
+    /// A registration of another boot that is there is heard: this process wrote its own at open,
+    /// so only a process that is alive could have written the other.
+    async fn adopt(&mut self, count: u64) -> Result<String, Error> {
         match self.hot.head(&self.key).await {
-            Ok(meta) => self.hot.put_if_match(&self.key, body, &meta.tag).await,
-            Err(Error::NotFound(_)) => self.hot.put_tagged(&self.key, body).await,
+            Ok(meta) => {
+                let found = self.hot.get(&self.key, None).await?;
+                if let Some(found) = Registration::decode(&found) {
+                    self.peers.heard(&self.boot, &found);
+                }
+                let body = self.body(count);
+                self.hot.put_if_match(&self.key, body, &meta.tag).await
+            }
+            Err(Error::NotFound(_)) => {
+                let body = self.body(count);
+                self.hot.put_tagged(&self.key, body).await
+            }
             Err(error) => Err(error),
         }
     }
@@ -219,6 +253,7 @@ impl Proxy {
             deadline: Arc::clone(&inner.heartbeat.deadline),
             span: millis(config.departure).saturating_sub(millis(config.deadline_margin)),
             count: 0,
+            peers: locked(&inner.heartbeat.peers).clone(),
             etag: None,
             plain: Arc::clone(&inner.hot),
             seen: Arc::clone(&inner.pause),
@@ -268,4 +303,9 @@ impl Proxy {
     pub fn is_live(&self) -> bool {
         self.inner.heartbeat.deadline.is_live()
     }
+}
+
+/// How many beats of `heartbeat` the time `departure` is, rounded up.
+fn beats_in(departure: Duration, heartbeat: Duration) -> u64 {
+    millis(departure).div_ceil(millis(heartbeat).max(1))
 }

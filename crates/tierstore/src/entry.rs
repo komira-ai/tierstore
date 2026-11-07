@@ -12,9 +12,11 @@
 //!
 //! - The body is JSON: `v` (1), `key`, `op` ([`EntryOp`]), `st` ([`EntryState`]), `owner` (the
 //!   id of the proxy or reconciler working on the key, or `null`), `nonce` (written afresh by
-//!   every write) and `created_ms` (wall clock, for metrics, never for a decision). A reader
-//!   ignores fields it does not know, and reads an `op` or `st` it does not know as `Unknown`,
-//!   which no transition accepts.
+//!   every write), `created_ms` (wall clock, for metrics, never for a decision) and, optionally,
+//!   `owner_boot` (the boot of the owner's process, written with every owner). A reader ignores
+//!   fields it does not know, and reads an `op` or `st` it does not know as `Unknown`, which no
+//!   transition accepts; an entry without `owner_boot` (one an earlier release wrote or rewrote)
+//!   reads as one whose owner's process is not known.
 //! - [`Step`] is a transition of the entry. [`Step::apply`] is the guard: it says what an entry
 //!   in a given shape becomes, or that the step does not apply to it.
 //! - [`Entries`] makes the store calls: [`Entries::create`], [`Entries::advance`] (a replace on
@@ -60,6 +62,14 @@
 //! (the helper of the lease nonce), so that a counter that starts again under a known actor id, in
 //! this process or in another with the same process id and clock, still writes nonces no earlier
 //! instance wrote.
+//!
+//! # Owner's boot
+//!
+//! The same `boot` is written as `owner_boot` into every entry that has an owner. A proxy makes its
+//! [`Entries`] with the boot of its registration (`_tiering/proxies/<id>`, field `boot`), so the
+//! reconciler can tell an entry held by a process the registration names as running from one held by
+//! an earlier process of the same proxy id, which it names no more (see
+//! `entry_reconciler/restart.rs`).
 
 use std::sync::Arc;
 use std::sync::atomic::{AtomicU64, Ordering};
@@ -132,6 +142,11 @@ pub struct Entry {
     pub nonce: String,
     /// When the entry was created, in milliseconds of the wall clock. For metrics only.
     pub created_ms: u64,
+    /// The boot of the process that owns the entry (the `boot` of the owner's registration, for a
+    /// proxy); `None` for an entry without an owner, and for one that a release before this field
+    /// wrote or rewrote. Added to the body of version 1: a reader that does not know it ignores it.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub owner_boot: Option<String>,
 }
 
 /// The body of `entry`.
@@ -365,7 +380,8 @@ impl Entries {
         Self::with_boot(hot, me, clock, boot)
     }
 
-    /// As [`Entries::new`] with the `boot` named, for a test that needs the nonces to be known.
+    /// As [`Entries::new`] with the `boot` named: a proxy names the boot of its registration, and a
+    /// test names one to know the nonces.
     #[must_use]
     pub(crate) fn with_boot(
         hot: Arc<dyn Backend>,
@@ -461,6 +477,7 @@ impl Entries {
             owner: owned.then_some(self.me.clone()),
             nonce: self.nonce(),
             created_ms: self.clock.now(),
+            owner_boot: owned.then(|| self.boot.clone()),
         };
         let written = self
             .hot
@@ -511,6 +528,7 @@ impl Entries {
             key: seen.entry.key.clone(),
             op,
             st,
+            owner_boot: owner.map(|_| self.boot.clone()),
             owner: owner.map(str::to_owned),
             nonce: self.nonce(),
             created_ms: seen.entry.created_ms,
