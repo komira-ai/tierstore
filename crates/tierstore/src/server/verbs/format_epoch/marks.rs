@@ -137,9 +137,21 @@ pub(super) async fn activate(work: &Work<'_>, out: &mut dyn Write) -> Result<(),
             unseen.join(", ")
         )));
     }
+    // Every live registration acts on `drained`, so what `not_at_rest` still names is a write that
+    // was admitted before its proxy saw the phase, and may make its entry after the format
+    // says `active-marks`, with no marker (`docs/design/put-without-lock.md`, 8.2).
+    let writing = not_at_rest(&registrations);
+    if !writing.is_empty() {
+        return Err(refused(format!(
+            "refusing to activate marks: proxies that may still be finishing a write begun \
+             before the pause: {}; run it again after their next beat",
+            writing.join("; ")
+        )));
+    }
     writeln!(
         out,
-        "registrations: {} live, all protocol {PROTO_MARKS} or later and acting on drained",
+        "registrations: {} live, all protocol {PROTO_MARKS} or later, acting on drained and with \
+         no write in flight",
         live(&registrations)
     )?;
     require_no_entries(work, "activate marks").await?;

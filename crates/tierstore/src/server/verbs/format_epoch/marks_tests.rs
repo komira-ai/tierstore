@@ -121,7 +121,8 @@ async fn activate_marks_reports_each_check_and_writes_the_record_only_with_apply
     assert_eq!(
         out,
         "format: drained\n\
-         registrations: 1 live, all protocol 3 or later and acting on drained\n\
+         registrations: 1 live, all protocol 3 or later, acting on drained and with no write in \
+         flight\n\
          no entry and no journal object is held\n\
          marks bucket: \"tier-marks\" exists and is empty (it is not the hot bucket)\n\
          the old release is fenced (asserted by --old-release-fenced)\n\
@@ -189,8 +190,9 @@ async fn activate_marks_needs_drained_and_is_done_when_the_record_is_already_thi
 }
 
 /// Asserts the refusals about the proxies: an unnamed registration with no fresh heartbeat, a live
-/// one below protocol 3, and a live one that has not reported `drained` (no phase, or another),
-/// each with its message exactly; and that naming the departed one lets the activation go on.
+/// one below protocol 3, a live one that has not reported `drained` (no phase, or another), and
+/// one that reports `drained` with a write in flight or no count of them, each with its message
+/// exactly; and that naming the departed one lets the activation go on.
 #[tokio::test]
 async fn activate_marks_refuses_proxies_that_are_not_ready_and_accepts_a_departed_one() {
     let (hot, marks, clock) = ready().await;
@@ -230,6 +232,32 @@ async fn activate_marks_refuses_proxies_that_are_not_ready_and_accepts_a_departe
     assert_eq!(stored_format(&*hot).await, Some(drained()));
     register_reporting(&*hot, "behind", 3, "drained", 0).await;
     register_reporting(&*hot, "silent-phase", 4, "drained", 7).await;
+    let (writing, _) = acted(&*hot, Some(&*marks), &clock, &sleeper, &with(&FENCED)).await;
+    assert_eq!(
+        writing,
+        Err(
+            "refusing to activate marks: proxies that may still be finishing a write begun \
+             before the pause: silent-phase has 7 writes in flight; run it again after their \
+             next beat"
+                .to_owned()
+        )
+    );
+    let uncounted = Bytes::from_static(br#"{"proto":3,"boot":"b","hb":1,"phase":"drained"}"#);
+    hot.delete("_tiering/proxies/behind").await.unwrap();
+    hot.put("_tiering/proxies/behind", uncounted).await.unwrap();
+    let (silent, _) = acted(&*hot, Some(&*marks), &clock, &sleeper, &with(&FENCED)).await;
+    assert_eq!(
+        silent,
+        Err(
+            "refusing to activate marks: proxies that may still be finishing a write begun \
+             before the pause: behind reports no count of writes in flight; silent-phase has 7 \
+             writes in flight; run it again after their next beat"
+                .to_owned()
+        )
+    );
+    assert_eq!(stored_format(&*hot).await, Some(drained()));
+    register_reporting(&*hot, "behind", 3, "drained", 0).await;
+    register_reporting(&*hot, "silent-phase", 4, "drained", 0).await;
     let (done, out) = acted(&*hot, Some(&*marks), &clock, &sleeper, &with(&FENCED)).await;
     assert_eq!(done, Ok(()));
     assert!(out.contains("registrations: 3 live,"), "{out}");
