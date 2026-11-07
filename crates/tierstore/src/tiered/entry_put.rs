@@ -48,7 +48,7 @@ use bytes::Bytes;
 use super::put::Offered;
 use super::{Inner, Level};
 use crate::entry::{Created, Entry, EntryOp, EntryState, Outcome, Seen, Step, Take};
-use crate::{Error, PartBody};
+use crate::{Error, PartBody, PutAnswer};
 
 /// Why an object did not land.
 pub(super) enum Failed {
@@ -228,14 +228,16 @@ impl Inner {
     }
 
     /// The put of a streamed body on its entry; `hot_only` is a presigned put, which is never
-    /// written to the cold tier.
+    /// written to the cold tier. Gives what the hot tier's answer to the write says of the object
+    /// (see [`Backend::put_stream_answered`]), or `None` when the object went to the cold tier or
+    /// the hot tier's answer says nothing.
     pub(super) async fn put_streamed_on_entry(
         &self,
         key: &str,
         len: Option<u64>,
         body: PartBody<'_>,
         hot_only: bool,
-    ) -> Result<(), Error> {
+    ) -> Result<Option<PutAnswer>, Error> {
         let offered = Offered::new(body);
         self.put_on_entry(key, || async move {
             let full = || Failed::Definite(Error::Full(key.to_owned()));
@@ -244,16 +246,23 @@ impl Inner {
                     return Err(full());
                 }
                 let cold = self.cold.put_stream(key, len, offered.view()).await;
-                return cold.map_err(|error| self.sort(&offered, error));
+                return cold
+                    .map(|()| None)
+                    .map_err(|error| self.sort(&offered, error));
             }
-            match self.hot.put_stream(key, len, offered.view()).await {
+            let hot = self
+                .hot
+                .put_stream_answered(key, len, offered.view(), false)
+                .await;
+            match hot {
                 Err(Error::Full(_)) => {
                     self.latch_full();
                     if hot_only || offered.taken() > 0 {
                         return Err(full());
                     }
                     let cold = self.cold.put_stream(key, len, offered.view()).await;
-                    cold.map_err(|error| self.sort(&offered, error))
+                    cold.map(|()| None)
+                        .map_err(|error| self.sort(&offered, error))
                 }
                 other => other.map_err(|error| self.sort(&offered, error)),
             }
@@ -263,7 +272,7 @@ impl Inner {
 
     /// The error of a streamed landing: one that the body gave left nothing, and any other may
     /// have landed.
-    fn sort(&self, offered: &Offered<'_>, error: Error) -> Failed {
+    pub(super) fn sort(&self, offered: &Offered<'_>, error: Error) -> Failed {
         if offered.failed() {
             Failed::Definite(error)
         } else {

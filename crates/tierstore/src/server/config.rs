@@ -55,6 +55,7 @@ use super::config_cache::{CacheSettings, LocalCacheTable};
 use super::config_combined::{CombinedSettings, combined};
 use super::config_entry::entry_tuning;
 use super::config_handoff::handoff_of;
+use super::config_hot_only::refuse_hot_keys;
 use super::config_interface::{
     InterfaceTable, Interfaces, OciTable, UpstreamTable, interfaces, with_legacy,
 };
@@ -351,6 +352,10 @@ pub(super) struct TierTable {
     #[serde(default)]
     pub conditional_delete: Option<bool>,
     // Only `[hot_store]` has these.
+    /// The bucket of the markers (see `config_tier`); only for kind `s3`, where the default is
+    /// `<bucket>-marks`.
+    #[serde(default)]
+    pub marks_bucket: Option<String>,
     #[serde(default)]
     pub budget: Option<Size>,
     #[serde(default)]
@@ -450,11 +455,20 @@ pub(super) struct TierTable {
     #[serde(default)]
     pub held_ttl: Option<Dur>,
     #[serde(default)]
+    pub emergency_cold_landing: Option<bool>,
+    #[serde(default)]
     pub step_attempts: Option<u32>,
     #[serde(default)]
     pub step_retry_min: Option<Dur>,
     #[serde(default)]
     pub step_retry_max: Option<Dur>,
+    // The keys of the reads and listings that read markers (`config_entry`).
+    pub read_window: Option<Dur>,
+    pub read_retries: Option<u32>,
+    pub list_marker_pages: Option<u32>,
+    pub want_retry: Option<Dur>,
+    pub want_recent_limit: Option<u32>,
+    pub copy_back_max_bytes: Option<Size>,
     #[serde(default)]
     pub deadline_margin: Option<Dur>,
     #[serde(default)]
@@ -567,79 +581,6 @@ pub(super) enum Settings {
     Cache(Box<CacheSettings>),
     /// A storage node with a local cache in front of its proxy, which has no flags.
     Combined(Box<CombinedSettings>),
-}
-
-/// Refuses the keys only `[hot_store]` has, in `cold`.
-pub(super) fn refuse_hot_keys(cold: &TierTable) -> Result<(), ConfigError> {
-    let cold_has = [
-        ("budget", cold.budget.is_some()),
-        ("high_water", cold.high_water.is_some()),
-        ("low_water", cold.low_water.is_some()),
-        ("critical", cold.critical.is_some()),
-        ("copy_parallel", cold.copy_parallel.is_some()),
-        ("lease_ttl", cold.lease_ttl.is_some()),
-        ("lock_file", cold.lock_file.is_some()),
-        ("usage_stale_after", cold.usage_stale_after.is_some()),
-        ("journal_linger", cold.journal_linger.is_some()),
-        ("journal_retention", cold.journal_retention.is_some()),
-        (
-            "journal_batch_entries",
-            cold.journal_batch_entries.is_some(),
-        ),
-        ("usage_refresh", cold.usage_refresh.is_some()),
-        ("journal_page_size", cold.journal_page_size.is_some()),
-        ("copy_rounds", cold.copy_rounds.is_some()),
-        ("compare_range", cold.compare_range.is_some()),
-        ("delete_rounds", cold.delete_rounds.is_some()),
-        ("listing_heads", cold.listing_heads.is_some()),
-        ("upload_listing_calls", cold.upload_listing_calls.is_some()),
-        (
-            "abandoned_upload_after",
-            cold.abandoned_upload_after.is_some(),
-        ),
-        ("retry_min", cold.retry_min.is_some()),
-        ("retry_max", cold.retry_max.is_some()),
-        ("stray_grace", cold.stray_grace.is_some()),
-        ("stray_interval", cold.stray_interval.is_some()),
-        ("copy_back_ttl", cold.copy_back_ttl.is_some()),
-        ("usage_interval", cold.usage_interval.is_some()),
-        ("usage_scan_interval", cold.usage_scan_interval.is_some()),
-        (
-            "proxy_usage_stale_after",
-            cold.proxy_usage_stale_after.is_some(),
-        ),
-        ("format_refresh", cold.format_refresh.is_some()),
-        ("delete_wait", cold.delete_wait.is_some()),
-        ("delete_poll_min", cold.delete_poll_min.is_some()),
-        ("delete_poll_max", cold.delete_poll_max.is_some()),
-        ("stray_rate", cold.stray_rate.is_some()),
-        ("copy_back_max", cold.copy_back_max.is_some()),
-        ("scan_pages", cold.scan_pages.is_some()),
-        ("candidate_limit", cold.candidate_limit.is_some()),
-        ("tag_record_limit", cold.tag_record_limit.is_some()),
-        ("entry_rounds", cold.entry_rounds.is_some()),
-        ("heartbeat", cold.heartbeat.is_some()),
-        ("departure", cold.departure.is_some()),
-        ("held_ttl", cold.held_ttl.is_some()),
-        ("step_attempts", cold.step_attempts.is_some()),
-        ("step_retry_min", cold.step_retry_min.is_some()),
-        ("step_retry_max", cold.step_retry_max.is_some()),
-        ("deadline_margin", cold.deadline_margin.is_some()),
-        ("reconcile_interval", cold.reconcile_interval.is_some()),
-        (
-            "registration_retention",
-            cold.registration_retention.is_some(),
-        ),
-        ("idle_min", cold.idle_min.is_some()),
-        ("idle_max", cold.idle_max.is_some()),
-        ("lease_renew", cold.lease_renew.is_some()),
-        ("lease_margin", cold.lease_margin.is_some()),
-        ("listing_page_size", cold.listing_page_size.is_some()),
-        ("stop_wait", cold.stop_wait.is_some()),
-        ("lock_retry", cold.lock_retry.is_some()),
-        ("first_beat_poll", cold.first_beat_poll.is_some()),
-    ];
-    refuse("cold_store", "only [hot_store] has it", &cold_has)
 }
 
 /// The retired keys of `[hot_store]` that `hot` sets, as `hot_store.<key>`: the keys of the
@@ -798,6 +739,7 @@ pub(super) fn storage(
         proxy_id: front.proxy_id,
         slot: front.slot,
         hot: hot_parts.spec,
+        hot_marks: hot_parts.marks,
         cold: cold_parts.spec,
         hot_endpoint: hot_parts.endpoint,
         hot_region: hot_parts.region,

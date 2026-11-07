@@ -112,6 +112,8 @@ mod auth_tests;
 #[cfg(test)]
 mod body_tests;
 #[cfg(test)]
+mod create_only_tests;
+#[cfg(test)]
 mod drain_tests;
 #[cfg(test)]
 pub(crate) mod fake_upstream;

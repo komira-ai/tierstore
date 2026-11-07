@@ -15,7 +15,7 @@ use tokio::sync::Semaphore;
 use super::pause;
 use crate::faulty::{FaultyBackend, Op};
 use crate::journal::{FORMAT_KEY, PROXIES_PREFIX, proxy_key};
-use crate::registration::{PROTO, Registration};
+use crate::registration::{PROTO, PROTO_MARKS, Registration};
 use crate::registrations::Registrations;
 use crate::{
     Backend, Error, GateBackend, MemoryBackend, Mono, Phase, Proxy, ProxyConfig, Sleeper, TestClock,
@@ -318,6 +318,8 @@ async fn open_fails_with_the_error_of_a_registration_it_cannot_read_or_replace()
         proto: 1,
         boot: "b".into(),
         hb: 4,
+        phase: None,
+        writes_in_flight: None,
     }
     .encode();
     memory.put(&proxy_key("p1"), body.clone()).await.unwrap();
@@ -490,7 +492,7 @@ async fn a_request_that_comes_during_a_look_at_the_format_waits_for_it_and_uses_
         .unwrap();
 
     let inner = Arc::clone(&proxy.inner);
-    let request = tokio::spawn(async move { inner.admit_write("k").await });
+    let request = tokio::spawn(async move { inner.route_write("k").await.map(|_| ()) });
     tokio::task::yield_now().await;
     tokio::task::yield_now().await;
     assert!(!request.is_finished());
@@ -689,4 +691,34 @@ async fn a_stopped_old_process_acknowledges_nothing_while_the_new_one_serves() {
     new.proxy.delete("kept").await.unwrap();
     assert!(hot.get("kept", None).await.is_err());
     new.proxy.stop_heartbeat().await;
+}
+
+/// Asserts that a proxy with a marks bucket registers protocol 3, at its start and at every beat,
+/// and one without registers protocol 2: `tierstore format-epoch --activate-marks` takes 3 to mean
+/// that the proxy reads the marker of a key on a hot miss, which only a proxy with a marks bucket
+/// does. The rest of the body is the bytes of protocol 2: no `phase`, no `writes_in_flight`.
+#[tokio::test]
+async fn a_proxy_with_a_marks_bucket_registers_proto_3_and_one_without_registers_proto_2() {
+    for (marks, proto) in [(true, PROTO_MARKS), (false, PROTO)] {
+        let memory = Arc::new(MemoryBackend::new());
+        let mut config = ProxyConfig::new("p1", 1 << 20, Arc::new(TestClock::new()));
+        config.mono = Arc::new(Mono::new());
+        if marks {
+            config.marks = Some(Arc::new(MemoryBackend::new()));
+        }
+        let cold = Arc::new(MemoryBackend::new());
+        let proxy = Proxy::open(memory.clone(), cold, config).await.unwrap();
+        let written = registration(&memory).await.unwrap();
+        assert_eq!((written.proto, written.hb), (proto, 0), "{marks}");
+
+        let sleeper = Stepped::new();
+        assert!(proxy.start_heartbeat(sleeper.clone()));
+        sleeper.beat_done().await;
+        let beat = registration(&memory).await.unwrap();
+        assert_eq!((beat.proto, beat.hb), (proto, 1), "{marks}");
+        assert_eq!((beat.phase, beat.writes_in_flight), (None, None), "{marks}");
+        proxy.stop_heartbeat().await;
+    }
+    assert_eq!(PROTO_MARKS, 3);
+    assert_eq!(PROTO, 2);
 }

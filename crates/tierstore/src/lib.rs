@@ -67,6 +67,12 @@
 //!   reaps the entries of owners that departed, and adopts hot objects that have no entry and no
 //!   cold object. It does nothing until `_tiering/format` says `active`. [`ReconcilerConfig`] is
 //!   the part of its settings that is the lease, the pool of copies and the water marks.
+//! - [`Markers`] are the calls on the marker of one key, the object named by the key in the marks
+//!   bucket of the hot tier: a create-only create ([`MarkBirth`]), a change on the content tag for
+//!   each [`MarkMove`] of the transition table, a remove, a read, a wait for a lock to end, and the
+//!   lease a holder keeps its lock alive by. The body is a [`Marker`]. The puts and the deletes of a
+//!   [`Proxy`] call them while `_tiering/format` says `active-marks` and records the proxy's marks
+//!   bucket, and so do the plain puts (`put_plain`, `land_in_cold`), which no server code calls yet.
 //! - [`CachedStore`] answers repeated reads of an object's ranges from RAM in front of any
 //!   backend, typically a [`Proxy`]. It is a cache of the node it runs on, not state.
 //!
@@ -127,6 +133,16 @@ mod journal;
 mod lease;
 #[cfg(test)]
 mod lease_tests;
+mod marker;
+#[cfg(test)]
+mod marker_tests;
+mod marks;
+#[cfg(test)]
+mod marks_moves_tests;
+#[cfg(test)]
+mod marks_tests;
+#[cfg(test)]
+mod marks_wait_tests;
 mod memory;
 mod metrics;
 #[cfg(test)]
@@ -168,9 +184,17 @@ pub use journal::{
     Checkpoint, JournalEntry, JournalOp, decode_checkpoint, decode_journal, encode_checkpoint,
     encode_journal,
 };
+pub use marker::{MARKER_VERSION, Marker, MarkerState, MarkerWhy, decode_marker, encode_marker};
+pub use marks::{
+    Creation, MarkBirth, MarkMove, MarkSeen, Markers, MarkersConfig, MarkersConfigError, Waited,
+    Written,
+};
 pub use memory::{MemoryBackend, TestClock};
 pub use reconciler::ReconcilerConfig;
 #[cfg(feature = "s3")]
 pub use s3::S3Backend;
 pub use sleeper::{RecordingSleeper, Sleeper, TokioSleeper};
-pub use tiered::{DeleteWait, Proxy, ProxyConfig, StepRetry};
+pub use tiered::{
+    DeleteWait, MarkReads, MarkedPutConfig, PlainPut, Proxy, ProxyConfig, PutBody, PutClaim,
+    StepRetry,
+};

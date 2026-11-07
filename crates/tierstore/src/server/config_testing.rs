@@ -47,6 +47,7 @@ s3_request_timeout    = "2m"
 [hot_store]
 kind               = "s3"
 bucket             = "tierstore-hot"
+marks_bucket       = "tierstore-marks"
 endpoint           = "http://192.0.2.10:9200"
 region             = "us-east-1"
 credentials_file   = "/etc/tierstore/hot.credentials"

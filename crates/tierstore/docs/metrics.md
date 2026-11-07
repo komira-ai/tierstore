@@ -289,6 +289,14 @@ On main, and not in a release yet. A build node's cache is read-write when its p
 
 In a read-only process the families of fills, evictions and pinned skips stay at 0, `tierstore_cache_staging_files` is 0, and `tierstore_cache_discarded_at_start_total` is 0 (a read-only start deletes nothing); it counts what the process deletes when it takes the lock. `tierstore_cache_bytes` and `tierstore_cache_objects` are the scan the process made until it takes the lock. Two processes over one directory count the same directory and the same file system twice in `tierstore_cache_bytes`, `tierstore_cache_objects` and `tierstore_cache_fs_free_bytes`: read the gauges of the directory from the process whose mode is `read_write`. The counters of hits, misses and bytes served are each process's own, and their sum is right.
 
+### The check of an old hit
+
+On main, and not in a release yet. With `local_cache.revalidate_after` set, a hit older than it is checked by one HEAD to the upstream (see [configuration](configuration.md)); without it the series stay at 0.
+
+| name | type | labels | increments when |
+|---|---|---|---|
+| `tierstore_cache_revalidations_total` | counter | `result`: `same`, `changed`, `gone`, `failed` | a check of a hit ended: `same`, the upstream holds the version the entry stands for and the hit was served from the disk; `changed`, it holds another version and the entry was dropped; `gone`, it has no such object and the entry was dropped; `failed`, the HEAD failed and the cached copy was served |
+
 ### v1: the cache's calls to the upstream
 
 | name | type | labels | increments when |
