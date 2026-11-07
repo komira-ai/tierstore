@@ -23,7 +23,7 @@ use percent_encoding::percent_decode_str;
 use ring::digest::{Context as Sha1Context, SHA1_FOR_LEGACY_USE_ONLY};
 use sha2::{Digest, Sha256};
 
-use crate::{Clock, Error, PartBody};
+use crate::{Clock, Error, PartBody, PutClaim};
 
 use super::chunked::{Decoder, Framing};
 use super::reply::{PAYLOAD_HEADER, S3Error};
@@ -36,6 +36,9 @@ static CRC64_NVME: Crc<u64, Table<16>> = Crc::<u64, Table<16>>::new(&CRC_64_NVME
 
 /// The header of the one checksum that is held to a body that is not data of an object.
 const MD5_HEADER: &str = "content-md5";
+
+/// The checksum header whose hash is the content tag of an object in a memory hot tier.
+const SHA256_HEADER: &str = "x-amz-checksum-sha256";
 
 /// The value of a header, if there is one and it is text.
 pub(crate) fn header<'a>(headers: &'a HeaderMap, name: &str) -> Option<&'a str> {
@@ -444,6 +447,23 @@ impl Check {
             framing,
             trailer: trailer_at,
         })
+    }
+
+    /// What the request says of the content tags its body would have: the hex of the MD5 it claimed
+    /// in `Content-MD5` (the tag of an object in an S3 hot tier) and the hex of the SHA-256 it
+    /// claimed in `x-amz-checksum-sha256` (the tag in a memory hot tier). A hash the trailer of an
+    /// `aws-chunked` body carries is not known before the body, so it is not named. The body is
+    /// held to every hash named, as it streams, so that a put answered from the claim alone is
+    /// still refused when the body is not what the headers say.
+    pub(crate) fn claim(&self) -> PutClaim {
+        let tags = self
+            .wants
+            .iter()
+            .filter(|want| [MD5_HEADER, SHA256_HEADER].contains(&want.header))
+            .filter(|want| want.expected.len() == want.length)
+            .map(|want| hex::encode(&want.expected))
+            .collect();
+        PutClaim { tags }
     }
 
     /// The framing of the body, if it is an `aws-chunked` one.

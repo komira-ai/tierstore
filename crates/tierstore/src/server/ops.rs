@@ -404,10 +404,36 @@ fn upload_error(error: Error) -> S3Error {
     }
 }
 
+/// How the key of a request may write an object, which the server knows from the key and not from
+/// the request.
+#[derive(Clone, Copy)]
+pub(super) enum Writes<'a> {
+    /// Create-only: a key that exists is refused (412). The scoped keys, whose write right does not
+    /// replace.
+    Creates,
+    /// Create-only in the hot tier alone, within what the grant of a presigned URL allows.
+    Presigned(&'a Grant),
+    /// The key of the whole front: a `PUT` with no `If-None-Match` is S3's plain put and replaces
+    /// the key where the backend replaces
+    /// ([`Backend::put_stream_replacing`](crate::Backend::put_stream_replacing)); `If-None-Match: *`
+    /// creates.
+    Full,
+}
+
+impl<'a> Writes<'a> {
+    /// The grant of a presigned URL, if the request is one.
+    fn grant(self) -> Option<&'a Grant> {
+        match self {
+            Self::Presigned(grant) => Some(grant),
+            Self::Creates | Self::Full => None,
+        }
+    }
+}
+
 impl Server {
     /// Does what a request asks for, once it is signed. The body of a multipart part and that
-    /// of a put that only creates are streamed to the backend as they arrive; every other call
-    /// reads its body first.
+    /// of a put with no `If-Match` and no `If-None-Match` other than `*` are streamed to the
+    /// backend as they arrive; every other call reads its body first.
     pub(super) async fn dispatch<B>(
         &self,
         parts: &Parts,
@@ -415,7 +441,7 @@ impl Server {
         query: &Query,
         reader: Reader<B>,
         check: Check,
-        presign: Option<&Grant>,
+        writes: Writes<'_>,
     ) -> Result<Answer, S3Error>
     where
         B: Body + Send,
@@ -449,7 +475,12 @@ impl Server {
             && creates_only(&parts.headers)
         {
             let len = body_len(parts, &check);
-            return self.put_streamed(key, len, reader, check, presign).await;
+            // `If-None-Match: *` asks to create, whatever the key may do.
+            let writes = match writes {
+                Writes::Full if parts.headers.contains_key("if-none-match") => Writes::Creates,
+                other => other,
+            };
+            return self.put_streamed(key, len, reader, check, writes).await;
         }
         let body = reader.read_all(check).await?;
         if let Some(setting) = &setting {
@@ -479,7 +510,9 @@ impl Server {
                 self.start_upload(&key).await
             }
             ("POST", Target::Object(key), true) if query.has("uploadId") => {
-                self.complete_upload(query, &key, body).await
+                let replaces =
+                    matches!(writes, Writes::Full) && !parts.headers.contains_key("if-none-match");
+                self.complete_upload(query, &key, body, replaces).await
             }
             _ => Err(S3Error::unsupported("this operation is not supported")),
         }
@@ -577,10 +610,11 @@ impl Server {
         }
     }
 
-    /// Creates the object from the body of the request as it arrives, create-only. The body is
-    /// not held: the pieces are checked against the hashes of the request as they pass, and go
-    /// on through a short queue to the backend's streamed put, which makes the object visible
-    /// only after the last piece. A body that is refused (a hash that does not match, a body
+    /// Stores the object from the body of the request as it arrives: create-only, or for a
+    /// plain put of the full key (`Writes::Full`) replacing a key that exists where the backend
+    /// replaces. The body is not held: the pieces are checked against the hashes of the request as
+    /// they pass, and go on through a short queue to the backend's streamed put, which makes the
+    /// object visible only after the last piece. A body that is refused (a hash that does not match, a body
     /// over the limit, a stalled or cut one) ends the stream with an error, so the backend
     /// stores nothing, and `refused` has the answer to send. `len` is the `Content-Length` of
     /// the request, if it has one.
@@ -595,7 +629,7 @@ impl Server {
         len: Option<u64>,
         reader: Reader<B>,
         check: Check,
-        presign: Option<&Grant>,
+        writes: Writes<'_>,
     ) -> Result<Answer, S3Error>
     where
         B: Body + Send,
@@ -604,8 +638,9 @@ impl Server {
     {
         refuse_reserved(key)?;
         refuse_unstorable(key)?;
-        let permit = self.admit(len, presign).await?;
-        let hot_only = presign.is_some();
+        let permit = self.admit(len, writes.grant()).await?;
+        let hot_only = matches!(writes, Writes::Presigned(_));
+        let claim = matches!(writes, Writes::Full).then(|| check.claim());
         let refused = Refused::default();
         let (carry, body) = hand_over(
             pieces(reader, check, refused.clone()),
@@ -614,10 +649,10 @@ impl Server {
         let (backend, name) = (Arc::clone(&self.backend), key.to_owned());
         let mut storing = tokio::spawn(async move {
             let _permit = permit;
-            if hot_only {
-                backend.put_stream_hot_only(&name, len, body).await
-            } else {
-                backend.put_stream(&name, len, body).await
+            match claim {
+                Some(claim) => backend.put_stream_replacing(&name, len, body, &claim).await,
+                None if hot_only => backend.put_stream_hot_only(&name, len, body).await,
+                None => backend.put_stream(&name, len, body).await,
             }
         });
         let early = tokio::select! {
@@ -906,6 +941,7 @@ impl Server {
         query: &Query,
         key: &str,
         body: Bytes,
+        replaces: bool,
     ) -> Result<Answer, S3Error> {
         refuse_reserved(key)?;
         let id = query.get("uploadId").unwrap_or_default();
@@ -924,7 +960,15 @@ impl Server {
             ));
         }
         let (backend, name, upload) = (Arc::clone(&self.backend), key.to_owned(), id.to_owned());
-        let call = async move { backend.complete_upload(&name, &upload, &wanted).await };
+        let call = async move {
+            if replaces {
+                backend
+                    .complete_upload_replacing(&name, &upload, &wanted)
+                    .await
+            } else {
+                backend.complete_upload(&name, &upload, &wanted).await
+            }
+        };
         let etag = detached(call).await.map_err(upload_error)?;
         let etag = format!("\"{etag}\"");
         let body = xml::completed(&self.config.bucket, key, &etag);

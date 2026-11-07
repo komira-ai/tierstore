@@ -3,7 +3,9 @@
 use std::sync::Arc;
 use std::time::Duration;
 
-use tierstore::{Backend, ByteRange, CachedStore, Error, FaultyBackend, MemoryBackend, Op};
+use tierstore::{
+    Backend, ByteRange, CachedStore, Error, FaultyBackend, MemoryBackend, Op, PutClaim,
+};
 
 use crate::support::{Rig, assert_absent, body, keys, page};
 
@@ -336,4 +338,83 @@ async fn a_conditional_delete_through_the_cache_is_unsupported_and_changes_nothi
     assert!(matches!(refused, Error::Unsupported(_)), "{refused}");
     assert_eq!(f.backend.calls(Op::DeleteIfMatch), 0);
     assert_eq!(f.cached.get("k", None).await.unwrap(), body("v"));
+}
+
+/// A proxy over the rig whose format object says `active-marks`, which replaces a key a plain put
+/// or a completion names.
+async fn marks_proxy(rig: &Rig) -> Arc<tierstore::Proxy> {
+    let format = r#"{"epoch":3,"marks_bucket":"hot-marks","phase":"active-marks"}"#;
+    rig.hot_mem
+        .put(crate::support::FORMAT, body(format))
+        .await
+        .unwrap();
+    let mut config = rig.config("p1", 1 << 30);
+    config.marks = Some(Arc::new(MemoryBackend::new()));
+    config.marks_name = Some("hot-marks".to_owned());
+    Arc::new(rig.open(config).await.unwrap())
+}
+
+/// Asserts that a cache over a backend that does not replace passes a replacing put and a
+/// replacing completion on as the create-only calls they are: a key that exists is refused, as
+/// `AlreadyExists`, and the object and what the cache holds of it are as they were.
+#[tokio::test]
+async fn a_replacing_call_on_a_backend_that_does_not_replace_creates_only() {
+    let f = fixture(100);
+    let claim = PutClaim::default();
+    let put = f
+        .cached
+        .put_stream_replacing("k", Some(3), crate::support::chunks(&["one"]), &claim);
+    put.await.unwrap();
+    assert_eq!(f.cached.get("k", None).await.unwrap(), body("one"));
+    let again =
+        f.cached
+            .put_stream_replacing("k", Some(3), crate::support::chunks(&["two"]), &claim);
+    assert_eq!(again.await, Err(Error::AlreadyExists("k".to_owned())));
+    assert_eq!(f.cached.get("k", None).await.unwrap(), body("one"));
+    assert_eq!(f.cached.cached_bytes(), 3);
+
+    let upload = f.cached.create_upload("k").await.unwrap();
+    let part = f
+        .cached
+        .upload_part("k", &upload, 1, crate::support::chunks(&["two"]))
+        .await;
+    let parts = [(1, part.unwrap())];
+    let refused = f
+        .cached
+        .complete_upload_replacing("k", &upload, &parts)
+        .await;
+    assert_eq!(refused, Err(Error::AlreadyExists("k".to_owned())));
+    assert_eq!(f.cached.get("k", None).await.unwrap(), body("one"));
+}
+
+/// Asserts that a cache over a proxy that replaces drops what it holds of a key a replacing put or
+/// a replacing completion has replaced: the next read gives the new bytes, not the cached ones.
+#[tokio::test]
+async fn a_replacing_put_and_a_replacing_completion_drop_what_the_cache_holds() {
+    let rig = Rig::new();
+    let cached = CachedStore::new(marks_proxy(&rig).await, 100);
+    let claim = PutClaim::default();
+    cached.put("k", body("one")).await.unwrap();
+    assert_eq!(cached.get("k", None).await.unwrap(), body("one"));
+    assert_eq!(cached.cached_bytes(), 3);
+
+    let chunks = crate::support::chunks(&["two!"]);
+    cached
+        .put_stream_replacing("k", Some(4), chunks, &claim)
+        .await
+        .unwrap();
+    assert_eq!(cached.cached_bytes(), 0);
+    assert_eq!(cached.get("k", None).await.unwrap(), body("two!"));
+
+    let upload = cached.create_upload("k").await.unwrap();
+    let part = cached
+        .upload_part("k", &upload, 1, crate::support::chunks(&["three"]))
+        .await;
+    let parts = [(1, part.unwrap())];
+    cached
+        .complete_upload_replacing("k", &upload, &parts)
+        .await
+        .unwrap();
+    assert_eq!(cached.cached_bytes(), 0);
+    assert_eq!(cached.get("k", None).await.unwrap(), body("three"));
 }

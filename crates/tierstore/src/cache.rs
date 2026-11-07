@@ -7,8 +7,8 @@ use async_trait::async_trait;
 use bytes::Bytes;
 
 use crate::{
-    Backend, ByteRange, Error, Listed, Meta, OpenUpload, PartBody, PutAnswer, UploadedPart,
-    UploadsAfter,
+    Backend, ByteRange, Error, Listed, Meta, OpenUpload, PartBody, PutAnswer, PutClaim,
+    UploadedPart, UploadsAfter,
 };
 
 /// What a cached read was asked for: an object, and a range of it or the whole of it.
@@ -230,6 +230,20 @@ impl Backend for CachedStore {
         self.inner.put_stream_hot_only(key, len, body).await
     }
 
+    /// A put that replaces a key that exists drops what the cache holds of it.
+    async fn put_stream_replacing(
+        &self,
+        key: &str,
+        len: Option<u64>,
+        body: PartBody<'_>,
+        claim: &PutClaim,
+    ) -> Result<(), Error> {
+        let inner = &self.inner;
+        inner.put_stream_replacing(key, len, body, claim).await?;
+        self.cache().drop_key(key);
+        Ok(())
+    }
+
     async fn put_if_match(&self, key: &str, body: Bytes, etag: &str) -> Result<String, Error> {
         let tag = self.inner.put_if_match(key, body, etag).await?;
         self.cache().drop_key(key);
@@ -339,6 +353,18 @@ impl Backend for CachedStore {
     ) -> Result<String, Error> {
         let inner = &self.inner;
         let tag = inner.complete_upload_if_match(key, id, parts, etag).await?;
+        self.cache().drop_key(key);
+        Ok(tag)
+    }
+
+    /// A completion that replaces a key that exists drops what the cache holds of it.
+    async fn complete_upload_replacing(
+        &self,
+        key: &str,
+        id: &str,
+        parts: &[(u32, String)],
+    ) -> Result<String, Error> {
+        let tag = self.inner.complete_upload_replacing(key, id, parts).await?;
         self.cache().drop_key(key);
         Ok(tag)
     }

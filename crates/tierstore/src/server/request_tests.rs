@@ -542,3 +542,27 @@ fn a_streamed_body_needs_a_length_and_a_call_that_takes_data() {
     assert_eq!(refused.kind(), required);
     assert!(unchecked().framing().is_none());
 }
+
+/// Asserts that a request names the content tags its body would have from `Content-MD5` (the hex
+/// of the MD5) and `x-amz-checksum-sha256` (the hex of the SHA-256) and from no other checksum
+/// header, and that a request with none names none.
+#[test]
+fn the_claim_of_a_request_is_the_hex_of_its_md5_and_sha256() {
+    let md5 = checksum("content-md5", b"abcd");
+    let sha = checksum("x-amz-checksum-sha256", b"abcd");
+    let crc = checksum("x-amz-checksum-crc32", b"abcd");
+    let headers = with(&[
+        ("content-md5", &md5),
+        ("x-amz-checksum-sha256", &sha),
+        ("x-amz-checksum-crc32", &crc),
+    ]);
+    let claim = Check::new("UNSIGNED-PAYLOAD", &headers, true)
+        .unwrap()
+        .claim();
+    let tags = vec![
+        "e2fc714c4727ee9395f324cd2e7f331f".to_owned(),
+        "88d4266fd4e6338d13b845fcf289579d209c897823b9217da3e161936f031589".to_owned(),
+    ];
+    assert_eq!(claim.tags, tags);
+    assert!(unchecked().claim().tags.is_empty());
+}

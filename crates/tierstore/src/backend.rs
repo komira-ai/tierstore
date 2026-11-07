@@ -5,7 +5,7 @@ use bytes::{Bytes, BytesMut};
 use futures::StreamExt;
 use futures::stream::BoxStream;
 
-use crate::Error;
+use crate::{Error, PutClaim};
 
 /// The body of a part of a multipart upload, as the chunks it arrives in, so that a part of any
 /// size is stored without being held in memory whole.
@@ -470,6 +470,31 @@ pub trait Backend: Send + Sync {
         self.put_stream(key, len, body).await
     }
 
+    /// [`Backend::put_stream`] for a put that is S3's plain `PUT`: the request has no `If-None-Match`
+    /// and no `If-Match`, so a key that exists is replaced and the last writer wins. `claim` names
+    /// the content tags the body is known to have (see [`PutClaim`]); a body whose tag the key has
+    /// already may be answered without a write, and a body that is not written is read to its end,
+    /// so that a check the caller makes on it as it passes is made.
+    ///
+    /// Only a backend that replaces under a rule of its own overrides this; [`Proxy`](crate::Proxy)
+    /// does when its format says `active-marks`, and creates, as before, under every other format.
+    /// The provided implementation is [`Backend::put_stream`], create-only, and ignores `claim`; a
+    /// backend that keeps a copy of what it reads (a cache) must forward the call and forget the
+    /// key.
+    ///
+    /// # Errors
+    /// As [`Backend::put_stream`], except that [`Error::AlreadyExists`] is given only by a backend
+    /// that does not replace.
+    async fn put_stream_replacing(
+        &self,
+        key: &str,
+        len: Option<u64>,
+        body: PartBody<'_>,
+        _claim: &PutClaim,
+    ) -> Result<(), Error> {
+        self.put_stream(key, len, body).await
+    }
+
     /// [`Backend::put_tagged`] for a body that arrives as chunks (`len` is the number of bytes it
     /// is to give, or `None` if the caller does not know): create-only, and gives the content
     /// tag of the object this write made, with no read after it.
@@ -807,6 +832,25 @@ pub trait Backend: Send + Sync {
         Err(Error::Unsupported(
             "complete_upload_if_match: this backend does not do it".to_owned(),
         ))
+    }
+
+    /// [`Backend::complete_upload`] for S3's `CompleteMultipartUpload`, which makes the object
+    /// whatever the key held: a key that exists is replaced and the last writer wins. Only a
+    /// backend that replaces under a rule of its own overrides this; [`Proxy`](crate::Proxy) does
+    /// when its format says `active-marks`. The provided implementation is
+    /// [`Backend::complete_upload`], create-only; a backend that keeps a copy of what it reads (a
+    /// cache) must forward the call and forget the key.
+    ///
+    /// # Errors
+    /// As [`Backend::complete_upload`], except that [`Error::AlreadyExists`] is given only by a
+    /// backend that does not replace.
+    async fn complete_upload_replacing(
+        &self,
+        key: &str,
+        id: &str,
+        parts: &[(u32, String)],
+    ) -> Result<String, Error> {
+        self.complete_upload(key, id, parts).await
     }
 
     /// Drops the upload `id` of `key` and the parts it holds.

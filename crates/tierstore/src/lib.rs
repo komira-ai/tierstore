@@ -72,7 +72,8 @@
 //!   each [`MarkMove`] of the transition table, a remove, a read, a wait for a lock to end, and the
 //!   lease a holder keeps its lock alive by. The body is a [`Marker`]. The puts and the deletes of a
 //!   [`Proxy`] call them while `_tiering/format` says `active-marks` and records the proxy's marks
-//!   bucket, and so do the plain puts (`put_plain`, `land_in_cold`), which no server code calls yet.
+//!   bucket, and so do the plain puts (`put_plain`, `land_in_cold`), which the S3 front calls through
+//!   [`Backend::put_stream_replacing`] and [`Backend::complete_upload_replacing`].
 //!   The [`EntryReconciler`] calls them too, under the same format and once it was given the marks
 //!   bucket ([`EntryReconciler::with_marks`]): it copies the `DIRTY` markers' keys to the cold tier,
 //!   holds a deleted key's marker until no reader can still be served its cold copy, clears the

@@ -61,9 +61,12 @@ mod overwrite;
 #[cfg(test)]
 mod overwrite_tests;
 mod pause;
+mod plain_complete;
 mod plain_put;
 #[cfg(test)]
 mod plain_put_tests;
+#[cfg(test)]
+mod plain_replacing_tests;
 mod put;
 mod read;
 mod uploads;
@@ -286,11 +289,15 @@ fn refuse_reserved(key: &str) -> Result<(), Error> {
 ///   retries it; a key that exists is [`Error::AlreadyExists`]. A cold tier that cannot be asked
 ///   whether it holds the key is [`Error::Unavailable`]: a new key is not accepted while it is down.
 /// - **Plain put** ([`Proxy::put_plain`]) and **landing in cold** ([`Proxy::land_in_cold`]) are
-///   not [`Backend`] calls and are made only under the format `active-marks` (`marked_put.rs`): a
-///   plain put of a key the hot tier holds replaces the object under a lock on the key's marker,
-///   and a put the hot tier refused with [`Error::Full`] lands in the cold tier if
+///   made only under the format `active-marks` (`plain_put.rs`): a plain put of a key the hot tier
+///   holds replaces the object under a lock on the key's marker, and a put the hot tier refused
+///   with [`Error::Full`] before it took a byte lands in the cold tier if
 ///   [`ProxyConfig::emergency_cold_landing`] is set. Under any other format they are answered
-///   [`Error::Unavailable`] without a request.
+///   [`Error::Unavailable`] without a request. [`Backend::put_stream_replacing`] and
+///   [`Backend::complete_upload_replacing`] are the calls of the trait that reach them (the S3
+///   front's `PUT` and `CompleteMultipartUpload` with no `If-None-Match`): under `active-marks`
+///   they replace, and under every other format they create, as `put_stream` and
+///   `complete_upload` do.
 /// - **Streamed put** ([`Backend::put_stream`]) is a put whose body arrives as chunks and is
 ///   never held whole: the chunks go on to the hot tier's own streamed put (or the cold tier's,
 ///   where the hot tier is full), which makes the object visible, create-only, only after the
@@ -724,6 +731,19 @@ impl Backend for Proxy {
             .map(drop)
     }
 
+    /// A plain `PUT`: the proxy replaces a key that exists where the format says `active-marks`
+    /// (see `plain_put.rs`), and creates, as [`put_stream`](Backend::put_stream) does, under every
+    /// other format.
+    async fn put_stream_replacing(
+        &self,
+        key: &str,
+        len: Option<u64>,
+        body: PartBody<'_>,
+        claim: &PutClaim,
+    ) -> Result<(), Error> {
+        self.inner.put_replacing(key, len, body, claim).await
+    }
+
     /// The proxy keeps objects immutable: it never replaces one.
     async fn put_if_match(&self, key: &str, _body: Bytes, _etag: &str) -> Result<String, Error> {
         Err(Error::Other(format!("the proxy does not replace {key}")))
@@ -828,6 +848,18 @@ impl Backend for Proxy {
         parts: &[(u32, String)],
     ) -> Result<String, Error> {
         self.inner.complete_on_entry(key, id, parts).await
+    }
+
+    /// The completion of an upload that replaces a key that exists where the format says
+    /// `active-marks` (see `plain_complete.rs`), and creates, as
+    /// [`complete_upload`](Backend::complete_upload) does, under every other format.
+    async fn complete_upload_replacing(
+        &self,
+        key: &str,
+        id: &str,
+        parts: &[(u32, String)],
+    ) -> Result<String, Error> {
+        self.inner.complete_replacing(key, id, parts).await
     }
 
     async fn abort_upload(&self, key: &str, id: &str) -> Result<(), Error> {
