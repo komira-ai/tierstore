@@ -272,7 +272,7 @@ impl Inner {
 
     /// The error of a streamed landing: one that the body gave left nothing, and any other may
     /// have landed.
-    fn sort(&self, offered: &Offered<'_>, error: Error) -> Failed {
+    pub(super) fn sort(&self, offered: &Offered<'_>, error: Error) -> Failed {
         if offered.failed() {
             Failed::Definite(error)
         } else {

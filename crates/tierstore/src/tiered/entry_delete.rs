@@ -251,7 +251,7 @@ impl Inner {
     }
 
     /// Whether a delete that ended may be acknowledged: the proxy is still live.
-    fn acknowledge(&self, key: &str) -> Result<(), Error> {
+    pub(super) fn acknowledge(&self, key: &str) -> Result<(), Error> {
         if self.heartbeat.deadline.is_live() {
             Ok(())
         } else {

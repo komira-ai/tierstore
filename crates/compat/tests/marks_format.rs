@@ -122,8 +122,9 @@ async fn the_previous_release_serves_a_store_whose_format_says_active_marks() {
 
 /// Asserts that this branch, over the hot directory in which the previous release put objects and
 /// left its registration, under a format object that says `active-marks`, reads and lists what the
-/// previous release put, and makes no write: a put is answered `Unavailable` with the text that says
-/// writes wait for the active format, and the previous release's objects are as they were.
+/// previous release put, and, as a proxy that has no marks bucket, makes no write: a put is
+/// answered `Unavailable` with the text that says writes wait for the active format, and the
+/// previous release's objects are as they were.
 #[tokio::test]
 async fn this_branch_serves_what_the_previous_release_put_and_writes_nothing_under_active_marks() {
     let hot_dir = TestDir::under(env!("CARGO_TARGET_TMPDIR"), "compat-marks-format-old-hot");

@@ -541,7 +541,8 @@ impl Inner {
             }
             return Err(Stop::Lost);
         }
-        locked(&self.index).insert(&name.hex, meta.size, meta.tag, meta.modified);
+        let checked = Some(self.clock.now());
+        locked(&self.index).insert(&name.hex, (meta.size, meta.tag, meta.modified), checked);
         // A delete that came while the object was being read marked this fill: what it read is
         // gone from the upstream, so it is not kept (the mark is looked for after the entry is
         // in the index; see `forget`).

@@ -2,7 +2,10 @@
 //! entry reconciler's retry delays, stray sweep, copy-back limits and usage and listing work, and
 //! the proxy's side of it (how long the usage object stands, how often the format object is read,
 //! how many looks at an entry, how long a delete waits for the reconciler, and how often and how
-//! fast the last step of a put or a delete is tried again).
+//! fast the last step of a put or a delete is tried again), and the keys of the proxy's reads and
+//! listings that read the markers of `docs/design/put-without-lock.md` (`read_window`,
+//! `read_retries`, `list_marker_pages`, `want_retry`, `want_recent_limit` and
+//! `copy_back_max_bytes`).
 //!
 //! Each has the value that was a constant of the code before it was a key as its default, and a
 //! range, and the relations between keys are checked here once, when the file is read, each
@@ -10,12 +13,18 @@
 
 use std::time::Duration;
 
-use crate::{DeleteWait, EntryReconcilerConfig, ProxyConfig, StepRetry};
+use crate::{
+    DeleteWait, EntryReconcilerConfig, MarkReads, MarkedPutConfig, MarkersConfig, ProxyConfig,
+    StepRetry,
+};
 
 use super::cli_heartbeat::DEPARTURE;
-use super::config::{ConfigError, TierTable, duration, invalid, within};
+use super::config::{ConfigError, TierTable, duration, invalid, refuse, within};
 use super::config_tuning::{HOUR, MS, span};
-use super::config_units::Dur;
+use super::config_units::{Dur, Size};
+
+/// A bound on the largest size of a key: a tebibyte.
+const TIB: u64 = 1 << 40;
 
 /// A bound on the longest interval of a key: a year.
 const YEAR: Duration = Duration::from_secs(365 * 24 * 3600);
@@ -60,6 +69,10 @@ pub struct EntryTuning {
     pub delete_poll_min: Duration,
     /// `hot_store.delete_poll_max`: the longest sleep of that wait.
     pub delete_poll_max: Duration,
+    /// `hot_store.emergency_cold_landing`: whether a plain put that the hot tier refuses with
+    /// `Full` before it took a byte lands in the cold tier under a lock, and not 503 (only under
+    /// the format `active-marks`; residual R6' of `docs/design/put-without-lock.md`).
+    pub emergency_cold_landing: bool,
     /// `hot_store.step_attempts`: the most tries of the last step of a put or a delete (the
     /// landing of a put, the hand-over of a delete, the removal of an entry), the first included.
     pub step_attempts: u32,
@@ -89,6 +102,34 @@ pub struct EntryTuning {
     /// file must also be longer than `lease_ttl`, so that an entry the previous holder of the
     /// lease left held while it copied is not reaped before that lease would have lapsed.
     pub held_ttl: Duration,
+    /// `hot_store.read_window`: the longest a hot-miss pair, or the reads of a listing after its
+    /// cold page, may take before they are read again.
+    pub read_window: Duration,
+    /// `hot_store.read_retries`: how many times such a read is read again before it is 503.
+    pub read_retries: u32,
+    /// `hot_store.list_marker_pages`: the pages of marker names one round of a listing reads
+    /// beyond its first.
+    pub list_marker_pages: u32,
+    /// `hot_store.want_retry`: how long a proxy waits to ask again for the copy-back of a key.
+    pub want_retry: Duration,
+    /// `hot_store.want_recent_limit`: the most keys a proxy remembers it asked a copy-back of.
+    pub want_recent_limit: u32,
+    /// `hot_store.copy_back_max_bytes`: the largest object a read asks to have copied back.
+    pub copy_back_max_bytes: u64,
+    /// `hot_store.copy_concurrency`: the keys the copier works at once under the markers.
+    pub copy_concurrency: u32,
+    /// `hot_store.marks_page`: the markers in one listing page of the marks bucket.
+    pub marks_page: u32,
+    /// `hot_store.orphan_after`: how long a `DIRTY` marker with no hot object behind it stands
+    /// unchanged before the leader clears it.
+    pub orphan_after: Duration,
+    /// `hot_store.tombstone_hold`: how long a `gone` marker is kept after its cold object was
+    /// deleted or overwritten; at least `lease_ttl` plus `lease_margin`.
+    pub tombstone_hold: Duration,
+    /// `hot_store.lock_lease`: how long a lock stands unchanged before the leader reaps it
+    /// though its holder lives; at least twice the default `lock_refresh` plus the default
+    /// `queued_call_margin`.
+    pub lock_lease: Duration,
 }
 
 impl Default for EntryTuning {
@@ -112,10 +153,22 @@ impl Default for EntryTuning {
             delete_wait: Duration::from_secs(30),
             delete_poll_min: Duration::from_secs(1),
             delete_poll_max: Duration::from_secs(10),
+            emergency_cold_landing: false,
             step_attempts: StepRetry::new().attempts,
             step_retry_min: StepRetry::new().delay,
             step_retry_max: StepRetry::new().delay_max,
             held_ttl: Duration::from_secs(3600),
+            read_window: MarkReads::default().read_window,
+            read_retries: MarkReads::default().read_retries,
+            list_marker_pages: MarkReads::default().list_marker_pages,
+            want_retry: MarkReads::default().want_retry,
+            want_recent_limit: 100_000,
+            copy_back_max_bytes: MarkReads::default().copy_back_max_bytes,
+            copy_concurrency: 128,
+            marks_page: 1000,
+            orphan_after: Duration::from_secs(120),
+            tombstone_hold: Duration::from_secs(120),
+            lock_lease: MarkersConfig::default().lock_lease,
         }
     }
 }
@@ -136,6 +189,11 @@ impl EntryTuning {
         config.candidate_limit = self.candidate_limit as usize;
         config.tag_record_limit = self.tag_record_limit as usize;
         config.held_ttl = self.held_ttl;
+        config.copy_concurrency = self.copy_concurrency as usize;
+        config.marks_page = self.marks_page as usize;
+        config.orphan_after = self.orphan_after;
+        config.tombstone_hold = self.tombstone_hold;
+        config.markers.lock_lease = self.lock_lease;
     }
 
     /// Gives the values to the settings of the proxy.
@@ -148,10 +206,19 @@ impl EntryTuning {
             poll_min: self.delete_poll_min,
             poll_max: self.delete_poll_max,
         };
+        proxy.emergency_cold_landing = self.emergency_cold_landing;
         proxy.step_retry = StepRetry {
             attempts: self.step_attempts,
             delay: self.step_retry_min,
             delay_max: self.step_retry_max,
+        };
+        proxy.mark_reads = MarkReads {
+            read_window: self.read_window,
+            read_retries: self.read_retries,
+            list_marker_pages: self.list_marker_pages,
+            want_retry: self.want_retry,
+            want_recent_limit: self.want_recent_limit as usize,
+            copy_back_max_bytes: self.copy_back_max_bytes,
         };
     }
 }
@@ -200,11 +267,75 @@ fn longer_than(held_ttl: Duration, key: &str, longer: Duration) -> Result<(), Co
     Ok(())
 }
 
+/// Refuses the settings of the markers that do not hold together: a `tombstone_hold` below
+/// `lease_ttl` plus `lease_margin` (a stalled leader's late cold write could land after the hold),
+/// a `read_window` that is not below the `tombstone_hold` (a read pair could then pair a cold answer
+/// from before a delete with a marker read after the tombstone was let go, I9), an `orphan_after` that is not more than the `reassert_after` of the puts (the leader would clear
+/// the marker of a put that is still streaming its body, 5.1 step 5), and a `lock_lease` below two refreshes plus the margin of a queued call (checked by the
+/// markers' own settings, with the defaults of the keys not yet in the file).
+fn marks_checks(
+    tuning: &EntryTuning,
+    lease_ttl: Duration,
+    lease_margin: Option<Duration>,
+) -> Result<(), ConfigError> {
+    let margin = lease_margin.unwrap_or(lease_ttl / 3);
+    let least = lease_ttl.saturating_add(margin);
+    if tuning.tombstone_hold < least {
+        let why = format!(
+            "{}ms must be at least lease_ttl plus lease_margin, which is {}ms, or a late cold \
+             write of a stalled leader can land after the hold",
+            tuning.tombstone_hold.as_millis(),
+            least.as_millis()
+        );
+        return Err(invalid("hot_store.tombstone_hold", why));
+    }
+    if tuning.read_window >= tuning.tombstone_hold {
+        let why = format!(
+            "{}ms must be below tombstone_hold, which is {}ms, or a read pair could pair a cold \
+             answer from before a delete with a marker read after the tombstone was let go",
+            tuning.read_window.as_millis(),
+            tuning.tombstone_hold.as_millis()
+        );
+        return Err(invalid("hot_store.read_window", why));
+    }
+    let reassert = MarkedPutConfig::new().reassert_after;
+    if tuning.orphan_after <= reassert {
+        let why = format!(
+            "{}ms must be more than reassert_after, which is {}ms, or the leader can clear the \
+             marker of a put that is still streaming its body",
+            tuning.orphan_after.as_millis(),
+            reassert.as_millis()
+        );
+        return Err(invalid("hot_store.orphan_after", why));
+    }
+    let markers = MarkersConfig {
+        lock_lease: tuning.lock_lease,
+        ..MarkersConfig::default()
+    };
+    markers
+        .check()
+        .map_err(|error| invalid("hot_store.lock_lease", error.to_string()))
+}
+
+/// Refuses the keys of the leader's pass over the markers that `cold` sets: only `[hot_store]`
+/// has them.
+pub(super) fn refuse_marks_keys(cold: &TierTable) -> Result<(), ConfigError> {
+    let set = [
+        ("copy_concurrency", cold.copy_concurrency.is_some()),
+        ("marks_page", cold.marks_page.is_some()),
+        ("orphan_after", cold.orphan_after.is_some()),
+        ("tombstone_hold", cold.tombstone_hold.is_some()),
+        ("lock_lease", cold.lock_lease.is_some()),
+    ];
+    refuse("cold_store", "only [hot_store] has it", &set)
+}
+
 /// The entry settings `[hot_store]` gives, or the defaults of those it leaves out, checked against
 /// `lease_ttl`.
 pub(super) fn entry_tuning(
     hot: &TierTable,
     lease_ttl: Duration,
+    lease_margin: Option<Duration>,
 ) -> Result<EntryTuning, ConfigError> {
     let old = EntryTuning::default();
     let tuning = EntryTuning {
@@ -276,6 +407,9 @@ pub(super) fn entry_tuning(
             old.delete_poll_max,
             HOUR,
         )?,
+        emergency_cold_landing: hot
+            .emergency_cold_landing
+            .unwrap_or(old.emergency_cold_landing),
         step_attempts: count("step_attempts", hot.step_attempts, old.step_attempts, 100)?,
         step_retry_min: time(
             "step_retry_min",
@@ -290,7 +424,46 @@ pub(super) fn entry_tuning(
             HOUR,
         )?,
         held_ttl: time("held_ttl", hot.held_ttl, old.held_ttl, YEAR)?,
+        read_window: time("read_window", hot.read_window, old.read_window, HOUR)?,
+        read_retries: count("read_retries", hot.read_retries, old.read_retries, 100)?,
+        list_marker_pages: count(
+            "list_marker_pages",
+            hot.list_marker_pages,
+            old.list_marker_pages,
+            100,
+        )?,
+        want_retry: time("want_retry", hot.want_retry, old.want_retry, YEAR)?,
+        want_recent_limit: count(
+            "want_recent_limit",
+            hot.want_recent_limit,
+            old.want_recent_limit,
+            100_000_000,
+        )?,
+        copy_back_max_bytes: within(
+            "hot_store",
+            "copy_back_max_bytes",
+            hot.copy_back_max_bytes
+                .map_or(old.copy_back_max_bytes, |size: Size| size.0),
+            1,
+            TIB,
+        )?,
+        copy_concurrency: count(
+            "copy_concurrency",
+            hot.copy_concurrency,
+            old.copy_concurrency,
+            100_000,
+        )?,
+        marks_page: count("marks_page", hot.marks_page, old.marks_page, 100_000)?,
+        orphan_after: time("orphan_after", hot.orphan_after, old.orphan_after, YEAR)?,
+        tombstone_hold: time(
+            "tombstone_hold",
+            hot.tombstone_hold,
+            old.tombstone_hold,
+            YEAR,
+        )?,
+        lock_lease: time("lock_lease", hot.lock_lease, old.lock_lease, YEAR)?,
     };
+
     let low = ("retry_min", tuning.retry_min);
     ordered("retry_max", low, tuning.retry_max)?;
     let low = ("delete_poll_min", tuning.delete_poll_min);
@@ -312,9 +485,14 @@ pub(super) fn entry_tuning(
         longer_than(tuning.held_ttl, "lease_ttl", lease_ttl)?;
         longer_than(tuning.held_ttl, "departure", departure)?;
     }
+    marks_checks(&tuning, lease_ttl, lease_margin)?;
     Ok(tuning)
 }
 
 #[cfg(test)]
 #[path = "config_entry_tests.rs"]
 mod tests;
+
+#[cfg(test)]
+#[path = "config_marks_tests.rs"]
+mod marks_tests;

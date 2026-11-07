@@ -192,6 +192,12 @@ fn holds_in_crash_overwrite_lock() {
     check("crash/overwrite-lock");
 }
 
+/// Crash holding a DELETE lock, reaped keeping the `gone` it found (5.13, pull request 7).
+#[test]
+fn holds_in_crash_delete_lock_rolled_back() {
+    check("crash/delete-lock-rolled-back");
+}
+
 /// Crash holding a DELETE lock (A4 A18).
 #[test]
 fn holds_in_crash_delete_lock() {

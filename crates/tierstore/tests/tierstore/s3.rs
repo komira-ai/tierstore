@@ -791,7 +791,11 @@ async fn a_proxy_needs_the_length_of_a_body_when_either_tier_is_s3() {
     let (_s3, s3) = backend().await;
     assert!(s3.needs_length());
     assert!(!tierstore::MemoryBackend::new().needs_length());
+    assert_eq!(s3.single_put_max(), Some(5 << 30));
+    assert_eq!(tierstore::MemoryBackend::new().single_put_max(), None);
     let s3: Arc<dyn Backend> = Arc::new(s3);
+    let cached = tierstore::CachedStore::new(s3.clone(), 1000);
+    assert_eq!(cached.single_put_max(), Some(5 << 30));
     let memory = || -> Arc<dyn Backend> { Arc::new(tierstore::MemoryBackend::new()) };
     let open = |hot: Arc<dyn Backend>, cold: Arc<dyn Backend>| async move {
         let clock = Arc::new(SystemClock);
@@ -806,8 +810,9 @@ async fn a_proxy_needs_the_length_of_a_body_when_either_tier_is_s3() {
 
 /// Asserts that a streamed put through the proxy over an S3 hot tier is answered with the tag the
 /// hot tier gave the object, which a HEAD through the proxy then gives, whether the length of the
-/// body is told or not; that a hot tier that does not say (the in-memory one) gives no answer;
-/// and that the same put with `hot_only` written to the hot tier is answered as well.
+/// body is told or not; that the in-memory hot tier answers with the tag of the bytes it wrote,
+/// which a HEAD through the proxy gives too; and that the same put with `hot_only` written to the
+/// hot tier is answered as well.
 #[tokio::test]
 async fn a_streamed_put_through_the_proxy_is_answered_with_the_tag_of_the_hot_object() {
     let (_s3, hot) = backend().await;
@@ -835,8 +840,12 @@ async fn a_streamed_put_through_the_proxy_is_answered_with_the_tag_of_the_hot_ob
     .await
     .unwrap();
     let chunks: PartBody<'static> = stream::once(async { Ok(body("abc")) }).boxed();
-    let unsaid = proxy.put_stream_answered("k", Some(3), chunks, false).await;
-    assert_eq!(unsaid, Ok(None));
+    let said = proxy
+        .put_stream_answered("k", Some(3), chunks, false)
+        .await
+        .unwrap()
+        .unwrap();
+    assert_eq!(said.tag, proxy.head("k").await.unwrap().tag);
     assert_eq!(read_text(&proxy, "k").await, "abc");
 }
 

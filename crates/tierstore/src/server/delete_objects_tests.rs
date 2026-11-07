@@ -23,7 +23,7 @@ use super::{AccessKey, Prefixes, ScopedKey, Server, ServerConfig};
 const MD5: &str = "content-md5";
 
 /// The document of a DeleteObjects call for `keys`.
-fn document(keys: &[&str], quiet: Option<&str>) -> String {
+pub(super) fn document(keys: &[&str], quiet: Option<&str>) -> String {
     let mut xml = String::from("<Delete xmlns=\"http://s3.amazonaws.com/doc/2006-03-01/\">");
     if let Some(quiet) = quiet {
         xml.push_str(&format!("<Quiet>{quiet}</Quiet>"));
@@ -63,7 +63,7 @@ async fn rig_with(names: &[&str]) -> Rig {
 }
 
 /// The `Code` and `Message` of each `Error` of a result, with its key.
-fn errors(body: &str) -> Vec<(String, String, String)> {
+pub(super) fn errors(body: &str) -> Vec<(String, String, String)> {
     let doc = roxmltree::Document::parse(body).unwrap();
     let text = |node: roxmltree::Node, name: &str| {
         let child = node.children().find(|c| c.tag_name().name() == name);

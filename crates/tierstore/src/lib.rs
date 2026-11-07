@@ -70,15 +70,21 @@
 //! - [`Markers`] are the calls on the marker of one key, the object named by the key in the marks
 //!   bucket of the hot tier: a create-only create ([`MarkBirth`]), a change on the content tag for
 //!   each [`MarkMove`] of the transition table, a remove, a read, a wait for a lock to end, and the
-//!   lease a holder keeps its lock alive by. The body is a [`Marker`]. Only the leader's work below calls
-//!   them, and nothing the server runs calls that yet.
+//!   lease a holder keeps its lock alive by. The body is a [`Marker`]. The puts and the deletes of a
+//!   [`Proxy`] call them while `_tiering/format` says `active-marks` and records the proxy's marks
+//!   bucket, and so do the plain puts (`put_plain`, `land_in_cold`), which no server code calls yet.
+//!   The [`EntryReconciler`] calls them too, under the same format and once it was given the marks
+//!   bucket ([`EntryReconciler::with_marks`]): it copies the `DIRTY` markers' keys to the cold tier,
+//!   holds a deleted key's marker until no reader can still be served its cold copy, clears the
+//!   markers of puts that left nothing behind, and reaps the locks of owners that are gone.
+//!   The leader's eviction, copy-back and stray sweep below call them too, and nothing the server
+//!   runs calls those yet.
 //! - [`MarkEvictor`], [`CopyBacker`] and [`StraySweep`] are the leader's eviction, copy-back and
 //!   stray sweep over markers (`docs/design/put-without-lock.md`, 5.10 to 5.12), and [`WantRequests`]
 //!   is the ask a proxy's cold read makes for a copy-back. [`LeaderLease`] is the lease they ask the
 //!   margin of, and [`CopyRecords`] the pairs of tags the copier will record for the eviction and the
 //!   sweep. Each pass reads `_tiering/format` and does nothing unless it says `active-marks`; the
-//!   leader's step that calls the first three comes with the pull requests 7 and 10 of the design, and
-//!   the hot-miss read that calls the ask with pull request 3.
+//!   leader's step that calls the first three comes with pull request 10 of the design.
 //! - [`CachedStore`] answers repeated reads of an object's ranges from RAM in front of any
 //!   backend, typically a [`Proxy`]. It is a cache of the node it runs on, not state.
 //!
@@ -220,4 +226,7 @@ pub use reconciler::ReconcilerConfig;
 #[cfg(feature = "s3")]
 pub use s3::S3Backend;
 pub use sleeper::{RecordingSleeper, Sleeper, TokioSleeper};
-pub use tiered::{DeleteWait, Proxy, ProxyConfig, StepRetry};
+pub use tiered::{
+    DeleteWait, MarkReads, MarkedPutConfig, PlainPut, Proxy, ProxyConfig, PutBody, PutClaim,
+    StepRetry,
+};
