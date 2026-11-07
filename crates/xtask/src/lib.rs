@@ -251,6 +251,10 @@ enum ReleaseVerb {
         /// Append `version=<X.Y.Z>` to this file (`GITHUB_OUTPUT`).
         #[arg(long)]
         output: Option<PathBuf>,
+        /// Write `<X.Y.Z>` to this file, which the build uploads as the artifact
+        /// `version-<X.Y.Z>`: the release plan reads the version the binary says from its name.
+        #[arg(long)]
+        record: Option<PathBuf>,
         #[arg(long, default_value = "gh")]
         gh: PathBuf,
     },
@@ -273,10 +277,11 @@ enum ReleaseVerb {
         #[arg(long)]
         scratch: PathBuf,
     },
-    /// Whether a push to main is released and as which tag; appends the answer to `--output`.
+    /// Which commit of main is released and as which tag; appends the answer to `--output`.
     Plan {
         #[arg(long)]
         repo: String,
+        /// The tip of main: the plan walks its first-parent history down to the highest tag.
         #[arg(long)]
         commit: String,
         /// The `VERSION` file: a version above the highest release tag is the next tag.
@@ -552,6 +557,7 @@ fn run(cli: Cli) -> Result<Vec<String>, Error> {
             repo,
             version_file,
             output,
+            record,
             gh,
         }) => {
             let text = version_file
@@ -564,6 +570,7 @@ fn run(cli: Cli) -> Result<Vec<String>, Error> {
                 &repo,
                 text.as_deref(),
                 output.as_deref(),
+                record.as_deref(),
             )
         }
         Verb::Release(ReleaseVerb::SetVersion { version }) => release::set_version(&root, &version),

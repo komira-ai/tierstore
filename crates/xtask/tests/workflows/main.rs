@@ -481,7 +481,9 @@ fn artifacts_yml_builds_under_the_version_the_release_will_tag() {
     // Catches: any change to artifacts.yml that lets a binary be built without the version
     // computed for it (the v0.3.1 binary said 0.3.0): the `version` job gone or no longer the
     // `cargo xtask release version` the release plan shares, a build job that does not wait for
-    // it or does not pass it to the build, a build-commit step that does not check it.
+    // it or does not pass it to the build, a build-commit step that does not check it, and the
+    // version not recorded on the run under the artifact name the release plan reads (the plan
+    // would then release nothing).
     assert_eq!(
         artifacts_problems(&text_of("artifacts.yml")),
         Vec::<String>::new()
@@ -508,6 +510,27 @@ const ARTIFACTS_DEFECTS: &[(&str, &str, &str)] = &[
         "version: ''",
         "output version",
     ),
+    (
+        "name: version-${{ steps.version.outputs.version }}",
+        "name: version",
+        "upload-artifact step named version-",
+    ),
+    (
+        "path: ${{ runner.temp }}/version",
+        "path: VERSION",
+        "upload-artifact step named version-",
+    ),
+    (
+        "uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1\n        with:\n          name: version-",
+        "uses: actions/cache/save@55cc8345863c7cc4c66a329aec7e433d2d1c52a9 # v6.1.0\n        with:\n          name: version-",
+        "upload-artifact step named version-",
+    ),
+    (
+        "path: ${{ runner.temp }}/version\n          if-no-files-found: error",
+        "path: ${{ runner.temp }}/version\n          if-no-files-found: warn",
+        "upload-artifact step named version-",
+    ),
+    (" --record \"$RUNNER_TEMP/version\"", "", "--record"),
 ];
 
 #[test]
@@ -668,7 +691,8 @@ fn artifacts_yml_has_its_own_non_cancelling_group_per_commit() {
 #[test]
 fn the_plan_job_if_is_pinned_whole_and_its_inputs_are_pinned() {
     // Catches: one `&&` turned into `||` (every substring of the condition stays in the text),
-    // the plan reading another commit than the run built, a freeze that is not passed on or
+    // the plan given the commit the completed run built instead of the tip of main it walks from
+    // (it would plan a commit a release has since passed by, and fail), a freeze that is not passed on or
     // not read from the repository variable, and a group that does not need a push from this
     // repository.
     let text = text_of("release.yml");
@@ -684,13 +708,18 @@ fn the_plan_job_if_is_pinned_whole_and_its_inputs_are_pinned() {
             "plan: `if` is not",
         ),
         (
-            "ref: ${{ github.event_name == 'workflow_run' && github.event.workflow_run.head_sha || inputs.commit }}",
+            "ref: ${{ github.event_name == 'workflow_run' && github.sha || inputs.commit }}",
             "ref: ${{ inputs.commit }}",
             "plan: checkout ref",
         ),
         (
-            "COMMIT: ${{ github.event.workflow_run.head_sha }}",
+            "ref: ${{ github.event_name == 'workflow_run' && github.sha || inputs.commit }}",
+            "ref: ${{ github.event_name == 'workflow_run' && github.event.workflow_run.head_sha || inputs.commit }}",
+            "plan: checkout ref",
+        ),
+        (
             "COMMIT: ${{ github.sha }}",
+            "COMMIT: ${{ github.event.workflow_run.head_sha }}",
             "plan: env COMMIT",
         ),
         (" --freeze \"$FREEZE\"", "", "plan: --freeze"),
