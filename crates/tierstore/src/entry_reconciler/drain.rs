@@ -26,7 +26,7 @@ use std::time::Duration;
 
 use super::{EntryReconciler, StepReport};
 use crate::Error;
-use crate::format::{Format, FormatPhase, format_body};
+use crate::format::{ENTRIES_EPOCH, Format, FormatPhase, format_body};
 use crate::journal::{FORMAT_KEY, PROXIES_PREFIX};
 use crate::registration::Registration;
 
@@ -57,7 +57,9 @@ impl EntryReconciler {
         }
         let drained = Format {
             phase: FormatPhase::Drained,
-            epoch: None,
+            // The epoch is kept, so that `--cancel` of a `drained` puts `active` back at it and
+            // does not delete the format object (an optional field of the format, no new one).
+            epoch: Some(ENTRIES_EPOCH),
             marks_bucket: None,
         };
         match self

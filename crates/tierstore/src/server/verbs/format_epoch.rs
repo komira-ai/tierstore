@@ -58,6 +58,9 @@ use crate::{Backend, Clock, Error, Sleeper};
 /// for each key.
 const ACTIVE_EPOCH: u64 = 2;
 
+/// The first epoch above [`ACTIVE_EPOCH`].
+const ACTIVE_EPOCH_ABOVE: u64 = ACTIVE_EPOCH + 1;
+
 /// The first protocol number of a registration of a process that writes the format of
 /// [`ACTIVE_EPOCH`].
 const ACTIVE_PROTO: u32 = 2;
@@ -233,6 +236,23 @@ fn drain_gate(
 ) -> Result<(), VerbError> {
     if phase_name(found) == "unknown" {
         return Err(VerbError::Refused(UNKNOWN.to_owned()));
+    }
+    // No verb writes `active` above the epoch of the entries without the markers: a proxy would
+    // run entries under it, and the leader would not finish the pause the drain copies from it.
+    if let Some((
+        Format {
+            phase: FormatPhase::Active,
+            epoch: Some(epoch @ (ACTIVE_EPOCH_ABOVE..)),
+            ..
+        },
+        _,
+    )) = found
+    {
+        return Err(VerbError::Refused(format!(
+            "refusing to drain: the format says active at epoch {epoch}, and the entry protocol of \
+             this release is epoch {ACTIVE_EPOCH}; no verb writes that record, so look at who \
+             did before changing it"
+        )));
     }
     check_departed(registrations, departed, "drain")
 }

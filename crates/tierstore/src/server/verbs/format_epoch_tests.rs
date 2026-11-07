@@ -537,6 +537,59 @@ async fn cancel_puts_back_the_format_that_was_before_the_drain() {
     assert_eq!(stored_format(&*hot).await, Some(active_format(2)));
 }
 
+/// Asserts that `--cancel --apply` of the `drained` that the leader writes over the entry protocol,
+/// `{"phase":"drained","epoch":2}`, writes `{"epoch":2,"phase":"active"}` back and does not delete
+/// the format object, and that `--activate` accepts that `drained` too.
+#[tokio::test]
+async fn cancel_after_the_leaders_drained_restores_active_epoch_2() {
+    let (hot, clock) = tier();
+    let sleeper = RecordingSleeper::new();
+    let leader_drained = Format {
+        phase: FormatPhase::Drained,
+        epoch: Some(2),
+        marks_bucket: None,
+    };
+    set_format(&*hot, &leader_drained).await;
+    let (result, out) = acted(&*hot, &clock, &sleeper, &["--cancel"]).await;
+    assert_eq!(result, Ok(()));
+    assert_eq!(
+        out,
+        "dry run: would write the active format back; nothing was written; add --apply to do it\n"
+    );
+    let (result, _) = acted(&*hot, &clock, &sleeper, &["--cancel", "--apply"]).await;
+    assert_eq!(result, Ok(()));
+    assert_eq!(stored_format(&*hot).await, Some(active_format(2)));
+    hot.delete(FORMAT_KEY).await.unwrap();
+    set_format(&*hot, &leader_drained).await;
+    let (result, _) = acted(&*hot, &clock, &sleeper, &["--activate", "--apply"]).await;
+    assert_eq!(result, Ok(()));
+    assert_eq!(stored_format(&*hot).await, Some(active_format(2)));
+}
+
+/// Asserts that `--drain` over an unmarked `active` record at an epoch above 2, which no verb
+/// writes, is refused with the epoch named and writes nothing, in `--check` as well; and that an
+/// `active` at epoch 2 is still drained.
+#[tokio::test]
+async fn drain_refuses_an_active_format_above_the_epoch_of_the_entries() {
+    let (hot, clock) = tier();
+    let sleeper = RecordingSleeper::new();
+    set_format(&*hot, &active_format(3)).await;
+    for flags in [&["--drain", "--apply"][..], &["--check"][..]] {
+        let (result, _) = acted(&*hot, &clock, &sleeper, flags).await;
+        assert_eq!(
+            result,
+            Err(
+                "refusing to drain: the format says active at epoch 3, and the entry protocol of \
+                 this release is epoch 2; no verb writes that record, so look at who did before \
+                 changing it"
+                    .to_owned()
+            ),
+            "{flags:?}"
+        );
+    }
+    assert_eq!(stored_format(&*hot).await, Some(active_format(3)));
+}
+
 /// Asserts that a cancel that finds the format object gone or replaced between its read and its
 /// write is refused with the message exactly, for the delete and for the write back.
 #[tokio::test]

@@ -5,7 +5,7 @@
 use super::*;
 use crate::registration::Registration;
 
-const DRAINED: &[u8] = br#"{"phase":"drained"}"#;
+const DRAINED: &[u8] = br#"{"phase":"drained","epoch":2}"#;
 
 fn drain_at(epoch: u64) -> Format {
     Format {
@@ -49,7 +49,7 @@ impl Rig {
 
 /// Asserts that under `drain` at epoch 2 a landed put is copied to the cold tier and its entry
 /// removed as under `active`, and that in the same step, with the one registration at rest, the
-/// format object becomes `{"phase":"drained"}`; the step after it does nothing.
+/// format object becomes `{"phase":"drained","epoch":2}`; the step after it does nothing.
 #[tokio::test]
 async fn a_drain_over_the_entries_finishes_them_and_writes_drained() {
     let rig = Rig::new();

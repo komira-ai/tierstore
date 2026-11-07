@@ -124,6 +124,7 @@ async fn before_the_epoch_a_round_does_nothing_and_waits() {
         "",
         r#"{"phase":"drain"}"#,
         r#"{"phase":"drained"}"#,
+        r#"{"phase":"drained","epoch":2}"#,
         r#"{"epoch":1,"phase":"active"}"#,
         r#"{"epoch":1,"phase":"drain"}"#,
         r#"{"epoch":3,"phase":"drain"}"#,
@@ -162,7 +163,10 @@ async fn a_round_under_the_drain_over_the_entries_finishes_them_and_writes_drain
     assert!(round.failed.is_empty(), "{:?}", round.failed);
     assert!(rig.cold_has("k").await);
     let format = rig.hot_mem.get(FORMAT_KEY, None).await.unwrap();
-    assert_eq!(format, Bytes::from_static(br#"{"phase":"drained"}"#));
+    assert_eq!(
+        format,
+        Bytes::from_static(br#"{"phase":"drained","epoch":2}"#)
+    );
     let next = rounds.round().await;
     assert!(next.failed.is_empty(), "{:?}", next.failed);
     assert_eq!(next.pause, Some(Duration::from_secs(1)));

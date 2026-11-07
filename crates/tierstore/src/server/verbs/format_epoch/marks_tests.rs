@@ -372,6 +372,29 @@ async fn activate_marks_needs_the_old_release_fenced_and_refuses_a_changed_recor
     assert_eq!(stored_format(&*hot).await, Some(drained()));
 }
 
+/// Asserts that `--activate-marks` and `--restore-entries` accept the `drained` that the leader
+/// writes over the entry protocol, `{"phase":"drained","epoch":2}`, as they accept the one with no
+/// epoch: the stored record becomes `active-marks` or `active` at epoch 2.
+#[tokio::test]
+async fn the_leaders_drained_with_epoch_2_is_accepted_by_activate_marks_and_restore_entries() {
+    let leader_drained = format(FormatPhase::Drained, Some(2), None);
+    for (flags, wanted) in [
+        (&FENCED[..], Some(active_marks())),
+        (
+            &["--restore-entries", "--apply"][..],
+            Some(format(FormatPhase::Active, Some(2), None)),
+        ),
+    ] {
+        let (hot, marks, clock) = ready().await;
+        hot.delete(FORMAT_KEY).await.unwrap();
+        set_format(&*hot, &leader_drained).await;
+        let sleeper = RecordingSleeper::new();
+        let (done, out) = acted(&*hot, Some(&*marks), &clock, &sleeper, flags).await;
+        assert_eq!(done, Ok(()), "{flags:?}: {out}");
+        assert_eq!(stored_format(&*hot).await, wanted, "{flags:?}");
+    }
+}
+
 /// A store at `drained` after a rollback, ready for `--restore-entries`: one live proxy that acts
 /// on `drained` with no write in flight.
 async fn rolled_back() -> (Arc<MemoryBackend>, Arc<MemoryBackend>, Arc<TestClock>) {
