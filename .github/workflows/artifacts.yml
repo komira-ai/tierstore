@@ -296,7 +296,7 @@ jobs:
     needs: [version]
     if: ${{ github.event_name != 'pull_request' }}
     runs-on: macos-15
-    timeout-minutes: 45
+    timeout-minutes: 120
     permissions:
       contents: read
     env:
@@ -325,6 +325,12 @@ jobs:
       - run: cargo cyclonedx --version
       # Every test of the crates the binary is made of, on macOS. They include the update hook's
       # launchd steps and packaging/macos (tests/packaging_macos.rs).
+      - name: Stress the hand-off multipart and OCI re-check tests
+        env:
+          ROUNDS: 8
+          HANDOFF_PAR: 8
+          OCI_PAR: 8
+        run: bash macos-stress.sh
       - name: The tests, on macOS
         run: cargo test --locked -p tierstore -p objstore-s3 -p tierstore-testkit --features tierstore/s3 --no-fail-fast
       # The crate's version is the release's: the binary reports the version of `Cargo.toml`.
