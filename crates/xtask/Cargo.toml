@@ -33,6 +33,8 @@ hostkeeper-config.workspace = true
 hostkeeper-unpack.workspace = true
 # xz for the tar.xz archive of cargo-cyclonedx that `fetch` unpacks.
 lzma-rs = "0.3.0"
+# The MD5 sums a Debian package lists its files with (`release deb`).
+md-5 = "0.11.0"
 # The TLS client of `fetch`: the host's trusted roots and nothing else.
 rustls = { version = "0.23.45", default-features = false, features = ["ring", "std", "tls12"] }
 rustls-native-certs = "0.8.4"

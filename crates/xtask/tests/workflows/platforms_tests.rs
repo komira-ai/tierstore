@@ -153,11 +153,15 @@ fn the_build_and_signing_commands_name_the_platform_and_nothing_else() {
     let attest = attest_commands(&["macos-arm64"]);
     assert_eq!(
         attest.len(),
-        4,
-        "the two sums checks, the tarball's bundle, the package's"
+        5,
+        "the two sums checks, the tarball's bundle, the package's, the tap tarball's"
     );
     assert!(attest[2].ends_with("-macos-arm64.tar.gz.sigstore.json\""));
     assert!(attest[3].ends_with("-macos-arm64.tar.zst.sigstore.json\""));
+    assert_eq!(
+        attest[4],
+        "cp \"$BUNDLE\" \"dist/tierstore-${RELEASE_VERSION}-macos-arm64.tar.gz.sigstore.json\""
+    );
 }
 
 #[test]

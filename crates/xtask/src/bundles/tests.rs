@@ -332,10 +332,16 @@ fn the_pairing_is_one_bundle_per_listed_tarball_and_nothing_else() {
 }
 
 #[test]
-fn a_tarball_and_a_hostkeeper_package_need_a_bundle_and_nothing_else_does() {
+fn a_tarball_a_hostkeeper_package_and_a_debian_package_need_a_bundle_and_nothing_else_does() {
     // Catches: a package listed without a provenance bundle because only `.tar.gz` was taken
     // for a subject, or an SBOM or the release index demanding a bundle nobody makes.
-    for yes in [TARBALL, PACKAGE, "x.tar.gz", "x.tar.zst"] {
+    for yes in [
+        TARBALL,
+        PACKAGE,
+        "x.tar.gz",
+        "x.tar.zst",
+        "tierstore_0.4.0_amd64.deb",
+    ] {
         assert!(needs_bundle(yes), "{yes}");
     }
     for no in [
@@ -345,6 +351,8 @@ fn a_tarball_and_a_hostkeeper_package_need_a_bundle_and_nothing_else_does() {
         "x.tar",
         "x.zst",
         "tar.zst.txt",
+        "x.deb.txt",
+        "x.debian",
     ] {
         assert!(!needs_bundle(no), "{no}");
     }

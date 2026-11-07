@@ -106,10 +106,15 @@ fn bundle(sha: &Sha256) -> String {
     format!("{bundle}\n")
 }
 
-/// The assets of `COMMIT` with the hostkeeper packages of `HK_VERSION`, sorted.
+/// The release version `HK_VERSION` belongs to.
+const VERSION: &str = "0.4.0";
+
+/// The assets of `COMMIT` with the hostkeeper packages of `HK_VERSION` and the tap tarballs and
+/// Debian packages of `VERSION`, sorted.
 fn all_assets() -> Vec<String> {
     let mut names = expected_assets(COMMIT);
     names.extend(hostkeeper_assets(HK_VERSION));
+    names.extend(distribution_assets(VERSION));
     names.sort();
     names
 }
@@ -175,6 +180,70 @@ fn the_hostkeeper_assets_of_a_version_are_a_package_per_platform_and_the_index_s
             "tierstore-0.4.0+0123456789ab-macos-arm64.tar.zst".to_owned(),
         ]
     );
+}
+
+#[test]
+fn the_distribution_assets_of_a_version_are_a_tap_tarball_per_platform_and_a_deb_per_linux_arch() {
+    // Catches: a tap name the tap's guard refuses (it takes linux-aarch64, not linux-arm64), a
+    // Debian package for macOS, a Debian architecture other than amd64 and arm64, or a version
+    // that carries the commit.
+    assert_eq!(
+        distribution_assets(VERSION),
+        [
+            "tierstore-0.4.0-linux-aarch64.tar.gz".to_owned(),
+            "tierstore-0.4.0-linux-x86_64.tar.gz".to_owned(),
+            "tierstore-0.4.0-macos-arm64.tar.gz".to_owned(),
+            "tierstore_0.4.0_amd64.deb".to_owned(),
+            "tierstore_0.4.0_arm64.deb".to_owned(),
+        ]
+    );
+}
+
+#[test]
+fn a_release_without_a_tap_tarball_a_deb_or_their_bundles_or_of_another_version_is_refused() {
+    // Catches: a release that ships without the file a channel downloads (each with sums that
+    // match their files, so the check of the set refuses them), a Debian package whose
+    // provenance bundle was never downloaded, and distribution files of another version than
+    // the hostkeeper packages', which a channel would publish as the wrong release.
+    let all = all_assets();
+    let without =
+        |gone: &str| -> Vec<String> { all.iter().filter(|n| *n != gone).cloned().collect() };
+    for gone in distribution_assets(VERSION) {
+        let dir = scratch(&format!("check-no-{gone}"));
+        assets_of(&dir, &without(&gone));
+        assert_eq!(
+            refused(check(&dir, COMMIT)),
+            [format!("{SUMS} does not list {gone}")]
+        );
+    }
+    for with_bundle in [
+        "tierstore_0.4.0_amd64.deb",
+        "tierstore-0.4.0-macos-arm64.tar.gz",
+    ] {
+        let dir = scratch(&format!("check-no-bundle-{with_bundle}"));
+        assets(&dir);
+        std::fs::remove_file(dir.join(bundles::name_of(with_bundle))).expect("rm");
+        assert_eq!(
+            refused(check(&dir, COMMIT)),
+            [format!(
+                "{with_bundle}: no provenance bundle {with_bundle}.sigstore.json"
+            )]
+        );
+    }
+    let mut names: Vec<String> = all
+        .iter()
+        .filter(|n| !distribution_assets(VERSION).contains(n))
+        .cloned()
+        .collect();
+    names.extend(distribution_assets("0.5.0"));
+    let dir = scratch("check-other-release-version");
+    assets_of(&dir, &names);
+    let problems = refused(check(&dir, COMMIT));
+    assert_eq!(problems.len(), 10, "{problems:?}");
+    assert!(problems.contains(&format!("{SUMS} does not list tierstore_0.4.0_arm64.deb")));
+    assert!(problems.contains(&format!(
+        "{SUMS} lists tierstore_0.5.0_arm64.deb, which is not an asset of {COMMIT}"
+    )));
 }
 
 #[test]
@@ -339,7 +408,7 @@ fn a_complete_directory_passes_the_check() {
     assets(&dir);
     let printed = check(&dir, COMMIT).expect("check");
     assert!(
-        printed.last().is_some_and(|l| l.contains("10 files")),
+        printed.last().is_some_and(|l| l.contains("15 files")),
         "{printed:?}"
     );
 }
@@ -586,13 +655,15 @@ fn publish_creates_a_draft_with_every_file_reads_it_back_and_publishes_it() {
     );
     assert!(create.contains(&"--draft".to_owned()));
     // 6 assets (a tarball and an SBOM per platform) + 4 (a package per platform and the index)
-    // + 6 bundles (a tarball and a package per platform) + the sums.
+    // + 5 (a tap tarball per platform and a Debian package per Linux platform) + 11 bundles (a
+    // tarball, a hostkeeper package and a tap tarball per platform, and the Debian packages)
+    // + the sums.
     assert_eq!(
         create
             .iter()
             .filter(|a| Path::new(a).starts_with(&*dir))
             .count(),
-        17
+        27
     );
     assert_eq!(ran[1][..3], ["release", "edit", "v0.3.0"]);
     assert!(ran[1].contains(&"--draft=false".to_owned()));

@@ -11,6 +11,7 @@
 
 mod desired;
 mod desired_tests;
+mod distribution_tests;
 mod hostkeeper;
 mod hostkeeper_tests;
 mod lint;

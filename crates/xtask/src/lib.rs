@@ -6,8 +6,9 @@
 //! - [`licenses`]: the third-party licence notice of a binary, which `package` puts in its tarball.
 //! - [`sums`]: assemble `SHA256SUMS` and check the files and their attestations against it.
 //! - [`build_commit`]: a built binary names the commit it was built from.
-//! - [`release`]: find the successful build of a commit, check its files, publish them; and the
-//!   hostkeeper packages of a build, their release index and the checks a host makes of them;
+//! - [`release`]: find the successful build of a commit, check its files, publish them; the
+//!   hostkeeper packages of a build, their release index and the checks a host makes of them; the
+//!   tap-named tarballs and the Debian packages of a build;
 //!   and the version and digest a published release is set as on the hostkeeper coordinator.
 //! - [`advisories`]: keep the security advisories in one issue.
 //!
@@ -333,6 +334,39 @@ enum ReleaseVerb {
         #[arg(long)]
         out: PathBuf,
     },
+    /// The tarball of a platform's binary named as the Homebrew tap's formula downloads it,
+    /// `dir/tierstore-<version>-<target>.tar.gz`, a copy of the commit-named tarball.
+    TapTarball {
+        /// The directory holding the commit-named tarball; the copy and its sums line go here.
+        dir: PathBuf,
+        /// The commit the tarball was built from, a full SHA.
+        #[arg(long)]
+        commit: String,
+        /// `<major>.<minor>.<patch>`, the release's version.
+        #[arg(long)]
+        version: String,
+        /// The platform of the tarball.
+        #[arg(long, value_enum)]
+        platform: package::Platform,
+    },
+    /// The Debian package of a Linux platform's binary, `<out>/tierstore_<version>_<arch>.deb`.
+    Deb {
+        /// The built binary; it is not run, so it may be of any platform.
+        #[arg(long)]
+        binary: PathBuf,
+        /// `<major>.<minor>.<patch>`, the release's version.
+        #[arg(long)]
+        version: String,
+        /// The platform the binary was built for (`linux-x86_64` or `linux-arm64`).
+        #[arg(long, value_enum)]
+        platform: package::Platform,
+        /// The third-party licence notice (`licenses`) to install under `/usr/share/doc/tierstore`.
+        #[arg(long)]
+        licenses: PathBuf,
+        /// The directory the package and its sums line are written to; created when missing.
+        #[arg(long)]
+        out: PathBuf,
+    },
     /// The release index of the hostkeeper packages in `dir`, `dir/index.json`, and its sums
     /// line in `dir/SHA256SUMS.index`.
     HostkeeperIndex {
@@ -608,6 +642,19 @@ fn run(cli: Cli) -> Result<Vec<String>, Error> {
             platform,
             &out,
         ),
+        Verb::Release(ReleaseVerb::TapTarball {
+            dir,
+            commit,
+            version,
+            platform,
+        }) => release::tap_tarball::tap_tarball(&dir, &commit, &version, platform),
+        Verb::Release(ReleaseVerb::Deb {
+            binary,
+            version,
+            platform,
+            licenses,
+            out,
+        }) => release::deb::deb(&binary, &version, platform, &licenses, &out),
         Verb::Release(ReleaseVerb::HostkeeperIndex {
             dir,
             commit,
