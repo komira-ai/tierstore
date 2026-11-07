@@ -25,6 +25,7 @@ fn a_path_is_on_the_surface_when_it_starts_with_an_entry() {
         ".github/workflows/artifacts.yml",
         "Cargo.toml",
         "rust-toolchain.toml",
+        "crates/tierstore/Cargo.toml",
         "crates/xtask/src/release/hostkeeper_package.rs",
     ] {
         assert!(on_surface(path.as_bytes()), "{path}");
@@ -35,7 +36,7 @@ fn a_path_is_on_the_surface_when_it_starts_with_an_entry() {
         "docs/ci-and-release.md",
         ".github/workflows/ci.yml",
         "crates/tierstore/src/server/bucket.rs",
-        "crates/tierstore/Cargo.toml",
+        "crates/tierstore-model/Cargo.toml",
         "crates/xtask/src/advisories.rs",
         "x/packaging/tierstore.toml",
         "",

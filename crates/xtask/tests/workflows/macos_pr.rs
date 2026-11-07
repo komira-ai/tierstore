@@ -14,7 +14,8 @@
 //!   macOS release build, with its `TARGET` and the version `surface` gives, exactly
 //!   [`pr_mac_commands`] (the commands of artifacts.yml's macOS build job, with the tests of the
 //!   whole workspace for the tests of the binary's crates), with no action but the checkout and a
-//!   cache restore (it uploads, saves and signs nothing), and with no `if:`, `env` or
+//!   cache restore (it uploads, saves and signs nothing), a checkout that keeps no token
+//!   (`persist-credentials: false`), and with no `if:`, `env` or
 //!   `continue-on-error` on a step;
 //! - `macos`, the check to require, does not need both, run under [`GATE_IF`] on ubuntu, and hold
 //!   one step, `exit 1` under [`GATE_STEP_IF`]: it fails unless `surface` passed and
@@ -113,12 +114,19 @@ pub fn scalars<'a>(node: &'a Node, out: &mut Vec<&'a str>) {
 }
 
 /// What in `text` names a secret or the token, if anything: `secrets` in any case (the context,
-/// `secrets: inherit`), `github.token` or `GITHUB_TOKEN`.
+/// `secrets: inherit`), `github.token` or `GITHUB_TOKEN`, or the `github` context indexed or
+/// whole (`github['token']`, `toJSON(github)`), which holds the token.
 fn names_a_secret(text: &str) -> Option<&'static str> {
     let lower = text.to_ascii_lowercase();
-    ["secrets", "github.token", "github_token"]
-        .into_iter()
-        .find(|word| lower.contains(word))
+    [
+        "secrets",
+        "github.token",
+        "github_token",
+        "github[",
+        "tojson(github",
+    ]
+    .into_iter()
+    .find(|word| lower.contains(word))
 }
 
 /// One line per way the job `name` of `file`, which a pull request runs on macOS, can reach a
@@ -329,6 +337,15 @@ fn mac_job_problems(job: Option<&Node>, workflow_env: Option<&Node>) -> Vec<Stri
         problems.push(format!("{name}: env RELEASE_VERSION is not {version}"));
     }
     problems.extend(execution_problems(name, mac, Some(ON_THE_SURFACE)));
+    let keeps_token = steps(job).iter().any(|s| {
+        at(s, &["uses"]).is_some_and(|u| u.starts_with("actions/checkout@"))
+            && at(s, &["with", "persist-credentials"]) != Some("false")
+    });
+    if keeps_token {
+        problems.push(format!(
+            "{name}: a checkout keeps the token in .git/config (persist-credentials is not false)"
+        ));
+    }
     for step in steps(job) {
         if entry(step, "env").is_some() {
             let label = at(step, &["name"])

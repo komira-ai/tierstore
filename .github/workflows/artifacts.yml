@@ -21,8 +21,8 @@
 # A pull request builds, packages and sums the Linux files, their hostkeeper packages included,
 # and attests nothing; the macOS job of this file does not run for a pull request (a pull request
 # that changes the macOS surface runs the same macOS build in macos.yml, which signs and uploads
-# nothing), so the pull request's sums cover the Linux files alone and it has no release index. A push to main builds every platform, also
-# signs, in the `attest` job, and then checks what it signed (`verify`), as a deployment does. A
+# nothing), so the pull request's sums cover the Linux files alone and it has no release index.
+# A push to main builds every platform, also signs, in the `attest` job, and then checks what it signed (`verify`), as a deployment does. A
 # run by hand (workflow_dispatch) on a branch builds every platform, the macOS one included, and
 # sums them, and signs nothing: it is how a change to the macOS build is tried before it merges.
 # The attest job is in THIS file for one reason: the signer identity of an attestation is the

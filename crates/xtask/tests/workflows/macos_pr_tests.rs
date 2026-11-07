@@ -6,8 +6,7 @@
 use std::process::Command;
 
 use super::macos_pr::{
-    GATE_STEP_IF, ON_THE_SURFACE, PR_MAC_TESTS, macos_pr_problems, pr_mac_commands,
-    pull_request_job_problems,
+    GATE_STEP_IF, PR_MAC_TESTS, macos_pr_problems, pr_mac_commands, pull_request_job_problems,
 };
 use super::platforms::{BUILDS, MAC_TESTS, build_commands, pull_request_macos_problems};
 use super::platforms_tests::in_job;
@@ -234,6 +233,12 @@ const DEFECTS: &[(&str, &str, &str, &str)] = &[
         "      - uses: actions/cache/save@55cc8345863c7cc4c66a329aec7e433d2d1c52a9 # v6.1.0\n      - name: The packaged binary carries a valid code signature\n",
         "macos-arm64: uses actions/cache/save@",
     ),
+    (
+        "macos-arm64",
+        "          persist-credentials: false\n",
+        "          persist-credentials: true\n",
+        "macos-arm64: a checkout keeps the token",
+    ),
     // macos: the check to require.
     (
         "macos",
@@ -406,6 +411,16 @@ fn a_secret_or_the_token_in_a_pull_request_macos_job_is_refused() {
             "    timeout-minutes: 60\n    secrets: inherit\n",
             "secrets",
         ),
+        (
+            "      TARGET: aarch64-apple-darwin\n",
+            "      TARGET: aarch64-apple-darwin\n      T: ${{ github['token'] }}\n",
+            "github[",
+        ),
+        (
+            "      TARGET: aarch64-apple-darwin\n",
+            "      TARGET: aarch64-apple-darwin\n      ALL: ${{ toJSON(github) }}\n",
+            "tojson(github",
+        ),
     ] {
         let text = spoiled_mac(replace, with);
         let named = format!("names {word}");
@@ -491,15 +506,6 @@ fn the_secret_check_names_the_exact_problems_and_nothing_in_a_clean_job() {
             "x.yml: the job mac runs on macOS for a pull request and names secrets (`echo ${{ secrets.A }}`); it holds no secret and no token",
         ]
     );
-}
-
-#[test]
-fn the_surface_condition_is_the_one_the_gate_and_the_job_share() {
-    // Catches: the job and the gate reading different outputs of `surface`, so the gate would
-    // accept a skip the job's condition did not make.
-    assert_eq!(ON_THE_SURFACE, "${{ needs.surface.outputs.mac == 'true' }}");
-    assert!(GATE_STEP_IF.contains("needs.surface.outputs.mac == 'true'"));
-    assert!(GATE_STEP_IF.contains("needs.surface.outputs.mac != 'true'"));
 }
 
 /// Tracked files that name macOS, launchd or a `target_os` and are not on the macOS surface, each
@@ -625,4 +631,38 @@ fn the_marker_check_sees_each_marker_and_skips_prose() {
     assert!(!is_code("docs/ci-and-release.md"));
     assert!(!is_code("docs/design/diagrams/live-update.svg"));
     assert!(is_code("packaging/hostkeeper/units/tierstore.plist"));
+}
+
+#[test]
+fn a_pull_request_job_whose_runner_the_lint_cannot_see_is_refused() {
+    // Catches: a pull request's job put on macOS through a matrix or an input (`runs-on` as an
+    // expression), a label in another case, or a reusable workflow, any of which would pass the
+    // check of the job's runner by its name; while a workflow no pull request starts may do so.
+    let head = "on:\n  pull_request:\njobs:\n";
+    let matrix = format!(
+        "{head}  t:\n    strategy:\n      matrix:\n        os: [macos-15]\n    runs-on: ${{{{ matrix.os }}}}\n    permissions:\n      contents: read\n"
+    );
+    assert_eq!(
+        pull_request_macos_problems("x.yml", &matrix),
+        [
+            "x.yml: the job t of a pull request runs on an expression; name its runner, so the lint can tell whether it is macOS"
+        ]
+    );
+    let called = format!(
+        "{head}  t:\n    uses: o/r/.github/workflows/w.yml@3d3c42e5aac5ba805825da76410c181273ba90b1 # v1.0.0\n"
+    );
+    assert_eq!(
+        pull_request_macos_problems("x.yml", &called),
+        [
+            "x.yml: the job t of a pull request calls a reusable workflow, whose runners the lint cannot see"
+        ]
+    );
+    let upper =
+        format!("{head}  t:\n    runs-on: MacOS-15\n    permissions:\n      contents: read\n");
+    assert_eq!(pull_request_macos_problems("x.yml", &upper).len(), 1);
+    let by_hand = matrix.replace("  pull_request:", "  workflow_dispatch:");
+    assert_eq!(
+        pull_request_macos_problems("x.yml", &by_hand),
+        Vec::<String>::new()
+    );
 }

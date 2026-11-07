@@ -15,9 +15,11 @@
 //! plist among it), the xtask verbs the macOS build job runs and the release code that checks
 //! their files, the workflows that build or check the macOS binary and their lint, and the
 //! toolchain and the root manifest (which pins the hostkeeper crates the package is unpacked
-//! with). The workflow lint (`tests/workflows/macos_pr_tests.rs`) refuses a tracked file that
-//! names macOS, launchd or a `target_os` and is not on the surface, unless it is listed there as
-//! exempt with its reason, so the list cannot fall behind the code.
+//! with), and the manifests of the binary's crates. The workflow lint
+//! (`tests/workflows/macos_pr_tests.rs`) refuses a tracked file that names macOS, launchd,
+//! `darwin` or a `target_os` and is not on the surface, unless it is listed there as exempt with
+//! its reason. Code that is POSIX alone (`cfg(unix)`, libc calls) and names none of those is not
+//! on the surface by that test; a change to it is checked on macOS after the merge.
 
 use std::path::Path;
 
@@ -36,6 +38,9 @@ pub const SURFACE: &[&str] = &[
     // and checked with.
     "Cargo.toml",
     "rust-toolchain.toml",
+    // The manifests of the binary's crates: their features choose the platform code built.
+    "crates/tierstore/Cargo.toml",
+    "crates/objstore-s3/Cargo.toml",
     // The packaging: the launchd plist, the systemd units, the hostkeeper manifest.
     "packaging/",
     "crates/tierstore/tests/packaging",

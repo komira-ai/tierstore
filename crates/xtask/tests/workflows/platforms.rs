@@ -733,7 +733,31 @@ fn on_macos(job: &Node) -> bool {
     if let Some(runs_on) = entry(job, "runs-on") {
         scalars(runs_on, &mut labels);
     }
-    labels.iter().any(|l| l.starts_with("macos"))
+    labels
+        .iter()
+        .any(|l| l.to_ascii_lowercase().starts_with("macos"))
+}
+
+/// One line per job of a workflow a pull request starts whose runner the lint cannot see: a
+/// `runs-on` that is an expression (a matrix value, an input), or a call of a reusable workflow
+/// (a job-level `uses:`), either of which could put the job on macOS unseen.
+fn unseen_runner_problems(file: &str, name: &str, job: &Node) -> Vec<String> {
+    let mut problems = Vec::new();
+    let mut labels = Vec::new();
+    if let Some(runs_on) = entry(job, "runs-on") {
+        scalars(runs_on, &mut labels);
+    }
+    if labels.iter().any(|l| l.contains("${{")) {
+        problems.push(format!(
+            "{file}: the job {name} of a pull request runs on an expression; name its runner, so the lint can tell whether it is macOS"
+        ));
+    }
+    if entry(job, "uses").is_some() {
+        problems.push(format!(
+            "{file}: the job {name} of a pull request calls a reusable workflow, whose runners the lint cannot see"
+        ));
+    }
+    problems
 }
 
 /// One line per job of the workflow `file` (`text`) that a pull request runs on a macOS runner
@@ -741,7 +765,8 @@ fn on_macos(job: &Node) -> bool {
 /// the job is on macOS ([`on_macos`]) under another `if:` than [`NOT_FOR_A_PULL_REQUEST`]: it is
 /// refused unless it is the job `macos-arm64` of `macos.yml` under [`ON_THE_SURFACE`], and each
 /// such job is held to [`pull_request_job_problems`] (`contents: read` alone, no environment, no
-/// secret and no token in it or in the workflow's `env`).
+/// secret and no token in it or in the workflow's `env`). A job of such a workflow whose runner
+/// is an expression, or that calls a reusable workflow, is refused ([`unseen_runner_problems`]).
 pub fn pull_request_macos_problems(file: &str, text: &str) -> Vec<String> {
     let doc = match yaml::load(text) {
         Ok(doc) => doc,
@@ -753,6 +778,7 @@ pub fn pull_request_macos_problems(file: &str, text: &str) -> Vec<String> {
     let mut problems = Vec::new();
     for (name, job) in entry(&doc, "jobs").map_or(&[][..], entries) {
         let name = name.as_str().unwrap_or_default();
+        problems.extend(unseen_runner_problems(file, name, job));
         let condition = at(job, &["if"]);
         if !on_macos(job) || condition == Some(NOT_FOR_A_PULL_REQUEST) {
             continue;
