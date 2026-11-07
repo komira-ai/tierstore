@@ -350,6 +350,34 @@ fn client_builder(
         .pool_idle_timeout(pool_idle_timeout)
 }
 
+/// A send that failed, and whether it did so before the store could have seen the request.
+pub(super) struct Failed {
+    pub(super) error: ObjectStoreError,
+    /// The request certainly never reached a store, so sending it again cannot land it twice.
+    pub(super) unsent: bool,
+}
+
+/// The failure `e` of a send.
+///
+/// The request is sent again only for an error of the connector (`is_connect`): the connection
+/// to the endpoint was refused, had no route, could not resolve, or did not come up in
+/// `connect_timeout`. hyper-util's client reports that kind only for an error of the connector's
+/// `connect` call, which runs before the request is handed to a connection, so not one byte of
+/// the request, its head or its body, was written. Every other error leaves that open and is
+/// not sent again here: a timeout of the whole request, a reset or an end of the connection
+/// after the request was handed over, and "connection closed before message completed", which
+/// hyper also gives when the request was written to a connection the store had already half
+/// closed or died on while it read. The client cannot tell that from a store that did the work
+/// and died before it answered, and a resend of a conditional PUT that landed would break the
+/// protocol of the markers. (hyper-util's own client already sends again a request that hyper
+/// returns unwritten on a pooled connection that turned out closed.)
+pub(super) fn failed(e: reqwest::Error) -> Failed {
+    Failed {
+        unsent: e.is_connect(),
+        error: transport(e),
+    }
+}
+
 impl Conn {
     /// The endpoint for the next request: the endpoints in turn, one step for each call.
     fn next_target(&self) -> &Target {
@@ -369,7 +397,9 @@ impl Conn {
     }
 
     /// Signs and sends one request, limited as a whole to [`Conn::timeout_for`] its
-    /// body. `key` of `None` addresses the bucket.
+    /// body. `key` of `None` addresses the bucket. A send that never reached a store is made
+    /// again to the next endpoint (see [`Conn::failing_over`]); the body is held as `Bytes`, so
+    /// every send has all of it, and each is signed again for the `Host` it goes to.
     async fn send(
         &self,
         method: Method,
@@ -378,11 +408,26 @@ impl Conn {
         headers: Vec<(&'static str, String)>,
         body: Bytes,
     ) -> Result<Response, ObjectStoreError> {
-        let req = self
-            .signed(method, key, query, headers, &body)
-            .timeout(self.timeout_for(body.len()));
-        let req = if body.is_empty() { req } else { req.body(body) };
-        req.send().await.map_err(transport)
+        // PERF: hashing a 128 MiB segment takes a fraction of a second on this task's
+        // thread; move it off the runtime if upload latency shows it.
+        let payload = if body.is_empty() {
+            EMPTY_SHA256.to_owned()
+        } else {
+            hex::encode(Sha256::digest(&body))
+        };
+        let timeout = self.timeout_for(body.len());
+        self.failing_over(|| {
+            let req = self
+                .signed_payload(method.clone(), key, query, headers.clone(), &payload)
+                .timeout(timeout);
+            let req = if body.is_empty() {
+                req
+            } else {
+                req.body(body.clone())
+            };
+            async move { req.send().await.map_err(failed) }
+        })
+        .await
     }
 
     /// Signs and sends a GET with no whole-request limit: the answer's headers must
@@ -393,11 +438,54 @@ impl Conn {
         key: &ObjectKey,
         headers: Vec<(&'static str, String)>,
     ) -> Result<Response, ObjectStoreError> {
-        let req = self.signed(Method::GET, Some(key), &[], headers, &Bytes::new());
-        let resp = self.within(req.send()).await?.map_err(transport)?;
+        let resp = self
+            .failing_over(|| {
+                let req =
+                    self.signed_payload(Method::GET, Some(key), &[], headers.clone(), EMPTY_SHA256);
+                async move {
+                    match self.within(req.send()).await {
+                        Ok(sent) => sent.map_err(failed),
+                        Err(stalled) => Err(Failed {
+                            error: stalled,
+                            unsent: false,
+                        }),
+                    }
+                }
+            })
+            .await?;
         #[cfg(test)]
         read_limit_tests::took_head();
         Ok(resp)
+    }
+
+    /// Runs `attempt`, which signs a request for the next endpoint and sends it, again after a
+    /// failure that proves the store never saw the request ([`Failed::unsent`]), until the
+    /// sends are [`S3Tuning::endpoint_attempts`] in all. The last failure is the error, as it
+    /// is for a request sent once; any other failure ends the request at once. With one
+    /// endpoint the next send is to the same address on a new connection.
+    pub(super) async fn failing_over<F, Fut>(
+        &self,
+        mut attempt: F,
+    ) -> Result<Response, ObjectStoreError>
+    where
+        F: FnMut() -> Fut,
+        Fut: Future<Output = Result<Response, Failed>>,
+    {
+        let mut sends = 1;
+        loop {
+            match attempt().await {
+                Ok(resp) => return Ok(resp),
+                Err(failed) if failed.unsent && sends < self.tuning.endpoint_attempts => {
+                    tracing::warn!(
+                        error = %failed.error,
+                        sends,
+                        "request never reached the store; sending it to the next endpoint"
+                    );
+                    sends += 1;
+                }
+                Err(failed) => return Err(failed.error),
+            }
+        }
     }
 
     /// Runs `step`, failing as a stalled read if it takes longer than `request_timeout`.
@@ -432,28 +520,9 @@ impl Conn {
         Ok(body.freeze())
     }
 
-    /// The signed request, with no limit set and no body attached.
-    fn signed(
-        &self,
-        method: Method,
-        key: Option<&ObjectKey>,
-        query: &[(&str, String)],
-        headers: Vec<(&'static str, String)>,
-        body: &[u8],
-    ) -> reqwest::RequestBuilder {
-        // PERF: hashing a 128 MiB segment takes a fraction of a second on this task's
-        // thread; move it off the runtime if upload latency shows it.
-        let payload = if body.is_empty() {
-            EMPTY_SHA256.to_owned()
-        } else {
-            hex::encode(Sha256::digest(body))
-        };
-        self.signed_payload(method, key, query, headers, &payload)
-    }
-
     /// The signed request for a body whose hex SHA-256 is `payload` (or `UNSIGNED-PAYLOAD`),
-    /// with no limit set and no body attached.
-    fn signed_payload(
+    /// with no limit set and no body attached. It goes to the next endpoint in turn.
+    pub(super) fn signed_payload(
         &self,
         method: Method,
         key: Option<&ObjectKey>,

@@ -1,6 +1,6 @@
 # One store, several endpoints: the S3 client sends each request to the next endpoint in turn
 
-Status: **built in the pull request that adds `endpoints` (tierstore#229).** This document replaces the first version of #228, which also planned a random mode, failover, down marks and metrics; none of that is decided (section 7). Terms in bold are those of [tierstore-design.md](tierstore-design.md) and [put-without-lock.md](put-without-lock.md).
+Status: **built in the pull request that adds `endpoints` (tierstore#229); failover on a failed connect added in section 8.** This document replaces the first version of #228, which also planned a random mode, failover, down marks and metrics; none of that is decided (section 7). Terms in bold are those of [tierstore-design.md](tierstore-design.md) and [put-without-lock.md](put-without-lock.md).
 
 ## 1. The problem
 
@@ -22,7 +22,7 @@ What the user wants: the same thing as now, with N connections, and the requests
 - Nothing above the S3 client knows there is more than one endpoint: the `Backend` and `ObjectStore` interfaces, the markers, the locks, every stored format and the fronts are unchanged. The marks bucket of the hot tier is a second handle on the same store and shares the endpoints. `format-epoch --hot-endpoint` stays one address.
 - No new `[server]` keys.
 
-A request that fails fails as it does today, with the same error. The caller's retry is a new request and goes to the next endpoint because of the rotation. The client adds no retry on another endpoint beyond what it does today.
+A request that fails fails as it does today, with the same error, except one whose connection to its endpoint could not be made: that request never reached a store and goes to the next endpoint (section 8). The caller's retry of any other failure is a new request and goes to the next endpoint because of the rotation.
 
 ## 3. What the design rests on
 
@@ -68,8 +68,23 @@ Tests, in the pull request: nine requests over three loopback fakes that verify 
 
 None of these is part of this design, and none is a decision against it; each would be its own design and pull request.
 
-- **Failover**, and any down-marking of an endpoint that did not answer.
+- **Down-marking** of an endpoint that did not answer (failover on a failed connect is built, section 8).
 - **A random choice** in place of the rotation.
 - **Least-in-flight choice**, if the endpoints differ in speed.
 - **Metrics per endpoint** and a line at start that names them.
 - **TLS** to an endpoint (not built for a single endpoint either).
+
+## 8. Failover on a connection that could not be made
+
+The user needs a node down not to fail a third of the requests (the next lab has three storage nodes). The client sends a request again, to the next endpoint, only when the request certainly never reached a store. No health check, no down mark, no probe.
+
+| Failure of a send | Sent again? | Why |
+|---|---|---|
+| connect refused, no route, name not resolved, connect timeout (reqwest `is_connect`) | yes, up to `server.s3_endpoint_attempts` sends (default 3) | hyper-util reports this kind only for an error of the connector, which runs before the request is given to a connection: no byte of it was written |
+| timeout of the whole request or of the answer's head; reset or closed after the request was handed over; "connection closed before message completed"; any HTTP status (5xx included) | no | the store may have done the work; a conditional PUT that landed and is sent again breaks the lock-free marker protocol |
+
+"Connection closed before message completed" (hyper `IncompleteMessage`, shown as `client error (SendRequest)`) is the answer to a request written to a pooled connection that the store had already closed or died on. hyper cannot tell that from a store that read the request, did the work and died. When hyper knows the request was not written to a reused connection it returns the request to hyper-util, whose client already sends it on a new connection; the case that reaches the caller is the one that is not provable, so it is not sent again here. The remedy for it is the one in place: `server.s3_pool_idle_timeout` shorter than the store's idle close, and the caller's retry.
+
+Bodies. A `Bytes` body (small puts, the parts of a multipart upload) is cloned per send, which copies nothing, and each send is signed again for the `Host` it goes to. A body streamed from the client (`put_stream`, one streamed PUT) is not buffered: its source is shared by the sends of the request, and a send is repeated only after a failed connect, when the body was not yet polled, so the next send reads it from its start. A streamed body that has been read is never replayed; if it were, the new body would end short of its length and fail.
+
+With one endpoint a send that failed to connect is repeated to the same address on a new connection, up to the same bound.

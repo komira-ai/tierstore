@@ -317,6 +317,7 @@ pub(super) struct ServerTable {
     pub s3_pool_idle_timeout: Option<Dur>,
     pub s3_read_retries: Option<u32>,
     pub s3_read_retry_wait: Option<Dur>,
+    pub s3_endpoint_attempts: Option<u32>,
     // The keys of `config_io`.
     pub header_timeout: Option<Dur>,
     pub accept_pause: Option<Dur>,

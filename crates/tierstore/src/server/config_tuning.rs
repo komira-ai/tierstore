@@ -28,7 +28,7 @@ pub struct S3Client {
     /// the stretch off.
     pub min_body_rate: Option<NonZeroU64>,
     /// `server.s3_pool_idle_timeout`, `server.s3_read_retries`, `server.s3_read_retry_wait`,
-    /// `server.s3_single_put_max` and `server.s3_part_bytes`.
+    /// `server.s3_endpoint_attempts`, `server.s3_single_put_max` and `server.s3_part_bytes`.
     pub tuning: S3Tuning,
     /// `server.s3_chunks_waiting`: how many chunks of a part an S3 tier holds between the body it
     /// is given and the request that sends it.
@@ -145,6 +145,15 @@ pub(super) fn s3_client(server: &ServerTable) -> Result<S3Client, ConfigError> {
         old.tuning.read_retry_wait,
         (MS, Duration::from_secs(10)),
     )?;
+    let endpoint_attempts = within(
+        "server",
+        "s3_endpoint_attempts",
+        server
+            .s3_endpoint_attempts
+            .unwrap_or(old.tuning.endpoint_attempts),
+        1,
+        8,
+    )?;
     let single_put_max = within(
         "server",
         "s3_single_put_max",
@@ -170,6 +179,7 @@ pub(super) fn s3_client(server: &ServerTable) -> Result<S3Client, ConfigError> {
             pool_idle_timeout,
             read_retries,
             read_retry_wait,
+            endpoint_attempts,
             single_put_max,
             part_bytes,
         },
@@ -283,6 +293,7 @@ cache  = true
         assert_eq!(client.tuning.pool_idle_timeout, Duration::from_secs(30));
         assert_eq!(client.tuning.read_retries, 2);
         assert_eq!(client.tuning.read_retry_wait, Duration::from_millis(50));
+        assert_eq!(client.tuning.endpoint_attempts, 3);
         assert_eq!(client.tuning.single_put_max, 5 << 30);
         assert_eq!(client.tuning.part_bytes, 16 << 20);
         assert_eq!(client, S3Client::default());
@@ -306,7 +317,7 @@ cache  = true
         let text = with_server(
             "s3_connect_timeout = \"2s\"\ns3_min_bytes_per_sec = 4096\n\
              s3_pool_idle_timeout = \"10s\"\ns3_read_retries = 4\ns3_read_retry_wait = \"7ms\"\n\
-             s3_single_put_max = \"1GiB\"\ns3_part_bytes = \"64MiB\"",
+             s3_endpoint_attempts = 5\ns3_single_put_max = \"1GiB\"\ns3_part_bytes = \"64MiB\"",
         );
         let text = text.replacen(
             "budget = 1000",
@@ -321,6 +332,7 @@ cache  = true
         assert_eq!(client.tuning.pool_idle_timeout, Duration::from_secs(10));
         assert_eq!(client.tuning.read_retries, 4);
         assert_eq!(client.tuning.read_retry_wait, Duration::from_millis(7));
+        assert_eq!(client.tuning.endpoint_attempts, 5);
         assert_eq!(client.tuning.single_put_max, 1 << 30);
         assert_eq!(client.tuning.part_bytes, 64 << 20);
         let built = built(&mut cli);
@@ -374,6 +386,14 @@ cache  = true
             (
                 "s3_read_retries = 9",
                 "server.s3_read_retries: 9 is not between 0 and 8",
+            ),
+            (
+                "s3_endpoint_attempts = 0",
+                "server.s3_endpoint_attempts: 0 is not between 1 and 8",
+            ),
+            (
+                "s3_endpoint_attempts = 9",
+                "server.s3_endpoint_attempts: 9 is not between 1 and 8",
             ),
             (
                 "s3_read_retry_wait = \"0ms\"",
@@ -451,20 +471,22 @@ cache  = true
     fn the_ends_of_the_ranges_are_taken() {
         let low = with_server(
             "s3_connect_timeout = \"1ms\"\ns3_pool_idle_timeout = \"1ms\"\n\
-             s3_read_retries = 0\ns3_read_retry_wait = \"1ms\"\n\
+             s3_read_retries = 0\ns3_read_retry_wait = \"1ms\"\ns3_endpoint_attempts = 1\n\
              s3_single_put_max = \"1MiB\"\ns3_part_bytes = \"5MiB\"",
         );
         let cli = from_text(&low, DEFAULTS).unwrap();
         assert_eq!(cli.s3_client.tuning.read_retries, 0);
+        assert_eq!(cli.s3_client.tuning.endpoint_attempts, 1);
         assert_eq!(cli.s3_client.tuning.single_put_max, 1 << 20);
         assert_eq!(cli.s3_client.tuning.part_bytes, 5 << 20);
         let high = with_server(
             "s3_connect_timeout = \"10m\"\ns3_pool_idle_timeout = \"1h\"\n\
-             s3_read_retries = 8\ns3_read_retry_wait = \"10s\"\n\
+             s3_read_retries = 8\ns3_read_retry_wait = \"10s\"\ns3_endpoint_attempts = 8\n\
              s3_single_put_max = \"5GiB\"\ns3_part_bytes = \"1GiB\"",
         );
         let cli = from_text(&high, DEFAULTS).unwrap();
         assert_eq!(cli.s3_client.tuning.read_retries, 8);
+        assert_eq!(cli.s3_client.tuning.endpoint_attempts, 8);
         assert_eq!(cli.s3_client.tuning.single_put_max, 5 << 30);
         assert_eq!(cli.s3_client.tuning.part_bytes, 1 << 30);
         let edge = with_hot(

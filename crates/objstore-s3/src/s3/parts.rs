@@ -43,7 +43,7 @@ use reqwest::header::CONTENT_LENGTH;
 use reqwest::{Method, Response, StatusCode};
 
 use super::sigv4::UNSIGNED_PAYLOAD;
-use super::{Conn, S3Store, Stalled, failure, multipart, transport, xml};
+use super::{Conn, Failed, S3Store, Stalled, failure, multipart, transport, xml};
 use crate::body::{too_long, too_short};
 use crate::{BodyStream, KeyPrefix, ObjectKey, ObjectStoreError, PageSize};
 
@@ -291,7 +291,9 @@ impl Conn {
     /// Signs and sends a PUT of `len` bytes read from `source`, with `headers` besides the
     /// signed ones, and gives the store's answer.
     /// The request is cut short, as `Stalled`, when it makes no progress for `request_timeout`
-    /// (see the module docs).
+    /// (see the module docs). A send that fails to connect is made again to the next endpoint,
+    /// with the same source and no copy of it (see [`Conn::watched`]); any other failure ends
+    /// the request, since the source may have been read.
     pub(super) async fn send_streamed(
         &self,
         key: &ObjectKey,
@@ -300,21 +302,56 @@ impl Conn {
         len: u64,
         source: BodyStream,
     ) -> Result<Response, ObjectStoreError> {
-        let pulse = Arc::new(Pulse::default());
-        let body = Streamed::new(source, len, Arc::clone(&pulse));
-        let request = self
-            .signed_payload(Method::PUT, Some(key), query, headers, UNSIGNED_PAYLOAD)
-            .header(CONTENT_LENGTH, len)
-            .body(reqwest::Body::wrap(body));
+        let source = Arc::new(Mutex::new(source.fuse()));
+        self.failing_over(|| {
+            let pulse = Arc::new(Pulse::default());
+            let body = Streamed::sharing(Arc::clone(&source), len, Arc::clone(&pulse));
+            let request = self
+                .signed_payload(
+                    Method::PUT,
+                    Some(key),
+                    query,
+                    headers.clone(),
+                    UNSIGNED_PAYLOAD,
+                )
+                .header(CONTENT_LENGTH, len)
+                .body(reqwest::Body::wrap(body));
+            self.watched(request, pulse)
+        })
+        .await
+    }
+
+    /// Sends `request`, whose body is fed by `pulse`, and ends it as `Stalled` if it makes no
+    /// progress for `request_timeout`. A failure to connect is `unsent`: the body is polled only
+    /// once the request is handed to a connection, so the source has not been read and the
+    /// next send reads it from its start. (Were it read, the next body would end short of
+    /// `len` and fail as [`ObjectStoreError::Body`], not store a part.)
+    async fn watched(
+        &self,
+        request: reqwest::RequestBuilder,
+        pulse: Arc<Pulse>,
+    ) -> Result<Response, Failed> {
         let mut sending = Box::pin(request.send());
         let limit = self.request_timeout;
         let mut seen = 0;
         loop {
             let waited = tokio::time::timeout(limit, &mut sending).await;
             match waited {
-                Ok(answer) => return answer.map_err(|e| caused_by(&pulse, e)),
+                Ok(Ok(resp)) => return Ok(resp),
+                Ok(Err(e)) => {
+                    let unsent = e.is_connect();
+                    return Err(Failed {
+                        error: caused_by(&pulse, e),
+                        unsent,
+                    });
+                }
                 Err(_) if pulse.moved(&mut seen) => {}
-                Err(_) => return Err(ObjectStoreError::Transport(Arc::new(Stalled))),
+                Err(_) => {
+                    return Err(Failed {
+                        error: ObjectStoreError::Transport(Arc::new(Stalled)),
+                        unsent: false,
+                    });
+                }
             }
         }
     }
@@ -367,9 +404,10 @@ impl Pulse {
 /// docs. The piece taken last is held back until the next one, or the end of the source, has
 /// been seen.
 struct Streamed {
-    /// Behind a lock only so that the body is `Sync`, as the client wants it. Fused, so that
-    /// a poll after the end is no poll of the source.
-    source: Mutex<Fuse<BodyStream>>,
+    /// Behind a lock so that the body is `Sync`, as the client wants it, and shared so that
+    /// the next send of a request that never connected reads the same source (only one send
+    /// has a body at a time). Fused, so that a poll after the end is no poll of the source.
+    source: Arc<Mutex<Fuse<BodyStream>>>,
     len: u64,
     /// The bytes taken from the source so far.
     taken: u64,
@@ -378,9 +416,11 @@ struct Streamed {
 }
 
 impl Streamed {
-    fn new(source: BodyStream, len: u64, pulse: Arc<Pulse>) -> Self {
+    /// A body over a `source` that the next send of the request reads from where this one
+    /// stopped, which is the start if this one never began.
+    fn sharing(source: Arc<Mutex<Fuse<BodyStream>>>, len: u64, pulse: Arc<Pulse>) -> Self {
         Self {
-            source: Mutex::new(source.fuse()),
+            source,
             len,
             taken: 0,
             held: None,
@@ -417,9 +457,12 @@ impl http_body::Body for Streamed {
         let this = self.get_mut();
         this.pulse.polls.fetch_add(1, Ordering::Relaxed);
         loop {
-            let locked = this.source.get_mut();
-            let source = locked.unwrap_or_else(PoisonError::into_inner);
-            let next = source.poll_next_unpin(cx);
+            let next = {
+                let locked = this.source.lock();
+                locked
+                    .unwrap_or_else(PoisonError::into_inner)
+                    .poll_next_unpin(cx)
+            };
             let waiting = &this.pulse.waiting;
             waiting.store(next.is_pending(), Ordering::Relaxed);
             match ready!(next) {
@@ -453,6 +496,10 @@ mod tests {
 
     use super::*;
 
+    fn streamed(source: BodyStream, len: u64, pulse: Arc<Pulse>) -> Streamed {
+        Streamed::sharing(Arc::new(Mutex::new(source.fuse())), len, pulse)
+    }
+
     fn piece(text: &'static str) -> Result<Bytes, ObjectStoreError> {
         Ok(Bytes::from_static(text.as_bytes()))
     }
@@ -466,7 +513,7 @@ mod tests {
     fn written(len: u64, pieces: Vec<Result<Bytes, ObjectStoreError>>) -> (Vec<u8>, String) {
         futures::executor::block_on(async {
             let source = stream::iter(pieces).boxed();
-            let mut body = Streamed::new(source, len, Arc::default());
+            let mut body = streamed(source, len, Arc::default());
             let mut data = Vec::new();
             loop {
                 let polled = std::future::poll_fn(|cx| Pin::new(&mut body).poll_frame(cx));
@@ -524,7 +571,7 @@ mod tests {
     fn the_error_that_ends_a_body_is_kept_for_the_request() {
         let pulse = Arc::new(Pulse::default());
         let source = stream::iter(vec![piece("ab"), broken()]).boxed();
-        let mut body = Streamed::new(source, 10, Arc::clone(&pulse));
+        let mut body = streamed(source, 10, Arc::clone(&pulse));
         let mut cx = Context::from_waker(Waker::noop());
         let polled = Pin::new(&mut body).poll_frame(&mut cx);
         assert!(matches!(polled, Poll::Ready(Some(Err(_)))));
@@ -547,7 +594,7 @@ mod tests {
 
         let pulse = Arc::new(Pulse::default());
         let source = stream::pending().boxed();
-        let mut body = Streamed::new(source, 3, Arc::clone(&pulse));
+        let mut body = streamed(source, 3, Arc::clone(&pulse));
         let mut cx = Context::from_waker(Waker::noop());
         assert!(Pin::new(&mut body).poll_frame(&mut cx).is_pending());
         let mut seen = 0;

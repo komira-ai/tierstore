@@ -378,7 +378,7 @@ fn the_io_keys_are_read_here_and_refused_by_the_pinned_release_before() {
     let keys = "header_timeout = \"61s\"\nlisten_backlog = 512\naccept_pause = \"150ms\"\n\
                 door_grace = \"4s\"\ndoor_look = \"20ms\"\nput_pieces_queued = 6\n\
                 oci_handshake_timeout = \"12s\"\ns3_part_bytes = \"32MiB\"\n\
-                s3_multipart_threshold = \"32MiB\"\ns3_chunks_waiting = 2\n\
+                s3_multipart_threshold = \"32MiB\"\ns3_chunks_waiting = 2\ns3_endpoint_attempts = 4\n\
                 dir_copy_chunk = \"2MiB\"\ndir_read_chunk = \"128KiB\"";
     assert_eq!(both(&node.file(keys, "", "")), (ok.clone(), refused));
     assert_eq!(both(&node.file("", "", "")), (ok.clone(), ok));
