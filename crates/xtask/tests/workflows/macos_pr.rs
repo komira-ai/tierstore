@@ -1,36 +1,33 @@
 //! The macOS checks of a pull request: `macos.yml`, the one workflow that runs a pull request on a
-//! macOS runner, and only when the pull request changes the macOS surface
-//! (`xtask::mac_surface::SURFACE`).
+//! macOS runner, for every pull request.
 //!
 //! [`macos_pr_problems`] refuses `macos.yml` when:
 //! - its triggers are not `pull_request` alone, or its concurrency is not one group per pull
 //!   request ([`GROUP`]) that cancels the older run;
-//! - its jobs are not `surface`, `macos-arm64` and `macos`;
-//! - `surface` does not run on ubuntu, from a checkout of the merge commit and its parents
-//!   (`fetch-depth: 2`), exactly [`surface_commands`] (the changed paths, the answer of `cargo
-//!   xtask mac-surface`, the version of the build), with the version under [`VERSION_IF`] alone,
-//!   and hand the answer and the version on as its outputs;
-//! - `macos-arm64` does not need `surface` and run under [`ON_THE_SURFACE`] on the runner of the
-//!   macOS release build, with its `TARGET` and the version `surface` gives, exactly
-//!   [`pr_mac_commands`] (the commands of artifacts.yml's macOS build job, with the tests of the
-//!   whole workspace for the tests of the binary's crates), with no action but the checkout and a
-//!   cache restore (it uploads, saves and signs nothing), a checkout that keeps no token
-//!   (`persist-credentials: false`), and with no `if:`, `env` or
-//!   `continue-on-error` on a step;
-//! - `macos`, the check to require, does not need both, run under [`GATE_IF`] on ubuntu, and hold
-//!   one step, `exit 1` under [`GATE_STEP_IF`]: it fails unless `surface` passed and
-//!   `macos-arm64` passed on the surface or was skipped off it;
+//! - its jobs are not `version` and [`MAC_JOB`] (a job named `macos-arm64` among them: a pull
+//!   request's run of artifacts.yml has a skipped job of that name, which a check of that name
+//!   would pass on);
+//! - `version` does not run on ubuntu, under no `if:`, exactly [`version_commands`] (artifacts.yml's
+//!   version, unrecorded), with no action but the checkout, and hand the version on as its output;
+//! - [`MAC_JOB`] does not need `version` and run under no `if:` on the runner of the macOS release
+//!   build, with its `TARGET` and the version `version` gives, exactly [`pr_mac_commands`] (the
+//!   commands of artifacts.yml's macOS build job, with the tests of the whole workspace for the
+//!   tests of the binary's crates), with no action but the checkout and a cache restore of
+//!   artifacts.yml's macOS cache ([`CACHE_KEY`], [`CACHE_RESTORE_KEYS`]: it uploads, saves and
+//!   signs nothing), a checkout that keeps no token (`persist-credentials: false`), and with no
+//!   `if:`, `env` or `continue-on-error` on a step;
 //! - the cargo-cyclonedx pins of its `env` are not artifacts.yml's.
 //!
 //! [`pull_request_job_problems`] refuses a job a pull request runs on macOS that holds anything
 //! but `contents: read`, names an environment, or names a secret or the token anywhere in it or in
 //! its workflow's `env` (which every job sees). `platforms::pull_request_macos_problems` applies
-//! it to every workflow, and refuses a job a pull request runs on macOS outside `macos.yml`.
+//! it to every workflow, and refuses a job a pull request runs on macOS other than [`MAC_JOB`] of
+//! `macos.yml`.
 
 use super::lint::{entries, entry, names};
 use super::platforms::{
     BUILDS, MAC_TESTS, action_problems, at, build_commands, command_problems, commands,
-    execution_problems, steps,
+    execution_problems, steps, using,
 };
 use super::yaml::{self, Node, Value};
 
@@ -40,37 +37,32 @@ pub const MACOS_PR: &str = "macos.yml";
 /// The one group of a pull request's runs.
 pub const GROUP: &str = "macos-${{ github.event.pull_request.number }}";
 
-/// The `if:` of the macOS job: the pull request changes the macOS surface.
-pub const ON_THE_SURFACE: &str = "${{ needs.surface.outputs.mac == 'true' }}";
+/// The macOS job of `macos.yml`: not `macos-arm64`, the name of artifacts.yml's macOS job, which a
+/// pull request's run of artifacts.yml skips.
+pub const MAC_JOB: &str = "macos";
 
-/// The `if:` of the version step of `surface`: on the surface alone.
-pub const VERSION_IF: &str = "${{ steps.surface.outputs.mac == 'true' }}";
+/// The key of the cache the macOS job restores: artifacts.yml's macOS cache, its `${{ github.job }}`
+/// spelled out as that job's name.
+pub const CACHE_KEY: &str = "cargo-${{ runner.os }}-${{ runner.arch }}-macos-arm64-${{ hashFiles('Cargo.lock', 'rust-toolchain.toml') }}";
 
-/// The `if:` of the check to require: it runs whatever the jobs it needs did, unless the run was
-/// cancelled (a newer run of the pull request reports it).
-pub const GATE_IF: &str = "${{ !cancelled() }}";
-
-/// The `if:` of the one step of `macos`, which fails it.
-pub const GATE_STEP_IF: &str = "${{ needs.surface.result != 'success' || (needs.surface.outputs.mac == 'true' && needs.macos-arm64.result != 'success') || (needs.surface.outputs.mac != 'true' && needs.macos-arm64.result != 'skipped') }}";
+/// The restore keys of the cache the macOS job restores, likewise artifacts.yml's.
+pub const CACHE_RESTORE_KEYS: &str = "cargo-${{ runner.os }}-${{ runner.arch }}-macos-arm64-";
 
 /// The tests of the macOS job: every test of the workspace, none left out.
 pub const PR_MAC_TESTS: &str =
     "cargo test --locked --workspace --features tierstore/s3 --no-fail-fast";
 
 /// The jobs of `macos.yml`, sorted.
-pub const JOBS: [&str; 3] = ["macos", "macos-arm64", "surface"];
+pub const JOBS: [&str; 2] = [MAC_JOB, "version"];
 
 /// The variables of the file's `env` that pin cargo-cyclonedx, which must be artifacts.yml's.
 const PINS: [&str; 2] = ["CYCLONEDX_VERSION", "CYCLONEDX_SHA256_AARCH64_MACOS"];
 
-/// The `run:` commands of `surface`, in order.
-pub fn surface_commands() -> Vec<String> {
+/// The `run:` commands of `version`, in order.
+pub fn version_commands() -> Vec<String> {
     vec![
         "rustup toolchain install".to_owned(),
         "cargo xtask --help".to_owned(),
-        "git diff --name-only -z --no-renames HEAD^1 HEAD > \"$RUNNER_TEMP/changed\"".to_owned(),
-        "cargo xtask mac-surface --changed \"$RUNNER_TEMP/changed\" --output \"$GITHUB_OUTPUT\""
-            .to_owned(),
         "cargo xtask release version --repo \"$GITHUB_REPOSITORY\" --version-file VERSION --output \"$GITHUB_OUTPUT\""
             .to_owned(),
     ]
@@ -221,95 +213,57 @@ pub fn macos_pr_problems(text: &str, artifacts: &str) -> Vec<String> {
             .find(|(k, _)| k.as_str() == Some(name))
             .map(|(_, v)| v)
     };
-    problems.extend(surface_problems(job("surface")));
-    problems.extend(mac_job_problems(job("macos-arm64"), entry(&doc, "env")));
-    problems.extend(gate_problems(job("macos")));
+    problems.extend(version_problems(job("version")));
+    problems.extend(mac_job_problems(job(MAC_JOB), entry(&doc, "env")));
     problems
 }
 
-/// One line per way `surface` is not the answer and the version.
-fn surface_problems(job: Option<&Node>) -> Vec<String> {
-    let Some(surface) = job else {
-        return vec![format!("{MACOS_PR}: no job surface")];
+/// One line per way `version` is not the version of the build.
+fn version_problems(job: Option<&Node>) -> Vec<String> {
+    let Some(version) = job else {
+        return vec![format!("{MACOS_PR}: no job version")];
     };
     let mut problems = Vec::new();
-    if !at(surface, &["runs-on"]).is_some_and(|r| r.starts_with("ubuntu-")) {
-        problems.push("surface: does not run on an ubuntu runner".to_owned());
+    if !at(version, &["runs-on"]).is_some_and(|r| r.starts_with("ubuntu-")) {
+        problems.push("version: does not run on an ubuntu runner".to_owned());
     }
-    for key in ["if", "continue-on-error"] {
-        if entry(surface, key).is_some() {
-            problems.push(format!("surface: has `{key}`"));
-        }
-    }
-    let checkout = steps(job)
-        .iter()
-        .find(|s| at(s, &["uses"]).is_some_and(|u| u.starts_with("actions/checkout@")));
-    if checkout.and_then(|s| at(s, &["with", "fetch-depth"])) != Some("2") {
-        problems.push(
-            "surface: the checkout is not of the merge commit and its parents (fetch-depth: 2)"
-                .to_owned(),
-        );
-    }
+    problems.extend(execution_problems("version", version, None));
     problems.extend(command_problems(
-        "surface",
+        "version",
         &commands(job),
-        &surface_commands(),
+        &version_commands(),
     ));
-    problems.extend(action_problems("surface", job, &["actions/checkout@"]));
-    for step in steps(job) {
-        let run = at(step, &["run"]).unwrap_or_default();
-        let condition = at(step, &["if"]);
-        let id = at(step, &["id"]);
-        let (want_if, want_id) = if run.contains("release version") {
-            (Some(VERSION_IF), Some("version"))
-        } else if run.contains("mac-surface") {
-            (None, Some("surface"))
-        } else {
-            (None, id)
-        };
-        if condition != want_if {
-            problems.push(format!(
-                "surface: the step `{}` runs under `if: {condition:?}`, not {want_if:?}",
-                run.trim_end()
-            ));
-        }
-        if id != want_id {
-            problems.push(format!(
-                "surface: the step `{}` has the id {id:?}, not {want_id:?}",
-                run.trim_end()
-            ));
-        }
-        if entry(step, "continue-on-error").is_some() {
-            problems.push(format!(
-                "surface: the step `{}` has continue-on-error",
-                run.trim_end()
-            ));
-        }
+    problems.extend(action_problems("version", job, &["actions/checkout@"]));
+    let ids: Vec<Option<&str>> = steps(job).iter().map(|s| at(s, &["id"])).collect();
+    let id = steps(job)
+        .iter()
+        .find(|s| at(s, &["run"]).is_some_and(|r| r.contains("release version")))
+        .and_then(|s| at(s, &["id"]));
+    if id != Some("version") || ids.iter().flatten().count() != 1 {
+        problems.push(format!(
+            "version: the ids of its steps are {ids:?}, not `version` on the release version step alone"
+        ));
     }
-    for (output, want) in [
-        ("mac", "${{ steps.surface.outputs.mac }}"),
-        ("version", "${{ steps.version.outputs.version }}"),
-    ] {
-        let got = at(surface, &["outputs", output]);
-        if got != Some(want) {
-            problems.push(format!("surface: output {output} is {got:?}, not {want}"));
-        }
+    let output = at(version, &["outputs", "version"]);
+    let want = "${{ steps.version.outputs.version }}";
+    if output != Some(want) {
+        problems.push(format!("version: output version is {output:?}, not {want}"));
     }
     problems
 }
 
-/// One line per way `macos-arm64` is not the macOS build of artifacts.yml with the workspace's
-/// tests, on the surface alone, holding nothing.
+/// One line per way [`MAC_JOB`] is not the macOS build of artifacts.yml with the workspace's
+/// tests, on every pull request, holding nothing.
 fn mac_job_problems(job: Option<&Node>, workflow_env: Option<&Node>) -> Vec<String> {
     let Some(mac) = job else {
-        return vec![format!("{MACOS_PR}: no job macos-arm64")];
+        return vec![format!("{MACOS_PR}: no job {MAC_JOB}")];
     };
     let b = mac_build();
-    let name = "macos-arm64";
+    let name = MAC_JOB;
     let mut problems = Vec::new();
     let needs = names(entry(mac, "needs"));
-    if needs != ["surface"] {
-        problems.push(format!("{name}: needs are {needs:?}, not [\"surface\"]"));
+    if needs != ["version"] {
+        problems.push(format!("{name}: needs are {needs:?}, not [\"version\"]"));
     }
     let runner = at(mac, &["runs-on"]);
     if runner != Some(b.runner) {
@@ -332,11 +286,21 @@ fn mac_job_problems(job: Option<&Node>, workflow_env: Option<&Node>) -> Vec<Stri
     if at(mac, &["env", "TARGET"]) != Some(b.target) {
         problems.push(format!("{name}: TARGET is not {}", b.target));
     }
-    let version = "${{ needs.surface.outputs.version }}";
+    let version = "${{ needs.version.outputs.version }}";
     if at(mac, &["env", "RELEASE_VERSION"]) != Some(version) {
         problems.push(format!("{name}: env RELEASE_VERSION is not {version}"));
     }
-    problems.extend(execution_problems(name, mac, Some(ON_THE_SURFACE)));
+    problems.extend(execution_problems(name, mac, None));
+    let restores = using(job, "actions/cache/restore@");
+    let keys: Vec<(Option<&str>, Option<&str>)> = restores
+        .iter()
+        .map(|s| (at(s, &["with", "key"]), at(s, &["with", "restore-keys"])))
+        .collect();
+    if keys != [(Some(CACHE_KEY), Some(CACHE_RESTORE_KEYS))] {
+        problems.push(format!(
+            "{name}: its cache restores are {keys:?}, not the one of artifacts.yml's macOS cache ({CACHE_KEY}, {CACHE_RESTORE_KEYS})"
+        ));
+    }
     let keeps_token = steps(job).iter().any(|s| {
         at(s, &["uses"]).is_some_and(|u| u.starts_with("actions/checkout@"))
             && at(s, &["with", "persist-credentials"]) != Some("false")
@@ -361,41 +325,5 @@ fn mac_job_problems(job: Option<&Node>, workflow_env: Option<&Node>) -> Vec<Stri
         &["actions/checkout@", "actions/cache/restore@"],
     ));
     problems.extend(pull_request_job_problems(MACOS_PR, name, mac, workflow_env));
-    problems
-}
-
-/// One line per way `macos` is not the check that passes exactly when the macOS checks passed or
-/// had nothing to check.
-fn gate_problems(job: Option<&Node>) -> Vec<String> {
-    let Some(gate) = job else {
-        return vec![format!("{MACOS_PR}: no job macos")];
-    };
-    let mut problems = Vec::new();
-    let mut needs = names(entry(gate, "needs"));
-    needs.sort();
-    if needs != ["macos-arm64", "surface"] {
-        problems.push(format!(
-            "macos: needs are {needs:?}, not macos-arm64 and surface"
-        ));
-    }
-    if at(gate, &["if"]) != Some(GATE_IF) {
-        problems.push(format!("macos: `if` is not {GATE_IF}"));
-    }
-    if !at(gate, &["runs-on"]).is_some_and(|r| r.starts_with("ubuntu-")) {
-        problems.push("macos: does not run on an ubuntu runner".to_owned());
-    }
-    if entry(gate, "continue-on-error").is_some() {
-        problems.push("macos: has continue-on-error".to_owned());
-    }
-    let all = steps(job);
-    let fails = all.len() == 1
-        && at(&all[0], &["if"]) == Some(GATE_STEP_IF)
-        && at(&all[0], &["run"]).map(str::trim_end) == Some("exit 1")
-        && entry(&all[0], "continue-on-error").is_none();
-    if !fails {
-        problems.push(format!(
-            "macos: its steps are not the one `exit 1` under `if: {GATE_STEP_IF}`"
-        ));
-    }
     problems
 }
