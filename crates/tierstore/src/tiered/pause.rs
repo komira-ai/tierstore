@@ -93,12 +93,6 @@ impl FormatState {
             Known::Missing | Known::Phase(FormatPhase::Active)
         )
     }
-
-    /// Whether the markers are in force (`active-marks`): the only phase in which a read writes
-    /// one.
-    pub(super) fn marks_in_force(&self) -> bool {
-        self.phase == Known::Phase(FormatPhase::ActiveMarks)
-    }
 }
 
 /// The refusal of a write that waits for the format to say `active` at epoch 2.

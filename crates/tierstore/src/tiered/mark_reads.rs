@@ -23,7 +23,8 @@
 //!   `tombstone_hold` after the cold delete, and a pair no longer than `read_window` cannot pair a
 //!   cold answer that was current before a delete with a marker read after the marker was cleared.
 //! - **The ask for a copy-back.** A whole-object read that the cold tier answered, for a key with
-//!   no marker, in the phase `active-marks`, asks for `WANT` (M10): a create-only write in a task
+//!   no marker, in the phase `active-marks` at epoch 3 or later with the marks bucket this proxy has
+//!   (`ProxyConfig::marks_name`, the condition of a put), asks for `WANT` (M10): a create-only write in a task
 //!   of its own, below the `Critical` level, for an object of at most `copy_back_max_bytes`, and
 //!   at most once in `want_retry` for each key from this proxy, from a set of at most
 //!   `want_recent_limit` keys kept in memory, so that a cold-only key read a thousand times a second
@@ -78,7 +79,7 @@ pub(super) enum CopyBack {
     /// None: the key has a marker, or the markers are not in force.
     No,
     /// By creating `WANT` through these markers: the key has no marker and the markers are in
-    /// force.
+    /// force for this proxy (it may write them).
     ByMarker(Arc<Markers>),
 }
 
@@ -137,13 +138,18 @@ impl Wants {
 impl Inner {
     /// The markers, if a read that missed the hot tier reads them now: this proxy has a marks
     /// bucket and the format object, as of a read at most `format_refresh` old, names a phase from
-    /// which markers can be in force. Also whether they are in force (`active-marks`).
+    /// which markers can be in force. Also whether this proxy may write them: the format opens
+    /// writes on markers (`active-marks` at epoch 3 or later) in the marks bucket this proxy has
+    /// (`ProxyConfig::marks_name`), as for a put, so that two names are never in use at once.
     async fn markers_to_read(&self) -> Option<(&Arc<Markers>, bool)> {
         let markers = self.markers.as_ref()?;
         let state = self.format_state().await;
-        state
-            .reads_markers()
-            .then(|| (markers, state.marks_in_force()))
+        let mine = self.config.marks_name.as_deref();
+        let may_write = state
+            .marks
+            .as_deref()
+            .is_some_and(|recorded| mine == Some(recorded));
+        state.reads_markers().then_some((markers, may_write))
     }
 
     /// Whether a listing reads markers, and the markers it reads them through.
