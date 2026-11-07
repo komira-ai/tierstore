@@ -481,5 +481,8 @@ async fn settle(marks: &Marks<'_>) -> Result<Left, VerbError> {
 }
 
 #[cfg(test)]
+#[path = "marks_rollback_tests.rs"]
+mod rollback_tests;
+#[cfg(test)]
 #[path = "marks_tests.rs"]
 mod tests;
