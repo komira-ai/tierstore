@@ -25,6 +25,8 @@
 //! The copier never writes hot except the marker, and takes no lock: a write to the marker during
 //! the copy is what fails its clear.
 
+use std::sync::atomic::Ordering;
+
 use super::EntryReconciler;
 use super::marks::{Hold, Look, MarkSide, Marked};
 use crate::deadline::millis;
@@ -76,7 +78,7 @@ impl EntryReconciler {
         self.tally.lags(key, hot.size);
         let cold = found(self.cold.head(key).await)?;
         let mut written = None;
-        let same = |cold: &&Meta| self.same_copy(key, hot, cold, &look);
+        let same = |cold: &&Meta| Self::same_copy(side, key, hot, cold, &look);
         let cold_tag = match cold.as_ref().filter(same) {
             Some(cold) => cold.tag.clone(),
             None => {
@@ -105,12 +107,40 @@ impl EntryReconciler {
         }
         let cleared = self.mark_clear(side, a, MarkMove::Clear).await?;
         if cleared {
-            let limit = self.config.tag_record_limit;
-            self.tags().record(key, &hot.tag, &cold_tag, limit);
+            self.mark_record(side, key, (hot, &cold_tag), written, &look);
             self.tally.caught_up(key);
             return Ok(Marked::Cleared);
         }
         Ok(Marked::Moved)
+    }
+
+    /// Records the pair of tags of `key` for the eviction and the sweep, with the time on the
+    /// monotonic clock at which the cold object was written: `written` if this pass wrote it, else
+    /// the time of the hold that noted the pair, else the time of the record the pair already has,
+    /// else the time this leader took over (it did not see the copy made).
+    fn mark_record(
+        &self,
+        side: &MarkSide,
+        key: &str,
+        (hot, cold_tag): (&Meta, &str),
+        written: Option<u64>,
+        look: &Look,
+    ) {
+        let held = look
+            .held
+            .as_ref()
+            .filter(|held| {
+                let pair = held.tags.as_ref();
+                pair.is_some_and(|(h, c)| *h == hot.tag && c == cold_tag)
+            })
+            .map(|held| held.at);
+        let copied_at = written
+            .or(held)
+            .or_else(|| side.records.copied_at(key, &hot.tag, cold_tag))
+            .unwrap_or_else(|| side.taken_over.load(Ordering::SeqCst));
+        let limit = self.config.tag_record_limit;
+        side.records
+            .record(key, &hot.tag, cold_tag, copied_at, limit);
     }
 
     /// Hot lacks the key and the marker says `gone`: deletes the cold object and starts the hold;
@@ -170,14 +200,15 @@ impl EntryReconciler {
     /// Whether the cold object has the bytes of the hot one without a read: the sizes are equal
     /// and either both tags are one plain MD5, or this leader recorded the pair, or it wrote the
     /// pair under this very version of the marker (a hold, which see).
-    fn same_copy(&self, key: &str, hot: &Meta, cold: &Meta, look: &Look) -> bool {
+    fn same_copy(side: &MarkSide, key: &str, hot: &Meta, cold: &Meta, look: &Look) -> bool {
         let same_md5 = is_plain_md5(&hot.tag) && hot.tag == cold.tag;
         let held = look
             .held
             .as_ref()
             .and_then(|held| held.tags.as_ref())
             .is_some_and(|(h, c)| *h == hot.tag && *c == cold.tag);
-        hot.size == cold.size && (same_md5 || held || self.tags().matches(key, &hot.tag, &cold.tag))
+        let recorded = side.records.copied_at(key, &hot.tag, &cold.tag).is_some();
+        hot.size == cold.size && (same_md5 || held || recorded)
     }
 
     /// Writes the hot object of `key` to the cold tier: create-only if there is no cold object

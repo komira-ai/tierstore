@@ -432,6 +432,20 @@ impl Markers {
         })
     }
 
+    /// Calls of the same actor, over the same marks bucket and with the same settings, with a boot
+    /// of their own: the nonces of the two never meet. The settings have been checked already.
+    pub(crate) fn alongside(&self) -> Self {
+        Self {
+            marks: Arc::clone(&self.marks),
+            me: self.me.clone(),
+            boot: crate::lease::new_nonce(),
+            config: self.config.clone(),
+            mono: Arc::clone(&self.mono),
+            sleeper: Arc::clone(&self.sleeper),
+            writes: AtomicU64::new(0),
+        }
+    }
+
     /// The times this actor waits and leases by.
     #[must_use]
     pub fn config(&self) -> &MarkersConfig {

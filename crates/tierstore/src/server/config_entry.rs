@@ -130,6 +130,9 @@ pub struct EntryTuning {
     /// though its holder lives; at least twice the default `lock_refresh` plus the default
     /// `queued_call_margin`.
     pub lock_lease: Duration,
+    /// `hot_store.evict_min_age`: how old the cold copy of a hot object must be for the leader to
+    /// evict the hot object, counted from the cold write on the leader's clock.
+    pub evict_min_age: Duration,
 }
 
 impl Default for EntryTuning {
@@ -169,6 +172,7 @@ impl Default for EntryTuning {
             orphan_after: Duration::from_secs(120),
             tombstone_hold: Duration::from_secs(120),
             lock_lease: MarkersConfig::default().lock_lease,
+            evict_min_age: Duration::from_secs(600),
         }
     }
 }
@@ -194,6 +198,8 @@ impl EntryTuning {
         config.orphan_after = self.orphan_after;
         config.tombstone_hold = self.tombstone_hold;
         config.markers.lock_lease = self.lock_lease;
+        config.evict_min_age = self.evict_min_age;
+        config.copy_back_max_bytes = self.copy_back_max_bytes;
     }
 
     /// Gives the values to the settings of the proxy.
@@ -326,6 +332,7 @@ pub(super) fn refuse_marks_keys(cold: &TierTable) -> Result<(), ConfigError> {
         ("orphan_after", cold.orphan_after.is_some()),
         ("tombstone_hold", cold.tombstone_hold.is_some()),
         ("lock_lease", cold.lock_lease.is_some()),
+        ("evict_min_age", cold.evict_min_age.is_some()),
     ];
     refuse("cold_store", "only [hot_store] has it", &set)
 }
@@ -462,6 +469,7 @@ pub(super) fn entry_tuning(
             YEAR,
         )?,
         lock_lease: time("lock_lease", hot.lock_lease, old.lock_lease, YEAR)?,
+        evict_min_age: time("evict_min_age", hot.evict_min_age, old.evict_min_age, YEAR)?,
     };
 
     let low = ("retry_min", tuning.retry_min);

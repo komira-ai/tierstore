@@ -145,6 +145,7 @@ const FLAGLESS_KEYS: &[&str] = &[
     "hot_store.orphan_after",
     "hot_store.tombstone_hold",
     "hot_store.lock_lease",
+    "hot_store.evict_min_age",
 ];
 
 /// Keys of the table the pages need not name.
