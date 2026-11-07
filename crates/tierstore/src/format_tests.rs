@@ -275,14 +275,38 @@ fn only_drain_that_names_the_marks_bucket_is_the_pause_of_a_rollback() {
     assert!(!rollback.runs_entries());
     for json in [
         r#"{"phase":"drain"}"#,
-        r#"{"phase":"drain","epoch":2}"#,
         r#"{"phase":"drained","marks_bucket":"m"}"#,
     ] {
         let format = decoded(json);
         assert!(!format.rolls_back_marks(), "{json}");
         assert!(!format.runs_a_pass(), "{json}");
     }
+    assert!(!decoded(r#"{"phase":"drain","epoch":2}"#).rolls_back_marks());
     let active_marks = decoded(r#"{"phase":"active-marks"}"#);
     assert!(active_marks.runs_a_pass());
     assert!(!active_marks.rolls_back_marks());
+}
+
+/// Asserts that `drain` at epoch 2 with no marks bucket is the pause over the entry
+/// protocol: it gives the leader a pass, pauses writes and runs neither entries nor markers for a
+/// proxy; `drain` with no epoch or any other epoch (the pause before the entries), `drain` that
+/// names a bucket (a rollback), `drained` and `active` are not it.
+#[test]
+fn only_drain_at_epoch_2_with_no_bucket_is_the_pause_over_the_entries() {
+    let pause = decoded(r#"{"phase":"drain","epoch":2}"#);
+    assert!(pause.drains_entries());
+    assert!(pause.runs_a_pass());
+    assert!(pause.pauses_writes());
+    assert!(!pause.runs_entries());
+    assert!(!pause.rolls_back_marks());
+    for json in [
+        r#"{"phase":"drain"}"#,
+        r#"{"phase":"drain","epoch":1}"#,
+        r#"{"phase":"drain","epoch":3}"#,
+        r#"{"phase":"drain","epoch":3,"marks_bucket":"m"}"#,
+        r#"{"phase":"drained","epoch":2}"#,
+        r#"{"phase":"active","epoch":2}"#,
+    ] {
+        assert!(!decoded(json).drains_entries(), "{json}");
+    }
 }

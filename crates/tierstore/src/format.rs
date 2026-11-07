@@ -44,13 +44,10 @@
 //!   the exception: it deletes both tiers, hands the entry over and waits for the release before it
 //!   is acknowledged.
 
-#[cfg(feature = "server")]
 use bytes::Bytes;
 use serde::{Deserialize, Serialize};
 
-use crate::journal::FORMAT_KEY;
-#[cfg(feature = "server")]
-use crate::journal::to_body;
+use crate::journal::{FORMAT_KEY, to_body};
 use crate::{Backend, Error};
 
 /// Where the store is in a change of format.
@@ -118,12 +115,28 @@ impl Format {
     }
 
     /// Whether a reconciler has a pass to make under this: it works the entries (`runs_entries`),
-    /// or the phase is `active-marks`, or the record is the pause of a rollback
+    /// or the record is the pause over the entry protocol ([`Format::drains_entries`]), or the
+    /// phase is `active-marks`, or the record is the pause of a rollback
     /// ([`Format::rolls_back_marks`]); under those two it works the markers if it has the marks
     /// bucket the record names.
     #[cfg(feature = "server")]
     pub(crate) fn runs_a_pass(&self) -> bool {
-        self.runs_entries() || self.phase == FormatPhase::ActiveMarks || self.rolls_back_marks()
+        self.runs_entries()
+            || self.drains_entries()
+            || self.phase == FormatPhase::ActiveMarks
+            || self.rolls_back_marks()
+    }
+
+    /// Whether this is the pause over the entry protocol (`tierstore format-epoch --drain` over
+    /// `active` at epoch 2): the phase `drain`, the epoch [`ENTRIES_EPOCH`] and no marks bucket.
+    /// Writes are paused, and the leader finishes every open entry and writes `drained` once no
+    /// proxy can start a write (`docs/design/put-without-lock.md`, 8.2, step 1). A `drain` with no
+    /// epoch is the pause before the entries, which the release before them ends, and one at any
+    /// other epoch is not a pause this release makes; the leader does nothing under either.
+    pub(crate) fn drains_entries(&self) -> bool {
+        self.phase == FormatPhase::Drain
+            && self.marks_bucket.is_none()
+            && self.epoch == Some(ENTRIES_EPOCH)
     }
 
     /// Whether this is the pause of a rollback from `active-marks` (`tierstore format-epoch
@@ -171,7 +184,6 @@ pub(crate) async fn marks_run_in(hot: &dyn Backend, bucket: &str) -> Result<bool
 /// As [`read_format`], with the content tag of the object. The tag is read first, so that if the
 /// object changes between the two calls the tag is the older one, and a write over it by that tag
 /// fails.
-#[cfg(feature = "server")]
 pub(crate) async fn read_format_tagged(
     hot: &dyn Backend,
 ) -> Result<Option<(Format, String)>, Error> {
@@ -188,7 +200,6 @@ pub(crate) async fn read_format_tagged(
 }
 
 /// The body of a format object.
-#[cfg(feature = "server")]
 pub(crate) fn format_body(format: &Format) -> Bytes {
     to_body(format)
 }

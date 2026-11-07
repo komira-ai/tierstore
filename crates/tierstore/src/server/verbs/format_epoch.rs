@@ -13,10 +13,13 @@
 //! - `--check` reads the format object, the registrations and the open entries, prints them, and
 //!   says whether `--drain` would be accepted. It writes nothing and asks the store nothing but
 //!   the objects of tierstore.
-//! - `--drain` writes `{"phase":"drain"}` and waits, with no time limit, for a reconciler of the
-//!   bridge release (the one before the entries) to write `drained`, which applies the journals
-//!   first; the reconciler of this release writes it never, so `--drain` is for stores that
-//!   still have journals to apply. It refuses while a registration that is not running is not named on
+//! - `--drain` writes `{"phase":"drain"}` and waits, with no time limit, for `drained`. Over an
+//!   `active` format at epoch 2 (the entry protocol of this release) the pause keeps the epoch,
+//!   and the reconciler of this release that holds the lease writes `drained` once `_entries/` is
+//!   empty and every registration that has not departed reports a pause and no write in flight;
+//!   the verb prints what it waits for at every poll. Over a store with journals to apply (no
+//!   epoch) the reconciler of the bridge release, the one before the entries, writes it, after it
+//!   applies the journals. It refuses while a registration that is not running is not named on
 //!   `--departed`: a registration of a release before the heartbeat has no heartbeat, only the
 //!   operator can say its process is gone, and a wrong answer lets an old writer go on during the
 //!   pause. A drain that was begun is resumed by running it again.
@@ -43,7 +46,9 @@ use std::time::Duration;
 use clap::{Args, Parser};
 
 use self::marks::Marks;
-use super::registrations::{self, Registration, check_departed, check_protocol};
+use super::registrations::{
+    self, Registration, check_departed, check_protocol, holding_entry_drain,
+};
 use super::{Hot, VerbError, block_on, finished, parse_duration, parsed};
 use crate::format::{Format, FormatPhase, format_body, read_format_tagged};
 use crate::journal::{ENTRIES_PREFIX, FORMAT_KEY, JOURNAL_PREFIX, PROXIES_PREFIX};
@@ -52,6 +57,9 @@ use crate::{Backend, Clock, Error, Sleeper};
 /// The epoch `--activate` writes: the number of the format of the protocol with one journal entry
 /// for each key.
 const ACTIVE_EPOCH: u64 = 2;
+
+/// The first epoch above [`ACTIVE_EPOCH`].
+const ACTIVE_EPOCH_ABOVE: u64 = ACTIVE_EPOCH + 1;
 
 /// The first protocol number of a registration of a process that writes the format of
 /// [`ACTIVE_EPOCH`].
@@ -229,6 +237,23 @@ fn drain_gate(
     if phase_name(found) == "unknown" {
         return Err(VerbError::Refused(UNKNOWN.to_owned()));
     }
+    // No verb writes `active` above the epoch of the entries without the markers: a proxy would
+    // run entries under it, and the leader would not finish the pause the drain copies from it.
+    if let Some((
+        Format {
+            phase: FormatPhase::Active,
+            epoch: Some(epoch @ (ACTIVE_EPOCH_ABOVE..)),
+            ..
+        },
+        _,
+    )) = found
+    {
+        return Err(VerbError::Refused(format!(
+            "refusing to drain: the format says active at epoch {epoch}, and the entry protocol of \
+             this release is epoch {ACTIVE_EPOCH}; no verb writes that record, so look at who \
+             did before changing it"
+        )));
+    }
     check_departed(registrations, departed, "drain")
 }
 
@@ -321,11 +346,19 @@ fn changed(wrote: Result<(), Error>) -> Result<(), VerbError> {
 
 /// Reads the format object until it says `drained`, and says what it waits for.
 async fn wait(work: &Work<'_>, out: &mut dyn Write) -> Result<(), VerbError> {
+    let over_entries = current(work.hot)
+        .await?
+        .is_some_and(|(format, _)| format.drains_entries());
+    let leader = if over_entries {
+        "once `_entries/` is empty and every registration that has not departed reports a pause \
+         and no write in flight"
+    } else {
+        "once every journal is applied and the format has said drain for the settle time"
+    };
     writeln!(
         out,
-        "waiting for the format to say drained: the reconciler that holds the lease writes it once \
-         every journal is applied and the format has said drain for the settle time; there is no \
-         time limit, interrupt to stop and --cancel to resume writes"
+        "waiting for the format to say drained: the reconciler that holds the lease writes it {leader}; \
+         there is no time limit, interrupt to stop and --cancel to resume writes"
     )?;
     loop {
         let found = current(work.hot).await?;
@@ -345,10 +378,24 @@ async fn wait(work: &Work<'_>, out: &mut dyn Write) -> Result<(), VerbError> {
                 )));
             }
         }
-        let registered = count(work.hot, PROXIES_PREFIX).await?;
-        let why = format!("the format says drain; {registered} registrations");
+        let why = if over_entries {
+            holding(work).await?
+        } else {
+            let registered = count(work.hot, PROXIES_PREFIX).await?;
+            format!("the format says drain; {registered} registrations")
+        };
         still_waiting(work, out, &why).await?;
     }
+}
+
+/// What the leader's `drained` waits for under the pause over the entry protocol, for the
+/// operator: the open entries and the registrations that may still write.
+async fn holding(work: &Work<'_>) -> Result<String, VerbError> {
+    let entries = count(work.hot, ENTRIES_PREFIX).await?;
+    let registrations = registrations_of(work).await?;
+    let mut why = vec![format!("{entries} open entries")];
+    why.extend(holding_entry_drain(&registrations));
+    Ok(why.join("; "))
 }
 
 async fn cancel(work: &Work<'_>, out: &mut dyn Write) -> Result<(), VerbError> {
