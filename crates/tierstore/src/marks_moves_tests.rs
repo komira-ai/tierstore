@@ -197,6 +197,24 @@ fn a_lock_ends_dirty_if_the_key_owes_cold_a_copy_and_clearing_if_not() {
     assert_eq!(end(&over_dirty, false), dirty(true));
 }
 
+/// Asserts M6 for the emergency landing (5.5, step 5): a settle ends the holder's own lock as
+/// `CLEARING`, owned by the holder with nothing owed, whatever the lock said it owed, and `gone` is
+/// kept; the lock of someone else is not settled.
+#[test]
+fn a_settle_ends_any_own_lock_as_clearing_and_keeps_gone() {
+    for why in [MarkerWhy::ColdLand, MarkerWhy::Overwrite, MarkerWhy::Evict] {
+        for gone in [false, true] {
+            let settled = took(&lock(why.clone(), gone, ME), MarkMove::Settle);
+            let want = made(shape(MarkerState::Clearing, gone, false, None, Some(ME)));
+            assert_eq!(settled, want, "{why:?} gone={gone}");
+        }
+    }
+    assert_eq!(
+        MarkMove::Settle.apply(&lock(MarkerWhy::ColdLand, false, THEM), ME),
+        None
+    );
+}
+
 /// Asserts M14: a refresh writes the holder's own lock again, every field the same.
 #[test]
 fn a_refresh_writes_the_same_lock() {
@@ -299,7 +317,7 @@ fn the_table_allows(mv: &MarkMove, from: &Marker) -> bool {
     match mv {
         MarkMove::Bump | MarkMove::Lock(_) => nobody_holds,
         MarkMove::Gone => own_lock && from.why == Some(MarkerWhy::Delete),
-        MarkMove::Release { .. } | MarkMove::Refresh => own_lock,
+        MarkMove::Release { .. } | MarkMove::Settle | MarkMove::Refresh => own_lock,
         MarkMove::Clear => from.st == MarkerState::Dirty,
         MarkMove::ClearOrphan => matches!((&from.st, from.gone), (MarkerState::Dirty, false)),
         MarkMove::Reap => matches!(from.st, MarkerState::Lock | MarkerState::Other(_)),
@@ -319,6 +337,7 @@ fn a_move_applies_exactly_where_the_table_says() {
         MarkMove::Gone,
         MarkMove::Release { changed: false },
         MarkMove::Release { changed: true },
+        MarkMove::Settle,
         MarkMove::Refresh,
         MarkMove::Clear,
         MarkMove::ClearOrphan,
@@ -356,7 +375,7 @@ fn a_move_applies_exactly_where_the_table_says() {
             }
         }
     }
-    assert_eq!(checked, 10 * 5 * 3 * 5 * 4);
+    assert_eq!(checked, 11 * 5 * 3 * 5 * 4);
 }
 
 /// Asserts the delete of the design as a walk through the table (5.6): lock over nothing, decide

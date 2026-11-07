@@ -59,9 +59,10 @@ async fn the_fixtures_pause_writes_as_their_phases_say() {
 }
 
 /// Asserts that the fixture of the phase `active-marks` (with its epoch 3 and its `marks_bucket`)
-/// pauses no write and makes none: a put is answered `Unavailable` with the text that says writes
-/// wait for the active format, as for the fixture of a newer writer, and nothing is stored in
-/// either tier. This release reads the word and does nothing for it.
+/// pauses no write, and that a proxy that has no marks bucket makes none: a put is answered
+/// `Unavailable` with the text that says writes wait for the active format, as for the fixture of
+/// a newer writer, and nothing is stored in either tier. (A proxy that has the recorded marks
+/// bucket puts on markers: `tiered/marked_put_tests.rs`.)
 #[tokio::test(start_paused = true)]
 async fn the_active_marks_fixture_pauses_nothing_and_makes_no_write() {
     let tiers = Tiers::new();

@@ -67,6 +67,7 @@ impl MarkRig {
         config.mono = mono.clone();
         config.sleeper = sleeper.clone();
         config.marks = Some(marks_faults.clone());
+        config.marks_name = Some("hot-marks".to_owned());
         config.usage_refresh = Duration::ZERO;
         config.format_refresh = Duration::ZERO;
         tune(&mut config);

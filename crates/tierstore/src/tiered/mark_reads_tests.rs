@@ -478,6 +478,31 @@ async fn a_head_a_ranged_read_and_a_read_before_activation_ask_for_no_copy_back(
     assert_eq!(rig.marks_faults.calls(Op::Put), 0);
 }
 
+/// Asserts that a read asks for no copy-back unless the format opens writes on markers for this
+/// proxy, as a put does: not under a record that names another marks bucket, none, no epoch or an
+/// epoch below 3, and not when the proxy has no name for its marks bucket. The read is served, and
+/// the marker is read, but no marker is written.
+#[tokio::test]
+async fn no_copy_back_is_asked_for_where_a_put_would_be_refused() {
+    let other = r#"{"epoch":3,"marks_bucket":"another","phase":"active-marks"}"#;
+    let none = r#"{"epoch":3,"phase":"active-marks"}"#;
+    let no_epoch = r#"{"marks_bucket":"hot-marks","phase":"active-marks"}"#;
+    let early = r#"{"epoch":2,"marks_bucket":"hot-marks","phase":"active-marks"}"#;
+    for format in [other, none, no_epoch, early] {
+        let rig = MarkRig::new(format).await;
+        rig.put_cold("k", "cold").await;
+        read_and_settle(&rig, "k", 1).await;
+        assert_eq!(rig.marks_faults.calls(Op::Put), 0, "{format}");
+        assert_eq!(rig.marker("k").await, None, "{format}");
+        assert_eq!(rig.marks_faults.calls_on(Op::Get, "k"), 1, "{format}");
+    }
+    let nameless = MarkRig::tuned(ACTIVE_MARKS, |config| config.marks_name = None).await;
+    nameless.put_cold("k", "cold").await;
+    read_and_settle(&nameless, "k", 1).await;
+    assert_eq!(nameless.marks_faults.calls(Op::Put), 0);
+    assert_eq!(nameless.marker("k").await, None);
+}
+
 /// Asserts that a key that has a marker already (a lock, here) is not asked for, and that a
 /// create that fails is ignored: the read is served, and the proxy does not try again within
 /// `want_retry`.
@@ -531,7 +556,7 @@ async fn a_proxy_whose_marker_settings_do_not_hold_together_does_not_open() {
     let rig = MarkRig::new(ACTIVE_MARKS).await;
     let mut config = crate::ProxyConfig::new("p2", 1000, Arc::new(TestClock::new()));
     config.marks = Some(rig.marks.clone());
-    config.markers.lock_poll_min = Duration::ZERO;
+    config.marks_put.markers.lock_poll_min = Duration::ZERO;
     let opened = Proxy::open(rig.hot_mem.clone(), rig.cold_mem.clone(), config).await;
     let why = "invalid marker settings: lock_poll_min must be more than zero";
     assert_eq!(opened.err(), Some(Error::Other(why.to_owned())));
