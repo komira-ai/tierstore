@@ -16,8 +16,14 @@
 //!   (a time before the object's is `PreconditionFailed`) and `If-Modified-Since` (a time not
 //!   before the object's is a 304), in the order of RFC 7232 and to the second; a date that is
 //!   not an HTTP date is ignored, as S3 does;
-//! - PutObject, which only ever creates: `If-None-Match: *` is what a client sends, and a put
-//!   without it is create-only too, because the proxy keeps objects immutable. A key that
+//! - PutObject, which creates: `If-None-Match: *` is what a client sends, and a put without it is
+//!   create-only too, because the proxy keeps objects immutable, except for the full key under the
+//!   format phase `active-marks`: there a put without `If-None-Match` replaces a key that exists
+//!   (200, the last writer wins), answers 200 with no write for the bytes the key holds when the
+//!   request names their `Content-MD5` or `x-amz-checksum-sha256`, and, when the hot tier has no
+//!   room, is 503 `SlowDown` or, with `hot_store.emergency_cold_landing`, lands in the cold tier
+//!   (`docs/design/put-without-lock.md`, 5.3 to 5.5). A scoped key and a presigned URL only create
+//!   under every format. A key that
 //!   exists is `PreconditionFailed`, except that under the format phase `active-marks`
 //!   (`docs/design/put-without-lock.md`, 5.1) a key that a delete is removing, or has just
 //!   removed, is 409 `ConditionalRequestConflict`. `If-Match` is answered `PreconditionFailed` for
@@ -49,7 +55,9 @@
 //!   its hot tier when that has room, else its cold tier, as the upload id says). The server
 //!   holds no part: the body of an UploadPart is handed to the backend as a stream, piece by
 //!   piece as it arrives, so a part of any size is stored without being held in memory, and
-//!   the completion joins the parts into the object in the backend, create-only. A part
+//!   the completion joins the parts into the object in the backend, create-only (the full key's
+//!   completion with no `If-None-Match` replaces a key that exists under the format phase
+//!   `active-marks`, as a put does). A part
 //!   whose body is refused (a checksum that does not match, a body over the limit, a stalled
 //!   one) is not stored. An upload is the backend's: it lives as long as the backend keeps it,
 //!   and `NoSuchUpload` is the answer for an id the backend does not hold. The ETag of a part
@@ -909,8 +917,12 @@ impl Server {
         let reader = Reader::new(body, limit, config.body_idle_timeout)
             .with_decoder(decoder)
             .with_floor(floor.0, floor.1, Arc::clone(&config.rate_clock));
-        let grant = signed.presign.as_ref();
-        self.dispatch(parts, target, &query, reader, check, grant)
+        let writes = match (&signed.presign, &signed.role) {
+            (Some(grant), _) => ops::Writes::Presigned(grant),
+            (None, Role::Full) => ops::Writes::Full,
+            (None, _) => ops::Writes::Creates,
+        };
+        self.dispatch(parts, target, &query, reader, check, writes)
             .await
     }
 

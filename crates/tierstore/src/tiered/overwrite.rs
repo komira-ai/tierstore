@@ -212,18 +212,38 @@ impl Inner {
         bytes: Bytes,
         first: String,
     ) -> Result<String, Error> {
+        let write = |tag: Option<String>| {
+            let bytes = bytes.clone();
+            async move {
+                match tag {
+                    Some(tag) => self.hot.put_if_match(key, bytes, &tag).await,
+                    None => self.hot.put_tagged(key, bytes).await,
+                }
+            }
+        };
+        self.replace_with(held, key, first, write).await
+    }
+
+    /// The replace of the object that `write` makes, which is given the tag the hot object has
+    /// (none: the hot tier no longer holds the key) and can be tried again, starting from the tag
+    /// `first`. A write refused for the tag reads it again, at most `entry_rounds` times.
+    pub(super) async fn replace_with<W, Fut>(
+        &self,
+        held: &mut Held,
+        key: &str,
+        first: String,
+        write: W,
+    ) -> Result<String, Error>
+    where
+        W: Fn(Option<String>) -> Fut,
+        Fut: std::future::Future<Output = Result<String, Error>>,
+    {
         let mut tag = Some(first);
         for _ in 0..self.config.entry_rounds.max(1) {
             if !held.may_destroy() {
                 return Err(stale(key));
             }
-            let write = async {
-                match &tag {
-                    Some(tag) => self.hot.put_if_match(key, bytes.clone(), tag).await,
-                    None => self.hot.put_tagged(key, bytes.clone()).await,
-                }
-            };
-            match held.lease(write).await {
+            match held.lease(write(tag.clone())).await {
                 Ok(made) => return Ok(made),
                 Err(
                     Error::PreconditionFailed(_) | Error::NotFound(_) | Error::AlreadyExists(_),

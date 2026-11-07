@@ -207,16 +207,22 @@ impl Rig {
     /// A rig whose format object says `format` (none if empty), with `tune` applied to the
     /// proxy's settings.
     pub(super) async fn with(format: &str, tune: impl FnOnce(&mut ProxyConfig)) -> Self {
-        Self::build(format, false, tune).await
+        Self::over(format, false, tune, |hot| hot).await
     }
 
     /// A rig whose proxies wait on the timer of the runtime (see [`Timer`]) and not on the
     /// [`Pacer`].
     pub(super) async fn timed() -> Self {
-        Self::build(MARKS_FORMAT, true, |_| {}).await
+        Self::over(MARKS_FORMAT, true, |_| {}, |hot| hot).await
     }
 
-    async fn build(format: &str, timed: bool, tune: impl FnOnce(&mut ProxyConfig)) -> Self {
+    /// As [`Rig::with`], for a proxy whose hot tier is the rig's gate seen through `wrap`.
+    pub(super) async fn over(
+        format: &str,
+        timed: bool,
+        tune: impl FnOnce(&mut ProxyConfig),
+        wrap: impl FnOnce(Arc<GateBackend>) -> Arc<dyn Backend>,
+    ) -> Self {
         let clock = Arc::new(TestClock::new());
         let mono = Arc::new(Mono::new());
         let hot_mem = Arc::new(MemoryBackend::with_clock(clock.clone()));
@@ -245,7 +251,7 @@ impl Rig {
         config.marks = Some(marks.clone());
         config.marks_name = Some("hot-marks".to_owned());
         tune(&mut config);
-        let proxy = Proxy::open(hot.clone(), cold.clone(), config)
+        let proxy = Proxy::open(wrap(hot.clone()), cold.clone(), config)
             .await
             .unwrap();
         proxy

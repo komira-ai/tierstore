@@ -18,7 +18,7 @@ use hyper::body::Body;
 use hyper::header::HeaderMap;
 use percent_encoding::percent_decode_str;
 
-use crate::{Clock, Error, PartBody};
+use crate::{Clock, Error, PartBody, PutClaim};
 
 use super::chunked::{Decoder, Framing};
 use super::digests::{Algorithm, Digests};
@@ -377,6 +377,24 @@ impl Check {
             framing,
             trailer,
         })
+    }
+
+    /// What the request says of the content tags its body would have: the hex of the MD5 it claimed
+    /// in `Content-MD5` (the tag of an object in an S3 hot tier) and the hex of the SHA-256 it
+    /// claimed in `x-amz-checksum-sha256` (the tag in a memory hot tier). A hash the trailer of an
+    /// `aws-chunked` body carries is not known before the body, so it is not named. The body is
+    /// held to every hash named, as it streams, so that a put answered from the claim alone is
+    /// still refused when the body is not what the headers say.
+    pub(crate) fn claim(&self) -> PutClaim {
+        let tags = self
+            .wants
+            .iter()
+            .filter(|want| want.header == want.algorithm.header())
+            .filter(|want| matches!(want.algorithm, Algorithm::Md5 | Algorithm::Sha256))
+            .filter(|want| want.expected.len() == want.algorithm.length())
+            .map(|want| hex::encode(&want.expected))
+            .collect();
+        PutClaim { tags }
     }
 
     /// The framing of the body, if it is an `aws-chunked` one.

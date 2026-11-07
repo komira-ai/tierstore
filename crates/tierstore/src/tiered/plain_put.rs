@@ -1,9 +1,13 @@
 //! The plain puts of a proxy whose format is `active-marks` (`docs/design/put-without-lock.md`):
 //! the entry points of the overwrite (5.3), the same-bytes put (5.4) and the emergency landing
-//! (5.5). They are methods of [`Proxy`] and no part of [`Backend`](crate::Backend): a put of the
-//! trait is create-only, and it is answered as before under every format. Nothing in this
-//! release's server calls them yet, and a proxy that reads any format but `active-marks` answers
-//! them [`Error::Unavailable`] without a request.
+//! (5.5). [`Proxy::put_plain`] and [`Proxy::land_in_cold`] are methods of [`Proxy`] for a library
+//! caller, and a put of the [`Backend`](crate::Backend) trait is create-only. The S3 front's `PUT` without
+//! `If-None-Match` calls [`Backend::put_stream_replacing`](crate::Backend::put_stream_replacing),
+//! which the proxy answers with `Inner::put_replacing` below: the plain put, and the emergency landing for a body the hot
+//! tier refused with [`Error::Full`] before it took a byte when
+//! [`ProxyConfig::emergency_cold_landing`](super::ProxyConfig::emergency_cold_landing) is set.
+//! Under every other format that call creates, and a plain put of the methods answers
+//! [`Error::Unavailable`] without a request.
 //!
 //! A plain put of a key that the hot tier does not hold is the fast path (5.1, `marked_put.rs`):
 //! the object and the marker are written together, create-only, with no cold request. A body held
@@ -72,6 +76,44 @@ impl Inner {
         };
         self.require_live(key)?;
         Ok(markers)
+    }
+
+    /// The plain `PUT` of the S3 front (see the module): the format `active-marks` routes it to
+    /// `put_plain`, and any other format to the create-only put of the trait.
+    ///
+    /// A hot tier that answers [`Error::Full`] before it took a byte of the body, whether it was
+    /// asked to create the key or to replace it, is answered 503 `SlowDown` (the error is passed
+    /// on), unless `emergency_cold_landing` is on, and then the body goes on to
+    /// `Inner::land_in_cold`. A hot tier that took part of the body before it refused it, or a
+    /// body that ended with an error, is passed on: those bytes cannot be sent again.
+    pub(super) async fn put_replacing(
+        &self,
+        key: &str,
+        len: Option<u64>,
+        body: PartBody<'_>,
+        claim: &PutClaim,
+    ) -> Result<(), Error> {
+        if !matches!(self.route_write(key).await?, WriteRoute::Marks(_)) {
+            return self
+                .put_object_stream(key, len, body, false)
+                .await
+                .map(drop);
+        }
+        let offered = Offered::new(body);
+        let stream = || PutBody::Stream {
+            len,
+            body: offered.view(),
+        };
+        match self.put_plain(key, stream(), claim).await {
+            Err(Error::Full(_))
+                if self.config.emergency_cold_landing
+                    && offered.taken() == 0
+                    && !offered.failed() =>
+            {
+                self.land_in_cold(key, stream()).await.map(drop)
+            }
+            done => done.map(drop),
+        }
     }
 
     async fn put_plain(
