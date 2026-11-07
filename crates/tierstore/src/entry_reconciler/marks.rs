@@ -17,10 +17,12 @@
 //! The waits of the design (`orphan_after`, `lock_lease`, `tombstone_hold`) are not sleeps. The
 //! leader notes the version of each marker it lists and when, on its monotonic clock, it first
 //! saw that version ([`MarkBooks`]); a pass that finds the version unchanged for long enough acts,
-//! and until then the marker is left. A version that changed starts the count again, and so does a
-//! new leader, which counts a wait up to one wait late and never early. A version is first seen
-//! when the page that lists it is listed, by the clock read then, not at the start of the pass: the
-//! work on the pages before it can take longer than a wait.
+//! and until then the marker is left. A tombstone inside its hold is left without a request: the
+//! listing gives its version, which is the one the hold was noted under, so the marker, hot and
+//! cold are read once the hold has run out and not before. A version that changed starts the
+//! count again, and so does a new leader, which counts a wait up to one wait late and never
+//! early. A version is first seen when the page that lists it is listed, by the clock read then,
+//! not at the start of the pass: the work on the pages before it can take longer than a wait.
 
 use std::collections::{BTreeMap, BTreeSet};
 use std::sync::Arc;
@@ -154,6 +156,15 @@ impl MarkBooks {
             expired: age >= lease,
             held,
         }
+    }
+
+    /// Whether the marker `key`, listed at version `tag`, is a tombstone still inside its hold
+    /// (`hold` in milliseconds) at `now`: the leader noted a hold under this very version and
+    /// it has not yet run out. Such a marker needs no request until the hold ends.
+    pub(super) fn in_hold(&self, key: &str, tag: &str, now: u64, hold: u64) -> bool {
+        self.holds
+            .get(key)
+            .is_some_and(|(held, hold_at)| held == tag && now.saturating_sub(hold_at.at) < hold)
     }
 
     /// Notes the hold on the marker `key` at version `tag`.
@@ -325,6 +336,14 @@ impl EntryReconciler {
         };
         let (backed_off, due): (Vec<Listed>, Vec<Listed>) = page.into_iter().partition(waiting);
         report.backed_off += backed_off.len();
+        // A tombstone inside its hold is left as the listing gave it: its version is the one the
+        // hold was noted under, so neither the marker nor hot nor cold is read until the hold
+        // ends. A write to the marker moves its version, and the next listing shows it.
+        let hold = millis(self.config.tombstone_hold);
+        let (holding, due): (Vec<Listed>, Vec<Listed>) = due
+            .into_iter()
+            .partition(|object| self.mark_books.in_hold(&object.key, &object.tag, now, hold));
+        report.pinned += holding.len();
         let width = self.config.copy_concurrency.max(1);
         let reads = stream::iter(due).map(|object| async move {
             let read = side.markers.read(&object.key).await;
