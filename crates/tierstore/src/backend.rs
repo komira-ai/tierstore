@@ -359,6 +359,14 @@ pub trait Backend: Send + Sync {
         false
     }
 
+    /// The longest object, in bytes, that the backend writes with one request; it writes a longer
+    /// one in several (an S3 multipart upload, whose completion is what a create-only write
+    /// is refused at, after every part is sent). `None` for a backend with no such limit, which is
+    /// the default.
+    fn single_put_max(&self) -> Option<u64> {
+        None
+    }
+
     /// Writes an object, only if the key does not exist (`If-None-Match: *`).
     ///
     /// # Errors
