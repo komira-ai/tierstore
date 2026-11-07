@@ -1,18 +1,14 @@
-//! The macOS checks of a pull request ([`super::macos_pr`]): `macos.yml` passes, each way of
-//! running macOS on the wrong pull requests, of failing to run it on the right ones, of checking
-//! less than the release build does, or of handing its job a secret, is named; and every tracked
-//! file that names macOS is on the macOS surface or listed here with the reason it is not.
-
-use std::process::Command;
+//! The macOS checks of a pull request ([`super::macos_pr`]): `macos.yml` passes, and each way of
+//! skipping its macOS job on a pull request, of naming it so a skipped job passes for it, of
+//! checking less than the release build does, or of handing it a secret, is named.
 
 use super::macos_pr::{
-    GATE_STEP_IF, PR_MAC_TESTS, macos_pr_problems, pr_mac_commands, pull_request_job_problems,
+    MAC_JOB, PR_MAC_TESTS, macos_pr_problems, pr_mac_commands, pull_request_job_problems,
 };
 use super::platforms::{BUILDS, MAC_TESTS, build_commands, pull_request_macos_problems};
 use super::platforms_tests::in_job;
 use super::text_of;
 use super::yaml;
-use xtask::mac_surface::{SURFACE, on_surface};
 
 fn problems_of(text: &str) -> Vec<String> {
     macos_pr_problems(text, &text_of("artifacts.yml"))
@@ -81,219 +77,159 @@ const DEFECTS: &[(&str, &str, &str, &str)] = &[
         "jobs:\n  extra:\n    runs-on: ubuntu-24.04\n    steps:\n      - run: echo\n",
         "jobs are",
     ),
-    // surface: the paths, the answer, the version.
+    // version: the version of the build, as artifacts.yml computes it.
     (
-        "surface",
-        "          fetch-depth: 2\n",
-        "",
-        "fetch-depth: 2",
-    ),
-    (
-        "surface",
+        "version",
         "runs-on: ubuntu-24.04",
         "runs-on: macos-15",
-        "surface: does not run on an ubuntu runner",
+        "version: does not run on an ubuntu runner",
     ),
     (
-        "surface",
-        " --no-renames",
-        "",
-        "surface: does not run `git diff",
-    ),
-    (
-        "surface",
-        "HEAD^1 HEAD",
-        "HEAD~5 HEAD",
-        "surface: does not run `git diff",
-    ),
-    (
-        "surface",
-        "        id: surface\n",
-        "",
-        "has the id None, not Some(\"surface\")",
-    ),
-    (
-        "surface",
-        "        if: ${{ steps.surface.outputs.mac == 'true' }}\n",
-        "",
-        "runs under `if: None`",
-    ),
-    (
-        "surface",
+        "version",
         "    runs-on: ubuntu-24.04\n",
         "    if: ${{ false }}\n    runs-on: ubuntu-24.04\n",
-        "surface: has `if`",
+        "version: runs under `if: Some(\"${{ false }}\")`",
     ),
     (
-        "surface",
-        "        run: cargo xtask mac-surface",
-        "        continue-on-error: true\n        run: cargo xtask mac-surface",
-        "has continue-on-error",
+        "version",
+        "        run: cargo xtask release version",
+        "        continue-on-error: true\n        run: cargo xtask release version",
+        "version: the step",
     ),
     (
-        "surface",
-        "mac: ${{ steps.surface.outputs.mac }}",
-        "mac: 'true'",
-        "surface: output mac",
+        "version",
+        " --version-file VERSION",
+        "",
+        "version: does not run `cargo xtask release version",
     ),
     (
-        "surface",
+        "version",
+        "        id: version\n",
+        "",
+        "version: the ids of its steps are",
+    ),
+    (
+        "version",
+        "      - name: Compile xtask\n",
+        "      - name: Compile xtask\n        id: version\n",
+        "version: the ids of its steps are",
+    ),
+    (
+        "version",
         "version: ${{ steps.version.outputs.version }}",
         "version: 0.0.0",
-        "surface: output version",
+        "version: output version",
     ),
     (
-        "surface",
+        "version",
         "      - name: Compile xtask\n",
         "      - uses: actions/cache/restore@55cc8345863c7cc4c66a329aec7e433d2d1c52a9 # v6.1.0\n      - name: Compile xtask\n",
-        "surface: uses actions/cache/restore@",
+        "version: uses actions/cache/restore@",
     ),
-    // macos-arm64: on the surface alone, the release build's commands, nothing uploaded or held.
+    // A job named as artifacts.yml's macOS job, which a pull request's run of artifacts.yml skips.
     (
-        "macos-arm64",
-        "    if: ${{ needs.surface.outputs.mac == 'true' }}\n",
         "",
-        "macos-arm64: runs under `if: None`",
+        "\n  macos:\n",
+        "\n  macos-arm64:\n",
+        "jobs are [\"macos-arm64\", \"version\"]",
+    ),
+    // macos: on every pull request, the release build's commands, nothing uploaded or held.
+    (
+        "macos",
+        "    needs: [version]\n",
+        "    needs: [version]\n    if: ${{ contains(github.event.pull_request.labels.*.name, 'macos') }}\n",
+        "macos: runs under `if: Some(",
     ),
     (
-        "macos-arm64",
-        "    if: ${{ needs.surface.outputs.mac == 'true' }}\n",
-        "    if: ${{ always() }}\n",
-        "macos-arm64: runs under `if: Some(\"${{ always() }}\")`",
+        "macos",
+        "    needs: [version]\n",
+        "    needs: [version]\n    if: ${{ always() }}\n",
+        "macos: runs under `if: Some(\"${{ always() }}\")`",
     ),
     (
-        "macos-arm64",
-        "needs: [surface]",
-        "needs: []",
-        "macos-arm64: needs are",
+        "macos",
+        "-macos-arm64-${{ hashFiles",
+        "-${{ github.job }}-${{ hashFiles",
+        "macos: its cache restores are",
     ),
     (
-        "macos-arm64",
+        "macos",
+        "restore-keys: cargo-${{ runner.os }}-${{ runner.arch }}-macos-arm64-",
+        "restore-keys: cargo-${{ runner.os }}-${{ runner.arch }}-",
+        "macos: its cache restores are",
+    ),
+    ("macos", "needs: [version]", "needs: []", "macos: needs are"),
+    (
+        "macos",
         "runs-on: macos-15",
         "runs-on: macos-14",
-        "macos-arm64: runs on Some(\"macos-14\")",
+        "macos: runs on Some(\"macos-14\")",
     ),
     (
-        "macos-arm64",
+        "macos",
         "TARGET: aarch64-apple-darwin",
         "TARGET: x86_64-apple-darwin",
-        "macos-arm64: TARGET is not",
+        "macos: TARGET is not",
     ),
     (
-        "macos-arm64",
-        "RELEASE_VERSION: ${{ needs.surface.outputs.version }}",
+        "macos",
+        "RELEASE_VERSION: ${{ needs.version.outputs.version }}",
         "RELEASE_VERSION: 0.0.0",
-        "macos-arm64: env RELEASE_VERSION",
+        "macos: env RELEASE_VERSION",
     ),
     (
-        "macos-arm64",
+        "macos",
         "      RELEASE_VERSION:",
         "      CARGO_BUILD_TARGET: x\n      RELEASE_VERSION:",
-        "macos-arm64: its env sets",
+        "macos: its env sets",
     ),
     (
-        "macos-arm64",
+        "macos",
         " --workspace --features",
         " -p tierstore --features",
-        "macos-arm64: does not run `cargo test --locked --workspace",
+        "macos: does not run `cargo test --locked --workspace",
     ),
     (
-        "macos-arm64",
+        "macos",
         "      - name: The packaged binary carries a valid code signature\n",
         "      - name: The packaged binary carries a valid code signature\n        if: ${{ false }}\n",
-        "macos-arm64: the step `The packaged binary carries a valid code signature` has an `if:`",
+        "macos: the step `The packaged binary carries a valid code signature` has an `if:`",
     ),
     (
-        "macos-arm64",
+        "macos",
         "        run: codesign --verify --strict",
         "        continue-on-error: true\n        run: codesign --verify --strict",
         "has continue-on-error",
     ),
     (
-        "macos-arm64",
+        "macos",
         "      - name: The packaged binary carries a valid code signature\n",
         "      - name: The packaged binary carries a valid code signature\n        env:\n          TARGET: x\n",
         "sets its own env",
     ),
     (
-        "macos-arm64",
+        "macos",
         "--platform macos-arm64 --scratch",
         "--platform linux-arm64 --scratch",
-        "macos-arm64: does not run `cargo xtask verify-assets hostkeeper-package",
+        "macos: does not run `cargo xtask verify-assets hostkeeper-package",
     ),
     (
-        "macos-arm64",
+        "macos",
         "      - name: The packaged binary carries a valid code signature\n",
         "      - uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1\n      - name: The packaged binary carries a valid code signature\n",
-        "macos-arm64: uses actions/upload-artifact@",
+        "macos: uses actions/upload-artifact@",
     ),
     (
-        "macos-arm64",
+        "macos",
         "      - name: The packaged binary carries a valid code signature\n",
         "      - uses: actions/cache/save@55cc8345863c7cc4c66a329aec7e433d2d1c52a9 # v6.1.0\n      - name: The packaged binary carries a valid code signature\n",
-        "macos-arm64: uses actions/cache/save@",
+        "macos: uses actions/cache/save@",
     ),
     (
-        "macos-arm64",
+        "macos",
         "          persist-credentials: false\n",
         "          persist-credentials: true\n",
-        "macos-arm64: a checkout keeps the token",
-    ),
-    // macos: the check to require.
-    (
-        "macos",
-        "needs: [surface, macos-arm64]",
-        "needs: [surface]",
-        "macos: needs are",
-    ),
-    (
-        "macos",
-        "    if: ${{ !cancelled() }}\n",
-        "",
-        "macos: `if` is not",
-    ),
-    (
-        "macos",
-        "    if: ${{ !cancelled() }}\n",
-        "    if: ${{ always() }}\n",
-        "macos: `if` is not",
-    ),
-    (
-        "macos",
-        "runs-on: ubuntu-24.04",
-        "runs-on: macos-15",
-        "macos: does not run on an ubuntu runner",
-    ),
-    (
-        "macos",
-        "    runs-on: ubuntu-24.04\n",
-        "    continue-on-error: true\n    runs-on: ubuntu-24.04\n",
-        "macos: has continue-on-error",
-    ),
-    ("macos", "run: exit 1", "run: exit 0", "macos: its steps"),
-    (
-        "macos",
-        " || (needs.surface.outputs.mac != 'true' && needs.macos-arm64.result != 'skipped')",
-        "",
-        "macos: its steps",
-    ),
-    (
-        "macos",
-        "needs.surface.result != 'success' || ",
-        "",
-        "macos: its steps",
-    ),
-    (
-        "macos",
-        "needs.macos-arm64.result != 'success')",
-        "needs.macos-arm64.result == 'failure')",
-        "macos: its steps",
-    ),
-    (
-        "macos",
-        "        run: exit 1\n",
-        "        run: exit 1\n      - run: exit 1\n",
-        "macos: its steps",
+        "macos: a checkout keeps the token",
     ),
 ];
 
@@ -322,11 +258,7 @@ fn a_job_missing_from_macos_yml_or_a_file_that_does_not_parse_is_named() {
     // Catches: a job deleted (its checks would then find nothing to refuse), and a file read as
     // clean because it could not be read at all.
     let text = text_of("macos.yml");
-    for (job, says) in [
-        ("surface", "no job surface"),
-        ("macos-arm64", "no job macos-arm64"),
-        ("macos", "no job macos"),
-    ] {
+    for (job, says) in [("version", "no job version"), ("macos", "no job macos")] {
         let renamed = text.replacen(&format!("\n  {job}:\n"), "\n  renamed:\n", 1);
         let problems = problems_of(&renamed);
         assert!(
@@ -341,36 +273,9 @@ fn a_job_missing_from_macos_yml_or_a_file_that_does_not_parse_is_named() {
     assert_eq!(macos_pr_problems(&text, "jobs: [").len(), 1);
 }
 
-#[test]
-fn the_gate_step_condition_fails_exactly_when_the_macos_checks_did_not_pass() {
-    // Catches: a gate that passes a failed, cancelled or missing macOS job on the surface, or a
-    // surface job that failed (its answer unknown), or that fails a pull request off the surface
-    // whose macOS job was rightly skipped. The condition is evaluated here as GitHub would, over
-    // every result of the two jobs.
-    let fails = |surface: &str, mac: &str, ran: &str| {
-        surface != "success"
-            || (mac == "true" && ran != "success")
-            || (mac != "true" && ran != "skipped")
-    };
-    assert_eq!(
-        GATE_STEP_IF,
-        "${{ needs.surface.result != 'success' || (needs.surface.outputs.mac == 'true' && needs.macos-arm64.result != 'success') || (needs.surface.outputs.mac != 'true' && needs.macos-arm64.result != 'skipped') }}"
-    );
-    let results = ["success", "failure", "cancelled", "skipped"];
-    for surface in results {
-        for mac in ["true", "false", ""] {
-            for ran in results {
-                let passes = surface == "success"
-                    && ((mac == "true" && ran == "success") || (mac != "true" && ran == "skipped"));
-                assert_eq!(!fails(surface, mac, ran), passes, "{surface} {mac:?} {ran}");
-            }
-        }
-    }
-}
-
 /// The macOS job of macos.yml, with `replace` replaced by `with` in it.
 fn spoiled_mac(replace: &str, with: &str) -> String {
-    in_job(&text_of("macos.yml"), "macos-arm64", replace, with)
+    in_job(&text_of("macos.yml"), MAC_JOB, replace, with)
 }
 
 #[test]
@@ -431,7 +336,7 @@ fn a_secret_or_the_token_in_a_pull_request_macos_job_is_refused() {
             assert!(
                 problems
                     .iter()
-                    .any(|p| p.contains("macos-arm64") && p.contains(&named)),
+                    .any(|p| p.contains("the job macos ") && p.contains(&named)),
                 "{with:?}: {problems:?}"
             );
         }
@@ -506,131 +411,6 @@ fn the_secret_check_names_the_exact_problems_and_nothing_in_a_clean_job() {
             "x.yml: the job mac runs on macOS for a pull request and names secrets (`echo ${{ secrets.A }}`); it holds no secret and no token",
         ]
     );
-}
-
-/// Tracked files that name macOS, launchd or a `target_os` and are not on the macOS surface, each
-/// with the reason a change to it needs no macOS check before it merges.
-const OFF_THE_SURFACE: &[(&str, &str)] = &[
-    (
-        ".github/ISSUE_TEMPLATE/bug_report.yml",
-        "the issue form's list of platforms; no code",
-    ),
-    (
-        ".github/workflows/release.yml",
-        "runs after a merge only and builds nothing; it downloads the macOS files artifacts.yml built",
-    ),
-    (
-        ".github/workflows/hostkeeper-desired.yml",
-        "runs by hand after a release only; it reads the release index, which names the macOS package",
-    ),
-    (
-        "crates/tierstore/site/",
-        "the pages of the site, which name the macOS download; tierstore-site.yml checks them",
-    ),
-];
-
-/// Whether a file of this kind is code or configuration that can behave differently on macOS: not
-/// prose or a picture.
-fn is_code(path: &str) -> bool {
-    !(path.ends_with(".md") || path.ends_with(".svg"))
-}
-
-/// Whether `text` names macOS, launchd or an operating system in a `cfg`.
-fn names_macos(text: &[u8]) -> bool {
-    let lower = text.to_ascii_lowercase();
-    ["macos", "launchd", "launchctl", "darwin", "target_os"]
-        .iter()
-        .any(|m| lower.windows(m.len()).any(|w| w == m.as_bytes()))
-}
-
-fn root() -> std::path::PathBuf {
-    std::path::PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("../..")
-}
-
-/// The tracked paths of the repository, by `git ls-files`.
-fn tracked() -> Vec<String> {
-    let out = Command::new("git")
-        .args(["ls-files", "-z"])
-        .current_dir(root())
-        .output()
-        .unwrap_or_else(|e| panic!("run git ls-files: {e}"));
-    assert!(out.status.success(), "git ls-files failed: {}", out.status);
-    String::from_utf8(out.stdout)
-        .expect("utf-8 paths")
-        .split('\0')
-        .filter(|p| !p.is_empty())
-        .map(str::to_owned)
-        .collect()
-}
-
-#[test]
-fn every_tracked_file_that_names_macos_is_on_the_surface_or_says_why_not() {
-    // Catches: a file with code for macOS (a `cfg(target_os)`, a launchd step, a macOS runner,
-    // the macOS target) added outside the surface, so a pull request that changes it would run no
-    // macOS check; an exemption with no reason, one for a file that is gone, and one for a file
-    // that is on the surface (it would hide nothing and go stale).
-    let files = tracked();
-    let mut missing = Vec::new();
-    for path in &files {
-        if !is_code(path) || on_surface(path.as_bytes()) {
-            continue;
-        }
-        let exempt = OFF_THE_SURFACE.iter().any(|(p, _)| path.starts_with(p));
-        let Ok(text) = std::fs::read(root().join(path)) else {
-            continue;
-        };
-        if names_macos(&text) && !exempt {
-            missing.push(path.as_str());
-        }
-    }
-    assert_eq!(
-        missing,
-        Vec::<&str>::new(),
-        "on neither xtask::mac_surface::SURFACE nor OFF_THE_SURFACE"
-    );
-    for (path, reason) in OFF_THE_SURFACE {
-        assert!(!reason.trim().is_empty(), "{path}: no reason");
-        assert!(
-            files.iter().any(|f| f.starts_with(path)),
-            "{path}: exempt, but no tracked file"
-        );
-        assert!(
-            !on_surface(path.as_bytes()),
-            "{path}: exempt and on the surface"
-        );
-    }
-}
-
-#[test]
-fn every_entry_of_the_surface_names_a_tracked_file() {
-    // Catches: an entry left behind by a file that moved, which holds nothing while the file's new
-    // path runs no macOS check (the test above then names the new path).
-    let files = tracked();
-    for entry in SURFACE {
-        assert!(
-            files.iter().any(|f| f.starts_with(entry)),
-            "{entry}: no tracked file starts with it"
-        );
-    }
-}
-
-#[test]
-fn the_marker_check_sees_each_marker_and_skips_prose() {
-    // Catches: a completeness check that can find nothing (each marker, in any case, is seen) or
-    // that would require the docs to be on the surface.
-    for text in [
-        "#[cfg(target_os = \"linux\")]",
-        "on MacOS",
-        "launchd",
-        "launchctl bootout",
-        "aarch64-apple-darwin",
-    ] {
-        assert!(names_macos(text.as_bytes()), "{text}");
-    }
-    assert!(!names_macos(b"fn main() {}"));
-    assert!(!is_code("docs/ci-and-release.md"));
-    assert!(!is_code("docs/design/diagrams/live-update.svg"));
-    assert!(is_code("packaging/hostkeeper/units/tierstore.plist"));
 }
 
 #[test]
