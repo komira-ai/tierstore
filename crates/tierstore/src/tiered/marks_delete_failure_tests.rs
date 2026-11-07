@@ -320,6 +320,35 @@ async fn a_client_that_disconnects_after_the_lock_was_taken_does_not_leak_it() {
     assert_eq!(rig.shape("k").await, dirty_shape(true));
 }
 
+/// Asserts that a delete whose client drops the request after the task was spawned is still
+/// counted as a write in flight until its lock is let go: one while the hot DELETE is held at the
+/// store, the request long gone, and none once the lock is released. A count of zero before that
+/// would let the rollback of the format see the marks bucket empty and a marker appear after it.
+#[tokio::test]
+async fn a_delete_whose_client_is_gone_is_counted_as_a_write_until_its_lock_is_let_go() {
+    let rig = Rig::new().await;
+    rig.seed_both("k").await;
+    let gate = rig.hot.gate(Op::Delete, "k", Phase::Pre);
+    let proxy = Arc::clone(&rig.proxy);
+    let client = tokio::spawn(async move { proxy.delete("k").await });
+    gate.parked().await;
+    assert_eq!(rig.writes_counted(), 1);
+    client.abort();
+    assert!(client.await.unwrap_err().is_cancelled());
+    let_the_others_run().await;
+    assert_eq!(rig.writes_counted(), 1);
+    assert_eq!(
+        rig.shape("k").await,
+        lock_shape(MarkerWhy::Delete, true, "p1")
+    );
+
+    assert!(gate.release());
+    let_the_others_run().await;
+    assert_eq!(rig.writes_counted(), 0);
+    assert!(!rig.hot_has("k").await);
+    assert_eq!(rig.shape("k").await, dirty_shape(true));
+}
+
 /// A clock that panics once, at the first reading after the test says so.
 struct Dies {
     base: Arc<dyn Clock>,
@@ -376,6 +405,7 @@ async fn an_aborted_delete_releases_its_lock_and_waits_the_margin_only_if_a_dele
 
         let asked: Vec<Duration> = if queued { vec![secs(60)] } else { vec![] };
         assert_eq!(rig.sleeper.asked(), asked, "{op:?}");
+        assert_eq!(rig.writes_counted(), 0, "{op:?}");
         assert_eq!(rig.shape("k").await, dirty_shape(queued), "{op:?}");
         assert!(rig.hot_has("k").await, "{op:?}");
     }

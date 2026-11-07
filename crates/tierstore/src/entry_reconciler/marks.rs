@@ -3,8 +3,9 @@
 //! over the entries when the format says `active-marks` and the reconciler has the marks bucket
 //! and its name ([`EntryReconciler::with_marks`]) and the name is the one the format records, at
 //! epoch 3 or later (the condition of a put, of the copier and of every pass in the module
-//! `passes`). Under any other phase, or with another name, nothing here runs: the pass over the
-//! markers is inert until the activation.
+//! `passes`). It goes on under the pause of a rollback from `active-marks` (`drain` with the name
+//! still recorded), until the markers are done. Under any other phase, or with another name,
+//! nothing here runs: the pass over the markers is inert until the activation.
 //!
 //! A pass lists the marks bucket in pages of [`EntryReconcilerConfig::marks_page`], reads the
 //! markers of a page (one GET each, which is the version `a` of the marker) and works them on a
@@ -234,11 +235,18 @@ impl EntryReconciler {
     }
 
     /// The marks bucket, if the markers are worked under `format`: it says `active-marks` at epoch
-    /// 3 or later ([`Format::runs_marks`]) and names the marks bucket this reconciler has, which
-    /// is also the condition under which the eviction, the copy-back and the sweep act.
+    /// 3 or later ([`Format::runs_marks`]) or is the pause of a rollback from it
+    /// ([`Format::rolls_back_marks`]), and names the marks bucket this reconciler has. The eviction,
+    /// the copy-back and the sweep act under the first only.
     pub(super) fn runs_marks(&self, format: &Format) -> Option<Arc<MarkSide>> {
         let side = self.marks.as_ref()?;
-        (format.runs_marks() == Some(side.bucket.as_str())).then(|| Arc::clone(side))
+        let named = format.runs_marks().or_else(|| {
+            format
+                .rolls_back_marks()
+                .then_some(format.marks_bucket.as_deref())
+                .flatten()
+        });
+        (named == Some(side.bucket.as_str())).then(|| Arc::clone(side))
     }
 
     /// Notes that the markers are not being worked by this step, so that the passes begin afresh

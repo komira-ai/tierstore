@@ -4,9 +4,12 @@ use std::time::Duration;
 
 use bytes::Bytes;
 
-use super::super::testing::{register, register_old, tier};
-use super::{Class, Registration, check_departed, check_protocol, read};
+use super::super::testing::{register, register_old, register_reporting, tier};
+use super::{
+    Class, Registration, check_departed, check_protocol, not_at_rest, not_drained, phase_word, read,
+};
 use crate::faulty::{FaultyBackend, Op};
+use crate::format::FormatPhase;
 use crate::{Backend, Error};
 use std::sync::Arc;
 
@@ -17,6 +20,8 @@ fn entry(id: &str, class: Class) -> Registration {
         id: id.to_owned(),
         class,
         age_ms: 0,
+        phase: None,
+        writes_in_flight: None,
     }
 }
 
@@ -94,6 +99,8 @@ fn each_class_has_its_line() {
         id: "a".to_owned(),
         class,
         age_ms: 2_999,
+        phase: None,
+        writes_in_flight: None,
     };
     assert_eq!(
         at(Class::Live { proto: 2 }).describe(),
@@ -165,4 +172,100 @@ fn every_live_registration_must_be_at_the_protocol() {
         Err("refusing to activate: registrations below protocol 2: a, d".to_owned())
     );
     assert!(check_protocol(&all[1..3], 2).is_ok());
+}
+
+/// Asserts that the phase and the writes in flight a body reports are read, in the line for the
+/// operator of a live and of a silent registration, and that a body that reports neither, and a
+/// phase word this release does not know, read as they are: the phase `unknown`, no count.
+#[tokio::test]
+async fn the_phase_and_the_writes_in_flight_are_read_and_described() {
+    let (hot, clock) = tier();
+    register_reporting(&*hot, "a", 3, "active-marks", 4).await;
+    register_reporting(&*hot, "b", 3, "someday", 0).await;
+    register(&*hot, "c", 3).await;
+    clock.advance(20_000);
+    let found = read(&*hot, clock.now(), FRESH).await.unwrap();
+    let got: Vec<(Option<FormatPhase>, Option<u64>)> = found
+        .iter()
+        .map(|found| (found.phase, found.writes_in_flight))
+        .collect();
+    assert_eq!(
+        got,
+        vec![
+            (Some(FormatPhase::ActiveMarks), Some(4)),
+            (Some(FormatPhase::Unknown), Some(0)),
+            (None, None),
+        ]
+    );
+    let lines: Vec<String> = found.iter().map(Registration::describe).collect();
+    assert_eq!(
+        lines,
+        vec![
+            "silent, protocol 3, phase active-marks, 4 writes in flight, written 20s ago",
+            "silent, protocol 3, phase unknown, 0 writes in flight, written 20s ago",
+            "silent, protocol 3, written 20s ago",
+        ]
+    );
+    let live = Registration {
+        class: Class::Live { proto: 3 },
+        phase: Some(FormatPhase::Drained),
+        writes_in_flight: Some(0),
+        ..entry("d", Class::Unlabelled)
+    };
+    assert_eq!(
+        live.describe(),
+        "live, protocol 3, phase drained, 0 writes in flight, written 0s ago"
+    );
+    for (phase, word) in [
+        (FormatPhase::Drain, "drain"),
+        (FormatPhase::Drained, "drained"),
+        (FormatPhase::Active, "active"),
+        (FormatPhase::ActiveMarks, "active-marks"),
+        (FormatPhase::Unknown, "unknown"),
+    ] {
+        assert_eq!(phase_word(phase), word);
+    }
+}
+
+/// Asserts which registrations are not at rest under a pause: only a live one of protocol 3 or
+/// later that does not report `drain` or `drained`, or reports no count or a count above zero;
+/// one of protocol 2, a silent one and an unlabelled one are not judged.
+#[test]
+fn only_a_live_proxy_that_reads_markers_can_be_not_at_rest() {
+    let reporting = |id: &str, class, phase, writes| Registration {
+        class,
+        phase,
+        writes_in_flight: writes,
+        ..entry(id, Class::Unlabelled)
+    };
+    let live3 = Class::Live { proto: 3 };
+    let rows = vec![
+        reporting("ok-drain", live3, Some(FormatPhase::Drain), Some(0)),
+        reporting("ok-drained", live3, Some(FormatPhase::Drained), Some(0)),
+        reporting("marking", live3, Some(FormatPhase::ActiveMarks), Some(0)),
+        reporting("unsaid", live3, None, None),
+        reporting("busy", live3, Some(FormatPhase::Drain), Some(3)),
+        reporting("proto2", Class::Live { proto: 2 }, None, None),
+        reporting("silent", Class::Silent { proto: 3 }, None, None),
+        reporting("unlabelled", Class::Unlabelled, None, None),
+    ];
+    assert_eq!(
+        not_at_rest(&rows),
+        vec![
+            "marking acts on active-marks",
+            "unsaid reports no phase",
+            "unsaid reports no count of writes in flight",
+            "busy has 3 writes in flight",
+        ]
+    );
+    assert_eq!(
+        not_drained(&rows),
+        vec![
+            "ok-drain acts on drain",
+            "marking acts on active-marks",
+            "unsaid reports no phase",
+            "busy acts on drain",
+            "proto2 reports no phase",
+        ]
+    );
 }

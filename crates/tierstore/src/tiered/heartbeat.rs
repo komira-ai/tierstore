@@ -13,11 +13,18 @@
 //! entry protocol within one beat of its being written, and one that starts after it, at its first
 //! beat, whether or not a request comes. A read that fails changes nothing.
 //!
+//! Each beat reports two things beside the protocol: `phase`, the phase of the format object the
+//! proxy acts on, and `writes_in_flight`, the number of writes it has begun and not ended
+//! (`pause::Writing`). The operator's rollback from `active-marks` waits for both
+//! (`tierstore format-epoch`). The registration written at the start, before the first beat, reports
+//! neither.
+//!
 //! A stopping process keeps beating until its drain is over and then calls
 //! [`Proxy::stop_heartbeat`]: there is no flag in the registration for a closing process, it just
 //! stops changing, and the reconciler counts its owner as departed once it has stayed unchanged for
 //! the departure time.
 
+use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::{Arc, Mutex};
 use std::time::Duration;
 
@@ -142,6 +149,8 @@ struct Beater {
     gate: Arc<AsyncMutex<()>>,
     /// The longest that look may take: the heartbeat period, as for a beat.
     limit: Duration,
+    /// The writes begun and not ended, which each beat reports.
+    writing: Arc<AtomicU64>,
 }
 
 impl Beater {
@@ -176,13 +185,16 @@ impl Beater {
 
     /// The body of beat `count`.
     fn body(&self, count: u64) -> Bytes {
+        // The phase is read before the count of writes, never after it (see `pause::Writing`).
+        let phase = locked(&self.seen).reported();
+        let in_flight = self.writing.load(Ordering::SeqCst);
         Registration {
             proto: self.proto,
             boot: self.boot.clone(),
             hb: count,
             peers: Some(self.peers.names()),
-            phase: None,
-            writes_in_flight: None,
+            phase,
+            writes_in_flight: Some(in_flight),
         }
         .encode()
     }
@@ -259,6 +271,7 @@ impl Proxy {
             seen: Arc::clone(&inner.pause),
             gate: Arc::clone(&inner.format_gate),
             limit: config.heartbeat,
+            writing: Arc::clone(&inner.writing),
         };
         let (stop, stopped) = watch::channel(false);
         let (over, ended) = watch::channel(());

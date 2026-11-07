@@ -42,6 +42,23 @@ pub(super) async fn register(hot: &dyn Backend, id: &str, proto: u32) {
         .unwrap();
 }
 
+/// A registration of a release with a heartbeat that reports the `phase` it acts on and the
+/// number of `writes` in flight.
+pub(super) async fn register_reporting(
+    hot: &dyn Backend,
+    id: &str,
+    proto: u32,
+    phase: &str,
+    writes: u64,
+) {
+    let body = format!(
+        r#"{{"proto":{proto},"boot":"b","hb":1,"phase":"{phase}","writes_in_flight":{writes}}}"#
+    );
+    let key = format!("_tiering/proxies/{id}");
+    hot.delete(&key).await.unwrap();
+    hot.put(&key, Bytes::from(body)).await.unwrap();
+}
+
 /// A registration of a release before the heartbeat: an empty object.
 pub(super) async fn register_old(hot: &dyn Backend, id: &str) {
     hot.put(&format!("_tiering/proxies/{id}"), Bytes::from_static(b"{}"))

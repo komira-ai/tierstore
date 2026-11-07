@@ -34,7 +34,7 @@ impl Inner {
         key: &str,
         body: PutBody<'_>,
     ) -> Result<PlainPut, Error> {
-        let markers = self.admit_marked(key).await?;
+        let (markers, _writing) = self.admit_marked(key).await?;
         if !self.config.emergency_cold_landing {
             return Err(retry(key, "the hot tier is full"));
         }
