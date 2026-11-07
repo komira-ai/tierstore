@@ -25,6 +25,7 @@ mod killed_put;
 mod list_parts;
 mod list_uploads;
 mod list_uploads_reserved;
+mod marks_e2e;
 mod multipart;
 mod open_read;
 mod recheck;
