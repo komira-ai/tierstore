@@ -19,7 +19,7 @@
     <p class="kicker">What it does</p>
     <h2>Two tiers, one bucket</h2>
     <ul class="why-grid">
-      <li><h3>Writes land on the hot tier</h3><p>A put is refused if the key exists in either tier. It is created in the hot tier and acknowledged once its journal entry is durable there.</p></li>
+      <li><h3>Writes land on the hot tier</h3><p>On a store on the entry format a put is refused if the key exists in either tier; on the marker format a plain put replaces it. It is written to the hot tier and acknowledged once its entry (or marker) says it landed there.</p></li>
       <li><h3>The cold tier is filled in the background</h3><p>One reconciler at a time, guarded by a lease object in the hot tier, copies puts to the cold tier and never scans either tier's data.</p></li>
       <li><h3>The hot tier is freed when it fills</h3><p>Above the high-water mark it evicts the oldest objects that the cold tier already holds, down to the low-water mark.</p></li>
       <li><h3>Reads try hot, then cold</h3><p>A cold hit is copied back into the hot tier. A listing merges both tiers.</p></li>
@@ -35,13 +35,14 @@
     <div class="table-wrap"><table>
     <thead><tr><th>Thing</th><th>State</th></tr></thead>
     <tbody>
-    <tr><td>S3 front: get (ranges), head, create-only put, delete, list, multipart, SigV4</td><td><span class="tag tag-ok">works today</span></td></tr>
+    <tr><td>S3 front: get (ranges), head, put (create-only on the entry format; a plain put replaces on the marker format), delete, list, multipart, SigV4</td><td><span class="tag tag-ok">works today</span></td></tr>
     <tr><td>Hot and cold tiers: S3-compatible store, local directory, memory</td><td><span class="tag tag-ok">works today</span></td></tr>
     <tr><td>Key roles: full, read-only, presigning, garbage collection, scoped</td><td><span class="tag tag-ok">works today</span></td></tr>
     <tr><td>A TOML configuration file (<code>--config</code>), the only way to configure the process</td><td><span class="tag tag-ok">works today; the data-path flags of earlier builds are gone</span></td></tr>
     <tr><td>A per-node read-through cache in the binary, as a build node (<code>[local_cache]</code>, <code>[[policy]]</code> <code>cache = true</code>)</td><td><span class="tag tag-ok">works; a build node, file only</span></td></tr>
-    <tr><td>TLS on the S3 front</td><td><span class="tag tag-planned">not built</span></td></tr>
-    <tr><td>A package, a container image, updates by a host updater</td><td><span class="tag tag-planned">none: a tarball and an example unit</span></td></tr>
+    <tr><td>TLS on the S3 front (<code>server.tls_cert_file</code>, <code>server.tls_key_file</code>)</td><td><span class="tag tag-ok">works today; optional</span></td></tr>
+    <tr><td>hostkeeper packages and updates through <code>tierstore update-hook</code></td><td><span class="tag tag-ok">works today</span></td></tr>
+    <tr><td>A Homebrew formula, an apt package, a container image</td><td><span class="tag tag-planned">none yet: a tarball and an example unit</span></td></tr>
     </tbody></table></div>
   </div>
 </section>

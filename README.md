@@ -66,7 +66,7 @@ path = "cold"
 ./tierstore --config tierstore.toml
 ```
 
-The process asks each tier the questions its guarantees rest on, then prints `tierstore <version> listen=127.0.0.1:9000`.
+The process does not test its tiers: it opens the proxy and binds the address, then prints `tierstore <version> listen=127.0.0.1:9000`.
 `curl http://127.0.0.1:9000/readyz` answers `ready`. Stop it with Ctrl-C; it drains and exits.
 
 ### 4. Put and get an object
@@ -86,7 +86,9 @@ aws --endpoint-url http://127.0.0.1:9000 s3api get-object --bucket tierstore --k
 cat out.txt
 ```
 
-A put is create-only: putting `hello.txt` again is refused with 412. The aws CLI is not part of tierstore's own tests, which
+Whether putting `hello.txt` again is refused depends on the store's format phase: on a store on the older entry format a put is create-only and
+the second is refused with 412; on a store on the marker format (`active-marks`) a plain put replaces the key, and `If-None-Match: *` makes a put
+create-only. The aws CLI is not part of tierstore's own tests, which
 drive the front with an SDK on its default settings and with bodies framed by hand.
 
 ## The configurations
@@ -152,10 +154,11 @@ prefix = "cas/b/"
 cache  = true
 ```
 
-### All-in-one (planned)
+### All-in-one
 
 One process that is both: the storage node's two tiers and the build node's disk cache in front of them, for a single
-machine. It is not in a release and has no configuration keys yet.
+machine. Its file has `[hot_store]`, `[cold_store]` and `[local_cache]`; see
+[A file for a storage node with a cache](crates/tierstore/docs/configuration.md#a-file-for-a-storage-node-with-a-cache).
 
 ## Documentation
 

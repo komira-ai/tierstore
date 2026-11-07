@@ -40,7 +40,7 @@ path = "cold"</pre></div>
   <li>
     <h3>Start it</h3>
     <div class="code"><pre><span class="p">$</span> ./tierstore --config tierstore.toml</pre></div>
-    <p>The process asks each tier the questions its guarantees rest on, then prints its version and the address it listens on. <code>curl http://127.0.0.1:9000/readyz</code> answers <code>ready</code>. Stop it with Ctrl-C: it drains and exits.</p>
+    <p>The process does not test its tiers: it opens the proxy (which reads and writes the hot tier's own state) and binds the address, then prints its version and the address it listens on. <code>curl http://127.0.0.1:9000/readyz</code> answers <code>ready</code>. Stop it with Ctrl-C: it drains and exits.</p>
   </li>
   <li>
     <h3>Put and get an object</h3>
@@ -53,7 +53,7 @@ path = "cold"</pre></div>
 <span class="p">$</span> aws --endpoint-url http://127.0.0.1:9000 s3api put-object --bucket tierstore --key hello.txt --body hello.txt
 <span class="p">$</span> aws --endpoint-url http://127.0.0.1:9000 s3api get-object --bucket tierstore --key hello.txt out.txt
 <span class="p">$</span> cat out.txt</pre></div>
-    <p>A put is create-only: putting <code>hello.txt</code> again is refused with 412. tierstore's own tests drive the front with an SDK set this way, not with the <code>aws</code> CLI.</p>
+    <p>Whether putting <code>hello.txt</code> again is refused depends on the store's format phase: on a store on the older entry format a put is create-only and the second is refused with 412; on a store on the marker format (<code>active-marks</code>) a plain put replaces the key, and <code>If-None-Match: *</code> is what makes a put create-only. tierstore's own tests drive the front with an SDK set this way, not with the <code>aws</code> CLI.</p>
   </li>
 </ol>
 
@@ -106,7 +106,7 @@ credentials_file = "/etc/tierstore-cache/upstream-read.key"
 prefix = "cas/b/"
 cache  = true</pre></div>
 
-<h3 id="all-in-one">All-in-one <span class="tag tag-planned">not in a release yet</span></h3>
-<p>One process that is both: the storage node's two tiers and the build node's disk cache in front of them, for a single machine. It has no configuration keys yet.</p>
+<h3 id="all-in-one">All-in-one</h3>
+<p>One process that is both: the storage node's two tiers and the build node's disk cache in front of them, for a single machine. Its file has <code>[hot_store]</code>, <code>[cold_store]</code> and <code>[local_cache]</code>; <a href="/docs/configuration/#a-file-for-a-storage-node-with-a-cache">configuration</a> has an example.</p>
 
 <p>Next: <a href="install.html">install it as a service</a>, <a href="demo.html">a start and a drain</a>, or <a href="/docs/">the operator guide</a>.</p>

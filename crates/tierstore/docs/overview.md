@@ -1,6 +1,6 @@
 # What tierstore is
 
-tierstore is an S3-compatible object store server that puts a small, fast tier in front of a large, slow one. Clients speak S3 to one bucket. New objects are written to the hot tier, copied to the cold tier in the background, and removed from the hot tier when it fills. It is a binary, `tierstore`, for Linux (x86_64, arm64) and macOS (Apple silicon), with no package and no container image.
+tierstore is an S3-compatible object store server that puts a small, fast tier in front of a large, slow one. Clients speak S3 to one bucket. New objects are written to the hot tier, copied to the cold tier in the background, and removed from the hot tier when it fills. It is a binary, `tierstore`, for Linux (x86_64, arm64) and macOS (Apple silicon). hostkeeper packages exist and update it through `tierstore update-hook`; there is no Homebrew formula, apt package or container image yet.
 
 This guide is for the person who installs and runs it. It describes what is on the main branch of the source today. A piece that is planned and not in the code is described only under a heading titled "Not in a release yet", so you can tell the two apart.
 
@@ -27,9 +27,8 @@ A write goes to the hot tier and is acknowledged once the entry of its key (a sm
 
 ## What it guarantees and what it does not
 
-- A put is create-only: a key that exists in either tier is refused with 412 `PreconditionFailed`. Objects are immutable.
+- On a store on the entry format (`active`) a put is create-only: a key that exists in either tier is refused with 412 `PreconditionFailed`. On a store on the marker format (`active-marks`) a plain put replaces the key, `If-None-Match: *` still creates only, and `If-Match` replaces only the object it names. Which one applies is the format phase of the hot tier ([operations](operations.md#the-format-object-and-the-pause-of-writes)).
 - A put is acknowledged only after its entry says it landed in the hot tier. Losing the hot tier loses objects that were not yet copied to the cold tier.
-- A put is acknowledged only after its journal entry is durable in the hot tier. Losing the hot tier loses objects that were not yet copied to the cold tier.
 - It does not scrub a storage node's objects: nothing re-reads stored bytes to find rot. See [limits](limits.md).
 
 ## Where to go next
