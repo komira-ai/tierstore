@@ -3,7 +3,7 @@
 //!
 //! ```text
 //! tierstore update-hook <prepare|cutover|verify|rollback|cleanup> [<artifact>] --params <file>
-//! tierstore format-epoch (--check|--drain|--cancel|--activate) --hot <tier> [flags]
+//! tierstore format-epoch (--check|--drain|--cancel|--activate|--activate-marks|--restore-entries) --hot <tier> [flags]
 //! tierstore entries (ls|show --key <key>) --hot <tier> [flags]
 //! ```
 //!
@@ -93,6 +93,57 @@ impl Hot {
             &S3Client::default(),
         )
         .map_err(VerbError::Refused)
+    }
+}
+
+/// The marks bucket of the hot store: the name the format record gives it, and the tier.
+type MarksTier = (String, Arc<dyn Backend>);
+
+impl Hot {
+    /// The marks bucket of the hot store, with the name the format record gives it: for an
+    /// `s3:<bucket>` hot tier the bucket `named` or `<bucket>-marks`, with the endpoint, region and
+    /// credentials of the hot tier; for `memory` a map of its own. A `dir:<path>` tier has none
+    /// (`None`) in this release.
+    ///
+    /// # Errors
+    /// [`VerbError::Refused`] for a name that is empty or is the hot bucket, for a name given to a
+    /// hot tier that is not an `s3` one, and as [`Hot::open`].
+    fn open_marks(&self, named: Option<&str>) -> Result<Option<MarksTier>, VerbError> {
+        let (name, spec) = match (self.hot.strip_prefix("s3:"), named) {
+            (Some(bucket), named) => {
+                let marks = named.map_or_else(|| format!("{bucket}-marks"), str::to_owned);
+                if marks.is_empty() || marks == bucket {
+                    return Err(VerbError::Refused(format!(
+                        "--marks-bucket {marks:?}: the markers need a bucket of their own, not \
+                         empty and not the hot bucket"
+                    )));
+                }
+                let spec = format!("s3:{marks}");
+                (marks, spec)
+            }
+            (None, Some(named)) => {
+                return Err(VerbError::Refused(format!(
+                    "--marks-bucket {named:?} is only for an `s3:<bucket>` hot tier"
+                )));
+            }
+            (None, None) if self.hot.starts_with("dir:") => return Ok(None),
+            (None, None) => ("memory".to_owned(), "memory".to_owned()),
+        };
+        let s3 = S3Flags {
+            endpoint: self.hot_endpoint.as_deref(),
+            region: self.hot_region.as_deref(),
+            credentials: self.hot_credentials_file.as_deref(),
+            conditional_delete: None,
+        };
+        let tier = open_tier(
+            "--hot",
+            &spec,
+            &s3,
+            self.s3_request_timeout,
+            &S3Client::default(),
+        )
+        .map_err(VerbError::Refused)?;
+        Ok(Some((name, tier)))
     }
 }
 

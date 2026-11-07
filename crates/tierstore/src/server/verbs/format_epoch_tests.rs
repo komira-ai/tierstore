@@ -39,6 +39,7 @@ async fn acted(
         hot,
         clock,
         sleeper,
+        marks: None,
     };
     let result = act(work, &mut out).await.map_err(|why| why.to_string());
     (result, String::from_utf8(out).unwrap())
@@ -244,26 +245,31 @@ async fn a_phase_this_release_does_not_know_is_refused() {
     assert!(sleeper.asked().is_empty());
 }
 
-/// Asserts that the phase `active-marks` is named by `--check`, with its epoch, and that `--check`,
-/// `--drain` and `--activate` refuse it with the message exactly and write nothing: this release
-/// does not leave it.
+/// Asserts that the phase `active-marks` is named by `--check` with its epoch (and `--drain` would
+/// be accepted: it is the way back), that `--activate` and `--cancel` refuse it with the message
+/// exactly, that `--drain` of it needs the marks bucket (none is given here), and that nothing is
+/// written.
 #[tokio::test]
-async fn the_phase_active_marks_is_named_and_not_left_by_this_release() {
+async fn the_phase_active_marks_is_named_and_only_the_rollback_drain_leaves_it() {
     let (hot, clock) = tier();
     let marks = br#"{"phase":"active-marks","epoch":3,"marks_bucket":"tier-hot-marks"}"#;
     hot.put(FORMAT_KEY, Bytes::from_static(marks))
         .await
         .unwrap();
     let sleeper = RecordingSleeper::new();
-    let message = "the format object says active-marks, a phase this release does not leave; use \
-                   the tool of the release that wrote it";
-    for flags in [&["--check"][..], &["--drain", "--apply"][..]] {
-        let (result, out) = acted(&*hot, &clock, &sleeper, flags).await;
-        assert_eq!(result, Err(message.to_owned()), "{flags:?}");
-        let named = flags == ["--check"];
-        let heading = "format: active-marks (epoch 3)\n";
-        assert_eq!(out.starts_with(heading), named, "{out}");
-    }
+    let (result, out) = acted(&*hot, &clock, &sleeper, &["--check"]).await;
+    assert_eq!(result, Ok(()));
+    assert!(out.starts_with("format: active-marks (epoch 3)\n"), "{out}");
+    assert!(out.ends_with("--drain would be accepted\n"), "{out}");
+    let (drain, _) = acted(&*hot, &clock, &sleeper, &["--drain", "--apply"]).await;
+    assert_eq!(
+        drain,
+        Err(
+            "this hot tier has no marks bucket in this release (a `dir:<path>` hot tier cannot \
+             run the markers); the markers need an `s3:<bucket>` hot tier"
+                .to_owned()
+        )
+    );
     let (activate, _) = acted(&*hot, &clock, &sleeper, &["--activate", "--apply"]).await;
     assert_eq!(
         activate,
@@ -741,6 +747,7 @@ async fn an_output_that_cannot_be_written_is_an_error() {
         hot: &*hot,
         clock: &*clock,
         sleeper: &sleeper,
+        marks: None,
     };
     let result = act(work, &mut Broken).await;
     assert_eq!(
