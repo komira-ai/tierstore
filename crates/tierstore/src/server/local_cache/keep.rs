@@ -360,7 +360,8 @@ impl Inner {
         // the entry protocol, only after the whole body has been written to that tier, so the HEAD
         // is what spares the bandwidth and room. A proxy that runs on markers answers a create-only
         // put of a key it holds before it reads the body, and the HEAD is then a read of its own
-        // that the put repeats; with the setting off the put is the upstream's alone.
+        // that the put repeats (through such a proxy a hot HEAD, a marker GET and a cold HEAD);
+        // with the setting off the put is the upstream's alone.
         if self.config.head_before_put {
             match self.upstream.head(key).await {
                 Ok(_) => {

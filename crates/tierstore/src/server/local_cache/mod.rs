@@ -320,9 +320,9 @@ pub struct CacheConfig {
     /// Whether a create-only put asks the upstream for the key (one HEAD) before it reads the
     /// body (default `true`). The HEAD spares an upstream that refuses a key it holds only after
     /// the whole body has arrived the transfer of a large blob it has already; an upstream that
-    /// answers before it reads the body (a proxy whose format is `active-marks`) makes it a
-    /// request more for every put of a new key, and with `false` the put is only the upstream's
-    /// own (see `put_through`, in `keep`).
+    /// answers before it reads the body (a proxy whose format is `active-marks`) makes it three
+    /// requests more of the proxy for every put of a new key (a hot HEAD, a marker GET and a cold
+    /// HEAD), and with `false` the put is only the upstream's own (see `put_through`, in `keep`).
     pub head_before_put: bool,
 }
 
