@@ -24,7 +24,9 @@
 //!    reap ends by the lease (5.13).
 //! 5. Release (M6, M8): `CLEARING`, then the marker is removed.
 //!
-//! A pass reads the format object once and does nothing unless it says `active-marks`.
+//! A pass reads the format object once and does nothing unless it says `active-marks` at epoch 3
+//! or later and names the marks bucket the evictor was given (the condition of a put and of the
+//! copier).
 
 use std::collections::BTreeMap;
 use std::num::NonZeroU64;
@@ -37,7 +39,7 @@ use futures::stream::{self, StreamExt};
 use crate::backend::ByteRange;
 use crate::deadline::millis;
 use crate::entry::{ambiguous, found};
-use crate::format::marks_active;
+use crate::format::marks_run_in;
 use crate::marks_leader::{LeaderLease, release, renewed};
 use crate::{Backend, Clock, Creation, Error, MarkBirth, MarkerWhy, Markers, Meta, Written};
 
@@ -181,7 +183,8 @@ pub enum Evicted {
 /// What one [`MarkEvictor::evict_pass`] did.
 #[derive(Debug, Default, PartialEq, Eq)]
 pub struct EvictReport {
-    /// Whether the format said `active-marks`. If not, nothing else was done.
+    /// Whether the format opened writes on markers in the evictor's marks bucket. If not, nothing
+    /// else was done.
     pub active: bool,
     /// The bytes of the hot objects deleted.
     pub freed: u64,
@@ -207,6 +210,7 @@ pub struct MarkEvictor {
     hot: Arc<dyn Backend>,
     cold: Arc<dyn Backend>,
     markers: Markers,
+    bucket: String,
     lease: LeaderLease,
     records: Arc<CopyRecords>,
     mono: Arc<dyn Clock>,
@@ -215,13 +219,15 @@ pub struct MarkEvictor {
 }
 
 impl MarkEvictor {
-    /// The eviction of the leader whose markers are `markers`, over `hot` and `cold`; `records`
-    /// is shared with the copier. The leader took over now, on `mono`.
+    /// The eviction of the leader whose markers are `markers`, in the marks bucket named `bucket`
+    /// (the name the format record must give), over `hot` and `cold`; `records` is shared with the
+    /// copier. The leader took over now, on `mono`.
     #[must_use]
     pub fn new(
         hot: Arc<dyn Backend>,
         cold: Arc<dyn Backend>,
         markers: Markers,
+        bucket: &str,
         lease: LeaderLease,
         records: Arc<CopyRecords>,
         mono: Arc<dyn Clock>,
@@ -232,6 +238,7 @@ impl MarkEvictor {
             hot,
             cold,
             markers,
+            bucket: bucket.to_owned(),
             lease,
             records,
             mono,
@@ -251,11 +258,11 @@ impl MarkEvictor {
         self.taken_over_at.load(Ordering::SeqCst)
     }
 
-    /// Evicts `keys`, at most `parallel` at a time (at least one), if the format says
-    /// `active-marks`.
+    /// Evicts `keys`, at most `parallel` at a time (at least one), if the format opens writes on
+    /// markers in this evictor's marks bucket.
     pub async fn evict_pass(&self, keys: Vec<String>, parallel: usize) -> EvictReport {
         let mut report = EvictReport::default();
-        match marks_active(self.hot.as_ref()).await {
+        match marks_run_in(self.hot.as_ref(), &self.bucket).await {
             Ok(true) => report.active = true,
             Ok(false) => return report,
             Err(error) => {

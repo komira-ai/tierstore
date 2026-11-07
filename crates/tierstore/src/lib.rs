@@ -83,8 +83,9 @@
 //!   stray sweep over markers (`docs/design/put-without-lock.md`, 5.10 to 5.12), and [`WantRequests`]
 //!   is the ask a proxy's cold read makes for a copy-back. [`LeaderLease`] is the lease they ask the
 //!   margin of, and [`CopyRecords`] the pairs of tags the copier will record for the eviction and the
-//!   sweep. Each pass reads `_tiering/format` and does nothing unless it says `active-marks`; the
-//!   leader's step that calls the first three comes with pull request 10 of the design.
+//!   sweep. Each pass reads `_tiering/format` and does nothing unless it says `active-marks` at
+//!   epoch 3 or later and names the marks bucket it was given; the leader's step that calls the
+//!   first three comes with pull request 10 of the design.
 //! - [`CachedStore`] answers repeated reads of an object's ranges from RAM in front of any
 //!   backend, typically a [`Proxy`]. It is a cache of the node it runs on, not state.
 //!

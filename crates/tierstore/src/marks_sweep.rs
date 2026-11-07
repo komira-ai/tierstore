@@ -27,7 +27,8 @@
 //! are left to the client.
 //!
 //! It runs at takeover and then every `stray_interval`, and reads the format object first: under
-//! a phase other than `active-marks` it does nothing.
+//! a format that does not say `active-marks` at epoch 3 or later and name the marks bucket the
+//! sweep was given (the condition of a put and of the copier) it does nothing.
 
 use std::collections::VecDeque;
 use std::sync::Arc;
@@ -35,7 +36,7 @@ use std::time::Duration;
 
 use crate::deadline::millis;
 use crate::entry::found;
-use crate::format::marks_active;
+use crate::format::marks_run_in;
 use crate::journal::is_reserved;
 use crate::marks_evict::CopyRecords;
 use crate::{Backend, Clock, Creation, Error, Listed, MarkBirth, Markers, Meta, Sleeper};
@@ -72,7 +73,8 @@ impl Default for SweepConfig {
 /// What one [`StraySweep::run`] did.
 #[derive(Debug, Default, PartialEq, Eq)]
 pub struct SweepReport {
-    /// Whether the format said `active-marks`. If not, nothing else was done.
+    /// Whether the format opened writes on markers in the sweep's marks bucket. If not, nothing
+    /// else was done.
     pub active: bool,
     /// The hot objects that got a `DIRTY` marker.
     pub adopted: usize,
@@ -150,6 +152,7 @@ pub struct StraySweep {
     hot: Arc<dyn Backend>,
     cold: Arc<dyn Backend>,
     marks: Arc<dyn Backend>,
+    bucket: String,
     markers: Markers,
     records: Arc<CopyRecords>,
     time: SweepTime,
@@ -160,12 +163,13 @@ pub struct StraySweep {
 
 impl StraySweep {
     /// The sweep of the leader whose markers are `markers`, kept in the bucket `marks` (the one
-    /// `markers` is over).
+    /// `markers` is over), which the format record names `bucket`.
     #[must_use]
     pub fn new(
         hot: Arc<dyn Backend>,
         cold: Arc<dyn Backend>,
         marks: Arc<dyn Backend>,
+        bucket: &str,
         markers: Markers,
         records: Arc<CopyRecords>,
         time: SweepTime,
@@ -175,6 +179,7 @@ impl StraySweep {
             hot,
             cold,
             marks,
+            bucket: bucket.to_owned(),
             markers,
             records,
             time,
@@ -199,10 +204,10 @@ impl StraySweep {
         Duration::from_micros(1_000_000_u64.div_ceil(rate))
     }
 
-    /// Sweeps if the format says `active-marks`.
+    /// Sweeps if the format opens writes on markers in this sweep's marks bucket.
     pub async fn run(&mut self) -> SweepReport {
         let mut report = SweepReport::default();
-        match marks_active(self.hot.as_ref()).await {
+        match marks_run_in(self.hot.as_ref(), &self.bucket).await {
             Ok(true) => report.active = true,
             Ok(false) => return report,
             Err(error) => {

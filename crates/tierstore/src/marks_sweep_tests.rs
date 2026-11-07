@@ -9,7 +9,7 @@ use async_trait::async_trait;
 use bytes::Bytes;
 
 use crate::format::FormatPhase;
-use crate::marks_leader_tests::{Rig, Shape, bytes, dirty, secs, shape_of};
+use crate::marks_leader_tests::{MARKS_BUCKET, NOT_OPEN, Rig, Shape, bytes, dirty, secs, shape_of};
 use crate::{
     Backend, ByteRange, CopyRecords, Error, EvictConfig, Evicted, Listed, MarkEvictor, MarkerState,
     MemoryBackend, Meta, Op, StraySweep, SweepConfig, SweepTime,
@@ -97,6 +97,7 @@ fn sweep_over(
         hot,
         cold,
         rig.marks.clone(),
+        MARKS_BUCKET,
         rig.markers("S"),
         records.clone(),
         time(rig),
@@ -279,6 +280,7 @@ async fn an_object_landed_without_its_marker_is_adopted_by_the_sweep_and_never_e
         rig.hot.clone(),
         rig.cold.clone(),
         rig.markers("L"),
+        MARKS_BUCKET,
         lease,
         records,
         rig.mono.clone(),
@@ -381,6 +383,34 @@ async fn the_sweep_runs_at_takeover_and_then_only_after_its_interval() {
     assert!(!sweep.due());
     sweep.took_over();
     assert!(sweep.due());
+}
+
+/// Asserts that the sweep does nothing under the phase `active-marks` when the record does not open
+/// writes on markers in the sweep's marks bucket: no epoch, an epoch below 3, no name, another
+/// name. Under the record that does it runs.
+#[tokio::test]
+async fn the_sweep_does_nothing_unless_the_record_names_its_bucket_at_epoch_3() {
+    for record in NOT_OPEN {
+        let rig = Rig::new();
+        rig.format_json(record).await;
+        rig.hot_mem.put("a", bytes("v")).await.unwrap();
+        age(&rig);
+        let mut sweep = sweeper(&rig);
+        let report = sweep.run().await;
+        assert!(!report.active, "{record}");
+        assert_eq!((report.adopted, report.uploads_aborted), (0, 0), "{record}");
+        assert_eq!(rig.marks.calls(Op::Put), 0, "{record}");
+        assert_eq!(rig.hot.calls(Op::List), 0, "{record}");
+        assert!(sweep.due(), "{record}");
+    }
+    let rig = Rig::new();
+    rig.activate().await;
+    rig.hot_mem.put("a", bytes("v")).await.unwrap();
+    age(&rig);
+    let mut sweep = sweeper(&rig);
+    let report = sweep.run().await;
+    assert!(report.active);
+    assert_eq!(report.adopted, 1);
 }
 
 /// Asserts that the sweep does nothing under a format that is not `active-marks` (it reads the

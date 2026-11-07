@@ -21,7 +21,9 @@
 //!   (5.13). A failure before the write, and a hot write the store refused (any answer
 //!   but "unavailable" or "other failure", which leave it open), release it.
 //!
-//! A pass reads the format object once and does nothing unless it says `active-marks`.
+//! A pass reads the format object once and does nothing unless it says `active-marks` at epoch 3
+//! or later and names the marks bucket the copy-back was given (the condition of a put and of the
+//! copier).
 
 use std::collections::{BTreeMap, BTreeSet};
 use std::sync::{Arc, Mutex, MutexGuard, PoisonError};
@@ -32,7 +34,7 @@ use futures::stream::{self, StreamExt};
 
 use crate::deadline::millis;
 use crate::entry::ambiguous;
-use crate::format::marks_active;
+use crate::format::marks_run_in;
 use crate::marks_leader::{LeaderLease, release, renewed};
 use crate::{
     Backend, Clock, Creation, Error, MarkBirth, MarkMove, MarkSeen, MarkerState, MarkerWhy,
@@ -215,7 +217,8 @@ pub enum CopiedBack {
 /// What one [`CopyBacker::pass`] did.
 #[derive(Debug, Default, PartialEq, Eq)]
 pub struct CopyBackReport {
-    /// Whether the format said `active-marks`. If not, nothing else was done.
+    /// Whether the format opened writes on markers in the copy-back's marks bucket. If not, nothing
+    /// else was done.
     pub active: bool,
     /// The objects copied into the hot tier.
     pub landed: usize,
@@ -244,6 +247,7 @@ pub struct CopyBacker {
     hot: Arc<dyn Backend>,
     cold: Arc<dyn Backend>,
     markers: Markers,
+    bucket: String,
     lease: LeaderLease,
     mono: Arc<dyn Clock>,
     config: CopyBackConfig,
@@ -255,12 +259,14 @@ pub struct CopyBacker {
 }
 
 impl CopyBacker {
-    /// The copy-back of the leader whose markers are `markers`, over `hot` and `cold`.
+    /// The copy-back of the leader whose markers are `markers`, in the marks bucket named `bucket`
+    /// (the name the format record must give), over `hot` and `cold`.
     #[must_use]
     pub fn new(
         hot: Arc<dyn Backend>,
         cold: Arc<dyn Backend>,
         markers: Markers,
+        bucket: &str,
         lease: LeaderLease,
         mono: Arc<dyn Clock>,
         config: CopyBackConfig,
@@ -269,6 +275,7 @@ impl CopyBacker {
             hot,
             cold,
             markers,
+            bucket: bucket.to_owned(),
             lease,
             mono,
             config,
@@ -284,12 +291,12 @@ impl CopyBacker {
     }
 
     /// Works on `markers`, all the markers the discovery found in this round (those that are not
-    /// `WANT` are ignored), at most `parallel` at a time (at least one), if the format says
-    /// `active-marks`. The oldest `copy_back_max` asks that are younger than `copy_back_ttl` are
+    /// `WANT` are ignored), at most `parallel` at a time (at least one), if the format opens
+    /// writes on markers in this copy-back's marks bucket. The oldest `copy_back_max` asks that are younger than `copy_back_ttl` are
     /// copied; the others are dropped.
     pub async fn pass(&mut self, markers: Vec<MarkSeen>, parallel: usize) -> CopyBackReport {
         let mut report = CopyBackReport::default();
-        match marks_active(self.hot.as_ref()).await {
+        match marks_run_in(self.hot.as_ref(), &self.bucket).await {
             Ok(true) => report.active = true,
             Ok(false) => return report,
             Err(error) => {

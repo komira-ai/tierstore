@@ -13,7 +13,8 @@ use futures::StreamExt;
 use crate::backend::{ReadBody, Window};
 use crate::format::FormatPhase;
 use crate::marks_leader_tests::{
-    Rig, Shape, bytes, dirty, done, lock, secs, shape_of, until_parked, want,
+    MARKS_BUCKET, NOT_OPEN, Rig, Shape, bytes, dirty, done, lock, secs, shape_of, until_parked,
+    want,
 };
 use crate::{
     Backend, ByteRange, CopyBackConfig, CopyBacker, Error, GateBackend, LeaderLease, Listed,
@@ -52,6 +53,7 @@ async fn backer(
         hot,
         cold,
         rig.markers(LEADER),
+        MARKS_BUCKET,
         lease,
         rig.mono.clone(),
         config,
@@ -555,6 +557,27 @@ async fn a_stream_is_cut_when_the_leader_loses_its_lease_and_lands_nothing() {
     assert!(matches!(report.failed[0].1, Error::Unavailable(_)));
     assert!(!rig.hot_has(KEY).await);
     assert_eq!(shape_of(&rig, KEY).await, Some(copy_back_lock()));
+}
+
+/// Asserts that a pass does nothing under the phase `active-marks` when the record does not open
+/// writes on markers in the copy-back's marks bucket: no epoch, an epoch below 3, no name, another
+/// name. The same pass under the record that does copies back.
+#[tokio::test]
+async fn a_copy_back_pass_does_nothing_unless_the_record_names_its_bucket_at_epoch_3() {
+    for record in NOT_OPEN {
+        let (rig, mut cb) = asked().await;
+        rig.format_json(record).await;
+        let report = cb.pass(vec![want_seen(&rig, KEY).await], 4).await;
+        assert!(!report.active, "{record}");
+        assert_eq!(report.landed + report.lost + report.dropped, 0, "{record}");
+        assert_eq!(rig.marks.calls(Op::PutIfMatch), 0, "{record}");
+        assert!(!rig.hot_has(KEY).await, "{record}");
+    }
+    let (rig, mut cb) = asked().await;
+    let report = cb.pass(vec![want_seen(&rig, KEY).await], 4).await;
+    assert!(report.active);
+    assert_eq!(report.landed, 1);
+    assert!(rig.hot_has(KEY).await);
 }
 
 /// Asserts that a pass does nothing under a format that is not `active-marks`, and fails every

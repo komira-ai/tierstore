@@ -20,6 +20,18 @@ use crate::{
     encode_marker,
 };
 
+/// The name of the marks bucket the rig's format object records.
+pub(crate) const MARKS_BUCKET: &str = "marks";
+
+/// The records of the phase `active-marks` that do not open writes on markers in [`MARKS_BUCKET`]:
+/// no epoch, an epoch below 3, no name, and another name.
+pub(crate) const NOT_OPEN: [&str; 4] = [
+    r#"{"phase":"active-marks","marks_bucket":"marks"}"#,
+    r#"{"phase":"active-marks","epoch":2,"marks_bucket":"marks"}"#,
+    r#"{"phase":"active-marks","epoch":3}"#,
+    r#"{"phase":"active-marks","epoch":3,"marks_bucket":"another"}"#,
+];
+
 /// Three buckets in memory, each behind a wrapper that fails and counts, and the clocks.
 pub(crate) struct Rig {
     pub(crate) clock: Arc<TestClock>,
@@ -66,13 +78,19 @@ impl Rig {
         let format = Format {
             phase,
             epoch: Some(3),
-            marks_bucket: Some("marks".to_owned()),
+            marks_bucket: Some(MARKS_BUCKET.to_owned()),
         };
         self.hot_mem.delete(FORMAT_KEY).await.unwrap();
         self.hot_mem
             .put(FORMAT_KEY, format_body(&format))
             .await
             .unwrap();
+    }
+
+    /// Writes `json` as the format object, replacing any.
+    pub(crate) async fn format_json(&self, json: &str) {
+        let _ = self.hot_mem.delete(FORMAT_KEY).await;
+        self.hot_mem.put(FORMAT_KEY, bytes(json)).await.unwrap();
     }
 
     pub(crate) async fn activate(&self) {

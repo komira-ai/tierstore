@@ -7,7 +7,8 @@ use std::sync::Arc;
 
 use crate::format::FormatPhase;
 use crate::marks_leader_tests::{
-    Rig, Shape, bytes, dirty, done, lock, secs, shape_of, until_parked, want,
+    MARKS_BUCKET, NOT_OPEN, Rig, Shape, bytes, dirty, done, lock, secs, shape_of, until_parked,
+    want,
 };
 use crate::{
     Backend, CopyRecords, Error, EvictConfig, Evicted, GateBackend, LeaderLease, MarkEvictor,
@@ -47,6 +48,7 @@ fn evictor_over(
         hot,
         rig.cold.clone(),
         markers,
+        MARKS_BUCKET,
         lease,
         records.clone(),
         rig.mono.clone(),
@@ -613,6 +615,36 @@ async fn a_pass_does_nothing_unless_the_format_says_active_marks() {
         assert_eq!(rig.hot.calls_on(Op::Head, KEY), 0);
         assert_eq!(rig.marks.calls(Op::Put), 0);
     }
+}
+
+/// Asserts that a pass does nothing under the phase `active-marks` when the record does not open
+/// writes on markers in the evictor's marks bucket: no epoch, an epoch below 3, no name, another
+/// name. The same pass under the record that does evicts.
+#[tokio::test]
+async fn a_pass_does_nothing_unless_the_record_names_the_evictors_bucket_at_epoch_3() {
+    for record in NOT_OPEN {
+        let rig = Rig::new();
+        both(&rig, "bytes").await;
+        rig.format_json(record).await;
+        let records = Arc::new(CopyRecords::default());
+        let ev = evictor(&rig, &records).await;
+        rig.mono.advance(secs(600));
+        let report = ev.evict_pass(vec![KEY.to_owned()], 4).await;
+        assert!(!report.active, "{record}");
+        assert_eq!(report.evicted, 0, "{record}");
+        assert!(rig.hot_has(KEY).await, "{record}");
+        assert_eq!(rig.hot.calls_on(Op::Head, KEY), 0, "{record}");
+        assert_eq!(rig.marks.calls(Op::Put), 0, "{record}");
+    }
+    let rig = Rig::new();
+    both(&rig, "bytes").await;
+    rig.activate().await;
+    let records = Arc::new(CopyRecords::default());
+    let ev = evictor(&rig, &records).await;
+    rig.mono.advance(secs(600));
+    let report = ev.evict_pass(vec![KEY.to_owned()], 4).await;
+    assert!(report.active);
+    assert_eq!(report.evicted, 1);
 }
 
 /// Asserts that a pass whose format object cannot be read fails every key with that error and

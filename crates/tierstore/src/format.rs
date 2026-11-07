@@ -119,13 +119,6 @@ impl Format {
     pub(crate) fn runs_a_pass(&self) -> bool {
         self.runs_entries() || self.phase == FormatPhase::ActiveMarks
     }
-
-    /// Whether the phase is `active-marks`, whatever the epoch and the name of the bucket. The
-    /// leader's eviction, copy-back and stray sweep (`marks_evict`, `marks_copy_back`,
-    /// `marks_sweep`) work under it.
-    pub(crate) fn is_active_marks(&self) -> bool {
-        self.phase == FormatPhase::ActiveMarks
-    }
 }
 
 fn decode(body: &[u8]) -> Result<Format, Error> {
@@ -145,15 +138,19 @@ pub(crate) async fn read_format(hot: &dyn Backend) -> Result<Option<Format>, Err
     }
 }
 
-/// Whether the hot tier's format object says `active-marks`: one read of it. A missing object, any
-/// other phase and a phase this release does not know are `false`.
+/// Whether the hot tier's format object opens writes on markers in the marks bucket `bucket` (the
+/// one a leader's pass was given): one read of it. The phase is `active-marks`, the epoch is
+/// [`MARKS_EPOCH`] or later and the record names `bucket` ([`Format::runs_marks`], the condition
+/// of a put and of the leader's copier). A missing object, any other phase, a phase this release
+/// does not know, a record without the epoch or the name, an earlier epoch and another name are
+/// `false`.
 ///
 /// # Errors
 /// As [`read_format`].
-pub(crate) async fn marks_active(hot: &dyn Backend) -> Result<bool, Error> {
+pub(crate) async fn marks_run_in(hot: &dyn Backend, bucket: &str) -> Result<bool, Error> {
     Ok(read_format(hot)
         .await?
-        .is_some_and(|format| format.is_active_marks()))
+        .is_some_and(|format| format.runs_marks() == Some(bucket)))
 }
 
 /// As [`read_format`], with the content tag of the object. The tag is read first, so that if the
