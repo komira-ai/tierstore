@@ -571,10 +571,18 @@ pub fn artifacts_platform_problems(
         }
     }
 
+    // The version record of the `version` job is read by its name alone, by the release plan,
+    // and never downloaded: it is not one of the files a release waits for. `artifacts_problems`
+    // (lint.rs) pins that step.
+    let record = format!(
+        "{}${{{{ steps.version.outputs.version }}}}",
+        xtask::release::VERSION_ARTIFACT
+    );
     let mut uploaded: Vec<&str> = jobs
         .iter()
         .flat_map(|(_, body)| using(Some(body), UPLOAD))
         .filter_map(|s| at(s, &["with", "name"]))
+        .filter(|name| *name != record)
         .collect();
     uploaded.sort_unstable();
     let mut wanted = artifacts.to_vec();

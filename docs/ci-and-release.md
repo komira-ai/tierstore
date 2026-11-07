@@ -7,7 +7,7 @@
 | `ci.yml` | pull request, push to `main` | `lint`: format, cargo-deny (licences, bans, sources), clippy, the workflow lint. `test`: every test under cargo-llvm-cov with branch coverage, and the 99% gate on lines and branches of every crate (`crates/coverage-gate`). |
 | `advisories.yml` | daily, push to `main` | `cargo deny check advisories`; the result is kept in one issue, and the run is green whatever it finds. |
 | `artifacts.yml` | pull request, push to `main`; by hand | builds `tierstore` (`--features server`) for linux-x86_64, linux-arm64 and macos-arm64, each on a GitHub-hosted runner of its platform, packages it with its SBOM and as a hostkeeper package, writes the release index of the hostkeeper packages, makes `SHA256SUMS`. The macos-arm64 job also runs the tests of `tierstore`, `objstore-s3` and `tierstore-testkit` on macOS, the update hook's among them (both of its arms are built and tested on every system, each against fakes of its service manager, and the macOS packaging). No macOS runner is part of a pull request's checks: for a pull request the macos-arm64 job is skipped and the sums cover the Linux files; a push to `main` builds every platform, and a run by hand (`gh workflow run artifacts.yml --ref <branch>`) builds and sums every platform of a branch and signs nothing. On a push to `main` it also signs (build provenance and SBOM attestations) and checks what it signed. |
-| `release.yml` | when `ci` or `artifacts` finishes on a push to `main` (automatic, see Releases); by hand | `plan` decides whether the push is released and as which tag; `verify` and `publish` attach the files that push built and signed to a GitHub release, after checking them again. Builds nothing of tierstore. |
+| `release.yml` | when `ci` or `artifacts` finishes on a push to `main` (automatic, see Releases); by hand | `plan` decides which commit of `main` is released and as which tag (the newest whose build recorded that version); `verify` and `publish` attach the files that commit's push built and signed to a GitHub release, after checking them again. Builds nothing of tierstore. |
 | `tierstore-site.yml` | pull request, push to `main`, when the site changes | typecheck, tests and build of tierstore.dev. |
 | `tierstore-site-publish.yml` | push to `main` / by hand | builds the site again; uploads it only when the repository variable `TIERSTORE_SITE_PUBLISH` is `true`. |
 | `hostkeeper-desired.yml` | by hand, from `main` | sets the desired version of tierstore on the hostkeeper coordinator to a published release and waits for the fleet; skipped while the repository variable `HOSTKEEPER_COORDINATOR_URL` is empty. See [Setting the desired version on the hostkeeper coordinator](#setting-the-desired-version-on-the-hostkeeper-coordinator). |
@@ -58,11 +58,14 @@ gh attestation verify <file> --repo komira-ai/tierstore \
 
 ## Releases
 
-Every push to `main` that changes code and passes `ci.yml` and `artifacts.yml` is released by
-itself; nobody runs anything. `release.yml` starts when a run of `ci` or of `artifacts` on `main`
-finishes, and it acts only on a run that succeeded for a push to `main` of this repository. Both
-workflows finish on every push, so it starts twice for a commit; the plan job lets the run that
-finishes last go on, because it looks for a successful push run of both.
+Every push to `main` that changes code and passes `ci.yml` and `artifacts.yml` is released, by
+itself or in the release of a newer push; nobody runs anything. `release.yml` starts when a run of
+`ci` or of `artifacts` on `main` finishes, and it acts only on a run that succeeded for a push to
+`main` of this repository. Both workflows finish on every push, so it starts twice for a commit.
+The plan job does not plan the commit that run built: it walks the first-parent history of the
+tip of `main` down to the highest release tag, newest first, and releases the newest commit that
+is ready (both its push runs succeeded and its build recorded the version of the next tag; see
+below). A run that finds nothing ready ends green with nothing to do.
 
 Release actions are made one at a time and none is ever cancelled. Every workflow that tags
 or publishes is in one concurrency group, `release-main` for a run that succeeded for a
@@ -72,8 +75,8 @@ repository to be this one, because a pull request from a fork's branch named `ma
 `branches: [main]` of `workflow_run` and, if it counted, could take the one waiting place and
 displace a real release. A newer push waits behind a running release. GitHub keeps only the newest
 waiting run, so a push that is replaced while it waits is not released by itself; that loses
-nothing, because the plan measures from the highest tag and the next release carries the skipped
-commits. A manual run is in a group of its own (publish refuses a tag or a release that exists).
+nothing, because every plan walks from the tip of `main` and measures from the highest tag, and
+the next release carries the skipped commits. A manual run is in a group of its own (publish refuses a tag or a release that exists).
 
 The workflow lint (`crates/xtask/tests/workflows`) finds these workflows by what they do, not by a
 list of names: any workflow with `contents: write`, `gh release`, or a `git tag` or tag push must be in the group with `cancel-in-progress: false`, or be listed in
@@ -86,10 +89,14 @@ push does not wait for the release of another.
 
 Pushes made before an earlier push has been released all build with the same computed version (the
 next number after the tag that exists when they build). Whichever is released first takes it; the
-release runs of the others then stop at `check-binary`, because their binary says a version that
-is no longer the tag, and publish nothing. That is the safe direction: nothing wrong is published.
-The next push builds under the new number and is released, and a re-run of `artifacts.yml` for a
-stopped commit does the same for it.
+binaries of the others say a version that is no longer the next tag. Each build run records the
+version it built under as the name of an artifact, `version-<X.Y.Z>` (`cargo xtask release
+version --record`), so the plan knows this before anything is downloaded: it passes such a commit
+over with the reason `built as X.Y.Z, not vX.Y.Z+1; a newer commit's release carries it`, and
+never plans it again. The next push builds under the new number and is released, and its release
+carries the changes of the commits passed over; a re-run of `artifacts.yml` for the newest passed
+over commit records the new number and has it released without waiting for a push. A build run
+from before the record existed has no `version-` artifact and is passed over the same way.
 
 The `plan` job (read-only, `cargo xtask release plan`) decides, in this order:
 
@@ -98,17 +105,24 @@ The `plan` job (read-only, `cargo xtask release plan`) decides, in this order:
    set it to `false`) to resume. Any other value, a typo included, also freezes: the switch fails
    closed. A push made while it was set is released with the next one, since a plan measures from
    the highest tag.
-2. `ci.yml` or `artifacts.yml` has no successful push run for the commit yet: no release from
-   this run.
-3. The highest release tag already covers the commit (this is how the second of two runs for one
-   commit stops): no release.
-4. Everything changed since the highest release tag is documentation: no release. The paths are
+2. The highest release tag already covers the tip of `main` (this is how the second of two runs
+   for one commit stops): no release.
+3. The tag is the patch after the highest `vX.Y.Z` tag (or the `VERSION` file, item 6). The plan
+   walks the first-parent history of the tip, newest first, down to the highest tag and at most
+   twenty commits, and picks the first commit that is ready: `ci.yml` and `artifacts.yml` each
+   have a successful push run for it, and the `artifacts.yml` run recorded the version of the tag
+   (`version-<X.Y.Z>`). A commit that a merge brought in was never the tip of `main` and is not
+   judged. When no commit is ready: no release, and the reason names each commit judged and why
+   (a run not finished or failed, no version record, or built under another version).
+4. Everything changed from the highest release tag up to the commit picked is documentation: no
+   release. The paths are
    `docs/`, `**/*.md`, `crates/*/docs/` and `crates/*/site/` (the list is `DOCS_PATHS` in
    `crates/xtask/src/release/plan.rs`, and a test holds this list to the code). The site is not
    in the release files, which are the `tierstore` binary and its SBOM. A change of any other
    path, `.github/workflows` included, is released. A renamed file counts under both its old and
    its new path, so moving a source file into `docs/` is a code change.
-5. Otherwise the tag is the patch after the highest `vX.Y.Z` tag. To release a minor or major
+5. Otherwise the commit picked is released under the tag.
+6. To release a minor or major
    version, commit a file `VERSION` at the root holding `X.Y.Z`: when it is above the highest tag
    the next release is that tag. A `VERSION` at or below the highest tag is ignored (the patch
    bump stands), so the file never needs to be kept up to date; one that is not `X.Y.Z` fails the
@@ -131,16 +145,18 @@ crate with `cargo xtask release set-version --version X.Y.Z` (strict `X.Y.Z`, or
 rewrites `version` in that manifest and the `tierstore` entry of `Cargo.lock`, so the `--locked`
 build accepts it, and the SBOM step must leave the lock file as the verb wrote it. A build that
 does not run the verb, a developer's for one, reports the version committed in `Cargo.toml`. The
-release plan computes the version again and names the tag with it. The `verify` job
+release plan computes the version again, names the tag with it, and picks a commit whose build
+recorded that version (above). The `verify` job
 then unpacks the linux-x86_64 tarball it will publish, runs the binary with `--version`
 (`cargo xtask release check-binary`) and refuses to go on, so that nothing is tagged or published,
 unless the binary says the tag and the commit. The release runner cannot run the linux-arm64 or
 the macos-arm64 binary; each is run with `--version` and checked against the same version and
 commit (`cargo xtask build-commit --version`) by the job that builds it, on a runner of its own
 platform, and a release needs that run of `artifacts.yml` to be green. That build-time check is
-the version proof of the macOS binary. The two computations differ only when a tag
-appears between the build and the release (another release published in that time); the release is
-then refused, and the next push is built and released under the new number. The names of the
+the version proof of the macOS binary. The two computations differ when a tag
+appears between the build and the plan (another release published in that time); the plan then
+passes the commit over by its record, and the next push is built and released under the new number.
+`check-binary` still refuses the release if a tag appears between the plan and the check. The names of the
 tarballs and SBOMs carry the commit, not the version, and are unchanged; the hostkeeper packages
 are named by the version the binary reports, which holds both.
 
