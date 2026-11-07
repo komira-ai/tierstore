@@ -23,6 +23,8 @@ enum Do {
     Beat(&'static str, &'static str, u64),
     /// The leader finishes the marker of the key.
     Finish(&'static str),
+    /// The leader finishes every marker.
+    FinishAll,
     /// Another operator replaces the format object (none: deletes it).
     Format(Option<Format>),
 }
@@ -67,6 +69,11 @@ impl Sleeper for Plays {
                     register_reporting(&*self.hot, id, 3, phase, writes).await;
                 }
                 Do::Finish(key) => self.marks.delete(key).await.unwrap(),
+                Do::FinishAll => {
+                    for object in self.marks.list("").await.unwrap() {
+                        self.marks.delete(&object.key).await.unwrap();
+                    }
+                }
                 Do::Format(record) => {
                     self.hot.delete(FORMAT_KEY).await.unwrap();
                     if let Some(record) = &record {
@@ -312,7 +319,6 @@ async fn the_rollback_wait_stops_for_a_proxy_that_went_silent_and_goes_on_when_i
     register_reporting(&*hot, "a", 3, "drain", 0).await;
     let sleeper = Plays::new(&hot, &marks, vec![]);
     plant(&*marks, "d", MarkerState::Dirty).await;
-    let first = RecordingSleeper::new();
     // The clock moves past the window of fresh beats while the verb waits for the marker.
     struct Ages(Arc<TestClock>, Arc<MemoryBackend>);
     #[async_trait]
@@ -333,7 +339,7 @@ async fn the_rollback_wait_stops_for_a_proxy_that_went_silent_and_goes_on_when_i
                 .to_owned()
         )
     );
-    assert_eq!(first.asked().len() + sleeper.asked(), 0);
+    assert_eq!(stored_format(&*hot).await, Some(rolling_back()));
     let named = ["--drain", "--apply", "--departed", "a"];
     let (done, _) = acted(&*hot, Some(&*marks), &clock, &*sleeper, &named).await;
     assert_eq!(done, Ok(()));
@@ -343,7 +349,7 @@ async fn the_rollback_wait_stops_for_a_proxy_that_went_silent_and_goes_on_when_i
 /// Asserts how the marks bucket is read while waiting: markers of a state this release does not
 /// know and bodies that are not markers are waited for and counted as other, a marker that vanishes
 /// between the listing and its read is nothing, a `WANT` that changed under its delete is waited
-/// for, a failed read is the store's error, and more markers than a page are all counted.
+/// for, and a `WANT` that is gone already is nothing owed.
 #[tokio::test]
 async fn the_rollback_counts_every_kind_of_marker_and_every_page() {
     let (hot, marks, clock) = marking().await;
@@ -380,11 +386,14 @@ async fn the_rollback_counts_every_kind_of_marker_and_every_page() {
         ),
         "{out}"
     );
-    assert!(
-        out.contains("(1 WANT markers were deleted)") || out.contains("WANT markers were deleted"),
-        "{out}"
-    );
+    assert!(out.contains("(3 WANT markers were deleted)"), "{out}");
+}
 
+/// Asserts that the markers of every page of the listing are counted (a thousand to a page, here
+/// a thousand and one), and that a read or a delete of the hot tier that fails with an error that
+/// says nothing about the marker is the store's error and stops the verb.
+#[tokio::test]
+async fn the_rollback_counts_the_markers_of_every_page_and_passes_on_a_store_error() {
     let (hot, marks, clock) = marking().await;
     register_reporting(&*hot, "a", 3, "drain", 0).await;
     hot.delete(FORMAT_KEY).await.unwrap();
@@ -392,21 +401,35 @@ async fn the_rollback_counts_every_kind_of_marker_and_every_page() {
     for n in 0..1001 {
         plant(&*marks, &format!("k{n:04}"), MarkerState::Dirty).await;
     }
-    let sleeper = Plays::new(&hot, &marks, vec![vec![]]);
-    let faulty = FaultyBackend::new(marks.clone());
-    faulty.fail_next_on(Op::Get, "k1000", Error::Unavailable("down".to_owned()));
-    let (failed, _) = acted(
-        &*hot,
-        Some(&faulty),
-        &clock,
-        &*sleeper,
-        &["--drain", "--apply"],
-    )
-    .await;
-    assert_eq!(
-        failed,
-        Err("the hot tier: backend unavailable: down".to_owned())
+    let sleeper = Plays::new(&hot, &marks, vec![vec![Do::FinishAll]]);
+    let flags = ["--drain", "--apply"];
+    let (done, out) = acted(&*hot, Some(&*marks), &clock, &*sleeper, &flags).await;
+    assert_eq!(done, Ok(()));
+    assert!(
+        out.contains(
+            "still waiting: 1001 markers are not finished (DIRTY 1001, LOCK 0, CLEARING 0, other 0)\n"
+        ),
+        "{out}"
     );
+
+    let (hot, marks, clock) = marking().await;
+    register_reporting(&*hot, "a", 3, "drain", 0).await;
+    hot.delete(FORMAT_KEY).await.unwrap();
+    set_format(&*hot, &rolling_back()).await;
+    plant(&*marks, "d", MarkerState::Dirty).await;
+    plant(&*marks, "w", MarkerState::Want).await;
+    let sleeper = Plays::new(&hot, &marks, vec![]);
+    let down = || Error::Unavailable("down".to_owned());
+    for op in [Op::Get, Op::DeleteIfMatch] {
+        let faulty = FaultyBackend::new(marks.clone());
+        faulty.fail_next_with(op, down());
+        let (failed, _) = acted(&*hot, Some(&faulty), &clock, &*sleeper, &flags).await;
+        assert_eq!(
+            failed,
+            Err("the hot tier: backend unavailable: down".to_owned()),
+            "{op:?}"
+        );
+    }
 }
 
 /// Asserts that cancelling the pause of a rollback puts `active-marks` back with its epoch and
