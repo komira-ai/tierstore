@@ -10,10 +10,11 @@ use bytes::Bytes;
 use tierstore_testkit::dir::TestDir;
 
 use super::super::testing::{
-    args, put_entry, register, register_old, set_format, status, stored_format, tier,
+    args, put_entry, register, register_old, register_reporting, set_format, status, stored_format,
+    tier,
 };
 use super::{Cli, Work, act, run};
-use crate::entry::{EntryOp, EntryState};
+use crate::entry::{EntryOp, EntryState, entry_key};
 use crate::faulty::{FaultyBackend, Op};
 use crate::format::{Format, FormatPhase};
 use crate::journal::FORMAT_KEY;
@@ -826,4 +827,86 @@ fn flags_that_are_not_valid_are_status_2_and_help_is_status_0() {
         err,
         "tierstore format-epoch: --hot \"s3:bucket\": it needs --hot-endpoint\n"
     );
+}
+
+/// One thing the reconciler or a proxy does while `--drain` over the entry protocol waits.
+enum Happens {
+    /// The proxy writes its registration again, with the phase and the writes in flight.
+    Beat(&'static str, &'static str, u64),
+    /// The reconciler finishes the entry of the key.
+    Finish(&'static str),
+    /// The reconciler writes `drained`.
+    Drained,
+}
+
+/// A sleeper that does, at its n-th call, the n-th thing of the list.
+struct Happenings {
+    hot: Arc<dyn Backend>,
+    list: Mutex<Vec<Happens>>,
+}
+
+#[async_trait]
+impl Sleeper for Happenings {
+    async fn sleep(&self, _duration: Duration) {
+        let next = {
+            let mut list = self.list.lock().unwrap();
+            assert!(!list.is_empty(), "the verb waits for something not planned");
+            list.remove(0)
+        };
+        match next {
+            Happens::Beat(id, phase, writes) => {
+                register_reporting(&*self.hot, id, 2, phase, writes).await;
+            }
+            Happens::Finish(key) => self.hot.delete(&entry_key(key)).await.unwrap(),
+            Happens::Drained => {
+                let tag = self.hot.head(FORMAT_KEY).await.unwrap().tag;
+                let body = crate::format::format_body(&drained_format());
+                self.hot.put_if_match(FORMAT_KEY, body, &tag).await.unwrap();
+            }
+        }
+    }
+}
+
+/// Asserts that `--drain` over `active` at epoch 2 writes `drain` with the epoch, says that the
+/// reconciler writes `drained` once `_entries/` is empty and the registrations report a pause and
+/// no write, and prints at each poll the open entries and each registration that may still write
+/// (naming the phase it acts on, the writes in flight, or that it has no fresh heartbeat), until
+/// the format says `drained`.
+#[tokio::test]
+async fn drain_over_the_entry_protocol_prints_what_holds_the_reconciler() {
+    let (hot, clock) = tier();
+    register_reporting(&*hot, "a", 2, "active", 1).await;
+    register_old(&*hot, "old").await;
+    put_entry(&*hot, "k", EntryOp::Put, EntryState::Held, Some("a")).await;
+    set_format(&*hot, &active_format(2)).await;
+    clock.advance(60_000);
+    register_reporting(&*hot, "a", 2, "active", 1).await;
+    let tier: Arc<dyn Backend> = hot.clone();
+    let sleeper = Happenings {
+        hot: tier,
+        list: Mutex::new(vec![
+            Happens::Beat("a", "drain", 1),
+            Happens::Beat("a", "drain", 0),
+            Happens::Finish("k"),
+            Happens::Drained,
+        ]),
+    };
+    let flags = ["--drain", "--apply", "--departed", "old"];
+    let (result, out) = acted(&*hot, &clock, &sleeper, &flags).await;
+    assert_eq!(result, Ok(()));
+    let holds = "old reports no phase; old reports no count of writes in flight; old has no fresh heartbeat";
+    let wait = "the reconciler that holds the lease writes it once `_entries/` is empty and every \
+                registration that has not departed reports a pause and no write in flight; \
+                there is no time limit, interrupt to stop and --cancel to resume writes";
+    let expected = format!(
+        "wrote the format: drain\n\
+         waiting for the format to say drained: {wait}\n\
+         still waiting: 1 open entries; a acts on active; a has 1 writes in flight; {holds}\n\
+         still waiting: 1 open entries; a has 1 writes in flight; {holds}\n\
+         still waiting: 1 open entries; {holds}\n\
+         still waiting: 0 open entries; {holds}\n\
+         drained: writes are paused and every journal is applied\n"
+    );
+    assert_eq!(out, expected);
+    assert_eq!(stored_format(&*hot).await, Some(drained_format()));
 }

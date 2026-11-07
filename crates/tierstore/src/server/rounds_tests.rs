@@ -115,8 +115,8 @@ impl Rig {
     }
 }
 
-/// Asserts that with no format object, and with each format that does not run entries (a drain, a
-/// drained store, an epoch below 2), a round does nothing: the landed put is not copied, no lease
+/// Asserts that with no format object, and with each format that does not run entries (a drain with
+/// no epoch or below 2, a drain that names a marks bucket, a drained store, an epoch below 2), a round does nothing: the landed put is not copied, no lease
 /// is taken, nothing failed, and the loop is told to wait the idle wait (one second).
 #[tokio::test(start_paused = true)]
 async fn before_the_epoch_a_round_does_nothing_and_waits() {
@@ -125,7 +125,9 @@ async fn before_the_epoch_a_round_does_nothing_and_waits() {
         r#"{"phase":"drain"}"#,
         r#"{"phase":"drained"}"#,
         r#"{"epoch":1,"phase":"active"}"#,
-        r#"{"epoch":2,"phase":"drain"}"#,
+        r#"{"epoch":1,"phase":"drain"}"#,
+        r#"{"epoch":3,"phase":"drain"}"#,
+        r#"{"epoch":3,"phase":"drain","marks_bucket":"b-marks"}"#,
     ];
     for format in formats {
         let rig = Rig::new();
@@ -139,6 +141,32 @@ async fn before_the_epoch_a_round_does_nothing_and_waits() {
         assert!(!rig.cold_has("k").await, "{format}");
         assert!(!rig.lease_held().await, "{format}");
     }
+}
+
+/// Asserts that a round under `drain` at epoch 2, the pause over the entry protocol, works the
+/// entries and then writes `drained` once the one registration reports a pause and no write in
+/// flight: the landed put is copied, the format object says `drained`, and the round after it
+/// does nothing and takes no more of the lease.
+#[tokio::test(start_paused = true)]
+async fn a_round_under_the_drain_over_the_entries_finishes_them_and_writes_drained() {
+    let rig = Rig::new();
+    rig.set_format(r#"{"epoch":2,"phase":"drain"}"#).await;
+    rig.landed_put("k").await;
+    let quiet = r#"{"proto":2,"boot":"b","hb":4,"phase":"drain","writes_in_flight":0}"#;
+    rig.hot_mem
+        .put("_tiering/proxies/p2", Bytes::from_static(quiet.as_bytes()))
+        .await
+        .unwrap();
+    let mut rounds = rig.rounds();
+    let round = rounds.round().await;
+    assert!(round.failed.is_empty(), "{:?}", round.failed);
+    assert!(rig.cold_has("k").await);
+    let format = rig.hot_mem.get(FORMAT_KEY, None).await.unwrap();
+    assert_eq!(format, Bytes::from_static(br#"{"phase":"drained"}"#));
+    let next = rounds.round().await;
+    assert!(next.failed.is_empty(), "{:?}", next.failed);
+    assert_eq!(next.pause, Some(Duration::from_secs(1)));
+    rounds.stop().await;
 }
 
 /// Asserts that the round that reads the active format starts the work: a node that did nothing

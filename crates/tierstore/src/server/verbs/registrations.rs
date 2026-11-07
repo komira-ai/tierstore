@@ -212,22 +212,45 @@ pub(super) fn check_protocol(
 /// that is not live is for [`check_departed`]. Empty when every such proxy says that it acts on
 /// `drain` or `drained` and has no write in flight.
 pub(super) fn not_at_rest(registrations: &[Registration]) -> Vec<String> {
+    registrations
+        .iter()
+        .filter(|found| matches!(found.class, Class::Live { proto } if proto >= PROTO_MARKS))
+        .flat_map(rest_reasons)
+        .collect()
+}
+
+/// What stops the leader from writing `drained` over a pause of the entry protocol, for the
+/// operator who waits for it: for each registration that is not at rest, why. Every registration
+/// counts, whatever its protocol, since a proxy of the entry protocol writes entries; one that is
+/// not live is held by the leader until it has stood unchanged for the departure
+/// ([`EntryReconcilerConfig::departure`](crate::EntryReconcilerConfig)), unless it reports a
+/// pause and no write in flight.
+pub(super) fn holding_entry_drain(registrations: &[Registration]) -> Vec<String> {
+    registrations
+        .iter()
+        .flat_map(|found| {
+            let why = rest_reasons(found);
+            let silent = (!matches!(found.class, Class::Live { .. }) && !why.is_empty())
+                .then(|| format!("{} has no fresh heartbeat", found.id));
+            why.into_iter().chain(silent)
+        })
+        .collect()
+}
+
+/// Why the proxy of `found` may still write: it reports no phase or one other than `drain` or
+/// `drained`, or no count of writes in flight or a count above zero.
+fn rest_reasons(found: &Registration) -> Vec<String> {
     let mut why = Vec::new();
-    for found in registrations {
-        if !matches!(found.class, Class::Live { proto } if proto >= PROTO_MARKS) {
-            continue;
-        }
-        let id = &found.id;
-        match found.phase {
-            None => why.push(format!("{id} reports no phase")),
-            Some(FormatPhase::Drain | FormatPhase::Drained) => {}
-            Some(phase) => why.push(format!("{id} acts on {}", phase_word(phase))),
-        }
-        match found.writes_in_flight {
-            None => why.push(format!("{id} reports no count of writes in flight")),
-            Some(0) => {}
-            Some(writes) => why.push(format!("{id} has {writes} writes in flight")),
-        }
+    let id = &found.id;
+    match found.phase {
+        None => why.push(format!("{id} reports no phase")),
+        Some(FormatPhase::Drain | FormatPhase::Drained) => {}
+        Some(phase) => why.push(format!("{id} acts on {}", phase_word(phase))),
+    }
+    match found.writes_in_flight {
+        None => why.push(format!("{id} reports no count of writes in flight")),
+        Some(0) => {}
+        Some(writes) => why.push(format!("{id} has {writes} writes in flight")),
     }
     why
 }

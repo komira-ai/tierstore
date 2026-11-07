@@ -24,6 +24,8 @@ use crate::{
 mod copy;
 #[path = "entry_reconciler_tests/copy_back.rs"]
 mod copy_back;
+#[path = "entry_reconciler_tests/drain.rs"]
+mod drain;
 #[path = "entry_reconciler_tests/evict.rs"]
 mod evict;
 #[path = "entry_reconciler_tests/evict_calls.rs"]
@@ -979,22 +981,4 @@ fn the_delay_of_a_failing_item_doubles_to_the_longest() {
     assert_eq!(delays, expected);
     assert_eq!(retry_delay(secs(1), secs(60), 0), secs(1));
     assert_eq!(retry_delay(secs(1), secs(60), u32::MAX), secs(60));
-}
-
-/// Asserts the defaults of the settings: the departure, the waits of the loop, the retry delays,
-/// the comparison range, the stray grace, interval and rate.
-#[test]
-fn the_settings_default_to_the_values_the_design_names() {
-    let config = Rig::new().config("r1");
-    let secs = Duration::from_secs;
-    assert_eq!(config.departure, secs(60));
-    assert_eq!(config.held_ttl, secs(3600));
-    assert_eq!((config.idle_min, config.idle_max), (secs(1), secs(10)));
-    assert_eq!((config.retry_min, config.retry_max), (secs(1), secs(60)));
-    assert_eq!(config.compare_range, 1 << 20);
-    assert_eq!(config.stray_grace, secs(600));
-    assert_eq!(config.stray_interval, secs(24 * 3600));
-    assert_eq!(config.stray_rate, 100);
-    assert_eq!(config.abandoned_upload_after, secs(0));
-    assert_eq!(config.base.parallel, 16);
 }

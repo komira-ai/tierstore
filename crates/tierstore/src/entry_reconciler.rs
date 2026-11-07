@@ -4,8 +4,8 @@
 //! It is the process that holds the lease `_tiering/lease`, and it is the only actor that releases
 //! the entries of puts. A [`step`](EntryReconciler::step) does this, in order:
 //!
-//! 1. Reads `_tiering/format`. Until the object says `active` the reconciler does nothing at all:
-//!    it takes no lease and reads no entry. That is the epoch gate: a node of this release beside
+//! 1. Reads `_tiering/format`. Until the object says `active` (or `drain` over the entry protocol, see
+//!    below) the reconciler does nothing at all: it takes no lease and reads no entry. That is the epoch gate: a node of this release beside
 //!    nodes that still write journals is inert until the operator activates the new format.
 //! 2. Takes the lease, or renews it if less than its margin is left, as the journal reconciler does
 //!    (renewal runs on a timer of its own, so a long copy does not lose it).
@@ -84,6 +84,12 @@
 //! markers and back without a second holder. Under any other reading of that phase it does
 //! nothing, as it does nothing until the format says `active`.
 //!
+//! Under `drain` over the entry protocol (`tierstore format-epoch --drain` at epoch 2) a
+//! step works the entries as under `active` and then, once no entry is open and every registration
+//! that has not departed reports a pause and no write in flight, writes `drained` over the format
+//! object by its content tag (the module `drain` says in what order, and why). So the pause ends
+//! in `drained` without an operator's hand, and a `--cancel` that lands first is not overwritten.
+//!
 //! No call here probes what a store does: that a hot tier honours `If-Match`, or that a cold tier
 //! writes create-only, is a requirement of the stores (see the design).
 
@@ -99,7 +105,7 @@ use tokio::sync::Notify;
 use crate::backend::Backend;
 use crate::deadline::millis;
 use crate::entry::{Entries, EntryOp, entry_key};
-use crate::format::{FormatPhase, read_format};
+use crate::format::{FormatPhase, read_format, read_format_tagged};
 use crate::journal::PROXIES_PREFIX;
 use crate::lease::Lease;
 use crate::registrations::Registrations;
@@ -108,6 +114,7 @@ use crate::{Error, MarkersConfig, ReconcilerConfig, Sleeper, TokioSleeper};
 mod backoff;
 mod copier;
 mod copy_back;
+mod drain;
 mod evict;
 mod marks;
 mod passes;
@@ -259,7 +266,7 @@ impl EntryReconcilerConfig {
 #[derive(Debug, Default, PartialEq, Eq)]
 pub struct StepReport {
     /// Whether `_tiering/format` said `active`, or `active-marks` with the marks bucket this
-    /// reconciler was given. If not, nothing else was done.
+    /// reconciler was given, or `drain` over the entry protocol. If not, nothing else was done.
     pub active: bool,
     /// Whether this reconciler held the lease for the step. If not, nothing else was done.
     pub held: bool,
@@ -282,6 +289,8 @@ pub struct StepReport {
     pub evicting: bool,
     /// Whether the listing of the hot tier has pages left: the loop steps again at once.
     pub scanning: bool,
+    /// Whether this step wrote `{"phase":"drained"}` over a `drain` over the entry protocol.
+    pub drained: bool,
     /// The calls that failed, in the order they did.
     pub failed: Vec<Error>,
 }
@@ -430,10 +439,20 @@ impl EntryReconciler {
             }
         };
         let side = self.runs_marks(&format);
+        let mut pause = None;
         if side.is_none() {
             // The passes over the markers begin afresh when the format comes back to them.
             self.unsettle_marks();
-            if format.phase != FormatPhase::Active {
+            if format.drains_entries() {
+                match self.pause_tag().await {
+                    Ok(Some(tag)) => pause = Some(tag),
+                    Ok(None) => return report,
+                    Err(error) => {
+                        report.failed.push(error);
+                        return report;
+                    }
+                }
+            } else if format.phase != FormatPhase::Active {
                 return report;
             }
         }
@@ -450,8 +469,26 @@ impl EntryReconciler {
                     .renewing(&*sleeper, self.mark_steps(side, report))
                     .await
             }
-            None => lease.renewing(&*sleeper, self.steps(report)).await,
+            None => {
+                let steps = async {
+                    let mut report = self.steps(report).await;
+                    if let Some(tag) = &pause {
+                        self.settle_drain(tag, &mut report).await;
+                    }
+                    report
+                };
+                lease.renewing(&*sleeper, steps).await
+            }
         }
+    }
+
+    /// The content tag of the format object if it still says `drain` over the entry protocol: the
+    /// tag the write of `drained` is made over (see the module `drain`). The format was read without
+    /// a tag in `read_format`, so it is read again with the tag, and a record that has changed
+    /// meanwhile is not drained.
+    async fn pause_tag(&self) -> Result<Option<String>, Error> {
+        let found = read_format_tagged(self.hot.as_ref()).await?;
+        Ok(found.and_then(|(format, tag)| format.drains_entries().then_some(tag)))
     }
 
     /// The steps of a step, once the format is active and the lease is held.

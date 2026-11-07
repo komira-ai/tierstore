@@ -6,7 +6,8 @@ use bytes::Bytes;
 
 use super::super::testing::{register, register_old, register_reporting, tier};
 use super::{
-    Class, Registration, check_departed, check_protocol, not_at_rest, not_drained, phase_word, read,
+    Class, Registration, check_departed, check_protocol, holding_entry_drain, not_at_rest,
+    not_drained, phase_word, read,
 };
 use crate::faulty::{FaultyBackend, Op};
 use crate::format::FormatPhase;
@@ -266,6 +267,47 @@ fn only_a_live_proxy_that_reads_markers_can_be_not_at_rest() {
             "unsaid reports no phase",
             "busy acts on drain",
             "proto2 reports no phase",
+        ]
+    );
+}
+
+/// Asserts which registrations hold the leader's `drained` under the pause over the entry
+/// protocol: every one that does not report `drain` or `drained` and no write in flight,
+/// whatever its protocol (a live one of protocol 2 included), and one that is not live says
+/// also that it has no fresh heartbeat; a silent one that reports a pause and no write holds
+/// nothing.
+#[test]
+fn under_the_entry_pause_every_registration_that_may_write_holds_the_drain() {
+    let reporting = |id: &str, class, phase, writes| Registration {
+        class,
+        phase,
+        writes_in_flight: writes,
+        ..entry(id, Class::Unlabelled)
+    };
+    let live2 = Class::Live { proto: 2 };
+    let rows = vec![
+        reporting("ok", live2, Some(FormatPhase::Drained), Some(0)),
+        reporting(
+            "silent-ok",
+            Class::Silent { proto: 2 },
+            Some(FormatPhase::Drain),
+            Some(0),
+        ),
+        reporting("proto2", live2, Some(FormatPhase::Active), Some(1)),
+        reporting("silent", Class::Silent { proto: 2 }, None, None),
+        reporting("unlabelled", Class::Unlabelled, None, None),
+    ];
+    assert_eq!(
+        holding_entry_drain(&rows),
+        vec![
+            "proto2 acts on active",
+            "proto2 has 1 writes in flight",
+            "silent reports no phase",
+            "silent reports no count of writes in flight",
+            "silent has no fresh heartbeat",
+            "unlabelled reports no phase",
+            "unlabelled reports no count of writes in flight",
+            "unlabelled has no fresh heartbeat",
         ]
     );
 }
