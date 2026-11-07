@@ -205,10 +205,12 @@ pub async fn run_handing(
     let reconciler = Rounds::tuned(
         built.hot,
         built.cold,
+        built.marks,
         built.reconciler,
         departure,
         &built.entry,
-    );
+    )
+    .map_err(Error::from)?;
     let reconciling = async move {
         match gate {
             Some(gate) => reconcile_gated(reconciler, halt, gate).await,

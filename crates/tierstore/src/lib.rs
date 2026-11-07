@@ -73,6 +73,10 @@
 //!   lease a holder keeps its lock alive by. The body is a [`Marker`]. The puts and the deletes of a
 //!   [`Proxy`] call them while `_tiering/format` says `active-marks` and records the proxy's marks
 //!   bucket, and so do the plain puts (`put_plain`, `land_in_cold`), which no server code calls yet.
+//!   The [`EntryReconciler`] calls them too, under the same format and once it was given the marks
+//!   bucket ([`EntryReconciler::with_marks`]): it copies the `DIRTY` markers' keys to the cold tier,
+//!   holds a deleted key's marker until no reader can still be served its cold copy, clears the
+//!   markers of puts that left nothing behind, and reaps the locks of owners that are gone.
 //! - [`CachedStore`] answers repeated reads of an object's ranges from RAM in front of any
 //!   backend, typically a [`Proxy`]. It is a cache of the node it runs on, not state.
 //!

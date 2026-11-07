@@ -6,8 +6,8 @@
 //! it, and only while `_tiering/format` says `active-marks` (`tiered/marked_put.rs`,
 //! `tiered/marks_delete.rs`: create, read, change by a compare-and-swap, wait, remove), and so do
 //! its plain puts (`tiered/overwrite.rs`, `tiered/cold_land.rs`), which no server code calls yet;
-//! the refresh of a lock by the delete and `may_destroy`'s caller in the leader are for the pull
-//! requests that follow.
+//! so does the leader's pass over the markers (`entry_reconciler/marks.rs`), which runs under the
+//! same format only.
 //!
 //! - [`MarkBirth`] is the marker a create-only write makes where none exists (M1, M3, M10, M12).
 //! - [`MarkMove`] is a transition of a marker that exists (M2, M4, M4', M5 to M7, M9, M11, M13 and
@@ -45,7 +45,7 @@
 //! of the lock is younger than `lock_lease - queued_call_margin`, so that a call it started
 //! cannot land after the leader reaped the lock, unless the process itself was frozen. The
 //! leader's side of the lease (a lock unchanged for `lock_lease` is reaped even if its holder
-//! lives) is the leader's, and uses [`MarkMove::Reap`].
+//! lives) is the leader's, and uses [`MarkMove::Reap`] (`entry_reconciler/reap.rs`).
 //!
 //! # Nonce
 //!
