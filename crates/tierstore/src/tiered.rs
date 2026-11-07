@@ -104,11 +104,17 @@ pub struct ProxyConfig {
     /// The marks bucket of the hot store (`hot_store.marks_bucket`): the second handle on the hot
     /// store, for the markers of `docs/design/put-without-lock.md`. This release reads it, on a
     /// hot miss and in a listing, in the phases of the format from which a marker can be in force
-    /// (see `mark_reads.rs`); it writes to it only a `WANT` marker, in the phase `active-marks`.
+    /// (see `mark_reads.rs`); it writes to it only a `WANT` marker, in the phase `active-marks`
+    /// at epoch 3 or later with [`ProxyConfig::marks_name`] the recorded bucket.
     /// `None` is a proxy with no marks bucket (every proxy of a library user, and a server over a
     /// `dir` hot tier, whose directory of markers is opened by the release that uses it): it reads
     /// no marker, and its registration says `proto` 2.
     pub marks: Option<Arc<dyn Backend>>,
+    /// The name of the marks bucket `marks` is the handle on, as the format object records it
+    /// (`marks_bucket`): a proxy whose name is not the recorded one writes no marker under
+    /// `active-marks`, so that two names are never in use at once. `None` is no name, which is
+    /// never the recorded one.
+    pub marks_name: Option<String>,
     /// The waits and the lease of the calls on markers. This release only reads markers, so it
     /// uses none of them; the config of the server sets them in the release that waits for a lock.
     pub markers: MarkersConfig,
@@ -147,6 +153,7 @@ impl ProxyConfig {
             entry_rounds: 3,
             delete_wait: DeleteWait::new(),
             marks: None,
+            marks_name: None,
             markers: MarkersConfig::default(),
             mark_reads: MarkReads::default(),
             step_retry: StepRetry::new(),

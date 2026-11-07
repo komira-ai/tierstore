@@ -1,6 +1,7 @@
 //! The settings, servers, tiers and key files made of the flags.
 
 use super::*;
+use crate::server::cli::marks_name;
 
 /// Asserts that percents are shares of a whole.
 #[test]
@@ -63,6 +64,26 @@ fn the_settings_are_made_from_the_flags() {
     assert_eq!(built.reconciler.low_water, 0.7);
     assert_eq!(built.reconciler.parallel, 16);
     assert_eq!(built.reconciler.lease_ttl, Duration::from_secs(30));
+}
+
+/// Asserts that the name a proxy gives its marks bucket is the one the format record carries: the
+/// bucket of an `s3:<bucket>` tier, `memory` for a memory tier, none for a `dir` tier (it has no
+/// handle) or for a form no tier takes, and that the settings carry it (a memory tier here).
+#[test]
+fn the_marks_name_is_the_bucket_of_the_tier_the_record_names() {
+    assert_eq!(
+        marks_name("s3:hot-bucket-marks"),
+        Some("hot-bucket-marks".to_owned())
+    );
+    assert_eq!(marks_name("memory"), Some("memory".to_owned()));
+    assert_eq!(marks_name("dir:/srv/hot-marks"), None);
+    assert_eq!(marks_name("tape"), None);
+
+    let dir = TestDir::under(std::env::temp_dir(), "tierstore-marks-name");
+    let mut cli = cli(&dir);
+    cli.hot_marks = "memory".to_owned();
+    let built = build(&cli).expect("built");
+    assert_eq!(built.proxy.marks_name.as_deref(), Some("memory"));
 }
 
 /// Asserts that a file whose `[server] bucket` is the name of a probe path, `metricz` among them,

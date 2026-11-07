@@ -38,6 +38,10 @@ pub(super) struct Pause {
     entries: bool,
     /// The phase the last object read says. Kept when a read fails.
     phase: Known,
+    /// The marks bucket the last object read says writes are made in, if it says that they are
+    /// made on markers (`active-marks` at epoch 3 or later, with the bucket named). Kept when a
+    /// read fails.
+    marks: Option<String>,
 }
 
 impl Pause {
@@ -46,6 +50,7 @@ impl Pause {
         self.paused = format.is_some_and(Format::pauses_writes);
         self.entries = format.is_some_and(Format::runs_entries);
         self.phase = format.map_or(Known::Missing, |format| Known::Phase(format.phase));
+        self.marks = format.and_then(Format::runs_marks).map(str::to_owned);
     }
 
     fn state(&self) -> FormatState {
@@ -53,12 +58,13 @@ impl Pause {
             paused: self.paused,
             entries: self.entries,
             phase: self.phase,
+            marks: self.marks.clone(),
         }
     }
 }
 
 /// What a read of the format object, kept for up to `format_refresh`, says to a proxy.
-#[derive(Clone, Copy, Debug)]
+#[derive(Clone, Debug)]
 pub(super) struct FormatState {
     /// Writes are paused (`drain` or `drained`).
     pub(super) paused: bool,
@@ -66,6 +72,8 @@ pub(super) struct FormatState {
     pub(super) entries: bool,
     /// The phase the object names.
     pub(super) phase: Known,
+    /// The format opens writes on markers, in this marks bucket.
+    pub(super) marks: Option<String>,
 }
 
 impl FormatState {
@@ -81,12 +89,6 @@ impl FormatState {
             self.phase,
             Known::Missing | Known::Phase(FormatPhase::Active)
         )
-    }
-
-    /// Whether the markers are in force (`active-marks`): the only phase in which a read writes
-    /// one.
-    pub(super) fn marks_in_force(&self) -> bool {
-        self.phase == Known::Phase(FormatPhase::ActiveMarks)
     }
 }
 

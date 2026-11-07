@@ -478,6 +478,60 @@ async fn a_head_a_ranged_read_and_a_read_before_activation_ask_for_no_copy_back(
     assert_eq!(rig.marks_faults.calls(Op::Put), 0);
 }
 
+/// Asserts that a proxy writes no `WANT` marker unless the format record opens writes on markers
+/// for it: a record whose marks bucket is another than the proxy's, a record with no epoch, a
+/// record with no name, an epoch below 3, and a proxy with no name each leave the key without a
+/// marker and the marks bucket without a put, while the read is served from the cold tier and
+/// still reads the marker of the key. The proxy of the record is the control: it asks.
+#[tokio::test]
+async fn a_want_marker_is_written_only_by_a_proxy_the_format_record_opens_markers_for() {
+    let hot_marks = Some("hot-marks");
+    let cases = [
+        (
+            r#"{"epoch":3,"marks_bucket":"elsewhere","phase":"active-marks"}"#,
+            hot_marks,
+            false,
+        ),
+        (
+            r#"{"phase":"active-marks","marks_bucket":"hot-marks"}"#,
+            hot_marks,
+            false,
+        ),
+        (
+            r#"{"epoch":2,"marks_bucket":"hot-marks","phase":"active-marks"}"#,
+            hot_marks,
+            false,
+        ),
+        (r#"{"epoch":3,"phase":"active-marks"}"#, hot_marks, false),
+        (ACTIVE_MARKS, Some("elsewhere"), false),
+        (ACTIVE_MARKS, None, false),
+        (ACTIVE_MARKS, hot_marks, true),
+    ];
+    for (format, name, asks) in cases {
+        let rig = MarkRig::tuned(format, |config| {
+            config.marks_name = name.map(str::to_owned);
+        })
+        .await;
+        rig.put_cold("k", "cold").await;
+        for how in HOW {
+            let served = read(&rig, "k", how).await;
+            assert_eq!(served, Ok(shown(how, "cold")), "{format} {name:?} {how}");
+            settle().await;
+        }
+        assert_eq!(
+            rig.marks_faults.calls_on(Op::Get, "k"),
+            4,
+            "{format} {name:?}"
+        );
+        assert_eq!(rig.marker("k").await.is_some(), asks, "{format} {name:?}");
+        assert_eq!(
+            rig.marks_faults.calls(Op::Put),
+            u64::from(asks),
+            "{format} {name:?}"
+        );
+    }
+}
+
 /// Asserts that a key that has a marker already (a lock, here) is not asked for, and that a
 /// create that fails is ignored: the read is served, and the proxy does not try again within
 /// `want_retry`.

@@ -126,6 +126,34 @@ fn only_active_with_epoch_2_or_more_runs_entries() {
     }
 }
 
+/// Asserts that a record opens writes on markers, and names the bucket, only in the phase
+/// `active-marks` with an epoch of 3 or more and a `marks_bucket`: not a missing epoch or name, not
+/// epoch 2, not another phase that carries both.
+#[test]
+fn only_active_marks_with_epoch_3_or_more_and_a_bucket_runs_marks() {
+    let cases = [
+        (
+            r#"{"epoch":3,"marks_bucket":"b","phase":"active-marks"}"#,
+            Some("b"),
+        ),
+        (
+            r#"{"epoch":4,"marks_bucket":"b","phase":"active-marks"}"#,
+            Some("b"),
+        ),
+        (
+            r#"{"epoch":2,"marks_bucket":"b","phase":"active-marks"}"#,
+            None,
+        ),
+        (r#"{"marks_bucket":"b","phase":"active-marks"}"#, None),
+        (r#"{"epoch":3,"phase":"active-marks"}"#, None),
+        (r#"{"epoch":3,"marks_bucket":"b","phase":"active"}"#, None),
+        (r#"{"epoch":3,"marks_bucket":"b","phase":"someday"}"#, None),
+    ];
+    for (json, runs) in cases {
+        assert_eq!(decoded(json).runs_marks(), runs, "{json}");
+    }
+}
+
 /// The fixture of the format object of the phase `active-marks`.
 const ACTIVE_MARKS: &str =
     include_str!("../tests/stored_formats/fixtures/format_active_marks.json");
