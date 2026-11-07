@@ -23,6 +23,8 @@ use crate::{
 
 #[path = "entry_reconciler_marks_tests/pages.rs"]
 mod pages;
+#[path = "entry_reconciler_marks_tests/passes.rs"]
+mod passes;
 #[path = "entry_reconciler_marks_tests/reap.rs"]
 mod reap;
 #[path = "entry_reconciler_marks_tests/tombstone.rs"]
@@ -108,10 +110,25 @@ impl Rig {
         holder: &str,
         tweak: impl FnOnce(&mut EntryReconcilerConfig),
     ) -> EntryReconciler {
+        self.leader_over_with(
+            self.hot_calls.clone(),
+            self.cold_calls.clone(),
+            holder,
+            tweak,
+        )
+    }
+
+    /// As [`Rig::leader_with`] over the given hot and cold tiers.
+    fn leader_over_with(
+        &self,
+        hot: Arc<dyn Backend>,
+        cold: Arc<dyn Backend>,
+        holder: &str,
+        tweak: impl FnOnce(&mut EntryReconcilerConfig),
+    ) -> EntryReconciler {
         let mut config = self.config(holder);
         tweak(&mut config);
-        let reconciler =
-            EntryReconciler::new(self.hot_calls.clone(), self.cold_calls.clone(), config);
+        let reconciler = EntryReconciler::new(hot, cold, config);
         reconciler
             .with_marks(self.marks_calls.clone(), BUCKET)
             .expect("the settings hold together")
@@ -132,9 +149,14 @@ impl Rig {
 
     /// The format object of the hot store, replaced by one in `phase`.
     async fn format(&self, phase: FormatPhase, bucket: Option<&str>) {
+        self.format_at(phase, Some(3), bucket).await;
+    }
+
+    /// The format object of the hot store, replaced by one in `phase` at `epoch`.
+    async fn format_at(&self, phase: FormatPhase, epoch: Option<u64>, bucket: Option<&str>) {
         let format = Format {
             phase,
-            epoch: Some(3),
+            epoch,
             marks_bucket: bucket.map(str::to_owned),
         };
         self.hot.delete(FORMAT_KEY).await.ok();

@@ -49,6 +49,7 @@ const LOCAL_CACHE_KEYS: &[&str] = &[
     "fill_chunk",
     "keep_queue_bytes",
     "revalidate_after",
+    "head_before_put",
 ];
 
 /// Whether `key` is a name some table of the file holds: the last part of a key in [`KEYS`], a

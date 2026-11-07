@@ -166,6 +166,21 @@ impl Sleeper for Pacer {
     }
 }
 
+/// A wait on the timer of the runtime that then moves the monotonic clock by the time waited: for
+/// a test on a paused clock whose stores delay their calls on the same timer, so that a waiting
+/// proxy lets the runtime go idle and the virtual time pass.
+struct Timer {
+    mono: Arc<Mono>,
+}
+
+#[async_trait]
+impl Sleeper for Timer {
+    async fn sleep(&self, duration: Duration) {
+        tokio::time::sleep(duration).await;
+        self.mono.advance(duration);
+    }
+}
+
 /// A proxy `p1` over a hot tier, a marks bucket and a cold tier, each behind a gate and a fault
 /// injector, whose format is `active-marks`.
 pub(super) struct Rig {
@@ -180,6 +195,7 @@ pub(super) struct Rig {
     pub(super) cold_faults: Arc<FaultyBackend>,
     pub(super) cold: Arc<GateBackend>,
     pub(super) pacer: Arc<Pacer>,
+    sleeper: Arc<dyn Sleeper>,
     pub(super) proxy: Arc<Proxy>,
 }
 
@@ -191,6 +207,16 @@ impl Rig {
     /// A rig whose format object says `format` (none if empty), with `tune` applied to the
     /// proxy's settings.
     pub(super) async fn with(format: &str, tune: impl FnOnce(&mut ProxyConfig)) -> Self {
+        Self::build(format, false, tune).await
+    }
+
+    /// A rig whose proxies wait on the timer of the runtime (see [`Timer`]) and not on the
+    /// [`Pacer`].
+    pub(super) async fn timed() -> Self {
+        Self::build(MARKS_FORMAT, true, |_| {}).await
+    }
+
+    async fn build(format: &str, timed: bool, tune: impl FnOnce(&mut ProxyConfig)) -> Self {
         let clock = Arc::new(TestClock::new());
         let mono = Arc::new(Mono::new());
         let hot_mem = Arc::new(MemoryBackend::with_clock(clock.clone()));
@@ -210,7 +236,12 @@ impl Rig {
         config.mono = mono.clone();
         config.usage_refresh = Duration::ZERO;
         config.format_refresh = Duration::ZERO;
-        config.sleeper = pacer.clone();
+        let sleeper: Arc<dyn Sleeper> = if timed {
+            Arc::new(Timer { mono: mono.clone() })
+        } else {
+            pacer.clone()
+        };
+        config.sleeper = sleeper.clone();
         config.marks = Some(marks.clone());
         config.marks_name = Some("hot-marks".to_owned());
         tune(&mut config);
@@ -234,8 +265,29 @@ impl Rig {
             cold_faults,
             cold,
             pacer,
+            sleeper,
             proxy: Arc::new(proxy),
         }
+    }
+
+    /// A second live proxy `id` over the same three stores, with the waits of the first.
+    pub(super) async fn another_proxy(&self, id: &str) -> Arc<Proxy> {
+        let mut config = ProxyConfig::new(id, 1000, Arc::new(TestClock::new()));
+        config.mono = self.mono.clone();
+        config.usage_refresh = Duration::ZERO;
+        config.format_refresh = Duration::ZERO;
+        config.sleeper = self.sleeper.clone();
+        config.marks = Some(self.marks.clone());
+        config.marks_name = Some("hot-marks".to_owned());
+        let proxy = Proxy::open(self.hot.clone(), self.cold.clone(), config)
+            .await
+            .unwrap();
+        proxy
+            .inner
+            .heartbeat
+            .deadline
+            .extend_to(crate::Clock::now(&*self.mono) + 3_600_000);
+        Arc::new(proxy)
     }
 
     /// A plain put of the held `text` with no claim.

@@ -1,17 +1,18 @@
 //! The pass of the leader over the markers of the put-without-lock design
 //! (`docs/design/put-without-lock.md`, 5.9, 5.13 and 5.14), which a step does in place of the pass
 //! over the entries when the format says `active-marks` and the reconciler has the marks bucket
-//! and its name ([`EntryReconciler::with_marks`]) and the name is the one the format records. Under
-//! any other phase, or with another name, nothing here runs: the pass over the markers is inert
-//! until the activation.
+//! and its name ([`EntryReconciler::with_marks`]) and the name is the one the format records, at
+//! epoch 3 or later (the condition of a put, of the copier and of every pass in the module
+//! `passes`). Under any other phase, or with another name, nothing here runs: the pass over the
+//! markers is inert until the activation.
 //!
 //! A pass lists the marks bucket in pages of [`EntryReconcilerConfig::marks_page`], reads the
 //! markers of a page (one GET each, which is the version `a` of the marker) and works them on a
 //! pool of [`EntryReconcilerConfig::copy_concurrency`], the `DIRTY` ones first (the module
 //! `copier`), then the locks and clearings of owners that departed or whose lease ran out (the
-//! module `reap`). A `WANT` marker, which asks for a copy-back, and the eviction and the stray
-//! sweep that make locks of the leader's own are the work of the next pull request: this pass
-//! leaves a `WANT` as it is.
+//! module `reap`). A `WANT` marker, which asks for a copy-back, is left by this pass and given,
+//! with the others of the listing, to the copy-back that runs after the last page; the stray sweep
+//! and the eviction, which make locks of the leader's own, run after that (the module `passes`).
 //!
 //! The waits of the design (`orphan_after`, `lock_lease`, `tombstone_hold`) are not sleeps. The
 //! leader notes the version of each marker it lists and when, on its monotonic clock, it first
@@ -23,21 +24,56 @@
 
 use std::collections::{BTreeMap, BTreeSet};
 use std::sync::Arc;
+use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
 
 use futures::stream::{self, StreamExt};
+use tokio::sync::Mutex;
 
+use super::passes::Passes;
 use super::{EntryReconciler, StepReport};
 use crate::deadline::millis;
-use crate::format::{Format, FormatPhase};
+use crate::format::Format;
 use crate::journal::PROXIES_PREFIX;
-use crate::{Backend, Error, Listed, MarkSeen, MarkerState, Markers, MarkersConfigError};
+use crate::{
+    Backend, CopyRecords, Error, Listed, MarkSeen, MarkerState, Markers, MarkersConfigError,
+};
 
 /// The leader's handle on the marks bucket: the backend, to list it, the calls on the markers
-/// over the same backend, and the name the format record must give for the pass to run.
+/// over the same backend, the name the format record must give for the pass to run, and what the
+/// leader's passes over the markers share.
 pub(super) struct MarkSide {
     pub(super) store: Arc<dyn Backend>,
     pub(super) markers: Markers,
     pub(super) bucket: String,
+    /// The pairs of tags of the copies this leader made, which the copier writes and the eviction
+    /// and the sweep read.
+    pub(super) records: Arc<CopyRecords>,
+    /// When, on the monotonic clock, this leader began to work the markers: a pair of tags the
+    /// leader never saw copied counts as copied then.
+    pub(super) taken_over: AtomicU64,
+    /// Whether the next step over the markers is the first of a leader that has just taken the
+    /// lease, or come back to the markers from another phase: it starts the passes afresh.
+    fresh: AtomicBool,
+    /// The eviction, the copy-back and the stray sweep. Only the step uses it, one step at a time.
+    pub(super) passes: Mutex<Passes>,
+}
+
+impl MarkSide {
+    /// Notes that the next step over the markers begins a leader's work afresh: the lease was lost
+    /// or never held, or the format left the markers (a rollback) and may come back to them.
+    pub(super) fn unsettle(&self) {
+        self.fresh.store(true, Ordering::SeqCst);
+    }
+
+    /// Begins the work of a leader at `now` if the last step did not go on from this one: the
+    /// records of copies are dropped (the evictor does it), and a pair with no record counts as
+    /// copied from now.
+    async fn begin(&self, now: u64) {
+        if self.fresh.swap(false, Ordering::SeqCst) {
+            self.taken_over.store(now, Ordering::SeqCst);
+            self.passes.lock().await.took_over();
+        }
+    }
 }
 
 /// What a pass remembers of the markers it lists, by key. Both maps are the leader's own: a new
@@ -64,6 +100,14 @@ pub(super) struct Hold {
     pub(super) at: u64,
     /// The tags of the hot and the cold object after a copy.
     pub(super) tags: Option<(String, String)>,
+}
+
+impl Hold {
+    /// Whether the hold noted this pair of tags: the hot object and the cold object it wrote.
+    pub(super) fn has_pair(&self, hot: &str, cold: &str) -> bool {
+        let pair = self.tags.as_ref().map(|(h, c)| (h.as_str(), c.as_str()));
+        pair == Some((hot, cold))
+    }
 }
 
 /// What a pass knows of one marker beyond its body.
@@ -164,21 +208,34 @@ impl EntryReconciler {
             Arc::clone(&base.sleeper),
         )?;
         let bucket = bucket.into();
+        let records = Arc::new(CopyRecords::default());
+        let passes = self.passes(&markers, &store, &bucket, &records);
         self.marks = Some(Arc::new(MarkSide {
             store,
             markers,
             bucket,
+            records,
+            taken_over: AtomicU64::new(0),
+            fresh: AtomicBool::new(true),
+            passes: Mutex::new(passes),
         }));
         Ok(self)
     }
 
-    /// The marks bucket, if the markers are worked under `format`: it says `active-marks`, and
-    /// names the marks bucket this reconciler has.
+    /// The marks bucket, if the markers are worked under `format`: it says `active-marks` at epoch
+    /// 3 or later ([`Format::runs_marks`]) and names the marks bucket this reconciler has, which
+    /// is also the condition under which the eviction, the copy-back and the sweep act.
     pub(super) fn runs_marks(&self, format: &Format) -> Option<Arc<MarkSide>> {
-        let named = format.marks_bucket.as_deref();
         let side = self.marks.as_ref()?;
-        let active = format.phase == FormatPhase::ActiveMarks;
-        (active && named == Some(side.bucket.as_str())).then(|| Arc::clone(side))
+        (format.runs_marks() == Some(side.bucket.as_str())).then(|| Arc::clone(side))
+    }
+
+    /// Notes that the markers are not being worked by this step, so that the passes begin afresh
+    /// when they are.
+    pub(super) fn unsettle_marks(&self) {
+        if let Some(side) = &self.marks {
+            side.unsettle();
+        }
     }
 
     /// The steps of a step over the markers, once the format says `active-marks` and the lease is
@@ -190,6 +247,7 @@ impl EntryReconciler {
     ) -> StepReport {
         report.held = true;
         let now = self.config.base.mono.now();
+        side.begin(now).await;
         match self.hot.list(PROXIES_PREFIX).await {
             Ok(listed) => self.registrations.observe(now, &listed),
             Err(error) => {
@@ -197,12 +255,16 @@ impl EntryReconciler {
                 return report;
             }
         }
-        if let Some(listed) = self.mark_pages(&side, now, &mut report).await {
+        let mut wants = Vec::new();
+        if let Some(listed) = self.mark_pages(&side, now, &mut wants, &mut report).await {
             self.mark_books.retain(&listed);
             self.retries.retain(|key, _| listed.contains(key));
             self.tally.keep_lagging(&listed);
+            self.mark_copy_back(&side, wants, &mut report).await;
         }
+        self.mark_sweep(&side, &mut report).await;
         self.tend_usage(now, &mut report).await;
+        self.mark_evict(&side, now, &mut report).await;
         self.publish_usage(now, &mut report).await;
         report
     }
@@ -211,11 +273,13 @@ impl EntryReconciler {
     /// when each page is listed: the copies of the pages before it may have taken longer than a
     /// wait, and a version first seen on this page was not seen earlier. Gives the keys listed, or
     /// `None` if a listing failed (the keys not reached are then not forgotten). The registrations
-    /// were listed at `registered`, the start of the pass, and are judged by that time alone.
+    /// were listed at `registered`, the start of the pass, and are judged by that time alone. The
+    /// `WANT` markers of the pages are added to `wants`.
     async fn mark_pages(
         &mut self,
         side: &MarkSide,
         registered: u64,
+        wants: &mut Vec<MarkSeen>,
         report: &mut StepReport,
     ) -> Option<BTreeSet<String>> {
         let size = self.config.marks_page.max(1);
@@ -233,7 +297,8 @@ impl EntryReconciler {
             let last = page.len() < size;
             after = page.last().map(|object| object.key.clone());
             listed.extend(page.iter().map(|object| object.key.clone()));
-            self.mark_page(side, page, (registered, now), report).await;
+            self.mark_page(side, page, (registered, now), wants, report)
+                .await;
             if last {
                 return Some(listed);
             }
@@ -241,12 +306,14 @@ impl EntryReconciler {
     }
 
     /// Reads the markers of a page and works them: `DIRTY` first, then the others. `times` are
-    /// the time the registrations were listed at and the time this page was.
+    /// the time the registrations were listed at and the time this page was. The `WANT` markers
+    /// are left as they are and added to `wants`.
     async fn mark_page(
         &mut self,
         side: &MarkSide,
         page: Vec<Listed>,
         times: (u64, u64),
+        wants: &mut Vec<MarkSeen>,
         report: &mut StepReport,
     ) {
         let now = times.1;
@@ -274,6 +341,12 @@ impl EntryReconciler {
             }
         }
         items.sort_by_key(|seen| seen.marker.st != MarkerState::Dirty);
+        wants.extend(
+            items
+                .iter()
+                .filter(|seen| seen.marker.st == MarkerState::Want)
+                .cloned(),
+        );
         let orphan = millis(self.config.orphan_after);
         let lease = millis(self.config.markers.lock_lease);
         let looks: Vec<Look> = items

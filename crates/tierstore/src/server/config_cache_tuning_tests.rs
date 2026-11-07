@@ -243,3 +243,19 @@ fn revalidate_after_is_never_unless_the_file_gives_a_duration() {
     assert!(why.contains("revalidate_after"), "{why}");
     assert!(!why.contains("sometimes"), "{why}");
 }
+
+/// Asserts that `head_before_put` is true when the file leaves it out (a put asks the upstream for
+/// the key before it reads the body, as before the key), is what the file gives, is a field of the
+/// table, and that a value that is not a boolean is refused naming the key and not showing the
+/// value.
+#[test]
+fn head_before_put_is_true_unless_the_file_says_false() {
+    assert!(cache_of("").cache.head_before_put);
+    assert!(CacheConfig::new("/c", 1000, Vec::new()).head_before_put);
+    assert!(cache_of("head_before_put = true").cache.head_before_put);
+    assert!(!cache_of("head_before_put = false").cache.head_before_put);
+    assert!(fields_of::<LocalCacheTable>().contains(&"head_before_put"));
+    let why = refusal("head_before_put = \"sometimes\"");
+    assert!(why.contains("head_before_put"), "{why}");
+    assert!(!why.contains("sometimes"), "{why}");
+}
