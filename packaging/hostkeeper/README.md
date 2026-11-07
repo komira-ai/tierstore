@@ -26,6 +26,7 @@ tests here check the package that carries them.
 
 hostkeeper's manifest loader takes a launchd plist as a unit file and a launchd label as a `run`
 entry, and the tests load the macOS manifest and plist with it. The unpacker and loader the tests
-and `artifacts.yml` use are those of the commit that merged komira-ai/hostkeeper#23, which know
-both the manifest's `platform` key and launchd jobs, so every platform's package is unpacked with
-hostkeeper's own code, in the tests and in the build job of its platform.
+and `artifacts.yml` use are those of the one commit the root `Cargo.toml` pins (the merge of
+komira-ai/hostkeeper#135, whose unpacker publishes a version as a user other than root on macOS),
+which know both the manifest's `platform` key and launchd jobs, so every platform's package is
+unpacked with hostkeeper's own code, in the tests and in the build job of its platform.
