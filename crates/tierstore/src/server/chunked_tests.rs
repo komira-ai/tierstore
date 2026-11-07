@@ -11,7 +11,8 @@ use hyper::header::{HeaderMap, HeaderName, HeaderValue};
 use sha2::{Digest, Sha256};
 
 use super::auth::StreamAuth;
-use super::chunked::{Decoder, Framing, TRAILABLE};
+use super::chunked::{Decoder, Framing};
+use super::digests::{Algorithm, TRAILABLE};
 use super::reply::S3Error;
 
 const SIGNED: &str = "STREAMING-AWS4-HMAC-SHA256-PAYLOAD";
@@ -154,7 +155,7 @@ fn the_head_of_a_request_says_how_its_body_is_framed() {
     assert!(signed.signed());
     assert_eq!((signed.decoded(), signed.trailer()), (61, None));
     for (claim, is_signed) in [(SIGNED_TRAILER, true), (UNSIGNED_TRAILER, false)] {
-        for name in TRAILABLE {
+        for name in TRAILABLE.map(Algorithm::header) {
             let spaced = format!(" {} ", name.to_uppercase());
             let head = headers(&[length[0], ("x-amz-trailer", &spaced)]);
             let got = Framing::parse(claim, &head).unwrap().unwrap();

@@ -16,7 +16,8 @@ use tokio::time::Instant;
 
 use crate::Error;
 
-use super::chunked::{Decoder, TRAILABLE};
+use super::chunked::Decoder;
+use super::digests::{Algorithm, TRAILABLE};
 use super::reply::S3Error;
 use super::request::{Check, Query, Reader, Refused, Target, header, pieces, query_pairs, resolve};
 use super::testing::{CHECKSUMS, Scripted, Step, checksum, crc64nvme};
@@ -274,6 +275,28 @@ fn each_checksum_header_is_held_to() {
     assert!(verdict(&claim, &with(&pairs), &[b"hello"]).is_err());
 }
 
+/// Asserts that two claims of one algorithm are each held to the body, though the body is hashed
+/// once for both: the SHA-256 the signature covers and `x-amz-checksum-sha256` are both right, or
+/// one of them is not, and the one that is not names itself (`XAmzContentSHA256Mismatch` for the
+/// signature's, `BadDigest` for the header's).
+#[test]
+fn two_claims_of_one_algorithm_are_each_held_to_the_body() {
+    let body: &[u8] = b"hello world";
+    let name = "x-amz-checksum-sha256";
+    let right = checksum(name, body);
+    let wrong = checksum(name, b"another body");
+    let claim = hex::encode(Sha256::digest(body));
+    let other = hex::encode(Sha256::digest(b"another body"));
+    let chunks: [&[u8]; 2] = [b"hello ", b"world"];
+    assert!(verdict(&claim, &with(&[(name, &right)]), &chunks).is_ok());
+    let refused = verdict(&claim, &with(&[(name, &wrong)]), &chunks).unwrap_err();
+    assert_eq!(refused.kind(), (StatusCode::BAD_REQUEST, "BadDigest"));
+    assert!(refused.message().contains(name));
+    let refused = verdict(&other, &with(&[(name, &right)]), &chunks).unwrap_err();
+    let signed = (StatusCode::BAD_REQUEST, "XAmzContentSHA256Mismatch");
+    assert_eq!(refused.kind(), signed);
+}
+
 /// Asserts that a checksum header whose value is not the base64 of a hash of its length is
 /// `InvalidDigest`: not base64, empty, the wrong length, and not text.
 #[test]
@@ -451,7 +474,7 @@ fn decoding(body: Scripted, check: &Check) -> Reader<Scripted> {
 async fn a_trailing_checksum_is_held_to_the_data_of_the_body() {
     let data: &[u8] = b"hello world, hello world";
     let claim = "STREAMING-UNSIGNED-PAYLOAD-TRAILER";
-    for name in TRAILABLE {
+    for name in TRAILABLE.map(Algorithm::header) {
         let head = trailer_head(name, data.len());
         let check = Check::new(claim, &head, true).unwrap();
         assert_eq!(

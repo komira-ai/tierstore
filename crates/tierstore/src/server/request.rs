@@ -10,35 +10,22 @@ use std::time::Duration;
 use base64::Engine as _;
 use base64::engine::general_purpose::STANDARD;
 use bytes::{Buf, Bytes, BytesMut};
-use crc::{CRC_64_NVME, Crc, Digest as Crc64Digest, Table};
-use crc32fast::Hasher as Crc32;
 use futures::StreamExt;
 use futures::stream::unfold;
 use http_body_util::{BodyExt, LengthLimitError, Limited};
 use hyper::StatusCode;
 use hyper::body::Body;
 use hyper::header::HeaderMap;
-use md5::Md5;
 use percent_encoding::percent_decode_str;
-use ring::digest::{Context as Sha1Context, SHA1_FOR_LEGACY_USE_ONLY};
-use sha2::{Digest, Sha256};
 
 use crate::{Clock, Error, PartBody, PutClaim};
 
 use super::chunked::{Decoder, Framing};
+use super::digests::{Algorithm, Digests};
 use super::reply::{PAYLOAD_HEADER, S3Error};
 
 /// The error of a request body.
 pub(crate) type BoxError = Box<dyn std::error::Error + Send + Sync>;
-
-/// CRC-64/NVMe, with the table of 16 slices that makes it fast enough for a body at line rate.
-static CRC64_NVME: Crc<u64, Table<16>> = Crc::<u64, Table<16>>::new(&CRC_64_NVME);
-
-/// The header of the one checksum that is held to a body that is not data of an object.
-const MD5_HEADER: &str = "content-md5";
-
-/// The checksum header whose hash is the content tag of an object in a memory hot tier.
-const SHA256_HEADER: &str = "x-amz-checksum-sha256";
 
 /// The value of a header, if there is one and it is text.
 pub(crate) fn header<'a>(headers: &'a HeaderMap, name: &str) -> Option<&'a str> {
@@ -302,80 +289,22 @@ where
     }
 }
 
-/// A hash of a body.
-enum Hasher {
-    Sha256(Sha256),
-    Md5(Md5),
-    Crc32(Crc32),
-    Crc32c(u32),
-    Sha1(Sha1Context),
-    Crc64Nvme(Crc64Digest<'static, u64, Table<16>>),
-}
-
-impl Hasher {
-    /// A SHA-1 hasher: the checksum a client asks for in `x-amz-checksum-sha1` is a SHA-1.
-    fn sha1() -> Self {
-        Self::Sha1(Sha1Context::new(&SHA1_FOR_LEGACY_USE_ONLY))
-    }
-
-    /// A CRC-64/NVMe hasher: the checksum a client asks for in `x-amz-checksum-crc64nvme`.
-    fn crc64_nvme() -> Self {
-        Self::Crc64Nvme(CRC64_NVME.digest())
-    }
-
-    fn update(&mut self, data: &[u8]) {
-        match self {
-            Self::Sha256(hasher) => Digest::update(hasher, data),
-            Self::Md5(hasher) => Digest::update(hasher, data),
-            Self::Crc32(hasher) => hasher.update(data),
-            Self::Crc32c(state) => *state = crc32c::crc32c_append(*state, data),
-            Self::Sha1(context) => context.update(data),
-            Self::Crc64Nvme(digest) => digest.update(data),
-        }
-    }
-
-    /// The hash, as bytes: the digest, or the big-endian bytes of a CRC.
-    fn finish(self) -> Vec<u8> {
-        match self {
-            Self::Sha256(hasher) => hasher.finalize().to_vec(),
-            Self::Md5(hasher) => hasher.finalize().to_vec(),
-            Self::Crc32(hasher) => hasher.finalize().to_be_bytes().to_vec(),
-            Self::Crc32c(state) => state.to_be_bytes().to_vec(),
-            Self::Sha1(context) => context.finish().as_ref().to_vec(),
-            Self::Crc64Nvme(digest) => digest.finalize().to_be_bytes().to_vec(),
-        }
-    }
-}
-
 /// A hash that a body must come to, as a header of the request claimed.
 struct Want {
     header: &'static str,
-    hasher: Hasher,
+    algorithm: Algorithm,
     expected: Vec<u8>,
-    /// The length in bytes of a hash of this algorithm.
-    length: usize,
-}
-
-/// The headers a request may claim a hash of its body in, each with the length in bytes of the
-/// hash and a hasher for it.
-fn claimable() -> [(&'static str, usize, Hasher); 6] {
-    [
-        (MD5_HEADER, 16, Hasher::Md5(Md5::new())),
-        ("x-amz-checksum-crc32", 4, Hasher::Crc32(Crc32::new())),
-        ("x-amz-checksum-crc32c", 4, Hasher::Crc32c(0)),
-        ("x-amz-checksum-sha1", 20, Hasher::sha1()),
-        ("x-amz-checksum-sha256", 32, Hasher::Sha256(Sha256::new())),
-        ("x-amz-checksum-crc64nvme", 8, Hasher::crc64_nvme()),
-    ]
 }
 
 /// What the body of a request must hash to: the hash the signature covers (the
 /// `x-amz-content-sha256` header), and each hash the request claims in `Content-MD5`,
 /// `x-amz-checksum-crc32`, `x-amz-checksum-crc32c`, `x-amz-checksum-sha1`,
-/// `x-amz-checksum-sha256` or `x-amz-checksum-crc64nvme`. The body is fed to the check a piece at a time, so a body of any
-/// size is checked without being held.
+/// `x-amz-checksum-sha256` or `x-amz-checksum-crc64nvme`. The body is fed to the check a piece at
+/// a time, so a body of any size is checked without being held; each algorithm is hashed once,
+/// however many of the claims name it.
 pub(crate) struct Check {
     wants: Vec<Want>,
+    digests: Digests,
     /// The framing of an `aws-chunked` body, if it is one.
     framing: Option<Framing>,
     /// The place in `wants` of the checksum the trailer of an `aws-chunked` body carries.
@@ -410,42 +339,43 @@ impl Check {
             }
             _ => wants.push(Want {
                 header: PAYLOAD_HEADER,
-                hasher: Hasher::Sha256(Sha256::new()),
+                algorithm: Algorithm::Sha256,
                 expected: hex::decode(claim).unwrap_or_default(),
-                length: 32,
             }),
         }
-        let trailer = framing.as_ref().and_then(Framing::trailer);
-        let trailer_at = trailer.map(|_| wants.len());
-        for (header, length, hasher) in claimable().into_iter().filter(|c| Some(c.0) == trailer) {
-            let expected = Vec::new();
+        let trailing = framing.as_ref().and_then(Framing::trailer);
+        let trailing = trailing.and_then(Algorithm::from_header);
+        let trailer = trailing.map(|_| wants.len());
+        if let Some(algorithm) = trailing {
             wants.push(Want {
-                header,
-                hasher,
-                expected,
-                length,
+                header: algorithm.header(),
+                algorithm,
+                expected: Vec::new(),
             });
         }
-        for (name, length, hasher) in claimable() {
-            let Some(value) = headers.get(name).filter(|_| data || name == MD5_HEADER) else {
+        for algorithm in Algorithm::ALL {
+            let name = algorithm.header();
+            let claimed = headers.get(name);
+            let Some(value) = claimed.filter(|_| data || algorithm == Algorithm::Md5) else {
                 continue;
             };
             let text = value.to_str().unwrap_or_default();
             let decoded = STANDARD.decode(text.trim()).ok();
-            let Some(expected) = decoded.filter(|bytes| bytes.len() == length) else {
+            let Some(expected) = decoded.filter(|bytes| bytes.len() == algorithm.length()) else {
                 return Err(S3Error::invalid_digest(name));
             };
             wants.push(Want {
                 header: name,
-                hasher,
+                algorithm,
                 expected,
-                length,
             });
         }
+        let digests = Digests::new(wants.iter().map(|want| want.algorithm));
         Ok(Self {
             wants,
+            digests,
             framing,
-            trailer: trailer_at,
+            trailer,
         })
     }
 
@@ -459,8 +389,9 @@ impl Check {
         let tags = self
             .wants
             .iter()
-            .filter(|want| [MD5_HEADER, SHA256_HEADER].contains(&want.header))
-            .filter(|want| want.expected.len() == want.length)
+            .filter(|want| want.header == want.algorithm.header())
+            .filter(|want| matches!(want.algorithm, Algorithm::Md5 | Algorithm::Sha256))
+            .filter(|want| want.expected.len() == want.algorithm.length())
             .map(|want| hex::encode(&want.expected))
             .collect();
         PutClaim { tags }
@@ -482,7 +413,7 @@ impl Check {
         };
         for want in self.wants.iter_mut().skip(at).take(1) {
             let decoded = STANDARD.decode(text.trim()).ok();
-            let bytes = decoded.filter(|bytes| bytes.len() == want.length);
+            let bytes = decoded.filter(|bytes| bytes.len() == want.algorithm.length());
             want.expected = bytes.ok_or_else(|| S3Error::invalid_digest(want.header))?;
         }
         Ok(())
@@ -490,9 +421,7 @@ impl Check {
 
     /// Feeds the next piece of the body to the hashes.
     pub(crate) fn update(&mut self, data: &[u8]) {
-        for want in &mut self.wants {
-            want.hasher.update(data);
-        }
+        self.digests.update(data);
     }
 
     /// Compares the hashes of the whole body with the ones the request claimed.
@@ -501,8 +430,10 @@ impl Check {
     /// `BadDigest` for a checksum header whose hash is not the body's, and
     /// `XAmzContentSHA256Mismatch` for the hash the signature covers.
     pub(crate) fn finish(self) -> Result<(), S3Error> {
+        let done = self.digests.finish();
         for want in self.wants {
-            if want.hasher.finish() != want.expected {
+            let computed = done.get(&want.algorithm).map(Vec::as_slice);
+            if computed != Some(want.expected.as_slice()) {
                 return Err(S3Error::mismatch(want.header));
             }
         }

@@ -190,6 +190,10 @@ pub(super) struct LocalCacheTable {
     /// until the entry is evicted; `0s` checks every hit).
     #[serde(default)]
     pub revalidate_after: Option<Dur>,
+    /// Whether a create-only put asks the upstream for the key before it reads the body
+    /// (default `true`; `false` for an upstream that refuses a key it holds before the body).
+    #[serde(default)]
+    pub head_before_put: Option<bool>,
     /// The bytes a fill reads from the upstream at a time (4KiB to 1GiB, default 8MiB).
     #[serde(default)]
     pub fill_chunk: Option<Size>,
@@ -370,6 +374,7 @@ impl CachePart {
         }
         cache.write_through = table.write_through.unwrap_or(false);
         cache.revalidate_after = table.revalidate_after.map(|after| after.0);
+        cache.head_before_put = table.head_before_put.unwrap_or(true);
         config_cache_tuning::apply(&table, &mut cache)?;
         let scrub_min_round = duration(table.scrub_min_round, SCRUB_MIN_ROUND);
         if !scrub_min_round.is_zero() && scrub_min_round < cache.scrub_tick {

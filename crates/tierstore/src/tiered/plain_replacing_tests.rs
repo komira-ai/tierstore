@@ -79,7 +79,7 @@ impl Backend for Takes {
 /// A rig whose hot tier is [`Takes`] and whose landing is on.
 async fn taking() -> Rig {
     let wrap = |hot: Arc<GateBackend>| -> Arc<dyn Backend> { Arc::new(Takes(hot)) };
-    Rig::over(super::plain_put_tests::MARKS_FORMAT, landing, wrap).await
+    Rig::over(super::plain_put_tests::MARKS_FORMAT, false, landing, wrap).await
 }
 
 /// Asserts that under the entry format the plain put of the trait creates and a second one is

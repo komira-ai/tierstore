@@ -5,10 +5,10 @@
 //!
 //! The eviction ([`MarkEvictor`](crate::MarkEvictor)), the copy-back
 //! ([`CopyBacker`](crate::CopyBacker)) and the stray sweep ([`StraySweep`](crate::StraySweep))
-//! are the leader's. None of them is called by the server yet: the leader's step that holds the
-//! lease and calls them, and the format phase `active-marks` that the step waits for, come with
-//! the pull requests 7 and 10 of the design. Each of their passes reads the format object first
-//! and does nothing under another phase.
+//! are the leader's: the [`EntryReconciler`](crate::EntryReconciler) builds them when it is given
+//! its marks bucket ([`with_marks`](crate::EntryReconciler::with_marks)) and runs them in its step
+//! under the lease it holds, so that there is one lease and one holder of it across the phases.
+//! Each of their passes reads the format object first and does nothing under another phase.
 
 use std::sync::Arc;
 
@@ -23,9 +23,14 @@ use crate::{Backend, Error, MarkMove, Markers, Outcome, ReconcilerConfig, Writte
 /// The lease of the leader, `_tiering/lease`, as the work on markers asks for it: whether it is
 /// held, and whether it has its margin left before a call that destroys or publishes.
 ///
-/// It is made over the same settings as the lease of the [`EntryReconciler`](crate::EntryReconciler)
-/// (`holder`, `lease_ttl`, `lease_renew`, `lease_margin`, `mono`), and is the same object in the
-/// hot tier: a process that runs both holds it once.
+/// The [`EntryReconciler`](crate::EntryReconciler) hands its own lease to the passes it runs
+/// (`LeaderLease::of`), so that a process that works the entries and the markers holds the one
+/// object `_tiering/lease` once, whichever phase the format is in.
+///
+/// One made by [`new`](Self::new) is a lease of its own, with a nonce of its own: beside an
+/// `EntryReconciler` of the same holder it cannot take over the lease the reconciler holds, and
+/// the reconciler cannot take over its, until the ttl has passed. Make one only where nothing else
+/// of the process holds the lease.
 #[derive(Clone)]
 pub struct LeaderLease {
     lease: Lease,
@@ -48,6 +53,14 @@ impl LeaderLease {
             renew,
             margin,
         );
+        Self { lease }
+    }
+
+    /// The lease `lease` that a reconciler holds, as the passes ask for it: the same object, the
+    /// same nonce and the same expiry, so that what the reconciler holds is held here and what it
+    /// loses is lost here.
+    #[must_use]
+    pub(crate) fn of(lease: Lease) -> Self {
         Self { lease }
     }
 

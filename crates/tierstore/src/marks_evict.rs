@@ -198,6 +198,11 @@ pub struct EvictReport {
     pub kept: usize,
     /// The keys whose hot object was gone.
     pub gone: usize,
+    /// The keys whose hot object was deleted, in the order the pool finished them.
+    pub removed: Vec<String>,
+    /// The keys left because their cold copy is young: the caller may offer them again once
+    /// `evict_min_age` has passed.
+    pub waiting: Vec<String>,
     /// The errors of the releases of locks whose delete had succeeded.
     pub unreleased: Vec<Error>,
     /// The keys whose eviction failed, with the error, in the order they failed: the caller puts
@@ -285,10 +290,14 @@ impl MarkEvictor {
                 Ok(Evicted::Removed { freed, unreleased }) => {
                     report.evicted += 1;
                     report.freed = report.freed.saturating_add(freed);
+                    report.removed.push(key);
                     report.unreleased.extend(unreleased);
                 }
                 Ok(Evicted::Dirtied) => report.dirtied += 1,
-                Ok(Evicted::Young) => report.young += 1,
+                Ok(Evicted::Young) => {
+                    report.young += 1;
+                    report.waiting.push(key);
+                }
                 Ok(Evicted::Kept) => report.kept += 1,
                 Ok(Evicted::Gone) => report.gone += 1,
                 Err(error) => report.failed.push((key, error)),

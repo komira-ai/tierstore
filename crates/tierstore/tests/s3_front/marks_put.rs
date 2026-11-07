@@ -136,9 +136,9 @@ async fn create(h: &Harness, key: &str, body: &[u8]) -> reqwest::Response {
     call(h, "PUT", key, &[], &[("if-none-match", "*")], body).await
 }
 
-/// Asserts what a plain put of a new key asks of the stores: the hot HEAD with the marker GET (the
-/// look an overwrite needs), then the object and the marker, and nothing of the cold tier. The
-/// object is served and its marker says `DIRTY`.
+/// Asserts what a plain put of a new key asks of the stores: the hot HEAD alone (it reads no
+/// marker), then the object and the marker, and nothing of the cold tier. The object is served
+/// and its marker says `DIRTY`.
 #[tokio::test]
 async fn a_plain_put_of_a_new_key_writes_the_object_and_its_marker_and_never_asks_cold() {
     let h = marks().await;
@@ -149,7 +149,7 @@ async fn a_plain_put_of_a_new_key_writes_the_object_and_its_marker_and_never_ask
         seen.take(&h, K),
         Requests {
             hot: vec![Op::Head, Op::Put],
-            marks: vec![Op::Get, Op::Put],
+            marks: vec![Op::Put],
             cold: vec![],
         }
     );
@@ -250,8 +250,8 @@ async fn a_put_with_if_none_match_that_meets_a_delete_is_409_and_is_free_after_i
 }
 
 /// Asserts that a plain put whose `x-amz-checksum-sha256` is the checksum of the bytes the key
-/// holds is 200 and writes nothing: the hot HEAD and the marker GET are all the stores receive, and
-/// the object, its marker and its tag are as they were. The same put with other bytes and their
+/// holds is 200 and writes nothing: the hot HEAD is all the stores receive (the marker is not read),
+/// and the object, its marker and its tag are as they were. The same put with other bytes and their
 /// checksum replaces the key.
 #[tokio::test]
 async fn a_plain_put_of_the_bytes_the_key_holds_with_their_checksum_writes_nothing() {
@@ -275,7 +275,7 @@ async fn a_plain_put_of_the_bytes_the_key_holds_with_their_checksum_writes_nothi
         seen.take(&h, K),
         Requests {
             hot: vec![Op::Head],
-            marks: vec![Op::Get],
+            marks: vec![],
             cold: vec![],
         }
     );
@@ -497,8 +497,9 @@ async fn upload(
     (done, id)
 }
 
-/// Asserts what the completion of an upload of a new key asks of the stores: the hot HEAD with
-/// the marker GET, then the hot tier's completion and the marker, and nothing of the cold tier.
+/// Asserts what the completion of an upload of a new key asks of the stores: the hot HEAD
+/// alone, then the hot tier's completion and the marker (no marker is read), and nothing of the
+/// cold tier.
 #[tokio::test]
 async fn the_completion_of_an_upload_of_a_new_key_writes_the_object_and_its_marker() {
     let h = marks().await;
@@ -506,7 +507,7 @@ async fn the_completion_of_an_upload_of_a_new_key_writes_the_object_and_its_mark
     let (done, _) = upload(&h, K, b"parts", &[]).await;
     assert_eq!(done.status(), 200);
     let requests = completion(seen.take(&h, K));
-    assert_eq!(requests.marks, vec![Op::Get, Op::Put]);
+    assert_eq!(requests.marks, vec![Op::Put]);
     assert_eq!(requests.hot.first(), Some(&Op::Head));
     assert_eq!(requests.hot.last(), Some(&Op::CompleteUpload));
     assert!(requests.cold.is_empty(), "{requests:?}");

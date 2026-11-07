@@ -4,7 +4,8 @@
 //! [`Backend::complete_upload_replacing`](crate::Backend::complete_upload_replacing) for it. The
 //! rules are those of the plain put of `plain_put.rs`, with the parts in place of the body:
 //!
-//! 1. The hot HEAD and the marker together.
+//! 1. The hot HEAD alone; the marker is read after it, where the key is found (a key the hot tier
+//!    does not hold reads no marker, as in `plain_put.rs`).
 //! 2. A key the hot tier does not hold is made by the fast path (the object is the hot tier's
 //!    create-only completion, the marker is written beside it); a completion that loses a race to
 //!    another writer's creation goes on as a replace of what the winner made.
@@ -39,9 +40,8 @@ impl Inner {
             return Err(cold_upload(key));
         };
         self.require_live(key)?;
-        let (held, marker) = self.look(markers, key).await?;
-        let (meta, marker) = match held {
-            Some(meta) => (meta, marker),
+        let (meta, marker) = match self.head_hot(key).await? {
+            Some(meta) => (meta, markers.read(key).await?),
             None => {
                 let landed = self
                     .land_marked(
@@ -55,9 +55,9 @@ impl Inner {
                     )
                     .await;
                 match landed {
-                    Err(Error::AlreadyExists(_)) => match self.look(markers, key).await? {
-                        (Some(meta), marker) => (meta, marker),
-                        (None, _) => {
+                    Err(Error::AlreadyExists(_)) => match self.head_hot(key).await? {
+                        Some(meta) => (meta, markers.read(key).await?),
+                        None => {
                             let why = "the key was made and removed while the upload completed";
                             return Err(retry(key, why));
                         }

@@ -1,5 +1,6 @@
 //! The keys of `[hot_store]` for the leader's pass over the markers: `copy_concurrency`,
-//! `marks_page`, `orphan_after`, `tombstone_hold` and `lock_lease`. Their defaults, that each
+//! `marks_page`, `orphan_after`, `tombstone_hold`, `lock_lease` and `evict_min_age` (and the
+//! `copy_back_max_bytes` the leader's copy-back shares with the reads). Their defaults, that each
 //! reaches the setting it stands for, their ranges, their relations to the lease and to the
 //! refreshes of a lock, and that `[cold_store]` refuses them.
 
@@ -28,7 +29,8 @@ fn reconciler_with(tuning: &EntryTuning) -> EntryReconcilerConfig {
 }
 
 const ALL: &str = "copy_concurrency = 7\nmarks_page = 11\norphan_after = \"3m\"\n\
-    tombstone_hold = \"4m\"\nlock_lease = \"5m\"";
+    tombstone_hold = \"4m\"\nlock_lease = \"5m\"\nevict_min_age = \"7m\"\n\
+    copy_back_max_bytes = \"3MiB\"";
 
 /// A file that gives none of the keys has the values of the design (section 9), and they are the
 /// defaults the reconciler's settings start from.
@@ -40,6 +42,7 @@ fn a_file_that_gives_none_of_the_keys_has_the_defaults_of_the_design() {
     assert_eq!(tuning.orphan_after, Duration::from_secs(120));
     assert_eq!(tuning.tombstone_hold, Duration::from_secs(120));
     assert_eq!(tuning.lock_lease, Duration::from_secs(120));
+    assert_eq!(tuning.evict_min_age, Duration::from_secs(600));
     let base = ReconcilerConfig::new("p1/reconciler", 1000, std::sync::Arc::new(SystemClock));
     let before = EntryReconcilerConfig::new(base);
     let after = reconciler_with(&tuning);
@@ -47,6 +50,8 @@ fn a_file_that_gives_none_of_the_keys_has_the_defaults_of_the_design() {
     assert_eq!(after.marks_page, before.marks_page);
     assert_eq!(after.orphan_after, before.orphan_after);
     assert_eq!(after.tombstone_hold, before.tombstone_hold);
+    assert_eq!(after.evict_min_age, before.evict_min_age);
+    assert_eq!(after.copy_back_max_bytes, before.copy_back_max_bytes);
     assert_eq!(after.markers, MarkersConfig::default());
 }
 
@@ -61,6 +66,8 @@ fn every_key_reaches_the_setting_it_stands_for() {
     assert_eq!(config.orphan_after, Duration::from_secs(180));
     assert_eq!(config.tombstone_hold, Duration::from_secs(240));
     assert_eq!(config.markers.lock_lease, Duration::from_secs(300));
+    assert_eq!(config.evict_min_age, Duration::from_secs(420));
+    assert_eq!(config.copy_back_max_bytes, 3 << 20);
     assert_eq!(
         config.markers.lock_refresh,
         MarkersConfig::default().lock_refresh
@@ -78,7 +85,12 @@ fn each_key_is_refused_outside_its_range() {
         assert_eq!(refusal(&with_hot(&zero)), message("0"), "{key}");
         assert_eq!(refusal(&with_hot(&big)), message("100001"), "{key}");
     }
-    for key in ["orphan_after", "tombstone_hold", "lock_lease"] {
+    for key in [
+        "orphan_after",
+        "tombstone_hold",
+        "lock_lease",
+        "evict_min_age",
+    ] {
         let zero = format!("{key} = \"0s\"");
         let over = format!("{key} = \"8761h\"");
         let message = |value: &str, high: &str| {

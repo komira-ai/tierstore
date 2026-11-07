@@ -10,6 +10,8 @@
 mod backends;
 mod cache;
 #[cfg(feature = "server")]
+mod cache_over_marks;
+#[cfg(feature = "server")]
 mod cache_over_proxy;
 #[cfg(feature = "server")]
 mod cache_upstreams;

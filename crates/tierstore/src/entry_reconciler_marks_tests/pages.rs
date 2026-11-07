@@ -208,29 +208,6 @@ async fn the_dirty_markers_of_a_page_are_worked_before_its_locks() {
     assert!(copied < reaped, "{log:?}");
 }
 
-/// Asserts that a `WANT` marker is left as it is: the leader neither locks it nor removes it
-/// (the copy-back is the work of a later release), and counts it as nothing done.
-#[tokio::test]
-async fn a_want_marker_is_left_alone() {
-    let rig = Rig::new();
-    rig.activate().await;
-    rig.cold.put("k", bytes("v")).await.unwrap();
-    rig.plant(marker("k", MarkerState::Want, false, false))
-        .await;
-    let mut leader = rig.leader("r1");
-    assert_eq!(leader.step().await, report(0, 0));
-    rig.pass(Duration::from_secs(600));
-    assert_eq!(leader.step().await, report(0, 0));
-    assert_eq!(
-        rig.shape("k").await,
-        Some((MarkerState::Want, false, false))
-    );
-    assert_eq!(
-        rig.marks_calls.calls(Op::PutIfMatch) + rig.marks_calls.calls(Op::Delete),
-        0
-    );
-}
-
 /// Asserts that `copy_lag` is the bytes of the objects under `DIRTY` markers with hot present: a
 /// marker with nothing behind it adds nothing, the lag falls as markers clear, and a marker that
 /// is removed by someone else leaves the figure at the next pass.

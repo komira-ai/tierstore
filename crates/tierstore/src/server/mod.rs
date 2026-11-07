@@ -298,6 +298,7 @@ mod config_unknown;
 mod counted;
 mod delete_objects;
 mod deprecated;
+mod digests;
 mod door;
 mod drain;
 mod first_beat;
@@ -382,6 +383,8 @@ mod config_testing;
 mod delete_objects_marks_tests;
 #[cfg(test)]
 mod delete_objects_tests;
+#[cfg(test)]
+mod digests_tests;
 #[cfg(test)]
 mod docs_tests;
 #[cfg(test)]

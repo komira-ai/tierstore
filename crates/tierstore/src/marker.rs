@@ -5,8 +5,8 @@
 //! write marker objects are in the module `marks`; the puts and deletes of the proxy call them while
 //! the format says `active-marks` (and so do its plain puts, `tiered/overwrite.rs` and
 //! `tiered/cold_land.rs`, which the S3 front calls), and so does the leader's pass over the
-//! markers, and so do the leader's eviction, copy-back and stray sweep (nothing the server runs
-//! calls those yet).
+//! markers, and so do the leader's eviction, copy-back and stray sweep, which the `EntryReconciler`
+//! step runs (`entry_reconciler/passes.rs`) under the same format.
 //!
 //! - The body is JSON: `v` (1), `key`, `st` ([`MarkerState`]), `gone`, `dirty`, `why`
 //!   ([`MarkerWhy`], for a lock), `owner` (the id of the proxy or the leader holding a lock or a
