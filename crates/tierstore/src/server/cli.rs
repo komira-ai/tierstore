@@ -494,6 +494,10 @@ pub(super) struct Built {
     pub(super) entry: EntryTuning,
     pub(super) hot: Arc<dyn Backend>,
     pub(super) cold: Arc<dyn Backend>,
+    /// The marks bucket of the hot store and its name (the bucket of an `s3` tier, `memory` for a
+    /// memory tier), if the node has one: the leader works the markers under the format
+    /// `active-marks` that names it.
+    pub(super) marks: Option<(String, Arc<dyn Backend>)>,
     pub(super) oci: Option<OciSetup>,
 }
 
@@ -742,7 +746,7 @@ pub(super) fn build(cli: &Cli) -> Result<Built, Error> {
     let cold = open_tier("--cold", &cli.cold, &cli.cold_s3(), timeout, &cli.s3_client)?;
     let marks = open_marks(cli, timeout)?;
     let mut proxy = ProxyConfig::new(&cli.proxy_id, cli.hot_bytes, Arc::clone(&clock));
-    proxy.marks = marks;
+    proxy.marks.clone_from(&marks);
     proxy.marks_name = marks_name(&cli.hot_marks);
     proxy.critical = share(cli.critical);
     let tuning = &cli.hot_tuning;
@@ -768,6 +772,9 @@ pub(super) fn build(cli: &Cli) -> Result<Built, Error> {
         entry: cli.entry_tuning,
         hot,
         cold,
+        marks: marks
+            .zip(marks_name(&cli.hot_marks))
+            .map(|(store, name)| (name, store)),
         oci,
     })
 }

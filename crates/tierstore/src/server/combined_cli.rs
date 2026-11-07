@@ -83,10 +83,12 @@ pub(super) async fn serve_combined(
     let reconciler = Rounds::tuned(
         built.hot,
         built.cold,
+        built.marks,
         built.reconciler,
         departure,
         &built.entry,
-    );
+    )
+    .map_err(Error::from)?;
     let halt = Arc::clone(&beside_halt);
     let reconciling = async move {
         match gate {

@@ -59,6 +59,23 @@ fn assert_invalid<T: std::fmt::Debug>(result: Result<T, Error>) {
     assert!(matches!(result, Err(Error::InvalidKey(_))), "{result:?}");
 }
 
+/// Asserts that a call failed with `Error::InvalidSegment` for `key`.
+fn assert_segment<T: std::fmt::Debug>(key: &str, result: Result<T, Error>) {
+    assert_eq!(result.unwrap_err(), Error::InvalidSegment(key.to_owned()));
+}
+
+/// Asserts that a call failed because `key` is refused: with `Error::InvalidSegment` for a key
+/// that has `..` in it (the keys of the tests that have a dot segment have this one), with
+/// `Error::InvalidKey` for an empty key or a key over 1024 bytes.
+fn assert_refused<T: std::fmt::Debug>(key: &str, result: Result<T, Error>) {
+    let expected = if key.contains("..") {
+        Error::InvalidSegment(key.to_owned())
+    } else {
+        Error::InvalidKey(key.to_owned())
+    };
+    assert_eq!(result.unwrap_err(), expected);
+}
+
 /// Asserts that a call failed with `Error::Other`.
 fn assert_other<T: std::fmt::Debug>(result: Result<T, Error>) {
     assert!(matches!(result, Err(Error::Other(_))), "{result:?}");
@@ -347,27 +364,27 @@ async fn a_listing_of_more_than_one_s3_page_is_followed_across_pages() {
     assert_eq!(page(&backend, Some("k0001"), 2).await, ["k0002", "k0003"]);
 }
 
-/// Asserts that a key S3's rules refuse (a `..` segment, which the client cannot send; the
-/// empty key; one over 1024 bytes) is `InvalidKey` for every call that takes one, also as a
-/// start-after key, that a prefix over 1024 bytes is too, and that no request reaches the
-/// service. (Replaces the test that pinned `a b` as a key the client cannot name.)
+/// Asserts that a key S3's rules refuse (the empty key, one over 1024 bytes) is `InvalidKey`, and a
+/// key the client cannot send (a `..` segment) is `InvalidSegment`, for every call that takes one,
+/// also as a start-after key; that a prefix over 1024 bytes is `InvalidKey`; and that no request
+/// reaches the service. (Replaces the test that pinned `a b` as a key the client cannot name.)
 #[tokio::test]
 async fn a_key_the_client_cannot_name_is_refused_before_any_request() {
     let (s3, backend) = backend().await;
     let range = Some(ByteRange::new(0, 1));
     let long = "k".repeat(1025);
     for key in ["a/../b", "", long.as_str()] {
-        assert_invalid(backend.put(key, body("v")).await);
-        assert_invalid(backend.put_if_match(key, body("v"), "tag").await);
-        assert_invalid(backend.get(key, None).await);
-        assert_invalid(backend.get(key, range).await);
-        assert_invalid(backend.head(key).await);
-        assert_invalid(backend.delete(key).await);
-        assert_invalid(backend.list_page("", Some(key), 5).await);
-        assert_invalid(backend.create_upload(key).await);
-        assert_invalid(backend.upload_part(key, "u", 1, chunks(&["x"])).await);
-        assert_invalid(backend.complete_upload(key, "u", &[]).await);
-        assert_invalid(backend.abort_upload(key, "u").await);
+        assert_refused(key, backend.put(key, body("v")).await);
+        assert_refused(key, backend.put_if_match(key, body("v"), "tag").await);
+        assert_refused(key, backend.get(key, None).await);
+        assert_refused(key, backend.get(key, range).await);
+        assert_refused(key, backend.head(key).await);
+        assert_refused(key, backend.delete(key).await);
+        assert_refused(key, backend.list_page("", Some(key), 5).await);
+        assert_refused(key, backend.create_upload(key).await);
+        assert_refused(key, backend.upload_part(key, "u", 1, chunks(&["x"])).await);
+        assert_refused(key, backend.complete_upload(key, "u", &[]).await);
+        assert_refused(key, backend.abort_upload(key, "u").await);
     }
     assert_invalid(backend.list(&long).await);
     assert_eq!(s3.requests(), Vec::<String>::new());
@@ -648,7 +665,7 @@ async fn a_listing_of_parts_that_fails_is_an_error() {
 
     let (endpoint, seen) = scripted(vec![]);
     let store = S3Backend::new(config(&endpoint)).unwrap();
-    assert_invalid(store.list_parts("a/../b", "u", None, 10).await);
+    assert_segment("a/../b", store.list_parts("a/../b", "u", None, 10).await);
     assert!(seen.lock().unwrap().is_empty());
 }
 

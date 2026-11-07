@@ -174,7 +174,7 @@ fn a_gc_key_needs_a_plain_id_and_a_secret() {
 }
 
 /// Asserts that a key or a list prefix that starts with the prefix of the key but is not a valid
-/// name is refused: a `..` or a `.` segment, a control character, a name over 1024 bytes. The
+/// name is refused: a `..` or a `.` segment, a character XML 1.0 forbids, a name over 1024 bytes. The
 /// names are given as they are after the path is decoded, so each is a name the check sees.
 #[test]
 fn a_name_under_the_prefix_that_is_not_a_valid_name_is_refused() {

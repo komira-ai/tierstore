@@ -454,6 +454,11 @@ pub(super) struct TierTable {
     pub departure: Option<Dur>,
     #[serde(default)]
     pub held_ttl: Option<Dur>,
+    pub copy_concurrency: Option<u32>,
+    pub marks_page: Option<u32>,
+    pub orphan_after: Option<Dur>,
+    pub tombstone_hold: Option<Dur>,
+    pub lock_lease: Option<Dur>,
     #[serde(default)]
     pub emergency_cold_landing: Option<bool>,
     #[serde(default)]
@@ -728,8 +733,8 @@ pub(super) fn storage(
             .map_err(|why| invalid("hot_store.lock_file", format!("{path:?} {why}")))?;
     }
     let lease_ttl = duration(hot.lease_ttl, Duration::from_secs(30));
-    let entry_tuning = entry_tuning(&hot, lease_ttl)?;
     let reconcile_tuning = reconcile_tuning(&hot, lease_ttl)?;
+    let entry_tuning = entry_tuning(&hot, lease_ttl, reconcile_tuning.lease_margin)?;
     let handoff = handoff_of(&server, lock_file.as_deref())?;
     let oci = fronts.oci;
     let shared = front_of(server, fronts.s3, per_run)?;

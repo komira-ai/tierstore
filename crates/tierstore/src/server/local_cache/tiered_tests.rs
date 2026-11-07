@@ -330,11 +330,12 @@ async fn a_fill_of_an_object_replaced_by_one_of_another_size_is_refused_as_writt
     assert_eq!(cache.held(), (0, 0));
 }
 
-/// Asserts that the check of an old hit asks the upstream what "one version" is: over two tiers,
-/// where the tag moves when the object is copied, a changed tag is not a change and the entry
-/// is served without a body download, and an object of another size is one and is read again.
+/// Asserts that the check of an old hit compares the tag as well as the size whatever the
+/// upstream says "one version" is for a read in progress: over two tiers, where the tag moves
+/// when the object is copied, a changed tag is read again (one GET, the entry then holds the new
+/// tag and is served by the next check without a download), and an object of another size is too.
 #[tokio::test]
-async fn a_revalidation_over_two_tiers_compares_by_size_and_ignores_a_tag_that_moved() {
+async fn a_revalidation_over_two_tiers_compares_the_tag_and_the_size() {
     use super::metrics::Revalidated;
 
     let rig = Rig::new("tscache-rv-tiers");
@@ -349,17 +350,27 @@ async fn a_revalidation_over_two_tiers_compares_by_size_and_ignores_a_tag_that_m
     assert_eq!(cache.held(), (3000, 1));
     let reads = moving.reads.load(Ordering::SeqCst);
 
+    // The tag moved and the bytes did not: the entry's tag is not the upstream's, so the object is
+    // read again, once.
+    rig.clock.advance(60_001);
+    assert_eq!(cache.get("cas/b/obj", None).await.unwrap(), data);
+    assert!(moving.reads.load(Ordering::SeqCst) > reads);
+    assert_eq!(cache.counters().revalidations(Revalidated::Same), 0);
+    assert_eq!(cache.counters().revalidations(Revalidated::Changed), 1);
+    assert_eq!(cache.held(), (3000, 1));
+
+    // The entry has the tag the upstream gives now: the next check is a match, with no GET.
+    let reads = moving.reads.load(Ordering::SeqCst);
     rig.clock.advance(60_001);
     assert_eq!(cache.get("cas/b/obj", None).await.unwrap(), data);
     assert_eq!(moving.reads.load(Ordering::SeqCst), reads);
     assert_eq!(cache.counters().revalidations(Revalidated::Same), 1);
-    assert_eq!(cache.counters().revalidations(Revalidated::Changed), 0);
 
     let longer = pattern(3001);
     rig.replace("cas/b/obj", &longer).await;
     rig.clock.advance(60_001);
     assert_eq!(cache.get("cas/b/obj", None).await.unwrap(), longer);
     assert!(moving.reads.load(Ordering::SeqCst) > reads);
-    assert_eq!(cache.counters().revalidations(Revalidated::Changed), 1);
+    assert_eq!(cache.counters().revalidations(Revalidated::Changed), 2);
     assert_eq!(cache.held(), (3001, 1));
 }

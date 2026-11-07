@@ -22,21 +22,13 @@ use hmac::Mac;
 use sha2::{Digest, Sha256};
 
 use super::auth::{MISMATCH, StreamAuth, keyed};
+use super::digests::Algorithm;
 use super::reply::S3Error;
 use super::request::header;
 
 const SIGNED: &str = "STREAMING-AWS4-HMAC-SHA256-PAYLOAD";
 const SIGNED_TRAILER: &str = "STREAMING-AWS4-HMAC-SHA256-PAYLOAD-TRAILER";
 const UNSIGNED_TRAILER: &str = "STREAMING-UNSIGNED-PAYLOAD-TRAILER";
-
-/// The trailing checksums S3 takes, as the headers that would carry them.
-pub(crate) const TRAILABLE: [&str; 5] = [
-    "x-amz-checksum-crc32",
-    "x-amz-checksum-crc32c",
-    "x-amz-checksum-crc64nvme",
-    "x-amz-checksum-sha1",
-    "x-amz-checksum-sha256",
-];
 
 /// The name of the line that signs the trailer.
 const TRAILER_SIGNATURE: &str = "x-amz-trailer-signature";
@@ -108,11 +100,12 @@ impl Framing {
     }
 }
 
-/// The checksum that `x-amz-trailer` announces: one of [`TRAILABLE`].
+/// The checksum that `x-amz-trailer` announces: the header of one of the trailable algorithms
+/// ([`Algorithm::trailable`]).
 fn trailer_name(headers: &hyper::header::HeaderMap) -> Result<String, S3Error> {
     let text = header(headers, "x-amz-trailer").unwrap_or_default();
     let name = text.trim().to_ascii_lowercase();
-    if TRAILABLE.contains(&name.as_str()) {
+    if Algorithm::from_header(&name).is_some_and(Algorithm::trailable) {
         Ok(name)
     } else {
         let text = "x-amz-trailer must name one checksum (x-amz-checksum-crc32, -crc32c, \

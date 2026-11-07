@@ -58,10 +58,12 @@ impl Rig {
         Rounds::tuned(
             self.hot.clone(),
             self.cold.clone(),
+            None,
             config,
             DEPARTURE,
             tuning,
         )
+        .unwrap()
     }
 
     /// The times in the usage object after each of five rounds that are 12 seconds apart.

@@ -393,6 +393,7 @@ impl From<Error> for S3Error {
             Error::Full(_) | Error::SlowDown(_) => (StatusCode::SERVICE_UNAVAILABLE, "SlowDown"),
             Error::Reserved(_) => (StatusCode::FORBIDDEN, "AccessDenied"),
             Error::InvalidKey(_) => (StatusCode::BAD_REQUEST, "KeyTooLongError"),
+            Error::InvalidSegment(_) => (StatusCode::BAD_REQUEST, "InvalidArgument"),
             Error::InvalidPart(_) => (StatusCode::BAD_REQUEST, "InvalidPart"),
             Error::BadDigest(_) => (StatusCode::BAD_REQUEST, "BadDigest"),
             Error::Unsupported(_) => (StatusCode::NOT_IMPLEMENTED, "NotImplemented"),

@@ -24,9 +24,12 @@
 //!   a streamed put, a presigned put, and the parts and the completion of a multipart upload) and
 //!   its deletes on markers, and a read of a key only the cold tier has writes the `WANT` marker
 //!   that asks for a copy-back; a proxy with another marks bucket, or none, answers every write
-//!   [`Error::Unavailable`], as for a phase it does not take as active. Nothing pauses, and the
-//!   entry reconciler does nothing. A release before it takes the phase to be one it does not
-//!   know, which is the same as the second.
+//!   [`Error::Unavailable`], as for a phase it does not take as active. Nothing pauses. The
+//!   reconciler works the markers (`docs/design/put-without-lock.md`, 5.9, 5.13 and 5.14: the
+//!   copy to cold, the reap and the usage) only if it was given the marks bucket and its name is
+//!   the record's `marks_bucket`, and does nothing otherwise, and it never works the entries
+//!   under this phase. A release before it takes the phase to be one it does not know, which is
+//!   the same as doing nothing.
 //! - `active`: the change is done. With `"epoch": 2` or more a proxy makes its writes on the
 //!   entries of their keys; it never pauses writes for it. A proxy of this release makes no write
 //!   under any other format: no object, `active` below epoch 2 and a phase it does not know are
@@ -109,6 +112,14 @@ impl Format {
             && self.epoch.is_some_and(|epoch| epoch >= MARKS_EPOCH);
         self.marks_bucket.as_deref().filter(|_| runs)
     }
+
+    /// Whether a reconciler has a pass to make under this: it works the entries (`runs_entries`),
+    /// or the phase is `active-marks`, where it works the markers if it has the marks bucket the
+    /// record names.
+    #[cfg(feature = "server")]
+    pub(crate) fn runs_a_pass(&self) -> bool {
+        self.runs_entries() || self.phase == FormatPhase::ActiveMarks
+    }
 }
 
 fn decode(body: &[u8]) -> Result<Format, Error> {
@@ -126,6 +137,21 @@ pub(crate) async fn read_format(hot: &dyn Backend) -> Result<Option<Format>, Err
         Err(Error::NotFound(_)) => Ok(None),
         Err(error) => Err(error),
     }
+}
+
+/// Whether the hot tier's format object opens writes on markers in the marks bucket `bucket` (the
+/// one a leader's pass was given): one read of it. The phase is `active-marks`, the epoch is
+/// [`MARKS_EPOCH`] or later and the record names `bucket` ([`Format::runs_marks`], the condition
+/// of a put and of the leader's copier). A missing object, any other phase, a phase this release
+/// does not know, a record without the epoch or the name, an earlier epoch and another name are
+/// `false`.
+///
+/// # Errors
+/// As [`read_format`].
+pub(crate) async fn marks_run_in(hot: &dyn Backend, bucket: &str) -> Result<bool, Error> {
+    Ok(read_format(hot)
+        .await?
+        .is_some_and(|format| format.runs_marks() == Some(bucket)))
 }
 
 /// As [`read_format`], with the content tag of the object. The tag is read first, so that if the
