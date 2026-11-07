@@ -9,7 +9,11 @@
 //!   sent (the S3 backend would otherwise upload all the parts of a large body and learn it at the
 //!   completion). The HEAD only saves work: the upstream's create-only put is the one arbiter of
 //!   two writers of one key, and its `AlreadyExists` is passed on as it is. An upstream that
-//!   cannot answer the HEAD is the error of the put. Under a `cache = true` policy the object is
+//!   cannot answer the HEAD is the error of the put. With `head_before_put` off there is no HEAD:
+//!   the put goes to the upstream as it is, for an upstream (a proxy whose format is
+//!   `active-marks`) that refuses a key it holds before it reads the body, and the tag its answer
+//!   gives (see `put_stream_answered`) is the cache's version of the copy, so the put costs the
+//!   upstream its own requests and no more. Under a `cache = true` policy the object is
 //!   also kept on the node (see `keep`).
 //! - **Hot-only put** ([`put_stream_hot_only`](crate::Backend::put_stream_hot_only)): the same
 //!   put, sent to the upstream as its hot-only put, which a proxy answers
