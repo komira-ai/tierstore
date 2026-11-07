@@ -37,6 +37,11 @@
 //! it, and a task that ends any other way (a panic, an abort, a runtime shutting down) releases
 //! it from its drop (`MarkedDelete`'s `Drop`).
 //!
+//! The delete is counted as a write in flight (`Writing`) until its lock is let go, not until
+//! the answer: the count belongs to the task, and goes to the release when the task drops its
+//! lock, so a client that goes away does not make the proxy report no write in flight while the
+//! marker is still being written.
+//!
 //! **A hot DELETE whose outcome is unknown** (it timed out, or failed in a way that does not say
 //! whether the store did it) may still be queued at the store, which does not cancel it. The delete
 //! is answered [`Error::SlowDown`] at once but keeps its lock for `queued_call_margin`, and only
@@ -58,6 +63,7 @@ use tokio::sync::oneshot;
 use super::Inner;
 use super::entry_put::retry;
 use super::entry_retry::Backoff;
+use super::pause::Writing;
 use crate::entry::ambiguous;
 use crate::{
     Creation, Error, MarkBirth, MarkMove, MarkSeen, MarkerWhy, Markers, Outcome, Waited, Written,
@@ -71,15 +77,17 @@ fn busy(key: &str, why: &str) -> Error {
 impl Inner {
     /// Deletes `key` on its marker: the steps of the module, on a task of their own, so that a
     /// client that drops this future after the lock was taken leaves nothing held. The answer is
-    /// sent when the delete is acknowledged, before the lock is released.
+    /// sent when the delete is acknowledged, before the lock is released. `writing` counts the
+    /// delete as a write in flight and is kept by the task until the lock is let go.
     pub(super) async fn delete_on_marker(
         self: &Arc<Self>,
         markers: Arc<Markers>,
         key: &str,
+        writing: Writing,
     ) -> Result<(), Error> {
         self.require_live(key)?;
         let (answer, asked) = oneshot::channel();
-        let delete = MarkedDelete::new(Arc::clone(self), markers, key);
+        let delete = MarkedDelete::new(Arc::clone(self), markers, key, writing);
         drop(tokio::spawn(delete.run(answer)));
         asked
             .await
@@ -98,16 +106,25 @@ pub(super) struct MarkedDelete {
     held: Option<Written>,
     /// Whether the hot DELETE was started and is not known to have ended.
     in_flight: bool,
+    /// The count of this delete as a write in flight: it goes to the [`Release`] of the lock, and
+    /// is dropped with the delete if there is none.
+    writing: Option<Writing>,
 }
 
 impl MarkedDelete {
-    pub(super) fn new(inner: Arc<Inner>, markers: Arc<Markers>, key: &str) -> Self {
+    pub(super) fn new(
+        inner: Arc<Inner>,
+        markers: Arc<Markers>,
+        key: &str,
+        writing: Writing,
+    ) -> Self {
         Self {
             inner,
             markers,
             key: key.to_owned(),
             held: None,
             in_flight: false,
+            writing: Some(writing),
         }
     }
 
@@ -230,7 +247,8 @@ impl MarkedDelete {
         }
     }
 
-    /// The release of the lock, if it is held; the delete holds none after this.
+    /// The release of the lock, if it is held; the delete holds none after this. The count of the
+    /// delete as a write in flight goes with the release and ends with it.
     pub(super) fn release(&mut self) -> Option<Release> {
         let lock = self.held.take()?;
         Some(Release {
@@ -238,6 +256,7 @@ impl MarkedDelete {
             markers: Arc::clone(&self.markers),
             lock,
             queued: self.in_flight,
+            _writing: self.writing.take(),
         })
     }
 }
@@ -263,6 +282,8 @@ pub(super) struct Release {
     pub(super) lock: Written,
     /// Whether a hot DELETE may still land: then the lock is kept for `queued_call_margin` first.
     pub(super) queued: bool,
+    /// The delete's count as a write in flight, dropped when the release has run.
+    _writing: Option<Writing>,
 }
 
 impl Release {

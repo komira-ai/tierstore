@@ -17,6 +17,7 @@ use tokio::sync::{Notify, oneshot};
 use tokio::task::JoinHandle;
 
 use super::marks_delete::MarkedDelete;
+use super::pause::Writing;
 use crate::faulty::{FaultyBackend, Op};
 use crate::journal::FORMAT_KEY;
 use crate::{
@@ -228,6 +229,14 @@ impl Rig {
         rig
     }
 
+    /// The writes the proxy counts as begun and not ended.
+    pub(crate) fn writes_counted(&self) -> u64 {
+        self.proxy
+            .inner
+            .writing
+            .load(std::sync::atomic::Ordering::SeqCst)
+    }
+
     /// Moves `live_until` of the proxy to ten minutes from now.
     pub(crate) fn live(&self) {
         let until = crate::Clock::now(&*self.mono) + 600_000;
@@ -317,7 +326,8 @@ impl Rig {
     pub(super) fn make(&self, key: &str) -> MarkedDelete {
         let inner = Arc::clone(&self.proxy.inner);
         let markers = Arc::clone(inner.markers.as_ref().unwrap());
-        MarkedDelete::new(inner, markers, key)
+        let writing = Writing::begin(&inner.writing);
+        MarkedDelete::new(inner, markers, key, writing)
     }
 
     /// A delete of `key` run to the end of its release.

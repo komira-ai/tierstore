@@ -667,10 +667,16 @@ impl Inner {
     /// `active`, and on the marker of its key (see `marks_delete.rs`) under `active-marks`: refused
     /// with [`Error::Unavailable`] while writes are paused or the format is neither.
     async fn delete_object(self: &Arc<Self>, key: &str) -> Result<(), Error> {
-        let (route, _writing) = self.route_write(key).await?;
+        let (route, writing) = self.route_write(key).await?;
         match route {
-            WriteRoute::Entries => self.delete_on_entry(key).await,
-            WriteRoute::Marks(markers) => self.delete_on_marker(Arc::clone(markers), key).await,
+            WriteRoute::Entries => {
+                let _writing = writing;
+                self.delete_on_entry(key).await
+            }
+            WriteRoute::Marks(markers) => {
+                self.delete_on_marker(Arc::clone(markers), key, writing)
+                    .await
+            }
         }
     }
 }
