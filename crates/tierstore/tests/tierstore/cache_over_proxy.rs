@@ -264,6 +264,30 @@ async fn a_put_of_a_key_the_hot_tier_holds_is_refused_before_the_body_is_read() 
     assert_eq!(puts, (tiers.hot.calls(Op::Put), tiers.cold.calls(Op::Put)));
 }
 
+/// Asserts that a plain put through a cache over a proxy whose format is not `active-marks` is the
+/// proxy's create-only put, as a plain put of the proxy is: a new key is put and kept, a key the
+/// hot tier holds is refused as `AlreadyExists` with no byte of the body read after the proxy's
+/// answer and the bytes of the object as they were. (Only a proxy on markers replaces.)
+#[tokio::test]
+async fn a_plain_put_through_a_cache_over_an_entry_proxy_creates_and_refuses_an_existing_key() {
+    let tiers = Tiers::new();
+    let proxy = tiers.proxy().await;
+    tiers.hot_mem.put("img/h", body("old")).await.unwrap();
+    let (_dir, cache) = cache_over(proxy, |_| {});
+    let claim = tierstore::PutClaim::default();
+
+    let made = cache.put_stream_replacing("img/n", Some(3), chunks(&["new"]), &claim);
+    assert!(made.await.is_ok());
+    assert_eq!(read(&*tiers.hot_mem, "img/n").await, body("new"));
+    assert_eq!(cache.held(), (3, 1));
+
+    let refused = cache.put_stream_replacing("img/h", Some(3), chunks(&["new"]), &claim);
+    let refused = refused.await;
+    assert_eq!(refused, Err(Error::AlreadyExists("img/h".to_owned())));
+    assert_eq!(read(&*tiers.hot_mem, "img/h").await, body("old"));
+    assert_eq!(cache.get("img/h", None).await.unwrap(), body("old"));
+}
+
 /// A cache over `upstream` that checks every hit (`revalidate_after = 0s`) and keeps what is under
 /// `img/`, in the `cache` directory of `dir`: a second one over the same `dir` finds what the
 /// first kept.

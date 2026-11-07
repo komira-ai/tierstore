@@ -748,7 +748,7 @@ impl Backend for Proxy {
         len: Option<u64>,
         body: PartBody<'_>,
         claim: &PutClaim,
-    ) -> Result<(), Error> {
+    ) -> Result<Option<PutAnswer>, Error> {
         self.inner.put_replacing(key, len, body, claim).await
     }
 

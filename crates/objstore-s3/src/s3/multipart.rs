@@ -72,21 +72,32 @@ pub(super) fn part_len(tuning: &super::S3Tuning) -> usize {
     tuning.part_bytes.clamp(MIN_PART_BYTES, MAX_PART_BYTES) as usize
 }
 
-/// Writes `body`, `len` bytes, under `key` as a multipart upload: a new object, or, given the
-/// entity tag `matching`, the replacement of the object that has it (`If-Match` on the
-/// completion). Gives the `ETag` of the object, quotes included, if the completion carries one.
+/// What the completion of a multipart upload asks of the key.
+#[derive(Clone, Copy)]
+pub(super) enum Rule<'a> {
+    /// A new object: `If-None-Match: *` where the store claims conditional writes.
+    Create,
+    /// The object, whether the key has one or not: no condition on the completion.
+    Replace,
+    /// The replacement of the object that has this entity tag (`If-Match`).
+    Match(&'a str),
+}
+
+/// Writes `body`, `len` bytes, under `key` as a multipart upload that the completion makes an
+/// object by `rule`. Gives the `ETag` of the object, quotes included, if the completion carries
+/// one.
 pub(super) async fn put(
     conn: &Arc<Conn>,
     key: &ObjectKey,
     len: u64,
     body: BodyStream,
-    matching: Option<&str>,
+    rule: Rule<'_>,
 ) -> Result<Option<String>, ObjectStoreError> {
     let size = part_size_of(len, conn.tuning.part_bytes).ok_or(ObjectStoreError::Unsupported(
         "an object larger than 10,000 parts of 5 GiB",
     ))?;
     let upload = create(conn, key).await?;
-    let sent = send(&upload, len, size, body, matching).await;
+    let sent = send(&upload, len, size, body, rule).await;
     settle(upload, sent).await
 }
 
@@ -140,7 +151,7 @@ async fn send_unsized(
         let part = rest.next(len).await?;
         etags.push(upload_part(upload, etags.len() + 1, part).await?);
     }
-    complete(upload, &etags, Some(etag)).await
+    complete(upload, &etags, Rule::Match(etag)).await
 }
 
 /// An upload in progress. Dropped while open, it is aborted from a task of its own.
@@ -213,7 +224,7 @@ async fn send(
     len: u64,
     size: u64,
     body: BodyStream,
-    matching: Option<&str>,
+    rule: Rule<'_>,
 ) -> Result<Option<String>, ObjectStoreError> {
     let mut parts = Parts::new(body, len);
     let mut etags = Vec::new();
@@ -223,7 +234,7 @@ async fn send(
         let number = etags.len() + 1;
         etags.push(upload_part(upload, number, part).await?);
     }
-    complete(upload, &etags, matching).await
+    complete(upload, &etags, rule).await
 }
 
 /// UploadPart: answers the part's ETag.
@@ -263,19 +274,20 @@ pub(super) fn part_etag(
     })
 }
 
-/// CompleteMultipartUpload, create-only as `put_new` is when the store claims it, or, given the
-/// tag `matching`, replacing the object that has it (`If-Match`). S3 may answer 200 with an
-/// `<Error>` body: that is a failure too.
+/// CompleteMultipartUpload by `rule`: create-only as `put_new` is when the store claims it,
+/// replacing the object that has a tag (`If-Match`), or with no condition. S3 may answer 200 with
+/// an `<Error>` body: that is a failure too.
 async fn complete(
     upload: &Upload,
     etags: &[String],
-    matching: Option<&str>,
+    rule: Rule<'_>,
 ) -> Result<Option<String>, ObjectStoreError> {
     let request = xml::complete_request(etags);
     let (conn, key, id) = (&upload.conn, &upload.key, &upload.id);
-    match matching {
-        Some(etag) => complete_replacing(conn, key, id, request, etag).await,
-        None => complete_with(conn, key, id, request).await,
+    match rule {
+        Rule::Match(etag) => complete_replacing(conn, key, id, request, etag).await,
+        Rule::Create => complete_with(conn, key, id, request).await,
+        Rule::Replace => complete_plain(conn, key, id, request).await,
     }
 }
 
@@ -307,6 +319,27 @@ pub(super) async fn complete_with(
         StatusCode::OK => completed(resp).await,
         // Asked only of a store that claims conditional writes.
         StatusCode::PRECONDITION_FAILED => Err(ObjectStoreError::AlreadyExists(key.clone())),
+        _ => Err(failure(resp).await),
+    }
+}
+
+/// CompleteMultipartUpload of the upload `id` of `key` with no condition: the object is made
+/// whether the key holds one or not, as a plain PUT is. Gives the `ETag` of the object, quotes
+/// included, if the answer has one.
+async fn complete_plain(
+    conn: &Conn,
+    key: &ObjectKey,
+    id: &str,
+    request: String,
+) -> Result<Option<String>, ObjectStoreError> {
+    let headers = vec![("content-type", "application/xml".to_owned())];
+    let query = [("uploadId", id.to_owned())];
+    let body = Bytes::from(request);
+    let resp = conn
+        .send(Method::POST, Some(key), &query, headers, body)
+        .await?;
+    match resp.status() {
+        StatusCode::OK => completed(resp).await,
         _ => Err(failure(resp).await),
     }
 }

@@ -18,6 +18,7 @@ use futures::StreamExt;
 use futures::stream::{self, BoxStream};
 use reqwest::{Response, StatusCode};
 
+use super::multipart::Rule;
 use super::tagged::{PutAnswer, header, retrying};
 use super::{Conn, S3Store, SINGLE_PUT_MAX, failure, multipart, times, transport};
 use crate::body::Unsized;
@@ -150,7 +151,7 @@ impl S3Store {
             let condition = Some(("if-match", etag.to_owned()));
             self.put_whole(key, len, body, condition).await?
         } else {
-            multipart::put(&self.conn, key, len, body, Some(etag)).await?
+            multipart::put(&self.conn, key, len, body, Rule::Match(etag)).await?
         };
         done.ok_or_else(|| bad(key, "the answer carries no ETag"))
     }
@@ -177,7 +178,7 @@ impl S3Store {
         let done = if self.sends_whole(len) {
             self.put_whole(key, len, body, self.create_only()).await?
         } else {
-            multipart::put(&self.conn, key, len, body, None).await?
+            multipart::put(&self.conn, key, len, body, Rule::Create).await?
         };
         done.ok_or_else(|| bad(key, "the answer carries no ETag"))
     }
@@ -273,7 +274,37 @@ impl S3Store {
                 .put_whole_answered(key, len, body, self.create_only())
                 .await;
         }
-        let etag = multipart::put(&self.conn, key, len, body, None).await?;
+        let etag = multipart::put(&self.conn, key, len, body, Rule::Create).await?;
+        Ok(PutAnswer {
+            etag,
+            modified_millis: None,
+        })
+    }
+
+    /// Writes the object whether the key has one or not (a plain PUT: no `If-None-Match`, no
+    /// `If-Match`), with `len` bytes taken from `body` as they are sent, and gives what the
+    /// answer to the write that made it says, as [`put_stream_new_answered`](Self::put_stream_new_answered)
+    /// does. Works on a store without conditional writes too.
+    ///
+    /// A body of at most [`S3Tuning::single_put_max`](super::S3Tuning::single_put_max) bytes is
+    /// streamed as one PUT; a longer one is a multipart upload whose completion carries no
+    /// condition, so the object appears only in the last request, after the whole body was read,
+    /// and the upload is aborted on any failure. A body that fails or has another length than
+    /// `len` writes nothing. The write is sent once.
+    ///
+    /// # Errors
+    /// The body's error, [`ObjectStoreError::Body`] for a body of another length than `len`, and
+    /// the store's refusal.
+    pub async fn put_stream_replacing_answered(
+        &self,
+        key: &ObjectKey,
+        len: u64,
+        body: BodyStream,
+    ) -> Result<PutAnswer, ObjectStoreError> {
+        if self.sends_whole(len) {
+            return self.put_whole_answered(key, len, body, None).await;
+        }
+        let etag = multipart::put(&self.conn, key, len, body, Rule::Replace).await?;
         Ok(PutAnswer {
             etag,
             modified_millis: None,

@@ -24,9 +24,10 @@ fn landing(config: &mut ProxyConfig) {
     config.emergency_cold_landing = true;
 }
 
-/// A hot tier that takes the first piece of a streamed body, whatever it is, and then answers
-/// `Full`: the refusal of a store that ran out of room while it wrote.
-struct Takes(Arc<dyn Backend>);
+/// A hot tier that answers `Full` to a streamed body: after it took the first piece of it, whatever
+/// it is, if the flag says so (a store that ran out of room while it wrote), else before it took a
+/// byte (a store that has no room to begin with).
+struct Takes(Arc<dyn Backend>, bool);
 
 #[async_trait]
 impl Backend for Takes {
@@ -40,7 +41,9 @@ impl Backend for Takes {
         _len: Option<u64>,
         mut body: PartBody<'_>,
     ) -> Result<String, Error> {
-        let _ = body.next().await;
+        if self.1 {
+            let _ = body.next().await;
+        }
         Err(Error::Full(key.to_owned()))
     }
 
@@ -78,7 +81,13 @@ impl Backend for Takes {
 
 /// A rig whose hot tier is [`Takes`] and whose landing is on.
 async fn taking() -> Rig {
-    let wrap = |hot: Arc<GateBackend>| -> Arc<dyn Backend> { Arc::new(Takes(hot)) };
+    let wrap = |hot: Arc<GateBackend>| -> Arc<dyn Backend> { Arc::new(Takes(hot, true)) };
+    Rig::over(super::plain_put_tests::MARKS_FORMAT, false, landing, wrap).await
+}
+
+/// A rig whose hot tier is [`Takes`] that refuses before it takes a byte, and whose landing is on.
+async fn refusing() -> Rig {
+    let wrap = |hot: Arc<GateBackend>| -> Arc<dyn Backend> { Arc::new(Takes(hot, false)) };
     Rig::over(super::plain_put_tests::MARKS_FORMAT, false, landing, wrap).await
 }
 
@@ -103,6 +112,43 @@ async fn under_the_entry_format_a_replacing_put_creates_only() {
     assert_eq!(put("two").await, Err(Error::AlreadyExists("k".to_owned())));
     assert_eq!(rig.hot_text("k").await.as_deref(), Some("one"));
     assert!(rig.marks_log().is_empty());
+}
+
+/// Asserts what a plain put says of the object it made, for a cache that keeps a copy: under
+/// `active-marks` the answer is the tag of the hot object (the tag a HEAD gives), for a key that
+/// is new and for an overwrite; under the entry format it is the tag of the create. A hot tier
+/// that answers `Full` before it took a byte, with the landing on, lands the object in the cold
+/// tier and the answer has no tag, since that tag moves when the object is copied the other way.
+#[tokio::test]
+async fn a_replacing_put_answers_with_the_tag_of_the_hot_object_and_none_for_a_landing() {
+    let claim = PutClaim::default();
+    for format in [super::plain_put_tests::MARKS_FORMAT, ENTRIES_FORMAT] {
+        let rig = Rig::with(format, |_| {}).await;
+        let answer = rig
+            .proxy
+            .put_stream_replacing("k", Some(3), chunks(&["one"]), &claim)
+            .await;
+        assert_eq!(answer.unwrap().unwrap().tag, rig.hot_tag("k").await);
+        if format == ENTRIES_FORMAT {
+            continue;
+        }
+        let answer = rig
+            .proxy
+            .put_stream_replacing("k", Some(3), chunks(&["two"]), &claim)
+            .await;
+        settle().await;
+        assert_eq!(rig.hot_text("k").await.as_deref(), Some("two"));
+        assert_eq!(answer.unwrap().unwrap().tag, rig.hot_tag("k").await);
+    }
+
+    let rig = refusing().await;
+    let answer = rig
+        .proxy
+        .put_stream_replacing("k", Some(3), chunks(&["new"]), &claim)
+        .await;
+    settle().await;
+    assert_eq!(answer, Ok(None));
+    assert_eq!(rig.cold_text("k").await.as_deref(), Some("new"));
 }
 
 /// Asserts that under the entry format the completion of the trait creates only, too.

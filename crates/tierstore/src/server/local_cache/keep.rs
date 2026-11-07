@@ -1,10 +1,12 @@
-//! The create-only put of a cache that writes through, and the copy of the object it keeps.
+//! The put of a cache that writes through (create-only or plain), and the copy of the object it
+//! keeps.
 //!
 //! A put under a `cache = true` policy is copied into `<path>/.stage/` as its body streams to
 //! the upstream, and once the upstream has it the copy is put in the cache before the put is
 //! answered, so the node reads what it wrote without a fill:
 //!
-//! 1. the upstream's put acknowledges the object;
+//! 1. the upstream's put acknowledges the object (a plain put is sent with no HEAD before it, and
+//!    the cache forgets the key before it and when the upstream has answered, see `put_through`);
 //! 2. the tag and the time of the object are the upstream's answer to the put, if it gives a tag
 //!    (S3's answer to a PUT, or to the completion of a multipart upload, has the `ETag`, which is
 //!    what a HEAD gives; it has no `Last-Modified`, so the time is that of the cache's clock when
@@ -72,6 +74,9 @@
 //!   own entry, whenever the delete comes before the check that follows the insert; a delete
 //!   that finishes before the HEAD makes the HEAD fail. Readers of the key never wait for the
 //!   keep (unlike a fill, which they share): they are answered from the upstream, at once.
+//! - Two puts of one object that run at once, one of them a plain put, keep no copy (counted as
+//!   `deleted`, as a delete is): the order in which the upstream took them is not known here, and
+//!   the first read of the object fills it (see `Writing`, in `write`).
 //! - A multipart upload is not kept: the first read of the object fills it.
 
 use std::future::Future;
@@ -87,11 +92,12 @@ use tokio::sync::{OwnedSemaphorePermit, mpsc};
 use tokio::task::JoinHandle;
 use tokio::time::Instant;
 
-use crate::{Error, Meta, PartBody, PutAnswer};
+use crate::{Error, Meta, PartBody, PutAnswer, PutClaim};
 
 use super::fill::{Filled, Flight, Pending, Published, Reserved, Staged};
 use super::layout::{Name, Sidecar};
 use super::metrics::{SkippedKeep, bump};
+use super::write::Writing;
 use super::{Inner, locked};
 
 /// The chunks of a body that may wait for the disk.
@@ -103,6 +109,19 @@ pub(super) const KEEP_QUEUE: usize = 16;
 /// the chunks the front delivers; the keeps that run at once hold at most `max_concurrent_keeps`
 /// times this, 32 MiB by default.
 pub(super) const KEEP_QUEUE_BYTES: u64 = 4 << 20;
+
+/// How a put is sent to the upstream.
+#[derive(Clone, Copy)]
+pub(super) enum Sent<'a> {
+    /// Create-only (`If-None-Match: *`), for a backend with two tiers to both of them.
+    Creates,
+    /// Create-only, the put that a backend with two tiers writes to its first tier only (see
+    /// [`put_stream_hot_only`](crate::Backend::put_stream_hot_only)).
+    CreatesHotOnly,
+    /// A plain put: the key is replaced where the upstream replaces (see
+    /// [`put_stream_replacing`](crate::Backend::put_stream_replacing)).
+    Replaces(&'a PutClaim),
+}
 
 /// The task that writes the chunks of a body to the stage file, and the way to it.
 pub(super) struct Writer {
@@ -232,6 +251,9 @@ pub(super) struct Keeping {
     /// What the upstream's answer to the put said of the object, and the time of the cache's
     /// clock when it arrived; none if the answer gave no tag.
     answer: Option<(PutAnswer, u64)>,
+    /// The put as the cache registered it, while the keep may still be wanted (see
+    /// [`Writing`]).
+    writing: Option<Writing>,
 }
 
 impl Keeping {
@@ -255,6 +277,7 @@ impl Keeping {
             finished: false,
             digest: String::new(),
             answer: None,
+            writing: None,
         }
     }
 
@@ -328,33 +351,48 @@ pub(super) fn tee<'a>(key: &'a str, body: PartBody<'a>, keeping: &'a mut Keeping
 }
 
 impl Inner {
-    /// Sends a body to the upstream as a create-only put: for `hot_only`, the put that a backend
-    /// with two tiers writes to its first tier only (see
-    /// [`put_stream_hot_only`](crate::Backend::put_stream_hot_only)).
+    /// Sends a body to the upstream as `sent` says.
     async fn send_put(
         &self,
         key: &str,
         len: Option<u64>,
         body: PartBody<'_>,
-        hot_only: bool,
+        sent: Sent<'_>,
     ) -> Result<Option<(PutAnswer, u64)>, Error> {
-        let answer = self
-            .upstream
-            .put_stream_answered(key, len, body, hot_only)
-            .await?;
+        let answer = match sent {
+            Sent::Creates => {
+                let put = self.upstream.put_stream_answered(key, len, body, false);
+                put.await?
+            }
+            Sent::CreatesHotOnly => {
+                let put = self.upstream.put_stream_answered(key, len, body, true);
+                put.await?
+            }
+            Sent::Replaces(claim) => {
+                let put = self.upstream.put_stream_replacing(key, len, body, claim);
+                put.await?
+            }
+        };
         Ok(answer.map(|answer| (answer, self.clock.now())))
     }
 
-    /// A create-only put of a body that arrives as chunks; `hot_only` as for
-    /// [`send_put`](Inner::send_put).
+    /// A put of a body that arrives as chunks, sent as `sent` says.
+    ///
+    /// A plain put goes to the upstream as it is, with no HEAD before it (an overwrite is what it
+    /// is for). The key is forgotten before it is sent and when the upstream has answered, also
+    /// with an error (a timeout, or a 5xx after the commit, may have replaced the object): a
+    /// read that fills between the two reads the old object, and its entry, or the one the cache
+    /// had, goes with the second (see [`forget`](Inner::forget)). Then the new copy is kept like
+    /// that of a create-only put, under the tag of the answer.
     pub(super) async fn put_through(
         self: &Arc<Self>,
         key: &str,
         len: Option<u64>,
         body: PartBody<'_>,
-        hot_only: bool,
+        sent: Sent<'_>,
     ) -> Result<(), Error> {
         self.writable(key)?;
+        let replaces = matches!(sent, Sent::Replaces(_));
         // One HEAD before the body is read (`head_before_put`), for an upstream of two tiers as for
         // any other: a key that only the first tier holds is refused by the proxy's own put, under
         // the entry protocol, only after the whole body has been written to that tier, so the HEAD
@@ -362,7 +400,7 @@ impl Inner {
         // put of a key it holds before it reads the body, and the HEAD is then a read of its own
         // that the put repeats (through such a proxy a hot HEAD, a marker GET and a cold HEAD);
         // with the setting off the put is the upstream's alone.
-        if self.config.head_before_put {
+        if self.config.head_before_put && !replaces {
             match self.upstream.head(key).await {
                 Ok(_) => {
                     bump(&self.counters.write_exists);
@@ -371,6 +409,13 @@ impl Inner {
                 Err(Error::NotFound(_)) => {}
                 Err(other) => return Err(other),
             }
+        }
+        let name = self.cacheable(key);
+        let writing = name
+            .as_ref()
+            .map(|name| self.begin_write(&name.hex, replaces));
+        if replaces {
+            self.forget(key);
         }
         let name = self.cacheable(key);
         let mut keeping = match &name {
@@ -383,14 +428,18 @@ impl Inner {
         let sent = match &mut keeping {
             Some(keeping) => {
                 let teed = tee(key, body, keeping);
-                self.send_put(key, len, teed, hot_only).await
+                self.send_put(key, len, teed, sent).await
             }
-            None => self.send_put(key, len, body, hot_only).await,
+            None => self.send_put(key, len, body, sent).await,
         };
+        if replaces {
+            self.forget(key);
+        }
         match sent {
             Ok(answer) => {
                 if let Some(keeping) = &mut keeping {
                     keeping.answer = answer;
+                    keeping.writing = writing;
                 }
             }
             Err(Error::AlreadyExists(exists)) => {
@@ -469,10 +518,17 @@ impl Inner {
             return;
         };
         let written = (keeping.seen, keeping.digest);
-        if let Err(why) = self
-            .publish_put(key, name, stage, written, keeping.answer)
-            .await
-        {
+        let published = self
+            .publish_put(
+                key,
+                name,
+                stage,
+                written,
+                keeping.answer,
+                keeping.writing.as_ref(),
+            )
+            .await;
+        if let Err(why) = published {
             self.counters.keep_skipped(why);
             self.forget(key);
         }
@@ -528,6 +584,7 @@ impl Inner {
         mut stage: Stage,
         written: (u64, String),
         answer: Option<(PutAnswer, u64)>,
+        writing: Option<&Writing>,
     ) -> Result<(), SkippedKeep> {
         let (size, digest) = written;
         let deadline = Instant::now() + self.config.keep_deadline;
@@ -610,7 +667,10 @@ impl Inner {
         // A delete that finished after the HEAD marked this keep (see `forget`), and may have
         // dropped nothing because the entry was not in yet: the object is gone from the
         // upstream. The mark is looked for after the entry is in the index.
-        if self.is_invalidated(&name.hex) {
+        //
+        // So is another put of the object that ran at the same time as a plain put, which the
+        // upstream may have taken after this one (see `Writing`).
+        if self.is_invalidated(&name.hex) || writing.is_some_and(Writing::overlapped) {
             self.drop_entry(&name.hex);
             return Err(SkippedKeep::Deleted);
         }

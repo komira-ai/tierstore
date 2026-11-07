@@ -22,7 +22,7 @@ use super::entry_put::{landing, retry};
 use super::overwrite::{PlainPut, PutBody, PutClaim};
 use super::pause::WriteRoute;
 use super::put::Offered;
-use crate::{Error, Markers, PartBody};
+use crate::{Error, Markers, PartBody, PutAnswer};
 use bytes::Bytes;
 
 impl Proxy {
@@ -86,34 +86,40 @@ impl Inner {
     /// on), unless `emergency_cold_landing` is on, and then the body goes on to
     /// `Inner::land_in_cold`. A hot tier that took part of the body before it refused it, or a
     /// body that ended with an error, is passed on: those bytes cannot be sent again.
+    ///
+    /// The answer names the object by the content tag the put gives (the hot tier's, which is the
+    /// one a HEAD gives); a landing in the cold tier gives none, since that tag moves when the
+    /// object is copied the other way.
     pub(super) async fn put_replacing(
         &self,
         key: &str,
         len: Option<u64>,
         body: PartBody<'_>,
         claim: &PutClaim,
-    ) -> Result<(), Error> {
+    ) -> Result<Option<PutAnswer>, Error> {
         if !matches!(self.route_write(key).await?, WriteRoute::Marks(_)) {
-            return self
-                .put_object_stream(key, len, body, false)
-                .await
-                .map(drop);
+            return self.put_object_stream(key, len, body, false).await;
         }
         let offered = Offered::new(body);
         let stream = || PutBody::Stream {
             len,
             body: offered.view(),
         };
-        match self.put_plain(key, stream(), claim).await {
+        let put = match self.put_plain(key, stream(), claim).await {
             Err(Error::Full(_))
                 if self.config.emergency_cold_landing
                     && offered.taken() == 0
                     && !offered.failed() =>
             {
-                self.land_in_cold(key, stream()).await.map(drop)
+                self.land_in_cold(key, stream()).await?
             }
-            done => done.map(drop),
-        }
+            done => done?,
+        };
+        // The tag of a landing in the cold tier is not the one a HEAD gives later (`None`).
+        Ok(put.tag.map(|tag| PutAnswer {
+            tag,
+            modified: None,
+        }))
     }
 
     async fn put_plain(

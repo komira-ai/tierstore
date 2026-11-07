@@ -477,10 +477,14 @@ pub trait Backend: Send + Sync {
     /// so that a check the caller makes on it as it passes is made.
     ///
     /// Only a backend that replaces under a rule of its own overrides this; [`Proxy`](crate::Proxy)
-    /// does when its format says `active-marks`, and creates, as before, under every other format.
-    /// The provided implementation is [`Backend::put_stream`], create-only, and ignores `claim`; a
-    /// backend that keeps a copy of what it reads (a cache) must forward the call and forget the
-    /// key.
+    /// does when its format says `active-marks`, and creates, as before, under every other format;
+    /// the S3 backend sends a PUT with no condition. The provided implementation is
+    /// [`Backend::put_stream`], create-only, and ignores `claim`; a backend that keeps a copy of
+    /// what it reads (a cache) must forward the call and forget the key.
+    ///
+    /// The answer is what the write says of the object, as for [`Backend::put_stream_answered`]
+    /// (the tag a HEAD gives for it, `None` where the backend cannot say without another call),
+    /// for a caller that keeps a copy of what it writes.
     ///
     /// # Errors
     /// As [`Backend::put_stream`], except that [`Error::AlreadyExists`] is given only by a backend
@@ -491,8 +495,8 @@ pub trait Backend: Send + Sync {
         len: Option<u64>,
         body: PartBody<'_>,
         _claim: &PutClaim,
-    ) -> Result<(), Error> {
-        self.put_stream(key, len, body).await
+    ) -> Result<Option<PutAnswer>, Error> {
+        self.put_stream(key, len, body).await.map(|()| None)
     }
 
     /// [`Backend::put_tagged`] for a body that arrives as chunks (`len` is the number of bytes it
