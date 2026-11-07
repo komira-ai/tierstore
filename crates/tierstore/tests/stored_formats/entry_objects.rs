@@ -5,6 +5,7 @@ use tierstore::{Entry, EntryOp, EntryState, decode_entry, encode_entry, entry_ke
 const HELD: &[u8] = include_bytes!("fixtures/entry.json");
 const PENDING: &[u8] = include_bytes!("fixtures/entry_pending.json");
 const NEWER: &[u8] = include_bytes!("fixtures/entry_newer.json");
+const BOOTED: &[u8] = include_bytes!("fixtures/entry_booted.json");
 
 fn held() -> Entry {
     Entry {
@@ -15,6 +16,7 @@ fn held() -> Entry {
         owner: Some("node1-b7f3".to_owned()),
         nonce: "node1-b7f3.0".to_owned(),
         created_ms: 1_790_000_000_000,
+        owner_boot: None,
     }
 }
 
@@ -27,6 +29,7 @@ fn pending() -> Entry {
         owner: None,
         nonce: "node1-b7f3.4".to_owned(),
         created_ms: 1_790_000_000_000,
+        owner_boot: None,
     }
 }
 
@@ -60,8 +63,60 @@ fn an_entry_with_an_added_field_operation_and_state_still_reads() {
         owner: Some("node1-b7f3".to_owned()),
         nonce: "node1-b7f3.9".to_owned(),
         created_ms: 1_790_000_000_000,
+        owner_boot: None,
     };
     assert_eq!(decode_entry(NEWER).unwrap(), want);
+}
+
+fn booted() -> Entry {
+    Entry {
+        owner_boot: Some("5e0c1d7a9b3f4c28a6d1e8f07b2c3a49".to_owned()),
+        ..held()
+    }
+}
+
+/// The entry as the release before `owner_boot` defines it: the fields of version 1 and no more, as
+/// serde reads and writes it (an unknown field is ignored).
+#[derive(Debug, PartialEq, serde::Deserialize, serde::Serialize)]
+struct PreviousEntry {
+    v: u32,
+    key: String,
+    op: EntryOp,
+    st: EntryState,
+    owner: Option<String>,
+    nonce: String,
+    created_ms: u64,
+}
+
+/// Asserts that the fixture of a held put that names the boot of its owner reads as that entry, and
+/// that writing the entry gives the bytes of the fixture exactly: `owner_boot` is the last field,
+/// and an entry without an owner boot is written without the field (the two fixtures above).
+#[test]
+fn a_held_put_that_names_the_boot_of_its_owner_reads_and_is_written_as_the_fixture() {
+    assert_eq!(decode_entry(BOOTED).unwrap(), booted());
+    assert_eq!(&encode_entry(&booted())[..], BOOTED);
+}
+
+/// Asserts both directions of a rolling update on the entry body: the release before reads the
+/// entry that names a boot as the same entry (it ignores `owner_boot`), and an entry that release
+/// rewrites, which has no `owner_boot`, reads here as the same entry with the owner's boot not
+/// known.
+#[test]
+fn the_release_before_reads_an_entry_with_an_owner_boot_and_this_one_reads_what_it_writes() {
+    let before: PreviousEntry = serde_json::from_slice(BOOTED).unwrap();
+    let held = held();
+    assert_eq!(
+        (before.v, before.key.as_str(), before.op, before.st),
+        (held.v, held.key.as_str(), held.op, held.st)
+    );
+    assert_eq!(before.owner, held.owner);
+    assert_eq!(
+        (before.nonce.as_str(), before.created_ms),
+        (held.nonce.as_str(), held.created_ms)
+    );
+
+    let rewritten = serde_json::to_vec(&before).unwrap();
+    assert_eq!(decode_entry(&rewritten).unwrap(), held);
 }
 
 /// Asserts the name an entry is kept under for a key of the fixtures: the prefix and the SHA-256 of

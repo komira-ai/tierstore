@@ -1,7 +1,6 @@
 //! The entry reconciler: its gate on the format, the step of each state of an entry, the loop's
-//! waits. The races between a delete and the reconciler, the stray sweep, and the usage and the
-//! eviction are in the three modules below; every race is driven one store call at a time through
-//! a gate, and no test reads a clock or waits on one.
+//! waits. The races, the sweep, the usage, the eviction and the restart are in the modules below;
+//! every race is driven one store call at a time through a gate, and no test reads a clock.
 
 use std::future::Future;
 use std::sync::Arc;
@@ -31,6 +30,8 @@ mod evict;
 mod evict_calls;
 #[path = "entry_reconciler_tests/races.rs"]
 mod races;
+#[path = "entry_reconciler_tests/restart.rs"]
+mod restart;
 #[path = "entry_reconciler_tests/sweep.rs"]
 mod sweep;
 #[path = "entry_reconciler_tests/usage.rs"]
@@ -128,8 +129,7 @@ impl Rig {
 
     /// Registers the proxy `id`, as a heartbeat of it would have.
     async fn register(&self, id: &str) {
-        let body = Bytes::from_static(b"{}");
-        self.hot.put(&proxy_key(id), body).await.unwrap();
+        self.hot.put(&proxy_key(id), bytes("{}")).await.unwrap();
     }
 
     /// Writes the entry of `key` as it is, with a nonce.
@@ -142,6 +142,7 @@ impl Rig {
             owner: owner.map(str::to_owned),
             nonce: "planted".to_owned(),
             created_ms: 0,
+            owner_boot: None,
         };
         self.hot
             .put(&entry_key(key), encode_entry(&entry))
@@ -154,8 +155,7 @@ impl Rig {
     }
 
     async fn shape(&self, key: &str) -> Option<(EntryOp, EntryState, Option<String>)> {
-        let seen = self.entry(key).await?;
-        let entry = seen.entry;
+        let Seen { entry, .. } = self.entry(key).await?;
         Some((entry.op, entry.st, entry.owner))
     }
 

@@ -131,6 +131,8 @@ mod deadline;
 mod deadline_tests;
 mod dir;
 mod entry;
+#[cfg(test)]
+mod entry_body_tests;
 mod entry_reconciler;
 #[cfg(test)]
 mod entry_tests;

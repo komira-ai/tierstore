@@ -96,6 +96,7 @@ pub(super) async fn put_entry(
         owner: owner.map(str::to_owned),
         nonce: "n1".to_owned(),
         created_ms: 7,
+        owner_boot: None,
     };
     hot.put(&entry_key(key), encode_entry(&entry))
         .await

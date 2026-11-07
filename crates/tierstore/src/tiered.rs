@@ -64,6 +64,9 @@ mod overwrite_requests_tests;
 #[cfg(test)]
 mod overwrite_tests;
 mod pause;
+mod peers;
+#[cfg(test)]
+mod peers_tests;
 mod plain_complete;
 mod plain_put;
 #[cfg(test)]
@@ -72,6 +75,8 @@ mod plain_put_tests;
 mod plain_replacing_tests;
 mod put;
 mod read;
+#[cfg(test)]
+mod restart_tests;
 mod uploads;
 #[cfg(test)]
 mod uploads_tests;
@@ -425,7 +430,8 @@ impl Proxy {
         heartbeat.register(hot.as_ref(), &proxy_key(id)).await?;
         #[cfg(feature = "server")]
         tracing::debug!(proxy = %id, "tierstore: proxy opened");
-        let entries = Entries::new(Arc::clone(&hot), id, Arc::clone(&config.clock));
+        let boot = heartbeat.boot.clone();
+        let entries = Entries::with_boot(Arc::clone(&hot), id, Arc::clone(&config.clock), boot);
         let inner = Inner {
             hot,
             cold,
