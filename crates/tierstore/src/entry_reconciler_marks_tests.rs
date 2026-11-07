@@ -27,6 +27,8 @@ mod pages;
 mod passes;
 #[path = "entry_reconciler_marks_tests/reap.rs"]
 mod reap;
+#[path = "entry_reconciler_marks_tests/rollback.rs"]
+mod rollback;
 #[path = "entry_reconciler_marks_tests/tombstone.rs"]
 mod tombstone;
 

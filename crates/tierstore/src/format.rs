@@ -12,6 +12,10 @@
 //! - `drain`: asked for by the operator. A proxy answers every write with
 //!   [`Error::Unavailable`] (a 503 at the S3 front) and keeps serving reads; the reconciler of the
 //!   bridge release applied the journals until each one was applied to its end.
+//! - `drain` over a record that names `marks_bucket`: the pause of a rollback from `active-marks`
+//!   (`tierstore format-epoch --drain`, `docs/design/put-without-lock.md`, 8.2). The leader goes
+//!   on working the markers of that bucket under it and the operator writes `drained` once none is
+//!   left. `--cancel` of it puts `active-marks` back.
 //! - `drained`: written by the reconciler of the bridge release (and no one else) when it holds the
 //!   lease, has seen `drain` for the settle time, and every journal it knows is applied to its end.
 //!   Writes stay paused. This release's reconciler never writes it.
@@ -114,11 +118,22 @@ impl Format {
     }
 
     /// Whether a reconciler has a pass to make under this: it works the entries (`runs_entries`),
-    /// or the phase is `active-marks`, where it works the markers if it has the marks bucket the
-    /// record names.
+    /// or the phase is `active-marks`, or the record is the pause of a rollback
+    /// ([`Format::rolls_back_marks`]); under those two it works the markers if it has the marks
+    /// bucket the record names.
     #[cfg(feature = "server")]
     pub(crate) fn runs_a_pass(&self) -> bool {
-        self.runs_entries() || self.phase == FormatPhase::ActiveMarks
+        self.runs_entries() || self.phase == FormatPhase::ActiveMarks || self.rolls_back_marks()
+    }
+
+    /// Whether this is the pause of a rollback from `active-marks` (`tierstore format-epoch
+    /// --drain` over it): the phase `drain` with the marks bucket still named. Writes are paused,
+    /// and the leader goes on working the markers of that bucket until none is left, so that the
+    /// operator can write `drained` (`docs/design/put-without-lock.md`, 8.2). The pause that
+    /// precedes the activation names no bucket, and the leader does nothing under it.
+    #[cfg(feature = "server")]
+    pub(crate) fn rolls_back_marks(&self) -> bool {
+        self.phase == FormatPhase::Drain && self.marks_bucket.is_some()
     }
 }
 
