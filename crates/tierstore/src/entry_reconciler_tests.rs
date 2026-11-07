@@ -21,6 +21,8 @@ use crate::{
     Step, Take, TestClock, encode_entry, entry_key,
 };
 
+#[path = "entry_reconciler_tests/copy.rs"]
+mod copy;
 #[path = "entry_reconciler_tests/copy_back.rs"]
 mod copy_back;
 #[path = "entry_reconciler_tests/evict.rs"]
@@ -95,11 +97,28 @@ impl Rig {
     }
 
     async fn activate(&self) {
-        let body = format_body(&Format {
-            phase: FormatPhase::Active,
+        self.set_phase(FormatPhase::Active).await;
+    }
+
+    /// The format object of the hot store, replaced by one in `phase` with no epoch.
+    async fn set_phase(&self, phase: FormatPhase) {
+        let format = Format {
+            phase,
             epoch: None,
-        });
+            marks_bucket: None,
+        };
+        self.hot.delete(FORMAT_KEY).await.ok();
+        let body = format_body(&format);
         self.hot.put(FORMAT_KEY, body).await.unwrap();
+    }
+
+    /// One heartbeat of the proxy `id` after `secs` seconds: the clocks move on and its
+    /// registration is written again, so that the reconciler sees it change.
+    async fn beat(&self, id: &str, secs: u64) {
+        self.mono.advance(Duration::from_secs(secs));
+        self.clock.advance(secs * 1000);
+        self.hot.delete(&proxy_key(id)).await.unwrap();
+        self.register(id).await;
     }
 
     /// The calls of the proxy `id`, as its entries.
@@ -191,9 +210,7 @@ async fn nothing_is_done_until_the_format_is_active() {
     let mut r = rig.reconciler();
     assert_eq!(r.step().await, StepReport::default());
     for phase in [FormatPhase::Drain, FormatPhase::Drained] {
-        let body = format_body(&Format { phase, epoch: None });
-        rig.hot.delete(FORMAT_KEY).await.ok();
-        rig.hot.put(FORMAT_KEY, body).await.unwrap();
+        rig.set_phase(phase).await;
         assert_eq!(r.step().await, StepReport::default());
     }
     assert!(!rig.cold_has("k").await);
@@ -402,17 +419,6 @@ async fn a_held_entry_is_waited_for_until_its_owner_has_departed_and_then_reaped
     assert!(rig.cold_has("k").await && rig.entry("k").await.is_none());
 }
 
-impl Rig {
-    /// One heartbeat of the proxy `id` after `secs` seconds: the clocks move on and its
-    /// registration is written again, so that the reconciler sees it change.
-    async fn beat(&self, id: &str, secs: u64) {
-        self.mono.advance(Duration::from_secs(secs));
-        self.clock.advance(secs * 1000);
-        self.hot.delete(&proxy_key(id)).await.unwrap();
-        self.register(id).await;
-    }
-}
-
 /// Asserts that a put left held by a proxy that goes on beating (it could not hand the entry over
 /// when the hot tier failed its write) is waited for until it has stood unchanged for
 /// `held_ttl`, by the reconciler's monotonic clock, and then reaped and copied to the cold tier.
@@ -618,10 +624,9 @@ async fn a_failing_store_call_fails_the_item_and_leaves_the_entry_held() {
     // The tier that fails, the call, and whether the cold tier holds the bytes already (so that
     // the comparison, not the copy, is what is under test).
     let cases = [
-        (false, Op::Head, false),
         (false, Op::Get, false),
-        (true, Op::Head, false),
         (true, Op::Put, false),
+        (true, Op::Head, true),
         (false, Op::Get, true),
         (true, Op::Get, true),
     ];
@@ -729,8 +734,8 @@ async fn a_failing_item_waits_its_own_delay_and_the_delay_doubles() {
     land(&rig, "p1", "k").await;
     let cold = Arc::new(FaultyBackend::new(rig.cold.clone()));
     let unavailable = || Error::Unavailable("cold".to_owned());
-    cold.fail_next_on(Op::Head, "k", unavailable());
-    cold.fail_next_on(Op::Head, "k", unavailable());
+    cold.fail_next_on(Op::Put, "k", unavailable());
+    cold.fail_next_on(Op::Put, "k", unavailable());
     let mut r = rig.over(rig.hot.clone(), cold.clone(), "r1", |_| {});
     assert_eq!(r.step().await.failed.len(), 1);
     assert_eq!(r.step().await.backed_off, 1);

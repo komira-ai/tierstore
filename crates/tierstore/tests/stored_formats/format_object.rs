@@ -2,7 +2,7 @@
 
 use std::time::Duration;
 
-use tierstore::{Error, Proxy, ProxyConfig};
+use tierstore::{Error, Proxy, ProxyConfig, StepReport};
 
 use crate::support::Tiers;
 use tierstore::Backend as _;
@@ -12,6 +12,7 @@ const DRAIN: &[u8] = include_bytes!("fixtures/format_drain.json");
 const DRAINED: &[u8] = include_bytes!("fixtures/format_drained.json");
 const ACTIVE: &[u8] = include_bytes!("fixtures/format_active.json");
 const NEWER: &[u8] = include_bytes!("fixtures/format_newer.json");
+const ACTIVE_MARKS: &[u8] = include_bytes!("fixtures/format_active_marks.json");
 
 /// A proxy that reads the format object before every write.
 async fn eager(tiers: &Tiers) -> Proxy {
@@ -55,4 +56,43 @@ async fn the_fixtures_pause_writes_as_their_phases_say() {
         panic!("{put:?}");
     };
     assert!(text.contains("not live"), "{text}");
+}
+
+/// Asserts that the fixture of the phase `active-marks` (with its epoch 3 and its `marks_bucket`)
+/// pauses no write, and that a proxy that has no marks bucket makes none: a put is answered
+/// `Unavailable` with the text that says writes wait for the active format, as for the fixture of
+/// a newer writer, and nothing is stored in either tier. (A proxy that has the recorded marks
+/// bucket puts on markers: `tiered/marked_put_tests.rs`.)
+#[tokio::test(start_paused = true)]
+async fn the_active_marks_fixture_pauses_nothing_and_makes_no_write() {
+    let tiers = Tiers::new();
+    tiers.seed(FORMAT, ACTIVE_MARKS).await;
+    let proxy = eager(&tiers).await;
+    let put = proxy.put("k", "v".into()).await;
+    let Err(Error::Unavailable(text)) = put else {
+        panic!("{put:?}");
+    };
+    assert!(
+        text.contains("writes wait until the format object says active"),
+        "{text}"
+    );
+    assert!(!text.contains("paused"), "{text}");
+    assert_eq!(tiers.hot_keys("k").await, Vec::<String>::new());
+    assert_eq!(tiers.cold_keys().await, Vec::<String>::new());
+    assert_eq!(tiers.stored(FORMAT).await, ACTIVE_MARKS);
+}
+
+/// Asserts that under the fixture of the phase `active-marks` the entry reconciler does nothing: a
+/// step takes no lease, reads no entry and copies nothing, and reports that the format is not
+/// active, so a release that keeps the entry protocol never works the entries beside the markers.
+#[tokio::test(start_paused = true)]
+async fn the_active_marks_fixture_makes_the_entry_reconciler_do_nothing() {
+    let tiers = Tiers::new();
+    tiers.seed(FORMAT, ACTIVE_MARKS).await;
+    tiers.seed("kept", b"bytes").await;
+    let mut reconciler = tiers.reconciler("r1", 1000);
+    let step = reconciler.step().await;
+    assert_eq!(step, StepReport::default());
+    assert_eq!(tiers.cold_keys().await, Vec::<String>::new());
+    assert_eq!(tiers.hot_keys("").await, ["_tiering/format", "kept"]);
 }

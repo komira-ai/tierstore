@@ -302,7 +302,9 @@ async fn every_call_is_held_under_its_own_kind_and_then_runs() {
     let hot_only = gated.put_stream_hot_only("n4", None, chunks("4"));
     held(gated, Op::Put, hot_only).await;
     let answered = gated.put_stream_answered("n5", Some(1), chunks("5"), false);
-    assert_eq!(held(gated, Op::Put, answered).await, None);
+    let answer = held(gated, Op::Put, answered).await;
+    let written = rig.memory.head("n5").await.unwrap().tag;
+    assert_eq!(answer.map(|answer| answer.tag), Some(written));
 
     let replaced = gated.put_if_match("o", bytes("abd"), &tag);
     let tag = held(gated, Op::PutIfMatch, replaced).await;
@@ -348,6 +350,19 @@ async fn every_call_is_held_under_its_own_kind_and_then_runs() {
     )
     .await;
     assert_eq!(rig.memory.get("u", None).await.unwrap(), bytes("p1p2"));
+
+    let tag_u = rig.memory.head("u").await.unwrap().tag;
+    let over = held(gated, Op::CreateUpload, gated.create_upload("u")).await;
+    let part = gated.upload_part("u", &over, 1, chunks("q1"));
+    let tag_q = held(gated, Op::UploadPart, part).await;
+    let parts = [(1, tag_q)];
+    held(
+        gated,
+        Op::CompleteUpload,
+        gated.complete_upload_if_match("u", &over, &parts, &tag_u),
+    )
+    .await;
+    assert_eq!(rig.memory.get("u", None).await.unwrap(), bytes("q1"));
 
     let aborted = held(gated, Op::CreateUpload, gated.create_upload("v")).await;
     let open = held(gated, Op::ListUploads, gated.list_uploads("", None, 10)).await;

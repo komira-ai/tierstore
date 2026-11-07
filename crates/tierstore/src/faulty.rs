@@ -35,7 +35,7 @@ pub enum Op {
     CreateUpload,
     /// [`Backend::upload_part`].
     UploadPart,
-    /// [`Backend::complete_upload`].
+    /// [`Backend::complete_upload`] and [`Backend::complete_upload_if_match`].
     CompleteUpload,
     /// [`Backend::abort_upload`].
     AbortUpload,
@@ -97,6 +97,12 @@ struct Plan {
 pub struct FaultyBackend {
     inner: Arc<dyn Backend>,
     plan: Mutex<Plan>,
+    /// What this wrapper says is the longest object its backend writes in one request, in place
+    /// of the answer of the wrapped backend.
+    single_put_max: Option<u64>,
+    /// Whether an answer to a streamed write is passed on without the tag the backend gave: a
+    /// store whose answer to a write has none.
+    untagged: bool,
 }
 
 impl FaultyBackend {
@@ -106,7 +112,25 @@ impl FaultyBackend {
         Self {
             inner,
             plan: Mutex::new(Plan::default()),
+            single_put_max: None,
+            untagged: false,
         }
+    }
+
+    /// This wrapper saying that its backend writes an object of more than `max` bytes in
+    /// several requests ([`Backend::single_put_max`]), whatever the backend says.
+    #[must_use]
+    pub fn with_single_put_max(mut self, max: u64) -> Self {
+        self.single_put_max = Some(max);
+        self
+    }
+
+    /// This wrapper giving no tag with the answer to a streamed write
+    /// ([`Backend::put_stream_answered`]), as a store does whose answer has none.
+    #[must_use]
+    pub fn without_answers(mut self) -> Self {
+        self.untagged = true;
+        self
     }
 
     /// Fails the next `count` calls of kind `op` with [`Error::Unavailable`], in place of the
@@ -249,6 +273,10 @@ impl Backend for FaultyBackend {
         self.inner.needs_length()
     }
 
+    fn single_put_max(&self) -> Option<u64> {
+        self.single_put_max.or_else(|| self.inner.single_put_max())
+    }
+
     fn same_version(&self, a: &Meta, b: &Meta) -> bool {
         self.inner.same_version(a, b)
     }
@@ -284,9 +312,11 @@ impl Backend for FaultyBackend {
         hot_only: bool,
     ) -> Result<Option<PutAnswer>, Error> {
         self.enter(Op::Put, key).await?;
-        self.inner
+        let answer = self
+            .inner
             .put_stream_answered(key, len, body, hot_only)
-            .await
+            .await?;
+        Ok(answer.filter(|_| !self.untagged))
     }
 
     /// As `put_stream`, a call of kind [`Op::Put`].
@@ -414,6 +444,19 @@ impl Backend for FaultyBackend {
     ) -> Result<String, Error> {
         self.enter(Op::CompleteUpload, key).await?;
         self.inner.complete_upload(key, id, parts).await
+    }
+
+    /// A conditional completion is a call of kind [`Op::CompleteUpload`], as a completion is.
+    async fn complete_upload_if_match(
+        &self,
+        key: &str,
+        id: &str,
+        parts: &[(u32, String)],
+        etag: &str,
+    ) -> Result<String, Error> {
+        self.enter(Op::CompleteUpload, key).await?;
+        let inner = &self.inner;
+        inner.complete_upload_if_match(key, id, parts, etag).await
     }
 
     async fn abort_upload(&self, key: &str, id: &str) -> Result<(), Error> {

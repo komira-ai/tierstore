@@ -559,6 +559,7 @@ put 403.
 | `local_cache.forget_limit` | the most keys a read-only cache remembers it deleted or replaced through the upstream (1 to 100000000, default 65536); past it the cache is emptied when it takes the lock |
 | `local_cache.fill_chunk` | the bytes a fill reads from the upstream at a time (4KiB to 1GiB, default `8MiB`) |
 | `local_cache.keep_queue_bytes` | the most bytes of a put's body that may wait for the disk before its copy is dropped (1 byte to 1GiB, default `4MiB`) |
+| `local_cache.revalidate_after` | how old a hit may be (since its entry was filled or last checked) before one HEAD to the upstream checks it, comparing the version and never reading the body; unset, the default, never checks, and `0s` checks every hit. A changed or missing object drops the entry and the read goes upstream; a HEAD that fails serves the cached copy and is logged and counted |
 | `cold_store.endpoints` | a list of exactly one endpoint, in place of `endpoint`: several are refused as not supported yet, since the cache reads from one upstream |
 
 `[cold_store]` is the upstream: any `kind` (an `s3` bucket, with `endpoint` and a `credentials_file`

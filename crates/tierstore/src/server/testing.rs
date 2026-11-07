@@ -463,3 +463,18 @@ pub(crate) async fn established_unaccepted(at: std::net::SocketAddr, tries: usiz
     }
     established + 1
 }
+
+/// An address of this host other than 127.0.0.1, for a configured address beside the loopback
+/// one: 127.0.0.2 on Linux, where all of 127.0.0.0/8 is loopback.
+#[cfg(target_os = "linux")]
+pub(crate) fn beside_loopback() -> std::net::IpAddr {
+    std::net::IpAddr::from([127, 0, 0, 2])
+}
+
+/// An address of this host other than 127.0.0.1, for a configured address beside the loopback
+/// one: `::1` where 127.0.0.1 is the only IPv4 loopback address (macOS). Its socket is IPv6
+/// only, so 127.0.0.1 on the same port is still added and still free ([`super::listen::bind_set`]).
+#[cfg(not(target_os = "linux"))]
+pub(crate) fn beside_loopback() -> std::net::IpAddr {
+    std::net::IpAddr::from(std::net::Ipv6Addr::LOCALHOST)
+}

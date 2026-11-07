@@ -10,6 +10,11 @@ pub enum Error {
     /// A create-only put on a key that exists.
     #[error("object {0} already exists")]
     AlreadyExists(String),
+    /// A create-only put on a key that a delete is removing, or has removed by the time the
+    /// answer is decided: neither "exists" nor "created", and a retry gets the true answer (an S3
+    /// 409 `ConditionalRequestConflict`).
+    #[error("object {0} is being deleted or was deleted while the put was decided")]
+    Conflict(String),
     /// A put that replaces an object only if it has a given content tag, and the object has
     /// another.
     #[error("object {0} does not have the expected content tag")]
@@ -43,6 +48,14 @@ pub enum Error {
     /// that does not override them.
     #[error("not supported: {0}")]
     Unsupported(String),
+    /// The key is held by another writer, or by a call of this one whose outcome is not known (the
+    /// text says which, and names the key), and the call did not wait for it any longer: a lock
+    /// that outlasted `lock_wait`, or one kept until a call that may still land cannot. Nothing of
+    /// the call is visible; a retry after a moment may succeed. The S3 front answers it `SlowDown`
+    /// with `Retry-After`, as a throttle is answered, though it is not one
+    /// (`docs/design/put-without-lock.md`, 5.2).
+    #[error("busy: {0}")]
+    SlowDown(String),
     /// The backend did not answer (down, timed out, refused the connection). Retrying later
     /// may succeed.
     #[error("backend unavailable: {0}")]

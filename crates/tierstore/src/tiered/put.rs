@@ -9,7 +9,8 @@ use futures::stream;
 use tokio::sync::Mutex as AsyncMutex;
 
 use super::Inner;
-use crate::{Error, PartBody};
+use super::pause::WriteRoute;
+use crate::{Error, PartBody, PutAnswer};
 use futures::StreamExt;
 
 /// The body of a streamed put, which more than one tier may be offered in turn: a view of it is
@@ -71,20 +72,25 @@ impl<'a> Offered<'a> {
 impl Inner {
     /// Puts a held body on the entry of `key`.
     pub(super) async fn put_object(&self, key: &str, body: Bytes) -> Result<(), Error> {
-        self.admit_write(key).await?;
-        self.put_held_on_entry(key, body).await
+        match self.route_write(key).await? {
+            WriteRoute::Entries => self.put_held_on_entry(key, body).await,
+            WriteRoute::Marks(markers) => self.put_held_marked(markers, key, body).await,
+        }
     }
 
     /// As `put_object`, for a body that arrives as chunks: it goes to the hot tier, or to the
-    /// cold tier where the hot tier is full, without being held.
+    /// cold tier where the hot tier is full, without being held. Gives the hot tier's answer to
+    /// the write, if the object went there and the answer says what a HEAD of it gives.
     pub(super) async fn put_object_stream(
         &self,
         key: &str,
         len: Option<u64>,
         body: PartBody<'_>,
         hot_only: bool,
-    ) -> Result<(), Error> {
-        self.admit_write(key).await?;
-        self.put_streamed_on_entry(key, len, body, hot_only).await
+    ) -> Result<Option<PutAnswer>, Error> {
+        match self.route_write(key).await? {
+            WriteRoute::Entries => self.put_streamed_on_entry(key, len, body, hot_only).await,
+            WriteRoute::Marks(markers) => self.put_streamed_marked(markers, key, len, body).await,
+        }
     }
 }

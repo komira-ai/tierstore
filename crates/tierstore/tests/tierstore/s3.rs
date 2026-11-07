@@ -16,7 +16,7 @@ use tierstore::{Backend, ByteRange, Error, PartBody, ProxyConfig, S3Backend, Sys
 use crate::conformance;
 use crate::list_parts::contract as parts_contract;
 use crate::list_uploads::contract as uploads_contract;
-use crate::multipart::{contract, large};
+use crate::multipart::{conditional_contract, contract, large};
 use crate::support::{body, keys, page};
 use futures::StreamExt;
 use std::io::Read;
@@ -446,6 +446,19 @@ async fn the_s3_backend_does_multipart_uploads() {
     assert_eq!(s3.stats().completed, 2);
 }
 
+/// Asserts that the S3 backend completes an upload over an existing object only if the object has
+/// the tag named, held to the same checks as the in-memory and the directory backend, with the
+/// tags without quotes; the completion that succeeds was sent with `If-Match`, and every upload
+/// the checks left open was aborted.
+#[tokio::test]
+async fn the_s3_backend_completes_an_upload_over_the_object_with_the_tag() {
+    let (s3, backend) = backend().await;
+    s3.set_min_part_bytes(0);
+    conditional_contract(&backend).await;
+    assert_eq!(s3.incomplete_uploads(), 0);
+    assert_eq!(s3.stats().completed, 1);
+}
+
 /// Asserts that the S3 backend lists the open uploads of the service as the trait says, held to
 /// the same checks as the in-memory and the directory backend (ListMultipartUploads with the
 /// prefix, the page size and the two markers), that the time of a start is the service's in
@@ -795,7 +808,11 @@ async fn a_proxy_needs_the_length_of_a_body_when_either_tier_is_s3() {
     let (_s3, s3) = backend().await;
     assert!(s3.needs_length());
     assert!(!tierstore::MemoryBackend::new().needs_length());
+    assert_eq!(s3.single_put_max(), Some(5 << 30));
+    assert_eq!(tierstore::MemoryBackend::new().single_put_max(), None);
     let s3: Arc<dyn Backend> = Arc::new(s3);
+    let cached = tierstore::CachedStore::new(s3.clone(), 1000);
+    assert_eq!(cached.single_put_max(), Some(5 << 30));
     let memory = || -> Arc<dyn Backend> { Arc::new(tierstore::MemoryBackend::new()) };
     let open = |hot: Arc<dyn Backend>, cold: Arc<dyn Backend>| async move {
         let clock = Arc::new(SystemClock);
@@ -806,4 +823,70 @@ async fn a_proxy_needs_the_length_of_a_body_when_either_tier_is_s3() {
     assert!(open(memory(), s3.clone()).await.needs_length());
     assert!(open(s3.clone(), memory()).await.needs_length());
     assert!(!open(memory(), memory()).await.needs_length());
+}
+
+/// Asserts that a streamed put through the proxy over an S3 hot tier is answered with the tag the
+/// hot tier gave the object, which a HEAD through the proxy then gives, whether the length of the
+/// body is told or not; that the in-memory hot tier answers with the tag of the bytes it wrote,
+/// which a HEAD through the proxy gives too; and that the same put with `hot_only` written to the
+/// hot tier is answered as well.
+#[tokio::test]
+async fn a_streamed_put_through_the_proxy_is_answered_with_the_tag_of_the_hot_object() {
+    let (_s3, hot) = backend().await;
+    let cold: Arc<dyn Backend> = Arc::new(tierstore::MemoryBackend::new());
+    let proxy = crate::support::open_live(
+        Arc::new(hot),
+        cold,
+        ProxyConfig::new("p1", 1 << 20, Arc::new(SystemClock)),
+    )
+    .await
+    .unwrap();
+    for (key, len, hot_only) in [("told", Some(3), false), ("hot-only", Some(3), true)] {
+        let chunks: PartBody<'static> = stream::once(async { Ok(body("abc")) }).boxed();
+        let answer = proxy.put_stream_answered(key, len, chunks, hot_only);
+        let answer = answer.await.unwrap().unwrap();
+        assert_eq!(answer.tag, proxy.head(key).await.unwrap().tag, "{key}");
+    }
+    assert_eq!(read_text(&proxy, "told").await, "abc");
+
+    let proxy = crate::support::open_live(
+        Arc::new(tierstore::MemoryBackend::new()),
+        Arc::new(tierstore::MemoryBackend::new()),
+        ProxyConfig::new("p2", 1 << 20, Arc::new(SystemClock)),
+    )
+    .await
+    .unwrap();
+    let chunks: PartBody<'static> = stream::once(async { Ok(body("abc")) }).boxed();
+    let said = proxy
+        .put_stream_answered("k", Some(3), chunks, false)
+        .await
+        .unwrap()
+        .unwrap();
+    assert_eq!(said.tag, proxy.head("k").await.unwrap().tag);
+    assert_eq!(read_text(&proxy, "k").await, "abc");
+}
+
+/// Asserts that a streamed put that the proxy writes to the cold tier because the hot tier is full
+/// is answered with no tag: the tag of a HEAD of the object is the cold tier's while the hot tier
+/// lacks it and changes when the object is copied back, so the answer says nothing.
+#[tokio::test]
+async fn a_streamed_put_to_the_cold_tier_through_the_proxy_gives_no_answer() {
+    let (_s3, hot) = backend().await;
+    let usage = r#"{"hot_bytes":1048576,"copy_lag":0,"time":0}"#;
+    hot.put("_tiering/usage", body(usage)).await.unwrap();
+    let clock = Arc::new(tierstore::TestClock::new());
+    let cold: Arc<dyn Backend> = Arc::new(tierstore::MemoryBackend::new());
+    let config = ProxyConfig::new("p1", 1 << 20, clock);
+    let proxy = crate::support::open_live(Arc::new(hot), cold.clone(), config)
+        .await
+        .unwrap();
+    let chunks: PartBody<'static> = stream::once(async { Ok(body("abc")) }).boxed();
+    let landed = proxy.put_stream_answered("k", Some(3), chunks, false).await;
+    assert_eq!(landed, Ok(None));
+    assert_eq!(cold.get("k", None).await.unwrap(), body("abc"));
+}
+
+/// The text of the object under `key`.
+async fn read_text(backend: &dyn Backend, key: &str) -> String {
+    crate::support::text(backend, key).await
 }

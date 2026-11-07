@@ -29,7 +29,7 @@ use super::pause::{self, Pause};
 use super::{Inner, Proxy, locked};
 use crate::deadline::millis;
 use crate::lease::new_nonce;
-use crate::registration::{PROTO, Registration};
+use crate::registration::{PROTO, PROTO_MARKS, Registration};
 use crate::{Backend, Bounded, Clock, Deadline, Error, ProxyConfig, Sleeper};
 
 /// Where the heartbeat of a proxy is.
@@ -48,6 +48,9 @@ enum State {
 /// What a proxy keeps of its heartbeat.
 pub(super) struct Heartbeat {
     pub(super) deadline: Arc<Deadline>,
+    /// The `proto` of every body of the registration: [`PROTO_MARKS`] for a proxy that reads
+    /// markers (it has a marks bucket), [`PROTO`] for one that does not.
+    pub(super) proto: u32,
     /// Random at the start of the process, in every body of its registration.
     pub(super) boot: String,
     state: Mutex<State>,
@@ -60,6 +63,11 @@ impl Heartbeat {
                 Arc::clone(&config.mono),
                 config.deadline_margin,
             )),
+            proto: if config.marks.is_some() {
+                PROTO_MARKS
+            } else {
+                PROTO
+            },
             boot: new_nonce(),
             state: Mutex::new(State::Idle),
         }
@@ -67,8 +75,14 @@ impl Heartbeat {
 
     /// The registration of a process that has not beaten yet.
     pub(super) fn first_body(&self) -> Bytes {
-        let (proto, boot, hb) = (PROTO, self.boot.clone(), 0);
-        Registration { proto, boot, hb }.encode()
+        Registration {
+            proto: self.proto,
+            boot: self.boot.clone(),
+            hb: 0,
+            phase: None,
+            writes_in_flight: None,
+        }
+        .encode()
     }
 
     /// Writes this process's registration at open: create-only. One that exists is left as it is,
@@ -94,6 +108,7 @@ impl Heartbeat {
 struct Beater {
     hot: Bounded,
     key: String,
+    proto: u32,
     boot: String,
     mono: Arc<dyn Clock>,
     deadline: Arc<Deadline>,
@@ -126,8 +141,14 @@ impl Beater {
     async fn beat(&mut self) -> Result<(), Error> {
         let sent = self.mono.now();
         let count = self.count + 1;
-        let (proto, boot, hb) = (PROTO, self.boot.clone(), count);
-        let body = Registration { proto, boot, hb }.encode();
+        let body = Registration {
+            proto: self.proto,
+            boot: self.boot.clone(),
+            hb: count,
+            phase: None,
+            writes_in_flight: None,
+        }
+        .encode();
         let tag = match self.etag.take() {
             Some(etag) => self.hot.put_if_match(&self.key, body, &etag).await?,
             None => self.adopt(body).await?,
@@ -192,6 +213,7 @@ impl Proxy {
         let beater = Beater {
             hot: Bounded::new(Arc::clone(&inner.hot), config.heartbeat),
             key: crate::journal::proxy_key(&config.proxy_id),
+            proto: inner.heartbeat.proto,
             boot: inner.heartbeat.boot.clone(),
             mono: Arc::clone(&config.mono),
             deadline: Arc::clone(&inner.heartbeat.deadline),

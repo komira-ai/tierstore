@@ -28,7 +28,8 @@
 //! listing, goes to the upstream as it is.
 //!
 //! - A hit (HEAD, GET, ranged GET of an object that is in the cache) is answered from the disk
-//!   and makes no call to the upstream.
+//!   and makes no call to the upstream, unless [`CacheConfig::revalidate_after`] is set and the
+//!   entry is older than it: then one HEAD checks the entry first (module `revalidate`).
 //! - A miss on a whole GET fills the object. A miss on a ranged GET fills the whole object if it
 //!   is at most 64 MiB, and otherwise passes the range through and keeps nothing. A HEAD of an
 //!   object that is not kept goes to the upstream and fills nothing.
@@ -122,6 +123,7 @@ mod keep;
 pub(super) mod layout;
 mod listing;
 mod metrics;
+mod revalidate;
 mod scrub;
 mod selfcheck;
 mod stream;
@@ -155,6 +157,8 @@ mod lost_tests;
 mod read_only_tasks_tests;
 #[cfg(test)]
 mod read_only_tests;
+#[cfg(test)]
+mod revalidate_tests;
 #[cfg(test)]
 mod scrub_tests;
 #[cfg(test)]
@@ -206,6 +210,7 @@ use hold::{Hold, Standing};
 use index::Index;
 use layout::{Name, data_path, name_of};
 use metrics::{add, bump};
+use revalidate::Verdict;
 use stream::eager;
 
 /// The most an uncached object may be, for a ranged read of it to fill the whole of it.
@@ -306,6 +311,10 @@ pub struct CacheConfig {
     /// The most pages of the upstream one listing reads to make up for the names it leaves out.
     /// At least one (0 is read as 1).
     pub listing_calls: u32,
+    /// How old a hit may be, since its entry was filled or last checked, before it is checked
+    /// against the upstream with one HEAD (see the module `revalidate`). `None`, the default,
+    /// never checks: a hit is served from the disk until the entry is evicted.
+    pub revalidate_after: Option<Duration>,
 }
 
 impl CacheConfig {
@@ -334,6 +343,7 @@ impl CacheConfig {
             lock_interval: LOCK_INTERVAL,
             scrub_tick: SCRUB_TICK,
             listing_calls: listing::LISTING_CALLS,
+            revalidate_after: None,
         }
     }
 
@@ -447,7 +457,9 @@ fn index_of(mut found: Vec<layout::Found>) -> Index {
     let mut index = Index::default();
     for found in found {
         let sidecar = found.sidecar;
-        index.insert(&found.hex, sidecar.size, sidecar.tag, sidecar.modified);
+        // Found on the disk: how long ago the upstream last held this version is not known.
+        let (size, tag, modified) = (sidecar.size, sidecar.tag, sidecar.modified);
+        index.insert(&found.hex, (size, tag, modified), None);
     }
     index
 }
@@ -768,6 +780,9 @@ impl Backend for LocalCache {
         let Some(name) = inner.cacheable(key) else {
             return passed(range).await;
         };
+        // An old hit is checked first. An entry that is not the upstream's any more is dropped
+        // by the check, and the read below is a miss.
+        drop(inner.revalidate(key, &name).await);
         if let Some(body) = inner.open_kept(&name, range, true).await? {
             return Ok(body);
         }
@@ -799,9 +814,19 @@ impl Backend for LocalCache {
         let inner = &self.inner;
         let name = inner.cacheable(key);
         let kept = name.as_ref().and_then(|name| inner.kept(name));
-        match (kept, name) {
-            (Some(meta), Some(name)) if inner.unchanged(&name, &meta).await => Ok(meta),
-            _ => inner.upstream.head(key).await,
+        let (Some(meta), Some(name)) = (kept, name) else {
+            return inner.upstream.head(key).await;
+        };
+        // The check of an old hit is the HEAD that answers when the object is not the one kept.
+        match inner.revalidate(key, &name).await {
+            Verdict::Changed(found) => return Ok(found),
+            Verdict::Gone => return Err(Error::NotFound(key.to_owned())),
+            Verdict::Serve => {}
+        }
+        if inner.unchanged(&name, &meta).await {
+            Ok(meta)
+        } else {
+            inner.upstream.head(key).await
         }
     }
 
