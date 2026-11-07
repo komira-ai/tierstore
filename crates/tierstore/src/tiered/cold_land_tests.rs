@@ -6,10 +6,10 @@
 
 use std::time::Duration;
 
-use super::marked_put_tests::{
+use super::overwrite::PlainPut;
+use super::plain_put_tests::{
     MARKS_FORMAT, Rig, Shape, held, marker, settle, streamed, until_parked,
 };
-use super::overwrite::PlainPut;
 use crate::{
     Error, MarkMove, MarkerState, MarkerWhy, Markers, MarkersConfig, Op, Phase, RecordingSleeper,
 };

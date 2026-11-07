@@ -579,7 +579,8 @@ pub(super) fn open_tier(
 }
 
 /// The second handle on the hot store, for its marks bucket: the tier `cli.hot_marks` names, with
-/// the endpoint, region and credentials of the hot tier. Only `Proxy::put_plain` and `Proxy::land_in_cold` use it, and no server code calls those yet. A bucket
+/// the endpoint, region and credentials of the hot tier. The proxy calls it only while the format
+/// object says `active-marks` and records [`marks_name`]. A bucket
 /// of an S3 store is reached when it is first used, so this asks the store nothing; a `dir` hot
 /// tier has none yet (`None`): opening its directory beside the hot one makes it, and a unit with
 /// `ProtectSystem=strict` and the hot directory alone in `ReadWritePaths=` could not, so the
@@ -594,6 +595,12 @@ pub(super) fn open_marks(cli: &Cli, timeout: Duration) -> Result<Option<Arc<dyn 
     let spec = &cli.hot_marks;
     let marks = open_tier("--hot", spec, &cli.hot_s3(), timeout, &cli.s3_client)?;
     Ok(Some(marks))
+}
+
+/// The name of the marks bucket the format object records for the tier `spec`: the bucket of an
+/// `s3:<bucket>`, and the text of any other form.
+pub(super) fn marks_name(spec: &str) -> String {
+    spec.strip_prefix("s3:").unwrap_or(spec).to_owned()
 }
 
 /// Refuses `false` as the conditional-delete setting of a `memory` or `dir:<path>` tier, which
@@ -733,6 +740,7 @@ pub(super) fn build(cli: &Cli) -> Result<Built, Error> {
     let marks = open_marks(cli, timeout)?;
     let mut proxy = ProxyConfig::new(&cli.proxy_id, cli.hot_bytes, Arc::clone(&clock));
     proxy.marks = marks;
+    proxy.marks_name = Some(marks_name(&cli.hot_marks));
     proxy.critical = share(cli.critical);
     let tuning = &cli.hot_tuning;
     proxy.usage_refresh = tuning.usage_refresh;

@@ -104,7 +104,7 @@ async fn a_fill_that_commits_between_the_steps_of_a_reservation_is_counted() {
     let first = inner.reserve(50).expect("room for the first");
     let commit = || {
         let name = name_of("cas/b/first");
-        locked(&inner.index).insert(&name.hex, 50, "tag".to_owned(), 0);
+        locked(&inner.index).insert(&name.hex, (50, "tag".to_owned(), 0), None);
         drop(first);
     };
     assert!(inner.reserve_between(50, commit).is_none());
@@ -129,7 +129,7 @@ fn tight(name: &str) -> Rig {
 /// Puts an object of `size` bytes in the index of the rig, as a fill that committed does.
 fn commit_object(rig: &Rig, key: &str, size: u64) {
     let name = name_of(key);
-    locked(&rig.cache.inner.index).insert(&name.hex, size, "tag".to_owned(), 0);
+    locked(&rig.cache.inner.index).insert(&name.hex, (size, "tag".to_owned(), 0), None);
 }
 
 /// Asserts that a reservation is refused for the objects in the index, for the fills that run, and

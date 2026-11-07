@@ -78,6 +78,12 @@ fn each_failure_of_the_store_has_its_status_and_code() {
         None,
     );
     check(
+        Error::Conflict(k()),
+        409,
+        "ConditionalRequestConflict",
+        None,
+    );
+    check(
         Error::Full(k()),
         503,
         "SlowDown",

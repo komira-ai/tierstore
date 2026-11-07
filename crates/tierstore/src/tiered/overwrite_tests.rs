@@ -6,10 +6,10 @@
 
 use std::time::Duration;
 
-use super::marked_put_tests::{
+use super::overwrite::{PlainPut, PutBody, PutClaim};
+use super::plain_put_tests::{
     Rig, Shape, body, chunks, held, marker, settle, streamed, until_parked,
 };
-use super::overwrite::{PlainPut, PutBody, PutClaim};
 use crate::Backend;
 use crate::{
     Error, MarkMove, MarkerState, MarkerWhy, Markers, MarkersConfig, Meta, Op, Phase,
@@ -248,7 +248,7 @@ async fn an_overwrite_whose_lock_write_loses_reads_the_marker_again_and_decides_
 /// client is told to retry, with the object as it was.
 #[tokio::test]
 async fn an_overwrite_gives_up_when_the_marker_keeps_changing() {
-    let rig = Rig::with(super::marked_put_tests::MARKS_FORMAT, |config| {
+    let rig = Rig::with(super::plain_put_tests::MARKS_FORMAT, |config| {
         config.entry_rounds = 1;
     })
     .await;

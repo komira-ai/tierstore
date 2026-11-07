@@ -18,8 +18,10 @@
 //!   not an HTTP date is ignored, as S3 does;
 //! - PutObject, which only ever creates: `If-None-Match: *` is what a client sends, and a put
 //!   without it is create-only too, because the proxy keeps objects immutable. A key that
-//!   exists is `PreconditionFailed`. `If-Match` is answered `PreconditionFailed` for another
-//!   content tag and `NotImplemented` for the right one (an immutable object cannot be
+//!   exists is `PreconditionFailed`, except that under the format phase `active-marks`
+//!   (`docs/design/put-without-lock.md`, 5.1) a key that a delete is removing, or has just
+//!   removed, is 409 `ConditionalRequestConflict`. `If-Match` is answered `PreconditionFailed` for
+//!   another content tag and `NotImplemented` for the right one (an immutable object cannot be
 //!   replaced);
 //! - DeleteObject, which succeeds for a key that is not there, and DeleteObjects (`POST
 //!   /<bucket>?delete`, up to 1000 keys, `Quiet`, `Content-MD5` or an `x-amz-checksum-*` header
@@ -274,6 +276,7 @@ mod config_cache_tuning;
 mod config_combined;
 mod config_entry;
 mod config_handoff;
+mod config_hot_only;
 mod config_interface;
 mod config_io;
 mod config_load;
@@ -391,6 +394,8 @@ mod idle_tests;
 mod key_rules_tests;
 #[cfg(test)]
 mod list_delimiter_tests;
+#[cfg(test)]
+mod list_marks_tests;
 #[cfg(test)]
 mod list_objects_v1_tests;
 #[cfg(test)]

@@ -1,19 +1,34 @@
 //! The pause of writes: the proxy reads `_tiering/format` (at most once for each
 //! [`ProxyConfig::format_refresh`](super::ProxyConfig::format_refresh)) before each write and
 //! answers it with [`Error::Unavailable`] while the format pauses writes, and until it says
-//! `{"epoch": 2, "phase": "active"}`, from when a write is made on the entry of its key. Reads are
-//! never paused. It keeps too whether the format says `active-marks`, which only the plain puts of
-//! `marked_put.rs` ask: the writes of the [`Backend`](crate::Backend) trait do not.
+//! `{"epoch": 2, "phase": "active"}`, from when a write is made on the entry of its key, or
+//! `{"phase": "active-marks", "marks_bucket": ...}`, from when a put is made on the marker of its
+//! key (`marked_put.rs`). Reads are never paused; a read that misses the hot tier reads the phase
+//! from the same kept answer (`mark_reads.rs`). Which of the two a put takes is decided here, once
+//! for the put, from the one read of the format object: [`WriteRoute`].
 
-use std::sync::Mutex;
+use std::sync::{Arc, Mutex};
 use std::time::Duration;
 
 use tokio::sync::Mutex as AsyncMutex;
 use tokio::time::Instant;
 
 use super::{Inner, locked, refuse_reserved};
-use crate::format::{Format, read_format};
+use crate::format::{Format, FormatPhase, read_format};
+use crate::marks::Markers;
 use crate::{Backend, Error};
+
+/// What the proxy knows of the phase of the format object.
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
+pub(super) enum Known {
+    /// No read of the object has succeeded yet.
+    #[default]
+    Unread,
+    /// The last read that succeeded found no object.
+    Missing,
+    /// The last read that succeeded found this phase.
+    Phase(FormatPhase),
+}
 
 /// What the proxy last read of the format object.
 #[derive(Default)]
@@ -24,36 +39,75 @@ pub(super) struct Pause {
     paused: bool,
     /// Whether the last object read says that writes are made on entries. Kept when a read fails.
     entries: bool,
-    /// Whether the last object read says that writes are made on markers, and if so the
-    /// `marks_bucket` it names. Kept when a read fails.
-    marks: Option<Option<String>>,
-}
-
-/// What the proxy knows of the format object at one moment.
-struct FormatState {
-    paused: bool,
-    entries: bool,
-    /// `Some` when the phase is `active-marks`, with the marks bucket the record names.
-    marks: Option<Option<String>>,
+    /// The phase the last object read says. Kept when a read fails.
+    phase: Known,
+    /// The marks bucket the last object read says writes are made in, if it says that they are
+    /// made on markers (`active-marks` at epoch 3 or later, with the bucket named). Kept when a
+    /// read fails.
+    marks: Option<String>,
 }
 
 impl Pause {
-    fn state(&self) -> FormatState {
-        FormatState {
-            paused: self.paused,
-            entries: self.entries,
-            marks: self.marks.clone(),
-        }
-    }
-
     /// Keeps what `format` (none if there is no object) says.
     fn keep(&mut self, format: Option<&Format>) {
         self.paused = format.is_some_and(Format::pauses_writes);
         self.entries = format.is_some_and(Format::runs_entries);
-        self.marks = format
-            .filter(|format| format.runs_marks())
-            .map(|format| format.marks_bucket.clone());
+        self.phase = format.map_or(Known::Missing, |format| Known::Phase(format.phase));
+        self.marks = format.and_then(Format::runs_marks).map(str::to_owned);
     }
+
+    fn state(&self) -> FormatState {
+        FormatState {
+            paused: self.paused,
+            entries: self.entries,
+            phase: self.phase,
+            marks: self.marks.clone(),
+        }
+    }
+}
+
+/// What a read of the format object, kept for up to `format_refresh`, says to a proxy.
+#[derive(Clone, Debug)]
+pub(super) struct FormatState {
+    /// Writes are paused (`drain` or `drained`).
+    pub(super) paused: bool,
+    /// Writes are made on entries (`active` at epoch 2 or later).
+    pub(super) entries: bool,
+    /// The phase the object names.
+    pub(super) phase: Known,
+    /// The format opens writes on markers, in this marks bucket.
+    pub(super) marks: Option<String>,
+}
+
+impl FormatState {
+    /// Whether a read that missed the hot tier reads the marker of its key
+    /// (`docs/design/put-without-lock.md`, 5.7). It does in every phase from which a marker can be
+    /// in force or can still be being run to completion (`drain`, `drained`, `active-marks`, and a
+    /// phase this release does not know), and when no read of the object has succeeded yet, so
+    /// that a proxy that cannot see the format does not serve the cold copy of a deleted key. It
+    /// does not when the object is missing or says `active`: the entry protocol is in force, no
+    /// marker exists, and the marks bucket need not.
+    pub(super) fn reads_markers(&self) -> bool {
+        !matches!(
+            self.phase,
+            Known::Missing | Known::Phase(FormatPhase::Active)
+        )
+    }
+}
+
+/// The refusal of a write that waits for the format to say `active` at epoch 2.
+fn waits_for_entries() -> Error {
+    let why = "writes wait until the format object says active at epoch 2 \
+               (tierstore format-epoch --activate); reads are served";
+    Error::Unavailable(why.to_owned())
+}
+
+/// How a write of a key is made, from the format object.
+pub(super) enum WriteRoute<'a> {
+    /// On the entry of the key (`entry_put.rs`).
+    Entries,
+    /// On the marker of the key (`marked_put.rs`), by the calls of these markers.
+    Marks(&'a Arc<Markers>),
 }
 
 /// Reads the format object of `hot` now, within `limit`, and keeps what it says as a read of a write
@@ -84,23 +138,56 @@ pub(super) async fn refresh(
 }
 
 impl Inner {
-    /// Checks that a write of `key` may go on: the key is not reserved, writes are not paused, and
-    /// the format says that writes are made on entries.
-    pub(super) async fn admit_write(&self, key: &str) -> Result<(), Error> {
+    /// Checks that a write of `key` may go on and says how it is made: the key is not reserved,
+    /// writes are not paused, and the format says either that writes are made on entries, or
+    /// `active-marks` with the marks bucket this proxy has.
+    pub(super) async fn route_write(&self, key: &str) -> Result<WriteRoute<'_>, Error> {
         refuse_reserved(key)?;
-        let FormatState {
-            paused, entries, ..
-        } = self.format_state().await;
-        if paused {
+        let state = self.format_state().await;
+        if state.paused {
             let why = "writes are paused while the store changes format; retry later";
             return Err(Error::Unavailable(why.to_owned()));
         }
-        if !entries {
-            let why = "writes wait until the format object says active at epoch 2 \
-                       (tierstore format-epoch --activate); reads are served";
-            return Err(Error::Unavailable(why.to_owned()));
+        if let Some(recorded) = state.marks {
+            return self.marks_route(&recorded);
         }
-        Ok(())
+        if !state.entries {
+            return Err(waits_for_entries());
+        }
+        Ok(WriteRoute::Entries)
+    }
+
+    /// The route of a write under `active-marks`, for a format that records the marks bucket
+    /// `recorded`: marks if this proxy has the markers of that bucket, and else a refusal, so
+    /// that two names are never in use at once.
+    fn marks_route(&self, recorded: &str) -> Result<WriteRoute<'_>, Error> {
+        let mine = self.config.marks_name.as_deref();
+        match (&self.markers, mine) {
+            (Some(markers), Some(mine)) if mine == recorded => Ok(WriteRoute::Marks(markers)),
+            // A proxy with no marks bucket does not act on the phase: its refusal is the one it
+            // always gave.
+            (None, _) => Err(waits_for_entries()),
+            _ => {
+                let why = format!(
+                    "the format record puts the markers in the bucket {recorded:?}, which is not \
+                     this proxy's marks bucket ({mine:?}); writes are refused until \
+                     hot_store.marks_bucket is the recorded one"
+                );
+                #[cfg(feature = "server")]
+                tracing::warn!("tierstore: {why}");
+                Err(Error::Unavailable(why))
+            }
+        }
+    }
+
+    /// Checks that a write of `key` that only the entry protocol makes (a delete) may go on: as
+    /// [`Inner::route_write`], and the route is the entries. Under `active-marks` it is refused as
+    /// for any phase that is not active, since no delete is made on markers yet.
+    pub(super) async fn admit_write(&self, key: &str) -> Result<(), Error> {
+        match self.route_write(key).await? {
+            WriteRoute::Entries => Ok(()),
+            WriteRoute::Marks(_) => Err(waits_for_entries()),
+        }
     }
 
     /// Whether the format says `active`, so that a read of a cold object asks for a copy-back on
@@ -109,24 +196,8 @@ impl Inner {
         self.format_state().await.entries
     }
 
-    /// `None` unless the format says `active-marks` (as of a read of the format object that is at
-    /// most `format_refresh` old; nothing a proxy does under another format depends on it).
-    /// Otherwise whether the marks bucket the record names is the one this proxy was configured
-    /// with (`ProxyConfig::marks_bucket`). A proxy with no configured name
-    /// compares nothing; one with a name refuses a record that names another bucket or none.
-    pub(super) async fn marks_bucket_agrees(&self) -> Option<bool> {
-        let named = self.format_state().await.marks?;
-        Some(
-            self.config
-                .marks_bucket
-                .as_ref()
-                .is_none_or(|own| named.as_ref() == Some(own)),
-        )
-    }
-
-    /// Whether writes are paused, whether they are made on entries and whether they are made on
-    /// markers, as of a read of the format object that is at most `format_refresh` old.
-    async fn format_state(&self) -> FormatState {
+    /// What the format object says, as of a read of it that is at most `format_refresh` old.
+    pub(super) async fn format_state(&self) -> FormatState {
         if let Some(state) = self.fresh_format_state() {
             return state;
         }

@@ -7,6 +7,10 @@ use crate::{Backend, Error, Listed};
 
 impl Inner {
     pub(super) async fn list_objects(&self, prefix: &str) -> Result<Vec<Listed>, Error> {
+        if let Some(markers) = self.markers_for_listing().await {
+            // One page as long as the listing: each tier reads on until its listing ends.
+            return self.list_marked(markers, prefix, None, usize::MAX).await;
+        }
         let mut in_hot = self.hot.list(prefix).await?;
         in_hot.retain(is_data);
         let mut in_cold = self.cold.list(prefix).await?;
@@ -20,6 +24,11 @@ impl Inner {
         start_after: Option<&str>,
         max_keys: usize,
     ) -> Result<Vec<Listed>, Error> {
+        if let Some(markers) = self.markers_for_listing().await {
+            return self
+                .list_marked(markers, prefix, start_after, max_keys)
+                .await;
+        }
         let in_hot = data_page(self.hot.as_ref(), prefix, start_after, max_keys).await?;
         let in_cold = data_page(self.cold.as_ref(), prefix, start_after, max_keys).await?;
         Ok(merge(in_hot, in_cold, max_keys))
@@ -29,7 +38,7 @@ impl Inner {
 /// The first `max_keys` objects of the listing of `tier` after `start_after`, without the
 /// objects under the reserved prefixes: pages of the tier are read until enough objects
 /// are left or the listing ends.
-async fn data_page(
+pub(super) async fn data_page(
     tier: &dyn Backend,
     prefix: &str,
     start_after: Option<&str>,

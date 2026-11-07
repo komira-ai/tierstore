@@ -15,6 +15,8 @@
 use std::sync::Arc;
 
 use super::entry_put::landing;
+use super::marked_put::cold_upload;
+use super::pause::WriteRoute;
 use super::{Inner, Level, refuse_reserved};
 use crate::journal::is_reserved;
 use crate::{Backend, Error, OpenUpload, PartBody, UploadedPart, UploadsAfter};
@@ -24,12 +26,12 @@ use crate::{Backend, Error, OpenUpload, PartBody, UploadedPart, UploadsAfter};
 pub(super) const HOT_PREFIX: &str = "ts-hot~";
 
 /// The tier an upload id names, and the id the tier knows.
-enum Route<'a> {
+pub(super) enum Route<'a> {
     Hot(&'a str),
     Cold(&'a str),
 }
 
-fn route(id: &str) -> Route<'_> {
+pub(super) fn route(id: &str) -> Route<'_> {
     match id.strip_prefix(HOT_PREFIX) {
         Some(inner) => Route::Hot(inner),
         None => Route::Cold(id),
@@ -64,7 +66,14 @@ fn starts(after: Option<UploadsAfter<'_>>) -> (Start, Start) {
 impl Inner {
     /// Starts an upload of `key`: in the hot tier unless it is full, where the cold tier takes it.
     pub(super) async fn start_upload(&self, key: &str) -> Result<String, Error> {
-        self.admit_write(key).await?;
+        if matches!(self.route_write(key).await?, WriteRoute::Marks(_)) {
+            // Whatever the level: a put at `Full` is written to the hot tier (marked_put.rs).
+            return self
+                .hot
+                .create_upload(key)
+                .await
+                .map(|id| format!("{HOT_PREFIX}{id}"));
+        }
         if self.level().await < Level::Full {
             match self.hot.create_upload(key).await {
                 Ok(id) => return Ok(format!("{HOT_PREFIX}{id}")),
@@ -87,8 +96,9 @@ impl Inner {
         len: Option<u64>,
         body: PartBody<'_>,
     ) -> Result<String, Error> {
-        self.admit_write(key).await?;
+        let marks = matches!(self.route_write(key).await?, WriteRoute::Marks(_));
         match route(id) {
+            Route::Cold(_) if marks => Err(cold_upload(key)),
             Route::Hot(inner) => {
                 let sent = self.hot.upload_part_with_len(key, inner, number, len, body);
                 self.note_full(sent.await)
@@ -110,7 +120,13 @@ impl Inner {
         id: &str,
         parts: &[(u32, String)],
     ) -> Result<String, Error> {
-        self.admit_write(key).await?;
+        let markers = match self.route_write(key).await? {
+            WriteRoute::Marks(markers) => Some(markers),
+            WriteRoute::Entries => None,
+        };
+        if let Some(markers) = markers {
+            return self.complete_marked(markers, key, id, parts).await;
+        }
         let (tier, id, hot) = match route(id) {
             Route::Hot(inner) => (&self.hot, inner, true),
             Route::Cold(id) => (&self.cold, id, false),

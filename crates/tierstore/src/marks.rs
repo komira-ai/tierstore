@@ -2,8 +2,11 @@
 //! compare-and-swap, read, remove, wait for a lock to end, and keep a lock alive
 //! (`docs/design/put-without-lock.md`, sections 4.3 and 5.2). The body of a marker is the module
 //! `marker`; the marker of K is the object named exactly K in the marks bucket of the hot store,
-//! which is the [`Backend`] handed to [`Markers::new`]. Only the plain puts of the proxy
-//! (`tiered/overwrite.rs`, `tiered/cold_land.rs`) call it, and no server code calls those yet.
+//! which is the [`Backend`] handed to [`Markers::new`]. The puts of the proxy call it, and only
+//! while `_tiering/format` says `active-marks` (`tiered/marked_put.rs`: create, read, change by a
+//! compare-and-swap, wait, remove), and so do its plain puts (`tiered/overwrite.rs`,
+//! `tiered/cold_land.rs`), which no server code calls yet; the lock calls of the delete, the
+//! refresh and `may_destroy` are for the pull requests that take locks.
 //!
 //! - [`MarkBirth`] is the marker a create-only write makes where none exists (M1, M3, M10, M12).
 //! - [`MarkMove`] is a transition of a marker that exists (M2, M4, M4', M5 to M7, M9, M11, M13 and
@@ -471,6 +474,23 @@ impl Markers {
             )));
         }
         Ok(Some(MarkSeen { marker, tag }))
+    }
+
+    /// The names of the markers whose key starts with `prefix` and sorts after `after`, at most
+    /// `max_keys`, in key order: a page of the listing of the marks bucket, with the `prefix` and
+    /// `after` of the client's own listing (the marker of K is named K). A page of fewer than
+    /// `max_keys` names is the last.
+    ///
+    /// # Errors
+    /// The backend's error for a failed listing.
+    pub async fn names(
+        &self,
+        prefix: &str,
+        after: Option<&str>,
+        max_keys: usize,
+    ) -> Result<Vec<String>, Error> {
+        let page = self.marks.list_page(prefix, after, max_keys).await?;
+        Ok(page.into_iter().map(|listed| listed.key).collect())
     }
 
     /// Creates the marker of `key` as `birth` says, create-only.
