@@ -17,7 +17,10 @@
 //! - A `CLEARING` is removed: no one writes it but its owner, and its owner has either stopped or
 //!   is this leader's earlier pass.
 //!
-//! A marker whose owner lives and whose lease has not run out is left, and counted as pinned.
+//! A marker whose owner lives and whose lease has not run out is left, and counted as pinned. So is
+//! a `LOCK` of the leader's own holder (the lock of one of its eviction and copy-back passes, or of
+//! a pass of a process of the same name that died) until its lease has run out: the holder of the
+//! leader is no proxy, has no registration, and would otherwise count as departed at once.
 
 use super::EntryReconciler;
 use super::marks::{Look, MarkSide, Marked};
@@ -41,16 +44,18 @@ impl EntryReconciler {
                 .departed(owner, registered, self.config.departure)
         });
         let own = owner == Some(self.config.base.holder.as_str());
-        let dead = departed || look.expired;
         if marker.st == MarkerState::Clearing {
-            if !(own || dead) {
+            if !(own || departed || look.expired) {
                 return Ok(Marked::Pinned);
             }
             self.require_lease().await?;
             side.markers.remove_departed(a).await?;
             return Ok(Marked::Reaped);
         }
-        if !dead {
+        // The lock of this leader's own holder is one of its passes' (an eviction or a copy-back
+        // whose hot write was left open): the leader has no registration, so it never counts as
+        // departed, and only the lease of the lock ends it.
+        if !(look.expired || (departed && !own)) {
             return Ok(Marked::Pinned);
         }
         self.require_lease().await?;

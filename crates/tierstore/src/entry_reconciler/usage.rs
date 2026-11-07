@@ -83,6 +83,14 @@ pub(super) struct Books {
     pub(super) evicting: bool,
 }
 
+impl Books {
+    /// Asks for the next listing no later than `at` on the monotonic clock: the eviction left
+    /// candidates alone that a later listing will offer again.
+    pub(super) fn rescan_by(&mut self, at: u64) {
+        self.scan_at = self.scan_at.map(|due| due.min(at));
+    }
+}
+
 /// What the calls that run on the pool tell the step, which only a `&self` can reach.
 #[derive(Default)]
 pub(super) struct Tally {

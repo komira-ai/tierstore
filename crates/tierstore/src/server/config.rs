@@ -459,6 +459,7 @@ pub(super) struct TierTable {
     pub orphan_after: Option<Dur>,
     pub tombstone_hold: Option<Dur>,
     pub lock_lease: Option<Dur>,
+    pub evict_min_age: Option<Dur>,
     #[serde(default)]
     pub emergency_cold_landing: Option<bool>,
     #[serde(default)]
