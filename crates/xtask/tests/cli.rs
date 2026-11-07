@@ -410,7 +410,7 @@ fn release_plan_reads_the_version_file_and_the_freeze_and_appends_its_outputs() 
     put(
         &d,
         &format!("repos/{REPO}/compare/v0.3.1...{COMMIT}"),
-        "{\"status\":\"ahead\",\"files\":[{\"filename\":\"Cargo.lock\"}],\"commits\":[{\"commit\":{\"message\":\"fix a thing (#9)\"}}]}",
+        "{\"status\":\"ahead\",\"merge_base_commit\":{\"sha\":\"fedcba9876543210fedcba9876543210fedcba98\"},\"files\":[{\"filename\":\"Cargo.lock\"}],\"commits\":[{\"commit\":{\"message\":\"fix a thing (#9)\"}}]}",
     );
     // The build run recorded the version it built under, as `release version --record` and
     // artifacts.yml's upload name it.

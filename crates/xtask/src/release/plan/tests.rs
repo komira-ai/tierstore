@@ -7,6 +7,8 @@ use crate::testdir::TestDir;
 
 const COMMIT: &str = "0123456789abcdef0123456789abcdef01234567";
 const REPO: &str = "example/tierstore";
+/// The commit of the highest release tag: `COMMIT`'s first parent in `repo`.
+const BASE: &str = "fedcba9876543210fedcba9876543210fedcba98";
 
 fn scratch(name: &str) -> TestDir {
     let beside = std::env::current_exe().expect("test binary");
@@ -105,12 +107,17 @@ fn repo(tags: &[&str], status: &str, files: &[&str], messages: &[&str]) -> FakeG
     ];
     let compared = json!({
         "status": status,
+        "merge_base_commit": { "sha": BASE },
         "files": files.iter().map(|f| json!({ "filename": f })).collect::<Vec<_>>(),
         "commits": messages
             .iter()
             .map(|m| json!({ "commit": { "message": m } }))
             .collect::<Vec<_>>(),
     });
+    api.push((
+        format!("repos/{REPO}/commits/{COMMIT}"),
+        json!({ "sha": COMMIT, "parents": [{ "sha": BASE }] }),
+    ));
     for tag in tags.iter().chain(&["v0.3.1"]) {
         let path = compare_path(tag);
         if !api.iter().any(|(p, _)| *p == path) {

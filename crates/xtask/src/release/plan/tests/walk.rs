@@ -65,9 +65,15 @@ fn history(history: &[Pushed], extra: &[&str], files: &[&str]) -> FakeGh {
             })
         })
         .collect();
+    let base = history.last().map_or(String::new(), |c| c.parent.clone());
     for (index, c) in history.iter().enumerate() {
+        api.push((
+            format!("repos/{REPO}/commits/{}", c.sha),
+            json!({ "sha": c.sha, "parents": [{ "sha": c.parent }] }),
+        ));
         let compared = json!({
             "status": "ahead",
+            "merge_base_commit": { "sha": base },
             "files": files.iter().map(|f| json!({ "filename": f })).collect::<Vec<_>>(),
             "commits": listed[index..].iter().rev().cloned().collect::<Vec<_>>(),
         });
@@ -227,8 +233,8 @@ fn a_commit_a_merge_brought_in_is_not_judged() {
 }
 
 #[test]
-fn the_walk_judges_twenty_commits_and_says_how_many_older_it_left() {
-    // Catches: an unbounded walk (three API calls a commit, on every run), and a cut that is
+fn the_walk_judges_twenty_commits_and_says_it_left_older_ones() {
+    // Catches: an unbounded walk (four API calls a commit, on every run), and a cut that is
     // not reported.
     let chain: Vec<String> = std::iter::once(COMMIT.to_owned())
         .chain((1..=24).rev().map(sha))
@@ -240,7 +246,13 @@ fn the_walk_judges_twenty_commits_and_says_how_many_older_it_left() {
         .collect();
     let gh = history(&commits, &[], &["crates/tierstore/src/lib.rs"]);
     let (_, written) = plan_tip(&gh, "walk-limit");
-    assert!(written.ends_with("; 5 older not judged\n"), "{written}");
+    assert!(
+        written.ends_with(&format!(
+            "{}: no successful push run of artifacts.yml on main yet; older commits not judged\n",
+            chain[19]
+        )),
+        "{written}"
+    );
     assert!(asked(&gh, &chain[19]), "{:?}", gh.asked.borrow());
     assert!(
         !gh.asked
@@ -349,4 +361,83 @@ fn the_version_is_recorded_in_the_file_the_build_uploads() {
     );
     let e = version(&gh, REPO, None, None, Some(&dir.join("missing/version"))).expect_err("dir");
     assert!(e.to_string().contains("missing/version"), "{e}");
+}
+
+#[test]
+fn the_walk_reads_each_parent_so_a_long_compare_never_hides_the_newest_commits() {
+    // GitHub lists a compare's commits oldest first and cuts the list short (30 a page), so with
+    // many commits after the tag the tip and its parents are not in it.
+    // Catches: a walk that follows parents through the compare's list, which would judge the tip
+    // alone and leave a ready parent unreleased.
+    let mut gh = history(
+        &[
+            pushed(COMMIT, &sha(2), None, false),
+            pushed(&sha(2), &sha(1), Some("0.3.56"), true),
+        ],
+        &[],
+        &["crates/tierstore/src/lib.rs"],
+    );
+    for (_, v) in &mut gh.api {
+        if v.get("status").is_some() {
+            v["commits"] = json!([{ "sha": sha(40), "commit": { "message": "oldest" } }]);
+        }
+    }
+    let (printed, _) = plan_tip(&gh, "walk-long");
+    assert_eq!(printed[0], format!("release v0.3.56 of {}", sha(2)));
+}
+
+#[test]
+fn a_root_commit_ends_the_walk() {
+    // A history with no parent above the tag (the tag is on another line GitHub still calls an
+    // ancestor). Catches: a missing parent read as a commit to judge.
+    let mut gh = history(
+        &[pushed(COMMIT, &sha(1), None, false)],
+        &[],
+        &["Cargo.lock"],
+    );
+    let path = format!("repos/{REPO}/commits/{COMMIT}");
+    for (p, v) in &mut gh.api {
+        if *p == path {
+            v["parents"] = json!([]);
+        }
+        if v.get("status").is_some() {
+            v["merge_base_commit"]["sha"] = json!(sha(5));
+        }
+    }
+    let (_, written) = plan_tip(&gh, "walk-root");
+    assert!(written.starts_with("release=false\n"), "{written}");
+    assert!(!written.contains("not judged"), "{written}");
+}
+
+#[test]
+fn a_parent_github_does_not_know_or_a_compare_without_its_base_is_an_error() {
+    // Catches: an unknown commit on main's history, or a compare that does not name the tag's
+    // commit, taken for the end of the walk (a plan that silently judges less than it says).
+    let mut gh = history(
+        &[
+            pushed(COMMIT, &sha(2), None, false),
+            pushed(&sha(2), &sha(1), Some("0.3.56"), true),
+        ],
+        &[],
+        &["Cargo.lock"],
+    );
+    gh.api
+        .retain(|(p, _)| *p != format!("repos/{REPO}/commits/{COMMIT}"));
+    let e = plan(&gh, &request(None, "", None)).expect_err("unknown");
+    assert_eq!(e.to_string(), format!("GitHub does not know {COMMIT}"));
+    let mut gh = history(
+        &[pushed(COMMIT, &sha(1), None, false)],
+        &[],
+        &["Cargo.lock"],
+    );
+    for (_, v) in &mut gh.api {
+        if let Some(map) = v.as_object_mut() {
+            map.remove("merge_base_commit");
+        }
+    }
+    let e = plan(&gh, &request(None, "", None)).expect_err("base");
+    assert_eq!(
+        e.to_string(),
+        format!("GitHub's compare names no commit for {TAG}")
+    );
 }

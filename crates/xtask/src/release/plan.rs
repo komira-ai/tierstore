@@ -53,8 +53,9 @@ const TAG_REFS_LIMIT: usize = 100;
 /// The most commit titles a release note lists.
 const NOTE_TITLES: usize = 20;
 
-/// The most commits of the first-parent history a plan judges, newest first. A commit further
-/// back was built before the twenty newer ones, so under a version no newer than theirs: when
+/// The most commits of the first-parent history a plan judges, newest first (each is read from
+/// GitHub on its own, so a long compare, which GitHub lists oldest first and cuts short, never
+/// hides the newest). A commit further back was built before the twenty newer ones, so under a version no newer than theirs: when
 /// none of them is ready, it is not either, or its release is carried by a newer commit's.
 const WALK_LIMIT: usize = 20;
 
@@ -255,27 +256,21 @@ fn changes(compared: &Value, tag: &str, commit: &str) -> Result<Changes, Error> 
     )))
 }
 
-/// The first-parent history of `tip` that `compared` (`tag...tip`, ahead) lists, newest first:
-/// `tip`, its first parent, and so on while the compare lists the commit. The tag's commit is
-/// not listed, so the walk ends above it (or earlier, where GitHub cut a long compare short).
-/// A commit a merge brought in is not on it: it was never the tip of `main`, so it has no push
-/// run.
-fn first_parents(compared: &Value, tip: &str) -> Vec<String> {
-    let listed = compared["commits"]
-        .as_array()
-        .map_or(&[][..], Vec::as_slice);
-    let parent = |sha: &str| {
-        listed
-            .iter()
-            .find(|c| c["sha"] == sha)
-            .and_then(|c| c["parents"][0]["sha"].as_str())
-            .filter(|p| listed.iter().any(|c| c["sha"] == *p))
-    };
-    let mut chain = vec![tip.to_owned()];
-    while let Some(next) = chain.last().and_then(|c| parent(c)) {
-        chain.push(next.to_owned());
-    }
-    chain
+/// The first parent of `commit`, from GitHub; none for a root commit. A commit GitHub does not
+/// know is an error: every commit asked is on the history of the tip of `main`.
+fn parent_of(gh: &dyn Gh, repo: &str, commit: &str) -> Result<Option<String>, Error> {
+    let found = gh
+        .api(&format!("repos/{repo}/commits/{commit}"))?
+        .ok_or_else(|| Error::Failed(format!("GitHub does not know {commit}")))?;
+    Ok(found["parents"][0]["sha"].as_str().map(str::to_owned))
+}
+
+/// The commit `compared` (`tag...tip`, ahead) says the tag is: the walk ends above it.
+fn base_of(compared: &Value, tag: &str) -> Result<String, Error> {
+    compared["merge_base_commit"]["sha"]
+        .as_str()
+        .map(str::to_owned)
+        .ok_or_else(|| Error::Failed(format!("GitHub's compare names no commit for {tag}")))
 }
 
 /// The version the push run `run` of [`BUILD_WORKFLOW`] built its binary under, from the name
@@ -400,46 +395,63 @@ pub fn plan(gh: &dyn Gh, request: &Request) -> Result<Vec<String>, Error> {
     }
     let latest = latest_tag(gh, repo)?;
     let tag = next_tag(latest.as_deref(), version)?;
-    let (chain, tip_compared) = match &latest {
-        None => (vec![tip.to_owned()], None),
+    // The tag's commit, where the walk ends, and the tip's compare, kept for the tip's note.
+    let (base, tip_compared) = match &latest {
+        None => (None, None),
         Some(latest) => {
             let compared = compare(gh, repo, latest, tip)?;
             if !ahead(&compared, latest, tip)? {
                 return skip(output, format!("{latest} already covers {tip}"));
             }
-            (first_parents(&compared, tip), Some(compared))
+            (Some(base_of(&compared, latest)?), Some(compared))
         }
     };
+    // The first-parent history, newest first, one commit at a time: a commit a merge brought in
+    // was never the tip of main and is not on it.
     let mut passed = Vec::new();
-    for commit in chain.iter().take(WALK_LIMIT) {
-        if let Some(reason) = not_ready(gh, repo, commit, &tag)? {
+    let mut commit = tip.to_owned();
+    let mut cut = false;
+    loop {
+        if let Some(reason) = not_ready(gh, repo, &commit, &tag)? {
             passed.push(format!("{commit}: {reason}"));
-            continue;
+            let Some(base) = &base else { break };
+            match parent_of(gh, repo, &commit)? {
+                Some(parent) if parent != *base => {
+                    if passed.len() == WALK_LIMIT {
+                        cut = true;
+                        break;
+                    }
+                    commit = parent;
+                    continue;
+                }
+                _ => break,
+            }
         }
         let Some(latest) = &latest else {
             return release(
                 output,
                 &tag,
-                commit,
+                &commit,
                 &format!("The push run of {commit} on {MAIN}."),
             );
         };
         let compared = match tip_compared {
             Some(compared) if commit == tip => compared,
-            _ => compare(gh, repo, latest, commit)?,
+            _ => compare(gh, repo, latest, &commit)?,
         };
-        return match changes(&compared, latest, commit)? {
+        return match changes(&compared, latest, &commit)? {
             Changes::Released => skip(output, format!("{latest} already covers {commit}")),
             Changes::Docs => skip(
                 output,
                 format!("only docs changed since {latest}: nothing in a release differs"),
             ),
-            Changes::Code(note) => release(output, &tag, commit, &note),
+            Changes::Code(note) => release(output, &tag, &commit, &note),
         };
     }
-    let unjudged = match chain.len().saturating_sub(WALK_LIMIT) {
-        0 => String::new(),
-        n => format!("; {n} older not judged"),
+    let unjudged = if cut {
+        "; older commits not judged"
+    } else {
+        ""
     };
     skip(
         output,
