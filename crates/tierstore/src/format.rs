@@ -116,6 +116,7 @@ impl Format {
     /// Whether a reconciler has a pass to make under this: it works the entries (`runs_entries`),
     /// or the phase is `active-marks`, where it works the markers if it has the marks bucket the
     /// record names.
+    #[cfg(feature = "server")]
     pub(crate) fn runs_a_pass(&self) -> bool {
         self.runs_entries() || self.phase == FormatPhase::ActiveMarks
     }
