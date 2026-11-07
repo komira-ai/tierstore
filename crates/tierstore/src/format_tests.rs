@@ -3,7 +3,9 @@
 use bytes::Bytes;
 
 use crate::faulty::{FaultyBackend, Op};
-use crate::format::{Format, FormatPhase, format_body, read_format, read_format_tagged};
+use crate::format::{
+    Format, FormatPhase, format_body, marks_run_in, read_format, read_format_tagged,
+};
 use crate::journal::FORMAT_KEY;
 use crate::{Backend, Error, MemoryBackend};
 
@@ -145,6 +147,47 @@ fn only_active_marks_runs_marks() {
         let format = decoded(json);
         assert_eq!(format.runs_marks(), runs, "{json}");
     }
+}
+
+/// Asserts that a leader's pass over markers is active only for the phase `active-marks` at epoch 3
+/// or later with the record naming the bucket the pass was given, and that `marks_run_in` reads it
+/// from the hot tier: no object, another phase, a phase this release does not know, no epoch, an
+/// epoch below 3, no name and another name are false, and a hot tier that fails the read is that
+/// error.
+#[tokio::test]
+async fn only_active_marks_naming_the_passes_bucket_runs_the_markers() {
+    for (json, runs) in [
+        (
+            r#"{"epoch":3,"phase":"active-marks","marks_bucket":"m"}"#,
+            true,
+        ),
+        (
+            r#"{"epoch":4,"phase":"active-marks","marks_bucket":"m"}"#,
+            true,
+        ),
+        (r#"{"phase":"active-marks","marks_bucket":"m"}"#, false),
+        (
+            r#"{"epoch":2,"phase":"active-marks","marks_bucket":"m"}"#,
+            false,
+        ),
+        (r#"{"epoch":3,"phase":"active-marks"}"#, false),
+        (
+            r#"{"epoch":3,"phase":"active-marks","marks_bucket":"n"}"#,
+            false,
+        ),
+        (r#"{"epoch":3,"phase":"active","marks_bucket":"m"}"#, false),
+        (r#"{"phase":"drained","marks_bucket":"m"}"#, false),
+        (r#"{"phase":"someday","marks_bucket":"m"}"#, false),
+    ] {
+        let hot = MemoryBackend::new();
+        hot.put(FORMAT_KEY, Bytes::from(json)).await.unwrap();
+        assert_eq!(marks_run_in(&hot, "m").await, Ok(runs), "{json}");
+    }
+    let empty = MemoryBackend::new();
+    assert_eq!(marks_run_in(&empty, "m").await, Ok(false));
+    let corrupt = MemoryBackend::new();
+    corrupt.put(FORMAT_KEY, Bytes::from("{")).await.unwrap();
+    assert!(marks_run_in(&corrupt, "m").await.is_err());
 }
 
 /// The fixture of the format object of the phase `active-marks`.

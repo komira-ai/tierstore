@@ -139,6 +139,21 @@ pub(crate) async fn read_format(hot: &dyn Backend) -> Result<Option<Format>, Err
     }
 }
 
+/// Whether the hot tier's format object opens writes on markers in the marks bucket `bucket` (the
+/// one a leader's pass was given): one read of it. The phase is `active-marks`, the epoch is
+/// [`MARKS_EPOCH`] or later and the record names `bucket` ([`Format::runs_marks`], the condition
+/// of a put and of the leader's copier). A missing object, any other phase, a phase this release
+/// does not know, a record without the epoch or the name, an earlier epoch and another name are
+/// `false`.
+///
+/// # Errors
+/// As [`read_format`].
+pub(crate) async fn marks_run_in(hot: &dyn Backend, bucket: &str) -> Result<bool, Error> {
+    Ok(read_format(hot)
+        .await?
+        .is_some_and(|format| format.runs_marks() == Some(bucket)))
+}
+
 /// As [`read_format`], with the content tag of the object. The tag is read first, so that if the
 /// object changes between the two calls the tag is the older one, and a write over it by that tag
 /// fails.
