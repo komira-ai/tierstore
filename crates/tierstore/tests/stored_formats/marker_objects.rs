@@ -5,6 +5,7 @@ use tierstore::{Marker, MarkerState, MarkerWhy, decode_marker, encode_marker};
 const DIRTY: &[u8] = include_bytes!("fixtures/marker.json");
 const LOCKED: &[u8] = include_bytes!("fixtures/marker_lock.json");
 const NEWER: &[u8] = include_bytes!("fixtures/marker_newer.json");
+const WANT: &[u8] = include_bytes!("fixtures/marker_want.json");
 
 fn dirty() -> Marker {
     Marker {
@@ -101,4 +102,24 @@ fn the_key_of_a_marker_is_kept_as_written_whatever_it_holds() {
     let body = encode_marker(&marker);
     assert_eq!(decode_marker(&body).unwrap().key, key);
     assert!(String::from_utf8(body.to_vec()).unwrap().contains(key));
+}
+
+/// Asserts that the `WANT` marker a read of a key only the cold tier has creates reads and is
+/// written as its fixture: the state `WANT`, `gone` and `dirty` false, and neither `why` nor `owner`.
+/// Catches a renamed state, or a field that appears in what a read writes.
+#[test]
+fn the_want_marker_of_a_cold_read_is_the_fixture() {
+    let want = Marker {
+        v: 1,
+        key: "models/a.bin".to_owned(),
+        st: MarkerState::Want,
+        gone: false,
+        dirty: false,
+        why: None,
+        owner: None,
+        nonce: "7d2e9a05c1b84f3690a5e2d8c4b7f1a3".to_owned(),
+        extra: serde_json::Map::new(),
+    };
+    assert_eq!(decode_marker(WANT).unwrap(), want);
+    assert_eq!(&encode_marker(&want)[..], WANT);
 }

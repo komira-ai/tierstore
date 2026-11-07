@@ -3,8 +3,9 @@
 //! answers it with [`Error::Unavailable`] while the format pauses writes, and until it says
 //! `{"epoch": 2, "phase": "active"}`, from when a write is made on the entry of its key, or
 //! `{"phase": "active-marks", "marks_bucket": ...}`, from when a put is made on the marker of its
-//! key (`marked_put.rs`). Reads are never paused. Which of the two a put takes is decided here,
-//! once for the put, from the one read of the format object: [`WriteRoute`].
+//! key (`marked_put.rs`). Reads are never paused; a read that misses the hot tier reads the phase
+//! from the same kept answer (`mark_reads.rs`). Which of the two a put takes is decided here, once
+//! for the put, from the one read of the format object: [`WriteRoute`].
 
 use std::sync::Mutex;
 use std::time::Duration;
@@ -13,9 +14,21 @@ use tokio::sync::Mutex as AsyncMutex;
 use tokio::time::Instant;
 
 use super::{Inner, locked, refuse_reserved};
-use crate::format::{Format, read_format};
+use crate::format::{Format, FormatPhase, read_format};
 use crate::marks::Markers;
 use crate::{Backend, Error};
+
+/// What the proxy knows of the phase of the format object.
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
+pub(super) enum Known {
+    /// No read of the object has succeeded yet.
+    #[default]
+    Unread,
+    /// The last read that succeeded found no object.
+    Missing,
+    /// The last read that succeeded found this phase.
+    Phase(FormatPhase),
+}
 
 /// What the proxy last read of the format object.
 #[derive(Default)]
@@ -26,6 +39,8 @@ pub(super) struct Pause {
     paused: bool,
     /// Whether the last object read says that writes are made on entries. Kept when a read fails.
     entries: bool,
+    /// The phase the last object read says. Kept when a read fails.
+    phase: Known,
     /// Whether the last object read says `active-marks`, and then the name of the marks bucket it
     /// records (none if it records none). Kept when a read fails.
     marks: Option<Option<String>>,
@@ -36,6 +51,7 @@ impl Pause {
     fn keep(&mut self, format: Option<&Format>) {
         self.paused = format.is_some_and(Format::pauses_writes);
         self.entries = format.is_some_and(Format::runs_entries);
+        self.phase = format.map_or(Known::Missing, |format| Known::Phase(format.phase));
         self.marks = format
             .filter(|format| format.runs_marks())
             .map(|format| format.marks_bucket.clone());
@@ -45,19 +61,45 @@ impl Pause {
         FormatState {
             paused: self.paused,
             entries: self.entries,
+            phase: self.phase,
             marks: self.marks.clone(),
         }
     }
 }
 
-/// What the format object says, as of a read that is at most `format_refresh` old.
-struct FormatState {
-    /// Writes are paused.
-    paused: bool,
-    /// Writes are made on entries.
-    entries: bool,
+/// What a read of the format object, kept for up to `format_refresh`, says to a proxy.
+#[derive(Clone, Debug)]
+pub(super) struct FormatState {
+    /// Writes are paused (`drain` or `drained`).
+    pub(super) paused: bool,
+    /// Writes are made on entries (`active` at epoch 2 or later).
+    pub(super) entries: bool,
+    /// The phase the object names.
+    pub(super) phase: Known,
     /// The format says `active-marks`, and records this marks bucket (`None`: none).
-    marks: Option<Option<String>>,
+    pub(super) marks: Option<Option<String>>,
+}
+
+impl FormatState {
+    /// Whether a read that missed the hot tier reads the marker of its key
+    /// (`docs/design/put-without-lock.md`, 5.7). It does in every phase from which a marker can be
+    /// in force or can still be being run to completion (`drain`, `drained`, `active-marks`, and a
+    /// phase this release does not know), and when no read of the object has succeeded yet, so
+    /// that a proxy that cannot see the format does not serve the cold copy of a deleted key. It
+    /// does not when the object is missing or says `active`: the entry protocol is in force, no
+    /// marker exists, and the marks bucket need not.
+    pub(super) fn reads_markers(&self) -> bool {
+        !matches!(
+            self.phase,
+            Known::Missing | Known::Phase(FormatPhase::Active)
+        )
+    }
+
+    /// Whether the markers are in force (`active-marks`): the only phase in which a read writes
+    /// one.
+    pub(super) fn marks_in_force(&self) -> bool {
+        self.phase == Known::Phase(FormatPhase::ActiveMarks)
+    }
 }
 
 /// The refusal of a write that waits for the format to say `active` at epoch 2.
@@ -163,7 +205,7 @@ impl Inner {
     }
 
     /// What the format object says, as of a read of it that is at most `format_refresh` old.
-    async fn format_state(&self) -> FormatState {
+    pub(super) async fn format_state(&self) -> FormatState {
         if let Some(state) = self.fresh_format_state() {
             return state;
         }

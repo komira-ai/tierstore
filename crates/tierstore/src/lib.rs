@@ -194,4 +194,4 @@ pub use reconciler::ReconcilerConfig;
 #[cfg(feature = "s3")]
 pub use s3::S3Backend;
 pub use sleeper::{RecordingSleeper, Sleeper, TokioSleeper};
-pub use tiered::{DeleteWait, MarkedPutConfig, Proxy, ProxyConfig, StepRetry};
+pub use tiered::{DeleteWait, MarkReads, MarkedPutConfig, Proxy, ProxyConfig, StepRetry};
