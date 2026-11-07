@@ -20,7 +20,7 @@ use tokio::sync::Semaphore;
 
 use crate::{
     Backend, ByteRange, Error, FaultyBackend, Listed, MemoryBackend, Meta, Op, OpenUpload,
-    PartBody, ReadBody, TestClock, UploadedPart, UploadsAfter,
+    PartBody, PutAnswer, PutClaim, ReadBody, TestClock, UploadedPart, UploadsAfter,
 };
 
 use super::layout::{data_path, name_of};
@@ -192,6 +192,10 @@ pub(in crate::server) struct Tamper {
     heads: Mutex<Option<Arc<Semaphore>>>,
     /// The HEADs that wait at `heads`, counted when they arrive.
     heading: AtomicU64,
+    /// The gate that holds a plain put after it has replaced the object, before it answers.
+    replacing: Mutex<Option<Arc<Semaphore>>>,
+    /// The plain puts that wait at `replacing`, counted when they arrive.
+    replaced: AtomicU64,
 }
 
 /// A semaphore that reads wait on, and the key whose reads wait (every key if none).
@@ -219,7 +223,28 @@ impl Tamper {
             lie_size: AtomicBool::new(false),
             heads: Mutex::new(None),
             heading: AtomicU64::new(0),
+            replacing: Mutex::new(None),
+            replaced: AtomicU64::new(0),
         }
+    }
+
+    /// Holds every plain put from now on, after it has replaced the object and before it
+    /// answers (as an answer that is slow to arrive), until a permit is added to the gate that
+    /// is returned.
+    pub(in crate::server) fn hold_replacing(&self) -> Arc<Semaphore> {
+        let gate = Arc::new(Semaphore::new(0));
+        let mut held = self
+            .replacing
+            .lock()
+            .unwrap_or_else(PoisonError::into_inner);
+        *held = Some(Arc::clone(&gate));
+        gate
+    }
+
+    /// How many plain puts have replaced their object and wait at the gate of
+    /// [`hold_replacing`](Self::hold_replacing).
+    pub(in crate::server) fn replaced(&self) -> u64 {
+        self.replaced.load(Ordering::SeqCst)
     }
 
     /// Holds every HEAD that finds its object from now on, after it has the answer, until a
@@ -311,6 +336,36 @@ impl Backend for Tamper {
             }
         }
         self.memory.put(key, whole.freeze()).await
+    }
+
+    /// Replaces the object, as a store does for a plain `PUT`, and answers with the tag of the new
+    /// object.
+    async fn put_stream_replacing(
+        &self,
+        key: &str,
+        _len: Option<u64>,
+        mut body: PartBody<'_>,
+        _claim: &PutClaim,
+    ) -> Result<Option<PutAnswer>, Error> {
+        let mut whole = BytesMut::new();
+        while let Some(chunk) = body.next().await {
+            whole.extend_from_slice(&chunk?);
+        }
+        self.memory.delete(key).await?;
+        let tag = self.memory.put_tagged(key, whole.freeze()).await?;
+        let gate = self
+            .replacing
+            .lock()
+            .unwrap_or_else(PoisonError::into_inner)
+            .clone();
+        if let Some(gate) = gate {
+            let _ = self.replaced.fetch_add(1, Ordering::SeqCst);
+            gate.acquire().await.expect("the gate stays open").forget();
+        }
+        Ok(Some(PutAnswer {
+            tag,
+            modified: None,
+        }))
     }
 
     async fn put_if_match(&self, key: &str, body: Bytes, etag: &str) -> Result<String, Error> {

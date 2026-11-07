@@ -603,7 +603,7 @@ impl ObjectStore for S3Store {
             let sent = self.put_whole(key, len, body, self.create_only()).await;
             return sent.map(drop);
         }
-        multipart::put(&self.conn, key, len, body, None)
+        multipart::put(&self.conn, key, len, body, multipart::Rule::Create)
             .await
             .map(drop)
     }

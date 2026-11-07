@@ -321,13 +321,13 @@ Without it, the cache is read-only and they stay 0.
 
 | name | type | labels | increments when |
 |---|---|---|---|
-| `tierstore_cache_upstream_puts_total` | counter | none | the upstream accepted a create-only put, or the completion of a multipart upload |
+| `tierstore_cache_upstream_puts_total` | counter | none | the upstream accepted a create-only or plain put, or the completion of a multipart upload |
 | `tierstore_cache_upstream_put_bytes_total` | counter | none | bytes of the puts the upstream accepted, and of each part it accepted |
 | `tierstore_cache_upstream_put_failures_total` | counter | `reason`: `exists`, `unavailable`, `full`, `bad_digest`, `other` | a put or a completion reached the upstream and failed |
-| `tierstore_cache_writes_through_total` | counter | none | the upstream took a whole-body create-only put (not a completion) |
+| `tierstore_cache_writes_through_total` | counter | none | the upstream took a whole-body create-only or plain put (not a completion) |
 | `tierstore_cache_write_exists_total` | counter | none | a put was answered "already exists" |
 | `tierstore_cache_keeps_expired_total` | counter | none | a put was answered before the copy kept on the node finished, because the copy took longer than the wait |
-| `tierstore_cache_write_keep_skipped_total` | counter | `reason`: `budget`, `io`, `busy`, `head`, `deleted`, `slow`, `deadline`, `read_only` | the upstream took a put and the node did not keep a copy (`head`: the upstream's answer to the put gave no tag and the HEAD after it failed or gave another size); `read_only` is a node whose cache does not hold the lock of its directory, or lost it while the copy was made (see [operations](operations.md#the-cache-lock-and-read-only-mode)) |
+| `tierstore_cache_write_keep_skipped_total` | counter | `reason`: `budget`, `io`, `busy`, `head`, `deleted`, `slow`, `deadline`, `read_only` | the upstream took a put and the node did not keep a copy (`head`: the upstream's answer to the put gave no tag and the HEAD after it failed or gave another size; `deleted`: the object was deleted or replaced meanwhile, or another put of the key ran at the same time as a plain put); `read_only` is a node whose cache does not hold the lock of its directory, or lost it while the copy was made (see [operations](operations.md#the-cache-lock-and-read-only-mode)) |
 
 The reasons of a failed put:
 
