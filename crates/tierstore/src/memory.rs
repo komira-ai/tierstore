@@ -11,7 +11,7 @@ use sha2::{Digest, Sha256};
 
 use crate::backend::{part_page, upload_page};
 use crate::{
-    Backend, ByteRange, Clock, Error, Listed, Meta, OpenUpload, Opened, PartBody, Span,
+    Backend, ByteRange, Clock, Error, Listed, Meta, OpenUpload, Opened, PartBody, PutAnswer, Span,
     UploadedPart, UploadsAfter, Window,
 };
 
@@ -228,6 +228,22 @@ impl Backend for MemoryBackend {
         let tag = tag_of(&body, self.short_tags);
         self.create(key, body)?;
         Ok(tag)
+    }
+
+    /// The tag of the answer is the tag of the bytes written, which is what a HEAD gives.
+    async fn put_stream_answered(
+        &self,
+        key: &str,
+        _len: Option<u64>,
+        mut body: PartBody<'_>,
+        _hot_only: bool,
+    ) -> Result<Option<PutAnswer>, Error> {
+        let whole = collect(&mut body).await?;
+        let tag = self.put_tagged(key, whole).await?;
+        Ok(Some(PutAnswer {
+            tag,
+            modified: None,
+        }))
     }
 
     async fn put_if_match(&self, key: &str, body: Bytes, etag: &str) -> Result<String, Error> {

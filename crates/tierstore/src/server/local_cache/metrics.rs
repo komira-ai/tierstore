@@ -79,6 +79,22 @@ pub(super) enum Evicted {
 /// The label of each [`Evicted`], in the order of the enum.
 const EVICTED: [&str; 2] = ["budget", "floor"];
 
+/// What the check of an old hit against the upstream found (see `revalidate`).
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub(super) enum Revalidated {
+    /// The upstream holds the version the entry stands for.
+    Same,
+    /// The upstream holds another version: the entry was dropped.
+    Changed,
+    /// The upstream has no such object: the entry was dropped.
+    Gone,
+    /// The upstream could not be asked: the cached copy was served.
+    Failed,
+}
+
+/// The label of each [`Revalidated`], in the order of the enum.
+const REVALIDATED: [&str; 4] = ["same", "changed", "gone", "failed"];
+
 /// What the cache has done since it started.
 #[derive(Debug, Default)]
 pub struct Counters {
@@ -100,6 +116,7 @@ pub struct Counters {
     keep_skips: [AtomicU64; SKIPPED_KEEP.len()],
     failures: [AtomicU64; FAILED.len()],
     evictions: [AtomicU64; EVICTED.len()],
+    revalidations: [AtomicU64; REVALIDATED.len()],
     pub(super) pinned_skips: AtomicU64,
     /// The objects the scrub hashed again, and the bytes it read for them.
     pub(super) scrubbed_objects: AtomicU64,
@@ -150,6 +167,17 @@ impl Counters {
     #[cfg(test)]
     pub(super) fn keeps_skipped(&self, why: SkippedKeep) -> u64 {
         read(&self.keep_skips[why as usize])
+    }
+
+    /// Counts a check of an old hit that found `found`.
+    pub(super) fn revalidated(&self, found: Revalidated) {
+        bump(&self.revalidations[found as usize]);
+    }
+
+    /// The checks of old hits that found `found`.
+    #[cfg(test)]
+    pub(super) fn revalidations(&self, found: Revalidated) -> u64 {
+        read(&self.revalidations[found as usize])
     }
 
     /// Counts an eviction for `why`.
@@ -225,6 +253,13 @@ impl Counters {
             let _ = writeln!(
                 text,
                 "tierstore_cache_evictions_total{{reason=\"{label}\"}} {value}"
+            );
+        }
+        for (label, counter) in REVALIDATED.iter().zip(&self.revalidations) {
+            let value = read(counter);
+            let _ = writeln!(
+                text,
+                "tierstore_cache_revalidations_total{{result=\"{label}\"}} {value}"
             );
         }
         // One series for each mode: 1 for the one the cache is in, 0 for the other.

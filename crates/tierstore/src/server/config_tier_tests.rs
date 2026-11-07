@@ -10,7 +10,7 @@ use tierstore_testkit::dir::TestDir;
 
 use super::marks_directory;
 use crate::Error;
-use crate::server::cli::open_marks;
+use crate::server::cli::{marks_name, open_marks};
 use crate::server::config::{from_text, settings_from_text};
 use crate::server::config_testing::{DEFAULTS, GOLDEN, MINIMAL};
 
@@ -135,16 +135,14 @@ async fn the_second_handle_is_a_store_of_its_own_and_a_dir_hot_tier_makes_no_dir
     );
 }
 
-/// Asserts the name the reconciler gives the marks bucket it was handed, which is the name a
-/// format record must carry for its markers to be worked: the bucket of an `s3` tier without its
-/// `s3:`, and the spec itself for a `memory` or a `dir` tier.
+/// Asserts the name a proxy compares with the format record: the bucket of an S3 marks tier, the
+/// word `memory` for a memory tier's, and none for a `dir` tier, which has no handle.
 #[test]
-fn the_marks_bucket_is_named_by_its_s3_bucket_or_by_its_spec() {
-    use crate::server::cli::marks_name;
-    assert_eq!(marks_name("s3:tier-hot-marks"), "tier-hot-marks");
-    assert_eq!(marks_name("memory"), "memory");
+fn the_marks_bucket_a_proxy_names_is_the_s3_bucket_or_memory_and_a_dir_tier_has_none() {
     assert_eq!(
-        marks_name("dir:/var/tierstore/hot-marks"),
-        "dir:/var/tierstore/hot-marks"
+        marks_name("s3:tier-hot-marks"),
+        Some("tier-hot-marks".to_owned())
     );
+    assert_eq!(marks_name("memory"), Some("memory".to_owned()));
+    assert_eq!(marks_name("dir:/srv/hot-marks"), None);
 }

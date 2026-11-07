@@ -185,10 +185,10 @@ fn a_key_is_named_by_its_content_or_by_its_own_hash() {
 fn the_index_orders_by_use_and_charges_each_object_once() {
     let mut index = Index::default();
     assert_eq!((index.bytes(), index.len()), (0, 0));
-    index.insert("a", 10, "ta".to_owned(), 1);
-    index.insert("b", 20, "tb".to_owned(), 2);
-    index.insert("c", 30, "tc".to_owned(), 3);
-    index.insert("a", 15, "ta2".to_owned(), 4);
+    index.insert("a", (10, "ta".to_owned(), 1), None);
+    index.insert("b", (20, "tb".to_owned(), 2), None);
+    index.insert("c", (30, "tc".to_owned(), 3), None);
+    index.insert("a", (15, "ta2".to_owned(), 4), None);
     assert_eq!((index.bytes(), index.len()), (65, 3));
     assert_eq!(index.get("a").unwrap().meta().tag, "ta2");
     let sizes = |index: &Index| -> Vec<(String, u64)> { index.oldest_first() };

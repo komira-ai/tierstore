@@ -214,7 +214,7 @@ async fn an_abandoned_keep_leaves_the_object_of_the_new_ownership_alone() {
         modified: 0,
     };
     std::fs::write(meta_path(root, &hex), serde_json::to_vec(&sidecar).unwrap()).unwrap();
-    super::locked(&first.inner.index).insert(&hex, 11, "new".to_owned(), 0);
+    super::locked(&first.inner.index).insert(&hex, (11, "new".to_owned(), 0), None);
 
     gate.0.open();
     wait_until("the cleanup of the keep ended", || {

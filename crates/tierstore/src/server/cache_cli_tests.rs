@@ -1,7 +1,7 @@
 //! The start of a build node: what it serves, and the refusals of its start.
 
 use std::fs::Permissions;
-use std::net::{IpAddr, SocketAddr};
+use std::net::SocketAddr;
 use std::os::unix::fs::PermissionsExt;
 use std::path::PathBuf;
 use std::sync::Arc;
@@ -26,7 +26,7 @@ use super::config_testing::oci_interface;
 use super::listen::LoopbackBind;
 use super::local_cache::testing::{FakeDisk, Quirk, digest, pattern};
 use super::local_cache::{CacheConfig, Disk, SystemDisk};
-use super::testing::established_unaccepted;
+use super::testing::{beside_loopback, established_unaccepted};
 use crate::{
     Backend, ByteRange as TierRange, Error as BackendError, FaultyBackend, Listed, MemoryBackend,
     Meta, Op,
@@ -741,21 +741,6 @@ async fn a_taken_oci_address_stops_the_start_and_closes_the_s3_listener() {
     assert!(again.is_ok(), "the S3 address is still held");
 }
 
-/// An address of this host other than 127.0.0.1, for a configured address beside the loopback
-/// one: 127.0.0.2 on Linux, where all of 127.0.0.0/8 is loopback.
-#[cfg(target_os = "linux")]
-fn beside_loopback() -> IpAddr {
-    IpAddr::from([127, 0, 0, 2])
-}
-
-/// An address of this host other than 127.0.0.1, for a configured address beside the loopback
-/// one: `::1` where 127.0.0.1 is the only IPv4 loopback address (macOS). Its socket is IPv6
-/// only, so 127.0.0.1 on the same port is still added and still free ([`super::listen::bind_set`]).
-#[cfg(not(target_os = "linux"))]
-fn beside_loopback() -> IpAddr {
-    IpAddr::from(std::net::Ipv6Addr::LOCALHOST)
-}
-
 /// Asserts that a build node serves its S3 port on 127.0.0.1 as well as on the configured
 /// address, and answers `/readyz` on both, with the configured address first in `ready`.
 #[tokio::test]
@@ -877,7 +862,7 @@ fn the_loops_have_the_times_of_the_settings() {
 /// lets over it are established while nothing accepts; with a larger one more than that are.
 #[tokio::test]
 async fn the_cache_bind_listens_with_the_backlog_given_on_every_socket() {
-    let configured = ["127.0.0.2:0".parse().expect("an address")];
+    let configured = [SocketAddr::from((beside_loopback(), 0))];
     let small = bind_cache_s3(&configured, 1).expect("bound");
     assert_eq!(small.len(), 2);
     for listener in &small {

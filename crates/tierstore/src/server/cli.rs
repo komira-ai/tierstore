@@ -583,7 +583,8 @@ pub(super) fn open_tier(
 }
 
 /// The second handle on the hot store, for its marks bucket: the tier `cli.hot_marks` names, with
-/// the endpoint, region and credentials of the hot tier. Nothing in this release calls it. A bucket
+/// the endpoint, region and credentials of the hot tier. The proxy calls it only while the format
+/// object says `active-marks` and records [`marks_name`]. A bucket
 /// of an S3 store is reached when it is first used, so this asks the store nothing; a `dir` hot
 /// tier has none yet (`None`): opening its directory beside the hot one makes it, and a unit with
 /// `ProtectSystem=strict` and the hot directory alone in `ReadWritePaths=` could not, so the
@@ -600,10 +601,13 @@ pub(super) fn open_marks(cli: &Cli, timeout: Duration) -> Result<Option<Arc<dyn 
     Ok(Some(marks))
 }
 
-/// The name of the marks bucket a tier spec `spec` (`cli.hot_marks`) stands for, as the format
-/// record names it: the bucket of an `s3:<bucket>` tier, the spec itself for the others.
-pub(super) fn marks_name(spec: &str) -> &str {
-    spec.strip_prefix("s3:").unwrap_or(spec)
+/// The name the format record gives the marks bucket that `spec` (`cli.hot_marks`) opens: the bucket
+/// of `s3:<bucket>`, and `memory` for a memory tier's. A `dir` tier has no handle yet, so no name.
+pub(super) fn marks_name(spec: &str) -> Option<String> {
+    let bucket = spec.strip_prefix("s3:");
+    bucket
+        .or_else(|| (spec == "memory").then_some(spec))
+        .map(str::to_owned)
 }
 
 /// Refuses `false` as the conditional-delete setting of a `memory` or `dir:<path>` tier, which
@@ -743,6 +747,7 @@ pub(super) fn build(cli: &Cli) -> Result<Built, Error> {
     let marks = open_marks(cli, timeout)?;
     let mut proxy = ProxyConfig::new(&cli.proxy_id, cli.hot_bytes, Arc::clone(&clock));
     proxy.marks.clone_from(&marks);
+    proxy.marks_name = marks_name(&cli.hot_marks);
     proxy.critical = share(cli.critical);
     let tuning = &cli.hot_tuning;
     proxy.usage_refresh = tuning.usage_refresh;
@@ -767,7 +772,9 @@ pub(super) fn build(cli: &Cli) -> Result<Built, Error> {
         entry: cli.entry_tuning,
         hot,
         cold,
-        marks: marks.map(|store| (marks_name(&cli.hot_marks).to_owned(), store)),
+        marks: marks
+            .zip(marks_name(&cli.hot_marks))
+            .map(|(store, name)| (name, store)),
         oci,
     })
 }
