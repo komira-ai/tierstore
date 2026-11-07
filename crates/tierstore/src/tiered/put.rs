@@ -72,7 +72,8 @@ impl<'a> Offered<'a> {
 impl Inner {
     /// Puts a held body on the entry of `key`.
     pub(super) async fn put_object(&self, key: &str, body: Bytes) -> Result<(), Error> {
-        match self.route_write(key).await? {
+        let (route, _writing) = self.route_write(key).await?;
+        match route {
             WriteRoute::Entries => self.put_held_on_entry(key, body).await,
             WriteRoute::Marks(markers) => self.put_held_marked(markers, key, body).await,
         }
@@ -88,7 +89,8 @@ impl Inner {
         body: PartBody<'_>,
         hot_only: bool,
     ) -> Result<Option<PutAnswer>, Error> {
-        match self.route_write(key).await? {
+        let (route, _writing) = self.route_write(key).await?;
+        match route {
             WriteRoute::Entries => self.put_streamed_on_entry(key, len, body, hot_only).await,
             WriteRoute::Marks(markers) => self.put_streamed_marked(markers, key, len, body).await,
         }

@@ -7,6 +7,7 @@
 //! from the same kept answer (`mark_reads.rs`). Which of the two a put takes is decided here, once
 //! for the put, from the one read of the format object: [`WriteRoute`].
 
+use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::{Arc, Mutex};
 use std::time::Duration;
 
@@ -48,6 +49,15 @@ pub(super) struct Pause {
 }
 
 impl Pause {
+    /// The phase the last read says, if a read has found an object: what the registration reports
+    /// as the phase the proxy acts on.
+    pub(super) fn reported(&self) -> Option<FormatPhase> {
+        match self.phase {
+            Known::Phase(phase) => Some(phase),
+            Known::Unread | Known::Missing => None,
+        }
+    }
+
     /// Keeps what `format` (none if there is no object) says.
     fn keep(&mut self, format: Option<&Format>) {
         self.paused = format.is_some_and(Format::pauses_writes);
@@ -92,6 +102,29 @@ impl FormatState {
             self.phase,
             Known::Missing | Known::Phase(FormatPhase::Active)
         )
+    }
+}
+
+/// A write the proxy has begun and not ended, counted from the moment it asks the format whether
+/// it may go on until it is dropped. The registration reports the count (`writes_in_flight`), and
+/// the operator's rollback waits for it to be zero after the proxy has seen a phase other than
+/// `active-marks`: a write that began before the proxy saw the new phase is counted, and a write
+/// that begins after it is refused, so a registration that reports that phase and a count of zero
+/// has no write that goes on under `active-marks`. The heartbeat reads the phase first and the
+/// count after it, which is the order that argument needs.
+pub(super) struct Writing(Arc<AtomicU64>);
+
+impl Writing {
+    /// Counts a write begun.
+    pub(super) fn begin(count: &Arc<AtomicU64>) -> Self {
+        count.fetch_add(1, Ordering::SeqCst);
+        Self(Arc::clone(count))
+    }
+}
+
+impl Drop for Writing {
+    fn drop(&mut self) {
+        self.0.fetch_sub(1, Ordering::SeqCst);
     }
 }
 
@@ -140,8 +173,17 @@ pub(super) async fn refresh(
 impl Inner {
     /// Checks that a write of `key` may go on and says how it is made: the key is not reserved,
     /// writes are not paused, and the format says either that writes are made on entries, or
-    /// `active-marks` with the marks bucket this proxy has.
-    pub(super) async fn route_write(&self, key: &str) -> Result<WriteRoute<'_>, Error> {
+    /// `active-marks` with the marks bucket this proxy has. The write is counted
+    /// ([`Writing`]) until the caller drops the second value, so a caller keeps it until the write
+    /// has ended.
+    pub(super) async fn route_write(&self, key: &str) -> Result<(WriteRoute<'_>, Writing), Error> {
+        // Counted before the format is looked at: see `Writing`.
+        let writing = Writing::begin(&self.writing);
+        let route = self.routed(key).await?;
+        Ok((route, writing))
+    }
+
+    async fn routed(&self, key: &str) -> Result<WriteRoute<'_>, Error> {
         refuse_reserved(key)?;
         let state = self.format_state().await;
         if state.paused {
