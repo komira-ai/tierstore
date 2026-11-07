@@ -22,6 +22,7 @@ fn cache_over(world: &World, proxy: Arc<Proxy>) -> (TestDir, LocalCache) {
     let policies = vec![("img/".to_owned(), true)];
     let mut config = CacheConfig::new(dir.path().join("cache"), 1 << 20, policies);
     config.revalidate_after = Some(AFTER);
+    config.write_through = true;
     let clock: Arc<dyn Clock> = world.clock.clone();
     let cache = LocalCache::open(config, proxy, Arc::new(SystemDisk), clock).unwrap();
     (dir, cache)
@@ -105,5 +106,40 @@ async fn a_cache_hit_older_than_revalidate_after_of_an_unchanged_key_costs_one_h
     assert_eq!(cache.get(K, None).await.unwrap(), body("bytes"));
     assert_eq!(world.since(&mut seen), [req(Store::Hot, Op::Head, K)]);
     assert_eq!(cache.get(K, None).await.unwrap(), body("bytes"));
+    assert_eq!(world.since(&mut seen), []);
+}
+
+/// Asserts what a put through the cache of a build node costs the stores in this stack: the cache's
+/// own HEAD of the key before the body (a miss through the proxy: the hot HEAD, the marker GET and
+/// the cold HEAD), the create-only put of a new key (the same three reads, then the object and the
+/// marker), and, since a memory hot tier gives no tag with its answer to a write, the HEAD that
+/// learns the tag for the cache's copy. The pre-HEAD is the one that design 6.1 counts as gone and
+/// that its section 10.4 moves to pull request 10; an S3 hot tier answers with the tag, and the HEAD
+/// after goes. The cache then serves the bytes it kept, with no request.
+#[tokio::test]
+async fn a_put_through_the_cache_costs_its_own_head_before_the_create_only_put_of_the_proxy() {
+    let world = World::new().await;
+    let upstream = world.proxy("p1").await;
+    let (_dir, cache) = cache_over(&world, upstream);
+    let mut seen = world.cursor();
+    let chunks: Vec<Result<bytes::Bytes, Error>> = vec![Ok(body("pushed"))];
+    let stream = futures::StreamExt::boxed(futures::stream::iter(chunks));
+    cache.put_stream(K, Some(6), stream).await.unwrap();
+    assert_eq!(
+        world.since(&mut seen),
+        [
+            req(Store::Hot, Op::Head, K),
+            req(Store::Hot, Op::Head, K),
+            req(Store::Hot, Op::Put, K),
+            req(Store::Hot, Op::Head, K),
+            req(Store::Marks, Op::Get, K),
+            req(Store::Marks, Op::Get, K),
+            req(Store::Marks, Op::Put, K),
+            req(Store::Cold, Op::Head, K),
+            req(Store::Cold, Op::Head, K),
+        ]
+    );
+    assert_eq!(world.hot_text(K).await.as_deref(), Some("pushed"));
+    assert_eq!(cache.get(K, None).await.unwrap(), body("pushed"));
     assert_eq!(world.since(&mut seen), []);
 }

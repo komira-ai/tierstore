@@ -411,3 +411,69 @@ async fn an_overwrite_during_the_copy_leaves_the_marker_and_the_next_pass_copies
     assert_eq!(world.cold_text(K).await.as_deref(), Some("newer"));
     assert_eq!(world.marker(K).await, None);
 }
+
+/// Puts `K`, has the leader copy it, and evicts it from the hot tier: the cold tier holds `v1` and
+/// the hot tier and the marks bucket hold nothing of the key.
+async fn evicted(world: &World, proxy: &Proxy) {
+    proxy.put(K, body("v1")).await.unwrap();
+    let mut leader = world.leader("r1");
+    assert_eq!(leader.step().await.changed, 1);
+    leader.stop().await;
+    let passes = world.passes().await;
+    world.pass(Duration::from_secs(601));
+    assert!(passes.lease.take().await);
+    let report = passes.evictor.evict_pass(vec![K.to_owned()], 1).await;
+    assert_eq!(report.evicted, 1, "{report:?}");
+    assert_eq!(world.hot_text(K).await, None);
+    assert_eq!(world.marker(K).await, None);
+}
+
+/// Asserts that a plain put of a key that was evicted, which only the cold tier holds, is the put of
+/// a new key in the hot tier (the object and a `DIRTY` marker, no request to the cold tier), that the
+/// new bytes are read at once, and that the leader then replaces the cold object by its tag.
+#[tokio::test]
+async fn a_plain_put_of_an_evicted_key_lands_in_hot_and_the_leader_replaces_the_cold_copy() {
+    let world = World::new().await;
+    let proxy = world.proxy("p1").await;
+    evicted(&world, &proxy).await;
+    let mut seen = world.cursor();
+    let claim = tierstore::PutClaim::default();
+    let put = proxy.put_plain(K, tierstore::PutBody::Held(body("v2")), &claim);
+    put.await.unwrap();
+    let requests = world.since(&mut seen);
+    assert_eq!(count(&requests, Store::Cold, Op::Head), 0);
+    assert_eq!(count(&requests, Store::Hot, Op::Put), 1);
+    assert_eq!(served(&proxy, K).await.as_deref(), Ok("v2"));
+    assert_eq!(world.cold_text(K).await.as_deref(), Some("v1"));
+    assert_eq!(world.shape(K).await, Some((MarkerState::Dirty, false)));
+
+    let mut next = world.leader("r2");
+    let step = work(&world, &mut next).await;
+    assert!(step.failed.is_empty(), "{step:?}");
+    assert_eq!(world.cold_text(K).await.as_deref(), Some("v2"));
+    assert_eq!(world.marker(K).await, None);
+}
+
+/// Asserts that a delete of a key that was evicted deletes it: the hot HEAD finds nothing, so there
+/// is no hot DELETE, the marker says `gone`, the key is absent to a read at once though the cold
+/// tier holds it, and the leader deletes the cold object.
+#[tokio::test]
+async fn a_delete_of_an_evicted_key_marks_it_gone_and_the_leader_deletes_the_cold_copy() {
+    let world = World::new().await;
+    let proxy = world.proxy("p1").await;
+    evicted(&world, &proxy).await;
+    let mut seen = world.cursor();
+    proxy.delete(K).await.unwrap();
+    released(&world, K).await;
+    let requests = world.since(&mut seen);
+    assert_eq!(count(&requests, Store::Hot, Op::Delete), 0);
+    assert_eq!(world.shape(K).await, Some((MarkerState::Dirty, true)));
+    assert_eq!(served(&proxy, K).await, Err(Error::NotFound(K.to_owned())));
+    assert_eq!(world.cold_text(K).await.as_deref(), Some("v1"));
+
+    let mut next = world.leader("r2");
+    work(&world, &mut next).await;
+    world.converge(&mut next, K).await;
+    assert_eq!(world.cold_text(K).await, None);
+    assert_eq!(served(&proxy, K).await, Err(Error::NotFound(K.to_owned())));
+}
