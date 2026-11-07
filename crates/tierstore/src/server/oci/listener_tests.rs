@@ -564,8 +564,8 @@ async fn the_connections_held_at_the_end_of_the_settle_are_taken_and_served() {
 /// clock is held ([`ClockHold`]): the closes that follow are on their way through the kernel, and
 /// a loopback close on macOS may reach its peer after the runtime has parked, which on a clock
 /// left to auto-advance would move it to the drain deadline and cut the lingering connection. The
-/// client in the slot closes its end only once the runtime has parked waiting for it ([`Parks`]),
-/// so that the outcome is shown not to depend on when that close arrives.
+/// client in the slot closes its end only once the runtime has begun to park waiting for it
+/// ([`Parks`]), so that the outcome is shown not to depend on when that close arrives.
 #[test]
 fn the_door_waits_for_a_free_slot_no_longer_than_its_grace() {
     let parks = Arc::new(Parks::default());
@@ -614,7 +614,7 @@ fn the_door_waits_for_a_free_slot_no_longer_than_its_grace() {
             "closed, unanswered"
         );
         // The client closes its end, which ends the lingering close of the server's, once the
-        // runtime has parked with the loop waiting for it.
+        // runtime has begun to park with the loop waiting for it.
         let in_slot = in_slot.into_std().expect("a std socket");
         let (seen, parks) = (parks.count(), Arc::clone(&parks));
         let client = std::thread::spawn(move || {
@@ -674,7 +674,7 @@ impl ClockHold {
     }
 }
 
-/// The idle parks of a runtime, counted as they come.
+/// The idle parks of a runtime, counted as each begins (tokio's `on_thread_park`).
 #[derive(Default)]
 struct Parks {
     count: Mutex<u64>,
