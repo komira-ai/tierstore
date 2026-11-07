@@ -75,10 +75,14 @@
 //! again at `idle_min` after progress. There is no wake-up: a put into an idle system waits for the
 //! wait that is running.
 //!
-//! Under the format `active-marks`, a reconciler that was given the marks bucket the format names
-//! ([`EntryReconciler::with_marks`]) makes a pass over the markers of the put-without-lock design
-//! in place of steps 3 to 6 (the modules `marks`, `copier` and `reap` say what it does); under any
-//! other reading of that phase it does nothing, as it does nothing until the format says `active`.
+//! Under the format `active-marks` at epoch 3 or later, a reconciler that was given the marks bucket
+//! the format names ([`EntryReconciler::with_marks`]) makes a pass over the markers of the
+//! put-without-lock design in place of steps 3 to 6: the copy, the hold and the reap, then the
+//! copy-back of the `WANT` markers, the stray sweep, the usage and the eviction (the modules
+//! `marks`, `copier`, `reap` and `passes` say what each does). They run under the one lease this
+//! reconciler holds, whichever phase the format is in, so the lease passes from the entries to the
+//! markers and back without a second holder. Under any other reading of that phase it does
+//! nothing, as it does nothing until the format says `active`.
 //!
 //! No call here probes what a store does: that a hot tier honours `If-Match`, or that a cold tier
 //! writes create-only, is a requirement of the stores (see the design).
@@ -106,6 +110,7 @@ mod copier;
 mod copy_back;
 mod evict;
 mod marks;
+mod passes;
 mod reap;
 mod restart;
 mod sweep;
@@ -194,6 +199,12 @@ pub struct EntryReconcilerConfig {
     /// (`tombstone_hold`, 120 s): at least `lease_ttl` plus `lease_margin`, which the file's
     /// loader checks.
     pub tombstone_hold: Duration,
+    /// How old the cold copy of a hot object must be, by the leader's monotonic clock from the
+    /// cold write, for the eviction over markers to evict the hot object (`evict_min_age`, 600 s).
+    pub evict_min_age: Duration,
+    /// The largest object the copy-back over markers copies into the hot tier
+    /// (`copy_back_max_bytes`, 64 MiB): the lock of the key is held for the whole stream.
+    pub copy_back_max_bytes: u64,
     /// What the loop waits on between steps, and between the lookups of the sweep. The renewal of
     /// the lease waits on `base.sleeper`.
     pub waiter: Arc<dyn Sleeper>,
@@ -237,6 +248,8 @@ impl EntryReconcilerConfig {
             marks_page: 1000,
             orphan_after: Duration::from_secs(120),
             tombstone_hold: Duration::from_secs(120),
+            evict_min_age: Duration::from_secs(600),
+            copy_back_max_bytes: 64 << 20,
             waiter: Arc::new(TokioSleeper),
         }
     }
@@ -402,6 +415,7 @@ impl EntryReconciler {
         self.tally.clear();
         self.tags().clear();
         self.mark_books = MarkBooks::default();
+        self.unsettle_marks();
     }
 
     /// Does one step, if the format is active and the lease is held.
@@ -416,8 +430,12 @@ impl EntryReconciler {
             }
         };
         let side = self.runs_marks(&format);
-        if side.is_none() && format.phase != FormatPhase::Active {
-            return report;
+        if side.is_none() {
+            // The passes over the markers begin afresh when the format comes back to them.
+            self.unsettle_marks();
+            if format.phase != FormatPhase::Active {
+                return report;
+            }
         }
         report.active = true;
         if !self.lease.ensure().await {

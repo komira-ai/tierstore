@@ -81,12 +81,8 @@ impl Inner {
         claim: &PutClaim,
     ) -> Result<PlainPut, Error> {
         let markers = self.admit_marked(key).await?;
-        let (held, marker) = self.look(markers, key).await?;
-        match (held, body) {
-            (Some(meta), body) => {
-                self.overwrite(markers, key, body, claim, meta, marker)
-                    .await
-            }
+        match (self.head_hot(key).await?, body) {
+            (Some(meta), body) => self.overwrite(markers, key, body, claim, meta).await,
             (None, PutBody::Held(bytes)) => self.put_new_held(markers, key, claim, bytes).await,
             (None, PutBody::Stream { len, body }) => {
                 self.put_new_stream(markers, key, len, body).await
@@ -121,13 +117,12 @@ impl Inner {
                 tag: Some(tag),
                 wrote: true,
             }),
-            Err(Error::AlreadyExists(_)) => match self.look(markers, key).await? {
-                (Some(meta), marker) => {
+            Err(Error::AlreadyExists(_)) => match self.head_hot(key).await? {
+                Some(meta) => {
                     let body = PutBody::Held(bytes);
-                    self.overwrite(markers, key, body, claim, meta, marker)
-                        .await
+                    self.overwrite(markers, key, body, claim, meta).await
                 }
-                (None, _) => Err(retry(key, "the key was made and removed while the put ran")),
+                None => Err(retry(key, "the key was made and removed while the put ran")),
             },
             Err(error) => Err(error),
         }

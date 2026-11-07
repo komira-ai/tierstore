@@ -2,16 +2,23 @@
 //!
 //! A plain put of a key the hot tier holds, in order:
 //!
-//! 1. **Wave 1**, the hot HEAD and the read of the marker together ([`Inner::look`]).
+//! 1. **The look**, the hot HEAD ([`Inner::head_hot`]); a key it does not find is the fast path
+//!    of 5.1 (`plain_put.rs`), which reads no marker. Where it finds the object, the marker is
+//!    read next, one wave later than the design's wave 1 (which read both together, so that a
+//!    new key cost one marker GET more than the model has it: the model's plain put begins with
+//!    the HEAD alone).
 //! 2. **Same bytes.** If the caller's [`PutClaim`] names the tag the hot object has and the sizes
-//!    are equal, the answer is given with no write. This tier keeps no header of an object (a GET
-//!    and a HEAD give the same content type for every object), so a put never changes anything
-//!    but the bytes, and the design's condition that the request changes no header is always
-//!    met.
+//!    are equal, the answer is given with no write, and the marker is not read. This tier keeps
+//!    no header of an object (a GET and a HEAD give the same content type for every object), so
+//!    a put never changes anything but the bytes, and the design's condition that the request
+//!    changes no header is always met.
 //! 3. **The lock** on the marker ([`Inner::take_lock`]): create-only `LOCK(OVERWRITE)` where no
 //!    marker exists, a compare-and-swap from the version read where it is `DIRTY` or `WANT` (the
 //!    `gone` it found is kept), a wait (5.2) where it is a `LOCK` or a `CLEARING`. A create or a
-//!    swap that loses reads the marker and decides again, at most `entry_rounds` times.
+//!    swap that loses reads the marker and decides again. A loss after which the marker is held
+//!    by another writer's lock is a wait and not a failure (the writer that won it is the one to
+//!    wait for, and `lock_wait` bounds each wait); a loss after which the marker is free again
+//!    and changed counts, and at most `entry_rounds` of them are made.
 //! 4. **The replace**, `If-Match` the tag of the object. A body held whole uses the tag of wave 1
 //!    and reads the object again only when the replace is refused for it (412), then tries again;
 //!    a stream reads it under the lock first, since its bytes cannot be sent twice, and a replace
@@ -97,23 +104,17 @@ fn stale(key: &str) -> Error {
 }
 
 impl Inner {
-    /// Wave 1 of an overwrite: the hot HEAD and the marker, together. The meta is `None` where the
-    /// hot tier does not hold the key.
-    pub(super) async fn look(
-        &self,
-        markers: &Markers,
-        key: &str,
-    ) -> Result<(Option<Meta>, Option<MarkSeen>), Error> {
-        let (head, marker) = futures::join!(self.hot.head(key), markers.read(key));
-        let meta = match head {
-            Ok(meta) => Some(meta),
-            Err(Error::NotFound(_)) => None,
-            Err(error) => return Err(error),
-        };
-        Ok((meta, marker?))
+    /// The meta of the hot object, or `None` where the hot tier does not hold the key.
+    pub(super) async fn head_hot(&self, key: &str) -> Result<Option<Meta>, Error> {
+        match self.hot.head(key).await {
+            Ok(meta) => Ok(Some(meta)),
+            Err(Error::NotFound(_)) => Ok(None),
+            Err(error) => Err(error),
+        }
     }
 
-    /// The overwrite of the object `meta` (see the module).
+    /// The overwrite of the object `meta` (see the module). The marker is read here, after the
+    /// answer a claim can give.
     pub(super) async fn overwrite(
         &self,
         markers: &Arc<Markers>,
@@ -121,7 +122,6 @@ impl Inner {
         mut body: PutBody<'_>,
         claim: &PutClaim,
         meta: Meta,
-        marker: Option<MarkSeen>,
     ) -> Result<PlainPut, Error> {
         if claim.is_met_by(&meta, body.len()) {
             drain(&mut body).await?;
@@ -130,6 +130,7 @@ impl Inner {
                 wrote: false,
             });
         }
+        let marker = markers.read(key).await?;
         let mut held = self
             .take_lock(markers, key, MarkerWhy::Overwrite, marker, false)
             .await?;
@@ -187,19 +188,20 @@ impl Inner {
                 let retrying = self.config.step_retry;
                 return Ok(Held::new(markers, &self.config.sleeper, retrying, written));
             }
-            lost += 1;
             seen = markers.read(key).await?;
+            // A lost create or swap that finds the marker held lost to another writer's lock, and
+            // the next turn waits for it (5.2); it is not a failure. A marker found free again,
+            // changed, is one that keeps changing.
+            if !seen.as_ref().is_some_and(|found| found.marker.st.is_held()) {
+                lost += 1;
+            }
         }
         Err(retry(key, "the marker keeps changing"))
     }
 
     /// The tag of the hot object, or none if the hot tier does not hold the key.
     async fn head_tag(&self, key: &str) -> Result<Option<String>, Error> {
-        match self.hot.head(key).await {
-            Ok(meta) => Ok(Some(meta.tag)),
-            Err(Error::NotFound(_)) => Ok(None),
-            Err(error) => Err(error),
-        }
+        Ok(self.head_hot(key).await?.map(|meta| meta.tag))
     }
 
     /// The replace of a body held whole, starting from the tag `first`.

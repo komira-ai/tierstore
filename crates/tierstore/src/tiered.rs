@@ -59,6 +59,8 @@ mod marks_delete_failure_tests;
 pub(crate) mod marks_delete_tests;
 mod overwrite;
 #[cfg(test)]
+mod overwrite_requests_tests;
+#[cfg(test)]
 mod overwrite_tests;
 mod pause;
 mod peers;
