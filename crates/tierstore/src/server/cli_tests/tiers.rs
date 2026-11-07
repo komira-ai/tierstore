@@ -4,8 +4,10 @@ use std::fs::Permissions;
 use std::os::unix::fs::PermissionsExt;
 use std::time::Duration;
 
+use crate::Backend as _;
 use bytes::Bytes;
 use futures::StreamExt as _;
+use objstore_s3::s3::fake::FakeS3;
 use tierstore_testkit::dir::TestDir;
 
 use crate::server::cli::{S3Flags, dir_tier, open_tier, s3_backend};
@@ -23,6 +25,7 @@ async fn a_dir_tier_takes_its_chunk_sizes_from_the_settings() {
     let spec = format!("dir:{path}");
     let flags = S3Flags {
         endpoint: None,
+        more_endpoints: &[],
         region: None,
         credentials: None,
         conditional_delete: None,
@@ -65,6 +68,7 @@ fn an_s3_tier_takes_its_chunks_waiting_from_the_settings() {
     std::fs::set_permissions(&credentials, Permissions::from_mode(0o600)).unwrap();
     let flags = S3Flags {
         endpoint: Some("http://127.0.0.1:9"),
+        more_endpoints: &[],
         region: None,
         credentials: Some(credentials.as_path()),
         conditional_delete: None,
@@ -91,4 +95,51 @@ fn an_s3_tier_takes_its_chunks_waiting_from_the_settings() {
         (timeout, &plain),
     );
     assert_eq!(built.unwrap().chunks_waiting(), plain.chunks_waiting);
+}
+
+/// Asserts that the endpoints a tier is given reach the backend an S3 tier opens as: six puts to
+/// a tier with an endpoint and two more land on the three services two each, in turn.
+#[tokio::test]
+async fn an_s3_tier_sends_its_requests_to_its_endpoints_in_turn() {
+    let dir = TestDir::under(std::env::temp_dir(), "tierstore-tier-endpoints");
+    let credentials = dir.path().join("credentials");
+    std::fs::write(&credentials, "test-key\ntest-secret\n").unwrap();
+    std::fs::set_permissions(&credentials, Permissions::from_mode(0o600)).unwrap();
+    let services = [
+        FakeS3::start().await,
+        FakeS3::start().await,
+        FakeS3::start().await,
+    ];
+    let more = [
+        services[1].endpoint().to_owned(),
+        services[2].endpoint().to_owned(),
+    ];
+    let flags = S3Flags {
+        endpoint: Some(services[0].endpoint()),
+        more_endpoints: &more,
+        region: None,
+        credentials: Some(credentials.as_path()),
+        conditional_delete: None,
+    };
+    let client = S3Client::default();
+    let timeout = Duration::from_secs(30);
+    let tier = s3_backend(
+        "--cold",
+        "s3:tierstore-fake",
+        "tierstore-fake",
+        &flags,
+        (timeout, &client),
+    )
+    .unwrap();
+    for at in 0..6 {
+        tier.put(&format!("k{at}"), Bytes::from_static(b"x"))
+            .await
+            .unwrap();
+    }
+    let seen: Vec<usize> = services.iter().map(|s| s.requests().len()).collect();
+    assert_eq!(seen, [2, 2, 2]);
+    assert_eq!(
+        services[1].requests(),
+        ["PUT /tierstore-fake/k1?", "PUT /tierstore-fake/k4?"]
+    );
 }

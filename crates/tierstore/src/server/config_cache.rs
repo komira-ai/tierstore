@@ -50,8 +50,7 @@
 //! The file is read into a [`CacheSettings`]. An `oci` interface is the
 //! storage node's, with its rules (see [`config`](super::config)). What it refuses, besides what
 //! every file does: a layout that is not `digest-v1`,
-//! `cache = false`, marks out of order, no `[[policy]]` with `cache = true`, a list of more than
-//! one `endpoints` in `[cold_store]` (the cache reads from one upstream), and the keys of the
+//! `cache = false`, marks out of order, no `[[policy]]` with `cache = true`, and the keys of the
 //! storage node that do nothing here: `skip_checks`, the reconciler's keys and
 //! `backend_check_wait`. With an `oci` interface it also refuses a front whose blobs (the keys under
 //! `<prefix>blobs/sha256/`) no `[[policy]]` with `cache = true` keeps.
@@ -229,27 +228,6 @@ pub(super) struct CacheSettings {
     pub handoff: Option<Handoff>,
 }
 
-/// The `endpoint` of the upstream: `endpoint`, or the one entry of `endpoints`.
-fn upstream_table(mut cold: TierTable) -> Result<TierTable, ConfigError> {
-    let Some(list) = cold.endpoints.take() else {
-        return Ok(cold);
-    };
-    if cold.endpoint.is_some() {
-        let why = "give endpoint or endpoints, not both";
-        return Err(invalid("cold_store.endpoints", why));
-    }
-    match <[String; 1]>::try_from(list) {
-        Ok([only]) => {
-            cold.endpoint = Some(only);
-            Ok(cold)
-        }
-        Err(_) => {
-            let why = "the cache reads from one upstream: give exactly one endpoint (a list of several is not supported yet)";
-            Err(invalid("cold_store.endpoints", why))
-        }
-    }
-}
-
 /// The percent in `value`, or `default`, from `low` to `high`.
 fn percent(key: &str, value: Option<u8>, default: u8, low: u8) -> Result<u8, ConfigError> {
     within("local_cache", key, value.unwrap_or(default), low, 100)
@@ -419,7 +397,7 @@ impl CacheSettings {
         refuse_hot_keys(&cold)?;
         let skipping = [("skip_checks", cold.skip_checks.is_some())];
         refuse("cold_store", "not for a build node", &skipping)?;
-        let upstream = tier("cold_store", &upstream_table(cold)?)?;
+        let upstream = tier("cold_store", &cold)?;
         let part = CachePart::new(table, policy)?;
         check_outside_cache(handoff.as_ref(), &part.config.path)?;
         let oci = fronts.oci;

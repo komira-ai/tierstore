@@ -80,6 +80,7 @@ impl Hot {
     fn open(&self) -> Result<Arc<dyn Backend>, VerbError> {
         let s3 = S3Flags {
             endpoint: self.hot_endpoint.as_deref(),
+            more_endpoints: &[],
             region: self.hot_region.as_deref(),
             credentials: self.hot_credentials_file.as_deref(),
             conditional_delete: None,
@@ -131,6 +132,7 @@ impl Hot {
         };
         let s3 = S3Flags {
             endpoint: self.hot_endpoint.as_deref(),
+            more_endpoints: &[],
             region: self.hot_region.as_deref(),
             credentials: self.hot_credentials_file.as_deref(),
             conditional_delete: None,

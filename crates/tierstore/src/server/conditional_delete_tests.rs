@@ -169,6 +169,7 @@ async fn the_setting_decides_whether_an_s3_tier_sends_the_delete_with_if_match()
         let s3 = FakeS3::start().await;
         let flags = S3Flags {
             endpoint: Some(s3.endpoint()),
+            more_endpoints: &[],
             region: None,
             credentials: Some(credentials.as_path()),
             conditional_delete: setting,

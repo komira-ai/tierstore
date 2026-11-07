@@ -79,7 +79,7 @@ fn a_file_with_the_three_tables_makes_a_combined_node() {
 /// a cache directory that is a tier's directory, inside it or around it (also written with `.` and
 /// `..`, or relative, or with a relative tier directory), around the lock file or a key file of
 /// the OCI front, a relative lock file or relative key files of the OCI front (which would lead
-/// into the cache directory from the working directory), a list of endpoints, the keys of the hot store that are not for
+/// into the cache directory from the working directory), the keys of the hot store that are not for
 /// the cold one, a mark out of order in `[local_cache]`, and an OCI front no policy keeps.
 #[test]
 fn a_combined_file_is_refused_when_it_cannot_be_run() {
@@ -164,14 +164,6 @@ fn a_combined_file_is_refused_when_it_cannot_be_run() {
         (
             oci(", tls_cert_file = \"/etc/oci.crt\", tls_key_file = \".stage/oci.key\""),
             "oci interface params.tls_key_file: must be an absolute path in a file with a local cache",
-        ),
-        (
-            NODE.replacen(
-                "[cold_store]\n",
-                "[cold_store]\nendpoints = [\"http://c:1\"]\n",
-                1,
-            ) + CACHE,
-            "cold_store.endpoints: only the [cold_store] of a build node takes a list; give endpoint",
         ),
         (
             NODE.replacen("[hot_store]\n", "[hot_store]\nskip_checks = [\"a=b\"]\n", 1) + CACHE,

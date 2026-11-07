@@ -86,10 +86,16 @@ pub(super) const KEYS: &[(&str, &[&str])] = &[
         "cold",
         &["cold_store.kind", "cold_store.path", "cold_store.bucket"],
     ),
-    ("hot-endpoint", &["hot_store.endpoint"]),
+    (
+        "hot-endpoint",
+        &["hot_store.endpoint", "hot_store.endpoints"],
+    ),
     ("hot-region", &["hot_store.region"]),
     ("hot-credentials-file", &["hot_store.credentials_file"]),
-    ("cold-endpoint", &["cold_store.endpoint"]),
+    (
+        "cold-endpoint",
+        &["cold_store.endpoint", "cold_store.endpoints"],
+    ),
     ("cold-region", &["cold_store.region"]),
     ("cold-credentials-file", &["cold_store.credentials_file"]),
     ("s3-request-timeout", &["server.s3_request_timeout"]),
@@ -484,8 +490,8 @@ pub(super) struct TierTable {
     /// still loads.
     #[serde(default)]
     pub skip_checks: Option<Vec<String>>,
-    /// Only the `[cold_store]` of a build node: the upstream, as a list of one in place of
-    /// `endpoint`.
+    /// The endpoints of an `s3` tier, in place of `endpoint` (give exactly one of the two): each
+    /// request goes to the next in turn. All must be the same store.
     #[serde(default)]
     pub endpoints: Option<Vec<String>>,
 }
@@ -706,13 +712,6 @@ pub(super) fn storage(
 ) -> Result<Cli, ConfigError> {
     let (hot, cold) = tiers;
     refuse_hot_keys(&cold)?;
-    let why = "only the [cold_store] of a build node takes a list; give endpoint";
-    refuse("hot_store", why, &[("endpoints", hot.endpoints.is_some())])?;
-    refuse(
-        "cold_store",
-        why,
-        &[("endpoints", cold.endpoints.is_some())],
-    )?;
     let skipping = [("skip_checks", hot.skip_checks.is_some())];
     refuse("hot_store", "only [cold_store] has it", &skipping)?;
     let hot_parts = tier("hot_store", &hot)?;
@@ -748,9 +747,11 @@ pub(super) fn storage(
         hot_marks: hot_parts.marks,
         cold: cold_parts.spec,
         hot_endpoint: hot_parts.endpoint,
+        hot_more_endpoints: hot_parts.more_endpoints,
         hot_region: hot_parts.region,
         hot_credentials_file: hot_parts.credentials_file,
         cold_endpoint: cold_parts.endpoint,
+        cold_more_endpoints: cold_parts.more_endpoints,
         cold_region: cold_parts.region,
         cold_credentials_file: cold_parts.credentials_file,
         hot_conditional_delete: hot_parts.conditional_delete,

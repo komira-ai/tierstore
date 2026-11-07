@@ -312,6 +312,18 @@ fn a_list_of_one_endpoint_is_the_upstream() {
     );
 }
 
+/// Asserts that several `endpoints` are the upstream's endpoints in order.
+#[test]
+fn a_list_of_endpoints_is_the_upstreams_endpoints_in_turn() {
+    let several = cache_with(
+        "endpoint         = \"http://192.0.2.20:9300\"",
+        "endpoints        = [\"http://192.0.2.21:9300\", \"http://192.0.2.22:9300\"]",
+    );
+    let upstream = cache_of(&several).upstream;
+    assert_eq!(upstream.endpoint.as_deref(), Some("http://192.0.2.21:9300"));
+    assert_eq!(upstream.more_endpoints, ["http://192.0.2.22:9300"]);
+}
+
 /// Asserts each refusal of a build node's file, each naming the key and what is wrong, and none
 /// repeating a value: a hot store with a cache that does not take writes, a layout that is not the only one, a cache that
 /// is turned off, marks out of order or out of range, a budget that is missing or zero, a rate
@@ -412,16 +424,16 @@ fn a_build_node_file_is_refused_when_it_cannot_be_run() {
         (
             cache_with(
                 "endpoint         = \"http://192.0.2.20:9300\"",
-                "endpoints = [\"http://a:1\", \"http://b:2\"]",
+                "endpoints = [\"http://a:1\", \"http://a:1\"]",
             ),
-            "give exactly one endpoint",
+            "cold_store.endpoints: \"http://a:1\" is given twice",
         ),
         (
             cache_with(
                 "endpoint         = \"http://192.0.2.20:9300\"",
                 "endpoints = []",
             ),
-            "give exactly one endpoint",
+            "cold_store.endpoints: is empty; give at least one endpoint",
         ),
         (
             cache_with(
@@ -584,26 +596,9 @@ fn the_water_marks_are_judged_at_their_edges() {
     }
 }
 
-/// Asserts that a storage node refuses what only a build node has: a list of endpoints in either
-/// tier, and a policy that asks for a cache, with the reason.
+/// Asserts that a storage node refuses a policy that asks for a cache, with the reason.
 #[test]
-fn a_storage_node_refuses_a_list_of_endpoints_and_a_cache_policy() {
-    let hot = GOLDEN.replacen(
-        "[hot_store]\n",
-        "[hot_store]\nendpoints = [\"http://h:1\"]\n",
-        1,
-    );
-    // Put in [cold_store] itself, not at the end of the file, which ends with another table.
-    let cold = GOLDEN.replacen(
-        "[cold_store]\n",
-        "[cold_store]\nendpoints = [\"http://c:1\"]\n",
-        1,
-    );
-    for (text, key) in [(hot, "hot_store.endpoints"), (cold, "cold_store.endpoints")] {
-        let why = refusal(&text);
-        assert!(why.contains(key), "{why}");
-        assert!(why.contains("build node"), "{why}");
-    }
+fn a_storage_node_refuses_a_cache_policy() {
     let policy = format!("{GOLDEN}\n[[policy]]\nprefix = \"a/\"\ncache = true\n");
     let why = refusal(&policy);
     assert!(why.contains("policy[0].cache"), "{why}");

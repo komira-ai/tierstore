@@ -17,7 +17,11 @@ pub(super) struct TierParts {
     /// another bucket of the store, a `dir` tier in the directory of that name beside its own,
     /// and a `memory` tier in a map of its own.
     pub marks: String,
+    /// The endpoint, or the first of `endpoints`.
     pub endpoint: Option<String>,
+    /// The rest of `endpoints`, in order; each request of the tier goes to the next of
+    /// `endpoint` and these in turn.
+    pub more_endpoints: Vec<String>,
     pub region: Option<String>,
     pub credentials_file: Option<PathBuf>,
     /// The `conditional_delete` key; `None` is the default of the kind.
@@ -28,6 +32,7 @@ pub(super) struct TierParts {
 pub(super) fn tier(name: &str, table: &TierTable) -> Result<TierParts, ConfigError> {
     let s3_only = [
         ("endpoint", table.endpoint.is_some()),
+        ("endpoints", table.endpoints.is_some()),
         ("region", table.region.is_some()),
         ("credentials_file", table.credentials_file.is_some()),
     ];
@@ -38,16 +43,16 @@ pub(super) fn tier(name: &str, table: &TierTable) -> Result<TierParts, ConfigErr
         table.conditional_delete == Some(false),
     );
     let marks_named = ("marks_bucket", table.marks_bucket.is_some());
-    let (spec, marks) = match (table.kind, &table.path, &table.bucket) {
+    let (spec, marks, endpoints) = match (table.kind, &table.path, &table.bucket) {
         (Kind::Memory, ..) => {
-            let keys = [path, bucket, s3_only[0], s3_only[1], s3_only[2]];
+            let keys = [path, bucket, s3_only[0], s3_only[1], s3_only[2], s3_only[3]];
             refuse(name, "not for kind \"memory\"", &keys)?;
             refuse(name, DELETE_OFF, &[delete_off])?;
             refuse(name, MARKS_ONLY_S3, &[marks_named])?;
-            ("memory".to_owned(), "memory".to_owned())
+            ("memory".to_owned(), "memory".to_owned(), Vec::new())
         }
         (Kind::Dir, path_value, _) => {
-            let keys = [bucket, s3_only[0], s3_only[1], s3_only[2]];
+            let keys = [bucket, s3_only[0], s3_only[1], s3_only[2], s3_only[3]];
             refuse(name, "not for kind \"dir\"", &keys)?;
             refuse(name, DELETE_OFF, &[delete_off])?;
             refuse(name, MARKS_ONLY_S3, &[marks_named])?;
@@ -56,25 +61,54 @@ pub(super) fn tier(name: &str, table: &TierTable) -> Result<TierParts, ConfigErr
             (
                 format!("dir:{}", path.display()),
                 format!("dir:{}", marks.display()),
+                Vec::new(),
             )
         }
         (Kind::S3, _, bucket_value) => {
             refuse(name, "not for kind \"s3\"", &[path])?;
             let bucket = require(name, "bucket", bucket_value.as_ref())?;
-            require(name, "endpoint", table.endpoint.as_ref())?;
+            let endpoints = endpoints(name, table)?;
             require(name, "credentials_file", table.credentials_file.as_ref())?;
             let marks = marks_bucket(name, bucket, table.marks_bucket.as_deref())?;
-            (format!("s3:{bucket}"), format!("s3:{marks}"))
+            (format!("s3:{bucket}"), format!("s3:{marks}"), endpoints)
         }
     };
+    let mut endpoints = endpoints.into_iter();
     Ok(TierParts {
         spec,
         marks,
-        endpoint: table.endpoint.clone(),
+        endpoint: endpoints.next(),
+        more_endpoints: endpoints.collect(),
         region: table.region.clone(),
         credentials_file: table.credentials_file.clone(),
         conditional_delete: table.conditional_delete,
     })
+}
+
+/// The endpoints of an `s3` tier: the one `endpoint`, or the entries of `endpoints`, which is not
+/// empty and has no entry twice. Exactly one of the two keys is given.
+fn endpoints(name: &str, table: &TierTable) -> Result<Vec<String>, ConfigError> {
+    let list = match (&table.endpoint, &table.endpoints) {
+        (Some(one), None) => return Ok(vec![one.clone()]),
+        (Some(_), Some(_)) => {
+            let why = "give endpoint or endpoints, not both";
+            return Err(invalid(&format!("{name}.endpoints"), why));
+        }
+        (None, Some(list)) => list,
+        (None, None) => return Err(invalid(&format!("{name}.endpoint"), "it is needed")),
+    };
+    let key = format!("{name}.endpoints");
+    if list.is_empty() {
+        return Err(invalid(&key, "is empty; give at least one endpoint"));
+    }
+    if let Some(twice) = list
+        .iter()
+        .enumerate()
+        .find_map(|(at, one)| list[..at].contains(one).then_some(one))
+    {
+        return Err(invalid(&key, format!("{twice:?} is given twice")));
+    }
+    Ok(list.clone())
 }
 
 /// Why `conditional_delete = false` is refused for a `memory` or `dir` tier.

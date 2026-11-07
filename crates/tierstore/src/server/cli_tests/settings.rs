@@ -294,6 +294,7 @@ fn an_s3_tier_that_its_flags_do_not_describe_is_refused() {
     let refused = |spec: &str, endpoint: Option<&str>, credentials: Option<&Path>| {
         let flags = S3Flags {
             endpoint,
+            more_endpoints: &[],
             region: None,
             credentials,
             conditional_delete: None,
@@ -330,6 +331,7 @@ fn an_s3_tier_that_its_flags_do_not_describe_is_refused() {
     for (endpoint, region, credentials) in given {
         let flags = S3Flags {
             endpoint,
+            more_endpoints: &[],
             region,
             credentials,
             conditional_delete: None,
@@ -341,6 +343,7 @@ fn an_s3_tier_that_its_flags_do_not_describe_is_refused() {
     }
     let none = S3Flags {
         endpoint: None,
+        more_endpoints: &[],
         region: None,
         credentials: None,
         conditional_delete: None,
