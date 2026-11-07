@@ -1,8 +1,8 @@
 //! The release platforms in the workflows: every platform a release is built for
 //! (`xtask::package::Platform::ALL`) has its build job in `artifacts.yml` on a GitHub-hosted
 //! runner of its own platform, and every later job, here and in `release.yml`, reads, signs and
-//! checks its files; `ci.yml` builds and tests on macOS, the one platform whose build the `test`
-//! job (Linux) does not cover.
+//! checks its files; the macOS build job also runs the tests of the binary's crates, the one
+//! platform whose build the `test` job of `ci.yml` (Linux) does not cover.
 //!
 //! The commands of a build job and of the signing job are pinned whole ([`build_commands`],
 //! [`attest_commands`]): a check that looks for a word in a command passes a command that names a
@@ -42,11 +42,15 @@
 //! [`release_platform_problems`] refuses `release.yml` when its `verify` job does not download
 //! every platform's assets merged into `dist`, the sums into `published` and `bundles` into
 //! `dist`. [`pull_request_macos_problems`] refuses any workflow a pull request starts that has a
-//! job on a macOS runner without [`NOT_FOR_A_PULL_REQUEST`]: no macOS runner is part of a pull
-//! request's checks. The macOS build and its tests run in `artifacts.yml` on a push and by hand
-//! (`workflow_dispatch`), whose triggers [`TRIGGERS`] pins.
+//! job on a macOS runner without [`NOT_FOR_A_PULL_REQUEST`], other than the job `macos-arm64` of
+//! `macos.yml` under its surface condition (`super::macos_pr`), and holds every job a pull
+//! request runs on macOS to no secret, no token and `contents: read` alone. The release build of
+//! macOS and its tests run in `artifacts.yml` on a push and by hand (`workflow_dispatch`), whose
+//! triggers [`TRIGGERS`] pins; a pull request that changes the macOS surface runs the same build,
+//! with the tests of the whole workspace, in `macos.yml`.
 
 use super::lint::{SIGN_IF, entries, entry, names, runs};
+use super::macos_pr::{MACOS_PR, ON_THE_SURFACE, pull_request_job_problems, scalars};
 use super::yaml::{self, Node, Value};
 
 /// A platform's build job: its runner (GitHub-hosted, of the platform's own OS and architecture,
@@ -216,7 +220,7 @@ pub fn matches(pattern: &str, name: &str) -> bool {
 }
 
 /// The steps of `job`.
-fn steps(job: Option<&Node>) -> &[Node] {
+pub fn steps(job: Option<&Node>) -> &[Node] {
     match job.and_then(|j| entry(j, "steps")).map(|s| &s.value) {
         Some(Value::Seq(items)) => items,
         _ => &[],
@@ -224,7 +228,7 @@ fn steps(job: Option<&Node>) -> &[Node] {
 }
 
 /// The text at `path` (keys, one level each) under `node`.
-fn at<'a>(node: &'a Node, path: &[&str]) -> Option<&'a str> {
+pub fn at<'a>(node: &'a Node, path: &[&str]) -> Option<&'a str> {
     let mut here = node;
     for key in path {
         here = entry(here, key)?;
@@ -233,7 +237,7 @@ fn at<'a>(node: &'a Node, path: &[&str]) -> Option<&'a str> {
 }
 
 /// The steps of `job` that use the action `action` (`<owner>/<name>@`).
-fn using<'a>(job: Option<&'a Node>, action: &str) -> Vec<&'a Node> {
+pub fn using<'a>(job: Option<&'a Node>, action: &str) -> Vec<&'a Node> {
     steps(job)
         .iter()
         .filter(|s| at(s, &["uses"]).is_some_and(|u| u.starts_with(action)))
@@ -241,13 +245,13 @@ fn using<'a>(job: Option<&'a Node>, action: &str) -> Vec<&'a Node> {
 }
 
 /// The `run:` commands of `job`, each without its trailing newline.
-fn commands(job: Option<&Node>) -> Vec<&str> {
+pub fn commands(job: Option<&Node>) -> Vec<&str> {
     runs(job).into_iter().map(str::trim_end).collect()
 }
 
 /// One line per difference of the commands `got` of `name` from `want`: each one missing, each
 /// one that is not wanted, and an order other than `want`'s.
-fn command_problems(name: &str, got: &[&str], want: &[String]) -> Vec<String> {
+pub fn command_problems(name: &str, got: &[&str], want: &[String]) -> Vec<String> {
     let mut problems = Vec::new();
     for w in want {
         if !got.contains(&w.as_str()) {
@@ -271,7 +275,7 @@ fn command_problems(name: &str, got: &[&str], want: &[String]) -> Vec<String> {
 }
 
 /// One line per action of `job` (named `name`) that is not one of `allowed` (`<owner>/<name>@`).
-fn action_problems(name: &str, job: Option<&Node>, allowed: &[&str]) -> Vec<String> {
+pub fn action_problems(name: &str, job: Option<&Node>, allowed: &[&str]) -> Vec<String> {
     steps(job)
         .iter()
         .filter_map(|s| at(s, &["uses"]))
@@ -282,7 +286,7 @@ fn action_problems(name: &str, job: Option<&Node>, allowed: &[&str]) -> Vec<Stri
 
 /// One line per way `job` (named `name`) can be skipped or fail unseen: a job `if:` other than
 /// `job_if`, `continue-on-error` on it or a step, or an `if:` on a step that is not a cache save.
-fn execution_problems(name: &str, job: &Node, job_if: Option<&str>) -> Vec<String> {
+pub fn execution_problems(name: &str, job: &Node, job_if: Option<&str>) -> Vec<String> {
     let mut problems = Vec::new();
     let condition = at(job, &["if"]);
     if condition != job_if {
@@ -722,9 +726,47 @@ pub fn release_platform_problems(text: &str, platforms: &[&str]) -> Vec<String> 
     )
 }
 
-/// One line per job of the workflow `file` (`text`) that a pull request runs on a macOS runner:
-/// the workflow has a `pull_request` trigger and the job, on a runner whose name starts with
-/// `macos`, has another `if:` than [`NOT_FOR_A_PULL_REQUEST`].
+/// Whether `job` runs on a macOS runner: a label of its `runs-on` (a name, a list of labels, or
+/// a group and its labels) starts with `macos`.
+fn on_macos(job: &Node) -> bool {
+    let mut labels = Vec::new();
+    if let Some(runs_on) = entry(job, "runs-on") {
+        scalars(runs_on, &mut labels);
+    }
+    labels
+        .iter()
+        .any(|l| l.to_ascii_lowercase().starts_with("macos"))
+}
+
+/// One line per job of a workflow a pull request starts whose runner the lint cannot see: a
+/// `runs-on` that is an expression (a matrix value, an input), or a call of a reusable workflow
+/// (a job-level `uses:`), either of which could put the job on macOS unseen.
+fn unseen_runner_problems(file: &str, name: &str, job: &Node) -> Vec<String> {
+    let mut problems = Vec::new();
+    let mut labels = Vec::new();
+    if let Some(runs_on) = entry(job, "runs-on") {
+        scalars(runs_on, &mut labels);
+    }
+    if labels.iter().any(|l| l.contains("${{")) {
+        problems.push(format!(
+            "{file}: the job {name} of a pull request runs on an expression; name its runner, so the lint can tell whether it is macOS"
+        ));
+    }
+    if entry(job, "uses").is_some() {
+        problems.push(format!(
+            "{file}: the job {name} of a pull request calls a reusable workflow, whose runners the lint cannot see"
+        ));
+    }
+    problems
+}
+
+/// One line per job of the workflow `file` (`text`) that a pull request runs on a macOS runner
+/// where it may not, or with what it may not hold. The workflow has a `pull_request` trigger and
+/// the job is on macOS ([`on_macos`]) under another `if:` than [`NOT_FOR_A_PULL_REQUEST`]: it is
+/// refused unless it is the job `macos-arm64` of `macos.yml` under [`ON_THE_SURFACE`], and each
+/// such job is held to [`pull_request_job_problems`] (`contents: read` alone, no environment, no
+/// secret and no token in it or in the workflow's `env`). A job of such a workflow whose runner
+/// is an expression, or that calls a reusable workflow, is refused ([`unseen_runner_problems`]).
 pub fn pull_request_macos_problems(file: &str, text: &str) -> Vec<String> {
     let doc = match yaml::load(text) {
         Ok(doc) => doc,
@@ -733,16 +775,26 @@ pub fn pull_request_macos_problems(file: &str, text: &str) -> Vec<String> {
     if !names(entry(&doc, "on")).iter().any(|t| t == "pull_request") {
         return Vec::new();
     }
-    entry(&doc, "jobs")
-        .map_or(&[][..], entries)
-        .iter()
-        .filter(|(_, j)| at(j, &["runs-on"]).is_some_and(|r| r.starts_with("macos")))
-        .filter(|(_, j)| at(j, &["if"]) != Some(NOT_FOR_A_PULL_REQUEST))
-        .map(|(name, _)| {
-            format!(
-                "{file}: the job {} runs on macOS for a pull request; no macOS runner is part of a pull request's checks",
-                name.as_str().unwrap_or_default()
-            )
-        })
-        .collect()
+    let mut problems = Vec::new();
+    for (name, job) in entry(&doc, "jobs").map_or(&[][..], entries) {
+        let name = name.as_str().unwrap_or_default();
+        problems.extend(unseen_runner_problems(file, name, job));
+        let condition = at(job, &["if"]);
+        if !on_macos(job) || condition == Some(NOT_FOR_A_PULL_REQUEST) {
+            continue;
+        }
+        let gated = file == MACOS_PR && name == "macos-arm64" && condition == Some(ON_THE_SURFACE);
+        if !gated {
+            problems.push(format!(
+                "{file}: the job {name} runs on macOS for a pull request; only the job macos-arm64 of {MACOS_PR}, under `if: {ON_THE_SURFACE}`, may"
+            ));
+        }
+        problems.extend(pull_request_job_problems(
+            file,
+            name,
+            job,
+            entry(&doc, "env"),
+        ));
+    }
+    problems
 }

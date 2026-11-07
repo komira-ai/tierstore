@@ -19,10 +19,10 @@
 # SHA256SUMS lists the packages and the index; the attest job signs them as it signs the tarballs.
 #
 # A pull request builds, packages and sums the Linux files, their hostkeeper packages included,
-# and attests nothing; the macOS job does not run for a pull request (no macOS runner is part of a
-# pull request's checks), so the pull request's sums cover the Linux files alone and it has no
-# release index. A push to main builds every platform, also
-# signs, in the `attest` job, and then checks what it signed (`verify`), as a deployment does. A
+# and attests nothing; the macOS job of this file does not run for a pull request (a pull request
+# that changes the macOS surface runs the same macOS build in macos.yml, which signs and uploads
+# nothing), so the pull request's sums cover the Linux files alone and it has no release index.
+# A push to main builds every platform, also signs, in the `attest` job, and then checks what it signed (`verify`), as a deployment does. A
 # run by hand (workflow_dispatch) on a branch builds every platform, the macOS one included, and
 # sums them, and signs nothing: it is how a change to the macOS build is tried before it merges.
 # The attest job is in THIS file for one reason: the signer identity of an attestation is the
@@ -302,7 +302,9 @@ jobs:
   # binary must be to run, and is not notarized. Only this job can run it: release.yml's
   # check-binary runs the linux-x86_64 binary alone, so the build-commit steps below are the
   # version check of the macOS binary. It also runs the tests of the crates the binary is made
-  # of, which ci.yml runs on Linux only. Not for a pull request: on a push and by hand.
+  # of, which ci.yml runs on Linux only. Not for a pull request: on a push and by hand (macos.yml
+  # runs the same commands, with every test of the workspace, for a pull request on the macOS
+  # surface).
   macos-arm64:
     needs: [version]
     if: ${{ github.event_name != 'pull_request' }}
