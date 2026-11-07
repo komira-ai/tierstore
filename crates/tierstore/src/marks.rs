@@ -8,7 +8,8 @@
 //! its plain puts (`tiered/overwrite.rs`, `tiered/cold_land.rs`), which no server code calls yet;
 //! so does the leader's pass over the markers (`entry_reconciler/marks.rs`), which runs under the
 //! same format only, and so do the leader's eviction, copy-back and stray sweep (`marks_evict`,
-//! `marks_copy_back`, `marks_sweep`), which nothing the server runs calls yet.
+//! `marks_copy_back`, `marks_sweep`), which the `EntryReconciler` step runs
+//! (`entry_reconciler/passes.rs`) under the same format.
 //!
 //! - [`MarkBirth`] is the marker a create-only write makes where none exists (M1, M3, M10, M12).
 //! - [`MarkMove`] is a transition of a marker that exists (M2, M4, M4', M5 to M7, M9, M11, M13 and
