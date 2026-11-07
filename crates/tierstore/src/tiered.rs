@@ -791,7 +791,8 @@ impl Backend for Proxy {
     /// the object from one tier to the other, so versions are told apart by size alone: the proxy
     /// never replaces an object. Limit: a key that is deleted and put again with a body of the
     /// same size between two HEADs is not seen. A key named by its content (`cas/l/<digest>`) is
-    /// not affected, as its bytes are checked against the digest.
+    /// not affected, as its bytes are checked against the digest. The check of an old hit in the
+    /// local cache (`local_cache.revalidate_after`) does not ask this: it compares the tag as well.
     fn same_version(&self, a: &Meta, b: &Meta) -> bool {
         a.size == b.size
     }

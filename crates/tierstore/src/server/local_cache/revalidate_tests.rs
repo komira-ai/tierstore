@@ -5,6 +5,7 @@
 use std::time::Duration;
 
 use super::index::Index;
+use super::layout::{self, Sidecar};
 use super::metrics::Revalidated;
 use super::testing::{Rig, digest, pattern, tree, until};
 use super::{Backend as _, Mode};
@@ -303,6 +304,53 @@ async fn an_entry_found_on_the_disk_at_start_is_checked_by_its_first_hit() {
     assert_eq!(reopened.get("cas/b/obj", None).await.unwrap(), body);
     assert_eq!(upstream_calls(&rig), (1, 3));
     assert_eq!(reopened.counters().revalidations(Revalidated::Same), 1);
+}
+
+/// Asserts that an entry read back from the disk at start is compared by the tag its sidecar
+/// holds, not by its size: the object written over with other bytes of the same length while the
+/// process was down is read again by the first hit, and the next hit is served from the disk.
+#[tokio::test]
+async fn an_entry_found_on_the_disk_at_start_is_compared_by_the_tag_of_its_sidecar() {
+    let rig = filled("tscache-rv-start-tag", "cas/b/obj", &pattern(500)).await;
+    rig.replace("cas/b/obj", &[6_u8; 500]).await;
+    let reopened = rig.reopen();
+    assert_eq!(reopened.held(), (500, 1));
+    assert_eq!(
+        reopened.get("cas/b/obj", None).await.unwrap(),
+        vec![6_u8; 500]
+    );
+    assert_eq!(reopened.counters().revalidations(Revalidated::Changed), 1);
+    assert_eq!(upstream_calls(&rig), (2, 5));
+
+    assert_eq!(
+        reopened.get("cas/b/obj", None).await.unwrap(),
+        vec![6_u8; 500]
+    );
+    assert_eq!(upstream_calls(&rig), (2, 5));
+    assert_eq!(reopened.held(), (500, 1));
+}
+
+/// Asserts that an entry whose sidecar holds no tag (nothing the cache writes, but a sidecar is a
+/// file) is never taken for the upstream's version: its first hit reads the object again and the
+/// entry then has the upstream's tag.
+#[tokio::test]
+async fn an_entry_whose_sidecar_has_an_empty_tag_is_read_again_by_its_first_hit() {
+    let body = pattern(500);
+    let rig = filled("tscache-rv-no-tag", "cas/b/obj", &body).await;
+    let path = layout::meta_path(&rig.config.path, &layout::name_of("cas/b/obj").hex);
+    let mut sidecar: Sidecar = serde_json::from_slice(&std::fs::read(&path).unwrap()).unwrap();
+    sidecar.tag.clear();
+    std::fs::write(&path, serde_json::to_vec(&sidecar).unwrap()).unwrap();
+
+    let reopened = rig.reopen();
+    assert_eq!(reopened.get("cas/b/obj", None).await.unwrap(), body);
+    assert_eq!(reopened.counters().revalidations(Revalidated::Changed), 1);
+    assert_eq!(upstream_calls(&rig), (2, 5));
+    let healed: Sidecar = serde_json::from_slice(&std::fs::read(&path).unwrap()).unwrap();
+    assert_eq!(
+        healed.tag,
+        rig.tamper.memory.head("cas/b/obj").await.unwrap().tag
+    );
 }
 
 /// Asserts that an entry whose time is after the clock's (the clock was set back) is checked
