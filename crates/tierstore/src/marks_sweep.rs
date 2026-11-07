@@ -165,6 +165,11 @@ impl StraySweep {
     /// The sweep of the leader whose markers are `markers`, kept in the bucket `marks` (the one
     /// `markers` is over), which the format record names `bucket`.
     #[must_use]
+    #[expect(
+        clippy::too_many_arguments,
+        reason = "the handles and settings of one leader, each distinct; a struct of them would \
+                  only rename the list"
+    )]
     pub fn new(
         hot: Arc<dyn Backend>,
         cold: Arc<dyn Backend>,

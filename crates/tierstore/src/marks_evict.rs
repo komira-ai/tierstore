@@ -223,6 +223,11 @@ impl MarkEvictor {
     /// (the name the format record must give), over `hot` and `cold`; `records` is shared with the
     /// copier. The leader took over now, on `mono`.
     #[must_use]
+    #[expect(
+        clippy::too_many_arguments,
+        reason = "the handles and settings of one leader, each distinct; a struct of them would \
+                  only rename the list"
+    )]
     pub fn new(
         hot: Arc<dyn Backend>,
         cold: Arc<dyn Backend>,
