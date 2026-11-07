@@ -30,6 +30,12 @@ pub enum Error {
     /// [`Error::NotFound`] instead.
     #[error("key {0} cannot be stored by this backend")]
     InvalidKey(String),
+    /// A key with a path segment (text between `/`) that is exactly `.` or `..`. S3 takes such a
+    /// key, but the HTTP client of an S3 tier would rewrite the path before it sends the request,
+    /// and the farm's MinIO refuses the key itself, so no object can have it there. The front
+    /// answers it 400 `InvalidArgument` and names the rule, as it is not a length error.
+    #[error("key {0:?} has a path segment that is `.` or `..`, which the store does not take")]
+    InvalidSegment(String),
     /// A body whose bytes do not hash to the name of the object it is written under (a key
     /// named by its content). Nothing is stored.
     #[error("the body of {0} does not hash to the name of the object")]

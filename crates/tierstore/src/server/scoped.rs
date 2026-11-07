@@ -19,7 +19,7 @@
 //! all empty is refused (it could do nothing). A request signed by the key is allowed for the
 //! calls below, and only for a key (or a list prefix) that starts with a prefix of the list the
 //! call needs and, for a key, is longer than it, after the path is percent-decoded and with no
-//! `..`, no `.` segment and no control character in it:
+//! `.` or `..` segment and no character XML 1.0 forbids in it (`a..b` is a name):
 //!
 //! - **read**: GetObject and HeadObject of such a key; ListObjectsV2 and ListMultipartUploads
 //!   (`GET ?uploads`) with a `prefix` parameter that starts with a read prefix (a list with no

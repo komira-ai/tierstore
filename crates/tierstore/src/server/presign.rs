@@ -44,7 +44,7 @@
 //!
 //! - a `PUT` of one object whose key, after the path is percent-decoded, starts with the
 //!   prefix of the ceiling (a byte prefix, no normalization; the prefix ends in `/` and the key is
-//!   longer than it) and is a valid name: at most 1024 bytes, no control character (NUL included), no `..` anywhere and no `.` segment; never a
+//!   longer than it) and is a valid name: at most 1024 bytes, no character XML 1.0 forbids (NUL included) and no `.` or `..` segment (`a..b` is a name); never a
 //!   key under `_journal/` or `_tiering/`;
 //! - no multipart call, no `If-Match` (nothing is replaced), and no other method;
 //! - an `X-Amz-Expires` of at most the smaller of the ceiling's `max_expires_secs` and the
@@ -96,6 +96,7 @@ use super::keys::{AccessKey, Role, read_private_text};
 use super::ops::{MULTIPART, RESPONSE_OVERRIDES};
 use super::request::{Query, Target, header, query_pairs};
 use super::time::{amz_date, parse_amz_date};
+use super::xml;
 
 /// The payload hash of a presigned request.
 const UNSIGNED: &str = "UNSIGNED-PAYLOAD";
@@ -169,9 +170,11 @@ pub enum PresignError {
     Endpoint,
 }
 
-/// Whether `text` is a name that a key or a prefix may be: at most 1024 bytes, no control
-/// character (NUL included), no `..` anywhere and no `.` as a whole path segment. (A `..`
-/// anywhere is refused and not only as a segment, so that no encoding of one gets by.)
+/// Whether `text` is a name that a key or a prefix may be: at most 1024 bytes, no character
+/// that XML 1.0 forbids (NUL included; exactly the characters the front refuses in a key it
+/// stores) and no path segment (text between `/`) that is `.` or `..`. A name with dots in it
+/// (`a..b`, `.hidden`) is a name. The path is percent-decoded before the check, so an encoded
+/// dot segment (`%2e%2e`) is seen as one.
 ///
 /// # Errors
 /// [`PresignError::Name`] with the reason.
@@ -179,14 +182,14 @@ pub fn check_name(text: &str) -> Result<(), PresignError> {
     if text.len() > 1024 {
         return Err(PresignError::Name("over 1024 bytes"));
     }
-    if text.chars().any(char::is_control) {
-        return Err(PresignError::Name("a control character"));
+    if text.chars().any(xml::forbids) {
+        return Err(PresignError::Name("a character XML 1.0 forbids"));
     }
-    if text.contains("..") {
-        return Err(PresignError::Name("contains .."));
-    }
-    if text.split('/').any(|segment| segment == ".") {
-        return Err(PresignError::Name("a . segment"));
+    if text
+        .split('/')
+        .any(|segment| segment == "." || segment == "..")
+    {
+        return Err(PresignError::Name("a . or .. segment"));
     }
     Ok(())
 }

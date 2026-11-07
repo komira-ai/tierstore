@@ -24,6 +24,15 @@ pub(crate) fn escape(text: &str) -> String {
         .replace('\'', "&apos;")
 }
 
+/// Whether XML 1.0 has no character `c`: U+0000 to U+0008, U+000B, U+000C, U+000E to U+001F,
+/// U+FFFE and U+FFFF (tab, line feed, carriage return, U+007F and the C1 controls are allowed). A
+/// key with one cannot be carried by a listing a client reads as XML 1.0, so the front refuses to
+/// store it, and a presigned or scoped grant does not name it either.
+pub(crate) fn forbids(c: char) -> bool {
+    matches!(c, '\u{0}'..='\u{8}' | '\u{B}' | '\u{C}' | '\u{E}'..='\u{1F}')
+        || matches!(c, '\u{FFFE}' | '\u{FFFF}')
+}
+
 fn element(name: &str, text: &str) -> String {
     format!("<{name}>{text}</{name}>")
 }
