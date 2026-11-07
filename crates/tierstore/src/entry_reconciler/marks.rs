@@ -19,10 +19,10 @@
 //! saw that version ([`MarkBooks`]); a pass that finds the version unchanged for long enough acts,
 //! and until then the marker is left. A tombstone inside its hold is left without a request: the
 //! listing gives its version, which is the one the hold was noted under, so the marker, hot and
-//! cold are read once the hold has run out and not before. A version that changed starts the count again, and so does a
-//! new leader, which counts a wait up to one wait late and never early. A version is first seen
-//! when the page that lists it is listed, by the clock read then, not at the start of the pass: the
-//! work on the pages before it can take longer than a wait.
+//! cold are read once the hold has run out and not before. A version that changed starts the
+//! count again, and so does a new leader, which counts a wait up to one wait late and never
+//! early. A version is first seen when the page that lists it is listed, by the clock read then,
+//! not at the start of the pass: the work on the pages before it can take longer than a wait.
 
 use std::collections::{BTreeMap, BTreeSet};
 use std::sync::Arc;
