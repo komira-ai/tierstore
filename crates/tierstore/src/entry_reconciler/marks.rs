@@ -102,6 +102,14 @@ pub(super) struct Hold {
     pub(super) tags: Option<(String, String)>,
 }
 
+impl Hold {
+    /// Whether the hold noted this pair of tags: the hot object and the cold object it wrote.
+    pub(super) fn has_pair(&self, hot: &str, cold: &str) -> bool {
+        let pair = self.tags.as_ref().map(|(h, c)| (h.as_str(), c.as_str()));
+        pair == Some((hot, cold))
+    }
+}
+
 /// What a pass knows of one marker beyond its body.
 #[derive(Clone, Debug, Default, PartialEq, Eq)]
 pub(super) struct Look {

@@ -129,10 +129,7 @@ impl EntryReconciler {
         let held = look
             .held
             .as_ref()
-            .filter(|held| {
-                let pair = held.tags.as_ref();
-                pair.is_some_and(|(h, c)| *h == hot.tag && c == cold_tag)
-            })
+            .filter(|held| held.has_pair(&hot.tag, cold_tag))
             .map(|held| held.at);
         let copied_at = written
             .or(held)
@@ -205,8 +202,7 @@ impl EntryReconciler {
         let held = look
             .held
             .as_ref()
-            .and_then(|held| held.tags.as_ref())
-            .is_some_and(|(h, c)| *h == hot.tag && *c == cold.tag);
+            .is_some_and(|held| held.has_pair(&hot.tag, &cold.tag));
         let recorded = side.records.copied_at(key, &hot.tag, &cold.tag).is_some();
         hot.size == cold.size && (same_md5 || held || recorded)
     }

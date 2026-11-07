@@ -537,3 +537,69 @@ async fn the_successor_of_a_leader_that_died_in_a_copy_back_reaps_its_lock_and_s
     assert_eq!(successor.step().await, report(1, 0));
     assert_eq!(rig.hot_body("k").await, Some(bytes("v")));
 }
+
+/// Asserts that an eviction cycle that runs out of candidates above the low water stays open, so
+/// that the next step goes on with it though the figure is under the high water: of three objects
+/// of ten, thirty and forty-five bytes with one candidate offered, the step evicts the oldest
+/// (seventy-five bytes left) and reports the cycle open, the next step has nothing to offer and
+/// reports it still open, and a leader with no figure yet evicts nothing.
+#[tokio::test]
+async fn a_cycle_that_runs_out_of_candidates_stays_open_for_the_next_step() {
+    let rig = Rig::new();
+    rig.activate().await;
+    for (key, size) in [("a", 10), ("b", 30), ("c", 45)] {
+        rig.hot
+            .put(key, Bytes::from("x".repeat(size)))
+            .await
+            .unwrap();
+        rig.cold
+            .put(key, Bytes::from("x".repeat(size)))
+            .await
+            .unwrap();
+        rig.clock.advance(1000);
+    }
+    let mut leader = rig.leader_with("r1", |config| {
+        tight(config);
+        config.candidate_limit = 1;
+    });
+    let mut idle = StepReport::default();
+    let side = leader.marks.clone().unwrap();
+    leader.mark_evict(&side, 0, &mut idle).await;
+    assert_eq!(idle, StepReport::default());
+
+    assert_eq!(
+        leader.step().await,
+        StepReport {
+            evicting: true,
+            ..evicting(1, 1, 0)
+        }
+    );
+    assert!(rig.hot_body("a").await.is_none());
+    let next = leader.step().await;
+    assert_eq!(
+        next,
+        StepReport {
+            evicting: true,
+            ..report(0, 0)
+        }
+    );
+    assert!(rig.hot_body("b").await.is_some());
+}
+
+/// Asserts that the `CLEARING` marker of a live owner is left (counted as pinned) until its owner
+/// departs, the lease of the lock runs out, or it is the leader's own.
+#[tokio::test]
+async fn a_clearing_marker_of_a_live_owner_is_left() {
+    let rig = Rig::new();
+    rig.activate().await;
+    rig.register("p1").await;
+    let mut clearing = lock("k", MarkerWhy::Overwrite, "p1", false);
+    clearing.st = MarkerState::Clearing;
+    rig.plant(clearing).await;
+    let mut leader = rig.leader("r1");
+    assert_eq!(leader.step().await, report(0, 1));
+    assert_eq!(
+        rig.shape("k").await,
+        Some((MarkerState::Clearing, false, true))
+    );
+}
