@@ -602,7 +602,7 @@ fn the_door_waits_for_a_free_slot_no_longer_than_its_grace() {
         // nothing in it, shuts its end and lingers, and the door closes.
         lingering(&drain).await;
         let _ = door_closed.await;
-        let _hold = ClockHold::new();
+        let _hold = ();
 
         let mut answer = Vec::new();
         let _ = waiting.read_to_end(&mut answer).await;
