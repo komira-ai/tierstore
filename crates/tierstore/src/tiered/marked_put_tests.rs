@@ -191,13 +191,15 @@ async fn an_upload_begun_in_cold_is_not_completed_on_markers() {
 }
 
 /// Asserts that a put is refused with 503 and touches nothing, marker included, when the format
-/// says `active-marks` with a marks bucket other than this proxy's, when it records none, when this
-/// proxy has no marks bucket or no name for it, and when there is no format object.
+/// says `active-marks` with a marks bucket other than this proxy's, when it records none, when it
+/// records no epoch or one below 3, when this proxy has no marks bucket or no name for it, and when there is no format object.
 #[tokio::test]
 async fn a_put_is_refused_unless_the_format_records_the_marks_bucket_this_proxy_has() {
     let other = r#"{"epoch":3,"marks_bucket":"another","phase":"active-marks"}"#;
     let none = r#"{"epoch":3,"phase":"active-marks"}"#;
-    for format in [other, none, ""] {
+    let no_epoch = r#"{"marks_bucket":"hot-marks","phase":"active-marks"}"#;
+    let early = r#"{"epoch":2,"marks_bucket":"hot-marks","phase":"active-marks"}"#;
+    for format in [other, none, no_epoch, early, ""] {
         let rig = MarkRig::with_format(format).await;
         let put = rig.proxy.put("k", body("v")).await;
         assert!(

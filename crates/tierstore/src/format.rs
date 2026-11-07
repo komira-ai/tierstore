@@ -19,14 +19,14 @@
 //!   marker in the marks bucket in place of the entry of a key. This release reads the word and
 //!   the optional `marks_bucket` that names the bucket. A read that misses the hot tier reads the
 //!   marker of its key beside the cold read (and a listing reads the marker names) in this phase,
-//!   in `drain` and `drained`, and in a phase it does not know. Under it a proxy whose own marks
-//!   bucket is the one named makes its puts (a put, a streamed put, a presigned put, and the parts
-//!   and the completion of a multipart upload) on markers, and a read of a key only the cold tier
-//!   has writes the `WANT` marker that asks for a copy-back; every other write (a delete) is
-//!   answered [`Error::Unavailable`], as for a phase it does not take as active; a proxy with
-//!   another marks bucket, or none, answers every write so. Nothing pauses, and the entry
-//!   reconciler does nothing. A release before it takes the phase to be one it does not know,
-//!   which is the same as the second.
+//!   in `drain` and `drained`, and in a phase it does not know. Under it, with epoch 3 or more and
+//!   a `marks_bucket` that is the one the proxy is configured with, a proxy makes its puts (a put,
+//!   a streamed put, a presigned put, and the parts and the completion of a multipart upload) on
+//!   markers, and a read of a key only the cold tier has writes the `WANT` marker that asks for
+//!   a copy-back; every other write (a delete) is answered [`Error::Unavailable`], as for a phase
+//!   it does not take as active; a proxy with another marks bucket, or none, answers every write
+//!   so. Nothing pauses, and the entry reconciler does nothing. A release before it takes the
+//!   phase to be one it does not know, which is the same as the second.
 //! - `active`: the change is done. With `"epoch": 2` or more a proxy makes its writes on the
 //!   entries of their keys; it never pauses writes for it. A proxy of this release makes no write
 //!   under any other format: no object, `active` below epoch 2 and a phase it does not know are
@@ -84,22 +84,30 @@ impl Format {
     pub(crate) fn pauses_writes(&self) -> bool {
         matches!(self.phase, FormatPhase::Drain | FormatPhase::Drained)
     }
-
-    /// Whether the markers of the put-without-lock design are in force: the phase is
-    /// `active-marks`. The name of the bucket is [`Format::marks_bucket`].
-    pub(crate) fn runs_marks(&self) -> bool {
-        self.phase == FormatPhase::ActiveMarks
-    }
 }
 
 /// The first epoch whose writes are made on entries.
 pub(crate) const ENTRIES_EPOCH: u64 = 2;
+
+/// The first epoch whose writes are made on markers.
+pub(crate) const MARKS_EPOCH: u64 = 3;
 
 impl Format {
     /// Whether a proxy that reads this makes its writes on entries: the phase is `active` and the
     /// epoch is [`ENTRIES_EPOCH`] or later.
     pub(crate) fn runs_entries(&self) -> bool {
         self.phase == FormatPhase::Active && self.epoch.is_some_and(|epoch| epoch >= ENTRIES_EPOCH)
+    }
+}
+
+impl Format {
+    /// The name of the marks bucket if the phase is `active-marks` at [`MARKS_EPOCH`] or later and
+    /// the record names the bucket: then the writes that are built are made on markers, in that
+    /// bucket. A record that lacks the epoch or the name is not one a proxy writes under.
+    pub(crate) fn runs_marks(&self) -> Option<&str> {
+        let runs = self.phase == FormatPhase::ActiveMarks
+            && self.epoch.is_some_and(|epoch| epoch >= MARKS_EPOCH);
+        self.marks_bucket.as_deref().filter(|_| runs)
     }
 }
 

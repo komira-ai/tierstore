@@ -7,7 +7,7 @@
 //! from the same kept answer (`mark_reads.rs`). Which of the two a put takes is decided here, once
 //! for the put, from the one read of the format object: [`WriteRoute`].
 
-use std::sync::Mutex;
+use std::sync::{Arc, Mutex};
 use std::time::Duration;
 
 use tokio::sync::Mutex as AsyncMutex;
@@ -41,9 +41,10 @@ pub(super) struct Pause {
     entries: bool,
     /// The phase the last object read says. Kept when a read fails.
     phase: Known,
-    /// Whether the last object read says `active-marks`, and then the name of the marks bucket it
-    /// records (none if it records none). Kept when a read fails.
-    marks: Option<Option<String>>,
+    /// The marks bucket the last object read says writes are made in, if it says that they are
+    /// made on markers (`active-marks` at epoch 3 or later, with the bucket named). Kept when a
+    /// read fails.
+    marks: Option<String>,
 }
 
 impl Pause {
@@ -52,9 +53,7 @@ impl Pause {
         self.paused = format.is_some_and(Format::pauses_writes);
         self.entries = format.is_some_and(Format::runs_entries);
         self.phase = format.map_or(Known::Missing, |format| Known::Phase(format.phase));
-        self.marks = format
-            .filter(|format| format.runs_marks())
-            .map(|format| format.marks_bucket.clone());
+        self.marks = format.and_then(Format::runs_marks).map(str::to_owned);
     }
 
     fn state(&self) -> FormatState {
@@ -76,8 +75,8 @@ pub(super) struct FormatState {
     pub(super) entries: bool,
     /// The phase the object names.
     pub(super) phase: Known,
-    /// The format says `active-marks`, and records this marks bucket (`None`: none).
-    pub(super) marks: Option<Option<String>>,
+    /// The format opens writes on markers, in this marks bucket.
+    pub(super) marks: Option<String>,
 }
 
 impl FormatState {
@@ -94,12 +93,6 @@ impl FormatState {
             Known::Missing | Known::Phase(FormatPhase::Active)
         )
     }
-
-    /// Whether the markers are in force (`active-marks`): the only phase in which a read writes
-    /// one.
-    pub(super) fn marks_in_force(&self) -> bool {
-        self.phase == Known::Phase(FormatPhase::ActiveMarks)
-    }
 }
 
 /// The refusal of a write that waits for the format to say `active` at epoch 2.
@@ -114,7 +107,7 @@ pub(super) enum WriteRoute<'a> {
     /// On the entry of the key (`entry_put.rs`).
     Entries,
     /// On the marker of the key (`marked_put.rs`), by the calls of these markers.
-    Marks(&'a Markers),
+    Marks(&'a Arc<Markers>),
 }
 
 /// Reads the format object of `hot` now, within `limit`, and keeps what it says as a read of a write
@@ -156,7 +149,7 @@ impl Inner {
             return Err(Error::Unavailable(why.to_owned()));
         }
         if let Some(recorded) = state.marks {
-            return self.marks_route(recorded.as_deref());
+            return self.marks_route(&recorded);
         }
         if !state.entries {
             return Err(waits_for_entries());
@@ -167,19 +160,18 @@ impl Inner {
     /// The route of a write under `active-marks`, for a format that records the marks bucket
     /// `recorded`: marks if this proxy has the markers of that bucket, and else a refusal, so
     /// that two names are never in use at once.
-    fn marks_route(&self, recorded: Option<&str>) -> Result<WriteRoute<'_>, Error> {
+    fn marks_route(&self, recorded: &str) -> Result<WriteRoute<'_>, Error> {
         let mine = self.config.marks_name.as_deref();
-        match (&self.markers, recorded) {
-            (Some(markers), Some(recorded)) if mine == Some(recorded) => {
-                Ok(WriteRoute::Marks(markers))
-            }
+        match (&self.markers, mine) {
+            (Some(markers), Some(mine)) if mine == recorded => Ok(WriteRoute::Marks(markers)),
             // A proxy with no marks bucket does not act on the phase: its refusal is the one it
             // always gave.
             (None, _) => Err(waits_for_entries()),
             _ => {
                 let why = format!(
-                    "the format object records the marks bucket {recorded:?}, and this proxy's \
-                     is {mine:?}: writes wait until hot_store.marks_bucket is the recorded one"
+                    "the format record puts the markers in the bucket {recorded:?}, which is not \
+                     this proxy's marks bucket ({mine:?}); writes are refused until \
+                     hot_store.marks_bucket is the recorded one"
                 );
                 #[cfg(feature = "server")]
                 tracing::warn!("tierstore: {why}");
