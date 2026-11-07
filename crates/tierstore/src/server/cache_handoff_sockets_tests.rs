@@ -413,7 +413,7 @@ async fn takes_the_same_sockets(shape: Shape, listen: &[&str]) {
     assert_eq!(new.unwrap(), Drained { abandoned: 0 }, "{shape:?}");
 }
 
-/// Asserts (T02) that an address that is not loopback gets the loopback socket of a cache:
+/// Asserts (T02) that an address other than 127.0.0.1 gets the 127.0.0.1 socket of a cache:
 /// a node listening on [`beside_loopback`] at port 0 (`127.0.0.2:0` on Linux, `[::1]:0` on
 /// macOS) offers that socket and 127.0.0.1 on a port of its own, the second node takes both and
 /// binds nothing, and a client on the 127.0.0.1 socket is answered after the first has ended; a
@@ -441,8 +441,8 @@ async fn a_wildcard_address_hands_over_one_socket() {
 /// Asserts (T02) that two non-loopback addresses and the added loopback socket are handed over
 /// in the order of the list and then the loopback one, each on a port of its own: three sockets
 /// for a cache and two for a storage node with none, the same ones in the second node. Linux
-/// only: it needs two loopback addresses other than 127.0.0.1 that are not the same, and macOS
-/// has one, `::1` (a wildcard would listen beyond loopback).
+/// only: it needs two distinct loopback addresses other than 127.0.0.1, and macOS has
+/// one, `::1` (a wildcard would listen beyond loopback).
 #[cfg(target_os = "linux")]
 #[tokio::test]
 async fn two_addresses_are_handed_over_in_order_with_the_loopback_socket_last() {
