@@ -35,6 +35,64 @@ async fn a_gone_marker_with_no_hot_object_deletes_cold_holds_for_the_tombstone_h
     assert_eq!(rig.cold_calls.calls(Op::Put), 0);
 }
 
+/// Asserts that a tombstone inside its hold costs the store no request at all: after the pass
+/// that deleted the cold object, every pass before `tombstone_hold` has run out reads neither the
+/// marker nor hot nor cold for the key (the listing already gave the version the hold was noted
+/// under), however many passes there are, and each still counts the marker as pinned. Catches a
+/// leader that re-read the marker and HEADed hot for every gone marker on every pass of the hold.
+#[tokio::test]
+async fn a_tombstone_inside_its_hold_costs_no_request_per_pass() {
+    let rig = Rig::new();
+    rig.activate().await;
+    rig.cold.put("k", bytes("deleted")).await.unwrap();
+    rig.plant(gone("k")).await;
+    let mut leader = rig.leader("r1");
+    assert_eq!(leader.step().await, report(1, 0));
+    let requests = || {
+        (
+            rig.marks_calls.calls_on(Op::Get, "k"),
+            rig.hot_calls.calls_on(Op::Head, "k"),
+            rig.cold_calls.call_log().len(),
+        )
+    };
+    let before = requests();
+
+    for _ in 0..11 {
+        rig.pass(Duration::from_secs(10));
+        assert_eq!(leader.step().await, report(0, 1));
+    }
+
+    assert_eq!(requests(), before);
+    assert_eq!(rig.shape("k").await, Some((MarkerState::Dirty, true, true)));
+}
+
+/// Asserts that the work of a tombstone is done once, when the hold ends, and not before: over
+/// the whole life of a deleted key the leader reads the marker twice (the pass that starts the
+/// hold and the pass that ends it), HEADs hot twice and cold once (at the end), deletes cold once,
+/// and clears the marker.
+#[tokio::test]
+async fn a_tombstone_is_checked_once_when_its_hold_ends() {
+    let rig = Rig::new();
+    rig.activate().await;
+    rig.cold.put("k", bytes("deleted")).await.unwrap();
+    rig.plant(gone("k")).await;
+    let mut leader = rig.leader("r1");
+    assert_eq!(leader.step().await, report(1, 0));
+    for _ in 0..11 {
+        rig.pass(Duration::from_secs(10));
+        assert_eq!(leader.step().await, report(0, 1));
+    }
+
+    rig.pass(Duration::from_secs(10));
+    assert_eq!(leader.step().await, report(1, 0));
+
+    assert_eq!(rig.shape("k").await, None);
+    assert_eq!(rig.marks_calls.calls_on(Op::Get, "k"), 2);
+    assert_eq!(rig.hot_calls.calls_on(Op::Head, "k"), 2);
+    assert_eq!(rig.cold_calls.calls(Op::Head), 1);
+    assert_eq!(rig.cold_calls.calls(Op::Delete), 1);
+}
+
 /// Asserts that a cold object that a stalled leader published late, during the hold, is deleted
 /// again at the end of it and held again: the marker is cleared only by a pass that finds cold
 /// absent.
@@ -139,6 +197,39 @@ async fn a_marker_that_said_gone_is_held_after_the_cold_overwrite_before_it_is_c
     assert_eq!(leader.step().await, report(1, 0));
     assert_eq!(rig.shape("k").await, None);
     assert_eq!(rig.cold_calls.calls(Op::PutIfMatch), 1);
+}
+
+/// Asserts that a hold after a cold overwrite (hot holds the key, the marker says `gone`) costs
+/// the store no request per pass either: the passes inside the hold read neither the marker nor
+/// hot nor cold for the key and count it as pinned, and the pass after the hold clears the marker.
+#[tokio::test]
+async fn a_hold_after_a_cold_overwrite_costs_no_request_per_pass() {
+    let rig = Rig::new();
+    rig.activate().await;
+    rig.hot.put("k", bytes("recreated")).await.unwrap();
+    rig.cold.put("k", bytes("deleted")).await.unwrap();
+    rig.plant(gone("k")).await;
+    let mut leader = rig.leader("r1");
+    assert_eq!(leader.step().await, report(1, 0));
+    let requests = || {
+        (
+            rig.marks_calls.calls_on(Op::Get, "k"),
+            rig.hot_calls.calls_on(Op::Head, "k"),
+            rig.cold_calls.call_log().len(),
+        )
+    };
+    let before = requests();
+
+    for _ in 0..11 {
+        rig.pass(Duration::from_secs(10));
+        assert_eq!(leader.step().await, report(0, 1));
+    }
+    assert_eq!(requests(), before);
+    assert_eq!(rig.shape("k").await, Some((MarkerState::Dirty, true, true)));
+
+    rig.pass(Duration::from_secs(10));
+    assert_eq!(leader.step().await, report(1, 0));
+    assert_eq!(rig.shape("k").await, None);
 }
 
 /// Asserts the safety of a delete that overtakes a copy (the leader's half of a delete during a

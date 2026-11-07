@@ -9,10 +9,12 @@
 #
 # - `workflow_run`: the completion of a run of `ci` or of `artifacts` on main. Both workflows run
 #   on every push to main, side by side, so this starts once for each of them. Only a run that
-#   succeeded, for a push, to main of this repository, is acted on (the `if:` of `plan`); and the
-#   plan lets the run that finishes last go on, because it looks for a successful push run of
-#   both for that commit (`cargo xtask release plan`). The other starts, finds one missing, and
-#   ends green with nothing to do. No tag starts this workflow.
+#   succeeded, for a push, to main of this repository, is acted on (the `if:` of `plan`). The plan
+#   does not plan the commit that run built: it walks the first-parent history of the tip of main
+#   (`github.sha`) down to the highest release tag, newest first, and releases the newest commit
+#   that is ready (`cargo xtask release plan`). So a run that a newer one replaced in the group
+#   below, or one that started before the other workflow finished, leaves nothing behind. No tag
+#   starts this workflow.
 # - `workflow_dispatch`: the manual override, from main, with the tag (`v<major>.<minor>.<patch>`)
 #   and the full SHA of the commit, as before. It is not held by the freeze.
 #
@@ -21,16 +23,21 @@
 # pull request. Making them callable would move the push runs `release locate` and the
 # attestation check look for. `workflow_run` leaves both files as they are.
 #
-# plan     read-only. Decides whether this commit is released and as which tag, and prints it
-#          (cargo xtask release plan; by hand, cargo xtask release manual). No release when the
-#          repository variable RELEASE_FREEZE is set to anything but empty or `false`; when ci or artifacts has no successful
-#          push run for the commit yet; when an existing release already covers it; or when
-#          everything since the highest release tag is documentation (the paths are listed in
-#          docs/ci-and-release.md and held by a test). Otherwise the tag is the patch after the
-#          highest v<major>.<minor>.<patch> tag, or the version in the VERSION file at the root
-#          when that is higher. The change is measured from the highest tag, not from the push,
-#          so the code of a push whose run was replaced or failed is in the next release. The note
-#          lists the titles of the commits since that tag.
+# plan     read-only. Decides which commit is released and as which tag, and prints it
+#          (cargo xtask release plan; by hand, cargo xtask release manual). The tag is the patch
+#          after the highest v<major>.<minor>.<patch> tag, or the version in the VERSION file at
+#          the root when that is higher. The commit is the newest of main, down to the highest
+#          tag, that is ready: ci and artifacts each have a successful push run for it, and its
+#          artifacts run recorded that version (the `version-<X.Y.Z>` artifact), so its binary
+#          says the tag. A commit built under an older version (a release was published after its
+#          build) is passed over, not retried: a newer commit's release carries its changes. No
+#          release when the repository variable RELEASE_FREEZE is set to anything but empty or
+#          `false`; when an existing release already covers the tip; when no commit is ready; or
+#          when everything since the highest release tag is documentation (the paths are listed
+#          in docs/ci-and-release.md and held by a test). The change is measured from the highest
+#          tag, not from the push, so the code of a push whose run was replaced, failed or was
+#          passed over is in the next release. The note lists the titles of the commits since
+#          that tag.
 # verify   refuses a commit that is not on main, or that lacks a successful push run of
 #          artifacts.yml (the files and their signatures) or of ci.yml (the lint and the tests)
 #          (cargo xtask release locate), downloads the files of that run, makes the release index
@@ -49,9 +56,9 @@
 # verify also runs the downloaded linux-x86_64 binary with `--version` and refuses to go on
 # unless it says exactly the tag (without the v) and the first 12 digits of the commit
 # (cargo xtask release check-binary): artifacts.yml built it under the version that
-# `cargo xtask release version` computed, and the plan names the tag with the same computation,
-# so they differ only when a tag appeared between the build and the release, and then nothing
-# is published.
+# `cargo xtask release version` computed and recorded, and the plan chose a commit whose record
+# is the tag, so this holds unless a tag appeared between the plan and the check, and then
+# nothing is published.
 #
 # One release action at a time, never cancelled: the group has two
 # conditions (`release-main` for a run that succeeded for a push to this repository, a group
@@ -61,7 +68,7 @@
 # workflow lint finds them by what they do and holds each to it (artifacts.yml, which only
 # builds and attests, is exempt and has a group per commit).
 # GitHub keeps one waiting run per group, so a third replaces the second; nothing is lost by
-# that, since the plan measures from the highest tag. A manual run of this workflow takes a group
+# that, since every plan walks from the tip of main and measures from the highest tag. A manual run of this workflow takes a group
 # of its own (publish refuses a tag or release that exists). The lint also holds `contents: write`
 # to the `publish` job alone, `plan` to read access, and this file to no build and no signing
 # step.
@@ -118,21 +125,21 @@ jobs:
       commit: ${{ steps.auto.outputs.commit || steps.manual.outputs.commit }}
       note: ${{ steps.auto.outputs.note || steps.manual.outputs.note }}
     steps:
-      # The commit the run built, not `github.sha` (for a `workflow_run`, the newest commit of
-      # main): its VERSION file is the one read.
+      # For a `workflow_run`, `github.sha`: the newest commit of main, the tip the plan walks
+      # from, not the commit the completed run built. Its VERSION file is the one read.
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
         with:
-          ref: ${{ github.event_name == 'workflow_run' && github.event.workflow_run.head_sha || inputs.commit }}
+          ref: ${{ github.event_name == 'workflow_run' && github.sha || inputs.commit }}
           persist-credentials: false
       - run: rustup toolchain install
       - name: Compile xtask
         run: cargo xtask --help
-      - name: Whether this push is released, and as which tag
+      - name: Which commit of main is released, and as which tag
         id: auto
         if: ${{ github.event_name == 'workflow_run' }}
         env:
           GH_TOKEN: ${{ github.token }}
-          COMMIT: ${{ github.event.workflow_run.head_sha }}
+          COMMIT: ${{ github.sha }}
           # The stop switch: `true` releases nothing until an admin clears it.
           FREEZE: ${{ vars.RELEASE_FREEZE }}
         run: cargo xtask release plan --repo "$GITHUB_REPOSITORY" --commit "$COMMIT" --version-file VERSION --freeze "$FREEZE" --output "$GITHUB_OUTPUT"

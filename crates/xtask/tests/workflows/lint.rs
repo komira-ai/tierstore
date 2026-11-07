@@ -262,8 +262,14 @@ const PLAN_GUARDS: [&str; 4] = [
 /// for a push to `main` of this repository.
 const PLAN_IF: &str = "${{ github.ref == 'refs/heads/main' && (github.event_name == 'workflow_dispatch' || (github.event_name == 'workflow_run' && github.event.workflow_run.conclusion == 'success' && github.event.workflow_run.event == 'push' && github.event.workflow_run.head_branch == 'main' && github.event.workflow_run.head_repository.full_name == github.repository)) }}";
 
-/// The checkout of the plan job: the commit the run built, or the one a manual run names.
-const PLAN_REF: &str = "${{ github.event_name == 'workflow_run' && github.event.workflow_run.head_sha || inputs.commit }}";
+/// The checkout of the plan job: the tip of `main` it walks from, or the commit a manual run
+/// names.
+const PLAN_REF: &str = "${{ github.event_name == 'workflow_run' && github.sha || inputs.commit }}";
+
+/// The commit the plan is given: the tip of `main` (for a `workflow_run`, the newest commit of
+/// the default branch), not the commit the completed run built, which may be one a release has
+/// since passed by.
+const PLAN_COMMIT: &str = "${{ github.sha }}";
 
 /// The `cargo xtask` verbs release.yml may run; the others build or fetch.
 const XTASK_VERBS: [&str; 4] = ["--help", "release", "sums", "verify-assets"];
@@ -370,9 +376,8 @@ pub fn release_problems(text: &str) -> Vec<String> {
             .and_then(|e| entry(e, key))
             .and_then(Node::as_str)
     };
-    if auto_env("COMMIT") != Some("${{ github.event.workflow_run.head_sha }}") {
-        problems
-            .push("plan: env COMMIT is not ${{ github.event.workflow_run.head_sha }}".to_owned());
+    if auto_env("COMMIT") != Some(PLAN_COMMIT) {
+        problems.push(format!("plan: env COMMIT is not {PLAN_COMMIT}"));
     }
     if auto_env("FREEZE") != Some("${{ vars.RELEASE_FREEZE }}") {
         problems.push("plan: env FREEZE is not ${{ vars.RELEASE_FREEZE }}".to_owned());
@@ -522,6 +527,40 @@ pub fn artifacts_problems(text: &str) -> Vec<String> {
         .any(|r| r.contains("--version-file VERSION"))
     {
         problems.push("version job: release version lacks --version-file VERSION".to_owned());
+    }
+    // The version is recorded on the run under the name the release plan reads.
+    let record = format!(
+        "{}${{{{ steps.version.outputs.version }}}}",
+        xtask::release::VERSION_ARTIFACT
+    );
+    let steps: &[Node] = match version.and_then(|j| entry(j, "steps")).map(|s| &s.value) {
+        Some(Value::Seq(items)) => items,
+        _ => &[],
+    };
+    let recorded = steps.iter().any(|s| {
+        let uses = entry(s, "uses").and_then(Node::as_str).unwrap_or_default();
+        let with = |key: &str| {
+            entry(s, "with")
+                .and_then(|w| entry(w, key))
+                .and_then(Node::as_str)
+        };
+        uses.starts_with("actions/upload-artifact@")
+            && with("name") == Some(record.as_str())
+            && with("path") == Some("${{ runner.temp }}/version")
+            && with("if-no-files-found") == Some("error")
+    });
+    if !recorded {
+        problems.push(format!(
+            "version job: no upload-artifact step named {record} of ${{{{ runner.temp }}}}/version with if-no-files-found: error"
+        ));
+    }
+    if !version_runs
+        .iter()
+        .any(|r| r.contains("release version") && r.contains("--record \"$RUNNER_TEMP/version\""))
+    {
+        problems.push(
+            "version job: release version lacks --record \"$RUNNER_TEMP/version\"".to_owned(),
+        );
     }
     let output = version
         .and_then(|j| entry(j, "outputs"))
