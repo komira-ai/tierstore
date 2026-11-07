@@ -45,10 +45,9 @@ thiserror = "2.0.21"
 ureq = { version = "3.4.2", default-features = false, features = ["rustls-no-provider"] }
 
 [dev-dependencies]
-# The tests of the hostkeeper package (tests/hostkeeper_package) also read it with the
-# placed-path lint of hostkeeper's main and the loader that lint is built on, which loads the
-# macOS package's launchd job (the root `Cargo.toml` says which commits and why two).
-hostkeeper-config-main.workspace = true
+# The tests of the hostkeeper package (tests/hostkeeper_package) also check it with hostkeeper's
+# placed-path lint, at the commit of hostkeeper's loader and unpacker (the root `Cargo.toml` says
+# which).
 hostkeeper-placed.workspace = true
 # The launchd plist of the macOS package, read as XML.
 roxmltree.workspace = true
