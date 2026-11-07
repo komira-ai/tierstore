@@ -26,13 +26,15 @@ pub(super) const READ_RETRY_WAIT: Duration = Duration::from_millis(50);
 /// [`S3Tuning::endpoint_attempts`].
 pub const ENDPOINT_ATTEMPTS: u32 = 3;
 
-/// How long an unused pooled connection is kept before the client drops it. reqwest's
-/// default is 90 s, longer than many servers and proxies keep an idle connection; a
-/// request sent on a connection the peer has already closed fails with "connection
-/// closed before message completed". Dropping idle connections after 30 s keeps the
-/// client's side shorter than common load-balancer and server idle closes (often 60 s;
-/// some paths close at about 20 s). This is the default of [`S3Tuning::pool_idle_timeout`].
-pub(super) const POOL_IDLE_TIMEOUT: Duration = Duration::from_secs(30);
+/// How long an unused pooled connection is kept before the client drops it. A request
+/// written to a connection the peer has just closed fails with "connection closed before
+/// message completed", and it is not sent again because the store may have read it. So
+/// the client's idle timeout must be clearly shorter than the idle close of the store and
+/// of any proxy in front of it. MinIO closes idle connections after 30 s by default
+/// (`--idle-timeout`), so this default is half of that. reqwest's default is 90 s. A
+/// proxy that closes sooner than this, or a restart of the store, can still hit the
+/// race. This is the default of [`S3Tuning::pool_idle_timeout`].
+pub(super) const POOL_IDLE_TIMEOUT: Duration = Duration::from_secs(15);
 
 /// The settings of a store that are the same for every bucket. `S3Store::new` takes the
 /// defaults; [`S3Store::new_tuned`](super::S3Store::new_tuned) takes these.
@@ -78,9 +80,10 @@ mod tests {
     use super::*;
 
     #[test]
-    fn the_defaults_are_the_values_before_they_were_settings() {
+    fn the_defaults_are_the_values_before_they_were_settings_except_the_pool_idle_timeout() {
         let tuning = S3Tuning::default();
-        assert_eq!(tuning.pool_idle_timeout, Duration::from_secs(30));
+        // The one deliberate change: 15 s, below MinIO's 30 s idle close (it was 30 s).
+        assert_eq!(tuning.pool_idle_timeout, Duration::from_secs(15));
         assert_eq!(tuning.read_retries, 2);
         assert_eq!(tuning.read_retry_wait, Duration::from_millis(50));
         assert_eq!(tuning.endpoint_attempts, 3);

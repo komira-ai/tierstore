@@ -41,13 +41,13 @@ fn the_timeout_grows_with_the_body_at_the_floor_rate() {
     assert_eq!(slowest.conn.timeout_for(usize::MAX), saturated);
 }
 
-/// Catches: the idle pool timeout reverting to reqwest's 90 s default, which lets a
-/// request reuse a connection the server has already closed.
+/// Catches: the idle pool timeout reverting to reqwest's 90 s default, or to 30 s, which
+/// lets a request reuse a connection MinIO (idle close 30 s) is closing.
 #[test]
-fn pool_idle_timeout_is_30s() {
+fn pool_idle_timeout_is_15s() {
     assert_eq!(
         S3Tuning::default().pool_idle_timeout,
-        Duration::from_secs(30)
+        Duration::from_secs(15)
     );
 }
 
