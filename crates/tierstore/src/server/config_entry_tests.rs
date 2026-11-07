@@ -236,7 +236,9 @@ fn a_duration_out_of_range_is_refused_by_name_and_the_ends_are_taken() {
         from_text(&with_keys(&[(key, "1ms")]), DEFAULTS).unwrap();
     }
     from_text(&with_keys(&[("format_refresh", "1h")]), DEFAULTS).unwrap();
-    from_text(&with_keys(&[("read_window", "1h")]), DEFAULTS).unwrap();
+    // The end of the range of `read_window` needs a `tombstone_hold` above it.
+    let long = [("read_window", "1h"), ("tombstone_hold", "2h")];
+    from_text(&with_keys(&long), DEFAULTS).unwrap();
     for key in one_ms {
         from_text(&with_keys(&[(key, "1ms"), low[0], low[1]]), DEFAULTS).unwrap();
     }

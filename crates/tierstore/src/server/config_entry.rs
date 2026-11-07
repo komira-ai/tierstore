@@ -13,7 +13,10 @@
 
 use std::time::Duration;
 
-use crate::{DeleteWait, EntryReconcilerConfig, MarkReads, MarkersConfig, ProxyConfig, StepRetry};
+use crate::{
+    DeleteWait, EntryReconcilerConfig, MarkReads, MarkedPutConfig, MarkersConfig, ProxyConfig,
+    StepRetry,
+};
 
 use super::cli_heartbeat::DEPARTURE;
 use super::config::{ConfigError, TierTable, duration, invalid, refuse, within};
@@ -266,7 +269,9 @@ fn longer_than(held_ttl: Duration, key: &str, longer: Duration) -> Result<(), Co
 
 /// Refuses the settings of the markers that do not hold together: a `tombstone_hold` below
 /// `lease_ttl` plus `lease_margin` (a stalled leader's late cold write could land after the hold),
-/// and a `lock_lease` below two refreshes plus the margin of a queued call (checked by the
+/// a `read_window` that is not below the `tombstone_hold` (a read pair could then pair a cold answer
+/// from before a delete with a marker read after the tombstone was let go, I9), an `orphan_after` that is not more than the `reassert_after` of the puts (the leader would clear
+/// the marker of a put that is still streaming its body, 5.1 step 5), and a `lock_lease` below two refreshes plus the margin of a queued call (checked by the
 /// markers' own settings, with the defaults of the keys not yet in the file).
 fn marks_checks(
     tuning: &EntryTuning,
@@ -283,6 +288,25 @@ fn marks_checks(
             least.as_millis()
         );
         return Err(invalid("hot_store.tombstone_hold", why));
+    }
+    if tuning.read_window >= tuning.tombstone_hold {
+        let why = format!(
+            "{}ms must be below tombstone_hold, which is {}ms, or a read pair could pair a cold \
+             answer from before a delete with a marker read after the tombstone was let go",
+            tuning.read_window.as_millis(),
+            tuning.tombstone_hold.as_millis()
+        );
+        return Err(invalid("hot_store.read_window", why));
+    }
+    let reassert = MarkedPutConfig::new().reassert_after;
+    if tuning.orphan_after <= reassert {
+        let why = format!(
+            "{}ms must be more than reassert_after, which is {}ms, or the leader can clear the \
+             marker of a put that is still streaming its body",
+            tuning.orphan_after.as_millis(),
+            reassert.as_millis()
+        );
+        return Err(invalid("hot_store.orphan_after", why));
     }
     let markers = MarkersConfig {
         lock_lease: tuning.lock_lease,

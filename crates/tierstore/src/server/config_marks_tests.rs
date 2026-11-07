@@ -159,3 +159,44 @@ fn the_cold_store_refuses_each_key_and_the_keys_are_known() {
         );
     }
 }
+
+/// An `orphan_after` that is not more than the `reassert_after` of the puts (30 s) is refused: a
+/// put whose body streams for longer than `orphan_after` would have its marker cleared as an orphan
+/// before it marks again. The refusal names both numbers; one millisecond more is accepted.
+#[test]
+fn a_config_with_a_reassert_after_above_orphan_after_is_refused() {
+    let message = |orphan: u64| {
+        format!(
+            "hot_store.orphan_after: {orphan}ms must be more than reassert_after, which is \
+             30000ms, or the leader can clear the marker of a put that is still streaming its body"
+        )
+    };
+    for (given, millis) in [("10s", 10_000), ("30s", 30_000)] {
+        let text = with_hot(&format!("orphan_after = \"{given}\""));
+        assert_eq!(refusal(&text), message(millis), "{given}");
+    }
+    let text = with_hot("orphan_after = \"30001ms\"");
+    let tuning = from_text(&text, DEFAULTS).unwrap().entry_tuning;
+    assert_eq!(tuning.orphan_after, Duration::from_millis(30_001));
+}
+
+/// A `read_window` that is not below the `tombstone_hold` is refused: with the default hold (120 s) a
+/// window of 120 s or more, and with a hold the file gives, a window as long as it. The refusal names
+/// both numbers; a window one millisecond shorter than the hold is accepted.
+#[test]
+fn a_config_with_a_read_window_above_the_tombstone_hold_is_refused() {
+    let message = |window: u64, hold: u64| {
+        format!(
+            "hot_store.read_window: {window}ms must be below tombstone_hold, which is {hold}ms, \
+             or a read pair could pair a cold answer from before a delete with a marker read \
+             after the tombstone was let go"
+        )
+    };
+    let text = with_hot("read_window = \"120s\"");
+    assert_eq!(refusal(&text), message(120_000, 120_000));
+    let text = with_hot("read_window = \"10m\"\ntombstone_hold = \"5m\"");
+    assert_eq!(refusal(&text), message(600_000, 300_000));
+    let text = with_hot("read_window = \"119999ms\"");
+    let tuning = from_text(&text, DEFAULTS).unwrap().entry_tuning;
+    assert_eq!(tuning.read_window, Duration::from_millis(119_999));
+}
