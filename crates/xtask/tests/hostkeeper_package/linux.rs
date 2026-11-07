@@ -1,6 +1,5 @@
-//! The two Linux packages, read with hostkeeper's own code: the unpacker and the manifest loader
-//! of komira-ai/hostkeeper#23 as merged, and the placed-path lint of an earlier commit of
-//! hostkeeper's main with that commit's loader.
+//! The two Linux packages, read with hostkeeper's own code at the one commit the root
+//! `Cargo.toml` pins: the unpacker, the manifest loader and the placed-path lint.
 
 use std::collections::BTreeSet;
 use std::num::NonZeroU64;
@@ -259,9 +258,8 @@ fn the_unit_runs_the_binary_of_current_as_tierstore_and_its_stop_covers_the_drai
     }
 }
 
-/// The placed-path lint of hostkeeper's main on `platform`'s package, through `edit` (of the
-/// unit's text) first, in a host tree below `root`. Main's loader predates the manifest's
-/// `platform` key, so that one line is left out for it.
+/// hostkeeper's placed-path lint on `platform`'s package, through `edit` (of the unit's text)
+/// first, in a host tree below `root`, its manifest loaded by hostkeeper's loader.
 fn placed_lint(
     root: &Path,
     platform: Platform,
@@ -271,27 +269,13 @@ fn placed_lint(
     std::fs::create_dir_all(&version).expect("the version directory");
     let utf8 = |bytes: Vec<u8>| String::from_utf8(bytes).expect("UTF-8");
     write_tree(&version, &package(platform), |name, bytes| match name {
-        "manifest.toml" => utf8(bytes)
-            .lines()
-            .filter(|line| !line.starts_with("platform "))
-            .map(|line| format!("{line}\n"))
-            .collect::<String>()
-            .into_bytes(),
         UNIT => edit(utf8(bytes)).into_bytes(),
         _ => bytes,
     });
-    let manifest = hostkeeper_config_main::manifest::Manifest::load(
-        &version,
-        &hostkeeper_config_main::manifest::Expected {
-            name: hostkeeper_config_main::names::ServiceName::new("tierstore").expect("a name"),
-            version: hostkeeper_config_main::names::Version::new(VERSION).expect("a version"),
-        },
-        &hostkeeper_config_main::manifest::HostkeeperVersion::parse(MIN_HOSTKEEPER)
-            .expect("a version"),
-    )
-    .expect("main's loader takes the manifest without its platform");
+    let manifest =
+        Manifest::load(&version, &expected(platform), &running()).expect("the loader takes it");
     for unit in &manifest.run {
-        let name = hostkeeper_config_main::names::UnitName::of("tierstore", unit, false)
+        let name = hostkeeper_config::names::UnitName::of("tierstore", unit, false)
             .expect("a unit of tierstore");
         let template = name.template().expect("an instance of a template");
         assert!(
