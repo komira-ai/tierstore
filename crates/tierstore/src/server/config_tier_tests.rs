@@ -146,3 +146,82 @@ fn the_marks_bucket_a_proxy_names_is_the_s3_bucket_or_memory_and_a_dir_tier_has_
     assert_eq!(marks_name("memory"), Some("memory".to_owned()));
     assert_eq!(marks_name("dir:/srv/hot-marks"), None);
 }
+
+/// Asserts that `endpoints` of an `s3` tier, hot or cold, is the endpoint list in order (the first
+/// is `endpoint`, the others follow it), and that a list of one makes the same settings as
+/// `endpoint` does.
+#[test]
+fn a_list_of_endpoints_is_the_s3_tiers_endpoints_in_order() {
+    let one = from_text(GOLDEN, DEFAULTS).unwrap();
+    assert_eq!(one.hot_more_endpoints, Vec::<String>::new());
+    assert_eq!(one.cold_more_endpoints, Vec::<String>::new());
+    let listed = GOLDEN
+        .replacen(
+            "endpoint           = \"http://192.0.2.10:9200\"",
+            "endpoints          = [\"http://192.0.2.10:9200\"]",
+            1,
+        )
+        .replacen(
+            "endpoint         = \"http://127.0.0.1:30900\"",
+            "endpoints        = [\"http://127.0.0.1:30900\"]",
+            1,
+        );
+    assert_ne!(listed, GOLDEN);
+    assert_eq!(from_text(&listed, DEFAULTS).unwrap(), one);
+
+    let several = GOLDEN
+        .replacen(
+            "endpoint           = \"http://192.0.2.10:9200\"",
+            "endpoints          = [\"http://192.0.2.11:9200\", \"http://192.0.2.12:9200\", \"http://192.0.2.13:9200\"]",
+            1,
+        )
+        .replacen(
+            "endpoint         = \"http://127.0.0.1:30900\"",
+            "endpoints        = [\"http://127.0.0.1:30901\", \"http://127.0.0.1:30902\"]",
+            1,
+        );
+    let cli = from_text(&several, DEFAULTS).unwrap();
+    assert_eq!(cli.hot_endpoint.as_deref(), Some("http://192.0.2.11:9200"));
+    assert_eq!(
+        cli.hot_more_endpoints,
+        ["http://192.0.2.12:9200", "http://192.0.2.13:9200"]
+    );
+    assert_eq!(cli.cold_endpoint.as_deref(), Some("http://127.0.0.1:30901"));
+    assert_eq!(cli.cold_more_endpoints, ["http://127.0.0.1:30902"]);
+}
+
+/// Asserts the refusals of the endpoints of an `s3` tier, each naming the key: both `endpoint` and
+/// `endpoints`, an empty list, an endpoint twice, neither, and a list in a tier that is not `s3`.
+#[test]
+fn the_endpoints_of_an_s3_tier_are_refused_when_both_empty_twice_or_missing() {
+    let hot = "endpoint           = \"http://192.0.2.10:9200\"\n";
+    let cold = "endpoint         = \"http://127.0.0.1:30900\"\n";
+    for (table, line, name) in [("hot", hot, "hot_store"), ("cold", cold, "cold_store")] {
+        let with = |replacement: &str| GOLDEN.replacen(line, replacement, 1);
+        let both = with(&format!("{line}endpoints = [\"http://x:1\"]\n"));
+        let empty = with("endpoints = []\n");
+        let twice = with("endpoints = [\"http://x:1\", \"http://y:1\", \"http://x:1\"]\n");
+        let neither = with("");
+        let key = format!("{name}.endpoints");
+        for (text, why) in [
+            (both, format!("{key}: give endpoint or endpoints, not both")),
+            (
+                empty,
+                format!("{key}: is empty; give at least one endpoint"),
+            ),
+            (twice, format!("{key}: \"http://x:1\" is given twice")),
+            (neither, format!("{name}.endpoint: it is needed")),
+        ] {
+            assert_eq!(refusal(&text), why, "{table}");
+        }
+    }
+    let dir = with_hot(
+        "kind = \"dir\"\npath = \"/var/hot\"\nendpoints = [\"http://x:1\"]\nbudget = 1000",
+    );
+    assert_eq!(refusal(&dir), "hot_store.endpoints: not for kind \"dir\"");
+    let memory = with_hot("kind = \"memory\"\nendpoints = [\"http://x:1\"]\nbudget = 1000");
+    assert_eq!(
+        refusal(&memory),
+        "hot_store.endpoints: not for kind \"memory\""
+    );
+}

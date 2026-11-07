@@ -383,3 +383,31 @@ fn the_io_keys_are_read_here_and_refused_by_the_pinned_release_before() {
     assert_eq!(both(&node.file(keys, "", "")), (ok.clone(), refused));
     assert_eq!(both(&node.file("", "", "")), (ok.clone(), ok));
 }
+
+/// Asserts that a storage-node file whose `[hot_store]` has `endpoints` in place of `endpoint` is
+/// read by this release and refused by the release before with status 2 (it takes a list only in
+/// the `[cold_store]` of a build node), so a host that may roll back keeps `endpoint` until every
+/// process has this release; and that the same file with `endpoint` is loaded by both, and so is a
+/// list of one entry in place of `endpoint` by this release only.
+#[test]
+fn a_list_of_endpoints_is_read_here_and_refused_by_the_release_before() {
+    let node = Node::new("compat-config-endpoints");
+    let ok = status(ExitCode::SUCCESS);
+    let refused = status(ExitCode::from(2));
+    let file = node.file("", "", "");
+    assert_eq!(both(&file), (ok.clone(), ok.clone()));
+    let text = std::fs::read_to_string(&file).unwrap();
+    for list in [
+        "[\"http://hot.invalid\"]",
+        "[\"http://a.invalid\", \"http://b.invalid\"]",
+    ] {
+        let listed = text.replacen(
+            "endpoint = \"http://hot.invalid\"",
+            &format!("endpoints = {list}"),
+            1,
+        );
+        assert_ne!(listed, text);
+        std::fs::write(&file, listed).unwrap();
+        assert_eq!(both(&file), (ok.clone(), refused.clone()), "{list}");
+    }
+}

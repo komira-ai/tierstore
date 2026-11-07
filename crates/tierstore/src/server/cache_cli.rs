@@ -384,6 +384,7 @@ pub(super) async fn run_cache(
     let tier = &settings.upstream;
     let s3 = S3Flags {
         endpoint: tier.endpoint.as_deref(),
+        more_endpoints: &tier.more_endpoints,
         region: tier.region.as_deref(),
         credentials: tier.credentials_file.as_deref(),
         conditional_delete: tier.conditional_delete,

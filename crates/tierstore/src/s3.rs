@@ -131,6 +131,9 @@
 //!   not send the write again as if it had not been applied (a retry is answered 412 if the other
 //!   writer won, and also if this one did).
 //!
+//! With several endpoints ([`S3Backend::new_rotating`]) each request, a repeated read included, goes to the next
+//! endpoint in turn; the endpoints must be one store, so that any of them serves any request.
+//!
 //! Each request is bounded by the `request_timeout` of the [`S3Config`], and a read is sent
 //! again after a failure in transport; a write never is. A part is the exception to the bound:
 //! it is as slow as the client that sends it, so only a part that makes no progress for the
@@ -197,13 +200,28 @@ impl S3Backend {
     ///
     /// # Errors
     /// [`S3ConfigError`] if the endpoint or the bucket name is refused.
-    pub fn new_tuned(mut config: S3Config, tuning: S3Tuning) -> Result<Self, S3ConfigError> {
+    pub fn new_tuned(config: S3Config, tuning: S3Tuning) -> Result<Self, S3ConfigError> {
+        Self::new_rotating(config, tuning, &[])
+    }
+
+    /// As [`S3Backend::new_tuned`], reaching the bucket through `config.endpoint` and then the
+    /// endpoints of `also`: each request goes to the next endpoint in turn (see
+    /// [`S3Store::new_rotating`]). They must be the same store, so that any of them can serve
+    /// any request, a multipart upload's parts and its completion included.
+    ///
+    /// # Errors
+    /// [`S3ConfigError`] if an endpoint (one given twice included) or the bucket name is refused.
+    pub fn new_rotating(
+        mut config: S3Config,
+        tuning: S3Tuning,
+        also: &[String],
+    ) -> Result<Self, S3ConfigError> {
         config.capabilities = Capabilities {
             conditional_put: true,
             object_lock: false,
         };
         Ok(Self {
-            store: S3Store::new_tuned(config, tuning)?,
+            store: S3Store::new_rotating(config, tuning, also)?,
             conditional_delete: false,
             chunks_waiting: CHUNKS_WAITING,
         })

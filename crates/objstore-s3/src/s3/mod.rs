@@ -53,6 +53,7 @@ use std::fmt;
 use std::future::Future;
 use std::num::NonZeroU64;
 use std::sync::Arc;
+use std::sync::atomic::{AtomicUsize, Ordering};
 use std::time::{Duration, SystemTime};
 
 use base64::Engine as _;
@@ -216,12 +217,21 @@ pub struct S3Store {
     conn: Arc<Conn>,
 }
 
-/// What every request to the bucket needs: the client, the address, the signing key.
-struct Conn {
-    client: reqwest::Client,
+/// One endpoint of the store.
+struct Target {
     base: Url,
     /// `host[:port]` as the `Host` header carries it.
     host: String,
+}
+
+/// What every request to the bucket needs: the client, the addresses, the signing key.
+struct Conn {
+    /// One client for all the endpoints; it keeps a connection pool for each `host:port`.
+    client: reqwest::Client,
+    /// The endpoints, at least one. Each request goes to the next in turn.
+    targets: Vec<Target>,
+    /// How many requests were signed so far; the request number modulo the endpoints picks one.
+    sent: AtomicUsize,
     bucket: String,
     region: String,
     credentials: Credentials,
@@ -234,7 +244,14 @@ struct Conn {
 impl fmt::Debug for S3Store {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         f.debug_struct("S3Store")
-            .field("base", &self.conn.base.as_str())
+            .field("base", &self.conn.targets[0].base.as_str())
+            .field(
+                "also",
+                &self.conn.targets[1..]
+                    .iter()
+                    .map(|t| t.base.as_str())
+                    .collect::<Vec<_>>(),
+            )
             .field("bucket", &self.conn.bucket)
             .field("capabilities", &self.conn.capabilities)
             .finish_non_exhaustive()
@@ -250,25 +267,29 @@ impl S3Store {
     /// A store for `config.bucket` with the idle-connection and read-retry settings `tuning`
     /// gives. Does no I/O.
     pub fn new_tuned(config: S3Config, tuning: S3Tuning) -> Result<Self, S3ConfigError> {
-        let bad = |why| S3ConfigError::Endpoint {
-            endpoint: config.endpoint.clone(),
-            why,
-        };
-        let base = Url::parse(&config.endpoint).map_err(|_| bad("not a URL"))?;
-        match base.scheme() {
-            "http" => {}
-            "https" => return Err(bad("TLS is not built yet; use http")),
-            _ => return Err(bad("the scheme must be http")),
+        Self::new_rotating(config, tuning, &[])
+    }
+
+    /// As [`S3Store::new_tuned`], reaching the bucket through `config.endpoint` and then the
+    /// endpoints of `also`, in that order: each request goes to the next endpoint in turn, and
+    /// is signed for the `Host` it goes to. All of them must be the same store. An endpoint
+    /// given twice is refused. With an empty `also` this is [`S3Store::new_tuned`].
+    pub fn new_rotating(
+        config: S3Config,
+        tuning: S3Tuning,
+        also: &[String],
+    ) -> Result<Self, S3ConfigError> {
+        let mut targets: Vec<Target> = Vec::with_capacity(1 + also.len());
+        for endpoint in std::iter::once(&config.endpoint).chain(also) {
+            let target = target_of(endpoint)?;
+            if targets.iter().any(|t| t.host == target.host) {
+                return Err(S3ConfigError::Endpoint {
+                    endpoint: endpoint.clone(),
+                    why: "given twice",
+                });
+            }
+            targets.push(target);
         }
-        if !base.username().is_empty() || base.password().is_some() {
-            return Err(bad("credentials belong in `credentials`, not the URL"));
-        }
-        if base.path() != "/" || base.query().is_some() || base.fragment().is_some() {
-            return Err(bad("path-style addressing needs an endpoint with no path"));
-        }
-        // An `http` URL always has a host, and the userinfo was refused above, so the
-        // authority is the host with its port, if it is not the scheme's default.
-        let host = base.authority().to_owned();
         if !valid_bucket(&config.bucket) {
             return Err(S3ConfigError::Bucket(config.bucket));
         }
@@ -277,8 +298,8 @@ impl S3Store {
             .map_err(S3ConfigError::Client)?;
         let conn = Conn {
             client,
-            base,
-            host,
+            targets,
+            sent: AtomicUsize::new(0),
             bucket: config.bucket,
             region: config.region,
             credentials: config.credentials,
@@ -291,6 +312,30 @@ impl S3Store {
             conn: Arc::new(conn),
         })
     }
+}
+
+/// The endpoint `endpoint` names, if it is `http://host[:port]`.
+fn target_of(endpoint: &str) -> Result<Target, S3ConfigError> {
+    let bad = |why| S3ConfigError::Endpoint {
+        endpoint: endpoint.to_owned(),
+        why,
+    };
+    let base = Url::parse(endpoint).map_err(|_| bad("not a URL"))?;
+    match base.scheme() {
+        "http" => {}
+        "https" => return Err(bad("TLS is not built yet; use http")),
+        _ => return Err(bad("the scheme must be http")),
+    }
+    if !base.username().is_empty() || base.password().is_some() {
+        return Err(bad("credentials belong in `credentials`, not the URL"));
+    }
+    if base.path() != "/" || base.query().is_some() || base.fragment().is_some() {
+        return Err(bad("path-style addressing needs an endpoint with no path"));
+    }
+    // An `http` URL always has a host, and the userinfo was refused above, so the
+    // authority is the host with its port, if it is not the scheme's default.
+    let host = base.authority().to_owned();
+    Ok(Target { base, host })
 }
 
 /// A client builder with the given limits and idle pool timeout. `request_timeout` is
@@ -306,6 +351,12 @@ fn client_builder(
 }
 
 impl Conn {
+    /// The endpoint for the next request: the endpoints in turn, one step for each call.
+    fn next_target(&self) -> &Target {
+        let n = self.sent.fetch_add(1, Ordering::Relaxed);
+        &self.targets[n % self.targets.len()]
+    }
+
     /// The limit on a whole request with a `body_len`-byte body.
     fn timeout_for(&self, body_len: usize) -> Duration {
         let Some(rate) = self.min_body_rate else {
@@ -422,6 +473,7 @@ impl Conn {
         )]
         let now = SystemTime::now();
         let amz_date = Utc::of(now, false).amz();
+        let target = self.next_target();
         headers.push(("x-amz-content-sha256", payload.to_owned()));
         headers.push(("x-amz-date", amz_date.clone()));
         let authorization = Signer {
@@ -432,7 +484,7 @@ impl Conn {
         .authorization(
             &Request {
                 method: method.as_str(),
-                host: &self.host,
+                host: &target.host,
                 path: &path,
                 query,
                 headers: &headers,
@@ -441,7 +493,7 @@ impl Conn {
             &amz_date,
         );
 
-        let mut url = self.base.clone();
+        let mut url = target.base.clone();
         url.set_path(&path);
         let q = sigv4::canonical_query(query);
         url.set_query((!q.is_empty()).then_some(q.as_str()));
@@ -493,7 +545,7 @@ impl S3Store {
             match self
                 .conn
                 .client
-                .get(self.conn.base.clone())
+                .get(self.conn.targets[0].base.clone())
                 .timeout(left)
                 .send()
                 .await

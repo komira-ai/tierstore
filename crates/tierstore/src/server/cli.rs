@@ -17,7 +17,7 @@
 //! the multipart uploads in progress, in a directory of the local file system (see
 //! [`DirBackend`](crate::DirBackend)), so that they outlive a restart; the directory is made if
 //! it does not exist. A tier `s3:<bucket>` is a bucket of an S3-compatible store (see
-//! [`S3Backend`]), which the keys of the tier say how to reach, in the table of the tier: `hot_store.endpoint` or `cold_store.endpoint` (`http://host[:port]`, required),
+//! [`S3Backend`]), which the keys of the tier say how to reach, in the table of the tier: `hot_store.endpoint` or `cold_store.endpoint` (`http://host[:port]`), or `endpoints` in place of it (a list whose addresses the requests go to in turn),
 //! `hot_store.region` or `cold_store.region` (the signing region, `us-east-1` if not given), and
 //! `hot_store.credentials_file` or `cold_store.credentials_file` (required: a file only its owner may
 //! read, in the form of `server.access_key_file` below; a secret in the config file would be
@@ -222,6 +222,9 @@ pub struct Cli {
     /// The endpoint of the hot tier when it is `s3:<bucket>`: `http://host[:port]`, with no
     /// path. TLS is not built yet.
     pub hot_endpoint: Option<String>,
+    /// The endpoints after `hot_endpoint` when `hot_store.endpoints` lists several: each request
+    /// goes to the next of all of them in turn.
+    pub hot_more_endpoints: Vec<String>,
     /// The region in the credential scope of the requests to the hot tier when it is
     /// `s3:<bucket>`; `us-east-1` if not given.
     pub hot_region: Option<String>,
@@ -232,6 +235,8 @@ pub struct Cli {
     /// The endpoint of the cold tier when it is `s3:<bucket>`: `http://host[:port]`, with no
     /// path. TLS is not built yet.
     pub cold_endpoint: Option<String>,
+    /// The endpoints after `cold_endpoint` when `cold_store.endpoints` lists several.
+    pub cold_more_endpoints: Vec<String>,
     /// The region in the credential scope of the requests to the cold tier when it is
     /// `s3:<bucket>`; `us-east-1` if not given.
     pub cold_region: Option<String>,
@@ -523,6 +528,8 @@ pub(super) struct OciSetup {
 /// The flags that say how to reach a tier that is an S3 bucket.
 pub(super) struct S3Flags<'a> {
     pub(super) endpoint: Option<&'a str>,
+    /// The endpoints after `endpoint`, if the tier has several.
+    pub(super) more_endpoints: &'a [String],
     pub(super) region: Option<&'a str>,
     pub(super) credentials: Option<&'a Path>,
     /// The tier's `conditional_delete` setting; `None` is the default of its kind.
@@ -546,6 +553,7 @@ impl Cli {
     fn hot_s3(&self) -> S3Flags<'_> {
         S3Flags {
             endpoint: self.hot_endpoint.as_deref(),
+            more_endpoints: &self.hot_more_endpoints,
             region: self.hot_region.as_deref(),
             credentials: self.hot_credentials_file.as_deref(),
             conditional_delete: self.hot_conditional_delete,
@@ -556,6 +564,7 @@ impl Cli {
     fn cold_s3(&self) -> S3Flags<'_> {
         S3Flags {
             endpoint: self.cold_endpoint.as_deref(),
+            more_endpoints: &self.cold_more_endpoints,
             region: self.cold_region.as_deref(),
             credentials: self.cold_credentials_file.as_deref(),
             conditional_delete: self.cold_conditional_delete,
@@ -670,7 +679,7 @@ pub(super) fn s3_backend(
         request_timeout: timeout,
         min_body_rate: client.min_body_rate,
     };
-    let built = S3Backend::new_tuned(config, client.tuning);
+    let built = S3Backend::new_rotating(config, client.tuning, s3.more_endpoints);
     let backend = built.map_err(|why| fail(why.to_string()))?;
     // Off unless set: a read of the tag before the DELETE is right on every store. The store is
     // not asked whether it enforces `If-Match` on a DELETE; the setting says.
