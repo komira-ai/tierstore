@@ -1,7 +1,9 @@
 //! The keys the front takes follow S3's rules (`objstore_s3::key_rules`), through
 //! `Server::handle`: any text of 1 to 1024 bytes is a key over in-memory tiers, over an S3 tier
 //! and over a proxy with a directory hot tier and an S3 cold tier; a longer key is 400
-//! `KeyTooLongError`, and so is a `.` or `..` segment over an S3 tier, whose client cannot send it.
+//! `KeyTooLongError`; a `.` or `..` segment over an S3 tier, whose client cannot send it, is 400
+//! `InvalidArgument` with a message that names the rule. A key of 1024 bytes whose segments are at
+//! most 255 bytes (the longest segment MinIO takes) is taken, in ASCII and in 3-byte characters.
 
 use std::sync::Arc;
 use std::time::Duration;
@@ -17,7 +19,7 @@ use crate::{
     S3Backend, TestClock,
 };
 
-use super::testing::{BUCKET, KEY_ID, NOW, Rig, SECRET, live_proxy, texts};
+use super::testing::{BUCKET, KEY_ID, NOW, Rig, SECRET, live_proxy, segmented, texts};
 use super::{Server, ServerConfig};
 
 /// Keys S3 accepts, one kind of difficulty each: parentheses and a space, `+`, a bare `%` and
@@ -363,4 +365,127 @@ async fn a_proxy_over_a_directory_and_an_s3_tier_carries_the_keys() {
     assert_eq!(backend.head(&longest).await.unwrap().size, 1);
     let listed = rig.list("").await;
     assert!(texts(&listed.1, "Key").contains(&longest));
+}
+
+/// The keys of the tests of the limits of a key: 1024 bytes of ASCII in segments of at most 255
+/// bytes (the longest segment MinIO takes), and 1024 bytes of 3-byte characters (`\u{20ac}`) in
+/// five segments of at most 255 bytes.
+fn long_keys() -> [String; 2] {
+    [
+        segmented('k', &[255, 255, 255, 254, 1]),
+        segmented('\u{20ac}', &[85, 85, 85, 84, 1]),
+    ]
+}
+
+/// Asserts the lengths of the keys the sizes above are made for.
+#[test]
+fn the_long_keys_of_the_tests_are_1024_bytes_in_segments_of_at_most_255() {
+    for key in long_keys() {
+        assert_eq!(key.len(), 1024);
+        assert_eq!(key.split('/').count(), 5);
+        assert!(key.split('/').all(|segment| segment.len() <= 255));
+    }
+}
+
+/// Asserts that a plain request through the front takes a key of 1024 bytes whose segments are at
+/// most 255 bytes, in ASCII and in 3-byte characters (the encoded path is longer than the key),
+/// puts, reads, heads, lists and deletes it, and that the same key with one more byte is 400
+/// `KeyTooLongError` at a put, with nothing stored.
+#[tokio::test(start_paused = true)]
+async fn a_key_of_1024_bytes_in_short_segments_is_taken_and_one_byte_more_is_refused() {
+    let rig = Rig::new(1 << 20).await;
+    let keys = long_keys();
+    for key in &keys {
+        let path = enc(key);
+        let put = rig.put(&path, b"long").await;
+        assert_eq!(put.status, StatusCode::OK, "{}", put.body);
+        let got = rig.get(&path, None).await;
+        assert_eq!((got.status, got.body.as_str()), (StatusCode::OK, "long"));
+        let head = rig.call("HEAD", &path, b"").await;
+        assert_eq!(head.status, StatusCode::OK);
+    }
+    let listed = rig.list("").await;
+    let mut wanted = keys.to_vec();
+    wanted.sort();
+    assert_eq!(texts(&listed.body, "Key"), wanted);
+    for key in &keys {
+        let deleted = rig.call("DELETE", &enc(key), b"").await;
+        assert_eq!(deleted.status, StatusCode::NO_CONTENT);
+    }
+    for key in &keys {
+        let longer = format!("{key}x");
+        let put = rig.put(&enc(&longer), b"long").await;
+        assert_eq!(put.status, StatusCode::BAD_REQUEST);
+        assert_eq!(put.code(), "KeyTooLongError");
+    }
+    assert!(texts(&rig.list("").await.body, "Key").is_empty());
+}
+
+/// Asserts that the same keys over an S3 tier (the client escapes and signs the path as sent) are
+/// stored under their names and read back, and that one byte more is 400 `KeyTooLongError`
+/// with nothing sent to the service.
+#[tokio::test]
+async fn an_s3_tier_takes_a_key_of_1024_bytes_in_short_segments() {
+    let s3 = FakeS3::start().await;
+    let clock = Arc::new(TestClock::new());
+    clock.set(NOW);
+    let config = ServerConfig::new(BUCKET, KEY_ID, SECRET, clock);
+    let server = Server::new(s3_backend(&s3), config.clone());
+    let rig = S3Front { server, config };
+    let keys = long_keys();
+    for key in &keys {
+        let put = rig.call("PUT", &enc(key), b"long").await;
+        assert_eq!(put.0, StatusCode::OK, "{}", put.1);
+        let got = rig.call("GET", &enc(key), b"").await;
+        assert_eq!((got.0, got.1.as_str()), (StatusCode::OK, "long"));
+    }
+    let mut wanted = keys.to_vec();
+    wanted.sort();
+    assert_eq!(s3.keys(), wanted);
+    let before = s3.requests().len();
+    for key in &keys {
+        let put = rig.call("PUT", &enc(&format!("{key}x")), b"long").await;
+        assert_eq!(put.0, StatusCode::BAD_REQUEST);
+        assert!(put.1.contains("KeyTooLongError"), "{}", put.1);
+    }
+    assert_eq!(s3.requests().len(), before);
+}
+
+/// Asserts the refusal of a `.` or `..` segment over an S3 tier: every call that names such a key
+/// is 400 `InvalidArgument` (not `KeyTooLongError`, which is a length error), the message is
+/// exactly the one that names the rule and the key, a name that only has dots in it (`a..b`,
+/// `...`, `.hidden`) is a key, and nothing reaches the service for the refused keys.
+#[tokio::test]
+async fn a_dot_segment_over_an_s3_tier_is_400_invalid_argument_naming_the_rule() {
+    let s3 = FakeS3::start().await;
+    let clock = Arc::new(TestClock::new());
+    clock.set(NOW);
+    let config = ServerConfig::new(BUCKET, KEY_ID, SECRET, clock);
+    let server = Server::new(s3_backend(&s3), config.clone());
+    let rig = S3Front { server, config };
+    let before = s3.requests().len();
+    for key in ["a/../b", "a/./b", "./a", "a/..", "../a"] {
+        for method in ["PUT", "GET", "DELETE"] {
+            let refused = rig.call(method, key, b"x").await;
+            assert_eq!(refused.0, StatusCode::BAD_REQUEST, "{method} {key}");
+            assert_eq!(
+                texts(&refused.1, "Code"),
+                ["InvalidArgument"],
+                "{method} {key}"
+            );
+            let message = format!(
+                "key {key:?} has a path segment that is `.` or `..`, which the store does not take"
+            );
+            assert_eq!(texts(&refused.1, "Message"), [message], "{method} {key}");
+        }
+    }
+    let started = rig.call("POST", "a/../b?uploads", b"").await;
+    assert_eq!(started.0, StatusCode::BAD_REQUEST);
+    assert_eq!(texts(&started.1, "Code"), ["InvalidArgument"]);
+    assert_eq!(s3.requests().len(), before);
+    for key in ["a..b", "...", ".hidden", "a/..c/d.."] {
+        let put = rig.call("PUT", key, b"x").await;
+        assert_eq!(put.0, StatusCode::OK, "{key}: {}", put.1);
+        assert_eq!(rig.call("GET", key, b"").await.1, "x", "{key}");
+    }
 }

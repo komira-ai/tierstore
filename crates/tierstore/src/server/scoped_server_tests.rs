@@ -181,6 +181,42 @@ async fn the_first_list_prefix_counts_and_dot_segments_are_refused_on_every_call
     assert!(exists(&rig, "r/a").await);
 }
 
+/// Asserts that a scoped key takes a name with dots that is not a dot segment, as a plain request
+/// does: it reads, heads and lists `r/a..b` and `r/...` (by a listing prefix inside such a name),
+/// creates `w/a..b` and deletes `d/a..b`; a `..` segment, also as the end of a listing prefix, is
+/// still 403.
+#[tokio::test(start_paused = true)]
+async fn a_scoped_key_takes_a_name_with_dots_that_is_not_a_dot_segment() {
+    let rig = rig().await;
+    rig.put("r/a..b", b"one").await;
+    rig.put("r/...", b"two").await;
+    rig.put("d/a..b", b"three").await;
+    for (key, body) in [("r/a..b", "one"), ("r/...", "two")] {
+        let got = scoped(&rig, "GET", &uri(key), &[], b"").await;
+        assert_eq!((got.status, got.body.as_str()), (StatusCode::OK, body));
+        let head = scoped(&rig, "HEAD", &uri(key), &[], b"").await;
+        assert_eq!(head.status, StatusCode::OK, "{key}");
+    }
+    for (query, keys) in [
+        ("list-type=2&prefix=r%2Fa..", vec!["r/a..b"]),
+        ("list-type=2&prefix=r%2F...", vec!["r/..."]),
+    ] {
+        let listed = scoped(&rig, "GET", &listing(query), &[], b"").await;
+        assert_eq!(listed.status, StatusCode::OK, "{query}");
+        assert_eq!(texts(&listed.body, "Key"), keys, "{query}");
+    }
+    let dots = scoped(&rig, "GET", &listing("list-type=2&prefix=r%2F.."), &[], b"").await;
+    assert_eq!(denied(&dots), access_denied());
+    let put = scoped(&rig, "PUT", &uri("w/a..b"), &[], b"made").await;
+    assert_eq!(put.status, StatusCode::OK, "{}", put.body);
+    assert_eq!(rig.get("w/a..b", None).await.body, "made");
+    let deleted = scoped(&rig, "DELETE", &uri("d/a..b"), &[], b"").await;
+    assert_eq!(deleted.status, StatusCode::NO_CONTENT);
+    assert!(!exists(&rig, "d/a..b").await);
+    let climbing = scoped(&rig, "GET", &uri("r/a/../b"), &[], b"").await;
+    assert_eq!(denied(&climbing), access_denied());
+}
+
 /// Asserts that finishing a multipart upload never replaces an object: for a key under a write
 /// prefix that already holds an object, the completion is not 200 and the object is as it was.
 #[tokio::test(start_paused = true)]

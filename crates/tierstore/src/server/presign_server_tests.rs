@@ -10,10 +10,10 @@ use hyper::{Request, StatusCode};
 use crate::{Backend, Error, Op, TestClock};
 
 use super::auth::sign_as;
-use super::presign::presign_url;
 use super::presign::tests::{NOW, SECRET, access, grant, request};
 use super::presign::{Grant, PresignKey};
-use super::testing::{BUCKET, KEY_ID, Reply, Rig, Scripted, Step};
+use super::presign::{PresignError, presign_put, presign_url};
+use super::testing::{BUCKET, KEY_ID, Reply, Rig, Scripted, Step, segmented};
 use super::{AccessKey, ServerConfig};
 
 const MEBIBYTE: u64 = 1 << 20;
@@ -204,8 +204,6 @@ async fn a_key_outside_the_prefix_is_refused_in_every_spelling() {
         "cas/b/../c/x",
         "cas/b/./x",
         "cas/b/..",
-        "cas/b/...",
-        "cas/b/..%2Fc/x",
         "_journal/p1/0000000000000001",
         "_tiering/usage",
         "_tiering/lease",
@@ -649,4 +647,103 @@ async fn the_cap_of_a_key_holds_when_the_request_limit_is_larger() {
         f.put(&put_url("cas/b/fits", 300), &[1_u8; 16]).await.status,
         StatusCode::OK
     );
+}
+
+/// Asserts that a presigned PUT takes a name with dots in it that is not a dot segment, as a plain
+/// request does (`..` anywhere in a name used to be refused): `a..b`, a name that begins or ends
+/// with `..`, `...`, a segment of dots, and a literal `..%2F` (the characters, not an escaped
+/// slash). The object is stored under that name, in the prefix, and no key outside it.
+#[tokio::test(start_paused = true)]
+async fn a_presigned_put_takes_a_name_with_dots_that_is_not_a_dot_segment() {
+    let f = fixture().await;
+    for name in [
+        "cas/b/a..b",
+        "cas/b/..x",
+        "cas/b/x..",
+        "cas/b/...",
+        "cas/b/x/.../y",
+        "cas/b/..%2Fc/x",
+    ] {
+        let reply = f.put(&put_url(name, 300), b"X").await;
+        assert_eq!(reply.status, StatusCode::OK, "{name}: {}", reply.body);
+        assert!(f.holds(name).await, "{name}");
+    }
+    assert!(!f.holds("cas/c/x").await);
+}
+
+/// Asserts that a presigned PUT refuses exactly the characters in a name that a plain request
+/// refuses: each character XML 1.0 forbids is 403 `AccessDenied` for the URL and 400
+/// `InvalidArgument` for the plain request, and each one it allows (tab, line feed, carriage
+/// return, U+007F, U+0085) is 200 for both, and the object is stored under the name.
+#[tokio::test(start_paused = true)]
+async fn a_presigned_put_refuses_the_characters_a_plain_put_refuses_and_no_others() {
+    let f = fixture().await;
+    let forbidden = ['\0', '\u{1}', '\u{8}', '\u{b}', '\u{c}', '\u{e}', '\u{1f}'];
+    for c in forbidden.into_iter().chain(['\u{fffe}', '\u{ffff}']) {
+        let name = format!("cas/b/x{c}y");
+        let url = presign_url("PUT", &access("pack-presign"), &request(&name, 300), &[]);
+        let presigned = f.put(&url.unwrap(), b"X").await;
+        assert_eq!(
+            refused(&presigned),
+            (403, "AccessDenied".to_owned()),
+            "{c:?}"
+        );
+        let encoded: String = name.bytes().map(|b| format!("%{b:02X}")).collect();
+        let plain = f.rig.put(&encoded, b"X").await;
+        assert_eq!(
+            refused(&plain),
+            (400, "InvalidArgument".to_owned()),
+            "{c:?}"
+        );
+        assert!(!f.holds(&name).await, "{c:?}");
+    }
+    for c in ['\t', '\n', '\r', '\u{7f}', '\u{85}'] {
+        let presigned = format!("cas/b/p{c}y");
+        let reply = f.put(&put_url(&presigned, 300), b"X").await;
+        assert_eq!(reply.status, StatusCode::OK, "{c:?}: {}", reply.body);
+        assert!(f.holds(&presigned).await, "{c:?}");
+        let plain = format!("cas/b/q{c}y");
+        let encoded: String = plain.bytes().map(|b| format!("%{b:02X}")).collect();
+        assert_eq!(
+            f.rig.put(&encoded, b"X").await.status,
+            StatusCode::OK,
+            "{c:?}"
+        );
+        assert!(f.holds(&plain).await, "{c:?}");
+    }
+}
+
+/// Asserts that a presigned PUT takes a key of 1024 bytes in segments of at most 255 bytes under
+/// the prefix of the grant, in ASCII and in 3-byte characters (`\u{20ac}`), that the library signs
+/// them, and that a key of 1025 bytes is not signed by the library and, signed by hand, is refused
+/// `AccessDenied` (it is not a name) with nothing stored.
+#[tokio::test(start_paused = true)]
+async fn a_presigned_put_takes_a_key_of_1024_bytes_in_short_segments_and_not_one_of_1025() {
+    let f = fixture().await;
+    let tails = [
+        segmented('k', &[255, 255, 255, 250]),
+        segmented('\u{20ac}', &[85, 85, 85, 82, 1]),
+    ];
+    for tail in tails {
+        let key = format!("cas/b/{tail}");
+        assert_eq!(key.len(), 1024);
+        assert!(key.split('/').all(|segment| segment.len() <= 255));
+        let reply = f.put(&put_url(&key, 300), b"X").await;
+        assert_eq!(reply.status, StatusCode::OK, "{}", reply.body);
+        assert_eq!(f.rig.get(&encode(&key), None).await.body, "X");
+
+        let longer = format!("{key}x");
+        let wanted = access("pack-presign");
+        let library = presign_put(&wanted, &request(&longer, 300));
+        assert_eq!(library, Err(PresignError::Name("over 1024 bytes")));
+        let url = presign_url("PUT", &wanted, &request(&longer, 300), &[]).unwrap();
+        let reply = f.put(&url, b"X").await;
+        assert_eq!(refused(&reply), (403, "AccessDenied".to_owned()));
+        assert!(!f.holds(&longer).await);
+    }
+}
+
+/// A key as it is written in the path of a request.
+fn encode(key: &str) -> String {
+    key.bytes().map(|b| format!("%{b:02X}")).collect()
 }

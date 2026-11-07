@@ -338,20 +338,54 @@ fn the_full_key_cannot_sign_a_put_url() {
     assert_eq!(refused.unwrap_err(), READ_URL_ONLY);
 }
 
-/// Asserts the names a key or a prefix may be, and the prefixes a key may have.
+/// Asserts the names a key or a prefix may be: a segment equal to `.` or `..` is refused and a
+/// name with dots in it is not (`a..b`, `...`); a character XML 1.0 forbids is refused and the ones
+/// it allows (tab, line feed, carriage return, U+007F, a C1 control) are not, which are exactly the
+/// characters a plain request is refused or allowed in a key.
 #[test]
 fn names_and_prefixes_are_checked() {
-    for good in ["cas/b/a", "a.b", "a/.b", "a/b./c", "é/ü", "x/%2e"] {
+    for good in [
+        "cas/b/a",
+        "a.b",
+        "a/.b",
+        "a/b./c",
+        "\u{e9}/\u{fc}",
+        "x/%2e",
+        "a..b",
+        "..x",
+        "x..",
+        "...",
+        "a/.../b",
+        "a/..b/c..",
+        "a\tb",
+        "a\nb\r",
+        "a\u{7f}",
+        "a\u{85}",
+    ] {
         assert_eq!(check_name(good), Ok(()), "{good}");
     }
+    for bad in ["a/../b", "..", "a/./b", "./a", "a/.", "a/..", ".", "../"] {
+        let refused = Err(PresignError::Name("a . or .. segment"));
+        assert_eq!(check_name(bad), refused, "{bad:?}");
+    }
     for bad in [
-        "a/../b", "..", "a\0b", "a/./b", "./a", "a/.", "a\u{7f}", "a\tb",
+        "a\0b",
+        "a\u{1}",
+        "a\u{8}",
+        "a\u{b}",
+        "a\u{c}",
+        "a\u{e}",
+        "a\u{1f}",
+        "a\u{fffe}",
+        "a\u{ffff}",
     ] {
-        assert!(check_name(bad).is_err(), "{bad:?}");
+        let refused = Err(PresignError::Name("a character XML 1.0 forbids"));
+        assert_eq!(check_name(bad), refused, "{bad:?}");
     }
     assert!(check_name(&"a".repeat(1025)).is_err());
     assert_eq!(check_name(&"a".repeat(1024)), Ok(()));
     assert_eq!(validate_prefix("cas/b/"), Ok(()));
+    assert_eq!(validate_prefix("cas/b..c/"), Ok(()));
     for bad in [
         "",
         "_",
@@ -364,6 +398,8 @@ fn names_and_prefixes_are_checked() {
         "_entries/",
         "_entries/ab",
         "a/../",
+        "a/./",
+        "a/..",
     ] {
         assert!(validate_prefix(bad).is_err(), "{bad:?}");
     }

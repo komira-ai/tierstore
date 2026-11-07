@@ -183,7 +183,9 @@ A scoped key's file is JSON of exactly `access_key_id`, `secret_access_key`, `re
 `write_prefixes` and `delete_prefixes`; the lists may be empty, but not all, and every prefix
 ends in `/`, is not, or under, or over `_journal/` or `_tiering/`, and has neither as a segment.
 
-A call whose key or listing `prefix` has `..` anywhere in it is refused, even inside a prefix.
+A call whose key or listing `prefix` has a path segment (text between `/`) that is exactly `.` or `..`, or a character XML 1.0
+forbids (U+0000-U+0008, U+000B, U+000C, U+000E-U+001F, U+FFFE, U+FFFF), is refused, even inside a prefix. The path is
+percent-decoded first, so `%2e%2e` is a `..` segment. A name that only has dots in it (`a..b`, `.hidden`) is a name.
 The server library does not itself force the access key ids of its keys to differ (`ServerConfig`
 is plain data); the command line does, and exits 2.
 

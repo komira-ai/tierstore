@@ -168,7 +168,8 @@ fn refuse_reserved(key: &str) -> Result<(), S3Error> {
 ///
 /// - S3's own rules (`objstore_s3::key_rules::s3_key`): over 1024 bytes is [`Error::InvalidKey`]
 ///   (400 `KeyTooLongError`, as S3 answers). Any other text is a key. (A `.` or `..` segment is
-///   one too: an S3 tier refuses it itself, see `objstore_s3::key_rules::s3_client_key`.)
+///   one too: an S3 tier refuses it itself, 400 `InvalidArgument` with a message that names the
+///   rule, see `objstore_s3::key_rules::s3_client_key` and [`Error::InvalidSegment`].)
 /// - A character a listing can carry: the answers of a listing are XML 1.0, which has no
 ///   character for U+0000-U+0008, U+000B, U+000C, U+000E-U+001F, U+FFFE and U+FFFF (tab, line
 ///   feed, carriage return, U+007F and the C1 controls are allowed). A client that does not ask
@@ -179,11 +180,7 @@ fn refuse_unstorable(key: &str) -> Result<(), S3Error> {
     if key_rules::s3_key(key).is_err() {
         return Err(S3Error::from(Error::InvalidKey(key.to_owned())));
     }
-    let bad = |c: char| {
-        matches!(c, '\u{0}'..='\u{8}' | '\u{B}' | '\u{C}' | '\u{E}'..='\u{1F}')
-            || matches!(c, '\u{FFFE}' | '\u{FFFF}')
-    };
-    if key.chars().any(bad) {
+    if key.chars().any(xml::forbids) {
         return Err(S3Error::invalid(
             "a key may not have a character XML 1.0 forbids (U+0000-U+0008, U+000B, U+000C, \
              U+000E-U+001F, U+FFFE, U+FFFF)",

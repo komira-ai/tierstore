@@ -94,8 +94,9 @@
 //!
 //! - A key is the client's [`ObjectKey`], which follows S3's rules (`objstore_s3::key_rules`):
 //!   any text of 1 to 1024 bytes, space, `+`, `%`, `&`, `<`, `?`, `#` and non-ASCII text
-//!   included, escaped by the client; a key or a prefix the rules refuse (over 1024 bytes, or a
-//!   `.` or `..` segment) is [`Error::InvalidKey`] (S3 answer 400 `KeyTooLongError`).
+//!   included, escaped by the client; a key or a prefix the rules refuse (empty, or over 1024
+//!   bytes) is [`Error::InvalidKey`] (S3 answer 400 `KeyTooLongError`), and a key with a `.` or
+//!   `..` segment is [`Error::InvalidSegment`] (400 `InvalidArgument`, naming the rule).
 //! - S3 answers 416 to a range that starts at or past the end of the object, and a range of
 //!   length zero is no request at all. The trait wants no bytes for a range starting at the
 //!   end and an [`Error::Other`] for one starting past it, so a HEAD decides both, and finds
@@ -141,7 +142,7 @@ use futures::future;
 use futures::stream;
 use objstore_s3::s3::{S3Store, StampedObject};
 use objstore_s3::{
-    BodyStream, KeyPrefix, ListToken, ObjectKey, ObjectStore, ObjectStoreError, PageSize,
+    BodyStream, KeyError, KeyPrefix, ListToken, ObjectKey, ObjectStore, ObjectStoreError, PageSize,
 };
 use tokio::sync::mpsc;
 
@@ -334,10 +335,14 @@ fn client_range(range: ByteRange) -> Option<objstore_s3::ByteRange> {
     objstore_s3::ByteRange::new(range.offset(), len)
 }
 
-/// The key as the client names it, or [`Error::InvalidKey`] if S3's rules refuse it (see
-/// `objstore_s3::key_rules`: empty, over 1024 bytes, or a `.` or `..` segment).
+/// The key as the client names it, or the error for the rule that refuses it (see
+/// `objstore_s3::key_rules`): [`Error::InvalidSegment`] for a `.` or `..` segment, otherwise
+/// [`Error::InvalidKey`] (empty, or over 1024 bytes).
 fn object_key(key: &str) -> Result<ObjectKey, Error> {
-    ObjectKey::new(key).map_err(|_| Error::InvalidKey(key.to_owned()))
+    ObjectKey::new(key).map_err(|refused| match refused {
+        KeyError::Segment(_) => Error::InvalidSegment(key.to_owned()),
+        KeyError::Empty | KeyError::TooLong(_) => Error::InvalidKey(key.to_owned()),
+    })
 }
 
 /// An object of a listing of the client as one of this crate.
