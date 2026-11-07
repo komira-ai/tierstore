@@ -130,9 +130,16 @@ const FLAGLESS_KEYS: &[&str] = &[
     "hot_store.delete_wait",
     "hot_store.delete_poll_min",
     "hot_store.delete_poll_max",
+    "hot_store.emergency_cold_landing",
     "hot_store.step_attempts",
     "hot_store.step_retry_min",
     "hot_store.step_retry_max",
+    "hot_store.read_window",
+    "hot_store.read_retries",
+    "hot_store.list_marker_pages",
+    "hot_store.want_retry",
+    "hot_store.want_recent_limit",
+    "hot_store.copy_back_max_bytes",
 ];
 
 /// Keys of the table the pages need not name.

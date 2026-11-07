@@ -579,7 +579,8 @@ pub(super) fn open_tier(
 }
 
 /// The second handle on the hot store, for its marks bucket: the tier `cli.hot_marks` names, with
-/// the endpoint, region and credentials of the hot tier. Nothing in this release calls it. A bucket
+/// the endpoint, region and credentials of the hot tier. The proxy calls it only while the format
+/// object says `active-marks` and records [`marks_name`]. A bucket
 /// of an S3 store is reached when it is first used, so this asks the store nothing; a `dir` hot
 /// tier has none yet (`None`): opening its directory beside the hot one makes it, and a unit with
 /// `ProtectSystem=strict` and the hot directory alone in `ReadWritePaths=` could not, so the
@@ -742,7 +743,7 @@ pub(super) fn build(cli: &Cli) -> Result<Built, Error> {
     let marks = open_marks(cli, timeout)?;
     let mut proxy = ProxyConfig::new(&cli.proxy_id, cli.hot_bytes, Arc::clone(&clock));
     proxy.marks = marks;
-    proxy.marks_bucket = marks_name(&cli.hot_marks);
+    proxy.marks_name = marks_name(&cli.hot_marks);
     proxy.critical = share(cli.critical);
     let tuning = &cli.hot_tuning;
     proxy.usage_refresh = tuning.usage_refresh;

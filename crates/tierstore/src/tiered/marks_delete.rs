@@ -271,7 +271,7 @@ impl Release {
         if self.queued {
             config
                 .sleeper
-                .sleep(config.markers.queued_call_margin)
+                .sleep(config.marks_put.markers.queued_call_margin)
                 .await;
         }
         let mut backoff = Backoff::new(config.step_retry);

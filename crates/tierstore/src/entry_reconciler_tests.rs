@@ -21,6 +21,8 @@ use crate::{
     Step, Take, TestClock, encode_entry, entry_key,
 };
 
+#[path = "entry_reconciler_tests/copy.rs"]
+mod copy;
 #[path = "entry_reconciler_tests/copy_back.rs"]
 mod copy_back;
 #[path = "entry_reconciler_tests/evict.rs"]
@@ -622,10 +624,9 @@ async fn a_failing_store_call_fails_the_item_and_leaves_the_entry_held() {
     // The tier that fails, the call, and whether the cold tier holds the bytes already (so that
     // the comparison, not the copy, is what is under test).
     let cases = [
-        (false, Op::Head, false),
         (false, Op::Get, false),
-        (true, Op::Head, false),
         (true, Op::Put, false),
+        (true, Op::Head, true),
         (false, Op::Get, true),
         (true, Op::Get, true),
     ];
@@ -733,8 +734,8 @@ async fn a_failing_item_waits_its_own_delay_and_the_delay_doubles() {
     land(&rig, "p1", "k").await;
     let cold = Arc::new(FaultyBackend::new(rig.cold.clone()));
     let unavailable = || Error::Unavailable("cold".to_owned());
-    cold.fail_next_on(Op::Head, "k", unavailable());
-    cold.fail_next_on(Op::Head, "k", unavailable());
+    cold.fail_next_on(Op::Put, "k", unavailable());
+    cold.fail_next_on(Op::Put, "k", unavailable());
     let mut r = rig.over(rig.hot.clone(), cold.clone(), "r1", |_| {});
     assert_eq!(r.step().await.failed.len(), 1);
     assert_eq!(r.step().await.backed_off, 1);

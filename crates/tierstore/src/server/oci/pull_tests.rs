@@ -1,7 +1,7 @@
 //! The pull-through of the front, over an in-memory store and a registry in the process (see
 //! `fake_upstream`): no network.
 
-use std::sync::{Arc, Mutex, PoisonError};
+use std::sync::{Arc, Mutex, PoisonError, mpsc};
 use std::time::Duration;
 
 use bytes::Bytes;
@@ -585,6 +585,9 @@ struct Script {
     head_hangs: bool,
     /// Whether a `GET` of the tag is never answered.
     get_hangs: bool,
+    /// Told when the registry is sent the first request that it never answers (see
+    /// [`hold_clock_until_hang`]).
+    hung: Option<mpsc::Sender<()>>,
 }
 
 type Control = Arc<Mutex<Script>>;
@@ -597,6 +600,7 @@ fn script() -> Control {
         get_status: 200,
         head_hangs: false,
         get_hangs: false,
+        hung: None,
     }))
 }
 
@@ -608,11 +612,14 @@ fn change(control: &Control, edit: impl FnOnce(&mut Script)) {
 async fn tag_rig(control: &Control) -> Rig {
     let control = Arc::clone(control);
     Rig::new(move |seen| {
-        let now = control.lock().unwrap_or_else(PoisonError::into_inner);
+        let mut now = control.lock().unwrap_or_else(PoisonError::into_inner);
         if seen.path != TAG_PATH {
             return Fake::status(404);
         }
         if (seen.method == "HEAD" && now.head_hangs) || (seen.method == "GET" && now.get_hangs) {
+            if let Some(hung) = now.hung.take() {
+                let _ = hung.send(());
+            }
             return Fake::ending(Vec::new(), Ending::Hang);
         }
         if seen.method == "HEAD" {
@@ -626,6 +633,24 @@ async fn tag_rig(control: &Control) -> Rig {
         }
     })
     .await
+}
+
+/// Keeps the paused clock of a test where it is until the registry of `control` is sent the
+/// request that it never answers, and lets it move on from then.
+///
+/// The fake registry answers over a loopback socket. With the clock paused, tokio moves it to
+/// the next timer whenever the runtime has nothing to run, and a runtime waiting for a reply that
+/// is still on its way through the kernel has nothing to run: the clock would jump to the
+/// upstream's per-step `timeout` in the middle of a pull that is answered (which then fails, 502)
+/// or to the re-check deadline before the request that hangs is made. While a blocking task runs,
+/// tokio does not move a paused clock on (`tokio::time::pause`, "Preventing auto-advance"), so
+/// this one runs until the registry is sent the request it never answers. From then on nothing
+/// is on its way and the next timer is the one the test is about.
+fn hold_clock_until_hang(control: &Control) {
+    let (hung, hang) = mpsc::channel();
+    change(control, |now| now.hung = Some(hung));
+    // Ends at the hang, or when the registry's handler is dropped with the rig.
+    drop(tokio::task::spawn_blocking(move || hang.recv()));
 }
 
 fn methods(rig: &Rig) -> Vec<String> {
@@ -831,28 +856,35 @@ async fn a_pushed_tag_stands_unless_the_upstream_has_it_at_another_digest() {
 
 /// Asserts a re-check whose `HEAD` is never answered serves the stored tag once the re-check
 /// deadline (`recheck_timeout`, 5s, shorter than the upstream's per-step `timeout`) has passed on
-/// the injected clock, counts one failure, and writes no version.
+/// the injected clock, counts one failure, and writes no version. The clock stands still until
+/// the `HEAD` is made ([`hold_clock_until_hang`]), so the deadline is the only timer that can end
+/// the re-check.
 #[tokio::test(start_paused = true)]
 async fn a_head_that_is_never_answered_serves_the_stored_tag_at_the_recheck_deadline() {
     let _quiet = quiet();
     let control = script();
+    hold_clock_until_hang(&control);
     let rig = tag_rig(&control).await;
     assert_served(&rig.get(TAG_PATH).await, MANIFEST);
     change(&control, |now| now.head_hangs = true);
     let before = tokio::time::Instant::now();
     assert_served(&rig.get(TAG_PATH).await, MANIFEST);
     assert_eq!(tokio::time::Instant::now() - before, RECHECK_DEADLINE);
+    assert_eq!(methods(&rig), ["GET", "HEAD"]);
     assert_eq!(rig.metrics.recheck_failures(), 1);
     assert_eq!(rig.tags_stored().await, [FIRST_VERSION]);
 }
 
 /// Asserts the deadline bounds the re-check as a whole: a `HEAD` that says the tag moved followed
 /// by a `GET` that is never answered serves the stored tag at the same deadline, not after a
-/// further per-step timeout, counts one failure, and writes no version.
+/// further per-step timeout, counts one failure, and writes no version. The clock stands still
+/// until the `GET` is made ([`hold_clock_until_hang`]): the first pull and the `HEAD` are
+/// answered over the loopback socket at the instant the test starts, whatever the load.
 #[tokio::test(start_paused = true)]
 async fn a_get_of_a_moved_tag_that_is_never_answered_is_cut_at_the_recheck_deadline() {
     let _quiet = quiet();
     let control = script();
+    hold_clock_until_hang(&control);
     let rig = tag_rig(&control).await;
     assert_served(&rig.get(TAG_PATH).await, MANIFEST);
     change(&control, |now| {
@@ -862,6 +894,7 @@ async fn a_get_of_a_moved_tag_that_is_never_answered_is_cut_at_the_recheck_deadl
     let before = tokio::time::Instant::now();
     assert_served(&rig.get(TAG_PATH).await, MANIFEST);
     assert_eq!(tokio::time::Instant::now() - before, RECHECK_DEADLINE);
+    assert_eq!(methods(&rig), ["GET", "HEAD", "GET"]);
     assert_eq!(rig.metrics.recheck_failures(), 1);
     assert_eq!(rig.tags_stored().await, [FIRST_VERSION]);
 }

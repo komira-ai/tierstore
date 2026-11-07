@@ -206,7 +206,7 @@ impl Rig {
         config.format_refresh = Duration::ZERO;
         config.sleeper = sleeper.clone();
         config.marks = Some(marks.clone());
-        config.marks_bucket = Some("marks".to_owned());
+        config.marks_name = Some("marks".to_owned());
         tune(&mut config);
         let proxy = Proxy::open(hot.clone(), cold.clone(), config)
             .await
@@ -677,8 +677,8 @@ async fn a_delete_is_unavailable_while_the_format_does_not_open_writes_on_marker
 async fn a_proxy_without_a_marks_bucket_or_with_another_refuses_a_delete_under_active_marks() {
     let tunes: [fn(&mut ProxyConfig); 3] = [
         |config| config.marks = None,
-        |config| config.marks_bucket = None,
-        |config| config.marks_bucket = Some("elsewhere".to_owned()),
+        |config| config.marks_name = None,
+        |config| config.marks_name = Some("elsewhere".to_owned()),
     ];
     for tune in tunes {
         let rig = Rig::build(MARKS_FORMAT, tune).await;
@@ -703,7 +703,7 @@ async fn a_reserved_key_is_refused_and_unusable_marker_settings_keep_a_proxy_fro
     let clock = Arc::new(TestClock::new());
     let mut config = ProxyConfig::new("p2", BUDGET, clock.clone());
     config.marks = Some(Arc::new(MemoryBackend::new()));
-    config.markers.lock_lease = secs(1);
+    config.marks_put.markers.lock_lease = secs(1);
     let hot = Arc::new(MemoryBackend::with_clock(clock.clone()));
     let opened = Proxy::open(hot, Arc::new(MemoryBackend::with_clock(clock)), config).await;
     assert!(matches!(opened, Err(Error::Other(_))));

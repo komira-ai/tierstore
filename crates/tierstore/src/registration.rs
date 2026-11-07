@@ -15,10 +15,17 @@ use serde::{Deserialize, Serialize};
 use crate::format::FormatPhase;
 use crate::journal::to_body;
 
-/// The `proto` of the registrations this release writes: 2, the protocol of one journal entry for
+/// The `proto` of the registrations of a proxy with no marks bucket: 2, the protocol of one journal entry for
 /// each key (the registrations of the release before, which heartbeats but writes journals, say 1;
 /// `tierstore format-epoch --activate` refuses while one of them is live).
 pub(crate) const PROTO: u32 = 2;
+
+/// The `proto` of a proxy that has a marks bucket, so reads the marker of a key on a hot miss in
+/// every phase from which a marker can be in force (`docs/design/put-without-lock.md`, 5.7 and
+/// 8.1): `tierstore format-epoch --activate-marks` takes 3 to mean that. A proxy with no marks
+/// bucket (a library user's, and a server over a `dir` hot tier) says [`PROTO`], because it reads
+/// no marker.
+pub(crate) const PROTO_MARKS: u32 = 3;
 
 /// What a registration says.
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]

@@ -293,7 +293,7 @@ async fn a_streamed_put_is_passed_to_the_inner_store_unread() {
 }
 
 /// Asserts that the cache passes a put that asks for the answer to the inner store as it is: the
-/// object is made there, the answer is the inner store's (none, for a store that gives none), and a
+/// object is made there, the answer is the inner store's (the tag of the object it made, for the in-memory backend), and a
 /// failure of the inner store is the cache's.
 #[tokio::test]
 async fn a_put_that_asks_for_the_answer_is_passed_to_the_inner_store() {
@@ -312,7 +312,14 @@ async fn a_put_that_asks_for_the_answer_is_passed_to_the_inner_store() {
         .cached
         .put_stream_answered("k", Some(4), chunks, true)
         .await;
-    assert_eq!(made, Ok(None));
+    let tag = f.backend.head("k").await.unwrap().tag;
+    assert_eq!(
+        made,
+        Ok(Some(tierstore::PutAnswer {
+            tag,
+            modified: None
+        }))
+    );
     assert_eq!(f.cached.get("k", None).await.unwrap(), body("0123"));
 }
 

@@ -1,6 +1,7 @@
 //! The settings, servers, tiers and key files made of the flags.
 
 use super::*;
+use crate::server::cli::marks_name;
 
 /// Asserts that percents are shares of a whole.
 #[test]
@@ -57,6 +58,7 @@ fn the_settings_are_made_from_the_flags() {
     assert_eq!(built.proxy.proxy_id, "p1");
     assert_eq!(built.proxy.hot_budget, 1000);
     assert_eq!(built.proxy.critical, 0.95);
+    assert_eq!(built.proxy.marks_name, marks_name(&cli.hot_marks));
     assert_eq!(built.reconciler.holder, "p1/reconciler");
     assert_eq!(built.reconciler.hot_budget, 1000);
     assert_eq!(built.reconciler.high_water, 0.8);
