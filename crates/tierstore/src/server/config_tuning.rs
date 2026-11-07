@@ -281,16 +281,17 @@ cache  = true
         from_text(text, DEFAULTS).unwrap_err().to_string()
     }
 
-    /// A file that gives none of the keys has the values the code had before they were keys: the
+    /// A file that gives none of the keys has the values the code had before they were keys, except
+    /// the pool idle timeout, which is 15 s on purpose (it was 30 s): the
     /// connect timeout, body rate, idle timeout and retries of the S3 client, and the proxy's and
     /// reconciler's counts and sizes, in the file's settings and in what `build` makes of them.
     #[test]
-    fn a_file_that_gives_none_of_the_keys_has_the_old_values() {
+    fn a_file_that_gives_none_of_the_keys_has_the_defaults() {
         let mut cli = from_text(MINIMAL, DEFAULTS).unwrap();
         let client = cli.s3_client;
         assert_eq!(client.connect_timeout, Duration::from_secs(5));
         assert_eq!(client.min_body_rate.map(|rate| rate.get()), Some(1 << 20));
-        assert_eq!(client.tuning.pool_idle_timeout, Duration::from_secs(30));
+        assert_eq!(client.tuning.pool_idle_timeout, Duration::from_secs(15));
         assert_eq!(client.tuning.read_retries, 2);
         assert_eq!(client.tuning.read_retry_wait, Duration::from_millis(50));
         assert_eq!(client.tuning.endpoint_attempts, 3);
