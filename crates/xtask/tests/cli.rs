@@ -387,7 +387,8 @@ fn advisories_reads_head_when_no_commit_is_given_and_reports_a_git_failure() {
 #[test]
 fn release_plan_reads_the_version_file_and_the_freeze_and_appends_its_outputs() {
     // Catches: `release plan` not passing its flags on (--version-file, --freeze, --output),
-    // a missing VERSION file being an error, and the answers not reaching the output file.
+    // a missing VERSION file being an error, the answers not reaching the output file, and the
+    // build run's version record not read through the real `gh` path.
     let d = dir("plan");
     let run_json = format!(
         "{{\"workflow_runs\":[{{\"id\":11,\"head_sha\":\"{COMMIT}\",\"head_branch\":\"main\",\"event\":\"push\",\"conclusion\":\"success\"}}]}}"
@@ -411,6 +412,16 @@ fn release_plan_reads_the_version_file_and_the_freeze_and_appends_its_outputs() 
         &format!("repos/{REPO}/compare/v0.3.1...{COMMIT}"),
         "{\"status\":\"ahead\",\"files\":[{\"filename\":\"Cargo.lock\"}],\"commits\":[{\"commit\":{\"message\":\"fix a thing (#9)\"}}]}",
     );
+    // The build run recorded the version it built under, as `release version --record` and
+    // artifacts.yml's upload name it.
+    let recorded = |version: &str| {
+        put(
+            &d,
+            &format!("repos/{REPO}/actions/runs/11/artifacts?per_page=100"),
+            &format!("{{\"artifacts\":[{{\"name\":\"version-{version}\"}}]}}"),
+        );
+    };
+    recorded("0.3.2");
     let plan = |extra: &[&str]| {
         let mut args = vec![
             "release",
@@ -432,6 +443,7 @@ fn release_plan_reads_the_version_file_and_the_freeze_and_appends_its_outputs() 
     let written = std::fs::read_to_string(d.join("github-output")).expect("out");
     assert!(written.contains("tag=v0.3.2\n"), "{written}");
     put(&d, "VERSION", "0.4.0\n");
+    recorded("0.4.0");
     let o = plan(&["--version-file", "VERSION"]);
     assert_eq!(o.status.code(), Some(0), "{}", stderr(&o));
     let written = std::fs::read_to_string(d.join("github-output")).expect("out");
@@ -516,7 +528,7 @@ fn release_manual_hands_the_tag_commit_and_note_on_and_refuses_a_bad_tag_with_st
 #[test]
 fn release_version_prints_the_version_the_plan_would_tag_and_appends_it() {
     // Catches: `release version` not passing its flags on, and the answer not reaching the
-    // output file the build job reads.
+    // output file the build job reads or the record file it uploads.
     let d = dir("version");
     put(
         &d,
@@ -537,9 +549,13 @@ fn release_version_prints_the_version_the_plan_would_tag_and_appends_it() {
         args.extend_from_slice(extra);
         run(&d, &args)
     };
-    let o = version(&["--version-file", "VERSION"]);
+    let o = version(&["--version-file", "VERSION", "--record", "version"]);
     assert_eq!(o.status.code(), Some(0), "{}", stderr(&o));
     assert_eq!(stdout(&o), "version=0.3.2\n");
+    assert_eq!(
+        std::fs::read_to_string(d.join("version")).expect("record"),
+        "0.3.2\n"
+    );
     put(&d, "VERSION", "0.4.0\n");
     let o = version(&["--version-file", "VERSION"]);
     assert_eq!(o.status.code(), Some(0), "{}", stderr(&o));

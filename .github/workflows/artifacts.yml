@@ -44,9 +44,11 @@
 # (`cargo xtask release version`: the patch after the highest vX.Y.Z tag, or the VERSION file at
 # the root when that is higher), before anything is built, and every build job writes it into the
 # crate (`cargo xtask release set-version`, from RELEASE_VERSION) before building, so
-# `tierstore --version` prints `X.Y.Z+<12 hex>`. The release plan (release.yml) names its tag
-# with the same computation, and the release is refused
-# unless the downloaded binary says that tag. The names of the tarballs and SBOMs carry the commit,
+# `tierstore --version` prints `X.Y.Z+<12 hex>`. The job also records the version on the run as
+# the name of an artifact, `version-<X.Y.Z>`. The release plan (release.yml) names its tag with
+# the same computation and releases only a commit whose run recorded that version (a commit built
+# before a newer release was published is passed over, and a newer commit's release carries it);
+# the release is refused unless the downloaded binary says that tag. The names of the tarballs and SBOMs carry the commit,
 # not the version, and are unchanged; the hostkeeper packages are named by the version the binary
 # reports, which holds both. A pull request builds under the version its base would release next.
 #
@@ -110,7 +112,16 @@ jobs:
         id: version
         env:
           GH_TOKEN: ${{ github.token }}
-        run: cargo xtask release version --repo "$GITHUB_REPOSITORY" --version-file VERSION --output "$GITHUB_OUTPUT"
+        run: cargo xtask release version --repo "$GITHUB_REPOSITORY" --version-file VERSION --output "$GITHUB_OUTPUT" --record "$RUNNER_TEMP/version"
+      # The version this run builds under, recorded on the run as the name of an artifact,
+      # version-<X.Y.Z>: the release plan reads it to release only a commit whose binary says the
+      # tag the plan would give it, and passes over one built before a newer release.
+      - name: Record the version on the run
+        uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
+        with:
+          name: version-${{ steps.version.outputs.version }}
+          path: ${{ runner.temp }}/version
+          if-no-files-found: error
 
   # glibc: the binary needs the glibc of the runner image it was built on (Ubuntu 24.04) or newer.
   linux-x86_64:

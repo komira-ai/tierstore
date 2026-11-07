@@ -65,12 +65,42 @@ fn refs(tags: &[&str]) -> Value {
     )
 }
 
-/// A repository whose `COMMIT` has green runs of both workflows, whose release tags are
-/// `tags`, and which holds `files` and the commit messages `messages` after the highest of them.
+fn artifacts_path(run: u64) -> String {
+    format!("repos/{REPO}/actions/runs/{run}/artifacts?per_page=100")
+}
+
+/// The artifacts of a build run whose version records are `versions` (`version-<each>`), beside
+/// the files a release takes.
+fn recorded(versions: &[&str]) -> Value {
+    let mut names = vec!["assets-linux-x86_64".to_owned(), "sha256sums".to_owned()];
+    names.extend(versions.iter().map(|v| format!("version-{v}")));
+    json!({ "artifacts": names
+        .iter()
+        .map(|n| json!({ "name": n, "expired": false }))
+        .collect::<Vec<_>>() })
+}
+
+/// `gh` with the build run of `COMMIT` (run 11) recording `version` instead.
+fn record_as(mut gh: FakeGh, version: &str) -> FakeGh {
+    gh.api.retain(|(p, _)| *p != artifacts_path(11));
+    gh.api.push((artifacts_path(11), recorded(&[version])));
+    gh
+}
+
+/// A repository whose `COMMIT` has green runs of both workflows, whose build run recorded the
+/// version after the highest of the release tags `tags` (as it does when no release is published
+/// between the build and the plan), and which holds `files` and the commit messages `messages`
+/// after the highest of them.
 fn repo(tags: &[&str], status: &str, files: &[&str], messages: &[&str]) -> FakeGh {
+    let highest = tags
+        .iter()
+        .filter_map(|t| parse_tag(t).map(|v| (v, *t)))
+        .max();
+    let next = next_tag(highest.map(|(_, t)| t), None).expect("next");
     let mut api = vec![
         (runs_path("artifacts.yml"), green(11)),
         (runs_path("ci.yml"), green(22)),
+        (artifacts_path(11), recorded(&[&next[1..]])),
         (tags_path(), refs(tags)),
     ];
     let compared = json!({
@@ -323,7 +353,10 @@ fn a_release_without_commit_messages_says_where_it_came_from() {
 #[test]
 fn a_version_file_names_the_tag_of_a_code_push() {
     // Catches: VERSION read by the plan but not used for the tag.
-    let gh = repo(&["v0.3.1"], "ahead", &["Cargo.lock"], &["bump"]);
+    let gh = record_as(
+        repo(&["v0.3.1"], "ahead", &["Cargo.lock"], &["bump"]),
+        "0.4.0",
+    );
     let printed = plan_of(&gh, Some("0.4.0\n"));
     assert!(printed.contains(&"tag=v0.4.0".to_owned()), "{printed:?}");
     let gh = repo(&["v0.3.1"], "ahead", &["Cargo.lock"], &["bump"]);
@@ -433,10 +466,11 @@ fn a_commit_without_both_green_runs_waits_for_the_run_that_finishes_last() {
         gh.api.retain(|(p, _)| *p != path);
         let printed = plan_of(&gh, None);
         assert!(printed.contains(&"release=false".to_owned()), "{missing}");
-        assert!(printed[0].contains(missing), "{printed:?}");
-        assert!(
-            !gh.asked.borrow().contains(&tags_path()),
-            "{missing}: tags read"
+        assert_eq!(
+            printed[0],
+            format!(
+                "no release: no commit of main is ready to be v0.3.2: {COMMIT}: no successful push run of {missing} on main yet"
+            )
         );
     }
 }
@@ -577,8 +611,8 @@ fn the_version_of_a_commit_is_the_one_the_plan_would_tag() {
         (vec![], None, "0.1.0"),
         (vec![], Some("v0.0.7"), "0.0.7"),
     ] {
-        let gh = repo(&tags, "ahead", &["Cargo.lock"], &["fix"]);
-        let printed = version(&gh, REPO, file, None).expect("version");
+        let gh = record_as(repo(&tags, "ahead", &["Cargo.lock"], &["fix"]), want);
+        let printed = version(&gh, REPO, file, None, None).expect("version");
         assert_eq!(
             printed,
             vec![format!("version={want}")],
@@ -600,16 +634,18 @@ fn the_version_is_appended_to_the_output_file_and_a_bad_input_is_an_error() {
     let dir = scratch("version-out");
     let out = dir.join("out");
     let gh = repo(&["v0.3.1"], "ahead", &[], &[]);
-    version(&gh, REPO, None, Some(&out)).expect("version");
-    version(&gh, REPO, Some("0.5.0"), Some(&out)).expect("version");
+    version(&gh, REPO, None, Some(&out), None).expect("version");
+    version(&gh, REPO, Some("0.5.0"), Some(&out), None).expect("version");
     assert_eq!(
         std::fs::read_to_string(&out).expect("out"),
         "version=0.3.2\nversion=0.5.0\n"
     );
-    let e = version(&gh, REPO, Some("soon"), None).expect_err("bad");
+    let e = version(&gh, REPO, Some("soon"), None, None).expect_err("bad");
     assert!(e.to_string().contains("VERSION"), "{e}");
     let names: Vec<String> = (0..100).map(|n| format!("v0.0.{n}")).collect();
     let names: Vec<&str> = names.iter().map(String::as_str).collect();
     let gh = repo(&names, "ahead", &[], &[]);
-    assert!(version(&gh, REPO, None, None).is_err());
+    assert!(version(&gh, REPO, None, None, None).is_err());
 }
+
+mod walk;
