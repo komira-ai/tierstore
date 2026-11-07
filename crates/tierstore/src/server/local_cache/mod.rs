@@ -12,7 +12,7 @@
 //! With [`CacheConfig::write_through`] (`write_through = true` in `[local_cache]`) the cache
 //! accepts writes and sends every one of them to the upstream: nothing is acknowledged before
 //! the upstream has it, and nothing is only local. The module `write` has what each call does.
-//! A create-only put under a `cache = true` policy is also kept on the node (module `keep`):
+//! A put under a `cache = true` policy, create-only or plain, is also kept on the node (module `keep`):
 //! the body is copied to `.stage/` as it streams to the upstream, and once the upstream has
 //! acknowledged it and said what tag it gave the object, the copy is put in the cache before the
 //! answer. That copy is best effort and never fails the put.
@@ -146,6 +146,8 @@ mod keep_head_tests;
 #[cfg(test)]
 mod keep_lock_tests;
 #[cfg(test)]
+mod keep_replace_tests;
+#[cfg(test)]
 mod keep_s3_tests;
 #[cfg(test)]
 mod keep_tests;
@@ -197,8 +199,8 @@ use tokio::sync::Semaphore;
 use crate::journal::is_reserved;
 use crate::server::lock;
 use crate::{
-    Backend, ByteRange, Clock, Error, Listed, Meta, OpenUpload, PartBody, ReadBody, UploadedPart,
-    UploadsAfter,
+    Backend, ByteRange, Clock, Error, Listed, Meta, OpenUpload, PartBody, PutAnswer, PutClaim,
+    ReadBody, UploadedPart, UploadsAfter,
 };
 
 pub use disk::{Disk, Space, SystemDisk};
@@ -210,6 +212,7 @@ pub use selfcheck::{LocalTierFailure, check_local};
 use fill::Pending;
 use hold::{Hold, Standing};
 use index::Index;
+use keep::Sent;
 use layout::{Name, data_path, name_of};
 use metrics::{add, bump};
 use revalidate::Verdict;
@@ -318,7 +321,7 @@ pub struct CacheConfig {
     /// never checks: a hit is served from the disk until the entry is evicted.
     pub revalidate_after: Option<Duration>,
     /// Whether a create-only put asks the upstream for the key (one HEAD) before it reads the
-    /// body (default `true`). The HEAD spares an upstream that refuses a key it holds only after
+    /// body (default `true`; a plain put never does). The HEAD spares an upstream that refuses a key it holds only after
     /// the whole body has arrived the transfer of a large blob it has already; an upstream that
     /// answers before it reads the body (a proxy whose format is `active-marks`) makes it three
     /// requests more of the proxy for every put of a new key (a hot HEAD, a marker GET and a cold
@@ -424,6 +427,8 @@ pub(super) struct Inner {
     /// they must not keep what they read. A name is put here only while it has a fill in
     /// `flights`, and leaves with it; the lock is taken with `flights` held.
     invalidated: Mutex<HashSet<String>>,
+    /// The puts that are running, by the name of the object (see `Writing`).
+    writers: Mutex<HashMap<String, write::Writers>>,
     /// The number of the next file in `.stage/`.
     staged: AtomicU64,
     /// What every name in `.stage/` that this cache makes starts with: it is not the prefix of
@@ -575,6 +580,7 @@ impl LocalCache {
             counters,
             flights: Mutex::new(HashMap::new()),
             invalidated: Mutex::new(HashSet::new()),
+            writers: Mutex::new(HashMap::new()),
             staged: AtomicU64::new(0),
             stage_prefix: stage_prefix(),
             reserved: AtomicU64::new(0),
@@ -712,7 +718,7 @@ impl Backend for LocalCache {
         len: Option<u64>,
         body: PartBody<'_>,
     ) -> Result<(), Error> {
-        self.inner.put_through(key, len, body, false).await
+        self.inner.put_through(key, len, body, Sent::Creates).await
     }
 
     async fn put_stream_hot_only(
@@ -721,7 +727,23 @@ impl Backend for LocalCache {
         len: Option<u64>,
         body: PartBody<'_>,
     ) -> Result<(), Error> {
-        self.inner.put_through(key, len, body, true).await
+        self.inner
+            .put_through(key, len, body, Sent::CreatesHotOnly)
+            .await
+    }
+
+    /// A plain `PUT`: sent to the upstream as its plain put, and the cache keeps the new copy
+    /// and forgets the old one (see `put_through`, in `keep`).
+    async fn put_stream_replacing(
+        &self,
+        key: &str,
+        len: Option<u64>,
+        body: PartBody<'_>,
+        claim: &PutClaim,
+    ) -> Result<Option<PutAnswer>, Error> {
+        let sent = Sent::Replaces(claim);
+        self.inner.put_through(key, len, body, sent).await?;
+        Ok(None)
     }
 
     async fn put_if_match(&self, _key: &str, _body: Bytes, _etag: &str) -> Result<String, Error> {

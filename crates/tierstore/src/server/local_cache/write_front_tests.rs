@@ -223,8 +223,6 @@ async fn a_create_only_put_is_200_and_a_repeat_is_412() {
             (412, "PreconditionFailed".to_owned()),
             "{key}"
         );
-        let plain = front.full("PUT", key, &[], b"third").await;
-        assert_eq!(plain.status, StatusCode::PRECONDITION_FAILED, "{key}");
         assert_eq!(front.rig.calls(Op::Put), puts, "{key}");
         assert_eq!(front.read(key).await.body, "first", "{key}");
     }
@@ -233,6 +231,42 @@ async fn a_create_only_put_is_200_and_a_repeat_is_412() {
     assert_eq!(front.rig.calls(Op::Put), 3);
     assert_eq!(front.rig.calls(Op::PutIfMatch), 0);
     assert_eq!(front.rig.staged_files(), 0);
+}
+
+/// Asserts a plain `PUT` through the front of an object the upstream holds: 200, the upstream gets
+/// one put and no HEAD, the next read is the new bytes (under a prefix the cache keeps it is a
+/// hit that sends the upstream nothing), and `If-None-Match: *` for the same key is still 412 and
+/// leaves the new bytes. Before this, the plain put was a create-only one and answered 412.
+#[tokio::test]
+async fn a_plain_put_of_a_held_key_is_200_and_the_next_read_is_the_new_object() {
+    let front = Front::new("tscache-wfront-overwrite", true);
+    for key in ["cas/b/obj", "other/obj"] {
+        front.rig.put(key, b"old").await;
+        assert_eq!(front.read(key).await.body, "old", "{key}");
+        let (puts, heads, gets) = (
+            front.rig.calls(Op::Put),
+            front.rig.calls(Op::Head),
+            front.rig.calls(Op::Get),
+        );
+
+        // The front hands the backend the length only when the request says it; without it the
+        // copy cannot be reserved for and is not kept.
+        let replaced = front
+            .full("PUT", key, &[("content-length", "3")], b"new")
+            .await;
+        assert_eq!(replaced.status, StatusCode::OK, "{key}: {}", replaced.body);
+        assert_eq!(front.rig.calls(Op::Put), puts + 1, "{key}");
+        assert_eq!(front.rig.calls(Op::Head), heads, "{key}");
+        assert_eq!(front.read(key).await.body, "new", "{key}");
+        let kept = key.starts_with("cas/");
+        assert_eq!(front.rig.calls(Op::Get), gets + u64::from(!kept), "{key}");
+
+        let create = front
+            .full("PUT", key, &[("if-none-match", "*")], b"third")
+            .await;
+        assert_eq!(denied(&create), (412, "PreconditionFailed".to_owned()));
+        assert_eq!(front.read(key).await.body, "new", "{key}");
+    }
 }
 
 /// Asserts that a put of a key named by its content (`cas/l/<sha256>`) whose body hashes to

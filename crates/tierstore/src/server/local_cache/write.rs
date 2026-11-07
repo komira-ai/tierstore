@@ -1,6 +1,18 @@
 //! The writes of a cache with `write_through` on: each goes to the upstream before it is
 //! acknowledged, so nothing is only local and there is nothing to recover.
 //!
+//! - **Plain put** (`put_stream_replacing`, a `PUT` with no `If-None-Match`): sent to the
+//!   upstream as its plain put (see [`put_stream_replacing`](crate::Backend::put_stream_replacing)),
+//!   with no HEAD before it, and the key is replaced where the upstream replaces. The cache
+//!   [`forget`](Inner::forget)s the key before the put and again when the upstream has answered
+//!   (also with an error, which may have followed a commit), so that neither a read that fills
+//!   between the two nor an older copy is served after the overwrite, and then keeps the new
+//!   copy under the tag the upstream's answer gives (see `keep`). Two puts of one key that run at
+//!   once, one of them a plain put, keep no copy: the order in which the upstream took them is
+//!   not known here, and the next read fills the object (see [`Writing`]). A put that replaces
+//!   on a tag (`If-Match`) is still refused. Where the upstream creates only (a proxy whose
+//!   format is not `active-marks`) the plain put is the upstream's create-only one and its
+//!   `AlreadyExists` is passed on.
 //! - **Create-only put** ([`put_through`](Inner::put_through), in `keep`): one HEAD of the key
 //!   goes to the upstream before the body is read (also when the upstream is a proxy of two
 //!   tiers, whose own put refuses a key that only its first tier holds only after the body has
@@ -39,6 +51,7 @@ use futures::stream;
 use crate::journal::is_reserved;
 use crate::{Error, PartBody};
 
+use super::keep::Sent;
 use super::{Inner, READ_ONLY, locked};
 
 impl Inner {
@@ -59,7 +72,7 @@ impl Inner {
     pub(super) async fn put_whole(self: &Arc<Self>, key: &str, body: Bytes) -> Result<(), Error> {
         let len = body.len() as u64;
         let once: PartBody<'_> = stream::once(async move { Ok(body) }).boxed();
-        self.put_through(key, Some(len), once, false).await
+        self.put_through(key, Some(len), once, Sent::Creates).await
     }
 
     /// Deletes the object: the entry first, then the upstream's. A read that fills the key
@@ -141,5 +154,66 @@ impl Inner {
     /// Whether the fill of `hex` was marked by [`forget`](Self::forget).
     pub(super) fn is_invalidated(&self, hex: &str) -> bool {
         locked(&self.invalidated).contains(hex)
+    }
+}
+
+/// The puts of one object that are running on this node.
+#[derive(Default)]
+pub(super) struct Writers {
+    /// How many.
+    running: usize,
+    /// Whether one of them, now or before, was a plain put.
+    replaces: bool,
+    /// Whether two of them ran at once with a plain put among them: the order in which the
+    /// upstream took them is not known, so none of them keeps a copy.
+    overlapped: bool,
+}
+
+/// A put of an object that is running, from before its body is sent until its keep has ended.
+/// It tells the keep whether another put of the object ran at the same time as a plain put
+/// (see [`Writers`]), so that a keep never puts in the cache the copy of a write that the
+/// upstream took before another one.
+pub(super) struct Writing {
+    inner: Arc<Inner>,
+    hex: String,
+}
+
+impl Writing {
+    /// Whether another put of the object ran while this one did, with a plain put among them.
+    /// Looked for after the entry is in the index (see `is_invalidated`): a put that begins
+    /// after the look forgets the entry, and one that began before it is seen here.
+    pub(super) fn overlapped(&self) -> bool {
+        locked(&self.inner.writers)
+            .get(&self.hex)
+            .is_some_and(|group| group.overlapped)
+    }
+}
+
+impl Drop for Writing {
+    fn drop(&mut self) {
+        let mut writers = locked(&self.inner.writers);
+        let group = writers.entry(self.hex.clone()).or_default();
+        group.running = group.running.saturating_sub(1);
+        if group.running == 0 {
+            let _ = writers.remove(&self.hex);
+        }
+    }
+}
+
+impl Inner {
+    /// Registers a put of the object `hex`; `replaces` is true for a plain put.
+    pub(super) fn begin_write(self: &Arc<Self>, hex: &str, replaces: bool) -> Writing {
+        {
+            let mut writers = locked(&self.writers);
+            let group = writers.entry(hex.to_owned()).or_default();
+            // Not short-circuited: no branch for a look at a group that is alone.
+            group.overlapped |= (group.running > 0) & (replaces | group.replaces);
+            group.replaces |= replaces;
+            group.running += 1;
+        }
+        Writing {
+            inner: Arc::clone(self),
+            hex: hex.to_owned(),
+        }
     }
 }

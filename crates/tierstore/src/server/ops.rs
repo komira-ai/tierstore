@@ -647,7 +647,10 @@ impl Server {
         let mut storing = tokio::spawn(async move {
             let _permit = permit;
             match claim {
-                Some(claim) => backend.put_stream_replacing(&name, len, body, &claim).await,
+                Some(claim) => backend
+                    .put_stream_replacing(&name, len, body, &claim)
+                    .await
+                    .map(drop),
                 None if hot_only => backend.put_stream_hot_only(&name, len, body).await,
                 None => backend.put_stream(&name, len, body).await,
             }

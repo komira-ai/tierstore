@@ -9,8 +9,8 @@ use async_trait::async_trait;
 use bytes::Bytes;
 
 use crate::{
-    Backend, ByteRange, Error, Listed, Meta, OpenUpload, Opened, PartBody, PutAnswer, ReadBody,
-    Span, UploadedPart, UploadsAfter,
+    Backend, ByteRange, Error, Listed, Meta, OpenUpload, Opened, PartBody, PutAnswer, PutClaim,
+    ReadBody, Span, UploadedPart, UploadsAfter,
 };
 
 /// The kinds of call a [`FaultyBackend`] tells apart.
@@ -315,6 +315,22 @@ impl Backend for FaultyBackend {
         let answer = self
             .inner
             .put_stream_answered(key, len, body, hot_only)
+            .await?;
+        Ok(answer.filter(|_| !self.untagged))
+    }
+
+    /// A plain put is a call of kind [`Op::Put`], as `put_stream` is.
+    async fn put_stream_replacing(
+        &self,
+        key: &str,
+        len: Option<u64>,
+        body: PartBody<'_>,
+        claim: &PutClaim,
+    ) -> Result<Option<PutAnswer>, Error> {
+        self.enter(Op::Put, key).await?;
+        let answer = self
+            .inner
+            .put_stream_replacing(key, len, body, claim)
             .await?;
         Ok(answer.filter(|_| !self.untagged))
     }
