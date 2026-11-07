@@ -64,7 +64,7 @@ opening the proxy: <why>
 binding <address>: <why>
 ```
 
-tierstore does not test its stores at start. Opening the proxy reads and writes the hot tier's own state (its registration and its journal), so a hot tier that is down fails the start here with `opening the proxy: <why>`: check the endpoint, the network and the store; the unit tries again every 30 seconds. A cold store that is down does not fail a start: the first request that needs it fails (a client sees 503 `ServiceUnavailable`, see "Errors a client sees"). A store that does not meet what tierstore requires of it (see [operations](operations.md#what-tierstore-requires-of-a-store)) is not detected at all. `binding` is an address in use, or one that is not on this host. A server given several S3 or registry listen addresses (see [configuration](configuration.md)) starts only if it can bind every one: the message names the first that failed, and nothing is served.
+tierstore does not test its stores at start. Opening the proxy reads and writes the hot tier's own state (its registration), so a hot tier that is down fails the start here with `opening the proxy: <why>`: check the endpoint, the network and the store; the unit tries again every 30 seconds. A cold store that is down does not fail a start: the first request that needs it fails (a client sees 503 `ServiceUnavailable`, see "Errors a client sees"). A store that does not meet what tierstore requires of it (see [operations](operations.md#what-tierstore-requires-of-a-store)) is not detected at all. `binding` is an address in use, or one that is not on this host. A server given several S3 or registry listen addresses (see [configuration](configuration.md)) starts only if it can bind every one: the message names the first that failed, and nothing is served.
 
 An address given twice exits 2 before anything is bound; the message names the entries and the address:
 
@@ -129,7 +129,7 @@ Both exit 3 and the unit does not restart. The first is a probe that could not b
 | 403 `SignatureDoesNotMatch` | the secret is wrong, or the request was changed after it was signed |
 | 403 `RequestTimeTooSkewed` | the client's clock is more than 15 minutes from the server's |
 | 403 `AccessDenied` | the key's role does not allow the call; see [keys and roles](keys.md) |
-| 412 `PreconditionFailed` | the key already exists in either tier: puts are create-only |
+| 412 `PreconditionFailed` | a create-only put found the key in either tier (every put on the entry format, a put with `If-None-Match: *`, a scoped or presigned put), or an `If-Match` named another tag; on the marker format a plain put replaces and is not refused |
 | 413 `EntityTooLarge` | a body longer than `server.max_request_bytes` (or the presigning key's ceiling) |
 | 400 `RequestTimeout` | a body that stalled for `server.body_idle_timeout` or came slower than `server.put_min_bytes_per_sec`; nothing is stored |
 | 503 `SlowDown` | more than `server.max_concurrent_puts` bodies at once for longer than `server.put_permit_wait`, or a put that met a full tier; or, under the format phase `active-marks`, a delete of a key that another writer holds for longer than the lock wait (5 s), or whose hot DELETE ended unknown and is kept from a put for a minute; retry |
