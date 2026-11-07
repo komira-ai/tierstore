@@ -1,11 +1,12 @@
 //! The macOS package, on the Linux runner: its manifest and plist read as data, the placed-path
-//! rule of a plist's program, its manifest and plist loaded by hostkeeper main's loader, which
-//! reads launchd jobs, and its archive through the unpacker of komira-ai/hostkeeper#23 as merged,
-//! whose loader reads both the manifest's `platform` key and launchd jobs.
+//! rule of a plist's program, its manifest and plist loaded by hostkeeper's loader, which reads
+//! both the manifest's `platform` key and launchd jobs, and its archive through hostkeeper's
+//! unpacker (both at the one commit the root `Cargo.toml` pins).
 
 use std::path::Path;
 
-use hostkeeper_config_main::manifest::{Manifest as MainManifest, ManifestRefusal as MainRefusal};
+use hostkeeper_config::manifest::{Expected, HostkeeperVersion, Manifest, ManifestRefusal};
+use hostkeeper_config::names::{ServiceName, Version};
 use hostkeeper_placed::lint::{LintError, check_unit_text};
 use xtask::package::Platform;
 use xtask::release::hostkeeper_package::{BINARY, LAUNCHD_LABEL};
@@ -185,34 +186,25 @@ fn the_macos_package_has_one_job_no_service_file_and_the_linux_ones_no_plist() {
 }
 
 /// The macOS package's files below `root`, as a host keeps the version, its manifest through
-/// `edit` first, loaded with hostkeeper main's manifest loader. Main's loader predates the
-/// manifest's `platform` key, so that one line is left out for it.
-fn load_with_mains_loader(
+/// `edit` first, loaded with hostkeeper's manifest loader.
+fn load_with_hostkeepers_loader(
     root: &Path,
     edit: impl Fn(String) -> String,
-) -> Result<MainManifest, MainRefusal> {
+) -> Result<Manifest, ManifestRefusal> {
     let version = version_dir(root);
     std::fs::create_dir_all(&version).expect("the version directory");
     write_tree(&version, &mac(), |name, bytes| match name {
-        "manifest.toml" => edit(
-            String::from_utf8(bytes)
-                .expect("UTF-8")
-                .lines()
-                .filter(|line| !line.starts_with("platform "))
-                .map(|line| format!("{line}\n"))
-                .collect(),
-        )
-        .into_bytes(),
+        "manifest.toml" => edit(String::from_utf8(bytes).expect("UTF-8")).into_bytes(),
         _ => bytes,
     });
-    MainManifest::load(
+    Manifest::load(
         &version,
-        &hostkeeper_config_main::manifest::Expected {
-            name: hostkeeper_config_main::names::ServiceName::new("tierstore").expect("a name"),
-            version: hostkeeper_config_main::names::Version::new(VERSION).expect("a version"),
+        &Expected {
+            name: ServiceName::new("tierstore").expect("a name"),
+            version: Version::new(VERSION).expect("a version"),
+            platform: hk_platform(Platform::MacosArm64),
         },
-        &hostkeeper_config_main::manifest::HostkeeperVersion::parse(MIN_HOSTKEEPER)
-            .expect("a version"),
+        &HostkeeperVersion::parse(MIN_HOSTKEEPER).expect("a version"),
     )
 }
 
@@ -231,8 +223,8 @@ fn the_macos_manifest_and_its_plist_load_with_hostkeepers_launchd_loader() {
     // loader checks the run entry against the plist: a label of tierstore with no plist of its
     // own, and a label that is not tierstore's.
     let scratch = Scratch::new("hostkeeper-package-mac-load");
-    let manifest =
-        load_with_mains_loader(&scratch.path().join("as-built"), |text| text).expect("loaded");
+    let manifest = load_with_hostkeepers_loader(&scratch.path().join("as-built"), |text| text)
+        .expect("loaded");
     assert_eq!(manifest.version.as_str(), VERSION);
     assert_eq!(manifest.run, [LAUNCHD_LABEL]);
     assert_eq!(
@@ -252,10 +244,10 @@ fn the_macos_manifest_and_its_plist_load_with_hostkeepers_launchd_loader() {
         ("not-tierstores", "com.example.tierstore"),
     ] {
         let refused =
-            load_with_mains_loader(&scratch.path().join(dir), |text| run_entry(text, entry))
+            load_with_hostkeepers_loader(&scratch.path().join(dir), |text| run_entry(text, entry))
                 .unwrap_err();
         assert!(
-            matches!(&refused, MainRefusal::RunUnit { unit, .. } if unit == entry),
+            matches!(&refused, ManifestRefusal::RunUnit { unit, .. } if unit == entry),
             "{entry}: {refused:?}"
         );
     }
@@ -265,7 +257,7 @@ fn the_macos_manifest_and_its_plist_load_with_hostkeepers_launchd_loader() {
 fn the_macos_package_unpacks_with_hostkeeper_and_its_manifest_loads() {
     // Catches: a macOS package hostkeeper's unpacker refuses: an archive rule broken, or a
     // manifest or launchd job its loader, which knows both the manifest's `platform` key and
-    // launchd jobs (komira-ai/hostkeeper#23 as merged), does not take.
+    // launchd jobs (komira-ai/hostkeeper#32), does not take.
     let scratch = Scratch::new("hostkeeper-package-mac-unpack");
     let unpacked = unpack(scratch.path(), &mac(), Platform::MacosArm64).expect("unpacked");
     let manifest = &unpacked.manifest;
