@@ -1,0 +1,153 @@
+# The macOS checks of a pull request, run only when it changes the macOS surface: the code that
+# behaves differently on macOS or that builds, packages or checks the macOS binary (the launchd
+# arm of the update hook and its step runner, the listener hand-off, the packaging, the xtask
+# release verbs, the workflows that build them; `xtask::mac_surface::SURFACE` lists it).
+#
+# - `surface` (Linux) lists the paths the pull request changes (the merge commit against its first
+#   parent, the base) and answers `mac=true` when one of them is on the surface (`cargo xtask
+#   mac-surface`). On the surface it also computes the version the build is given, as the
+#   `version` job of artifacts.yml does, so the macOS job needs no token.
+# - `macos-arm64` (macOS, GitHub-hosted, macos-15), on the surface only: every test of the
+#   workspace on macOS, then the build, the package, the hostkeeper package and the checks that
+#   artifacts.yml's `macos-arm64` job makes of them after a merge (the binary names the commit and
+#   the version, built and unpacked from the tarball; the package unpacks with hostkeeper's own
+#   unpacker; the unpacked binary's code signature is valid). It uploads nothing, saves no cache
+#   and signs nothing; it holds `contents: read` alone and no secret, no token and no OIDC scope.
+# - `macos` (Linux) is the one check to require: it passes when `surface` passed and either the
+#   pull request is off the surface and `macos-arm64` was skipped, or it is on the surface and
+#   `macos-arm64` passed; it fails otherwise. So a pull request that is off the surface waits on
+#   no macOS runner, and a required `macos` never waits on a job that will not run.
+#
+# A pull request's newer run cancels its older one, so a burst of pushes holds one macOS runner.
+# Pull requests only: a push to main builds and tests macOS in artifacts.yml, unchanged. The
+# workflow lint (crates/xtask/tests/workflows/macos_pr.rs) pins this file: its jobs, their
+# conditions, the commands of the macOS job (artifacts.yml's, with the workspace's tests), the
+# cargo-cyclonedx pins (artifacts.yml's), and no secret or write scope in a macOS job.
+name: macos
+
+on:
+  pull_request:
+
+permissions: {}
+
+concurrency:
+  group: macos-${{ github.event.pull_request.number }}
+  cancel-in-progress: true
+
+env:
+  CARGO_TERM_COLOR: always
+  CARGO_INCREMENTAL: 0
+  # cargo-cyclonedx makes the SBOM, as in artifacts.yml (the lint holds these to its pins).
+  CYCLONEDX_VERSION: 0.5.9
+  CYCLONEDX_SHA256_AARCH64_MACOS: 4c53dfa21e70b65bf7f8d2592aadde3bcb02c1a40b6ec63b877e5ca65a29e180
+
+defaults:
+  run:
+    shell: bash
+
+jobs:
+  # Whether the pull request changes the macOS surface, and the version of the build if it does.
+  # The checkout is the merge commit and its parents: its first parent is the base the pull
+  # request merges into. `--no-renames` lists a moved file under its old path and its new one.
+  surface:
+    runs-on: ubuntu-24.04
+    timeout-minutes: 15
+    permissions:
+      contents: read
+    outputs:
+      mac: ${{ steps.surface.outputs.mac }}
+      version: ${{ steps.version.outputs.version }}
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+          fetch-depth: 2
+      - run: rustup toolchain install
+      - name: Compile xtask
+        run: cargo xtask --help
+      - name: The paths the pull request changes
+        run: git diff --name-only -z --no-renames HEAD^1 HEAD > "$RUNNER_TEMP/changed"
+      - name: Whether they are on the macOS surface
+        id: surface
+        run: cargo xtask mac-surface --changed "$RUNNER_TEMP/changed" --output "$GITHUB_OUTPUT"
+      - name: The version of the next release
+        id: version
+        if: ${{ steps.surface.outputs.mac == 'true' }}
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: cargo xtask release version --repo "$GITHUB_REPOSITORY" --version-file VERSION --output "$GITHUB_OUTPUT"
+
+  # The tests of the workspace and the macOS build of artifacts.yml, on the surface only. The cache
+  # is artifacts.yml's macOS cache (the same key: the same job name), which a push to main saves;
+  # this job only restores it.
+  macos-arm64:
+    needs: [surface]
+    if: ${{ needs.surface.outputs.mac == 'true' }}
+    runs-on: macos-15
+    timeout-minutes: 60
+    permissions:
+      contents: read
+    env:
+      TARGET: aarch64-apple-darwin
+      RELEASE_VERSION: ${{ needs.surface.outputs.version }}
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+      - run: rustup toolchain install
+      - uses: actions/cache/restore@55cc8345863c7cc4c66a329aec7e433d2d1c52a9 # v6.1.0
+        with:
+          path: |
+            ~/.cargo/registry
+            ~/.cargo/git
+            target
+          key: cargo-${{ runner.os }}-${{ runner.arch }}-${{ github.job }}-${{ hashFiles('Cargo.lock', 'rust-toolchain.toml') }}
+          restore-keys: cargo-${{ runner.os }}-${{ runner.arch }}-${{ github.job }}-
+      - name: Install cargo-cyclonedx (pinned version and checksum)
+        run: cargo xtask fetch --url "https://github.com/CycloneDX/cyclonedx-rust-cargo/releases/download/cargo-cyclonedx-$CYCLONEDX_VERSION/cargo-cyclonedx-$TARGET.tar.xz" --sha256 "$CYCLONEDX_SHA256_AARCH64_MACOS" --out "$HOME/.cargo/bin/cargo-cyclonedx" --extract tar.xz --member "cargo-cyclonedx-$TARGET/cargo-cyclonedx"
+      - run: cargo cyclonedx --version
+      # Every test of every crate of the workspace, on macOS: the update hook's launchd steps, the
+      # listener hand-off, packaging/macos (tests/packaging_macos.rs) and the xtask verbs among
+      # them.
+      - name: The tests of the workspace, on macOS
+        run: cargo test --locked --workspace --features tierstore/s3 --no-fail-fast
+      # From here, the commands of artifacts.yml's macos-arm64 job, in its order.
+      - name: The crate takes the version of the release
+        run: cargo xtask release set-version --version "$RELEASE_VERSION"
+      - name: Keep the lock file as written
+        run: cp Cargo.lock "$RUNNER_TEMP/Cargo.lock.release"
+      - run: cargo build --locked --release --target "$TARGET" -p tierstore --features server --bin tierstore
+      - name: tierstore names the commit and the version
+        run: cargo xtask build-commit "target/$TARGET/release/tierstore" "$GITHUB_SHA" --version "$RELEASE_VERSION"
+      - name: SBOM
+        run: cargo cyclonedx --format json --spec-version 1.5 --describe binaries --target "$TARGET"
+      - name: The SBOM step left Cargo.lock unchanged
+        run: cmp Cargo.lock "$RUNNER_TEMP/Cargo.lock.release"
+      - name: Resolve the crates of this build
+        run: cargo metadata --locked --format-version 1 --manifest-path crates/tierstore/Cargo.toml --features server --filter-platform "$TARGET" > "$RUNNER_TEMP/metadata.json"
+      - name: Third-party licence notice
+        run: cargo xtask licenses --metadata "$RUNNER_TEMP/metadata.json" --package tierstore --out "$RUNNER_TEMP/THIRD-PARTY-LICENSES.txt"
+      - name: Package tierstore
+        run: cargo xtask package --binary "target/$TARGET/release/tierstore" --sbom crates/tierstore/tierstore_bin.cdx.json --licenses "$RUNNER_TEMP/THIRD-PARTY-LICENSES.txt" --platform macos-arm64 --commit "$GITHUB_SHA" --out dist
+      - run: mkdir "$RUNNER_TEMP/unpacked"
+      - run: tar -xzf "dist/tierstore-${GITHUB_SHA}-macos-arm64.tar.gz" -C "$RUNNER_TEMP/unpacked" tierstore
+      - name: The packaged tierstore names the commit and the version
+        run: cargo xtask build-commit "$RUNNER_TEMP/unpacked/tierstore" "$GITHUB_SHA" --version "$RELEASE_VERSION"
+      - name: The hostkeeper package
+        run: cargo xtask release hostkeeper-package --binary "target/$TARGET/release/tierstore" --version "$RELEASE_VERSION+${GITHUB_SHA::12}" --min-hostkeeper 0.1.0 --platform macos-arm64 --out dist
+      - name: The hostkeeper package unpacks as a host unpacks it
+        run: cargo xtask verify-assets hostkeeper-package dist --version "$RELEASE_VERSION+${GITHUB_SHA::12}" --platform macos-arm64 --scratch "$RUNNER_TEMP/hostkeeper"
+      - name: The packaged binary carries a valid code signature
+        run: codesign --verify --strict "$RUNNER_TEMP/hostkeeper/packages/tierstore/$RELEASE_VERSION+${GITHUB_SHA::12}/bin/tierstore"
+
+  # The check to require. Its one step fails the job unless `surface` passed and `macos-arm64`
+  # ran and passed on the surface, or was skipped off it; with the step skipped, the job passes.
+  macos:
+    needs: [surface, macos-arm64]
+    if: ${{ !cancelled() }}
+    runs-on: ubuntu-24.04
+    timeout-minutes: 5
+    steps:
+      - name: Refuse a macOS check that did not pass
+        if: ${{ needs.surface.result != 'success' || (needs.surface.outputs.mac == 'true' && needs.macos-arm64.result != 'success') || (needs.surface.outputs.mac != 'true' && needs.macos-arm64.result != 'skipped') }}
+        run: exit 1

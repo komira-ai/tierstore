@@ -10,6 +10,8 @@
 //!   hostkeeper packages of a build, their release index and the checks a host makes of them;
 //!   and the version and digest a published release is set as on the hostkeeper coordinator.
 //! - [`advisories`]: keep the security advisories in one issue.
+//! - [`mac_surface`]: whether a pull request changes the macOS surface, which runs its macOS
+//!   checks.
 //!
 //! The workflows that call them are in `.github/workflows`; `tests/workflows.rs` holds each
 //! of them to the rules of this repository.
@@ -19,6 +21,7 @@ pub mod build_commit;
 pub mod bundles;
 pub mod fetch;
 pub mod licenses;
+pub mod mac_surface;
 pub mod package;
 pub mod release;
 pub mod sums;
@@ -156,6 +159,16 @@ enum Verb {
     /// A GitHub release of the exact files a push to main built and signed.
     #[command(subcommand)]
     Release(ReleaseVerb),
+    /// Whether a pull request changes the macOS surface: prints each changed path on it and
+    /// `mac=true` or `mac=false`.
+    MacSurface {
+        /// The changed paths, each ended by a NUL byte (`git diff --name-only -z --no-renames`).
+        #[arg(long)]
+        changed: PathBuf,
+        /// Append `mac=true` or `mac=false` to this file (`GITHUB_OUTPUT`).
+        #[arg(long)]
+        output: Option<PathBuf>,
+    },
 }
 
 #[derive(Subcommand)]
@@ -451,6 +464,9 @@ fn run(cli: Cli) -> Result<Vec<String>, Error> {
             Ok(printed)
         }
         Verb::Advisories(args) => advisories::run(&args, &root, &cargo_program()),
+        Verb::MacSurface { changed, output } => {
+            mac_surface::mac_surface(&changed, output.as_deref())
+        }
         Verb::Fetch {
             url,
             sha256,

@@ -1,5 +1,5 @@
 //! The release platforms in `artifacts.yml` and `release.yml`, and no macOS runner in a pull
-//! request's checks ([`super::platforms`]):
+//! request's checks outside `macos.yml` ([`super::platforms`]):
 //! the files of the repository pass, and each way of leaving a platform out, of building, signing
 //! or checking it with the wrong inputs, or of skipping a step that checks it, is named.
 
@@ -805,9 +805,11 @@ fn a_release_yml_that_does_not_take_the_macos_files_where_it_checks_them_is_name
 
 #[test]
 fn a_macos_job_that_a_pull_request_runs_is_named() {
-    // Catches: a macOS runner added to a pull request's checks (ci.yml given a macOS job again, or
-    // the macOS build of artifacts.yml without its condition), while a workflow no pull request
-    // starts may have one.
+    // Catches: a macOS runner added to a pull request's checks outside macos.yml (ci.yml given a
+    // macOS job, the macOS build of artifacts.yml without its condition, a runner named in a
+    // list of labels), and the surface condition copied into another workflow; while a workflow
+    // no pull request starts may have one, and macos.yml's own job under it is accepted.
+    let only = "only the job macos-arm64 of macos.yml, under `if: ${{ needs.surface.outputs.mac == 'true' }}`, may";
     let ci = text_of("ci.yml").replace(
         "jobs:\n",
         "jobs:\n  macos:\n    runs-on: macos-15\n    steps:\n      - run: cargo test --locked\n",
@@ -815,7 +817,8 @@ fn a_macos_job_that_a_pull_request_runs_is_named() {
     assert_eq!(
         pull_request_macos_problems("ci.yml", &ci),
         [
-            "ci.yml: the job macos runs on macOS for a pull request; no macOS runner is part of a pull request's checks"
+            format!("ci.yml: the job macos runs on macOS for a pull request; {only}"),
+            "ci.yml: the job macos runs on macOS for a pull request with permissions [], not contents: read alone".to_owned(),
         ]
     );
     let artifacts = in_job(
@@ -826,9 +829,27 @@ fn a_macos_job_that_a_pull_request_runs_is_named() {
     );
     assert_eq!(
         pull_request_macos_problems("artifacts.yml", &artifacts),
-        [
-            "artifacts.yml: the job macos-arm64 runs on macOS for a pull request; no macOS runner is part of a pull request's checks"
-        ]
+        [format!(
+            "artifacts.yml: the job macos-arm64 runs on macOS for a pull request; {only}"
+        )]
+    );
+    let labelled = "on:\n  pull_request:\njobs:\n  mac:\n    runs-on: [macos-15, arm64]\n    permissions:\n      contents: read\n";
+    assert_eq!(
+        pull_request_macos_problems("x.yml", labelled),
+        [format!(
+            "x.yml: the job mac runs on macOS for a pull request; {only}"
+        )]
+    );
+    let macos = text_of("macos.yml");
+    assert_eq!(
+        pull_request_macos_problems("macos.yml", &macos),
+        Vec::<String>::new()
+    );
+    assert_eq!(
+        pull_request_macos_problems("other.yml", &macos),
+        [format!(
+            "other.yml: the job macos-arm64 runs on macOS for a pull request; {only}"
+        )]
     );
     let by_hand = "on:\n  workflow_dispatch:\njobs:\n  mac:\n    runs-on: macos-15\n";
     assert_eq!(
