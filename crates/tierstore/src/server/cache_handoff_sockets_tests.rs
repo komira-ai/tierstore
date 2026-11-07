@@ -31,6 +31,7 @@ use super::handoff::testing::{connect, send};
 use super::local_cache::testing::{age, tree};
 use super::local_cache::{Disk, SystemDisk};
 use super::lock::try_take;
+use super::testing::beside_loopback;
 use crate::{Backend, MemoryBackend};
 
 /// What a client sends to ask `/healthz`, keeping the connection alive.
@@ -413,16 +414,17 @@ async fn takes_the_same_sockets(shape: Shape, listen: &[&str]) {
 }
 
 /// Asserts (T02) that an address that is not loopback gets the loopback socket of a cache:
-/// a node listening on `127.0.0.2:0` offers that socket and 127.0.0.1 on a port of its own, the
-/// second node takes both and binds nothing, and a client on the 127.0.0.1 socket is answered
-/// after the first has ended; a storage node with no cache offers the one socket. Catches: a
-/// length mismatch on every update of a cache node, a successor that binds 127.0.0.1 beside the
-/// first, and a loopback listener lost in the hand-over.
-#[cfg(target_os = "linux")]
+/// a node listening on [`beside_loopback`] at port 0 (`127.0.0.2:0` on Linux, `[::1]:0` on
+/// macOS) offers that socket and 127.0.0.1 on a port of its own, the second node takes both and
+/// binds nothing, and a client on the 127.0.0.1 socket is answered after the first has ended; a
+/// storage node with no cache offers the one socket. Catches: a length mismatch on every update
+/// of a cache node, a successor that binds 127.0.0.1 beside the first, and a loopback listener
+/// lost in the hand-over.
 #[tokio::test]
 async fn a_cache_node_hands_over_its_loopback_socket_beside_a_non_loopback_address() {
+    let beside = SocketAddr::from((beside_loopback(), 0)).to_string();
     for shape in SHAPES {
-        takes_the_same_sockets(shape, &["127.0.0.2:0"]).await;
+        takes_the_same_sockets(shape, &[beside.as_str()]).await;
     }
 }
 
@@ -438,7 +440,9 @@ async fn a_wildcard_address_hands_over_one_socket() {
 
 /// Asserts (T02) that two non-loopback addresses and the added loopback socket are handed over
 /// in the order of the list and then the loopback one, each on a port of its own: three sockets
-/// for a cache and two for a storage node with none, the same ones in the second node.
+/// for a cache and two for a storage node with none, the same ones in the second node. Linux
+/// only: it needs two loopback addresses other than 127.0.0.1 that are not the same, and macOS
+/// has one, `::1` (a wildcard would listen beyond loopback).
 #[cfg(target_os = "linux")]
 #[tokio::test]
 async fn two_addresses_are_handed_over_in_order_with_the_loopback_socket_last() {
@@ -461,7 +465,8 @@ async fn a_loopback_address_at_port_zero_hands_over_the_port_the_first_chose() {
 /// what the settings name with the loopback socket of a cache), with exit status 1 and nothing
 /// bound, and that the first goes on answering on each of its addresses and keeps its control
 /// socket. Catches: an order-blind comparison that hands the sockets over to a node that expects
-/// them elsewhere.
+/// them elsewhere. Linux only, for the reason of
+/// [`two_addresses_are_handed_over_in_order_with_the_loopback_socket_last`].
 #[cfg(target_os = "linux")]
 #[tokio::test]
 async fn a_reordered_list_is_a_mismatch_and_the_first_goes_on() {
