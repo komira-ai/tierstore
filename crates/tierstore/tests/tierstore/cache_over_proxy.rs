@@ -263,3 +263,101 @@ async fn a_put_of_a_key_the_hot_tier_holds_is_refused_before_the_body_is_read() 
     assert_eq!(read(&*tiers.hot_mem, "img/h").await, body("old"));
     assert_eq!(puts, (tiers.hot.calls(Op::Put), tiers.cold.calls(Op::Put)));
 }
+
+/// A cache over `upstream` that checks every hit (`revalidate_after = 0s`) and keeps what is under
+/// `img/`, in the `cache` directory of `dir`: a second one over the same `dir` finds what the
+/// first kept.
+fn checking_cache_in(dir: &TestDir, upstream: Arc<dyn Backend>) -> LocalCache {
+    let policies = vec![("img/".to_owned(), true)];
+    let mut config = CacheConfig::new(dir.path().join("cache"), 1 << 20, policies);
+    config.revalidate_after = Some(std::time::Duration::ZERO);
+    let clock: Arc<dyn Clock> = Arc::new(tierstore::SystemClock);
+    LocalCache::open(config, upstream, Arc::new(SystemDisk), clock).unwrap()
+}
+
+/// How many checks of hits ended with `result` (`same`, `changed`), by the metrics text.
+fn checks(cache: &LocalCache, result: &str) -> u64 {
+    let prefix = format!("tierstore_cache_revalidations_total{{result=\"{result}\"}} ");
+    let metrics = cache.metrics();
+    let line = metrics.lines().find_map(|line| line.strip_prefix(&prefix));
+    line.expect("the series").parse().expect("a count")
+}
+
+/// Writes other bytes over an object a tier holds, as another process does (the tier refuses a
+/// second create-only put, so the old object is deleted first).
+async fn overwrite(tier: &MemoryBackend, key: &str, text: &str) {
+    tier.delete(key).await.unwrap();
+    tier.put(key, body(text)).await.unwrap();
+}
+
+/// Asserts that the check of an old hit over a proxy sees an object that another process wrote
+/// over with bytes of the same length: the old bytes are not served, the new ones are read,
+/// kept and served by the next hit, and an object written over again in the cold tier alone (the
+/// hot tier has none) is seen the same way. A check that compared the sizes alone would serve the
+/// old bytes for ever.
+#[tokio::test]
+async fn a_same_size_overwrite_under_a_proxy_is_seen_by_the_check_of_a_hit() {
+    let tiers = Tiers::new();
+    let proxy = tiers.proxy().await;
+    tiers.hot_mem.put("img/a", body("first")).await.unwrap();
+    let dir = TestDir::under(env!("CARGO_TARGET_TMPDIR"), "tierstore-cache-revalidate");
+    let cache = checking_cache_in(&dir, proxy);
+    assert_eq!(cache.get("img/a", None).await.unwrap(), body("first"));
+
+    overwrite(&tiers.hot_mem, "img/a", "other").await;
+    assert_eq!(cache.get("img/a", None).await.unwrap(), body("other"));
+    assert_eq!(cache.held(), (5, 1));
+    assert_eq!(checks(&cache, "changed"), 1);
+    assert_eq!(cache.get("img/a", None).await.unwrap(), body("other"));
+    assert_eq!(checks(&cache, "same"), 1);
+
+    // Only the cold tier holds the object now, and it is written over there.
+    tiers.hot_mem.delete("img/a").await.unwrap();
+    tiers.cold_mem.put("img/a", body("third")).await.unwrap();
+    assert_eq!(cache.get("img/a", None).await.unwrap(), body("third"));
+    overwrite(&tiers.cold_mem, "img/a", "fifth").await;
+    assert_eq!(cache.get("img/a", None).await.unwrap(), body("fifth"));
+    assert_eq!(cache.held(), (5, 1));
+}
+
+/// Asserts what a check that finds the same object costs over a proxy: one HEAD of the hot tier,
+/// no read of an object and no call to the cold tier, and the bytes come from the disk.
+#[tokio::test]
+async fn a_check_that_finds_the_same_object_is_one_hot_head_and_no_read_of_either_tier() {
+    let tiers = Tiers::new();
+    let proxy = tiers.proxy().await;
+    tiers.hot_mem.put("img/a", body("first")).await.unwrap();
+    let dir = TestDir::under(env!("CARGO_TARGET_TMPDIR"), "tierstore-cache-revalidate");
+    let cache = checking_cache_in(&dir, proxy);
+    assert_eq!(cache.get("img/a", None).await.unwrap(), body("first"));
+    let calls = |tiers: &Tiers| {
+        let count = |tier: &FaultyBackend| [Op::Get, Op::Head].map(|op| tier.calls(op));
+        (count(&tiers.hot), count(&tiers.cold))
+    };
+    let ([gets, heads], cold) = calls(&tiers);
+
+    assert_eq!(cache.get("img/a", None).await.unwrap(), body("first"));
+    assert_eq!(calls(&tiers), ([gets, heads + 1], cold));
+    assert_eq!(checks(&cache, "same"), 1);
+}
+
+/// Asserts that an entry a former process kept, found on the disk at start, is compared by its
+/// tag under a proxy too: the object written over with bytes of the same length while no cache
+/// was running is read again by the first hit, not served from the disk.
+#[tokio::test]
+async fn an_entry_kept_before_a_restart_is_not_served_after_a_same_size_overwrite() {
+    let tiers = Tiers::new();
+    tiers.hot_mem.put("img/a", body("first")).await.unwrap();
+    let dir = TestDir::under(env!("CARGO_TARGET_TMPDIR"), "tierstore-cache-revalidate");
+    let before = checking_cache_in(&dir, tiers.proxy().await);
+    assert_eq!(before.get("img/a", None).await.unwrap(), body("first"));
+    drop(before);
+    overwrite(&tiers.hot_mem, "img/a", "other").await;
+
+    let after = checking_cache_in(&dir, tiers.proxy().await);
+    assert_eq!(after.held(), (5, 1));
+    assert_eq!(after.get("img/a", None).await.unwrap(), body("other"));
+    assert_eq!(checks(&after, "changed"), 1);
+    assert_eq!(after.get("img/a", None).await.unwrap(), body("other"));
+    assert_eq!(checks(&after, "same"), 1);
+}

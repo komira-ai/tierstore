@@ -629,7 +629,8 @@ impl LocalCache {
 
 impl Inner {
     /// Whether `a` and `b` are one version of an object: the upstream says (see
-    /// [`Backend::same_version`]), as only it knows what its tags stand for.
+    /// [`Backend::same_version`]), as only it knows what its tags stand for. The fill asks it, of
+    /// two HEADs a read apart; the check of an old hit does not (see `revalidate`).
     pub(super) fn same_version(&self, a: &Meta, b: &Meta) -> bool {
         self.upstream.same_version(a, b)
     }
