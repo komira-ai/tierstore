@@ -175,12 +175,11 @@ async fn a_proxy_that_the_format_record_does_not_open_markers_for_writes_no_mark
             tokio::task::yield_now().await;
         }
         assert_eq!(world.marker(K).await, None, "{format} {name}");
-        for put in [proxy.put("builds/new", body("x")).await.map(|()| ())] {
-            assert!(
-                matches!(put, Err(Error::Unavailable(_))),
-                "{format} {name}: {put:?}"
-            );
-        }
+        let put = proxy.put("builds/new", body("x")).await;
+        assert!(
+            matches!(put, Err(Error::Unavailable(_))),
+            "{format} {name}: {put:?}"
+        );
         let delete = proxy.delete(K).await;
         assert!(
             matches!(delete, Err(Error::Unavailable(_))),

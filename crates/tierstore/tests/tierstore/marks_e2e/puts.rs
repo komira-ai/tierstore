@@ -308,3 +308,48 @@ async fn a_multipart_upload_of_a_new_key_completes_with_a_dirty_marker() {
     assert_eq!(world.shape(K).await, Some((MarkerState::Dirty, false)));
     assert_eq!(world.cold_text(K).await, None);
 }
+
+/// Asserts the answers of a plain put of a new key whose creation is refused: as `AlreadyExists`
+/// while the key is there (another writer's) it is the overwrite of it, and as `AlreadyExists` with
+/// no key there to overwrite it is `Unavailable` (the winner's key was deleted already), and any
+/// other refusal of the object write (here `Full`) is that error; and for a stream the refused
+/// creation is `Unavailable` for the client to retry, since the bytes are gone. A marker the put
+/// made is cleaned up each time, and nothing stays in the hot tier.
+#[tokio::test]
+async fn a_plain_put_of_a_new_key_whose_creation_is_refused_is_answered_by_the_reason() {
+    let world = World::new().await;
+    let proxy = world.proxy("p1").await;
+    let refused = || Error::AlreadyExists(K.to_owned());
+
+    world.hot.fail_next_with(Op::Put, refused());
+    let put = proxy
+        .put_plain(K, PutBody::Held(body("v1")), &PutClaim::default())
+        .await;
+    assert!(matches!(put, Err(Error::Unavailable(_))), "{put:?}");
+
+    world
+        .hot
+        .fail_next_with(Op::Put, Error::Full("hot".to_owned()));
+    let put = proxy
+        .put_plain(K, PutBody::Held(body("v1")), &PutClaim::default())
+        .await;
+    assert_eq!(put, Err(Error::Full("hot".to_owned())));
+
+    world.hot.fail_next_with(Op::Put, refused());
+    let chunks: Vec<Result<bytes::Bytes, Error>> = vec![Ok(body("abc"))];
+    let stream = futures::StreamExt::boxed(futures::stream::iter(chunks));
+    let put = proxy
+        .put_plain(
+            K,
+            PutBody::Stream {
+                len: Some(3),
+                body: stream,
+            },
+            &PutClaim::default(),
+        )
+        .await;
+    assert!(matches!(put, Err(Error::Unavailable(_))), "{put:?}");
+
+    assert_eq!(world.hot_text(K).await, None);
+    assert_eq!(world.marker(K).await, None);
+}
