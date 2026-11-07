@@ -194,6 +194,21 @@ impl Inner {
     {
         self.require_live(key)?;
         self.require_absent(markers, key).await?;
+        self.land_marked(markers, key, land).await
+    }
+
+    /// Wave 2 of 5.1 and what follows it: the object `land` writes create-only and the marker,
+    /// together. A refused creation is answered by the re-check of step 2.
+    pub(super) async fn land_marked<T, F, Fut>(
+        &self,
+        markers: &Markers,
+        key: &str,
+        land: F,
+    ) -> Result<T, Error>
+    where
+        F: FnOnce() -> Fut,
+        Fut: Future<Output = Result<T, Failed>>,
+    {
         let (object, marker) = futures::join!(land(), markers.create(key, MarkBirth::Dirty));
         match object {
             Ok(value) => {
