@@ -3,15 +3,15 @@
 
 use std::io;
 use std::net::{IpAddr, Ipv4Addr, Ipv6Addr, SocketAddr};
-use std::sync::Arc;
 use std::sync::atomic::{AtomicBool, AtomicUsize, Ordering};
+use std::sync::{Arc, Condvar, Mutex};
 use std::task::{Context, Poll};
 use std::time::Duration;
 
 use tierstore_testkit::dir::TestDir;
 use tokio::io::{AsyncRead, AsyncReadExt as _, AsyncWriteExt as _};
 use tokio::net::TcpStream;
-use tokio::sync::watch;
+use tokio::sync::{oneshot, watch};
 
 use super::listener::{OciLimits, Shared, accept_loop, drain_of};
 use super::test_pki::{ca, ip, leaf};
@@ -388,15 +388,18 @@ async fn pair() -> ((TcpStream, SocketAddr), TcpStream) {
 /// An accept loop over `incoming` (TLS when `acceptor` is given), with room for
 /// `max_connections` and bounds long enough that none of them ends a test's connection, its stop,
 /// and its drain, which the test begins.
-fn closing_loop(
-    incoming: Held,
+fn closing_loop<I>(
+    incoming: I,
     max_connections: usize,
     acceptor: Option<TlsAcceptor>,
 ) -> (
     tokio::task::JoinHandle<usize>,
     watch::Sender<bool>,
     Arc<Drain>,
-) {
+)
+where
+    I: Incoming<Stream = TcpStream> + Send + Sync + 'static,
+{
     let (front, _) = plain_front();
     let minute = Duration::from_secs(60);
     let limits = OciLimits {
@@ -554,35 +557,149 @@ async fn the_connections_held_at_the_end_of_the_settle_are_taken_and_served() {
 /// limit the module states), the connection in the slot is closed in turn, and the loop ends with
 /// nothing cut. It would catch a door that waits for a slot for ever, and one that takes a
 /// connection past the front's limit.
-#[tokio::test(start_paused = true)]
-async fn the_door_waits_for_a_free_slot_no_longer_than_its_grace() {
-    let (first, mut in_slot) = pair().await;
-    let (second, mut waiting) = pair().await;
-    let held = Held {
-        held: vec![Ok(second)],
-        ready: vec![first],
-        counted: AtomicBool::new(false),
-    };
-    // The first connection takes the slot, before the stop or once the door is closing.
-    let (looping, stop) = plain_loop(held, 1);
-    stop.send(true).expect("a loop");
+///
+/// The clock is paused. It moves past the door's grace by auto-advance while nothing is on its way
+/// through the kernel, and the test waits for what the grace does by events: the door drops its
+/// source ([`Telling`]) and the connection in the slot shuts its end and lingers. From then on the
+/// clock is held ([`ClockHold`]): the closes that follow are on their way through the kernel, and
+/// a loopback close on macOS may reach its peer after the runtime has parked, which on a clock
+/// left to auto-advance would move it to the drain deadline and cut the lingering connection. The
+/// client in the slot closes its end only once the runtime has begun to park waiting for it
+/// ([`Parks`]), so that the outcome is shown not to depend on when that close arrives.
+#[test]
+fn the_door_waits_for_a_free_slot_no_longer_than_its_grace() {
+    let parks = Arc::new(Parks::default());
+    let counted = Arc::clone(&parks);
+    let runtime = tokio::runtime::Builder::new_current_thread()
+        .enable_all()
+        .start_paused(true)
+        .on_thread_park(move || counted.parked())
+        .build()
+        .expect("a runtime");
+    runtime.block_on(async {
+        let (first, mut in_slot) = pair().await;
+        let (second, mut waiting) = pair().await;
+        let (gone, door_closed) = oneshot::channel();
+        // The second connection is in the accept queue from the start, ready to be taken.
+        let held = Telling {
+            incoming: Held {
+                held: vec![Ok(second)],
+                ready: vec![first],
+                counted: AtomicBool::new(true),
+            },
+            _gone: gone,
+        };
+        // The first connection takes the slot, before the stop or once the door is closing.
+        let (looping, stop, drain) = closing_loop(held, 1, None);
+        drain.begin();
+        stop.send(true).expect("a loop");
+        // A request on the held connection gets no answer: it was never taken past the limit, and
+        // the kernel ends it (an end of stream, or a reset) when the socket closes.
+        let request = b"GET /v2/ HTTP/1.1\r\nhost: oci.test\r\n\r\n";
+        let _ = waiting.write_all(request).await;
 
-    // A request on the held connection gets no answer: it was never taken past the limit, and
-    // the kernel ends it (an end of stream, or a reset) when the socket closes.
-    let request = b"GET /v2/ HTTP/1.1\r\nhost: oci.test\r\n\r\n";
-    let _ = waiting.write_all(request).await;
-    let mut answer = Vec::new();
-    let _ = waiting.read_to_end(&mut answer).await;
-    assert_eq!(String::from_utf8_lossy(&answer), "", "not served");
-    let mut byte = [0_u8; 1];
-    assert_eq!(
-        in_slot.read(&mut byte).await.unwrap(),
-        0,
-        "closed, unanswered"
-    );
-    // The client closes its end, which ends the lingering close of the server's.
-    drop(in_slot);
-    assert_eq!(looping.await.expect("the loop ended"), 0);
+        // The door's grace is the first timer: at its end the connection in the slot, which sent
+        // nothing in it, shuts its end and lingers, and the door closes.
+        lingering(&drain).await;
+        let _ = door_closed.await;
+        let _hold = ClockHold::new();
+
+        let mut answer = Vec::new();
+        let _ = waiting.read_to_end(&mut answer).await;
+        assert_eq!(String::from_utf8_lossy(&answer), "", "not served");
+        let mut byte = [0_u8; 1];
+        assert_eq!(
+            in_slot.read(&mut byte).await.unwrap(),
+            0,
+            "closed, unanswered"
+        );
+        // The client closes its end, which ends the lingering close of the server's, once the
+        // runtime has begun to park with the loop waiting for it.
+        let in_slot = in_slot.into_std().expect("a std socket");
+        let (seen, parks) = (parks.count(), Arc::clone(&parks));
+        let client = std::thread::spawn(move || {
+            parks.wait_past(seen);
+            drop(in_slot);
+        });
+        assert_eq!(looping.await.expect("the loop ended"), 0);
+        client.join().expect("the client closed");
+    });
+}
+
+/// A source of connections that says when it is gone: the door drops its source when it closes,
+/// and with it this sender, which ends the wait of its receiver. It counts no handshakes in flight,
+/// so what `incoming` gives is taken only once it is in the accept queue.
+struct Telling<I> {
+    incoming: I,
+    _gone: oneshot::Sender<()>,
+}
+
+impl<I: Incoming> Incoming for Telling<I> {
+    type Stream = I::Stream;
+
+    fn poll_incoming(&mut self, cx: &mut Context<'_>) -> Poll<io::Result<(I::Stream, SocketAddr)>> {
+        self.incoming.poll_incoming(cx)
+    }
+}
+
+/// Returns once a connection of `drain` lingers: it has shut its end and waits for its client's.
+async fn lingering(drain: &Drain) {
+    loop {
+        let entered = drain.idle.notified();
+        tokio::pin!(entered);
+        let _ = entered.as_mut().enable();
+        if drain.lingering() > 0 {
+            return;
+        }
+        entered.await;
+    }
+}
+
+/// Keeps a paused clock from auto-advancing while it lives: tokio does not auto-advance a paused
+/// clock while a `spawn_blocking` task runs (`tokio::time::pause`, "Preventing auto-advance"), and
+/// this one runs until the hold is dropped.
+struct ClockHold {
+    _dropped_ends_it: std::sync::mpsc::Sender<()>,
+}
+
+impl ClockHold {
+    fn new() -> Self {
+        let (hold, dropped) = std::sync::mpsc::channel::<()>();
+        drop(tokio::task::spawn_blocking(move || {
+            let _ = dropped.recv();
+        }));
+        Self {
+            _dropped_ends_it: hold,
+        }
+    }
+}
+
+/// The idle parks of a runtime, counted as each begins (tokio's `on_thread_park`).
+#[derive(Default)]
+struct Parks {
+    count: Mutex<u64>,
+    moved: Condvar,
+}
+
+impl Parks {
+    fn parked(&self) {
+        *self.count.lock().unwrap() += 1;
+        self.moved.notify_all();
+    }
+
+    fn count(&self) -> u64 {
+        *self.count.lock().unwrap()
+    }
+
+    /// Blocks until there were more parks than `seen`.
+    fn wait_past(&self, seen: u64) {
+        let count = self.count.lock().unwrap();
+        drop(
+            self.moved
+                .wait_while(count, |count| *count <= seen)
+                .unwrap(),
+        );
+    }
 }
 
 /// Asserts that an OCI front whose every slot is held by an idle keep-alive connection (it has
