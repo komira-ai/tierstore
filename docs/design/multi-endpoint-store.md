@@ -20,7 +20,7 @@ What the user wants: the same thing as now, with N connections, and the requests
 - The S3 client (`crates/objstore-s3`, `S3Store::new_rotating`) keeps the endpoints and one atomic counter. Every signed request takes the next number, so the choice is per request, not per connection, and a read that the client sends again goes to the next endpoint.
 - Each request is signed for the `Host` of the endpoint it goes to. One `reqwest::Client` serves all of them and pools connections per host:port, so each endpoint has its own pool.
 - Nothing above the S3 client knows there is more than one endpoint: the `Backend` and `ObjectStore` interfaces, the markers, the locks, every stored format and the fronts are unchanged. The marks bucket of the hot tier is a second handle on the same store and shares the endpoints. `format-epoch --hot-endpoint` stays one address.
-- No new `[server]` keys.
+- One new `[server]` key, `server.s3_endpoint_attempts` (section 8); no other.
 
 A request that fails fails as it does today, with the same error, except one whose connection to its endpoint could not be made: that request never reached a store and goes to the next endpoint (section 8). The caller's retry of any other failure is a new request and goes to the next endpoint because of the rotation.
 
