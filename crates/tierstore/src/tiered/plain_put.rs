@@ -16,7 +16,7 @@ use super::Inner;
 use super::Proxy;
 use super::entry_put::{landing, retry};
 use super::overwrite::{PlainPut, PutBody, PutClaim};
-use super::pause::WriteRoute;
+use super::pause::{WriteRoute, Writing};
 use super::put::Offered;
 use crate::{Error, Markers, PartBody};
 use bytes::Bytes;
@@ -63,15 +63,16 @@ impl Proxy {
 
 impl Inner {
     /// The calls on the markers, if the format says `active-marks` with the marks bucket this
-    /// proxy has and the proxy may write now.
-    pub(super) async fn admit_marked(&self, key: &str) -> Result<&Arc<Markers>, Error> {
-        let route = self.route_write(key).await?;
+    /// proxy has and the proxy may write now, and the count of the write (`Writing`), which the
+    /// caller keeps until the write has ended.
+    pub(super) async fn admit_marked(&self, key: &str) -> Result<(&Arc<Markers>, Writing), Error> {
+        let (route, writing) = self.route_write(key).await?;
         let WriteRoute::Marks(markers) = route else {
             let why = "writes on markers wait until the format object says active-marks";
             return Err(Error::Unavailable(why.to_owned()));
         };
         self.require_live(key)?;
-        Ok(markers)
+        Ok((markers, writing))
     }
 
     async fn put_plain(
@@ -80,7 +81,7 @@ impl Inner {
         body: PutBody<'_>,
         claim: &PutClaim,
     ) -> Result<PlainPut, Error> {
-        let markers = self.admit_marked(key).await?;
+        let (markers, _writing) = self.admit_marked(key).await?;
         let (held, marker) = self.look(markers, key).await?;
         match (held, body) {
             (Some(meta), body) => {

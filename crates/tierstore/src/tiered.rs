@@ -1,5 +1,6 @@
 //! The proxy: a store over a hot and a cold backend.
 
+use std::sync::atomic::AtomicU64;
 use std::sync::{Arc, Mutex, MutexGuard, PoisonError};
 use std::time::Duration;
 
@@ -381,6 +382,8 @@ struct Inner {
     /// One caller reads the format object at a time, so that a caller that waited uses the read of
     /// the caller before it. The heartbeat's look at the format goes through it too.
     format_gate: Arc<AsyncMutex<()>>,
+    /// The writes begun and not ended (`pause::Writing`), which the registration reports.
+    writing: Arc<AtomicU64>,
     counters: Counters,
     heartbeat: Heartbeat,
     /// The calls on the markers of keys, as this proxy: present when `config.marks` is.
@@ -422,6 +425,7 @@ impl Proxy {
             pause: Arc::default(),
             entries,
             format_gate: Arc::default(),
+            writing: Arc::default(),
             counters: Counters::default(),
             heartbeat,
             markers,
@@ -663,7 +667,8 @@ impl Inner {
     /// `active`, and on the marker of its key (see `marks_delete.rs`) under `active-marks`: refused
     /// with [`Error::Unavailable`] while writes are paused or the format is neither.
     async fn delete_object(self: &Arc<Self>, key: &str) -> Result<(), Error> {
-        match self.route_write(key).await? {
+        let (route, _writing) = self.route_write(key).await?;
+        match route {
             WriteRoute::Entries => self.delete_on_entry(key).await,
             WriteRoute::Marks(markers) => self.delete_on_marker(Arc::clone(markers), key).await,
         }

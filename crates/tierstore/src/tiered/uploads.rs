@@ -66,7 +66,8 @@ fn starts(after: Option<UploadsAfter<'_>>) -> (Start, Start) {
 impl Inner {
     /// Starts an upload of `key`: in the hot tier unless it is full, where the cold tier takes it.
     pub(super) async fn start_upload(&self, key: &str) -> Result<String, Error> {
-        if matches!(self.route_write(key).await?, WriteRoute::Marks(_)) {
+        let (routed, _writing) = self.route_write(key).await?;
+        if matches!(routed, WriteRoute::Marks(_)) {
             // Whatever the level: a put at `Full` is written to the hot tier (marked_put.rs).
             return self
                 .hot
@@ -96,7 +97,8 @@ impl Inner {
         len: Option<u64>,
         body: PartBody<'_>,
     ) -> Result<String, Error> {
-        let marks = matches!(self.route_write(key).await?, WriteRoute::Marks(_));
+        let (routed, _writing) = self.route_write(key).await?;
+        let marks = matches!(routed, WriteRoute::Marks(_));
         match route(id) {
             Route::Cold(_) if marks => Err(cold_upload(key)),
             Route::Hot(inner) => {
@@ -120,7 +122,8 @@ impl Inner {
         id: &str,
         parts: &[(u32, String)],
     ) -> Result<String, Error> {
-        let markers = match self.route_write(key).await? {
+        let (routed, _writing) = self.route_write(key).await?;
+        let markers = match routed {
             WriteRoute::Marks(markers) => Some(markers),
             WriteRoute::Entries => None,
         };

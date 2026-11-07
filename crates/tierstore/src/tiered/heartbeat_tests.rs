@@ -696,7 +696,9 @@ async fn a_stopped_old_process_acknowledges_nothing_while_the_new_one_serves() {
 /// Asserts that a proxy with a marks bucket registers protocol 3, at its start and at every beat,
 /// and one without registers protocol 2: `tierstore format-epoch --activate-marks` takes 3 to mean
 /// that the proxy reads the marker of a key on a hot miss, which only a proxy with a marks bucket
-/// does. The rest of the body is the bytes of protocol 2: no `phase`, no `writes_in_flight`.
+/// does. The registration written at open is the bytes of protocol 2 (no `phase`, no
+/// `writes_in_flight`); a beat adds the count of writes (zero) and, with no format object, no
+/// phase.
 #[tokio::test]
 async fn a_proxy_with_a_marks_bucket_registers_proto_3_and_one_without_registers_proto_2() {
     for (marks, proto) in [(true, PROTO_MARKS), (false, PROTO)] {
@@ -710,15 +712,152 @@ async fn a_proxy_with_a_marks_bucket_registers_proto_3_and_one_without_registers
         let proxy = Proxy::open(memory.clone(), cold, config).await.unwrap();
         let written = registration(&memory).await.unwrap();
         assert_eq!((written.proto, written.hb), (proto, 0), "{marks}");
+        assert_eq!((written.phase, written.writes_in_flight), (None, None));
 
         let sleeper = Stepped::new();
         assert!(proxy.start_heartbeat(sleeper.clone()));
         sleeper.beat_done().await;
         let beat = registration(&memory).await.unwrap();
         assert_eq!((beat.proto, beat.hb), (proto, 1), "{marks}");
-        assert_eq!((beat.phase, beat.writes_in_flight), (None, None), "{marks}");
+        assert_eq!(
+            (beat.phase, beat.writes_in_flight),
+            (None, Some(0)),
+            "{marks}"
+        );
         proxy.stop_heartbeat().await;
     }
     assert_eq!(PROTO_MARKS, 3);
     assert_eq!(PROTO, 2);
+}
+
+mod in_flight {
+    use super::*;
+    use crate::format::FormatPhase;
+    use crate::tiered::marked_put_rig::{MarkRig, body};
+
+    /// The registration of `p1` in the hot tier of the rig.
+    async fn reported(rig: &MarkRig) -> Registration {
+        registration(&rig.hot_mem).await.unwrap()
+    }
+
+    /// Asserts what a beat reports: the phase of the format object the proxy last read and the
+    /// number of writes begun and not ended. A put held at its object write is counted by the
+    /// beat that comes while it is held and not by the one after it ends; a change of the format
+    /// is reported by the beat after the next one, because the look at the format follows the
+    /// beat; a registration that reports `drain` and none in flight is what the rollback waits
+    /// for.
+    #[tokio::test]
+    async fn a_beat_reports_the_phase_and_the_writes_begun_and_not_ended() {
+        let rig = MarkRig::new().await;
+        let held = rig.hot.gate(Op::Put, "k", Phase::Post);
+        let proxy = rig.proxy.clone();
+        let put = tokio::spawn(async move { proxy.put("k", body("v")).await });
+        held.parked().await;
+
+        let sleeper = Stepped::new();
+        assert!(rig.proxy.start_heartbeat(sleeper.clone()));
+        sleeper.beat_done().await;
+        let beat = reported(&rig).await;
+        assert_eq!(
+            (beat.phase, beat.writes_in_flight),
+            (Some(FormatPhase::ActiveMarks), Some(1))
+        );
+
+        assert!(held.release());
+        put.await.unwrap().unwrap();
+        sleeper.next();
+        sleeper.beat_done().await;
+        assert_eq!(reported(&rig).await.writes_in_flight, Some(0));
+
+        let tag = rig.hot_mem.head(FORMAT_KEY).await.unwrap().tag;
+        let drain = body(r#"{"epoch":3,"marks_bucket":"hot-marks","phase":"drain"}"#);
+        rig.hot_mem
+            .put_if_match(FORMAT_KEY, drain, &tag)
+            .await
+            .unwrap();
+        sleeper.next();
+        sleeper.beat_done().await;
+        assert_eq!(reported(&rig).await.phase, Some(FormatPhase::ActiveMarks));
+        sleeper.next();
+        sleeper.beat_done().await;
+        let beat = reported(&rig).await;
+        assert_eq!(
+            (beat.phase, beat.writes_in_flight),
+            (Some(FormatPhase::Drain), Some(0))
+        );
+        rig.proxy.stop_heartbeat().await;
+    }
+
+    /// Asserts that every kind of write is counted from its beginning to its end and then not:
+    /// a delete, a part of a multipart upload, its start and its completion, each held at the
+    /// store; and that a write the format refuses, and one that fails, leave nothing counted.
+    #[tokio::test]
+    async fn every_write_is_counted_until_it_ends_and_a_refused_or_failed_one_leaves_nothing() {
+        let rig = MarkRig::new().await;
+        let counted = || {
+            rig.proxy
+                .inner
+                .writing
+                .load(std::sync::atomic::Ordering::SeqCst)
+        };
+        rig.hot_mem.put("d", body("v")).await.unwrap();
+
+        let held = rig.hot.gate(Op::Delete, "d", Phase::Pre);
+        let proxy = rig.proxy.clone();
+        let delete = tokio::spawn(async move { proxy.delete("d").await });
+        held.parked().await;
+        assert_eq!(counted(), 1);
+        assert!(held.release());
+        delete.await.unwrap().unwrap();
+        assert_eq!(counted(), 0);
+
+        let held = rig.hot.gate(Op::CreateUpload, "u", Phase::Pre);
+        let proxy = rig.proxy.clone();
+        let start = tokio::spawn(async move { proxy.create_upload("u").await });
+        held.parked().await;
+        assert_eq!(counted(), 1);
+        assert!(held.release());
+        let id = start.await.unwrap().unwrap();
+        assert_eq!(counted(), 0);
+
+        let held = rig.hot.gate(Op::UploadPart, "u", Phase::Pre);
+        let proxy = rig.proxy.clone();
+        let upload = id.clone();
+        let part = tokio::spawn(async move {
+            let part = crate::tiered::marked_put_rig::chunks(&["abc"]);
+            proxy.upload_part("u", &upload, 1, part).await
+        });
+        held.parked().await;
+        assert_eq!(counted(), 1);
+        assert!(held.release());
+        let etag = part.await.unwrap().unwrap();
+        assert_eq!(counted(), 0);
+
+        let held = rig.hot.gate(Op::CompleteUpload, "u", Phase::Pre);
+        let proxy = rig.proxy.clone();
+        let parts = vec![(1, etag)];
+        let complete = tokio::spawn(async move { proxy.complete_upload("u", &id, &parts).await });
+        held.parked().await;
+        assert_eq!(counted(), 1);
+        assert!(held.release());
+        complete.await.unwrap().unwrap();
+        assert_eq!(counted(), 0);
+
+        rig.hot_faults
+            .fail_next_on(Op::Put, "f", Error::Unavailable("down".to_owned()));
+        assert!(rig.proxy.put("f", body("v")).await.is_err());
+        assert_eq!(counted(), 0);
+
+        let tag = rig.hot_mem.head(FORMAT_KEY).await.unwrap().tag;
+        let drained = body(r#"{"phase":"drained"}"#);
+        rig.hot_mem
+            .put_if_match(FORMAT_KEY, drained, &tag)
+            .await
+            .unwrap();
+        assert!(matches!(
+            rig.proxy.put("g", body("v")).await,
+            Err(Error::Unavailable(_))
+        ));
+        assert_eq!(counted(), 0);
+    }
 }
