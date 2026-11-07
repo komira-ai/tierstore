@@ -80,6 +80,16 @@ fn wire(method: &str, uri: &str, body: &[u8]) -> Wire {
     }
 }
 
+impl Wire {
+    /// The head, asking the server with `Expect: 100-continue` to say whether it wants the body
+    /// before it is sent.
+    fn head_expecting(&self) -> Vec<u8> {
+        let mut head = self.head[..self.head.len() - 2].to_vec();
+        head.extend_from_slice(b"expect: 100-continue\r\n\r\n");
+        head
+    }
+}
+
 /// The head of an answer.
 struct Head {
     status: u16,
@@ -204,6 +214,23 @@ impl Conn {
     /// Sends a signed request and reads the answer.
     async fn call(&mut self, request: &Wire) -> Answer {
         self.send(&request.head).await;
+        self.send(&request.body).await;
+        self.answer().await
+    }
+
+    /// Sends a signed request that the server may refuse without reading its body, and reads the
+    /// answer. The head asks `Expect: 100-continue`, and the body is sent only if the server
+    /// answers `100 Continue`: a server that refuses a request at once does not read its body
+    /// (hyper tries one read of what has come of it, and closes the connection when that is not
+    /// all of it), so a body sent with the head would be written into a connection that may
+    /// already be closed, and fail with `EPIPE` or a reset in place of the answer.
+    async fn offer(&mut self, request: &Wire) -> Answer {
+        self.send(&request.head_expecting()).await;
+        let head = self.head().await;
+        if head.status != 100 {
+            let body = self.take(head.length()).await;
+            return Answer { head, body };
+        }
         self.send(&request.body).await;
         self.answer().await
     }
@@ -635,8 +662,12 @@ async fn a_multipart_upload_goes_on_across_the_take_and_an_abort_removes_it() {
                 let mut listed = open_uploads(&mut second).await;
                 listed.sort();
                 assert_eq!(listed, vec![id.clone()]);
-                let stray = second
-                    .call(&wire("PUT", &part_uri("cas/aborted", &gone, 2), &two))
+                // The part is refused before its body is read, and the server may close the
+                // connection after the refusal (see `Conn::offer`): it goes on a connection of its
+                // own, which the second instance answered, and `second` stays open.
+                let (mut refusing, _) = successor(at).await;
+                let stray = refusing
+                    .offer(&wire("PUT", &part_uri("cas/aborted", &gone, 2), &two))
                     .await;
                 assert_eq!(stray.head.status, 404, "{}", stray.text());
                 assert_eq!(texts(&stray.text(), "Code"), ["NoSuchUpload"]);
@@ -661,7 +692,7 @@ async fn a_multipart_upload_goes_on_across_the_take_and_an_abort_removes_it() {
                 assert!(open_uploads(&mut second).await.is_empty());
                 let read = second.call(&wire("GET", &obj("cas/multi"), b"")).await;
                 assert_eq!(digest(&read.body), digest(&joined));
-                drop((first, in_flight, second));
+                drop((first, in_flight, second, refusing));
                 pair.first_ends().await;
                 pair.stop();
             }
