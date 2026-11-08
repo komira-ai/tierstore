@@ -386,6 +386,8 @@ mod delete_objects_tests;
 #[cfg(test)]
 mod digests_tests;
 #[cfg(test)]
+mod docs_examples_tests;
+#[cfg(test)]
 mod docs_tests;
 #[cfg(test)]
 mod drain_contract_tests;

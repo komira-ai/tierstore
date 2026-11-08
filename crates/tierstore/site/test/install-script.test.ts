@@ -36,5 +36,5 @@ function refused(name: string, edit: (t: string) => void, why: RegExp): void {
 refused('a dist/ without install.sh', (t) => rmSync(join(t, 'install.sh')), /missing install\.sh/);
 refused('install.sh that is not a shell script', (t) => writeFileSync(join(t, 'install.sh'), '<html></html>\n'), /install\.sh: does not start with #!\/bin\/sh/);
 refused('an install.sh over the budget', (t) => writeFileSync(join(t, 'install.sh'), `#!/bin/sh\n${'#'.repeat(INSTALL_SCRIPT_MAX_BYTES)}\n`), /install\.sh is \d+ bytes; the limit is/);
-refused('a second shell script', (t) => writeFileSync(join(t, 'other.sh'), '#!/bin/sh\n'), /other\.sh: only \.html, \.js and \.css files are published/);
-refused('install.sh below the root', (t) => writeFileSync(join(t, 'docs', 'install.sh'), '#!/bin/sh\n'), /docs\/install\.sh: only \.html, \.js and \.css files are published/);
+refused('a second shell script', (t) => writeFileSync(join(t, 'other.sh'), '#!/bin/sh\n'), /other\.sh: only \.html, \.js, \.css, \.md and \.txt files are published/);
+refused('install.sh below the root', (t) => writeFileSync(join(t, 'docs', 'install.sh'), '#!/bin/sh\n'), /docs\/install\.sh: only \.html, \.js, \.css, \.md and \.txt files are published/);

@@ -1,0 +1,86 @@
+<div class="narrow">
+<h1>Install</h1>
+<p class="lede">Take the tarball, which works today. The other ways are written and arrive with the next release.</p>
+
+<div class="tabs" data-tabs="install">
+<section data-tab="Tarball · works today">
+<p>One block for Linux (x86_64 or arm64) and macOS (Apple silicon). It takes the tarball of the machine it runs on from the latest release on GitHub, with its signature bundle and <code>SHA256SUMS</code> for the checks below, unpacks it and prints the version.</p>
+<div class="code"><pre data-lang="sh"><span class="p">$</span> os=$(uname -s | sed 's/Darwin/macos/; s/Linux/linux/')
+<span class="p">$</span> arch=$(uname -m | sed 's/aarch64/arm64/')
+<span class="p">$</span> gh release download --repo komira-ai/tierstore \
+    --pattern "tierstore-*-$os-$arch.tar.gz*" --pattern SHA256SUMS
+<span class="p">$</span> tar -xzf tierstore-*-$os-$arch.tar.gz tierstore
+<span class="p">$</span> ./tierstore --version</pre></div>
+<p class="note">No <code>gh</code>? Take the same files from the <a href="https://github.com/komira-ai/tierstore/releases">releases page</a>. The last line is the check that it runs: it prints a version.</p>
+</section>
+<section data-tab="Script · next release">
+<p><strong>Not in a release yet.</strong> The script reads the newest release from tierstore.dev, downloads the tarball of your machine (Linux x86_64 or arm64, macOS Apple silicon), refuses unless its SHA-256 matches, and puts <code>tierstore</code> in <code>~/.local/bin</code>. It starts nothing. Until a release is published there, use the Tarball tab.</p>
+<div class="code"><pre data-lang="sh"><span class="p">$</span> curl -fsSL https://tierstore.dev/install.sh | sh
+<span class="p">$</span> tierstore --version</pre></div>
+<p class="note">The script checks the SHA-256 itself. The second line is the check that it runs: it prints a version.</p>
+</section>
+<section data-tab="Homebrew · next release">
+<p><strong>Not in a release yet.</strong> The tap <code>komira-ai/tap</code> has the formula for macOS on Apple silicon and for Linux. Until a release has it, use the Tarball tab.</p>
+<div class="code"><pre data-lang="sh"><span class="p">$</span> brew install komira-ai/tap/tierstore
+<span class="p">$</span> tierstore --version</pre></div>
+<p class="note">The second line is the check that it runs: it prints a version.</p>
+</section>
+<section data-tab="apt · next release">
+<p><strong>Not in a release yet.</strong> The package <code>tierstore</code> is in the repository <code>packages.komira.ai</code>. The block fetches the repository's key, trusts it for this source only (<code>Signed-By</code>), and installs. Until a release has it, use the Tarball tab.</p>
+<div class="code"><pre data-lang="sh">sudo install -d -m 0755 /usr/share/keyrings
+sudo curl -fsSL https://packages.komira.ai/apt/komira-archive-keyring.gpg -o /usr/share/keyrings/komira-archive-keyring.gpg
+sudo tee /etc/apt/sources.list.d/komira.sources &gt;/dev/null &lt;&lt;'EOF'
+Types: deb
+URIs: https://packages.komira.ai/apt
+Suites: stable
+Components: main
+Signed-By: /usr/share/keyrings/komira-archive-keyring.gpg
+EOF
+sudo apt update
+sudo apt install tierstore
+tierstore --version</pre></div>
+<p class="note">apt checks the package against the key named in <code>Signed-By</code>. The last line is the check that it runs: it prints a version.</p>
+</section>
+</div>
+
+<p class="next"><strong>Next: <a href="/docs/">configure it</a>.</strong> One small file, then a put and a get.</p>
+
+<h2 id="verify">Verify the tarball</h2>
+<p>This is for the <strong>Tarball</strong> tab only. The script checks its own download, and Homebrew and apt install from their own repositories. Run these in the directory you downloaded into, in the same shell, so that <code>$os</code> and <code>$arch</code> are still set.</p>
+
+<h3 id="check-it">Check it</h3>
+<p>The first line proves the file is intact. The second proves a workflow of this repository built it.</p>
+<div class="code"><pre data-lang="sh"><span class="p">$</span> sha256sum -c --ignore-missing SHA256SUMS
+<span class="p">$</span> gh attestation verify tierstore-*-$os-$arch.tar.gz --repo komira-ai/tierstore</pre></div>
+
+<h3 id="more-ways">More ways</h3>
+<p>For a stricter check, without <code>gh</code>, or on a host with no network. <code>&lt;commit&gt;</code> is the full commit SHA in the tarball's name, and <code>&lt;tarball&gt;</code> is the tarball's file name, <code>tierstore-&lt;commit&gt;-linux-x86_64.tar.gz</code> for instance.</p>
+
+<h4 id="integrity">Integrity</h4>
+<p>The checksum file lists every platform's tarball, so <code>--ignore-missing</code> skips the ones you did not take. It proves the file is intact, not who built it.</p>
+
+<h4 id="authenticity-gh">Authenticity with gh, pinned to the workflow and the commit</h4>
+<p>This also proves the build ran the workflow <code>artifacts.yml</code> on <code>main</code> from that commit.</p>
+<div class="code"><pre data-lang="sh">gh attestation verify tierstore-&lt;commit&gt;-linux-x86_64.tar.gz --repo komira-ai/tierstore \
+  --signer-workflow komira-ai/tierstore/.github/workflows/artifacts.yml \
+  --source-ref refs/heads/main --source-digest &lt;commit&gt; --deny-self-hosted-runners</pre></div>
+
+<h4 id="authenticity-cosign">Authenticity without gh</h4>
+<p>This needs only cosign. It prints <code>Verified OK</code>. <code>--type slsaprovenance1</code> is required: without it cosign fails with "invalid predicate type".</p>
+<div class="code"><pre data-lang="sh">cosign verify-blob-attestation \
+  --bundle &lt;tarball&gt;.sigstore.json \
+  --type slsaprovenance1 \
+  --certificate-identity-regexp '^https://github.com/komira-ai/tierstore/\.github/workflows/artifacts\.yml@refs/heads/main$' \
+  --certificate-oidc-issuer https://token.actions.githubusercontent.com \
+  &lt;tarball&gt;</pre></div>
+
+<h4 id="offline">On a host with no network</h4>
+<p>Fetch the trusted root on a host that has a network, copy it over with the tarball and its bundle, and verify against the bundle.</p>
+<div class="code"><pre data-lang="sh">gh attestation trusted-root &gt; trusted_root.jsonl</pre></div>
+<div class="code"><pre data-lang="sh">gh attestation verify &lt;tarball&gt; --repo komira-ai/tierstore \
+  --bundle &lt;tarball&gt;.sigstore.json --custom-trusted-root trusted_root.jsonl \
+  --signer-workflow komira-ai/tierstore/.github/workflows/artifacts.yml \
+  --source-ref refs/heads/main --source-digest &lt;commit&gt; --deny-self-hosted-runners</pre></div>
+
+<p class="note">Every pinned check names one signer: the workflow <code>.github/workflows/artifacts.yml</code> of this repository, run on <code>refs/heads/main</code>. The binary for macOS is ad-hoc signed and not notarized; <code>gh release download</code> and <code>curl</code> save it without the quarantine attribute, so it runs. The <a href="/docs/install/">install guide</a> covers the service account, the unit and updates.</p>
+</div>
