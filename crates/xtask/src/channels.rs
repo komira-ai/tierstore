@@ -9,6 +9,8 @@
 //!   puts the release files (the tap-named tarballs, the Debian packages, their bundles and a
 //!   `SHA256SUMS` of exactly those) to `releases/<version>/` of the site bucket once each, then
 //!   replaces `releases/latest.json`, never with an older version, and invalidates it.
+//! - `channels apt read|index|sign|write ...` ([`apt`]): the Debian packages into the apt
+//!   repository the organisation's products share, in the three jobs of `release.yml`.
 //! - `channels formula --sums <file> --version <X.Y.Z> --repo <owner/name> --out <file>`
 //!   ([`formula`]): `Formula/tierstore.rb` as the Homebrew tap's guard takes it, from the
 //!   release's `SHA256SUMS` alone.
@@ -18,6 +20,7 @@
 //! The programs that talk to the outside (`aws`, `gh`) are flags, so a test hands a stand-in
 //! ([`aws::Aws`], [`crate::release::Gh`]).
 
+pub mod apt;
 pub mod aws;
 pub mod formula;
 pub mod gate;
@@ -52,6 +55,10 @@ pub enum Verb {
         /// `NAME=${VAR:+set}`, so a secret never reaches a command line.
         #[arg(long = "setting", required = true)]
         settings: Vec<String>,
+        /// What an earlier job must have said, `NAME=VALUE` with VALUE its output: unless every
+        /// one is `true` the job is off and green, and its settings are not judged.
+        #[arg(long = "require")]
+        requires: Vec<String>,
         /// Append `enabled=true` or `enabled=false` to this file (`GITHUB_OUTPUT`).
         #[arg(long)]
         output: Option<PathBuf>,
@@ -82,6 +89,11 @@ pub enum Verb {
         /// The `aws` program.
         #[arg(long, default_value = "aws")]
         aws: PathBuf,
+    },
+    /// The apt repository: read the index, merge the packages, sign it, write it.
+    Apt {
+        #[command(subcommand)]
+        verb: apt::Verb,
     },
     /// `Formula/tierstore.rb` from the release's `SHA256SUMS`.
     Formula {
@@ -130,8 +142,9 @@ pub fn run(verb: Verb) -> Result<Vec<String>, Error> {
         Verb::Gate {
             label,
             settings,
+            requires,
             output,
-        } => gate::gate(&label, &settings, output.as_deref()),
+        } => gate::gate(&label, &settings, &requires, output.as_deref()),
         Verb::Upload {
             dir,
             tag,
@@ -153,6 +166,7 @@ pub fn run(verb: Verb) -> Result<Vec<String>, Error> {
                 attempts,
             },
         ),
+        Verb::Apt { verb } => apt::run(verb),
         Verb::Formula {
             sums,
             version,

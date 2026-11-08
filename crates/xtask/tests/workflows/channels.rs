@@ -59,7 +59,7 @@ const OWNED: &[(&str, &str)] = &[
     ("TIERSTORE_RELEASES_", "channel-upload"),
 ];
 
-fn steps(job: &Node) -> &[Node] {
+pub(super) fn steps(job: &Node) -> &[Node] {
     match entry(job, "steps").map(|s| &s.value) {
         Some(Value::Seq(items)) => items,
         _ => &[],
@@ -80,17 +80,17 @@ fn scalars<'a>(node: &'a Node, out: &mut Vec<&'a str>) {
     }
 }
 
-fn mentions(node: &Node, word: &str) -> bool {
+pub(super) fn mentions(node: &Node, word: &str) -> bool {
     let mut all = Vec::new();
     scalars(node, &mut all);
     all.iter().any(|s| s.contains(word))
 }
 
-fn text<'a>(step: &'a Node, key: &str) -> &'a str {
+pub(super) fn text<'a>(step: &'a Node, key: &str) -> &'a str {
     entry(step, key).and_then(Node::as_str).unwrap_or_default()
 }
 
-fn uses(step: &Node, action: &str) -> bool {
+pub(super) fn uses(step: &Node, action: &str) -> bool {
     text(step, "uses").starts_with(&format!("{action}@"))
 }
 
@@ -113,7 +113,9 @@ pub fn channel_problems(doc: &Node) -> Vec<String> {
     for (name, found) in jobs {
         let name = name.as_str().unwrap_or_default();
         for (word, owner) in OWNED {
-            if name != *owner && mentions(found, word) {
+            // The apt jobs that hold the cloud role assume it with the same action.
+            let apt_role = *word == "configure-aws-credentials" && super::apt::is_role_job(name);
+            if name != *owner && !apt_role && mentions(found, word) {
                 problems.push(format!("{name}: names {word}, which only {owner} may"));
             }
         }
