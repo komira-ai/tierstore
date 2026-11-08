@@ -6,7 +6,7 @@
 |---|---|---|
 | `ci.yml` | pull request, push to `main` | `lint`: format, cargo-deny (licences, bans, sources), clippy, the workflow lint. `test`: every test under cargo-llvm-cov with branch coverage, and the 99% gate on lines and branches of every crate (`crates/coverage-gate`). |
 | `advisories.yml` | daily, push to `main` | `cargo deny check advisories`; the result is kept in one issue, and the run is green whatever it finds. |
-| `artifacts.yml` | pull request, push to `main`; by hand | builds `tierstore` (`--features server`) for linux-x86_64, linux-arm64 and macos-arm64, each on a GitHub-hosted runner of its platform, packages it with its SBOM and as a hostkeeper package (and, for the Homebrew tap and apt, as a tap-named tarball and, on Linux, a Debian package), writes the release index of the hostkeeper packages, makes `SHA256SUMS`. The macos-arm64 job also runs the tests of `tierstore`, `objstore-s3` and `tierstore-testkit` on macOS, the update hook's among them (both of its arms are built and tested on every system, each against fakes of its service manager, and the macOS packaging). This workflow runs no macOS job for a pull request (`macos.yml` does, for every pull request): for a pull request its macos-arm64 job is skipped and the sums cover the Linux files; a push to `main` builds every platform, and a run by hand (`gh workflow run artifacts.yml --ref <branch>`) builds and sums every platform of a branch and signs nothing. On a push to `main` it also signs (build provenance and SBOM attestations) and checks what it signed. |
+| `artifacts.yml` | pull request, push to `main`; by hand | builds `tierstore` (`--features server`) for linux-x86_64, linux-arm64 and macos-arm64, each on a GitHub-hosted runner of its platform, packages it with its SBOM and as a hostkeeper package (and, for the Homebrew tap and apt, as a tap-named tarball and, on Linux, a Debian package and an RPM package), writes the release index of the hostkeeper packages, makes `SHA256SUMS`. The macos-arm64 job also runs the tests of `tierstore`, `objstore-s3` and `tierstore-testkit` on macOS, the update hook's among them (both of its arms are built and tested on every system, each against fakes of its service manager, and the macOS packaging). This workflow runs no macOS job for a pull request (`macos.yml` does, for every pull request): for a pull request its macos-arm64 job is skipped and the sums cover the Linux files; a push to `main` builds every platform, and a run by hand (`gh workflow run artifacts.yml --ref <branch>`) builds and sums every platform of a branch and signs nothing. On a push to `main` it also signs (build provenance and SBOM attestations) and checks what it signed. |
 | `macos.yml` | pull request | `version` (Linux) computes the version the build is given, as artifacts.yml's `version` job does. `macos` runs on `macos-15` for every pull request: every test of the workspace (`cargo test --workspace --features tierstore/s3`), then the commands of artifacts.yml's macos-arm64 job (build, SBOM, licence notice, tarball, hostkeeper package unpacked with hostkeeper's unpacker, code signature), uploading and signing nothing, with `contents: read` alone and no secret or token. It restores artifacts.yml's macOS cache and saves none. It is not named `macos-arm64`: a pull request's run of artifacts.yml skips its job of that name, and a skipped job passes as a check. If `version` fails, `macos` is skipped and the run fails on `version`. A newer push to a pull request cancels its older run. |
 | `release.yml` | when `ci` or `artifacts` finishes on a push to `main` (automatic, see Releases); by hand | `plan` decides which commit of `main` is released and as which tag (the newest whose build recorded that version); `verify` and `publish` attach the files that commit's push built and signed to a GitHub release, after checking them again. Builds nothing of tierstore. |
 | `tierstore-site.yml` | pull request, push to `main`, when the site changes | typecheck, tests and build of tierstore.dev. |
@@ -52,13 +52,16 @@ For a commit `<commit>` (the full SHA) and each platform (`linux-x86_64`, `linux
   platform its file, size and SHA-256;
 - `tierstore-<version>-<target>.tar.gz`, where `<version>` is the release's `X.Y.Z` and `<target>` is
   `macos-arm64`, `linux-aarch64` or `linux-x86_64`: the tarball the Homebrew tap's formula
-  downloads (see "The tap tarball and the Debian package" below). It is a copy of the platform's
+  downloads (see "The tap tarball, the Debian package and the RPM package" below). It is a copy of the platform's
   commit-named tarball, so it holds the same bytes, and has its own
   `tierstore-<version>-<target>.tar.gz.sigstore.json`;
 - `tierstore_<version>_<arch>.deb`, with `<arch>` `amd64` (linux-x86_64) or `arm64` (linux-arm64):
   the Debian package of the binary, and its `.deb.sigstore.json`; there is none for macOS;
-- `SHA256SUMS`: the SHA-256 of the tarballs, SBOMs, hostkeeper packages, `index.json`, tap tarballs
-  and Debian packages.
+- `tierstore-<version>-1.<arch>.rpm`, with `<arch>` `x86_64` (linux-x86_64) or `aarch64`
+  (linux-arm64): the RPM package of the binary, and its `.rpm.sigstore.json`; there is none for
+  macOS;
+- `SHA256SUMS`: the SHA-256 of the tarballs, SBOMs, hostkeeper packages, `index.json`, tap tarballs,
+  Debian packages and RPM packages.
 
 The release assets are what an operator copies into hostkeeper's release channel, as
 `tierstore/<version>/index.json` and the packages and bundles beside it.
@@ -215,7 +218,7 @@ version and the platform. The macOS job then checks the code signature of the bi
 A commit built before the hostkeeper packages were added has none, and `release check` refuses to
 release it.
 
-### The tap tarball and the Debian package
+### The tap tarball, the Debian package and the RPM package
 
 The tap and apt channels take their files from the release; their uploads are not in
 `artifacts.yml`. The names are fixed by the channels: the tap's guard accepts a formula whose urls
@@ -243,13 +246,28 @@ archive.
   daemon-reload`; it never starts or enables the unit, which also waits for
   `/etc/tierstore/access.key`. Removing the package leaves the account and `/etc/tierstore`, which
   holds the keys. The build job then has `dpkg-deb --info` and `dpkg-deb --contents` read the file.
+- `cargo xtask release rpm --binary <path> --version <X.Y.Z> --platform <platform> --licenses
+  <file> --out <dir>` writes `tierstore-<version>-1.<arch>.rpm` (`x86_64` or `aarch64`) and its line
+  in `<out>/SHA256SUMS.<platform>`. It has the files of the Debian package at the same paths and
+  modes, every owner `root`, with two differences the RPM conventions ask for: the licence is the
+  `%license` file `/usr/share/licenses/tierstore/LICENSE`, and the example configuration is
+  `%config(noreplace)`. The package requires `systemd`. Its `%post` (every install and upgrade)
+  does what the `postinst` does, each step only where its tool or the `tierstore` group is there,
+  so a container without systemd installs; its `%postun` runs `systemctl daemon-reload` when the
+  last version is removed. Nothing starts or enables the unit, and removing the package leaves the
+  account and `/etc/tierstore`. The file is the same bytes for the same inputs (build time and file
+  times 2026-09-01, build host `localhost`, gzip level 9, no signature: the signature header holds
+  the digests only). It is built with the `rpm` crate, without its signing and compression
+  features. The build job then has `cargo xtask release rpm-info <file>` read it back: the digests,
+  the payload, and the header and file list `rpm -qip` and `rpm -qlv` would print (the runner has
+  no `rpm`). Nothing yet installs the package with `dnf`.
 
 In `artifacts.yml` the `attest` job signs each of these files as its own subject and names its bundle
 `<file>.sigstore.json`, with the version of the `version` job. `release check` (which runs on a
 push, never on a pull request) requires the three tap tarballs, the macOS one included as it
-requires the macOS hostkeeper package, and the two Debian packages, each with its bundle;
-`verify-assets attestations` verifies a Debian package for provenance and its bundle, as it does a
-hostkeeper package; and the release attaches them all. A pull request builds the Linux ones and
+requires the macOS hostkeeper package, and the two Debian packages and the two RPM packages, each
+with its bundle; `verify-assets attestations` verifies a Debian or an RPM package for provenance
+and its bundle, as it does a hostkeeper package; and the release attaches them all. A pull request builds the Linux ones and
 sums them; the tap tarball of macOS is made by the macOS job, which `artifacts.yml` runs on a push
 and by hand and `macos.yml` runs for every pull request.
 
