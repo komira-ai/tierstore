@@ -22,7 +22,7 @@
 //! - The verbs of the rpm channel are run by the jobs of their kind alone.
 
 use super::apt::{Job, Kind, PROMOTE_IF, ROLE, gate_problems, permissions, runs};
-use super::channels::{GATE_IF, mentions, steps, text, uses};
+use super::channels::{GATE_IF, mentions, steps, text};
 use super::lint::{RELEASE_IF, entries, entry, names};
 use super::yaml::Node;
 
@@ -327,7 +327,13 @@ fn job_problems(want: &Job, job: &Node) -> Vec<String> {
     problems.extend(suite_problems(want, all));
     problems.extend(gate_problems(want, &all[gate]));
     for step in &all[..gate] {
-        for word in ["aws-actions/", "secrets.", "APT_GPG_", "rpm-key"] {
+        for word in [
+            "aws-actions/",
+            "channels assume",
+            "secrets.",
+            "APT_GPG_",
+            "rpm-key",
+        ] {
             if mentions(step, word) {
                 problems.push(format!("{name}: a step before the gate names {word}"));
             }
@@ -458,7 +464,7 @@ fn role_problems(want: &Job, after: &[Node]) -> Vec<String> {
     let roles: Vec<usize> = after
         .iter()
         .enumerate()
-        .filter(|(_, s)| uses(s, "aws-actions/configure-aws-credentials"))
+        .filter(|(_, s)| text(s, "run").contains("cargo xtask channels assume "))
         .map(|(i, _)| i)
         .collect();
     let verbs: Vec<usize> = after
@@ -469,9 +475,20 @@ fn role_problems(want: &Job, after: &[Node]) -> Vec<String> {
         .collect();
     match (roles.as_slice(), verbs.as_slice()) {
         ([role], [at]) => {
-            let given = entry(&after[*role], "with")
-                .and_then(|w| entry(w, "role-to-assume"))
+            let given = entry(&after[*role], "env")
+                .and_then(|e| entry(e, "ROLE_ARN"))
                 .and_then(Node::as_str);
+            let assume = text(&after[*role], "run");
+            for argument in [
+                "--role-arn \"$ROLE_ARN\"",
+                "--session-name ",
+                "--region ",
+                "--env-file \"$GITHUB_ENV\"",
+            ] {
+                if !assume.contains(argument) {
+                    problems.push(format!("{name}: the assume step is not given {argument}"));
+                }
+            }
             if given != Some(ROLE) {
                 problems.push(format!(
                     "{name}: the role assumed is not {ROLE}, the environment's"
@@ -535,7 +552,13 @@ fn role_problems(want: &Job, after: &[Node]) -> Vec<String> {
 fn index_problems(want: &Job, job: &Node, after: &[Node]) -> Vec<String> {
     let name = want.name;
     let mut problems = Vec::new();
-    for word in ["aws-actions/", "id-token", "AWS_", "APT_PUBLISH_"] {
+    for word in [
+        "aws-actions/",
+        "channels assume",
+        "id-token",
+        "AWS_",
+        "APT_PUBLISH_",
+    ] {
         if mentions(job, word) {
             problems.push(format!(
                 "{name}: names {word}; this job holds the key, not the role"

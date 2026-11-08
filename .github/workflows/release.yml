@@ -1062,11 +1062,9 @@ jobs:
         run: cargo xtask channels gate --label testing-rpm-read --output "$GITHUB_OUTPUT" --require "RPM_REPO_READY=$RPM_REPO_READY" --setting "APT_PUBLISH_ROLE_ARN=${APT_PUBLISH_ROLE_ARN:+set}" --setting "APT_BUCKET=${APT_BUCKET:+set}" --setting "APT_DISTRIBUTION_ID=${APT_DISTRIBUTION_ID:+set}" --setting "APT_HOSTNAME=${APT_HOSTNAME:+set}"
       - name: Assume the apt publish role through OIDC
         if: ${{ steps.gate.outputs.enabled == 'true' }}
-        uses: aws-actions/configure-aws-credentials@e1253824e5c10ff9df46874f81ed3ec929e19cfd # v6.3.0
-        with:
-          role-to-assume: ${{ vars.APT_PUBLISH_ROLE_ARN }}
-          aws-region: us-east-1
-          mask-aws-account-id: true
+        env:
+          ROLE_ARN: ${{ vars.APT_PUBLISH_ROLE_ARN }}
+        run: cargo xtask channels assume --role-arn "$ROLE_ARN" --session-name "tierstore-apt-$GITHUB_RUN_ID" --region us-east-1 --env-file "$GITHUB_ENV"
       - name: Read the current repodata and the ETag of repomd.xml and its signature from S3 (never through the CDN, which caches the index)
         if: ${{ steps.gate.outputs.enabled == 'true' }}
         env:
@@ -1226,11 +1224,9 @@ jobs:
         run: cargo xtask channels rpm check-signed --dir "$RUNNER_TEMP/rpm-signed" --version "${TAG#v}" --sums dist/SHA256SUMS --signed-sums "$RUNNER_TEMP/rpm-signed/SHA256SUMS.signed"
       - name: Assume the apt publish role through OIDC
         if: ${{ steps.gate.outputs.enabled == 'true' }}
-        uses: aws-actions/configure-aws-credentials@e1253824e5c10ff9df46874f81ed3ec929e19cfd # v6.3.0
-        with:
-          role-to-assume: ${{ vars.APT_PUBLISH_ROLE_ARN }}
-          aws-region: us-east-1
-          mask-aws-account-id: true
+        env:
+          ROLE_ARN: ${{ vars.APT_PUBLISH_ROLE_ARN }}
+        run: cargo xtask channels assume --role-arn "$ROLE_ARN" --session-name "tierstore-apt-$GITHUB_RUN_ID" --region us-east-1 --env-file "$GITHUB_ENV"
       - name: Upload the .rpms once each, then write the signed repodata with If-Match on the ETags that were read, then invalidate /rpm/testing/<arch>/repodata/*
         id: put
         if: ${{ steps.gate.outputs.enabled == 'true' }}
@@ -1274,11 +1270,9 @@ jobs:
         run: cargo xtask channels gate --label testing-rpm-read-2 --output "$GITHUB_OUTPUT" --setting "APT_PUBLISH_ROLE_ARN=${APT_PUBLISH_ROLE_ARN:+set}" --setting "APT_BUCKET=${APT_BUCKET:+set}" --setting "APT_DISTRIBUTION_ID=${APT_DISTRIBUTION_ID:+set}" --setting "APT_HOSTNAME=${APT_HOSTNAME:+set}"
       - name: Assume the apt publish role through OIDC
         if: ${{ steps.gate.outputs.enabled == 'true' }}
-        uses: aws-actions/configure-aws-credentials@e1253824e5c10ff9df46874f81ed3ec929e19cfd # v6.3.0
-        with:
-          role-to-assume: ${{ vars.APT_PUBLISH_ROLE_ARN }}
-          aws-region: us-east-1
-          mask-aws-account-id: true
+        env:
+          ROLE_ARN: ${{ vars.APT_PUBLISH_ROLE_ARN }}
+        run: cargo xtask channels assume --role-arn "$ROLE_ARN" --session-name "tierstore-apt-$GITHUB_RUN_ID" --region us-east-1 --env-file "$GITHUB_ENV"
       - name: Read the current repodata and the ETag of repomd.xml and its signature from S3 (never through the CDN, which caches the index)
         if: ${{ steps.gate.outputs.enabled == 'true' }}
         env:
@@ -1438,11 +1432,9 @@ jobs:
         run: cargo xtask channels rpm check-signed --dir "$RUNNER_TEMP/rpm-signed" --version "${TAG#v}" --sums dist/SHA256SUMS --signed-sums "$RUNNER_TEMP/rpm-signed/SHA256SUMS.signed"
       - name: Assume the apt publish role through OIDC
         if: ${{ steps.gate.outputs.enabled == 'true' }}
-        uses: aws-actions/configure-aws-credentials@e1253824e5c10ff9df46874f81ed3ec929e19cfd # v6.3.0
-        with:
-          role-to-assume: ${{ vars.APT_PUBLISH_ROLE_ARN }}
-          aws-region: us-east-1
-          mask-aws-account-id: true
+        env:
+          ROLE_ARN: ${{ vars.APT_PUBLISH_ROLE_ARN }}
+        run: cargo xtask channels assume --role-arn "$ROLE_ARN" --session-name "tierstore-apt-$GITHUB_RUN_ID" --region us-east-1 --env-file "$GITHUB_ENV"
       - name: Upload the .rpms once each, then write the signed repodata with If-Match on the ETags that were read, then invalidate /rpm/testing/<arch>/repodata/*
         id: put
         if: ${{ steps.gate.outputs.enabled == 'true' }}
@@ -1486,11 +1478,9 @@ jobs:
         run: cargo xtask channels gate --label testing-rpm-read-3 --output "$GITHUB_OUTPUT" --setting "APT_PUBLISH_ROLE_ARN=${APT_PUBLISH_ROLE_ARN:+set}" --setting "APT_BUCKET=${APT_BUCKET:+set}" --setting "APT_DISTRIBUTION_ID=${APT_DISTRIBUTION_ID:+set}" --setting "APT_HOSTNAME=${APT_HOSTNAME:+set}"
       - name: Assume the apt publish role through OIDC
         if: ${{ steps.gate.outputs.enabled == 'true' }}
-        uses: aws-actions/configure-aws-credentials@e1253824e5c10ff9df46874f81ed3ec929e19cfd # v6.3.0
-        with:
-          role-to-assume: ${{ vars.APT_PUBLISH_ROLE_ARN }}
-          aws-region: us-east-1
-          mask-aws-account-id: true
+        env:
+          ROLE_ARN: ${{ vars.APT_PUBLISH_ROLE_ARN }}
+        run: cargo xtask channels assume --role-arn "$ROLE_ARN" --session-name "tierstore-apt-$GITHUB_RUN_ID" --region us-east-1 --env-file "$GITHUB_ENV"
       - name: Read the current repodata and the ETag of repomd.xml and its signature from S3 (never through the CDN, which caches the index)
         if: ${{ steps.gate.outputs.enabled == 'true' }}
         env:
@@ -1650,11 +1640,9 @@ jobs:
         run: cargo xtask channels rpm check-signed --dir "$RUNNER_TEMP/rpm-signed" --version "${TAG#v}" --sums dist/SHA256SUMS --signed-sums "$RUNNER_TEMP/rpm-signed/SHA256SUMS.signed"
       - name: Assume the apt publish role through OIDC
         if: ${{ steps.gate.outputs.enabled == 'true' }}
-        uses: aws-actions/configure-aws-credentials@e1253824e5c10ff9df46874f81ed3ec929e19cfd # v6.3.0
-        with:
-          role-to-assume: ${{ vars.APT_PUBLISH_ROLE_ARN }}
-          aws-region: us-east-1
-          mask-aws-account-id: true
+        env:
+          ROLE_ARN: ${{ vars.APT_PUBLISH_ROLE_ARN }}
+        run: cargo xtask channels assume --role-arn "$ROLE_ARN" --session-name "tierstore-apt-$GITHUB_RUN_ID" --region us-east-1 --env-file "$GITHUB_ENV"
       - name: Upload the .rpms once each, then write the signed repodata with If-Match on the ETags that were read, then invalidate /rpm/testing/<arch>/repodata/*
         id: put
         if: ${{ steps.gate.outputs.enabled == 'true' }}
@@ -2646,11 +2634,9 @@ jobs:
         run: cargo xtask channels gate --label stable-rpm-read --output "$GITHUB_OUTPUT" --require "TESTING_ENABLED=$TESTING_ENABLED" --setting "APT_PUBLISH_ROLE_ARN=${APT_PUBLISH_ROLE_ARN:+set}" --setting "APT_BUCKET=${APT_BUCKET:+set}" --setting "APT_DISTRIBUTION_ID=${APT_DISTRIBUTION_ID:+set}" --setting "APT_HOSTNAME=${APT_HOSTNAME:+set}"
       - name: Assume the apt publish role through OIDC
         if: ${{ steps.gate.outputs.enabled == 'true' }}
-        uses: aws-actions/configure-aws-credentials@e1253824e5c10ff9df46874f81ed3ec929e19cfd # v6.3.0
-        with:
-          role-to-assume: ${{ vars.APT_PUBLISH_ROLE_ARN }}
-          aws-region: us-east-1
-          mask-aws-account-id: true
+        env:
+          ROLE_ARN: ${{ vars.APT_PUBLISH_ROLE_ARN }}
+        run: cargo xtask channels assume --role-arn "$ROLE_ARN" --session-name "tierstore-apt-$GITHUB_RUN_ID" --region us-east-1 --env-file "$GITHUB_ENV"
       - name: Read the repodata of testing (what is promoted) and of stable (what it is merged into), with the ETag of each replaced object, from S3
         if: ${{ steps.gate.outputs.enabled == 'true' }}
         env:
@@ -2787,11 +2773,9 @@ jobs:
           path: ${{ runner.temp }}/rpm-next
       - name: Assume the apt publish role through OIDC
         if: ${{ steps.gate.outputs.enabled == 'true' }}
-        uses: aws-actions/configure-aws-credentials@e1253824e5c10ff9df46874f81ed3ec929e19cfd # v6.3.0
-        with:
-          role-to-assume: ${{ vars.APT_PUBLISH_ROLE_ARN }}
-          aws-region: us-east-1
-          mask-aws-account-id: true
+        env:
+          ROLE_ARN: ${{ vars.APT_PUBLISH_ROLE_ARN }}
+        run: cargo xtask channels assume --role-arn "$ROLE_ARN" --session-name "tierstore-apt-$GITHUB_RUN_ID" --region us-east-1 --env-file "$GITHUB_ENV"
       - name: Write the signed repodata of stable with If-Match on the ETags that were read (the packages are in the pool already), then invalidate /rpm/stable/<arch>/repodata/*
         id: put
         if: ${{ steps.gate.outputs.enabled == 'true' }}
@@ -2835,11 +2819,9 @@ jobs:
         run: cargo xtask channels gate --label stable-rpm-read-2 --output "$GITHUB_OUTPUT" --setting "APT_PUBLISH_ROLE_ARN=${APT_PUBLISH_ROLE_ARN:+set}" --setting "APT_BUCKET=${APT_BUCKET:+set}" --setting "APT_DISTRIBUTION_ID=${APT_DISTRIBUTION_ID:+set}" --setting "APT_HOSTNAME=${APT_HOSTNAME:+set}"
       - name: Assume the apt publish role through OIDC
         if: ${{ steps.gate.outputs.enabled == 'true' }}
-        uses: aws-actions/configure-aws-credentials@e1253824e5c10ff9df46874f81ed3ec929e19cfd # v6.3.0
-        with:
-          role-to-assume: ${{ vars.APT_PUBLISH_ROLE_ARN }}
-          aws-region: us-east-1
-          mask-aws-account-id: true
+        env:
+          ROLE_ARN: ${{ vars.APT_PUBLISH_ROLE_ARN }}
+        run: cargo xtask channels assume --role-arn "$ROLE_ARN" --session-name "tierstore-apt-$GITHUB_RUN_ID" --region us-east-1 --env-file "$GITHUB_ENV"
       - name: Read the repodata of testing (what is promoted) and of stable (what it is merged into), with the ETag of each replaced object, from S3
         if: ${{ steps.gate.outputs.enabled == 'true' }}
         env:
@@ -2976,11 +2958,9 @@ jobs:
           path: ${{ runner.temp }}/rpm-next
       - name: Assume the apt publish role through OIDC
         if: ${{ steps.gate.outputs.enabled == 'true' }}
-        uses: aws-actions/configure-aws-credentials@e1253824e5c10ff9df46874f81ed3ec929e19cfd # v6.3.0
-        with:
-          role-to-assume: ${{ vars.APT_PUBLISH_ROLE_ARN }}
-          aws-region: us-east-1
-          mask-aws-account-id: true
+        env:
+          ROLE_ARN: ${{ vars.APT_PUBLISH_ROLE_ARN }}
+        run: cargo xtask channels assume --role-arn "$ROLE_ARN" --session-name "tierstore-apt-$GITHUB_RUN_ID" --region us-east-1 --env-file "$GITHUB_ENV"
       - name: Write the signed repodata of stable with If-Match on the ETags that were read (the packages are in the pool already), then invalidate /rpm/stable/<arch>/repodata/*
         id: put
         if: ${{ steps.gate.outputs.enabled == 'true' }}
@@ -3024,11 +3004,9 @@ jobs:
         run: cargo xtask channels gate --label stable-rpm-read-3 --output "$GITHUB_OUTPUT" --setting "APT_PUBLISH_ROLE_ARN=${APT_PUBLISH_ROLE_ARN:+set}" --setting "APT_BUCKET=${APT_BUCKET:+set}" --setting "APT_DISTRIBUTION_ID=${APT_DISTRIBUTION_ID:+set}" --setting "APT_HOSTNAME=${APT_HOSTNAME:+set}"
       - name: Assume the apt publish role through OIDC
         if: ${{ steps.gate.outputs.enabled == 'true' }}
-        uses: aws-actions/configure-aws-credentials@e1253824e5c10ff9df46874f81ed3ec929e19cfd # v6.3.0
-        with:
-          role-to-assume: ${{ vars.APT_PUBLISH_ROLE_ARN }}
-          aws-region: us-east-1
-          mask-aws-account-id: true
+        env:
+          ROLE_ARN: ${{ vars.APT_PUBLISH_ROLE_ARN }}
+        run: cargo xtask channels assume --role-arn "$ROLE_ARN" --session-name "tierstore-apt-$GITHUB_RUN_ID" --region us-east-1 --env-file "$GITHUB_ENV"
       - name: Read the repodata of testing (what is promoted) and of stable (what it is merged into), with the ETag of each replaced object, from S3
         if: ${{ steps.gate.outputs.enabled == 'true' }}
         env:
@@ -3165,11 +3143,9 @@ jobs:
           path: ${{ runner.temp }}/rpm-next
       - name: Assume the apt publish role through OIDC
         if: ${{ steps.gate.outputs.enabled == 'true' }}
-        uses: aws-actions/configure-aws-credentials@e1253824e5c10ff9df46874f81ed3ec929e19cfd # v6.3.0
-        with:
-          role-to-assume: ${{ vars.APT_PUBLISH_ROLE_ARN }}
-          aws-region: us-east-1
-          mask-aws-account-id: true
+        env:
+          ROLE_ARN: ${{ vars.APT_PUBLISH_ROLE_ARN }}
+        run: cargo xtask channels assume --role-arn "$ROLE_ARN" --session-name "tierstore-apt-$GITHUB_RUN_ID" --region us-east-1 --env-file "$GITHUB_ENV"
       - name: Write the signed repodata of stable with If-Match on the ETags that were read (the packages are in the pool already), then invalidate /rpm/stable/<arch>/repodata/*
         id: put
         if: ${{ steps.gate.outputs.enabled == 'true' }}

@@ -130,8 +130,8 @@ const DEFECTS: &[(&str, &str, &str, &str)] = &[
     ),
     (
         "testing-rpm-write",
-        "        uses: aws-actions/configure-aws-credentials@e1253824e5c10ff9df46874f81ed3ec929e19cfd # v6.3.0\n        with:\n          role-to-assume: ${{ vars.APT_PUBLISH_ROLE_ARN }}",
-        "        uses: aws-actions/configure-aws-credentials@e1253824e5c10ff9df46874f81ed3ec929e19cfd # v6.3.0\n        with:\n          role-to-assume: arn:aws:iam::1:role/other",
+        " ROLE_ARN: ${{ vars.APT_PUBLISH_ROLE_ARN }}",
+        " ROLE_ARN: arn:aws:iam::1:role/other",
         "testing-rpm-write: the role assumed is not ${{ vars.APT_PUBLISH_ROLE_ARN }}, the environment's",
     ),
     (
@@ -269,8 +269,8 @@ const DEFECTS: &[(&str, &str, &str, &str)] = &[
     (
         "testing-rpm-read",
         "      - name: Gate on the settings",
-        "      - name: Name the role before the gate\n        uses: aws-actions/configure-aws-credentials@e1253824e5c10ff9df46874f81ed3ec929e19cfd # v6.3.0\n      - name: Gate on the settings",
-        "testing-rpm-read: a step before the gate names aws-actions/",
+        "      - name: Name the role before the gate\n        run: cargo xtask channels assume --role-arn x\n      - name: Gate on the settings",
+        "testing-rpm-read: a step before the gate names channels assume",
     ),
     (
         "tap",
@@ -376,7 +376,7 @@ fn a_job_that_is_missing_or_too_short_is_named() {
     steps:
       - id: gate
         run: echo
-      - uses: aws-actions/configure-aws-credentials@e1253824e5c10ff9df46874f81ed3ec929e19cfd # v6.3.0
+      - run: cargo xtask channels assume --role-arn x
         if: ${{ steps.gate.outputs.enabled == 'true' }}
       - run: cargo xtask channels rpm repo write --suite testing
         if: ${{ steps.gate.outputs.enabled == 'true' }}
