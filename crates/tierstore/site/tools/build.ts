@@ -1,6 +1,7 @@
 // Builds dist/: the prerendered pages and the hashed assets, then checks the result (check-dist.ts).
 //
 //   dist/index.html, 404.html, <route>/index.html   the pages (pages.ts), around the copy in content/ (layout.ts)
+//   dist/install.sh                                 the install script, static/install.sh byte for byte (INSTALL_SCRIPT)
 //   dist/assets/<id>/                               the browser modules (build/browser, from tsc), the recorded data
 //                                                   as modules (data/<name>.js, from content/data/<name>.json) and
 //                                                   the stylesheets of static/
@@ -12,7 +13,7 @@
 import { createHash } from 'crypto';
 import { existsSync, mkdirSync, readFileSync, readdirSync, rmSync, writeFileSync } from 'fs';
 import { dirname, join, resolve } from 'path';
-import { checkDist, importsOf, listFiles } from './check-dist';
+import { checkDist, importsOf, INSTALL_SCRIPT, listFiles } from './check-dist';
 import { renderPage, STYLESHEETS } from './layout';
 import { docsPages, loadDocs } from './docs';
 import { highlightBlocks } from './highlight';
@@ -104,6 +105,8 @@ export function buildSite(opts: BuildOptions): { id: string; files: string[] } {
     const main = highlightBlocks(rewriteLinks(renderTabs(copy), pages));
     write(join(opts.outDir, outPath(page.route)), renderPage(page, main, refs));
   }
+
+  write(join(opts.outDir, INSTALL_SCRIPT), readFileSync(join(opts.staticDir, INSTALL_SCRIPT)));
 
   if (opts.check !== false) checkDist(opts.outDir);
   return { id, files: listFiles(opts.outDir) };
