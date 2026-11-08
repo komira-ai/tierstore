@@ -422,6 +422,8 @@ mod list_versions_tests;
 #[cfg(test)]
 mod lock_tests;
 #[cfg(test)]
+mod metrics_page_tests;
+#[cfg(test)]
 mod metrics_tests;
 #[cfg(test)]
 mod one_call_get_tests;
