@@ -1182,13 +1182,13 @@ jobs:
     permissions:
       contents: read
       id-token: write
-    uses: komira-ai/hostkeeper/.github/workflows/set-desired.yml@1adad60c2a7c0136b9f46cb79a987883f2185445 # v0.1.33
+    uses: komira-ai/hostkeeper/.github/workflows/set-desired.yml@32a9cc6f8242d0efbc3476391302062ff444dd47 # v0.1.44
     with:
       service: tierstore
       version: ${{ needs.farm-check.outputs.package-version }}
       package_digest: ${{ needs.farm-check.outputs.package-digest }}
-      hostkeeper_version: 0.1.33
-      hostkeeper_commit: 1adad60c2a7c0136b9f46cb79a987883f2185445
+      hostkeeper_version: 0.1.44
+      hostkeeper_commit: 32a9cc6f8242d0efbc3476391302062ff444dd47
       coordinator_url: ${{ vars.HOSTKEEPER_COORDINATOR_URL }}
       coordinator_ca: ${{ vars.HOSTKEEPER_COORDINATOR_CA }}
       audience: tierstore-hostkeeper-release

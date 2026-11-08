@@ -215,13 +215,13 @@ const DEFECTS: &[(&str, &str, &str, &str)] = &[
     ),
     (
         "farm",
-        "      hostkeeper_commit: 1adad60c2a7c0136b9f46cb79a987883f2185445\n",
+        "      hostkeeper_commit: 32a9cc6f8242d0efbc3476391302062ff444dd47\n",
         "      hostkeeper_commit: 2321ed897b4b9269471eadf169d7f29989161b4a\n",
         "farm: with.hostkeeper_commit is",
     ),
     (
         "farm",
-        "      hostkeeper_version: 0.1.33\n",
+        "      hostkeeper_version: 0.1.44\n",
         "      hostkeeper_version: 0.1.66\n",
         "farm: with.hostkeeper_version is",
     ),
@@ -433,18 +433,18 @@ fn farm_calls_the_same_hostkeeper_release_as_the_run_by_hand() {
     let desired = text_of("hostkeeper-desired.yml");
     assert_eq!(pin_problems(&release, &desired), Vec::<String>::new());
     let bumped = desired.replace(
-        "1adad60c2a7c0136b9f46cb79a987883f2185445 # v0.1.33",
+        "32a9cc6f8242d0efbc3476391302062ff444dd47 # v0.1.44",
         "2321ed897b4b9269471eadf169d7f29989161b4a # v0.1.66",
     );
     assert_ne!(bumped, desired);
     let problems = pin_problems(&release, &bumped);
     assert_eq!(problems.len(), 1, "{problems:?}");
     assert!(
-        problems[0].starts_with("farm: the pin Some((\"1adad60c"),
+        problems[0].starts_with("farm: the pin Some((\"32a9cc6f"),
         "{problems:?}"
     );
     // The comment is part of the pin: a release named differently is another pin.
-    let renamed = release.replace("# v0.1.33", "# v0.1.34");
+    let renamed = release.replace("# v0.1.44", "# v0.1.45");
     assert_eq!(pin_problems(&renamed, &desired).len(), 1);
     // A farm job that is not hostkeeper's workflow has no pin at all.
     let other = release.replace(
