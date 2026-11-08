@@ -18,7 +18,7 @@
 //!   the tarball with the runner's own `tar` and the check of the binary unpacked from it, the
 //!   hostkeeper package of the binary and its unpack with hostkeeper's rules, the copy of the
 //!   tarball under the name the Homebrew tap downloads it by, on Linux the Debian package and the
-//!   reads of it by `dpkg-deb`, and on macOS the check of the unpacked binary's code signature), it uses an action other than checkout, a cache restore that restores
+//!   reads of it by `dpkg-deb`, the RPM package and the read of it by `release rpm-info`, and on macOS the check of the unpacked binary's code signature), it uses an action other than checkout, a cache restore that restores
 //!   nothing on a push (`lookup-only`), a cache save and the upload, or it uploads another
 //!   artifact than `assets-<platform>` from `dist/`;
 //! - the cargo-cyclonedx checksum a build job names is not 64 lowercase hex digits in the file's
@@ -60,7 +60,8 @@ use super::yaml::{self, Node, Value};
 /// pins the SHA-256 of its cargo-cyclonedx, the `if:` of the job (none: it runs for every event),
 /// whether it runs the tests (the platform whose tests no pull-request check runs), the target
 /// the Homebrew tap's formula names the platform's tarball by (`tap`, the last part of
-/// `tierstore-<version>-<tap>.tar.gz`), and the Debian architecture of its package, if it has one.
+/// `tierstore-<version>-<tap>.tar.gz`), and the Debian and RPM architectures of its packages, if it
+/// has them.
 pub struct Build {
     pub platform: &'static str,
     pub runner: &'static str,
@@ -70,6 +71,7 @@ pub struct Build {
     pub tests: bool,
     pub tap: &'static str,
     pub deb: Option<&'static str>,
+    pub rpm: Option<&'static str>,
 }
 
 /// The `if:` of a job on a macOS runner in a workflow a pull request starts: never for a pull
@@ -99,6 +101,7 @@ pub const BUILDS: &[Build] = &[
         tests: false,
         tap: "linux-x86_64",
         deb: Some("amd64"),
+        rpm: Some("x86_64"),
     },
     Build {
         platform: "linux-arm64",
@@ -109,6 +112,7 @@ pub const BUILDS: &[Build] = &[
         tests: false,
         tap: "linux-aarch64",
         deb: Some("arm64"),
+        rpm: Some("aarch64"),
     },
     Build {
         platform: "macos-arm64",
@@ -119,6 +123,7 @@ pub const BUILDS: &[Build] = &[
         tests: true,
         tap: "macos-arm64",
         deb: None,
+        rpm: None,
     },
 ];
 
@@ -183,6 +188,13 @@ pub fn build_commands(b: &Build) -> Vec<String> {
         commands.push(format!("dpkg-deb --info \"dist/{file}\""));
         commands.push(format!("dpkg-deb --contents \"dist/{file}\""));
     }
+    if let Some(architecture) = b.rpm {
+        let file = rpm_file("${RELEASE_VERSION}", architecture);
+        commands.push(format!(
+            "cargo xtask release rpm --binary \"target/$TARGET/release/tierstore\" --version \"$RELEASE_VERSION\" --platform {platform} --licenses \"$RUNNER_TEMP/THIRD-PARTY-LICENSES.txt\" --out dist"
+        ));
+        commands.push(format!("cargo xtask release rpm-info \"dist/{file}\""));
+    }
     if b.tests {
         commands.insert(3, MAC_TESTS.to_owned());
     }
@@ -196,6 +208,20 @@ pub fn build_commands(b: &Build) -> Vec<String> {
 /// expression writes it) for `architecture`.
 pub fn deb_file(version: &str, architecture: &str) -> String {
     format!("tierstore_{version}_{architecture}.deb")
+}
+
+/// The file name of the RPM package of `version` (a literal, or a variable as a shell or an
+/// expression writes it) for `architecture`.
+pub fn rpm_file(version: &str, architecture: &str) -> String {
+    format!("tierstore-{version}-1.{architecture}.rpm")
+}
+
+/// The copy of the bundle of the RPM package of `architecture` under the package's name.
+pub fn rpm_copy(architecture: &str) -> String {
+    format!(
+        "cp \"$BUNDLE\" \"dist/{}.sigstore.json\"",
+        rpm_file("${RELEASE_VERSION}", architecture)
+    )
 }
 
 /// The copy of the bundle of the tap tarball of the platform whose tap target is `tap` under the
@@ -220,7 +246,7 @@ fn build_of(platform: &str) -> Option<&'static Build> {
 /// The `run:` commands of `attest` for `platforms`, in order: the two checks of the sums, then
 /// the copy of each platform's bundle, then the copy of each platform's hostkeeper package's
 /// bundle, then the copy of each platform's tap tarball's bundle, then the copy of each Linux
-/// platform's Debian package's bundle.
+/// platform's Debian package's bundle, then that of its RPM package's.
 pub fn attest_commands(platforms: &[&str]) -> Vec<String> {
     let mut commands = vec![
         "/usr/bin/sha256sum --check --strict <<< \"$SUMS_SHA256  dist/SHA256SUMS\"".to_owned(),
@@ -239,6 +265,9 @@ pub fn attest_commands(platforms: &[&str]) -> Vec<String> {
     }
     for build in platforms.iter().filter_map(|p| build_of(p)) {
         commands.extend(build.deb.map(deb_copy));
+    }
+    for build in platforms.iter().filter_map(|p| build_of(p)) {
+        commands.extend(build.rpm.map(rpm_copy));
     }
     commands
 }
@@ -657,7 +686,7 @@ pub fn artifacts_platform_problems(
 /// One line per way `attest` does not sign every one of `platforms`, or does more than sign.
 fn attest_problems(attest: Option<&Node>, platforms: &[&str]) -> Vec<String> {
     let mut problems = Vec::new();
-    // The tap tarballs and Debian packages are named by the `version` job's output.
+    // The tap tarballs and Debian and RPM packages are named by the `version` job's output.
     if !names(attest.and_then(|j| entry(j, "needs"))).contains(&"version".to_owned()) {
         problems.push("attest: does not need version".to_owned());
     }
@@ -775,7 +804,7 @@ fn package_attest_problems(
 }
 
 /// The version of the release as the attest job reads it: the `version` job's output, which the
-/// build jobs gave the binary and named the tap tarballs and Debian packages by.
+/// build jobs gave the binary and named the tap tarballs and Debian and RPM packages by.
 pub const VERSION_OUTPUT: &str = "${{ needs.version.outputs.version }}";
 
 /// One line per way `attest` does not sign the tap tarball of `platform` and, on Linux, its Debian
@@ -802,6 +831,14 @@ fn distribution_attest_problems(
             architecture.to_owned(),
             format!("dist/{}", deb_file(VERSION_OUTPUT, architecture)),
             deb_copy(architecture),
+        ));
+    }
+    if let Some(architecture) = build.rpm {
+        files.push((
+            "rpm",
+            architecture.to_owned(),
+            format!("dist/{}", rpm_file(VERSION_OUTPUT, architecture)),
+            rpm_copy(architecture),
         ));
     }
     let mut problems = Vec::new();

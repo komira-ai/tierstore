@@ -1,4 +1,4 @@
-//! The tap tarballs and Debian packages in `artifacts.yml` ([`super::platforms`]): the files of the
+//! The tap tarballs and Debian and RPM packages in `artifacts.yml` ([`super::platforms`]): the files of the
 //! repository pass, their names are the ones the Homebrew tap and apt take, and each way of leaving
 //! one out, making it for another platform, leaving it unread by `dpkg`, or signing it under
 //! another name or as no subject of its own is named.
@@ -17,19 +17,31 @@ fn artifacts_problems_of(text: &str) -> Vec<String> {
 }
 
 #[test]
-fn the_tap_and_debian_names_are_the_ones_the_tap_and_apt_take() {
+fn the_tap_debian_and_rpm_names_are_the_ones_the_tap_apt_and_dnf_take() {
     // Catches: a tap tarball named linux-arm64 (the tap's guard takes linux-aarch64 and refuses
     // the pull request), a Debian package for macOS, a file name whose version runs into the
     // architecture (`$RELEASE_VERSION_amd64` is another variable), and a platform whose Debian
     // bundle copy or tap copy is left out of the signing commands.
-    let targets: Vec<(&str, &str, Option<&str>)> =
-        BUILDS.iter().map(|b| (b.platform, b.tap, b.deb)).collect();
+    let targets: Vec<(&str, &str, Option<&str>, Option<&str>)> = BUILDS
+        .iter()
+        .map(|b| (b.platform, b.tap, b.deb, b.rpm))
+        .collect();
     assert_eq!(
         targets,
         [
-            ("linux-x86_64", "linux-x86_64", Some("amd64")),
-            ("linux-arm64", "linux-aarch64", Some("arm64")),
-            ("macos-arm64", "macos-arm64", None),
+            (
+                "linux-x86_64",
+                "linux-x86_64",
+                Some("amd64"),
+                Some("x86_64")
+            ),
+            (
+                "linux-arm64",
+                "linux-aarch64",
+                Some("arm64"),
+                Some("aarch64")
+            ),
+            ("macos-arm64", "macos-arm64", None, None),
         ]
     );
     let linux = build_commands(&BUILDS[1]);
@@ -38,19 +50,31 @@ fn the_tap_and_debian_names_are_the_ones_the_tap_and_apt_take() {
             &"dpkg-deb --info \"dist/tierstore_${RELEASE_VERSION}_arm64.deb\"".to_owned()
         )
     );
-    assert!(!build_commands(&BUILDS[2]).iter().any(|c| c.contains("deb")));
+    assert!(
+        linux.contains(
+            &"cargo xtask release rpm-info \"dist/tierstore-${RELEASE_VERSION}-1.aarch64.rpm\""
+                .to_owned()
+        )
+    );
+    assert!(
+        !build_commands(&BUILDS[2])
+            .iter()
+            .any(|c| c.contains("deb") || c.contains("rpm"))
+    );
     let attest = attest_commands(&platforms());
-    assert_eq!(attest.len(), 2 + 3 + 3 + 3 + 2);
+    assert_eq!(attest.len(), 2 + 3 + 3 + 3 + 2 + 2);
     assert_eq!(
-        attest[attest.len() - 2..],
+        attest[attest.len() - 4..],
         [
             "cp \"$BUNDLE\" \"dist/tierstore_${RELEASE_VERSION}_amd64.deb.sigstore.json\"",
             "cp \"$BUNDLE\" \"dist/tierstore_${RELEASE_VERSION}_arm64.deb.sigstore.json\"",
+            "cp \"$BUNDLE\" \"dist/tierstore-${RELEASE_VERSION}-1.x86_64.rpm.sigstore.json\"",
+            "cp \"$BUNDLE\" \"dist/tierstore-${RELEASE_VERSION}-1.aarch64.rpm.sigstore.json\"",
         ]
     );
 }
 
-/// Changes to the build jobs and `attest` that leave a tap tarball or a Debian package out, make
+/// Changes to the build jobs and `attest` that leave a tap tarball or a Debian or RPM package out, make
 /// it for another platform, leave it unread by `dpkg`, or sign it under another name or as no
 /// subject of its own.
 const DISTRIBUTION_DEFECTS: &[(&str, &str, &str, &str)] = &[
@@ -109,6 +133,36 @@ const DISTRIBUTION_DEFECTS: &[(&str, &str, &str, &str)] = &[
         "attest: the bundle of `provenance-tap-linux-x86_64` is not copied as",
     ),
     (
+        "linux-x86_64",
+        "      - name: The RPM package\n        run: cargo xtask release rpm --binary \"target/$TARGET/release/tierstore\" --version \"$RELEASE_VERSION\" --platform linux-x86_64 --licenses \"$RUNNER_TEMP/THIRD-PARTY-LICENSES.txt\" --out dist\n",
+        "",
+        "linux-x86_64: does not run `cargo xtask release rpm --binary",
+    ),
+    (
+        "linux-arm64",
+        "--platform linux-arm64 --licenses \"$RUNNER_TEMP/THIRD-PARTY-LICENSES.txt\" --out dist\n      - name: The RPM package reads back",
+        "--platform linux-x86_64 --licenses \"$RUNNER_TEMP/THIRD-PARTY-LICENSES.txt\" --out dist\n      - name: The RPM package reads back",
+        "linux-arm64: does not run `cargo xtask release rpm --binary",
+    ),
+    (
+        "linux-arm64",
+        "      - name: The RPM package reads back\n        run: cargo xtask release rpm-info \"dist/tierstore-${RELEASE_VERSION}-1.aarch64.rpm\"\n",
+        "",
+        "linux-arm64: does not run `cargo xtask release rpm-info \"dist/tierstore-${RELEASE_VERSION}-1.aarch64.rpm\"`",
+    ),
+    (
+        "attest",
+        "- id: provenance-rpm-aarch64\n",
+        "- id: provenance-rpm-aarch64-other\n",
+        "attest: no provenance attestation `provenance-rpm-aarch64` of dist/tierstore-${{ needs.version.outputs.version }}-1.aarch64.rpm alone",
+    ),
+    (
+        "attest",
+        "run: cp \"$BUNDLE\" \"dist/tierstore-${RELEASE_VERSION}-1.x86_64.rpm.sigstore.json\"",
+        "run: cp \"$BUNDLE\" \"dist/tierstore-${RELEASE_VERSION}-1.aarch64.rpm.sigstore.json\"",
+        "attest: the bundle of `provenance-rpm-x86_64` is not copied as",
+    ),
+    (
         "attest",
         "    needs: [version, sums]\n",
         "    needs: [sums]\n",
@@ -117,7 +171,7 @@ const DISTRIBUTION_DEFECTS: &[(&str, &str, &str, &str)] = &[
 ];
 
 #[test]
-fn each_way_of_leaving_out_or_misnaming_a_tap_tarball_or_a_debian_package_is_named() {
+fn each_way_of_leaving_out_or_misnaming_a_tap_tarball_or_a_package_is_named() {
     // Catches: a distribution file that is not made, is made for the wrong platform, is not read
     // by dpkg, is signed with a version that is not the release's, has no provenance attestation
     // of its own, or whose bundle is copied under another file's name.

@@ -14,11 +14,12 @@
 //! - its first step that is not setup is the gate (`cargo xtask channels gate`), which is given
 //!   each of the job's settings and none of their values, and every step after the gate runs only
 //!   when the gate said `enabled=true`; no step before the gate assumes a role or mints a token;
-//! - the role is assumed by one step of each upload job alone, with the role of the environment;
+//! - the role is assumed by one step of each upload job alone (`cargo xtask channels assume`,
+//!   given the role of the environment through `ROLE_ARN`, never an action of a third party);
 //!   the release bot's token is minted by one step of `tap` alone, for the tap repository alone
 //!   with the two permissions the pull request needs, in the second to last step, and read by the
 //!   last step alone, which opens the pull request;
-//! - the key of the bot, the role and the token action appear in no other job.
+//! - the key of the bot, the assume step and the token action appear in no other job.
 
 use super::apt::PROMOTE_IF;
 use super::lint::{RELEASE_IF, entries, entry, names};
@@ -80,10 +81,7 @@ pub const CHANNELS: &[Channel] = &[
 const OWNED: &[(&str, &[&str])] = &[
     ("RELEASE_BOT_PRIVATE_KEY", &["tap"]),
     ("create-github-app-token", &["tap"]),
-    (
-        "configure-aws-credentials",
-        &["testing-upload", "promote-latest"],
-    ),
+    ("channels assume", &["testing-upload", "promote-latest"]),
     ("TIERSTORE_RELEASES_", &["testing-upload", "promote-latest"]),
     ("channels upload", &["testing-upload"]),
     ("channels latest", &["promote-latest"]),
@@ -143,8 +141,8 @@ pub fn channel_problems(doc: &Node) -> Vec<String> {
     for (name, found) in jobs {
         let name = name.as_str().unwrap_or_default();
         for (word, owners) in OWNED {
-            // The apt jobs that hold the cloud role assume it with the same action.
-            let apt_role = *word == "configure-aws-credentials" && super::apt::is_role_job(name);
+            // The apt jobs that hold the cloud role assume it with the same verb.
+            let apt_role = *word == "channels assume" && super::apt::is_role_job(name);
             if !owners.contains(&name) && !apt_role && mentions(found, word) {
                 problems.push(format!(
                     "{name}: names {word}, which only {} may",
@@ -199,7 +197,12 @@ fn job_problems(channel: &Channel, job: &Node) -> Vec<String> {
     };
     problems.extend(gate_problems(channel, &all[gate]));
     for step in &all[..gate] {
-        for word in ["aws-actions/", "create-github-app-token", "secrets."] {
+        for word in [
+            "aws-actions/",
+            "channels assume",
+            "create-github-app-token",
+            "secrets.",
+        ] {
             if mentions(step, word) {
                 problems.push(format!("{name}: a step before the gate names {word}"));
             }
@@ -277,7 +280,7 @@ fn upload_problems(name: &str, after_gate: &[Node]) -> Vec<String> {
     let roles: Vec<usize> = after_gate
         .iter()
         .enumerate()
-        .filter(|(_, s)| uses(s, "aws-actions/configure-aws-credentials"))
+        .filter(|(_, s)| text(s, "run").contains("cargo xtask channels assume"))
         .map(|(i, _)| i)
         .collect();
     let uploads: Vec<usize> = after_gate
@@ -288,13 +291,24 @@ fn upload_problems(name: &str, after_gate: &[Node]) -> Vec<String> {
         .collect();
     match (roles.as_slice(), uploads.as_slice()) {
         ([role], [upload]) => {
-            let given = entry(&after_gate[*role], "with")
-                .and_then(|w| entry(w, "role-to-assume"))
+            let given = entry(&after_gate[*role], "env")
+                .and_then(|e| entry(e, "ROLE_ARN"))
                 .and_then(Node::as_str);
             if given != Some(ROLE) {
                 problems.push(format!(
                     "{name}: the role assumed is not {ROLE}, the environment's"
                 ));
+            }
+            let assume = text(&after_gate[*role], "run");
+            for argument in [
+                "--role-arn \"$ROLE_ARN\"",
+                "--session-name ",
+                "--region ",
+                "--env-file \"$GITHUB_ENV\"",
+            ] {
+                if !assume.contains(argument) {
+                    problems.push(format!("{name}: the assume step is not given {argument}"));
+                }
             }
             if role > upload {
                 problems.push(format!("{name}: the role is assumed after `{verb}` runs"));
