@@ -94,9 +94,10 @@ use tokio::time::Instant;
 
 use crate::{Error, Meta, PartBody, PutAnswer, PutClaim};
 
+use super::calls::counting;
 use super::fill::{Filled, Flight, Pending, Published, Reserved, Staged};
 use super::layout::{Name, Sidecar};
-use super::metrics::{SkippedKeep, bump};
+use super::metrics::{SkippedKeep, add, bump};
 use super::write::Writing;
 use super::{Inner, locked};
 
@@ -401,13 +402,18 @@ impl Inner {
         // that the put repeats (through such a proxy a hot HEAD, a marker GET and a cold HEAD);
         // with the setting off the put is the upstream's alone.
         if self.config.head_before_put && !replaces {
-            match self.upstream.head(key).await {
+            match self.upstream_head(key).await {
                 Ok(_) => {
                     bump(&self.counters.write_exists);
                     return Err(Error::AlreadyExists(key.to_owned()));
                 }
                 Err(Error::NotFound(_)) => {}
-                Err(other) => return Err(other),
+                Err(other) => {
+                    // No put was sent, and the client is told the put failed: it is a failed
+                    // put, under the reason the error of the HEAD maps to.
+                    self.counters.put_failed(&other);
+                    return Err(other);
+                }
             }
         }
         let name = self.cacheable(key);
@@ -425,12 +431,13 @@ impl Inner {
             }
             None => None,
         };
+        let passed = AtomicU64::new(0);
         let sent = match &mut keeping {
             Some(keeping) => {
-                let teed = tee(key, body, keeping);
+                let teed = counting(tee(key, body, keeping), &passed);
                 self.send_put(key, len, teed, sent).await
             }
-            None => self.send_put(key, len, body, sent).await,
+            None => self.send_put(key, len, counting(body, &passed), sent).await,
         };
         if replaces {
             self.forget(key);
@@ -442,18 +449,28 @@ impl Inner {
                     keeping.writing = writing;
                 }
             }
-            Err(Error::AlreadyExists(exists)) => {
-                bump(&self.counters.write_exists);
-                return Err(Error::AlreadyExists(exists));
+            Err(error) => {
+                // The put reached the upstream (the HEAD before it, if any, was another call)
+                // and failed.
+                self.counters.put_failed(&error);
+                if matches!(error, Error::AlreadyExists(_)) {
+                    bump(&self.counters.write_exists);
+                }
+                return Err(error);
             }
-            Err(other) => return Err(other),
         }
+        bump(&self.counters.upstream_puts);
+        add(&self.counters.upstream_put_bytes, passed.into_inner());
         bump(&self.counters.writes_through);
         if let (Some(name), Some(mut keeping)) = (name, keeping) {
             if !keeping.finished {
                 // The upstream took the put without reading the body to its end.
                 if keeping.wanted.is_some() {
-                    return Err(Error::BadDigest(key.to_owned()));
+                    // The upstream took it, so it is a put (above); the client is told it
+                    // failed, so it is a failure of reason `bad_digest` too.
+                    let error = Error::BadDigest(key.to_owned());
+                    self.counters.put_failed(&error);
+                    return Err(error);
                 }
                 keeping.stage = None;
                 keeping.lost = Some(SkippedKeep::Head);
@@ -596,7 +613,7 @@ impl Inner {
                 tag: answer.tag,
                 modified: answer.modified.unwrap_or(arrived),
             },
-            None => match Self::before(deadline, self.upstream.head(key)).await? {
+            None => match Self::before(deadline, self.upstream_head(key)).await? {
                 Ok(meta) if meta.size == size => meta,
                 _ => return Err(SkippedKeep::Head),
             },
