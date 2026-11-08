@@ -855,3 +855,47 @@ fn release_desired_refuses_a_release_without_an_index_with_status_1_and_a_bad_ve
         "xtask: --version \"v0.3.53\" is not <major>.<minor>.<patch>, a release tag without its v\n"
     );
 }
+
+#[test]
+fn macos_paths_hands_its_flags_on_appends_the_answer_and_fails_on_an_output_it_cannot_write() {
+    // Catches: `macos-paths` not reading --changed or not appending to --output, and an answer
+    // that could not be written exiting 0 (the job would then pass with no answer).
+    let d = dir("macos-paths");
+    std::fs::write(d.join("changed"), b"docs/x.md\0README.md\0").expect("write");
+    let o = run(
+        &d,
+        &[
+            "macos-paths",
+            "--changed",
+            "changed",
+            "--output",
+            "github-output",
+        ],
+    );
+    assert_eq!(o.status.code(), Some(0), "{}", stderr(&o));
+    assert_eq!(
+        stdout(&o),
+        "the macOS job is not needed: each of the 2 changed paths is one it builds nothing from\nmacos=false\n"
+    );
+    assert_eq!(
+        std::fs::read_to_string(d.join("github-output")).expect("out"),
+        "macos=false\n"
+    );
+    std::fs::create_dir(d.join("a-directory")).expect("dir");
+    let o = run(
+        &d,
+        &[
+            "macos-paths",
+            "--changed",
+            "changed",
+            "--output",
+            "a-directory",
+        ],
+    );
+    assert_eq!(o.status.code(), Some(1), "{}", stdout(&o));
+    assert!(
+        stderr(&o).starts_with("xtask: append to a-directory: "),
+        "{}",
+        stderr(&o)
+    );
+}
