@@ -34,9 +34,9 @@ refused('a style element', 'index.html', '</head>', '<style>a{}</style></head>',
 refused('an inline script', 'index.html', '</head>', '<script>alert(1)</script></head>', /an inline <script>/);
 refused('a script without a src under /assets/', 'index.html', 'src="/assets/', 'src="/other/', /a <script> without one src under \/assets\//);
 refused('an event handler', 'index.html', '<h1', '<h1 onclick="x()"', /an event-handler attribute onclick on <h1>/);
-refused('a javascript: URL', 'index.html', 'href="/install/"', 'href="javascript:alert(1)"', /a script URL/);
-refused('an entity-encoded javascript: URL', 'index.html', 'href="/install/"', 'href="&#106;avascript:alert(1)"', /a script URL/);
-refused('a data: URL', 'index.html', 'href="/install/"', 'href="data:text/html,x"', /a script URL/);
+refused('a javascript: URL', 'index.html', 'href="/get-started/"', 'href="javascript:alert(1)"', /a script URL/);
+refused('an entity-encoded javascript: URL', 'index.html', 'href="/get-started/"', 'href="&#106;avascript:alert(1)"', /a script URL/);
+refused('a data: URL', 'index.html', 'href="/get-started/"', 'href="data:text/html,x"', /a script URL/);
 refused('a stylesheet from another origin', 'index.html', /href="\/assets\/[0-9a-f]+\/site\.css"/, 'href="https://cdn.example.org/x.css"', /<link href> names another origin/);
 refused('a comment in a page', 'index.html', '</head>', '<!-- x --></head>', /a '<' that does not start a tag/);
 refused('an @import in a stylesheet', '__ID__/site.css', /^/, '@import "other.css";\n', /an @import/);

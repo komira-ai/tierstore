@@ -24,7 +24,6 @@ mod linux {
     use sha2::{Digest as _, Sha256};
     use tierstore::server::build_info::VERSION;
     use tierstore::{Clock as _, SystemClock};
-    use tierstore_testkit::dir::TestDir;
     use tierstore_testkit::reaped::{Reaped, first_line, spawn};
     use tokio::io::{AsyncReadExt as _, AsyncWriteExt as _};
     use tokio::net::TcpStream;
@@ -308,7 +307,7 @@ cache  = true
             )
             .await
             .unwrap();
-        let dir = TestDir::under(std::env::temp_dir(), "ts-hp");
+        let (dir, socket) = crate::files::socket_dir("ts-hp", "control.sock");
         let root = dir.path().to_path_buf();
         let key = root.join("key");
         std::fs::write(&key, format!("{BIN_KEY_ID}\n{BIN_SECRET}\n")).unwrap();
@@ -316,7 +315,6 @@ cache  = true
         let hot_key = root.join("hot.key");
         std::fs::write(&hot_key, "HOTKEY\nhot-secret\n").unwrap();
         std::fs::set_permissions(&hot_key, std::fs::Permissions::from_mode(0o600)).unwrap();
-        let socket = root.join("control.sock");
         let config = node_file(&root, fake.endpoint(), &socket, &key, &hot_key);
 
         let mut first = Node::start(&config);

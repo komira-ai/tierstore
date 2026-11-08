@@ -114,6 +114,7 @@
 //! A background walk hashes each object again at a bounded rate and drops the ones whose bytes
 //! changed on the disk; see [`scrub`].
 
+mod calls;
 mod disk;
 mod evict;
 mod fill;
@@ -158,6 +159,8 @@ mod listing_tests;
 #[cfg(test)]
 mod lost_tests;
 #[cfg(test)]
+mod metrics_text_tests;
+#[cfg(test)]
 mod read_only_tasks_tests;
 #[cfg(test)]
 mod read_only_tests;
@@ -177,6 +180,8 @@ mod stream_tests;
 pub(in crate::server) mod testing;
 #[cfg(test)]
 mod tiered_tests;
+#[cfg(test)]
+mod upstream_counts_tests;
 #[cfg(test)]
 mod write_front_tests;
 #[cfg(test)]
@@ -819,19 +824,19 @@ impl Backend for LocalCache {
         if let Some(body) = inner.open_kept(&name, range, true).await? {
             return Ok(body);
         }
+        // A read of a kept key that the cache does not serve is one miss, counted here, before
+        // any call to the upstream, whatever comes of the read.
+        bump(&inner.counters.misses);
         if !inner.read_write() {
             // A read-only cache fills nothing: the miss goes straight to the upstream.
-            bump(&inner.counters.misses);
             return passed(range).await;
         }
         if let Some(wanted) = range {
-            let meta = inner.upstream.head(key).await?;
+            let meta = inner.upstream_head(key).await?;
             if meta.size > inner.config.whole_limit {
-                bump(&inner.counters.misses);
                 return passed(Some(wanted)).await;
             }
         }
-        bump(&inner.counters.misses);
         match inner.join_or_start(key, &name) {
             Ok(pending) => eager(inner.follow(key, range, pending)).await,
             Err(fill::Filled::Kept) => match inner.open_kept(&name, range, false).await? {
@@ -847,19 +852,29 @@ impl Backend for LocalCache {
         let inner = &self.inner;
         let name = inner.cacheable(key);
         let kept = name.as_ref().and_then(|name| inner.kept(name));
+        // A HEAD the index answers is a head hit, and one the upstream answers a head miss.
         let (Some(meta), Some(name)) = (kept, name) else {
-            return inner.upstream.head(key).await;
+            bump(&inner.counters.head_misses);
+            return inner.upstream_head(key).await;
         };
         // The check of an old hit is the HEAD that answers when the object is not the one kept.
         match inner.revalidate(key, &name).await {
-            Verdict::Changed(found) => return Ok(found),
-            Verdict::Gone => return Err(Error::NotFound(key.to_owned())),
+            Verdict::Changed(found) => {
+                bump(&inner.counters.head_misses);
+                return Ok(found);
+            }
+            Verdict::Gone => {
+                bump(&inner.counters.head_misses);
+                return Err(Error::NotFound(key.to_owned()));
+            }
             Verdict::Serve => {}
         }
         if inner.unchanged(&name, &meta).await {
+            bump(&inner.counters.head_hits);
             Ok(meta)
         } else {
-            inner.upstream.head(key).await
+            bump(&inner.counters.head_misses);
+            inner.upstream_head(key).await
         }
     }
 
