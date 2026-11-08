@@ -3,6 +3,7 @@
 //! the files of the repository pass, and each way of leaving a platform out, of building, signing
 //! or checking it with the wrong inputs, or of skipping a step that checks it, is named.
 
+use super::macos_pr::MAC_IF;
 use super::platforms::{
     BUILDS, MAC_TESTS, artifacts_platform_problems, attest_commands, build_commands, matches,
     pull_request_macos_problems, release_platform_problems,
@@ -811,10 +812,10 @@ fn a_release_yml_that_does_not_take_the_macos_files_where_it_checks_them_is_name
 fn a_macos_job_that_a_pull_request_runs_is_named() {
     // Catches: a macOS runner added to a pull request's checks outside macos.yml (ci.yml given a
     // macOS job, the macOS build of artifacts.yml without its condition, a runner named in a
-    // list of labels), macos.yml's job copied into another workflow, and macos.yml's job given a
-    // condition (a skipped job passes as a check) or renamed; while a workflow no pull request
-    // starts may have one, and macos.yml's own job is accepted.
-    let only = "only the job macos of macos.yml, under no `if:`, may";
+    // list of labels), macos.yml's job copied into another workflow, and macos.yml's job given
+    // another condition than its own (a skipped job passes as a check), none, or renamed; while a
+    // workflow no pull request starts may have one, and macos.yml's own job is accepted.
+    let only = format!("only the job macos of macos.yml, under `if: {MAC_IF}`, may");
     let ci = text_of("ci.yml").replace(
         "jobs:\n",
         "jobs:\n  macos:\n    runs-on: macos-15\n    steps:\n      - run: cargo test --locked\n",
@@ -856,18 +857,19 @@ fn a_macos_job_that_a_pull_request_runs_is_named() {
             "other.yml: the job macos runs on macOS for a pull request; {only}"
         )]
     );
-    let conditioned = in_job(
-        &macos,
-        "macos",
-        "    needs: [version]\n",
-        "    needs: [version]\n    if: ${{ github.event.pull_request.draft == false }}\n",
-    );
-    assert_eq!(
-        pull_request_macos_problems("macos.yml", &conditioned),
-        [format!(
-            "macos.yml: the job macos runs on macOS for a pull request; {only}"
-        )]
-    );
+    for with in [
+        "    if: ${{ github.event.pull_request.draft == false }}\n",
+        "",
+    ] {
+        let conditioned = in_job(&macos, "macos", &format!("    if: {MAC_IF}\n"), with);
+        assert_eq!(
+            pull_request_macos_problems("macos.yml", &conditioned),
+            [format!(
+                "macos.yml: the job macos runs on macOS for a pull request; {only}"
+            )],
+            "{with:?}"
+        );
+    }
     let renamed = macos.replacen("\n  macos:\n", "\n  macos-arm64:\n", 1);
     assert_eq!(
         pull_request_macos_problems("macos.yml", &renamed),

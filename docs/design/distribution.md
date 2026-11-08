@@ -76,6 +76,8 @@ Each is a **copy of the commit-named tarball with the same bytes**, under the ta
 
 `files` lists every file of `releases/<V>/` except `SHA256SUMS`. The format is additive from the start (AGENTS.md B8): a reader ignores a key it does not know, and a later release may add keys.
 
+**The install script.** `https://tierstore.dev/install.sh` is `crates/tierstore/site/static/install.sh`, a POSIX `sh` script that the site build copies to the root of `dist/` (the one file of the site that is not a page, a script or a stylesheet; it is uploaded as `text/x-shellscript` with the pages' short cache, so it is replaced with the site and never touches `releases/`). It takes flags only (`--version`, `--prefix`, `--system`, `--base-url`), reads `releases/latest.json` for the newest version, downloads `tierstore-<V>-<platform>.tar.gz` and `SHA256SUMS` from `releases/<V>/` for Linux x86_64, Linux aarch64 or macOS arm64, and installs the binary only if the tarball's SHA-256 is the one listed. It writes to `~/.local/bin` (or `/usr/local/bin` with `--system`, using `sudo` only when the directory is not writable), starts nothing, and on another platform stops with the Homebrew and apt commands. The check catches a damaged download; it does not prove who built the file, because the sums come from the same address (the provenance bundles do, and the install guide says how to check them).
+
 ## 4. The cloud side: `infra/site`
 
 A CDK app (TypeScript, us-east-1), copied from the sibling repository's `infra/site` (`README.md` there is the description of what it builds) and cut down to the one site; the held steps (`held/main.ts`) come with it. What the stack builds is the the sibling site design as it stands, so a reviewer who knows it reads only the differences:
@@ -91,7 +93,7 @@ A CDK app (TypeScript, us-east-1), copied from the sibling repository's `infra/s
 | workflow it trusts | `.github/workflows/tierstore-site-publish.yml` at `refs/heads/main` | `.github/workflows/release.yml` at `refs/heads/main` |
 | GitHub environment | `prod-site-tierstore` | `prod-releases-tierstore` |
 | may write | the site's objects at the root, and delete them in the sync; **no write under `releases/`** | `releases/<V>/*` only with `If-None-Match` (write-once); `releases/latest.json` only with `If-Match` or `If-None-Match` |
-| may read | the bucket's listing (for the sync) | `GetObject` on `releases/*` (the files are public; this is for the re-run check, section 8) |
+| may read | the bucket's listing (for the sync) | `GetObject` on `releases/*` (the files are public; this is for the re-run check, section 8), and `ListBucket` on the bucket only under the `releases/` prefix, so a missing `latest.json` answers `NoSuchKey`, not `AccessDenied`. Granted by the stack since this pull request; the open question on the role as built having no read is resolved by it |
 | may invalidate | the one distribution | nothing |
 | delete | the site's own objects | **never**; the bucket policy also denies `DeleteObject` and `DeleteObjectVersion` on `releases/*` to every principal |
 
