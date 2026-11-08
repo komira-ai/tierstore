@@ -1,13 +1,13 @@
-//! `channels apt-index --current <dir> --out <dir> --debs <dir> --version <V> --origin <t> --label
+//! `channels apt index --current <dir> --out <dir> --debs <dir> --version <V> --origin <t> --label
 //! <t> --description <t> --date <epoch> [--keep <n>]`: the packages merged into the index
-//! `apt-read` copied to `<current>`.
+//! `apt read` copied to `<current>`.
 //!
 //! The index is shared with other products. Their entries are kept as they are, the architectures
 //! they list are kept (an index written without one would drop its packages), and the `Origin`,
 //! `Label` and `Description` of the `Release` that exists stay: the three flags apply to the
 //! first `Release` only. A version older than the newest listed for tierstore is refused, and so
 //! is the same version with other bytes. Everything is computed before anything is written; the
-//! new unsigned index goes to `<out>/dists/stable/` and the ETags it was built from to
+//! new unsigned index goes to `<out>/dists/<suite>/` and the ETags it was built from to
 //! `<out>/etags.txt`. The `Date` is `--date`, seconds since the epoch.
 
 use std::path::Path;
@@ -15,7 +15,7 @@ use std::path::Path;
 use super::control;
 use super::index::{self, ReleaseInfo, Stanza};
 use super::package_files;
-use super::state::{self, ETAGS_FILE, POOL_DIR};
+use super::state::{self, ETAGS_FILE, POOL_DIR, Suite};
 use crate::Error;
 
 /// How many versions of a package and architecture the index keeps, by default.
@@ -23,6 +23,7 @@ pub const KEEP: usize = 25;
 
 /// What `apt-index` is asked.
 pub struct Request<'a> {
+    pub suite: Suite,
     pub current: &'a Path,
     pub out: &'a Path,
     pub debs: &'a Path,
@@ -48,10 +49,73 @@ fn listed_archs(main: &Path) -> Vec<String> {
         .collect()
 }
 
-fn write(path: &Path, bytes: &[u8]) -> Result<(), Error> {
+pub(super) fn write(path: &Path, bytes: &[u8]) -> Result<(), Error> {
     let what = || format!("write {}", path.display());
     std::fs::create_dir_all(path.parent().unwrap_or(path)).map_err(Error::spawn(what()))?;
     std::fs::write(path, bytes).map_err(Error::spawn(what()))
+}
+
+/// An index as `apt read` copied it.
+pub(super) struct Current {
+    /// The architectures it lists together with the defaults.
+    pub archs: Vec<String>,
+    /// Every stanza of their `Packages`.
+    pub stanzas: Vec<Stanza>,
+    /// The text of its `Release`, when it has one.
+    pub release: Option<String>,
+}
+
+/// The index of `suite` in `dir` (what `apt read` wrote): the architectures it lists together with
+/// the defaults, every stanza of their `Packages`, and the text of its `Release` when it has one.
+///
+/// # Errors
+/// A `Packages` file that is not one.
+pub(super) fn read_index(dir: &Path, suite: Suite) -> Result<Current, Error> {
+    let root = dir.join("dists").join(suite.name());
+    let main = root.join("main");
+    let mut archs: Vec<String> = state::DEFAULT_ARCHS
+        .iter()
+        .map(|a| (*a).to_owned())
+        .collect();
+    archs.extend(listed_archs(&main));
+    archs.sort();
+    archs.dedup();
+    let mut existing = Vec::new();
+    for arch in &archs {
+        let path = main.join(format!("binary-{arch}")).join("Packages");
+        if let Ok(text) = std::fs::read_to_string(&path) {
+            existing.extend(
+                index::parse_packages(&text)
+                    .map_err(|e| Error::Failed(format!("{}: {e}", path.display())))?,
+            );
+        }
+    }
+    Ok(Current {
+        archs,
+        stanzas: existing,
+        release: std::fs::read_to_string(root.join("Release")).ok(),
+    })
+}
+
+/// Writes the new unsigned index of `suite` to `out`, and the ETags it was built from. Everything
+/// is computed before anything is written.
+///
+/// # Errors
+/// An index that cannot be built, or a file that cannot be written.
+pub(super) fn write_index(
+    out: &Path,
+    suite: Suite,
+    info: &ReleaseInfo,
+    stanzas: &[Stanza],
+    archs: &[String],
+    etags: &str,
+) -> Result<(), Error> {
+    let tree = index::tree(suite, info, stanzas, archs)?;
+    for file in &tree {
+        write(&out.join(&file.path), &file.data)?;
+    }
+    // The new index was built from exactly the objects whose ETags these are.
+    write(&out.join(ETAGS_FILE), etags.as_bytes())
 }
 
 /// The `apt-index` verb: the lines to print.
@@ -82,27 +146,12 @@ pub fn build(r: &Request) -> Result<Vec<String>, Error> {
         }
         added.push(stanza);
     }
-    let main = r.current.join("dists").join("stable").join("main");
-    let mut archs: Vec<String> = state::DEFAULT_ARCHS
-        .iter()
-        .map(|a| (*a).to_owned())
-        .collect();
-    archs.extend(listed_archs(&main));
-    archs.sort();
-    archs.dedup();
-    let mut existing = Vec::new();
-    for arch in &archs {
-        let path = main.join(format!("binary-{arch}")).join("Packages");
-        if let Ok(text) = std::fs::read_to_string(&path) {
-            existing.extend(
-                index::parse_packages(&text)
-                    .map_err(|e| Error::Failed(format!("{}: {e}", path.display())))?,
-            );
-        }
-    }
+    let Current {
+        archs,
+        stanzas: existing,
+        release,
+    } = read_index(r.current, r.suite)?;
     let merged = index::merge(&existing, &added, r.keep)?;
-    let release_path = r.current.join("dists").join("stable").join("Release");
-    let release = std::fs::read_to_string(&release_path).ok();
     let info = index::keep_shared_fields(
         release.as_deref(),
         ReleaseInfo {
@@ -112,13 +161,7 @@ pub fn build(r: &Request) -> Result<Vec<String>, Error> {
             date: r.date,
         },
     )?;
-    let tree = index::tree(&info, &merged.stanzas, &archs)?;
-    // Everything is computed; only now is anything written.
-    for file in &tree {
-        write(&r.out.join(&file.path), &file.data)?;
-    }
-    // The new index was built from exactly the objects whose ETags these are.
-    write(&r.out.join(ETAGS_FILE), etags.as_bytes())?;
+    write_index(r.out, r.suite, &info, &merged.stanzas, &archs, &etags)?;
     Ok(vec![format!(
         "apt-index: added {}, dropped {}, listed {}",
         merged.added,

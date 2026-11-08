@@ -1,5 +1,5 @@
-//! The rules for the apt jobs of `release.yml` (`apt-deploy-read`, `apt-index` and
-//! `apt-deploy-write`, each in up to three attempts), which put the release's Debian packages in
+//! The rules for the apt jobs of `release.yml` (`testing-apt-read`, `testing-apt-index` and
+//! `testing-apt-write`, each in up to three attempts), which put the release's Debian packages in
 //! the apt repository the organisation's products share (docs/design/distribution.md, sections 5
 //! and 8). [`apt_problems`] is called from `release_problems`, so the one lint holds the whole
 //! file.
@@ -23,10 +23,10 @@ use super::lint::{RELEASE_IF, entries, entry, names};
 use super::yaml::Node;
 
 /// The `if:` of the read job of attempt 2: the first write lost the race for the index.
-pub const RETRY_2_IF: &str = "${{ needs.plan.outputs.release == 'true' && github.ref == 'refs/heads/main' && needs.apt-deploy-write.outputs.conflict == 'true' }}";
+pub const RETRY_2_IF: &str = "${{ needs.plan.outputs.release == 'true' && github.ref == 'refs/heads/main' && needs.testing-apt-write.outputs.conflict == 'true' }}";
 
 /// The `if:` of the read job of attempt 3.
-pub const RETRY_3_IF: &str = "${{ needs.plan.outputs.release == 'true' && github.ref == 'refs/heads/main' && needs.apt-deploy-write-2.outputs.conflict == 'true' }}";
+pub const RETRY_3_IF: &str = "${{ needs.plan.outputs.release == 'true' && github.ref == 'refs/heads/main' && needs.testing-apt-write-2.outputs.conflict == 'true' }}";
 
 /// The role the read and write jobs assume.
 const ROLE: &str = "${{ vars.APT_PUBLISH_ROLE_ARN }}";
@@ -63,80 +63,91 @@ pub struct Job {
     pub requires: &'static [&'static str],
     /// Does the write pass `--last`?
     pub last: bool,
+    /// The suite its verbs are given with `--suite`, and its index is signed in.
+    pub suite: &'static str,
 }
 
 pub const JOBS: [Job; 9] = [
     Job {
-        name: "apt-deploy-read",
+        name: "testing-apt-read",
         kind: Kind::Read,
-        needs: &["plan", "soak"],
+        needs: &["plan", "publish"],
         condition: RELEASE_IF,
         requires: &[],
         last: false,
+        suite: "testing",
     },
     Job {
-        name: "apt-index",
+        name: "testing-apt-index",
         kind: Kind::Index,
-        needs: &["apt-deploy-read", "plan"],
+        needs: &["plan", "testing-apt-read"],
         condition: RELEASE_IF,
         requires: &["READ_ENABLED"],
         last: false,
+        suite: "testing",
     },
     Job {
-        name: "apt-deploy-write",
+        name: "testing-apt-write",
         kind: Kind::Write,
-        needs: &["apt-deploy-read", "apt-index", "plan"],
+        needs: &["plan", "testing-apt-index", "testing-apt-read"],
         condition: RELEASE_IF,
         requires: &["READ_ENABLED", "INDEX_SIGNED"],
         last: false,
+        suite: "testing",
     },
     Job {
-        name: "apt-deploy-read-2",
+        name: "testing-apt-read-2",
         kind: Kind::Read,
-        needs: &["apt-deploy-write", "plan"],
+        needs: &["plan", "testing-apt-write"],
         condition: RETRY_2_IF,
         requires: &[],
         last: false,
+        suite: "testing",
     },
     Job {
-        name: "apt-index-2",
+        name: "testing-apt-index-2",
         kind: Kind::Index,
-        needs: &["apt-deploy-read-2", "plan"],
+        needs: &["plan", "testing-apt-read-2"],
         condition: RELEASE_IF,
         requires: &["READ_ENABLED"],
         last: false,
+        suite: "testing",
     },
     Job {
-        name: "apt-deploy-write-2",
+        name: "testing-apt-write-2",
         kind: Kind::Write,
-        needs: &["apt-deploy-read-2", "apt-index-2", "plan"],
+        needs: &["plan", "testing-apt-index-2", "testing-apt-read-2"],
         condition: RELEASE_IF,
         requires: &["READ_ENABLED", "INDEX_SIGNED"],
         last: false,
+        suite: "testing",
     },
     Job {
-        name: "apt-deploy-read-3",
+        name: "testing-apt-read-3",
         kind: Kind::Read,
-        needs: &["apt-deploy-write-2", "plan"],
+        needs: &["plan", "testing-apt-write-2"],
         condition: RETRY_3_IF,
         requires: &[],
         last: false,
+        suite: "testing",
     },
     Job {
-        name: "apt-index-3",
+        name: "testing-apt-index-3",
         kind: Kind::Index,
-        needs: &["apt-deploy-read-3", "plan"],
+        needs: &["plan", "testing-apt-read-3"],
         condition: RELEASE_IF,
         requires: &["READ_ENABLED"],
         last: false,
+        suite: "testing",
     },
     Job {
-        name: "apt-deploy-write-3",
+        name: "testing-apt-write-3",
         kind: Kind::Write,
-        needs: &["apt-deploy-read-3", "apt-index-3", "plan"],
+        needs: &["plan", "testing-apt-index-3", "testing-apt-read-3"],
         condition: RELEASE_IF,
         requires: &["READ_ENABLED", "INDEX_SIGNED"],
         last: true,
+        suite: "testing",
     },
 ];
 
@@ -247,6 +258,7 @@ fn job_problems(want: &Job, job: &Node) -> Vec<String> {
         problems.push(format!("{name}: no step has the id `gate`"));
         return problems;
     };
+    problems.extend(suite_problems(want, all));
     problems.extend(gate_problems(want, &all[gate]));
     for step in &all[..gate] {
         for word in ["aws-actions/", "secrets.", "APT_GPG_", "apt-key"] {
@@ -274,6 +286,43 @@ fn job_problems(want: &Job, job: &Node) -> Vec<String> {
                     text(step, "name")
                 ));
             }
+        }
+    }
+    problems
+}
+
+/// The release publishes into the suite `testing` and nowhere else: every verb of the job is given
+/// `--suite <suite>`, the index is signed in the directory of that suite, and a write puts the
+/// packages in the pool (`--no-pool` is the promotion's).
+fn suite_problems(want: &Job, all: &[Node]) -> Vec<String> {
+    let name = want.name;
+    let mut problems = Vec::new();
+    let needle = format!("{}--suite {} ", verb(want.kind), want.suite);
+    for step in all
+        .iter()
+        .filter(|s| text(s, "run").contains(verb(want.kind)))
+    {
+        let run = text(step, "run");
+        if !run.contains(&needle) {
+            problems.push(format!(
+                "{name}: `{}...` is not given `--suite {}`",
+                verb(want.kind).trim_end(),
+                want.suite
+            ));
+        }
+        if run.contains("--no-pool") {
+            problems.push(format!(
+                "{name}: passes --no-pool; the release's write puts the packages in the pool"
+            ));
+        }
+    }
+    let dir = format!("--dir \"$RUNNER_TEMP/apt-next/dists/{}\" ", want.suite);
+    for step in all.iter().filter(|s| text(s, "run").contains(SIGN)) {
+        if !text(step, "run").contains(&dir) {
+            problems.push(format!(
+                "{name}: the index is not signed in dists/{}, the suite the job writes",
+                want.suite
+            ));
         }
     }
     problems

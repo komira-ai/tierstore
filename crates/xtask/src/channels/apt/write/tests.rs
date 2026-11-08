@@ -33,8 +33,9 @@ impl Repo {
             b"Package: buildrules\nVersion: 9.9.9\nArchitecture: amd64\nSHA256: ee\n\n",
         );
         aws.put(&key("InRelease"), b"old clear signed");
-        read(&aws, BUCKET, &dir.join("current")).expect("read");
+        read(&aws, Suite::Stable, BUCKET, &dir.join("current")).expect("read");
         build::build(&build::Request {
+            suite: Suite::Stable,
             current: &dir.join("current"),
             out: &dir.join("next"),
             debs: &debs,
@@ -54,12 +55,15 @@ impl Repo {
 
     fn request<'a>(&'a self, last: bool) -> Request<'a> {
         Request {
+            suite: Suite::Stable,
             bucket: BUCKET,
             distribution_id: "E123ABC",
             hostname: "packages-eu.komira.ai",
             next: Box::leak(self.dir.join("next").into_boxed_path()),
-            debs: &self.debs,
-            version: "1.2.3",
+            pool: Some(Pool {
+                debs: &self.debs,
+                version: "1.2.3",
+            }),
             last,
         }
     }
@@ -411,7 +415,10 @@ fn an_index_that_does_not_match_the_packages_or_is_incomplete_is_refused_before_
     let repo = Repo::new("write-unlisted", "1.2.3");
     release_files(&repo.debs, "1.2.4");
     let mut r = repo.request(false);
-    r.version = "1.2.4";
+    r.pool = Some(Pool {
+        debs: &repo.debs,
+        version: "1.2.4",
+    });
     let e = write(&repo.aws, &r, None).unwrap_err().to_string();
     assert!(e.contains("does not list tierstore_1.2.4_amd64.deb"), "{e}");
 }

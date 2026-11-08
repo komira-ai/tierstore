@@ -53,7 +53,13 @@ fn the_packages_and_release_text_is_what_the_other_repository_writes() {
         description: Some("buildrules packages".to_owned()),
         date: 1_790_000_000,
     };
-    let files = tree(&info, &second.stanzas, &strings(&["arm64", "amd64"])).expect("tree");
+    let files = tree(
+        Suite::Stable,
+        &info,
+        &second.stanzas,
+        &strings(&["arm64", "amd64"]),
+    )
+    .expect("tree");
     let paths: Vec<&str> = files.iter().map(|f| f.path.as_str()).collect();
     assert_eq!(
         paths,
@@ -299,7 +305,7 @@ fn a_release_without_a_label_or_description_omits_them() {
         description: None,
         date: 0,
     };
-    let files = tree(&info, &[], &strings(&["amd64"])).expect("tree");
+    let files = tree(Suite::Stable, &info, &[], &strings(&["amd64"])).expect("tree");
     let release = String::from_utf8(files[2].data.clone()).expect("utf8");
     assert!(release.starts_with("Suite: stable\nCodename: stable\nDate: Thu, 01 Jan 1970 00:00:00 UTC\nArchitectures: amd64\nComponents: main\nAcquire-By-Hash: yes\nSHA256:\n "));
     // An empty index is a Packages of no bytes and its gzip.
@@ -315,9 +321,10 @@ fn an_architecture_that_is_not_a_name_or_is_listed_twice_or_a_stanza_without_one
         description: None,
         date: 0,
     };
-    assert!(tree(&info, &[], &strings(&["a/b"])).is_err());
-    assert!(tree(&info, &[], &strings(&["amd64", "amd64"])).is_err());
+    assert!(tree(Suite::Stable, &info, &[], &strings(&["a/b"])).is_err());
+    assert!(tree(Suite::Stable, &info, &[], &strings(&["amd64", "amd64"])).is_err());
     let e = tree(
+        Suite::Stable,
         &info,
         &[stanza("1.0.0", "s390x", "a")],
         &strings(&["amd64"]),

@@ -1,7 +1,7 @@
 //! What the shared index consists of, and what was read of it. Pure functions over text.
 //!
-//! The repository is one tree of object keys under `apt/`. The index of the suite `stable` is a
-//! handful of objects under `apt/dists/stable/`: for each architecture a `Packages` and a
+//! The repository is one tree of object keys under `apt/`. The index of a suite (`stable`,
+//! `testing`) is a handful of objects under `apt/dists/<suite>/`: for each architecture a `Packages` and a
 //! `Packages.gz`, and `Release`, `InRelease` and `Release.gpg`. Every write to one of them is
 //! conditional on the version that was read (its ETag), so the ETag of each object is kept beside
 //! the copy of it in a text file, `etags.txt`, one `<path><TAB><etag>` line per object, `-` for an
@@ -12,8 +12,29 @@ use crate::Error;
 /// The key prefix of everything the repository serves.
 pub const KEY_ROOT: &str = "apt/";
 
-/// The index of the suite, relative to the repository root.
-pub const SUITE_DIR: &str = "dists/stable/";
+/// The suites of the repository this product publishes into. Both list the same pool: `testing`
+/// holds a release from the moment it is published, `stable` gets the same entries only after the
+/// release's install checks (and the lab) passed, so a package is never copied, only listed.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, clap::ValueEnum)]
+pub enum Suite {
+    Stable,
+    Testing,
+}
+
+impl Suite {
+    /// The name: the `Suite` and `Codename` of the `Release`, and the directory below `dists/`.
+    pub fn name(self) -> &'static str {
+        match self {
+            Suite::Stable => "stable",
+            Suite::Testing => "testing",
+        }
+    }
+
+    /// The index of the suite, relative to the repository root: `dists/<suite>/`.
+    pub fn dir(self) -> String {
+        format!("dists/{}/", self.name())
+    }
+}
 
 /// The pool directory this product owns; its role may write below it and nowhere else in the pool.
 pub const POOL_DIR: &str = "pool/tierstore";
@@ -58,7 +79,7 @@ pub fn archs_of_release(release: &str) -> Vec<String> {
     out
 }
 
-/// The objects of the index of `archs`, relative to `dists/stable/`, in the order they are
+/// The objects of the index of `archs`, relative to `dists/<suite>/`, in the order they are
 /// written: every `Packages` and `Packages.gz` first, then `Release`, `Release.gpg`, `InRelease`.
 /// A reader sees a `Release` only after the files it lists.
 pub fn index_files(archs: &[String]) -> Vec<String> {
@@ -71,12 +92,12 @@ pub fn index_files(archs: &[String]) -> Vec<String> {
     out
 }
 
-/// The object key of a file of the index.
-pub fn index_key(rel: &str) -> String {
-    format!("{KEY_ROOT}{SUITE_DIR}{rel}")
+/// The object key of a file of the index of `suite`.
+pub fn index_key(suite: Suite, rel: &str) -> String {
+    format!("{KEY_ROOT}{}{rel}", suite.dir())
 }
 
-/// Is `rel` (relative to `dists/stable/`) a `Packages` or `Packages.gz` file, the files a
+/// Is `rel` (relative to `dists/<suite>/`) a `Packages` or `Packages.gz` file, the files a
 /// `Release` lists by hash?
 pub fn is_packages_file(rel: &str) -> bool {
     rel.ends_with("/Packages") || rel.ends_with("/Packages.gz")
@@ -92,11 +113,11 @@ pub fn release_hash_of<'a>(release: &'a str, rel: &str) -> Option<&'a str> {
 }
 
 /// The object key of the by-hash copy of the index file `rel` (`main/binary-<arch>/Packages[.gz]`)
-/// whose sha256 is `hash`: `apt/dists/stable/main/binary-<arch>/by-hash/SHA256/<hash>`, the name
-/// an `Acquire-By-Hash: yes` `Release` makes apt look for.
-pub fn by_hash_key(rel: &str, hash: &str) -> String {
+/// of `suite` whose sha256 is `hash`: `apt/dists/<suite>/main/binary-<arch>/by-hash/SHA256/<hash>`,
+/// the name an `Acquire-By-Hash: yes` `Release` makes apt look for.
+pub fn by_hash_key(suite: Suite, rel: &str, hash: &str) -> String {
     let dir = rel.rsplit_once('/').map_or("", |(dir, _)| dir);
-    format!("{KEY_ROOT}{SUITE_DIR}{dir}/by-hash/SHA256/{hash}")
+    format!("{KEY_ROOT}{}{dir}/by-hash/SHA256/{hash}", suite.dir())
 }
 
 /// The object key of a package file in this product's pool directory, by the file's base name.
