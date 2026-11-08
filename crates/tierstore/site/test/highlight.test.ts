@@ -88,12 +88,14 @@ test('go and java: keywords, types, calls, strings and comments', () => {
   assert.ok(highlight('java', 'new Foo(1); // n').includes('<span class="h-k">new</span>'));
 });
 
-test('the built Get started page: toml, shell and every client language are coloured', () => {
+test('the built install, client and docs pages: toml, shell and every client language are coloured', () => {
   const dist = buildReal('highlight');
-  const html = readFileSync(join(dist, 'get-started', 'index.html'), 'utf8');
-  assert.ok(html.includes('<span class="h-t">[[interface]]</span>'));
-  assert.ok(html.includes('<span class="h-a">proxy_id</span>'));
-  assert.ok(html.includes('<span class="h-f">curl</span> <span class="h-a">-fsSL</span>'));
+  const html = readFileSync(join(dist, 'docs', 'clients', 'index.html'), 'utf8');
+  assert.ok(html.includes('<span class="h-a">--endpoint-url</span>'), 'sh is not coloured');
+  const landing = readFileSync(join(dist, 'docs', 'index.html'), 'utf8');
+  assert.ok(landing.includes('<span class="h-t">[[interface]]</span>'));
+  assert.ok(landing.includes('<span class="h-a">proxy_id</span>'));
+  assert.ok(readFileSync(join(dist, 'install', 'index.html'), 'utf8').includes('<span class="h-f">curl</span> <span class="h-a">-fsSL</span>'));
   assert.ok(html.includes('<span class="h-f">LoadDefaultConfig</span>'), 'go is not coloured');
   assert.ok(html.includes('<span class="h-t">S3Client</span>'), 'java and js are not coloured');
   assert.ok(html.includes('<span class="h-k">use</span> aws_sdk_s3'), 'rust is not coloured');

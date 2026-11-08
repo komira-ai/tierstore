@@ -76,6 +76,8 @@ Each is a **copy of the commit-named tarball with the same bytes**, under the ta
 
 `files` lists every file of `releases/<V>/` except `SHA256SUMS`. The format is additive from the start (AGENTS.md B8): a reader ignores a key it does not know, and a later release may add keys.
 
+**The install script.** `https://tierstore.dev/install.sh` is `crates/tierstore/site/static/install.sh`, a POSIX `sh` script that the site build copies to the root of `dist/` (the one file of the site that is not a page, a script or a stylesheet; it is uploaded as `text/x-shellscript` with the pages' short cache, so it is replaced with the site and never touches `releases/`). It takes flags only (`--version`, `--prefix`, `--system`, `--base-url`), reads `releases/latest.json` for the newest version, downloads `tierstore-<V>-<platform>.tar.gz` and `SHA256SUMS` from `releases/<V>/` for Linux x86_64, Linux aarch64 or macOS arm64, and installs the binary only if the tarball's SHA-256 is the one listed. It writes to `~/.local/bin` (or `/usr/local/bin` with `--system`, using `sudo` only when the directory is not writable), starts nothing, and on another platform stops with the Homebrew and apt commands. The check catches a damaged download; it does not prove who built the file, because the sums come from the same address (the provenance bundles do, and the install guide says how to check them).
+
 ## 4. The cloud side: `infra/site`
 
 A CDK app (TypeScript, us-east-1), copied from the sibling repository's `infra/site` (`README.md` there is the description of what it builds) and cut down to the one site; the held steps (`held/main.ts`) come with it. What the stack builds is the the sibling site design as it stands, so a reviewer who knows it reads only the differences:

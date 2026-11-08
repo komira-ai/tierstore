@@ -8,10 +8,10 @@ Build machines that read the same files again and again from a shared store. The
 
 ```diagram
 alt: Clients read from tierstore on the build machine. A read the local cache holds is answered from the disk. A miss is read from the remote S3-compatible store and a copy is kept in the cache. The cache evicts the least recently used objects when it fills.
-node clients 0 1.5 "Clients" "builds, GET and HEAD"
+node clients 0 1.5 "Clients" "build jobs"
 node tierstore 1 1.5 "tierstore" "build node" main
 node cache 2 1 "local cache" "disk, LRU" hot
-node store 2 2 "remote store" "MinIO, RustFS" remote
+node store 2 2 "S3 store" "MinIO, RustFS" remote
 node gone 2 0 "freed" "space" ghost
 edge clients tierstore "read"
 edge tierstore cache "read"

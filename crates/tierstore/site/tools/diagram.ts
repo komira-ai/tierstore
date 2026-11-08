@@ -38,10 +38,10 @@ export interface Diagram {
 }
 
 /** The most characters a box's label and second line may have: what fits the box at the size they are drawn. */
-export const MAX_LABEL = 12;
-export const MAX_SUB = 16;
+export const MAX_LABEL = 11;
+export const MAX_SUB = 15;
 /** The most characters an arrow's label may have: what fits between two columns. */
-export const MAX_EDGE_LABEL = 12;
+export const MAX_EDGE_LABEL = 10;
 export const COLUMNS = 3;
 
 /** A line split into words, where "a quoted string" is one word. */
@@ -106,9 +106,9 @@ export function parseDiagram(src: string, name = 'a diagram'): Diagram {
 }
 
 // The grid, in the units of the viewBox.
-const BOX_W = 120;
+const BOX_W = 128;
 const BOX_H = 62;
-const COL_GAP = 84;
+const COL_GAP = 92;
 const ROW_GAP = 44;
 const PAD = 8;
 const HEAD = 8;

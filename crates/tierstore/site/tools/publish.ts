@@ -11,7 +11,7 @@
 //     the job's user can read (never on a command line), and exchanges it with `aws sts assume-role-with-web-identity`
 //     for credentials that last an hour. There is no long-lived key anywhere;
 //  3. uploads the assets (they never change under a URL, so they are immutable), then the pages (short cache), then
-//     version.txt, then sweeps what the build no longer has, then invalidates the distribution. The sweep comes after
+//     install.sh (the install script: text/x-shellscript, the pages' short cache), then version.txt, then sweeps what the build no longer has, then invalidates the distribution. The sweep comes after
 //     the uploads, so a visitor holding an old page can still load the old assets until the new pages are in place.
 //     releases/ is never touched by any command here (the role also denies deleting it).
 //
@@ -83,6 +83,9 @@ export function parseArgs(argv: readonly string[]): Options {
 
 export const IMMUTABLE = 'public, max-age=31536000, immutable';
 export const PAGE = 'public, max-age=60, s-maxage=300';
+/** The install script, served at /install.sh: the one file of dist/ that is not a page, a script or a stylesheet. */
+export const INSTALL_SCRIPT = 'install.sh';
+export const SHELL_SCRIPT_TYPE = 'text/x-shellscript';
 
 /** The `aws` commands, in the order they run. `versionFile` holds the commit. */
 export function plan(o: Options, versionFile: string): string[][] {
@@ -99,6 +102,7 @@ export function plan(o: Options, versionFile: string): string[][] {
     only('*.html', 'text/html; charset=utf-8', PAGE),
     only('*.md', 'text/markdown; charset=utf-8', PAGE),
     only('*.txt', 'text/plain; charset=utf-8', PAGE),
+    only(INSTALL_SCRIPT, SHELL_SCRIPT_TYPE, PAGE),
     ['s3', 'cp', versionFile, `${target}version.txt`, '--content-type', 'text/plain', '--cache-control', 'no-cache'],
     ['s3', 'sync', o.dist, target, '--delete', '--exclude', 'releases/*', '--exclude', 'version.txt'],
     ['cloudfront', 'create-invalidation', '--distribution-id', o.distributionId, '--paths', '/*'],
@@ -121,9 +125,9 @@ export interface Deps {
 }
 
 /** The least a built site has, kept under the real site (test/golden.manifest) and above half of it: a dist/ below either is not a site, and the sweep deletes. */
-export const MIN_HTML_PAGES = 10;
-export const MIN_FILES = 13;
-/** The only file types a built site holds (check-dist.ts enforces it); the syncs above give exactly these a content type and a cache rule. */
+export const MIN_HTML_PAGES = 12;
+export const MIN_FILES = 24;
+/** The only file types a built site holds besides install.sh (check-dist.ts enforces it); the syncs above give exactly these a content type and a cache rule. */
 const TYPES = ['.html', '.js', '.css', '.md', '.txt'];
 
 function filesUnder(dir: string): string[] {
@@ -151,7 +155,8 @@ export function checkDist(dist: string): void {
   const html = files.filter((f) => f.endsWith('.html')).length;
   if (html < MIN_HTML_PAGES) throw new Error(`${dist} is not a built site: only ${html} html pages (at least ${MIN_HTML_PAGES}); the sweep would empty the bucket`);
   if (files.length < MIN_FILES) throw new Error(`${dist} is not a built site: only ${files.length} files (at least ${MIN_FILES}); the sweep would empty the bucket`);
-  const odd = files.find((f) => !TYPES.some((t) => f.endsWith(t)));
+  if (!files.includes(INSTALL_SCRIPT)) throw new Error(`${dist} is not a built site: ${INSTALL_SCRIPT} is missing; the sweep would delete it from the bucket`);
+  const odd = files.find((f) => f !== INSTALL_SCRIPT && !TYPES.some((t) => f.endsWith(t)));
   if (odd !== undefined) throw new Error(`${dist} is not a built site: ${odd} is a file type the sync would upload without a content type or cache rule`);
 }
 

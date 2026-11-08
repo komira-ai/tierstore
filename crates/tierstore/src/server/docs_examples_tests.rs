@@ -28,7 +28,9 @@ const PAGES: &[(&str, &[Shape])] = &[
 ];
 
 fn read(page: &str) -> String {
-    let path = Path::new(env!("CARGO_MANIFEST_DIR")).join("docs").join(page);
+    let path = Path::new(env!("CARGO_MANIFEST_DIR"))
+        .join("docs")
+        .join(page);
     std::fs::read_to_string(&path).unwrap_or_else(|why| panic!("{}: {why}", path.display()))
 }
 
@@ -65,7 +67,11 @@ fn shape_of(settings: &Settings) -> Shape {
 fn every_toml_file_of_the_docs_landing_page_and_the_examples_loads() {
     for (page, shapes) in PAGES {
         let blocks = toml_blocks(&read(page));
-        assert_eq!(blocks.len(), shapes.len(), "{page}: the TOML files it shows");
+        assert_eq!(
+            blocks.len(),
+            shapes.len(),
+            "{page}: the TOML files it shows"
+        );
         for (block, want) in blocks.iter().zip(*shapes) {
             let settings = settings_from_text(block, DEFAULTS)
                 .unwrap_or_else(|why| panic!("{page}: the loader refuses the file: {why}"));
@@ -81,7 +87,10 @@ fn a_file_the_loader_refuses_is_found() {
     let example = &toml_blocks(&read("examples/directory-as-bucket.md"))[0];
     let no_budget = example.replace("budget = \"200GiB\"\n", "");
     assert!(settings_from_text(&no_budget, DEFAULTS).is_err());
-    let no_cold = example.replace("[cold_store]\nkind = \"dir\"\npath = \"/srv/big/tierstore\"\n", "");
+    let no_cold = example.replace(
+        "[cold_store]\nkind = \"dir\"\npath = \"/srv/big/tierstore\"\n",
+        "",
+    );
     assert_ne!(&no_cold, example, "the cold table was in the file");
     assert!(settings_from_text(&no_cold, DEFAULTS).is_err());
 }
@@ -99,7 +108,10 @@ fn every_example_has_a_diagram_a_file_commands_and_limits() {
             "## What to expect",
             "## Limits",
         ] {
-            assert!(text.contains(&format!("\n{heading}\n")), "{page}: no {heading}");
+            assert!(
+                text.contains(&format!("\n{heading}\n")),
+                "{page}: no {heading}"
+            );
         }
         assert!(text.contains("\n```diagram\n"), "{page}: no diagram");
     }

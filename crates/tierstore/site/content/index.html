@@ -10,7 +10,7 @@
     <div class="hero-copy">
       <h1 class="display k-mark">A hot tier in front of a <em>cold store</em>, behind one S3 endpoint.</h1>
       <p class="lede k-line">tierstore is an S3 server in front of a small, fast store and a large, cheap one. Your programs see one bucket and talk to it with any S3 client.</p>
-      <p class="actions hero-links k-line"><a class="button button-primary" href="get-started.html">Get started</a> <a class="button" href="demo.html">See a start and a drain</a></p>
+      <p class="actions hero-links k-line"><a class="button button-primary" href="install.html">Install</a> <a class="button" href="/docs/">Read the docs</a></p>
     </div>
     <figure class="flow k-fade-in">
       <svg class="flow-svg" viewBox="0 0 640 400" width="640" height="400" role="img" aria-labelledby="flow-title flow-desc" focusable="false">
@@ -71,10 +71,20 @@
     <ul class="why-grid k-rv">
       <li><h3>New objects go to the fast tier</h3><p>A write is confirmed as soon as the hot tier has the object.</p></li>
       <li><h3>The large tier catches up quietly</h3><p>In the background, tierstore copies new objects to the cold tier.</p></li>
-      <li><h3>Old objects make room</h3><p>When the hot tier fills, the oldest objects the cold tier already has are removed.</p></li>
+      <li><h3>Old objects make room</h3><p>When the hot tier fills, the objects written longest ago that the cold tier already has are removed.</p></li>
       <li><h3>Reads look in the fast tier first</h3><p>An object only in the cold tier is read from there and copied back to the hot tier.</p></li>
     </ul>
-    <p>To see why tierstore exists and where it stops, read <a href="why.html">why tierstore</a>. For the settings and for running it, see the <a href="/docs/configuration/">configuration</a> and <a href="/docs/operations/">operations</a> guides.</p>
+    <p>To see why tierstore exists, read <a href="https://komira.ai/whitepapers/tierstore">the technical report</a>. For the settings and for running it, see the <a href="/docs/">docs</a>; to watch a start and a drain, see the <a href="demo.html">demo</a>.</p>
+  </div>
+</section>
+
+<section class="band" id="examples">
+  <div class="wrap">
+    <h2 class="k-rv">Three ways to set it up</h2>
+    <p class="k-rv">Each example is a complete file, with a picture of what it does, the commands to run it, what to expect and where it stops.</p>
+    <div class="k-rv">
+{{example-cards}}
+    </div>
   </div>
 </section>
 
@@ -89,7 +99,8 @@
     <tr><td>Each tier can be an S3-compatible store, a directory on disk, or memory</td><td><span class="tag tag-ok">works today</span></td></tr>
     <tr><td>One TOML configuration file (<code>--config</code>), the only way to set tierstore up; the old command-line options for the data path are gone</td><td><span class="tag tag-ok">works today</span></td></tr>
     <tr><td>A read cache on a machine's local disk, for build machines (<code>[local_cache]</code>, <code>[[policy]]</code> with <code>cache = true</code>)</td><td><span class="tag tag-ok">works; a build node, file only</span></td></tr>
-    <tr><td>A Homebrew formula, an apt package, a container image</td><td><span class="tag tag-planned">none yet: there is a tarball and an example unit</span></td></tr>
+    <tr><td>An install script, a Homebrew formula and an apt package</td><td><span class="tag tag-planned">from the next release; today a tarball</span></td></tr>
+    <tr><td>A container image</td><td><span class="tag tag-planned">none yet</span></td></tr>
     </tbody></table></div>
     <p class="k-rv">Keys for different jobs, HTTPS and host updates work today too; the <a href="/docs/">operator guide</a> lists them all.</p>
   </div>

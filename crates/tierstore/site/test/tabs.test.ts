@@ -183,29 +183,31 @@ test('storage: a storage that throws, on reading, on writing or on being reached
   assert.equal(storageOf({ localStorage: ok }), ok);
 });
 
-test('the built Get started page: six client languages and four install methods, in tabs, every panel in the page', () => {
+test('the built Install page: four install methods in tabs, every panel in the page; the client page has a heading for each language and no tabs', () => {
   const dist = buildReal('tabs');
-  const html = readFileSync(join(dist, 'get-started', 'index.html'), 'utf8');
+  const html = readFileSync(join(dist, 'install', 'index.html'), 'utf8');
   const labels = (name: string): string[] => {
     const g = new RegExp(`<div class="tabs" data-group="${name}">[\\s\\S]*?<div class="tab-list"[^>]*>([\\s\\S]*?)</div>`).exec(html)?.[1] ?? '';
     return [...g.matchAll(/role="tab"[^>]*>([^<]+)<\/button>/g)].map((m) => m[1]);
   };
-  assert.deepEqual(labels('client'), ['AWS CLI', 'Python (boto3)', 'JavaScript (AWS SDK v3)', 'Go (aws-sdk-go-v2)', 'Rust (aws-sdk-s3)', 'Java (AWS SDK v2)']);
-  assert.deepEqual(labels('install'), ['Tarball', 'Script (coming soon)', 'Homebrew (coming soon)', 'apt (coming soon)']);
-  assert.deepEqual(labels('shape'), ['One machine', 'Storage node', 'Build node']);
-  assert.equal(html.match(/role="tabpanel"/g)?.length, 6 + 4 + 3);
+  assert.deepEqual(labels('install'), ['Script', 'Homebrew', 'apt', 'Tarball']);
+  assert.equal(html.match(/role="tabpanel"/g)?.length, 4);
   assert.ok(!/role="tabpanel"[^>]* hidden/.test(html));
   assert.ok(!html.includes('data-tabs='), 'a data-tabs marker reached the page');
   assert.match(html, /<script type="module" src="\/assets\/[0-9a-f]{16}\/tabs\.js"><\/script>/);
   // Each client points at the endpoint, path-style, with the documented region and bucket.
-  const text = html.replace(/<[^>]+>/g, '').replace(/&quot;/g, '"');
-  for (const needle of ['endpoint_url="http://tierstore.example:9000"', 'forcePathStyle: true', 'o.UsePathStyle = true', 'force_path_style(true)', '.forcePathStyle(true)', '--endpoint-url http://tierstore.example:9000']) {
+  const clients = readFileSync(join(dist, 'docs', 'clients', 'index.html'), 'utf8');
+  assert.deepEqual([...clients.matchAll(/<h2 id="[a-z0-9-]+">([^<]+)<\/h2>/g)].map((m) => m[1]), ['AWS CLI', 'Python (boto3)', 'JavaScript (AWS SDK v3)', 'Go (aws-sdk-go-v2)', 'Rust (aws-sdk-s3)', 'Java (AWS SDK v2)']);
+  assert.ok(!clients.includes('role="tab"'));
+  const text = clients.replace(/<[^>]+>/g, '').replace(/&quot;/g, '"');
+  for (const needle of ['endpoint_url="http://127.0.0.1:9000"', 'forcePathStyle: true', 'o.UsePathStyle = true', 'force_path_style(true)', '.forcePathStyle(true)', '--endpoint-url http://127.0.0.1:9000']) {
     assert.ok(text.includes(needle), needle);
   }
 });
 
 test('the tab script ships with the page that has tabs, and the other pages do not load it', () => {
   const dist = buildReal('tabs-scripts');
-  assert.ok(readFileSync(join(dist, 'get-started', 'index.html'), 'utf8').includes('/tabs.js"'));
+  assert.ok(readFileSync(join(dist, 'install', 'index.html'), 'utf8').includes('/tabs.js"'));
   assert.ok(!readFileSync(join(dist, 'why', 'index.html'), 'utf8').includes('/tabs.js"'));
+  assert.ok(!readFileSync(join(dist, 'docs', 'index.html'), 'utf8').includes('/tabs.js"'));
 });

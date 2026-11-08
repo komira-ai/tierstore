@@ -9,11 +9,11 @@ A storage node that is also read heavily by the machine it runs on. Writes pass 
 ```diagram
 alt: Clients read and write through tierstore. A local cache answers reads. Writes go through the cache to the hot directory, which tierstore copies to the cold remote store in the background. The hot directory removes the oldest written objects the cold store already holds.
 node clients 0 1.5 "Clients" "any S3 client"
-node tierstore 1 1.5 "tierstore" "local cache, LRU" main
+node tierstore 1 1.5 "tierstore" "LRU cache" main
 node hot 2 1 "hot dir" "fast disk" hot
 node cold 2 2 "cold store" "MinIO, RustFS" remote
 node gone 2 0 "freed" "space" ghost
-edge clients tierstore "read / write" both
+edge clients tierstore "read/write" both
 edge tierstore hot "write"
 edge tierstore cold "read" dashed
 edge hot cold "copy" dashed

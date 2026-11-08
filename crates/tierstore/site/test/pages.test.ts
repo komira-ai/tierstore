@@ -1,9 +1,11 @@
-// The home page and Get started read as a newcomer's pages: a hero with a headline, a pitch, two buttons and the picture; plain
-// words; a short install block per method; the long verification in the install guide.
+// The home page and the Install page read as a newcomer's pages: a hero with a headline, a pitch, two buttons (Install, Read the docs)
+// and the picture; an Examples band with three cards; plain words; one command block per install method, the long
+// verification under Verify.
 //
-// Catches: an install block or a row of pills back in the hero; jargon of the code (entry format, marker format, reconciler,
-// lease, water marks) in the home copy; a Get started page that repeats the verification, the release-history note or the
-// naming of <commit> that the install guide holds; a tarball command that is for one platform only; prose wider than 640px.
+// Catches: an install block or a row of pills back in the hero; the old buttons; jargon of the code (entry format, marker format,
+// reconciler, lease, water marks) in the home copy; a claim that the hot tier is an LRU; an Install page with more than one command
+// block in a tab, or a method not labelled with when it is available; a tarball command that is for one platform only; prose
+// wider than 640px.
 
 import assert from 'node:assert/strict';
 import { readFileSync } from 'node:fs';
@@ -13,47 +15,64 @@ import { assetDir, buildReal } from './support';
 
 const dist = buildReal('pages');
 const home = readFileSync(join(dist, 'index.html'), 'utf8');
-const started = readFileSync(join(dist, 'get-started', 'index.html'), 'utf8');
+const install = readFileSync(join(dist, 'install', 'index.html'), 'utf8');
 const text = (html: string): string => html.replace(/<[^>]+>/g, '').replace(/&lt;/g, '<').replace(/&gt;/g, '>').replace(/&quot;/g, '"').replace(/&amp;/g, '&');
 const hero = /<section class="hero">[\s\S]*?<\/section>/.exec(home)?.[0] ?? '';
 
-test('the hero holds a headline, one paragraph, two buttons and the picture, and no install block or pills', () => {
+test('the hero holds a headline, one paragraph, two buttons (Install, Read the docs) and the picture, and no install block or pills', () => {
   assert.equal(hero.match(/<h1\b/g)?.length, 1);
   assert.equal(hero.match(/<p class="lede/g)?.length, 1);
-  assert.deepEqual([...hero.matchAll(/<a class="(button[^"]*)"[^>]*>([^<]+)<\/a>/g)].map((m) => [m[1], m[2]]), [['button button-primary', 'Get started'], ['button', 'See a start and a drain']]);
+  assert.deepEqual([...hero.matchAll(/<a class="(button[^"]*)" href="([^"]*)">([^<]+)<\/a>/g)].map((m) => [m[1], m[2], m[3]]), [['button button-primary', '/install/', 'Install'], ['button', '/docs/', 'Read the docs']]);
   assert.ok(hero.includes('class="flow-svg"'));
   assert.doesNotMatch(hero, /install-block|class="pill"|class="tag|<commit>|&lt;commit&gt;|class="cmd/);
 });
 
-test('the home page is in plain words: none of the code\'s own terms for how a write or a drain is kept', () => {
+test('the home page is in plain words: none of the code\'s own terms for how a write or a drain is kept, and the hot tier is not called an LRU', () => {
   const words = text(home);
   for (const jargon of ['entry format', 'marker format', 'reconciler', 'lease', 'water-mark', 'water mark', 'promote', 'miss\\b', 'tombstone']) {
     assert.ok(!new RegExp(`\\b${jargon}`, 'i').test(words), `the home page says "${jargon}"`);
   }
+  // (The Examples band has a cache that is an LRU, as the cards say; the claim is about the rest of the page.)
+  const rest = text(home.replace(/<section class="band" id="examples">[\s\S]*?<\/section>/, ''));
+  assert.doesNotMatch(rest, /\bLRU\b|least recently/i, 'the hot tier evicts the oldest written, it is not an LRU');
   assert.match(words, /a build node, file only/);
+  assert.match(words, /written longest ago/);
 });
 
-test('Get started is short: install tabs, configure, run, clients, and a link to the install guide for the checks', () => {
-  assert.deepEqual([...started.matchAll(/<h2 id="([a-z-]+)"/g)].map((m) => m[1]), ['install', 'configure', 'run', 'clients']);
-  assert.doesNotMatch(started, /id="planned"|id="release-files"|Where the code lives|full 40-hex|sigstore|SHA256SUMS/);
-  assert.match(started, /<a href="\/docs\/install\/#verify">Verify the download<\/a>/);
+test('the Examples band of the home page has three cards, each a link to its example with its picture', () => {
+  const band = /<section class="band" id="examples">[\s\S]*?<\/section>/.exec(home)?.[0] ?? '';
+  const cards = [...band.matchAll(/<li class="card"><a href="([^"]+)">([\s\S]*?)<\/a><\/li>/g)];
+  assert.deepEqual(cards.map((c) => c[1]), ['/docs/examples/directory-as-bucket/', '/docs/examples/cache-in-front-of-s3/', '/docs/examples/cache-hot-cold/']);
+  for (const c of cards) assert.ok(c[2].includes('<svg class="diagram-svg"') && /<h3>[^<]+<\/h3>/.test(c[2]), c[1]);
+  assert.ok(!home.includes('{{example-cards}}'), 'the placeholder reached the page');
 });
 
-test('the tarball block takes the platform of the machine it runs on: Linux or macOS, x86_64 or arm64', () => {
-  const block = /<div class="code"><pre class="hl">([\s\S]*?)<\/pre>/.exec(started)?.[1] ?? '';
-  const cmd = text(block);
+test('Install is short: four tabs with one command block each, Next, then Verify; no client snippets, no configuration', () => {
+  assert.deepEqual([...install.matchAll(/<h2 id="([a-z-]+)"/g)].map((m) => m[1]), ['verify']);
+  const panels = [...install.matchAll(/<div class="tab-panel"[^>]*>([\s\S]*?)\n<\/div>\n(?=<div class="tab-panel"|<\/div>)/g)];
+  assert.equal(panels.length, 4);
+  for (const p of panels) assert.equal(p[1].match(/<div class="code">/g)?.length, 1, 'one command block in a tab');
+  assert.doesNotMatch(install, /\[\[interface\]\]|aws-sdk|boto3|forcePathStyle/);
+});
+
+test('every install method that is not in a release yet says so next to its command, and the tarball says it works today', () => {
+  const t = text(install);
+  const label = (needle: string): string => { const at = t.indexOf(needle); assert.ok(at > 0, needle); return t.slice(Math.max(0, at - 700), at); };
+  for (const cmd of ['curl -fsSL https://tierstore.dev/install.sh | sh', 'brew install komira-ai/tap/tierstore', 'sudo apt install tierstore']) {
+    assert.match(label(cmd), /From the next release/, cmd);
+  }
+  assert.match(label('gh release download'), /Works today/);
+  assert.match(t, /Signed-By: \/usr\/share\/keyrings\/komira-archive-keyring\.gpg/);
+  assert.match(t, /https:\/\/packages\.komira\.ai\/apt\/komira-archive-keyring\.gpg/);
+});
+
+test('the tarball block takes the platform of the machine it runs on: Linux or macOS, x86_64 or arm64, with its bundle and SHA256SUMS', () => {
+  const all = text(install);
+  const cmd = all.slice(all.indexOf('os=$(uname'), all.indexOf('./tierstore --version') + 30);
   assert.match(cmd, /uname -s \| sed 's\/Darwin\/macos\/; s\/Linux\/linux\/'/);
   assert.match(cmd, /uname -m \| sed 's\/aarch64\/arm64\/'/);
-  assert.match(cmd, /--pattern "tierstore-\*-\$os-\$arch\.tar\.gz"/);
+  assert.match(cmd, /--pattern "tierstore-\*-\$os-\$arch\.tar\.gz\*" --pattern SHA256SUMS/);
   assert.match(cmd, /\.\/tierstore --version/);
-});
-
-test('every planned install method is marked coming soon next to its one command', () => {
-  for (const cmd of ['curl -fsSL https://tierstore.dev/install.sh | sh', 'brew install komira-ai/tap/tierstore', 'sudo apt install tierstore']) {
-    const at = text(started).indexOf(cmd);
-    assert.ok(at > 0, cmd);
-    assert.match(text(started).slice(Math.max(0, at - 260), at), /Coming soon/, cmd);
-  }
 });
 
 test('prose is 640px wide (40rem) and the page is 70rem', () => {

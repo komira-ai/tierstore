@@ -3,6 +3,7 @@
 //   dist/index.html, 404.html, <route>/index.html   the pages (pages.ts), around the copy in content/ (layout.ts)
 //   dist/docs/<name>.md, docs/examples/<name>.md    the Markdown each docs page is made from (llms.ts), for programs
 //   dist/llms.txt, llms-full.txt                    the docs as a list of links and as one file (llms.ts)
+//   dist/install.sh                                 the install script, static/install.sh byte for byte (INSTALL_SCRIPT)
 //   dist/assets/<id>/                               the browser modules (build/browser, from tsc), the recorded data
 //                                                   as modules (data/<name>.js, from content/data/<name>.json) and
 //                                                   the stylesheets of static/
@@ -14,7 +15,7 @@
 import { createHash } from 'crypto';
 import { existsSync, mkdirSync, readFileSync, readdirSync, rmSync, writeFileSync } from 'fs';
 import { dirname, join, resolve } from 'path';
-import { checkDist, importsOf, listFiles } from './check-dist';
+import { checkDist, importsOf, INSTALL_SCRIPT, listFiles } from './check-dist';
 import { renderPage, STYLESHEETS } from './layout';
 import { docsPages, exampleCards, loadDocs, rawMarkdown } from './docs';
 import { llmsFull, llmsTxt, rawPath } from './llms';
@@ -116,6 +117,7 @@ export function buildSite(opts: BuildOptions): { id: string; files: string[] } {
   for (const d of docs) write(join(opts.outDir, rawPath(d.stem)), rawMarkdown(d));
   write(join(opts.outDir, 'llms.txt'), llmsTxt(docs));
   write(join(opts.outDir, 'llms-full.txt'), llmsFull(docs));
+  write(join(opts.outDir, INSTALL_SCRIPT), readFileSync(join(opts.staticDir, INSTALL_SCRIPT)));
 
   if (opts.check !== false) checkDist(opts.outDir);
   return { id, files: listFiles(opts.outDir) };

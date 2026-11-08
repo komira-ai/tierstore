@@ -15,7 +15,7 @@ const SIGNER = 'komira-ai/tierstore/.github/workflows/artifacts.yml';
 const VERIFY_FLAGS = ['--repo komira-ai/tierstore', `--signer-workflow ${SIGNER}`, '--source-ref refs/heads/main', '--source-digest <commit>', '--deny-self-hosted-runners'];
 
 const pages: Array<[string, string]> = [
-  ['site get-started page', read(SITE, 'content', 'get-started.html')],
+  ['site install page', read(SITE, 'content', 'install.html')],
   ['site home page', read(SITE, 'content', 'index.html')],
   ['install guide', read(DOCS, 'install.md')],
   ['repository README', read(REPO, 'README.md')],
@@ -31,11 +31,10 @@ test('the release document gives the verify command with the flags of the instal
   for (const flag of VERIFY_FLAGS) assert.ok(doc.includes(flag), `docs/ci-and-release.md lacks ${flag}`);
 });
 
-test('the install guide gives the verify command with this repository as signer, and the Get started page links to it instead of repeating it', () => {
+test('the install page and the install guide give the verify command with this repository as signer, and the install page links to the guide for the service', () => {
   const started = pages[0][1];
-  assert.match(started, /href="\/docs\/install\/#verify"[^>]*>Verify the download</);
-  assert.doesNotMatch(started, /gh attestation|cosign|sha256sum/, 'the verification lives in the install guide alone');
-  for (const [name, text] of pages.slice(2, 3)) {
+  assert.match(started, /href="\/docs\/install\/">install guide</);
+  for (const [name, text] of [pages[0], pages[2]]) {
     for (const flag of VERIFY_FLAGS) assert.ok(text.replace(/&lt;/g, '<').replace(/&gt;/g, '>').includes(flag), `${name} lacks ${flag}`);
     assert.match(text, /gh attestation verify/, `${name} lacks the command`);
   }
@@ -66,7 +65,7 @@ test('the install guide says versions up to 0.2.0 were built in another reposito
 /** GitHub Actions' OIDC issuer, which signs the certificate of every attestation (xtask's bundles::ISSUER). */
 const ISSUER = 'https://token.actions.githubusercontent.com';
 
-const INSTALL: Array<[string, string]> = [pages[2]];
+const INSTALL: Array<[string, string]> = [pages[0], pages[2]];
 const RELEASE_DOC = read(REPO, 'docs', 'ci-and-release.md');
 
 /** The command lines of a page: markup out, entities decoded, continued lines joined, a leading `$ ` prompt dropped. */
@@ -157,7 +156,7 @@ test('the offline gh check of the install page and the install guide takes the b
 test('every document of the repository that the install pages, the packaging notes and the site scan name exists', () => {
   const files: Array<[string, string]> = [
     ['crates/tierstore/docs/install.md', DOCS],
-    [`${SITE_REL}/content/get-started.html`, SITE],
+    [`${SITE_REL}/content/install.html`, SITE],
     ['packaging/README.md', `${REPO}/packaging`],
     ['packaging/tierstore.service', `${REPO}/packaging`],
     [`${SITE_REL}/test/hygiene.test.ts`, SITE],
@@ -182,8 +181,7 @@ test('every document of the repository that the install pages, the packaging not
 // packaging/tierstore and packaging/tierstore/README.md, which never existed).
 test('every packaging path the install and demo pages name exists in the repository', () => {
   let named = 0;
-  for (const page of ['get-started.html', 'demo.html']) {
-    const file = `${SITE_REL}/content/${page}`;
+  for (const file of [`${SITE_REL}/content/demo.html`, 'crates/tierstore/docs/clients.md']) {
     const paths = [...read(REPO, file).matchAll(/(?<![\w/.-])packaging(?:\/[A-Za-z0-9@._-]+)*/g)].map((m) => m[0]);
     for (const p of paths) assert.ok(existsSync(join(REPO, p)), `${file} names ${p}, which does not exist`);
     named += paths.length;

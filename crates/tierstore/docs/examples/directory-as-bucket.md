@@ -13,7 +13,7 @@ node tierstore 1 1.5 "tierstore" "one S3 endpoint" main
 node hot 2 1 "hot dir" "fast disk" hot
 node cold 2 2 "cold dir" "big disk"
 node gone 2 0 "freed" "space" ghost
-edge clients tierstore "read / write" both
+edge clients tierstore "read/write" both
 edge tierstore hot "write"
 edge tierstore cold "read" dashed
 edge hot cold "copy" dashed

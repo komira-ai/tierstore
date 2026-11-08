@@ -35,17 +35,19 @@ test('the manifest sees a one byte change in a page and a missing file (the chec
   assert.notEqual(manifestOf(missing, stems), clean);
 });
 
-test('the manifest ignores the pages rendered from the guide and sees every hand-made page, the docs index included', () => {
+test('the manifest ignores the files made from the guide and sees every hand-made page', () => {
   const dist = buildReal('golden-g');
   const clean = manifestOf(dist, stems);
   const guide = copyTree(dist, 'golden-h');
-  for (const stem of stems) plant(guide, join('docs', stem, 'index.html'), '<h1', '<h2');
+  for (const stem of stems) plant(guide, stem === 'index' ? 'docs/index.html' : join('docs', stem, 'index.html'), '<h1', '<h2');
+  for (const file of ['llms.txt', 'llms-full.txt', 'docs/overview.md', 'docs/examples/cache-hot-cold.md']) plant(guide, file, /^/, 'planted\n');
   assert.equal(manifestOf(guide, stems), clean, 'a change to a page rendered from the guide must not change the manifest (docs.test.ts holds those pages)');
-  for (const page of ['index.html', 'get-started/index.html', 'why/index.html', 'demo/index.html', '404.html', 'docs/index.html']) {
+  for (const page of ['index.html', 'install/index.html', 'get-started/index.html', 'why/index.html', 'demo/index.html', '404.html']) {
     const changed = copyTree(dist, 'golden-i');
     plant(changed, page, /<(h1|main)/, '<$1 data-planted');
     assert.notEqual(manifestOf(changed, stems), clean, `a change to ${page} must change the manifest`);
   }
-  assert.ok(golden.includes('  docs/index.html'), 'the committed manifest lacks the docs index');
-  assert.ok(!stems.some((s) => golden.includes(`  docs/${s}/index.html`)), 'the committed manifest lists a page rendered from the guide');
+  assert.ok(golden.includes('  install/index.html'), 'the committed manifest lacks the install page');
+  assert.ok(!stems.some((s) => golden.includes(`  docs/${s}/index.html`) || golden.includes(`  docs/${s}.md`)), 'the committed manifest lists a file made from the guide');
+  assert.ok(!golden.includes('  docs/index.html') && !golden.includes('  llms'), 'the committed manifest lists the docs landing page or an llms file');
 });
