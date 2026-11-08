@@ -88,8 +88,10 @@ pub fn notes(repo: &str, tag: &str, commit: &str, run_id: u64, extra: &[String])
          --signer-workflow {repo}/.github/workflows/artifacts.yml \\\n  \
          --source-ref refs/heads/main --source-digest {commit} \
          --deny-self-hosted-runners\n```\n\n\
-         `{SUMS}` lists the SHA-256 of every file; each tarball and each hostkeeper package \
-         (`tierstore-<version>-<platform>.tar.zst`) also has its provenance bundle \
+         `{SUMS}` lists the SHA-256 of every file; each tarball (the commit-named ones and the \
+         `tierstore-<version>-<target>.tar.gz` ones the Homebrew tap downloads), each hostkeeper \
+         package (`tierstore-<version>-<platform>.tar.zst`) and each Debian package \
+         (`tierstore_<version>_<arch>.deb`) also has its provenance bundle \
          (`<file>.sigstore.json`) for an offline check with `--bundle`, and `index.json` is the \
          release index of the hostkeeper packages.\n"
     ));

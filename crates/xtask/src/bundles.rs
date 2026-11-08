@@ -53,10 +53,11 @@ pub fn is_bundle(name: &str) -> bool {
     name.ends_with(SUFFIX)
 }
 
-/// Whether the asset `name` has a provenance bundle: a tarball or a hostkeeper package, but not
-/// an SBOM or the release index, which are subjects of the sums' attestation only.
+/// Whether the asset `name` has a provenance bundle: a tarball, a hostkeeper package or a Debian
+/// package, but not an SBOM or the release index, which are subjects of the sums' attestation
+/// only.
 pub fn needs_bundle(name: &str) -> bool {
-    name.ends_with(".tar.gz") || name.ends_with(".tar.zst")
+    name.ends_with(".tar.gz") || name.ends_with(".tar.zst") || name.ends_with(".deb")
 }
 
 /// `commit` with its last hex digit changed: a commit the bundle was not made for.

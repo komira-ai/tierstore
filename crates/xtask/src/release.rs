@@ -16,10 +16,12 @@
 //!   appends it to `--output` (on Actions, `GITHUB_OUTPUT`). So a commit that failed its tests
 //!   is never released, though the signing does not wait for them.
 //! - `release check <dir> --commit <sha>` ([`check`]): `<dir>` passes `verify-assets sums`,
-//!   `SHA256SUMS` lists exactly the assets of that commit ([`expected_assets`] and
-//!   [`hostkeeper_assets`] of the one version of its hostkeeper packages) and no other,
-//!   and each tarball and package has exactly one provenance bundle whose one subject is
-//!   that file's digest ([`crate::bundles`]), and no bundle is there for anything else.
+//!   `SHA256SUMS` lists exactly the assets of that commit ([`expected_assets`],
+//!   [`hostkeeper_assets`] of the one version of its hostkeeper packages, and
+//!   [`distribution_assets`] of the release version that version names) and no other,
+//!   and each tarball, package and Debian package has exactly one provenance bundle whose one
+//!   subject is that file's digest ([`crate::bundles`]), and no bundle is there for anything
+//!   else.
 //! - `release publish <dir> --repo <owner/repo> --tag <tag> --commit <sha> --run-id <id>
 //!   --notes-file <file> [--note <text>]... [--gh <program>]` ([`publish`]): `check`, then
 //!   creates release `<tag>` at `<sha>` as a draft with every file of `<dir>`, reads the
@@ -34,11 +36,16 @@
 //! `verify-assets hostkeeper-package` and `verify-assets hostkeeper-index`
 //! ([`hostkeeper_verify`]) check them as a host does. See those modules.
 //!
+//! And the files the distribution channels take: `release tap-tarball` ([`tap_tarball`]) names a
+//! platform's tarball as the Homebrew tap's formula downloads it, `tierstore-<version>-<target>.tar.gz`,
+//! and `release deb` ([`deb`]) builds `tierstore_<version>_<arch>.deb` of a Linux binary.
+//!
 //! After a release, by hand: `release desired` ([`desired`]) reads the release index of a published
 //! release and gives the version and digest `.github/workflows/hostkeeper-desired.yml` sets on the
 //! hostkeeper coordinator, or refuses a release whose index lacks a platform.
 
 mod binary;
+pub mod deb;
 pub mod desired;
 pub mod hostkeeper_index;
 pub mod hostkeeper_package;
@@ -46,6 +53,7 @@ pub mod hostkeeper_verify;
 mod plan;
 mod publish;
 mod set_version;
+pub mod tap_tarball;
 
 pub use binary::{check_binary, check_built, check_said};
 pub use plan::{
@@ -115,6 +123,23 @@ pub fn hostkeeper_assets(version: &str) -> Vec<String> {
     names
 }
 
+/// The files `SHA256SUMS` lists for the release `version` (`<major>.<minor>.<patch>`) besides
+/// the commit-named tarballs and the hostkeeper packages, sorted: the tap tarball of each
+/// platform ([`tap_tarball`]) and the Debian package of each Linux platform ([`deb`]).
+pub fn distribution_assets(version: &str) -> Vec<String> {
+    let mut names: Vec<String> = Platform::ALL
+        .iter()
+        .map(|p| tap_tarball::file_name(version, *p))
+        .collect();
+    for platform in Platform::ALL {
+        if let Some(architecture) = deb::architecture(platform) {
+            names.push(deb::file_name(version, architecture));
+        }
+    }
+    names.sort();
+    names
+}
+
 /// The one version of the hostkeeper packages of `commit` that `listed` names (by their names,
 /// `tierstore-<version>-<platform>.tar.zst`, the version ending `+<the first 12 digits>`), or
 /// the problem.
@@ -148,7 +173,12 @@ pub fn check(dir: &Path, commit: &str) -> Result<Vec<String>, Error> {
     let listed: Vec<&str> = lines.iter().map(|l| l.name.as_str()).collect();
     let mut expected = expected_assets(commit);
     match package_version(&listed, commit) {
-        Ok(version) => expected.extend(hostkeeper_assets(&version)),
+        Ok(version) => {
+            expected.extend(hostkeeper_assets(&version));
+            // `X.Y.Z+<12 hex>`: the release's version is what is before the `+`.
+            let release = version.split_once('+').map_or(&version[..], |(v, _)| v);
+            expected.extend(distribution_assets(release));
+        }
         Err(problem) => problems.push(problem),
     }
     for name in &expected {

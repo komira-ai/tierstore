@@ -6,8 +6,11 @@ frees the hot tier when it fills. It is a release asset for Linux (x86_64, arm64
 silicon), as a tarball with its SBOM and its provenance bundle, and as a hostkeeper package of each
 of those platforms with its provenance bundle and one release index, `index.json`
 (`docs/ci-and-release.md`; `cargo xtask release hostkeeper-package` builds the package from
-`hostkeeper/`, see its README); no system package and no container image is released. These files,
-for Linux hosts, go beside the binary.
+`hostkeeper/`, see its README), and as a Debian package for the two Linux platforms
+(`tierstore_<version>_<arch>.deb`, built by `cargo xtask release deb` from the unit, the sysusers
+entry and the example configuration below: it places them as "Placing the unit" does, except the
+unit at `/usr/lib/systemd/system`); no container image is released. These files, for Linux hosts, go
+beside the binary.
 
 | file | what |
 |---|---|

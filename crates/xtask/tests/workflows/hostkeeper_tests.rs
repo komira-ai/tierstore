@@ -182,7 +182,7 @@ const INDEX_DEFECTS: &[(&str, &str, &str, &str)] = &[
     ),
     (
         "attest",
-        "    needs: [sums]\n",
+        "    needs: [version, sums]\n",
         "    needs: [version]\n",
         "attest: does not need sums",
     ),

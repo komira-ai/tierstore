@@ -2855,6 +2855,7 @@ dependencies = [
  "hostkeeper-placed",
  "hostkeeper-unpack",
  "lzma-rs",
+ "md-5 0.11.0",
  "roxmltree",
  "rustls",
  "rustls-native-certs",

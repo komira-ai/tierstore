@@ -36,6 +36,11 @@ fn package_name(platform: &str) -> String {
     format!("tierstore-{VERSION}-{platform}.tar.zst")
 }
 
+/// The file name of the Debian package of `architecture`.
+fn deb_name(architecture: &str) -> String {
+    format!("tierstore_0.4.0_{architecture}.deb")
+}
+
 fn sha(bytes: &[u8]) -> String {
     hex::encode(Sha256::digest(bytes))
 }
@@ -141,6 +146,51 @@ impl Release {
                     sha(own.as_bytes())
                 ));
             }
+        }
+        std::fs::write(release.dir.join("SHA256SUMS"), sums).expect("sums");
+        release
+    }
+
+    /// The good release that also holds what the distribution channels download: for each
+    /// platform the tap-named tarball, a copy of the platform's commit-named tarball (so with
+    /// its digest, its SBOM attestation and its bundle), and for each Linux platform a Debian
+    /// package with its own bundle (provenance online, and the bundle bound to the commit; no
+    /// SBOM), all listed in the sums.
+    fn with_distribution(name: &str) -> Release {
+        let mut release = Release::good(name);
+        let mut sums = std::fs::read_to_string(release.dir.join("SHA256SUMS")).expect("sums");
+        let tap = |platform: &str| match platform {
+            "linux-arm64" => "linux-aarch64".to_owned(),
+            other => other.to_owned(),
+        };
+        for platform in PLATFORMS {
+            let source = format!("tierstore-{COMMIT}-{platform}.tar.gz");
+            let copy = format!("tierstore-0.4.0-{}.tar.gz", tap(platform));
+            let bytes = std::fs::read(release.dir.join(&source)).expect("source");
+            std::fs::write(release.dir.join(&copy), &bytes).expect("copy");
+            std::fs::copy(
+                release.dir.join(format!("{source}.sigstore.json")),
+                release.dir.join(format!("{copy}.sigstore.json")),
+            )
+            .expect("bundle");
+            sums.push_str(&format!("{}  {copy}\n", sha(&bytes)));
+        }
+        for architecture in ["amd64", "arm64"] {
+            let file = deb_name(architecture);
+            let bytes = format!("deb of {architecture}").into_bytes();
+            let digest = sha(&bytes);
+            std::fs::write(release.dir.join(&file), &bytes).expect("file");
+            sums.push_str(&format!("{digest}  {file}\n"));
+            release
+                .ledger
+                .push(format!("{digest}|{SIGNER}|{PROVENANCE}|-|-"));
+            let own = bundle(&digest);
+            std::fs::write(release.dir.join(format!("{file}.sigstore.json")), &own)
+                .expect("bundle");
+            release.ledger.push(format!(
+                "{digest}|{SIGNER}|{PROVENANCE}|{}|{COMMIT}",
+                sha(own.as_bytes())
+            ));
         }
         std::fs::write(release.dir.join("SHA256SUMS"), sums).expect("sums");
         release
@@ -513,7 +563,7 @@ fn a_sums_file_that_lists_neither_a_tarball_nor_an_sbom_is_refused() {
     let failed = failure(release.verify());
     assert!(
         failed.contains(
-            "SHA256SUMS lists NOTES, which is neither a tarball, an SBOM, a hostkeeper package nor the release index"
+            "SHA256SUMS lists NOTES, which is neither a tarball, an SBOM, a hostkeeper package, a Debian package nor the release index"
         ),
         "{failed}"
     );
@@ -611,6 +661,68 @@ fn a_bundle_file_for_the_release_index_is_refused_as_the_bundle_of_nothing_liste
     assert!(
         failure(release.verify())
             .contains("index.json.sigstore.json: not the bundle of a listed tarball")
+    );
+}
+
+#[test]
+fn a_release_with_tap_tarballs_and_debian_packages_verifies_each_as_its_own_subject() {
+    // Catches: a Debian package refused as an unknown kind, one passing without its provenance
+    // or bundle, and a tap tarball skipping the checks every tarball gets (provenance, SBOM
+    // and its own bundle).
+    let release = Release::with_distribution("distribution-good");
+    let printed = release.verify().expect("verify");
+    for architecture in ["amd64", "arm64"] {
+        let line = format!("verified: {} (provenance, bundle)", deb_name(architecture));
+        assert!(printed.contains(&line), "{printed:?}");
+    }
+    for target in ["linux-aarch64", "linux-x86_64", "macos-arm64"] {
+        let line = format!("verified: tierstore-0.4.0-{target}.tar.gz (provenance, SBOM, bundle)");
+        assert!(printed.contains(&line), "{printed:?}");
+    }
+    assert_eq!(printed.len(), 6 + 5 + 1, "{printed:?}");
+}
+
+#[test]
+fn a_debian_package_without_its_bundle_or_provenance_or_signed_by_another_workflow_is_refused() {
+    // Catches: a Debian package listed in the sums that nothing verifies, because only tarballs
+    // and hostkeeper packages were taken for subjects.
+    let good = Release::with_distribution("distribution-deb");
+    let name = deb_name("arm64");
+    let digest = good.digest_of(&name);
+
+    let mut no_bundle = Release::with_distribution("distribution-deb-no-bundle");
+    no_bundle.ledger.clear();
+    std::fs::remove_file(no_bundle.dir.join(format!("{name}.sigstore.json"))).expect("rm");
+    assert_eq!(
+        failure(no_bundle.verify()),
+        format!("{name}: no provenance bundle {name}.sigstore.json")
+    );
+
+    let failed = failure(
+        good.filtered(|l| !(l.starts_with(&digest) && l.ends_with("|-|-")))
+            .verify(),
+    );
+    assert!(
+        failed.contains("no build provenance attestation signed by"),
+        "{failed}"
+    );
+
+    let other = "example/tierstore/.github/workflows/ci.yml";
+    let failed = failure(
+        good.changed(|l| {
+            if l.starts_with(&digest) && l.ends_with(COMMIT) {
+                l.replace(SIGNER, other)
+            } else {
+                l.to_owned()
+            }
+        })
+        .verify(),
+    );
+    assert!(
+        failed.contains(&format!(
+            "{name}: its bundle {name}.sigstore.json does not verify"
+        )),
+        "{failed}"
     );
 }
 

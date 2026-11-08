@@ -16,8 +16,9 @@
 //!   [`build_commands`] in that order (the build, the SBOM, the check of the built binary, the
 //!   resolution of the build's crates, the third-party licence notice, the package, the unpack of
 //!   the tarball with the runner's own `tar` and the check of the binary unpacked from it, the
-//!   hostkeeper package of the binary and its unpack with hostkeeper's rules, and on macOS the
-//!   check of the unpacked binary's code signature), it uses an action other than checkout, a cache restore that restores
+//!   hostkeeper package of the binary and its unpack with hostkeeper's rules, the copy of the
+//!   tarball under the name the Homebrew tap downloads it by, on Linux the Debian package and the
+//!   reads of it by `dpkg-deb`, and on macOS the check of the unpacked binary's code signature), it uses an action other than checkout, a cache restore that restores
 //!   nothing on a push (`lookup-only`), a cache save and the upload, or it uploads another
 //!   artifact than `assets-<platform>` from `dist/`;
 //! - the cargo-cyclonedx checksum a build job names is not 64 lowercase hex digits in the file's
@@ -32,7 +33,8 @@
 //! - `attest` lacks, for any platform, the SBOM attestation of its tarball, the provenance
 //!   attestation of its tarball alone, or the copy of that attestation's bundle under the
 //!   tarball's name, or the same two for its hostkeeper package (named by the sums job's
-//!   `package-version` output); uses an action other than the download, the two attest actions and the
+//!   `package-version` output), for its tap tarball and, on Linux, for its Debian package (both
+//!   named by the `version` job's output); uses an action other than the download, the two attest actions and the
 //!   upload; runs a command other than [`attest_commands`] (nothing built in this repository runs
 //!   while it holds `id-token: write`); runs on another runner than ubuntu; or does not upload the
 //!   bundles as `bundles`;
@@ -56,7 +58,9 @@ use super::yaml::{self, Node, Value};
 /// A platform's build job: its runner (GitHub-hosted, of the platform's own OS and architecture,
 /// so the binary runs where it is built), its Rust target, the variable of the file's `env` that
 /// pins the SHA-256 of its cargo-cyclonedx, the `if:` of the job (none: it runs for every event),
-/// and whether it runs the tests (the platform whose tests no pull-request check runs).
+/// whether it runs the tests (the platform whose tests no pull-request check runs), the target
+/// the Homebrew tap's formula names the platform's tarball by (`tap`, the last part of
+/// `tierstore-<version>-<tap>.tar.gz`), and the Debian architecture of its package, if it has one.
 pub struct Build {
     pub platform: &'static str,
     pub runner: &'static str,
@@ -64,6 +68,8 @@ pub struct Build {
     pub pin: &'static str,
     pub job_if: Option<&'static str>,
     pub tests: bool,
+    pub tap: &'static str,
+    pub deb: Option<&'static str>,
 }
 
 /// The `if:` of a job on a macOS runner in a workflow a pull request starts: never for a pull
@@ -91,6 +97,8 @@ pub const BUILDS: &[Build] = &[
         pin: "CYCLONEDX_SHA256_X86_64_LINUX",
         job_if: None,
         tests: false,
+        tap: "linux-x86_64",
+        deb: Some("amd64"),
     },
     Build {
         platform: "linux-arm64",
@@ -99,6 +107,8 @@ pub const BUILDS: &[Build] = &[
         pin: "CYCLONEDX_SHA256_AARCH64_LINUX",
         job_if: None,
         tests: false,
+        tap: "linux-aarch64",
+        deb: Some("arm64"),
     },
     Build {
         platform: "macos-arm64",
@@ -107,6 +117,8 @@ pub const BUILDS: &[Build] = &[
         pin: "CYCLONEDX_SHA256_AARCH64_MACOS",
         job_if: Some(NOT_FOR_A_PULL_REQUEST),
         tests: true,
+        tap: "macos-arm64",
+        deb: None,
     },
 ];
 
@@ -159,7 +171,18 @@ pub fn build_commands(b: &Build) -> Vec<String> {
         format!(
             "cargo xtask verify-assets hostkeeper-package dist --version \"{PACKAGE_VERSION}\" --platform {platform} --scratch \"$RUNNER_TEMP/hostkeeper\""
         ),
+        format!(
+            "cargo xtask release tap-tarball dist --commit \"$GITHUB_SHA\" --version \"$RELEASE_VERSION\" --platform {platform}"
+        ),
     ];
+    if let Some(architecture) = b.deb {
+        let file = deb_file("${RELEASE_VERSION}", architecture);
+        commands.push(format!(
+            "cargo xtask release deb --binary \"target/$TARGET/release/tierstore\" --version \"$RELEASE_VERSION\" --platform {platform} --licenses \"$RUNNER_TEMP/THIRD-PARTY-LICENSES.txt\" --out dist"
+        ));
+        commands.push(format!("dpkg-deb --info \"dist/{file}\""));
+        commands.push(format!("dpkg-deb --contents \"dist/{file}\""));
+    }
     if b.tests {
         commands.insert(3, MAC_TESTS.to_owned());
     }
@@ -169,9 +192,35 @@ pub fn build_commands(b: &Build) -> Vec<String> {
     commands
 }
 
+/// The file name of the Debian package of `version` (a literal, or a variable as a shell or an
+/// expression writes it) for `architecture`.
+pub fn deb_file(version: &str, architecture: &str) -> String {
+    format!("tierstore_{version}_{architecture}.deb")
+}
+
+/// The copy of the bundle of the tap tarball of the platform whose tap target is `tap` under the
+/// tarball's name.
+pub fn tap_copy(tap: &str) -> String {
+    format!("cp \"$BUNDLE\" \"dist/tierstore-${{RELEASE_VERSION}}-{tap}.tar.gz.sigstore.json\"")
+}
+
+/// The copy of the bundle of the Debian package of `architecture` under the package's name.
+pub fn deb_copy(architecture: &str) -> String {
+    format!(
+        "cp \"$BUNDLE\" \"dist/{}.sigstore.json\"",
+        deb_file("${RELEASE_VERSION}", architecture)
+    )
+}
+
+/// The build of `platform`, if it is one of [`BUILDS`].
+fn build_of(platform: &str) -> Option<&'static Build> {
+    BUILDS.iter().find(|b| b.platform == platform)
+}
+
 /// The `run:` commands of `attest` for `platforms`, in order: the two checks of the sums, then
 /// the copy of each platform's bundle, then the copy of each platform's hostkeeper package's
-/// bundle.
+/// bundle, then the copy of each platform's tap tarball's bundle, then the copy of each Linux
+/// platform's Debian package's bundle.
 pub fn attest_commands(platforms: &[&str]) -> Vec<String> {
     let mut commands = vec![
         "/usr/bin/sha256sum --check --strict <<< \"$SUMS_SHA256  dist/SHA256SUMS\"".to_owned(),
@@ -184,6 +233,12 @@ pub fn attest_commands(platforms: &[&str]) -> Vec<String> {
     }
     for platform in platforms {
         commands.push(package_copy(platform));
+    }
+    for build in platforms.iter().filter_map(|p| build_of(p)) {
+        commands.push(tap_copy(build.tap));
+    }
+    for build in platforms.iter().filter_map(|p| build_of(p)) {
+        commands.extend(build.deb.map(deb_copy));
     }
     commands
 }
@@ -602,6 +657,10 @@ pub fn artifacts_platform_problems(
 /// One line per way `attest` does not sign every one of `platforms`, or does more than sign.
 fn attest_problems(attest: Option<&Node>, platforms: &[&str]) -> Vec<String> {
     let mut problems = Vec::new();
+    // The tap tarballs and Debian packages are named by the `version` job's output.
+    if !names(attest.and_then(|j| entry(j, "needs"))).contains(&"version".to_owned()) {
+        problems.push("attest: does not need version".to_owned());
+    }
     let sbom_steps = using(attest, "actions/attest-sbom@");
     let provenance_steps = using(attest, "actions/attest-build-provenance@");
     for platform in platforms {
@@ -641,6 +700,11 @@ fn attest_problems(attest: Option<&Node>, platforms: &[&str]) -> Vec<String> {
             ));
         }
         problems.extend(package_attest_problems(attest, &provenance_steps, platform));
+        problems.extend(distribution_attest_problems(
+            attest,
+            &provenance_steps,
+            platform,
+        ));
     }
     problems.extend(action_problems(
         "attest",
@@ -706,6 +770,63 @@ fn package_attest_problems(
         problems.push(format!(
             "attest: the bundle of the hostkeeper package of {platform} is not copied as `{copy}` from {output} with PACKAGE_VERSION {PACKAGE_VERSION_OUTPUT}"
         ));
+    }
+    problems
+}
+
+/// The version of the release as the attest job reads it: the `version` job's output, which the
+/// build jobs gave the binary and named the tap tarballs and Debian packages by.
+pub const VERSION_OUTPUT: &str = "${{ needs.version.outputs.version }}";
+
+/// One line per way `attest` does not sign the tap tarball of `platform` and, on Linux, its Debian
+/// package, each as its own subject, by the name the `version` job's output gives it, and copy
+/// that attestation's bundle under the file's name.
+fn distribution_attest_problems(
+    attest: Option<&Node>,
+    provenance_steps: &[&Node],
+    platform: &str,
+) -> Vec<String> {
+    let Some(build) = build_of(platform) else {
+        return Vec::new();
+    };
+    // (the kind in the step's id, the id's last part, the subject, the copy of the bundle)
+    let mut files = vec![(
+        "tap",
+        build.tap.to_owned(),
+        format!("dist/tierstore-{VERSION_OUTPUT}-{}.tar.gz", build.tap),
+        tap_copy(build.tap),
+    )];
+    if let Some(architecture) = build.deb {
+        files.push((
+            "deb",
+            architecture.to_owned(),
+            format!("dist/{}", deb_file(VERSION_OUTPUT, architecture)),
+            deb_copy(architecture),
+        ));
+    }
+    let mut problems = Vec::new();
+    for (kind, name, subject, copy) in files {
+        let id = format!("provenance-{kind}-{name}");
+        let own = provenance_steps.iter().any(|s| {
+            at(s, &["id"]) == Some(id.as_str())
+                && at(s, &["with", "subject-path"]) == Some(subject.as_str())
+        });
+        if !own {
+            problems.push(format!(
+                "attest: no provenance attestation `{id}` of {subject} alone"
+            ));
+        }
+        let output = format!("${{{{ steps.{id}.outputs.bundle-path }}}}");
+        let copied = steps(attest).iter().any(|s| {
+            at(s, &["env", "BUNDLE"]) == Some(output.as_str())
+                && at(s, &["env", "RELEASE_VERSION"]) == Some(VERSION_OUTPUT)
+                && at(s, &["run"]).is_some_and(|r| r.trim_end() == copy)
+        });
+        if !copied {
+            problems.push(format!(
+                "attest: the bundle of `{id}` is not copied as `{copy}` from {output} with RELEASE_VERSION {VERSION_OUTPUT}"
+            ));
+        }
     }
     problems
 }
