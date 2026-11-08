@@ -8,7 +8,7 @@
 | `advisories.yml` | daily, push to `main` | `cargo deny check advisories`; the result is kept in one issue, and the run is green whatever it finds. |
 | `artifacts.yml` | pull request, push to `main`; by hand | builds `tierstore` (`--features server`) for linux-x86_64, linux-arm64 and macos-arm64, each on a GitHub-hosted runner of its platform, packages it with its SBOM and as a hostkeeper package (and, for the Homebrew tap and apt, as a tap-named tarball and, on Linux, a Debian package), writes the release index of the hostkeeper packages, makes `SHA256SUMS`. The macos-arm64 job also runs the tests of `tierstore`, `objstore-s3` and `tierstore-testkit` on macOS, the update hook's among them (both of its arms are built and tested on every system, each against fakes of its service manager, and the macOS packaging). This workflow runs no macOS job for a pull request (`macos.yml` does, for every pull request that changes a path the macOS build reads): for a pull request its macos-arm64 job is skipped and the sums cover the Linux files; a push to `main` builds every platform, and a run by hand (`gh workflow run artifacts.yml --ref <branch>`) builds and sums every platform of a branch and signs nothing. On a push to `main` it also signs (build provenance and SBOM attestations) and checks what it signed. |
 | `macos.yml` | pull request | `changes` (Linux) lists the paths the pull request changes (its merge commit against the base, a rename as its old and new path) and judges them with `cargo xtask macos-paths`: the macOS job is not needed when every one is documentation (`docs/`, a top-level `*.md`), `LICENSE`, the lint configuration (`clippy.toml`, `deny.toml`, `rustfmt.toml`), an issue or pull request template, or a workflow that puts nothing on macOS (the list is `SKIPPABLE_DIRS` and `SKIPPABLE_FILES` in `crates/xtask/src/macos_paths.rs`); any other path, a path that is not UTF-8, or a list that is empty or cannot be read runs it. `version` (Linux) computes the version the build is given, as artifacts.yml's `version` job does. `macos` runs on `macos-15` unless `changes` passed and answered that it is not needed: every test of the workspace (`cargo test --workspace --features tierstore/s3`), then the commands of artifacts.yml's macos-arm64 job (build, SBOM, licence notice, tarball, hostkeeper package unpacked with hostkeeper's unpacker, code signature), uploading and signing nothing, with `contents: read` alone and no secret or token. It restores artifacts.yml's macOS cache and saves none. It is not named `macos-arm64`: a pull request's run of artifacts.yml skips its job of that name, and a skipped job passes as a check. If `version` fails, `macos` is skipped and the run fails on `version`. `macos-checks` (Linux) runs after the three whatever they did, a cancelled run included, and passes only when `version` and `macos` passed, or `macos` was skipped on that answer of a `changes` that passed. A newer push to a pull request cancels its older run. |
-| `release.yml` | when `ci` or `artifacts` finishes on a push to `main` (automatic, see Releases); by hand | `plan` decides which commit of `main` is released and as which tag (the newest whose build recorded that version); `verify` and `publish` attach the files that commit's push built and signed to a GitHub release, after checking them again. Builds nothing of tierstore. |
+| `release.yml` | when `ci` or `artifacts` finishes on a push to `main` (automatic, see Releases); by hand | `plan` decides which commit of `main` is released and as which tag (the newest whose build recorded that version); `verify` and `publish` attach the files that commit's push built and signed to a GitHub release, after checking them again; `channel-upload` and `tap` then put the release on tierstore.dev and in the Homebrew tap (see The public channels). Builds nothing of tierstore. |
 | `tierstore-site.yml` | pull request, push to `main`, when the site changes | typecheck, tests and build of tierstore.dev. |
 | `tierstore-site-publish.yml` | push to `main` / by hand | builds the site again; uploads it only when the repository variable `TIERSTORE_SITE_PUBLISH` is `true`. |
 | `hostkeeper-desired.yml` | by hand, from `main` | sets the desired version of tierstore on the hostkeeper coordinator to a published release and waits for the fleet; skipped while the repository variable `HOSTKEEPER_COORDINATOR_URL` is empty. See [Setting the desired version on the hostkeeper coordinator](#setting-the-desired-version-on-the-hostkeeper-coordinator). |
@@ -254,6 +254,40 @@ requires the macOS hostkeeper package, and the two Debian packages, each with it
 hostkeeper package; and the release attaches them all. A pull request builds the Linux ones and
 sums them; the tap tarball of macOS is made by the macOS job, which `artifacts.yml` runs on a push
 and by hand and `macos.yml` runs for every pull request.
+
+### The public channels: tierstore.dev and the Homebrew tap
+
+After `publish`, `release.yml` has two more jobs, `channel-upload` and `tap`. Nothing waits for them
+and a failed one un-releases nothing: re-run the failed job. Each starts with `cargo xtask channels
+gate`, which is given the job's settings and writes `enabled=true` or `enabled=false`, and every
+later step runs only when it said `true`. None of the settings set: the job ends green with a
+notice and writes nothing (merging the workflow changes no release). All set: it runs. Some set:
+it ends red naming the missing ones.
+
+| job | environment | settings | does |
+|---|---|---|---|
+| `channel-upload` | `prod-releases-tierstore` | variables `TIERSTORE_RELEASES_BUCKET`, `TIERSTORE_RELEASES_ROLE_ARN`; optional `TIERSTORE_RELEASES_DISTRIBUTION_ID` | assumes the role by OIDC, puts `releases/<version>/` (the three tap tarballs, the two Debian packages, their bundles and a `SHA256SUMS` of exactly these) once each, then replaces `releases/latest.json` |
+| `tap` | `release` | variable `RELEASE_BOT_APP_ID`, secret `RELEASE_BOT_PRIVATE_KEY` | renders `Formula/tierstore.rb` from the checked `SHA256SUMS` and opens the pull request `bump/tierstore-v<version>` in `<owner>/homebrew-tap` as the release bot |
+
+- `cargo xtask channels upload` puts each file with one `aws s3api put-object --if-none-match '*'`,
+  the only kind of upload the role allows. A file that exists answers `412`; the stored file is then
+  read back and the answer is a success only if its digest is the local file's, so a re-run passes
+  and a different file at a version's key fails and is never written over. `latest.json`
+  (`{"version", "tag", "commit", "files": {name: {"sha256", "size"}}}`) is written last, with
+  `--if-match` on the ETag that was read, only when its version is lower than the release's, so a
+  late or re-run older release writes nothing; with a distribution id given, `/releases/latest.json`
+  is then invalidated.
+- `cargo xtask channels formula` writes the formula the tap's guard accepts, line for line, with each
+  `sha256` from the release's `SHA256SUMS` and nothing hashed or downloaded; a sums file that lacks
+  one of the three tarballs or lists one twice is refused.
+- `cargo xtask channels tap` uses the GitHub API only: a branch at the tap's tip, one commit of the
+  file, the pull request, and auto-merge (squash) when the tap allows it. It refuses a tap that is
+  ahead of the release, does nothing when the tap is at the release or a pull request for it is
+  open, and closes older open bump pull requests. The bot's token (the app's installation for the
+  tap repository alone) is minted in the second to last step and read by the last one only.
+
+The design is `docs/design/distribution.md`; the workflow lint (`crates/xtask/tests/workflows`)
+holds the shape of both jobs.
 
 ### Releasing by hand
 

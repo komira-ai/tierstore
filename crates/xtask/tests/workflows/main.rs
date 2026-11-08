@@ -9,6 +9,8 @@
 )]
 #![allow(dead_code)]
 
+mod channels;
+mod channels_tests;
 mod desired;
 mod desired_tests;
 mod distribution_tests;

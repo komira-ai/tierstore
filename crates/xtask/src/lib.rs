@@ -10,6 +10,8 @@
 //!   hostkeeper packages of a build, their release index and the checks a host makes of them; the
 //!   tap-named tarballs and the Debian packages of a build;
 //!   and the version and digest a published release is set as on the hostkeeper coordinator.
+//! - [`channels`]: a published release reaching tierstore.dev and the Homebrew tap; the settings
+//!   gate of those jobs.
 //! - [`advisories`]: keep the security advisories in one issue.
 //! - [`macos_paths`]: whether a pull request needs the macOS job of `macos.yml`, from the paths
 //!   it changes.
@@ -20,6 +22,7 @@
 pub mod advisories;
 pub mod build_commit;
 pub mod bundles;
+pub mod channels;
 pub mod fetch;
 pub mod licenses;
 pub mod macos_paths;
@@ -160,6 +163,9 @@ enum Verb {
     /// A GitHub release of the exact files a push to main built and signed.
     #[command(subcommand)]
     Release(ReleaseVerb),
+    /// A published release reaching the public channels.
+    #[command(subcommand)]
+    Channels(channels::Verb),
     /// Whether a pull request needs the macOS job of `macos.yml`, from the paths it changes; a
     /// path not known to be skippable, or a list that cannot be read, runs it.
     MacosPaths {
@@ -690,6 +696,7 @@ fn run(cli: Cli) -> Result<Vec<String>, Error> {
             &dir,
             output.as_deref(),
         ),
+        Verb::Channels(verb) => channels::run(verb),
         Verb::Release(ReleaseVerb::Check { dir, commit }) => release::check(&dir, &commit),
         Verb::Release(ReleaseVerb::Publish {
             dir,

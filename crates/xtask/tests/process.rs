@@ -15,6 +15,7 @@ use std::path::{Path, PathBuf};
 use serde_json::{Value, json};
 use xtask::Error;
 use xtask::advisories::{Call, Method, Process, Tools};
+use xtask::channels::aws::{Answer, Aws, RealAws};
 use xtask::release::{Gh, RealGh};
 
 const FAKE: &str = env!("CARGO_BIN_EXE_gh-fake");
@@ -75,6 +76,32 @@ fn the_release_gh_runs_a_command_and_names_the_first_words_of_a_failed_one() {
     let why = failed(gh.run(&args(&["fail", "it", "broke"])));
     assert_eq!(why, "gh fail it: it broke");
     assert!(!spawn_error(RealGh(PathBuf::from(MISSING)).run(&args(&["x"]))).is_empty());
+}
+
+#[test]
+fn the_real_aws_hands_back_what_the_program_printed_and_whether_it_succeeded() {
+    // Catches: a refusal by aws read as a success, an answer that loses its stderr (the verbs
+    // read it for the 412), and a missing program taken for an answer.
+    let aws = RealAws(PathBuf::from(FAKE));
+    let args = |words: &[&str]| words.iter().map(|w| (*w).to_owned()).collect::<Vec<_>>();
+    assert_eq!(
+        aws.run(&args(&["print", "{}"])).expect("run"),
+        Answer {
+            ok: true,
+            stdout: "{}\n".to_owned(),
+            stderr: String::new()
+        }
+    );
+    assert_eq!(
+        aws.run(&args(&["fail", "PreconditionFailed"]))
+            .expect("run"),
+        Answer {
+            ok: false,
+            stdout: String::new(),
+            stderr: "PreconditionFailed\n".to_owned()
+        }
+    );
+    assert!(!spawn_error(RealAws(PathBuf::from(MISSING)).run(&args(&["x"]))).is_empty());
 }
 
 fn call(method: Method, path: &Path, body: Option<Value>) -> Call {
