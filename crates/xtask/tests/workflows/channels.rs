@@ -114,8 +114,8 @@ pub fn channel_problems(doc: &Node) -> Vec<String> {
     for (name, found) in jobs {
         let name = name.as_str().unwrap_or_default();
         for (word, owner) in OWNED {
-            // The apt jobs that hold the cloud role assume it with the same action.
-            let apt_role = *word == "configure-aws-credentials" && super::apt::is_role_job(name);
+            // The apt jobs that hold the cloud role assume it with the same verb.
+            let apt_role = *word == "channels assume" && super::apt::is_role_job(name);
             if name != *owner && !apt_role && mentions(found, word) {
                 problems.push(format!("{name}: names {word}, which only {owner} may"));
             }
@@ -167,7 +167,12 @@ fn job_problems(channel: &Channel, job: &Node) -> Vec<String> {
     };
     problems.extend(gate_problems(channel, &all[gate]));
     for step in &all[..gate] {
-        for word in ["aws-actions/", "create-github-app-token", "secrets."] {
+        for word in [
+            "aws-actions/",
+            "channels assume",
+            "create-github-app-token",
+            "secrets.",
+        ] {
             if mentions(step, word) {
                 problems.push(format!("{name}: a step before the gate names {word}"));
             }

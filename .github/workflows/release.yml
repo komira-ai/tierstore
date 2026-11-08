@@ -480,11 +480,9 @@ jobs:
         run: cargo xtask channels gate --label testing-apt-read --output "$GITHUB_OUTPUT" --setting "APT_PUBLISH_ROLE_ARN=${APT_PUBLISH_ROLE_ARN:+set}" --setting "APT_BUCKET=${APT_BUCKET:+set}" --setting "APT_DISTRIBUTION_ID=${APT_DISTRIBUTION_ID:+set}" --setting "APT_HOSTNAME=${APT_HOSTNAME:+set}"
       - name: Assume the apt publish role through OIDC
         if: ${{ steps.gate.outputs.enabled == 'true' }}
-        uses: aws-actions/configure-aws-credentials@e1253824e5c10ff9df46874f81ed3ec929e19cfd # v6.3.0
-        with:
-          role-to-assume: ${{ vars.APT_PUBLISH_ROLE_ARN }}
-          aws-region: us-east-1
-          mask-aws-account-id: true
+        env:
+          ROLE_ARN: ${{ vars.APT_PUBLISH_ROLE_ARN }}
+        run: cargo xtask channels assume --role-arn "$ROLE_ARN" --session-name "tierstore-apt-$GITHUB_RUN_ID" --region us-east-1 --env-file "$GITHUB_ENV"
       - name: Read the current index and the ETag of each object from S3 (never through the CDN, which caches the index)
         if: ${{ steps.gate.outputs.enabled == 'true' }}
         env:
@@ -619,11 +617,9 @@ jobs:
           cargo xtask release check dist --commit "$COMMIT"
       - name: Assume the apt publish role through OIDC
         if: ${{ steps.gate.outputs.enabled == 'true' }}
-        uses: aws-actions/configure-aws-credentials@e1253824e5c10ff9df46874f81ed3ec929e19cfd # v6.3.0
-        with:
-          role-to-assume: ${{ vars.APT_PUBLISH_ROLE_ARN }}
-          aws-region: us-east-1
-          mask-aws-account-id: true
+        env:
+          ROLE_ARN: ${{ vars.APT_PUBLISH_ROLE_ARN }}
+        run: cargo xtask channels assume --role-arn "$ROLE_ARN" --session-name "tierstore-apt-$GITHUB_RUN_ID" --region us-east-1 --env-file "$GITHUB_ENV"
       - name: Upload the .debs once each, then write the signed index with If-Match on the ETags that were read, then invalidate /apt/dists/*
         id: put
         if: ${{ steps.gate.outputs.enabled == 'true' }}
@@ -667,11 +663,9 @@ jobs:
         run: cargo xtask channels gate --label testing-apt-read-2 --output "$GITHUB_OUTPUT" --setting "APT_PUBLISH_ROLE_ARN=${APT_PUBLISH_ROLE_ARN:+set}" --setting "APT_BUCKET=${APT_BUCKET:+set}" --setting "APT_DISTRIBUTION_ID=${APT_DISTRIBUTION_ID:+set}" --setting "APT_HOSTNAME=${APT_HOSTNAME:+set}"
       - name: Assume the apt publish role through OIDC
         if: ${{ steps.gate.outputs.enabled == 'true' }}
-        uses: aws-actions/configure-aws-credentials@e1253824e5c10ff9df46874f81ed3ec929e19cfd # v6.3.0
-        with:
-          role-to-assume: ${{ vars.APT_PUBLISH_ROLE_ARN }}
-          aws-region: us-east-1
-          mask-aws-account-id: true
+        env:
+          ROLE_ARN: ${{ vars.APT_PUBLISH_ROLE_ARN }}
+        run: cargo xtask channels assume --role-arn "$ROLE_ARN" --session-name "tierstore-apt-$GITHUB_RUN_ID" --region us-east-1 --env-file "$GITHUB_ENV"
       - name: Read the current index and the ETag of each object from S3 (never through the CDN, which caches the index)
         if: ${{ steps.gate.outputs.enabled == 'true' }}
         env:
@@ -806,11 +800,9 @@ jobs:
           cargo xtask release check dist --commit "$COMMIT"
       - name: Assume the apt publish role through OIDC
         if: ${{ steps.gate.outputs.enabled == 'true' }}
-        uses: aws-actions/configure-aws-credentials@e1253824e5c10ff9df46874f81ed3ec929e19cfd # v6.3.0
-        with:
-          role-to-assume: ${{ vars.APT_PUBLISH_ROLE_ARN }}
-          aws-region: us-east-1
-          mask-aws-account-id: true
+        env:
+          ROLE_ARN: ${{ vars.APT_PUBLISH_ROLE_ARN }}
+        run: cargo xtask channels assume --role-arn "$ROLE_ARN" --session-name "tierstore-apt-$GITHUB_RUN_ID" --region us-east-1 --env-file "$GITHUB_ENV"
       - name: Upload the .debs once each, then write the signed index with If-Match on the ETags that were read, then invalidate /apt/dists/*
         id: put
         if: ${{ steps.gate.outputs.enabled == 'true' }}
@@ -854,11 +846,9 @@ jobs:
         run: cargo xtask channels gate --label testing-apt-read-3 --output "$GITHUB_OUTPUT" --setting "APT_PUBLISH_ROLE_ARN=${APT_PUBLISH_ROLE_ARN:+set}" --setting "APT_BUCKET=${APT_BUCKET:+set}" --setting "APT_DISTRIBUTION_ID=${APT_DISTRIBUTION_ID:+set}" --setting "APT_HOSTNAME=${APT_HOSTNAME:+set}"
       - name: Assume the apt publish role through OIDC
         if: ${{ steps.gate.outputs.enabled == 'true' }}
-        uses: aws-actions/configure-aws-credentials@e1253824e5c10ff9df46874f81ed3ec929e19cfd # v6.3.0
-        with:
-          role-to-assume: ${{ vars.APT_PUBLISH_ROLE_ARN }}
-          aws-region: us-east-1
-          mask-aws-account-id: true
+        env:
+          ROLE_ARN: ${{ vars.APT_PUBLISH_ROLE_ARN }}
+        run: cargo xtask channels assume --role-arn "$ROLE_ARN" --session-name "tierstore-apt-$GITHUB_RUN_ID" --region us-east-1 --env-file "$GITHUB_ENV"
       - name: Read the current index and the ETag of each object from S3 (never through the CDN, which caches the index)
         if: ${{ steps.gate.outputs.enabled == 'true' }}
         env:
@@ -993,11 +983,9 @@ jobs:
           cargo xtask release check dist --commit "$COMMIT"
       - name: Assume the apt publish role through OIDC
         if: ${{ steps.gate.outputs.enabled == 'true' }}
-        uses: aws-actions/configure-aws-credentials@e1253824e5c10ff9df46874f81ed3ec929e19cfd # v6.3.0
-        with:
-          role-to-assume: ${{ vars.APT_PUBLISH_ROLE_ARN }}
-          aws-region: us-east-1
-          mask-aws-account-id: true
+        env:
+          ROLE_ARN: ${{ vars.APT_PUBLISH_ROLE_ARN }}
+        run: cargo xtask channels assume --role-arn "$ROLE_ARN" --session-name "tierstore-apt-$GITHUB_RUN_ID" --region us-east-1 --env-file "$GITHUB_ENV"
       - name: Upload the .debs once each, then write the signed index with If-Match on the ETags that were read, then invalidate /apt/dists/*
         id: put
         if: ${{ steps.gate.outputs.enabled == 'true' }}
