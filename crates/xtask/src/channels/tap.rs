@@ -19,9 +19,12 @@
 //!    version means the tap has this release and nothing is opened;
 //! 3. an open bump pull request for this version or a newer one means there is nothing to open (an
 //!    open one for this version without auto-merge gets it asked for);
-//! 4. otherwise the branch is made, or reused when an earlier run stopped after making it and it
-//!    holds these bytes, the pull request is opened, and auto-merge (squash) is asked for. GitHub
-//!    refuses auto-merge on a tap with no required checks: that is a notice, not a failure;
+//! 4. otherwise the branch is made, and the formula put on it. An earlier run may have stopped
+//!    part way, and the branch is then found as it was left: at the base's tip with no commit of
+//!    ours (the formula is put on it), or holding exactly these bytes (it is reused); a branch
+//!    holding anything else is refused. Then the pull request is opened, and auto-merge (squash)
+//!    is asked for. GitHub refuses auto-merge on a tap with no required checks: that is a notice,
+//!    not a failure;
 //! 5. open bump pull requests for older versions are closed, with their branches.
 //!
 //! A run again is therefore safe: whatever the earlier run finished is found and not made twice.
@@ -148,19 +151,15 @@ fn close_older(gh: &dyn Gh, tap_repo: &str, older: &[&Bump], newer: &str) -> Vec
     said
 }
 
-/// Makes the branch of the bump with the formula on it, from the base's tip.
-fn push_branch(
-    gh: &dyn Gh,
-    r: &Request,
-    branch: &str,
-    text: &str,
-    blob: Option<&str>,
-) -> Result<(), Error> {
-    let tap = r.tap_repo;
-    let tip = gh
-        .api(&format!("repos/{tap}/git/ref/heads/{}", r.base))?
-        .and_then(|v| v["object"]["sha"].as_str().map(str::to_owned))
-        .ok_or_else(|| Error::Failed(format!("{tap} has no branch {}", r.base)))?;
+/// The sha the ref `heads/<branch>` of the tap points at, if the branch exists.
+fn branch_tip(gh: &dyn Gh, tap: &str, branch: &str) -> Result<Option<String>, Error> {
+    Ok(gh
+        .api(&format!("repos/{tap}/git/ref/heads/{branch}"))?
+        .and_then(|v| v["object"]["sha"].as_str().map(str::to_owned)))
+}
+
+/// Makes the branch of the bump at the base's tip `tip`.
+fn make_branch(gh: &dyn Gh, tap: &str, branch: &str, tip: &str) -> Result<(), Error> {
     gh.run(&[
         "api".to_owned(),
         "-X".to_owned(),
@@ -171,11 +170,22 @@ fn push_branch(
         "-f".to_owned(),
         format!("sha={tip}"),
     ])?;
+    Ok(())
+}
+
+/// Puts the formula on `branch` as one commit (the contents API); `blob` is the file it replaces.
+fn put_formula(
+    gh: &dyn Gh,
+    r: &Request,
+    branch: &str,
+    text: &str,
+    blob: Option<&str>,
+) -> Result<(), Error> {
     let mut args = vec![
         "api".to_owned(),
         "-X".to_owned(),
         "PUT".to_owned(),
-        format!("repos/{tap}/contents/{PATH}"),
+        format!("repos/{}/contents/{PATH}", r.tap_repo),
         "-f".to_owned(),
         format!("message={NAME} {}", r.version),
         "-f".to_owned(),
@@ -189,6 +199,39 @@ fn push_branch(
     }
     gh.run(&args)?;
     Ok(())
+}
+
+/// Brings the branch of the bump to the state "the formula is on it", whatever an earlier run
+/// left: no branch is made and given the formula; a branch at the base's tip (the earlier run
+/// made it and stopped before the commit) is given the formula; a branch that holds these bytes
+/// is left as it is. Anything else is refused.
+fn ensure_branch(
+    gh: &dyn Gh,
+    r: &Request,
+    branch: &str,
+    text: &str,
+    blob: Option<&str>,
+) -> Result<(), Error> {
+    let tap = r.tap_repo;
+    let tip = branch_tip(gh, tap, r.base)?
+        .ok_or_else(|| Error::Failed(format!("{tap} has no branch {}", r.base)))?;
+    match branch_tip(gh, tap, branch)? {
+        None => {
+            make_branch(gh, tap, branch, &tip)?;
+            put_formula(gh, r, branch, text, blob)
+        }
+        Some(at) if at == tip => put_formula(gh, r, branch, text, blob),
+        Some(_) => {
+            let held = gh.api(&format!("repos/{tap}/contents/{PATH}?ref={branch}"))?;
+            if held.as_ref().map(decode).transpose()?.as_deref() == Some(text) {
+                Ok(())
+            } else {
+                Err(Error::Failed(format!(
+                    "the branch {branch} exists in {tap} with another {PATH} than this release's; delete the branch by hand"
+                )))
+            }
+        }
+    }
 }
 
 /// Opens the pull request of `branch`: its url.
@@ -318,15 +361,7 @@ pub fn tap(gh: &dyn Gh, r: &Request) -> Result<Vec<String>, Error> {
         return Ok(said);
     }
     let branch = format!("bump/{NAME}-v{version}");
-    match gh.api(&format!("repos/{tap_repo}/contents/{PATH}?ref={branch}"))? {
-        Some(held) if decode(&held)? != text => {
-            return Err(Error::Failed(format!(
-                "the branch {branch} exists in {tap_repo} with another {PATH} than this release's; delete the branch by hand"
-            )));
-        }
-        Some(_) => {}
-        None => push_branch(gh, r, &branch, &text, blob.as_deref())?,
-    }
+    ensure_branch(gh, r, &branch, &text, blob.as_deref())?;
     let url = open_pr(gh, r, &branch)?;
     said.push(format!("opened {url}: {NAME} {version}"));
     said.push(ask_auto_merge(gh, tap_repo, &url));

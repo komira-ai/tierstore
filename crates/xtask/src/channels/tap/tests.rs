@@ -368,22 +368,90 @@ fn a_branch_an_earlier_run_made_is_reused_when_it_holds_these_bytes_and_refused_
     // Catches: a re-run that fails at the branch it made itself, and one that opens a pull
     // request for bytes it did not write.
     let f = release();
-    let branch = format!("repos/{TAP}/contents/{PATH}?ref=bump/tierstore-v1.2.3");
+    let contents = format!("repos/{TAP}/contents/{PATH}?ref=bump/tierstore-v1.2.3");
+    let head = format!("repos/{TAP}/git/ref/heads/bump/tierstore-v1.2.3");
     let gh = FakeGh::new();
-    gh.set(&branch, file_json(&formula_of("1.2.3")));
+    gh.set(&head, json!({"object": {"sha": "committed"}}));
+    gh.set(&contents, file_json(&formula_of("1.2.3")));
     tap(&gh, &f.request()).expect("reused");
     assert_eq!(gh.ran().len(), 2);
     assert!(gh.ran()[0].starts_with("api -X POST repos/komira-ai/homebrew-tap/pulls "));
 
     let gh = FakeGh::new();
-    gh.set(&branch, file_json(&formula_of("1.2.4")));
+    gh.set(&head, json!({"object": {"sha": "committed"}}));
+    gh.set(&contents, file_json(&formula_of("1.2.4")));
+    let refused = Error::Failed(format!(
+        "the branch bump/tierstore-v1.2.3 exists in {TAP} with another {PATH} than this release's; delete the branch by hand"
+    ));
+    assert_eq!(tap(&gh, &f.request()).unwrap_err(), refused);
+    assert!(gh.ran().is_empty());
+
+    // A branch with a ref but no formula on it is not ours either.
+    let gh = FakeGh::new();
+    gh.set(&head, json!({"object": {"sha": "committed"}}));
+    assert_eq!(tap(&gh, &f.request()).unwrap_err(), refused);
+    assert!(gh.ran().is_empty());
+}
+
+#[test]
+fn a_branch_left_at_the_base_tip_by_a_failed_commit_gets_the_formula_on_the_next_run() {
+    // Catches: a run whose contents PUT failed leaving the branch at the base's tip with no
+    // commit, and the next run refusing it as holding "another formula" (the base has one) or
+    // failing the ref POST with a 422 (the first release, the base has none).
+    let f = release();
+    let head = format!("repos/{TAP}/git/ref/heads/bump/tierstore-v1.2.3");
+    let ref_post = format!("api -X POST repos/{TAP}/git/refs");
+    let put = format!("api -X PUT repos/{TAP}/contents/{PATH}");
+
+    // The first run: the ref is made and the PUT fails.
+    let gh = FakeGh::new();
+    gh.fail_when("-X PUT", "502 Bad Gateway");
     assert_eq!(
         tap(&gh, &f.request()).unwrap_err(),
-        Error::Failed(format!(
-            "the branch bump/tierstore-v1.2.3 exists in {TAP} with another {PATH} than this release's; delete the branch by hand"
-        ))
+        Error::Failed("502 Bad Gateway".to_owned())
     );
-    assert!(gh.ran().is_empty());
+    assert_eq!(gh.ran().len(), 2);
+
+    // The next run, with the base holding a formula: the contents of the branch are the base's.
+    let gh = FakeGh::new();
+    gh.set(&head, json!({"object": {"sha": "basesha"}}));
+    gh.set(
+        &format!("repos/{TAP}/contents/{PATH}?ref=bump/tierstore-v1.2.3"),
+        file_json(&formula_of("1.2.2")),
+    );
+    gh.fail_when("git/refs", "Reference already exists");
+    let said = tap(&gh, &f.request()).expect("recovered");
+    let ran = gh.ran();
+    assert!(ran[0].starts_with(&put), "{ran:?}");
+    assert!(
+        ran[0].ends_with("-f branch=bump/tierstore-v1.2.3 -f sha=blobsha"),
+        "{ran:?}"
+    );
+    assert!(ran[1].starts_with("api -X POST repos/komira-ai/homebrew-tap/pulls "));
+    assert!(ran.iter().all(|r| !r.starts_with(&ref_post)), "{ran:?}");
+    assert_eq!(said[0], format!("opened {PR_URL}: tierstore 1.2.3"));
+
+    // The first release of a tap: the base has no formula, the branch has none, and no blob
+    // is named.
+    let gh = FakeGh::new();
+    gh.unset(&format!("repos/{TAP}/contents/{PATH}?ref=main"));
+    gh.set(&head, json!({"object": {"sha": "basesha"}}));
+    gh.fail_when("git/refs", "Reference already exists");
+    tap(&gh, &f.request()).expect("recovered");
+    let ran = gh.ran();
+    assert!(ran[0].starts_with(&put), "{ran:?}");
+    assert!(!ran[0].contains("-f sha="), "{ran:?}");
+    assert!(ran[1].starts_with("api -X POST repos/komira-ai/homebrew-tap/pulls "));
+
+    // The PUT fails again: the failure is reported and no pull request is opened.
+    let gh = FakeGh::new();
+    gh.set(&head, json!({"object": {"sha": "basesha"}}));
+    gh.fail_when("-X PUT", "502 Bad Gateway");
+    assert_eq!(
+        tap(&gh, &f.request()).unwrap_err(),
+        Error::Failed("502 Bad Gateway".to_owned())
+    );
+    assert_eq!(gh.ran().len(), 1);
 }
 
 #[test]
