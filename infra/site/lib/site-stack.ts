@@ -39,12 +39,29 @@ export const NONCURRENT_VERSION_DAYS = 365;
 export const ERROR_TTL = Duration.seconds(10);
 
 /**
- * Viewer-request function (cloudfront-js-2.0): `/x/` -> `/x/index.html`. Everything under /releases/ is a download and
- * is passed through untouched (the router never rewrites it, including a path that ends in a slash).
+ * Viewer-request function (cloudfront-js-2.0). First: a request for www.tierstore.dev (whatever the path, /releases/
+ * included) is answered with a 301 to https://tierstore.dev with the same path and query string, and goes no further.
+ * Then: `/x/` -> `/x/index.html`. Everything under /releases/ is a download and is passed through untouched (the router
+ * never rewrites it, including a path that ends in a slash).
  */
 export const ROUTER_SOURCE = `function handler(event) {
   var r = event.request;
   var uri = r.uri;
+  var host = r.headers && r.headers.host ? r.headers.host.value.toLowerCase() : '';
+  if (host === '${c.WWW_DOMAIN}') {
+    var pairs = [];
+    var qs = r.querystring || {};
+    Object.keys(qs).forEach(function (k) {
+      var q = qs[k];
+      var values = q.multiValue ? q.multiValue.map(function (m) { return m.value; }) : [q.value];
+      values.forEach(function (v) { pairs.push(v === '' ? k : k + '=' + v); });
+    });
+    return {
+      statusCode: 301,
+      statusDescription: 'Moved Permanently',
+      headers: { location: { value: 'https://${c.DOMAIN}' + uri + (pairs.length ? '?' + pairs.join('&') : '') } }
+    };
+  }
   if (uri.indexOf('/releases/') === 0) return r;
   if (uri.charAt(uri.length - 1) === '/') r.uri = uri + 'index.html';
   return r;
@@ -93,7 +110,11 @@ export class SiteStack extends Stack {
     const zone = props.hostedZoneId
       ? route53.HostedZone.fromHostedZoneAttributes(this, 'Zone', { hostedZoneId: props.hostedZoneId, zoneName: c.DOMAIN })
       : route53.HostedZone.fromLookup(this, 'Zone', { domainName: c.DOMAIN });
-    const cert = new acm.Certificate(this, 'Cert', { domainName: c.DOMAIN, validation: acm.CertificateValidation.fromDns(zone) });
+    const cert = new acm.Certificate(this, 'Cert', {
+      domainName: c.DOMAIN,
+      subjectAlternativeNames: [c.WWW_DOMAIN],
+      validation: acm.CertificateValidation.fromDns(zone),
+    });
 
     const headers = new cloudfront.ResponseHeadersPolicy(this, 'Headers', {
       responseHeadersPolicyName: c.HEADERS_POLICY_NAME,
@@ -115,7 +136,7 @@ export class SiteStack extends Stack {
 
     const router = new cloudfront.Function(this, 'Router', {
       functionName: c.ROUTER_NAME,
-      comment: `${c.SITE_ID} site: /x/ -> /x/index.html; /releases/* untouched`,
+      comment: `${c.SITE_ID} site: ${c.WWW_DOMAIN} -> 301 ${c.DOMAIN}; /x/ -> /x/index.html; /releases/* untouched`,
       runtime: cloudfront.FunctionRuntime.JS_2_0,
       code: cloudfront.FunctionCode.fromInline(ROUTER_SOURCE),
     });
@@ -130,7 +151,7 @@ export class SiteStack extends Stack {
 
     this.distribution = new cloudfront.Distribution(this, 'Distribution', {
       comment: `${c.DOMAIN} site and releases`,
-      domainNames: [c.DOMAIN],
+      domainNames: [c.DOMAIN, c.WWW_DOMAIN],
       certificate: cert,
       defaultRootObject: 'index.html',
       minimumProtocolVersion: cloudfront.SecurityPolicyProtocol.TLS_V1_2_2021,
@@ -149,6 +170,8 @@ export class SiteStack extends Stack {
     const target = route53.RecordTarget.fromAlias(new targets.CloudFrontTarget(this.distribution));
     new route53.ARecord(this, 'ARecord', { zone, recordName: c.DOMAIN, target });
     new route53.AaaaRecord(this, 'AaaaRecord', { zone, recordName: c.DOMAIN, target });
+    new route53.ARecord(this, 'WwwARecord', { zone, recordName: c.WWW_DOMAIN, target });
+    new route53.AaaaRecord(this, 'WwwAaaaRecord', { zone, recordName: c.WWW_DOMAIN, target });
 
     const distributionArn = `arn:aws:cloudfront::${this.account}:distribution/${this.distribution.distributionId}`;
     const releaseObjects = this.bucket.arnForObjects(`${c.RELEASES_PREFIX}*`);

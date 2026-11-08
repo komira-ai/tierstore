@@ -4,6 +4,8 @@
 
 export const REGION = 'us-east-1'; // ACM certificates for CloudFront must live here, so every stack does
 export const DOMAIN = 'tierstore.dev';
+/** Answers with a 301 to the same path and query on DOMAIN; it is a name of the same distribution and certificate. */
+export const WWW_DOMAIN = `www.${DOMAIN}`;
 export const SITE_ID = 'tierstore';
 
 export const GITHUB_OIDC_HOST = 'token.actions.githubusercontent.com';
