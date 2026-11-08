@@ -91,7 +91,7 @@ A CDK app (TypeScript, us-east-1), copied from the sibling repository's `infra/s
 | workflow it trusts | `.github/workflows/tierstore-site-publish.yml` at `refs/heads/main` | `.github/workflows/release.yml` at `refs/heads/main` |
 | GitHub environment | `prod-site-tierstore` | `prod-releases-tierstore` |
 | may write | the site's objects at the root, and delete them in the sync; **no write under `releases/`** | `releases/<V>/*` only with `If-None-Match` (write-once); `releases/latest.json` only with `If-Match` or `If-None-Match` |
-| may read | the bucket's listing (for the sync) | `GetObject` on `releases/*` (the files are public; this is for the re-run check, section 8) |
+| may read | the bucket's listing (for the sync) | `GetObject` on `releases/*` (the files are public; this is for the re-run check, section 8), and `ListBucket` on the bucket only under the `releases/` prefix, so a missing `latest.json` answers `NoSuchKey`, not `AccessDenied`. Granted by the stack since this pull request; the open question on the role as built having no read is resolved by it |
 | may invalidate | the one distribution | nothing |
 | delete | the site's own objects | **never**; the bucket policy also denies `DeleteObject` and `DeleteObjectVersion` on `releases/*` to every principal |
 

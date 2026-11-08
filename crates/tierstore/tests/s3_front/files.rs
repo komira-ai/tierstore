@@ -2,7 +2,7 @@
 
 use std::fs::Permissions;
 use std::os::unix::fs::PermissionsExt;
-use std::path::PathBuf;
+use std::path::{Path, PathBuf};
 
 use bytes::Bytes;
 use tierstore::{Backend as _, DirBackend};
@@ -67,6 +67,15 @@ fn quoted(addresses: &[&str]) -> String {
 pub fn oci_interface(listen: &[&str], params: &str) -> String {
     let listen = quoted(listen);
     format!("\n[[interface]]\ntype = \"oci\"\nparams = {{ addresses = [{listen}]{params} }}\n")
+}
+
+/// A scratch directory for a Unix socket called `file`, and the socket's path in it: under the
+/// system's temporary directory, or under the build's when the socket's path there is too long to
+/// bind (a socket's path has a short limit, which a deep checkout or a long `TMPDIR` passes).
+pub fn socket_dir(name: &str, file: &str) -> (TestDir, PathBuf) {
+    let system = std::env::temp_dir();
+    let build = Path::new(env!("CARGO_TARGET_TMPDIR"));
+    TestDir::for_socket(&[&system, build], name, file)
 }
 
 /// A scratch directory with a key file in it, and the file and the flags of a start that uses it.

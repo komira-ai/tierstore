@@ -208,7 +208,8 @@ export class SiteStack extends Stack {
     );
 
     // The releases role: assumed by the release workflow's upload job only. It writes releases/<version>/<file> once and
-    // releases/latest.json (the one object that is replaced), reads and lists nothing, and deletes nothing anywhere.
+    // releases/latest.json (the one object that is replaced), reads releases/* (public downloads anyway) so `channels upload` can
+    // check what is there, and deletes nothing anywhere.
     // Uploads are single-part (aws s3api put-object, at most 5 GiB): a multipart upload sends its parts without the
     // If-None-Match header, which the policy below refuses, so a multipart upload to releases/<version>/ fails by design.
     this.releasesRole = new iam.Role(this, 'ReleasesRole', {
@@ -223,6 +224,20 @@ export class SiteStack extends Stack {
         actions: ['s3:PutObject'],
         resources: [this.bucket.arnForObjects(`${c.RELEASES_PREFIX}*/*`)],
         conditions: { StringEquals: { 's3:if-none-match': '*' } },
+      }),
+    );
+    // Read: GetObject on releases/* only. ListBucket is what turns a missing key's 403 into NoSuchKey/404 (a first release
+    // reads an absent releases/latest.json). A GetObject/HeadObject request carries no s3:prefix, so the condition is
+    // StringLikeIfExists: a real listing must name a prefix under releases/, a key read is not held back by the absent key.
+    this.releasesRole.addToPolicy(
+      new iam.PolicyStatement({ sid: 'ReadReleaseFiles', actions: ['s3:GetObject'], resources: [releaseObjects] }),
+    );
+    this.releasesRole.addToPolicy(
+      new iam.PolicyStatement({
+        sid: 'ListReleasesPrefix',
+        actions: ['s3:ListBucket'],
+        resources: [this.bucket.bucketArn],
+        conditions: { StringLikeIfExists: { 's3:prefix': [c.RELEASES_PREFIX + '*'] } },
       }),
     );
     // Written once: a PutObject under releases/<version>/ must carry If-None-Match: * (S3 conditional write), so a

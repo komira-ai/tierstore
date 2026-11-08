@@ -41,16 +41,16 @@ absent has not been counted at zero: a query over it returns nothing, not 0.
 
 ## The build-node cache (v1)
 
-Every name in this section starts with `tierstore_cache_`, which the first column leaves out: `hits_total` is the series `tierstore_cache_` followed by `hits_total`. The text of the cache's series has no `# TYPE` line, so Prometheus stores them as untyped; `rate()` works on them anyway. An S3 GET reaches the cache as a HEAD (for the size and the conditions) and then a GET. These series count the GET, so a GET of a missing key, which the HEAD before it answers 404, is not in them.
+Every name in this section starts with `tierstore_cache_`; the text below shortens a name to what follows the prefix (`hits_total` for `tierstore_cache_hits_total`) and the tables give it whole. The text of the cache's series has no `# TYPE` line, so Prometheus stores them as untyped; `rate()` works on them anyway. An S3 GET reaches the cache as a HEAD (for the size and the conditions) and then a GET. These series count the GET, so a GET of a missing key, which the HEAD before it answers 404, is not in them.
 
 ### Cache reads and bytes
 
 | name | type | labels | increments when |
 |---|---|---|---|
-| `hits_total` | counter | none | a GET of an object the cache holds is answered from disk, whole or ranged |
-| `misses_total` | counter | none | a GET of a key the cache is set to keep is not answered from disk: the key is not held, or its file could not be read. |
-| `bytes_served_local_total` | counter | none | bytes of the answers that counted as hits |
-| `bytes_served_upstream_total` | counter | none | bytes of every answer that was not a hit: a pass-through read, and the read from disk that follows a fill |
+| `tierstore_cache_hits_total` | counter | none | a GET of an object the cache holds is answered from disk, whole or ranged |
+| `tierstore_cache_misses_total` | counter | none | a GET of a key the cache is set to keep is not answered from disk: the key is not held, or its file could not be read. |
+| `tierstore_cache_bytes_served_local_total` | counter | none | bytes of the answers that counted as hits |
+| `tierstore_cache_bytes_served_upstream_total` | counter | none | bytes of every answer that was not a hit: a pass-through read, and the read from disk that follows a fill |
 
 What they do not count:
 
@@ -67,17 +67,17 @@ What they do not count:
 
 | name | type | labels | increments when |
 |---|---|---|---|
-| `fills_total` | counter | none | a fill wrote a new object into the cache |
-| `fills_skipped_total` | counter | none | a fill was not started or not kept and nothing went wrong: every fill slot was running, or there was no room |
-| `fills_skipped_busy_total` | counter | none | of the skipped fills, those that found every fill slot taken |
-| `fill_failures_total` | counter | `reason`: `hash_mismatch`, `upstream_error`, `short_body`, `local_io`, `changed`, `aborted` | a fill ended without leaving an object in the cache |
-| `evictions_total` | counter | `reason`: `budget`, `floor` | an object was evicted |
-| `pinned_skips_total` | counter | none | an eviction pass passed over an object because it has more than one hard link |
-| `scrubbed_objects_total` | counter | none | the scrub hashed an object again (not in a release yet) |
-| `scrubbed_bytes_total` | counter | none | the bytes the scrub read for those objects |
-| `scrub_mismatches_total` | counter | none | the scrub dropped an object whose bytes no longer matched its digest |
-| `scrub_errors_total` | counter | none | the scrub could not judge an object because a read failed, or its check panicked |
-| `discarded_at_start_total` | counter | none | a file was removed at start: a file the scan did not find whole, or what a fill left in the stage directory at the last stop |
+| `tierstore_cache_fills_total` | counter | none | a fill wrote a new object into the cache |
+| `tierstore_cache_fills_skipped_total` | counter | none | a fill was not started or not kept and nothing went wrong: every fill slot was running, or there was no room |
+| `tierstore_cache_fills_skipped_busy_total` | counter | none | of the skipped fills, those that found every fill slot taken |
+| `tierstore_cache_fill_failures_total` | counter | `reason`: `hash_mismatch`, `upstream_error`, `short_body`, `local_io`, `changed`, `aborted` | a fill ended without leaving an object in the cache |
+| `tierstore_cache_evictions_total` | counter | `reason`: `budget`, `floor` | an object was evicted |
+| `tierstore_cache_pinned_skips_total` | counter | none | an eviction pass passed over an object because it has more than one hard link |
+| `tierstore_cache_scrubbed_objects_total` | counter | none | the scrub hashed an object again |
+| `tierstore_cache_scrubbed_bytes_total` | counter | none | the bytes the scrub read for those objects |
+| `tierstore_cache_scrub_mismatches_total` | counter | none | the scrub dropped an object whose bytes no longer matched its digest |
+| `tierstore_cache_scrub_errors_total` | counter | none | the scrub could not judge an object because a read failed, or its check panicked |
+| `tierstore_cache_discarded_at_start_total` | counter | none | a file was removed at start: a file the scan did not find whole, or what a fill left in the stage directory at the last stop |
 
 The reasons of a failed fill:
 
@@ -104,10 +104,41 @@ These four are gauges, measured when `/metricz` is read.
 
 | name | type | what it is |
 |---|---|---|
-| `bytes` | gauge | bytes of objects in the cache |
-| `objects` | gauge | objects in the cache |
-| `fs_free_bytes` | gauge | free bytes of the file system of the cache directory |
-| `staging_files` | gauge | files in the stage directory now: fills that are running |
+| `tierstore_cache_bytes` | gauge | bytes of objects in the cache |
+| `tierstore_cache_objects` | gauge | objects in the cache |
+| `tierstore_cache_fs_free_bytes` | gauge | free bytes of the file system of the cache directory |
+| `tierstore_cache_staging_files` | gauge | files in the stage directory now: fills that are running |
+
+### The cache mode
+
+A build node's cache is read-write when its process holds the lock of the cache directory and read-only when another process does (see [operations](operations.md#the-cache-lock-and-read-only-mode)).
+
+| name | type | labels | value |
+|---|---|---|---|
+| `tierstore_cache_mode` | gauge | `mode`: `read_only`, `read_write` | one series for each mode: 1 for the mode the cache is in now, 0 for the other |
+
+In a read-only process the families of fills, evictions and pinned skips stay at 0, `tierstore_cache_staging_files` is 0, and `tierstore_cache_discarded_at_start_total` is 0 (a read-only start deletes nothing); it counts what the process deletes when it takes the lock. `tierstore_cache_bytes` and `tierstore_cache_objects` are the scan the process made until it takes the lock. Two processes over one directory count the same directory and the same file system twice in `tierstore_cache_bytes`, `tierstore_cache_objects` and `tierstore_cache_fs_free_bytes`: read the gauges of the directory from the process whose mode is `read_write`. The counters of hits, misses and bytes served are each process's own, and their sum is right.
+
+### The check of an old hit
+
+With `local_cache.revalidate_after` set, a hit older than it is checked by one HEAD to the upstream (see [configuration](configuration.md)); without it the series stay at 0.
+
+| name | type | labels | increments when |
+|---|---|---|---|
+| `tierstore_cache_revalidations_total` | counter | `result`: `same`, `changed`, `gone`, `failed` | a check of a hit ended: `same`, the upstream holds the version the entry stands for and the hit was served from the disk; `changed`, it holds another version and the entry was dropped; `gone`, it has no such object and the entry was dropped; `failed`, the HEAD failed and the cached copy was served |
+
+### Cache writes
+
+These series count the writes of a cache node that sends them to the upstream (`local_cache.write_through`). Without it, the cache takes no writes and they stay 0.
+
+| name | type | labels | increments when |
+|---|---|---|---|
+| `tierstore_cache_writes_through_total` | counter | none | the upstream took a whole-body create-only or plain put (not a completion) |
+| `tierstore_cache_write_exists_total` | counter | none | a put was answered "already exists" |
+| `tierstore_cache_keeps_expired_total` | counter | none | a put was answered before the copy kept on the node finished, because the copy took longer than the wait |
+| `tierstore_cache_write_keep_skipped_total` | counter | `reason`: `budget`, `io`, `busy`, `head`, `deleted`, `slow`, `deadline`, `read_only` | the upstream took a put and the node did not keep a copy (`head`: the upstream's answer to the put gave no tag and the HEAD after it failed or gave another size; `deleted`: the object was deleted or replaced meanwhile, or another put of the key ran at the same time as a plain put); `read_only` is a node whose cache does not hold the lock of its directory, or lost it while the copy was made (see [operations](operations.md#the-cache-lock-and-read-only-mode)) |
+
+A key that the HEAD before a create-only put finds is answered "already exists" without a put reaching the upstream, and counts in `write_exists_total` as the upstream's own "already exists" does.
 
 ## The hot and cold tiers (v2)
 
@@ -232,25 +263,13 @@ these series:
 | `tierstore_oci_requests_total` | counter | `route`: `ping`, `manifest`, `blob`, `tags`, `upload`, `other`; `outcome`: `ok`, `created`, `accepted`, `no_content`, `partial`, `not_found`, `invalid`, `not_allowed`, `range_not_satisfiable`, `unauthorized`, `denied`, `failed`, `conflict` | requests, by the status they were answered with (`ok` 200, `created` 201, `accepted` 202, `no_content` 204, `partial` 206, `not_found` 404, `invalid` 400, 411 or 413, `not_allowed` 405, `range_not_satisfiable` 416, `unauthorized` 401, `denied` 403, `failed` 5xx, `conflict` 409). The `upload` route is the paths of blob uploads; a manifest `PUT` is counted under `manifest` |
 | `tierstore_oci_bytes_served_total` | counter | none | bytes of blobs read for responses |
 | `tierstore_oci_digest_mismatches_total` | counter | none | objects whose bytes were not the digest they are named by |
+| `tierstore_oci_tag_recheck_failures_total` | counter | none | a pull of a stored tag whose re-check against the upstream registry failed or took longer than `recheck_timeout`, so the stored tag was served (see [configuration](configuration.md#paramsupstream)); 0 on a front with no `upstream` |
 | `tierstore_oci_front_info` | gauge | `mode`: `https`, `http` | always 1; the label is the mode the front runs in |
-
-Every `/metricz`, with or without the front, ends with one more series:
-
-| name | type | labels | what it says |
-|---|---|---|---|
-| `tierstore_build_info` | gauge | `version`: the crate version; `commit`: the commit the binary was built from, twelve hex digits, or `unknown` outside a git checkout; `slot`: the port `server.slot` names, only when `server.slot` is given (otherwise the gauge has no such label) | always 1; says which build answered |
-
-## Not in a release yet
-
-Everything below describes series that are being added and are not in a released tierstore. The
-names and labels are those of the changes under review and can still change; this page is
-updated when they land. Do not build alerts on them until they are in a release.
 
 ### The drain
 
-One series of the server itself, with a `# TYPE` line, shown on every
-node whatever sources it has (it comes after the blocks of the proxy, the OCI front and the
-cache):
+After the blocks of the sources, every `/metricz` shows one series of the server itself, with a
+`# TYPE` line, whatever sources the node has:
 
 | name | type | labels | increments when |
 |---|---|---|---|
@@ -270,32 +289,27 @@ thing for the front's own connections (the series above counts only those of the
 
 The two together are the requests that came too late in a drain.
 
+### The build
+
+Every `/metricz`, with or without the front, ends with one more series:
+
+| name | type | labels | what it says |
+|---|---|---|---|
+| `tierstore_build_info` | gauge | `version`: the crate version; `commit`: the commit the binary was built from, twelve hex digits, or `unknown` outside a git checkout; `slot`: the port `server.slot` names, only when `server.slot` is given (otherwise the gauge has no such label) | always 1; says which build answered |
+
+## Not in a release yet
+
+Everything below is on main and not in a released tierstore yet; this page is updated when it
+ships. Do not build alerts on these series until they are in a release.
+
 ### v1: changes in the next release
 
 The series of "The build-node cache (v1)" above change as follows, and the cache gains the series
 of the sections after this one. They all start with `tierstore_cache_`.
 
-- Each family gets one `# TYPE` line: a counter, or a gauge for `tierstore_cache_bytes`, `tierstore_cache_objects`, `tierstore_cache_fs_free_bytes` and `tierstore_cache_staging_files`. `tierstore_cache_discarded_at_start_total` is declared a counter that is set once, when the cache is opened.
-- A read of a kept key that the cache does not serve is one miss on every path, counted right after the lookup and before any call to the upstream: a ranged GET whose size HEAD to the upstream then fails, a ranged GET of an object over the whole-object limit, and a fill that then fails. So a ranged GET whose HEAD fails now counts a miss. A range past the end of a held object is still neither a hit nor a miss.
+- Each family gets one `# TYPE` line, before its samples: a counter, or a gauge for `tierstore_cache_bytes`, `tierstore_cache_objects`, `tierstore_cache_fs_free_bytes`, `tierstore_cache_staging_files` and `tierstore_cache_mode`. `tierstore_cache_discarded_at_start_total` is declared a counter that is set once, when the cache is opened.
+- A read of a kept key that the cache does not serve is one miss on every path, counted right after the lookup and before any call the read itself makes to the upstream (only the HEAD that checks an old hit, with `local_cache.revalidate_after`, comes before the lookup): a ranged GET whose size HEAD to the upstream then fails, a ranged GET of an object over the whole-object limit, a fill that then fails, and every miss of a read-only cache. So a ranged GET whose HEAD fails now counts a miss. A range past the end of a held object is still neither a hit nor a miss.
 - The bytes the cache fetched from the upstream are `tierstore_cache_upstream_bytes_read_total`, in the next section.
-
-### The cache mode
-
-On main, and not in a release yet. A build node's cache is read-write when its process holds the lock of the cache directory and read-only when another process does (see [operations](operations.md#the-cache-lock-and-read-only-mode)).
-
-| name | type | labels | value |
-|---|---|---|---|
-| `tierstore_cache_mode` | gauge | `mode`: `read_only`, `read_write` | one series for each mode: 1 for the mode the cache is in now, 0 for the other |
-
-In a read-only process the families of fills, evictions and pinned skips stay at 0, `tierstore_cache_staging_files` is 0, and `tierstore_cache_discarded_at_start_total` is 0 (a read-only start deletes nothing); it counts what the process deletes when it takes the lock. `tierstore_cache_bytes` and `tierstore_cache_objects` are the scan the process made until it takes the lock. Two processes over one directory count the same directory and the same file system twice in `tierstore_cache_bytes`, `tierstore_cache_objects` and `tierstore_cache_fs_free_bytes`: read the gauges of the directory from the process whose mode is `read_write`. The counters of hits, misses and bytes served are each process's own, and their sum is right.
-
-### The check of an old hit
-
-On main, and not in a release yet. With `local_cache.revalidate_after` set, a hit older than it is checked by one HEAD to the upstream (see [configuration](configuration.md)); without it the series stay at 0.
-
-| name | type | labels | increments when |
-|---|---|---|---|
-| `tierstore_cache_revalidations_total` | counter | `result`: `same`, `changed`, `gone`, `failed` | a check of a hit ended: `same`, the upstream holds the version the entry stands for and the hit was served from the disk; `changed`, it holds another version and the entry was dropped; `gone`, it has no such object and the entry was dropped; `failed`, the HEAD failed and the cached copy was served |
 
 ### v1: the cache's calls to the upstream
 
@@ -304,51 +318,54 @@ On main, and not in a release yet. With `local_cache.revalidate_after` set, a hi
 | `tierstore_cache_upstream_reads_total` | counter | `op`: `get`, `head`, `list`, `list_uploads` | the cache sends one such call to the upstream |
 | `tierstore_cache_upstream_bytes_read_total` | counter | none | bytes that the cache's upstream GETs brought back |
 | `tierstore_cache_head_hits_total` | counter | none | a HEAD the cache is asked for is answered from its index: a client's HEAD, or the S3 front's HEAD before a GET |
-| `tierstore_cache_head_misses_total` | counter | none | the same HEADs, sent to the upstream |
+| `tierstore_cache_head_misses_total` | counter | none | the same HEADs, answered by the upstream |
 
 What they do not count:
 
-- A fill reads the upstream in ranged chunks, so `op="get"` counts calls, not objects: an object of 350 bytes filled in chunks of 100 is four GET calls. It also counts every pass-through read.
-- `op="head"` counts the cache's own HEADs as well as the clients': the size before a ranged fill, the two HEADs of a fill, the HEAD before a put, and the HEAD after one is acknowledged only when the upstream's answer to the put gave no tag (an S3 upstream's answer has the `ETag`, so a put to one makes no HEAD after it). `head_hits_total` and `head_misses_total` count only the HEADs the S3 front sends to the cache, which includes the HEAD that the front sends before each GET. So `head_hits_total + head_misses_total` is a lookup rate, not a rate of HEAD requests from clients.
-- A listing counts as one `list` call, and each page of a paged listing counts as one more. Each call of `list_uploads` counts one.
-- Not counted at all: deletes, creating and aborting uploads, sending a part, the start-up probe, and retries made inside a backend wrapper.
+- A fill reads the upstream in ranged chunks, so `op="get"` counts calls, not objects: an object of 350 bytes filled in chunks of 100 is four GET calls. A pass-through read (a key the cache does not keep, a range over the whole-object limit, the rest of a read after a fill that was given up) is read in chunks of the same size, one GET each.
+- `op="head"` counts the cache's own HEADs as well as the clients': the size before a ranged fill, the HEAD of a fill before its GETs and, for a key not named by its content, a second one after them, the HEAD that checks an old hit (`local_cache.revalidate_after`), the two HEADs that hold a pass-through read to one version (before the first chunk and after the last: every pass-through read without a range makes them, and a ranged one whose range is over one chunk), the HEAD before a create-only put, and the HEAD after a put is acknowledged only when the upstream's answer to the put gave no tag (an S3 upstream's answer has the `ETag`, so a put to one makes no HEAD after it). `head_hits_total` and `head_misses_total` count only the HEADs the cache is asked for, which include the HEAD that the S3 front sends before each GET. So `head_hits_total + head_misses_total` is a lookup rate, not a rate of HEAD requests from clients.
+- A HEAD of an old hit that the check finds the same, or cannot make, is a head hit; one the check finds changed or gone is a head miss, answered by the check's HEAD. A HEAD of a held key that a read-only cache finds changed on disk (the holder of the directory put the object again) is a head miss, answered by an upstream HEAD. A HEAD of a key the cache does not keep is a miss, and one of a reserved key is refused and is neither.
+- A listing without pages counts one `list` call, and a paged listing counts one for each page it asks the upstream for, the pages that make up for reserved keys left out included. Each page of `list_uploads` counts one. A listing under a reserved prefix asks the upstream nothing and counts nothing.
+- Not counted at all: deletes, creating and aborting uploads, sending a part, listing the parts of an upload, the start-up probe, and retries made inside a backend wrapper.
 - `upstream_bytes_read_total` counts a GET that returned. The bytes of a GET that failed are not counted, and the bytes of a GET that returned are counted even if the fill then fails (a short body, a hash mismatch, a changed object) or is dropped.
 
 ### v1: writes through the cache
 
-These series exist when the cache node is set to send writes to the upstream (write-through).
-Without it, the cache is read-only and they stay 0.
+These series count the writes of a cache node that sends them to the upstream
+(`local_cache.write_through`). Without it, the cache takes no writes and they stay 0.
 
 | name | type | labels | increments when |
 |---|---|---|---|
 | `tierstore_cache_upstream_puts_total` | counter | none | the upstream accepted a create-only or plain put, or the completion of a multipart upload |
 | `tierstore_cache_upstream_put_bytes_total` | counter | none | bytes of the puts the upstream accepted, and of each part it accepted |
-| `tierstore_cache_upstream_put_failures_total` | counter | `reason`: `exists`, `unavailable`, `full`, `bad_digest`, `other` | a put or a completion reached the upstream and failed |
-| `tierstore_cache_writes_through_total` | counter | none | the upstream took a whole-body create-only or plain put (not a completion) |
-| `tierstore_cache_write_exists_total` | counter | none | a put was answered "already exists" |
-| `tierstore_cache_keeps_expired_total` | counter | none | a put was answered before the copy kept on the node finished, because the copy took longer than the wait |
-| `tierstore_cache_write_keep_skipped_total` | counter | `reason`: `budget`, `io`, `busy`, `head`, `deleted`, `slow`, `deadline`, `read_only` | the upstream took a put and the node did not keep a copy (`head`: the upstream's answer to the put gave no tag and the HEAD after it failed or gave another size; `deleted`: the object was deleted or replaced meanwhile, or another put of the key ran at the same time as a plain put); `read_only` is a node whose cache does not hold the lock of its directory, or lost it while the copy was made (see [operations](operations.md#the-cache-lock-and-read-only-mode)) |
+| `tierstore_cache_upstream_put_failures_total` | counter | `reason`: `exists`, `unavailable`, `full`, `bad_digest`, `other` | a put or a completion reached the upstream and failed, or the HEAD before a put failed |
 
 The reasons of a failed put:
 
 - `exists`: the upstream's create-only put or completion found the object (412).
 - `unavailable`: the upstream did not answer.
 - `full`: the upstream had no room (507).
-- `bad_digest`: the body did not hash to the name of the object. When the upstream had already taken the put, it counts as a put and as a `bad_digest` failure.
+- `bad_digest`: the body did not hash to the name of the object. When the upstream had already taken the put (it stopped reading the body before its end), it counts as a put, with the bytes the upstream was given, and as a `bad_digest` failure.
 - `other`: any other failure.
+
+A body that fails part way, such as that of a client that goes away, fails the put, and counts under the reason of its error (`unavailable` for a client that went away).
 
 What they do not count:
 
-- Before sending a put, the cache sends the upstream a HEAD. A key the HEAD finds is answered "already exists" without a put reaching the upstream: it counts in `write_exists_total` only, not as `put_failures` with reason `exists`. That reason counts the races the HEAD did not see.
+- Before sending a create-only put, the cache sends the upstream a HEAD, unless `local_cache.head_before_put` is `false`; a plain put sends none. A key the HEAD finds is answered "already exists" without a put reaching the upstream: it counts in `write_exists_total` only, not as `put_failures` with reason `exists`. That reason counts the races the HEAD did not see.
 - A HEAD before a put that fails with anything but "not found" fails the put although no put was sent. It counts under `put_failures` with the reason its error maps to (`unavailable`, `full`, `other`), and in `upstream_reads_total{op="head"}`.
 - A part that fails, a delete, an abort and a part's retry are not failures here. A part that is accepted counts its bytes even if the upload is never completed, and a client's retry of an accepted part counts them twice.
 - A completion counts one put and no bytes of its own: the bytes are those of its parts.
+- A put that failed at the upstream, or at the HEAD before it, counts no bytes, whatever part of its body was sent. The one put the client is told failed that counts bytes is a `bad_digest` put the upstream had already taken (above).
 - `writes_through_total` counts whole-body puts only, `upstream_puts_total` counts those and completions, and `write_exists_total` counts the HEAD's answer and the upstream's together.
 
-### The queries
+## Cache queries (v1)
 
 All of these use a `5m` window. Every `sum` is outside the `rate`. Shorten the window to see a
 change sooner and lengthen it to smooth a quiet node; keep it at least four scrape intervals.
+The queries over `tierstore_cache_upstream_bytes_read_total`, `tierstore_cache_upstream_reads_total`
+and the `upstream_put` series need the release that adds them (see "Not in a release yet"); the
+others work on a released tierstore.
 
 ### Query: cache hit rate (v1)
 
@@ -430,7 +447,7 @@ label_replace(sum(rate(tierstore_cache_upstream_bytes_read_total[5m])), "tier", 
 The write-through counters (`upstream_puts`, `upstream_put_bytes`, `upstream_put_failures`) are
 also toward the cold store and have no shared counterpart. `tierstore_cache_bytes_served_upstream_total`,
 the fills and the evictions have none either, and `tierstore_cache_head_hits_total` counts
-clients' HEADs, not `op="head"` of the shared family. The `local` values count a GET once per reader at the cache, and the `hot` and `cold`
+the HEADs the cache is asked for (the S3 front's HEAD before each GET included), not `op="head"` of the shared family. The `local` values count a GET once per reader at the cache, and the `hot` and `cold`
 values once per GET at the proxy, so compare the rates, not the totals.
 
 ### Query: cache read amplification (v1)
