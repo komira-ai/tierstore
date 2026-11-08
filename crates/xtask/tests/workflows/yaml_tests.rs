@@ -27,15 +27,28 @@ fn ci_with_step(step: &str) -> (String, usize) {
     (spoiled, line)
 }
 
-/// The text of the first scalar in `node` whose text starts with `prefix`, and whether it
-/// was plain.
-fn scalar_starting(node: &yaml::Node, prefix: &str) -> Option<(String, bool)> {
-    match &node.value {
-        Value::Scalar { text, plain } => text.starts_with(prefix).then(|| (text.clone(), *plain)),
-        Value::Seq(items) => items.iter().find_map(|n| scalar_starting(n, prefix)),
-        Value::Map(entries) => entries
-            .iter()
-            .find_map(|(k, v)| scalar_starting(k, prefix).or_else(|| scalar_starting(v, prefix))),
+/// The `run` of the first step of the first job of the workflow `doc` (the step
+/// [`ci_with_step`] inserts): its text, and whether it was plain.
+fn first_run(doc: &yaml::Node) -> (String, bool) {
+    fn get<'a>(node: &'a yaml::Node, key: &str) -> &'a yaml::Node {
+        match &node.value {
+            Value::Map(entries) => entries
+                .iter()
+                .find(|(k, _)| k.as_str() == Some(key))
+                .map(|(_, v)| v)
+                .unwrap_or_else(|| panic!("no `{key}`")),
+            _ => panic!("`{key}` is looked up in a node that is not a mapping"),
+        }
+    }
+    let Value::Map(jobs) = &get(doc, "jobs").value else {
+        panic!("`jobs` is not a mapping")
+    };
+    let Value::Seq(steps) = &get(&jobs[0].1, "steps").value else {
+        panic!("`steps` is not a sequence")
+    };
+    match &get(&steps[0], "run").value {
+        Value::Scalar { text, plain } => (text.clone(), *plain),
+        _ => panic!("`run` is not a scalar"),
     }
 }
 
@@ -74,11 +87,13 @@ fn a_colon_tab_in_a_plain_scalar_is_refused_on_its_line() {
     // Catches: a reader that accepts `:` followed by a tab, which ends a plain scalar as a
     // space does.
     let (spoiled, line) = ci_with_step("run: echo a:\tb");
-    let problems = lint("ci.yml", &spoiled);
-    assert_eq!(problems.len(), 1, "{problems:?}");
-    assert!(
-        problems[0].starts_with(&format!("line {line}: not valid YAML: ")),
-        "{problems:?}"
+    let column = "      - run: echo a:\t".len() + 1;
+    assert_eq!(
+        lint("ci.yml", &spoiled),
+        vec![format!(
+            "line {line}: not valid YAML: ':' must be followed by a valid YAML whitespace \
+             (column {column})"
+        )]
     );
 }
 
@@ -118,7 +133,7 @@ fn the_issue_run_as_a_block_or_a_quoted_scalar_is_read_whole() {
         let (spoiled, _) = ci_with_step(&step);
         assert_eq!(lint("ci.yml", &spoiled), Vec::<String>::new(), "{step}");
         let doc = yaml::load(&spoiled).expect("valid YAML");
-        let (text, plain) = scalar_starting(&doc, "echo \"::notice::").expect(&step);
+        let (text, plain) = first_run(&doc);
         assert_eq!(text.trim_end(), ISSUE_COMMAND, "{step}");
         assert!(!plain, "{step}");
     }
@@ -139,10 +154,6 @@ fn a_space_hash_in_a_plain_scalar_starts_a_comment_and_a_hash_alone_does_not() {
         let (spoiled, _) = ci_with_step(step);
         assert_eq!(lint("ci.yml", &spoiled), Vec::<String>::new(), "{step:?}");
         let doc = yaml::load(&spoiled).expect("valid YAML");
-        assert_eq!(
-            scalar_starting(&doc, "echo a").or_else(|| scalar_starting(&doc, "echo \"::")),
-            Some((command.to_owned(), true)),
-            "{step:?}"
-        );
+        assert_eq!(first_run(&doc), (command.to_owned(), true), "{step:?}");
     }
 }
