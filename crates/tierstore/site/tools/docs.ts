@@ -216,7 +216,7 @@ export function docsPages(docs: readonly Doc[]): Page[] {
   ];
   for (const d of docs) {
     const description = d.summary.length > 200 ? `${d.summary.slice(0, 197)}...` : d.summary;
-    pages.push({ route: docRoute(d.stem), source: `docs-${d.stem}`, title: d.title, description, scripts: ['copy.js'], bands: false, html: `${docsNav(docs, d.stem)}\n${d.body}` });
+    pages.push({ route: docRoute(d.stem), source: `docs-${d.stem}`, title: d.title, description, scripts: ['copy.js'], bands: false, html: `<div class="docs-layout">\n${docsNav(docs, d.stem)}\n<div class="docs-body">\n${d.body}\n</div>\n</div>` });
   }
   return pages;
 }

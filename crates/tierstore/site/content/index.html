@@ -1,15 +1,15 @@
 <section class="hero">
   <svg class="hero-orbits" aria-hidden="true" viewBox="0 0 1200 800" preserveAspectRatio="xMidYMid slice" focusable="false">
     <g class="k-orbits" fill="none" transform="rotate(-14 600 400)" stroke="#B3DDEE" stroke-width="1">
-      <ellipse cx="600" cy="400" rx="330" ry="110" stroke-opacity="0.2"></ellipse>
-      <ellipse cx="600" cy="400" rx="440" ry="148" stroke-opacity="0.14"></ellipse>
-      <ellipse cx="600" cy="400" rx="560" ry="190" stroke-opacity="0.09"></ellipse>
+      <ellipse cx="600" cy="400" rx="330" ry="110" stroke-opacity="0.32"></ellipse>
+      <ellipse cx="600" cy="400" rx="440" ry="148" stroke-opacity="0.22"></ellipse>
+      <ellipse cx="600" cy="400" rx="560" ry="190" stroke-opacity="0.14"></ellipse>
     </g>
   </svg>
   <div class="wrap hero-grid">
     <div class="hero-copy">
       <h1 class="display k-mark">A hot tier in front of a <em>cold store</em>, behind one S3 endpoint.</h1>
-      <p class="lede k-line">tierstore is an S3 server that sits in front of two stores: a small, fast one and a large, cheap one. New objects go to the fast one, are copied to the large one in the background, and are cleared from the fast one when it fills up. Your programs see one bucket and talk to it with any S3 client.</p>
+      <p class="lede k-line">tierstore is an S3 server in front of a small, fast store and a large, cheap one. Your programs see one bucket and talk to it with any S3 client.</p>
       <p class="actions hero-links k-line"><a class="button button-primary" href="get-started.html">Get started</a> <a class="button" href="demo.html">See a start and a drain</a></p>
     </div>
     <figure class="flow k-fade-in">
@@ -69,10 +69,10 @@
   <div class="wrap">
     <h2 class="k-rv">Two tiers, one bucket</h2>
     <ul class="why-grid k-rv">
-      <li><h3>New objects go to the fast tier</h3><p>tierstore confirms a write as soon as the hot tier has the object. Writing a name that already exists either replaces the object or is refused, depending on how the store was set up.</p></li>
-      <li><h3>The large tier catches up quietly</h3><p>In the background, tierstore copies new objects to the cold tier. Only one copier runs at a time, and it works from a record of new writes, so it never has to scan your data.</p></li>
-      <li><h3>Old objects make room</h3><p>When the hot tier passes its upper size limit, tierstore removes the oldest objects that the cold tier already has, until it is back under the lower limit.</p></li>
-      <li><h3>Reads look in the fast tier first</h3><p>If an object is only in the cold tier, tierstore reads it from there and copies it back to the hot tier. A listing shows both tiers together.</p></li>
+      <li><h3>New objects go to the fast tier</h3><p>A write is confirmed as soon as the hot tier has the object.</p></li>
+      <li><h3>The large tier catches up quietly</h3><p>In the background, tierstore copies new objects to the cold tier.</p></li>
+      <li><h3>Old objects make room</h3><p>When the hot tier fills, the oldest objects the cold tier already has are removed.</p></li>
+      <li><h3>Reads look in the fast tier first</h3><p>An object only in the cold tier is read from there and copied back to the hot tier.</p></li>
     </ul>
     <p>To see why tierstore exists and where it stops, read <a href="why.html">why tierstore</a>. For the settings and for running it, see the <a href="/docs/configuration/">configuration</a> and <a href="/docs/operations/">operations</a> guides.</p>
   </div>
@@ -87,12 +87,10 @@
     <tbody>
     <tr><td>What an S3 client needs: read (a whole object or a range), write, delete, list, multipart upload, and signed requests (SigV4)</td><td><span class="tag tag-ok">works today</span></td></tr>
     <tr><td>Each tier can be an S3-compatible store, a directory on disk, or memory</td><td><span class="tag tag-ok">works today</span></td></tr>
-    <tr><td>Keys for different jobs: full access, read-only, signed links, garbage collection, and keys limited to a prefix</td><td><span class="tag tag-ok">works today</span></td></tr>
-    <tr><td>One TOML configuration file (<code>--config</code>), the only way to set tierstore up</td><td><span class="tag tag-ok">works today; the old command-line options for the data path are gone</span></td></tr>
+    <tr><td>One TOML configuration file (<code>--config</code>), the only way to set tierstore up; the old command-line options for the data path are gone</td><td><span class="tag tag-ok">works today</span></td></tr>
     <tr><td>A read cache on a machine's local disk, for build machines (<code>[local_cache]</code>, <code>[[policy]]</code> with <code>cache = true</code>)</td><td><span class="tag tag-ok">works; a build node, file only</span></td></tr>
-    <tr><td>HTTPS on the S3 endpoint (<code>server.tls_cert_file</code>, <code>server.tls_key_file</code>)</td><td><span class="tag tag-ok">works today; optional</span></td></tr>
-    <tr><td>Updates by the hostkeeper host updater, through <code>tierstore update-hook</code></td><td><span class="tag tag-ok">works today</span></td></tr>
     <tr><td>A Homebrew formula, an apt package, a container image</td><td><span class="tag tag-planned">none yet: there is a tarball and an example unit</span></td></tr>
     </tbody></table></div>
+    <p class="k-rv">Keys for different jobs, HTTPS and host updates work today too; the <a href="/docs/">operator guide</a> lists them all.</p>
   </div>
 </section>

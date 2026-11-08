@@ -103,7 +103,7 @@ test('the built Get started page: toml, shell and every client language are colo
   assert.ok(guide.includes('<pre class="hl">') && guide.includes('<span class="h-t">[server]</span>'), 'the configuration guide is not coloured');
 });
 
-// WCAG 2.x contrast of the highlight colours on the code panel (site.css names them, theme.css the panel).
+// WCAG 2.x contrast of the highlight colours on the code panel (site.css names both: the colours and --code-bg, the deep navy panel).
 const channel = (v: number): number => (v / 255 <= 0.03928 ? v / 255 / 12.92 : ((v / 255 + 0.055) / 1.055) ** 2.4);
 const luminance = (hex: string): number => {
   const n = parseInt(hex.slice(1), 16);
@@ -119,20 +119,21 @@ test('contrast: the formula gives 21 for black on white and 1 for a colour on it
   assert.equal(contrast('#123456', '#123456'), 1);
 });
 
-test('every highlight colour is at least 4.5:1 (WCAG AA) on the code panel and on the page background', () => {
+test('every highlight colour is at least 4.5:1 (WCAG AA) on the code panel, and so are the prompt, comment and output colours', () => {
   const site = readFileSync(join(SITE, 'static', 'site.css'), 'utf8');
   const theme = readFileSync(join(SITE, 'static', 'theme.css'), 'utf8');
-  const vars = new Map([...theme.matchAll(/--([a-z0-9-]+):\s*(#[0-9a-f]{6})/g)].map((m) => [m[1], m[2]] as const));
+  const vars = new Map([...theme.matchAll(/--([a-z0-9-]+):\s*(#[0-9a-f]{6})/g), ...site.matchAll(/--([a-z0-9-]+):\s*(#[0-9a-f]{6})/g)].map((m) => [m[1], m[2]] as const));
+  const panel = vars.get('code-bg') as string;
+  assert.equal(panel, '#0d1822', 'the code panel is the deep navy of the header and the hero');
+  for (const name of ['code-fg', 'on-deep-muted', 'orange']) assert.ok(contrast(vars.get(name) as string, panel) >= 4.5, `${name} on the code panel`);
   const colours = [...site.matchAll(/^\.hl \.(h-[a-z](?:, \.hl \.h-[a-z])*) \{ color: (#[0-9a-f]{6}|var\(--[a-z-]+\))/gm)];
   assert.ok(colours.length >= 5, 'the highlight rules were not found');
   const classes = new Set<string>();
   for (const m of colours) {
     for (const c of m[1].split(', .hl .')) classes.add(c);
     const colour = m[2].startsWith('var(') ? (vars.get(m[2].slice(6, -1)) as string) : m[2];
-    for (const bg of ['bg-code', 'bg']) {
-      const ratio = contrast(colour, vars.get(bg) as string);
-      assert.ok(ratio >= 4.5, `${m[1]} ${colour} on ${bg} is ${ratio.toFixed(2)}:1`);
-    }
+    const ratio = contrast(colour, panel);
+    assert.ok(ratio >= 4.5, `${m[1]} ${colour} on the code panel is ${ratio.toFixed(2)}:1`);
   }
   for (const c of ['h-k', 'h-s', 'h-n', 'h-c', 'h-t', 'h-a', 'h-f']) assert.ok(classes.has(c), `no colour for ${c}`);
 });

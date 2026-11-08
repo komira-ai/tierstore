@@ -2,6 +2,10 @@
 
 /* Prose is 40rem (640px) wide, as on komira.ai, and the page is 70rem; the theme's 43rem and 62rem are set again here, since theme.css is pinned. */
 :root { --measure: 40rem; --wrap: 70rem; }
+:root { --code-bg: #0d1822; --code-fg: #e8eef4; }
+
+/* Headings are set at 600: komira.ai's Sohne is licensed and not served here, and the system faces that stand in for it have a bold, so 500 would read as the body weight. */
+h1, h2, h3 { font-weight: 600; }
 
 /* ---- the home hero: copy on the left, the picture large on the right, with room around both ---- */
 .hero-grid.wrap { padding-top: 7rem; padding-bottom: 7.5rem; gap: 4rem; }
@@ -31,7 +35,9 @@
 .obj { stroke: none; }
 .obj-a { fill: var(--accent); }
 .obj-b, .obj-b-hot { fill: var(--blue); }
-.dot .halo { fill-opacity: 0.22; }
+.dot .halo { fill-opacity: 0.32; }
+.dot circle:not(.halo) { r: 8px; }
+.dot .halo { r: 20px; }
 .dot-hit { transform: translate(470px, 88px); fill: var(--accent); }
 .dot-miss { transform: translate(470px, 312px); fill: var(--orange); }
 .dot-promote { transform: translate(630px, 200px); fill: var(--blue); }
@@ -89,10 +95,10 @@
 @keyframes obj-pulse { 0%, 15%, 26%, 100% { opacity: 0.55; } 19%, 23% { opacity: 1; } }
 
 /* ---- sections ---- */
-.band { padding: 7.5rem 0; }
+.band { padding: 5.5rem 0; }
 .band .wrap > p { max-width: var(--measure); }
 .band .wrap > h2 + p { margin-bottom: 2rem; }
-@media (max-width: 40rem) { .band { padding: 4.5rem 0; } }
+@media (max-width: 40rem) { .band { padding: 3.5rem 0; } }
 .compact { max-width: 46rem; }
 .why-grid { display: grid; gap: 1.5rem; grid-template-columns: repeat(auto-fit, minmax(min(100%, 25rem), 1fr)); margin: 1.5rem 0 1.5rem; padding: 0; list-style: none; }
 .why-grid li { margin: 0; background: #ffffff; border: 1px solid var(--border); border-radius: var(--radius); padding: 1.5rem 1.5rem 1.6rem; }
@@ -107,8 +113,8 @@ td:last-child { min-width: 18rem; }
 @media (max-width: 34rem) { td:last-child { min-width: 14rem; } }
 .band .table-wrap td:first-child { white-space: normal; }
 
-/* ---- one narrow, centred column for a short page (Get started), as komira.ai sets its text ---- */
-.narrow { max-width: 46rem; margin: 0 auto; }
+/* ---- one narrow column for a short page (Get started), its left edge on the logo's ---- */
+.narrow { max-width: 46rem; margin: 0; }
 .narrow > h1 { margin-bottom: 1.5rem; }
 .narrow > h2 { margin-top: 6rem; }
 .narrow > p, .narrow > ul { max-width: var(--measure); }
@@ -127,31 +133,41 @@ ol.steps > li:last-child::after { display: none; }
 ol.steps h3 { margin: 0 0 0.4rem; }
 @media (max-width: 34rem) { ol.steps > li { padding-left: 2.75rem; } }
 
-/* ---- code blocks ---- */
+/* ---- code blocks: the deep navy of the header and the hero, light tokens; Copy sits in the corner at every width ---- */
 .code { position: relative; margin: 1rem 0 1.25rem; }
-.code pre { margin: 0; padding-right: 5.5rem; }
-.code pre .c { color: var(--fg-muted); }
-.code pre .p { color: var(--accent-text); user-select: none; }
-.code button.copy { position: absolute; top: 0.5rem; right: 0.5rem; }
-.hl .h-k { color: #b93a12; }
-.hl .h-s { color: #1f6b3a; }
-.hl .h-n { color: #6b4aa0; }
-.hl .h-c { color: #566a7f; font-style: italic; }
-.hl .h-t, .hl .h-f { color: var(--ink); font-weight: 700; }
-.hl .h-a { color: #2c6e8c; }
+.code pre {
+  margin: 0; padding: 1rem 5.5rem 1rem 1rem; background-color: var(--code-bg); color: var(--code-fg); border-radius: var(--radius); scrollbar-width: thin; scrollbar-color: var(--on-deep-muted) transparent;
+  /* a shadow at an edge that has more to scroll to (the gradients scroll with the text; the covers do not) */
+  background-image: linear-gradient(to right, var(--code-bg), var(--code-bg)), linear-gradient(to right, var(--code-bg), var(--code-bg)), linear-gradient(to right, rgb(232 238 244 / 28%), transparent), linear-gradient(to left, rgb(232 238 244 / 28%), transparent);
+  background-position: left center, right center, left center, right center; background-repeat: no-repeat; background-size: 1.5rem 100%, 1.5rem 100%, 1rem 100%, 1rem 100%; background-attachment: local, local, scroll, scroll;
+}
+.code pre .c { color: var(--on-deep-muted); }
+.code pre .p { color: var(--orange); user-select: none; }
+.code button.copy { position: absolute; top: 0.5rem; right: 0.5rem; min-width: 4.5rem; background: var(--deep-2); color: var(--on-deep); border-color: rgb(179 221 238 / 45%); }
+.code button.copy:hover { color: var(--orange); border-color: var(--orange); }
+.code button.copy.done { color: #9fe0b5; border-color: #9fe0b5; }
+.hl .h-k { color: #ffa07a; }
+.hl .h-s { color: #94dba8; }
+.hl .h-n { color: #cdb8f5; }
+.hl .h-c { color: #a9bccf; font-style: italic; }
+.hl .h-t, .hl .h-f { color: #ffffff; font-weight: 700; }
+.hl .h-a { color: #8fd0ec; }
 .svg-scroll { overflow-x: auto; }
 .svg-scroll svg { min-width: 760px; }
 
 /* ---- tabs (buttons that src/tabs.ts shows; with no script every panel is on the page under its title) ---- */
 .tabs { margin: 1.5rem 0; }
-.tab-list { display: flex; flex-wrap: wrap; gap: 0 1.5rem; border-bottom: 1px solid var(--border); }
+.tab-list { display: flex; flex-wrap: nowrap; gap: 0 1.75rem; overflow-x: auto; scrollbar-width: none; border-bottom: 1px solid var(--border); }
 .tab-list[hidden] { display: none; }
 .tab-list button {
-  font: inherit; font-size: 0.95rem; cursor: pointer; background: none; border: 0; border-bottom: 3px solid transparent;
-  margin-bottom: -1px; padding: 0.45rem 0; color: var(--fg-muted);
+  font: inherit; font-size: 1rem; cursor: pointer; background: none; border: 0; border-bottom: 4px solid transparent; white-space: nowrap;
+  margin-bottom: -1px; padding: 0 0.1rem; min-height: 44px; color: var(--fg-muted);
 }
 .tab-list button:hover { color: var(--accent-hover); }
-.tab-list button[aria-selected="true"] { color: var(--ink); border-bottom-color: var(--accent); }
+.tab-list button[aria-selected="true"] { color: var(--ink); font-weight: 700; border-bottom-color: var(--accent); }
+/* a method that is not out yet reads as muted, and a tab that is chosen is still bold and underlined */
+.tab-list button[data-tab$="coming-soon"]:not([aria-selected="true"]) { color: #6b7d90; font-style: italic; }
+@media (max-width: 34rem) { .tab-list { -webkit-mask-image: linear-gradient(to right, #000 calc(100% - 2rem), transparent); mask-image: linear-gradient(to right, #000 calc(100% - 2rem), transparent); } .tab-list { padding-right: 2rem; } }
 .tab-list button:focus-visible, .tab-panel:focus-visible { outline: 2px solid var(--accent); outline-offset: 2px; }
 .tab-panel { padding-top: 1rem; }
 .tab-panel[hidden] { display: none; }
@@ -161,15 +177,32 @@ ol.steps h3 { margin: 0 0 0.4rem; }
 
 /* ---- transcripts and notes ---- */
 .transcript pre { white-space: pre-wrap; overflow-wrap: anywhere; }
-.transcript .o { color: var(--fg-2); }
-.transcript .c { color: var(--fg-muted); }
+.transcript .o { color: var(--code-fg); }
+.transcript .c { color: var(--on-deep-muted); }
 .source-note { margin: 0.4rem 0 1rem; font-size: 0.9rem; color: var(--fg-muted); }
 
-/* ---- the operator guide (generated from crates/tierstore/docs by tools/docs.ts) ---- */
-.docs-nav { margin: 0 0 2rem; padding: 0 0 1rem; border-bottom: 1px solid var(--border); max-width: none; }
-.docs-nav ul { display: flex; flex-wrap: wrap; gap: 0.4rem 1.4rem; list-style: none; margin: 0; padding: 0; }
-.docs-nav li { margin: 0; }
-.docs-nav a[aria-current="page"] { font-weight: 700; text-decoration-color: var(--ink); }
+/* ---- the operator guide (generated from crates/tierstore/docs by tools/docs.ts): the guide's pages in a column on the left, the page beside it ---- */
+.docs-layout { display: grid; grid-template-columns: minmax(0, 1fr); gap: 1.5rem 3.5rem; align-items: start; }
+.docs-nav { max-width: none; }
+.docs-nav ul { display: flex; gap: 0.5rem; list-style: none; margin: 0; padding: 0 0 0.5rem; overflow-x: auto; scrollbar-width: thin; }
+.docs-nav li { margin: 0; flex: none; }
+.docs-nav a { display: block; padding: 0.4rem 0.9rem; border: 1px solid var(--border); border-radius: 99px; color: var(--fg-muted); text-decoration: none; font-size: 0.95rem; white-space: nowrap; }
+.docs-nav a:hover { color: var(--accent-hover); border-color: var(--accent); }
+.docs-nav a[aria-current="page"] { color: var(--ink); font-weight: 700; border-color: var(--ink); text-decoration: underline; text-decoration-color: var(--accent); text-decoration-thickness: 2px; text-underline-offset: 4px; }
+@media (min-width: 60rem) {
+  .docs-layout { grid-template-columns: 13rem minmax(0, 1fr); }
+  .docs-nav { position: sticky; top: calc(var(--header-h) + 1.5rem); }
+  .docs-nav ul { flex-direction: column; gap: 0; padding: 0; border-left: 1px solid var(--border); overflow: visible; }
+  .docs-nav a { border: 0; border-left: 3px solid transparent; margin-left: -1px; border-radius: 0; padding: 0.35rem 0 0.35rem 1rem; white-space: normal; text-decoration: none; }
+  .docs-nav a:hover { border-left-color: var(--border-strong); }
+  .docs-nav a[aria-current="page"] { border-left-color: var(--accent); text-decoration: none; }
+}
+.docs-body > p, .docs-body > ul, .docs-body > ol, .docs-body > h3, .docs-body > blockquote { max-width: var(--measure); }
+.docs-body > h1 { margin-top: 0; }
+.docs-body > h2 { margin-top: 3rem; }
+.docs-body > h2::before { margin-bottom: 0.8rem; }
+.docs-body .lede { font-size: 1.25rem; line-height: 1.5; font-weight: 400; color: var(--fg-2); }
+.docs-body .lede code { font-size: 0.9em; }
 .docs-list { list-style: none; margin: 1.5rem 0; padding: 0; display: grid; gap: 1rem; max-width: none; }
 .docs-list li { margin: 0; background: #ffffff; border: 1px solid var(--border); border-radius: var(--radius); padding: 1rem 1.25rem; }
 .docs-list a { font: 500 1.05rem var(--mono); }
@@ -189,7 +222,11 @@ main.wrap h2 .tag { margin-left: 0.6rem; }
   .band .table-wrap td { border: 0; padding: 0; min-width: 0; }
   .band .table-wrap td:last-child { margin-top: 0.5rem; }
   .band .table-wrap .tag { margin-left: 0; white-space: normal; border-radius: 1rem; }
-  .code { display: flex; flex-direction: column; }
-  .code pre { padding-right: 1rem; }
-  .code button.copy { position: static; align-self: flex-end; margin: 0.4rem 0 0; }
+  .code pre { padding-right: 4.75rem; }
+  .code button.copy { min-width: 3.6rem; }
+}
+@media (max-width: 34rem) {
+  .bar { gap: 0 0.75rem; }
+  .site-nav ul { gap: 0 0.75rem; }
+  .site-nav a { font-size: 0.9rem; }
 }
