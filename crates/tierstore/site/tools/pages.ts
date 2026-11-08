@@ -58,7 +58,7 @@ export const PAGES: readonly Page[] = [
     scripts: ['copy.js', 'reveal.js'],
     bands: true,
   },
-  { route: '/get-started/', source: 'get-started', title: 'Get started', description: 'Install tierstore, write a configuration file, start it and put and get an object.', nav: 'start', scripts: ['copy.js', 'reveal.js'], bands: false },
+  { route: '/get-started/', source: 'get-started', title: 'Get started', description: 'Install tierstore, write a configuration file, start it and put and get an object.', nav: 'start', scripts: ['copy.js', 'reveal.js', 'tabs.js'], bands: false },
   { route: '/install/', source: 'moved-install', title: 'Install', description: 'The install steps are on the Get started page.', scripts: ['copy.js'], bands: false, noindex: true, redirect: '/get-started/#install' },
   { route: '/getting-started/', source: 'moved-getting-started', title: 'Get started', description: 'The first steps are on the Get started page.', scripts: ['copy.js'], bands: false, noindex: true, redirect: '/get-started/' },
   { route: '/demo/', source: 'demo', title: 'Demo', description: 'A start, the probes and a drain of tierstore, as the code prints them.', scripts: ['copy.js', 'reveal.js'], bands: false },

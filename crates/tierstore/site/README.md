@@ -30,7 +30,7 @@ differ, so a change is made in both in the same pull request.
 | `served-policy.ts` | the Content-Security-Policy the site is served under, a copy of the policy `infra/site` sets as the header (`infra/site/test/site-stack.test.ts` holds the two equal) |
 | `static/theme.css` | the theme (the komira.ai look); `test/theme.test.ts` pins its sha256 |
 | `static/site.css` | this site's own rules, loaded after the theme |
-| `src/copy.ts`, `src/reveal.ts` | copy buttons on command blocks; scroll reveal |
+| `src/copy.ts`, `src/reveal.ts`, `src/tabs.ts` (with `src/tab-logic.ts`) | copy buttons on command blocks; scroll reveal; tabs (the arrow keys, the remembered choice in `localStorage`, all in `try`/`catch`) |
 | `tools/` | `pages.ts` (routes, titles, the white-paper URL), `layout.ts` (the page shell, with the `> tierstore` mark), `build.ts`, `check-dist.ts`, `links.ts`, `csp.ts`, `publish.ts` (uploads a built `dist/`; see Deploying) |
 | `test/` | golden output (`golden.manifest` guards the hand-made pages and assets, the docs index included; the pages rendered from the guide (`docs/<name>/index.html`) are left out of it and held by `docs.test.ts` and the crate's `docs_tests.rs`, so a guide edit needs no new manifest), the docs pages (`docs.test.ts`), links, Content-Security-Policy, theme digest, the optional footer link (`footer-slot.test.ts`), the "not built" statements and demo strings held to the crate source (`claims.test.ts`), public-repo scan, supply-chain policy, the publish program against stand-ins for the token service and the `aws` CLI (`publish.test.ts`) |
 
@@ -47,7 +47,7 @@ read from its source, and each block names the file. Values that differ on every
 
 ## Look and motion
 
-The look is komira.ai's: palette, type scale, link underline, code panel and the `k-fade`, `k-rise`, `k-spin`, `k-grow` keyframes. The face is a system sans-serif stack closest to Sohne; no font file is served. The home page's picture of requests (inline SVG, CSS keyframes, no script) shows a still frame under `prefers-reduced-motion`. `src/reveal.ts` is the scroll reveal; nothing is hidden without it. Code blocks marked `data-lang` are coloured by the build (`tools/highlight.ts`) and `<div class="tabs">` groups become CSS-only tabs (`tools/tabs.ts`).
+The look is komira.ai's: palette, type scale, link underline, code panel and the `k-fade`, `k-rise`, `k-spin`, `k-grow` keyframes. The face is a system sans-serif stack closest to Sohne; no font file is served. The home page's picture of requests (inline SVG, CSS keyframes, no script) shows a still frame under `prefers-reduced-motion`. `src/reveal.ts` is the scroll reveal; nothing is hidden without it. Code blocks marked `data-lang` are coloured by the build (`tools/highlight.ts`) and `<div class="tabs">` groups become ARIA tabs (`tools/tabs.ts`; `src/tabs.ts` shows the tab list, moves with the arrow keys and remembers the choice; with no script every panel is on the page, stacked). The languages are toml, sh, rust, python, js, go and java; the colours are in `static/site.css` and `test/highlight.test.ts` holds them to 4.5:1 on the code panel. The theme has no dark set, so there is none.
 
 ## Deploying
 
@@ -66,7 +66,7 @@ distribution does the upload. A pull request never reaches it.
 
 The publish program asks the runner for the job's token, exchanges it with `aws sts assume-role-with-web-identity` for credentials
 that last an hour, uploads the assets (immutable) then the pages (short cache) then `version.txt`, sweeps what the build no
-longer has, and invalidates the distribution. It refuses a `dist/` with fewer than 10 pages or 12 files (`MIN_HTML_PAGES` and `MIN_FILES`; a test keeps them under the real site and above half of it), so
+longer has, and invalidates the distribution. It refuses a `dist/` with fewer than 10 pages or 13 files (`MIN_HTML_PAGES` and `MIN_FILES`; a test keeps them under the real site and above half of it), so
 an empty build can never make the sweep empty the bucket, and a file type other than `.html`, `.js` and `.css` (the sync
 gives only those a content type and a cache rule; `check-dist` already refuses others). `releases/` is never touched. Because the repository and its Actions logs are
 public, the role, the bucket (its name ends in the account id) and the distribution are masked before the first command.

@@ -2,30 +2,57 @@
 <p class="lede">Install tierstore, write a configuration file, start it and put and get an object. It takes about five minutes on one machine.</p>
 
 <h2 id="install">Install <span class="tag tag-ok">works today</span></h2>
-<p>Take the tarball of your platform from this repository's releases. Each tab below downloads it and unpacks the binary; the steps after them check the download and place the binary as a service.</p>
-<div class="tabs" data-tabs="platform">
-<section data-tab="Linux x86_64">
+<p>Choose a method. The tarball works today; the script, Homebrew and apt are planned, and their tabs say so. The steps after the tabs check the download and place the binary as a service.</p>
+<div class="tabs" data-tabs="install">
+<section data-tab="Tarball">
+<p>Take the tarball of your platform from this repository's releases, and unpack the binary.</p>
+<p><strong>Linux x86_64</strong></p>
 <div class="code"><pre data-lang="sh"><span class="p">$</span> gh release download --repo komira-ai/tierstore \
     --pattern 'tierstore-*-linux-x86_64.tar.gz' --pattern SHA256SUMS
 <span class="p">$</span> tar -xzf tierstore-*-linux-x86_64.tar.gz tierstore
 <span class="p">$</span> ./tierstore --version</pre></div>
-</section>
-<section data-tab="Linux arm64">
+<p><strong>Linux arm64</strong></p>
 <div class="code"><pre data-lang="sh"><span class="p">$</span> gh release download --repo komira-ai/tierstore \
     --pattern 'tierstore-*-linux-arm64.tar.gz' --pattern SHA256SUMS
 <span class="p">$</span> tar -xzf tierstore-*-linux-arm64.tar.gz tierstore
 <span class="p">$</span> ./tierstore --version</pre></div>
-</section>
-<section data-tab="macOS (Apple silicon)">
+<p><strong>macOS (Apple silicon)</strong></p>
 <div class="code"><pre data-lang="sh"><span class="p">$</span> gh release download --repo komira-ai/tierstore \
     --pattern 'tierstore-*-macos-arm64.tar.gz' --pattern SHA256SUMS
 <span class="p">$</span> tar -xzf tierstore-*-macos-arm64.tar.gz tierstore
 <span class="p">$</span> ./tierstore --version</pre></div>
+<p class="note">No <code>gh</code>? Download the same files from the <a href="https://github.com/komira-ai/tierstore/releases">releases page</a>.</p>
+</section>
+<section data-tab="Script (planned)">
+<div class="notice notice-warn"><p><strong>Not built yet.</strong> There is nothing at this address, so the command fails today. Use the tarball.</p></div>
+<p>One shell script that works on Linux and on macOS: it picks the tarball of the host, checks its digest and places the binary.</p>
+<div class="code"><pre data-lang="sh"><span class="p">$</span> curl -fsSL https://tierstore.dev/install.sh | sh</pre></div>
+</section>
+<section data-tab="Homebrew (planned)">
+<div class="notice notice-warn"><p><strong>Not built yet.</strong> There is no formula, so the command fails today. Use the tarball.</p></div>
+<p>A formula in the tap <code>komira-ai/tap</code>, for macOS on Apple silicon and for Linux:</p>
+<div class="code"><pre data-lang="sh"><span class="p">$</span> brew install komira-ai/tap/tierstore</pre></div>
+</section>
+<section data-tab="apt (planned)">
+<div class="notice notice-warn"><p><strong>Not built yet.</strong> There is no <code>tierstore</code> package in the apt repository, so these commands fail today. Use the tarball.</p></div>
+<p>The package <code>tierstore</code> in the repository <code>packages.komira.ai</code>, shared with other Komira tools. Fetch the repository's key over HTTPS into <code>/usr/share/keyrings</code>, compare its fingerprint with the one the repository publishes, then write a deb822 source that trusts that file for this source only:</p>
+<div class="code"><pre data-lang="sh"><span class="p">$</span> sudo install -d -m 0755 /usr/share/keyrings
+<span class="p">$</span> sudo curl -fsSL https://packages.komira.ai/apt/komira-archive-keyring.gpg -o /usr/share/keyrings/komira-archive-keyring.gpg
+<span class="p">$</span> gpg --show-keys --with-fingerprint /usr/share/keyrings/komira-archive-keyring.gpg</pre></div>
+<div class="code"><pre data-lang="sh"><span class="p">$</span> sudo tee /etc/apt/sources.list.d/komira.sources &gt;/dev/null &lt;&lt;'EOF'
+Types: deb
+URIs: https://packages.komira.ai/apt
+Suites: stable
+Components: main
+Signed-By: /usr/share/keyrings/komira-archive-keyring.gpg
+EOF
+<span class="p">$</span> sudo apt update
+<span class="p">$</span> sudo apt install tierstore</pre></div>
+<p>The first fetch of the key trusts TLS once; the fingerprint is the check against it. There is no rpm package.</p>
 </section>
 </div>
-<p class="note">No <code>gh</code>? Download the same files from the <a href="https://github.com/komira-ai/tierstore/releases">releases page</a>. A one-line installer for every platform is planned: see <a href="#planned">Not in a release yet</a>.</p>
 
-<p>tierstore is a binary for Linux (x86_64 and arm64) and macOS (Apple silicon). It ships from the <a href="https://github.com/komira-ai/tierstore/releases">releases of this repository</a>: every release carries the tarball, its provenance bundle and its checksum. There is no Homebrew formula, apt package or container image yet (Homebrew, apt and a copy of the release files on tierstore.dev are planned: see <a href="#planned">Not in a release yet</a> below). hostkeeper packages exist and update it through <code>tierstore update-hook</code>; otherwise nothing updates it afterwards.</p>
+<p>tierstore is a binary for Linux (x86_64 and arm64) and macOS (Apple silicon). It ships from the <a href="https://github.com/komira-ai/tierstore/releases">releases of this repository</a>: every release carries the tarball, its provenance bundle and its checksum. There is no Homebrew formula, apt package or container image yet (a one-line script, Homebrew, apt and a copy of the release files on tierstore.dev are planned: see <a href="#planned">Not in a release yet</a> below). hostkeeper packages exist and update it through <code>tierstore update-hook</code>; otherwise nothing updates it afterwards.</p>
 
 <div class="notice notice-warn"><p><strong>Where the code lives.</strong> The source is <code>crates/tierstore</code> in <a href="https://github.com/komira-ai/tierstore">komira-ai/tierstore</a>, and the packaging notes are in <a href="https://github.com/komira-ai/tierstore/blob/main/packaging/README.md"><code>packaging</code></a>. Versions up to 0.2.0 were built in another repository, and their release history is there. From 0.3.0 on, every release is built and signed here.</p></div>
 
@@ -117,29 +144,8 @@ tierstore-0123456789abcdef0123456789abcdef01234567-macos-arm64.tar.gz</pre></div
 </ol>
 
 <h2 id="planned">Not in a release yet <span class="tag tag-planned">planned, not built</span></h2>
-<div class="notice notice-warn"><p><strong>None of this exists yet.</strong> The commands below fail today: there is no formula, no <code>tierstore</code> package in the apt repository and nothing at the release address. Use the tarball above. They are here so that you know what is coming and where.</p></div>
-<h3 id="installer">One-line installer <span class="tag tag-planned">planned, not built</span></h3>
-<p>One shell script that works on Linux and on macOS: it picks the tarball of the host, checks its digest and places the binary.</p>
-<div class="code"><pre data-lang="sh"><span class="p">$</span> curl -fsSL https://tierstore.dev/install.sh | sh</pre></div>
-<h3>Homebrew <span class="tag tag-planned">planned, not built</span></h3>
-<p>A formula in the tap <code>komira-ai/tap</code>, for macOS on Apple silicon and for Linux:</p>
-<div class="code"><pre><span class="p">$</span> brew install komira-ai/tap/tierstore</pre></div>
-<h3>apt <span class="tag tag-planned">planned, not built</span></h3>
-<p>The package <code>tierstore</code> in the repository <code>packages.komira.ai</code>, shared with other Komira tools. Fetch the repository's key over HTTPS into <code>/usr/share/keyrings</code>, compare its fingerprint with the one the repository publishes, then write a deb822 source that trusts that file for this source only:</p>
-<div class="code"><pre><span class="p">$</span> sudo install -d -m 0755 /usr/share/keyrings
-<span class="p">$</span> sudo curl -fsSL https://packages.komira.ai/apt/komira-archive-keyring.gpg -o /usr/share/keyrings/komira-archive-keyring.gpg
-<span class="p">$</span> gpg --show-keys --with-fingerprint /usr/share/keyrings/komira-archive-keyring.gpg</pre></div>
-<div class="code"><pre><span class="p">$</span> sudo tee /etc/apt/sources.list.d/komira.sources &gt;/dev/null &lt;&lt;'EOF'
-Types: deb
-URIs: https://packages.komira.ai/apt
-Suites: stable
-Components: main
-Signed-By: /usr/share/keyrings/komira-archive-keyring.gpg
-EOF
-<span class="p">$</span> sudo apt update
-<span class="p">$</span> sudo apt install tierstore</pre></div>
-<p>The first fetch of the key trusts TLS once; the fingerprint is the check against it. There is no rpm package.</p>
-<h3>Release files on tierstore.dev <span class="tag tag-planned">planned, not built</span></h3>
+<div class="notice notice-warn"><p><strong>None of this exists yet.</strong> The script, the formula and the apt package of the tabs above, and the release files below, are not built. Use the tarball.</p></div>
+<h3 id="release-files">Release files on tierstore.dev <span class="tag tag-planned">planned, not built</span></h3>
 <p>Each release is meant to be copied to <code>https://tierstore.dev/releases/&lt;version&gt;/</code>, written once and never changed, with <code>https://tierstore.dev/releases/latest.json</code> naming the newest. The releases of this repository on GitHub stay the place the files are built and signed; the checks under "Verify it" above are the same for a file taken from either.</p>
 
 <h2 id="configure">Configure</h2>
@@ -234,30 +240,87 @@ cache  = true</pre></div>
 <h2 id="run">Start it, then put and get an object</h2>
 <div class="code"><pre data-lang="sh"><span class="p">$</span> ./tierstore --config tierstore.toml</pre></div>
 <p>The process does not test its tiers: it opens the proxy (which reads and writes the hot tier's own state) and binds the address, then prints its version and the address it listens on. <code>curl http://127.0.0.1:9000/readyz</code> answers <code>ready</code>. Stop it with Ctrl-C: it drains and exits.</p>
-<p>The front serves one bucket, path-style, over plain HTTP, and refuses the checksum trailer that recent AWS clients send by default, so tell the <code>aws</code> CLI to send checksums only when required.</p>
+<p>The front serves one bucket, path-style, over plain HTTP (the example file has no TLS). The key id and the secret are the two lines of <code>access.key</code>. The <code>aws</code> CLI below is told to address the bucket in the path; the other clients are under <a href="#clients">Use it from your code</a>.</p>
 <div class="code"><pre data-lang="sh"><span class="p">$</span> export AWS_ACCESS_KEY_ID=AKIDEXAMPLE AWS_SECRET_ACCESS_KEY=example-secret-change-me AWS_DEFAULT_REGION=us-east-1
 <span class="p">$</span> aws configure set default.s3.addressing_style path
-<span class="p">$</span> aws configure set default.request_checksum_calculation when_required
-<span class="p">$</span> aws configure set default.response_checksum_validation when_required
 <span class="p">$</span> echo hello &gt; hello.txt
 <span class="p">$</span> aws --endpoint-url http://127.0.0.1:9000 s3api put-object --bucket tierstore --key hello.txt --body hello.txt
 <span class="p">$</span> aws --endpoint-url http://127.0.0.1:9000 s3api get-object --bucket tierstore --key hello.txt out.txt
 <span class="p">$</span> cat out.txt</pre></div>
 <p>Whether putting <code>hello.txt</code> again is refused depends on the store's format phase: on a store on the older entry format a put is create-only and the second is refused with 412; on a store on the marker format (<code>active-marks</code>) a plain put replaces the key, and <code>If-None-Match: *</code> is what makes a put create-only.</p>
 
-<h2 id="clients">Using it from an S3 client</h2>
-<p>The front serves one bucket, path-style, over plain HTTP, and checks SigV4 in the <code>Authorization</code> header (and presigned GET and PUT URLs). An SDK with its defaults sends some things the front refuses, so a client needs these settings. The crate's tests drive the front with <code>aws-sdk-rust</code> set this way; the aws CLI and boto3 are not tested.</p>
+<h2 id="clients">Use it from your code</h2>
+<p>Point an S3 client at the endpoint of the <code>s3</code> interface, with path-style addressing, and sign with a key of tierstore. tierstore issues no credentials of its own: the key id and the secret are those of a key file you wrote (<a href="/docs/keys/">Keys and roles</a>), the two lines of <code>server.access_key_file</code> for the full key, or a read-only key's for a client that only reads. Every tab below sets these:</p>
 <div class="table-wrap"><table>
 <thead><tr><th>Setting</th><th>Value</th><th>Why</th></tr></thead>
 <tbody>
-<tr><td>endpoint</td><td><code>http://&lt;host&gt;:&lt;port&gt;</code> of the <code>s3</code> interface</td><td>the front has no TLS; an <code>https://</code> endpoint fails</td></tr>
-<tr><td>addressing</td><td>path-style</td><td>the bucket is in the path; virtual-host addressing is not served</td></tr>
+<tr><td>endpoint</td><td><code>http://&lt;host&gt;:&lt;port&gt;</code> of the <code>s3</code> interface</td><td>without <code>server.tls_cert_file</code> and <code>server.tls_key_file</code> the front has no TLS, and an <code>https://</code> endpoint fails</td></tr>
+<tr><td>addressing</td><td>path-style</td><td>the bucket is in the path; virtual-hosted addressing is served only for the domains of <code>server.domains</code></td></tr>
 <tr><td>bucket</td><td>the <code>server.bucket</code> name</td><td>there is one</td></tr>
-<tr><td>region</td><td>tierstore's own <code>server.region</code>, <code>us-east-1</code> by default</td><td>the region is in the credential scope of the signature</td></tr>
-<tr><td>request and response checksums</td><td><code>when_required</code></td><td>the SDK default sends a checksum trailer in an <code>aws-chunked</code> body, which the front refuses with 501</td></tr>
+<tr><td>region</td><td>tierstore's own <code>server.region</code>, <code>us-east-1</code> by default</td><td>the region is in the credential scope of the signature, and a client with another is refused 403 <code>InvalidAccessKeyId</code></td></tr>
+<tr><td>credentials</td><td>a static key id and secret</td><td>the front has no session tokens and no STS</td></tr>
+<tr><td>checksums</td><td><code>when_required</code> (optional)</td><td>keeps the client from sending a checksum with every upload; the front takes the checksums of the SDK defaults and checks them</td></tr>
 </tbody></table></div>
 <div class="tabs" data-tabs="client">
-<section data-tab="Rust">
+<section data-tab="AWS CLI">
+<div class="code"><pre data-lang="sh"><span class="p">$</span> export AWS_ACCESS_KEY_ID=&lt;key id&gt; AWS_SECRET_ACCESS_KEY=&lt;secret&gt; AWS_DEFAULT_REGION=us-east-1
+<span class="p">$</span> aws configure set default.s3.addressing_style path
+<span class="p">$</span> aws --endpoint-url http://tierstore.example:9000 s3api put-object --bucket tierstore --key hello.txt --body hello.txt
+<span class="p">$</span> aws --endpoint-url http://tierstore.example:9000 s3api list-objects-v2 --bucket tierstore</pre></div>
+</section>
+<section data-tab="Python (boto3)">
+<div class="code"><pre data-lang="python">import boto3
+from botocore.config import Config
+
+client = boto3.client(
+    "s3",
+    endpoint_url="http://tierstore.example:9000",
+    region_name="us-east-1",
+    aws_access_key_id=KEY_ID,
+    aws_secret_access_key=SECRET,
+    config=Config(
+        signature_version="s3v4",
+        s3={"addressing_style": "path"},
+        request_checksum_calculation="when_required",
+        response_checksum_validation="when_required",
+    ),
+)
+client.put_object(Bucket="tierstore", Key="hello.txt", Body=b"hello")</pre></div>
+</section>
+<section data-tab="JavaScript (AWS SDK v3)">
+<div class="code"><pre data-lang="js">import { S3Client, PutObjectCommand } from "@aws-sdk/client-s3";
+
+const client = new S3Client({
+  endpoint: "http://tierstore.example:9000",
+  region: "us-east-1",
+  forcePathStyle: true,
+  credentials: { accessKeyId: KEY_ID, secretAccessKey: SECRET },
+  requestChecksumCalculation: "WHEN_REQUIRED",
+  responseChecksumValidation: "WHEN_REQUIRED",
+});
+await client.send(new PutObjectCommand({ Bucket: "tierstore", Key: "hello.txt", Body: "hello" }));</pre></div>
+</section>
+<section data-tab="Go (aws-sdk-go-v2)">
+<div class="code"><pre data-lang="go">cfg, err := config.LoadDefaultConfig(ctx,
+    config.WithRegion("us-east-1"),
+    config.WithCredentialsProvider(credentials.NewStaticCredentialsProvider(keyID, secret, "")),
+)
+if err != nil {
+    return err
+}
+client := s3.NewFromConfig(cfg, func(o *s3.Options) {
+    o.BaseEndpoint = aws.String("http://tierstore.example:9000")
+    o.UsePathStyle = true
+    o.RequestChecksumCalculation = aws.RequestChecksumCalculationWhenRequired
+    o.ResponseChecksumValidation = aws.ResponseChecksumValidationWhenRequired
+})
+_, err = client.PutObject(ctx, &amp;s3.PutObjectInput{
+    Bucket: aws.String("tierstore"),
+    Key:    aws.String("hello.txt"),
+    Body:   strings.NewReader("hello"),
+})</pre></div>
+</section>
+<section data-tab="Rust (aws-sdk-s3)">
 <div class="code"><pre data-lang="rust">use aws_sdk_s3::config::{Credentials, Region, RequestChecksumCalculation, ResponseChecksumValidation};
 
 let config = aws_sdk_s3::Config::builder()
@@ -271,43 +334,17 @@ let config = aws_sdk_s3::Config::builder()
     .build();
 let client = aws_sdk_s3::Client::from_conf(config);</pre></div>
 </section>
-<section data-tab="Python">
-<div class="code"><pre data-lang="python">import boto3
-from botocore.config import Config
-
-client = boto3.client(
-    "s3",
-    endpoint_url="http://tierstore.example:9000",
-    region_name="us-east-1",
-    aws_access_key_id=KEY_ID,
-    aws_secret_access_key=SECRET,
-    config=Config(
-        s3={"addressing_style": "path"},
-        request_checksum_calculation="when_required",
-        response_checksum_validation="when_required",
-    ),
-)
-client.put_object(Bucket="tierstore", Key="hello.txt", Body=b"hello")</pre></div>
-</section>
-<section data-tab="JavaScript">
-<div class="code"><pre data-lang="js">import { S3Client, PutObjectCommand } from "@aws-sdk/client-s3";
-
-const client = new S3Client({
-  endpoint: "http://tierstore.example:9000",
-  region: "us-east-1",
-  forcePathStyle: true,
-  credentials: { accessKeyId: KEY_ID, secretAccessKey: SECRET },
-  requestChecksumCalculation: "WHEN_REQUIRED",
-  responseChecksumValidation: "WHEN_REQUIRED",
-});
-await client.send(new PutObjectCommand({ Bucket: "tierstore", Key: "hello.txt", Body: "hello" }));</pre></div>
-</section>
-<section data-tab="aws CLI">
-<div class="code"><pre data-lang="sh"><span class="p">$</span> aws configure set default.s3.addressing_style path
-<span class="p">$</span> aws configure set default.request_checksum_calculation when_required
-<span class="p">$</span> aws configure set default.response_checksum_validation when_required
-<span class="p">$</span> aws --endpoint-url http://tierstore.example:9000 s3api list-objects-v2 --bucket tierstore</pre></div>
+<section data-tab="Java (AWS SDK v2)">
+<div class="code"><pre data-lang="java">S3Client client = S3Client.builder()
+    .endpointOverride(URI.create("http://tierstore.example:9000"))
+    .region(Region.US_EAST_1)
+    .forcePathStyle(true)
+    .credentialsProvider(StaticCredentialsProvider.create(AwsBasicCredentials.create(KEY_ID, SECRET)))
+    .requestChecksumCalculation(RequestChecksumCalculation.WHEN_REQUIRED)
+    .responseChecksumValidation(ResponseChecksumValidation.WHEN_REQUIRED)
+    .build();
+client.putObject(PutObjectRequest.builder().bucket("tierstore").key("hello.txt").build(), RequestBody.fromString("hello"));</pre></div>
 </section>
 </div>
-<p class="source-note">From <code>packaging/README.md</code>, "Using a stock SDK". That README also lists the settings read from the code and not tested.</p>
+<p class="source-note">From <code>packaging/README.md</code>, "Using a stock SDK". The crate's tests drive the front with the Rust SDK set as in its tab; the other tabs are written from the SDKs' documentation and not run against the front by the repository's tests.</p>
 <p>Next: <a href="/demo/">a start and a drain</a>, <a href="/docs/configure/">the configuration guide</a>, <a href="/docs/configuration/">the configuration reference</a> or <a href="/docs/">the whole operator guide</a>.</p>

@@ -62,7 +62,8 @@ test('the old install and getting-started addresses answer with a page that link
 
 test('Get started has the installer, the install steps, the configuration and the client snippets', () => {
   const html = page('/get-started/');
-  for (const id of ['install', 'planned', 'installer', 'configure', 'run', 'clients']) assert.ok(html.includes(`id="${id}"`), `no #${id}`);
+  for (const id of ['install', 'planned', 'configure', 'run', 'clients']) assert.ok(html.includes(`id="${id}"`), `no #${id}`);
   assert.match(html.replace(/<[^>]+>/g, ''), /curl -fsSL https:\/\/tierstore\.dev\/install\.sh \| sh/);
-  assert.match(html, /id="installer">One-line installer <span class="tag tag-planned">planned, not built<\/span>/);
+  assert.match(html, /role="tab"[^>]*>Script \(planned\)<\/button>/);
+  assert.match(html, /<strong>Not built yet\.<\/strong> There is nothing at this address/);
 });

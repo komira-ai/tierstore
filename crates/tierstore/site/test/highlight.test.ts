@@ -2,15 +2,14 @@
 //
 // Catches: a configuration block that comes out as plain text, a token that is wrapped but not escaped (markup from
 // the example reaching the page), a prompt mark that is lost, a language the highlighter does not know passing
-// silently, and tabs that hide content when no stylesheet is applied.
+// silently, a highlight colour that cannot be read on the code panel, and a Go or Java snippet left uncoloured.
 
 import assert from 'node:assert/strict';
 import { readFileSync } from 'node:fs';
 import { join } from 'node:path';
 import { test } from 'node:test';
 import { highlight, highlightBlocks } from '../tools/highlight';
-import { MAX_TABS, renderTabs } from '../tools/tabs';
-import { buildReal } from './support';
+import { buildReal, SITE } from './support';
 
 test('toml: tables, keys, strings, numbers and booleans each get their class', () => {
   const out = highlight('toml', '[server]\nproxy_id = "a-1" # name\nn = 8\nok = true\n');
@@ -74,32 +73,66 @@ test('a language the highlighter does not know is refused', () => {
   assert.throws(() => highlightBlocks('<pre data-lang="cobol">x</pre>'), /no language here/);
 });
 
-test('tabs: radios, labels and panels in order, the first checked; the panels all stay in the page', () => {
-  const out = renderTabs('<div class="tabs" data-tabs="client">\n<section data-tab="Rust"><p>r</p></section>\n<section data-tab="Python"><p>p</p></section>\n</div>');
-  assert.ok(out.includes('<input type="radio" class="tab-input" name="tab-client" id="tab-client-1" checked>'));
-  assert.ok(out.includes('<input type="radio" class="tab-input" name="tab-client" id="tab-client-2">'));
-  assert.ok(out.includes('<label for="tab-client-1">Rust</label><label for="tab-client-2">Python</label>'));
-  assert.equal(out.match(/<div class="tab-panel">/g)?.length, 2);
-  assert.ok(out.includes('<p>r</p>') && out.includes('<p>p</p>'));
+test('go and java: keywords, types, calls, strings and comments', () => {
+  const go = highlight('go', 'client := s3.NewFromConfig(cfg) // done\nBucket: aws.String("tierstore"), nil');
+  assert.ok(go.includes('<span class="h-f">NewFromConfig</span>'));
+  assert.ok(go.includes('<span class="h-c">// done</span>'));
+  assert.ok(go.includes('<span class="h-s">&quot;tierstore&quot;</span>'));
+  assert.ok(go.includes('<span class="h-k">nil</span>'));
+  assert.ok(highlight('go', 'return err').includes('<span class="h-k">return</span>'));
+  assert.ok(highlight('go', 'x := `raw "text"`').includes('<span class="h-s">`raw &quot;text&quot;`</span>'));
+  const java = highlight('java', 'S3Client client = S3Client.builder().forcePathStyle(true).build();');
+  assert.ok(java.includes('<span class="h-t">S3Client</span>'));
+  assert.ok(java.includes('<span class="h-f">builder</span>'));
+  assert.ok(java.includes('<span class="h-k">true</span>'));
+  assert.ok(highlight('java', 'new Foo(1); // n').includes('<span class="h-k">new</span>'));
 });
 
-test('tabs: one tab, or more than the stylesheet has rules for, is refused', () => {
-  const group = (n: number): string => `<div class="tabs" data-tabs="g">${Array.from({ length: n }, (_, i) => `<section data-tab="t${i}">x</section>`).join('')}</div>`;
-  assert.throws(() => renderTabs(group(1)), /1 tabs/);
-  assert.throws(() => renderTabs(group(MAX_TABS + 1)), /not 2 to/);
-  assert.doesNotThrow(() => renderTabs(group(MAX_TABS)));
-});
-
-test('the built Get started page: its toml, shell and client snippets are coloured, in tabs of several languages', () => {
+test('the built Get started page: toml, shell and every client language are coloured', () => {
   const dist = buildReal('highlight');
   const html = readFileSync(join(dist, 'get-started', 'index.html'), 'utf8');
   assert.ok(html.includes('<span class="h-t">[[interface]]</span>'));
   assert.ok(html.includes('<span class="h-a">proxy_id</span>'));
-  for (const label of ['Rust', 'Python', 'JavaScript', 'aws CLI', 'Linux x86_64', 'Linux arm64', 'macOS (Apple silicon)', 'One machine', 'Storage node', 'Build node']) {
-    assert.ok(html.includes(`>${label}</label>`), `no tab ${label}`);
-  }
+  assert.ok(html.includes('<span class="h-f">curl</span> <span class="h-a">-fsSL</span>'));
+  assert.ok(html.includes('<span class="h-f">LoadDefaultConfig</span>'), 'go is not coloured');
+  assert.ok(html.includes('<span class="h-t">S3Client</span>'), 'java and js are not coloured');
+  assert.ok(html.includes('<span class="h-k">use</span> aws_sdk_s3'), 'rust is not coloured');
+  assert.ok(html.includes('<span class="h-k">import</span> boto3'), 'python is not coloured');
   assert.ok(!html.includes('data-lang='), 'a data-lang marker reached the page');
-  assert.ok(!html.includes('data-tab'), 'a data-tab marker reached the page');
   const guide = readFileSync(join(dist, 'docs', 'configure', 'index.html'), 'utf8');
   assert.ok(guide.includes('<pre class="hl">') && guide.includes('<span class="h-t">[server]</span>'), 'the configuration guide is not coloured');
+});
+
+// WCAG 2.x contrast of the highlight colours on the code panel (site.css names them, theme.css the panel).
+const channel = (v: number): number => (v / 255 <= 0.03928 ? v / 255 / 12.92 : ((v / 255 + 0.055) / 1.055) ** 2.4);
+const luminance = (hex: string): number => {
+  const n = parseInt(hex.slice(1), 16);
+  return 0.2126 * channel((n >> 16) & 255) + 0.7152 * channel((n >> 8) & 255) + 0.0722 * channel(n & 255);
+};
+const contrast = (a: string, b: string): number => {
+  const [hi, lo] = [luminance(a), luminance(b)].sort((x, y) => y - x);
+  return (hi + 0.05) / (lo + 0.05);
+};
+
+test('contrast: the formula gives 21 for black on white and 1 for a colour on itself', () => {
+  assert.equal(Math.round(contrast('#000000', '#ffffff')), 21);
+  assert.equal(contrast('#123456', '#123456'), 1);
+});
+
+test('every highlight colour is at least 4.5:1 (WCAG AA) on the code panel and on the page background', () => {
+  const site = readFileSync(join(SITE, 'static', 'site.css'), 'utf8');
+  const theme = readFileSync(join(SITE, 'static', 'theme.css'), 'utf8');
+  const vars = new Map([...theme.matchAll(/--([a-z0-9-]+):\s*(#[0-9a-f]{6})/g)].map((m) => [m[1], m[2]] as const));
+  const colours = [...site.matchAll(/^\.hl \.(h-[a-z](?:, \.hl \.h-[a-z])*) \{ color: (#[0-9a-f]{6}|var\(--[a-z-]+\))/gm)];
+  assert.ok(colours.length >= 5, 'the highlight rules were not found');
+  const classes = new Set<string>();
+  for (const m of colours) {
+    for (const c of m[1].split(', .hl .')) classes.add(c);
+    const colour = m[2].startsWith('var(') ? (vars.get(m[2].slice(6, -1)) as string) : m[2];
+    for (const bg of ['bg-code', 'bg']) {
+      const ratio = contrast(colour, vars.get(bg) as string);
+      assert.ok(ratio >= 4.5, `${m[1]} ${colour} on ${bg} is ${ratio.toFixed(2)}:1`);
+    }
+  }
+  for (const c of ['h-k', 'h-s', 'h-n', 'h-c', 'h-t', 'h-a', 'h-f']) assert.ok(classes.has(c), `no colour for ${c}`);
 });

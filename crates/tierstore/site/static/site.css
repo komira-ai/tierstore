@@ -119,32 +119,22 @@ ol.steps h3 { margin: 0 0 0.4rem; }
 .svg-scroll { overflow-x: auto; }
 .svg-scroll svg { min-width: 760px; }
 
-/* ---- tabs (radio inputs and labels, no script) ---- */
-.tabs { position: relative; margin: 1.5rem 0; }
-.tab-input { position: absolute; opacity: 0; width: 1px; height: 1px; margin: 0; pointer-events: none; }
+/* ---- tabs (buttons that src/tabs.ts shows; with no script every panel is on the page under its title) ---- */
+.tabs { margin: 1.5rem 0; }
 .tab-list { display: flex; flex-wrap: wrap; gap: 0 1.5rem; border-bottom: 1px solid var(--border); }
-.tab-list label { cursor: pointer; padding: 0.45rem 0; margin-bottom: -1px; font-size: 0.95rem; color: var(--fg-muted); border-bottom: 3px solid transparent; }
-.tab-list label:hover { color: var(--accent-hover); }
-.tab-panel { display: none; padding-top: 1rem; }
+.tab-list[hidden] { display: none; }
+.tab-list button {
+  font: inherit; font-size: 0.95rem; cursor: pointer; background: none; border: 0; border-bottom: 3px solid transparent;
+  margin-bottom: -1px; padding: 0.45rem 0; color: var(--fg-muted);
+}
+.tab-list button:hover { color: var(--accent-hover); }
+.tab-list button[aria-selected="true"] { color: var(--ink); border-bottom-color: var(--accent); }
+.tab-list button:focus-visible, .tab-panel:focus-visible { outline: 2px solid var(--accent); outline-offset: 2px; }
+.tab-panel { padding-top: 1rem; }
+.tab-panel[hidden] { display: none; }
 .tab-panel > :last-child { margin-bottom: 0; }
-.tabs > .tab-input:nth-of-type(1):checked ~ .tab-list > label:nth-child(1) { color: var(--ink); border-bottom-color: var(--accent); }
-.tabs > .tab-input:nth-of-type(1):checked ~ .tab-panels > .tab-panel:nth-child(1) { display: block; }
-.tabs > .tab-input:nth-of-type(1):focus-visible ~ .tab-list > label:nth-child(1) { outline: 2px solid var(--accent); outline-offset: 2px; }
-.tabs > .tab-input:nth-of-type(2):checked ~ .tab-list > label:nth-child(2) { color: var(--ink); border-bottom-color: var(--accent); }
-.tabs > .tab-input:nth-of-type(2):checked ~ .tab-panels > .tab-panel:nth-child(2) { display: block; }
-.tabs > .tab-input:nth-of-type(2):focus-visible ~ .tab-list > label:nth-child(2) { outline: 2px solid var(--accent); outline-offset: 2px; }
-.tabs > .tab-input:nth-of-type(3):checked ~ .tab-list > label:nth-child(3) { color: var(--ink); border-bottom-color: var(--accent); }
-.tabs > .tab-input:nth-of-type(3):checked ~ .tab-panels > .tab-panel:nth-child(3) { display: block; }
-.tabs > .tab-input:nth-of-type(3):focus-visible ~ .tab-list > label:nth-child(3) { outline: 2px solid var(--accent); outline-offset: 2px; }
-.tabs > .tab-input:nth-of-type(4):checked ~ .tab-list > label:nth-child(4) { color: var(--ink); border-bottom-color: var(--accent); }
-.tabs > .tab-input:nth-of-type(4):checked ~ .tab-panels > .tab-panel:nth-child(4) { display: block; }
-.tabs > .tab-input:nth-of-type(4):focus-visible ~ .tab-list > label:nth-child(4) { outline: 2px solid var(--accent); outline-offset: 2px; }
-.tabs > .tab-input:nth-of-type(5):checked ~ .tab-list > label:nth-child(5) { color: var(--ink); border-bottom-color: var(--accent); }
-.tabs > .tab-input:nth-of-type(5):checked ~ .tab-panels > .tab-panel:nth-child(5) { display: block; }
-.tabs > .tab-input:nth-of-type(5):focus-visible ~ .tab-list > label:nth-child(5) { outline: 2px solid var(--accent); outline-offset: 2px; }
-.tabs > .tab-input:nth-of-type(6):checked ~ .tab-list > label:nth-child(6) { color: var(--ink); border-bottom-color: var(--accent); }
-.tabs > .tab-input:nth-of-type(6):checked ~ .tab-panels > .tab-panel:nth-child(6) { display: block; }
-.tabs > .tab-input:nth-of-type(6):focus-visible ~ .tab-list > label:nth-child(6) { outline: 2px solid var(--accent); outline-offset: 2px; }
+.tab-title { margin: 1rem 0 0; font-weight: 700; color: var(--ink); }
+.tabs-on .tab-title { display: none; }
 
 /* ---- transcripts and notes ---- */
 .transcript pre { white-space: pre-wrap; overflow-wrap: anywhere; }
