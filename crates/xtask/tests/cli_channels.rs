@@ -166,7 +166,8 @@ fn upload_and_tap_report_the_first_call_that_fails_and_a_bad_flag_is_a_usage_err
 
 #[test]
 fn upload_stops_at_the_first_aws_call_that_fails() {
-    // Catches: the upload verb's `aws` program flag not reaching the calls.
+    // Catches: the upload verb's `aws` program flag not reaching the calls, and an upload that
+    // goes on to a later file after a put fails.
     let d = fresh("upload-fails");
     let dist = d.join("dist");
     std::fs::create_dir(&dist).unwrap();
@@ -177,6 +178,8 @@ fn upload_stops_at_the_first_aws_call_that_fails() {
         "tierstore-1.2.3-macos-arm64.tar.gz",
         "tierstore_1.2.3_amd64.deb",
         "tierstore_1.2.3_arm64.deb",
+        "tierstore-1.2.3-1.aarch64.rpm",
+        "tierstore-1.2.3-1.x86_64.rpm",
     ] {
         let bytes = format!("bytes of {name}");
         std::fs::write(dist.join(name), &bytes).unwrap();
@@ -204,10 +207,19 @@ fn upload_stops_at_the_first_aws_call_that_fails() {
     );
     assert_eq!(o.status.code(), Some(1), "{}", stderr(&o));
     assert!(
-        stderr(&o).contains("put releases/1.2.3/tierstore-1.2.3-linux-aarch64.tar.gz"),
+        stderr(&o).contains("put releases/1.2.3/tierstore-1.2.3-1.aarch64.rpm"),
         "{}",
         stderr(&o)
     );
+    for later in [
+        "tierstore-1.2.3-1.aarch64.rpm.sigstore.json",
+        "tierstore-1.2.3-1.x86_64.rpm",
+        "tierstore-1.2.3-linux-aarch64.tar.gz",
+        "SHA256SUMS",
+        "latest.json",
+    ] {
+        assert!(!stderr(&o).contains(later), "{later}: {}", stderr(&o));
+    }
 }
 
 fn sha256(bytes: &[u8]) -> String {
