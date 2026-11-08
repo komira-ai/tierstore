@@ -58,6 +58,9 @@ function plain(text: string, known: ReadonlySet<string>): string {
   return out;
 }
 
+/** The fence languages the build highlights, and the language each is highlighted as. */
+const FENCE_LANGS: Readonly<Record<string, string | undefined>> = { toml: 'toml', sh: 'sh' };
+
 function link(label: string, target: string, known: ReadonlySet<string>): string {
   // The text was escaped before the links were read: undo that for the target, which is escaped again as an attribute.
   const t = target.replace(/&quot;/g, '"').replace(/&lt;/g, '<').replace(/&gt;/g, '>').replace(/&amp;/g, '&');
@@ -106,7 +109,9 @@ export function renderMarkdown(md: string, known: ReadonlySet<string>, name = 'a
       const body: string[] = [];
       for (i++; i < lines.length && !lines[i].startsWith('```'); i++) body.push(lines[i]);
       if (i >= lines.length) fail('a code fence that is not closed');
-      out.push(`<div class="code"><pre>${escapeText(body.join('\n'))}</pre></div>`);
+      // A fence in a language the site highlights (toml, sh) is marked so the build colours it (highlight.ts).
+      const lang = FENCE_LANGS[fence[1].trim().split(/\s+/)[0]];
+      out.push(`<div class="code"><pre${lang === undefined ? '' : ` data-lang="${lang}"`}>${escapeText(body.join('\n'))}</pre></div>`);
       continue;
     }
     const heading = /^(#{1,3}) (.+)$/.exec(line);
@@ -204,7 +209,6 @@ export function docsPages(docs: readonly Doc[]): Page[] {
       source: 'docs',
       title: 'Operator guide',
       description: 'The tierstore operator guide: install, keys and roles, configuration, operations, troubleshooting and limits.',
-      nav: 'docs',
       scripts: ['copy.js'],
       bands: false,
       html: index,
@@ -212,7 +216,7 @@ export function docsPages(docs: readonly Doc[]): Page[] {
   ];
   for (const d of docs) {
     const description = d.summary.length > 200 ? `${d.summary.slice(0, 197)}...` : d.summary;
-    pages.push({ route: docRoute(d.stem), source: `docs-${d.stem}`, title: d.title, description, nav: 'docs', scripts: ['copy.js'], bands: false, html: `${docsNav(docs, d.stem)}\n${d.body}` });
+    pages.push({ route: docRoute(d.stem), source: `docs-${d.stem}`, title: d.title, description, scripts: ['copy.js'], bands: false, html: `${docsNav(docs, d.stem)}\n${d.body}` });
   }
   return pages;
 }

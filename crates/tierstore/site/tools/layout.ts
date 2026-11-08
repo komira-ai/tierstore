@@ -4,7 +4,7 @@
 // Nothing is inline: two stylesheets (the shared theme, then the site's own) and module scripts (which a browser
 // defers), no style attribute, no event handler. check-dist.ts refuses the pages if that stops being true.
 
-import { NAV, type Page, REPO_URL, SITE_NAME, WHITE_PAPER_URL } from './pages';
+import { FOOTER_LINKS, NAV, type Page, RELEASES_URL, REPO_URL, SITE_NAME, WHITE_PAPER_URL } from './pages';
 
 /** The stylesheets every page loads, in order: the theme (byte for byte the shared file), then the site's own. */
 export const STYLESHEETS = ['theme.css', 'site.css'] as const;
@@ -18,7 +18,7 @@ const ESCAPES: Readonly<Record<string, string>> = { '&': '&amp;', '<': '&lt;', '
 export const escapeText = (s: string): string => s.replace(/[&<>"]/g, (c) => ESCAPES[c]);
 
 function header(page: Page): string {
-  const items = NAV.map((n) => `<li><a href="${n.route}"${page.nav === n.key ? ' aria-current="page"' : ''}>${escapeText(n.label)}</a></li>`);
+  const items = NAV.map((n) => `<li><a href="${escapeText(n.href)}"${n.key !== null && page.nav === n.key ? ' aria-current="page"' : ''}>${escapeText(n.label)}</a></li>`);
   return [
     '<header class="site-header"><div class="wrap bar">',
     `<a class="brand" href="/" aria-label="${SITE_NAME} home"><span class="gt" aria-hidden="true">&gt;</span>${SITE_NAME}</a>`,
@@ -29,12 +29,17 @@ function header(page: Page): string {
   ].join('\n');
 }
 
-/** The footer; the white-paper link is there only when there is a paper to link to (pages.ts: WHITE_PAPER_URL). */
-export function footer(whitePaper: string | null): string {
-  const paper = whitePaper === null ? '' : `<li><a href="${escapeText(whitePaper)}">White paper</a></li>`;
+/** The footer: the pages that are not in the top navigation, the releases, the source and the technical report. */
+export function footer(whitePaper: string): string {
+  const links = [
+    ...FOOTER_LINKS.map((l) => [l.label, l.href] as const),
+    ['Releases', RELEASES_URL],
+    ['Source on GitHub', REPO_URL],
+    ['Technical report', whitePaper],
+  ];
   return [
     `<footer class="site-footer"><div class="wrap"><p>${SITE_NAME} is licensed under the Apache License 2.0.</p>`,
-    `<ul><li><a href="${REPO_URL}">Source on GitHub</a></li>${paper}</ul></div></footer>`,
+    `<ul>${links.map(([label, href]) => `<li><a href="${escapeText(href)}">${escapeText(label)}</a></li>`).join('')}</ul></div></footer>`,
   ].join('\n');
 }
 
@@ -46,6 +51,7 @@ export function renderPage(page: Page, main: string, assets: Assets): string {
     `<title>${escapeText(`${page.title} - ${SITE_NAME}`)}</title>`,
     `<meta name="description" content="${escapeText(page.description)}">`,
     page.noindex ? '<meta name="robots" content="noindex">' : '',
+    page.redirect === undefined ? '' : `<meta http-equiv="refresh" content="0; url=${escapeText(page.redirect)}">`,
     ...STYLESHEETS.map((css) => `<link rel="stylesheet" href="${assets.base}${css}">`),
     ...page.scripts.map((js) => `<script type="module" src="${assets.base}${js}"></script>`),
   ].filter((l) => l !== '');

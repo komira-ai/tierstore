@@ -1,5 +1,5 @@
 //! The verify commands of the install guide (`crates/tierstore/docs/install.md`) and the site's
-//! install page (`crates/tierstore/site/content/install.html`), read for the tests that hold them
+//! install page (`crates/tierstore/site/content/get-started.html`), read for the tests that hold them
 //! to what this crate checks a release with.
 
 use std::path::Path;
@@ -9,7 +9,7 @@ pub fn pages() -> [(&'static str, String); 2] {
     let root = Path::new(env!("CARGO_MANIFEST_DIR")).join("../..");
     [
         "crates/tierstore/docs/install.md",
-        "crates/tierstore/site/content/install.html",
+        "crates/tierstore/site/content/get-started.html",
     ]
     .map(|path| {
         let text = std::fs::read_to_string(root.join(path)).expect("an install page");

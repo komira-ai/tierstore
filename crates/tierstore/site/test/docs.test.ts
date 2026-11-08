@@ -130,7 +130,7 @@ test('the first paragraph is the lede, and the page names the guide in its navig
   const page = built('/docs/keys/');
   assert.match(page, /<h1>Keys and roles<\/h1>\n<p class="lede">/);
   assert.match(page, /<a href="\/docs\/keys\/" aria-current="page">Keys and roles<\/a>/);
-  assert.match(page, /<a href="\/docs\/" aria-current="page">Docs<\/a>/);
+  assert.match(page, /<a href="\/docs\/">Docs<\/a>/, "the footer still links to the guide");
 });
 
 test('the workflow runs the site tests when the guide or the crate source changes, on a pull request and on a push', () => {

@@ -2,7 +2,7 @@
 // which scripts it loads. The content files are the page copy as written for the site (content/*.html: the inside of
 // <main>); the document around them is layout.ts.
 
-export type NavKey = 'start' | 'install' | 'demo' | 'why' | 'docs';
+export type NavKey = 'start';
 
 export interface Page {
   /** The URL path: '/' or '/name/' or '/404.html'. */
@@ -19,6 +19,8 @@ export interface Page {
   /** The home runs in bands that each carry their own .wrap; every other page sits in one. */
   bands: boolean;
   noindex?: boolean;
+  /** A page that moved: the route it now lives at. The page says so, links there and sends a browser there. */
+  redirect?: string;
   /** The inside of <main>, when the page is generated (docs.ts) and not copy under content/. */
   html?: string;
 }
@@ -31,19 +33,20 @@ export const CRATE_URL = `${REPO_URL}/tree/main/crates/tierstore`;
 export const PACKAGING_URL = `${REPO_URL}/blob/main/packaging/README.md`;
 export const RELEASES_URL = `${REPO_URL}/releases`;
 
-/**
- * The white paper. null while there is no final version: nothing on the site links to it, names it or reserves room
- * for it. Set to the paper's URL, and the footer gains the link.
- */
-export const WHITE_PAPER_URL: string | null = null;
+/** The technical report on tierstore, at the main site. The header and the footer link to it; it opens as any link does. */
+export const WHITE_PAPER_URL = 'https://komira.ai/whitepapers/tierstore';
 
-/** The navigation, in order: the label and the page it names. */
-export const NAV: readonly { key: NavKey; label: string; route: string }[] = [
-  { key: 'start', label: 'Get started', route: '/getting-started/' },
-  { key: 'install', label: 'Install', route: '/install/' },
-  { key: 'demo', label: 'Demo', route: '/demo/' },
-  { key: 'why', label: 'Why', route: '/why/' },
-  { key: 'docs', label: 'Docs', route: '/docs/' },
+/** The top navigation, in order: exactly these two. Get Started is a page of this site and the report is not. */
+export const NAV: readonly { key: NavKey | null; label: string; href: string }[] = [
+  { key: 'start', label: 'Get Started', href: '/get-started/' },
+  { key: null, label: 'Technical Report', href: WHITE_PAPER_URL },
+];
+
+/** The footer's links to this site's other pages, in order (the source and the report follow them). */
+export const FOOTER_LINKS: readonly { label: string; href: string }[] = [
+  { label: 'Docs', href: '/docs/' },
+  { label: 'Demo', href: '/demo/' },
+  { label: 'Why tierstore', href: '/why/' },
 ];
 
 export const PAGES: readonly Page[] = [
@@ -52,13 +55,14 @@ export const PAGES: readonly Page[] = [
     source: 'index',
     title: 'A hot tier over a cold store, behind one S3 endpoint',
     description: 'tierstore is an S3 server over a hot and a cold tier of S3-compatible stores. Open source, Apache 2.0.',
-    scripts: ['copy.js'],
+    scripts: ['copy.js', 'reveal.js'],
     bands: true,
   },
-  { route: '/getting-started/', source: 'getting-started', title: 'Get started', description: 'Download tierstore, write a configuration file, start it and put and get an object.', nav: 'start', scripts: ['copy.js'], bands: false },
-  { route: '/install/', source: 'install', title: 'Install', description: 'Get tierstore from a release of this repository and run it as a service.', nav: 'install', scripts: ['copy.js'], bands: false },
-  { route: '/demo/', source: 'demo', title: 'Demo', description: 'A start, the probes and a drain of tierstore, as the code prints them.', nav: 'demo', scripts: ['copy.js'], bands: false },
-  { route: '/why/', source: 'why', title: 'Why tierstore', description: 'The problem tierstore solves and how the tiers work.', nav: 'why', scripts: ['copy.js'], bands: false },
+  { route: '/get-started/', source: 'get-started', title: 'Get started', description: 'Install tierstore, write a configuration file, start it and put and get an object.', nav: 'start', scripts: ['copy.js', 'reveal.js'], bands: false },
+  { route: '/install/', source: 'moved-install', title: 'Install', description: 'The install steps are on the Get started page.', scripts: ['copy.js'], bands: false, noindex: true, redirect: '/get-started/#install' },
+  { route: '/getting-started/', source: 'moved-getting-started', title: 'Get started', description: 'The first steps are on the Get started page.', scripts: ['copy.js'], bands: false, noindex: true, redirect: '/get-started/' },
+  { route: '/demo/', source: 'demo', title: 'Demo', description: 'A start, the probes and a drain of tierstore, as the code prints them.', scripts: ['copy.js', 'reveal.js'], bands: false },
+  { route: '/why/', source: 'why', title: 'Why tierstore', description: 'The problem tierstore solves and how the tiers work.', scripts: ['copy.js', 'reveal.js'], bands: false },
   {
     route: '/404.html',
     source: '404',
