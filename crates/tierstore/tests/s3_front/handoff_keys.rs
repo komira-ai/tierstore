@@ -185,14 +185,12 @@ mod linux {
     use tokio::sync::oneshot;
 
     use super::{HEALTHZ, answer_of, healthz, serving, settings};
-    use crate::files::{Files, Tables};
+    use crate::files::{Files, Tables, socket_dir};
 
-    /// A scratch directory for the control socket, and the socket's path in it. The directory is
-    /// under the system's temporary directory, whose path is short enough for a Unix socket.
+    /// A scratch directory for the control socket, and the socket's path in it, as
+    /// [`socket_dir`] chooses it: short enough for a Unix socket.
     fn state() -> (TestDir, PathBuf) {
-        let dir = TestDir::under(std::env::temp_dir(), "handoff-keys");
-        let socket = dir.path().join("control.sock");
-        (dir, socket)
+        socket_dir("handoff-keys", "control.sock")
     }
 
     /// The settings of a start that hands off over `socket`, waiting `wait` (a key's text).
