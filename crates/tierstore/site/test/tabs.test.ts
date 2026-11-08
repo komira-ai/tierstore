@@ -11,7 +11,7 @@ import { join } from 'node:path';
 import { test } from 'node:test';
 import { enhance, nextIndex, recall, remember, storageOf } from '../src/tab-logic';
 import { MAX_TABS, renderTabs, slug } from '../tools/tabs';
-import { buildReal } from './support';
+import { buildReal, SITE } from './support';
 
 const group = (labels: string[], name = 'client'): string =>
   `<div class="tabs" data-tabs="${name}">\n${labels.map((l) => `<section data-tab="${l}"><p>${l} body</p></section>`).join('\n')}\n</div>`;
@@ -190,7 +190,7 @@ test('the built Install page: four install methods in tabs, every panel in the p
     const g = new RegExp(`<div class="tabs" data-group="${name}">[\\s\\S]*?<div class="tab-list"[^>]*>([\\s\\S]*?)</div>`).exec(html)?.[1] ?? '';
     return [...g.matchAll(/role="tab"[^>]*>([^<]+)<\/button>/g)].map((m) => m[1]);
   };
-  assert.deepEqual(labels('install'), ['Script', 'Homebrew', 'apt', 'Tarball']);
+  assert.deepEqual(labels('install'), ['Tarball · works today', 'Script · next release', 'Homebrew · next release', 'apt · next release']);
   assert.equal(html.match(/role="tabpanel"/g)?.length, 4);
   assert.ok(!/role="tabpanel"[^>]* hidden/.test(html));
   assert.ok(!html.includes('data-tabs='), 'a data-tabs marker reached the page');
@@ -210,4 +210,10 @@ test('the tab script ships with the page that has tabs, and the other pages do n
   assert.ok(readFileSync(join(dist, 'install', 'index.html'), 'utf8').includes('/tabs.js"'));
   assert.ok(!readFileSync(join(dist, 'why', 'index.html'), 'utf8').includes('/tabs.js"'));
   assert.ok(!readFileSync(join(dist, 'docs', 'index.html'), 'utf8').includes('/tabs.js"'));
+});
+
+test('the tabs are drawn as tabs: a box each, the chosen one joined to its panel and marked on top', () => {
+  const css = readFileSync(join(SITE, 'static', 'site.css'), 'utf8');
+  assert.match(css, /\.tab-list button \{[^}]*border: 1px solid var\(--border-strong\); border-bottom: 0; border-radius: var\(--radius\) var\(--radius\) 0 0;/);
+  assert.match(css, /\.tab-list button\[aria-selected="true"\] \{[^}]*border-top: 4px solid var\(--accent\)/);
 });

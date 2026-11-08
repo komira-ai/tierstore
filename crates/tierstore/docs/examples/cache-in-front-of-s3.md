@@ -7,16 +7,15 @@ Keep a disk cache on a build machine in front of a MinIO or RustFS bucket that i
 Build machines that read the same files again and again from a shared store. The store keeps the data; the cache holds what was used lately under a byte budget and evicts the least recently used objects first. This node takes no writes: it is a read cache.
 
 ```diagram
-alt: Clients read from tierstore on the build machine. A read the local cache holds is answered from the disk. A miss is read from the remote S3-compatible store and a copy is kept in the cache. The cache evicts the least recently used objects when it fills.
-node clients 0 1.5 "Clients" "build jobs"
-node tierstore 1 1.5 "tierstore" "build node" main
-node cache 2 1 "local cache" "disk, LRU" hot
-node store 2 2 "S3 store" "MinIO, RustFS" remote
-node gone 2 0 "freed" "space" ghost
+alt: Clients read from tierstore on the build machine. A read the local cache holds is answered from its disk. On a miss tierstore reads the remote S3-compatible store and the cache keeps a copy. When the cache fills it evicts the least recently used objects.
+node clients 0 1 "Clients" "build jobs"
+node tierstore 1 1 "tierstore" "build node" main
+node cache 2 0.5 "local cache" "disk, LRU" hot
+node store 2 1.5 "S3 store" "MinIO, RustFS" remote
 edge clients tierstore "read"
 edge tierstore cache "read"
-edge store cache "fill" dashed
-edge cache gone "evict" dashed
+edge tierstore store "read miss"
+edge store cache "keep copy"
 ```
 
 ## The file
@@ -46,7 +45,7 @@ prefix = "cas/b/"
 cache  = true
 ```
 
-`[local_cache]` is the directory and the byte budget of the cache. `[cold_store]` is the remote store, reached over plain `http://`, path-style; give it a key that can only read. `[[policy]]` names which keys are cached: here those under `cas/b/`, and at least one policy must say `cache = true`.
+`[local_cache]` is the directory and the byte budget of the cache. `[cold_store]` is the remote store, reached over plain `http://`, path-style; give it a key that can only read. The store is a self-hosted S3-compatible store (MinIO, RustFS): Amazon S3 is not supported as a tier yet, and TLS to a tier is not built. `[[policy]]` names which keys are cached: here those under `cas/b/`, and at least one policy must say `cache = true`.
 
 ## Commands
 

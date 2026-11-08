@@ -1,8 +1,12 @@
 # Configuration
 
-tierstore is configured by one TOML file given with `--config <path>`. The file is the only way to say what the data path is: which interfaces it serves, which tiers, which keys, which limits. A key that is left out has the default this page gives. A file holds no secret, only the paths of key files. The process takes no flag for any of it: the flags of earlier builds that did (--listen, --hot, --oci-listen and the rest) are refused at the start, with status 2 and a message that names the key of the file that replaces each, and there is no environment variable.
+tierstore is configured by one TOML file, given with `--config <path>`. A key that is left out has the default this page gives, and a file holds no secret, only the paths of key files. A file has one of three shapes, told apart by its tables; every shape has at least one `[[interface]]` of type `s3`, and a file with one tier alone is refused:
 
-A file has one of three shapes, told apart by its tables: a storage node (a hot tier and a cold tier), a build node (a read cache on local disk in front of one upstream, `[local_cache]`), and a storage node with a cache in front of its own proxy (all three tables). Every shape has at least one `[[interface]]` of type `s3`.
+- **A storage node**: `[hot_store]` and `[cold_store]`. New objects go to the hot tier and are copied to the cold tier. See [Two directories as one S3 bucket](examples/directory-as-bucket.md).
+- **A build node**: `[local_cache]` and `[cold_store]`, a read cache on local disk in front of one upstream. See [A cache in front of a remote S3-compatible store](examples/cache-in-front-of-s3.md).
+- **A storage node with a cache**: all three tables in one process. See [A cache in front of a hot and a cold store](examples/cache-hot-cold.md).
+
+Tiers today are directories or self-hosted S3-compatible stores (MinIO, RustFS) reached over `http://`. AWS S3 is not supported as a tier yet, and TLS to tiers is not built. Flags of earlier builds no longer set any of this; see [Moving from flags](configuration.md#moving-from-flags).
 
 ## A file for a storage node
 
@@ -43,8 +47,8 @@ region              = "us-east-1"
 max_request_bytes   = 268435456
 access_key_file     = "/etc/tierstore/access.key"
 read_only_key_files = ["/etc/tierstore/daemons.key"]
-presign_key_files   = ["/etc/tierstore/pack-presign.key"]
-gc_key_files        = ["/etc/tierstore/pack-gc.key"]
+presign_key_files   = ["/etc/tierstore/presign.key"]
+gc_key_files        = ["/etc/tierstore/gc.key"]
 
 [hot_store]
 kind               = "s3"
@@ -68,7 +72,7 @@ endpoint         = "http://s3-cold.example:9000"
 credentials_file = "/etc/tierstore/cold.credentials"
 ```
 
-Start it with the file and nothing else but the flags of the run:
+`presign_key_files` and `gc_key_files` hold scoped keys: one signs presigned PUT URLs, the other lists and deletes under one prefix for garbage collection (see [keys](keys.md)). Leave both out if you do not use them. Start it with the file and nothing else but the flags of the run:
 
 ```sh
 /usr/libexec/tierstore/tierstore --config /etc/tierstore/tierstore.toml --drain-lb-wait 10s --drain-deadline 15m

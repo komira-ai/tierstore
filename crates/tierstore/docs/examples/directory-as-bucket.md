@@ -1,26 +1,26 @@
-# A directory as an S3 bucket
+# Two directories as one S3 bucket
 
-Serve a hot directory on a fast disk and a cold directory on a big one as a single S3 bucket. No other service is needed.
+Serve a hot directory on a fast disk and a cold directory on a big one as one S3 bucket. No other service is needed.
 
 ## What it is for
 
 A machine with a fast disk and a big slow one, and programs that speak S3. No other service is needed: both tiers are directories on this machine.
 
 ```diagram
-alt: Clients send S3 requests to tierstore. A write goes to the hot directory. tierstore copies it to the cold directory in the background and removes old copies from the hot directory when it fills. A read the hot directory lacks is answered from the cold directory.
-node clients 0 1.5 "Clients" "any S3 client"
-node tierstore 1 1.5 "tierstore" "one S3 endpoint" main
-node hot 2 1 "hot dir" "fast disk" hot
-node cold 2 2 "cold dir" "big disk"
-node gone 2 0 "freed" "space" ghost
+alt: Clients send S3 requests to tierstore. A write goes to the hot directory, and tierstore copies it to the cold directory in the background (dashed). A read the hot directory lacks is read from the cold directory.
+node clients 0 1 "Clients" "any S3 client"
+node tierstore 1 1 "tierstore" "one S3 endpoint" main
+node hot 2 0.5 "hot dir" "fast disk" hot
+node cold 2 1.5 "cold dir" "big disk"
 edge clients tierstore "read/write" both
 edge tierstore hot "write"
-edge tierstore cold "read" dashed
+edge tierstore cold "read miss"
 edge hot cold "copy" dashed
-edge hot gone "evict" dashed
 ```
 
 ## The file
+
+Both tiers are `kind = "dir"`, which is tierstore's own flat layout (names are percent-encoded and a 32-byte tag comes before each body). A `dir` tier cannot serve a tree of files that already exists: fill it through S3.
 
 ```toml
 [[interface]]
@@ -42,7 +42,7 @@ kind = "dir"
 path = "/srv/big/tierstore"
 ```
 
-The two paths are two different directories, one on each disk. `hot_store.budget` is the bytes the hot directory may hold; past `hot_store.high_water` (80 percent by default) tierstore removes objects until usage is down to `hot_store.low_water` (70 percent).
+The two paths are two different directories, one on each disk. Tiers today are directories or self-hosted S3-compatible stores (MinIO, RustFS); this example needs neither. `hot_store.budget` is the bytes the hot directory may hold; past `hot_store.high_water` (80 percent by default) tierstore removes objects until usage is down to `hot_store.low_water` (70 percent).
 
 ## Commands
 

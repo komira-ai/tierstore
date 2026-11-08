@@ -128,11 +128,42 @@ test('the examples say what the code does: the hot tier is not an LRU, the cache
   }
 });
 
-test('each diagram is the three boxes of its example and shows the arrows the page names: read, write, copy and evict where the example has them', () => {
+test('each diagram shows the arrows its page names, in one vocabulary: solid is a request, dashed is the background copy; the cache is its own box; no box for freed space', () => {
   const arrows = (name: string): string[] => [...read('docs', 'examples', name, 'index.html').matchAll(/<text class="dg-edge-label"[^>]*>([^<]+)<\/text>/g)].map((m) => m[1]);
-  assert.deepEqual(arrows('directory-as-bucket'), ['read/write', 'write', 'read', 'copy', 'evict']);
-  assert.deepEqual(arrows('cache-hot-cold'), ['read/write', 'write', 'read', 'copy', 'evict']);
-  assert.deepEqual(arrows('cache-in-front-of-s3'), ['read', 'read', 'fill', 'evict']);
+  const dashed = (name: string): number => read('docs', 'examples', name, 'index.html').match(/dg-edge dg-edge-dashed/g)?.length ?? 0;
+  const boxes = (name: string): string[] => [...read('docs', 'examples', name, 'index.html').matchAll(/<text class="dg-name"[^>]*>([^<]+)<\/text>/g)].map((m) => m[1]);
+  assert.deepEqual(arrows('directory-as-bucket'), ['read/write', 'write', 'read miss', 'copy']);
+  assert.deepEqual(boxes('directory-as-bucket'), ['Clients', 'tierstore', 'hot dir', 'cold dir']);
+  assert.deepEqual(arrows('cache-hot-cold'), ['read/write', 'read/write', 'miss/write', 'copy']);
+  assert.deepEqual(boxes('cache-hot-cold'), ['Clients', 'tierstore', 'local cache', 'hot dir', 'cold store']);
+  assert.deepEqual(arrows('cache-in-front-of-s3'), ['read', 'read', 'read miss', 'keep copy']);
+  assert.deepEqual(boxes('cache-in-front-of-s3'), ['Clients', 'tierstore', 'local cache', 'S3 store']);
+  // The only dashed arrow is the copy from the hot tier to the cold one; a read from the cold tier is a request, so it is solid.
+  assert.equal(dashed('directory-as-bucket'), 1);
+  assert.equal(dashed('cache-hot-cold'), 1);
+  assert.equal(dashed('cache-in-front-of-s3'), 0);
+  for (const name of EXAMPLES) assert.doesNotMatch(read('docs', 'examples', name, 'index.html'), /freed|dg-ghost/, name);
+});
+
+test('a diagram sits in a box that scrolls sideways and can be focused; a card shows an icon of it, with boxes and arrows and no words', () => {
+  const page = read('docs', 'examples', 'cache-hot-cold', 'index.html');
+  assert.match(page, /<div class="diagram-scroll" role="group" aria-label="Diagram; on a narrow screen it scrolls sideways" tabindex="0">/);
+  assert.match(page, /<p class="diagram-hint">Swipe sideways to see the whole picture\.<\/p>/);
+  const css = readFileSync(join(SITE, 'static', 'site.css'), 'utf8');
+  assert.match(css, /\.diagram-hint \{ display: none;/);
+  assert.match(css, /\.diagram-scroll \.diagram-svg \{ min-width: 28rem; \}/);
+  const home = read('index.html');
+  const icons = [...home.matchAll(/<figure class="diagram diagram-icon">([\s\S]*?)<\/figure>/g)].map((m) => m[1]);
+  assert.equal(icons.length, 3);
+  for (const i of icons) {
+    assert.doesNotMatch(i, /<text/);
+    assert.ok((i.match(/<g class="dg-node/g)?.length ?? 0) >= 3 && (i.match(/<g class="dg-edge/g)?.length ?? 0) >= 2);
+  }
+  const GHOSTED = ['alt: x', 'node a 0 1 "A" "a"', 'node b 1 1 "B" "b"', 'node g 2 0 "G" "g" ghost', 'edge a b "go"', 'edge b g "gone"'].join('\n');
+  const icon = renderDiagram(parseDiagram(GHOSTED), false, true);
+  assert.equal(icon.match(/<g class="dg-node/g)?.length, 2, 'a ghost box is left out of an icon');
+  assert.equal(icon.match(/<g class="dg-edge/g)?.length, 1, 'and so is the arrow to it');
+  assert.match(renderDiagram(parseDiagram(GHOSTED)), /<text class="dg-name"[^>]*>G<\/text>/, 'the full picture keeps it');
 });
 
 // ---- the landing page ----
@@ -141,12 +172,15 @@ test('the landing page starts with Configure tierstore: one smallest file, each 
   const html = read('docs', 'index.html');
   assert.match(html, /<h1>Configure tierstore<\/h1>/);
   const headings = [...html.matchAll(/<h2 id="([a-z-]+)"/g)].map((m) => m[1]);
-  assert.deepEqual(headings, ['the-smallest-working-file', 'all-configuration-options', 'examples']);
+  assert.deepEqual(headings, ['pick-a-shape', 'the-smallest-working-file', 'all-configuration-options', 'examples']);
   const first = html.slice(html.indexOf('id="the-smallest-working-file"'), html.indexOf('id="all-configuration-options"'));
   assert.equal(first.match(/<pre class="hl">/g)?.length, 3, 'the file, the commands to start it and the put and get');
   for (const key of ['interface.type', 'interface.params', 'server.proxy_id', 'server.bucket', 'server.access_key_file', 'hot_store.kind', 'hot_store.path', 'hot_store.budget', 'cold_store.kind', 'cold_store.path']) {
     assert.ok(first.includes(`<code>${key}</code>`), `${key} is not explained`);
   }
+  const pick = html.slice(html.indexOf('id="pick-a-shape"'), html.indexOf('id="the-smallest-working-file"'));
+  for (const name of EXAMPLES) assert.ok(pick.includes(`href="/docs/examples/${name}/"`), `${name} is not linked in Pick a shape`);
+  assert.match(text(pick), /AWS S3 is not supported as a tier yet, and TLS to tiers is not built/);
   assert.match(text(first), /tierstore format-epoch --hot dir:\/srv\/tierstore\/hot --activate --apply/);
 });
 
@@ -163,8 +197,8 @@ test('every key of every table of the reference is on the landing page with its 
   }
   for (const id of ['interface', 'server', 'hot_store-and-cold_store', 'local_cache', 'policy', 'paramsupstream']) assert.ok(landing.includes(`<h3 id="${id}">`), id);
   // A default, and its meaning, as the reference gives them.
-  assert.match(landing, /<td><code>hot_store\.high_water<\/code><\/td><td>percent, 80<\/td><td>above this share of the budget, eviction begins<\/td>/);
-  assert.match(landing, /<td><code>policy\.cache<\/code><\/td><td>boolean, <code>false<\/code><\/td>/);
+  assert.match(landing, /<td><code>hot_store\.high_water<\/code><\/td><td data-label="Type, default">percent, 80<\/td><td>above this share of the budget, eviction begins<\/td>/);
+  assert.match(landing, /<td><code>policy\.cache<\/code><\/td><td data-label="Type, default">boolean, <code>false<\/code><\/td>/);
 });
 
 test('a change to a table of the reference changes the landing page, and a missing table is an error', () => {
@@ -195,7 +229,7 @@ test('each page is served as the Markdown it is made from, with links that resol
   }
   const example = read('docs', 'examples', 'cache-hot-cold.md');
   assert.match(example, /^# A cache in front of a hot and a cold store\n/);
-  assert.match(example, /^Diagram: Clients read and write through tierstore\./m);
+  assert.match(example, /^Diagram: Clients read and write through tierstore, which has three tiers in one process\./m);
   assert.match(example, /\]\(\.\.\/operations\.md#what-tierstore-requires-of-a-store\)/, 'a link to a page of docs/ goes one directory up');
   const landing = read('docs', 'index.md');
   assert.match(landing, /\]\(examples\/cache-hot-cold\.md\)/);

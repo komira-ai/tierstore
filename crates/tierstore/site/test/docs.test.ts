@@ -149,3 +149,34 @@ test('the workflow runs the site tests when the guide or the crate source change
     assert.equal(wf.split(glob).length - 1, 2, `the workflow's paths: filters (pull_request and push) each name ${glob.trim()}`);
   }
 });
+
+test('on a phone the guide menu is a disclosure that the page script closes, and with no script it is the open list; a wide screen shows the list with no summary', () => {
+  for (const route of ['/docs/', '/docs/keys/', '/docs/examples/cache-hot-cold/']) {
+    const html = built(route);
+    assert.match(html, /<details class="docs-menu" open>\n<summary>Docs menu<\/summary>\n<nav class="docs-nav" aria-label="Guide">/, route);
+    assert.match(html, /\/docs-menu\.js"><\/script>/, route);
+    assert.ok(html.includes('<p class="docs-nav-title">Configure</p>') && html.includes('<p class="docs-nav-title">Examples</p>') && html.includes('<p class="docs-nav-title">More guides</p>'), route);
+  }
+  const js = readFileSync(join(SITE, 'build', 'browser', 'docs-menu.js'), 'utf8');
+  assert.match(js, /\(min-width: 60rem\)/);
+  assert.match(js, /menu\.open = wide\.matches/);
+  const css = readFileSync(join(SITE, 'static', 'site.css'), 'utf8');
+  assert.match(css, /@media \(min-width: 60rem\) \{[^@]*\.docs-menu summary \{ display: none; \}/);
+});
+
+test('a table of the guide labels its middle columns, and on a phone its rows are stacked with the label before each cell', () => {
+  const html = built('/docs/');
+  assert.match(html, /<td data-label="Type, default">/);
+  assert.doesNotMatch(html, /<td data-label="What">/, 'the last column is the text and has no label');
+  assert.match(html, /<tr><td><code>hot_store\.kind<\/code><\/td><td>the kind of the hot tier/, 'a two-column table has no labels');
+  const css = readFileSync(join(SITE, 'static', 'site.css'), 'utf8');
+  assert.match(css, /\.docs-body \.table-wrap td\[data-label\]::before \{ content: attr\(data-label\) ": "/);
+  assert.match(css, /\.docs-body \.table-wrap tr, \.docs-body \.table-wrap td \{ display: block; \}/);
+});
+
+test('a code block wraps its long lines and keeps its text clear of the Copy button: on a wide screen by padding, on a phone by a strip of its own', () => {
+  const css = readFileSync(join(SITE, 'static', 'site.css'), 'utf8');
+  assert.match(css, /\.code pre \{[^}]*padding: 1rem 5\.5rem 1rem 1rem;[^}]*white-space: pre-wrap; overflow-wrap: anywhere;/);
+  assert.match(css, /@media \(max-width: 40rem\) \{[^@]*\.code pre \{ padding: 2\.9rem 1rem 1rem; \}/);
+  assert.match(css, /\.code button\.copy \{ position: absolute; top: 0\.5rem; right: 0\.5rem;/);
+});

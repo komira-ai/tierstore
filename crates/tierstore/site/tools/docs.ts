@@ -187,7 +187,8 @@ export function renderMarkdown(md: string, known: ReadonlySet<string>, name = 'a
       for (const row of rows.slice(2)) {
         const c = cells(row);
         if (c.length !== head.length) fail(`a table row of ${c.length} cells under a header of ${head.length}`);
-        html.push(`<tr>${c.map((x) => `<td>${inline(x, known)}</td>`).join('')}</tr>`);
+        // A middle column carries its header as a label, so that the row can be stacked on a phone (key over its type and default over its text).
+        html.push(`<tr>${c.map((x, k) => `<td${k > 0 && k < head.length - 1 && head[k] !== '' ? ` data-label="${escapeText(head[k].replace(/`/g, ''))}"` : ''}>${inline(x, known)}</td>`).join('')}</tr>`);
       }
       html.push('</tbody></table></div>');
       out.push(...html);
@@ -270,7 +271,8 @@ function docsNav(docs: readonly Doc[], current: string | null): string {
   const lead = docs.filter((d) => d.stem === LANDING || d.stem === REFERENCE);
   const examples = docs.filter((d) => isExample(d.stem));
   const guide = docs.filter((d) => !isExample(d.stem) && !lead.includes(d));
-  return `<nav class="docs-nav" aria-label="Guide">\n${group('Configure', lead)}\n${group('Examples', examples)}\n${group('Guide', guide)}\n</nav>`;
+  // A <details> that is open: on a phone src/docs-menu.js closes it and the summary opens it; with no script, or on a wide screen, it is the open list.
+  return `<details class="docs-menu" open>\n<summary>Docs menu</summary>\n<nav class="docs-nav" aria-label="Guide">\n${group('Configure', lead)}\n${group('Examples', examples)}\n${group('More guides', guide)}\n</nav>\n</details>`;
 }
 
 /** The examples as cards, each with its picture small: for the docs landing page and the home page. */
@@ -278,7 +280,7 @@ export function exampleCards(docs: readonly Doc[]): string {
   const cards = docs.filter((d) => isExample(d.stem)).map((d) => {
     const fence = /```diagram\n([\s\S]*?)```/.exec(d.md);
     if (fence === null) throw new Error(`docs: ${d.stem} has no diagram`);
-    const picture = renderDiagram(parseDiagram(fence[1], d.stem), false);
+    const picture = renderDiagram(parseDiagram(fence[1], d.stem), false, true);
     return `<li class="card"><a href="${docRoute(d.stem)}">${picture}<h3>${escapeText(d.title)}</h3><p>${escapeText(d.summary)}</p></a></li>`;
   });
   return `<ul class="cards">\n${cards.join('\n')}\n</ul>`;
@@ -305,7 +307,7 @@ export function docsPages(docs: readonly Doc[]): Page[] {
       title: d.title,
       description,
       nav: 'docs' as const,
-      scripts: ['copy.js'],
+      scripts: ['copy.js', 'docs-menu.js'],
       bands: false,
       html: `<div class="docs-layout">\n${docsNav(docs, d.stem)}\n<div class="docs-body">\n${body}\n</div>\n</div>`,
     };

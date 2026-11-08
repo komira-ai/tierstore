@@ -130,13 +130,18 @@ function head(x: number, y: number, dx: number, dy: number): string {
   return `<polygon class="dg-head" points="${num(x)},${num(y)} ${num(bx + px)},${num(by + py)} ${num(bx - px)},${num(by - py)}"></polygon>`;
 }
 
-export function renderDiagram(d: Diagram, caption = true): string {
+/**
+ * The picture as SVG. `icon` draws the small form for a card: the boxes and arrows with no words and no ghost boxes
+ * (the card's title and text say what they are), in a figure of its own class.
+ */
+export function renderDiagram(full: Diagram, caption = true, icon = false): string {
+  const d: Diagram = icon ? { ...full, nodes: full.nodes.filter((n) => n.kind !== 'ghost') } : full;
   const { w, h } = sizeOf(d);
   const at = (n: DiagramNode): { x: number; y: number } => ({ x: PAD + n.col * (BOX_W + COL_GAP), y: PAD + n.row * (BOX_H + ROW_GAP) });
   const byId = new Map(d.nodes.map((n) => [n.id, n]));
   const lines: string[] = [];
   const labels: string[] = [];
-  for (const e of d.edges) {
+  for (const e of d.edges.filter((e) => byId.has(e.from) && byId.has(e.to))) {
     const a = byId.get(e.from) as DiagramNode;
     const b = byId.get(e.to) as DiagramNode;
     const pa = at(a);
@@ -173,7 +178,7 @@ export function renderDiagram(d: Diagram, caption = true): string {
     lines.push(`<g class="${e.dashed ? 'dg-edge dg-edge-dashed' : 'dg-edge'}"><path class="${cls}" d="M${num(sx)} ${num(sy)} L${num(ex)} ${num(ey)}"></path>${head(x2 - dx * gap, y2 - dy * gap, dx, dy)}${e.both ? head(x1 + dx * gap, y1 + dy * gap, -dx, -dy) : ''}</g>`);
     const mx = (x1 + x2) / 2;
     const my = (y1 + y2) / 2;
-    labels.push(vertical ? `<text class="dg-edge-label" x="${num(mx + 9)}" y="${num(my + 5)}">${escapeText(e.label)}</text>` : `<text class="dg-edge-label" x="${num(mx)}" y="${num(my - 7)}" text-anchor="middle">${escapeText(e.label)}</text>`);
+    if (!icon) labels.push(vertical ? (a.col === COLUMNS - 1 ? `<text class="dg-edge-label" x="${num(mx - 9)}" y="${num(my + 5)}" text-anchor="end">${escapeText(e.label)}</text>` : `<text class="dg-edge-label" x="${num(mx + 9)}" y="${num(my + 5)}">${escapeText(e.label)}</text>`) : `<text class="dg-edge-label" x="${num(mx)}" y="${num(my - 7)}" text-anchor="middle">${escapeText(e.label)}</text>`);
   }
   const boxes = d.nodes.map((n) => {
     const p = at(n);
@@ -181,18 +186,23 @@ export function renderDiagram(d: Diagram, caption = true): string {
     return [
       `<g class="dg-node dg-${n.kind}">`,
       `<rect x="${num(p.x)}" y="${num(p.y)}" width="${BOX_W}" height="${BOX_H}" rx="4"></rect>`,
-      `<text class="dg-name" x="${num(cx)}" y="${num(p.y + 27)}" text-anchor="middle">${escapeText(n.label)}</text>`,
-      `<text class="dg-sub" x="${num(cx)}" y="${num(p.y + 47)}" text-anchor="middle">${escapeText(n.sub)}</text>`,
+      icon ? '' : `<text class="dg-name" x="${num(cx)}" y="${num(p.y + 27)}" text-anchor="middle">${escapeText(n.label)}</text>`,
+      icon ? '' : `<text class="dg-sub" x="${num(cx)}" y="${num(p.y + 47)}" text-anchor="middle">${escapeText(n.sub)}</text>`,
       '</g>',
     ].join('');
   });
+  const svg = [`<svg class="diagram-svg" viewBox="0 0 ${w} ${h}" aria-hidden="true" focusable="false">`, ...lines, ...boxes.filter((b) => b !== ''), ...labels, '</svg>'].join('\n');
+  // On a phone the picture keeps a width at which its words can be read and scrolls sideways inside its own box.
+  if (icon) return `<figure class="diagram diagram-icon">\n${svg}\n</figure>`;
   return [
-    `<figure class="diagram"><svg class="diagram-svg" viewBox="0 0 ${w} ${h}" aria-hidden="true" focusable="false">`,
-    ...lines,
-    ...boxes,
-    ...labels,
-    `</svg>${caption ? `<figcaption>${escapeText(d.alt)}</figcaption>` : ''}</figure>`,
-  ].join('\n');
+    '<figure class="diagram">',
+    `<div class="diagram-scroll" role="group" aria-label="Diagram; on a narrow screen it scrolls sideways" tabindex="0">`,
+    svg,
+    '</div>',
+    '<p class="diagram-hint">Swipe sideways to see the whole picture.</p>',
+    caption ? `<figcaption>${escapeText(d.alt)}</figcaption>` : '',
+    '</figure>',
+  ].filter((l) => l !== '').join('\n');
 }
 
 /** The picture as text, for the raw Markdown of a page: what the alt line says and each arrow on a line of its own. */

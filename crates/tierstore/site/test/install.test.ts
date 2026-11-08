@@ -207,7 +207,7 @@ function verifyProblems(cmds: string[]): string[] {
   const problems: string[] = [];
   const at = (pred: (c: string) => boolean): number[] => cmds.flatMap((c, i) => (pred(c) ? [i] : []));
   const sums = at((c) => c.startsWith('sha256sum'));
-  const online = at((c) => c.startsWith('gh attestation verify') && !c.includes('--bundle'));
+  const online = at((c) => c.startsWith('gh attestation verify') && !c.includes('--bundle') && operandOf(c) === ONLINE_FILE);
   const cosign = at((c) => c.startsWith('cosign verify-blob-attestation'));
   const offline = at((c) => c.startsWith('gh attestation verify') && c.includes('--bundle'));
   const root = at((c) => c.startsWith('gh attestation trusted-root'));
@@ -236,7 +236,7 @@ test('the install page and the install guide give each verify command whole, and
 test('the verify block check can fail: a flag dropped from one gh command, a missing tarball, a check or the trusted root out of order', () => {
   for (const [name, text] of INSTALL) {
     const cmds = commands(text);
-    const isOnline = (c: string): boolean => c.startsWith('gh attestation verify') && !c.includes('--bundle');
+    const isOnline = (c: string): boolean => c.startsWith('gh attestation verify') && !c.includes('--bundle') && operandOf(c) === ONLINE_FILE;
     const isOffline = (c: string): boolean => c.startsWith('gh attestation verify') && c.includes('--bundle');
     const said = (mutated: string[], what: string): boolean => verifyProblems(mutated).some((p) => p.includes(what));
     for (const flag of VERIFY_FLAGS) {
@@ -254,4 +254,17 @@ test('the verify block check can fail: a flag dropped from one gh command, a mis
     const reversed = [...cmds.slice(0, fetch), ...cmds.slice(fetch + 1), cmds[fetch]];
     assert.ok(said(reversed, 'the trusted root is fetched after'), `${name}: the trusted root fetched after its use passes`);
   }
+});
+
+// The short check of the Install page ("Check it"): one gh line under the checksum, with this repository as the one that must have built the file, before the pinned forms of "More ways".
+test('the install page gives a short check, the checksum and one gh line naming this repository, before the pinned forms; the guide, which has no short check, gives none', () => {
+  const quick = (c: string): boolean => c.startsWith('gh attestation verify') && !c.includes('--signer-workflow') && !c.includes('--bundle');
+  const cmds = commands(pages[0][1]);
+  const found = cmds.filter(quick);
+  assert.deepEqual(found, ['gh attestation verify tierstore-*-$os-$arch.tar.gz --repo komira-ai/tierstore']);
+  const at = (pred: (c: string) => boolean): number => cmds.findIndex(pred);
+  assert.ok(at((c) => c.startsWith('sha256sum')) < at(quick) && at(quick) < at((c) => c.startsWith('gh attestation verify') && c.includes('--signer-workflow') && !c.includes('--bundle')));
+  assert.equal(commands(pages[2][1]).filter(quick).length, 0);
+  // It says which tab it is for.
+  assert.match(pages[0][1].replace(/<[^>]+>/g, ''), /This is for the Tarball tab only\./);
 });

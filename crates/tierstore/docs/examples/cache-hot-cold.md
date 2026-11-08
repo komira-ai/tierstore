@@ -7,17 +7,16 @@ Run a disk cache, a hot directory and a cold S3-compatible store in one process.
 A storage node that is also read heavily by the machine it runs on. Writes pass through the cache to the hot tier and are copied to the cold store in the background; reads are answered from the cache, then the hot tier, then the cold store.
 
 ```diagram
-alt: Clients read and write through tierstore. A local cache answers reads. Writes go through the cache to the hot directory, which tierstore copies to the cold remote store in the background. The hot directory removes the oldest written objects the cold store already holds.
-node clients 0 1.5 "Clients" "any S3 client"
-node tierstore 1 1.5 "tierstore" "LRU cache" main
+alt: Clients read and write through tierstore, which has three tiers in one process. The local cache answers reads. A write passes through the cache to the hot directory, and the hot directory is copied to the cold remote store in the background (dashed). A read that misses the cache and the hot directory is read from the cold store.
+node clients 0 1 "Clients" "any S3 client"
+node tierstore 1 1 "tierstore" "one process" main
+node cache 2 0 "local cache" "disk, LRU" hot
 node hot 2 1 "hot dir" "fast disk" hot
 node cold 2 2 "cold store" "MinIO, RustFS" remote
-node gone 2 0 "freed" "space" ghost
 edge clients tierstore "read/write" both
-edge tierstore hot "write"
-edge tierstore cold "read" dashed
+edge tierstore cache "read/write" both
+edge cache hot "miss/write" both
 edge hot cold "copy" dashed
-edge hot gone "evict" dashed
 ```
 
 ## The file
@@ -51,6 +50,8 @@ budget = "40GiB"
 prefix = "cas/b/"
 cache  = true
 ```
+
+The cold store is a self-hosted S3-compatible store (MinIO, RustFS) reached over `http://`: Amazon S3 is not supported as a tier yet, and TLS to a tier is not built.
 
 With `[hot_store]`, `[cold_store]` and `[local_cache]` in one file the node owns the data and takes writes. `local_cache.write_through` is true whether it is left out or given, and `false` is refused: a write passes through the cache so that its entries stay right.
 

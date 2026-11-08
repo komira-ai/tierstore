@@ -36,11 +36,11 @@ export const RELEASES_URL = `${REPO_URL}/releases`;
 /** The technical report on tierstore, at the main site. The header and the footer link to it; it opens as any link does. */
 export const WHITE_PAPER_URL = 'https://komira.ai/whitepapers/tierstore';
 
-/** The top navigation, in order: exactly these three. Install and Docs are pages of this site; Why is the report, which is not. */
-export const NAV: readonly { key: NavKey | null; label: string; href: string }[] = [
+/** The top navigation, in order: exactly these three. Install and Docs are pages of this site; Why is the report, which is not: its link says so (an arrow, a hidden note for a screen reader, `rel="noopener"`). */
+export const NAV: readonly { key: NavKey | null; label: string; href: string; external?: boolean }[] = [
   { key: 'install', label: 'Install', href: '/install/' },
   { key: 'docs', label: 'Docs', href: '/docs/' },
-  { key: null, label: 'Why', href: WHITE_PAPER_URL },
+  { key: null, label: 'Why', href: WHITE_PAPER_URL, external: true },
 ];
 
 /** The footer's links to this site's other pages, in order (the releases, the source and the report follow them). */

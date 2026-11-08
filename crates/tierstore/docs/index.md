@@ -1,6 +1,16 @@
 # Configure tierstore
 
-tierstore reads one TOML file, given with `--config`. This page shows the smallest file that works, says what each key in it does, and lists every key of every table. Three complete examples follow the list.
+tierstore reads one TOML file, given with `--config`. This page helps you pick a shape, shows the smallest file that works, says what each key in it does, and lists every key of every table. Three complete examples, each with a diagram, follow the list.
+
+## Pick a shape
+
+A file has one of three shapes; one tier alone is refused. Pick by where the data lives:
+
+- [Two directories as one S3 bucket](examples/directory-as-bucket.md): a hot tier and a cold tier on one machine, a fast disk and a big one. Start here if you have nothing else running.
+- [A cache in front of a remote S3-compatible store](examples/cache-in-front-of-s3.md): a disk cache on a build machine, in front of a MinIO or RustFS bucket that is far away or slow. It takes no writes.
+- [A cache in front of a hot and a cold store](examples/cache-hot-cold.md): a storage node that is also read heavily by its own machine: a cache, a hot directory and a cold remote store in one process.
+
+Tiers today are directories or self-hosted S3-compatible stores (MinIO, RustFS) reached over `http://`. AWS S3 is not supported as a tier yet, and TLS to tiers is not built.
 
 ## The smallest working file
 
@@ -71,6 +81,6 @@ Every table of the file, with each key's type, its default and what it does. The
 
 Three complete files, each with a diagram, the commands to run it, what to expect and where it stops:
 
-- [A directory as an S3 bucket](examples/directory-as-bucket.md): a hot directory on a fast disk, a cold directory on a big one.
+- [Two directories as one S3 bucket](examples/directory-as-bucket.md): a hot directory on a fast disk, a cold directory on a big one.
 - [A cache in front of a remote S3-compatible store](examples/cache-in-front-of-s3.md): a disk cache that reads from a MinIO or RustFS bucket.
 - [A cache in front of a hot and a cold store](examples/cache-hot-cold.md): all three tables in one process.

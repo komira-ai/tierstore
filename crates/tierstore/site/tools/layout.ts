@@ -17,8 +17,15 @@ export interface Assets {
 const ESCAPES: Readonly<Record<string, string>> = { '&': '&amp;', '<': '&lt;', '>': '&gt;', '"': '&quot;' };
 export const escapeText = (s: string): string => s.replace(/[&<>"]/g, (c) => ESCAPES[c]);
 
+/** What a link that leaves the site carries: an arrow, and a note for a screen reader. */
+export const EXTERNAL_CUE = '<span class="ext" aria-hidden="true"> &#8599;</span><span class="visually-hidden"> (opens the technical report on komira.ai)</span>';
+
 function header(page: Page): string {
-  const items = NAV.map((n) => `<li><a href="${escapeText(n.href)}"${n.key !== null && page.nav === n.key ? ' aria-current="page"' : ''}>${escapeText(n.label)}</a></li>`);
+  const items = NAV.map((n) =>
+    n.external === true
+      ? `<li><a href="${escapeText(n.href)}" rel="noopener">${escapeText(n.label)}${EXTERNAL_CUE}</a></li>`
+      : `<li><a href="${escapeText(n.href)}"${n.key !== null && page.nav === n.key ? ' aria-current="page"' : ''}>${escapeText(n.label)}</a></li>`,
+  );
   return [
     '<header class="site-header"><div class="wrap bar">',
     `<a class="brand" href="/" aria-label="${SITE_NAME} home"><span class="gt" aria-hidden="true">&gt;</span>${SITE_NAME}</a>`,
@@ -39,7 +46,7 @@ export function footer(whitePaper: string): string {
   ];
   return [
     `<footer class="site-footer"><div class="wrap"><p>${SITE_NAME} is licensed under the Apache License 2.0.</p>`,
-    `<ul>${links.map(([label, href]) => `<li><a href="${escapeText(href)}">${escapeText(label)}</a></li>`).join('')}</ul></div></footer>`,
+    `<ul>${links.map(([label, href]) => `<li><a href="${escapeText(href)}"${href === whitePaper ? ' rel="noopener"' : ''}>${escapeText(label)}${href === whitePaper ? EXTERNAL_CUE : ''}</a></li>`).join('')}</ul></div></footer>`,
   ].join('\n');
 }
 

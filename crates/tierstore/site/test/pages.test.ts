@@ -55,15 +55,25 @@ test('Install is short: four tabs with one command block each, Next, then Verify
   assert.doesNotMatch(install, /\[\[interface\]\]|aws-sdk|boto3|forcePathStyle/);
 });
 
-test('every install method that is not in a release yet says so next to its command, and the tarball says it works today', () => {
+test('the tarball is the first tab and says it works today; every method that is not in a release yet says so in its tab and next to its command', () => {
+  const labels = [...install.matchAll(/role="tab"[^>]*>([^<]+)<\/button>/g)].map((m) => m[1]);
+  assert.deepEqual(labels, ['Tarball · works today', 'Script · next release', 'Homebrew · next release', 'apt · next release']);
   const t = text(install);
   const label = (needle: string): string => { const at = t.indexOf(needle); assert.ok(at > 0, needle); return t.slice(Math.max(0, at - 700), at); };
   for (const cmd of ['curl -fsSL https://tierstore.dev/install.sh | sh', 'brew install komira-ai/tap/tierstore', 'sudo apt install tierstore']) {
-    assert.match(label(cmd), /From the next release/, cmd);
+    assert.match(label(cmd), /Not in a release yet/, cmd);
   }
-  assert.match(label('gh release download'), /Works today/);
+  assert.match(label('gh release download'), /works today/);
   assert.match(t, /Signed-By: \/usr\/share\/keyrings\/komira-archive-keyring\.gpg/);
   assert.match(t, /https:\/\/packages\.komira\.ai\/apt\/komira-archive-keyring\.gpg/);
+});
+
+test('every install block is followed by a version check, and the page says which tabs Verify is for', () => {
+  const panels = [...install.matchAll(/<div class="tab-panel"[^>]*>([\s\S]*?)\n<\/div>\n(?=<div class="tab-panel"|<\/div>)/g)].map((m) => text(m[1]));
+  assert.equal(panels.length, 4);
+  for (const p of panels) assert.match(p, /tierstore --version/);
+  assert.match(text(install), /Verify the tarball[\s\S]*This is for the Tarball tab only\. The script checks its own download, and Homebrew and apt install from their own repositories/);
+  assert.deepEqual([...install.matchAll(/<h[34] id="([a-z-]+)"/g)].map((m) => m[1]).slice(0, 2), ['check-it', 'more-ways']);
 });
 
 test('the tarball block takes the platform of the machine it runs on: Linux or macOS, x86_64 or arm64, with its bundle and SHA256SUMS', () => {
