@@ -42,8 +42,10 @@ function distWith(name: string, files: string[]): string {
   return dist;
 }
 
-const PAGES = ['index.html', '404.html', 'install/index.html', 'getting-started/index.html', 'docs/index.html', 'about/index.html', 'why/index.html', 'config/index.html', 'demo/index.html', 'get-started/index.html'];
-const ASSETS = ['assets/x/a.js', 'assets/x/b.js', 'assets/x/s.css', 'install.sh'];
+const PAGES = ['index.html', '404.html', 'install/index.html', 'getting-started/index.html', 'docs/index.html', 'docs/keys/index.html', 'docs/limits/index.html', 'why/index.html', 'config/index.html', 'demo/index.html', 'get-started/index.html', 'docs/examples/a/index.html'];
+// The docs as Markdown and the two files for programs: plain text, each with a content type and a cache rule of its own.
+const TEXT = ['llms.txt', 'llms-full.txt', 'docs/keys.md', 'docs/limits.md', 'docs/overview.md', 'docs/index.md', 'docs/troubleshooting.md', 'docs/examples/a.md', 'docs/examples/b.md'];
+const ASSETS = ['assets/x/a.js', 'assets/x/b.js', 'assets/x/s.css', 'install.sh', ...TEXT];
 
 /** A built-looking dist/: the floor's worth of pages and files. */
 function fakeDist(name: string): string {
@@ -113,21 +115,36 @@ test('the command line must give every flag once, with a value of the right shap
   for (const [argv, why] of refused) assert.throws(() => parseArgs(argv), why, argv.join(' '));
 });
 
-test('the plan uploads assets, then pages, then the install script, then the version, then sweeps, then invalidates', () => {
+test('the plan uploads assets, then pages, then the Markdown and text files, then the install script, then the version, then sweeps, then invalidates', () => {
   const p = plan(GOOD, '/v');
   const verbs = p.map((a) => a.slice(0, 2).join(' '));
-  assert.deepEqual(verbs, ['s3 sync', 's3 sync', 's3 sync', 's3 sync', 's3 cp', 's3 sync', 'cloudfront create-invalidation']);
+  assert.deepEqual(verbs, ['s3 sync', 's3 sync', 's3 sync', 's3 sync', 's3 sync', 's3 sync', 's3 cp', 's3 sync', 'cloudfront create-invalidation']);
   // Only the sweep deletes, and it is the last thing before the invalidation.
   const deleting = p.map((a, i) => (a.includes('--delete') ? i : -1)).filter((i) => i >= 0);
-  assert.deepEqual(deleting, [5]);
-  assert.deepEqual(p[6], ['cloudfront', 'create-invalidation', '--distribution-id', GOOD.distributionId, '--paths', '/*']);
+  assert.deepEqual(deleting, [7]);
+  assert.deepEqual(p[8], ['cloudfront', 'create-invalidation', '--distribution-id', GOOD.distributionId, '--paths', '/*']);
   // Assets are immutable, pages are not.
   assert.ok(p[0].includes(IMMUTABLE) && p[1].includes(IMMUTABLE));
   assert.ok(p[2].includes(PAGE) && !p[2].includes(IMMUTABLE));
 });
 
+test('the docs as Markdown and the .txt files are uploaded with their own content types and the pages\' short cache, and only those types are allowed', () => {
+  const p = plan(GOOD, '/v');
+  for (const [i, include, type] of [[3, '*.md', 'text/markdown; charset=utf-8'], [4, '*.txt', 'text/plain; charset=utf-8']] as const) {
+    const sync = p[i];
+    assert.deepEqual(sync.flatMap((x, j) => (x === '--include' ? [sync[j + 1]] : [])), [include]);
+    assert.equal(sync[sync.indexOf('--content-type') + 1], type);
+    assert.equal(sync[sync.indexOf('--cache-control') + 1], PAGE);
+  }
+  // Every published type has a sync of its own that gives it a content type: nothing is uploaded by the sweep alone.
+  for (const f of listFiles(buildReal('publish-types'))) {
+    const covered = p.slice(0, 6).some((sync) => sync.some((x, j) => sync[j - 1] === '--include' && new RegExp(`^${x.replace(/[.]/g, '\\.').replace(/\*/g, '.*')}$`).test(f)));
+    assert.ok(covered, `${f} is in no sync with a content type`);
+  }
+});
+
 test('install.sh is uploaded alone, as text/x-shellscript, with the pages\' short cache and never as immutable', () => {
-  const upload = plan(GOOD, '/v')[3];
+  const upload = plan(GOOD, '/v')[5];
   assert.equal(upload.slice(0, 4).join(' '), `s3 sync ${GOOD.dist} s3://${GOOD.bucket}/`);
   const includes = upload.flatMap((x, i) => (x === '--include' ? [upload[i + 1]] : []));
   assert.deepEqual(includes, [INSTALL_SCRIPT]);
@@ -135,7 +152,7 @@ test('install.sh is uploaded alone, as text/x-shellscript, with the pages\' shor
   assert.equal(upload[upload.indexOf('--cache-control') + 1], PAGE);
   assert.equal(INSTALL_SCRIPT, 'install.sh');
   // No other sync gives it a type: the page sync includes only *.html and the asset syncs only assets/*.
-  for (const i of [0, 1, 2]) assert.equal(plan(GOOD, '/v')[i].includes(INSTALL_SCRIPT), false);
+  for (const i of [0, 1, 2, 3, 4]) assert.equal(plan(GOOD, '/v')[i].includes(INSTALL_SCRIPT), false);
 });
 
 test('no command writes to another bucket, and none can delete or overwrite under releases/', () => {
@@ -155,7 +172,7 @@ test('no command writes to another bucket, and none can delete or overwrite unde
     assert.equal(argv.includes('--force'), false);
   }
   // The sweep must not delete version.txt, which is not in dist/.
-  const sweep = plan(GOOD, '/v')[5];
+  const sweep = plan(GOOD, '/v')[7];
   assert.ok(sweep.join(' ').includes('--exclude version.txt'));
 });
 
@@ -272,14 +289,14 @@ test('the floors sit below the built site and above a gutted one', () => {
 
 test('a file type the sync would upload without a content type or cache rule is refused', () => {
   // install.sh is the one other file; a second script, or the same name below the root, has no content type or cache rule.
-  for (const extra of ['logo.png', 'assets/x/font.woff2', 'data.json', 'robots.txt', 'x.svg', 'uninstall.sh', 'docs/install.sh', 'install.sh.bak']) {
+  for (const extra of ['logo.png', 'assets/x/font.woff2', 'data.json', 'robots.xml', 'x.svg', 'uninstall.sh', 'docs/install.sh', 'install.sh.bak']) {
     const dist = distWith(`publish-type-${extra.replace(/[^a-z0-9]/gi, '_')}`, [...PAGES, ...ASSETS, extra]);
     assert.throws(() => checkDist(dist), new RegExp(`${extra.replace('.', '\\.')}`), extra);
   }
 });
 
 test('a dist/ without install.sh is not a built site: the sweep would take it off the bucket', () => {
-  const dist = distWith('publish-no-install', [...PAGES, 'assets/x/a.js', 'assets/x/b.js', 'assets/x/s.css']);
+  const dist = distWith('publish-no-install', [...PAGES, ...TEXT, 'assets/x/a.js', 'assets/x/b.js', 'assets/x/s.css']);
   assert.throws(() => checkDist(dist), /install\.sh is missing/);
 });
 

@@ -45,14 +45,14 @@
 //! every platform's assets merged into `dist`, the sums into `published` and `bundles` into
 //! `dist`. [`pull_request_macos_problems`] refuses any workflow a pull request starts that has a
 //! job on a macOS runner without [`NOT_FOR_A_PULL_REQUEST`], other than the job `macos` of
-//! `macos.yml` under no `if:` (`super::macos_pr`), and holds every job a pull request runs on
-//! macOS to no secret, no token and `contents: read` alone. The release build of macOS and its
-//! tests run in `artifacts.yml` on a push and by hand (`workflow_dispatch`), whose triggers
-//! [`TRIGGERS`] pins; every pull request runs the same build, with the tests of the whole
-//! workspace, in `macos.yml`.
+//! `macos.yml` under its one `if:` (`super::macos_pr::MAC_IF`), and holds every job a pull
+//! request runs on macOS to no secret, no token and `contents: read` alone. The release build of
+//! macOS and its tests run in `artifacts.yml` on a push and by hand (`workflow_dispatch`), whose
+//! triggers [`TRIGGERS`] pins; a pull request that changes a path the macOS build reads runs the
+//! same build, with the tests of the whole workspace, in `macos.yml`.
 
 use super::lint::{SIGN_IF, entries, entry, names, runs};
-use super::macos_pr::{MAC_JOB, MACOS_PR, pull_request_job_problems, scalars};
+use super::macos_pr::{MAC_IF, MAC_JOB, MACOS_PR, pull_request_job_problems, scalars};
 use super::yaml::{self, Node, Value};
 
 /// A platform's build job: its runner (GitHub-hosted, of the platform's own OS and architecture,
@@ -921,7 +921,7 @@ fn unseen_runner_problems(file: &str, name: &str, job: &Node) -> Vec<String> {
 /// One line per job of the workflow `file` (`text`) that a pull request runs on a macOS runner
 /// where it may not, or with what it may not hold. The workflow has a `pull_request` trigger and
 /// the job is on macOS ([`on_macos`]) under another `if:` than [`NOT_FOR_A_PULL_REQUEST`]: it is
-/// refused unless it is the job [`MAC_JOB`] of `macos.yml` under no `if:`, and each
+/// refused unless it is the job [`MAC_JOB`] of `macos.yml` under [`MAC_IF`], and each
 /// such job is held to [`pull_request_job_problems`] (`contents: read` alone, no environment, no
 /// secret and no token in it or in the workflow's `env`). A job of such a workflow whose runner
 /// is an expression, or that calls a reusable workflow, is refused ([`unseen_runner_problems`]).
@@ -941,10 +941,10 @@ pub fn pull_request_macos_problems(file: &str, text: &str) -> Vec<String> {
         if !on_macos(job) || condition == Some(NOT_FOR_A_PULL_REQUEST) {
             continue;
         }
-        let allowed = file == MACOS_PR && name == MAC_JOB && condition.is_none();
+        let allowed = file == MACOS_PR && name == MAC_JOB && condition == Some(MAC_IF);
         if !allowed {
             problems.push(format!(
-                "{file}: the job {name} runs on macOS for a pull request; only the job {MAC_JOB} of {MACOS_PR}, under no `if:`, may"
+                "{file}: the job {name} runs on macOS for a pull request; only the job {MAC_JOB} of {MACOS_PR}, under `if: {MAC_IF}`, may"
             ));
         }
         problems.extend(pull_request_job_problems(

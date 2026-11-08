@@ -1,5 +1,5 @@
 //! The verify commands of the install guide (`crates/tierstore/docs/install.md`) and the site's
-//! install page (`crates/tierstore/site/content/get-started.html`), read for the tests that hold them
+//! install page (`crates/tierstore/site/content/install.html`), read for the tests that hold them
 //! to what this crate checks a release with.
 
 use std::path::Path;
@@ -9,7 +9,7 @@ pub fn pages() -> [(&'static str, String); 2] {
     let root = Path::new(env!("CARGO_MANIFEST_DIR")).join("../..");
     [
         "crates/tierstore/docs/install.md",
-        "crates/tierstore/site/content/get-started.html",
+        "crates/tierstore/site/content/install.html",
     ]
     .map(|path| {
         let text = std::fs::read_to_string(root.join(path)).expect("an install page");
@@ -140,7 +140,14 @@ fn a_start_block_reloads_the_unit_first_and_a_start_without_a_reload_is_rejected
     assert!(!reloads_before_every_start(earlier));
     assert!(!reloads_before_every_start(earlier_html));
     assert!(!reloads_before_every_start("no commands here"));
+    // The install guide starts the service; the site's install page is the install commands and the
+    // checks of a download and starts nothing. A page that does start it must reload first.
+    let mut starting = 0;
     for (name, page) in pages() {
-        assert!(reloads_before_every_start(&page), "{name}");
+        if page.contains("systemctl start tierstore") {
+            assert!(reloads_before_every_start(&page), "{name}");
+            starting += 1;
+        }
     }
+    assert!(starting >= 1, "no install page starts the service");
 }
