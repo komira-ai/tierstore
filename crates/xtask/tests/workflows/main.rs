@@ -16,6 +16,8 @@ mod channels_tests;
 mod desired;
 mod desired_tests;
 mod distribution_tests;
+mod farm;
+mod farm_tests;
 mod hostkeeper;
 mod hostkeeper_tests;
 mod lint;

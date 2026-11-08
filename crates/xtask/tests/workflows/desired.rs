@@ -44,6 +44,10 @@ pub const AUDIENCE: &str = "tierstore-hostkeeper-desired";
 /// The repository variables of the coordinator: its address and its CA.
 pub const COORDINATOR_VARS: [&str; 2] = ["HOSTKEEPER_COORDINATOR_URL", "HOSTKEEPER_COORDINATOR_CA"];
 
+/// The repository variable of the coordinator's name on the tailnet, which `release.yml` reads
+/// beside the two above, for the join of the farm job.
+pub const TAILNET_COORDINATOR: &str = "HOSTKEEPER_TAILNET_COORDINATOR";
+
 /// The word of a workflow that names the farm coordinator's verb.
 pub const DEPLOY_FARM: &str = "deploy-farm";
 
@@ -219,7 +223,10 @@ pub fn coordinator_problems(file: &str, text: &str) -> Vec<String> {
                 .chars()
                 .take_while(|c| c.is_ascii_alphanumeric() || *c == '_')
                 .collect();
-            if name.contains("COORDINATOR") && !COORDINATOR_VARS.contains(&name.as_str()) {
+            if name.contains("COORDINATOR")
+                && !COORDINATOR_VARS.contains(&name.as_str())
+                && name != TAILNET_COORDINATOR
+            {
                 problems.push(format!(
                     "{file}: line {}: reads vars.{name}, not one of hostkeeper's {COORDINATOR_VARS:?}",
                     n + 1

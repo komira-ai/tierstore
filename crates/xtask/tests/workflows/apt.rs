@@ -69,7 +69,7 @@ pub const JOBS: [Job; 9] = [
     Job {
         name: "apt-deploy-read",
         kind: Kind::Read,
-        needs: &["plan", "publish"],
+        needs: &["plan", "soak"],
         condition: RELEASE_IF,
         requires: &[],
         last: false,

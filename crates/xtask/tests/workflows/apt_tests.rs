@@ -40,7 +40,7 @@ fn the_apt_jobs_of_release_yml_pass_and_are_the_nine_the_design_names() {
 const DEFECTS: &[(&str, &str, &str, &str)] = &[
     (
         "apt-deploy-read",
-        "needs: [plan, publish]",
+        "needs: [plan, soak]",
         "needs: [plan]",
         "apt-deploy-read: needs are not",
     ),

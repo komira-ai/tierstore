@@ -11,6 +11,8 @@
 //!   replaces `releases/latest.json`, never with an older version, and invalidates it.
 //! - `channels apt read|index|sign|write ...` ([`apt`]): the Debian packages into the apt
 //!   repository the organisation's products share, in the three jobs of `release.yml`.
+//! - `channels soak --hours <n> --reached-at <secs> --version <X.Y.Z+hex> ...` ([`soak`]): the
+//!   farm stays healthy on the release for N hours before the public channels follow.
 //! - `channels formula --sums <file> --version <X.Y.Z> --repo <owner/name> --out <file>`
 //!   ([`formula`]): `Formula/tierstore.rb` as the Homebrew tap's guard takes it, from the
 //!   release's `SHA256SUMS` alone.
@@ -24,6 +26,7 @@ pub mod apt;
 pub mod aws;
 pub mod formula;
 pub mod gate;
+pub mod soak;
 pub mod tap;
 pub mod upload;
 
@@ -62,6 +65,35 @@ pub enum Verb {
         /// Append `enabled=true` or `enabled=false` to this file (`GITHUB_OUTPUT`).
         #[arg(long)]
         output: Option<PathBuf>,
+    },
+    /// The farm stays healthy on a release for N hours before the public channels follow.
+    Soak {
+        /// How many hours to soak, 0 to 5; 0 ends at once.
+        #[arg(long)]
+        hours: u32,
+        /// Seconds since the epoch at which the farm was read converged on the version.
+        #[arg(long)]
+        reached_at: u64,
+        /// The version the farm must stay on, as the coordinator names it, `X.Y.Z+<12 hex>`.
+        #[arg(long)]
+        version: String,
+        /// Start a clock at this many seconds since the epoch that only the soak's own waits
+        /// move, instead of the machine's: for a test, which then waits for nothing.
+        #[arg(long)]
+        now: Option<u64>,
+        /// Seconds between two reads.
+        #[arg(long, default_value_t = soak::INTERVAL_SECS)]
+        interval_secs: u64,
+        /// How many reads in a row may get no answer.
+        #[arg(long, default_value_t = soak::MAX_SILENT_READS)]
+        max_silent_reads: u32,
+        /// The program that reads the convergence and prints the JSON of `hostkeeper ctl releases
+        /// converge`. Needed for a soak of more than 0 hours.
+        #[arg(long)]
+        read_command: Option<PathBuf>,
+        /// One argument of the reading program; repeat for more.
+        #[arg(long = "read-arg", allow_hyphen_values = true)]
+        read_args: Vec<String>,
     },
     /// The release files to `releases/<version>/` of the site bucket, then `releases/latest.json`.
     Upload {
@@ -145,6 +177,33 @@ pub fn run(verb: Verb) -> Result<Vec<String>, Error> {
             requires,
             output,
         } => gate::gate(&label, &settings, &requires, output.as_deref()),
+        Verb::Soak {
+            hours,
+            reached_at,
+            version,
+            now,
+            interval_secs,
+            max_silent_reads,
+            read_command,
+            read_args,
+        } => {
+            let request = soak::Request {
+                hours,
+                reached_at,
+                version: &version,
+                interval_secs,
+                max_silent_reads,
+            };
+            let reader = read_command.map(|program| soak::RealReader {
+                program,
+                args: read_args,
+            });
+            let reader = reader.as_ref().map(|r| r as &dyn soak::Reader);
+            match now {
+                Some(start) => soak::soak(&request, &mut soak::FixedClock(start), reader),
+                None => soak::soak(&request, &mut soak::SystemClock, reader),
+            }
+        }
         Verb::Upload {
             dir,
             tag,

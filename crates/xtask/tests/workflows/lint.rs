@@ -12,7 +12,8 @@
 //!   the one the table gives. So `id-token` and `attestations` (the scopes that sign) are
 //!   written by the one `attest` job of `artifacts.yml`, on a push to `main` alone, `id-token`
 //!   also by the site's deploy job and by the `set-desired` job of `hostkeeper-desired.yml`
-//!   (the token the hostkeeper coordinator admits), and by the release's `channel-upload` job (the
+//!   (the token the hostkeeper coordinator admits) and by the release's `farm` job (the same token
+//!   for the farm), and by the release's `channel-upload` job (the
 //!   token the release-files role admits) and its six apt jobs that read and write the repository
 //!   (the token the apt role admits); `contents: write` by the release's `publish` job
 //!   alone.
@@ -72,6 +73,12 @@ pub const WRITE_ALLOWED: &[Allowed] = &[
         job: "publish",
         scope: "contents",
         condition: RELEASE_IF,
+    },
+    Allowed {
+        file: "release.yml",
+        job: "farm",
+        scope: "id-token",
+        condition: super::farm::FARM_IF,
     },
     Allowed {
         file: "release.yml",
@@ -362,12 +369,21 @@ pub fn release_problems(text: &str) -> Vec<String> {
     };
     let mut listed: Vec<&str> = jobs.iter().filter_map(|(k, _)| k.as_str()).collect();
     listed.sort_unstable();
-    let mut expected = vec!["channel-upload", "plan", "publish", "tap", "verify"];
+    let mut expected = vec![
+        "channel-upload",
+        "farm",
+        "farm-check",
+        "plan",
+        "publish",
+        "soak",
+        "tap",
+        "verify",
+    ];
     expected.extend(super::apt::JOBS.iter().map(|j| j.name));
     expected.sort_unstable();
     if listed != expected {
         problems.push(format!(
-            "jobs are {listed:?}, not plan, verify, publish, channel-upload, tap and the apt jobs {expected:?}"
+            "jobs are {listed:?}, not plan, verify, publish, farm-check, farm, soak, channel-upload, tap and the apt jobs {expected:?}"
         ));
     }
     for (name, job) in jobs {
@@ -377,13 +393,15 @@ pub fn release_problems(text: &str) -> Vec<String> {
             let level = level.as_str().unwrap_or_default();
             let writes = level != "read" && level != "none";
             let scope = scope.as_str().unwrap_or_default();
-            // `channel-upload` holds `id-token: write` for the release-files role, and the apt
-            // jobs that read and write the repository for the apt role, and none anything that
-            // writes to the repository; `channels::channel_problems` and `apt::apt_problems` pin
+            // `channel-upload` holds `id-token: write` for the release-files role, the apt
+            // jobs that read and write the repository for the apt role, and `farm` for the
+            // hostkeeper coordinator, and none anything that writes to the repository;
+            // `channels::channel_problems`, `apt::apt_problems` and `farm::farm_problems` pin
             // those jobs whole.
-            let oidc = (name == "channel-upload" || super::apt::is_role_job(name))
-                && scope == "id-token"
-                && level == "write";
+            let oidc =
+                (name == "channel-upload" || name == "farm" || super::apt::is_role_job(name))
+                    && scope == "id-token"
+                    && level == "write";
             if writes && name != "publish" && !oidc {
                 problems.push(format!(
                     "{name}: permissions grant `{scope}: {level}`; only publish writes"
@@ -507,6 +525,7 @@ pub fn release_problems(text: &str) -> Vec<String> {
         problems.push("plan does not read vars.RELEASE_FREEZE".to_owned());
     }
     problems.extend(build_problems(text));
+    problems.extend(super::farm::farm_problems(&doc, text));
     problems.extend(super::channels::channel_problems(&doc));
     problems.extend(super::apt::apt_problems(&doc));
     problems

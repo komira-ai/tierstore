@@ -8,7 +8,7 @@
 | `advisories.yml` | daily, push to `main` | `cargo deny check advisories`; the result is kept in one issue, and the run is green whatever it finds. |
 | `artifacts.yml` | pull request, push to `main`; by hand | builds `tierstore` (`--features server`) for linux-x86_64, linux-arm64 and macos-arm64, each on a GitHub-hosted runner of its platform, packages it with its SBOM and as a hostkeeper package (and, for the Homebrew tap and apt, as a tap-named tarball and, on Linux, a Debian package), writes the release index of the hostkeeper packages, makes `SHA256SUMS`. The macos-arm64 job also runs the tests of `tierstore`, `objstore-s3` and `tierstore-testkit` on macOS, the update hook's among them (both of its arms are built and tested on every system, each against fakes of its service manager, and the macOS packaging). This workflow runs no macOS job for a pull request (`macos.yml` does, for every pull request): for a pull request its macos-arm64 job is skipped and the sums cover the Linux files; a push to `main` builds every platform, and a run by hand (`gh workflow run artifacts.yml --ref <branch>`) builds and sums every platform of a branch and signs nothing. On a push to `main` it also signs (build provenance and SBOM attestations) and checks what it signed. |
 | `macos.yml` | pull request | `version` (Linux) computes the version the build is given, as artifacts.yml's `version` job does. `macos` runs on `macos-15` for every pull request: every test of the workspace (`cargo test --workspace --features tierstore/s3`), then the commands of artifacts.yml's macos-arm64 job (build, SBOM, licence notice, tarball, hostkeeper package unpacked with hostkeeper's unpacker, code signature), uploading and signing nothing, with `contents: read` alone and no secret or token. It restores artifacts.yml's macOS cache and saves none. It is not named `macos-arm64`: a pull request's run of artifacts.yml skips its job of that name, and a skipped job passes as a check. If `version` fails, `macos` is skipped and the run fails on `version`. A newer push to a pull request cancels its older run. |
-| `release.yml` | when `ci` or `artifacts` finishes on a push to `main` (automatic, see Releases); by hand | `plan` decides which commit of `main` is released and as which tag (the newest whose build recorded that version); `verify` and `publish` attach the files that commit's push built and signed to a GitHub release, after checking them again; `channel-upload` and `tap` then put the release on tierstore.dev and in the Homebrew tap (see The public channels). Builds nothing of tierstore. |
+| `release.yml` | when `ci` or `artifacts` finishes on a push to `main` (automatic, see Releases); by hand | `plan` decides which commit of `main` is released and as which tag (the newest whose build recorded that version); `verify` and `publish` attach the files that commit's push built and signed to a GitHub release, after checking them again; `farm-check`, `farm` and `soak` then move the farm onto the release through hostkeeper and wait out the soak (see The farm first); `channel-upload`, `tap` and the apt jobs follow them and put the release on tierstore.dev, in the Homebrew tap and in apt (see The public channels). Builds nothing of tierstore. |
 | `tierstore-site.yml` | pull request, push to `main`, when the site changes | typecheck, tests and build of tierstore.dev. |
 | `tierstore-site-publish.yml` | push to `main` / by hand | builds the site again; uploads it only when the repository variable `TIERSTORE_SITE_PUBLISH` is `true`. |
 | `hostkeeper-desired.yml` | by hand, from `main` | sets the desired version of tierstore on the hostkeeper coordinator to a published release and waits for the fleet; skipped while the repository variable `HOSTKEEPER_COORDINATOR_URL` is empty. See [Setting the desired version on the hostkeeper coordinator](#setting-the-desired-version-on-the-hostkeeper-coordinator). |
@@ -253,9 +253,37 @@ hostkeeper package; and the release attaches them all. A pull request builds the
 sums them; the tap tarball of macOS is made by the macOS job, which `artifacts.yml` runs on a push
 and by hand and `macos.yml` runs for every pull request.
 
+### The farm first
+
+A release reaches the farm before anybody outside (`docs/design/distribution.md`, section 5.3).
+After `publish` three jobs of `release.yml` run, and the public channels below wait for the last:
+
+- `farm-check` holds the gate. With neither repository variable `HOSTKEEPER_COORDINATOR_URL` nor
+  `HOSTKEEPER_COORDINATOR_CA` set it ends green with a notice, and `farm`, `soak` and every public
+  job are skipped: no farm, no public release. With one of them set it ends red. With both set it
+  runs `cargo xtask release desired` for the release just published (the check of
+  `hostkeeper-desired.yml`: the index lists a package of every platform), and, if the repository
+  variable `HOSTKEEPER_RELEASE_CHANNEL` is set, waits up to 30 minutes until the release channel
+  serves that release's `index.json` byte for byte. The tailnet's three variables
+  (`HOSTKEEPER_TAILNET_CLIENT_ID`, `HOSTKEEPER_TAILNET_AUDIENCE`, `HOSTKEEPER_TAILNET_COORDINATOR`)
+  are all set or none: all makes `farm` join the tailnet, some is red.
+- `farm` calls hostkeeper's `set-desired.yml` (the same pin as `hostkeeper-desired.yml`, which the
+  workflow lint holds equal) for the service `tierstore`, with the audience
+  `tierstore-hostkeeper-release`, and waits for the coordinator to report every farm host on the
+  version, reading every 10 seconds, at most `FARM_MAX_POLLS` times (default 360). It is the only
+  job here with `id-token: write`. The coordinator needs an allow-list entry for it like the one
+  for `hostkeeper-desired.yml`, with the event `workflow_run` and that audience.
+- `soak` waits `FARM_SOAK_HOURS` (a repository variable; empty is 0, which ends at once; at most 5)
+  after `farm` converged, reading the farm and failing at the first read that is not healthy
+  (`cargo xtask channels soak`). Only 0 works today: hostkeeper's CI client has no call that only
+  reads, so a larger value fails the job at once and no public channel follows. Leave it at 0.
+
+A failed `farm` or `soak` leaves the release a GitHub release and no more; fix the farm and re-run
+the failed jobs of the run, or let the next release go through.
+
 ### The public channels: tierstore.dev and the Homebrew tap
 
-After `publish`, `release.yml` has two more jobs, `channel-upload` and `tap`. Nothing waits for them
+After `soak`, `release.yml` has two more jobs, `channel-upload` and `tap`. Nothing waits for them
 and a failed one un-releases nothing: re-run the failed job. Each starts with `cargo xtask channels
 gate`, which is given the job's settings and writes `enabled=true` or `enabled=false`, and every
 later step runs only when it said `true`. None of the settings set: the job ends green with a
@@ -289,7 +317,7 @@ holds the shape of both jobs.
 
 ### The apt repository
 
-After `publish`, `release.yml` also puts the two Debian packages in `packages.komira.ai`, the apt
+After `soak`, `release.yml` also puts the two Debian packages in `packages.komira.ai`, the apt
 repository the organisation's products share, in three jobs that never share a secret: no job
 holds both the signing key and the cloud role.
 
@@ -326,7 +354,9 @@ run, and every host's daemon fetches that version from the release channel
 (`{release_channel}/tierstore/<version>/`) and installs the package of its own platform.
 `hostkeeper-desired.yml` sets that version for a published release. It is run by hand, from
 `main` ("Run workflow"), with the release's version `X.Y.Z`; nothing else starts it, release.yml
-included.
+included. (`release.yml` moves the farm onto each release by itself, with the same check and the
+same reusable workflow: see The farm first. This one stays for a version set by hand, a rollback
+to an older release, say.)
 
 Before you run it, the release must be in the release channel: stage it with hostkeeper's
 `cargo xtask release channel-stage` (komira-ai/hostkeeper, `docs/deploy/release-channel.md`).

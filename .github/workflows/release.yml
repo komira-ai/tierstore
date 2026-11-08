@@ -53,9 +53,19 @@
 #          publish). A tag or a release that exists is refused; a draft a failed run left is
 #          replaced. Re-run the failed jobs of a run, not the whole run.
 #
+# farm-check, farm, soak
+#          the farm first (docs/design/distribution.md, section 5.3). After the GitHub release
+#          exists the release is staged for hostkeeper and the coordinator moves the farm: `farm`
+#          (hostkeeper's set-desired.yml, with the tailnet join when its variables are set) waits
+#          until the coordinator reports every farm host on the version, and `soak` then waits
+#          FARM_SOAK_HOURS (empty is 0, which ends at once). The public jobs below need `soak`, so
+#          they run only for a release the farm took. With no farm configured (the coordinator's
+#          two repository variables empty) farm-check is a green no-op, farm and soak are
+#          skipped, and no public job runs. The comment above farm-check says more.
+#
 # channel-upload, tap
-#          the public channels, after the GitHub release exists (docs/design/distribution.md,
-#          section 5). Each starts with `cargo xtask channels gate`: with none of its settings
+#          the public channels, after the soak (docs/design/distribution.md, section 5). Each
+#          starts with `cargo xtask channels gate`: with none of its settings
 #          set the job ends green with a notice and writes nothing, with some it ends red naming
 #          the missing ones, and every later step runs only when the gate said `enabled=true`.
 #          Nothing waits for them and a failed one un-releases nothing: re-run the failed job.
@@ -71,7 +81,7 @@
 # apt-deploy-read, apt-index, apt-deploy-write (and their attempts 2 and 3, the jobs with the suffix
 #          -2 and -3)
 #          the apt repository packages.komira.ai, which the organisation's products share, after
-#          the GitHub release exists. Three jobs so that none holds both the signing key and the
+#          the soak. Three jobs so that none holds both the signing key and the
 #          cloud role: the first (environment `apt-publish`, `id-token: write`) reads the
 #          current index and the ETag of each object from S3; the second (environment
 #          `apt-signing`, `contents: read`) merges the two .debs into it, keeping every other
@@ -319,6 +329,146 @@ jobs:
           NOTE: ${{ needs.plan.outputs.note }}
         run: cargo xtask release publish dist --repo "$GITHUB_REPOSITORY" --tag "$TAG" --commit "$COMMIT" --run-id "$RUN_ID" --notes-file "$RUNNER_TEMP/release-notes.md" --note "$NOTE"
 
+  # The farm first (docs/design/distribution.md, section 5.3): the release is a GitHub release now,
+  # and nothing public names it until the farm has taken it and kept it healthy. Three jobs.
+  #
+  #   farm-check  (read; the settings are repository variables, as hostkeeper-desired has them)
+  #               the gate (`channels gate`: none of HOSTKEEPER_COORDINATOR_URL and
+  #               HOSTKEEPER_COORDINATOR_CA set is a green no-op, some is red, and the tailnet's
+  #               three variables are all or none), then `release desired` for the release just
+  #               published (the same check hostkeeper-desired runs: the index lists a package
+  #               of every platform), then, if HOSTKEEPER_RELEASE_CHANNEL is set, a wait until the
+  #               release channel serves the release's index byte for byte (the coordinator
+  #               refuses a version the channel does not hold yet with `not_in_channel`).
+  #   farm        hostkeeper's reusable workflow set-desired.yml, pinned as hostkeeper-desired
+  #               pins it (a job that calls a workflow has no steps, which is why the gate is the
+  #               job before it): it proves the pinned hostkeeper, joins the tailnet when the
+  #               tailnet's variables are set, sets the desired version of the service tierstore
+  #               with this job's OIDC token and reads the convergence every 10 seconds until the
+  #               coordinator reports the service converged. It fails otherwise, and so nothing
+  #               public follows. The only job here that holds `id-token: write`.
+  #   soak        FARM_SOAK_HOURS hours (a repository variable; empty is 0, which ends at once)
+  #               after the farm converged (`channels soak`). It runs only when `farm` converged.
+  #
+  # With no farm configured farm-check is a green no-op, `farm` and `soak` are skipped, and so are
+  # the public jobs below, which need `soak`: no farm, no public release.
+  farm-check:
+    needs: [plan, publish]
+    if: ${{ needs.plan.outputs.release == 'true' && github.ref == 'refs/heads/main' }}
+    runs-on: ubuntu-24.04
+    timeout-minutes: 45
+    permissions:
+      contents: read
+    outputs:
+      enabled: ${{ steps.gate.outputs.enabled }}
+      tailnet: ${{ steps.tailnet.outputs.enabled }}
+      package-version: ${{ steps.desired.outputs.package-version }}
+      package-digest: ${{ steps.desired.outputs.package-digest }}
+    env:
+      COMMIT: ${{ needs.plan.outputs.commit }}
+      TAG: ${{ needs.plan.outputs.tag }}
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          ref: ${{ needs.plan.outputs.commit }}
+          persist-credentials: false
+      - run: rustup toolchain install
+      - name: Compile xtask
+        run: cargo xtask --help
+      - name: Gate on the settings of the coordinator (a job without them does nothing and ends green)
+        id: gate
+        env:
+          HOSTKEEPER_COORDINATOR_URL: ${{ vars.HOSTKEEPER_COORDINATOR_URL }}
+          HOSTKEEPER_COORDINATOR_CA: ${{ vars.HOSTKEEPER_COORDINATOR_CA }}
+        run: cargo xtask channels gate --label farm --output "$GITHUB_OUTPUT" --setting "HOSTKEEPER_COORDINATOR_URL=${HOSTKEEPER_COORDINATOR_URL:+set}" --setting "HOSTKEEPER_COORDINATOR_CA=${HOSTKEEPER_COORDINATOR_CA:+set}"
+      # Only when the coordinator is reached over the tailnet: its three variables are all set or
+      # none. None is not a failure here, it is a coordinator the runner reaches without a join.
+      - name: Gate on the settings of the tailnet (none means no join)
+        id: tailnet
+        if: ${{ steps.gate.outputs.enabled == 'true' }}
+        env:
+          HOSTKEEPER_TAILNET_CLIENT_ID: ${{ vars.HOSTKEEPER_TAILNET_CLIENT_ID }}
+          HOSTKEEPER_TAILNET_AUDIENCE: ${{ vars.HOSTKEEPER_TAILNET_AUDIENCE }}
+          HOSTKEEPER_TAILNET_COORDINATOR: ${{ vars.HOSTKEEPER_TAILNET_COORDINATOR }}
+        run: cargo xtask channels gate --label farm-tailnet --output "$GITHUB_OUTPUT" --setting "HOSTKEEPER_TAILNET_CLIENT_ID=${HOSTKEEPER_TAILNET_CLIENT_ID:+set}" --setting "HOSTKEEPER_TAILNET_AUDIENCE=${HOSTKEEPER_TAILNET_AUDIENCE:+set}" --setting "HOSTKEEPER_TAILNET_COORDINATOR=${HOSTKEEPER_TAILNET_COORDINATOR:+set}"
+      # The input is read as an environment variable of the step, never spliced into a script.
+      - name: Refuse a release whose index lacks a platform
+        id: desired
+        if: ${{ steps.gate.outputs.enabled == 'true' }}
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: cargo xtask release desired --repo "$GITHUB_REPOSITORY" --version "${TAG#v}" --dir "$RUNNER_TEMP/desired" --output "$GITHUB_OUTPUT"
+      # curl's own retries, a fixed 40 seconds apart, 404 included, until 1800 seconds have passed:
+      # a channel that never serves the version fails the job. The channel's sync is a timer on
+      # the channel's host. Without HOSTKEEPER_RELEASE_CHANNEL the step does nothing and the
+      # coordinator's own refusal (`not_in_channel`) is what `farm` meets if the sync is late:
+      # re-run the failed jobs.
+      - name: Wait until the release channel serves the release's index, byte for byte
+        if: ${{ steps.gate.outputs.enabled == 'true' }}
+        env:
+          RELEASE_CHANNEL: ${{ vars.HOSTKEEPER_RELEASE_CHANNEL }}
+          PACKAGE_VERSION: ${{ steps.desired.outputs.package-version }}
+        run: |
+          if [ -z "$RELEASE_CHANNEL" ]; then
+            echo "::notice title=The release channel is not read::HOSTKEEPER_RELEASE_CHANNEL is not set, so the job does not wait for the channel's sync; the coordinator refuses the version until the channel holds it."
+            exit 0
+          fi
+          curl --proto =https --tlsv1.2 --fail --silent --show-error --max-time 30 --retry 45 --retry-delay 40 --retry-max-time 1800 --retry-all-errors --output "$RUNNER_TEMP/served-index.json" "$RELEASE_CHANNEL/tierstore/$PACKAGE_VERSION/index.json"
+          cmp "$RUNNER_TEMP/desired/index.json" "$RUNNER_TEMP/served-index.json"
+
+  farm:
+    needs: [plan, farm-check]
+    if: ${{ needs.plan.outputs.release == 'true' && github.ref == 'refs/heads/main' && needs.farm-check.outputs.enabled == 'true' }}
+    permissions:
+      contents: read
+      id-token: write
+    uses: komira-ai/hostkeeper/.github/workflows/set-desired.yml@1adad60c2a7c0136b9f46cb79a987883f2185445 # v0.1.33
+    with:
+      service: tierstore
+      version: ${{ needs.farm-check.outputs.package-version }}
+      package_digest: ${{ needs.farm-check.outputs.package-digest }}
+      hostkeeper_version: 0.1.33
+      hostkeeper_commit: 1adad60c2a7c0136b9f46cb79a987883f2185445
+      coordinator_url: ${{ vars.HOSTKEEPER_COORDINATOR_URL }}
+      coordinator_ca: ${{ vars.HOSTKEEPER_COORDINATOR_CA }}
+      audience: tierstore-hostkeeper-release
+      wait: true
+      # One read every 10 seconds: the default, 360, waits about an hour for the farm.
+      max_polls: ${{ fromJSON(vars.FARM_MAX_POLLS || '360') }}
+      join_tailnet: ${{ needs.farm-check.outputs.tailnet == 'true' }}
+      tailnet_client_id: ${{ vars.HOSTKEEPER_TAILNET_CLIENT_ID }}
+      tailnet_audience: ${{ vars.HOSTKEEPER_TAILNET_AUDIENCE }}
+      tailnet_coordinator: ${{ vars.HOSTKEEPER_TAILNET_COORDINATOR }}
+
+  # A timer, not a verdict: nobody approves it. Its hours start when the farm was read converged,
+  # which `farm` (a called workflow, with no step of its own to stamp the time) leaves to this job's
+  # first step; it is later by the queueing of one job, which only lengthens the soak. A job lives
+  # 6 hours at most, so the tool refuses more than 5. It holds no token: the reads of a soak of
+  # more than 0 hours need a call hostkeeper's CI client does not have yet (`channels soak` says
+  # so and fails), so FARM_SOAK_HOURS stays 0 until then.
+  soak:
+    needs: [plan, farm-check, farm]
+    if: ${{ needs.plan.outputs.release == 'true' && github.ref == 'refs/heads/main' && needs.farm.outputs.converged == 'true' }}
+    runs-on: ubuntu-24.04
+    timeout-minutes: 345
+    permissions:
+      contents: read
+    env:
+      COMMIT: ${{ needs.plan.outputs.commit }}
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          ref: ${{ needs.plan.outputs.commit }}
+          persist-credentials: false
+      - run: rustup toolchain install
+      - name: Compile xtask
+        run: cargo xtask --help
+      - name: Keep reading the farm until the soak has passed (0 hours ends at once)
+        env:
+          FARM_SOAK_HOURS: ${{ vars.FARM_SOAK_HOURS }}
+          PACKAGE_VERSION: ${{ needs.farm-check.outputs.package-version }}
+        run: cargo xtask channels soak --hours "${FARM_SOAK_HOURS:-0}" --reached-at "$(date +%s)" --version "$PACKAGE_VERSION"
+
   # tierstore.dev/releases/<version>/ and releases/latest.json. The environment holds the settings
   # (TIERSTORE_RELEASES_BUCKET, TIERSTORE_RELEASES_ROLE_ARN and, optionally,
   # TIERSTORE_RELEASES_DISTRIBUTION_ID); the role's trust names this file at refs/heads/main, this
@@ -326,7 +476,7 @@ jobs:
   # job. The files are the release-assets artifact, checked again here because they crossed the
   # artifact store. Until the settings exist the job is a green no-op.
   channel-upload:
-    needs: [plan, publish]
+    needs: [plan, soak]
     if: ${{ needs.plan.outputs.release == 'true' && github.ref == 'refs/heads/main' }}
     runs-on: ubuntu-24.04
     timeout-minutes: 30
@@ -379,7 +529,7 @@ jobs:
   # last one alone. Until RELEASE_BOT_APP_ID and RELEASE_BOT_PRIVATE_KEY exist the job is a green
   # no-op.
   tap:
-    needs: [plan, publish]
+    needs: [plan, soak]
     if: ${{ needs.plan.outputs.release == 'true' && github.ref == 'refs/heads/main' }}
     runs-on: ubuntu-24.04
     timeout-minutes: 15
@@ -448,7 +598,7 @@ jobs:
   # settings ends green with a notice and writes nothing.
 
   apt-deploy-read:
-    needs: [plan, publish]
+    needs: [plan, soak]
     if: ${{ needs.plan.outputs.release == 'true' && github.ref == 'refs/heads/main' }}
     runs-on: ubuntu-24.04
     timeout-minutes: 15

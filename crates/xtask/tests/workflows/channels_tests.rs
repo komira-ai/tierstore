@@ -21,9 +21,9 @@ fn the_channel_jobs_of_release_yml_pass_and_are_the_two_the_design_names() {
 const DEFECTS: &[(&str, &str, &str, &str)] = &[
     (
         "channel-upload",
-        "needs: [plan, publish]",
+        "needs: [plan, soak]",
         "needs: [plan]",
-        "channel-upload: needs are not plan and publish",
+        "channel-upload: needs are not plan and soak",
     ),
     (
         "channel-upload",

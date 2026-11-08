@@ -5,7 +5,8 @@
 //!
 //! Each job is held to the shape that makes it safe to leave in the workflow before its owner has
 //! made the settings, and safe to run after:
-//! - it needs `plan` and `publish` (the release exists) and has the `if:` of `publish`;
+//! - it needs `plan` and `soak` (the release exists, and the farm took it and kept it healthy) and
+//!   has the `if:` of `publish`;
 //! - it names its environment, which holds the settings, and holds exactly the permissions the
 //!   table below gives (the cloud token for `channel-upload`, nothing to write for `tap`);
 //! - its first step that is not setup is the gate (`cargo xtask channels gate`), which is given
@@ -126,8 +127,8 @@ pub fn channel_problems(doc: &Node) -> Vec<String> {
 fn job_problems(channel: &Channel, job: &Node) -> Vec<String> {
     let name = channel.job;
     let mut problems = Vec::new();
-    if names(entry(job, "needs")) != ["plan", "publish"] {
-        problems.push(format!("{name}: needs are not plan and publish"));
+    if names(entry(job, "needs")) != ["plan", "soak"] {
+        problems.push(format!("{name}: needs are not plan and soak"));
     }
     if entry(job, "if").and_then(Node::as_str) != Some(RELEASE_IF) {
         problems.push(format!("{name}: `if` is not {RELEASE_IF}"));
