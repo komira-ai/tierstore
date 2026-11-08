@@ -394,9 +394,14 @@ async fn a_key_the_client_cannot_name_is_refused_before_any_request() {
 /// multipart upload included (a part whose chunks are not taken is given up with the request).
 #[tokio::test]
 async fn a_store_that_cannot_be_reached_is_unavailable() {
-    let listener = std::net::TcpListener::bind("127.0.0.1:0").unwrap();
-    let endpoint = format!("http://{}", listener.local_addr().unwrap());
-    drop(listener);
+    // A port held for the whole test binary and refusing connections: one bound and let go
+    // could be taken by another test's server, which would then answer.
+    let dead = tierstore_testkit::port::dead_addr();
+    assert!(
+        tierstore_testkit::port::is_taken(dead),
+        "{dead} can be taken"
+    );
+    let endpoint = format!("http://{dead}");
     let backend = S3Backend::new(config(&endpoint)).unwrap();
     let range = Some(ByteRange::new(0, 1));
     let swap = backend.put_if_match("k", body("v"), "tag");
