@@ -9,8 +9,13 @@
 //! Drop order matters when a test starts processes that write into the directory: a
 //! `TestDir` drops after every local declared after it, so declare it first and the
 //! processes (their guards reaped on drop) are gone before the directory is removed.
+//!
+//! A Unix socket's path has a short limit (107 bytes on Linux, 103 on macOS), and the scratch
+//! root of a build in a deep checkout can pass it on its own. [`TestDir::for_socket`] makes the
+//! directory under the first of several roots where the socket's path still binds.
 
 use std::ops::Deref;
+use std::os::unix::net::SocketAddr;
 use std::path::{Path, PathBuf};
 use std::sync::atomic::{AtomicU32, Ordering};
 
@@ -32,11 +37,40 @@ impl TestDir {
     /// If the directory cannot be made (a test cannot go on without it).
     #[must_use]
     pub fn under(root: impl AsRef<Path>, name: &str) -> Self {
-        static COUNTER: AtomicU32 = AtomicU32::new(0);
-        let n = COUNTER.fetch_add(1, Ordering::SeqCst);
-        let path = root
-            .as_ref()
-            .join(format!("{name}-{}-{n}", std::process::id()));
+        Self::make(root.as_ref().join(unique(name)))
+    }
+
+    /// A new, empty directory `<root>/<name>-<pid>-<n>` for a Unix socket called `file`, and the
+    /// socket's path in it, under the first of `roots` where that path is short enough to bind
+    /// (the platform's own rule, as [`SocketAddr::from_pathname`] applies it). Tests pass
+    /// [`std::env::temp_dir`] and then `env!("CARGO_TARGET_TMPDIR")`, so that a long value of
+    /// either is passed over for the other.
+    ///
+    /// # Panics
+    /// If under none of `roots` the path fits, naming each path it tried; or as [`Self::under`].
+    #[must_use]
+    pub fn for_socket(roots: &[&Path], name: &str, file: &str) -> (Self, PathBuf) {
+        let dir = unique(name);
+        let tried: Vec<(PathBuf, PathBuf)> = roots
+            .iter()
+            .map(|root| {
+                let made = root.join(&dir);
+                let socket = made.join(file);
+                (made, socket)
+            })
+            .collect();
+        let Some((made, socket)) = tried
+            .iter()
+            .find(|(_, socket)| SocketAddr::from_pathname(socket).is_ok())
+        else {
+            let sockets: Vec<&PathBuf> = tried.iter().map(|(_, socket)| socket).collect();
+            panic!("no root gives a Unix socket path short enough to bind: tried {sockets:?}");
+        };
+        (Self::make(made.clone()), socket.clone())
+    }
+
+    /// Makes `path` an empty directory and owns it.
+    fn make(path: PathBuf) -> Self {
         // Absent unless an earlier process of this pid left it.
         let _ = std::fs::remove_dir_all(&path);
         std::fs::create_dir_all(&path)
@@ -49,6 +83,13 @@ impl TestDir {
     pub fn path(&self) -> &Path {
         &self.path
     }
+}
+
+/// `<name>-<pid>-<n>`, with `n` counting the directories this process named.
+fn unique(name: &str) -> String {
+    static COUNTER: AtomicU32 = AtomicU32::new(0);
+    let n = COUNTER.fetch_add(1, Ordering::SeqCst);
+    format!("{name}-{}-{n}", std::process::id())
 }
 
 impl Deref for TestDir {
@@ -141,6 +182,81 @@ mod tests {
         let not_a_dir = file.path().join("plain");
         std::fs::write(&not_a_dir, b"").unwrap();
         let _ = TestDir::under(&not_a_dir, "inside");
+    }
+
+    /// A root under which no socket path binds: longer than any platform's limit on its own.
+    fn too_long() -> PathBuf {
+        root().join("r".repeat(200))
+    }
+
+    /// Catches a socket directory made under a root where the socket cannot bind, or a socket
+    /// path that is not in the directory: with a too-long root first, the directory is made
+    /// under the second, the long root is never made, the socket binds there, and the drop
+    /// removes the directory with the socket in it.
+    #[test]
+    fn a_socket_dir_is_made_under_the_first_root_where_its_socket_binds() {
+        let base = TestDir::under(root(), "tk-sock");
+        let long = too_long();
+        let (dir, socket) = TestDir::for_socket(&[&long, base.path()], "tk-s", "c.sock");
+        assert_eq!(dir.path().parent(), Some(base.path()));
+        assert_eq!(socket, dir.path().join("c.sock"));
+        assert!(dir.path().is_dir());
+        assert!(!long.exists());
+        let listener = std::os::unix::net::UnixListener::bind(&socket).unwrap();
+        drop(listener);
+        let made = dir.path().to_owned();
+        drop(dir);
+        assert!(!made.exists());
+    }
+
+    /// Catches a choice that skips a root where the socket binds: of two that fit, the first is
+    /// taken and nothing is made under the second.
+    #[test]
+    fn of_two_roots_that_fit_the_first_is_taken() {
+        let first = TestDir::under(root(), "tk-first");
+        let second = TestDir::under(root(), "tk-second");
+        let (dir, socket) = TestDir::for_socket(&[first.path(), second.path()], "tk-s", "c.sock");
+        assert_eq!(dir.path().parent(), Some(first.path()));
+        assert_eq!(socket.parent(), Some(dir.path()));
+        assert_eq!(std::fs::read_dir(second.path()).unwrap().count(), 0);
+    }
+
+    /// The message `for_socket` panics with under these roots.
+    fn panic_of(roots: &[&Path]) -> String {
+        let panicked = std::panic::catch_unwind(|| TestDir::for_socket(roots, "tk-none", "c.sock"))
+            .expect_err("a panic");
+        panicked
+            .downcast_ref::<String>()
+            .expect("a formatted message")
+            .clone()
+    }
+
+    /// Catches a `for_socket` that goes on with a path that cannot bind, or one whose panic
+    /// does not say which paths it tried: under two too-long roots it panics naming the socket
+    /// path under each, in order, and makes neither; under no root at all it panics naming none.
+    #[test]
+    fn with_no_root_that_fits_it_panics_naming_each_path_tried() {
+        let long = too_long();
+        let longer = root().join("s".repeat(300));
+        let message = panic_of(&[&long, &longer]);
+        let prefix = "no root gives a Unix socket path short enough to bind: tried [";
+        assert!(message.starts_with(prefix), "{message}");
+        let tried: Vec<&str> = message[prefix.len()..message.len() - 1]
+            .split(", ")
+            .collect();
+        assert_eq!(tried.len(), 2, "{message}");
+        for (named, under) in tried.iter().zip([&long, &longer]) {
+            let named = PathBuf::from(named.trim_matches('"'));
+            assert_eq!(named.parent().and_then(Path::parent), Some(under.as_path()));
+            assert_eq!(named.file_name(), Some("c.sock".as_ref()));
+        }
+        assert!(!long.exists());
+        assert!(!longer.exists());
+
+        assert_eq!(
+            panic_of(&[]),
+            "no root gives a Unix socket path short enough to bind: tried []"
+        );
     }
 
     /// Catches a drop during a panic that keeps the directory without the variable, or

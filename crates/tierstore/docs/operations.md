@@ -95,6 +95,8 @@ A request cut at the deadline is counted on stderr: `tierstore: <N> requests wer
 
 To restart for a new binary or a new key file, replace the file, then `systemctl restart tierstore`; run more than one process, with ids of their own, if clients must not see the pause. The update hook (`tierstore update-hook`) does that for a host updater; see [the update hook](update-hook.md).
 
+During an update two releases share the hot tier (and, on a node with `[local_cache]`, the cache directory), and each reads what the other writes. The objects and files tierstore keeps of its own (the key entries, the registrations, the format object, the markers, the cache sidecars, the update hook's record and the rest), where each lives and the rule that each changes only by adding are in [docs/stored-formats.md](https://github.com/komira-ai/tierstore/blob/main/docs/stored-formats.md).
+
 `hot_store.lock_file` says which of the processes over one node reconciles. A process that holds an exclusive lock on the file runs the reconciler and takes the lease. A process that finds the lock held serves reads and writes through its own proxy at once and does not touch the reconciler's state in the hot tier, the lease included, until it holds the lock; it tries every `hot_store.lock_retry` (one second unless that is set). The system frees the lock when the holder exits or crashes, so a process started beside the one that is draining reconciles as soon as that one has exited and given its lease up. Give both processes the same file, on a local file system, in a directory that nothing removes: a directory under `/run` that systemd removes with the unit would let a third process make a new file and lock it beside the second. The holder looks before each pass at whether the path still leads to the file it locked; if the file was replaced, it gives its lease up and waits for the lock on the new file. A start whose lock file cannot be opened, is a link or is on a network file system exits 1. Without the flag the reconciler works as soon as the process starts, as before.
 
 ## Live update by hand-off of the sockets
@@ -157,6 +159,8 @@ Before the pause: tell the owners of the clients that write (builds, image pushe
 
 ## Rolling out the entry protocol
 
+The entry protocol is the older of the two write formats this release knows. The newest is the marker format (the format phase `active-marks`), which a store is moved onto after it is on the entry format: see [Rolling out the markers and going back](operations.md#rolling-out-the-markers-and-going-back). This section is the rollout of the entry protocol from the journals.
+
 This release has the entry protocol only: the per-node journals, their checkpoints and the journal reconciler are gone. It reads no `_journal/` object and writes none, and it takes no write until the format object says `{"epoch":2,"phase":"active"}`. So it is rolled over a store after the bridge release has drained the journals, and the store is activated once. There is no canary, because the epoch is one object that every node reads: the whole fleet changes protocol at once, after one planned pause of writes.
 
 What a node of this release does about the epoch:
@@ -214,7 +218,7 @@ A write that is in flight when the rollback begins and that a proxy has already 
 
 ## What tierstore requires of a store
 
-tierstore is a proxy over a hot store and a cold store. It does not test either store, at start or later: it does not write probe keys, and it does not check that a store behaves as described here. A store that does not meet these requirements is not detected; the guarantees below are the ones that are lost, silently. (Opening the proxy at start reads and writes the hot tier's own state, the node's registration and its journal, so a hot tier that cannot be reached fails the start: that is the proxy's work, not a test of the store.)
+tierstore is a proxy over a hot store and a cold store. It does not test either store, at start or later: it does not write probe keys, and it does not check that a store behaves as described here. A store that does not meet these requirements is not detected; the guarantees below are the ones that are lost, silently. (Opening the proxy at start reads and writes the hot tier's own state, the node's registration, so a hot tier that cannot be reached fails the start: that is the proxy's work, not a test of the store.)
 
 The hot store must provide:
 

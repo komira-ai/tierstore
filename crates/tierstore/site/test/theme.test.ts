@@ -15,7 +15,7 @@ import { outPath, PAGES } from '../tools/pages';
 import { assetDir, buildReal, copyTree, plant, SITE } from './support';
 
 /** theme.css sha256. */
-const THEME_SHA256 = 'dc07bcb1137cdd4d1207e4f33ebdc61e96dc4d096ff24f54c712a0616029caaf';
+const THEME_SHA256 = '7ebcbc329dacae0e2f0955ab3563bf4986fdfe28bc4c1ed41af00620568e8d2e';
 const sha256 = (b: Buffer): string => createHash('sha256').update(b).digest('hex');
 
 test('static/theme.css is the pinned theme, byte for byte', () => {

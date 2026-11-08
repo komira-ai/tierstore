@@ -113,7 +113,7 @@ How the cache behaves is in [operations](operations.md#a-build-node). The file i
 
 ## A file for a storage node with a cache
 
-One process that owns the data and keeps a disk cache in front of its own proxy: the file has `[hot_store]`, `[cold_store]` and `[local_cache]`. The S3 front and the OCI front read from the cache; the cache reads from, and writes to, the proxy, which is a storage node's (both tiers, the journal, the reconciler). The tiers are not tested at the start, as a storage node's are not either:
+One process that owns the data and keeps a disk cache in front of its own proxy: the file has `[hot_store]`, `[cold_store]` and `[local_cache]`. The S3 front and the OCI front read from the cache; the cache reads from, and writes to, the proxy, which is a storage node's (both tiers, the entries, the reconciler). The tiers are not tested at the start, as a storage node's are not either:
 
 ```toml
 [[interface]]

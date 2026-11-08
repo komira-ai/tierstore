@@ -1,25 +1,82 @@
 <section class="hero">
+  <svg class="hero-orbits" aria-hidden="true" viewBox="0 0 1200 800" preserveAspectRatio="xMidYMid slice" focusable="false">
+    <g class="k-orbits" fill="none" transform="rotate(-14 600 400)" stroke="#B3DDEE" stroke-width="1">
+      <ellipse cx="600" cy="400" rx="330" ry="110" stroke-opacity="0.2"></ellipse>
+      <ellipse cx="600" cy="400" rx="440" ry="148" stroke-opacity="0.14"></ellipse>
+      <ellipse cx="600" cy="400" rx="560" ry="190" stroke-opacity="0.09"></ellipse>
+    </g>
+  </svg>
   <div class="wrap hero-grid">
-    <div>
-      <p class="eyebrow"><span class="pill">Early development</span> <span class="muted">open source, Apache 2.0</span></p>
-      <h1 class="display">A hot tier in front of a <em>cold store</em>, behind one S3 endpoint.</h1>
-      <p class="lede">tierstore is an S3 server over two S3-compatible stores. It writes new objects to the hot tier, copies them to the cold tier in the background, and frees the hot tier when it fills. Clients see one bucket and sign with any S3 SDK.</p>
-      <div class="install-block">
+    <div class="hero-copy">
+      <p class="eyebrow k-mark"><span class="pill">Early development</span> <span>open source, Apache 2.0</span></p>
+      <h1 class="display k-mark">A hot tier in front of a <em>cold store</em>, behind one S3 endpoint.</h1>
+      <p class="lede k-line">tierstore is an S3 server over two S3-compatible stores. It writes new objects to the hot tier, copies them to the cold tier in the background, and frees the hot tier when it fills. Clients see one bucket and sign with any S3 SDK.</p>
+      <div class="install-block k-line">
         <p class="install-label"><strong>Install</strong> <span class="tag tag-ok">works today</span> <span class="tag tag-muted">Linux and macOS, from a GitHub release</span></p>
         <div class="cmd cmd-lg cmd-xl"><pre><code><span class="prompt">$ </span>tar -xzf tierstore-&lt;commit&gt;-linux-x86_64.tar.gz tierstore</code></pre></div>
-        <p class="install-note">tierstore ships from its own <a href="https://github.com/komira-ai/tierstore/releases">GitHub releases</a>: each release carries its tarball. The <a href="install.html">install page</a> has the steps, including how to verify the download.</p>
+        <p class="install-note">tierstore ships from its own <a href="https://github.com/komira-ai/tierstore/releases">GitHub releases</a>: each release carries its tarball. <a href="get-started.html#install">Get started</a> has the steps, including how to verify the download.</p>
       </div>
-      <p class="actions hero-links"><a class="button button-primary" href="install.html">Install</a> <a class="button" href="demo.html">See a start and a drain</a></p>
+      <p class="actions hero-links k-line"><a class="button button-primary" href="get-started.html">Get started</a> <a class="button" href="demo.html">See a start and a drain</a></p>
     </div>
+    <figure class="flow k-fade-in">
+      <svg class="flow-svg" viewBox="0 0 640 400" width="640" height="400" role="img" aria-labelledby="flow-title flow-desc" focusable="false">
+        <title id="flow-title">Requests through tierstore</title>
+        <desc id="flow-desc">Clients send requests to one S3 endpoint. A request for an object in the hot tier is answered from the hot tier. A request for an object that is only in the cold store falls through to the cold store, is answered from there, and the object is copied into the hot tier.</desc>
+        <g class="flow-lines" fill="none">
+          <path d="M106 70 L250 200"></path>
+          <path d="M106 200 L250 200"></path>
+          <path d="M106 330 L250 200"></path>
+          <path d="M250 200 L450 88"></path>
+          <path d="M250 200 L450 312"></path>
+          <path class="flow-promote" d="M610 312 H630 V88 H610"></path>
+        </g>
+        <g class="flow-box">
+          <rect x="14" y="48" width="92" height="44" rx="4"></rect>
+          <rect x="14" y="178" width="92" height="44" rx="4"></rect>
+          <rect x="14" y="308" width="92" height="44" rx="4"></rect>
+          <rect class="flow-hot" x="450" y="40" width="160" height="96" rx="4"></rect>
+          <rect x="450" y="264" width="160" height="96" rx="4"></rect>
+        </g>
+        <g class="flow-text">
+          <text x="60" y="76" text-anchor="middle">client</text>
+          <text x="60" y="206" text-anchor="middle">client</text>
+          <text x="60" y="336" text-anchor="middle">client</text>
+          <text class="flow-name" x="530" y="72" text-anchor="middle">hot tier</text>
+          <text class="flow-name" x="530" y="296" text-anchor="middle">cold store</text>
+        </g>
+        <g class="flow-objs">
+          <rect class="obj obj-a" x="478" y="88" width="22" height="22" rx="3"></rect>
+          <rect class="obj obj-b-hot" x="520" y="88" width="22" height="22" rx="3"></rect>
+          <rect class="obj obj-a" x="478" y="312" width="22" height="22" rx="3"></rect>
+          <rect class="obj obj-b" x="520" y="312" width="22" height="22" rx="3"></rect>
+        </g>
+        <g class="dot dot-hit"><circle r="15" class="halo"></circle><circle r="6"></circle></g>
+        <g class="dot dot-miss"><circle r="15" class="halo"></circle><circle r="6"></circle></g>
+        <g class="dot dot-promote"><circle r="15" class="halo"></circle><circle r="6"></circle></g>
+        <g class="flow-node">
+          <circle class="node-fill" cx="250" cy="200" r="54"></circle>
+          <circle class="node-ring" cx="250" cy="200" r="54"></circle>
+          <g class="k-spin-node"><path d="M 250 146 A 54 54 0 0 1 304 200" fill="none" stroke-linecap="round"></path></g>
+          <text class="flow-name" x="250" y="198" text-anchor="middle">tierstore</text>
+          <text class="flow-sub" x="250" y="222" text-anchor="middle">S3 endpoint</text>
+        </g>
+        <g class="flow-labels">
+          <text class="lbl lbl-hit" x="450" y="28">hit</text>
+          <text class="lbl lbl-miss" x="450" y="388">miss, read from cold</text>
+          <text class="lbl lbl-promote" x="530" y="206" text-anchor="middle">promote to hot</text>
+        </g>
+      </svg>
+      <figcaption>A hit is answered by the hot tier. A miss falls through to the cold store, and the object is copied into the hot tier.</figcaption>
+    </figure>
   </div>
 </section>
 
 <section class="band" id="what">
   <div class="wrap">
-    <p class="kicker">What it does</p>
-    <h2>Two tiers, one bucket</h2>
-    <ul class="why-grid">
-      <li><h3>Writes land on the hot tier</h3><p>A put is refused if the key exists in either tier. It is created in the hot tier and acknowledged once its journal entry is durable there.</p></li>
+    <p class="kicker k-rv">What it does</p>
+    <h2 class="k-rv">Two tiers, one bucket</h2>
+    <ul class="why-grid k-rv">
+      <li><h3>Writes land on the hot tier</h3><p>On a store on the entry format a put is refused if the key exists in either tier; on the marker format a plain put replaces it. It is written to the hot tier and acknowledged once its entry (or marker) says it landed there.</p></li>
       <li><h3>The cold tier is filled in the background</h3><p>One reconciler at a time, guarded by a lease object in the hot tier, copies puts to the cold tier and never scans either tier's data.</p></li>
       <li><h3>The hot tier is freed when it fills</h3><p>Above the high-water mark it evicts the oldest objects that the cold tier already holds, down to the low-water mark.</p></li>
       <li><h3>Reads try hot, then cold</h3><p>A cold hit is copied back into the hot tier. A listing merges both tiers.</p></li>
@@ -30,18 +87,19 @@
 
 <section class="band band-planned" id="status">
   <div class="wrap">
-    <p class="kicker">Status</p>
-    <h2>What is built, and what is not</h2>
-    <div class="table-wrap"><table>
+    <p class="kicker k-rv">Status</p>
+    <h2 class="k-rv">What is built, and what is not</h2>
+    <div class="table-wrap k-rv"><table>
     <thead><tr><th>Thing</th><th>State</th></tr></thead>
     <tbody>
-    <tr><td>S3 front: get (ranges), head, create-only put, delete, list, multipart, SigV4</td><td><span class="tag tag-ok">works today</span></td></tr>
+    <tr><td>S3 front: get (ranges), head, put (create-only on the entry format; a plain put replaces on the marker format), delete, list, multipart, SigV4</td><td><span class="tag tag-ok">works today</span></td></tr>
     <tr><td>Hot and cold tiers: S3-compatible store, local directory, memory</td><td><span class="tag tag-ok">works today</span></td></tr>
     <tr><td>Key roles: full, read-only, presigning, garbage collection, scoped</td><td><span class="tag tag-ok">works today</span></td></tr>
     <tr><td>A TOML configuration file (<code>--config</code>), the only way to configure the process</td><td><span class="tag tag-ok">works today; the data-path flags of earlier builds are gone</span></td></tr>
     <tr><td>A per-node read-through cache in the binary, as a build node (<code>[local_cache]</code>, <code>[[policy]]</code> <code>cache = true</code>)</td><td><span class="tag tag-ok">works; a build node, file only</span></td></tr>
-    <tr><td>TLS on the S3 front</td><td><span class="tag tag-planned">not built</span></td></tr>
-    <tr><td>A package, a container image, updates by a host updater</td><td><span class="tag tag-planned">none: a tarball and an example unit</span></td></tr>
+    <tr><td>TLS on the S3 front (<code>server.tls_cert_file</code>, <code>server.tls_key_file</code>)</td><td><span class="tag tag-ok">works today; optional</span></td></tr>
+    <tr><td>hostkeeper packages and updates through <code>tierstore update-hook</code></td><td><span class="tag tag-ok">works today</span></td></tr>
+    <tr><td>A Homebrew formula, an apt package, a container image</td><td><span class="tag tag-planned">none yet: a tarball and an example unit</span></td></tr>
     </tbody></table></div>
   </div>
 </section>

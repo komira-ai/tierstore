@@ -20,16 +20,17 @@ The site lives with the crate (`crates/tierstore/site`). The tests find the repo
 and `node-version-file`), `.github/workflows/tierstore-site-publish.yml` in those, in the artifact path and in the two
 files its deploy job checks out, and `test/supply-chain.test.ts` checks that the workflows and the site agree. The test
 `csp.test.ts` reads the Content-Security-Policy from `served-policy.ts`, a copy of the policy the site's hosting sets as
-the header; a change to it there is made here in the same step.
+the header (`CONTENT_SECURITY_POLICY` in `infra/site/lib/site-stack.ts`); the infrastructure's own test fails when the two
+differ, so a change is made in both in the same pull request.
 
 | Path | What |
 |---|---|
 | `../docs/*.md` | the operator guide, rendered by `tools/docs.ts` into `/docs/` and `/docs/<name>/` (a page for each file, so a new file is a new page; `Not in a release yet` sections are marked). The crate's test `src/server/docs_tests.rs` holds the guide to the code, so the pages cannot say what the code does not. A minimal renderer for the subset the guide uses, no dependency; it refuses what it does not read |
 | `content/*.html` | the page copy: the inside of each page's `<main>`. Each claim comes from the crate's documentation, `packaging/README.md` or the code; a page says where |
-| `served-policy.ts` | the Content-Security-Policy the site is served under, a copy of the policy the site's hosting sets as the header |
-| `static/theme.css` | the theme; `test/theme.test.ts` pins its sha256 |
+| `served-policy.ts` | the Content-Security-Policy the site is served under, a copy of the policy `infra/site` sets as the header (`infra/site/test/site-stack.test.ts` holds the two equal) |
+| `static/theme.css` | the theme (the komira.ai look); `test/theme.test.ts` pins its sha256 |
 | `static/site.css` | this site's own rules, loaded after the theme |
-| `src/copy.ts` | copy buttons on command blocks |
+| `src/copy.ts`, `src/reveal.ts` | copy buttons on command blocks; scroll reveal |
 | `tools/` | `pages.ts` (routes, titles, the white-paper URL), `layout.ts` (the page shell, with the `> tierstore` mark), `build.ts`, `check-dist.ts`, `links.ts`, `csp.ts`, `publish.ts` (uploads a built `dist/`; see Deploying) |
 | `test/` | golden output (`golden.manifest` guards the hand-made pages and assets, the docs index included; the pages rendered from the guide (`docs/<name>/index.html`) are left out of it and held by `docs.test.ts` and the crate's `docs_tests.rs`, so a guide edit needs no new manifest), the docs pages (`docs.test.ts`), links, Content-Security-Policy, theme digest, the optional footer link (`footer-slot.test.ts`), the "not built" statements and demo strings held to the crate source (`claims.test.ts`), public-repo scan, supply-chain policy, the publish program against stand-ins for the token service and the `aws` CLI (`publish.test.ts`) |
 
@@ -40,10 +41,13 @@ output that nobody produced. `content/demo.html` is a transcript whose output li
 read from its source, and each block names the file. Values that differ on every run are written as `<N>` and
 `<version>`.
 
-## The white paper
+## The technical report
 
-`WHITE_PAPER_URL` in `tools/pages.ts` is `null`: until the paper is final the site says nothing about it.
-Setting the URL adds a footer link on every page. The paper itself is maintained with the website, not in this repository.
+`WHITE_PAPER_URL` in `tools/pages.ts` is the report on tierstore at the main site (`https://komira.ai/whitepapers/tierstore`). It is the second of the two links in the header (`NAV`: Get Started, Technical Report) and is in the footer too. The report itself is maintained with the main site, not in this repository. The pages that left the header (Docs, Demo, Why tierstore) are in the footer (`FOOTER_LINKS`); `/install/` and `/getting-started/` are stub pages that link and redirect to `/get-started/`.
+
+## Look and motion
+
+The look is komira.ai's: palette, type scale, link underline, code panel and the `k-fade`, `k-rise`, `k-spin`, `k-grow` keyframes. The face is a system sans-serif stack closest to Sohne; no font file is served. The home page's picture of requests (inline SVG, CSS keyframes, no script) shows a still frame under `prefers-reduced-motion`. `src/reveal.ts` is the scroll reveal; nothing is hidden without it. Code blocks marked `data-lang` are coloured by the build (`tools/highlight.ts`) and `<div class="tabs">` groups become CSS-only tabs (`tools/tabs.ts`).
 
 ## Deploying
 
@@ -62,7 +66,7 @@ distribution does the upload. A pull request never reaches it.
 
 The publish program asks the runner for the job's token, exchanges it with `aws sts assume-role-with-web-identity` for credentials
 that last an hour, uploads the assets (immutable) then the pages (short cache) then `version.txt`, sweeps what the build no
-longer has, and invalidates the distribution. It refuses a `dist/` with fewer than 9 pages or 11 files (`MIN_HTML_PAGES` and `MIN_FILES`; a test keeps them under the real site and above half of it), so
+longer has, and invalidates the distribution. It refuses a `dist/` with fewer than 10 pages or 12 files (`MIN_HTML_PAGES` and `MIN_FILES`; a test keeps them under the real site and above half of it), so
 an empty build can never make the sweep empty the bucket, and a file type other than `.html`, `.js` and `.css` (the sync
 gives only those a content type and a cache rule; `check-dist` already refuses others). `releases/` is never touched. Because the repository and its Actions logs are
 public, the role, the bucket (its name ends in the account id) and the distribution are masked before the first command.
@@ -75,7 +79,7 @@ merge that changes nothing under the site's paths does not start it at all.
 The settings are three variables of the environment `prod-site-tierstore`, set once by whoever sets the site up
 (`TIERSTORE_SITE_BUCKET`, `TIERSTORE_SITE_DISTRIBUTION_ID`, `TIERSTORE_SITE_PUBLISH_ROLE_ARN`); there is no secret. An unset
 variable is an empty flag, which the program refuses. The environment, the role and its trust, the bucket, the distribution and
-the certificate are created once by an operator with their own AWS credentials (`infra/site`); the workflow only publishes.
+the certificate are created once by an operator with their own AWS credentials, from this repository's `infra/site` (its README lists the steps); the workflow only publishes.
 
 The workflow lint (`cargo test -p xtask --test workflows`) allows `id-token: write` for this job and this environment alone.
 
@@ -84,5 +88,4 @@ The output and its rules are those of `site/README.md`: `dist/` holds the pages 
 
 ## Theme
 
-`static/theme.css` is never edited here. A change to the theme is made once, upstream, and the new file and digest are
-taken by every site that shares it.
+`static/theme.css` is the komira.ai look shared by the open-source sites. A change to it moves its digest in `test/theme.test.ts` in the same commit.

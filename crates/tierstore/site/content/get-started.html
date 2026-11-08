@@ -1,5 +1,31 @@
-<h1>Install</h1>
-<p class="lede">tierstore is a binary for Linux (x86_64 and arm64) and macOS (Apple silicon). It ships from the <a href="https://github.com/komira-ai/tierstore/releases">releases of this repository</a>: every release carries the tarball, its provenance bundle and its checksum. There is no package and no container image, and nothing updates it afterwards.</p>
+<h1>Get started</h1>
+<p class="lede">Install tierstore, write a configuration file, start it and put and get an object. It takes about five minutes on one machine.</p>
+
+<h2 id="install">Install <span class="tag tag-ok">works today</span></h2>
+<p>Take the tarball of your platform from this repository's releases. Each tab below downloads it and unpacks the binary; the steps after them check the download and place the binary as a service.</p>
+<div class="tabs" data-tabs="platform">
+<section data-tab="Linux x86_64">
+<div class="code"><pre data-lang="sh"><span class="p">$</span> gh release download --repo komira-ai/tierstore \
+    --pattern 'tierstore-*-linux-x86_64.tar.gz' --pattern SHA256SUMS
+<span class="p">$</span> tar -xzf tierstore-*-linux-x86_64.tar.gz tierstore
+<span class="p">$</span> ./tierstore --version</pre></div>
+</section>
+<section data-tab="Linux arm64">
+<div class="code"><pre data-lang="sh"><span class="p">$</span> gh release download --repo komira-ai/tierstore \
+    --pattern 'tierstore-*-linux-arm64.tar.gz' --pattern SHA256SUMS
+<span class="p">$</span> tar -xzf tierstore-*-linux-arm64.tar.gz tierstore
+<span class="p">$</span> ./tierstore --version</pre></div>
+</section>
+<section data-tab="macOS (Apple silicon)">
+<div class="code"><pre data-lang="sh"><span class="p">$</span> gh release download --repo komira-ai/tierstore \
+    --pattern 'tierstore-*-macos-arm64.tar.gz' --pattern SHA256SUMS
+<span class="p">$</span> tar -xzf tierstore-*-macos-arm64.tar.gz tierstore
+<span class="p">$</span> ./tierstore --version</pre></div>
+</section>
+</div>
+<p class="note">No <code>gh</code>? Download the same files from the <a href="https://github.com/komira-ai/tierstore/releases">releases page</a>. A one-line installer for every platform is planned: see <a href="#planned">Not in a release yet</a>.</p>
+
+<p>tierstore is a binary for Linux (x86_64 and arm64) and macOS (Apple silicon). It ships from the <a href="https://github.com/komira-ai/tierstore/releases">releases of this repository</a>: every release carries the tarball, its provenance bundle and its checksum. There is no Homebrew formula, apt package or container image yet (Homebrew, apt and a copy of the release files on tierstore.dev are planned: see <a href="#planned">Not in a release yet</a> below). hostkeeper packages exist and update it through <code>tierstore update-hook</code>; otherwise nothing updates it afterwards.</p>
 
 <div class="notice notice-warn"><p><strong>Where the code lives.</strong> The source is <code>crates/tierstore</code> in <a href="https://github.com/komira-ai/tierstore">komira-ai/tierstore</a>, and the packaging notes are in <a href="https://github.com/komira-ai/tierstore/blob/main/packaging/README.md"><code>packaging</code></a>. Versions up to 0.2.0 were built in another repository, and their release history is there. From 0.3.0 on, every release is built and signed here.</p></div>
 
@@ -90,6 +116,135 @@ tierstore-0123456789abcdef0123456789abcdef01234567-macos-arm64.tar.gz</pre></div
   </li>
 </ol>
 
+<h2 id="planned">Not in a release yet <span class="tag tag-planned">planned, not built</span></h2>
+<div class="notice notice-warn"><p><strong>None of this exists yet.</strong> The commands below fail today: there is no formula, no <code>tierstore</code> package in the apt repository and nothing at the release address. Use the tarball above. They are here so that you know what is coming and where.</p></div>
+<h3 id="installer">One-line installer <span class="tag tag-planned">planned, not built</span></h3>
+<p>One shell script that works on Linux and on macOS: it picks the tarball of the host, checks its digest and places the binary.</p>
+<div class="code"><pre data-lang="sh"><span class="p">$</span> curl -fsSL https://tierstore.dev/install.sh | sh</pre></div>
+<h3>Homebrew <span class="tag tag-planned">planned, not built</span></h3>
+<p>A formula in the tap <code>komira-ai/tap</code>, for macOS on Apple silicon and for Linux:</p>
+<div class="code"><pre><span class="p">$</span> brew install komira-ai/tap/tierstore</pre></div>
+<h3>apt <span class="tag tag-planned">planned, not built</span></h3>
+<p>The package <code>tierstore</code> in the repository <code>packages.komira.ai</code>, shared with other Komira tools. Fetch the repository's key over HTTPS into <code>/usr/share/keyrings</code>, compare its fingerprint with the one the repository publishes, then write a deb822 source that trusts that file for this source only:</p>
+<div class="code"><pre><span class="p">$</span> sudo install -d -m 0755 /usr/share/keyrings
+<span class="p">$</span> sudo curl -fsSL https://packages.komira.ai/apt/komira-archive-keyring.gpg -o /usr/share/keyrings/komira-archive-keyring.gpg
+<span class="p">$</span> gpg --show-keys --with-fingerprint /usr/share/keyrings/komira-archive-keyring.gpg</pre></div>
+<div class="code"><pre><span class="p">$</span> sudo tee /etc/apt/sources.list.d/komira.sources &gt;/dev/null &lt;&lt;'EOF'
+Types: deb
+URIs: https://packages.komira.ai/apt
+Suites: stable
+Components: main
+Signed-By: /usr/share/keyrings/komira-archive-keyring.gpg
+EOF
+<span class="p">$</span> sudo apt update
+<span class="p">$</span> sudo apt install tierstore</pre></div>
+<p>The first fetch of the key trusts TLS once; the fingerprint is the check against it. There is no rpm package.</p>
+<h3>Release files on tierstore.dev <span class="tag tag-planned">planned, not built</span></h3>
+<p>Each release is meant to be copied to <code>https://tierstore.dev/releases/&lt;version&gt;/</code>, written once and never changed, with <code>https://tierstore.dev/releases/latest.json</code> naming the newest. The releases of this repository on GitHub stay the place the files are built and signed; the checks under "Verify it" above are the same for a file taken from either.</p>
+
+<h2 id="configure">Configure</h2>
+<p>tierstore is configured by one TOML file, <code>--config &lt;file&gt;</code>, and nothing else for the data path. A new file sets only a few keys; everything else keeps its default until a measurement says otherwise. <a href="/docs/configuration/">The reference</a> lists every key and its default, and <a href="/docs/configure/">the configuration guide</a> has a complete file for each shape.</p>
+<div class="table-wrap"><table>
+<thead><tr><th>Key</th><th>What to put</th></tr></thead>
+<tbody>
+<tr><td><code>[[interface]]</code> <code>type</code>, <code>params.addresses</code></td><td><code>"s3"</code> and the address to listen on: a private address on a storage node, <code>127.0.0.1</code> on a build node</td></tr>
+<tr><td><code>server.proxy_id</code></td><td>a name of this process; give each process over the same tiers its own, and keep it across restarts</td></tr>
+<tr><td><code>server.bucket</code></td><td>the one bucket clients see</td></tr>
+<tr><td><code>server.access_key_file</code></td><td>the full key file</td></tr>
+<tr><td><code>hot_store</code>, <code>cold_store</code></td><td>the tiers: <code>kind = "dir"</code> with a <code>path</code>, or <code>kind = "s3"</code> with a <code>bucket</code>, an <code>endpoint</code> and a <code>credentials_file</code>; <code>hot_store.budget</code> is the bytes the hot tier is meant to hold</td></tr>
+<tr><td><code>local_cache.path</code>, <code>local_cache.budget</code></td><td>on a build node, the cache directory and its size</td></tr>
+</tbody></table></div>
+<p>A key file is the access key id and then the secret, one on each line (or JSON). It must be owned by the account that runs tierstore with mode 0600 or 0400: a start with a key file that its group or others can read is refused.</p>
+<div class="code"><pre data-lang="sh"><span class="p">$</span> printf 'AKIDEXAMPLE\nexample-secret-change-me\n' &gt; access.key
+<span class="p">$</span> chmod 0600 access.key
+<span class="p">$</span> mkdir hot cold</pre></div>
+<p>Then a file for the shape you run. Each <code>[[interface]]</code> is something the process serves.</p>
+<div class="tabs" data-tabs="shape">
+<section data-tab="One machine">
+<p>The two tiers are directories. Write this as <code>tierstore.toml</code> next to <code>access.key</code>:</p>
+<div class="code"><pre data-lang="toml">[[interface]]
+type   = "s3"
+params = { addresses = ["127.0.0.1:9000"] }
+
+[server]
+proxy_id        = "tierstore-1"
+bucket          = "tierstore"
+access_key_file = "access.key"
+
+[hot_store]
+kind   = "dir"
+path   = "hot"
+budget = "1GiB"
+
+[cold_store]
+kind = "dir"
+path = "cold"</pre></div>
+</section>
+<section data-tab="Storage node">
+<p>A hot tier on SSD in front of a cold tier on spinning disks, with a read-only key for daemons that only read. Either tier may instead be <code>kind = "s3"</code> with a <code>bucket</code>, an <code>endpoint</code> and a <code>credentials_file</code>. An <code>[[interface]]</code> of type <code>oci</code> adds the read-only OCI registry front.</p>
+<div class="code"><pre data-lang="toml">[[interface]]
+type   = "s3"
+params = { addresses = ["192.0.2.10:9000"] }
+
+[server]
+proxy_id            = "tierstore-1"
+bucket              = "tierstore"
+access_key_file     = "/etc/tierstore/access.key"
+read_only_key_files = ["/etc/tierstore/daemons.key"]
+
+[hot_store]
+kind   = "dir"
+path   = "/srv/tierstore/hot"
+budget = "800GiB"
+
+[cold_store]
+kind = "dir"
+path = "/srv/tierstore/cold"</pre></div>
+</section>
+<section data-tab="Build node">
+<p>A read cache on local disk in front of one upstream, with no hot tier. The upstream is <code>[cold_store]</code>, read with a read-only key, and <code>[[policy]]</code> says which key prefixes are kept.</p>
+<div class="code"><pre data-lang="toml">[[interface]]
+type   = "s3"
+params = { addresses = ["127.0.0.1:9400"] }
+
+[server]
+proxy_id        = "tierstore-cache-1"
+bucket          = "tierstore"
+access_key_file = "/etc/tierstore-cache/access.key"
+
+[local_cache]
+path   = "/var/lib/tierstore-cache"
+budget = "40GiB"
+
+[cold_store]
+kind             = "s3"
+bucket           = "tierstore"
+endpoint         = "http://s3-cold.example:9000"
+credentials_file = "/etc/tierstore-cache/upstream-read.key"
+
+[[policy]]
+prefix = "cas/b/"
+cache  = true</pre></div>
+</section>
+</div>
+<p>One process can also be both: the storage node's two tiers with the build node's disk cache in front of them, for a single machine. Its file has <code>[hot_store]</code>, <code>[cold_store]</code> and <code>[local_cache]</code>; <a href="/docs/configuration/#a-file-for-a-storage-node-with-a-cache">the reference</a> has an example.</p>
+<p>Check a new file before you start with it. <code>--check-config</code> loads the file and reads the key files it names, binds nothing and asks no store, then exits 0 and prints nothing, or prints the refusal and exits 2.</p>
+<div class="code"><pre data-lang="sh"><span class="p">$</span> ./tierstore --config tierstore.toml --check-config</pre></div>
+
+<h2 id="run">Start it, then put and get an object</h2>
+<div class="code"><pre data-lang="sh"><span class="p">$</span> ./tierstore --config tierstore.toml</pre></div>
+<p>The process does not test its tiers: it opens the proxy (which reads and writes the hot tier's own state) and binds the address, then prints its version and the address it listens on. <code>curl http://127.0.0.1:9000/readyz</code> answers <code>ready</code>. Stop it with Ctrl-C: it drains and exits.</p>
+<p>The front serves one bucket, path-style, over plain HTTP, and refuses the checksum trailer that recent AWS clients send by default, so tell the <code>aws</code> CLI to send checksums only when required.</p>
+<div class="code"><pre data-lang="sh"><span class="p">$</span> export AWS_ACCESS_KEY_ID=AKIDEXAMPLE AWS_SECRET_ACCESS_KEY=example-secret-change-me AWS_DEFAULT_REGION=us-east-1
+<span class="p">$</span> aws configure set default.s3.addressing_style path
+<span class="p">$</span> aws configure set default.request_checksum_calculation when_required
+<span class="p">$</span> aws configure set default.response_checksum_validation when_required
+<span class="p">$</span> echo hello &gt; hello.txt
+<span class="p">$</span> aws --endpoint-url http://127.0.0.1:9000 s3api put-object --bucket tierstore --key hello.txt --body hello.txt
+<span class="p">$</span> aws --endpoint-url http://127.0.0.1:9000 s3api get-object --bucket tierstore --key hello.txt out.txt
+<span class="p">$</span> cat out.txt</pre></div>
+<p>Whether putting <code>hello.txt</code> again is refused depends on the store's format phase: on a store on the older entry format a put is create-only and the second is refused with 412; on a store on the marker format (<code>active-marks</code>) a plain put replaces the key, and <code>If-None-Match: *</code> is what makes a put create-only.</p>
+
 <h2 id="clients">Using it from an S3 client</h2>
 <p>The front serves one bucket, path-style, over plain HTTP, and checks SigV4 in the <code>Authorization</code> header (and presigned GET and PUT URLs). An SDK with its defaults sends some things the front refuses, so a client needs these settings. The crate's tests drive the front with <code>aws-sdk-rust</code> set this way; the aws CLI and boto3 are not tested.</p>
 <div class="table-wrap"><table>
@@ -101,7 +256,9 @@ tierstore-0123456789abcdef0123456789abcdef01234567-macos-arm64.tar.gz</pre></div
 <tr><td>region</td><td>tierstore's own <code>server.region</code>, <code>us-east-1</code> by default</td><td>the region is in the credential scope of the signature</td></tr>
 <tr><td>request and response checksums</td><td><code>when_required</code></td><td>the SDK default sends a checksum trailer in an <code>aws-chunked</code> body, which the front refuses with 501</td></tr>
 </tbody></table></div>
-<div class="code"><pre>use aws_sdk_s3::config::{Credentials, Region, RequestChecksumCalculation, ResponseChecksumValidation};
+<div class="tabs" data-tabs="client">
+<section data-tab="Rust">
+<div class="code"><pre data-lang="rust">use aws_sdk_s3::config::{Credentials, Region, RequestChecksumCalculation, ResponseChecksumValidation};
 
 let config = aws_sdk_s3::Config::builder()
     .behavior_version_latest()
@@ -113,5 +270,44 @@ let config = aws_sdk_s3::Config::builder()
     .response_checksum_validation(ResponseChecksumValidation::WhenRequired)
     .build();
 let client = aws_sdk_s3::Client::from_conf(config);</pre></div>
+</section>
+<section data-tab="Python">
+<div class="code"><pre data-lang="python">import boto3
+from botocore.config import Config
+
+client = boto3.client(
+    "s3",
+    endpoint_url="http://tierstore.example:9000",
+    region_name="us-east-1",
+    aws_access_key_id=KEY_ID,
+    aws_secret_access_key=SECRET,
+    config=Config(
+        s3={"addressing_style": "path"},
+        request_checksum_calculation="when_required",
+        response_checksum_validation="when_required",
+    ),
+)
+client.put_object(Bucket="tierstore", Key="hello.txt", Body=b"hello")</pre></div>
+</section>
+<section data-tab="JavaScript">
+<div class="code"><pre data-lang="js">import { S3Client, PutObjectCommand } from "@aws-sdk/client-s3";
+
+const client = new S3Client({
+  endpoint: "http://tierstore.example:9000",
+  region: "us-east-1",
+  forcePathStyle: true,
+  credentials: { accessKeyId: KEY_ID, secretAccessKey: SECRET },
+  requestChecksumCalculation: "WHEN_REQUIRED",
+  responseChecksumValidation: "WHEN_REQUIRED",
+});
+await client.send(new PutObjectCommand({ Bucket: "tierstore", Key: "hello.txt", Body: "hello" }));</pre></div>
+</section>
+<section data-tab="aws CLI">
+<div class="code"><pre data-lang="sh"><span class="p">$</span> aws configure set default.s3.addressing_style path
+<span class="p">$</span> aws configure set default.request_checksum_calculation when_required
+<span class="p">$</span> aws configure set default.response_checksum_validation when_required
+<span class="p">$</span> aws --endpoint-url http://tierstore.example:9000 s3api list-objects-v2 --bucket tierstore</pre></div>
+</section>
+</div>
 <p class="source-note">From <code>packaging/README.md</code>, "Using a stock SDK". That README also lists the settings read from the code and not tested.</p>
-<p>Next: <a href="demo.html">a start and a drain</a>, or <a href="/docs/configuration/">the configuration</a>.</p>
+<p>Next: <a href="/demo/">a start and a drain</a>, <a href="/docs/configure/">the configuration guide</a>, <a href="/docs/configuration/">the configuration reference</a> or <a href="/docs/">the whole operator guide</a>.</p>
