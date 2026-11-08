@@ -1,6 +1,8 @@
 // Builds dist/: the prerendered pages and the hashed assets, then checks the result (check-dist.ts).
 //
 //   dist/index.html, 404.html, <route>/index.html   the pages (pages.ts), around the copy in content/ (layout.ts)
+//   dist/docs/<name>.md, docs/examples/<name>.md    the Markdown each docs page is made from (llms.ts), for programs
+//   dist/llms.txt, llms-full.txt                    the docs as a list of links and as one file (llms.ts)
 //   dist/install.sh                                 the install script, static/install.sh byte for byte (INSTALL_SCRIPT)
 //   dist/assets/<id>/                               the browser modules (build/browser, from tsc), the recorded data
 //                                                   as modules (data/<name>.js, from content/data/<name>.json) and
@@ -15,10 +17,14 @@ import { existsSync, mkdirSync, readFileSync, readdirSync, rmSync, writeFileSync
 import { dirname, join, resolve } from 'path';
 import { checkDist, importsOf, INSTALL_SCRIPT, listFiles } from './check-dist';
 import { renderPage, STYLESHEETS } from './layout';
-import { docsPages, loadDocs } from './docs';
+import { docsPages, exampleCards, loadDocs, rawMarkdown } from './docs';
+import { llmsFull, llmsTxt, rawPath } from './llms';
 import { highlightBlocks } from './highlight';
 import { renderTabs } from './tabs';
 import { outPath, PAGES, rewriteLinks } from './pages';
+
+/** Where the page copy puts the cards of the examples (docs.ts exampleCards): the home page has them in a band. */
+const EXAMPLE_CARDS = '{{example-cards}}';
 
 export interface BuildOptions {
   /** tsc's browser output (build/browser): the modules the pages load and what they import. */
@@ -88,7 +94,8 @@ export function buildSite(opts: BuildOptions): { id: string; files: string[] } {
     }
   }
   // Only the scripts the pages name and what they import ship (types.js-like modules of types only are never loaded).
-  const pages = [...PAGES, ...docsPages(loadDocs(opts.docsDir))];
+  const docs = loadDocs(opts.docsDir);
+  const pages = [...PAGES, ...docsPages(docs)];
   const entries = [...new Set(pages.flatMap((p) => p.scripts))].sort();
   for (const e of entries) if (!compiled.has(e)) throw new Error(`build: ${e} is missing; run tsc -p tsconfig.browser.json first`);
   const assets = new Map<string, Buffer>();
@@ -101,11 +108,15 @@ export function buildSite(opts: BuildOptions): { id: string; files: string[] } {
   rmSync(opts.outDir, { recursive: true, force: true });
   for (const [path, bytes] of assets) write(join(opts.outDir, 'assets', id, path), bytes);
   for (const page of pages) {
-    const copy = page.html ?? readFileSync(join(opts.contentDir, `${page.source}.html`), 'utf8');
+    const copy = (page.html ?? readFileSync(join(opts.contentDir, `${page.source}.html`), 'utf8')).replace(EXAMPLE_CARDS, exampleCards(docs));
     const main = highlightBlocks(rewriteLinks(renderTabs(copy), pages));
     write(join(opts.outDir, outPath(page.route)), renderPage(page, main, refs));
   }
 
+  // The docs as the Markdown they are written in, and the two files that list them for programs.
+  for (const d of docs) write(join(opts.outDir, rawPath(d.stem)), rawMarkdown(d));
+  write(join(opts.outDir, 'llms.txt'), llmsTxt(docs));
+  write(join(opts.outDir, 'llms-full.txt'), llmsFull(docs));
   write(join(opts.outDir, INSTALL_SCRIPT), readFileSync(join(opts.staticDir, INSTALL_SCRIPT)));
 
   if (opts.check !== false) checkDist(opts.outDir);

@@ -100,6 +100,8 @@ export function plan(o: Options, versionFile: string): string[][] {
     only('assets/*.js', 'text/javascript', IMMUTABLE),
     only('assets/*.css', 'text/css', IMMUTABLE),
     only('*.html', 'text/html; charset=utf-8', PAGE),
+    only('*.md', 'text/markdown; charset=utf-8', PAGE),
+    only('*.txt', 'text/plain; charset=utf-8', PAGE),
     only(INSTALL_SCRIPT, SHELL_SCRIPT_TYPE, PAGE),
     ['s3', 'cp', versionFile, `${target}version.txt`, '--content-type', 'text/plain', '--cache-control', 'no-cache'],
     ['s3', 'sync', o.dist, target, '--delete', '--exclude', 'releases/*', '--exclude', 'version.txt'],
@@ -123,10 +125,10 @@ export interface Deps {
 }
 
 /** The least a built site has, kept under the real site (test/golden.manifest) and above half of it: a dist/ below either is not a site, and the sweep deletes. */
-export const MIN_HTML_PAGES = 10;
-export const MIN_FILES = 12;
+export const MIN_HTML_PAGES = 12;
+export const MIN_FILES = 24;
 /** The only file types a built site holds besides install.sh (check-dist.ts enforces it); the syncs above give exactly these a content type and a cache rule. */
-const TYPES = ['.html', '.js', '.css'];
+const TYPES = ['.html', '.js', '.css', '.md', '.txt'];
 
 function filesUnder(dir: string): string[] {
   const out: string[] = [];

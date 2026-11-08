@@ -1,6 +1,6 @@
 # Install
 
-tierstore ships as a tarball per platform (Linux on x86_64 and arm64, macOS on Apple silicon) attached to every release of [this repository](https://github.com/komira-ai/tierstore/releases), with its SBOM and a provenance bundle. Versions up to 0.2.0 were built in another repository; from 0.3.0 on, releases are built and signed here. There is no Homebrew formula, apt package or container image yet; Homebrew, apt and a copy of the release files on tierstore.dev are planned, and [Not in a release yet](install.md#not-in-a-release-yet) says how they are meant to be used. hostkeeper packages exist and update tierstore through `tierstore update-hook` (see [Updates through hostkeeper](install.md#updates-through-hostkeeper)); without hostkeeper nothing updates the binary: to move to a new release, place the new binary the same way and restart the unit (on Linux; the sections from "Place the binary" on are for a Linux host).
+tierstore ships as a tarball per platform (Linux on x86_64 and arm64, macOS on Apple silicon) attached to every release of [this repository](https://github.com/komira-ai/tierstore/releases), with its SBOM and a provenance bundle. Versions up to 0.2.0 were built in another repository; from 0.3.0 on, releases are built and signed here. An install script, a Homebrew formula and an apt package are written but are not in a release yet (the tierstore.dev Install page says "from the next release" for each): until a release has them, take the tarball. There is no container image yet. [Not in a release yet](install.md#not-in-a-release-yet) says how the new ways are meant to be used. hostkeeper packages exist and update tierstore through `tierstore update-hook` (see [Updates through hostkeeper](install.md#updates-through-hostkeeper)); without hostkeeper nothing updates the binary: to move to a new release, place the new binary the same way and restart the unit (on Linux; the sections from "Place the binary" on are for a Linux host).
 
 ## Take the tarball
 
@@ -169,7 +169,15 @@ On Linux an instance starts only when its marker file, `/var/lib/tierstore/run-a
 
 ## Not in a release yet
 
-Three more ways to take tierstore are planned. None of them exists yet: the commands below fail today (there is no formula, no `tierstore` package in the apt repository, and nothing at the address), so take the tarball above. This section describes the intended use and is not held to the code until they exist.
+Four more ways to take tierstore are written and not in a release yet. The commands below fail today (there is no formula, no `tierstore` package in the apt repository, and nothing at the address the script reads), so take the tarball above. This section describes the intended use and is not held to the code until they exist.
+
+### Install script
+
+`curl -fsSL https://tierstore.dev/install.sh | sh` reads the newest release from the copy of the release files on tierstore.dev (below), downloads the tarball of the machine and `SHA256SUMS`, refuses unless the SHA-256 matches, and places `tierstore` in `~/.local/bin`. It starts nothing. It works once a release has been copied there.
+
+```sh
+curl -fsSL https://tierstore.dev/install.sh | sh
+```
 
 ### Homebrew
 

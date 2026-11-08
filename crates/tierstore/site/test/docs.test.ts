@@ -6,15 +6,18 @@
 // code by a test of the crate (src/server/docs_tests.rs); this holds the site to the guide.
 
 import assert from 'node:assert/strict';
-import { cpSync, existsSync, mkdirSync, readdirSync, readFileSync, unlinkSync, writeFileSync } from 'node:fs';
+import { cpSync, existsSync, mkdirSync, readFileSync, unlinkSync, writeFileSync } from 'node:fs';
 import { join, relative, sep } from 'node:path';
 import { test } from 'node:test';
 import { buildSite } from '../tools/build';
 import { listFiles } from '../tools/check-dist';
 import { loadDocs, renderMarkdown, slug } from '../tools/docs';
+import { guideStems } from '../tools/manifest';
 import { buildReal, copyTree, DOCS, REPO, scratch, SITE } from './support';
 
-const stems = readdirSync(DOCS).filter((f) => f.endsWith('.md')).map((f) => f.replace(/\.md$/, '')).sort();
+const stems = guideStems(DOCS);
+/** The built page of a stem: the landing page is /docs/ itself. */
+const pageOf = (stem: string): string => (stem === 'index' ? 'docs/index.html' : `docs/${stem}/index.html`);
 const dist = buildReal('docs');
 const built = (route: string): string => readFileSync(join(dist, route.replace(/^\//, ''), 'index.html'), 'utf8');
 
@@ -32,21 +35,23 @@ function copyDocs(name: string): string {
   return dir;
 }
 
-/** What is wrong with the files under docs/ of a built tree: exactly index.html and <stem>/index.html for each guide file. */
+/** What is wrong with the files under docs/ of a built tree: exactly the page and the Markdown of each guide file. */
 function docsTreeProblems(tree: string): string[] {
-  const want = new Set(['docs/index.html', ...stems.map((s) => `docs/${s}/index.html`)]);
+  const want = new Set([...stems.map(pageOf), ...stems.map((s) => `docs/${s}.md`)]);
   const have = new Set(listFiles(tree).filter((f) => f.startsWith('docs/')));
   return [...[...want].filter((f) => !have.has(f)).map((f) => `missing ${f}`), ...[...have].filter((f) => !want.has(f)).map((f) => `unexpected ${f}`)];
 }
 
-test('every file of docs/ is a page of the site, under /docs/<name>/, and /docs/ lists them all', () => {
-  assert.ok(stems.length >= 7, `the guide has ${stems.length} pages`);
-  const index = built('/docs/');
+test('every file of docs/ and docs/examples/ is a page of the site and has its Markdown beside it, and every page is in the sidebar of every other', () => {
+  assert.ok(stems.length >= 12, `the guide has ${stems.length} pages`);
+  assert.ok(stems.includes('index') && stems.includes('examples/cache-hot-cold'));
+  const nav = (html: string): string => /<nav class="docs-nav"[\s\S]*?<\/nav>/.exec(html)?.[0] ?? '';
   for (const stem of stems) {
-    assert.ok(existsSync(join(dist, 'docs', stem, 'index.html')), `docs/${stem}.md has no page`);
-    assert.ok(index.includes(`href="/docs/${stem}/"`), `/docs/ does not list ${stem}`);
+    assert.ok(existsSync(join(dist, pageOf(stem))), `docs/${stem}.md has no page`);
+    assert.ok(existsSync(join(dist, 'docs', `${stem}.md`)), `docs/${stem}.md is not served as Markdown`);
+    assert.ok(nav(readFileSync(join(dist, pageOf('overview')), 'utf8')).includes(`href="${stem === 'index' ? '/docs/' : `/docs/${stem}/`}"`), `the sidebar does not list ${stem}`);
   }
-  assert.deepEqual(docsTreeProblems(dist), [], 'the built docs/ is index.html and one <name>/index.html per guide file, nothing else');
+  assert.deepEqual(docsTreeProblems(dist), [], 'the built docs/ is a page and a Markdown file per guide file, nothing else');
 });
 
 test('an extra docs directory or a stray file under docs/ is refused (the check can fail)', () => {
@@ -61,12 +66,13 @@ test('an extra docs directory or a stray file under docs/ is refused (the check 
   }
   const gone = copyTree(dist, 'docs-gone');
   unlinkSync(join(gone, 'docs', 'keys', 'index.html'));
-  assert.deepEqual(docsTreeProblems(gone), ['missing docs/keys/index.html']);
+  unlinkSync(join(gone, 'docs', 'examples', 'cache-hot-cold.md'));
+  assert.deepEqual(docsTreeProblems(gone), ['missing docs/keys/index.html', 'missing docs/examples/cache-hot-cold.md']);
 });
 
-test('the guide is read in its order, and a page the site has not heard of follows by name', () => {
+test('the guide is read in its order (the landing page, the reference, the examples, the guide), and a page the site has not heard of follows by name', () => {
   const order = loadDocs(DOCS).map((d) => d.stem);
-  assert.deepEqual(order.slice(0, 3), ['overview', 'install', 'keys']);
+  assert.deepEqual(order.slice(0, 7), ['index', 'configuration', 'examples/directory-as-bucket', 'examples/cache-in-front-of-s3', 'examples/cache-hot-cold', 'overview', 'configure']);
   const dir = copyDocs('docs-order');
   writeFileSync(join(dir, 'zzz.md'), '# A page\n\nText.\n');
   const after = loadDocs(dir).map((d) => d.stem);
@@ -78,7 +84,7 @@ test('a page added to docs/ is built, and a change to the guide changes its page
   writeFileSync(join(dir, 'metrics.md'), '# Metrics\n\nThe counters.\n\n## Names\n\nA name.\n');
   const out = buildWith('docs-add-out', dir);
   assert.match(readFileSync(join(out, 'docs', 'metrics', 'index.html'), 'utf8'), /<h2 id="names">Names<\/h2>/);
-  assert.match(readFileSync(join(out, 'docs', 'index.html'), 'utf8'), /href="\/docs\/metrics\/"/);
+  assert.match(readFileSync(join(out, 'docs', 'overview', 'index.html'), 'utf8'), /href="\/docs\/metrics\/"/, 'the sidebar lists the new page');
   const text = readFileSync(join(dir, 'limits.md'), 'utf8');
   writeFileSync(join(dir, 'limits.md'), text.replace('One bucket, SigV4 in the header, virtual-hosted-style only for the domains you list.', 'A planted sentence.'));
   assert.match(readFileSync(join(buildWith('docs-change', dir), 'docs', 'limits', 'index.html'), 'utf8'), /A planted sentence\./);
@@ -130,7 +136,7 @@ test('the first paragraph is the lede, and the page names the guide in its navig
   const page = built('/docs/keys/');
   assert.match(page, /<h1>Keys and roles<\/h1>\n<p class="lede">/);
   assert.match(page, /<a href="\/docs\/keys\/" aria-current="page">Keys and roles<\/a>/);
-  assert.match(page, /<a href="\/docs\/">Docs<\/a>/, "the footer still links to the guide");
+  assert.match(page, /<a href="\/docs\/" aria-current="page">Docs<\/a>/, 'the header marks Docs as the current section');
 });
 
 test('the workflow runs the site tests when the guide or the crate source changes, on a pull request and on a push', () => {
@@ -142,4 +148,35 @@ test('the workflow runs the site tests when the guide or the crate source change
     const glob = `      - ${dir}/**\n`;
     assert.equal(wf.split(glob).length - 1, 2, `the workflow's paths: filters (pull_request and push) each name ${glob.trim()}`);
   }
+});
+
+test('on a phone the guide menu is a disclosure that the page script closes, and with no script it is the open list; a wide screen shows the list with no summary', () => {
+  for (const route of ['/docs/', '/docs/keys/', '/docs/examples/cache-hot-cold/']) {
+    const html = built(route);
+    assert.match(html, /<details class="docs-menu" open>\n<summary>Docs menu<\/summary>\n<nav class="docs-nav" aria-label="Guide">/, route);
+    assert.match(html, /\/docs-menu\.js"><\/script>/, route);
+    assert.ok(html.includes('<p class="docs-nav-title">Configure</p>') && html.includes('<p class="docs-nav-title">Examples</p>') && html.includes('<p class="docs-nav-title">More guides</p>'), route);
+  }
+  const js = readFileSync(join(SITE, 'build', 'browser', 'docs-menu.js'), 'utf8');
+  assert.match(js, /\(min-width: 60rem\)/);
+  assert.match(js, /menu\.open = wide\.matches/);
+  const css = readFileSync(join(SITE, 'static', 'site.css'), 'utf8');
+  assert.match(css, /@media \(min-width: 60rem\) \{[^@]*\.docs-menu summary \{ display: none; \}/);
+});
+
+test('a table of the guide labels its middle columns, and on a phone its rows are stacked with the label before each cell', () => {
+  const html = built('/docs/');
+  assert.match(html, /<td data-label="Type, default">/);
+  assert.doesNotMatch(html, /<td data-label="What">/, 'the last column is the text and has no label');
+  assert.match(html, /<tr><td><code>hot_store\.kind<\/code><\/td><td>the kind of the hot tier/, 'a two-column table has no labels');
+  const css = readFileSync(join(SITE, 'static', 'site.css'), 'utf8');
+  assert.match(css, /\.docs-body \.table-wrap td\[data-label\]::before \{ content: attr\(data-label\) ": "/);
+  assert.match(css, /\.docs-body \.table-wrap tr, \.docs-body \.table-wrap td \{ display: block; \}/);
+});
+
+test('a code block wraps its long lines and keeps its text clear of the Copy button: on a wide screen by padding, on a phone by a strip of its own', () => {
+  const css = readFileSync(join(SITE, 'static', 'site.css'), 'utf8');
+  assert.match(css, /\.code pre \{[^}]*padding: 1rem 5\.5rem 1rem 1rem;[^}]*white-space: pre-wrap; overflow-wrap: anywhere;/);
+  assert.match(css, /@media \(max-width: 40rem\) \{[^@]*\.code pre \{ padding: 2\.9rem 1rem 1rem; \}/);
+  assert.match(css, /\.code button\.copy \{ position: absolute; top: 0\.5rem; right: 0\.5rem;/);
 });
