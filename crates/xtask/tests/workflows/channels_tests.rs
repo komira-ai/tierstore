@@ -123,8 +123,8 @@ const DEFECTS: &[(&str, &str, &str, &str)] = &[
     ),
     (
         "channel-upload",
-        "role-to-assume: ${{ vars.TIERSTORE_RELEASES_ROLE_ARN }}",
-        "role-to-assume: ${{ vars.APT_PUBLISH_ROLE_ARN }}",
+        "'true' }}\n        env:\n          ROLE_ARN: ${{ vars.TIERSTORE_RELEASES_ROLE_ARN }}",
+        "'true' }}\n        env:\n          ROLE_ARN: ${{ vars.APT_PUBLISH_ROLE_ARN }}",
         "channel-upload: the role assumed is not ${{ vars.TIERSTORE_RELEASES_ROLE_ARN }}, the environment's",
     ),
     (
@@ -156,6 +156,24 @@ const DEFECTS: &[(&str, &str, &str, &str)] = &[
         "      - name: Gate on the settings of the release files",
         "      - uses: aws-actions/configure-aws-credentials@e1253824e5c10ff9df46874f81ed3ec929e19cfd # v6.3.0\n        with:\n          role-to-assume: ${{ vars.TIERSTORE_RELEASES_ROLE_ARN }}\n          aws-region: us-east-1\n      - name: Gate on the settings of the release files",
         "channel-upload: a step before the gate names aws-actions/",
+    ),
+    (
+        "channel-upload",
+        " --role-arn \"$ROLE_ARN\"",
+        "",
+        "channel-upload: the assume step is not given --role-arn \"$ROLE_ARN\"",
+    ),
+    (
+        "channel-upload",
+        " --region us-east-1 --env-file",
+        " --env-file",
+        "channel-upload: the assume step is not given --region ",
+    ),
+    (
+        "channel-upload",
+        " --env-file \"$GITHUB_ENV\"",
+        "",
+        "channel-upload: the assume step is not given --env-file \"$GITHUB_ENV\"",
     ),
     (
         "tap",
@@ -226,8 +244,8 @@ const DEFECTS: &[(&str, &str, &str, &str)] = &[
     (
         "tap",
         "      - name: The token of the release bot, for the tap repository alone\n",
-        "      - uses: aws-actions/configure-aws-credentials@e1253824e5c10ff9df46874f81ed3ec929e19cfd # v6.3.0\n        if: ${{ steps.gate.outputs.enabled == 'true' }}\n        with:\n          role-to-assume: x\n      - name: The token of the release bot, for the tap repository alone\n",
-        "tap: names configure-aws-credentials, which only channel-upload may",
+        "      - run: cargo xtask channels assume --role-arn x\n        if: ${{ steps.gate.outputs.enabled == 'true' }}\n      - name: The token of the release bot, for the tap repository alone\n",
+        "tap: names channels assume, which only channel-upload may",
     ),
 ];
 
@@ -276,8 +294,8 @@ fn a_job_that_is_missing_or_too_short_is_named() {
 }
 
 #[test]
-fn the_upload_assumes_the_role_before_it_uploads_and_pins_the_action() {
-    // Catches: an upload that runs without credentials, and an action pinned by tag.
+fn the_upload_assumes_the_role_before_it_uploads() {
+    // Catches: an upload that runs without credentials.
     let text = text_of("release.yml");
     let swapped = {
         let upload =
@@ -296,17 +314,33 @@ fn the_upload_assumes_the_role_before_it_uploads_and_pins_the_action() {
             .any(|p| p == "channel-upload: the role is assumed after the upload"),
         "{problems:?}"
     );
-    let unpinned = in_job(
+}
+
+#[test]
+fn the_upload_job_cannot_go_back_to_an_action_for_its_credentials() {
+    // Catches: aws-actions/configure-aws-credentials returning to channel-upload, which the
+    // Actions policy of the repository refuses (GitHub then fails every run of the workflow).
+    let text = text_of("release.yml");
+    let back = in_job(
         &text,
         "channel-upload",
-        "aws-actions/configure-aws-credentials@e1253824e5c10ff9df46874f81ed3ec929e19cfd # v6.3.0",
-        "aws-actions/configure-aws-credentials@v6",
+        "        run: cargo xtask channels assume --role-arn \"$ROLE_ARN\" --session-name \"tierstore-release-$GITHUB_RUN_ID\" --region us-east-1 --env-file \"$GITHUB_ENV\"\n",
+        "        run: echo\n      - uses: aws-actions/configure-aws-credentials@e1253824e5c10ff9df46874f81ed3ec929e19cfd # v6.3.0\n",
     );
     assert!(
-        lint("release.yml", &unpinned)
+        lint("release.yml", &back)
             .iter()
-            .any(|p| p.contains("40-digit")),
-        "{unpinned}"
+            .any(|p| p.contains("not admitted by the Actions policy")),
+        "{:?}",
+        lint("release.yml", &back)
+    );
+    assert!(
+        release_problems(&back)
+            .iter()
+            .any(|p| p
+                == "channel-upload: it needs one step that assumes the role and one that uploads"),
+        "{:?}",
+        release_problems(&back)
     );
 }
 

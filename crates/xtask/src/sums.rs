@@ -21,7 +21,8 @@
 //! - `verify-assets attestations <dir> --repo <owner/repo> --workflow-ref <ref> --commit
 //!   <sha> [--source-ref refs/heads/<branch>] [--trusted-root <file>] [--gh <program>]`
 //!   ([`verify_attestations`]): every listed tarball, SBOM, hostkeeper package
-//!   (`tierstore-<version>-<platform>.tar.zst`), Debian package (`tierstore_<version>_<arch>.deb`)
+//!   (`tierstore-<version>-<platform>.tar.zst`), Debian package (`tierstore_<version>_<arch>.deb`), RPM package
+//!   (`tierstore-<version>-1.<arch>.rpm`)
 //!   and release index (`index.json`) has build
 //!   provenance signed by the workflow `--workflow-ref` names, for the branch `--source-ref`
 //!   names (default `refs/heads/main`; a value that is not `refs/heads/<branch>` is a usage
@@ -495,9 +496,12 @@ pub fn verify_attestations(dir: &Path, a: &Attestations) -> Result<Vec<String>, 
             a.require(&file, workflow, Some(SBOM_PREDICATE))?;
             a.require_bundle(dir, &l.name, workflow)?;
             printed.push(format!("verified: {} (provenance, SBOM, bundle)", l.name));
-        } else if l.name.ends_with(PACKAGE_SUFFIX) || l.name.ends_with(".deb") {
+        } else if l.name.ends_with(PACKAGE_SUFFIX)
+            || l.name.ends_with(".deb")
+            || l.name.ends_with(".rpm")
+        {
             // A hostkeeper package: the build provenance of the sums and its own bundle, the
-            // one hostkeeper verifies offline. A Debian package has the same two.
+            // one hostkeeper verifies offline. A Debian or an RPM package has the same two.
             a.require(&file, workflow, None)?;
             a.require_bundle(dir, &l.name, workflow)?;
             printed.push(format!("verified: {} (provenance, bundle)", l.name));
@@ -507,7 +511,7 @@ pub fn verify_attestations(dir: &Path, a: &Attestations) -> Result<Vec<String>, 
             printed.push(format!("verified: {} (provenance)", l.name));
         } else {
             return Err(Error::Failed(format!(
-                "{SUMS} lists {}, which is neither a tarball, an SBOM, a hostkeeper package, a Debian package nor the release index",
+                "{SUMS} lists {}, which is neither a tarball, an SBOM, a hostkeeper package, a Debian package, an RPM package nor the release index",
                 l.name
             )));
         }

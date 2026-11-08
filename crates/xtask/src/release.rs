@@ -19,7 +19,7 @@
 //!   `SHA256SUMS` lists exactly the assets of that commit ([`expected_assets`],
 //!   [`hostkeeper_assets`] of the one version of its hostkeeper packages, and
 //!   [`distribution_assets`] of the release version that version names) and no other,
-//!   and each tarball, package and Debian package has exactly one provenance bundle whose one
+//!   and each tarball, package, Debian package and RPM package has exactly one provenance bundle whose one
 //!   subject is that file's digest ([`crate::bundles`]), and no bundle is there for anything
 //!   else.
 //! - `release publish <dir> --repo <owner/repo> --tag <tag> --commit <sha> --run-id <id>
@@ -38,7 +38,8 @@
 //!
 //! And the files the distribution channels take: `release tap-tarball` ([`tap_tarball`]) names a
 //! platform's tarball as the Homebrew tap's formula downloads it, `tierstore-<version>-<target>.tar.gz`,
-//! and `release deb` ([`deb`]) builds `tierstore_<version>_<arch>.deb` of a Linux binary.
+//! `release deb` ([`deb`]) builds `tierstore_<version>_<arch>.deb` of a Linux binary, and `release rpm`
+//! ([`rpm`]) builds `tierstore-<version>-1.<arch>.rpm` of it.
 //!
 //! After a release, by hand: `release desired` ([`desired`]) reads the release index of a published
 //! release and gives the version and digest `.github/workflows/hostkeeper-desired.yml` sets on the
@@ -52,6 +53,7 @@ pub mod hostkeeper_package;
 pub mod hostkeeper_verify;
 mod plan;
 mod publish;
+pub mod rpm;
 mod set_version;
 pub mod tap_tarball;
 
@@ -125,7 +127,8 @@ pub fn hostkeeper_assets(version: &str) -> Vec<String> {
 
 /// The files `SHA256SUMS` lists for the release `version` (`<major>.<minor>.<patch>`) besides
 /// the commit-named tarballs and the hostkeeper packages, sorted: the tap tarball of each
-/// platform ([`tap_tarball`]) and the Debian package of each Linux platform ([`deb`]).
+/// platform ([`tap_tarball`]) and the Debian and RPM packages of each Linux platform ([`deb`],
+/// [`rpm`]).
 pub fn distribution_assets(version: &str) -> Vec<String> {
     let mut names: Vec<String> = Platform::ALL
         .iter()
@@ -134,6 +137,9 @@ pub fn distribution_assets(version: &str) -> Vec<String> {
     for platform in Platform::ALL {
         if let Some(architecture) = deb::architecture(platform) {
             names.push(deb::file_name(version, architecture));
+        }
+        if let Some(architecture) = rpm::architecture(platform) {
+            names.push(rpm::file_name(version, architecture));
         }
     }
     names.sort();

@@ -8,7 +8,7 @@
 //! - [`build_commit`]: a built binary names the commit it was built from.
 //! - [`release`]: find the successful build of a commit, check its files, publish them; the
 //!   hostkeeper packages of a build, their release index and the checks a host makes of them; the
-//!   tap-named tarballs and the Debian packages of a build;
+//!   tap-named tarballs, the Debian packages and the RPM packages of a build;
 //!   and the version and digest a published release is set as on the hostkeeper coordinator.
 //! - [`channels`]: a published release reaching tierstore.dev and the Homebrew tap; the settings
 //!   gate of those jobs.
@@ -386,6 +386,31 @@ enum ReleaseVerb {
         #[arg(long)]
         out: PathBuf,
     },
+    /// The RPM package of a Linux platform's binary, `<out>/tierstore-<version>-1.<arch>.rpm`.
+    Rpm {
+        /// The built binary; it is not run, so it may be of any platform.
+        #[arg(long)]
+        binary: PathBuf,
+        /// `<major>.<minor>.<patch>`, the release's version.
+        #[arg(long)]
+        version: String,
+        /// The platform the binary was built for (`linux-x86_64` or `linux-arm64`).
+        #[arg(long, value_enum)]
+        platform: package::Platform,
+        /// The third-party licence notice (`licenses`) to install under
+        /// `/usr/share/licenses/tierstore`.
+        #[arg(long)]
+        licenses: PathBuf,
+        /// The directory the package and its sums line are written to; created when missing.
+        #[arg(long)]
+        out: PathBuf,
+    },
+    /// What `rpm -qip` and `rpm -qlv` show of an RPM package, read by this tool's own reader,
+    /// after the check of its digests.
+    RpmInfo {
+        /// The package file.
+        file: PathBuf,
+    },
     /// The release index of the hostkeeper packages in `dir`, `dir/index.json`, and its sums
     /// line in `dir/SHA256SUMS.index`.
     HostkeeperIndex {
@@ -677,6 +702,14 @@ fn run(cli: Cli) -> Result<Vec<String>, Error> {
             licenses,
             out,
         }) => release::deb::deb(&binary, &version, platform, &licenses, &out),
+        Verb::Release(ReleaseVerb::Rpm {
+            binary,
+            version,
+            platform,
+            licenses,
+            out,
+        }) => release::rpm::rpm(&binary, &version, platform, &licenses, &out),
+        Verb::Release(ReleaseVerb::RpmInfo { file }) => release::rpm::rpm_info(&file),
         Verb::Release(ReleaseVerb::HostkeeperIndex {
             dir,
             commit,

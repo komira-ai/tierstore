@@ -166,7 +166,8 @@ fn upload_and_tap_report_the_first_call_that_fails_and_a_bad_flag_is_a_usage_err
 
 #[test]
 fn upload_stops_at_the_first_aws_call_that_fails() {
-    // Catches: the upload verb's `aws` program flag not reaching the calls.
+    // Catches: the upload verb's `aws` program flag not reaching the calls, and an upload that
+    // goes on to a later file after a put fails.
     let d = fresh("upload-fails");
     let dist = d.join("dist");
     std::fs::create_dir(&dist).unwrap();
@@ -177,6 +178,8 @@ fn upload_stops_at_the_first_aws_call_that_fails() {
         "tierstore-1.2.3-macos-arm64.tar.gz",
         "tierstore_1.2.3_amd64.deb",
         "tierstore_1.2.3_arm64.deb",
+        "tierstore-1.2.3-1.aarch64.rpm",
+        "tierstore-1.2.3-1.x86_64.rpm",
     ] {
         let bytes = format!("bytes of {name}");
         std::fs::write(dist.join(name), &bytes).unwrap();
@@ -204,10 +207,19 @@ fn upload_stops_at_the_first_aws_call_that_fails() {
     );
     assert_eq!(o.status.code(), Some(1), "{}", stderr(&o));
     assert!(
-        stderr(&o).contains("put releases/1.2.3/tierstore-1.2.3-linux-aarch64.tar.gz"),
+        stderr(&o).contains("put releases/1.2.3/tierstore-1.2.3-1.aarch64.rpm"),
         "{}",
         stderr(&o)
     );
+    for later in [
+        "tierstore-1.2.3-1.aarch64.rpm.sigstore.json",
+        "tierstore-1.2.3-1.x86_64.rpm",
+        "tierstore-1.2.3-linux-aarch64.tar.gz",
+        "SHA256SUMS",
+        "latest.json",
+    ] {
+        assert!(!stderr(&o).contains(later), "{later}: {}", stderr(&o));
+    }
 }
 
 fn sha256(bytes: &[u8]) -> String {
@@ -479,5 +491,89 @@ fn the_apt_suite_and_promote_and_no_pool_are_dispatched_and_their_flags_are_held
         write(&["--no-pool", "--debs", "dist"]).status.code(),
         Some(2)
     );
-    assert_eq!(write(&[]).status.code(), Some(2));
+}
+
+/// `channels assume` as a process with the token offer of the runner set (or not) in its
+/// environment, and an `aws` that is never reached.
+fn assume(d: &Path, role: &str, offer: &[(&str, &str)]) -> Output {
+    let mut command = Command::new(env!("CARGO_BIN_EXE_xtask"));
+    command
+        .current_dir(d)
+        .env_remove("ACTIONS_ID_TOKEN_REQUEST_URL")
+        .env_remove("ACTIONS_ID_TOKEN_REQUEST_TOKEN")
+        .envs(offer.iter().copied())
+        .args([
+            "channels",
+            "assume",
+            "--role-arn",
+            role,
+            "--session-name",
+            "tierstore-release-1",
+            "--region",
+            "us-east-1",
+            "--env-file",
+            "github-env",
+            "--aws",
+            "aws-that-is-not-there",
+        ]);
+    command.output().expect("run xtask")
+}
+
+#[test]
+fn assume_refuses_an_empty_role_and_a_job_without_an_oidc_offer_and_writes_nothing() {
+    // Catches: an assume verb that goes on without a role (status 2, a usage error) or without
+    // the token the runner offers (status 1), or that writes the env file before it has
+    // credentials.
+    let d = fresh("assume");
+    let o = assume(&d, "", &[]);
+    assert_eq!(o.status.code(), Some(2), "{}", stderr(&o));
+    assert!(stderr(&o).contains("--role-arn is empty"), "{}", stderr(&o));
+
+    let o = assume(&d, "arn:aws:iam::1:role/r", &[]);
+    assert_eq!(o.status.code(), Some(1), "{}", stderr(&o));
+    assert!(
+        stderr(&o).contains("the runner offers no OIDC token"),
+        "{}",
+        stderr(&o)
+    );
+    let o = assume(
+        &d,
+        "arn:aws:iam::1:role/r",
+        &[("ACTIONS_ID_TOKEN_REQUEST_URL", "https://127.0.0.1:9/t")],
+    );
+    assert_eq!(o.status.code(), Some(1), "{}", stderr(&o));
+    assert!(
+        stderr(&o).contains("the runner offers no OIDC token"),
+        "{}",
+        stderr(&o)
+    );
+    assert!(!d.join("github-env").exists());
+}
+
+#[test]
+fn assume_masks_the_role_and_the_bearer_before_it_asks_for_the_token() {
+    // Catches: the real offer not being read from the environment by its names, and a mask that
+    // comes after the first request. The address refuses the connection, so the token request
+    // fails and no `aws` is run.
+    let d = fresh("assume-offer");
+    let o = assume(
+        &d,
+        "arn:aws:iam::1:role/r",
+        &[
+            ("ACTIONS_ID_TOKEN_REQUEST_URL", "http://127.0.0.1:9/t"),
+            ("ACTIONS_ID_TOKEN_REQUEST_TOKEN", "bearer-x"),
+        ],
+    );
+    assert_eq!(o.status.code(), Some(1), "{}", stderr(&o));
+    assert_eq!(
+        stdout(&o),
+        "::add-mask::arn:aws:iam::1:role/r\n::add-mask::bearer-x\n"
+    );
+    assert!(
+        stderr(&o).contains("the OIDC token request failed: "),
+        "{}",
+        stderr(&o)
+    );
+    assert!(!stderr(&o).contains("bearer-x"), "{}", stderr(&o));
+    assert!(!d.join("github-env").exists());
 }

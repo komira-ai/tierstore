@@ -35,6 +35,9 @@ hostkeeper-unpack.workspace = true
 lzma-rs = "0.3.0"
 # The MD5 sums a Debian package lists its files with (`release deb`).
 md-5 = "0.11.0"
+# The RPM packages `release rpm` builds and `release rpm-info` reads back; the builder and reader
+# only (no signing, no zstd, xz or bzip2), so no C library.
+rpm = { version = "0.30.2", default-features = false, features = ["payload", "gzip-compression"] }
 # The TLS client of `fetch`: the host's trusted roots and nothing else.
 rustls = { version = "0.23.45", default-features = false, features = ["ring", "std", "tls12"] }
 rustls-native-certs = "0.8.4"
