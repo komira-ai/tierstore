@@ -10,7 +10,8 @@
 //!
 //! - `channels apt read --bucket <b> --out <dir>` ([`read`]): the current index and the ETag of
 //!   each of its objects, from S3 (never through the CDN, which caches the index and would hand
-//!   back a stale ETag). Job `apt-deploy-read`: the cloud role, no key.
+//!   back a stale ETag). Jobs `testing-apt-read` and
+//!   `stable-apt-read`: the cloud role, no key.
 //! - `channels apt index --current <dir> --out <dir> --debs <dir> --version <V> ...`
 //!   ([`build`]): the packages merged into that index, every other product's entries kept as they
 //!   are. Reads no cloud and no key.
@@ -19,11 +20,11 @@
 //!   `stable`; reads no cloud and no key. The write that follows is `apt write --suite stable
 //!   --no-pool`.
 //! - `channels apt sign --dir <dir> --work <dir> --fingerprint <fpr> --key-file <f>
-//!   --passphrase-file <f>` ([`sign`]): `InRelease` and `Release.gpg`, verified. Job `apt-index`:
-//!   the key, no cloud role.
+//!   --passphrase-file <f>` ([`sign`]): `InRelease` and `Release.gpg`, verified. Jobs `testing-apt-index` and `stable-apt-index`: the key, no cloud role.
 //! - `channels apt write --bucket <b> --distribution-id <id> --hostname <h> --next <dir> --debs
 //!   <dir> --version <V>` ([`write`]): the packages into the pool with `If-None-Match`, the index
-//!   with `If-Match` on the ETags that were read. Job `apt-deploy-write`: the cloud role, no key.
+//!   with `If-Match` on the ETags that were read (`--no-pool` instead of `--debs` and `--version`:
+//!   the index only). Jobs `testing-apt-write` and `stable-apt-write`: the cloud role, no key.
 //!
 //! The programs that talk to the outside (`aws`, `gpg`) are flags, so a test hands a stand-in
 //! ([`super::aws::Aws`], [`sign::Gpg`]).
