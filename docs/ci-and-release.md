@@ -307,6 +307,30 @@ it ends red naming the missing ones.
 The design is `docs/design/distribution.md`; the workflow lint (`crates/xtask/tests/workflows`)
 holds the shape of both jobs.
 
+### The apt repository
+
+After `publish`, `release.yml` also puts the two Debian packages in `packages.komira.ai`, the apt
+repository the organisation's products share, in three jobs that never share a secret: no job
+holds both the signing key and the cloud role. The release is listed in the suite `testing`
+(`apt/dists/testing/`, every verb takes `--suite testing`); the suite `stable`, the one users
+install from, is written only by the promotion of the same entries after the install checks
+(`cargo xtask channels apt promote`, then `apt write --suite stable --no-pool`: the index only,
+the pool holds the packages already). Both suites list the files of one pool.
+
+| job | environment | settings | does |
+|---|---|---|---|
+| `testing-apt-read` | `apt-publish` | variables `APT_PUBLISH_ROLE_ARN`, `APT_BUCKET`, `APT_DISTRIBUTION_ID`, `APT_HOSTNAME` | assumes the role by OIDC and reads the current index and the ETag of each of its objects from S3 (`cargo xtask channels apt read`) |
+| `testing-apt-index` | `apt-signing` | variable `APT_GPG_FINGERPRINT`, secrets `APT_GPG_PRIVATE_KEY`, `APT_GPG_PASSPHRASE` | merges `tierstore_<version>_{amd64,arm64}.deb` into that index, keeping every other product's entries (`apt index`), and signs `InRelease` and `Release.gpg` (`apt sign`); no cloud role |
+| `testing-apt-write` | `apt-publish` | as the read job | uploads the packages once each, then the index with `If-Match` on the ETags that were read, then invalidates `/apt/dists/*` (`apt write`) |
+
+A job without its settings ends green with a notice and writes nothing; the index and write jobs
+are also off when the read job was (`channels gate --require`). The index is the one object other
+products' releases write too. When the write finds it changed in between (`412`), it reports
+`conflict=true` and ends green, and the jobs with the suffix `-2` read, merge, sign and write
+again; the write of the third attempt (`-3`) fails instead of asking for a fourth. A package that
+is in the pool already passes only with the same bytes. A version older than the newest listed is
+refused. A release whose apt jobs all failed is still a release: re-run the failed jobs.
+
 ### Releasing by hand
 
 Run the `release` workflow from `main` ("Run workflow"), giving the tag (`vX.Y.Z`), the full SHA

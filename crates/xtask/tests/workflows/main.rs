@@ -11,6 +11,8 @@
 
 mod allowed_actions;
 mod allowed_actions_tests;
+mod apt;
+mod apt_tests;
 mod channels;
 mod channels_tests;
 mod desired;
