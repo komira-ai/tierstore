@@ -227,15 +227,13 @@ fn check_config_accepts_a_good_write_through_file_and_prints_nothing() {
 }
 
 /// Asserts that `--check-config` makes no call to the network: the upstream of the file is an
-/// address nothing listens on (a port that was bound and let go), and the check still exits 0
-/// with no output. (A start does not call the upstream either: see
+/// address nothing listens on (a port held by `tierstore_testkit::port::dead_addr`), and the
+/// check still exits 0 with no output. (A start does not call the upstream either: see
 /// `a_start_makes_no_call_of_the_upstream_and_leaves_it_no_key` in the crate.)
 #[test]
 fn check_config_does_not_call_the_upstream() {
     let files = Files::new("bin-check-offline");
-    let closed = std::net::TcpListener::bind("127.0.0.1:0").unwrap();
-    let endpoint = format!("http://{}", closed.local_addr().unwrap());
-    drop(closed);
+    let endpoint = format!("http://{}", tierstore_testkit::port::dead_addr());
     let cache_dir = files.key.with_file_name("cache");
     let config = check_file(&files, "write_through = true", &endpoint, &cache_dir);
     assert_eq!(run(&checking(&config)), (0, String::new(), String::new()));

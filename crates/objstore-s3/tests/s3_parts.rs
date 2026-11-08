@@ -276,9 +276,7 @@ async fn a_body_that_fails_or_has_the_wrong_length_leaves_no_part() {
 /// body that the request was to send.
 #[tokio::test]
 async fn a_store_that_cannot_be_reached_is_a_transport_error() {
-    let closed = TcpListener::bind("127.0.0.1:0").await.unwrap();
-    let endpoint = format!("http://{}", closed.local_addr().unwrap());
-    drop(closed);
+    let endpoint = format!("http://{}", tierstore_testkit::port::dead_addr());
     let store = store(&endpoint, CONDITIONAL, Duration::from_secs(5));
     let k = key("k");
     let sent = store.upload_part_stream(&k, "u-1", 1, 3, pieces(&["abc"]));
@@ -963,9 +961,7 @@ async fn a_listing_of_parts_the_store_refuses_or_garbles_is_an_error() {
 /// Asserts that a store that cannot be reached gives a transport error for a listing of parts.
 #[tokio::test]
 async fn a_listing_of_parts_on_a_store_that_cannot_be_reached_is_a_transport_error() {
-    let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
-    let endpoint = format!("http://{}", listener.local_addr().unwrap());
-    drop(listener);
+    let endpoint = format!("http://{}", tierstore_testkit::port::dead_addr());
     let store = store(&endpoint, CONDITIONAL, Duration::from_secs(5));
     let listed = store.list_parts(&key("k"), "u", None, PageSize::MAX).await;
     assert!(

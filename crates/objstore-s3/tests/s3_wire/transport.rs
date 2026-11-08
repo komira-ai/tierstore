@@ -2,12 +2,10 @@
 
 use super::*;
 
-/// An endpoint nothing listens on: a port that was bound and then released.
+/// An endpoint nothing listens on or can take: a port held, not listening, until the test
+/// binary exits ([`tierstore_testkit::port::dead_addr`]).
 async fn dead_endpoint() -> String {
-    let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
-    let addr = listener.local_addr().unwrap();
-    drop(listener);
-    format!("http://{addr}")
+    format!("http://{}", tierstore_testkit::port::dead_addr())
 }
 
 /// Catches: an unreachable store reported as success, as an empty result, or as a
