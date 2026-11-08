@@ -107,10 +107,10 @@ describe('cloudfront', () => {
     t.resourceCountIs('AWS::CloudFront::CloudFrontOriginAccessIdentity', 0);
   });
 
-  test('the distribution serves tierstore.dev with TLS 1.2, HTTP/3, https redirect, GET/HEAD, and 403/404 as the 404 page', () => {
+  test('the distribution serves tierstore.dev and www.tierstore.dev with TLS 1.2, HTTP/3, https redirect, GET/HEAD, and 403/404 as the 404 page', () => {
     t.hasResourceProperties('AWS::CloudFront::Distribution', {
       DistributionConfig: Match.objectLike({
-        Aliases: ['tierstore.dev'],
+        Aliases: ['tierstore.dev', 'www.tierstore.dev'],
         DefaultRootObject: 'index.html',
         HttpVersion: 'http2and3',
         ViewerCertificate: Match.objectLike({ MinimumProtocolVersion: 'TLSv1.2_2021', SslSupportMethod: 'sni-only' }),
@@ -132,6 +132,31 @@ describe('cloudfront', () => {
     t.hasResourceProperties('AWS::Route53::RecordSet', { Type: 'A', Name: 'tierstore.dev.', AliasTarget: Match.anyValue() });
     t.hasResourceProperties('AWS::Route53::RecordSet', { Type: 'AAAA', Name: 'tierstore.dev.', AliasTarget: Match.anyValue() });
     t.hasResourceProperties('AWS::CertificateManager::Certificate', { DomainName: 'tierstore.dev', ValidationMethod: 'DNS' });
+  });
+
+  test('the certificate also covers www.tierstore.dev, validated by DNS in the same zone', () => {
+    t.hasResourceProperties('AWS::CertificateManager::Certificate', {
+      DomainName: 'tierstore.dev',
+      SubjectAlternativeNames: ['www.tierstore.dev'],
+      ValidationMethod: 'DNS',
+      DomainValidationOptions: [
+        { DomainName: 'tierstore.dev', HostedZoneId: 'Z0TESTZONE' },
+        { DomainName: 'www.tierstore.dev', HostedZoneId: 'Z0TESTZONE' },
+      ],
+    });
+    t.resourceCountIs('AWS::CertificateManager::Certificate', 1);
+  });
+
+  test('www.tierstore.dev has A and AAAA aliases to the same distribution as the apex', () => {
+    const records = Object.values(t.findResources('AWS::Route53::RecordSet')) as any[];
+    for (const type of ['A', 'AAAA']) {
+      const apex = records.find((r) => r.Properties.Type === type && r.Properties.Name === 'tierstore.dev.');
+      const www = records.find((r) => r.Properties.Type === type && r.Properties.Name === 'www.tierstore.dev.');
+      expect(www.Properties.AliasTarget).toBeDefined();
+      expect(www.Properties.AliasTarget).toEqual(apex.Properties.AliasTarget);
+      expect(www.Properties.HostedZoneId).toBe('Z0TESTZONE');
+    }
+    t.resourceCountIs('AWS::Route53::RecordSet', 4);
   });
 
   test('the response headers are the strict set: CSP, HSTS, nosniff, DENY, no-referrer, COOP, CORP, permissions', () => {
@@ -167,11 +192,12 @@ describe('cloudfront', () => {
 });
 
 describe('router', () => {
-  const run = (uri: string): string => {
-    const sandbox: { event: any; out?: string } = { event: { request: { uri } } };
-    vm.runInNewContext(`${ROUTER_SOURCE}\nout = handler(event).uri;`, sandbox);
-    return sandbox.out!;
+  const respond = (request: any): any => {
+    const sandbox: { event: any; out?: any } = { event: { request } };
+    vm.runInNewContext(`${ROUTER_SOURCE}\nout = JSON.stringify(handler(event));`, sandbox);
+    return JSON.parse(sandbox.out);
   };
+  const run = (uri: string): string => respond({ uri, headers: { host: { value: 'tierstore.dev' } } }).uri;
 
   test('is the inline function of the distribution', () => {
     t.hasResourceProperties('AWS::CloudFront::Function', { FunctionCode: ROUTER_SOURCE, FunctionConfig: Match.objectLike({ Runtime: 'cloudfront-js-2.0' }) });
@@ -190,6 +216,54 @@ describe('router', () => {
     expect(run('/releases/1.2.3/tierstore_1.2.3_amd64.deb')).toBe('/releases/1.2.3/tierstore_1.2.3_amd64.deb');
     expect(run('/releases/latest.json')).toBe('/releases/latest.json');
     expect(run('/releases/1.2.3/')).toBe('/releases/1.2.3/');
+  });
+});
+
+describe('router: www.tierstore.dev', () => {
+  const respond = (request: any): any => {
+    const sandbox: { event: any; out?: any } = { event: { request } };
+    vm.runInNewContext(`${ROUTER_SOURCE}\nout = JSON.stringify(handler(event));`, sandbox);
+    return JSON.parse(sandbox.out);
+  };
+  const www = (uri: string, querystring?: any, host = 'www.tierstore.dev'): any =>
+    respond({ uri, querystring, headers: { host: { value: host } } });
+  const location = (r: any): string => r.headers.location.value;
+
+  test('answers 301 to the apex, keeping the path', () => {
+    const r = www('/docs/install.html');
+    expect(r.statusCode).toBe(301);
+    expect(r.statusDescription).toBe('Moved Permanently');
+    expect(location(r)).toBe('https://tierstore.dev/docs/install.html');
+    expect(location(www('/'))).toBe('https://tierstore.dev/');
+  });
+
+  test('keeps the query string, a repeated key and a key without a value included', () => {
+    expect(location(www('/docs/', { a: { value: '1' }, b: { value: '' } }))).toBe('https://tierstore.dev/docs/?a=1&b');
+    expect(location(www('/x', { k: { value: '1', multiValue: [{ value: '1' }, { value: '2' }] } }))).toBe('https://tierstore.dev/x?k=1&k=2');
+    expect(location(www('/x', {}))).toBe('https://tierstore.dev/x');
+  });
+
+  test('redirects /releases/ too, before any other routing', () => {
+    const r = www('/releases/1.2.3/tierstore_1.2.3_amd64.deb');
+    expect(r.statusCode).toBe(301);
+    expect(location(r)).toBe('https://tierstore.dev/releases/1.2.3/tierstore_1.2.3_amd64.deb');
+    expect(location(www('/releases/1.2.3/'))).toBe('https://tierstore.dev/releases/1.2.3/');
+  });
+
+  test('matches the host without regard to case', () => {
+    expect(www('/x', undefined, 'WWW.TierStore.dev').statusCode).toBe(301);
+  });
+
+  test('the apex host is not redirected, with or without a query string', () => {
+    const r = respond({ uri: '/docs/', querystring: { a: { value: '1' } }, headers: { host: { value: 'tierstore.dev' } } });
+    expect(r.statusCode).toBeUndefined();
+    expect(r.uri).toBe('/docs/index.html');
+    expect(respond({ uri: '/releases/latest.json', headers: { host: { value: 'tierstore.dev' } } }).uri).toBe('/releases/latest.json');
+  });
+
+  test('a request with no host header is routed as the apex', () => {
+    expect(respond({ uri: '/docs/', headers: {} }).uri).toBe('/docs/index.html');
+    expect(respond({ uri: '/docs/' }).uri).toBe('/docs/index.html');
   });
 });
 

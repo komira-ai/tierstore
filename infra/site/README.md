@@ -6,11 +6,19 @@ deploys it: CI runs its tests (`.github/workflows/tierstore-site.yml`) and the w
 | Stack | What it holds |
 |---|---|
 | `tierstore-dns-zone` | the public Route 53 zone of `tierstore.dev` (retained: a new zone would have new name servers) |
-| `tierstore-prod-site` | the private S3 bucket `tierstore-prod-site-<account>` (versioned, encrypted, TLS only, retained), the CloudFront distribution in front of it (origin access control, the ACM certificate, A and AAAA records, the security headers, the router function) and two IAM roles |
+| `tierstore-prod-site` | the private S3 bucket `tierstore-prod-site-<account>` (versioned, encrypted, TLS only, retained), the CloudFront distribution in front of it (origin access control, the ACM certificate for `tierstore.dev` and `www.tierstore.dev`, A and AAAA records for both names, the security headers, the router function) and two IAM roles |
 
 Region is `us-east-1` for both (CloudFront certificates must live there). The site is under the bucket root; release
 files are public downloads under `https://tierstore.dev/releases/<version>/<file>`, with `releases/latest.json` beside
 them. The router passes `/releases/` through untouched and the headers policy is the site's.
+
+**`www.tierstore.dev`** is a name of the same distribution (alternate domain name, certificate SAN, and A and AAAA alias
+records in the Route 53 zone, not at the registrar). The router answers any request for that host, `/releases/` included,
+with `301` to `https://tierstore.dev<path>?<query>` before it does anything else; the apex is routed as before. The
+certificate's names are part of the stack, so adding `www` replaced the certificate: CloudFormation creates the new
+certificate (validated by two DNS records in the zone), points the distribution at it, and only then deletes the old one,
+so the apex keeps serving. The owner's step for the change is to run the `site` step again: the dry run, then `--apply`
+(step 4 below). Nothing changes at the registrar.
 
 ## The two roles
 
@@ -63,7 +71,7 @@ npm run held -- dns --account <account> --profile <profile> --apply
    stack's certificate is validated through this zone, so the next step waits (up to about 30 minutes) until it does.
 
 ```
-# 4. the site: bucket, distribution, certificate, records, the two roles
+# 4. the site: bucket, distribution, certificate (apex and www), records, the router, the two roles; run it again after any change here
 npm run held -- site --account <account> --profile <profile> --repo komira-ai/tierstore
 npm run held -- site --account <account> --profile <profile> --repo komira-ai/tierstore --apply
 
