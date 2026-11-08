@@ -474,6 +474,121 @@ fn a_gate_that_requires_an_earlier_job_is_off_and_green_unless_that_job_said_tru
     assert_eq!(gate("READ_ENABLED").status.code(), Some(2));
 }
 
+/// The answer of `releases converge` for a farm that is healthy on `1.2.3+0123456789ab`, or not.
+fn convergence(state: &str) -> String {
+    format!(
+        "{{\"convergence\":{{\"desired\":\"1.2.3+0123456789ab\",\"state\":\"CONVERGENCE_STATE_{state}\",\"roles\":[{{\"role\":\"hot\",\"atDesired\":2}}]}}}}"
+    )
+}
+
+/// `channels soak` with a clock that starts at 1000 and a reading program that prints `reply`.
+fn soak(d: &Path, hours: &str, reply: &str) -> Output {
+    std::fs::write(d.join("reply"), reply).unwrap();
+    run(
+        d,
+        &[
+            "channels",
+            "soak",
+            "--hours",
+            hours,
+            "--reached-at",
+            "1000",
+            "--now",
+            "1000",
+            "--interval-secs",
+            "1800",
+            "--version",
+            "1.2.3+0123456789ab",
+            "--read-command",
+            FAKE,
+            "--read-arg",
+            "api",
+            "--read-arg",
+            "reply",
+        ],
+    )
+}
+
+#[test]
+fn soak_waits_out_the_hours_on_its_own_clock_and_ends_on_the_first_unhealthy_read() {
+    // Catches: a soak verb that is not wired to the command line (its flags, its clock, its
+    // reading program and its arguments), that waits in real time under `--now`, or whose status
+    // does not tell a farm that stayed healthy (0) from one that did not (1).
+    let d = fresh("soak");
+    let o = soak(&d, "1", &convergence("CONVERGED"));
+    assert!(o.status.success(), "{}", stderr(&o));
+    assert_eq!(
+        stdout(&o),
+        "soak: the farm stayed healthy on 1.2.3+0123456789ab for 1 hours (3 reads)\n"
+    );
+
+    let o = soak(&d, "1", &convergence("HALTED"));
+    assert_eq!(o.status.code(), Some(1));
+    assert!(
+        stderr(&o).contains("read 1 shows the farm not healthy"),
+        "{}",
+        stderr(&o)
+    );
+
+    let o = soak(&d, "0", "never read");
+    assert!(o.status.success(), "{}", stderr(&o));
+    assert!(stdout(&o).starts_with("soak: 0 hours"), "{}", stdout(&o));
+}
+
+#[test]
+fn soak_refuses_more_than_five_hours_and_a_soak_with_nothing_to_read_with() {
+    // Catches: the limit of a hosted job and the missing reader being a failure (1) instead of a
+    // usage error (2), and a soak that passes without ever reading the farm.
+    let d = fresh("soak-usage");
+    let o = soak(&d, "6", &convergence("CONVERGED"));
+    assert_eq!(o.status.code(), Some(2), "{}", stderr(&o));
+    assert!(stderr(&o).contains("is more than 5"), "{}", stderr(&o));
+
+    let o = run(
+        &d,
+        &[
+            "channels",
+            "soak",
+            "--hours",
+            "1",
+            "--reached-at",
+            "1000",
+            "--now",
+            "1000",
+            "--version",
+            "1.2.3+0123456789ab",
+        ],
+    );
+    assert_eq!(o.status.code(), Some(2), "{}", stderr(&o));
+    assert!(
+        stderr(&o).contains("needs --read-command"),
+        "{}",
+        stderr(&o)
+    );
+}
+
+#[test]
+fn soak_on_the_machine_clock_with_zero_hours_ends_at_once() {
+    // Catches: the machine's clock path of the verb (no `--now`) not being wired, which is the
+    // one the workflow runs.
+    let d = fresh("soak-machine");
+    let o = run(
+        &d,
+        &[
+            "channels",
+            "soak",
+            "--hours",
+            "0",
+            "--reached-at",
+            "1000",
+            "--version",
+            "1.2.3+0123456789ab",
+        ],
+    );
+    assert!(o.status.success(), "{}", stderr(&o));
+    assert!(stdout(&o).starts_with("soak: 0 hours"), "{}", stdout(&o));
+}
+
 #[test]
 fn the_apt_suite_and_promote_and_no_pool_are_dispatched_and_their_flags_are_held_together() {
     // Catches: `--suite` ignored (testing read from the stable path), `promote` not wired,
@@ -578,3 +693,158 @@ fn the_apt_suite_and_promote_and_no_pool_are_dispatched_and_their_flags_are_held
     );
     assert_eq!(write(&[]).status.code(), Some(2));
 }
+
+#[test]
+fn decide_latest_and_the_install_checks_are_dispatched_and_report_what_fails() {
+    // Catches: a verb not wired to its implementation, a refusal that does not reach the exit
+    // status, and a promotion decided without its answer in GITHUB_OUTPUT. The programs the
+    // checks run are the stand-in program, which answers none of them.
+    let d = fresh("decide-checks");
+    let decide = |check_apt: &str, farm: &str| {
+        let mut args = vec![
+            "channels",
+            "decide",
+            "--farm-enabled",
+            farm,
+            "--output",
+            "out",
+        ];
+        let results: Vec<String> = [
+            "testing-upload=success",
+            "testing-apt-write=success",
+            "testing-apt-write-2=skipped",
+            "testing-apt-write-3=skipped",
+            "check-brew=success",
+            "check-install-sh=success",
+            "farm-check=success",
+            "farm=success",
+            "soak=success",
+        ]
+        .iter()
+        .map(|r| (*r).to_owned())
+        .chain([format!("check-apt={check_apt}")])
+        .collect();
+        for r in &results {
+            args.extend(["--result", r]);
+        }
+        run(&d, &args)
+    };
+    let o = decide("success", "true");
+    assert!(o.status.success(), "{}", stderr(&o));
+    assert_eq!(
+        std::fs::read_to_string(d.join("out")).unwrap(),
+        "promote=true\n"
+    );
+    let o = decide("failure", "true");
+    assert_eq!(o.status.code(), Some(1));
+    assert!(
+        stderr(&o).contains("check-apt is failure"),
+        "{}",
+        stderr(&o)
+    );
+    assert_eq!(decide("success", "maybe").status.code(), Some(2));
+
+    let latest = run(
+        &d,
+        &[
+            "channels", "latest", "dist", "--tag", "1.2.3", "--commit", COMMIT_SHA, "--bucket",
+            "b", "--work", "work", "--aws", FAKE,
+        ],
+    );
+    assert_eq!(latest.status.code(), Some(2), "{}", stderr(&latest));
+    let upload = run(
+        &d,
+        &[
+            "channels",
+            "upload",
+            "dist",
+            "--no-latest",
+            "--tag",
+            "1.2.3",
+            "--commit",
+            COMMIT_SHA,
+            "--bucket",
+            "b",
+            "--work",
+            "work",
+            "--aws",
+            FAKE,
+        ],
+    );
+    assert_eq!(upload.status.code(), Some(2), "{}", stderr(&upload));
+
+    let o = run(
+        &d,
+        &[
+            "channels",
+            "check-apt",
+            "--arch",
+            "amd64",
+            "--version",
+            "1.2.3",
+            "--commit",
+            COMMIT_SHA,
+            "--root",
+            "root",
+            "--dpkg",
+            FAKE,
+            "--apt-get",
+            FAKE,
+            "--dpkg-query",
+            FAKE,
+            "--curl",
+            FAKE,
+        ],
+    );
+    assert_eq!(o.status.code(), Some(1));
+    assert!(
+        stderr(&o).contains("--print-architecture failed"),
+        "{}",
+        stderr(&o)
+    );
+
+    std::fs::write(d.join("tierstore.rb"), "formula").unwrap();
+    let o = run(
+        &d,
+        &[
+            "channels",
+            "check-brew",
+            "--formula",
+            "tierstore.rb",
+            "--version",
+            "1.2.3",
+            "--commit",
+            COMMIT_SHA,
+            "--brew",
+            FAKE,
+        ],
+    );
+    assert_eq!(o.status.code(), Some(1));
+    assert!(
+        stderr(&o).contains("tap-new --no-git local/tierstore failed"),
+        "{}",
+        stderr(&o)
+    );
+
+    let o = run(
+        &d,
+        &[
+            "channels",
+            "check-install-sh",
+            "--version",
+            "1.2.3",
+            "--commit",
+            COMMIT_SHA,
+            "--work",
+            "scratch",
+            "--curl",
+            FAKE,
+            "--sh",
+            FAKE,
+        ],
+    );
+    assert_eq!(o.status.code(), Some(1));
+    assert!(stderr(&o).contains("failed"), "{}", stderr(&o));
+}
+
+const COMMIT_SHA: &str = "0123456789abcdef0123456789abcdef01234567";

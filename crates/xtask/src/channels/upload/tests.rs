@@ -227,6 +227,7 @@ impl Fixture {
             distribution_id,
             work: &self.work,
             attempts: 3,
+            latest: true,
         }
     }
 }
@@ -762,4 +763,112 @@ fn bucket_names_may_hold_digits_dots_and_dashes() {
         request.bucket = bucket;
         assert_eq!(check_request(&request), Ok("1.2.3".to_owned()), "{bucket}");
     }
+}
+
+/// A request of the fixture that does not replace `latest.json`.
+fn without_latest(f: &Fixture) -> Request<'_> {
+    Request {
+        latest: false,
+        ..f.request("")
+    }
+}
+
+#[test]
+fn a_release_published_with_no_latest_puts_its_files_and_never_names_it_the_newest() {
+    // Catches: a publish to testing that moves releases/latest.json before the install checks.
+    let f = Fixture::new("no-latest");
+    let aws = FakeAws::default();
+    let said = upload(&aws, &without_latest(&f)).expect("uploaded");
+    let keys = aws.keys_put();
+    assert_eq!(keys.len(), names().len() + 1);
+    assert!(
+        keys.iter().all(|k| k.starts_with("releases/1.2.3/")),
+        "{keys:?}"
+    );
+    assert!(aws.get(LATEST_KEY).is_none());
+    assert!(said.iter().all(|l| !l.contains("latest.json")), "{said:?}");
+    assert!(aws.calls_of("create-invalidation").is_empty());
+}
+
+#[test]
+fn latest_reads_the_published_files_back_and_then_replaces_the_pointer_and_puts_nothing_else() {
+    // Catches: a promotion that uploads the files again (so not the bytes testing holds), or
+    // that names the release before the files were read back.
+    let f = Fixture::new("latest");
+    let aws = FakeAws::default();
+    upload(&aws, &without_latest(&f)).expect("published to testing");
+    let before = aws.calls_of("put-object").len();
+    let said = latest(&aws, &f.request("EDIST123")).expect("promoted");
+    let puts = aws.puts().split_off(before);
+    assert_eq!(puts.len(), 1);
+    assert_eq!(flag(&puts[0], "--key").as_deref(), Some(LATEST_KEY));
+    assert_eq!(said.len(), names().len() + 1 + 2);
+    assert!(
+        said[0].starts_with("releases/1.2.3/") && said[0].contains(": sha256 "),
+        "{said:?}"
+    );
+    assert_eq!(said[said.len() - 2], format!("{LATEST_KEY}: now 1.2.3"));
+    let reads: Vec<String> = aws
+        .calls_of("get-object")
+        .iter()
+        .map(|c| flag(c, "--key").expect("key"))
+        .filter(|k| k.starts_with("releases/1.2.3/"))
+        .collect();
+    assert!(
+        reads.contains(&"releases/1.2.3/SHA256SUMS".to_owned()),
+        "{reads:?}"
+    );
+    assert_eq!(
+        json(aws.get(LATEST_KEY).expect("latest"))["version"],
+        "1.2.3"
+    );
+}
+
+#[test]
+fn latest_refuses_a_file_that_is_not_in_the_bucket_or_holds_other_bytes_and_writes_no_pointer() {
+    // Catches: a pointer to a version whose files are missing or are not the ones that were
+    // checked against SHA256SUMS.
+    let f = Fixture::new("latest-refused");
+    let aws = FakeAws::default();
+    let e = latest(&aws, &f.request("")).unwrap_err().to_string();
+    assert!(e.contains("could not be read back"), "{e}");
+    upload(&aws, &without_latest(&f)).expect("published to testing");
+    let name = distribution_assets("1.2.3").remove(0);
+    aws.put(&format!("releases/1.2.3/{name}"), b"other bytes");
+    let e = latest(&aws, &f.request("")).unwrap_err().to_string();
+    assert!(
+        e.contains(&format!("releases/1.2.3/{name} holds sha256")),
+        "{e}"
+    );
+    assert!(e.contains("but this release's"), "{e}");
+    assert!(aws.get(LATEST_KEY).is_none());
+    // The sums of the version are held to the same.
+    let aws = FakeAws::default();
+    upload(&aws, &without_latest(&f)).expect("published to testing");
+    aws.put("releases/1.2.3/SHA256SUMS", b"other sums");
+    let e = latest(&aws, &f.request("")).unwrap_err().to_string();
+    assert!(e.contains("releases/1.2.3/SHA256SUMS holds sha256"), "{e}");
+    assert!(aws.get(LATEST_KEY).is_none());
+}
+
+#[test]
+fn latest_leaves_a_newer_pointer_alone_and_holds_its_flags_and_files_to_the_same_forms() {
+    // Catches: the promotion of an older release moving the channel down, and a directory that
+    // is not a release read as one.
+    let f = Fixture::new("latest-newer");
+    let aws = FakeAws::default();
+    upload(&aws, &without_latest(&f)).expect("published to testing");
+    aws.put(LATEST_KEY, br#"{"version": "1.9.0"}"#);
+    let said = latest(&aws, &f.request("")).expect("left alone");
+    assert!(
+        said.last()
+            .expect("a line")
+            .contains("newer than 1.2.3: left as it is"),
+        "{said:?}"
+    );
+    let mut r = f.request("");
+    r.tag = "1.2.3";
+    assert!(matches!(latest(&aws, &r), Err(Error::Usage(_))));
+    std::fs::remove_file(f.release.join(SUMS)).expect("remove");
+    assert!(latest(&aws, &f.request("")).is_err());
 }

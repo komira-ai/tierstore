@@ -17,6 +17,7 @@ use xtask::Error;
 use xtask::advisories::{Call, Method, Process, Tools};
 use xtask::channels::apt::sign::{Gpg, RealGpg};
 use xtask::channels::aws::{Answer, Aws, RealAws};
+use xtask::channels::soak::{Read, Reader, RealReader};
 use xtask::release::{Gh, RealGh};
 
 const FAKE: &str = env!("CARGO_BIN_EXE_gh-fake");
@@ -103,6 +104,37 @@ fn the_real_aws_hands_back_what_the_program_printed_and_whether_it_succeeded() {
         }
     );
     assert!(!spawn_error(RealAws(PathBuf::from(MISSING)).run(&args(&["x"]))).is_empty());
+}
+
+#[test]
+fn the_real_reader_hands_back_what_the_program_printed_or_why_it_gave_no_answer() {
+    // Catches: a reading program that fails taken for a reply (the soak would judge its error
+    // text), the reason of its failure lost, and a missing program taken for silence.
+    let d = dir("reader");
+    let reply = d.join("reply");
+    std::fs::write(&reply, "{\"convergence\":{}}").expect("reply");
+    let args = |words: &[&str]| words.iter().map(|w| (*w).to_owned()).collect::<Vec<_>>();
+    let reader = RealReader {
+        program: PathBuf::from(FAKE),
+        args: args(&["api", reply.to_str().expect("utf8")]),
+    };
+    assert_eq!(
+        reader.read().expect("read"),
+        Read::Reply("{\"convergence\":{}}".to_owned())
+    );
+    let failing = RealReader {
+        program: PathBuf::from(FAKE),
+        args: args(&["fail", "no route to the coordinator"]),
+    };
+    assert_eq!(
+        failing.read().expect("read"),
+        Read::Silent("no route to the coordinator".to_owned())
+    );
+    let missing = RealReader {
+        program: PathBuf::from(MISSING),
+        args: Vec::new(),
+    };
+    assert!(!spawn_error(missing.read()).is_empty());
 }
 
 fn call(method: Method, path: &Path, body: Option<Value>) -> Call {

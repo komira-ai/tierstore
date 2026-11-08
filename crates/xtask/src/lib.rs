@@ -444,6 +444,30 @@ enum ReleaseVerb {
         #[arg(long, default_value = "gh")]
         gh: PathBuf,
     },
+    /// The version and digest of a release in the suite `testing` to set as tierstore's desired
+    /// version on the hostkeeper coordinator; refuses a release testing does not list with the
+    /// digests of its `SHA256SUMS`.
+    DesiredDeb {
+        #[arg(long)]
+        repo: String,
+        /// `<major>.<minor>.<patch>`: the release `v<major>.<minor>.<patch>`.
+        #[arg(long)]
+        version: String,
+        /// Where `SHA256SUMS` of the release and the `Packages` files read are put; created when
+        /// missing.
+        #[arg(long)]
+        dir: PathBuf,
+        /// The apt repository.
+        #[arg(long, default_value = "https://packages.komira.ai/apt")]
+        apt_url: String,
+        /// Append `package-version=` and `package-digest=` to this file (`GITHUB_OUTPUT`).
+        #[arg(long)]
+        output: Option<PathBuf>,
+        #[arg(long, default_value = "gh")]
+        gh: PathBuf,
+        #[arg(long, default_value = "curl")]
+        curl: PathBuf,
+    },
     /// `dir` holds exactly the assets of the commit, each tarball and package with its bundle.
     Check {
         dir: PathBuf,
@@ -727,6 +751,26 @@ fn run(cli: Cli) -> Result<Vec<String>, Error> {
             &repo,
             &version,
             &dir,
+            output.as_deref(),
+        ),
+        Verb::Release(ReleaseVerb::DesiredDeb {
+            repo,
+            version,
+            dir,
+            apt_url,
+            output,
+            gh,
+            curl,
+        }) => release::desired_deb::desired_deb(
+            &release::RealGh(gh),
+            &channels::check::RealHost,
+            &release::desired_deb::Request {
+                curl: &curl,
+                repo: &repo,
+                version: &version,
+                dir: &dir,
+                apt_url: &apt_url,
+            },
             output.as_deref(),
         ),
         Verb::Channels(verb) => channels::run(verb),

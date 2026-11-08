@@ -20,7 +20,7 @@ pub const SKIPPABLE_DIRS: [&str; 2] = ["docs/", ".github/ISSUE_TEMPLATE/"];
 /// The files a pull request may change without the macOS job, besides a top-level `*.md` file.
 /// The workflows listed put nothing on macOS for a pull request; `macos.yml` and `artifacts.yml`
 /// (whose macOS job `macos.yml` repeats) are not listed, nor is a workflow added later.
-pub const SKIPPABLE_FILES: [&str; 11] = [
+pub const SKIPPABLE_FILES: [&str; 10] = [
     "LICENSE",
     "clippy.toml",
     "deny.toml",
@@ -29,7 +29,6 @@ pub const SKIPPABLE_FILES: [&str; 11] = [
     ".github/workflows/advisories.yml",
     ".github/workflows/ci.yml",
     ".github/workflows/hostkeeper-desired.yml",
-    ".github/workflows/release.yml",
     ".github/workflows/tierstore-site-publish.yml",
     ".github/workflows/tierstore-site.yml",
 ];

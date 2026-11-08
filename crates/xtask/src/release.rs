@@ -48,6 +48,7 @@
 mod binary;
 pub mod deb;
 pub mod desired;
+pub mod desired_deb;
 pub mod hostkeeper_index;
 pub mod hostkeeper_package;
 pub mod hostkeeper_verify;
