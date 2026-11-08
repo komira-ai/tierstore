@@ -3,6 +3,8 @@
 use std::fmt::Write as _;
 use std::sync::atomic::{AtomicU64, Ordering};
 
+use crate::Error;
+
 /// Why a fill did not leave an object in the cache.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub(super) enum FailedFill {
@@ -95,9 +97,156 @@ pub(super) enum Revalidated {
 /// The label of each [`Revalidated`], in the order of the enum.
 const REVALIDATED: [&str; 4] = ["same", "changed", "gone", "failed"];
 
+/// Why a put or a completion of an upload failed at the upstream, or at the HEAD before it.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub(super) enum PutFailed {
+    /// The upstream found the object: its create-only put or completion answered 412.
+    Exists,
+    /// The upstream did not answer.
+    Unavailable,
+    /// The upstream had no room (507).
+    Full,
+    /// The body did not hash to the name of the object.
+    BadDigest,
+    /// Any other failure.
+    Other,
+}
+
+impl PutFailed {
+    /// The reason an error of a put counts under.
+    pub(super) fn of(error: &Error) -> Self {
+        match error {
+            Error::AlreadyExists(_) => Self::Exists,
+            Error::Unavailable(_) => Self::Unavailable,
+            Error::Full(_) => Self::Full,
+            Error::BadDigest(_) => Self::BadDigest,
+            _ => Self::Other,
+        }
+    }
+}
+
+/// The label of each [`PutFailed`], in the order of the enum.
+const PUT_FAILED: [&str; 5] = ["exists", "unavailable", "full", "bad_digest", "other"];
+
+/// The kind of call the cache sends the upstream that `upstream_reads_total` counts.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub(super) enum Call {
+    /// A GET, whole or of a range.
+    Get,
+    /// A HEAD.
+    Head,
+    /// A listing, or one page of one.
+    List,
+    /// A page of the listing of open uploads.
+    ListUploads,
+}
+
+/// The label of each [`Call`], in the order of the enum.
+const CALLS: [&str; 4] = ["get", "head", "list", "list_uploads"];
+
+/// The kind of a family that only goes up (or is set once, when the cache is opened).
+const COUNTER: &str = "counter";
+
+/// The kind of a family that is measured when `/metricz` is read, and goes up and down.
+const GAUGE: &str = "gauge";
+
+// The full name of each family, written out so that a search of the source for a name the
+// metrics page shows finds it.
+const HITS: &str = "tierstore_cache_hits_total";
+const MISSES: &str = "tierstore_cache_misses_total";
+const BYTES_SERVED_LOCAL: &str = "tierstore_cache_bytes_served_local_total";
+const BYTES_SERVED_UPSTREAM: &str = "tierstore_cache_bytes_served_upstream_total";
+const FILLS: &str = "tierstore_cache_fills_total";
+const FILLS_SKIPPED: &str = "tierstore_cache_fills_skipped_total";
+const FILLS_SKIPPED_BUSY: &str = "tierstore_cache_fills_skipped_busy_total";
+const UPSTREAM_BYTES_READ: &str = "tierstore_cache_upstream_bytes_read_total";
+const HEAD_HITS: &str = "tierstore_cache_head_hits_total";
+const HEAD_MISSES: &str = "tierstore_cache_head_misses_total";
+const UPSTREAM_PUTS: &str = "tierstore_cache_upstream_puts_total";
+const UPSTREAM_PUT_BYTES: &str = "tierstore_cache_upstream_put_bytes_total";
+const WRITES_THROUGH: &str = "tierstore_cache_writes_through_total";
+const WRITE_EXISTS: &str = "tierstore_cache_write_exists_total";
+const KEEPS_EXPIRED: &str = "tierstore_cache_keeps_expired_total";
+const PINNED_SKIPS: &str = "tierstore_cache_pinned_skips_total";
+const SCRUBBED_OBJECTS: &str = "tierstore_cache_scrubbed_objects_total";
+const SCRUBBED_BYTES: &str = "tierstore_cache_scrubbed_bytes_total";
+const SCRUB_MISMATCHES: &str = "tierstore_cache_scrub_mismatches_total";
+const SCRUB_ERRORS: &str = "tierstore_cache_scrub_errors_total";
+const DISCARDED_AT_START: &str = "tierstore_cache_discarded_at_start_total";
+const BYTES: &str = "tierstore_cache_bytes";
+const OBJECTS: &str = "tierstore_cache_objects";
+const FS_FREE_BYTES: &str = "tierstore_cache_fs_free_bytes";
+const STAGING_FILES: &str = "tierstore_cache_staging_files";
+const FILL_FAILURES: &str = "tierstore_cache_fill_failures_total";
+const UPSTREAM_READS: &str = "tierstore_cache_upstream_reads_total";
+const UPSTREAM_PUT_FAILURES: &str = "tierstore_cache_upstream_put_failures_total";
+const WRITE_KEEP_SKIPPED: &str = "tierstore_cache_write_keep_skipped_total";
+const EVICTIONS: &str = "tierstore_cache_evictions_total";
+const REVALIDATIONS: &str = "tierstore_cache_revalidations_total";
+const MODE: &str = "tierstore_cache_mode";
+
+/// The families of one sample, with their kinds, in the order `/metricz` shows them.
+pub(super) const PLAIN: [(&str, &str); 25] = [
+    (HITS, COUNTER),
+    (MISSES, COUNTER),
+    (BYTES_SERVED_LOCAL, COUNTER),
+    (BYTES_SERVED_UPSTREAM, COUNTER),
+    (FILLS, COUNTER),
+    (FILLS_SKIPPED, COUNTER),
+    (FILLS_SKIPPED_BUSY, COUNTER),
+    (UPSTREAM_BYTES_READ, COUNTER),
+    (HEAD_HITS, COUNTER),
+    (HEAD_MISSES, COUNTER),
+    (UPSTREAM_PUTS, COUNTER),
+    (UPSTREAM_PUT_BYTES, COUNTER),
+    (WRITES_THROUGH, COUNTER),
+    (WRITE_EXISTS, COUNTER),
+    (KEEPS_EXPIRED, COUNTER),
+    (PINNED_SKIPS, COUNTER),
+    (SCRUBBED_OBJECTS, COUNTER),
+    (SCRUBBED_BYTES, COUNTER),
+    (SCRUB_MISMATCHES, COUNTER),
+    (SCRUB_ERRORS, COUNTER),
+    (DISCARDED_AT_START, COUNTER),
+    (BYTES, GAUGE),
+    (OBJECTS, GAUGE),
+    (FS_FREE_BYTES, GAUGE),
+    (STAGING_FILES, GAUGE),
+];
+
+/// The families of one sample for each value of a label: the name, the kind, the name of the
+/// label and its values, in the order `/metricz` shows them, after [`PLAIN`].
+pub(super) const LABELLED: [(&str, &str, &str, &[&str]); 7] = [
+    (FILL_FAILURES, COUNTER, "reason", &FAILED),
+    (UPSTREAM_READS, COUNTER, "op", &CALLS),
+    (UPSTREAM_PUT_FAILURES, COUNTER, "reason", &PUT_FAILED),
+    (WRITE_KEEP_SKIPPED, COUNTER, "reason", &SKIPPED_KEEP),
+    (EVICTIONS, COUNTER, "reason", &EVICTED),
+    (REVALIDATIONS, COUNTER, "result", &REVALIDATED),
+    (MODE, GAUGE, "mode", &MODES),
+];
+
+/// The label of each mode of the cache, in the order `/metricz` shows them.
+const MODES: [&str; 2] = ["read_only", "read_write"];
+
 /// What the cache has done since it started.
 #[derive(Debug, Default)]
 pub struct Counters {
+    /// The calls the cache sent the upstream, by [`Call`] (a fill reads in ranged chunks, so the
+    /// GETs are calls, not objects).
+    upstream_reads: [AtomicU64; CALLS.len()],
+    /// The bytes the cache's upstream GETs that returned brought back.
+    pub(super) upstream_bytes_read: AtomicU64,
+    /// The HEADs the cache is asked that the index answered: the HEADs of clients, and the S3
+    /// front's HEAD before a GET.
+    pub(super) head_hits: AtomicU64,
+    /// The same HEADs, sent to the upstream.
+    pub(super) head_misses: AtomicU64,
+    /// The puts (create-only or plain) and the completions of uploads the upstream accepted.
+    pub(super) upstream_puts: AtomicU64,
+    /// The bytes of the puts the upstream accepted, and of each part it accepted.
+    pub(super) upstream_put_bytes: AtomicU64,
+    put_failures: [AtomicU64; PUT_FAILED.len()],
     pub(super) hits: AtomicU64,
     pub(super) misses: AtomicU64,
     pub(super) bytes_served_local: AtomicU64,
@@ -158,6 +307,28 @@ impl Counters {
         bump(&self.failures[why as usize]);
     }
 
+    /// Counts a call of `kind` sent to the upstream.
+    pub(super) fn called(&self, kind: Call) {
+        bump(&self.upstream_reads[kind as usize]);
+    }
+
+    /// The calls of `kind` sent to the upstream.
+    #[cfg(test)]
+    pub(super) fn calls(&self, kind: Call) -> u64 {
+        read(&self.upstream_reads[kind as usize])
+    }
+
+    /// Counts a put or a completion that failed with `error`, under the reason it maps to.
+    pub(super) fn put_failed(&self, error: &Error) {
+        bump(&self.put_failures[PutFailed::of(error) as usize]);
+    }
+
+    /// The puts and completions that failed for `why`.
+    #[cfg(test)]
+    pub(super) fn put_failures(&self, why: PutFailed) -> u64 {
+        read(&self.put_failures[why as usize])
+    }
+
     /// Counts a put that was taken by the upstream and not kept, for `why`.
     pub(super) fn keep_skipped(&self, why: SkippedKeep) {
         bump(&self.keep_skips[why as usize]);
@@ -197,7 +368,8 @@ impl Counters {
         read(&self.evictions[why as usize])
     }
 
-    /// The text of `/metricz`, with the gauges the caller measured now.
+    /// The text of `/metricz`, with the gauges the caller measured now. Each family has one
+    /// `# TYPE` line, before its first sample, as the OCI front's have.
     pub(super) fn render(
         &self,
         cache_bytes: u64,
@@ -206,66 +378,55 @@ impl Counters {
         read_write: bool,
     ) -> String {
         let mut text = String::new();
+        // In the order of `PLAIN`, which holds the name and the kind of each.
         let plain = [
-            ("hits_total", read(&self.hits)),
-            ("misses_total", read(&self.misses)),
-            ("bytes_served_local_total", read(&self.bytes_served_local)),
-            (
-                "bytes_served_upstream_total",
-                read(&self.bytes_served_upstream),
-            ),
-            ("fills_total", read(&self.fills)),
-            ("fills_skipped_total", read(&self.fills_skipped)),
-            ("fills_skipped_busy_total", read(&self.fills_skipped_busy)),
-            ("writes_through_total", read(&self.writes_through)),
-            ("write_exists_total", read(&self.write_exists)),
-            ("keeps_expired_total", read(&self.keeps_expired)),
-            ("pinned_skips_total", read(&self.pinned_skips)),
-            ("scrubbed_objects_total", read(&self.scrubbed_objects)),
-            ("scrubbed_bytes_total", read(&self.scrubbed_bytes)),
-            ("scrub_mismatches_total", read(&self.scrub_mismatches)),
-            ("scrub_errors_total", read(&self.scrub_errors)),
-            ("discarded_at_start_total", read(&self.discarded_at_start)),
-            ("bytes", cache_bytes),
-            ("objects", cache_objects),
-            ("fs_free_bytes", fs_free_bytes),
-            ("staging_files", read(&self.staging_files)),
+            read(&self.hits),
+            read(&self.misses),
+            read(&self.bytes_served_local),
+            read(&self.bytes_served_upstream),
+            read(&self.fills),
+            read(&self.fills_skipped),
+            read(&self.fills_skipped_busy),
+            read(&self.upstream_bytes_read),
+            read(&self.head_hits),
+            read(&self.head_misses),
+            read(&self.upstream_puts),
+            read(&self.upstream_put_bytes),
+            read(&self.writes_through),
+            read(&self.write_exists),
+            read(&self.keeps_expired),
+            read(&self.pinned_skips),
+            read(&self.scrubbed_objects),
+            read(&self.scrubbed_bytes),
+            read(&self.scrub_mismatches),
+            read(&self.scrub_errors),
+            // Set once, when the cache is opened (and when it takes the lock), and the same after.
+            read(&self.discarded_at_start),
+            cache_bytes,
+            cache_objects,
+            fs_free_bytes,
+            read(&self.staging_files),
         ];
-        for (name, value) in plain {
-            let _ = writeln!(text, "tierstore_cache_{name} {value}");
-        }
-        for (label, counter) in FAILED.iter().zip(&self.failures) {
-            let value = read(counter);
-            let _ = writeln!(
-                text,
-                "tierstore_cache_fill_failures_total{{reason=\"{label}\"}} {value}"
-            );
-        }
-        for (label, counter) in SKIPPED_KEEP.iter().zip(&self.keep_skips) {
-            let value = read(counter);
-            let _ = writeln!(
-                text,
-                "tierstore_cache_write_keep_skipped_total{{reason=\"{label}\"}} {value}"
-            );
-        }
-        for (label, counter) in EVICTED.iter().zip(&self.evictions) {
-            let value = read(counter);
-            let _ = writeln!(
-                text,
-                "tierstore_cache_evictions_total{{reason=\"{label}\"}} {value}"
-            );
-        }
-        for (label, counter) in REVALIDATED.iter().zip(&self.revalidations) {
-            let value = read(counter);
-            let _ = writeln!(
-                text,
-                "tierstore_cache_revalidations_total{{result=\"{label}\"}} {value}"
-            );
+        for ((name, kind), value) in PLAIN.iter().zip(plain) {
+            let _ = writeln!(text, "# TYPE {name} {kind}");
+            let _ = writeln!(text, "{name} {value}");
         }
         // One series for each mode: 1 for the one the cache is in, 0 for the other.
-        for (label, now) in [("read_only", !read_write), ("read_write", read_write)] {
-            let value = u8::from(now);
-            let _ = writeln!(text, "tierstore_cache_mode{{mode=\"{label}\"}} {value}");
+        let modes = [u64::from(!read_write), u64::from(read_write)];
+        let values: [Vec<u64>; LABELLED.len()] = [
+            self.failures.iter().map(read).collect(),
+            self.upstream_reads.iter().map(read).collect(),
+            self.put_failures.iter().map(read).collect(),
+            self.keep_skips.iter().map(read).collect(),
+            self.evictions.iter().map(read).collect(),
+            self.revalidations.iter().map(read).collect(),
+            modes.to_vec(),
+        ];
+        for ((name, kind, label, labels), values) in LABELLED.iter().zip(values) {
+            let _ = writeln!(text, "# TYPE {name} {kind}");
+            for (value_label, value) in labels.iter().zip(values) {
+                let _ = writeln!(text, "{name}{{{label}=\"{value_label}\"}} {value}");
+            }
         }
         text
     }
