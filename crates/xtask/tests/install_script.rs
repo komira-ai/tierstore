@@ -41,19 +41,7 @@ const SCRIPT: &str = concat!(
 );
 /// What the script uses besides the shell's builtins and the fakes.
 const TOOLS: &[&str] = &[
-    "tar",
-    "gzip",
-    "mktemp",
-    "cat",
-    "tr",
-    "sed",
-    "awk",
-    "cut",
-    "install",
-    "mkdir",
-    "rm",
-    "rmdir",
-    "sha256sum",
+    "tar", "gzip", "mktemp", "cat", "tr", "sed", "awk", "cut", "install", "mkdir", "rm", "rmdir",
 ];
 
 /// A tool of the host, found in the directories the system's tools are in (the test reads no environment variable).
@@ -63,6 +51,17 @@ fn which(name: &str) -> PathBuf {
         .map(|d| Path::new(d).join(name))
         .find(|p| p.is_file())
         .unwrap_or_else(|| panic!("{name} is not in /usr/bin, /bin or /usr/local/bin"))
+}
+
+/// The host's SHA-256 command line: `sha256sum` where it exists (Linux), else `shasum -a 256` (macOS, which has no
+/// `sha256sum`). The fixture's `sha256sum` and the `shasum` stand-in run it, so the script sees the same tool on both.
+fn host_sha256() -> String {
+    ["/usr/bin", "/bin", "/usr/local/bin"]
+        .iter()
+        .map(|d| Path::new(d).join("sha256sum"))
+        .find(|p| p.is_file())
+        .map(|p| p.display().to_string())
+        .unwrap_or_else(|| format!("{} -a 256", which("shasum").display()))
 }
 
 fn sha(bytes: &[u8]) -> String {
@@ -115,6 +114,13 @@ impl Fixture {
         for t in TOOLS {
             symlink(which(t), dir.join("tools").join(t)).unwrap();
         }
+        let digest = dir.join("tools/sha256sum");
+        fs::write(
+            &digest,
+            format!("#!/bin/sh\nexec {} \"$@\"\n", host_sha256()),
+        )
+        .unwrap();
+        fs::set_permissions(&digest, fs::Permissions::from_mode(0o755)).unwrap();
         let f = Self { dir };
         f.platform("Linux", "x86_64");
         f.fake("id", "echo 1000");
@@ -531,12 +537,11 @@ fn shasum_is_used_when_sha256sum_is_missing_and_no_tool_at_all_is_refused() {
     let f = Fixture::new("install-shasum");
     f.release("1.2.3", &["linux-x86_64"]);
     f.latest(r#"{"version": "1.2.3"}"#);
-    let sha256sum = which("sha256sum");
     f.fake(
         "shasum",
         &format!(
             "[ \"$1 $2\" = '-a 256' ] || exit 2\nshift 2\nexec {} \"$@\"",
-            sha256sum.display()
+            host_sha256()
         ),
     );
     let prefix = f.path("bin");
