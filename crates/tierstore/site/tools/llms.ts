@@ -3,7 +3,7 @@
 // /docs/<name>.md and /docs/examples/<name>.md (build.ts writes those from rawMarkdown).
 
 import { type Doc, LANDING, rawMarkdown } from './docs';
-import { DOMAIN, PACKAGING_URL, RELEASES_URL, REPO_URL, SITE_NAME, WHITE_PAPER_URL } from './pages';
+import { DOMAIN, PACKAGING_URL, RELEASES_URL, REPO_URL, SITE_NAME, REPORT_URL } from './pages';
 
 const BASE = `https://${DOMAIN}`;
 
@@ -34,7 +34,7 @@ export function llmsTxt(docs: readonly Doc[]): string {
     '',
     '## Optional',
     '',
-    `- [Technical report](${WHITE_PAPER_URL}): why tierstore exists and how its tiers work`,
+    `- [Technical report](${REPORT_URL}): why tierstore exists and how its tiers work`,
     `- [Install](${BASE}/install/): install commands and how to verify a download`,
     `- [Source](${REPO_URL}): the repository`,
     `- [Releases](${RELEASES_URL}): the tarballs, their checksums and signatures`,

@@ -10,7 +10,7 @@ import { readFileSync } from 'node:fs';
 import { join } from 'node:path';
 import { test } from 'node:test';
 import { footer } from '../tools/layout';
-import { FOOTER_LINKS, NAV, outPath, PAGES, WHITE_PAPER_URL } from '../tools/pages';
+import { FOOTER_LINKS, NAV, outPath, PAGES, REPORT_URL } from '../tools/pages';
 import { buildReal } from './support';
 
 const dist = buildReal('nav');
@@ -21,11 +21,11 @@ const links = (html: string): Array<[string, string]> =>
   [...html.matchAll(/<a href="([^"]*)"[^>]*>([\s\S]*?)<\/a>/g)].map((m) => [m[1], m[2].replace(/<span class="ext"[\s\S]*$/, '')]);
 
 test('the technical report is the paper on the main site', () => {
-  assert.equal(WHITE_PAPER_URL, 'https://komira.ai/whitepapers/tierstore');
+  assert.equal(REPORT_URL, 'https://komira.ai/research/tierstore');
 });
 
 test('every page has exactly three links in the top navigation, in order: Install, Docs, Why', () => {
-  const want = [['/install/', 'Install'], ['/docs/', 'Docs'], [WHITE_PAPER_URL, 'Why']];
+  const want = [['/install/', 'Install'], ['/docs/', 'Docs'], [REPORT_URL, 'Why']];
   for (const p of PAGES) assert.deepEqual(links(navOf(page(p.route))), want, p.route);
   assert.deepEqual(links(navOf(page('/docs/examples/cache-hot-cold/'))), want);
   assert.equal(NAV.length, 3);
@@ -36,10 +36,10 @@ test('the Why link leaves the site and says so: an arrow, a note for a screen re
   for (const route of ['/', '/install/', '/docs/']) {
     const nav = navOf(page(route));
     assert.doesNotMatch(nav, /target=|onclick/);
-    assert.match(nav, new RegExp(`<a href="${WHITE_PAPER_URL}" rel="noopener">Why<span class="ext" aria-hidden="true"> &#8599;</span><span class="visually-hidden"> \\(opens the technical report on komira.ai\\)</span></a>`), route);
+    assert.match(nav, new RegExp(`<a href="${REPORT_URL}" rel="noopener">Why<span class="ext" aria-hidden="true"> &#8599;</span><span class="visually-hidden"> \\(opens the technical report on komira.ai\\)</span></a>`), route);
     assert.equal(nav.match(/rel=/g)?.length, 1, 'only the link that leaves the site has a rel');
   }
-  assert.match(footer(WHITE_PAPER_URL), /<a href="https:\/\/komira\.ai\/whitepapers\/tierstore" rel="noopener">Technical report<span class="ext"/);
+  assert.match(footer(REPORT_URL), /<a href="https:\/\/komira\.ai\/research\/tierstore" rel="noopener">Technical report<span class="ext"/);
 });
 
 test('Install is marked as the current page on its own page, Docs on every page of the docs, and nothing else is marked', () => {
@@ -52,18 +52,18 @@ test('Install is marked as the current page on its own page, Docs on every page 
 });
 
 test('the footer carries what is not in the navigation, the releases, the source and the report', () => {
-  const html = footer(WHITE_PAPER_URL);
+  const html = footer(REPORT_URL);
   const hrefs = links(html).map(([href]) => href);
   for (const l of FOOTER_LINKS) assert.ok(hrefs.includes(l.href), `${l.label} is not in the footer`);
   assert.deepEqual(
     links(html).map(([, text]) => text),
     ['Demo', 'For programs: llms.txt', 'Releases', 'Source on GitHub', 'Technical report'],
   );
-  assert.ok(hrefs.includes(WHITE_PAPER_URL));
+  assert.ok(hrefs.includes(REPORT_URL));
 });
 
 test('the old addresses answer with a page that links to where the content went and sends a browser there', () => {
-  for (const [route, target] of [['/get-started/', '/install/'], ['/getting-started/', '/install/'], ['/why/', WHITE_PAPER_URL]] as const) {
+  for (const [route, target] of [['/get-started/', '/install/'], ['/getting-started/', '/install/'], ['/why/', REPORT_URL]] as const) {
     const html = page(route);
     assert.ok(html.includes(`<meta http-equiv="refresh" content="0; url=${target}">`), route);
     assert.ok(html.includes('<meta name="robots" content="noindex">'), route);

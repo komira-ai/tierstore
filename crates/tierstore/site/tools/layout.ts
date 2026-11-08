@@ -4,7 +4,7 @@
 // Nothing is inline: two stylesheets (the shared theme, then the site's own) and module scripts (which a browser
 // defers), no style attribute, no event handler. check-dist.ts refuses the pages if that stops being true.
 
-import { FOOTER_LINKS, NAV, type Page, RELEASES_URL, REPO_URL, SITE_NAME, WHITE_PAPER_URL } from './pages';
+import { FOOTER_LINKS, NAV, type Page, RELEASES_URL, REPO_URL, SITE_NAME, REPORT_URL } from './pages';
 
 /** The stylesheets every page loads, in order: the theme (byte for byte the shared file), then the site's own. */
 export const STYLESHEETS = ['theme.css', 'site.css'] as const;
@@ -37,16 +37,16 @@ function header(page: Page): string {
 }
 
 /** The footer: the pages that are not in the top navigation, the releases, the source and the technical report. */
-export function footer(whitePaper: string): string {
+export function footer(reportUrl: string): string {
   const links = [
     ...FOOTER_LINKS.map((l) => [l.label, l.href] as const),
     ['Releases', RELEASES_URL],
     ['Source on GitHub', REPO_URL],
-    ['Technical report', whitePaper],
+    ['Technical report', reportUrl],
   ];
   return [
     `<footer class="site-footer"><div class="wrap"><p>${SITE_NAME} is licensed under the Apache License 2.0.</p>`,
-    `<ul>${links.map(([label, href]) => `<li><a href="${escapeText(href)}"${href === whitePaper ? ' rel="noopener"' : ''}>${escapeText(label)}${href === whitePaper ? EXTERNAL_CUE : ''}</a></li>`).join('')}</ul></div></footer>`,
+    `<ul>${links.map(([label, href]) => `<li><a href="${escapeText(href)}"${href === reportUrl ? ' rel="noopener"' : ''}>${escapeText(label)}${href === reportUrl ? EXTERNAL_CUE : ''}</a></li>`).join('')}</ul></div></footer>`,
   ].join('\n');
 }
 
@@ -74,7 +74,7 @@ export function renderPage(page: Page, main: string, assets: Assets): string {
     `<main id="main"${page.bands ? '' : ' class="wrap"'}>`,
     main.replace(/\n$/, ''),
     '</main>',
-    footer(WHITE_PAPER_URL),
+    footer(REPORT_URL),
     '</body>',
     '</html>',
     '',

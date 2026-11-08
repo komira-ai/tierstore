@@ -264,7 +264,7 @@ test('llms.txt follows llmstxt.org: a title, a one-paragraph summary in a quote,
   for (const d of docs) assert.ok(links.includes(`https://tierstore.dev/docs/${d.stem}.md`), `llms.txt does not link ${d.stem}`);
   const examples = llms.slice(llms.indexOf('## Examples'), llms.indexOf('## Optional'));
   assert.equal(examples.match(/^- \[/gm)?.length, 3);
-  assert.ok(llms.includes('(https://komira.ai/whitepapers/tierstore)'));
+  assert.ok(llms.includes('(https://komira.ai/research/tierstore)'));
   assert.ok(llms.endsWith('\n') && !llms.includes('\n\n\n'));
 });
 

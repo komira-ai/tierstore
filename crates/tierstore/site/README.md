@@ -44,7 +44,7 @@ read from its source, and each block names the file. Values that differ on every
 
 ## The technical report
 
-`WHITE_PAPER_URL` in `tools/pages.ts` is the report on tierstore at the main site (`https://komira.ai/whitepapers/tierstore`). It is the last of the three links in the header (`NAV`: Install, Docs, Why) and is in the footer too. The report itself is maintained with the main site, not in this repository. The Demo and `llms.txt` are in the footer (`FOOTER_LINKS`). `/get-started/` and `/getting-started/` are stub pages that link and redirect to `/install/`, and `/why/` is a stub that links and redirects to the report, so no address ever breaks.
+`REPORT_URL` in `tools/pages.ts` is the report on tierstore at the main site (`https://komira.ai/research/tierstore`). It is the last of the three links in the header (`NAV`: Install, Docs, Why) and is in the footer too. The report itself is maintained with the main site, not in this repository. The Demo and `llms.txt` are in the footer (`FOOTER_LINKS`). `/get-started/` and `/getting-started/` are stub pages that link and redirect to `/install/`, and `/why/` is a stub that links and redirects to the report, so no address ever breaks.
 
 ## Install
 
