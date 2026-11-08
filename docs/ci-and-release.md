@@ -281,7 +281,9 @@ section 5). Nobody approves a step.
    tarballs, the two Debian packages, their bundles and a `SHA256SUMS` of exactly these, once each,
    write-once) and does **not** write `releases/latest.json` (`cargo xtask channels upload
    --no-latest`). The `testing-apt-*` jobs put the Debian packages in the pool and list them in the
-   apt suite `testing` (see The apt repository). `formula` renders `Formula/tierstore.rb` from the
+   apt suite `testing` (see The apt repository), and the `testing-rpm-*` jobs put the signed RPM
+   packages in the pool and list them in the rpm tree's suite `testing` (see The rpm repository).
+   `formula` renders `Formula/tierstore.rb` from the
    verified `SHA256SUMS` and keeps it as the artifact `formula`; it opens no pull request.
 2. **Install checks**, on GitHub-hosted runners, at release time only. Each is skipped when nothing
    was published for it to read, and a failure stops the release before anything public changes:
@@ -291,6 +293,16 @@ section 5). Nobody approves a step.
      that `tierstore --version` prints the release, the unit, the `sysusers.d` entry and the
      conffile exist, and the service is neither enabled nor running
      (`cargo xtask channels check-apt`).
+   - `check-rpm` (x86_64 on `ubuntu-24.04`, aarch64 on `ubuntu-24.04-arm`; the current Fedora,
+     AlmaLinux 9 and Amazon Linux 2023, each a clean container pinned by digest) starts the
+     container and runs `cargo xtask channels check-rpm` on the runner against it (`docker exec`:
+     the runner's binary needs a newer C library than these systems have). In the container it
+     writes a repository file for the suite `testing` (`gpgcheck=1` and `repo_gpgcheck=1`, the
+     archive key at `packages.komira.ai/apt/komira-archive-keyring.asc`), installs
+     `tierstore-<version>` with `dnf`, and checks that `rpm -K` of the package from the pool says
+     its digests and signatures are OK, that `tierstore --version` prints the release
+     (`/usr/libexec/tierstore/tierstore`), that the unit, the `sysusers.d` entry and the conffile
+     exist (the conffile registered as one with `rpm -qc`), and that the service is not enabled.
    - `check-brew` (`macos-15`) installs the rendered formula from a local tap and runs the binary
      (`cargo xtask channels check-brew`).
    - `check-install-sh` (`ubuntu-24.04` and `macos-15`) runs `install.sh` from tierstore.dev with
@@ -320,8 +332,8 @@ section 5). Nobody approves a step.
    `releases/latest.json` (`cargo xtask channels latest`: it first reads every file of
    `releases/<version>/` back from the bucket and holds it to the release's `SHA256SUMS`),
    `tap` opens the pull request in the Homebrew tap from the artifact `formula`, and the
-   `stable-apt-*` jobs list the entries of the release in the suite `stable` (see The apt
-   repository).
+   `stable-apt-*` and `stable-rpm-*` jobs list the entries of the release in the suite `stable` (see
+   The apt repository and The rpm repository).
 
 A failed job leaves the release a GitHub release in testing and no more. Re-run the failed jobs of
 the run: every write is write-once or idempotent, and `promote-check` reads the results again, so
@@ -390,6 +402,43 @@ products' releases write too. When the write finds it changed in between (`412`)
 again; the write of the third attempt (`-3`) fails instead of asking for a fourth. The `stable-apt-*` jobs have the same attempts. `apt promote` refuses a version `testing` does not list, a digest that is not the one in `SHA256SUMS`, and a `stable` that lists a newer version or this version with other bytes. A package that
 is in the pool already passes only with the same bytes. A version older than the newest listed is
 refused. A release whose apt jobs all failed is still a release: re-run the failed jobs.
+
+### The rpm repository
+
+The same repository (`packages.komira.ai`, the bucket and the distribution of the apt jobs) also
+serves a dnf/yum/zypper tree under `rpm/` (`infra/apt_repo` in komira-internal, whose pull request
+1638 adds it): `rpm/pool/tierstore/<package>.rpm` written once and shared by both suites and both
+architectures, and for each suite and architecture `rpm/<suite>/<arch>/repodata/` with
+`repomd.xml`, its detached signature `repomd.xml.asc`, and the `primary`, `filelists` and `other`
+files it lists (gzip, named by their digest, written once). Users put `rpm/komira.repo` (which that
+repository's held script uploads) in `/etc/yum.repos.d/`: the suite `stable` enabled, `testing`
+disabled, `gpgcheck=1` and `repo_gpgcheck=1`, and the key the apt tree uses. Only `repomd.xml` and
+`repomd.xml.asc` are ever replaced, each with `If-Match` on the ETag that was read.
+
+The nine jobs of each suite are the apt jobs' three (read, index, write) in three attempts, in the
+same environments, with the same settings and the same key, and the same rule that no job holds
+both the key and the cloud role. They do nothing, and end green with a notice, until the repository
+variable `RPM_REPO_READY` is `true`: set it once the rpm tree is deployed in komira-internal, so a
+release before that does not fail on `AccessDenied` (the first read of the suite `testing` is given
+it with `channels gate --require`, and the other jobs follow it).
+
+| job | environment | does |
+|---|---|---|
+| `testing-rpm-read` | `apt-publish` | reads `repomd.xml` and `repomd.xml.asc` of each architecture with their ETags, and the files `repomd.xml` lists, from S3 (`cargo xtask channels rpm repo read --suite testing`) |
+| `testing-rpm-index` | `apt-signing` | signs each `.rpm` (`channels rpm sign`: the signature header only, with the signing subkey, at the commit's time), merges the signed packages into that `repodata`, keeping every other product's packages (`rpm repo index`), and signs `repomd.xml` (`rpm repo sign`); no cloud role |
+| `testing-rpm-write` | `apt-publish` | checks the signed packages (`rpm check-signed`: with the signature taken out each is the package `SHA256SUMS` lists), uploads them once each, then the `repodata` with `If-Match` on the ETags that were read, then invalidates `/rpm/testing/<arch>/repodata/*` (`rpm repo write`) |
+| `stable-rpm-read`, `stable-rpm-index`, `stable-rpm-write` | as above | after `promote-check`: read both suites; sign the packages again (the same key and time give the same bytes) and promote the entries `testing` lists (`rpm promote`), held to `SHA256SUMS` and to the digests of the signed packages; sign `repomd.xml`; write the `repodata` of `stable` with `If-Match`; no package (`rpm repo write --suite stable --no-pool`) |
+
+A package is signed with the signing subkey in its signature header and nowhere else, so the
+unsigned package that the build attested and `SHA256SUMS` lists is the signed package with that one
+entry taken out. The signature is made with `gpg` (the loopback pinentry, key and passphrase
+files, as `apt sign`), SHA-256, over the main header, at `--signed-at` (the job passes the commit's
+time, frozen with `--faked-system-time`), and is deterministic for an RSA or EdDSA key, so a re-run
+and the promotion give the same bytes. When the fingerprint variable lists several keys (a
+rotation), the first signs the packages and `repomd.xml.asc` has a signature of each. The publish
+role may not read the pool, so a package that is there already (`412` on `If-None-Match`) is
+compared by fetching it from the public host. The `check-rpm` job above installs the testing suite
+before anything is promoted.
 
 ### Releasing by hand
 

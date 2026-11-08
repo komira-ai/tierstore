@@ -731,6 +731,10 @@ fn each_file_is_served_as_what_it_is() {
         "application/vnd.debian.binary-package"
     );
     assert_eq!(
+        content_type("tierstore-1.2.3-1.x86_64.rpm"),
+        "application/x-rpm"
+    );
+    assert_eq!(
         content_type("tierstore-1.2.3-macos-arm64.tar.gz"),
         "application/gzip"
     );

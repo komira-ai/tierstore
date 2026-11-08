@@ -9,9 +9,9 @@
 //!
 //! | stage | result that lets the release go on |
 //! |---|---|
-//! | `testing-upload`, `testing-apt-write` | `success` (a job without its settings ends green) |
-//! | `testing-apt-write-2`, `testing-apt-write-3` | `success`, or `skipped` (the first write did not lose the race) |
-//! | `check-apt`, `check-brew`, `check-install-sh` | `success`, or `skipped` (nothing was published to check) |
+//! | `testing-upload`, `testing-apt-write`, `testing-rpm-write` | `success` (a job without its settings ends green) |
+//! | `testing-apt-write-2`, `testing-apt-write-3`, `testing-rpm-write-2`, `testing-rpm-write-3` | `success`, or `skipped` (the first write did not lose the race) |
+//! | `check-apt`, `check-rpm`, `check-brew`, `check-install-sh` | `success`, or `skipped` (nothing was published to check) |
 //! | `farm-check` | `success` |
 //! | `farm`, `soak` | both `success` when the lab is configured; both `skipped` when it is not (a notice, and the release goes on) |
 //!
@@ -25,12 +25,16 @@ use crate::Error;
 use crate::release::append_output;
 
 /// The stages the rule reads, in the order it names them.
-pub const STAGES: [&str; 10] = [
+pub const STAGES: [&str; 14] = [
     "testing-upload",
     "testing-apt-write",
     "testing-apt-write-2",
     "testing-apt-write-3",
+    "testing-rpm-write",
+    "testing-rpm-write-2",
+    "testing-rpm-write-3",
     "check-apt",
+    "check-rpm",
     "check-brew",
     "check-install-sh",
     "farm-check",
@@ -42,10 +46,13 @@ pub const STAGES: [&str; 10] = [
 const RESULTS: [&str; 4] = ["success", "failure", "cancelled", "skipped"];
 
 /// The stages that may be skipped.
-const MAY_SKIP: [&str; 5] = [
+const MAY_SKIP: [&str; 8] = [
     "testing-apt-write-2",
     "testing-apt-write-3",
+    "testing-rpm-write-2",
+    "testing-rpm-write-3",
     "check-apt",
+    "check-rpm",
     "check-brew",
     "check-install-sh",
 ];

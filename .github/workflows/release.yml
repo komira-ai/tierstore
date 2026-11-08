@@ -62,13 +62,20 @@
 #               write-once, WITHOUT releases/latest.json: cargo xtask channels upload --no-latest;
 #               environment `prod-releases-tierstore`, `id-token: write`, no repository write) and
 #               the nine testing-apt-* jobs (the Debian packages into the pool and the index of
-#               the suite `testing` of packages.komira.ai).
+#               the suite `testing` of packages.komira.ai) and the nine testing-rpm-* jobs (the
+#               RPM packages, signed, into the pool and the repodata of the suite `testing` of
+#               the same repository, once the repository variable RPM_REPO_READY is `true`).
 # 2. checks     check-apt (a clean Ubuntu container pinned by digest, amd64 and arm64: adds the
 #               repository with its published keyring and the suite testing, installs
 #               tierstore=<version>, the binary says the release, the unit, sysusers.d entry and
 #               conffile are there, the service is neither enabled nor running), check-brew (the
 #               rendered formula from a local tap, on macos-15) and check-install-sh (install.sh
-#               from tierstore.dev with --version, on Linux and on macOS). A failure stops the
+#               from tierstore.dev with --version, on Linux and on macOS) and check-rpm (clean
+#               containers of Fedora, AlmaLinux 9 and Amazon Linux 2023 pinned by digest, x86_64
+#               and aarch64: adds the repository file of the suite testing, installs
+#               tierstore-<version> with dnf, `rpm -K` accepts the package, the binary says the
+#               release, the unit and the conffile are there, the service is not enabled). A
+#               failure stops the
 #               release before anything public changes.
 # 3. the lab    farm-check, farm, soak: hostkeeper installs the Debian package of the suite testing
 #               on the lab and the coordinator moves it. Without the lab's settings the stage is
@@ -77,9 +84,10 @@
 # 4. promotion  promote-check (cargo xtask channels decide: the results of the jobs above) and
 #               then, automatically, promote-latest (releases/latest.json, after the bucket is
 #               read back against SHA256SUMS), tap (the pull request in the Homebrew tap, from the
-#               formula that was installed) and the nine stable-apt-* jobs (the entries of the
+#               formula that was installed), the nine stable-apt-* jobs (the entries of the
 #               release copied from the index of testing to the index of stable, digests checked
-#               against SHA256SUMS, no package written). Nobody approves a step (B12).
+#               against SHA256SUMS, no package written) and the nine stable-rpm-* jobs (the same
+#               for the repodata of the rpm tree). Nobody approves a step (B12).
 #
 # Each job that writes starts with `cargo xtask channels gate`: with none of its settings set the
 # job ends green with a notice and writes nothing, with some it ends red naming the missing ones,
@@ -97,6 +105,13 @@
 # were read. A write that finds the index changed in between ends green with conflict=true, and
 # the next attempt reads, merges and signs again; the third attempt fails instead of asking for a
 # fourth.
+#
+# The nine rpm jobs of each suite (testing-rpm-*, stable-rpm-*) are the same three, in the same
+# environments with the same settings and the same key, for the rpm tree (`channels rpm`): the
+# index job also signs the .rpms, which adds one entry to the signature header and changes nothing
+# else, so the unsigned packages SHA256SUMS lists are the signed ones minus that entry
+# (`channels rpm check-signed`). They end green with a notice and write nothing, besides the
+# apt settings, while the repository variable RPM_REPO_READY is not `true`.
 #
 # verify also runs the downloaded linux-x86_64 binary with `--version` and refuses to go on
 # unless it says exactly the tag (without the v) and the first 12 digits of the commit
@@ -1006,6 +1021,662 @@ jobs:
           APT_HOSTNAME: ${{ vars.APT_HOSTNAME }}
         run: cargo xtask channels apt write --suite testing --bucket "$APT_BUCKET" --distribution-id "$APT_DISTRIBUTION_ID" --hostname "$APT_HOSTNAME" --next "$RUNNER_TEMP/apt-next" --debs dist --version "${TAG#v}" --last --output "$GITHUB_OUTPUT"
 
+  # TESTING, the rpm tree of the repository packages.komira.ai: the release's RPM packages, signed,
+  # into the pool and the repodata of the suite `testing` (docs/design/distribution.md, sections 5
+  # and 8). The same three jobs and up to three attempts as the apt repository, and the same
+  # environments, settings and key; no job holds both the signing key and the cloud role:
+  #   testing-rpm-read   (environment apt-publish: the role, no key) reads repomd.xml and
+  #                      repomd.xml.asc of each architecture, with their ETags, and the files they
+  #                      list, from S3;
+  #   testing-rpm-index  (environment apt-signing: the key, no role) signs the .rpms (the signature
+  #                      header only: the unsigned bytes are the attested ones), merges them into
+  #                      that repodata, keeping every other product's packages, and signs
+  #                      repomd.xml;
+  #   testing-rpm-write  (environment apt-publish) checks the signed packages against SHA256SUMS,
+  #                      uploads them once each, then the repodata, with If-Match on the ETags that
+  #                      were read.
+  # A write that finds repomd.xml changed in between (another product's release) reports
+  # conflict=true and ends green; attempt 2 (the jobs with the suffix -2), and then 3, read, merge
+  # and sign again, and the last one fails instead of asking for a fourth. A job without its
+  # settings ends green with a notice and writes nothing; so does one while the repository variable
+  # RPM_REPO_READY is not `true` (it is set once the rpm tree of the repository is deployed, so a
+  # release before that does not fail on AccessDenied).
+
+  testing-rpm-read:
+    needs: [plan, publish]
+    if: ${{ needs.plan.outputs.release == 'true' && github.ref == 'refs/heads/main' }}
+    runs-on: ubuntu-24.04
+    timeout-minutes: 15
+    environment: apt-publish
+    permissions:
+      contents: read
+      id-token: write
+    outputs:
+      enabled: ${{ steps.gate.outputs.enabled }}
+    env:
+      COMMIT: ${{ needs.plan.outputs.commit }}
+      TAG: ${{ needs.plan.outputs.tag }}
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          ref: ${{ needs.plan.outputs.commit }}
+          persist-credentials: false
+      - run: rustup toolchain install
+      - name: Compile xtask
+        run: cargo xtask --help
+      - name: Gate on the settings of the apt repository (a job without them does nothing and ends green)
+        id: gate
+        env:
+          RPM_REPO_READY: ${{ vars.RPM_REPO_READY }}
+          APT_PUBLISH_ROLE_ARN: ${{ vars.APT_PUBLISH_ROLE_ARN }}
+          APT_BUCKET: ${{ vars.APT_BUCKET }}
+          APT_DISTRIBUTION_ID: ${{ vars.APT_DISTRIBUTION_ID }}
+          APT_HOSTNAME: ${{ vars.APT_HOSTNAME }}
+        run: cargo xtask channels gate --label testing-rpm-read --output "$GITHUB_OUTPUT" --require "RPM_REPO_READY=$RPM_REPO_READY" --setting "APT_PUBLISH_ROLE_ARN=${APT_PUBLISH_ROLE_ARN:+set}" --setting "APT_BUCKET=${APT_BUCKET:+set}" --setting "APT_DISTRIBUTION_ID=${APT_DISTRIBUTION_ID:+set}" --setting "APT_HOSTNAME=${APT_HOSTNAME:+set}"
+      - name: Assume the apt publish role through OIDC
+        if: ${{ steps.gate.outputs.enabled == 'true' }}
+        uses: aws-actions/configure-aws-credentials@e1253824e5c10ff9df46874f81ed3ec929e19cfd # v6.3.0
+        with:
+          role-to-assume: ${{ vars.APT_PUBLISH_ROLE_ARN }}
+          aws-region: us-east-1
+          mask-aws-account-id: true
+      - name: Read the current repodata and the ETag of repomd.xml and its signature from S3 (never through the CDN, which caches the index)
+        if: ${{ steps.gate.outputs.enabled == 'true' }}
+        env:
+          APT_BUCKET: ${{ vars.APT_BUCKET }}
+        run: cargo xtask channels rpm repo read --suite testing --bucket "$APT_BUCKET" --out "$RUNNER_TEMP/rpm-current"
+      - uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
+        if: ${{ steps.gate.outputs.enabled == 'true' }}
+        with:
+          name: rpm-current
+          path: ${{ runner.temp }}/rpm-current
+          if-no-files-found: error
+          retention-days: 1
+
+  testing-rpm-index:
+    needs: [plan, testing-rpm-read]
+    if: ${{ needs.plan.outputs.release == 'true' && github.ref == 'refs/heads/main' }}
+    runs-on: ubuntu-24.04
+    timeout-minutes: 15
+    environment: apt-signing
+    permissions:
+      contents: read
+    outputs:
+      enabled: ${{ steps.gate.outputs.enabled }}
+      signed: ${{ steps.sign.outputs.signed }}
+    env:
+      COMMIT: ${{ needs.plan.outputs.commit }}
+      TAG: ${{ needs.plan.outputs.tag }}
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          ref: ${{ needs.plan.outputs.commit }}
+          persist-credentials: false
+      - run: rustup toolchain install
+      - name: Compile xtask
+        run: cargo xtask --help
+      - name: Gate on the signing key and on the read (a job without them does nothing and ends green)
+        id: gate
+        env:
+          READ_ENABLED: ${{ needs.testing-rpm-read.outputs.enabled }}
+          APT_GPG_FINGERPRINT: ${{ vars.APT_GPG_FINGERPRINT }}
+          APT_GPG_PRIVATE_KEY: ${{ secrets.APT_GPG_PRIVATE_KEY }}
+          APT_GPG_PASSPHRASE: ${{ secrets.APT_GPG_PASSPHRASE }}
+        run: cargo xtask channels gate --label testing-rpm-index --output "$GITHUB_OUTPUT" --require "READ_ENABLED=$READ_ENABLED" --setting "APT_GPG_FINGERPRINT=${APT_GPG_FINGERPRINT:+set}" --setting "APT_GPG_PRIVATE_KEY=${APT_GPG_PRIVATE_KEY:+set}" --setting "APT_GPG_PASSPHRASE=${APT_GPG_PASSPHRASE:+set}"
+      - uses: actions/download-artifact@3e5f45b2cfb9172054b4087a40e8e0b5a5461e7c # v8.0.1
+        if: ${{ steps.gate.outputs.enabled == 'true' }}
+        with:
+          name: rpm-current
+          path: ${{ runner.temp }}/rpm-current
+      - uses: actions/download-artifact@3e5f45b2cfb9172054b4087a40e8e0b5a5461e7c # v8.0.1
+        if: ${{ steps.gate.outputs.enabled == 'true' }}
+        with:
+          name: release-assets
+          path: dist
+      - name: The files are exactly the assets of this commit, and match SHA256SUMS
+        if: ${{ steps.gate.outputs.enabled == 'true' }}
+        run: |
+          (cd dist && sha256sum --check --strict SHA256SUMS)
+          cargo xtask release check dist --commit "$COMMIT"
+      - name: Sign the .rpms with the signing subkey (the signature header only; the same bytes for the same commit), then remove the key
+        id: sign-rpms
+        if: ${{ steps.gate.outputs.enabled == 'true' }}
+        env:
+          APT_GPG_FINGERPRINT: ${{ vars.APT_GPG_FINGERPRINT }}
+          APT_GPG_PRIVATE_KEY: ${{ secrets.APT_GPG_PRIVATE_KEY }}
+          APT_GPG_PASSPHRASE: ${{ secrets.APT_GPG_PASSPHRASE }}
+        run: |
+          umask 077
+          printf '%s' "$APT_GPG_PRIVATE_KEY" > "$RUNNER_TEMP/rpm-key.asc"
+          printf '%s' "$APT_GPG_PASSPHRASE" > "$RUNNER_TEMP/rpm-passphrase"
+          cargo xtask channels rpm sign --rpms dist --out "$RUNNER_TEMP/rpm-signed" --version "${TAG#v}" --sums dist/SHA256SUMS --work "$RUNNER_TEMP/rpm-sign-packages" --fingerprint "$APT_GPG_FINGERPRINT" --key-file "$RUNNER_TEMP/rpm-key.asc" --passphrase-file "$RUNNER_TEMP/rpm-passphrase" --signed-at "$(git show --no-patch --format=%ct HEAD)"
+      - name: Merge the signed .rpms into the repodata that was read (the packages of every other product are kept)
+        if: ${{ steps.gate.outputs.enabled == 'true' }}
+        run: cargo xtask channels rpm repo index --suite testing --current "$RUNNER_TEMP/rpm-current" --out "$RUNNER_TEMP/rpm-next" --rpms "$RUNNER_TEMP/rpm-signed" --version "${TAG#v}" --date "$(date +%s)"
+      - name: Sign repomd.xml of each architecture with the signing subkey (repomd.xml.asc), then remove the key
+        id: sign
+        if: ${{ steps.gate.outputs.enabled == 'true' }}
+        env:
+          APT_GPG_FINGERPRINT: ${{ vars.APT_GPG_FINGERPRINT }}
+          APT_GPG_PRIVATE_KEY: ${{ secrets.APT_GPG_PRIVATE_KEY }}
+          APT_GPG_PASSPHRASE: ${{ secrets.APT_GPG_PASSPHRASE }}
+        run: |
+          umask 077
+          printf '%s' "$APT_GPG_PRIVATE_KEY" > "$RUNNER_TEMP/rpm-key.asc"
+          printf '%s' "$APT_GPG_PASSPHRASE" > "$RUNNER_TEMP/rpm-passphrase"
+          cargo xtask channels rpm repo sign --dir "$RUNNER_TEMP/rpm-next/testing" --work "$RUNNER_TEMP/rpm-sign" --fingerprint "$APT_GPG_FINGERPRINT" --key-file "$RUNNER_TEMP/rpm-key.asc" --passphrase-file "$RUNNER_TEMP/rpm-passphrase" --output "$GITHUB_OUTPUT"
+      - uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
+        if: ${{ steps.gate.outputs.enabled == 'true' }}
+        with:
+          name: rpm-next
+          path: |
+            ${{ runner.temp }}/rpm-next/testing
+            ${{ runner.temp }}/rpm-next/etags.txt
+          if-no-files-found: error
+          retention-days: 1
+      - uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
+        if: ${{ steps.gate.outputs.enabled == 'true' }}
+        with:
+          name: rpm-signed
+          path: ${{ runner.temp }}/rpm-signed
+          if-no-files-found: error
+          retention-days: 1
+
+  testing-rpm-write:
+    needs: [plan, testing-rpm-read, testing-rpm-index]
+    if: ${{ needs.plan.outputs.release == 'true' && github.ref == 'refs/heads/main' }}
+    runs-on: ubuntu-24.04
+    timeout-minutes: 15
+    environment: apt-publish
+    permissions:
+      contents: read
+      id-token: write
+    outputs:
+      conflict: ${{ steps.put.outputs.conflict }}
+    env:
+      COMMIT: ${{ needs.plan.outputs.commit }}
+      TAG: ${{ needs.plan.outputs.tag }}
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          ref: ${{ needs.plan.outputs.commit }}
+          persist-credentials: false
+      - run: rustup toolchain install
+      - name: Compile xtask
+        run: cargo xtask --help
+      - name: Gate on the settings of the apt repository and on the signed repodata (a job without them does nothing and ends green)
+        id: gate
+        env:
+          READ_ENABLED: ${{ needs.testing-rpm-read.outputs.enabled }}
+          INDEX_SIGNED: ${{ needs.testing-rpm-index.outputs.signed }}
+          APT_PUBLISH_ROLE_ARN: ${{ vars.APT_PUBLISH_ROLE_ARN }}
+          APT_BUCKET: ${{ vars.APT_BUCKET }}
+          APT_DISTRIBUTION_ID: ${{ vars.APT_DISTRIBUTION_ID }}
+          APT_HOSTNAME: ${{ vars.APT_HOSTNAME }}
+        run: cargo xtask channels gate --label testing-rpm-write --output "$GITHUB_OUTPUT" --require "READ_ENABLED=$READ_ENABLED" --require "INDEX_SIGNED=$INDEX_SIGNED" --setting "APT_PUBLISH_ROLE_ARN=${APT_PUBLISH_ROLE_ARN:+set}" --setting "APT_BUCKET=${APT_BUCKET:+set}" --setting "APT_DISTRIBUTION_ID=${APT_DISTRIBUTION_ID:+set}" --setting "APT_HOSTNAME=${APT_HOSTNAME:+set}"
+      - uses: actions/download-artifact@3e5f45b2cfb9172054b4087a40e8e0b5a5461e7c # v8.0.1
+        if: ${{ steps.gate.outputs.enabled == 'true' }}
+        with:
+          name: rpm-next
+          path: ${{ runner.temp }}/rpm-next
+      - uses: actions/download-artifact@3e5f45b2cfb9172054b4087a40e8e0b5a5461e7c # v8.0.1
+        if: ${{ steps.gate.outputs.enabled == 'true' }}
+        with:
+          name: rpm-signed
+          path: ${{ runner.temp }}/rpm-signed
+      - uses: actions/download-artifact@3e5f45b2cfb9172054b4087a40e8e0b5a5461e7c # v8.0.1
+        if: ${{ steps.gate.outputs.enabled == 'true' }}
+        with:
+          name: release-assets
+          path: dist
+      - name: The files are exactly the assets of this commit, and match SHA256SUMS
+        if: ${{ steps.gate.outputs.enabled == 'true' }}
+        run: |
+          (cd dist && sha256sum --check --strict SHA256SUMS)
+          cargo xtask release check dist --commit "$COMMIT"
+      - name: The signed .rpms are the attested packages plus a signature (checked against SHA256SUMS and the digests of the signing job)
+        if: ${{ steps.gate.outputs.enabled == 'true' }}
+        run: cargo xtask channels rpm check-signed --dir "$RUNNER_TEMP/rpm-signed" --version "${TAG#v}" --sums dist/SHA256SUMS --signed-sums "$RUNNER_TEMP/rpm-signed/SHA256SUMS.signed"
+      - name: Assume the apt publish role through OIDC
+        if: ${{ steps.gate.outputs.enabled == 'true' }}
+        uses: aws-actions/configure-aws-credentials@e1253824e5c10ff9df46874f81ed3ec929e19cfd # v6.3.0
+        with:
+          role-to-assume: ${{ vars.APT_PUBLISH_ROLE_ARN }}
+          aws-region: us-east-1
+          mask-aws-account-id: true
+      - name: Upload the .rpms once each, then write the signed repodata with If-Match on the ETags that were read, then invalidate /rpm/testing/<arch>/repodata/*
+        id: put
+        if: ${{ steps.gate.outputs.enabled == 'true' }}
+        env:
+          APT_BUCKET: ${{ vars.APT_BUCKET }}
+          APT_DISTRIBUTION_ID: ${{ vars.APT_DISTRIBUTION_ID }}
+          APT_HOSTNAME: ${{ vars.APT_HOSTNAME }}
+        run: cargo xtask channels rpm repo write --suite testing --bucket "$APT_BUCKET" --distribution-id "$APT_DISTRIBUTION_ID" --hostname "$APT_HOSTNAME" --next "$RUNNER_TEMP/rpm-next" --rpms "$RUNNER_TEMP/rpm-signed" --version "${TAG#v}" --output "$GITHUB_OUTPUT"
+
+  # Attempt 2: the write of attempt 1 lost the race for repomd.xml.
+
+  testing-rpm-read-2:
+    needs: [plan, testing-rpm-write]
+    if: ${{ needs.plan.outputs.release == 'true' && github.ref == 'refs/heads/main' && needs.testing-rpm-write.outputs.conflict == 'true' }}
+    runs-on: ubuntu-24.04
+    timeout-minutes: 15
+    environment: apt-publish
+    permissions:
+      contents: read
+      id-token: write
+    outputs:
+      enabled: ${{ steps.gate.outputs.enabled }}
+    env:
+      COMMIT: ${{ needs.plan.outputs.commit }}
+      TAG: ${{ needs.plan.outputs.tag }}
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          ref: ${{ needs.plan.outputs.commit }}
+          persist-credentials: false
+      - run: rustup toolchain install
+      - name: Compile xtask
+        run: cargo xtask --help
+      - name: Gate on the settings of the apt repository (a job without them does nothing and ends green)
+        id: gate
+        env:
+          APT_PUBLISH_ROLE_ARN: ${{ vars.APT_PUBLISH_ROLE_ARN }}
+          APT_BUCKET: ${{ vars.APT_BUCKET }}
+          APT_DISTRIBUTION_ID: ${{ vars.APT_DISTRIBUTION_ID }}
+          APT_HOSTNAME: ${{ vars.APT_HOSTNAME }}
+        run: cargo xtask channels gate --label testing-rpm-read-2 --output "$GITHUB_OUTPUT" --setting "APT_PUBLISH_ROLE_ARN=${APT_PUBLISH_ROLE_ARN:+set}" --setting "APT_BUCKET=${APT_BUCKET:+set}" --setting "APT_DISTRIBUTION_ID=${APT_DISTRIBUTION_ID:+set}" --setting "APT_HOSTNAME=${APT_HOSTNAME:+set}"
+      - name: Assume the apt publish role through OIDC
+        if: ${{ steps.gate.outputs.enabled == 'true' }}
+        uses: aws-actions/configure-aws-credentials@e1253824e5c10ff9df46874f81ed3ec929e19cfd # v6.3.0
+        with:
+          role-to-assume: ${{ vars.APT_PUBLISH_ROLE_ARN }}
+          aws-region: us-east-1
+          mask-aws-account-id: true
+      - name: Read the current repodata and the ETag of repomd.xml and its signature from S3 (never through the CDN, which caches the index)
+        if: ${{ steps.gate.outputs.enabled == 'true' }}
+        env:
+          APT_BUCKET: ${{ vars.APT_BUCKET }}
+        run: cargo xtask channels rpm repo read --suite testing --bucket "$APT_BUCKET" --out "$RUNNER_TEMP/rpm-current"
+      - uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
+        if: ${{ steps.gate.outputs.enabled == 'true' }}
+        with:
+          name: rpm-current-2
+          path: ${{ runner.temp }}/rpm-current
+          if-no-files-found: error
+          retention-days: 1
+
+  testing-rpm-index-2:
+    needs: [plan, testing-rpm-read-2]
+    if: ${{ needs.plan.outputs.release == 'true' && github.ref == 'refs/heads/main' }}
+    runs-on: ubuntu-24.04
+    timeout-minutes: 15
+    environment: apt-signing
+    permissions:
+      contents: read
+    outputs:
+      enabled: ${{ steps.gate.outputs.enabled }}
+      signed: ${{ steps.sign.outputs.signed }}
+    env:
+      COMMIT: ${{ needs.plan.outputs.commit }}
+      TAG: ${{ needs.plan.outputs.tag }}
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          ref: ${{ needs.plan.outputs.commit }}
+          persist-credentials: false
+      - run: rustup toolchain install
+      - name: Compile xtask
+        run: cargo xtask --help
+      - name: Gate on the signing key and on the read (a job without them does nothing and ends green)
+        id: gate
+        env:
+          READ_ENABLED: ${{ needs.testing-rpm-read-2.outputs.enabled }}
+          APT_GPG_FINGERPRINT: ${{ vars.APT_GPG_FINGERPRINT }}
+          APT_GPG_PRIVATE_KEY: ${{ secrets.APT_GPG_PRIVATE_KEY }}
+          APT_GPG_PASSPHRASE: ${{ secrets.APT_GPG_PASSPHRASE }}
+        run: cargo xtask channels gate --label testing-rpm-index-2 --output "$GITHUB_OUTPUT" --require "READ_ENABLED=$READ_ENABLED" --setting "APT_GPG_FINGERPRINT=${APT_GPG_FINGERPRINT:+set}" --setting "APT_GPG_PRIVATE_KEY=${APT_GPG_PRIVATE_KEY:+set}" --setting "APT_GPG_PASSPHRASE=${APT_GPG_PASSPHRASE:+set}"
+      - uses: actions/download-artifact@3e5f45b2cfb9172054b4087a40e8e0b5a5461e7c # v8.0.1
+        if: ${{ steps.gate.outputs.enabled == 'true' }}
+        with:
+          name: rpm-current-2
+          path: ${{ runner.temp }}/rpm-current
+      - uses: actions/download-artifact@3e5f45b2cfb9172054b4087a40e8e0b5a5461e7c # v8.0.1
+        if: ${{ steps.gate.outputs.enabled == 'true' }}
+        with:
+          name: release-assets
+          path: dist
+      - name: The files are exactly the assets of this commit, and match SHA256SUMS
+        if: ${{ steps.gate.outputs.enabled == 'true' }}
+        run: |
+          (cd dist && sha256sum --check --strict SHA256SUMS)
+          cargo xtask release check dist --commit "$COMMIT"
+      - name: Sign the .rpms with the signing subkey (the signature header only; the same bytes for the same commit), then remove the key
+        id: sign-rpms
+        if: ${{ steps.gate.outputs.enabled == 'true' }}
+        env:
+          APT_GPG_FINGERPRINT: ${{ vars.APT_GPG_FINGERPRINT }}
+          APT_GPG_PRIVATE_KEY: ${{ secrets.APT_GPG_PRIVATE_KEY }}
+          APT_GPG_PASSPHRASE: ${{ secrets.APT_GPG_PASSPHRASE }}
+        run: |
+          umask 077
+          printf '%s' "$APT_GPG_PRIVATE_KEY" > "$RUNNER_TEMP/rpm-key.asc"
+          printf '%s' "$APT_GPG_PASSPHRASE" > "$RUNNER_TEMP/rpm-passphrase"
+          cargo xtask channels rpm sign --rpms dist --out "$RUNNER_TEMP/rpm-signed" --version "${TAG#v}" --sums dist/SHA256SUMS --work "$RUNNER_TEMP/rpm-sign-packages" --fingerprint "$APT_GPG_FINGERPRINT" --key-file "$RUNNER_TEMP/rpm-key.asc" --passphrase-file "$RUNNER_TEMP/rpm-passphrase" --signed-at "$(git show --no-patch --format=%ct HEAD)"
+      - name: Merge the signed .rpms into the repodata that was read (the packages of every other product are kept)
+        if: ${{ steps.gate.outputs.enabled == 'true' }}
+        run: cargo xtask channels rpm repo index --suite testing --current "$RUNNER_TEMP/rpm-current" --out "$RUNNER_TEMP/rpm-next" --rpms "$RUNNER_TEMP/rpm-signed" --version "${TAG#v}" --date "$(date +%s)"
+      - name: Sign repomd.xml of each architecture with the signing subkey (repomd.xml.asc), then remove the key
+        id: sign
+        if: ${{ steps.gate.outputs.enabled == 'true' }}
+        env:
+          APT_GPG_FINGERPRINT: ${{ vars.APT_GPG_FINGERPRINT }}
+          APT_GPG_PRIVATE_KEY: ${{ secrets.APT_GPG_PRIVATE_KEY }}
+          APT_GPG_PASSPHRASE: ${{ secrets.APT_GPG_PASSPHRASE }}
+        run: |
+          umask 077
+          printf '%s' "$APT_GPG_PRIVATE_KEY" > "$RUNNER_TEMP/rpm-key.asc"
+          printf '%s' "$APT_GPG_PASSPHRASE" > "$RUNNER_TEMP/rpm-passphrase"
+          cargo xtask channels rpm repo sign --dir "$RUNNER_TEMP/rpm-next/testing" --work "$RUNNER_TEMP/rpm-sign" --fingerprint "$APT_GPG_FINGERPRINT" --key-file "$RUNNER_TEMP/rpm-key.asc" --passphrase-file "$RUNNER_TEMP/rpm-passphrase" --output "$GITHUB_OUTPUT"
+      - uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
+        if: ${{ steps.gate.outputs.enabled == 'true' }}
+        with:
+          name: rpm-next-2
+          path: |
+            ${{ runner.temp }}/rpm-next/testing
+            ${{ runner.temp }}/rpm-next/etags.txt
+          if-no-files-found: error
+          retention-days: 1
+      - uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
+        if: ${{ steps.gate.outputs.enabled == 'true' }}
+        with:
+          name: rpm-signed-2
+          path: ${{ runner.temp }}/rpm-signed
+          if-no-files-found: error
+          retention-days: 1
+
+  testing-rpm-write-2:
+    needs: [plan, testing-rpm-read-2, testing-rpm-index-2]
+    if: ${{ needs.plan.outputs.release == 'true' && github.ref == 'refs/heads/main' }}
+    runs-on: ubuntu-24.04
+    timeout-minutes: 15
+    environment: apt-publish
+    permissions:
+      contents: read
+      id-token: write
+    outputs:
+      conflict: ${{ steps.put.outputs.conflict }}
+    env:
+      COMMIT: ${{ needs.plan.outputs.commit }}
+      TAG: ${{ needs.plan.outputs.tag }}
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          ref: ${{ needs.plan.outputs.commit }}
+          persist-credentials: false
+      - run: rustup toolchain install
+      - name: Compile xtask
+        run: cargo xtask --help
+      - name: Gate on the settings of the apt repository and on the signed repodata (a job without them does nothing and ends green)
+        id: gate
+        env:
+          READ_ENABLED: ${{ needs.testing-rpm-read-2.outputs.enabled }}
+          INDEX_SIGNED: ${{ needs.testing-rpm-index-2.outputs.signed }}
+          APT_PUBLISH_ROLE_ARN: ${{ vars.APT_PUBLISH_ROLE_ARN }}
+          APT_BUCKET: ${{ vars.APT_BUCKET }}
+          APT_DISTRIBUTION_ID: ${{ vars.APT_DISTRIBUTION_ID }}
+          APT_HOSTNAME: ${{ vars.APT_HOSTNAME }}
+        run: cargo xtask channels gate --label testing-rpm-write-2 --output "$GITHUB_OUTPUT" --require "READ_ENABLED=$READ_ENABLED" --require "INDEX_SIGNED=$INDEX_SIGNED" --setting "APT_PUBLISH_ROLE_ARN=${APT_PUBLISH_ROLE_ARN:+set}" --setting "APT_BUCKET=${APT_BUCKET:+set}" --setting "APT_DISTRIBUTION_ID=${APT_DISTRIBUTION_ID:+set}" --setting "APT_HOSTNAME=${APT_HOSTNAME:+set}"
+      - uses: actions/download-artifact@3e5f45b2cfb9172054b4087a40e8e0b5a5461e7c # v8.0.1
+        if: ${{ steps.gate.outputs.enabled == 'true' }}
+        with:
+          name: rpm-next-2
+          path: ${{ runner.temp }}/rpm-next
+      - uses: actions/download-artifact@3e5f45b2cfb9172054b4087a40e8e0b5a5461e7c # v8.0.1
+        if: ${{ steps.gate.outputs.enabled == 'true' }}
+        with:
+          name: rpm-signed-2
+          path: ${{ runner.temp }}/rpm-signed
+      - uses: actions/download-artifact@3e5f45b2cfb9172054b4087a40e8e0b5a5461e7c # v8.0.1
+        if: ${{ steps.gate.outputs.enabled == 'true' }}
+        with:
+          name: release-assets
+          path: dist
+      - name: The files are exactly the assets of this commit, and match SHA256SUMS
+        if: ${{ steps.gate.outputs.enabled == 'true' }}
+        run: |
+          (cd dist && sha256sum --check --strict SHA256SUMS)
+          cargo xtask release check dist --commit "$COMMIT"
+      - name: The signed .rpms are the attested packages plus a signature (checked against SHA256SUMS and the digests of the signing job)
+        if: ${{ steps.gate.outputs.enabled == 'true' }}
+        run: cargo xtask channels rpm check-signed --dir "$RUNNER_TEMP/rpm-signed" --version "${TAG#v}" --sums dist/SHA256SUMS --signed-sums "$RUNNER_TEMP/rpm-signed/SHA256SUMS.signed"
+      - name: Assume the apt publish role through OIDC
+        if: ${{ steps.gate.outputs.enabled == 'true' }}
+        uses: aws-actions/configure-aws-credentials@e1253824e5c10ff9df46874f81ed3ec929e19cfd # v6.3.0
+        with:
+          role-to-assume: ${{ vars.APT_PUBLISH_ROLE_ARN }}
+          aws-region: us-east-1
+          mask-aws-account-id: true
+      - name: Upload the .rpms once each, then write the signed repodata with If-Match on the ETags that were read, then invalidate /rpm/testing/<arch>/repodata/*
+        id: put
+        if: ${{ steps.gate.outputs.enabled == 'true' }}
+        env:
+          APT_BUCKET: ${{ vars.APT_BUCKET }}
+          APT_DISTRIBUTION_ID: ${{ vars.APT_DISTRIBUTION_ID }}
+          APT_HOSTNAME: ${{ vars.APT_HOSTNAME }}
+        run: cargo xtask channels rpm repo write --suite testing --bucket "$APT_BUCKET" --distribution-id "$APT_DISTRIBUTION_ID" --hostname "$APT_HOSTNAME" --next "$RUNNER_TEMP/rpm-next" --rpms "$RUNNER_TEMP/rpm-signed" --version "${TAG#v}" --output "$GITHUB_OUTPUT"
+
+  # Attempt 3: the write of attempt 2 lost the race for repomd.xml.
+
+  testing-rpm-read-3:
+    needs: [plan, testing-rpm-write-2]
+    if: ${{ needs.plan.outputs.release == 'true' && github.ref == 'refs/heads/main' && needs.testing-rpm-write-2.outputs.conflict == 'true' }}
+    runs-on: ubuntu-24.04
+    timeout-minutes: 15
+    environment: apt-publish
+    permissions:
+      contents: read
+      id-token: write
+    outputs:
+      enabled: ${{ steps.gate.outputs.enabled }}
+    env:
+      COMMIT: ${{ needs.plan.outputs.commit }}
+      TAG: ${{ needs.plan.outputs.tag }}
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          ref: ${{ needs.plan.outputs.commit }}
+          persist-credentials: false
+      - run: rustup toolchain install
+      - name: Compile xtask
+        run: cargo xtask --help
+      - name: Gate on the settings of the apt repository (a job without them does nothing and ends green)
+        id: gate
+        env:
+          APT_PUBLISH_ROLE_ARN: ${{ vars.APT_PUBLISH_ROLE_ARN }}
+          APT_BUCKET: ${{ vars.APT_BUCKET }}
+          APT_DISTRIBUTION_ID: ${{ vars.APT_DISTRIBUTION_ID }}
+          APT_HOSTNAME: ${{ vars.APT_HOSTNAME }}
+        run: cargo xtask channels gate --label testing-rpm-read-3 --output "$GITHUB_OUTPUT" --setting "APT_PUBLISH_ROLE_ARN=${APT_PUBLISH_ROLE_ARN:+set}" --setting "APT_BUCKET=${APT_BUCKET:+set}" --setting "APT_DISTRIBUTION_ID=${APT_DISTRIBUTION_ID:+set}" --setting "APT_HOSTNAME=${APT_HOSTNAME:+set}"
+      - name: Assume the apt publish role through OIDC
+        if: ${{ steps.gate.outputs.enabled == 'true' }}
+        uses: aws-actions/configure-aws-credentials@e1253824e5c10ff9df46874f81ed3ec929e19cfd # v6.3.0
+        with:
+          role-to-assume: ${{ vars.APT_PUBLISH_ROLE_ARN }}
+          aws-region: us-east-1
+          mask-aws-account-id: true
+      - name: Read the current repodata and the ETag of repomd.xml and its signature from S3 (never through the CDN, which caches the index)
+        if: ${{ steps.gate.outputs.enabled == 'true' }}
+        env:
+          APT_BUCKET: ${{ vars.APT_BUCKET }}
+        run: cargo xtask channels rpm repo read --suite testing --bucket "$APT_BUCKET" --out "$RUNNER_TEMP/rpm-current"
+      - uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
+        if: ${{ steps.gate.outputs.enabled == 'true' }}
+        with:
+          name: rpm-current-3
+          path: ${{ runner.temp }}/rpm-current
+          if-no-files-found: error
+          retention-days: 1
+
+  testing-rpm-index-3:
+    needs: [plan, testing-rpm-read-3]
+    if: ${{ needs.plan.outputs.release == 'true' && github.ref == 'refs/heads/main' }}
+    runs-on: ubuntu-24.04
+    timeout-minutes: 15
+    environment: apt-signing
+    permissions:
+      contents: read
+    outputs:
+      enabled: ${{ steps.gate.outputs.enabled }}
+      signed: ${{ steps.sign.outputs.signed }}
+    env:
+      COMMIT: ${{ needs.plan.outputs.commit }}
+      TAG: ${{ needs.plan.outputs.tag }}
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          ref: ${{ needs.plan.outputs.commit }}
+          persist-credentials: false
+      - run: rustup toolchain install
+      - name: Compile xtask
+        run: cargo xtask --help
+      - name: Gate on the signing key and on the read (a job without them does nothing and ends green)
+        id: gate
+        env:
+          READ_ENABLED: ${{ needs.testing-rpm-read-3.outputs.enabled }}
+          APT_GPG_FINGERPRINT: ${{ vars.APT_GPG_FINGERPRINT }}
+          APT_GPG_PRIVATE_KEY: ${{ secrets.APT_GPG_PRIVATE_KEY }}
+          APT_GPG_PASSPHRASE: ${{ secrets.APT_GPG_PASSPHRASE }}
+        run: cargo xtask channels gate --label testing-rpm-index-3 --output "$GITHUB_OUTPUT" --require "READ_ENABLED=$READ_ENABLED" --setting "APT_GPG_FINGERPRINT=${APT_GPG_FINGERPRINT:+set}" --setting "APT_GPG_PRIVATE_KEY=${APT_GPG_PRIVATE_KEY:+set}" --setting "APT_GPG_PASSPHRASE=${APT_GPG_PASSPHRASE:+set}"
+      - uses: actions/download-artifact@3e5f45b2cfb9172054b4087a40e8e0b5a5461e7c # v8.0.1
+        if: ${{ steps.gate.outputs.enabled == 'true' }}
+        with:
+          name: rpm-current-3
+          path: ${{ runner.temp }}/rpm-current
+      - uses: actions/download-artifact@3e5f45b2cfb9172054b4087a40e8e0b5a5461e7c # v8.0.1
+        if: ${{ steps.gate.outputs.enabled == 'true' }}
+        with:
+          name: release-assets
+          path: dist
+      - name: The files are exactly the assets of this commit, and match SHA256SUMS
+        if: ${{ steps.gate.outputs.enabled == 'true' }}
+        run: |
+          (cd dist && sha256sum --check --strict SHA256SUMS)
+          cargo xtask release check dist --commit "$COMMIT"
+      - name: Sign the .rpms with the signing subkey (the signature header only; the same bytes for the same commit), then remove the key
+        id: sign-rpms
+        if: ${{ steps.gate.outputs.enabled == 'true' }}
+        env:
+          APT_GPG_FINGERPRINT: ${{ vars.APT_GPG_FINGERPRINT }}
+          APT_GPG_PRIVATE_KEY: ${{ secrets.APT_GPG_PRIVATE_KEY }}
+          APT_GPG_PASSPHRASE: ${{ secrets.APT_GPG_PASSPHRASE }}
+        run: |
+          umask 077
+          printf '%s' "$APT_GPG_PRIVATE_KEY" > "$RUNNER_TEMP/rpm-key.asc"
+          printf '%s' "$APT_GPG_PASSPHRASE" > "$RUNNER_TEMP/rpm-passphrase"
+          cargo xtask channels rpm sign --rpms dist --out "$RUNNER_TEMP/rpm-signed" --version "${TAG#v}" --sums dist/SHA256SUMS --work "$RUNNER_TEMP/rpm-sign-packages" --fingerprint "$APT_GPG_FINGERPRINT" --key-file "$RUNNER_TEMP/rpm-key.asc" --passphrase-file "$RUNNER_TEMP/rpm-passphrase" --signed-at "$(git show --no-patch --format=%ct HEAD)"
+      - name: Merge the signed .rpms into the repodata that was read (the packages of every other product are kept)
+        if: ${{ steps.gate.outputs.enabled == 'true' }}
+        run: cargo xtask channels rpm repo index --suite testing --current "$RUNNER_TEMP/rpm-current" --out "$RUNNER_TEMP/rpm-next" --rpms "$RUNNER_TEMP/rpm-signed" --version "${TAG#v}" --date "$(date +%s)"
+      - name: Sign repomd.xml of each architecture with the signing subkey (repomd.xml.asc), then remove the key
+        id: sign
+        if: ${{ steps.gate.outputs.enabled == 'true' }}
+        env:
+          APT_GPG_FINGERPRINT: ${{ vars.APT_GPG_FINGERPRINT }}
+          APT_GPG_PRIVATE_KEY: ${{ secrets.APT_GPG_PRIVATE_KEY }}
+          APT_GPG_PASSPHRASE: ${{ secrets.APT_GPG_PASSPHRASE }}
+        run: |
+          umask 077
+          printf '%s' "$APT_GPG_PRIVATE_KEY" > "$RUNNER_TEMP/rpm-key.asc"
+          printf '%s' "$APT_GPG_PASSPHRASE" > "$RUNNER_TEMP/rpm-passphrase"
+          cargo xtask channels rpm repo sign --dir "$RUNNER_TEMP/rpm-next/testing" --work "$RUNNER_TEMP/rpm-sign" --fingerprint "$APT_GPG_FINGERPRINT" --key-file "$RUNNER_TEMP/rpm-key.asc" --passphrase-file "$RUNNER_TEMP/rpm-passphrase" --output "$GITHUB_OUTPUT"
+      - uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
+        if: ${{ steps.gate.outputs.enabled == 'true' }}
+        with:
+          name: rpm-next-3
+          path: |
+            ${{ runner.temp }}/rpm-next/testing
+            ${{ runner.temp }}/rpm-next/etags.txt
+          if-no-files-found: error
+          retention-days: 1
+      - uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
+        if: ${{ steps.gate.outputs.enabled == 'true' }}
+        with:
+          name: rpm-signed-3
+          path: ${{ runner.temp }}/rpm-signed
+          if-no-files-found: error
+          retention-days: 1
+
+  testing-rpm-write-3:
+    needs: [plan, testing-rpm-read-3, testing-rpm-index-3]
+    if: ${{ needs.plan.outputs.release == 'true' && github.ref == 'refs/heads/main' }}
+    runs-on: ubuntu-24.04
+    timeout-minutes: 15
+    environment: apt-publish
+    permissions:
+      contents: read
+      id-token: write
+    outputs:
+      conflict: ${{ steps.put.outputs.conflict }}
+    env:
+      COMMIT: ${{ needs.plan.outputs.commit }}
+      TAG: ${{ needs.plan.outputs.tag }}
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          ref: ${{ needs.plan.outputs.commit }}
+          persist-credentials: false
+      - run: rustup toolchain install
+      - name: Compile xtask
+        run: cargo xtask --help
+      - name: Gate on the settings of the apt repository and on the signed repodata (a job without them does nothing and ends green)
+        id: gate
+        env:
+          READ_ENABLED: ${{ needs.testing-rpm-read-3.outputs.enabled }}
+          INDEX_SIGNED: ${{ needs.testing-rpm-index-3.outputs.signed }}
+          APT_PUBLISH_ROLE_ARN: ${{ vars.APT_PUBLISH_ROLE_ARN }}
+          APT_BUCKET: ${{ vars.APT_BUCKET }}
+          APT_DISTRIBUTION_ID: ${{ vars.APT_DISTRIBUTION_ID }}
+          APT_HOSTNAME: ${{ vars.APT_HOSTNAME }}
+        run: cargo xtask channels gate --label testing-rpm-write-3 --output "$GITHUB_OUTPUT" --require "READ_ENABLED=$READ_ENABLED" --require "INDEX_SIGNED=$INDEX_SIGNED" --setting "APT_PUBLISH_ROLE_ARN=${APT_PUBLISH_ROLE_ARN:+set}" --setting "APT_BUCKET=${APT_BUCKET:+set}" --setting "APT_DISTRIBUTION_ID=${APT_DISTRIBUTION_ID:+set}" --setting "APT_HOSTNAME=${APT_HOSTNAME:+set}"
+      - uses: actions/download-artifact@3e5f45b2cfb9172054b4087a40e8e0b5a5461e7c # v8.0.1
+        if: ${{ steps.gate.outputs.enabled == 'true' }}
+        with:
+          name: rpm-next-3
+          path: ${{ runner.temp }}/rpm-next
+      - uses: actions/download-artifact@3e5f45b2cfb9172054b4087a40e8e0b5a5461e7c # v8.0.1
+        if: ${{ steps.gate.outputs.enabled == 'true' }}
+        with:
+          name: rpm-signed-3
+          path: ${{ runner.temp }}/rpm-signed
+      - uses: actions/download-artifact@3e5f45b2cfb9172054b4087a40e8e0b5a5461e7c # v8.0.1
+        if: ${{ steps.gate.outputs.enabled == 'true' }}
+        with:
+          name: release-assets
+          path: dist
+      - name: The files are exactly the assets of this commit, and match SHA256SUMS
+        if: ${{ steps.gate.outputs.enabled == 'true' }}
+        run: |
+          (cd dist && sha256sum --check --strict SHA256SUMS)
+          cargo xtask release check dist --commit "$COMMIT"
+      - name: The signed .rpms are the attested packages plus a signature (checked against SHA256SUMS and the digests of the signing job)
+        if: ${{ steps.gate.outputs.enabled == 'true' }}
+        run: cargo xtask channels rpm check-signed --dir "$RUNNER_TEMP/rpm-signed" --version "${TAG#v}" --sums dist/SHA256SUMS --signed-sums "$RUNNER_TEMP/rpm-signed/SHA256SUMS.signed"
+      - name: Assume the apt publish role through OIDC
+        if: ${{ steps.gate.outputs.enabled == 'true' }}
+        uses: aws-actions/configure-aws-credentials@e1253824e5c10ff9df46874f81ed3ec929e19cfd # v6.3.0
+        with:
+          role-to-assume: ${{ vars.APT_PUBLISH_ROLE_ARN }}
+          aws-region: us-east-1
+          mask-aws-account-id: true
+      - name: Upload the .rpms once each, then write the signed repodata with If-Match on the ETags that were read, then invalidate /rpm/testing/<arch>/repodata/*
+        id: put
+        if: ${{ steps.gate.outputs.enabled == 'true' }}
+        env:
+          APT_BUCKET: ${{ vars.APT_BUCKET }}
+          APT_DISTRIBUTION_ID: ${{ vars.APT_DISTRIBUTION_ID }}
+          APT_HOSTNAME: ${{ vars.APT_HOSTNAME }}
+        run: cargo xtask channels rpm repo write --suite testing --bucket "$APT_BUCKET" --distribution-id "$APT_DISTRIBUTION_ID" --hostname "$APT_HOSTNAME" --next "$RUNNER_TEMP/rpm-next" --rpms "$RUNNER_TEMP/rpm-signed" --version "${TAG#v}" --last --output "$GITHUB_OUTPUT"
+
   # INSTALL CHECKS (release time only; a failure stops the release before anything public
   # changes). check-apt: a clean Ubuntu container, pinned by digest, on a hosted runner of each
   # architecture, adds packages.komira.ai with the published keyring (deb822, Signed-By) and the
@@ -1042,6 +1713,46 @@ jobs:
         env:
           ARCH: ${{ matrix.arch }}
         run: docker run --rm --volume "$PWD/target/debug/xtask:/usr/local/bin/xtask:ro" ubuntu@sha256:fe81560990fae86dc4743202b2cb4d3df98d0bcf949173cecef15ce1127ef852 xtask channels check-apt --arch "$ARCH" --version "${TAG#v}" --commit "$COMMIT"
+
+  # check-rpm: the release installed with dnf from the suite testing, in a clean container of each
+  # of three distributions (the current Fedora, AlmaLinux 9 and Amazon Linux 2023, each pinned by
+  # digest), on a hosted runner of each architecture. The container is the system that is checked
+  # and the verb runs on the runner (`docker exec`): the runner's binary is built against a newer C
+  # library than these distributions have.
+  check-rpm:
+    needs: [plan, testing-rpm-write, testing-rpm-write-2, testing-rpm-write-3]
+    if: ${{ !cancelled() && !failure() && needs.plan.outputs.release == 'true' && github.ref == 'refs/heads/main' && (needs.testing-rpm-write.outputs.conflict == 'false' || needs.testing-rpm-write-2.outputs.conflict == 'false' || needs.testing-rpm-write-3.outputs.conflict == 'false') }}
+    strategy:
+      fail-fast: false
+      matrix:
+        arch: [x86_64, aarch64]
+        image:
+          - fedora@sha256:a7d72ba2745b100a3351087472e5ee7b2450af7cf331e7673007e3817612839c
+          - almalinux@sha256:245f8aab832fe800aa42bdab5fad75ebbd8e0b4c9f24820a83c638b177857ae2
+          - amazonlinux@sha256:3ccfbe800f864982b0a4e124a614b2382518cbd04b3c1cd35202bd46f392675b
+    runs-on: ${{ matrix.arch == 'aarch64' && 'ubuntu-24.04-arm' || 'ubuntu-24.04' }}
+    timeout-minutes: 30
+    permissions:
+      contents: read
+    env:
+      COMMIT: ${{ needs.plan.outputs.commit }}
+      TAG: ${{ needs.plan.outputs.tag }}
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          ref: ${{ needs.plan.outputs.commit }}
+          persist-credentials: false
+      - run: rustup toolchain install
+      - name: Compile xtask
+        run: cargo xtask --help
+      - name: Start a clean container of the image
+        env:
+          IMAGE: ${{ matrix.image }}
+        run: docker run --detach --name check-rpm "$IMAGE" sleep infinity
+      - name: Install tierstore from the suite testing in it with dnf, and hold the installed system to what the package promises
+        env:
+          ARCH: ${{ matrix.arch }}
+        run: cargo xtask channels check-rpm --container check-rpm --arch "$ARCH" --version "${TAG#v}" --commit "$COMMIT"
 
   # check-brew: the rendered formula installed with Homebrew from a local tap (brew refuses a
   # bare path), on the hosted macos-15 runner, and the binary it installed says the release.
@@ -1235,7 +1946,7 @@ jobs:
   # skipped with a notice and does not hold the release. Re-running the failed jobs of a run
   # resumes: every write is write-once or idempotent and this job reads the results again.
   promote-check:
-    needs: [plan, testing-upload, testing-apt-write, testing-apt-write-2, testing-apt-write-3, check-apt, check-brew, check-install-sh, farm-check, farm, soak]
+    needs: [plan, testing-upload, testing-apt-write, testing-apt-write-2, testing-apt-write-3, testing-rpm-write, testing-rpm-write-2, testing-rpm-write-3, check-apt, check-rpm, check-brew, check-install-sh, farm-check, farm, soak]
     if: ${{ !cancelled() && !failure() && needs.plan.outputs.release == 'true' && github.ref == 'refs/heads/main' }}
     runs-on: ubuntu-24.04
     timeout-minutes: 15
@@ -1261,14 +1972,18 @@ jobs:
           TESTING_APT_WRITE: ${{ needs.testing-apt-write.result }}
           TESTING_APT_WRITE_2: ${{ needs.testing-apt-write-2.result }}
           TESTING_APT_WRITE_3: ${{ needs.testing-apt-write-3.result }}
+          TESTING_RPM_WRITE: ${{ needs.testing-rpm-write.result }}
+          TESTING_RPM_WRITE_2: ${{ needs.testing-rpm-write-2.result }}
+          TESTING_RPM_WRITE_3: ${{ needs.testing-rpm-write-3.result }}
           CHECK_APT: ${{ needs.check-apt.result }}
+          CHECK_RPM: ${{ needs.check-rpm.result }}
           CHECK_BREW: ${{ needs.check-brew.result }}
           CHECK_INSTALL_SH: ${{ needs.check-install-sh.result }}
           FARM_CHECK: ${{ needs.farm-check.result }}
           FARM: ${{ needs.farm.result }}
           SOAK: ${{ needs.soak.result }}
           FARM_ENABLED: ${{ needs.farm-check.outputs.enabled }}
-        run: cargo xtask channels decide --result "testing-upload=$TESTING_UPLOAD" --result "testing-apt-write=$TESTING_APT_WRITE" --result "testing-apt-write-2=$TESTING_APT_WRITE_2" --result "testing-apt-write-3=$TESTING_APT_WRITE_3" --result "check-apt=$CHECK_APT" --result "check-brew=$CHECK_BREW" --result "check-install-sh=$CHECK_INSTALL_SH" --result "farm-check=$FARM_CHECK" --result "farm=$FARM" --result "soak=$SOAK" --farm-enabled "$FARM_ENABLED" --output "$GITHUB_OUTPUT"
+        run: cargo xtask channels decide --result "testing-upload=$TESTING_UPLOAD" --result "testing-apt-write=$TESTING_APT_WRITE" --result "testing-apt-write-2=$TESTING_APT_WRITE_2" --result "testing-apt-write-3=$TESTING_APT_WRITE_3" --result "testing-rpm-write=$TESTING_RPM_WRITE" --result "testing-rpm-write-2=$TESTING_RPM_WRITE_2" --result "testing-rpm-write-3=$TESTING_RPM_WRITE_3" --result "check-apt=$CHECK_APT" --result "check-rpm=$CHECK_RPM" --result "check-brew=$CHECK_BREW" --result "check-install-sh=$CHECK_INSTALL_SH" --result "farm-check=$FARM_CHECK" --result "farm=$FARM" --result "soak=$SOAK" --farm-enabled "$FARM_ENABLED" --output "$GITHUB_OUTPUT"
 
   # promote-latest: releases/latest.json, the pointer the install script and users follow, replaced
   # by this release after the bucket is read back and held to SHA256SUMS (cargo xtask channels
@@ -1918,3 +2633,575 @@ jobs:
           APT_DISTRIBUTION_ID: ${{ vars.APT_DISTRIBUTION_ID }}
           APT_HOSTNAME: ${{ vars.APT_HOSTNAME }}
         run: cargo xtask channels apt write --suite stable --bucket "$APT_BUCKET" --distribution-id "$APT_DISTRIBUTION_ID" --hostname "$APT_HOSTNAME" --next "$RUNNER_TEMP/apt-next" --no-pool --last --output "$GITHUB_OUTPUT"
+
+  # The rpm tree of the promotion: the entries of the release that the repodata of testing lists
+  # are listed in the repodata of stable (docs/design/distribution.md, section 5.2). Nothing is
+  # uploaded: the packages are in the pool. The index job signs the packages again (the same key and
+  # the same time give the same bytes) and holds the entries of testing to those digests and to
+  # SHA256SUMS. Read, index and write as for testing, and up to three attempts.
+
+  stable-rpm-read:
+    needs: [plan, promote-check, testing-rpm-read]
+    if: ${{ needs.plan.outputs.release == 'true' && github.ref == 'refs/heads/main' && needs.promote-check.outputs.promote == 'true' }}
+    runs-on: ubuntu-24.04
+    timeout-minutes: 15
+    environment: apt-publish
+    permissions:
+      contents: read
+      id-token: write
+    outputs:
+      enabled: ${{ steps.gate.outputs.enabled }}
+    env:
+      COMMIT: ${{ needs.plan.outputs.commit }}
+      TAG: ${{ needs.plan.outputs.tag }}
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          ref: ${{ needs.plan.outputs.commit }}
+          persist-credentials: false
+      - run: rustup toolchain install
+      - name: Compile xtask
+        run: cargo xtask --help
+      - name: Gate on the settings of the apt repository (a job without them does nothing and ends green)
+        id: gate
+        env:
+          TESTING_ENABLED: ${{ needs.testing-rpm-read.outputs.enabled }}
+          APT_PUBLISH_ROLE_ARN: ${{ vars.APT_PUBLISH_ROLE_ARN }}
+          APT_BUCKET: ${{ vars.APT_BUCKET }}
+          APT_DISTRIBUTION_ID: ${{ vars.APT_DISTRIBUTION_ID }}
+          APT_HOSTNAME: ${{ vars.APT_HOSTNAME }}
+        run: cargo xtask channels gate --label stable-rpm-read --output "$GITHUB_OUTPUT" --require "TESTING_ENABLED=$TESTING_ENABLED" --setting "APT_PUBLISH_ROLE_ARN=${APT_PUBLISH_ROLE_ARN:+set}" --setting "APT_BUCKET=${APT_BUCKET:+set}" --setting "APT_DISTRIBUTION_ID=${APT_DISTRIBUTION_ID:+set}" --setting "APT_HOSTNAME=${APT_HOSTNAME:+set}"
+      - name: Assume the apt publish role through OIDC
+        if: ${{ steps.gate.outputs.enabled == 'true' }}
+        uses: aws-actions/configure-aws-credentials@e1253824e5c10ff9df46874f81ed3ec929e19cfd # v6.3.0
+        with:
+          role-to-assume: ${{ vars.APT_PUBLISH_ROLE_ARN }}
+          aws-region: us-east-1
+          mask-aws-account-id: true
+      - name: Read the repodata of testing (what is promoted) and of stable (what it is merged into), with the ETag of each replaced object, from S3
+        if: ${{ steps.gate.outputs.enabled == 'true' }}
+        env:
+          APT_BUCKET: ${{ vars.APT_BUCKET }}
+        run: |
+          cargo xtask channels rpm repo read --suite testing --bucket "$APT_BUCKET" --out "$RUNNER_TEMP/rpm-read/testing"
+          cargo xtask channels rpm repo read --suite stable --bucket "$APT_BUCKET" --out "$RUNNER_TEMP/rpm-read/stable"
+      - uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
+        if: ${{ steps.gate.outputs.enabled == 'true' }}
+        with:
+          name: rpm-read
+          path: ${{ runner.temp }}/rpm-read
+          if-no-files-found: error
+          retention-days: 1
+
+  stable-rpm-index:
+    needs: [plan, promote-check, stable-rpm-read, testing-rpm-index]
+    if: ${{ needs.plan.outputs.release == 'true' && github.ref == 'refs/heads/main' && needs.promote-check.outputs.promote == 'true' }}
+    runs-on: ubuntu-24.04
+    timeout-minutes: 15
+    environment: apt-signing
+    permissions:
+      contents: read
+    outputs:
+      enabled: ${{ steps.gate.outputs.enabled }}
+      signed: ${{ steps.sign.outputs.signed }}
+    env:
+      COMMIT: ${{ needs.plan.outputs.commit }}
+      TAG: ${{ needs.plan.outputs.tag }}
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          ref: ${{ needs.plan.outputs.commit }}
+          persist-credentials: false
+      - run: rustup toolchain install
+      - name: Compile xtask
+        run: cargo xtask --help
+      - name: Gate on the signing key and on the read (a job without them does nothing and ends green)
+        id: gate
+        env:
+          READ_ENABLED: ${{ needs.stable-rpm-read.outputs.enabled }}
+          APT_GPG_FINGERPRINT: ${{ vars.APT_GPG_FINGERPRINT }}
+          APT_GPG_PRIVATE_KEY: ${{ secrets.APT_GPG_PRIVATE_KEY }}
+          APT_GPG_PASSPHRASE: ${{ secrets.APT_GPG_PASSPHRASE }}
+        run: cargo xtask channels gate --label stable-rpm-index --output "$GITHUB_OUTPUT" --require "READ_ENABLED=$READ_ENABLED" --setting "APT_GPG_FINGERPRINT=${APT_GPG_FINGERPRINT:+set}" --setting "APT_GPG_PRIVATE_KEY=${APT_GPG_PRIVATE_KEY:+set}" --setting "APT_GPG_PASSPHRASE=${APT_GPG_PASSPHRASE:+set}"
+      - uses: actions/download-artifact@3e5f45b2cfb9172054b4087a40e8e0b5a5461e7c # v8.0.1
+        if: ${{ steps.gate.outputs.enabled == 'true' }}
+        with:
+          name: rpm-read
+          path: ${{ runner.temp }}/rpm-read
+      - uses: actions/download-artifact@3e5f45b2cfb9172054b4087a40e8e0b5a5461e7c # v8.0.1
+        if: ${{ steps.gate.outputs.enabled == 'true' }}
+        with:
+          name: release-assets
+          path: dist
+      - name: The files are exactly the assets of this commit, and match SHA256SUMS
+        if: ${{ steps.gate.outputs.enabled == 'true' }}
+        run: |
+          (cd dist && sha256sum --check --strict SHA256SUMS)
+          cargo xtask release check dist --commit "$COMMIT"
+      - name: Sign the .rpms with the signing subkey (the signature header only; the same bytes for the same commit), then remove the key
+        id: sign-rpms
+        if: ${{ steps.gate.outputs.enabled == 'true' }}
+        env:
+          APT_GPG_FINGERPRINT: ${{ vars.APT_GPG_FINGERPRINT }}
+          APT_GPG_PRIVATE_KEY: ${{ secrets.APT_GPG_PRIVATE_KEY }}
+          APT_GPG_PASSPHRASE: ${{ secrets.APT_GPG_PASSPHRASE }}
+        run: |
+          umask 077
+          printf '%s' "$APT_GPG_PRIVATE_KEY" > "$RUNNER_TEMP/rpm-key.asc"
+          printf '%s' "$APT_GPG_PASSPHRASE" > "$RUNNER_TEMP/rpm-passphrase"
+          cargo xtask channels rpm sign --rpms dist --out "$RUNNER_TEMP/rpm-signed" --version "${TAG#v}" --sums dist/SHA256SUMS --work "$RUNNER_TEMP/rpm-sign-packages" --fingerprint "$APT_GPG_FINGERPRINT" --key-file "$RUNNER_TEMP/rpm-key.asc" --passphrase-file "$RUNNER_TEMP/rpm-passphrase" --signed-at "$(git show --no-patch --format=%ct HEAD)"
+      - name: Promote the entries of this release that testing lists into the repodata of stable (held to the digests of SHA256SUMS and of the signed packages; the packages of every other product are kept)
+        if: ${{ steps.gate.outputs.enabled == 'true' }}
+        run: cargo xtask channels rpm promote --testing "$RUNNER_TEMP/rpm-read/testing" --stable "$RUNNER_TEMP/rpm-read/stable" --out "$RUNNER_TEMP/rpm-next" --version "${TAG#v}" --sums dist/SHA256SUMS --signed-sums "$RUNNER_TEMP/rpm-signed/SHA256SUMS.signed" --date "$(date +%s)"
+      - name: Sign repomd.xml of each architecture with the signing subkey (repomd.xml.asc), then remove the key
+        id: sign
+        if: ${{ steps.gate.outputs.enabled == 'true' }}
+        env:
+          APT_GPG_FINGERPRINT: ${{ vars.APT_GPG_FINGERPRINT }}
+          APT_GPG_PRIVATE_KEY: ${{ secrets.APT_GPG_PRIVATE_KEY }}
+          APT_GPG_PASSPHRASE: ${{ secrets.APT_GPG_PASSPHRASE }}
+        run: |
+          umask 077
+          printf '%s' "$APT_GPG_PRIVATE_KEY" > "$RUNNER_TEMP/rpm-key.asc"
+          printf '%s' "$APT_GPG_PASSPHRASE" > "$RUNNER_TEMP/rpm-passphrase"
+          cargo xtask channels rpm repo sign --dir "$RUNNER_TEMP/rpm-next/stable" --work "$RUNNER_TEMP/rpm-sign" --fingerprint "$APT_GPG_FINGERPRINT" --key-file "$RUNNER_TEMP/rpm-key.asc" --passphrase-file "$RUNNER_TEMP/rpm-passphrase" --output "$GITHUB_OUTPUT"
+      - uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
+        if: ${{ steps.gate.outputs.enabled == 'true' }}
+        with:
+          name: rpm-promoted
+          path: |
+            ${{ runner.temp }}/rpm-next/stable
+            ${{ runner.temp }}/rpm-next/etags.txt
+          if-no-files-found: error
+          retention-days: 1
+
+  stable-rpm-write:
+    needs: [plan, promote-check, stable-rpm-read, stable-rpm-index, testing-rpm-write]
+    if: ${{ needs.plan.outputs.release == 'true' && github.ref == 'refs/heads/main' && needs.promote-check.outputs.promote == 'true' }}
+    runs-on: ubuntu-24.04
+    timeout-minutes: 15
+    environment: apt-publish
+    permissions:
+      contents: read
+      id-token: write
+    outputs:
+      conflict: ${{ steps.put.outputs.conflict }}
+    env:
+      COMMIT: ${{ needs.plan.outputs.commit }}
+      TAG: ${{ needs.plan.outputs.tag }}
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          ref: ${{ needs.plan.outputs.commit }}
+          persist-credentials: false
+      - run: rustup toolchain install
+      - name: Compile xtask
+        run: cargo xtask --help
+      - name: Gate on the settings of the apt repository and on the signed repodata (a job without them does nothing and ends green)
+        id: gate
+        env:
+          READ_ENABLED: ${{ needs.stable-rpm-read.outputs.enabled }}
+          INDEX_SIGNED: ${{ needs.stable-rpm-index.outputs.signed }}
+          APT_PUBLISH_ROLE_ARN: ${{ vars.APT_PUBLISH_ROLE_ARN }}
+          APT_BUCKET: ${{ vars.APT_BUCKET }}
+          APT_DISTRIBUTION_ID: ${{ vars.APT_DISTRIBUTION_ID }}
+          APT_HOSTNAME: ${{ vars.APT_HOSTNAME }}
+        run: cargo xtask channels gate --label stable-rpm-write --output "$GITHUB_OUTPUT" --require "READ_ENABLED=$READ_ENABLED" --require "INDEX_SIGNED=$INDEX_SIGNED" --setting "APT_PUBLISH_ROLE_ARN=${APT_PUBLISH_ROLE_ARN:+set}" --setting "APT_BUCKET=${APT_BUCKET:+set}" --setting "APT_DISTRIBUTION_ID=${APT_DISTRIBUTION_ID:+set}" --setting "APT_HOSTNAME=${APT_HOSTNAME:+set}"
+      - uses: actions/download-artifact@3e5f45b2cfb9172054b4087a40e8e0b5a5461e7c # v8.0.1
+        if: ${{ steps.gate.outputs.enabled == 'true' }}
+        with:
+          name: rpm-promoted
+          path: ${{ runner.temp }}/rpm-next
+      - name: Assume the apt publish role through OIDC
+        if: ${{ steps.gate.outputs.enabled == 'true' }}
+        uses: aws-actions/configure-aws-credentials@e1253824e5c10ff9df46874f81ed3ec929e19cfd # v6.3.0
+        with:
+          role-to-assume: ${{ vars.APT_PUBLISH_ROLE_ARN }}
+          aws-region: us-east-1
+          mask-aws-account-id: true
+      - name: Write the signed repodata of stable with If-Match on the ETags that were read (the packages are in the pool already), then invalidate /rpm/stable/<arch>/repodata/*
+        id: put
+        if: ${{ steps.gate.outputs.enabled == 'true' }}
+        env:
+          APT_BUCKET: ${{ vars.APT_BUCKET }}
+          APT_DISTRIBUTION_ID: ${{ vars.APT_DISTRIBUTION_ID }}
+          APT_HOSTNAME: ${{ vars.APT_HOSTNAME }}
+        run: cargo xtask channels rpm repo write --suite stable --bucket "$APT_BUCKET" --distribution-id "$APT_DISTRIBUTION_ID" --hostname "$APT_HOSTNAME" --next "$RUNNER_TEMP/rpm-next" --no-pool --output "$GITHUB_OUTPUT"
+
+  # Attempt 2: the write of attempt 1 lost the race for repomd.xml.
+
+  stable-rpm-read-2:
+    needs: [plan, stable-rpm-write]
+    if: ${{ needs.plan.outputs.release == 'true' && github.ref == 'refs/heads/main' && needs.stable-rpm-write.outputs.conflict == 'true' }}
+    runs-on: ubuntu-24.04
+    timeout-minutes: 15
+    environment: apt-publish
+    permissions:
+      contents: read
+      id-token: write
+    outputs:
+      enabled: ${{ steps.gate.outputs.enabled }}
+    env:
+      COMMIT: ${{ needs.plan.outputs.commit }}
+      TAG: ${{ needs.plan.outputs.tag }}
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          ref: ${{ needs.plan.outputs.commit }}
+          persist-credentials: false
+      - run: rustup toolchain install
+      - name: Compile xtask
+        run: cargo xtask --help
+      - name: Gate on the settings of the apt repository (a job without them does nothing and ends green)
+        id: gate
+        env:
+          APT_PUBLISH_ROLE_ARN: ${{ vars.APT_PUBLISH_ROLE_ARN }}
+          APT_BUCKET: ${{ vars.APT_BUCKET }}
+          APT_DISTRIBUTION_ID: ${{ vars.APT_DISTRIBUTION_ID }}
+          APT_HOSTNAME: ${{ vars.APT_HOSTNAME }}
+        run: cargo xtask channels gate --label stable-rpm-read-2 --output "$GITHUB_OUTPUT" --setting "APT_PUBLISH_ROLE_ARN=${APT_PUBLISH_ROLE_ARN:+set}" --setting "APT_BUCKET=${APT_BUCKET:+set}" --setting "APT_DISTRIBUTION_ID=${APT_DISTRIBUTION_ID:+set}" --setting "APT_HOSTNAME=${APT_HOSTNAME:+set}"
+      - name: Assume the apt publish role through OIDC
+        if: ${{ steps.gate.outputs.enabled == 'true' }}
+        uses: aws-actions/configure-aws-credentials@e1253824e5c10ff9df46874f81ed3ec929e19cfd # v6.3.0
+        with:
+          role-to-assume: ${{ vars.APT_PUBLISH_ROLE_ARN }}
+          aws-region: us-east-1
+          mask-aws-account-id: true
+      - name: Read the repodata of testing (what is promoted) and of stable (what it is merged into), with the ETag of each replaced object, from S3
+        if: ${{ steps.gate.outputs.enabled == 'true' }}
+        env:
+          APT_BUCKET: ${{ vars.APT_BUCKET }}
+        run: |
+          cargo xtask channels rpm repo read --suite testing --bucket "$APT_BUCKET" --out "$RUNNER_TEMP/rpm-read/testing"
+          cargo xtask channels rpm repo read --suite stable --bucket "$APT_BUCKET" --out "$RUNNER_TEMP/rpm-read/stable"
+      - uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
+        if: ${{ steps.gate.outputs.enabled == 'true' }}
+        with:
+          name: rpm-read-2
+          path: ${{ runner.temp }}/rpm-read
+          if-no-files-found: error
+          retention-days: 1
+
+  stable-rpm-index-2:
+    needs: [plan, stable-rpm-read-2]
+    if: ${{ needs.plan.outputs.release == 'true' && github.ref == 'refs/heads/main' }}
+    runs-on: ubuntu-24.04
+    timeout-minutes: 15
+    environment: apt-signing
+    permissions:
+      contents: read
+    outputs:
+      enabled: ${{ steps.gate.outputs.enabled }}
+      signed: ${{ steps.sign.outputs.signed }}
+    env:
+      COMMIT: ${{ needs.plan.outputs.commit }}
+      TAG: ${{ needs.plan.outputs.tag }}
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          ref: ${{ needs.plan.outputs.commit }}
+          persist-credentials: false
+      - run: rustup toolchain install
+      - name: Compile xtask
+        run: cargo xtask --help
+      - name: Gate on the signing key and on the read (a job without them does nothing and ends green)
+        id: gate
+        env:
+          READ_ENABLED: ${{ needs.stable-rpm-read-2.outputs.enabled }}
+          APT_GPG_FINGERPRINT: ${{ vars.APT_GPG_FINGERPRINT }}
+          APT_GPG_PRIVATE_KEY: ${{ secrets.APT_GPG_PRIVATE_KEY }}
+          APT_GPG_PASSPHRASE: ${{ secrets.APT_GPG_PASSPHRASE }}
+        run: cargo xtask channels gate --label stable-rpm-index-2 --output "$GITHUB_OUTPUT" --require "READ_ENABLED=$READ_ENABLED" --setting "APT_GPG_FINGERPRINT=${APT_GPG_FINGERPRINT:+set}" --setting "APT_GPG_PRIVATE_KEY=${APT_GPG_PRIVATE_KEY:+set}" --setting "APT_GPG_PASSPHRASE=${APT_GPG_PASSPHRASE:+set}"
+      - uses: actions/download-artifact@3e5f45b2cfb9172054b4087a40e8e0b5a5461e7c # v8.0.1
+        if: ${{ steps.gate.outputs.enabled == 'true' }}
+        with:
+          name: rpm-read-2
+          path: ${{ runner.temp }}/rpm-read
+      - uses: actions/download-artifact@3e5f45b2cfb9172054b4087a40e8e0b5a5461e7c # v8.0.1
+        if: ${{ steps.gate.outputs.enabled == 'true' }}
+        with:
+          name: release-assets
+          path: dist
+      - name: The files are exactly the assets of this commit, and match SHA256SUMS
+        if: ${{ steps.gate.outputs.enabled == 'true' }}
+        run: |
+          (cd dist && sha256sum --check --strict SHA256SUMS)
+          cargo xtask release check dist --commit "$COMMIT"
+      - name: Sign the .rpms with the signing subkey (the signature header only; the same bytes for the same commit), then remove the key
+        id: sign-rpms
+        if: ${{ steps.gate.outputs.enabled == 'true' }}
+        env:
+          APT_GPG_FINGERPRINT: ${{ vars.APT_GPG_FINGERPRINT }}
+          APT_GPG_PRIVATE_KEY: ${{ secrets.APT_GPG_PRIVATE_KEY }}
+          APT_GPG_PASSPHRASE: ${{ secrets.APT_GPG_PASSPHRASE }}
+        run: |
+          umask 077
+          printf '%s' "$APT_GPG_PRIVATE_KEY" > "$RUNNER_TEMP/rpm-key.asc"
+          printf '%s' "$APT_GPG_PASSPHRASE" > "$RUNNER_TEMP/rpm-passphrase"
+          cargo xtask channels rpm sign --rpms dist --out "$RUNNER_TEMP/rpm-signed" --version "${TAG#v}" --sums dist/SHA256SUMS --work "$RUNNER_TEMP/rpm-sign-packages" --fingerprint "$APT_GPG_FINGERPRINT" --key-file "$RUNNER_TEMP/rpm-key.asc" --passphrase-file "$RUNNER_TEMP/rpm-passphrase" --signed-at "$(git show --no-patch --format=%ct HEAD)"
+      - name: Promote the entries of this release that testing lists into the repodata of stable (held to the digests of SHA256SUMS and of the signed packages; the packages of every other product are kept)
+        if: ${{ steps.gate.outputs.enabled == 'true' }}
+        run: cargo xtask channels rpm promote --testing "$RUNNER_TEMP/rpm-read/testing" --stable "$RUNNER_TEMP/rpm-read/stable" --out "$RUNNER_TEMP/rpm-next" --version "${TAG#v}" --sums dist/SHA256SUMS --signed-sums "$RUNNER_TEMP/rpm-signed/SHA256SUMS.signed" --date "$(date +%s)"
+      - name: Sign repomd.xml of each architecture with the signing subkey (repomd.xml.asc), then remove the key
+        id: sign
+        if: ${{ steps.gate.outputs.enabled == 'true' }}
+        env:
+          APT_GPG_FINGERPRINT: ${{ vars.APT_GPG_FINGERPRINT }}
+          APT_GPG_PRIVATE_KEY: ${{ secrets.APT_GPG_PRIVATE_KEY }}
+          APT_GPG_PASSPHRASE: ${{ secrets.APT_GPG_PASSPHRASE }}
+        run: |
+          umask 077
+          printf '%s' "$APT_GPG_PRIVATE_KEY" > "$RUNNER_TEMP/rpm-key.asc"
+          printf '%s' "$APT_GPG_PASSPHRASE" > "$RUNNER_TEMP/rpm-passphrase"
+          cargo xtask channels rpm repo sign --dir "$RUNNER_TEMP/rpm-next/stable" --work "$RUNNER_TEMP/rpm-sign" --fingerprint "$APT_GPG_FINGERPRINT" --key-file "$RUNNER_TEMP/rpm-key.asc" --passphrase-file "$RUNNER_TEMP/rpm-passphrase" --output "$GITHUB_OUTPUT"
+      - uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
+        if: ${{ steps.gate.outputs.enabled == 'true' }}
+        with:
+          name: rpm-promoted-2
+          path: |
+            ${{ runner.temp }}/rpm-next/stable
+            ${{ runner.temp }}/rpm-next/etags.txt
+          if-no-files-found: error
+          retention-days: 1
+
+  stable-rpm-write-2:
+    needs: [plan, stable-rpm-read-2, stable-rpm-index-2]
+    if: ${{ needs.plan.outputs.release == 'true' && github.ref == 'refs/heads/main' }}
+    runs-on: ubuntu-24.04
+    timeout-minutes: 15
+    environment: apt-publish
+    permissions:
+      contents: read
+      id-token: write
+    outputs:
+      conflict: ${{ steps.put.outputs.conflict }}
+    env:
+      COMMIT: ${{ needs.plan.outputs.commit }}
+      TAG: ${{ needs.plan.outputs.tag }}
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          ref: ${{ needs.plan.outputs.commit }}
+          persist-credentials: false
+      - run: rustup toolchain install
+      - name: Compile xtask
+        run: cargo xtask --help
+      - name: Gate on the settings of the apt repository and on the signed repodata (a job without them does nothing and ends green)
+        id: gate
+        env:
+          READ_ENABLED: ${{ needs.stable-rpm-read-2.outputs.enabled }}
+          INDEX_SIGNED: ${{ needs.stable-rpm-index-2.outputs.signed }}
+          APT_PUBLISH_ROLE_ARN: ${{ vars.APT_PUBLISH_ROLE_ARN }}
+          APT_BUCKET: ${{ vars.APT_BUCKET }}
+          APT_DISTRIBUTION_ID: ${{ vars.APT_DISTRIBUTION_ID }}
+          APT_HOSTNAME: ${{ vars.APT_HOSTNAME }}
+        run: cargo xtask channels gate --label stable-rpm-write-2 --output "$GITHUB_OUTPUT" --require "READ_ENABLED=$READ_ENABLED" --require "INDEX_SIGNED=$INDEX_SIGNED" --setting "APT_PUBLISH_ROLE_ARN=${APT_PUBLISH_ROLE_ARN:+set}" --setting "APT_BUCKET=${APT_BUCKET:+set}" --setting "APT_DISTRIBUTION_ID=${APT_DISTRIBUTION_ID:+set}" --setting "APT_HOSTNAME=${APT_HOSTNAME:+set}"
+      - uses: actions/download-artifact@3e5f45b2cfb9172054b4087a40e8e0b5a5461e7c # v8.0.1
+        if: ${{ steps.gate.outputs.enabled == 'true' }}
+        with:
+          name: rpm-promoted-2
+          path: ${{ runner.temp }}/rpm-next
+      - name: Assume the apt publish role through OIDC
+        if: ${{ steps.gate.outputs.enabled == 'true' }}
+        uses: aws-actions/configure-aws-credentials@e1253824e5c10ff9df46874f81ed3ec929e19cfd # v6.3.0
+        with:
+          role-to-assume: ${{ vars.APT_PUBLISH_ROLE_ARN }}
+          aws-region: us-east-1
+          mask-aws-account-id: true
+      - name: Write the signed repodata of stable with If-Match on the ETags that were read (the packages are in the pool already), then invalidate /rpm/stable/<arch>/repodata/*
+        id: put
+        if: ${{ steps.gate.outputs.enabled == 'true' }}
+        env:
+          APT_BUCKET: ${{ vars.APT_BUCKET }}
+          APT_DISTRIBUTION_ID: ${{ vars.APT_DISTRIBUTION_ID }}
+          APT_HOSTNAME: ${{ vars.APT_HOSTNAME }}
+        run: cargo xtask channels rpm repo write --suite stable --bucket "$APT_BUCKET" --distribution-id "$APT_DISTRIBUTION_ID" --hostname "$APT_HOSTNAME" --next "$RUNNER_TEMP/rpm-next" --no-pool --output "$GITHUB_OUTPUT"
+
+  # Attempt 3: the write of attempt 2 lost the race for repomd.xml.
+
+  stable-rpm-read-3:
+    needs: [plan, stable-rpm-write-2]
+    if: ${{ needs.plan.outputs.release == 'true' && github.ref == 'refs/heads/main' && needs.stable-rpm-write-2.outputs.conflict == 'true' }}
+    runs-on: ubuntu-24.04
+    timeout-minutes: 15
+    environment: apt-publish
+    permissions:
+      contents: read
+      id-token: write
+    outputs:
+      enabled: ${{ steps.gate.outputs.enabled }}
+    env:
+      COMMIT: ${{ needs.plan.outputs.commit }}
+      TAG: ${{ needs.plan.outputs.tag }}
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          ref: ${{ needs.plan.outputs.commit }}
+          persist-credentials: false
+      - run: rustup toolchain install
+      - name: Compile xtask
+        run: cargo xtask --help
+      - name: Gate on the settings of the apt repository (a job without them does nothing and ends green)
+        id: gate
+        env:
+          APT_PUBLISH_ROLE_ARN: ${{ vars.APT_PUBLISH_ROLE_ARN }}
+          APT_BUCKET: ${{ vars.APT_BUCKET }}
+          APT_DISTRIBUTION_ID: ${{ vars.APT_DISTRIBUTION_ID }}
+          APT_HOSTNAME: ${{ vars.APT_HOSTNAME }}
+        run: cargo xtask channels gate --label stable-rpm-read-3 --output "$GITHUB_OUTPUT" --setting "APT_PUBLISH_ROLE_ARN=${APT_PUBLISH_ROLE_ARN:+set}" --setting "APT_BUCKET=${APT_BUCKET:+set}" --setting "APT_DISTRIBUTION_ID=${APT_DISTRIBUTION_ID:+set}" --setting "APT_HOSTNAME=${APT_HOSTNAME:+set}"
+      - name: Assume the apt publish role through OIDC
+        if: ${{ steps.gate.outputs.enabled == 'true' }}
+        uses: aws-actions/configure-aws-credentials@e1253824e5c10ff9df46874f81ed3ec929e19cfd # v6.3.0
+        with:
+          role-to-assume: ${{ vars.APT_PUBLISH_ROLE_ARN }}
+          aws-region: us-east-1
+          mask-aws-account-id: true
+      - name: Read the repodata of testing (what is promoted) and of stable (what it is merged into), with the ETag of each replaced object, from S3
+        if: ${{ steps.gate.outputs.enabled == 'true' }}
+        env:
+          APT_BUCKET: ${{ vars.APT_BUCKET }}
+        run: |
+          cargo xtask channels rpm repo read --suite testing --bucket "$APT_BUCKET" --out "$RUNNER_TEMP/rpm-read/testing"
+          cargo xtask channels rpm repo read --suite stable --bucket "$APT_BUCKET" --out "$RUNNER_TEMP/rpm-read/stable"
+      - uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
+        if: ${{ steps.gate.outputs.enabled == 'true' }}
+        with:
+          name: rpm-read-3
+          path: ${{ runner.temp }}/rpm-read
+          if-no-files-found: error
+          retention-days: 1
+
+  stable-rpm-index-3:
+    needs: [plan, stable-rpm-read-3]
+    if: ${{ needs.plan.outputs.release == 'true' && github.ref == 'refs/heads/main' }}
+    runs-on: ubuntu-24.04
+    timeout-minutes: 15
+    environment: apt-signing
+    permissions:
+      contents: read
+    outputs:
+      enabled: ${{ steps.gate.outputs.enabled }}
+      signed: ${{ steps.sign.outputs.signed }}
+    env:
+      COMMIT: ${{ needs.plan.outputs.commit }}
+      TAG: ${{ needs.plan.outputs.tag }}
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          ref: ${{ needs.plan.outputs.commit }}
+          persist-credentials: false
+      - run: rustup toolchain install
+      - name: Compile xtask
+        run: cargo xtask --help
+      - name: Gate on the signing key and on the read (a job without them does nothing and ends green)
+        id: gate
+        env:
+          READ_ENABLED: ${{ needs.stable-rpm-read-3.outputs.enabled }}
+          APT_GPG_FINGERPRINT: ${{ vars.APT_GPG_FINGERPRINT }}
+          APT_GPG_PRIVATE_KEY: ${{ secrets.APT_GPG_PRIVATE_KEY }}
+          APT_GPG_PASSPHRASE: ${{ secrets.APT_GPG_PASSPHRASE }}
+        run: cargo xtask channels gate --label stable-rpm-index-3 --output "$GITHUB_OUTPUT" --require "READ_ENABLED=$READ_ENABLED" --setting "APT_GPG_FINGERPRINT=${APT_GPG_FINGERPRINT:+set}" --setting "APT_GPG_PRIVATE_KEY=${APT_GPG_PRIVATE_KEY:+set}" --setting "APT_GPG_PASSPHRASE=${APT_GPG_PASSPHRASE:+set}"
+      - uses: actions/download-artifact@3e5f45b2cfb9172054b4087a40e8e0b5a5461e7c # v8.0.1
+        if: ${{ steps.gate.outputs.enabled == 'true' }}
+        with:
+          name: rpm-read-3
+          path: ${{ runner.temp }}/rpm-read
+      - uses: actions/download-artifact@3e5f45b2cfb9172054b4087a40e8e0b5a5461e7c # v8.0.1
+        if: ${{ steps.gate.outputs.enabled == 'true' }}
+        with:
+          name: release-assets
+          path: dist
+      - name: The files are exactly the assets of this commit, and match SHA256SUMS
+        if: ${{ steps.gate.outputs.enabled == 'true' }}
+        run: |
+          (cd dist && sha256sum --check --strict SHA256SUMS)
+          cargo xtask release check dist --commit "$COMMIT"
+      - name: Sign the .rpms with the signing subkey (the signature header only; the same bytes for the same commit), then remove the key
+        id: sign-rpms
+        if: ${{ steps.gate.outputs.enabled == 'true' }}
+        env:
+          APT_GPG_FINGERPRINT: ${{ vars.APT_GPG_FINGERPRINT }}
+          APT_GPG_PRIVATE_KEY: ${{ secrets.APT_GPG_PRIVATE_KEY }}
+          APT_GPG_PASSPHRASE: ${{ secrets.APT_GPG_PASSPHRASE }}
+        run: |
+          umask 077
+          printf '%s' "$APT_GPG_PRIVATE_KEY" > "$RUNNER_TEMP/rpm-key.asc"
+          printf '%s' "$APT_GPG_PASSPHRASE" > "$RUNNER_TEMP/rpm-passphrase"
+          cargo xtask channels rpm sign --rpms dist --out "$RUNNER_TEMP/rpm-signed" --version "${TAG#v}" --sums dist/SHA256SUMS --work "$RUNNER_TEMP/rpm-sign-packages" --fingerprint "$APT_GPG_FINGERPRINT" --key-file "$RUNNER_TEMP/rpm-key.asc" --passphrase-file "$RUNNER_TEMP/rpm-passphrase" --signed-at "$(git show --no-patch --format=%ct HEAD)"
+      - name: Promote the entries of this release that testing lists into the repodata of stable (held to the digests of SHA256SUMS and of the signed packages; the packages of every other product are kept)
+        if: ${{ steps.gate.outputs.enabled == 'true' }}
+        run: cargo xtask channels rpm promote --testing "$RUNNER_TEMP/rpm-read/testing" --stable "$RUNNER_TEMP/rpm-read/stable" --out "$RUNNER_TEMP/rpm-next" --version "${TAG#v}" --sums dist/SHA256SUMS --signed-sums "$RUNNER_TEMP/rpm-signed/SHA256SUMS.signed" --date "$(date +%s)"
+      - name: Sign repomd.xml of each architecture with the signing subkey (repomd.xml.asc), then remove the key
+        id: sign
+        if: ${{ steps.gate.outputs.enabled == 'true' }}
+        env:
+          APT_GPG_FINGERPRINT: ${{ vars.APT_GPG_FINGERPRINT }}
+          APT_GPG_PRIVATE_KEY: ${{ secrets.APT_GPG_PRIVATE_KEY }}
+          APT_GPG_PASSPHRASE: ${{ secrets.APT_GPG_PASSPHRASE }}
+        run: |
+          umask 077
+          printf '%s' "$APT_GPG_PRIVATE_KEY" > "$RUNNER_TEMP/rpm-key.asc"
+          printf '%s' "$APT_GPG_PASSPHRASE" > "$RUNNER_TEMP/rpm-passphrase"
+          cargo xtask channels rpm repo sign --dir "$RUNNER_TEMP/rpm-next/stable" --work "$RUNNER_TEMP/rpm-sign" --fingerprint "$APT_GPG_FINGERPRINT" --key-file "$RUNNER_TEMP/rpm-key.asc" --passphrase-file "$RUNNER_TEMP/rpm-passphrase" --output "$GITHUB_OUTPUT"
+      - uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
+        if: ${{ steps.gate.outputs.enabled == 'true' }}
+        with:
+          name: rpm-promoted-3
+          path: |
+            ${{ runner.temp }}/rpm-next/stable
+            ${{ runner.temp }}/rpm-next/etags.txt
+          if-no-files-found: error
+          retention-days: 1
+
+  stable-rpm-write-3:
+    needs: [plan, stable-rpm-read-3, stable-rpm-index-3]
+    if: ${{ needs.plan.outputs.release == 'true' && github.ref == 'refs/heads/main' }}
+    runs-on: ubuntu-24.04
+    timeout-minutes: 15
+    environment: apt-publish
+    permissions:
+      contents: read
+      id-token: write
+    outputs:
+      conflict: ${{ steps.put.outputs.conflict }}
+    env:
+      COMMIT: ${{ needs.plan.outputs.commit }}
+      TAG: ${{ needs.plan.outputs.tag }}
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          ref: ${{ needs.plan.outputs.commit }}
+          persist-credentials: false
+      - run: rustup toolchain install
+      - name: Compile xtask
+        run: cargo xtask --help
+      - name: Gate on the settings of the apt repository and on the signed repodata (a job without them does nothing and ends green)
+        id: gate
+        env:
+          READ_ENABLED: ${{ needs.stable-rpm-read-3.outputs.enabled }}
+          INDEX_SIGNED: ${{ needs.stable-rpm-index-3.outputs.signed }}
+          APT_PUBLISH_ROLE_ARN: ${{ vars.APT_PUBLISH_ROLE_ARN }}
+          APT_BUCKET: ${{ vars.APT_BUCKET }}
+          APT_DISTRIBUTION_ID: ${{ vars.APT_DISTRIBUTION_ID }}
+          APT_HOSTNAME: ${{ vars.APT_HOSTNAME }}
+        run: cargo xtask channels gate --label stable-rpm-write-3 --output "$GITHUB_OUTPUT" --require "READ_ENABLED=$READ_ENABLED" --require "INDEX_SIGNED=$INDEX_SIGNED" --setting "APT_PUBLISH_ROLE_ARN=${APT_PUBLISH_ROLE_ARN:+set}" --setting "APT_BUCKET=${APT_BUCKET:+set}" --setting "APT_DISTRIBUTION_ID=${APT_DISTRIBUTION_ID:+set}" --setting "APT_HOSTNAME=${APT_HOSTNAME:+set}"
+      - uses: actions/download-artifact@3e5f45b2cfb9172054b4087a40e8e0b5a5461e7c # v8.0.1
+        if: ${{ steps.gate.outputs.enabled == 'true' }}
+        with:
+          name: rpm-promoted-3
+          path: ${{ runner.temp }}/rpm-next
+      - name: Assume the apt publish role through OIDC
+        if: ${{ steps.gate.outputs.enabled == 'true' }}
+        uses: aws-actions/configure-aws-credentials@e1253824e5c10ff9df46874f81ed3ec929e19cfd # v6.3.0
+        with:
+          role-to-assume: ${{ vars.APT_PUBLISH_ROLE_ARN }}
+          aws-region: us-east-1
+          mask-aws-account-id: true
+      - name: Write the signed repodata of stable with If-Match on the ETags that were read (the packages are in the pool already), then invalidate /rpm/stable/<arch>/repodata/*
+        id: put
+        if: ${{ steps.gate.outputs.enabled == 'true' }}
+        env:
+          APT_BUCKET: ${{ vars.APT_BUCKET }}
+          APT_DISTRIBUTION_ID: ${{ vars.APT_DISTRIBUTION_ID }}
+          APT_HOSTNAME: ${{ vars.APT_HOSTNAME }}
+        run: cargo xtask channels rpm repo write --suite stable --bucket "$APT_BUCKET" --distribution-id "$APT_DISTRIBUTION_ID" --hostname "$APT_HOSTNAME" --next "$RUNNER_TEMP/rpm-next" --no-pool --last --output "$GITHUB_OUTPUT"

@@ -195,13 +195,13 @@ const DEFECTS: &[(&str, &str, &str, &str)] = &[
         "testing-apt-read",
         "      TAG: ${{ needs.plan.outputs.tag }}\n    steps:",
         "      TAG: ${{ needs.plan.outputs.tag }}\n      KEY: ${{ secrets.APT_GPG_PRIVATE_KEY }}\n    steps:",
-        "testing-apt-read: names APT_GPG_, the signing key, which only the apt index jobs may",
+        "testing-apt-read: names APT_GPG_, the signing key, which only the apt and rpm index jobs may",
     ),
     (
         "tap",
         "      TAG: ${{ needs.plan.outputs.tag }}\n    steps:",
         "      TAG: ${{ needs.plan.outputs.tag }}\n      ROLE: ${{ vars.APT_PUBLISH_ROLE_ARN }}\n    steps:",
-        "tap: names APT_PUBLISH_ROLE_ARN, which only the apt jobs that read and write may",
+        "tap: names APT_PUBLISH_ROLE_ARN, which only the apt and rpm jobs that read and write may",
     ),
     (
         "testing-apt-index",
