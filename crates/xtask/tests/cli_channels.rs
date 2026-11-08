@@ -226,3 +226,270 @@ fn sha256(bytes: &[u8]) -> String {
     use sha2::Digest;
     hex::encode(sha2::Sha256::digest(bytes))
 }
+
+#[test]
+fn the_apt_verbs_are_dispatched_and_report_the_first_thing_that_fails() {
+    // Catches: a verb of the apt channel that is not wired to its implementation, a failure that
+    // does not reach the exit status, and a signing failure that leaves the private key behind.
+    // `aws` and `gpg` are the stand-in program, which answers neither.
+    let d = fresh("apt");
+    let o = run(
+        &d,
+        &[
+            "channels",
+            "apt",
+            "read",
+            "--bucket",
+            "apt-bucket",
+            "--out",
+            "current",
+            "--aws",
+            FAKE,
+        ],
+    );
+    assert_eq!(o.status.code(), Some(1));
+    assert!(
+        stderr(&o).contains("get-object apt/dists/stable/Release failed"),
+        "{}",
+        stderr(&o)
+    );
+
+    let o = run(
+        &d,
+        &[
+            "channels",
+            "apt",
+            "index",
+            "--current",
+            "current",
+            "--out",
+            "next",
+            "--debs",
+            "dist",
+            "--version",
+            "1.2.3",
+            "--origin",
+            "o",
+            "--label",
+            "l",
+            "--description",
+            "d",
+            "--date",
+            "5",
+        ],
+    );
+    assert_eq!(o.status.code(), Some(1));
+    assert!(
+        stderr(&o).contains("etags.txt is missing: run `apt read` first"),
+        "{}",
+        stderr(&o)
+    );
+
+    std::fs::create_dir_all(d.join("stable")).unwrap();
+    std::fs::write(d.join("stable/Release"), "Suite: stable\n").unwrap();
+    std::fs::write(d.join("key.asc"), "key").unwrap();
+    std::fs::write(d.join("pass"), "pass").unwrap();
+    let sign = |fingerprint: &str| {
+        run(
+            &d,
+            &[
+                "channels",
+                "apt",
+                "sign",
+                "--dir",
+                "stable",
+                "--work",
+                "work",
+                "--fingerprint",
+                fingerprint,
+                "--key-file",
+                "key.asc",
+                "--passphrase-file",
+                "pass",
+                "--gpg",
+                FAKE,
+                "--output",
+                "out",
+            ],
+        )
+    };
+    let o = sign("0123456789ABCDEF0123456789ABCDEF01234567");
+    assert_eq!(o.status.code(), Some(1));
+    assert!(
+        stderr(&o).contains("gpg could not import the key"),
+        "{}",
+        stderr(&o)
+    );
+    assert!(!d.join("key.asc").exists() && !d.join("pass").exists() && !d.join("out").exists());
+    assert_eq!(sign("nonsense").status.code(), Some(2));
+
+    let o = run(
+        &d,
+        &[
+            "channels",
+            "apt",
+            "write",
+            "--bucket",
+            "apt-bucket",
+            "--distribution-id",
+            "E1",
+            "--hostname",
+            "packages.example",
+            "--next",
+            "next",
+            "--debs",
+            "dist",
+            "--version",
+            "1.2.3",
+            "--last",
+            "--aws",
+            FAKE,
+        ],
+    );
+    assert_eq!(o.status.code(), Some(1));
+    assert!(
+        stderr(&o).contains("tierstore_1.2.3_amd64.deb is not in"),
+        "{}",
+        stderr(&o)
+    );
+}
+
+#[test]
+fn a_gate_that_requires_an_earlier_job_is_off_and_green_unless_that_job_said_true() {
+    // Catches: a job that runs, or fails, after the job it depends on was off.
+    let d = fresh("gate-require");
+    let gate = |require: &str| {
+        run(
+            &d,
+            &[
+                "channels",
+                "gate",
+                "--label",
+                "apt index",
+                "--output",
+                "out",
+                "--setting",
+                "A=",
+                "--require",
+                require,
+            ],
+        )
+    };
+    let o = gate("READ_ENABLED=false");
+    assert!(o.status.success(), "{}", stderr(&o));
+    assert!(
+        stdout(&o).contains("READ_ENABLED is not true"),
+        "{}",
+        stdout(&o)
+    );
+    assert_eq!(
+        std::fs::read_to_string(d.join("out")).unwrap(),
+        "enabled=false\n"
+    );
+    assert_eq!(gate("READ_ENABLED").status.code(), Some(2));
+}
+
+#[test]
+fn the_apt_suite_and_promote_and_no_pool_are_dispatched_and_their_flags_are_held_together() {
+    // Catches: `--suite` ignored (testing read from the stable path), `promote` not wired,
+    // `--no-pool` still asking for packages, and `--no-pool` accepted beside `--debs`.
+    let d = fresh("apt-suite");
+    let o = run(
+        &d,
+        &[
+            "channels",
+            "apt",
+            "read",
+            "--suite",
+            "testing",
+            "--bucket",
+            "apt-bucket",
+            "--out",
+            "current",
+            "--aws",
+            FAKE,
+        ],
+    );
+    assert_eq!(o.status.code(), Some(1));
+    assert!(
+        stderr(&o).contains("get-object apt/dists/testing/Release failed"),
+        "{}",
+        stderr(&o)
+    );
+    assert_eq!(
+        run(
+            &d,
+            &[
+                "channels", "apt", "read", "--suite", "beta", "--bucket", "b", "--out", "o"
+            ]
+        )
+        .status
+        .code(),
+        Some(2)
+    );
+
+    let o = run(
+        &d,
+        &[
+            "channels",
+            "apt",
+            "promote",
+            "--testing",
+            "t",
+            "--stable",
+            "s",
+            "--out",
+            "o",
+            "--version",
+            "1.2.3",
+            "--sums",
+            "SHA256SUMS",
+            "--origin",
+            "o",
+            "--label",
+            "l",
+            "--description",
+            "d",
+            "--date",
+            "5",
+        ],
+    );
+    assert_eq!(o.status.code(), Some(1));
+    assert!(
+        stderr(&o).contains("etags.txt is missing: run `apt read --suite stable` first"),
+        "{}",
+        stderr(&o)
+    );
+
+    let write = |extra: &[&str]| {
+        let mut args = vec![
+            "channels",
+            "apt",
+            "write",
+            "--suite",
+            "stable",
+            "--bucket",
+            "apt-bucket",
+            "--distribution-id",
+            "E1",
+            "--hostname",
+            "packages.example",
+            "--next",
+            "next",
+            "--last",
+            "--aws",
+            FAKE,
+        ];
+        args.extend(extra);
+        run(&d, &args)
+    };
+    let o = write(&["--no-pool"]);
+    assert_eq!(o.status.code(), Some(1));
+    assert!(stderr(&o).contains("Release"), "{}", stderr(&o));
+    assert!(!stderr(&o).contains("is not in"), "{}", stderr(&o));
+    assert_eq!(
+        write(&["--no-pool", "--debs", "dist"]).status.code(),
+        Some(2)
+    );
+    assert_eq!(write(&[]).status.code(), Some(2));
+}

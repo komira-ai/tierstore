@@ -88,6 +88,22 @@ fn digest_file(path: &Path) -> Result<(Sha256, u64), Error> {
     }
 }
 
+/// Is `name` a bucket name (lower case letters, digits, `-` and `.`)?
+pub(crate) fn is_bucket(name: &str) -> bool {
+    !name.is_empty()
+        && name
+            .bytes()
+            .all(|b| b.is_ascii_lowercase() || b.is_ascii_digit() || b == b'-' || b == b'.')
+}
+
+/// Is `id` a CloudFront distribution id (upper case letters and digits)?
+pub(crate) fn is_distribution_id(id: &str) -> bool {
+    !id.is_empty()
+        && id
+            .bytes()
+            .all(|b| b.is_ascii_uppercase() || b.is_ascii_digit())
+}
+
 /// The version of `tag`, after the flags are held to their forms.
 fn check_request(r: &Request) -> Result<String, Error> {
     let version = r
@@ -98,21 +114,13 @@ fn check_request(r: &Request) -> Result<String, Error> {
             Error::Usage(format!("--tag {:?} is not v<major>.<minor>.<patch>", r.tag))
         })?;
     full_commit("--commit", r.commit)?;
-    let bucket = !r.bucket.is_empty()
-        && r.bucket
-            .bytes()
-            .all(|b| b.is_ascii_lowercase() || b.is_ascii_digit() || b == b'-' || b == b'.');
-    if !bucket {
+    if !is_bucket(r.bucket) {
         return Err(Error::Usage(format!(
             "--bucket {:?} is not a bucket name",
             r.bucket
         )));
     }
-    let distribution = r.distribution_id.is_empty()
-        || r.distribution_id
-            .bytes()
-            .all(|b| b.is_ascii_uppercase() || b.is_ascii_digit());
-    if !distribution {
+    if !r.distribution_id.is_empty() && !is_distribution_id(r.distribution_id) {
         return Err(Error::Usage(format!(
             "--distribution-id {:?} is not a distribution id",
             r.distribution_id

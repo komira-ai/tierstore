@@ -9,6 +9,8 @@
 )]
 #![allow(dead_code)]
 
+mod apt;
+mod apt_tests;
 mod channels;
 mod channels_tests;
 mod desired;

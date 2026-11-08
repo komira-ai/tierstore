@@ -15,6 +15,7 @@ use std::path::{Path, PathBuf};
 use serde_json::{Value, json};
 use xtask::Error;
 use xtask::advisories::{Call, Method, Process, Tools};
+use xtask::channels::apt::sign::{Gpg, RealGpg};
 use xtask::channels::aws::{Answer, Aws, RealAws};
 use xtask::release::{Gh, RealGh};
 
@@ -203,4 +204,30 @@ fn github_answers_json_an_empty_reply_a_404_for_a_get_and_errors_otherwise() {
         root: &d,
     };
     assert!(!spawn_error(tools.github(&call(Method::Get, &reply, None))).is_empty());
+}
+
+#[test]
+fn the_real_gpg_hands_back_what_the_program_printed_and_whether_it_succeeded() {
+    // Catches: a refusal by gpg read as a success (the index would be published unsigned), an
+    // answer that loses its stderr (the verb names the step's reason), and a missing program taken
+    // for an answer.
+    let gpg = RealGpg(PathBuf::from(FAKE));
+    let args = |words: &[&str]| words.iter().map(|w| (*w).to_owned()).collect::<Vec<_>>();
+    assert_eq!(
+        gpg.run(&args(&["print", "ok"])).expect("run"),
+        Answer {
+            ok: true,
+            stdout: "ok\n".to_owned(),
+            stderr: String::new()
+        }
+    );
+    assert_eq!(
+        gpg.run(&args(&["fail", "BAD signature"])).expect("run"),
+        Answer {
+            ok: false,
+            stdout: String::new(),
+            stderr: "BAD signature\n".to_owned()
+        }
+    );
+    assert!(!spawn_error(RealGpg(PathBuf::from(MISSING)).run(&args(&["x"]))).is_empty());
 }

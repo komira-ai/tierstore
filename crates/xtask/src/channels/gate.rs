@@ -6,6 +6,11 @@
 //! | all set | `true` | runs |
 //! | some set | `false` | red, naming the missing ones |
 //!
+//! A job that follows another (the apt index after the apt read) names what it needs from it
+//! with `--require NAME=VALUE`, `VALUE` being the earlier job's output: unless every one is
+//! exactly `true` the job is off, green, and its own settings are not judged (the earlier job
+//! said it is off, and says why).
+//!
 //! The third row is a half-made setting, a typo in a variable name among them: it must not leave
 //! a channel silently off. A setting is set when its value is not empty; the value itself is never
 //! printed, so a workflow passes `NAME=${VAR:+set}` for a secret.
@@ -37,13 +42,29 @@ fn parse(setting: &str) -> Result<(&str, bool), Error> {
 /// The `gate` verb: the lines to print.
 ///
 /// # Errors
-/// A label or setting that is not of its form, a name given twice, or some but not all of the
-/// settings set.
-pub fn gate(label: &str, settings: &[String], output: Option<&Path>) -> Result<Vec<String>, Error> {
+/// A label, setting or requirement that is not of its form, a name given twice, or some but not
+/// all of the settings set.
+pub fn gate(
+    label: &str,
+    settings: &[String],
+    requires: &[String],
+    output: Option<&Path>,
+) -> Result<Vec<String>, Error> {
     if label.is_empty() || label.chars().any(char::is_control) || label.contains("::") {
         return Err(Error::Usage(format!(
             "--label {label:?} is not a plain name"
         )));
+    }
+    let mut unmet = Vec::new();
+    for require in requires {
+        let Some((name, value)) = require.split_once('=') else {
+            return Err(Error::Usage(format!(
+                "--require {require:?} is not NAME=VALUE"
+            )));
+        };
+        if value != "true" {
+            unmet.push(name);
+        }
     }
     let mut set = Vec::new();
     let mut unset = Vec::new();
@@ -58,12 +79,18 @@ pub fn gate(label: &str, settings: &[String], output: Option<&Path>) -> Result<V
             unset.push(name);
         }
     }
-    let enabled = unset.is_empty();
+    let enabled = unset.is_empty() && unmet.is_empty();
     if let Some(output) = output {
         append_output(output, &[format!("enabled={enabled}")])?;
     }
     if enabled {
         return Ok(vec![format!("{label}: all its settings are set")]);
+    }
+    if !unmet.is_empty() {
+        return Ok(vec![format!(
+            "::notice title=The {label} job is off::{} is not true, so it writes nothing and ends green.",
+            unmet.join(", ")
+        )]);
     }
     if set.is_empty() {
         return Ok(vec![format!(
