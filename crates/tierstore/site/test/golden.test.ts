@@ -41,7 +41,7 @@ test('the manifest ignores the pages rendered from the guide and sees every hand
   const guide = copyTree(dist, 'golden-h');
   for (const stem of stems) plant(guide, join('docs', stem, 'index.html'), '<h1', '<h2');
   assert.equal(manifestOf(guide, stems), clean, 'a change to a page rendered from the guide must not change the manifest (docs.test.ts holds those pages)');
-  for (const page of ['index.html', 'getting-started/index.html', 'why/index.html', 'install/index.html', 'demo/index.html', '404.html', 'docs/index.html']) {
+  for (const page of ['index.html', 'get-started/index.html', 'why/index.html', 'demo/index.html', '404.html', 'docs/index.html']) {
     const changed = copyTree(dist, 'golden-i');
     plant(changed, page, /<(h1|main)/, '<$1 data-planted');
     assert.notEqual(manifestOf(changed, stems), clean, `a change to ${page} must change the manifest`);

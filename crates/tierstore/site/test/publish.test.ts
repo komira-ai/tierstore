@@ -42,7 +42,7 @@ function distWith(name: string, files: string[]): string {
   return dist;
 }
 
-const PAGES = ['index.html', '404.html', 'install/index.html', 'getting-started/index.html', 'docs/index.html', 'about/index.html', 'why/index.html', 'config/index.html', 'demo/index.html'];
+const PAGES = ['index.html', '404.html', 'install/index.html', 'getting-started/index.html', 'docs/index.html', 'about/index.html', 'why/index.html', 'config/index.html', 'demo/index.html', 'get-started/index.html'];
 const ASSETS = ['assets/x/a.js', 'assets/x/b.js', 'assets/x/s.css'];
 
 /** A built-looking dist/: the floor's worth of pages and files. */

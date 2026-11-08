@@ -15,7 +15,7 @@ const SIGNER = 'komira-ai/tierstore/.github/workflows/artifacts.yml';
 const VERIFY_FLAGS = ['--repo komira-ai/tierstore', `--signer-workflow ${SIGNER}`, '--source-ref refs/heads/main', '--source-digest <commit>', '--deny-self-hosted-runners'];
 
 const pages: Array<[string, string]> = [
-  ['site install page', read(SITE, 'content', 'install.html')],
+  ['site get-started page', read(SITE, 'content', 'get-started.html')],
   ['site home page', read(SITE, 'content', 'index.html')],
   ['install guide', read(DOCS, 'install.md')],
   ['repository README', read(REPO, 'README.md')],
@@ -155,7 +155,7 @@ test('the offline gh check of the install page and the install guide takes the b
 test('every document of the repository that the install pages, the packaging notes and the site scan name exists', () => {
   const files: Array<[string, string]> = [
     ['crates/tierstore/docs/install.md', DOCS],
-    [`${SITE_REL}/content/install.html`, SITE],
+    [`${SITE_REL}/content/get-started.html`, SITE],
     ['packaging/README.md', `${REPO}/packaging`],
     ['packaging/tierstore.service', `${REPO}/packaging`],
     [`${SITE_REL}/test/hygiene.test.ts`, SITE],
@@ -180,7 +180,7 @@ test('every document of the repository that the install pages, the packaging not
 // packaging/tierstore and packaging/tierstore/README.md, which never existed).
 test('every packaging path the install and demo pages name exists in the repository', () => {
   let named = 0;
-  for (const page of ['install.html', 'demo.html']) {
+  for (const page of ['get-started.html', 'demo.html']) {
     const file = `${SITE_REL}/content/${page}`;
     const paths = [...read(REPO, file).matchAll(/(?<![\w/.-])packaging(?:\/[A-Za-z0-9@._-]+)*/g)].map((m) => m[0]);
     for (const p of paths) assert.ok(existsSync(join(REPO, p)), `${file} names ${p}, which does not exist`);
