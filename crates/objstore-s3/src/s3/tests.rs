@@ -191,9 +191,7 @@ async fn a_connect_that_times_out_is_not_resent_but_a_refused_one_is() {
     assert!(e.is_timeout(), "{e:?}");
     assert!(!is_retryable(&transport(e)));
 
-    let closed = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
-    let gone = closed.local_addr().unwrap();
-    drop(closed);
+    let gone = tierstore_testkit::port::dead_addr();
     let e = client
         .get(format!("http://{gone}/"))
         .send()
