@@ -2,7 +2,7 @@
 // which scripts it loads. The content files are the page copy as written for the site (content/*.html: the inside of
 // <main>); the document around them is layout.ts.
 
-export type NavKey = 'start';
+export type NavKey = 'install' | 'docs';
 
 export interface Page {
   /** The URL path: '/' or '/name/' or '/404.html'. */
@@ -34,19 +34,19 @@ export const PACKAGING_URL = `${REPO_URL}/blob/main/packaging/README.md`;
 export const RELEASES_URL = `${REPO_URL}/releases`;
 
 /** The technical report on tierstore, at the main site. The header and the footer link to it; it opens as any link does. */
-export const WHITE_PAPER_URL = 'https://komira.ai/whitepapers/tierstore';
+export const REPORT_URL = 'https://komira.ai/research/tierstore';
 
-/** The top navigation, in order: exactly these two. Get Started is a page of this site and the report is not. */
-export const NAV: readonly { key: NavKey | null; label: string; href: string }[] = [
-  { key: 'start', label: 'Get Started', href: '/get-started/' },
-  { key: null, label: 'Technical Report', href: WHITE_PAPER_URL },
+/** The top navigation, in order: exactly these three. Install and Docs are pages of this site; Why is the report, which is not: its link says so (an arrow, a hidden note for a screen reader, `rel="noopener"`). */
+export const NAV: readonly { key: NavKey | null; label: string; href: string; external?: boolean }[] = [
+  { key: 'install', label: 'Install', href: '/install/' },
+  { key: 'docs', label: 'Docs', href: '/docs/' },
+  { key: null, label: 'Why', href: REPORT_URL, external: true },
 ];
 
-/** The footer's links to this site's other pages, in order (the source and the report follow them). */
+/** The footer's links to this site's other pages, in order (the releases, the source and the report follow them). */
 export const FOOTER_LINKS: readonly { label: string; href: string }[] = [
-  { label: 'Docs', href: '/docs/' },
   { label: 'Demo', href: '/demo/' },
-  { label: 'Why tierstore', href: '/why/' },
+  { label: 'For programs: llms.txt', href: '/llms.txt' },
 ];
 
 export const PAGES: readonly Page[] = [
@@ -58,11 +58,11 @@ export const PAGES: readonly Page[] = [
     scripts: ['copy.js', 'reveal.js'],
     bands: true,
   },
-  { route: '/get-started/', source: 'get-started', title: 'Get started', description: 'Install tierstore, write a configuration file, start it and put and get an object.', nav: 'start', scripts: ['copy.js', 'reveal.js'], bands: false },
-  { route: '/install/', source: 'moved-install', title: 'Install', description: 'The install steps are on the Get started page.', scripts: ['copy.js'], bands: false, noindex: true, redirect: '/get-started/#install' },
-  { route: '/getting-started/', source: 'moved-getting-started', title: 'Get started', description: 'The first steps are on the Get started page.', scripts: ['copy.js'], bands: false, noindex: true, redirect: '/get-started/' },
+  { route: '/install/', source: 'install', title: 'Install', description: 'Install tierstore with one command, then check what you installed.', nav: 'install', scripts: ['copy.js', 'reveal.js', 'tabs.js'], bands: false },
+  { route: '/get-started/', source: 'moved-install', title: 'Install', description: 'The install steps are on the Install page.', scripts: ['copy.js'], bands: false, noindex: true, redirect: '/install/' },
+  { route: '/getting-started/', source: 'moved-install', title: 'Install', description: 'The install steps are on the Install page.', scripts: ['copy.js'], bands: false, noindex: true, redirect: '/install/' },
   { route: '/demo/', source: 'demo', title: 'Demo', description: 'A start, the probes and a drain of tierstore, as the code prints them.', scripts: ['copy.js', 'reveal.js'], bands: false },
-  { route: '/why/', source: 'why', title: 'Why tierstore', description: 'The problem tierstore solves and how the tiers work.', scripts: ['copy.js', 'reveal.js'], bands: false },
+  { route: '/why/', source: 'moved-why', title: 'Why tierstore', description: 'Why tierstore exists is in the technical report.', scripts: ['copy.js'], bands: false, noindex: true, redirect: REPORT_URL },
   {
     route: '/404.html',
     source: '404',

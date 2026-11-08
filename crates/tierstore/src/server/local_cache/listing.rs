@@ -19,6 +19,7 @@ use crate::journal::{RESERVED_PREFIXES, is_reserved};
 use crate::{Error, Listed, OpenUpload, UploadsAfter};
 
 use super::Inner;
+use super::metrics::Call;
 
 /// The default of `local_cache.listing_calls`: the most pages of the upstream one listing reads to
 /// make up for the names it leaves out.
@@ -46,6 +47,7 @@ impl Inner {
         if is_reserved(prefix) {
             return Ok(Vec::new());
         }
+        self.counters.called(Call::List);
         let mut found = self.upstream.list(prefix).await?;
         found.retain(|object| !is_reserved(&object.key));
         self.with_kept_tags(&mut found);
@@ -87,6 +89,7 @@ impl Inner {
                 return Err(Error::Unavailable(text));
             }
             let want = max_keys - found.len();
+            self.counters.called(Call::List);
             let page = self
                 .upstream
                 .list_page(prefix, after.as_deref(), want)
@@ -127,6 +130,7 @@ impl Inner {
             let marker = after
                 .as_ref()
                 .map(|(key, id)| (key.as_str(), id.as_deref()));
+            self.counters.called(Call::ListUploads);
             let page = self.upstream.list_uploads(prefix, marker, want).await?;
             let last = page.last().map(|up| (up.key.clone(), Some(up.id.clone())));
             let full = page.len() == want;

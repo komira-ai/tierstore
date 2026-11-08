@@ -453,7 +453,7 @@ impl Chunks {
         if self.expect.is_none() && self.left.is_some_and(|left| left <= chunk) {
             return Ok(());
         }
-        let meta = self.inner.upstream.head(&self.key).await?;
+        let meta = self.inner.upstream_head(&self.key).await?;
         tagged(&self.key, &meta)?;
         if self
             .expect
@@ -474,7 +474,7 @@ impl Chunks {
         let Some(pinned) = &self.pin else {
             return Ok(());
         };
-        let now = self.inner.upstream.head(&self.key).await?;
+        let now = self.inner.upstream_head(&self.key).await?;
         if self.inner.same_version(&now, pinned) {
             return Ok(());
         }
@@ -492,9 +492,8 @@ impl Chunks {
             return Ok(None);
         }
         let range = ByteRange::new(self.at, want);
-        let upstream = &self.inner.upstream;
-        let body = upstream.get_stream(&self.key, Some(range)).await?;
-        let bytes = read_within(body, want).await?;
+        let bytes = self.inner.upstream_get_within(&self.key, range, want);
+        let bytes = bytes.await?;
         let got = bytes.len() as u64;
         self.inner.served(Served::Upstream, got);
         self.at += got;

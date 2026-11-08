@@ -7,7 +7,7 @@
 // policy has no directive for, and a policy that no longer is the one the pages were checked against.
 
 import assert from 'node:assert/strict';
-import { writeFileSync } from 'node:fs';
+import { unlinkSync, writeFileSync } from 'node:fs';
 import { join } from 'node:path';
 import { test } from 'node:test';
 import { checkDist } from '../tools/check-dist';
@@ -34,9 +34,9 @@ refused('a style element', 'index.html', '</head>', '<style>a{}</style></head>',
 refused('an inline script', 'index.html', '</head>', '<script>alert(1)</script></head>', /an inline <script>/);
 refused('a script without a src under /assets/', 'index.html', 'src="/assets/', 'src="/other/', /a <script> without one src under \/assets\//);
 refused('an event handler', 'index.html', '<h1', '<h1 onclick="x()"', /an event-handler attribute onclick on <h1>/);
-refused('a javascript: URL', 'index.html', 'href="/get-started/"', 'href="javascript:alert(1)"', /a script URL/);
-refused('an entity-encoded javascript: URL', 'index.html', 'href="/get-started/"', 'href="&#106;avascript:alert(1)"', /a script URL/);
-refused('a data: URL', 'index.html', 'href="/get-started/"', 'href="data:text/html,x"', /a script URL/);
+refused('a javascript: URL', 'index.html', 'href="/install/"', 'href="javascript:alert(1)"', /a script URL/);
+refused('an entity-encoded javascript: URL', 'index.html', 'href="/install/"', 'href="&#106;avascript:alert(1)"', /a script URL/);
+refused('a data: URL', 'index.html', 'href="/install/"', 'href="data:text/html,x"', /a script URL/);
 refused('a stylesheet from another origin', 'index.html', /href="\/assets\/[0-9a-f]+\/site\.css"/, 'href="https://cdn.example.org/x.css"', /<link href> names another origin/);
 refused('a comment in a page', 'index.html', '</head>', '<!-- x --></head>', /a '<' that does not start a tag/);
 refused('an @import in a stylesheet', '__ID__/site.css', /^/, '@import "other.css";\n', /an @import/);
@@ -46,8 +46,20 @@ refused('a string run as code', '__ID__/copy.js', /^/, 'eval("1");\n', /uses eva
 refused('markup from a string', '__ID__/copy.js', /^/, 'document.body.innerHTML = "x";\n', /uses innerHTML/);
 test('check-dist refuses a file type that is not published', () => {
   const t = copyTree(dist, 'csp-filetype');
-  writeFileSync(join(t, 'robots.txt'), 'x\n');
-  assert.throws(() => checkDist(t), /robots\.txt: only \.html, \.js and \.css files are published/);
+  writeFileSync(join(t, 'robots.xml'), 'x\n');
+  assert.throws(() => checkDist(t), /robots\.xml: only \.html, \.js, \.css, \.md and \.txt files are published/);
+});
+
+test('check-dist lets the docs as Markdown and llms.txt through, and refuses an empty one or one with a NUL', () => {
+  assert.doesNotThrow(() => checkDist(dist));
+  for (const bad of ['', '\0x']) {
+    const t = copyTree(dist, 'csp-text-file');
+    writeFileSync(join(t, 'docs', 'overview.md'), bad);
+    assert.throws(() => checkDist(t), /docs\/overview\.md: a text file that is empty or holds a NUL/);
+  }
+  const gone = copyTree(dist, 'csp-no-llms');
+  unlinkSync(join(gone, 'llms.txt'));
+  assert.throws(() => checkDist(gone), /missing llms\.txt/);
 });
 
 test('the policy parsed from served-policy.ts is the one the pages are checked against', () => {

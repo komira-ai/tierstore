@@ -1,24 +1,37 @@
 # The macOS checks of every pull request: every test of the workspace on macOS, and the macOS
-# build, package and checks that artifacts.yml's `macos-arm64` job makes after a merge.
+# build, package and checks that artifacts.yml's `macos-arm64` job makes after a merge, when the
+# pull request changes a path they build from; and one check, `macos-checks`, that says whether
+# they passed or were not needed.
 #
+# - `changes` (Linux) lists the paths the pull request changes (the merge commit against its
+#   first parent, the base; a rename is its old and its new path) and judges them with
+#   `cargo xtask macos-paths`: `macos=false` when each is one the macOS job builds nothing from
+#   (documentation, the lint configuration, the templates, the workflows that put nothing on
+#   macOS), `macos=true` otherwise, and when the list cannot be read or names no path.
 # - `version` (Linux) computes the version the build is given, as the `version` job of
 #   artifacts.yml does (it reads the repository's tags with the token), so the macOS job needs no
 #   token.
 # - `macos` (macOS, GitHub-hosted, macos-15): every test of the workspace on macOS, then the
 #   build, the package, the hostkeeper package and the checks of them (the binary names the commit
 #   and the version, built and unpacked from the tarball; the package unpacks with hostkeeper's own
-#   unpacker; the unpacked binary's code signature is valid). It uploads nothing, saves no cache
-#   and signs nothing; it holds `contents: read` alone and no secret, no token and no OIDC scope.
-#   Its name is not `macos-arm64`: a pull request's run of artifacts.yml has a job of that name,
-#   skipped, and a check named `macos-arm64` would pass on it. If `version` fails, `macos` is
-#   skipped and the run fails on `version`.
+#   unpacker; the unpacked binary's code signature is valid). It runs unless `changes` passed and
+#   answered `macos=false`: a `changes` that failed, or gave no answer, runs it. It is skipped when
+#   `version` fails, and when the run is cancelled. It uploads nothing, saves no cache and signs
+#   nothing; it holds `contents: read` alone and no secret, no token and no OIDC scope. Its name is
+#   not `macos-arm64`: a pull request's run of artifacts.yml has a job of that name, skipped, and a
+#   check named `macos-arm64` would pass on it.
+# - `macos-checks` (Linux) runs whatever the others did, cancelled included, and passes only when
+#   `version` passed and `macos` passed, or `macos` was skipped because `changes` passed and
+#   answered `macos=false`. It is the one check of this workflow a rule requiring checks by name
+#   needs: a skipped `macos` passes as a check, `macos-checks` is never skipped.
 #
 # A pull request's newer run cancels its older one, so a burst of pushes holds one macOS runner.
-# Pull requests only: a push to main builds and tests macOS in artifacts.yml, unchanged. The
-# workflow lint (crates/xtask/tests/workflows/macos_pr.rs) pins this file: its jobs, the commands
-# of each (the macOS job's are artifacts.yml's, with the workspace's tests), the cache it
-# restores, the cargo-cyclonedx pins (artifacts.yml's), and no secret or write scope in a macOS
-# job.
+# Every pull request starts the workflow (no path filter on the trigger, which would leave no
+# check at all). Pull requests only: a push to main builds and tests macOS in artifacts.yml,
+# unchanged. The workflow lint (crates/xtask/tests/workflows/macos_pr.rs) pins this file: its jobs,
+# the commands of each (the macOS job's are artifacts.yml's, with the workspace's tests), the
+# conditions of `macos` and `macos-checks`, the cache it restores, the cargo-cyclonedx pins
+# (artifacts.yml's), and no secret or write scope in a macOS job.
 name: macos
 
 on:
@@ -42,6 +55,29 @@ defaults:
     shell: bash
 
 jobs:
+  # Whether the pull request changes a path the macOS job builds from. The checkout is the merge
+  # commit and its first parent (the base), whose difference is what the pull request changes.
+  changes:
+    runs-on: ubuntu-24.04
+    timeout-minutes: 15
+    permissions:
+      contents: read
+    outputs:
+      macos: ${{ steps.changes.outputs.macos }}
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+          fetch-depth: 2
+      - run: rustup toolchain install
+      - name: Compile xtask
+        run: cargo xtask --help
+      - name: The paths the pull request changes
+        run: git diff --no-renames --name-only -z HEAD^1 HEAD > "$RUNNER_TEMP/changed"
+      - name: Whether the macOS job is needed
+        id: changes
+        run: cargo xtask macos-paths --changed "$RUNNER_TEMP/changed" --output "$GITHUB_OUTPUT"
+
   # The version of the build: the version the base of the pull request would release next.
   version:
     runs-on: ubuntu-24.04
@@ -67,7 +103,8 @@ jobs:
   # macOS cache: its key names that job, `macos-arm64`, where artifacts.yml's has
   # `${{ github.job }}`, so this job restores what a push to main saves there; it saves nothing.
   macos:
-    needs: [version]
+    needs: [changes, version]
+    if: ${{ !cancelled() && needs.version.result == 'success' && !(needs.changes.result == 'success' && needs.changes.outputs.macos == 'false') }}
     runs-on: macos-15
     timeout-minutes: 60
     permissions:
@@ -126,3 +163,16 @@ jobs:
         run: cargo xtask release tap-tarball dist --commit "$GITHUB_SHA" --version "$RELEASE_VERSION" --platform macos-arm64
       - name: The packaged binary carries a valid code signature
         run: codesign --verify --strict "$RUNNER_TEMP/hostkeeper/packages/tierstore/$RELEASE_VERSION+${GITHUB_SHA::12}/bin/tierstore"
+
+  # The one check of the macOS checks: it runs after the others whatever they did, and fails
+  # unless the macOS job passed, or was not needed and everything it would have needed passed.
+  macos-checks:
+    needs: [changes, version, macos]
+    if: ${{ always() }}
+    runs-on: ubuntu-24.04
+    timeout-minutes: 5
+    permissions: {}
+    steps:
+      - name: The macOS checks did not pass, and were needed
+        if: ${{ always() && !(needs.version.result == 'success' && (needs.macos.result == 'success' || (needs.macos.result == 'skipped' && needs.changes.result == 'success' && needs.changes.outputs.macos == 'false'))) }}
+        run: exit 1

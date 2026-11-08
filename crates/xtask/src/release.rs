@@ -291,7 +291,7 @@ pub fn locate(
 }
 
 /// Appends `lines` to `output` (on Actions, `GITHUB_OUTPUT`), one per line.
-fn append_output(output: &Path, lines: &[String]) -> Result<(), Error> {
+pub(crate) fn append_output(output: &Path, lines: &[String]) -> Result<(), Error> {
     std::fs::OpenOptions::new()
         .create(true)
         .append(true)

@@ -468,7 +468,7 @@ impl Inner {
         live: &watch::Sender<Live>,
     ) -> Result<Filled, Stop> {
         let generation = self.generation();
-        let meta = self.upstream.head(key).await?;
+        let meta = self.upstream_head(key).await?;
         tagged(key, &meta)?;
         let Some(reservation) = self.reserve(meta.size) else {
             bump(&self.counters.fills_skipped);
@@ -493,7 +493,7 @@ impl Inner {
         while offset < meta.size {
             let want = self.config.fill_chunk.max(1).min(meta.size - offset);
             let range = ByteRange::new(offset, want);
-            let chunk = self.upstream.get(key, Some(range)).await?;
+            let chunk = self.upstream_get(key, range).await?;
             if chunk.len() as u64 != want {
                 return Err(Stop::Short);
             }
@@ -510,7 +510,7 @@ impl Inner {
         staged.finish().await?;
         // A key named by its content is checked by the hash below. Any other key could have been
         // written over while it was read, and the file would hold bytes of two versions.
-        if name.content.is_none() && !self.same_version(&self.upstream.head(key).await?, &meta) {
+        if name.content.is_none() && !self.same_version(&self.upstream_head(key).await?, &meta) {
             return Err(Stop::Changed);
         }
         let digest = hex::encode(hasher.finalize());

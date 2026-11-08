@@ -386,6 +386,8 @@ mod delete_objects_tests;
 #[cfg(test)]
 mod digests_tests;
 #[cfg(test)]
+mod docs_examples_tests;
+#[cfg(test)]
 mod docs_tests;
 #[cfg(test)]
 mod drain_contract_tests;
@@ -421,6 +423,8 @@ mod list_uploads_delimiter_tests;
 mod list_versions_tests;
 #[cfg(test)]
 mod lock_tests;
+#[cfg(test)]
+mod metrics_page_tests;
 #[cfg(test)]
 mod metrics_tests;
 #[cfg(test)]
