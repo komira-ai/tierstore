@@ -5,11 +5,13 @@
 //! are resolved to a copy of the anchored node. Everything the lint does not evaluate
 //! is refused here rather than read some other way: a tag, a second document, an
 //! alias to a node that is not finished, or more nodes than [`MAX_NODES`] (an alias
-//! bomb).
+//! bomb). Text that is not YAML is refused with the line and column the parser stops
+//! at: a plain scalar ends at `: ` and at ` #`, as in GitHub's parser, so a `run:` that
+//! holds `: ` unquoted is named on its line, and one that holds ` #` is read up to it.
 
 use std::collections::BTreeMap;
 
-use saphyr_parser::{Event, Parser, ScalarStyle, Span, Tag};
+use saphyr_parser::{Event, Parser, ScalarStyle, ScanError, Span, Tag};
 
 /// Nodes one document may expand to, aliases included.
 pub const MAX_NODES: usize = 100_000;
@@ -109,6 +111,18 @@ fn at(span: Span, what: &str) -> String {
     format!("line {}: {what}", span.start.line())
 }
 
+/// A text the parser refuses, with the line and column it refuses it at (a plain scalar
+/// holding `: `, for one, as GitHub refuses it).
+fn not_yaml(e: ScanError) -> String {
+    let mark = e.marker();
+    format!(
+        "line {}: not valid YAML: {} (column {})",
+        mark.line(),
+        e.info(),
+        mark.col() + 1
+    )
+}
+
 fn refuse_tag(tag: Option<&Tag>, span: Span) -> Result<(), String> {
     match tag {
         Some(t) => Err(at(span, &format!("a YAML tag (`{t}`) is not evaluated"))),
@@ -123,7 +137,7 @@ pub fn load(text: &str) -> Result<Node, String> {
     let mut docs: Vec<Node> = Vec::new();
     let mut budget = MAX_NODES;
     for event in Parser::new_from_str(text) {
-        let (event, span) = event.map_err(|e| format!("line 0: not valid YAML: {e}"))?;
+        let (event, span) = event.map_err(not_yaml)?;
         // Each node costs one; an alias costs the size of the copy it makes.
         let (node, anchor, cost) = match event {
             Event::Nothing
