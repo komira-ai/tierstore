@@ -1,14 +1,14 @@
-//! The rules for the farm jobs of `release.yml` (`farm-check`, `farm` and `soak`), which move the
-//! hostkeeper farm onto a release before any public channel follows it
+//! The rules for the lab jobs of `release.yml` (`farm-check`, `farm` and `soak`), which move the
+//! hostkeeper lab onto a release that is in testing and installed, before the promotion
 //! (docs/design/distribution.md, section 5.3). [`farm_problems`] is called from
 //! `release_problems`, so the one lint holds the whole file; [`pin_problems`] compares the pin of
 //! `farm` with the one of `hostkeeper-desired.yml`.
 //!
-//! - `farm-check` reads the repository (`contents: read`, no environment: its settings are
-//!   repository variables, which a job that calls a workflow can read too), has the `if:` of the
-//!   jobs after the plan, and starts with the gate: the coordinator's two variables, then the
+//! - `farm-check` waits for the three install checks, reads the repository (`contents: read`, no
+//!   environment: its settings are repository variables, which a job that calls a workflow can
+//!   read too), has the `if:` of the jobs after skippable jobs, and starts with the gate: the coordinator's two variables, then the
 //!   tailnet's three. Every step after the first gate runs only when it said `enabled=true`, and
-//!   one of them is `cargo xtask release desired`, whose two outputs the job hands on.
+//!   one of them is `cargo xtask release desired-deb` (the testing suite lists the package), whose two outputs the job hands on.
 //! - `farm` is hostkeeper's reusable workflow, pinned to the same commit and release as
 //!   `hostkeeper-desired.yml`, called with the version and digest `farm-check` handed on, the
 //!   coordinator's variables, the audience of this workflow and `wait: true`, and only when the
@@ -16,15 +16,16 @@
 //!   the farm does (the lint's write table pins the `if:` of the scope).
 //! - `soak` holds `contents: read` alone and runs only when `farm` converged; it runs
 //!   `cargo xtask channels soak`.
-//! - Every public job (the channels and the three apt jobs in up to three attempts) waits for
-//!   `soak`: it names it in `needs`, or names a job that does, so that a public job without the
-//!   soak is named. Their `if:` is the one of the jobs after the plan, which has no status
-//!   function, so a skipped or failed `soak` skips them.
+//! - Every job that makes the release public (`promote-latest`, `tap` and the nine apt jobs of the
+//!   suite `stable`) waits for `promote-check`, which waits for the lab (`soak`) and for the
+//!   install checks, so that a promotion without them is named. With no lab configured `farm` and
+//!   `soak` are skipped, and `promote-check` accepts exactly that (its own rules are in
+//!   `checks.rs`).
 
 use super::apt::JOBS;
-use super::channels::{CHANNELS, GATE_IF, steps, text};
+use super::channels::{GATE_IF, steps, text};
 use super::hostkeeper::at;
-use super::lint::{RELEASE_IF, entries, entry, names};
+use super::lint::{AFTER_IF, entries, entry, names};
 use super::yaml::Node;
 
 /// The `if:` of `farm`: a release, on main, once the gate of `farm-check` said the farm is set up.
@@ -95,11 +96,14 @@ pub fn farm_problems(doc: &Node, text: &str) -> Vec<String> {
 
 fn check_problems(check: &Node) -> Vec<String> {
     let mut problems = Vec::new();
-    if names(entry(check, "needs")) != ["plan", "publish"] {
-        problems.push("farm-check: needs are not plan and publish".to_owned());
+    if names(entry(check, "needs")) != ["check-apt", "check-brew", "check-install-sh", "plan"] {
+        problems.push(
+            "farm-check: needs are not plan and the three install checks: the lab is told about a release that was installed from testing"
+                .to_owned(),
+        );
     }
-    if entry(check, "if").and_then(Node::as_str) != Some(RELEASE_IF) {
-        problems.push(format!("farm-check: `if` is not {RELEASE_IF}"));
+    if entry(check, "if").and_then(Node::as_str) != Some(AFTER_IF) {
+        problems.push(format!("farm-check: `if` is not {AFTER_IF}"));
     }
     if entry(check, "environment").is_some() {
         problems.push(
@@ -167,11 +171,11 @@ fn check_problems(check: &Node) -> Vec<String> {
     let desired = after.iter().find(|s| at(s, &["id"]) == Some("desired"));
     if !desired.is_some_and(|s| {
         text(s, "run").starts_with(
-            "cargo xtask release desired --repo \"$GITHUB_REPOSITORY\" --version \"${TAG#v}\" ",
+            "cargo xtask release desired-deb --repo \"$GITHUB_REPOSITORY\" --version \"${TAG#v}\" ",
         ) && text(s, "run").contains("--output \"$GITHUB_OUTPUT\"")
     }) {
         problems.push(
-            "farm-check: no step `desired` runs `cargo xtask release desired` for the tag of this release"
+            "farm-check: no step `desired` runs `cargo xtask release desired-deb` for the tag of this release"
                 .to_owned(),
         );
     }
@@ -371,17 +375,36 @@ fn reaches(doc: &Node, name: &str, target: &str, seen: &mut Vec<String>) -> bool
         .any(|n| reaches(doc, n, target, seen))
 }
 
-/// Every public job waits for `soak`.
+/// The jobs that make the release public.
+const PROMOTION: [&str; 5] = [
+    "promote-latest",
+    "tap",
+    "stable-apt-read",
+    "stable-apt-index",
+    "stable-apt-write",
+];
+
+/// Every job that makes the release public waits for `promote-check`, and `promote-check` waits
+/// for the lab and for the install checks.
 fn order_problems(doc: &Node) -> Vec<String> {
-    let public = CHANNELS
+    let public = PROMOTION
         .iter()
-        .map(|c| c.job)
-        .chain(JOBS.iter().map(|j| j.name));
+        .copied()
+        .chain(JOBS.iter().filter(|j| j.suite == "stable").map(|j| j.name));
     let mut problems = Vec::new();
     for name in public {
-        if job(doc, name).is_some() && !reaches(doc, name, "soak", &mut Vec::new()) {
+        if job(doc, name).is_some() && !reaches(doc, name, "promote-check", &mut Vec::new()) {
             problems.push(format!(
-                "{name}: does not wait for soak, so it could run for a release the farm did not take"
+                "{name}: does not wait for promote-check, so it could make a release public that was not installed from testing and put on the lab"
+            ));
+        }
+    }
+    for before in ["soak", "check-apt", "check-brew", "check-install-sh"] {
+        if job(doc, "promote-check").is_some()
+            && !reaches(doc, "promote-check", before, &mut Vec::new())
+        {
+            problems.push(format!(
+                "promote-check: does not wait for {before}, so it would decide without its result"
             ));
         }
     }

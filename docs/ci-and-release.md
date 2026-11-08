@@ -8,7 +8,7 @@
 | `advisories.yml` | daily, push to `main` | `cargo deny check advisories`; the result is kept in one issue, and the run is green whatever it finds. |
 | `artifacts.yml` | pull request, push to `main`; by hand | builds `tierstore` (`--features server`) for linux-x86_64, linux-arm64 and macos-arm64, each on a GitHub-hosted runner of its platform, packages it with its SBOM and as a hostkeeper package (and, for the Homebrew tap and apt, as a tap-named tarball and, on Linux, a Debian package), writes the release index of the hostkeeper packages, makes `SHA256SUMS`. The macos-arm64 job also runs the tests of `tierstore`, `objstore-s3` and `tierstore-testkit` on macOS, the update hook's among them (both of its arms are built and tested on every system, each against fakes of its service manager, and the macOS packaging). This workflow runs no macOS job for a pull request (`macos.yml` does, for every pull request): for a pull request its macos-arm64 job is skipped and the sums cover the Linux files; a push to `main` builds every platform, and a run by hand (`gh workflow run artifacts.yml --ref <branch>`) builds and sums every platform of a branch and signs nothing. On a push to `main` it also signs (build provenance and SBOM attestations) and checks what it signed. |
 | `macos.yml` | pull request | `version` (Linux) computes the version the build is given, as artifacts.yml's `version` job does. `macos` runs on `macos-15` for every pull request: every test of the workspace (`cargo test --workspace --features tierstore/s3`), then the commands of artifacts.yml's macos-arm64 job (build, SBOM, licence notice, tarball, hostkeeper package unpacked with hostkeeper's unpacker, code signature), uploading and signing nothing, with `contents: read` alone and no secret or token. It restores artifacts.yml's macOS cache and saves none. It is not named `macos-arm64`: a pull request's run of artifacts.yml skips its job of that name, and a skipped job passes as a check. If `version` fails, `macos` is skipped and the run fails on `version`. A newer push to a pull request cancels its older run. |
-| `release.yml` | when `ci` or `artifacts` finishes on a push to `main` (automatic, see Releases); by hand | `plan` decides which commit of `main` is released and as which tag (the newest whose build recorded that version); `verify` and `publish` attach the files that commit's push built and signed to a GitHub release, after checking them again; `farm-check`, `farm` and `soak` then move the farm onto the release through hostkeeper and wait out the soak (see The farm first); `channel-upload`, `tap` and the apt jobs follow them and put the release on tierstore.dev, in the Homebrew tap and in apt (see The public channels). Builds nothing of tierstore. |
+| `release.yml` | when `ci` or `artifacts` finishes on a push to `main` (automatic, see Releases); by hand | `plan` decides which commit of `main` is released and as which tag (the newest whose build recorded that version); `verify` and `publish` attach the files that commit's push built and signed to a GitHub release, after checking them again; the release then goes through four stages (see The order of a release): `testing-upload`, `formula` and the `testing-apt-*` jobs publish it to testing, `check-apt`, `check-brew` and `check-install-sh` install it from there, `farm-check`, `farm` and `soak` put it on the lab through hostkeeper when the lab is configured, and `promote-check` then lets `promote-latest`, `tap` and the `stable-apt-*` jobs make it public. Builds nothing of tierstore. |
 | `tierstore-site.yml` | pull request, push to `main`, when the site changes | typecheck, tests and build of tierstore.dev. |
 | `tierstore-site-publish.yml` | push to `main` / by hand | builds the site again; uploads it only when the repository variable `TIERSTORE_SITE_PUBLISH` is `true`. |
 | `hostkeeper-desired.yml` | by hand, from `main` | sets the desired version of tierstore on the hostkeeper coordinator to a published release and waits for the fleet; skipped while the repository variable `HOSTKEEPER_COORDINATOR_URL` is empty. See [Setting the desired version on the hostkeeper coordinator](#setting-the-desired-version-on-the-hostkeeper-coordinator). |
@@ -253,53 +253,84 @@ hostkeeper package; and the release attaches them all. A pull request builds the
 sums them; the tap tarball of macOS is made by the macOS job, which `artifacts.yml` runs on a push
 and by hand and `macos.yml` runs for every pull request.
 
-### The farm first
+### The order of a release
 
-A release reaches the farm before anybody outside (`docs/design/distribution.md`, section 5.3).
-After `publish` three jobs of `release.yml` run, and the public channels below wait for the last:
+After `publish`, a release goes through four stages, in this order, and the same bytes go through
+all of them: nothing is rebuilt and nothing is uploaded again (`docs/design/distribution.md`,
+section 5). Nobody approves a step.
 
-- `farm-check` holds the gate. With neither repository variable `HOSTKEEPER_COORDINATOR_URL` nor
-  `HOSTKEEPER_COORDINATOR_CA` set it ends green with a notice, and `farm`, `soak` and every public
-  job are skipped: no farm, no public release. With one of them set it ends red. With both set it
-  runs `cargo xtask release desired` for the release just published (the check of
-  `hostkeeper-desired.yml`: the index lists a package of every platform), and, if the repository
-  variable `HOSTKEEPER_RELEASE_CHANNEL` is set, waits up to 30 minutes until the release channel
-  serves that release's `index.json` byte for byte. The tailnet's three variables
-  (`HOSTKEEPER_TAILNET_CLIENT_ID`, `HOSTKEEPER_TAILNET_AUDIENCE`, `HOSTKEEPER_TAILNET_COORDINATOR`)
-  are all set or none: all makes `farm` join the tailnet, some is red.
-- `farm` calls hostkeeper's `set-desired.yml` (the same pin as `hostkeeper-desired.yml`, which the
-  workflow lint holds equal) for the service `tierstore`, with the audience
-  `tierstore-hostkeeper-release`, and waits for the coordinator to report every farm host on the
-  version, reading every 10 seconds, at most `FARM_MAX_POLLS` times (default 360). It is the only
-  job here with `id-token: write`. The coordinator needs an allow-list entry for it like the one
-  for `hostkeeper-desired.yml`, with the event `workflow_run` and that audience.
-- `soak` waits `FARM_SOAK_HOURS` (a repository variable; empty is 0, which ends at once; at most 5)
-  after `farm` converged, reading the farm and failing at the first read that is not healthy
-  (`cargo xtask channels soak`). Only 0 works today: hostkeeper's CI client has no call that only
-  reads, so a larger value fails the job at once and no public channel follows. Leave it at 0.
+1. **Testing.** `testing-upload` puts `releases/<version>/` on tierstore.dev (the three tap
+   tarballs, the two Debian packages, their bundles and a `SHA256SUMS` of exactly these, once each,
+   write-once) and does **not** write `releases/latest.json` (`cargo xtask channels upload
+   --no-latest`). The `testing-apt-*` jobs put the Debian packages in the pool and list them in the
+   apt suite `testing` (see The apt repository). `formula` renders `Formula/tierstore.rb` from the
+   verified `SHA256SUMS` and keeps it as the artifact `formula`; it opens no pull request.
+2. **Install checks**, on GitHub-hosted runners, at release time only. Each is skipped when nothing
+   was published for it to read, and a failure stops the release before anything public changes:
+   - `check-apt` (amd64 on `ubuntu-24.04`, arm64 on `ubuntu-24.04-arm`) runs `xtask` in a clean
+     `ubuntu@sha256:...` container, adds `packages.komira.ai` with the published keyring and the
+     suite `testing` (a deb822 source with `Signed-By`), installs `tierstore=<version>`, and checks
+     that `tierstore --version` prints the release, the unit, the `sysusers.d` entry and the
+     conffile exist, and the service is neither enabled nor running
+     (`cargo xtask channels check-apt`).
+   - `check-brew` (`macos-15`) installs the rendered formula from a local tap and runs the binary
+     (`cargo xtask channels check-brew`).
+   - `check-install-sh` (`ubuntu-24.04` and `macos-15`) runs `install.sh` from tierstore.dev with
+     `--version <version>` and runs the binary (`cargo xtask channels check-install-sh`).
+3. **The lab**, through hostkeeper. `farm-check` holds the gate. With neither repository variable
+   `HOSTKEEPER_COORDINATOR_URL` nor `HOSTKEEPER_COORDINATOR_CA` set it ends green with a notice, and
+   `farm` and `soak` are skipped: **the stage is skipped and does not hold the release**. With one
+   of them set it ends red. With both set it runs `cargo xtask release desired-deb`, which reads
+   the suite `testing` as a client reads it and holds the entry of each `.deb` to the digest of the
+   release's `SHA256SUMS`, and hands the package version and digest on. The tailnet's three
+   variables (`HOSTKEEPER_TAILNET_CLIENT_ID`, `HOSTKEEPER_TAILNET_AUDIENCE`,
+   `HOSTKEEPER_TAILNET_COORDINATOR`) are all set or none: all makes `farm` join the tailnet, some is
+   red. `farm` calls hostkeeper's `set-desired.yml` (the same pin as `hostkeeper-desired.yml`, which
+   the workflow lint holds equal) for the service `tierstore`, with the audience
+   `tierstore-hostkeeper-release`, and waits for the coordinator to report every lab host on the
+   version, reading every 10 seconds, at most `FARM_MAX_POLLS` times (default 360). It is the only
+   job here with `id-token: write` for the coordinator, and needs an allow-list entry like the
+   one for `hostkeeper-desired.yml`, with the event `workflow_run` and that audience. `soak` waits
+   `FARM_SOAK_HOURS` (a repository variable; empty is 0, which ends at once; at most 5) after
+   `farm` converged, failing at the first read that is not healthy (`cargo xtask channels soak`).
+   Only 0 works today: hostkeeper's CI client has no call that only reads, so a larger value fails
+   the job at once. Leave it at 0. When the lab is configured it must converge (and soak), or
+   nothing public follows.
+4. **Promotion.** `promote-check` (`cargo xtask channels decide`) reads the results of the jobs
+   above: a failed or cancelled stage, or a lab that is configured and did not converge, ends it
+   red and the jobs after it are skipped. Otherwise `promote-latest` replaces
+   `releases/latest.json` (`cargo xtask channels latest`: it first reads every file of
+   `releases/<version>/` back from the bucket and holds it to the release's `SHA256SUMS`),
+   `tap` opens the pull request in the Homebrew tap from the artifact `formula`, and the
+   `stable-apt-*` jobs list the entries of the release in the suite `stable` (see The apt
+   repository).
 
-A failed `farm` or `soak` leaves the release a GitHub release and no more; fix the farm and re-run
-the failed jobs of the run, or let the next release go through.
+A failed job leaves the release a GitHub release in testing and no more. Re-run the failed jobs of
+the run: every write is write-once or idempotent, and `promote-check` reads the results again, so
+the run resumes where it stopped.
 
 ### The public channels: tierstore.dev and the Homebrew tap
 
-After `soak`, `release.yml` has two more jobs, `channel-upload` and `tap`. Nothing waits for them
-and a failed one un-releases nothing: re-run the failed job. Each starts with `cargo xtask channels
-gate`, which is given the job's settings and writes `enabled=true` or `enabled=false`, and every
-later step runs only when it said `true`. None of the settings set: the job ends green with a
-notice and writes nothing (merging the workflow changes no release). All set: it runs. Some set:
-it ends red naming the missing ones.
+`testing-upload`, `promote-latest` and `tap` are the jobs of the stages above that write to
+tierstore.dev and the tap. Each starts with `cargo xtask channels gate`, which is given the job's
+settings and writes `enabled=true` or `enabled=false`, and every later step runs only when it said
+`true`. None of the settings set: the job ends green with a notice and writes nothing (merging the
+workflow changes no release). All set: it runs. Some set: it ends red naming the missing ones.
+`promote-latest` is also off when `testing-upload` was.
 
 | job | environment | settings | does |
 |---|---|---|---|
-| `channel-upload` | `prod-releases-tierstore` | variables `TIERSTORE_RELEASES_BUCKET`, `TIERSTORE_RELEASES_ROLE_ARN`; optional `TIERSTORE_RELEASES_DISTRIBUTION_ID` | assumes the role by OIDC, puts `releases/<version>/` (the three tap tarballs, the two Debian packages, their bundles and a `SHA256SUMS` of exactly these) once each, then replaces `releases/latest.json` |
-| `tap` | `release` | variable `RELEASE_BOT_APP_ID`, secret `RELEASE_BOT_PRIVATE_KEY` | renders `Formula/tierstore.rb` from the checked `SHA256SUMS` and opens the pull request `bump/tierstore-v<version>` in `<owner>/homebrew-tap` as the release bot |
+| `testing-upload` | `prod-releases-tierstore` | variables `TIERSTORE_RELEASES_BUCKET`, `TIERSTORE_RELEASES_ROLE_ARN`; optional `TIERSTORE_RELEASES_DISTRIBUTION_ID` | assumes the role by OIDC and puts `releases/<version>/` once each; never `latest.json` |
+| `promote-latest` | `prod-releases-tierstore` | the same | assumes the same role, reads `releases/<version>/` back, and replaces `releases/latest.json` |
+| `tap` | `release` | variable `RELEASE_BOT_APP_ID`, secret `RELEASE_BOT_PRIVATE_KEY` | opens the pull request `bump/tierstore-v<version>` in `<owner>/homebrew-tap` as the release bot, from the artifact `formula` |
 
 - `cargo xtask channels upload` puts each file with one `aws s3api put-object --if-none-match '*'`,
   the only kind of upload the role allows. A file that exists answers `412`; the stored file is then
   read back and the answer is a success only if its digest is the local file's, so a re-run passes
-  and a different file at a version's key fails and is never written over. `latest.json`
-  (`{"version", "tag", "commit", "files": {name: {"sha256", "size"}}}`) is written last, with
+  and a different file at a version's key fails and is never written over. Without `--no-latest` it
+  also writes `latest.json`; the release does not use that.
+- `cargo xtask channels latest` writes
+  `latest.json` (`{"version", "tag", "commit", "files": {name: {"sha256", "size"}}}`) with
   `--if-match` on the ETag that was read, only when its version is lower than the release's, so a
   late or re-run older release writes nothing; with a distribution id given, `/releases/latest.json`
   is then invalidated.
@@ -313,11 +344,11 @@ it ends red naming the missing ones.
   tap repository alone) is minted in the second to last step and read by the last one only.
 
 The design is `docs/design/distribution.md`; the workflow lint (`crates/xtask/tests/workflows`)
-holds the shape of both jobs.
+holds the shape of these jobs.
 
 ### The apt repository
 
-After `soak`, `release.yml` also puts the two Debian packages in `packages.komira.ai`, the apt
+After `publish`, `release.yml` also puts the two Debian packages in `packages.komira.ai`, the apt
 repository the organisation's products share, in three jobs that never share a secret: no job
 holds both the signing key and the cloud role. The release is listed in the suite `testing`
 (`apt/dists/testing/`, every verb takes `--suite testing`); the suite `stable`, the one users
@@ -330,12 +361,15 @@ the pool holds the packages already). Both suites list the files of one pool.
 | `testing-apt-read` | `apt-publish` | variables `APT_PUBLISH_ROLE_ARN`, `APT_BUCKET`, `APT_DISTRIBUTION_ID`, `APT_HOSTNAME` | assumes the role by OIDC and reads the current index and the ETag of each of its objects from S3 (`cargo xtask channels apt read`) |
 | `testing-apt-index` | `apt-signing` | variable `APT_GPG_FINGERPRINT`, secrets `APT_GPG_PRIVATE_KEY`, `APT_GPG_PASSPHRASE` | merges `tierstore_<version>_{amd64,arm64}.deb` into that index, keeping every other product's entries (`apt index`), and signs `InRelease` and `Release.gpg` (`apt sign`); no cloud role |
 | `testing-apt-write` | `apt-publish` | as the read job | uploads the packages once each, then the index with `If-Match` on the ETags that were read, then invalidates `/apt/dists/*` (`apt write`) |
+| `stable-apt-read` | `apt-publish` | as the read job | after `promote-check`: reads the index of `testing` and of `stable` with the ETag of each object |
+| `stable-apt-index` | `apt-signing` | as the index job | lists the entries of this release that `testing` holds in the index of `stable`, held to the digests of `SHA256SUMS` and keeping every other product's entries (`apt promote`), and signs it |
+| `stable-apt-write` | `apt-publish` | as the read job | writes the index of `stable` with `If-Match` on the ETags that were read and invalidates `/apt/dists/*`; no package (`apt write --suite stable --no-pool`) |
 
 A job without its settings ends green with a notice and writes nothing; the index and write jobs
 are also off when the read job was (`channels gate --require`). The index is the one object other
 products' releases write too. When the write finds it changed in between (`412`), it reports
 `conflict=true` and ends green, and the jobs with the suffix `-2` read, merge, sign and write
-again; the write of the third attempt (`-3`) fails instead of asking for a fourth. A package that
+again; the write of the third attempt (`-3`) fails instead of asking for a fourth. The `stable-apt-*` jobs have the same attempts. `apt promote` refuses a version `testing` does not list, a digest that is not the one in `SHA256SUMS`, and a `stable` that lists a newer version or this version with other bytes. A package that
 is in the pool already passes only with the same bytes. A version older than the newest listed is
 refused. A release whose apt jobs all failed is still a release: re-run the failed jobs.
 

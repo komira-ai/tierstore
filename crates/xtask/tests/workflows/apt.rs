@@ -28,6 +28,16 @@ pub const RETRY_2_IF: &str = "${{ needs.plan.outputs.release == 'true' && github
 /// The `if:` of the read job of attempt 3.
 pub const RETRY_3_IF: &str = "${{ needs.plan.outputs.release == 'true' && github.ref == 'refs/heads/main' && needs.testing-apt-write-2.outputs.conflict == 'true' }}";
 
+/// The `if:` of the promotion's jobs of the first attempt: a release, on main, that
+/// `promote-check` promoted.
+pub const PROMOTE_IF: &str = "${{ needs.plan.outputs.release == 'true' && github.ref == 'refs/heads/main' && needs.promote-check.outputs.promote == 'true' }}";
+
+/// The `if:` of the read job of the second attempt of the promotion.
+pub const STABLE_RETRY_2_IF: &str = "${{ needs.plan.outputs.release == 'true' && github.ref == 'refs/heads/main' && needs.stable-apt-write.outputs.conflict == 'true' }}";
+
+/// The `if:` of the read job of the third attempt of the promotion.
+pub const STABLE_RETRY_3_IF: &str = "${{ needs.plan.outputs.release == 'true' && github.ref == 'refs/heads/main' && needs.stable-apt-write-2.outputs.conflict == 'true' }}";
+
 /// The role the read and write jobs assume.
 const ROLE: &str = "${{ vars.APT_PUBLISH_ROLE_ARN }}";
 
@@ -67,7 +77,7 @@ pub struct Job {
     pub suite: &'static str,
 }
 
-pub const JOBS: [Job; 9] = [
+pub const JOBS: [Job; 18] = [
     Job {
         name: "testing-apt-read",
         kind: Kind::Read,
@@ -149,6 +159,98 @@ pub const JOBS: [Job; 9] = [
         last: true,
         suite: "testing",
     },
+    Job {
+        name: "stable-apt-read",
+        kind: Kind::Read,
+        needs: &["plan", "promote-check", "testing-apt-read"],
+        condition: PROMOTE_IF,
+        requires: &["TESTING_ENABLED"],
+        last: false,
+        suite: "stable",
+    },
+    Job {
+        name: "stable-apt-index",
+        kind: Kind::Index,
+        needs: &[
+            "plan",
+            "promote-check",
+            "stable-apt-read",
+            "testing-apt-index",
+        ],
+        condition: PROMOTE_IF,
+        requires: &["READ_ENABLED"],
+        last: false,
+        suite: "stable",
+    },
+    Job {
+        name: "stable-apt-write",
+        kind: Kind::Write,
+        needs: &[
+            "plan",
+            "promote-check",
+            "stable-apt-index",
+            "stable-apt-read",
+            "testing-apt-write",
+        ],
+        condition: PROMOTE_IF,
+        requires: &["READ_ENABLED", "INDEX_SIGNED"],
+        last: false,
+        suite: "stable",
+    },
+    Job {
+        name: "stable-apt-read-2",
+        kind: Kind::Read,
+        needs: &["plan", "stable-apt-write"],
+        condition: STABLE_RETRY_2_IF,
+        requires: &[],
+        last: false,
+        suite: "stable",
+    },
+    Job {
+        name: "stable-apt-index-2",
+        kind: Kind::Index,
+        needs: &["plan", "stable-apt-read-2"],
+        condition: RELEASE_IF,
+        requires: &["READ_ENABLED"],
+        last: false,
+        suite: "stable",
+    },
+    Job {
+        name: "stable-apt-write-2",
+        kind: Kind::Write,
+        needs: &["plan", "stable-apt-index-2", "stable-apt-read-2"],
+        condition: RELEASE_IF,
+        requires: &["READ_ENABLED", "INDEX_SIGNED"],
+        last: false,
+        suite: "stable",
+    },
+    Job {
+        name: "stable-apt-read-3",
+        kind: Kind::Read,
+        needs: &["plan", "stable-apt-write-2"],
+        condition: STABLE_RETRY_3_IF,
+        requires: &[],
+        last: false,
+        suite: "stable",
+    },
+    Job {
+        name: "stable-apt-index-3",
+        kind: Kind::Index,
+        needs: &["plan", "stable-apt-read-3"],
+        condition: RELEASE_IF,
+        requires: &["READ_ENABLED"],
+        last: false,
+        suite: "stable",
+    },
+    Job {
+        name: "stable-apt-write-3",
+        kind: Kind::Write,
+        needs: &["plan", "stable-apt-index-3", "stable-apt-read-3"],
+        condition: RELEASE_IF,
+        requires: &["READ_ENABLED", "INDEX_SIGNED"],
+        last: true,
+        suite: "stable",
+    },
 ];
 
 /// Is `name` an apt job that holds the cloud role (a read or a write)?
@@ -156,14 +258,25 @@ pub fn is_role_job(name: &str) -> bool {
     JOBS.iter().any(|j| j.name == name && j.kind != Kind::Index)
 }
 
-/// The verb each kind of job runs, and no other kind.
-fn verb(kind: Kind) -> &'static str {
-    match kind {
-        Kind::Read => "cargo xtask channels apt read ",
-        Kind::Index => "cargo xtask channels apt index ",
-        Kind::Write => "cargo xtask channels apt write ",
+/// The verb each kind of job runs, and no other kind: the index job of the suite `testing` merges
+/// the release's packages (`apt index`), the one of `stable` promotes the entries testing lists
+/// (`apt promote`).
+fn verb(kind: Kind, suite: &str) -> &'static str {
+    match (kind, suite) {
+        (Kind::Read, _) => "cargo xtask channels apt read ",
+        (Kind::Index, "stable") => "cargo xtask channels apt promote ",
+        (Kind::Index, _) => "cargo xtask channels apt index ",
+        (Kind::Write, _) => "cargo xtask channels apt write ",
     }
 }
+
+/// The verbs, with the kind and the suite of the only jobs that may run each.
+const VERBS: [(&str, Kind, &str); 4] = [
+    ("cargo xtask channels apt read ", Kind::Read, ""),
+    ("cargo xtask channels apt index ", Kind::Index, "testing"),
+    ("cargo xtask channels apt promote ", Kind::Index, "stable"),
+    ("cargo xtask channels apt write ", Kind::Write, ""),
+];
 
 const SIGN: &str = "cargo xtask channels apt sign ";
 
@@ -183,7 +296,8 @@ pub fn apt_problems(doc: &Node) -> Vec<String> {
     }
     for (name, found) in jobs {
         let name = name.as_str().unwrap_or_default();
-        let kind = JOBS.iter().find(|j| j.name == name).map(|j| j.kind);
+        let own = JOBS.iter().find(|j| j.name == name);
+        let kind = own.map(|j| j.kind);
         if kind != Some(Kind::Index) && mentions(found, "APT_GPG_") {
             problems.push(format!(
                 "{name}: names APT_GPG_, the signing key, which only the apt index jobs may"
@@ -194,11 +308,18 @@ pub fn apt_problems(doc: &Node) -> Vec<String> {
                 "{name}: names APT_PUBLISH_ROLE_ARN, which only the apt jobs that read and write may"
             ));
         }
-        for other in [Kind::Read, Kind::Index, Kind::Write] {
-            if kind != Some(other) && runs(found, verb(other)) {
+        for (word, other, suite) in VERBS {
+            let may =
+                own.is_some_and(|j| j.kind == other && (suite.is_empty() || j.suite == suite));
+            if !may && runs(found, word) {
+                let of = if suite.is_empty() {
+                    String::new()
+                } else {
+                    format!(" of the suite {suite}")
+                };
                 problems.push(format!(
-                    "{name}: runs `{}...`, which only the {other:?} jobs of the apt repository may",
-                    verb(other).trim_end()
+                    "{name}: runs `{}...`, which only the {other:?} jobs{of} of the apt repository may",
+                    word.trim_end()
                 ));
             }
         }
@@ -277,7 +398,7 @@ fn job_problems(want: &Job, job: &Node) -> Vec<String> {
     }
     let after = &all[gate + 1..];
     match want.kind {
-        Kind::Index => problems.extend(index_problems(name, job, after)),
+        Kind::Index => problems.extend(index_problems(want, job, after)),
         _ => {
             problems.extend(role_problems(want, after));
             for step in all.iter().filter(|s| mentions(s, "secrets.")) {
@@ -291,29 +412,72 @@ fn job_problems(want: &Job, job: &Node) -> Vec<String> {
     problems
 }
 
-/// The release publishes into the suite `testing` and nowhere else: every verb of the job is given
-/// `--suite <suite>`, the index is signed in the directory of that suite, and a write puts the
-/// packages in the pool (`--no-pool` is the promotion's).
+/// A job writes one suite and no other: every verb of the job is given `--suite <suite>` (the
+/// promotion's read job reads both suites, and its index job is given the two directories and the
+/// sums), the index is signed in the directory of that suite, a write of `testing` puts the
+/// packages in the pool, and a write of `stable` puts none (`--no-pool`): the promotion lists in
+/// `stable` the entries `testing` holds, and writes no package.
 fn suite_problems(want: &Job, all: &[Node]) -> Vec<String> {
     let name = want.name;
+    let stable = want.suite == "stable";
+    let other = if stable { "testing" } else { "stable" };
+    let own = verb(want.kind, want.suite);
     let mut problems = Vec::new();
-    let needle = format!("{}--suite {} ", verb(want.kind), want.suite);
-    for step in all
-        .iter()
-        .filter(|s| text(s, "run").contains(verb(want.kind)))
-    {
+    for step in all.iter().filter(|s| text(s, "run").contains(own)) {
         let run = text(step, "run");
-        if !run.contains(&needle) {
-            problems.push(format!(
-                "{name}: `{}...` is not given `--suite {}`",
-                verb(want.kind).trim_end(),
-                want.suite
-            ));
+        let shown = own.trim_end();
+        match (want.kind, stable) {
+            (Kind::Index, true) => {
+                for argument in [
+                    "--testing \"$RUNNER_TEMP/apt-read/testing\" ",
+                    "--stable \"$RUNNER_TEMP/apt-read/stable\" ",
+                    "--sums dist/SHA256SUMS ",
+                ] {
+                    if !run.contains(argument) {
+                        problems.push(format!("{name}: `{shown}...` is not given {argument}"));
+                    }
+                }
+            }
+            (Kind::Read, true) => {
+                for suite in ["testing", "stable"] {
+                    if !run.contains(&format!("{own}--suite {suite} ")) {
+                        problems.push(format!(
+                            "{name}: `{shown}...` is not given `--suite {suite}`: the promotion reads both"
+                        ));
+                    }
+                }
+            }
+            _ => {
+                if !run.contains(&format!("{own}--suite {} ", want.suite)) {
+                    problems.push(format!(
+                        "{name}: `{shown}...` is not given `--suite {}`",
+                        want.suite
+                    ));
+                }
+                if run.contains(&format!("--suite {other} ")) {
+                    problems.push(format!(
+                        "{name}: names `--suite {other}`; this job is for the suite {}",
+                        want.suite
+                    ));
+                }
+            }
         }
-        if run.contains("--no-pool") {
-            problems.push(format!(
-                "{name}: passes --no-pool; the release's write puts the packages in the pool"
-            ));
+        if want.kind == Kind::Write {
+            if stable && !run.contains(" --no-pool ") {
+                problems.push(format!(
+                    "{name}: does not pass --no-pool; the promotion writes the index only"
+                ));
+            }
+            if stable && run.contains("--debs ") {
+                problems.push(format!(
+                    "{name}: passes --debs; the promotion uploads no package"
+                ));
+            }
+            if !stable && run.contains("--no-pool") {
+                problems.push(format!(
+                    "{name}: passes --no-pool; the release's write puts the packages in the pool"
+                ));
+            }
         }
     }
     let dir = format!("--dir \"$RUNNER_TEMP/apt-next/dists/{}\" ", want.suite);
@@ -385,7 +549,7 @@ fn role_problems(want: &Job, after: &[Node]) -> Vec<String> {
     let verbs: Vec<usize> = after
         .iter()
         .enumerate()
-        .filter(|(_, s)| text(s, "run").contains(verb(want.kind)))
+        .filter(|(_, s)| text(s, "run").contains(verb(want.kind, want.suite)))
         .map(|(i, _)| i)
         .collect();
     match (roles.as_slice(), verbs.as_slice()) {
@@ -410,10 +574,13 @@ fn role_problems(want: &Job, after: &[Node]) -> Vec<String> {
         }
         _ => problems.push(format!(
             "{name}: it needs one step that assumes the role and one that runs `{}...`",
-            verb(want.kind).trim_end()
+            verb(want.kind, want.suite).trim_end()
         )),
     }
+    // The write of the suite `testing` uploads the release's packages, checked against the
+    // sums; the promotion's write has no file of the release.
     if want.kind == Kind::Write
+        && want.suite == "testing"
         && !after
             .iter()
             .any(|s| text(s, "run").contains("cargo xtask release check dist"))
@@ -425,7 +592,8 @@ fn role_problems(want: &Job, after: &[Node]) -> Vec<String> {
 
 /// The index jobs: no role, the key in the gate and the signing step alone, the merge before the
 /// signature.
-fn index_problems(name: &str, job: &Node, after: &[Node]) -> Vec<String> {
+fn index_problems(want: &Job, job: &Node, after: &[Node]) -> Vec<String> {
+    let name = want.name;
     let mut problems = Vec::new();
     for word in ["aws-actions/", "id-token", "AWS_", "APT_PUBLISH_"] {
         if mentions(job, word) {
@@ -436,7 +604,7 @@ fn index_problems(name: &str, job: &Node, after: &[Node]) -> Vec<String> {
     }
     let merge = after
         .iter()
-        .position(|s| text(s, "run").contains(verb(Kind::Index)));
+        .position(|s| text(s, "run").contains(verb(Kind::Index, want.suite)));
     let sign = after.iter().position(|s| text(s, "run").contains(SIGN));
     match (merge, sign) {
         (Some(m), Some(s)) if m < s => {
@@ -461,7 +629,7 @@ fn index_problems(name: &str, job: &Node, after: &[Node]) -> Vec<String> {
         }
         _ => problems.push(format!(
             "{name}: it needs a step that merges (`{}...`) and then one that signs (`{}...`)",
-            verb(Kind::Index).trim_end(),
+            verb(Kind::Index, want.suite).trim_end(),
             SIGN.trim_end()
         )),
     }

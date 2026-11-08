@@ -1,23 +1,26 @@
-//! The rules for the channel jobs of `release.yml` (`channel-upload` and `tap`), which put a
-//! published release on tierstore.dev and in the Homebrew tap (docs/design/distribution.md,
-//! section 5). [`channel_problems`] is called from `release_problems`, so the one lint holds the
+//! The rules for the channel jobs of `release.yml` (`testing-upload`, `promote-latest` and `tap`),
+//! which put a published release on tierstore.dev and in the Homebrew tap
+//! (docs/design/distribution.md, section 5). [`channel_problems`] is called from `release_problems`, so the one lint holds the
 //! whole file.
 //!
 //! Each job is held to the shape that makes it safe to leave in the workflow before its owner has
 //! made the settings, and safe to run after:
-//! - it needs `plan` and `soak` (the release exists, and the farm took it and kept it healthy) and
-//!   has the `if:` of `publish`;
+//! - it has the `needs` and the `if:` of the table: `testing-upload` runs right after `publish`
+//!   and writes `releases/<version>/` only (`channels upload --no-latest`); `promote-latest` and
+//!   `tap` wait for `promote-check` (and for the job whose output they use), and run only when
+//!   it said the release is promoted;
 //! - it names its environment, which holds the settings, and holds exactly the permissions the
-//!   table below gives (the cloud token for `channel-upload`, nothing to write for `tap`);
+//!   table below gives (the cloud token for the two upload jobs, nothing to write for `tap`);
 //! - its first step that is not setup is the gate (`cargo xtask channels gate`), which is given
 //!   each of the job's settings and none of their values, and every step after the gate runs only
 //!   when the gate said `enabled=true`; no step before the gate assumes a role or mints a token;
-//! - the role is assumed by one step of `channel-upload` alone, with the role of the environment;
+//! - the role is assumed by one step of each upload job alone, with the role of the environment;
 //!   the release bot's token is minted by one step of `tap` alone, for the tap repository alone
 //!   with the two permissions the pull request needs, in the second to last step, and read by the
 //!   last step alone, which opens the pull request;
 //! - the key of the bot, the role and the token action appear in no other job.
 
+use super::apt::PROMOTE_IF;
 use super::lint::{RELEASE_IF, entries, entry, names};
 use super::yaml::{Node, Value};
 
@@ -35,29 +38,55 @@ pub struct Channel {
     pub permissions: &'static [&'static str],
     /// The settings the gate is given.
     pub settings: &'static [&'static str],
+    /// The jobs it waits for, sorted.
+    pub needs: &'static [&'static str],
+    /// Its `if:`.
+    pub condition: &'static str,
+    /// The answers of earlier jobs the gate is given with `--require`.
+    pub requires: &'static [&'static str],
 }
 
 pub const CHANNELS: &[Channel] = &[
     Channel {
-        job: "channel-upload",
+        job: "testing-upload",
         environment: "prod-releases-tierstore",
         permissions: &["contents: read", "id-token: write"],
         settings: &["TIERSTORE_RELEASES_BUCKET", "TIERSTORE_RELEASES_ROLE_ARN"],
+        needs: &["plan", "publish"],
+        condition: RELEASE_IF,
+        requires: &[],
+    },
+    Channel {
+        job: "promote-latest",
+        environment: "prod-releases-tierstore",
+        permissions: &["contents: read", "id-token: write"],
+        settings: &["TIERSTORE_RELEASES_BUCKET", "TIERSTORE_RELEASES_ROLE_ARN"],
+        needs: &["plan", "promote-check", "testing-upload"],
+        condition: PROMOTE_IF,
+        requires: &["UPLOADED"],
     },
     Channel {
         job: "tap",
         environment: "release",
         permissions: &["contents: read"],
         settings: &["RELEASE_BOT_APP_ID", "RELEASE_BOT_PRIVATE_KEY"],
+        needs: &["formula", "plan", "promote-check"],
+        condition: PROMOTE_IF,
+        requires: &[],
     },
 ];
 
-/// Words that belong to one channel job and to no other: `(word, job)`.
-const OWNED: &[(&str, &str)] = &[
-    ("RELEASE_BOT_PRIVATE_KEY", "tap"),
-    ("create-github-app-token", "tap"),
-    ("configure-aws-credentials", "channel-upload"),
-    ("TIERSTORE_RELEASES_", "channel-upload"),
+/// Words that belong to some channel jobs and to no other: `(word, jobs)`.
+const OWNED: &[(&str, &[&str])] = &[
+    ("RELEASE_BOT_PRIVATE_KEY", &["tap"]),
+    ("create-github-app-token", &["tap"]),
+    (
+        "configure-aws-credentials",
+        &["testing-upload", "promote-latest"],
+    ),
+    ("TIERSTORE_RELEASES_", &["testing-upload", "promote-latest"]),
+    ("channels upload", &["testing-upload"]),
+    ("channels latest", &["promote-latest"]),
 ];
 
 pub(super) fn steps(job: &Node) -> &[Node] {
@@ -113,11 +142,14 @@ pub fn channel_problems(doc: &Node) -> Vec<String> {
     }
     for (name, found) in jobs {
         let name = name.as_str().unwrap_or_default();
-        for (word, owner) in OWNED {
+        for (word, owners) in OWNED {
             // The apt jobs that hold the cloud role assume it with the same action.
             let apt_role = *word == "configure-aws-credentials" && super::apt::is_role_job(name);
-            if name != *owner && !apt_role && mentions(found, word) {
-                problems.push(format!("{name}: names {word}, which only {owner} may"));
+            if !owners.contains(&name) && !apt_role && mentions(found, word) {
+                problems.push(format!(
+                    "{name}: names {word}, which only {} may",
+                    owners.join(" and ")
+                ));
             }
         }
     }
@@ -127,11 +159,11 @@ pub fn channel_problems(doc: &Node) -> Vec<String> {
 fn job_problems(channel: &Channel, job: &Node) -> Vec<String> {
     let name = channel.job;
     let mut problems = Vec::new();
-    if names(entry(job, "needs")) != ["plan", "soak"] {
-        problems.push(format!("{name}: needs are not plan and soak"));
+    if names(entry(job, "needs")) != channel.needs {
+        problems.push(format!("{name}: needs are not {:?}", channel.needs));
     }
-    if entry(job, "if").and_then(Node::as_str) != Some(RELEASE_IF) {
-        problems.push(format!("{name}: `if` is not {RELEASE_IF}"));
+    if entry(job, "if").and_then(Node::as_str) != Some(channel.condition) {
+        problems.push(format!("{name}: `if` is not {}", channel.condition));
     }
     if entry(job, "environment").and_then(Node::as_str) != Some(channel.environment) {
         problems.push(format!(
@@ -182,7 +214,9 @@ fn job_problems(channel: &Channel, job: &Node) -> Vec<String> {
         }
     }
     match name {
-        "channel-upload" => problems.extend(upload_problems(&all[gate + 1..])),
+        "testing-upload" | "promote-latest" => {
+            problems.extend(upload_problems(name, &all[gate + 1..]));
+        }
         _ => problems.extend(tap_problems(&all[gate + 1..])),
     }
     problems
@@ -212,13 +246,33 @@ fn gate_problems(channel: &Channel, gate: &Node) -> Vec<String> {
             "{name}: the gate must be given each setting as NAME=${{VAR:+set}}, and no other"
         ));
     }
+    for require in channel.requires {
+        if !run.contains(&format!("--require \"{require}=${require}\"")) {
+            problems.push(format!(
+                "{name}: the gate is not given --require \"{require}=${require}\""
+            ));
+        }
+    }
+    if run.matches("--require ").count() != channel.requires.len() {
+        problems.push(format!(
+            "{name}: the gate is given a requirement it should not be"
+        ));
+    }
     if run.contains("secrets.") || run.contains("vars.") {
         problems.push(format!("{name}: the gate's command line holds a value"));
     }
     problems
 }
 
-fn upload_problems(after_gate: &[Node]) -> Vec<String> {
+/// The upload jobs: `testing-upload` puts the files of the version and never the pointer
+/// (`channels upload --no-latest`); `promote-latest` reads them back and replaces the pointer
+/// (`channels latest`) and uploads nothing.
+fn upload_problems(name: &str, after_gate: &[Node]) -> Vec<String> {
+    let verb = if name == "testing-upload" {
+        "cargo xtask channels upload"
+    } else {
+        "cargo xtask channels latest"
+    };
     let mut problems = Vec::new();
     let roles: Vec<usize> = after_gate
         .iter()
@@ -229,7 +283,7 @@ fn upload_problems(after_gate: &[Node]) -> Vec<String> {
     let uploads: Vec<usize> = after_gate
         .iter()
         .enumerate()
-        .filter(|(_, s)| text(s, "run").contains("cargo xtask channels upload"))
+        .filter(|(_, s)| text(s, "run").contains(verb))
         .map(|(i, _)| i)
         .collect();
     match (roles.as_slice(), uploads.as_slice()) {
@@ -239,35 +293,38 @@ fn upload_problems(after_gate: &[Node]) -> Vec<String> {
                 .and_then(Node::as_str);
             if given != Some(ROLE) {
                 problems.push(format!(
-                    "channel-upload: the role assumed is not {ROLE}, the environment's"
+                    "{name}: the role assumed is not {ROLE}, the environment's"
                 ));
             }
             if role > upload {
-                problems.push("channel-upload: the role is assumed after the upload".to_owned());
+                problems.push(format!("{name}: the role is assumed after `{verb}` runs"));
             }
             let run = text(&after_gate[*upload], "run");
+            if name == "testing-upload" && !run.contains(" --no-latest ") {
+                problems.push(
+                    "testing-upload: the upload is not given --no-latest, so it would name an unchecked release the newest"
+                        .to_owned(),
+                );
+            }
             for argument in [
                 "--tag \"$TAG\"",
                 "--commit \"$COMMIT\"",
                 "--bucket \"$BUCKET\"",
             ] {
                 if !run.contains(argument) {
-                    problems.push(format!(
-                        "channel-upload: the upload is not given {argument}"
-                    ));
+                    problems.push(format!("{name}: `{verb}` is not given {argument}"));
                 }
             }
         }
-        _ => problems.push(
-            "channel-upload: it needs one step that assumes the role and one that uploads"
-                .to_owned(),
-        ),
+        _ => problems.push(format!(
+            "{name}: it needs one step that assumes the role and one that runs `{verb}`"
+        )),
     }
     if !after_gate
         .iter()
         .any(|s| text(s, "run").contains("cargo xtask release check dist"))
     {
-        problems.push("channel-upload: no step checks the downloaded files".to_owned());
+        problems.push(format!("{name}: no step checks the downloaded files"));
     }
     problems
 }

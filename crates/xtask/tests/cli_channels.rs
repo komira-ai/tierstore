@@ -596,3 +596,158 @@ fn the_apt_suite_and_promote_and_no_pool_are_dispatched_and_their_flags_are_held
     );
     assert_eq!(write(&[]).status.code(), Some(2));
 }
+
+#[test]
+fn decide_latest_and_the_install_checks_are_dispatched_and_report_what_fails() {
+    // Catches: a verb not wired to its implementation, a refusal that does not reach the exit
+    // status, and a promotion decided without its answer in GITHUB_OUTPUT. The programs the
+    // checks run are the stand-in program, which answers none of them.
+    let d = fresh("decide-checks");
+    let decide = |check_apt: &str, farm: &str| {
+        let mut args = vec![
+            "channels",
+            "decide",
+            "--farm-enabled",
+            farm,
+            "--output",
+            "out",
+        ];
+        let results: Vec<String> = [
+            "testing-upload=success",
+            "testing-apt-write=success",
+            "testing-apt-write-2=skipped",
+            "testing-apt-write-3=skipped",
+            "check-brew=success",
+            "check-install-sh=success",
+            "farm-check=success",
+            "farm=success",
+            "soak=success",
+        ]
+        .iter()
+        .map(|r| (*r).to_owned())
+        .chain([format!("check-apt={check_apt}")])
+        .collect();
+        for r in &results {
+            args.extend(["--result", r]);
+        }
+        run(&d, &args)
+    };
+    let o = decide("success", "true");
+    assert!(o.status.success(), "{}", stderr(&o));
+    assert_eq!(
+        std::fs::read_to_string(d.join("out")).unwrap(),
+        "promote=true\n"
+    );
+    let o = decide("failure", "true");
+    assert_eq!(o.status.code(), Some(1));
+    assert!(
+        stderr(&o).contains("check-apt is failure"),
+        "{}",
+        stderr(&o)
+    );
+    assert_eq!(decide("success", "maybe").status.code(), Some(2));
+
+    let latest = run(
+        &d,
+        &[
+            "channels", "latest", "dist", "--tag", "1.2.3", "--commit", COMMIT_SHA, "--bucket",
+            "b", "--work", "work", "--aws", FAKE,
+        ],
+    );
+    assert_eq!(latest.status.code(), Some(2), "{}", stderr(&latest));
+    let upload = run(
+        &d,
+        &[
+            "channels",
+            "upload",
+            "dist",
+            "--no-latest",
+            "--tag",
+            "1.2.3",
+            "--commit",
+            COMMIT_SHA,
+            "--bucket",
+            "b",
+            "--work",
+            "work",
+            "--aws",
+            FAKE,
+        ],
+    );
+    assert_eq!(upload.status.code(), Some(2), "{}", stderr(&upload));
+
+    let o = run(
+        &d,
+        &[
+            "channels",
+            "check-apt",
+            "--arch",
+            "amd64",
+            "--version",
+            "1.2.3",
+            "--commit",
+            COMMIT_SHA,
+            "--root",
+            "root",
+            "--dpkg",
+            FAKE,
+            "--apt-get",
+            FAKE,
+            "--dpkg-query",
+            FAKE,
+            "--curl",
+            FAKE,
+        ],
+    );
+    assert_eq!(o.status.code(), Some(1));
+    assert!(
+        stderr(&o).contains("--print-architecture failed"),
+        "{}",
+        stderr(&o)
+    );
+
+    std::fs::write(d.join("tierstore.rb"), "formula").unwrap();
+    let o = run(
+        &d,
+        &[
+            "channels",
+            "check-brew",
+            "--formula",
+            "tierstore.rb",
+            "--version",
+            "1.2.3",
+            "--commit",
+            COMMIT_SHA,
+            "--brew",
+            FAKE,
+        ],
+    );
+    assert_eq!(o.status.code(), Some(1));
+    assert!(
+        stderr(&o).contains("tap-new --no-git local/tierstore failed"),
+        "{}",
+        stderr(&o)
+    );
+
+    let o = run(
+        &d,
+        &[
+            "channels",
+            "check-install-sh",
+            "--version",
+            "1.2.3",
+            "--commit",
+            COMMIT_SHA,
+            "--work",
+            "scratch",
+            "--curl",
+            FAKE,
+            "--sh",
+            FAKE,
+        ],
+    );
+    assert_eq!(o.status.code(), Some(1));
+    assert!(stderr(&o).contains("failed"), "{}", stderr(&o));
+}
+
+const COMMIT_SHA: &str = "0123456789abcdef0123456789abcdef01234567";

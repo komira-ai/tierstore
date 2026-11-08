@@ -13,6 +13,8 @@ mod apt;
 mod apt_tests;
 mod channels;
 mod channels_tests;
+mod checks;
+mod checks_tests;
 mod desired;
 mod desired_tests;
 mod distribution_tests;

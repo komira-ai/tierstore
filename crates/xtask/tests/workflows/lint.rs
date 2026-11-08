@@ -13,9 +13,9 @@
 //!   written by the one `attest` job of `artifacts.yml`, on a push to `main` alone, `id-token`
 //!   also by the site's deploy job and by the `set-desired` job of `hostkeeper-desired.yml`
 //!   (the token the hostkeeper coordinator admits) and by the release's `farm` job (the same token
-//!   for the farm), and by the release's `channel-upload` job (the
-//!   token the release-files role admits) and its six apt jobs that read and write the repository
-//!   (the token the apt role admits); `contents: write` by the release's `publish` job
+//!   for the farm), and by the release's `testing-upload` and `promote-latest` jobs (the
+//!   token the release-files role admits) and its twelve apt jobs that read and write the
+//!   repository (the token the apt role admits), six for the suite `testing` and six for `stable`; `contents: write` by the release's `publish` job
 //!   alone.
 //!
 //! Keys are matched exactly. What this does not evaluate it refuses: a YAML tag, a second
@@ -82,9 +82,15 @@ pub const WRITE_ALLOWED: &[Allowed] = &[
     },
     Allowed {
         file: "release.yml",
-        job: "channel-upload",
+        job: "testing-upload",
         scope: "id-token",
         condition: RELEASE_IF,
+    },
+    Allowed {
+        file: "release.yml",
+        job: "promote-latest",
+        scope: "id-token",
+        condition: super::apt::PROMOTE_IF,
     },
     Allowed {
         file: "release.yml",
@@ -119,6 +125,42 @@ pub const WRITE_ALLOWED: &[Allowed] = &[
     Allowed {
         file: "release.yml",
         job: "testing-apt-write-3",
+        scope: "id-token",
+        condition: RELEASE_IF,
+    },
+    Allowed {
+        file: "release.yml",
+        job: "stable-apt-read",
+        scope: "id-token",
+        condition: super::apt::PROMOTE_IF,
+    },
+    Allowed {
+        file: "release.yml",
+        job: "stable-apt-write",
+        scope: "id-token",
+        condition: super::apt::PROMOTE_IF,
+    },
+    Allowed {
+        file: "release.yml",
+        job: "stable-apt-read-2",
+        scope: "id-token",
+        condition: super::apt::STABLE_RETRY_2_IF,
+    },
+    Allowed {
+        file: "release.yml",
+        job: "stable-apt-write-2",
+        scope: "id-token",
+        condition: RELEASE_IF,
+    },
+    Allowed {
+        file: "release.yml",
+        job: "stable-apt-read-3",
+        scope: "id-token",
+        condition: super::apt::STABLE_RETRY_3_IF,
+    },
+    Allowed {
+        file: "release.yml",
+        job: "stable-apt-write-3",
         scope: "id-token",
         condition: RELEASE_IF,
     },
@@ -300,6 +342,12 @@ fn permission_problems(file: &str, name: &str, job: &Node) -> Vec<String> {
 pub const RELEASE_IF: &str =
     "${{ needs.plan.outputs.release == 'true' && github.ref == 'refs/heads/main' }}";
 
+/// The condition of the jobs that run after jobs that may be skipped (an attempt that was not
+/// needed, a check with nothing to check): not cancelled, no predecessor failed, and the plan
+/// said to release, on a run of `main`. A failed predecessor still stops the job; a skipped one does
+/// not.
+pub const AFTER_IF: &str = "${{ !cancelled() && !failure() && needs.plan.outputs.release == 'true' && github.ref == 'refs/heads/main' }}";
+
 /// What the `if:` of the plan job must say of the run that started it: it is a completed
 /// run that succeeded, for a push to `main` of this repository.
 const PLAN_GUARDS: [&str; 4] = [
@@ -370,20 +418,26 @@ pub fn release_problems(text: &str) -> Vec<String> {
     let mut listed: Vec<&str> = jobs.iter().filter_map(|(k, _)| k.as_str()).collect();
     listed.sort_unstable();
     let mut expected = vec![
-        "channel-upload",
+        "check-apt",
+        "check-brew",
+        "check-install-sh",
         "farm",
         "farm-check",
+        "formula",
         "plan",
+        "promote-check",
+        "promote-latest",
         "publish",
         "soak",
         "tap",
+        "testing-upload",
         "verify",
     ];
     expected.extend(super::apt::JOBS.iter().map(|j| j.name));
     expected.sort_unstable();
     if listed != expected {
         problems.push(format!(
-            "jobs are {listed:?}, not plan, verify, publish, farm-check, farm, soak, channel-upload, tap and the apt jobs {expected:?}"
+            "jobs are {listed:?}, not plan, verify, publish, formula, testing-upload, the install checks, the lab (farm-check, farm, soak), promote-check, promote-latest, tap and the apt jobs {expected:?}"
         ));
     }
     for (name, job) in jobs {
@@ -393,15 +447,17 @@ pub fn release_problems(text: &str) -> Vec<String> {
             let level = level.as_str().unwrap_or_default();
             let writes = level != "read" && level != "none";
             let scope = scope.as_str().unwrap_or_default();
-            // `channel-upload` holds `id-token: write` for the release-files role, the apt
+            // `testing-upload` and `promote-latest` hold `id-token: write` for the release-files role, the apt
             // jobs that read and write the repository for the apt role, and `farm` for the
             // hostkeeper coordinator, and none anything that writes to the repository;
             // `channels::channel_problems`, `apt::apt_problems` and `farm::farm_problems` pin
             // those jobs whole.
-            let oidc =
-                (name == "channel-upload" || name == "farm" || super::apt::is_role_job(name))
-                    && scope == "id-token"
-                    && level == "write";
+            let oidc = (name == "testing-upload"
+                || name == "promote-latest"
+                || name == "farm"
+                || super::apt::is_role_job(name))
+                && scope == "id-token"
+                && level == "write";
             if writes && name != "publish" && !oidc {
                 problems.push(format!(
                     "{name}: permissions grant `{scope}: {level}`; only publish writes"
@@ -528,6 +584,7 @@ pub fn release_problems(text: &str) -> Vec<String> {
     problems.extend(super::farm::farm_problems(&doc, text));
     problems.extend(super::channels::channel_problems(&doc));
     problems.extend(super::apt::apt_problems(&doc));
+    problems.extend(super::checks::check_problems(&doc));
     problems
 }
 

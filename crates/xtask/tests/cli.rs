@@ -855,3 +855,45 @@ fn release_desired_refuses_a_release_without_an_index_with_status_1_and_a_bad_ve
         "xtask: --version \"v0.3.53\" is not <major>.<minor>.<patch>, a release tag without its v\n"
     );
 }
+
+#[test]
+fn release_desired_deb_refuses_a_release_without_sums_with_status_1_and_a_bad_version_with_status_2()
+ {
+    // Catches: the flags of `release desired-deb` not reaching it, a release without the digests
+    // to hold the testing suite to passing, and a malformed --version not a usage error.
+    let d = dir("release-desired-deb");
+    put(
+        &d,
+        &format!("repos/{REPO}/releases/tags/v0.3.53"),
+        &format!(
+            "{{\"tag_name\":\"v0.3.53\",\"target_commitish\":\"{COMMIT}\",\"draft\":false,\"prerelease\":false,\"assets\":[]}}"
+        ),
+    );
+    let args = |version: &'static str| {
+        [
+            "release",
+            "desired-deb",
+            "--repo",
+            REPO,
+            "--version",
+            version,
+            "--dir",
+            "desired",
+            "--output",
+            "github-output",
+            "--gh",
+            FAKE,
+            "--curl",
+            FAKE,
+        ]
+    };
+    let o = run(&d, &args("0.3.53"));
+    assert_eq!(o.status.code(), Some(1), "{}", stderr(&o));
+    assert!(
+        stderr(&o).contains("release v0.3.53 has no SHA256SUMS"),
+        "{}",
+        stderr(&o)
+    );
+    assert!(!d.join("github-output").exists());
+    assert_eq!(run(&d, &args("v0.3.53")).status.code(), Some(2));
+}

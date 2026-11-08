@@ -11,7 +11,7 @@ use super::yaml;
 const ROLE_STEP: &str = "        uses: aws-actions/configure-aws-credentials@e1253824e5c10ff9df46874f81ed3ec929e19cfd # v6.3.0\n        with:\n          role-to-assume: ${{ vars.APT_PUBLISH_ROLE_ARN }}\n          aws-region: us-east-1\n          mask-aws-account-id: true\n";
 
 #[test]
-fn the_apt_jobs_of_release_yml_pass_and_are_the_nine_the_design_names() {
+fn the_apt_jobs_of_release_yml_pass_and_are_the_eighteen_the_design_names() {
     // Catches: an apt job lost or renamed, which the defects below would not notice.
     let doc = yaml::load(&text_of("release.yml")).expect("release.yml parses");
     assert_eq!(apt_problems(&doc), Vec::<String>::new());
@@ -27,7 +27,16 @@ fn the_apt_jobs_of_release_yml_pass_and_are_the_nine_the_design_names() {
             "testing-apt-write-2",
             "testing-apt-read-3",
             "testing-apt-index-3",
-            "testing-apt-write-3"
+            "testing-apt-write-3",
+            "stable-apt-read",
+            "stable-apt-index",
+            "stable-apt-write",
+            "stable-apt-read-2",
+            "stable-apt-index-2",
+            "stable-apt-write-2",
+            "stable-apt-read-3",
+            "stable-apt-index-3",
+            "stable-apt-write-3"
         ]
     );
     assert_eq!(
@@ -284,11 +293,120 @@ const DEFECTS: &[(&str, &str, &str, &str)] = &[
         "channels apt write --suite testing --no-pool --bucket",
         "testing-apt-write: passes --no-pool; the release's write puts the packages in the pool",
     ),
+    // the promotion into stable
+    (
+        "stable-apt-index",
+        "needs: [plan, promote-check, stable-apt-read, testing-apt-index]",
+        "needs: [plan, stable-apt-read, testing-apt-index]",
+        "stable-apt-index: needs are not",
+    ),
+    (
+        "stable-apt-write",
+        "&& needs.promote-check.outputs.promote == 'true' }}",
+        "}}",
+        "stable-apt-write: `if` is not",
+    ),
+    (
+        "stable-apt-read",
+        "needs: [plan, promote-check, testing-apt-read]",
+        "needs: [plan, testing-apt-read]",
+        "stable-apt-read: needs are not",
+    ),
+    (
+        "stable-apt-read",
+        " --require \"TESTING_ENABLED=$TESTING_ENABLED\"",
+        "",
+        "stable-apt-read: the gate is not given --require \"TESTING_ENABLED=$TESTING_ENABLED\"",
+    ),
+    (
+        "stable-apt-read",
+        "channels apt read --suite testing --bucket",
+        "channels apt read --bucket",
+        "stable-apt-read: `cargo xtask channels apt read...` is not given `--suite testing`: the promotion reads both",
+    ),
+    (
+        "stable-apt-read",
+        "channels apt read --suite stable --bucket",
+        "channels apt read --suite testing --bucket",
+        "stable-apt-read: `cargo xtask channels apt read...` is not given `--suite stable`: the promotion reads both",
+    ),
+    (
+        "stable-apt-index",
+        "--sums dist/SHA256SUMS ",
+        "",
+        "stable-apt-index: `cargo xtask channels apt promote...` is not given --sums dist/SHA256SUMS",
+    ),
+    (
+        "stable-apt-index",
+        "--testing \"$RUNNER_TEMP/apt-read/testing\" ",
+        "--testing \"$RUNNER_TEMP/apt-read/stable\" ",
+        "stable-apt-index: `cargo xtask channels apt promote...` is not given --testing",
+    ),
+    (
+        "stable-apt-index",
+        "channels apt promote ",
+        "channels apt index --suite stable ",
+        "stable-apt-index: runs `cargo xtask channels apt index...`, which only the Index jobs of the suite testing of the apt repository may",
+    ),
+    (
+        "testing-apt-index",
+        "channels apt index --suite testing ",
+        "channels apt promote ",
+        "testing-apt-index: runs `cargo xtask channels apt promote...`, which only the Index jobs of the suite stable of the apt repository may",
+    ),
+    (
+        "stable-apt-index",
+        "--dir \"$RUNNER_TEMP/apt-next/dists/stable\" ",
+        "--dir \"$RUNNER_TEMP/apt-next/dists/testing\" ",
+        "stable-apt-index: the index is not signed in dists/stable, the suite the job writes",
+    ),
+    (
+        "stable-apt-write",
+        "--suite stable --bucket",
+        "--suite testing --bucket",
+        "stable-apt-write: `cargo xtask channels apt write...` is not given `--suite stable`",
+    ),
+    (
+        "stable-apt-write",
+        " --no-pool ",
+        " ",
+        "stable-apt-write: does not pass --no-pool; the promotion writes the index only",
+    ),
+    (
+        "stable-apt-write",
+        " --no-pool ",
+        " --no-pool --debs dist ",
+        "stable-apt-write: passes --debs; the promotion uploads no package",
+    ),
+    (
+        "testing-apt-read",
+        "channels apt read --suite testing --bucket",
+        "channels apt read --suite testing --suite stable --bucket",
+        "testing-apt-read: names `--suite stable`; this job is for the suite testing",
+    ),
+    (
+        "stable-apt-write",
+        "role-to-assume: ${{ vars.APT_PUBLISH_ROLE_ARN }}",
+        "role-to-assume: ${{ vars.TIERSTORE_RELEASES_ROLE_ARN }}",
+        "stable-apt-write: the role assumed is not ${{ vars.APT_PUBLISH_ROLE_ARN }}",
+    ),
+    (
+        "stable-apt-write-3",
+        " --last",
+        "",
+        "stable-apt-write-3: `--last` must be passed by the last attempt's write and by no other",
+    ),
+    (
+        "stable-apt-index",
+        "cargo xtask release check dist",
+        "echo check dist",
+        "stable-apt-index: no step checks the downloaded files",
+    ),
     (
         "tap",
         "cargo xtask channels tap ",
         "cargo xtask channels apt index ",
-        "tap: runs `cargo xtask channels apt index...`, which only the Index jobs of the apt repository may",
+        "tap: runs `cargo xtask channels apt index...`, which only the Index jobs of the suite testing of the apt repository may",
     ),
 ];
 
@@ -305,7 +423,7 @@ fn a_job_that_is_missing_or_too_short_is_named() {
     // which the rules about the steps would otherwise skip.
     let doc = yaml::load("jobs: {}\n").expect("parses");
     let problems = apt_problems(&doc);
-    assert_eq!(problems.len(), 9);
+    assert_eq!(problems.len(), 18);
     assert!(
         problems
             .iter()

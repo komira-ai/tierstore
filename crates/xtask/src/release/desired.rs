@@ -44,7 +44,7 @@ use crate::sums::{SUMS, read_sums};
 type Assets = Vec<(String, Option<u64>)>;
 
 /// The published release `tag` of `repo`: its commit and its assets.
-fn release(gh: &dyn Gh, repo: &str, tag: &str) -> Result<(String, Assets), Error> {
+pub(super) fn release(gh: &dyn Gh, repo: &str, tag: &str) -> Result<(String, Assets), Error> {
     let Some(found) = gh.api(&format!("repos/{repo}/releases/tags/{tag}"))? else {
         return Err(Error::Failed(format!(
             "{repo} has no release {tag}: --version names a released version of tierstore"

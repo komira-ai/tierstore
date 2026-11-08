@@ -1,6 +1,6 @@
 //! The farm jobs of `release.yml` ([`super::farm`]): the file passes, each way of leaving the farm
 //! out of the order, giving a job more than it needs, or calling hostkeeper with other inputs is
-//! named, and every public job is shown to wait for the soak.
+//! named, and every job that makes the release public is shown to wait for `promote-check`, which waits for the soak.
 
 use super::desired::{TAILNET_COORDINATOR, coordinator_problems};
 use super::farm::{FARM_IF, SOAK_IF, farm_problems, pin_problems};
@@ -28,13 +28,13 @@ const DEFECTS: &[(&str, &str, &str, &str)] = &[
     // farm-check
     (
         "farm-check",
-        "needs: [plan, publish]",
+        "needs: [plan, check-apt, check-brew, check-install-sh]",
         "needs: [plan]",
-        "farm-check: needs are not plan and publish",
+        "farm-check: needs are not plan and the three install checks",
     ),
     (
         "farm-check",
-        "    if: ${{ needs.plan.outputs.release == 'true' && github.ref == 'refs/heads/main' }}\n",
+        "    if: ${{ !cancelled() && !failure() && needs.plan.outputs.release == 'true' && github.ref == 'refs/heads/main' }}\n",
         "",
         "farm-check: `if` is not",
     ),
@@ -120,25 +120,19 @@ const DEFECTS: &[(&str, &str, &str, &str)] = &[
         "farm-check",
         "        id: desired\n        if: ${{ steps.gate.outputs.enabled == 'true' }}\n",
         "        id: desired\n",
-        "farm-check: the step `Refuse a release whose index lacks a platform` after the gate does not have",
+        "farm-check: the step `Refuse a release the testing suite does not list with the digests of its SHA256SUMS` after the gate does not have",
     ),
     (
         "farm-check",
-        "      - name: Wait until the release channel serves the release's index, byte for byte\n        if: ${{ steps.gate.outputs.enabled == 'true' }}\n",
-        "      - name: Wait until the release channel serves the release's index, byte for byte\n",
-        "farm-check: the step `Wait until the release channel serves the release's index, byte for byte` after the gate does not have",
-    ),
-    (
-        "farm-check",
-        "run: cargo xtask release desired --repo",
+        "run: cargo xtask release desired-deb --repo",
         "run: echo --repo",
-        "farm-check: no step `desired` runs `cargo xtask release desired` for the tag of this release",
+        "farm-check: no step `desired` runs `cargo xtask release desired-deb` for the tag of this release",
     ),
     (
         "farm-check",
         "--version \"${TAG#v}\" --dir",
         "--version \"$TAG\" --dir",
-        "farm-check: no step `desired` runs `cargo xtask release desired` for the tag of this release",
+        "farm-check: no step `desired` runs `cargo xtask release desired-deb` for the tag of this release",
     ),
     (
         "farm-check",
@@ -298,49 +292,49 @@ const DEFECTS: &[(&str, &str, &str, &str)] = &[
         "PACKAGE_VERSION: ${{ needs.plan.outputs.tag }}",
         "soak: env PACKAGE_VERSION is not",
     ),
-    // the public jobs wait for the soak
+    // the jobs that make the release public wait for promote-check, which waits for the lab
     (
-        "channel-upload",
-        "needs: [plan, soak]",
-        "needs: [plan, publish]",
-        "channel-upload: does not wait for soak",
+        "promote-latest",
+        "needs: [plan, promote-check, testing-upload]",
+        "needs: [plan, testing-upload]",
+        "promote-latest: does not wait for promote-check",
     ),
     (
         "tap",
-        "needs: [plan, soak]",
-        "needs: [plan, publish]",
-        "tap: does not wait for soak",
+        "needs: [plan, promote-check, formula]",
+        "needs: [plan, formula]",
+        "tap: does not wait for promote-check",
     ),
     (
-        "apt-deploy-read",
-        "needs: [plan, soak]",
-        "needs: [plan, publish]",
-        "apt-deploy-read: does not wait for soak",
+        "stable-apt-read",
+        "needs: [plan, promote-check, testing-apt-read]",
+        "needs: [plan, testing-apt-read]",
+        "stable-apt-read: does not wait for promote-check",
     ),
     (
-        "apt-index",
-        "needs: [plan, apt-deploy-read]",
+        "stable-apt-index",
+        "needs: [plan, promote-check, stable-apt-read, testing-apt-index]",
+        "needs: [plan, stable-apt-read, testing-apt-index]",
+        "stable-apt-index: needs are not",
+    ),
+    (
+        "stable-apt-read-3",
+        "needs: [plan, stable-apt-write-2]",
         "needs: [plan]",
-        "apt-index: does not wait for soak",
+        "stable-apt-read-3: does not wait for promote-check",
     ),
     (
-        "apt-deploy-write-2",
-        "needs: [plan, apt-deploy-read-2, apt-index-2]",
-        "needs: [plan, apt-deploy-read-2]",
-        "apt-deploy-write-2: needs are not",
-    ),
-    (
-        "apt-deploy-read-3",
-        "needs: [plan, apt-deploy-write-2]",
-        "needs: [plan, publish]",
-        "apt-deploy-read-3: does not wait for soak",
+        "promote-check",
+        ", soak]",
+        "]",
+        "promote-check: does not wait for soak, so it would decide without its result",
     ),
 ];
 
 #[test]
 fn each_defect_in_the_farm_jobs_and_their_order_is_named_by_the_lint() {
     // Catches: a pin of the farm jobs that holds nothing, because the file passes whether or not
-    // the thing it pins is there; and a public job that no longer waits for the soak.
+    // the thing it pins is there; and a public job that no longer waits for the promotion check.
     each_named("release.yml", release_problems, DEFECTS);
 }
 

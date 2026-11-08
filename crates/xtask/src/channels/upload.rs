@@ -13,6 +13,12 @@
 //! success only if its digest is the local file's: a re-run of the job passes, and a different
 //! file at a version's key is never written over (the role cannot, and this refuses to pretend).
 //!
+//! With `--no-latest` the verb ends there: the release is on tierstore.dev under its version and no
+//! pointer names it. `channels latest` (`latest` below) is the later step that does: it checks that
+//! the bucket holds, byte for byte, the files the release's `SHA256SUMS` lists, and then replaces the
+//! pointer as described next. The two together are the one `upload` with the pointer, in two jobs
+//! with a test of the release between them.
+//!
 //! `releases/latest.json` comes last, so a run that stopped halfway leaves a version without a
 //! pointer and never a pointer to missing files. It is read with its ETag and written with
 //! `--if-match` on that ETag, only when its version is lower than this release's (none yet: with
@@ -61,6 +67,8 @@ pub struct Request<'a> {
     pub distribution_id: &'a str,
     pub work: &'a Path,
     pub attempts: u32,
+    /// Replace `latest.json` after the files are in (false for `--no-latest`).
+    pub latest: bool,
 }
 
 /// One file to put: its name in `releases/<version>/`, where it is, and what it is.
@@ -434,10 +442,90 @@ pub fn upload(aws: &dyn Aws, r: &Request) -> Result<Vec<String>, Error> {
     let (sums_digest, _) = digest_file(&sums_file)?;
     let key = format!("releases/{version}/{SUMS}");
     said.push(put_once(aws, r, &key, &sums_file, &sums_digest)?);
+    if r.latest {
+        said.extend(point_latest(aws, r, &version)?);
+    }
+    Ok(said)
+}
+
+/// Replaces `latest.json` with this release, when it is newer than the one there.
+fn point_latest(aws: &dyn Aws, r: &Request, version: &str) -> Result<Vec<String>, Error> {
     // `is_plain_version` held in `check_request`; a number too large for a u64 is the only miss.
-    let ours = numbers(&version)
+    let ours = numbers(version)
         .ok_or_else(|| Error::Usage(format!("--tag {:?} holds a number too large", r.tag)))?;
-    said.extend(replace_latest(aws, r, &version, ours)?);
+    replace_latest(aws, r, version, ours)
+}
+
+/// Reads `releases/<version>/<name>` back into `--work` and holds it to `sha256`.
+fn check_published(
+    aws: &dyn Aws,
+    r: &Request,
+    version: &str,
+    name: &str,
+    sha256: &Sha256,
+) -> Result<String, Error> {
+    let key = format!("releases/{version}/{name}");
+    let held = r.work.join("published");
+    let held_text = held.display().to_string();
+    let got = aws.run(&strings(&[
+        "s3api",
+        "get-object",
+        "--bucket",
+        r.bucket,
+        "--key",
+        &key,
+        &held_text,
+    ]))?;
+    if !got.ok {
+        return Err(refusal(&format!("{key} could not be read back"), &got));
+    }
+    let (stored, _) = digest_file(&held)?;
+    if stored != *sha256 {
+        return Err(Error::Failed(format!(
+            "{key} holds sha256 {stored}, but this release's {name} is {sha256}"
+        )));
+    }
+    Ok(format!("{key}: sha256 {stored}"))
+}
+
+/// The `latest` verb: the pointer to this release, after the bucket is read back.
+///
+/// Every file of `releases/<version>/` and its `SHA256SUMS` are read from the bucket and held to
+/// the digests of the release's `SHA256SUMS` (the files that were published are exactly the ones
+/// that were checked, nothing is uploaded again), and only then is `latest.json` replaced, never
+/// with an older version.
+///
+/// # Errors
+/// A flag out of its form, a file of the release that is missing or not the one `SHA256SUMS`
+/// lists, a file of the version that is not in the bucket or holds other bytes, a refusal by AWS,
+/// or `latest.json` changed under every attempt.
+pub fn latest(aws: &dyn Aws, r: &Request) -> Result<Vec<String>, Error> {
+    let version = check_request(r)?;
+    let entries = collect(r.dir, &version)?;
+    std::fs::create_dir_all(r.work)
+        .map_err(Error::spawn(format!("create {}", r.work.display())))?;
+    let sums_file = r.work.join(SUMS);
+    std::fs::write(&sums_file, sums_text(&entries))
+        .map_err(Error::spawn(format!("write {}", sums_file.display())))?;
+    let latest_file = r.work.join(LATEST_FILE);
+    std::fs::write(
+        &latest_file,
+        latest_text(&version, r.tag, r.commit, &entries),
+    )
+    .map_err(Error::spawn(format!("write {}", latest_file.display())))?;
+    let mut said = Vec::new();
+    for entry in &entries {
+        said.push(check_published(
+            aws,
+            r,
+            &version,
+            &entry.name,
+            &entry.sha256,
+        )?);
+    }
+    let (sums_digest, _) = digest_file(&sums_file)?;
+    said.push(check_published(aws, r, &version, SUMS, &sums_digest)?);
+    said.extend(point_latest(aws, r, &version)?);
     Ok(said)
 }
 
