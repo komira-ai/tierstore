@@ -183,7 +183,7 @@ const DEFECTS: &[(&str, &str, &str, &str)] = &[
         "testing-apt-index",
         "      - name: Merge the .debs into the index",
         "      - run: cargo xtask channels assume --role-arn x\n        if: ${{ steps.gate.outputs.enabled == 'true' }}\n      - name: Merge the .debs into the index",
-        "testing-apt-index: names channels assume, which only channel-upload may",
+        "testing-apt-index: names channels assume, which only testing-upload and promote-latest may",
     ),
     (
         "testing-apt-write",

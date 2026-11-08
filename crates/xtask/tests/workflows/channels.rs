@@ -197,7 +197,12 @@ fn job_problems(channel: &Channel, job: &Node) -> Vec<String> {
     };
     problems.extend(gate_problems(channel, &all[gate]));
     for step in &all[..gate] {
-        for word in ["aws-actions/", "create-github-app-token", "secrets."] {
+        for word in [
+            "aws-actions/",
+            "channels assume",
+            "create-github-app-token",
+            "secrets.",
+        ] {
             if mentions(step, word) {
                 problems.push(format!("{name}: a step before the gate names {word}"));
             }
