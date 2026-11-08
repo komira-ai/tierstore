@@ -1,21 +1,25 @@
-// The manifest of a built tree: every file's path and sha256, one per line, sorted, except the pages rendered from the guide (docs/<stem>/index.html;
-// docs.test.ts holds them). test/golden.manifest is its committed copy; `npm run golden` rewrites it from a fresh build after a change meant to alter the output.
+// The manifest of a built tree: every file's path and sha256, one per line, sorted, except the files made from the guide (the docs pages and
+// their Markdown, llms.txt and llms-full.txt; docs.test.ts and examples.test.ts hold them). test/golden.manifest is its committed copy; `npm run golden` rewrites it from a fresh build after a change meant to alter the output.
 
 import { createHash } from 'crypto';
-import { readdirSync, readFileSync, writeFileSync } from 'fs';
+import { existsSync, readdirSync, readFileSync, writeFileSync } from 'fs';
 import { join, resolve } from 'path';
 import { buildSite } from './build';
 import { listFiles } from './check-dist';
 
-/** The stems of the guide: one per crates/tierstore/docs/<stem>.md. */
+/** The stems of the guide: one per crates/tierstore/docs/<stem>.md and docs/examples/<name>.md (as 'examples/<name>'); 'index' is the landing page. */
 export function guideStems(docsDir: string): string[] {
-  return readdirSync(docsDir).filter((f) => f.endsWith('.md')).map((f) => f.replace(/\.md$/, '')).sort();
+  const top = readdirSync(docsDir).filter((f) => f.endsWith('.md')).map((f) => f.replace(/\.md$/, ''));
+  const examples = existsSync(join(docsDir, 'examples')) ? readdirSync(join(docsDir, 'examples')).filter((f) => f.endsWith('.md')).map((f) => `examples/${f.replace(/\.md$/, '')}`) : [];
+  return [...top, ...examples].sort();
 }
 
-/** The pages rendered from the guide, docs/<stem>/index.html: not in the manifest, docs.test.ts holds them. docs/index.html is
- *  hand-made (its heading, lede and title are in tools/docs.ts), so it is in the manifest, and so is anything else under docs/. */
+/** The files made from the guide, which are not in the manifest (docs.test.ts and examples.test.ts hold them): the page of each stem
+ *  (docs/<stem>/index.html, and docs/index.html for the landing page), its Markdown (docs/<stem>.md), and the two files that list
+ *  them for programs. Everything else under docs/ and the rest of the tree is in it. */
 export function isGuidePage(file: string, stems: readonly string[]): boolean {
-  return stems.some((s) => file === `docs/${s}/index.html`);
+  if (file === 'llms.txt' || file === 'llms-full.txt') return true;
+  return stems.some((s) => file === `docs/${s}.md` || file === (s === 'index' ? 'docs/index.html' : `docs/${s}/index.html`));
 }
 
 export function manifestOf(dir: string, stems: readonly string[]): string {

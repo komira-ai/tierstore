@@ -1,5 +1,20 @@
 /* tierstore.dev: the rules this site adds on top of theme.css (the komira.ai look). */
 
+/* Prose is 40rem (640px) wide, as on komira.ai, and the page is 70rem; the theme's 43rem and 62rem are set again here, since theme.css is pinned. */
+:root { --measure: 40rem; --wrap: 70rem; }
+:root { --code-bg: #0d1822; --code-fg: #e8eef4; }
+
+/* Headings are set at 600: komira.ai's Sohne is licensed and not served here, and the system faces that stand in for it have a bold, so 500 would read as the body weight. */
+h1, h2, h3 { font-weight: 600; }
+
+/* ---- the home hero: copy on the left, the picture large on the right, with room around both ---- */
+.hero-grid.wrap { padding-top: 7rem; padding-bottom: 7.5rem; gap: 4rem; }
+@media (min-width: 64rem) { .hero-grid { grid-template-columns: minmax(0, 0.8fr) minmax(0, 1.2fr); gap: 5rem; } }
+.hero .display { font-size: clamp(2.3rem, 4.4vw, 3.4rem); margin-bottom: 1.75rem; }
+.hero .lede { max-width: 33rem; font-size: 1.2rem; line-height: 1.62; margin-bottom: 0; }
+.hero-links { margin-top: 2.5rem; }
+@media (max-width: 40rem) { .hero-grid.wrap { padding-top: 4rem; padding-bottom: 4.5rem; gap: 3rem; } }
+
 /* ---- the hero's picture: clients, one S3 endpoint, the hot tier and the cold store ----
    The base rules are the still frame (what prefers-reduced-motion shows): a hit at the hot tier, a miss read from the
    cold store, an object on its way into the hot tier. The loop below runs only when motion is welcome. */
@@ -20,7 +35,9 @@
 .obj { stroke: none; }
 .obj-a { fill: var(--accent); }
 .obj-b, .obj-b-hot { fill: var(--blue); }
-.dot .halo { fill-opacity: 0.22; }
+.dot .halo { fill-opacity: 0.32; }
+.dot circle:not(.halo) { r: 8px; }
+.dot .halo { r: 20px; }
 .dot-hit { transform: translate(470px, 88px); fill: var(--accent); }
 .dot-miss { transform: translate(470px, 312px); fill: var(--orange); }
 .dot-promote { transform: translate(630px, 200px); fill: var(--blue); }
@@ -28,7 +45,7 @@
 .lbl-hit { fill: var(--accent); }
 .lbl-miss { fill: var(--orange); }
 .lbl-promote { fill: var(--blue); }
-.hero figcaption { margin: 0.9rem 0 0; font-size: 0.9rem; line-height: 1.5; }
+.hero figcaption { max-width: 34rem; margin: 1.25rem 0 0; font-size: 0.9rem; line-height: 1.5; }
 
 @media (prefers-reduced-motion: no-preference) {
   .flow-svg * { animation-duration: 14s; animation-iteration-count: infinite; animation-fill-mode: both; animation-timing-function: ease-in-out; }
@@ -78,19 +95,41 @@
 @keyframes obj-pulse { 0%, 15%, 26%, 100% { opacity: 0.55; } 19%, 23% { opacity: 1; } }
 
 /* ---- sections ---- */
-.install-block .cmd-lg pre, .install-block .cmd-lg code { white-space: pre-wrap; overflow-wrap: anywhere; }
+.band { padding: 5.5rem 0; }
+.band .wrap > p { max-width: var(--measure); }
+.band .wrap > h2 + p { margin-bottom: 2rem; }
+@media (max-width: 40rem) { .band { padding: 3.5rem 0; } }
 .compact { max-width: 46rem; }
-.why-grid { display: grid; gap: 1.25rem; grid-template-columns: repeat(auto-fit, minmax(min(100%, 19rem), 1fr)); margin: 1.5rem 0 1.5rem; padding: 0; list-style: none; }
+.why-grid { display: grid; gap: 1.5rem; grid-template-columns: repeat(auto-fit, minmax(min(100%, 25rem), 1fr)); margin: 1.5rem 0 1.5rem; padding: 0; list-style: none; }
 .why-grid li { margin: 0; background: #ffffff; border: 1px solid var(--border); border-radius: var(--radius); padding: 1.5rem 1.5rem 1.6rem; }
 .why-grid h3 { margin: 0 0 0.6rem; font-size: 1.3rem; letter-spacing: -0.01em; }
 .why-grid p { margin: 0; font-size: 1.02rem; line-height: 1.55; }
+main.wrap { padding-top: 5rem; padding-bottom: 7rem; }
 main.wrap > h1 { margin-top: 0.4em; }
 main.wrap > p, main.wrap > ul, main.wrap > ol, main.wrap > h3 { max-width: var(--measure); }
 main.wrap > h2:first-child { margin-top: 0; }
 td:first-child { white-space: nowrap; }
 td:last-child { min-width: 18rem; }
 @media (max-width: 34rem) { td:last-child { min-width: 14rem; } }
+/* a phone: a row of a table of the guide is stacked, the key over its type and default over its text, each cell with the name of its column */
+@media (max-width: 40rem) {
+  .docs-body .table-wrap table, .docs-body .table-wrap tbody, .docs-body .table-wrap tr, .docs-body .table-wrap td { display: block; }
+  .docs-body .table-wrap thead { display: none; }
+  .docs-body .table-wrap tr { padding: 0.8rem 0; border-bottom: 1px solid var(--border); }
+  .docs-body .table-wrap td { border: 0; padding: 0; min-width: 0; white-space: normal; overflow-wrap: anywhere; }
+  .docs-body .table-wrap td:not(:first-child) { margin-top: 0.25rem; }
+  .docs-body .table-wrap td[data-label]::before { content: attr(data-label) ": "; font-weight: 700; color: var(--fg-muted); }
+}
 .band .table-wrap td:first-child { white-space: normal; }
+
+/* ---- one narrow column for a short page (Get started), its left edge on the logo's ---- */
+.narrow { max-width: 46rem; margin: 0; }
+.narrow > h1 { margin-bottom: 1.5rem; }
+.narrow > h2 { margin-top: 6rem; }
+.narrow > p, .narrow > ul { max-width: var(--measure); }
+.narrow .tabs { margin: 1.75rem 0 1.5rem; }
+.narrow h4 { margin: 2rem 0 0.4rem; font: 600 1.05rem var(--sans); color: var(--ink); }
+.narrow .note { margin-top: 0; font-size: 0.95rem; }
 
 /* ---- numbered steps ---- */
 ol.steps { list-style: none; counter-reset: s; padding: 0; margin: 1.5rem 0; max-width: none; }
@@ -104,61 +143,154 @@ ol.steps > li:last-child::after { display: none; }
 ol.steps h3 { margin: 0 0 0.4rem; }
 @media (max-width: 34rem) { ol.steps > li { padding-left: 2.75rem; } }
 
-/* ---- code blocks ---- */
+/* ---- code blocks: the deep navy of the header and the hero, light tokens. A long line wraps (at a word, or anywhere in one that has none, like a URL), so nothing is cut off; on a wide screen Copy sits in the corner and the text keeps clear of it, on a phone Copy has a strip of its own above the text ---- */
 .code { position: relative; margin: 1rem 0 1.25rem; }
-.code pre { margin: 0; padding-right: 5.5rem; }
-.code pre .c { color: var(--fg-muted); }
-.code pre .p { color: var(--accent-text); user-select: none; }
-.code button.copy { position: absolute; top: 0.5rem; right: 0.5rem; }
-.hl .h-k { color: #b93a12; }
-.hl .h-s { color: #1f6b3a; }
-.hl .h-n { color: #6b4aa0; }
-.hl .h-c { color: #566a7f; font-style: italic; }
-.hl .h-t, .hl .h-f { color: var(--ink); font-weight: 700; }
-.hl .h-a { color: #2c6e8c; }
+.code pre {
+  margin: 0; padding: 1rem 5.5rem 1rem 1rem; background-color: var(--code-bg); color: var(--code-fg); border-radius: var(--radius);
+  white-space: pre-wrap; overflow-wrap: anywhere; overflow-x: auto; scrollbar-width: thin; scrollbar-color: var(--on-deep-muted) transparent;
+}
+.code pre .c { color: var(--on-deep-muted); }
+.code pre .p { color: var(--orange); user-select: none; }
+.code button.copy { position: absolute; top: 0.5rem; right: 0.5rem; min-width: 4.5rem; background: var(--deep-2); color: var(--on-deep); border-color: rgb(179 221 238 / 45%); }
+.code button.copy:hover { color: var(--orange); border-color: var(--orange); }
+.code button.copy.done { color: #9fe0b5; border-color: #9fe0b5; }
+.hl .h-k { color: #ffa07a; }
+.hl .h-s { color: #94dba8; }
+.hl .h-n { color: #cdb8f5; }
+.hl .h-c { color: #a9bccf; font-style: italic; }
+.hl .h-t, .hl .h-f { color: #ffffff; font-weight: 700; }
+.hl .h-a { color: #8fd0ec; }
 .svg-scroll { overflow-x: auto; }
 .svg-scroll svg { min-width: 760px; }
 
-/* ---- tabs (radio inputs and labels, no script) ---- */
-.tabs { position: relative; margin: 1.5rem 0; }
-.tab-input { position: absolute; opacity: 0; width: 1px; height: 1px; margin: 0; pointer-events: none; }
-.tab-list { display: flex; flex-wrap: wrap; gap: 0 1.5rem; border-bottom: 1px solid var(--border); }
-.tab-list label { cursor: pointer; padding: 0.45rem 0; margin-bottom: -1px; font-size: 0.95rem; color: var(--fg-muted); border-bottom: 3px solid transparent; }
-.tab-list label:hover { color: var(--accent-hover); }
-.tab-panel { display: none; padding-top: 1rem; }
+/* ---- tabs (buttons that src/tabs.ts shows; with no script every panel is on the page under its title): drawn as tabs, a box each, the chosen one joined to its panel ---- */
+.tabs { margin: 1.5rem 0; }
+.tab-list { display: flex; flex-wrap: nowrap; gap: 0.35rem; overflow-x: auto; scrollbar-width: none; border-bottom: 2px solid var(--border-strong); }
+.tab-list[hidden] { display: none; }
+.tab-list button {
+  font: inherit; font-size: 0.98rem; cursor: pointer; background: var(--bg-soft); border: 1px solid var(--border-strong); border-bottom: 0; border-radius: var(--radius) var(--radius) 0 0;
+  white-space: nowrap; margin-bottom: -2px; padding: 0 0.8rem; min-height: 46px; color: var(--ink);
+}
+.tab-list button:hover { color: var(--accent-hover); border-color: var(--accent); }
+.tab-list button[aria-selected="true"] { background: #ffffff; color: var(--ink); font-weight: 700; border-color: var(--border-strong); border-top: 4px solid var(--accent); padding-top: 0; border-bottom: 2px solid #ffffff; }
+@media (max-width: 34rem) { .tab-list { -webkit-mask-image: linear-gradient(to right, #000 calc(100% - 2rem), transparent); mask-image: linear-gradient(to right, #000 calc(100% - 2rem), transparent); } .tab-list { padding-right: 2rem; } }
+.tab-list button:focus-visible, .tab-panel:focus-visible { outline: 2px solid var(--accent); outline-offset: 2px; }
+.tab-panel { padding-top: 1rem; }
+.tab-panel[hidden] { display: none; }
 .tab-panel > :last-child { margin-bottom: 0; }
-.tabs > .tab-input:nth-of-type(1):checked ~ .tab-list > label:nth-child(1) { color: var(--ink); border-bottom-color: var(--accent); }
-.tabs > .tab-input:nth-of-type(1):checked ~ .tab-panels > .tab-panel:nth-child(1) { display: block; }
-.tabs > .tab-input:nth-of-type(1):focus-visible ~ .tab-list > label:nth-child(1) { outline: 2px solid var(--accent); outline-offset: 2px; }
-.tabs > .tab-input:nth-of-type(2):checked ~ .tab-list > label:nth-child(2) { color: var(--ink); border-bottom-color: var(--accent); }
-.tabs > .tab-input:nth-of-type(2):checked ~ .tab-panels > .tab-panel:nth-child(2) { display: block; }
-.tabs > .tab-input:nth-of-type(2):focus-visible ~ .tab-list > label:nth-child(2) { outline: 2px solid var(--accent); outline-offset: 2px; }
-.tabs > .tab-input:nth-of-type(3):checked ~ .tab-list > label:nth-child(3) { color: var(--ink); border-bottom-color: var(--accent); }
-.tabs > .tab-input:nth-of-type(3):checked ~ .tab-panels > .tab-panel:nth-child(3) { display: block; }
-.tabs > .tab-input:nth-of-type(3):focus-visible ~ .tab-list > label:nth-child(3) { outline: 2px solid var(--accent); outline-offset: 2px; }
-.tabs > .tab-input:nth-of-type(4):checked ~ .tab-list > label:nth-child(4) { color: var(--ink); border-bottom-color: var(--accent); }
-.tabs > .tab-input:nth-of-type(4):checked ~ .tab-panels > .tab-panel:nth-child(4) { display: block; }
-.tabs > .tab-input:nth-of-type(4):focus-visible ~ .tab-list > label:nth-child(4) { outline: 2px solid var(--accent); outline-offset: 2px; }
-.tabs > .tab-input:nth-of-type(5):checked ~ .tab-list > label:nth-child(5) { color: var(--ink); border-bottom-color: var(--accent); }
-.tabs > .tab-input:nth-of-type(5):checked ~ .tab-panels > .tab-panel:nth-child(5) { display: block; }
-.tabs > .tab-input:nth-of-type(5):focus-visible ~ .tab-list > label:nth-child(5) { outline: 2px solid var(--accent); outline-offset: 2px; }
-.tabs > .tab-input:nth-of-type(6):checked ~ .tab-list > label:nth-child(6) { color: var(--ink); border-bottom-color: var(--accent); }
-.tabs > .tab-input:nth-of-type(6):checked ~ .tab-panels > .tab-panel:nth-child(6) { display: block; }
-.tabs > .tab-input:nth-of-type(6):focus-visible ~ .tab-list > label:nth-child(6) { outline: 2px solid var(--accent); outline-offset: 2px; }
+.tab-title { margin: 1rem 0 0; font-weight: 700; color: var(--ink); }
+.tabs-on .tab-title { display: none; }
 
 /* ---- transcripts and notes ---- */
 .transcript pre { white-space: pre-wrap; overflow-wrap: anywhere; }
-.transcript .o { color: var(--fg-2); }
-.transcript .c { color: var(--fg-muted); }
+.transcript .o { color: var(--code-fg); }
+.transcript .c { color: var(--on-deep-muted); }
 .source-note { margin: 0.4rem 0 1rem; font-size: 0.9rem; color: var(--fg-muted); }
 
-/* ---- the operator guide (generated from crates/tierstore/docs by tools/docs.ts) ---- */
-.docs-nav { margin: 0 0 2rem; padding: 0 0 1rem; border-bottom: 1px solid var(--border); max-width: none; }
-.docs-nav ul { display: flex; flex-wrap: wrap; gap: 0.4rem 1.4rem; list-style: none; margin: 0; padding: 0; }
+/* ---- the operator guide (generated from crates/tierstore/docs by tools/docs.ts): the guide's pages in a column on the left, the page beside it ---- */
+.docs-layout { display: grid; grid-template-columns: minmax(0, 1fr); gap: 1.5rem 3.5rem; align-items: start; }
+.docs-menu summary { cursor: pointer; padding: 0.7rem 1rem; border: 1px solid var(--border-strong); border-radius: var(--radius); font-weight: 700; color: var(--ink); background: var(--bg-soft); min-height: 44px; }
+.docs-menu summary:hover { color: var(--accent-hover); border-color: var(--accent); }
+.docs-menu[open] summary { border-radius: var(--radius) var(--radius) 0 0; }
+.docs-menu .docs-nav { max-width: none; padding: 0.25rem 1rem 1rem; border: 1px solid var(--border-strong); border-top: 0; border-radius: 0 0 var(--radius) var(--radius); background: #ffffff; }
+.docs-nav-title { margin: 1.25rem 0 0.4rem; font: 700 0.78rem var(--sans); letter-spacing: 0.08em; text-transform: uppercase; color: var(--fg-muted); }
+.docs-nav-title:first-child { margin-top: 0.75rem; }
+.docs-nav ul { list-style: none; margin: 0; padding: 0; border-left: 1px solid var(--border); }
 .docs-nav li { margin: 0; }
-.docs-nav a[aria-current="page"] { font-weight: 700; text-decoration-color: var(--ink); }
+.docs-nav a { display: block; border-left: 3px solid transparent; margin-left: -1px; padding: 0.4rem 0 0.4rem 1rem; color: var(--fg-muted); text-decoration: none; font-size: 0.98rem; }
+.docs-nav a:hover { color: var(--accent-hover); border-left-color: var(--border-strong); }
+.docs-nav a[aria-current="page"] { color: var(--ink); font-weight: 700; border-left-color: var(--accent); }
+@media (min-width: 60rem) {
+  .docs-layout { grid-template-columns: 13rem minmax(0, 1fr); }
+  .docs-menu { position: sticky; top: calc(var(--header-h) + 1.5rem); }
+  .docs-menu summary { display: none; }
+  .docs-menu .docs-nav { padding: 0; border: 0; background: none; }
+  .docs-nav-title:first-child { margin-top: 0; }
+}
+.docs-body > p, .docs-body > ul, .docs-body > ol, .docs-body > h3, .docs-body > blockquote { max-width: var(--measure); }
+.docs-body > h1 { margin-top: 0; }
+.docs-body > h2 { margin-top: 3rem; }
+.docs-body > h2::before { margin-bottom: 0.8rem; }
+.docs-body .lede { font-size: 1.25rem; line-height: 1.5; font-weight: 400; color: var(--fg-2); }
+.docs-body .lede code { font-size: 0.9em; }
 .docs-list { list-style: none; margin: 1.5rem 0; padding: 0; display: grid; gap: 1rem; max-width: none; }
 .docs-list li { margin: 0; background: #ffffff; border: 1px solid var(--border); border-radius: var(--radius); padding: 1rem 1.25rem; }
 .docs-list a { font: 500 1.05rem var(--mono); }
 .docs-list p { margin: 0.4rem 0 0; font-size: 1rem; line-height: 1.5; }
 main.wrap h2 .tag { margin-left: 0.6rem; }
+
+/* ---- phones: the picture's words are set larger so they stay readable at the width of the screen, and the status table stacks ---- */
+@media (max-width: 40rem) {
+  .flow-text text { font-size: 28px; }
+  .flow-text .flow-name { font-size: 28px; }
+  .flow-node .flow-name { font-size: 24px; }
+  .flow-node .flow-sub { font-size: 18px; }
+  .lbl { font-size: 24px; }
+  .band .table-wrap table, .band .table-wrap tbody, .band .table-wrap tr, .band .table-wrap td { display: block; }
+  .band .table-wrap thead { display: none; }
+  .band .table-wrap tr { padding: 0.9rem 0; border-bottom: 1px solid var(--border); }
+  .band .table-wrap td { border: 0; padding: 0; min-width: 0; }
+  .band .table-wrap td:last-child { margin-top: 0.5rem; }
+  .band .table-wrap .tag { margin-left: 0; white-space: normal; border-radius: 1rem; }
+  .code pre { padding: 2.9rem 1rem 1rem; }
+  .code button.copy { min-width: 4.5rem; }
+}
+@media (max-width: 40rem) {
+  .dg-node .dg-name { font-size: 21px; }
+  .dg-node .dg-sub { font-size: 16.5px; }
+  .dg-edge-label { font-size: 16.5px; }
+  /* the picture keeps a width at which its words can be read, and the box around it scrolls sideways */
+  .diagram-scroll .diagram-svg { min-width: 28rem; }
+  .diagram-hint { display: block; }
+}
+@media (max-width: 34rem) {
+  .bar { gap: 0 0.75rem; }
+  .site-nav ul { gap: 0 0.75rem; }
+  .site-nav a { font-size: 0.9rem; }
+}
+
+/* ---- diagrams (tools/diagram.ts): boxes and arrows in the look of the site; they scale with the page and stay readable at a phone's width ---- */
+.diagram { margin: 1.5rem 0 2rem; max-width: 36rem; }
+.diagram-svg { display: block; width: 100%; height: auto; }
+.diagram-scroll {
+  overflow-x: auto; scrollbar-width: thin;
+  /* a shadow at an edge that has more to scroll to (the covers scroll with the picture, the shadows do not) */
+  background-image: linear-gradient(to right, var(--bg), var(--bg)), linear-gradient(to right, var(--bg), var(--bg)), linear-gradient(to right, rgb(13 24 34 / 22%), transparent), linear-gradient(to left, rgb(13 24 34 / 22%), transparent);
+  background-position: left center, right center, left center, right center; background-repeat: no-repeat; background-size: 1.5rem 100%, 1.5rem 100%, 1rem 100%, 1rem 100%; background-attachment: local, local, scroll, scroll;
+}
+.diagram-hint { display: none; margin: 0.4rem 0 0; font-size: 0.85rem; color: var(--fg-muted); }
+.diagram-scroll:focus-visible { outline: 2px solid var(--accent); outline-offset: 2px; }
+/* a card's picture is an icon: boxes and arrows, no words (the card says what it is) */
+.diagram-icon { max-width: 15rem; margin: 0 0 1rem; }
+.diagram-icon .dg-line { stroke-width: 3; }
+.diagram-icon .dg-node rect { stroke-width: 3; }
+.diagram figcaption { margin-top: 0.75rem; font-size: 0.9rem; line-height: 1.5; color: var(--fg-muted); }
+.dg-node rect { fill: #ffffff; stroke: var(--border-strong); stroke-width: 1.5; }
+.dg-node .dg-name { fill: var(--ink); font: 600 18.5px var(--sans); }
+.dg-node .dg-sub { fill: var(--fg-muted); font: 14.5px var(--sans); }
+.dg-main rect { fill: var(--deep-2); stroke: var(--deep-2); }
+.dg-main .dg-name { fill: var(--on-deep); }
+.dg-main .dg-sub { fill: var(--on-deep-muted); }
+.dg-hot rect { fill: var(--accent-soft); stroke: var(--accent); stroke-width: 2; }
+.dg-remote rect { fill: var(--bg-soft); stroke: var(--blue-ink); }
+.dg-ghost rect { fill: none; stroke: var(--border-strong); stroke-dasharray: 4 4; }
+.dg-ghost .dg-name, .dg-ghost .dg-sub { fill: var(--fg-muted); font-weight: 400; }
+.dg-line { fill: none; stroke: var(--fg-2); stroke-width: 1.75; }
+.dg-dashed { stroke: var(--accent-text); stroke-dasharray: 6 4; }
+.dg-head { fill: var(--fg-2); }
+.dg-edge-dashed .dg-head { fill: var(--accent-text); }
+.dg-edge-label { fill: var(--fg-2); font: 600 15px var(--sans); paint-order: stroke; stroke: var(--bg); stroke-width: 5px; stroke-linejoin: round; }
+
+/* ---- cards (the examples on the home page and the docs landing page) ---- */
+.cards { display: grid; gap: 1.5rem; grid-template-columns: repeat(auto-fit, minmax(min(100%, 17rem), 1fr)); margin: 1.5rem 0; padding: 0; list-style: none; max-width: none; }
+.card { margin: 0; background: #ffffff; border: 1px solid var(--border); border-radius: var(--radius); }
+.card a { display: block; height: 100%; padding: 1.25rem; color: inherit; text-decoration: none; border-radius: var(--radius); }
+.card a:hover { box-shadow: var(--shadow); }
+.card a:hover h3 { color: var(--accent-hover); }
+.card .diagram { margin: 0 0 1rem; }
+.card h3 { margin: 0 0 0.5rem; font-size: 1.15rem; line-height: 1.3; }
+.card p { margin: 0; font-size: 0.98rem; line-height: 1.5; color: var(--fg-2); }
+.next { margin: 2rem 0 0; font-size: 1.1rem; }
+
+/* a link that leaves the site (the header's Why): an arrow after it */
+.site-nav .ext, .site-footer .ext { font-size: 0.85em; opacity: 0.85; }

@@ -7,8 +7,8 @@
 
 import { escapeText } from './layout';
 
-export type Lang = 'toml' | 'sh' | 'rust' | 'python' | 'js';
-export const LANGS: readonly Lang[] = ['toml', 'sh', 'rust', 'python', 'js'];
+export type Lang = 'toml' | 'sh' | 'rust' | 'python' | 'js' | 'go' | 'java';
+export const LANGS: readonly Lang[] = ['toml', 'sh', 'rust', 'python', 'js', 'go', 'java'];
 
 type Rule = readonly [cls: string, re: RegExp];
 
@@ -61,6 +61,23 @@ const RULES: Readonly<Record<Lang, readonly Rule[]>> = {
     ['h-n', /\d[\d_]*(?:\.\d+)?\b/y],
     ['h-t', /[A-Z][A-Za-z0-9_]*/y],
     ['h-f', /[A-Za-z_$][\w$]*(?=\()/y],
+  ],
+  go: [
+    ['h-c', /\/\/[^\n]*/y],
+    ['h-s', new RegExp(DQ, 'y')],
+    ['h-s', /`[^`]*`/y],
+    ['h-k', new RegExp(words('package import func var const type struct interface return if else for range switch case default go defer nil true false'), 'y')],
+    ['h-n', /\d[\d_]*(?:\.\d+)?\b/y],
+    ['h-f', /[A-Za-z_]\w*(?=\()/y],
+    ['h-t', /[A-Z][A-Za-z0-9_]*/y],
+  ],
+  java: [
+    ['h-c', /\/\/[^\n]*/y],
+    ['h-s', new RegExp(DQ, 'y')],
+    ['h-k', new RegExp(words('import package public private protected static final class interface new return void if else for try catch throws true false null var'), 'y')],
+    ['h-n', /\d[\d_]*(?:\.\d+)?\b/y],
+    ['h-f', /[A-Za-z_]\w*(?=\()/y],
+    ['h-t', /[A-Z][A-Za-z0-9_]*/y],
   ],
 };
 

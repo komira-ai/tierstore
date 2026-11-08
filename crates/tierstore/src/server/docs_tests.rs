@@ -34,12 +34,17 @@ use super::config_unknown::fields_of;
 const NOT_YET: &str = "Not in a release yet";
 
 /// Flags of other programs that a page may name (an example of a podman or curl call, and the
+/// `aws s3api` calls of the examples, and the
 /// verify commands of the install guide: `sha256sum -c`, `gh attestation verify` online and with
 /// a bundle and a trusted root, and `cosign verify-blob-attestation`), and the flags of the
 /// verbs (`update-hook`, `format-epoch`, `entries`), which are read before the server's flags and are not among them
 /// (the verbs take the hot tier by `--hot` and its companions, which the server reads from the file).
 const FOREIGN_FLAGS: &[&str] = &[
     "--tls-verify",
+    "--endpoint-url",
+    "--bucket",
+    "--key",
+    "--body",
     "--repo",
     "--signer-workflow",
     "--source-ref",
@@ -529,21 +534,32 @@ fn docs_dir() -> PathBuf {
 
 fn read_docs() -> Vec<Doc> {
     let mut docs = Vec::new();
-    let entries = std::fs::read_dir(docs_dir()).expect("crates/tierstore/docs exists");
-    for entry in entries {
-        let path = entry.expect("a directory entry").path();
-        if path.extension().is_some_and(|e| e == "md") {
-            let name = path
-                .file_name()
-                .expect("a name")
-                .to_string_lossy()
-                .into_owned();
-            let text = std::fs::read_to_string(&path).expect("a readable page");
-            docs.push(Doc { name, text });
-        }
-    }
+    read_pages(&docs_dir(), "", &mut docs);
     docs.sort_by(|a, b| a.name.cmp(&b.name));
     docs
+}
+
+/// The `.md` files of `dir`, named `prefix` and the file's name (`configuration.md`,
+/// `examples/cache-hot-cold.md`), and those of its `examples/` directory.
+fn read_pages(dir: &Path, prefix: &str, docs: &mut Vec<Doc>) {
+    let entries = std::fs::read_dir(dir).expect("crates/tierstore/docs exists");
+    for entry in entries {
+        let path = entry.expect("a directory entry").path();
+        let file = path
+            .file_name()
+            .expect("a name")
+            .to_string_lossy()
+            .into_owned();
+        if path.is_dir() && file == "examples" {
+            read_pages(&path, "examples/", docs);
+        } else if path.extension().is_some_and(|e| e == "md") {
+            let text = std::fs::read_to_string(&path).expect("a readable page");
+            docs.push(Doc {
+                name: format!("{prefix}{file}"),
+                text,
+            });
+        }
+    }
 }
 
 /// The non-test `.rs` files under `dir`, comment lines out.
