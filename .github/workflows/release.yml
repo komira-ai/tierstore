@@ -495,7 +495,7 @@ jobs:
         if: ${{ steps.gate.outputs.enabled == 'true' }}
         env:
           ROLE_ARN: ${{ vars.APT_PUBLISH_ROLE_ARN }}
-        run: cargo xtask channels assume --role-arn "$ROLE_ARN" --session-name "tierstore-apt-$GITHUB_RUN_ID" --region us-east-1 --env-file "$GITHUB_ENV"
+        run: cargo xtask channels assume --role-arn "$ROLE_ARN" --session-name "tierstore-testing-apt-read-$GITHUB_RUN_ID" --region us-east-1 --env-file "$GITHUB_ENV"
       - name: Read the current index and the ETag of each object from S3 (never through the CDN, which caches the index)
         if: ${{ steps.gate.outputs.enabled == 'true' }}
         env:
@@ -632,7 +632,7 @@ jobs:
         if: ${{ steps.gate.outputs.enabled == 'true' }}
         env:
           ROLE_ARN: ${{ vars.APT_PUBLISH_ROLE_ARN }}
-        run: cargo xtask channels assume --role-arn "$ROLE_ARN" --session-name "tierstore-apt-$GITHUB_RUN_ID" --region us-east-1 --env-file "$GITHUB_ENV"
+        run: cargo xtask channels assume --role-arn "$ROLE_ARN" --session-name "tierstore-testing-apt-write-$GITHUB_RUN_ID" --region us-east-1 --env-file "$GITHUB_ENV"
       - name: Upload the .debs once each, then write the signed index with If-Match on the ETags that were read, then invalidate /apt/dists/*
         id: put
         if: ${{ steps.gate.outputs.enabled == 'true' }}
@@ -678,7 +678,7 @@ jobs:
         if: ${{ steps.gate.outputs.enabled == 'true' }}
         env:
           ROLE_ARN: ${{ vars.APT_PUBLISH_ROLE_ARN }}
-        run: cargo xtask channels assume --role-arn "$ROLE_ARN" --session-name "tierstore-apt-$GITHUB_RUN_ID" --region us-east-1 --env-file "$GITHUB_ENV"
+        run: cargo xtask channels assume --role-arn "$ROLE_ARN" --session-name "tierstore-testing-apt-read-2-$GITHUB_RUN_ID" --region us-east-1 --env-file "$GITHUB_ENV"
       - name: Read the current index and the ETag of each object from S3 (never through the CDN, which caches the index)
         if: ${{ steps.gate.outputs.enabled == 'true' }}
         env:
@@ -815,7 +815,7 @@ jobs:
         if: ${{ steps.gate.outputs.enabled == 'true' }}
         env:
           ROLE_ARN: ${{ vars.APT_PUBLISH_ROLE_ARN }}
-        run: cargo xtask channels assume --role-arn "$ROLE_ARN" --session-name "tierstore-apt-$GITHUB_RUN_ID" --region us-east-1 --env-file "$GITHUB_ENV"
+        run: cargo xtask channels assume --role-arn "$ROLE_ARN" --session-name "tierstore-testing-apt-write-2-$GITHUB_RUN_ID" --region us-east-1 --env-file "$GITHUB_ENV"
       - name: Upload the .debs once each, then write the signed index with If-Match on the ETags that were read, then invalidate /apt/dists/*
         id: put
         if: ${{ steps.gate.outputs.enabled == 'true' }}
@@ -861,7 +861,7 @@ jobs:
         if: ${{ steps.gate.outputs.enabled == 'true' }}
         env:
           ROLE_ARN: ${{ vars.APT_PUBLISH_ROLE_ARN }}
-        run: cargo xtask channels assume --role-arn "$ROLE_ARN" --session-name "tierstore-apt-$GITHUB_RUN_ID" --region us-east-1 --env-file "$GITHUB_ENV"
+        run: cargo xtask channels assume --role-arn "$ROLE_ARN" --session-name "tierstore-testing-apt-read-3-$GITHUB_RUN_ID" --region us-east-1 --env-file "$GITHUB_ENV"
       - name: Read the current index and the ETag of each object from S3 (never through the CDN, which caches the index)
         if: ${{ steps.gate.outputs.enabled == 'true' }}
         env:
@@ -998,7 +998,7 @@ jobs:
         if: ${{ steps.gate.outputs.enabled == 'true' }}
         env:
           ROLE_ARN: ${{ vars.APT_PUBLISH_ROLE_ARN }}
-        run: cargo xtask channels assume --role-arn "$ROLE_ARN" --session-name "tierstore-apt-$GITHUB_RUN_ID" --region us-east-1 --env-file "$GITHUB_ENV"
+        run: cargo xtask channels assume --role-arn "$ROLE_ARN" --session-name "tierstore-testing-apt-write-3-$GITHUB_RUN_ID" --region us-east-1 --env-file "$GITHUB_ENV"
       - name: Upload the .debs once each, then write the signed index with If-Match on the ETags that were read, then invalidate /apt/dists/*
         id: put
         if: ${{ steps.gate.outputs.enabled == 'true' }}
