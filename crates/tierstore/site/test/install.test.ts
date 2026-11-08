@@ -31,8 +31,11 @@ test('the release document gives the verify command with the flags of the instal
   for (const flag of VERIFY_FLAGS) assert.ok(doc.includes(flag), `docs/ci-and-release.md lacks ${flag}`);
 });
 
-test('the install page and the install guide give the verify command with this repository as signer', () => {
-  for (const [name, text] of pages.slice(0, 1).concat(pages.slice(2, 3))) {
+test('the install guide gives the verify command with this repository as signer, and the Get started page links to it instead of repeating it', () => {
+  const started = pages[0][1];
+  assert.match(started, /href="\/docs\/install\/#verify"[^>]*>Verify the download</);
+  assert.doesNotMatch(started, /gh attestation|cosign|sha256sum/, 'the verification lives in the install guide alone');
+  for (const [name, text] of pages.slice(2, 3)) {
     for (const flag of VERIFY_FLAGS) assert.ok(text.replace(/&lt;/g, '<').replace(/&gt;/g, '>').includes(flag), `${name} lacks ${flag}`);
     assert.match(text, /gh attestation verify/, `${name} lacks the command`);
   }
@@ -50,7 +53,6 @@ test('downloads point to this repository\'s releases and no page sends the reade
 
 test('the install guide says versions up to 0.2.0 were built in another repository', () => {
   assert.match(pages[2][1], /up to (and including )?0\.2\.0[^.]*built in another repository|built in another repository[^.]*0\.2\.0/i);
-  assert.match(pages[0][1], /0\.2\.0/);
 });
 
 // The three checks of a download (integrity, then authenticity with gh or with cosign), held to the signer above.
@@ -64,7 +66,7 @@ test('the install guide says versions up to 0.2.0 were built in another reposito
 /** GitHub Actions' OIDC issuer, which signs the certificate of every attestation (xtask's bundles::ISSUER). */
 const ISSUER = 'https://token.actions.githubusercontent.com';
 
-const INSTALL: Array<[string, string]> = [pages[0], pages[2]];
+const INSTALL: Array<[string, string]> = [pages[2]];
 const RELEASE_DOC = read(REPO, 'docs', 'ci-and-release.md');
 
 /** The command lines of a page: markup out, entities decoded, continued lines joined, a leading `$ ` prompt dropped. */
@@ -186,7 +188,7 @@ test('every packaging path the install and demo pages name exists in the reposit
     for (const p of paths) assert.ok(existsSync(join(REPO, p)), `${file} names ${p}, which does not exist`);
     named += paths.length;
   }
-  assert.ok(named >= 3, `only ${named} paths were found to check`);
+  assert.ok(named >= 2, `only ${named} paths were found to check`);
 });
 
 // The verify block as a whole: each command checked on its own line, and the three checks in their order.

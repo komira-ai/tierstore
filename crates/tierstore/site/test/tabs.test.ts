@@ -191,7 +191,7 @@ test('the built Get started page: six client languages and four install methods,
     return [...g.matchAll(/role="tab"[^>]*>([^<]+)<\/button>/g)].map((m) => m[1]);
   };
   assert.deepEqual(labels('client'), ['AWS CLI', 'Python (boto3)', 'JavaScript (AWS SDK v3)', 'Go (aws-sdk-go-v2)', 'Rust (aws-sdk-s3)', 'Java (AWS SDK v2)']);
-  assert.deepEqual(labels('install'), ['Tarball', 'Script (planned)', 'Homebrew (planned)', 'apt (planned)']);
+  assert.deepEqual(labels('install'), ['Tarball', 'Script (coming soon)', 'Homebrew (coming soon)', 'apt (coming soon)']);
   assert.deepEqual(labels('shape'), ['One machine', 'Storage node', 'Build node']);
   assert.equal(html.match(/role="tabpanel"/g)?.length, 6 + 4 + 3);
   assert.ok(!/role="tabpanel"[^>]* hidden/.test(html));

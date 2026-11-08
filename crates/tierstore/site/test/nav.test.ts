@@ -60,10 +60,10 @@ test('the old install and getting-started addresses answer with a page that link
   }
 });
 
-test('Get started has the installer, the install steps, the configuration and the client snippets', () => {
+test('Get started has the install tabs, the configuration, the run step and the client snippets', () => {
   const html = page('/get-started/');
-  for (const id of ['install', 'planned', 'configure', 'run', 'clients']) assert.ok(html.includes(`id="${id}"`), `no #${id}`);
+  for (const id of ['install', 'configure', 'run', 'clients']) assert.ok(html.includes(`id="${id}"`), `no #${id}`);
   assert.match(html.replace(/<[^>]+>/g, ''), /curl -fsSL https:\/\/tierstore\.dev\/install\.sh \| sh/);
-  assert.match(html, /role="tab"[^>]*>Script \(planned\)<\/button>/);
-  assert.match(html, /<strong>Not built yet\.<\/strong> There is nothing at this address/);
+  assert.match(html, /role="tab"[^>]*>Script \(coming soon\)<\/button>/);
+  assert.match(html, /<span class="tag tag-planned">Coming soon<\/span> Nothing is published at this address yet/);
 });

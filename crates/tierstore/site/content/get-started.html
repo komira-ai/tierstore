@@ -1,173 +1,43 @@
+<div class="narrow">
 <h1>Get started</h1>
-<p class="lede">Install tierstore, write a configuration file, start it and put and get an object. It takes about five minutes on one machine.</p>
+<p class="lede">Install tierstore, start it on one machine, and put and get an object. It takes about five minutes.</p>
 
-<h2 id="install">Install <span class="tag tag-ok">works today</span></h2>
-<p>Choose a method. The tarball works today; the script, Homebrew and apt are planned, and their tabs say so. The steps after the tabs check the download and place the binary as a service.</p>
+<h2 id="install">Install</h2>
 <div class="tabs" data-tabs="install">
 <section data-tab="Tarball">
-<p>Take the tarball of your platform from this repository's releases, and unpack the binary.</p>
-<p><strong>Linux x86_64</strong></p>
-<div class="code"><pre data-lang="sh"><span class="p">$</span> gh release download --repo komira-ai/tierstore \
-    --pattern 'tierstore-*-linux-x86_64.tar.gz' --pattern SHA256SUMS
-<span class="p">$</span> tar -xzf tierstore-*-linux-x86_64.tar.gz tierstore
+<p>One command block for Linux (x86_64 or arm64) and macOS (Apple silicon). It takes the tarball of the machine it runs on, unpacks it and prints the version.</p>
+<div class="code"><pre data-lang="sh"><span class="p">$</span> os=$(uname -s | sed 's/Darwin/macos/; s/Linux/linux/')
+<span class="p">$</span> arch=$(uname -m | sed 's/aarch64/arm64/')
+<span class="p">$</span> gh release download --repo komira-ai/tierstore \
+    --pattern "tierstore-*-$os-$arch.tar.gz"
+<span class="p">$</span> tar -xzf tierstore-*-$os-$arch.tar.gz tierstore
 <span class="p">$</span> ./tierstore --version</pre></div>
-<p><strong>Linux arm64</strong></p>
-<div class="code"><pre data-lang="sh"><span class="p">$</span> gh release download --repo komira-ai/tierstore \
-    --pattern 'tierstore-*-linux-arm64.tar.gz' --pattern SHA256SUMS
-<span class="p">$</span> tar -xzf tierstore-*-linux-arm64.tar.gz tierstore
-<span class="p">$</span> ./tierstore --version</pre></div>
-<p><strong>macOS (Apple silicon)</strong></p>
-<div class="code"><pre data-lang="sh"><span class="p">$</span> gh release download --repo komira-ai/tierstore \
-    --pattern 'tierstore-*-macos-arm64.tar.gz' --pattern SHA256SUMS
-<span class="p">$</span> tar -xzf tierstore-*-macos-arm64.tar.gz tierstore
-<span class="p">$</span> ./tierstore --version</pre></div>
-<p class="note">No <code>gh</code>? Download the same files from the <a href="https://github.com/komira-ai/tierstore/releases">releases page</a>.</p>
+<p class="note">No <code>gh</code>? Take the same file from the <a href="https://github.com/komira-ai/tierstore/releases">releases page</a>. <a href="/docs/install/#verify">Verify the download</a> before you run it.</p>
 </section>
-<section data-tab="Script (planned)">
-<div class="notice notice-warn"><p><strong>Not built yet.</strong> There is nothing at this address, so the command fails today. Use the tarball.</p></div>
-<p>One shell script that works on Linux and on macOS: it picks the tarball of the host, checks its digest and places the binary.</p>
+<section data-tab="Script (coming soon)">
+<p><span class="tag tag-planned">Coming soon</span> Nothing is published at this address yet, so the command fails today. Use the tarball.</p>
 <div class="code"><pre data-lang="sh"><span class="p">$</span> curl -fsSL https://tierstore.dev/install.sh | sh</pre></div>
 </section>
-<section data-tab="Homebrew (planned)">
-<div class="notice notice-warn"><p><strong>Not built yet.</strong> There is no formula, so the command fails today. Use the tarball.</p></div>
-<p>A formula in the tap <code>komira-ai/tap</code>, for macOS on Apple silicon and for Linux:</p>
+<section data-tab="Homebrew (coming soon)">
+<p><span class="tag tag-planned">Coming soon</span> There is no formula yet, so the command fails today. Use the tarball.</p>
 <div class="code"><pre data-lang="sh"><span class="p">$</span> brew install komira-ai/tap/tierstore</pre></div>
 </section>
-<section data-tab="apt (planned)">
-<div class="notice notice-warn"><p><strong>Not built yet.</strong> There is no <code>tierstore</code> package in the apt repository, so these commands fail today. Use the tarball.</p></div>
-<p>The package <code>tierstore</code> in the repository <code>packages.komira.ai</code>, shared with other Komira tools. Fetch the repository's key over HTTPS into <code>/usr/share/keyrings</code>, compare its fingerprint with the one the repository publishes, then write a deb822 source that trusts that file for this source only:</p>
-<div class="code"><pre data-lang="sh"><span class="p">$</span> sudo install -d -m 0755 /usr/share/keyrings
-<span class="p">$</span> sudo curl -fsSL https://packages.komira.ai/apt/komira-archive-keyring.gpg -o /usr/share/keyrings/komira-archive-keyring.gpg
-<span class="p">$</span> gpg --show-keys --with-fingerprint /usr/share/keyrings/komira-archive-keyring.gpg</pre></div>
-<div class="code"><pre data-lang="sh"><span class="p">$</span> sudo tee /etc/apt/sources.list.d/komira.sources &gt;/dev/null &lt;&lt;'EOF'
-Types: deb
-URIs: https://packages.komira.ai/apt
-Suites: stable
-Components: main
-Signed-By: /usr/share/keyrings/komira-archive-keyring.gpg
-EOF
-<span class="p">$</span> sudo apt update
-<span class="p">$</span> sudo apt install tierstore</pre></div>
-<p>The first fetch of the key trusts TLS once; the fingerprint is the check against it. There is no rpm package.</p>
+<section data-tab="apt (coming soon)">
+<p><span class="tag tag-planned">Coming soon</span> There is no package yet, so the command fails today. Use the tarball. The <a href="/docs/install/#apt">install guide</a> says how the repository is meant to be added.</p>
+<div class="code"><pre data-lang="sh"><span class="p">$</span> sudo apt install tierstore</pre></div>
 </section>
 </div>
-
-<p>tierstore is a binary for Linux (x86_64 and arm64) and macOS (Apple silicon). It ships from the <a href="https://github.com/komira-ai/tierstore/releases">releases of this repository</a>: every release carries the tarball, its provenance bundle and its checksum. There is no Homebrew formula, apt package or container image yet (a one-line script, Homebrew, apt and a copy of the release files on tierstore.dev are planned: see <a href="#planned">Not in a release yet</a> below). hostkeeper packages exist and update it through <code>tierstore update-hook</code>; otherwise nothing updates it afterwards.</p>
-
-<div class="notice notice-warn"><p><strong>Where the code lives.</strong> The source is <code>crates/tierstore</code> in <a href="https://github.com/komira-ai/tierstore">komira-ai/tierstore</a>, and the packaging notes are in <a href="https://github.com/komira-ai/tierstore/blob/main/packaging/README.md"><code>packaging</code></a>. Versions up to 0.2.0 were built in another repository, and their release history is there. From 0.3.0 on, every release is built and signed here.</p></div>
-
-<ol class="steps">
-  <li>
-    <h3>Take the tarball of your architecture <span class="tag tag-ok">works today</span></h3>
-    <p>A <a href="https://github.com/komira-ai/tierstore/releases">release</a> lists <code>tierstore-&lt;commit&gt;-linux-x86_64.tar.gz</code>, <code>tierstore-&lt;commit&gt;-linux-arm64.tar.gz</code> and <code>tierstore-&lt;commit&gt;-macos-arm64.tar.gz</code>, each with a <code>.sigstore.json</code> bundle, and all of them in <code>SHA256SUMS</code>. Take the one for the host by its digest.</p>
-    <p><code>&lt;commit&gt;</code> is the full 40-hex SHA of the commit the release was built from. Find it in the release's asset list, or in <code>SHA256SUMS</code>, where each line is a digest and a file name, so the name of a tierstore tarball carries it. For instance, with the example SHA <code>0123456789abcdef0123456789abcdef01234567</code>:</p>
-    <div class="code"><pre>tierstore-0123456789abcdef0123456789abcdef01234567-linux-x86_64.tar.gz
-tierstore-0123456789abcdef0123456789abcdef01234567-linux-arm64.tar.gz
-tierstore-0123456789abcdef0123456789abcdef01234567-macos-arm64.tar.gz</pre></div>
-  </li>
-  <li>
-    <h3>Verify it <span class="tag tag-ok">works today</span></h3>
-    <p>Three checks, in this order: the first proves the download is intact, the second or the third that this repository built and signed it. The second needs <code>gh</code>; the third needs only cosign, for a host whose <code>gh</code> has no <code>gh attestation</code> command. Take the tarball's <code>.sigstore.json</code> bundle and <code>SHA256SUMS</code> from the same release; below, <code>&lt;tarball&gt;</code> is the tarball's file name.</p>
-    <p><strong>Integrity.</strong> <code>SHA256SUMS</code> lists the tarballs and SBOMs of every platform, so <code>--ignore-missing</code> skips the ones you did not take:</p>
-    <div class="code"><pre><span class="p">$</span> sha256sum -c --ignore-missing SHA256SUMS</pre></div>
-    <p><code>SHA256SUMS</code> is not itself an attestation subject, so this check proves integrity, not authenticity: who built the file is what the next check proves.</p>
-    <p><strong>Authenticity with gh.</strong> This needs a <code>gh</code> that has the <code>gh attestation</code> command (Ubuntu 24.04's packaged <code>gh</code>, 2.46.0, does not: use the check without <code>gh</code> there). Check the tarball against the workflow of this repository that signed it:</p>
-    <div class="code"><pre><span class="p">$</span> gh attestation verify tierstore-&lt;commit&gt;-linux-x86_64.tar.gz --repo komira-ai/tierstore \
-    --signer-workflow komira-ai/tierstore/.github/workflows/artifacts.yml \
-    --source-ref refs/heads/main --source-digest &lt;commit&gt; --deny-self-hosted-runners</pre></div>
-    <p><code>&lt;commit&gt;</code> is the full SHA in the tarball's name; <code>--source-digest</code> makes the check prove the build came from that commit, not only from the main workflow.</p>
-    <p><strong>Authenticity without gh.</strong> This needs only cosign, and checks the tarball against its <code>.sigstore.json</code> bundle; it prints <code>Verified OK</code>.</p>
-    <div class="code"><pre><span class="p">$</span> cosign verify-blob-attestation \
-    --bundle &lt;tarball&gt;.sigstore.json \
-    --type slsaprovenance1 \
-    --certificate-identity-regexp '^https://github.com/komira-ai/tierstore/\.github/workflows/artifacts\.yml@refs/heads/main$' \
-    --certificate-oidc-issuer https://token.actions.githubusercontent.com \
-    &lt;tarball&gt;</pre></div>
-    <p><code>--type slsaprovenance1</code> is required: the bundle holds SLSA provenance v1, and with cosign's default type the check fails with "invalid predicate type".</p>
-    <p>With a <code>gh</code> that has <code>gh attestation</code> on a host with no network, verify against the bundle and a trusted root fetched beforehand on a host that has one, and copied over with the tarball:</p>
-    <div class="code"><pre><span class="p">$</span> gh attestation trusted-root &gt; trusted_root.jsonl
-<span class="p">$</span> gh attestation verify &lt;tarball&gt; --repo komira-ai/tierstore \
-    --bundle &lt;tarball&gt;.sigstore.json --custom-trusted-root trusted_root.jsonl \
-    --signer-workflow komira-ai/tierstore/.github/workflows/artifacts.yml \
-    --source-ref refs/heads/main --source-digest &lt;commit&gt; --deny-self-hosted-runners</pre></div>
-    <p>Every check names one signer: the workflow file <code>.github/workflows/artifacts.yml</code> of this repository, run on <code>refs/heads/main</code>. That identity is part of what a release promises: if the file were renamed or moved, every command here would fail. <a href="https://github.com/komira-ai/tierstore/blob/main/docs/ci-and-release.md">docs/ci-and-release.md</a> lists the files of a release and what each attests.</p>
-  </li>
-  <li>
-    <h3>On macOS (Apple silicon) <span class="tag tag-ok">works today</span></h3>
-    <p>The macOS binary is <code>tierstore-&lt;commit&gt;-macos-arm64.tar.gz</code>, built and signed by the same workflow as the Linux ones and checked the same way. It is built on a macOS 15 runner on Apple silicon, which runs it before it is packaged and refuses it unless it reports the version and the commit of the release. This step covers taking and verifying it. A Mac runs it as a LaunchDaemon, one build node on loopback that the host updater updates by a plain restart through <code>tierstore update-hook</code>, with a brief gap in serving; the files and the layout are in <a href="https://github.com/komira-ai/tierstore/blob/main/crates/tierstore/docs/update-hook.md#on-a-mac">The update hook</a> and <code>packaging/macos</code>.</p>
-    <p>Take the tarball, its bundle and <code>SHA256SUMS</code> from one release, with <code>gh</code> (Homebrew's <code>gh</code> has <code>gh attestation</code>) or with <code>curl</code>, and check its digest with <code>shasum</code>, which every Mac has; it prints <code>OK</code>:</p>
-    <div class="code"><pre><span class="p">$</span> gh release download v&lt;X.Y.Z&gt; --repo komira-ai/tierstore \
-    --pattern 'tierstore-*-macos-arm64.tar.gz*' --pattern SHA256SUMS
-<span class="p">$</span> grep -- '-macos-arm64\.tar\.gz$' SHA256SUMS | shasum -a 256 -c</pre></div>
-    <p>Then check that this repository built and signed it, offline against its bundle: run the offline check above (<code>gh attestation trusted-root</code> on a host with a network, then <code>gh attestation verify</code> with <code>--bundle</code> and <code>--custom-trusted-root</code>), with <code>&lt;tarball&gt;</code> set to <code>tierstore-&lt;commit&gt;-macos-arm64.tar.gz</code>. cosign's check without <code>gh</code> works the same way.</p>
-    <p>The binary is not notarized by Apple. It is ad-hoc signed by the linker, as every binary for Apple silicon must be to run. <code>gh release download</code> and <code>curl</code> save it without the quarantine attribute, so macOS runs it as it runs any program installed from the command line, as a Linux host runs a binary fetched with <code>curl</code>; a file saved by a web browser carries the attribute, and macOS then refuses to open it because it is not notarized. Take it with <code>gh</code> or <code>curl</code>. Its authenticity is what the checks above prove, not an Apple signature.</p>
-    <div class="code"><pre><span class="p">$</span> tar -xzf tierstore-&lt;commit&gt;-macos-arm64.tar.gz tierstore
-<span class="p">$</span> ./tierstore --version</pre></div>
-    <p><strong>On a Mac, this is the last step.</strong> The steps after it (the placement under <code>/usr/libexec</code>, the systemd unit, the sysusers account, the key files' owner and the start) are for a Linux host.</p>
-  </li>
-  <li>
-    <h3>Place the binary <span class="tag tag-ok">works today</span> <span class="tag tag-muted">Linux</span></h3>
-    <p>The tarball holds one member, the binary under its own name.</p>
-    <div class="code"><pre><span class="p">$</span> tar -xzf tierstore-&lt;commit&gt;-linux-x86_64.tar.gz tierstore
-<span class="p">$</span> install -d -m 0755 /usr/libexec/tierstore
-<span class="p">$</span> install -m 0755 -o root -g root tierstore /usr/libexec/tierstore/tierstore</pre></div>
-    <p>The update hook is written for a host updater that is in development; no release carries it as a step an updater calls yet. To move to the next release, place the next binary the same way and restart the unit.</p>
-  </li>
-  <li>
-    <h3>Place the unit <span class="tag tag-ok">works today</span> <span class="tag tag-muted">Linux</span></h3>
-    <p>The repository has an example systemd unit, <code>tierstore.service</code>, a configuration file, <code>tierstore.toml</code>, and a sysusers entry, <code>tierstore.conf</code>, in <code>packaging</code>. The values in the file are examples: edit the address of the <code>s3</code> interface, the proxy id, the buckets, the endpoints and the hot-tier size to your setup.</p>
-    <div class="code"><pre><span class="p">$</span> install -m 0644 tierstore.conf /etc/sysusers.d/tierstore.conf
-<span class="p">$</span> systemd-sysusers /etc/sysusers.d/tierstore.conf
-<span class="p">$</span> install -d -m 0750 -o root -g tierstore /etc/tierstore
-<span class="p">$</span> install -m 0640 -o root -g tierstore tierstore.toml /etc/tierstore/tierstore.toml
-<span class="p">$</span> install -m 0644 tierstore.service /etc/systemd/system/tierstore.service
-<span class="p">$</span> systemctl daemon-reload</pre></div>
-    <p>Edit the installed <code>/etc/tierstore/tierstore.toml</code> before you start the unit: the unit reads that file and no other.</p>
-  </li>
-  <li>
-    <h3>Write the key files <span class="tag tag-ok">works today</span> <span class="tag tag-muted">Linux</span></h3>
-    <p>Four files, each owned by <code>tierstore</code> with mode 0600 or 0400 (the process refuses a key file that its group or others can read). A secret is never on the command line and the process reads no environment variable.</p>
-    <ul>
-      <li><code>/etc/tierstore/access.key</code>: the full key, the one clients that write sign with (<code>server.access_key_file</code>);</li>
-      <li><code>/etc/tierstore/daemons.key</code>: a read-only key (<code>server.read_only_key_files</code>), which may get, head and list and nothing else;</li>
-      <li><code>/etc/tierstore/hot.credentials</code> and <code>/etc/tierstore/cold.credentials</code>: the keys tierstore signs its requests to the two stores with.</li>
-    </ul>
-    <p>A file holds its key as JSON or as two lines, the access key id and then the secret access key. The <a href="/docs/keys/">configuration page</a> has both forms.</p>
-  </li>
-  <li>
-    <h3>Start it <span class="tag tag-ok">works today</span> <span class="tag tag-muted">Linux</span></h3>
-    <p>The unit does not start at install or at boot (it has no <code>[Install]</code> section), and it is skipped while <code>/etc/tierstore/access.key</code> does not exist. If you edited the unit after the <code>daemon-reload</code> above, run it again: once systemd has loaded the unit it keeps that copy until the next <code>daemon-reload</code>, so the reload makes the edit take effect. Start it by hand when the files are in place:</p>
-    <div class="code"><pre><span class="p">$</span> systemctl daemon-reload
-<span class="p">$</span> systemctl start tierstore</pre></div>
-    <p>To start it at boot, add the section in a drop-in (<code>systemctl edit tierstore</code>, <code>[Install]</code> and <code>WantedBy=multi-user.target</code>) and run <code>systemctl enable tierstore</code>.</p>
-  </li>
-</ol>
-
-<h2 id="planned">Not in a release yet <span class="tag tag-planned">planned, not built</span></h2>
-<div class="notice notice-warn"><p><strong>None of this exists yet.</strong> The script, the formula and the apt package of the tabs above, and the release files below, are not built. Use the tarball.</p></div>
-<h3 id="release-files">Release files on tierstore.dev <span class="tag tag-planned">planned, not built</span></h3>
-<p>Each release is meant to be copied to <code>https://tierstore.dev/releases/&lt;version&gt;/</code>, written once and never changed, with <code>https://tierstore.dev/releases/latest.json</code> naming the newest. The releases of this repository on GitHub stay the place the files are built and signed; the checks under "Verify it" above are the same for a file taken from either.</p>
+<p class="note">To run tierstore as a service on Linux, follow the <a href="/docs/install/">install guide</a>.</p>
 
 <h2 id="configure">Configure</h2>
-<p>tierstore is configured by one TOML file, <code>--config &lt;file&gt;</code>, and nothing else for the data path. A new file sets only a few keys; everything else keeps its default until a measurement says otherwise. <a href="/docs/configuration/">The reference</a> lists every key and its default, and <a href="/docs/configure/">the configuration guide</a> has a complete file for each shape.</p>
-<div class="table-wrap"><table>
-<thead><tr><th>Key</th><th>What to put</th></tr></thead>
-<tbody>
-<tr><td><code>[[interface]]</code> <code>type</code>, <code>params.addresses</code></td><td><code>"s3"</code> and the address to listen on: a private address on a storage node, <code>127.0.0.1</code> on a build node</td></tr>
-<tr><td><code>server.proxy_id</code></td><td>a name of this process; give each process over the same tiers its own, and keep it across restarts</td></tr>
-<tr><td><code>server.bucket</code></td><td>the one bucket clients see</td></tr>
-<tr><td><code>server.access_key_file</code></td><td>the full key file</td></tr>
-<tr><td><code>hot_store</code>, <code>cold_store</code></td><td>the tiers: <code>kind = "dir"</code> with a <code>path</code>, or <code>kind = "s3"</code> with a <code>bucket</code>, an <code>endpoint</code> and a <code>credentials_file</code>; <code>hot_store.budget</code> is the bytes the hot tier is meant to hold</td></tr>
-<tr><td><code>local_cache.path</code>, <code>local_cache.budget</code></td><td>on a build node, the cache directory and its size</td></tr>
-</tbody></table></div>
-<p>A key file is the access key id and then the secret, one on each line (or JSON). It must be owned by the account that runs tierstore with mode 0600 or 0400: a start with a key file that its group or others can read is refused.</p>
+<p>tierstore reads one TOML file. Make a key file, which holds an access key id and a secret on two lines, and two directories for the tiers.</p>
 <div class="code"><pre data-lang="sh"><span class="p">$</span> printf 'AKIDEXAMPLE\nexample-secret-change-me\n' &gt; access.key
 <span class="p">$</span> chmod 0600 access.key
 <span class="p">$</span> mkdir hot cold</pre></div>
-<p>Then a file for the shape you run. Each <code>[[interface]]</code> is something the process serves.</p>
+<p>Then write the file for the shape you run, as <code>tierstore.toml</code> next to <code>access.key</code>.</p>
 <div class="tabs" data-tabs="shape">
 <section data-tab="One machine">
-<p>The two tiers are directories. Write this as <code>tierstore.toml</code> next to <code>access.key</code>:</p>
+<p>Both tiers are directories on this machine. Start here.</p>
 <div class="code"><pre data-lang="toml">[[interface]]
 type   = "s3"
 params = { addresses = ["127.0.0.1:9000"] }
@@ -187,7 +57,7 @@ kind = "dir"
 path = "cold"</pre></div>
 </section>
 <section data-tab="Storage node">
-<p>A hot tier on SSD in front of a cold tier on spinning disks, with a read-only key for daemons that only read. Either tier may instead be <code>kind = "s3"</code> with a <code>bucket</code>, an <code>endpoint</code> and a <code>credentials_file</code>. An <code>[[interface]]</code> of type <code>oci</code> adds the read-only OCI registry front.</p>
+<p>A fast hot tier in front of a large cold tier, on a private address, with a read-only key for programs that only read.</p>
 <div class="code"><pre data-lang="toml">[[interface]]
 type   = "s3"
 params = { addresses = ["192.0.2.10:9000"] }
@@ -208,7 +78,7 @@ kind = "dir"
 path = "/srv/tierstore/cold"</pre></div>
 </section>
 <section data-tab="Build node">
-<p>A read cache on local disk in front of one upstream, with no hot tier. The upstream is <code>[cold_store]</code>, read with a read-only key, and <code>[[policy]]</code> says which key prefixes are kept.</p>
+<p>A cache on local disk in front of one upstream store, for a machine that mostly reads.</p>
 <div class="code"><pre data-lang="toml">[[interface]]
 type   = "s3"
 params = { addresses = ["127.0.0.1:9400"] }
@@ -233,34 +103,25 @@ prefix = "cas/b/"
 cache  = true</pre></div>
 </section>
 </div>
-<p>One process can also be both: the storage node's two tiers with the build node's disk cache in front of them, for a single machine. Its file has <code>[hot_store]</code>, <code>[cold_store]</code> and <code>[local_cache]</code>; <a href="/docs/configuration/#a-file-for-a-storage-node-with-a-cache">the reference</a> has an example.</p>
-<p>Check a new file before you start with it. <code>--check-config</code> loads the file and reads the key files it names, binds nothing and asks no store, then exits 0 and prints nothing, or prints the refusal and exits 2.</p>
-<div class="code"><pre data-lang="sh"><span class="p">$</span> ./tierstore --config tierstore.toml --check-config</pre></div>
+<p class="note">Every other setting keeps its default. The <a href="/docs/configure/">configuration guide</a> explains these shapes and the <a href="/docs/configuration/">reference</a> lists every key.</p>
 
-<h2 id="run">Start it, then put and get an object</h2>
+<h2 id="run">Run</h2>
+<p>Start tierstore. It prints its version and the address it listens on, and serves one bucket until you press Ctrl-C.</p>
 <div class="code"><pre data-lang="sh"><span class="p">$</span> ./tierstore --config tierstore.toml</pre></div>
-<p>The process does not test its tiers: it opens the proxy (which reads and writes the hot tier's own state) and binds the address, then prints its version and the address it listens on. <code>curl http://127.0.0.1:9000/readyz</code> answers <code>ready</code>. Stop it with Ctrl-C: it drains and exits.</p>
-<p>The front serves one bucket, path-style, over plain HTTP (the example file has no TLS). The key id and the secret are the two lines of <code>access.key</code>. The <code>aws</code> CLI below is told to address the bucket in the path; the other clients are under <a href="#clients">Use it from your code</a>.</p>
-<div class="code"><pre data-lang="sh"><span class="p">$</span> export AWS_ACCESS_KEY_ID=AKIDEXAMPLE AWS_SECRET_ACCESS_KEY=example-secret-change-me AWS_DEFAULT_REGION=us-east-1
+<p>In another terminal, put an object and get it back with the <code>aws</code> CLI. The key is the one in <code>access.key</code>.</p>
+<div class="code"><pre data-lang="sh"><span class="p">$</span> export AWS_ACCESS_KEY_ID=AKIDEXAMPLE
+<span class="p">$</span> export AWS_SECRET_ACCESS_KEY=example-secret-change-me
+<span class="p">$</span> export AWS_DEFAULT_REGION=us-east-1
 <span class="p">$</span> aws configure set default.s3.addressing_style path
 <span class="p">$</span> echo hello &gt; hello.txt
-<span class="p">$</span> aws --endpoint-url http://127.0.0.1:9000 s3api put-object --bucket tierstore --key hello.txt --body hello.txt
-<span class="p">$</span> aws --endpoint-url http://127.0.0.1:9000 s3api get-object --bucket tierstore --key hello.txt out.txt
+<span class="p">$</span> aws --endpoint-url http://127.0.0.1:9000 s3api put-object \
+    --bucket tierstore --key hello.txt --body hello.txt
+<span class="p">$</span> aws --endpoint-url http://127.0.0.1:9000 s3api get-object \
+    --bucket tierstore --key hello.txt out.txt
 <span class="p">$</span> cat out.txt</pre></div>
-<p>Whether putting <code>hello.txt</code> again is refused depends on the store's format phase: on a store on the older entry format a put is create-only and the second is refused with 412; on a store on the marker format (<code>active-marks</code>) a plain put replaces the key, and <code>If-None-Match: *</code> is what makes a put create-only.</p>
 
 <h2 id="clients">Use it from your code</h2>
-<p>Point an S3 client at the endpoint of the <code>s3</code> interface, with path-style addressing, and sign with a key of tierstore. tierstore issues no credentials of its own: the key id and the secret are those of a key file you wrote (<a href="/docs/keys/">Keys and roles</a>), the two lines of <code>server.access_key_file</code> for the full key, or a read-only key's for a client that only reads. Every tab below sets these:</p>
-<div class="table-wrap"><table>
-<thead><tr><th>Setting</th><th>Value</th><th>Why</th></tr></thead>
-<tbody>
-<tr><td>endpoint</td><td><code>http://&lt;host&gt;:&lt;port&gt;</code> of the <code>s3</code> interface</td><td>without <code>server.tls_cert_file</code> and <code>server.tls_key_file</code> the front has no TLS, and an <code>https://</code> endpoint fails</td></tr>
-<tr><td>addressing</td><td>path-style</td><td>the bucket is in the path; virtual-hosted addressing is served only for the domains of <code>server.domains</code></td></tr>
-<tr><td>bucket</td><td>the <code>server.bucket</code> name</td><td>there is one</td></tr>
-<tr><td>region</td><td>tierstore's own <code>server.region</code>, <code>us-east-1</code> by default</td><td>the region is in the credential scope of the signature, and a client with another is refused 403 <code>InvalidAccessKeyId</code></td></tr>
-<tr><td>credentials</td><td>a static key id and secret</td><td>the front has no session tokens and no STS</td></tr>
-<tr><td>checksums</td><td><code>when_required</code> (optional)</td><td>keeps the client from sending a checksum with every upload; the front takes the checksums of the SDK defaults and checks them</td></tr>
-</tbody></table></div>
+<p>Point any S3 client at the address, with path-style addressing, the region <code>us-east-1</code> and the key from <code>access.key</code>. tierstore has no credentials of its own.</p>
 <div class="tabs" data-tabs="client">
 <section data-tab="AWS CLI">
 <div class="code"><pre data-lang="sh"><span class="p">$</span> export AWS_ACCESS_KEY_ID=&lt;key id&gt; AWS_SECRET_ACCESS_KEY=&lt;secret&gt; AWS_DEFAULT_REGION=us-east-1
@@ -347,4 +208,5 @@ client.putObject(PutObjectRequest.builder().bucket("tierstore").key("hello.txt")
 </section>
 </div>
 <p class="source-note">From <code>packaging/README.md</code>, "Using a stock SDK". The crate's tests drive the front with the Rust SDK set as in its tab; the other tabs are written from the SDKs' documentation and not run against the front by the repository's tests.</p>
-<p>Next: <a href="/demo/">a start and a drain</a>, <a href="/docs/configure/">the configuration guide</a>, <a href="/docs/configuration/">the configuration reference</a> or <a href="/docs/">the whole operator guide</a>.</p>
+<p>Next: <a href="/demo/">a start and a drain</a>, <a href="/docs/">the operator guide</a>.</p>
+</div>

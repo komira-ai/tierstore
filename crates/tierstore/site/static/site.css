@@ -1,5 +1,16 @@
 /* tierstore.dev: the rules this site adds on top of theme.css (the komira.ai look). */
 
+/* Prose is 40rem (640px) wide, as on komira.ai, and the page is 70rem; the theme's 43rem and 62rem are set again here, since theme.css is pinned. */
+:root { --measure: 40rem; --wrap: 70rem; }
+
+/* ---- the home hero: copy on the left, the picture large on the right, with room around both ---- */
+.hero-grid.wrap { padding-top: 7rem; padding-bottom: 7.5rem; gap: 4rem; }
+@media (min-width: 64rem) { .hero-grid { grid-template-columns: minmax(0, 0.8fr) minmax(0, 1.2fr); gap: 5rem; } }
+.hero .display { font-size: clamp(2.3rem, 4.4vw, 3.4rem); margin-bottom: 1.75rem; }
+.hero .lede { max-width: 33rem; font-size: 1.2rem; line-height: 1.62; margin-bottom: 0; }
+.hero-links { margin-top: 2.5rem; }
+@media (max-width: 40rem) { .hero-grid.wrap { padding-top: 4rem; padding-bottom: 4.5rem; gap: 3rem; } }
+
 /* ---- the hero's picture: clients, one S3 endpoint, the hot tier and the cold store ----
    The base rules are the still frame (what prefers-reduced-motion shows): a hit at the hot tier, a miss read from the
    cold store, an object on its way into the hot tier. The loop below runs only when motion is welcome. */
@@ -28,7 +39,7 @@
 .lbl-hit { fill: var(--accent); }
 .lbl-miss { fill: var(--orange); }
 .lbl-promote { fill: var(--blue); }
-.hero figcaption { margin: 0.9rem 0 0; font-size: 0.9rem; line-height: 1.5; }
+.hero figcaption { max-width: 34rem; margin: 1.25rem 0 0; font-size: 0.9rem; line-height: 1.5; }
 
 @media (prefers-reduced-motion: no-preference) {
   .flow-svg * { animation-duration: 14s; animation-iteration-count: infinite; animation-fill-mode: both; animation-timing-function: ease-in-out; }
@@ -78,12 +89,16 @@
 @keyframes obj-pulse { 0%, 15%, 26%, 100% { opacity: 0.55; } 19%, 23% { opacity: 1; } }
 
 /* ---- sections ---- */
-.install-block .cmd-lg pre, .install-block .cmd-lg code { white-space: pre-wrap; overflow-wrap: anywhere; }
+.band { padding: 7.5rem 0; }
+.band .wrap > p { max-width: var(--measure); }
+.band .wrap > h2 + p { margin-bottom: 2rem; }
+@media (max-width: 40rem) { .band { padding: 4.5rem 0; } }
 .compact { max-width: 46rem; }
-.why-grid { display: grid; gap: 1.25rem; grid-template-columns: repeat(auto-fit, minmax(min(100%, 19rem), 1fr)); margin: 1.5rem 0 1.5rem; padding: 0; list-style: none; }
+.why-grid { display: grid; gap: 1.5rem; grid-template-columns: repeat(auto-fit, minmax(min(100%, 25rem), 1fr)); margin: 1.5rem 0 1.5rem; padding: 0; list-style: none; }
 .why-grid li { margin: 0; background: #ffffff; border: 1px solid var(--border); border-radius: var(--radius); padding: 1.5rem 1.5rem 1.6rem; }
 .why-grid h3 { margin: 0 0 0.6rem; font-size: 1.3rem; letter-spacing: -0.01em; }
 .why-grid p { margin: 0; font-size: 1.02rem; line-height: 1.55; }
+main.wrap { padding-top: 5rem; padding-bottom: 7rem; }
 main.wrap > h1 { margin-top: 0.4em; }
 main.wrap > p, main.wrap > ul, main.wrap > ol, main.wrap > h3 { max-width: var(--measure); }
 main.wrap > h2:first-child { margin-top: 0; }
@@ -91,6 +106,14 @@ td:first-child { white-space: nowrap; }
 td:last-child { min-width: 18rem; }
 @media (max-width: 34rem) { td:last-child { min-width: 14rem; } }
 .band .table-wrap td:first-child { white-space: normal; }
+
+/* ---- one narrow, centred column for a short page (Get started), as komira.ai sets its text ---- */
+.narrow { max-width: 46rem; margin: 0 auto; }
+.narrow > h1 { margin-bottom: 1.5rem; }
+.narrow > h2 { margin-top: 6rem; }
+.narrow > p, .narrow > ul { max-width: var(--measure); }
+.narrow .tabs { margin: 1.75rem 0 1.5rem; }
+.narrow .note { margin-top: 0; font-size: 0.95rem; }
 
 /* ---- numbered steps ---- */
 ol.steps { list-style: none; counter-reset: s; padding: 0; margin: 1.5rem 0; max-width: none; }
@@ -152,3 +175,21 @@ ol.steps h3 { margin: 0 0 0.4rem; }
 .docs-list a { font: 500 1.05rem var(--mono); }
 .docs-list p { margin: 0.4rem 0 0; font-size: 1rem; line-height: 1.5; }
 main.wrap h2 .tag { margin-left: 0.6rem; }
+
+/* ---- phones: the picture's words are set larger so they stay readable at the width of the screen, and the status table stacks ---- */
+@media (max-width: 40rem) {
+  .flow-text text { font-size: 24px; }
+  .flow-text .flow-name { font-size: 26px; }
+  .flow-node .flow-name { font-size: 22px; }
+  .flow-node .flow-sub { font-size: 17px; }
+  .lbl { font-size: 21px; }
+  .band .table-wrap table, .band .table-wrap tbody, .band .table-wrap tr, .band .table-wrap td { display: block; }
+  .band .table-wrap thead { display: none; }
+  .band .table-wrap tr { padding: 0.9rem 0; border-bottom: 1px solid var(--border); }
+  .band .table-wrap td { border: 0; padding: 0; min-width: 0; }
+  .band .table-wrap td:last-child { margin-top: 0.5rem; }
+  .band .table-wrap .tag { margin-left: 0; white-space: normal; border-radius: 1rem; }
+  .code { display: flex; flex-direction: column; }
+  .code pre { padding-right: 1rem; }
+  .code button.copy { position: static; align-self: flex-end; margin: 0.4rem 0 0; }
+}
