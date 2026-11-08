@@ -105,7 +105,7 @@ Today's `publish.ts` already excludes `releases/` from every upload and from `--
 
 `release.yml` keeps its shape: `plan` (read), `verify` (read; builds nothing that holds a token), `publish` (the one `contents: write`). `verify` gains the steps that make the copies and the packages (`cargo xtask release channel-files`) and checks them; the GitHub release gains the tap-named tarballs and their bundles as assets (they are in `release-assets`); the packages go in a second artifact, `channel-files`, that no `release check` lists, because they are not assets of the GitHub release.
 
-After `publish` come two jobs that gate the rest, `farm` and `soak` (section 5.3), and then four independent branches that need `soak`. Nothing waits for the four and a failed one un-releases nothing: the release is already a GitHub release and its tag exists (as in buildrules, whose `release.yml` these jobs follow).
+After `publish` come two jobs that gate the rest, `farm` and `soak` (section 5.3), and then three independent branches that need `soak` (`channel-upload`, `tap` and the apt jobs). Nothing waits for the three and a failed one un-releases nothing: the release is already a GitHub release and its tag exists (as in buildrules, whose `release.yml` these jobs follow).
 
 | job | environment | holds | does |
 |---|---|---|---|
@@ -115,7 +115,7 @@ After `publish` come two jobs that gate the rest, `farm` and `soak` (section 5.3
 
 The three apt jobs and their split are copied from buildrules' `release.yml` (the `apt-*` jobs; `RELEASING.md`, "The apt repository"): no job holds both the signing key and the cloud role, so a compromise of one step cannot sign and publish. The shared repository's own role for the product (`komira-apt-publish-tierstore`) is created by the apt repository's stack in komira-internal (section 7), trusts `.github/workflows/release.yml` of this repository at main in the environment `apt-publish`, may write `apt/pool/tierstore/*` with `If-None-Match` only and the shared `apt/dists/*` with `If-Match` only, and may delete nothing.
 
-**The workflow lint** (`crates/xtask/tests/workflows`, AGENTS.md B10): the new jobs go in the existing workflow, not in a new one (B9); the lint lists, for `release.yml`, which jobs may hold `id-token: write` (the upload job and the apt read and write jobs), under which `if:`, and that `contents: write` stays with `publish` alone. The `if:` is the one `publish` has (`needs.plan.outputs.release == 'true' && github.ref == 'refs/heads/main'`). Actions are pinned by commit SHA; the release bot's token comes from `actions/create-github-app-token` pinned the same way, in the last two steps of `tap`, given to the one step that opens the pull request.
+**The workflow lint** (`crates/xtask/tests/workflows`, AGENTS.md B10): the new jobs go in the existing workflow, not in a new one (B9); the lint lists, for `release.yml`, which jobs may hold `id-token: write` (`farm`, `soak`, the upload job and the apt read and write jobs), under which `if:`, and that `contents: write` stays with `publish` alone. The `if:` is the one `publish` has (`needs.plan.outputs.release == 'true' && github.ref == 'refs/heads/main'`). Actions are pinned by commit SHA; the release bot's token comes from `actions/create-github-app-token` pinned the same way, in the last two steps of `tap`, given to the one step that opens the pull request.
 
 **Where each channel reads from.** The tap and the formula read the GitHub release (the template fixes it), which exists before the farm job runs; the tap is held back by `soak` all the same, so no public channel names a version before the farm has kept it. The upload reads `release-assets` and `channel-files`. The apt jobs read `channel-files`; they do not download from tierstore.dev, so a failed upload does not hold apt. The site is a copy for people; no other channel depends on it. The farm reads none of them: it takes the release from the hostkeeper channel (section 5.3).
 
@@ -159,7 +159,7 @@ sequenceDiagram
   P->>P: plan: tag vX.Y.Z and commit C from the tip of main
   P->>P: verify: check files, attestations; make tap-named copies and the two .debs
   P->>G: publish: release with commit-named files, tap-named copies, bundles
-  Note over U,A: after publish, independent, each a green no-op until its settings exist
+  Note over U,A: after soak, independent of one another, each a green no-op until its settings exist
   par site files
     U->>S: assume role by OIDC, PUT releases/V/* (If-None-Match)
     U->>S: GET latest.json and ETag, then PUT it (If-Match) if V is newer
