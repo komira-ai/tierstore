@@ -111,6 +111,8 @@ const BOX_H = 62;
 const COL_GAP = 92;
 const ROW_GAP = 44;
 const PAD = 8;
+/** Room right of the last column for the label of a vertical edge there ("miss/write"). */
+const RIGHT_LABEL = 72;
 const HEAD = 8;
 
 const num = (n: number): string => String(Math.round(n * 10) / 10);
@@ -118,7 +120,7 @@ const num = (n: number): string => String(Math.round(n * 10) / 10);
 /** The size of the picture's viewBox, from the grid the nodes use. */
 export function sizeOf(d: Diagram): { w: number; h: number } {
   const rows = Math.max(...d.nodes.map((n) => n.row));
-  return { w: PAD * 2 + COLUMNS * BOX_W + (COLUMNS - 1) * COL_GAP, h: PAD * 2 + BOX_H + rows * (BOX_H + ROW_GAP) };
+  return { w: PAD * 2 + RIGHT_LABEL + COLUMNS * BOX_W + (COLUMNS - 1) * COL_GAP, h: PAD * 2 + BOX_H + rows * (BOX_H + ROW_GAP) };
 }
 
 /** An arrowhead whose tip is at (x, y) and that points along (dx, dy), a unit vector. */
@@ -178,7 +180,7 @@ export function renderDiagram(full: Diagram, caption = true, icon = false): stri
     lines.push(`<g class="${e.dashed ? 'dg-edge dg-edge-dashed' : 'dg-edge'}"><path class="${cls}" d="M${num(sx)} ${num(sy)} L${num(ex)} ${num(ey)}"></path>${head(x2 - dx * gap, y2 - dy * gap, dx, dy)}${e.both ? head(x1 + dx * gap, y1 + dy * gap, -dx, -dy) : ''}</g>`);
     const mx = (x1 + x2) / 2;
     const my = (y1 + y2) / 2;
-    if (!icon) labels.push(vertical ? (a.col === COLUMNS - 1 ? `<text class="dg-edge-label" x="${num(mx - 9)}" y="${num(my + 5)}" text-anchor="end">${escapeText(e.label)}</text>` : `<text class="dg-edge-label" x="${num(mx + 9)}" y="${num(my + 5)}">${escapeText(e.label)}</text>`) : `<text class="dg-edge-label" x="${num(mx)}" y="${num(my - 7)}" text-anchor="middle">${escapeText(e.label)}</text>`);
+    if (!icon) labels.push(vertical ? `<text class="dg-edge-label" x="${num(mx + 9)}" y="${num(my + 5)}">${escapeText(e.label)}</text>` : `<text class="dg-edge-label" x="${num(mx)}" y="${num(my - 7)}" text-anchor="middle">${escapeText(e.label)}</text>`);
   }
   const boxes = d.nodes.map((n) => {
     const p = at(n);
