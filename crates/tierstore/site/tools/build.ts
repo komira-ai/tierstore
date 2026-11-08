@@ -16,6 +16,8 @@ import { dirname, join, resolve } from 'path';
 import { checkDist, importsOf, INSTALL_SCRIPT, listFiles } from './check-dist';
 import { renderPage, STYLESHEETS } from './layout';
 import { docsPages, loadDocs } from './docs';
+import { highlightBlocks } from './highlight';
+import { renderTabs } from './tabs';
 import { outPath, PAGES, rewriteLinks } from './pages';
 
 export interface BuildOptions {
@@ -99,7 +101,8 @@ export function buildSite(opts: BuildOptions): { id: string; files: string[] } {
   rmSync(opts.outDir, { recursive: true, force: true });
   for (const [path, bytes] of assets) write(join(opts.outDir, 'assets', id, path), bytes);
   for (const page of pages) {
-    const main = rewriteLinks(page.html ?? readFileSync(join(opts.contentDir, `${page.source}.html`), 'utf8'), pages);
+    const copy = page.html ?? readFileSync(join(opts.contentDir, `${page.source}.html`), 'utf8');
+    const main = highlightBlocks(rewriteLinks(renderTabs(copy), pages));
     write(join(opts.outDir, outPath(page.route)), renderPage(page, main, refs));
   }
 

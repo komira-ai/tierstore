@@ -25,7 +25,7 @@ test('the checker has something to check: the home page links to the pages it na
 
 test('a link to a page that is not built is reported', () => {
   const t = copyTree(dist, 'links-page');
-  plant(t, 'index.html', 'href="/install/"', 'href="/installs/"');
+  plant(t, 'index.html', 'href="/get-started/"', 'href="/installs/"');
   const problems = checkLinks(t);
   assert.equal(problems.length > 0, true);
   assert.match(problems.join('\n'), /index\.html: <a href="\/installs\/"> names no file/);
@@ -33,7 +33,7 @@ test('a link to a page that is not built is reported', () => {
 
 test('a link without the trailing slash is reported', () => {
   const t = copyTree(dist, 'links-slash');
-  plant(t, 'index.html', 'href="/install/"', 'href="/install"');
+  plant(t, 'index.html', 'href="/get-started/"', 'href="/install"');
   assert.match(checkLinks(t).join('\n'), /names no file/);
 });
 

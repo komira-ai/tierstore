@@ -96,7 +96,7 @@ impl Inner {
             before,
             settled: false,
         };
-        match self.upstream.head(key).await {
+        match self.upstream_head(key).await {
             Ok(found) if entry.same_content(&found) => {
                 claim.settled = true;
                 self.counters.revalidated(Revalidated::Same);

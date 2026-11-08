@@ -28,7 +28,7 @@ workflow file on `main`.
 | Role | Environment | Workflow | May |
 |---|---|---|---|
 | `tierstore-prod-publish` | `prod-site-tierstore` | `.github/workflows/tierstore-site-publish.yml` | list the bucket; put and delete objects outside `releases/` (what `crates/tierstore/site/tools/publish.ts` runs: `s3 sync --delete`, `s3 cp`); create an invalidation. Explicitly denied: put, delete and delete-version under `releases/` |
-| `tierstore-prod-releases` | `prod-releases-tierstore` | `.github/workflows/release.yml` | put `releases/<version>/<file>` only with `If-None-Match: *`; put `releases/latest.json`; create an invalidation. Explicitly denied: put without `If-None-Match: *` under `releases/<version>/`, and delete or delete-version anywhere. No read, no list |
+| `tierstore-prod-releases` | `prod-releases-tierstore` | `.github/workflows/release.yml` | put `releases/<version>/<file>` only with `If-None-Match: *`; put `releases/latest.json`; read `releases/*` (`GetObject`, public downloads anyway); list the bucket only with an `s3:prefix` under `releases/` (so a missing key answers 404, not 403); create an invalidation. Explicitly denied: put without `If-None-Match: *` under `releases/<version>/`, and delete or delete-version anywhere. These reads are what `cargo xtask channels upload` needs for a re-run and for `latest.json` |
 
 **Single-part uploads.** A multipart upload sends its parts without the `If-None-Match` header, so the releases role
 refuses them by design. The release job uploads each file with one `aws s3api put-object ... --if-none-match '*'`
