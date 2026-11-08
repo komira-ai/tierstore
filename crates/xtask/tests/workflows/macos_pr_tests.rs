@@ -2,13 +2,15 @@
 //! skipping its macOS job on a pull request, of naming it so a skipped job passes for it, of
 //! checking less than the release build does, or of handing it a secret, is named.
 
+use super::lint::{entries, entry};
 use super::macos_pr::{
-    MAC_JOB, PR_MAC_TESTS, macos_pr_problems, pr_mac_commands, pull_request_job_problems,
+    MAC_JOB, PR_MAC_TESTS, macos_pr_problems, pr_mac_commands, pull_request_job_problems, scalars,
 };
 use super::platforms::{BUILDS, MAC_TESTS, build_commands, pull_request_macos_problems};
 use super::platforms_tests::in_job;
 use super::text_of;
 use super::yaml;
+use xtask::macos_paths::SKIPPABLE_FILES;
 
 fn problems_of(text: &str) -> Vec<String> {
     macos_pr_problems(text, &text_of("artifacts.yml"))
@@ -131,21 +133,49 @@ const DEFECTS: &[(&str, &str, &str, &str)] = &[
         "",
         "\n  macos:\n",
         "\n  macos-arm64:\n",
-        "jobs are [\"macos-arm64\", \"version\"]",
+        "jobs are [\"changes\", \"macos-arm64\", \"macos-checks\", \"version\"]",
     ),
     // macos: on every pull request, the release build's commands, nothing uploaded or held.
     (
         "macos",
-        "    needs: [version]\n",
-        "    needs: [version]\n    if: ${{ contains(github.event.pull_request.labels.*.name, 'macos') }}\n",
+        MAC_IF_LINE,
+        "    if: ${{ contains(github.event.pull_request.labels.*.name, 'macos') }}\n",
         "macos: runs under `if: Some(",
     ),
     (
         "macos",
-        "    needs: [version]\n",
-        "    needs: [version]\n    if: ${{ always() }}\n",
+        MAC_IF_LINE,
+        "    if: ${{ always() }}\n",
         "macos: runs under `if: Some(\"${{ always() }}\")`",
     ),
+    // A macOS job that runs only on an answer of `true` (a `changes` that failed would skip it),
+    // or that is skipped on an answer of `false` from a `changes` that failed.
+    (
+        "macos",
+        "!(needs.changes.result == 'success' && needs.changes.outputs.macos == 'false') }}",
+        "needs.changes.outputs.macos == 'true' }}",
+        "macos: runs under `if: Some(",
+    ),
+    (
+        "macos",
+        "!(needs.changes.result == 'success' && needs.changes.outputs.macos == 'false') }}",
+        "needs.changes.outputs.macos != 'false' }}",
+        "macos: runs under `if: Some(",
+    ),
+    // One that runs after a failed `version`, or in a cancelled run.
+    (
+        "macos",
+        "!cancelled() && needs.version.result == 'success' && ",
+        "!cancelled() && ",
+        "macos: runs under `if: Some(",
+    ),
+    (
+        "macos",
+        "${{ !cancelled() && ",
+        "${{ always() && ",
+        "macos: runs under `if: Some(",
+    ),
+    ("macos", MAC_IF_LINE, "", "macos: runs under `if: None`"),
     (
         "macos",
         "-macos-arm64-${{ hashFiles",
@@ -158,7 +188,12 @@ const DEFECTS: &[(&str, &str, &str, &str)] = &[
         "restore-keys: cargo-${{ runner.os }}-${{ runner.arch }}-",
         "macos: its cache restores are",
     ),
-    ("macos", "needs: [version]", "needs: []", "macos: needs are"),
+    (
+        "macos",
+        "needs: [changes, version]",
+        "needs: [version]",
+        "macos: needs are",
+    ),
     (
         "macos",
         "runs-on: macos-15",
@@ -231,7 +266,216 @@ const DEFECTS: &[(&str, &str, &str, &str)] = &[
         "          persist-credentials: true\n",
         "macos: a checkout keeps the token",
     ),
+    // changes: the paths of the pull request, judged by `cargo xtask macos-paths`.
+    (
+        "changes",
+        "runs-on: ubuntu-24.04",
+        "runs-on: macos-15",
+        "changes: does not run on an ubuntu runner",
+    ),
+    (
+        "changes",
+        "    runs-on: ubuntu-24.04\n",
+        "    if: ${{ github.event.pull_request.draft == false }}\n    runs-on: ubuntu-24.04\n",
+        "changes: runs under `if: Some(",
+    ),
+    (
+        "changes",
+        "      contents: read\n",
+        "      contents: read\n      pull-requests: write\n",
+        "changes: its permissions are",
+    ),
+    (
+        "changes",
+        "    timeout-minutes: 15\n",
+        "    timeout-minutes: 15\n    env:\n      GIT_DIR: x\n",
+        "changes: it or a step sets an env",
+    ),
+    (
+        "changes",
+        "        id: changes\n",
+        "        id: changes\n        env:\n          GIT_DIR: x\n",
+        "changes: it or a step sets an env",
+    ),
+    (
+        "changes",
+        "        run: cargo xtask macos-paths",
+        "        continue-on-error: true\n        run: cargo xtask macos-paths",
+        "changes: the step `Whether the macOS job is needed` has continue-on-error",
+    ),
+    // A rename judged by its new path alone, and a diff against another commit than the base.
+    (
+        "changes",
+        "git diff --no-renames --name-only",
+        "git diff --name-only",
+        "changes: does not run `git diff --no-renames",
+    ),
+    (
+        "changes",
+        " HEAD^1 HEAD >",
+        " HEAD~5 HEAD >",
+        "changes: does not run `git diff --no-renames",
+    ),
+    (
+        "changes",
+        "          fetch-depth: 2\n",
+        "",
+        "changes: its checkouts (persist-credentials, fetch-depth) are [(Some(\"false\"), None)]",
+    ),
+    (
+        "changes",
+        "          fetch-depth: 2\n",
+        "          fetch-depth: 1\n",
+        "changes: its checkouts",
+    ),
+    // A checkout of the head, or of anything but the merge commit: the diff would then be of the
+    // last commit of the pull request alone.
+    (
+        "changes",
+        "          fetch-depth: 2\n",
+        "          fetch-depth: 2\n          ref: ${{ github.event.pull_request.head.sha }}\n",
+        "changes: a checkout sets [[\"fetch-depth\", \"persist-credentials\", \"ref\"]]",
+    ),
+    (
+        "changes",
+        "          fetch-depth: 2\n",
+        "          fetch-depth: 2\n          path: elsewhere\n",
+        "changes: a checkout sets",
+    ),
+    (
+        "changes",
+        "          persist-credentials: false\n          fetch-depth: 2\n",
+        "          fetch-depth: 2\n",
+        "changes: its checkouts",
+    ),
+    (
+        "changes",
+        "      - run: rustup toolchain install\n",
+        "      - uses: actions/cache/restore@55cc8345863c7cc4c66a329aec7e433d2d1c52a9 # v6.1.0\n      - run: rustup toolchain install\n",
+        "changes: uses actions/cache/restore@",
+    ),
+    (
+        "changes",
+        "        id: changes\n",
+        "        id: answer\n",
+        "changes: the ids of its steps are",
+    ),
+    (
+        "changes",
+        "      - name: The paths the pull request changes\n",
+        "      - name: The paths the pull request changes\n        id: diff\n",
+        "changes: the ids of its steps are",
+    ),
+    (
+        "changes",
+        "macos: ${{ steps.changes.outputs.macos }}",
+        "macos: 'true'",
+        "changes: its outputs are not",
+    ),
+    (
+        "changes",
+        "      macos: ${{ steps.changes.outputs.macos }}\n",
+        "      macos: ${{ steps.changes.outputs.macos }}\n      extra: x\n",
+        "changes: its outputs are not",
+    ),
+    // macos-checks: the one check, never skipped, failing unless the macOS checks passed or
+    // were not needed.
+    (
+        "macos-checks",
+        "    if: ${{ always() }}\n",
+        "    if: ${{ !cancelled() }}\n",
+        "macos-checks: runs under `if: Some(\"${{ !cancelled() }}\")`",
+    ),
+    (
+        "macos-checks",
+        "    if: ${{ always() }}\n",
+        "",
+        "macos-checks: runs under `if: None`",
+    ),
+    (
+        "macos-checks",
+        "needs: [changes, version, macos]",
+        "needs: [version, macos]",
+        "macos-checks: needs are",
+    ),
+    (
+        "macos-checks",
+        "    runs-on: ubuntu-24.04\n",
+        "    runs-on: macos-15\n",
+        "macos-checks: does not run on an ubuntu runner",
+    ),
+    (
+        "macos-checks",
+        "    permissions: {}\n",
+        "    permissions:\n      contents: read\n",
+        "macos-checks: its permissions are",
+    ),
+    (
+        "macos-checks",
+        "    permissions: {}\n",
+        "",
+        "macos-checks: its permissions are None",
+    ),
+    (
+        "macos-checks",
+        "    timeout-minutes: 5\n",
+        "    timeout-minutes: 5\n    continue-on-error: true\n",
+        "macos-checks: has continue-on-error",
+    ),
+    (
+        "macos-checks",
+        "        run: exit 1\n",
+        "        run: exit 0\n",
+        "macos-checks: its steps are not",
+    ),
+    (
+        "macos-checks",
+        "        run: exit 1\n",
+        "        continue-on-error: true\n        run: exit 1\n",
+        "macos-checks: its steps are not",
+    ),
+    (
+        "macos-checks",
+        "        run: exit 1\n",
+        "        run: exit 1\n      - run: echo\n",
+        "macos-checks: its steps are not",
+    ),
+    // A gate that passes on a skipped macOS job whatever `changes` answered, or did.
+    (
+        "macos-checks",
+        " && needs.changes.outputs.macos == 'false'",
+        "",
+        "macos-checks: its steps are not",
+    ),
+    (
+        "macos-checks",
+        " && needs.changes.result == 'success'",
+        "",
+        "macos-checks: its steps are not",
+    ),
+    (
+        "macos-checks",
+        "!(needs.version.result == 'success' && (",
+        "!((",
+        "macos-checks: its steps are not",
+    ),
+    // A gate step that a cancelled run skips (the gate would then pass).
+    (
+        "macos-checks",
+        "${{ always() && !(",
+        "${{ !(",
+        "macos-checks: its steps are not",
+    ),
+    (
+        "",
+        "\n  macos-checks:\n",
+        "\n  macos-arm64:\n",
+        "jobs are [\"changes\", \"macos\", \"macos-arm64\", \"version\"]",
+    ),
 ];
+
+/// The line of the macOS job's condition.
+const MAC_IF_LINE: &str = "    if: ${{ !cancelled() && needs.version.result == 'success' && !(needs.changes.result == 'success' && needs.changes.outputs.macos == 'false') }}\n";
 
 #[test]
 fn each_defect_in_macos_yml_is_named_by_the_lint() {
@@ -258,7 +502,12 @@ fn a_job_missing_from_macos_yml_or_a_file_that_does_not_parse_is_named() {
     // Catches: a job deleted (its checks would then find nothing to refuse), and a file read as
     // clean because it could not be read at all.
     let text = text_of("macos.yml");
-    for (job, says) in [("version", "no job version"), ("macos", "no job macos")] {
+    for (job, says) in [
+        ("changes", "no job changes"),
+        ("version", "no job version"),
+        ("macos", "no job macos"),
+        ("macos-checks", "no job macos-checks"),
+    ] {
         let renamed = text.replacen(&format!("\n  {job}:\n"), "\n  renamed:\n", 1);
         let problems = problems_of(&renamed);
         assert!(
@@ -445,4 +694,36 @@ fn a_pull_request_job_whose_runner_the_lint_cannot_see_is_refused() {
         pull_request_macos_problems("x.yml", &by_hand),
         Vec::<String>::new()
     );
+}
+
+#[test]
+fn every_workflow_a_pull_request_may_change_without_the_macos_job_exists_and_runs_nothing_on_macos()
+{
+    // Catches: a workflow of `xtask::macos_paths::SKIPPABLE_FILES` renamed or deleted (its entry
+    // would then name nothing, and the new name would run the macOS job unseen), macos.yml or
+    // artifacts.yml (which define the macOS build) listed, and a listed workflow given a job on
+    // macOS, whose change the macOS job would then not see.
+    let names: Vec<String> = super::workflows().into_iter().map(|(n, _)| n).collect();
+    let listed: Vec<&str> = SKIPPABLE_FILES
+        .iter()
+        .filter_map(|p| p.strip_prefix(".github/workflows/"))
+        .collect();
+    assert!(!listed.is_empty());
+    for file in listed {
+        assert!(names.iter().any(|n| n == file), "{file} is not a workflow");
+        assert!(file != "macos.yml" && file != "artifacts.yml", "{file}");
+        let doc = yaml::load(&text_of(file)).expect("load");
+        for (name, job) in entry(&doc, "jobs").map_or(&[][..], entries) {
+            let mut labels = Vec::new();
+            if let Some(runs_on) = entry(job, "runs-on") {
+                scalars(runs_on, &mut labels);
+            }
+            assert!(
+                !labels
+                    .iter()
+                    .any(|l| l.to_ascii_lowercase().contains("macos")),
+                "{file}: the job {name:?} runs on {labels:?}"
+            );
+        }
+    }
 }
