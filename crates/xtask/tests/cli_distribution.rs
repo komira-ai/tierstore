@@ -113,11 +113,51 @@ fn the_build_jobs_chain_of_a_linux_platform_gives_sums_that_verify() {
         );
         assert!(o.status.success(), "{}", stderr(&o));
         assert!(stdout(&o).starts_with("tierstore_0.4.0_"), "{}", stdout(&o));
+        let o = run(
+            &d,
+            &[
+                "release",
+                "rpm",
+                "--binary",
+                "tierstore",
+                "--version",
+                "0.4.0",
+                "--platform",
+                platform,
+                "--licenses",
+                "notice.txt",
+                "--out",
+                "dist",
+            ],
+        );
+        assert!(o.status.success(), "{}", stderr(&o));
+        assert!(
+            stdout(&o).starts_with("tierstore-0.4.0-1."),
+            "{}",
+            stdout(&o)
+        );
     }
+    let o = run(
+        &d,
+        &["release", "rpm-info", "dist/tierstore-0.4.0-1.aarch64.rpm"],
+    );
+    assert!(o.status.success(), "{}", stderr(&o));
+    assert!(
+        stdout(&o).contains("Architecture: aarch64"),
+        "{}",
+        stdout(&o)
+    );
+    assert!(
+        stdout(&o).contains("-0640 root:root /etc/tierstore/tierstore.toml %config(noreplace)"),
+        "{}",
+        stdout(&o)
+    );
     let o = run(&d, &["sums", "assemble", "dist"]);
     assert!(o.status.success(), "{}", stderr(&o));
     let sums = stdout(&o);
     for name in [
+        "tierstore-0.4.0-1.aarch64.rpm",
+        "tierstore-0.4.0-1.x86_64.rpm",
         "tierstore-0.4.0-linux-aarch64.tar.gz",
         "tierstore-0.4.0-linux-x86_64.tar.gz",
         "tierstore_0.4.0_amd64.deb",
@@ -130,8 +170,8 @@ fn the_build_jobs_chain_of_a_linux_platform_gives_sums_that_verify() {
 }
 
 #[test]
-fn the_macos_platform_has_a_tap_tarball_and_no_debian_package() {
-    // Catches: a Debian package built for macOS, and a macOS tap tarball that is not made.
+fn the_macos_platform_has_a_tap_tarball_and_no_debian_or_rpm_package() {
+    // Catches: a Debian or an RPM package built for macOS, and a macOS tap tarball that is not made.
     let d = fresh("macos");
     inputs(&d);
     package(&d, "macos-arm64");
@@ -171,6 +211,29 @@ fn the_macos_platform_has_a_tap_tarball_and_no_debian_package() {
     assert_eq!(o.status.code(), Some(2));
     assert!(
         stderr(&o).contains("only the Linux platforms have a Debian package"),
+        "{}",
+        stderr(&o)
+    );
+    let o = run(
+        &d,
+        &[
+            "release",
+            "rpm",
+            "--binary",
+            "tierstore",
+            "--version",
+            "0.4.0",
+            "--platform",
+            "macos-arm64",
+            "--licenses",
+            "notice.txt",
+            "--out",
+            "dist",
+        ],
+    );
+    assert_eq!(o.status.code(), Some(2));
+    assert!(
+        stderr(&o).contains("only the Linux platforms have an RPM package"),
         "{}",
         stderr(&o)
     );
