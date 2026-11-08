@@ -11,6 +11,8 @@
 //!   tap-named tarballs, the Debian packages and the RPM packages of a build;
 //!   and the version and digest a published release is set as on the hostkeeper coordinator.
 //! - [`advisories`]: keep the security advisories in one issue.
+//! - [`macos_paths`]: whether a pull request needs the macOS job of `macos.yml`, from the paths
+//!   it changes.
 //!
 //! The workflows that call them are in `.github/workflows`; `tests/workflows.rs` holds each
 //! of them to the rules of this repository.
@@ -20,6 +22,7 @@ pub mod build_commit;
 pub mod bundles;
 pub mod fetch;
 pub mod licenses;
+pub mod macos_paths;
 pub mod package;
 pub mod release;
 pub mod sums;
@@ -157,6 +160,16 @@ enum Verb {
     /// A GitHub release of the exact files a push to main built and signed.
     #[command(subcommand)]
     Release(ReleaseVerb),
+    /// Whether a pull request needs the macOS job of `macos.yml`, from the paths it changes; a
+    /// path not known to be skippable, or a list that cannot be read, runs it.
+    MacosPaths {
+        /// The changed paths, NUL-separated (`git diff --no-renames --name-only -z`).
+        #[arg(long)]
+        changed: PathBuf,
+        /// Append `macos=true` or `macos=false` to this file (`GITHUB_OUTPUT`).
+        #[arg(long)]
+        output: Option<PathBuf>,
+    },
 }
 
 #[derive(Subcommand)]
@@ -510,6 +523,9 @@ fn run(cli: Cli) -> Result<Vec<String>, Error> {
             Ok(printed)
         }
         Verb::Advisories(args) => advisories::run(&args, &root, &cargo_program()),
+        Verb::MacosPaths { changed, output } => {
+            macos_paths::macos_paths(&changed, output.as_deref())
+        }
         Verb::Fetch {
             url,
             sha256,

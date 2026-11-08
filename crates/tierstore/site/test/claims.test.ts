@@ -65,11 +65,11 @@ export function staleClaims(src: ReadonlyMap<string, string>): string[] {
   const all = [...src.entries()];
   const config = src.get('server/config.rs') ?? '';
   if (!/build-node shape/.test(config) || !/\[local_cache\]/.test(config)) {
-    out.push('config.rs no longer reads a build node ([local_cache] with [cold_store]): update docs/configuration.md, docs/operations.md ("A build node"), content/why.html and content/index.html (the status table)');
+    out.push('config.rs no longer reads a build node ([local_cache] with [cold_store]): update docs/configuration.md, docs/operations.md ("A build node"), docs/index.md and content/index.html (the status table)');
   }
   for (const [name, text] of all) {
-    if (!EXPORTERS.has(name) && /# TYPE |tierstore_cache_\{/.test(text)) out.push(`${name} exports metrics: the counters of the OCI front, the cache and the tiers (EXPORTERS) were the only ones; update docs/operations.md ("Metrics"), docs/metrics.md and content/why.html ("Where it stops")`);
-    if (/\bCachedStore\b/.test(text)) out.push(`${name} uses CachedStore: the binary has a cache now; update content/why.html ("The per-node read-through cache is not in the binary") and content/index.html`);
+    if (!EXPORTERS.has(name) && /# TYPE |tierstore_cache_\{/.test(text)) out.push(`${name} exports metrics: the counters of the OCI front, the cache and the tiers (EXPORTERS) were the only ones; update docs/operations.md ("Metrics") and docs/metrics.md`);
+    if (/\bCachedStore\b/.test(text)) out.push(`${name} uses CachedStore: the binary has a cache now; update docs/operations.md ("A build node"), docs/examples/cache-in-front-of-s3.md and content/index.html`);
   }
   const routes = new Set([...(src.get('server/mod.rs') ?? '').matchAll(/\(true, "(\/[a-z]+)"/g)].map((m) => m[1]));
   const want = ['/healthz', '/metricz', '/readyz', '/usagez'];
@@ -85,10 +85,10 @@ export function staleClaims(src: ReadonlyMap<string, string>): string[] {
   }
   // The metric names the pages give, as /metricz prints them: the type line and the sample, in code (not a doc comment).
   if (!/# TYPE tierstore_drain_late_requests_total counter\\n/.test(mod) || !/tierstore_drain_late_requests_total \{/.test(mod)) {
-    out.push('server/mod.rs no longer prints the type line and the sample of tierstore_drain_late_requests_total: update content/why.html ("Where it stops")');
+    out.push('server/mod.rs no longer prints the type line and the sample of tierstore_drain_late_requests_total: update docs/metrics.md');
   }
   if (!/# TYPE tierstore_build_info gauge\\n/.test(info) || !/tierstore_build_info\{\{version=/.test(info)) {
-    out.push('server/build_info.rs no longer prints the type line and the sample of tierstore_build_info: update content/why.html ("Where it stops")');
+    out.push('server/build_info.rs no longer prints the type line and the sample of tierstore_build_info: update docs/metrics.md');
   }
   // What content/demo.html ("Stop it: the drain") says the drain does: an answer says `Connection: close` when the
   // drain says so, and the drain (server/drain.rs) says so, once it is not ready.
@@ -117,13 +117,11 @@ const page = (name: string): string => read(SITE, 'content', `${name}.html`);
 
 test('the pages say what they say about the cache and metrics, so the code check below is not vacuous', () => {
   assert.match(read(DOCS, 'operations.md'), /the counters of the OCI read front/);
-  assert.match(page('why'), /serves the counters of the OCI read front, those of the local cache of a build node and, on main, hit, miss and byte counters of the two tiers/);
-  assert.match(page('why'), /The <code>tierstore<\/code> binary does not use it/);
-  assert.match(page('why'), /<code>\[local_cache\]<\/code> and <code>\[cold_store\]<\/code> and no <code>\[hot_store\]<\/code>/);
+  assert.match(read(DOCS, 'configuration.md'), /A file for a build node[\s\S]*?The file has `\[local_cache\]` and `\[cold_store\]` and no `\[hot_store\]`/);
   assert.match(page('index'), /a build node, file only/);
   // The metric names the page gives exist in the source, and the demo says what the drain does.
   // (that they are printed by the program, not only named in a comment, is staleClaims' check.)
-  for (const name of ['tierstore_build_info', 'tierstore_drain_late_requests_total']) assert.match(page('why'), new RegExp(`<code>${name}</code>`));
+  for (const name of ['tierstore_build_info', 'tierstore_drain_late_requests_total']) assert.match(read(DOCS, 'metrics.md'), new RegExp(`\`${name}\``));
   assert.match(page('demo'), /<code>Connection: close<\/code>.*lingering close.*not answered 503/);
   assert.match(page('demo'), /reads until the client closes, for at most the header timeout, 60 seconds by default/);
 });
@@ -138,7 +136,7 @@ test('the check can fail: a second metrics exporter, a CachedStore use and a dro
   // Planted in a file that is no exporter, so a file added to EXPORTERS later does not hide it.
   const planted = new Map([...real, ['server/planted.rs', '# TYPE x counter']]);
   assert.match(staleClaims(planted).join('\n'), /server\/planted\.rs exports metrics.*docs\/operations\.md/);
-  assert.match(staleClaims(with_('main.rs', (s) => s + '\nuse tierstore::CachedStore;')).join('\n'), /uses CachedStore.*content\/why\.html/);
+  assert.match(staleClaims(with_('main.rs', (s) => s + '\nuse tierstore::CachedStore;')).join('\n'), /uses CachedStore.*docs\/operations\.md/);
   assert.match(staleClaims(with_('server/config.rs', (s) => s.replace('build-node shape', 'ok'))).join('\n'), /no longer reads a build node.*docs\/configuration\.md/);
   assert.match(staleClaims(with_('server/mod.rs', (s) => s.replace('"/usagez"', '"/usagez2"'))).join('\n'), /probe routes/);
 });
@@ -153,9 +151,9 @@ test('the check can fail: a literal in a test or a comment does not stand for wh
   // The metrics: the exposition goes and the doc comment that names the metric stays.
   const noDrain = with_('server/mod.rs', (s) => s.replace('# TYPE tierstore_drain_late_requests_total counter', '# TYPE tierstore_other counter').replace('tierstore_drain_late_requests_total {late}', 'tierstore_other {late}'));
   assert.ok(noDrain.get('server/mod.rs')?.includes('`tierstore_drain_late_requests_total`'), 'the doc comment is still there');
-  assert.match(staleClaims(noDrain).join('\n'), /tierstore_drain_late_requests_total.*content\/why\.html/);
+  assert.match(staleClaims(noDrain).join('\n'), /tierstore_drain_late_requests_total.*docs\/metrics\.md/);
   const noInfo = with_('server/build_info.rs', (s) => s.replace('# TYPE tierstore_build_info gauge', '# TYPE tierstore_info gauge'));
-  assert.match(staleClaims(noInfo).join('\n'), /tierstore_build_info.*content\/why\.html/);
+  assert.match(staleClaims(noInfo).join('\n'), /tierstore_build_info.*docs\/metrics\.md/);
   // The drain: no Connection: close while not ready, and no lingering close.
   assert.match(staleClaims(with_('server/mod.rs', (s) => s.replace('response.headers_mut().insert(CONNECTION, close);', ''))).join('\n'), /Connection: close.*content\/demo\.html/);
   // ... nor when the drain no longer says so once it is not ready.

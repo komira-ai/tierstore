@@ -10,7 +10,9 @@
 //  - no subresource (link, script, img, ...) is loaded from another origin; only an <a> may leave the site;
 //  - no stylesheet imports another or loads a url() from outside the site;
 //  - no script fetches (no connect-src), evaluates a string, or writes markup from a string;
-//  - only .html, .js and .css files are published, JavaScript and CSS within their budgets.
+//  - only .html, .js, .css, .md and .txt files are published (the last two are the docs as Markdown and llms.txt: plain
+//    text that is never run), JavaScript and CSS within their budgets, and the one other file, install.sh at the root (the
+//    install script served at /install.sh), which is a POSIX shell script within its budget.
 //
 // The scanner and the attribute decoding are mopm.dev's (komira-ai/mopm, site/tools/check-dist.ts), the same rules.
 
@@ -45,10 +47,14 @@ export const JS_MAX_BYTES = 64 * 1024;
 export const PAGE_JS_MAX_BYTES = 128 * 1024;
 /** The theme (shared, never edited) and the site's own stylesheet, and the two a page links together. */
 export const THEME_CSS_MAX_BYTES = 24 * 1024;
-export const SITE_CSS_MAX_BYTES = 16 * 1024;
+export const SITE_CSS_MAX_BYTES = 20 * 1024;
 export const PAGE_CSS_MAX_BYTES = 40 * 1024;
 
-export const REQUIRED: readonly string[] = PAGES.map((p) => outPath(p.route));
+/** The one file of dist/ that is not a page, a script or a stylesheet: the install script, copied from static/ to the root. */
+export const INSTALL_SCRIPT = 'install.sh';
+export const INSTALL_SCRIPT_MAX_BYTES = 32 * 1024;
+
+export const REQUIRED: readonly string[] = [...PAGES.map((p) => outPath(p.route)), INSTALL_SCRIPT, 'llms.txt', 'llms-full.txt'];
 
 export class DistError extends Error {
   constructor(problems: string[]) {
@@ -217,12 +223,22 @@ export function checkDist(dir: string): void {
   for (const f of files) size.set(f, statSync(join(dir, f)).size);
 
   for (const f of files) {
+    if (f === INSTALL_SCRIPT) {
+      const text = readFileSync(join(dir, f), 'utf8');
+      if (!text.startsWith('#!/bin/sh\n')) problems.push(`${f}: does not start with #!/bin/sh`);
+      if (Buffer.byteLength(text) > INSTALL_SCRIPT_MAX_BYTES) problems.push(`${f} is ${Buffer.byteLength(text)} bytes; the limit is ${INSTALL_SCRIPT_MAX_BYTES}`);
+      continue;
+    }
     const ext = posix.extname(f);
-    if (!['.html', '.js', '.css'].includes(ext)) {
-      problems.push(`${f}: only .html, .js and .css files are published`);
+    if (!['.html', '.js', '.css', '.md', '.txt'].includes(ext)) {
+      problems.push(`${f}: only .html, .js, .css, .md and .txt files are published (and ${INSTALL_SCRIPT} at the root)`);
       continue;
     }
     const text = readFileSync(join(dir, f), 'utf8');
+    if (ext === '.md' || ext === '.txt') {
+      if (text.trim() === '' || text.includes('\0')) problems.push(`${f}: a text file that is empty or holds a NUL`);
+      continue;
+    }
     if (ext === '.js') checkJs(f, text, have, problems);
     if (ext === '.css') checkCss(f, text, problems);
     if (ext !== '.html') continue;

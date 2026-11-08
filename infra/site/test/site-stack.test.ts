@@ -338,10 +338,45 @@ describe('releases role', () => {
     expect(JSON.stringify(role.NeverDelete.Resource)).toMatch(/\/\*"\]\]/);
   });
 
-  test('can invalidate the distribution, and has no read, list or multipart grant', () => {
+  test('may read releases/* and nothing outside it', () => {
+    expect(role.ReadReleaseFiles).toEqual({
+      Sid: 'ReadReleaseFiles',
+      Effect: 'Allow',
+      Action: 's3:GetObject',
+      Resource: { 'Fn::Join': ['', [{ 'Fn::GetAtt': [expect.any(String), 'Arn'] }, '/releases/*']] },
+    });
+    expect(role.ReadReleaseFiles.Condition).toBeUndefined();
+  });
+
+  test('may list the bucket only under the releases/ prefix, so a missing key answers 404 and not 403', () => {
+    expect(role.ListReleasesPrefix).toEqual({
+      Sid: 'ListReleasesPrefix',
+      Effect: 'Allow',
+      Action: 's3:ListBucket',
+      Resource: { 'Fn::GetAtt': [expect.any(String), 'Arn'] },
+      Condition: { StringLikeIfExists: { 's3:prefix': ['releases/*'] } },
+    });
+  });
+
+  test('every s3:ListBucket and s3:GetObject allow is bounded to releases/', () => {
+    for (const s of Object.values(role) as any[]) {
+      const actions: string[] = Array.isArray(s.Action) ? s.Action : [s.Action];
+      if (s.Effect === 'Deny') continue;
+      if (actions.includes('s3:ListBucket')) expect(JSON.stringify(s.Condition)).toContain('"s3:prefix":["releases/*"]');
+      if (actions.includes('s3:GetObject')) expect(resourceText(s)).toMatch(/\/releases\/\*"\]\]\}$/);
+    }
+  });
+
+  test('keeps its denies: no delete anywhere, and a put under releases/<version>/ needs If-None-Match', () => {
+    expect(role.NeverDelete.Effect).toBe('Deny');
+    expect(role.ReleasesWriteOnce.Effect).toBe('Deny');
+    expect(role.ReleasesWriteOnce.Condition).toEqual({ StringNotEquals: { 's3:if-none-match': '*' } });
+  });
+
+  test('can invalidate the distribution, and has no other allow than put, read, list and invalidate', () => {
     expect(role.Invalidate.Action).toBe('cloudfront:CreateInvalidation');
     const allowed = Object.values(role).filter((s: any) => s.Effect !== 'Deny').flatMap((s: any) => (Array.isArray(s.Action) ? s.Action : [s.Action]));
-    expect(new Set(allowed)).toEqual(new Set(['s3:PutObject', 'cloudfront:CreateInvalidation']));
+    expect(new Set(allowed)).toEqual(new Set(['s3:PutObject', 's3:GetObject', 's3:ListBucket', 'cloudfront:CreateInvalidation']));
   });
 });
 

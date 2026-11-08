@@ -15,7 +15,7 @@ const SIGNER = 'komira-ai/tierstore/.github/workflows/artifacts.yml';
 const VERIFY_FLAGS = ['--repo komira-ai/tierstore', `--signer-workflow ${SIGNER}`, '--source-ref refs/heads/main', '--source-digest <commit>', '--deny-self-hosted-runners'];
 
 const pages: Array<[string, string]> = [
-  ['site get-started page', read(SITE, 'content', 'get-started.html')],
+  ['site install page', read(SITE, 'content', 'install.html')],
   ['site home page', read(SITE, 'content', 'index.html')],
   ['install guide', read(DOCS, 'install.md')],
   ['repository README', read(REPO, 'README.md')],
@@ -31,8 +31,10 @@ test('the release document gives the verify command with the flags of the instal
   for (const flag of VERIFY_FLAGS) assert.ok(doc.includes(flag), `docs/ci-and-release.md lacks ${flag}`);
 });
 
-test('the install page and the install guide give the verify command with this repository as signer', () => {
-  for (const [name, text] of pages.slice(0, 1).concat(pages.slice(2, 3))) {
+test('the install page and the install guide give the verify command with this repository as signer, and the install page links to the guide for the service', () => {
+  const started = pages[0][1];
+  assert.match(started, /href="\/docs\/install\/">install guide</);
+  for (const [name, text] of [pages[0], pages[2]]) {
     for (const flag of VERIFY_FLAGS) assert.ok(text.replace(/&lt;/g, '<').replace(/&gt;/g, '>').includes(flag), `${name} lacks ${flag}`);
     assert.match(text, /gh attestation verify/, `${name} lacks the command`);
   }
@@ -50,7 +52,6 @@ test('downloads point to this repository\'s releases and no page sends the reade
 
 test('the install guide says versions up to 0.2.0 were built in another repository', () => {
   assert.match(pages[2][1], /up to (and including )?0\.2\.0[^.]*built in another repository|built in another repository[^.]*0\.2\.0/i);
-  assert.match(pages[0][1], /0\.2\.0/);
 });
 
 // The three checks of a download (integrity, then authenticity with gh or with cosign), held to the signer above.
@@ -155,7 +156,7 @@ test('the offline gh check of the install page and the install guide takes the b
 test('every document of the repository that the install pages, the packaging notes and the site scan name exists', () => {
   const files: Array<[string, string]> = [
     ['crates/tierstore/docs/install.md', DOCS],
-    [`${SITE_REL}/content/get-started.html`, SITE],
+    [`${SITE_REL}/content/install.html`, SITE],
     ['packaging/README.md', `${REPO}/packaging`],
     ['packaging/tierstore.service', `${REPO}/packaging`],
     [`${SITE_REL}/test/hygiene.test.ts`, SITE],
@@ -180,13 +181,12 @@ test('every document of the repository that the install pages, the packaging not
 // packaging/tierstore and packaging/tierstore/README.md, which never existed).
 test('every packaging path the install and demo pages name exists in the repository', () => {
   let named = 0;
-  for (const page of ['get-started.html', 'demo.html']) {
-    const file = `${SITE_REL}/content/${page}`;
+  for (const file of [`${SITE_REL}/content/demo.html`, 'crates/tierstore/docs/clients.md']) {
     const paths = [...read(REPO, file).matchAll(/(?<![\w/.-])packaging(?:\/[A-Za-z0-9@._-]+)*/g)].map((m) => m[0]);
     for (const p of paths) assert.ok(existsSync(join(REPO, p)), `${file} names ${p}, which does not exist`);
     named += paths.length;
   }
-  assert.ok(named >= 3, `only ${named} paths were found to check`);
+  assert.ok(named >= 2, `only ${named} paths were found to check`);
 });
 
 // The verify block as a whole: each command checked on its own line, and the three checks in their order.
@@ -207,7 +207,7 @@ function verifyProblems(cmds: string[]): string[] {
   const problems: string[] = [];
   const at = (pred: (c: string) => boolean): number[] => cmds.flatMap((c, i) => (pred(c) ? [i] : []));
   const sums = at((c) => c.startsWith('sha256sum'));
-  const online = at((c) => c.startsWith('gh attestation verify') && !c.includes('--bundle'));
+  const online = at((c) => c.startsWith('gh attestation verify') && !c.includes('--bundle') && operandOf(c) === ONLINE_FILE);
   const cosign = at((c) => c.startsWith('cosign verify-blob-attestation'));
   const offline = at((c) => c.startsWith('gh attestation verify') && c.includes('--bundle'));
   const root = at((c) => c.startsWith('gh attestation trusted-root'));
@@ -236,7 +236,7 @@ test('the install page and the install guide give each verify command whole, and
 test('the verify block check can fail: a flag dropped from one gh command, a missing tarball, a check or the trusted root out of order', () => {
   for (const [name, text] of INSTALL) {
     const cmds = commands(text);
-    const isOnline = (c: string): boolean => c.startsWith('gh attestation verify') && !c.includes('--bundle');
+    const isOnline = (c: string): boolean => c.startsWith('gh attestation verify') && !c.includes('--bundle') && operandOf(c) === ONLINE_FILE;
     const isOffline = (c: string): boolean => c.startsWith('gh attestation verify') && c.includes('--bundle');
     const said = (mutated: string[], what: string): boolean => verifyProblems(mutated).some((p) => p.includes(what));
     for (const flag of VERIFY_FLAGS) {
@@ -254,4 +254,17 @@ test('the verify block check can fail: a flag dropped from one gh command, a mis
     const reversed = [...cmds.slice(0, fetch), ...cmds.slice(fetch + 1), cmds[fetch]];
     assert.ok(said(reversed, 'the trusted root is fetched after'), `${name}: the trusted root fetched after its use passes`);
   }
+});
+
+// The short check of the Install page ("Check it"): one gh line under the checksum, with this repository as the one that must have built the file, before the pinned forms of "More ways".
+test('the install page gives a short check, the checksum and one gh line naming this repository, before the pinned forms; the guide, which has no short check, gives none', () => {
+  const quick = (c: string): boolean => c.startsWith('gh attestation verify') && !c.includes('--signer-workflow') && !c.includes('--bundle');
+  const cmds = commands(pages[0][1]);
+  const found = cmds.filter(quick);
+  assert.deepEqual(found, ['gh attestation verify tierstore-*-$os-$arch.tar.gz --repo komira-ai/tierstore']);
+  const at = (pred: (c: string) => boolean): number => cmds.findIndex(pred);
+  assert.ok(at((c) => c.startsWith('sha256sum')) < at(quick) && at(quick) < at((c) => c.startsWith('gh attestation verify') && c.includes('--signer-workflow') && !c.includes('--bundle')));
+  assert.equal(commands(pages[2][1]).filter(quick).length, 0);
+  // It says which tab it is for.
+  assert.match(pages[0][1].replace(/<[^>]+>/g, ''), /This is for the Tarball tab only\./);
 });

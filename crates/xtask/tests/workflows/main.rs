@@ -12,9 +12,11 @@
 mod desired;
 mod desired_tests;
 mod distribution_tests;
+mod expr;
 mod hostkeeper;
 mod hostkeeper_tests;
 mod lint;
+mod macos_gate_tests;
 mod macos_pr;
 mod macos_pr_tests;
 mod platforms;
