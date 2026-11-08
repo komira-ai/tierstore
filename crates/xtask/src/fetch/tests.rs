@@ -460,10 +460,7 @@ fn fetch_over_plain_http_is_refused_before_any_connection_and_installs_nothing()
 fn an_https_url_is_connected_to_and_a_refused_connection_is_a_download_error() {
     // Catches: the HTTPS rule refusing an `https://` URL, which `download` is for. A port nothing
     // listens on refuses the connection, so the error is the transfer's, not the rule's.
-    let addr = std::net::TcpListener::bind("127.0.0.1:0")
-        .expect("bind")
-        .local_addr()
-        .expect("addr");
+    let addr = tierstore_testkit::port::dead_addr();
     let url = format!("https://{addr}/tool");
     let e = download(&url, &[]).expect_err("closed port");
     assert!(

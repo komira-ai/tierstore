@@ -9,7 +9,7 @@ publish.workspace = true
 
 # The object store trait, its key and page types and an S3 client (SigV4, multipart, conditional
 # writes), with no dependency on another crate of this workspace but, among the
-# dev-dependencies, `tierstore-testkit` (the loopback port helpers of `tests/s3_wire/`).
+# dev-dependencies, `tierstore-testkit` (the loopback port helpers of its tests).
 # `tierstore` adapts the client.
 
 [features]
