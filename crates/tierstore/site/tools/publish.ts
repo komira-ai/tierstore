@@ -97,6 +97,8 @@ export function plan(o: Options, versionFile: string): string[][] {
     only('assets/*.js', 'text/javascript', IMMUTABLE),
     only('assets/*.css', 'text/css', IMMUTABLE),
     only('*.html', 'text/html; charset=utf-8', PAGE),
+    only('*.md', 'text/markdown; charset=utf-8', PAGE),
+    only('*.txt', 'text/plain; charset=utf-8', PAGE),
     ['s3', 'cp', versionFile, `${target}version.txt`, '--content-type', 'text/plain', '--cache-control', 'no-cache'],
     ['s3', 'sync', o.dist, target, '--delete', '--exclude', 'releases/*', '--exclude', 'version.txt'],
     ['cloudfront', 'create-invalidation', '--distribution-id', o.distributionId, '--paths', '/*'],
@@ -122,7 +124,7 @@ export interface Deps {
 export const MIN_HTML_PAGES = 10;
 export const MIN_FILES = 13;
 /** The only file types a built site holds (check-dist.ts enforces it); the syncs above give exactly these a content type and a cache rule. */
-const TYPES = ['.html', '.js', '.css'];
+const TYPES = ['.html', '.js', '.css', '.md', '.txt'];
 
 function filesUnder(dir: string): string[] {
   const out: string[] = [];

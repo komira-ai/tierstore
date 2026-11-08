@@ -399,6 +399,11 @@ The start refuses an `upstream` table whose password file others can read, that 
 
 `[[policy]]` has a `prefix` (empty for all the rest, or ending in `/`) and `cache`. Without `[local_cache]` a policy is read and checked and has no effect, and `policy.cache = true` is refused, since there is no cache. With `[local_cache]` (a build node, or a storage node with a cache) a key is kept if the longest prefix that holds it says `cache = true`, and at least one policy must say so. Two non-empty prefixes may not nest, a prefix may not be listed twice, and none may lie under `_journal/`, `_tiering/` or `_entries/`.
 
+| Key | Type, default | What |
+|---|---|---|
+| `policy.prefix` | string, required | the keys the policy is about: empty for all the rest, or ending in `/` |
+| `policy.cache` | boolean, `false` | `true`: keep the keys under the prefix in the local cache |
+
 ## What is not a key
 
 A value of the code is a key when it is a tuning choice: an interval, a timeout, a limit, a back-off, a retry count or a buffer size that an operator may have a reason to change. These are not keys, because they are not choices of this program:
