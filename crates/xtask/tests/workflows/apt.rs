@@ -18,7 +18,7 @@
 //!   asking for a fourth attempt).
 //! - The verbs of the apt channel are run by the jobs of their kind alone.
 
-use super::channels::{GATE_IF, mentions, steps, text, uses};
+use super::channels::{GATE_IF, mentions, steps, text};
 use super::lint::{RELEASE_IF, entries, entry, names};
 use super::yaml::Node;
 
@@ -261,7 +261,13 @@ fn job_problems(want: &Job, job: &Node) -> Vec<String> {
     problems.extend(suite_problems(want, all));
     problems.extend(gate_problems(want, &all[gate]));
     for step in &all[..gate] {
-        for word in ["aws-actions/", "secrets.", "APT_GPG_", "apt-key"] {
+        for word in [
+            "aws-actions/",
+            "channels assume",
+            "secrets.",
+            "APT_GPG_",
+            "apt-key",
+        ] {
             if mentions(step, word) {
                 problems.push(format!("{name}: a step before the gate names {word}"));
             }
@@ -379,7 +385,7 @@ fn role_problems(want: &Job, after: &[Node]) -> Vec<String> {
     let roles: Vec<usize> = after
         .iter()
         .enumerate()
-        .filter(|(_, s)| uses(s, "aws-actions/configure-aws-credentials"))
+        .filter(|(_, s)| text(s, "run").contains("cargo xtask channels assume"))
         .map(|(i, _)| i)
         .collect();
     let verbs: Vec<usize> = after
@@ -390,13 +396,24 @@ fn role_problems(want: &Job, after: &[Node]) -> Vec<String> {
         .collect();
     match (roles.as_slice(), verbs.as_slice()) {
         ([role], [at]) => {
-            let given = entry(&after[*role], "with")
-                .and_then(|w| entry(w, "role-to-assume"))
+            let given = entry(&after[*role], "env")
+                .and_then(|e| entry(e, "ROLE_ARN"))
                 .and_then(Node::as_str);
             if given != Some(ROLE) {
                 problems.push(format!(
                     "{name}: the role assumed is not {ROLE}, the environment's"
                 ));
+            }
+            let assume = text(&after[*role], "run");
+            for argument in [
+                "--role-arn \"$ROLE_ARN\"",
+                "--session-name ",
+                "--region ",
+                "--env-file \"$GITHUB_ENV\"",
+            ] {
+                if !assume.contains(argument) {
+                    problems.push(format!("{name}: the assume step is not given {argument}"));
+                }
             }
             if role > at {
                 problems.push(format!("{name}: the role is assumed after the verb runs"));

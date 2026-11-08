@@ -17,10 +17,15 @@
 //! - `channels tap --version <X.Y.Z> --formula-file <file> --repo <owner/name> --tap-repo
 //!   <owner/name>` ([`tap`]): the pull request `bump/tierstore-v<X.Y.Z>` in the tap.
 //!
+//! - `channels assume --role-arn <arn> --session-name <name> --region <r> --env-file <file>`
+//!   ([`assume`]): the job's AWS credentials from its OIDC token, into the env file; the step
+//!   `release.yml` runs where an action would otherwise do it.
+//!
 //! The programs that talk to the outside (`aws`, `gh`) are flags, so a test hands a stand-in
 //! ([`aws::Aws`], [`crate::release::Gh`]).
 
 pub mod apt;
+pub mod assume;
 pub mod aws;
 pub mod formula;
 pub mod gate;
@@ -62,6 +67,24 @@ pub enum Verb {
         /// Append `enabled=true` or `enabled=false` to this file (`GITHUB_OUTPUT`).
         #[arg(long)]
         output: Option<PathBuf>,
+    },
+    /// The job's AWS credentials from its OIDC token, appended to the env file (`GITHUB_ENV`).
+    Assume {
+        /// The role to assume.
+        #[arg(long)]
+        role_arn: String,
+        /// The session name AWS records.
+        #[arg(long)]
+        session_name: String,
+        /// The region the later steps use.
+        #[arg(long)]
+        region: String,
+        /// Where the `AWS_*` lines are appended.
+        #[arg(long)]
+        env_file: PathBuf,
+        /// The `aws` program.
+        #[arg(long, default_value = "aws")]
+        aws: PathBuf,
     },
     /// The release files to `releases/<version>/` of the site bucket, then `releases/latest.json`.
     Upload {
@@ -145,6 +168,24 @@ pub fn run(verb: Verb) -> Result<Vec<String>, Error> {
             requires,
             output,
         } => gate::gate(&label, &settings, &requires, output.as_deref()),
+        Verb::Assume {
+            role_arn,
+            session_name,
+            region,
+            env_file,
+            aws,
+        } => assume::assume(
+            &aws::RealAws(aws),
+            &mut std::io::stdout().lock(),
+            &assume::oidc_from_env,
+            &assume::Request {
+                role_arn: &role_arn,
+                session_name: &session_name,
+                region: &region,
+                env_file: &env_file,
+                https_only: true,
+            },
+        ),
         Verb::Upload {
             dir,
             tag,

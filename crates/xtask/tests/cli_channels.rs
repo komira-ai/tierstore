@@ -227,6 +227,91 @@ fn sha256(bytes: &[u8]) -> String {
     hex::encode(sha2::Sha256::digest(bytes))
 }
 
+/// `channels assume` as a process with the token offer of the runner set (or not) in its
+/// environment, and an `aws` that is never reached.
+fn assume(d: &Path, role: &str, offer: &[(&str, &str)]) -> Output {
+    let mut command = Command::new(env!("CARGO_BIN_EXE_xtask"));
+    command
+        .current_dir(d)
+        .env_remove("ACTIONS_ID_TOKEN_REQUEST_URL")
+        .env_remove("ACTIONS_ID_TOKEN_REQUEST_TOKEN")
+        .envs(offer.iter().copied())
+        .args([
+            "channels",
+            "assume",
+            "--role-arn",
+            role,
+            "--session-name",
+            "tierstore-release-1",
+            "--region",
+            "us-east-1",
+            "--env-file",
+            "github-env",
+            "--aws",
+            "aws-that-is-not-there",
+        ]);
+    command.output().expect("run xtask")
+}
+
+#[test]
+fn assume_refuses_an_empty_role_and_a_job_without_an_oidc_offer_and_writes_nothing() {
+    // Catches: an assume verb that goes on without a role (status 2, a usage error) or without
+    // the token the runner offers (status 1), or that writes the env file before it has
+    // credentials.
+    let d = fresh("assume");
+    let o = assume(&d, "", &[]);
+    assert_eq!(o.status.code(), Some(2), "{}", stderr(&o));
+    assert!(stderr(&o).contains("--role-arn is empty"), "{}", stderr(&o));
+
+    let o = assume(&d, "arn:aws:iam::1:role/r", &[]);
+    assert_eq!(o.status.code(), Some(1), "{}", stderr(&o));
+    assert!(
+        stderr(&o).contains("the runner offers no OIDC token"),
+        "{}",
+        stderr(&o)
+    );
+    let o = assume(
+        &d,
+        "arn:aws:iam::1:role/r",
+        &[("ACTIONS_ID_TOKEN_REQUEST_URL", "https://127.0.0.1:9/t")],
+    );
+    assert_eq!(o.status.code(), Some(1), "{}", stderr(&o));
+    assert!(
+        stderr(&o).contains("the runner offers no OIDC token"),
+        "{}",
+        stderr(&o)
+    );
+    assert!(!d.join("github-env").exists());
+}
+
+#[test]
+fn assume_masks_the_role_and_the_bearer_before_it_asks_for_the_token() {
+    // Catches: the real offer not being read from the environment by its names, and a mask that
+    // comes after the first request. The address refuses the connection, so the token request
+    // fails and no `aws` is run.
+    let d = fresh("assume-offer");
+    let o = assume(
+        &d,
+        "arn:aws:iam::1:role/r",
+        &[
+            ("ACTIONS_ID_TOKEN_REQUEST_URL", "http://127.0.0.1:9/t"),
+            ("ACTIONS_ID_TOKEN_REQUEST_TOKEN", "bearer-x"),
+        ],
+    );
+    assert_eq!(o.status.code(), Some(1), "{}", stderr(&o));
+    assert_eq!(
+        stdout(&o),
+        "::add-mask::arn:aws:iam::1:role/r\n::add-mask::bearer-x\n"
+    );
+    assert!(
+        stderr(&o).contains("the OIDC token request failed: "),
+        "{}",
+        stderr(&o)
+    );
+    assert!(!stderr(&o).contains("bearer-x"), "{}", stderr(&o));
+    assert!(!d.join("github-env").exists());
+}
+
 #[test]
 fn the_apt_verbs_are_dispatched_and_report_the_first_thing_that_fails() {
     // Catches: a verb of the apt channel that is not wired to its implementation, a failure that
