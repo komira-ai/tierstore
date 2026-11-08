@@ -53,6 +53,21 @@
 #          publish). A tag or a release that exists is refused; a draft a failed run left is
 #          replaced. Re-run the failed jobs of a run, not the whole run.
 #
+# channel-upload, tap
+#          the public channels, after the GitHub release exists (docs/design/distribution.md,
+#          section 5). Each starts with `cargo xtask channels gate`: with none of its settings
+#          set the job ends green with a notice and writes nothing, with some it ends red naming
+#          the missing ones, and every later step runs only when the gate said `enabled=true`.
+#          Nothing waits for them and a failed one un-releases nothing: re-run the failed job.
+#          channel-upload (environment `prod-releases-tierstore`, `id-token: write`, no
+#          repository write) assumes the release-files role by OIDC and puts the tap-named
+#          tarballs, the Debian packages and their bundles to tierstore.dev/releases/<version>/
+#          once each, then replaces releases/latest.json (cargo xtask channels upload). tap
+#          (environment `release`, `contents: read`) opens the pull request that puts the
+#          release's Homebrew formula in komira-ai/homebrew-tap, as the release bot: the bot's
+#          token is minted for the tap alone in the second to last step and given to the last
+#          one alone (cargo xtask channels formula, cargo xtask channels tap).
+#
 # verify also runs the downloaded linux-x86_64 binary with `--version` and refuses to go on
 # unless it says exactly the tag (without the v) and the first 12 digits of the commit
 # (cargo xtask release check-binary): artifacts.yml built it under the version that
@@ -289,3 +304,117 @@ jobs:
           RUN_ID: ${{ needs.verify.outputs.run-id }}
           NOTE: ${{ needs.plan.outputs.note }}
         run: cargo xtask release publish dist --repo "$GITHUB_REPOSITORY" --tag "$TAG" --commit "$COMMIT" --run-id "$RUN_ID" --notes-file "$RUNNER_TEMP/release-notes.md" --note "$NOTE"
+
+  # tierstore.dev/releases/<version>/ and releases/latest.json. The environment holds the settings
+  # (TIERSTORE_RELEASES_BUCKET, TIERSTORE_RELEASES_ROLE_ARN and, optionally,
+  # TIERSTORE_RELEASES_DISTRIBUTION_ID); the role's trust names this file at refs/heads/main, this
+  # environment and this repository's id. No stored key: the credentials are the role's, for the
+  # job. The files are the release-assets artifact, checked again here because they crossed the
+  # artifact store. Until the settings exist the job is a green no-op.
+  channel-upload:
+    needs: [plan, publish]
+    if: ${{ needs.plan.outputs.release == 'true' && github.ref == 'refs/heads/main' }}
+    runs-on: ubuntu-24.04
+    timeout-minutes: 30
+    environment: prod-releases-tierstore
+    permissions:
+      contents: read
+      id-token: write
+    env:
+      COMMIT: ${{ needs.plan.outputs.commit }}
+      TAG: ${{ needs.plan.outputs.tag }}
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          ref: ${{ needs.plan.outputs.commit }}
+          persist-credentials: false
+      - run: rustup toolchain install
+      - name: Compile xtask
+        run: cargo xtask --help
+      - name: Gate on the settings of the release files (a job without them does nothing and ends green)
+        id: gate
+        env:
+          BUCKET: ${{ vars.TIERSTORE_RELEASES_BUCKET }}
+          ROLE_ARN: ${{ vars.TIERSTORE_RELEASES_ROLE_ARN }}
+        run: cargo xtask channels gate --label channel-upload --output "$GITHUB_OUTPUT" --setting "TIERSTORE_RELEASES_BUCKET=${BUCKET:+set}" --setting "TIERSTORE_RELEASES_ROLE_ARN=${ROLE_ARN:+set}"
+      - uses: actions/download-artifact@3e5f45b2cfb9172054b4087a40e8e0b5a5461e7c # v8.0.1
+        if: ${{ steps.gate.outputs.enabled == 'true' }}
+        with:
+          name: release-assets
+          path: dist
+      - name: The files are exactly the assets of this commit
+        if: ${{ steps.gate.outputs.enabled == 'true' }}
+        run: cargo xtask release check dist --commit "$COMMIT"
+      - name: Assume the release-files role through OIDC
+        if: ${{ steps.gate.outputs.enabled == 'true' }}
+        uses: aws-actions/configure-aws-credentials@e1253824e5c10ff9df46874f81ed3ec929e19cfd # v6.3.0
+        with:
+          role-to-assume: ${{ vars.TIERSTORE_RELEASES_ROLE_ARN }}
+          aws-region: us-east-1
+          mask-aws-account-id: true
+      - name: Put the files of the version once each, then replace latest.json
+        if: ${{ steps.gate.outputs.enabled == 'true' }}
+        env:
+          BUCKET: ${{ vars.TIERSTORE_RELEASES_BUCKET }}
+          DISTRIBUTION_ID: ${{ vars.TIERSTORE_RELEASES_DISTRIBUTION_ID }}
+        run: cargo xtask channels upload dist --tag "$TAG" --commit "$COMMIT" --bucket "$BUCKET" --distribution-id "$DISTRIBUTION_ID" --work "$RUNNER_TEMP/releases-upload"
+
+  # The Homebrew formula of the release, as a pull request in the organisation's tap, which admits
+  # only the renderer's exact output (its guard). The job holds `contents: read`; the release
+  # bot's token is for the tap repository alone, minted in the second to last step and given to the
+  # last one alone. Until RELEASE_BOT_APP_ID and RELEASE_BOT_PRIVATE_KEY exist the job is a green
+  # no-op.
+  tap:
+    needs: [plan, publish]
+    if: ${{ needs.plan.outputs.release == 'true' && github.ref == 'refs/heads/main' }}
+    runs-on: ubuntu-24.04
+    timeout-minutes: 15
+    environment: release
+    permissions:
+      contents: read
+    env:
+      COMMIT: ${{ needs.plan.outputs.commit }}
+      TAG: ${{ needs.plan.outputs.tag }}
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          ref: ${{ needs.plan.outputs.commit }}
+          persist-credentials: false
+      - run: rustup toolchain install
+      - name: Compile xtask
+        run: cargo xtask --help
+      - name: Gate on the settings of the release bot (a job without them does nothing and ends green)
+        id: gate
+        env:
+          APP_ID: ${{ vars.RELEASE_BOT_APP_ID }}
+          PRIVATE_KEY: ${{ secrets.RELEASE_BOT_PRIVATE_KEY }}
+        run: cargo xtask channels gate --label tap --output "$GITHUB_OUTPUT" --setting "RELEASE_BOT_APP_ID=${APP_ID:+set}" --setting "RELEASE_BOT_PRIVATE_KEY=${PRIVATE_KEY:+set}"
+      - uses: actions/download-artifact@3e5f45b2cfb9172054b4087a40e8e0b5a5461e7c # v8.0.1
+        if: ${{ steps.gate.outputs.enabled == 'true' }}
+        with:
+          name: release-assets
+          path: dist
+      - name: The files are exactly the assets of this commit, and match SHA256SUMS
+        if: ${{ steps.gate.outputs.enabled == 'true' }}
+        run: |
+          (cd dist && sha256sum --check --strict SHA256SUMS)
+          cargo xtask release check dist --commit "$COMMIT"
+      - name: Render Formula/tierstore.rb from the verified SHA256SUMS
+        if: ${{ steps.gate.outputs.enabled == 'true' }}
+        run: cargo xtask channels formula --sums dist/SHA256SUMS --version "${TAG#v}" --repo "$GITHUB_REPOSITORY" --out "$RUNNER_TEMP/tap/tierstore.rb"
+      - name: The token of the release bot, for the tap repository alone
+        id: bot
+        if: ${{ steps.gate.outputs.enabled == 'true' }}
+        uses: actions/create-github-app-token@64ab729a6294000f5aa4a4bc0b73d1f32bc45510 # v3.3.0
+        with:
+          app-id: ${{ vars.RELEASE_BOT_APP_ID }}
+          private-key: ${{ secrets.RELEASE_BOT_PRIVATE_KEY }}
+          owner: ${{ github.repository_owner }}
+          repositories: homebrew-tap
+          permission-contents: write
+          permission-pull-requests: write
+      - name: The pull request that puts the formula of this release in the tap, with auto-merge when the tap allows it
+        if: ${{ steps.gate.outputs.enabled == 'true' }}
+        env:
+          GH_TOKEN: ${{ steps.bot.outputs.token }}
+        run: cargo xtask channels tap --version "${TAG#v}" --formula-file "$RUNNER_TEMP/tap/tierstore.rb" --repo "$GITHUB_REPOSITORY" --tap-repo "$GITHUB_REPOSITORY_OWNER/homebrew-tap"

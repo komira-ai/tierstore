@@ -12,8 +12,9 @@
 //!   the one the table gives. So `id-token` and `attestations` (the scopes that sign) are
 //!   written by the one `attest` job of `artifacts.yml`, on a push to `main` alone, `id-token`
 //!   also by the site's deploy job and by the `set-desired` job of `hostkeeper-desired.yml`
-//!   (the token the hostkeeper coordinator admits); `contents: write` by the release's `publish`
-//!   job alone.
+//!   (the token the hostkeeper coordinator admits), and by the release's `channel-upload` job (the
+//!   token the release-files role admits); `contents: write` by the release's `publish` job
+//!   alone.
 //!
 //! Keys are matched exactly. What this does not evaluate it refuses: a YAML tag, a second
 //! document, an alias to an unfinished node, a document that does not parse.
@@ -69,6 +70,12 @@ pub const WRITE_ALLOWED: &[Allowed] = &[
         file: "release.yml",
         job: "publish",
         scope: "contents",
+        condition: RELEASE_IF,
+    },
+    Allowed {
+        file: "release.yml",
+        job: "channel-upload",
+        scope: "id-token",
         condition: RELEASE_IF,
     },
     Allowed {
@@ -272,7 +279,7 @@ const PLAN_REF: &str = "${{ github.event_name == 'workflow_run' && github.sha ||
 const PLAN_COMMIT: &str = "${{ github.sha }}";
 
 /// The `cargo xtask` verbs release.yml may run; the others build or fetch.
-const XTASK_VERBS: [&str; 4] = ["--help", "release", "sums", "verify-assets"];
+const XTASK_VERBS: [&str; 5] = ["--help", "channels", "release", "sums", "verify-assets"];
 
 pub fn names(node: Option<&Node>) -> Vec<String> {
     let mut found = node.map(triggers).unwrap_or_default();
@@ -318,8 +325,10 @@ pub fn release_problems(text: &str) -> Vec<String> {
     };
     let mut listed: Vec<&str> = jobs.iter().filter_map(|(k, _)| k.as_str()).collect();
     listed.sort_unstable();
-    if listed != ["plan", "publish", "verify"] {
-        problems.push(format!("jobs are {listed:?}, not plan, verify and publish"));
+    if listed != ["channel-upload", "plan", "publish", "tap", "verify"] {
+        problems.push(format!(
+            "jobs are {listed:?}, not plan, verify, publish, channel-upload and tap"
+        ));
     }
     for (name, job) in jobs {
         let name = name.as_str().unwrap_or_default();
@@ -328,7 +337,10 @@ pub fn release_problems(text: &str) -> Vec<String> {
             let level = level.as_str().unwrap_or_default();
             let writes = level != "read" && level != "none";
             let scope = scope.as_str().unwrap_or_default();
-            if writes && name != "publish" {
+            // `channel-upload` holds `id-token: write` for the release-files role, and nothing
+            // that writes to the repository; `channels::channel_problems` pins that job whole.
+            let oidc = name == "channel-upload" && scope == "id-token" && level == "write";
+            if writes && name != "publish" && !oidc {
                 problems.push(format!(
                     "{name}: permissions grant `{scope}: {level}`; only publish writes"
                 ));
@@ -451,6 +463,7 @@ pub fn release_problems(text: &str) -> Vec<String> {
         problems.push("plan does not read vars.RELEASE_FREEZE".to_owned());
     }
     problems.extend(build_problems(text));
+    problems.extend(super::channels::channel_problems(&doc));
     problems
 }
 
