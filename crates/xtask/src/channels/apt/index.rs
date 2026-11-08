@@ -4,7 +4,7 @@
 //! tool writes for the same inputs (the golden test pins it), so two repositories feed one apt
 //! repository one format.
 //!
-//! Layout (suite `stable`, component `main`):
+//! Layout (suite `stable` or `testing`, component `main`):
 //!
 //! ```text
 //! dists/stable/Release
@@ -25,7 +25,7 @@ use sha2::{Digest, Sha256};
 
 use super::control::{self, Field};
 use super::deb::control_of;
-use super::state::{POOL_DIR, valid_arch};
+use super::state::{POOL_DIR, Suite, valid_arch};
 use crate::Error;
 use crate::channels::numbers;
 
@@ -312,13 +312,14 @@ fn gzip(bytes: &[u8]) -> Result<Vec<u8>, Error> {
 }
 
 /// The index files of `archs` (`Packages` and `Packages.gz` under
-/// `dists/stable/main/binary-<arch>/`) and the `Release` that lists them. A stanza whose
+/// `dists/<suite>/main/binary-<arch>/`) and the `Release` that lists them. A stanza whose
 /// architecture is not in `archs` is refused: it would be listed nowhere.
 ///
 /// # Errors
 /// An architecture that is not a name or is listed twice, or a stanza for an architecture that is
 /// not listed.
 pub fn tree(
+    suite: Suite,
     info: &ReleaseInfo,
     stanzas: &[Stanza],
     archs: &[String],
@@ -347,7 +348,7 @@ pub fn tree(
         ] {
             sums.push_str(&format!(" {} {} {rel}\n", sha256_hex(&data), data.len()));
             files.push(TreeFile {
-                path: format!("dists/stable/{rel}"),
+                path: format!("{}{rel}", suite.dir()),
                 data,
             });
         }
@@ -361,8 +362,8 @@ pub fn tree(
     optional("Origin", &info.origin);
     optional("Label", &info.label);
     fields.extend([
-        Field::new("Suite", "stable"),
-        Field::new("Codename", "stable"),
+        Field::new("Suite", suite.name()),
+        Field::new("Codename", suite.name()),
         Field::new("Date", &format_date(info.date)),
         Field::new("Architectures", &sorted.join(" ")),
         Field::new("Components", "main"),
@@ -376,7 +377,7 @@ pub fn tree(
     fields.push(Field::new("Acquire-By-Hash", "yes"));
     let release = format!("{}SHA256:\n{sums}", control::render(&fields)?);
     files.push(TreeFile {
-        path: "dists/stable/Release".to_owned(),
+        path: format!("{}Release", suite.dir()),
         data: release.into_bytes(),
     });
     Ok(files)

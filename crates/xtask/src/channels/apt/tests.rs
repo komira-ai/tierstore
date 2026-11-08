@@ -41,3 +41,30 @@ fn the_package_files_of_a_version_are_one_per_architecture_and_must_all_be_there
         Err(Error::Usage(_))
     ));
 }
+
+#[test]
+fn a_write_verb_with_a_pool_half_given_is_a_usage_error() {
+    // Catches: a pool of one half (debs without a version) read as a pool or as none; clap holds
+    // the flags together on the command line, and the verb holds them again.
+    let verb = |debs: Option<&str>, version: Option<&str>, no_pool: bool| Verb::Write {
+        suite: Suite::Stable,
+        bucket: "apt-bucket".to_owned(),
+        distribution_id: "E1".to_owned(),
+        hostname: "packages.example".to_owned(),
+        next: PathBuf::from("next"),
+        debs: debs.map(PathBuf::from),
+        version: version.map(str::to_owned),
+        no_pool,
+        last: true,
+        output: None,
+        aws: PathBuf::from("aws"),
+    };
+    for v in [
+        verb(Some("d"), None, false),
+        verb(None, None, false),
+        verb(Some("d"), Some("1.2.3"), true),
+    ] {
+        let e = run(v).unwrap_err();
+        assert!(matches!(e, Error::Usage(_)), "{e}");
+    }
+}

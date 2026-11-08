@@ -1,10 +1,11 @@
-//! `channels apt-write --bucket <b> --distribution-id <id> --hostname <h> --next <dir> --debs <dir>
-//! --version <V> [--last] [--output <file>] [--aws <program>]`: the signed index and the packages
-//! into the apt repository.
+//! `channels apt write --bucket <b> --distribution-id <id> --hostname <h> --next <dir> (--debs <dir>
+//! --version <V> | --no-pool) [--suite stable|testing] [--last] [--output <file>] [--aws
+//! <program>]`: the signed index and the packages into the apt repository.
 //!
 //! The order is what keeps a reader consistent when the write stops anywhere:
 //!
-//! 1. the packages, each with `If-None-Match: *` (a `412` means it exists; it is kept only when
+//! 1. the packages (none with `--no-pool`: the promotion of a release from `testing` to `stable`
+//!    writes the index only, the pool holds the packages already), each with `If-None-Match: *` (a `412` means it exists; it is kept only when
 //!    its bytes are ours, and a different file under the name is a failure: a package is never
 //!    overwritten, and the index must not list a file that is not this one);
 //! 2. the by-hash copy of every `Packages` and `Packages.gz`
@@ -24,22 +25,30 @@
 use std::path::Path;
 
 use super::index::{self, sha256_hex};
-use super::state::{self, ABSENT, ETAGS_FILE, POOL_DIR};
+use super::state::{self, ABSENT, ETAGS_FILE, POOL_DIR, Suite};
 use super::{Failure, classify, control, package_files, strings, why};
 use crate::Error;
 use crate::channels::aws::Aws;
 use crate::channels::upload::{is_bucket, is_distribution_id};
 use crate::release::append_output;
 
-/// What `apt-write` is asked.
+/// What `apt write` is asked.
 pub struct Request<'a> {
+    pub suite: Suite,
     pub bucket: &'a str,
     pub distribution_id: &'a str,
     pub hostname: &'a str,
     pub next: &'a Path,
+    /// The packages to put in the pool, or `None` to write the index only.
+    pub pool: Option<Pool<'a>>,
+    pub last: bool,
+}
+
+/// The packages of a release: the directory they are in and their version.
+#[derive(Clone, Copy)]
+pub struct Pool<'a> {
     pub debs: &'a Path,
     pub version: &'a str,
-    pub last: bool,
 }
 
 /// What one conditional put came to.
@@ -105,7 +114,7 @@ fn check_next(
     r: &Request,
     packages: &[(String, std::path::PathBuf)],
 ) -> Result<Vec<String>, Error> {
-    let root = r.next.join("dists").join("stable");
+    let root = r.next.join("dists").join(r.suite.name());
     let release = read_text(&root.join("Release"))?;
     let files = state::index_files(&state::archs_of_release(&release));
     for rel in &files {
@@ -198,7 +207,7 @@ fn upload_package(
     Ok(())
 }
 
-/// The `apt-write` verb: the lines to print.
+/// The `apt write` verb: the lines to print.
 ///
 /// # Errors
 /// A flag out of its form, a new index that is incomplete or does not match the packages, a put
@@ -228,10 +237,13 @@ pub fn write(aws: &dyn Aws, r: &Request, output: Option<&Path>) -> Result<Vec<St
             r.hostname
         )));
     }
-    let packages = package_files(r.debs, r.version)?;
+    let packages = match r.pool {
+        Some(pool) => package_files(pool.debs, pool.version)?,
+        None => Vec::new(),
+    };
     let files = check_next(r, &packages)?;
     let etags = state::parse_etags(&read_text(&r.next.join(ETAGS_FILE))?)?;
-    let root = r.next.join("dists").join("stable");
+    let root = r.next.join("dists").join(r.suite.name());
     let mut printed = Vec::new();
 
     for (name, path) in &packages {
@@ -239,7 +251,7 @@ pub fn write(aws: &dyn Aws, r: &Request, output: Option<&Path>) -> Result<Vec<St
     }
     for rel in files.iter().filter(|rel| state::is_packages_file(rel)) {
         let path = root.join(rel);
-        let key = state::by_hash_key(rel, &sha256_hex(&read(&path)?));
+        let key = state::by_hash_key(r.suite, rel, &sha256_hex(&read(&path)?));
         // Named by their content, so a 412 means the same bytes are there.
         match put(aws, r.bucket, &key, &path, &condition(None))? {
             Put::Done => printed.push(format!("uploaded {key}")),
@@ -247,7 +259,7 @@ pub fn write(aws: &dyn Aws, r: &Request, output: Option<&Path>) -> Result<Vec<St
         }
     }
     for rel in &files {
-        let key = state::index_key(rel);
+        let key = state::index_key(r.suite, rel);
         let cond = condition(state::etag_of(&etags, rel));
         match put(aws, r.bucket, &key, &root.join(rel), &cond)? {
             Put::Done => printed.push(format!("wrote {key}")),
@@ -282,8 +294,9 @@ pub fn write(aws: &dyn Aws, r: &Request, output: Option<&Path>) -> Result<Vec<St
         )));
     }
     printed.push(format!(
-        "invalidated /apt/dists/*; the index is at https://{}/apt/dists/stable/InRelease",
-        r.hostname
+        "invalidated /apt/dists/*; the index is at https://{}/apt/dists/{}/InRelease",
+        r.hostname,
+        r.suite.name()
     ));
     if let Some(output) = output {
         append_output(output, &["conflict=false".to_owned()])?;

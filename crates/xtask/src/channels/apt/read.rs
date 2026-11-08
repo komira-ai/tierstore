@@ -1,15 +1,15 @@
-//! `channels apt-read --bucket <b> --out <dir> [--aws <program>]`: the current index, read from S3.
+//! `channels apt read --bucket <b> --out <dir> [--suite stable|testing] [--aws <program>]`: the current index, read from S3.
 //!
 //! `Release` first, then the `Packages` and `Packages.gz` of the architectures it lists and of the
 //! defaults, then `Release.gpg` and `InRelease`. The copy is written under
-//! `<dir>/dists/stable/` and the ETag of each object (`-` for one that does not exist) to
+//! `<dir>/dists/<suite>/` and the ETag of each object (`-` for one that does not exist) to
 //! `<dir>/etags.txt`: the index a later job builds is conditional on exactly these.
 
 use std::path::Path;
 
 use serde_json::Value;
 
-use super::state::{self, ABSENT, ETAGS_FILE};
+use super::state::{self, ABSENT, ETAGS_FILE, Suite};
 use super::{Failure, classify, strings, why};
 use crate::Error;
 use crate::channels::aws::Aws;
@@ -25,8 +25,14 @@ fn etag_of(stdout: &str) -> Option<String> {
 /// Reads one object of the index to `dest`: its ETag, or `-` when there is no such object
 /// (`NoSuchKey`, or `AccessDenied`: the publish role may not list the bucket, so S3 answers a
 /// missing key with `AccessDenied`; a wrong grant shows at the first write instead).
-fn fetch(aws: &dyn Aws, bucket: &str, rel: &str, dest: &Path) -> Result<String, Error> {
-    let key = state::index_key(rel);
+fn fetch(
+    aws: &dyn Aws,
+    suite: Suite,
+    bucket: &str,
+    rel: &str,
+    dest: &Path,
+) -> Result<String, Error> {
+    let key = state::index_key(suite, rel);
     let dir = dest.parent().unwrap_or(dest);
     std::fs::create_dir_all(dir).map_err(Error::spawn(format!("create {}", dir.display())))?;
     let dest_arg = dest.display().to_string();
@@ -56,20 +62,20 @@ fn fetch(aws: &dyn Aws, bucket: &str, rel: &str, dest: &Path) -> Result<String, 
     }
 }
 
-/// The `apt-read` verb: the lines to print.
+/// The `apt read` verb: the lines to print.
 ///
 /// # Errors
 /// A bucket that is not a name, an object that could not be read for a reason other than being
 /// absent, or a file that could not be written.
-pub fn read(aws: &dyn Aws, bucket: &str, out: &Path) -> Result<Vec<String>, Error> {
+pub fn read(aws: &dyn Aws, suite: Suite, bucket: &str, out: &Path) -> Result<Vec<String>, Error> {
     if !is_bucket(bucket) {
         return Err(Error::Usage(format!(
             "--bucket {bucket:?} is not a bucket name"
         )));
     }
-    let root = out.join("dists").join("stable");
+    let root = out.join("dists").join(suite.name());
     let release_path = root.join("Release");
-    let release_etag = fetch(aws, bucket, "Release", &release_path)?;
+    let release_etag = fetch(aws, suite, bucket, "Release", &release_path)?;
     let release = std::fs::read_to_string(&release_path).unwrap_or_default();
     let mut entries = Vec::new();
     let mut printed = Vec::new();
@@ -77,7 +83,7 @@ pub fn read(aws: &dyn Aws, bucket: &str, out: &Path) -> Result<Vec<String>, Erro
         let etag = if rel == "Release" {
             release_etag.clone()
         } else {
-            fetch(aws, bucket, &rel, &root.join(&rel))?
+            fetch(aws, suite, bucket, &rel, &root.join(&rel))?
         };
         printed.push(format!(
             "read {rel}: {}",

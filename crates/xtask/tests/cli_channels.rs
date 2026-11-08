@@ -376,3 +376,108 @@ fn a_gate_that_requires_an_earlier_job_is_off_and_green_unless_that_job_said_tru
     );
     assert_eq!(gate("READ_ENABLED").status.code(), Some(2));
 }
+
+#[test]
+fn the_apt_suite_and_promote_and_no_pool_are_dispatched_and_their_flags_are_held_together() {
+    // Catches: `--suite` ignored (testing read from the stable path), `promote` not wired,
+    // `--no-pool` still asking for packages, and `--no-pool` accepted beside `--debs`.
+    let d = fresh("apt-suite");
+    let o = run(
+        &d,
+        &[
+            "channels",
+            "apt",
+            "read",
+            "--suite",
+            "testing",
+            "--bucket",
+            "apt-bucket",
+            "--out",
+            "current",
+            "--aws",
+            FAKE,
+        ],
+    );
+    assert_eq!(o.status.code(), Some(1));
+    assert!(
+        stderr(&o).contains("get-object apt/dists/testing/Release failed"),
+        "{}",
+        stderr(&o)
+    );
+    assert_eq!(
+        run(
+            &d,
+            &[
+                "channels", "apt", "read", "--suite", "beta", "--bucket", "b", "--out", "o"
+            ]
+        )
+        .status
+        .code(),
+        Some(2)
+    );
+
+    let o = run(
+        &d,
+        &[
+            "channels",
+            "apt",
+            "promote",
+            "--testing",
+            "t",
+            "--stable",
+            "s",
+            "--out",
+            "o",
+            "--version",
+            "1.2.3",
+            "--sums",
+            "SHA256SUMS",
+            "--origin",
+            "o",
+            "--label",
+            "l",
+            "--description",
+            "d",
+            "--date",
+            "5",
+        ],
+    );
+    assert_eq!(o.status.code(), Some(1));
+    assert!(
+        stderr(&o).contains("etags.txt is missing: run `apt read --suite stable` first"),
+        "{}",
+        stderr(&o)
+    );
+
+    let write = |extra: &[&str]| {
+        let mut args = vec![
+            "channels",
+            "apt",
+            "write",
+            "--suite",
+            "stable",
+            "--bucket",
+            "apt-bucket",
+            "--distribution-id",
+            "E1",
+            "--hostname",
+            "packages.example",
+            "--next",
+            "next",
+            "--last",
+            "--aws",
+            FAKE,
+        ];
+        args.extend(extra);
+        run(&d, &args)
+    };
+    let o = write(&["--no-pool"]);
+    assert_eq!(o.status.code(), Some(1));
+    assert!(stderr(&o).contains("Release"), "{}", stderr(&o));
+    assert!(!stderr(&o).contains("is not in"), "{}", stderr(&o));
+    assert_eq!(
+        write(&["--no-pool", "--debs", "dist"]).status.code(),
+        Some(2)
+    );
+    assert_eq!(write(&[]).status.code(), Some(2));
+}

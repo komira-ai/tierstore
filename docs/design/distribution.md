@@ -111,7 +111,7 @@ After `publish` come two jobs that gate the rest, `farm` and `soak` (section 5.3
 |---|---|---|---|
 | `channel-upload` (needs `soak`) | `prod-releases-tierstore` | `id-token: write`, no repository write | assumes `tierstore-prod-releases`, uploads `releases/<V>/*` with `If-None-Match`, then `releases/latest.json` |
 | `tap` (needs `soak`) | `release` | `contents: read`, the release bot's token for `komira-ai/homebrew-tap` alone | renders `Formula/tierstore.rb` from the verified `SHA256SUMS`, opens the pull request `bump/tierstore-v<V>` in the tap as the bot, with auto-merge when the tap allows it |
-| `apt-deploy-read`, `apt-index`, `apt-deploy-write` (the first needs `soak`) | `apt-publish`, `apt-signing`, `apt-publish` | read job and write job: the cloud role (`id-token: write`) and no key; index job: the signing key and no role | read the current index, merge the `.deb`s and sign it, upload the `.deb`s and write the index; a lost write starts attempt 2, then 3 (`apt-*-2`, `apt-*-3`) |
+| `testing-apt-read`, `testing-apt-index`, `testing-apt-write` (the first needs `soak`) | `apt-publish`, `apt-signing`, `apt-publish` | read job and write job: the cloud role (`id-token: write`) and no key; index job: the signing key and no role | read the current index, merge the `.deb`s and sign it, upload the `.deb`s and write the index; a lost write starts attempt 2, then 3 (`testing-apt-*-2`, `testing-apt-*-3`); the jobs publish into the suite `testing`, and `stable` gets the same entries by `apt promote` after the install checks |
 
 The three apt jobs and their split are copied from buildrules' `release.yml` (the `apt-*` jobs; `RELEASING.md`, "The apt repository"): no job holds both the signing key and the cloud role, so a compromise of one step cannot sign and publish. As built, the jobs are nine, three attempts of three: the `-2` read job runs only when the write of attempt 1 answered `conflict=true` (its `if:` says so, besides the `if:` of `publish`), the `-3` read job only after attempt 2's, and the write of attempt 3 passes `--last`. The role is assumed by `aws-actions/configure-aws-credentials` (pinned by SHA, as in `channel-upload`), not by a verb of this repository: the OIDC exchange is that action's and buildrules' `apt_publish assume` is not ported. The signing key and its passphrase reach the signing step as the step's two secrets, are written by it to two files of mode 0600, and `channels apt sign` takes the files by flag (S2) and removes them, with its private keyring, when it ends. The shared repository's own role for the product (`komira-apt-publish-tierstore`) is created by the apt repository's stack in komira-internal (section 7), trusts `.github/workflows/release.yml` of this repository at main in the environment `apt-publish`, may write `apt/pool/tierstore/*` with `If-None-Match` only and the shared `apt/dists/*` with `If-Match` only, and may delete nothing.
 
@@ -137,9 +137,9 @@ The same three rows judge `farm` (its settings are in the table below). The thir
 | `soak` | none: it runs after `farm` ended green with `reached=true` |
 | `channel-upload` | variables of `prod-releases-tierstore`: `TIERSTORE_RELEASES_BUCKET`, `TIERSTORE_RELEASES_ROLE_ARN` |
 | `tap` | variable `RELEASE_BOT_APP_ID` and secret `RELEASE_BOT_PRIVATE_KEY` of `release` |
-| `apt-deploy-read`, `apt-deploy-write` | variables of `apt-publish`: `APT_PUBLISH_ROLE_ARN`, `APT_BUCKET`, `APT_DISTRIBUTION_ID`, `APT_HOSTNAME` |
-| `apt-index` | variable `APT_GPG_FINGERPRINT`, secrets `APT_GPG_PRIVATE_KEY`, `APT_GPG_PASSPHRASE` of `apt-signing`; and the output of the read job, given to the gate as `--require` (below) |
-| `apt-deploy-write` | the settings of the read job, and the outputs of the read and index jobs, given as `--require` |
+| `testing-apt-read`, `testing-apt-write` | variables of `apt-publish`: `APT_PUBLISH_ROLE_ARN`, `APT_BUCKET`, `APT_DISTRIBUTION_ID`, `APT_HOSTNAME` |
+| `testing-apt-index` | variable `APT_GPG_FINGERPRINT`, secrets `APT_GPG_PRIVATE_KEY`, `APT_GPG_PASSPHRASE` of `apt-signing`; and the output of the read job, given to the gate as `--require` (below) |
+| `testing-apt-write` | the settings of the read job, and the outputs of the read and index jobs, given as `--require` |
 
 The index and write jobs follow another job, and a job whose predecessor was off must be off too, not red for "some of its settings set": `channels gate --require NAME=VALUE` (the workflow passes the predecessor's output) turns the job off, green with a notice, unless every `VALUE` is exactly `true`, and then does not judge the job's own settings. The label of an apt gate is the job's name.
 
@@ -155,9 +155,9 @@ sequenceDiagram
   participant S as tierstore.dev bucket
   participant T as tap
   participant H as komira-ai/homebrew-tap
-  participant R as apt-deploy-read
-  participant I as apt-index
-  participant W as apt-deploy-write
+  participant R as testing-apt-read
+  participant I as testing-apt-index
+  participant W as testing-apt-write
   participant A as packages.komira.ai bucket
   P->>P: plan: tag vX.Y.Z and commit C from the tip of main
   P->>P: verify: check files, attestations; make tap-named copies and the two .debs

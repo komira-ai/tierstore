@@ -22,11 +22,12 @@ fn shared_repository(dir: &Path, aws: &FakeAws) {
         &key("main/binary-all/Packages"),
         b"Package: docs\nVersion: 1.0.0\nArchitecture: all\nSHA256: dd\n\n",
     );
-    read(aws, BUCKET, &dir.join("current")).expect("read");
+    read(aws, Suite::Stable, BUCKET, &dir.join("current")).expect("read");
 }
 
 fn request<'a>(dir: &'a Path, debs: &'a Path) -> Request<'a> {
     Request {
+        suite: Suite::Stable,
         current: Box::leak(dir.join("current").into_boxed_path()),
         out: Box::leak(dir.join("next").into_boxed_path()),
         debs,
@@ -112,7 +113,7 @@ fn a_first_release_takes_its_origin_label_and_description_from_the_flags() {
     // Catches: a repository created without its identity.
     let dir = scratch("build-first");
     let aws = FakeAws::new();
-    read(&aws, BUCKET, &dir.join("current")).expect("read");
+    read(&aws, Suite::Stable, BUCKET, &dir.join("current")).expect("read");
     let debs = scratch("build-first-debs");
     release_files(&debs, "1.2.3");
     build(&request(&dir, &debs)).expect("build");
@@ -130,7 +131,7 @@ fn a_re_run_of_the_same_release_lists_it_once() {
     // Catches: a second attempt after a lost race adding a second entry.
     let dir = scratch("build-twice");
     let aws = FakeAws::new();
-    read(&aws, BUCKET, &dir.join("current")).expect("read");
+    read(&aws, Suite::Stable, BUCKET, &dir.join("current")).expect("read");
     let debs = scratch("build-twice-debs");
     release_files(&debs, "1.2.3");
     build(&request(&dir, &debs)).expect("first");
@@ -158,7 +159,7 @@ fn a_release_older_than_the_newest_listed_or_with_other_bytes_writes_nothing() {
             format!("Package: tierstore\nVersion: {listed}\nArchitecture: amd64\nSHA256: 00\n\n")
                 .as_bytes(),
         );
-        read(&aws, BUCKET, &dir.join("current")).expect("read");
+        read(&aws, Suite::Stable, BUCKET, &dir.join("current")).expect("read");
         let debs = scratch("build-refused-debs");
         release_files(&debs, "1.2.3");
         let e = build(&request(&dir, &debs)).unwrap_err().to_string();
@@ -180,7 +181,7 @@ fn what_cannot_be_built_is_refused_with_the_reason() {
         e.contains("etags.txt is missing: run `apt read` first"),
         "{e}"
     );
-    read(&aws, BUCKET, &dir.join("current")).expect("read");
+    read(&aws, Suite::Stable, BUCKET, &dir.join("current")).expect("read");
     // The file named 1.2.3 holds version 1.2.4: its control file does not say its name.
     let other = scratch("build-bad-other");
     release_files(&other, "1.2.4");
@@ -231,7 +232,7 @@ fn an_out_directory_that_cannot_be_written_is_an_error_naming_it() {
     // Catches: a build that reports success with nothing on disk.
     let dir = scratch("build-disk");
     let aws = FakeAws::new();
-    read(&aws, BUCKET, &dir.join("current")).expect("read");
+    read(&aws, Suite::Stable, BUCKET, &dir.join("current")).expect("read");
     let debs = scratch("build-disk-debs");
     release_files(&debs, "1.2.3");
     std::fs::write(dir.join("next"), "a file").expect("file");

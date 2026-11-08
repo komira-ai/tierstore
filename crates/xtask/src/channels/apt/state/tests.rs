@@ -36,7 +36,10 @@ fn the_index_files_end_with_release_gpg_and_in_release_the_commit_point() {
             "InRelease"
         ]
     );
-    assert_eq!(index_key("Release"), "apt/dists/stable/Release");
+    assert_eq!(
+        index_key(Suite::Stable, "Release"),
+        "apt/dists/stable/Release"
+    );
     assert!(
         is_packages_file(&files[1]) && is_packages_file(&files[0]) && !is_packages_file("Release")
     );
@@ -53,11 +56,11 @@ fn keys_stay_below_the_product_and_the_suite() {
         assert!(pool_key(bad).is_err(), "{bad:?}");
     }
     assert_eq!(
-        by_hash_key("main/binary-amd64/Packages.gz", "ab"),
+        by_hash_key(Suite::Stable, "main/binary-amd64/Packages.gz", "ab"),
         "apt/dists/stable/main/binary-amd64/by-hash/SHA256/ab"
     );
     assert_eq!(
-        by_hash_key("Packages", "ab"),
+        by_hash_key(Suite::Stable, "Packages", "ab"),
         "apt/dists/stable//by-hash/SHA256/ab"
     );
 }
