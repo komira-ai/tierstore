@@ -177,6 +177,8 @@ fn upload_stops_at_the_first_aws_call_that_fails() {
         "tierstore-1.2.3-macos-arm64.tar.gz",
         "tierstore_1.2.3_amd64.deb",
         "tierstore_1.2.3_arm64.deb",
+        "tierstore-1.2.3-1.aarch64.rpm",
+        "tierstore-1.2.3-1.x86_64.rpm",
     ] {
         let bytes = format!("bytes of {name}");
         std::fs::write(dist.join(name), &bytes).unwrap();
@@ -204,7 +206,7 @@ fn upload_stops_at_the_first_aws_call_that_fails() {
     );
     assert_eq!(o.status.code(), Some(1), "{}", stderr(&o));
     assert!(
-        stderr(&o).contains("put releases/1.2.3/tierstore-1.2.3-linux-aarch64.tar.gz"),
+        stderr(&o).contains("put releases/1.2.3/tierstore-1.2.3-1.aarch64.rpm"),
         "{}",
         stderr(&o)
     );
