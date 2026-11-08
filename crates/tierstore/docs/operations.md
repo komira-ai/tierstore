@@ -157,6 +157,8 @@ Before the pause: tell the owners of the clients that write (builds, image pushe
 
 ## Rolling out the entry protocol
 
+The entry protocol is the older of the two write formats this release knows. The newest is the marker format (the format phase `active-marks`), which a store is moved onto after it is on the entry format: see [Rolling out the markers and going back](operations.md#rolling-out-the-markers-and-going-back). This section is the rollout of the entry protocol from the journals.
+
 This release has the entry protocol only: the per-node journals, their checkpoints and the journal reconciler are gone. It reads no `_journal/` object and writes none, and it takes no write until the format object says `{"epoch":2,"phase":"active"}`. So it is rolled over a store after the bridge release has drained the journals, and the store is activated once. There is no canary, because the epoch is one object that every node reads: the whole fleet changes protocol at once, after one planned pause of writes.
 
 What a node of this release does about the epoch:
@@ -214,7 +216,7 @@ A write that is in flight when the rollback begins and that a proxy has already 
 
 ## What tierstore requires of a store
 
-tierstore is a proxy over a hot store and a cold store. It does not test either store, at start or later: it does not write probe keys, and it does not check that a store behaves as described here. A store that does not meet these requirements is not detected; the guarantees below are the ones that are lost, silently. (Opening the proxy at start reads and writes the hot tier's own state, the node's registration and its journal, so a hot tier that cannot be reached fails the start: that is the proxy's work, not a test of the store.)
+tierstore is a proxy over a hot store and a cold store. It does not test either store, at start or later: it does not write probe keys, and it does not check that a store behaves as described here. A store that does not meet these requirements is not detected; the guarantees below are the ones that are lost, silently. (Opening the proxy at start reads and writes the hot tier's own state, the node's registration, so a hot tier that cannot be reached fails the start: that is the proxy's work, not a test of the store.)
 
 The hot store must provide:
 

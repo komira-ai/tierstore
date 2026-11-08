@@ -1,5 +1,5 @@
 <h1>Install</h1>
-<p class="lede">tierstore is a binary for Linux (x86_64 and arm64) and macOS (Apple silicon). It ships from the <a href="https://github.com/komira-ai/tierstore/releases">releases of this repository</a>: every release carries the tarball, its provenance bundle and its checksum. There is no package and no container image, and nothing updates it afterwards.</p>
+<p class="lede">tierstore is a binary for Linux (x86_64 and arm64) and macOS (Apple silicon). It ships from the <a href="https://github.com/komira-ai/tierstore/releases">releases of this repository</a>: every release carries the tarball, its provenance bundle and its checksum. There is no Homebrew formula, apt package or container image yet (Homebrew, apt and a copy of the release files on tierstore.dev are planned: see <a href="#planned">Not in a release yet</a> below). hostkeeper packages exist and update it through <code>tierstore update-hook</code>; otherwise nothing updates it afterwards.</p>
 
 <div class="notice notice-warn"><p><strong>Where the code lives.</strong> The source is <code>crates/tierstore</code> in <a href="https://github.com/komira-ai/tierstore">komira-ai/tierstore</a>, and the packaging notes are in <a href="https://github.com/komira-ai/tierstore/blob/main/packaging/README.md"><code>packaging</code></a>. Versions up to 0.2.0 were built in another repository, and their release history is there. From 0.3.0 on, every release is built and signed here.</p></div>
 
@@ -90,6 +90,29 @@ tierstore-0123456789abcdef0123456789abcdef01234567-macos-arm64.tar.gz</pre></div
   </li>
 </ol>
 
+<h2 id="planned">Not in a release yet <span class="tag tag-planned">planned, not built</span></h2>
+<div class="notice notice-warn"><p><strong>None of this exists yet.</strong> The commands below fail today: there is no formula, no <code>tierstore</code> package in the apt repository and nothing at the release address. Use the tarball above. They are here so that you know what is coming and where.</p></div>
+<h3>Homebrew <span class="tag tag-planned">planned, not built</span></h3>
+<p>A formula in the tap <code>komira-ai/tap</code>, for macOS on Apple silicon and for Linux:</p>
+<div class="code"><pre><span class="p">$</span> brew install komira-ai/tap/tierstore</pre></div>
+<h3>apt <span class="tag tag-planned">planned, not built</span></h3>
+<p>The package <code>tierstore</code> in the repository <code>packages.komira.ai</code>, shared with other Komira tools. Fetch the repository's key over HTTPS into <code>/usr/share/keyrings</code>, compare its fingerprint with the one the repository publishes, then write a deb822 source that trusts that file for this source only:</p>
+<div class="code"><pre><span class="p">$</span> sudo install -d -m 0755 /usr/share/keyrings
+<span class="p">$</span> sudo curl -fsSL https://packages.komira.ai/apt/komira-archive-keyring.gpg -o /usr/share/keyrings/komira-archive-keyring.gpg
+<span class="p">$</span> gpg --show-keys --with-fingerprint /usr/share/keyrings/komira-archive-keyring.gpg</pre></div>
+<div class="code"><pre><span class="p">$</span> sudo tee /etc/apt/sources.list.d/komira.sources &gt;/dev/null &lt;&lt;'EOF'
+Types: deb
+URIs: https://packages.komira.ai/apt
+Suites: stable
+Components: main
+Signed-By: /usr/share/keyrings/komira-archive-keyring.gpg
+EOF
+<span class="p">$</span> sudo apt update
+<span class="p">$</span> sudo apt install tierstore</pre></div>
+<p>The first fetch of the key trusts TLS once; the fingerprint is the check against it. There is no rpm package.</p>
+<h3>Release files on tierstore.dev <span class="tag tag-planned">planned, not built</span></h3>
+<p>Each release is meant to be copied to <code>https://tierstore.dev/releases/&lt;version&gt;/</code>, written once and never changed, with <code>https://tierstore.dev/releases/latest.json</code> naming the newest. The releases of this repository on GitHub stay the place the files are built and signed; the checks under "Verify it" above are the same for a file taken from either.</p>
+
 <h2 id="clients">Using it from an S3 client</h2>
 <p>The front serves one bucket, path-style, over plain HTTP, and checks SigV4 in the <code>Authorization</code> header (and presigned GET and PUT URLs). An SDK with its defaults sends some things the front refuses, so a client needs these settings. The crate's tests drive the front with <code>aws-sdk-rust</code> set this way; the aws CLI and boto3 are not tested.</p>
 <div class="table-wrap"><table>
@@ -114,4 +137,4 @@ let config = aws_sdk_s3::Config::builder()
     .build();
 let client = aws_sdk_s3::Client::from_conf(config);</pre></div>
 <p class="source-note">From <code>packaging/README.md</code>, "Using a stock SDK". That README also lists the settings read from the code and not tested.</p>
-<p>Next: <a href="demo.html">a start and a drain</a>, or <a href="/docs/configuration/">the configuration</a>.</p>
+<p>Next: <a href="demo.html">a start and a drain</a>, <a href="/docs/configure/">the configuration guide</a>, or <a href="/docs/configuration/">the configuration reference</a>.</p>

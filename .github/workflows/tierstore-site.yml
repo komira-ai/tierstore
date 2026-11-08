@@ -1,8 +1,10 @@
 # Build and tests of the tierstore.dev website (crates/tierstore/site): TypeScript compiled by
 # tsc, a build program that prerenders the pages, and node:test tests over the built tree (golden
 # output, links, the Content-Security-Policy rules, the pinned theme, the optional footer link, a
-# public-repo scan). Runs only when the site (or the guide it is made from, or the crate's source
-# that test/claims.test.ts holds its statements to, or this file) changes. The Node version is
+# public-repo scan), and the tests of the site's AWS stacks (infra/site: jest at 99% of lines and
+# branches, which also holds the stacks' Content-Security-Policy to served-policy.ts). Runs only when
+# the site (or the guide it is made from, or the crate's source that test/claims.test.ts holds its
+# statements to, or the infrastructure, or this file) changes. The Node version is
 # exactly the one in the site's .node-version. The network is touched by `npm ci` alone, with
 # install scripts off. Nothing here deploys, and this file holds no cloud access: a push to main
 # is published by tierstore-site-publish.yml, which builds and tests again and uploads (it is the
@@ -16,6 +18,7 @@ on:
       - crates/tierstore/site/**
       - crates/tierstore/docs/**
       - crates/tierstore/src/**
+      - infra/site/**
       - .github/workflows/tierstore-site.yml
   push:
     branches: [main]
@@ -23,6 +26,7 @@ on:
       - crates/tierstore/site/**
       - crates/tierstore/docs/**
       - crates/tierstore/src/**
+      - infra/site/**
       - .github/workflows/tierstore-site.yml
 
 permissions: {}
@@ -50,3 +54,12 @@ jobs:
       - run: npm run typecheck
       - run: npm test
       - run: npm run build
+      - name: Install the infrastructure tests' dependencies
+        working-directory: infra/site
+        run: npm ci --ignore-scripts --no-audit --no-fund
+      - name: Typecheck the infrastructure
+        working-directory: infra/site
+        run: npm run typecheck
+      - name: Test the infrastructure (99% of lines and branches)
+        working-directory: infra/site
+        run: npm test
