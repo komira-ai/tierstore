@@ -23,7 +23,9 @@
 # job's output) and `<target>` is `linux-x86_64`, `linux-aarch64` or `macos-arm64`, the names the
 # Homebrew tap accepts (`cargo xtask release tap-tarball`: a copy, the same bytes). Each Linux
 # platform also has a Debian package, `tierstore_<version>_<arch>.deb` with `<arch>` `amd64` or
-# `arm64` (`cargo xtask release deb`), which `dpkg-deb` reads in the build job. Each of these is
+# `arm64` (`cargo xtask release deb`), which `dpkg-deb` reads in the build job, and an RPM package,
+# `tierstore-<version>-1.<arch>.rpm` with `<arch>` `x86_64` or `aarch64` (`cargo xtask release
+# rpm`), which the build job reads back with `cargo xtask release rpm-info`. Each of these is
 # listed in SHA256SUMS and signed by `attest` as a subject of its own, with its
 # `<file>.sigstore.json`. Uploading them to the tap, apt or a bucket is not done here.
 #
@@ -218,6 +220,13 @@ jobs:
         run: dpkg-deb --info "dist/tierstore_${RELEASE_VERSION}_amd64.deb"
       - name: dpkg reads the files of the Debian package
         run: dpkg-deb --contents "dist/tierstore_${RELEASE_VERSION}_amd64.deb"
+      # The RPM package of the same binary, tierstore-<version>-1.x86_64.rpm (<version> is X.Y.Z),
+      # with its line in dist/SHA256SUMS.linux-x86_64; the xtask reader then checks its digests and
+      # prints its header and files (the runner has no rpm to read it with).
+      - name: The RPM package
+        run: cargo xtask release rpm --binary "target/$TARGET/release/tierstore" --version "$RELEASE_VERSION" --platform linux-x86_64 --licenses "$RUNNER_TEMP/THIRD-PARTY-LICENSES.txt" --out dist
+      - name: The RPM package reads back
+        run: cargo xtask release rpm-info "dist/tierstore-${RELEASE_VERSION}-1.x86_64.rpm"
       - uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
         with:
           name: assets-linux-x86_64
@@ -318,6 +327,13 @@ jobs:
         run: dpkg-deb --info "dist/tierstore_${RELEASE_VERSION}_arm64.deb"
       - name: dpkg reads the files of the Debian package
         run: dpkg-deb --contents "dist/tierstore_${RELEASE_VERSION}_arm64.deb"
+      # The RPM package of the same binary, tierstore-<version>-1.aarch64.rpm (<version> is X.Y.Z),
+      # with its line in dist/SHA256SUMS.linux-arm64; the xtask reader then checks its digests and
+      # prints its header and files (the runner has no rpm to read it with).
+      - name: The RPM package
+        run: cargo xtask release rpm --binary "target/$TARGET/release/tierstore" --version "$RELEASE_VERSION" --platform linux-arm64 --licenses "$RUNNER_TEMP/THIRD-PARTY-LICENSES.txt" --out dist
+      - name: The RPM package reads back
+        run: cargo xtask release rpm-info "dist/tierstore-${RELEASE_VERSION}-1.aarch64.rpm"
       - uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
         with:
           name: assets-linux-arm64
@@ -644,6 +660,24 @@ jobs:
           BUNDLE: ${{ steps.provenance-deb-arm64.outputs.bundle-path }}
           RELEASE_VERSION: ${{ needs.version.outputs.version }}
         run: cp "$BUNDLE" "dist/tierstore_${RELEASE_VERSION}_arm64.deb.sigstore.json"
+      - id: provenance-rpm-x86_64
+        uses: actions/attest-build-provenance@4d101475d8b20a2381f78447822ac1eab6504dd8 # v4.2.2
+        with:
+          subject-path: dist/tierstore-${{ needs.version.outputs.version }}-1.x86_64.rpm
+      - name: Name the bundle of the RPM package for linux-x86_64
+        env:
+          BUNDLE: ${{ steps.provenance-rpm-x86_64.outputs.bundle-path }}
+          RELEASE_VERSION: ${{ needs.version.outputs.version }}
+        run: cp "$BUNDLE" "dist/tierstore-${RELEASE_VERSION}-1.x86_64.rpm.sigstore.json"
+      - id: provenance-rpm-aarch64
+        uses: actions/attest-build-provenance@4d101475d8b20a2381f78447822ac1eab6504dd8 # v4.2.2
+        with:
+          subject-path: dist/tierstore-${{ needs.version.outputs.version }}-1.aarch64.rpm
+      - name: Name the bundle of the RPM package for linux-arm64
+        env:
+          BUNDLE: ${{ steps.provenance-rpm-aarch64.outputs.bundle-path }}
+          RELEASE_VERSION: ${{ needs.version.outputs.version }}
+        run: cp "$BUNDLE" "dist/tierstore-${RELEASE_VERSION}-1.aarch64.rpm.sigstore.json"
       - uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
         with:
           name: bundles
