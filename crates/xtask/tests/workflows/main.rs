@@ -22,6 +22,7 @@ mod macos_pr_tests;
 mod platforms;
 mod platforms_tests;
 mod yaml;
+mod yaml_tests;
 
 use std::path::PathBuf;
 
