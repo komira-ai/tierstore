@@ -328,6 +328,20 @@ const DEFECTS: &[(&str, &str, &str, &str)] = &[
         "          fetch-depth: 1\n",
         "changes: its checkouts",
     ),
+    // A checkout of the head, or of anything but the merge commit: the diff would then be of the
+    // last commit of the pull request alone.
+    (
+        "changes",
+        "          fetch-depth: 2\n",
+        "          fetch-depth: 2\n          ref: ${{ github.event.pull_request.head.sha }}\n",
+        "changes: a checkout sets [[\"fetch-depth\", \"persist-credentials\", \"ref\"]]",
+    ),
+    (
+        "changes",
+        "          fetch-depth: 2\n",
+        "          fetch-depth: 2\n          path: elsewhere\n",
+        "changes: a checkout sets",
+    ),
     (
         "changes",
         "          persist-credentials: false\n          fetch-depth: 2\n",

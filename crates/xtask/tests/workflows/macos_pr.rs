@@ -312,6 +312,24 @@ fn changes_problems(job: Option<&Node>) -> Vec<String> {
             )
         })
         .collect();
+    let mut with_keys: Vec<Vec<&str>> = using(job, "actions/checkout@")
+        .iter()
+        .map(|s| {
+            let mut keys: Vec<&str> = entry(s, "with")
+                .map_or(&[][..], entries)
+                .iter()
+                .filter_map(|(k, _)| k.as_str())
+                .collect();
+            keys.sort_unstable();
+            keys
+        })
+        .collect();
+    with_keys.retain(|keys| keys != &["fetch-depth", "persist-credentials"]);
+    if !with_keys.is_empty() {
+        problems.push(format!(
+            "{name}: a checkout sets {with_keys:?}, not persist-credentials and fetch-depth alone (another ref, repository or path would diff another commit than the merge)"
+        ));
+    }
     if checkouts != [(Some("false"), Some("2"))] {
         problems.push(format!(
             "{name}: its checkouts (persist-credentials, fetch-depth) are {checkouts:?}, not one of the merge commit and its base that keeps no token (false, 2)"
