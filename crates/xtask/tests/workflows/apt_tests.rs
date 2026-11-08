@@ -8,7 +8,7 @@ use super::platforms_tests::{each_named, in_job};
 use super::text_of;
 use super::yaml;
 
-const ROLE_STEP: &str = "        env:\n          ROLE_ARN: ${{ vars.APT_PUBLISH_ROLE_ARN }}\n        run: cargo xtask channels assume --role-arn \"$ROLE_ARN\" --session-name \"tierstore-apt-$GITHUB_RUN_ID\" --region us-east-1 --env-file \"$GITHUB_ENV\"\n";
+const ROLE_STEP: &str = "        env:\n          ROLE_ARN: ${{ vars.APT_PUBLISH_ROLE_ARN }}\n        run: cargo xtask channels assume --role-arn \"$ROLE_ARN\" --session-name \"tierstore-testing-apt-write-$GITHUB_RUN_ID\" --region us-east-1 --env-file \"$GITHUB_ENV\"\n";
 
 #[test]
 fn the_apt_jobs_of_release_yml_pass_and_are_the_eighteen_the_design_names() {
@@ -152,26 +152,38 @@ const DEFECTS: &[(&str, &str, &str, &str)] = &[
     (
         "testing-apt-read",
         "      - name: Gate on the settings",
-        "      - run: cargo xtask channels assume --role-arn x\n      - name: Gate on the settings",
-        "testing-apt-read: a step before the gate names channels assume",
+        "      - uses: aws-actions/configure-aws-credentials@e1253824e5c10ff9df46874f81ed3ec929e19cfd # v6.3.0\n      - name: Gate on the settings",
+        "testing-apt-read: a step before the gate names aws-actions/",
     ),
     (
         "testing-apt-write",
-        " ROLE_ARN: ${{ vars.APT_PUBLISH_ROLE_ARN }}",
-        " ROLE_ARN: ${{ vars.OTHER_ROLE_ARN }}",
+        "          ROLE_ARN: ${{ vars.APT_PUBLISH_ROLE_ARN }}",
+        "          ROLE_ARN: ${{ vars.TIERSTORE_RELEASES_ROLE_ARN }}",
         "testing-apt-write: the role assumed is not ${{ vars.APT_PUBLISH_ROLE_ARN }}",
     ),
     (
         "testing-apt-write",
-        " --region us-east-1 --env-file",
-        " --env-file",
-        "testing-apt-write: the assume step is not given --region ",
+        " --session-name \"tierstore-testing-apt-write-$GITHUB_RUN_ID\"",
+        "",
+        "testing-apt-write: the assume step is not given --session-name ",
     ),
     (
         "testing-apt-read",
         " --env-file \"$GITHUB_ENV\"",
         "",
         "testing-apt-read: the assume step is not given --env-file \"$GITHUB_ENV\"",
+    ),
+    (
+        "testing-apt-read",
+        "      - name: Gate on the settings",
+        "      - run: cargo xtask channels assume --role-arn x\n      - name: Gate on the settings",
+        "testing-apt-read: a step before the gate names channels assume",
+    ),
+    (
+        "testing-apt-index",
+        "      - name: Merge the .debs into the index",
+        "      - run: cargo xtask channels assume --role-arn x\n        if: ${{ steps.gate.outputs.enabled == 'true' }}\n      - name: Merge the .debs into the index",
+        "testing-apt-index: names channels assume, which only channel-upload may",
     ),
     (
         "testing-apt-write",
@@ -218,8 +230,8 @@ const DEFECTS: &[(&str, &str, &str, &str)] = &[
     (
         "testing-apt-index",
         "      - name: Merge the .debs into the index",
-        "      - run: cargo xtask channels assume --role-arn x\n        if: ${{ steps.gate.outputs.enabled == 'true' }}\n      - name: Merge the .debs into the index",
-        "testing-apt-index: names channels assume; this job holds the key, not the role",
+        "      - uses: aws-actions/configure-aws-credentials@e1253824e5c10ff9df46874f81ed3ec929e19cfd # v6.3.0\n        if: ${{ steps.gate.outputs.enabled == 'true' }}\n      - name: Merge the .debs into the index",
+        "testing-apt-index: names aws-actions/; this job holds the key, not the role",
     ),
     (
         "testing-apt-index",
@@ -485,7 +497,7 @@ fn a_job_renamed_or_added_is_named_by_the_list_of_jobs() {
 
 #[test]
 fn the_role_is_assumed_before_the_index_is_read_and_before_it_is_written() {
-    // Catches: a read or write that runs without credentials, and a third party's action taking the verb's place.
+    // Catches: a read or write that runs without credentials, and the credentials action (which the Actions policy refuses) coming back.
     let text = text_of("release.yml");
     for (job, verb) in [
         ("testing-apt-read", "      - name: Read the current index"),
@@ -521,17 +533,17 @@ fn the_role_is_assumed_before_the_index_is_read_and_before_it_is_written() {
             "{job}: {problems:?}"
         );
     }
-    let action = in_job(
+    let back_to_the_action = in_job(
         &text,
         "testing-apt-write-2",
-        ROLE_STEP,
+        "        run: cargo xtask channels assume --role-arn \"$ROLE_ARN\" --session-name \"tierstore-testing-apt-write-2-$GITHUB_RUN_ID\" --region us-east-1 --env-file \"$GITHUB_ENV\"\n",
         "        uses: aws-actions/configure-aws-credentials@e1253824e5c10ff9df46874f81ed3ec929e19cfd # v6.3.0\n",
     );
     assert!(
-        lint("release.yml", &action)
+        lint("release.yml", &back_to_the_action)
             .iter()
-            .any(|p| p.contains("Actions policy")),
-        "{action}"
+            .any(|p| p.contains("not admitted by the Actions policy")),
+        "{back_to_the_action}"
     );
 }
 

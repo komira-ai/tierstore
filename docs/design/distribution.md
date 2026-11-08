@@ -168,7 +168,7 @@ The same three rows judge `farm-check`, the job before `farm` that holds the far
 
 The index and write jobs follow another job, and a job whose predecessor was off must be off too, not red for "some of its settings set": `channels gate --require NAME=VALUE` (the workflow passes the predecessor's output) turns the job off, green with a notice, unless every `VALUE` is exactly `true`, and then does not judge the job's own settings. The label of an apt gate is the job's name. This is also how promotion stays tied to testing: a `stable-apt-*` job whose testing counterpart was a no-op is a no-op.
 
-No secret is committed in a file, and no account id, endpoint or role ARN is (S1): they are the values of the environments. The upload and write steps run `aws` from a flag-given program (`--aws`, default `aws`, as `verify-assets attestations` takes `--gh`) with the role assumed from the job's OIDC token by the `cargo xtask channels assume` step before it.
+No secret is committed in a file, and no account id, endpoint or role ARN is (S1): they are the values of the environments. The upload and write steps run `aws` from a flag-given program (`--aws`, default `aws`, as `verify-assets attestations` takes `--gh`) with the role assumed from the job's OIDC token by the SHA-pinned `aws-actions/configure-aws-credentials` step before it.
 
 ### 5.2 One release through the four stages
 

@@ -549,7 +549,7 @@ fn role_problems(want: &Job, after: &[Node]) -> Vec<String> {
     let roles: Vec<usize> = after
         .iter()
         .enumerate()
-        .filter(|(_, s)| text(s, "run").contains("cargo xtask channels assume "))
+        .filter(|(_, s)| text(s, "run").contains("cargo xtask channels assume"))
         .map(|(i, _)| i)
         .collect();
     let verbs: Vec<usize> = after
@@ -563,6 +563,11 @@ fn role_problems(want: &Job, after: &[Node]) -> Vec<String> {
             let given = entry(&after[*role], "env")
                 .and_then(|e| entry(e, "ROLE_ARN"))
                 .and_then(Node::as_str);
+            if given != Some(ROLE) {
+                problems.push(format!(
+                    "{name}: the role assumed is not {ROLE}, the environment's"
+                ));
+            }
             let assume = text(&after[*role], "run");
             for argument in [
                 "--role-arn \"$ROLE_ARN\"",
@@ -573,11 +578,6 @@ fn role_problems(want: &Job, after: &[Node]) -> Vec<String> {
                 if !assume.contains(argument) {
                     problems.push(format!("{name}: the assume step is not given {argument}"));
                 }
-            }
-            if given != Some(ROLE) {
-                problems.push(format!(
-                    "{name}: the role assumed is not {ROLE}, the environment's"
-                ));
             }
             if role > at {
                 problems.push(format!("{name}: the role is assumed after the verb runs"));
@@ -612,13 +612,7 @@ fn role_problems(want: &Job, after: &[Node]) -> Vec<String> {
 fn index_problems(want: &Job, job: &Node, after: &[Node]) -> Vec<String> {
     let name = want.name;
     let mut problems = Vec::new();
-    for word in [
-        "aws-actions/",
-        "channels assume",
-        "id-token",
-        "AWS_",
-        "APT_PUBLISH_",
-    ] {
+    for word in ["aws-actions/", "id-token", "AWS_", "APT_PUBLISH_"] {
         if mentions(job, word) {
             problems.push(format!(
                 "{name}: names {word}; this job holds the key, not the role"
