@@ -365,6 +365,7 @@ pub fn lint(file: &str, text: &str) -> Vec<String> {
     }
     let mut pinned = Vec::new();
     uses(&doc, &mut pinned);
+    problems.extend(super::allowed_actions::action_problems(&pinned));
     for (line, value) in pinned {
         problems.extend(pin_problem(text, line, value));
     }
