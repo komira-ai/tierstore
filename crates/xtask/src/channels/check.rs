@@ -79,7 +79,7 @@ fn strings(args: &[&str]) -> Vec<String> {
 }
 
 /// Runs `program <args>`; its standard output, or why it failed.
-fn must(host: &dyn Host, program: &Path, args: &[&str]) -> Result<String, Error> {
+pub(super) fn must(host: &dyn Host, program: &Path, args: &[&str]) -> Result<String, Error> {
     let answer = host.run(program, &strings(args))?;
     if answer.ok {
         return Ok(answer.stdout);
@@ -98,7 +98,7 @@ fn write(path: &Path, bytes: &[u8]) -> Result<(), Error> {
     std::fs::write(path, bytes).map_err(Error::spawn(what()))
 }
 
-fn version_flag(version: &str) -> Result<(), Error> {
+pub(super) fn version_flag(version: &str) -> Result<(), Error> {
     if is_plain_version(version) {
         Ok(())
     } else {
@@ -109,7 +109,12 @@ fn version_flag(version: &str) -> Result<(), Error> {
 }
 
 /// The binary at `binary` says the release it is: `tierstore <version>+<12 digits of commit>`.
-fn says(host: &dyn Host, binary: &Path, version: &str, commit: &str) -> Result<String, Error> {
+pub(super) fn says(
+    host: &dyn Host,
+    binary: &Path,
+    version: &str,
+    commit: &str,
+) -> Result<String, Error> {
     let said = must(host, binary, &["--version"])?;
     check_said(&said, version, commit)?;
     Ok(said.trim_end().to_owned())

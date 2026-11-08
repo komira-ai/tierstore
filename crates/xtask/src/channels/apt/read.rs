@@ -16,7 +16,7 @@ use crate::channels::aws::Aws;
 use crate::channels::upload::is_bucket;
 
 /// The ETag in the JSON `aws s3api get-object` prints.
-fn etag_of(stdout: &str) -> Option<String> {
+pub(crate) fn etag_of(stdout: &str) -> Option<String> {
     let value: Value = serde_json::from_str(stdout).ok()?;
     let etag = value.get("ETag")?.as_str()?;
     (!etag.is_empty() && !etag.contains(char::is_whitespace)).then(|| etag.to_owned())
