@@ -302,7 +302,7 @@ fn flags_in(text: &str) -> Vec<String> {
 
 /// The `tierstore_...` words of `text` that are metric names. A word that ends in `_` is a prefix
 /// (`tierstore_cache_` before the names that follow it) and keeps its `_`.
-fn metrics_in(text: &str) -> Vec<String> {
+pub(super) fn metrics_in(text: &str) -> Vec<String> {
     let mut found = Vec::new();
     let mut at = 0;
     while let Some(offset) = text[at..].find("tierstore_") {
@@ -891,12 +891,12 @@ fn a_link_that_names_nothing_is_found() {
 /// Asserts that a metric name that is only the start of a real one is found.
 #[test]
 fn a_metric_that_is_the_start_of_another_is_found() {
-    let prefix = with_appended("operations.md", "\n`tierstore_cache_bytes`\n");
+    let prefix = with_appended("operations.md", "\n`tierstore_cache_bytes_served`\n");
     let problems = check(&prefix, &code());
     assert!(
         said(
             &problems,
-            "the metric tierstore_cache_bytes is not in the source"
+            "the metric tierstore_cache_bytes_served is not in the source"
         ),
         "{problems:?}"
     );

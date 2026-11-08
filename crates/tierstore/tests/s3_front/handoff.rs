@@ -1,5 +1,7 @@
 //! The live update as `run_handing` runs it: a new instance asks the running one, over a control
-//! socket in a scratch directory, for its S3 and OCI sockets, and the running one drains.
+//! socket in a scratch directory, for its S3 and OCI sockets, and the running one drains. The
+//! control socket's directory is [`socket_dir`]'s, not the key file's under the build's scratch
+//! root, whose path in a deep checkout is too long for a Unix socket to bind.
 
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::time::Duration;
@@ -10,7 +12,7 @@ use tierstore::server::cli::{Addresses, Cli, run_handing};
 use tierstore::server::handoff::Handoff;
 use tokio::sync::oneshot;
 
-use crate::files::{Files, Tables, oci_interface};
+use crate::files::{Files, Tables, oci_interface, socket_dir};
 
 /// A client that keeps no connection after an answer, so that each call is a new connection.
 fn client() -> Client {
@@ -50,7 +52,7 @@ async fn assert_served(client: &Client, bound: &Addresses) {
 #[tokio::test]
 async fn a_new_instance_takes_both_fronts_and_the_old_one_drains() {
     let files = Files::new("handoff-run");
-    let socket = files.key.with_file_name("control.sock");
+    let (_control, socket) = socket_dir("handoff-run", "control.sock");
     let setup = Handoff {
         socket: socket.clone(),
         wait: Duration::from_secs(3600),
@@ -121,7 +123,7 @@ async fn a_new_instance_takes_both_fronts_and_the_old_one_drains() {
 #[tokio::test]
 async fn settings_that_name_other_addresses_are_refused_and_the_old_one_goes_on() {
     let files = Files::new("handoff-refused");
-    let socket = files.key.with_file_name("control.sock");
+    let (_control, socket) = socket_dir("handoff-refused", "control.sock");
     let setup = Handoff {
         socket,
         wait: Duration::from_secs(3600),
