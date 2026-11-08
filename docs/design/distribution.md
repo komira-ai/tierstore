@@ -143,7 +143,7 @@ The same three rows judge `farm` (its settings are in the table below). The thir
 
 The index and write jobs follow another job, and a job whose predecessor was off must be off too, not red for "some of its settings set": `channels gate --require NAME=VALUE` (the workflow passes the predecessor's output) turns the job off, green with a notice, unless every `VALUE` is exactly `true`, and then does not judge the job's own settings. The label of an apt gate is the job's name.
 
-No secret is written in a file, and no account id, endpoint or role ARN is (S1): they are the values of the environments. The upload and write steps run `aws` from a flag-given program (`--aws`, default `aws`, as `verify-assets attestations` takes `--gh`) with the role assumed by `aws sts assume-role-with-web-identity` from the job's OIDC token, as `tierstore-site-publish.yml` does today.
+No secret is committed in a file, and no account id, endpoint or role ARN is (S1): they are the values of the environments. The upload and write steps run `aws` from a flag-given program (`--aws`, default `aws`, as `verify-assets attestations` takes `--gh`) with the role assumed from the job's OIDC token by the SHA-pinned `aws-actions/configure-aws-credentials` step before it.
 
 ### 5.2 One release through every channel
 

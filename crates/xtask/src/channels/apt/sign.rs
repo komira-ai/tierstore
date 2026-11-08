@@ -170,6 +170,26 @@ fn private_dir(work: &Path, home: &Path) -> std::io::Result<()> {
 /// A fingerprint that is not one, a `Release` that is not there, a private directory that cannot
 /// be made, or a gpg step that fails.
 pub fn sign(gpg: &dyn Gpg, r: &Request, output: Option<&Path>) -> Result<Vec<String>, Error> {
+    let done = sign_files(gpg, r);
+    // The key never outlives the verb, whatever the verb came to (a flag out of its form
+    // included). A runner is discarded after its job all the same, so a file that is gone already
+    // is not a failure.
+    let _ = std::fs::remove_dir_all(r.work.join("gnupg"));
+    let _ = std::fs::remove_file(r.key_file);
+    let _ = std::fs::remove_file(r.passphrase_file);
+    let fingerprints = done?;
+    if let Some(output) = output {
+        crate::release::append_output(output, &["signed=true".to_owned()])?;
+    }
+    Ok(vec![format!(
+        "signed Release with {} subkey(s), {}: InRelease and Release.gpg verify",
+        fingerprints.len(),
+        fingerprints.join(", ")
+    )])
+}
+
+/// The signing itself: the fingerprints that signed.
+fn sign_files(gpg: &dyn Gpg, r: &Request) -> Result<Vec<String>, Error> {
     let fingerprints = split_fingerprints(r.fingerprints)?;
     let release = r.dir.join("Release");
     if !release.is_file() {
@@ -179,23 +199,9 @@ pub fn sign(gpg: &dyn Gpg, r: &Request, output: Option<&Path>) -> Result<Vec<Str
         )));
     }
     let home = r.work.join("gnupg");
-    let made =
-        private_dir(r.work, &home).map_err(Error::spawn(format!("create {}", home.display())));
-    let done = made.and_then(|()| gpg_steps(gpg, &home, &fingerprints, r));
-    // The key never outlives the verb. A runner is discarded after its job all the same, so a
-    // file that is gone already is not a failure.
-    let _ = std::fs::remove_dir_all(&home);
-    let _ = std::fs::remove_file(r.key_file);
-    let _ = std::fs::remove_file(r.passphrase_file);
-    done?;
-    if let Some(output) = output {
-        crate::release::append_output(output, &["signed=true".to_owned()])?;
-    }
-    Ok(vec![format!(
-        "signed Release with {} subkey(s), {}: InRelease and Release.gpg verify",
-        fingerprints.len(),
-        fingerprints.join(", ")
-    )])
+    private_dir(r.work, &home).map_err(Error::spawn(format!("create {}", home.display())))?;
+    gpg_steps(gpg, &home, &fingerprints, r)?;
+    Ok(fingerprints)
 }
 
 #[cfg(test)]

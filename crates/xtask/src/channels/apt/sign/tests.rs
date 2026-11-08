@@ -270,3 +270,22 @@ fn a_work_directory_that_cannot_hold_the_keyring_is_an_error_and_an_old_keyring_
     let e = sign(&gpg, &s.request(FPR), None).unwrap_err().to_string();
     assert!(e.starts_with("create "), "{e}");
 }
+
+#[test]
+fn the_key_files_are_removed_when_the_flags_are_refused_before_any_signing() {
+    // Catches: a key and a passphrase left on the runner's disk because the verb stopped on a
+    // fingerprint or a missing Release before it reached the cleanup.
+    let s = Setup::new("sign-refused-removes-key");
+    let gpg = FakeGpg::default();
+    assert!(matches!(
+        sign(&gpg, &s.request("abc"), None),
+        Err(Error::Usage(_))
+    ));
+    assert!(!s.dir.join("key.asc").exists() && !s.dir.join("pass").exists());
+    std::fs::write(s.dir.join("key.asc"), "PRIVATE KEY").expect("key");
+    std::fs::write(s.dir.join("pass"), "secret").expect("pass");
+    std::fs::remove_file(s.dir.join("next/dists/stable/Release")).expect("remove");
+    assert!(sign(&gpg, &s.request(FPR), None).is_err());
+    assert!(!s.dir.join("key.asc").exists() && !s.dir.join("pass").exists());
+    assert!(gpg.calls.borrow().is_empty());
+}
