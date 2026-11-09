@@ -155,3 +155,22 @@ fn states_the_residual_of_an_old_node_that_starts_after_the_activation() {
 fn states_the_residual_of_an_old_node_that_starts_at_any_time() {
     check("residual/first-start-old-starts-at-any-time");
 }
+
+/// A create answered with an error that does not say whether it was written (a 409) leaves the
+/// node to read the object at its next beat, or another node's create writes it.
+#[test]
+fn holds_in_a_create_answered_409_while_a_peer_creates() {
+    check("first-start/create-answered-409-one-loses");
+}
+
+/// When every create is answered so and none was written, the nodes stay 503 until a restart.
+#[test]
+fn states_the_residual_of_every_create_answered_409() {
+    check("residual/first-start-every-create-answered-409");
+}
+
+/// The old process of the node's own id is left out of the proof by id, and writes after it.
+#[test]
+fn states_the_residual_of_an_old_node_of_the_same_id() {
+    check("residual/first-start-old-node-of-the-same-id");
+}

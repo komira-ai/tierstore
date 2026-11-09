@@ -150,6 +150,13 @@ pub(super) fn first_start(v: &mut Vec<Scenario>) {
     );
 
     add(
+        "first-start/create-answered-409-one-loses",
+        "FS1 FS2 FS3",
+        "two nodes race and one create is answered with an error that does not say whether it was written (409 ConditionalRequestConflict), whether it was or not: the node reads the object at its next beat, or the other node's create writes it, and both end writable",
+        tweak(marks(2), &|c| c.lost_puts = 1),
+        Pass,
+    );
+    add(
         "negative/first-start-no-journal-check",
         "FS1",
         "wrong variant: a proof that does not list _journal/ activates over a journal",
@@ -221,6 +228,25 @@ pub(super) fn first_start(v: &mut Vec<Scenario>) {
         Fail("FS2"),
     );
 
+    add(
+        "residual/first-start-every-create-answered-409",
+        "FS2",
+        "every create of the start is answered with an error that does not say whether it was written, and none was: the nodes stay 503 until a restart, which runs the proof again",
+        tweak(marks(2), &|c| c.lost_puts = 2),
+        Fail("FS2"),
+    );
+    add(
+        "residual/first-start-old-node-of-the-same-id",
+        "FS1",
+        "the old process of the node's own id (an upgrade in place) is running and its registration is left out by id: the proof does not see it, and it writes a journal after the object is written",
+        tweak(marks(1), &|c| {
+            c.old = true;
+            c.old_up = true;
+            c.old_same_id = true;
+            c.must_activate = false;
+        }),
+        Fail("FS1"),
+    );
     add(
         "residual/first-start-old-starts-after-the-proof",
         "FS1",
