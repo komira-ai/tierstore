@@ -42,6 +42,7 @@ use super::cli_reconcile::{reconcile, reconcile_gated};
 use super::cli_serve::open_gate;
 use super::config_combined::CombinedSettings;
 use super::first_beat::wait_first_beat;
+use super::first_format::first_format;
 use super::listen::joined;
 use super::local_cache::{Disk, SystemDisk};
 use super::memory_format::start_format;
@@ -72,6 +73,7 @@ pub(super) async fn serve_combined(
     let proxy = Arc::new(opened.map_err(|why| format!("opening the proxy: {why}"))?);
     proxy.start_heartbeat(Arc::new(TokioSleeper));
     wait_first_beat(&proxy, heartbeat, cli.reconcile_tuning.first_beat_poll).await;
+    first_format(cli, &proxy, built.hot.as_ref(), heartbeat).await?;
     let beating = Arc::clone(&proxy);
     built.server.proxy = Some(Arc::clone(&proxy));
     let upstream: Arc<dyn Backend> = proxy;

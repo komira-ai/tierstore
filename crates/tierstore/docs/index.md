@@ -51,17 +51,16 @@ Each key, in one line:
 | `cold_store.kind` | the kind of the cold tier |
 | `cold_store.path` | the directory of the cold tier, an absolute path; put it on the big disk, and not at the hot tier's path |
 
-Every other key keeps its default. Make the directories and the key file, activate the new store once, and start tierstore:
+Every other key keeps its default. Make the directories and the key file, and start tierstore:
 
 ```sh
 sudo install -d -o "$USER" /srv/tierstore/hot /srv/tierstore/cold
 printf 'AKIDEXAMPLE\nexample-secret-change-me\n' > /srv/tierstore/access.key
 chmod 0600 /srv/tierstore/access.key
-tierstore format-epoch --hot dir:/srv/tierstore/hot --activate --apply
 tierstore --config /srv/tierstore/tierstore.toml
 ```
 
-A new hot tier answers every write with 503 until `format-epoch --activate --apply` has run once; reads work. Run it once per store, not once per start. Then, from another terminal, put an object and get it back with the `aws` CLI:
+The first start of a new hot tier writes its format object itself, so writes work at once. Then, from another terminal, put an object and get it back with the `aws` CLI:
 
 ```sh
 export AWS_ACCESS_KEY_ID=AKIDEXAMPLE AWS_SECRET_ACCESS_KEY=example-secret-change-me AWS_DEFAULT_REGION=us-east-1

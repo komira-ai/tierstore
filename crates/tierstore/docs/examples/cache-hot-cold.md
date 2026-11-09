@@ -58,11 +58,10 @@ With `[hot_store]`, `[cold_store]` and `[local_cache]` in one file the node owns
 ## Commands
 
 ```sh
-tierstore format-epoch --hot dir:/srv/tierstore/hot --activate --apply
 tierstore --config /etc/tierstore/tierstore.toml
 ```
 
-The `format-epoch` step is needed once for a new hot tier: until it has run, every write is answered 503.
+The first start of a new hot tier writes its format object itself, so writes work at once.
 
 ```sh
 aws --endpoint-url http://127.0.0.1:9300 s3api put-object --bucket tierstore --key cas/b/example --body example

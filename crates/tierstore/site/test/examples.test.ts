@@ -124,7 +124,7 @@ test('the examples say what the code does: the hot tier is not an LRU, the cache
   assert.match(both, /`?local_cache\.write_through`? is true whether it is left out or given, and `?false`? is refused/);
   assert.match(both, /It is not an LRU/);
   for (const name of ['directory-as-bucket', 'cache-hot-cold']) {
-    assert.match(text(read('docs', 'examples', name, 'index.html')), /format-epoch --hot dir:\/srv\/\S+ --activate --apply/, `${name}: the activation of the hot tier`);
+    assert.doesNotMatch(text(read('docs', 'examples', name, 'index.html')), /format-epoch|--activate/, `${name}: a new hot tier needs no activation step`);
   }
 });
 
@@ -181,7 +181,7 @@ test('the landing page starts with Configure tierstore: one smallest file, each 
   const pick = html.slice(html.indexOf('id="pick-a-shape"'), html.indexOf('id="the-smallest-working-file"'));
   for (const name of EXAMPLES) assert.ok(pick.includes(`href="/docs/examples/${name}/"`), `${name} is not linked in Pick a shape`);
   assert.match(text(pick), /AWS S3 is not supported as a tier yet, and TLS to tiers is not built/);
-  assert.match(text(first), /tierstore format-epoch --hot dir:\/srv\/tierstore\/hot --activate --apply/);
+  assert.doesNotMatch(text(first), /format-epoch|--activate/, 'the first start of a new hot tier writes its format itself');
 });
 
 test('every key of every table of the reference is on the landing page with its type, default and meaning, from configuration.md', () => {

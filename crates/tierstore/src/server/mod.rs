@@ -302,6 +302,7 @@ mod digests;
 mod door;
 mod drain;
 mod first_beat;
+mod first_format;
 mod front;
 pub mod gc;
 pub mod handoff;

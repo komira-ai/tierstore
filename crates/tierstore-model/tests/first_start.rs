@@ -1,8 +1,7 @@
 //! The scenarios of the first start of a hot tier with no format object
 //! (`docs/design/tierstore-design.md`, 13.1): the property each is evidence for holds in every
 //! reachable state (`holds_in_*`), or the checker rejects the wrong variant with a counterexample
-//! of the rule named (`rejects_*`), or states the residual the design leaves to the credential
-//! fence.
+//! of the rule named (`rejects_*`), or states the residual the design accepts (`residual_*`).
 
 use tierstore_model::scenarios::verify;
 
@@ -12,40 +11,28 @@ fn check(id: &str) {
     }
 }
 
-/// One node proves the tier new, creates active-marks and is writable.
+/// One node writes the format object and is writable.
 #[test]
-fn holds_in_one_node_over_a_new_s3_tier() {
-    check("first-start/one-node-s3");
+fn holds_in_one_node_over_a_tier_with_no_format() {
+    check("first-start/one-node");
 }
 
-/// One node creates active at epoch 2 over a dir tier.
+/// The loser of the create-only put follows the object of the winner.
 #[test]
-fn holds_in_one_node_over_a_new_dir_tier() {
-    check("first-start/one-node-dir");
+fn holds_in_two_nodes_racing() {
+    check("first-start/two-nodes-race");
 }
 
-/// The loser of the create follows the object, though the winner's markers fill the marks bucket.
+/// No start replaces a pause the operator wrote over the record.
 #[test]
-fn holds_in_two_nodes_racing_over_a_new_s3_tier() {
-    check("first-start/two-nodes-race-s3");
-}
-
-/// Two processes over one dir.
-#[test]
-fn holds_in_two_nodes_racing_over_a_new_dir_tier() {
-    check("first-start/two-nodes-race-dir");
-}
-
-/// Both writers write the same record, so a create that is not atomic does no harm.
-#[test]
-fn holds_in_two_nodes_whose_create_is_not_atomic() {
-    check("first-start/two-nodes-race-create-not-atomic");
+fn holds_in_two_nodes_racing_with_a_pause() {
+    check("first-start/two-nodes-race-with-a-pause");
 }
 
 /// A crash at any step of either node.
 #[test]
-fn holds_in_a_crash_between_registration_and_the_put() {
-    check("first-start/crash-between-registration-and-put");
+fn holds_in_a_crash_at_any_step() {
+    check("first-start/crash-at-any-step");
 }
 
 /// A crash after the put took effect.
@@ -54,123 +41,40 @@ fn holds_in_a_crash_between_the_put_and_its_answer() {
     check("first-start/crash-between-put-and-answer");
 }
 
-/// A restart reads the object and runs no proof.
+/// An ambiguous answer is not retried and is followed on read.
 #[test]
-fn holds_in_a_restart_after_the_activation() {
+fn holds_in_an_ambiguous_answer() {
+    check("first-start/ambiguous-answer");
+}
+
+/// A restart reads the object and writes nothing, whether it is the record or a pause.
+#[test]
+fn holds_in_a_restart_over_an_object() {
     check("first-start/restart-after-activation");
+    check("first-start/restart-over-a-pause");
 }
 
-/// A journal alone stops the activation.
+/// A create that is not atomic can replace a pause.
 #[test]
-fn holds_in_a_journal_left_by_a_departed_release() {
-    check("first-start/journal-left");
+fn rejects_a_create_that_is_not_atomic() {
+    check("negative/first-start-create-not-atomic");
 }
 
-/// An entry alone stops the activation.
+/// A node that stops following after an ambiguous answer stays 503.
 #[test]
-fn holds_in_an_entry_left_without_a_format_object() {
-    check("first-start/entries-left");
+fn rejects_a_node_that_does_not_follow_an_ambiguous_answer() {
+    check("negative/first-start-ambiguous-answer-not-followed");
 }
 
-/// A marker alone stops the activation.
+/// A release before the format object beside a bucket this rule has used is unsupported.
 #[test]
-fn holds_in_a_marks_bucket_that_holds_a_marker() {
-    check("first-start/marks-bucket-used");
+fn residual_an_earlier_release_beside_the_format_object() {
+    check("residual/first-start-old-journal-left");
+    check("residual/first-start-old-release-running");
 }
 
-/// No epoch 3 over a missing bucket.
+/// A 409 that is false (no put was in flight and none landed) leaves the node 503 until a restart.
 #[test]
-fn holds_in_a_marks_bucket_that_does_not_exist() {
-    check("first-start/marks-bucket-missing");
-}
-
-/// Activation over a journal.
-#[test]
-fn rejects_fs1_in_a_proof_without_the_journal_list() {
-    check("negative/first-start-no-journal-check");
-}
-
-/// Activation beside a running old node.
-#[test]
-fn rejects_fs1_in_a_proof_without_the_registration_list() {
-    check("negative/first-start-no-registration-check");
-}
-
-/// Activation over an entry.
-#[test]
-fn rejects_fs1_in_a_proof_without_the_entries_list() {
-    check("negative/first-start-no-entries-check");
-}
-
-/// Activation over a marker.
-#[test]
-fn rejects_fs1_in_a_proof_without_the_marks_list() {
-    check("negative/first-start-no-marks-check-used");
-}
-
-/// Epoch 3 over a missing bucket.
-#[test]
-fn rejects_fs3_in_a_proof_without_the_marks_list() {
-    check("negative/first-start-no-marks-check-missing");
-}
-
-/// The window between the last list and the put, which the credential fence closes.
-#[test]
-fn states_the_residual_of_an_old_node_that_starts_after_the_proof() {
-    check("residual/first-start-old-starts-after-the-proof");
-}
-
-/// A proof that counts the node's own registration refuses on a new tier (FS2).
-#[test]
-fn rejects_fs2_in_a_proof_that_counts_its_own_registration() {
-    check("negative/first-start-counts-its-own-registration");
-}
-
-/// A proof that counts the registrations of peers starting now makes two nodes block each other (FS2).
-#[test]
-fn rejects_fs2_in_a_proof_that_counts_its_peers_registrations() {
-    check("negative/first-start-counts-its-peers-registrations");
-}
-
-/// No activation beside a running node of an earlier release that writes journals (FS1).
-#[test]
-fn holds_in_an_old_release_node_writing_journals() {
-    check("first-start/old-release-writing");
-}
-
-/// The same over a dir tier, where the old node may die (FS1).
-#[test]
-fn holds_in_an_old_release_node_writing_journals_over_a_dir_tier() {
-    check("first-start/old-release-writing-dir");
-}
-
-/// An old node that starts once the object exists writes journals, which the fence stops.
-#[test]
-fn states_the_residual_of_an_old_node_that_starts_after_the_activation() {
-    check("residual/first-start-old-starts-after-the-activation");
-}
-
-/// An old node that starts at any point is the same residual, over two nodes and a crash.
-#[test]
-fn states_the_residual_of_an_old_node_that_starts_at_any_time() {
-    check("residual/first-start-old-starts-at-any-time");
-}
-
-/// A create answered with an error that does not say whether it was written (a 409) leaves the
-/// node to read the object at its next beat, or another node's create writes it.
-#[test]
-fn holds_in_a_create_answered_409_while_a_peer_creates() {
-    check("first-start/create-answered-409-one-loses");
-}
-
-/// When every create is answered so and none was written, the nodes stay 503 until a restart.
-#[test]
-fn states_the_residual_of_every_create_answered_409() {
+fn residual_every_create_answered_409() {
     check("residual/first-start-every-create-answered-409");
-}
-
-/// The old process of the node's own id is left out of the proof by id, and writes after it.
-#[test]
-fn states_the_residual_of_an_old_node_of_the_same_id() {
-    check("residual/first-start-old-node-of-the-same-id");
 }

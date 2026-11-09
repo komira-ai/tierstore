@@ -16,6 +16,7 @@ use super::cli::{Cli, Error, OciSetup, build};
 use super::cli_reconcile::{Gate, reconcile, reconcile_gated};
 use super::drain::late_of;
 use super::first_beat::wait_first_beat;
+use super::first_format::first_format;
 use super::handoff::{
     Front, Handoff, HandoffError, Inherited, MAX_SOCKETS, Offer, Socket, Want, check_control_path,
     take,
@@ -163,6 +164,7 @@ pub async fn run_handing(
     let proxy = Arc::new(opened.map_err(|why| Error::from(format!("opening the proxy: {why}")))?);
     proxy.start_heartbeat(Arc::new(TokioSleeper));
     wait_first_beat(&proxy, heartbeat, cli.reconcile_tuning.first_beat_poll).await;
+    first_format(cli, &proxy, built.hot.as_ref(), heartbeat).await?;
     let beating = Arc::clone(&proxy);
     built.server.proxy = Some(Arc::clone(&proxy));
     let oci_backend: Arc<dyn Backend> = proxy.clone();
