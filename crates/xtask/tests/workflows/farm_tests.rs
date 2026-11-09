@@ -88,9 +88,9 @@ const DEFECTS: &[(&str, &str, &str, &str)] = &[
     ),
     (
         "farm-check",
-        "      package-digest: ${{ steps.desired.outputs.package-digest }}",
-        "      package-digest: ''",
-        "farm-check: output package-digest is not",
+        "      targets: ${{ steps.desired.outputs.targets }}",
+        "      targets: ''",
+        "farm-check: output targets is not",
     ),
     (
         "farm-check",
@@ -148,15 +148,27 @@ const DEFECTS: &[(&str, &str, &str, &str)] = &[
     ),
     (
         "farm-check",
-        "run: cargo xtask release desired-deb --repo",
+        "run: cargo xtask release desired-apt --repo",
         "run: echo --repo",
-        "farm-check: no step `desired` runs `cargo xtask release desired-deb` for the tag of this release",
+        "farm-check: no step `desired` runs `cargo xtask release desired-apt` for the tag of this release",
     ),
     (
         "farm-check",
-        "--version \"${TAG#v}\" --dir",
-        "--version \"$TAG\" --dir",
-        "farm-check: no step `desired` runs `cargo xtask release desired-deb` for the tag of this release",
+        " --min-hostkeeper 0.1.216 ",
+        " --min-hostkeeper 0.1.215 ",
+        "farm-check: the step `desired` is not given `--min-hostkeeper 0.1.216`",
+    ),
+    (
+        "farm-check",
+        " --min-hostkeeper 0.1.216 ",
+        " ",
+        "farm-check: the step `desired` is not given `--min-hostkeeper 0.1.216`",
+    ),
+    (
+        "farm-check",
+        "--version \"${TAG#v}\" --min",
+        "--version \"$TAG\" --min",
+        "farm-check: no step `desired` runs `cargo xtask release desired-apt` for the tag of this release",
     ),
     (
         "farm-check",
@@ -209,9 +221,21 @@ const DEFECTS: &[(&str, &str, &str, &str)] = &[
     ),
     (
         "farm",
-        "      package_digest: ${{ needs.farm-check.outputs.package-digest }}\n",
-        "      package_digest: ''\n",
-        "farm: with.package_digest is",
+        "      targets: ${{ needs.farm-check.outputs.targets }}\n",
+        "      targets: ''\n",
+        "farm: with.targets is",
+    ),
+    (
+        "farm",
+        "      targets: ${{ needs.farm-check.outputs.targets }}\n",
+        "      targets: ${{ needs.farm-check.outputs.targets }}\n      package_digest: ${{ needs.farm-check.outputs.targets }}\n",
+        "farm: with.package_digest is an input it should not give",
+    ),
+    (
+        "farm",
+        "      tailnet_tag: ${{ vars.HOSTKEEPER_TAILNET_TAG }}\n",
+        "      tailnet_tag: tag:hk-ci\n",
+        "farm: with.tailnet_tag is",
     ),
     (
         "farm",
@@ -239,13 +263,19 @@ const DEFECTS: &[(&str, &str, &str, &str)] = &[
     ),
     (
         "farm",
-        "      hostkeeper_commit: 32a9cc6f8242d0efbc3476391302062ff444dd47\n",
+        "      hostkeeper_commit: 7307de84415a86623c0713316f4be36215461694\n",
         "      hostkeeper_commit: 2321ed897b4b9269471eadf169d7f29989161b4a\n",
         "farm: with.hostkeeper_commit is",
     ),
     (
         "farm",
-        "      hostkeeper_version: 0.1.44\n",
+        " # v0.1.216\n    with:",
+        " # v0.1.215\n    with:",
+        "farm: the pin is release \"0.1.215\", not 0.1.216 or later",
+    ),
+    (
+        "farm",
+        "      hostkeeper_version: 0.1.216\n",
         "      hostkeeper_version: 0.1.66\n",
         "farm: with.hostkeeper_version is",
     ),

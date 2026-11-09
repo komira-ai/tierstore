@@ -9,10 +9,12 @@
 //!   tailnet's three. The gate is also given `--require TIERSTORE_LAB_INSTALL=...`, `true` only
 //!   when that repository variable is exactly `true`: with it off, the lab is off whatever the
 //!   other settings are (they serve `hostkeeper-desired.yml` too). Every step after the first gate runs only when it said `enabled=true`, and
-//!   one of them is `cargo xtask release desired-deb` (the testing suite lists the package), whose two outputs the job hands on.
+//!   one of them is `cargo xtask release desired-apt` (the testing suite lists the package), whose two outputs
+//!   (`package-version` and `targets`, the apt installer's entry per architecture) the job hands on.
 //! - `farm` is hostkeeper's reusable workflow, pinned to a commit with its release as the comment
 //!   (a pin of its own: `hostkeeper-desired.yml` pins another revision of the client, and the
-//!   coordinator's allow-list has an entry for each, by its audience), called with the version and digest `farm-check` handed on, the
+//!   coordinator's allow-list has an entry for each, by its audience), called with the version and
+//!   the `targets` `farm-check` handed on (never a `package_digest`), at a release of hostkeeper no older than [`APT_FLOOR`], the
 //!   coordinator's variables, the audience of this workflow and `wait: true`, and only when the
 //!   gate said `enabled=true`. It holds `contents: read` and `id-token: write`; no other job of
 //!   the farm does (the lint's write table pins the `if:` of the scope).
@@ -40,6 +42,11 @@ pub const SOAK_IF: &str = after_if!("needs.farm.outputs.converged == 'true'");
 /// The audience of the OIDC token of `farm`, which the coordinator's allow-list entry for this
 /// workflow names (not the one of `hostkeeper-desired.yml`, whose entry admits another event).
 pub const AUDIENCE: &str = "tierstore-hostkeeper-release";
+
+/// The first release of hostkeeper whose daemon announces `apt` (its pull request 256): before it
+/// no host is ordered an apt entry. The pin of `farm` is at this release or later, and
+/// `desired-apt` is given it as `--min-hostkeeper`.
+pub const APT_FLOOR: &str = "0.1.216";
 
 /// The repository variable that switches the lab stage on.
 const SWITCH: &str = "TIERSTORE_LAB_INSTALL";
@@ -132,10 +139,7 @@ fn check_problems(check: &Node) -> Vec<String> {
             "package-version",
             "${{ steps.desired.outputs.package-version }}",
         ),
-        (
-            "package-digest",
-            "${{ steps.desired.outputs.package-digest }}",
-        ),
+        ("targets", "${{ steps.desired.outputs.targets }}"),
     ] {
         if at(check, &["outputs", output]) != Some(want) {
             problems.push(format!("farm-check: output {output} is not {want}"));
@@ -181,13 +185,20 @@ fn check_problems(check: &Node) -> Vec<String> {
     let desired = after.iter().find(|s| at(s, &["id"]) == Some("desired"));
     if !desired.is_some_and(|s| {
         text(s, "run").starts_with(
-            "cargo xtask release desired-deb --repo \"$GITHUB_REPOSITORY\" --version \"${TAG#v}\" ",
+            "cargo xtask release desired-apt --repo \"$GITHUB_REPOSITORY\" --version \"${TAG#v}\" ",
         ) && text(s, "run").contains("--output \"$GITHUB_OUTPUT\"")
     }) {
         problems.push(
-            "farm-check: no step `desired` runs `cargo xtask release desired-deb` for the tag of this release"
+            "farm-check: no step `desired` runs `cargo xtask release desired-apt` for the tag of this release"
                 .to_owned(),
         );
+    }
+    let floor = format!("--min-hostkeeper {APT_FLOOR} ");
+    if !desired.is_some_and(|s| format!("{} ", text(s, "run")).contains(&floor)) {
+        problems.push(format!(
+            "farm-check: the step `desired` is not given `{}`: the entries would name a hostkeeper floor that is not the first with the apt installer",
+            floor.trim_end()
+        ));
     }
     problems
 }
@@ -241,14 +252,11 @@ fn gate_problems(gate: &Node, label: &str, settings: &[&str], who: &str) -> Vec<
 
 /// What each input of hostkeeper's workflow must be in `farm`, for the pin `commit` whose version
 /// comment says `release`.
-fn with_wanted<'a>(commit: &'a str, release: &'a str) -> [(&'static str, &'a str); 14] {
+fn with_wanted<'a>(commit: &'a str, release: &'a str) -> [(&'static str, &'a str); 15] {
     [
         ("service", "tierstore"),
         ("version", "${{ needs.farm-check.outputs.package-version }}"),
-        (
-            "package_digest",
-            "${{ needs.farm-check.outputs.package-digest }}",
-        ),
+        ("targets", "${{ needs.farm-check.outputs.targets }}"),
         ("hostkeeper_version", release),
         ("hostkeeper_commit", commit),
         ("coordinator_url", "${{ vars.HOSTKEEPER_COORDINATOR_URL }}"),
@@ -272,6 +280,7 @@ fn with_wanted<'a>(commit: &'a str, release: &'a str) -> [(&'static str, &'a str
             "tailnet_coordinator",
             "${{ vars.HOSTKEEPER_TAILNET_COORDINATOR }}",
         ),
+        ("tailnet_tag", "${{ vars.HOSTKEEPER_TAILNET_TAG }}"),
     ]
 }
 
@@ -289,6 +298,19 @@ fn pin<'a>(job: &'a Node, text: &'a str) -> Option<(&'a str, &'a str)> {
         .and_then(|line| line.split_once(" # v"))
         .map_or("", |(_, version)| version.trim_end());
     Some((commit, release))
+}
+
+/// Whether the plain version `version` is `floor` or later; `None` when either is not
+/// `<major>.<minor>.<patch>`.
+fn version_at_least(version: &str, floor: &str) -> Option<bool> {
+    let parts = |text: &str| -> Option<Vec<u64>> {
+        let numbers: Vec<u64> = text
+            .split('.')
+            .map(|p| p.parse().ok())
+            .collect::<Option<_>>()?;
+        (numbers.len() == 3).then_some(numbers)
+    };
+    Some(parts(version)? >= parts(floor)?)
 }
 
 fn farm_job_problems(farm: &Node, text: &str) -> Vec<String> {
@@ -312,10 +334,22 @@ fn farm_job_problems(farm: &Node, text: &str) -> Vec<String> {
         ));
         return problems;
     };
-    for (key, want) in with_wanted(commit, release) {
+    if version_at_least(release, APT_FLOOR) != Some(true) {
+        problems.push(format!(
+            "farm: the pin is release {release:?}, not {APT_FLOOR} or later: before it no daemon announces apt, so the entry would never be ordered"
+        ));
+    }
+    let wanted = with_wanted(commit, release);
+    for (key, want) in wanted {
         let got = at(farm, &["with", key]);
         if got != Some(want) {
             problems.push(format!("farm: with.{key} is {got:?}, not {want:?}"));
+        }
+    }
+    for (key, _) in entry(farm, "with").map_or(&[][..], entries) {
+        let key = key.as_str().unwrap_or_default();
+        if !wanted.iter().any(|(k, _)| *k == key) {
+            problems.push(format!("farm: with.{key} is an input it should not give"));
         }
     }
     problems

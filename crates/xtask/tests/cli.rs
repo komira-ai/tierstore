@@ -901,11 +901,12 @@ fn release_desired_after_a_run_that_published_nothing_sets_nothing_and_both_ways
 }
 
 #[test]
-fn release_desired_deb_refuses_a_release_without_sums_with_status_1_and_a_bad_version_with_status_2()
+fn release_desired_apt_refuses_a_release_without_sums_with_status_1_and_a_bad_version_or_floor_with_status_2()
  {
-    // Catches: the flags of `release desired-deb` not reaching it, a release without the digests
-    // to hold the testing suite to passing, and a malformed --version not a usage error.
-    let d = dir("release-desired-deb");
+    // Catches: the flags of `release desired-apt` not reaching it, a release without the digests
+    // to hold the testing suite to passing, and a malformed --version or --min-hostkeeper not a
+    // usage error.
+    let d = dir("release-desired-apt");
     put(
         &d,
         &format!("repos/{REPO}/releases/tags/v0.3.53"),
@@ -916,11 +917,13 @@ fn release_desired_deb_refuses_a_release_without_sums_with_status_1_and_a_bad_ve
     let args = |version: &'static str| {
         [
             "release",
-            "desired-deb",
+            "desired-apt",
             "--repo",
             REPO,
             "--version",
             version,
+            "--min-hostkeeper",
+            "0.1.216",
             "--dir",
             "desired",
             "--output",
@@ -940,6 +943,9 @@ fn release_desired_deb_refuses_a_release_without_sums_with_status_1_and_a_bad_ve
     );
     assert!(!d.join("github-output").exists());
     assert_eq!(run(&d, &args("v0.3.53")).status.code(), Some(2));
+    let mut floor = args("0.3.53");
+    floor[7] = "v0.1.216";
+    assert_eq!(run(&d, &floor).status.code(), Some(2));
 }
 
 #[test]
