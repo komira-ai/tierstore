@@ -12,7 +12,9 @@
 //! and the example configuration is `%config(noreplace)`, so an upgrade keeps the host's edits
 //! (and writes a new example beside it as `.rpmnew`). Every file is owned by `root`, the
 //! directories this package owns (`/etc/tierstore` is 0750, the others 0755) are in the package,
-//! and the package requires `systemd`, which provides `systemd-sysusers`.
+//! and the package requires `systemd`, which provides `systemd-sysusers`, and `glibc >= 2.28`
+//! ([`glibc::FLOOR`]), the glibc the binary is linked against, so a host with an older one refuses
+//! the install instead of failing to start the service.
 //!
 //! The scriptlets ([`POST`], [`POSTUN`]) do what the Debian maintainer scripts do. `%post` runs
 //! on every install and upgrade: it creates the account with `systemd-sysusers`, gives
@@ -31,14 +33,15 @@ use std::collections::BTreeSet;
 use std::path::Path;
 
 use rpm::{
-    BuildConfig, CompressionWithLevel, Dependency, FileFlags, FileMode, FileOptions, Package,
-    PackageBuilder, Scriptlet,
+    BuildConfig, CompressionWithLevel, Dependency, DependencyFlags, FileFlags, FileMode,
+    FileOptions, Package, PackageBuilder, Scriptlet,
 };
 
 use crate::Error;
 use crate::fetch::Sha256;
 use crate::package::{Platform, open_sums, read, write_new, write_sums};
 use crate::release::deb::{self, File};
+use crate::release::glibc;
 use crate::release::hostkeeper_package::is_plain_version;
 use crate::sums;
 
@@ -141,6 +144,7 @@ pub fn build(version: &str, architecture: &str, files: &[File]) -> Result<Vec<u8
         .packager(deb::MAINTAINER)
         .build_host(BUILD_HOST)
         .requires(Dependency::any("systemd"))
+        .requires(Dependency::greater_eq("glibc", glibc::FLOOR))
         .post_install_script(Scriptlet::new(POST).prog(vec!["/bin/sh"]))
         .post_uninstall_script(Scriptlet::new(POSTUN).prog(vec!["/bin/sh"]));
     for (path, permissions) in DIRECTORIES {
@@ -180,6 +184,23 @@ fn description() -> String {
         .map(|line| (*line).to_owned())
         .collect::<Vec<_>>()
         .join("\n")
+}
+
+/// A requirement as `rpm -qR` writes it: `name`, or `name >= version`.
+fn requirement(dependency: rpm::Dependency) -> String {
+    let op: String = [
+        (DependencyFlags::LESS, "<"),
+        (DependencyFlags::GREATER, ">"),
+        (DependencyFlags::EQUAL, "="),
+    ]
+    .into_iter()
+    .filter(|(flag, _)| dependency.flags.contains(*flag))
+    .map(|(_, text)| text)
+    .collect();
+    if op.is_empty() {
+        return dependency.name;
+    }
+    format!("{} {op} {}", dependency.name, dependency.version)
 }
 
 /// The error for a failure of the `rpm` crate while it does `what`.
@@ -246,8 +267,8 @@ pub fn inspect(bytes: &[u8]) -> Result<Info, Error> {
         .get_requires()
         .map_err(failed("read the requirements"))?
         .into_iter()
-        .map(|d| d.name)
-        .filter(|name| !name.starts_with("rpmlib("))
+        .filter(|d| !d.name.starts_with("rpmlib("))
+        .map(requirement)
         .collect::<BTreeSet<_>>()
         .into_iter()
         .collect();

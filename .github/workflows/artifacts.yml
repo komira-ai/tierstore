@@ -8,6 +8,13 @@
 # `macos-arm64`. Each build job runs on a GitHub-hosted runner of its own platform, so each
 # binary is run where it is built and must say the commit and the version there.
 #
+# The Linux binaries are linked against glibc 2.28 (`cargo zigbuild`, target `<triple>.2.28`), not
+# against the glibc of the runner image, so they start on every distribution from Debian 10 and
+# RHEL 8 on, which the .deb and .rpm packages require (`libc6 (>= 2.28)`, `glibc >= 2.28`). Each
+# Linux job reads the binary's symbol versions and fails when one is above 2.28
+# (`cargo xtask release check-glibc`). zig and cargo-zigbuild are downloaded by URL and checked
+# against their SHA-256, as cargo-cyclonedx is.
+#
 # Beside them, the hostkeeper packages of the same binaries: `tierstore-<version>-<platform>.tar.zst`
 # (`cargo xtask release hostkeeper-package`, where `<version>` is what `tierstore --version`
 # prints, `X.Y.Z+<12 hex>`), each with the bundle of its own provenance attestation,
@@ -97,6 +104,20 @@ env:
   CYCLONEDX_SHA256_X86_64_LINUX: fb8dbee9f182173e062a64a387b21a0badc6fab8b2abf9294973f012972bf6d8
   CYCLONEDX_SHA256_AARCH64_LINUX: 7bf131ca5389b07a4f10c182bcf8a5ad339d64408b6f0d8f6834a0bd6120a06a
   CYCLONEDX_SHA256_AARCH64_MACOS: 4c53dfa21e70b65bf7f8d2592aadde3bcb02c1a40b6ec63b877e5ca65a29e180
+  # The Linux binaries are linked by `cargo zigbuild` against this glibc (zig supplies its headers
+  # and symbol versions), and no `GLIBC_` symbol version above it may be in them. It is the
+  # `libc6` and `glibc` floor of the .deb and .rpm (`FLOOR` in crates/xtask/src/release/glibc.rs;
+  # a test holds the two equal).
+  GLIBC_FLOOR: "2.28"
+  # zig (the C compiler and linker of the Linux builds) and cargo-zigbuild, their release files
+  # checked against their SHA-256 before use (zig's from ziglang.org/download/index.json,
+  # cargo-zigbuild's from the `.sha256` beside each file; both recomputed when pinned).
+  ZIG_VERSION: 0.15.2
+  ZIG_SHA256_X86_64_LINUX: 02aa270f183da276e5b5920b1dac44a63f1a49e55050ebde3aecc9eb82f93239
+  ZIG_SHA256_AARCH64_LINUX: 958ed7d1e00d0ea76590d27666efbf7a932281b3d7ba0c6b01b0ff26498f667f
+  ZIGBUILD_VERSION: 0.24.1
+  ZIGBUILD_SHA256_X86_64_LINUX: 32581c8e13f27a807bb244aaaac870522f5b51263c766cf77b1a99771ce9fa5c
+  ZIGBUILD_SHA256_AARCH64_LINUX: 70bb4c9cc71a6d16211b9079996e3cd588671053312adeff4d043499ed887601
 
 defaults:
   run:
@@ -134,7 +155,7 @@ jobs:
           path: ${{ runner.temp }}/version
           if-no-files-found: error
 
-  # glibc: the binary needs the glibc of the runner image it was built on (Ubuntu 24.04) or newer.
+  # glibc: the binary is linked against glibc 2.28 (GLIBC_FLOOR) and needs that or newer.
   linux-x86_64:
     needs: [version]
     runs-on: ubuntu-24.04
@@ -156,8 +177,8 @@ jobs:
             ~/.cargo/registry
             ~/.cargo/git
             target
-          key: cargo-${{ runner.os }}-${{ runner.arch }}-${{ github.job }}-${{ hashFiles('Cargo.lock', 'rust-toolchain.toml') }}
-          restore-keys: cargo-${{ runner.os }}-${{ runner.arch }}-${{ github.job }}-
+          key: cargo-zigbuild-${{ runner.os }}-${{ runner.arch }}-${{ github.job }}-${{ hashFiles('Cargo.lock', 'rust-toolchain.toml') }}
+          restore-keys: cargo-zigbuild-${{ runner.os }}-${{ runner.arch }}-${{ github.job }}-
           # On a push (to main: the build the attest job signs) nothing is restored: the signed
           # binary is built from a clean target/, never on a cached one. The lookup still tells
           # the save step below whether this key exists.
@@ -175,7 +196,20 @@ jobs:
       # `tierstore` is built by itself: its binary needs the crate's `server` feature
       # (`required-features`), and `-p tierstore --bins` without it builds no binary and says
       # nothing.
-      - run: cargo build --locked --release --target "$TARGET" -p tierstore --features server --bin tierstore
+      # zig and cargo-zigbuild, pinned by URL and SHA-256. zig is a directory (its compiler and
+      # its library files), installed whole under $HOME/zig.
+      - name: Install zig (pinned version and checksum)
+        run: cargo xtask fetch --url "https://ziglang.org/download/$ZIG_VERSION/zig-x86_64-linux-$ZIG_VERSION.tar.xz" --sha256 "$ZIG_SHA256_X86_64_LINUX" --out "$HOME/zig" --extract tar.xz --tree
+      - name: Install cargo-zigbuild (pinned version and checksum)
+        run: cargo xtask fetch --url "https://github.com/rust-cross/cargo-zigbuild/releases/download/v$ZIGBUILD_VERSION/cargo-zigbuild-$TARGET.tar.xz" --sha256 "$ZIGBUILD_SHA256_X86_64_LINUX" --out "$HOME/.cargo/bin/cargo-zigbuild" --extract tar.xz --member "cargo-zigbuild-$TARGET/cargo-zigbuild"
+      - run: PATH="$HOME/zig:$PATH" cargo zigbuild --version
+      # Linked against glibc 2.28 (the target's `.2.28`); the binary lands in target/$TARGET/release
+      # as it does for `cargo build`.
+      - run: PATH="$HOME/zig:$PATH" cargo zigbuild --locked --release --target "$TARGET.$GLIBC_FLOOR" -p tierstore --features server --bin tierstore
+      # The binary asks for no glibc symbol version above the floor: read from its ELF file, so
+      # a binary linked against the runner's newer glibc fails here and not on a host.
+      - name: tierstore needs no glibc newer than the floor
+        run: cargo xtask release check-glibc "target/$TARGET/release/tierstore" --max "$GLIBC_FLOOR"
       # The binary runs here (a runner of its own architecture built it) and says the commit.
       - name: tierstore names the commit and the version
         run: cargo xtask build-commit "target/$TARGET/release/tierstore" "$GITHUB_SHA" --version "$RELEASE_VERSION"
@@ -263,8 +297,8 @@ jobs:
             ~/.cargo/registry
             ~/.cargo/git
             target
-          key: cargo-${{ runner.os }}-${{ runner.arch }}-${{ github.job }}-${{ hashFiles('Cargo.lock', 'rust-toolchain.toml') }}
-          restore-keys: cargo-${{ runner.os }}-${{ runner.arch }}-${{ github.job }}-
+          key: cargo-zigbuild-${{ runner.os }}-${{ runner.arch }}-${{ github.job }}-${{ hashFiles('Cargo.lock', 'rust-toolchain.toml') }}
+          restore-keys: cargo-zigbuild-${{ runner.os }}-${{ runner.arch }}-${{ github.job }}-
           # On a push (to main: the build the attest job signs) nothing is restored: the signed
           # binary is built from a clean target/, never on a cached one. The lookup still tells
           # the save step below whether this key exists.
@@ -282,7 +316,20 @@ jobs:
       # `tierstore` is built by itself: its binary needs the crate's `server` feature
       # (`required-features`), and `-p tierstore --bins` without it builds no binary and says
       # nothing.
-      - run: cargo build --locked --release --target "$TARGET" -p tierstore --features server --bin tierstore
+      # zig and cargo-zigbuild, pinned by URL and SHA-256. zig is a directory (its compiler and
+      # its library files), installed whole under $HOME/zig.
+      - name: Install zig (pinned version and checksum)
+        run: cargo xtask fetch --url "https://ziglang.org/download/$ZIG_VERSION/zig-aarch64-linux-$ZIG_VERSION.tar.xz" --sha256 "$ZIG_SHA256_AARCH64_LINUX" --out "$HOME/zig" --extract tar.xz --tree
+      - name: Install cargo-zigbuild (pinned version and checksum)
+        run: cargo xtask fetch --url "https://github.com/rust-cross/cargo-zigbuild/releases/download/v$ZIGBUILD_VERSION/cargo-zigbuild-$TARGET.tar.xz" --sha256 "$ZIGBUILD_SHA256_AARCH64_LINUX" --out "$HOME/.cargo/bin/cargo-zigbuild" --extract tar.xz --member "cargo-zigbuild-$TARGET/cargo-zigbuild"
+      - run: PATH="$HOME/zig:$PATH" cargo zigbuild --version
+      # Linked against glibc 2.28 (the target's `.2.28`); the binary lands in target/$TARGET/release
+      # as it does for `cargo build`.
+      - run: PATH="$HOME/zig:$PATH" cargo zigbuild --locked --release --target "$TARGET.$GLIBC_FLOOR" -p tierstore --features server --bin tierstore
+      # The binary asks for no glibc symbol version above the floor: read from its ELF file, so
+      # a binary linked against the runner's newer glibc fails here and not on a host.
+      - name: tierstore needs no glibc newer than the floor
+        run: cargo xtask release check-glibc "target/$TARGET/release/tierstore" --max "$GLIBC_FLOOR"
       # The binary runs here (a runner of its own architecture built it) and says the commit.
       - name: tierstore names the commit and the version
         run: cargo xtask build-commit "target/$TARGET/release/tierstore" "$GITHUB_SHA" --version "$RELEASE_VERSION"

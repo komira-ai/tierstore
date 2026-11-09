@@ -81,7 +81,7 @@ and enables nothing: write the key files under /etc/tierstore, then start tierst
         file.len()
     );
     assert!(p.primary.starts_with(&primary), "{}", p.primary);
-    assert!(p.primary.contains("    <rpm:requires>\n      <rpm:entry name=\"/bin/sh\"/>\n      <rpm:entry name=\"config(tierstore)\" flags=\"EQ\" epoch=\"0\" ver=\"1.2.3\" rel=\"1\"/>\n      <rpm:entry name=\"systemd\"/>\n    </rpm:requires>\n    <file>/etc/tierstore/tierstore.toml</file>\n  </format>\n</package>\n"));
+    assert!(p.primary.contains("    <rpm:requires>\n      <rpm:entry name=\"/bin/sh\"/>\n      <rpm:entry name=\"config(tierstore)\" flags=\"EQ\" epoch=\"0\" ver=\"1.2.3\" rel=\"1\"/>\n      <rpm:entry name=\"glibc\" flags=\"GE\" epoch=\"0\" ver=\"2.28\"/>\n      <rpm:entry name=\"systemd\"/>\n    </rpm:requires>\n    <file>/etc/tierstore/tierstore.toml</file>\n  </format>\n</package>\n"));
     assert!(!p.primary.contains("rpmlib("));
     assert_eq!(
         p.filelists,

@@ -23,6 +23,7 @@
 //!   artifact than `assets-<platform>` from `dist/`;
 //! - the cargo-cyclonedx checksum a build job names is not 64 lowercase hex digits in the file's
 //!   `env`, or any job or step sets a `CYCLONEDX_` variable of its own (which would shadow the pin);
+//! - a Linux build job is not built and checked against glibc 2.28 as [`super::glibc_floor`] says;
 //! - a job other than `attest` and `verify` has an `if:`, those two have another than the
 //!   signing condition, any job or step has `continue-on-error`, or a step that is not a cache
 //!   save has an `if:` (a required step that can be skipped or fail unseen is no gate);
@@ -51,6 +52,7 @@
 //! triggers [`TRIGGERS`] pins; a pull request that changes a path the macOS build reads runs the
 //! same build, with the tests of the whole workspace, in `macos.yml`.
 
+use super::glibc_floor::{self, Zig};
 use super::lint::{SIGN_IF, entries, entry, names, runs};
 use super::macos_pr::{MAC_IF, MAC_JOB, MACOS_PR, pull_request_job_problems, scalars};
 use super::yaml::{self, Node, Value};
@@ -72,6 +74,8 @@ pub struct Build {
     pub tap: &'static str,
     pub deb: Option<&'static str>,
     pub rpm: Option<&'static str>,
+    /// How a Linux binary is linked against glibc 2.28 (`cargo zigbuild`): none for macOS.
+    pub zig: Option<Zig>,
 }
 
 /// The `if:` of a job on a macOS runner in a workflow a pull request starts: never for a pull
@@ -102,6 +106,11 @@ pub const BUILDS: &[Build] = &[
         tap: "linux-x86_64",
         deb: Some("amd64"),
         rpm: Some("x86_64"),
+        zig: Some(Zig {
+            arch: "x86_64",
+            zig_pin: "ZIG_SHA256_X86_64_LINUX",
+            zigbuild_pin: "ZIGBUILD_SHA256_X86_64_LINUX",
+        }),
     },
     Build {
         platform: "linux-arm64",
@@ -113,6 +122,11 @@ pub const BUILDS: &[Build] = &[
         tap: "linux-aarch64",
         deb: Some("arm64"),
         rpm: Some("aarch64"),
+        zig: Some(Zig {
+            arch: "aarch64",
+            zig_pin: "ZIG_SHA256_AARCH64_LINUX",
+            zigbuild_pin: "ZIGBUILD_SHA256_AARCH64_LINUX",
+        }),
     },
     Build {
         platform: "macos-arm64",
@@ -124,6 +138,7 @@ pub const BUILDS: &[Build] = &[
         tap: "macos-arm64",
         deb: None,
         rpm: None,
+        zig: None,
     },
 ];
 
@@ -144,6 +159,9 @@ pub const MIN_HOSTKEEPER: &str = "0.1.0";
 /// build job put it.
 pub const CODESIGN: &str = "codesign --verify --strict \"$RUNNER_TEMP/hostkeeper/packages/tierstore/$RELEASE_VERSION+${GITHUB_SHA::12}/bin/tierstore\"";
 
+/// The build of a platform that is not linked by zig.
+pub const BUILD: &str = "cargo build --locked --release --target \"$TARGET\" -p tierstore --features server --bin tierstore";
+
 /// The `run:` commands of the build job of `b`, in order.
 pub fn build_commands(b: &Build) -> Vec<String> {
     let platform = b.platform;
@@ -156,7 +174,7 @@ pub fn build_commands(b: &Build) -> Vec<String> {
         "cargo cyclonedx --version".to_owned(),
         "cargo xtask release set-version --version \"$RELEASE_VERSION\"".to_owned(),
         "cp Cargo.lock \"$RUNNER_TEMP/Cargo.lock.release\"".to_owned(),
-        "cargo build --locked --release --target \"$TARGET\" -p tierstore --features server --bin tierstore".to_owned(),
+        BUILD.to_owned(),
         "cargo xtask build-commit \"target/$TARGET/release/tierstore\" \"$GITHUB_SHA\" --version \"$RELEASE_VERSION\"".to_owned(),
         "cargo cyclonedx --format json --spec-version 1.5 --describe binaries --target \"$TARGET\"".to_owned(),
         "cmp Cargo.lock \"$RUNNER_TEMP/Cargo.lock.release\"".to_owned(),
@@ -180,6 +198,7 @@ pub fn build_commands(b: &Build) -> Vec<String> {
             "cargo xtask release tap-tarball dist --commit \"$GITHUB_SHA\" --version \"$RELEASE_VERSION\" --platform {platform}"
         ),
     ];
+    glibc_floor::splice_zig_commands(b, &mut commands);
     if let Some(architecture) = b.deb {
         let file = deb_file("${RELEASE_VERSION}", architecture);
         commands.push(format!(
@@ -457,7 +476,7 @@ fn download_problems(
 }
 
 /// Whether `value` is 64 lowercase hex digits.
-fn is_sha256(value: &str) -> bool {
+pub fn is_sha256(value: &str) -> bool {
     value.len() == 64
         && value
             .bytes()
@@ -537,6 +556,7 @@ fn build_problems(doc: &Node, b: &Build, build: &Node) -> Vec<String> {
             b.pin
         ));
     }
+    problems.extend(glibc_floor::pin_problems(doc, b));
     let uploads: Vec<(Option<&str>, Option<&str>)> = using(Some(build), UPLOAD)
         .iter()
         .map(|s| (at(s, &["with", "name"]), at(s, &["with", "path"])))
@@ -566,9 +586,9 @@ fn shadow_problems(jobs: &[(Node, Node)]) -> Vec<String> {
         for (scope, env) in scopes {
             for (key, _) in env.map_or(&[][..], entries) {
                 let key = key.as_str().unwrap_or_default();
-                if key.starts_with("CYCLONEDX_") {
+                if glibc_floor::shadows(key) {
                     problems.push(format!(
-                        "{scope}: sets {key}, which shadows the file's cargo-cyclonedx pins"
+                        "{scope}: sets {key}, which shadows the file's cargo-cyclonedx, zig and glibc pins"
                     ));
                 }
             }

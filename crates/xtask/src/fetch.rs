@@ -8,7 +8,10 @@
 //! 2. Its SHA-256 is compared with `--sha256`. A mismatch is refused here, before any
 //!    byte is unpacked or written: nothing is created on disk.
 //! 3. It is unpacked in memory: as is, or one regular file (`--member`, its path inside
-//!    the archive) out of a gzip or xz tar (`--extract tar.gz`, `--extract tar.xz`).
+//!    the archive) out of a gzip or xz tar (`--extract tar.gz`, `--extract tar.xz`), or the
+//!    whole tar as a directory tree (`--tree`: `--out` is the directory, the archive's one top
+//!    directory is dropped, and an entry that is not a regular file or a directory, or whose
+//!    path leaves the tree, is refused).
 //! 4. The file is written to `<out>.part` beside `--out`, made executable (0755) and
 //!    renamed over `--out`. When writing or renaming fails, `<out>.part` is removed, so
 //!    `--out` holds either the whole new file or what it held before.
@@ -16,7 +19,7 @@
 use std::fmt;
 use std::io::Read;
 use std::os::unix::fs::PermissionsExt;
-use std::path::{Path, PathBuf};
+use std::path::{Component, Path, PathBuf};
 use std::str::FromStr;
 use std::sync::Arc;
 use std::time::Duration;
@@ -78,10 +81,10 @@ impl FromStr for Sha256 {
 /// What `--extract` names.
 #[derive(Clone, Copy, Debug, PartialEq, Eq, clap::ValueEnum)]
 pub enum Format {
-    /// A gzip-compressed tar: the file is its `--member`.
+    /// A gzip-compressed tar: the file is its `--member`, or with `--tree` the whole archive.
     #[value(name = "tar.gz")]
     TarGz,
-    /// An xz-compressed tar: the file is its `--member`.
+    /// An xz-compressed tar: the file is its `--member`, or with `--tree` the whole archive.
     #[value(name = "tar.xz")]
     TarXz,
 }
@@ -94,43 +97,53 @@ pub enum Unpack {
     /// The download is a tar archive, gzip-compressed (`xz: false`) or xz-compressed;
     /// the file is the regular file at `member` in it.
     Tar { xz: bool, member: PathBuf },
+    /// The download is a tar archive, gzip-compressed (`xz: false`) or xz-compressed; all of it
+    /// is installed as the directory `out`, without the archive's top directory.
+    Tree { xz: bool },
 }
 
 impl Unpack {
-    /// `--extract` and `--member` as given; `Err` names the flag that is missing or
+    /// `--extract`, `--member` and `--tree` as given; `Err` names the flag that is missing or
     /// out of place.
-    pub fn new(extract: Option<Format>, member: Option<PathBuf>) -> Result<Unpack, String> {
-        match (extract, member) {
-            (None, None) => Ok(Unpack::Raw),
-            (Some(Format::TarGz), Some(member)) => Ok(Unpack::Tar { xz: false, member }),
-            (Some(Format::TarXz), Some(member)) => Ok(Unpack::Tar { xz: true, member }),
-            (Some(Format::TarGz | Format::TarXz), None) => {
-                Err("--extract tar.gz and tar.xz need --member, the file to take".to_owned())
+    pub fn new(
+        extract: Option<Format>,
+        member: Option<PathBuf>,
+        tree: bool,
+    ) -> Result<Unpack, String> {
+        match (extract, member, tree) {
+            (None, None, false) => Ok(Unpack::Raw),
+            (Some(Format::TarGz), Some(member), false) => Ok(Unpack::Tar { xz: false, member }),
+            (Some(Format::TarXz), Some(member), false) => Ok(Unpack::Tar { xz: true, member }),
+            (Some(format), None, true) => Ok(Unpack::Tree {
+                xz: format == Format::TarXz,
+            }),
+            (_, Some(_), true) => Err("--tree installs the whole archive: it takes no \
+                                       --member"
+                .to_owned()),
+            (None, _, true) => {
+                Err("--tree is for a tar: it needs --extract tar.gz or tar.xz".to_owned())
             }
-            (None, Some(_)) => Err("--member is a file in a tar: it needs --extract \
-                                    tar.gz or tar.xz"
+            (Some(Format::TarGz | Format::TarXz), None, false) => Err(
+                "--extract tar.gz and tar.xz need --member, the file to take, or --tree".to_owned(),
+            ),
+            (None, Some(_), false) => Err("--member is a file in a tar: it needs --extract \
+                                           tar.gz or tar.xz"
                 .to_owned()),
         }
     }
+}
 
-    /// The file this unpacking makes of `bytes`.
-    fn apply(&self, bytes: &[u8]) -> Result<Vec<u8>, Error> {
-        match self {
-            Unpack::Raw => Ok(bytes.to_vec()),
-            Unpack::Tar { xz: false, member } => {
-                let mut tar = Vec::new();
-                flate2::read::MultiGzDecoder::new(bytes)
-                    .read_to_end(&mut tar)
-                    .map_err(unpack_error)?;
-                tar_member(&tar, member)
-            }
-            Unpack::Tar { xz: true, member } => {
-                let mut tar = Vec::new();
-                lzma_rs::xz_decompress(&mut &bytes[..], &mut tar).map_err(unpack_error)?;
-                tar_member(&tar, member)
-            }
-        }
+/// The tar archive inside a gzip (`xz: false`) or xz download.
+fn decompress(bytes: &[u8], xz: bool) -> Result<Vec<u8>, Error> {
+    let mut tar = Vec::new();
+    if xz {
+        lzma_rs::xz_decompress(&mut &bytes[..], &mut tar).map_err(unpack_error)?;
+    } else {
+        flate2::read::MultiGzDecoder::new(bytes)
+            .read_to_end(&mut tar)
+            .map_err(unpack_error)?;
     }
+    Ok(tar)
 }
 
 /// Why a fetch failed.
@@ -216,7 +229,11 @@ pub fn install(bytes: &[u8], sha256: &Sha256, unpack: &Unpack, out: &Path) -> Re
             actual,
         });
     }
-    let file = unpack.apply(bytes)?;
+    let file = match unpack {
+        Unpack::Tree { xz } => return install_tree(&decompress(bytes, *xz)?, out),
+        Unpack::Raw => bytes.to_vec(),
+        Unpack::Tar { xz, member } => tar_member(&decompress(bytes, *xz)?, member)?,
+    };
     write_executable(out, &file).map_err(|e| Error::Install {
         path: out.to_owned(),
         why: e.to_string(),
@@ -270,6 +287,77 @@ fn write_executable(out: &Path, data: &[u8]) -> std::io::Result<()> {
         let _ = std::fs::remove_file(&part);
     }
     written
+}
+
+/// Installs the tar archive `tar` as the directory `out`: unpacked into [`part_path`] and
+/// renamed over `out`, so `out` holds the whole new tree or what it held before.
+fn install_tree(tar: &[u8], out: &Path) -> Result<(), Error> {
+    let part = part_path(out);
+    let installed = unpack_tree(tar, &part, out).and_then(|()| {
+        let install = |e: std::io::Error| install_error(out, e);
+        if out.exists() {
+            std::fs::remove_dir_all(out).map_err(install)?;
+        }
+        std::fs::rename(&part, out).map_err(install)
+    });
+    if installed.is_err() {
+        // A part tree that cannot be removed is reported by the error itself.
+        let _ = std::fs::remove_dir_all(&part);
+    }
+    installed
+}
+
+fn install_error(out: &Path, e: impl fmt::Display) -> Error {
+    Error::Install {
+        path: out.to_owned(),
+        why: e.to_string(),
+    }
+}
+
+/// Writes the files and directories of `tar` below `dest` (made empty first), each without the
+/// archive's top directory. A file is 0755 when the archive makes it executable by anyone, 0644
+/// otherwise.
+fn unpack_tree(tar: &[u8], dest: &Path, out: &Path) -> Result<(), Error> {
+    let io = |e: std::io::Error| install_error(out, e);
+    if dest.exists() {
+        std::fs::remove_dir_all(dest).map_err(io)?;
+    }
+    std::fs::create_dir_all(dest).map_err(io)?;
+    let mut archive = tar::Archive::new(tar);
+    for entry in archive.entries().map_err(unpack_error)? {
+        let mut entry = entry.map_err(unpack_error)?;
+        let path = entry.path().map_err(unpack_error)?.into_owned();
+        if !path.components().all(|c| matches!(c, Component::Normal(_))) {
+            return Err(Error::Unpack(format!("{path:?} leaves the tree")));
+        }
+        let relative: PathBuf = path.components().skip(1).collect();
+        if relative.as_os_str().is_empty() {
+            continue;
+        }
+        let target = dest.join(&relative);
+        let kind = entry.header().entry_type();
+        if kind.is_dir() {
+            std::fs::create_dir_all(&target).map_err(io)?;
+        } else if kind.is_file() {
+            let mode = if entry.header().mode().map_err(unpack_error)? & 0o111 == 0 {
+                0o644
+            } else {
+                0o755
+            };
+            target
+                .parent()
+                .map_or(Ok(()), std::fs::create_dir_all)
+                .map_err(io)?;
+            let mut file = std::fs::File::create(&target).map_err(io)?;
+            std::io::copy(&mut entry, &mut file).map_err(io)?;
+            std::fs::set_permissions(&target, std::fs::Permissions::from_mode(mode)).map_err(io)?;
+        } else {
+            return Err(Error::Unpack(format!(
+                "{path:?} is not a regular file or a directory"
+            )));
+        }
+    }
+    Ok(())
 }
 
 /// The contents of the regular file at `member` in the tar archive `tar`.

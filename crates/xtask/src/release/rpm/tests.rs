@@ -59,7 +59,15 @@ fn the_package_names_the_release_and_architecture_in_its_header() {
         )
     );
     assert_eq!(info.compression, "gzip");
-    assert_eq!(info.requires, ["/bin/sh", "config(tierstore)", "systemd"]);
+    assert_eq!(
+        info.requires,
+        [
+            "/bin/sh",
+            "config(tierstore) = 0.4.0-1",
+            "glibc >= 2.28",
+            "systemd"
+        ]
+    );
     let other = inspect(&build("0.4.1", "aarch64", &files(BINARY, NOTICE)).expect("build"))
         .expect("inspect");
     assert_eq!(other.nevra.1, "0.4.1");
@@ -438,7 +446,7 @@ fn rpm_info_lists_the_header_and_the_files_as_rpm_does() {
             "Release: 1",
             "Architecture: x86_64",
             "Compression: gzip",
-            "Requires: /bin/sh, config(tierstore), systemd",
+            "Requires: /bin/sh, config(tierstore) = 0.4.0-1, glibc >= 2.28, systemd",
         ]
     );
     assert!(
@@ -461,4 +469,37 @@ fn rpm_info_lists_the_header_and_the_files_as_rpm_does() {
         rpm_info(&dir.join("missing.rpm")),
         Err(Error::Spawn { .. })
     ));
+}
+
+#[test]
+fn the_package_requires_the_glibc_the_binary_is_linked_against() {
+    // Catches: a package that installs on a host whose glibc is older than the one the binary
+    // needs (the service then fails to start with "GLIBC_2.xx not found" instead of `dnf`
+    // refusing the install): the header carries `glibc >= 2.28` as a greater-or-equal
+    // requirement of that version, not as a bare name.
+    assert_eq!(glibc::FLOOR, "2.28");
+    let requires = parsed(&package())
+        .metadata
+        .get_requires()
+        .expect("requires");
+    let glibc = requires.iter().find(|d| d.name == "glibc").expect("glibc");
+    assert_eq!(glibc.version, "2.28");
+    assert_eq!(glibc.flags, DependencyFlags::GE);
+}
+
+#[test]
+fn a_requirement_is_written_as_rpm_writes_it() {
+    // Catches: the read-back dropping the version of a requirement, so a package that lost
+    // its `>=` would read back the same as one that has it.
+    for (dependency, text) in [
+        (Dependency::any("systemd"), "systemd"),
+        (Dependency::greater_eq("glibc", "2.28"), "glibc >= 2.28"),
+        (
+            Dependency::eq("config(tierstore)", "0.4.0-1"),
+            "config(tierstore) = 0.4.0-1",
+        ),
+        (Dependency::less("libfoo", "3"), "libfoo < 3"),
+    ] {
+        assert_eq!(requirement(dependency), text);
+    }
 }

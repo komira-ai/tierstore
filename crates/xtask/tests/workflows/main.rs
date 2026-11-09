@@ -36,6 +36,8 @@ mod distribution_tests;
 mod expr;
 mod farm;
 mod farm_tests;
+mod glibc_floor;
+mod glibc_floor_tests;
 mod graph;
 mod graph_tests;
 mod hostkeeper;
