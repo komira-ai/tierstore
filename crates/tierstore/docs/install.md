@@ -2,6 +2,16 @@
 
 tierstore ships as a tarball per platform (Linux on x86_64 and arm64, macOS on Apple silicon) attached to every release of [this repository](https://github.com/komira-ai/tierstore/releases), with its SBOM and a provenance bundle. Versions up to 0.2.0 were built in another repository; from 0.3.0 on, releases are built and signed here. An install script, a Homebrew formula and an apt package are written but are not in a release yet (the tierstore.dev Install page says "from the next release" for each): until a release has them, take the tarball. There is no container image yet. [Not in a release yet](install.md#not-in-a-release-yet) says how the new ways are meant to be used. hostkeeper packages exist and update tierstore through `tierstore update-hook` (see [Updates through hostkeeper](install.md#updates-through-hostkeeper)); without hostkeeper nothing updates the binary: to move to a new release, place the new binary the same way and restart the unit (on Linux; the sections from "Place the binary" on are for a Linux host).
 
+## Platforms
+
+| platform | tarball | minimum |
+|---|---|---|
+| Linux on x86_64 | `linux-x86_64` | glibc 2.28 |
+| Linux on arm64 (aarch64) | `linux-arm64` | glibc 2.28 |
+| macOS on Apple silicon | `macos-arm64` | macOS 15 (the release is built and signed on it) |
+
+The Linux binaries are dynamically linked against glibc and are built for glibc 2.28 (`cargo zigbuild` with the target `<triple>.2.28`), not for the glibc of the machine that builds them: they start on any distribution with glibc 2.28 or newer, which is Debian 10, Ubuntu 18.10 and newer, RHEL, AlmaLinux and Rocky Linux 8 and newer, Amazon Linux 2023, Fedora, and SUSE Linux Enterprise 15. A host with an older glibc cannot run them: RHEL and CentOS 7, Amazon Linux 2 (glibc 2.26) and Ubuntu 18.04 (glibc 2.27) fail at start with ``version `GLIBC_2.xx' not found``. The Debian package depends on `libc6 (>= 2.28)` and the RPM package requires `glibc >= 2.28`, so `apt` and `dnf` refuse the install on such a host instead of installing a service that cannot start. There is no musl (Alpine) build. `ldd --version` prints the host's glibc.
+
 ## Take the tarball
 
 A release lists `tierstore-<commit>-linux-x86_64.tar.gz`, `tierstore-<commit>-linux-arm64.tar.gz` and `tierstore-<commit>-macos-arm64.tar.gz`, each with a `.sigstore.json` bundle, and all of them in `SHA256SUMS`. Take the tarball of the host's architecture by its digest, with its bundle and `SHA256SUMS` from the same release. `<commit>` is the full SHA in the tarball's name; below, `<tarball>` is the tarball's file name, `tierstore-<commit>-linux-x86_64.tar.gz` for instance.

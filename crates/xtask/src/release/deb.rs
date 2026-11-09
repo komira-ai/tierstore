@@ -17,6 +17,9 @@
 //! | `/usr/share/doc/tierstore/copyright` | 0644 | the repository's `LICENSE` |
 //! | `/usr/share/doc/tierstore/THIRD-PARTY-LICENSES.txt` | 0644 | the notice of the crates linked into the binary (`--licenses`) |
 //!
+//! The package depends on `systemd` and on `libc6 (>= 2.28)` ([`glibc::FLOOR`]), the glibc the
+//! binary is linked against, so `apt` and `dpkg` refuse to install it on a host with an older one.
+//!
 //! The maintainer scripts ([`POSTINST`], [`POSTRM`]) create the account with `systemd-sysusers`,
 //! give `/etc/tierstore` and the example file to its group (mode 0750 and 0640, as `docs/install.md`
 //! has them) and run `systemctl daemon-reload`. Nothing starts the unit and nothing enables it: the
@@ -39,6 +42,7 @@ use md5::{Digest, Md5};
 use crate::Error;
 use crate::fetch::Sha256;
 use crate::package::{Platform, open_sums, read, write_new, write_sums};
+use crate::release::glibc;
 use crate::release::hostkeeper_package::is_plain_version;
 use crate::sums;
 
@@ -169,9 +173,10 @@ pub fn control(version: &str, architecture: &str, files: &[File]) -> String {
     let bytes: usize = files.iter().map(|(_, _, content)| content.len()).sum();
     let mut text = format!(
         "Package: {NAME}\nVersion: {version}\nArchitecture: {architecture}\n\
-         Maintainer: {MAINTAINER}\nInstalled-Size: {}\nDepends: systemd\n\
+         Maintainer: {MAINTAINER}\nInstalled-Size: {}\nDepends: systemd, libc6 (>= {})\n\
          Section: admin\nPriority: optional\nHomepage: {HOMEPAGE}\nDescription: {SYNOPSIS}\n",
-        bytes.div_ceil(1024)
+        bytes.div_ceil(1024),
+        glibc::FLOOR
     );
     for line in DESCRIPTION {
         if line.is_empty() {

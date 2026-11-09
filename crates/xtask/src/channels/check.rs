@@ -4,6 +4,7 @@
 //! its install-check jobs, on hosted runners and at release time only.
 //!
 //! - `check-apt` runs in a clean Ubuntu container (the image is pinned by digest by the job): it
+//!   brings the image's packages up to date (the pinned image is older than the archive),
 //!   adds `packages.komira.ai` with the published keyring (a binary `.gpg`, referred to by a
 //!   deb822 `Signed-By`) and the suite `testing`, installs `tierstore=<version>`, and then holds
 //!   the installed system to what the package promises: the package is at the version, the binary
@@ -240,7 +241,23 @@ pub fn check_apt(host: &dyn Host, r: &Apt) -> Result<Vec<String>, Error> {
         )));
     }
     // A clean image has no certificates: the first update goes over the mirrors' plain HTTP.
+    // The image is pinned by digest, so its packages are as old as the pin: the archive has moved
+    // on, and `ca-certificates` and `curl` may need newer versions of packages the image has
+    // ("you have held broken packages"). So the installed packages are brought up to date before
+    // anything is installed. `dist-upgrade` may install or remove packages to do so, which
+    // `upgrade` never does; `--force-confold` keeps the image's configuration files, as there
+    // is nobody to answer dpkg's question.
     must(host, r.apt_get, &["update"])?;
+    must(
+        host,
+        r.apt_get,
+        &[
+            "dist-upgrade",
+            "-y",
+            "-o",
+            "Dpkg::Options::=--force-confold",
+        ],
+    )?;
     must(
         host,
         r.apt_get,

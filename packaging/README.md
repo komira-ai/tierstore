@@ -12,6 +12,14 @@ entry and the example configuration below: it places them as "Placing the unit" 
 unit at `/usr/lib/systemd/system`); no container image is released. These files, for Linux hosts, go
 beside the binary.
 
+The Linux binaries (and so the Debian and RPM packages, which hold the same bytes) are linked by
+`cargo zigbuild` against glibc 2.28, so they run on Debian 10, Ubuntu 18.10, RHEL 8, AlmaLinux 8,
+Amazon Linux 2023 and newer, and on nothing older (RHEL 7, Amazon Linux 2 and Ubuntu 18.04 have a
+glibc below 2.28). The Debian package says `Depends: systemd, libc6 (>= 2.28)` and the RPM package
+`Requires: glibc >= 2.28`, so `apt` and `dnf` refuse a host below the floor at install time; the
+floor is `FLOOR` in `crates/xtask/src/release/glibc.rs`, and `cargo xtask release check-glibc`
+fails a build whose binary asks for a newer `GLIBC_` symbol version (`docs/ci-and-release.md`).
+
 | file | what |
 |---|---|
 | `tierstore.service` | the unit: the binary as `tierstore` run with the file, an account that is not root, a stop that waits for the drain, and the hardening of the other example units |

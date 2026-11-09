@@ -36,6 +36,10 @@
 //! `verify-assets hostkeeper-package` and `verify-assets hostkeeper-index`
 //! ([`hostkeeper_verify`]) check them as a host does. See those modules.
 //!
+//! `release check-glibc <binary> --max <major>.<minor>` ([`glibc`]) refuses a Linux binary that
+//! needs a glibc symbol version above `--max`: the build jobs of `artifacts.yml` run it with the
+//! glibc the release binaries are linked against (2.28).
+//!
 //! And the files the distribution channels take: `release tap-tarball` ([`tap_tarball`]) names a
 //! platform's tarball as the Homebrew tap's formula downloads it, `tierstore-<version>-<target>.tar.gz`,
 //! `release deb` ([`deb`]) builds `tierstore_<version>_<arch>.deb` of a Linux binary, and `release rpm`
@@ -51,6 +55,7 @@ pub mod deb;
 pub mod desired;
 pub mod desired_deb;
 pub mod desired_targets;
+pub mod glibc;
 pub mod hostkeeper_index;
 pub mod hostkeeper_package;
 pub mod hostkeeper_verify;

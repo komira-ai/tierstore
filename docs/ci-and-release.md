@@ -6,7 +6,7 @@
 |---|---|---|
 | `ci.yml` | pull request, push to `main` | `lint`: format, cargo-deny (licences, bans, sources), clippy, the workflow lint. `test`: every test under cargo-llvm-cov with branch coverage, and the 99% gate on lines and branches of every crate (`crates/coverage-gate`). |
 | `advisories.yml` | daily, push to `main` | `cargo deny check advisories`; the result is kept in one issue, and the run is green whatever it finds. |
-| `artifacts.yml` | pull request, push to `main`; by hand | builds `tierstore` (`--features server`) for linux-x86_64, linux-arm64 and macos-arm64, each on a GitHub-hosted runner of its platform, packages it with its SBOM and as a hostkeeper package (and, for the Homebrew tap and apt, as a tap-named tarball and, on Linux, a Debian package and an RPM package), writes the release index of the hostkeeper packages, makes `SHA256SUMS`. The macos-arm64 job also runs the tests of `tierstore`, `objstore-s3` and `tierstore-testkit` on macOS, the update hook's among them (both of its arms are built and tested on every system, each against fakes of its service manager, and the macOS packaging). This workflow runs no macOS job for a pull request (`macos.yml` does, for every pull request that changes a path the macOS build reads): for a pull request its macos-arm64 job is skipped and the sums cover the Linux files; a push to `main` builds every platform, and a run by hand (`gh workflow run artifacts.yml --ref <branch>`) builds and sums every platform of a branch and signs nothing. On a push to `main` it also signs (build provenance and SBOM attestations) and checks what it signed. |
+| `artifacts.yml` | pull request, push to `main`; by hand | builds `tierstore` (`--features server`) for linux-x86_64, linux-arm64 and macos-arm64, each on a GitHub-hosted runner of its platform, packages it with its SBOM and as a hostkeeper package (and, for the Homebrew tap and apt, as a tap-named tarball and, on Linux, a Debian package and an RPM package), writes the release index of the hostkeeper packages, makes `SHA256SUMS`. The macos-arm64 job also runs the tests of `tierstore`, `objstore-s3` and `tierstore-testkit` on macOS, the update hook's among them (both of its arms are built and tested on every system, each against fakes of its service manager, and the macOS packaging). This workflow runs no macOS job for a pull request (`macos.yml` does, for every pull request that changes a path the macOS build reads): for a pull request its macos-arm64 job is skipped and the sums cover the Linux files; a push to `main` builds every platform, and a run by hand (`gh workflow run artifacts.yml --ref <branch>`) builds and sums every platform of a branch and signs nothing. On a push to `main` it also signs (build provenance and SBOM attestations) and checks what it signed. The Linux binaries are linked against glibc 2.28 by `cargo zigbuild`, not against the runner's glibc, and each Linux job fails when the binary asks for a newer `GLIBC_` symbol version (see "The glibc floor of the Linux binaries"). |
 | `macos.yml` | pull request | `changes` (Linux) lists the paths the pull request changes (its merge commit against the base, a rename as its old and new path) and judges them with `cargo xtask macos-paths`: the macOS job is not needed when every one is documentation (`docs/`, a top-level `*.md`), `LICENSE`, the lint configuration (`clippy.toml`, `deny.toml`, `rustfmt.toml`), an issue or pull request template, or a workflow that puts nothing on macOS (the list is `SKIPPABLE_DIRS` and `SKIPPABLE_FILES` in `crates/xtask/src/macos_paths.rs`); any other path, a path that is not UTF-8, or a list that is empty or cannot be read runs it. `version` (Linux) computes the version the build is given, as artifacts.yml's `version` job does. `macos` runs on `macos-15` unless `changes` passed and answered that it is not needed: every test of the workspace (`cargo test --workspace --features tierstore/s3`), then the commands of artifacts.yml's macos-arm64 job (build, SBOM, licence notice, tarball, hostkeeper package unpacked with hostkeeper's unpacker, code signature), uploading and signing nothing, with `contents: read` alone and no secret or token. It restores artifacts.yml's macOS cache and saves none. It is not named `macos-arm64`: a pull request's run of artifacts.yml skips its job of that name, and a skipped job passes as a check. If `version` fails, `macos` is skipped and the run fails on `version`. `macos-checks` (Linux) runs after the three whatever they did, a cancelled run included, and passes only when `version` and `macos` passed, or `macos` was skipped on that answer of a `changes` that passed. A newer push to a pull request cancels its older run. |
 | `release.yml` | when `ci` or `artifacts` finishes on a push to `main` (automatic, see Releases); by hand | `plan` decides which commit of `main` is released and as which tag (the newest whose build recorded that version); `verify` and `publish` attach the files that commit's push built and signed to a GitHub release, after checking them again; the release then goes through four stages (see The order of a release): `testing-upload`, `formula` and the `testing-apt-*` jobs publish it to testing, `check-apt`, `check-brew` and `check-install-sh` install it from there, `farm-check`, `farm` and `soak` put it on the lab through hostkeeper when the lab is configured, and `promote-check` then lets `promote-latest`, `tap` and the `stable-apt-*` jobs make it public. Builds nothing of tierstore. |
 | `tierstore-site.yml` | pull request, push to `main`, when the site changes | typecheck, tests and build of tierstore.dev. |
@@ -234,6 +234,12 @@ archive.
   line to `<dir>/SHA256SUMS.<platform>`. The copy has the same bytes, so the binary (and the
   licence notice beside it) is the commit-named tarball's, byte for byte; the SBOM attestation of
   that digest covers it. Each build job runs it after the hostkeeper package, the macOS job too.
+- `cargo xtask release check-glibc <binary> --max <major>.<minor>` reads the `.gnu.version_r`
+  section of a 64-bit little-endian ELF file (it runs nothing, so it checks any platform's binary)
+  and fails when the binary needs a `GLIBC_<x>.<y>` symbol version above `--max`, naming each
+  version; `GLIBC_PRIVATE` and other libraries' versions (`GCC_3.0`) are not counted. Each Linux
+  build job runs it on the binary it built, with the floor of the packages (see "The glibc floor of
+  the Linux binaries").
 - `cargo xtask release deb --binary <path> --version <X.Y.Z> --platform <platform> --licenses
   <file> --out <dir>` writes `tierstore_<version>_<arch>.deb` for a Linux platform and its line in
   `<out>/SHA256SUMS.<platform>`. The package is an `ar` archive of `debian-binary`,
@@ -243,7 +249,7 @@ archive.
   `/usr/lib/sysusers.d/tierstore.conf` (from `packaging/`), the example
   `/etc/tierstore/tierstore.toml` (0640, from `packaging/tierstore.toml`; the one conffile, so an
   upgrade keeps a host's edits), and `/usr/share/doc/tierstore/copyright` (the repository's
-  `LICENSE`) and `THIRD-PARTY-LICENSES.txt`. Its `postinst` runs `systemd-sysusers`, gives
+  `LICENSE`) and `THIRD-PARTY-LICENSES.txt`. It depends on `systemd` and `libc6 (>= 2.28)`. Its `postinst` runs `systemd-sysusers`, gives
   `/etc/tierstore` (0750) and the example file (0640) to the `tierstore` group, and runs `systemctl
   daemon-reload`; it never starts or enables the unit, which also waits for
   `/etc/tierstore/access.key`. Removing the package leaves the account and `/etc/tierstore`, which
@@ -253,7 +259,7 @@ archive.
   in `<out>/SHA256SUMS.<platform>`. It has the files of the Debian package at the same paths and
   modes, every owner `root`, with two differences the RPM conventions ask for: the licence is the
   `%license` file `/usr/share/licenses/tierstore/LICENSE`, and the example configuration is
-  `%config(noreplace)`. The package requires `systemd`. Its `%post` (every install and upgrade)
+  `%config(noreplace)`. The package requires `systemd` and `glibc >= 2.28`. Its `%post` (every install and upgrade)
   does what the `postinst` does, each step only where its tool or the `tierstore` group is there,
   so a container without systemd installs; its `%postun` runs `systemctl daemon-reload` when the
   last version is removed. Nothing starts or enables the unit, and removing the package leaves the
@@ -291,7 +297,9 @@ section 5). Nobody approves a step.
    was published for it to read, and a failure stops the release before anything public changes:
    - `check-apt` (amd64 on `ubuntu-24.04`, arm64 on `ubuntu-24.04-arm`) runs `xtask` in a clean
      `ubuntu@sha256:...` container, adds `packages.komira.ai` with the published keyring and the
-     suite `testing` (a deb822 source with `Signed-By`), installs `tierstore=<version>`, and checks
+     suite `testing` (a deb822 source with `Signed-By`), installs `tierstore=<version>` (after an
+     `apt-get update` and `apt-get dist-upgrade` of the image, which the digest pin leaves older than
+     the archive, and before the install of `ca-certificates` and `curl`), and checks
      that `tierstore --version` prints the release, the unit, the `sysusers.d` entry and the
      conffile exist, and the service is neither enabled nor running
      (`cargo xtask channels check-apt`).
@@ -535,3 +543,33 @@ The site publish job is off until these exist:
    workflow file `tierstore-site-publish.yml` at `refs/heads/main` and that environment, and that
    can only write the site's bucket and invalidate its distribution.
 4. The repository variable `TIERSTORE_SITE_PUBLISH` set to `true`.
+
+## The glibc floor of the Linux binaries
+
+The Linux binaries are dynamically linked against glibc. Built with plain `cargo build` on a runner
+image (Ubuntu 24.04, glibc 2.39) they ask for `GLIBC_2.39` and fail to start on AlmaLinux 9 and
+Amazon Linux 2023 ("version `GLIBC_2.39' not found"), which is how the first release's `check-rpm`
+failed. So the `linux-x86_64` and `linux-arm64` jobs of `artifacts.yml` link with `cargo zigbuild`
+for the target `<triple>.2.28` (`x86_64-unknown-linux-gnu.2.28`, `aarch64-unknown-linux-gnu.2.28`):
+zig is the C compiler and linker, and links against glibc 2.28's symbol versions whatever the
+runner has. The output is still `target/<triple>/release/tierstore`, so every later step is unchanged.
+
+- zig (0.15.2) and cargo-zigbuild (0.24.1) are release downloads pinned by URL and SHA-256 in the
+  workflow's `env` (`ZIG_VERSION`, `ZIG_SHA256_*`, `ZIGBUILD_VERSION`, `ZIGBUILD_SHA256_*`) and
+  fetched by `cargo xtask fetch`, which compares the digest before it unpacks anything. zig is a
+  directory (its compiler and library files), so it is installed whole with `fetch --extract tar.xz
+  --tree --out <dir>`: the archive's one top directory is dropped, a path that leaves the tree and
+  any entry that is not a regular file or directory is refused, and the directory appears in one
+  rename. To move to another zig, change the version and both digests together (the digests are in
+  `https://ziglang.org/download/index.json` and beside each cargo-zigbuild file; recompute them).
+- `GLIBC_FLOOR` in the `env` (2.28) is the target's version and the `--max` of `release
+  check-glibc`, and is `FLOOR` of `crates/xtask/src/release/glibc.rs`, which the Debian package's
+  `libc6 (>= 2.28)` and the RPM package's `glibc >= 2.28` use; the workflow lint
+  (`crates/xtask/tests/workflows`) fails when the file's `env` and the constant differ.
+- The cargo cache of the two Linux jobs has its own key (`cargo-zigbuild-...`), so a `target/` built
+  with the runner's glibc is never restored into a zig build. The cache is restored on a pull request
+  only; a push builds from a clean `target/` as before.
+- 2.28 is RHEL 8's glibc, so it is the oldest glibc of the distributions this project installs on
+  (`crates/tierstore/docs/install.md`, "Platforms"). Raising the floor needs a new constant, a new
+  `env` value and a changed Debian and RPM dependency in one change; the packages refuse a host
+  below the floor at install time, which is the point of the dependency.

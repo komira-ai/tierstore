@@ -294,3 +294,64 @@ fn a_version_with_a_commit_is_a_usage_error_and_a_missing_tarball_a_failure() {
     );
     assert_eq!(o.status.code(), Some(2), "{}", stderr(&o));
 }
+
+/// The 64-byte header of a 64-bit little-endian ELF file with no section: a binary that needs
+/// no glibc.
+fn bare_elf() -> Vec<u8> {
+    let mut header = b"\x7fELF\x02\x01\x01".to_vec();
+    header.resize(64, 0);
+    header
+}
+
+#[test]
+fn check_glibc_reads_the_binary_against_the_limit_and_refuses_what_it_cannot_read() {
+    // Catches: the verb not reaching the check (the flag `--max` lost, the binary argument
+    // taken for something else), a file that is not an ELF binary passing, and a limit out of
+    // its form being a failure (1) and not a usage error (2).
+    let d = fresh("check-glibc");
+    std::fs::write(d.join("static"), bare_elf()).expect("binary");
+    std::fs::write(d.join("script"), b"#!/bin/sh\n").expect("script");
+    let o = run(&d, &["release", "check-glibc", "static", "--max", "2.28"]);
+    assert_eq!(o.status.code(), Some(0), "{}", stderr(&o));
+    assert_eq!(
+        stdout(&o).trim_end(),
+        "release check-glibc: static needs no glibc symbol version; the limit is GLIBC_2.28"
+    );
+    let o = run(&d, &["release", "check-glibc", "script", "--max", "2.28"]);
+    assert_eq!(o.status.code(), Some(1));
+    assert_eq!(stderr(&o).trim_end(), "xtask: script: not an ELF file");
+    let o = run(&d, &["release", "check-glibc", "static", "--max", "2"]);
+    assert_eq!(o.status.code(), Some(2));
+    assert!(
+        stderr(&o).contains("--max \"2\" is not <major>.<minor>"),
+        "{}",
+        stderr(&o)
+    );
+}
+
+#[test]
+fn fetch_tree_without_a_tar_format_is_a_usage_error() {
+    // Catches: `--tree` reaching the download with nothing to unpack it with, instead of
+    // being refused before any connection.
+    let d = fresh("fetch-tree");
+    let o = run(
+        &d,
+        &[
+            "fetch",
+            "--url",
+            "https://example.invalid/zig.tar.xz",
+            "--sha256",
+            &"0".repeat(64),
+            "--out",
+            "zig",
+            "--tree",
+        ],
+    );
+    assert_eq!(o.status.code(), Some(2), "{}", stderr(&o));
+    assert!(
+        stderr(&o).contains("--tree is for a tar: it needs --extract tar.gz or tar.xz"),
+        "{}",
+        stderr(&o)
+    );
+    assert!(!d.join("zig").exists());
+}

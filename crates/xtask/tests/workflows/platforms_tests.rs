@@ -16,7 +16,7 @@ fn platforms() -> Vec<&'static str> {
     Platform::ALL.iter().map(|p| p.name()).collect()
 }
 
-fn artifacts_problems_of(text: &str) -> Vec<String> {
+pub fn artifacts_problems_of(text: &str) -> Vec<String> {
     artifacts_platform_problems(text, &platforms(), &ARTIFACTS)
 }
 
@@ -689,6 +689,7 @@ fn commands_out_of_order_are_named() {
 const SET_VERSION: &str = "cargo xtask release set-version --version \"$RELEASE_VERSION\"";
 const KEEP_LOCK: &str = "cp Cargo.lock \"$RUNNER_TEMP/Cargo.lock.release\"";
 const CHECK_LOCK: &str = "cmp Cargo.lock \"$RUNNER_TEMP/Cargo.lock.release\"";
+const ZIGBUILD: &str = "PATH=\"$HOME/zig:$PATH\" cargo zigbuild --locked --release --target \"$TARGET.$GLIBC_FLOOR\" -p tierstore --features server --bin tierstore";
 const BUILD: &str = "cargo build --locked --release --target \"$TARGET\" -p tierstore --features server --bin tierstore";
 
 #[test]
@@ -725,7 +726,8 @@ fn a_build_job_that_runs_set_version_or_the_lock_copy_after_the_build_is_named()
     // version of the checkout), and the lock comparison made before the lock file is copied.
     let text = text_of("artifacts.yml");
     for b in BUILDS {
-        for (early, late) in [(SET_VERSION, BUILD), (KEEP_LOCK, CHECK_LOCK)] {
+        let build = if b.zig.is_some() { ZIGBUILD } else { BUILD };
+        for (early, late) in [(SET_VERSION, build), (KEEP_LOCK, CHECK_LOCK)] {
             let swapped = in_job(&text, b.platform, early, "SWAP-PLACEHOLDER");
             let swapped = in_job(&swapped, b.platform, late, early);
             let swapped = in_job(&swapped, b.platform, "SWAP-PLACEHOLDER", late);

@@ -256,7 +256,7 @@ fn the_control_file_names_the_package_its_version_architecture_and_size_in_kibib
         control("1.2.3", "arm64", &files),
         "Package: tierstore\nVersion: 1.2.3\nArchitecture: arm64\n\
          Maintainer: tierstore authors <tierstore@users.noreply.github.com>\n\
-         Installed-Size: 3\nDepends: systemd\nSection: admin\nPriority: optional\n\
+         Installed-Size: 3\nDepends: systemd, libc6 (>= 2.28)\nSection: admin\nPriority: optional\n\
          Homepage: https://tierstore.dev\n\
          Description: S3 server over a hot and a cold tier of S3-compatible stores\n \
          New objects are written to the hot tier, copied to the cold tier in the background,\n \
@@ -494,4 +494,20 @@ fn the_verb_refuses_what_it_cannot_package_and_writes_nothing() {
     put(&out, "tierstore_0.4.0_arm64.deb", b"in the way");
     let exists = run("0.4.0", Platform::LinuxArm64, &binary, &notice).expect_err("a file");
     assert!(matches!(exists, Error::Spawn { .. }), "{exists:?}");
+}
+
+#[test]
+fn the_package_depends_on_the_glibc_the_binary_is_linked_against() {
+    // Catches: a control file that lets `apt` install the package on a host whose glibc is older
+    // than the binary's (it then fails to start with "GLIBC_2.xx not found"): the dependency
+    // is `libc6 (>= 2.28)`, the floor `release check-glibc` holds the binary to.
+    assert_eq!(glibc::FLOOR, "2.28");
+    let depends = control("1.2.3", "amd64", &[])
+        .lines()
+        .find(|l| l.starts_with("Depends:"))
+        .map(str::to_owned);
+    assert_eq!(
+        depends.as_deref(),
+        Some("Depends: systemd, libc6 (>= 2.28)")
+    );
 }

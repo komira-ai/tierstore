@@ -253,20 +253,37 @@ fn extract_and_member_must_agree() {
     // Catches: a tar format accepted without the member to take (what would it
     // install?), or a member silently ignored for a format that has none.
     let m = || Some(member("d/tool"));
-    assert_eq!(Unpack::new(None, None), Ok(Unpack::Raw));
-    assert_eq!(Unpack::new(Some(Format::TarGz), m()), Ok(tar_gz("d/tool")));
+    assert_eq!(Unpack::new(None, None, false), Ok(Unpack::Raw));
     assert_eq!(
-        Unpack::new(Some(Format::TarXz), m()),
+        Unpack::new(Some(Format::TarGz), m(), false),
+        Ok(tar_gz("d/tool"))
+    );
+    assert_eq!(
+        Unpack::new(Some(Format::TarXz), m(), false),
         Ok(Unpack::Tar {
             xz: true,
             member: member("d/tool")
         })
     );
     for format in [Format::TarGz, Format::TarXz] {
-        let e = Unpack::new(Some(format), None).expect_err("no member");
+        let e = Unpack::new(Some(format), None, false).expect_err("no member");
         assert!(e.contains("need --member"), "{e}");
     }
-    let e = Unpack::new(None, m()).expect_err("member out of place");
+    let e = Unpack::new(None, m(), false).expect_err("member out of place");
+    assert!(e.contains("needs --extract tar.gz or tar.xz"), "{e}");
+    assert_eq!(
+        Unpack::new(Some(Format::TarGz), None, true),
+        Ok(Unpack::Tree { xz: false })
+    );
+    assert_eq!(
+        Unpack::new(Some(Format::TarXz), None, true),
+        Ok(Unpack::Tree { xz: true })
+    );
+    let e = Unpack::new(Some(Format::TarXz), m(), true).expect_err("tree and member");
+    assert!(e.contains("takes no --member"), "{e}");
+    let e = Unpack::new(None, m(), true).expect_err("tree and member, no format");
+    assert!(e.contains("takes no --member"), "{e}");
+    let e = Unpack::new(None, None, true).expect_err("tree without a tar");
     assert!(e.contains("needs --extract tar.gz or tar.xz"), "{e}");
 }
 
@@ -390,7 +407,7 @@ fn fetch_downloads_checks_and_installs_and_prints_what_it_did() {
     let line = fetch_with(
         "https://example.invalid/tool",
         &Sha256::of(TOOL),
-        &Unpack::new(None, None).expect("unpack"),
+        &Unpack::new(None, None, false).expect("unpack"),
         &out,
         |url| {
             assert_eq!(url, "https://example.invalid/tool");
@@ -407,7 +424,7 @@ fn fetch_downloads_checks_and_installs_and_prints_what_it_did() {
     let e = fetch_with(
         "https://example.invalid/tool",
         &Sha256::of(b"another file"),
-        &Unpack::new(None, None).expect("unpack"),
+        &Unpack::new(None, None, false).expect("unpack"),
         &dir.join("never"),
         |_| Ok(TOOL.to_vec()),
     )
@@ -418,7 +435,7 @@ fn fetch_downloads_checks_and_installs_and_prints_what_it_did() {
     let e = fetch_with(
         "https://example.invalid/tool",
         &Sha256::of(TOOL),
-        &Unpack::new(None, None).expect("unpack"),
+        &Unpack::new(None, None, false).expect("unpack"),
         &dir.join("never"),
         |url| {
             Err(Error::Download {
@@ -443,7 +460,7 @@ fn fetch_over_plain_http_is_refused_before_any_connection_and_installs_nothing()
     let e = fetch(
         &server.url,
         &Sha256::of(TOOL),
-        &Unpack::new(None, None).expect("unpack"),
+        &Unpack::new(None, None, false).expect("unpack"),
         &out,
         &roots,
     )
@@ -467,4 +484,213 @@ fn an_https_url_is_connected_to_and_a_refused_connection_is_a_download_error() {
         matches!(&e, Error::Download { why, .. } if why != PLAIN_HTTP),
         "{e}"
     );
+}
+
+/// A tar of the directory `zig-1.0` as a toolchain archive has it: a plain file, an executable,
+/// a file in a nested directory and an empty directory.
+fn tree_tar() -> Vec<u8> {
+    let mut b = tar::Builder::new(Vec::new());
+    for dir in ["zig-1.0/", "zig-1.0/lib/", "zig-1.0/lib/empty/"] {
+        let mut h = tar::Header::new_gnu();
+        h.set_entry_type(tar::EntryType::Directory);
+        h.set_mode(0o755);
+        h.set_size(0);
+        b.append_data(&mut h, dir, &[][..]).expect("dir");
+    }
+    for (path, mode, data) in [
+        ("zig-1.0/LICENSE", 0o644, &b"licence"[..]),
+        ("zig-1.0/zig", 0o755, TOOL),
+        ("zig-1.0/lib/std.zig", 0o600, &b"std"[..]),
+    ] {
+        let mut h = tar::Header::new_gnu();
+        h.set_mode(mode);
+        h.set_size(data.len() as u64);
+        b.append_data(&mut h, path, data).expect("file");
+    }
+    b.into_inner().expect("tar")
+}
+
+/// A one-entry tar whose path is written into the header as is (the builder refuses `..`).
+fn raw_path_tar(path: &str, kind: tar::EntryType) -> Vec<u8> {
+    let mut h = tar::Header::new_gnu();
+    h.as_old_mut().name[..path.len()].copy_from_slice(path.as_bytes());
+    h.set_entry_type(kind);
+    h.set_mode(0o644);
+    h.set_size(0);
+    h.set_cksum();
+    let mut tar = h.as_bytes().to_vec();
+    tar.resize(tar.len() + 1024, 0);
+    tar
+}
+
+fn file_mode(path: &Path) -> u32 {
+    std::fs::metadata(path)
+        .expect("metadata")
+        .permissions()
+        .mode()
+        & 0o777
+}
+
+#[test]
+fn a_tree_is_installed_as_a_directory_without_the_archives_top_directory() {
+    // Catches: a tree install that keeps the `zig-1.0/` prefix (the tool is then not at
+    // `<out>/zig`), loses the executable bit of the tool, makes the plain files executable,
+    // or drops an empty directory or a nested file. One case per decoder.
+    for (name, bytes, xz) in [
+        ("tree-gz", gzip(&tree_tar()), false),
+        ("tree-xz", xz(&tree_tar()), true),
+    ] {
+        let own = scratch(name);
+        let out = own.join("opt").join("zig");
+        install(&bytes, &Sha256::of(&bytes), &Unpack::Tree { xz }, &out).expect(name);
+        assert_eq!(std::fs::read(out.join("zig")).expect("zig"), TOOL, "{name}");
+        assert_eq!(file_mode(&out.join("zig")), 0o755, "{name}");
+        assert_eq!(file_mode(&out.join("LICENSE")), 0o644, "{name}");
+        assert_eq!(
+            file_mode(&out.join("lib/std.zig")),
+            0o644,
+            "{name}: 0600 becomes 0644"
+        );
+        assert!(out.join("lib/empty").is_dir(), "{name}");
+        assert!(!out.join("zig-1.0").exists(), "{name}");
+        assert!(!part_path(&out).exists(), "{name}");
+    }
+}
+
+#[test]
+fn a_tree_replaces_an_old_tree_and_a_stale_part_tree() {
+    // Catches: a new tree merged over the old one (a file the new archive lacks survives), or
+    // a killed run's part tree that leaks files into the new one.
+    let own = scratch("tree-replace");
+    let out = own.join("zig");
+    std::fs::create_dir_all(&out).expect("old tree");
+    std::fs::write(out.join("old-only"), b"old").expect("old file");
+    std::fs::create_dir_all(part_path(&out)).expect("stale part");
+    std::fs::write(part_path(&out).join("half"), b"half").expect("stale file");
+    let bytes = gzip(&tree_tar());
+    install(
+        &bytes,
+        &Sha256::of(&bytes),
+        &Unpack::Tree { xz: false },
+        &out,
+    )
+    .expect("install");
+    assert!(!out.join("old-only").exists());
+    assert!(!out.join("half").exists());
+    assert!(out.join("zig").is_file());
+    assert!(!part_path(&out).exists());
+}
+
+#[test]
+fn a_tree_with_a_wrong_hash_writes_nothing() {
+    // Catches: a tree unpacked before the digest is compared.
+    let own = scratch("tree-mismatch");
+    let out = own.join("zig");
+    let bytes = gzip(&tree_tar());
+    let result = install(
+        &bytes,
+        &Sha256::of(b"other"),
+        &Unpack::Tree { xz: false },
+        &out,
+    );
+    assert!(matches!(result, Err(Error::Mismatch { .. })), "{result:?}");
+    assert!(!out.exists() && !part_path(&out).exists());
+}
+
+#[test]
+fn a_tree_archive_with_an_unsafe_or_unusual_entry_is_refused_and_leaves_no_part_tree() {
+    // Catches: a path that climbs out of the tree (`../escape`) or is absolute written outside
+    // --out, a symlink or device entry unpacked into a tool tree, and an undecodable archive
+    // that installs an empty tree.
+    let cases = [
+        (
+            "dotdot",
+            gzip(&raw_path_tar("top/../../escape", tar::EntryType::Regular)),
+        ),
+        (
+            "absolute",
+            gzip(&raw_path_tar("/etc/escape", tar::EntryType::Regular)),
+        ),
+        (
+            "symlink",
+            gzip(&raw_path_tar("top/link", tar::EntryType::Symlink)),
+        ),
+        ("gz", b"not gzip".to_vec()),
+        ("tar", gzip(&[1u8; 1024])),
+    ];
+    for (name, bytes) in cases {
+        let own = scratch(&format!("tree-refused-{name}"));
+        let out = own.join("zig");
+        let result = install(
+            &bytes,
+            &Sha256::of(&bytes),
+            &Unpack::Tree { xz: false },
+            &out,
+        );
+        assert!(
+            matches!(result, Err(Error::Unpack(_))),
+            "{name}: {result:?}"
+        );
+        assert!(!out.exists() && !part_path(&out).exists(), "{name}");
+        assert!(!own.join("escape").exists(), "{name}");
+    }
+}
+
+#[test]
+fn a_tree_that_cannot_be_written_is_an_install_error_and_leaves_no_part_tree() {
+    // Catches: an io failure reported as an unpack error or swallowed. Four places fail here:
+    // the part tree's parent is a file, a directory entry where a file of the same path was
+    // written, a file below a path that is a file, and an --out that is a file.
+    let own = scratch("tree-io");
+    let bytes = gzip(&tree_tar());
+    let unpack = Unpack::Tree { xz: false };
+    let blocker = own.join("blocker");
+    std::fs::write(&blocker, b"file").expect("blocker");
+    let out = blocker.join("zig");
+    let result = install(&bytes, &Sha256::of(&bytes), &unpack, &out);
+    assert!(matches!(result, Err(Error::Install { .. })), "{result:?}");
+
+    // A directory entry where a regular file of the same path was written before.
+    let clash = {
+        let mut b = tar::Builder::new(Vec::new());
+        for (path, kind) in [
+            ("t/lib", tar::EntryType::Regular),
+            ("t/lib/", tar::EntryType::Directory),
+        ] {
+            let mut h = tar::Header::new_gnu();
+            h.set_entry_type(kind);
+            h.set_mode(0o644);
+            h.set_size(0);
+            b.append_data(&mut h, path, &[][..]).expect("entry");
+        }
+        gzip(&b.into_inner().expect("tar"))
+    };
+    let out = own.join("clash");
+    let result = install(&clash, &Sha256::of(&clash), &unpack, &out);
+    assert!(matches!(result, Err(Error::Install { .. })), "{result:?}");
+    assert!(!out.exists() && !part_path(&out).exists());
+
+    // A file below a path that is a file.
+    let below = {
+        let mut b = tar::Builder::new(Vec::new());
+        for path in ["t/a", "t/a/b"] {
+            let mut h = tar::Header::new_gnu();
+            h.set_mode(0o644);
+            h.set_size(0);
+            b.append_data(&mut h, path, &[][..]).expect("entry");
+        }
+        gzip(&b.into_inner().expect("tar"))
+    };
+    let out = own.join("below");
+    let result = install(&below, &Sha256::of(&below), &unpack, &out);
+    assert!(matches!(result, Err(Error::Install { .. })), "{result:?}");
+    assert!(!part_path(&out).exists());
+
+    // An --out that is a file: it is not a tree that can be replaced.
+    let out = own.join("a-file");
+    std::fs::write(&out, b"file").expect("file");
+    let result = install(&bytes, &Sha256::of(&bytes), &unpack, &out);
+    assert!(matches!(result, Err(Error::Install { .. })), "{result:?}");
+    assert_eq!(std::fs::read(&out).expect("kept"), b"file");
+    assert!(!part_path(&out).exists());
 }

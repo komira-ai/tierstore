@@ -109,7 +109,7 @@ enum Verb {
         /// The SHA-256 of the download (before unpacking), 64 lowercase hex digits.
         #[arg(long)]
         sha256: fetch::Sha256,
-        /// The file to install; its directory is created when missing.
+        /// The file to install (with `--tree`, the directory); its parent is created when missing.
         #[arg(long)]
         out: PathBuf,
         /// How the download is packed (default: it is the file).
@@ -119,6 +119,10 @@ enum Verb {
         /// the archive.
         #[arg(long)]
         member: Option<PathBuf>,
+        /// Install the whole tar (`--extract tar.gz` or `tar.xz`) as the directory `--out`,
+        /// without the archive's top directory.
+        #[arg(long)]
+        tree: bool,
     },
     /// The third-party licence notice of the crates a binary is built from, from the output of
     /// `cargo metadata`.
@@ -405,6 +409,14 @@ enum ReleaseVerb {
         #[arg(long)]
         out: PathBuf,
     },
+    /// Refuse a Linux binary that needs a glibc symbol version above `--max`.
+    CheckGlibc {
+        /// The built binary; it is read, not run, so it may be of any platform.
+        binary: PathBuf,
+        /// The highest glibc version allowed, `<major>.<minor>`.
+        #[arg(long)]
+        max: String,
+    },
     /// What `rpm -qip` and `rpm -qlv` show of an RPM package, read by this tool's own reader,
     /// after the check of its digests.
     RpmInfo {
@@ -569,8 +581,9 @@ fn run(cli: Cli) -> Result<Vec<String>, Error> {
             out,
             extract,
             member,
+            tree,
         } => {
-            let unpack = fetch::Unpack::new(extract, member).map_err(Error::Usage)?;
+            let unpack = fetch::Unpack::new(extract, member, tree).map_err(Error::Usage)?;
             let roots = fetch::host_roots();
             Ok(vec![fetch::fetch(&url, &sha256, &unpack, &out, &roots)?])
         }
@@ -740,6 +753,9 @@ fn run(cli: Cli) -> Result<Vec<String>, Error> {
             licenses,
             out,
         }) => release::rpm::rpm(&binary, &version, platform, &licenses, &out),
+        Verb::Release(ReleaseVerb::CheckGlibc { binary, max }) => {
+            release::glibc::check_glibc(&binary, &max)
+        }
         Verb::Release(ReleaseVerb::RpmInfo { file }) => release::rpm::rpm_info(&file),
         Verb::Release(ReleaseVerb::HostkeeperIndex {
             dir,
