@@ -8,7 +8,8 @@ use super::super::ports::Instance;
 use super::super::record::{Mode, Record};
 use super::super::report::{Done, Reason};
 use super::super::{
-    CACHE_HANDOFF_CAPABILITY, HANDOFF_CAPABILITY, HANDOFF_SOCKET_KEY, LOCAL_CACHE_TABLE,
+    CACHE_HANDOFF_CAPABILITY, DIR_TIER_KIND, HANDOFF_CAPABILITY, HANDOFF_SOCKET_KEY,
+    HANDOFF_STATE_DIR_CAPABILITY, HOT_STORE_TABLE, LOCAL_CACHE_TABLE,
 };
 use super::{Ctx, unit_name};
 
@@ -30,17 +31,27 @@ pub(super) fn prepare(
         ));
     }
     let update = params.previous.as_ref();
-    // A node with a local cache hands over only between releases whose cache shapes do.
+    // A node with a local cache hands over only between releases whose cache shapes do, and a
+    // node whose file leaves the socket out only between releases that default it.
     let mut needed = vec![HANDOFF_CAPABILITY];
-    if update.is_some() && !params.declared_restart && check_handoff_socket(c, params)? {
-        needed.push(CACHE_HANDOFF_CAPABILITY);
+    let mut restart = params.declared_restart;
+    if update.is_some() && !params.declared_restart {
+        let shape = read_shape(c, params)?;
+        if shape.cache {
+            needed.push(CACHE_HANDOFF_CAPABILITY);
+        }
+        if !shape.socket_named {
+            needed.push(HANDOFF_STATE_DIR_CAPABILITY);
+        }
+        // Two instances must not share a dir hot tier: its lease is atomic in one process only.
+        restart = shape.dir_hot;
     }
     // The staged binary is asked on a first install too: it proves `bin/tierstore` is there and
     // runs.
     let staged = c.ports.host.capabilities(&params.staged_release)?;
     let mode = match update {
         None => None,
-        Some(_) if params.declared_restart => Some(Mode::Restart),
+        Some(_) if restart => Some(Mode::Restart),
         Some(previous) => {
             let before = c.ports.host.capabilities(&previous.release)?;
             let can = |list: &[String]| {
@@ -126,10 +137,22 @@ fn serving(
     }
 }
 
-/// Holds the node's configuration to naming the hand-over socket: without it the new instance
-/// could not take the old one's listening sockets. Says whether the configuration has a
-/// `[local_cache]` table (a build node, or a storage node with a cache).
-fn check_handoff_socket(c: &Ctx<'_, '_>, params: &Params) -> Result<bool, Done> {
+/// What `prepare` reads of the node's configuration to choose the way of an update.
+struct Shape {
+    /// The configuration has a `[local_cache]` table (a build node, or a storage node with a
+    /// cache).
+    cache: bool,
+    /// The configuration names `[server] handoff_socket`; if not, the release's default in the
+    /// service's state directory is the socket.
+    socket_named: bool,
+    /// The hot tier is a directory (`[hot_store] kind = "dir"`), which two instances must not
+    /// share: the update is a restart.
+    dir_hot: bool,
+}
+
+/// Reads the node's configuration for its shape. A `handoff_socket` that is an empty string is
+/// refused, as it names no socket; one that is left out is the release's default.
+fn read_shape(c: &Ctx<'_, '_>, params: &Params) -> Result<Shape, Done> {
     let path = params.config_file.as_deref().ok_or_else(|| {
         Done::fail(
             Reason::BadParams,
@@ -148,21 +171,30 @@ fn check_handoff_socket(c: &Ctx<'_, '_>, params: &Params) -> Result<bool, Done> 
             format!("{} is not TOML: {}", path.display(), e.message()),
         )
     })?;
-    let named = table
+    let dir_hot = table
+        .get(HOT_STORE_TABLE)
+        .and_then(toml::Value::as_table)
+        .and_then(|hot| hot.get("kind"))
+        .and_then(toml::Value::as_str)
+        .is_some_and(|kind| kind == DIR_TIER_KIND);
+    let socket = table
         .get("server")
         .and_then(toml::Value::as_table)
-        .and_then(|server| server.get(HANDOFF_SOCKET_KEY))
-        .and_then(toml::Value::as_str)
-        .is_some_and(|socket| !socket.is_empty());
-    if named {
-        return Ok(table.contains_key(LOCAL_CACHE_TABLE));
+        .and_then(|server| server.get(HANDOFF_SOCKET_KEY));
+    if !dir_hot && socket.is_some_and(|socket| socket.as_str().is_none_or(str::is_empty)) {
+        return Err(Done::fail(
+            Reason::HandoffNotConfigured,
+            format!(
+                "{} has an empty or non-string [server] {HANDOFF_SOCKET_KEY}: give the path of \
+                 the socket, or leave the key out for the default in the service's state \
+                 directory",
+                path.display()
+            ),
+        ));
     }
-    Err(Done::fail(
-        Reason::HandoffNotConfigured,
-        format!(
-            "{} has no [server] {HANDOFF_SOCKET_KEY}: the new instance could not take the old \
-             one's sockets; set it, or set mode = \"restart\" in the params",
-            path.display()
-        ),
-    ))
+    Ok(Shape {
+        cache: table.contains_key(LOCAL_CACHE_TABLE),
+        socket_named: socket.is_some(),
+        dir_hot,
+    })
 }

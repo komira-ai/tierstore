@@ -170,6 +170,6 @@ case ":${PATH:-}:" in
   *) say "Note: $PREFIX is not on your PATH; add it, or run $PREFIX/tierstore by its path." ;;
 esac
 say "tierstore is not running: this script starts nothing and writes no configuration."
-say "To start it: write a configuration file, check it with 'tierstore --config FILE --check-config', then run"
-say "'tierstore --config FILE'. Linux hosts: packaging/ in the repository has a systemd unit and an example file."
+say "To start it: write a configuration file, then enable the service (or run 'tierstore --config FILE')."
+say "Linux hosts: packaging/ in the repository has a systemd unit and an example file."
 say "Guide: https://tierstore.dev/docs/"

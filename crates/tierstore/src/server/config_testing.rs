@@ -5,9 +5,14 @@ use super::config::{DEFAULT_DRAIN_DEADLINE, DEFAULT_DRAIN_LB_WAIT, PerRun};
 
 /// The knobs of a run that gives none of them.
 pub(crate) const DEFAULTS: PerRun = PerRun {
-    drain_lb_wait: DEFAULT_DRAIN_LB_WAIT,
-    drain_deadline: DEFAULT_DRAIN_DEADLINE,
+    drain_lb_wait: None,
+    drain_deadline: None,
+    state_dir: None,
 };
+
+/// The drain a run that gives no part of it has: the defaults of the keys.
+pub(crate) const DEFAULT_DRAIN: (std::time::Duration, std::time::Duration) =
+    (DEFAULT_DRAIN_LB_WAIT, DEFAULT_DRAIN_DEADLINE);
 
 /// A storage node's file: two S3 tiers, every key of the key table given, a value that is not
 /// the default wherever the key has a default.

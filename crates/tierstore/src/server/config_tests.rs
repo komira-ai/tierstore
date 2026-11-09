@@ -10,7 +10,7 @@ use tierstore_testkit::dir::TestDir;
 use super::super::config_units::parse_size;
 use super::{ConfigError, KEYS, PerRun, from_text, keys_for_flags, load, removed};
 use crate::server::cli::{Cli, parse_duration};
-use crate::server::config_testing::{DEFAULTS, GOLDEN, MINIMAL};
+use crate::server::config_testing::{DEFAULT_DRAIN, DEFAULTS, GOLDEN, MINIMAL};
 
 /// The message of the refusal of this file text.
 fn refusal(text: &str) -> String {
@@ -108,13 +108,13 @@ fn a_key_that_is_left_out_has_its_default() {
     assert!(cli.grant_key_file.is_empty());
     assert!(cli.oci_listen.is_empty());
     assert!(cli.skip_backend_check.is_empty());
-    assert_eq!(DEFAULTS.drain_lb_wait, Duration::from_secs(10));
-    assert_eq!(DEFAULTS.drain_deadline, Duration::from_secs(900));
-    assert_eq!(cli.drain_lb_wait, DEFAULTS.drain_lb_wait);
-    assert_eq!(cli.drain_deadline, DEFAULTS.drain_deadline);
+    assert_eq!(DEFAULTS.drain_lb_wait, None);
+    assert_eq!(DEFAULTS.drain_deadline, None);
+    assert_eq!((cli.drain_lb_wait, cli.drain_deadline), DEFAULT_DRAIN);
     let slow = PerRun {
-        drain_lb_wait: Duration::from_secs(1),
-        drain_deadline: Duration::from_secs(2),
+        drain_lb_wait: Some(Duration::from_secs(1)),
+        drain_deadline: Some(Duration::from_secs(2)),
+        state_dir: None,
     };
     let with_run = from_text(MINIMAL, slow).unwrap();
     assert_eq!(with_run.drain_lb_wait, Duration::from_secs(1));
@@ -842,4 +842,77 @@ fn the_minimum_secret_length_is_a_setting_and_no_other_key_of_that_name_is() {
              shown); expected u32"
         )
     );
+}
+
+/// The knobs of a run that gives the flags of the drain `lb_wait` and `deadline`.
+fn flags(lb_wait: Option<u64>, deadline: Option<u64>) -> PerRun {
+    PerRun {
+        drain_lb_wait: lb_wait.map(Duration::from_secs),
+        drain_deadline: deadline.map(Duration::from_secs),
+        state_dir: None,
+    }
+}
+
+/// Asserts that `server.drain_lb_wait` and `server.drain_deadline` set the two parts of the drain
+/// (each alone, with the other at its default), that a start with neither takes the defaults, and
+/// that a flag of an old unit sets one when the file does not.
+#[test]
+fn the_drain_is_set_by_keys_of_the_server_table() {
+    let both = minimal_with(
+        "access_key_file = \"key\"",
+        "access_key_file = \"key\"\ndrain_lb_wait = \"3s\"\ndrain_deadline = \"2m\"",
+    );
+    let cli = from_text(&both, DEFAULTS).unwrap();
+    assert_eq!(cli.drain_lb_wait, Duration::from_secs(3));
+    assert_eq!(cli.drain_deadline, Duration::from_secs(120));
+
+    let wait_only = minimal_with(
+        "access_key_file = \"key\"",
+        "access_key_file = \"key\"\ndrain_lb_wait = \"3s\"",
+    );
+    let cli = from_text(&wait_only, DEFAULTS).unwrap();
+    assert_eq!(cli.drain_lb_wait, Duration::from_secs(3));
+    assert_eq!(cli.drain_deadline, DEFAULT_DRAIN.1);
+
+    let cli = from_text(MINIMAL, flags(Some(5), None)).unwrap();
+    assert_eq!(cli.drain_lb_wait, Duration::from_secs(5));
+    assert_eq!(cli.drain_deadline, DEFAULT_DRAIN.1);
+    let cli = from_text(MINIMAL, flags(None, Some(7))).unwrap();
+    assert_eq!(cli.drain_lb_wait, DEFAULT_DRAIN.0);
+    assert_eq!(cli.drain_deadline, Duration::from_secs(7));
+}
+
+/// Asserts that a part of the drain given by its key and by its flag is refused, naming the key and
+/// the flag in the exact words, and that the other part, given once, does not excuse it.
+#[test]
+fn a_part_of_the_drain_given_by_key_and_flag_is_refused() {
+    let text = minimal_with(
+        "access_key_file = \"key\"",
+        "access_key_file = \"key\"\ndrain_lb_wait = \"3s\"\ndrain_deadline = \"2m\"",
+    );
+    let lb_wait = from_text(&text, flags(Some(1), None))
+        .unwrap_err()
+        .to_string();
+    assert_eq!(
+        lb_wait,
+        "server.drain_lb_wait: is set in the file and by --drain-lb-wait too; give it once, in the file"
+    );
+    let deadline = from_text(&text, flags(None, Some(1)))
+        .unwrap_err()
+        .to_string();
+    assert_eq!(
+        deadline,
+        "server.drain_deadline: is set in the file and by --drain-deadline too; give it once, in the file"
+    );
+}
+
+/// Asserts that a drain key that is not a duration is a syntax error that says what a duration is.
+#[test]
+fn a_drain_key_that_is_no_duration_is_refused() {
+    let text = minimal_with(
+        "access_key_file = \"key\"",
+        "access_key_file = \"key\"\ndrain_lb_wait = \"soon\"",
+    );
+    let why = refusal(&text);
+    assert!(why.contains("expected a duration such as"), "{why}");
 }

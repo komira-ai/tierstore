@@ -6,10 +6,7 @@
 use std::path::Path;
 
 use super::cli::Cli;
-use super::config::{
-    ConfigError, DEFAULT_DRAIN_DEADLINE, DEFAULT_DRAIN_LB_WAIT, File, KEYS, PerRun, Settings,
-    invalid, settings,
-};
+use super::config::{ConfigError, File, KEYS, PerRun, Settings, invalid, settings};
 use super::config_syntax::{find_secret, syntax};
 use super::config_unknown::announce_unknown_keys;
 
@@ -50,11 +47,7 @@ impl Cli {
     /// # Errors
     /// The refusal of a file that is not one of this format, or is the file of a build node.
     pub fn from_config_text(text: &str) -> Result<Self, ConfigError> {
-        let per_run = PerRun {
-            drain_lb_wait: DEFAULT_DRAIN_LB_WAIT,
-            drain_deadline: DEFAULT_DRAIN_DEADLINE,
-        };
-        from_text(text, per_run)
+        from_text(text, PerRun::default())
     }
 }
 

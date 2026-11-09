@@ -323,8 +323,9 @@ fn socket_line(socket: &Path) -> String {
 /// The run knobs with a settle of `settle`.
 fn settle(settle: Duration) -> PerRun {
     PerRun {
-        drain_lb_wait: settle,
-        drain_deadline: Duration::from_secs(60),
+        drain_lb_wait: Some(settle),
+        drain_deadline: Some(Duration::from_secs(60)),
+        state_dir: None,
     }
 }
 
@@ -817,8 +818,8 @@ async fn a_read_cache_refuses_writes_on_both_instances_and_stores_nothing() {
 async fn a_keep_alive_connection_of_the_draining_instance_is_answered_with_connection_close() {
     let long = settle(Duration::from_secs(2));
     let shapes = [
-        Shape::build("tscache-traffic-ka-b", false, long),
-        Shape::storage("tscache-traffic-ka-s", long).await,
+        Shape::build("tscache-traffic-ka-b", false, long.clone()),
+        Shape::storage("tscache-traffic-ka-s", long.clone()).await,
     ];
     for shape in shapes {
         let work = |mut pair: Pair| async move {
@@ -850,7 +851,7 @@ async fn a_keep_alive_connection_of_the_draining_instance_is_answered_with_conne
 async fn the_overlap_the_traffic_tests_hold_is_a_real_one() {
     let long = settle(Duration::from_secs(2));
     let shapes = [
-        Shape::build("tscache-traffic-overlap-b", true, long),
+        Shape::build("tscache-traffic-overlap-b", true, long.clone()),
         Shape::storage("tscache-traffic-overlap-s", long).await,
     ];
     for shape in shapes {

@@ -18,11 +18,17 @@ use xtask::release::hostkeeper_package::{BINARY, hostkeeper_package};
 
 use crate::support::{
     CURRENT_BINARY, LINUX, MIN_HOSTKEEPER, PACKAGES, Scratch, VERSION, binary, flag, hk_platform,
-    manifest_toml, package, seconds, text, unit_value, unpack, version_dir, write_tree,
+    manifest_toml, package, text, unit_value, unpack, version_dir, write_tree,
 };
 
 /// The unit template of the Linux packages.
 const UNIT: &str = "units/tierstore@.service";
+
+/// The drain a Linux process has with the unit giving no flag for it: the defaults of
+/// `server.drain_lb_wait` (10 s) and `server.drain_deadline` (15 min). The test
+/// `the_units_stop_timeouts_cover_the_drain_the_defaults_make` of the tierstore crate pins the
+/// defaults to these.
+const LINUX_DRAIN_SECS: u64 = 10 + 15 * 60;
 
 fn bound(seconds: u64) -> NonZeroU64 {
     NonZeroU64::new(seconds).expect("not zero")
@@ -230,9 +236,11 @@ fn the_unit_runs_the_binary_of_current_as_tierstore_and_its_stop_covers_the_drai
         assert_eq!(unit_value(&unit, "[Service]", "User"), "tierstore");
         assert_eq!(unit_value(&unit, "[Service]", "Restart"), "on-failure");
         let lease = 5;
-        let drain = seconds(flag(&words, "--drain-lb-wait"))
-            + seconds(flag(&words, "--drain-deadline"))
-            + lease;
+        assert!(
+            !words.iter().any(|word| word.starts_with("--drain")),
+            "the drain is the file's keys: {words:?}"
+        );
+        let drain = LINUX_DRAIN_SECS + lease;
         let stop: u64 = unit_value(&unit, "[Service]", "TimeoutStopSec")
             .parse()
             .expect("seconds");

@@ -42,11 +42,17 @@ pub const RELEASE_VERSION: &str = concat!(
 /// [`HANDOFF_CACHE_CAPABILITY`] says the same of a build node and of a storage node with
 /// `[local_cache]`. `prepare` needs both releases to list it too when the node's configuration has
 /// `[local_cache]`: a release with only `handoff-socket-v1` refuses the key in that shape, so its
-/// instance has no control socket to take from. This list is all `--capabilities` prints.
+/// instance has no control socket to take from.
+///
+/// [`HANDOFF_STATE_DIR_CAPABILITY`] says `server.handoff_socket` may be left out under a unit with
+/// a state directory. `prepare` needs both releases to list it when the node's configuration
+/// leaves the key out: the running release would otherwise have no control socket to take from.
+/// This list is all `--capabilities` prints.
 pub const CAPABILITIES: &[&str] = &[
     "handover-v1",
     HANDOFF_SOCKET_CAPABILITY,
     HANDOFF_CACHE_CAPABILITY,
+    HANDOFF_STATE_DIR_CAPABILITY,
 ];
 
 /// `handoff-socket-v1`: a storage node started with `server.handoff_socket` takes the listening
@@ -60,6 +66,12 @@ pub const HANDOFF_SOCKET_CAPABILITY: &str = "handoff-socket-v1";
 /// storage node does (see [`HANDOFF_SOCKET_CAPABILITY`]); the cache directory lock keeps the new
 /// instance read-only until the old one has exited.
 pub const HANDOFF_CACHE_CAPABILITY: &str = "handoff-cache-v1";
+
+/// `handoff-state-dir-v1`: a start with no `server.handoff_socket` under a service manager that
+/// made a state directory for it (systemd's `STATE_DIRECTORY`) uses `handoff.sock` in that
+/// directory, as if the file named it; with no state directory it makes no control socket, as
+/// before.
+pub const HANDOFF_STATE_DIR_CAPABILITY: &str = "handoff-state-dir-v1";
 
 /// The text `--capabilities` prints for `names`: each name and a newline, nothing for none.
 #[must_use]

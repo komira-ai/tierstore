@@ -1,41 +1,31 @@
 //! `prepare`: the hand-over socket, the mode, the instances it picks, and what it refuses.
 
 use crate::server::update_hook::{
-    CACHE_HANDOFF_CAPABILITY, Class, HANDOFF_CAPABILITY, Instance, Mode, Reason, Record, Step,
-    UnitState,
+    CACHE_HANDOFF_CAPABILITY, Class, HANDOFF_CAPABILITY, HANDOFF_STATE_DIR_CAPABILITY, Instance,
+    Mode, Reason, Record, Step, UnitState,
 };
 
 use super::fake::{
-    CONFIG, NEW, OLD, SystemdFake, WITH_CACHE_SOCKET, WITH_SOCKET, assert_deferred, assert_failed,
-    assert_ok, detail, params, params_with,
+    CONFIG, DIR_HOT, NEW, OLD, SystemdFake, WITH_CACHE_SOCKET, WITH_SOCKET, WITHOUT_SOCKET,
+    assert_deferred, assert_failed, assert_ok, detail, params, params_with,
 };
 
 use Step::{Cutover, Prepare};
 
-/// Asserts that `prepare` of an update refuses a configuration that does not name a non-empty
-/// `[server] handoff_socket` string (absent, empty, outside `[server]`, not a table, not TOML)
-/// with `handoff_not_configured` of class environment, and records nothing. Catches an update
-/// that starts and cannot take the sockets of the old instance.
+/// Asserts that `prepare` of an update refuses a configuration whose `[server] handoff_socket` is
+/// an empty string or not a string, or that is not TOML, with `handoff_not_configured` of class
+/// environment, and records nothing. Catches an update that starts and cannot take the sockets of
+/// the old instance.
 #[test]
-fn prepare_refuses_a_configuration_without_the_hand_over_socket() {
+fn prepare_refuses_a_hand_over_socket_that_names_no_socket() {
     let configurations = [
-        ("", "has no [server] handoff_socket"),
-        (
-            "[server]\nlisten = \"0.0.0.0:9300\"\n",
-            "has no [server] handoff_socket",
-        ),
         (
             "[server]\nhandoff_socket = \"\"\n",
-            "has no [server] handoff_socket",
+            "empty or non-string [server] handoff_socket",
         ),
         (
             "[server]\nhandoff_socket = 7\n",
-            "has no [server] handoff_socket",
-        ),
-        ("server = 3\n", "has no [server] handoff_socket"),
-        (
-            "handoff_socket = \"/x.sock\"\n",
-            "has no [server] handoff_socket",
+            "empty or non-string [server] handoff_socket",
         ),
         ("[server\n", "is not TOML"),
     ];
@@ -132,15 +122,83 @@ fn a_storage_node_hands_over_with_the_socket_word_alone() {
     assert_eq!(fake.record().mode, Some(Mode::Handover));
 }
 
-/// Asserts that a configuration with `[local_cache]` and no `handoff_socket` is refused with
-/// `handoff_not_configured`, as one of any other shape is, whatever the releases list.
+/// Asserts that a configuration that leaves `handoff_socket` out, of any shape (nothing in
+/// `[server]`, no `[server]`, a top-level key outside it, a `[server]` that is not a table, a
+/// build node), is not refused: the update is a hand-over when both releases list
+/// `handoff-state-dir-v1` (and `handoff-cache-v1` for a cache shape), and a restart when either
+/// lacks the state-directory word, since the running release would have no control socket.
 #[test]
-fn a_cache_shape_without_the_hand_over_socket_is_not_configured() {
+fn a_configuration_without_the_hand_over_socket_hands_over_by_the_default() {
+    let all: &[&str] = &[
+        HANDOFF_CAPABILITY,
+        CACHE_HANDOFF_CAPABILITY,
+        HANDOFF_STATE_DIR_CAPABILITY,
+    ];
+    let without_state_dir: &[&str] = &[HANDOFF_CAPABILITY, CACHE_HANDOFF_CAPABILITY];
+    let configurations = [
+        "",
+        WITHOUT_SOCKET,
+        "server = 3\n",
+        "handoff_socket = \"/x.sock\"\n",
+        "[local_cache]\npath = \"/c\"\n",
+    ];
+    for text in configurations {
+        for (staged, previous, mode) in [
+            (all, all, Mode::Handover),
+            (without_state_dir, all, Mode::Restart),
+            (all, without_state_dir, Mode::Restart),
+        ] {
+            let fake = SystemdFake::installed();
+            fake.set_config(Some(text));
+            fake.set_capabilities(NEW, staged);
+            fake.set_capabilities(OLD, previous);
+            assert_ok(&fake.run(Prepare, &params(NEW, Some(OLD))));
+            assert_eq!(
+                fake.record().mode,
+                Some(mode),
+                "{text:?} {staged:?} {previous:?}"
+            );
+        }
+    }
+}
+
+/// Asserts that a configuration whose hot tier is `kind = "dir"` is a restart even when both
+/// releases list every hand-over word and the socket is named, with the socket left out, or with
+/// an empty one (which is not refused, as no socket is used); that the other kinds of hot tier
+/// still hand over; and that the restart is recorded and the detail says it. Catches two
+/// instances sharing one directory's lease.
+#[test]
+fn a_directory_as_the_hot_tier_is_a_restart() {
+    let dir_without_socket = "[hot_store]\nkind = \"dir\"\npath = \"/h\"\n";
+    let dir_empty_socket = "[server]\nhandoff_socket = \"\"\n[hot_store]\nkind = \"dir\"\n";
+    let memory = "[server]\nhandoff_socket = \"/s.sock\"\n[hot_store]\nkind = \"memory\"\n";
+    let s3 = "[server]\nhandoff_socket = \"/s.sock\"\n[hot_store]\nkind = \"s3\"\n";
+    let hot_not_table = "[server]\nhandoff_socket = \"/s.sock\"\n";
+    for (text, mode) in [
+        (DIR_HOT, Mode::Restart),
+        (dir_without_socket, Mode::Restart),
+        (dir_empty_socket, Mode::Restart),
+        (memory, Mode::Handover),
+        (s3, Mode::Handover),
+        (hot_not_table, Mode::Handover),
+    ] {
+        let fake = SystemdFake::installed();
+        fake.set_config(Some(text));
+        let done = fake.run(Prepare, &params(NEW, Some(OLD)));
+        assert_ok(&done);
+        assert_eq!(fake.record().mode, Some(mode), "{text:?}");
+        assert!(detail(&done).contains(mode.as_str()), "{done:?}");
+    }
+}
+
+/// Asserts that a first install, which hands nothing over, is not judged by its hot tier: the
+/// configuration is not read, so a directory there changes nothing.
+#[test]
+fn a_first_install_with_a_directory_as_the_hot_tier_records_no_mode() {
     let fake = SystemdFake::installed();
-    fake.set_config(Some("[local_cache]\npath = \"/c\"\n"));
-    let done = fake.run(Prepare, &params(NEW, Some(OLD)));
-    assert_failed(&done, Reason::HandoffNotConfigured);
-    assert_eq!(done.report.class, Class::Environment);
+    fake.set_config(Some(DIR_HOT));
+    assert_ok(&fake.run(Prepare, &params(NEW, None)));
+    assert_eq!(fake.record().mode, None);
 }
 
 /// Asserts that `mode = "restart"` in the params gives a restart for a cache shape that both

@@ -11,10 +11,14 @@
 # removes it when it retires the instance, so at boot, when both units are enabled, only the one
 # the hook's record names starts. A skipped condition is not a failure: the unit stays inactive.
 #
-# The hand-over socket lives in the StateDirectory: `server.handoff_socket` in
-# /etc/tierstore/config.toml names it, for example /var/lib/tierstore/handoff.sock. Without it
-# (or with `mode = "restart"` in the package's params) an update stops the live instance before it
-# starts the other, with a gap in serving.
+# The hand-over socket lives in the StateDirectory: systemd sets STATE_DIRECTORY for it, and a
+# process that has it and a configuration without `server.handoff_socket` uses
+# /var/lib/tierstore/handoff.sock, so the file need not name it. With `mode = "restart"` in the
+# package's params, or with a directory as the hot tier, an update stops the live instance before
+# it starts the other, with a gap in serving.
+#
+# The drain is the defaults of `server.drain_lb_wait` (10 s) and `server.drain_deadline` (15 m),
+# which TimeoutStopSec= is above; the unit passes no flag for it.
 #
 # hostkeeper's own Force, which starts every `run` unit and waits for all of them, finds the
 # standby instance inactive by design and reports it; the service is up all the same.
@@ -37,9 +41,7 @@ User=tierstore
 StateDirectory=tierstore
 StateDirectoryMode=0700
 ExecStart=/var/lib/hostkeeper/packages/tierstore/current/bin/tierstore \
-  --config /etc/tierstore/config.toml \
-  --drain-lb-wait 10s \
-  --drain-deadline 15m
+  --config /etc/tierstore/config.toml
 KillSignal=SIGTERM
 TimeoutStopSec=960
 Restart=on-failure

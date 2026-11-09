@@ -16,7 +16,7 @@ use std::path::{Path, PathBuf};
 use std::time::Duration;
 
 use clap::Parser;
-use tierstore::server::cli::Args;
+use tierstore::server::cli::{Args, Cli};
 use tierstore::server::update_hook::{Instance, LAUNCHD_PLIST, RELEASE_BINARY, marker_path};
 
 /// The words in the name of a flag that say it holds a secret.
@@ -24,6 +24,22 @@ const SECRET_WORDS: [&str; 5] = ["key", "secret", "credential", "token", "passwo
 
 /// The release link of hostkeeper's package, which both files run the binary of.
 const CURRENT: &str = "/var/lib/hostkeeper/packages/tierstore/current";
+
+/// The drain of a process that is not on macOS and is given no part of it: the defaults of
+/// `server.drain_lb_wait` and `server.drain_deadline`, which the xtask test of the package holds
+/// the template's `TimeoutStopSec=` to (`LINUX_DRAIN_SECS` there).
+const LINUX_DRAIN: (Duration, Duration) = (Duration::from_secs(10), Duration::from_secs(15 * 60));
+
+/// The drain of a process on macOS that is given no part of it, which the plist's `ExitTimeOut` is
+/// above (`MACOS_DRAIN_SECS` in the xtask test of the package).
+const MACOS_DRAIN: (Duration, Duration) = (Duration::from_secs(1), Duration::from_secs(60));
+
+/// The settings of the example storage node's file, whose drain is the defaults.
+fn defaults() -> Cli {
+    let file = Path::new(env!("CARGO_MANIFEST_DIR")).join("../../packaging/tierstore.toml");
+    let text = std::fs::read_to_string(file).expect("the example file");
+    Cli::from_config_text(&text).expect("the example file loads")
+}
 
 /// The systemd template.
 const TEMPLATE: &str = "tierstore@.service";
@@ -160,8 +176,29 @@ fn the_template_runs_the_current_release_with_flags_the_binary_parses() {
         args.config.as_deref(),
         Some(Path::new("/etc/tierstore/config.toml"))
     );
-    assert_eq!(args.drain_lb_wait, Duration::from_secs(10));
-    assert_eq!(args.drain_deadline, Duration::from_secs(15 * 60));
+    assert_eq!(args.drain_lb_wait, None);
+    assert_eq!(args.drain_deadline, None);
+}
+
+/// Asserts that a process on Linux (or anywhere but macOS) with no drain key waits 10 s for the
+/// load balancers and 15 min for the requests in flight, which is the drain the template's
+/// `TimeoutStopSec=` is sized for. It would catch a default raised past the stop timeout, which
+/// would let systemd kill a drain in progress.
+#[cfg(not(target_os = "macos"))]
+#[test]
+fn the_units_stop_timeouts_cover_the_drain_the_defaults_make() {
+    let cli = defaults();
+    assert_eq!((cli.drain_lb_wait, cli.drain_deadline), LINUX_DRAIN);
+}
+
+/// Asserts that a process on macOS with no drain key waits 1 s and 60 s, the drain the plist's
+/// `ExitTimeOut` is sized for (a loopback service has no load balancer to wait for). It would
+/// catch a macOS default raised past `ExitTimeOut`.
+#[cfg(target_os = "macos")]
+#[test]
+fn the_macos_defaults_are_the_drain_the_plist_waits_for() {
+    let cli = defaults();
+    assert_eq!((cli.drain_lb_wait, cli.drain_deadline), MACOS_DRAIN);
 }
 
 /// Asserts that an instance starts only under its marker file: the template's
@@ -208,10 +245,10 @@ fn the_template_is_enabled_at_boot_with_a_private_state_directory() {
 #[test]
 fn the_template_waits_for_the_drain_and_does_not_restart_a_clean_exit() {
     let unit = read(TEMPLATE);
-    let args = Args::try_parse_from(exec_start(&unit)).expect("the template's flags");
+    let cli = defaults();
     assert_eq!(value(&unit, "KillSignal"), "SIGTERM");
     let seconds: u64 = value(&unit, "TimeoutStopSec").parse().expect("seconds");
-    let drain = args.drain_lb_wait + args.drain_deadline + Duration::from_secs(5);
+    let drain = cli.drain_lb_wait + cli.drain_deadline + Duration::from_secs(5);
     let timeout = Duration::from_secs(seconds);
     assert!(timeout >= drain, "{timeout:?} is less than {drain:?}");
     assert_eq!(value(&unit, "Restart"), "on-failure");
@@ -290,10 +327,12 @@ fn the_plist_runs_the_current_release_as_the_service_account_kept_alive() {
 #[test]
 fn launchd_waits_for_the_drain() {
     let args = Args::try_parse_from(arguments()).expect("the plist's flags");
+    assert_eq!(args.drain_lb_wait, None, "the drain is the file's keys");
+    assert_eq!(args.drain_deadline, None, "the drain is the file's keys");
     let Some(Plist::Integer(seconds)) = plist().get("ExitTimeOut").cloned() else {
         panic!("ExitTimeOut is an integer");
     };
     let exit = Duration::from_secs(seconds.try_into().unwrap());
-    let drain = args.drain_lb_wait + args.drain_deadline;
+    let drain = MACOS_DRAIN.0 + MACOS_DRAIN.1;
     assert!(exit >= drain, "{exit:?} is less than {drain:?}");
 }

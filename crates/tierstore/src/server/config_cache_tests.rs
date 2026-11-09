@@ -6,7 +6,7 @@ use std::time::Duration;
 
 use super::config::{from_text, settings_from_text};
 use super::config_cache::{CacheSettings, LocalCacheTable, Rate};
-use super::config_testing::{DEFAULTS, GOLDEN, MINIMAL, oci_interface};
+use super::config_testing::{DEFAULT_DRAIN, DEFAULTS, GOLDEN, MINIMAL, oci_interface};
 use super::config_unknown::fields_of;
 use super::local_cache::{FILL_CHUNK, SCRUB_MIN_ROUND, SCRUB_RATE, WHOLE_FILL_LIMIT};
 
@@ -195,7 +195,7 @@ fn a_build_node_file_makes_a_cache() {
     assert_eq!(front.body_idle_timeout, Duration::from_secs(20));
     assert_eq!(front.aws_chunked_max_line_bytes, 2048);
     assert_eq!(cache.s3_request_timeout, Duration::from_secs(120));
-    assert_eq!(front.drain_lb_wait, DEFAULTS.drain_lb_wait);
+    assert_eq!(front.drain_lb_wait, DEFAULT_DRAIN.0);
 
     let config = &cache.cache;
     assert_eq!(config.path, Path::new("/var/lib/tierstore-cache"));

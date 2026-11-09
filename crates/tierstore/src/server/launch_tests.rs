@@ -6,7 +6,7 @@ use std::time::Duration;
 
 use tierstore_testkit::dir::TestDir;
 
-use super::{Refused, resolve};
+use super::{Refused, resolve, state_dir_of};
 use crate::server::config::from_text;
 use crate::server::config_testing::{DEFAULTS, GOLDEN};
 
@@ -169,4 +169,61 @@ fn the_usage_is_the_parsers_with_or_without_a_file() {
         assert_eq!(kind, "usage", "{args:?}");
         assert!(stderr, "{args:?}");
     }
+}
+
+/// Asserts that the state directory is the first directory of systemd's `STATE_DIRECTORY` when it
+/// is an absolute path, and none when it is unset, empty, relative, or not text.
+#[test]
+fn the_state_directory_is_the_first_absolute_one_systemd_names() {
+    use std::os::unix::ffi::OsStringExt;
+    use std::path::PathBuf;
+    let of = |value: &str| state_dir_of(Some(OsString::from(value)));
+    assert_eq!(
+        of("/var/lib/tierstore"),
+        Some(PathBuf::from("/var/lib/tierstore"))
+    );
+    assert_eq!(
+        of("/var/lib/a:/var/lib/b"),
+        Some(PathBuf::from("/var/lib/a"))
+    );
+    assert_eq!(of(""), None);
+    assert_eq!(of("tierstore"), None);
+    assert_eq!(state_dir_of(None), None);
+    assert_eq!(
+        state_dir_of(Some(OsString::from_vec(vec![0xff, b'/']))),
+        None
+    );
+}
+
+/// Asserts that a drain flag and the same part of the drain in the file are refused together by
+/// the whole command line, with status 2's kind of refusal (a config error), and the flag alone
+/// still works.
+#[test]
+fn a_drain_flag_with_the_key_in_the_file_is_refused() {
+    let dir = TestDir::under(std::env::temp_dir(), "tierstore-launch-drain-key");
+    let path = dir.path().join("tierstore.toml");
+    let text = GOLDEN.replacen(
+        "min_secret_bytes      = 24",
+        "min_secret_bytes      = 24\ndrain_deadline = \"1m\"",
+        1,
+    );
+    std::fs::write(&path, text).unwrap();
+    let path = path.display().to_string();
+    let (kind, _, why) = refused(&["tierstore", "--config", &path, "--drain-deadline", "2m"]);
+    assert_eq!(kind, "config");
+    assert!(
+        why.contains("server.drain_deadline: is set in the file and by --drain-deadline too"),
+        "{why}"
+    );
+    let launch = resolve(words(&[
+        "tierstore",
+        "--config",
+        &path,
+        "--drain-lb-wait",
+        "2s",
+    ]))
+    .unwrap();
+    let cli = launch.settings.into_storage().unwrap();
+    assert_eq!(cli.drain_lb_wait, Duration::from_secs(2));
+    assert_eq!(cli.drain_deadline, Duration::from_secs(60));
 }

@@ -132,11 +132,10 @@ no declaration file: the hook runs as root, as hostkeeper's step, and reaches th
 On Linux the package has one template, `tierstore@.service`, and the hook alternates between its
 two instances, `tierstore@a` and `tierstore@b`. Both run `current/bin/tierstore` and serve port
 9300. An update starts the idle instance, which takes the listening sockets of the live one over
-the hand-over socket (`server.handoff_socket` in `/etc/tierstore/config.toml`, for example
-`/var/lib/tierstore/handoff.sock`), and the live one drains and exits 0. An instance starts only
+the hand-over socket (`server.handoff_socket` in `/etc/tierstore/config.toml`, which defaults to
+`handoff.sock` in the unit's state directory, `/var/lib/tierstore/handoff.sock`, so the file need not name it), and the live one drains and exits 0. An instance starts only
 when its marker file, `/var/lib/tierstore/run-a` or `run-b`, exists, so that at boot, with both
-units enabled, only the one the hook's record names starts. A host whose releases (a node with `[local_cache]` needs `handoff-cache-v1` as well as `handoff-socket-v1`) or whose hot
-tier cannot hand over (a `dir:` hot tier, say) sets `mode = "restart"` in the package's params:
+units enabled, only the one the hook's record names starts. A host whose releases cannot hand over (a node with `[local_cache]` needs `handoff-cache-v1` as well as `handoff-socket-v1`, and a configuration that leaves the socket out needs `handoff-state-dir-v1`) restarts, and so does a node with a `dir:` hot tier, which the hook reads from the configuration; `mode = "restart"` in the package's params forces it too:
 the update then stops the live instance and starts the other, with a gap in serving.
 
 On a Mac the package has one job, `tierstore.plist` (label `tierstore`, installed as
@@ -345,7 +344,7 @@ anonymous GET requests."), as S3 answers, and not the `403` of an unsigned reque
 interfaces it serves (`[[interface]]`), the tiers, the key files, the limits and the reconciler's
 settings. The process takes no flag for any of it: the flags of earlier builds that did are
 refused at the start, with exit status 2 and the key that replaces each. The unit above gives the
-file and the two flags of the drain, and nothing else. `crates/tierstore/docs/configuration.md`
+file, and nothing else. `crates/tierstore/docs/configuration.md`
 lists every key with its default and what the loader refuses; this section has what only the
 packaging needs. The example for the unit is `tierstore.toml`, placed as
 `/etc/tierstore/tierstore.toml`; it lists one `s3` interface, the full and one read-only key, and
@@ -654,7 +653,7 @@ address of theirs, and must agree on these params.
 ### Moving from flags
 
 A unit that gave the flags of earlier builds is moved by writing the file and changing
-`ExecStart=` to `--config <path>` and the two flags of the drain (`crates/tierstore/docs/configuration.md`,
+`ExecStart=` to `--config <path>` (the drain is `server.drain_lb_wait` and `server.drain_deadline` in the file; `crates/tierstore/docs/configuration.md`,
 "Moving from flags", says where each setting went). A start that still gives one of the removed
 flags exits with status 2 and a message that names the key that replaces it, so the unit stops
 instead of running with settings it did not read.
@@ -681,10 +680,9 @@ instead of running with settings it did not read.
 | `hot_store.usage_stale_after` | how old the usage that the reconciler publishes may be (2m by default, longer than `hot_store.lease_ttl`) before `/usagez` says 503 with the reason |
 | an `oci` interface | the registry front (read-only unless it asks for keys), off unless the file has one; see The OCI read front |
 
-The unit's two flags are the drain on SIGTERM: `--drain-lb-wait` is how long `/readyz` says 503
-while the server goes on accepting and serving (the settle), and `--drain-deadline` is how long it
-then waits for requests in flight and for the connections it closes. `tierstore --help` lists the
-flags of a run.
+The drain on SIGTERM is two keys of `[server]`: `drain_lb_wait` is how long `/readyz` says 503
+while the server goes on accepting and serving (the settle, `10s`; `1s` on macOS), and `drain_deadline` is how long it
+then waits for requests in flight and for the connections it closes (`15m`; `60s` on macOS). The units pass no flag for them; the flags of the releases before, `--drain-lb-wait` and `--drain-deadline`, are still taken, and a start that gets a part by the flag and the key is refused.
 
 ## Virtual-hosted-style addressing
 
@@ -861,8 +859,8 @@ next request. A connection holds one of the `params.max_connections` slots from 
 there is no limit per client address, so a host that opens that many connections and says nothing
 can keep the others waiting: the host's firewall rules are the control for that. A client that takes no byte of an answer for `server.body_idle_timeout`
 is cut. A connection that reaches its lifetime finishes the answer it is sending for at most
-`--drain-deadline`, and is cut then. On the drain the front goes on serving through `--drain-lb-wait`, takes no new connection,
-lets the requests being answered finish, and closes what is left at `--drain-deadline`. The start
+`server.drain_deadline`, and is cut then. On the drain the front goes on serving through `server.drain_lb_wait`, takes no new connection,
+lets the requests being answered finish, and closes what is left at `server.drain_deadline`. The start
 line on stdout gets ` oci-listen=<address> (https)` or ` (http)` after `listen=<address>`, and `/metricz`
 has `tierstore_oci_front_info{mode="https"}` or `{mode="http"}`. In plain mode there is no handshake,
 so the handshake time does not apply; the other limits are the same.
@@ -1011,7 +1009,7 @@ the operator's choice, and the shipped file does not make it.
 ## Stopping it
 
 systemd sends SIGTERM. The process answers `/readyz` 503 and puts `Connection: close` on every
-answer from then on, serves for `--drain-lb-wait` (the settle) so that a load balancer sees it,
+answer from then on, serves for `server.drain_lb_wait` (the settle) so that a load balancer sees it,
 stops accepting (the connections the kernel has already set up for it are taken and served, for
 3 seconds at most, as is the first request of a new connection), and
 closes each idle connection with a lingering close (it shuts its end for
@@ -1019,10 +1017,10 @@ writing, so that the client reads a clean end of stream, and reads until the cli
 seconds at most). A request already on the wire is served, with `Connection: close`, never
 answered 503; one that arrives within a round trip of the end of the stream cannot be answered
 and is counted in `tierstore_drain_late_requests_total`. It waits for the requests in flight and
-the connections for at most `--drain-deadline`, gives up the reconciler's lease and exits 0.
+the connections for at most `server.drain_deadline`, gives up the reconciler's lease and exits 0.
 `TimeoutStopSec=` is set above
-the sum of the two drain flags and the lease's wait, so that systemd does not send SIGKILL to a drain
-in progress; if `--drain-deadline` is raised, raise it too. A start that fails is tried again
+the sum of the two drain keys and the lease's wait, so that systemd does not send SIGKILL to a drain
+in progress; if `server.drain_deadline` is raised, raise it too. A start that fails is tried again
 after 30 seconds; exit status 2 (a command line or a file the process refused: an unknown flag, a flag of the data
 path that went, a file that does not load; or two keys with one access key id) is not, since a
 restart cannot mend it. Other combinations of settings and key files refused after parsing exit 1, and are tried again

@@ -225,8 +225,9 @@ impl Rig {
     fn launch(&self, spec: &Spec, stop: impl Future<Output = ()> + Send + 'static) -> Launched {
         let text = self.text(spec.handoff);
         let knobs = PerRun {
-            drain_lb_wait: spec.lb_wait,
-            drain_deadline: spec.deadline,
+            drain_lb_wait: Some(spec.lb_wait),
+            drain_deadline: Some(spec.deadline),
+            state_dir: None,
         };
         let (told, bound) = oneshot::channel::<Addresses>();
         let ready = move |at: Addresses| drop(told.send(at));

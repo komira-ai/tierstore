@@ -5,6 +5,7 @@
 //! that the message says what to do and not that the argument is unexpected.
 
 use std::ffi::OsString;
+use std::path::PathBuf;
 
 use clap::Parser;
 
@@ -40,6 +41,26 @@ fn removed_flag(args: &[OsString]) -> Option<String> {
         .find_map(removed)
 }
 
+/// The state directory a service manager made for the service, from the value of systemd's
+/// `STATE_DIRECTORY`: the first of its directories (it holds several, separated by `:`), if it
+/// is a non-empty absolute path.
+fn state_dir_of(value: Option<OsString>) -> Option<PathBuf> {
+    let value = value?;
+    let first = value.to_str()?.split(':').next()?;
+    let path = PathBuf::from(first);
+    path.is_absolute().then_some(path)
+}
+
+/// The directory systemd made for the unit's `StateDirectory=`, which it names in the process's
+/// environment; where `server.handoff_socket` is when the file leaves it out.
+#[expect(
+    clippy::disallowed_methods,
+    reason = "STATE_DIRECTORY is set by systemd for the unit's StateDirectory=, a platform-set marker (AGENTS.md S2), not configuration"
+)]
+fn state_dir() -> Option<PathBuf> {
+    state_dir_of(std::env::var_os("STATE_DIRECTORY"))
+}
+
 /// The settings that `args` (the program name first) stand for.
 ///
 /// # Errors
@@ -61,6 +82,7 @@ pub(super) fn resolve(args: Vec<OsString>) -> Result<Launch, Refused> {
     let per_run = PerRun {
         drain_lb_wait: args.drain_lb_wait,
         drain_deadline: args.drain_deadline,
+        state_dir: state_dir(),
     };
     let settings = load(&path, per_run).map_err(Refused::Config)?;
     Ok(Launch {

@@ -2,8 +2,11 @@
 //! (see [`handoff`](super::handoff)): `handoff_socket`, the control socket, and `handoff_wait`,
 //! how long a new instance waits for the running one to hand its sockets over.
 //!
-//! Without `handoff_socket` there is no hand-off: the start binds its sockets itself and makes no
-//! control socket, as it did before the keys existed. Every shape of node reads them: a storage
+//! Without `handoff_socket` there is no hand-off, unless the service manager made a state
+//! directory for the service (systemd's `STATE_DIRECTORY`, which the unit of hostkeeper's package
+//! has): the socket is then [`DEFAULT_SOCKET_NAME`] in it, so that a node's file need not name it.
+//! With neither the start binds its sockets itself and makes no control socket, as it did before
+//! the keys existed. Every shape of node reads them: a storage
 //! node serves through [`run_handing`](super::cli::run_handing), and a build node and a storage
 //! node with `[local_cache]` get their sockets through the same hand-off (`bind_fronts`). A build
 //! node has no `hot_store.lock_file`, so only the other checks apply to it. The keys are in
@@ -21,6 +24,10 @@ use super::config_tuning::span;
 use super::handoff::Handoff;
 use super::lock::check_lock_path;
 
+/// The file name of the control socket in the state directory, when `server.handoff_socket` is
+/// left out. The update hook's `prepare` relies on it (`update_hook::DEFAULT_SOCKET_NAME`).
+pub(super) const DEFAULT_SOCKET_NAME: &str = "handoff.sock";
+
 /// The wait of `server.handoff_wait` when the key is left out.
 pub(super) const DEFAULT_HANDOFF_WAIT: Duration = Duration::from_secs(10);
 
@@ -35,9 +42,9 @@ const MOST_WAIT: Duration = Duration::from_secs(3600);
 /// smaller of the two, so that a file means the same on both.
 pub(super) const MOST_SOCKET_PATH: usize = 103;
 
-/// The hand-off `[server]` asks for, if `handoff_socket` is given; `lock_file` is the node's
-/// `hot_store.lock_file`, which the control socket must not be, since the offer replaces the file
-/// at its path.
+/// The hand-off `[server]` asks for, if `handoff_socket` is given or the service has a
+/// `state_dir` to hold it; `lock_file` is the node's `hot_store.lock_file`, which the control
+/// socket must not be, since the offer replaces the file at its path.
 ///
 /// # Errors
 /// A `handoff_socket` that is not an absolute path of a file, is longer than a Unix socket's path
@@ -46,8 +53,10 @@ pub(super) const MOST_SOCKET_PATH: usize = 103;
 pub(super) fn handoff_of(
     server: &ServerTable,
     lock_file: Option<&Path>,
+    state_dir: Option<&Path>,
 ) -> Result<Option<Handoff>, ConfigError> {
-    let Some(socket) = &server.handoff_socket else {
+    let default = state_dir.map(|dir| dir.join(DEFAULT_SOCKET_NAME));
+    let Some(socket) = server.handoff_socket.as_ref().or(default.as_ref()) else {
         let why =
             "it is the wait for the running instance of server.handoff_socket, which is not given";
         refuse(

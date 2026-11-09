@@ -393,7 +393,7 @@ impl CacheSettings {
         require_keeping(policy)?;
         let unused = [("backend_check_wait", server.backend_check_wait.is_some())];
         refuse("server", "not used by a build node", &unused)?;
-        let handoff = handoff_of(&server, None)?;
+        let handoff = handoff_of(&server, None, per_run.state_dir.as_deref())?;
         refuse_hot_keys(&cold)?;
         let skipping = [("skip_checks", cold.skip_checks.is_some())];
         refuse("cold_store", "not for a build node", &skipping)?;
