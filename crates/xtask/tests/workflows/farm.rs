@@ -1,16 +1,16 @@
 //! The rules for the lab jobs of `release.yml` (`farm-check`, `farm` and `soak`), which move the
 //! hostkeeper lab onto a release that is in testing and installed, before the promotion
 //! (docs/design/distribution.md, section 5.3). [`farm_problems`] is called from
-//! `release_problems`, so the one lint holds the whole file; [`pin_problems`] compares the pin of
-//! `farm` with the one of `hostkeeper-desired.yml`.
+//! `release_problems`, so the one lint holds the whole file.
 //!
 //! - `farm-check` waits for the three install checks, reads the repository (`contents: read`, no
 //!   environment: its settings are repository variables, which a job that calls a workflow can
 //!   read too), has the `if:` of the jobs after skippable jobs, and starts with the gate: the coordinator's two variables, then the
 //!   tailnet's three. Every step after the first gate runs only when it said `enabled=true`, and
 //!   one of them is `cargo xtask release desired-deb` (the testing suite lists the package), whose two outputs the job hands on.
-//! - `farm` is hostkeeper's reusable workflow, pinned to the same commit and release as
-//!   `hostkeeper-desired.yml`, called with the version and digest `farm-check` handed on, the
+//! - `farm` is hostkeeper's reusable workflow, pinned to a commit with its release as the comment
+//!   (a pin of its own: `hostkeeper-desired.yml` pins another revision of the client, and the
+//!   coordinator's allow-list has an entry for each, by its audience), called with the version and digest `farm-check` handed on, the
 //!   coordinator's variables, the audience of this workflow and `wait: true`, and only when the
 //!   gate said `enabled=true`. It holds `contents: read` and `id-token: write`; no other job of
 //!   the farm does (the lint's write table pins the `if:` of the scope).
@@ -287,25 +287,6 @@ fn farm_job_problems(farm: &Node, text: &str) -> Vec<String> {
         }
     }
     problems
-}
-
-/// One line per way the pin of `farm` in `release` (the text of `release.yml`) is not the pin of
-/// `set-desired` in `desired` (the text of `hostkeeper-desired.yml`): one hostkeeper release
-/// makes the calls of both, and the coordinator's allow-list names the workflow ref of the pin.
-pub fn pin_problems(release: &str, desired: &str) -> Vec<String> {
-    let load = |text: &str| super::yaml::load(text).map_err(|e| vec![e]);
-    let (release_doc, desired_doc) = match (load(release), load(desired)) {
-        (Ok(r), Ok(d)) => (r, d),
-        (Err(e), _) | (_, Err(e)) => return e,
-    };
-    let from_release = job(&release_doc, "farm").and_then(|j| pin(j, release));
-    let from_desired = job(&desired_doc, "set-desired").and_then(|j| pin(j, desired));
-    if from_release.is_none() || from_release != from_desired {
-        return vec![format!(
-            "farm: the pin {from_release:?} is not the pin of hostkeeper-desired.yml, {from_desired:?}"
-        )];
-    }
-    Vec::new()
 }
 
 fn soak_problems(soak: &Node) -> Vec<String> {

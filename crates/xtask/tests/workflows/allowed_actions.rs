@@ -18,8 +18,8 @@ pub const PATTERNS_ALLOWED: &[&str] = &[
 
 /// The owners whose actions the same setting admits without a pattern: GitHub's own (the setting
 /// `github_owned_allowed`) and the owner of the repository (the policy "Allow OWNER, and select
-/// non-OWNER, actions and reusable workflows"), whose reusable workflow hostkeeper-desired.yml
-/// calls.
+/// non-OWNER, actions and reusable workflows"), whose reusable workflow set-desired.yml
+/// hostkeeper-desired.yml and release.yml call.
 pub const OWNERS_ALLOWED: &[&str] = &["actions/", "github/", "komira-ai/"];
 
 /// Whether `text` matches `pattern`, where `*` stands for any text and the rest is literal.
