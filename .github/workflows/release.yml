@@ -1790,30 +1790,34 @@ jobs:
 
   # THE LAB (docs/design/distribution.md, section 5.3), after the install checks: the release is in
   # testing, installed on clean machines, and now hostkeeper installs the Debian package from the
-  # suite testing on the lab. Three jobs.
+  # suite testing on the lab, through its apt installer (the host's repository entry
+  # komira-testing). Three jobs.
   #
   #   farm-check  (read; the settings are repository variables, as hostkeeper-desired has them)
   #               the gate (`channels gate`: unless the repository variable TIERSTORE_LAB_INSTALL
   #               is exactly `true` the lab is off, a green no-op with a notice naming it, whatever
   #               the other settings are; with it `true`, none of HOSTKEEPER_COORDINATOR_URL and
   #               HOSTKEEPER_COORDINATOR_CA set is a green no-op, some is red, and the tailnet's
-  #               three variables are all or none), then `release desired-deb` for the release
+  #               three variables are all or none), then `release desired-apt` for the release
   #               just published: the testing suite, read as a client reads it, lists the
   #               package of both architectures with the digests of the release's SHA256SUMS.
-  #               Its package-version (the package's, `X.Y.Z`) and package-digest are what the
-  #               coordinator is given.
+  #               Its package-version (the package's, `X.Y.Z`) and targets (one apt entry per
+  #               architecture, each pinning its .deb by that digest) are what the coordinator
+  #               is given. No release index and no package digest: tierstore ships no archive.
   #   farm        hostkeeper's reusable workflow set-desired.yml, pinned to a revision of its own
   #               (a job that calls a workflow has no steps, which is why the gate is the
-  #               job before it): it proves the pinned hostkeeper, joins the tailnet when the
-  #               tailnet's variables are set, sets the desired version of the service tierstore
-  #               with this job's OIDC token and reads the convergence every 10 seconds until the
+  #               job before it): it proves the pinned hostkeeper (0.1.216 is the first release
+  #               whose daemon announces apt, and it is the floor in every entry), joins the
+  #               tailnet when the tailnet's variables are set, sets the desired version and
+  #               targets of the service tierstore with this job's OIDC token and reads the convergence every 10 seconds until the
   #               coordinator reports the service converged. It fails otherwise, and so nothing
   #               public follows. The only job here that holds `id-token: write`.
   #   soak        FARM_SOAK_HOURS hours (a repository variable; empty is 0, which ends at once)
   #               after the lab converged (`channels soak`). It runs only when `farm` converged.
   #
   # With no lab switched on (TIERSTORE_LAB_INSTALL not `true`; the coordinator's variables serve
-  # the desired-version workflow too, and the hand-off here waits for hostkeeper's apt installer) or no
+  # the desired-version workflow too, and the package must first meet the apt installer's rules,
+  # docs/design/distribution.md, section 5.3) or no
   # lab configured (the coordinator's two repository variables empty) farm-check is a
   # green no-op with a notice, `farm` and `soak` are skipped, and the release goes on to the
   # promotion: `promote-check` accepts exactly that. With the lab configured it must converge
@@ -1829,7 +1833,7 @@ jobs:
       enabled: ${{ steps.gate.outputs.enabled }}
       tailnet: ${{ steps.tailnet.outputs.enabled }}
       package-version: ${{ steps.desired.outputs.package-version }}
-      package-digest: ${{ steps.desired.outputs.package-digest }}
+      targets: ${{ steps.desired.outputs.targets }}
     env:
       COMMIT: ${{ needs.plan.outputs.commit }}
       TAG: ${{ needs.plan.outputs.tag }}
@@ -1866,7 +1870,7 @@ jobs:
         if: ${{ steps.gate.outputs.enabled == 'true' }}
         env:
           GH_TOKEN: ${{ github.token }}
-        run: cargo xtask release desired-deb --repo "$GITHUB_REPOSITORY" --version "${TAG#v}" --dir "$RUNNER_TEMP/desired" --output "$GITHUB_OUTPUT"
+        run: cargo xtask release desired-apt --repo "$GITHUB_REPOSITORY" --version "${TAG#v}" --min-hostkeeper 0.1.216 --dir "$RUNNER_TEMP/desired" --output "$GITHUB_OUTPUT"
 
   farm:
     needs: [plan, farm-check]
@@ -1874,13 +1878,13 @@ jobs:
     permissions:
       contents: read
       id-token: write
-    uses: komira-ai/hostkeeper/.github/workflows/set-desired.yml@32a9cc6f8242d0efbc3476391302062ff444dd47 # v0.1.44
+    uses: komira-ai/hostkeeper/.github/workflows/set-desired.yml@7307de84415a86623c0713316f4be36215461694 # v0.1.216
     with:
       service: tierstore
       version: ${{ needs.farm-check.outputs.package-version }}
-      package_digest: ${{ needs.farm-check.outputs.package-digest }}
-      hostkeeper_version: 0.1.44
-      hostkeeper_commit: 32a9cc6f8242d0efbc3476391302062ff444dd47
+      targets: ${{ needs.farm-check.outputs.targets }}
+      hostkeeper_version: 0.1.216
+      hostkeeper_commit: 7307de84415a86623c0713316f4be36215461694
       coordinator_url: ${{ vars.HOSTKEEPER_COORDINATOR_URL }}
       coordinator_ca: ${{ vars.HOSTKEEPER_COORDINATOR_CA }}
       audience: tierstore-hostkeeper-release
@@ -1891,6 +1895,7 @@ jobs:
       tailnet_client_id: ${{ vars.HOSTKEEPER_TAILNET_CLIENT_ID }}
       tailnet_audience: ${{ vars.HOSTKEEPER_TAILNET_AUDIENCE }}
       tailnet_coordinator: ${{ vars.HOSTKEEPER_TAILNET_COORDINATOR }}
+      tailnet_tag: ${{ vars.HOSTKEEPER_TAILNET_TAG }}
 
   # A timer, not a verdict: nobody approves it. Its hours start when the farm was read converged,
   # which `farm` (a called workflow, with no step of its own to stamp the time) leaves to this job's

@@ -53,7 +53,7 @@
 mod binary;
 pub mod deb;
 pub mod desired;
-pub mod desired_deb;
+pub mod desired_apt;
 pub mod desired_targets;
 pub mod glibc;
 pub mod hostkeeper_index;

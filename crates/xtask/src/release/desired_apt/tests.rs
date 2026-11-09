@@ -4,12 +4,16 @@ use serde_json::{Value, json};
 
 use super::*;
 use crate::channels::apt::index::sha256_hex;
+use crate::channels::apt::package_names;
 use crate::channels::aws::Answer;
+use crate::fetch::Sha256;
+use crate::release::hostkeeper_package::manifest;
 use crate::sums::{Line, render};
 use crate::testdir::TestDir;
 
 const REPO: &str = "example/tierstore";
 const COMMIT: &str = "0123456789abcdef0123456789abcdef01234567";
+const FLOOR: &str = "0.1.216";
 const URL: &str = "https://packages.komira.ai/apt";
 
 fn scratch(name: &str) -> TestDir {
@@ -18,9 +22,17 @@ fn scratch(name: &str) -> TestDir {
         beside
             .parent()
             .expect("deps")
-            .join("xtask-desired-deb-unit"),
+            .join("xtask-desired-apt-unit"),
         name,
     )
+}
+
+/// The architecture a package file is for (`tierstore_<version>_<arch>.deb`).
+fn arch_of(name: &str) -> &str {
+    name.trim_end_matches(".deb")
+        .rsplit('_')
+        .next()
+        .unwrap_or_default()
 }
 
 fn deb_bytes(name: &str) -> Vec<u8> {
@@ -146,10 +158,11 @@ fn ask(
         curl: Path::new("curl"),
         repo: REPO,
         version,
+        min_hostkeeper: FLOOR,
         dir,
         apt_url,
     };
-    desired_deb(gh, cdn, &request, output)
+    desired_apt(gh, cdn, &request, output)
 }
 
 fn refused(result: Result<Vec<String>, Error>) -> Vec<String> {
@@ -159,11 +172,49 @@ fn refused(result: Result<Vec<String>, Error>) -> Vec<String> {
     }
 }
 
+/// The digest of the `.deb` named `name` in the fake release.
+fn digest_of(name: &str) -> String {
+    Sha256::of(&deb_bytes(name)).to_string()
+}
+
+/// The entry sent for one architecture, written out in full.
+fn expected_entry(arch: &str) -> Value {
+    json!({
+        "installer": "apt",
+        "repository": "komira-testing",
+        "packageVersion": "1.2.3",
+        "digest": digest_of(&format!("tierstore_1.2.3_{arch}.deb")),
+        "manifest": {
+            "package": "tierstore",
+            "hook": {
+                "timeoutSecs": {
+                    "prepare": "0", "cutover": "300", "verify": "1000",
+                    "rollback": "600", "cleanup": "1300", "uninstall": "300",
+                },
+                "verifyDeadlineSecs": "1600",
+                "promotionCeilingSecs": "3600",
+                "cleanupRetries": 3,
+                "boot": "restore",
+            },
+            "run": ["tierstore.service"],
+            "healthUrl": "http://127.0.0.1:9300/readyz",
+            "params": {
+                "config_file": {"text": "/etc/tierstore/tierstore.toml"},
+                "service_manager": {"text": "systemd"},
+            },
+            "minHostkeeper": "0.1.216",
+            "installerBounds": {"stageSecs": "600", "activateSecs": "300", "removeSecs": "300"},
+        },
+    })
+}
+
 #[test]
-fn a_release_the_testing_suite_lists_with_the_digests_of_its_sums_gives_the_package_version_and_digest()
+fn a_release_the_testing_suite_lists_with_the_digests_of_its_sums_gives_the_package_version_and_one_apt_entry_per_architecture()
  {
-    // Catches: a lab told to install a version testing does not hold, or a digest that pins
-    // only one architecture or not the sums' bytes.
+    // Catches: a lab told to install a version testing does not hold, an entry that pins the
+    // digest of the other architecture or not the sums' bytes, a platform key that is not the
+    // host's (`linux-x86_64`, `linux-arm64`), a macOS entry (there is no package), and a
+    // `package-digest` output that the digest-only form needed.
     let dir = scratch("ok");
     let out = dir.join("out");
     let cdn = good_cdn();
@@ -175,23 +226,78 @@ fn a_release_the_testing_suite_lists_with_the_digests_of_its_sums_gives_the_pack
             "https://packages.komira.ai/apt/dists/testing/main/binary-arm64/Packages"
         ]
     );
-    let names = package_names("1.2.3").expect("names");
-    let expected = Sha256::of(
-        names
-            .iter()
-            .map(|n| format!("{}  {n}\n", Sha256::of(&deb_bytes(n))))
-            .collect::<String>()
-            .as_bytes(),
-    );
+    let written = std::fs::read_to_string(&out).expect("output");
+    let lines: Vec<&str> = written.lines().collect();
+    assert_eq!(lines.len(), 2, "{written}");
+    assert_eq!(lines[0], "package-version=1.2.3");
+    let targets: Value =
+        serde_json::from_str(lines[1].strip_prefix("targets=").expect("targets")).expect("JSON");
     assert_eq!(
-        std::fs::read_to_string(&out).expect("output"),
-        format!("package-version=1.2.3\npackage-digest={expected}\n")
+        targets,
+        json!({
+            "linux-x86_64": {"entries": [expected_entry("amd64")]},
+            "linux-arm64": {"entries": [expected_entry("arm64")]},
+        })
+    );
+    assert_ne!(
+        targets["linux-x86_64"]["entries"][0]["digest"],
+        targets["linux-arm64"]["entries"][0]["digest"]
     );
     assert!(
-        said[0].starts_with("release v1.2.3 (0123456789abcdef"),
+        said[0].starts_with("release v1.2.3 (0123456789abcdef")
+            && said[0].contains("for each of 2 architectures"),
         "{said:?}"
     );
     assert_eq!(said[1], "package-version=1.2.3");
+    assert_eq!(said[2], lines[1]);
+    assert!(!written.contains("package-digest"));
+    // Without --output the same lines are only printed; an output that cannot be appended to
+    // fails the verb, so that the job does not pass without its answer.
+    assert_eq!(run(&gh(), &good_cdn(), &dir, None).expect("desired"), said);
+    assert!(run(&gh(), &good_cdn(), &dir, Some(&dir)).is_err());
+}
+
+#[test]
+fn the_hook_and_health_of_an_entry_are_those_of_the_archive_manifest() {
+    // Catches: the entry's hook bounds, deadlines, boot step or health URL drifting from
+    // `packaging/hostkeeper/manifest.toml.in` (the archive that stays until the farm has moved),
+    // so that the same node is updated under two different sets of bounds.
+    let archive: toml::Table = manifest(Platform::LinuxX86_64, "1.2.3+0123456789ab", FLOOR)
+        .parse()
+        .expect("the archive manifest is TOML");
+    let hook = archive["hook"].as_table().expect("hook");
+    let sent = entry("1.2.3", &digest_of("x"), FLOOR);
+    let sent_hook = &sent["manifest"]["hook"];
+    for (key, camel) in [
+        ("verify_deadline_secs", "verifyDeadlineSecs"),
+        ("promotion_ceiling_secs", "promotionCeilingSecs"),
+    ] {
+        let want = hook[key].as_integer().expect(key).to_string();
+        assert_eq!(sent_hook[camel], json!(want), "{key}");
+    }
+    assert_eq!(
+        sent_hook["cleanupRetries"],
+        json!(hook["cleanup_retries"].as_integer().expect("retries"))
+    );
+    assert_eq!(
+        sent_hook["boot"],
+        json!(hook["boot"].as_str().expect("boot"))
+    );
+    for (step, want) in hook["timeout_secs"].as_table().expect("timeouts") {
+        assert_eq!(
+            sent_hook["timeoutSecs"][step],
+            json!(want.as_integer().expect(step).to_string()),
+            "{step}"
+        );
+    }
+    assert_eq!(
+        sent["manifest"]["healthUrl"],
+        json!(archive["health"]["url"].as_str().expect("health url"))
+    );
+    assert_eq!(
+        sent["manifest"]["params"]["config_file"]["text"],
+        json!("/etc/tierstore/tierstore.toml")
+    );
 }
 
 #[test]
@@ -258,4 +364,26 @@ fn a_release_that_is_missing_or_has_no_sums_and_flags_out_of_their_form_are_erro
     }
     let e = ask(&gh(), &good_cdn(), "v1.2.3", &dir, URL, None);
     assert!(matches!(e, Err(Error::Usage(_))));
+}
+
+#[test]
+fn a_hostkeeper_floor_that_is_not_a_plain_version_is_a_usage_error() {
+    // Catches: a `minHostkeeper` such as `v0.1.216` or `0.1` sent on to the coordinator, which
+    // refuses the whole set, after the lab stage has read the suite.
+    let dir = scratch("floor");
+    for floor in ["v0.1.216", "0.1", "0.1.216+abc", ""] {
+        let request = Request {
+            curl: Path::new("curl"),
+            repo: REPO,
+            version: "1.2.3",
+            min_hostkeeper: floor,
+            dir: &dir,
+            apt_url: URL,
+        };
+        let e = desired_apt(&gh(), &good_cdn(), &request, None).unwrap_err();
+        assert_eq!(
+            e.to_string(),
+            format!("--min-hostkeeper {floor:?} is not <major>.<minor>.<patch>"),
+        );
+    }
 }

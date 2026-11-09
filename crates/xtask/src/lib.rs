@@ -463,15 +463,19 @@ enum ReleaseVerb {
         #[arg(long, default_value = "gh")]
         gh: PathBuf,
     },
-    /// The version and digest of a release in the suite `testing` to set as tierstore's desired
-    /// version on the hostkeeper coordinator; refuses a release testing does not list with the
-    /// digests of its `SHA256SUMS`.
-    DesiredDeb {
+    /// The version and `targets` (the apt installer's entry per architecture) of a release in the
+    /// suite `testing` to set as tierstore's desired version on the hostkeeper coordinator;
+    /// refuses a release testing does not list with the digests of its `SHA256SUMS`.
+    DesiredApt {
         #[arg(long)]
         repo: String,
         /// `<major>.<minor>.<patch>`: the release `v<major>.<minor>.<patch>`.
         #[arg(long)]
         version: String,
+        /// `<major>.<minor>.<patch>`: the first hostkeeper release whose daemon announces `apt`,
+        /// the `minHostkeeper` of every entry.
+        #[arg(long)]
+        min_hostkeeper: String,
         /// Where `SHA256SUMS` of the release and the `Packages` files read are put; created when
         /// missing.
         #[arg(long)]
@@ -479,7 +483,7 @@ enum ReleaseVerb {
         /// The apt repository.
         #[arg(long, default_value = "https://packages.komira.ai/apt")]
         apt_url: String,
-        /// Append `package-version=` and `package-digest=` to this file (`GITHUB_OUTPUT`).
+        /// Append `package-version=` and `targets=` to this file (`GITHUB_OUTPUT`).
         #[arg(long)]
         output: Option<PathBuf>,
         #[arg(long, default_value = "gh")]
@@ -780,21 +784,23 @@ fn run(cli: Cli) -> Result<Vec<String>, Error> {
                 output: output.as_deref(),
             },
         ),
-        Verb::Release(ReleaseVerb::DesiredDeb {
+        Verb::Release(ReleaseVerb::DesiredApt {
             repo,
             version,
+            min_hostkeeper,
             dir,
             apt_url,
             output,
             gh,
             curl,
-        }) => release::desired_deb::desired_deb(
+        }) => release::desired_apt::desired_apt(
             &release::RealGh(gh),
             &channels::check::RealHost,
-            &release::desired_deb::Request {
+            &release::desired_apt::Request {
                 curl: &curl,
                 repo: &repo,
                 version: &version,
+                min_hostkeeper: &min_hostkeeper,
                 dir: &dir,
                 apt_url: &apt_url,
             },
