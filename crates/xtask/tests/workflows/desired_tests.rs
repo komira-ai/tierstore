@@ -452,7 +452,8 @@ fn the_channel_wait_comes_after_the_check_and_the_comparison_after_the_wait() {
 fn a_trigger_an_input_or_a_job_other_than_the_two_ways_in_is_named() {
     // Catches: a push or a schedule setting a version, the completion of another workflow (ci,
     // whose success says nothing of a release) or of release on another branch, the dispatch
-    // dropped (no rollback by hand), a second input or none, an input that is not a required
+    // dropped (no rollback by hand), the two ways in sharing one concurrency group or a run
+    // cancelled, a second input or none, an input that is not a required
     // string, a job beside the two, and a document that does not parse being read as clean.
     let text = text_of(FILE);
     for (replace, with, says) in [
@@ -505,6 +506,17 @@ fn a_trigger_an_input_or_a_job_other_than_the_two_ways_in_is_named() {
             "        type: string\n        required: true\n",
             "        type: string\n        required: false\n",
             "input version: required is Some(\"false\"), not true",
+        ),
+        // One group for both ways in: a waiting rollback by hand is replaced by a release run.
+        (
+            "  group: hostkeeper-desired-${{ github.event_name == 'workflow_dispatch' && 'dispatch' || 'release' }}\n",
+            "  group: hostkeeper-desired\n",
+            "concurrency: group is Some(\"hostkeeper-desired\"), not",
+        ),
+        (
+            "  cancel-in-progress: false\n",
+            "  cancel-in-progress: true\n",
+            "concurrency: cancel-in-progress is Some(\"true\"), not false",
         ),
         (
             "jobs:\n  check:\n",

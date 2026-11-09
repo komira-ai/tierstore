@@ -206,7 +206,8 @@ fn archive(
     let name = file_name(version, platform);
     let (sha, bytes) = sha256_file(&dir.join(&name))?;
     let mut problems = Vec::new();
-    if sha.to_string() != listed.sha256.as_str() || bytes != listed.bytes {
+    // The SHA-256 decides: other bytes of the listed size are other bytes too.
+    if sha.to_string() != listed.sha256.as_str() {
         problems.push(format!(
             "{name}: sha256 {sha} and {bytes} bytes, not the sha256 {} and {} bytes {INDEX} lists (package_digest_mismatch)",
             listed.sha256.as_str(),

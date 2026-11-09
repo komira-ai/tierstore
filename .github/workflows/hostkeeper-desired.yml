@@ -60,7 +60,11 @@
 #                 out stage by stage, longer than a job should hold this workflow's group. The job
 #                 ends once the coordinator stored the version (`reason` `not_waited`).
 #
-# The two jobs share one group and a run is never cancelled: a second run waits for the first.
+# One run at a time of each way in, never cancelled: the runs after a release share the group
+# `hostkeeper-desired-release`, where a newer waiting run replaces an older one (each derives the
+# newest release itself, so nothing is lost), and the runs by hand share
+# `hostkeeper-desired-dispatch`, so that a rollback waiting for its turn is never replaced by the
+# completion of a release run.
 #
 # The workflow lint (crates/xtask/tests/workflows, desired.rs) holds this file to what is said here.
 name: hostkeeper-desired
@@ -80,7 +84,7 @@ on:
 permissions: {}
 
 concurrency:
-  group: hostkeeper-desired
+  group: hostkeeper-desired-${{ github.event_name == 'workflow_dispatch' && 'dispatch' || 'release' }}
   cancel-in-progress: false
 
 jobs:

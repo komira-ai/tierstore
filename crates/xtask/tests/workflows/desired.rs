@@ -7,6 +7,8 @@
 //! - anything but `workflow_run` and `workflow_dispatch` starts it; the `workflow_run` is not the
 //!   completion of `release` on `main`; or the dispatch's inputs are not the one required string
 //!   `version`;
+//! - its concurrency is not [`GROUP`] with `cancel-in-progress: false` (a run by hand is never
+//!   replaced by the completion of a release run while it waits, nor any run cancelled);
 //! - its jobs are not `check` and `set-desired`; `check`'s `if:` is not [`DESIRED_IF`] (the
 //!   repository variable is the gate, at the job level, only `main` runs it, and a release run is
 //!   acted on only when it succeeded, on `main` of this repository) or `set-desired`'s is not
@@ -37,6 +39,10 @@ pub const FILE: &str = "hostkeeper-desired.yml";
 /// The `if:` of `check`: a run of `main` while the repository variable is `true`, by hand, or
 /// after a run of `release.yml` that succeeded on `main` of this repository.
 pub const DESIRED_IF: &str = "${{ github.ref == 'refs/heads/main' && vars.TIERSTORE_SETS_DESIRED == 'true' && (github.event_name == 'workflow_dispatch' || (github.event_name == 'workflow_run' && github.event.workflow_run.conclusion == 'success' && github.event.workflow_run.head_branch == 'main' && github.event.workflow_run.head_repository.full_name == github.repository)) }}";
+
+/// The concurrency group: one for the runs by hand, one for the runs after a release.
+pub const GROUP: &str =
+    "hostkeeper-desired-${{ github.event_name == 'workflow_dispatch' && 'dispatch' || 'release' }}";
 
 /// The `if:` of `set-desired`: the gate again, and `check` chose a release.
 pub const SET_IF: &str = "${{ github.ref == 'refs/heads/main' && vars.TIERSTORE_SETS_DESIRED == 'true' && needs.check.outputs.set == 'true' }}";
@@ -156,6 +162,13 @@ pub fn desired_problems(text: &str) -> Vec<String> {
         Err(e) => return vec![e],
     };
     let mut problems = trigger_problems(entry(&doc, "on"));
+    let concurrency = entry(&doc, "concurrency");
+    for (key, want) in [("group", GROUP), ("cancel-in-progress", "false")] {
+        let got = concurrency.and_then(|c| at(c, &[key]));
+        if got != Some(want) {
+            problems.push(format!("concurrency: {key} is {got:?}, not {want}"));
+        }
+    }
     let jobs = entry(&doc, "jobs").map_or(&[][..], entries);
     let mut found: Vec<&str> = jobs.iter().filter_map(|(k, _)| k.as_str()).collect();
     found.sort_unstable();
