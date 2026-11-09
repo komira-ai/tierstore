@@ -291,7 +291,9 @@ section 5). Nobody approves a step.
    was published for it to read, and a failure stops the release before anything public changes:
    - `check-apt` (amd64 on `ubuntu-24.04`, arm64 on `ubuntu-24.04-arm`) runs `xtask` in a clean
      `ubuntu@sha256:...` container, adds `packages.komira.ai` with the published keyring and the
-     suite `testing` (a deb822 source with `Signed-By`), installs `tierstore=<version>`, and checks
+     suite `testing` (a deb822 source with `Signed-By`), installs `tierstore=<version>` (after an
+     `apt-get update` and `apt-get dist-upgrade` of the image, which the digest pin leaves older than
+     the archive, and before the install of `ca-certificates` and `curl`), and checks
      that `tierstore --version` prints the release, the unit, the `sysusers.d` entry and the
      conffile exist, and the service is neither enabled nor running
      (`cargo xtask channels check-apt`).

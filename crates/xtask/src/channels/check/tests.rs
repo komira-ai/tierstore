@@ -139,7 +139,7 @@ fn apt<'a>(root: &'a Path) -> Apt<'a> {
 #[test]
 fn a_clean_install_from_testing_is_checked_and_adds_the_repository_the_way_a_user_does() {
     // Catches: a source that is not deb822 with Signed-By and the suite testing, a package
-    // installed at no version, and the order (certificates, keyring, source, update, install).
+    // installed at no version, and the order (update, upgrade, certificates, keyring, source, update, install).
     let dir = scratch("apt-ok");
     let machine = Machine::new(&dir);
     let said = check_apt(&machine, &apt(&dir)).expect("checked");
@@ -151,6 +151,7 @@ fn a_clean_install_from_testing_is_checked_and_adds_the_repository_the_way_a_use
             .collect::<Vec<_>>(),
         [
             "dpkg",
+            "apt-get",
             "apt-get",
             "apt-get",
             "curl",
@@ -272,6 +273,7 @@ fn a_program_that_fails_is_named_with_what_it_said_and_a_machine_of_another_arch
     // Catches: an apt-get update that fails (a signature apt could not verify) read as a pass.
     for (refuse, program) in [
         ("update", "apt-get update"),
+        ("dist-upgrade", "apt-get dist-upgrade"),
         ("ca-certificates", "ca-certificates"),
         ("--output", "--output"),
         ("tierstore=", "tierstore=1.2.3"),
@@ -541,4 +543,31 @@ fn a_script_that_cannot_be_downloaded_or_fails_and_flags_out_of_their_form_are_e
         assert!(matches!(check_install_sh(&host, &r), Err(Error::Usage(_))));
     }
     assert!(host.0.calls().is_empty());
+}
+
+#[test]
+fn the_image_is_updated_and_upgraded_before_certificates_and_curl_are_installed() {
+    // Catches: the failure of the first release's amd64 install check, `apt-get install -y
+    // ca-certificates curl` on the digest-pinned ubuntu:24.04 image refused with "you have held
+    // broken packages" because the image's packages are older than the archive's: the apt-get
+    // calls are `update`, then the upgrade, then the install of the two packages, before the
+    // repository is added, and the second `update` follows the source file.
+    let dir = scratch("apt-upgrade-order");
+    let machine = Machine::new(&dir);
+    check_apt(&machine, &apt(&dir)).expect("checked");
+    let calls: Vec<String> = machine
+        .calls()
+        .into_iter()
+        .filter(|c| c.starts_with("apt-get "))
+        .collect();
+    assert_eq!(
+        calls,
+        [
+            "apt-get update",
+            "apt-get dist-upgrade -y -o Dpkg::Options::=--force-confold",
+            "apt-get install -y --no-install-recommends ca-certificates curl",
+            "apt-get update",
+            "apt-get install -y --no-install-recommends tierstore=1.2.3",
+        ]
+    );
 }
