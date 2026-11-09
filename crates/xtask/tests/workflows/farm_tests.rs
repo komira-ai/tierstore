@@ -3,7 +3,7 @@
 //! named, and every job that makes the release public is shown to wait for `promote-check`, which waits for the soak.
 
 use super::desired::{TAILNET_COORDINATOR, coordinator_problems};
-use super::farm::{FARM_IF, SOAK_IF, farm_problems, pin_problems};
+use super::farm::{FARM_IF, SOAK_IF, farm_problems};
 use super::lint::{lint, release_problems};
 use super::platforms_tests::{each_named, in_job};
 use super::{text_of, yaml};
@@ -423,38 +423,6 @@ fn a_farm_job_that_is_missing_or_a_soak_without_steps_is_named() {
     ] {
         assert!(problems.contains(&says.to_owned()), "{says}: {problems:?}");
     }
-}
-
-#[test]
-fn farm_calls_the_same_hostkeeper_release_as_the_run_by_hand() {
-    // Catches: the coordinator's allow-list naming the `job_workflow_ref` of one pin while the
-    // farm job calls another, so that its token is refused after a bump of one file alone.
-    let release = text_of("release.yml");
-    let desired = text_of("hostkeeper-desired.yml");
-    assert_eq!(pin_problems(&release, &desired), Vec::<String>::new());
-    let bumped = desired.replace(
-        "32a9cc6f8242d0efbc3476391302062ff444dd47 # v0.1.44",
-        "2321ed897b4b9269471eadf169d7f29989161b4a # v0.1.66",
-    );
-    assert_ne!(bumped, desired);
-    let problems = pin_problems(&release, &bumped);
-    assert_eq!(problems.len(), 1, "{problems:?}");
-    assert!(
-        problems[0].starts_with("farm: the pin Some((\"32a9cc6f"),
-        "{problems:?}"
-    );
-    // The comment is part of the pin: a release named differently is another pin.
-    let renamed = release.replace("# v0.1.44", "# v0.1.45");
-    assert_eq!(pin_problems(&renamed, &desired).len(), 1);
-    // A farm job that is not hostkeeper's workflow has no pin at all.
-    let other = release.replace(
-        "komira-ai/hostkeeper/.github/workflows/set-desired.yml@",
-        "komira-ai/hostkeeper/.github/workflows/other.yml@",
-    );
-    assert!(pin_problems(&other, &desired)[0].starts_with("farm: the pin None"));
-    // A file that does not parse is named, not skipped.
-    assert!(!pin_problems("a: [", &desired).is_empty());
-    assert!(!pin_problems(&release, "a: [").is_empty());
 }
 
 #[test]

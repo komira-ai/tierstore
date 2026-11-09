@@ -857,6 +857,50 @@ fn release_desired_refuses_a_release_without_an_index_with_status_1_and_a_bad_ve
 }
 
 #[test]
+fn release_desired_after_a_run_that_published_nothing_sets_nothing_and_both_ways_are_refused() {
+    // Catches: `--after-run` not reaching the verb (it asks GitHub for the jobs of that run,
+    // through the `gh` given), a run whose publish was skipped handing on anything but
+    // `set=false`, and `--version` with `--after-run` not reported as a usage error.
+    let d = dir("release-desired-after-run");
+    put(
+        &d,
+        &format!("repos/{REPO}/actions/runs/7/jobs?per_page=100"),
+        "{\"total_count\":1,\"jobs\":[{\"name\":\"publish\",\"conclusion\":\"skipped\"}]}",
+    );
+    let args = |version: &'static str| {
+        [
+            "release",
+            "desired",
+            "--repo",
+            REPO,
+            "--version",
+            version,
+            "--after-run",
+            "7",
+            "--dir",
+            "desired",
+            "--output",
+            "github-output",
+            "--gh",
+            FAKE,
+        ]
+    };
+    let o = run(&d, &args(""));
+    assert_eq!(o.status.code(), Some(0), "{}", stderr(&o));
+    assert_eq!(
+        std::fs::read_to_string(d.join("github-output")).expect("the output"),
+        "set=false\n"
+    );
+    assert!(!d.join("desired").exists());
+    let o = run(&d, &args("0.3.53"));
+    assert_eq!(o.status.code(), Some(2), "{}", stderr(&o));
+    assert_eq!(
+        stderr(&o),
+        "xtask: give one of --version and --after-run, not both and not neither\n"
+    );
+}
+
+#[test]
 fn release_desired_deb_refuses_a_release_without_sums_with_status_1_and_a_bad_version_with_status_2()
  {
     // Catches: the flags of `release desired-deb` not reaching it, a release without the digests

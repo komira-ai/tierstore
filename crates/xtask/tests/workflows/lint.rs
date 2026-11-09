@@ -21,7 +21,7 @@
 //! Keys are matched exactly. What this does not evaluate it refuses: a YAML tag, a second
 //! document, an alias to an unfinished node, a document that does not parse.
 
-use super::desired::DESIRED_IF;
+use super::desired::SET_IF as DESIRED_SET_IF;
 use super::yaml::{self, Node, Value};
 
 /// A write permission a job may hold: the workflow file, the job, the scope, and the `if:` of
@@ -66,7 +66,7 @@ pub const WRITE_ALLOWED: &[Allowed] = &[
         file: "hostkeeper-desired.yml",
         job: "set-desired",
         scope: "id-token",
-        condition: DESIRED_IF,
+        condition: DESIRED_SET_IF,
     },
     Allowed {
         file: "release.yml",

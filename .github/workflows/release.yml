@@ -1799,8 +1799,8 @@ jobs:
   #               package of both architectures with the digests of the release's SHA256SUMS.
   #               Its package-version (the package's, `X.Y.Z`) and package-digest are what the
   #               coordinator is given.
-  #   farm        hostkeeper's reusable workflow set-desired.yml, pinned as hostkeeper-desired
-  #               pins it (a job that calls a workflow has no steps, which is why the gate is the
+  #   farm        hostkeeper's reusable workflow set-desired.yml, pinned to a revision of its own
+  #               (a job that calls a workflow has no steps, which is why the gate is the
   #               job before it): it proves the pinned hostkeeper, joins the tailnet when the
   #               tailnet's variables are set, sets the desired version of the service tierstore
   #               with this job's OIDC token and reads the convergence every 10 seconds until the

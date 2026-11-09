@@ -171,7 +171,7 @@ pub fn set_problems(found: &[Platform], wanted: &[Platform]) -> Vec<String> {
 ///
 /// # Errors
 /// The file cannot be read.
-pub fn digest_file(path: &Path) -> Result<(Sha256Hex, u64), Error> {
+pub fn sha256_file(path: &Path) -> Result<(fetch::Sha256, u64), Error> {
     let what = || format!("read {}", path.display());
     let mut file = std::fs::File::open(path).map_err(Error::spawn(what()))?;
     let mut hasher = Sha256::new();
@@ -185,7 +185,16 @@ pub fn digest_file(path: &Path) -> Result<(Sha256Hex, u64), Error> {
         hasher.update(&buffer[..n]);
         bytes += n as u64;
     }
-    let hex = hex::encode(hasher.finalize());
+    Ok((fetch::Sha256(hasher.finalize().into()), bytes))
+}
+
+/// [`sha256_file`], the digest as hostkeeper's type.
+///
+/// # Errors
+/// The file cannot be read.
+pub fn digest_file(path: &Path) -> Result<(Sha256Hex, u64), Error> {
+    let (sha, bytes) = sha256_file(path)?;
+    let hex = sha.to_string();
     let digest = Sha256Hex::parse(&hex).ok_or_else(|| Error::Failed(hex.clone()))?;
     Ok((digest, bytes))
 }
