@@ -13,8 +13,14 @@ use xtask::release::hostkeeper_package::{BINARY, LAUNCHD_LABEL};
 
 use crate::support::{
     CURRENT_BINARY, LINUX, MIN_HOSTKEEPER, PACKAGES, Scratch, VERSION, Value, hk_platform, integer,
-    listing, manifest_toml, package, plist, seconds, string, text, unpack, version_dir, write_tree,
+    listing, manifest_toml, package, plist, string, text, unpack, version_dir, write_tree,
 };
+
+/// The drain a Mac process has with the plist giving no flag for it: the macOS defaults of
+/// `server.drain_lb_wait` (1 s) and `server.drain_deadline` (60 s). The test
+/// `the_macos_defaults_are_the_drain_the_plist_waits_for` of the tierstore crate pins the defaults
+/// to these.
+const MACOS_DRAIN_SECS: u64 = 1 + 60;
 
 /// The launchd job of the macOS package.
 const PLIST: &str = "units/tierstore.plist";
@@ -108,18 +114,7 @@ fn the_plist_runs_the_binary_of_current_as_tierstore_and_its_exit_timeout_covers
     let words: Vec<&str> = arguments.iter().map(string).collect();
     let toml = manifest_toml(&archive);
     let config = toml["params"]["config_file"].as_str().expect("a string");
-    assert_eq!(
-        words,
-        [
-            CURRENT_BINARY,
-            "--config",
-            config,
-            "--drain-lb-wait",
-            "1s",
-            "--drain-deadline",
-            "60s"
-        ]
-    );
+    assert_eq!(words, [CURRENT_BINARY, "--config", config]);
     assert!(CURRENT_BINARY.ends_with(&format!("/current/{BINARY}")));
     assert_eq!(string(&job["UserName"]), "_tierstore");
     assert_eq!(string(&job["GroupName"]), "_tierstore");
@@ -127,7 +122,7 @@ fn the_plist_runs_the_binary_of_current_as_tierstore_and_its_exit_timeout_covers
     assert_eq!(job["KeepAlive"], Value::Bool(true));
     assert_eq!(integer(&job["ThrottleInterval"]), 30);
     let exit_timeout = u64::try_from(integer(&job["ExitTimeOut"])).expect("positive");
-    let drain = seconds(words[4]) + seconds(words[6]);
+    let drain = MACOS_DRAIN_SECS;
     assert!(
         exit_timeout > drain,
         "ExitTimeOut {exit_timeout} s, drain {drain} s"

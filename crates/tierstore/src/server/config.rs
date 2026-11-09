@@ -36,7 +36,10 @@
 //! its name and never its value. A key whose name says it holds a secret is refused, unknown or
 //! not: keys and credentials are paths of files (a key ending in `_file` or `_files`).
 //!
-//! Per-run knobs are flags only: `--config`, `--check-config` and the two parts of the drain.
+//! The flags of a run are `--config`, `--check-config` and `--capabilities` (the last two are
+//! for a host updater), and the two parts of the drain, which are keys of `[server]` too
+//! (`drain_lb_wait`, `drain_deadline`); the flag stays for the units of the releases before, and a
+//! start that gets a part by both is refused.
 
 use std::fmt;
 use std::net::SocketAddr;
@@ -154,11 +157,24 @@ pub(super) const KEYS: &[(&str, &[&str])] = &[
     ("oci-echo-bytes", &["params.echo_bytes"]),
 ];
 
-/// The default of `--drain-lb-wait`, which a start from a file takes when the flag is not given.
+/// The default of `server.drain_lb_wait`, which a start takes when neither the key nor
+/// `--drain-lb-wait` is given: 10 s, where a load balancer may be in front of the node.
+#[cfg(not(target_os = "macos"))]
 pub(super) const DEFAULT_DRAIN_LB_WAIT: Duration = Duration::from_secs(10);
 
-/// The default of `--drain-deadline`.
+/// The default of `server.drain_lb_wait` on macOS: 1 s, as the node is a loopback service there
+/// and no load balancer waits to see the 503.
+#[cfg(target_os = "macos")]
+pub(super) const DEFAULT_DRAIN_LB_WAIT: Duration = Duration::from_secs(1);
+
+/// The default of `server.drain_deadline`: 15 minutes.
+#[cfg(not(target_os = "macos"))]
 pub(super) const DEFAULT_DRAIN_DEADLINE: Duration = Duration::from_secs(15 * 60);
+
+/// The default of `server.drain_deadline` on macOS: 60 s, which the launchd job's `ExitTimeOut`
+/// is sized for.
+#[cfg(target_os = "macos")]
+pub(super) const DEFAULT_DRAIN_DEADLINE: Duration = Duration::from_secs(60);
 
 /// Why a start from the file `--config` names is refused. Every one of
 /// them but an unreadable file is a start that a restart cannot mend; all exit with status 2.
@@ -221,13 +237,17 @@ pub enum ConfigError {
     },
 }
 
-/// The knobs of one run, which are flags even when the rest is in a file.
-#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+/// What the run itself gives, beside the file: the flags of the drain, which a unit of the
+/// releases before still passes, and the directory the service manager made for the service.
+#[derive(Clone, Debug, Default, PartialEq, Eq)]
 pub(super) struct PerRun {
-    /// `--drain-lb-wait`.
-    pub drain_lb_wait: Duration,
-    /// `--drain-deadline`.
-    pub drain_deadline: Duration,
+    /// `--drain-lb-wait`, if given; the file's `server.drain_lb_wait` is refused beside it.
+    pub drain_lb_wait: Option<Duration>,
+    /// `--drain-deadline`, if given; the file's `server.drain_deadline` is refused beside it.
+    pub drain_deadline: Option<Duration>,
+    /// The service's state directory (systemd's `STATE_DIRECTORY`), if the unit has one: where
+    /// `server.handoff_socket` is by default (see [`config_handoff`](super::config_handoff)).
+    pub state_dir: Option<PathBuf>,
 }
 
 /// What a tier is made of.
@@ -331,6 +351,14 @@ pub(super) struct ServerTable {
     pub dir_read_chunk: Option<Size>,
     pub s3_single_put_max: Option<Size>,
     pub s3_part_bytes: Option<Size>,
+    /// How long, after the drain began, the server goes on serving everything, so that a load
+    /// balancer sees the 503 of `/readyz`; the default is `DEFAULT_DRAIN_LB_WAIT`.
+    #[serde(default)]
+    pub drain_lb_wait: Option<Dur>,
+    /// How long the drain waits for requests in flight and for the connections it closes, once
+    /// the settle is over; the default is `DEFAULT_DRAIN_DEADLINE`.
+    #[serde(default)]
+    pub drain_deadline: Option<Dur>,
     // The keys of `config_handoff`.
     #[serde(default)]
     pub handoff_socket: Option<PathBuf>,
@@ -736,7 +764,7 @@ pub(super) fn storage(
     let lease_ttl = duration(hot.lease_ttl, Duration::from_secs(30));
     let reconcile_tuning = reconcile_tuning(&hot, lease_ttl)?;
     let entry_tuning = entry_tuning(&hot, lease_ttl, reconcile_tuning.lease_margin)?;
-    let handoff = handoff_of(&server, lock_file.as_deref())?;
+    let handoff = handoff_of(&server, lock_file.as_deref(), per_run.state_dir.as_deref())?;
     let oci = fronts.oci;
     let shared = front_of(server, fronts.s3, per_run)?;
     let front = shared.front;
@@ -916,8 +944,20 @@ pub(super) fn front_of(
             .aws_chunked_max_line_bytes
             .unwrap_or(DEFAULT_AWS_CHUNKED_MAX_LINE_BYTES),
         min_secret_bytes: server.min_secret_bytes.unwrap_or(DEFAULT_MIN_SECRET_BYTES),
-        drain_lb_wait: per_run.drain_lb_wait,
-        drain_deadline: per_run.drain_deadline,
+        drain_lb_wait: drain_part(
+            "drain_lb_wait",
+            "--drain-lb-wait",
+            server.drain_lb_wait,
+            per_run.drain_lb_wait,
+            DEFAULT_DRAIN_LB_WAIT,
+        )?,
+        drain_deadline: drain_part(
+            "drain_deadline",
+            "--drain-deadline",
+            server.drain_deadline,
+            per_run.drain_deadline,
+            DEFAULT_DRAIN_DEADLINE,
+        )?,
         io,
     };
     Ok(Shared {
@@ -926,6 +966,28 @@ pub(super) fn front_of(
         s3_client,
         backend_check_wait: server.backend_check_wait.map(|wait| wait.0),
     })
+}
+
+/// One part of the drain: the key of `[server]`, or the flag of a unit of the releases before, or
+/// `default`.
+///
+/// # Errors
+/// A part that the file and the flag both give, which names the key and the flag.
+fn drain_part(
+    key: &str,
+    flag: &str,
+    file: Option<Dur>,
+    given: Option<Duration>,
+    default: Duration,
+) -> Result<Duration, ConfigError> {
+    match (file, given) {
+        (Some(_), Some(_)) => Err(invalid(
+            &format!("server.{key}"),
+            format!("is set in the file and by {flag} too; give it once, in the file"),
+        )),
+        (Some(file), None) => Ok(file.0),
+        (None, given) => Ok(given.unwrap_or(default)),
+    }
 }
 
 #[cfg(test)]

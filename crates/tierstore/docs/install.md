@@ -159,7 +159,7 @@ To start it at boot, add the section in a drop-in (`systemctl edit tierstore`, w
 
 The unit restarts a failed start after 30 seconds. It does not restart exit status 2 (a command line or file the process refused, which a restart cannot mend) or 3 (the file system of a cache directory answered the start-up check of the cache wrongly). After 5 failed starts in an hour systemd stops trying; `systemctl reset-failed tierstore` and a new start try again. [Troubleshooting](troubleshooting.md) lists the exit statuses.
 
-`TimeoutStopSec=` in the unit is above the sum of `--drain-lb-wait`, `--drain-deadline` and the reconciler's lease wait, so systemd does not kill a drain in progress. If you raise `--drain-deadline`, raise it too.
+`TimeoutStopSec=` in the unit is above the sum of `server.drain_lb_wait`, `server.drain_deadline` (10s and 15m unless the file sets them) and the reconciler's lease wait, so systemd does not kill a drain in progress. If you raise `server.drain_deadline`, raise it too.
 
 ## Updates through hostkeeper
 
@@ -174,8 +174,8 @@ On Linux an instance starts only when its marker file, `/var/lib/tierstore/run-a
 
 ### What this does not do yet
 
-- An update is a hand-over only when both releases list `handoff-socket-v1` in `tierstore --capabilities` (and `handoff-cache-v1` too, for a configuration with a `[local_cache]` table) and the configuration names a `handoff_socket`; otherwise it is a restart, with a gap. This binary lists `handoff-socket-v1`, so the first update that hands over is the one from this release to a later one; the update to this release of a node with `[local_cache]` needs `mode = "restart"` in its params, since its configuration cannot have the key while the earlier release runs ([the hand-over socket](update-hook.md#the-hand-over-socket)).
-- An instance stops in at most 975 s (the 70 s `--drain-lb-wait`, the 900 s drain and 5 s for the lease); the unit's `TimeoutStopSec=` is above it, so a `cleanup` that finds the old instance still draining is deferred and run again.
+- An update is a hand-over only when both releases list `handoff-socket-v1` in `tierstore --capabilities` (and `handoff-cache-v1` too, for a configuration with a `[local_cache]` table) and the hot tier is not a directory; otherwise it is a restart, with a gap. The configuration need not name a `handoff_socket`: a release that lists `handoff-state-dir-v1` defaults it to `handoff.sock` in the unit's state directory, and an update from one that does not is a restart. This binary lists `handoff-socket-v1`, so the first update that hands over is the one from this release to a later one; the update to this release from one that does not list the words is a restart, which the hook chooses itself ([the hand-over socket](update-hook.md#the-hand-over-socket)).
+- An instance stops in at most 975 s (the 70 s `server.drain_lb_wait`, the 900 s drain and 5 s for the lease); the unit's `TimeoutStopSec=` is above it, so a `cleanup` that finds the old instance still draining is deferred and run again.
 
 ## Other ways to take it
 

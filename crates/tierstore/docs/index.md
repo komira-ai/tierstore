@@ -51,13 +51,12 @@ Each key, in one line:
 | `cold_store.kind` | the kind of the cold tier |
 | `cold_store.path` | the directory of the cold tier, an absolute path; put it on the big disk, and not at the hot tier's path |
 
-Every other key keeps its default. Make the directories and the key file, check the file, activate the new store once, and start tierstore:
+Every other key keeps its default. Make the directories and the key file, activate the new store once, and start tierstore:
 
 ```sh
 sudo install -d -o "$USER" /srv/tierstore/hot /srv/tierstore/cold
 printf 'AKIDEXAMPLE\nexample-secret-change-me\n' > /srv/tierstore/access.key
 chmod 0600 /srv/tierstore/access.key
-tierstore --config /srv/tierstore/tierstore.toml --check-config
 tierstore format-epoch --hot dir:/srv/tierstore/hot --activate --apply
 tierstore --config /srv/tierstore/tierstore.toml
 ```

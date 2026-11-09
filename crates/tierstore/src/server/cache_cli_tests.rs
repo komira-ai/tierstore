@@ -37,8 +37,9 @@ const SECRET: &str = "cache-secret-0123456789";
 
 /// The knobs of a run whose drain does not wait.
 pub(super) const QUICK: PerRun = PerRun {
-    drain_lb_wait: Duration::from_millis(50),
-    drain_deadline: Duration::from_secs(60),
+    drain_lb_wait: Some(Duration::from_millis(50)),
+    drain_deadline: Some(Duration::from_secs(60)),
+    state_dir: None,
 };
 
 /// A scratch directory with a key file in it.

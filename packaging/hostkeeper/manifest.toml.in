@@ -14,7 +14,7 @@
 #   or `launchd` (with `launchd_label` on macOS), as the update hook reads them
 #   (crates/tierstore/docs/update-hook.md, "The params file"). There is no `mode`, so an update
 #   on Linux is a hand-over when both releases can do it and a restart when they cannot, and the
-#   node's configuration must name `server.handoff_socket` ("The hand-over socket" there).
+#   node's configuration may leave `server.handoff_socket` out ("The hand-over socket" there).
 #
 # The bounds are the same on both systems. `cutover` (300 s) covers, on Linux, the start of the
 # idle instance and the hook's wait for readiness and for the build gauge, and, on macOS, the

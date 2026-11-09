@@ -94,6 +94,16 @@ pub const HANDOFF_CAPABILITY: &str = crate::server::build_info::HANDOFF_SOCKET_C
 /// sockets over too. Both releases need it, beside [`HANDOFF_CAPABILITY`], for a hand-over of a
 /// node whose configuration has `[local_cache]`.
 pub const CACHE_HANDOFF_CAPABILITY: &str = crate::server::build_info::HANDOFF_CACHE_CAPABILITY;
+/// The capability of a release whose `server.handoff_socket` defaults to `handoff.sock` in the
+/// service's state directory (`STATE_DIRECTORY`, which the template's `StateDirectory=` sets).
+/// Both releases need it, beside [`HANDOFF_CAPABILITY`], for a hand-over of a node whose
+/// configuration leaves the key out.
+pub const HANDOFF_STATE_DIR_CAPABILITY: &str =
+    crate::server::build_info::HANDOFF_STATE_DIR_CAPABILITY;
+/// The table of the configuration that holds the hot tier.
+pub const HOT_STORE_TABLE: &str = "hot_store";
+/// The `kind` of a tier that is a directory of the file system.
+pub const DIR_TIER_KIND: &str = "dir";
 /// The table of the configuration that makes a node one with a local cache.
 pub const LOCAL_CACHE_TABLE: &str = "local_cache";
 /// The configuration key of the hand-over socket, in the `[server]` table.

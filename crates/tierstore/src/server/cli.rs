@@ -160,24 +160,26 @@ pub struct Args {
     /// With `--config`: loads and checks the file as a start does (the file, and the key files it
     /// names) and exits with status 0 and no output, or prints the refusal and exits with status
     /// 2. Nothing is bound, opened or asked of the network. Without `--config` it is a usage
-    /// error.
-    #[arg(long)]
+    /// error. The host updater's hook runs it before an update; it is not in `--help`, as an
+    /// operator writes the file and enables the service.
+    #[arg(long, hide = true)]
     pub check_config: bool,
     /// Prints the capabilities of this build, one to a line, and exits with status 0 without
     /// starting anything. It needs no other flag and is refused with any (status 2). A host
     /// updater asks it of a release before it hands over to it.
     // Never read: `main` finds the flag in the raw arguments before they are parsed. The field is
-    // here so that `--help` and the docs checks know the flag.
-    #[arg(long)]
+    // here so that the parser and the docs checks know the flag; it is not in `--help`.
+    #[arg(long, hide = true)]
     pub capabilities: bool,
-    /// How long, after the drain began, the server goes on serving everything, so that the
-    /// 503 of `/readyz` is seen: a number and `ms`, `s`, `m` or `h`.
-    #[arg(long, default_value = "10s", value_parser = parse_duration)]
-    pub drain_lb_wait: Duration,
-    /// How long the drain waits for requests in flight, for the answers being sent, and for the
-    /// connections it closes, once the settle is over.
-    #[arg(long, default_value = "15m", value_parser = parse_duration)]
-    pub drain_deadline: Duration,
+    /// Kept for the units and scripts of the releases before: the same as `server.drain_lb_wait`
+    /// of the file, which is where it is set now. A start that gets both the flag and the key is
+    /// refused with status 2. A number and `ms`, `s`, `m` or `h`.
+    #[arg(long, hide = true, value_parser = parse_duration)]
+    pub drain_lb_wait: Option<Duration>,
+    /// Kept for the units and scripts of the releases before: the same as `server.drain_deadline`
+    /// of the file. Given with the key it is refused, as `--drain-lb-wait` is.
+    #[arg(long, hide = true, value_parser = parse_duration)]
+    pub drain_deadline: Option<Duration>,
 }
 
 /// The settings of a storage node, made of its configuration file (see

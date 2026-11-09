@@ -24,8 +24,9 @@ The operator guide (install, keys and roles, configuration, operations, troubles
 The settings that describe the data path are in one TOML file given with `--config <path>`:
 `[[interface]]` (the fronts: `type = "s3"` or `"oci"`, with `params`), `[server]`, `[hot_store]`,
 `[cold_store]`, `[local_cache]` and `[[policy]]` (`src/server/config.rs`). The binary takes no flag
-for any of it; the flags of a run are `--config`, `--check-config`, `--capabilities` and the two
-of the drain, and a flag that used to hold a setting is refused with the key that replaces it. A
+for any of it; the flag of a run is `--config` (`--check-config` and `--capabilities` are for a host
+updater's hook, and the two flags of the drain are kept for old units; the drain is
+`server.drain_lb_wait` and `server.drain_deadline`), and a flag that used to hold a setting is refused with the key that replaces it. A
 file holds no secret, only the paths of key files, and refuses a key or a table it does not know.
 The format and the rules are in `docs/configuration.md`.
 
@@ -45,7 +46,7 @@ What waiting costs, as the code does it:
   the number of connections the server accepts.
 - A waiter counts as a request in flight. During a drain the server waits for it, so a drain can
   take up to `server.put_permit_wait` longer than without waiting, and never longer than
-  `--drain-deadline`.
+  `server.drain_deadline`.
 - A waiter does not notice that its client went away: the connection is looked at again when the
   body is first read, after a permit is given.
 - A client should retry the 503, and a connection that broke while it was still
@@ -73,9 +74,8 @@ under a `cache = true` policy is also kept on the node (`src/server/local_cache/
 multipart upload is not. The roles of the keys apply as on a storage node. The start does not test the
 upstream (tierstore verifies nothing of the stores it is given; see "What tierstore requires of a
 store" in `docs/operations.md`), so the upstream key must be one that writes, or the first write fails.
-`tierstore --config <path> --check-config` checks a file as a
-start does, without touching the network, and exits 0 and prints nothing, or prints the refusal and
-exits 2.
+A host updater's hook checks a file as a start does, without touching the network, with
+`tierstore --config <path> --check-config`; an operator writes the file and enables the service.
 
 ## Metrics
 

@@ -191,22 +191,22 @@ async fn it_drains_on_sigint_too() {
     assert_eq!(running.exit_code().await, Some(0));
 }
 
-/// Asserts that `--help` and `--version` exit 0 and print the flags of a run and the version, that
+/// Asserts that `--help` and `--version` exit 0 and print `--config` and the version, and none of the
+/// four flags that are for the host updater or kept for old units (they stay accepted), that
 /// a start without `--config` exits 2 and says the settings are in a file, and that a flag that is
 /// not known and a value that is not valid exit 2 with a usage text.
 #[test]
 fn the_flags_are_parsed_and_refused_as_the_usage_says() {
     let (code, out, _) = run(&["--help".to_owned()]);
     assert_eq!(code, 0);
-    let named = [
-        "--config",
+    assert!(out.contains("--config"), "{out}");
+    for hidden in [
         "--check-config",
         "--capabilities",
         "--drain-lb-wait",
         "--drain-deadline",
-    ];
-    for flag in named {
-        assert!(out.contains(flag), "{flag}");
+    ] {
+        assert!(!out.contains(hidden), "{hidden}");
     }
     assert!(!out.contains("--listen"), "{out}");
     let (code, out, _) = run(&["--version".to_owned()]);
@@ -288,21 +288,98 @@ fn capabilities_prints_the_names_one_to_a_line_and_exits_0() {
     assert_eq!(out, expected);
 }
 
-/// Asserts that `--capabilities` of the binary prints exactly `handover-v1`, `handoff-socket-v1`
-/// and `handoff-cache-v1` in that order, each with a newline, and exits 0 with nothing on stderr:
-/// the first is the line the host updater's `prepare` step reads to hand over to this release
-/// instead of restarting it, the second says the binary serves through `server.handoff_socket`,
-/// the third that its build node and its storage node with `[local_cache]` do too (a node whose
-/// configuration has `[local_cache]` is handed over only between releases that list it). Catches:
+/// Asserts that `--capabilities` of the binary prints exactly `handover-v1`, `handoff-socket-v1`,
+/// `handoff-cache-v1` and `handoff-state-dir-v1` in that order, each with a newline, and exits 0
+/// with nothing on stderr: the first is the line the host updater's `prepare` step reads to hand
+/// over to this release instead of restarting it, the second says the binary serves through
+/// `server.handoff_socket`, the third that its build node and its storage node with `[local_cache]`
+/// do too (a node whose configuration has `[local_cache]` is handed over only between releases that
+/// list it), the fourth that the socket defaults to the state directory (a node whose configuration
+/// leaves the key out is handed over only between releases that list it). Catches:
 /// any capability left out of the list (for `handover-v1`, every update is a restart), a
 /// misspelled name the updater would not find, and a fourth name nothing promises.
 #[test]
-fn capabilities_lists_the_three_hand_over_words() {
+fn capabilities_lists_the_four_hand_over_words() {
     let (code, out, err) = run(&["--capabilities".to_owned()]);
     assert_eq!(
         (code, out.as_str(), err.as_str()),
-        (0, "handover-v1\nhandoff-socket-v1\nhandoff-cache-v1\n", "")
+        (
+            0,
+            "handover-v1\nhandoff-socket-v1\nhandoff-cache-v1\nhandoff-state-dir-v1\n",
+            ""
+        )
     );
+}
+
+/// Starts the binary with `flags` and the variable `STATE_DIRECTORY` set to `state` as systemd
+/// sets it for a unit with `StateDirectory=`; the rest as [`start`].
+fn start_in_state_dir(flags: &[String], state: &std::path::Path) -> Running {
+    let mut command = Command::new(BIN);
+    command
+        .args(flags)
+        .env("STATE_DIRECTORY", state)
+        .stdout(Stdio::piped())
+        .stderr(Stdio::null());
+    let mut child = spawn(&mut command, 3).unwrap();
+    let stdout = child.stdout.take().unwrap();
+    let (line, reader) = first_line(stdout, Duration::from_secs(30)).unwrap();
+    let words: Vec<&str> = line.split_whitespace().collect();
+    let listen = words[2].strip_prefix("listen=").expect("listen=");
+    let pid = Pid::from_raw(i32::try_from(child.id()).unwrap()).unwrap();
+    Running {
+        child: Some(child),
+        pid,
+        addr: listen.to_owned(),
+        line,
+        _stdout: reader,
+    }
+}
+
+/// Asserts that a start whose file leaves out `server.handoff_socket`, run with the state
+/// directory systemd made for the unit, makes the control socket `handoff.sock` in it (a socket
+/// file), that the drain keys of the file are read (a `drain_lb_wait` of 50 ms and a
+/// `drain_deadline`), and that SIGTERM ends it with status 0. Catches a default socket that is not
+/// made. (A start with no state directory makes none: `a_state_directory_gives_the_socket_its_default`
+/// and `the_state_directory_is_the_first_absolute_one_systemd_names` in the crate.)
+#[tokio::test]
+async fn the_state_directory_holds_the_default_hand_over_socket() {
+    use std::os::unix::fs::FileTypeExt as _;
+    let files = Files::new("bin-state-dir");
+    let tables = Tables {
+        server: "drain_lb_wait = \"50ms\"\ndrain_deadline = \"1m\"".to_owned(),
+        ..Tables::default()
+    };
+    let flags = files.flags_of(&tables, &[]);
+    // Short, as a Unix socket's path is at most 103 bytes.
+    let state = tierstore_testkit::dir::TestDir::under(std::env::temp_dir(), "tssd");
+    let mut running = start_in_state_dir(&flags, state.path());
+    let socket = state.path().join("handoff.sock");
+    let made = std::fs::symlink_metadata(&socket).unwrap();
+    assert!(made.file_type().is_socket(), "{made:?}");
+    running.signal(Signal::TERM);
+    assert_eq!(running.exit_code().await, Some(0));
+}
+
+/// Asserts that a part of the drain given in the file and by its flag is refused with status 2 and
+/// the exact message, and that the flag alone is still taken and the key alone is.
+#[test]
+fn a_drain_part_given_twice_is_refused_by_the_binary() {
+    let files = Files::new("bin-drain-twice");
+    let tables = Tables {
+        server: "drain_deadline = \"1m\"".to_owned(),
+        ..Tables::default()
+    };
+    let flags = files.flags_of(&tables, &["--drain-deadline", "2m", "--check-config"]);
+    let (code, out, err) = run(&flags);
+    assert_eq!((code, out.as_str()), (2, ""));
+    assert!(
+        err.contains("server.drain_deadline: is set in the file and by --drain-deadline too; give it once, in the file"),
+        "{err}"
+    );
+    let once = files.flags_of(&tables, &["--check-config"]);
+    assert_eq!(run(&once), (0, String::new(), String::new()));
+    let flag_only = files.flags(&["--drain-deadline", "2m", "--check-config"]);
+    assert_eq!(run(&flag_only), (0, String::new(), String::new()));
 }
 
 /// The file of a build node and of a storage node with a cache, as `--check-config` reads them,

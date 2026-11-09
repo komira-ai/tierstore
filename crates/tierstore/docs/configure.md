@@ -5,14 +5,10 @@ This page is for an operator who is setting tierstore up: which few keys to set,
 The process is started with the file and nothing else for the data path:
 
 ```sh
-/usr/libexec/tierstore/tierstore --config /etc/tierstore/tierstore.toml --drain-lb-wait 10s --drain-deadline 15m
+/usr/libexec/tierstore/tierstore --config /etc/tierstore/tierstore.toml
 ```
 
-`--check-config` loads the file and reads the key files it names, binds nothing and asks no store, and exits 0 and prints nothing or prints the refusal and exits 2, so run it on a new file first. It does not make the checks of a start that need the disk and the stores (the water marks, the cache directory, the credentials of a tier); [Configuration](configuration.md#the-flags-of-a-run) lists what it leaves out:
-
-```sh
-/usr/libexec/tierstore/tierstore --config /etc/tierstore/tierstore.toml --check-config
-```
+Write the file, then enable the service; a file the process refuses is named on stderr (`journalctl -u tierstore`) with the key.
 
 ## The keys to set
 
