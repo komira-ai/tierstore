@@ -33,10 +33,17 @@ const DEFECTS: &[(&str, &str, &str, &str)] = &[
     ),
     (
         "tap",
-        "    if: ${{ needs.plan.outputs.release == 'true' && github.ref == 'refs/heads/main' && needs.promote-check.outputs.promote == 'true' }}\n",
+        "    if: ${{ !cancelled() && !failure() && needs.plan.outputs.release == 'true' && github.ref == 'refs/heads/main' && needs.promote-check.outputs.promote == 'true' }}\n",
         "    if: ${{ always() }}\n",
         "tap: `if` is not",
     ),
+    (
+        "promote-latest",
+        "!cancelled() && !failure() && ",
+        "",
+        "promote-latest: `if` is not",
+    ),
+    ("tap", "!failure() && ", "", "tap: `if` is not"),
     (
         "testing-upload",
         "environment: prod-releases-tierstore",

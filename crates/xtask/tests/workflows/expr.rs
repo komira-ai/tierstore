@@ -3,7 +3,7 @@
 //!
 //! The subset: `${{ … }}` around the expression; `||`, `&&`, `!`, `==` and `!=` with GitHub's
 //! precedence (`!` binds tightest, then the comparisons, then `&&`, then `||`); parentheses;
-//! string literals in single quotes; the functions `always()` and `cancelled()`; and dotted
+//! string literals in single quotes; the functions `always()`, `cancelled()` and `failure()`; and dotted
 //! names (`needs.version.result`) looked up in a table, a name not in it being empty, as an unset
 //! output is. Strings compare as GitHub compares them, without regard to case. Anything else is
 //! an error naming what was not understood.
@@ -16,6 +16,8 @@ pub struct Context {
     pub names: BTreeMap<String, String>,
     /// Whether the run was cancelled (`cancelled()`).
     pub cancelled: bool,
+    /// Whether a job this one waits for failed (`failure()`).
+    pub failed: bool,
 }
 
 #[derive(Debug, Clone, PartialEq)]
@@ -167,6 +169,7 @@ impl Parser<'_> {
                     return match name.as_str() {
                         "always" => Ok(Value::Bool(true)),
                         "cancelled" => Ok(Value::Bool(self.context.cancelled)),
+                        "failure" => Ok(Value::Bool(self.context.failed)),
                         _ => Err(format!("the function {name} is not understood")),
                     };
                 }
