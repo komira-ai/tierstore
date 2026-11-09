@@ -100,6 +100,13 @@ pub struct FsCfg {
     pub old: bool,
     /// The old node is running, registered, at the start of the scenario.
     pub old_up: bool,
+    /// The old node has the id of the node of this release (an upgrade in place): the proof
+    /// leaves its registration out, as it leaves out the node's own.
+    pub old_same_id: bool,
+    /// Creates, in total, whose answer is an error that does not say whether the object was
+    /// written (a 409 `ConditionalRequestConflict`, a timeout): each takes effect or not, and the
+    /// node reads the format object at its next beat.
+    pub lost_puts: u8,
     /// Times the old node may start or restart from the scenario's start.
     pub old_starts: u8,
     /// When the old node may start or restart: any time, only once the format object exists,
@@ -129,6 +136,8 @@ impl FsCfg {
             flaw: Flaw::None,
             old: false,
             old_up: false,
+            old_same_id: false,
+            lost_puts: 0,
             old_starts: 0,
             old_at: OldAt::Any,
             init_format: false,
@@ -196,6 +205,8 @@ pub struct S {
     /// A node wrote the record at epoch 3 over a missing marks bucket.
     no_bucket: bool,
     crashes: u8,
+    /// Creates answered with an error that does not say whether they took effect.
+    lost: u8,
     nodes: [Pc; NEW],
     old: OldS,
 }
@@ -211,6 +222,10 @@ pub enum Act {
     ListMarks(usize),
     Refuse(usize),
     Create(usize),
+    /// A create answered 409 or timed out that took effect.
+    CreateLanded(usize),
+    /// A create answered 409 or timed out that did not take effect.
+    CreateVoid(usize),
     Check(usize),
     Overwrite(usize),
     Answer(usize),
@@ -234,9 +249,9 @@ impl FirstStart {
 
     /// Whether the registration of the old node stops the proof: any registration of an earlier
     /// release does, live, silent or empty, since no clock of the node can be compared with the
-    /// hot tier's.
+    /// hot tier's, unless it has the node's own id (the proof leaves that one out).
     fn old_blocks(&self, s: &S) -> bool {
-        self.cfg.old && s.old.registered
+        self.cfg.old && s.old.registered && !self.cfg.old_same_id
     }
 
     fn old_may_start(&self, format_exists: bool) -> bool {
@@ -301,7 +316,17 @@ impl FirstStart {
                     out.push(self.node(s, i, Pc::Answer, Act::Create(i), |n| {
                         n.fmt = true;
                         n.no_bucket |= self.no_bucket_written();
-                    }))
+                    }));
+                    if s.lost < self.cfg.lost_puts && !s.fmt {
+                        out.push(self.node(s, i, Pc::Refused, Act::CreateLanded(i), |n| {
+                            n.fmt = true;
+                            n.lost += 1;
+                            n.no_bucket |= self.no_bucket_written();
+                        }));
+                        out.push(self.node(s, i, Pc::Refused, Act::CreateVoid(i), |n| {
+                            n.lost += 1;
+                        }));
+                    }
                 }
                 Create::CheckThenWrite if s.fmt => out.push(go(Pc::Answer, Act::Check(i))),
                 Create::CheckThenWrite => out.push(go(Pc::Blind, Act::Check(i))),
@@ -392,6 +417,7 @@ impl Model for FirstStart {
             mk_new: false,
             no_bucket: false,
             crashes: 0,
+            lost: 0,
             nodes,
             old: OldS {
                 alive: up,
