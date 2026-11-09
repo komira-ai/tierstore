@@ -23,8 +23,8 @@
 //! `package-version=<X.Y.Z>` and `targets=<JSON>`: the proto3 JSON of hostkeeper's `TargetList`
 //! per platform (`linux-x86_64` for `amd64`, `linux-arm64` for `arm64`; no `macos-arm64`, which
 //! has no package here), as hostkeeper's `cargo xtask release targets` writes it for its own
-//! native packages. The manifest of an entry is the hook, run unit, health URL and params that
-//! [`entry`] names; `--min-hostkeeper` is its `minHostkeeper`, the first hostkeeper release whose
+//! native packages. The manifest of an entry is the hook bounds, run unit and health URL that
+//! [`entry`] names (no hook command: hostkeeper's built-in steps run); `--min-hostkeeper` is its `minHostkeeper`, the first hostkeeper release whose
 //! daemon announces `apt`.
 
 use std::path::Path;
@@ -63,12 +63,16 @@ fn packages_url(apt_url: &str, arch: &str) -> String {
 
 /// The entry of the installer `apt` for the `.deb` of `version` whose SHA-256 is `digest`.
 ///
-/// The hook's bounds, deadlines, boot step and the health URL are those of the package's archive
-/// manifest (`packaging/hostkeeper/manifest.toml.in`; a test holds the two equal). The run unit
-/// is `tierstore.service`, the one regular unit file of the `.deb`: an instance of
-/// `tierstore@.service` cannot be a `run` unit of a package. The params are the update hook's
-/// (`crates/tierstore/docs/update-hook.md`): the node's configuration file, which the `.deb`
-/// installs, and the service manager.
+/// The hook's bounds and deadlines and the health URL are those of the package's archive manifest
+/// (`packaging/hostkeeper/manifest.toml.in`; a test holds the two equal). The entry names no
+/// `hook.command`, no `hook.boot` and no `params`, so hostkeeper runs its built-in steps (stop,
+/// swap, start): an update of the `.deb` is a restart. `tierstore update-hook` is not adapted to
+/// the `.deb`'s single unit yet (it reads `<release>/bin/tierstore` and hands the sockets over
+/// between the instances `tierstore@a` and `tierstore@b`), and hostkeeper refuses a `boot` step
+/// with no command, so the archive manifest's `boot = "restore"` is not sent. The built-in steps
+/// ignore `params`, so the update hook's are not sent either. The run unit is `tierstore.service`,
+/// the one regular unit file of the `.deb`: an instance of `tierstore@.service` cannot be a `run`
+/// unit of a package.
 pub fn entry(version: &str, digest: &str, min_hostkeeper: &str) -> Value {
     json!({
         "installer": "apt",
@@ -85,14 +89,9 @@ pub fn entry(version: &str, digest: &str, min_hostkeeper: &str) -> Value {
                 "verifyDeadlineSecs": "1600",
                 "promotionCeilingSecs": "3600",
                 "cleanupRetries": 3,
-                "boot": "restore",
             },
             "run": ["tierstore.service"],
             "healthUrl": "http://127.0.0.1:9300/readyz",
-            "params": {
-                "config_file": {"text": "/etc/tierstore/tierstore.toml"},
-                "service_manager": {"text": "systemd"},
-            },
             "minHostkeeper": min_hostkeeper,
             "installerBounds": {"stageSecs": "600", "activateSecs": "300", "removeSecs": "300"},
         },
