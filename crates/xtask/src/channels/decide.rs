@@ -137,7 +137,7 @@ pub fn decide(
         return Err(Error::Refused(problems));
     }
     if !lab_on {
-        said.push("::notice title=The lab stage was skipped::The hostkeeper settings are absent, so the release did not go through the lab; it goes on to the public channels.".to_owned());
+        said.push("::notice title=The lab stage was skipped::The lab is not switched on (the repository variable TIERSTORE_LAB_INSTALL is not true) or its hostkeeper settings are absent, so the release did not go through the lab; it goes on to the public channels.".to_owned());
     }
     if let Some(output) = output {
         append_output(output, &["promote=true".to_owned()])?;

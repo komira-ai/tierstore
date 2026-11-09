@@ -351,6 +351,12 @@ const DEFECTS: &[(&str, &str, &str, &str)] = &[
     ),
     (
         "promote-check",
+        "FARM_ENABLED: ${{ needs.farm-check.outputs.enabled }}",
+        "FARM_ENABLED: ${{ vars.HOSTKEEPER_COORDINATOR_URL != '' }}",
+        "promote-check: the decision is not given the lab's setting",
+    ),
+    (
+        "promote-check",
         " --output \"$GITHUB_OUTPUT\"\n",
         "\n",
         "promote-check: the decision is not written to GITHUB_OUTPUT",
