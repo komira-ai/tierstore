@@ -14,7 +14,7 @@ use std::time::Duration;
 use tokio::sync::Mutex as AsyncMutex;
 use tokio::time::Instant;
 
-use super::{Inner, locked, refuse_reserved};
+use super::{Inner, Proxy, locked, refuse_reserved};
 use crate::format::{Format, FormatPhase, read_format};
 use crate::marks::Markers;
 use crate::{Backend, Error};
@@ -168,6 +168,17 @@ pub(super) async fn refresh(
     };
     // A read that fails or runs out of time changes nothing.
     let _ = tokio::time::timeout(limit, read).await;
+}
+
+impl Proxy {
+    /// Reads the format object now, within `limit`, and keeps what it says, so that a format
+    /// object the start has just written (or lost the race to write) is followed at once and not
+    /// at the next beat. A read that fails changes nothing; the next beat reads again.
+    #[cfg(feature = "server")]
+    pub(crate) async fn read_format_now(&self, limit: Duration) {
+        let inner = &self.inner;
+        refresh(&inner.pause, &inner.format_gate, inner.hot.as_ref(), limit).await;
+    }
 }
 
 impl Inner {

@@ -168,17 +168,11 @@ The gap between `high_water` and `low_water` (10% here, 80 GiB) is what one evic
 
 **The cache.** Set `local_cache.budget` to the working set of the builds on the node (the content-addressed objects that consecutive builds read again), not to the whole disk. The budget may not be above the size of the file system less `local_cache.free_floor` (10% by default), and below that floor a pass evicts even under the budget. Above `local_cache.high_water` (90%) a pass evicts the least recently used objects down to `local_cache.low_water` (75%), and above `local_cache.critical` (95%) a fill is skipped. An object larger than the budget is never kept. The fills hold memory: at most `local_cache.max_concurrent_fills` chunks of `local_cache.fill_chunk` (8 MiB) at a time, 32 MiB with the defaults. If the count of misses served from the upstream and kept nowhere climbs, raise `local_cache.max_concurrent_fills`.
 
-## The marks bucket and the activation
+## The marks bucket and the first start
 
 An `s3` hot tier has a second bucket, the marks bucket, named `<hot bucket>-marks` unless `hot_store.marks_bucket` says another name. Create it on the hot store before the first start, and give the hot credentials list, read, write and delete on it as on the hot bucket: a read that misses the hot tier reads the marker, and a bucket that does not exist makes a read of a key only the cold tier has answer 503. Every process over the hot bucket names the same marks bucket. A `dir` hot tier has none.
 
-A new store takes no write until it is activated: reads are served and writes answer 503 with a message that names the verb. Activate it once, from a machine that is not a proxy, with the tier flags the unit has. The first run is a dry run that makes every check and writes nothing:
-
-```sh
-tierstore format-epoch --hot s3:tierstore-hot --hot-endpoint http://storage-1.example:9000 --hot-credentials-file /etc/tierstore/hot.credentials --activate
-```
-
-Read what it prints, then run it again with `--apply`. Within seconds every process over the tier takes writes. With several endpoints name any one of them; the verb makes a few calls. Moving a store onto the markers later (`--activate-marks`) is a planned pause of writes with its own order: [Rolling out the markers](operations.md#rolling-out-the-markers-and-going-back) has it, and so has the rule that the marks bucket exists before the release that reads it is rolled.
+A hot tier that has no format object is new, and the first start makes it: after its first beat the node writes the format with a create-only put and takes writes at once. An `s3` hot tier gets `active-marks` naming the marks bucket above, so that bucket must exist, empty, before the first start; if it does not, writes fail with the errors of a missing bucket and nothing is probed. A `dir` hot tier gets `active` at epoch 2. When several nodes start at once, one object is written and the others follow it. A format object that exists is never changed by a start. Moving a store that holds data from one format to another (`format-epoch`, a planned pause of writes) is in [Operations](operations.md#rolling-out-the-markers-and-going-back).
 
 ## What to cache
 

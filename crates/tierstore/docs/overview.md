@@ -25,7 +25,7 @@ client --S3--> tierstore --> hot tier  (dir: on SSD)
                          \-> cold tier (dir: on HDD, or an S3 bucket)
 ```
 
-A write goes to the hot tier and is acknowledged once the entry of its key (a small object in the hot tier, `_entries/<digest of the key>`) says it landed. The reconciler later copies it to the cold tier. A read is served from the hot tier, else from the cold tier, and a read that found an object only in the cold tier asks the reconciler, on that entry, to copy it back into the hot tier. So the hot tier is also a cache of what was used lately. Writes are taken only once the store has been activated (see [operations](operations.md#rolling-out-the-entry-protocol)); reads never wait for it. When the hot tier is full, new objects are written straight to the cold tier.
+A write goes to the hot tier and is acknowledged once the entry of its key (a small object in the hot tier, `_entries/<digest of the key>`) says it landed. The reconciler later copies it to the cold tier. A read is served from the hot tier, else from the cold tier, and a read that found an object only in the cold tier asks the reconciler, on that entry, to copy it back into the hot tier. So the hot tier is also a cache of what was used lately. A new hot tier is given its format object by the first start; reads never wait for it. When the hot tier is full, new objects are written straight to the cold tier.
 
 ## What it guarantees and what it does not
 

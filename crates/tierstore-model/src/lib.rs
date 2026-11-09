@@ -3,7 +3,7 @@
 //! itself, of today's per-key entry protocol under write-once (module [`entries`]).
 //!
 //! A third, independent model (module [`firststart`]) checks the first start of a hot tier that
-//! has no `_tiering/format` object, as section 13.1 of the design document proposes it.
+//! has no `_tiering/format` object, as section 13.1 of the design document decides it.
 //!
 //! Nothing here depends on the `tierstore` crate or on any other crate: the protocols are
 //! re-stated as small state machines whose every step is one atomic store call (or one local

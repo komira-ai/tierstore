@@ -145,13 +145,7 @@ systemctl daemon-reload
 systemctl start tierstore
 ```
 
-A storage node over a new `dir` or `s3` hot tier serves reads and answers writes 503 until the store is activated, which is done once, with the same tier flags the unit has:
-
-```sh
-tierstore format-epoch --hot s3:tierstore-hot --hot-endpoint http://s3-hot.example:9000 --hot-credentials-file /etc/tierstore/hot.credentials --activate --apply
-```
-
-Within seconds every process over the tier takes writes. [Operations](operations.md#rolling-out-the-entry-protocol) says what this does on a store that an earlier release wrote.
+A storage node over a new `dir` or `s3` hot tier (one with no format object) writes the format itself at its first start and takes writes at once; there is no step to run. An `s3` hot tier needs its marks bucket to exist first ([Configure](configure.md#the-marks-bucket-and-the-first-start)).
 
 To start it at boot, add the section in a drop-in (`systemctl edit tierstore`, with `[Install]` and `WantedBy=multi-user.target`) and run `systemctl enable tierstore`.
 

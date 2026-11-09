@@ -50,11 +50,10 @@ The two paths are two different directories, one on each disk. Tiers today are d
 sudo install -d -o "$USER" /srv/fast/tierstore /srv/big/tierstore
 printf 'AKIDEXAMPLE\nexample-secret-change-me\n' > /srv/tierstore/access.key
 chmod 0600 /srv/tierstore/access.key
-tierstore format-epoch --hot dir:/srv/fast/tierstore --activate --apply
 tierstore --config /srv/tierstore/tierstore.toml
 ```
 
-The `format-epoch` step is needed once for a new hot tier: until it has run, every write is answered 503. Then use any S3 client, path-style, region `us-east-1`, with the key from `access.key`:
+The first start of a new hot tier writes its format object itself, so writes work at once. Use any S3 client, path-style, region `us-east-1`, with the key from `access.key`:
 
 ```sh
 aws --endpoint-url http://127.0.0.1:9000 s3api put-object --bucket tierstore --key hello.txt --body hello.txt
