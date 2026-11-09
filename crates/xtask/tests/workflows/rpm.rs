@@ -30,13 +30,46 @@ use super::yaml::Node;
 pub const RETRY_2_IF: &str = "${{ needs.plan.outputs.release == 'true' && github.ref == 'refs/heads/main' && needs.testing-rpm-write.outputs.conflict == 'true' }}";
 
 /// The `if:` of the read job of attempt 3.
-pub const RETRY_3_IF: &str = "${{ needs.plan.outputs.release == 'true' && github.ref == 'refs/heads/main' && needs.testing-rpm-write-2.outputs.conflict == 'true' }}";
+pub const RETRY_3_IF: &str = after_if!("needs.testing-rpm-write-2.outputs.conflict == 'true'");
 
 /// The `if:` of the read job of the second attempt of the promotion.
-pub const STABLE_RETRY_2_IF: &str = "${{ needs.plan.outputs.release == 'true' && github.ref == 'refs/heads/main' && needs.stable-rpm-write.outputs.conflict == 'true' }}";
+pub const STABLE_RETRY_2_IF: &str = after_if!("needs.stable-rpm-write.outputs.conflict == 'true'");
 
 /// The `if:` of the read job of the third attempt of the promotion.
-pub const STABLE_RETRY_3_IF: &str = "${{ needs.plan.outputs.release == 'true' && github.ref == 'refs/heads/main' && needs.stable-rpm-write-2.outputs.conflict == 'true' }}";
+pub const STABLE_RETRY_3_IF: &str =
+    after_if!("needs.stable-rpm-write-2.outputs.conflict == 'true'");
+
+/// The `if:` of the index job of attempt 2 of the testing tree: its read job ran.
+pub const TESTING_INDEX_2_IF: &str = after_if!("needs.testing-rpm-read-2.result == 'success'");
+
+/// The `if:` of the write job of attempt 2 of the testing tree: its read and index jobs ran.
+pub const TESTING_WRITE_2_IF: &str = after_if!(
+    "needs.testing-rpm-read-2.result == 'success' && needs.testing-rpm-index-2.result == 'success'"
+);
+
+/// The `if:` of the index job of attempt 3 of the testing tree: its read job ran.
+pub const TESTING_INDEX_3_IF: &str = after_if!("needs.testing-rpm-read-3.result == 'success'");
+
+/// The `if:` of the write job of attempt 3 of the testing tree: its read and index jobs ran.
+pub const TESTING_WRITE_3_IF: &str = after_if!(
+    "needs.testing-rpm-read-3.result == 'success' && needs.testing-rpm-index-3.result == 'success'"
+);
+
+/// The `if:` of the index job of attempt 2 of the stable tree: its read job ran.
+pub const STABLE_INDEX_2_IF: &str = after_if!("needs.stable-rpm-read-2.result == 'success'");
+
+/// The `if:` of the write job of attempt 2 of the stable tree: its read and index jobs ran.
+pub const STABLE_WRITE_2_IF: &str = after_if!(
+    "needs.stable-rpm-read-2.result == 'success' && needs.stable-rpm-index-2.result == 'success'"
+);
+
+/// The `if:` of the index job of attempt 3 of the stable tree: its read job ran.
+pub const STABLE_INDEX_3_IF: &str = after_if!("needs.stable-rpm-read-3.result == 'success'");
+
+/// The `if:` of the write job of attempt 3 of the stable tree: its read and index jobs ran.
+pub const STABLE_WRITE_3_IF: &str = after_if!(
+    "needs.stable-rpm-read-3.result == 'success' && needs.stable-rpm-index-3.result == 'success'"
+);
 
 macro_rules! job {
     ($name:expr, $kind:ident, [$($need:expr),*], $cond:expr, [$($req:expr),*], $last:expr, $suite:expr) => {
@@ -93,7 +126,7 @@ pub const JOBS: [Job; 18] = [
         "testing-rpm-index-2",
         Index,
         ["plan", "testing-rpm-read-2"],
-        RELEASE_IF,
+        TESTING_INDEX_2_IF,
         ["READ_ENABLED"],
         false,
         "testing"
@@ -102,7 +135,7 @@ pub const JOBS: [Job; 18] = [
         "testing-rpm-write-2",
         Write,
         ["plan", "testing-rpm-index-2", "testing-rpm-read-2"],
-        RELEASE_IF,
+        TESTING_WRITE_2_IF,
         ["READ_ENABLED", "INDEX_SIGNED"],
         false,
         "testing"
@@ -120,7 +153,7 @@ pub const JOBS: [Job; 18] = [
         "testing-rpm-index-3",
         Index,
         ["plan", "testing-rpm-read-3"],
-        RELEASE_IF,
+        TESTING_INDEX_3_IF,
         ["READ_ENABLED"],
         false,
         "testing"
@@ -129,7 +162,7 @@ pub const JOBS: [Job; 18] = [
         "testing-rpm-write-3",
         Write,
         ["plan", "testing-rpm-index-3", "testing-rpm-read-3"],
-        RELEASE_IF,
+        TESTING_WRITE_3_IF,
         ["READ_ENABLED", "INDEX_SIGNED"],
         true,
         "testing"
@@ -185,7 +218,7 @@ pub const JOBS: [Job; 18] = [
         "stable-rpm-index-2",
         Index,
         ["plan", "stable-rpm-read-2"],
-        RELEASE_IF,
+        STABLE_INDEX_2_IF,
         ["READ_ENABLED"],
         false,
         "stable"
@@ -194,7 +227,7 @@ pub const JOBS: [Job; 18] = [
         "stable-rpm-write-2",
         Write,
         ["plan", "stable-rpm-index-2", "stable-rpm-read-2"],
-        RELEASE_IF,
+        STABLE_WRITE_2_IF,
         ["READ_ENABLED", "INDEX_SIGNED"],
         false,
         "stable"
@@ -212,7 +245,7 @@ pub const JOBS: [Job; 18] = [
         "stable-rpm-index-3",
         Index,
         ["plan", "stable-rpm-read-3"],
-        RELEASE_IF,
+        STABLE_INDEX_3_IF,
         ["READ_ENABLED"],
         false,
         "stable"
@@ -221,7 +254,7 @@ pub const JOBS: [Job; 18] = [
         "stable-rpm-write-3",
         Write,
         ["plan", "stable-rpm-index-3", "stable-rpm-read-3"],
-        RELEASE_IF,
+        STABLE_WRITE_3_IF,
         ["READ_ENABLED", "INDEX_SIGNED"],
         true,
         "stable"

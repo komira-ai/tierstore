@@ -30,10 +30,10 @@ use super::rpm::JOBS as RPM_JOBS;
 use super::yaml::Node;
 
 /// The `if:` of `farm`: a release, on main, once the gate of `farm-check` said the farm is set up.
-pub const FARM_IF: &str = "${{ needs.plan.outputs.release == 'true' && github.ref == 'refs/heads/main' && needs.farm-check.outputs.enabled == 'true' }}";
+pub const FARM_IF: &str = after_if!("needs.farm-check.outputs.enabled == 'true'");
 
 /// The `if:` of `soak`: a release, on main, and `farm` converged.
-pub const SOAK_IF: &str = "${{ needs.plan.outputs.release == 'true' && github.ref == 'refs/heads/main' && needs.farm.outputs.converged == 'true' }}";
+pub const SOAK_IF: &str = after_if!("needs.farm.outputs.converged == 'true'");
 
 /// The audience of the OIDC token of `farm`, which the coordinator's allow-list entry for this
 /// workflow names (not the one of `hostkeeper-desired.yml`, whose entry admits another event).

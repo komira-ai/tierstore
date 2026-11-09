@@ -240,7 +240,7 @@ const DEFECTS: &[(&str, &str, &str, &str)] = &[
     ),
     (
         "soak",
-        "    if: ${{ needs.plan.outputs.release == 'true' && github.ref == 'refs/heads/main' && needs.farm.outputs.converged == 'true' }}\n",
+        "    if: ${{ !cancelled() && !failure() && needs.plan.outputs.release == 'true' && github.ref == 'refs/heads/main' && needs.farm.outputs.converged == 'true' }}\n",
         "    if: ${{ always() }}\n",
         "soak: `if` is not",
     ),

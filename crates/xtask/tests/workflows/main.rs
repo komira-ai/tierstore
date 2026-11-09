@@ -9,6 +9,19 @@
 )]
 #![allow(dead_code)]
 
+/// The `if:` of a job after jobs that may be skipped: not cancelled, no predecessor failed, the
+/// plan said to release on a run of `main`, and `$tail`. GitHub skips a job whose `needs` chain
+/// holds a skipped job unless the `if:` has a status function, so every such job says so.
+macro_rules! after_if {
+    ($tail:literal) => {
+        concat!(
+            "${{ !cancelled() && !failure() && needs.plan.outputs.release == 'true' && github.ref == 'refs/heads/main' && ",
+            $tail,
+            " }}"
+        )
+    };
+}
+
 mod allowed_actions;
 mod allowed_actions_tests;
 mod apt;
@@ -23,6 +36,8 @@ mod distribution_tests;
 mod expr;
 mod farm;
 mod farm_tests;
+mod graph;
+mod graph_tests;
 mod hostkeeper;
 mod hostkeeper_tests;
 mod lint;

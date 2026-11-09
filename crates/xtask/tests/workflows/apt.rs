@@ -26,17 +26,50 @@ use super::yaml::Node;
 pub const RETRY_2_IF: &str = "${{ needs.plan.outputs.release == 'true' && github.ref == 'refs/heads/main' && needs.testing-apt-write.outputs.conflict == 'true' }}";
 
 /// The `if:` of the read job of attempt 3.
-pub const RETRY_3_IF: &str = "${{ needs.plan.outputs.release == 'true' && github.ref == 'refs/heads/main' && needs.testing-apt-write-2.outputs.conflict == 'true' }}";
+pub const RETRY_3_IF: &str = after_if!("needs.testing-apt-write-2.outputs.conflict == 'true'");
 
 /// The `if:` of the promotion's jobs of the first attempt: a release, on main, that
 /// `promote-check` promoted.
-pub const PROMOTE_IF: &str = "${{ needs.plan.outputs.release == 'true' && github.ref == 'refs/heads/main' && needs.promote-check.outputs.promote == 'true' }}";
+pub const PROMOTE_IF: &str = after_if!("needs.promote-check.outputs.promote == 'true'");
 
 /// The `if:` of the read job of the second attempt of the promotion.
-pub const STABLE_RETRY_2_IF: &str = "${{ needs.plan.outputs.release == 'true' && github.ref == 'refs/heads/main' && needs.stable-apt-write.outputs.conflict == 'true' }}";
+pub const STABLE_RETRY_2_IF: &str = after_if!("needs.stable-apt-write.outputs.conflict == 'true'");
 
 /// The `if:` of the read job of the third attempt of the promotion.
-pub const STABLE_RETRY_3_IF: &str = "${{ needs.plan.outputs.release == 'true' && github.ref == 'refs/heads/main' && needs.stable-apt-write-2.outputs.conflict == 'true' }}";
+pub const STABLE_RETRY_3_IF: &str =
+    after_if!("needs.stable-apt-write-2.outputs.conflict == 'true'");
+
+/// The `if:` of the index job of attempt 2 of the testing tree: its read job ran.
+pub const TESTING_INDEX_2_IF: &str = after_if!("needs.testing-apt-read-2.result == 'success'");
+
+/// The `if:` of the write job of attempt 2 of the testing tree: its read and index jobs ran.
+pub const TESTING_WRITE_2_IF: &str = after_if!(
+    "needs.testing-apt-read-2.result == 'success' && needs.testing-apt-index-2.result == 'success'"
+);
+
+/// The `if:` of the index job of attempt 3 of the testing tree: its read job ran.
+pub const TESTING_INDEX_3_IF: &str = after_if!("needs.testing-apt-read-3.result == 'success'");
+
+/// The `if:` of the write job of attempt 3 of the testing tree: its read and index jobs ran.
+pub const TESTING_WRITE_3_IF: &str = after_if!(
+    "needs.testing-apt-read-3.result == 'success' && needs.testing-apt-index-3.result == 'success'"
+);
+
+/// The `if:` of the index job of attempt 2 of the stable tree: its read job ran.
+pub const STABLE_INDEX_2_IF: &str = after_if!("needs.stable-apt-read-2.result == 'success'");
+
+/// The `if:` of the write job of attempt 2 of the stable tree: its read and index jobs ran.
+pub const STABLE_WRITE_2_IF: &str = after_if!(
+    "needs.stable-apt-read-2.result == 'success' && needs.stable-apt-index-2.result == 'success'"
+);
+
+/// The `if:` of the index job of attempt 3 of the stable tree: its read job ran.
+pub const STABLE_INDEX_3_IF: &str = after_if!("needs.stable-apt-read-3.result == 'success'");
+
+/// The `if:` of the write job of attempt 3 of the stable tree: its read and index jobs ran.
+pub const STABLE_WRITE_3_IF: &str = after_if!(
+    "needs.stable-apt-read-3.result == 'success' && needs.stable-apt-index-3.result == 'success'"
+);
 
 /// The role the read and write jobs assume.
 pub(super) const ROLE: &str = "${{ vars.APT_PUBLISH_ROLE_ARN }}";
@@ -118,7 +151,7 @@ pub const JOBS: [Job; 18] = [
         name: "testing-apt-index-2",
         kind: Kind::Index,
         needs: &["plan", "testing-apt-read-2"],
-        condition: RELEASE_IF,
+        condition: TESTING_INDEX_2_IF,
         requires: &["READ_ENABLED"],
         last: false,
         suite: "testing",
@@ -127,7 +160,7 @@ pub const JOBS: [Job; 18] = [
         name: "testing-apt-write-2",
         kind: Kind::Write,
         needs: &["plan", "testing-apt-index-2", "testing-apt-read-2"],
-        condition: RELEASE_IF,
+        condition: TESTING_WRITE_2_IF,
         requires: &["READ_ENABLED", "INDEX_SIGNED"],
         last: false,
         suite: "testing",
@@ -145,7 +178,7 @@ pub const JOBS: [Job; 18] = [
         name: "testing-apt-index-3",
         kind: Kind::Index,
         needs: &["plan", "testing-apt-read-3"],
-        condition: RELEASE_IF,
+        condition: TESTING_INDEX_3_IF,
         requires: &["READ_ENABLED"],
         last: false,
         suite: "testing",
@@ -154,7 +187,7 @@ pub const JOBS: [Job; 18] = [
         name: "testing-apt-write-3",
         kind: Kind::Write,
         needs: &["plan", "testing-apt-index-3", "testing-apt-read-3"],
-        condition: RELEASE_IF,
+        condition: TESTING_WRITE_3_IF,
         requires: &["READ_ENABLED", "INDEX_SIGNED"],
         last: true,
         suite: "testing",
@@ -210,7 +243,7 @@ pub const JOBS: [Job; 18] = [
         name: "stable-apt-index-2",
         kind: Kind::Index,
         needs: &["plan", "stable-apt-read-2"],
-        condition: RELEASE_IF,
+        condition: STABLE_INDEX_2_IF,
         requires: &["READ_ENABLED"],
         last: false,
         suite: "stable",
@@ -219,7 +252,7 @@ pub const JOBS: [Job; 18] = [
         name: "stable-apt-write-2",
         kind: Kind::Write,
         needs: &["plan", "stable-apt-index-2", "stable-apt-read-2"],
-        condition: RELEASE_IF,
+        condition: STABLE_WRITE_2_IF,
         requires: &["READ_ENABLED", "INDEX_SIGNED"],
         last: false,
         suite: "stable",
@@ -237,7 +270,7 @@ pub const JOBS: [Job; 18] = [
         name: "stable-apt-index-3",
         kind: Kind::Index,
         needs: &["plan", "stable-apt-read-3"],
-        condition: RELEASE_IF,
+        condition: STABLE_INDEX_3_IF,
         requires: &["READ_ENABLED"],
         last: false,
         suite: "stable",
@@ -246,7 +279,7 @@ pub const JOBS: [Job; 18] = [
         name: "stable-apt-write-3",
         kind: Kind::Write,
         needs: &["plan", "stable-apt-index-3", "stable-apt-read-3"],
-        condition: RELEASE_IF,
+        condition: STABLE_WRITE_3_IF,
         requires: &["READ_ENABLED", "INDEX_SIGNED"],
         last: true,
         suite: "stable",

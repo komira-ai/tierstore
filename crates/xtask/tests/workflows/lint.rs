@@ -114,7 +114,7 @@ pub const WRITE_ALLOWED: &[Allowed] = &[
         file: "release.yml",
         job: "testing-apt-write-2",
         scope: "id-token",
-        condition: RELEASE_IF,
+        condition: super::apt::TESTING_WRITE_2_IF,
     },
     Allowed {
         file: "release.yml",
@@ -126,7 +126,7 @@ pub const WRITE_ALLOWED: &[Allowed] = &[
         file: "release.yml",
         job: "testing-apt-write-3",
         scope: "id-token",
-        condition: RELEASE_IF,
+        condition: super::apt::TESTING_WRITE_3_IF,
     },
     Allowed {
         file: "release.yml",
@@ -150,7 +150,7 @@ pub const WRITE_ALLOWED: &[Allowed] = &[
         file: "release.yml",
         job: "stable-apt-write-2",
         scope: "id-token",
-        condition: RELEASE_IF,
+        condition: super::apt::STABLE_WRITE_2_IF,
     },
     Allowed {
         file: "release.yml",
@@ -162,7 +162,7 @@ pub const WRITE_ALLOWED: &[Allowed] = &[
         file: "release.yml",
         job: "stable-apt-write-3",
         scope: "id-token",
-        condition: RELEASE_IF,
+        condition: super::apt::STABLE_WRITE_3_IF,
     },
     Allowed {
         file: "release.yml",
@@ -186,7 +186,7 @@ pub const WRITE_ALLOWED: &[Allowed] = &[
         file: "release.yml",
         job: "testing-rpm-write-2",
         scope: "id-token",
-        condition: RELEASE_IF,
+        condition: super::rpm::TESTING_WRITE_2_IF,
     },
     Allowed {
         file: "release.yml",
@@ -198,7 +198,7 @@ pub const WRITE_ALLOWED: &[Allowed] = &[
         file: "release.yml",
         job: "testing-rpm-write-3",
         scope: "id-token",
-        condition: RELEASE_IF,
+        condition: super::rpm::TESTING_WRITE_3_IF,
     },
     Allowed {
         file: "release.yml",
@@ -222,7 +222,7 @@ pub const WRITE_ALLOWED: &[Allowed] = &[
         file: "release.yml",
         job: "stable-rpm-write-2",
         scope: "id-token",
-        condition: RELEASE_IF,
+        condition: super::rpm::STABLE_WRITE_2_IF,
     },
     Allowed {
         file: "release.yml",
@@ -234,7 +234,7 @@ pub const WRITE_ALLOWED: &[Allowed] = &[
         file: "release.yml",
         job: "stable-rpm-write-3",
         scope: "id-token",
-        condition: RELEASE_IF,
+        condition: super::rpm::STABLE_WRITE_3_IF,
     },
     Allowed {
         file: "advisories.yml",
@@ -661,6 +661,7 @@ pub fn release_problems(text: &str) -> Vec<String> {
     problems.extend(super::apt::apt_problems(&doc));
     problems.extend(super::rpm::rpm_problems(&doc));
     problems.extend(super::checks::check_problems(&doc));
+    problems.extend(super::graph::graph_problems(&doc));
     problems
 }
 

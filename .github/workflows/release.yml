@@ -694,7 +694,7 @@ jobs:
 
   testing-apt-index-2:
     needs: [plan, testing-apt-read-2]
-    if: ${{ needs.plan.outputs.release == 'true' && github.ref == 'refs/heads/main' }}
+    if: ${{ !cancelled() && !failure() && needs.plan.outputs.release == 'true' && github.ref == 'refs/heads/main' && needs.testing-apt-read-2.result == 'success' }}
     runs-on: ubuntu-24.04
     timeout-minutes: 15
     environment: apt-signing
@@ -766,7 +766,7 @@ jobs:
 
   testing-apt-write-2:
     needs: [plan, testing-apt-read-2, testing-apt-index-2]
-    if: ${{ needs.plan.outputs.release == 'true' && github.ref == 'refs/heads/main' }}
+    if: ${{ !cancelled() && !failure() && needs.plan.outputs.release == 'true' && github.ref == 'refs/heads/main' && needs.testing-apt-read-2.result == 'success' && needs.testing-apt-index-2.result == 'success' }}
     runs-on: ubuntu-24.04
     timeout-minutes: 15
     environment: apt-publish
@@ -829,7 +829,7 @@ jobs:
 
   testing-apt-read-3:
     needs: [plan, testing-apt-write-2]
-    if: ${{ needs.plan.outputs.release == 'true' && github.ref == 'refs/heads/main' && needs.testing-apt-write-2.outputs.conflict == 'true' }}
+    if: ${{ !cancelled() && !failure() && needs.plan.outputs.release == 'true' && github.ref == 'refs/heads/main' && needs.testing-apt-write-2.outputs.conflict == 'true' }}
     runs-on: ubuntu-24.04
     timeout-minutes: 15
     environment: apt-publish
@@ -877,7 +877,7 @@ jobs:
 
   testing-apt-index-3:
     needs: [plan, testing-apt-read-3]
-    if: ${{ needs.plan.outputs.release == 'true' && github.ref == 'refs/heads/main' }}
+    if: ${{ !cancelled() && !failure() && needs.plan.outputs.release == 'true' && github.ref == 'refs/heads/main' && needs.testing-apt-read-3.result == 'success' }}
     runs-on: ubuntu-24.04
     timeout-minutes: 15
     environment: apt-signing
@@ -949,7 +949,7 @@ jobs:
 
   testing-apt-write-3:
     needs: [plan, testing-apt-read-3, testing-apt-index-3]
-    if: ${{ needs.plan.outputs.release == 'true' && github.ref == 'refs/heads/main' }}
+    if: ${{ !cancelled() && !failure() && needs.plan.outputs.release == 'true' && github.ref == 'refs/heads/main' && needs.testing-apt-read-3.result == 'success' && needs.testing-apt-index-3.result == 'success' }}
     runs-on: ubuntu-24.04
     timeout-minutes: 15
     environment: apt-publish
@@ -1288,7 +1288,7 @@ jobs:
 
   testing-rpm-index-2:
     needs: [plan, testing-rpm-read-2]
-    if: ${{ needs.plan.outputs.release == 'true' && github.ref == 'refs/heads/main' }}
+    if: ${{ !cancelled() && !failure() && needs.plan.outputs.release == 'true' && github.ref == 'refs/heads/main' && needs.testing-rpm-read-2.result == 'success' }}
     runs-on: ubuntu-24.04
     timeout-minutes: 15
     environment: apt-signing
@@ -1377,7 +1377,7 @@ jobs:
 
   testing-rpm-write-2:
     needs: [plan, testing-rpm-read-2, testing-rpm-index-2]
-    if: ${{ needs.plan.outputs.release == 'true' && github.ref == 'refs/heads/main' }}
+    if: ${{ !cancelled() && !failure() && needs.plan.outputs.release == 'true' && github.ref == 'refs/heads/main' && needs.testing-rpm-read-2.result == 'success' && needs.testing-rpm-index-2.result == 'success' }}
     runs-on: ubuntu-24.04
     timeout-minutes: 15
     environment: apt-publish
@@ -1448,7 +1448,7 @@ jobs:
 
   testing-rpm-read-3:
     needs: [plan, testing-rpm-write-2]
-    if: ${{ needs.plan.outputs.release == 'true' && github.ref == 'refs/heads/main' && needs.testing-rpm-write-2.outputs.conflict == 'true' }}
+    if: ${{ !cancelled() && !failure() && needs.plan.outputs.release == 'true' && github.ref == 'refs/heads/main' && needs.testing-rpm-write-2.outputs.conflict == 'true' }}
     runs-on: ubuntu-24.04
     timeout-minutes: 15
     environment: apt-publish
@@ -1496,7 +1496,7 @@ jobs:
 
   testing-rpm-index-3:
     needs: [plan, testing-rpm-read-3]
-    if: ${{ needs.plan.outputs.release == 'true' && github.ref == 'refs/heads/main' }}
+    if: ${{ !cancelled() && !failure() && needs.plan.outputs.release == 'true' && github.ref == 'refs/heads/main' && needs.testing-rpm-read-3.result == 'success' }}
     runs-on: ubuntu-24.04
     timeout-minutes: 15
     environment: apt-signing
@@ -1585,7 +1585,7 @@ jobs:
 
   testing-rpm-write-3:
     needs: [plan, testing-rpm-read-3, testing-rpm-index-3]
-    if: ${{ needs.plan.outputs.release == 'true' && github.ref == 'refs/heads/main' }}
+    if: ${{ !cancelled() && !failure() && needs.plan.outputs.release == 'true' && github.ref == 'refs/heads/main' && needs.testing-rpm-read-3.result == 'success' && needs.testing-rpm-index-3.result == 'success' }}
     runs-on: ubuntu-24.04
     timeout-minutes: 15
     environment: apt-publish
@@ -1864,7 +1864,7 @@ jobs:
 
   farm:
     needs: [plan, farm-check]
-    if: ${{ needs.plan.outputs.release == 'true' && github.ref == 'refs/heads/main' && needs.farm-check.outputs.enabled == 'true' }}
+    if: ${{ !cancelled() && !failure() && needs.plan.outputs.release == 'true' && github.ref == 'refs/heads/main' && needs.farm-check.outputs.enabled == 'true' }}
     permissions:
       contents: read
       id-token: write
@@ -1894,7 +1894,7 @@ jobs:
   # so and fails), so FARM_SOAK_HOURS stays 0 until then.
   soak:
     needs: [plan, farm-check, farm]
-    if: ${{ needs.plan.outputs.release == 'true' && github.ref == 'refs/heads/main' && needs.farm.outputs.converged == 'true' }}
+    if: ${{ !cancelled() && !failure() && needs.plan.outputs.release == 'true' && github.ref == 'refs/heads/main' && needs.farm.outputs.converged == 'true' }}
     runs-on: ubuntu-24.04
     timeout-minutes: 345
     permissions:
@@ -1966,7 +1966,7 @@ jobs:
   # that become the newest. Same environment and role as testing-upload.
   promote-latest:
     needs: [plan, promote-check, testing-upload]
-    if: ${{ needs.plan.outputs.release == 'true' && github.ref == 'refs/heads/main' && needs.promote-check.outputs.promote == 'true' }}
+    if: ${{ !cancelled() && !failure() && needs.plan.outputs.release == 'true' && github.ref == 'refs/heads/main' && needs.promote-check.outputs.promote == 'true' }}
     runs-on: ubuntu-24.04
     timeout-minutes: 30
     environment: prod-releases-tierstore
@@ -2018,7 +2018,7 @@ jobs:
   # alone. Until RELEASE_BOT_APP_ID and RELEASE_BOT_PRIVATE_KEY exist the job is a green no-op.
   tap:
     needs: [plan, promote-check, formula]
-    if: ${{ needs.plan.outputs.release == 'true' && github.ref == 'refs/heads/main' && needs.promote-check.outputs.promote == 'true' }}
+    if: ${{ !cancelled() && !failure() && needs.plan.outputs.release == 'true' && github.ref == 'refs/heads/main' && needs.promote-check.outputs.promote == 'true' }}
     runs-on: ubuntu-24.04
     timeout-minutes: 15
     environment: release
@@ -2073,7 +2073,7 @@ jobs:
   # when testing-apt-read had its settings.
   stable-apt-read:
     needs: [plan, promote-check, testing-apt-read]
-    if: ${{ needs.plan.outputs.release == 'true' && github.ref == 'refs/heads/main' && needs.promote-check.outputs.promote == 'true' }}
+    if: ${{ !cancelled() && !failure() && needs.plan.outputs.release == 'true' && github.ref == 'refs/heads/main' && needs.promote-check.outputs.promote == 'true' }}
     runs-on: ubuntu-24.04
     timeout-minutes: 15
     environment: apt-publish
@@ -2124,7 +2124,7 @@ jobs:
 
   stable-apt-index:
     needs: [plan, promote-check, stable-apt-read, testing-apt-index]
-    if: ${{ needs.plan.outputs.release == 'true' && github.ref == 'refs/heads/main' && needs.promote-check.outputs.promote == 'true' }}
+    if: ${{ !cancelled() && !failure() && needs.plan.outputs.release == 'true' && github.ref == 'refs/heads/main' && needs.promote-check.outputs.promote == 'true' }}
     runs-on: ubuntu-24.04
     timeout-minutes: 15
     environment: apt-signing
@@ -2196,7 +2196,7 @@ jobs:
 
   stable-apt-write:
     needs: [plan, promote-check, stable-apt-read, stable-apt-index, testing-apt-write]
-    if: ${{ needs.plan.outputs.release == 'true' && github.ref == 'refs/heads/main' && needs.promote-check.outputs.promote == 'true' }}
+    if: ${{ !cancelled() && !failure() && needs.plan.outputs.release == 'true' && github.ref == 'refs/heads/main' && needs.promote-check.outputs.promote == 'true' }}
     runs-on: ubuntu-24.04
     timeout-minutes: 15
     environment: apt-publish
@@ -2249,7 +2249,7 @@ jobs:
 
   stable-apt-read-2:
     needs: [plan, stable-apt-write]
-    if: ${{ needs.plan.outputs.release == 'true' && github.ref == 'refs/heads/main' && needs.stable-apt-write.outputs.conflict == 'true' }}
+    if: ${{ !cancelled() && !failure() && needs.plan.outputs.release == 'true' && github.ref == 'refs/heads/main' && needs.stable-apt-write.outputs.conflict == 'true' }}
     runs-on: ubuntu-24.04
     timeout-minutes: 15
     environment: apt-publish
@@ -2299,7 +2299,7 @@ jobs:
 
   stable-apt-index-2:
     needs: [plan, stable-apt-read-2]
-    if: ${{ needs.plan.outputs.release == 'true' && github.ref == 'refs/heads/main' }}
+    if: ${{ !cancelled() && !failure() && needs.plan.outputs.release == 'true' && github.ref == 'refs/heads/main' && needs.stable-apt-read-2.result == 'success' }}
     runs-on: ubuntu-24.04
     timeout-minutes: 15
     environment: apt-signing
@@ -2371,7 +2371,7 @@ jobs:
 
   stable-apt-write-2:
     needs: [plan, stable-apt-read-2, stable-apt-index-2]
-    if: ${{ needs.plan.outputs.release == 'true' && github.ref == 'refs/heads/main' }}
+    if: ${{ !cancelled() && !failure() && needs.plan.outputs.release == 'true' && github.ref == 'refs/heads/main' && needs.stable-apt-read-2.result == 'success' && needs.stable-apt-index-2.result == 'success' }}
     runs-on: ubuntu-24.04
     timeout-minutes: 15
     environment: apt-publish
@@ -2424,7 +2424,7 @@ jobs:
 
   stable-apt-read-3:
     needs: [plan, stable-apt-write-2]
-    if: ${{ needs.plan.outputs.release == 'true' && github.ref == 'refs/heads/main' && needs.stable-apt-write-2.outputs.conflict == 'true' }}
+    if: ${{ !cancelled() && !failure() && needs.plan.outputs.release == 'true' && github.ref == 'refs/heads/main' && needs.stable-apt-write-2.outputs.conflict == 'true' }}
     runs-on: ubuntu-24.04
     timeout-minutes: 15
     environment: apt-publish
@@ -2474,7 +2474,7 @@ jobs:
 
   stable-apt-index-3:
     needs: [plan, stable-apt-read-3]
-    if: ${{ needs.plan.outputs.release == 'true' && github.ref == 'refs/heads/main' }}
+    if: ${{ !cancelled() && !failure() && needs.plan.outputs.release == 'true' && github.ref == 'refs/heads/main' && needs.stable-apt-read-3.result == 'success' }}
     runs-on: ubuntu-24.04
     timeout-minutes: 15
     environment: apt-signing
@@ -2546,7 +2546,7 @@ jobs:
 
   stable-apt-write-3:
     needs: [plan, stable-apt-read-3, stable-apt-index-3]
-    if: ${{ needs.plan.outputs.release == 'true' && github.ref == 'refs/heads/main' }}
+    if: ${{ !cancelled() && !failure() && needs.plan.outputs.release == 'true' && github.ref == 'refs/heads/main' && needs.stable-apt-read-3.result == 'success' && needs.stable-apt-index-3.result == 'success' }}
     runs-on: ubuntu-24.04
     timeout-minutes: 15
     environment: apt-publish
@@ -2603,7 +2603,7 @@ jobs:
 
   stable-rpm-read:
     needs: [plan, promote-check, testing-rpm-read]
-    if: ${{ needs.plan.outputs.release == 'true' && github.ref == 'refs/heads/main' && needs.promote-check.outputs.promote == 'true' }}
+    if: ${{ !cancelled() && !failure() && needs.plan.outputs.release == 'true' && github.ref == 'refs/heads/main' && needs.promote-check.outputs.promote == 'true' }}
     runs-on: ubuntu-24.04
     timeout-minutes: 15
     environment: apt-publish
@@ -2654,7 +2654,7 @@ jobs:
 
   stable-rpm-index:
     needs: [plan, promote-check, stable-rpm-read, testing-rpm-index]
-    if: ${{ needs.plan.outputs.release == 'true' && github.ref == 'refs/heads/main' && needs.promote-check.outputs.promote == 'true' }}
+    if: ${{ !cancelled() && !failure() && needs.plan.outputs.release == 'true' && github.ref == 'refs/heads/main' && needs.promote-check.outputs.promote == 'true' }}
     runs-on: ubuntu-24.04
     timeout-minutes: 15
     environment: apt-signing
@@ -2736,7 +2736,7 @@ jobs:
 
   stable-rpm-write:
     needs: [plan, promote-check, stable-rpm-read, stable-rpm-index, testing-rpm-write]
-    if: ${{ needs.plan.outputs.release == 'true' && github.ref == 'refs/heads/main' && needs.promote-check.outputs.promote == 'true' }}
+    if: ${{ !cancelled() && !failure() && needs.plan.outputs.release == 'true' && github.ref == 'refs/heads/main' && needs.promote-check.outputs.promote == 'true' }}
     runs-on: ubuntu-24.04
     timeout-minutes: 15
     environment: apt-publish
@@ -2789,7 +2789,7 @@ jobs:
 
   stable-rpm-read-2:
     needs: [plan, stable-rpm-write]
-    if: ${{ needs.plan.outputs.release == 'true' && github.ref == 'refs/heads/main' && needs.stable-rpm-write.outputs.conflict == 'true' }}
+    if: ${{ !cancelled() && !failure() && needs.plan.outputs.release == 'true' && github.ref == 'refs/heads/main' && needs.stable-rpm-write.outputs.conflict == 'true' }}
     runs-on: ubuntu-24.04
     timeout-minutes: 15
     environment: apt-publish
@@ -2839,7 +2839,7 @@ jobs:
 
   stable-rpm-index-2:
     needs: [plan, stable-rpm-read-2]
-    if: ${{ needs.plan.outputs.release == 'true' && github.ref == 'refs/heads/main' }}
+    if: ${{ !cancelled() && !failure() && needs.plan.outputs.release == 'true' && github.ref == 'refs/heads/main' && needs.stable-rpm-read-2.result == 'success' }}
     runs-on: ubuntu-24.04
     timeout-minutes: 15
     environment: apt-signing
@@ -2921,7 +2921,7 @@ jobs:
 
   stable-rpm-write-2:
     needs: [plan, stable-rpm-read-2, stable-rpm-index-2]
-    if: ${{ needs.plan.outputs.release == 'true' && github.ref == 'refs/heads/main' }}
+    if: ${{ !cancelled() && !failure() && needs.plan.outputs.release == 'true' && github.ref == 'refs/heads/main' && needs.stable-rpm-read-2.result == 'success' && needs.stable-rpm-index-2.result == 'success' }}
     runs-on: ubuntu-24.04
     timeout-minutes: 15
     environment: apt-publish
@@ -2974,7 +2974,7 @@ jobs:
 
   stable-rpm-read-3:
     needs: [plan, stable-rpm-write-2]
-    if: ${{ needs.plan.outputs.release == 'true' && github.ref == 'refs/heads/main' && needs.stable-rpm-write-2.outputs.conflict == 'true' }}
+    if: ${{ !cancelled() && !failure() && needs.plan.outputs.release == 'true' && github.ref == 'refs/heads/main' && needs.stable-rpm-write-2.outputs.conflict == 'true' }}
     runs-on: ubuntu-24.04
     timeout-minutes: 15
     environment: apt-publish
@@ -3024,7 +3024,7 @@ jobs:
 
   stable-rpm-index-3:
     needs: [plan, stable-rpm-read-3]
-    if: ${{ needs.plan.outputs.release == 'true' && github.ref == 'refs/heads/main' }}
+    if: ${{ !cancelled() && !failure() && needs.plan.outputs.release == 'true' && github.ref == 'refs/heads/main' && needs.stable-rpm-read-3.result == 'success' }}
     runs-on: ubuntu-24.04
     timeout-minutes: 15
     environment: apt-signing
@@ -3106,7 +3106,7 @@ jobs:
 
   stable-rpm-write-3:
     needs: [plan, stable-rpm-read-3, stable-rpm-index-3]
-    if: ${{ needs.plan.outputs.release == 'true' && github.ref == 'refs/heads/main' }}
+    if: ${{ !cancelled() && !failure() && needs.plan.outputs.release == 'true' && github.ref == 'refs/heads/main' && needs.stable-rpm-read-3.result == 'success' && needs.stable-rpm-index-3.result == 'success' }}
     runs-on: ubuntu-24.04
     timeout-minutes: 15
     environment: apt-publish

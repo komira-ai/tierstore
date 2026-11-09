@@ -82,6 +82,7 @@ fn run(text: &str, o: Outcome) -> (bool, &'static str, bool) {
     let mut context = Context {
         names: names.clone(),
         cancelled: o.cancelled,
+        failed: false,
     };
     let runs = holds(&mac_if, &context).expect("macos if");
     let macos = if runs { o.macos } else { "skipped" };
@@ -191,6 +192,7 @@ fn the_expressions_are_read_with_githubs_precedence_and_refused_when_not_underst
     let context = Context {
         names: BTreeMap::from([("a.b".to_owned(), "X".to_owned())]),
         cancelled: true,
+        failed: true,
     };
     for (text, want) in [
         ("${{ a.b == 'x' }}", true),
@@ -200,6 +202,8 @@ fn the_expressions_are_read_with_githubs_precedence_and_refused_when_not_underst
         ("${{ (always() || always()) && !always() }}", false),
         ("${{ cancelled() }}", true),
         ("${{ !cancelled() }}", false),
+        ("${{ failure() }}", true),
+        ("${{ !cancelled() && !failure() }}", false),
         ("${{ a.b }}", true),
         ("${{ unset }}", false),
     ] {
