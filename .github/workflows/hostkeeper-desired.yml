@@ -1,80 +1,106 @@
-# Sets the desired version of tierstore on the hostkeeper coordinator to a release that is already
-# published, and waits for the fleet to reach it. By hand only: run it from main ("Run workflow")
-# with one input, the released version `X.Y.Z` (its tag without the v).
+# Sets the desired version of tierstore on the hostkeeper coordinator to a published release, by
+# its targets: each host is ordered the package of its own platform. Two ways in:
 #
-# Nothing else starts it. release.yml does not call it and it waits for no run of release.yml: a
-# host fetches the version from the release channel (`{release_channel}/tierstore/<version>/`),
-# and nothing in CI publishes into the channel. A version set before the channel holds it leaves
-# every host failing its fetch (`fetch_failed`) and retrying. Stage the release into the channel
-# first (`cargo xtask release channel-stage` of komira-ai/hostkeeper,
-# docs/deploy/release-channel.md there), then run this.
+# - `workflow_run`: the completion of a run of `release.yml` on main of this repository. Only a run
+#   that succeeded is acted on, and of those only one whose job `publish` succeeded: then the
+#   newest published release is set (release runs are one at a time, so it is the release that
+#   run published, or a newer one whose run comes next). Most release runs publish nothing, and
+#   then nothing is set. Since a run of `release.yml` succeeds only once the release passed its
+#   install checks, the lab and the promotion, the fleet is moved last.
+# - `workflow_dispatch`, from main ("Run workflow"), with one input, the released version `X.Y.Z`
+#   (its tag without the v), an older one included (a rollback).
 #
-# It is OFF until the repository variable HOSTKEEPER_COORDINATOR_URL is set: while it is empty both
-# jobs are skipped (their job-level `if:`). The settings are repository variables; there is no
-# secret:
-#  - HOSTKEEPER_COORDINATOR_URL  the coordinator's private listener, https://<host>[:<port>];
-#  - HOSTKEEPER_COORDINATOR_CA   the PEM certificates of the CA that listener's certificate chains to.
+# It is OFF until the repository variable TIERSTORE_SETS_DESIRED is `true`, exactly: unset, or
+# anything else, both jobs are skipped (their job-level `if:`), whichever way it started. Its
+# other settings are repository variables too; none is a secret:
+#  - HOSTKEEPER_COORDINATOR_URL      the coordinator's private listener, https://<host>[:<port>],
+#                                    by the name it has on the tailnet and in its certificate;
+#  - HOSTKEEPER_COORDINATOR_CA       the PEM certificates of the CA that listener chains to;
+#  - HOSTKEEPER_RELEASE_CHANNEL      the release channel's base URL, https://<host>[/<path>], as
+#                                    the hosts' `release_channel`; a GitHub-hosted runner reads it;
+#  - HOSTKEEPER_TAILNET_CLIENT_ID    the client ID of the tailnet's federated identity for this
+#                                    repository; empty: the runner does not join the tailnet;
+#  - HOSTKEEPER_TAILNET_AUDIENCE     the audience of that federated identity;
+#  - HOSTKEEPER_TAILNET_COORDINATOR  the coordinator's name on the tailnet, which the join pings;
+#  - HOSTKEEPER_TAILNET_TAG          the tag the join gives the runner's node, the one that
+#                                    identity's trust credential issues (such as `tag:ci`).
 # The coordinator lets the job's OIDC token set the version only through an allow-list entry for
-# this repository (by id), refs/heads/main, the event workflow_dispatch, the audience below, the
-# service tierstore, and the `job_workflow_ref` of the called workflow pinned below
-# (komira-ai/hostkeeper/.github/workflows/set-desired.yml@<that commit>). Moving the pin moves the
-# `job_workflow_ref`, so the entry moves with it.
+# this repository (by id), refs/heads/main, the events workflow_run and workflow_dispatch, the
+# audience below, the service tierstore, and the `job_workflow_ref` of the called workflow pinned
+# below (komira-ai/hostkeeper/.github/workflows/set-desired.yml@<that commit>). Moving the pin
+# moves the `job_workflow_ref`, so the entry moves with it.
 #
 # Two jobs:
 #  - check        holds no token that writes. `cargo xtask release desired` (crates/xtask,
-#                 src/release/desired.rs): the release v<version> is published, its index.json is
-#                 the one its SHA256SUMS lists, hostkeeper's own reader reads it as the index of
-#                 tierstore <version>+<the first 12 digits of the release's commit> in canonical
-#                 form, and it lists a package of each of linux-x86_64, linux-arm64 and
-#                 macos-arm64 that is an asset of the release at the size the index gives. The
-#                 coordinator orders a service and a version, never a platform: a host whose
-#                 platform the index lacks is refused the version (`no_package_for_platform`)
-#                 while the others take it, so an index without the macOS package would leave every
-#                 Mac behind unseen. Such a release is refused here, and the coordinator is never
-#                 called. The job hands on the package version and the SHA-256 of index.json.
-#  - set-desired  needs check, and is hostkeeper's reusable workflow, pinned below with the
-#                 hostkeeper release whose program makes the calls (komira-ai/hostkeeper,
-#                 docs/deploy/ci-client.md): it downloads that release and proves it (SHA256SUMS,
-#                 the attestation by its artifacts.yml on refs/heads/main, the attested commit, the
-#                 program's --version) before any step can hold a token; then
-#                 `hostkeeper ci set-desired` calls `releases set-desired` with the job's OIDC
-#                 token and reads `releases converge` every 10 seconds, at most max_polls times.
-#                 Each read whose answer differs from the one before is printed as one line with
-#                 the hosts of each role at the version, updating, failed and down, so a role that
-#                 does not move (the Macs') shows on its own line whatever the others do. The job
-#                 fails unless the coordinator reports the service converged: every live host at
-#                 the version, none updating or failed. A silent host is not live and is not
-#                 waited for; it is counted under `down` on its role's line.
+#                 src/release/desired.rs) decides the release (`--version` by hand,
+#                 `--after-run` after a run of release.yml; one of the two is empty) and hands on
+#                 `set=false` when that run published none. Otherwise it refuses a release unless
+#                 its index.json is the one its SHA256SUMS lists, hostkeeper's own reader reads it
+#                 as the index of tierstore <version>+<the first 12 digits of the release's
+#                 commit> in canonical form, and it lists a package of each of linux-x86_64,
+#                 linux-arm64 and macos-arm64; each package is the one the index lists, its
+#                 bundle is its provenance bundle, and hostkeeper's unpacker unpacks it as a host
+#                 does. It hands on the package version, the index (its exact text) and its
+#                 SHA-256, and the release's targets (src/release/desired_targets.rs): today one
+#                 hostkeeper-archive entry per platform. Then the job waits until the release
+#                 channel serves that index, byte for byte, for at most about half an hour: the
+#                 coordinator refuses a version the channel does not hold (`not_in_channel`), and
+#                 the channel takes a release by its own sync, which CI does not run.
+#  - set-desired  needs check, and is hostkeeper's reusable workflow (the CI client), pinned below
+#                 with the hostkeeper release whose hkctl makes the call, the revision
+#                 hostkeeper's own release.yml pins (komira-ai/hostkeeper,
+#                 docs/deploy/ci-client.md): it proves that release (SHA256SUMS, the attestation
+#                 by its artifacts.yml on refs/heads/main, the attested commit, `hkctl
+#                 --version`) before any step can hold a token, joins the runner to the tailnet
+#                 when HOSTKEEPER_TAILNET_CLIENT_ID is set (the coordinator's private listener is
+#                 on the tailnet only), and calls `releases set-desired` with the job's OIDC
+#                 token, naming the release by its targets and by its index with the index's
+#                 digest (a daemon before targets is ordered its archive through the index). It
+#                 does not wait for the fleet: the coordinator's update plan rolls the version
+#                 out stage by stage, longer than a job should hold this workflow's group. The job
+#                 ends once the coordinator stored the version (`reason` `not_waited`).
 #
-# The two jobs share one group and a run is never cancelled: a second run waits for the first.
+# One run at a time of each way in, never cancelled: the runs after a release share the group
+# `hostkeeper-desired-release`, where a newer waiting run replaces an older one (each derives the
+# newest release itself, so nothing is lost), and the runs by hand share
+# `hostkeeper-desired-dispatch`, so that a rollback waiting for its turn is never replaced by the
+# completion of a release run.
 #
 # The workflow lint (crates/xtask/tests/workflows, desired.rs) holds this file to what is said here.
 name: hostkeeper-desired
 
 on:
+  workflow_run:
+    workflows: [release]
+    types: [completed]
+    branches: [main]
   workflow_dispatch:
     inputs:
       version:
-        description: "A released version of tierstore, X.Y.Z (the tag without the v), already staged in the release channel"
+        description: "A released version of tierstore, X.Y.Z (the tag without the v)"
         type: string
         required: true
 
 permissions: {}
 
 concurrency:
-  group: hostkeeper-desired
+  group: hostkeeper-desired-${{ github.event_name == 'workflow_dispatch' && 'dispatch' || 'release' }}
   cancel-in-progress: false
 
 jobs:
   check:
-    if: ${{ github.ref == 'refs/heads/main' && vars.HOSTKEEPER_COORDINATOR_URL != '' }}
+    if: ${{ github.ref == 'refs/heads/main' && vars.TIERSTORE_SETS_DESIRED == 'true' && (github.event_name == 'workflow_dispatch' || (github.event_name == 'workflow_run' && github.event.workflow_run.conclusion == 'success' && github.event.workflow_run.head_branch == 'main' && github.event.workflow_run.head_repository.full_name == github.repository)) }}
     runs-on: ubuntu-24.04
-    timeout-minutes: 15
+    timeout-minutes: 50
     permissions:
       contents: read
+      actions: read
     outputs:
+      set: ${{ steps.desired.outputs.set }}
       package-version: ${{ steps.desired.outputs.package-version }}
-      package-digest: ${{ steps.desired.outputs.package-digest }}
+      release-index: ${{ steps.desired.outputs.release-index }}
+      release-index-digest: ${{ steps.desired.outputs.release-index-digest }}
+      targets: ${{ steps.desired.outputs.targets }}
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
         with:
@@ -82,29 +108,48 @@ jobs:
       - run: rustup toolchain install
       - name: Compile xtask
         run: cargo xtask --help
-      # The input is read as an environment variable of the step, never spliced into a script.
-      - name: Refuse a version whose release index lacks a platform
+      # The input and the run id are read as environment variables of the step, never spliced into
+      # a script. One of the two is empty: the input on a workflow_run, the run id on a dispatch.
+      - name: The release to set, refused when its index lacks a platform
         id: desired
         env:
           GH_TOKEN: ${{ github.token }}
           VERSION: ${{ inputs.version }}
-        run: cargo xtask release desired --repo "$GITHUB_REPOSITORY" --version "$VERSION" --dir "$RUNNER_TEMP/desired" --output "$GITHUB_OUTPUT"
+          RUN_ID: ${{ github.event.workflow_run.id }}
+        run: cargo xtask release desired --repo "$GITHUB_REPOSITORY" --version "$VERSION" --after-run "$RUN_ID" --dir "$RUNNER_TEMP/desired" --output "$GITHUB_OUTPUT"
+      # curl's own retries, a fixed 40 seconds apart, 404 included (`--retry-all-errors`), until
+      # 1800 seconds have passed: a channel that never serves the version fails the job.
+      - name: Wait until the release channel serves the release's index
+        if: ${{ steps.desired.outputs.set == 'true' }}
+        env:
+          RELEASE_CHANNEL: ${{ vars.HOSTKEEPER_RELEASE_CHANNEL }}
+          PACKAGE_VERSION: ${{ steps.desired.outputs.package-version }}
+        run: curl --proto =https --proto-redir =https --tlsv1.2 --fail --silent --show-error --max-time 30 --retry 45 --retry-delay 40 --retry-max-time 1800 --retry-all-errors --output "$RUNNER_TEMP/served-index.json" "$RELEASE_CHANNEL/tierstore/$PACKAGE_VERSION/index.json"
+      - name: The channel serves the release's index, byte for byte
+        if: ${{ steps.desired.outputs.set == 'true' }}
+        run: cmp "$RUNNER_TEMP/desired/index.json" "$RUNNER_TEMP/served-index.json"
 
   set-desired:
     needs: [check]
-    if: ${{ github.ref == 'refs/heads/main' && vars.HOSTKEEPER_COORDINATOR_URL != '' }}
+    if: ${{ github.ref == 'refs/heads/main' && vars.TIERSTORE_SETS_DESIRED == 'true' && needs.check.outputs.set == 'true' }}
     permissions:
       contents: read
       id-token: write
-    uses: komira-ai/hostkeeper/.github/workflows/set-desired.yml@32a9cc6f8242d0efbc3476391302062ff444dd47 # v0.1.44
+    uses: komira-ai/hostkeeper/.github/workflows/set-desired.yml@2c767d1842a88edb7120073d2dff3b4bfccc834c # v0.1.184
     with:
       service: tierstore
       version: ${{ needs.check.outputs.package-version }}
-      package_digest: ${{ needs.check.outputs.package-digest }}
-      hostkeeper_version: 0.1.44
-      hostkeeper_commit: 32a9cc6f8242d0efbc3476391302062ff444dd47
+      release_index: ${{ needs.check.outputs.release-index }}
+      release_index_digest: ${{ needs.check.outputs.release-index-digest }}
+      targets: ${{ needs.check.outputs.targets }}
+      hostkeeper_version: 0.1.184
+      hostkeeper_commit: 2c767d1842a88edb7120073d2dff3b4bfccc834c
       coordinator_url: ${{ vars.HOSTKEEPER_COORDINATOR_URL }}
       coordinator_ca: ${{ vars.HOSTKEEPER_COORDINATOR_CA }}
       audience: tierstore-hostkeeper-desired
-      wait: true
-      max_polls: 180
+      wait: false
+      join_tailnet: ${{ vars.HOSTKEEPER_TAILNET_CLIENT_ID != '' }}
+      tailnet_client_id: ${{ vars.HOSTKEEPER_TAILNET_CLIENT_ID }}
+      tailnet_audience: ${{ vars.HOSTKEEPER_TAILNET_AUDIENCE }}
+      tailnet_coordinator: ${{ vars.HOSTKEEPER_TAILNET_COORDINATOR }}
+      tailnet_tag: ${{ vars.HOSTKEEPER_TAILNET_TAG }}

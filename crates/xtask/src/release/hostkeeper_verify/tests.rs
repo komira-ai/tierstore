@@ -1,5 +1,6 @@
 use std::ops::Deref;
 use std::os::unix::fs::PermissionsExt;
+use std::path::PathBuf;
 
 use hostkeeper_config::daemon::Sha256Hex;
 use hostkeeper_config::index::PackageEntry;

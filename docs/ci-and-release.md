@@ -11,7 +11,7 @@
 | `release.yml` | when `ci` or `artifacts` finishes on a push to `main` (automatic, see Releases); by hand | `plan` decides which commit of `main` is released and as which tag (the newest whose build recorded that version); `verify` and `publish` attach the files that commit's push built and signed to a GitHub release, after checking them again; the release then goes through four stages (see The order of a release): `testing-upload`, `formula` and the `testing-apt-*` jobs publish it to testing, `check-apt`, `check-brew` and `check-install-sh` install it from there, `farm-check`, `farm` and `soak` put it on the lab through hostkeeper when the lab is configured, and `promote-check` then lets `promote-latest`, `tap` and the `stable-apt-*` jobs make it public. Builds nothing of tierstore. |
 | `tierstore-site.yml` | pull request, push to `main`, when the site changes | typecheck, tests and build of tierstore.dev. |
 | `tierstore-site-publish.yml` | push to `main` / by hand | builds the site again; uploads it only when the repository variable `TIERSTORE_SITE_PUBLISH` is `true`. |
-| `hostkeeper-desired.yml` | by hand, from `main` | sets the desired version of tierstore on the hostkeeper coordinator to a published release and waits for the fleet; skipped while the repository variable `HOSTKEEPER_COORDINATOR_URL` is empty. See [Setting the desired version on the hostkeeper coordinator](#setting-the-desired-version-on-the-hostkeeper-coordinator). |
+| `hostkeeper-desired.yml` | the completion of a run of `release.yml` on `main`, and by hand from `main` | sets the desired version of tierstore on the hostkeeper coordinator to a published release, by its targets: after a release run that published one, the newest release; by hand, the version given. Skipped while the repository variable `TIERSTORE_SETS_DESIRED` is not `true`. See [Setting the desired version on the hostkeeper coordinator](#setting-the-desired-version-on-the-hostkeeper-coordinator). |
 
 Every workflow is held to the same rules by `crates/xtask/tests/workflows`: every `uses:` is a
 40-digit commit SHA with a version comment, `permissions: {}` at the top, no
@@ -325,8 +325,8 @@ section 5). Nobody approves a step.
    release's `SHA256SUMS`, and hands the package version and digest on. The tailnet's three
    variables (`HOSTKEEPER_TAILNET_CLIENT_ID`, `HOSTKEEPER_TAILNET_AUDIENCE`,
    `HOSTKEEPER_TAILNET_COORDINATOR`) are all set or none: all makes `farm` join the tailnet, some is
-   red. `farm` calls hostkeeper's `set-desired.yml` (the same pin as `hostkeeper-desired.yml`, which
-   the workflow lint holds equal) for the service `tierstore`, with the audience
+   red. `farm` calls hostkeeper's `set-desired.yml` (a pin of its own, not the one of
+   `hostkeeper-desired.yml`) for the service `tierstore`, with the audience
    `tierstore-hostkeeper-release`, and waits for the coordinator to report every lab host on the
    version, reading every 10 seconds, at most `FARM_MAX_POLLS` times (default 360). It is the only
    job here with `id-token: write` for the coordinator, and needs an allow-list entry like the
@@ -467,43 +467,59 @@ is made from a commit whose `artifacts.yml` run computed that same version.
 Hosts take tierstore through hostkeeper: the coordinator holds the version each service should
 run, and every host's daemon fetches that version from the release channel
 (`{release_channel}/tierstore/<version>/`) and installs the package of its own platform.
-`hostkeeper-desired.yml` sets that version for a published release. It is run by hand, from
-`main` ("Run workflow"), with the release's version `X.Y.Z`; nothing else starts it, release.yml
-included. (`release.yml` moves the farm onto each release by itself, with the same check and the
-same reusable workflow: see The farm first. This one stays for a version set by hand, a rollback
-to an older release, say.)
+`hostkeeper-desired.yml` sets that version for a published release, two ways:
 
-Before you run it, the release must be in the release channel: stage it with hostkeeper's
-`cargo xtask release channel-stage` (komira-ai/hostkeeper, `docs/deploy/release-channel.md`).
-Nothing in CI publishes into the channel, and a version the channel does not hold leaves every host
-failing its fetch.
+- after each run of `release.yml` on `main` that succeeded and whose job `publish` succeeded, it
+  sets the newest published release. A run of `release.yml` succeeds only once the release passed
+  its install checks, the lab and the promotion, so the fleet is moved last. Most release runs
+  publish nothing (their plan finds no new release), and then nothing is set;
+- by hand, from `main` ("Run workflow"), with a released version `X.Y.Z`, an older one included
+  (a rollback).
 
-Its `check` job (`cargo xtask release desired`, no token that writes) refuses the run unless the
-release `vX.Y.Z` is published, its `index.json` is the one its `SHA256SUMS` lists, hostkeeper's own
-reader reads it as the index of tierstore `X.Y.Z+<the first 12 digits of the release's commit>`,
-and it lists a package for each of linux-x86_64, linux-arm64 and macos-arm64 that is an asset of
-the release at the size the index gives. The coordinator orders a service and a version and never
-a platform, so a host whose platform the index lacks is refused the version
-(`no_package_for_platform`) while the others take it; a release made before the hostkeeper
-packages has no index and is refused too. Only then does the `set-desired` job call hostkeeper's
-reusable workflow (`set-desired.yml` of komira-ai/hostkeeper, pinned to a commit with the
-hostkeeper release whose program makes the calls), which proves that release, sets the version
-with the job's OIDC token, and reads the convergence every 10 seconds. Each change is printed as
-one line with the hosts of each role at the version, updating, failed and down, and the job fails
-unless every live host reaches the version. The version the coordinator is given is the packages'
-(`X.Y.Z+<12 hex>`), and the digest is the SHA-256 of `index.json`, which pins every platform's
-package.
+Both are off until the repository variable `TIERSTORE_SETS_DESIRED` is `true`, exactly: unset, or
+anything else, both jobs are skipped.
+
+Its `check` job (`cargo xtask release desired`, no token that writes) decides the release and
+refuses it unless its `index.json` is the one its `SHA256SUMS` lists, hostkeeper's own reader reads
+it as the index of tierstore `X.Y.Z+<the first 12 digits of the release's commit>`, and it lists a
+package for each of linux-x86_64, linux-arm64 and macos-arm64; each package must be the one the
+index lists, its `.sigstore.json` bundle its provenance bundle, and hostkeeper's unpacker must
+unpack it as a host does. A host whose platform a release lacks is ordered nothing, so an index
+without the macOS package would leave every Mac behind; a release made before the hostkeeper
+packages has no index and is refused too. The job hands on the package version, the index and its
+SHA-256, and the release's **targets**: today one `hostkeeper-archive` entry per platform (the
+archive's size and SHA-256, its bundle, its two locations, the release channel's and the GitHub
+asset's, and the `min_hostkeeper` of its manifest). Once hostkeeper's apt installer ships, the Linux
+lists gain an `apt` entry ahead of the archive (`crates/xtask/src/release/desired_targets.rs`).
+Then the job waits, for at most about half an hour, until the release channel serves the release's
+`index.json` byte for byte: the channel takes a release by its own sync, which CI does not run, and
+the coordinator refuses a version the channel does not hold (`not_in_channel`).
+
+The `set-desired` job then calls hostkeeper's CI client (`set-desired.yml` of
+komira-ai/hostkeeper, pinned to the revision hostkeeper's own `release.yml` pins), which proves
+that hostkeeper release, joins the runner to the tailnet (the coordinator's private listener is on
+the tailnet only) and sets the version with the job's OIDC token, naming the release by its
+targets and by its index. It does not wait for the fleet: the coordinator's update plan rolls the
+version out stage by stage. Watch the roll with `hkctl releases converge --service tierstore`.
 
 The workflow is off until a maintainer sets it up once:
 
-1. The coordinator's allow-list entry for this repository: its id, `refs/heads/main`, the event
-   `workflow_dispatch`, the audience `tierstore-hostkeeper-desired`, the service `tierstore`, and the
-   `job_workflow_ref` `komira-ai/hostkeeper/.github/workflows/set-desired.yml@<the pinned commit>`.
-   A new pin in the workflow needs a new `job_workflow_ref` in the entry.
-2. The repository variable `HOSTKEEPER_COORDINATOR_CA`: the PEM certificates of the CA the
-   coordinator's private listener chains to.
-3. The repository variable `HOSTKEEPER_COORDINATOR_URL`: that listener, `https://<host>[:<port>]`.
-   While it is empty both jobs are skipped.
+1. The coordinator's allow-list entry for this repository: its id, `refs/heads/main`, the events
+   `workflow_run` and `workflow_dispatch`, the audience `tierstore-hostkeeper-desired`, the service
+   `tierstore`, and the `job_workflow_ref`
+   `komira-ai/hostkeeper/.github/workflows/set-desired.yml@<the pinned commit>`. A new pin in the
+   workflow needs a new `job_workflow_ref` in the entry. The coordinator reads it at start.
+2. The tailnet's federated identity for this repository (subject
+   `repo:komira-ai/tierstore:ref:refs/heads/main`), whose tag the ACL lets reach the coordinator's
+   private listener (komira-ai/hostkeeper, `docs/deploy/ci-client.md`, "Reaching the coordinator").
+3. The repository variables: `HOSTKEEPER_COORDINATOR_URL` (the listener, `https://<host>[:<port>]`,
+   by its name on the tailnet), `HOSTKEEPER_COORDINATOR_CA` (the PEM certificates of its CA),
+   `HOSTKEEPER_RELEASE_CHANNEL` (the channel's base URL, as the hosts' `release_channel`),
+   `HOSTKEEPER_TAILNET_CLIENT_ID` and `HOSTKEEPER_TAILNET_AUDIENCE` (the federated identity's),
+   `HOSTKEEPER_TAILNET_COORDINATOR` (the coordinator's name on the tailnet) and
+   `HOSTKEEPER_TAILNET_TAG` (the tag that identity issues, such as `tag:ci`; the client checks it
+   even without the join, so it must be set).
+4. Last, `TIERSTORE_SETS_DESIRED` set to `true`.
 
 ## The compatibility check against the release before
 

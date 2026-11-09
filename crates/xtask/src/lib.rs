@@ -438,19 +438,26 @@ enum ReleaseVerb {
         #[arg(long)]
         output: Option<PathBuf>,
     },
-    /// The version and digest of a published release to set as tierstore's desired version on
-    /// the hostkeeper coordinator; refuses a release whose index lacks a platform.
+    /// The version, release index and targets of a published release to set as tierstore's
+    /// desired version on the hostkeeper coordinator; refuses a release whose index lacks a
+    /// platform.
     Desired {
         #[arg(long)]
         repo: String,
-        /// `<major>.<minor>.<patch>`: the release `v<major>.<minor>.<patch>`.
-        #[arg(long)]
+        /// `<major>.<minor>.<patch>`: the release `v<major>.<minor>.<patch>`. Empty, or not given,
+        /// with `--after-run`.
+        #[arg(long, default_value = "")]
         version: String,
-        /// Where `index.json` and `SHA256SUMS` of the release are downloaded; created when
-        /// missing.
+        /// The id of a run of `release.yml`: the newest release, when its job `publish`
+        /// succeeded; nothing (`set=false`) otherwise. Empty, or not given, with `--version`.
+        #[arg(long, default_value = "")]
+        after_run: String,
+        /// Where the release's index, sums, packages and bundles are downloaded and the
+        /// packages unpacked; created when missing.
         #[arg(long)]
         dir: PathBuf,
-        /// Append `package-version=` and `package-digest=` to this file (`GITHUB_OUTPUT`).
+        /// Append `set=`, and with `set=true` `package-version=`, `release-index=`,
+        /// `release-index-digest=` and `targets=`, to this file (`GITHUB_OUTPUT`).
         #[arg(long)]
         output: Option<PathBuf>,
         #[arg(long, default_value = "gh")]
@@ -759,15 +766,19 @@ fn run(cli: Cli) -> Result<Vec<String>, Error> {
         Verb::Release(ReleaseVerb::Desired {
             repo,
             version,
+            after_run,
             dir,
             output,
             gh,
         }) => release::desired::desired(
             &release::RealGh(gh),
-            &repo,
-            &version,
-            &dir,
-            output.as_deref(),
+            &release::desired::Request {
+                repo: &repo,
+                version: &version,
+                after_run: &after_run,
+                dir: &dir,
+                output: output.as_deref(),
+            },
         ),
         Verb::Release(ReleaseVerb::DesiredDeb {
             repo,

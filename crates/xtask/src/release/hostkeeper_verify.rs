@@ -21,10 +21,10 @@
 //! the release's bundles by `verify-assets attestations` ([`crate::sums`]).
 
 use std::os::unix::fs::MetadataExt;
-use std::path::{Path, PathBuf};
+use std::path::Path;
 
 use hostkeeper_config::index::ReleaseIndex;
-use hostkeeper_unpack::{HostFs, Limits, Owner, UnpackOrder};
+use hostkeeper_unpack::{HostFs, Limits, Owner, UnpackOrder, Unpacked};
 
 use super::hostkeeper_index::{
     INDEX, Packages, digest_file, host_platform, index_failed, our_platform, packages, service,
@@ -119,14 +119,14 @@ pub fn attribute_problems(path: &Path) -> Result<Vec<String>, Error> {
 
 /// Unpacks the package at `path` (SHA-256 `digest`) with hostkeeper's unpacker into
 /// `<scratch>/packages`, as the order of tierstore `version` on `platform`, owned by this process's
-/// user: the version directory.
-fn unpack(
+/// user: the version directory and the manifest hostkeeper loaded from it.
+pub(super) fn unpack(
     path: &Path,
     version: &str,
     platform: Platform,
     digest: hostkeeper_config::daemon::Sha256Hex,
     scratch: &Path,
-) -> Result<PathBuf, Error> {
+) -> Result<Unpacked, Error> {
     let packages = scratch.join("packages");
     std::fs::create_dir_all(&packages)
         .map_err(Error::spawn(format!("create {}", packages.display())))?;
@@ -149,14 +149,13 @@ fn unpack(
     // adapter of its own (hostkeeper's unpacker has none); the macOS build job checks the code
     // signature of the binary unpacked here with `codesign --verify --strict` instead.
     let host = hostkeeper_unpack::Platform::Linux;
-    let unpacked = hostkeeper_unpack::unpack(path, &order, &LIMITS, &fs, host).map_err(|e| {
+    hostkeeper_unpack::unpack(path, &order, &LIMITS, &fs, host).map_err(|e| {
         Error::Failed(format!(
             "{}: hostkeeper does not unpack it: {e} ({})",
             path.display(),
             e.outcome().2
         ))
-    })?;
-    Ok(unpacked.dir)
+    })
 }
 
 /// The `verify-assets hostkeeper-package` verb: the line to print.
@@ -205,7 +204,7 @@ fn verify_package_within(
         ));
     }
     let sha256 = digest.as_str().to_owned();
-    let unpacked = unpack(&path, version, platform, digest, scratch)?;
+    let unpacked = unpack(&path, version, platform, digest, scratch)?.dir;
     Ok(vec![format!(
         "{name}: {bytes} bytes, sha256 {sha256}, no extended attribute; unpacked as a host does into {}",
         unpacked.display()
