@@ -117,6 +117,16 @@ pub(super) fn first_start(v: &mut Vec<Scenario>) {
     );
 
     add(
+        "residual/first-start-every-create-answered-409",
+        "FS2",
+        "every create is answered 409 and none lands (no peer's put is in flight, so the answer is false): all nodes stay 503 until a restart; the node reads at every beat but writes nothing more",
+        tweak(one(2), &|c| {
+            c.ambiguous = true;
+            c.lost_always = true;
+        }),
+        Fail("FS2"),
+    );
+    add(
         "residual/first-start-old-journal-left",
         "FS1",
         "a journal of a release before the format object is there and there is no format object: the tier is taken for new, and the format sits beside a journal nobody applies (unsupported; the release only ran on the farm, which is past it)",

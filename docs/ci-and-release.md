@@ -326,13 +326,22 @@ section 5). Nobody approves a step.
    and neither repository variable
    `HOSTKEEPER_COORDINATOR_URL` nor `HOSTKEEPER_COORDINATOR_CA` set it ends green with a notice,
    and the stage is skipped the same way. With the switch `true` and one
-   of them set it ends red. With both set it runs `cargo xtask release desired-deb`, which reads
-   the suite `testing` as a client reads it and holds the entry of each `.deb` to the digest of the
-   release's `SHA256SUMS`, and hands the package version and digest on. The tailnet's three
+   of them set it ends red. With both set it runs `cargo xtask release desired-apt`, which reads
+   the suite `testing` as a client reads it, holds the entry of each `.deb` to the digest of the
+   release's `SHA256SUMS`, and hands on the package version and the `targets` of hostkeeper's apt
+   installer: for `linux-x86_64` and `linux-arm64` one entry that names the host's repository
+   entry `komira-testing`, the package version and the `.deb`'s digest as the pin (no release
+   index and no package digest: tierstore ships no archive, and a host that does not announce
+   `apt` is ordered nothing). Every entry carries `minHostkeeper` 0.1.216, the first hostkeeper
+   release whose daemon announces `apt`; hosts need a daemon of that release or later, and the
+   switch stays off until they have it and the `.deb` meets the installer's rules
+   (`docs/design/distribution.md`, section 5.3, "The apt target"). The tailnet's three
    variables (`HOSTKEEPER_TAILNET_CLIENT_ID`, `HOSTKEEPER_TAILNET_AUDIENCE`,
    `HOSTKEEPER_TAILNET_COORDINATOR`) are all set or none: all makes `farm` join the tailnet, some is
    red. `farm` calls hostkeeper's `set-desired.yml` (a pin of its own, not the one of
-   `hostkeeper-desired.yml`) for the service `tierstore`, with the audience
+   `hostkeeper-desired.yml`; release 0.1.216, which has `targets` and the apt installer, and its
+   `tailnet_tag` is the variable `HOSTKEEPER_TAILNET_TAG`, as in `hostkeeper-desired.yml`) for the
+   service `tierstore`, with the audience
    `tierstore-hostkeeper-release`, and waits for the coordinator to report every lab host on the
    version, reading every 10 seconds, at most `FARM_MAX_POLLS` times (default 360). It is the only
    job here with `id-token: write` for the coordinator, and needs an allow-list entry like the

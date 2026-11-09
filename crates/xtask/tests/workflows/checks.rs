@@ -64,7 +64,7 @@ const VERBS: [(&str, &str); 7] = [
     ("check-brew", "cargo xtask channels check-brew "),
     ("check-install-sh", "cargo xtask channels check-install-sh "),
     ("promote-check", "cargo xtask channels decide "),
-    ("farm-check", "cargo xtask release desired-deb "),
+    ("farm-check", "cargo xtask release desired-apt "),
 ];
 
 /// What a job is held to.

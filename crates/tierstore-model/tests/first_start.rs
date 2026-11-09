@@ -72,3 +72,28 @@ fn residual_an_earlier_release_beside_the_format_object() {
     check("residual/first-start-old-journal-left");
     check("residual/first-start-old-release-running");
 }
+
+/// A create answered with an error that does not say whether it was written (a 409) leaves the
+/// node to read the object at its next beat, or another node's create writes it.
+#[test]
+fn holds_in_a_create_answered_409_while_a_peer_creates() {
+    check("first-start/create-answered-409-one-loses");
+}
+
+/// When every create is answered so and none was written, the nodes stay 503 until a restart.
+#[test]
+fn states_the_residual_of_every_create_answered_409() {
+    check("residual/first-start-every-create-answered-409");
+}
+
+/// The old process of the node's own id is left out of the proof by id, and writes after it.
+#[test]
+fn states_the_residual_of_an_old_node_of_the_same_id() {
+    check("residual/first-start-old-node-of-the-same-id");
+}
+
+/// A 409 that is false (no put was in flight and none landed) leaves the node 503 until a restart.
+#[test]
+fn residual_every_create_answered_409() {
+    check("residual/first-start-every-create-answered-409");
+}

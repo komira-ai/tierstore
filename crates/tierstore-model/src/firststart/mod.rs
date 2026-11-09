@@ -79,6 +79,9 @@ pub struct FsCfg {
     pub flaw: Flaw,
     /// The put may be answered ambiguously.
     pub ambiguous: bool,
+    /// An ambiguous answer without effect may come even when no other put is in flight (every
+    /// create is answered 409 and none lands): the stated residual.
+    pub lost_always: bool,
     /// The operator may change the record once it exists.
     pub operator: bool,
     /// A node of an earlier release may run: it writes journals and never reads the format object.
@@ -103,6 +106,7 @@ impl FsCfg {
             create: Create::OnlyIfAbsent,
             flaw: Flaw::None,
             ambiguous: false,
+            lost_always: false,
             operator: false,
             old: false,
             old_starts: 0,
@@ -235,7 +239,7 @@ impl FirstStart {
                             Self::written,
                         ));
                         let other_puts = (0..NEW).any(|j| j != i && s.nodes[j] == Pc::Put);
-                        if other_puts {
+                        if other_puts || self.cfg.lost_always {
                             out.push(go(Pc::Refused, Act::CreateAmbiguousLost(i)));
                         }
                     }

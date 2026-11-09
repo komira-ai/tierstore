@@ -691,6 +691,8 @@ sequenceDiagram
 
 Running a release from before the format object against a bucket that a release with this rule has used is unsupported: that release does not read the format object, so it writes journals (`_journal/`) that nobody applies, and a tier it left with no format object is taken for new. The model shows both cases (`residual/first-start-old-journal-left`, `residual/first-start-old-release-running`, each rejected by FS1 as the residual requires). It only ever ran on the farm, which is past it; the operator docs say so. The credential fence of 13 step 4 still applies to a restarted old binary.
 
+A second residual: a 409 means another put of the key is in flight, so the object appears. If a store answered 409 with no put in flight and nothing landed, every node would stay 503, reading the object at each beat, until a restart (`residual/first-start-every-create-answered-409`, rejected by FS2 as the residual requires). A restart reads, finds no object and puts again.
+
 #### The model check
 
 `crates/tierstore-model` has a third model, `firststart` (`src/firststart/mod.rs`), explored by the same breadth-first explorer; scenarios are in `src/scenarios/first_start.rs`, the tests in `tests/first_start.rs`. One hot tier whose format object is `None`, the record a start writes, or a record someone else wrote; up to two nodes of this release that may crash; the operator who may write a pause; a put answered normally, ambiguously after it took effect, or ambiguously without effect. Properties: FS1 (no format beside a journal of an earlier release; holds only where none runs, the residual), FS2 (a new tier: the object is written and every node follows it), FS4 (a start never replaces a record someone else wrote).
@@ -713,6 +715,7 @@ cargo test -p tierstore-model --test first_start
 | `negative/first-start-create-not-atomic` | rejected, FS4 | 56 |
 | `negative/first-start-ambiguous-answer-not-followed` | rejected, FS2 | 6 |
 | `residual/first-start-old-journal-left`, `old-release-running` | rejected, FS1 (the stated residual) | 4, 88 |
+| `residual/first-start-every-create-answered-409` | rejected, FS2 (the stated residual) | 42 |
 
 The model abstracts the record (the same for every node of one configuration) and takes a node that follows the object to be writable; what a paused record does to writes is the pause machinery of 8.2, not this section.
 
