@@ -71,11 +71,11 @@ test('the old addresses answer with a page that links to where the content went 
   }
 });
 
-test('Install has the four install tabs, the Next link to the docs and the Verify section after them', () => {
+test('Install has the five install tabs, the Next link to the docs and the Verify section after them', () => {
   const html = page('/install/');
   const labels = [...(/<div class="tab-list"[^>]*>([\s\S]*?)<\/div>/.exec(html)?.[1] ?? '').matchAll(/role="tab"[^>]*>([^<]+)<\/button>/g)].map((m) => m[1]);
-  assert.deepEqual(labels, ['Tarball · works today', 'Script · next release', 'Homebrew · next release', 'apt · next release']);
-  assert.equal(html.match(/role="tabpanel"/g)?.length, 4);
+  assert.deepEqual(labels, ['Script', 'Homebrew', 'apt', 'dnf', 'Tarball']);
+  assert.equal(html.match(/role="tabpanel"/g)?.length, 5);
   assert.match(html.replace(/<[^>]+>/g, ''), /curl -fsSL https:\/\/tierstore\.dev\/install\.sh \| sh/);
   const at = (needle: string): number => html.indexOf(needle);
   assert.ok(at('role="tabpanel"') < at('Next: ') && at('Next: ') < at('id="verify"'), 'the order is the tabs, Next, then Verify');

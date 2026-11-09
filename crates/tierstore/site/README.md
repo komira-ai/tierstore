@@ -48,7 +48,7 @@ read from its source, and each block names the file. Values that differ on every
 
 ## Install
 
-`/install/` has the four ways to install in tabs (Script, Homebrew, apt, Tarball), one command block each, with when each is available (the first three from the next release; the tarball from GitHub works today), then a link to the docs, then Verify: the checks of a download (SHA256SUMS, `gh attestation verify`, cosign). `test/install.test.ts` and `crates/xtask` hold those commands to what a release is checked with.
+`/install/` has the five ways to install in tabs (Script, Homebrew, apt, dnf, Tarball), one command block each ending in a version check, all available today, then a link to the docs, then Verify: the checks of a download (SHA256SUMS, `gh attestation verify`, cosign). `test/install.test.ts` and `crates/xtask` hold those commands to what a release is checked with.
 
 ## Diagrams
 

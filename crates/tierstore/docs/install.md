@@ -1,6 +1,6 @@
 # Install
 
-tierstore ships as a tarball per platform (Linux on x86_64 and arm64, macOS on Apple silicon) attached to every release of [this repository](https://github.com/komira-ai/tierstore/releases), with its SBOM and a provenance bundle. Versions up to 0.2.0 were built in another repository; from 0.3.0 on, releases are built and signed here. An install script, a Homebrew formula and an apt package are written but are not in a release yet (the tierstore.dev Install page says "from the next release" for each): until a release has them, take the tarball. There is no container image yet. [Not in a release yet](install.md#not-in-a-release-yet) says how the new ways are meant to be used. hostkeeper packages exist and update tierstore through `tierstore update-hook` (see [Updates through hostkeeper](install.md#updates-through-hostkeeper)); without hostkeeper nothing updates the binary: to move to a new release, place the new binary the same way and restart the unit (on Linux; the sections from "Place the binary" on are for a Linux host).
+tierstore ships as a tarball per platform (Linux on x86_64 and arm64, macOS on Apple silicon) attached to every release of [this repository](https://github.com/komira-ai/tierstore/releases), with its SBOM and a provenance bundle. Versions up to 0.2.0 were built in another repository; from 0.3.0 on, releases are built and signed here. There are five ways to take it, all available today: [the install script](install.md#install-script), [Homebrew](install.md#homebrew), [apt](install.md#apt), [dnf](install.md#dnf) and [the tarball](install.md#take-the-tarball). The script, Homebrew and the tarball give you the binary alone; apt and dnf also add the account, the unit and an example configuration. There is no container image yet. hostkeeper packages exist and update tierstore through `tierstore update-hook` (see [Updates through hostkeeper](install.md#updates-through-hostkeeper)); without hostkeeper nothing updates the binary: to move to a new release, place the new binary the same way and restart the unit (on Linux; the sections from "Place the binary" on are for a Linux host).
 
 ## Platforms
 
@@ -177,34 +177,35 @@ On Linux an instance starts only when its marker file, `/var/lib/tierstore/run-a
 - An update is a hand-over only when both releases list `handoff-socket-v1` in `tierstore --capabilities` (and `handoff-cache-v1` too, for a configuration with a `[local_cache]` table) and the configuration names a `handoff_socket`; otherwise it is a restart, with a gap. This binary lists `handoff-socket-v1`, so the first update that hands over is the one from this release to a later one; the update to this release of a node with `[local_cache]` needs `mode = "restart"` in its params, since its configuration cannot have the key while the earlier release runs ([the hand-over socket](update-hook.md#the-hand-over-socket)).
 - An instance stops in at most 975 s (the 70 s `--drain-lb-wait`, the 900 s drain and 5 s for the lease); the unit's `TimeoutStopSec=` is above it, so a `cleanup` that finds the old instance still draining is deferred and run again.
 
-## Not in a release yet
+## Other ways to take it
 
-Four more ways to take tierstore are written and not in a release yet. The commands below fail today (there is no formula, no `tierstore` package in the apt repository, and nothing at the address the script reads), so take the tarball above. This section describes the intended use and is not held to the code until they exist.
+The tarball above is the base: the other ways install the same release. None of them starts the service.
 
 ### Install script
 
-`curl -fsSL https://tierstore.dev/install.sh | sh` reads the newest release from the copy of the release files on tierstore.dev (below), downloads the tarball of the machine and `SHA256SUMS`, refuses unless the SHA-256 matches, and places `tierstore` in `~/.local/bin`. It starts nothing. It works once a release has been copied there.
+`curl -fsSL https://tierstore.dev/install.sh | sh` reads the newest release from the copy of the release files on tierstore.dev (below), downloads the tarball of the machine and `SHA256SUMS`, refuses unless the SHA-256 matches, and places `tierstore` in `~/.local/bin`. It starts nothing. `~/.local/bin` is on the `PATH` of many but not all hosts; the version check below names the file so that it works either way.
 
 ```sh
 curl -fsSL https://tierstore.dev/install.sh | sh
+~/.local/bin/tierstore --version
 ```
 
 ### Homebrew
 
-A formula in the tap `komira-ai/tap`, for macOS on Apple silicon and for Linux:
+A formula in the tap `komira-ai/tap`, for macOS on Apple silicon and for Linux. Homebrew places `tierstore` on the `PATH`:
 
 ```sh
 brew install komira-ai/tap/tierstore
+tierstore --version
 ```
 
 ### apt
 
-The package `tierstore` in the repository `packages.komira.ai`, shared with other Komira tools. Fetch the repository's key over HTTPS into `/usr/share/keyrings`, compare its fingerprint with the one the repository publishes, then write a deb822 source that trusts that file for this source only:
+For Debian 10 and newer and Ubuntu 20.04 and newer. The package `tierstore` is in the repository `packages.komira.ai`, shared with other Komira tools. Fetch the repository's key over HTTPS into `/usr/share/keyrings`, then write a deb822 source that trusts that file for this source only:
 
 ```sh
 sudo install -d -m 0755 /usr/share/keyrings
 sudo curl -fsSL https://packages.komira.ai/apt/komira-archive-keyring.gpg -o /usr/share/keyrings/komira-archive-keyring.gpg
-gpg --show-keys --with-fingerprint /usr/share/keyrings/komira-archive-keyring.gpg
 ```
 
 ```sh
@@ -217,10 +218,25 @@ Signed-By: /usr/share/keyrings/komira-archive-keyring.gpg
 EOF
 sudo apt update
 sudo apt install tierstore
+/usr/libexec/tierstore/tierstore --version
 ```
 
-The first fetch of the key trusts TLS once; the fingerprint is the check against it. There is no rpm package.
+apt checks the package against the key named in `Signed-By`. The first fetch of the key trusts TLS once; `gpg` can print the fingerprint of the file to compare with the one the repository publishes.
+
+### dnf
+
+For AlmaLinux, Rocky Linux and RHEL 8 and newer, Fedora and Amazon Linux 2023. The repository file names the repository's key; dnf checks the signature of the repository's metadata and of the package against it:
+
+```sh
+sudo curl -fsSLo /etc/yum.repos.d/komira.repo https://packages.komira.ai/rpm/komira.repo
+sudo dnf install tierstore
+/usr/libexec/tierstore/tierstore --version
+```
+
+### What the packages place
+
+The deb and the rpm place the binary at `/usr/libexec/tierstore/tierstore`, as "Place the binary" above does by hand, and nothing on the `PATH`: run it by that path, or link it from a directory that is on the `PATH` yourself. They also place the unit, the `sysusers.d` entry and the example configuration `/etc/tierstore/tierstore.toml` (a conffile, so an upgrade keeps your edits), create the `tierstore` account, and run `systemctl daemon-reload`. They start nothing and enable nothing: the key files and the configuration are still yours to write, as in the sections above. The package manager updates the binary on its own `apt upgrade` or `dnf upgrade`, with a restart of the unit left to you.
 
 ### Release files on tierstore.dev
 
-Each release is meant to be copied to `https://tierstore.dev/releases/<version>/`, written once and never changed, with `https://tierstore.dev/releases/latest.json` naming the newest. The releases of this repository on GitHub stay the place the files are built and signed; the checks under "Verify" above are the same for a file taken from either.
+Each release is copied to `https://tierstore.dev/releases/<version>/`, written once and never changed, with `https://tierstore.dev/releases/latest.json` naming the newest. The releases of this repository on GitHub stay the place the files are built and signed; the checks under "Verify" above are the same for a file taken from either.
