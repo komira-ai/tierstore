@@ -67,10 +67,9 @@ fn settings(words: Vec<String>) -> Cli {
     assert!(on_host.starts_with("/etc/tierstore"), "{on_host:?}");
     let name = on_host.file_name().and_then(|name| name.to_str());
     let text = read(name.expect("a file name"));
-    let mut cli = Cli::from_config_text(&text).expect("the unit's file");
-    cli.drain_lb_wait = args.drain_lb_wait;
-    cli.drain_deadline = args.drain_deadline;
-    cli
+    assert_eq!(args.drain_lb_wait, None, "the drain is the file's keys");
+    assert_eq!(args.drain_deadline, None, "the drain is the file's keys");
+    Cli::from_config_text(&text).expect("the unit's file")
 }
 
 /// The settings of the unit's command line.

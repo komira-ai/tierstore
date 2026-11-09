@@ -11,7 +11,7 @@ use std::time::Duration;
 use clap::{CommandFactory, Parser};
 use tierstore_testkit::dir::TestDir;
 
-use crate::server::config_testing::MINIMAL;
+use crate::server::config_testing::{DEFAULT_DRAIN, MINIMAL};
 use crate::server::local_cache::LocalTierFailure;
 use crate::server::{AccessKey, Drained};
 
@@ -102,8 +102,8 @@ fn the_keys_have_their_defaults() {
     assert_eq!(cli.bucket, "tier-bucket");
     assert_eq!(cli.region, "us-east-1");
     assert_eq!((cli.high_water, cli.low_water, cli.critical), (80, 70, 95));
-    assert_eq!(cli.drain_lb_wait, Duration::from_secs(10));
-    assert_eq!(cli.drain_deadline, Duration::from_secs(900));
+    assert_eq!(cli.drain_lb_wait, DEFAULT_DRAIN.0);
+    assert_eq!(cli.drain_deadline, DEFAULT_DRAIN.1);
     assert_eq!(cli.copy_parallel, 16);
     assert_eq!(cli.lease_ttl, Duration::from_secs(30));
     assert_eq!(cli.usage_stale_after, Duration::from_secs(120));
@@ -164,20 +164,33 @@ fn the_slot_reaches_the_server_settings() {
     assert_eq!(build(&cli).expect("built").server.slot, Some(9301));
 }
 
-/// Asserts that the help names every flag of a run and none that went, and that the version names
-/// the package version.
+/// Asserts that the help names `--config` and none of the flags that went or that are for a host
+/// updater (`--check-config`, `--capabilities`) or kept for old units (the two of the drain), which
+/// the parser still takes; and that the version names the package version.
 #[test]
 fn the_help_names_the_flags_of_a_run_and_the_version_the_package() {
     let help = Args::command().render_long_help().to_string();
-    for name in [
-        "--config",
+    assert!(help.contains("--config"));
+    for hidden in [
         "--check-config",
         "--capabilities",
         "--drain-lb-wait",
         "--drain-deadline",
     ] {
-        assert!(help.contains(name), "{name}");
+        assert!(!help.contains(hidden), "{hidden}");
     }
+    let taken = Args::try_parse_from([
+        "tierstore",
+        "--config=f",
+        "--check-config",
+        "--capabilities",
+        "--drain-lb-wait=1s",
+        "--drain-deadline=2s",
+    ])
+    .unwrap();
+    assert!(taken.check_config && taken.capabilities);
+    assert_eq!(taken.drain_lb_wait, Some(Duration::from_secs(1)));
+    assert_eq!(taken.drain_deadline, Some(Duration::from_secs(2)));
     for gone in ["--listen", "--hot", "--print-config", "--oci-listen"] {
         assert!(!help.contains(gone), "{gone}");
     }

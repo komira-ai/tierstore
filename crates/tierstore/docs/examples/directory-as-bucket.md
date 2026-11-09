@@ -50,7 +50,6 @@ The two paths are two different directories, one on each disk. Tiers today are d
 sudo install -d -o "$USER" /srv/fast/tierstore /srv/big/tierstore
 printf 'AKIDEXAMPLE\nexample-secret-change-me\n' > /srv/tierstore/access.key
 chmod 0600 /srv/tierstore/access.key
-tierstore --config /srv/tierstore/tierstore.toml --check-config
 tierstore format-epoch --hot dir:/srv/fast/tierstore --activate --apply
 tierstore --config /srv/tierstore/tierstore.toml
 ```

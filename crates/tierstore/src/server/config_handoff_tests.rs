@@ -5,7 +5,7 @@
 use std::path::PathBuf;
 use std::time::Duration;
 
-use super::super::config::{ServerTable, from_text, settings_from_text};
+use super::super::config::{PerRun, ServerTable, from_text, settings_from_text};
 use super::super::config_testing::{DEFAULTS, MINIMAL};
 use super::super::config_unknown::fields_of;
 use super::super::handoff::Handoff;
@@ -392,5 +392,73 @@ fn a_plain_storage_node_reads_both_keys_as_the_control() {
             socket: PathBuf::from("/var/lib/tierstore/handoff.sock"),
             wait: Duration::from_secs(3),
         })
+    );
+}
+
+/// Asserts that a service with a state directory has the hand-off without the key: the socket is
+/// `handoff.sock` in the directory, with the default wait; that the key, when given, wins; that
+/// `handoff_wait` is then allowed without the key; and that a build node gets the same.
+#[test]
+fn a_state_directory_gives_the_socket_its_default() {
+    let per_run = PerRun {
+        state_dir: Some(PathBuf::from("/var/lib/tierstore")),
+        ..PerRun::default()
+    };
+    let default = Handoff {
+        socket: PathBuf::from("/var/lib/tierstore/handoff.sock"),
+        wait: Duration::from_secs(10),
+    };
+    assert_eq!(
+        from_text(MINIMAL, per_run.clone()).unwrap().handoff,
+        Some(default)
+    );
+
+    let named = with_server("handoff_socket = \"/run/other.sock\"");
+    let taken = from_text(&named, per_run.clone()).unwrap().handoff.unwrap();
+    assert_eq!(taken.socket, PathBuf::from("/run/other.sock"));
+
+    let waiting = with_server("handoff_wait = \"5s\"");
+    let taken = from_text(&waiting, per_run.clone())
+        .unwrap()
+        .handoff
+        .unwrap();
+    assert_eq!(taken.wait, Duration::from_secs(5));
+
+    let build = build_node("");
+    let taken = settings_from_text(&build, per_run.clone()).unwrap();
+    assert_eq!(
+        taken
+            .into_cache()
+            .expect("a build node")
+            .handoff
+            .map(|handoff| handoff.socket),
+        Some(PathBuf::from("/var/lib/tierstore/handoff.sock"))
+    );
+    let combined = combined_at("/var/lib/tierstore/cache", "");
+    let taken = settings_from_text(&combined, per_run).unwrap();
+    assert_eq!(
+        taken
+            .into_combined()
+            .expect("a combined node")
+            .node
+            .handoff
+            .map(|handoff| handoff.socket),
+        Some(PathBuf::from("/var/lib/tierstore/handoff.sock"))
+    );
+}
+
+/// Asserts that a default socket is held to the checks of a named one: a state directory that
+/// makes the path too long is refused, naming the key.
+#[test]
+fn a_state_directory_that_makes_the_socket_path_too_long_is_refused() {
+    let per_run = PerRun {
+        state_dir: Some(PathBuf::from(format!("/{}", "a".repeat(100)))),
+        ..PerRun::default()
+    };
+    let why = from_text(MINIMAL, per_run).unwrap_err().to_string();
+    assert!(why.starts_with("server.handoff_socket: \""), "{why}");
+    assert!(
+        why.ends_with("the path of a Unix socket is at most 103"),
+        "{why}"
     );
 }

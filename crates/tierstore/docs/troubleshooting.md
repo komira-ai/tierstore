@@ -4,7 +4,7 @@
 
 | Status | Meaning | The unit |
 |---|---|---|
-| 0 | a clean drain, or `--check-config` or `--help` done | stays stopped |
+| 0 | a clean drain, or `--help` done | stays stopped |
 | 1 | a start that failed: an address in use, a key file refused after parsing, the settings that depend on each other (see "Messages at start"), and a hot tier that cannot be reached when the proxy is opened (`opening the proxy: ...`). A cold store that cannot be reached is not one: tierstore does not test its stores | restarts after 30 seconds |
 | 2 | a flag the parser refused (or a flag of the data path that went, which the message answers with its key), a start without `--config`, a file that does not load (`conditional_delete = false` for a `memory` or `dir` tier among it), a limit of the OCI front (its prefix, its certificate and key, see "OCI front"), a local cache budget the file system cannot hold (see "Build-node cache"), or two keys with one id | does not restart: a restart cannot mend it |
 | 3 | the cache directory, once opened, could not be probed or its file system failed the cache check (a build node, or a node with `[local_cache]`) | does not restart: the same file system would answer the same way |
@@ -24,7 +24,7 @@ server.s3_request_timeout must be longer than zero
 server.bucket <name> is the name of a probe path
 ```
 
-Fix the value; `journalctl -u tierstore` shows the message at every try. `--check-config` does not find these (see [configuration](configuration.md#the-flags-of-a-run)).
+Fix the value; `journalctl -u tierstore` shows the message at every try.
 
 A key file:
 
@@ -145,7 +145,7 @@ Check `/usagez` first. A 503 there means the reconciler is not publishing: look 
 
 ## A connection ends during a restart
 
-From the moment a stop begins every answer carries `Connection: close`, and at the end of the settle (`--drain-lb-wait`) the server closes each idle connection by shutting its end for writing: a client reads the end of the stream, not a reset, and opens a new connection. A client that sent a request in the one round trip before it read that end gets no answer: the server read the request, dropped it and counted it in `tierstore_drain_late_requests_total`. Do not retry such a request unless it is safe to repeat: a retried create-only put answers 412 whether its first try was stored or another writer stored the key. Only a connection that was idle for the whole settle can meet this, and the server cannot remove it; a count that is large after every restart means clients that send on a connection without looking at `Connection: close`. The OCI read front drains the same way, and counts its own connections in `tierstore_oci_drain_late_requests_total`. The counts reach their last value after the settle, when `/metricz` has closed with the S3 listener, so the process says them on stderr as it exits, a line for each front that counted one: `tierstore: <N> connections sent a request too late in the drain of the S3 front` (or `of the OCI front`). Each counts connections, once each, not requests.
+From the moment a stop begins every answer carries `Connection: close`, and at the end of the settle (`server.drain_lb_wait`) the server closes each idle connection by shutting its end for writing: a client reads the end of the stream, not a reset, and opens a new connection. A client that sent a request in the one round trip before it read that end gets no answer: the server read the request, dropped it and counted it in `tierstore_drain_late_requests_total`. Do not retry such a request unless it is safe to repeat: a retried create-only put answers 412 whether its first try was stored or another writer stored the key. Only a connection that was idle for the whole settle can meet this, and the server cannot remove it; a count that is large after every restart means clients that send on a connection without looking at `Connection: close`. The OCI read front drains the same way, and counts its own connections in `tierstore_oci_drain_late_requests_total`. The counts reach their last value after the settle, when `/metricz` has closed with the S3 listener, so the process says them on stderr as it exits, a line for each front that counted one: `tierstore: <N> connections sent a request too late in the drain of the S3 front` (or `of the OCI front`). Each counts connections, once each, not requests.
 
 ## A reused connection is closed
 
@@ -153,4 +153,4 @@ The server closes a connection that has waited for its next request for longer t
 
 ## At drain deadline
 
-`tierstore: <N> requests were cut at the drain deadline` on stderr means clients were still sending or reading when `--drain-deadline` ran out. Raise it, with `TimeoutStopSec=` in the unit.
+`tierstore: <N> requests were cut at the drain deadline` on stderr means clients were still sending or reading when `server.drain_deadline` ran out. Raise it, with `TimeoutStopSec=` in the unit.

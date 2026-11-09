@@ -58,7 +58,6 @@ With `[hot_store]`, `[cold_store]` and `[local_cache]` in one file the node owns
 ## Commands
 
 ```sh
-tierstore --config /etc/tierstore/tierstore.toml --check-config
 tierstore format-epoch --hot dir:/srv/tierstore/hot --activate --apply
 tierstore --config /etc/tierstore/tierstore.toml
 ```

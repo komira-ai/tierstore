@@ -411,3 +411,37 @@ fn a_list_of_endpoints_is_read_here_and_refused_by_the_release_before() {
         assert_eq!(both(&file), (ok.clone(), refused.clone()), "{list}");
     }
 }
+
+/// Asserts both directions of the drain's move from two flags to two keys of `[server]`. A file
+/// that sets `drain_lb_wait` and `drain_deadline` is read by this branch and refused by the pinned
+/// release before with status 2 (it predates the warning for an unknown key), so a host that may
+/// roll back leaves the keys out and keeps the flags until every process has this branch. The
+/// flags of that release's unit are still taken here: a file without the keys, checked with
+/// `--drain-lb-wait` and `--drain-deadline`, is loaded by both; and the keys together with the
+/// flag for the same part are refused here, with status 2.
+#[test]
+fn the_drain_keys_are_read_here_and_the_old_flags_are_still_taken() {
+    let node = Node::new("compat-config-drain");
+    let ok = status(ExitCode::SUCCESS);
+    let refused = status(ExitCode::from(2));
+    let keys = "drain_lb_wait = \"3s\"\ndrain_deadline = \"2m\"";
+    assert_eq!(
+        both(&node.file(keys, "", "")),
+        (ok.clone(), refused.clone())
+    );
+
+    let flags = |file: &OsString| {
+        let mut args = check_args(file);
+        for word in ["--drain-lb-wait", "1s", "--drain-deadline", "30s"] {
+            args.push(OsString::from(word));
+        }
+        args
+    };
+    let plain = node.file("", "", "");
+    let now = tierstore::server::cli::main(flags(&plain));
+    let before = tierstore_prev::server::cli::main(flags(&plain));
+    assert_eq!((status(now), status(before)), (ok.clone(), ok));
+
+    let keyed = node.file(keys, "", "");
+    assert_eq!(status(tierstore::server::cli::main(flags(&keyed))), refused);
+}

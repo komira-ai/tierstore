@@ -52,7 +52,6 @@ cache  = true
 There is no hot tier, so there is nothing to activate.
 
 ```sh
-tierstore --config /etc/tierstore-cache/tierstore.toml --check-config
 tierstore --config /etc/tierstore-cache/tierstore.toml
 ```
 

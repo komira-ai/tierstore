@@ -360,17 +360,6 @@ pub fn integer(value: &Value) -> i64 {
     }
 }
 
-/// A duration flag's value in seconds: `70s`, `15m`.
-pub fn seconds(text: &str) -> u64 {
-    let (number, unit) = text.split_at(text.len() - 1);
-    let number: u64 = number.parse().expect("a number");
-    match unit {
-        "s" => number,
-        "m" => number * 60,
-        other => panic!("a unit this test does not read: {other}"),
-    }
-}
-
 /// The word after `flag` in `words`.
 pub fn flag<'a>(words: &[&'a str], flag: &str) -> &'a str {
     let at = words

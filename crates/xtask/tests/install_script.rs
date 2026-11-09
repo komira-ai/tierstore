@@ -529,7 +529,11 @@ fn the_binary_is_asked_its_version_and_nothing_else_and_the_output_says_how_to_s
         "{out}"
     );
     assert!(out.contains("tierstore is not running"), "{out}");
-    assert!(out.contains("--config FILE --check-config"), "{out}");
+    assert!(
+        out.contains("write a configuration file, then enable the service"),
+        "{out}"
+    );
+    assert!(!out.contains("--check-config"), "{out}");
 }
 
 #[test]

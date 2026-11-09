@@ -72,10 +72,10 @@ endpoint         = "http://s3-cold.example:9000"
 credentials_file = "/etc/tierstore/cold.credentials"
 ```
 
-`presign_key_files` and `gc_key_files` hold scoped keys: one signs presigned PUT URLs, the other lists and deletes under one prefix for garbage collection (see [keys](keys.md)). Leave both out if you do not use them. Start it with the file and nothing else but the flags of the run:
+`presign_key_files` and `gc_key_files` hold scoped keys: one signs presigned PUT URLs, the other lists and deletes under one prefix for garbage collection (see [keys](keys.md)). Leave both out if you do not use them. Start it with the file and nothing else:
 
 ```sh
-/usr/libexec/tierstore/tierstore --config /etc/tierstore/tierstore.toml --drain-lb-wait 10s --drain-deadline 15m
+/usr/libexec/tierstore/tierstore --config /etc/tierstore/tierstore.toml
 ```
 
 ## A file for a build node
@@ -246,7 +246,9 @@ When the file has a `[local_cache]` table (a build node, or a storage node with 
 | `server.dir_read_chunk` | bytes, 64 KiB (1 to 1 GiB) | the size of the chunks in which a `dir` tier gives a streamed read |
 | `server.s3_single_put_max` | size, `5GiB` (1MiB to 5GiB) | the longest object of known length that an `s3` tier (both tiers, or the upstream of a cache) is written with one PUT, whose body is streamed and never held whole; a longer one, and a body of unknown length, is a multipart upload. 5GiB is the most S3 takes in one PUT. Lower it for a store or a proxy that takes a long PUT worse than several short ones |
 | `server.s3_part_bytes` | size, `16MiB` (5MiB to 1GiB) | the size of a part of a multipart upload to an `s3` tier. One part is held in memory while it is sent, so a write holds this much; an object too large for 10,000 parts of this size gets larger parts |
-| `server.handoff_socket` | path, none | The control socket of the hand-off of the listening sockets (see [Live update by hand-off of the sockets](operations.md#live-update-by-hand-off-of-the-sockets)): an absolute path of at most 103 bytes, in a directory only the node's user may write, and not `hot_store.lock_file`. With it a start takes the sockets of the instance that answers there, or binds its own where none answers, and then answers there itself; without it, the default, a start binds its own sockets and makes no control socket. Every shape reads it. On a node with `[local_cache]` it must not be inside `local_cache.path` (refused, exit 2), and for a build node `local_cache.path` must then be an absolute path, so that the two can be compared (refused, exit 2) |
+| `server.drain_lb_wait` | duration, `10s` (`1s` on macOS) | on SIGTERM, the settle: how long `/readyz` says 503 while the server goes on accepting and serving, so that a load balancer sees it. On a loopback service there is none to wait for, which is why the macOS default is shorter. Given too as `--drain-lb-wait` (a flag of the releases before, still taken), a start that gets both is refused with status 2 |
+| `server.drain_deadline` | duration, `15m` (`60s` on macOS) | then how long it waits for requests in flight and for the connections it closes (a lingering close, see [operations](operations.md#drain-and-restart)). Given too as `--drain-deadline`; both is refused as for `server.drain_lb_wait`. The unit's stop timeout is above the sum of the two (see [install](install.md)); if you raise either, raise it too |
+| `server.handoff_socket` | path, none | The control socket of the hand-off of the listening sockets (see [Live update by hand-off of the sockets](operations.md#live-update-by-hand-off-of-the-sockets)): an absolute path of at most 103 bytes, in a directory only the node's user may write, and not `hot_store.lock_file`. With it a start takes the sockets of the instance that answers there, or binds its own where none answers, and then answers there itself. Left out, it is `handoff.sock` in the service's state directory when the service manager made one (systemd sets `STATE_DIRECTORY` for a unit with `StateDirectory=`, as hostkeeper's package has: `/var/lib/tierstore/handoff.sock`), and a process with no state directory binds its own sockets and makes no control socket. The default is held to the checks below as a named path is. Every shape reads it. On a node with `[local_cache]` it must not be inside `local_cache.path` (refused, exit 2), and for a build node `local_cache.path` must then be an absolute path, so that the two can be compared (refused, exit 2) |
 | `server.handoff_wait` | duration, `10s` (1ms to 1h) | how long a start waits for the instance that answers on `server.handoff_socket` to hand its sockets over, from the connection to the end of the hand-off; a start that is not answered in that time fails (exit 1) and binds nothing. Refused without `server.handoff_socket` |
 
 ## `[hot_store]` and `[cold_store]`
@@ -421,17 +423,17 @@ These tuning values are fixed in this release and have no key: the intervals of 
 
 ## The flags of a run
 
-These describe one run, not the data path, and have no key:
+These describe one run, not the data path, and have no key. `--check-config` and `--capabilities` are for the host updater's hook and are not in `--help`; an operator writes the file and enables the service:
 
 | Flag | Default | What |
 |---|---|---|
 | `--config` | none | the file; a start without it is refused with status 2 |
 | `--check-config` | off | with `--config`: load the file, read the key files it names, the S3 front's certificate and key if it has them, and for an `oci` interface check the prefix, the connection lifetime and the TLS files; then exit 0 and print nothing, or print the refusal and exit 2. It binds nothing and asks no store. What it does not check is listed below. Without `--config` it is a usage error |
 | `--capabilities` | off | print what this build can do, one capability to a line, and exit 0 (a build with none prints nothing). It needs no file, and with any other argument it prints nothing on stdout, says `--capabilities takes no other flag` on stderr and exits 2 |
-| `--drain-lb-wait` | `10s` | on SIGTERM, the settle: how long `/readyz` says 503 while the server goes on accepting and serving |
-| `--drain-deadline` | `15m` | then how long it waits for requests in flight and for the connections it closes (a lingering close, see [operations](operations.md#drain-and-restart)) |
+| `--drain-lb-wait` | the key's | kept for the units of the releases before: the same as `server.drain_lb_wait`, not in `--help`; refused when the file sets the key too |
+| `--drain-deadline` | the key's | kept as above for `server.drain_deadline` |
 
-`--check-config` finds what the loader refuses (see "What the loader refuses"), a `bucket` that is a probe path name, a zero `body_idle_timeout`, a key file that is not owned by the user, is open to others or is a link, two keys with one id, and, in the file of a build node, a zero `s3_request_timeout`. It does not find what a start checks after that: the water marks out of order, `usage_stale_after` not above `lease_ttl`, the heartbeat values out of the relations above, or a zero `s3_request_timeout` in a storage node's file (a start exits 1 on each, and the unit tries again every 30 seconds); a tier that is down; the cache directory and a `budget` over the size of its file system. A file that passes `--check-config` can still fail to start.
+`--check-config` finds what the loader refuses (see "What the loader refuses"), a `bucket` that is a probe path name, a zero `body_idle_timeout`, a key file that is not owned by the user, is open to others or is a link, two keys with one id, and, in the file of a build node, a zero `s3_request_timeout`. It does not find what a start checks after that: the water marks out of order, `usage_stale_after` not above `lease_ttl`, the heartbeat values out of the relations above, or a zero `s3_request_timeout` in a storage node's file (a start exits 1 on each, and the unit tries again every 30 seconds); a tier that is down; the cache directory and a `budget` over the size of its file system. A file that passes it can still fail to start.
 
 `--help` and `--version` are the usual: `--version` prints the version, `+` and the commit the binary was built from (`tierstore 0.3.0+0123456789ab`), and the start line ends with ` commit=<commit>`. The commit is twelve hex digits, or `unknown` for a build that had neither a git checkout nor a stamp.
 

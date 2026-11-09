@@ -24,9 +24,9 @@ use std::time::Duration;
 use crate::server::build_info::gauge;
 use crate::server::update_hook::systemd::run_step;
 use crate::server::update_hook::{
-    CACHE_HANDOFF_CAPABILITY, Clock, Done, HANDOFF_CAPABILITY, HANDOFF_SOCKET_KEY, Host, Instance,
-    Instances, LOCAL_CACHE_TABLE, Lock, Markers, Outcome, Params, PortError, PortKind, Reason,
-    Record, Reply, StateDir, Step, SystemdPorts, UnitState, Units, marker_path,
+    CACHE_HANDOFF_CAPABILITY, Clock, Done, HANDOFF_CAPABILITY, HANDOFF_STATE_DIR_CAPABILITY, Host,
+    Instance, Instances, LOCAL_CACHE_TABLE, Lock, Markers, Outcome, Params, PortError, PortKind,
+    Reason, Record, Reply, StateDir, Step, SystemdPorts, UnitState, Units, marker_path,
 };
 
 /// The release that runs at first.
@@ -42,6 +42,10 @@ pub const WITH_SOCKET: &str = "[server]\nhandoff_socket = \"/var/lib/tierstore/h
 /// A configuration of a build node or a storage node with a cache that names the hand-over
 /// socket.
 pub const WITH_CACHE_SOCKET: &str = "[server]\nhandoff_socket = \"/var/lib/tierstore/handoff.sock\"\n\n[local_cache]\npath = \"/var/lib/tierstore/cache\"\n";
+/// A configuration that leaves the hand-over socket out: its default is the socket.
+pub const WITHOUT_SOCKET: &str = "[server]\nproxy_id = \"p1\"\n";
+/// A configuration with a directory as the hot tier, and the hand-over socket named.
+pub const DIR_HOT: &str = "[server]\nhandoff_socket = \"/var/lib/tierstore/handoff.sock\"\n\n[hot_store]\nkind = \"dir\"\npath = \"/var/lib/tierstore/hot\"\n";
 /// The commit of every release's build.
 const COMMIT: &str = "0123456789ab";
 /// The unit file the package ships.
@@ -178,13 +182,11 @@ impl World {
                 has(HANDOFF_CAPABILITY) && (!with_cache || has(CACHE_HANDOFF_CAPABILITY))
             })
         };
-        let configured = self
-            .config
-            .as_deref()
-            .is_some_and(|text| text.contains(HANDOFF_SOCKET_KEY));
+        // A node with no configuration cannot start a successor that takes the sockets. The
+        // socket key may be left out: the process defaults it (`prepare` judged the releases).
         // Both releases, checked together: an instance serving is always one that was started
         // from a release.
-        configured && [old, Some(new)].into_iter().all(|r| r.is_some_and(capable))
+        self.config.is_some() && [old, Some(new)].into_iter().all(|r| r.is_some_and(capable))
     }
 
     /// systemd starting `instance`.
@@ -247,6 +249,7 @@ impl SystemdFake {
         let capable = vec![
             HANDOFF_CAPABILITY.to_owned(),
             CACHE_HANDOFF_CAPABILITY.to_owned(),
+            HANDOFF_STATE_DIR_CAPABILITY.to_owned(),
         ];
         SystemdFake {
             w: RefCell::new(World {

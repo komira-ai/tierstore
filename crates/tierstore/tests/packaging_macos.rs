@@ -1,6 +1,6 @@
 //! The build-node file of a Mac (`packaging/macos/tierstore.toml`) against the binary and the
 //! launchd plist of hostkeeper's package (`packaging/hostkeeper/units/tierstore.plist`): the plist
-//! names the file and the two flags of the drain, the binary accepts that command line and that
+//! names the file, the binary accepts that command line and that
 //! file, and the file serves `[local_cache]` on loopback only, on the port the update hook probes.
 
 #![allow(
@@ -141,7 +141,7 @@ fn table<'a>(table: &'a toml::Table, key: &str) -> &'a toml::Table {
     table[key].as_table().unwrap_or_else(|| panic!("[{key}]"))
 }
 
-/// Asserts that the plist's command line is `--config` with the file's place and the two flags
+/// Asserts that the plist's command line is `--config` with the file's place
 /// of the drain, each once and nothing else (a start refuses any other flag beside a file; the
 /// test below runs the binary on it), and that no key of the file holds a secret (each names a
 /// file); and that the file is a build node that serves on loopback only: `[local_cache]` and `[cold_store]` and no
@@ -150,13 +150,13 @@ fn table<'a>(table: &'a toml::Table, key: &str) -> &'a toml::Table {
 #[test]
 fn the_plist_runs_a_local_cache_on_loopback_from_its_file() {
     let words = arguments();
-    assert_eq!(words.len(), 7, "{words:?}");
+    assert_eq!(words.len(), 3, "{words:?}");
     assert_eq!(
         Path::new(&flag("--config")),
         Path::new(LAUNCHD_LINKS_DIR).join("etc/tierstore.toml")
     );
     let flags: Vec<&String> = words.iter().filter(|w| w.starts_with("--")).collect();
-    assert_eq!(flags, ["--config", "--drain-lb-wait", "--drain-deadline"]);
+    assert_eq!(flags, ["--config"]);
     let file = config();
     assert!(file.contains_key("local_cache"), "a build node");
     assert!(file.contains_key("cold_store"));
