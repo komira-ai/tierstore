@@ -1,32 +1,22 @@
 <div class="narrow">
 <h1>Install</h1>
-<p class="lede">Take the tarball, which works today. The other ways are written and arrive with the next release.</p>
+<p class="lede">Five ways, all available today. The script is the simplest; a package manager keeps tierstore with the rest of the system; the tarball is the one to verify by hand.</p>
 
 <div class="tabs" data-tabs="install">
-<section data-tab="Tarball · works today">
-<p>One block for Linux (x86_64 or arm64) and macOS (Apple silicon). It takes the tarball of the machine it runs on from the latest release on GitHub, with its signature bundle and <code>SHA256SUMS</code> for the checks below, unpacks it and prints the version.</p>
-<div class="code"><pre data-lang="sh"><span class="p">$</span> os=$(uname -s | sed 's/Darwin/macos/; s/Linux/linux/')
-<span class="p">$</span> arch=$(uname -m | sed 's/aarch64/arm64/')
-<span class="p">$</span> gh release download --repo komira-ai/tierstore \
-    --pattern "tierstore-*-$os-$arch.tar.gz*" --pattern SHA256SUMS
-<span class="p">$</span> tar -xzf tierstore-*-$os-$arch.tar.gz tierstore
-<span class="p">$</span> ./tierstore --version</pre></div>
-<p class="note">No <code>gh</code>? Take the same files from the <a href="https://github.com/komira-ai/tierstore/releases">releases page</a>. The last line is the check that it runs: it prints a version.</p>
-</section>
-<section data-tab="Script · next release">
-<p><strong>Not in a release yet.</strong> The script reads the newest release from tierstore.dev, downloads the tarball of your machine (Linux x86_64 or arm64, macOS Apple silicon), refuses unless its SHA-256 matches, and puts <code>tierstore</code> in <code>~/.local/bin</code>. It starts nothing. Until a release is published there, use the Tarball tab.</p>
+<section data-tab="Script">
+<p>The script reads the newest release from tierstore.dev, downloads the tarball of your machine (Linux x86_64 or arm64, macOS Apple silicon), refuses unless its SHA-256 matches, and puts <code>tierstore</code> in <code>~/.local/bin</code>. It starts nothing.</p>
 <div class="code"><pre data-lang="sh"><span class="p">$</span> curl -fsSL https://tierstore.dev/install.sh | sh
-<span class="p">$</span> tierstore --version</pre></div>
-<p class="note">The script checks the SHA-256 itself. The second line is the check that it runs: it prints a version.</p>
+<span class="p">$</span> ~/.local/bin/tierstore --version</pre></div>
+<p class="note">The script checks the SHA-256 itself. The last line is the check that it runs: it prints a version. Add <code>~/.local/bin</code> to your <code>PATH</code> to run it as <code>tierstore</code>.</p>
 </section>
-<section data-tab="Homebrew · next release">
-<p><strong>Not in a release yet.</strong> The tap <code>komira-ai/tap</code> has the formula for macOS on Apple silicon and for Linux. Until a release has it, use the Tarball tab.</p>
+<section data-tab="Homebrew">
+<p>The tap <code>komira-ai/tap</code> has the formula for macOS on Apple silicon and for Linux. Homebrew puts <code>tierstore</code> on your <code>PATH</code>.</p>
 <div class="code"><pre data-lang="sh"><span class="p">$</span> brew install komira-ai/tap/tierstore
 <span class="p">$</span> tierstore --version</pre></div>
-<p class="note">The second line is the check that it runs: it prints a version.</p>
+<p class="note">The last line is the check that it runs: it prints a version.</p>
 </section>
-<section data-tab="apt · next release">
-<p><strong>Not in a release yet.</strong> The package <code>tierstore</code> is in the repository <code>packages.komira.ai</code>. The block fetches the repository's key, trusts it for this source only (<code>Signed-By</code>), and installs. Until a release has it, use the Tarball tab.</p>
+<section data-tab="apt">
+<p>For Debian 10 and newer and Ubuntu 20.04 and newer. The package <code>tierstore</code> is in the repository <code>packages.komira.ai</code>. The block fetches the repository's key, trusts it for this source only (<code>Signed-By</code>), and installs.</p>
 <div class="code"><pre data-lang="sh">sudo install -d -m 0755 /usr/share/keyrings
 sudo curl -fsSL https://packages.komira.ai/apt/komira-archive-keyring.gpg -o /usr/share/keyrings/komira-archive-keyring.gpg
 sudo tee /etc/apt/sources.list.d/komira.sources &gt;/dev/null &lt;&lt;'EOF'
@@ -38,15 +28,32 @@ Signed-By: /usr/share/keyrings/komira-archive-keyring.gpg
 EOF
 sudo apt update
 sudo apt install tierstore
-tierstore --version</pre></div>
-<p class="note">apt checks the package against the key named in <code>Signed-By</code>. The last line is the check that it runs: it prints a version.</p>
+/usr/libexec/tierstore/tierstore --version</pre></div>
+<p class="note">apt checks the package against the key named in <code>Signed-By</code>. The package puts the binary at <code>/usr/libexec/tierstore/tierstore</code> and nothing on your <code>PATH</code>; it also adds the service account, the systemd unit and an example configuration, and starts nothing. The last line is the check that it runs: it prints a version.</p>
+</section>
+<section data-tab="dnf">
+<p>For AlmaLinux, Rocky Linux and RHEL 8 and newer, Fedora and Amazon Linux 2023. The first line saves the repository file, which names the repository's key; dnf checks the signature of the repository and of the package against it.</p>
+<div class="code"><pre data-lang="sh">sudo curl -fsSLo /etc/yum.repos.d/komira.repo https://packages.komira.ai/rpm/komira.repo
+sudo dnf install tierstore
+/usr/libexec/tierstore/tierstore --version</pre></div>
+<p class="note">The package puts the binary at <code>/usr/libexec/tierstore/tierstore</code> and nothing on your <code>PATH</code>; it also adds the service account, the systemd unit and an example configuration, and starts nothing. The last line is the check that it runs: it prints a version.</p>
+</section>
+<section data-tab="Tarball">
+<p>One block for Linux (x86_64 or arm64) and macOS (Apple silicon). It takes the tarball of the machine it runs on from the latest release on GitHub, with its signature bundle and <code>SHA256SUMS</code> for the checks below, unpacks it and prints the version.</p>
+<div class="code"><pre data-lang="sh"><span class="p">$</span> os=$(uname -s | sed 's/Darwin/macos/; s/Linux/linux/')
+<span class="p">$</span> arch=$(uname -m | sed 's/aarch64/arm64/')
+<span class="p">$</span> gh release download --repo komira-ai/tierstore \
+    --pattern "tierstore-*-$os-$arch.tar.gz*" --pattern SHA256SUMS
+<span class="p">$</span> tar -xzf tierstore-*-$os-$arch.tar.gz tierstore
+<span class="p">$</span> ./tierstore --version</pre></div>
+<p class="note">No <code>gh</code>? Take the same files from the <a href="https://github.com/komira-ai/tierstore/releases">releases page</a>. The last line is the check that it runs: it prints a version.</p>
 </section>
 </div>
 
 <p class="next"><strong>Next: <a href="/docs/">configure it</a>.</strong> One small file, then a put and a get.</p>
 
 <h2 id="verify">Verify the tarball</h2>
-<p>This is for the <strong>Tarball</strong> tab only. The script checks its own download, and Homebrew and apt install from their own repositories. Run these in the directory you downloaded into, in the same shell, so that <code>$os</code> and <code>$arch</code> are still set.</p>
+<p>This is for the <strong>Tarball</strong> tab only. The script checks its own download, and Homebrew, apt and dnf verify signatures themselves: apt and dnf check the signature of the repository and of the package, Homebrew the checksum its formula names. Run these in the directory you downloaded into, in the same shell, so that <code>$os</code> and <code>$arch</code> are still set.</p>
 
 <h3 id="check-it">Check it</h3>
 <p>The first line proves the file is intact. The second proves a workflow of this repository built it.</p>

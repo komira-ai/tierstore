@@ -183,15 +183,15 @@ test('storage: a storage that throws, on reading, on writing or on being reached
   assert.equal(storageOf({ localStorage: ok }), ok);
 });
 
-test('the built Install page: four install methods in tabs, every panel in the page; the client page has a heading for each language and no tabs', () => {
+test('the built Install page: five install methods in tabs, every panel in the page; the client page has a heading for each language and no tabs', () => {
   const dist = buildReal('tabs');
   const html = readFileSync(join(dist, 'install', 'index.html'), 'utf8');
   const labels = (name: string): string[] => {
     const g = new RegExp(`<div class="tabs" data-group="${name}">[\\s\\S]*?<div class="tab-list"[^>]*>([\\s\\S]*?)</div>`).exec(html)?.[1] ?? '';
     return [...g.matchAll(/role="tab"[^>]*>([^<]+)<\/button>/g)].map((m) => m[1]);
   };
-  assert.deepEqual(labels('install'), ['Tarball · works today', 'Script · next release', 'Homebrew · next release', 'apt · next release']);
-  assert.equal(html.match(/role="tabpanel"/g)?.length, 4);
+  assert.deepEqual(labels('install'), ['Script', 'Homebrew', 'apt', 'dnf', 'Tarball']);
+  assert.equal(html.match(/role="tabpanel"/g)?.length, 5);
   assert.ok(!/role="tabpanel"[^>]* hidden/.test(html));
   assert.ok(!html.includes('data-tabs='), 'a data-tabs marker reached the page');
   assert.match(html, /<script type="module" src="\/assets\/[0-9a-f]{16}\/tabs\.js"><\/script>/);

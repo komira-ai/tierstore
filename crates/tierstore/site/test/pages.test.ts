@@ -4,7 +4,7 @@
 //
 // Catches: an install block or a row of pills back in the hero; the old buttons; jargon of the code (entry format, marker format,
 // reconciler, lease, water marks) in the home copy; a claim that the hot tier is an LRU; an Install page with more than one command
-// block in a tab, or a method not labelled with when it is available; a tarball command that is for one platform only; prose
+// block in a tab, or a method still labelled as not yet available; a tarball command that is for one platform only; prose
 // wider than 640px.
 
 import assert from 'node:assert/strict';
@@ -47,32 +47,41 @@ test('the Examples band of the home page has three cards, each a link to its exa
   assert.ok(!home.includes('{{example-cards}}'), 'the placeholder reached the page');
 });
 
-test('Install is short: four tabs with one command block each, Next, then Verify; no client snippets, no configuration', () => {
+test('Install is short: five tabs with one command block each, Next, then Verify; no client snippets, no configuration', () => {
   assert.deepEqual([...install.matchAll(/<h2 id="([a-z-]+)"/g)].map((m) => m[1]), ['verify']);
   const panels = [...install.matchAll(/<div class="tab-panel"[^>]*>([\s\S]*?)\n<\/div>\n(?=<div class="tab-panel"|<\/div>)/g)];
-  assert.equal(panels.length, 4);
+  assert.equal(panels.length, 5);
   for (const p of panels) assert.equal(p[1].match(/<div class="code">/g)?.length, 1, 'one command block in a tab');
   assert.doesNotMatch(install, /\[\[interface\]\]|aws-sdk|boto3|forcePathStyle/);
 });
 
-test('the tarball is the first tab and says it works today; every method that is not in a release yet says so in its tab and next to its command', () => {
+test('Script is the first tab and Tarball the last; no tab or sentence says a method is for a later release', () => {
   const labels = [...install.matchAll(/role="tab"[^>]*>([^<]+)<\/button>/g)].map((m) => m[1]);
-  assert.deepEqual(labels, ['Tarball · works today', 'Script · next release', 'Homebrew · next release', 'apt · next release']);
+  assert.deepEqual(labels, ['Script', 'Homebrew', 'apt', 'dnf', 'Tarball']);
   const t = text(install);
-  const label = (needle: string): string => { const at = t.indexOf(needle); assert.ok(at > 0, needle); return t.slice(Math.max(0, at - 700), at); };
-  for (const cmd of ['curl -fsSL https://tierstore.dev/install.sh | sh', 'brew install komira-ai/tap/tierstore', 'sudo apt install tierstore']) {
-    assert.match(label(cmd), /Not in a release yet/, cmd);
-  }
-  assert.match(label('gh release download'), /works today/);
+  assert.doesNotMatch(t, /next release|Not in a release yet|until a release|from the next/i);
+  const at = (needle: string): number => { const i = t.indexOf(needle); assert.ok(i > 0, needle); return i; };
+  assert.ok(at('curl -fsSL https://tierstore.dev/install.sh | sh') < at('brew install komira-ai/tap/tierstore') && at('brew install komira-ai/tap/tierstore') < at('sudo apt install tierstore') && at('sudo apt install tierstore') < at('sudo dnf install tierstore') && at('sudo dnf install tierstore') < at('gh release download'));
   assert.match(t, /Signed-By: \/usr\/share\/keyrings\/komira-archive-keyring\.gpg/);
   assert.match(t, /https:\/\/packages\.komira\.ai\/apt\/komira-archive-keyring\.gpg/);
+  assert.match(t, /sudo curl -fsSLo \/etc\/yum\.repos\.d\/komira\.repo https:\/\/packages\.komira\.ai\/rpm\/komira\.repo/);
+});
+
+test('the apt and dnf tabs check the version by the path the package installs to, and say it is not on the PATH', () => {
+  const panels = [...install.matchAll(/<div class="tab-panel"[^>]*>([\s\S]*?)\n<\/div>\n(?=<div class="tab-panel"|<\/div>)/g)].map((m) => text(m[1]));
+  for (const i of [2, 3]) {
+    assert.match(panels[i], /\/usr\/libexec\/tierstore\/tierstore --version/, `tab ${i}`);
+    assert.match(panels[i], /nothing on your PATH/, `tab ${i}`);
+    assert.doesNotMatch(panels[i].replace('/usr/libexec/tierstore/tierstore --version', ''), /(^|\s)tierstore --version/, `tab ${i} runs the bare name`);
+  }
+  assert.match(panels[0], /~\/\.local\/bin\/tierstore --version/);
 });
 
 test('every install block is followed by a version check, and the page says which tabs Verify is for', () => {
   const panels = [...install.matchAll(/<div class="tab-panel"[^>]*>([\s\S]*?)\n<\/div>\n(?=<div class="tab-panel"|<\/div>)/g)].map((m) => text(m[1]));
-  assert.equal(panels.length, 4);
+  assert.equal(panels.length, 5);
   for (const p of panels) assert.match(p, /tierstore --version/);
-  assert.match(text(install), /Verify the tarball[\s\S]*This is for the Tarball tab only\. The script checks its own download, and Homebrew and apt install from their own repositories/);
+  assert.match(text(install), /Verify the tarball[\s\S]*This is for the Tarball tab only\. The script checks its own download, and Homebrew, apt and dnf verify signatures themselves/);
   assert.deepEqual([...install.matchAll(/<h[34] id="([a-z-]+)"/g)].map((m) => m[1]).slice(0, 2), ['check-it', 'more-ways']);
 });
 
