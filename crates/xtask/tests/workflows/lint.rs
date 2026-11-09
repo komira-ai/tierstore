@@ -15,7 +15,7 @@
 //!   (the token the hostkeeper coordinator admits) and by the release's `farm` job (the same token
 //!   for the farm), and by the release's `testing-upload` and `promote-latest` jobs (the
 //!   token the release-files role admits) and its twelve apt jobs that read and write the
-//!   repository (the token the apt role admits), six for the suite `testing` and six for `stable`; `contents: write` by the release's `publish` job
+//!   repository (the token the apt role admits), six for the suite `testing` and six for `stable`, and the same twelve for the rpm tree; `contents: write` by the release's `publish` job
 //!   alone.
 //!
 //! Keys are matched exactly. What this does not evaluate it refuses: a YAML tag, a second
@@ -161,6 +161,78 @@ pub const WRITE_ALLOWED: &[Allowed] = &[
     Allowed {
         file: "release.yml",
         job: "stable-apt-write-3",
+        scope: "id-token",
+        condition: RELEASE_IF,
+    },
+    Allowed {
+        file: "release.yml",
+        job: "testing-rpm-read",
+        scope: "id-token",
+        condition: RELEASE_IF,
+    },
+    Allowed {
+        file: "release.yml",
+        job: "testing-rpm-write",
+        scope: "id-token",
+        condition: RELEASE_IF,
+    },
+    Allowed {
+        file: "release.yml",
+        job: "testing-rpm-read-2",
+        scope: "id-token",
+        condition: super::rpm::RETRY_2_IF,
+    },
+    Allowed {
+        file: "release.yml",
+        job: "testing-rpm-write-2",
+        scope: "id-token",
+        condition: RELEASE_IF,
+    },
+    Allowed {
+        file: "release.yml",
+        job: "testing-rpm-read-3",
+        scope: "id-token",
+        condition: super::rpm::RETRY_3_IF,
+    },
+    Allowed {
+        file: "release.yml",
+        job: "testing-rpm-write-3",
+        scope: "id-token",
+        condition: RELEASE_IF,
+    },
+    Allowed {
+        file: "release.yml",
+        job: "stable-rpm-read",
+        scope: "id-token",
+        condition: super::apt::PROMOTE_IF,
+    },
+    Allowed {
+        file: "release.yml",
+        job: "stable-rpm-write",
+        scope: "id-token",
+        condition: super::apt::PROMOTE_IF,
+    },
+    Allowed {
+        file: "release.yml",
+        job: "stable-rpm-read-2",
+        scope: "id-token",
+        condition: super::rpm::STABLE_RETRY_2_IF,
+    },
+    Allowed {
+        file: "release.yml",
+        job: "stable-rpm-write-2",
+        scope: "id-token",
+        condition: RELEASE_IF,
+    },
+    Allowed {
+        file: "release.yml",
+        job: "stable-rpm-read-3",
+        scope: "id-token",
+        condition: super::rpm::STABLE_RETRY_3_IF,
+    },
+    Allowed {
+        file: "release.yml",
+        job: "stable-rpm-write-3",
         scope: "id-token",
         condition: RELEASE_IF,
     },
@@ -422,6 +494,7 @@ pub fn release_problems(text: &str) -> Vec<String> {
         "check-apt",
         "check-brew",
         "check-install-sh",
+        "check-rpm",
         "farm",
         "farm-check",
         "formula",
@@ -435,10 +508,11 @@ pub fn release_problems(text: &str) -> Vec<String> {
         "verify",
     ];
     expected.extend(super::apt::JOBS.iter().map(|j| j.name));
+    expected.extend(super::rpm::JOBS.iter().map(|j| j.name));
     expected.sort_unstable();
     if listed != expected {
         problems.push(format!(
-            "jobs are {listed:?}, not plan, verify, publish, formula, testing-upload, the install checks, the lab (farm-check, farm, soak), promote-check, promote-latest, tap and the apt jobs {expected:?}"
+            "jobs are {listed:?}, not plan, verify, publish, formula, testing-upload, the install checks, the lab (farm-check, farm, soak), promote-check, promote-latest, tap and the apt and rpm jobs {expected:?}"
         ));
     }
     for (name, job) in jobs {
@@ -585,6 +659,7 @@ pub fn release_problems(text: &str) -> Vec<String> {
     problems.extend(super::farm::farm_problems(&doc, text));
     problems.extend(super::channels::channel_problems(&doc));
     problems.extend(super::apt::apt_problems(&doc));
+    problems.extend(super::rpm::rpm_problems(&doc));
     problems.extend(super::checks::check_problems(&doc));
     problems
 }

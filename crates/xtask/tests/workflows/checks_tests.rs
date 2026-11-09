@@ -171,6 +171,103 @@ const DEFECTS: &[(&str, &str, &str, &str)] = &[
         "echo",
         "check-apt: it needs one step that runs `docker run`",
     ),
+    // check-rpm
+    (
+        "check-rpm",
+        "needs: [plan, testing-rpm-write, testing-rpm-write-2, testing-rpm-write-3]",
+        "needs: [plan, testing-rpm-write]",
+        "check-rpm: needs are not",
+    ),
+    (
+        "check-rpm",
+        "!cancelled() && !failure() && ",
+        "",
+        "check-rpm: `if` is not",
+    ),
+    (
+        "check-rpm",
+        "    permissions:\n      contents: read\n",
+        "    environment: apt-publish\n    permissions:\n      contents: read\n",
+        "check-rpm: names an environment",
+    ),
+    (
+        "check-rpm",
+        "          - fedora@sha256:a7d72ba2745b100a3351087472e5ee7b2450af7cf331e7673007e3817612839c\n",
+        "          - fedora:latest\n",
+        "check-rpm: the matrix has not one fedora@sha256:<digest> image, pinned by digest",
+    ),
+    (
+        "check-rpm",
+        "          - fedora@sha256:a7d72ba2745b100a3351087472e5ee7b2450af7cf331e7673007e3817612839c\n",
+        "",
+        "check-rpm: the matrix has 2 images, not 3",
+    ),
+    (
+        "check-rpm",
+        "        arch: [x86_64, aarch64]",
+        "        arch: [x86_64]",
+        "check-rpm: the matrix architectures are",
+    ),
+    (
+        "check-rpm",
+        "runs-on: ${{ matrix.arch == 'aarch64' && 'ubuntu-24.04-arm' || 'ubuntu-24.04' }}",
+        "runs-on: ubuntu-24.04",
+        "check-rpm: runs-on is not",
+    ),
+    (
+        "check-rpm",
+        "docker run --detach --name check-rpm \"$IMAGE\" sleep infinity",
+        "docker run --detach --name check-rpm --volume \"$PWD:/src\" \"$IMAGE\" sleep infinity",
+        "check-rpm: the container must be the image of the matrix, with nothing of the runner mounted and no privilege",
+    ),
+    (
+        "check-rpm",
+        "docker run --detach --name check-rpm \"$IMAGE\" sleep infinity",
+        "docker run --detach --name check-rpm --privileged \"$IMAGE\" sleep infinity",
+        "check-rpm: the container must be the image of the matrix",
+    ),
+    (
+        "check-rpm",
+        "docker run --detach --name check-rpm ",
+        "docker run --detach --name other ",
+        "check-rpm: the container is not named check-rpm",
+    ),
+    (
+        "check-rpm",
+        "docker run --detach --name check-rpm \"$IMAGE\" sleep infinity",
+        "echo no container",
+        "check-rpm: it needs one step that runs `docker run`",
+    ),
+    (
+        "check-rpm",
+        "--arch \"$ARCH\" ",
+        "",
+        "check-rpm: no step runs `channels check-rpm` with the container, the architecture, the version and the commit",
+    ),
+    (
+        "check-rpm",
+        "          IMAGE: ${{ matrix.image }}\n",
+        "          IMAGE: ${{ matrix.image }}\n          TOKEN: ${{ secrets.OTHER }}\n",
+        "check-rpm: names secrets.; this job holds no secret",
+    ),
+    (
+        "promote-check",
+        " --result \"check-rpm=$CHECK_RPM\"",
+        "",
+        "promote-check: the decision is not given --result \"check-rpm=$CHECK_RPM\"",
+    ),
+    (
+        "promote-check",
+        " --result \"testing-rpm-write-3=$TESTING_RPM_WRITE_3\"",
+        "",
+        "promote-check: the decision is not given --result \"testing-rpm-write-3=$TESTING_RPM_WRITE_3\"",
+    ),
+    (
+        "formula",
+        "      - name: Render Formula",
+        "      - run: cargo xtask channels check-rpm --arch x\n      - name: Render Formula",
+        "formula: runs `cargo xtask channels check-rpm...`, which only check-rpm may",
+    ),
     // check-brew
     (
         "check-brew",
@@ -293,7 +390,7 @@ const DEFECTS: &[(&str, &str, &str, &str)] = &[
         "formula",
         "      - name: Render Formula",
         "      - run: docker run --rm alpine true\n      - name: Render Formula",
-        "formula: runs docker; only check-apt may",
+        "formula: runs docker; only check-apt and check-rpm may",
     ),
     (
         "formula",

@@ -16,7 +16,10 @@
 //! - `channels decide ...` ([`decide`]): whether the release is promoted from testing to the
 //!   public channels, from the results of the jobs before it.
 //! - `channels check-apt|check-brew|check-install-sh ...` ([`check`]): the release installed from
-//!   the testing suite, the rendered formula and `install.sh`, as a user does.
+//!   the testing suite, the rendered formula and `install.sh`, as a user does; `check-rpm`
+//!   ([`check_rpm`]) the same with `dnf`, in a container.
+//! - `channels rpm sign|check-signed|promote|repo ...` ([`rpm`]): the RPM packages, signed, into the
+//!   rpm tree of the same repository.
 //! - `channels apt read|index|sign|write ...` ([`apt`]): the Debian packages into the apt
 //!   repository the organisation's products share, in the three jobs of `release.yml`.
 //! - `channels soak --hours <n> --reached-at <secs> --version <X.Y.Z+hex> ...` ([`soak`]): the
@@ -38,9 +41,11 @@ pub mod apt;
 pub mod assume;
 pub mod aws;
 pub mod check;
+pub mod check_rpm;
 pub mod decide;
 pub mod formula;
 pub mod gate;
+pub mod rpm;
 pub mod soak;
 pub mod tap;
 pub mod upload;
@@ -198,6 +203,30 @@ pub enum Verb {
         #[arg(long)]
         output: Option<PathBuf>,
     },
+    /// The release installed with `dnf` from the suite `testing` in a clean container.
+    CheckRpm {
+        /// The RPM architecture of the machine, `x86_64` or `aarch64`.
+        #[arg(long)]
+        arch: String,
+        /// `<major>.<minor>.<patch>`.
+        #[arg(long)]
+        version: String,
+        /// The commit the release was built from, a full SHA.
+        #[arg(long)]
+        commit: String,
+        /// The repository host.
+        #[arg(long, default_value = "https://packages.komira.ai")]
+        url: String,
+        /// The container to check: every program runs in it with `docker exec`.
+        #[arg(long)]
+        container: String,
+        /// A directory of the container the package is downloaded to.
+        #[arg(long, default_value = "/root")]
+        work: String,
+        /// The `docker` program.
+        #[arg(long, default_value = "docker")]
+        docker: PathBuf,
+    },
     /// The release installed from the suite `testing` in a clean Ubuntu system.
     CheckApt {
         /// The Debian architecture of this machine, `amd64` or `arm64`.
@@ -271,6 +300,11 @@ pub enum Verb {
     Apt {
         #[command(subcommand)]
         verb: apt::Verb,
+    },
+    /// The rpm repository: sign the packages, read the `repodata`, merge, sign it, write it.
+    Rpm {
+        #[command(subcommand)]
+        verb: rpm::Verb,
     },
     /// `Formula/tierstore.rb` from the release's `SHA256SUMS`.
     Formula {
@@ -441,6 +475,27 @@ pub fn run(verb: Verb) -> Result<Vec<String>, Error> {
                 curl: &curl,
             },
         ),
+        Verb::CheckRpm {
+            arch,
+            version,
+            commit,
+            url,
+            container,
+            work,
+            docker,
+        } => check_rpm::check_rpm(
+            &check_rpm::Container {
+                docker,
+                name: container,
+            },
+            &check_rpm::Rpm {
+                arch: &arch,
+                version: &version,
+                commit: &commit,
+                url: &url,
+                work: &work,
+            },
+        ),
         Verb::CheckBrew {
             formula,
             version,
@@ -476,6 +531,7 @@ pub fn run(verb: Verb) -> Result<Vec<String>, Error> {
             },
         ),
         Verb::Apt { verb } => apt::run(verb),
+        Verb::Rpm { verb } => rpm::run(verb),
         Verb::Formula {
             sums,
             version,

@@ -97,14 +97,21 @@ fn a_failed_or_cancelled_stage_is_refused_and_every_such_stage_is_named() {
     // Catches: an install check that failed, or a testing publish that did not finish, letting
     // the release go public.
     let problems = refusal(
-        &results(&[("check-apt", "failure"), ("testing-upload", "cancelled")]),
+        &results(&[
+            ("check-apt", "failure"),
+            ("testing-upload", "cancelled"),
+            ("check-rpm", "failure"),
+            ("testing-rpm-write", "failure"),
+        ]),
         "true",
     );
     assert_eq!(
         problems,
         [
             "testing-upload is cancelled: the release does not go on",
-            "check-apt is failure: the release does not go on"
+            "testing-rpm-write is failure: the release does not go on",
+            "check-apt is failure: the release does not go on",
+            "check-rpm is failure: the release does not go on"
         ]
     );
 }
@@ -118,7 +125,12 @@ fn only_the_stages_that_may_be_skipped_may_be_skipped() {
             "{stage}"
         );
     }
-    for stage in ["testing-upload", "testing-apt-write", "farm-check"] {
+    for stage in [
+        "testing-upload",
+        "testing-apt-write",
+        "testing-rpm-write",
+        "farm-check",
+    ] {
         let problems = refusal(&results(&[(stage, "skipped")]), "true");
         assert_eq!(
             problems,

@@ -55,7 +55,7 @@ pub struct Request<'a> {
 
 /// A fingerprint as hex digits (the spaces gpg prints between groups are tolerated), at least 16
 /// of them: upper case, without spaces.
-fn clean_fingerprint(raw: &str) -> Option<String> {
+pub(super) fn clean_fingerprint(raw: &str) -> Option<String> {
     let clean: String = raw.chars().filter(|c| *c != ' ').collect();
     (clean.len() >= 16 && clean.chars().all(|c| c.is_ascii_hexdigit()))
         .then(|| clean.to_ascii_uppercase())
@@ -63,7 +63,7 @@ fn clean_fingerprint(raw: &str) -> Option<String> {
 
 /// The fingerprints of the signing subkeys: one, or several separated by commas. A list that is
 /// empty, has an empty element or names a key twice is refused.
-fn split_fingerprints(raw: &str) -> Result<Vec<String>, Error> {
+pub(crate) fn split_fingerprints(raw: &str) -> Result<Vec<String>, Error> {
     let mut out: Vec<String> = Vec::new();
     for part in raw.split(',') {
         match clean_fingerprint(part) {
@@ -79,7 +79,7 @@ fn split_fingerprints(raw: &str) -> Result<Vec<String>, Error> {
     Ok(out)
 }
 
-fn args(words: &[&str]) -> Vec<String> {
+pub(crate) fn args(words: &[&str]) -> Vec<String> {
     words.iter().map(|w| (*w).to_owned()).collect()
 }
 
@@ -155,7 +155,7 @@ fn gpg_steps(
 }
 
 /// An empty directory `home` (mode 0700) below `work`, which is made when missing.
-fn private_dir(work: &Path, home: &Path) -> std::io::Result<()> {
+pub(crate) fn private_dir(work: &Path, home: &Path) -> std::io::Result<()> {
     match std::fs::remove_dir_all(home) {
         Err(e) if e.kind() != std::io::ErrorKind::NotFound => return Err(e),
         _ => {}

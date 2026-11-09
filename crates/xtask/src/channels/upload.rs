@@ -192,6 +192,8 @@ fn content_type(name: &str) -> &'static str {
         "application/json"
     } else if name.ends_with(".deb") {
         "application/vnd.debian.binary-package"
+    } else if name.ends_with(".rpm") {
+        "application/x-rpm"
     } else {
         "application/gzip"
     }

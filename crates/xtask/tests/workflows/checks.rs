@@ -1,6 +1,6 @@
 //! The rules for the jobs of `release.yml` that sit between the publication to testing and the
 //! promotion (docs/design/distribution.md, section 5): `formula`, the three install checks
-//! (`check-apt`, `check-brew`, `check-install-sh`) and `promote-check`. [`check_problems`] is
+//! (`check-apt`, `check-rpm`, `check-brew`, `check-install-sh`) and `promote-check`. [`check_problems`] is
 //! called from `release_problems`, so the one lint holds the whole file.
 //!
 //! - The jobs hold `contents: read` alone, name no environment, no secret, no variable and no
@@ -9,6 +9,10 @@
 //!   runner of each architecture (amd64 and arm64), and runs `channels check-apt` with the
 //!   architecture, the version and the commit of the release; it waits for every attempt of the
 //!   apt write of testing, and runs only when one of them wrote.
+//! - `check-rpm` starts a clean container of each of three distributions (Fedora, AlmaLinux 9 and
+//!   Amazon Linux 2023), every image pinned by digest, on a hosted runner of each architecture, with
+//!   nothing of the runner mounted, and runs `channels check-rpm` on the runner against it; it waits
+//!   for every attempt of the rpm write of testing, and runs only when one of them wrote.
 //! - `check-brew` runs on the hosted `macos-15` runner, from the artifact `formula`; it and
 //!   `check-install-sh` are the only jobs of `release.yml` on macOS. `check-install-sh` runs on
 //!   Linux and on macOS and waits for `testing-upload`.
@@ -28,16 +32,23 @@ use super::yaml::Node;
 /// landed appends), after the attempts that were needed.
 pub const APT_IF: &str = "${{ !cancelled() && !failure() && needs.plan.outputs.release == 'true' && github.ref == 'refs/heads/main' && (needs.testing-apt-write.outputs.conflict == 'false' || needs.testing-apt-write-2.outputs.conflict == 'false' || needs.testing-apt-write-3.outputs.conflict == 'false') }}";
 
+/// The `if:` of `check-rpm`: a write of the rpm tree of testing wrote.
+pub const RPM_IF: &str = "${{ !cancelled() && !failure() && needs.plan.outputs.release == 'true' && github.ref == 'refs/heads/main' && (needs.testing-rpm-write.outputs.conflict == 'false' || needs.testing-rpm-write-2.outputs.conflict == 'false' || needs.testing-rpm-write-3.outputs.conflict == 'false') }}";
+
 /// The `if:` of `check-install-sh`: the files are at tierstore.dev/releases/<version>/.
 pub const INSTALL_SH_IF: &str = "${{ !cancelled() && !failure() && needs.plan.outputs.release == 'true' && github.ref == 'refs/heads/main' && needs.testing-upload.outputs.enabled == 'true' }}";
 
 /// The results `promote-check` reads: the stage and the job whose result it is.
-const STAGES: [(&str, &str); 10] = [
+const STAGES: [(&str, &str); 14] = [
     ("testing-upload", "TESTING_UPLOAD"),
     ("testing-apt-write", "TESTING_APT_WRITE"),
     ("testing-apt-write-2", "TESTING_APT_WRITE_2"),
     ("testing-apt-write-3", "TESTING_APT_WRITE_3"),
+    ("testing-rpm-write", "TESTING_RPM_WRITE"),
+    ("testing-rpm-write-2", "TESTING_RPM_WRITE_2"),
+    ("testing-rpm-write-3", "TESTING_RPM_WRITE_3"),
     ("check-apt", "CHECK_APT"),
+    ("check-rpm", "CHECK_RPM"),
     ("check-brew", "CHECK_BREW"),
     ("check-install-sh", "CHECK_INSTALL_SH"),
     ("farm-check", "FARM_CHECK"),
@@ -46,9 +57,10 @@ const STAGES: [(&str, &str); 10] = [
 ];
 
 /// The jobs and the verbs only they run.
-const VERBS: [(&str, &str); 6] = [
+const VERBS: [(&str, &str); 7] = [
     ("formula", "cargo xtask channels formula "),
     ("check-apt", "cargo xtask channels check-apt "),
+    ("check-rpm", "cargo xtask channels check-rpm "),
     ("check-brew", "cargo xtask channels check-brew "),
     ("check-install-sh", "cargo xtask channels check-install-sh "),
     ("promote-check", "cargo xtask channels decide "),
@@ -62,7 +74,7 @@ struct Want {
     condition: &'static str,
 }
 
-const JOBS: [Want; 5] = [
+const JOBS: [Want; 6] = [
     Want {
         name: "formula",
         needs: &["plan", "publish"],
@@ -77,6 +89,16 @@ const JOBS: [Want; 5] = [
             "testing-apt-write-3",
         ],
         condition: APT_IF,
+    },
+    Want {
+        name: "check-rpm",
+        needs: &[
+            "plan",
+            "testing-rpm-write",
+            "testing-rpm-write-2",
+            "testing-rpm-write-3",
+        ],
+        condition: RPM_IF,
     },
     Want {
         name: "check-brew",
@@ -94,6 +116,7 @@ const JOBS: [Want; 5] = [
             "check-apt",
             "check-brew",
             "check-install-sh",
+            "check-rpm",
             "farm",
             "farm-check",
             "plan",
@@ -101,6 +124,9 @@ const JOBS: [Want; 5] = [
             "testing-apt-write",
             "testing-apt-write-2",
             "testing-apt-write-3",
+            "testing-rpm-write",
+            "testing-rpm-write-2",
+            "testing-rpm-write-3",
             "testing-upload",
         ],
         condition: AFTER_IF,
@@ -156,12 +182,14 @@ pub fn check_problems(doc: &Node) -> Vec<String> {
                 "{name}: runs on macOS; only check-brew and check-install-sh may"
             ));
         }
-        if name != "check-apt"
+        if !["check-apt", "check-rpm"].contains(&name)
             && steps(found)
                 .iter()
                 .any(|s| text(s, "run").contains("docker "))
         {
-            problems.push(format!("{name}: runs docker; only check-apt may"));
+            problems.push(format!(
+                "{name}: runs docker; only check-apt and check-rpm may"
+            ));
         }
         if let Some(container) = entry(found, "container") {
             let image = container.as_str().or_else(|| at(container, &["image"]));
@@ -204,6 +232,7 @@ fn job_problems(want: &Want, job: &Node) -> Vec<String> {
     match name {
         "formula" => problems.extend(formula_problems(all)),
         "check-apt" => problems.extend(apt_problems(job, all)),
+        "check-rpm" => problems.extend(rpm_problems(job, all)),
         "check-brew" => problems.extend(brew_problems(job, all)),
         "check-install-sh" => problems.extend(install_sh_problems(job, all)),
         _ => problems.extend(promote_problems(job, all)),
@@ -284,6 +313,74 @@ fn apt_problems(job: &Node, all: &[Node]) -> Vec<String> {
         if !run.contains(argument) {
             problems.push(format!("check-apt: the check is not given {argument}"));
         }
+    }
+    problems
+}
+
+/// The distributions `check-rpm` installs on, as the image names the matrix pins by digest.
+const RPM_IMAGES: [&str; 3] = ["fedora", "almalinux", "amazonlinux"];
+
+fn rpm_problems(job: &Node, all: &[Node]) -> Vec<String> {
+    let mut problems = Vec::new();
+    let runs_on = "${{ matrix.arch == 'aarch64' && 'ubuntu-24.04-arm' || 'ubuntu-24.04' }}";
+    if at(job, &["runs-on"]) != Some(runs_on) {
+        problems.push(format!("check-rpm: runs-on is not {runs_on}"));
+    }
+    let matrix = entry(job, "strategy").and_then(|s| entry(s, "matrix"));
+    let arches = names(matrix.and_then(|m| entry(m, "arch")));
+    if arches != ["aarch64", "x86_64"] {
+        problems.push(format!(
+            "check-rpm: the matrix architectures are {arches:?}, not x86_64 and aarch64"
+        ));
+    }
+    let images = names(matrix.and_then(|m| entry(m, "image")));
+    for name in RPM_IMAGES {
+        let pinned_image = images
+            .iter()
+            .filter(|i| i.starts_with(&format!("{name}@")))
+            .count();
+        if pinned_image != 1 || !images.iter().all(|i| pinned(i)) {
+            problems.push(format!(
+                "check-rpm: the matrix has not one {name}@sha256:<digest> image, pinned by digest"
+            ));
+        }
+    }
+    if images.len() != RPM_IMAGES.len() {
+        problems.push(format!(
+            "check-rpm: the matrix has {} images, not {}",
+            images.len(),
+            RPM_IMAGES.len()
+        ));
+    }
+    let containers = runs_with(all, "docker run");
+    let [run] = containers.as_slice() else {
+        problems.push("check-rpm: it needs one step that runs `docker run`".to_owned());
+        return problems;
+    };
+    if !run.contains("\"$IMAGE\"") || run.contains("--volume") || run.contains("--privileged") {
+        problems.push(
+            "check-rpm: the container must be the image of the matrix, with nothing of the runner mounted and no privilege"
+                .to_owned(),
+        );
+    }
+    if !run.contains("--name check-rpm ") {
+        problems.push("check-rpm: the container is not named check-rpm".to_owned());
+    }
+    let checks = runs_with(all, "cargo xtask channels check-rpm ");
+    if !checks.iter().any(|r| {
+        [
+            "--container check-rpm ",
+            "--arch \"$ARCH\" ",
+            "--version \"${TAG#v}\" ",
+            "--commit \"$COMMIT\"",
+        ]
+        .iter()
+        .all(|a| r.contains(a))
+    }) {
+        problems.push(
+            "check-rpm: no step runs `channels check-rpm` with the container, the architecture, the version and the commit"
+                .to_owned(),
+        );
     }
     problems
 }

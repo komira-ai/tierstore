@@ -39,7 +39,7 @@ pub const STABLE_RETRY_2_IF: &str = "${{ needs.plan.outputs.release == 'true' &&
 pub const STABLE_RETRY_3_IF: &str = "${{ needs.plan.outputs.release == 'true' && github.ref == 'refs/heads/main' && needs.stable-apt-write-2.outputs.conflict == 'true' }}";
 
 /// The role the read and write jobs assume.
-const ROLE: &str = "${{ vars.APT_PUBLISH_ROLE_ARN }}";
+pub(super) const ROLE: &str = "${{ vars.APT_PUBLISH_ROLE_ARN }}";
 
 /// The settings of the read and write jobs, all in the environment `apt-publish`.
 const PUBLISH_SETTINGS: [&str; 4] = [
@@ -253,9 +253,11 @@ pub const JOBS: [Job; 18] = [
     },
 ];
 
-/// Is `name` an apt job that holds the cloud role (a read or a write)?
+/// Is `name` an apt or rpm job that holds the cloud role (a read or a write)?
 pub fn is_role_job(name: &str) -> bool {
-    JOBS.iter().any(|j| j.name == name && j.kind != Kind::Index)
+    JOBS.iter()
+        .chain(super::rpm::JOBS.iter())
+        .any(|j| j.name == name && j.kind != Kind::Index)
 }
 
 /// The verb each kind of job runs, and no other kind: the index job of the suite `testing` merges
@@ -280,7 +282,7 @@ const VERBS: [(&str, Kind, &str); 4] = [
 
 const SIGN: &str = "cargo xtask channels apt sign ";
 
-fn runs(node: &Node, needle: &str) -> bool {
+pub(super) fn runs(node: &Node, needle: &str) -> bool {
     steps(node).iter().any(|s| text(s, "run").contains(needle))
 }
 
@@ -297,15 +299,17 @@ pub fn apt_problems(doc: &Node) -> Vec<String> {
     for (name, found) in jobs {
         let name = name.as_str().unwrap_or_default();
         let own = JOBS.iter().find(|j| j.name == name);
-        let kind = own.map(|j| j.kind);
+        let kind = own
+            .or_else(|| super::rpm::JOBS.iter().find(|j| j.name == name))
+            .map(|j| j.kind);
         if kind != Some(Kind::Index) && mentions(found, "APT_GPG_") {
             problems.push(format!(
-                "{name}: names APT_GPG_, the signing key, which only the apt index jobs may"
+                "{name}: names APT_GPG_, the signing key, which only the apt and rpm index jobs may"
             ));
         }
         if !is_role_job(name) && mentions(found, "APT_PUBLISH_ROLE_ARN") {
             problems.push(format!(
-                "{name}: names APT_PUBLISH_ROLE_ARN, which only the apt jobs that read and write may"
+                "{name}: names APT_PUBLISH_ROLE_ARN, which only the apt and rpm jobs that read and write may"
             ));
         }
         for (word, other, suite) in VERBS {
@@ -333,7 +337,7 @@ pub fn apt_problems(doc: &Node) -> Vec<String> {
     problems
 }
 
-fn permissions(job: &Node) -> Vec<String> {
+pub(super) fn permissions(job: &Node) -> Vec<String> {
     let mut held: Vec<String> = entry(job, "permissions")
         .map_or(&[][..], entries)
         .iter()
@@ -498,7 +502,7 @@ fn suite_problems(want: &Job, all: &[Node]) -> Vec<String> {
     problems
 }
 
-fn gate_problems(want: &Job, gate: &Node) -> Vec<String> {
+pub(super) fn gate_problems(want: &Job, gate: &Node) -> Vec<String> {
     let name = want.name;
     let run = text(gate, "run");
     let mut problems = Vec::new();

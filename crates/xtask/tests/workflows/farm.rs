@@ -16,8 +16,8 @@
 //!   the farm does (the lint's write table pins the `if:` of the scope).
 //! - `soak` holds `contents: read` alone and runs only when `farm` converged; it runs
 //!   `cargo xtask channels soak`.
-//! - Every job that makes the release public (`promote-latest`, `tap` and the nine apt jobs of the
-//!   suite `stable`) waits for `promote-check`, which waits for the lab (`soak`) and for the
+//! - Every job that makes the release public (`promote-latest`, `tap` and the nine apt and the nine rpm jobs
+//!   of the suite `stable`) waits for `promote-check`, which waits for the lab (`soak`) and for the
 //!   install checks, so that a promotion without them is named. With no lab configured `farm` and
 //!   `soak` are skipped, and `promote-check` accepts exactly that (its own rules are in
 //!   `checks.rs`).
@@ -26,6 +26,7 @@ use super::apt::JOBS;
 use super::channels::{GATE_IF, steps, text};
 use super::hostkeeper::at;
 use super::lint::{AFTER_IF, entries, entry, names};
+use super::rpm::JOBS as RPM_JOBS;
 use super::yaml::Node;
 
 /// The `if:` of `farm`: a release, on main, once the gate of `farm-check` said the farm is set up.
@@ -376,21 +377,26 @@ fn reaches(doc: &Node, name: &str, target: &str, seen: &mut Vec<String>) -> bool
 }
 
 /// The jobs that make the release public.
-const PROMOTION: [&str; 5] = [
+const PROMOTION: [&str; 8] = [
     "promote-latest",
     "tap",
     "stable-apt-read",
     "stable-apt-index",
     "stable-apt-write",
+    "stable-rpm-read",
+    "stable-rpm-index",
+    "stable-rpm-write",
 ];
 
 /// Every job that makes the release public waits for `promote-check`, and `promote-check` waits
 /// for the lab and for the install checks.
 fn order_problems(doc: &Node) -> Vec<String> {
-    let public = PROMOTION
-        .iter()
-        .copied()
-        .chain(JOBS.iter().filter(|j| j.suite == "stable").map(|j| j.name));
+    let public = PROMOTION.iter().copied().chain(
+        JOBS.iter()
+            .chain(RPM_JOBS.iter())
+            .filter(|j| j.suite == "stable")
+            .map(|j| j.name),
+    );
     let mut problems = Vec::new();
     for name in public {
         if job(doc, name).is_some() && !reaches(doc, name, "promote-check", &mut Vec::new()) {
@@ -399,7 +405,13 @@ fn order_problems(doc: &Node) -> Vec<String> {
             ));
         }
     }
-    for before in ["soak", "check-apt", "check-brew", "check-install-sh"] {
+    for before in [
+        "soak",
+        "check-apt",
+        "check-rpm",
+        "check-brew",
+        "check-install-sh",
+    ] {
         if job(doc, "promote-check").is_some()
             && !reaches(doc, "promote-check", before, &mut Vec::new())
         {

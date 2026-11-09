@@ -31,6 +31,8 @@ mod macos_pr;
 mod macos_pr_tests;
 mod platforms;
 mod platforms_tests;
+mod rpm;
+mod rpm_tests;
 mod yaml;
 mod yaml_tests;
 
