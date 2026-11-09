@@ -3,6 +3,7 @@
 
 use crate::entries::{BCfg, Entries};
 use crate::explore::{Limits, Outcome, explore};
+use crate::firststart::{FirstStart, FsCfg};
 use crate::marks::{Cfg, GhostKind, Init, Marks, Op};
 
 /// What a run must show.
@@ -21,6 +22,9 @@ pub enum Sys {
     Marks(Cfg),
     /// Today's entry protocol (baseline).
     Entries(BCfg),
+    /// The first start of a hot tier with no format object (`docs/design/tierstore-design.md`,
+    /// 13.1).
+    FirstStart(FsCfg),
 }
 
 pub struct Scenario {
@@ -43,6 +47,10 @@ pub fn run(sc: &Scenario) -> Outcome {
         ),
         Sys::Entries(c) => explore(
             &Entries::new(c.clone()),
+            Limits::new(c.max_states, sc.liveness),
+        ),
+        Sys::FirstStart(c) => explore(
+            &FirstStart::new(c.clone()),
             Limits::new(c.max_states, sc.liveness),
         ),
     }
@@ -158,6 +166,7 @@ fn crashy(mut c: Cfg, ghost: Option<GhostKind>) -> Cfg {
 }
 
 mod baseline;
+mod first_start;
 mod heavy;
 mod marks_core;
 mod negatives;
@@ -169,6 +178,7 @@ pub fn all() -> Vec<Scenario> {
     negatives::negatives(&mut v);
     heavy::heavy(&mut v);
     baseline::baseline(&mut v);
+    first_start::first_start(&mut v);
     v
 }
 
@@ -180,7 +190,7 @@ pub fn ablation() -> Vec<(&'static str, Option<(&'static str, String)>)> {
         .filter(|s| s.expect == Expect::Pass && !s.heavy && !s.id.starts_with("ghost/"))
         .filter_map(|s| match s.sys {
             Sys::Marks(c) => Some((s.id, c)),
-            Sys::Entries(_) => None,
+            Sys::Entries(_) | Sys::FirstStart(_) => None,
         })
         .collect();
     FIXES
@@ -287,7 +297,7 @@ pub fn matrix_of(literal: bool, only: Option<&[&str]>) -> Vec<Row> {
         })
         .filter_map(|s| match s.sys {
             Sys::Marks(c) => Some((s.id, if literal { unfix(c) } else { c })),
-            Sys::Entries(_) => None,
+            Sys::Entries(_) | Sys::FirstStart(_) => None,
         })
         .collect();
     RULES
