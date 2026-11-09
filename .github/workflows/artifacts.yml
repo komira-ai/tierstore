@@ -202,7 +202,7 @@ jobs:
         run: cargo xtask fetch --url "https://ziglang.org/download/$ZIG_VERSION/zig-x86_64-linux-$ZIG_VERSION.tar.xz" --sha256 "$ZIG_SHA256_X86_64_LINUX" --out "$HOME/zig" --extract tar.xz --tree
       - name: Install cargo-zigbuild (pinned version and checksum)
         run: cargo xtask fetch --url "https://github.com/rust-cross/cargo-zigbuild/releases/download/v$ZIGBUILD_VERSION/cargo-zigbuild-$TARGET.tar.xz" --sha256 "$ZIGBUILD_SHA256_X86_64_LINUX" --out "$HOME/.cargo/bin/cargo-zigbuild" --extract tar.xz --member "cargo-zigbuild-$TARGET/cargo-zigbuild"
-      - run: PATH="$HOME/zig:$PATH" cargo zigbuild --version
+      - run: PATH="$HOME/zig:$PATH" zig version
       # Linked against glibc 2.28 (the target's `.2.28`); the binary lands in target/$TARGET/release
       # as it does for `cargo build`.
       - run: PATH="$HOME/zig:$PATH" cargo zigbuild --locked --release --target "$TARGET.$GLIBC_FLOOR" -p tierstore --features server --bin tierstore
@@ -322,7 +322,7 @@ jobs:
         run: cargo xtask fetch --url "https://ziglang.org/download/$ZIG_VERSION/zig-aarch64-linux-$ZIG_VERSION.tar.xz" --sha256 "$ZIG_SHA256_AARCH64_LINUX" --out "$HOME/zig" --extract tar.xz --tree
       - name: Install cargo-zigbuild (pinned version and checksum)
         run: cargo xtask fetch --url "https://github.com/rust-cross/cargo-zigbuild/releases/download/v$ZIGBUILD_VERSION/cargo-zigbuild-$TARGET.tar.xz" --sha256 "$ZIGBUILD_SHA256_AARCH64_LINUX" --out "$HOME/.cargo/bin/cargo-zigbuild" --extract tar.xz --member "cargo-zigbuild-$TARGET/cargo-zigbuild"
-      - run: PATH="$HOME/zig:$PATH" cargo zigbuild --version
+      - run: PATH="$HOME/zig:$PATH" zig version
       # Linked against glibc 2.28 (the target's `.2.28`); the binary lands in target/$TARGET/release
       # as it does for `cargo build`.
       - run: PATH="$HOME/zig:$PATH" cargo zigbuild --locked --release --target "$TARGET.$GLIBC_FLOOR" -p tierstore --features server --bin tierstore

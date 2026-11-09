@@ -49,7 +49,7 @@ pub fn splice_zig_commands(b: &Build, commands: &mut Vec<String>) {
             format!(
                 "cargo xtask fetch --url \"https://github.com/rust-cross/cargo-zigbuild/releases/download/v$ZIGBUILD_VERSION/cargo-zigbuild-$TARGET.tar.xz\" --sha256 \"${zigbuild_pin}\" --out \"$HOME/.cargo/bin/cargo-zigbuild\" --extract tar.xz --member \"cargo-zigbuild-$TARGET/cargo-zigbuild\""
             ),
-            "PATH=\"$HOME/zig:$PATH\" cargo zigbuild --version".to_owned(),
+            "PATH=\"$HOME/zig:$PATH\" zig version".to_owned(),
             "PATH=\"$HOME/zig:$PATH\" cargo zigbuild --locked --release --target \"$TARGET.$GLIBC_FLOOR\" -p tierstore --features server --bin tierstore".to_owned(),
             "cargo xtask release check-glibc \"target/$TARGET/release/tierstore\" --max \"$GLIBC_FLOOR\"".to_owned(),
         ],
