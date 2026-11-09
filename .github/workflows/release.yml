@@ -78,8 +78,9 @@
 #               failure stops the
 #               release before anything public changes.
 # 3. the lab    farm-check, farm, soak: hostkeeper installs the Debian package of the suite testing
-#               on the lab and the coordinator moves it. Without the lab's settings the stage is
-#               skipped with a notice and does not hold the release; with them it must converge
+#               on the lab and the coordinator moves it. Unless the repository variable
+#               TIERSTORE_LAB_INSTALL is `true`, or without the lab's settings, the stage is
+#               skipped with a notice and does not hold the release; with both it must converge
 #               and then soak FARM_SOAK_HOURS (empty is 0, which ends at once).
 # 4. promotion  promote-check (cargo xtask channels decide: the results of the jobs above) and
 #               then, automatically, promote-latest (releases/latest.json, after the bucket is
@@ -1792,7 +1793,9 @@ jobs:
   # suite testing on the lab. Three jobs.
   #
   #   farm-check  (read; the settings are repository variables, as hostkeeper-desired has them)
-  #               the gate (`channels gate`: none of HOSTKEEPER_COORDINATOR_URL and
+  #               the gate (`channels gate`: unless the repository variable TIERSTORE_LAB_INSTALL
+  #               is exactly `true` the lab is off, a green no-op with a notice naming it, whatever
+  #               the other settings are; with it `true`, none of HOSTKEEPER_COORDINATOR_URL and
   #               HOSTKEEPER_COORDINATOR_CA set is a green no-op, some is red, and the tailnet's
   #               three variables are all or none), then `release desired-deb` for the release
   #               just published: the testing suite, read as a client reads it, lists the
@@ -1809,7 +1812,9 @@ jobs:
   #   soak        FARM_SOAK_HOURS hours (a repository variable; empty is 0, which ends at once)
   #               after the lab converged (`channels soak`). It runs only when `farm` converged.
   #
-  # With no lab configured (the coordinator's two repository variables empty) farm-check is a
+  # With no lab switched on (TIERSTORE_LAB_INSTALL not `true`; the coordinator's variables serve
+  # the desired-version workflow too, and the hand-off here waits for hostkeeper's apt installer) or no
+  # lab configured (the coordinator's two repository variables empty) farm-check is a
   # green no-op with a notice, `farm` and `soak` are skipped, and the release goes on to the
   # promotion: `promote-check` accepts exactly that. With the lab configured it must converge
   # and soak, or nothing public follows.
@@ -1836,12 +1841,13 @@ jobs:
       - run: rustup toolchain install
       - name: Compile xtask
         run: cargo xtask --help
-      - name: Gate on the settings of the coordinator (a job without them does nothing and ends green)
+      - name: Gate on the switch of the lab and the settings of the coordinator (a job without them does nothing and ends green)
         id: gate
         env:
+          TIERSTORE_LAB_INSTALL: ${{ vars.TIERSTORE_LAB_INSTALL == 'true' && 'true' || 'false' }}
           HOSTKEEPER_COORDINATOR_URL: ${{ vars.HOSTKEEPER_COORDINATOR_URL }}
           HOSTKEEPER_COORDINATOR_CA: ${{ vars.HOSTKEEPER_COORDINATOR_CA }}
-        run: cargo xtask channels gate --label farm --output "$GITHUB_OUTPUT" --setting "HOSTKEEPER_COORDINATOR_URL=${HOSTKEEPER_COORDINATOR_URL:+set}" --setting "HOSTKEEPER_COORDINATOR_CA=${HOSTKEEPER_COORDINATOR_CA:+set}"
+        run: cargo xtask channels gate --label farm --output "$GITHUB_OUTPUT" --require "TIERSTORE_LAB_INSTALL=$TIERSTORE_LAB_INSTALL" --setting "HOSTKEEPER_COORDINATOR_URL=${HOSTKEEPER_COORDINATOR_URL:+set}" --setting "HOSTKEEPER_COORDINATOR_CA=${HOSTKEEPER_COORDINATOR_CA:+set}"
       # Only when the coordinator is reached over the tailnet: its three variables are all set or
       # none. None is not a failure here, it is a coordinator the runner reaches without a join.
       - name: Gate on the settings of the tailnet (none means no join)

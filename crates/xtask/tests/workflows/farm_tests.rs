@@ -28,6 +28,30 @@ const DEFECTS: &[(&str, &str, &str, &str)] = &[
     // farm-check
     (
         "farm-check",
+        " --require \"TIERSTORE_LAB_INSTALL=$TIERSTORE_LAB_INSTALL\"",
+        "",
+        "farm-check: the gate is not given --require \"TIERSTORE_LAB_INSTALL=$TIERSTORE_LAB_INSTALL\": the lab starts without the switch",
+    ),
+    (
+        "farm-check",
+        " --require \"TIERSTORE_LAB_INSTALL=$TIERSTORE_LAB_INSTALL\"",
+        " --require \"TIERSTORE_LAB_INSTALL=$TIERSTORE_LAB_INSTALL\" --require \"X=$X\"",
+        "farm-check: the gate is given a requirement it should not be",
+    ),
+    (
+        "farm-check",
+        "TIERSTORE_LAB_INSTALL: ${{ vars.TIERSTORE_LAB_INSTALL == 'true' && 'true' || 'false' }}",
+        "TIERSTORE_LAB_INSTALL: ${{ vars.TIERSTORE_LAB_INSTALL || 'false' }}",
+        "farm-check: the gate's TIERSTORE_LAB_INSTALL is not",
+    ),
+    (
+        "farm-check",
+        "TIERSTORE_LAB_INSTALL: ${{ vars.TIERSTORE_LAB_INSTALL == 'true' && 'true' || 'false' }}",
+        "TIERSTORE_LAB_INSTALL: 'true'",
+        "farm-check: the gate's TIERSTORE_LAB_INSTALL is not",
+    ),
+    (
+        "farm-check",
         "needs: [plan, check-apt, check-brew, check-install-sh]",
         "needs: [plan]",
         "farm-check: needs are not plan and the three install checks",
@@ -136,8 +160,8 @@ const DEFECTS: &[(&str, &str, &str, &str)] = &[
     ),
     (
         "farm-check",
-        "      - name: Gate on the settings of the coordinator",
-        "      - run: echo ${{ vars.HOSTKEEPER_COORDINATOR_URL }}\n      - name: Gate on the settings of the coordinator",
+        "      - name: Gate on the switch of the lab and the settings of the coordinator",
+        "      - run: echo ${{ vars.HOSTKEEPER_COORDINATOR_URL }}\n      - name: Gate on the switch of the lab and the settings of the coordinator",
         "farm-check: a step before the gate names vars.HOSTKEEPER",
     ),
     // farm

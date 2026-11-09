@@ -6,7 +6,9 @@
 //! - `farm-check` waits for the three install checks, reads the repository (`contents: read`, no
 //!   environment: its settings are repository variables, which a job that calls a workflow can
 //!   read too), has the `if:` of the jobs after skippable jobs, and starts with the gate: the coordinator's two variables, then the
-//!   tailnet's three. Every step after the first gate runs only when it said `enabled=true`, and
+//!   tailnet's three. The gate is also given `--require TIERSTORE_LAB_INSTALL=...`, `true` only
+//!   when that repository variable is exactly `true`: with it off, the lab is off whatever the
+//!   other settings are (they serve `hostkeeper-desired.yml` too). Every step after the first gate runs only when it said `enabled=true`, and
 //!   one of them is `cargo xtask release desired-deb` (the testing suite lists the package), whose two outputs the job hands on.
 //! - `farm` is hostkeeper's reusable workflow, pinned to a commit with its release as the comment
 //!   (a pin of its own: `hostkeeper-desired.yml` pins another revision of the client, and the
@@ -38,6 +40,12 @@ pub const SOAK_IF: &str = after_if!("needs.farm.outputs.converged == 'true'");
 /// The audience of the OIDC token of `farm`, which the coordinator's allow-list entry for this
 /// workflow names (not the one of `hostkeeper-desired.yml`, whose entry admits another event).
 pub const AUDIENCE: &str = "tierstore-hostkeeper-release";
+
+/// The repository variable that switches the lab stage on.
+const SWITCH: &str = "TIERSTORE_LAB_INSTALL";
+
+/// What the gate's environment holds for it: `true` only when the variable is exactly `true`.
+const SWITCH_VALUE: &str = "${{ vars.TIERSTORE_LAB_INSTALL == 'true' && 'true' || 'false' }}";
 
 /// The settings of the coordinator that the first gate is given.
 const COORDINATOR_SETTINGS: [&str; 2] = ["HOSTKEEPER_COORDINATOR_URL", "HOSTKEEPER_COORDINATOR_CA"];
@@ -144,6 +152,7 @@ fn check_problems(check: &Node) -> Vec<String> {
         &COORDINATOR_SETTINGS,
         "farm-check: the gate",
     ));
+    problems.extend(switch_problems(&all[gate]));
     for step in &all[..gate] {
         for word in ["vars.HOSTKEEPER", "secrets.", "id-token"] {
             if super::channels::mentions(step, word) {
@@ -179,6 +188,29 @@ fn check_problems(check: &Node) -> Vec<String> {
             "farm-check: no step `desired` runs `cargo xtask release desired-deb` for the tag of this release"
                 .to_owned(),
         );
+    }
+    problems
+}
+
+/// The lab is off unless the repository variable `TIERSTORE_LAB_INSTALL` is exactly `true`: the
+/// gate step is given that as `--require` (a gate that is not required to be on judges nothing, so
+/// the settings of `hostkeeper-desired.yml` alone would start the lab), from an environment value
+/// that is `true` only for exactly that, and it is the only `--require` of the step.
+fn switch_problems(gate: &Node) -> Vec<String> {
+    let run = text(gate, "run");
+    let mut problems = Vec::new();
+    if !run.contains(&format!("--require \"{SWITCH}=${SWITCH}\"")) {
+        problems.push(format!(
+            "farm-check: the gate is not given --require \"{SWITCH}=${SWITCH}\": the lab starts without the switch"
+        ));
+    }
+    if run.matches("--require ").count() != 1 {
+        problems.push("farm-check: the gate is given a requirement it should not be".to_owned());
+    }
+    if at(gate, &["env", SWITCH]) != Some(SWITCH_VALUE) {
+        problems.push(format!(
+            "farm-check: the gate's {SWITCH} is not {SWITCH_VALUE}: anything but exactly `true` must leave the lab off"
+        ));
     }
     problems
 }

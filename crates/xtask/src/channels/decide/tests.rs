@@ -53,6 +53,7 @@ fn a_lab_that_is_not_configured_is_skipped_with_a_notice_and_does_not_hold_the_r
             said[0].starts_with("::notice title=The lab stage was skipped::"),
             "{said:?}"
         );
+        assert!(said[0].contains("TIERSTORE_LAB_INSTALL"), "{said:?}");
         assert_eq!(said.len(), 2);
     }
 }
