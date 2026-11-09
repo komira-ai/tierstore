@@ -2,6 +2,9 @@
 //! `docs/design/put-without-lock.md` (module [`marks`]) and, as a sanity check of the model
 //! itself, of today's per-key entry protocol under write-once (module [`entries`]).
 //!
+//! A third, independent model (module [`firststart`]) checks the first start of a hot tier that
+//! has no `_tiering/format` object, as section 13.1 of the design document proposes it.
+//!
 //! Nothing here depends on the `tierstore` crate or on any other crate: the protocols are
 //! re-stated as small state machines whose every step is one atomic store call (or one local
 //! decision), explored in every interleaving by the breadth-first explorer of [`explore`] with
@@ -86,6 +89,7 @@
 pub mod cli;
 pub mod entries;
 pub mod explore;
+pub mod firststart;
 pub mod lin;
 pub mod marks;
 pub mod scenarios;

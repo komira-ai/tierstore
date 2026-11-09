@@ -596,13 +596,226 @@ New formats are only additions, but the rollout still has to be safe beside old 
 1. **Bridge release.** The previous release plus: `_entries/` is a reserved prefix everywhere it is listed (a client key that already starts with `_entries/` can no longer be read, written or listed through the proxy, which refuses it; on `dir:` the file stays on disk and is kept readable by the backend); the registration becomes a heartbeat object; the release watches `_tiering/format` and, under phase `drain`, answers writes 503 and keeps serving reads while its leader applies the journals until every checkpoint is at the head of its journal; it then writes phase `drained`. It changes no data or wire format. It rolls out with the existing hand-off while writes stay up.
 2. **The operator verb `tierstore format-epoch`** (a subcommand, so its tests are Rust; dry-run default; held, never run by CI). `--check` changes nothing. `--drain` refuses unless every registration is of the bridge release with a recent heartbeat, or is named by the operator after a process check (older registrations have no heartbeat and cannot be classified by the tool), then waits for `drained`. `--cancel` writes the previous phase back. Tell the owners of the client fleet before `--drain`: the write pause is minutes, scales with fleet size and cold health, and a cold outage makes the drain wait.
 3. **The release of this design** rolls out with the socket hand-off while writes are paused. It serves reads, answers writes 503, and does not campaign for the lease until the format says `{epoch: 2, phase: active}`. It has no journal reconciler: it never writes `drained`, and it neither reads nor writes `_journal/` or `_tiering/checkpoint/`. Rehearse the whole sequence, rollback included, in staging: there is no canary, because the epoch is fleet-wide.
-4. `format-epoch --activate` checks every live registration is of the new protocol and the journals are drained, then writes the active format. On a new store (no format object and no `_journal/` object) it creates the object. Nodes poll it and start writing. A node over a `memory` hot tier writes the active format into it at start, since the tier is new with the process. The verb prints, and never runs, the credential rotation that fences a restarted old binary (nodes of the new release get the new credential first).
+4. `format-epoch --activate` checks every live registration is of the new protocol and the journals are drained, then writes the active format. On a new store (no format object and no `_journal/` object) it creates the object. Section 13.1 proposes that a node does this itself at its start, after a stronger proof. Nodes poll it and start writing. A node over a `memory` hot tier writes the active format into it at start, since the tier is new with the process. The verb prints, and never runs, the credential rotation that fences a restarted old binary (nodes of the new release get the new credential first).
 5. **Rollback:** `format-epoch --drain` again: nodes answer writes 503, the leader seals every entry and adopts and replicates every hot object without a cold copy until `_entries/` is empty; then roll back. It needs cold up.
 6. **Clean-up, one release later:** the old `_journal/*` and `_tiering/checkpoint/*` objects stay until a release after the cut-over, so a rollback finds them; that release's leader deletes them (not built: the cut-over leaves them untouched).
 
 The rollout of the object record (section 16.13) is a separate, ordered list of changes, each additive.
 
 The compatibility tests of section 8 run the previous release on directories and buckets the new code wrote, and the new code on those the previous release wrote, including the refusal to activate over undrained journals.
+
+### 13.1 First start of a new hot tier: the node proves the tier is new and activates it (proposed; model-checked, not built)
+
+#### The problem
+
+A hot tier that has never held a `_tiering/format` object answers every write with 503 ("writes wait until the format object says active at epoch 2") until an operator has run `tierstore format-epoch --activate --apply` (`server/verbs/format_epoch.rs`, `activate`). On a farm that runs the markers that is two verbs and a pause: `--activate` reaches epoch 2, the entry protocol, and a second `--drain`, a roll and `--activate-marks` are needed to reach epoch 3 (`server/verbs/format_epoch/marks.rs`, `activate`; put-without-lock.md 8.2). The owner's goal is that users edit one configuration file and enable the service. For a tier that is new, today's rule asks for work that protects nothing.
+
+The rule exists for one reason. A hot tier with no format object is either brand new, or still written by a release before the bridge release, which keeps its acknowledged writes as journals (`_journal/`, section 13) that this release never reads. A node that activated the second kind would answer writes on the new protocol beside journals nobody applies: a pending cold delete in a journal is lost (the key reappears from cold), and a pending cold copy waits for the stray sweep to find the hot object (put-without-lock.md 5.12). So the activation is held back until something has shown the tier is the first kind. This section lets the node show that itself, once, at its start, and only for a tier with no format object.
+
+**What the owner sees.** Before: point a new node at an empty bucket or directory, start it, every write is 503 until an operator reads a runbook. After: start it and writes work (the node writes the format object during its start). On an `s3:` tier with an existing, empty marks bucket the node goes straight to `active-marks` at epoch 3; on a `dir:` tier to `active` at epoch 2; a `memory` tier is unchanged (it already writes epoch 2 at its start, `server/memory_format.rs`, `start_format`).
+
+**What does not change.** A tier that has a format object, of any phase, is never touched by this: the node reads it and follows it, as today. `format-epoch` and all its verbs are unchanged and stay the only way to move a tier that holds data from one format to the next, to roll back, and to activate a tier whose proof fails. The write pause of a real migration (section 13, put-without-lock.md 8.2) is not removed; this removes the operator step from the tier that has nothing to migrate.
+
+#### The proposal
+
+When a node starts it already reads the format object (`format.rs`, `read_format`: `Ok(None)` is exactly "the object is not there"; any other error is an unreadable object and stays 503 as today). **Only when the answer is "not there"**, after the node has registered and made its first beat (`Proxy::open`, `start_heartbeat`), it runs the proof and, if the proof holds, writes the format object. In order:
+
+1. **The emptiness proof.** Four listings in this order, which is the model's (registrations, `_entries/`, `_journal/`, the marks bucket; the put follows the last at once), each asking for one key, and one read per registration; all must come back empty:
+   - **no registration of another node below the required protocol.** `_tiering/proxies/` is listed and each body classified as `server/verbs/registrations.rs`, `read` does. Required protocol is 3 (`PROTO_MARKS`) for the marks target and 2 (`PROTO`) for the entries target, as `check_protocol` takes them. The node's own registration is left out by its id: `Heartbeat::register` leaves an old empty registration of the same id in place (it cannot be decoded), so a node upgraded in place from a release before the bridge release would otherwise block itself for ever. Peers of this release that are starting now need no rule of their own: their registration is `hb: 0` with no `phase`, and its protocol is at least the required one, so it is not "below". Counting them would make two nodes that start at once block each other (scenario `negative/first-start-counts-its-peers-registrations`). **A registration below the required protocol stops the proof whatever its age**, live, silent or empty (the brief for this section said "live"; Q3 asks whether to relax it). The verbs classify "live" by the age of the object against a clock (`Class::Live` is `age_ms < fresh`), which compares the node's wall clock with the hot tier's; a node that is wrong by more than `fresh` would take a running old node for a departed one, which is the mistake the proof exists to stop. A departed old node that left its registration therefore still stops the proof, and the operator names it with `--departed` in the verb. This is stricter than "no live registration", and it is the reason a dead old registration is cheap to explain and a wrong clock cannot matter (Q3).
+   - **no `_entries/` object** (`ENTRIES_PREFIX`): a store that has entries has run the entry protocol and has a format that someone deleted; `--activate-marks` refuses the same (`require_no_entries`).
+   - **no `_journal/` object** (`JOURNAL_PREFIX`): no release before the bridge release has written, and none has left work. This is the test `--activate` makes on a store with no format object.
+   - **for the marks target, the marks bucket exists and is empty** (`require_empty`: one `list_page` of one key; a bucket that cannot be listed does not exist or is not granted).
+2. **The create-only put.** The node writes `{"epoch":3,"marks_bucket":"<name>","phase":"active-marks"}` (marks target) or `{"epoch":2,"phase":"active"}` (entries target) with `Backend::put`, which is create-only (`If-None-Match: *`; `AlreadyExists` if the key is there). The record is a pure function of the node's configuration (the tier kind and `hot_store.marks_bucket`), so every node of one configuration writes the same bytes.
+3. **The answer.** `Ok`: the node won, and its next write sees the format (it keeps what it wrote, as `Pause::keep` keeps what it read). `AlreadyExists`: another node, or this one before a crash, wrote it first; the node reads the object and follows it exactly as a node that started later does. A node whose proof failed stays 503 and goes on reading the format object at every beat, as today (`format_refresh`); if a peer or the operator writes it, the node follows it within one beat. The proof is not repeated until the next start (Q2).
+4. **The target per tier kind.** The tier kind decides the target and nothing else does: an `s3:` hot tier has a marks bucket (`hot_store.marks_bucket`, default `<hot bucket>-marks`), so its target is `active-marks`; a `dir:` hot tier has none (`NO_MARKS`: "a `dir:<path>` hot tier cannot run the markers"), so its target is `active` at epoch 2; `memory` keeps its own start-up write. An `s3:` tier whose marks bucket is missing, not granted or not empty **does not fall back to epoch 2**: epoch 2 would put the farm on the entry protocol and bring back exactly the second pause this section removes. The node stays 503 and says which of the three it is.
+
+**When the proof fails** the node stays 503 and logs once, at warn, one line that names the reason and the verb:
+
+```text
+tierstore: the hot tier has no _tiering/format object and is not shown to be new: <reason>; writes answer 503 until it is activated: run `tierstore format-epoch --check --hot <tier>` and then the verbs of docs/design/tierstore-design.md 13 / put-without-lock.md 8.2
+```
+
+where `<reason>` is one of: `the registration of <id> is of protocol <p>, below <required>` (or `has no protocol: a release before the heartbeat`); `an _entries/ object exists`; `a _journal/ object exists (a release before the bridge release wrote here)`; `the marks bucket <name> cannot be listed`; `the marks bucket <name> holds an object`; `the hot tier could not be listed: <error>`. One line, one reason (the first that fails, in the order of the listings); `format-epoch --check` prints all of them. A failure to list the hot tier is a failure of the proof, not a reason to write.
+
+#### Sequence: one node, first start
+
+```mermaid
+sequenceDiagram
+    participant O as operator (edits the file, enables the service)
+    participant N as node
+    participant H as hot tier
+    participant M as marks bucket
+    O->>N: start
+    N->>H: PUT _tiering/proxies/id, create-only
+    H-->>N: 200
+    N->>H: GET _tiering/format
+    H-->>N: 404 (the only answer that starts the proof)
+    N->>H: LIST _tiering/proxies/ (+ GET each body)
+    H-->>N: only this node
+    N->>H: LIST _entries/ (1 key)
+    H-->>N: empty
+    N->>H: LIST _journal/ (1 key)
+    H-->>N: empty
+    N->>M: LIST (1 key)
+    M-->>N: empty
+    N->>H: PUT _tiering/format, If-None-Match *, active-marks epoch 3
+    H-->>N: 200
+    Note over N: writes are served from this start
+```
+
+#### Sequence: two nodes start at once
+
+```mermaid
+sequenceDiagram
+    participant A as node A
+    participant B as node B
+    participant H as hot tier
+    participant M as marks bucket
+    A->>H: PUT registration A
+    B->>H: PUT registration B
+    A->>H: GET _tiering/format
+    H-->>A: 404
+    B->>H: GET _tiering/format
+    H-->>B: 404
+    A->>H: LIST proxies, entries, journal (empty; B is of this release)
+    B->>H: LIST proxies, entries, journal (empty; A is of this release)
+    A->>M: LIST (empty)
+    B->>M: LIST (empty)
+    A->>H: PUT _tiering/format, If-None-Match *
+    H-->>A: 200
+    B->>H: PUT _tiering/format, If-None-Match *
+    H-->>B: 412 AlreadyExists
+    B->>H: GET _tiering/format
+    H-->>B: active-marks, epoch 3 (the same record)
+    Note over A,B: both serve writes
+    alt B lists the marks bucket after A's first write
+        A->>M: PUT marks/K (a client write)
+        B->>M: LIST (holds an object)
+        Note over B: the proof fails; at its next beat B reads the format object and follows it
+    end
+```
+
+#### Sequence: a node of an old release still writing
+
+```mermaid
+sequenceDiagram
+    participant X as old node (an earlier release)
+    participant N as node of this release
+    participant H as hot tier
+    X->>H: PUT _tiering/proxies/x (empty body)
+    X->>H: PUT key K, PUT _journal/... (acknowledged to the client)
+    N->>H: PUT registration, GET _tiering/format
+    H-->>N: 404
+    N->>H: LIST _tiering/proxies/ (+ GET each body)
+    H-->>N: x, no protocol number (a release before the heartbeat)
+    Note over N: the proof fails here; _entries/, _journal/ and the marks bucket are not listed
+    Note over N: warn: not shown to be new: the registration of x has no protocol; writes stay 503
+    Note over X,H: x keeps writing journals, the new release never touches them
+    Note over N: the operator drains the old release (section 13), then runs the verbs
+```
+
+If the old node's registration is not there yet when `N` lists (it starts a moment later) but its journal is, the `_journal/` listing stops the proof the same way. What neither listing can see is an old node that starts and writes after the last listing and before the put: see the residual below.
+
+#### Why the put is create-only, and what `dir:` gives
+
+On `s3:` the create-only put is one request that the store decides (`If-None-Match: *`; put-without-lock.md 2.2 lists it among the capabilities the tier must have). Two nodes that pass the proof at once race on one request: one gets 200, the other `AlreadyExists`, and the loser reads the winner's record. Nothing is retried and no lease is taken.
+
+On `dir:` the premise "create-if-absent is atomic within one process only" is **not what the code does**, and the design must not rest on it. `DirBackend::publish` writes a synced temporary file and `hard_link`s it to the name; the kernel makes the link fail where the name exists, so a create-only put is atomic **between processes too** on a local file system with hard links (the same requirement `dir.rs` already states). What is atomic within one process only is the lock of the *replacements*: `put_if_match` and the deletes of a key outside `_entries/` take the in-process `replacing` mutex and, unlike the keys under `_entries/` (or a backend opened `with_locked_keys`), no `flock` on `.entries/.lock`. Two processes over one directory are real (the socket hand-off of section 6.7 runs the old and the new process side by side, both new-release). For them:
+
+- the create is the link: one process creates the object, the other gets `AlreadyExists`, reads it and follows it, as on `s3:`;
+- the `dir:` target is epoch 2, whose verbs (`--activate`, `--drain`) replace the format with `put_if_match`, which is not cross-process atomic; this section does not use it, and the verbs' use of it is unchanged (the operator runs one verb at a time);
+- if the link ever were not atomic (a file system whose `link` is not exclusive), two nodes would both write the same record, because the record is a function of the configuration. The model checks that variant (`first-start/two-nodes-race-create-not-atomic`: a check, then an unconditional write) and it holds; it is **not** safe if the two processes ran different configurations, and a `dir:` tier has one configuration. The harm of a non-atomic create would be a blind write over an operator's `drain` in the same moment, which no operator does (the node writes only while the object is absent).
+
+An `AlreadyExists` for a create the node itself sent (the answer was lost, then retried) is harmless for the same reason: the node reads the object, sees its own record and follows it (scenario `first-start/crash-between-put-and-answer`).
+
+#### Edge cases and the mechanism that handles each
+
+| Case | What happens | Mechanism |
+|---|---|---|
+| Two new nodes start at once | one create wins, the other follows | create-only put; the loser reads the record (`two-nodes-race-s3`, `two-nodes-race-dir`) |
+| The loser lists the marks bucket after the winner's first client write | its proof fails (the bucket holds an object) and it stays 503 for at most one beat | the node reads the format at every beat (`format_refresh`) and follows an object that appeared; the heartbeat already does this |
+| A node crashes after registering, before the put | the restart registers again, reads 404 or the record, and goes on | no state of the proof is kept; a registration of this release never blocks (`crash-between-registration-and-put`) |
+| A node crashes after the put took effect, before it read the answer | the restart reads the record and follows it | the put is the only write; the node holds nothing to undo (`crash-between-put-and-answer`) |
+| A node restarts over an active tier | reads the record, runs no proof, writes nothing | the proof is entered only on 404 (`restart-after-activation`) |
+| A node of an old release is running and writes journals | no node of this release activates | the registration listing sees a node that has registered (an empty or protocol-1 body, whatever its age), the `_journal/` listing one that wrote (`old-release-writing`, `old-release-writing-dir`; each test is needed: `negative/first-start-no-registration-check`, `negative/first-start-no-journal-check`) |
+| An old release left a journal and is gone | nothing activates | `_journal/` listing (`journal-left`); the operator drains with the bridge release, as today |
+| Entries without a format object (someone deleted the object of a store that ran the entry protocol) | nothing activates | `_entries/` listing (`entries-left`, `negative/first-start-no-entries-check`) |
+| The marks bucket does not exist, is not granted, or holds a marker | nothing activates; no fall-back to epoch 2 | `list_page` on the marks store (`marks-bucket-missing`, `marks-bucket-used`, `negative/first-start-no-marks-check-missing`, `-used`) |
+| A node of the same id as an old node (upgrade in place) | its own registration is not counted; the old process that is still draining beside it is seen by its journals if it wrote, and by nothing if it has not | own id left out; the journal listing; the residual below |
+| The format object exists, in any phase (`drain`, `drained`, `active`, `active-marks`, a phase unknown to this release) | nothing is written | the proof is entered only on 404; a node never overwrites |
+| The format object is unreadable (error other than not found) | stays 503, no proof | `read_format` returns the error; unchanged from today |
+| The hot tier fails during the proof | stays 503, logs the error as the reason | any listing error fails the proof; the next start tries again |
+| Nodes of one hot tier configured with different marks buckets | the first to write records its bucket; the others answer 503 with the existing message naming both | `Format::runs_marks` and `marks_route` (unchanged) |
+| A node of the entries release (protocol 2) beside nodes that want epoch 3 | the epoch-3 node's proof fails: "protocol 2, below 3" | registration listing; the operator moves it by the verbs |
+| A node of an old release starts after the put, with credentials that reach the tier | the entries release answers writes 503 beside an `active-marks` it does not know (put-without-lock.md section 8.1); a release before it never reads the object and writes journals; what the bridge release does with that phase is not assumed here | not handled by the object: the credential fence of `--old-release-fenced` (put-without-lock.md 8.2 step 3); the model lets the old node write (`residual/first-start-old-starts-after-the-activation`) |
+
+**Residual (stated, not closed).** An old node that registers and writes after the last listing of the proof and before the put is invisible to it: the model finds a 9-step counterexample (`residual/first-start-old-starts-after-the-proof`: the node registers and lists, the old node registers, the node creates the object, the old node writes a journal). The window is the time between the first list and the put. No format object closes it for a release that never reads one, and the model gives the old node no such reading; the control is the one the verbs already print and require: the old release's credentials are rotated away before the new release first starts on a tier that the old release could reach (`--old-release-fenced`, put-without-lock.md 8.2 step 3). A fresh bucket nobody has pointed the old release at has no such node. This is why the proof is a tier-is-new check and not a replacement for the fence (Q1).
+
+#### The model check
+
+`crates/tierstore-model` has a third model, `firststart` (`src/firststart/mod.rs`), explored by the same breadth-first explorer; scenarios are in `src/scenarios/first_start.rs`, their tests in `tests/first_start.rs`. Every request of the start is one atomic step, so each list and the put have every interleaving of the other node, the old node and a crash between them. Properties: `FS1` once the format object exists no journal, no earlier `_entries/` object and no earlier marker exists; `FS2` where the tier is new and nothing else starts, every node that is up ends writable with the object written; `FS3` the record is never written at epoch 3 over a missing marks bucket.
+
+```text
+cargo run --release -p tierstore-model -- all          # every scenario of the crate, 134, all as required
+cargo run --release -p tierstore-model -- first-start/two-nodes-race-s3 -v   # one scenario, with its trace
+cargo test -p tierstore-model --test first_start
+```
+
+| Scenario | Result | States |
+|---|---|---|
+| `first-start/one-node-s3`, `one-node-dir` | PASS | 10, 9 |
+| `first-start/two-nodes-race-s3`, `two-nodes-race-dir` | PASS | 104, 87 |
+| `first-start/two-nodes-race-create-not-atomic` | PASS | 106 |
+| `first-start/crash-between-registration-and-put` (two nodes, two crashes) | PASS | 589 |
+| `first-start/crash-between-put-and-answer` | PASS | 43 |
+| `first-start/restart-after-activation` | PASS | 96 |
+| `first-start/old-release-writing`, `old-release-writing-dir` (an old node writing journals; never activates over it) | PASS | 576, 196 |
+| `first-start/journal-left`, `entries-left`, `marks-bucket-used`, `marks-bucket-missing` | PASS | 49, 64, 64, 64 |
+| `negative/first-start-no-journal-check`, `-no-registration-check`, `-no-entries-check`, `-no-marks-check-used` | rejected, FS1 | 7, 33, 8, 8 |
+| `negative/first-start-no-marks-check-missing` | rejected, FS3 | 8 |
+| `negative/first-start-counts-its-own-registration`, `-counts-its-peers-registrations` | rejected, FS2 | 8, 170 |
+| `residual/first-start-old-starts-after-the-proof`, `-after-the-activation`, `-at-any-time` | rejected, FS1 (the stated residuals) | 56, 13, 328 |
+
+Every test of the proof is needed (each wrong variant fails) and no test of it is too strong (counting a registration of this release makes a new tier unactivatable). The model is not a proof about the store: it assumes the listings are consistent (section 9), that a node of an old release registers before it writes (the bridge release registers at its open; the release before it is assumed to), and that an old node never reads the format object.
+
+#### Latency budget
+
+Added to the **first start of a node that reads 404 only**: one `GET` of the format object (a node reads it at its first beat today), four `LIST`s of one key (registrations, `_entries/`, `_journal/`, the marks bucket; three for `dir:`), one `GET` per registration present, and one `PUT`; at the hot tier's service time per request, sequentially: 5 + N requests for N registrations, N = 1 on a first node. A fleet that starts together on an empty tier does the proof N times with N growing to the fleet size, once, at the first start only (counted from the code path of the verbs, not measured; to be measured on the build node tier before the build). Nodes that start after the object exists add one `GET`, the read they make today. **Nothing is added to the put, get, head, list or delete paths, to the heartbeat, or to the reconciler:** the format object is read by the pause machinery at `format_refresh` as before.
+
+#### One-way doors
+
+The object the node writes is persisted and read by every later release and by the old binary, so it is audited against B8:
+
+| Door | Why it is one-way | How it stays additive |
+|---|---|---|
+| The bytes of `_tiering/format` the node writes | read by the proxies, the leader, the verbs and, as an unknown phase, by the bridge release | the node writes the records the verbs already write (`{"epoch":2,"phase":"active"}` and `{"epoch":3,"marks_bucket":"<name>","phase":"active-marks"}`, `format_body`); no new field, no new phase word; a reader ignores fields it does not know |
+| Who may write it (a node, not only the operator) | an operator that reads "the object is there" as "an operator decided" | the verbs read the object by its content, never by its author; `--check` prints the phase |
+| The target per tier kind (`s3:` goes to epoch 3) | a tier that starts at epoch 3 cannot be taken to epoch 2 without the rollback of 8.2 | the rollback exists and is unchanged (`--drain`, `--restore-entries`); a `dir:` tier cannot reach 3, and an `s3:` tier that wants 2 is a verb away |
+| A new registration rule (a registration below the required protocol stops the proof) | a stricter rule cannot loosen later without a decision | it only withholds a write that the verb performs on request; relaxing it is a later release |
+| A log line naming the verb | none | not persisted |
+
+Nothing here renumbers, renames, removes or re-means a field, adds a required field, refuses data that is new, or raises a version floor: **B8 holds**. The compatibility test B8 asks for is the existing one that runs the previous release on a store this release wrote and back (section 8, `crates/compat`), with one case added when the build lands: the previous release over a tier this release self-activated, expecting 503 on writes, reads served, and nothing written.
+
+#### Alternatives that were rejected
+
+- **A flag that says "this tier is new" (`hot_store.new_tier = true`) in the file.** It moves the operator's judgement into the file, and a flag left on is exactly the activation over journals the rule exists to stop. The proof reads the tier instead of asking.
+- **A drain-first self-activation** (write `drain`, wait `format_refresh`, check, then activate). It only protects the bridge release, which honours `drain`; a release before it never reads the object, and a wait on every first start buys nothing for the tier that is new.
+- **Undo after the put** (list again, delete the object if an old node appeared). Nodes of this release will already be writing on the record; deleting it is a pause nobody asked for, and it would be a second machine answering a deployment mistake (B20).
+- **Fall back to epoch 2 when the marks bucket is not usable.** It makes the first start succeed and the second pause certain.
+- **A periodic re-run of the proof while 503** (Q2).
+- **A "hot bucket holds no client object" test.** A tier with objects and none of the above state is a tier whose objects the stray sweep adopts (put-without-lock.md 5.12): the cold tier gets them. It adds a listing and refuses a tier that is safe to activate.
+
+#### Open questions for the CEO
+
+1. **The residual** (an old node that starts within the window of the first start, or is started later with credentials that reach the tier). The proposal keeps the credential fence as the control and does not try to close the window. Is that acceptable for a tier that is created fresh, given that on the farm nothing of the old release is pointed at a new bucket?
+2. **A node whose proof failed stays 503 until its next start, a peer's write, or the operator.** Should it re-run the proof at an interval (the cost is the four listings per interval while stuck), so that an old node that is stopped and whose registration the operator deletes lets the tier activate without a restart?
+3. **A registration of an earlier release stops the proof whatever its age.** The alternative (stop only for a live one) reads the age against a clock of the node and the hot tier's time, and a skew turns a running old node into a departed one. The cost of the strict rule is that a dead old registration on an otherwise empty tier needs `--departed`. Strict or lenient?
+4. **The `s3:` default goes to epoch 3 at once, and refuses to fall back to epoch 2.** A new farm tier then cannot run the entry protocol at all, which is the owner's goal; a library user who wants epoch 2 on an `s3:` tier has the verb. Agreed?
+5. **Who creates the marks bucket.** The node still does not create a bucket (no cloud write by default; no probing). A new farm needs the marks bucket created with the hot bucket by the infrastructure code, and the node's log names it when it is missing. Is a separate bucket for the markers acceptable as the one infrastructure step beside "edit one file"?
+
+#### Build plan
+
+Not built. Three pull requests, in order: (1) the proof as a function over the hot tier and the registrations, reusing `registrations::read`, `count` and `require_empty` (they move out of the verbs to the library, no behaviour change); (2) the call at the start of `run_handing` and `combined_cli`, after `Proxy::open` and the first beat, with the log line and its tests (404 with an empty tier writes the record; each reason keeps the node at 503; the record exists and nothing is written; a lost answer); (3) the operator docs (`configuration.md`: nothing to configure; the runbook: what the log line means) and the compatibility test above. This section changes no code and no format.
 
 ## 14. Future work
 
