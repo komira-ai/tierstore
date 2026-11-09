@@ -194,14 +194,9 @@ fn expected_entry(arch: &str) -> Value {
                 "verifyDeadlineSecs": "1600",
                 "promotionCeilingSecs": "3600",
                 "cleanupRetries": 3,
-                "boot": "restore",
             },
             "run": ["tierstore.service"],
             "healthUrl": "http://127.0.0.1:9300/readyz",
-            "params": {
-                "config_file": {"text": "/etc/tierstore/tierstore.toml"},
-                "service_manager": {"text": "systemd"},
-            },
             "minHostkeeper": "0.1.216",
             "installerBounds": {"stageSecs": "600", "activateSecs": "300", "removeSecs": "300"},
         },
@@ -259,7 +254,7 @@ fn a_release_the_testing_suite_lists_with_the_digests_of_its_sums_gives_the_pack
 
 #[test]
 fn the_hook_and_health_of_an_entry_are_those_of_the_archive_manifest() {
-    // Catches: the entry's hook bounds, deadlines, boot step or health URL drifting from
+    // Catches: the entry's hook bounds, deadlines, or health URL drifting from
     // `packaging/hostkeeper/manifest.toml.in` (the archive that stays until the farm has moved),
     // so that the same node is updated under two different sets of bounds.
     let archive: toml::Table = manifest(Platform::LinuxX86_64, "1.2.3+0123456789ab", FLOOR)
@@ -279,10 +274,8 @@ fn the_hook_and_health_of_an_entry_are_those_of_the_archive_manifest() {
         sent_hook["cleanupRetries"],
         json!(hook["cleanup_retries"].as_integer().expect("retries"))
     );
-    assert_eq!(
-        sent_hook["boot"],
-        json!(hook["boot"].as_str().expect("boot"))
-    );
+    // The archive manifest keeps its boot step; the apt entry has none (see the next test).
+    assert_eq!(hook["boot"].as_str(), Some("restore"));
     for (step, want) in hook["timeout_secs"].as_table().expect("timeouts") {
         assert_eq!(
             sent_hook["timeoutSecs"][step],
@@ -294,10 +287,20 @@ fn the_hook_and_health_of_an_entry_are_those_of_the_archive_manifest() {
         sent["manifest"]["healthUrl"],
         json!(archive["health"]["url"].as_str().expect("health url"))
     );
-    assert_eq!(
-        sent["manifest"]["params"]["config_file"]["text"],
-        json!("/etc/tierstore/tierstore.toml")
-    );
+}
+
+#[test]
+fn the_apt_entry_has_no_hook_command_no_boot_step_and_no_params_so_the_built_in_steps_run() {
+    // Catches: a `boot` step with no command (hostkeeper refuses it at the coordinator), or a
+    // command or params for `tierstore update-hook`, which is not adapted to the `.deb` yet.
+    let sent = entry("1.2.3", &digest_of("x"), FLOOR);
+    let manifest = sent["manifest"].as_object().expect("manifest");
+    let hook = manifest["hook"].as_object().expect("hook");
+    for absent in ["boot", "command"] {
+        assert!(!hook.contains_key(absent), "hook.{absent}");
+    }
+    assert!(!manifest.contains_key("params"));
+    assert!(hook.contains_key("timeoutSecs"));
 }
 
 #[test]
