@@ -107,11 +107,21 @@ fn blob_key(sha256: &str) -> String {
     format!("{FILL_PREFIX}{sha256}")
 }
 
+/// The name the cache's index and directory give the blob `sha256`: the hex of its reserved key.
+pub(super) fn blob_name(sha256: &str) -> String {
+    name_of(&blob_key(sha256)).hex
+}
+
 /// The path of the file of the blob `sha256` under the cache directory `root`, where the
 /// filesystem process opens it once a fill has been answered `ok`.
-#[cfg(test)]
 pub(in crate::server) fn blob_path(root: &std::path::Path, sha256: &str) -> std::path::PathBuf {
-    data_path(root, &name_of(&blob_key(sha256)).hex)
+    data_path(root, &blob_name(sha256))
+}
+
+/// The path of the file of the object `cas/l/<sha256>` under the cache directory `root`, where the
+/// filesystem process reads a tree manifest once its fill has been answered `ok`.
+pub(in crate::server) fn manifest_path(root: &std::path::Path, sha256: &str) -> std::path::PathBuf {
+    data_path(root, &name_of(&format!("cas/l/{sha256}")).hex)
 }
 
 /// What a fill reads, owned, so that the task of the fill holds it.
@@ -378,7 +388,7 @@ impl LocalCache {
         let mut index = locked(&inner.index);
         for sha256 in sha256s {
             let _ = index.used(sha256, now);
-            let _ = index.used(&name_of(&blob_key(sha256)).hex, now);
+            let _ = index.used(&blob_name(sha256), now);
         }
     }
 

@@ -90,6 +90,11 @@
 //!   intervals of its settings.
 //! - [`CachedStore`] answers repeated reads of an object's ranges from RAM in front of any
 //!   backend, typically a [`Proxy`]. It is a cache of the node it runs on, not state.
+//! - [`parse_manifest`] and [`flatten`] read the tree manifests of a tree served as a file
+//!   system: JSON listings of one directory each, named by the SHA-256 of their bytes. They do no
+//!   I/O: the caller gives the bytes of a manifest by digest. [`flatten`] numbers the entries of
+//!   a whole tree depth first, the root being 0, and refuses a tree over [`MAX_ENTRIES`],
+//!   [`MAX_DEPTH`] or [`MAX_MANIFEST_BYTES`] by name. `docs/tree-manifest.md` is the reference.
 //!
 //! The keys under `_journal/` (the per-node journals of the releases before the entries, which
 //! this release does not apply; their formats stay readable as bytes, see [`decode_journal`]), `_entries/` and `_tiering/` belong to the proxy and the
@@ -193,6 +198,9 @@ mod sleeper;
 #[cfg(test)]
 mod sleeper_tests;
 mod tiered;
+mod tree_manifest;
+#[cfg(test)]
+mod tree_manifest_tests;
 
 pub use backend::{
     Backend, ByteRange, Listed, Meta, OpenUpload, Opened, PartBody, PutAnswer, ReadBody, Span,
@@ -234,4 +242,8 @@ pub use sleeper::{RecordingSleeper, Sleeper, TokioSleeper};
 pub use tiered::{
     DeleteWait, MarkReads, MarkedPutConfig, PlainPut, Proxy, ProxyConfig, PutBody, PutClaim,
     StepRetry,
+};
+pub use tree_manifest::{
+    BlobSource, EntryKind, MAX_DEPTH, MAX_ENTRIES, MAX_MANIFEST_BYTES, TreeChild, TreeDigest,
+    TreeEntry, TreeError, TreeManifest, flatten, parse_manifest,
 };

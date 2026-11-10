@@ -320,7 +320,7 @@ pub(super) fn interfaces(tables: &[InterfaceTable]) -> Result<Interfaces, Config
         match table.kind.as_str() {
             "s3" | "oci" => {}
             "fs" => {
-                let why = "\"fs\" is not served yet; the types are \"s3\" and \"oci\"";
+                let why = "\"fs\" is not an interface of this process: `tierstore fs` is a process of its own, with an `[fs]` table; the types are \"s3\" and \"oci\"";
                 return Err(invalid(&format!("{at}.type"), why));
             }
             _ => {

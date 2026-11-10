@@ -12,11 +12,11 @@ use tokio::net::UnixStream;
 use tokio::sync::Notify;
 use tokio::task::JoinHandle;
 
-use super::{Listening, SocketFile, serve, serve_as};
+use super::{Listening, SocketFile, pinned, serve, serve_as};
 use crate::Op;
 use crate::server::local_cache::pack_testing::{Pack, blob_hex, fills, recency};
 use crate::server::local_cache::testing::{Rig, digest, pattern, until, wait_advancing};
-use crate::server::local_cache::{LocalCache, Tick, blob_path};
+use crate::server::local_cache::{LocalCache, PinError, Tick, blob_path};
 
 /// The directory of a socket, and the path of the socket in it.
 struct Place {
@@ -148,7 +148,7 @@ async fn the_answers_of_a_connection_come_in_order_with_the_words_of_the_failure
     let huge = format!("fill {sha} {} from {} @ 0", 2 << 20, pack.key);
     assert_eq!(client.ask(&huge).await, "no space");
     assert_eq!(client.ask("fill").await, "refused not a sha256 digest");
-    assert_eq!(client.ask("pin a b c").await, "refused unknown request");
+    assert_eq!(client.ask("frob a b c").await, "refused unknown request");
     assert_eq!(client.ask(&fill_line(&pack, 0)).await, "ok");
     let body = pattern(800);
     let named = digest(&body);
@@ -424,4 +424,42 @@ fn a_directory_in_the_way_is_not_replaced() {
     std::fs::create_dir(&place.path).unwrap();
     assert!(Listening::bind(&place.path).is_err());
     assert!(place.path.is_dir());
+}
+
+/// Asserts that the pin requests reach the cache's pins and are answered with the numbers: a pin
+/// of two held blobs and one the cache does not hold, the same pin again (the same answer), an
+/// unpin of the tree (the blobs it had pinned), and a pins-live that keeps one of two trees.
+#[tokio::test]
+async fn the_pin_requests_pin_unpin_and_keep_the_live_trees() {
+    let rig = Rig::new("tfs-pin");
+    let place = Place::new("tfs-pin");
+    let pack = Pack::put(&rig, "packs/pins", &[300, 300]).await;
+    let served = Served::start(&rig.cache, &place.path);
+    let mut client = Client::connect(&place.path).await;
+    assert_eq!(client.ask(&fill_line(&pack, 0)).await, "ok");
+    assert_eq!(client.ask(&fill_line(&pack, 1)).await, "ok");
+    let (first, second) = (&pack.blobs[0].0, &pack.blobs[1].0);
+    let missing = digest(b"a blob nobody filled");
+    let pin = format!("pin boot-1 tree-a {first} {second} {missing}");
+    assert_eq!(client.ask(&pin).await, "ok 2 0 1");
+    assert_eq!(client.ask(&pin).await, "ok 2 0 1");
+    assert_eq!(rig.cache.pinned_bytes(), 600);
+    assert_eq!(
+        client.ask(&format!("pin boot-1 tree-b {first}")).await,
+        "ok 1 0 0"
+    );
+    assert_eq!(client.ask("unpin boot-1 tree-a").await, "ok 2");
+    assert_eq!(rig.cache.pinned_bytes(), 300);
+    assert_eq!(client.ask("pins-live boot-1 tree-c").await, "ok 1");
+    assert_eq!(rig.cache.pinned_bytes(), 0);
+    assert_eq!(client.ask("pins-live boot-1").await, "ok 0");
+    served.stop().await;
+}
+
+/// Asserts that a cache that does not hold the lock of its directory is answered `read-only` for
+/// a pin request.
+#[test]
+fn a_pin_request_of_a_read_only_cache_is_answered_read_only() {
+    assert_eq!(pinned(Err(PinError::ReadOnly)), "read-only");
+    assert_eq!(pinned(Ok("1 0 0".to_owned())), "ok 1 0 0");
 }

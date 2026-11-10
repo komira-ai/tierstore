@@ -24,11 +24,12 @@ use std::path::{Path, PathBuf};
 use clap::CommandFactory;
 
 use super::cli::Args;
-use super::config::{KEYS, keys_for_flags, settings_from_text};
+use super::config::{KEYS, keys_for_flags};
 use super::config_cache::LocalCacheTable;
 use super::config_policy::Policy;
-use super::config_testing::DEFAULTS;
+use super::config_testing::{DEFAULTS, loads};
 use super::config_unknown::fields_of;
+use super::treefs::FsTable;
 
 /// The title of the sections that the exists-in-code checks leave out.
 const NOT_YET: &str = "Not in a release yet";
@@ -177,6 +178,7 @@ const SECTIONS: &[&str] = &[
     "params",
     "policy",
     "local_cache",
+    "fs",
 ];
 
 /// One page.
@@ -194,6 +196,8 @@ struct Code {
     cache_keys: BTreeSet<String>,
     /// The keys of `[[policy]]`, which a page may name.
     policy_keys: BTreeSet<String>,
+    /// The keys of `[fs]`, the file of `tierstore fs`, which have no flag: every page names each.
+    fs_keys: BTreeSet<String>,
     /// The non-test source of the crate with its comments and the backslashes of its escapes out.
     source: String,
 }
@@ -355,7 +359,10 @@ fn check(docs: &[Doc], code: &Code) -> Vec<String> {
     let mut named_flags = BTreeSet::new();
     let mut named_keys = BTreeSet::new();
     let known_key = |key: &str| {
-        code.keys.contains(key) || code.policy_keys.contains(key) || code.cache_keys.contains(key)
+        code.keys.contains(key)
+            || code.policy_keys.contains(key)
+            || code.cache_keys.contains(key)
+            || code.fs_keys.contains(key)
     };
     for (doc, page) in &parsed {
         let name = &doc.name;
@@ -414,7 +421,7 @@ fn check(docs: &[Doc], code: &Code) -> Vec<String> {
                     }
                 }
                 if block.info == "toml"
-                    && let Err(why) = settings_from_text(&block.body, DEFAULTS)
+                    && let Err(why) = loads(&block.body, DEFAULTS)
                 {
                     problems.push(format!("{at}: the loader refuses the file: {why}"));
                 }
@@ -450,6 +457,7 @@ fn check(docs: &[Doc], code: &Code) -> Vec<String> {
         .keys
         .iter()
         .chain(&code.cache_keys)
+        .chain(&code.fs_keys)
         .filter(|k| !named_keys.contains(*k));
     for key in missing_keys.filter(|k| !UNDOCUMENTED_KEYS.contains(&k.as_str())) {
         problems.push(format!("no page names the key {key}"));
@@ -630,6 +638,7 @@ fn code() -> Code {
         keys,
         cache_keys: table_keys::<LocalCacheTable>("local_cache"),
         policy_keys: table_keys::<Policy>("policy"),
+        fs_keys: table_keys::<FsTable>("fs"),
         source,
     }
 }

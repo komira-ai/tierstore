@@ -1241,3 +1241,18 @@ Small, and each has a recommendation.
 | Reserved prefix | `_entries/`, `_journal/` and `_tiering/`; refused to clients. |
 | Bridge release | The release that reserves `_entries/` everywhere and drains the old journals, so the new protocol can start beside no old writer. |
 | Residual | A stated outcome that needs a frozen or stalled actor (R1 to R4, section 11). |
+| `tierstore fs` | The virtual build file system: a subcommand of the `tierstore` binary, with its own unit, that makes one FUSE mount of the trees clients attach and fetches a file's bytes from the node's cache on its first open. A process of its own, not a front. See [virtual-build-fs.md](virtual-build-fs.md). |
+| Tree | An immutable directory tree of content-addressed files, named by the SHA-256 of its root tree manifest. |
+| Tree manifest | The JSON listing of one directory of a tree, with the digest, size and source of each file; its format is `crates/tierstore/docs/tree-manifest.md`. |
+| Frontend (of `tierstore fs`) | A protocol adapter that decodes the kernel's FUSE requests (later also NFS) into calls of the core; not one of the server's fronts. |
+| Core (of `tierstore fs`) | The protocol-independent filesystem of `tierstore fs`: the attached trees, their inode numbers, attributes, lookups, listings and opens. |
+| Attachment | A client's statement, on the control socket, that a run will use a tree on this node: `attach <digest> for <run>`, ended by `detach <run>`. With `prefetch all` the tree's blobs are also filled in the background. |
+| Passthrough, backing id | Linux 6.9 and later: the kernel reads a file's bytes from a backing file it was given (`FUSE_DEV_IOC_BACKING_OPEN`), so reads never reach `tierstore fs`. A blob has one backing id for as long as any open of it lives; the backing table (`<runtime dir>/backing`) lists them. Kernel 6.8 has none, and the mount then runs with cached opens. |
+| Control socket | The Unix socket of `tierstore fs` (`fs.control_socket`) that attachments are made on. |
+| Fill socket | The Unix socket of a build node's `tierstore` (`local_cache.fill_socket`) over which `tierstore fs` asks for source fills, touches and pins. |
+| Source fill | A copy of one blob into the node's cache, from an object key and an offset that a tree manifest names, kept under `_tiering/fill/<sha256>`. |
+| Pin | A tree's claim on the node's cache: the blobs a pinned tree has opened are not evicted while it is attached; capped by `local_cache.pin_limit`. |
+| Tree number | The small number `tierstore fs` gives a tree digest the first time it is attached on a mount; the top bits of the inode numbers of the tree. |
+| Inode number | The 64-bit number the kernel names a FUSE inode by: `tree_number << 24 \| index`, so that any instance of `tierstore fs` can answer for any inode the mount handed out. |
+| View, copy-up, whiteout | A run's writable view of a tree, the copy of a file into it on the first change, and the record of a deleted name. Designed for macOS and not built; on Linux the job's overlay does this. |
+| Run directory | The per-run directory a job runtime makes and removes; the overlay's upper directory is in it. |

@@ -33,6 +33,16 @@ crc = "3.4.0"
 crc32c = "0.6.8"
 crc32fast = "1.5.2"
 futures = "0.3.34"
+# The FUSE protocol of `tierstore fs` (Linux only; the crate's `server` feature). It mounts as
+# root through mount(2), and as another user through `fusermount3`. MIT.
+# This is `fuser` 0.18.0 plus two commits, on the branch `komira-0.18-resume` of our fork: a session
+# that resumes on an already-initialised /dev/fuse descriptor (`Session::from_fd_initialized`,
+# `Session::init_outcome`, `Session::stopper`, `Notifier::resend`), and `Notifier::backing_id_from_raw`,
+# which takes a backing id that the server before this one registered, without `unsafe`. The
+# first, ported to the current upstream master, is the branch `session-resume` of the fork; its
+# upstream pull request is not opened yet (the URL goes here when it is). This returns to
+# crates.io once upstream releases the change.
+fuser = { git = "https://github.com/komira-ai/fuser", rev = "0d8f5da4102a043484f52712df33df4e23f83430", default-features = false }
 hex = "0.4.3"
 # Header maps; already in the tree through hyper.
 http = "1.5.0"

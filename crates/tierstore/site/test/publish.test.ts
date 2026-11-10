@@ -44,7 +44,7 @@ function distWith(name: string, files: string[]): string {
 
 const PAGES = ['index.html', '404.html', 'install/index.html', 'getting-started/index.html', 'docs/index.html', 'docs/keys/index.html', 'docs/limits/index.html', 'why/index.html', 'config/index.html', 'demo/index.html', 'get-started/index.html', 'docs/examples/a/index.html'];
 // The docs as Markdown and the two files for programs: plain text, each with a content type and a cache rule of its own.
-const TEXT = ['llms.txt', 'llms-full.txt', 'docs/keys.md', 'docs/limits.md', 'docs/overview.md', 'docs/index.md', 'docs/troubleshooting.md', 'docs/examples/a.md', 'docs/examples/b.md'];
+const TEXT = ['llms.txt', 'llms-full.txt', 'docs/keys.md', 'docs/limits.md', 'docs/overview.md', 'docs/index.md', 'docs/troubleshooting.md', 'docs/examples/a.md', 'docs/examples/b.md', 'docs/tree-manifest.md'];
 const ASSETS = ['assets/x/a.js', 'assets/x/b.js', 'assets/x/s.css', 'install.sh', ...TEXT];
 
 /** A built-looking dist/: the floor's worth of pages and files. */

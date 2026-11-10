@@ -332,6 +332,7 @@ pub mod scoped;
 mod server_config;
 mod stop_watcher;
 mod time;
+mod treefs;
 #[cfg(any(target_os = "linux", target_os = "macos"))]
 pub mod update_hook;
 mod usage_probe;

@@ -1,0 +1,79 @@
+# tierstore fs (crates/tierstore, `tierstore fs`) as one of two instances: the template of
+# tierstore-fs@a.service and tierstore-fs@b.service. %i is the instance's letter. It makes the
+# virtual build file system's one FUSE mount, /run/tierstore/fs (`fs.mountpoint`), shows the trees
+# that clients attach on its control socket, and fetches a file's bytes from the node's tierstore
+# over its fill socket on the file's first open (docs/design/virtual-build-fs.md sections 6.2 to
+# 6.5, crates/tierstore/docs/configuration.md "[fs]").
+#
+# It is not the unit of tierstore@.service: that process parses requests from the network and
+# must not be able to mount, and this one parses the kernel's FUSE requests and tree manifests and
+# has no network. Every option of tierstore@.service that gives a service a mount namespace of its
+# own, from which a mount would not reach the host, is therefore left out: PrivateDevices,
+# PrivateTmp, ProtectSystem, ProtectHome, ProtectKernelTunables, ProtectKernelModules,
+# ProtectKernelLogs, ProtectControlGroups and RestrictNamespaces. What is added: DeviceAllow for
+# /dev/fuse; CAP_SYS_ADMIN as the only capability (the mount, and the backing ids of passthrough:
+# FUSE_DEV_IOC_BACKING_OPEN and _CLOSE check it in the initial user namespace, on this process, so
+# it stays in the bounding set and the ambient set; without it the process does not ask for
+# passthrough and runs in the mode of Linux 6.8); the system calls of @mount, and pidfd_open and
+# pidfd_getfd (the process takes the descriptor the service manager passes it as an owned
+# duplicate, with no unsafe code); Type=notify (the process says READY=1 when the mount is
+# served); a descriptor store of one (FileDescriptorStoreMax=1, kept across a restart with
+# FileDescriptorStorePreserve=restart): the process gives it the /dev/fuse descriptor of the
+# mount, so a crash or a restart of the unit does not unmount it and the next process serves it
+# (docs/design/virtual-build-fs.md sections 7.2 and 7.3, crates/tierstore/docs/operations.md
+# "Crash recovery and the hand-over of the mount"); a start limit of 5 in 60 s, after which the
+# unit is left failed, systemd drops the store and the kernel aborts the connection, so jobs fail
+# instead of hanging; and two RuntimeDirectories, kept across restarts: /run/tierstore-fs for its
+# state and /run/tierstore, the parent of its mount point (the process makes
+# /run/tierstore/fs). What changes: RestrictAddressFamilies is AF_UNIX alone. What stays: User,
+# NoNewPrivileges, MemoryDenyWriteExecute, UMask, and the marker file, restart settings and
+# release link of the template. The hand-over between the two instances is done by the processes
+# themselves (`handoff-fs-v1`, on fs.handoff_socket in the runtime directory): a new instance
+# asks the running one for the mount before it says READY=1.
+#
+# An instance starts only when its marker file, /var/lib/tierstore/run-fs-%i, exists. Nothing
+# writes it yet: the update hook does not act on this unit yet (crates/tierstore/docs/
+# update-hook.md "The second unit"), and until it does an operator creates the marker for
+# instance a. The mount must be made before the job runtime
+# starts: the runtime's unit orders itself After= this one.
+#
+# /etc/tierstore/fs.toml has the `[fs]` table; the cache directory and the fill socket it names are
+# those of the node's tierstore (`local_cache.path`, `local_cache.fill_socket`). It holds no secret.
+[Unit]
+Description=tierstore fs instance %i, the virtual build file system
+Documentation=https://github.com/komira-ai/tierstore/blob/main/crates/tierstore/docs/configuration.md
+After=tierstore@a.service tierstore@b.service
+ConditionPathExists=/var/lib/tierstore/run-fs-%i
+StartLimitIntervalSec=60
+StartLimitBurst=5
+
+[Service]
+Type=notify
+NotifyAccess=main
+User=tierstore
+RuntimeDirectory=tierstore-fs tierstore
+RuntimeDirectoryPreserve=yes
+ExecStart=/var/lib/hostkeeper/packages/tierstore/current/bin/tierstore fs \
+  --config /etc/tierstore/fs.toml
+KillSignal=SIGTERM
+TimeoutStopSec=30
+Restart=on-failure
+RestartSec=2
+RestartPreventExitStatus=2 3
+LimitNOFILE=65536
+UMask=0077
+NoNewPrivileges=yes
+DeviceAllow=/dev/fuse rw
+CapabilityBoundingSet=CAP_SYS_ADMIN
+AmbientCapabilities=CAP_SYS_ADMIN
+RestrictAddressFamilies=AF_UNIX
+RestrictRealtime=yes
+LockPersonality=yes
+MemoryDenyWriteExecute=yes
+SystemCallArchitectures=native
+SystemCallFilter=@system-service @mount pidfd_open pidfd_getfd
+FileDescriptorStoreMax=1
+FileDescriptorStorePreserve=restart
+
+[Install]
+WantedBy=multi-user.target

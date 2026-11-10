@@ -66,8 +66,23 @@ fn every_line_that_is_not_a_request_is_refused_with_its_reason() {
     let upper = SHA.to_uppercase();
     let cases: Vec<(String, Refusal)> = vec![
         (String::new(), Refusal::Unknown),
-        ("pin m t".into(), Refusal::Unknown),
-        ("unpin m t".into(), Refusal::Unknown),
+        ("pin".into(), Refusal::Malformed),
+        ("pin m".into(), Refusal::Malformed),
+        ("pin m t".into(), Refusal::Malformed),
+        (format!("pin m t {}", &SHA[1..]), Refusal::Digest),
+        (format!("pin m t {SHA} x"), Refusal::Digest),
+        ("pin m t ".into(), Refusal::Digest),
+        (format!("pin  t {SHA}"), Refusal::Name),
+        (format!("pin m  {SHA}"), Refusal::Name),
+        (format!("pin {} t {SHA}", "m".repeat(129)), Refusal::Name),
+        (format!("pin m t\u{e9} {SHA}"), Refusal::Name),
+        ("unpin".into(), Refusal::Malformed),
+        ("unpin m".into(), Refusal::Malformed),
+        ("unpin m ".into(), Refusal::Name),
+        ("unpin  t".into(), Refusal::Name),
+        ("pins-live".into(), Refusal::Name),
+        ("pins-live ".into(), Refusal::Name),
+        (format!("pins-live m {}", "t".repeat(129)), Refusal::Name),
         ("FILL x".into(), Refusal::Unknown),
         ("fill".into(), Refusal::Digest),
         ("fill ".into(), Refusal::Digest),
@@ -137,8 +152,39 @@ fn a_refusal_says_in_words_what_was_wrong() {
         (Refusal::Overflow, "offset and size pass 2^64"),
         (Refusal::Key, "not a usable key"),
         (Refusal::Reserved, "reserved key"),
+        (Refusal::Name, "not a usable name"),
     ];
     for (refusal, text) in words {
         assert_eq!(refusal.to_string(), text);
     }
+}
+
+/// Asserts that a pin names the mount, the tree and every blob, that an unpin names the mount and
+/// the tree, and that a pins-live names the mount and any number of trees, spaces between the
+/// trees being passed over.
+#[test]
+fn the_pin_requests_name_the_mount_the_tree_and_the_blobs() {
+    let pin = Request::Pin {
+        mount: "boot-1".to_owned(),
+        tree: SHA.to_owned(),
+        blobs: vec![SHA.to_owned(), OTHER.to_owned()],
+    };
+    assert_eq!(line(&format!("pin boot-1 {SHA} {SHA} {OTHER}")), Ok(pin));
+    let unpin = Request::Unpin {
+        mount: "boot-1".to_owned(),
+        tree: SHA.to_owned(),
+    };
+    assert_eq!(line(&format!("unpin boot-1 {SHA}")), Ok(unpin));
+    let live = Request::PinsLive {
+        mount: "boot-1".to_owned(),
+        trees: vec![SHA.to_owned(), OTHER.to_owned()],
+    };
+    assert_eq!(line(&format!("pins-live boot-1 {SHA}  {OTHER}")), Ok(live));
+    let none = Request::PinsLive {
+        mount: "boot-1".to_owned(),
+        trees: Vec::new(),
+    };
+    assert_eq!(line("pins-live boot-1"), Ok(none));
+    let edge = "m".repeat(128);
+    assert!(line(&format!("pins-live {edge}")).is_ok());
 }

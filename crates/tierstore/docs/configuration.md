@@ -177,7 +177,7 @@ At least one entry has type `s3`. The entries of a type are served together: one
 
 | Key | Type, default | What |
 |---|---|---|
-| `interface.type` | `"s3"` or `"oci"`, required | what the entry serves. `"s3"` is the S3 API, `/healthz`, `/readyz`, `/usagez` and `/metricz`. `"oci"` is the OCI registry front (read-only unless `params.require_auth` is true). `"fs"` is not served yet and is refused with a message that says so; any other value is refused |
+| `interface.type` | `"s3"` or `"oci"`, required | what the entry serves. `"s3"` is the S3 API, `/healthz`, `/readyz`, `/usagez` and `/metricz`. `"oci"` is the OCI registry front (read-only unless `params.require_auth` is true). `"fs"` is refused with a message that says it is not an interface of this process: the virtual build file system is `tierstore fs`, a process of its own whose file has an `[fs]` table (see below); any other value is refused |
 | `interface.params` | table, required in effect | the params of the entry, below. An entry without `params.port` or `params.addresses` is refused |
 | `params.port` | port, 1 to 65535 | listen on this port on the IPv4 wildcard, `0.0.0.0:<port>`. For loopback, another address or IPv6, give `params.addresses` |
 | `params.addresses` | address or list of addresses | listen on exactly these. To listen on the wildcard of both families give `["0.0.0.0:<port>", "[::]:<port>"]`: an IPv6 address is bound for IPv6 only, so the two do not clash. A start that cannot bind every address is refused |
@@ -375,6 +375,37 @@ The read cache of a build node, or of a storage node that keeps it in front of i
 
 The upstream is `[cold_store]`, with any `kind`. In place of `endpoint` it may have a list `endpoints`, whose addresses the upstream requests go to in turn. With `write_through = true` the node takes create-only puts, plain puts, presigned puts, multipart uploads and deletes, and sends each to the upstream before it answers; the keys' roles apply as on a storage node, and a put that replaces on a tag (`If-Match`) and a copy are still refused. A plain `PUT` (no `If-None-Match`) is sent to the upstream as a plain put, with no HEAD before it, and replaces the object where the upstream replaces: a proxy whose format is `active-marks`, or an S3 bucket (a proxy on the entry protocol creates only, and refuses a key it holds with 412, as it does for any plain put). A put under a `cache = true` prefix, create-only or plain, is also kept on the node before it is answered, so its next read is a local hit; a plain put forgets the node's older copy of the key, also when the upstream refuses it, and keeps the new one under the tag the upstream answered. A copy that cannot be kept never fails the put; two puts of one key that run at once on the node, one of them plain, keep no copy, and the next read fills it. A build node leaves out `skip_checks` and the reconciler's keys and `server.backend_check_wait`. It may have an `oci` interface (an `[[interface]]` with `type = "oci"`): the registry front then reads through the cache, and the start refuses the file unless a `[[policy]]` with `cache = true` covers the blobs, the keys under `blobs/sha256/` below `params.prefix`.
 
+## `[fs]`
+
+The file of `tierstore fs`, the virtual build file system of a build node (see [the virtual build file system](operations.md#the-virtual-build-file-system)). It is read with `tierstore fs --config <path>`; it is a file of its own, not the file of the node's `tierstore` (which has no `[fs]` table), and it holds no secret. A key it has that this release does not know is a warning on stderr. Three keys are needed, and two of them repeat what the node's `tierstore` was told, so that the two files agree.
+
+| Key | Type, default | What |
+|---|---|---|
+| `fs.mountpoint` | path, `/run/tierstore/fs` (absolute) | where the one FUSE mount is made, before the job runtime starts; made if it is not there. Jobs are given `<mountpoint>/trees/<digest>` |
+| `fs.runtime_dir` | path, `/run/tierstore-fs` (absolute) | the state that outlives the process: the table of tree numbers, the attachments, the record of the kernel's handshake (`init`) and the backing table (`backing`). The unit's `RuntimeDirectory=`, kept across restarts |
+| `fs.control_socket` | path, `control.sock` in `fs.runtime_dir` (absolute, at most 103 bytes) | the Unix socket clients attach and detach on; mode 0660 |
+| `fs.client_group` | group name or number, required | the group of the control socket. The process must be a member of it |
+| `fs.owner` | `"uid:gid"`, required | the user and group id every entry of every tree reports: the host id of the user the jobs run as, so that a job may change what it copies up |
+| `fs.fill_socket` | path, required (absolute) | the fill socket of the node's `tierstore`: its `local_cache.fill_socket` |
+| `fs.cache_path` | path, required (absolute) | the cache directory of the node's `tierstore`: its `local_cache.path`. It must not be on a stacked file system (overlayfs, eCryptfs) |
+| `fs.fetch_timeout` | duration, `60s` (1ms to 1h) | how long an answer of the fill socket is waited for, and, in whole seconds, how long a closed fill socket is retried (the node's `tierstore` is being updated) before the open fails |
+| `fs.threads` | count, 16 (1 to 1024) | the threads that serve the kernel's requests, which read one `/dev/fuse` descriptor between them; an open that waits for a fill holds one |
+| `fs.passthrough` | `true` or `false`, `true` | whether to ask the kernel for passthrough (reads go from the cache file to the job inside the kernel) when it offers it and the process holds `CAP_SYS_ADMIN`. `false` forces the mode of Linux 6.8: cached opens, every read the page cache misses answered by the process. See [operations](operations.md#the-virtual-build-file-system) |
+| `fs.max_backing_ids` | count, 65536 (1 to 1048576) | the most backing ids live at once, one for each blob that some open file is served from; an open of a blob that has none, while this many are live, is a cached open (reads reach the process) and so is every open of that blob until those are closed; no open waits for a release, which needs a free worker. Only passthrough uses them |
+| `fs.handoff_socket` | path, `handoff.sock` in `fs.runtime_dir` (absolute, at most 103 bytes) | the Unix socket the running instance offers its mount on (mode 0600, its user only), and a new instance asks on at its start. See [crash recovery and the hand-over](operations.md#crash-recovery-and-the-hand-over-of-the-mount) |
+| `fs.handoff_wait` | duration, `120s` (1s to 1h) | how long a hand-over may last: for the new instance, from its connect to the running instance's `done`; for the running instance, the time it gives the new one to ask, to say `ack` and, once it has stopped, to say `ready` before it reads requests again. The wait for `ready` starts at `done` and covers the new instance's whole start (it makes its attachments again, reading the manifests through the fill socket), so set it above that time on a node with many attached trees: a new instance still starting when it ends is not the one that serves, and its `ready` fails |
+| `fs.recover_wait` | duration, `30s` (1s to 1h) | after a restart on a kernel that cannot send requests again (before Linux 6.9): how long the connection is watched for requests no one answers before it is aborted, so that the jobs that wait on them fail. Set it above the longest time the node's builds keep the mount busy without a moment of rest, and not under `fs.fetch_timeout` |
+
+The mount is made with `allow_other` and `default_permissions` (the kernel checks the modes, which are 0644, 0755 for an executable file or a directory, and 0777 for a link), `max_background` 1024 and, with passthrough, `max_stack_depth` 1, and, where the kernel offers them, `FUSE_CACHE_SYMLINKS`, `FUSE_PARALLEL_DIROPS`, `FUSE_DO_READDIRPLUS` and `FUSE_READDIRPLUS_AUTO`. An example:
+
+```toml
+[fs]
+client_group = "builders"
+owner = "1000:1000"
+fill_socket = "/var/lib/tierstore/fill.sock"
+cache_path = "/var/cache/tierstore"
+```
+
 ## `params.upstream`
 
 On main, not in v0.0.41. A registry the OCI front pulls from when its store has no such manifest or blob (a pull-through cache). It is an inline table in the params of an `oci` interface, for example `params = { addresses = ["127.0.0.1:5000"], upstream = { url = "https://registry.example" } }`. A storage node's file takes it, with or without `[local_cache]`; a build node's file is refused with it, because a pull is stored and a build node takes no writes.
@@ -456,7 +487,7 @@ Each of these exits with status 2 and names the file and the key (a syntax error
 - in the file of a build node or of a storage node with a cache, an `oci` interface whose blobs no `[[policy]]` with `cache = true` keeps, a `layout` other than `digest-v1`, `cache = false`, marks out of order, and no `[[policy]]` with `cache = true`;
 - an `s3` tier with both `endpoint` and `endpoints`, with an empty `endpoints` or with an address in it twice, a key a tier's `kind` does not take (`endpoints` included), a `dir` tier without `path`, an `s3` tier without `bucket`, `endpoint` (or `endpoints`) or `credentials_file`, and a key only one tier has in the other (`budget` and the reconciler's keys belong to `[hot_store]`, `skip_checks` to `[cold_store]`);
 - a water mark outside 1 to 100, and a budget, count or limit of zero;
-- an `[[interface]]` that breaks the rules of its section above: a type that is not `s3` or `oci` (`fs` is named as not served yet), neither `params.port` nor `params.addresses` or both, a port of zero, an address listened on twice, a param its type does not take, only one of the certificate and the key, `params.max_connections = 0`, `oci` entries that disagree, and a file with no `s3` entry;
+- an `[[interface]]` that breaks the rules of its section above: a type that is not `s3` or `oci` (`fs` is named as a process of its own), neither `params.port` nor `params.addresses` or both, a port of zero, an address listened on twice, a param its type does not take, only one of the certificate and the key, `params.max_connections = 0`, `oci` entries that disagree, and a file with no `s3` entry;
 - a `[[policy]]` that breaks the rules above.
 
 ## Keys this release does not know
