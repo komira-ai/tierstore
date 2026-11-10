@@ -136,20 +136,25 @@ impl Notice {
     }
 }
 
+/// What a taker does with the descriptor before it says `ack`. It is not generic, so that the whole
+/// exchange is one function, as the coverage of the branches of a generic one is counted for each
+/// instantiation.
+pub(super) type Prepare<'a> = Box<dyn FnMut(&OwnedFd) -> Result<(), String> + 'a>;
+
 /// Takes the mount from the instance that answers at `paths.socket`. `prepare` runs once the offer
 /// is checked and before the running instance is told to stop: it puts the descriptor in the
 /// service manager's store and reads the state the successor starts from, and what it gives is
-/// returned with the mount. If it fails the running instance is told `nak` and goes on.
+/// not returned. If it fails the running instance is told `nak` and goes on.
 ///
 /// `Ok(None)` when no instance answers there: there is no file, or a file no one listens on.
 ///
 /// # Errors
 /// [`HandoverError`]: the running instance refused or did not keep to the protocol, serves other
 /// paths than `paths` names, did not finish within `paths.wait`, or `prepare` failed.
-pub(super) async fn take<T>(
+pub(super) async fn take(
     paths: &Paths<'_>,
-    prepare: impl FnOnce(&OwnedFd) -> Result<T, String>,
-) -> Result<Option<(Taken, T)>, HandoverError> {
+    prepare: Prepare<'_>,
+) -> Result<Option<Taken>, HandoverError> {
     let exchanging = exchange(paths, prepare);
     match tokio::time::timeout(paths.wait, exchanging).await {
         Ok(taken) => taken,
@@ -158,10 +163,10 @@ pub(super) async fn take<T>(
 }
 
 /// The whole exchange with the running instance.
-async fn exchange<T>(
+async fn exchange(
     paths: &Paths<'_>,
-    prepare: impl FnOnce(&OwnedFd) -> Result<T, String>,
-) -> Result<Option<(Taken, T)>, HandoverError> {
+    mut prepare: Prepare<'_>,
+) -> Result<Option<Taken>, HandoverError> {
     let stream = match UnixStream::connect(paths.socket).await {
         Ok(stream) => stream,
         Err(why)
@@ -200,13 +205,10 @@ async fn exchange<T>(
     }
     let control = fds.remove(1);
     let device = fds.remove(0);
-    let prepared = match prepare(&device) {
-        Ok(prepared) => prepared,
-        Err(why) => {
-            nak(&stream).await?;
-            return Err(HandoverError::Unprepared(why));
-        }
-    };
+    if let Err(why) = prepare(&device) {
+        nak(&stream).await?;
+        return Err(HandoverError::Unprepared(why));
+    }
     wire::send(&stream, &["ack".to_owned()], &[])
         .await
         .map_err(io("accepting the offer"))?;
@@ -223,7 +225,7 @@ async fn exchange<T>(
         control: StdListener::from(control),
         notice: Notice(stream),
     };
-    Ok(Some((taken, prepared)))
+    Ok(Some(taken))
 }
 
 /// Refuses the offer: the running instance goes on.

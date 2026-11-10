@@ -36,14 +36,20 @@ async fn a_taker_is_given_the_mount_and_the_running_instance_ends_when_it_is_rea
     let stored = Cell::new(false);
     let taken = within(
         "the take",
-        take(&old.paths(), |device| {
-            stored.set(device.as_fd().try_clone_to_owned().is_ok());
-            Prepared::load(&old.settings).map_err(|why| why.to_string())
-        }),
+        take(
+            &old.paths(),
+            Box::new(|device| {
+                stored.set(device.as_fd().try_clone_to_owned().is_ok());
+                Prepared::load(&old.settings)
+                    .map(drop)
+                    .map_err(|why| why.to_string())
+            }),
+        ),
     )
     .await
     .unwrap();
-    let (taken, prepared) = taken.expect("an instance answered");
+    let taken = taken.expect("an instance answered");
+    let prepared = Prepared::load(&old.settings).unwrap();
     assert!(stored.get());
     // The running instance has stopped reading: a request waits for the successor.
     old.kernel.getattr(2, ino::ROOT);
@@ -78,9 +84,10 @@ async fn a_taker_that_cannot_prepare_leaves_the_running_instance_as_it_was() {
     let old = instance("tfs-ho-nak", Duration::from_secs(3600), None);
     let refused = within(
         "the refused take",
-        take(&old.paths(), |_| {
-            Err::<(), _>("the store is full".to_owned())
-        }),
+        take(
+            &old.paths(),
+            Box::new(|_| Err("the store is full".to_owned())),
+        ),
     )
     .await;
     match refused {
@@ -90,10 +97,10 @@ async fn a_taker_that_cannot_prepare_leaves_the_running_instance_as_it_was() {
     old.assert_serving(1);
     assert!(old.settings.handoff_socket.exists());
     // The next taker is answered.
-    let again = within("the next take", take(&old.paths(), |_| Ok::<_, String>(())))
+    let again = within("the next take", take(&old.paths(), Box::new(|_| Ok(()))))
         .await
         .unwrap();
-    let (taken, ()) = again.expect("answered");
+    let taken = again.expect("answered");
     taken.notice.ready().await.unwrap();
     within("the end", old.serving).await.unwrap().unwrap();
 }
@@ -108,7 +115,7 @@ async fn a_taker_with_other_paths_is_refused_by_name_and_the_running_instance_go
         mountpoint: other,
         ..old.paths()
     };
-    let refused = within("the take", take(&paths, |_| Ok::<_, String>(()))).await;
+    let refused = within("the take", take(&paths, Box::new(|_| Ok(())))).await;
     match refused {
         Err(HandoverError::Mismatch { offered, wanted }) => {
             assert_eq!(
@@ -132,7 +139,7 @@ async fn a_request_not_understood_and_a_taker_of_another_user_are_refused() {
     let answer = ask(&stream, &["hello"]).await;
     assert_eq!(answer.lines, ["refused", "the request is not understood"]);
     let other = instance("tfs-ho-other-user", Duration::from_secs(3600), Some(1));
-    let refused = within("the take", take(&other.paths(), |_| Ok::<_, String>(()))).await;
+    let refused = within("the take", take(&other.paths(), Box::new(|_| Ok(())))).await;
     match refused {
         Err(HandoverError::Refused(why)) => assert!(why.contains("not the user"), "{why}"),
         other => panic!("{:?}", other.err()),
@@ -159,10 +166,10 @@ async fn a_taker_gone_before_ready_leaves_the_running_instance_serving_again() {
     drop(offer);
     within("the socket again", appears(&old.settings.handoff_socket)).await;
     old.assert_serving(1);
-    let again = within("the next take", take(&old.paths(), |_| Ok::<_, String>(())))
+    let again = within("the next take", take(&old.paths(), Box::new(|_| Ok(()))))
         .await
         .unwrap();
-    let (taken, ()) = again.expect("answered again");
+    let taken = again.expect("answered again");
     taken.notice.ready().await.unwrap();
     within("the end", old.serving).await.unwrap().unwrap();
 }
@@ -245,19 +252,9 @@ async fn a_taker_reads_what_it_is_told_and_refuses_what_is_not_the_protocol() {
         wait: Duration::from_secs(3600),
     };
     // Nobody there, and a file nobody listens on.
-    assert!(
-        take(&paths, |_| Ok::<_, String>(()))
-            .await
-            .unwrap()
-            .is_none()
-    );
+    assert!(take(&paths, Box::new(|_| Ok(()))).await.unwrap().is_none());
     std::fs::write(&socket, "stale").unwrap();
-    assert!(
-        take(&paths, |_| Ok::<_, String>(()))
-            .await
-            .unwrap()
-            .is_none()
-    );
+    assert!(take(&paths, Box::new(|_| Ok(()))).await.unwrap().is_none());
     std::fs::remove_file(&socket).unwrap();
     // A socket path in a directory that is not one.
     let under_file = dir.path().join("a-file/handoff.sock");
@@ -267,7 +264,7 @@ async fn a_taker_reads_what_it_is_told_and_refuses_what_is_not_the_protocol() {
         ..paths
     };
     assert!(matches!(
-        take(&bad, |_| Ok::<_, String>(())).await,
+        take(&bad, Box::new(|_| Ok(()))).await,
         Err(HandoverError::Io { .. })
     ));
 
@@ -284,7 +281,7 @@ async fn a_taker_reads_what_it_is_told_and_refuses_what_is_not_the_protocol() {
             wire::send(&stream, &lines, &[]).await.unwrap();
             stream
         };
-        let (_stream, result) = tokio::join!(peer, take(&paths, |_| Ok::<_, String>(())));
+        let (_stream, result) = tokio::join!(peer, take(&paths, Box::new(|_| Ok(()))));
         assert!(
             matches!(result, Err(HandoverError::Protocol(_))),
             "{:?}",
@@ -309,7 +306,7 @@ async fn a_taker_reads_what_it_is_told_and_refuses_what_is_not_the_protocol() {
             .await
             .unwrap();
     };
-    let (_, result) = tokio::join!(peer, take(&paths, |_| Ok::<_, String>(())));
+    let (_, result) = tokio::join!(peer, take(&paths, Box::new(|_| Ok(()))));
     assert!(
         matches!(result, Err(HandoverError::Protocol(_))),
         "{:?}",
@@ -336,7 +333,7 @@ async fn a_running_instance_that_never_answers_is_given_up_after_the_wait() {
         let _ = wire::recv(&stream).await.unwrap();
         std::future::pending::<()>().await;
     };
-    let taking = take(&paths, |_| Ok::<_, String>(()));
+    let taking = take(&paths, Box::new(|_| Ok(())));
     tokio::select! {
         result = taking => assert!(matches!(result, Err(HandoverError::Timeout(_)))),
         () = hang => unreachable!("the peer never answers"),

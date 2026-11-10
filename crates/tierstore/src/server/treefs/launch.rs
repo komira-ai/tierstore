@@ -109,15 +109,18 @@ async fn start(settings: &FsSettings, platform: &Platform) -> Result<Started, St
     };
     // The state is read to see that it can be, before the running instance is told to stop, and
     // read again once it has: it changes until then (a client attaches a tree).
-    let taken = handover::take(&paths, |device| {
-        Prepared::load(settings).map_err(|why| why.to_string())?;
-        manager
-            .store(FUSE_NAME, device.as_fd())
-            .and_then(|()| manager.barrier())
-            .map_err(|why| format!("the descriptor cannot be stored: {why}"))
-    })
+    let taken = handover::take(
+        &paths,
+        Box::new(|device| {
+            Prepared::load(settings).map_err(|why| why.to_string())?;
+            manager
+                .store(FUSE_NAME, device.as_fd())
+                .and_then(|()| manager.barrier())
+                .map_err(|why| format!("the descriptor cannot be stored: {why}"))
+        }),
+    )
     .await?;
-    if let Some((taken, ())) = taken {
+    if let Some(taken) = taken {
         let handover::Taken {
             device,
             control,
