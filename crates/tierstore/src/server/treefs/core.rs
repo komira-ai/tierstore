@@ -851,7 +851,7 @@ impl Core {
             // The kernel reads a passthrough file itself: a request for one is a fault.
             Handle::Backed(_) => return Err(Errno::Io),
         };
-        read::read_file(file, offset, size as usize)
+        read_file(file, offset, size as usize)
     }
 
     /// Closes the open file `fh`.
@@ -906,6 +906,8 @@ mod adopt;
 mod passthrough;
 mod prefetch;
 mod read;
+
+pub(super) use read::read_file;
 
 #[cfg(test)]
 #[path = "core_tests.rs"]

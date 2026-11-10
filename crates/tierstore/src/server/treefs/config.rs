@@ -14,6 +14,7 @@
 //! | `fs.threads` | threads that serve the kernel's requests (a fill blocks one) | `16` |
 //! | `fs.passthrough` | ask the kernel for passthrough when it offers it; `false` forces the mode of kernel 6.8 | `true` |
 //! | `fs.max_backing_ids` | the most backing ids live at once; past it an open of another blob is a cached open | `65536` |
+//! | `[fs.nfs]` | the settings of the NFS frontend (macOS), see `nfs/config.rs` | its defaults |
 //! | `fs.handoff_socket` | the socket a new instance asks the running one for the mount on (`handoff-fs-v1`) | `<runtime_dir>/handoff.sock` |
 //! | `fs.handoff_wait` | how long the hand-over of the mount may last, from the connect to the end | `120s` |
 //! | `fs.recover_wait` | after a restart on a kernel without resend: how long the connection may show requests no one answers before it is aborted | `30s` |
@@ -29,6 +30,8 @@ use crate::server::config_syntax::syntax;
 use crate::server::config_tuning::{HOUR, MS};
 use crate::server::config_units::Dur;
 use crate::server::config_unknown::fields_of;
+
+use super::nfs::config::{NfsSettings, NfsTable};
 
 /// The mount point when the file leaves out `fs.mountpoint`.
 const DEFAULT_MOUNTPOINT: &str = "/run/tierstore/fs";
@@ -87,6 +90,7 @@ pub(in crate::server) struct FsTable {
     threads: Option<u32>,
     passthrough: Option<bool>,
     max_backing_ids: Option<u32>,
+    nfs: Option<NfsTable>,
     handoff_socket: Option<PathBuf>,
     handoff_wait: Option<Dur>,
     recover_wait: Option<Dur>,
@@ -120,6 +124,8 @@ pub(in crate::server) struct FsSettings {
     /// Whether users other than the one who mounts may use the mount: always, but in the tests,
     /// where the mounting user is not root and `fusermount3` allows it only by `/etc/fuse.conf`.
     pub allow_other: bool,
+    /// The settings of the NFS frontend.
+    pub nfs: NfsSettings,
 }
 
 /// `path`, which is the value of `key`, if it is absolute.
@@ -252,6 +258,7 @@ impl FsSettings {
             handoff_wait,
             recover_wait,
             allow_other: true,
+            nfs: NfsSettings::of(table.nfs)?,
         })
     }
 }
@@ -270,6 +277,15 @@ pub(in crate::server) fn from_text(text: &str, groups: &str) -> Result<FsSetting
     for key in table.into_iter().flat_map(|table| table.keys()) {
         if !known.contains(&key.as_str()) {
             tracing::warn!("tierstore fs: fs.{key} is not a key of this release and is ignored");
+        }
+    }
+    let nfs_known = fields_of::<NfsTable>();
+    let nfs = table
+        .and_then(|table| table.get("nfs"))
+        .and_then(toml::Value::as_table);
+    for key in nfs.into_iter().flat_map(|table| table.keys()) {
+        if !nfs_known.contains(&key.as_str()) {
+            tracing::warn!("tierstore fs: fs.nfs.{key} is not a key of this release; ignored");
         }
     }
     FsSettings::of(file.fs, groups)

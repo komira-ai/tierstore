@@ -1,0 +1,64 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
+<!--
+  /Library/LaunchDaemons/tierstore-fs.plist: `tierstore fs` as a LaunchDaemon on a Mac, the virtual
+  build file system's NFSv3 frontend (docs/design/virtual-build-fs.md section 8). It serves the NFS
+  and MOUNT protocols on loopback only (`fs.nfs.listen`), mounts the export read-only at
+  `fs.mountpoint` as `fs.nfs.mount_user`, and unmounts on SIGTERM. root:wheel, mode 0644.
+
+  The job runs as root, because it makes the mount as another user: the mount user is the key
+  `fs.nfs.mount_user` of the file, not of this plist (a plist cannot read the file), and the process
+  runs `mount_nfs` as that user through sudo. Nothing else of it is privileged. The file is
+  /usr/local/tierstore/etc/fs.toml, which has the `[fs]` table and holds no secret and no key
+  file; no environment variable is set, the process reads none, and launchd needs no
+  notification of readiness.
+
+  This job is not in hostkeeper's package yet, as tierstore-fs@.service is not for Linux: the
+  update hook learns it with the hand-over of the NFS socket. Until then an operator installs the
+  file, and it restarts in place with a gap in serving: a hard mount makes the clients wait.
+
+  launchd sends SIGTERM on bootout. The process unmounts and exits 0; ExitTimeOut (30 s) is far
+  more than that takes. KeepAlive starts the process again whenever it exits while the job is
+  loaded, at most once in ThrottleInterval (10 s).
+
+  crates/tierstore/tests/packaging_hostkeeper.rs parses this file and checks it against the binary.
+-->
+<plist version="1.0">
+<dict>
+  <key>Label</key>
+  <string>tierstore-fs</string>
+  <key>ProgramArguments</key>
+  <array>
+    <string>/var/lib/hostkeeper/packages/tierstore/current/bin/tierstore</string>
+    <string>fs</string>
+    <string>--config</string>
+    <string>/usr/local/tierstore/etc/fs.toml</string>
+  </array>
+  <key>RunAtLoad</key>
+  <true/>
+  <key>KeepAlive</key>
+  <true/>
+  <key>ThrottleInterval</key>
+  <integer>10</integer>
+  <key>ExitTimeOut</key>
+  <integer>30</integer>
+  <key>ProcessType</key>
+  <string>Standard</string>
+  <key>Umask</key>
+  <integer>63</integer>
+  <key>SoftResourceLimits</key>
+  <dict>
+    <key>NumberOfFiles</key>
+    <integer>65536</integer>
+  </dict>
+  <key>HardResourceLimits</key>
+  <dict>
+    <key>NumberOfFiles</key>
+    <integer>65536</integer>
+  </dict>
+  <key>StandardOutPath</key>
+  <string>/usr/local/tierstore/log/tierstore-fs.out.log</string>
+  <key>StandardErrorPath</key>
+  <string>/usr/local/tierstore/log/tierstore-fs.err.log</string>
+</dict>
+</plist>

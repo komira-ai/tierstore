@@ -306,6 +306,7 @@ impl Rig {
             handoff_wait: Duration::from_secs(30),
             recover_wait: Duration::from_secs(30),
             allow_other: false,
+            nfs: crate::server::treefs::nfs::config::NfsSettings::default(),
         }
     }
 
@@ -359,6 +360,29 @@ impl Rig {
     /// A rig whose core does not count lookups: a frontend with no forget.
     pub(in crate::server) fn uncounted(name: &str, built: Built) -> Self {
         Self::made(name, built, (OWNER, 100), false)
+    }
+
+    /// A second core over the same cache and fill socket, with a table of tree numbers and a
+    /// runtime directory of its own: what a restart makes, before it attaches anything.
+    pub(in crate::server) fn second_core(&self) -> Arc<Core> {
+        let runtime = self.dir.path().join("run2");
+        std::fs::create_dir_all(&runtime).unwrap();
+        let socket = self.dir.path().join("fill.sock");
+        let fills = FillClient::pausing(socket, 3, Duration::from_secs(30), Arc::new(|_| {}));
+        Arc::new(Core::new(
+            Settings {
+                owner: OWNER,
+                cache_path: self.cache.clone(),
+                mountpoint: self.mountpoint.clone(),
+                mount_id: "mount-2".to_owned(),
+                max_backing_ids: 100,
+                generation: 1,
+                count_lookups: false,
+            },
+            fills,
+            TreeTable::create(&runtime).unwrap(),
+            &runtime,
+        ))
     }
 
     fn made(

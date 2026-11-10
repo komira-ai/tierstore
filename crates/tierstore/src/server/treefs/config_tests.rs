@@ -42,6 +42,7 @@ fn the_needed_keys_alone_give_the_defaults() {
         handoff_wait: Duration::from_secs(120),
         recover_wait: Duration::from_secs(30),
         allow_other: true,
+        nfs: crate::server::treefs::nfs::config::NfsSettings::default(),
     };
     assert_eq!(got, want);
 }

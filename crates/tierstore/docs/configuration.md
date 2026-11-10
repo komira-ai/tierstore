@@ -377,7 +377,7 @@ The upstream is `[cold_store]`, with any `kind`. In place of `endpoint` it may h
 
 ## `[fs]`
 
-The file of `tierstore fs`, the virtual build file system of a build node (see [the virtual build file system](operations.md#the-virtual-build-file-system)). It is read with `tierstore fs --config <path>`; it is a file of its own, not the file of the node's `tierstore` (which has no `[fs]` table), and it holds no secret. A key it has that this release does not know is a warning on stderr. Three keys are needed, and two of them repeat what the node's `tierstore` was told, so that the two files agree.
+The file of `tierstore fs`, the virtual build file system of a build node (see [the virtual build file system](operations.md#the-virtual-build-file-system)). It is read with `tierstore fs --config <path>`; it is a file of its own, not the file of the node's `tierstore` (which has no `[fs]` table), and it holds no secret. A key it has that this release does not know is a warning on stderr. On a Mac the file may also have an `[fs.nfs]` table (below). Three keys are needed, and two of them repeat what the node's `tierstore` was told, so that the two files agree.
 
 | Key | Type, default | What |
 |---|---|---|
@@ -395,6 +395,35 @@ The file of `tierstore fs`, the virtual build file system of a build node (see [
 | `fs.handoff_socket` | path, `handoff.sock` in `fs.runtime_dir` (absolute, at most 103 bytes) | the Unix socket the running instance offers its mount on (mode 0600, its user only), and a new instance asks on at its start. See [crash recovery and the hand-over](operations.md#crash-recovery-and-the-hand-over-of-the-mount) |
 | `fs.handoff_wait` | duration, `120s` (1s to 1h) | how long a hand-over may last: for the new instance, from its connect to the running instance's `done`; for the running instance, the time it gives the new one to ask, to say `ack` and, once it has stopped, to say `ready` before it reads requests again. The wait for `ready` starts at `done` and covers the new instance's whole start (it makes its attachments again, reading the manifests through the fill socket), so set it above that time on a node with many attached trees: a new instance still starting when it ends is not the one that serves, and its `ready` fails |
 | `fs.recover_wait` | duration, `30s` (1s to 1h) | after a restart on a kernel that cannot send requests again (before Linux 6.9): how long the connection is watched for requests no one answers before it is aborted, so that the jobs that wait on them fail. Set it above the longest time the node's builds keep the mount busy without a moment of rest, and not under `fs.fetch_timeout` |
+
+### `[fs.nfs]`
+
+On a Mac `tierstore fs` has no FUSE: it serves the same trees read-only over NFSv3 on a loopback socket and mounts the export itself with `mount_nfs` (on Linux the table is read and ignored). The table is optional, and every key has a default. A Mac's `fs.mountpoint` must be a directory the mount user owns (`mount_nfs` of a loopback export then needs no root); the process refuses to mount on one that someone else owns, and says who does. It mounts with `vers=3,tcp,ro,rdirplus,locallocks,actimeo=3600,hard` and the port twice: `ro` so that no read ends in a `SETATTR`, one hour of caching because everything below a tree's root is immutable, and `hard` so that a client waits for a server that restarts. A name that was absent when it was first asked stays absent in the client's cache for that hour, so a tree must be attached before a job looks for it.
+
+| Key | Type, default | What |
+|---|---|---|
+| `fs.nfs.listen` | `"ip:port"`, `127.0.0.1:12049` | where the NFS and MOUNT protocols are served, on one port. Must be an IPv4 loopback address. Port 0 takes a free port |
+| `fs.nfs.mount` | `true` or `false`, `true` | whether the process makes the mount. `false` serves only (a mount made by hand, or kept from an earlier instance) |
+| `fs.nfs.mount_user` | user name, the user of the process | the user the mount is made as, who must own `fs.mountpoint`. A process that is root runs the mount through `sudo -n -u`; one that is neither this user nor root refuses |
+| `fs.nfs.mount_wait` | duration, `30s` (1s to 1h) | how long a mount that fails is tried again |
+| `fs.nfs.mount_retry` | duration, `500ms` (1ms to 1m) | the pause between two tries |
+| `fs.nfs.fd_cache_shards` | count, 64 (1 to 4096) | the shards of the cache of open cache files, each with a lock of its own |
+| `fs.nfs.fd_cache_per_shard` | count, 64 (1 to 65536) | the open files one shard keeps; the oldest is closed first. Shards times this is the most descriptors the cache holds, and the process needs a limit of open files above that (the launchd job sets 65536; with the default 256 of a shell, a read that cannot open a cache file is `NFS3ERR_IO`) |
+| `fs.nfs.allowed_uids` | list of user ids, the mount user and the user of `fs.owner` | the users whose requests (`AUTH_SYS`) are served; any other, and a request with no user, is `NFS3ERR_ACCES`. This is a fence against other local users, not authentication: any local process can send any user id to the loopback socket |
+| `fs.nfs.jukebox_after` | duration, `5s` (1ms to 10m) | how long a read waits for a fill before the client is told to ask again (`NFS3ERR_JUKEBOX`); the fill goes on |
+
+```toml
+[fs]
+client_group = "builders"
+owner = "501:20"
+fill_socket = "/var/lib/tierstore/fill.sock"
+cache_path = "/usr/local/tierstore/cache"
+mountpoint = "/Volumes/tierstore"
+
+[fs.nfs]
+mount_user = "builder"
+allowed_uids = [501]
+```
 
 The mount is made with `allow_other` and `default_permissions` (the kernel checks the modes, which are 0644, 0755 for an executable file or a directory, and 0777 for a link), `max_background` 1024 and, with passthrough, `max_stack_depth` 1, and, where the kernel offers them, `FUSE_CACHE_SYMLINKS`, `FUSE_PARALLEL_DIROPS`, `FUSE_DO_READDIRPLUS` and `FUSE_READDIRPLUS_AUTO`. An example:
 

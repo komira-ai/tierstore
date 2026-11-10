@@ -45,8 +45,12 @@ allow-registry = ["https://github.com/rust-lang/crates.io-index"]
 # with them, and dev-dependencies its tests read the package with (the root `Cargo.toml` names the
 # commits).
 #
+# And `nfsserve`, the NFSv3 protocol of `tierstore fs` on macOS, from our fork at a pinned commit:
+# `nfsserve` 0.11.0 plus the patches the frontend needs (the root `Cargo.toml` names the commit and
+# what they are). It returns to crates.io once upstream releases such a change.
+#
 # And `fuser`, from our fork at a pinned commit: `fuser` 0.18.0 plus the change that lets a session
 # resume on an initialised /dev/fuse descriptor, which `tierstore fs` needs for crash recovery and
 # hand-over (the root `Cargo.toml` names the commit and the upstream pull request). It returns to
 # crates.io once upstream releases the change.
-allow-git = ["https://github.com/komira-ai/tierstore", "https://github.com/komira-ai/hostkeeper", "https://github.com/komira-ai/fuser"]
+allow-git = ["https://github.com/komira-ai/tierstore", "https://github.com/komira-ai/hostkeeper", "https://github.com/komira-ai/fuser", "https://github.com/komira-ai/nfsserve"]

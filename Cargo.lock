@@ -74,6 +74,12 @@ dependencies = [
 ]
 
 [[package]]
+name = "anyhow"
+version = "1.0.104"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "330a5ed07fa54e4702c9d6c4174f74427fc0ef6e214bbd677ae50a5099946470"
+
+[[package]]
 name = "arraydeque"
 version = "0.5.1"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -1587,6 +1593,21 @@ dependencies = [
 ]
 
 [[package]]
+name = "nfsserve"
+version = "0.11.0"
+source = "git+https://github.com/komira-ai/nfsserve?rev=6d9ea25d9960910cc0016daa6a69d47ca395c66e#6d9ea25d9960910cc0016daa6a69d47ca395c66e"
+dependencies = [
+ "anyhow",
+ "async-trait",
+ "byteorder",
+ "filetime",
+ "num-derive 0.4.2",
+ "num-traits",
+ "tokio",
+ "tracing",
+]
+
+[[package]]
 name = "nix"
 version = "0.31.3"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -1656,6 +1677,17 @@ name = "num-conv"
 version = "0.2.2"
 source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "521739c6d2bac4aa25192232afe6841231376b2b26d4d9fae5ecf8ca5772e441"
+
+[[package]]
+name = "num-derive"
+version = "0.4.2"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "ed3955f1a9c7c0c15e092f9c887db08b1fc683305fdf6eb6684f22555355e202"
+dependencies = [
+ "proc-macro2",
+ "quote",
+ "syn 2.0.119",
+]
 
 [[package]]
 name = "num-derive"
@@ -2105,7 +2137,7 @@ dependencies = [
  "memchr",
  "nom 8.0.0",
  "num",
- "num-derive",
+ "num-derive 0.5.1",
  "num-traits",
  "rpm-version",
  "sha1",
@@ -2546,6 +2578,7 @@ dependencies = [
  "hyper",
  "hyper-util",
  "md-5 0.11.0",
+ "nfsserve",
  "objstore-s3 0.1.0",
  "percent-encoding",
  "rcgen",
