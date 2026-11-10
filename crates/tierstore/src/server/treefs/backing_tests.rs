@@ -27,6 +27,7 @@ fn ticket(slot: Slot) -> super::Ticket {
     match slot {
         Slot::Register(ticket) => ticket,
         Slot::Live(backing) => panic!("a live id {} where a registration was due", backing.id),
+        Slot::Spill => panic!("a cached open where a registration was due"),
     }
 }
 
@@ -35,6 +36,7 @@ fn live(slot: Slot) -> u32 {
     match slot {
         Slot::Live(backing) => backing.id,
         Slot::Register(_) => panic!("a registration where a live id was due"),
+        Slot::Spill => panic!("a cached open where a live id was due"),
     }
 }
 
@@ -134,29 +136,37 @@ fn a_registration_given_up_lets_a_waiting_open_register() {
     assert_eq!(table.live(), 0);
 }
 
-/// Asserts the limit: with `most` ids live an open of another blob waits for a release, an open of
-/// a blob that has an id does not, and the release lets the waiting open register.
+/// Asserts the limit: with `most` ids live an open of another blob does not wait (the release that
+/// would end the wait needs a worker): it is a cached open, and so is every open of that blob until
+/// the cached ones are released, while a blob that has an id still shares it. After that the blob
+/// registers once an id is free.
 #[test]
-fn past_the_most_ids_an_open_waits_for_a_release() {
+fn past_the_most_ids_an_open_is_cached_and_the_blob_stays_cached_while_such_opens_live() {
     let dir = TestDir::under(std::env::temp_dir(), "tfs-backing-most");
     let table = table(&dir, 1);
     let kernel = FakeKernel::new();
     let (a, b) = (blob("a"), blob("b"));
     let _ = ticket(table.open(&a)).registered(kernel.registration());
     assert_eq!(live(table.open(&a)), 100);
-    let waiter = {
-        let table = Arc::clone(&table);
-        std::thread::spawn(move || {
-            let _ = ticket(table.open(&b)).registered(FakeKernel::new().registration());
-        })
-    };
-    until(|| table.waiting() == 1);
-    assert_eq!(table.live(), 1);
+    assert!(matches!(table.open(&b), Slot::Spill));
+    assert_eq!(
+        (table.live(), table.waiting(), table.spilled(&b)),
+        (1, 0, 1)
+    );
     table.release(&a);
-    assert_eq!(table.waiting(), 1);
     table.release(&a);
-    waiter.join().unwrap();
-    assert_eq!((table.live(), table.opens(&b)), (1, 1));
+    assert_eq!(table.live(), 0);
+    // An id is free now, but a cached open of the blob lives: no inode of it may go passthrough.
+    assert!(matches!(table.open(&b), Slot::Spill));
+    assert_eq!(table.spilled(&b), 2);
+    table.release(&b);
+    table.release(&b);
+    assert_eq!(table.spilled(&b), 0);
+    assert_eq!(
+        ticket(table.open(&b)).registered(kernel.registration()).id,
+        101
+    );
+    assert_eq!(text(dir.path()), format!("{b} 101 1\n"));
 }
 
 /// Asserts that a file that cannot be written does not stop the table.

@@ -127,7 +127,7 @@ fn a_detach_stops_the_prefetch_and_nothing_is_pinned_after_it() {
     rig.upstream.hold_fills();
     let thread = {
         let core = Arc::clone(&rig.core);
-        std::thread::spawn(move || core.prefetch(1))
+        std::thread::spawn(move || core.prefetch_here(1))
     };
     until(|| !blob_fills(&rig).is_empty());
     assert!(rig.core.detach(RUN).is_some());
@@ -148,7 +148,7 @@ fn the_last_blob_to_land_after_a_detach_is_not_pinned() {
     rig.upstream.hold_fills();
     let thread = {
         let core = Arc::clone(&rig.core);
-        std::thread::spawn(move || core.prefetch(1))
+        std::thread::spawn(move || core.prefetch_here(1))
     };
     until(|| !blob_fills(&rig).is_empty());
     assert!(rig.core.detach(RUN).is_some());
@@ -190,10 +190,10 @@ fn a_refused_pin_is_asked_again_by_an_open_and_a_pinned_tree_is_not_prefetched_t
     let _ = open_cached(&rig.core, crate::server::treefs::ino::of(1, 4), false).unwrap();
     assert_eq!(rig.upstream.asked("pin").len(), pins + 1);
     *rig.upstream.pin_answer.lock().unwrap() = None;
-    rig.core.prefetch(1);
+    rig.core.prefetch_here(1);
     assert_eq!(pinned(&rig).len(), 4 + 1 + 4);
     let (fills, pins) = (blob_fills(&rig).len(), rig.upstream.asked("pin").len());
-    rig.core.prefetch(1);
+    rig.core.prefetch_here(1);
     assert_eq!(
         (blob_fills(&rig).len(), rig.upstream.asked("pin").len()),
         (fills, pins)
@@ -205,7 +205,7 @@ fn a_refused_pin_is_asked_again_by_an_open_and_a_pinned_tree_is_not_prefetched_t
 #[test]
 fn a_missing_tree_is_not_prefetched_and_cached_blobs_are_not_filled() {
     let rig = Rig::new("tfs-prefetch-cached", sample());
-    rig.core.prefetch(77);
+    rig.core.prefetch_here(77);
     assert!(rig.upstream.asked("pin").is_empty());
     let _ = rig.core.attach(&root(&rig), RUN).unwrap();
     for blob in sample_blobs() {
@@ -214,7 +214,7 @@ fn a_missing_tree_is_not_prefetched_and_cached_blobs_are_not_filled() {
         std::fs::create_dir_all(path.parent().unwrap()).unwrap();
         std::fs::write(path, bytes).unwrap();
     }
-    rig.core.prefetch(1);
+    rig.core.prefetch_here(1);
     assert!(blob_fills(&rig).is_empty());
     assert_eq!(pinned(&rig).len(), 4);
 }
@@ -235,4 +235,29 @@ fn a_prefetched_blob_is_opened_by_passthrough_with_no_fill() {
     );
     assert_eq!(blob_fills(&rig).len(), fills);
     assert_eq!(kernel.registered.lock().unwrap().len(), 1);
+}
+
+/// Asserts that a prefetch whose tree was detached and attached again with prefetch is replaced:
+/// the old thread stops at its next blob and pins nothing, the new one fills and pins the tree
+/// once, and the old thread's end leaves the new one's marker.
+#[test]
+fn a_prefetch_replaced_by_a_detach_and_a_new_attach_stops_and_pins_nothing() {
+    let rig = Rig::new("tfs-prefetch-replaced", sample());
+    let _ = rig.core.attach(&root(&rig), RUN).unwrap();
+    rig.upstream.hold_fills();
+    let old = {
+        let core = Arc::clone(&rig.core);
+        std::thread::spawn(move || core.prefetch_here(1))
+    };
+    until(|| !blob_fills(&rig).is_empty());
+    assert!(rig.core.detach(RUN).is_some());
+    assert_eq!(rig.core.prefetching(), 0);
+    let _ = rig.core.attach_asking(&root(&rig), RUN, true).unwrap();
+    assert_eq!(rig.core.prefetching(), 1);
+    rig.upstream.release_fills();
+    old.join().unwrap();
+    until(|| rig.core.prefetching() == 0);
+    let pins = rig.upstream.asked("pin");
+    assert_eq!(pins.len(), 1, "{pins:?}");
+    assert_eq!(pinned(&rig).len(), 4);
 }

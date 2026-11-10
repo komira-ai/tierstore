@@ -17,8 +17,11 @@
 //! with the process, so a start makes a new, empty one. The `opens` of a line is the count at that
 //! write.
 //!
-//! The ids are limited to `fs.max_backing_ids`: an open of a blob with no live id waits for a
-//! release while that many ids are live or being registered.
+//! The ids are limited to `fs.max_backing_ids`. An open of a blob with no live id, while that many
+//! ids are live or being registered, does not wait for a release (the release is a request that
+//! needs a free worker, and every worker might be parked in such an open): it is a cached open,
+//! counted in `spilled`. While any such open of the blob lives, every other open of it is cached
+//! too, so that no inode has a passthrough open and a cached one at once.
 
 use std::any::Any;
 use std::collections::{HashMap, HashSet};
@@ -82,7 +85,9 @@ struct Inner {
     live: HashMap<TreeDigest, Live>,
     /// The blobs whose id is being registered by an open that was told to.
     registering: HashSet<TreeDigest>,
-    /// The opens that wait for a release or for a registration.
+    /// The cached opens of blobs that had no id when the limit was reached, by blob.
+    spilled: HashMap<TreeDigest, u32>,
+    /// The opens that wait for a registration.
     waiting: usize,
 }
 
@@ -100,6 +105,9 @@ pub(super) enum Slot {
     Live(Backing),
     /// The blob has none: register one, and give it to [`Ticket::registered`].
     Register(Ticket),
+    /// The blob has none and the limit is reached (or cached opens of it live): open it cached.
+    /// This open is counted, and ended by [`BackingTable::release`] like a passthrough one.
+    Spill,
 }
 
 /// The right to register the id of one blob, held until it is registered; dropped, it lets the
@@ -123,7 +131,8 @@ impl BackingTable {
     }
 
     /// Counts an open of `blob`: on its live id, or, if it has none and there is room for one, by
-    /// the right to register it. Waits while neither can be had.
+    /// the right to register it; as a cached open if there is no room. Waits only for another
+    /// open's registration of the same blob, which ends with that open's own fill.
     pub(super) fn open(self: &Arc<Self>, blob: &TreeDigest) -> Slot {
         let mut inner = locked(&self.inner);
         loop {
@@ -134,8 +143,16 @@ impl BackingTable {
                     guard: Arc::clone(&live.guard),
                 });
             }
-            let room = inner.live.len() + inner.registering.len() < self.most;
-            if room && inner.registering.insert(*blob) {
+            if let Some(count) = inner.spilled.get_mut(blob) {
+                *count += 1;
+                return Slot::Spill;
+            }
+            if !inner.registering.contains(blob) {
+                if inner.live.len() + inner.registering.len() >= self.most {
+                    let _ = inner.spilled.insert(*blob, 1);
+                    return Slot::Spill;
+                }
+                let _ = inner.registering.insert(*blob);
                 return Slot::Register(Ticket {
                     table: Arc::clone(self),
                     blob: *blob,
@@ -153,6 +170,13 @@ impl BackingTable {
     /// Ends one open of `blob`; the last one drops its id.
     pub(super) fn release(&self, blob: &TreeDigest) {
         let mut inner = locked(&self.inner);
+        if let Some(count) = inner.spilled.get_mut(blob) {
+            *count -= 1;
+            if *count == 0 {
+                let _ = inner.spilled.remove(blob);
+            }
+            return;
+        }
         let Some(live) = inner.live.get_mut(blob) else {
             return;
         };
@@ -161,7 +185,6 @@ impl BackingTable {
             // Dropping the guard closes the id.
             let _ = inner.live.remove(blob);
             self.write(&inner);
-            self.changed.notify_all();
         }
     }
 
@@ -190,6 +213,12 @@ impl BackingTable {
     #[cfg(test)]
     pub(super) fn live(&self) -> usize {
         locked(&self.inner).live.len()
+    }
+
+    /// The cached opens of `blob` that the limit caused.
+    #[cfg(test)]
+    pub(super) fn spilled(&self, blob: &TreeDigest) -> u32 {
+        locked(&self.inner).spilled.get(blob).copied().unwrap_or(0)
     }
 
     /// The opens that wait now.
@@ -231,7 +260,7 @@ impl Ticket {
 }
 
 impl Drop for Ticket {
-    /// Lets the opens that wait for the blob (or for room) go on.
+    /// Lets the opens that wait for the blob go on.
     fn drop(&mut self) {
         let _ = locked(&self.table.inner).registering.remove(&self.blob);
         self.table.changed.notify_all();

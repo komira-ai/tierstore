@@ -42,6 +42,15 @@ impl Core {
     ) -> Result<Opened, Errno> {
         let digest = blob.0;
         let backing = match table.open(digest) {
+            // At the limit of ids: a cached open, so that no open waits for a release, which
+            // needs a worker of its own.
+            Slot::Spill => {
+                let file = self.blob(loaded, number, entry, blob).inspect_err(|_| {
+                    table.release(digest);
+                })?;
+                let fh = self.new_handle(Handle::Spilled(file, *digest));
+                return Ok(Opened::Cached(fh));
+            }
             Slot::Live(backing) => {
                 self.pin_once(loaded, digest);
                 backing

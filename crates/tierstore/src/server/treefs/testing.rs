@@ -289,6 +289,16 @@ impl Rig {
 
     /// A rig whose entries report `owner`.
     pub(in crate::server) fn owned(name: &str, built: Built, owner: (u32, u32)) -> Self {
+        Self::limited(name, built, owner, 100)
+    }
+
+    /// A rig whose entries report `owner` and whose core gives at most `most` backing ids.
+    pub(in crate::server) fn limited(
+        name: &str,
+        built: Built,
+        owner: (u32, u32),
+        most: usize,
+    ) -> Self {
         let dir = TestDir::under(std::env::temp_dir(), name);
         let cache = dir.path().join("cache");
         let runtime = dir.path().join("run");
@@ -314,7 +324,7 @@ impl Rig {
                 cache_path: cache.clone(),
                 mountpoint: mountpoint.clone(),
                 mount_id: "mount-1".to_owned(),
-                max_backing_ids: 100,
+                max_backing_ids: most,
             },
             fills,
             TreeTable::create(&runtime).unwrap(),

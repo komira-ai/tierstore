@@ -8,7 +8,7 @@ use std::path::Path;
 
 use fuser::{BackgroundSession, Session};
 
-use super::{Frontend, Mode, config, id_in, privileged};
+use super::{Frontend, Mode, config, id_in, initial_user_namespace, privileged};
 use crate::server::treefs::core::FIXED_MTIME;
 use crate::server::treefs::ino;
 use crate::server::treefs::testing::{Built, Rig, file, sample, sha, skipped, until, with_fuse};
@@ -451,8 +451,27 @@ fn passthrough_is_chosen_only_where_offered_asked_for_and_privileged() {
     }
 }
 
+/// Asserts that only the identity map of the whole range is the initial user namespace: the map of
+/// a container, of a namespace made by `unshare -U`, one with a second line, or text that is not a
+/// map is not, so that a `CAP_SYS_ADMIN` held there does not make a process ask for passthrough.
+#[test]
+fn only_the_whole_identity_map_is_the_initial_user_namespace() {
+    assert!(initial_user_namespace("         0          0 4294967295\n"));
+    for map in [
+        "         0       1000          1\n",
+        "         0          0       4096\n",
+        "         0          0 4294967295\n      5000       5000          1\n",
+        "         1          0 4294967295\n",
+        "",
+        "not a map",
+    ] {
+        assert!(!initial_user_namespace(map), "{map:?}");
+    }
+}
+
 /// Asserts that the capability is read as the kernel's status of the process says (bit 21 of the
-/// effective set), and that a process without it does not ask for passthrough.
+/// effective set, in the initial user namespace), and that a process without it does not ask for
+/// passthrough.
 #[test]
 fn the_capability_is_read_from_the_effective_set_of_the_process() {
     let status = std::fs::read_to_string("/proc/self/status").unwrap();
@@ -461,7 +480,11 @@ fn the_capability_is_read_from_the_effective_set_of_the_process() {
         .find_map(|line| line.strip_prefix("CapEff:"))
         .unwrap();
     let bits = u64::from_str_radix(effective.trim(), 16).unwrap();
-    assert_eq!(privileged(), bits & (1 << 21) != 0);
+    let map = std::fs::read_to_string("/proc/self/uid_map").unwrap();
+    assert_eq!(
+        privileged(),
+        bits & (1 << 21) != 0 && initial_user_namespace(&map)
+    );
 }
 
 /// Asserts that the backing id is read from the text `fuser` prints for it, and that text without

@@ -137,13 +137,28 @@ impl Mode {
     }
 }
 
-/// Whether this process holds `CAP_SYS_ADMIN` (in the initial namespace, which is what
-/// `FUSE_DEV_IOC_BACKING_OPEN` asks): a process that cannot read its capabilities holds none.
+/// Whether this process holds `CAP_SYS_ADMIN` in the initial user namespace, which is what
+/// `FUSE_DEV_IOC_BACKING_OPEN` asks: the capability in the effective set, and a user namespace
+/// that is the initial one. A process that cannot read either holds none.
 fn privileged() -> bool {
-    rustix::thread::capabilities(None).is_ok_and(|sets| {
+    let capable = rustix::thread::capabilities(None).is_ok_and(|sets| {
         sets.effective
             .contains(rustix::thread::CapabilitySet::SYS_ADMIN)
-    })
+    });
+    capable
+        && std::fs::read_to_string("/proc/self/uid_map")
+            .is_ok_and(|map| initial_user_namespace(&map))
+}
+
+/// Whether the text of `/proc/self/uid_map` is that of the initial user namespace, which maps the
+/// whole range of ids to themselves in one line. A namespace of a container or of `unshare -U`
+/// maps less, or elsewhere, and its `CAP_SYS_ADMIN` is not the one the kernel asks for.
+fn initial_user_namespace(uid_map: &str) -> bool {
+    let mut lines = uid_map.lines();
+    let first = lines
+        .next()
+        .map(|line| line.split_whitespace().collect::<Vec<_>>());
+    lines.next().is_none() && first.is_some_and(|fields| fields == ["0", "0", "4294967295"])
 }
 
 /// The number in the text `{:?}` makes of a [`BackingId`] (`... backing_id: 7 }`): `fuser` 0.18

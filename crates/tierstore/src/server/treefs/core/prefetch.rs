@@ -7,7 +7,7 @@
 //! next blob when the tree is no longer attached, and pins what it has filled in batches, so that
 //! a tree of many files is not many requests.
 
-use std::collections::HashSet;
+use std::collections::{HashMap, HashSet, hash_map::Entry};
 use std::sync::Arc;
 
 use crate::tree_manifest::{EntryKind, TreeDigest};
@@ -21,22 +21,49 @@ const BATCH: usize = 512;
 impl Core {
     /// Starts the prefetch of the tree `number` on a thread of its own, unless one runs for it.
     pub(super) fn start_prefetch(self: &Arc<Self>, number: u64) {
-        if !locked(&self.prefetching).insert(number) {
-            return;
+        let token = Arc::new(());
+        match locked(&self.prefetching).entry(number) {
+            Entry::Occupied(_) => return,
+            Entry::Vacant(vacant) => {
+                let _ = vacant.insert(Arc::clone(&token));
+            }
         }
         let core = Arc::clone(self);
         let _ = std::thread::Builder::new()
             .name("fs-prefetch".to_owned())
             .spawn(move || {
-                core.prefetch(number);
-                let _ = locked(&core.prefetching).remove(&number);
+                core.prefetch(number, &token);
+                core.finish_prefetch(number, &token);
             });
     }
 
-    /// Fills and pins every blob of the tree `number`, in manifest order, until it is done or the
-    /// tree is no longer attached. A blob that cannot be had is recorded on the attachments, as a
+    /// Removes the marker of the tree `number` if it is the one of `token`: a thread that a detach
+    /// and a new attach replaced leaves the marker of its successor.
+    fn finish_prefetch(&self, number: u64, token: &Arc<()>) {
+        let mut running: std::sync::MutexGuard<'_, HashMap<u64, Arc<()>>> =
+            locked(&self.prefetching);
+        if running
+            .get(&number)
+            .is_some_and(|mine| Arc::ptr_eq(mine, token))
+        {
+            let _ = running.remove(&number);
+        }
+    }
+
+    /// Whether the thread of `token` is still the prefetch of the tree `number`, and the tree is
+    /// attached.
+    fn current(&self, number: u64, token: &Arc<()>) -> bool {
+        let mine = locked(&self.prefetching)
+            .get(&number)
+            .is_some_and(|marked| Arc::ptr_eq(marked, token));
+        mine && self.attached(number)
+    }
+
+    /// Fills and pins every blob of the tree `number`, in manifest order, until it is done, the
+    /// tree is no longer attached, or a detach and a new attach have given the tree another
+    /// prefetch (the marker of `token` is gone). A blob that cannot be had is recorded on the attachments, as a
     /// failed open records it, and the others go on.
-    pub(in crate::server::treefs) fn prefetch(&self, number: u64) {
+    fn prefetch(&self, number: u64, token: &Arc<()>) {
         let Ok(loaded) = self.tree(number) else {
             return;
         };
@@ -55,7 +82,7 @@ impl Core {
             if *size == 0 || !seen.insert(*digest) || locked(&loaded.pinned).contains(digest) {
                 continue;
             }
-            if !self.attached(number) {
+            if !self.current(number, token) {
                 return;
             }
             match self.cache_file((digest, *size, source.as_ref())) {
@@ -63,10 +90,10 @@ impl Core {
                 Err(reason) => self.failed((&loaded, number), entry.index, digest, reason),
             }
             if batch.len() >= BATCH {
-                self.pin_batch(number, &loaded, &mut batch);
+                self.pin_batch((number, token), &loaded, &mut batch);
             }
         }
-        self.pin_batch(number, &loaded, &mut batch);
+        self.pin_batch((number, token), &loaded, &mut batch);
     }
 
     /// Whether any run has the tree `number`.
@@ -75,10 +102,16 @@ impl Core {
     }
 
     /// Pins `batch` for the tree, and empties it. Under the lifecycle lock and only while the tree
-    /// is attached: a detach that has unpinned the tree is never followed by a pin.
-    fn pin_batch(&self, number: u64, loaded: &Loaded, batch: &mut Vec<TreeDigest>) {
+    /// is attached and this thread is its prefetch: a detach that has unpinned the tree is never
+    /// followed by a pin.
+    fn pin_batch(
+        &self,
+        (number, token): (u64, &Arc<()>),
+        loaded: &Loaded,
+        batch: &mut Vec<TreeDigest>,
+    ) {
         let _lifecycle = locked(&self.lifecycle);
-        if !batch.is_empty() && self.attached(number) {
+        if !batch.is_empty() && self.current(number, token) {
             let shas: Vec<String> = batch.iter().map(ToString::to_string).collect();
             let named: Vec<&str> = shas.iter().map(String::as_str).collect();
             self.fills.touch(&named);
@@ -90,6 +123,15 @@ impl Core {
             }
         }
         batch.clear();
+    }
+
+    /// Runs the prefetch of the tree `number` on this thread, as the one the tree has now.
+    #[cfg(test)]
+    pub(in crate::server::treefs) fn prefetch_here(&self, number: u64) {
+        let token = Arc::new(());
+        let _ = locked(&self.prefetching).insert(number, Arc::clone(&token));
+        self.prefetch(number, &token);
+        self.finish_prefetch(number, &token);
     }
 
     /// The trees a prefetch thread is working on.

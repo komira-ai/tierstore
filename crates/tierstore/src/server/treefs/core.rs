@@ -121,6 +121,9 @@ enum Handle {
     Empty,
     /// The cache file of a blob.
     Cached(File),
+    /// The cache file of a blob that got no backing id because `fs.max_backing_ids` were live; the
+    /// release is counted on the blob in the backing table.
+    Spilled(File, TreeDigest),
     /// A blob served by kernel passthrough: reads never reach this process, and the release is
     /// counted on the blob's backing id.
     Backed(TreeDigest),
@@ -188,8 +191,10 @@ pub(in crate::server) struct Core {
     /// Held by an attach, a restore and a detach for all of their work, so that a detach cannot
     /// unpin a tree that an attach has just taken.
     lifecycle: Mutex<()>,
-    /// The trees a thread is filling now for an attach that asked for `prefetch = "all"`.
-    prefetching: Mutex<HashSet<u64>>,
+    /// The trees a thread is filling now for an attach that asked for `prefetch = "all"`, each
+    /// with the token of its thread: a detach removes the entry, and a thread whose token is no
+    /// longer the tree's has been replaced and stops.
+    prefetching: Mutex<HashMap<u64, Arc<()>>>,
     /// The backing table, once the kernel offered passthrough and it was chosen.
     backing: OnceLock<Arc<BackingTable>>,
     /// Where the backing table is kept.
@@ -218,7 +223,7 @@ impl Core {
                 attachments: Attachments::new(runtime_dir),
             }),
             lifecycle: Mutex::new(()),
-            prefetching: Mutex::new(HashSet::new()),
+            prefetching: Mutex::new(HashMap::new()),
             backing: OnceLock::new(),
             backing_file: runtime_dir.join(backing::FILE),
             handles: Mutex::new(HashMap::new()),
@@ -677,7 +682,8 @@ impl Core {
     ///
     /// Where passthrough was chosen (`Core::enable_passthrough`), a non-empty file is answered
     /// with its blob's backing id: the live one, or one that `register` makes from the cache
-    /// file. Otherwise, and for an empty file, the open is a cached one.
+    /// file. Otherwise, for an empty file, and for a blob that has no id when `fs.max_backing_ids`
+    /// are live, the open is a cached one.
     ///
     /// # Errors
     /// [`Errno::RoFs`] for an open for writing, [`Errno::IsDir`] for a directory, [`Errno::Inval`]
@@ -808,7 +814,7 @@ impl Core {
             .cloned()
             .ok_or(Errno::Inval)?;
         let file = match handle.as_ref() {
-            Handle::Cached(file) => file,
+            Handle::Cached(file) | Handle::Spilled(file, _) => file,
             Handle::Empty => return Ok(Vec::new()),
             // The kernel reads a passthrough file itself: a request for one is a fault.
             Handle::Backed(_) => return Err(Errno::Io),
@@ -831,7 +837,9 @@ impl Core {
     /// Closes the open file `fh`.
     pub(super) fn release(&self, fh: u64) {
         let handle = locked(&self.handles).remove(&fh);
-        if let (Some(Handle::Backed(blob)), Some(table)) = (handle.as_deref(), self.backing.get()) {
+        if let (Some(Handle::Backed(blob) | Handle::Spilled(_, blob)), Some(table)) =
+            (handle.as_deref(), self.backing.get())
+        {
             table.release(blob);
         }
     }

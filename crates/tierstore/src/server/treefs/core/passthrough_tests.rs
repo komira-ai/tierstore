@@ -235,3 +235,51 @@ fn the_backing_table_file_follows_the_first_open_and_the_last_release() {
     rig.core.release(fh);
     assert_eq!(std::fs::read_to_string(&file).unwrap(), "");
 }
+
+/// Asserts the limit of `fs.max_backing_ids` at the core: with every id live, an open of another
+/// blob is a cached open that reads its bytes (no wait, no registration), a fill that fails fails
+/// that open and leaves nothing counted, the release ends the count, and the blob registers an id
+/// at its next open once its cached opens are released.
+#[test]
+fn past_the_most_ids_a_blob_is_opened_cached_and_never_waits() {
+    let rig = Rig::limited(
+        "tfs-pt-most",
+        sample(),
+        crate::server::treefs::testing::OWNER,
+        1,
+    );
+    rig.core.enable_passthrough();
+    let root = rig.upstream.built.lock().unwrap().root.clone();
+    let _ = rig.core.attach(&root, "run-1").unwrap();
+    let kernel = FakeKernel::new();
+    let (tool, a_h) = (ino::of(1, 4), ino::of(1, 7));
+    let (held, id) = backed(kernel.open(&rig.core, tool).unwrap());
+    assert_eq!(id, 100);
+    let a_digest = digest_of(b"int a;");
+    let _ = rig
+        .upstream
+        .failing
+        .lock()
+        .unwrap()
+        .insert(a_digest.to_string(), "upstream 503".to_owned());
+    assert!(matches!(kernel.open(&rig.core, a_h), Err(Errno::Io)));
+    let table = Arc::clone(rig.core.backing_table().unwrap());
+    assert_eq!(table.spilled(&a_digest), 0);
+    let _ = rig
+        .upstream
+        .failing
+        .lock()
+        .unwrap()
+        .remove(&a_digest.to_string());
+    let Opened::Cached(fh) = kernel.open(&rig.core, a_h).unwrap() else {
+        panic!("a backed open past the limit");
+    };
+    assert_eq!(rig.core.read(fh, 0, 100).unwrap(), b"int a;");
+    assert_eq!((table.live(), table.spilled(&a_digest)), (1, 1));
+    assert_eq!(kernel.registered.lock().unwrap().len(), 1);
+    rig.core.release(fh);
+    assert_eq!(table.spilled(&a_digest), 0);
+    rig.core.release(held);
+    assert_eq!(table.live(), 0);
+    assert_eq!(backed(kernel.open(&rig.core, a_h).unwrap()).1, 101);
+}

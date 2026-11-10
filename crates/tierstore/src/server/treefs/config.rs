@@ -13,7 +13,7 @@
 //! | `fs.fetch_timeout` | how long a fill, or a closed fill socket, is waited for | `60s` |
 //! | `fs.threads` | threads that serve the kernel's requests (a fill blocks one) | `16` |
 //! | `fs.passthrough` | ask the kernel for passthrough when it offers it; `false` forces the mode of kernel 6.8 | `true` |
-//! | `fs.max_backing_ids` | the most backing ids live at once; past it an open waits for a release | `65536` |
+//! | `fs.max_backing_ids` | the most backing ids live at once; past it an open of another blob is a cached open | `65536` |
 
 use std::path::{Path, PathBuf};
 use std::time::Duration;
