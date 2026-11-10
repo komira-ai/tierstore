@@ -90,7 +90,12 @@ impl Serving {
         let resend_failed = resend
             && outcome.flags.contains(InitFlags::FUSE_HAS_RESEND)
             && match session.notifier().resend() {
-                Ok(()) => false,
+                Ok(()) => {
+                    tracing::info!(
+                        "tierstore fs: asked the kernel to send again the requests the earlier process read and did not answer"
+                    );
+                    false
+                }
                 Err(why) => {
                     tracing::warn!(
                         "tierstore fs: the kernel was not asked to send requests again: {why}"

@@ -102,12 +102,17 @@ fn remove_stale(path: &Path) -> Result<(), StartError> {
     }
 }
 
-/// Makes the runtime directory and the mount point.
-pub(super) fn create_directories(settings: &FsSettings) -> Result<(), StartError> {
+/// Makes the runtime directory.
+pub(super) fn create_runtime_dir(settings: &FsSettings) -> Result<(), StartError> {
     std::fs::create_dir_all(&settings.runtime_dir).map_err(io(format!(
         "fs.runtime_dir {}",
         settings.runtime_dir.display()
-    )))?;
+    )))
+}
+
+/// Makes the mount point. A mount point that is a live mount of a connection taken over must not be
+/// made (it is a `stat` of the mount): only a start that mounts calls this.
+pub(super) fn create_mount_point(settings: &FsSettings) -> Result<(), StartError> {
     std::fs::create_dir_all(&settings.mountpoint).map_err(io(format!(
         "fs.mountpoint {}",
         settings.mountpoint.display()
@@ -172,7 +177,8 @@ impl Setup {
     /// # Errors
     /// [`StartError`]: why nothing was made.
     pub(super) fn start(settings: &FsSettings, count_lookups: bool) -> Result<Self, StartError> {
-        create_directories(settings)?;
+        create_runtime_dir(settings)?;
+        create_mount_point(settings)?;
         let table = TreeTable::create(&settings.runtime_dir)?;
         // The backing ids of an earlier mount belong to its connection, which is gone.
         remove_stale(&settings.runtime_dir.join(backing::FILE))?;
