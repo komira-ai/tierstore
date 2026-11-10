@@ -297,3 +297,25 @@ fn a_hand_over_that_does_not_complete_leaves_the_counts_unmarked() {
     let kept = std::fs::read_to_string(rig.runtime.join("backing")).unwrap();
     assert!(!kept.contains("exact"), "{kept}");
 }
+
+/// Asserts that a takeover asks nothing of the mount point: it is the live mount, whose root the
+/// kernel does not cache, so a `stat` or a `mkdir` of it is a request to the process that is not
+/// serving yet. The mount point here is a path under a file, which every call that looks at it
+/// refuses; a takeover that serves the connection never looks.
+#[test]
+fn a_takeover_never_looks_at_the_mount_point() {
+    let (rig, settings) = left_behind("tfs-rec-nomount", false);
+    let file = rig.dir.path().join("a-file");
+    std::fs::write(&file, "x").unwrap();
+    let settings = FsSettings {
+        mountpoint: file.join("mnt"),
+        ..settings
+    };
+    let (device, kernel) = fakedev::pair();
+    kernel.getattr(5, ino::ROOT);
+    let running = adopt(&settings, device, false);
+    answered(&kernel.reply(), 5);
+    assert!(!settings.mountpoint.exists());
+    assert!(!file.join("mnt").is_dir());
+    drop(running);
+}
