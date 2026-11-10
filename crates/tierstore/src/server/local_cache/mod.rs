@@ -46,6 +46,16 @@
 //! into `obj/` with a create-only link, so a name appears whole or not at all (layout:
 //! [`layout`]). A fill that fails is counted by reason and removed.
 //!
+//! # Fills for the fill socket
+//!
+//! The filesystem process of the node asks for blobs over the fill socket (see
+//! [`fill_socket`](crate::server::fill_socket)): `source` fills a blob that lies inside a larger
+//! upstream object, ranged, under the reserved key `_tiering/fill/<sha256>`, and a whole
+//! `cas/l/<sha256>`, with the same fetch as every fill. Those fills have their own permits
+//! (`fill_socket_concurrency`) and wait for one up to `fill_socket_wait`; they never take one of
+//! `max_concurrent_fills`, and the S3 path never takes theirs. Concurrent requests for one blob share
+//! one fetch. A cache that does not hold the lock fills nothing for the socket.
+//!
 //! # A read
 //!
 //! A reader of the fill is given the bytes as the fill writes them (see `stream.rs`): every read
@@ -127,6 +137,7 @@ mod metrics;
 mod revalidate;
 mod scrub;
 mod selfcheck;
+mod source;
 mod stream;
 mod write;
 
@@ -161,6 +172,8 @@ mod lost_tests;
 #[cfg(test)]
 mod metrics_text_tests;
 #[cfg(test)]
+pub(in crate::server) mod pack_testing;
+#[cfg(test)]
 mod read_only_tasks_tests;
 #[cfg(test)]
 mod read_only_tests;
@@ -170,6 +183,8 @@ mod revalidate_tests;
 mod scrub_tests;
 #[cfg(test)]
 mod selfcheck_tests;
+#[cfg(test)]
+mod source_tests;
 #[cfg(test)]
 mod stale_index_tests;
 #[cfg(test)]
@@ -221,6 +236,9 @@ use keep::Sent;
 use layout::{Name, data_path, name_of};
 use metrics::{add, bump};
 use revalidate::Verdict;
+#[cfg(test)]
+pub(super) use source::blob_path;
+pub(super) use source::{Blob, FillError};
 use stream::eager;
 
 /// The most an uncached object may be, for a ranged read of it to fill the whole of it.
@@ -243,6 +261,13 @@ pub const PASS_INTERVAL: Duration = Duration::from_secs(10);
 /// How long a cache waits between two tries of the lock of its directory, unless the settings say
 /// otherwise.
 pub const LOCK_INTERVAL: Duration = Duration::from_secs(1);
+
+/// The fills of the fill socket that may run at once, unless the settings say otherwise.
+pub const FILL_SOCKET_CONCURRENCY: usize = 16;
+
+/// How long a request of the fill socket waits for a permit of its pool, unless the settings say
+/// otherwise.
+pub const FILL_SOCKET_WAIT: Duration = Duration::from_secs(60);
 
 /// The keeps of a put that may run at once, unless the settings say otherwise.
 pub const MAX_CONCURRENT_KEEPS: usize = 8;
@@ -288,6 +313,13 @@ pub struct CacheConfig {
     /// The most fills that run at once. A miss that finds all of them running is served from
     /// the upstream and keeps nothing. At least one (0 is read as 1).
     pub max_concurrent_fills: usize,
+    /// The most fills that the fill socket runs at once: a pool of its own, which the S3 path's
+    /// `max_concurrent_fills` never draws on. A request that finds them all running waits for one
+    /// (see `fill_socket_wait`). At least one (0 is read as 1).
+    pub fill_socket_concurrency: usize,
+    /// The longest a request of the fill socket waits for a permit of its pool before it is
+    /// answered `busy`.
+    pub fill_socket_wait: Duration,
     /// The most create-only puts that are copied to the stage directory at once, apart from the
     /// fills. A put that finds them all running is not kept. At least one (0 is read as 1).
     pub max_concurrent_keeps: usize,
@@ -350,6 +382,8 @@ impl CacheConfig {
             fill_chunk: FILL_CHUNK,
             whole_limit: WHOLE_FILL_LIMIT,
             max_concurrent_fills: MAX_CONCURRENT_FILLS,
+            fill_socket_concurrency: FILL_SOCKET_CONCURRENCY,
+            fill_socket_wait: FILL_SOCKET_WAIT,
             max_concurrent_keeps: MAX_CONCURRENT_KEEPS,
             keep_wait: KEEP_WAIT,
             keep_deadline: KEEP_DEADLINE,
@@ -444,6 +478,11 @@ pub(super) struct Inner {
     reserved: AtomicU64,
     /// One permit for each fill that may run; a fill holds one until it ends.
     permits: Arc<Semaphore>,
+    /// One permit for each fill of the fill socket that may run; a request waits for one.
+    source_permits: Arc<Semaphore>,
+    /// The fills of the fill socket that are running, by the name of the object: concurrent
+    /// requests for one blob share the fetch.
+    source_flights: Mutex<HashMap<String, source::Flight>>,
     /// One permit for each put that may be copied to the stage directory; held until it ends.
     keeps: Arc<Semaphore>,
     /// Called after a keep has put its object in the index.
@@ -576,6 +615,7 @@ impl LocalCache {
         };
         let permits = Arc::new(Semaphore::new(config.max_concurrent_fills.max(1)));
         let keeps = Arc::new(Semaphore::new(config.max_concurrent_keeps.max(1)));
+        let source_permits = Arc::new(Semaphore::new(config.fill_socket_concurrency.max(1)));
         let inner = Inner {
             upstream,
             disk,
@@ -590,6 +630,8 @@ impl LocalCache {
             stage_prefix: stage_prefix(),
             reserved: AtomicU64::new(0),
             permits,
+            source_permits,
+            source_flights: Mutex::new(HashMap::new()),
             keeps,
             observer,
             #[cfg(test)]

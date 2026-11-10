@@ -112,9 +112,25 @@ impl Future for Pending {
 /// The task of a fill.
 type Task = JoinHandle<Result<Filled, Error>>;
 
+/// What a fill reads from the upstream.
+pub(super) enum Read<'a> {
+    /// The whole object of the key, whose size the fill asks the upstream for.
+    Object,
+    /// The whole object of the key, whose HEAD the caller has made.
+    Headed(Meta),
+    /// `size` bytes from `offset` of the upstream object `from`, which must hash to `sha256`: a
+    /// blob inside a larger object, kept under the key of the fill (see `source`).
+    Range {
+        from: &'a str,
+        offset: u64,
+        size: u64,
+        sha256: &'a str,
+    },
+}
+
 /// Why a fill ended without an object.
 #[derive(Debug)]
-enum Stop {
+pub(super) enum Stop {
     /// The upstream failed, or has no such object.
     Upstream(Error),
     /// The upstream gave fewer bytes than it had said the object has.
@@ -467,9 +483,41 @@ impl Inner {
         name: &Name,
         live: &watch::Sender<Live>,
     ) -> Result<Filled, Stop> {
+        self.fetch_from(key, name, live, &Read::Object).await
+    }
+
+    /// [`fetch`](Self::fetch) of what `read` says: the object of `key`, or a range of another
+    /// object kept as `key`. A range is checked against the hash it was asked under, and its
+    /// sidecar takes that hash as its tag, since the bytes are named by their content.
+    pub(super) async fn fetch_from(
+        self: &Arc<Self>,
+        key: &str,
+        name: &Name,
+        live: &watch::Sender<Live>,
+        read: &Read<'_>,
+    ) -> Result<Filled, Stop> {
         let generation = self.generation();
-        let meta = self.upstream_head(key).await?;
-        tagged(key, &meta)?;
+        let (from, start, meta, wanted) = match read {
+            Read::Object => {
+                let meta = self.upstream_head(key).await?;
+                tagged(key, &meta)?;
+                (key, 0, meta, name.content.as_deref())
+            }
+            Read::Headed(meta) => (key, 0, meta.clone(), name.content.as_deref()),
+            Read::Range {
+                from,
+                offset,
+                size,
+                sha256,
+            } => {
+                let meta = Meta {
+                    size: *size,
+                    tag: (*sha256).to_owned(),
+                    modified: self.clock.now(),
+                };
+                (*from, *offset, meta, Some(*sha256))
+            }
+        };
         let Some(reservation) = self.reserve(meta.size) else {
             bump(&self.counters.fills_skipped);
             return Ok(Filled::Skipped);
@@ -492,8 +540,8 @@ impl Inner {
         let _ = live.send_replace(progress(0));
         while offset < meta.size {
             let want = self.config.fill_chunk.max(1).min(meta.size - offset);
-            let range = ByteRange::new(offset, want);
-            let chunk = self.upstream_get(key, range).await?;
+            let range = ByteRange::new(start + offset, want);
+            let chunk = self.upstream_get(from, range).await?;
             if chunk.len() as u64 != want {
                 return Err(Stop::Short);
             }
@@ -510,15 +558,12 @@ impl Inner {
         staged.finish().await?;
         // A key named by its content is checked by the hash below. Any other key could have been
         // written over while it was read, and the file would hold bytes of two versions.
-        if name.content.is_none() && !self.same_version(&self.upstream_head(key).await?, &meta) {
+        let rechecked = matches!(read, Read::Object) && name.content.is_none();
+        if rechecked && !self.same_version(&self.upstream_head(key).await?, &meta) {
             return Err(Stop::Changed);
         }
         let digest = hex::encode(hasher.finalize());
-        if name
-            .content
-            .as_deref()
-            .is_some_and(|wanted| wanted != digest)
-        {
+        if wanted.is_some_and(|wanted| wanted != digest) {
             return Err(Stop::Mismatch);
         }
         let sidecar = Sidecar {

@@ -20,6 +20,9 @@
 //! keep_wait            = "5s"
 //! keep_deadline        = "60s"
 //! write_through        = false  # true: take writes and send them to the upstream
+//! # fill_socket        = "/var/lib/tierstore/fill.sock"   # default: fill.sock in the state dir
+//! # fill_socket_concurrency = 16
+//! # fill_socket_wait        = "60s"
 //!
 //! [cold_store]                  # the upstream: an S3 endpoint
 //! kind             = "s3"
@@ -67,6 +70,7 @@ use super::config::{
     refuse, require, tier, within,
 };
 use super::config_cache_tuning;
+use super::config_fill::{check_fill_outside_cache, fill_socket_of};
 use super::config_handoff::{check_outside_cache, handoff_of};
 use super::config_hot_only::refuse_hot_keys;
 use super::config_interface::Interfaces;
@@ -200,6 +204,17 @@ pub(super) struct LocalCacheTable {
     /// to 1GiB, default 4MiB).
     #[serde(default)]
     pub keep_queue_bytes: Option<Size>,
+    /// The fill socket: an absolute path of at most 103 bytes. Left out, `fill.sock` in the
+    /// service's state directory when it has one; with neither, there is no fill socket.
+    #[serde(default)]
+    pub fill_socket: Option<std::path::PathBuf>,
+    /// The most fills the fill socket runs at once (1 to 1024, default 16).
+    #[serde(default)]
+    pub fill_socket_concurrency: Option<u32>,
+    /// The longest a request of the fill socket waits for one of those fills to come free (1ms to
+    /// 1h, default `60s`).
+    #[serde(default)]
+    pub fill_socket_wait: Option<Dur>,
 }
 
 /// What a build-node file stands for.
@@ -226,6 +241,8 @@ pub(super) struct CacheSettings {
     /// The hand-off of the listening sockets (`server.handoff_socket` and `server.handoff_wait`),
     /// or none without `server.handoff_socket`.
     pub handoff: Option<Handoff>,
+    /// The fill socket (`local_cache.fill_socket`), or none.
+    pub fill_socket: Option<std::path::PathBuf>,
 }
 
 /// The percent in `value`, or `default`, from `low` to `high`.
@@ -398,8 +415,12 @@ impl CacheSettings {
         let skipping = [("skip_checks", cold.skip_checks.is_some())];
         refuse("cold_store", "not for a build node", &skipping)?;
         let upstream = tier("cold_store", &cold)?;
+        let fill_socket = fill_socket_of(&table, handoff.as_ref(), per_run.state_dir.as_deref())?;
         let part = CachePart::new(table, policy)?;
         check_outside_cache(handoff.as_ref(), &part.config.path)?;
+        if let Some(socket) = &fill_socket {
+            check_fill_outside_cache(socket, &part.config.path)?;
+        }
         let oci = fronts.oci;
         if oci.upstream.is_some() {
             let why =
@@ -418,6 +439,7 @@ impl CacheSettings {
             oci,
             scrub_rate: part.scrub_rate,
             handoff,
+            fill_socket,
         })
     }
 }
