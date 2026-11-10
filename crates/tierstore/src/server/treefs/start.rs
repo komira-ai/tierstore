@@ -138,9 +138,9 @@ pub(super) fn create_mount_point(settings: &FsSettings) -> Result<(), StartError
     )))
 }
 
-/// A core over `table` for the mount `mount_id`, whose file handles are numbered for `generation`
-/// (a frontend with file handles: FUSE),
-/// with the attachments the file holds made again and the cache told which trees are attached.
+/// A core over `table` for the mount `mount_id`, with the attachments the file holds made again
+/// and the cache told which trees are attached. `generation`, which numbers the file handles, exists
+/// only on Linux (and in tests), since only the FUSE frontend has file handles.
 /// `count_lookups` is whether the core counts the lookups of its inodes (a frontend that is told
 /// when they are forgotten, FUSE), or drops a tree when it is detached (one that is not told).
 pub(super) fn core_of(
