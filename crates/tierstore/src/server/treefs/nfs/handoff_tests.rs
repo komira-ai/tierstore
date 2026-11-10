@@ -20,12 +20,15 @@ use crate::server::treefs::testing::Rig;
 use crate::server::treefs::testing::SIGNALS;
 use crate::server::treefs::testing::until;
 
+/// A wait that only a hung test reaches.
+pub(super) const WAIT: std::time::Duration = std::time::Duration::from_secs(3600);
+
 fn me() -> Cred {
     Cred::Sys(euid(), 0)
 }
 
 /// Settings whose control socket for hand-offs is in the rig's directory, serving on `port`.
-fn handing(rig: &Rig, port: u16) -> crate::server::treefs::config::FsSettings {
+pub(super) fn handing(rig: &Rig, port: u16) -> crate::server::treefs::config::FsSettings {
     let nfs = NfsSettings {
         listen: std::net::SocketAddr::from(([127, 0, 0, 1], port)),
         handoff: Some(Handoff {
@@ -38,7 +41,7 @@ fn handing(rig: &Rig, port: u16) -> crate::server::treefs::config::FsSettings {
 }
 
 /// The status of GETATTR of `handle` on `client`.
-async fn getattr(client: &mut Client, handle: &[u8]) -> u32 {
+pub(super) async fn getattr(client: &mut Client, handle: &[u8]) -> u32 {
     let reply = client
         .call(NFS, GETATTR, me(), Enc::default().opaque(handle))
         .await;
@@ -55,7 +58,7 @@ async fn lookup(client: &mut Client, dir: &[u8], name: &str) -> Vec<u8> {
 }
 
 /// A process that serves with a hand-off socket, a connection to it, and the handle of the root.
-async fn running(rig: &Rig) -> (Running, Client, Vec<u8>, Arc<Recorder>) {
+pub(super) async fn running(rig: &Rig) -> (Running, Client, Vec<u8>, Arc<Recorder>) {
     let runner = Recorder::new(true);
     let old = Running::start(
         &handing(rig, 0),
@@ -73,7 +76,7 @@ async fn running(rig: &Rig) -> (Running, Client, Vec<u8>, Arc<Recorder>) {
 
 /// Starts the next process over the socket the running one serves on; its mount command finds the
 /// mount there.
-async fn taking_over(rig: &Rig, old: &Running) -> (Running, Arc<Recorder>) {
+pub(super) async fn taking_over(rig: &Rig, old: &Running) -> (Running, Arc<Recorder>) {
     let runner = Recorder::mounted_at(&rig.mountpoint);
     let new = Running::start(
         &handing(rig, old.address.port()),
@@ -329,6 +332,7 @@ async fn a_process_that_cannot_make_its_control_socket_after_a_takeover_serves_w
         super::offer_after_takeover(
             &rig.dir.path().join("none/handoff.sock"),
             Vec::new(),
+            WAIT,
             std::sync::Arc::new(|_| {}),
         )
     });
@@ -348,6 +352,7 @@ async fn a_process_that_cannot_make_its_control_socket_after_a_takeover_serves_w
         super::offer_after_takeover(
             &rig.dir.path().join("handoff.sock"),
             Vec::new(),
+            WAIT,
             std::sync::Arc::new(|_| {})
         )
         .is_some()

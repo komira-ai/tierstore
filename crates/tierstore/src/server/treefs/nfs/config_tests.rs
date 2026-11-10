@@ -185,7 +185,7 @@ fn the_handoff_keys_are_taken_and_each_refusal_names_its_key() {
     let waits = from_text(&with("handoff_socket = \"/run/x.sock\""), "")
         .unwrap()
         .nfs;
-    assert_eq!(waits.handoff.unwrap().wait, Duration::from_secs(10));
+    assert_eq!(waits.handoff.unwrap().wait, Duration::from_secs(120));
     let long = format!("handoff_socket = \"/{}\"", "x".repeat(120));
     for (text, key) in [
         ("handoff_wait = \"3s\"".to_owned(), "fs.nfs.handoff_wait"),

@@ -19,6 +19,20 @@
 //!    no new connection, finishes the requests in flight, and ends.
 //! 5. After `done` the taker binds the control socket itself, so the next update asks it.
 //!
+//! A taker that serves sockets which nothing else can serve for it (`tierstore fs` on macOS, the
+//! `nfs` front) asks for one more step, so that a taker that dies after `done` and before it
+//! serves leaves the running instance serving: its request is `take 1` and a second line,
+//! `ready`. The running instance, if it takes part (it is given a wait), does what it did, but
+//! after `done` it has handed nothing over until the taker sends the frame `ready`: it keeps its
+//! sockets and goes on serving through that time. If the taker ends the connection, sends
+//! another frame, or says nothing for the wait, the running instance makes its control socket
+//! again, lets go of the hold it took at `ack`, and serves on, as for a taker that was gone
+//! before `done`. A running instance that does not know the step (a release before it, or one
+//! given no wait) answers `refused` with "the request is not understood", and the taker asks
+//! again with `take 1` alone and no `ready`; a taker of that release that asks with `take 1`
+//! alone is handed over as before, with no step. So the step is additive: no release's request
+//! or answer changes meaning.
+//!
 //! No port is added, no packet is redirected and no right beyond the user's own is needed. The
 //! control socket is mode 0600 and a peer of another user is refused. Where nothing answers
 //! (no file, or a file no one listens on) the taker starts cold, binding its sockets itself.
@@ -42,7 +56,7 @@ pub(crate) use offer::{Hold, Offer, Socket, check_control_path};
 
 /// The most listening sockets one instance can hand over: what one message carries.
 pub(crate) const MAX_SOCKETS: usize = wire::MAX_FDS;
-pub(crate) use take::{Inherited, Want, take};
+pub(crate) use take::{Inherited, Want, take, take_with_ready};
 
 /// What an instance is told to do about a hand-off: where the control socket is, and how long a
 /// taker waits for the running instance.

@@ -79,6 +79,34 @@ again on its new connection, and requests on trees are idempotent. The drain is 
 fork; a client that never closes is let go when `fs.nfs.drain_wait` has passed
 (`a_client_that_never_closes_is_let_go_when_the_drain_wait_has_passed`).
 
+The NFS hand-over has one step more, `ready`, because a successor that dies after `done` and before it serves would
+otherwise leave nobody serving (the old process had ended, its listening socket closed with it, and a client's hard mount
+hung until a process was started by hand). The taker's request is `take 1` and a second line, `ready`; the old process, once
+it has said `done`, has handed nothing over until the taker sends the frame `ready` (the taker does so when its start is done
+and it is about to serve), and it goes on accepting and answering on its own copy of the socket meanwhile. A taker that ends the
+connection, sends another frame, or is silent for `fs.nfs.handoff_wait` after `done` has not taken anything: the old process
+lets its hold go, makes its hand-over socket again and, where the successor's start had replaced it, binds its control socket
+again, and serves on. The step is additive (the wait for `ready` is the one value of `fs.nfs.handoff_wait`, now 120s): an old
+process that does not know it answers the request `refused` with "the request is not understood", and the taker asks again
+with `take 1` alone; a taker of a release before it asks a new process with `take 1` alone and is handed over as before, with
+no step. The sequence, from `done`:
+
+```
+new                                     old (running)
+ | <---- "done"                           | serves on, holds its writes
+ | opens the table, makes the attachments,|
+ | binds the control socket               |
+ | "ready" ---------------------------->  | stops accepting, drains, exits
+ | (gone, wrong, or silent for the wait)  | lets the hold go, makes its sockets again, serves on
+```
+
+Each step at which the taker may die is a test (`a_successor_killed_at_each_step_leaves_the_old_instance_serving`,
+`a_successor_whose_start_fails_after_done_leaves_the_old_instance_serving`,
+`the_control_socket_is_bound_again_when_a_successor_that_replaced_it_is_gone`,
+`the_old_instance_ends_when_the_successor_says_ready_and_not_before`, and on the offer's side in `server/handoff/`
+`a_taker_gone_after_done_before_ready_leaves_the_instance_serving`, `a_taker_silent_for_the_wait_after_done_is_given_up`,
+`a_taker_asks_again_without_ready_of_an_instance_that_does_not_know_it`).
+
 Two processes must not write the table of tree numbers and the attachments file, which the taker reads after `done`. The offer
 therefore calls a hold when a taker answers `ack`, before `done` is sent (`the_hold_is_told_before_the_taker_has_its_done`), and
 releases it if that taker does not complete (`the_hold_is_released_when_the_taker_does_not_complete`); the hold waits for the attach

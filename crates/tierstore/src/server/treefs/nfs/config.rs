@@ -12,7 +12,7 @@
 //! | `fs.nfs.fd_cache_per_shard` | open cache files kept in one shard | `64` |
 //! | `fs.nfs.allowed_uids` | the user ids whose requests are served (`AUTH_SYS`); a fence against other local users, not authentication | the mount user and the owner (`fs.owner`) |
 //! | `fs.nfs.handoff_socket` | the control socket on which a running instance hands its listening socket to the next one (a file in a directory only the user of the process may write); none: no hand-off, an update is a restart | none |
-//! | `fs.nfs.handoff_wait` | how long a new instance waits for the running one to hand over | `10s` |
+//! | `fs.nfs.handoff_wait` | how long a hand-over may last: a new instance waits that long for the running one's `done`; the running one gives the new one that long after `done` to say `ready` (it covers the new one's whole start) before it serves on | `120s` |
 //! | `fs.nfs.drain_wait` | how long an instance that handed over waits for the clients to close their connections before it ends | `10s` |
 //! | `fs.nfs.jukebox_after` | how long a read waits for a fill before the client is told to ask again | `5s` |
 
@@ -46,8 +46,10 @@ const DEFAULT_PER_SHARD: u32 = 64;
 /// The wait for a fill when the file leaves out `fs.nfs.jukebox_after`.
 const DEFAULT_JUKEBOX_AFTER: Duration = Duration::from_secs(5);
 
-/// The wait for the running instance when the file leaves out `fs.nfs.handoff_wait`.
-const DEFAULT_HANDOFF_WAIT: Duration = Duration::from_secs(10);
+/// The wait of a hand-over when the file leaves out `fs.nfs.handoff_wait`: the running instance's
+/// wait for the successor's `ready` covers the successor's whole start, which makes the
+/// attachments again.
+const DEFAULT_HANDOFF_WAIT: Duration = Duration::from_secs(120);
 
 /// The wait for the clients when the file leaves out `fs.nfs.drain_wait`.
 const DEFAULT_DRAIN_WAIT: Duration = Duration::from_secs(10);
