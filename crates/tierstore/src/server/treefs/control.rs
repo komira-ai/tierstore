@@ -24,7 +24,6 @@ use std::path::{Path, PathBuf};
 use std::sync::{Arc, Condvar, Mutex};
 
 use rustix::event::{PollFd, PollFlags, poll};
-use rustix::pipe::{PipeFlags, pipe_with};
 
 use super::attach::Failure;
 use super::core::{AttachError, Core};
@@ -171,9 +170,9 @@ fn session(core: &Arc<Core>, gate: &Gate, stream: UnixStream) {
 /// What a request is answered while the socket is being handed over.
 const HANDED_OVER: &str = "handed over";
 
-/// The thread that accepts, and the pipe that stops it.
+/// The thread that accepts, and the socket that stops it.
 struct Acceptor {
-    stop: OwnedFd,
+    stop: UnixStream,
     thread: std::thread::JoinHandle<()>,
 }
 
@@ -232,7 +231,7 @@ impl Control {
     /// Starts the thread that accepts.
     fn accept(&mut self) -> std::io::Result<()> {
         self.listener.set_nonblocking(true)?;
-        let (stopped, stop) = pipe_with(PipeFlags::CLOEXEC)?;
+        let (stopped, stop) = UnixStream::pair()?;
         let listener = Arc::clone(&self.listener);
         let (core, gate) = (Arc::clone(&self.core), Arc::clone(&self.gate));
         let thread = std::thread::Builder::new()

@@ -303,7 +303,7 @@ The attachments are kept in `attachments` in the runtime directory (`fs.runtime_
 
 The process exits 0 on SIGTERM or SIGINT; a start that cannot be done exits 1 (2 for a file that is refused, 3 for a cache on a stacked file system). It says `READY=1` to the service manager's `NOTIFY_SOCKET` once the mount is served. Where there is a service manager (`NOTIFY_SOCKET` is set), SIGTERM stops the readers, each having answered the request it held, and **leaves the mount** for the descriptor store to keep (see below); started by hand, with no service manager, it unmounts.
 
-#### Crash recovery and the hand-over of the mount
+### Crash recovery and the hand-over of the mount
 
 The mount outlives the process. The kernel keeps a FUSE connection until the last file of `/dev/fuse` for it is closed, so the process gives its descriptor to the service manager (`FDSTORE=1`, `FDNAME=fuse`, with `BARRIER=1` to know the manager has it before `READY=1`), and the unit holds it (`FileDescriptorStoreMax=1`, `FileDescriptorStorePreserve=restart`). A process that is killed, crashes or is restarted by `systemctl restart` leaves the mount where it was; requests that come meanwhile wait in the kernel, and jobs block in `open` and `lookup`. systemd restarts the unit (`Restart=on-failure`) and passes the descriptor back (`LISTEN_PID`, `LISTEN_FDS`, `LISTEN_FDNAMES`, the name `fuse`), and the new process serves it:
 
