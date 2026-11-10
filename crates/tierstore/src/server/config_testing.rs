@@ -1,7 +1,7 @@
 //! Fixtures of the tests of the configuration file, which `config_tests.rs` and
 //! `launch_tests.rs` share.
 
-use super::config::{DEFAULT_DRAIN_DEADLINE, DEFAULT_DRAIN_LB_WAIT, PerRun};
+use super::config::{DEFAULT_DRAIN_DEADLINE, DEFAULT_DRAIN_LB_WAIT, PerRun, settings_from_text};
 
 /// The knobs of a run that gives none of them.
 pub(crate) const DEFAULTS: PerRun = PerRun {
@@ -9,6 +9,18 @@ pub(crate) const DEFAULTS: PerRun = PerRun {
     drain_deadline: None,
     state_dir: None,
 };
+
+/// Loads the text of a whole file as the process that reads it does: `tierstore fs` has a file of
+/// its own, with an `[fs]` table, and the group `builders` that the examples name.
+pub(crate) fn loads(body: &str, per_run: PerRun) -> Result<(), String> {
+    if body.contains("[fs]") {
+        let loaded = super::treefs::from_text(body, "builders:x:1000:\n");
+        return loaded.map(drop).map_err(|why| why.to_string());
+    }
+    settings_from_text(body, per_run)
+        .map(drop)
+        .map_err(|why| why.to_string())
+}
 
 /// The drain a run that gives no part of it has: the defaults of the keys.
 pub(crate) const DEFAULT_DRAIN: (std::time::Duration, std::time::Duration) =

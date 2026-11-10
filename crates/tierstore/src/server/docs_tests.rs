@@ -24,12 +24,12 @@ use std::path::{Path, PathBuf};
 use clap::CommandFactory;
 
 use super::cli::Args;
-use super::config::{KEYS, keys_for_flags, settings_from_text};
+use super::config::{KEYS, keys_for_flags};
 use super::config_cache::LocalCacheTable;
 use super::config_policy::Policy;
-use super::config_testing::DEFAULTS;
+use super::config_testing::{DEFAULTS, loads};
 use super::config_unknown::fields_of;
-use super::treefs::{FsTable, from_text};
+use super::treefs::FsTable;
 
 /// The title of the sections that the exists-in-code checks leave out.
 const NOT_YET: &str = "Not in a release yet";
@@ -181,9 +181,6 @@ const SECTIONS: &[&str] = &[
     "fs",
 ];
 
-/// The group file the examples of `tierstore fs` are loaded with: the group they name.
-const FS_GROUPS: &str = "builders:x:1000:\n";
-
 /// One page.
 struct Doc {
     name: String,
@@ -199,8 +196,7 @@ struct Code {
     cache_keys: BTreeSet<String>,
     /// The keys of `[[policy]]`, which a page may name.
     policy_keys: BTreeSet<String>,
-    /// The keys of `[fs]`, the file of `tierstore fs`: they have no flag, and every page must
-    /// name each.
+    /// The keys of `[fs]`, the file of `tierstore fs`, which have no flag: every page names each.
     fs_keys: BTreeSet<String>,
     /// The non-test source of the crate with its comments and the backslashes of its escapes out.
     source: String,
@@ -424,14 +420,8 @@ fn check(docs: &[Doc], code: &Code) -> Vec<String> {
                         }
                     }
                 }
-                // The file of `tierstore fs` is a file of its own, with an `[fs]` table.
-                let loaded = if block.body.contains("[fs]") {
-                    from_text(&block.body, FS_GROUPS).map(drop)
-                } else {
-                    settings_from_text(&block.body, DEFAULTS).map(drop)
-                };
                 if block.info == "toml"
-                    && let Err(why) = loaded
+                    && let Err(why) = loads(&block.body, DEFAULTS)
                 {
                     problems.push(format!("{at}: the loader refuses the file: {why}"));
                 }
