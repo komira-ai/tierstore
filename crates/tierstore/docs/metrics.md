@@ -73,6 +73,7 @@ What they do not count:
 | `tierstore_cache_fill_failures_total` | counter | `reason`: `hash_mismatch`, `upstream_error`, `short_body`, `local_io`, `changed`, `aborted` | a fill ended without leaving an object in the cache |
 | `tierstore_cache_evictions_total` | counter | `reason`: `budget`, `floor` | an object was evicted |
 | `tierstore_cache_pinned_skips_total` | counter | none | an eviction pass passed over an object because it has more than one hard link |
+| `tierstore_cache_pin_skips_total` | counter | none | an eviction pass passed over an object because a tree pins it (see `local_cache.pin_limit`) |
 | `tierstore_cache_scrubbed_objects_total` | counter | none | the scrub hashed an object again |
 | `tierstore_cache_scrubbed_bytes_total` | counter | none | the bytes the scrub read for those objects |
 | `tierstore_cache_scrub_mismatches_total` | counter | none | the scrub dropped an object whose bytes no longer matched its digest |
@@ -92,9 +93,10 @@ The reasons of a failed fill:
 and a changed object are failures, not skips. `evictions_total` counts objects, not bytes, and
 `budget` is the share of an eviction pass that brings the cache under its low water mark while
 `floor` is the share that restores the free space of the file system. `pinned_skips_total` goes
-up once for each pinned object that a pass reaches. A pass walks the objects oldest first and
-stops once it has freed enough, so it does not reach every pinned object, and it keeps rising
-while an object that the passes reach stays pinned.
+up once for each object with more than one hard link that a pass reaches, and `pin_skips_total`
+once for each object that a tree pins (`local_cache.pin_limit`) that a pass reaches. A pass walks the
+objects oldest first and stops once it has freed enough, so it does not reach every such object,
+and each keeps rising while an object that the passes reach stays linked or pinned.
 `discarded_at_start_total` is a counter that is set once, when the cache is opened, and stays
 the same for the rest of the process.
 

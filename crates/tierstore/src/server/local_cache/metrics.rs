@@ -168,6 +168,7 @@ const WRITES_THROUGH: &str = "tierstore_cache_writes_through_total";
 const WRITE_EXISTS: &str = "tierstore_cache_write_exists_total";
 const KEEPS_EXPIRED: &str = "tierstore_cache_keeps_expired_total";
 const PINNED_SKIPS: &str = "tierstore_cache_pinned_skips_total";
+const PIN_SKIPS: &str = "tierstore_cache_pin_skips_total";
 const SCRUBBED_OBJECTS: &str = "tierstore_cache_scrubbed_objects_total";
 const SCRUBBED_BYTES: &str = "tierstore_cache_scrubbed_bytes_total";
 const SCRUB_MISMATCHES: &str = "tierstore_cache_scrub_mismatches_total";
@@ -186,7 +187,7 @@ const REVALIDATIONS: &str = "tierstore_cache_revalidations_total";
 const MODE: &str = "tierstore_cache_mode";
 
 /// The families of one sample, with their kinds, in the order `/metricz` shows them.
-pub(super) const PLAIN: [(&str, &str); 25] = [
+pub(super) const PLAIN: [(&str, &str); 26] = [
     (HITS, COUNTER),
     (MISSES, COUNTER),
     (BYTES_SERVED_LOCAL, COUNTER),
@@ -203,6 +204,7 @@ pub(super) const PLAIN: [(&str, &str); 25] = [
     (WRITE_EXISTS, COUNTER),
     (KEEPS_EXPIRED, COUNTER),
     (PINNED_SKIPS, COUNTER),
+    (PIN_SKIPS, COUNTER),
     (SCRUBBED_OBJECTS, COUNTER),
     (SCRUBBED_BYTES, COUNTER),
     (SCRUB_MISMATCHES, COUNTER),
@@ -267,6 +269,8 @@ pub struct Counters {
     evictions: [AtomicU64; EVICTED.len()],
     revalidations: [AtomicU64; REVALIDATED.len()],
     pub(super) pinned_skips: AtomicU64,
+    /// The objects an eviction pass passed over because a tree pins them.
+    pub(super) pin_skips: AtomicU64,
     /// The objects the scrub hashed again, and the bytes it read for them.
     pub(super) scrubbed_objects: AtomicU64,
     pub(super) scrubbed_bytes: AtomicU64,
@@ -396,6 +400,7 @@ impl Counters {
             read(&self.write_exists),
             read(&self.keeps_expired),
             read(&self.pinned_skips),
+            read(&self.pin_skips),
             read(&self.scrubbed_objects),
             read(&self.scrubbed_bytes),
             read(&self.scrub_mismatches),

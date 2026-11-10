@@ -259,3 +259,19 @@ fn head_before_put_is_true_unless_the_file_says_false() {
     assert!(why.contains("head_before_put"), "{why}");
     assert!(!why.contains("sometimes"), "{why}");
 }
+
+/// Asserts `local_cache.pin_limit`: left out it is half the budget (the file's budget is 1000, so
+/// 500, as `CacheConfig::new` has it), a size or a number given reaches the setting, both ends of
+/// the range, 0 and the budget, are taken, and a value past the budget is refused naming the key.
+#[test]
+fn pin_limit_is_half_the_budget_unless_given_and_is_held_to_the_budget() {
+    assert_eq!(CacheConfig::new("/c", 1000, Vec::new()).pin_limit, 500);
+    assert_eq!(cache_of("").cache.pin_limit, 500);
+    assert_eq!(cache_of("pin_limit = 300").cache.pin_limit, 300);
+    assert_eq!(cache_of("pin_limit = \"1000B\"").cache.pin_limit, 1000);
+    assert_eq!(cache_of("pin_limit = 0").cache.pin_limit, 0);
+    assert_eq!(
+        refusal("pin_limit = 1001"),
+        "local_cache.pin_limit: 1001 is not between 0 and 1000"
+    );
+}
