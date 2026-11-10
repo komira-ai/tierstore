@@ -85,5 +85,6 @@ Each is its own pull request, when needed, and none reshapes what section 3 prot
   - *Version token*: the adapter maps its native token into the opaque `Meta.tag` (a content-derived value, per the lease note); each front renders it (ETag, generation).
 - **`gcs` store adapter** (generation preconditions as the conditional-write mechanism), **`gcs` front**, **`fs` front** (a mount, no port; platform support is its own concern behind `Interface`; the `/dev/fuse` descriptor travels in the hand-off as a new line kind).
 - Writes through `fs`, an NFS gateway, further stores and fronts.
+- The `fs` front and the writes through it are superseded, if accepted, by [virtual-build-fs.md](virtual-build-fs.md), a proposal that serves trees as a filesystem from a separate process, `tierstore fs`, with its own hand-off, rather than as a front of the S3 process.
 
 The three questions of the first drafts (compose multipart, ETag or generation rendering, `fs` platform support) are each answered by a piece above and need no change to the formats of section 2.
