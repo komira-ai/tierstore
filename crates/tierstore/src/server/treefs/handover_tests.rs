@@ -190,7 +190,9 @@ async fn a_taker_that_answers_done_with_something_else_has_not_taken_the_mount()
 #[tokio::test(start_paused = true)]
 async fn a_hand_over_socket_that_cannot_accept_is_said_and_tried_again() {
     let old = instance("tfs-ho-noaccept", Duration::from_secs(3600), None);
-    let (not_listening, _peer) = std::os::unix::net::UnixStream::pair().unwrap();
+    let (not_listening, mut peer) = std::os::unix::net::UnixStream::pair().unwrap();
+    // Readable, so that the accept is tried and fails.
+    std::io::Write::write_all(&mut peer, b"x").unwrap();
     let broken = std::os::unix::net::UnixListener::from(std::os::fd::OwnedFd::from(not_listening));
     broken.set_nonblocking(true).unwrap();
     let mut offer = Offer::bind(
