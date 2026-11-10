@@ -7,8 +7,8 @@ use std::os::unix::net::UnixStream;
 use serde_json::{Value, json};
 
 use super::{
-    ECRYPTFS, OVERLAYFS, Running, Signals, StartError, check_cache, new_mount_id, refuse_stacked,
-    stacked_name,
+    ECRYPTFS, OVERLAYFS, Prepared, Running, Signals, StartError, check_cache, new_mount_id,
+    refuse_stacked, stacked_name,
 };
 use crate::server::treefs::config::FsSettings;
 use crate::server::treefs::testing::{Rig, SIGNALS, sample, with_fuse};
@@ -382,4 +382,43 @@ fn only_a_mount_point_that_answers_not_connected_is_discarded() {
     discard_dead_mount(&settings, alive, &kernel);
     let other = Err(std::io::Error::from_raw_os_error(2));
     discard_dead_mount(&settings, other, &kernel);
+}
+
+/// Detaches a mount that a test left behind, without waiting for a server.
+fn detach(mountpoint: &std::path::Path) {
+    let status = std::process::Command::new("fusermount3")
+        .args(["-u", "-z"])
+        .arg(mountpoint)
+        .status()
+        .unwrap();
+    assert!(status.success());
+}
+
+/// Asserts that a process that takes over a live mount reaches ready and serves it: the first
+/// process mounts and leaves (the readers stop, the mount stays), and a second adopts the
+/// descriptor. The root of the mount has no cache time, so a `stat` of the mount point is a request
+/// the new process must answer itself; an adoption that made the mount point first waited on its
+/// own readers, which were not started, and never finished.
+#[test]
+fn a_takeover_of_a_live_mount_serves_a_stat_of_the_mount_point() {
+    with_fuse(takeover_of_live_mount);
+}
+
+fn takeover_of_live_mount() {
+    let rig = Rig::new("tfs-run-live", sample());
+    let settings = settings(&rig);
+    let first = Running::start(&settings).unwrap();
+    let device = first.device().unwrap();
+    first.leave();
+    assert!(mounted(&rig.mountpoint));
+    let prepared = Prepared::load(&settings).unwrap();
+    let second = Running::adopt(&settings, prepared, device, (None, false)).unwrap();
+    assert!(std::fs::metadata(&rig.mountpoint).unwrap().is_dir());
+    assert!(
+        std::fs::metadata(rig.mountpoint.join("trees"))
+            .unwrap()
+            .is_dir()
+    );
+    second.stop().unwrap();
+    detach(&rig.mountpoint);
 }
