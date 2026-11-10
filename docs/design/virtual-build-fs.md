@@ -1,12 +1,11 @@
 # Build inputs as a filesystem: lazy, writable, digest-addressed trees served by tierstore
 
-Status: **proposal, for the CEO's review; nothing here is built, and no code changes come with this document.** The farm's build executor (the service that runs build actions, called "the executor" below) keeps
+Status: **proposal with experiment results and the owner's decisions of 2026-11-09 recorded (section 13); nothing here is built, and no code changes come with this document.** The experiments of section 11 and phase 0 have run (Linux on node-05 and in a KVM guest, macOS on the farm Mac, executor logs and a fanotify watch for the inputs); phase 1 starts now. The farm's build executor (the service that runs build actions, called "the executor" below) keeps
 copying (or linking) each action's inputs into a scratch directory and removing it afterwards. This document designs, in
 parallel, how tierstore could serve those inputs as a filesystem instead, so that a job scheduled by jobscheduler reads its
 inputs without a copy, fetches only what it opens, may write anywhere in them privately, and runs on Linux and on macOS.
-Section 11 is the measurement plan against today's path on real builds run by the executor; section 12 is the phased plan, which starts
-with probes and builds nothing before their answers. Section 13 sets out the decisions the CEO is asked to make, each with
-its options and a recommendation.
+Section 11 holds the results of the first measurements and the plan against today's path on real builds run by the executor; section 12 is the phased plan, with the probes marked done or open. Section 13 records
+the owner's decisions and sets out the two still open (the Linux kernel, C8; the macOS frontend, C9), each with its options and a recommendation.
 
 **What this document starts from.** An earlier proposal, built on researched findings, preceded it and recommended: one tierstore
 filesystem core in Rust with thin frontends (FUSE with passthrough on Linux, an NFSv4.0 loopback server on macOS, FSKit
@@ -15,14 +14,18 @@ farm-Mac probes before anything else. This document does not redo that research.
 their public sources), checks the items it left unconfirmed (section 3.2), designs the parts it left open (copy-up and
 whiteouts, 6.6; the live hand-off of FUSE and NFS sessions, section 7; pinning, 6.5), and, where it disagrees, says so and
 why (section 3.1). The one place it disagrees is the Linux writable layer: this document recommends the kernel's overlayfs
-there and the core's writable layer on macOS, and puts the choice to the CEO (decision C4).
+there, and the owner decided so (C4 = A, 2026-11-09): the build executor never writes into tierstore's filesystem and always
+overlays the mount. The core's own writable layer (views, 6.6) is therefore a macOS-only design that may prove unnecessary (8).
 
 **Claim tags.** **Read in code** means read in the named repository (tierstore at this commit; the public
 repositories of the build executor and of jobscheduler at their main branches when this was written), with the file named (paths in the executor's repository leave out the prefix its crate names share). **Sourced**
 means a public source listed at the end, cited as [S*n*]. **Inferred** means reasoned here from those, and says how.
 **Unverified** means not checked against a primary source; each such claim is a probe or spike of section 12 or is not
 load-bearing. **Unmeasured** means a performance expectation with no measurement behind it yet; section 11 exists to
-replace every one of them. Probes and spikes are named MP1 to MP6 and SP1 to SP5, so they are not confused with sources
+replace every one of them. **Measured** means an experiment result of 2026-11-09/10, cited as the result file and the
+experiment id, for example (Measured: linux E5): `linux`, `macos` and `inputs` name the `RESULTS.md` of the three experiment areas
+(Linux on node-05 and a KVM guest, macOS on the farm Mac, the executor's logs and a fanotify watch on node-05), and E*n* is the experiment's id in it. Those files are
+not in this repository; a figure that came from a rerun or a different tool says so beside it. Probes and spikes are named MP1 to MP6 and SP1 to SP5, so they are not confused with sources
 [S*n*] or with the rules S1 to S4 of AGENTS.md.
 
 **Terms.** The defined terms below avoid the words this repository's glossary already defines (entry, lease, hold, slot, registration, node id); where such a word appears in its ordinary sense (a directory entry, the cache lock's holder, an NFS lease) the sense is the ordinary one. A **frontend** here is a protocol adapter of `tierstore fs`, not one of the server's S3 or OCI **fronts**.
@@ -83,31 +86,59 @@ So "copy-to-scratch" is, in the farm's configuration, **link-to-scratch plus sha
 costs at least one directory entry made and removed per action, a shared tree costs one hard link per file per node, and
 every byte of every input is on the node's disk before the action starts, whether or not the action reads it.
 
-### 1.2 What is not known (and why this document ends in a measurement plan)
+### 1.2 What was not known, what is now measured, and what still is not
 
-- **How much of its input root an action opens.** The executor's `inputs:` log line has the file count (`files`, `tree_files`)
-  and the bytes fetched from the CAS (`fetched_bytes`), and `inputs phases:` has `walk_ms`, `link_ms`, `trees_ms` and
-  `chown_ms` (the executor's `crates/daemon/src/cache/fill.rs`, `crates/driver-container/src/input_phases.rs`). Nothing
-  records the input root's total bytes (the executor's `docs/design/ui-data.md` lists input bytes as not recorded) or which inputs an
-  action opens. A lazy filesystem wins only where actions open a small part of what they are given, or where much of what
-  they are given is not yet on the node.
-- **What setup costs today on the shipped backend.** The executor's fast-sandbox.md section 9: "No benchmark of the shipped backend
-  is in this repository."
+The executor's `inputs:` log line has the file count (`files`, `tree_files`) and the bytes fetched from the CAS
+(`fetched_bytes`), and `inputs phases:` has `walk_ms`, `link_ms`, `trees_ms` and `chown_ms` (the executor's
+`crates/daemon/src/cache/fill.rs`, `crates/driver-container/src/input_phases.rs`). Nothing records the input root's total
+bytes (the executor's `docs/design/ui-data.md` lists input bytes as not recorded) or which inputs an action opens. A lazy
+filesystem wins only where actions open a small part of what they are given, or where much of what they are given is not
+yet on the node. The first measurements are in; the executor on node-05 is the `storage-and-daemon` service (Measured: inputs, section 0, item 1).
+
+- **What setup costs today on Linux** (Measured: inputs E2, from the executor's own log lines for all 204,110 container leases on node-05,
+  2026-10-18 to 2026-11-10; production data, not a probe):
+  - `link_ms + trees_ms + chown_ms`, the per-file setup that a lazy filesystem removes, is **2.66% of summed `run_ms`**
+    (1.8% to 2.0% on the three busiest days, 4.9% on one quiet day of 4,425 leases). It is under the 5% bar of section 11.
+  - Whole `inputs_ms` is 17.8% of summed `run_ms`. The biggest part is **`walk_ms`, 13.5% of `run_ms` and 76% of `inputs_ms`**,
+    about 49 ms per directory read (p50 49 reads per action): the serial fetch of REAPI `Directory` messages, not file linking.
+    Earlier text counted the walk as the floor of this design's own attach. It is not a floor but a separate fix in the executor
+    (a faster or batched `Directory` fetch). Tree manifests that tierstore caches by digest (6.1) remove the repeat walks of a
+    tree already seen on the node (Inferred: only if the executor stops walking `Directory` messages once a manifest exists for the root digest; SP5 settles it).
+  - 40% of actions run under 2 s, and for them setup is 1.7 times the run (Measured: inputs E2, 3.1).
+- **What setup costs on the Mac** (Measured: inputs E2, 3.4; the farm Mac's log, 3,379 leases, 2026-10-15 to 10-30, an older driver whose log
+  has no phase split): for actions with a shared tree, `inputs_ms` is p50 6.3 s and p90 37 s against `run_ms` p50 6.8 s, and
+  summed `inputs_ms` is 1.9 times summed `run_ms`. There is no split into walk, fetch and clone, so this does not show that
+  the clone is the cost: `clonefile` of a 190,000-file tree takes 1.5 s there (Measured: macos E3), so the clone of a 15,200-file tree would be
+  about 0.1 to 0.2 s (Inferred from the per-file figure). The log's queueing and fetch time are in the figure.
+- **How much of its input root an action opens** (Measured: inputs E1, fanotify on node-05's filesystem, 323 actions; **these are Bazel probe builds
+  submitted to the lab farm's REAPI, not Buck2 builds of the komira engine; a Buck2 rerun is pending**). The byte share is high and the file share
+  tiny, because every action opens the one big compiler binary:
+  - C actions with a zig toolchain tree (217 actions; input root 2,874 files and 203 MB at p50): 110 files opened (3.9%), 173 MB (85% of the bytes).
+  - Rust `rlib` actions (73 actions; 81 files and 603 MB at p50): 23 files (23%), 407 MB (69%).
+  - Over all 323 actions, opened bytes are 77.7% of input bytes. Files of 1 MB or more are 99.3% of opened bytes.
+  - The production shape (a 15,199-file, 470 MB tree for 58% of actions) is larger than the zig probe; opened share there is
+    **Inferred** at 30% to 40% of tree bytes and about 1% of its files (110 of 15,199). It needs a watch on real production leases. No such watch has run.
+  - On the Mac the opened share is not measured (the permission layer denied running a downloaded Bazel binary there; inputs section 7).
+- **Cold-file sizes** (Measured: inputs E9). Opened cold files over the 18 probe leases that fetched anything (n = 143): p50 21.6 kB, p90 7.2 MB, p99 and max 174 MB;
+  files of 1 MB or more are 99% of the opened cold bytes. Two clean first-fetcher leases of a toolchain fetched 555 MB and 519 MB and opened 7 of its
+  49 and 45 files, 377 MB and 353 MB. In production, 21.8% of actions had a cache miss, with fetched bytes per missing action p50 166 kB, p90 5.0 MB,
+  p99 29.4 MB (an average per action, not per-file sizes, which the log does not hold). So a cold toolchain action waits for one open of a 150 MB to 190 MB
+  binary (6.4); only the sizes are measured, not that wait.
 - The executor has already weighed a lazy input root and rejected it **for now**: "FUSE/NFSv4 lazy input root ... Revisit only if
-  actions read a small fraction of huge input roots" (the executor's `docs/design/worker-cache.md` section 11). That condition is
-  the first thing section 11 measures.
+  actions read a small fraction of huge input roots" (the executor's `docs/design/worker-cache.md` section 11). The measurements say the
+  condition is met by the file count and not by the bytes of the probe shapes (Inferred). The owner decided to build the surface anyway (C6, section 13).
 - **Where laziness loses.** Buildbarn reports its virtual filesystem running actions at over 95% of the speed of a fully
   downloaded input root in aggregate, and slow on workloads with poor cache hit rates, because each miss is a
   synchronous round trip; it added a cache of what similar actions read, to prefetch it [S7]. So the plan reports tails,
   not only medians, and keeps a prefetch arm.
-- **macOS has no published benchmark** of an NFS loopback or FSKit build filesystem against copies [S20, S25]; the probes
-  of section 12 are the first numbers.
+- **macOS has no published benchmark** of an NFS loopback or FSKit build filesystem against copies [S20, S25]; the NFSv3
+  numbers of section 8 are the first, from a demo-class server (Measured: macos E12). FSKit has none: it cannot run on the farm Mac without a signing identity (8).
 
 ### 1.3 What a filesystem could change
 
 - Setup becomes one request to tierstore, independent of the number of files.
 - Bytes are fetched when a file is first opened, so an action that opens a small share of a large toolchain fetches that
-  share on a cold node (unmeasured: no share is assumed).
+  share on a cold node (on the probe builds the share was 69% to 85% of bytes and under 25% of files, 1.2; the production share is Inferred).
 - A node's disk holds each blob once, in tierstore's cache, and with passthrough the kernel's page cache holds it once,
   shared by every job (section 6.9).
 - Teardown removes only what the action wrote.
@@ -123,13 +154,16 @@ Goals:
 - **One tree, one name.** A job's inputs are immutable trees addressed by digest. A job sees its trees and nothing else of
   the store.
 - **Writable to the job, private to the job.** A job may create, change and delete files anywhere in its view, as it may
-  in a copy, and no other job sees it.
-- **One core, thin frontends.** The filesystem's logic is written once; FUSE and NFS (and later FSKit) only translate.
+  in a copy, and no other job sees it. On Linux the writable layer is the kernel's overlay above a read-only tree (C4 = A); the
+  tree itself is never written.
+- **One core, thin frontends.** The filesystem's logic is written once; FUSE and NFS (and FSKit, if C9 chooses it) only translate.
 - **No job fails because tierstore was updated.** A live update hands the filesystem session over, as the update hook
   already hands over listening sockets.
 - **No job fails because tierstore's filesystem process crashed and came back**; if it does not come back, jobs fail with
   an error the job runtime can tell from a build error.
-- **Linux first, macOS with a stated route.** The farm's kernel is 6.17 (as its operators state; checked on a node in SP1).
+- **Linux first, macOS with a stated route.** The farm's kernel is **6.8, on all six lab nodes** (Measured: inputs, section 8; linux, section 9), not 6.17 as an
+  earlier version of this document took from the operators. FUSE passthrough and `FUSE_NOTIFY_RESEND` need 6.9 or later; the apt candidate,
+  the 24.04 HWE kernel 7.0.0-42, has both. The design runs on 6.8 without them, at a cost (6.4, 7.2), and the kernel is decision C8.
 - **Measured against today** before anything ships to the farm (section 11), with today's path kept as the kill-switch.
 - **tierstore stays generic.** It knows trees of content-addressed files, not REAPI, the executor or Buck2.
 
@@ -138,6 +172,8 @@ Non-goals:
 - Changing the executor now. The executor keeps its materialisation; this design ends where the executor and jobscheduler would call it.
 - A per-job disk quota (CEO, 2026-11-09: whole-node pool; section 6.9).
 - Serving a job's writes back as a new tree. Outputs are collected as today (6.6).
+- A general read/write interface of `tierstore fs`. The owner decided (2026-11-09) that the executor's builds never write into the tierstore
+  filesystem; a read/write surface for other clients is a later design of its own, and this document does not design it.
 - Windows.
 - A network filesystem for remote clients: the filesystem is local to a node, for the jobs on that node.
 - FUSE inside the job's container. No job gets `/dev/fuse`.
@@ -158,10 +194,10 @@ Non-goals:
 | Resolvable handles: an immutable file's handle carries what is needed to serve it, so the server keeps no per-file state [S5] | **Kept, extended** | Every inode number and NFS handle is derivable from the tree's manifests and a small table (invariant I1, 6.3), and so is every handle of a view (6.6). That is what makes a crash and an update survivable (section 7). |
 | Lazy Merkle expansion, one directory level on first access [S6] | **Changed: metadata eager per tree, data lazy** | A directory expanded on first access gets an inode number that depends on the order of lookups, which a restarted process cannot recover. Flattening a tree when it is first attached keeps numbers derivable; its cost is spike SP4 (6.3, D7). |
 | Pin the job's tree in the local cache; the evictor skips pinned; refcount per job tree, not per file | **Kept, designed** | Pins are kept by the cache's single writer, per attached tree, over the blobs the tree has opened, with a cap on pinned bytes (6.5). Correctness never depends on them: an evicted blob is fetched again (6.4). |
-| The per-job writable layer, copy-up included, lives in the core, so no overlayfs is needed | **Kept for macOS; for Linux put to the CEO (C4)** | On macOS there is no overlay, so the core's writable layer (6.6) is the design. On Linux a kernel overlayfs over a **read-only** FUSE tree keeps every job's writes on the node's disk, outside tierstore, in the directory both job runtimes already collect outputs from: tierstore then holds no job data, a crash loses nothing, and the FUSE server stays read-only, which keeps its crash and update simplest (section 7). The core's writable layer works on Linux too (writes to upper files go by passthrough), so this is a choice of simplicity and risk, not of possibility. |
-| Linux: FUSE with passthrough (6.9+), `max_background` raised to about 1024 (the default of 12 wedged busy Buildbarn workers [S28]) | **Kept** | Passthrough needs `CAP_SYS_ADMIN` in the initial user namespace [S1], which the network-facing tierstore process must not have, hence a separate filesystem process (6.2, C5). The kernel binds an inode to one backing file and forbids mixing passthrough and cached opens of one inode [S2], which shapes 6.4. |
-| macOS: one NFSv4.0 loopback server, mounted once per node at a fixed path, a per-job view per run, Seatbelt `(subpath ...)` isolation | **Kept, with two additions and one open choice** | 8. Additions: the server also checks the caller's uid against the run (jobscheduler gives each run its own user), and a view's handles are derivable so a restart is a pause. Open choice: NFSv4.0 (Buildbarn's, compound operations, open state to recover) or NFSv3 (stateless, chattier, a mature Rust crate); probe MP3 measures both, and C2 asks the CEO to let the version follow the probe. |
-| FSKit later, as a third frontend behind a flag | **Kept (C3)** | No passthrough for file-backed volumes, interactive per-user enablement, and Apple's own statement that it is not yet suited to a network-backed filesystem [S20, S25]. |
+| The per-job writable layer, copy-up included, lives in the core, so no overlayfs is needed | **Linux: changed, decided (C4 = A). macOS: kept, but possibly unnecessary** | On Linux a kernel overlayfs over a **read-only** FUSE tree keeps every job's writes on the node's disk, outside tierstore, in the directory both job runtimes already collect outputs from: tierstore holds no job data, a crash loses nothing, and the FUSE server stays read-only, which keeps its crash and update simplest (section 7). That composition works on 6.8 and on 7.0 (Measured: linux E4). The owner decided that the executor always overlays the mount and never writes into it. On macOS there is no overlay; the core's views (6.6) are the design only if a client needs a writable view that it cannot build itself, and the executor can (Measured: macos E18; 8). |
+| Linux: FUSE with passthrough (6.9+), `max_background` raised to about 1024 (the default of 12 wedged busy Buildbarn workers [S28]) | **Kept for kernels with passthrough; a mode without it for 6.8 (C8)** | Passthrough needs `CAP_SYS_ADMIN` in the initial user namespace of the calling process, not satisfied by uid 0 without the capability, by root in a user namespace, or by the opener of `/dev/fuse` (Measured: linux E10), which the network-facing tierstore process must not have, hence a separate filesystem process (6.2, C5). The kernel binds an inode to one backing file and forbids mixing passthrough and cached opens of one inode [S2], which shapes 6.4. The lab runs 6.8, which has no passthrough (the ioctl returns `ENOTTY`; Measured: linux E10): on it every read crosses the server (6.4). |
+| macOS: one NFSv4.0 loopback server, mounted once per node at a fixed path, a per-job view per run, Seatbelt `(subpath ...)` isolation | **Kept, with two additions and the frontend still open (C9)** | 8. Additions: the server also checks the caller's uid against the run (jobscheduler gives each run its own user), and handles are derivable so a restart is a pause (Measured: macos E16, with a patched demo server). NFSv4.0 could not be measured: no server was available (Measured: macos E12c). NFSv3 was measured and is slower and chattier than native by a large factor on metadata (8). |
+| FSKit later, as a third frontend behind a flag | **Changed (C3 reframed): an open candidate, blocked on signing** | No passthrough for file-backed volumes, interactive per-user enablement, and Apple's own statement that it is not yet suited to a network-backed filesystem [S20, S25]. On the farm Mac an ad-hoc signed extension with the FSKit entitlement is killed at exec, so it needs a team with the entitlement and one click in System Settings by the console user (8; Measured: macos E13). It is not set aside on the forum posts; it is measured against NFS once signing is available (C3). |
 | APFS `clonefile` as the fallback with no server | **Kept** | It is the executor's macOS path today and stays the default and the kill-switch (8). |
 | A live update hands over the FUSE session as the hook hands over listening sockets | **Kept, plus crash, plus NFS** | 7.1 to 7.3 for FUSE (descriptor store, recorded `INIT`, `FUSE_NOTIFY_RESEND`); 7.5 for NFS: new on macOS, which has no hand-over today; derivable handles and an on-disk duplicate request cache make a restart a pause; NFSv4.0 state is handed over on an update, and after a crash reclaims are answered `NO_GRACE` and the client opens again. |
 | Output capture by hashing in place, uploading only when no writer is open [S6] | **Kept in substance** | The runtimes' existing collectors read outputs once from the upper directory after the job's processes are gone, so no writer is open (6.6). tierstore does not store outputs (D4). |
@@ -171,50 +207,53 @@ Non-goals:
 
 | Item | Status now |
 |---|---|
-| Does the `fuser` crate expose FUSE passthrough? | **Yes**: since 0.16, and `BackingId::into_raw` since 0.18; it does not send `FUSE_NOTIFY_RESEND`, and `Session::from_fd` cannot adopt an initialised connection (read in its source and changelog [S4]). 6.2 says what is added. |
-| FUSE descriptor hand-over on Linux | **Designed (7.1 to 7.3), from the kernel source**: the connection lives while any device file of it is open; `FUSE_NOTIFY_RESEND` requeues what a dead server read; a released clone fails its requests [S2, S3]. The run of it is spike SP2. |
+| Does the `fuser` crate expose FUSE passthrough? | **Yes**: since 0.16, and `BackingId::into_raw` since 0.18; it does not send `FUSE_NOTIFY_RESEND`, and `Session::from_fd` cannot adopt an initialised connection (read in its source and changelog [S4]). **Measured, and worse than "cannot adopt":** `from_fd` always waits for `INIT`; on an initialised fd it consumes one queued request and answers it `EIO`, so a job gets a spurious error (Measured: linux E7). 6.2 says what is added. |
+| FUSE descriptor hand-over on Linux | **Designed (7.1 to 7.3), from the kernel source, and run for the crash case**: the connection lives while any device file of it is open; `FUSE_NOTIFY_RESEND` requeues what a dead server read; a released clone fails its requests [S2, S3]. Measured with a raw-protocol server and an fd holder: requests queued and not yet read are served by the new server 18 ms after it starts; requests read and not answered hang on 6.8 and are served 30 ms after start on 7.0 with `FUSE_NOTIFY_RESEND` (Measured: linux E7). The hand-over of 7.3 and the farm's concurrency are still spike SP2. |
 | NFSv4.0 open-state recovery after a server restart | **Client side confirmed in source**: Apple's current NFS client reclaims opens with `CLAIM_PREVIOUS` after a stale client id (`kext/nfs4_vnops.c`, `open_reclaim` [S24]). Whether the whole sequence works against our server, and how long new opens wait in the grace period, is probe MP3. 7.5 hands NFSv4.0 state over on an update, and after a crash keeps no grace period: a server with no stable record must answer reclaims `NO_GRACE` (RFC 7530 [S33]), and the client opens again. |
 | Licence and reuse of Buildbarn's NFS and XDR code | **Apache-2.0**, both `bb-remote-execution` and `go-xdr` (their repositories' licence records [S5]). A Rust port is allowed with the notice kept; Go code is not linked into tierstore (C2). |
 | Buildbarn's copy-up of pre-existing inputs | **None**: its CAS files refuse an open for write or truncate and a size change with an access error, and its write path panics if reached ("Files created by this factory are entirely immutable") [S6]. Copy-up is ours (6.6); EdenFS's materialize-on-write is the closer template [S9]. |
-| How Seatbelt treats paths on an NFS mount | **Not checkable without a Mac**: probe MP2 (`(debug deny)` trace). Until it answers, the server's own uid check (6.8) is the isolation that does not depend on it. |
-| Whether `mount(2)` of NFS over a Unix socket needs root, and whether a Unix socket or loopback TCP works on current macOS | **Probe MP1**. EdenFS reports the client buggy over Unix sockets [S10]; a report of the Unix-socket mount failing on macOS 26 is unconfirmed [S29]. |
-| FSKit: a LaunchDaemon mounting with no user logged in, a device manager pre-approving the extension, sockets from the extension, `fskitd`'s user | **Deferred with FSKit (C3)**: probe MP6 only if C3 is revisited. |
+| How Seatbelt treats paths on an NFS mount | **Answered (MP2): identical to APFS** in all 11 cases (read, create, `..`, symlink and rename escapes), and the deny log names the mount path (Measured: macos E15). Not tested: an FSKit mount, a mount under a firmlinked path, a cross-view hard link made by the server. The server's own uid check (6.8) stays, as it is cheap. |
+| Whether `mount(2)` of NFS over a Unix socket needs root, and whether a Unix socket or loopback TCP works on current macOS | **Answered in part (MP1)**. `mount_nfs` of a loopback export needs no root when the mount point is owned by the user (Measured: macos E14); a root-owned mount point gives `Operation not permitted`. **The Unix-socket transport failed**: 15 spellings of `mount_nfs` all gave "no usable addresses for host"; a direct `mount(2)` with XDR arguments was not tried (Measured: macos E14). Loopback TCP works. EdenFS reports the client buggy over Unix sockets [S10]; a report of the Unix-socket mount failing on macOS 26 is unconfirmed [S29]. |
+| FSKit: a LaunchDaemon mounting with no user logged in, a device manager pre-approving the extension, sockets from the extension, `fskitd`'s user | **Open, blocked on signing (C3)**; probe MP6. Measured so far: the entitlement is restricted and an ad-hoc signed extension is killed by AMFI (macos E13); `pluginkit -e use` is ignored by FSKit and the enablement is a per-user file written by the System Settings toggle; for a mount started by root, `fskitd` picks the console user's agent (Measured: macos E13, with a built-in module). That no user logged in means no agent is Inferred. |
 | Mountpoint for S3 being Linux-only | Not pursued: no S3 filesystem is a base (non-goals). |
 
 ## 4. Options
 
 ### 4.1 Linux
 
-| | L1: today (copy / link / shared trees) | L2: FUSE writable view in the core (Buildbarn shape, the proposal) | **L3: kernel overlayfs over a read-only lazy FUSE tree (recommended, C4)** | L4: composefs (EROFS metadata, overlay data-only lower over the local cache) | L5: EROFS over fscache on-demand (Nydus) |
+| | L1: today (copy / link / shared trees) | L2: FUSE writable view in the core (Buildbarn shape, the proposal) | **L3: kernel overlayfs over a read-only lazy FUSE tree (decided, C4 = A)** | L4: composefs (EROFS metadata, overlay data-only lower over the local cache) | L5: EROFS over fscache on-demand (Nydus) |
 |---|---|---|---|---|---|
 | Lazy data | No | Yes | Yes, per file | No: composefs reads objects from a local directory and has no fetch on demand [S15] | Yes, by block range [S16] |
 | Setup per action | One link (or copy) per file; one bind per shared tree | One attachment, with one host-wide mount | One attachment; the overlay mount the runtime makes today | An EROFS image per tree, fetch missing blobs, mount | An image per tree, mount |
 | Metadata path | Native | FUSE on a miss of the kernel's caches; the writable parts need short timeouts or explicit invalidation | FUSE on a miss of the kernel's caches only; the tree is immutable, so cached for the longest time the protocol allows, absent names included (6.3) | Native (kernel EROFS) | Native |
-| Data path, blob local | Native | Passthrough to the cache file for tree files and to the upper file for written files [S1] | Passthrough to the cache file; written files are native in the overlay | Native | Native (cachefiles) |
+| Data path, blob local | Native | Passthrough to the cache file for tree files and to the upper file for written files [S1] | Passthrough to the cache file (kernel 6.9 and later); written files are native in the overlay. On 6.8 every read crosses the server: 0.43 to 1.1 GiB/s from an untuned `fuser` server against native-speed passthrough at 5.3 GiB/s (one reader) and 23 GiB/s (eight), warm, in a guest (Measured: linux E6) | Native | Native (cachefiles) |
 | Where a job's writes live | Upper dir on disk | Upper dir on disk, managed by the core (6.6) | Upper dir on disk, managed by the kernel, as today | Upper dir on disk | Upper dir on disk |
-| tierstore crash | Nothing | Lookups and opens pause, then resume, with the core's view state on disk in order (6.6, 7.2) | Lookups and opens pause, then resume (7.2); no write is ever in tierstore | Nothing at run time | Reads of missing ranges fail; restart not documented |
+| tierstore crash | Nothing | Lookups and opens pause, then resume, with the core's view state on disk in order (6.6, 7.2) | Lookups and opens pause, then resume (7.2); no write is ever in tierstore. On 6.8, requests the dead server had read hang until aborted (7.2) | Nothing at run time | Reads of missing ranges fail; restart not documented |
 | Live update of tierstore | Nothing | Hand over the descriptor; view state is on disk (7.3) | Hand over the descriptor; the state is derivable (7.3) | Nothing | Not documented |
 | Privilege | Rootless | Mount and passthrough need `CAP_SYS_ADMIN` | Same, in a process with no network listener | Root mount: data-only lower layers need trusted xattrs [S17] | Root (`/dev/cachefiles`) |
-| Stacking depth | 1 (overlay) | 1 | 2: the FUSE mount declares depth 1 for passthrough, the overlay adds 1, and 2 is the kernel's maximum [S1, S17] | 2 | 2 |
+| Stacking depth | 1 (overlay) | 1 | 2 with passthrough: the FUSE mount declares depth 1, the overlay adds 1, and 2 is the kernel's maximum [S1, S17]; a FUSE `max_stack_depth` of 2 makes the overlay mount fail `EINVAL` (Measured: linux E4). Without passthrough (6.8) the FUSE mount is depth 1 and the overlay 2 anyway. | 2 | 2 |
 | New code on the job's path | None | The core's writable layer: create, rename, link, truncate, chmod, whiteouts, copy-up, all through FUSE | A read-only filesystem | Image builder | Image builder, cachefiles daemon |
-| Verdict | The baseline and the kill-switch | The macOS design; the Linux alternative (C4) | **Recommended for Linux** | Not lazy; the fallback if section 11 finds laziness does not pay (D8) | Deprecated in the farm's own kernel: `EROFS_FS_ONDEMAND` is marked deprecated and scheduled for removal [S16] |
+| Verdict | The baseline and the kill-switch | Not chosen for Linux (C4 = A); the views are a macOS design that may prove unnecessary (8) | **Chosen for Linux** | Not lazy; the fallback if section 11 finds laziness does not pay (D8) | Deprecated in the farm's own kernel: `EROFS_FS_ONDEMAND` is marked deprecated and scheduled for removal [S16] |
 
 ### 4.2 macOS
 
 macOS has no overlay: union mounts are documented as unsupported, `nullfs` is not in Darwin, APFS snapshots are read-only
 and need an entitlement, library interposition is stripped from hardened and system binaries, and Endpoint Security can
 allow or deny but not redirect [S30]. So a writable lazy view must be served by a filesystem
-process, or the tree must be copied.
+process, or the tree must be copied. Measured on macOS 27.0.1: the filesystems present are apfs, hfs, exfat, msdos, cd9660, udf,
+nfs, smbfs, webdav, ftp, ntfs, tmpfs, virtiofs and acfs; `MNT_UNION` is accepted but is only the old lookup fallthrough
+(no merged readdir, no copy-up, `rm` and writes to a lower file do not work), and `clonefile` from an NFS mount to APFS fails
+`EXDEV` (Measured: macos E18d, E18b).
 
-| | M0: today (`clonefile` of trees, copies) | **M1: one NFS loopback mount per node, writable views in the core (recommended)** | M2: FSKit module | M3: macFUSE / FUSE-T |
+| | M0: today (`clonefile` of trees, copies) | **M1: one NFS loopback mount per node, read-only, the client makes its writable view (C9)** | M2: FSKit module | M3: macFUSE / FUSE-T |
 |---|---|---|---|---|
 | Lazy | No | Yes | Yes | Yes |
-| Writable | Yes (copy-on-write clone [S21]) | Yes: the core's views (6.6) | Yes | Yes |
+| Writable | Yes (copy-on-write clone [S21]) | Read-only mount; a writable view is made by the client (the executor: real directories and symlinks, 35 µs per file; Measured: macos E18a) or by the core's views (6.6) if needed | Yes | Yes |
 | Kernel side | APFS | Apple's NFS client; no kext | FSKit: from macOS 15.4, one resource per volume; URL resources from macOS 26 [S18] | macFUSE: kext needs approval and reboot, or its FSKit backend [S19]; FUSE-T: an NFSv4 server under a non-permissive licence [S14] |
-| Read path | Native | Every read that misses the client's cache is an RPC to `tierstore fs`; no passthrough | Every lookup, directory read and read that misses the cache crosses XPC to the module (a directory read about 120 µs against a trivial module; higher CPU than macFUSE reported [S20]); kernel-offloaded I/O needs a device node [S20] | FUSE requests; FUSE-T as NFS |
-| Install | Nothing | A process; one mount by root at boot | An app extension, enabled per user and interactively in System Settings, not globally [S18, S25] | Kext approval, or a non-permissive licence |
-| Crash | Nothing | A hard mount waits for the server [S22, S10]; derivable handles and the client's reclaim make the return a pause (7.5, MP3) | Not documented | Not documented |
-| Verdict | Default and kill-switch until M1 is measured | **Recommended**, gated by probes MP1 to MP5 | Later, behind a flag (C3) | Rejected: licence (FUSE-T), or a user-enabled extension or kext (macFUSE) |
+| Read path | Native | Every read that misses the client's cache is an RPC to `tierstore fs`; no passthrough. NFSv3, demo-class server: stat 23x (warm) to 66x (cold) and open-and-read-all 13x to 26x slower than APFS, `clang` 2.0x to 2.6x, `cargo` 1.25x; the data is cached twice, 2.02x (Measured: macos E12, E17) | Every lookup, directory read and read that misses the cache crosses XPC to the module (a directory read about 120 µs against a trivial module; higher CPU than macFUSE reported [S20]); **no kernel-offloaded I/O for a path or URL backed volume**: the macOS 27 SDK's extent packing takes only a block device resource (Measured: macos E13, from the headers). Not run. | FUSE requests; FUSE-T as NFS |
+| Install | Nothing | A process; one mount at boot, which needs no root if the mount point is owned by the mounting user (Measured: macos E14) | An app extension, enabled per user and interactively in System Settings, not globally [S18, S25]; **needs a signing team with the FSKit entitlement** and the click by the console user (Measured: macos E13) | Kext approval, or a non-permissive licence |
+| Crash | Nothing | A hard mount waits for the server [S22, S10]. With stable handles a restart is a pause: 12.5 s for an 8 s outage, open files continue (Measured: macos E16); with the demo server's per-start handles every open fd and the mount go `ESTALE` for good | Not documented; not run | Not documented |
+| Verdict | Default and kill-switch until a frontend is chosen | **A candidate, measured on NFSv3 only (C9)** | **A candidate, blocked on signing; measured against NFS once available (C3, C9)** | Rejected: licence (FUSE-T), or a user-enabled extension or kext (macFUSE) |
 
 ## 5. The recommendation in one picture
 
@@ -223,24 +262,25 @@ process, or the tree must be copied.
  ┌───────────────────────────────────────────────────────────────────────────────────────────────┐
  │ core                                                                                          │
  │   trees:   tree manifests -> flattened, derivable inode numbers (I1)            read-only     │
- │   views:   tree + upper directory: copy-up, whiteouts, derivable handles (6.6)  macOS (and C4) │
- │   opens:   fill on first open; passthrough backing ids (Linux)                                │
+ │   views:   tree + upper directory: copy-up, whiteouts (6.6)   macOS only, maybe not needed   │
+ │   opens:   fill on first open; passthrough backing ids (Linux 6.9+; not on 6.8)               │
  │   control: attach / detach (Unix socket);  state in a runtime directory (7.1)                 │
- │ frontends: FUSE + passthrough (Linux)  |  NFSv4.0 or v3 on loopback (macOS)  |  FSKit (later) │
+ │ frontends: FUSE (Linux)  |  NFS on loopback (macOS)  |  FSKit (macOS, if C9 chooses it)       │
  └────────────┬───────────────────────────────────────────────────┬──────────────────────────────┘
               │ /dev/fuse  or  NFS                                │ fill socket (Unix): fill, touch, pin, unpin
               ▼                                                   ▼
   Linux job: overlayfs /work = upper (run dir)            tierstore (build node, as today)
              over /run/tierstore/fs/trees/<digest>          [local_cache]: one writer; pins; LRU
-  macOS job: /private/var/tierstore/fs/views/<run>          upstream: shared tiers (S3)
-             (Seatbelt: own subpath only; server checks uid)
+  macOS job: a writable directory the client builds (symlinks into the read-only
+             trees/<digest>), or views/<run> if the core builds views (6.6)   upstream: shared tiers (S3)
 ```
 
 In words: a client (jobscheduler's agent, or the executor's daemon for as long as the executor schedules its own runs) asks `tierstore fs`
 to **attach** a tree by its digest for a run. `tierstore fs` reads the tree's manifests through the node's tierstore cache
 and makes the tree appear on its one node-wide mount. On Linux the job runtime gives `trees/<digest>` to the job's
-container as the overlay's lower layer, exactly where it gives a materialised input root today. On macOS `tierstore fs`
-also makes a **view** for the run, `views/<run>`, writable through the core, and the runtime starts the job there. The
+container as the overlay's lower layer, exactly where it gives a materialised input root today. On macOS the mount is
+read-only too, and the client makes the run's writable directory over it (8); only if that proves unworkable does `tierstore fs`
+make a **view** for the run, `views/<run>`, writable through the core (6.6). The
 first open of a file asks the node's tierstore to fill that blob into its cache; on Linux the open is then passed through
 to the cache file, so the job's reads never visit `tierstore fs`. When the job ends, the runtime collects outputs from the
 upper directory and detaches.
@@ -326,8 +366,9 @@ Two processes on a build node, one binary, one package:
 - **`tierstore fs`**, new, a subcommand of the same binary with its own unit, `tierstore-fs@.service`, alternating
   instances `a` and `b` as the S3 unit does (on macOS, a second launchd job). It runs as the same user as the cache, so it
   can read the cache's files. On Linux it holds `CAP_SYS_ADMIN` as its only capability (to mount, and for passthrough's
-  `FUSE_DEV_IOC_BACKING_OPEN`, which checks `CAP_SYS_ADMIN` in the initial user namespace [S1]); on macOS it needs no
-  privilege, because root mounts its NFS export at boot (8). It has **no network**: on Linux `RestrictAddressFamilies=AF_UNIX`;
+  `FUSE_DEV_IOC_BACKING_OPEN`, which checks `CAP_SYS_ADMIN` in the initial user namespace [S1], for open and for close, on the calling process; Measured: linux E10);
+  the capability is needed for passthrough only, so on 6.8 (no passthrough) mounting is all it is for. On macOS it needs no
+  privilege, because the NFS export is mounted at boot (8) and `mount_nfs` of a loopback export needs no root when the mount point is owned by the mounting user (Measured: macos E14). It has **no network**: on Linux `RestrictAddressFamilies=AF_UNIX`;
   on macOS its NFS listener is bound to loopback (or a Unix socket, MP1) and it makes no outbound connection. It talks to
   the node's tierstore over the fill socket only, and opens the cache's files read-only, at the path the cache's layout
   gives the key `_tiering/fill/<sha256>` (`local_cache/layout.rs`: `name_of`, `data_path`).
@@ -361,10 +402,14 @@ rewrites that paragraph and the `"fs"` row of `configuration.md` (P10).
 **The FUSE protocol** is spoken through the `fuser` crate (MIT; kernel passthrough since 0.16, `BackingId::into_raw`,
 which lets a backing id outlive the process that made it, since 0.18 [S4]). Our code adds no `unsafe` (R2): the mount is
 `rustix::mount`, descriptor passing is the `rustix` code the hand-off already uses, and `FUSE_NOTIFY_RESEND` is a 16-byte
-header written to the device. Two things `fuser` lacks (read in its source and changelog [S4]): it cannot send
-`FUSE_NOTIFY_RESEND`, and `Session::from_fd` waits for `FUSE_INIT`, which the kernel sends once per mount, so it cannot
-adopt a connection that is already initialised. The second is what crash recovery and hand-over need (7.1). The plan is a
-constructor contributed to `fuser` upstream that starts a session from a recorded `INIT` reply; if upstream does not take
+header written to the device. Two things `fuser` 0.18 lacks (read in its source and changelog [S4], and **confirmed by a test**): it cannot send
+`FUSE_NOTIFY_RESEND`, and `Session::from_fd` always runs the handshake and waits for `FUSE_INIT`, which the kernel sends once per mount, so it cannot
+adopt a connection that is already initialised. Given an initialised descriptor it does worse than refuse: it reads the first queued request, fails with
+"Received non-init FUSE operation during handshake" after 75 to 124 µs, and answers that request `EIO`, so a job gets a spurious error (Measured: linux E7).
+**`fuser` 0.18 therefore needs a patch**: a constructor that skips the handshake and takes the recorded `INIT` reply (`KernelConfig`, protocol version),
+and a way to send `FUSE_NOTIFY_RESEND` (header only). The probe's raw-protocol server shows each is a few dozen lines at the protocol level (Measured: linux E7).
+The second is what crash recovery and hand-over need (7.1). The plan is a
+constructor contributed to `fuser` upstream; if upstream does not take
 it, a vendored fork with that one change. Spike SP2 decides.
 
 ### 6.3 The mount, the namespace and the inode numbers
@@ -374,13 +419,16 @@ starts (systemd ordering `Before=` the agent's unit), with `allow_other` (jobs r
 (the kernel checks modes; `tierstore fs` makes no access decision of its own on Linux), `max_background` 1024 [S28], and
 `max_stack_depth = 1` (passthrough needs at least 1, and the job's overlay above it must stay within the kernel's depth of
 2; the cache's filesystem must then be a non-stacked one such as XFS or ext4, which `tierstore fs` checks at start and
-refuses by name [S1, S17]). On macOS the mount is the NFS export of section 8. Under the mount:
+refuses by name [S1, S17]). Depth 1 is a hard limit: with 2 the overlay mount fails `EINVAL`; with 1 a rootless `crun` overlay
+(`userxattr`, `metacopy=off`, `redirect_dir=nofollow`, `index=off`, `xino=off`) mounts over the FUSE mount (Measured: linux E4, 7.0 guest). The FUSE mount is not in the
+container's mount namespace (0 FUSE lines in its `mountinfo`), but the host path of the lower directory shows in the overlay's options (Measured: linux E4). On 6.8 there is no
+passthrough and the mount declares no `max_stack_depth` (6.4). On macOS the mount is the NFS export of section 8. Under the mount:
 
 ```
 <mount>/                 mode 0711: anyone may pass through, nobody may list
 <mount>/trees/           mode 0711: same
 <mount>/trees/<digest>/  the root of an attached tree, read-only; absent unless attached
-<mount>/views/<run>/     a run's writable view (macOS, and Linux under C4 option B); absent unless attached
+<mount>/views/<run>/     a run's writable view (macOS, only if the core builds views); absent unless attached
 ```
 
 - **Attachment is the only way in.** A lookup of `trees/<digest>` or `views/<run>` succeeds only for what some client has
@@ -392,12 +440,21 @@ refuses by name [S1, S17]). On macOS the mount is the NFS export of section 8. U
   attribute and absent name carries the longest timeout the protocol allows: an absent name is answered with inode number
   0 and a timeout, which the kernel keeps as a negative entry until the timeout ([S2]: `fs/fuse/dir.c`, "Zero nodeid is
   same as -ENOENT, but with valid timeout"). That is what keeps a compiler's repeated include-path misses out of
-  `tierstore fs` (unmeasured; section 11 counts negative lookups). A job's overlay holds its lower root's dentry, so the 0
-  timeout on `trees/<digest>` costs a lookup per path walk from the host, not per read in a job. Views are writable and
+  `tierstore fs`. Measured with a minimal `fuser` server on 6.8, a compile of zstd and fmt in a rootless container: with negative entries a warm run sent 56 negative
+  lookups, without them 1,216 (a header-scan job: 0 against 935); with a 1 s timeout instead of 3,600 s it sent 1,620 revalidating lookups
+  (Measured: linux E5). A cached hit costs the same as native (stat 2.5 µs against 2.7 µs); a request that reaches the server costs 100 to 200 µs, so a stat with timeout 0 costs 161 µs
+  against 2.5 µs with a long one (Measured: linux E5, micro-benchmark; host 6.8). A job's overlay holds its lower root's dentry, so the 0
+  timeout on `trees/<digest>` costs a lookup per path walk from the host, not per read in a job: through a job-style overlay over a timeout-0 tree, `stat` was
+  4 µs and open-and-close 36 µs, while the same tree walked directly from the host took 94 µs per `stat` (Measured: linux E5, `nest.sh`). Views are writable and
   are cached as 6.6 says.
 - **Opens and directory reads.** A passthrough open sets `FOPEN_PASSTHROUGH` alone (the kernel refuses it combined with
   `FOPEN_KEEP_CACHE` [S2]: `fs/fuse/iomode.c`); an open of an empty file, which has no backing file, sets
-  `FOPEN_KEEP_CACHE`; directory opens set `FOPEN_CACHE_DIR`; the mount negotiates `READDIRPLUS` and `PARALLEL_DIROPS`.
+  `FOPEN_KEEP_CACHE`; directory opens set `FOPEN_CACHE_DIR`; the mount negotiates `READDIRPLUS`, `PARALLEL_DIROPS` and
+  **`FUSE_CACHE_SYMLINKS`**. Without the last, every `readlink` is a request: 3,769 per compile, and none in the warm run with it
+  (Measured: linux E5). Opens are never cached by the kernel: every `open()` and `opendir()` is a
+  request, 9,363 `open` and 30 `opendir` per compile and 15,654 and 2,068 per header-scan job, warm or cold, and an `open()` of a tree file costs
+  about 35 µs without passthrough and 41 to 45 µs with it against 3 to 5 µs native (Measured: linux E5). That per-open cost is the floor
+  of the metadata path, and 10,000 to 16,000 opens per build is the figure section 11 compares against (Inferred: about 0.4 s of a 23 s compile at 40 µs).
   `GETXATTR` and `LISTXATTR` are answered `ENOSYS`, so the kernel stops sending them after the first (the overlay above
   asks for its own `user.overlay.*` attributes on every lower directory); every request that would change a tree is
   answered `EROFS`.
@@ -444,7 +501,10 @@ lives; section 10 says how it is versioned.
 
 The cost of I1 is that a tree's manifests are all read and flattened when it is first attached: metadata is fetched
 eagerly, data lazily (D7). The executor's setup walks every `Directory` of every action's input root today (`walk_ms`), so the
-walk itself is not new; the flattening is (its cost is spike SP4). Buildbarn instead loads each directory on first access
+walk itself is not new; the flattening is. Measured on real trees with generated manifests (Measured: linux E8, single thread): 8,913 to 594,940 entries
+flatten in 0.02 s to 1.1 s, about 1.7 µs and 110 bytes of table per entry, a table of 1.1 to 66 MB and a peak RSS of 4 to 156 MB with the manifests loaded;
+a sorted-children lookup is 21 to 41 ns. The 2^24-entry limit would take about 30 s and 2 GB per attach (Inferred by extrapolation), so it is a limit and not a target. Not measured: the SHA-256 check of each manifest
+(Inferred: about 0.2 s per 67 MB) and the network fetch of the manifests; so SP4 is answered for the CPU and memory of flattening only. Buildbarn instead loads each directory on first access
 [S6]; doing that here would make inode numbers depend on the order of lookups, which a new process cannot recover. Each
 new root digest also costs a table append and cold dentries: the first lookup of each path under it is a round trip. That
 is why a toolchain should be a tree of its own, attached once per node and bound read-only into every action that uses it,
@@ -456,7 +516,21 @@ The kernel's rules for passthrough (`fs/fuse/iomode.c` and `fs/fuse/passthrough.
 of this section: an inode with an open passthrough file is bound to that one backing file, and a passthrough open with
 another backing id fails `EBUSY`; a non-passthrough open of an inode with a backing file fails `EIO`; a passthrough open
 of an inode with a cached open fails `ETXTBSY`. Every inode of a tree that has a non-empty file is therefore opened by
-passthrough, always, and always with the same backing id for as long as any open of it lives.
+passthrough, always, and always with the same backing id for as long as any open of it lives. Passthrough exists from kernel
+6.9; **the lab runs 6.8, which has none** (the ioctl returns `ENOTTY` and `INIT` does not offer it; Measured: linux E10), and the
+7.0 HWE kernel has it (Measured: linux E4, E6, in a KVM guest). The rules below hold on 7.0; what 6.8 does is at the end of this section.
+
+The cases were run on 7.0 (Measured: linux E6, raw-protocol server):
+
+- Two inodes opened with the **same backing id** work; nothing ties an id to one inode, so a blob in two trees is one id and many inodes.
+- One inode opened in two processes works with the live id; with a **fresh id per open the second open fails `EIO`** (`EBUSY` inside).
+- An id registered by one process and **closed by another after a hand-over works**; open files keep working. `BACKING_CLOSE` from uid 1000 is `EPERM` (E10).
+- A backing file unlinked while open keeps being served, later opens reuse the live id, and after the last close the id is gone and the next open fails.
+- **The backing table is mandatory.** A new instance without the table, while an inode is still open by a reader, registers a new id on the next open and gets
+  `EIO`; with the table preloaded it reuses the id, and the releases of opens made before the hand-over arrive at it and its last release closes the id. So the
+  table of 7.1 must be restored before the first open after a hand-over or a restart.
+- Read throughput through the overlay at 1, 4 and 8 readers is native with passthrough (4,609, 14,544 and 24,018 MiB/s against 4,454, 15,366 and 22,914 MiB/s over a native lower layer, warm) and
+  the server sees 0 read requests; without it, 433 to 1,141 MiB/s from an untuned `fuser` server (Measured: linux E6; guest numbers, the host's page cache behind them).
 
 On an `OPEN` of a non-empty file of an attached tree:
 
@@ -480,7 +554,7 @@ holds (`local_cache/mod.rs`).
 
 On macOS (NFS) the same steps run without backing ids: an `OPEN` (v4) or the first `READ` of a file (v3) fills the blob
 if needed, and `READ`s are served by `tierstore fs` from the cache file. A blob is opened once per process and its
-descriptor kept while any view references the file, so a `READ` costs one `pread` (unmeasured; the RPC cost is probe MP3).
+descriptor kept while any view references the file, so a `READ` costs one `pread` (unmeasured; the demo server's 1.3 ms per small open and read in section 8 is from a server that opens the file on every `READ`).
 
 A blob is verified before it is opened: a source fill publishes only bytes that hash to the name. The price is that the
 first open of a large blob waits for the whole blob (today the whole tree is fetched before the job starts, so a single
@@ -488,7 +562,15 @@ file is never slower than today; unmeasured overall). The cache's S3 path alread
 while the fill runs (`local_cache/stream.rs`); `tierstore fs` cannot on Linux, because passthrough needs a published file.
 Block-wise fetch with read-ahead (JuiceFS-style, 4 MiB blocks [S27]) is possible on macOS, where reads already pass
 through the server, and on Linux only for files read before their fill ends; both are future work, for when section 11
-shows large cold blobs on the critical path.
+shows large cold blobs on the critical path. They are likelier than assumed: files of 1 MB or more are 99% of the opened cold bytes, and the
+two biggest files of a toolchain are always opened (150 to 190 MB; Measured: inputs E9, probe builds). A prefetch of the always-opened binaries is the cheaper fix (below).
+
+**Kernel 6.8 (no passthrough; the lab today, C8).** Every inode is opened with a cached open (`FOPEN_KEEP_CACHE` on a file that is not
+being changed, which is every file of a tree), and every `READ` the page cache misses reaches `tierstore fs`, which `pread`s the cache file. There are no backing
+ids, no backing table and no `CAP_SYS_ADMIN` need beyond the mount, and D11's reason (the kernel forbids mixing) does not arise. What it costs: reads at 0.43 to 1.1 GiB/s
+from an untuned server against native (above), a compile within run-to-run noise of native (23.5 s native against 24.3 s, ranges overlapping, n = 5), and a header-scan job 21% slower warm
+(0.67 s against 0.81 s) and the same cold (Measured: linux E5, `fuser` 4 threads, 6.8, a live lab node, so absolute numbers are noisy). The page cache holds a blob once per inode that reads it, not once per blob
+(Inferred: cached opens have no shared backing file). What it risks: a crash with requests in flight, 7.2.
 
 **Prefetch** (for arm D of section 11, not before): an attachment may ask for `prefetch = "all"`, and every blob of the
 tree is filled in the background, in manifest order, on the fill socket's permits, without delaying the attach's answer;
@@ -548,9 +630,9 @@ A source that no longer exists upstream (the client deleted a pack while a tree 
 open with `EIO`, recorded on the attachment (7.4). That is the client's contract (6.1), and it is the failure the executor
 gets when it materialises from a missing blob, moved from before the job to during it.
 
-### 6.6 Writes: the overlay on Linux, the core's views on macOS
+### 6.6 Writes: the overlay on Linux; the core's views, if macOS needs them
 
-**Linux (recommended, C4 option A).** The job's writes never reach `tierstore fs`. The runtime mounts, inside the job's
+**Linux (decided, C4 = A).** The job's writes never reach `tierstore fs`. The runtime mounts, inside the job's
 mount namespace, the overlay it mounts today, with the attached tree as its lower directory:
 
 ```
@@ -562,7 +644,18 @@ input copies the file up into `upper` (reading it through the tree, so lazily, o
 disk's speed; a delete is a whiteout in `upper`. Outputs are read from `upper`, by the code that reads them there today,
 once per file, hashed and stored in one pass (B16), after the job's processes are gone, so no writer is open.
 
-**The core's views** (macOS, and Linux under C4 option B; built in phase 2). A view is the tree below and an **upper
+Measured with a rootless `crun`, uid 1000 mapped to host 1000, over a root-made read-only FUSE mount, on 6.8 and on the 7.0 guest (Measured: linux E4):
+read, `mmap`, `dlopen` and `exec` of the compiler from the overlay work; copy-up works for append, truncate, `chmod`, `chown`, `touch -d`, hard link, `mkfifo` and symlink
+(owner stays 1000, mode kept); `rm` and `rm -r` of lower entries work; recreating a removed directory makes it opaque; `rmdir` of a non-empty lower directory is `ENOTEMPTY`;
+a write to an input never reaches the tree. **`rename(2)` of an input directory returns `EXDEV`** (GNU `mv` falls back to copy and delete; a tool calling `rename(2)` directly gets the error);
+renaming an input file works. Reported owner and modes are as 6.3 says.
+
+**Removing a run directory.** The overlay's whiteouts are character devices 0/0 owned by the container's mapped root, which is the mounter (host uid 100000 in the test), mode 000,
+and the overlay's `work/work` directory is created mode 000 and owned by the same uid. Plain files and directories in `upper` are owned by the action user (1000). The action user therefore
+**cannot remove a finished run's `upper` or `work`**; the test needed root to delete it (Measured: linux E4). The runtime must remove the run directory as the mounter: a process in the same user namespace
+as the mapped root (for the executor, its own `crun` user namespace; for jobscheduler, the agent's equivalent), or root. That removal is part of the runtime's `remove` step (6.7), and a cleanup that runs as the action user is a defect.
+
+**The core's views** (macOS only, and built only if a macOS client needs a writable view it cannot make itself, 8; phase 2). A view is the tree below and an **upper
 directory** above. The runtime gives `tierstore fs` a directory in the run's directory (so it is on the run's volume and is
 removed with it, 6.9); the core keeps the view's mirror of paths in `<dir>/root` and its own records in `<dir>/meta`, so
 no name the run can create collides with a record. The mirror uses the whiteout encoding of the OCI image layer format
@@ -624,10 +717,9 @@ survive the process (a crash, an update), not the machine, which takes the run w
   form (view number, id); a copied-up file answers to both, so a handle the client took before the copy-up still leads to
   the copy (6.3). After a restart the core finds an entry by its id or tree index by walking `root/` once and reading the
   attributes, which is bounded by what the run wrote.
-- **Caching.** A view's entries change, so on FUSE they carry short timeouts (`fs.view_entry_timeout`, default 1 s) and the
-  core invalidates what it changes (`FUSE_NOTIFY_INVAL_ENTRY`, `FUSE_NOTIFY_INVAL_INODE`); on NFS a view's entries report
-  their real mtime, which the macOS client turns into short attribute caching (8). On Linux, a view's files in `root/` are
-  opened by passthrough too, so writes to them go at the disk's speed.
+- **Caching.** A view's entries change, so on NFS they report their real mtime, which the macOS client turns into short
+  attribute caching (8). (The FUSE form, with short timeouts `fs.view_entry_timeout` and `FUSE_NOTIFY_INVAL_ENTRY`, was for
+  the Linux option B that C4 did not choose, and is not built.)
 - **Outputs.** The runtime reads the run's outputs from `root/` after the job's processes are gone (an output is a plain
   file at its path there); an output the run never changed is still the tree's, and `detach <run> outputs <paths>`
   returns its digest from the manifest. tierstore does not hash or store outputs: the executor's output path packs small blobs into
@@ -660,13 +752,14 @@ jobscheduler's own tree store (1.1). The jobscheduler change is therefore (its o
   `crates/js-agent/src/lifecycle/machine/mod.rs`, before `create_and_start`) it attaches the tree; a `Writable` tree at
   the exec root becomes the overlay's `lowerdir` in place of today's empty `input_root`; a `ReadOnly` tree becomes a
   read-only bind at `dest` through `ContainerSpec.shared`, which the spec already supports (`spec.rs`);
-- it detaches in `remove`, after outputs are read and before the scratch delete;
+- it detaches in `remove`, after outputs are read and before the scratch delete, and the scratch delete of the run directory is done as the mounter of the
+  overlay, not as the action user, because whiteouts and `work/` belong to the mapped root and the action user cannot remove them (6.6; Measured: linux E4);
 - its disk offer subtracts the unused budget of tierstore's cache when the cache is on the scratch volume (6.9).
 
 The host-wide FUSE mount is made before the agent starts, so the agent's post-job integrity check sees it in its baseline
 (jobscheduler `crates/js-agent/src/integrity/mod.rs`); no per-job mount is made on the host, so none can be left behind.
 
-**jobscheduler, macOS (`sandbox-exec`).** The agent attaches the tree with a view whose upper directory it makes in the
+**jobscheduler, macOS (`sandbox-exec`)**, if C9 chooses a frontend and the core's views are built. The agent attaches the tree with a view whose upper directory it makes in the
 run's home, starts the job with its working directory in `<mount>/views/<run>`, and grants the run its view in its Seatbelt
 profile through the builder's allow-list read model (jobscheduler `crates/js-mac-pool/src/seatbelt/`: an allow-list of
 places, plus metadata reads of their ancestors so that `realpath` and `getcwd` work), with the mount's root not granted,
@@ -685,7 +778,8 @@ path kept as the fallback when `tierstore fs` is not configured or refuses an at
 least 256 files) is attached as its own tree and bound read-only where it is bound today, so its inodes are shared across
 actions as today; and `prepare_outputs`, which today **renames** each input that an output path names from the input root
 into the upper layer, copies it instead (a lazy read of that blob), and makes the mount points, the working directory and
-the outputs' parents in the upper layer. The executor's macOS driver uses the view as jobscheduler's does.
+the outputs' parents in the upper layer. Its `remove.rs` must delete the run directory as the overlay's mounter (6.6). The executor's macOS driver
+builds its own writable directory over the read-only tree, as 8 says (the executor never writes into the mount).
 
 **The executor's other half**: write each `Directory`'s tree manifest with its blobs' sources (it walks the `Directory` messages
 today and knows each blob's pack location), put the manifests to tierstore, and name the root digest in the job. That is
@@ -694,12 +788,13 @@ a design of the executor's own; spike SP5 is its throwaway form, and section 12 
 ### 6.8 Isolation
 
 - **Linux.** A job's container sees its overlay (whose lower is one tree root), its read-only tree binds and its other
-  mounts, and nothing of `/run/tierstore/fs`: the host mount namespace is gone after the container's pivot (inferred from
-  the OCI runtime model; checked in SP1). It cannot name another tree, because no path in its namespace leads to one. It
+  mounts, and nothing of `/run/tierstore/fs`: the host mount namespace is gone after the container's pivot (Measured: linux E4,
+  0 FUSE lines in the container's `mountinfo` and host paths do not resolve; the lower directory's host path is visible in the overlay's mount options, which is not access). It cannot name another tree, because no path in its namespace leads to one. It
   cannot write to a tree: its writes go to its own upper directory, a read-only bind is read-only, and the tree answers
   every changing request `EROFS`.
-- **macOS.** The Seatbelt profile grants the run its own view only (6.7); whether Seatbelt's path rules behave on an NFS
-  mount is probe MP2. `tierstore fs` also answers a request on `views/<run>` only when the caller's uid (NFS `AUTH_SYS`)
+- **macOS.** The Seatbelt profile grants the run its own view only (6.7); Seatbelt's path rules behave on an NFSv3 mount as on APFS in all 11 cases
+  tried, including `..`, symlink and rename escapes (Measured: macos E15). A read-only tree reached by symlinks from a client-built directory needs the profile to allow
+  `(subpath "<mount>/trees/<digest>")` for each input tree, which exposes that tree to the whole action, read-only (Measured: macos E18a, a symlink to a path outside the allowed subpath is denied). `tierstore fs` also answers a request on `views/<run>` only when the caller's uid (NFS `AUTH_SYS`)
   is the run's user, which jobscheduler creates fresh for each run, else `NFS4ERR_ACCESS` (or `NFS3ERR_ACCES`). That
   second check is a fence only against a process that cannot speak NFS to the server itself, because `AUTH_SYS` is a
   claim, not a proof: a job given loopback network (jobscheduler's `Loopback`, `Ports` or `On`) can reach a loopback TCP
@@ -731,40 +826,44 @@ There is no per-job disk quota (CEO, 2026-11-09). The node's disk is one pool, a
   and trees read the blob (inferred from the passthrough mechanism [S1]; unmeasured). A fill's pages are written by the
   build-node tierstore and charged to its service's memory cgroup; a page dropped since and read again is charged to the
   job that reads it (inferred from the kernel's rule that a page is charged to the cgroup that brings it in). On macOS the
-  NFS client caches pages of its own on top of the server's reads of the cache file, so a blob may be cached twice
-  (inferred; measured in section 11).
+  NFS client caches pages of its own on top of the server's reads of the cache file, so a blob is cached twice: reading 1.5 GiB through
+  NFSv3 grew file-backed pages by 3.1 GiB, 2.02 times the bytes, against 1.5 GiB natively (Measured: macos E17; reclaimability not measured; FSKit not measured). A cost in cache capacity, not committed memory (Inferred).
 
 ## 7. Failure, crash and live update
 
 This is the hard part: the filesystem server is in the path of every lookup and open of every running job, and, on macOS
-(and Linux under C4 option B), of every read and write. Sections 7.1 to 7.4 are Linux (FUSE); 7.5 is NFS.
+and on Linux 6.8 (no passthrough), of every read; on macOS also of every write if the core's views are built. Sections 7.1 to 7.4 are Linux (FUSE); 7.5 is NFS.
 
 ### 7.1 What makes it tractable, and what it needs (Linux)
 
 - **I1, derivable inode numbers** (6.3) and derivable view handles (6.6): any instance can answer any request of the
   mount.
-- **Under option A of C4, no job data in tierstore** (6.6): a crash loses nothing a job wrote. Under option B, the views'
-  upper directories hold it, written in order (6.6), so a crash loses nothing either, provided every reply was sent after
-  its writes.
+- **No job data in tierstore on Linux** (6.6, C4 = A): a crash loses nothing a job wrote. (Views on macOS hold it in their
+  upper directories, written in order, 6.6, so a crash loses nothing either, provided every reply was sent after its writes.)
 - **All other state is in the runtime directory** (kept across restarts of the unit): the table of tree and view numbers,
   the attachments, the backing table (blob, backing id, open count; written on each first open and last release, without
   `fsync`, since only the process has to be outlived), and the server's `INIT` reply (flags, `max_write`,
-  `max_readahead`, `time_gran`, `max_stack_depth`), written once at mount. A successor reads them at start.
+  `max_readahead`, `time_gran`, `max_stack_depth`), written once at mount. A successor reads them at start. The backing
+  table (7.0 and later) is **mandatory** for a successor: without it, an inode open across the hand-over makes every new open `EIO` (6.4; Measured: linux E6, case 3b).
 - **The kernel keeps a connection alive until the last `/dev/fuse` file of it is released** (`fs/fuse/dev.c`:
   `fuse_dev_release` aborts the connection only when the count of its devices reaches zero [S2]), and queues new requests
   while nobody reads them.
-- **`FUSE_NOTIFY_RESEND`** (protocol 7.40, `FUSE_HAS_RESEND`) makes the kernel queue again every request that was read
-  from a still-open device file but not answered, with the `FUSE_UNIQUE_RESEND` bit set in its id [S3]. The kernel's
+- **`FUSE_NOTIFY_RESEND`** (protocol 7.40, `FUSE_HAS_RESEND`; kernel 6.9 and later, so not on the lab's 6.8) makes the kernel queue again every request that was read
+  from a still-open device file but not answered, with the `FUSE_UNIQUE_RESEND` bit set in its id [S3]. On 7.0 it recovered a read-but-unanswered `OPEN` 30 ms after the new
+  server started, the request arriving again with the resend bit set (Measured: linux E7). The kernel's
   condition is that the requests are idempotent. Every request on a tree is (it is read-only, and its answers are derived
   from manifests); the backing-table updates of `OPEN` and `RELEASE` are made idempotent by keying them on the request's
-  `fh` and the open count. Under option B, a view's changing requests must also be made idempotent: each is applied as
+  `fh` and the open count. If views are built, their changing requests must also be made idempotent: each is applied as
   "make the upper directory look like this" (a create that finds its file made answers it; an unlink that finds the
   whiteout made answers it), which is why the view records go before the change (6.6).
 - **Requests read on a device file that is then released are lost**: `fuse_dev_release` ends them with `ECONNABORTED`
-  [S2]. So `tierstore fs` reads its one `/dev/fuse` descriptor from several threads and makes no clone
+  [S2]; measured, a job whose request was read and unanswered got `ECONNABORTED` 0.1 s after the kill when nothing else held the
+  fd (Measured: linux E7). **With an fd store the file is not released, so on 6.8 those requests hang instead of failing**: they sit on the device's
+  processing list, wait for an answer nobody can give, and the new server cannot know them (it did not read them). Requests queued and not yet read are served (7.2). So `tierstore fs` reads its one `/dev/fuse` descriptor from several threads and makes no clone
   (`FUSE_DEV_IOC_CLONE` gives each clone its own queue of requests in progress, which a crash would fail). If SP2 shows
   one descriptor is the limit, every clone is stored too (`FileDescriptorStoreMax` = clones + 1) (D12).
-- **A session that starts from a recorded `INIT` reply** (6.2), since the kernel sends `INIT` once per mount.
+- **A session that starts from a recorded `INIT` reply** (6.2), since the kernel sends `INIT` once per mount. `fuser` 0.18
+  needs the patch of 6.2 for this; its `from_fd` consumes and fails a request instead (Measured: linux E7).
 
 ### 7.2 A crash of `tierstore fs` (Linux)
 
@@ -779,8 +878,22 @@ This is the hard part: the filesystem server is in the path of every lookup and 
 4. It reads its state (7.1), starts the session from the recorded `INIT` reply, sends `FUSE_NOTIFY_RESEND`, and the
    blocked jobs go on.
 
+What happens, by kernel, with the descriptor held outside the dead process (Measured: linux E7, a raw-protocol server and an fd holder):
+
+| Kernel | Request queued, not yet read (a job's `cat` after the crash) | Request read, not answered (a job waiting on a slow fill) |
+|---|---|---|
+| 7.0, with `FUSE_NOTIFY_RESEND` | served | served 30 ms after start, the request arriving again with the resend bit set |
+| 7.0, without resend | served 19 ms after the new server starts | still blocked |
+| 6.8 (no resend) | served 18 ms after start; no `INIT` | **blocked indefinitely**: still blocked 12 s later, until the job is killed |
+| any, no holder of the fd | `ENOTCONN` | `ECONNABORTED` 0.1 s after the kill |
+
+On 6.8, then, a crash with requests in flight leaves those jobs hung. The bound is an abort of the connection
+(`/sys/fs/fuse/connections/<n>/abort`, or the unit's give-up path below) after `fs.recover_wait`, which fails every blocked request, and the runtime fails the
+affected runs as infrastructure failures (7.4); nothing is lost that a retry does not redo, since a tree is read-only. The 7.0 kernel also has `FUSE_REQUEST_TIMEOUT` (ABI 7.43), a kernel-side bound on a hung request (read in the header, not tested).
+
 The stall is the restart time (unmeasured; `RestartSec` plus a start that reads a few small files and flattens trees on
-demand). `tierstore fs` refuses to mount on a kernel that does not offer `FUSE_HAS_RESEND` in `INIT` (6.17 does [S3]).
+demand). On a kernel that offers `FUSE_HAS_RESEND` in `INIT` (7.0 does; Measured: linux E7), `tierstore fs` sends it; on one that does not (6.8) it runs in the mode above, and C8 decides whether the lab
+stays there.
 **If it does not come back**: when the unit gives up restarting (`StartLimitBurst` restarts within
 `StartLimitIntervalSec`) and is left failed, systemd drops its descriptor store, the last device file of the connection is
 released, the kernel aborts it, and every blocked and later request fails with an error. Jobs fail fast instead of
@@ -815,7 +928,8 @@ new (tierstore-fs@b)                                    old (tierstore-fs@a, run
   one keeps its own until it exits after `ready`. If the new instance fails before `ready`, the old one resumes reading;
   nothing was released.
 - No request is lost or answered twice: each request is read by exactly one process; the old one answers every request it
-  read before `done`; the kernel queues the rest for the new one.
+  read before `done`; the kernel queues the rest for the new one. This does not need `FUSE_NOTIFY_RESEND`, so it holds on 6.8 as
+  designed (Inferred from the 6.8 queued-request result of 7.2; the hand-over itself has not been run, SP2).
 - Control requests in the gap wait in the listening socket's backlog, as S3 connections do in today's hand-off.
 - Backing ids belong to the connection, so the kernel keeps every one across the hand-over; the new instance learns them
   from the backing table in the runtime directory.
@@ -864,6 +978,13 @@ So the server must come back on the same endpoint, quickly, and answer the handl
 - **The handles** are derivable (6.3) with the mount's boot id, so the new instance answers every handle the client holds;
   a handle of an earlier mount answers `STALE`. The `nfsserve` crate's default handle embeds its start time and answers
   stale after every restart, so it is overridden (`id_to_fh`, `fh_to_id`, `serverid` [S12]) if that crate is used (C2).
+  Measured on the macOS NFSv3 client with `nfsserve`'s demo server killed under load (Measured: macos E16, one run each, qualitative):
+  with the stock handles (generation from the start time, ids in lookup order) the client does not recover: every read on an open fd returns `ESTALE` for good, a new
+  `cat` of a cached path too, and the mount needs a remount. With stable handles (generation pinned, file id from the inode number, the tree walked at start) the reader blocked 12.5 s for an
+  8 s outage and **resumed on the same open fd with no error**, and a writer saw no error. So a restart is a pause of the outage plus the server's start (about 4 s to walk 59,000 entries) plus the client's retry backoff.
+- **Killing a stalled client** (Measured: macos E16): a process blocked on a down server ignores `SIGTERM`; `SIGKILL` ended a blocked new lookup within 1 s, but a process blocked mid-read stayed
+  in `U` state until the mount was force-unmounted; `umount` says "Resource busy" and `umount -f` succeeded in 1.4 s. The watchdog that gives up on a server (`fs.recover_wait`, below) therefore runs `umount -f` after `SIGKILL`.
+  The "server not responding" dialog could not be observed on the headless Mac (Unmeasured).
 - **Retransmitted requests.** A client resends a request whose reply it did not get, on its new connection; a
   non-idempotent one (create, remove, rename, link) that the old process had already executed would then fail (`ENOENT`
   on a resent remove) and look like a build error. A view's changing operations carry the client and transaction id in
@@ -872,8 +993,8 @@ So the server must come back on the same endpoint, quickly, and answer the handl
   idempotent. In a hand-over the old instance stops reading, sends every reply it owes, shuts down the write side of each
   connection, and only then exits, so no written reply is lost to a reset.
 - **NFSv3** has no other state: with the above, a restart, crash or update is a pause, as long as it is shorter than the
-  client's patience (MP3 measures when the dialog appears).
-- **NFSv4.0** (if MP3 chooses it) has state: client ids, open and lock owners with their sequence ids and each owner's
+  client's patience (the dialog's threshold is unmeasured).
+- **NFSv4.0** (if C9 chooses NFS and a v4.0 measurement favours it; none could be run, 8) has state: client ids, open and lock owners with their sequence ids and each owner's
   last reply, opens, and the lease.
   - **Update: hand the state over.** The old instance stops taking RPCs, writes its state table to the new one over the
     hand-off socket with the listening socket, and exits; the new one serves the same state, so the client sees a short
@@ -887,24 +1008,52 @@ So the server must come back on the same endpoint, quickly, and answer the handl
     checks that files open across a kill stay usable). Share-deny modes are honoured while the server runs, not across a
     crash; a view has one run, so a deny that is lost could only have been against the run's own opens.
 - **If the server stays down**, launchd keeps restarting it. The mount is `hard,intr` (8), so past `fs.recover_wait`
-  (default 120 s) the runtime kills the run's processes, which `intr` lets a signal end, and fails the run as an
-  infrastructure failure; the node-wide mount is not unmounted, since other runs use it. MP3 checks that a killed process
-  ends while the server is down.
+  (default 120 s) the runtime kills the run's processes and fails the run as an
+  infrastructure failure; the node-wide mount is not unmounted, since other runs use it, unless the server does not return (`umount -f`, above).
+  The measured client ignored `SIGTERM` and needed `SIGKILL` plus a forced unmount to release a process blocked mid-read (Measured: macos E16), so `intr` is not relied on.
 - **A slow fill** is answered `NFS3ERR_JUKEBOX` or `NFS4ERR_DELAY` after a second, and the client retries, so one slow
   upstream does not hold an RPC for the whole fetch and trip the client's not-responding handling (MP3).
 
 ## 8. macOS
 
-macOS has no overlayfs, no FUSE in the kernel and no passthrough. The design is M1 (4.2), gated by probes, with M0 (today's
-`clonefile`) as the default and kill-switch until M1 is measured. It needs the core's views (6.6) and the NFS frontend's
-crash and hand-off rules (7.5).
+macOS has no overlayfs, no FUSE in the kernel and no passthrough. Two frontends are candidates, NFS on loopback (M1) and FSKit
+(M2), and the choice between them is open (C9); M0 (today's `clonefile`) stays the default and kill-switch until one is chosen and
+measured. The mount is read-only. The owner decided that the executor never writes into it, so the writable directory of a run is the
+client's, not the core's, and the core's views (6.6) are built only if a client turns out to need them. The NFS frontend would need
+the crash and hand-off rules of 7.5.
 
-- **One mount per node.** At boot, root mounts `tierstore fs`'s export at `/private/var/tierstore/fs` (`fs.mountpoint`),
-  before the job agent starts (the agent waits for the mount), with `hard,intr` (a down server makes I/O wait, and a
-  signal can still end a waiting process, 7.5), `locallocks` (locks stay in the client, so a tool that locks a file in its
+**What was measured.** All on the farm Mac (a Mac Studio, M3 Ultra, 28 cores, macOS 27.0.1, running the executor's builds throughout, so numbers carry noise), 46,362 files and 12,394 directories (463 MB of the SDK plus a vendored ripgrep), five runs each, medians (Measured: macos E12). The NFS server is `nfsserve` 0.11's mirrorfs demo with a global mutex and a `File::open` per `READ`, **not a tuned server**, so these are an upper bound on an NFS frontend's cost, not a floor:
+
+| measure | APFS | NFSv3 loopback | ratio |
+|---|---|---|---|
+| stat every file, cold, one thread | 163 ms | 10,667 ms | 66x |
+| stat every file, warm, one thread | 154 ms | 3,562 ms | 23x |
+| stat every file, warm, eight threads | 57 ms | 225 ms | 4x |
+| open and read every file, one thread | 4,763 ms | 60,980 ms | 13x |
+| open and read every file, eight threads | 581 ms | 15,068 ms | 26x |
+| `clang -fsyntax-only` of a file including 1,667 SDK headers, cold | 257 ms | 677 ms | 2.6x |
+| the same, ten runs in a row | 2,544 ms | 5,096 ms | 2.0x |
+| `cargo build` of ripgrep, sources on the mount | 3,766 ms | 4,726 ms | 1.25x |
+| `cargo` no-op rebuild | 67 ms | 65 ms | 1.0x |
+
+The cost is per file and per metadata operation (about 230 µs per cold stat, 1.3 ms per small-file open and read); a large file reads fast (84 MB in 0.225 s). The server used 88 to 91 CPU-seconds for the whole run.
+The warm stat pass includes revalidations, since the client's 5 s minimum attribute cache expired during the cold pass (Measured: macos E12). The data is cached twice, 2.02 times the bytes (Measured: macos E17).
+
+**Who makes the writable directory** (Measured: macos E18, on the same tree, NFSv3 mount as the read-only lower):
+
+- (a) **The client builds real directories and a symlink per file into the mount, and copies up the files an action writes.** Works today. Building the view for 46,362 files and 12,394 directories took about 2.0 s, **35 µs per file**; deleting it 2.9 to 3.3 s. A `cargo` build through it took 4.4 s (4.7 s directly on NFS) and a `clang` syntax check with every header a symlink 1.1 s (0.68 s directly on NFS, 0.26 s native). Copy-up is a plain copy: 3 ms for a small file, 0.2 s for 84 MB. Costs: copy-up must be decided before the action starts (declared outputs), since a write through a symlink goes to the read-only target; tools that treat symlinks differently (`find` without `-L`, `tar`, `rsync -a`, `git`, `realpath`) see them; the Seatbelt profile must allow each input tree's subpath (6.8). Directory-level symlinks for untouched subtrees would be cheaper (Unmeasured).
+- (b) **`clonefile` from the mount fails**: `EXDEV` from NFS to APFS (file and directory), `ENOTSUP` within the NFS mount, and `cp -c` silently copies bytes. A clone can only follow a fill of local APFS, which is what the executor does today (`clonefile` of 190,435 files in 1.5 s and removal in 7 s, about 8 µs and 37 µs per file; Measured: macos E3).
+- (c) **A second NFS (or FSKit) volume owned by the executor with the tierstore mount as its lower** costs 1.2x to 25x more on top (stat 1.6x cold, eight-thread stat 25x through the second server's mutex, `clang` 1.8x, `cargo` 1.5x; Measured: macos E18c), and `nfsserve` has no union, copy-up or whiteout code, so the executor would write it. Not chosen.
+- (d) **There is no union mount.** `MNT_UNION` is accepted and is only lookup fallthrough: `ls` of the mount point is empty, a write to a lower file is not copied up, `rm` of a lower file does nothing to it (Measured: macos E18d). Not tested: `hdiutil attach -shadow` over a read-only image, which would give block-level copy-on-write at the price of building the image first.
+
+So the core's views (6.6) move out of the Linux design altogether and stay on macOS only as a fallback for a client that cannot build (a). The owner's rule is that the executor builds its own view; (a) is that, and it is cheap enough that the views need a reason to exist (Inferred).
+
+- **One mount per node.** At boot `tierstore fs`'s export is mounted at `/private/var/tierstore/fs` (`fs.mountpoint`),
+  before the job agent starts (the agent waits for the mount), with `hard,intr` (a down server makes I/O wait, 7.5; `intr` does not release a blocked reader, so it is not relied on),
+  `locallocks` (locks stay in the client, so a tool that locks a file in its
   view works without lock state in the server) and `rdirplus` [S22]. Per run, setup is one attach, with no per-file work
-  and no per-run mount: the cost moves to first touch. If MP1 finds that only root can mount NFS, root's one boot mount is
-  all that needs it.
+  and no per-run mount: the cost moves to first touch. **Root is not needed**: `mount_nfs` of a loopback export by an unprivileged user succeeded when the mount point
+  was owned by that user (the mount shows `nodev, nosuid, mounted by <user>`) and failed `Operation not permitted` on a root-owned one; a root mount has no `nodev,nosuid` (Measured: macos E14). Per-user mounts get `nosuid`, which suits a build tree.
 - **Attribute caching.** The macOS client does not take cache times from replies (Buildbarn's mount code notes that NFSv4
   has no per-reply way to give them [S5]). Within the mount's minimum and maximum, it caches a node's attributes for one
   tenth of the age of its mtime, and for the maximum under a delegation (read in the client's source [S24]). The design
@@ -913,9 +1062,10 @@ crash and hand-off rules (7.5).
   `views/` report the time of the last attach or detach, so an attach is seen soon. How soon, and whether the client's
   negative name cache (which `nonegnamecache` turns off for the whole mount) hides an attach after a miss, is probe MP4;
   the runtime attaches before it first looks up a path, so a miss before an attach does not arise in normal use.
-- **The version** is NFSv4.0 or NFSv3, decided by probe MP3: NFSv4.0's compound operations cut round trips, which is why
+- **The version** is NFSv4.0 or NFSv3: NFSv4.0's compound operations cut round trips, which is why
   Buildbarn chose it ("NFSv3 ... far more chatty") [S5]; NFSv3 has no state to recover (7.5) and a mature Rust crate
-  (`nfsserve`, BSD-3-Clause [S12]). The macOS client also accepts `vers=4.1` [S24], and a young Rust NFSv4.1 crate exists
+  (`nfsserve`, BSD-3-Clause [S12]). **Only NFSv3 was measured**: no NFSv4.0 server was available (macOS `nfsd` serves v2 and v3 only, no Rust v4 server crate could be
+  built in the time, Buildbarn's needs Go) (Measured: macos E12c). So MP3's v3-against-v4 question has no v4 number. The macOS client also accepts `vers=4.1` [S24], and a young Rust NFSv4.1 crate exists
   (`embednfs`, MIT [S13]); Buildbarn targets 4.0 because the macOS client did not support 4.1 when it was written [S5].
 - **Executables.** `nfsserve` answers `ACCESS` for a read-only filesystem without the execute right, which the macOS client
   turns into `EACCES` for `execve` (inferred from nfsserve's `nfs_handlers.rs` and the client's `nfs_vnop_access` [S12,
@@ -927,18 +1077,26 @@ crash and hand-off rules (7.5).
   are on its upper files, never shown to the client); `.nfs*` names for unlinked open files, which the core hides from
   listings as Buildbarn does (`hidden_files_pattern` [S8]); readdir without types costs lookups (`rdirplus` above); the
   first casing of a name becomes the client's.
-- **The transport.** Loopback TCP works for EdenFS [S10]; a Unix socket, which Buildbarn uses for NFSv4.0 (it needs
+- **The transport.** Loopback TCP works for EdenFS [S10] and here; a Unix socket, which Buildbarn uses for NFSv4.0 (it needs
   `NFS_MFLAG_NOCALLBACK` and calls `mount(2)` itself) [S5], is reported buggy by EdenFS [S10] and, by an unconfirmed
-  report, failing on macOS 26 [S29]. Probe MP1 decides. The Unix socket is preferred, because a job's profile can deny its
-  path, which makes the server's uid check a real fence (6.8); with loopback TCP only, runs whose network is above `Off`
+  report, failing on macOS 26 [S29]. **Measured: `mount_nfs` refused all 15 spellings tried** (v3 and v4, `ticotsord` netid, the socket path as host, as root and as user), each with
+  "no usable addresses for host"; the client has the strings for local transports, and a direct `mount(2)` with an XDR `nfs_mattr` was not tried (Measured: macos E14). The verified transport is loopback TCP. A Unix socket would
+  be preferred, because a job's profile can deny its path, which makes the server's uid check a real fence (6.8); with loopback TCP only, runs whose network is above `Off`
   keep today's copy.
 - **Isolation**: 6.8.
 - **OCI jobs in a Linux VM on a Mac** (if the farm runs any): the VM shares the tree from the host over VirtioFS or NFS and
   mounts a real overlay inside the guest; the host's VirtioFS metadata speed is unmeasured [S34] and is probe MP5.
-- **FSKit** (M2) is deferred (C3): Apple's own engineers say it is not yet suited to a network-backed filesystem, there is
-  no `fsync` delivery on URL-backed volumes and no locks, enablement is per user and interactive and cannot be made
-  global, kernel-offloaded I/O needs a device node, and reported CPU cost is well above macFUSE's [S18, S20, S25]. It
-  returns as a third frontend behind a flag, on the same core, when those change (MP6).
+- **FSKit** (M2) is an open candidate (C3 reframed, C9), not deferred on the forum posts. What Apple's engineers say [S18, S20, S25]: not yet suited to a
+  network-backed filesystem, no `fsync` delivery on URL-backed volumes and no locks, enablement per user and interactive, reported CPU cost well above macFUSE's.
+  What was measured on the farm Mac (Measured: macos E13):
+  - **No kernel-offloaded reads for a path or URL backed volume**: in the macOS 27 SDK headers, `FSExtentPacker` takes only an `FSBlockDeviceResource`, and `FSGenericURLResource` and `FSPathURLResource` have no extent API.
+    Every read crosses XPC. (`FSVolumeKernelOffloadedIOOperations` is deprecated for `FSVolumeKernelOffloadedIOHandler`, same model.) The only kernel shortcut is a block device, a different design (a disk image attached as a device).
+  - **It cannot run without a signing team that has the FSKit entitlement.** Apple's passthrough sample builds unsigned, but an ad-hoc signed extension carrying `com.apple.developer.fskit.fsmodule` is killed at exec
+    ("restricted entitlements, validation of code signature failed"). Whether a free personal team is accepted was not checked. A farm deployment needs a Developer ID signed, notarized build.
+  - **Enablement is one click by a person**: `pluginkit -e use` is ignored; the enablement is a per-user plist written by the System Settings toggle, and for a mount started by root `fskitd` picks the console user's agent (uid 450 on the farm Mac, not the admin account),
+    so the click is by the console user. Editing the plist was not tried. Whether a logged-out console can mount is Inferred to be no.
+  - No FSKit row of the head-to-head, the Seatbelt, kill or double-caching measurement exists.
+  Until signing is available, C3 reads: **measure FSKit against NFS** (probe MP6, with the same tree and workloads as above); it is a third frontend on the same core if it wins.
 
 ## 9. Edge cases the design handles
 
@@ -970,14 +1128,16 @@ crash and hand-off rules (7.5).
 | Two attaches of one tree for one run | One attachment; `detach` ends it once. |
 | A detach of a run that attached nothing | Answered `not attached`; nothing changes. |
 | `tierstore fs` restarted while no job runs | The descriptor store (Linux) or the derivable handles (macOS) keep the mount; nothing is visible. |
-| `tierstore fs` killed while a thread waits on a fill for a job's open (Linux) | The request was read from the stored descriptor, so it is resent to the next instance (7.1, SP2). |
+| `tierstore fs` killed while a thread waits on a fill for a job's open (Linux) | Kernel 7.0: the request was read from the stored descriptor, so it is resent to the next instance, 30 ms after it starts (7.2). Kernel 6.8: it hangs until the connection is aborted after `fs.recover_wait`, and the run fails as an infrastructure failure (7.2). |
+| A finished run's directory on Linux | Removed as the overlay's mounter: the whiteouts (char 0/0) and `work/` belong to the mapped root and the action user cannot remove them (6.6). |
 | `tierstore fs` killed with NFSv4.0 opens outstanding (macOS) | No grace period: reclaims are answered `NO_GRACE` and the client opens again (7.5, MP3). |
 | A request for a view from another run's user (macOS) | Refused by the server (6.8), whatever Seatbelt does. |
 | Node reboot | The mount and the runtime directory are gone with the kernel; `tierstore fs` mounts at boot before the agent; runs that did not survive are detached by the agent's `detach-all-except`. |
 | The S3 instance of the node is updated | Fills are answered by the lock holder throughout; pins are re-sent to the new holder (7.3). |
 | Upstream slow | First opens of missing blobs wait (recorded in `stall_ms`); files already open are unaffected. |
 | Cache volume full | The fill answers `no space`; the open fails `EIO` and the run is an infrastructure failure. |
-| The kernel lacks passthrough or resend, or the cache is on a stacked filesystem | `tierstore fs` refuses to start, by name; the runtime keeps materialising (6.7). |
+| The kernel lacks passthrough or resend (6.8, the lab today) | `tierstore fs` runs in the 6.8 mode: cached opens, every read through the server, no resend (6.4, 7.2), unless C8 sends the lab to 7.0 first. |
+| The cache is on a stacked filesystem | `tierstore fs` refuses to start, by name; the runtime keeps materialising (6.7). |
 
 ## 10. Compatibility (B8) and one-way doors
 
@@ -1018,10 +1178,30 @@ mount and its paths as jobs see them (D3).
 
 ## 11. Measurement plan
 
-The plan answers two questions in order, and the second is not run unless the first says it is worth it.
+The plan answers two questions. Q-A has a first answer (below); the owner decided not to gate the build on it (C6), so Q-B is
+measured alongside the build and not after Q-A's rule.
 
-**Q-A: is there anything for laziness to win?** (No new filesystem; the executor and the farm as they are; it runs beside the
-macOS probes of phase 0.)
+**Q-A: is there anything for laziness to win?** (No new filesystem; the executor and the farm as they are.)
+
+**Results so far** (2026-11-09/10). Their sources and caveats are in 1.2; the decision rule below is applied to them here.
+
+| Quantity | Result | Tag |
+|---|---|---|
+| `link_ms + trees_ms + chown_ms` against summed `run_ms`, node-05, 204,110 leases | 2.66% overall; 1.8% to 2.0% on the three busiest days; 4.9% on one quiet day | Measured: inputs E2, production log |
+| Whole `inputs_ms`, and `walk_ms`, against summed `run_ms` | 17.8%; 13.5% (49 ms per directory read) | Measured: inputs E2, production log |
+| Mac `inputs_ms` against `run_ms` for actions with a tree | p50 6.3 s against 6.8 s, p90 37 s; summed 1.9x; no phase split | Measured: inputs E2, 3,379 leases, older driver |
+| Opened share of the input root, byte-weighted p50 | zig C 85.4%, Rust `rlib` 68.7%; files 3.9% and 23.5% | Measured: inputs E1, **Bazel probe builds, not Buck2**; a Buck2 rerun is pending |
+| Opened share on the production tree (15,199 files, 470 MB) | 30% to 40% of bytes, about 1% of files | Inferred: inputs E1 |
+| Opened share on macOS | not measured | Unmeasured: inputs section 7 |
+| Opened cold file sizes | p50 21.6 kB, p90 7.2 MB, p99 174 MB; files of 1 MB or more are 99% of the bytes | Measured: inputs E9, 143 files of probe builds |
+| Compile of zstd and fmt through a FUSE tree against a native lower layer, 6.8, n = 5 | 24.3 s against 23.5 s cold, 24.2 s against 22.7 s warm; ranges overlap | Measured: linux E5 |
+| Header-scan job through FUSE against native | +21% warm (0.81 s against 0.67 s), +1% cold | Measured: linux E5 |
+| Flatten of 0.6 million entries | 1.1 s, 66 MB table, 156 MB peak | Measured: linux E8 |
+
+Against the rule below: leg 1 (5% of `run_ms`) is **not met** on the farm's mix as logged (2.66%); leg 2 (opened bytes under half) is not met on the probe shapes and
+is plausibly met on the production tree shape (Inferred). The owner decided to build regardless (C6): putting these optimisations in tierstore is the right long-term
+solution even though today's numbers on Linux are small. What stays open for Q-A: a Buck2 build of the engine with the watcher up, a production watch of the opened share, and the opened share on the Mac.
+Two findings stand outside the rule: the walk (13.5%, a separate executor fix, and removable by tree manifests cached by digest, 1.2) and the Mac's setup time, which is large but not shown to be the clone.
 
 - Instruments (changes to the executor, in Rust (T11), off by default):
   - add the input root's total bytes to the `inputs:` line (the file count is there already);
@@ -1029,7 +1209,8 @@ macOS probes of phase 0.)
     `FAN_OPEN_EXEC`) on the action's input mounts (the overlay and each shared-tree bind, reached through the container's
     root at `/proc/<pid>/root`), in the executor's daemon behind a flag, one line per lease. `fanotify` reports which files are
     opened, not how many bytes are read; L3 fetches whole blobs on open (6.4), so **opened bytes** is the number L3 would
-    fetch, and bytes read is not claimed. Placing those marks needs `CAP_SYS_ADMIN` (C7).
+    fetch, and bytes read is not claimed. Placing those marks needs `CAP_SYS_ADMIN` (C7). **Measured: a `FAN_MARK_FILESYSTEM` mark on the lease filesystem, from an
+    external root observer, sees opens through the overlay and the shared-tree binds**, with its event rate (about 270 per second during builds) and no queue overflow in three runs (inputs section 4.1), so the per-action marks and the daemon flag are not needed for measurement; C7 is settled in that way.
   - macOS has no such watch that an unprivileged daemon can run: there, Q-A measures setup times and bytes cloned, and a
     one-off `fs_usage` run as root on one node over one build gives opened files, labelled as measured on one node.
 - Builds: a full build of the komira engine and a full build of the executor itself, with the action cache disabled so every
@@ -1042,18 +1223,19 @@ macOS probes of phase 0.)
   the floor of L3's own attach, so it is reported and not counted as saved) is at least 5% of the build's summed `run_ms`,
   or, on cold nodes, opened bytes are under half of input bytes (byte-weighted p50). Otherwise stop: write the result into
   the executor's `worker-cache.md` section 11 and this document, and leave the executor as it is. Either way the executor's "revisit only if" is
-  then answered by a measurement. The 5% and the half are judgment calls for the CEO to confirm (C6), not derived figures.
+  then answered by a measurement. The 5% and the half are judgment calls, not derived figures. The owner answered C6 by building without the gate; the rule now only
+  decides what the results are reported against, and the `worker-cache.md` section 11 note is written with the first of them.
 
 **Q-B: does it win, by how much, and where does it lose?** (Needs the Linux core of phase 1, spike SP5, and on macOS
-the frontend of phase 2.)
+the frontend that C9 chooses.) It is measured alongside the build from the first working core, not after Q-A.
 
-- Arms, on the same nodes and the same commit, interleaved run by run (A, B, C, D, E, A, ...):
+- Arms, on the same nodes and the same commit, interleaved run by run (A, B, C, D, A, ...):
   - **A**: the executor as shipped (cache, hard links, shared trees);
-  - **B**: L3 with `fs.passthrough = false` (every inode a cached open; the cost passthrough saves);
-  - **C**: L3 with passthrough;
-  - **D**: L3 with passthrough and `prefetch = "all"`;
-  - **E** (once the core's views exist, for C4): L2, the core's views on Linux, with passthrough;
-  - on macOS, arms **M0** (today) and **M1**, with the NFS version MP3 chose.
+  - **B**: L3 with `fs.passthrough = false`: every inode a cached open, which is **the 6.8 mode and the lab's kernel today** (6.4); the cost passthrough saves;
+  - **C**: L3 with passthrough (7.0, C8);
+  - **D**: L3 with passthrough and `prefetch = "all"`, or a prefetch of the always-opened binaries (6.4);
+  - (the former arm E, the core's views on Linux, is dropped with C4 = A);
+  - on macOS, arms **M0** (today), **M1** (NFS) and, once signing exists, **M2** (FSKit), against the same trees and workloads as macos E12.
 - State between runs: a **cold** run starts with the executor's node cache, tierstore's cache and pins and the page cache
   (`drop_caches`; `purge` on macOS) emptied; a **warm** run starts after a run of the same arm; a **partial** run starts
   with tierstore's cache holding only the previous commit's blobs. Each state is judged separately.
@@ -1070,13 +1252,14 @@ the frontend of phase 2.)
   actions and why.
 - Report: per arm and state, median, p90 and p99, each with a 95% interval from a bootstrap over the repetitions; every
   figure marked measured or inferred (P11).
-- **Decision rule.** Recommend C (or D) for Linux if, on both builds, in every state separately, the median and p90 of
+- **Decision rule.** Recommend B, C (or D) for Linux, by the kernel (C8), if, on both builds, in every state separately, the median and p90 of
   lease-to-result wall time (setup, `client_ms`, fetch and run together; setup alone moves into run time under L3 and is
   reported, not judged) are not worse than A beyond the intervals' overlap, and no action fails because of the filesystem.
   Bytes written to the disk and bytes fetched are reported as the gain. If C loses on run time (metadata-heavy actions
   paying round trips the kernel's caches should have absorbed), the next candidate is L4 (composefs), whose metadata is
-  native and which removes the per-file links the same way, without laziness. macOS: M1 replaces cloning if it passes the
-  same rule against M0. For C4: E replaces C if it passes the same rule against C.
+  native and which removes the per-file links the same way, without laziness. Arm B against C is also the measurement that C8 waits for: the same rule says what passthrough and
+  resend are worth on the lab's builds. macOS: M1 or M2 replaces cloning if it passes the same rule against M0 (the NFSv3 demo numbers of section 8 already say that a
+  frontend must beat a clone of about 8 µs per file, 1.5 s per 190,000 files).
 - **Soak and faults** (phase 3; not timed): a week of real builds on the farm's nodes with the new path, counting hung-I/O
   incidents (a request waiting over 60 s) and stale-handle errors; and fault runs: kill `tierstore fs` under load with a
   thread waiting on a fill; update it under load; update the build-node tierstore under load; stop the upstream
@@ -1089,80 +1272,83 @@ the frontend of phase 2.)
 Probes and spikes are throwaway Rust programs (T11), run once on a farm node, whose results are written into this
 document before the phase that depends on them starts; none is merged.
 
-**Phase 0: probes (gated by C1), and Q-A.** On a farm Mac, at the macOS version the farm runs:
+**Phase 0: probes and Q-A. Done, 2026-11-09/10, except where a row says open.** The probes were run on the farm Mac (macOS 27.0.1) and on node-05 (host kernel 6.8.0-142) with a KVM guest on the 7.0.0-42 HWE kernel; the results are in the sections cited.
 
-| Probe | Question | Decides |
-|---|---|---|
-| MP1 | Does `mount(2)` (or `mount_nfs`) of a loopback NFS export need root? Does a Unix-socket transport work, for NFSv4.0 and NFSv3, on current macOS? | 8: the transport; who mounts |
-| MP2 | Does a Seatbelt `(subpath ...)` rule confine reads and writes on an NFS mount as on APFS? A `(debug deny)` trace of a job reading another run's view, and its own. | 6.8: whether Seatbelt is one of the two fences |
-| MP3 | Stat, open and read throughput, and RPCs per compile, over NFSv4.0 (a minimal server) and NFSv3 (`nfsserve`), against APFS; restart the server under load with files open and locked: does the v4.0 client reclaim, how long is the grace stall, does a stale handle or a dialog appear? Does `execve` from the mount work? | C2: the NFS version; 7.5 |
-| MP4 | Does the client honour per-entry attribute changes enough to cache `trees/` long and `views/` short under one mount? | 8: cache times |
-| MP5 | `clonefile` cost of a 50,000-file tree (the fallback's size; one unconfirmed report puts a 77,000-file clone at about two minutes [S30]); VirtioFS stat latency from a Linux guest. | M0's cost; OCI jobs on Macs |
-| MP6 | (Only if C3 is revisited.) FSKit: can a LaunchDaemon mount with no user logged in; can a device manager pre-approve the extension; may the extension open a socket to tierstore; does `fskitd` run as root? | C3 |
+| Probe | Question | Result | Decides |
+|---|---|---|---|
+| MP1 | Does `mount(2)` (or `mount_nfs`) of a loopback NFS export need root? Does a Unix-socket transport work, for NFSv4.0 and NFSv3, on current macOS? | **Done in part.** No root needed with a user-owned mount point; the Unix socket failed in 15 spellings of `mount_nfs`; a direct `mount(2)` with XDR arguments is **open** (Measured: macos E14) | 8: the transport; who mounts |
+| MP2 | Does a Seatbelt `(subpath ...)` rule confine reads and writes on an NFS mount as on APFS? | **Done: yes**, 11 cases identical to APFS (Measured: macos E15). Not tested on FSKit | 6.8 |
+| MP3 | Stat, open and read throughput, and RPCs per compile, over NFSv4.0 and NFSv3, against APFS; restart under load; `execve`. | **Done for NFSv3 only**: table in section 8; restart under load in 7.5 (Measured: macos E12, E16). **NFSv4.0 not run** (no server). `execve` from the mount was not tested | C9; 7.5 |
+| MP4 | Does the client honour per-entry attribute changes enough to cache `trees/` long and `views/` short under one mount? | **Open** | 8: cache times |
+| MP5 | `clonefile` cost of a 50,000-file tree; VirtioFS stat latency from a Linux guest. | **Done for the clone**: 8 µs and 37 µs per file to create and remove; 1.5 s and 7 s for 190,435 files (Measured: macos E3). The VirtioFS half is **open** | M0's cost; OCI jobs on Macs |
+| MP6 | FSKit: can a LaunchDaemon mount with no user logged in; can a device manager pre-approve the extension; may the extension open a socket to tierstore; does `fskitd` run as root? | **Blocked on signing** (Measured: macos E13); now also the FSKit-against-NFS measurement of C3. Partial: `fskitd` uses the console user's agent | C3, C9 |
 
-On Linux, in the same phase: Q-A of section 11 (the executor's instruments; phase 0 needs none of the code below), and spikes SP1 to
+On Linux, in the same phase: Q-A of section 11 (done as far as 1.2 and 11 say), and spikes SP1 to
 SP4 and SP5:
 
-| Spike | Question | Decides |
-|---|---|---|
-| SP1 | On a 6.17 farm node: does a rootless `crun` container mount overlayfs (`userxattr`, the pinned options) with a lower on a root-made FUSE mount (`allow_other`, `default_permissions`, passthrough, `max_stack_depth` 1)? Do copy-up, whiteouts, `mmap`, the reported owner and `EROFS` behave as 6.3 and 6.6 say? Is `/run/tierstore/fs` invisible in the container? How many `GETXATTR` and negative `LOOKUP` requests reach FUSE during a `find` and a compile? Does the mount survive `systemctl restart` of its unit, seen from the agent? Does an attach after a failed lookup of the same digest succeed? | L3 at all (else L2 or L4); the unit of 6.2 |
-| SP2 | With `fuser` plus a constructor from a recorded `INIT` reply: serve a connection another process initialised; kill the server while a thread waits on a slow fill, with the descriptor in systemd's store; does `FUSE_NOTIFY_RESEND` from the new server answer it, with no error in the job? Run the hand-over of 7.3 with requests arriving between `ack` and `done`. Is one descriptor read by many threads enough for the farm's concurrency? Does upstream `fuser` take the constructor? | 7.1 to 7.3 |
-| SP3 | Passthrough: two inodes sharing one backing id; one inode opened in two processes; a backing id registered by one process and closed by the next; `BackingId::into_raw` across exit; an evicted cache file still open; a view's upper file opened by passthrough for writing. | 6.4, 6.6, 7.1 |
-| SP4 | Flatten time and memory of the largest input root of each build (from Q-A's data). | I1's eager metadata (6.3, D7) |
-| SP5 | The executor, throwaway: a tree manifest writer from the `Directory` messages with pack locations, plus the container driver changes of 6.7, enough to run the two builds of Q-B. | Q-B can run |
+| Spike | Question | Result | Decides |
+|---|---|---|---|
+| SP1 | Does a rootless `crun` container mount overlayfs (the pinned options) with a lower on a root-made FUSE mount? Do copy-up, whiteouts, `mmap`, the owner and `EROFS` behave as 6.3 and 6.6 say? Is the mount invisible in the container? How many `GETXATTR` and negative `LOOKUP` requests reach FUSE? Does the mount survive `systemctl restart` of its unit, seen from the agent? Does an attach after a failed lookup of the same digest succeed? | **Done on 6.8 and on the 7.0 guest, except the last two** (the unit and the attach after a miss are **open**, as they need the unit): yes to the first four, invisible, one `GETXATTR` and one `LISTXATTR` per run, negative lookups 1,216 to 56 (Measured: linux E4, E5). Run on node-05 (6.8), not on a 6.17 node: no lab node runs 6.17 | L3 at all: yes; the unit of 6.2 |
+| SP2 | With `fuser` plus a constructor from a recorded `INIT` reply: serve a connection another process initialised; kill the server while a thread waits on a slow fill; does `FUSE_NOTIFY_RESEND` answer it? Run the hand-over of 7.3. Is one descriptor read by many threads enough? Does upstream `fuser` take the constructor? | **Done for the crash case with a raw-protocol server, not with a patched `fuser`**: recovery in 18 to 30 ms on 7.0, a hang on 6.8, `fuser` 0.18 needs the patch (Measured: linux E7). The 7.3 hand-over, thread count and upstream are **open** | 7.1 to 7.3 |
+| SP3 | Passthrough: two inodes sharing one backing id; one inode opened in two processes; an id registered by one process and closed by the next; an evicted cache file still open; a view's upper file opened by passthrough for writing. | **Done on 7.0** except the last (views): all cases in 6.4, the backing table mandatory (Measured: linux E6). `BackingId::into_raw` across exit through `fuser` is **open** | 6.4, 7.1 |
+| SP4 | Flatten time and memory of the largest input root of each build. | **Done for flattening**, on real trees of 8,913 to 594,940 entries with generated manifests; **open** for the manifest hash check, the fetch and the largest real input root of the engine builds (Measured: linux E8) | I1's eager metadata (6.3, D7) |
+| SP5 | The executor, throwaway: a tree manifest writer from the `Directory` messages with pack locations, plus the container driver changes of 6.7, enough to run the two builds of Q-B. | **Open**; it also settles whether the walk goes away (1.2) | Q-B can run |
+| SP6 | Privilege of `FUSE_DEV_IOC_BACKING_OPEN` and `_CLOSE` (added by the experiments). | **Done**: `CAP_SYS_ADMIN` in the initial namespace on the caller, for both (Measured: linux E10) | 6.2 |
 
-**Phase 1: the Linux core** (if Q-A says continue under C6, or at once if C6 is no). Pull requests, one subject each (P7), each naming its tests:
+**Phase 1: the Linux core. Starts now (C6 answered: no gate on Q-A; measurements continue alongside).** Pull requests, one subject each (P7), each naming its tests. Pull requests 1 and 2 are in progress; the Linux frontend is built first in the 6.8 mode (C8):
 
-1. tierstore: this document, with the probes' and spikes' results.
+1. tierstore: this document, with the probes' and spikes' results. **This pull request (274).**
 2. tierstore: the tree manifest format, reader and flattener (a library module, no I/O): a test by name for every refusal
-   and limit of 6.1, the exact-boundary test of 2^24 - 1 entries, and the cross-version manifest test (B8).
+   and limit of 6.1, the exact-boundary test of 2^24 - 1 entries, and the cross-version manifest test (B8). **In progress.**
 3. tierstore: the fill socket on the build-node instance: source fills under `_tiering/fill/`, its own waiting permits,
    bound only by the lock holder; tests include "twenty cold fills with the S3 path's permits all taken complete, none
    passes through" and "a fill during an update of the S3 instance is answered by the old instance".
 4. tierstore: pins in the cache: the pin set, `pin_limit`, the pins file, eviction's skip; tests include "a pinned entry
    survives an eviction pass over budget", "a pin past `pin_limit` is refused and the blob is kept by recency", "a scrub
    removes a pinned entry with bad bytes", and "a release without pins starts on a cache with a pins file".
-5. tierstore: the core and `tierstore fs` on Linux, read-only trees, no passthrough: mount, namespace, attachments, the
-   control socket, the unit file (with `max_background` 1024); the rewrite of `pluggable-interfaces.md` section 4 and the
+5. tierstore: the core and `tierstore fs` on Linux, read-only trees, no passthrough (the 6.8 mode, which is arm B): mount, namespace, attachments, the
+   control socket, the unit file (with `max_background` 1024) and `FUSE_CACHE_SYMLINKS`; the rewrite of `pluggable-interfaces.md` section 4 and the
    `"fs"` row of `configuration.md`; the terms of the table at the top added to the glossary of tierstore-design.md.
-6. tierstore: passthrough, the backing table, the `fs.passthrough` switch and `prefetch` (arms B and D need them).
-7. tierstore: crash recovery (descriptor store, recorded `INIT`, resend) and the hand-over (`handoff-fs-v1`); the hook
+6. tierstore: passthrough, the mandatory backing table, the `fs.passthrough` switch and `prefetch` (arms C and D need them; the kernel to run them on is C8).
+7. tierstore: crash recovery (descriptor store, recorded `INIT` through the `fuser` patch of 6.2, the bounded abort of 7.2 for 6.8, and resend where the kernel has it) and the hand-over (`handoff-fs-v1`); the hook
    learns the second unit; the cross-release layout test.
-8. The executor: the Q-A instruments. Numbered here, but it lands first, in phase 0, and needs none of the above.
+8. The executor: the Q-A instruments, reduced to the input root's total bytes in the `inputs:` line, since an external observer took the open counts (11). It needs none of the above and may land at any time.
 9. jobscheduler: the tree input kind, its capability, attach and detach in the `crun` runtime, the cache budget in the
    disk offer (its own design document first, B22).
 10. The executor: tree manifests, and naming the root digest in a job: the production form of SP5 (its own design document first).
 
-**Phase 2: the macOS frontend** (if MP1 to MP3 pass):
+**Phase 2: the macOS frontend** (after C9 chooses one; nothing here starts before then):
 
-11. tierstore: the core's views (6.6), with their tests: every view case of section 9, a kill at every step of every
+11. tierstore: the core's views (6.6), **only if a macOS client needs them** (the executor does not, 8), with their tests: every view case of section 9, a kill at every step of every
     operation of the table of 6.6 followed by roll-forward, a resent request after each, and handle stability across
     copy-up and across the client's rename to `.nfs…`.
-12. tierstore: the NFS frontend (the version MP3 chose), its handle scheme, the uid check, two alternating launchd jobs
-    and the hook's hand-over arm for them, the NFS hand-off of 7.5 (with the changes to tierstore-handover.md section 0
-    and update-hook.md); the drill of updating and killing it under load.
-13. jobscheduler: views on the macOS agent (the Seatbelt rules of 6.7), with today's copy as the kill-switch.
+12. tierstore: the chosen frontend, with its handle scheme (stable handles: a restart is a pause, 7.5), the uid check, two alternating launchd jobs
+    and the hook's hand-over arm for them; for NFS, the hand-off of 7.5 (with the changes to tierstore-handover.md section 0
+    and update-hook.md) and a server that is not the demo's (no global lock, an open-handle cache, `READDIRPLUS`, 8); the drill of updating and killing it under load.
+13. The macOS clients: the executor builds the run's writable directory over the read-only tree (8, option a), and jobscheduler's views or the same, with today's copy as the kill-switch.
 
 **Phase 3: prefetch and soak.** Access-profile prefetch (Buildbarn ADR 10 [S7]) if Q-B's tails ask for it, and the soak of
 section 11 on real builds run by the executor.
 
-**Phase 4: FSKit** (only if C3 is revisited and MP6 answers): a third frontend behind a flag, on the same core, measured
-against M1 on the same builds, since no benchmark of FSKit for builds exists.
+**Phase 4: FSKit** (when a signing team with the FSKit entitlement exists and the console user has enabled the extension): MP6 and a measurement
+against NFS on the workloads of section 8; if it wins (C9), a frontend on the same core, since no benchmark of FSKit for builds exists.
+A general read/write interface of `tierstore fs`, which the owner wants separately, is a later design and is not a phase of this one.
 
 ## 13. Decisions
 
-### 13.1 For the CEO
+### 13.1 Decisions
 
-Each is a yes or a no (C4: A or B), with what follows from either answer. C1 to C3 are the decisions the earlier proposal
-asked for; C4 to C7 are this document's.
+C1 to C3 are the decisions the earlier proposal asked for; C4 to C7 were this document's. On 2026-11-09 the owner answered C4 and C6, reframed C3, and
+the experiments of that day and the next settled C1 and C7 in effect. **C2 and C5 were not part of those decisions; their recommendations stand and the
+owner has not confirmed them.** Two decisions are open and new: the Linux kernel (C8) and the macOS frontend (C9). The original text of each decision is kept, with its status first.
 
-- **C1. Run the macOS probes (MP1 to MP5) on a farm Mac before any macOS work?**
+- **C1. Status: done.** MP1 to MP3 and MP5 were run on a farm Mac, in part (section 12). Original question: run the macOS probes (MP1 to MP5) on a farm Mac before any macOS work?
   - Recommendation: **yes.** Every macOS choice rests on them: the transport and who mounts (MP1), whether Seatbelt fences
     a view on NFS (MP2), the NFS version, its crash and hand-off behaviour and `execve` (MP3), attribute caching (MP4), and
     the cost of today's clone fallback (MP5).
   - Cost: throwaway Rust programs on one Mac, about one or two engineer-weeks (an estimate, not a measurement).
   - If no: macOS stays on M0 (today's clone) and phase 2 does not start; Linux is unaffected.
-- **C2. Build the core, and its NFS frontend, in Rust, rather than port or run Buildbarn's Go NFS server?**
+- **C2. Status: recommendation stands, not confirmed by the owner.** Build the core, and its NFS frontend, in Rust, rather than port or run Buildbarn's Go NFS server?**
   - (a) **Rust**: the core in tierstore, and the NFS frontend in Rust over it: for NFSv4.0 a port of the logic of
     Buildbarn's NFSv4.0 server (Apache-2.0, its notice kept [S5]), for NFSv3 the `nfsserve` crate (BSD-3-Clause [S12])
     with the core's handles and `ACCESS`. The version is MP3's answer, not part of this decision.
@@ -1172,12 +1358,17 @@ asked for; C4 to C7 are this document's.
   - Recommendation: **(a)**. tierstore is Rust; one core serves FUSE and NFS (and later FSKit); its rules (no `unsafe`,
     coverage, Rust tests) and its hand-off apply to one codebase.
   - If (b): phase 2 becomes a Go project with its own coverage gate and release, and 7.5 is designed again for it.
-- **C3. Defer FSKit: not a blocker, not the macOS data path, a third frontend later behind a flag?**
-  - Recommendation: **yes.** Apple says it is not yet suited to a network-backed filesystem; it lacks `fsync` delivery on
+- **C3. Status: reframed by the owner, 2026-11-09. FSKit is not deferred on forum posts; it is an open candidate, blocked on a signing team that has the FSKit
+  entitlement and on one click in System Settings by the console user (8). Until it is measured, C3 reads: measure FSKit against NFS once signing is available.**
+  Original question: defer FSKit: not a blocker, not the macOS data path, a third frontend later behind a flag?
+  - Original recommendation: **yes**, because Apple says it is not yet suited to a network-backed filesystem; it lacks `fsync` delivery on
     URL-backed volumes and locks; enablement is per user and interactive; and its reported CPU cost is high [S18, S20,
-    S25]. Probe MP6 is the condition for revisiting.
-  - If no: MP6 joins the probes, and phase 4 starts after phase 2.
-- **C4. On Linux, where does a job's writable layer live: (A) or (B)?**
+    S25]. The experiments add that a path or URL backed volume has no kernel-offloaded reads in the macOS 27 SDK and that the extension is killed without the entitlement (Measured: macos E13).
+  - What the owner needs to supply: a signing team (and a profile) with the FSKit entitlement, and the click as the console user.
+  - What follows: MP6 and the FSKit arm of Q-B run once those exist; C9 is decided after them.
+- **C4. Status: decided by the owner, 2026-11-09: (A).** The executor's builds never write into the tierstore filesystem: the executor always overlays the mount and reads through it. On macOS the
+  core's views are therefore not needed by the executor and may not be needed at all (8). A read/write interface of `tierstore fs` for other uses is a later, separate design. The measurements bear out (A) (Measured: linux E4, E5; macos E18).
+  Original question: on Linux, where does a job's writable layer live: (A) or (B)?
   - (A) **The kernel's overlayfs over a read-only FUSE tree (L3)**, as both runtimes mount today: writes never reach
     tierstore; the FUSE server is read-only and fully derivable, so its crash and update are simplest; outputs are
     collected as today. Costs: a stacking-depth budget of 2 (spike SP1 must pass), and two writable layers in one design
@@ -1187,8 +1378,7 @@ asked for; C4 to C7 are this document's.
     every job goes through FUSE; the views' intent log is on the Linux crash path; the runtimes' output collectors read the
     views' `root/` (6.6) instead of the overlay's upper; and the views must be built in phase 1, before the macOS probes say
     whether macOS will use them.
-  - Recommendation: **(A).** If phase 2 builds the views, Q-B measures them on Linux as arm E, and a later decision may
-    switch to (B) on that measurement; this decision does not approve the switch in advance.
+  - Original recommendation: **(A).** (Arm E, the views on Linux, is dropped from Q-B with this decision, 11.)
   - If (B): the views move into phase 1 (pull request 11 before 5), spike SP1 shrinks to the FUSE mount alone, and arm C
     of Q-B runs on the views.
 - **C5. A second process on Linux build nodes holding `CAP_SYS_ADMIN`, with no network?**
@@ -1209,17 +1399,37 @@ asked for; C4 to C7 are this document's.
     descriptor; there is no passthrough, so every read of a job's input is a FUSE round trip (arm B of Q-B becomes the
     design and measures the cost), and the unit keeps every hardening option of `tierstore@.service` that does not stop
     the mount reaching the host.
-- **C6. Measure first (Q-A) before building phase 1, and continue only on the rule of section 11 (per-file setup at least
-  5% of run time, or actions opening under half of their input bytes on cold nodes)?**
+- **C6. Status: answered by the owner, 2026-11-09: no gate on Q-A. Build the filesystem surface; measurements continue alongside.** The owner's reason: putting these optimisations in tierstore is the right
+  long-term solution, even though today's numbers on Linux are small (2.66% per-file setup, compile within noise of native; 1.2, 11). Phase 1 starts now (12).
+  Original question: measure first (Q-A) before building phase 1, and continue only on the rule of section 11 (per-file setup at least
+  5% of run time, or actions opening under half of their input bytes on cold nodes)?
   - Recommendation: **yes, with those thresholds.** They are judgment calls, not derived figures; Q-A answers the executor's own
     condition for revisiting a lazy input root (1.2).
   - If no: phase 1 starts at once, and Q-B answers both questions, after the building rather than before it.
-- **C7. Run the executor's `fanotify` instrument of Q-A as root on the measured nodes only, rather than give the executor's daemon
-  `CAP_SYS_ADMIN` behind a flag?**
+- **C7. Status: settled in effect.** The watch was run as an external root observer on node-05 and needed no executor change (11). Original question: run the executor's `fanotify` instrument of Q-A as root on the measured nodes only, rather than give the executor's daemon
+  `CAP_SYS_ADMIN` behind a flag?
   - Recommendation: **yes, as root on the measured nodes only**, so the executor's daemon gains no privilege in its shipped form.
   - If no: the executor's daemon unit gains the capability when the flag is set, and the executor's own review judges that change (G3).
+- **C8. Open, for the owner: the Linux kernel of the lab.** All six lab nodes run 6.8 (Measured: inputs section 8; linux section 9). FUSE passthrough and `FUSE_NOTIFY_RESEND` need 6.9 or later; the 24.04 HWE kernel, 7.0.0-42, is the apt candidate and ran every
+  experiment cleanly in a KVM guest. What each kernel gives (Measured: linux E4 to E7, E10):
+  - **6.8 (no passthrough, no resend).** The overlay composition works. Every read crosses the server (433 to 1,141 MiB/s from an untuned `fuser` server against native-speed passthrough); a compile is within run-to-run noise of native and a
+    header-scan job is 21% slower warm (6.4). Queued requests survive a crash; **requests the server had read and not answered hang** until the connection is aborted, so a crash with requests in flight fails those runs as
+    infrastructure failures after `fs.recover_wait` (7.2). No `CAP_SYS_ADMIN` need beyond the mount.
+  - **7.0 HWE.** Passthrough (native-speed reads, one set of pages per blob, a per-open cost of 41 to 45 µs against 35 µs without), and a crash recovers every in-flight request in about 30 ms. Also `FUSE_REQUEST_TIMEOUT`.
+    **Not tested on 7.0: k3s, minio, the executor itself, tailscale, cgroup behaviour**; only a KVM guest ran it, not the lab hardware. A reboot per node. node-05 has no out-of-tree modules (no DKMS), so modules are low risk (Measured: linux section 9).
+  - (A) **Upgrade the lab to 7.0 HWE first**, node by node with a canary, then build the full design (passthrough, backing table, resend).
+  - (B) **Ship the 6.8 mode first** (phase 1 pull requests 5 and 7 as in 12), and upgrade nodes to 7.0 when the services above have been run on it; passthrough and resend are selected at start by what `INIT` offers.
+  - Recommendation: **(B).** It starts phase 1 now without waiting for reboots of nodes that run other tenants' builds; the measured 6.8 cost is small for compiles, and the design loses nothing, since passthrough, the backing table and resend are additions to it (Inferred).
+    Arm B against arm C of Q-B then measures what the upgrade is worth on the lab's own builds.
+  - If (A): phase 1 pull requests 6 and 7 are not deferred, the first lab deployment waits for the canary node's soak on 7.0, and the 6.8 mode is not built.
+- **C9. Open, for the owner: the macOS frontend, NFS or FSKit.** NFSv3 is measured with a demo-class server (metadata 4x to 66x slower than APFS, `clang` 2.0x to 2.6x, `cargo` 1.25x, twice the page cache, a restart is a 12.5 s pause with stable handles; no root needed; Seatbelt works; the Unix socket failed; Measured: macos E12, E14 to E17).
+  NFSv4.0 has no measurement. FSKit has none either: it is blocked on signing (C3) and, from the SDK headers, has no kernel-offloaded reads for a path or URL backed volume. M0 (`clonefile`, about 8 µs per file) stays the default and the kill-switch.
+  - (A) NFSv3 now, with a server written for the job (no global lock, an open-handle cache, `READDIRPLUS`, derivable handles).
+  - (B) Wait for the FSKit measurement (C3), then choose.
+  - (C) Neither: macOS stays on M0, and the filesystem is Linux only.
+  - Recommendation: **(B), with M0 unchanged meanwhile.** The NFS numbers are a demo server's upper bound, and no macOS number yet shows a gain over an 8 µs clone; a frontend should be chosen on a measured gain (Inferred). Phase 2 does not start before this is decided.
 
-### 13.2 Decided here (the CEO may overturn any)
+### 13.2 Decided here (the owner may overturn any)
 
 - **D1.** tierstore's own tree manifest format, JSON, one object per directory, with blob sources; not REAPI. Why:
   tierstore stays generic, and only the client knows where a blob is (the executor's packs).
@@ -1241,7 +1451,7 @@ asked for; C4 to C7 are this document's.
   by `pin_limit`; not hard links. Why: one writer and one budget for the cache; a refused pin costs speed, never a job.
 - **D10.** Files of a tree report one fixed mtime, the value the executor's materialisation uses; the manifest has no mtime field in
   version 1. Why: parity with today, and no field without a client (B20).
-- **D11.** No uncached fallback for a non-empty file on Linux: a fill that fails fails the open. Why: the kernel forbids
+- **D11.** No uncached fallback for a non-empty file on Linux with passthrough (7.0 and later; on 6.8 every open is a cached open, 6.4): a fill that fails fails the open. Why: the kernel forbids
   mixing cached and passthrough opens of one inode, and an uncached read would be unverified.
 - **D12.** No clone of the `/dev/fuse` descriptor unless SP2 shows one is the limit, and then every clone is stored. Why:
   a released clone fails the requests it was serving.
@@ -1255,6 +1465,10 @@ asked for; C4 to C7 are this document's.
 - **D16.** After an NFSv4.0 crash, no grace period: reclaims are answered `NFS4ERR_NO_GRACE` and clients open again (7.5).
   Why: a server without a stable record of its clients must not grant reclaims, and a grace period would stall every open
   on the node for a lease time.
+- **D17.** The tierstore filesystem is read-only to the executor: it overlays the mount and never writes into it; a read/write interface for other clients is a later design (owner, 2026-11-09; C4).
+- **D18.** A finished run's overlay directory is removed as the overlay's mounter, never as the action user, because whiteouts and `work/` belong to the mapped root (6.6; Measured: linux E4).
+- **D19.** The mount sets `FUSE_CACHE_SYMLINKS` and answers absent names in trees with a cached negative entry (6.3; Measured: linux E5).
+- **D20.** Until C8 is decided, the Linux frontend is designed to run in two modes chosen at start by what `INIT` offers (passthrough or not, resend or not); the 6.8 mode is the one the lab can run today (6.4, 7.2).
 
 ## 14. Alternatives rejected
 
@@ -1363,3 +1577,4 @@ asked for; C4 to C7 are this document's.
 - [S32] Seatbelt rules match resolved paths (`subpath`, `literal`, `regex`): https://northpole.security/docs/workshop/rules/sandbox-rules
 - [S33] NFSv4.0, grace period and reclaim: https://www.rfc-editor.org/rfc/rfc7530
 - [S34] VirtioFS file sharing in a Linux VM on macOS: https://orbstack.dev/blog/fast-filesystem
+- [S35] Kernel sources read for the experiments: v6.8, v6.17 and v7.0 `fs/fuse/*.c` (including `backing.c` in 7.0); the 7.0 kernel is the Ubuntu 24.04 HWE package `linux-generic-hwe-24.04`, 7.0.0-42 (the `linux` experiment area keeps the sources).
