@@ -9,7 +9,15 @@
 //! - [`attach`], [`control`]: the attachments and the control socket they are made on.
 //! - [`fill_client`]: the client of the fill socket (fills, touches and pins).
 //! - [`core`]: the operations of a filesystem on inode numbers, with no protocol in them.
+//! - `start`: what a start does before a frontend serves (the runtime directory, the core, the
+//!   attachments made again, the control socket), and the signals that end the process. It has no
+//!   mount in it, so that the FUSE frontend and one without FUSE call it alike.
 //! - `fuse` and `run` (Linux): the FUSE frontend and the process around it.
+//!
+//! The core serves a frontend in either of two ways: with opens and handles, and a count of the
+//! lookups the kernel holds until it forgets them (FUSE); or by inode alone, with the reads of
+//! [`core::Core::read_ino`] and no count, so that a tree leaves memory when it is detached (a
+//! protocol with no open and no forget, as NFS).
 //!
 //! Two modes, chosen at start from what the kernel's `INIT` offers (`fuse`): with passthrough
 //! (kernel 6.9 and later, `CAP_SYS_ADMIN`, `fs.passthrough` not false) every non-empty file is
@@ -31,12 +39,18 @@ mod tree;
 mod fuse;
 #[cfg(target_os = "linux")]
 mod run;
+// Linux's start is the FUSE one; on other targets the start is built for the tests until a
+// frontend there calls it.
+#[cfg(any(target_os = "linux", test))]
+mod start;
 
 pub(super) use config::{FsSettings, load};
 #[cfg(test)]
 pub(super) use config::{FsTable, from_text};
 #[cfg(target_os = "linux")]
-pub(super) use run::{StartError, serve};
+pub(super) use run::serve;
+#[cfg(target_os = "linux")]
+pub(super) use start::StartError;
 
 use std::sync::{Mutex, MutexGuard};
 

@@ -2,6 +2,13 @@
 //! attached trees, with no protocol in it. The FUSE frontend (`fuse.rs`) decodes the kernel's
 //! requests into these calls; a test makes them directly.
 //!
+//! A frontend uses the core in one of two ways. With opens: [`Core::open`] gives a handle that
+//! [`Core::read`] reads and [`Core::release`] closes, and every lookup the kernel makes is counted
+//! until it is forgotten ([`Core::forget`]), so that a detached tree stays in memory while the
+//! kernel holds one of its inodes. By inode alone ([`Core::read_ino`], in `core/read.rs`): no
+//! handle, no open and no count, because the protocol has no open, release or forget; a tree
+//! leaves memory when it is detached. `Settings::count_lookups` chooses.
+//!
 //! The namespace is the mount's root (`ino::ROOT`) and `trees/` (`ino::TREES`); below `trees/`
 //! are the roots of the trees that some run has attached. Every inode number of a tree is
 //! derivable (`ino.rs`), so a tree that is not in memory is read again, from the table of tree
@@ -10,7 +17,6 @@
 use std::collections::{HashMap, HashSet};
 use std::fs::File;
 use std::io;
-use std::os::unix::fs::FileExt as _;
 use std::path::{Path, PathBuf};
 use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::{Arc, Mutex, OnceLock};
@@ -180,6 +186,10 @@ pub(super) struct Settings {
     pub mount_id: String,
     /// The most backing ids the kernel is given at once (`fs.max_backing_ids`).
     pub max_backing_ids: usize,
+    /// Whether the lookups of a tree's inodes are counted and a detached tree stays in memory
+    /// until they are forgotten (a frontend that is told of forgets). If not, a tree is dropped
+    /// when it is detached.
+    pub count_lookups: bool,
 }
 
 /// The core.
@@ -484,8 +494,15 @@ impl Core {
     /// The tree in memory, if it is, counting one more lookup of it.
     fn counted(&self, number: u64) -> Result<Arc<Loaded>, Errno> {
         let loaded = self.tree(number)?;
-        let _ = loaded.lookups.fetch_add(1, Ordering::AcqRel);
+        self.count_lookup(&loaded);
         Ok(loaded)
+    }
+
+    /// Counts one more lookup of the tree `loaded`, if this core counts them.
+    fn count_lookup(&self, loaded: &Loaded) {
+        if self.settings.count_lookups {
+            let _ = loaded.lookups.fetch_add(1, Ordering::AcqRel);
+        }
     }
 
     /// Counts a lookup of `ino`, which a listing with entries (`READDIRPLUS`) made.
@@ -553,7 +570,7 @@ impl Core {
         let Some(child) = found.and_then(|child| loaded.tree.entry(child)) else {
             return Ok(Looked::Absent(TREE_TTL));
         };
-        let _ = loaded.lookups.fetch_add(1, Ordering::AcqRel);
+        self.count_lookup(&loaded);
         let attr = self.attr_of(number, &loaded.tree, child);
         Ok(Looked::Found(Entry {
             attr,
@@ -819,19 +836,7 @@ impl Core {
             // The kernel reads a passthrough file itself: a request for one is a fault.
             Handle::Backed(_) => return Err(Errno::Io),
         };
-        let mut data = vec![0u8; size as usize];
-        let mut have = 0;
-        while have < data.len() {
-            let got = file
-                .read_at(&mut data[have..], offset + have as u64)
-                .map_err(|_| Errno::Io)?;
-            if got == 0 {
-                break;
-            }
-            have += got;
-        }
-        data.truncate(have);
-        Ok(data)
+        read::read_file(file, offset, size as usize)
     }
 
     /// Closes the open file `fh`.
@@ -884,6 +889,7 @@ fn path_of(tree: &Tree, index: u32) -> String {
 
 mod passthrough;
 mod prefetch;
+mod read;
 
 #[cfg(test)]
 #[path = "core_tests.rs"]

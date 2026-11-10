@@ -4,19 +4,16 @@
 use std::io::{BufRead as _, BufReader, Write as _};
 use std::os::unix::fs::MetadataExt as _;
 use std::os::unix::net::{UnixDatagram, UnixStream};
-use std::sync::Mutex;
 
 use serde_json::{Value, json};
 
 use super::{
-    ECRYPTFS, OVERLAYFS, Running, Signals, StartError, check_cache, new_mount_id, notify_ready,
-    refuse_stacked, serve, serve_notifying, stacked_name,
+    ECRYPTFS, OVERLAYFS, Running, StartError, check_cache, notify_ready, refuse_stacked, serve,
+    serve_notifying, stacked_name,
 };
 use crate::server::treefs::config::FsSettings;
+use crate::server::treefs::start::SIGNALS;
 use crate::server::treefs::testing::{Rig, sample, with_fuse};
-
-/// Tests that send signals to the process go one at a time: a signal is for every handler.
-static SIGNALS: Mutex<()> = Mutex::new(());
 
 /// Settings over the scratch directories of a rig, with the sample tree to be served.
 fn settings(rig: &Rig) -> FsSettings {
@@ -211,15 +208,6 @@ fn a_cache_on_a_stacked_file_system_is_refused_by_name() {
     check_cache(&rig.cache).unwrap();
 }
 
-/// Asserts that a mount id is thirty-two hex digits and two are not alike.
-#[test]
-fn a_mount_id_is_random_hex() {
-    let (a, b) = (new_mount_id().unwrap(), new_mount_id().unwrap());
-    assert_eq!(a.len(), 32);
-    assert!(a.bytes().all(|c| c.is_ascii_hexdigit()));
-    assert_ne!(a, b);
-}
-
 /// Asserts that the service manager is told `READY=1` at a path socket and at an abstract one,
 /// that nothing is sent without a socket, and that a socket that cannot be reached is only said.
 #[test]
@@ -240,26 +228,6 @@ fn the_service_manager_is_told_the_unit_is_ready() {
     assert_eq!(&buffer[..got], b"READY=1");
     notify_ready(None);
     notify_ready(Some(rig.dir.path().join("nobody-home").as_os_str()));
-}
-
-/// Asserts that SIGTERM and SIGINT, each, end the wait, and that one that came before the wait is
-/// not lost.
-#[test]
-fn sigterm_and_sigint_end_the_wait_even_if_they_came_first() {
-    let _one_at_a_time = SIGNALS
-        .lock()
-        .unwrap_or_else(std::sync::PoisonError::into_inner);
-    let runtime = tokio::runtime::Builder::new_current_thread()
-        .enable_all()
-        .build()
-        .unwrap();
-    runtime.block_on(async {
-        let mut signals = Signals::install().unwrap();
-        for signal in [rustix::process::Signal::TERM, rustix::process::Signal::INT] {
-            rustix::process::kill_process(rustix::process::getpid(), signal).unwrap();
-            signals.wait().await;
-        }
-    });
 }
 
 /// Asserts the process: it starts, tells the service manager, serves, and a SIGTERM unmounts it and
