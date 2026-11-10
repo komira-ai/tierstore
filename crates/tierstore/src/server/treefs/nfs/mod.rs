@@ -3,7 +3,9 @@
 //! (`docs/design/virtual-build-fs.md` section 8; decision C9). FSKit may replace it later.
 //!
 //! - [`config`]: the `[fs.nfs]` table.
-//! - `handle`: the file handle, the eight bytes of the core's inode number.
+//! - `boot`: the epoch of the boot, which the table of tree numbers and the handles carry, so that
+//!   a restart of the server keeps them and a reboot does not.
+//! - `handle`: the file handle, the core's inode number and the epoch.
 //! - `fs`: the procedures, on the core. The protocol under it is the `nfsserve` crate (our fork),
 //!   which decodes the RPCs and calls one trait, `NFSFileSystem`.
 //! - `fdcache`: the open cache files of the files read lately.
@@ -13,6 +15,7 @@
 //! The frontend is built and tested on every target; the process serves it on macOS only, where
 //! Linux has FUSE (`run.rs` of the parent).
 
+mod boot;
 pub(in crate::server) mod config;
 mod error;
 mod fdcache;

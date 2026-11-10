@@ -3,7 +3,8 @@
 //! on Linux, and on every target in the tests.
 //!
 //! A start, in order: the runtime directory and the mount point are made; the runtime directory
-//! gets a table of tree numbers afresh; the backing table of an earlier mount is removed; the
+//! gets a table of tree numbers (afresh, or, for an NFS mount that outlives the server, the one the
+//! mount of this boot left, see [`Identity`]); the backing table of an earlier mount is removed; the
 //! core is made over the fill socket; the attachments the file holds are made again (the manifests
 //! are read through the fill socket); the cache is told which trees are attached, so that it
 //! drops the pins of any other; and the control socket is bound.
@@ -86,12 +87,26 @@ fn remove_stale(path: &Path) -> Result<(), StartError> {
     }
 }
 
+/// Whose mount a start is for.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub(super) enum Identity {
+    /// A new mount, with a new connection: the table of tree numbers is made afresh and the mount
+    /// id is random (FUSE).
+    Fresh,
+    /// The mount of this boot, which a restart of the server does not end: the table of tree
+    /// numbers is reopened when it is of this epoch (a nonzero hash of the boot), and the mount id
+    /// is the epoch, so that the pins of the earlier start stay this mount's (NFS).
+    Boot(u32),
+}
+
 /// What a start makes before a frontend serves: the core, and the control socket it is driven by.
 pub(super) struct Setup {
     /// The core a frontend serves from.
     pub core: Arc<Core>,
     /// The control socket; it is closed when this is dropped.
     pub _control: Control,
+    /// Whether the table of tree numbers of an earlier start was reopened.
+    pub reopened: bool,
 }
 
 impl Setup {
@@ -101,7 +116,11 @@ impl Setup {
     ///
     /// # Errors
     /// [`StartError`]: why nothing was made.
-    pub(super) fn start(settings: &FsSettings, count_lookups: bool) -> Result<Self, StartError> {
+    pub(super) fn start(
+        settings: &FsSettings,
+        count_lookups: bool,
+        identity: Identity,
+    ) -> Result<Self, StartError> {
         std::fs::create_dir_all(&settings.runtime_dir).map_err(io(format!(
             "fs.runtime_dir {}",
             settings.runtime_dir.display()
@@ -110,7 +129,17 @@ impl Setup {
             "fs.mountpoint {}",
             settings.mountpoint.display()
         )))?;
-        let table = TreeTable::create(&settings.runtime_dir)?;
+        let (table, reopened, mount_id) = match identity {
+            Identity::Fresh => (
+                TreeTable::create(&settings.runtime_dir)?,
+                false,
+                new_mount_id()?,
+            ),
+            Identity::Boot(epoch) => {
+                let (table, reopened) = TreeTable::open_or_create(&settings.runtime_dir, epoch)?;
+                (table, reopened, format!("nfs-{epoch:08x}"))
+            }
+        };
         // The backing ids of an earlier mount belong to its connection, which is gone.
         remove_stale(&settings.runtime_dir.join(backing::FILE))?;
         let fills = FillClient::new(settings.fill_socket.clone(), settings.fetch_timeout);
@@ -119,7 +148,7 @@ impl Setup {
                 owner: settings.owner,
                 cache_path: settings.cache_path.clone(),
                 mountpoint: settings.mountpoint.clone(),
-                mount_id: new_mount_id()?,
+                mount_id,
                 max_backing_ids: settings.max_backing_ids,
                 count_lookups,
             },
@@ -143,6 +172,7 @@ impl Setup {
         Ok(Self {
             core,
             _control: control,
+            reopened,
         })
     }
 }

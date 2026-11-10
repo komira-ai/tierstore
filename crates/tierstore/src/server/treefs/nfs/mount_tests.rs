@@ -337,3 +337,58 @@ fn the_system_runner_runs_a_program_and_reports_what_it_said() {
     assert_eq!(empty.kind(), std::io::ErrorKind::InvalidInput);
     System.pause(Duration::ZERO);
 }
+
+/// A runner whose listing of the mounts is `listing`, or that cannot run it.
+struct Lister(Option<String>);
+
+impl Runner for Lister {
+    fn run(&self, argv: &[String]) -> std::io::Result<Ran> {
+        assert_eq!(argv, ["/sbin/mount"]);
+        match &self.0 {
+            Some(text) => Ok(said(true, text, "")),
+            None => Err(std::io::Error::from(std::io::ErrorKind::NotFound)),
+        }
+    }
+
+    fn pause(&self, _how_long: Duration) {}
+}
+
+/// Asserts that the listing of the mounts finds an NFS mount at the mount point, by the path as it
+/// is named and by the path it resolves to (macOS lists `/private/var` for `/var`), and not a
+/// mount at another path whose name begins with it; and that a listing that cannot be run is an
+/// error that names the command.
+#[test]
+fn a_mount_at_the_mount_point_is_found_in_the_listing() {
+    let (dir, path, _) = mountpoint("nfs-mounted");
+    let link = dir.path().join("link");
+    std::os::unix::fs::symlink(&path, &link).unwrap();
+    let nfs = NfsSettings::default();
+    let at = |listing: &str, mountpoint: &std::path::Path| {
+        Mounter::new(
+            Arc::new(Lister(Some(listing.to_owned()))),
+            &nfs,
+            mountpoint.to_owned(),
+            0,
+        )
+        .is_mounted()
+        .unwrap()
+    };
+    let line =
+        |at: &std::path::Path| format!("127.0.0.1:/ on {} (nfs, nodev, read-only)\n", at.display());
+    assert!(at(&line(&path), &path));
+    assert!(at(&line(&path), &link), "named by a link to it");
+    assert!(!at("/dev/disk1s1 on / (apfs, local)\n", &path));
+    assert!(!at(&line(&dir.path().join("mnt2")), &path));
+    let gone = dir.path().join("gone");
+    assert!(
+        at(&line(&gone), &gone),
+        "a path that does not resolve is compared as named"
+    );
+    let error = Mounter::new(Arc::new(Lister(None)), &nfs, path, 0)
+        .is_mounted()
+        .unwrap_err();
+    assert!(
+        error.to_string().starts_with("running /sbin/mount: "),
+        "{error}"
+    );
+}

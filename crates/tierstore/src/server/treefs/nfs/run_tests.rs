@@ -6,7 +6,8 @@ use std::os::unix::net::UnixStream;
 use std::sync::{Arc, Mutex};
 use std::time::Duration;
 
-use super::super::fixtures::{attached, loopback, settings};
+use super::super::boot::BootSource;
+use super::super::fixtures::{EPOCH, attached, handle_of, loopback, settings};
 use super::super::mount::{Ran, Runner};
 use super::super::wire_client::{Client, Cred, Dec, Enc, GETATTR, NFS};
 use super::{Running, serve, serve_with, timer};
@@ -17,19 +18,35 @@ use crate::server::treefs::start::SIGNALS;
 use crate::server::treefs::testing::until;
 
 /// Records the commands, answers every one with success unless told to fail the mount.
-struct Recorder {
+pub(super) struct Recorder {
     calls: Mutex<Vec<Vec<String>>>,
     mount_works: bool,
     /// The program whose run panics.
     panics: Option<&'static str>,
+    /// What the listing of the mounts says.
+    listing: String,
 }
 
 impl Recorder {
-    fn new(mount_works: bool) -> Arc<Self> {
+    pub(super) fn new(mount_works: bool) -> Arc<Self> {
         Arc::new(Self {
             calls: Mutex::new(Vec::new()),
             mount_works,
             panics: None,
+            listing: String::new(),
+        })
+    }
+
+    /// A runner whose listing of the mounts has an NFS mount at `path`.
+    pub(super) fn mounted_at(path: &std::path::Path) -> Arc<Self> {
+        Arc::new(Self {
+            calls: Mutex::new(Vec::new()),
+            mount_works: true,
+            panics: None,
+            listing: format!(
+                "127.0.0.1:/ on {} (nfs, nodev, nosuid, read-only)\n",
+                path.display()
+            ),
         })
     }
 
@@ -38,15 +55,16 @@ impl Recorder {
             calls: Mutex::new(Vec::new()),
             mount_works: true,
             panics: Some(program),
+            listing: String::new(),
         })
     }
 
-    fn calls(&self) -> Vec<Vec<String>> {
+    pub(super) fn calls(&self) -> Vec<Vec<String>> {
         locked(&self.calls).clone()
     }
 
     /// The port the mount command named.
-    fn mounted_port(&self) -> Option<u16> {
+    pub(super) fn mounted_port(&self) -> Option<u16> {
         let calls = self.calls();
         let line = calls.iter().find(|call| call[0] == "/sbin/mount_nfs")?;
         line[2]
@@ -63,7 +81,11 @@ impl Runner for Recorder {
         let fails = argv[0] == "/sbin/mount_nfs" && !self.mount_works;
         Ok(Ran {
             success: !fails,
-            stdout: String::new(),
+            stdout: if argv[0] == "/sbin/mount" {
+                self.listing.clone()
+            } else {
+                String::new()
+            },
             stderr: if fails {
                 "refused".to_owned()
             } else {
@@ -75,7 +97,7 @@ impl Runner for Recorder {
     fn pause(&self, _how_long: Duration) {}
 }
 
-fn ask(path: &std::path::Path, request: &str) -> serde_json::Value {
+pub(super) fn ask(path: &std::path::Path, request: &str) -> serde_json::Value {
     let stream = UnixStream::connect(path).unwrap();
     (&stream)
         .write_all(format!("{request}\n").as_bytes())
@@ -87,13 +109,13 @@ fn ask(path: &std::path::Path, request: &str) -> serde_json::Value {
 
 /// Yields to the runtime until nothing listens at `address`: the aborted server drops its socket
 /// when the runtime next runs it.
-async fn closed(address: std::net::SocketAddr) {
+pub(super) async fn closed(address: std::net::SocketAddr) {
     while std::net::TcpStream::connect(address).is_ok() {
         tokio::task::yield_now().await;
     }
 }
 
-fn euid() -> u32 {
+pub(super) fn euid() -> u32 {
     rustix::process::geteuid().as_raw()
 }
 
@@ -106,13 +128,13 @@ async fn a_start_serves_mounts_and_a_stop_unmounts() {
     let (rig, root) = attached("nfs-run-start");
     let settings = settings(&rig, loopback());
     let runner = Recorder::new(true);
-    let running = Running::start(&settings, runner.clone(), euid(), None)
+    let running = Running::start(&settings, runner.clone(), euid(), None, EPOCH)
         .await
         .unwrap();
     let port = runner.mounted_port().unwrap();
     assert_ne!(port, 0);
     assert_eq!(
-        runner.calls()[0][2],
+        runner.calls()[1][2],
         format!("vers=3,tcp,ro,rdirplus,locallocks,actimeo=3600,hard,port={port},mountport={port}")
     );
 
@@ -124,7 +146,7 @@ async fn a_start_serves_mounts_and_a_stop_unmounts() {
     let address = std::net::SocketAddr::from(([127, 0, 0, 1], port));
     let mut client = Client::connect(address).await;
     let handle = client.mount("/").await;
-    assert_eq!(handle, ino::ROOT.to_le_bytes());
+    assert_eq!(handle, handle_of(ino::ROOT));
     // The owner of the entries is the user of the process, so that user is served by default.
     let reply = client
         .call(
@@ -170,7 +192,7 @@ async fn a_start_without_a_mount_serves_only_and_the_list_of_users_is_taken() {
     let mut settings = settings(&rig, nfs);
     settings.nfs.listen = "127.0.0.1:0".parse().unwrap();
     let runner = Recorder::new(true);
-    let running = Running::start(&settings, runner.clone(), euid(), None)
+    let running = Running::start(&settings, runner.clone(), euid(), None, EPOCH)
         .await
         .unwrap();
     assert!(runner.calls().is_empty());
@@ -185,7 +207,7 @@ async fn a_start_whose_mount_fails_or_whose_address_is_taken_is_refused() {
     let (rig, _) = attached("nfs-run-refused");
     let settings = settings(&rig, loopback());
     let runner = Recorder::new(false);
-    let why = Running::start(&settings, runner.clone(), euid(), None)
+    let why = Running::start(&settings, runner.clone(), euid(), None, EPOCH)
         .await
         .err()
         .unwrap();
@@ -208,6 +230,7 @@ async fn a_start_whose_mount_fails_or_whose_address_is_taken_is_refused() {
         Recorder::new(true),
         euid(),
         None,
+        EPOCH,
     )
     .await
     .err()
@@ -241,7 +264,7 @@ async fn a_start_as_the_wrong_user_makes_nothing() {
     }
     let mut settings = settings(&rig, nfs);
     settings.runtime_dir = rig.dir.path().join("never-made");
-    let why = Running::start(&settings, Arc::new(Ids), euid(), None)
+    let why = Running::start(&settings, Arc::new(Ids), euid(), None, EPOCH)
         .await
         .err()
         .unwrap();
@@ -256,7 +279,7 @@ async fn a_start_the_neutral_start_refuses_ends_with_its_status() {
     let (rig, _) = attached("nfs-run-neutral");
     let mut settings = settings(&rig, loopback());
     settings.control_socket = rig.dir.path().join("no-such-dir").join("control.sock");
-    let why = Running::start(&settings, Recorder::new(true), euid(), None)
+    let why = Running::start(&settings, Recorder::new(true), euid(), None, EPOCH)
         .await
         .err()
         .unwrap();
@@ -275,7 +298,8 @@ fn serve_runs_until_sigterm_and_unmounts() {
     let settings = settings(&rig, loopback());
     let runner = Recorder::new(true);
     let (mine, theirs) = (settings.clone(), runner.clone());
-    let thread = std::thread::spawn(move || serve_with(&mine, theirs, euid()));
+    let thread =
+        std::thread::spawn(move || serve_with(&mine, theirs, euid(), &BootSource::fixed()));
     // The mount comes after the handlers were put in place.
     until(|| runner.mounted_port().is_some());
     rustix::process::kill_process(rustix::process::getpid(), rustix::process::Signal::TERM)
@@ -288,7 +312,7 @@ fn serve_runs_until_sigterm_and_unmounts() {
         control_socket: rig.dir.path().join("none").join("control.sock"),
         ..settings
     };
-    assert!(serve_with(&bad, Recorder::new(true), euid()).is_err());
+    assert!(serve_with(&bad, Recorder::new(true), euid(), &BootSource::fixed()).is_err());
     // With the commands of this machine, none of which a start that fails this early runs.
     assert!(serve(&bad).is_err());
 }
@@ -315,6 +339,7 @@ async fn a_command_that_dies_fails_the_start_or_the_stop() {
         Recorder::panicking("/sbin/mount_nfs"),
         euid(),
         None,
+        EPOCH,
     )
     .await
     .err()
@@ -326,9 +351,15 @@ async fn a_command_that_dies_fails_the_start_or_the_stop() {
 
     let (rig, _) = attached("nfs-run-dies-umount");
     let settings = self::settings(&rig, loopback());
-    let running = Running::start(&settings, Recorder::panicking("/sbin/umount"), euid(), None)
-        .await
-        .unwrap();
+    let running = Running::start(
+        &settings,
+        Recorder::panicking("/sbin/umount"),
+        euid(),
+        None,
+        EPOCH,
+    )
+    .await
+    .unwrap();
     let why = running.stop().await.unwrap_err();
     assert!(
         why.to_string().starts_with("waiting for the unmount: "),

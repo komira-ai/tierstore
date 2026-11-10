@@ -230,6 +230,7 @@ async fn an_offer_that_is_taken_is_a_stop() {
         &crate::server::handoff::Want {
             s3: &want,
             oci: &[],
+            nfs: &[],
         },
     )
     .await

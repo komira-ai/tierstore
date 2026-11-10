@@ -4,7 +4,7 @@
 use nfsserve::nfs::{ACCESS3_EXECUTE, ACCESS3_LOOKUP, ACCESS3_READ, FSF_HOMOGENEOUS, FSF_SYMLINK};
 
 use super::config::NfsSettings;
-use super::fixtures::{UID, attached, blob_of, endless, fs_of};
+use super::fixtures::{UID, attached, blob_of, endless, fs_of, handle_of};
 use super::wire_client::{
     ACCESS, CREATE, Client, Cred, Dec, Enc, FSINFO, GETATTR, LINK, LOOKUP, MKDIR, NFS, READ,
     READDIRPLUS, READLINK, REMOVE, RENAME, RMDIR, SETATTR, SYMLINK, WRITE, serve,
@@ -61,7 +61,7 @@ async fn status(client: &mut Client, procedure: u32, args: Enc) -> (u32, Vec<u8>
 #[tokio::test]
 async fn mount_then_lookup_then_read_a_file_over_tcp() {
     let (mut client, root, digest, task, rig) = connected("nfs-wire-read").await;
-    assert_eq!(root, ino::ROOT.to_le_bytes());
+    assert_eq!(root, handle_of(ino::ROOT));
 
     let attrs = status(&mut client, GETATTR, Enc::default().opaque(&root)).await;
     assert_eq!(attrs.0, 0);
@@ -79,7 +79,7 @@ async fn mount_then_lookup_then_read_a_file_over_tcp() {
     let cc = lookup(&mut client, &bin, "cc").await;
     let big = lookup(&mut client, &tree, "big.bin").await;
     let lib = lookup(&mut client, &tree, "lib").await;
-    assert_eq!(tool, ino::of(1, 4).to_le_bytes());
+    assert_eq!(tool, handle_of(ino::of(1, 4)));
 
     let missing = status(
         &mut client,
@@ -182,7 +182,7 @@ async fn readdirplus_respects_dircount_and_maxcount_limits() {
         assert_eq!(entry.cookie, entry.fileid);
         assert_eq!(
             entry.handle.as_deref(),
-            Some(&entry.fileid.to_le_bytes()[..])
+            Some(handle_of(entry.fileid).as_slice())
         );
         let attr = entry.attr.as_ref().unwrap();
         assert_eq!((attr.fileid, attr.uid), (entry.fileid, 1234));

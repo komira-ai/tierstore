@@ -17,11 +17,12 @@
 //! answered `not attached`.
 
 use std::io::{BufRead as _, BufReader, Read as _, Write as _};
-use std::os::unix::fs::PermissionsExt as _;
+use std::os::unix::fs::{MetadataExt as _, PermissionsExt as _};
 use std::os::unix::net::{UnixListener, UnixStream};
 use std::path::{Path, PathBuf};
 use std::sync::Arc;
-use std::sync::atomic::{AtomicBool, Ordering};
+
+use rustix::event::{PollFd, PollFlags, poll};
 
 use super::attach::Failure;
 use super::core::{AttachError, Core};
@@ -112,7 +113,11 @@ fn session(core: &Arc<Core>, stream: UnixStream) {
 /// The socket and the thread that serves it.
 pub(in crate::server) struct Control {
     path: PathBuf,
-    stop: Arc<AtomicBool>,
+    /// The device and inode of the socket's file as this bound it: a file at the path of another
+    /// is the successor's (`nfs/run.rs`), and is not removed.
+    file: (u64, u64),
+    /// The end of a pair that wakes the thread, which waits for a connection or for it.
+    wake: UnixStream,
     thread: Option<std::thread::JoinHandle<()>>,
 }
 
@@ -132,36 +137,51 @@ impl Control {
         let listener = UnixListener::bind(path)?;
         std::fs::set_permissions(path, std::fs::Permissions::from_mode(0o660))?;
         rustix::fs::chown(path, None, Some(rustix::fs::Gid::from_raw(gid)))?;
-        let stop = Arc::new(AtomicBool::new(false));
-        let stopping = Arc::clone(&stop);
+        let meta = std::fs::metadata(path)?;
+        let (wake, woken) = UnixStream::pair()?;
         let thread = std::thread::Builder::new()
             .name("fs-control".to_owned())
             .spawn(move || {
-                for stream in listener.incoming().flatten() {
-                    if stopping.load(Ordering::Acquire) {
+                loop {
+                    let mut fds = [
+                        PollFd::new(&listener, PollFlags::IN),
+                        PollFd::new(&woken, PollFlags::IN),
+                    ];
+                    // A signal that interrupts the wait is retried; any other failure ends the
+                    // thread, which a drop then still joins.
+                    if rustix::io::retry_on_intr(|| poll(&mut fds, None)).is_err() {
                         return;
                     }
-                    let core = Arc::clone(&core);
-                    let _ = std::thread::spawn(move || session(&core, stream));
+                    if !fds[1].revents().is_empty() {
+                        return;
+                    }
+                    if let Ok((stream, _)) = listener.accept() {
+                        let core = Arc::clone(&core);
+                        let _ = std::thread::spawn(move || session(&core, stream));
+                    }
                 }
             })?;
         Ok(Self {
             path: path.to_owned(),
-            stop,
+            file: (meta.dev(), meta.ino()),
+            wake,
             thread: Some(thread),
         })
     }
 }
 
 impl Drop for Control {
-    /// Stops accepting and removes the socket file. Connections that are open finish their
-    /// request and end when their client closes.
+    /// Stops accepting and removes the socket file, unless it is another's by now. Connections
+    /// that are open finish their request and end when their client closes.
     fn drop(&mut self) {
-        self.stop.store(true, Ordering::Release);
-        // The thread waits in `accept`: a connection wakes it to see the flag.
-        let _ = UnixStream::connect(&self.path);
+        // The thread waits for a connection or for this byte.
+        let _ = (&self.wake).write_all(b"x");
         let _ = self.thread.take().map(std::thread::JoinHandle::join);
-        let _ = std::fs::remove_file(&self.path);
+        let ours =
+            std::fs::metadata(&self.path).is_ok_and(|meta| (meta.dev(), meta.ino()) == self.file);
+        if ours {
+            let _ = std::fs::remove_file(&self.path);
+        }
     }
 }
 

@@ -1009,6 +1009,8 @@ infrastructure-retryable when `stall_ms` was over a tenth of the limit.
 
 ### 7.5 Crash and live update of the NFS frontend (macOS)
 
+**Status (pull request 12d, built).** The restart arm is built: the handle is the core's inode number and four bytes of the boot's epoch (a hash of the machine's boot identity; a handle of another boot is `NFS3ERR_STALE`), the table of tree numbers carries the epoch in the header word that was reserved and is reopened by a start of the same epoch, the mount is not made again when the `mount` listing shows it, and a resent READ or LOOKUP is answered as it was (no duplicate request cache: nothing a tree serves changes). The hand-over of the listening socket is built (`fs.nfs.handoff_socket`, a front kind `nfs` in the offer, a drain in the `komira-ai/nfsserve` fork). Not built yet: the launchd jobs `tierstore-fs@a` and `@b` with the hook's record and rollback (12e), and the `fs.recover_wait` watchdog. The walk at start is not a cost: trees are read when a handle first names them.
+
 What NFS gives: a hard mount makes the client wait and retry while the server does not answer [S22]; EdenFS reports
 exactly that, I/O hangs while its server is gone, and a dialog the client shows when the server stays unresponsive [S10].
 So the server must come back on the same endpoint, quickly, and answer the handles the client holds.

@@ -11,6 +11,9 @@
 //! | `fs.nfs.fd_cache_shards` | shards of the cache of open cache files | `64` |
 //! | `fs.nfs.fd_cache_per_shard` | open cache files kept in one shard | `64` |
 //! | `fs.nfs.allowed_uids` | the user ids whose requests are served (`AUTH_SYS`); a fence against other local users, not authentication | the mount user and the owner (`fs.owner`) |
+//! | `fs.nfs.handoff_socket` | the control socket on which a running instance hands its listening socket to the next one (a file in a directory only the user of the process may write); none: no hand-off, an update is a restart | none |
+//! | `fs.nfs.handoff_wait` | how long a new instance waits for the running one to hand over | `10s` |
+//! | `fs.nfs.drain_wait` | how long an instance that handed over waits for the clients to close their connections before it ends | `10s` |
 //! | `fs.nfs.jukebox_after` | how long a read waits for a fill before the client is told to ask again | `5s` |
 
 use std::net::{IpAddr, Ipv4Addr, SocketAddr};
@@ -19,8 +22,11 @@ use std::time::Duration;
 use serde::Deserialize;
 
 use crate::server::config::{ConfigError, invalid, within};
+use crate::server::config_handoff::MOST_SOCKET_PATH;
 use crate::server::config_tuning::{HOUR, MS};
 use crate::server::config_units::Dur;
+use crate::server::handoff::Handoff;
+use crate::server::lock::check_lock_path;
 
 /// The address the protocols are served on when the file leaves out `fs.nfs.listen`.
 const DEFAULT_LISTEN: SocketAddr = SocketAddr::new(IpAddr::V4(Ipv4Addr::LOCALHOST), 12_049);
@@ -40,6 +46,12 @@ const DEFAULT_PER_SHARD: u32 = 64;
 /// The wait for a fill when the file leaves out `fs.nfs.jukebox_after`.
 const DEFAULT_JUKEBOX_AFTER: Duration = Duration::from_secs(5);
 
+/// The wait for the running instance when the file leaves out `fs.nfs.handoff_wait`.
+const DEFAULT_HANDOFF_WAIT: Duration = Duration::from_secs(10);
+
+/// The wait for the clients when the file leaves out `fs.nfs.drain_wait`.
+const DEFAULT_DRAIN_WAIT: Duration = Duration::from_secs(10);
+
 /// The longest a name of a user may be.
 const MOST_USER_NAME: usize = 64;
 
@@ -55,6 +67,9 @@ pub(in crate::server) struct NfsTable {
     fd_cache_per_shard: Option<u32>,
     allowed_uids: Option<Vec<u32>>,
     jukebox_after: Option<Dur>,
+    handoff_socket: Option<std::path::PathBuf>,
+    handoff_wait: Option<Dur>,
+    drain_wait: Option<Dur>,
 }
 
 /// What the NFS frontend runs with.
@@ -73,6 +88,10 @@ pub(in crate::server) struct NfsSettings {
     /// The user ids that are served; none is the mount user and the owner of the entries.
     pub allowed_uids: Option<Vec<u32>>,
     pub jukebox_after: Duration,
+    /// The hand-off of the listening socket to a successor, if the file names a control socket.
+    pub handoff: Option<Handoff>,
+    /// How long an instance that handed over waits for the clients to close their connections.
+    pub drain_wait: Duration,
 }
 
 impl Default for NfsSettings {
@@ -87,6 +106,8 @@ impl Default for NfsSettings {
             fd_cache_per_shard: DEFAULT_PER_SHARD as usize,
             allowed_uids: None,
             jukebox_after: DEFAULT_JUKEBOX_AFTER,
+            handoff: None,
+            drain_wait: DEFAULT_DRAIN_WAIT,
         }
     }
 }
@@ -142,6 +163,34 @@ fn span(
         return Err(invalid(&format!("fs.nfs.{key}"), why));
     }
     Ok(value)
+}
+
+/// The hand-off the table asks for: a control socket that is an absolute path of a file that fits a
+/// Unix socket's address, and how long a new instance waits for the running one.
+fn handoff_of(
+    socket: Option<std::path::PathBuf>,
+    wait: Option<Dur>,
+) -> Result<Option<Handoff>, ConfigError> {
+    let Some(socket) = socket else {
+        if wait.is_some() {
+            return Err(invalid(
+                "fs.nfs.handoff_wait",
+                "is the wait for the running instance of fs.nfs.handoff_socket, which is not given",
+            ));
+        }
+        return Ok(None);
+    };
+    let key = "fs.nfs.handoff_socket";
+    check_lock_path(&socket).map_err(|why| invalid(key, format!("{socket:?} {why}")))?;
+    let length = socket.as_os_str().len();
+    if length > MOST_SOCKET_PATH {
+        let why = format!(
+            "{socket:?} is {length} bytes; the path of a Unix socket is at most {MOST_SOCKET_PATH}"
+        );
+        return Err(invalid(key, why));
+    }
+    let wait = span("handoff_wait", wait, DEFAULT_HANDOFF_WAIT, (MS, HOUR))?;
+    Ok(Some(Handoff { socket, wait }))
 }
 
 impl NfsSettings {
@@ -201,6 +250,13 @@ impl NfsSettings {
                 table.jukebox_after,
                 DEFAULT_JUKEBOX_AFTER,
                 (MS, Duration::from_secs(600)),
+            )?,
+            handoff: handoff_of(table.handoff_socket, table.handoff_wait)?,
+            drain_wait: span(
+                "drain_wait",
+                table.drain_wait,
+                DEFAULT_DRAIN_WAIT,
+                (MS, HOUR),
             )?,
         })
     }

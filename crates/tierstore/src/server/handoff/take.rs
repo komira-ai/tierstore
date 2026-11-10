@@ -15,6 +15,7 @@ use super::{Front, Handoff, HandoffError, Socket, line};
 pub(crate) struct Want<'a> {
     pub(crate) s3: &'a [SocketAddr],
     pub(crate) oci: &'a [SocketAddr],
+    pub(crate) nfs: &'a [SocketAddr],
 }
 
 /// The sockets taken from a running instance, in the order it serves them, with what the taker
@@ -23,10 +24,13 @@ pub(crate) struct Want<'a> {
 pub(crate) struct Inherited {
     pub(crate) s3: Vec<TcpListener>,
     pub(crate) oci: Vec<TcpListener>,
+    pub(crate) nfs: Vec<TcpListener>,
     /// The address of each of [`s3`](Self::s3).
     pub(crate) s3_addrs: Vec<SocketAddr>,
     /// The address of each of [`oci`](Self::oci).
     pub(crate) oci_addrs: Vec<SocketAddr>,
+    /// The address of each of [`nfs`](Self::nfs).
+    pub(crate) nfs_addrs: Vec<SocketAddr>,
     /// A copy of each socket, in the order the running instance offered them, for the taker's
     /// own control socket.
     pub(crate) copies: Vec<Socket>,
@@ -109,21 +113,32 @@ async fn exchange(
     }
     let mut offered = Vec::new();
     for entry in rest {
-        let parsed = entry
-            .split_once(' ')
-            .and_then(|(name, addr)| Some((Front::named(name)?, addr.parse::<SocketAddr>().ok()?)));
-        offered.push(parsed.ok_or(HandoffError::Protocol(
+        let (name, addr) = entry.split_once(' ').ok_or(HandoffError::Protocol(
             "a socket line that is not <front> <address>",
-        ))?);
+        ))?;
+        // A front this release does not know is skipped; the descriptor is closed below.
+        offered.push(match Front::named(name) {
+            Some(front) => Some((
+                front,
+                addr.parse::<SocketAddr>().map_err(|_| {
+                    HandoffError::Protocol("a socket line that is not <front> <address>")
+                })?,
+            )),
+            None => None,
+        });
     }
     let of = |front: Front| -> Vec<SocketAddr> {
         offered
             .iter()
+            .flatten()
             .filter(|(f, _)| *f == front)
             .map(|(_, a)| *a)
             .collect()
     };
-    if !(all_cover(want.s3, &of(Front::S3)) && all_cover(want.oci, &of(Front::Oci))) {
+    if !(all_cover(want.s3, &of(Front::S3))
+        && all_cover(want.oci, &of(Front::Oci))
+        && all_cover(want.nfs, &of(Front::Nfs)))
+    {
         wire::send(&stream, &["nak".to_owned()], &[])
             .await
             .map_err(io("refusing the offer"))?;
@@ -132,10 +147,15 @@ async fn exchange(
         };
         return Err(HandoffError::Mismatch {
             offered: rest.to_vec(),
-            wanted: [named(Front::S3, want.s3), named(Front::Oci, want.oci)].concat(),
+            wanted: [
+                named(Front::S3, want.s3),
+                named(Front::Oci, want.oci),
+                named(Front::Nfs, want.nfs),
+            ]
+            .concat(),
         });
     }
-    let fronts = offered.iter().map(|(front, _)| *front);
+    let fronts = offered.iter().map(|entry| entry.map(|(front, _)| front));
     let inherited = match adopt(fronts.zip(fds), copy) {
         Ok(inherited) => inherited,
         Err(why) => {
@@ -163,7 +183,7 @@ async fn exchange(
 /// The listeners of the descriptors that came on the control socket, by front, with their
 /// addresses and a copy of each made by `copy`.
 fn adopt(
-    offered: impl Iterator<Item = (Front, OwnedFd)>,
+    offered: impl Iterator<Item = (Option<Front>, OwnedFd)>,
     copy: Copy,
 ) -> std::io::Result<Inherited> {
     let mut inherited = Inherited {
@@ -171,15 +191,20 @@ fn adopt(
         oci: Vec::new(),
         s3_addrs: Vec::new(),
         oci_addrs: Vec::new(),
+        nfs: Vec::new(),
+        nfs_addrs: Vec::new(),
         copies: Vec::new(),
     };
     for (front, fd) in offered {
+        // A front this release does not know: the descriptor is closed.
+        let Some(front) = front else { continue };
         let listener = listener_of(fd)?;
         let addr = listener.local_addr()?;
         inherited.copies.push(Socket::new(front, copy(&listener)?));
         let (listeners, addrs) = match front {
             Front::S3 => (&mut inherited.s3, &mut inherited.s3_addrs),
             Front::Oci => (&mut inherited.oci, &mut inherited.oci_addrs),
+            Front::Nfs => (&mut inherited.nfs, &mut inherited.nfs_addrs),
         };
         listeners.push(listener);
         addrs.push(addr);

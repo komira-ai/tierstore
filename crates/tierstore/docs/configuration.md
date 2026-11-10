@@ -408,6 +408,11 @@ On a Mac `tierstore fs` has no FUSE: it serves the same trees read-only over NFS
 | `fs.nfs.fd_cache_per_shard` | count, 64 (1 to 65536) | the open files one shard keeps; the oldest is closed first. Shards times this is the most descriptors the cache holds, and the process needs a limit of open files above that (the launchd job sets 65536; with the default 256 of a shell, a read that cannot open a cache file is `NFS3ERR_IO`) |
 | `fs.nfs.allowed_uids` | list of user ids, the mount user and the user of `fs.owner` | the users whose requests (`AUTH_SYS`) are served; any other, and a request with no user, is `NFS3ERR_ACCES`. This is a fence against other local users, not authentication: any local process can send any user id to the loopback socket |
 | `fs.nfs.jukebox_after` | duration, `5s` (1ms to 10m) | how long a read waits for a fill before the client is told to ask again (`NFS3ERR_JUKEBOX`); the fill goes on |
+| `fs.nfs.handoff_socket` | path (absolute, at most 103 bytes), none | the Unix socket on which a running process hands its listening socket to the next one. With it, a process that starts asks a running one for the socket before it does anything else, and serves on the one it is given; without it, an update is a restart. The two processes of an update are given the same path and the same `fs.nfs.listen` |
+| `fs.nfs.handoff_wait` | duration, `10s` (1ms to 1h) | how long a new process waits for the running one to finish the hand-over. Needs `fs.nfs.handoff_socket` |
+| `fs.nfs.drain_wait` | duration, `10s` (1ms to 1h) | how long a process whose socket was taken waits for its clients to close their connections (it has shut down its side of each) before it ends |
+
+A restart and a hand-over keep the mount: a process that finds something mounted at `fs.mountpoint` (the `mount` listing names it) makes no mount, whatever `fs.nfs.mount` says, and its clients' hard mount waits for the socket, which must be the same address, so `fs.nfs.listen` needs a fixed port (the default is one). A restart of the process in the same boot reopens the table of tree numbers, so the handles clients hold name the same entries; a start after a reboot makes it afresh, and a handle of the earlier boot is `NFS3ERR_STALE`.
 
 ```toml
 [fs]

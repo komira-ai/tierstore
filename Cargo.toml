@@ -54,7 +54,7 @@ md-5 = "0.11.0"
 # fence, and execute that follows the mode bits), and `NFSTcpListener::from_listener` (a socket
 # handed over by the instance a new one replaces). An upstream pull request is not opened. This
 # returns to crates.io once upstream releases such a change.
-nfsserve = { git = "https://github.com/komira-ai/nfsserve", rev = "6d9ea25d9960910cc0016daa6a69d47ca395c66e", default-features = false }
+nfsserve = { git = "https://github.com/komira-ai/nfsserve", rev = "f2665dd518e1b32f85cd457fef75fffe6d8a61b3", default-features = false }
 percent-encoding = "2.3.2"
 # Test certificates only. ring is the crypto provider the rustls below uses too.
 rcgen = { version = "0.14", default-features = false, features = ["crypto", "pem", "ring"] }

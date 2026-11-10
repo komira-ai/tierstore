@@ -17,7 +17,7 @@ use super::config::FsSettings;
 use super::control::Control;
 use super::core::Core;
 use super::fuse::{self, Frontend};
-use super::start::{Setup, Signals, StartError, io};
+use super::start::{Identity, Setup, Signals, StartError, io};
 
 /// The magic number of an overlay file system (`OVERLAYFS_SUPER_MAGIC`).
 const OVERLAYFS: i64 = 0x794c_7630;
@@ -68,7 +68,7 @@ impl Running {
     /// [`StartError`]: why nothing was mounted.
     pub(super) fn start(settings: &FsSettings) -> Result<Self, StartError> {
         check_cache(&settings.cache_path)?;
-        let Setup { core, _control } = Setup::start(settings, true)?;
+        let Setup { core, _control, .. } = Setup::start(settings, true, Identity::Fresh)?;
         let config = fuse::config(settings.threads, settings.allow_other);
         let session = Session::new(
             Frontend::new(Arc::clone(&core), settings.passthrough),

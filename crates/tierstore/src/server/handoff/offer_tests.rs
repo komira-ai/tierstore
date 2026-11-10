@@ -274,6 +274,7 @@ async fn a_taker_gone_before_done_leaves_the_instance_serving_with_its_control_s
     let want = super::super::take::Want {
         s3: &wanted,
         oci: &[],
+        nfs: &[],
     };
     let taken = super::super::take::take(&setup, &want)
         .await

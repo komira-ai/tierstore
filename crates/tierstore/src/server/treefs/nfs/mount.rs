@@ -22,6 +22,9 @@ const MOUNT_NFS: &str = "/sbin/mount_nfs";
 /// The program that unmounts.
 const UMOUNT: &str = "/sbin/umount";
 
+/// The program that lists the mounts.
+const MOUNT: &str = "/sbin/mount";
+
 /// The program that tells a user's number.
 const ID: &str = "/usr/bin/id";
 
@@ -171,6 +174,26 @@ impl Mounter {
             format!("{host}:/"),
             self.mountpoint.display().to_string(),
         ]
+    }
+
+    /// Whether something is mounted at the mount point now (a server that restarts finds the mount
+    /// of the one before it, which the clients' hard mount waits on, and must not mount again on
+    /// top of it).
+    ///
+    /// # Errors
+    /// [`NfsError::Run`] for a listing that could not be run.
+    pub(super) fn is_mounted(&self) -> Result<bool, NfsError> {
+        let listing = self.run(&[MOUNT.to_owned()])?;
+        let real =
+            std::fs::canonicalize(&self.mountpoint).unwrap_or_else(|_| self.mountpoint.clone());
+        let marks = [
+            format!(" on {} (", self.mountpoint.display()),
+            format!(" on {} (", real.display()),
+        ];
+        Ok(listing
+            .stdout
+            .lines()
+            .any(|line| marks.iter().any(|mark| line.contains(mark.as_str()))))
     }
 
     /// Mounts the export served on `host:port` at the mount point, as the mount user, trying again

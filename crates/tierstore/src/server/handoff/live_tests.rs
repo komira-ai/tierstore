@@ -54,6 +54,7 @@ async fn taken(path: &Path, at: SocketAddr) -> Option<Vec<TcpListener>> {
     let want = Want {
         s3: &[at],
         oci: &[],
+        nfs: &[],
     };
     let setup = handoff(path.to_owned());
     let taken = within("taking the sockets", take(&setup, &want))
