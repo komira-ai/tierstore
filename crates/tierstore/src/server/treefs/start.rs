@@ -115,12 +115,17 @@ pub(super) enum Identity {
     Boot(u32),
 }
 
-/// Makes the runtime directory and the mount point.
-pub(super) fn create_directories(settings: &FsSettings) -> Result<(), StartError> {
+/// Makes the runtime directory.
+pub(super) fn create_runtime_dir(settings: &FsSettings) -> Result<(), StartError> {
     std::fs::create_dir_all(&settings.runtime_dir).map_err(io(format!(
         "fs.runtime_dir {}",
         settings.runtime_dir.display()
-    )))?;
+    )))
+}
+
+/// Makes the mount point. A mount point that is a live mount of a connection taken over must not be
+/// made (it is a `stat` of the mount): only a start that mounts calls this.
+pub(super) fn create_mount_point(settings: &FsSettings) -> Result<(), StartError> {
     std::fs::create_dir_all(&settings.mountpoint).map_err(io(format!(
         "fs.mountpoint {}",
         settings.mountpoint.display()
@@ -189,7 +194,8 @@ impl Setup {
     /// # Errors
     /// [`StartError`]: what `start` would fail with.
     pub(super) fn preflight(settings: &FsSettings) -> Result<(), StartError> {
-        create_directories(settings)?;
+        create_runtime_dir(settings)?;
+        create_mount_point(settings)?;
         let may = rustix::fs::Access::WRITE_OK | rustix::fs::Access::EXEC_OK;
         let control = &settings.control_socket;
         let places = [
@@ -219,7 +225,8 @@ impl Setup {
         count_lookups: bool,
         identity: Identity,
     ) -> Result<Self, StartError> {
-        create_directories(settings)?;
+        create_runtime_dir(settings)?;
+        create_mount_point(settings)?;
         let (table, reopened, mount_id) = match identity {
             Identity::Fresh => (
                 TreeTable::create(&settings.runtime_dir)?,
