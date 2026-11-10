@@ -375,8 +375,12 @@ fn a_mount_at_the_mount_point_is_found_in_the_listing() {
     };
     let line =
         |at: &std::path::Path| format!("127.0.0.1:/ on {} (nfs, nodev, read-only)\n", at.display());
+    // The listing names the path the kernel resolved (`/private/var` where the test directory is
+    // under `/var`), which is not the path as named.
+    let real = std::fs::canonicalize(&path).unwrap();
     assert!(at(&line(&path), &path));
-    assert!(at(&line(&path), &link), "named by a link to it");
+    assert!(at(&line(&real), &path), "listed by the path it resolves to");
+    assert!(at(&line(&real), &link), "named by a link to it");
     assert!(!at("/dev/disk1s1 on / (apfs, local)\n", &path));
     assert!(!at(&line(&dir.path().join("mnt2")), &path));
     let gone = dir.path().join("gone");
