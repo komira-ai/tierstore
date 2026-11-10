@@ -98,7 +98,8 @@ fn an_unknown_type_and_the_fs_type_are_refused() {
     let fs = refusal(&[entry("s3", "port = 9300"), entry("fs", "port = 21")]);
     assert_eq!(
         fs,
-        "interface[1].type: \"fs\" is not served yet; the types are \"s3\" and \"oci\""
+        "interface[1].type: \"fs\" is not an interface of this process: `tierstore fs` is a process of \
+         its own, with an `[fs]` table; the types are \"s3\" and \"oci\""
     );
 }
 

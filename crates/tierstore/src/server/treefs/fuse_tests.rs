@@ -396,3 +396,22 @@ fn the_kernel_forgetting_an_inode_reaches_the_core() {
         assert_eq!(std::fs::metadata(&cc).unwrap().size(), 3000);
     });
 }
+
+/// Asserts that each refusal of the core is the errno the kernel is told: a listing of the
+/// namespace by root is `EACCES` (the kernel refuses everyone else before the request is sent).
+#[test]
+fn each_refusal_of_the_core_is_an_errno_of_the_kernel() {
+    use crate::server::treefs::core::Errno as Core;
+    let cases = [
+        (Core::NoEnt, fuser::Errno::ENOENT),
+        (Core::Acces, fuser::Errno::EACCES),
+        (Core::NotDir, fuser::Errno::ENOTDIR),
+        (Core::IsDir, fuser::Errno::EISDIR),
+        (Core::Inval, fuser::Errno::EINVAL),
+        (Core::Io, fuser::Errno::EIO),
+        (Core::RoFs, fuser::Errno::EROFS),
+    ];
+    for (core, kernel) in cases {
+        assert_eq!(super::errno(core), kernel, "{core:?}");
+    }
+}

@@ -199,11 +199,6 @@ impl Core {
         locked(&self.served).push(what);
     }
 
-    /// Notes that a request of the kind `what` was served (the tests count them).
-    #[cfg(not(test))]
-    #[expect(clippy::unused_self, reason = "the test build counts the requests")]
-    fn note(&self, _what: &'static str) {}
-
     /// The attributes of `ino`, a directory of the namespace.
     fn namespace(&self, ino: u64) -> Entry {
         Entry {
@@ -394,12 +389,14 @@ impl Core {
 
     /// Counts a lookup of `ino`, which a listing with entries (`READDIRPLUS`) made.
     pub(super) fn count(&self, ino: u64) {
+        #[cfg(test)]
         self.note("count");
         let _ = self.counted(ino::split(ino).0);
     }
 
     /// The kernel forgets `nlookup` lookups of `ino`.
     pub(super) fn forget(&self, ino: u64, nlookup: u64) {
+        #[cfg(test)]
         self.note("forget");
         let (number, _) = ino::split(ino);
         let loaded = locked(&self.state).loaded.get(&number).cloned();
@@ -432,6 +429,7 @@ impl Core {
     /// that is not a directory.
     pub(super) fn lookup(&self, parent: u64, name: &str) -> Result<Looked, Errno> {
         let (number, index) = ino::split(parent);
+        #[cfg(test)]
         self.note(if number == 0 { "namespace" } else { "lookup" });
         if number == 0 {
             return match (parent, name) {
@@ -476,6 +474,7 @@ impl Core {
     /// # Errors
     /// [`Errno::NoEnt`] for an inode no tree and no namespace has.
     pub(super) fn getattr(&self, ino: u64) -> Result<Entry, Errno> {
+        #[cfg(test)]
         self.note("getattr");
         let (number, index) = ino::split(ino);
         if number == 0 {
@@ -497,6 +496,7 @@ impl Core {
     /// # Errors
     /// [`Errno::Inval`] for an inode that is not a link.
     pub(super) fn readlink(&self, ino: u64) -> Result<Arc<str>, Errno> {
+        #[cfg(test)]
         self.note("readlink");
         let (number, index) = ino::split(ino);
         if number == 0 {
@@ -538,6 +538,7 @@ impl Core {
         offset: u64,
         sink: &mut dyn FnMut(u64, DirItem) -> bool,
     ) -> Result<(), Errno> {
+        #[cfg(test)]
         self.note("readdir");
         self.opendir(ino)?;
         let (number, index) = ino::split(ino);
@@ -582,6 +583,7 @@ impl Core {
     /// [`Errno::RoFs`] for an open for writing, [`Errno::IsDir`] for a directory, [`Errno::Inval`]
     /// for a link, [`Errno::Io`] for a blob that cannot be had.
     pub(super) fn open(&self, ino: u64, writing: bool) -> Result<u64, Errno> {
+        #[cfg(test)]
         self.note("open");
         if writing {
             return Err(Errno::RoFs);
@@ -661,6 +663,7 @@ impl Core {
     /// # Errors
     /// [`Errno::Inval`] for a handle that is not open, [`Errno::Io`] for a read that fails.
     pub(super) fn read(&self, fh: u64, offset: u64, size: u32) -> Result<Vec<u8>, Errno> {
+        #[cfg(test)]
         self.note("read");
         let handle = locked(&self.handles)
             .get(&fh)

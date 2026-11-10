@@ -53,12 +53,12 @@ fn control_answer(socket: &Path) -> std::io::Result<serde_json::Value> {
 fn list(answer: &serde_json::Value, out: &mut dyn Write) -> std::io::Result<()> {
     for attachment in answer["attachments"].as_array().into_iter().flatten() {
         let (tree, run) = (&attachment["tree"], &attachment["run"]);
-        writeln!(
-            out,
-            "{} {}",
+        let line = format!(
+            "{} {}\n",
             tree.as_str().unwrap_or(""),
             run.as_str().unwrap_or("")
-        )?;
+        );
+        out.write_all(line.as_bytes())?;
     }
     Ok(())
 }

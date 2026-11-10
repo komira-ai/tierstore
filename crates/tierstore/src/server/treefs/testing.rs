@@ -344,8 +344,11 @@ pub(in crate::server) fn unavailable() -> Option<&'static str> {
         .write(true)
         .open("/dev/fuse")
         .is_ok();
-    let path = std::env::var_os("PATH").unwrap_or_default();
-    let helper = std::env::split_paths(&path).any(|dir| dir.join("fusermount3").exists());
+    // The mount runs the helper by its name, so the test finds it the same way.
+    let helper = std::process::Command::new("fusermount3")
+        .arg("--version")
+        .output()
+        .is_ok();
     reasons(device, helper)
 }
 

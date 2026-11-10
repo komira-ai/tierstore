@@ -29,6 +29,8 @@ mod fuse;
 mod run;
 
 pub(super) use config::{FsSettings, load};
+#[cfg(test)]
+pub(super) use config::{FsTable, from_text};
 #[cfg(target_os = "linux")]
 pub(super) use run::{StartError, serve};
 

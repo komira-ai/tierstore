@@ -336,3 +336,117 @@ fn launchd_waits_for_the_drain() {
     let drain = MACOS_DRAIN.0 + MACOS_DRAIN.1;
     assert!(exit >= drain, "{exit:?} is less than {drain:?}");
 }
+
+/// The systemd template of `tierstore fs`.
+const FS_TEMPLATE: &str = "tierstore-fs@.service";
+
+/// The options of `tierstore@.service` that give a service a mount namespace of its own, from which
+/// a mount does not reach the host (`docs/design/virtual-build-fs.md` section 6.2): the unit of
+/// `tierstore fs` leaves each out.
+const LEFT_OUT: [&str; 9] = [
+    "PrivateDevices",
+    "PrivateTmp",
+    "ProtectSystem",
+    "ProtectHome",
+    "ProtectKernelTunables",
+    "ProtectKernelModules",
+    "ProtectKernelLogs",
+    "ProtectControlGroups",
+    "RestrictNamespaces",
+];
+
+/// Asserts the diff of the unit of `tierstore fs` against `tierstore@.service`, as the design lists
+/// it: each option that gives a mount namespace of its own is in the S3 unit and not in this one;
+/// the mount's device, capability and system calls, the notify type, the start limit and the
+/// runtime directory are added with their values; the address families are the Unix ones alone;
+/// and the user, the privilege, memory and umask settings, the restart settings and the release
+/// link are the S3 unit's. It would catch an option left in that makes the mount invisible to the
+/// job runtime, and a capability the unit does not need.
+#[test]
+fn the_fs_template_differs_from_the_s3_template_as_the_design_lists() {
+    let (s3, fs) = (read(TEMPLATE), read(FS_TEMPLATE));
+    for key in LEFT_OUT {
+        assert_eq!(values(&s3, key).len(), 1, "the S3 unit has {key}");
+        assert!(
+            values(&fs, key).is_empty(),
+            "the unit of tierstore fs has {key}"
+        );
+    }
+    let added = [
+        ("DeviceAllow", "/dev/fuse rw"),
+        ("CapabilityBoundingSet", "CAP_SYS_ADMIN"),
+        ("AmbientCapabilities", "CAP_SYS_ADMIN"),
+        ("SystemCallFilter", "@system-service @mount"),
+        ("Type", "notify"),
+        ("NotifyAccess", "main"),
+        ("StartLimitIntervalSec", "60"),
+        ("StartLimitBurst", "5"),
+        ("RuntimeDirectory", "tierstore-fs"),
+        ("RuntimeDirectoryPreserve", "yes"),
+        ("RestrictAddressFamilies", "AF_UNIX"),
+    ];
+    for (key, want) in added {
+        assert_eq!(value(&fs, key), want, "{key}");
+    }
+    assert_ne!(value(&s3, "RestrictAddressFamilies"), "AF_UNIX");
+    for key in [
+        "User",
+        "NoNewPrivileges",
+        "MemoryDenyWriteExecute",
+        "UMask",
+        "Restart",
+        "RestartPreventExitStatus",
+        "KillSignal",
+        "SystemCallArchitectures",
+        "LockPersonality",
+        "RestrictRealtime",
+        "LimitNOFILE",
+    ] {
+        assert_eq!(value(&fs, key), value(&s3, key), "{key}");
+    }
+}
+
+/// Asserts that the unit of `tierstore fs` runs the `fs` verb of the binary of the release link with
+/// a `--config` the binary reads (a file that is not there is status 2, naming it, which a flag the
+/// binary did not parse would not be), starts only under a marker of its own after the S3
+/// instances, and is enabled at boot. It would catch a verb or a flag that is renamed under the
+/// unit, which would leave the instance failing at every start.
+#[test]
+fn the_fs_template_runs_the_fs_verb_of_the_current_release() {
+    let unit = read(FS_TEMPLATE);
+    let words = exec_start(&unit);
+    assert_eq!(words[0], format!("{CURRENT}/{RELEASE_BINARY}"));
+    assert_eq!(words[1..], ["fs", "--config", "/etc/tierstore/fs.toml"]);
+    assert_eq!(
+        value(&unit, "ConditionPathExists"),
+        "/var/lib/tierstore/run-fs-%i"
+    );
+    assert_eq!(
+        value(&unit, "After"),
+        "tierstore@a.service tierstore@b.service"
+    );
+    assert_eq!(value(&unit, "WantedBy"), "multi-user.target");
+    let scratch = tierstore_testkit::dir::TestDir::under(std::env::temp_dir(), "tfs-unit");
+    let missing = scratch.path().join("fs.toml");
+    let out = std::process::Command::new(env!("CARGO_BIN_EXE_tierstore"))
+        .args(["fs", "--config"])
+        .arg(&missing)
+        .output()
+        .expect("the binary runs");
+    assert_eq!(out.status.code(), Some(2));
+    let stderr = String::from_utf8_lossy(&out.stderr).into_owned();
+    assert!(stderr.contains("fs.toml"), "{stderr}");
+}
+
+/// Asserts that the marker of the unit of `tierstore fs` is not one of the markers the update hook
+/// writes for the S3 instances, so the hook cannot start or retire a mount it does not know.
+#[test]
+fn the_fs_marker_is_not_a_marker_of_the_s3_instances() {
+    let unit = read(FS_TEMPLATE);
+    let marker = value(&unit, "ConditionPathExists");
+    for instance in [Instance::A, Instance::B] {
+        let theirs = marker_path(instance);
+        let ours = marker.replace("%i", instance.letter());
+        assert_ne!(Path::new(&ours), theirs.as_path());
+    }
+}

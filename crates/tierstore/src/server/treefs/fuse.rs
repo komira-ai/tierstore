@@ -162,11 +162,7 @@ impl Filesystem for Frontend {
         let offered = config.capabilities();
         let passthrough = offered.contains(InitFlags::FUSE_PASSTHROUGH);
         let resend = offered.contains(InitFlags::FUSE_HAS_RESEND);
-        tracing::info!(
-            passthrough,
-            resend,
-            "tierstore fs: the kernel offers; cached opens run"
-        );
+        tracing::info!(passthrough, resend, "tierstore fs: kernel offers");
         Ok(())
     }
 

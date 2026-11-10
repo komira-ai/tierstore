@@ -53,7 +53,7 @@ struct File {
 
 /// `[fs]`.
 #[derive(Debug, Deserialize)]
-pub(super) struct FsTable {
+pub(in crate::server) struct FsTable {
     mountpoint: Option<PathBuf>,
     runtime_dir: Option<PathBuf>,
     control_socket: Option<PathBuf>,
@@ -187,7 +187,7 @@ impl FsSettings {
 /// # Errors
 /// [`ConfigError::Syntax`] for a file that is not TOML or has no `[fs]` table or a value of the
 /// wrong type, and those of [`FsSettings::of`].
-pub(super) fn from_text(text: &str, groups: &str) -> Result<FsSettings, ConfigError> {
+pub(in crate::server) fn from_text(text: &str, groups: &str) -> Result<FsSettings, ConfigError> {
     let file: File = toml::from_str(text).map_err(|error| syntax(text, &error))?;
     let whole = text.parse::<toml::Table>().unwrap_or_default();
     let known = fields_of::<FsTable>();

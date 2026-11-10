@@ -104,7 +104,7 @@ fn start_and_stop() {
             .last()
             .unwrap()
             .split(' ')
-            .last()
+            .next_back()
             .unwrap(),
         root
     );
