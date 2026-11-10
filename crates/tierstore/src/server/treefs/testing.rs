@@ -76,6 +76,15 @@ impl Built {
         built
     }
 
+    /// Adds the tree whose root holds `children` beside the others; the digest of its root.
+    pub(in crate::server) fn add_tree(&mut self, children: Vec<(&str, Node)>) -> String {
+        let children: Vec<(String, Node)> = children
+            .into_iter()
+            .map(|(n, c)| (n.to_owned(), c))
+            .collect();
+        self.manifest(&children)
+    }
+
     fn manifest(&mut self, children: &[(String, Node)]) -> String {
         let mut sorted = children.to_vec();
         sorted.sort_by(|a, b| a.0.as_bytes().cmp(b.0.as_bytes()));
@@ -122,6 +131,8 @@ pub(in crate::server) struct Upstream {
     pub built: Mutex<Built>,
     /// The digests whose fill is answered with these words.
     pub failing: Mutex<HashMap<String, String>>,
+    /// When set, the answer to every `pin` instead of `ok`.
+    pub pin_answer: Mutex<Option<String>>,
     /// The requests received, in order.
     pub requests: Mutex<Vec<String>>,
 }
@@ -158,7 +169,11 @@ impl Upstream {
                 Some("ok".to_owned())
             }
             "touch" => None,
-            "pin" => Some(format!("ok {} 0 0", words.len() - 3)),
+            "pin" => Some(
+                locked(&self.pin_answer)
+                    .clone()
+                    .unwrap_or_else(|| format!("ok {} 0 0", words.len() - 3)),
+            ),
             _ => Some("ok 0".to_owned()),
         }
     }
@@ -256,6 +271,7 @@ impl Rig {
             cache: cache.clone(),
             built: Mutex::new(built),
             failing: Mutex::new(HashMap::new()),
+            pin_answer: Mutex::new(None),
             requests: Mutex::new(Vec::new()),
         });
         let socket = dir.path().join("fill.sock");

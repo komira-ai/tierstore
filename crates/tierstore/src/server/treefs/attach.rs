@@ -5,7 +5,7 @@
 //! run are one attachment. A tree is attached while any run has it. The file holds one line,
 //! `<digest> <run>`, for each attachment; it is rewritten by a rename after every change.
 
-use std::collections::BTreeMap;
+use std::collections::{BTreeMap, BTreeSet};
 use std::io;
 use std::path::{Path, PathBuf};
 
@@ -37,6 +37,15 @@ struct Attached {
     failures: BTreeMap<String, Failure>,
 }
 
+impl Attached {
+    fn new(digest: TreeDigest) -> Self {
+        Self {
+            digest,
+            failures: BTreeMap::new(),
+        }
+    }
+}
+
 /// Whether `run` is a name the control socket takes: one word of visible ASCII, not empty.
 pub(super) fn is_run(run: &str) -> bool {
     !run.is_empty() && run.len() <= MAX_RUN && run.bytes().all(|byte| byte.is_ascii_graphic())
@@ -48,6 +57,9 @@ pub(super) struct Attachments {
     file: PathBuf,
     /// The tree number of each tree of each run.
     runs: BTreeMap<String, BTreeMap<u64, Attached>>,
+    /// The pairs of tree digest and run a restart could not attach again: not served, but kept in
+    /// the file so that a transient failure does not delete the record.
+    kept: BTreeSet<(String, String)>,
 }
 
 impl Attachments {
@@ -56,6 +68,7 @@ impl Attachments {
         Self {
             file: dir.join(FILE),
             runs: BTreeMap::new(),
+            kept: BTreeSet::new(),
         }
     }
 
@@ -79,34 +92,52 @@ impl Attachments {
             .collect())
     }
 
-    /// Records that `run` uses the tree `number`, `digest`.
-    pub(super) fn add(&mut self, run: &str, number: u64, digest: TreeDigest) {
-        let _ = self
-            .runs
+    /// Records that `run` uses the tree `number`, `digest`; whether it was new.
+    pub(super) fn add(&mut self, run: &str, number: u64, digest: TreeDigest) -> bool {
+        let _ = self.kept.remove(&(digest.to_string(), run.to_owned()));
+        self.runs
             .entry(run.to_owned())
             .or_default()
-            .entry(number)
-            .or_insert_with(|| Attached {
-                digest,
-                failures: BTreeMap::new(),
-            });
+            .insert(number, Attached::new(digest))
+            .is_none()
     }
 
-    /// Takes away every attachment of `run`; the trees it had, with their failures, or none if it
-    /// attached nothing.
+    /// Takes away the one attachment of `run` to the tree `number`, and nothing else.
+    pub(super) fn remove_one(&mut self, run: &str, number: u64) {
+        let trees = self.runs.entry(run.to_owned()).or_default();
+        let _ = trees.remove(&number);
+        if trees.is_empty() {
+            let _ = self.runs.remove(run);
+        }
+    }
+
+    /// Keeps the record of `run` using the tree `digest`, which a restart could not attach again.
+    pub(super) fn keep(&mut self, run: &str, digest: TreeDigest) {
+        let _ = self.kept.insert((digest.to_string(), run.to_owned()));
+    }
+
+    /// Takes away every attachment of `run`, and the records kept for it; the trees it had, with
+    /// their failures, or none if it attached nothing and nothing is kept for it.
     pub(super) fn remove(&mut self, run: &str) -> Option<Vec<(u64, TreeDigest, Vec<Failure>)>> {
-        let trees = self.runs.remove(run)?;
-        Some(
+        let before = self.kept.len();
+        self.kept.retain(|(_, kept)| kept != run);
+        let dropped = self.kept.len() != before;
+        let trees = self.runs.remove(run).unwrap_or_default();
+        (dropped || !trees.is_empty()).then(|| {
             trees
                 .into_iter()
                 .map(|(number, got)| (number, got.digest, got.failures.into_values().collect()))
-                .collect(),
-        )
+                .collect()
+        })
     }
 
     /// The runs there are.
     pub(super) fn runs(&self) -> Vec<String> {
-        self.runs.keys().cloned().collect()
+        let mut runs: Vec<String> = self.runs.keys().cloned().collect();
+        runs.extend(self.kept.iter().map(|(_, run)| run.clone()));
+        runs.sort();
+        runs.dedup();
+        runs
     }
 
     /// Whether any run has the tree `number`.
@@ -151,7 +182,11 @@ impl Attachments {
     /// What the system said.
     pub(super) fn save(&self) -> io::Result<()> {
         let mut text = String::new();
-        for (digest, run) in self.listing() {
+        let attached = self
+            .listing()
+            .into_iter()
+            .map(|(digest, run)| (digest.to_string(), run));
+        for (digest, run) in attached.chain(self.kept.iter().cloned()) {
             text.push_str(&format!("{digest} {run}\n"));
         }
         let mut new = self.file.clone().into_os_string();

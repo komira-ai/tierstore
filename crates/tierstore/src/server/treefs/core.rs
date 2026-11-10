@@ -163,6 +163,9 @@ pub(in crate::server) struct Core {
     fills: FillClient,
     table: TreeTable,
     state: Mutex<State>,
+    /// Held by an attach, a restore and a detach for all of their work, so that a detach cannot
+    /// unpin a tree that an attach has just taken.
+    lifecycle: Mutex<()>,
     handles: Mutex<HashMap<u64, Arc<Handle>>>,
     next_handle: AtomicU64,
     /// The requests served, by name, for the tests that count what reaches the core.
@@ -186,6 +189,7 @@ impl Core {
                 loaded: HashMap::new(),
                 attachments: Attachments::new(runtime_dir),
             }),
+            lifecycle: Mutex::new(()),
             handles: Mutex::new(HashMap::new()),
             next_handle: AtomicU64::new(1),
             #[cfg(test)]
@@ -288,12 +292,15 @@ impl Core {
         if !is_run(run) {
             return Err(AttachError::Run);
         }
+        let _lifecycle = locked(&self.lifecycle);
         let number = self.table.number_of(&digest)?;
         let _ = self.load_unless_loaded(number, digest)?;
         let mut state = locked(&self.state);
-        state.attachments.add(run, number, digest);
+        let added = state.attachments.add(run, number, digest);
         if let Err(error) = state.attachments.save() {
-            let _ = state.attachments.remove(run);
+            if added {
+                state.attachments.remove_one(run, number);
+            }
             return Err(error.into());
         }
         Ok(self
@@ -301,6 +308,38 @@ impl Core {
             .mountpoint
             .join("trees")
             .join(digest.to_string()))
+    }
+
+    /// Attaches again what the attachments file held before a restart: each pair of tree digest
+    /// and run whose tree can be read is attached in memory, and the file is written once at the
+    /// end. A pair that cannot be attached now is kept in the file, not served, until its run
+    /// attaches again or is detached.
+    pub(super) fn restore(&self, saved: Vec<(TreeDigest, String)>) {
+        let _lifecycle = locked(&self.lifecycle);
+        for (digest, run) in saved {
+            let loaded = self
+                .table
+                .number_of(&digest)
+                .map_err(|error| error.to_string())
+                .and_then(|number| {
+                    self.load_unless_loaded(number, digest)
+                        .map(|_| number)
+                        .map_err(|error| error.to_string())
+                });
+            let mut state = locked(&self.state);
+            match loaded {
+                Ok(number) => {
+                    let _ = state.attachments.add(&run, number, digest);
+                }
+                Err(why) => {
+                    tracing::warn!("tierstore fs: not attaching {digest} for {run} again: {why}");
+                    state.attachments.keep(&run, digest);
+                }
+            }
+        }
+        if let Err(why) = locked(&self.state).attachments.save() {
+            tracing::warn!("tierstore fs: cannot write the attachments file: {why}");
+        }
     }
 
     /// The tree `number` in memory, read if it is not.
@@ -319,6 +358,7 @@ impl Core {
     /// attached nothing. A tree no run has now is unpinned, and left memory when the kernel
     /// forgets its inodes.
     pub(super) fn detach(&self, run: &str) -> Option<Vec<Failure>> {
+        let _lifecycle = locked(&self.lifecycle);
         let (freed, failures) = {
             let mut state = locked(&self.state);
             let trees = state.attachments.remove(run)?;
@@ -334,6 +374,10 @@ impl Core {
             (freed, failures)
         };
         for (number, digest) in freed {
+            let loaded = locked(&self.state).loaded.get(&number).cloned();
+            loaded
+                .iter()
+                .for_each(|loaded| locked(&loaded.pinned).clear());
             let _ = self
                 .fills
                 .unpin(&self.settings.mount_id, &digest.to_string());
@@ -636,13 +680,16 @@ impl Core {
         };
         match file {
             Ok(file) => {
-                if locked(&loaded.pinned).insert(*digest) {
+                if !locked(&loaded.pinned).contains(digest) {
                     self.fills.touch(&[&sha]);
-                    let _ = self.fills.pin(
+                    let pinned = self.fills.pin(
                         &self.settings.mount_id,
                         &loaded.digest.to_string(),
                         &[&sha],
                     );
+                    if pinned.is_ok_and(|answer| answer.starts_with("ok")) {
+                        let _ = locked(&loaded.pinned).insert(*digest);
+                    }
                 }
                 Ok(file)
             }

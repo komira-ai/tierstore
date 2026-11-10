@@ -148,11 +148,7 @@ impl Running {
         ));
         let saved = Attachments::saved(&settings.runtime_dir)
             .map_err(io("reading the attachments file"))?;
-        for (tree, run) in saved {
-            if let Err(why) = core.attach(&tree.to_string(), &run) {
-                tracing::warn!("tierstore fs: not attaching {tree} for {run} again: {why}");
-            }
-        }
+        core.restore(saved);
         core.pins_live();
         let control = Control::serve(
             Arc::clone(&core),

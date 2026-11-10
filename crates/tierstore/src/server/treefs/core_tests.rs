@@ -6,7 +6,7 @@ use std::time::Duration;
 
 use super::{AttachError, Attr, Core, DirItem, Entry, Errno, Failure, Kind, Looked, TREE_TTL};
 use crate::server::treefs::ino;
-use crate::server::treefs::testing::{Built, OWNER, Rig, sample, sha};
+use crate::server::treefs::testing::{Built, OWNER, Rig, file, sample, sha};
 
 const RUN: &str = "run-1";
 
@@ -669,4 +669,127 @@ fn the_path_of_an_entry_is_its_names_from_the_root() {
     assert_eq!(super::path_of(&loaded.tree, 0), "/");
     assert_eq!(super::path_of(&loaded.tree, 3), "/bin/cc");
     assert_eq!(super::path_of(&loaded.tree, 7), "/include/a.h");
+}
+
+/// Asserts that a blob pinned for a tree is pinned again when the tree is attached again after its
+/// detach, even though the tree stayed in memory because the kernel held an inode of it. Catches a
+/// pinned set that outlives the unpin.
+#[test]
+fn a_tree_attached_again_pins_the_blobs_it_opens_again() {
+    let rig = attached("tfs-core-repin");
+    let core = &rig.core;
+    let root = rig.upstream.built.lock().unwrap().root.clone();
+    let cc = blob_of(&rig, 3000);
+    let _ = found(core, ino::TREES, &root);
+    let first = core.open(ino::of(1, 3), false).unwrap();
+    assert!(core.detach(RUN).is_some());
+    assert_eq!(core.trees_in_memory(), 1);
+    let _ = core.attach(&root, "run-2").unwrap();
+    let second = core.open(ino::of(1, 3), false).unwrap();
+    assert_eq!(
+        rig.upstream.asked("pin"),
+        vec![format!("pin mount-1 {root} {cc}"); 2]
+    );
+    core.release(first);
+    core.release(second);
+}
+
+/// Asserts that a pin the cache refuses is not recorded as done: the next open of the blob asks
+/// again, and once an answer is `ok` it asks no more.
+#[test]
+fn a_refused_pin_is_asked_again_by_the_next_open() {
+    let rig = attached("tfs-core-pin-refused");
+    let core = &rig.core;
+    *rig.upstream.pin_answer.lock().unwrap() = Some("busy".to_owned());
+    let first = core.open(ino::of(1, 3), false).unwrap();
+    *rig.upstream.pin_answer.lock().unwrap() = None;
+    let second = core.open(ino::of(1, 3), false).unwrap();
+    let third = core.open(ino::of(1, 3), false).unwrap();
+    assert_eq!(rig.upstream.asked("pin").len(), 2);
+    for fh in [first, second, third] {
+        core.release(fh);
+    }
+}
+
+/// Asserts that an attach whose attachments file cannot be written takes back only the attachment
+/// it added: the run's earlier trees stay attached and a repeat of an existing attach leaves it.
+#[test]
+fn a_failed_save_takes_back_only_the_attach_that_failed() {
+    let mut built = sample();
+    let second = built.add_tree(vec![("only", file(b"x"))]);
+    let rig = Rig::new("tfs-core-save-failed", built);
+    let core = &rig.core;
+    let root = rig.upstream.built.lock().unwrap().root.clone();
+    let _ = core.attach(&root, RUN).unwrap();
+    std::fs::remove_dir_all(&rig.runtime).unwrap();
+    assert!(core.attach(&second, RUN).is_err());
+    assert!(core.attach(&root, RUN).is_err());
+    let left: Vec<_> = core
+        .attachments()
+        .iter()
+        .map(|(tree, _)| tree.to_string())
+        .collect();
+    assert_eq!(left, [root]);
+}
+
+/// Asserts that a detach and an attach of one tree do not interleave: the unpin of the detach is
+/// sent before the attach takes the tree, so that it cannot remove the pins of the new run.
+#[test]
+fn an_attach_waits_for_the_detach_of_the_same_tree() {
+    let rig = attached("tfs-core-serial");
+    let core = &rig.core;
+    let root = rig.upstream.built.lock().unwrap().root.clone();
+    let guard = core.lifecycle.lock().unwrap();
+    std::thread::scope(|scope| {
+        let attach = scope.spawn(|| core.attach(&root, "run-2").unwrap());
+        std::thread::yield_now();
+        assert_eq!(core.attachments().len(), 1);
+        drop(guard);
+        let _ = attach.join().unwrap();
+    });
+    assert_eq!(core.attachments().len(), 2);
+}
+
+/// Asserts that a restore attaches what it can read, writes the file once, and keeps in the file
+/// the pair whose tree cannot be read now: it is not served, a detach of its run drops it, and an
+/// attach of it later serves it.
+#[test]
+fn a_restore_keeps_the_record_of_a_tree_it_cannot_read() {
+    let rig = Rig::new("tfs-core-restore", sample());
+    let core = &rig.core;
+    let root = rig.upstream.built.lock().unwrap().root.clone();
+    let gone = "ab".repeat(32);
+    let digest = |hex: &str| crate::tree_manifest::TreeDigest::from_hex(hex).unwrap();
+    core.restore(vec![
+        (digest(&gone), "run-1".to_owned()),
+        (digest(&root), "run-2".to_owned()),
+        (digest(&root), "run-3".to_owned()),
+    ]);
+    assert_eq!(core.attachments().len(), 2);
+    let file = || std::fs::read_to_string(rig.runtime.join("attachments")).unwrap();
+    assert!(file().contains(&format!("{gone} run-1\n")));
+    assert!(file().contains(&format!("{root} run-2\n")));
+    assert_eq!(core.detach_all_except(&["run-2".to_owned()]), 2);
+    assert_eq!(file(), format!("{root} run-2\n"));
+    assert_eq!(core.detach("run-1"), None);
+}
+
+/// Asserts that a restore with every tree number taken keeps the pair in the file, and that a
+/// restore whose file cannot be written still attaches what it read.
+#[test]
+fn a_restore_with_no_number_left_or_no_file_still_keeps_what_it_can() {
+    let rig = Rig::new("tfs-core-restore-full", sample());
+    let root = rig.upstream.built.lock().unwrap().root.clone();
+    let digest = crate::tree_manifest::TreeDigest::from_hex(&root).unwrap();
+    rig.core.table.exhaust();
+    rig.core.restore(vec![(digest, RUN.to_owned())]);
+    assert!(rig.core.attachments().is_empty());
+    assert_eq!(
+        std::fs::read_to_string(rig.runtime.join("attachments")).unwrap(),
+        format!("{root} {RUN}\n")
+    );
+    let rig = Rig::new("tfs-core-restore-nofile", sample());
+    std::fs::remove_dir_all(&rig.runtime).unwrap();
+    rig.core.restore(vec![(digest, RUN.to_owned())]);
+    assert_eq!(rig.core.attachments().len(), 1);
 }
