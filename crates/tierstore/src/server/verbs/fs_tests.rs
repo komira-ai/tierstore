@@ -74,6 +74,7 @@ fn a_file_that_is_missing_or_wrong_is_status_two() {
 
 /// Asserts that a start that fails is its status and its words on stderr: the cache directory is
 /// not there, status 1.
+#[cfg(target_os = "linux")]
 #[test]
 fn a_start_that_fails_says_why_with_its_status() {
     let rig = Rig::new("tfs-verb-start", sample());
