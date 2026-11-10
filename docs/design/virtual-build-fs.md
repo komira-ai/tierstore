@@ -5,7 +5,7 @@ copying (or linking) each action's inputs into a scratch directory and removing 
 parallel, how tierstore could serve those inputs as a filesystem instead, so that a job scheduled by jobscheduler reads its
 inputs without a copy, fetches only what it opens, may write anywhere in them privately, and runs on Linux and on macOS.
 Section 11 holds the results of the first measurements and the plan against today's path on real builds run by the executor; section 12 is the phased plan, with the probes marked done or open. Section 13 records
-the owner's decisions and sets out the two still open (the Linux kernel, C8; the macOS frontend, C9), each with its options and a recommendation.
+the owner's decisions and sets out the one still open (the macOS frontend, C9; the Linux kernel, C8, is decided: upgrade to 7.0 HWE), each with its options and a recommendation.
 
 **What this document starts from.** An earlier proposal, built on researched findings, preceded it and recommended: one tierstore
 filesystem core in Rust with thin frontends (FUSE with passthrough on Linux, an NFSv4.0 loopback server on macOS, FSKit
@@ -126,6 +126,16 @@ The largest is far below the entry limit of 6.1 and inside the sizes flattened i
   The inputs RESULTS attributes the Mac cost to the clone and reads it as evidence for M1 over M0 on the setup side. There is no split into walk, fetch and clone, and this
   document does not take that attribution as shown: `clonefile` takes 8 to 12 µs per file on a 190,000-file tree (1.5 s; Measured: macos E3, on a Mac running the farm's builds, the first
   run of each tree 20% to 40% slower), so the clone of a 15,200-file tree would be about 0.1 to 0.2 s, or 0.27 s at the 18 µs per file of the 5,762-file Toolchains tree (Inferred from the per-file figures).
+- **Where the Mac's setup goes** (Measured: mac-setup RESULTS.md, the executor's macOS driver read in code, its log joined by lease, and a probe on the farm Mac).
+  For actions with a tree, 99.5% of `inputs_ms` is the tree's materialisation, and that is not the network: a warm tree with nothing fetched is p50 6.4 s. After one
+  `fclonefileat` of the tree (0.14 s for 14,600 files and 3,200 directories), the driver makes the clone writable with a serial readdir, `stat` and `chmod` of every file
+  (0.36 s alone, about 19 µs per file), and with a pool of slot users a serial `lchown` of the whole run directory (0.37 s). Those serial passes contend on one APFS volume
+  when several actions start together: the median materialisation is 2.5 s with no other tree in flight, 3.8 s with one or two, 6.9 s with six to nine and 9.1 s with sixteen or
+  more, and the 37 s p90 is bursts of 8 to 11 actions of one build that start and finish together. The probe reproduces the shape with no network: at 16 threads the
+  writable pass is p50 10 s while `clonefile` stays at 0.74 s. What removes it in the executor, without this design: set the modes once when the tree is built so an action
+  does only the clone (about 70% of materialisation, Inferred from the probe), avoid the per-action `lchown`, and cap concurrent tree materialisations at about 4. Under this
+  design a tree already has its owner and modes as served (6.3), so neither pass exists; but every metadata operation of the action pays the NFS cost of 8, so the comparison
+  for C9 is against an executor with those fixes, not against today's.
   Measured and inferred do not meet, so the cost is unexplained: the log's queueing and fetch time are in the figure.
 - **How much of its input root an action opens** (Measured: inputs E1, fanotify on node-05's filesystem, 323 actions; **these are Bazel probe builds
   submitted to the lab farm's REAPI, not Buck2 builds of the komira engine; a Buck2 rerun is pending**). The byte share is high and the file share
@@ -1460,7 +1470,8 @@ owner has not confirmed them.** Two decisions are open and new: the Linux kernel
   `CAP_SYS_ADMIN` behind a flag?
   - Recommendation: **yes, as root on the measured nodes only**, so the executor's daemon gains no privilege in its shipped form.
   - If no: the executor's daemon unit gains the capability when the flag is set, and the executor's own review judges that change (G3).
-- **C8. Open, for the owner: the Linux kernel of the lab.** All six lab nodes run 6.8 (Measured: inputs section 8; linux section 9). FUSE passthrough and `FUSE_NOTIFY_RESEND` need 6.9 or later; the 24.04 HWE kernel, 7.0.0-42, is the apt candidate and ran every
+- **C8. Decided by the owner, 2026-11-09: (A), upgrade the lab to the 7.0 HWE kernel.** A rolling upgrade, one node at a time with health checks, started the same day; the 6.8 mode stays as the fallback a node runs until it is upgraded. The analysis that preceded the decision follows.
+  The Linux kernel of the lab. All six lab nodes run 6.8 (Measured: inputs section 8; linux section 9). FUSE passthrough and `FUSE_NOTIFY_RESEND` need 6.9 or later; the 24.04 HWE kernel, 7.0.0-42, is the apt candidate and ran every
   experiment cleanly in a KVM guest. What each kernel gives (Measured: linux E4 to E7, E10):
   - **6.8 (no passthrough, no resend).** The overlay composition works. Every read crosses the server (433 to 1,141 MiB/s from an untuned `fuser` server against native-speed passthrough; guest figures, 6.4); a compile is within run-to-run noise of native and a
     header-scan job is 21% slower warm (6.4). Queued requests survive a crash; **requests the server had read and not answered hang** until the connection is aborted, so a crash with requests in flight fails those runs as
@@ -1472,7 +1483,7 @@ owner has not confirmed them.** Two decisions are open and new: the Linux kernel
     **Not tested on 7.0: k3s, minio, the executor itself, tailscale, cgroup behaviour**; only a KVM guest ran it, not the lab hardware. A reboot per node. node-05 has no out-of-tree modules (no DKMS), so modules are low risk (Measured: linux section 9).
   - (A) **Upgrade the lab to 7.0 HWE first**, node by node with a canary, then build the full design (passthrough, backing table, resend).
   - (B) **Ship the 6.8 mode first** (phase 1 pull requests 5 and 7 as in 12), and upgrade nodes to 7.0 when the services above have been run on it; passthrough and resend are selected at start by what `INIT` offers.
-  - Recommendation: **(B).** It starts phase 1 now without waiting for reboots of nodes that run other tenants' builds; the measured 6.8 cost is small for compiles, and the design loses nothing, since passthrough, the backing table and resend are additions to it (Inferred).
+  - Recommendation before the decision: **(B).** It starts phase 1 now without waiting for reboots of nodes that run other tenants' builds; the measured 6.8 cost is small for compiles, and the design loses nothing, since passthrough, the backing table and resend are additions to it (Inferred).
     Arm B against arm C of Q-B then measures what the upgrade is worth on the lab's own builds.
   - If (A): phase 1 pull requests 6 and 7 are not deferred, the first lab deployment waits for the canary node's soak on 7.0, and the 6.8 mode is not built.
 - **C9. Open, for the owner: the macOS frontend, NFS or FSKit.** NFSv3 is measured with a demo-class server (metadata 4x to 66x slower than APFS, `clang` 2.0x to 2.6x, `cargo` 1.25x, twice the page cache, a restart is a 12.5 s pause for an 8 s outage with stable handles, in one run, and the extra time is the server's walk of 59,000 entries and the client's backoff together, which scales with tree size; no root needed; Seatbelt works; the Unix socket failed; Measured: macos E12, E14 to E17).
@@ -1523,7 +1534,7 @@ owner has not confirmed them.** Two decisions are open and new: the Linux kernel
 - **D17.** The tierstore filesystem is read-only to the executor: it overlays the mount and never writes into it; a read/write interface for other clients is a later design (owner, 2026-11-09; C4).
 - **D18.** A finished run's overlay directory is removed as the overlay's mounter, never as the action user, because `work/work` (mode 000) belongs to the mapped root and the action user cannot remove the run directory (6.6; Measured: linux E4; removal from inside the user namespace is untested).
 - **D19.** The mount sets `FUSE_CACHE_SYMLINKS` and answers absent names in trees with a cached negative entry (6.3; Measured: linux E5).
-- **D20.** Until C8 is decided, the Linux frontend is designed to run in two modes chosen at start by what `INIT` offers (passthrough or not, resend or not); the 6.8 mode is the one the lab can run today (6.4, 7.2).
+- **D20.** Until every node runs 7.0 (C8), the Linux frontend is designed to run in two modes chosen at start by what `INIT` offers (passthrough or not, resend or not); the 6.8 mode is the one the lab can run today (6.4, 7.2).
 
 ## 14. Alternatives rejected
 
