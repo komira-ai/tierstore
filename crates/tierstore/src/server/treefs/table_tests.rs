@@ -4,7 +4,7 @@ use std::os::unix::fs::FileExt as _;
 
 use tierstore_testkit::dir::TestDir;
 
-use super::{FILE, LAYOUT, TableError, TreeTable};
+use super::{FILE, HEADER, LAYOUT, RECORD, TableError, TreeTable};
 use crate::tree_manifest::TreeDigest;
 
 fn digest(seed: &[u8]) -> TreeDigest {
@@ -98,4 +98,82 @@ fn a_digest_is_what_the_record_holds() {
     file.write_all_at(&[0xab; 32], 16).unwrap();
     let got = table.digest_of(1).unwrap().unwrap();
     assert_eq!(got.to_string(), "ab".repeat(32));
+}
+
+/// The bytes of a table of two trees as a release wrote them, header included: the fixture.
+const FIXTURE: &[u8] = include_bytes!("../../../tests/stored_formats/fixtures/fs_trees_table.bin");
+
+/// Asserts that a table an earlier process made is opened with its numbers: a digest keeps the
+/// number it had, the next new digest gets the next number, and numbers read back to digests.
+#[test]
+fn an_open_table_keeps_the_numbers_the_earlier_process_gave() {
+    let dir = TestDir::under(std::env::temp_dir(), "tfs-table-open");
+    let first = TreeTable::create(dir.path()).unwrap();
+    let (a, b, c) = (digest(b"a"), digest(b"b"), digest(b"c"));
+    assert_eq!(first.number_of(&a).unwrap(), 1);
+    assert_eq!(first.number_of(&b).unwrap(), 2);
+    drop(first);
+    let again = TreeTable::open(dir.path()).unwrap();
+    assert_eq!(again.find(&a), Some(1));
+    assert_eq!(again.number_of(&b).unwrap(), 2);
+    assert_eq!(again.digest_of(2).unwrap(), Some(b));
+    assert_eq!(again.number_of(&c).unwrap(), 3);
+    drop(again);
+    assert_eq!(TreeTable::open(dir.path()).unwrap().find(&c), Some(3));
+}
+
+/// Asserts that a record the dead process half wrote is not a number: the next digest takes its
+/// place.
+#[test]
+fn a_half_written_record_is_not_a_number() {
+    let dir = TestDir::under(std::env::temp_dir(), "tfs-table-torn");
+    let first = TreeTable::create(dir.path()).unwrap();
+    assert_eq!(first.number_of(&digest(b"a")).unwrap(), 1);
+    first
+        .file
+        .write_all_at(&[7u8; 10], HEADER + RECORD)
+        .unwrap();
+    drop(first);
+    let again = TreeTable::open(dir.path()).unwrap();
+    assert_eq!(again.digest_of(2).unwrap(), None);
+    assert_eq!(again.number_of(&digest(b"b")).unwrap(), 2);
+    assert_eq!(again.digest_of(2).unwrap(), Some(digest(b"b")));
+}
+
+/// Asserts that a file that is not this layout's table, and a directory without one, are refused.
+#[test]
+fn a_file_that_is_not_the_table_of_this_layout_is_refused() {
+    let dir = TestDir::under(std::env::temp_dir(), "tfs-table-layout");
+    assert!(matches!(
+        TreeTable::open(dir.path()),
+        Err(TableError::Io(_))
+    ));
+    let path = dir.path().join(FILE);
+    for bytes in [
+        b"short".to_vec(),
+        [b"tsfstree".as_slice(), &2u32.to_le_bytes(), &[0u8; 4]].concat(),
+        [b"notatree".as_slice(), &LAYOUT.to_le_bytes(), &[0u8; 4]].concat(),
+    ] {
+        std::fs::write(&path, bytes).unwrap();
+        assert!(matches!(
+            TreeTable::open(dir.path()),
+            Err(TableError::Layout)
+        ));
+    }
+}
+
+/// Asserts that the table of a release, as the fixture holds its bytes, is opened by this one
+/// with its two numbers, and that a table this release makes has exactly those bytes.
+#[test]
+fn the_fixture_table_is_read_and_written_byte_for_byte() {
+    let dir = TestDir::under(std::env::temp_dir(), "tfs-table-fixture");
+    std::fs::write(dir.path().join(FILE), FIXTURE).unwrap();
+    let table = TreeTable::open(dir.path()).unwrap();
+    assert_eq!(table.find(&digest(b"fixture one")), Some(1));
+    assert_eq!(table.find(&digest(b"fixture two")), Some(2));
+    let made = TestDir::under(std::env::temp_dir(), "tfs-table-fixture-made");
+    let table = TreeTable::create(made.path()).unwrap();
+    assert_eq!(table.number_of(&digest(b"fixture one")).unwrap(), 1);
+    assert_eq!(table.number_of(&digest(b"fixture two")).unwrap(), 2);
+    assert_eq!(std::fs::read(made.path().join(FILE)).unwrap(), FIXTURE);
 }

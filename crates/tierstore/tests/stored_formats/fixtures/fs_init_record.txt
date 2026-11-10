@@ -1,0 +1,10 @@
+tierstore-fs-init 1
+generation 2
+mount_id 0123456789abcdef0123456789abcdef
+kernel_abi 7.40
+capabilities 0x7ffffff
+flags 0x4400300
+max_readahead 131072
+max_write 1048576
+time_gran_ns 1
+max_stack_depth 1

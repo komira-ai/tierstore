@@ -1,0 +1,12 @@
+tierstore-fs-init 2
+future_key some value a later release adds
+generation 5
+mount_id fedcba9876543210fedcba9876543210
+kernel_abi 7.43
+capabilities 0xffffffffff
+flags 0x4400300
+max_readahead 131072
+max_write 1048576
+time_gran_ns 1000000000
+max_stack_depth 0
+another_future_key 1

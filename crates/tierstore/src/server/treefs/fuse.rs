@@ -8,6 +8,12 @@
 //! capabilities `FUSE_CACHE_SYMLINKS`, `FUSE_PARALLEL_DIROPS` and `FUSE_DO_READDIRPLUS`, and
 //! `max_background` 1024.
 //!
+//! `init` also asks for `FUSE_HAS_RESEND` where the kernel offers it (Linux 6.9 and later), so that a
+//! process that takes the connection over can have the requests the one before read and did not
+//! answer sent again (`launch.rs`). A read or a release that names a handle an earlier process gave
+//! out is the core's to make sense of (`core/adopt.rs`), and `destroy` tells the process that the
+//! readers have stopped.
+//!
 //! Two modes, chosen in `init` from what the kernel offers (D20). With passthrough (the kernel
 //! offers `FUSE_PASSTHROUGH`, the process holds `CAP_SYS_ADMIN` in the initial namespace, and
 //! `fs.passthrough` is not false) the connection's `max_stack_depth` is 1, so that the job's
@@ -22,6 +28,7 @@ use std::fs::File;
 use std::io;
 use std::path::Path;
 use std::sync::Arc;
+use std::sync::mpsc::Sender;
 use std::time::{Duration, SystemTime, UNIX_EPOCH};
 
 use fuser::{
@@ -185,12 +192,25 @@ pub(super) struct Frontend {
     core: Arc<Core>,
     /// Whether to ask for passthrough if the kernel offers it (`fs.passthrough`).
     passthrough: bool,
+    /// Told when the session ends and the kernel's requests are no longer read.
+    ended: Option<Sender<()>>,
 }
 
 impl Frontend {
     /// A frontend over `core`.
     pub(super) fn new(core: Arc<Core>, passthrough: bool) -> Self {
-        Self { core, passthrough }
+        Self {
+            core,
+            passthrough,
+            ended: None,
+        }
+    }
+
+    /// The same, sending on `ended` when the session ends: when its readers have stopped and
+    /// every request they held has been passed to the core.
+    pub(super) fn telling(mut self, ended: Sender<()>) -> Self {
+        self.ended = Some(ended);
+        self
     }
 }
 
@@ -228,6 +248,11 @@ fn finish<T, R: Fail>(result: Result<T, core::Errno>, reply: R, done: impl FnOnc
 }
 
 impl Filesystem for Frontend {
+    fn destroy(&mut self) {
+        // The receiver is gone when nobody waits for the end.
+        let _ = self.ended.as_ref().map(|ended| ended.send(()));
+    }
+
     fn init(&mut self, _req: &Request, config: &mut KernelConfig) -> io::Result<()> {
         for flag in [
             InitFlags::FUSE_CACHE_SYMLINKS,
@@ -242,6 +267,10 @@ impl Filesystem for Frontend {
         let offered = config.capabilities();
         let passthrough = offered.contains(InitFlags::FUSE_PASSTHROUGH);
         let resend = offered.contains(InitFlags::FUSE_HAS_RESEND);
+        // So that a process that takes the connection over can have the requests the one before it
+        // had read and not answered sent again (kernel 6.9 and later; a kernel that does not offer
+        // it is not asked).
+        let _ = config.add_capabilities(InitFlags::FUSE_HAS_RESEND);
         let mode = Mode::chosen(passthrough, self.passthrough, privileged());
         if mode == Mode::Passthrough {
             // Offered, so these succeed; a stack depth of 1 lets the job's overlay stack on the mount.
@@ -310,7 +339,7 @@ impl Filesystem for Frontend {
     fn read(
         &self,
         _req: &Request,
-        _ino: INodeNo,
+        ino: INodeNo,
         fh: FileHandle,
         offset: u64,
         size: u32,
@@ -318,22 +347,24 @@ impl Filesystem for Frontend {
         _lock_owner: Option<LockOwner>,
         reply: ReplyData,
     ) {
-        finish(self.core.read(fh.0, offset, size), reply, |data, reply| {
-            reply.data(&data)
-        });
+        finish(
+            self.core.read_open(ino.0, fh.0, offset, size),
+            reply,
+            |data, reply| reply.data(&data),
+        );
     }
 
     fn release(
         &self,
         _req: &Request,
-        _ino: INodeNo,
+        ino: INodeNo,
         fh: FileHandle,
         _flags: OpenFlags,
         _lock_owner: Option<LockOwner>,
         _flush: bool,
         reply: ReplyEmpty,
     ) {
-        self.core.release(fh.0);
+        self.core.release_open(ino.0, fh.0);
         reply.ok();
     }
 

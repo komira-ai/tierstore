@@ -17,11 +17,14 @@
 //! answered `not attached`.
 
 use std::io::{BufRead as _, BufReader, Read as _, Write as _};
+use std::os::fd::{AsFd as _, OwnedFd};
 use std::os::unix::fs::PermissionsExt as _;
 use std::os::unix::net::{UnixListener, UnixStream};
 use std::path::{Path, PathBuf};
-use std::sync::Arc;
-use std::sync::atomic::{AtomicBool, Ordering};
+use std::sync::{Arc, Condvar, Mutex};
+
+use rustix::event::{PollFd, PollFlags, poll};
+use rustix::pipe::{PipeFlags, pipe_with};
 
 use super::attach::Failure;
 use super::core::{AttachError, Core};
@@ -80,8 +83,60 @@ fn failures_of(failures: &[Failure]) -> serde_json::Value {
     serde_json::json!(failures)
 }
 
-/// One connection: the requests it sends, answered in order, until it closes.
-fn session(core: &Arc<Core>, stream: UnixStream) {
+/// Whether requests are being answered, and how many are being answered now: a hand-over closes
+/// the gate and waits for the requests that passed it.
+#[derive(Default)]
+struct Gate {
+    /// (closed, requests being answered).
+    state: Mutex<(bool, usize)>,
+    idle: Condvar,
+}
+
+/// A request that passed the gate; the gate's count falls when it is dropped.
+struct Passed<'a>(&'a Gate);
+
+impl Gate {
+    /// Passes a request, or none if the gate is closed.
+    fn enter(&self) -> Option<Passed<'_>> {
+        let mut state = super::locked(&self.state);
+        if state.0 {
+            return None;
+        }
+        state.1 += 1;
+        Some(Passed(self))
+    }
+
+    /// Closes the gate and returns when no request is being answered.
+    fn close_and_drain(&self) {
+        let mut state = super::locked(&self.state);
+        state.0 = true;
+        while state.1 > 0 {
+            state = self
+                .idle
+                .wait(state)
+                .unwrap_or_else(std::sync::PoisonError::into_inner);
+        }
+    }
+
+    /// Opens the gate again.
+    fn open(&self) {
+        super::locked(&self.state).0 = false;
+    }
+}
+
+impl Drop for Passed<'_> {
+    fn drop(&mut self) {
+        let mut state = super::locked(&self.0.state);
+        state.1 -= 1;
+        if state.1 == 0 {
+            self.0.idle.notify_all();
+        }
+    }
+}
+
+/// One connection: the requests it sends, answered in order, until it closes or the socket is
+/// handed over.
+fn session(core: &Arc<Core>, gate: &Gate, stream: UnixStream) {
     let (mut read, mut write) = (BufReader::new(&stream), &stream);
     let mut line = Vec::new();
     loop {
@@ -100,6 +155,10 @@ fn session(core: &Arc<Core>, stream: UnixStream) {
             }
             return;
         };
+        let Some(_passed) = gate.enter() else {
+            let _ = write.write_all(answer(&refused(HANDED_OVER)).as_bytes());
+            return;
+        };
         if write
             .write_all(answer(&handle(core, &text)).as_bytes())
             .is_err()
@@ -109,11 +168,24 @@ fn session(core: &Arc<Core>, stream: UnixStream) {
     }
 }
 
+/// What a request is answered while the socket is being handed over.
+const HANDED_OVER: &str = "handed over";
+
+/// The thread that accepts, and the pipe that stops it.
+struct Acceptor {
+    stop: OwnedFd,
+    thread: std::thread::JoinHandle<()>,
+}
+
 /// The socket and the thread that serves it.
 pub(in crate::server) struct Control {
     path: PathBuf,
-    stop: Arc<AtomicBool>,
-    thread: Option<std::thread::JoinHandle<()>>,
+    listener: Arc<UnixListener>,
+    core: Arc<Core>,
+    gate: Arc<Gate>,
+    acceptor: Option<Acceptor>,
+    /// Whether the file at `path` is this instance's to remove.
+    owns_path: bool,
 }
 
 impl Control {
@@ -132,36 +204,108 @@ impl Control {
         let listener = UnixListener::bind(path)?;
         std::fs::set_permissions(path, std::fs::Permissions::from_mode(0o660))?;
         rustix::fs::chown(path, None, Some(rustix::fs::Gid::from_raw(gid)))?;
-        let stop = Arc::new(AtomicBool::new(false));
-        let stopping = Arc::clone(&stop);
+        Self::serve_on(core, listener, path)
+    }
+
+    /// Serves the listening socket `listener`, which is bound at `path`: one an earlier instance
+    /// gave this one in a hand-over, with the mode and group it made it with.
+    ///
+    /// # Errors
+    /// What the system said when the thread or its pipe cannot be made.
+    pub(in crate::server) fn serve_on(
+        core: Arc<Core>,
+        listener: UnixListener,
+        path: &Path,
+    ) -> std::io::Result<Self> {
+        let mut control = Self {
+            path: path.to_owned(),
+            listener: Arc::new(listener),
+            core,
+            gate: Arc::new(Gate::default()),
+            acceptor: None,
+            owns_path: true,
+        };
+        control.accept()?;
+        Ok(control)
+    }
+
+    /// Starts the thread that accepts.
+    fn accept(&mut self) -> std::io::Result<()> {
+        self.listener.set_nonblocking(true)?;
+        let (stopped, stop) = pipe_with(PipeFlags::CLOEXEC)?;
+        let listener = Arc::clone(&self.listener);
+        let (core, gate) = (Arc::clone(&self.core), Arc::clone(&self.gate));
         let thread = std::thread::Builder::new()
             .name("fs-control".to_owned())
             .spawn(move || {
-                for stream in listener.incoming().flatten() {
-                    if stopping.load(Ordering::Acquire) {
+                loop {
+                    let mut fds = [
+                        PollFd::new(&*listener, PollFlags::IN),
+                        PollFd::new(&stopped, PollFlags::IN),
+                    ];
+                    // A wait that fails (a signal) is a wait that ends with nothing to read: the
+                    // accept below then finds no connection.
+                    let _ = poll(&mut fds, None);
+                    if !fds[1].revents().is_empty() {
                         return;
                     }
-                    let core = Arc::clone(&core);
-                    let _ = std::thread::spawn(move || session(&core, stream));
+                    // A connection that went away between the wait and the accept is not one.
+                    listener.accept().into_iter().for_each(|(stream, _)| {
+                        let (core, gate) = (Arc::clone(&core), Arc::clone(&gate));
+                        let _ = std::thread::spawn(move || session(&core, &gate, stream));
+                    });
                 }
             })?;
-        Ok(Self {
-            path: path.to_owned(),
-            stop,
-            thread: Some(thread),
-        })
+        self.acceptor = Some(Acceptor { stop, thread });
+        Ok(())
+    }
+
+    /// A copy of the listening socket's descriptor, for the successor of a hand-over.
+    ///
+    /// # Errors
+    /// What the system said.
+    pub(in crate::server) fn listener_fd(&self) -> std::io::Result<OwnedFd> {
+        self.listener.as_fd().try_clone_to_owned()
+    }
+
+    /// Stops answering: no connection is accepted from here on (one that comes waits in the
+    /// socket's backlog), the request being answered is finished, and the next request of a
+    /// connection that is open is refused. The socket's file stays.
+    pub(in crate::server) fn pause(&mut self) {
+        self.gate.close_and_drain();
+        if let Some(Acceptor { stop, thread }) = self.acceptor.take() {
+            // The thread polls the read end; a byte on the write end wakes it.
+            let _ = rustix::io::write(&stop, &[0]);
+            let _ = thread.join();
+        }
+    }
+
+    /// Answers again after [`Control::pause`].
+    ///
+    /// # Errors
+    /// What the system said when the thread cannot be started.
+    pub(in crate::server) fn resume(&mut self) -> std::io::Result<()> {
+        self.gate.open();
+        self.accept()
+    }
+
+    /// Gives up the socket's file to a successor: it is not removed when this is dropped.
+    pub(in crate::server) fn leave_path(&mut self) {
+        self.owns_path = false;
     }
 }
 
 impl Drop for Control {
-    /// Stops accepting and removes the socket file. Connections that are open finish their
-    /// request and end when their client closes.
+    /// Stops accepting and removes the socket file, unless it was given to a successor.
+    /// Connections that are open finish their request and end when their client closes.
     fn drop(&mut self) {
-        self.stop.store(true, Ordering::Release);
-        // The thread waits in `accept`: a connection wakes it to see the flag.
-        let _ = UnixStream::connect(&self.path);
-        let _ = self.thread.take().map(std::thread::JoinHandle::join);
-        let _ = std::fs::remove_file(&self.path);
+        if let Some(Acceptor { stop, thread }) = self.acceptor.take() {
+            let _ = rustix::io::write(&stop, &[0]);
+            let _ = thread.join();
+        }
+        if self.owns_path {
+            let _ = std::fs::remove_file(&self.path);
+        }
     }
 }
 

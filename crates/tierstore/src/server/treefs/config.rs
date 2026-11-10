@@ -14,6 +14,9 @@
 //! | `fs.threads` | threads that serve the kernel's requests (a fill blocks one) | `16` |
 //! | `fs.passthrough` | ask the kernel for passthrough when it offers it; `false` forces the mode of kernel 6.8 | `true` |
 //! | `fs.max_backing_ids` | the most backing ids live at once; past it an open of another blob is a cached open | `65536` |
+//! | `fs.handoff_socket` | the socket a new instance asks the running one for the mount on (`handoff-fs-v1`) | `<runtime_dir>/handoff.sock` |
+//! | `fs.handoff_wait` | how long the hand-over of the mount may last, from the connect to the end | `120s` |
+//! | `fs.recover_wait` | after a restart on a kernel without resend: how long the connection may show requests no one answers before it is aborted | `30s` |
 
 use std::path::{Path, PathBuf};
 use std::time::Duration;
@@ -50,6 +53,17 @@ const DEFAULT_THREADS: u32 = 16;
 /// The backing ids live at once when the file leaves out `fs.max_backing_ids`.
 const DEFAULT_MAX_BACKING_IDS: u32 = 65_536;
 
+/// The name of the hand-over socket in the runtime directory when the file leaves out
+/// `fs.handoff_socket`.
+const DEFAULT_HANDOFF_SOCKET: &str = "handoff.sock";
+
+/// How long a hand-over of the mount may last when the file leaves out `fs.handoff_wait`.
+const DEFAULT_HANDOFF_WAIT: Duration = Duration::from_secs(120);
+
+/// How long a restarted instance watches for requests no one answers when the file leaves out
+/// `fs.recover_wait`.
+const DEFAULT_RECOVER_WAIT: Duration = Duration::from_secs(30);
+
 /// The most `fs.max_backing_ids` may be.
 const MOST_BACKING_IDS: u32 = 1 << 20;
 
@@ -73,6 +87,9 @@ pub(in crate::server) struct FsTable {
     threads: Option<u32>,
     passthrough: Option<bool>,
     max_backing_ids: Option<u32>,
+    handoff_socket: Option<PathBuf>,
+    handoff_wait: Option<Dur>,
+    recover_wait: Option<Dur>,
 }
 
 /// What `tierstore fs` runs with.
@@ -93,6 +110,13 @@ pub(in crate::server) struct FsSettings {
     pub passthrough: bool,
     /// The most backing ids live at once.
     pub max_backing_ids: usize,
+    /// The socket a new instance asks the running one for the mount on.
+    pub handoff_socket: PathBuf,
+    /// How long a hand-over of the mount may last.
+    pub handoff_wait: Duration,
+    /// How long a restarted instance on a kernel without resend watches for requests no one
+    /// answers.
+    pub recover_wait: Duration,
     /// Whether users other than the one who mounts may use the mount: always, but in the tests,
     /// where the mounting user is not root and `fusermount3` allows it only by `/etc/fuse.conf`.
     pub allow_other: bool,
@@ -105,6 +129,15 @@ fn absolute(key: &str, path: PathBuf) -> Result<PathBuf, ConfigError> {
     } else {
         Err(invalid(key, "must be an absolute path"))
     }
+}
+
+/// `wait`, which is the value of `key`, if it is between a second and an hour.
+fn bounded(key: &str, wait: Duration) -> Result<Duration, ConfigError> {
+    if wait < Duration::from_secs(1) || wait > HOUR {
+        let why = format!("{}ms is not between 1s and 1h", wait.as_millis());
+        return Err(invalid(key, why));
+    }
+    Ok(wait)
 }
 
 /// `uid:gid` as two numbers.
@@ -151,13 +184,29 @@ impl FsSettings {
         let control_socket = table
             .control_socket
             .unwrap_or_else(|| runtime_dir.join(DEFAULT_CONTROL_SOCKET));
-        let socket_length = control_socket.as_os_str().len();
-        if socket_length > MOST_SOCKET_PATH {
-            let why = format!(
-                "is {socket_length} bytes; the path of a Unix socket is at most {MOST_SOCKET_PATH}"
-            );
-            return Err(invalid("fs.control_socket", why));
+        let handoff_socket = table
+            .handoff_socket
+            .unwrap_or_else(|| runtime_dir.join(DEFAULT_HANDOFF_SOCKET));
+        for (key, socket) in [
+            ("fs.control_socket", &control_socket),
+            ("fs.handoff_socket", &handoff_socket),
+        ] {
+            let length = socket.as_os_str().len();
+            if length > MOST_SOCKET_PATH {
+                let why = format!(
+                    "is {length} bytes; the path of a Unix socket is at most {MOST_SOCKET_PATH}"
+                );
+                return Err(invalid(key, why));
+            }
         }
+        let handoff_wait = bounded(
+            "fs.handoff_wait",
+            table.handoff_wait.map_or(DEFAULT_HANDOFF_WAIT, |dur| dur.0),
+        )?;
+        let recover_wait = bounded(
+            "fs.recover_wait",
+            table.recover_wait.map_or(DEFAULT_RECOVER_WAIT, |dur| dur.0),
+        )?;
         let timeout = table
             .fetch_timeout
             .map_or(DEFAULT_FETCH_TIMEOUT, |dur| dur.0);
@@ -199,6 +248,9 @@ impl FsSettings {
             threads: threads as usize,
             passthrough: table.passthrough.unwrap_or(true),
             max_backing_ids: max_backing_ids as usize,
+            handoff_socket: absolute("fs.handoff_socket", handoff_socket)?,
+            handoff_wait,
+            recover_wait,
             allow_other: true,
         })
     }

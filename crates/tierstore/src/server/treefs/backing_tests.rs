@@ -5,7 +5,7 @@ use std::sync::Arc;
 
 use tierstore_testkit::dir::TestDir;
 
-use super::{BackingTable, FILE, Slot};
+use super::{BackingTable, FILE, Saved, Slot, saved};
 use crate::server::treefs::locked;
 use crate::server::treefs::testing::{FakeKernel, sha, until};
 use crate::tree_manifest::TreeDigest;
@@ -192,4 +192,94 @@ fn the_guard_of_an_id_is_had_by_its_type() {
     assert_eq!(backing.guard::<String>().map(String::as_str), Some("guard"));
     assert!(backing.guard::<u32>().is_none());
     assert_eq!(format!("{backing:?}"), "Backing { id: 5 }");
+}
+
+/// The table of two blobs, `a` and `b`, as a release wrote it at a clean stop: the fixture.
+const FIXTURE: &str = include_str!("../../../tests/stored_formats/fixtures/fs_backing_table.txt");
+
+/// The same with words a later release adds to a line, and a line that is nothing.
+const NEWER: &str =
+    include_str!("../../../tests/stored_formats/fixtures/fs_backing_table_newer.txt");
+
+/// Asserts that the fixture reads to its two lines (one counted exactly), that a later release's
+/// extra words are ignored, that a line that is not a line is left out, and that a missing file
+/// is no lines.
+#[test]
+fn the_file_is_read_line_by_line_and_a_later_releases_words_are_ignored() {
+    let dir = TestDir::under(std::env::temp_dir(), "tfs-backing-saved");
+    let expected = vec![
+        Saved {
+            blob: blob("b"),
+            id: 101,
+            opens: 1,
+            exact: false,
+        },
+        Saved {
+            blob: blob("a"),
+            id: 100,
+            opens: 2,
+            exact: true,
+        },
+    ];
+    assert_eq!(saved(&dir.path().join(FILE)).unwrap(), Vec::new());
+    std::fs::write(dir.path().join(FILE), FIXTURE).unwrap();
+    assert_eq!(saved(&dir.path().join(FILE)).unwrap(), expected);
+    std::fs::write(dir.path().join(FILE), NEWER).unwrap();
+    assert_eq!(saved(&dir.path().join(FILE)).unwrap(), expected);
+    for bad in [
+        "x 1 1",
+        &format!("{} one 1", blob("a")),
+        &format!("{} 1", blob("a")),
+    ] {
+        std::fs::write(dir.path().join(FILE), bad).unwrap();
+        assert_eq!(saved(&dir.path().join(FILE)).unwrap(), Vec::new(), "{bad}");
+    }
+    // A path that is not a file is an error, not an empty table.
+    assert!(saved(dir.path()).is_err());
+}
+
+/// Asserts that an adopted table written exactly gives back the bytes of the fixture, that a
+/// table written between (a plain write) carries the counts but not the mark, and that the file of
+/// a table that is adopted is written at once, as a table that is made is.
+#[test]
+fn an_adopted_table_is_written_back_as_the_fixture_has_it() {
+    let dir = TestDir::under(std::env::temp_dir(), "tfs-backing-adopted");
+    std::fs::write(dir.path().join(FILE), FIXTURE).unwrap();
+    let lines = saved(&dir.path().join(FILE)).unwrap();
+    let kernel = FakeKernel::new();
+    let table = BackingTable::adopt(dir.path().join(FILE), 10, &lines, &|id| kernel.wrap(id));
+    assert_eq!(table.live(), 2);
+    assert_eq!(text(dir.path()), FIXTURE.replace(" exact", ""));
+    table.write_exact();
+    assert_eq!(text(dir.path()), FIXTURE);
+}
+
+/// Asserts that the releases of an adopted blob's earlier opens close its id at the last, count
+/// them down one by one, and do not close an id whose count was not exact; and that an open of this
+/// process on the blob holds the id up.
+#[test]
+fn the_earlier_opens_of_an_adopted_blob_are_counted_down_to_the_close() {
+    let dir = TestDir::under(std::env::temp_dir(), "tfs-backing-foreign");
+    std::fs::write(dir.path().join(FILE), FIXTURE).unwrap();
+    let lines = saved(&dir.path().join(FILE)).unwrap();
+    let kernel = FakeKernel::new();
+    let table = BackingTable::adopt(dir.path().join(FILE), 10, &lines, &|id| kernel.wrap(id));
+    let (a, b) = (blob("a"), blob("b"));
+    assert_eq!(live(table.open(&a)), 100);
+    table.release_foreign(&a);
+    table.release_foreign(&a);
+    assert!(locked(&kernel.closed).is_empty());
+    table.release(&a);
+    assert_eq!(*locked(&kernel.closed), [100]);
+    assert_eq!(table.live(), 1);
+    // The count of b was not exact: no number of releases closes it.
+    table.release_foreign(&b);
+    table.release_foreign(&b);
+    assert_eq!(table.live(), 1);
+    assert_eq!(live(table.open(&b)), 101);
+    table.release(&b);
+    assert_eq!(table.live(), 1);
+    // A blob with no id, and a release for one, are nothing.
+    table.release_foreign(&blob("c"));
+    assert_eq!(text(dir.path()).lines().count(), 1);
 }
