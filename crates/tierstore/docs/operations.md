@@ -323,5 +323,5 @@ A job that holds no key reads its objects with presigned GET URLs. The service t
 ## Not in a release yet
 
 - **The fill socket** of a build node (`local_cache.fill_socket`, `fill_socket_concurrency` and `fill_socket_wait`; see [the fill socket](operations.md#the-fill-socket)), and so a default `fill.sock` in the state directory. A storage node with a cache has none and refuses the keys.
-- **`tierstore fs`**, the virtual build file system (see [the virtual build file system](operations.md#the-virtual-build-file-system)), its `[fs]` table and its unit, and the pin requests of the fill socket.
+- **The virtual build file system** (see [the virtual build file system](operations.md#the-virtual-build-file-system)): `tierstore fs`, its `[fs]` table and its unit, and the pin requests of the fill socket.
 - **Waiting for a put slot** A put over `server.max_concurrent_puts` waits up to `server.put_permit_wait` (15 s) for a slot before it is answered 503 `SlowDown`.
