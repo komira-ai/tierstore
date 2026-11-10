@@ -423,7 +423,7 @@ client_group = "builders"
 owner = "501:20"
 fill_socket = "/var/lib/tierstore/fill.sock"
 cache_path = "/usr/local/tierstore/cache"
-mountpoint = "/Users/builder/tierstore"
+mountpoint = "/Volumes/tierstore"
 
 [fs.nfs]
 mount_user = "builder"
