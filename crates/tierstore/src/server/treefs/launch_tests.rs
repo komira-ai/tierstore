@@ -229,6 +229,64 @@ fn a_restart_without_resend_aborts_a_connection_that_stays_hung() {
     assert!(!rig.dir.path().join("connections/77/abort").exists());
 }
 
+/// Asserts that a restart on a kernel that can send requests again, which refuses to, is watched as
+/// one that cannot: the requests the process before read stay unanswered, and the connection is
+/// aborted when they do not clear.
+#[test]
+fn a_restart_whose_resend_is_refused_is_watched_and_aborted_when_the_requests_stay() {
+    let _one_at_a_time = SIGNALS
+        .lock()
+        .unwrap_or_else(std::sync::PoisonError::into_inner);
+    let rig = Rig::new("tfs-launch-refused", sample());
+    leave_record(&rig, true);
+    let mut settings = rig.settings();
+    settings.recover_wait = std::time::Duration::from_secs(1);
+    let info = format!(
+        "36 24 0:79 / {} rw - fuse.tierstore-fs x rw\n",
+        rig.mountpoint.display()
+    );
+    let kernel = kernel_of(&rig, &info);
+    std::fs::create_dir_all(kernel.connections.join("79")).unwrap();
+    std::fs::write(kernel.connections.join("79/waiting"), "3\n").unwrap();
+    let (device, gone) = fakedev::pair();
+    // The kernel's end is gone, so the notification cannot be written.
+    drop(gone);
+    let platform = Platform {
+        manager: Manager::new(None),
+        stored: vec![Stored {
+            name: FUSE_NAME.to_owned(),
+            fd: device.as_raw_fd(),
+        }],
+        kernel: kernel.clone(),
+    };
+    let error = serve_with(&settings, platform).unwrap_err();
+    assert!(matches!(error, StartError::Aborted));
+    assert_eq!(
+        std::fs::read_to_string(kernel.connections.join("79/abort")).unwrap(),
+        "1"
+    );
+}
+
+/// Asserts that the hand-over socket exists before the service manager is told the unit is ready,
+/// so that the instance started next finds it: a start that cannot bind it ends in an error
+/// without having said ready.
+#[test]
+fn the_manager_is_not_told_ready_before_the_hand_over_socket_is_bound() {
+    let _one_at_a_time = SIGNALS
+        .lock()
+        .unwrap_or_else(std::sync::PoisonError::into_inner);
+    let rig = Rig::new("tfs-launch-unbound", sample());
+    leave_record(&rig, false);
+    let mut settings = rig.settings();
+    settings.handoff_socket = rig.dir.path().join("no/dir/handoff.sock");
+    let manager = FakeManager::start(&rig.dir.path().join("notify.sock"));
+    let (device, _kernel) = fakedev::pair();
+    let platform = platform(&manager, Some(device.as_raw_fd()), kernel_of(&rig, ""));
+    let error = serve_with(&settings, platform).unwrap_err();
+    assert!(error.to_string().contains("hand-over socket"), "{error}");
+    assert!(!manager.texts().iter().any(|text| text == "READY=1"));
+}
+
 fn mine_exists(settings: &FsSettings) -> bool {
     settings.handoff_socket.exists()
 }

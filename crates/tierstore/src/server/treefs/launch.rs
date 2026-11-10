@@ -66,7 +66,11 @@ fn adopt_stored(
     })?;
     let prepared = Prepared::load(settings)?;
     let running = Running::adopt(settings, prepared, device, (None, true))?;
-    let hung = if running.outcome().flags.contains(InitFlags::FUSE_HAS_RESEND) {
+    // A kernel that can send the requests again and refused to has left them as unanswered as
+    // one that cannot.
+    let hung = if running.outcome().flags.contains(InitFlags::FUSE_HAS_RESEND)
+        && !running.resend_failed()
+    {
         None
     } else {
         watch(settings, kernel)
@@ -195,18 +199,32 @@ async fn run(settings: &FsSettings, platform: Platform) -> Result<(), StartError
         hung,
     } = start(settings, &platform).await?;
     let manager = &platform.manager;
+    let bind = || {
+        Offer::bind(
+            &settings.handoff_socket,
+            &settings.mountpoint,
+            &settings.control_socket,
+            settings.handoff_wait,
+        )
+    };
+    // The socket is there before the manager hears the unit is ready, so that the instance that
+    // is started next (the other letter) finds it. A successor binds after it has told the
+    // instance it took the mount from that it serves: that one still holds the path until then.
+    let early = if notice.is_none() {
+        Some(bind()?)
+    } else {
+        None
+    };
     if let Err(why) = manager.ready() {
         tracing::warn!("tierstore fs: cannot tell the service manager it is ready: {why}");
     }
     if let Some(notice) = notice {
         notice.ready().await?;
     }
-    let offer = Offer::bind(
-        &settings.handoff_socket,
-        &settings.mountpoint,
-        &settings.control_socket,
-        settings.handoff_wait,
-    )?;
+    let offer = match early {
+        Some(offer) => offer,
+        None => bind()?,
+    };
     let end = tokio::select! {
         () = signals.wait() => End::Signal,
         handed = offer.serve(Arc::clone(&running)) => {

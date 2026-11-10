@@ -328,6 +328,20 @@ impl BackingTable {
         self.write(&locked(&self.inner), true);
     }
 
+    /// Writes the file with no line marked `exact`.
+    pub(super) fn write_inexact(&self) {
+        self.write(&locked(&self.inner), false);
+    }
+
+    /// Keeps every live id open in the kernel after this table is dropped: one reference to each
+    /// guard is leaked, so the guard is never dropped and never closes its id. For a process that
+    /// leaves the connection to its successor.
+    pub(super) fn abandon(&self) {
+        for live in locked(&self.inner).live.values() {
+            std::mem::forget(Arc::clone(&live.guard));
+        }
+    }
+
     /// Writes the file; a file that cannot be written is said and the table goes on. With `exact`
     /// the lines whose count is known say so.
     fn write(&self, inner: &Inner, exact: bool) {

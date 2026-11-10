@@ -4,12 +4,13 @@
 
 use fuser::InitFlags;
 
+use super::backing;
 use super::config::FsSettings;
 use super::fakedev::{self, Message};
 use super::init_record::{self, Record, RecordError};
 use super::ino;
 use super::run::{Prepared, Running, StartError};
-use super::testing::{Rig, sample, sha};
+use super::testing::{FakeKernel, Rig, sample, sha};
 
 /// The rig and its settings, with the record the process that mounted left.
 fn left_behind(name: &str, resend: bool) -> (Rig, FsSettings) {
@@ -100,6 +101,25 @@ fn a_refused_resend_is_said_and_the_takeover_goes_on() {
     // The kernel's end is gone, so the notification cannot be written.
     drop(kernel);
     let running = adopt(&settings, device, true);
+    assert!(running.resend_failed());
+    drop(running);
+}
+
+/// Asserts the order of a takeover after a crash: the kernel is asked to send the requests again
+/// before any reader starts, so that a request the new readers have taken is not put back and run
+/// twice. The first thing the kernel hears is the notification, and a request that was queued is
+/// answered once, after it.
+#[test]
+fn the_kernel_is_asked_to_send_requests_again_before_the_readers_start() {
+    let (_rig, settings) = left_behind("tfs-rec-resend-first", true);
+    let (device, kernel) = fakedev::pair();
+    kernel.getattr(5, ino::ROOT);
+    let running = adopt(&settings, device, true);
+    let note = kernel.reply();
+    assert_eq!((note.unique, note.error), (0, 7));
+    answered(&kernel.reply(), 5);
+    kernel.assert_silent();
+    assert!(!running.resend_failed());
     drop(running);
 }
 
@@ -232,4 +252,47 @@ fn the_backing_ids_of_the_process_before_are_adopted_where_the_connection_has_pa
     let kept = std::fs::read_to_string(rig.runtime.join("backing")).unwrap();
     assert_eq!(kept.lines().count(), 2);
     assert!(kept.contains(" 7 2"), "{kept}");
+}
+
+/// The process of `left_behind`, over a connection that has passthrough with the ids of `table`
+/// adopted, and the file of the ids as the process before left it.
+fn with_ids(name: &str, table: &str) -> (Running, Rig, FakeKernel) {
+    let (rig, settings) = left_behind(name, false);
+    std::fs::write(rig.runtime.join("backing"), table).unwrap();
+    let (device, _kernel) = fakedev::pair();
+    let running = adopt(&settings, device, false);
+    let kernel = FakeKernel::new();
+    let saved = backing::saved(&rig.runtime.join("backing")).unwrap();
+    running
+        .core()
+        .adopt_passthrough(&saved, &|id| kernel.wrap(id));
+    (running, rig, kernel)
+}
+
+/// Asserts that a process that leaves the connection at a signal writes the counts of the backing
+/// table exact (so that its successor closes the ids when the last open of each is released), and
+/// closes no id.
+#[test]
+fn a_process_that_leaves_the_connection_writes_the_counts_exact_and_closes_no_id() {
+    let table = format!("{} 7 2 exact\n", sha(b"tool bytes"));
+    let (running, rig, kernel) = with_ids("tfs-rec-leave", &table);
+    running.leave();
+    let kept = std::fs::read_to_string(rig.runtime.join("backing")).unwrap();
+    assert_eq!(kept, table);
+    assert!(super::locked(&kernel.closed).is_empty());
+}
+
+/// Asserts that a hand-over which does not complete, after the counts were written exact, writes
+/// the table again with no mark: the process serves on, and its successor after a crash must not
+/// trust the counts.
+#[test]
+fn a_hand_over_that_does_not_complete_leaves_the_counts_unmarked() {
+    let table = format!("{} 7 2 exact\n", sha(b"tool bytes"));
+    let (running, rig, _kernel) = with_ids("tfs-rec-resumed", &table);
+    running.quiesce();
+    let paused = std::fs::read_to_string(rig.runtime.join("backing")).unwrap();
+    assert!(paused.ends_with(" exact\n"), "{paused}");
+    running.resume().unwrap();
+    let kept = std::fs::read_to_string(rig.runtime.join("backing")).unwrap();
+    assert!(!kept.contains("exact"), "{kept}");
 }

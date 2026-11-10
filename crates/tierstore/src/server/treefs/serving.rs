@@ -17,7 +17,7 @@ use std::os::fd::{AsFd as _, OwnedFd};
 use std::sync::Arc;
 use std::sync::mpsc::{Receiver, channel};
 
-use fuser::{BackgroundSession, InitFlags, InitOutcome, Notifier, Session, SessionStopper};
+use fuser::{BackgroundSession, InitFlags, InitOutcome, Session, SessionStopper};
 
 use super::backing::{Guard, Saved};
 use super::config::FsSettings;
@@ -33,10 +33,12 @@ pub(super) struct Serving {
     ended: Receiver<()>,
     /// This process's own copy of the descriptor, to store, to hand over and to serve again.
     device: OwnedFd,
-    notifier: Notifier,
     outcome: InitOutcome,
     /// Whether this process made the mount, and so unmounts it.
     mounted: bool,
+    /// Whether the kernel was asked to send requests again and refused: requests the process
+    /// before read stay unanswered.
+    resend_failed: bool,
 }
 
 /// A frontend over `core`, and the channel it tells when the session ends.
@@ -58,12 +60,15 @@ impl Serving {
         let outcome = session
             .init_outcome()
             .ok_or_else(|| io::Error::other("the handshake left no outcome"))?;
-        Self::start(session, ended, (outcome, true))
+        Self::start(session, ended, (outcome, true), false)
     }
 
     /// Serves the connection of `device`, which the kernel set up with `outcome`. Where the
     /// connection has passthrough, the core takes over `saved`, the backing ids of the process
-    /// before this one; `None` leaves the core's table as it is (it already has the ids).
+    /// before this one; `None` leaves the core's table as it is (it already has the ids). With
+    /// `resend`, where the connection can, the kernel is asked to send again the requests the
+    /// process before read and did not answer: before the first reader starts, since the kernel
+    /// puts back every request that is being processed, those the new readers have taken too.
     ///
     /// # Errors
     /// What the system said when the threads or the stop pipe cannot be made.
@@ -72,7 +77,7 @@ impl Serving {
         settings: &FsSettings,
         device: OwnedFd,
         outcome: InitOutcome,
-        saved: Option<&[Saved]>,
+        (saved, resend): (Option<&[Saved]>, bool),
     ) -> io::Result<Self> {
         let (frontend, ended) = frontend(core, settings);
         let config = fuse::config(settings.threads, settings.allow_other);
@@ -82,7 +87,18 @@ impl Serving {
             let wrap = move |id| -> Guard { Arc::new(notifier.backing_id_from_raw(id)) };
             core.adopt_passthrough(saved, &wrap);
         }
-        Self::start(session, ended, (outcome, false))
+        let resend_failed = resend
+            && outcome.flags.contains(InitFlags::FUSE_HAS_RESEND)
+            && match session.notifier().resend() {
+                Ok(()) => false,
+                Err(why) => {
+                    tracing::warn!(
+                        "tierstore fs: the kernel was not asked to send requests again: {why}"
+                    );
+                    true
+                }
+            };
+        Self::start(session, ended, (outcome, false), resend_failed)
     }
 
     /// Starts the readers of `session`.
@@ -90,19 +106,19 @@ impl Serving {
         mut session: Session<Frontend>,
         ended: Receiver<()>,
         (outcome, mounted): (InitOutcome, bool),
+        resend_failed: bool,
     ) -> io::Result<Self> {
         let stopper = session.stopper()?;
         let device = session.as_fd().try_clone_to_owned()?;
-        let notifier = session.notifier();
         let session = session.spawn()?;
         Ok(Self {
             stopper,
             session: Some(session),
             ended,
             device,
-            notifier,
             outcome,
             mounted,
+            resend_failed,
         })
     }
 
@@ -119,22 +135,10 @@ impl Serving {
         self.device.try_clone()
     }
 
-    /// Whether the connection was set up with `FUSE_NOTIFY_RESEND` available.
-    pub(super) fn can_resend(&self) -> bool {
-        self.outcome.flags.contains(InitFlags::FUSE_HAS_RESEND)
-    }
-
-    /// Asks the kernel to send again the requests the process before this one read and did not
-    /// answer. Where the connection was not set up for it, nothing is asked.
-    ///
-    /// # Errors
-    /// What the kernel said.
-    pub(super) fn resend(&self) -> io::Result<()> {
-        if self.can_resend() {
-            self.notifier.resend()
-        } else {
-            Ok(())
-        }
+    /// Whether the kernel was asked to send requests again and did not: what the process before
+    /// read and did not answer stays so.
+    pub(super) fn resend_failed(&self) -> bool {
+        self.resend_failed
     }
 
     /// Stops the readers and returns when each has answered the request it held and stopped. The
@@ -160,7 +164,13 @@ impl Serving {
         self.stop_reading();
         // The new readers have no handle on the mount, if there was one: it was left behind with
         // the old (`stop_reading`), so a later `unmount` leaves the mount.
-        *self = Self::adopt(core, settings, self.device.try_clone()?, self.outcome, None)?;
+        *self = Self::adopt(
+            core,
+            settings,
+            self.device.try_clone()?,
+            self.outcome,
+            (None, false),
+        )?;
         Ok(())
     }
 

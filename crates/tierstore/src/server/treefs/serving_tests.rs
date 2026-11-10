@@ -13,7 +13,7 @@ fn stopped_readers_are_stopped_once_and_start_again_where_they_were() {
     let settings = rig.settings();
     let (device, kernel) = fakedev::pair();
     let outcome = fakedev::outcome(false);
-    let mut serving = Serving::adopt(&rig.core, &settings, device, outcome, None).unwrap();
+    let mut serving = Serving::adopt(&rig.core, &settings, device, outcome, (None, false)).unwrap();
     kernel.getattr(1, ino::ROOT);
     assert_eq!(kernel.reply().unique, 1);
     serving.stop_reading();
@@ -24,8 +24,7 @@ fn stopped_readers_are_stopped_once_and_start_again_where_they_were() {
     assert_eq!(kernel.reply().unique, 2);
     assert_eq!(serving.outcome(), outcome);
     // A connection that was set up without resend is not asked to send anything again.
-    assert!(!serving.can_resend());
-    serving.resend().unwrap();
+    assert!(!serving.resend_failed());
     kernel.assert_silent();
 }
 
@@ -40,7 +39,7 @@ fn ending_a_serving_that_made_no_mount_stops_its_readers() {
         &rig.settings(),
         device,
         fakedev::outcome(false),
-        None,
+        (None, false),
     )
     .unwrap();
     kernel.getattr(1, ino::ROOT);
@@ -79,7 +78,7 @@ fn a_serving_ended_after_its_readers_stopped_has_nothing_left_to_do() {
         &rig.settings(),
         device,
         fakedev::outcome(false),
-        None,
+        (None, false),
     )
     .unwrap();
     serving.stop_reading();

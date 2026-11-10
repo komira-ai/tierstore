@@ -96,6 +96,26 @@ fn start_and_stop() {
     again.stop().unwrap();
 }
 
+/// Asserts that a fresh start detaches a dead mount before it makes the directories: a dead mount
+/// answers `mkdir` with `EEXIST` and `stat` with `ENOTCONN`, so `create_dir_all` fails on it. The
+/// mount point is not there when the detaching runs, and is there after.
+#[test]
+fn a_fresh_start_detaches_a_dead_mount_before_it_makes_the_directories() {
+    let rig = Rig::new("tfs-run-dead", sample());
+    let settings = FsSettings {
+        mountpoint: rig.dir.path().join("fresh/mnt"),
+        ..settings(&rig)
+    };
+    let mut ran = false;
+    super::begin(&settings, || {
+        ran = true;
+        assert!(!settings.mountpoint.exists());
+    })
+    .unwrap();
+    assert!(ran);
+    assert!(settings.mountpoint.is_dir());
+}
+
 /// Asserts that a start that cannot do what it needs is an error that says what: a cache directory
 /// that is not there, a runtime directory or a mount point under a file, a control socket in a
 /// directory that is not there, a mount point that is not a directory.

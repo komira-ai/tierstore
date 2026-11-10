@@ -283,3 +283,55 @@ fn the_earlier_opens_of_an_adopted_blob_are_counted_down_to_the_close() {
     table.release_foreign(&blob("c"));
     assert_eq!(text(dir.path()).lines().count(), 1);
 }
+
+/// Asserts that a table which leaves the connection to its successor leaves the ids open in the
+/// kernel: the ids stay open when the table and every open that held one are dropped, and a table
+/// that does not abandon them closes each one.
+#[test]
+fn an_abandoned_table_leaves_its_ids_open_when_it_is_dropped() {
+    let dir = TestDir::under(std::env::temp_dir(), "tfs-backing-abandon");
+    let kernel = FakeKernel::new();
+    let (a, b) = (blob("a"), blob("b"));
+    let lines = [
+        Saved {
+            blob: a,
+            id: 7,
+            opens: 1,
+            exact: true,
+        },
+        Saved {
+            blob: b,
+            id: 8,
+            opens: 0,
+            exact: true,
+        },
+    ];
+    let kept = BackingTable::adopt(dir.path().join(FILE), 10, &lines, &|id| kernel.wrap(id));
+    let held = ticket(kept.open(&blob("c"))).registered(kernel.registration());
+    kept.abandon();
+    drop(held);
+    drop(kept);
+    assert_eq!(*locked(&kernel.closed), Vec::<u32>::new());
+
+    let dropped = BackingTable::adopt(dir.path().join(FILE), 10, &lines, &|id| kernel.wrap(id));
+    drop(dropped);
+    let mut closed = locked(&kernel.closed).clone();
+    closed.sort_unstable();
+    assert_eq!(closed, [7, 8]);
+}
+
+/// Asserts that a table written exact and then written again without the mark has no line marked:
+/// the counts of a process that serves on are a lower bound again.
+#[test]
+fn a_table_written_exact_is_written_again_without_the_mark() {
+    let dir = TestDir::under(std::env::temp_dir(), "tfs-backing-inexact");
+    let table = table(&dir, 10);
+    let kernel = FakeKernel::new();
+    let a = blob("a");
+    let _ = ticket(table.open(&a)).registered(kernel.registration());
+    table.write_exact();
+    assert_eq!(text(dir.path()), format!("{a} 100 1 exact\n"));
+    assert_eq!(live(table.open(&a)), 100);
+    table.write_inexact();
+    assert_eq!(text(dir.path()), format!("{a} 100 2\n"));
+}

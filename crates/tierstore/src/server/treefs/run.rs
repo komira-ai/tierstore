@@ -198,6 +198,14 @@ fn make_directories(settings: &FsSettings) -> Result<(), StartError> {
     )))
 }
 
+/// What a fresh start does first: `discard`, which detaches a dead mount at the mount point, and
+/// then the directories. A dead mount answers `mkdir` with `EEXIST` and `stat` with `ENOTCONN`, so
+/// `create_dir_all` fails on it: it must be gone before the directories are made.
+fn begin(settings: &FsSettings, discard: impl FnOnce()) -> Result<(), StartError> {
+    discard();
+    make_directories(settings)
+}
+
 /// A core over `table` for the mount `mount_id`, whose file handles are numbered for `generation`,
 /// with the attachments the file holds made again and the cache told which trees are attached.
 fn core_of(
@@ -241,12 +249,13 @@ impl Running {
     /// # Errors
     /// [`StartError`]: why nothing was mounted.
     pub(super) fn start(settings: &FsSettings) -> Result<Self, StartError> {
-        make_directories(settings)?;
-        discard_dead_mount(
-            settings,
-            std::fs::metadata(&settings.mountpoint),
-            &Kernel::real(),
-        );
+        begin(settings, || {
+            discard_dead_mount(
+                settings,
+                std::fs::metadata(&settings.mountpoint),
+                &Kernel::real(),
+            );
+        })?;
         let table = TreeTable::create(&settings.runtime_dir)?;
         // The backing ids of an earlier mount belong to its connection, which is gone.
         remove_stale(&settings.runtime_dir.join(backing::FILE))?;
@@ -301,11 +310,14 @@ impl Running {
         }
         .map_err(control_error(settings))?;
         init_record::write(&settings.runtime_dir, &record)?;
-        let serving = Serving::adopt(&core, settings, device, record.outcome, Some(&saved))
-            .map_err(io("serving the connection"))?;
-        if resend && let Err(why) = serving.resend() {
-            tracing::warn!("tierstore fs: the kernel was not asked to send requests again: {why}");
-        }
+        let serving = Serving::adopt(
+            &core,
+            settings,
+            device,
+            record.outcome,
+            (Some(&saved), resend),
+        )
+        .map_err(io("serving the connection"))?;
         Ok(Self::of(core, settings, Parts { control, serving }))
     }
 
@@ -329,6 +341,11 @@ impl Running {
     /// What the system said.
     pub(super) fn device(&self) -> std::io::Result<OwnedFd> {
         locked(&self.parts).serving.device()
+    }
+
+    /// Whether the kernel was asked to send the earlier process's requests again and refused.
+    pub(super) fn resend_failed(&self) -> bool {
+        locked(&self.parts).serving.resend_failed()
     }
 
     /// The outcome of the handshake the connection was set up with.
@@ -363,12 +380,16 @@ impl Running {
     pub(super) fn resume(&self) -> std::io::Result<()> {
         let mut parts = locked(&self.parts);
         parts.serving.restart(&self.core, &self.settings)?;
+        // The counts written exact at the pause are a lower bound again once opens go on.
+        self.core.write_backing_inexact();
         parts.control.resume()
     }
 
-    /// The mount is the successor's: the control socket's file is its too, and is not removed.
+    /// The mount is the successor's: the control socket's file is its too, and is not removed, and
+    /// the backing ids are its too: they stay open in the kernel when this process ends.
     pub(super) fn give_up(&self) {
         locked(&self.parts).control.leave_path();
+        self.core.abandon_backing();
     }
 
     /// Ends the process's service of the mount and leaves the mount for the service manager's
@@ -376,6 +397,10 @@ impl Running {
     /// unmounted.
     pub(super) fn leave(self) {
         locked(&self.parts).serving.stop_reading();
+        // The successor of a restart adopts the ids, and trusts the counts of a line that says
+        // they are exact; the ids must stay open in the kernel when this process's table goes.
+        self.core.write_backing_exact();
+        self.core.abandon_backing();
     }
 
     /// Unmounts and waits for the threads of the mount to end. A mount this process did not make
