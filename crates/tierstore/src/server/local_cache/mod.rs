@@ -97,7 +97,8 @@
 //! seeded at start from the files' times and written back to them (`utimensat`, once per object
 //! per pass however often it was used) so that a restart keeps it. An object with more than one
 //! link is in use by another tree: it is skipped, counted, and stays charged to the budget.
-//! Files in `.stage/` are never evicted and are removed at start.
+//! So is an object that a tree pins (module `pins`), counted separately. Files in `.stage/` are
+//! never evicted and are removed at start.
 //!
 //! # The lock and read-only mode
 //!
@@ -124,6 +125,8 @@ mod keep;
 pub(super) mod layout;
 mod listing;
 mod metrics;
+mod pin_set;
+mod pins;
 mod revalidate;
 mod scrub;
 mod selfcheck;
@@ -160,6 +163,10 @@ mod listing_tests;
 mod lost_tests;
 #[cfg(test)]
 mod metrics_text_tests;
+#[cfg(test)]
+mod pin_set_tests;
+#[cfg(test)]
+mod pins_tests;
 #[cfg(test)]
 mod read_only_tasks_tests;
 #[cfg(test)]
@@ -211,6 +218,7 @@ use crate::{
 pub use disk::{Disk, Space, SystemDisk};
 pub use hold::{Mode, Tick};
 pub use metrics::Counters;
+pub use pins::{PinAnswer, PinError};
 pub use scrub::{Every, SCRUB_MIN_ROUND, SCRUB_RATE, SCRUB_TICK, ScrubPass, Scrubber, Ticker};
 pub use selfcheck::{LocalTierFailure, check_local};
 
@@ -276,6 +284,9 @@ pub struct CacheConfig {
     pub low_water: u8,
     /// The percent of the budget above which a fill is skipped.
     pub critical: u8,
+    /// The most bytes of objects that trees may pin (see [`LocalCache::pin`]); a pin that would
+    /// take the pinned bytes over it is refused. Half the budget unless the settings say otherwise.
+    pub pin_limit: u64,
     /// The percent of the file system that is kept free: below it a pass evicts.
     pub free_floor: u8,
     /// The prefixes and whether the keys under each are kept; the longest prefix that holds a
@@ -336,7 +347,7 @@ pub struct CacheConfig {
 
 impl CacheConfig {
     /// A cache in `path` of `budget` bytes, with the water marks at 90, 75 and 95 percent, a
-    /// floor of 10 percent free, the fill sizes of the binary, and no writes.
+    /// floor of 10 percent free, a pin limit of half the budget, the fill sizes of the binary, and no writes.
     #[must_use]
     pub fn new(path: impl Into<PathBuf>, budget: u64, policies: Vec<(String, bool)>) -> Self {
         Self {
@@ -345,6 +356,7 @@ impl CacheConfig {
             high_water: 90,
             low_water: 75,
             critical: 95,
+            pin_limit: budget / 2,
             free_floor: 10,
             policies,
             fill_chunk: FILL_CHUNK,
@@ -574,6 +586,10 @@ impl LocalCache {
             add(&counters.discarded_at_start, scanned.discarded + removed);
             scanned
         };
+        let mut index = index_of(scanned.found);
+        if !matches!(standing, Standing::Waiting) {
+            pins::restore(&config, &mut index);
+        }
         let permits = Arc::new(Semaphore::new(config.max_concurrent_fills.max(1)));
         let keeps = Arc::new(Semaphore::new(config.max_concurrent_keeps.max(1)));
         let inner = Inner {
@@ -581,7 +597,7 @@ impl LocalCache {
             disk,
             clock,
             config,
-            index: Mutex::new(index_of(scanned.found)),
+            index: Mutex::new(index),
             counters,
             flights: Mutex::new(HashMap::new()),
             invalidated: Mutex::new(HashSet::new()),
@@ -685,18 +701,36 @@ impl Inner {
     /// It notes the name, and removes the files when it takes the lock (see `hold`), so that the
     /// object is not served from them then: it was deleted or replaced at the upstream.
     fn drop_entry(&self, hex: &str) {
+        let _ = self.remove_entry(hex, false);
+    }
+
+    /// [`drop_entry`](Self::drop_entry) for the eviction: an object that is pinned stays. Says
+    /// whether the object was removed.
+    fn evict_entry(&self, hex: &str) -> bool {
+        self.remove_entry(hex, true)
+    }
+
+    /// The work of both; `keep_pinned` leaves a pinned object where it is, looking at the pins
+    /// under the lock of the index, so that a pin made since the eviction chose the object holds.
+    fn remove_entry(&self, hex: &str, keep_pinned: bool) -> bool {
         // Asked first: a take that is running holds the answer until it has looked at the notes,
         // and an entry removed before that would be put back by the index it makes.
         let may_delete = self.may_delete(hex);
         #[cfg(test)]
         self.trace_between_delete_steps();
-        drop(locked(&self.index).remove(hex));
-        if !may_delete {
-            return;
+        {
+            let mut index = locked(&self.index);
+            if keep_pinned && index.pins.is_pinned(hex) {
+                return false;
+            }
+            drop(index.remove(hex));
         }
-        let root = &self.config.path;
-        let _ = std::fs::remove_file(data_path(root, hex));
-        let _ = std::fs::remove_file(layout::meta_path(root, hex));
+        if may_delete {
+            let root = &self.config.path;
+            let _ = std::fs::remove_file(data_path(root, hex));
+            let _ = std::fs::remove_file(layout::meta_path(root, hex));
+        }
+        true
     }
 }
 

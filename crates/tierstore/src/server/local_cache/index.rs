@@ -8,6 +8,8 @@ use std::collections::{BTreeMap, HashMap};
 
 use crate::Meta;
 
+use super::pin_set::PinSet;
+
 /// One object.
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub(super) struct Entry {
@@ -42,6 +44,8 @@ pub(super) struct Index {
     bytes: u64,
     /// The objects used since the last [`Index::take_touched`], with the time of the last use.
     touched: HashMap<String, u64>,
+    /// The trees that pin objects (see `pins`).
+    pub(super) pins: PinSet,
 }
 
 impl Index {
@@ -68,7 +72,7 @@ impl Index {
         (size, tag, modified): (u64, String, u64),
         checked: Option<u64>,
     ) {
-        self.remove(hex);
+        let _ = self.detach(hex);
         let used = self.next;
         self.next += 1;
         let entry = Entry {
@@ -81,6 +85,8 @@ impl Index {
         self.order.insert(used, hex.to_owned());
         self.entries.insert(hex.to_owned(), entry);
         self.bytes += size;
+        // An object written over is still the one the trees pin.
+        self.pins.resize(hex, size);
     }
 
     /// Takes the right to check the object `hex` against the upstream, if a check is due at
@@ -113,8 +119,14 @@ impl Index {
         }
     }
 
-    /// Takes the object out; gives it if it was there.
+    /// Takes the object out, and its pins; gives it if it was there.
     pub(super) fn remove(&mut self, hex: &str) -> Option<Entry> {
+        self.pins.forget(hex);
+        self.detach(hex)
+    }
+
+    /// Takes the object out of the entries and the order, and leaves its pins.
+    fn detach(&mut self, hex: &str) -> Option<Entry> {
         let entry = self.entries.remove(hex)?;
         self.order.remove(&entry.used);
         self.touched.remove(hex);

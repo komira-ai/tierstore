@@ -39,6 +39,7 @@ const LOCAL_CACHE_KEYS: &[&str] = &[
     "keep_deadline",
     "write_through",
     "whole_fill_limit",
+    "pin_limit",
     "scrub_rate",
     "scrub_min_round",
     "pass_interval",
