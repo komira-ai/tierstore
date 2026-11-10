@@ -3,10 +3,15 @@
 //! it has the object (so the fill has every byte and has not yet kept any), and a delete before
 //! it deletes; no test waits for a time.
 
+use std::sync::Arc;
 use std::sync::atomic::Ordering;
 
 use bytes::Bytes;
+use tokio::sync::oneshot;
+use tokio::task::JoinHandle;
 
+use super::Inner;
+use super::source::{FillError, Flying};
 use super::testing::{Rig, digest, pattern};
 use crate::{Backend, Error};
 
@@ -153,4 +158,91 @@ async fn a_fill_that_starts_during_a_delete_whose_answer_is_lost_does_not_keep_t
 #[should_panic(expected = "this never happened: the gate parked")]
 async fn a_wait_for_an_event_that_never_comes_fails_with_what_it_waited_for() {
     until("the gate parked", || false).await;
+}
+
+/// Asserts that a delete that comes while a socket fill of `cas/l/<sha256>` holds every byte of
+/// the object leaves nothing in the cache: the fill answers `changed`, no entry, data file or
+/// staged file is left, and the mark and the fill's place are gone, so the key written again is
+/// filled by the next request. Without the mark the fill keeps the deleted object and reads serve it.
+#[tokio::test]
+async fn a_socket_fill_that_a_delete_overtakes_does_not_keep_the_object() {
+    let rig = Rig::writing("tscache-race-socket");
+    let bytes = pattern(300);
+    let sha = digest(&bytes);
+    let key = format!("cas/l/{sha}");
+    rig.put(&key, &bytes).await;
+    let parked = rig.tamper.hold_key_after_read(&key);
+    let (cache, wanted) = (rig.cache.clone(), sha.clone());
+    let filling = tokio::spawn(async move { cache.fill_manifest(&wanted).await });
+    until("the fill read the object and parked", || {
+        rig.tamper.parked() >= 1
+    })
+    .await;
+
+    assert_eq!(rig.cache.delete(&key).await, Ok(()));
+    parked.add_permits(16);
+    assert_eq!(filling.await.unwrap(), Err(FillError::Changed));
+    assert_eq!(rig.cache.held(), (0, 0));
+    assert!(!rig.has_file(&key));
+    assert_eq!(rig.staged_files(), 0);
+    assert!(super::locked(&rig.cache.inner.source_flights).is_empty());
+    assert!(super::locked(&rig.cache.inner.invalidated).is_empty());
+
+    rig.put(&key, &bytes).await;
+    assert_eq!(rig.cache.fill_manifest(&sha).await, Ok(()));
+    assert_eq!(rig.cache.held(), (300, 1));
+}
+
+/// Puts the place of a socket fill of `hex` in the table of the socket's fills, as a request that
+/// began meanwhile has it; the sender keeps its fill unfinished.
+fn socket_place(
+    rig: &Rig,
+    hex: &str,
+) -> (Flying, oneshot::Sender<JoinHandle<Result<(), FillError>>>) {
+    let (sender, receiver) = oneshot::channel();
+    let inner = &rig.cache.inner;
+    drop(super::locked(&inner.source_flights).insert(hex.to_owned(), Inner::flight_of(receiver)));
+    let flying = Flying {
+        inner: Arc::clone(inner),
+        hex: hex.to_owned(),
+    };
+    (flying, sender)
+}
+
+/// Asserts that the mark of a delete stays until the last fill of the key ends, when a fill of the
+/// S3 path and one of the socket run at once: with the socket's fill ending first the S3 path's
+/// is still told the object is gone, and with the S3 path's ending first the socket's mark stays
+/// until the socket's fill ends. Without it the first to end removes the mark of both.
+#[tokio::test]
+async fn the_mark_of_a_delete_stays_until_the_last_fill_of_the_key_ends() {
+    let rig = Rig::writing("tscache-race-both");
+    let bytes = pattern(300);
+    let key = content_key(&bytes);
+    let hex = super::layout::name_of(&key).hex;
+    for socket_ends_first in [true, false] {
+        rig.put(&key, &bytes).await;
+        let parked = rig.tamper.hold_key_after_read(&key);
+        let (cache, name) = (rig.cache.clone(), key.clone());
+        let reader = tokio::spawn(async move { cache.get(&name, None).await });
+        until("the S3 fill parked", || rig.tamper.parked() >= 1).await;
+        let (socket, _unfinished) = socket_place(&rig, &hex);
+        assert_eq!(rig.cache.delete(&key).await, Ok(()));
+        if socket_ends_first {
+            drop(socket);
+            assert!(rig.cache.inner.is_invalidated(&hex));
+            parked.add_permits(16);
+            let read = reader.await.unwrap();
+            assert!(matches!(read, Err(Error::NotFound(_))), "{read:?}");
+        } else {
+            parked.add_permits(16);
+            let read = reader.await.unwrap();
+            assert!(matches!(read, Err(Error::NotFound(_))), "{read:?}");
+            assert!(rig.cache.inner.is_invalidated(&hex));
+            drop(socket);
+        }
+        assert!(!rig.cache.inner.is_invalidated(&hex));
+        assert!(super::locked(&rig.cache.inner.source_flights).is_empty());
+        assert!(super::locked(&rig.cache.inner.flights).is_empty());
+        assert_eq!(rig.cache.held(), (0, 0));
+    }
 }

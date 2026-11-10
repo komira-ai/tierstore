@@ -51,6 +51,9 @@ const LOCAL_CACHE_KEYS: &[&str] = &[
     "keep_queue_bytes",
     "revalidate_after",
     "head_before_put",
+    "fill_socket",
+    "fill_socket_concurrency",
+    "fill_socket_wait",
 ];
 
 /// Whether `key` is a name some table of the file holds: the last part of a key in [`KEYS`], a

@@ -107,6 +107,7 @@ pub(super) async fn serve_combined(
         beside_halt,
         beating: Some(beating),
         handoff: cli.handoff.as_ref(),
+        fill_socket: None,
     };
     let (server, oci) = (built.server, built.oci);
     serve_front(cache, server, oci, fronts, stop, ready, reconciling).await
