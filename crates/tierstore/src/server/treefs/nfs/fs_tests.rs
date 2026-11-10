@@ -445,6 +445,28 @@ async fn read_slower_than_the_jukebox_threshold_returns_jukebox() {
     assert_eq!(blob_files(&fs), 1);
 }
 
+/// Asserts that reads of one cold blob that all outwait the patience share one fill: three reads
+/// are JUKEBOX, the core is asked for the blob's file once and the fill socket for one fill, and
+/// after the fill every read is served from the descriptor it left. Catches a retry of a
+/// JUKEBOX read starting a second fill and a second blocking thread.
+#[tokio::test]
+async fn reads_of_one_cold_blob_that_outwait_the_patience_share_one_fill() {
+    let (rig, _) = attached("nfs-fs-single-flight");
+    let fs = fs_of(&rig, &NfsSettings::default(), none());
+    let tool = blob_of(&rig, 10);
+    let before = rig.upstream.asked("fill").len();
+    rig.upstream.hold_fills();
+    let jukebox = code(nfsstat3::NFS3ERR_JUKEBOX);
+    for _ in 0..3 {
+        assert_eq!(failed(fs.read(id(TOOL), 0, 100).await), jukebox);
+    }
+    rig.upstream.release_fills();
+    until(|| fs.fds.len() == 1);
+    assert_eq!(fs.read(id(TOOL), 0, 100).await.unwrap(), (tool, true));
+    assert_eq!(blob_files(&fs), 1);
+    assert_eq!(rig.upstream.asked("fill").len(), before + 1);
+}
+
 /// Asserts that every procedure that would change a tree is `NFS3ERR_ROFS`, on a file, a directory
 /// and the namespace, and that none of them changes what a read gives.
 #[tokio::test]

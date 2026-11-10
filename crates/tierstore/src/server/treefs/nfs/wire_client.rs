@@ -23,6 +23,7 @@ pub(super) const WRITE: u32 = 7;
 pub(super) const CREATE: u32 = 8;
 pub(super) const MKDIR: u32 = 9;
 pub(super) const SYMLINK: u32 = 10;
+pub(super) const MKNOD: u32 = 11;
 pub(super) const REMOVE: u32 = 12;
 pub(super) const RMDIR: u32 = 13;
 pub(super) const RENAME: u32 = 14;

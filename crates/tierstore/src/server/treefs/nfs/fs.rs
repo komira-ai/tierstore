@@ -8,11 +8,11 @@
 //! `fs.nfs.jukebox_after` for a fill is answered `NFS3ERR_JUKEBOX`, which has the client ask
 //! again, while the fill goes on.
 
-use std::collections::HashSet;
+use std::collections::{HashMap, HashSet};
 use std::fs::File;
 use std::future::Future;
 use std::pin::Pin;
-use std::sync::Arc;
+use std::sync::{Arc, Mutex};
 
 use async_trait::async_trait;
 use nfsserve::auth_unix;
@@ -22,16 +22,20 @@ use nfsserve::nfs::{
     specdata3,
 };
 use nfsserve::vfs::{DirEntry, NFSFileSystem, ReadDirResult, VFSCapabilities};
+use tokio::sync::watch;
 
 use super::config::NfsSettings;
 use super::fdcache::FdCache;
 use super::handle;
 use crate::server::treefs::core::{Attr, Core, Errno, FIXED_MTIME, Kind, Looked, read_file};
-use crate::server::treefs::ino;
+use crate::server::treefs::{ino, locked};
 
 /// A future that is ready when a read has waited long enough for a fill; one is made for each read
 /// that has to fill. The process makes it a timer, a test makes it ready or never.
 pub(super) type Patience = Arc<dyn Fn() -> Pin<Box<dyn Future<Output = ()> + Send>> + Send + Sync>;
+
+/// The state of a fill: not done, or the open file or why there is none.
+type Fill = Option<Result<Arc<File>, nfsstat3>>;
 
 /// The cookie verifier of every listing: the same for every start, so that a client's cookies
 /// outlive a restart.
@@ -115,6 +119,8 @@ pub(super) struct TreeNfs {
     fds: Arc<FdCache>,
     allowed: HashSet<u32>,
     patience: Patience,
+    /// The fills that are on, by inode.
+    filling: Arc<Mutex<HashMap<fileid3, watch::Receiver<Fill>>>>,
 }
 
 impl TreeNfs {
@@ -133,6 +139,7 @@ impl TreeNfs {
             )),
             allowed,
             patience,
+            filling: Arc::default(),
         }
     }
 
@@ -144,19 +151,47 @@ impl TreeNfs {
         if let Some(file) = self.fds.get(id) {
             return Ok(file);
         }
-        let (core, fds) = (Arc::clone(&self.core), Arc::clone(&self.fds));
-        let filling = tokio::task::spawn_blocking(move || {
+        let mut done = self.fill_of(id);
+        tokio::select! {
+            // A fill whose task died leaves no answer: that is an I/O error.
+            result = done.wait_for(Option::is_some) => result
+                .ok()
+                .and_then(|answer| answer.clone())
+                .unwrap_or(Err(nfsstat3::NFS3ERR_IO)),
+            () = (self.patience)() => Err(nfsstat3::NFS3ERR_JUKEBOX),
+        }
+    }
+
+    /// The receiver of the fill of `id`: one blocking task fills a blob however many reads ask for
+    /// it, so a client that is told JUKEBOX and asks again, or eight threads that read one cold
+    /// header, wait for the fill that is on and do not start another.
+    fn fill_of(&self, id: fileid3) -> watch::Receiver<Fill> {
+        let mut filling = locked(&self.filling);
+        if let Some(done) = filling.get(&id) {
+            return done.clone();
+        }
+        let (sender, receiver) = watch::channel(None);
+        filling.insert(id, receiver.clone());
+        let (core, fds, table) = (
+            Arc::clone(&self.core),
+            Arc::clone(&self.fds),
+            Arc::clone(&self.filling),
+        );
+        // The blocking task starts now, not when the watcher is first polled.
+        let blocking = tokio::task::spawn_blocking(move || {
             let (file, _) = core.blob_file(id)?.ok_or(Errno::Io)?;
             let file = Arc::new(file);
             fds.insert(id, Arc::clone(&file));
             Ok::<_, Errno>(file)
         });
-        tokio::select! {
-            done = filling => done
-                .map_err(|_| nfsstat3::NFS3ERR_IO)?
-                .map_err(status),
-            () = (self.patience)() => Err(nfsstat3::NFS3ERR_JUKEBOX),
-        }
+        tokio::spawn(async move {
+            let result = blocking.await.unwrap_or(Err(Errno::Io)).map_err(status);
+            // Out of the table first, so that a read that finds no descriptor after a failure
+            // starts a fill of its own.
+            let _ = locked(&table).remove(&id);
+            sender.send_replace(Some(result));
+        });
+        receiver
     }
 }
 

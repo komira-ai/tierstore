@@ -3,7 +3,7 @@
 use super::config::NfsSettings;
 use super::fixtures::{UID, attached, endless, fs_of};
 use super::wire_client::{
-    Client, Cred, Dec, Enc, GETATTR, LINK, LOOKUP, NFS, READ, RENAME, WRITE, serve,
+    Client, Cred, Dec, Enc, GETATTR, LINK, LOOKUP, MKNOD, NFS, READ, RENAME, WRITE, serve,
 };
 use crate::server::treefs::ino;
 
@@ -46,7 +46,7 @@ async fn rpc_from_an_allowed_uid_is_served() {
 }
 
 /// Asserts that a call from a user not in the list is `NFS3ERR_ACCES`, for a procedure of each shape
-/// of failure (the reply is the status and the empty failure body the procedure has, as exact
+/// of failure, MKNOD's wcc_data among them (the reply is the status and the empty failure body the procedure has, as exact
 /// bytes), that the procedure did not run (a READ of a cold blob asks for no fill), and that NULL,
 /// which carries nothing, is answered, and so is MOUNT, which hands out the root's handle that any
 /// process can derive.
@@ -66,6 +66,7 @@ async fn rpc_from_another_uid_is_denied_with_acces() {
         (LOOKUP, fh().opaque(b"trees"), 1),
         (READ, fh().u64(0).u32(10), 1),
         (WRITE, fh().u64(0).u32(1).u32(0).opaque(b"x"), 2),
+        (MKNOD, fh().opaque(b"x").u32(1), 2),
         (LINK, fh().opaque(&root).opaque(b"x"), 3),
         (RENAME, fh().opaque(b"a").opaque(&root).opaque(b"b"), 4),
     ];
