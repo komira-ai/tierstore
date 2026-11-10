@@ -47,6 +47,7 @@ impl Core {
 
     /// Writes the backing table again with no count marked exact: a process that paused for a
     /// hand-over that did not complete serves again, and its counts are a lower bound again.
+    #[cfg(target_os = "linux")]
     pub(in crate::server::treefs) fn write_backing_inexact(&self) {
         if let Some(table) = self.backing.get() {
             table.write_inexact();
@@ -56,6 +57,7 @@ impl Core {
     /// Leaves every backing id open in the kernel when this core goes: the process that takes the
     /// connection over adopts them. Dropping the guard of an id closes it, so one reference of
     /// each is given up without being dropped.
+    #[cfg(target_os = "linux")]
     pub(in crate::server::treefs) fn abandon_backing(&self) {
         if let Some(table) = self.backing.get() {
             table.abandon();

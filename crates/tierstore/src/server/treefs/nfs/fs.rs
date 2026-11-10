@@ -53,6 +53,7 @@ fn status(errno: Errno) -> nfsstat3 {
         Errno::IsDir => nfsstat3::NFS3ERR_ISDIR,
         Errno::Inval => nfsstat3::NFS3ERR_INVAL,
         Errno::Io => nfsstat3::NFS3ERR_IO,
+        #[cfg(any(target_os = "linux", test))]
         Errno::RoFs => nfsstat3::NFS3ERR_ROFS,
     }
 }

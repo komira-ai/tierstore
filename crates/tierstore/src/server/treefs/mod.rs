@@ -36,11 +36,13 @@
 //! `pread` of the cache file.
 
 mod attach;
+#[cfg(any(target_os = "linux", test))]
 mod backing;
 mod config;
 pub(in crate::server) mod control;
 pub(in crate::server) mod core;
 mod fill_client;
+#[cfg(any(target_os = "linux", test))]
 mod handle;
 mod ino;
 mod table;

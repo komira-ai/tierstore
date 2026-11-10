@@ -2,16 +2,23 @@
 //! answers from them, and a core over both.
 
 use std::collections::HashMap;
-use std::io::{BufRead as _, BufReader, IoSliceMut, Write as _};
+#[cfg(target_os = "linux")]
+use std::io::IoSliceMut;
+use std::io::{BufRead as _, BufReader, Write as _};
+#[cfg(target_os = "linux")]
 use std::mem::MaybeUninit;
+#[cfg(target_os = "linux")]
 use std::os::fd::OwnedFd;
 use std::os::unix::fs::MetadataExt as _;
-use std::os::unix::net::{UnixDatagram, UnixListener, UnixStream};
+#[cfg(target_os = "linux")]
+use std::os::unix::net::UnixDatagram;
+use std::os::unix::net::{UnixListener, UnixStream};
 use std::path::{Path, PathBuf};
 use std::sync::atomic::{AtomicBool, AtomicU32, Ordering};
 use std::sync::{Arc, Condvar, Mutex};
 use std::time::Duration;
 
+#[cfg(target_os = "linux")]
 use rustix::net::{RecvAncillaryBuffer, RecvAncillaryMessage, RecvFlags, recvmsg};
 use sha2::{Digest as _, Sha256};
 use tierstore_testkit::dir::TestDir;
@@ -519,6 +526,7 @@ pub(in crate::server::treefs) fn open_cached(
 }
 
 /// A message the fake service manager got: its text, and the descriptors that came with it.
+#[cfg(target_os = "linux")]
 pub(in crate::server::treefs) struct Message {
     pub text: String,
     pub fds: Vec<OwnedFd>,
@@ -526,6 +534,7 @@ pub(in crate::server::treefs) struct Message {
 
 /// A stand-in for the service manager: a datagram socket that keeps what it is sent, descriptors
 /// included, and closes the pipe of a `BARRIER=1` as the manager does when it gets there.
+#[cfg(target_os = "linux")]
 pub(in crate::server::treefs) struct FakeManager {
     path: PathBuf,
     messages: Arc<Mutex<Vec<Message>>>,
@@ -535,20 +544,18 @@ pub(in crate::server::treefs) struct FakeManager {
 /// The room for the ancillary data of a message to the fake manager.
 #[cfg(target_os = "linux")]
 const ANCILLARY: usize = rustix::cmsg_space!(ScmRights(8), ScmCredentials(1));
-/// The room for the ancillary data of a message to the fake manager.
-#[cfg(not(target_os = "linux"))]
-const ANCILLARY: usize = rustix::cmsg_space!(ScmRights(8));
 
 /// The text a [`FakeManager`] is sent to end its thread.
+#[cfg(target_os = "linux")]
 const STOP: &str = "stop the fake manager";
 
+#[cfg(target_os = "linux")]
 impl FakeManager {
     /// A manager that listens at `path`.
     pub(in crate::server::treefs) fn start(path: &Path) -> Self {
         let socket = UnixDatagram::bind(path).unwrap();
         // Every message then carries the sender's credentials beside any descriptors, as a real
         // manager's does not, so that the loop below sees an ancillary message it passes over.
-        #[cfg(target_os = "linux")]
         rustix::net::sockopt::set_socket_passcred(&socket, true).unwrap();
         let messages = Arc::new(Mutex::new(Vec::new()));
         let kept = Arc::clone(&messages);
@@ -611,6 +618,7 @@ impl FakeManager {
     }
 }
 
+#[cfg(target_os = "linux")]
 impl Drop for FakeManager {
     fn drop(&mut self) {
         let _ =

@@ -28,6 +28,7 @@ const CURRENT: &str = "/var/lib/hostkeeper/packages/tierstore/current";
 /// The drain of a process that is not on macOS and is given no part of it: the defaults of
 /// `server.drain_lb_wait` and `server.drain_deadline`, which the xtask test of the package holds
 /// the template's `TimeoutStopSec=` to (`LINUX_DRAIN_SECS` there).
+#[cfg(not(target_os = "macos"))]
 const LINUX_DRAIN: (Duration, Duration) = (Duration::from_secs(10), Duration::from_secs(15 * 60));
 
 /// The drain of a process on macOS that is given no part of it, which the plist's `ExitTimeOut` is
