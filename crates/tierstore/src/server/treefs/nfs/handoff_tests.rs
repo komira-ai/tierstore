@@ -298,3 +298,46 @@ fn the_process_ends_by_itself_when_its_socket_is_taken_and_leaves_the_mount() {
     runtime.block_on(new.stop()).unwrap();
     assert_eq!(next.calls().last().unwrap()[0], "/sbin/umount");
 }
+
+/// Asserts that a process that took the socket and then cannot make its control socket (its
+/// directory is gone) says so on stderr and serves without one, and does not fail the update.
+#[tokio::test]
+async fn a_process_that_cannot_make_its_control_socket_after_a_takeover_serves_without_one() {
+    use std::io::Write;
+    use std::sync::Mutex;
+
+    #[derive(Clone, Default)]
+    struct Stderr(Arc<Mutex<Vec<u8>>>);
+    impl Write for Stderr {
+        fn write(&mut self, bytes: &[u8]) -> std::io::Result<usize> {
+            self.0.lock().unwrap().extend_from_slice(bytes);
+            Ok(bytes.len())
+        }
+        fn flush(&mut self) -> std::io::Result<()> {
+            Ok(())
+        }
+    }
+
+    let (rig, _) = attached("nfs-handoff-nocontrol");
+    let stderr = Stderr::default();
+    let log =
+        crate::server::build_info::stderr_log::LineLog::new(stderr.clone(), tracing::Level::WARN);
+    let offer = tracing::subscriber::with_default(log, || {
+        super::offer_after_takeover(&rig.dir.path().join("none/handoff.sock"), Vec::new())
+    });
+    assert!(offer.is_none());
+    let said = String::from_utf8(stderr.0.lock().unwrap().clone()).unwrap();
+    assert!(
+        said.starts_with("tierstore fs: hand-off: binding the control socket: "),
+        "{said}"
+    );
+    assert!(
+        said.contains(
+            "serves without a control socket and cannot be handed over until it restarts"
+        ),
+        "{said}"
+    );
+    assert!(
+        super::offer_after_takeover(&rig.dir.path().join("handoff.sock"), Vec::new()).is_some()
+    );
+}

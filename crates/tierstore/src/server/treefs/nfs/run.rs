@@ -111,16 +111,7 @@ impl Running {
         };
         let address = listener.local_addr().map_err(listen)?;
         let offer = match (nfs.handoff.as_ref(), inherited) {
-            (Some(handoff), Some(taken)) => match Offer::bind(&handoff.socket, taken.copies) {
-                Ok(offer) => Some(offer),
-                Err(why) => {
-                    tracing::warn!(
-                        "tierstore fs: {why}; this instance serves without a control socket and \
-                         cannot be handed over until it restarts"
-                    );
-                    None
-                }
-            },
+            (Some(handoff), Some(taken)) => offer_after_takeover(&handoff.socket, taken.copies),
             (Some(handoff), None) => {
                 let copy = std::net::TcpListener::from(
                     listener.as_fd().try_clone_to_owned().map_err(listen)?,
@@ -149,9 +140,9 @@ impl Running {
             Arc::clone(&handed),
             nfs.drain_wait,
         ));
+        let numbers = if reopened { "kept" } else { "made afresh" };
         tracing::info!(
-            "tierstore fs: serving NFS on {address}, epoch {epoch:08x}, tree numbers {}",
-            if reopened { "kept" } else { "made afresh" }
+            "tierstore fs: serving NFS on {address}, epoch {epoch:08x}, tree numbers {numbers}"
         );
         let mut running = Self {
             _setup: setup,
@@ -172,12 +163,12 @@ impl Running {
             })
             .await
             .map_err(|why| io("waiting for the mount")(std::io::Error::other(why.to_string())))?;
+            let point = settings.mountpoint.display().to_string();
             if made? {
-                tracing::info!("tierstore fs: mounted at {}", settings.mountpoint.display());
+                tracing::info!("tierstore fs: mounted at {point}");
             } else {
                 tracing::info!(
-                    "tierstore fs: {} is mounted already: the clients' mount goes on",
-                    settings.mountpoint.display()
+                    "tierstore fs: {point} is mounted already: the clients' mount goes on"
                 );
             }
             running.mounted = Some(mounter);
@@ -222,6 +213,20 @@ impl Drop for Running {
     fn drop(&mut self) {
         self.server.abort();
     }
+}
+
+/// The control socket of a process that took its listening socket from the one it replaces: the
+/// sockets it took are what it offers to its own successor. A process that cannot make the control
+/// socket says so and serves without one, since the update has happened and cannot be undone.
+fn offer_after_takeover(socket: &std::path::Path, copies: Vec<Socket>) -> Option<Offer> {
+    Offer::bind(socket, copies)
+        .map_err(|why| {
+            tracing::warn!(
+                "tierstore fs: {why}; this instance serves without a control socket and \
+                 cannot be handed over until it restarts"
+            );
+        })
+        .ok()
 }
 
 /// Serves on `listener` until `stop` resolves or `offer` is taken by a successor, then lets the
