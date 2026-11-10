@@ -14,7 +14,8 @@
 # /dev/fuse; CAP_SYS_ADMIN as the only capability (the mount); the system calls of @mount;
 # Type=notify (the process says READY=1 when the mount is made); a start limit of 5 in 60 s, after
 # which the unit is left failed and the kernel aborts the connection, so jobs fail instead of
-# hanging; and a RuntimeDirectory, kept across restarts, for its state. What changes:
+# hanging; and two RuntimeDirectories, kept across restarts: /run/tierstore-fs for its state and
+# /run/tierstore, the parent of its mount point (the process makes /run/tierstore/fs). What changes:
 # RestrictAddressFamilies is AF_UNIX alone. What stays: User, NoNewPrivileges,
 # MemoryDenyWriteExecute, UMask, and the marker file, restart settings and release link of the
 # template. The descriptor store (a restart keeping the mount) and the hand-over between the two
@@ -39,7 +40,7 @@ StartLimitBurst=5
 Type=notify
 NotifyAccess=main
 User=tierstore
-RuntimeDirectory=tierstore-fs
+RuntimeDirectory=tierstore-fs tierstore
 RuntimeDirectoryPreserve=yes
 ExecStart=/var/lib/hostkeeper/packages/tierstore/current/bin/tierstore fs \
   --config /etc/tierstore/fs.toml

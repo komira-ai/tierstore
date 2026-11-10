@@ -381,7 +381,7 @@ fn the_fs_template_differs_from_the_s3_template_as_the_design_lists() {
         ("NotifyAccess", "main"),
         ("StartLimitIntervalSec", "60"),
         ("StartLimitBurst", "5"),
-        ("RuntimeDirectory", "tierstore-fs"),
+        ("RuntimeDirectory", "tierstore-fs tierstore"),
         ("RuntimeDirectoryPreserve", "yes"),
         ("RestrictAddressFamilies", "AF_UNIX"),
     ];
