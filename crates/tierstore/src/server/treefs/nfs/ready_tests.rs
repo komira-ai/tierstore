@@ -293,7 +293,7 @@ async fn a_control_socket_that_cannot_be_bound_again_is_said_and_the_process_ser
         "{said}"
     );
     assert!(
-        said.contains("goes on serving and takes no attach until it restarts"),
+        said.contains("); this instance goes on serving and takes no attach until it restarts"),
         "{said}"
     );
     assert!(old._keeper.revived.lock().unwrap().is_none());

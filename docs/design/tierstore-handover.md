@@ -84,9 +84,9 @@ otherwise leave nobody serving (the old process had ended, its listening socket 
 hung until a process was started by hand). The taker's request is `take 1` and a second line, `ready`; the old process, once
 it has said `done`, has handed nothing over until the taker sends the frame `ready` (the taker does so when its start is done
 and it is about to serve), and it goes on accepting and answering on its own copy of the socket meanwhile. A taker that ends the
-connection, sends another frame, or is silent for `fs.nfs.handoff_wait` after `done` has not taken anything: the old process
+connection, sends another frame, or is silent for `fs.nfs.handoff_ready_wait` after `done` has not taken anything: the old process
 lets its hold go, makes its hand-over socket again and, where the successor's start had replaced it, binds its control socket
-again, and serves on. The step is additive (the wait for `ready` is the one value of `fs.nfs.handoff_wait`, now 120s): an old
+again, and serves on. The step is additive (the wait for `ready` is its own key, `fs.nfs.handoff_ready_wait`, 120s, so the taker's wait for `done`, `fs.nfs.handoff_wait`, stays 10s): an old
 process that does not know it answers the request `refused` with "the request is not understood", and the taker asks again
 with `take 1` alone; a taker of a release before it asks a new process with `take 1` alone and is handed over as before, with
 no step. The sequence, from `done`:
@@ -97,8 +97,11 @@ new                                     old (running)
  | opens the table, makes the attachments,|
  | binds the control socket               |
  | "ready" ---------------------------->  | stops accepting, drains, exits
+ | <---- "bye"                            | (sent before it ends; the new one serves on reading it)
  | (gone, wrong, or silent for the wait)  | lets the hold go, makes its sockets again, serves on
 ```
+
+`ready` is answered `bye` so that the two never serve together: an old process whose wait passed has closed the connection, the write of `ready` may still succeed into the buffer, and only the missing `bye` tells the taker the old one serves on (`a_ready_that_arrives_after_the_instance_gave_up_is_not_answered_bye`, `an_answer_other_than_bye_to_ready_is_an_error`).
 
 Each step at which the taker may die is a test (`a_successor_killed_at_each_step_leaves_the_old_instance_serving`,
 `a_successor_whose_start_fails_after_done_leaves_the_old_instance_serving`,

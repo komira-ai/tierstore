@@ -8,7 +8,7 @@ use std::path::Path;
 use rustix::io::{FdFlags, fcntl_setfd};
 use tokio::net::{TcpListener, UnixStream};
 
-use super::offer::{NOT_UNDERSTOOD, READY, TAKE};
+use super::offer::{BYE, NOT_UNDERSTOOD, READY, TAKE};
 use super::wire::{self, Frame};
 use super::{Front, Handoff, HandoffError, Socket, line};
 
@@ -52,9 +52,20 @@ impl Ready {
     /// The running instance is gone from the connection: it did not wait for `ready` (it went on
     /// serving) and this instance must not serve beside it.
     pub(crate) async fn send(self) -> Result<(), HandoffError> {
+        let io = HandoffError::io("telling the running instance it can end");
         wire::send(&self.0, &[READY.to_owned()], &[])
             .await
-            .map_err(HandoffError::io("telling the running instance it can end"))
+            .map_err(HandoffError::io("telling the running instance it can end"))?;
+        // The running instance ends only after it has read `ready` and answered `bye`; a
+        // connection that closes instead means it gave up first and serves on.
+        let answer = wire::recv(&self.0).await.map_err(io)?;
+        if answer.lines == [BYE] {
+            Ok(())
+        } else {
+            Err(HandoffError::Protocol(
+                "something other than bye after ready",
+            ))
+        }
     }
 }
 

@@ -189,3 +189,48 @@ async fn ready_to_an_instance_that_is_gone_is_an_error() {
         "{error}"
     );
 }
+
+/// Asserts that a frame other than `bye` in answer to `ready` is an error of the protocol, so
+/// that the taker does not serve on an answer it does not know.
+#[tokio::test]
+async fn an_answer_other_than_bye_to_ready_is_an_error() {
+    use std::os::fd::AsFd as _;
+    let (_dir, path) = scratch();
+    let (listener, addr) = listening();
+    let control = UnixListener::bind(&path).unwrap();
+    let fake = tokio::spawn(async move {
+        let (stream, _) = control.accept().await.unwrap();
+        wire::recv(&stream).await.unwrap();
+        let offer = vec!["offer".to_owned(), format!("nfs {addr}")];
+        wire::send(&stream, &offer, &[listener.as_fd()])
+            .await
+            .unwrap();
+        wire::recv(&stream).await.unwrap();
+        wire::send(&stream, &["done".to_owned()], &[])
+            .await
+            .unwrap();
+        wire::recv(&stream).await.unwrap();
+        wire::send(&stream, &["nope".to_owned()], &[])
+            .await
+            .unwrap();
+    });
+    let addrs = [addr];
+    let want = Want {
+        s3: &[],
+        oci: &[],
+        nfs: &addrs,
+    };
+    let taken = take_with_ready(&handoff(path), &want)
+        .await
+        .unwrap()
+        .unwrap();
+    let error = taken.ready.unwrap().send().await.err().unwrap();
+    fake.await.unwrap();
+    assert!(
+        matches!(
+            error,
+            HandoffError::Protocol("something other than bye after ready")
+        ),
+        "{error}"
+    );
+}

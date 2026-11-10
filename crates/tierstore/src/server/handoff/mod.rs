@@ -24,7 +24,9 @@
 //! serves leaves the running instance serving: its request is `take 1` and a second line,
 //! `ready`. The running instance, if it takes part (it is given a wait), does what it did, but
 //! after `done` it has handed nothing over until the taker sends the frame `ready`: it keeps its
-//! sockets and goes on serving through that time. If the taker ends the connection, sends
+//! sockets and goes on serving through that time. It answers `ready` with `bye` and ends after
+//! sending it; the taker serves only once it has read `bye`, and a connection closed instead means
+//! the instance gave up and serves on. If the taker ends the connection, sends
 //! another frame, or says nothing for the wait, the running instance makes its control socket
 //! again, lets go of the hold it took at `ack`, and serves on, as for a taker that was gone
 //! before `done`. A running instance that does not know the step (a release before it, or one

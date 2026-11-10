@@ -81,7 +81,8 @@ async fn an_instance_ends_when_the_taker_says_ready_and_not_at_done() {
     settle().await;
     assert!(!serve.is_finished(), "done is not the end of the hand-off");
     assert!(!path.exists());
-    send(&taker, &["ready"]).await;
+    let bye = ask(&taker, &["ready"]).await;
+    assert_eq!(texts(&bye.lines), vec!["bye"], "the taker serves on bye");
     serve.await.unwrap();
     assert!(!path.exists(), "the successor's path is left to it");
     assert_eq!(*told.lock().unwrap(), [true]);
@@ -143,6 +144,27 @@ async fn a_taker_silent_for_the_wait_after_done_is_given_up() {
     assert_eq!(*told.lock().unwrap(), [true, false]);
     assert!(!serve.is_finished());
     drop(taker);
+    serve.abort();
+}
+
+/// Asserts that a taker whose `ready` arrives after the instance gave up (the wait passed with
+/// the connection open) is not answered `bye`: the connection is closed on it, which is what
+/// tells it not to serve, since the instance serves on.
+#[tokio::test(start_paused = true)]
+async fn a_ready_that_arrives_after_the_instance_gave_up_is_not_answered_bye() {
+    let (_dir, path) = scratch();
+    let (serve, told) = serving(&path, Duration::from_secs(10));
+    let taker = through_done(&path).await;
+    tokio::time::sleep(Duration::from_secs(11)).await;
+    assert_eq!(*told.lock().unwrap(), [true, false]);
+    // The connection is closed: the write fails, or the read ends with no `bye`.
+    let ready = ["ready".to_owned()];
+    let answered = match wire::send(&taker, &ready, &[]).await {
+        Ok(()) => wire::recv(&taker).await.map(|_| ()),
+        Err(why) => Err(why),
+    };
+    assert!(answered.is_err(), "no bye: the connection is closed");
+    assert!(!serve.is_finished());
     serve.abort();
 }
 

@@ -18,7 +18,7 @@
 //! reconnect to the new instance, which holds the socket), waits for them to close for at most
 //! `fs.nfs.drain_wait`, and ends with status 0 without unmounting: the mount is the new
 //! instance's now. If the next instance is gone before `ready`, or says it later than
-//! `fs.nfs.handoff_wait` after `done`, this one has handed nothing over: it serves on, takes
+//! `fs.nfs.handoff_ready_wait` after `done`, this one has handed nothing over: it serves on, takes
 //! attaches again, and binds its control socket again where the next had replaced it.
 
 use std::collections::HashSet;
@@ -151,11 +151,11 @@ impl Running {
         };
         let offer = match (nfs.handoff.as_ref(), inherited, cold) {
             (Some(handoff), Some(taken), _) => {
-                offer_after_takeover(&handoff.socket, taken.copies, handoff.wait, hold())
+                offer_after_takeover(&handoff.socket, taken.copies, nfs.ready_wait, hold())
             }
             (Some(handoff), None, Some(copy)) => Some(
                 Offer::bind(&handoff.socket, vec![Socket::new(Front::Nfs, copy)])?
-                    .with_ready_wait(handoff.wait)
+                    .with_ready_wait(nfs.ready_wait)
                     .with_hold(hold()),
             ),
             _ => None,
@@ -293,7 +293,8 @@ impl Keeper {
             .unwrap_or_else(std::sync::PoisonError::into_inner) = made
             .map_err(|why| {
                 tracing::warn!(
-                    "tierstore fs: the control socket at {} cannot be made again ({why}); this                      instance goes on serving and takes no attach until it restarts",
+                    "tierstore fs: the control socket at {} cannot be made again ({why}); this \
+                     instance goes on serving and takes no attach until it restarts",
                     self.control.display()
                 );
             })

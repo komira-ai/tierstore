@@ -23,6 +23,8 @@ use super::{Front, HandoffError, line};
 pub(super) const TAKE: &str = "take 1";
 /// The second line of a request that asks for the `ready` step, and the taker's last frame.
 pub(super) const READY: &str = "ready";
+/// The running instance's answer to `ready`, after which it ends.
+pub(super) const BYE: &str = "bye";
 /// Why a request is refused when it is not one this instance understands: a taker that asked for
 /// the `ready` step then asks again without it.
 pub(super) const NOT_UNDERSTOOD: &str = "the request is not understood";
@@ -294,7 +296,9 @@ async fn awaits_ready(stream: &UnixStream, wait: Duration) -> std::io::Result<()
         .await
         .map_err(timed_out)??;
     if frame.lines == [READY] {
-        Ok(())
+        // The taker serves only once it has read this: an instance that gave up closed the
+        // connection instead, so the two never both serve.
+        wire::send(stream, &[BYE.to_owned()], &[]).await
     } else {
         Err(std::io::Error::new(
             std::io::ErrorKind::InvalidData,
