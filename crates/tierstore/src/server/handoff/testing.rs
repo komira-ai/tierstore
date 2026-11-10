@@ -62,7 +62,7 @@ pub(crate) async fn connect(path: &std::path::Path) -> UnixStream {
 }
 
 /// Sends the request `lines` on `stream` and reads the answer.
-pub(super) async fn ask(stream: &UnixStream, lines: &[&str]) -> Frame {
+pub(crate) async fn ask(stream: &UnixStream, lines: &[&str]) -> Frame {
     send(stream, lines).await;
     wire::recv(stream).await.expect("an answer")
 }

@@ -13,9 +13,18 @@
 //! blob, by a rename, at each first open and each last release and without `fsync`: it has to
 //! outlive the process and not the machine. A successor that takes over the connection needs it
 //! before its first open (an inode open across the hand-over would otherwise get a new id and the
-//! open would fail with `EIO`; linux E6, case 3b). This release only writes it: the connection ends
-//! with the process, so a start makes a new, empty one. The `opens` of a line is the count at that
-//! write.
+//! open would fail with `EIO`; linux E6, case 3b), and reads it ([`saved`], [`BackingTable::adopt`]).
+//! The `opens` of a line is the count at that write, which is a lower bound of the opens there are
+//! (an open of a blob that has an id is not written). A process that stops reading to hand the
+//! connection over writes every line again with the exact count and a fourth word, `exact`
+//! ([`BackingTable::write_exact`]); a successor trusts the count of such a line, and keeps the id
+//! of any other for as long as the connection lives, since closing it on a count that may be short
+//! could leave an open file of the blob beside an open of another id. A line may end in words a
+//! later release adds; they are ignored. The fixture is `fs_backing_table.txt`.
+//!
+//! The releases of opens that an earlier process made reach the successor with the handles that
+//! process gave out ([`BackingTable::release_foreign`]); the id of the blob is closed when the last
+//! of them has gone.
 //!
 //! The ids are limited to `fs.max_backing_ids`. An open of a blob with no live id, while that many
 //! ids are live or being registered, does not wait for a release (the release is a request that
@@ -28,7 +37,7 @@ use std::collections::{HashMap, HashSet};
 use std::fmt::Write as _;
 use std::fs::File;
 use std::io;
-use std::path::PathBuf;
+use std::path::{Path, PathBuf};
 use std::sync::{Arc, Condvar, Mutex, PoisonError};
 
 use crate::tree_manifest::TreeDigest;
@@ -73,11 +82,73 @@ pub(super) struct Registered {
     pub guard: Guard,
 }
 
+/// The opens of a blob that an earlier process made and that have not been released.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+enum Foreign {
+    /// None.
+    None,
+    /// This many, exactly.
+    Exact(u32),
+    /// At least this many, perhaps more, since the earlier process did not write the count down
+    /// at its end: the id is kept.
+    Unknown(u32),
+}
+
 /// A blob with a live id.
 struct Live {
     id: u32,
     guard: Guard,
+    /// The opens of this process.
     opens: u32,
+    foreign: Foreign,
+}
+
+/// A line of the file: a blob with a live id in an earlier process.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub(super) struct Saved {
+    /// The blob.
+    pub blob: TreeDigest,
+    /// Its backing id.
+    pub id: u32,
+    /// The opens, if the line says that the count is exact (otherwise at least this many).
+    pub opens: u32,
+    /// Whether the line says the count is exact.
+    pub exact: bool,
+}
+
+/// The lines of the file at `path`: none for a file that is not there. A line that is not
+/// `<sha256> <id> <opens>` is said and left out (its id stays open in the kernel until the
+/// connection ends).
+///
+/// # Errors
+/// What the system said when the file exists and cannot be read.
+pub(super) fn saved(path: &Path) -> io::Result<Vec<Saved>> {
+    let text = match std::fs::read_to_string(path) {
+        Ok(text) => text,
+        Err(why) if why.kind() == io::ErrorKind::NotFound => return Ok(Vec::new()),
+        Err(why) => return Err(why),
+    };
+    let mut lines = Vec::new();
+    for line in text.lines() {
+        let words: Vec<&str> = line.split(' ').collect();
+        let parsed = match words[..] {
+            [blob, id, opens, ref rest @ ..] => TreeDigest::from_hex(blob)
+                .zip(id.parse().ok())
+                .zip(opens.parse().ok())
+                .map(|((blob, id), opens)| Saved {
+                    blob,
+                    id,
+                    opens,
+                    exact: rest.first() == Some(&"exact"),
+                }),
+            _ => None,
+        };
+        match parsed {
+            Some(saved) => lines.push(saved),
+            None => tracing::warn!("tierstore fs: a line of the backing table is not read: {line}"),
+        }
+    }
+    Ok(lines)
 }
 
 #[derive(Default)]
@@ -126,7 +197,46 @@ impl BackingTable {
             inner: Mutex::new(Inner::default()),
             changed: Condvar::new(),
         });
-        table.write(&locked(&table.inner));
+        table.write(&locked(&table.inner), false);
+        table
+    }
+
+    /// A table of the ids an earlier process of this connection registered, `saved` (the lines of
+    /// its file), at most `most` ids; `wrap` makes the guard that closes an id when it is dropped.
+    /// More lines than `most` are all kept: they are open in the kernel.
+    pub(super) fn adopt(
+        file: PathBuf,
+        most: usize,
+        saved: &[Saved],
+        wrap: &dyn Fn(u32) -> Guard,
+    ) -> Arc<Self> {
+        let live = saved
+            .iter()
+            .map(|line| {
+                let foreign = match (line.exact, line.opens) {
+                    (true, 0) => Foreign::None,
+                    (true, opens) => Foreign::Exact(opens),
+                    (false, opens) => Foreign::Unknown(opens),
+                };
+                let live = Live {
+                    id: line.id,
+                    guard: wrap(line.id),
+                    opens: 0,
+                    foreign,
+                };
+                (line.blob, live)
+            })
+            .collect();
+        let table = Arc::new(Self {
+            file,
+            most,
+            inner: Mutex::new(Inner {
+                live,
+                ..Inner::default()
+            }),
+            changed: Condvar::new(),
+        });
+        table.write(&locked(&table.inner), false);
         table
     }
 
@@ -181,24 +291,63 @@ impl BackingTable {
             return;
         };
         live.opens -= 1;
-        if live.opens == 0 {
+        self.drop_if_unused(&mut inner, blob);
+    }
+
+    /// Ends one open of `blob` that an earlier process made; the last one of all drops its id. An
+    /// id whose earlier opens were not counted exactly is kept.
+    pub(super) fn release_foreign(&self, blob: &TreeDigest) {
+        let mut inner = locked(&self.inner);
+        let Some(live) = inner.live.get_mut(blob) else {
+            return;
+        };
+        live.foreign = match live.foreign {
+            Foreign::Exact(opens) if opens > 1 => Foreign::Exact(opens - 1),
+            Foreign::Exact(_) => Foreign::None,
+            other => other,
+        };
+        self.drop_if_unused(&mut inner, blob);
+    }
+
+    /// Drops the id of `blob` if no open of this process or of an earlier one uses it.
+    fn drop_if_unused(&self, inner: &mut Inner, blob: &TreeDigest) {
+        let unused = inner
+            .live
+            .get(blob)
+            .is_some_and(|live| live.opens == 0 && live.foreign == Foreign::None);
+        if unused {
             // Dropping the guard closes the id.
             let _ = inner.live.remove(blob);
-            self.write(&inner);
+            self.write(inner, false);
         }
     }
 
-    /// Writes the file; a file that cannot be written is said and the table goes on.
-    fn write(&self, inner: &Inner) {
-        let mut lines: Vec<(String, u32, u32)> = inner
+    /// Writes the file with every count as it is now and `exact` on each line whose count is: for
+    /// a process that has stopped reading requests and is about to hand the connection over.
+    pub(super) fn write_exact(&self) {
+        self.write(&locked(&self.inner), true);
+    }
+
+    /// Writes the file; a file that cannot be written is said and the table goes on. With `exact`
+    /// the lines whose count is known say so.
+    fn write(&self, inner: &Inner, exact: bool) {
+        let mut lines: Vec<(String, u32, u32, bool)> = inner
             .live
             .iter()
-            .map(|(blob, live)| (blob.to_string(), live.id, live.opens))
+            .map(|(blob, live)| {
+                let (foreign, known) = match live.foreign {
+                    Foreign::None => (0, true),
+                    Foreign::Exact(opens) => (opens, true),
+                    Foreign::Unknown(opens) => (opens, false),
+                };
+                (blob.to_string(), live.id, live.opens + foreign, known)
+            })
             .collect();
         lines.sort();
         let mut text = String::new();
-        for (blob, id, opens) in lines {
-            let _ = writeln!(text, "{blob} {id} {opens}");
+        for (blob, id, opens, known) in lines {
+            let mark = if exact && known { " exact" } else { "" };
+            let _ = writeln!(text, "{blob} {id} {opens}{mark}");
         }
         let mut new = self.file.clone().into_os_string();
         new.push(".new");
@@ -252,9 +401,10 @@ impl Ticket {
                 id: registered.id,
                 guard: registered.guard,
                 opens: 1,
+                foreign: Foreign::None,
             },
         );
-        self.table.write(&inner);
+        self.table.write(&inner, false);
         backing
     }
 }

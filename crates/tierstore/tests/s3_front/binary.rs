@@ -289,23 +289,24 @@ fn capabilities_prints_the_names_one_to_a_line_and_exits_0() {
 }
 
 /// Asserts that `--capabilities` of the binary prints exactly `handover-v1`, `handoff-socket-v1`,
-/// `handoff-cache-v1` and `handoff-state-dir-v1` in that order, each with a newline, and exits 0
+/// `handoff-cache-v1`, `handoff-state-dir-v1` and `handoff-fs-v1` in that order, each with a newline, and exits 0
 /// with nothing on stderr: the first is the line the host updater's `prepare` step reads to hand
 /// over to this release instead of restarting it, the second says the binary serves through
 /// `server.handoff_socket`, the third that its build node and its storage node with `[local_cache]`
 /// do too (a node whose configuration has `[local_cache]` is handed over only between releases that
 /// list it), the fourth that the socket defaults to the state directory (a node whose configuration
-/// leaves the key out is handed over only between releases that list it). Catches:
-/// any capability left out of the list (for `handover-v1`, every update is a restart), a
-/// misspelled name the updater would not find, and a fourth name nothing promises.
+/// leaves the key out is handed over only between releases that list it), the fifth that
+/// `tierstore fs` hands its mount over (the second unit is handed over only between releases that
+/// list it). Catches: any capability left out of the list (for `handover-v1`, every update is a
+/// restart), a misspelled name the updater would not find, and a sixth name nothing promises.
 #[test]
-fn capabilities_lists_the_four_hand_over_words() {
+fn capabilities_lists_the_five_hand_over_words() {
     let (code, out, err) = run(&["--capabilities".to_owned()]);
     assert_eq!(
         (code, out.as_str(), err.as_str()),
         (
             0,
-            "handover-v1\nhandoff-socket-v1\nhandoff-cache-v1\nhandoff-state-dir-v1\n",
+            "handover-v1\nhandoff-socket-v1\nhandoff-cache-v1\nhandoff-state-dir-v1\nhandoff-fs-v1\n",
             ""
         )
     );

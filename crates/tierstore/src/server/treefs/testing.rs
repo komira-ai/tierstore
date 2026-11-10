@@ -2,17 +2,22 @@
 //! answers from them, and a core over both.
 
 use std::collections::HashMap;
-use std::io::{BufRead as _, BufReader, Write as _};
-use std::os::unix::net::{UnixListener, UnixStream};
+use std::io::{BufRead as _, BufReader, IoSliceMut, Write as _};
+use std::mem::MaybeUninit;
+use std::os::fd::OwnedFd;
+use std::os::unix::fs::MetadataExt as _;
+use std::os::unix::net::{UnixDatagram, UnixListener, UnixStream};
 use std::path::{Path, PathBuf};
 use std::sync::atomic::{AtomicBool, AtomicU32, Ordering};
 use std::sync::{Arc, Condvar, Mutex};
 use std::time::Duration;
 
+use rustix::net::{RecvAncillaryBuffer, RecvAncillaryMessage, RecvFlags, recvmsg};
 use sha2::{Digest as _, Sha256};
 use tierstore_testkit::dir::TestDir;
 
-use super::backing::Registered;
+use super::backing::{Guard, Registered};
+use super::config::FsSettings;
 use super::core::{Core, Errno, Opened, Settings};
 use super::fill_client::FillClient;
 use super::locked;
@@ -278,6 +283,55 @@ pub(in crate::server) struct Rig {
     pub dir: TestDir,
 }
 
+impl Rig {
+    /// Settings of `tierstore fs` over the scratch directories of the rig: the mount point, the
+    /// runtime directory, the sockets and the cache.
+    pub(in crate::server::treefs) fn settings(&self) -> FsSettings {
+        FsSettings {
+            mountpoint: self.mountpoint.clone(),
+            runtime_dir: self.runtime.clone(),
+            control_socket: self.dir.path().join("control.sock"),
+            client_group: std::fs::metadata(&self.runtime).unwrap().gid(),
+            owner: (
+                rustix::process::geteuid().as_raw(),
+                rustix::process::getegid().as_raw(),
+            ),
+            fill_socket: self.dir.path().join("fill.sock"),
+            cache_path: self.cache.clone(),
+            fetch_timeout: Duration::from_secs(5),
+            threads: 4,
+            passthrough: true,
+            max_backing_ids: 100,
+            handoff_socket: self.dir.path().join("handoff.sock"),
+            handoff_wait: Duration::from_secs(30),
+            recover_wait: Duration::from_secs(30),
+            allow_other: false,
+        }
+    }
+
+    /// The core of the process that takes over from the one of this rig: the generation after
+    /// it, over the same table, runtime directory, cache and fill socket.
+    pub(in crate::server::treefs) fn successor(&self) -> Arc<Core> {
+        let fills = FillClient::pausing(
+            self.dir.path().join("fill.sock"),
+            3,
+            Duration::from_secs(30),
+            Arc::new(|_| {}),
+        );
+        let mut settings = self.core.settings().clone();
+        settings.generation += 1;
+        Arc::new(Core::new(
+            settings,
+            fills,
+            TreeTable::open(&self.runtime).unwrap(),
+            &self.runtime,
+        ))
+    }
+}
+
+/// Tests that send signals to the process go one at a time: a signal is for every handler.
+pub(in crate::server::treefs) static SIGNALS: Mutex<()> = Mutex::new(());
+
 /// The owner every entry of the rigs reports.
 pub(in crate::server) const OWNER: (u32, u32) = (1234, 5678);
 
@@ -325,6 +379,7 @@ impl Rig {
                 mountpoint: mountpoint.clone(),
                 mount_id: "mount-1".to_owned(),
                 max_backing_ids: most,
+                generation: 1,
             },
             fills,
             TreeTable::create(&runtime).unwrap(),
@@ -388,6 +443,14 @@ impl FakeKernel {
         Ok(self.registration())
     }
 
+    /// The guard that closes the id `id`, which an earlier process registered.
+    pub(in crate::server::treefs) fn wrap(&self, id: u32) -> Guard {
+        Arc::new(Closes {
+            id,
+            closed: Arc::clone(&self.closed),
+        })
+    }
+
     /// The next number, as a registration: closed when its guard is dropped.
     pub(in crate::server::treefs) fn registration(&self) -> Registered {
         let id = self.next.fetch_add(1, Ordering::AcqRel);
@@ -413,6 +476,96 @@ pub(in crate::server::treefs) fn open_cached(
     match core.open(ino, writing, &mut |file| FakeKernel::new().register(file)) {
         Ok(Opened::Cached(fh) | Opened::Backed { fh, .. }) => Ok(fh),
         Err(error) => Err(error),
+    }
+}
+
+/// A message the fake service manager got: its text, and the descriptors that came with it.
+pub(in crate::server::treefs) struct Message {
+    pub text: String,
+    pub fds: Vec<OwnedFd>,
+}
+
+/// A stand-in for the service manager: a datagram socket that keeps what it is sent, descriptors
+/// included, and closes the pipe of a `BARRIER=1` as the manager does when it gets there.
+pub(in crate::server::treefs) struct FakeManager {
+    path: PathBuf,
+    messages: Arc<Mutex<Vec<Message>>>,
+    thread: Option<std::thread::JoinHandle<()>>,
+}
+
+/// The text a [`FakeManager`] is sent to end its thread.
+const STOP: &str = "stop the fake manager";
+
+impl FakeManager {
+    /// A manager that listens at `path`.
+    pub(in crate::server::treefs) fn start(path: &Path) -> Self {
+        let socket = UnixDatagram::bind(path).unwrap();
+        let messages = Arc::new(Mutex::new(Vec::new()));
+        let kept = Arc::clone(&messages);
+        let thread = std::thread::spawn(move || {
+            loop {
+                let mut buffer = [0u8; 1024];
+                let mut space = [MaybeUninit::uninit(); rustix::cmsg_space!(ScmRights(8))];
+                let mut control = RecvAncillaryBuffer::new(&mut space);
+                let mut iov = [IoSliceMut::new(&mut buffer)];
+                let got = recvmsg(&socket, &mut iov, &mut control, RecvFlags::empty()).unwrap();
+                let mut fds = Vec::new();
+                for message in control.drain() {
+                    if let RecvAncillaryMessage::ScmRights(rights) = message {
+                        fds.extend(rights);
+                    }
+                }
+                let text = String::from_utf8_lossy(&buffer[..got.bytes]).into_owned();
+                if text == STOP {
+                    return;
+                }
+                if text == "BARRIER=1" {
+                    // The manager has handled everything sent before: it lets go of the pipe.
+                    locked(&kept).push(Message {
+                        text,
+                        fds: Vec::new(),
+                    });
+                    drop(fds);
+                } else {
+                    locked(&kept).push(Message { text, fds });
+                }
+            }
+        });
+        Self {
+            path: path.to_owned(),
+            messages,
+            thread: Some(thread),
+        }
+    }
+
+    /// The socket's path, as `NOTIFY_SOCKET` holds it.
+    pub(in crate::server::treefs) fn socket(&self) -> &Path {
+        &self.path
+    }
+
+    /// The texts received so far, in order.
+    pub(in crate::server::treefs) fn texts(&self) -> Vec<String> {
+        locked(&self.messages)
+            .iter()
+            .map(|message| message.text.clone())
+            .collect()
+    }
+
+    /// Takes the descriptors that came with the first message whose text is `text`.
+    pub(in crate::server::treefs) fn take_fds(&self, text: &str) -> Vec<OwnedFd> {
+        locked(&self.messages)
+            .iter_mut()
+            .find(|message| message.text == text)
+            .map(|message| std::mem::take(&mut message.fds))
+            .unwrap_or_default()
+    }
+}
+
+impl Drop for FakeManager {
+    fn drop(&mut self) {
+        let _ =
+            UnixDatagram::unbound().and_then(|socket| socket.send_to(STOP.as_bytes(), &self.path));
+        let _ = self.thread.take().map(std::thread::JoinHandle::join);
     }
 }
 

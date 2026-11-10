@@ -376,7 +376,12 @@ fn the_fs_template_differs_from_the_s3_template_as_the_design_lists() {
         ("DeviceAllow", "/dev/fuse rw"),
         ("CapabilityBoundingSet", "CAP_SYS_ADMIN"),
         ("AmbientCapabilities", "CAP_SYS_ADMIN"),
-        ("SystemCallFilter", "@system-service @mount"),
+        (
+            "SystemCallFilter",
+            "@system-service @mount pidfd_open pidfd_getfd",
+        ),
+        ("FileDescriptorStoreMax", "1"),
+        ("FileDescriptorStorePreserve", "restart"),
         ("Type", "notify"),
         ("NotifyAccess", "main"),
         ("StartLimitIntervalSec", "60"),

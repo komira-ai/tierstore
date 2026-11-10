@@ -47,12 +47,19 @@ pub const RELEASE_VERSION: &str = concat!(
 /// [`HANDOFF_STATE_DIR_CAPABILITY`] says `server.handoff_socket` may be left out under a unit with
 /// a state directory. `prepare` needs both releases to list it when the node's configuration
 /// leaves the key out: the running release would otherwise have no control socket to take from.
+///
+/// [`HANDOFF_FS_CAPABILITY`] says `tierstore fs` hands its mount over to a successor and takes
+/// one over (`server::treefs`), keeping the mount's descriptor in the service manager's store. It
+/// is about the unit `tierstore-fs@.service`, not the S3 unit: the hook that updates that unit
+/// needs both releases to list it, and chooses a restart (the descriptor store carrying the mount
+/// across it) when either does not, or when the layouts of their runtime directories differ.
 /// This list is all `--capabilities` prints.
 pub const CAPABILITIES: &[&str] = &[
     "handover-v1",
     HANDOFF_SOCKET_CAPABILITY,
     HANDOFF_CACHE_CAPABILITY,
     HANDOFF_STATE_DIR_CAPABILITY,
+    HANDOFF_FS_CAPABILITY,
 ];
 
 /// `handoff-socket-v1`: a storage node started with `server.handoff_socket` takes the listening
@@ -72,6 +79,13 @@ pub const HANDOFF_CACHE_CAPABILITY: &str = "handoff-cache-v1";
 /// directory, as if the file named it; with no state directory it makes no control socket, as
 /// before.
 pub const HANDOFF_STATE_DIR_CAPABILITY: &str = "handoff-state-dir-v1";
+
+/// `handoff-fs-v1`: `tierstore fs` started with a running instance answering on
+/// `fs.handoff_socket` takes the mount from it (the `/dev/fuse` descriptor and the control
+/// socket, in the conversation `take-fs 1`), serves it from the recorded `INIT` outcome, and
+/// offers it in its turn; it keeps the descriptor in the service manager's store, and serves again
+/// the descriptor the manager kept for it after a crash or a restart.
+pub const HANDOFF_FS_CAPABILITY: &str = "handoff-fs-v1";
 
 /// The text `--capabilities` prints for `names`: each name and a newline, nothing for none.
 #[must_use]
