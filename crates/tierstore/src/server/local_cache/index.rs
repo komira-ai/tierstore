@@ -104,9 +104,10 @@ impl Index {
             // Found on the disk: how long ago the upstream last held this version is not known.
             let (size, tag, modified) = (sidecar.size, sidecar.tag, sidecar.modified);
             index.insert(&found.hex, (size, tag, modified), None);
-            if let Some(entry) = index.entries.get_mut(&found.hex) {
-                entry.unverified = unclean;
-            }
+            let found = index.entries.get_mut(&found.hex);
+            found
+                .into_iter()
+                .for_each(|entry| entry.unverified = unclean);
         }
         index
     }
@@ -118,9 +119,8 @@ impl Index {
 
     /// Says the object `hex` has been checked.
     pub(super) fn verified(&mut self, hex: &str) {
-        if let Some(entry) = self.entries.get_mut(hex) {
-            entry.unverified = false;
-        }
+        let entry = self.entries.get_mut(hex);
+        entry.into_iter().for_each(|entry| entry.unverified = false);
     }
 
     /// Takes the right to check the object `hex` against the upstream, if a check is due at
