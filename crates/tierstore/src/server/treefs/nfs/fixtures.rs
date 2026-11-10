@@ -98,24 +98,9 @@ pub(super) fn names(listing: &nfsserve::vfs::ReadDirResult) -> Vec<String> {
 
 /// Settings over the scratch directories of a rig; the NFS table is `nfs`.
 pub(super) fn settings(rig: &Rig, nfs: NfsSettings) -> crate::server::treefs::config::FsSettings {
-    use std::os::unix::fs::MetadataExt as _;
     crate::server::treefs::config::FsSettings {
-        mountpoint: rig.mountpoint.clone(),
-        runtime_dir: rig.runtime.clone(),
-        control_socket: rig.dir.path().join("control.sock"),
-        client_group: std::fs::metadata(&rig.runtime).unwrap().gid(),
-        owner: (
-            rustix::process::geteuid().as_raw(),
-            rustix::process::getegid().as_raw(),
-        ),
-        fill_socket: rig.dir.path().join("fill.sock"),
-        cache_path: rig.cache.clone(),
-        fetch_timeout: std::time::Duration::from_secs(5),
-        threads: 4,
-        passthrough: true,
-        max_backing_ids: 100,
-        allow_other: false,
         nfs,
+        ..rig.settings()
     }
 }
 

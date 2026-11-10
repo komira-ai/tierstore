@@ -2,39 +2,18 @@
 //! makes, the notification of the service manager, and the signals.
 
 use std::io::{BufRead as _, BufReader, Write as _};
-use std::os::unix::fs::MetadataExt as _;
-use std::os::unix::net::{UnixDatagram, UnixStream};
+use std::os::unix::net::UnixStream;
 
 use serde_json::{Value, json};
 
-use super::{
-    ECRYPTFS, OVERLAYFS, Running, StartError, check_cache, notify_ready, refuse_stacked, serve,
-    serve_notifying, stacked_name,
-};
+use super::{ECRYPTFS, OVERLAYFS, Running, check_cache, refuse_stacked, stacked_name};
 use crate::server::treefs::config::FsSettings;
-use crate::server::treefs::start::SIGNALS;
+use crate::server::treefs::start::StartError;
 use crate::server::treefs::testing::{Rig, sample, with_fuse};
 
 /// Settings over the scratch directories of a rig, with the sample tree to be served.
 fn settings(rig: &Rig) -> FsSettings {
-    FsSettings {
-        mountpoint: rig.mountpoint.clone(),
-        runtime_dir: rig.runtime.clone(),
-        control_socket: rig.dir.path().join("control.sock"),
-        client_group: std::fs::metadata(&rig.runtime).unwrap().gid(),
-        owner: (
-            rustix::process::geteuid().as_raw(),
-            rustix::process::getegid().as_raw(),
-        ),
-        fill_socket: rig.dir.path().join("fill.sock"),
-        cache_path: rig.cache.clone(),
-        fetch_timeout: std::time::Duration::from_secs(5),
-        threads: 4,
-        passthrough: true,
-        max_backing_ids: 100,
-        allow_other: false,
-        nfs: crate::server::treefs::nfs::config::NfsSettings::default(),
-    }
+    rig.settings()
 }
 
 fn mounted(mountpoint: &std::path::Path) -> bool {
@@ -113,6 +92,26 @@ fn start_and_stop() {
         root
     );
     again.stop().unwrap();
+}
+
+/// Asserts that a fresh start detaches a dead mount before it makes the directories: a dead mount
+/// answers `mkdir` with `EEXIST` and `stat` with `ENOTCONN`, so `create_dir_all` fails on it. The
+/// mount point is not there when the detaching runs, and is there after.
+#[test]
+fn a_fresh_start_detaches_a_dead_mount_before_it_makes_the_directories() {
+    let rig = Rig::new("tfs-run-dead", sample());
+    let settings = FsSettings {
+        mountpoint: rig.dir.path().join("fresh/mnt"),
+        ..settings(&rig)
+    };
+    let mut ran = false;
+    super::begin(&settings, || {
+        ran = true;
+        assert!(!settings.mountpoint.exists());
+    })
+    .unwrap();
+    assert!(ran);
+    assert!(settings.mountpoint.is_dir());
 }
 
 /// Asserts that a start that cannot do what it needs is an error that says what: a cache directory
@@ -209,57 +208,147 @@ fn a_cache_on_a_stacked_file_system_is_refused_by_name() {
     check_cache(&rig.cache).unwrap();
 }
 
-/// Asserts that the service manager is told `READY=1` at a path socket and at an abstract one,
-/// that nothing is sent without a socket, and that a socket that cannot be reached is only said.
+/// Asserts that a start that makes the mount records the handshake: generation 1, the id the pins
+/// are made under, and the outcome the kernel and the frontend agreed on.
 #[test]
-fn the_service_manager_is_told_the_unit_is_ready() {
-    use std::os::linux::net::SocketAddrExt as _;
-    let rig = Rig::new("tfs-run-notify", sample());
-    let path = rig.dir.path().join("notify.sock");
-    let socket = UnixDatagram::bind(&path).unwrap();
-    notify_ready(Some(path.as_os_str()));
-    let mut buffer = [0u8; 16];
-    let got = socket.recv(&mut buffer).unwrap();
-    assert_eq!(&buffer[..got], b"READY=1");
-    let name = format!("tierstore-fs-test-{}", rig.dir.path().display());
-    let address = std::os::unix::net::SocketAddr::from_abstract_name(name.as_bytes()).unwrap();
-    let abstract_socket = UnixDatagram::bind_addr(&address).unwrap();
-    notify_ready(Some(std::ffi::OsStr::new(&format!("@{name}"))));
-    let got = abstract_socket.recv(&mut buffer).unwrap();
-    assert_eq!(&buffer[..got], b"READY=1");
-    notify_ready(None);
-    notify_ready(Some(rig.dir.path().join("nobody-home").as_os_str()));
+fn a_start_records_the_handshake_for_the_process_that_takes_the_connection_over() {
+    with_fuse(records_the_handshake);
 }
 
-/// Asserts the process: it starts, tells the service manager, serves, and a SIGTERM unmounts it and
-/// ends it with success; and that a start that fails ends `serve` with the error.
-#[test]
-fn serve_runs_until_sigterm_and_unmounts() {
-    with_fuse(serve_and_sigterm);
-}
-
-fn serve_and_sigterm() {
-    let _one_at_a_time = SIGNALS
-        .lock()
-        .unwrap_or_else(std::sync::PoisonError::into_inner);
-    let rig = Rig::new("tfs-run-serve", sample());
+fn records_the_handshake() {
+    let rig = Rig::new("tfs-run-record", sample());
     let settings = settings(&rig);
-    let notify = rig.dir.path().join("notify.sock");
-    let ready = UnixDatagram::bind(&notify).unwrap();
-    let (mine, path) = (settings.clone(), notify.clone());
-    let thread = std::thread::spawn(move || serve_notifying(&mine, Some(path.as_os_str())));
-    // The notice comes after the mount is made, and the handlers were in place before it.
-    let mut buffer = [0u8; 16];
-    let got = ready.recv(&mut buffer).unwrap();
-    assert_eq!(&buffer[..got], b"READY=1");
-    assert!(mounted(&rig.mountpoint));
-    rustix::process::kill_process(rustix::process::getpid(), rustix::process::Signal::TERM)
-        .unwrap();
-    thread.join().unwrap().unwrap();
-    assert!(!mounted(&rig.mountpoint));
-    let bad = FsSettings {
-        cache_path: rig.dir.path().join("none"),
-        ..settings.clone()
+    let running = Running::start(&settings).unwrap();
+    let record = crate::server::treefs::init_record::read(&rig.runtime).unwrap();
+    assert_eq!(record.generation, 1);
+    assert_eq!(record.mount_id.len(), 32);
+    assert_eq!(record.outcome.kernel_abi.0, 7);
+    assert_eq!(record.outcome, running.outcome());
+    // Where the kernel offers resend the process asks for it, so that a takeover can use it.
+    let offered = record.outcome.capabilities;
+    assert_eq!(
+        record
+            .outcome
+            .flags
+            .contains(fuser::InitFlags::FUSE_HAS_RESEND),
+        offered.contains(fuser::InitFlags::FUSE_HAS_RESEND)
+    );
+    assert!(record.outcome.max_write > 0);
+    running.stop().unwrap();
+}
+
+/// Asserts that the answer of a mount whose connection has ended is told from the others.
+#[test]
+fn the_answer_of_a_dead_connection_is_told_from_other_errors() {
+    use super::not_connected;
+    assert!(not_connected(&std::io::Error::from_raw_os_error(107)));
+    assert!(!not_connected(&std::io::Error::from_raw_os_error(2)));
+    assert!(!not_connected(&std::io::Error::other("no os error")));
+}
+
+/// Asserts what is done to a mount that is to be discarded: its connection is aborted if asked, then
+/// the mount is detached; a mount point that is not a FUSE mount is left alone; and a connection
+/// that cannot be aborted, or a mount that cannot be detached, is said and not fatal.
+#[test]
+fn a_discarded_mount_is_aborted_if_asked_and_detached() {
+    use super::{Kernel, discard_with};
+    use std::cell::RefCell;
+    let rig = Rig::new("tfs-run-discard", sample());
+    let info = format!(
+        "36 24 0:45 / {} rw - fuse.tierstore-fs x rw\n",
+        rig.mountpoint.display()
+    );
+    let table = rig.dir.path().join("mountinfo");
+    std::fs::write(&table, info).unwrap();
+    let connections = rig.dir.path().join("connections");
+    std::fs::create_dir_all(connections.join("45")).unwrap();
+    let kernel = Kernel {
+        mountinfo: table,
+        connections: connections.clone(),
     };
-    assert!(serve(&bad).is_err());
+    let detached = RefCell::new(Vec::new());
+    let detach = |path: &std::path::Path| {
+        detached.borrow_mut().push(path.to_owned());
+        Ok(())
+    };
+    discard_with(&rig.mountpoint, (&kernel, false), &detach);
+    assert!(!connections.join("45/abort").exists());
+    assert_eq!(*detached.borrow(), std::slice::from_ref(&rig.mountpoint));
+    discard_with(&rig.mountpoint, (&kernel, true), &detach);
+    assert_eq!(
+        std::fs::read_to_string(connections.join("45/abort")).unwrap(),
+        "1"
+    );
+    assert_eq!(detached.borrow().len(), 2);
+    // Not a FUSE mount: nothing is done.
+    discard_with(std::path::Path::new("/elsewhere"), (&kernel, true), &detach);
+    assert_eq!(detached.borrow().len(), 2);
+    // Neither failure stops the other step.
+    std::fs::remove_dir_all(connections.join("45")).unwrap();
+    let failing = |_: &std::path::Path| Err(std::io::Error::other("busy"));
+    discard_with(&rig.mountpoint, (&kernel, true), &failing);
+    // The files of the machine are named.
+    let real = Kernel::real();
+    assert_eq!(real.mountinfo, std::path::Path::new("/proc/self/mountinfo"));
+    assert_eq!(
+        real.connection_of(std::path::Path::new("/does/not/exist")),
+        None
+    );
+    // A mount table that is not there has no connection.
+    let none = Kernel {
+        mountinfo: rig.dir.path().join("none"),
+        connections,
+    };
+    assert_eq!(none.connection_of(&rig.mountpoint), None);
+}
+
+/// Asserts that the real detach is tried on a path that is not a mount and its refusal is only
+/// said.
+#[test]
+fn a_mount_that_cannot_be_detached_is_said_and_the_start_goes_on() {
+    use super::{Kernel, discard_mount};
+    let rig = Rig::new("tfs-run-detach", sample());
+    let table = rig.dir.path().join("mountinfo");
+    let info = format!(
+        "36 24 0:46 / {} rw - fuse.tierstore-fs x rw\n",
+        rig.mountpoint.display()
+    );
+    std::fs::write(&table, info).unwrap();
+    let kernel = Kernel {
+        mountinfo: table,
+        connections: rig.dir.path().join("connections"),
+    };
+    discard_mount(&settings(&rig), true, &kernel);
+    assert!(!mounted(&rig.mountpoint));
+}
+
+/// Asserts that a mount point that answers `ENOTCONN` has its mount discarded (without aborting a
+/// connection that is already dead), and that any other answer leaves it alone.
+#[test]
+fn only_a_mount_point_that_answers_not_connected_is_discarded() {
+    use super::{Kernel, discard_dead_mount};
+    let rig = Rig::new("tfs-run-dead", sample());
+    let table = rig.dir.path().join("mountinfo");
+    let info = format!(
+        "36 24 0:47 / {} rw - fuse.tierstore-fs x rw\n",
+        rig.mountpoint.display()
+    );
+    std::fs::write(&table, info).unwrap();
+    let connections = rig.dir.path().join("connections");
+    std::fs::create_dir_all(connections.join("47")).unwrap();
+    let kernel = Kernel {
+        mountinfo: table,
+        connections: connections.clone(),
+    };
+    let settings = settings(&rig);
+    let dead = Err(std::io::Error::from_raw_os_error(107));
+    discard_dead_mount(&settings, dead, &kernel);
+    assert!(
+        !connections.join("47/abort").exists(),
+        "the connection is dead already"
+    );
+    let alive = std::fs::metadata(&rig.mountpoint);
+    discard_dead_mount(&settings, alive, &kernel);
+    let other = Err(std::io::Error::from_raw_os_error(2));
+    discard_dead_mount(&settings, other, &kernel);
 }

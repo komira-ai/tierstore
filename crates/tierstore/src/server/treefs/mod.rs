@@ -15,6 +15,14 @@
 //! - `fuse` and `run` (Linux): the FUSE frontend and the process around it.
 //! - [`nfs`] (macOS serves it; built and tested everywhere): the NFSv3 frontend, over loopback,
 //!   and the mount around it.
+//! - `launch`, `serving`, `sd`, `init_record`, `handle`, `recover` and `handover` (Linux): crash
+//!   recovery and the hand-over of the mount. The mount's `/dev/fuse` descriptor is kept by the
+//!   service manager (`sd`), so the mount outlives the process; a process that takes the
+//!   connection over serves it from the record of the kernel's handshake (`init_record`) without a
+//!   handshake (`serving`); the file handles of the process before are told by their numbers
+//!   (`handle`); a kernel that cannot send the unanswered requests again is waited on for a bounded
+//!   time (`recover`); and a running instance hands the connection to a new one with no moment in
+//!   which no one holds it (`handover`). `launch` decides at a start which of these applies.
 //!
 //! The core serves a frontend in either of two ways: with opens and handles, and a count of the
 //! lookups the kernel holds until it forgets them (FUSE); or by inode alone, with the reads of
@@ -33,6 +41,7 @@ mod config;
 pub(in crate::server) mod control;
 pub(in crate::server) mod core;
 mod fill_client;
+mod handle;
 mod ino;
 mod table;
 mod tree;
@@ -40,7 +49,19 @@ mod tree;
 #[cfg(target_os = "linux")]
 mod fuse;
 #[cfg(target_os = "linux")]
+mod handover;
+#[cfg(target_os = "linux")]
+mod init_record;
+#[cfg(target_os = "linux")]
+mod launch;
+#[cfg(target_os = "linux")]
+mod recover;
+#[cfg(target_os = "linux")]
 mod run;
+#[cfg(target_os = "linux")]
+mod sd;
+#[cfg(target_os = "linux")]
+mod serving;
 // The start is the FUSE frontend's on Linux and the NFS frontend's on macOS; on a target that serves
 // neither it is built for the tests.
 #[cfg(any(target_os = "linux", target_os = "macos", test))]
@@ -60,10 +81,10 @@ mod nfs;
 pub(super) use config::{FsSettings, load};
 #[cfg(test)]
 pub(super) use config::{FsTable, from_text};
+#[cfg(target_os = "linux")]
+pub(super) use launch::serve;
 #[cfg(not(target_os = "linux"))]
 pub(super) use nfs::{NfsError, serve};
-#[cfg(target_os = "linux")]
-pub(super) use run::serve;
 #[cfg(target_os = "linux")]
 pub(super) use start::StartError;
 
@@ -77,6 +98,12 @@ fn locked<T>(mutex: &Mutex<T>) -> MutexGuard<'_, T> {
         .unwrap_or_else(|poisoned| poisoned.into_inner())
 }
 
+#[cfg(test)]
+#[cfg(target_os = "linux")]
+mod fakedev;
+#[cfg(test)]
+#[cfg(target_os = "linux")]
+mod recovery_tests;
 #[cfg(test)]
 pub(in crate::server) mod testing;
 

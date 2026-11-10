@@ -5,7 +5,7 @@ copying (or linking) each action's inputs into a scratch directory and removing 
 parallel, how tierstore could serve those inputs as a filesystem instead, so that a job scheduled by jobscheduler reads its
 inputs without a copy, fetches only what it opens, may write anywhere in them privately, and runs on Linux and on macOS.
 Section 11 holds the results of the first measurements and the plan against today's path on real builds run by the executor; section 12 is the phased plan, with the probes marked done or open. Section 13 records
-the owner's decisions and sets out the one still open (the macOS frontend, C9; the Linux kernel, C8, is decided: upgrade to 7.0 HWE), each with its options and a recommendation.
+the owner's decisions and sets out the macOS frontend (C9, decided 2026-11-10: NFSv3 now, FSKit later if it measures better; the Linux kernel, C8, is decided: upgrade to 7.0 HWE), each with its options and a recommendation.
 
 **What this document starts from.** An earlier proposal, built on researched findings, preceded it and recommended: one tierstore
 filesystem core in Rust with thin frontends (FUSE with passthrough on Linux, an NFSv4.0 loopback server on macOS, FSKit
@@ -1068,10 +1068,21 @@ So the server must come back on the same endpoint, quickly, and answer the handl
 ## 8. macOS
 
 macOS has no overlayfs, no FUSE in the kernel and no passthrough. Two frontends are candidates, NFS on loopback (M1) and FSKit
-(M2), and the choice between them is open (C9); M0 (today's `clonefile`) stays the default and kill-switch until one is chosen and
-measured. The mount is read-only. The owner decided that the executor never writes into it, so the writable directory of a run is the
-client's, not the core's, and the core's views (6.6) are built only if a client turns out to need them. The NFS frontend would need
+(M2). **The owner decided on 2026-11-10 (C9): the frontend is NFSv3 over loopback TCP, built now on the same core as Linux; FSKit may replace it
+later if it measures better (phase 4).** M0 (today's `clonefile`) stays the default and kill-switch until the NFS frontend has run real builds.
+The mount is read-only. The owner decided that the executor never writes into it, so the writable directory of a run is the
+client's, not the core's, and the core's views (6.6) are not built for macOS (phase 2, pull request 11 is dropped). The NFS frontend follows
 the crash and hand-off rules of 7.5.
+
+**The tuned server, measured** (Measured: macos2 and macos3, 2026-11-09 and 10, the farm Mac). A server written for the job (`tunedfs`, a throwaway probe on `nfsserve` 0.11's protocol layer): an
+immutable flattened tree with ids in breadth-first order, 8-byte handles that are the id alone (so they survive a restart), a sharded descriptor cache,
+`READDIRPLUS`, a fixed old mtime, read-only, mounted with `vers=3,tcp,ro,rdirplus,locallocks,actimeo=3600` (`ro` matters: without it every read closes with a `SETATTR`).
+The largest single factor was a fix in `nfsserve`: its `TransactionTracker` took a global mutex and scanned its whole retention map on every request;
+sweeping once a second made cold walks about 3 times faster. Against native APFS, medians of five runs (macos3, interleaved): `stat` of 46,362 files cold 2,455 ms against 122 ms (about 20x, 33 µs
+per RPC, 71,117 RPCs), warm 188 ms against 114 ms; readdir of 12,394 directories 1,106 ms against 278 ms; open and read of every file 8,536 ms against 4,390 ms (one thread) and 610 ms against 582 ms (eight, after the first pass filled the client's cache);
+`clang -fsyntax-only` 307 ms against 268 ms on a warm mount and 907 ms against 432 ms on a fresh one; `cargo build` of ripgrep about +4% to +7% (macos3 re-measured; macos2: 4,058 ms against 3,766 ms isolated).
+The client cache is what makes it work: with a fixed old mtime and a 3600 s timeout, attributes, names, directory contents and data are served locally after one pass (0 RPCs on a repeat).
+NFSv4.1 (`embednfs`, untuned) was not better: no gain from compounds, 205,491 COMPOUNDs against 126,343 RPCs for one read pass. FSKit is built but was never mounted (the extension is disabled until a person switches it on in System Settings, macos3 section 1); it has no row.
 
 **What was measured.** All on the farm Mac (a Mac Studio, M3 Ultra, 28 cores, macOS 27.0.1, running the executor's builds throughout, so numbers carry noise), 46,362 files and 12,394 directories (463 MB of the SDK plus a vendored ripgrep), five runs each, medians (Measured: macos E12). The NFS server is `nfsserve` 0.11's mirrorfs demo with a global mutex and a `File::open` per `READ`, **not a tuned server**, so these are an upper bound on an NFS frontend's cost, not a floor:
 
@@ -1095,7 +1106,7 @@ The warm stat pass includes revalidations, since the client's 5 s minimum attrib
 
 **Who makes the writable directory** (Measured: macos E18, on the same tree, NFSv3 mount as the read-only lower):
 
-- (a) **The client builds real directories and a symlink per file into the mount, and copies up the files an action writes.** Works today. Building the view for 46,362 files and 12,394 directories took 2.0 to 2.1 s from a manifest list, with no walk of the mount (`mkdir` 0.4 s, symlinks 1.6 s, about 35 µs per symlink); deleting it 2.9 to 3.3 s. For comparison, `clonefile` of an APFS copy of the same tree takes about 0.45 s and its delete 2.4 s (Measured: macos E3, the MacOSX.platform row), so (a) is about 4.5 times slower to create than M0 and its delete costs about the same. A `cargo` build through it took 4.4 s (4.7 s directly on NFS) and a `clang` syntax check with every header a symlink 1.1 s (0.68 s directly on NFS, 0.26 s native), about 4.4 times native. Copy-up is a plain copy: 3 ms for a small file, 0.2 s for 84 MB. Costs: copy-up must be decided before the action starts (declared outputs), since a write through a symlink goes to the read-only target; tools that treat symlinks differently (`find` without `-L`, `tar`, `rsync -a`, `git`, `realpath`) see them; the Seatbelt profile must allow each input tree's subpath (6.8). Directory-level symlinks for untouched subtrees would be cheaper (Unmeasured).
+- (a) **The client builds real directories and a symlink per file into the mount, and copies up the files an action writes.** Chosen (C9, 2026-11-10); works today. Building the view for 46,362 files and 12,394 directories took 2.0 to 2.1 s from a manifest list, with no walk of the mount (`mkdir` 0.4 s, symlinks 1.6 s, about 35 µs per symlink); deleting it 2.9 to 3.3 s. For comparison, `clonefile` of an APFS copy of the same tree takes about 0.45 s and its delete 2.4 s (Measured: macos E3, the MacOSX.platform row), so (a) is about 4.5 times slower to create than M0 and its delete costs about the same. A `cargo` build through it took 4.4 s (4.7 s directly on NFS) and a `clang` syntax check with every header a symlink 1.1 s (0.68 s directly on NFS, 0.26 s native), about 4.4 times native. Copy-up is a plain copy: 3 ms for a small file, 0.2 s for 84 MB. Costs: copy-up must be decided before the action starts (declared outputs), since a write through a symlink goes to the read-only target; tools that treat symlinks differently (`find` without `-L`, `tar`, `rsync -a`, `git`, `realpath`) see them; the Seatbelt profile must allow each input tree's subpath (6.8). Directory-level symlinks for untouched subtrees would be cheaper (Unmeasured).
 - (b) **`clonefile` from the mount fails**: `EXDEV` from NFS to APFS (file and directory), `ENOTSUP` within the NFS mount, and `cp -c` silently copies bytes. A clone can only follow a fill of local APFS, which is what the executor does today (`clonefile` of 190,435 files in 1.5 s and removal in 7 s; clone 8 to 12 µs per file, the first run of each tree 20% to 40% slower, and delete 37 to 72 µs per file, more for directory-heavy trees. The 5,762-file Toolchains tree cloned at about 18 µs per file (104 to 170 ms) and was deleted in about 0.41 s; the 8 µs and 37 µs quoted elsewhere are the low ends; Measured: macos E3, on a Mac running the farm's builds).
 - (c) **A second NFS (or FSKit) volume owned by the executor with the tierstore mount as its lower** costs 1.2x to 25x more on top (stat 1.6x cold, eight-thread stat 25x through the second server's mutex, `clang` 1.8x, `cargo` 1.5x; Measured: macos E18c), and `nfsserve` has no union, copy-up or whiteout code, so the executor would write it. Not chosen.
 - (d) **There is no union mount.** `MNT_UNION` is accepted and is only lookup fallthrough: `ls` of the mount point is empty, a write to a lower file is not copied up, `rm` of a lower file does not remove it (it removes the empty upper stand-in), and `echo >> low.txt` returns 0 but creates an empty upper file (Measured: macos E18d, with a tmpfs upper over the read-only NFS mount, and `mount_nfs -o union` over a local directory). Not tested: union with an APFS volume as the upper, `mount_apfs -s`, and `hdiutil attach -shadow` over a read-only image, which would give block-level copy-on-write at the price of building the image first.
@@ -1108,7 +1119,9 @@ So the core's views (6.6) move out of the Linux design altogether and stay on ma
   view works without lock state in the server) and `rdirplus` [S22]. Per run, setup is one attach, with no per-file work
   and no per-run mount: the cost moves to first touch. **Root is not needed**: `mount_nfs` of a loopback export by an unprivileged user succeeded when the mount point
   was owned by that user (the mount shows `nodev, nosuid, mounted by <user>`) and failed `Operation not permitted` on a root-owned one; a root mount has no `nodev,nosuid`, so a root-run mount gives setuid binaries a chance (Measured: macos E14, where the unprivileged test was run as the admin user `adi` only). Per-user mounts get `nosuid`, which suits a build tree.
-  The export is mounted at boot and the mount also "needs no root", so the design must say which user mounts at boot: a boot mount made by root loses `nosuid`. Naming that user, and trying the mount as it at boot, is open (Unmeasured).
+  **Who mounts at boot is a config key.** A boot mount made by root loses `nosuid`, so the mount is made by the user the launchd job of `tierstore fs` runs as, which owns the mount point. That user is `fs.nfs.mount_user` (default: the user of the process; a name or a number); the job's plist names
+  it, and the mount point must be owned by it, which the process checks at start and refuses with the owner it found. A root-run process mounts as that user, not as root. The mount helper runs `mount_nfs -o vers=3,tcp,ro,rdirplus,locallocks,actimeo=3600,hard,port=<fs.nfs.port>,mountport=<fs.nfs.port>`
+  against `127.0.0.1` once the server listens, and is a retry loop bounded by `fs.nfs.mount_wait`; the key names, defaults and the mount at login-less boot are settled by the pull request that builds them and the farm Mac smoke test (Unmeasured: a boot mount without a login session).
 - **Attribute caching.** The macOS client does not take cache times from replies (Buildbarn's mount code notes that NFSv4
   has no per-reply way to give them [S5]). Within the mount's minimum and maximum, it caches a node's attributes for one
   tenth of the age of its mtime, and for the maximum under a delegation (read in the client's source [S24]). The design
@@ -1376,21 +1389,26 @@ SP4 and SP5:
    disk offer (its own design document first, B22).
 10. The executor: tree manifests, and naming the root digest in a job: the production form of SP5 (its own design document first).
 
-**Phase 2: the macOS frontend** (after C9 chooses one; nothing here starts before then):
+**Phase 2: the macOS frontend** (C9 chose NFSv3 on 2026-11-10; it starts now, on the same core, alongside phase 1):
 
-11. tierstore: the core's views (6.6), **only if a macOS client needs them** (the executor does not, 8), with their tests: every view case of section 9, a kill at every step of every
-    operation of the table of 6.6 followed by roll-forward, a resent request after each, and handle stability across
-    copy-up and across the client's rename to `.nfs…`.
-12. tierstore: the chosen frontend, with its handle scheme (stable handles: a restart is a pause, 7.5), the uid check, two alternating launchd jobs
-    and the hook's hand-over arm for them; for NFS, the hand-off of 7.5 (with the changes to tierstore-handover.md section 0
-    and update-hook.md) and a server that is not the demo's (no global lock, an open-handle cache, `READDIRPLUS`, 8); the drill of updating and killing it under load.
+11. ~~tierstore: the core's views (6.6)~~ **Dropped by C9 (2026-11-10):** the executor never writes into the mount and builds its own writable directory (8, option a), so no macOS client needs the core's views. They are reopened only by a client that cannot build its own.
+12. tierstore: the NFSv3 frontend, in four pull requests (P7), each one subject, interfaces before users. Branch names are `vbfs-mac-*`:
+    - 12a. This document: C9 decided, the phase revised.
+    - 12b. The core without a FUSE shape: it builds and is tested on macOS, serves a read by inode with no open, and lets a frontend with no `FORGET` hold a tree until its detach. No behaviour change on Linux.
+    - 12c. The frontend: a read-only export of the attached trees from the core, derivable 8-byte handles, `ACCESS` from the mode bits, `READDIRPLUS`, the fixed old mtime, a descriptor cache, `nfsserve` (a pinned fork of `komira-ai`, with the transaction tracker swept once a second
+      and `ACCESS` answered by the file system) behind the one file-system trait, the uid check of 6.8, the `fs.nfs.*` keys, the mount helper and the launchd job. The protocol layer is `nfsserve`'s and not written here (choice below).
+    - 12d. Crash, restart and hand-over for NFS: the table of tree numbers kept across a restart so that every handle the client holds is answered, the pause drill, the duplicate request cache if 7.5 needs one, two alternating launchd jobs and the hook's hand-over arm for them,
+      with the changes to tierstore-handover.md section 0 and update-hook.md; the drill of updating and killing it under load on the farm Mac.
+    - **The protocol layer.** `nfsserve` 0.11 (BSD-3-Clause, which `deny.toml` allows) already serves MOUNT and NFSv3 on one port, which `mount_nfs` with `port=` and `mountport=` needs, and its file-system trait is the interface the frontend implements. Writing the XDR, record marking and about twenty procedures
+      here is a further 3,000 lines with the same coverage bar, for no measured gain yet. Its known costs are the tracker (fixed, 3 lines, `probes/transaction_tracker.patch`), a task, a duplex pipe and a channel per request (the remaining part of the 20x cold-walk gap; inferred, not measured), an `ACCESS` that denies `execve` on a read-only file system
+      (patched to ask the file system), and no way to give it an accepted socket (needed by 12d). All four are small changes to a fork pinned by commit, as `fuser` is. Because the frontend is one trait implementation, replacing the layer later, if the per-request cost is worth removing, changes nothing that is shipped.
 13. The macOS clients: the executor builds the run's writable directory over the read-only tree (8, option a), and jobscheduler's views or the same, with today's copy as the kill-switch.
 
 **Phase 3: prefetch and soak.** Access-profile prefetch (Buildbarn ADR 10 [S7]) if Q-B's tails ask for it, and the soak of
 section 11 on real builds run by the executor.
 
 **Phase 4: FSKit** (when a signing team with the FSKit entitlement exists and the console user has enabled the extension): MP6 and a measurement
-against NFS on the workloads of section 8; if it wins (C9), a frontend on the same core, since no benchmark of FSKit for builds exists.
+against the tuned NFSv3 frontend on the workloads of section 8 (its numbers are the baseline); if it wins (C9), it replaces NFS as a frontend on the same core, since no benchmark of FSKit for builds exists.
 A general read/write interface of `tierstore fs`, which the owner wants separately, is a later design and is not a phase of this one.
 
 ## 13. Decisions
@@ -1486,7 +1504,7 @@ owner has not confirmed them.** Two decisions are open and new: the Linux kernel
   - Recommendation before the decision: **(B).** It starts phase 1 now without waiting for reboots of nodes that run other tenants' builds; the measured 6.8 cost is small for compiles, and the design loses nothing, since passthrough, the backing table and resend are additions to it (Inferred).
     Arm B against arm C of Q-B then measures what the upgrade is worth on the lab's own builds.
   - If (A): phase 1 pull requests 6 and 7 are not deferred, the first lab deployment waits for the canary node's soak on 7.0, and the 6.8 mode is not built.
-- **C9. Open, for the owner: the macOS frontend, NFS or FSKit.** NFSv3 is measured with a demo-class server (metadata 4x to 66x slower than APFS, `clang` 2.0x to 2.6x, `cargo` 1.25x, twice the page cache, a restart is a 12.5 s pause for an 8 s outage with stable handles, in one run, and the extra time is the server's walk of 59,000 entries and the client's backoff together, which scales with tree size; no root needed; Seatbelt works; the Unix socket failed; Measured: macos E12, E14 to E17).
+- **C9. Decided by the owner, 2026-11-10: (A), NFSv3 over loopback TCP now, built on the same core as Linux; FSKit may replace it later if it measures better (phase 4 unchanged). The core's views are not built (pull request 11 is dropped); the client builds its writable directory (8, option a). Who mounts at boot is the config key `fs.nfs.mount_user` (8). The text below is the question as it was asked.** NFSv3 is measured with a demo-class server (metadata 4x to 66x slower than APFS, `clang` 2.0x to 2.6x, `cargo` 1.25x, twice the page cache, a restart is a 12.5 s pause for an 8 s outage with stable handles, in one run, and the extra time is the server's walk of 59,000 entries and the client's backoff together, which scales with tree size; no root needed; Seatbelt works; the Unix socket failed; Measured: macos E12, E14 to E17).
   NFSv4.0 has no measurement. FSKit has none either: it is blocked on signing (C3) and, from the SDK headers, has no kernel-offloaded reads for a path or URL backed volume. M0 (`clonefile`, 8 to 12 µs per file) stays the default and the kill-switch.
   - The client-built writable directory (8, option a) is part of this choice: for 46,362 files it takes 2.0 to 2.1 s to create (symlinks 1.6 s, `mkdir` 0.4 s) against about 0.45 s for M0's `clonefile`, about 4.5 times slower, with a delete of 2.9 to 3.3 s against 2.4 s,
     and a `clang` run through it is about 4.4 times native (1.1 s against 0.26 s); directory-level symlinks were not measured (Measured: macos E18a, E3). That undercuts "cheap enough" and weighs against the lazy mount for small input sets.
