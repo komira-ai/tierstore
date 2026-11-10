@@ -17,6 +17,7 @@
 //! answered `not attached`.
 
 use std::io::{BufRead as _, BufReader, Read as _, Write as _};
+#[cfg(any(target_os = "linux", test))]
 use std::os::fd::{AsFd as _, OwnedFd};
 use std::os::unix::fs::{MetadataExt as _, PermissionsExt as _};
 use std::os::unix::net::{UnixListener, UnixStream};
@@ -111,6 +112,7 @@ impl Gate {
     }
 
     /// Closes the gate and returns when no request is being answered.
+    #[cfg(any(target_os = "linux", test))]
     fn close_and_drain(&self) {
         let mut state = super::locked(&self.state);
         state.0 = true;
@@ -123,6 +125,7 @@ impl Gate {
     }
 
     /// Opens the gate again.
+    #[cfg(any(target_os = "linux", test))]
     fn open(&self) {
         super::locked(&self.state).0 = false;
     }
@@ -276,6 +279,7 @@ impl Control {
     ///
     /// # Errors
     /// What the system said.
+    #[cfg(any(target_os = "linux", test))]
     pub(in crate::server) fn listener_fd(&self) -> std::io::Result<OwnedFd> {
         self.listener.as_fd().try_clone_to_owned()
     }
@@ -283,6 +287,7 @@ impl Control {
     /// Stops answering: no connection is accepted from here on (one that comes waits in the
     /// socket's backlog), the request being answered is finished, and the next request of a
     /// connection that is open is refused. The socket's file stays.
+    #[cfg(any(target_os = "linux", test))]
     pub(in crate::server) fn pause(&mut self) {
         self.gate.close_and_drain();
         if let Some(Acceptor { stop, thread }) = self.acceptor.take() {
@@ -296,12 +301,14 @@ impl Control {
     ///
     /// # Errors
     /// What the system said when the thread cannot be started.
+    #[cfg(any(target_os = "linux", test))]
     pub(in crate::server) fn resume(&mut self) -> std::io::Result<()> {
         self.gate.open();
         self.accept()
     }
 
     /// Gives up the socket's file to a successor: it is not removed when this is dropped.
+    #[cfg(any(target_os = "linux", test))]
     pub(in crate::server) fn leave_path(&mut self) {
         self.owns_path = false;
     }

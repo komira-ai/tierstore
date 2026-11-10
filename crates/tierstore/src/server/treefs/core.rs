@@ -18,8 +18,10 @@ use std::collections::{HashMap, HashSet};
 use std::fs::File;
 use std::io;
 use std::path::{Path, PathBuf};
+#[cfg(any(target_os = "linux", test))]
+use std::sync::OnceLock;
 use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
-use std::sync::{Arc, Mutex, OnceLock};
+use std::sync::{Arc, Mutex};
 use std::time::Duration;
 
 use crate::server::local_cache::{blob_path, manifest_path};
@@ -28,8 +30,10 @@ use crate::tree_manifest::{
 };
 
 use super::attach::{Attachments, Failure, is_run};
+#[cfg(any(target_os = "linux", test))]
 use super::backing::{self, Backing, BackingTable, Registrar};
 use super::fill_client::FillClient;
+#[cfg(any(target_os = "linux", test))]
 use super::handle;
 use super::ino;
 use super::locked;
@@ -63,6 +67,7 @@ pub(super) enum Errno {
     /// `EIO`: a fill failed, or a tree could not be read.
     Io,
     /// `EROFS`: a request that would change a tree.
+    #[cfg(any(target_os = "linux", test))]
     RoFs,
 }
 
@@ -122,6 +127,7 @@ struct Loaded {
 }
 
 /// An open file.
+#[cfg(any(target_os = "linux", test))]
 #[derive(Debug)]
 enum Handle {
     /// A file of no bytes: nothing to read.
@@ -137,6 +143,7 @@ enum Handle {
 }
 
 /// What an open is answered with.
+#[cfg(any(target_os = "linux", test))]
 #[derive(Debug)]
 pub(super) enum Opened {
     /// A cached open: the page cache is kept, and every read it misses reaches [`Core::read`].
@@ -190,9 +197,11 @@ pub(super) struct Settings {
     /// The id of this mount, which the pins are made under.
     pub mount_id: String,
     /// The most backing ids the kernel is given at once (`fs.max_backing_ids`).
+    #[cfg(any(target_os = "linux", test))]
     pub max_backing_ids: usize,
     /// How many processes have served this connection, this one included (`init_record`): in the
     /// numbers of the file handles this core gives out.
+    #[cfg(any(target_os = "linux", test))]
     pub generation: u32,
     /// Whether the lookups of a tree's inodes are counted and a detached tree stays in memory
     /// until they are forgotten (a frontend that is told of forgets). If not, a tree is dropped
@@ -217,10 +226,14 @@ pub(in crate::server) struct Core {
     /// longer the tree's has been replaced and stops.
     prefetching: Mutex<HashMap<u64, Arc<()>>>,
     /// The backing table, once the kernel offered passthrough and it was chosen.
+    #[cfg(any(target_os = "linux", test))]
     backing: OnceLock<Arc<BackingTable>>,
     /// Where the backing table is kept.
+    #[cfg(any(target_os = "linux", test))]
     backing_file: PathBuf,
+    #[cfg(any(target_os = "linux", test))]
     handles: Mutex<HashMap<u64, Arc<Handle>>>,
+    #[cfg(any(target_os = "linux", test))]
     next_handle: AtomicU64,
     /// The requests served, by name, for the tests that count what reaches the core.
     #[cfg(test)]
@@ -246,9 +259,13 @@ impl Core {
             lifecycle: Mutex::new(()),
             held: AtomicBool::new(false),
             prefetching: Mutex::new(HashMap::new()),
+            #[cfg(any(target_os = "linux", test))]
             backing: OnceLock::new(),
+            #[cfg(any(target_os = "linux", test))]
             backing_file: runtime_dir.join(backing::FILE),
+            #[cfg(any(target_os = "linux", test))]
             handles: Mutex::new(HashMap::new()),
+            #[cfg(any(target_os = "linux", test))]
             next_handle: AtomicU64::new(1),
             #[cfg(test)]
             served: Mutex::new(Vec::new()),
@@ -545,6 +562,7 @@ impl Core {
     }
 
     /// Counts a lookup of `ino`, which a listing with entries (`READDIRPLUS`) made.
+    #[cfg(any(target_os = "linux", test))]
     pub(super) fn count(&self, ino: u64) {
         #[cfg(test)]
         self.note("count");
@@ -552,6 +570,7 @@ impl Core {
     }
 
     /// The kernel forgets `nlookup` lookups of `ino`.
+    #[cfg(any(target_os = "linux", test))]
     pub(super) fn forget(&self, ino: u64, nlookup: u64) {
         #[cfg(test)]
         self.note("forget");
@@ -689,6 +708,7 @@ impl Core {
     ///
     /// # Errors
     /// As [`Core::opendir`].
+    #[cfg(any(target_os = "linux", test))]
     pub(super) fn readdir(
         &self,
         ino: u64,
@@ -744,6 +764,7 @@ impl Core {
     /// # Errors
     /// [`Errno::RoFs`] for an open for writing, [`Errno::IsDir`] for a directory, [`Errno::Inval`]
     /// for a link, [`Errno::Io`] for a blob that cannot be had or an id that cannot be registered.
+    #[cfg(any(target_os = "linux", test))]
     pub(super) fn open(
         &self,
         ino: u64,
@@ -782,6 +803,7 @@ impl Core {
     }
 
     /// A handle for an open, which stays until [`Core::release`].
+    #[cfg(any(target_os = "linux", test))]
     fn new_handle(&self, handle: Handle) -> u64 {
         let count = self.next_handle.fetch_add(1, Ordering::AcqRel);
         let fh = handle::make(
@@ -867,6 +889,7 @@ impl Core {
     ///
     /// # Errors
     /// [`Errno::Inval`] for a handle that is not open, [`Errno::Io`] for a read that fails.
+    #[cfg(any(target_os = "linux", test))]
     pub(super) fn read(&self, fh: u64, offset: u64, size: u32) -> Result<Vec<u8>, Errno> {
         #[cfg(test)]
         self.note("read");
@@ -884,6 +907,7 @@ impl Core {
     }
 
     /// Closes the open file `fh`.
+    #[cfg(any(target_os = "linux", test))]
     pub(super) fn release(&self, fh: u64) {
         let handle = locked(&self.handles).remove(&fh);
         if let (Some(Handle::Backed(blob) | Handle::Spilled(_, blob)), Some(table)) =
@@ -931,7 +955,9 @@ fn path_of(tree: &Tree, index: u32) -> String {
     format!("/{}", names.join("/"))
 }
 
+#[cfg(any(target_os = "linux", test))]
 mod adopt;
+#[cfg(any(target_os = "linux", test))]
 mod passthrough;
 mod prefetch;
 mod read;

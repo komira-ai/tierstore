@@ -184,7 +184,8 @@ impl Running {
         let core = core_of(
             settings,
             table,
-            (record.mount_id.clone(), record.generation),
+            record.mount_id.clone(),
+            record.generation,
             true,
         )?;
         let control = match control {

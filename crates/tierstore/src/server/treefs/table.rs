@@ -52,6 +52,7 @@ pub(in crate::server) enum TableError {
     /// The file is not a table, or is one of a layout of inode numbers this release does not
     /// know.
     #[error("the table of tree numbers is not a table of layout {LAYOUT}")]
+    #[cfg(any(target_os = "linux", test))]
     Layout,
 }
 
@@ -70,6 +71,7 @@ impl TreeTable {
     ///
     /// # Errors
     /// What the system said.
+    #[cfg(any(target_os = "linux", test))]
     pub(super) fn create(dir: &Path) -> Result<Self, TableError> {
         Self::create_of(dir, 0)
     }
@@ -174,6 +176,7 @@ impl TreeTable {
     /// # Errors
     /// [`TableError::Layout`] for a file that does not begin as this release's table does (the
     /// numbers of another layout would name other inodes); what the system said.
+    #[cfg(any(target_os = "linux", test))]
     pub(super) fn open(dir: &Path) -> Result<Self, TableError> {
         let file = File::options()
             .read(true)

@@ -12,11 +12,14 @@
 //! The pieces a process that takes a connection over also needs (the directories, the core over a
 //! table that was read, the control socket's error) are here too: `run.rs` calls them.
 
+#[cfg(any(target_os = "linux", test))]
 use std::io::Read as _;
+#[cfg(any(target_os = "linux", test))]
 use std::path::Path;
 use std::sync::Arc;
 
 use super::attach::Attachments;
+#[cfg(any(target_os = "linux", test))]
 use super::backing;
 use super::config::FsSettings;
 use super::control::Control;
@@ -84,6 +87,7 @@ pub(super) fn io(what: impl Into<String>) -> impl FnOnce(std::io::Error) -> Star
 }
 
 /// An id for this mount: sixteen random bytes as hex, which the pins are made under.
+#[cfg(any(target_os = "linux", test))]
 fn new_mount_id() -> Result<String, StartError> {
     let mut bytes = [0u8; 16];
     std::fs::File::open("/dev/urandom")
@@ -93,6 +97,7 @@ fn new_mount_id() -> Result<String, StartError> {
 }
 
 /// Removes the file at `path`, which a mount that is gone left; none is no fault.
+#[cfg(any(target_os = "linux", test))]
 fn remove_stale(path: &Path) -> Result<(), StartError> {
     match std::fs::remove_file(path) {
         Err(error) if error.kind() != std::io::ErrorKind::NotFound => Err(StartError::Io {
@@ -108,6 +113,7 @@ fn remove_stale(path: &Path) -> Result<(), StartError> {
 pub(super) enum Identity {
     /// A new mount, with a new connection: the table of tree numbers is made afresh and the mount
     /// id is random (FUSE).
+    #[cfg(any(target_os = "linux", test))]
     Fresh,
     /// The mount of this boot, which a restart of the server does not end: the table of tree
     /// numbers is reopened when it is of this epoch (a nonzero hash of the boot), and the mount id
@@ -132,14 +138,16 @@ pub(super) fn create_mount_point(settings: &FsSettings) -> Result<(), StartError
     )))
 }
 
-/// A core over `table` for the mount `mount_id`, whose file handles are numbered for `generation`,
+/// A core over `table` for the mount `mount_id`, whose file handles are numbered for `generation`
+/// (a frontend with file handles: FUSE),
 /// with the attachments the file holds made again and the cache told which trees are attached.
 /// `count_lookups` is whether the core counts the lookups of its inodes (a frontend that is told
 /// when they are forgotten, FUSE), or drops a tree when it is detached (one that is not told).
 pub(super) fn core_of(
     settings: &FsSettings,
     table: TreeTable,
-    (mount_id, generation): (String, u32),
+    mount_id: String,
+    #[cfg(any(target_os = "linux", test))] generation: u32,
     count_lookups: bool,
 ) -> Result<Arc<Core>, StartError> {
     let fills = FillClient::new(settings.fill_socket.clone(), settings.fetch_timeout);
@@ -149,7 +157,9 @@ pub(super) fn core_of(
             cache_path: settings.cache_path.clone(),
             mountpoint: settings.mountpoint.clone(),
             mount_id,
+            #[cfg(any(target_os = "linux", test))]
             max_backing_ids: settings.max_backing_ids,
+            #[cfg(any(target_os = "linux", test))]
             generation,
             count_lookups,
         },
@@ -177,6 +187,7 @@ pub(super) struct Setup {
     /// The core a frontend serves from.
     pub core: Arc<Core>,
     /// The id of this mount, which the pins are made under.
+    #[cfg(target_os = "linux")]
     pub mount_id: String,
     /// The control socket; it is closed when this is dropped.
     pub _control: Control,
@@ -228,6 +239,7 @@ impl Setup {
         create_runtime_dir(settings)?;
         create_mount_point(settings)?;
         let (table, reopened, mount_id) = match identity {
+            #[cfg(any(target_os = "linux", test))]
             Identity::Fresh => (
                 TreeTable::create(&settings.runtime_dir)?,
                 false,
@@ -239,8 +251,16 @@ impl Setup {
             }
         };
         // The backing ids of an earlier mount belong to its connection, which is gone.
+        #[cfg(any(target_os = "linux", test))]
         remove_stale(&settings.runtime_dir.join(backing::FILE))?;
-        let core = core_of(settings, table, (mount_id.clone(), 1), count_lookups)?;
+        let core = core_of(
+            settings,
+            table,
+            mount_id.clone(),
+            #[cfg(any(target_os = "linux", test))]
+            1,
+            count_lookups,
+        )?;
         let control = Control::serve(
             Arc::clone(&core),
             &settings.control_socket,
@@ -249,6 +269,7 @@ impl Setup {
         .map_err(control_error(settings))?;
         Ok(Self {
             core,
+            #[cfg(target_os = "linux")]
             mount_id,
             _control: control,
             reopened,
