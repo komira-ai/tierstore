@@ -76,17 +76,37 @@ fn an_attach_is_refused_by_name() {
     let rig = Rig::new("tfs-core-refused", sample());
     let core = &rig.core;
     let root = rig.upstream.built.lock().unwrap().root.clone();
-    assert_eq!(core.attach("nope", RUN).unwrap_err().to_string(), "not a sha256 digest");
-    assert_eq!(core.attach(&root.to_uppercase(), RUN).unwrap_err().to_string(), "not a sha256 digest");
-    assert_eq!(core.attach(&root, "").unwrap_err().to_string(), "not a usable run name");
-    assert_eq!(core.attach(&root, "a b").unwrap_err().to_string(), "not a usable run name");
+    assert_eq!(
+        core.attach("nope", RUN).unwrap_err().to_string(),
+        "not a sha256 digest"
+    );
+    assert_eq!(
+        core.attach(&root.to_uppercase(), RUN)
+            .unwrap_err()
+            .to_string(),
+        "not a sha256 digest"
+    );
+    assert_eq!(
+        core.attach(&root, "").unwrap_err().to_string(),
+        "not a usable run name"
+    );
+    assert_eq!(
+        core.attach(&root, "a b").unwrap_err().to_string(),
+        "not a usable run name"
+    );
     let unknown = sha(b"no such manifest");
     let why = core.attach(&unknown, RUN).unwrap_err().to_string();
     assert!(why.contains("upstream 404"), "{why}");
     // Bytes that are not a manifest, under their own digest.
     let junk = b"this is not json".to_vec();
     let digest = sha(&junk);
-    let _ = rig.upstream.built.lock().unwrap().manifests.insert(digest.clone(), junk);
+    let _ = rig
+        .upstream
+        .built
+        .lock()
+        .unwrap()
+        .manifests
+        .insert(digest.clone(), junk);
     let why = core.attach(&digest, RUN).unwrap_err();
     assert!(matches!(why, AttachError::Tree(_)), "{why}");
     assert!(why.to_string().contains("malformed manifest"), "{why}");
@@ -120,7 +140,15 @@ fn the_namespace_is_two_directories_nobody_lists() {
     let trees = core.getattr(ino::TREES).unwrap();
     for entry in [root, trees] {
         assert_eq!(entry.ttl, Duration::ZERO);
-        assert_eq!((entry.attr.kind, entry.attr.perm, entry.attr.uid, entry.attr.gid), (Kind::Dir, 0o711, 0, 0));
+        assert_eq!(
+            (
+                entry.attr.kind,
+                entry.attr.perm,
+                entry.attr.uid,
+                entry.attr.gid
+            ),
+            (Kind::Dir, 0o711, 0, 0)
+        );
     }
     assert_eq!((root.attr.ino, root.attr.nlink), (ino::ROOT, 3));
     assert_eq!((trees.attr.ino, trees.attr.nlink), (ino::TREES, 2));
@@ -152,7 +180,10 @@ fn a_tree_is_found_by_digest_only_while_attached() {
     assert_eq!((attr.uid, attr.gid), OWNER);
     assert_eq!(core.lookup(ino::TREES, &sha(b"other")), Err(Errno::NoEnt));
     assert_eq!(core.lookup(ino::TREES, "not-a-digest"), Err(Errno::NoEnt));
-    assert_eq!(core.lookup(ino::TREES, &root.to_uppercase()), Err(Errno::NoEnt));
+    assert_eq!(
+        core.lookup(ino::TREES, &root.to_uppercase()),
+        Err(Errno::NoEnt)
+    );
     assert!(core.detach(RUN).is_some());
     assert_eq!(core.lookup(ino::TREES, &root), Err(Errno::NoEnt));
     // Attached again: the same number.
@@ -178,12 +209,30 @@ fn the_entries_of_a_tree_report_their_modes_sizes_owner_and_timeout() {
     ];
     for (name, index, kind, perm, size, nlink) in cases {
         let entry = found(core, root_ino(), name);
-        let want = Attr { ino: ino::of(1, index), kind, size, perm, nlink, uid: OWNER.0, gid: OWNER.1 };
-        assert_eq!(entry, Entry { attr: want, ttl: TREE_TTL }, "{name}");
+        let want = Attr {
+            ino: ino::of(1, index),
+            kind,
+            size,
+            perm,
+            nlink,
+            uid: OWNER.0,
+            gid: OWNER.1,
+        };
+        assert_eq!(
+            entry,
+            Entry {
+                attr: want,
+                ttl: TREE_TTL
+            },
+            "{name}"
+        );
         assert_eq!(core.getattr(want.ino).unwrap(), entry);
     }
     let cc = found(core, ino::of(1, 2), "cc");
-    assert_eq!((cc.attr.ino, cc.attr.perm, cc.attr.size), (ino::of(1, 3), 0o755, 3000));
+    assert_eq!(
+        (cc.attr.ino, cc.attr.perm, cc.attr.size),
+        (ino::of(1, 3), 0o755, 3000)
+    );
     assert_eq!(found(core, ino::of(1, 2), "tool").attr.perm, 0o644);
     assert_eq!(found(core, ino::of(1, 6), "a.h").attr.size, 6);
 }
@@ -195,8 +244,14 @@ fn the_entries_of_a_tree_report_their_modes_sizes_owner_and_timeout() {
 fn an_absent_name_is_a_cached_absence_and_a_bad_parent_is_an_error() {
     let rig = attached("tfs-core-absent");
     let core = &rig.core;
-    assert_eq!(core.lookup(root_ino(), "nothing"), Ok(Looked::Absent(TREE_TTL)));
-    assert_eq!(core.lookup(ino::of(1, 2), "nothing"), Ok(Looked::Absent(TREE_TTL)));
+    assert_eq!(
+        core.lookup(root_ino(), "nothing"),
+        Ok(Looked::Absent(TREE_TTL))
+    );
+    assert_eq!(
+        core.lookup(ino::of(1, 2), "nothing"),
+        Ok(Looked::Absent(TREE_TTL))
+    );
     assert_eq!(core.lookup(ino::of(1, 1), "x"), Err(Errno::NotDir));
     assert_eq!(core.lookup(ino::of(1, 8), "x"), Err(Errno::NotDir));
     assert_eq!(core.lookup(ino::of(1, 99), "x"), Err(Errno::NoEnt));
@@ -232,8 +287,14 @@ fn a_listing_has_the_dots_then_the_children_and_resumes_from_a_position() {
         names(all.clone()),
         [".", "..", "big.bin", "bin", "empty.h", "include", "lib"]
     );
-    assert_eq!(all.iter().map(|(next, _)| *next).collect::<Vec<_>>(), [1, 2, 3, 4, 5, 6, 7]);
-    assert_eq!(names(listed(core, root_ino(), 4)), ["empty.h", "include", "lib"]);
+    assert_eq!(
+        all.iter().map(|(next, _)| *next).collect::<Vec<_>>(),
+        [1, 2, 3, 4, 5, 6, 7]
+    );
+    assert_eq!(
+        names(listed(core, root_ino(), 4)),
+        ["empty.h", "include", "lib"]
+    );
     assert!(listed(core, root_ino(), 7).is_empty());
     assert!(listed(core, root_ino(), u64::MAX).is_empty());
     let mut dots = Vec::new();
@@ -258,7 +319,10 @@ fn a_listing_has_the_dots_then_the_children_and_resumes_from_a_position() {
     })
     .unwrap();
     assert_eq!(asked, 3);
-    assert_eq!(core.readdir(ino::of(1, 1), 0, &mut |_, _| true), Err(Errno::NotDir));
+    assert_eq!(
+        core.readdir(ino::of(1, 1), 0, &mut |_, _| true),
+        Err(Errno::NotDir)
+    );
     assert_eq!(core.opendir(ino::of(1, 8)), Err(Errno::NotDir));
     assert_eq!(core.opendir(ino::of(1, 99)), Err(Errno::NoEnt));
     assert_eq!(core.opendir(root_ino()), Ok(()));
@@ -320,12 +384,18 @@ fn a_blob_in_the_cache_is_not_filled_again_and_is_pinned_once_per_tree() {
     let after_first = fills(&rig);
     let second = core.open(ino::of(1, 3), false).unwrap();
     assert_eq!(fills(&rig), after_first);
-    assert_eq!(rig.upstream.asked("pin"), [format!("pin mount-1 {root} {cc}")]);
+    assert_eq!(
+        rig.upstream.asked("pin"),
+        [format!("pin mount-1 {root} {cc}")]
+    );
     assert_eq!(rig.upstream.asked("touch"), [format!("touch {cc}")]);
     let a = blob_of(&rig, 6);
     let third = core.open(ino::of(1, 7), false).unwrap();
     assert_eq!(rig.upstream.asked("pin").len(), 2);
-    assert_eq!(rig.upstream.asked("pin")[1], format!("pin mount-1 {root} {a}"));
+    assert_eq!(
+        rig.upstream.asked("pin")[1],
+        format!("pin mount-1 {root} {a}")
+    );
     for fh in [first, second, third] {
         core.release(fh);
     }
@@ -348,8 +418,9 @@ fn an_open_is_refused_for_writing_and_for_what_is_not_a_file() {
 
 /// Asserts that a fill that fails fails the open with `EIO`, records the path, the digest and the
 /// words of the failure on every run that has the tree, once for a path however often it is opened,
-/// and gives them at `detach`; that a fill answered `ok` that left no file is a failure `io`; and
-/// that the file opens once the upstream has it again.
+/// and gives them at `detach`; that a fill answered `ok` that left no file is a failure `io`, and a
+/// blob the upstream does not have is `upstream 404`; and that the file opens once the upstream
+/// has it again.
 #[test]
 fn a_failed_fill_fails_the_open_and_is_recorded_for_every_run_of_the_tree() {
     let rig = attached("tfs-core-fail");
@@ -358,17 +429,44 @@ fn a_failed_fill_fails_the_open_and_is_recorded_for_every_run_of_the_tree() {
     let _ = core.attach(&root, "run-2").unwrap();
     let cc = blob_of(&rig, 3000);
     let tool = blob_of(&rig, 10);
-    let _ = rig.upstream.failing.lock().unwrap().insert(cc.clone(), "upstream 404".to_owned());
-    let _ = rig.upstream.failing.lock().unwrap().insert(tool.clone(), "ok".to_owned());
+    let a = blob_of(&rig, 6);
+    let _ = rig
+        .upstream
+        .failing
+        .lock()
+        .unwrap()
+        .insert(cc.clone(), "no space".to_owned());
+    let _ = rig
+        .upstream
+        .failing
+        .lock()
+        .unwrap()
+        .insert(tool.clone(), "ok".to_owned());
+    let held = rig.upstream.built.lock().unwrap().blobs.remove(&a).unwrap();
     assert_eq!(core.open(ino::of(1, 3), false), Err(Errno::Io));
     assert_eq!(core.open(ino::of(1, 3), false), Err(Errno::Io));
     assert_eq!(core.open(ino::of(1, 4), false), Err(Errno::Io));
+    assert_eq!(core.open(ino::of(1, 7), false), Err(Errno::Io));
     assert_eq!(core.open_files(), 0);
     assert!(rig.upstream.asked("pin").is_empty());
     let want = vec![
-        Failure { path: "/bin/cc".into(), digest: cc.clone(), reason: "upstream 404".into() },
-        Failure { path: "/bin/tool".into(), digest: tool, reason: "io".into() },
+        Failure {
+            path: "/bin/cc".into(),
+            digest: cc.clone(),
+            reason: "no space".into(),
+        },
+        Failure {
+            path: "/bin/tool".into(),
+            digest: tool,
+            reason: "io".into(),
+        },
+        Failure {
+            path: "/include/a.h".into(),
+            digest: a.clone(),
+            reason: "upstream 404".into(),
+        },
     ];
+    let _ = rig.upstream.built.lock().unwrap().blobs.insert(a, held);
     assert_eq!(core.detach("run-1").unwrap(), want);
     rig.upstream.failing.lock().unwrap().clear();
     assert!(core.open(ino::of(1, 3), false).is_ok());
@@ -403,7 +501,10 @@ fn a_read_that_the_system_fails_is_an_io_error() {
     let handle = core.open(ino::of(1, 3), false).unwrap();
     // Replace the open file with a directory: reading it fails.
     let directory = std::fs::File::open(&rig.cache).unwrap();
-    let _ = super::locked(&core.handles).insert(handle, std::sync::Arc::new(super::Handle::Cached(directory)));
+    let _ = super::locked(&core.handles).insert(
+        handle,
+        std::sync::Arc::new(super::Handle::Cached(directory)),
+    );
     assert_eq!(core.read(handle, 0, 10), Err(Errno::Io));
 }
 
@@ -421,8 +522,14 @@ fn a_detach_unpins_a_tree_only_when_its_last_run_goes() {
     assert_eq!(core.attachments().len(), 1);
     assert_eq!(core.detach("run-1"), None);
     assert_eq!(core.detach("run-2"), Some(Vec::new()));
-    assert_eq!(rig.upstream.asked("unpin"), [format!("unpin mount-1 {root}")]);
-    assert_eq!(std::fs::read_to_string(rig.runtime.join("attachments")).unwrap(), "");
+    assert_eq!(
+        rig.upstream.asked("unpin"),
+        [format!("unpin mount-1 {root}")]
+    );
+    assert_eq!(
+        std::fs::read_to_string(rig.runtime.join("attachments")).unwrap(),
+        ""
+    );
 }
 
 /// Asserts that `detach-all-except` ends the runs that are not named and counts them, and keeps the
@@ -435,7 +542,10 @@ fn detach_all_except_ends_the_runs_not_named() {
     for run in ["run-2", "run-3"] {
         let _ = core.attach(&root, run).unwrap();
     }
-    assert_eq!(core.detach_all_except(&["run-2".to_owned(), "never-attached".to_owned()]), 2);
+    assert_eq!(
+        core.detach_all_except(&["run-2".to_owned(), "never-attached".to_owned()]),
+        2
+    );
     let left: Vec<String> = core.attachments().into_iter().map(|(_, run)| run).collect();
     assert_eq!(left, ["run-2"]);
     assert_eq!(core.detach_all_except(&["run-2".to_owned()]), 0);
@@ -455,7 +565,10 @@ fn pins_live_names_the_trees_attached_now() {
     core.pins_live();
     assert_eq!(
         rig.upstream.asked("pins-live"),
-        [format!("pins-live mount-1 {root}"), "pins-live mount-1 ".to_owned()]
+        [
+            format!("pins-live mount-1 {root}"),
+            "pins-live mount-1 ".to_owned()
+        ]
     );
 }
 
@@ -525,7 +638,10 @@ fn a_tree_that_cannot_be_read_again_is_an_io_error() {
     assert_eq!(core.getattr(root_ino()), Err(Errno::Io));
     assert_eq!(core.getattr(ino::of(5, 0)), Err(Errno::NoEnt));
     // A table that cannot be read.
-    let table = std::fs::OpenOptions::new().write(true).open(rig.runtime.join("trees")).unwrap();
+    let table = std::fs::OpenOptions::new()
+        .write(true)
+        .open(rig.runtime.join("trees"))
+        .unwrap();
     table.set_len(16).unwrap();
     assert_eq!(core.getattr(root_ino()), Err(Errno::Io));
 }
@@ -537,7 +653,8 @@ fn a_manifest_file_is_read_up_to_one_byte_past_the_limit() {
     let rig = Rig::new("tfs-core-big", Built::default());
     let path = rig.cache.join("big");
     let file = std::fs::File::create(&path).unwrap();
-    file.set_len(crate::tree_manifest::MAX_MANIFEST_BYTES as u64 + 10).unwrap();
+    file.set_len(crate::tree_manifest::MAX_MANIFEST_BYTES as u64 + 10)
+        .unwrap();
     let bytes = super::read_manifest(&path).unwrap();
     assert_eq!(bytes.len(), crate::tree_manifest::MAX_MANIFEST_BYTES + 1);
     assert!(super::read_manifest(&rig.cache.join("none")).is_err());

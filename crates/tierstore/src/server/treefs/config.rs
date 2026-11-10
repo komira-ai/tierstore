@@ -22,8 +22,8 @@ use crate::server::config::{ConfigError, invalid, require, within};
 use crate::server::config_handoff::MOST_SOCKET_PATH;
 use crate::server::config_syntax::syntax;
 use crate::server::config_tuning::{HOUR, MS};
-use crate::server::config_unknown::fields_of;
 use crate::server::config_units::Dur;
+use crate::server::config_unknown::fields_of;
 
 /// The mount point when the file leaves out `fs.mountpoint`.
 const DEFAULT_MOUNTPOINT: &str = "/run/tierstore/fs";
@@ -144,7 +144,9 @@ impl FsSettings {
             );
             return Err(invalid("fs.control_socket", why));
         }
-        let timeout = table.fetch_timeout.map_or(DEFAULT_FETCH_TIMEOUT, |dur| dur.0);
+        let timeout = table
+            .fetch_timeout
+            .map_or(DEFAULT_FETCH_TIMEOUT, |dur| dur.0);
         if timeout < MS || timeout > HOUR {
             let why = format!("{}ms is not between 1ms and 1h", timeout.as_millis());
             return Err(invalid("fs.fetch_timeout", why));
@@ -187,13 +189,12 @@ impl FsSettings {
 /// wrong type, and those of [`FsSettings::of`].
 pub(super) fn from_text(text: &str, groups: &str) -> Result<FsSettings, ConfigError> {
     let file: File = toml::from_str(text).map_err(|error| syntax(text, &error))?;
-    if let Ok(whole) = text.parse::<toml::Table>() {
-        let known = fields_of::<FsTable>();
-        let table = whole.get("fs").and_then(toml::Value::as_table);
-        for key in table.into_iter().flat_map(|table| table.keys()) {
-            if !known.contains(&key.as_str()) {
-                tracing::warn!("tierstore fs: fs.{key} is not a key of this release and is ignored");
-            }
+    let whole = text.parse::<toml::Table>().unwrap_or_default();
+    let known = fields_of::<FsTable>();
+    let table = whole.get("fs").and_then(toml::Value::as_table);
+    for key in table.into_iter().flat_map(|table| table.keys()) {
+        if !known.contains(&key.as_str()) {
+            tracing::warn!("tierstore fs: fs.{key} is not a key of this release and is ignored");
         }
     }
     FsSettings::of(file.fs, groups)

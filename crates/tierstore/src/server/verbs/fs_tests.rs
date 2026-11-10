@@ -101,7 +101,9 @@ fn the_attachments_are_listed_from_the_control_socket() {
     let root = rig.upstream.built.lock().unwrap().root.clone();
     for run in ["run-b", "run-a"] {
         let stream = std::os::unix::net::UnixStream::connect(&socket).unwrap();
-        (&stream).write_all(format!("attach {root} for {run}\n").as_bytes()).unwrap();
+        (&stream)
+            .write_all(format!("attach {root} for {run}\n").as_bytes())
+            .unwrap();
         let mut line = String::new();
         let _ = BufReader::new(&stream).read_line(&mut line).unwrap();
         assert!(line.contains("\"ok\":true"), "{line}");
@@ -132,10 +134,10 @@ fn the_attachments_of_a_socket_that_does_not_answer_are_an_error() {
     });
     let (code, _, err) = fs(&["attachments", "--config", path.to_str().unwrap()]);
     assert_eq!(code, status(1));
-    assert!(err.contains("the control socket's answer"), "{err}");
+    assert!(err.contains("expected ident"), "{err}");
     let (code, _, err) = fs(&["attachments", "--config", path.to_str().unwrap()]);
     assert_eq!(code, status(1));
-    assert!(err.contains("the control socket's answer"), "{err}");
+    assert!(err.contains("EOF while parsing"), "{err}");
     server.join().unwrap();
 }
 
@@ -144,4 +146,39 @@ fn the_attachments_of_a_socket_that_does_not_answer_are_an_error() {
 fn the_verb_is_answered_by_name() {
     let answered = crate::server::verbs::answer(&args(&["fs", "--help"])).unwrap();
     assert_eq!(format!("{answered:?}"), status(0));
+}
+
+/// Asserts the status of a serve: success for a mount that ended well, and for one that did not the
+/// status of its error (3 for a stacked cache, 1 for the rest) with its words on stderr.
+#[cfg(target_os = "linux")]
+#[test]
+fn the_status_of_a_serve_is_the_status_of_its_error() {
+    use crate::server::treefs::StartError;
+    let mut err = Vec::new();
+    assert_eq!(
+        format!("{:?}", super::finished(Ok(()), &mut err)),
+        status(0)
+    );
+    assert!(err.is_empty());
+    let stacked = StartError::Stacked {
+        path: "/c".to_owned(),
+        name: "overlayfs",
+    };
+    assert_eq!(
+        format!("{:?}", super::finished(Err(stacked), &mut err)),
+        status(3)
+    );
+    let io = StartError::Io {
+        what: "mounting".to_owned(),
+        source: std::io::Error::other("busy"),
+    };
+    assert_eq!(
+        format!("{:?}", super::finished(Err(io), &mut err)),
+        status(1)
+    );
+    let text = String::from_utf8(err).unwrap();
+    assert!(
+        text.contains("tierstore fs: fs.cache_path /c") && text.contains("mounting: busy"),
+        "{text}"
+    );
 }

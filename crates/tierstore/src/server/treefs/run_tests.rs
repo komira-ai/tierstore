@@ -10,10 +10,10 @@ use serde_json::{Value, json};
 
 use super::{
     ECRYPTFS, OVERLAYFS, Running, Signals, StartError, check_cache, new_mount_id, notify_ready,
-    serve, serve_notifying, stacked_name,
+    refuse_stacked, serve, serve_notifying, stacked_name,
 };
 use crate::server::treefs::config::FsSettings;
-use crate::server::treefs::testing::{Rig, sample, skipped, unavailable};
+use crate::server::treefs::testing::{Rig, sample, with_fuse};
 
 /// Tests that send signals to the process go one at a time: a signal is for every handler.
 static SIGNALS: Mutex<()> = Mutex::new(());
@@ -25,7 +25,10 @@ fn settings(rig: &Rig) -> FsSettings {
         runtime_dir: rig.runtime.clone(),
         control_socket: rig.dir.path().join("control.sock"),
         client_group: std::fs::metadata(&rig.runtime).unwrap().gid(),
-        owner: (rustix::process::geteuid().as_raw(), rustix::process::getegid().as_raw()),
+        owner: (
+            rustix::process::geteuid().as_raw(),
+            rustix::process::getegid().as_raw(),
+        ),
         fill_socket: rig.dir.path().join("fill.sock"),
         cache_path: rig.cache.clone(),
         fetch_timeout: std::time::Duration::from_secs(5),
@@ -36,12 +39,15 @@ fn settings(rig: &Rig) -> FsSettings {
 
 fn mounted(mountpoint: &std::path::Path) -> bool {
     let info = std::fs::read_to_string("/proc/self/mountinfo").unwrap();
-    info.lines().any(|line| line.contains(mountpoint.to_str().unwrap()))
+    info.lines()
+        .any(|line| line.contains(mountpoint.to_str().unwrap()))
 }
 
 fn ask(path: &std::path::Path, request: &str) -> Value {
     let stream = UnixStream::connect(path).unwrap();
-    (&stream).write_all(format!("{request}\n").as_bytes()).unwrap();
+    (&stream)
+        .write_all(format!("{request}\n").as_bytes())
+        .unwrap();
     let mut line = String::new();
     let _ = BufReader::new(&stream).read_line(&mut line).unwrap();
     serde_json::from_str(&line).unwrap()
@@ -53,18 +59,25 @@ fn ask(path: &std::path::Path, request: &str) -> Value {
 /// which trees are attached, and leaves out what it cannot read.
 #[test]
 fn a_start_mounts_attaches_and_serves_and_a_stop_unmounts() {
-    if let Some(why) = unavailable() {
-        return skipped(&why);
-    }
+    with_fuse(start_and_stop);
+}
+
+fn start_and_stop() {
     let rig = Rig::new("tfs-run-start", sample());
     let root = rig.upstream.built.lock().unwrap().root.clone();
     let settings = settings(&rig);
     let running = Running::start(&settings).unwrap();
     assert!(mounted(&rig.mountpoint));
-    let answer = ask(&settings.control_socket, &format!("attach {root} for run-1"));
+    let answer = ask(
+        &settings.control_socket,
+        &format!("attach {root} for run-1"),
+    );
     assert_eq!(answer["ok"], json!(true));
     let path = answer["path"].as_str().unwrap().to_owned();
-    assert_eq!(std::fs::read(format!("{path}/include/a.h")).unwrap(), b"int a;");
+    assert_eq!(
+        std::fs::read(format!("{path}/include/a.h")).unwrap(),
+        b"int a;"
+    );
     assert_eq!(running.core().attachments().len(), 1);
     running.stop().unwrap();
     assert!(!mounted(&rig.mountpoint));
@@ -72,11 +85,29 @@ fn a_start_mounts_attaches_and_serves_and_a_stop_unmounts() {
     assert_eq!(kept, format!("{root} run-1\n"));
     // A line of the file whose tree cannot be had is not attached again.
     let gone = "ab".repeat(32);
-    std::fs::write(rig.runtime.join("attachments"), format!("{kept}{gone} run-2\n")).unwrap();
+    std::fs::write(
+        rig.runtime.join("attachments"),
+        format!("{kept}{gone} run-2\n"),
+    )
+    .unwrap();
     let again = Running::start(&settings).unwrap();
-    let left: Vec<String> = again.core().attachments().into_iter().map(|(_, run)| run).collect();
+    let left: Vec<String> = again
+        .core()
+        .attachments()
+        .into_iter()
+        .map(|(_, run)| run)
+        .collect();
     assert_eq!(left, ["run-1"]);
-    assert_eq!(rig.upstream.asked("pins-live").last().unwrap().split(' ').last().unwrap(), root);
+    assert_eq!(
+        rig.upstream
+            .asked("pins-live")
+            .last()
+            .unwrap()
+            .split(' ')
+            .last()
+            .unwrap(),
+        root
+    );
     again.stop().unwrap();
 }
 
@@ -90,14 +121,41 @@ fn a_start_that_cannot_do_what_it_needs_says_what() {
     let file = rig.dir.path().join("a-file");
     std::fs::write(&file, "x").unwrap();
     let cases: Vec<(FsSettings, &str)> = vec![
-        (FsSettings { cache_path: rig.dir.path().join("none"), ..base.clone() }, "fs.cache_path"),
-        (FsSettings { runtime_dir: file.join("run"), ..base.clone() }, "fs.runtime_dir"),
-        (FsSettings { mountpoint: file.join("mnt"), ..base.clone() }, "fs.mountpoint"),
         (
-            FsSettings { control_socket: rig.dir.path().join("no/dir/c.sock"), ..base.clone() },
+            FsSettings {
+                cache_path: rig.dir.path().join("none"),
+                ..base.clone()
+            },
+            "fs.cache_path",
+        ),
+        (
+            FsSettings {
+                runtime_dir: file.join("run"),
+                ..base.clone()
+            },
+            "fs.runtime_dir",
+        ),
+        (
+            FsSettings {
+                mountpoint: file.join("mnt"),
+                ..base.clone()
+            },
+            "fs.mountpoint",
+        ),
+        (
+            FsSettings {
+                control_socket: rig.dir.path().join("no/dir/c.sock"),
+                ..base.clone()
+            },
             "fs.control_socket",
         ),
-        (FsSettings { mountpoint: file.clone(), ..base.clone() }, "fs.mountpoint"),
+        (
+            FsSettings {
+                mountpoint: file.clone(),
+                ..base.clone()
+            },
+            "fs.mountpoint",
+        ),
     ];
     for (settings, what) in cases {
         let error = Running::start(&settings).err().unwrap();
@@ -115,9 +173,22 @@ fn a_cache_on_a_stacked_file_system_is_refused_by_name() {
     assert_eq!(stacked_name(OVERLAYFS), Some("overlayfs"));
     assert_eq!(stacked_name(ECRYPTFS), Some("eCryptfs"));
     assert_eq!(stacked_name(0xef53), None);
-    let error = StartError::Stacked { path: "/cache".to_owned(), name: "overlayfs" };
+    let error = refuse_stacked(std::path::Path::new("/cache"), OVERLAYFS).unwrap_err();
+    assert!(matches!(
+        error,
+        StartError::Stacked {
+            name: "overlayfs",
+            ..
+        }
+    ));
     assert_eq!(error.status(), 3);
-    assert!(error.to_string().starts_with("fs.cache_path /cache: the file system is overlayfs"));
+    assert!(
+        error
+            .to_string()
+            .starts_with("fs.cache_path /cache: the file system is overlayfs")
+    );
+    assert!(refuse_stacked(std::path::Path::new("/cache"), ECRYPTFS).is_err());
+    assert!(refuse_stacked(std::path::Path::new("/cache"), 0xef53).is_ok());
     let rig = Rig::new("tfs-run-cache", sample());
     check_cache(&rig.cache).unwrap();
 }
@@ -157,8 +228,13 @@ fn the_service_manager_is_told_the_unit_is_ready() {
 /// not lost.
 #[test]
 fn sigterm_and_sigint_end_the_wait_even_if_they_came_first() {
-    let _one_at_a_time = SIGNALS.lock().unwrap_or_else(std::sync::PoisonError::into_inner);
-    let runtime = tokio::runtime::Builder::new_current_thread().enable_all().build().unwrap();
+    let _one_at_a_time = SIGNALS
+        .lock()
+        .unwrap_or_else(std::sync::PoisonError::into_inner);
+    let runtime = tokio::runtime::Builder::new_current_thread()
+        .enable_all()
+        .build()
+        .unwrap();
     runtime.block_on(async {
         let mut signals = Signals::install().unwrap();
         for signal in [rustix::process::Signal::TERM, rustix::process::Signal::INT] {
@@ -172,10 +248,13 @@ fn sigterm_and_sigint_end_the_wait_even_if_they_came_first() {
 /// ends it with success; and that a start that fails ends `serve` with the error.
 #[test]
 fn serve_runs_until_sigterm_and_unmounts() {
-    if let Some(why) = unavailable() {
-        return skipped(&why);
-    }
-    let _one_at_a_time = SIGNALS.lock().unwrap_or_else(std::sync::PoisonError::into_inner);
+    with_fuse(serve_and_sigterm);
+}
+
+fn serve_and_sigterm() {
+    let _one_at_a_time = SIGNALS
+        .lock()
+        .unwrap_or_else(std::sync::PoisonError::into_inner);
     let rig = Rig::new("tfs-run-serve", sample());
     let settings = settings(&rig);
     let notify = rig.dir.path().join("notify.sock");
@@ -187,9 +266,13 @@ fn serve_runs_until_sigterm_and_unmounts() {
     let got = ready.recv(&mut buffer).unwrap();
     assert_eq!(&buffer[..got], b"READY=1");
     assert!(mounted(&rig.mountpoint));
-    rustix::process::kill_process(rustix::process::getpid(), rustix::process::Signal::TERM).unwrap();
+    rustix::process::kill_process(rustix::process::getpid(), rustix::process::Signal::TERM)
+        .unwrap();
     thread.join().unwrap().unwrap();
     assert!(!mounted(&rig.mountpoint));
-    let bad = FsSettings { cache_path: rig.dir.path().join("none"), ..settings.clone() };
+    let bad = FsSettings {
+        cache_path: rig.dir.path().join("none"),
+        ..settings.clone()
+    };
     assert!(serve(&bad).is_err());
 }

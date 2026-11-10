@@ -120,10 +120,7 @@ pub(in crate::server) fn blob_path(root: &std::path::Path, sha256: &str) -> std:
 
 /// The path of the file of the object `cas/l/<sha256>` under the cache directory `root`, where the
 /// filesystem process reads a tree manifest once its fill has been answered `ok`.
-pub(in crate::server) fn manifest_path(
-    root: &std::path::Path,
-    sha256: &str,
-) -> std::path::PathBuf {
+pub(in crate::server) fn manifest_path(root: &std::path::Path, sha256: &str) -> std::path::PathBuf {
     data_path(root, &name_of(&format!("cas/l/{sha256}")).hex)
 }
 

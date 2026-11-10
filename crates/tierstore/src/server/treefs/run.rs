@@ -82,18 +82,24 @@ fn stacked_name(magic: i64) -> Option<&'static str> {
     }
 }
 
-/// Refuses a cache directory on a stacked file system.
-fn check_cache(path: &Path) -> Result<(), StartError> {
-    let stat = rustix::fs::statfs(path)
-        .map_err(|errno| std::io::Error::from_raw_os_error(errno.raw_os_error()))
-        .map_err(io(format!("fs.cache_path {}", path.display())))?;
-    match stacked_name(stat.f_type as i64) {
+/// Refuses the cache directory `path` if its file system has the magic number `magic` of a stacked
+/// one.
+fn refuse_stacked(path: &Path, magic: i64) -> Result<(), StartError> {
+    match stacked_name(magic) {
         Some(name) => Err(StartError::Stacked {
             path: path.display().to_string(),
             name,
         }),
         None => Ok(()),
     }
+}
+
+/// Refuses a cache directory on a stacked file system.
+fn check_cache(path: &Path) -> Result<(), StartError> {
+    let stat = rustix::fs::statfs(path)
+        .map_err(|errno| std::io::Error::from_raw_os_error(errno.raw_os_error()))
+        .map_err(io(format!("fs.cache_path {}", path.display())))?;
+    refuse_stacked(path, stat.f_type as i64)
 }
 
 /// An id for this mount: sixteen random bytes as hex, which the pins are made under.
@@ -119,10 +125,14 @@ impl Running {
     /// [`StartError`]: why nothing was mounted.
     pub(super) fn start(settings: &FsSettings) -> Result<Self, StartError> {
         check_cache(&settings.cache_path)?;
-        std::fs::create_dir_all(&settings.runtime_dir)
-            .map_err(io(format!("fs.runtime_dir {}", settings.runtime_dir.display())))?;
-        std::fs::create_dir_all(&settings.mountpoint)
-            .map_err(io(format!("fs.mountpoint {}", settings.mountpoint.display())))?;
+        std::fs::create_dir_all(&settings.runtime_dir).map_err(io(format!(
+            "fs.runtime_dir {}",
+            settings.runtime_dir.display()
+        )))?;
+        std::fs::create_dir_all(&settings.mountpoint).map_err(io(format!(
+            "fs.mountpoint {}",
+            settings.mountpoint.display()
+        )))?;
         let table = TreeTable::create(&settings.runtime_dir)?;
         let fills = FillClient::new(settings.fill_socket.clone(), settings.fetch_timeout);
         let core = Arc::new(Core::new(
@@ -136,7 +146,8 @@ impl Running {
             table,
             &settings.runtime_dir,
         ));
-        let saved = Attachments::saved(&settings.runtime_dir).map_err(io("reading the attachments file"))?;
+        let saved = Attachments::saved(&settings.runtime_dir)
+            .map_err(io("reading the attachments file"))?;
         for (tree, run) in saved {
             if let Err(why) = core.attach(&tree.to_string(), &run) {
                 tracing::warn!("tierstore fs: not attaching {tree} for {run} again: {why}");
@@ -153,9 +164,13 @@ impl Running {
             settings.control_socket.display()
         )))?;
         let config = fuse::config(settings.threads, settings.allow_other);
-        let session = Session::new(Frontend::new(Arc::clone(&core)), &settings.mountpoint, &config)
-            .and_then(Session::spawn)
-            .map_err(io(format!("mounting {}", settings.mountpoint.display())))?;
+        let session = Session::new(
+            Frontend::new(Arc::clone(&core)),
+            &settings.mountpoint,
+            &config,
+        )
+        .and_then(Session::spawn)
+        .map_err(io(format!("mounting {}", settings.mountpoint.display())))?;
         Ok(Self {
             _core: core,
             _control: control,
@@ -174,9 +189,7 @@ impl Running {
     /// # Errors
     /// What the system said when the mount could not be unmounted.
     pub(super) fn stop(self) -> Result<(), StartError> {
-        self.session
-            .umount_and_join()
-            .map_err(io("unmounting"))
+        self.session.umount_and_join().map_err(io("unmounting"))
     }
 }
 
@@ -230,7 +243,8 @@ impl Signals {
 
     /// Waits for SIGTERM or SIGINT.
     pub(super) async fn wait(&mut self) {
-        let _ = futures::future::select(Box::pin(self.term.recv()), Box::pin(self.int.recv())).await;
+        let _ =
+            futures::future::select(Box::pin(self.term.recv()), Box::pin(self.int.recv())).await;
     }
 }
 

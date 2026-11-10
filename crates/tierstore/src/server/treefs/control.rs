@@ -89,7 +89,10 @@ fn session(core: &Core, stream: UnixStream) {
             }
             return;
         };
-        if write.write_all(answer(&handle(core, &text)).as_bytes()).is_err() {
+        if write
+            .write_all(answer(&handle(core, &text)).as_bytes())
+            .is_err()
+        {
             return;
         }
     }
@@ -108,7 +111,11 @@ impl Control {
     ///
     /// # Errors
     /// What the system said when the socket cannot be bound or given its mode and group.
-    pub(in crate::server) fn serve(core: Arc<Core>, path: &Path, gid: u32) -> std::io::Result<Self> {
+    pub(in crate::server) fn serve(
+        core: Arc<Core>,
+        path: &Path,
+        gid: u32,
+    ) -> std::io::Result<Self> {
         // A file that stays is found by the bind.
         let _ = std::fs::remove_file(path);
         let listener = UnixListener::bind(path)?;
@@ -142,9 +149,7 @@ impl Drop for Control {
         self.stop.store(true, Ordering::Release);
         // The thread waits in `accept`: a connection wakes it to see the flag.
         let _ = UnixStream::connect(&self.path);
-        if let Some(thread) = self.thread.take() {
-            let _ = thread.join();
-        }
+        let _ = self.thread.take().map(std::thread::JoinHandle::join);
         let _ = std::fs::remove_file(&self.path);
     }
 }

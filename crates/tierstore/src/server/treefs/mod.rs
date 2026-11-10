@@ -30,15 +30,37 @@ mod run;
 
 pub(super) use config::{FsSettings, load};
 #[cfg(target_os = "linux")]
-pub(super) use run::serve;
+pub(super) use run::{StartError, serve};
 
 use std::sync::{Mutex, MutexGuard};
 
 /// The data of `mutex`, whether or not a thread panicked holding it: the state it guards is
 /// whole at every point a panic can come from.
 fn locked<T>(mutex: &Mutex<T>) -> MutexGuard<'_, T> {
-    mutex.lock().unwrap_or_else(|poisoned| poisoned.into_inner())
+    mutex
+        .lock()
+        .unwrap_or_else(|poisoned| poisoned.into_inner())
 }
 
 #[cfg(test)]
 pub(in crate::server) mod testing;
+
+#[cfg(test)]
+mod tests {
+    use std::sync::{Arc, Mutex};
+
+    use super::locked;
+
+    /// Asserts that the data of a mutex is had after a thread panicked holding it.
+    #[test]
+    fn the_data_of_a_mutex_a_thread_panicked_holding_is_still_had() {
+        let mutex = Arc::new(Mutex::new(5));
+        let held = Arc::clone(&mutex);
+        let thread = std::thread::spawn(move || {
+            let _guard = held.lock().unwrap();
+            panic!("a thread dies holding the lock");
+        });
+        assert!(thread.join().is_err());
+        assert_eq!(*locked(&mutex), 5);
+    }
+}

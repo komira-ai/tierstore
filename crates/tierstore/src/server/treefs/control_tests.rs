@@ -23,9 +23,15 @@ impl Client {
     }
 
     fn ask(&mut self, request: &str) -> Value {
-        self.read.get_mut().write_all(format!("{request}\n").as_bytes()).unwrap();
+        self.read
+            .get_mut()
+            .write_all(format!("{request}\n").as_bytes())
+            .unwrap();
         let mut line = String::new();
-        assert!(self.read.read_line(&mut line).unwrap() > 0, "no answer to {request}");
+        assert!(
+            self.read.read_line(&mut line).unwrap() > 0,
+            "no answer to {request}"
+        );
         serde_json::from_str(&line).unwrap()
     }
 }
@@ -60,12 +66,30 @@ fn a_client_attaches_lists_and_detaches_over_the_socket() {
     assert_eq!(client.ask(&format!("attach {root} for run-3")), want);
     let listed = client.ask("attachments");
     assert_eq!(listed["attachments"].as_array().unwrap().len(), 3);
-    assert_eq!(listed["attachments"][0], json!({"tree": root, "run": "run-1"}));
-    assert_eq!(client.ask("detach run-1"), json!({"ok": true, "failures": []}));
-    assert_eq!(client.ask("detach run-1"), json!({"ok": false, "error": "not attached"}));
-    assert_eq!(client.ask("detach-all-except run-3 run-9"), json!({"ok": true, "detached": 1}));
-    assert_eq!(client.ask("detach-all-except"), json!({"ok": true, "detached": 1}));
-    assert_eq!(client.ask("attachments"), json!({"ok": true, "attachments": []}));
+    assert_eq!(
+        listed["attachments"][0],
+        json!({"tree": root, "run": "run-1"})
+    );
+    assert_eq!(
+        client.ask("detach run-1"),
+        json!({"ok": true, "failures": []})
+    );
+    assert_eq!(
+        client.ask("detach run-1"),
+        json!({"ok": false, "error": "not attached"})
+    );
+    assert_eq!(
+        client.ask("detach-all-except run-3 run-9"),
+        json!({"ok": true, "detached": 1})
+    );
+    assert_eq!(
+        client.ask("detach-all-except"),
+        json!({"ok": true, "detached": 1})
+    );
+    assert_eq!(
+        client.ask("attachments"),
+        json!({"ok": true, "attachments": []})
+    );
 }
 
 /// Asserts that a detach answers the failures an open recorded, with path, digest and reason.
@@ -75,9 +99,20 @@ fn a_detach_answers_the_failures_the_run_recorded() {
     let mut client = Client::connect(&rig.dir.path().join("control.sock"));
     let root = root(&rig);
     let _ = client.ask(&format!("attach {root} for run-1"));
-    let cc = crate::server::treefs::testing::sha(&(0..3000u32).map(|i| (i % 241) as u8).collect::<Vec<_>>());
-    let _ = rig.upstream.failing.lock().unwrap().insert(cc.clone(), "no space".to_owned());
-    assert!(rig.core.open(crate::server::treefs::ino::of(1, 3), false).is_err());
+    let cc = crate::server::treefs::testing::sha(
+        &(0..3000u32).map(|i| (i % 241) as u8).collect::<Vec<_>>(),
+    );
+    let _ = rig
+        .upstream
+        .failing
+        .lock()
+        .unwrap()
+        .insert(cc.clone(), "no space".to_owned());
+    assert!(
+        rig.core
+            .open(crate::server::treefs::ino::of(1, 3), false)
+            .is_err()
+    );
     let answer = client.ask("detach run-1");
     assert_eq!(
         answer["failures"],
@@ -92,9 +127,18 @@ fn a_request_that_is_refused_is_answered_in_words_and_the_connection_goes_on() {
     let mut client = Client::connect(&rig.dir.path().join("control.sock"));
     let root = root(&rig);
     let refused = |why: &str| json!({"ok": false, "error": why});
-    assert_eq!(client.ask("attach nope for run-1"), refused("not a sha256 digest"));
-    assert_eq!(client.ask(&format!("attach {root} for ")), refused("not a usable run name"));
-    assert_eq!(client.ask(&format!("attach {root} to run-1")), refused("unknown request"));
+    assert_eq!(
+        client.ask("attach nope for run-1"),
+        refused("not a sha256 digest")
+    );
+    assert_eq!(
+        client.ask(&format!("attach {root} for ")),
+        refused("not a usable run name")
+    );
+    assert_eq!(
+        client.ask(&format!("attach {root} to run-1")),
+        refused("unknown request")
+    );
     assert_eq!(client.ask("attach"), refused("unknown request"));
     assert_eq!(client.ask("detach"), refused("unknown request"));
     assert_eq!(client.ask("detach a b"), refused("unknown request"));
@@ -102,7 +146,12 @@ fn a_request_that_is_refused_is_answered_in_words_and_the_connection_goes_on() {
     assert_eq!(client.ask("frob"), refused("unknown request"));
     assert_eq!(client.ask(""), refused("unknown request"));
     let missing = format!("attach {} for run-1", "ab".repeat(32));
-    assert!(client.ask(&missing)["error"].as_str().unwrap().contains("upstream 404"));
+    assert!(
+        client.ask(&missing)["error"]
+            .as_str()
+            .unwrap()
+            .contains("upstream 404")
+    );
     assert_eq!(client.ask("attachments")["ok"], json!(true));
 }
 
@@ -122,7 +171,11 @@ fn a_line_that_is_too_long_or_unfinished_ends_the_connection() {
     assert_eq!(client.read.read_line(&mut line).unwrap(), 0);
     let mut client = Client::connect(&path);
     client.read.get_mut().write_all(b"attachments").unwrap();
-    client.read.get_mut().shutdown(std::net::Shutdown::Write).unwrap();
+    client
+        .read
+        .get_mut()
+        .shutdown(std::net::Shutdown::Write)
+        .unwrap();
     line.clear();
     assert_eq!(client.read.read_line(&mut line).unwrap(), 0);
     let mut client = Client::connect(&path);
@@ -177,23 +230,23 @@ fn a_socket_that_cannot_be_bound_is_an_error() {
     assert!(Control::serve(rig.core.clone(), &busy, gid).is_err());
 }
 
-/// Asserts that a group the process does not belong to cannot be given to the socket, as an error.
+/// Asserts that a group the process does not belong to cannot be given to the socket by a process
+/// that is not root, and can by one that is.
 #[test]
-fn a_group_the_process_is_not_in_is_an_error() {
+fn a_group_the_process_is_not_in_is_an_error_unless_it_is_root() {
     let rig = Rig::new("tfs-control-group", sample());
     let path = rig.dir.path().join("control.sock");
     let own = std::fs::metadata(&rig.runtime).unwrap().gid();
-    if rustix::process::geteuid().is_root() {
-        // Root may give any group; the case is the unprivileged one.
-        return;
-    }
-    let other = own.wrapping_add(7);
-    assert!(Control::serve(rig.core.clone(), &path, other).is_err());
+    let served = Control::serve(rig.core.clone(), &path, own.wrapping_add(7));
+    assert_eq!(served.is_ok(), rustix::process::geteuid().is_root());
 }
 
 /// Asserts the pure handler, which the socket calls: an unknown request is refused.
 #[test]
 fn the_handler_refuses_what_it_does_not_know() {
     let rig = Rig::new("tfs-control-handle", sample());
-    assert_eq!(handle(&rig.core, "x"), json!({"ok": false, "error": "unknown request"}));
+    assert_eq!(
+        handle(&rig.core, "x"),
+        json!({"ok": false, "error": "unknown request"})
+    );
 }

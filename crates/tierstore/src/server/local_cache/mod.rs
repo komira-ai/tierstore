@@ -244,8 +244,8 @@ use keep::Sent;
 use layout::{Name, data_path, name_of};
 use metrics::{add, bump};
 use revalidate::Verdict;
-pub(super) use source::{blob_path, manifest_path};
 pub(super) use source::{Blob, FillError};
+pub(super) use source::{blob_path, manifest_path};
 use stream::eager;
 
 /// The most an uncached object may be, for a ranged read of it to fill the whole of it.

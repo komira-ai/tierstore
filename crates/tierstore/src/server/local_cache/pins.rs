@@ -38,8 +38,8 @@ use thiserror::Error;
 
 use super::index::Index;
 use super::layout::is_digest;
-use super::source::blob_name;
 use super::pin_set::{Owner, Pinned, PinsFile};
+use super::source::blob_name;
 use super::{CacheConfig, Inner, LocalCache, locked};
 
 /// The name of the pins file in the cache directory.

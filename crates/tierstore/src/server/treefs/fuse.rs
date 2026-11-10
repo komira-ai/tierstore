@@ -17,14 +17,13 @@ use std::sync::Arc;
 use std::time::{Duration, SystemTime, UNIX_EPOCH};
 
 use fuser::{
-    BsdFileFlags, Config, Errno, FileAttr, FileHandle, FileType,
-    Filesystem, FopenFlags, Generation, INodeNo, InitFlags, KernelConfig, LockOwner, MountOption,
-    OpenAccMode, OpenFlags, RenameFlags, ReplyAttr, ReplyCreate, ReplyData, ReplyDirectory,
-    ReplyDirectoryPlus, ReplyEmpty, ReplyEntry, ReplyOpen, ReplyXattr, Request,
-    SessionACL, TimeOrNow,
+    BsdFileFlags, Config, Errno, FileAttr, FileHandle, FileType, Filesystem, FopenFlags,
+    Generation, INodeNo, InitFlags, KernelConfig, LockOwner, MountOption, OpenAccMode, OpenFlags,
+    RenameFlags, ReplyAttr, ReplyCreate, ReplyData, ReplyDirectory, ReplyDirectoryPlus, ReplyEmpty,
+    ReplyEntry, ReplyOpen, ReplyXattr, Request, SessionACL, TimeOrNow,
 };
 
-use super::core::{self, Attr, Core, Entry, Kind, Looked};
+use super::core::{self, Attr, Core, Kind, Looked};
 
 /// The background requests the kernel may have outstanding at once.
 const MAX_BACKGROUND: u16 = 1024;
@@ -72,10 +71,16 @@ fn file_attr(attr: &Attr) -> FileAttr {
     }
 }
 
-/// The kernel type of an entry.
-fn kind_of(entry: &Entry) -> FileType {
-    file_attr(&entry.attr).kind
-}
+/// What a lookup of a name that is not there answers: an inode number of 0.
+const ABSENT: Attr = Attr {
+    ino: 0,
+    kind: Kind::File,
+    size: 0,
+    perm: 0,
+    nlink: 0,
+    uid: 0,
+    gid: 0,
+};
 
 /// The options of the mount, for the users `acl` lets in.
 pub(super) fn config(threads: usize, allow_other: bool) -> Config {
@@ -109,23 +114,58 @@ impl Frontend {
     }
 }
 
+/// A reply that can be answered with an error.
+trait Fail {
+    fn fail(self, error: Errno);
+}
+
+macro_rules! fail {
+    ($($reply:ty),*) => {
+        $(impl Fail for $reply {
+            fn fail(self, error: Errno) {
+                self.error(error);
+            }
+        })*
+    };
+}
+
+fail!(
+    ReplyAttr,
+    ReplyData,
+    ReplyDirectory,
+    ReplyDirectoryPlus,
+    ReplyEmpty,
+    ReplyEntry,
+    ReplyOpen
+);
+
+/// Answers `reply` by `done` with what the core gave, or with the errno of its refusal.
+fn finish<T, R: Fail>(result: Result<T, core::Errno>, reply: R, done: impl FnOnce(T, R)) {
+    match result {
+        Ok(value) => done(value, reply),
+        Err(error) => reply.fail(errno(error)),
+    }
+}
+
 impl Filesystem for Frontend {
     fn init(&mut self, _req: &Request, config: &mut KernelConfig) -> io::Result<()> {
         for flag in [
             InitFlags::FUSE_CACHE_SYMLINKS,
             InitFlags::FUSE_PARALLEL_DIROPS,
             InitFlags::FUSE_DO_READDIRPLUS,
+            InitFlags::FUSE_READDIRPLUS_AUTO,
         ] {
             // A kernel that does not offer one runs without it; each is a saving.
             let _ = config.add_capabilities(flag);
         }
         let _ = config.set_max_background(MAX_BACKGROUND);
         let offered = config.capabilities();
+        let passthrough = offered.contains(InitFlags::FUSE_PASSTHROUGH);
+        let resend = offered.contains(InitFlags::FUSE_HAS_RESEND);
         tracing::info!(
-            "tierstore fs: the kernel offers passthrough: {}, resend: {}; this release runs \
-             with cached opens",
-            offered.contains(InitFlags::FUSE_PASSTHROUGH),
-            offered.contains(InitFlags::FUSE_HAS_RESEND)
+            passthrough,
+            resend,
+            "tierstore fs: the kernel offers; cached opens run"
         );
         Ok(())
     }
@@ -134,25 +174,17 @@ impl Filesystem for Frontend {
         let Some(name) = name.to_str() else {
             return reply.error(Errno::ENOENT);
         };
-        match self.core.lookup(parent.0, name) {
-            Ok(Looked::Found(entry)) => {
-                reply.entry(&entry.ttl, &file_attr(&entry.attr), Generation(0));
-            }
-            Ok(Looked::Absent(ttl)) => {
+        finish(
+            self.core.lookup(parent.0, name),
+            reply,
+            |looked, reply| match looked {
+                Looked::Found(entry) => {
+                    reply.entry(&entry.ttl, &file_attr(&entry.attr), Generation(0))
+                }
                 // An inode number of 0 is `ENOENT` that the kernel keeps for `ttl`.
-                let absent = file_attr(&Attr {
-                    ino: 0,
-                    kind: Kind::File,
-                    size: 0,
-                    perm: 0,
-                    nlink: 0,
-                    uid: 0,
-                    gid: 0,
-                });
-                reply.entry(&ttl, &absent, Generation(0));
-            }
-            Err(error) => reply.error(errno(error)),
-        }
+                Looked::Absent(ttl) => reply.entry(&ttl, &file_attr(&ABSENT), Generation(0)),
+            },
+        );
     }
 
     fn forget(&self, _req: &Request, ino: INodeNo, nlookup: u64) {
@@ -160,25 +192,22 @@ impl Filesystem for Frontend {
     }
 
     fn getattr(&self, _req: &Request, ino: INodeNo, _fh: Option<FileHandle>, reply: ReplyAttr) {
-        match self.core.getattr(ino.0) {
-            Ok(entry) => reply.attr(&entry.ttl, &file_attr(&entry.attr)),
-            Err(error) => reply.error(errno(error)),
-        }
+        finish(self.core.getattr(ino.0), reply, |entry, reply| {
+            reply.attr(&entry.ttl, &file_attr(&entry.attr));
+        });
     }
 
     fn readlink(&self, _req: &Request, ino: INodeNo, reply: ReplyData) {
-        match self.core.readlink(ino.0) {
-            Ok(target) => reply.data(target.as_bytes()),
-            Err(error) => reply.error(errno(error)),
-        }
+        finish(self.core.readlink(ino.0), reply, |target, reply| {
+            reply.data(target.as_bytes())
+        });
     }
 
     fn open(&self, _req: &Request, ino: INodeNo, flags: OpenFlags, reply: ReplyOpen) {
         let writing = flags.acc_mode() != OpenAccMode::O_RDONLY;
-        match self.core.open(ino.0, writing) {
-            Ok(fh) => reply.opened(FileHandle(fh), FopenFlags::FOPEN_KEEP_CACHE),
-            Err(error) => reply.error(errno(error)),
-        }
+        finish(self.core.open(ino.0, writing), reply, |fh, reply| {
+            reply.opened(FileHandle(fh), FopenFlags::FOPEN_KEEP_CACHE);
+        });
     }
 
     fn read(
@@ -192,10 +221,9 @@ impl Filesystem for Frontend {
         _lock_owner: Option<LockOwner>,
         reply: ReplyData,
     ) {
-        match self.core.read(fh.0, offset, size) {
-            Ok(data) => reply.data(&data),
-            Err(error) => reply.error(errno(error)),
-        }
+        finish(self.core.read(fh.0, offset, size), reply, |data, reply| {
+            reply.data(&data)
+        });
     }
 
     fn release(
@@ -213,10 +241,9 @@ impl Filesystem for Frontend {
     }
 
     fn opendir(&self, _req: &Request, ino: INodeNo, _flags: OpenFlags, reply: ReplyOpen) {
-        match self.core.opendir(ino.0) {
-            Ok(()) => reply.opened(FileHandle(0), FopenFlags::FOPEN_CACHE_DIR),
-            Err(error) => reply.error(errno(error)),
-        }
+        finish(self.core.opendir(ino.0), reply, |(), reply| {
+            reply.opened(FileHandle(0), FopenFlags::FOPEN_CACHE_DIR);
+        });
     }
 
     fn readdir(
@@ -228,17 +255,10 @@ impl Filesystem for Frontend {
         mut reply: ReplyDirectory,
     ) {
         let listed = self.core.readdir(ino.0, offset, &mut |next, item| {
-            !reply.add(
-                INodeNo(item.entry.attr.ino),
-                next,
-                kind_of(&item.entry),
-                &item.name,
-            )
+            let kind = file_attr(&item.entry.attr).kind;
+            !reply.add(INodeNo(item.entry.attr.ino), next, kind, &item.name)
         });
-        match listed {
-            Ok(()) => reply.ok(),
-            Err(error) => reply.error(errno(error)),
-        }
+        finish(listed, reply, |(), reply| reply.ok());
     }
 
     fn readdirplus(
@@ -252,24 +272,22 @@ impl Filesystem for Frontend {
         let core = &self.core;
         let listed = core.readdir(ino.0, offset, &mut |next, item| {
             let attr = file_attr(&item.entry.attr);
+            let ttl = item.entry.ttl;
             let full = reply.add(
-                INodeNo(item.entry.attr.ino),
+                INodeNo(attr.ino.0),
                 next,
                 &item.name,
-                &item.entry.ttl,
+                &ttl,
                 &attr,
                 Generation(0),
             );
             // The kernel takes a lookup of each entry it was sent, but of `.` and `..`.
-            if !full && item.name != "." && item.name != ".." {
-                core.count(item.entry.attr.ino);
+            if !full && !matches!(item.name.as_str(), "." | "..") {
+                core.count(attr.ino.0);
             }
             !full
         });
-        match listed {
-            Ok(()) => reply.ok(),
-            Err(error) => reply.error(errno(error)),
-        }
+        finish(listed, reply, |(), reply| reply.ok());
     }
 
     fn releasedir(
@@ -283,7 +301,14 @@ impl Filesystem for Frontend {
         reply.ok();
     }
 
-    fn getxattr(&self, _req: &Request, _ino: INodeNo, _name: &OsStr, _size: u32, reply: ReplyXattr) {
+    fn getxattr(
+        &self,
+        _req: &Request,
+        _ino: INodeNo,
+        _name: &OsStr,
+        _size: u32,
+        reply: ReplyXattr,
+    ) {
         reply.error(Errno::ENOSYS);
     }
 

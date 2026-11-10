@@ -301,11 +301,19 @@ impl Core {
             let _ = state.attachments.remove(run);
             return Err(error.into());
         }
-        Ok(self.settings.mountpoint.join("trees").join(digest.to_string()))
+        Ok(self
+            .settings
+            .mountpoint
+            .join("trees")
+            .join(digest.to_string()))
     }
 
     /// The tree `number` in memory, read if it is not.
-    fn load_unless_loaded(&self, number: u64, digest: TreeDigest) -> Result<Arc<Loaded>, AttachError> {
+    fn load_unless_loaded(
+        &self,
+        number: u64,
+        digest: TreeDigest,
+    ) -> Result<Arc<Loaded>, AttachError> {
         if let Some(loaded) = locked(&self.state).loaded.get(&number) {
             return Ok(Arc::clone(loaded));
         }
@@ -331,7 +339,9 @@ impl Core {
             (freed, failures)
         };
         for (number, digest) in freed {
-            let _ = self.fills.unpin(&self.settings.mount_id, &digest.to_string());
+            let _ = self
+                .fills
+                .unpin(&self.settings.mount_id, &digest.to_string());
             self.drop_if_forgotten(number);
         }
         Some(failures)
@@ -390,6 +400,7 @@ impl Core {
 
     /// The kernel forgets `nlookup` lookups of `ino`.
     pub(super) fn forget(&self, ino: u64, nlookup: u64) {
+        self.note("forget");
         let (number, _) = ino::split(ino);
         let loaded = locked(&self.state).loaded.get(&number).cloned();
         if let Some(loaded) = loaded {
@@ -616,9 +627,7 @@ impl Core {
             Err(_) => {
                 let filled = match source {
                     Some(source) => self.fills.fill_blob(&sha, size, &source.key, source.offset),
-                    None => self
-                        .fills
-                        .fill_blob(&sha, size, &format!("cas/l/{sha}"), 0),
+                    None => self.fills.fill_blob(&sha, size, &format!("cas/l/{sha}"), 0),
                 };
                 filled.and_then(|()| File::open(&path).map_err(|_| "io".to_owned()))
             }
@@ -627,9 +636,11 @@ impl Core {
             Ok(file) => {
                 if locked(&loaded.pinned).insert(*digest) {
                     self.fills.touch(&[&sha]);
-                    let _ = self
-                        .fills
-                        .pin(&self.settings.mount_id, &loaded.digest.to_string(), &[&sha]);
+                    let _ = self.fills.pin(
+                        &self.settings.mount_id,
+                        &loaded.digest.to_string(),
+                        &[&sha],
+                    );
                 }
                 Ok(file)
             }
@@ -651,7 +662,10 @@ impl Core {
     /// [`Errno::Inval`] for a handle that is not open, [`Errno::Io`] for a read that fails.
     pub(super) fn read(&self, fh: u64, offset: u64, size: u32) -> Result<Vec<u8>, Errno> {
         self.note("read");
-        let handle = locked(&self.handles).get(&fh).cloned().ok_or(Errno::Inval)?;
+        let handle = locked(&self.handles)
+            .get(&fh)
+            .cloned()
+            .ok_or(Errno::Inval)?;
         let Handle::Cached(file) = handle.as_ref() else {
             return Ok(Vec::new());
         };

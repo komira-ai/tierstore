@@ -11,12 +11,14 @@
 use std::ffi::OsString;
 use std::io::Write;
 use std::os::unix::net::UnixStream;
-use std::path::PathBuf;
+use std::path::{Path, PathBuf};
 use std::process::ExitCode;
 
 use clap::{Parser, Subcommand};
 
 use super::parsed;
+#[cfg(target_os = "linux")]
+use crate::server::treefs::StartError;
 use crate::server::treefs::{FsSettings, load};
 
 /// The arguments of the verb.
@@ -37,40 +39,54 @@ enum Command {
     Attachments,
 }
 
-/// What listing the attachments asks of the control socket.
-fn attachments(settings: &FsSettings, out: &mut dyn Write) -> Result<(), String> {
+/// The answer of the control socket to `attachments`.
+fn control_answer(socket: &Path) -> std::io::Result<serde_json::Value> {
     use std::io::{BufRead as _, BufReader};
-    let socket = &settings.control_socket;
-    let stream = UnixStream::connect(socket)
-        .map_err(|why| format!("the control socket {}: {why}", socket.display()))?;
-    (&stream)
-        .write_all(b"attachments\n")
-        .map_err(|why| format!("the control socket: {why}"))?;
+    let stream = UnixStream::connect(socket)?;
+    (&stream).write_all(b"attachments\n")?;
     let mut line = String::new();
-    let _ = BufReader::new(&stream)
-        .read_line(&mut line)
-        .map_err(|why| format!("the control socket: {why}"))?;
-    let answer: serde_json::Value =
-        serde_json::from_str(&line).map_err(|why| format!("the control socket's answer: {why}"))?;
-    let listed = answer["attachments"].as_array().into_iter().flatten();
-    for attachment in listed {
+    let _ = BufReader::new(&stream).read_line(&mut line)?;
+    Ok(serde_json::from_str(&line)?)
+}
+
+/// Writes the attachments of the answer, one line each: the digest of the tree and the run.
+fn list(answer: &serde_json::Value, out: &mut dyn Write) -> std::io::Result<()> {
+    for attachment in answer["attachments"].as_array().into_iter().flatten() {
         let (tree, run) = (&attachment["tree"], &attachment["run"]);
-        writeln!(out, "{} {}", tree.as_str().unwrap_or(""), run.as_str().unwrap_or(""))
-            .map_err(|why| format!("writing the output: {why}"))?;
+        writeln!(
+            out,
+            "{} {}",
+            tree.as_str().unwrap_or(""),
+            run.as_str().unwrap_or("")
+        )?;
     }
     Ok(())
 }
 
-/// Serves the mount.
+/// What listing the attachments asks of the control socket.
+fn attachments(settings: &FsSettings, out: &mut dyn Write) -> Result<(), String> {
+    let socket = &settings.control_socket;
+    let answer = control_answer(socket)
+        .map_err(|why| format!("the control socket {}: {why}", socket.display()))?;
+    list(&answer, out).map_err(|why| format!("writing the output: {why}"))
+}
+
+/// The exit status of a serve that ended with `result`.
 #[cfg(target_os = "linux")]
-fn serve(settings: &FsSettings, err: &mut dyn Write) -> ExitCode {
-    match crate::server::treefs::serve(settings) {
+fn finished(result: Result<(), StartError>, err: &mut dyn Write) -> ExitCode {
+    match result {
         Ok(()) => ExitCode::SUCCESS,
         Err(why) => {
             let _ = writeln!(err, "tierstore fs: {why}");
             ExitCode::from(why.status())
         }
     }
+}
+
+/// Serves the mount.
+#[cfg(target_os = "linux")]
+fn serve(settings: &FsSettings, err: &mut dyn Write) -> ExitCode {
+    finished(crate::server::treefs::serve(settings), err)
 }
 
 /// The mount is Linux's.

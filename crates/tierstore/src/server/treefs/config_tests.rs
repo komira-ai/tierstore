@@ -52,9 +52,15 @@ fn every_key_is_taken_when_it_is_set() {
     assert_eq!(got.mountpoint, PathBuf::from("/m"));
     assert_eq!(got.control_socket, PathBuf::from("/r/control.sock"));
     assert_eq!((got.client_group, got.owner), (77, (5, 6)));
-    assert_eq!((got.fetch_timeout, got.threads), (Duration::from_secs(5), 3));
+    assert_eq!(
+        (got.fetch_timeout, got.threads),
+        (Duration::from_secs(5), 3)
+    );
     let own = fs("control_socket = \"/elsewhere.sock\"\n");
-    assert_eq!(from_text(&own, GROUPS).unwrap().control_socket, PathBuf::from("/elsewhere.sock"));
+    assert_eq!(
+        from_text(&own, GROUPS).unwrap().control_socket,
+        PathBuf::from("/elsewhere.sock")
+    );
 }
 
 /// Asserts each refusal and that it names the key.

@@ -55,7 +55,10 @@ fn a_new_mount_starts_the_table_empty_and_failures_are_errors() {
     assert_eq!(second.number_of(&digest(b"z")).unwrap(), 1);
     let missing = dir.path().join("none");
     let error = TreeTable::create(&missing).unwrap_err();
-    assert!(error.to_string().starts_with("the table of tree numbers: "), "{error}");
+    assert!(
+        error.to_string().starts_with("the table of tree numbers: "),
+        "{error}"
+    );
     // A table whose file is gone from under it cannot be read: the record is short.
     std::fs::OpenOptions::new()
         .write(true)

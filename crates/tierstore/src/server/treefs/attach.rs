@@ -136,7 +136,11 @@ impl Attachments {
 
     /// Records `failure` in the attachment of every run that has the tree `number`.
     pub(super) fn fail(&mut self, number: u64, failure: &Failure) {
-        for got in self.runs.values_mut().filter_map(|trees| trees.get_mut(&number)) {
+        for got in self
+            .runs
+            .values_mut()
+            .filter_map(|trees| trees.get_mut(&number))
+        {
             let _ = got.failures.insert(failure.path.clone(), failure.clone());
         }
     }

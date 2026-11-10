@@ -47,7 +47,12 @@ pub(in crate::server) fn file(content: &[u8]) -> Node {
 
 /// A directory of `children`.
 pub(in crate::server) fn dir(children: Vec<(&str, Node)>) -> Node {
-    Node::Dir(children.into_iter().map(|(n, c)| (n.to_owned(), c)).collect())
+    Node::Dir(
+        children
+            .into_iter()
+            .map(|(n, c)| (n.to_owned(), c))
+            .collect(),
+    )
 }
 
 /// The manifests and blobs a tree is made of.
@@ -60,24 +65,25 @@ pub(in crate::server) struct Built {
 }
 
 impl Built {
-    /// Writes the tree `root` (a `Dir`).
-    pub(in crate::server) fn of(root: &Node) -> Self {
+    /// Writes the tree whose root holds `children`.
+    pub(in crate::server) fn of(children: Vec<(&str, Node)>) -> Self {
         let mut built = Self::default();
-        built.root = built.manifest(root);
+        let children: Vec<(String, Node)> = children
+            .into_iter()
+            .map(|(n, c)| (n.to_owned(), c))
+            .collect();
+        built.root = built.manifest(&children);
         built
     }
 
-    fn manifest(&mut self, node: &Node) -> String {
-        let Node::Dir(children) = node else {
-            panic!("a tree is a directory");
-        };
-        let mut sorted = children.clone();
+    fn manifest(&mut self, children: &[(String, Node)]) -> String {
+        let mut sorted = children.to_vec();
         sorted.sort_by(|a, b| a.0.as_bytes().cmp(b.0.as_bytes()));
         let mut items = Vec::new();
         for (name, child) in &sorted {
             let item = match child {
-                Node::Dir(_) => {
-                    let digest = self.manifest(child);
+                Node::Dir(grandchildren) => {
+                    let digest = self.manifest(grandchildren);
                     let size = self.manifests[&digest].len();
                     serde_json::json!({"name": name, "kind": "dir", "sha256": digest, "size": size})
                 }
@@ -192,9 +198,7 @@ impl FakeFill {
                     let mut line = String::new();
                     while reader.read_line(&mut line).unwrap_or(0) > 0 {
                         if let Some(answer) = upstream.answer(line.trim_end_matches('\n')) {
-                            if writer.write_all(format!("{answer}\n").as_bytes()).is_err() {
-                                return;
-                            }
+                            let _ = writer.write_all(format!("{answer}\n").as_bytes());
                         }
                         line.clear();
                     }
@@ -207,23 +211,14 @@ impl FakeFill {
             thread: Some(thread),
         }
     }
-
-    /// Closes the socket: later connections are refused.
-    pub(in crate::server) fn close(&mut self) {
-        self.stop.store(true, Ordering::Release);
-        let _ = UnixStream::connect(&self.path);
-        if let Some(thread) = self.thread.take() {
-            thread.join().unwrap();
-        }
-        std::fs::remove_file(&self.path).unwrap();
-    }
 }
 
 impl Drop for FakeFill {
     fn drop(&mut self) {
-        if self.thread.is_some() {
-            self.close();
-        }
+        self.stop.store(true, Ordering::Release);
+        let _ = UnixStream::connect(&self.path);
+        let _ = self.thread.take().map(std::thread::JoinHandle::join);
+        let _ = std::fs::remove_file(&self.path);
     }
 }
 
@@ -302,7 +297,7 @@ impl Rig {
 pub(in crate::server) fn sample() -> Built {
     let big: Vec<u8> = (0..300_000u32).map(|i| (i % 251) as u8).collect();
     let cc: Vec<u8> = (0..3000u32).map(|i| (i % 241) as u8).collect();
-    let tree = dir(vec![
+    Built::of(vec![
         ("big.bin", file(&big)),
         (
             "bin",
@@ -328,18 +323,30 @@ pub(in crate::server) fn sample() -> Built {
         ("empty.h", file(b"")),
         ("include", dir(vec![("a.h", file(b"int a;"))])),
         ("lib", Node::Link("bin".to_owned())),
-    ]);
-    Built::of(&tree)
+    ])
+}
+
+/// Why a FUSE mount cannot be made, given whether `/dev/fuse` can be opened for reading and
+/// writing and `fusermount3` is installed.
+pub(in crate::server) fn reasons(device: bool, helper: bool) -> Option<&'static str> {
+    [
+        (device, "/dev/fuse cannot be opened for reading and writing"),
+        (helper, "fusermount3 is not installed"),
+    ]
+    .into_iter()
+    .find_map(|(ok, why)| (!ok).then_some(why))
 }
 
 /// Whether this machine can make a FUSE mount as the user of the tests; if not, why.
-pub(in crate::server) fn unavailable() -> Option<String> {
-    if std::fs::OpenOptions::new().read(true).write(true).open("/dev/fuse").is_err() {
-        return Some("/dev/fuse cannot be opened for reading and writing".to_owned());
-    }
+pub(in crate::server) fn unavailable() -> Option<&'static str> {
+    let device = std::fs::OpenOptions::new()
+        .read(true)
+        .write(true)
+        .open("/dev/fuse")
+        .is_ok();
     let path = std::env::var_os("PATH").unwrap_or_default();
-    let found = std::env::split_paths(&path).any(|dir| dir.join("fusermount3").exists());
-    (!found).then(|| "fusermount3 is not installed".to_owned())
+    let helper = std::env::split_paths(&path).any(|dir| dir.join("fusermount3").exists());
+    reasons(device, helper)
 }
 
 /// Says on stderr why a test does not run.
@@ -347,3 +354,21 @@ pub(in crate::server) fn skipped(why: &str) {
     let _ = writeln!(std::io::stderr(), "skipped: {why}");
 }
 
+/// Runs `test` where a FUSE mount can be made, and says why it does not run where it cannot.
+pub(in crate::server) fn with_fuse(test: impl FnOnce()) {
+    unavailable().map_or_else(test, skipped);
+}
+
+/// Looks at `condition` again and again, yielding between looks, until it holds: for an event that
+/// another thread brings, with no clock in it. The test fails if the event never comes.
+pub(in crate::server) fn until(mut condition: impl FnMut() -> bool) {
+    let looks = (0..50_000_000u32).find(|_| {
+        std::thread::yield_now();
+        condition()
+    });
+    let _ = looks.expect("the event never came");
+}
+
+#[cfg(test)]
+#[path = "testing_tests.rs"]
+mod tests;

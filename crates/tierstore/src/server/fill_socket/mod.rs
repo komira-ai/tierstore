@@ -233,19 +233,19 @@ async fn session(cache: LocalCache, stream: UnixStream, uid: u32) {
                 said(cache.fill_blob(&blob).await)
             }
             Ok(Request::Manifest { sha256 }) => said(cache.fill_manifest(&sha256).await),
-            Ok(Request::Pin {
-                mount,
-                tree,
-                blobs,
-            }) => pinned(cache.pin(&mount, &tree, &blobs).map(|got| {
-                format!("{} {} {}", got.pinned, got.refused, got.absent)
-            })),
+            Ok(Request::Pin { mount, tree, blobs }) => pinned(
+                cache
+                    .pin(&mount, &tree, &blobs)
+                    .map(|got| format!("{} {} {}", got.pinned, got.refused, got.absent)),
+            ),
             Ok(Request::Unpin { mount, tree }) => {
                 pinned(cache.unpin(&mount, &tree).map(|count| count.to_string()))
             }
-            Ok(Request::PinsLive { mount, trees }) => {
-                pinned(cache.pins_live(&mount, &trees).map(|count| count.to_string()))
-            }
+            Ok(Request::PinsLive { mount, trees }) => pinned(
+                cache
+                    .pins_live(&mount, &trees)
+                    .map(|count| count.to_string()),
+            ),
             Err(refusal) => format!("refused {refusal}"),
         };
         if write
@@ -261,7 +261,10 @@ async fn session(cache: LocalCache, stream: UnixStream, uid: u32) {
 /// The answer to a pin request: `ok` and the numbers, or the words of the failure. Every digest
 /// was checked when the line was parsed, so the one failure left is a read-only cache.
 fn pinned(done: Result<String, PinError>) -> String {
-    done.map_or_else(|_| "read-only".to_owned(), |numbers| format!("ok {numbers}"))
+    done.map_or_else(
+        |_| "read-only".to_owned(),
+        |numbers| format!("ok {numbers}"),
+    )
 }
 
 /// The answer to a fill: `ok`, or the words of the failure.

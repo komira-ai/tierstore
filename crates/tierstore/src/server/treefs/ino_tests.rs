@@ -10,7 +10,13 @@ fn a_number_is_the_tree_number_over_the_index_and_splits_back() {
     assert_eq!(of(0, 2), TREES);
     assert_eq!(of(1, 0), 1 << 24);
     assert_eq!(of(1, (1 << 24) - 1), (2 << 24) - 1);
-    for (tree, index) in [(0, 1), (1, 0), (1, (1 << 24) - 1), (7, 12345), (MOST_TREES, 0)] {
+    for (tree, index) in [
+        (0, 1),
+        (1, 0),
+        (1, (1 << 24) - 1),
+        (7, 12345),
+        (MOST_TREES, 0),
+    ] {
         assert_eq!(split(of(tree, index)), (tree, index));
     }
     assert!(of(MOST_TREES, (1 << 24) - 1) < 1 << 63);

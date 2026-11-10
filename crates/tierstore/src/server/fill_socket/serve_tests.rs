@@ -444,7 +444,10 @@ async fn the_pin_requests_pin_unpin_and_keep_the_live_trees() {
     assert_eq!(client.ask(&pin).await, "ok 2 0 1");
     assert_eq!(client.ask(&pin).await, "ok 2 0 1");
     assert_eq!(rig.cache.pinned_bytes(), 600);
-    assert_eq!(client.ask(&format!("pin boot-1 tree-b {first}")).await, "ok 1 0 0");
+    assert_eq!(
+        client.ask(&format!("pin boot-1 tree-b {first}")).await,
+        "ok 1 0 0"
+    );
     assert_eq!(client.ask("unpin boot-1 tree-a").await, "ok 2");
     assert_eq!(rig.cache.pinned_bytes(), 300);
     assert_eq!(client.ask("pins-live boot-1 tree-c").await, "ok 1");
