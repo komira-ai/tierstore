@@ -250,6 +250,9 @@ impl Control {
                     }
                     // A connection that went away between the wait and the accept is not one.
                     listener.accept().into_iter().for_each(|(stream, _)| {
+                        // The listener does not block; on BSD and macOS a connection accepted from
+                        // it does not either, and the session reads and waits.
+                        let _ = stream.set_nonblocking(false);
                         let (core, gate) = (Arc::clone(&core), Arc::clone(&gate));
                         let _ = std::thread::spawn(move || session(&core, &gate, stream));
                     });

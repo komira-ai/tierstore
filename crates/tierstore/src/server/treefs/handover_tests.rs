@@ -167,6 +167,46 @@ async fn a_taker_gone_before_ready_leaves_the_running_instance_serving_again() {
     within("the end", old.serving).await.unwrap().unwrap();
 }
 
+/// Asserts that a taker which answers `done` with anything but `ready` has not taken the mount:
+/// the running instance serves again and binds its socket again.
+#[tokio::test]
+async fn a_taker_that_answers_done_with_something_else_has_not_taken_the_mount() {
+    let old = instance("tfs-ho-wrong", Duration::from_secs(3600), None);
+    let stream = connect(&old.settings.handoff_socket).await;
+    send(&stream, &["take-fs 1"]).await;
+    let offer = within("the offer", wire::recv(&stream)).await.unwrap();
+    send(&stream, &["ack"]).await;
+    assert_eq!(wire::recv(&stream).await.unwrap().lines, ["done"]);
+    send(&stream, &["not ready"]).await;
+    within("the socket again", appears(&old.settings.handoff_socket)).await;
+    old.assert_serving(1);
+    assert!(!old.serving.is_finished());
+    drop((stream, offer));
+}
+
+/// Asserts that a hand-over socket which cannot accept is said and tried again after a pause, and
+/// that the instance does not end for it. A socket that is not listening stands in: `accept` on it
+/// fails.
+#[tokio::test(start_paused = true)]
+async fn a_hand_over_socket_that_cannot_accept_is_said_and_tried_again() {
+    let old = instance("tfs-ho-noaccept", Duration::from_secs(3600), None);
+    let (not_listening, _peer) = std::os::unix::net::UnixStream::pair().unwrap();
+    let broken = std::os::unix::net::UnixListener::from(std::os::fd::OwnedFd::from(not_listening));
+    broken.set_nonblocking(true).unwrap();
+    let mut offer = Offer::bind(
+        &old.settings.handoff_socket.with_extension("again"),
+        &old.settings.mountpoint,
+        &old.settings.control_socket,
+        Duration::from_secs(3600),
+    )
+    .unwrap();
+    offer.listener = Some(UnixListener::from_std(broken).unwrap());
+    let serving = tokio::spawn(offer.serve(std::sync::Arc::clone(&old.running)));
+    tokio::time::sleep(Duration::from_secs(2)).await;
+    assert!(!serving.is_finished());
+    serving.abort();
+}
+
 /// Asserts that a conversation that goes quiet is given up after `fs.handoff_wait`, on the paused
 /// clock: a taker that connects and says nothing, and one that takes the mount and does not say it
 /// serves it; the running instance serves again after each.

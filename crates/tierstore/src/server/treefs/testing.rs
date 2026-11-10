@@ -493,6 +493,13 @@ pub(in crate::server::treefs) struct FakeManager {
     thread: Option<std::thread::JoinHandle<()>>,
 }
 
+/// The room for the ancillary data of a message to the fake manager.
+#[cfg(target_os = "linux")]
+const ANCILLARY: usize = rustix::cmsg_space!(ScmRights(8), ScmCredentials(1));
+/// The room for the ancillary data of a message to the fake manager.
+#[cfg(not(target_os = "linux"))]
+const ANCILLARY: usize = rustix::cmsg_space!(ScmRights(8));
+
 /// The text a [`FakeManager`] is sent to end its thread.
 const STOP: &str = "stop the fake manager";
 
@@ -500,12 +507,16 @@ impl FakeManager {
     /// A manager that listens at `path`.
     pub(in crate::server::treefs) fn start(path: &Path) -> Self {
         let socket = UnixDatagram::bind(path).unwrap();
+        // Every message then carries the sender's credentials beside any descriptors, as a real
+        // manager's does not, so that the loop below sees an ancillary message it passes over.
+        #[cfg(target_os = "linux")]
+        rustix::net::sockopt::set_socket_passcred(&socket, true).unwrap();
         let messages = Arc::new(Mutex::new(Vec::new()));
         let kept = Arc::clone(&messages);
         let thread = std::thread::spawn(move || {
             loop {
                 let mut buffer = [0u8; 1024];
-                let mut space = [MaybeUninit::uninit(); rustix::cmsg_space!(ScmRights(8))];
+                let mut space = [MaybeUninit::uninit(); ANCILLARY];
                 let mut control = RecvAncillaryBuffer::new(&mut space);
                 let mut iov = [IoSliceMut::new(&mut buffer)];
                 let got = recvmsg(&socket, &mut iov, &mut control, RecvFlags::empty()).unwrap();
