@@ -179,23 +179,54 @@ async fn a_start_serves_mounts_and_a_stop_unmounts() {
     closed(address).await;
 }
 
-/// Asserts that `fs.nfs.allowed_uids` replaces the default list, and that `fs.nfs.mount = false`
-/// serves without running any command, then stops without one.
+/// Asserts that `fs.nfs.allowed_uids` replaces the default list, over the wire: a user in the
+/// configured list is served, and a user of the default list (the one of the process, the mount
+/// user) that the configured list leaves out is answered `NFS3ERR_ACCES`; and that
+/// `fs.nfs.mount = false` serves without running any command, then stops without one.
 #[tokio::test]
 async fn a_start_without_a_mount_serves_only_and_the_list_of_users_is_taken() {
     let (rig, _) = attached("nfs-run-nomount");
+    let listed = 9_999;
+    let default_user = euid();
+    assert_ne!(listed, default_user);
     let nfs = super::super::config::NfsSettings {
         mount: false,
-        allowed_uids: Some(vec![9_999]),
+        allowed_uids: Some(vec![listed]),
         ..loopback()
     };
     let mut settings = settings(&rig, nfs);
     settings.nfs.listen = "127.0.0.1:0".parse().unwrap();
     let runner = Recorder::new(true);
-    let running = Running::start(&settings, runner.clone(), euid(), None, EPOCH)
+    let running = Running::start(&settings, runner.clone(), default_user, None, EPOCH)
         .await
         .unwrap();
     assert!(runner.calls().is_empty());
+
+    let mut client = Client::connect(running.address).await;
+    let handle = client.mount("/").await;
+    let status_of = |uid: u32| {
+        let handle = handle.clone();
+        async move {
+            let mut client = Client::connect(running.address).await;
+            let reply = client
+                .call(
+                    NFS,
+                    GETATTR,
+                    Cred::Sys(uid, 0),
+                    Enc::default().opaque(&handle),
+                )
+                .await;
+            Dec::new(&reply.body).u32()
+        }
+    };
+    assert_eq!(status_of(listed).await, 0, "the configured user is served");
+    assert_eq!(
+        status_of(default_user).await,
+        13,
+        "the default user, left out of the configured list, is NFS3ERR_ACCES"
+    );
+    drop(client);
+
     running.stop().await.unwrap();
     assert!(runner.calls().is_empty());
 }
