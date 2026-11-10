@@ -34,9 +34,13 @@
 //! than the settings name, or no end of the hand-off within `server.handoff_wait` fails the start
 //! (exit status 1) with nothing bound.
 //!
-//! On SIGTERM or SIGINT the process drains as a storage node does; the eviction pass and the
-//! lock task are the only things running beside the server, and they stop with it. Nothing is
-//! owed to the upstream: no journal, no lease, no copy in flight.
+//! With `local_cache.fill_socket` (by default `fill.sock` in the state directory) the cache also
+//! answers the fill socket (see [`fill_socket`](super::fill_socket)): bound while the process holds the
+//! lock of the cache directory, through the drain of the S3 front, and closed when the drain ends.
+//!
+//! On SIGTERM or SIGINT the process drains as a storage node does; the eviction pass, the lock
+//! task, the scrub and the fill socket are the only things running beside the server, and they stop
+//! with it. Nothing is owed to the upstream: no journal, no lease, no copy in flight.
 //!
 //! A storage node with a cache in front of its own proxy (see
 //! [`combined_cli`](super::combined_cli)) uses the same cache directory start (`open`), the same
@@ -58,6 +62,7 @@ use super::cli::{
 use super::cli_serve::{Bound, bind_fronts, bind_s3, cut_note, stopped_by};
 use super::config_cache::CacheSettings;
 use super::drain::late_of;
+use super::fill_socket;
 use super::front::{InvalidFlags, server_config};
 use super::handoff::Handoff;
 use super::listen::{LoopbackBind, bind_set, bind_with, joined};
@@ -233,6 +238,7 @@ pub(super) async fn serve_cache(
         beside_halt: Arc::new(Notify::new()),
         beating: None,
         handoff: settings.handoff.as_ref(),
+        fill_socket: settings.fill_socket.as_deref(),
     };
     serve_front(
         cache,
@@ -265,6 +271,9 @@ pub(super) struct Fronts<'a> {
     /// The hand-off of the listening sockets (`server.handoff_socket`), if the settings ask for
     /// one.
     pub(super) handoff: Option<&'a Handoff>,
+    /// The fill socket (`local_cache.fill_socket`), bound while the cache holds the lock of its
+    /// directory (see [`fill_socket`](super::fill_socket)); none for a node without one.
+    pub(super) fill_socket: Option<&'a std::path::Path>,
 }
 
 /// Serves the S3 front (and the OCI front, if there is a setup) over `cache`, with the loops of
@@ -317,13 +326,14 @@ pub(super) async fn serve_front(
     let (watcher, oci_stopped) = stop_watcher(stop, Arc::clone(&server), oci_drain, fronts.lb_wait);
     // One Notify for each loop: `notify_one` wakes one waiter, and keeps the wake for a loop that
     // is not waiting just now.
-    let halts: [Arc<Notify>; 4] = [
+    let halts: [Arc<Notify>; 5] = [
+        Arc::new(Notify::new()),
         Arc::new(Notify::new()),
         Arc::new(Notify::new()),
         Arc::new(Notify::new()),
         Arc::clone(&fronts.beside_halt),
     ];
-    let [halt, lock_halt, scrub_halt, _] = halts.clone();
+    let [halt, lock_halt, scrub_halt, fill_halt, _] = halts.clone();
     let beating = fronts.beating.clone();
     let serving = async move {
         let after = async {
@@ -359,8 +369,14 @@ pub(super) async fn serve_front(
             .await;
         tracing::debug!("tierstore: scrub ended");
     };
-    let ((drained, oci_cut), (), (), (), ()) =
-        tokio::join!(serving, beside, maintaining, holding, scrubbing);
+    let filling = async {
+        if let Some(path) = fronts.fill_socket {
+            fill_socket::serve(cache.clone(), path, fill_halt).await;
+            tracing::debug!("tierstore: fill socket ended");
+        }
+    };
+    let ((drained, oci_cut), (), (), (), (), ()) =
+        tokio::join!(serving, beside, maintaining, holding, scrubbing, filling);
     watcher.abort();
     super::build_info::stderr_log::notes(&cut_note(drained));
     super::build_info::stderr_log::notes(&oci_cut_note(oci_cut));

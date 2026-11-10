@@ -40,7 +40,7 @@ pub(super) struct Name {
 }
 
 /// Whether `text` is the lower-case hex of a SHA-256.
-pub(super) fn is_digest(text: &str) -> bool {
+pub(in crate::server) fn is_digest(text: &str) -> bool {
     text.len() == 64 && text.bytes().all(|b| matches!(b, b'0'..=b'9' | b'a'..=b'f'))
 }
 

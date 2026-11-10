@@ -154,7 +154,11 @@ impl Inner {
         };
         {
             let flights = locked(&self.flights);
-            if flights.contains_key(&name.hex) {
+            // A fill of the socket for the same name is marked as well (lock order: flights,
+            // source_flights, invalidated).
+            if flights.contains_key(&name.hex)
+                || locked(&self.source_flights).contains_key(&name.hex)
+            {
                 locked(&self.invalidated).insert(name.hex.clone());
             }
         }

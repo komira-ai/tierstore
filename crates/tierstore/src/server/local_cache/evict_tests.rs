@@ -84,7 +84,8 @@ async fn a_free_space_floor_evicts_below_the_budget() {
         Pass {
             evicted: 2,
             freed: 80,
-            pinned: 0
+            pinned: 0,
+            pin_skips: 0
         }
     );
     assert_eq!(rig.cache.held(), (80, 2));

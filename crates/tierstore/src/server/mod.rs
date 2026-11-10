@@ -283,6 +283,7 @@ mod config_cache;
 mod config_cache_tuning;
 mod config_combined;
 mod config_entry;
+mod config_fill;
 mod config_handoff;
 mod config_hot_only;
 mod config_interface;
@@ -301,6 +302,7 @@ mod deprecated;
 mod digests;
 mod door;
 mod drain;
+mod fill_socket;
 mod first_beat;
 mod first_format;
 mod front;
@@ -348,6 +350,8 @@ mod bucket_life_tests;
 mod bucket_tests;
 #[cfg(test)]
 mod cache_cli_tests;
+#[cfg(test)]
+mod cache_fill_socket_tests;
 #[cfg(test)]
 mod cache_handoff_lock_tests;
 #[cfg(test)]

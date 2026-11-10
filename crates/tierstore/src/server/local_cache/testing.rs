@@ -900,6 +900,11 @@ impl Rig {
         self.upstream.calls(op)
     }
 
+    /// The calls of a kind the upstream has had on exactly `key`.
+    pub(in crate::server) fn calls_on(&self, op: Op, key: &str) -> u64 {
+        self.upstream.calls_on(op, key)
+    }
+
     /// The data file of `key` in the cache directory.
     pub(in crate::server) fn file(&self, key: &str) -> PathBuf {
         data_path(&self.config.path, &name_of(key).hex)

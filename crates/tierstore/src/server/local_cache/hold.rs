@@ -45,12 +45,12 @@ use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
 use std::sync::{Arc, Mutex};
 use std::time::Duration;
 
-use tokio::sync::Notify;
+use tokio::sync::{Notify, watch};
 
 use crate::server::lock::{self, LockFile};
 
 use super::evict::joined;
-use super::{Inner, LocalCache, layout, locked};
+use super::{Inner, LocalCache, layout, locked, pins};
 use super::{add, index_of};
 
 /// The rounds a take makes at most to remove the files of the names noted while it ran.
@@ -160,6 +160,9 @@ pub(super) struct Hold {
     /// from its last look at the notes until `read_write` is set: a delete is noted before the
     /// promotion looks at the notes, or finds the cache read-write and removes the files itself.
     forgotten: Mutex<Forgotten>,
+    /// The mode, for whoever acts when it changes (the fill socket is bound while the cache is
+    /// read-write): set by the tick that changes `read_write`.
+    mode: watch::Sender<Mode>,
     /// Calls a test makes at fixed points of the take and of a delete, to order them.
     #[cfg(test)]
     pub(super) trace: Mutex<Trace>,
@@ -187,6 +190,11 @@ pub(super) struct Trace {
 }
 
 impl Hold {
+    /// A receiver of the mode: it holds the mode now, and is woken at each change.
+    pub(super) fn subscribe(&self) -> watch::Receiver<Mode> {
+        self.mode.subscribe()
+    }
+
     pub(super) fn new(standing: Standing) -> Self {
         let read_write = !matches!(standing, Standing::Waiting);
         Self {
@@ -194,6 +202,12 @@ impl Hold {
             read_write: AtomicBool::new(read_write),
             generation: AtomicU64::new(0),
             forgotten: Mutex::new(Forgotten::default()),
+            mode: watch::channel(if read_write {
+                Mode::ReadWrite
+            } else {
+                Mode::ReadOnly
+            })
+            .0,
             #[cfg(test)]
             trace: Mutex::new(Trace::default()),
         }
@@ -233,8 +247,18 @@ impl Inner {
         self.config.path.join(LOCK)
     }
 
-    /// One try of the lock; see [`LocalCache::tick`].
+    /// One try of the lock, and the write of the pins file if the cache holds the lock and the file
+    /// is due; see [`LocalCache::tick`].
     pub(super) fn tick(&self) -> io::Result<Tick> {
+        let outcome = self.try_lock();
+        if matches!(outcome, Ok(Tick::Held | Tick::Took)) {
+            self.save_pins(false);
+        }
+        outcome
+    }
+
+    /// One try of the lock.
+    fn try_lock(&self) -> io::Result<Tick> {
         let mut standing = locked(&self.hold.standing);
         if let Standing::Holding(file) = &*standing {
             if file.is_current() {
@@ -244,6 +268,7 @@ impl Inner {
             // The generation first: a fill that sees the cache read-only has the old number.
             let _ = self.hold.generation.fetch_add(1, Ordering::SeqCst);
             self.hold.read_write.store(false, Ordering::SeqCst);
+            let _ = self.hold.mode.send_replace(Mode::ReadOnly);
             return Ok(Tick::Lost);
         }
         if matches!(*standing, Standing::Lockless) {
@@ -309,9 +334,12 @@ impl Inner {
                     &self.counters.discarded_at_start,
                     scanned.discarded + removed,
                 );
-                *locked(&self.index) = index_of(found);
+                let mut index = index_of(found);
+                pins::restore(&self.config, &mut index);
+                *locked(&self.index) = index;
                 *forgotten = Forgotten::default();
                 let _ = self.hold.read_write.swap(true, Ordering::SeqCst);
+                let _ = self.hold.mode.send_replace(Mode::ReadWrite);
                 return Ok(());
             }
             pending = std::mem::take(&mut *forgotten);
@@ -416,7 +444,8 @@ impl LocalCache {
         self.inner.tick()
     }
 
-    /// Calls [`tick`](Self::tick) every `interval` until `halt` is notified. A tick runs on a
+    /// Calls [`tick`](Self::tick) every `interval` until `halt` is notified, and then writes the
+    /// pins file, as the cache gives up the lock. A tick runs on a
     /// thread that may block, so nothing waits on the lock inside a request or on the runtime.
     /// What a tick changed, and what went wrong, is said on stderr.
     pub async fn hold(&self, interval: Duration, halt: Arc<Notify>) {
@@ -438,5 +467,7 @@ impl LocalCache {
             #[cfg(test)]
             self.inner.trace_after_tick();
         }
+        // Halted: the cache gives up the lock, and the next holder reads the pins.
+        self.inner.save_pins(true);
     }
 }

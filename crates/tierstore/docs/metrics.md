@@ -54,6 +54,7 @@ Every name in this section starts with `tierstore_cache_`; the text below shorte
 
 What they do not count:
 
+- A fill that the fill socket asks for (see [operations](operations.md#the-fill-socket)) is counted as any fill is: in `fills_total`, in `fill_failures_total` under its reason, in `fills_skipped_total` when it finds no room, and in `upstream_reads_total` and `upstream_bytes_read_total`. It is a read of no client, so it counts no hit, miss or bytes served.
 - A key the cache is not set to keep (outside every keep policy, or under a reserved prefix) is passed through to the upstream. It counts bytes under `bytes_served_upstream` and is neither a hit nor a miss.
 - A miss counts once for each reader. Readers that share one fill each count a miss, and the fill counts once.
 - A ranged GET of a key that is not held first asks the upstream for the size. If that HEAD fails (the key does not exist, the upstream is down) the GET counts no miss. A ranged GET of an object over the whole-object limit counts a miss and is passed through: it fills nothing and counts bytes under `bytes_served_upstream`. Any other GET of a key that is not held counts its miss before the fill starts, so a failed fill still shows as a miss. A file that could not be read from disk is a miss on the paths that count one.
@@ -73,6 +74,7 @@ What they do not count:
 | `tierstore_cache_fill_failures_total` | counter | `reason`: `hash_mismatch`, `upstream_error`, `short_body`, `local_io`, `changed`, `aborted` | a fill ended without leaving an object in the cache |
 | `tierstore_cache_evictions_total` | counter | `reason`: `budget`, `floor` | an object was evicted |
 | `tierstore_cache_pinned_skips_total` | counter | none | an eviction pass passed over an object because it has more than one hard link |
+| `tierstore_cache_pin_skips_total` | counter | none | an eviction pass passed over an object because a tree pins it (see `local_cache.pin_limit`) |
 | `tierstore_cache_scrubbed_objects_total` | counter | none | the scrub hashed an object again |
 | `tierstore_cache_scrubbed_bytes_total` | counter | none | the bytes the scrub read for those objects |
 | `tierstore_cache_scrub_mismatches_total` | counter | none | the scrub dropped an object whose bytes no longer matched its digest |
@@ -92,9 +94,10 @@ The reasons of a failed fill:
 and a changed object are failures, not skips. `evictions_total` counts objects, not bytes, and
 `budget` is the share of an eviction pass that brings the cache under its low water mark while
 `floor` is the share that restores the free space of the file system. `pinned_skips_total` goes
-up once for each pinned object that a pass reaches. A pass walks the objects oldest first and
-stops once it has freed enough, so it does not reach every pinned object, and it keeps rising
-while an object that the passes reach stays pinned.
+up once for each object with more than one hard link that a pass reaches, and `pin_skips_total`
+once for each object that a tree pins (`local_cache.pin_limit`) that a pass reaches. A pass walks the
+objects oldest first and stops once it has freed enough, so it does not reach every such object,
+and each keeps rising while an object that the passes reach stays linked or pinned.
 `discarded_at_start_total` is a counter that is set once, when the cache is opened, and stays
 the same for the rest of the process.
 

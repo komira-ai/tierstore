@@ -226,7 +226,7 @@ impl Scrubber {
 impl Inner {
     /// Whether a fill of `hex` is running.
     fn filling(&self, hex: &str) -> bool {
-        locked(&self.flights).contains_key(hex)
+        locked(&self.flights).contains_key(hex) || locked(&self.source_flights).contains_key(hex)
     }
 
     /// Drops the object `hex` if no fill of it runs and its data file is still the file `hashed`
@@ -245,7 +245,9 @@ impl Inner {
         let now = std::fs::metadata(data_path(&self.config.path, hex))
             .ok()
             .map(|meta| identity(&meta));
-        let drop_it = !flights.contains_key(hex) && now == hashed;
+        let drop_it = !flights.contains_key(hex)
+            && !locked(&self.source_flights).contains_key(hex)
+            && now == hashed;
         if drop_it {
             self.drop_entry(hex);
         }

@@ -773,7 +773,10 @@ fn the_whole_fill_limit_is_a_size_between_one_byte_and_the_budget() {
 }
 
 /// The keys of `[local_cache]`, which the README of the packaging must document each in a row.
-const LOCAL_CACHE_KEYS: [&str; 25] = [
+const LOCAL_CACHE_KEYS: [&str; 29] = [
+    "fill_socket",
+    "fill_socket_concurrency",
+    "fill_socket_wait",
     "path",
     "layout",
     "budget",
@@ -787,6 +790,7 @@ const LOCAL_CACHE_KEYS: [&str; 25] = [
     "keep_deadline",
     "write_through",
     "whole_fill_limit",
+    "pin_limit",
     "cache",
     "scrub_rate",
     "scrub_min_round",

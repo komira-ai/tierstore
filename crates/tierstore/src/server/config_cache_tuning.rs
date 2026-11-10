@@ -51,6 +51,16 @@ pub(super) fn apply(table: &LocalCacheTable, cache: &mut CacheConfig) -> Result<
         .keep_queue_bytes
         .map_or(cache.keep_queue_bytes, |size| size.0);
     cache.keep_queue_bytes = within("local_cache", "keep_queue_bytes", queue, 1, GIB)?;
+    let fills = table
+        .fill_socket_concurrency
+        .unwrap_or_else(|| u32::try_from(cache.fill_socket_concurrency).unwrap_or(u32::MAX));
+    let fills = within("local_cache", "fill_socket_concurrency", fills, 1, 1024)?;
+    cache.fill_socket_concurrency = fills as usize;
+    cache.fill_socket_wait = time(
+        "fill_socket_wait",
+        table.fill_socket_wait,
+        cache.fill_socket_wait,
+    )?;
     Ok(())
 }
 
