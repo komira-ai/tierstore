@@ -2,7 +2,7 @@
 
 `tierstore update-hook` is the part of the binary that hostkeeper runs, as root, to put a new release of tierstore in place. hostkeeper owns the release directories and the link `current` that names the release in use; the hook owns the service: which instance runs, and the proof that the new release serves. This page is for the person who writes the package manifest for tierstore or reads what a step said.
 
-On Linux (systemd) an update is a hand-over without a gap when both releases can do it, and a restart with a gap when they cannot. On macOS (launchd) an update is always a restart with a gap. (`tierstore fs` on a Mac can hand its NFS socket over, see [the hand-over](../../../docs/design/tierstore-handover.md); the hook does not run it yet, so its update is a restart too.) Both arms are in every build; the params file chooses between them.
+On Linux (systemd) an update is a hand-over without a gap when both releases can do it, and a restart with a gap when they cannot. On macOS (launchd) an update is always a restart with a gap. (`tierstore fs` on a Mac can hand its NFS socket over, see section 0 of `docs/design/tierstore-handover.md` in the repository; the hook does not run it yet, so its update is a restart too.) Both arms are in every build; the params file chooses between them.
 
 ## The command line
 

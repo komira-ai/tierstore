@@ -12,7 +12,7 @@ use super::super::fixtures::{EPOCH, attached, endless, loopback, settings};
 use super::super::wire_client::{Client, Cred, Dec, Enc, GETATTR, LOOKUP, NFS, READ};
 use super::Running;
 use super::serve_with;
-use super::tests::{Recorder, euid};
+use super::tests::{Recorder, closed, euid};
 use crate::server::handoff::Handoff;
 use crate::server::treefs::start::SIGNALS;
 use crate::server::treefs::testing::Rig;
@@ -242,7 +242,10 @@ async fn a_cold_start_binds_its_own_socket_and_a_bad_control_path_is_refused() {
     let (old, client, _, _) = running(&rig).await;
     assert!(socket.exists());
     drop(client);
+    let address = old.address;
     old.stop().await.unwrap();
+    // The server task is gone, and its control socket with it, once nothing listens.
+    closed(address).await;
     assert!(!socket.exists());
 
     let mut bad = handing(&rig, 0);
