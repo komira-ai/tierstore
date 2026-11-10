@@ -17,6 +17,7 @@
 //! | `[fs.nfs]` | the settings of the NFS frontend (macOS), see `nfs/config.rs` | its defaults |
 //! | `fs.handoff_socket` | the socket a new instance asks the running one for the mount on (`handoff-fs-v1`) | `<runtime_dir>/handoff.sock` |
 //! | `fs.handoff_wait` | how long the hand-over of the mount may last, from the connect to the end | `120s` |
+//! | `fs.reattach_concurrency` | how many trees a start reads the manifests of at once when it makes the attachments again, before it serves (1 reads them one after the other) | `16` |
 //! | `fs.recover_wait` | after a restart on a kernel without resend: how long the connection may show requests no one answers before it is aborted | `30s` |
 
 use std::path::{Path, PathBuf};
@@ -67,6 +68,12 @@ const DEFAULT_HANDOFF_WAIT: Duration = Duration::from_secs(120);
 /// `fs.recover_wait`.
 const DEFAULT_RECOVER_WAIT: Duration = Duration::from_secs(30);
 
+/// The trees a start reads at once when the file leaves out `fs.reattach_concurrency`.
+const DEFAULT_REATTACH_CONCURRENCY: u32 = 16;
+
+/// The most `fs.reattach_concurrency` may be.
+const MOST_REATTACH_CONCURRENCY: u32 = 1024;
+
 /// The most `fs.max_backing_ids` may be.
 const MOST_BACKING_IDS: u32 = 1 << 20;
 
@@ -94,6 +101,7 @@ pub(in crate::server) struct FsTable {
     handoff_socket: Option<PathBuf>,
     handoff_wait: Option<Dur>,
     recover_wait: Option<Dur>,
+    reattach_concurrency: Option<u32>,
 }
 
 /// What `tierstore fs` runs with.
@@ -121,6 +129,8 @@ pub(in crate::server) struct FsSettings {
     /// How long a restarted instance on a kernel without resend watches for requests no one
     /// answers.
     pub recover_wait: Duration,
+    /// How many trees a start reads at once when it makes the attachments again.
+    pub reattach_concurrency: usize,
     /// Whether users other than the one who mounts may use the mount: always, but in the tests,
     /// where the mounting user is not root and `fusermount3` allows it only by `/etc/fuse.conf`.
     pub allow_other: bool,
@@ -234,6 +244,15 @@ impl FsSettings {
             1,
             MOST_BACKING_IDS,
         )?;
+        let reattach_concurrency = within(
+            "fs",
+            "reattach_concurrency",
+            table
+                .reattach_concurrency
+                .unwrap_or(DEFAULT_REATTACH_CONCURRENCY),
+            1,
+            MOST_REATTACH_CONCURRENCY,
+        )?;
         let group = require("fs", "client_group", table.client_group)?;
         let owner = require("fs", "owner", table.owner)?;
         Ok(Self {
@@ -257,6 +276,7 @@ impl FsSettings {
             handoff_socket: absolute("fs.handoff_socket", handoff_socket)?,
             handoff_wait,
             recover_wait,
+            reattach_concurrency: reattach_concurrency as usize,
             allow_other: true,
             nfs: NfsSettings::of(table.nfs)?,
         })

@@ -397,38 +397,6 @@ impl Core {
             .join(digest.to_string()))
     }
 
-    /// Attaches again what the attachments file held before a restart: each pair of tree digest
-    /// and run whose tree can be read is attached in memory, and the file is written once at the
-    /// end. A pair that cannot be attached now is kept in the file, not served, until its run
-    /// attaches again or is detached.
-    pub(super) fn restore(&self, saved: Vec<(TreeDigest, String)>) {
-        let _lifecycle = locked(&self.lifecycle);
-        for (digest, run) in saved {
-            let loaded = self
-                .table
-                .number_of(&digest)
-                .map_err(|error| error.to_string())
-                .and_then(|number| {
-                    self.load_unless_loaded(number, digest)
-                        .map(|_| number)
-                        .map_err(|error| error.to_string())
-                });
-            let mut state = locked(&self.state);
-            match loaded {
-                Ok(number) => {
-                    let _ = state.attachments.add(&run, number, digest);
-                }
-                Err(why) => {
-                    tracing::warn!("tierstore fs: not attaching {digest} for {run} again: {why}");
-                    state.attachments.keep(&run, digest);
-                }
-            }
-        }
-        if let Err(why) = locked(&self.state).attachments.save() {
-            tracing::warn!("tierstore fs: cannot write the attachments file: {why}");
-        }
-    }
-
     /// The tree `number` in memory, read if it is not.
     fn load_unless_loaded(
         &self,
@@ -935,6 +903,7 @@ mod adopt;
 mod passthrough;
 mod prefetch;
 mod read;
+mod restore;
 
 pub(super) use read::read_file;
 

@@ -144,6 +144,24 @@ pub(in crate::server) struct Upstream {
     /// Whether the fills of blobs wait (see [`Upstream::hold_fills`]).
     holding: Mutex<bool>,
     released: Condvar,
+    /// The fills of manifests in flight (see [`Upstream::gate_manifests`]).
+    gate: Mutex<Gate>,
+    gate_changed: Condvar,
+}
+
+/// The progress of the fills of manifests, which a test may pace.
+#[derive(Default)]
+struct Gate {
+    /// Whether a fill of a manifest waits for a permit.
+    gating: bool,
+    /// The fills received.
+    started: usize,
+    /// The fills received and not answered, and the most there have been at once.
+    in_flight: usize,
+    most: usize,
+    /// The permits given and the permits used.
+    given: usize,
+    used: usize,
 }
 
 impl Upstream {
@@ -157,28 +175,15 @@ impl Upstream {
         locked(&self.requests).push(line.to_owned());
         let words: Vec<&str> = line.split(' ').collect();
         match words[0] {
+            "fill" if words.len() == 2 => {
+                self.enter_manifest();
+                let answer = self.answer_fill(words[1], 2);
+                self.leave_manifest();
+                answer
+            }
             "fill" => {
-                let sha = words[1];
-                if words.len() > 2 {
-                    self.wait_while_held();
-                }
-                if let Some(why) = locked(&self.failing).get(sha) {
-                    // `ok` is an answer that leaves no file.
-                    return Some(why.clone());
-                }
-                let built = locked(&self.built);
-                if words.len() == 2 {
-                    let Some(bytes) = built.manifests.get(sha) else {
-                        return Some("upstream 404".to_owned());
-                    };
-                    Self::put(&manifest_path(&self.cache, sha), bytes);
-                } else {
-                    let Some(bytes) = built.blobs.get(sha) else {
-                        return Some("upstream 404".to_owned());
-                    };
-                    Self::put(&blob_path(&self.cache, sha), bytes);
-                }
-                Some("ok".to_owned())
+                self.wait_while_held();
+                self.answer_fill(words[1], words.len())
             }
             "touch" => None,
             "pin" => Some(
@@ -188,6 +193,73 @@ impl Upstream {
             ),
             _ => Some("ok 0".to_owned()),
         }
+    }
+
+    /// The answer to a fill of `sha`: a manifest when `words` is 2, else a blob.
+    fn answer_fill(&self, sha: &str, words: usize) -> Option<String> {
+        if let Some(why) = locked(&self.failing).get(sha) {
+            // `ok` is an answer that leaves no file.
+            return Some(why.clone());
+        }
+        let built = locked(&self.built);
+        if words == 2 {
+            let Some(bytes) = built.manifests.get(sha) else {
+                return Some("upstream 404".to_owned());
+            };
+            Self::put(&manifest_path(&self.cache, sha), bytes);
+        } else {
+            let Some(bytes) = built.blobs.get(sha) else {
+                return Some("upstream 404".to_owned());
+            };
+            Self::put(&blob_path(&self.cache, sha), bytes);
+        }
+        Some("ok".to_owned())
+    }
+
+    /// Makes every fill of a manifest wait, once it is received, for a permit of
+    /// [`Upstream::permit_manifests`]: for a test that paces the fills by its own events.
+    pub(in crate::server) fn gate_manifests(&self) {
+        locked(&self.gate).gating = true;
+    }
+
+    /// Lets `count` more fills of manifests go on.
+    pub(in crate::server) fn permit_manifests(&self, count: usize) {
+        locked(&self.gate).given += count;
+        self.gate_changed.notify_all();
+    }
+
+    /// Waits until `count` fills of manifests have been received in all.
+    pub(in crate::server) fn wait_for_manifest_fills(&self, count: usize) {
+        let gate = locked(&self.gate);
+        let _gate = self
+            .gate_changed
+            .wait_while(gate, |gate| gate.started < count)
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
+    }
+
+    /// The most fills of manifests that were in flight at once.
+    pub(in crate::server) fn most_manifest_fills(&self) -> usize {
+        locked(&self.gate).most
+    }
+
+    fn enter_manifest(&self) {
+        let mut gate = locked(&self.gate);
+        gate.started += 1;
+        gate.in_flight += 1;
+        gate.most = gate.most.max(gate.in_flight);
+        self.gate_changed.notify_all();
+        while gate.gating && gate.used >= gate.given {
+            gate = self
+                .gate_changed
+                .wait(gate)
+                .unwrap_or_else(std::sync::PoisonError::into_inner);
+        }
+        gate.used += 1;
+    }
+
+    fn leave_manifest(&self) {
+        locked(&self.gate).in_flight -= 1;
+        self.gate_changed.notify_all();
     }
 
     /// Makes every fill of a blob wait, once it is received, until [`Upstream::release_fills`]: for
@@ -305,6 +377,7 @@ impl Rig {
             handoff_socket: self.dir.path().join("handoff.sock"),
             handoff_wait: Duration::from_secs(30),
             recover_wait: Duration::from_secs(30),
+            reattach_concurrency: 4,
             allow_other: false,
             nfs: crate::server::treefs::nfs::config::NfsSettings::default(),
         }
@@ -406,6 +479,8 @@ impl Rig {
             requests: Mutex::new(Vec::new()),
             holding: Mutex::new(false),
             released: Condvar::new(),
+            gate: Mutex::new(Gate::default()),
+            gate_changed: Condvar::new(),
         });
         let socket = dir.path().join("fill.sock");
         let fill = FakeFill::start(&socket, Arc::clone(&upstream));
