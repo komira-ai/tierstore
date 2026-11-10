@@ -126,7 +126,7 @@ export interface Deps {
 
 /** The least a built site has, kept under the real site (test/golden.manifest) and above half of it: a dist/ below either is not a site, and the sweep deletes. */
 export const MIN_HTML_PAGES = 12;
-export const MIN_FILES = 24;
+export const MIN_FILES = 25;
 /** The only file types a built site holds besides install.sh (check-dist.ts enforces it); the syncs above give exactly these a content type and a cache rule. */
 const TYPES = ['.html', '.js', '.css', '.md', '.txt'];
 
