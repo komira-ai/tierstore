@@ -1,10 +1,10 @@
 # Build inputs as a filesystem: lazy, writable, digest-addressed trees served by tierstore
 
-Status: **proposal, for the CEO's review; nothing here is built, and no code changes come with this document.** kbf keeps
+Status: **proposal, for the CEO's review; nothing here is built, and no code changes come with this document.** The farm's build executor (the service that runs build actions, called "the executor" below) keeps
 copying (or linking) each action's inputs into a scratch directory and removing it afterwards. This document designs, in
 parallel, how tierstore could serve those inputs as a filesystem instead, so that a job scheduled by jobscheduler reads its
 inputs without a copy, fetches only what it opens, may write anywhere in them privately, and runs on Linux and on macOS.
-Section 11 is the measurement plan against today's path on real kbf builds; section 12 is the phased plan, which starts
+Section 11 is the measurement plan against today's path on real builds run by the executor; section 12 is the phased plan, which starts
 with probes and builds nothing before their answers. Section 13 sets out the decisions the CEO is asked to make, each with
 its options and a recommendation.
 
@@ -17,8 +17,8 @@ whiteouts, 6.6; the live hand-off of FUSE and NFS sessions, section 7; pinning, 
 why (section 3.1). The one place it disagrees is the Linux writable layer: this document recommends the kernel's overlayfs
 there and the core's writable layer on macOS, and puts the choice to the CEO (decision C4).
 
-**Claim tags.** **Read in code** means read in the named repository (tierstore at this commit; the public repositories
-komira-ai/kbf and komira-ai/jobscheduler at their main branches when this was written), with the file named. **Sourced**
+**Claim tags.** **Read in code** means read in the named repository (tierstore at this commit; the public
+repositories of the build executor and of jobscheduler at their main branches when this was written), with the file named (paths in the executor's repository leave out the prefix its crate names share). **Sourced**
 means a public source listed at the end, cited as [S*n*]. **Inferred** means reasoned here from those, and says how.
 **Unverified** means not checked against a primary source; each such claim is a probe or spike of section 12 or is not
 load-bearing. **Unmeasured** means a performance expectation with no measurement behind it yet; section 11 exists to
@@ -39,34 +39,34 @@ replace every one of them. Probes and spikes are named MP1 to MP6 and SP1 to SP5
 | **pin** | A tree's claim on the node's cache: the blobs a pinned tree has opened are not evicted while it is attached (6.5) |
 | **tree number** | A small number `tierstore fs` gives a tree digest (or a view) the first time it is attached on a mount (6.3) |
 | **inode number** | The 64-bit number the kernel names a FUSE inode by (FUSE calls it the node id); the NFS file handle carries the same number (6.3) |
-| **run directory** | The per-run directory a job runtime makes and removes (kbf: the lease directory; jobscheduler: the lease dir under the scratch root) |
+| **run directory** | The per-run directory a job runtime makes and removes (the executor: the lease directory; jobscheduler: the lease dir under the scratch root) |
 | **source fill** | A copy of one blob into the node's tierstore cache, from a key and an offset that the tree manifest names (6.2) |
 
 ## 1. The problem
 
 ### 1.1 What happens today (read in code)
 
-kbf prepares each action's **input root** (a REAPI `Directory` tree, SHA-256 digests) in the action's run directory before
-the action starts, and removes the directory after it ends (kbf `crates/kbf-daemon/src/tree.rs`,
-`crates/kbf-driver-container/src/runtime.rs`, `crates/kbf-driver-container/src/remove.rs`). There are three ways in:
+The executor prepares each action's **input root** (a REAPI `Directory` tree, SHA-256 digests) in the action's run directory before
+the action starts, and removes the directory after it ends (the executor's `crates/daemon/src/tree.rs`,
+`crates/driver-container/src/runtime.rs`, `crates/driver-container/src/remove.rs`). There are three ways in:
 
 1. **Plain copy.** Every file is fetched from the CAS and written; a second path with the same digest is copied from the
    first (`tree.rs`: `materialize`, `write_files`, `write_blob`).
 2. **Node cache, hard links.** With `--cache-dir`, each file is a hard link to an entry of a per-node NVMe file cache (on
    macOS a `clonefile`), so the bytes are written once per node and each action pays one link per file
-   (`crates/kbf-daemon/src/cache/lease.rs`, `cache/clone.rs`). Inside the container such a file shows the overflow owner,
-   mode 0444 or 0555, a fixed mtime, and one inode for identical inputs (kbf `docs/design/worker-cache.md` section 6.2).
+   (`crates/daemon/src/cache/lease.rs`, `cache/clone.rs`). Inside the container such a file shows the overflow owner,
+   mode 0444 or 0555, a fixed mtime, and one inode for identical inputs (the executor's `docs/design/worker-cache.md` section 6.2).
 3. **Shared trees.** A `Directory` with at least 256 files (a toolchain) is built once per node as a tree of hard links
    and bind-mounted read-only into each action that has it, at most 8 per action; the action's input root holds an empty
-   directory there, and an action that writes into one fails (kbf `docs/design/fast-sandbox.md` section 4,
-   `crates/kbf-daemon/src/trees/`). On macOS the tree is one `clonefile` of the directory instead, and is writable
+   directory there, and an action that writes into one fails (the executor's `docs/design/fast-sandbox.md` section 4,
+   `crates/daemon/src/trees/`). On macOS the tree is one `clonefile` of the directory instead, and is writable
    (fast-sandbox.md section 8).
 
-On Linux the action runs in a rootless `crun` container whose `/kbf/root` is an overlayfs: lower is the materialised input
-root, upper is a per-run directory, and outputs are read from the upper layer only, each hashed once (kbf
-`crates/kbf-driver-container/src/outputs.rs`). Before the run, kbf moves each input that an output path names from the
+On Linux the action runs in a rootless `crun` container whose input root is an overlayfs: lower is the materialised input
+root, upper is a per-run directory, and outputs are read from the upper layer only, each hashed once (the executor's
+`crates/driver-container/src/outputs.rs`). Before the run, the executor moves each input that an output path names from the
 input root into the upper layer, and makes the working directory and the outputs' parents there (fast-sandbox.md section
-3.1). The action runs as container user 1000 (`crates/kbf-driver-container/src/container.rs`: `ACTION_ID`).
+3.1). The action runs as container user 1000 (`crates/driver-container/src/container.rs`: `ACTION_ID`).
 
 jobscheduler's own `crun` path has the same overlay: `/work` is an overlayfs whose lower is an empty directory today
 (jobscheduler `crates/js-contain/src/oci/spec.rs`, `crates/js-contain/src/container.rs`). Its wire can name a
@@ -85,16 +85,16 @@ every byte of every input is on the node's disk before the action starts, whethe
 
 ### 1.2 What is not known (and why this document ends in a measurement plan)
 
-- **How much of its input root an action opens.** kbf's `inputs:` log line has the file count (`files`, `tree_files`)
+- **How much of its input root an action opens.** The executor's `inputs:` log line has the file count (`files`, `tree_files`)
   and the bytes fetched from the CAS (`fetched_bytes`), and `inputs phases:` has `walk_ms`, `link_ms`, `trees_ms` and
-  `chown_ms` (kbf `crates/kbf-daemon/src/cache/fill.rs`, `crates/kbf-driver-container/src/input_phases.rs`). Nothing
-  records the input root's total bytes (kbf `docs/design/ui-data.md` lists input bytes as not recorded) or which inputs an
+  `chown_ms` (the executor's `crates/daemon/src/cache/fill.rs`, `crates/driver-container/src/input_phases.rs`). Nothing
+  records the input root's total bytes (the executor's `docs/design/ui-data.md` lists input bytes as not recorded) or which inputs an
   action opens. A lazy filesystem wins only where actions open a small part of what they are given, or where much of what
   they are given is not yet on the node.
-- **What setup costs today on the shipped backend.** kbf fast-sandbox.md section 9: "No benchmark of the shipped backend
+- **What setup costs today on the shipped backend.** The executor's fast-sandbox.md section 9: "No benchmark of the shipped backend
   is in this repository."
-- kbf has already weighed a lazy input root and rejected it **for now**: "FUSE/NFSv4 lazy input root ... Revisit only if
-  actions read a small fraction of huge input roots" (kbf `docs/design/worker-cache.md` section 11). That condition is
+- The executor has already weighed a lazy input root and rejected it **for now**: "FUSE/NFSv4 lazy input root ... Revisit only if
+  actions read a small fraction of huge input roots" (the executor's `docs/design/worker-cache.md` section 11). That condition is
   the first thing section 11 measures.
 - **Where laziness loses.** Buildbarn reports its virtual filesystem running actions at over 95% of the speed of a fully
   downloaded input root in aggregate, and slow on workloads with poor cache hit rates, because each miss is a
@@ -131,11 +131,11 @@ Goals:
   an error the job runtime can tell from a build error.
 - **Linux first, macOS with a stated route.** The farm's kernel is 6.17 (as its operators state; checked on a node in SP1).
 - **Measured against today** before anything ships to the farm (section 11), with today's path kept as the kill-switch.
-- **tierstore stays generic.** It knows trees of content-addressed files, not REAPI, kbf or Buck2.
+- **tierstore stays generic.** It knows trees of content-addressed files, not REAPI, the executor or Buck2.
 
 Non-goals:
 
-- Changing kbf now. kbf keeps its materialisation; this design ends where kbf and jobscheduler would call it.
+- Changing the executor now. The executor keeps its materialisation; this design ends where the executor and jobscheduler would call it.
 - A per-job disk quota (CEO, 2026-11-09: whole-node pool; section 6.9).
 - Serving a job's writes back as a new tree. Outputs are collected as today (6.6).
 - Windows.
@@ -162,7 +162,7 @@ Non-goals:
 | Linux: FUSE with passthrough (6.9+), `max_background` raised to about 1024 (the default of 12 wedged busy Buildbarn workers [S28]) | **Kept** | Passthrough needs `CAP_SYS_ADMIN` in the initial user namespace [S1], which the network-facing tierstore process must not have, hence a separate filesystem process (6.2, C5). The kernel binds an inode to one backing file and forbids mixing passthrough and cached opens of one inode [S2], which shapes 6.4. |
 | macOS: one NFSv4.0 loopback server, mounted once per node at a fixed path, a per-job view per run, Seatbelt `(subpath ...)` isolation | **Kept, with two additions and one open choice** | 8. Additions: the server also checks the caller's uid against the run (jobscheduler gives each run its own user), and a view's handles are derivable so a restart is a pause. Open choice: NFSv4.0 (Buildbarn's, compound operations, open state to recover) or NFSv3 (stateless, chattier, a mature Rust crate); probe MP3 measures both, and C2 asks the CEO to let the version follow the probe. |
 | FSKit later, as a third frontend behind a flag | **Kept (C3)** | No passthrough for file-backed volumes, interactive per-user enablement, and Apple's own statement that it is not yet suited to a network-backed filesystem [S20, S25]. |
-| APFS `clonefile` as the fallback with no server | **Kept** | It is kbf's macOS path today and stays the default and the kill-switch (8). |
+| APFS `clonefile` as the fallback with no server | **Kept** | It is the executor's macOS path today and stays the default and the kill-switch (8). |
 | A live update hands over the FUSE session as the hook hands over listening sockets | **Kept, plus crash, plus NFS** | 7.1 to 7.3 for FUSE (descriptor store, recorded `INIT`, `FUSE_NOTIFY_RESEND`); 7.5 for NFS: new on macOS, which has no hand-over today; derivable handles and an on-disk duplicate request cache make a restart a pause; NFSv4.0 state is handed over on an update, and after a crash reclaims are answered `NO_GRACE` and the client opens again. |
 | Output capture by hashing in place, uploading only when no writer is open [S6] | **Kept in substance** | The runtimes' existing collectors read outputs once from the upper directory after the job's processes are gone, so no writer is open (6.6). tierstore does not store outputs (D4). |
 | Disk accounting on a whole-node pool | **Kept** | 6.9. |
@@ -236,7 +236,7 @@ process, or the tree must be copied.
              (Seatbelt: own subpath only; server checks uid)
 ```
 
-In words: a client (jobscheduler's agent, or kbf's daemon for as long as kbf schedules its own runs) asks `tierstore fs`
+In words: a client (jobscheduler's agent, or the executor's daemon for as long as the executor schedules its own runs) asks `tierstore fs`
 to **attach** a tree by its digest for a run. `tierstore fs` reads the tree's manifests through the node's tierstore cache
 and makes the tree appear on its one node-wide mount. On Linux the job runtime gives `trees/<digest>` to the job's
 container as the overlay's lower layer, exactly where it gives a materialised input root today. On macOS `tierstore fs`
@@ -268,12 +268,12 @@ name (bytewise), each name unique, none empty, `.` or `..`, none containing `/` 
 
 - The **digest** of a tree manifest, and so of the tree whose root it lists, is the SHA-256 of its bytes as stored. Two
   encodings of one tree are two trees; that costs a cache miss and nothing else, so no canonical form is needed.
-- A **source** says where the blob's bytes are in tierstore: an object key and an offset, the length being `size`. kbf's
-  blobs live inside packs, at a key of the form `cas/d/<node>/<boot>/<16 hex>` and an offset (kbf
-  `crates/kbf-pack/src/keys.rs`; the location record is `Location { pack_key, offset, length }` in
-  `crates/kbf-pack-index/src/lib.rs`), so the source is how tierstore reads one without knowing kbf's index. With no
-  `source`, the blob is the whole object `cas/l/<sha256>`, the content-addressed key kbf writes large objects to (best
-  effort, so a manifest writer that omits `source` must know the object is there: kbf `crates/kbf-front/src/large_backfill.rs`).
+- A **source** says where the blob's bytes are in tierstore: an object key and an offset, the length being `size`. The executor's
+  blobs live inside packs, at a key of the form `cas/d/<node>/<boot>/<16 hex>` and an offset (the executor's
+  `crates/pack/src/keys.rs`; the location record is `Location { pack_key, offset, length }` in
+  `crates/pack-index/src/lib.rs`), so the source is how tierstore reads one without knowing the executor's index. With no
+  `source`, the blob is the whole object `cas/l/<sha256>`, the content-addressed key the executor writes large objects to (best
+  effort, so a manifest writer that omits `source` must know the object is there: the executor's `crates/front/src/large_backfill.rs`).
   A file of size 0 has no source.
 - Child tree manifests are fetched the same way, from `cas/l/<sha256>`: a tree manifest is itself a content-addressed
   blob, written by the client with a create-only put (a content-addressed key is never overwritten).
@@ -402,11 +402,11 @@ refuses by name [S1, S17]). On macOS the mount is the NFS export of section 8. U
   asks for its own `user.overlay.*` attributes on every lower directory); every request that would change a tree is
   answered `EROFS`.
 - **Attributes.** Every entry of every tree reports one owner, `fs.owner` (`uid:gid`, host ids): the host id of the
-  **action user** (kbf: container user 1000, `ACTION_ID`; jobscheduler: its action user), not of the container's root;
+  **action user** (the executor: container user 1000, `ACTION_ID`; jobscheduler: its action user), not of the container's root;
   on macOS a view reports the run's own user (8). Files report mode 0644, or 0755 when `exec`; directories 0755; symlinks
   0777. The action can therefore change and create anything (the overlay or the view copies up), as in a copy it owns, and
-  every other user can read and traverse a tree, as kbf's cache files and tree store already allow (kbf fast-sandbox.md
-  section 4.4). mtime is fixed, the same value kbf's materialisation uses (D10). `nlink` is 1 for files, and 2 plus the
+  every other user can read and traverse a tree, as the executor's cache files and tree store already allow (the executor's fast-sandbox.md
+  section 4.4). mtime is fixed, the same value the executor's materialisation uses (D10). `nlink` is 1 for files, and 2 plus the
   subdirectories for a directory. `st_ino` is the inode number.
 
 **Inode numbers are derivable (invariant I1).** The kernel names every inode by a 64-bit number it got from a lookup
@@ -443,7 +443,7 @@ needed again is flattened again. Sections 7 and 8 stand on this. The layout is a
 lives; section 10 says how it is versioned.
 
 The cost of I1 is that a tree's manifests are all read and flattened when it is first attached: metadata is fetched
-eagerly, data lazily (D7). kbf's setup walks every `Directory` of every action's input root today (`walk_ms`), so the
+eagerly, data lazily (D7). The executor's setup walks every `Directory` of every action's input root today (`walk_ms`), so the
 walk itself is not new; the flattening is (its cost is spike SP4). Buildbarn instead loads each directory on first access
 [S6]; doing that here would make inode numbers depend on the order of lookups, which a new process cannot recover. Each
 new root digest also costs a table append and cold dentries: the first lookup of each path under it is a round trip. That
@@ -498,7 +498,7 @@ prefetching that, as Buildbarn's file system access cache does with a Bloom filt
 ### 6.5 Attachments, pins and eviction
 
 An **attachment** is a client's statement that a run will use a tree: `attach <digest> for <run> [view <upper dir>]`,
-where `<run>` is the client's id of the run (jobscheduler's run id, kbf's lease id) and `view` asks for a writable view
+where `<run>` is the client's id of the run (jobscheduler's run id, the executor's lease id) and `view` asks for a writable view
 whose upper directory the runtime has made in the run's directory (6.6). It is answered when the tree's manifests are read
 and flattened and the tree (or the view) resolves, with the path to give the job. `detach <run>` ends every attachment of
 the run and answers with what they recorded (7.4). Attachments are made on the control socket (`fs.control_socket`, a Unix
@@ -545,7 +545,7 @@ one writer and one budget:
   count, `local_cache/mod.rs`: `drop_entry`).
 
 A source that no longer exists upstream (the client deleted a pack while a tree using it was attached) fails that blob's
-open with `EIO`, recorded on the attachment (7.4). That is the client's contract (6.1), and it is the failure today's kbf
+open with `EIO`, recorded on the attachment (7.4). That is the client's contract (6.1), and it is the failure the executor
 gets when it materialises from a missing blob, moved from before the job to during it.
 
 ### 6.6 Writes: the overlay on Linux, the core's views on macOS
@@ -630,21 +630,21 @@ survive the process (a crash, an update), not the machine, which takes the run w
   opened by passthrough too, so writes to them go at the disk's speed.
 - **Outputs.** The runtime reads the run's outputs from `root/` after the job's processes are gone (an output is a plain
   file at its path there); an output the run never changed is still the tree's, and `detach <run> outputs <paths>`
-  returns its digest from the manifest. tierstore does not hash or store outputs: kbf's output path packs small blobs into
+  returns its digest from the manifest. tierstore does not hash or store outputs: the executor's output path packs small blobs into
   segments, which tierstore cannot do for it (D4).
 
 This is EdenFS's design in miniature: an overlay that records what was materialised, written in an order that loses
 nothing when the process is killed [S9]. The intent log is what that ordering needs to become when the protocol may resend
 a request whose effect is already on disk.
 
-Compared with kbf's plain copy, an action sees the same paths and contents, a tree it owns (6.3), writable everywhere,
+Compared with the executor's plain copy, an action sees the same paths and contents, a tree it owns (6.3), writable everywhere,
 private. Two differences it shares with today's overlay over a materialised root: renaming a directory of the input root
-fails `EXDEV`, and a hard link from an input copies it up. Compared with kbf's cached path (worker-cache.md section 6.2),
+fails `EXDEV`, and a hard link from an input copies it up. Compared with the executor's cached path (worker-cache.md section 6.2),
 the action sees its own uid instead of the overflow owner, modes 0644 and 0755 instead of 0444 and 0555, and identical
 inputs as separate inodes with `nlink` 1 instead of one shared inode; a tool that relies on inode identity (hard-link
 records in `tar` or `rsync -H`) behaves as it does over the plain copy. Two improvements: an action that opens an input for
-writing gets a private copy instead of `EACCES` (kbf worker-cache.md section 12, Q1), and, for a toolchain left inside the
-writable tree, an action that writes into it works instead of failing (kbf fast-sandbox.md section 4.4).
+writing gets a private copy instead of `EACCES` (the executor's worker-cache.md section 12, Q1), and, for a toolchain left inside the
+writable tree, an action that writes into it works instead of failing (the executor's fast-sandbox.md section 4.4).
 
 ### 6.7 Integration with the job runtimes
 
@@ -679,17 +679,17 @@ probe MP2 runs the profile the builder generates, not a hand-written one. Every 
 as `<mount>/trees/<digest>` under a read-only allow rule. The agent's refusal of tree inputs ("this agent keeps no stage
 trees") is lifted for hosts that list the capability.
 
-**kbf's own container driver**, for as long as kbf schedules its own leases, behind a daemon flag, with the materialised
+**The executor's own container driver**, for as long as the executor schedules its own leases, behind a daemon flag, with the materialised
 path kept as the fallback when `tierstore fs` is not configured or refuses an attach. Three changes in
-`crates/kbf-driver-container`: the overlay's lower directory comes from the attach; each shared tree (a `Directory` of at
+`crates/driver-container`: the overlay's lower directory comes from the attach; each shared tree (a `Directory` of at
 least 256 files) is attached as its own tree and bound read-only where it is bound today, so its inodes are shared across
 actions as today; and `prepare_outputs`, which today **renames** each input that an output path names from the input root
 into the upper layer, copies it instead (a lazy read of that blob), and makes the mount points, the working directory and
-the outputs' parents in the upper layer. kbf's macOS driver uses the view as jobscheduler's does.
+the outputs' parents in the upper layer. The executor's macOS driver uses the view as jobscheduler's does.
 
-**kbf's other half**: write each `Directory`'s tree manifest with its blobs' sources (it walks the `Directory` messages
+**The executor's other half**: write each `Directory`'s tree manifest with its blobs' sources (it walks the `Directory` messages
 today and knows each blob's pack location), put the manifests to tierstore, and name the root digest in the job. That is
-a kbf design of its own; spike SP5 is its throwaway form, and section 12 lists its production form.
+a design of the executor's own; spike SP5 is its throwaway form, and section 12 lists its production form.
 
 ### 6.8 Isolation
 
@@ -708,7 +708,7 @@ a kbf design of its own; spike SP5 is its throwaway form, and section 12 lists i
   is above `Off`, and such a run keeps today's copy. Buildbarn's `bb_virtual_tmp` serves a different symlink target per
   `AUTH_SYS` uid [S23]; that is the same mechanism, and Buildbarn does not offer it as an isolation boundary.
 - A host process (outside every container and sandbox) of any user can read an attached tree by its digest, as it can read
-  kbf's cache and tree store today (mode 0711 directories, files readable by others). Attaching is limited to the control
+  the executor's cache and tree store today (mode 0711 directories, files readable by others). Attaching is limited to the control
   socket's group. A tree's contents are build inputs, not secrets; a deployment that needs them hidden from host users sets
   the mountpoint under a 0710 directory of the runtime's group (D6). A view is readable only by its run's user.
 
@@ -1020,20 +1020,20 @@ mount and its paths as jobs see them (D3).
 
 The plan answers two questions in order, and the second is not run unless the first says it is worth it.
 
-**Q-A: is there anything for laziness to win?** (No new filesystem; kbf and the farm as they are; it runs beside the
+**Q-A: is there anything for laziness to win?** (No new filesystem; the executor and the farm as they are; it runs beside the
 macOS probes of phase 0.)
 
-- Instruments (kbf changes, in Rust (T11), off by default):
+- Instruments (changes to the executor, in Rust (T11), off by default):
   - add the input root's total bytes to the `inputs:` line (the file count is there already);
   - count, per action, the input files it opens and the summed size of those files: a `fanotify` watch (`FAN_OPEN`,
     `FAN_OPEN_EXEC`) on the action's input mounts (the overlay and each shared-tree bind, reached through the container's
-    root at `/proc/<pid>/root`), in the kbf daemon behind a flag, one line per lease. `fanotify` reports which files are
+    root at `/proc/<pid>/root`), in the executor's daemon behind a flag, one line per lease. `fanotify` reports which files are
     opened, not how many bytes are read; L3 fetches whole blobs on open (6.4), so **opened bytes** is the number L3 would
     fetch, and bytes read is not claimed. Placing those marks needs `CAP_SYS_ADMIN` (C7).
   - macOS has no such watch that an unprivileged daemon can run: there, Q-A measures setup times and bytes cloned, and a
     one-off `fs_usage` run as root on one node over one build gives opened files, labelled as measured on one node.
-- Builds: a full build of the komira engine and a full build of kbf itself, with the action cache disabled so every
-  action runs, on the farm's Linux nodes and on its macOS nodes, three times each, on a cold node (kbf's node cache and
+- Builds: a full build of the komira engine and a full build of the executor itself, with the action cache disabled so every
+  action runs, on the farm's Linux nodes and on its macOS nodes, three times each, on a cold node (the executor's node cache and
   the page cache emptied first) and on a warm one.
 - Report, per build and per platform: the distribution over actions of input bytes, input files, files opened, opened
   bytes, and the share opened (p50, p90, p99, and weighted by bytes); today's `inputs_ms` and its parts (`walk_ms`,
@@ -1041,25 +1041,25 @@ macOS probes of phase 0.)
 - **Decision rule.** Continue to Q-B if, on either build, `link_ms + trees_ms + chown_ms` (what L3 removes; `walk_ms` is
   the floor of L3's own attach, so it is reported and not counted as saved) is at least 5% of the build's summed `run_ms`,
   or, on cold nodes, opened bytes are under half of input bytes (byte-weighted p50). Otherwise stop: write the result into
-  kbf's `worker-cache.md` section 11 and this document, and leave kbf as it is. Either way kbf's "revisit only if" is
+  the executor's `worker-cache.md` section 11 and this document, and leave the executor as it is. Either way the executor's "revisit only if" is
   then answered by a measurement. The 5% and the half are judgment calls for the CEO to confirm (C6), not derived figures.
 
 **Q-B: does it win, by how much, and where does it lose?** (Needs the Linux core of phase 1, spike SP5, and on macOS
 the frontend of phase 2.)
 
 - Arms, on the same nodes and the same commit, interleaved run by run (A, B, C, D, E, A, ...):
-  - **A**: kbf as shipped (cache, hard links, shared trees);
+  - **A**: the executor as shipped (cache, hard links, shared trees);
   - **B**: L3 with `fs.passthrough = false` (every inode a cached open; the cost passthrough saves);
   - **C**: L3 with passthrough;
   - **D**: L3 with passthrough and `prefetch = "all"`;
   - **E** (once the core's views exist, for C4): L2, the core's views on Linux, with passthrough;
   - on macOS, arms **M0** (today) and **M1**, with the NFS version MP3 chose.
-- State between runs: a **cold** run starts with kbf's node cache, tierstore's cache and pins and the page cache
+- State between runs: a **cold** run starts with the executor's node cache, tierstore's cache and pins and the page cache
   (`drop_caches`; `purge` on macOS) emptied; a **warm** run starts after a run of the same arm; a **partial** run starts
   with tierstore's cache holding only the previous commit's blobs. Each state is judged separately.
 - Each arm: the two builds, in each state, at the farm's usual concurrency per node and at twice it, five repetitions each.
 - Measured, per action: lease-to-result wall time; setup and teardown (`input_fetch_start` to `input_fetch_completed` in
-  `ExecutedActionMetadata`, which kbf stamps today, plus `attach_ms` from `tierstore fs`, split into manifest fetch,
+  `ExecutedActionMetadata`, which the executor stamps today, plus `attach_ms` from `tierstore fs`, split into manifest fetch,
   flatten and table append, and `detach_ms`); `client_ms` (SP5's manifest build and put); run time (`run_ms`); `stall_ms`
   (7.4); first-touch latency (open of a blob not yet in the cache) as a distribution, p99 included; outputs time. Per
   node: bytes fetched from upstream against bytes copied or linked in arm A, bytes written to the disk (`/proc/diskstats`;
@@ -1100,7 +1100,7 @@ document before the phase that depends on them starts; none is merged.
 | MP5 | `clonefile` cost of a 50,000-file tree (the fallback's size; one unconfirmed report puts a 77,000-file clone at about two minutes [S30]); VirtioFS stat latency from a Linux guest. | M0's cost; OCI jobs on Macs |
 | MP6 | (Only if C3 is revisited.) FSKit: can a LaunchDaemon mount with no user logged in; can a device manager pre-approve the extension; may the extension open a socket to tierstore; does `fskitd` run as root? | C3 |
 
-On Linux, in the same phase: Q-A of section 11 (kbf instruments; phase 0 needs none of the code below), and spikes SP1 to
+On Linux, in the same phase: Q-A of section 11 (the executor's instruments; phase 0 needs none of the code below), and spikes SP1 to
 SP4 and SP5:
 
 | Spike | Question | Decides |
@@ -1109,7 +1109,7 @@ SP4 and SP5:
 | SP2 | With `fuser` plus a constructor from a recorded `INIT` reply: serve a connection another process initialised; kill the server while a thread waits on a slow fill, with the descriptor in systemd's store; does `FUSE_NOTIFY_RESEND` from the new server answer it, with no error in the job? Run the hand-over of 7.3 with requests arriving between `ack` and `done`. Is one descriptor read by many threads enough for the farm's concurrency? Does upstream `fuser` take the constructor? | 7.1 to 7.3 |
 | SP3 | Passthrough: two inodes sharing one backing id; one inode opened in two processes; a backing id registered by one process and closed by the next; `BackingId::into_raw` across exit; an evicted cache file still open; a view's upper file opened by passthrough for writing. | 6.4, 6.6, 7.1 |
 | SP4 | Flatten time and memory of the largest input root of each build (from Q-A's data). | I1's eager metadata (6.3, D7) |
-| SP5 | kbf, throwaway: a tree manifest writer from the `Directory` messages with pack locations, plus the container driver changes of 6.7, enough to run the two builds of Q-B. | Q-B can run |
+| SP5 | The executor, throwaway: a tree manifest writer from the `Directory` messages with pack locations, plus the container driver changes of 6.7, enough to run the two builds of Q-B. | Q-B can run |
 
 **Phase 1: the Linux core** (if Q-A says continue under C6, or at once if C6 is no). Pull requests, one subject each (P7), each naming its tests:
 
@@ -1128,10 +1128,10 @@ SP4 and SP5:
 6. tierstore: passthrough, the backing table, the `fs.passthrough` switch and `prefetch` (arms B and D need them).
 7. tierstore: crash recovery (descriptor store, recorded `INIT`, resend) and the hand-over (`handoff-fs-v1`); the hook
    learns the second unit; the cross-release layout test.
-8. kbf: the Q-A instruments. Numbered here, but it lands first, in phase 0, and needs none of the above.
+8. The executor: the Q-A instruments. Numbered here, but it lands first, in phase 0, and needs none of the above.
 9. jobscheduler: the tree input kind, its capability, attach and detach in the `crun` runtime, the cache budget in the
    disk offer (its own design document first, B22).
-10. kbf: tree manifests, and naming the root digest in a job: the production form of SP5 (its own design document first).
+10. The executor: tree manifests, and naming the root digest in a job: the production form of SP5 (its own design document first).
 
 **Phase 2: the macOS frontend** (if MP1 to MP3 pass):
 
@@ -1144,7 +1144,7 @@ SP4 and SP5:
 13. jobscheduler: views on the macOS agent (the Seatbelt rules of 6.7), with today's copy as the kill-switch.
 
 **Phase 3: prefetch and soak.** Access-profile prefetch (Buildbarn ADR 10 [S7]) if Q-B's tails ask for it, and the soak of
-section 11 on real kbf builds.
+section 11 on real builds run by the executor.
 
 **Phase 4: FSKit** (only if C3 is revisited and MP6 answers): a third frontend behind a flag, on the same core, measured
 against M1 on the same builds, since no benchmark of FSKit for builds exists.
@@ -1211,35 +1211,35 @@ asked for; C4 to C7 are this document's.
     the mount reaching the host.
 - **C6. Measure first (Q-A) before building phase 1, and continue only on the rule of section 11 (per-file setup at least
   5% of run time, or actions opening under half of their input bytes on cold nodes)?**
-  - Recommendation: **yes, with those thresholds.** They are judgment calls, not derived figures; Q-A answers kbf's own
+  - Recommendation: **yes, with those thresholds.** They are judgment calls, not derived figures; Q-A answers the executor's own
     condition for revisiting a lazy input root (1.2).
   - If no: phase 1 starts at once, and Q-B answers both questions, after the building rather than before it.
-- **C7. Run kbf's `fanotify` instrument of Q-A as root on the measured nodes only, rather than give kbf's daemon
+- **C7. Run the executor's `fanotify` instrument of Q-A as root on the measured nodes only, rather than give the executor's daemon
   `CAP_SYS_ADMIN` behind a flag?**
-  - Recommendation: **yes, as root on the measured nodes only**, so kbf's daemon gains no privilege in its shipped form.
-  - If no: kbf's daemon unit gains the capability when the flag is set, and kbf's own review judges that change (G3).
+  - Recommendation: **yes, as root on the measured nodes only**, so the executor's daemon gains no privilege in its shipped form.
+  - If no: the executor's daemon unit gains the capability when the flag is set, and the executor's own review judges that change (G3).
 
 ### 13.2 Decided here (the CEO may overturn any)
 
 - **D1.** tierstore's own tree manifest format, JSON, one object per directory, with blob sources; not REAPI. Why:
-  tierstore stays generic, and only the client knows where a blob is (kbf's packs).
+  tierstore stays generic, and only the client knows where a blob is (the executor's packs).
 - **D2.** The reserved front type `fs` is not used by `tierstore fs`; the pull request that adds it frees the name or uses
   it for the `[fs]` table.
 - **D3.** One node-wide mount (Linux `/run/tierstore/fs`, macOS `/private/var/tierstore/fs`), trees at `trees/<digest>`,
   views at `views/<run>`, one owner per node on Linux (`fs.owner`, the action user's host id). Why: one connection or
   endpoint to hand over, no per-job mount to leak.
 - **D4.** tierstore does not hash or store outputs. Why: B16's one read is kept by the runtimes' existing collectors, and
-  kbf's packing is kbf's.
+  the executor's packing is its own.
 - **D5.** All state of `tierstore fs` outside the views (tree and view numbers, attachments, backing table, `INIT` reply)
   is in its runtime directory, and the views' state in their upper directories, written in order and never `fsync`ed.
   Why: it must outlive the process, not the machine; a reboot takes the mount and the runs too.
-- **D6.** Attached trees are readable by host users who know the digest, as kbf's cache is today; views only by their
+- **D6.** Attached trees are readable by host users who know the digest, as the executor's cache is today; views only by their
   run's user. Why: parity; a deployment can narrow it with the mountpoint's parent directory.
 - **D7.** Metadata eager per tree, data lazy (6.3). Why: inode numbers must be derivable for crash and update.
 - **D8.** If Q-B finds laziness does not pay on Linux, the next candidate is composefs (L4), not more FUSE.
 - **D9.** Pins are kept by the cache's writer, per attached tree, over the blobs opened (all blobs with prefetch), capped
   by `pin_limit`; not hard links. Why: one writer and one budget for the cache; a refused pin costs speed, never a job.
-- **D10.** Files of a tree report one fixed mtime, the value kbf's materialisation uses; the manifest has no mtime field in
+- **D10.** Files of a tree report one fixed mtime, the value the executor's materialisation uses; the manifest has no mtime field in
   version 1. Why: parity with today, and no field without a client (B20).
 - **D11.** No uncached fallback for a non-empty file on Linux: a fill that fails fails the open. Why: the kernel forbids
   mixing cached and passthrough opens of one inode, and an uncached read would be unverified.
