@@ -411,3 +411,37 @@ async fn a_cache_reads_the_pins_file_at_open_and_starts_without_a_usable_one() {
     std::fs::create_dir(&file).unwrap();
     assert_eq!(rig.reopen().pinned_bytes(), 0);
 }
+
+/// Asserts that a blob a fill for a tree kept (`fill_blob`, under `_tiering/fill/<sha256>`) is
+/// pinned by the SHA-256 of its bytes, which is the name a tree's manifest gives it: a pin by that
+/// name is answered as pinned and not as absent, and the blob survives the pass that would have
+/// taken it. A name that is neither a blob nor an object stays absent.
+#[tokio::test]
+async fn a_blob_a_fill_kept_is_pinned_by_the_sha256_of_its_bytes() {
+    use super::pack_testing::Pack;
+    let rig = small("tscache-pin-blob", 1000);
+    let pack = Pack::put(&rig, "packs/pins", &[250, 250, 250]).await;
+    for i in 0..3 {
+        rig.cache.fill_blob(&pack.blob(i)).await.unwrap();
+    }
+    let (first, missing) = (pack.blobs[0].0.clone(), digest(b"held by nobody"));
+    let answer = rig
+        .cache
+        .pin(MOUNT, "tree-a", &[first.clone(), missing])
+        .unwrap();
+    assert_eq!(
+        answer,
+        PinAnswer {
+            pinned: 1,
+            refused: 0,
+            absent: 1
+        }
+    );
+    assert_eq!(rig.cache.pinned_bytes(), 250);
+    // A fill past the high water mark runs the pass, which takes the oldest blob it may: not the
+    // pinned one.
+    let _ = filled_from(&rig, 0..1, 250).await;
+    assert!(super::blob_path(&rig.config.path, &first).exists());
+    assert!(!super::blob_path(&rig.config.path, &pack.blobs[1].0).exists());
+    assert_eq!(rig.cache.unpin(MOUNT, "tree-a"), Ok(1));
+}
