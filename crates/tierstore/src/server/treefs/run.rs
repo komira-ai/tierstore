@@ -185,13 +185,22 @@ pub(super) struct Running {
     parts: Mutex<Parts>,
 }
 
-/// Makes the directories a start needs.
-fn make_directories(settings: &FsSettings) -> Result<(), StartError> {
+/// What every start checks and makes: the cache directory is there and not on a stacked file
+/// system, and the runtime directory is made. It touches nothing at the mount point.
+fn make_state_directories(settings: &FsSettings) -> Result<(), StartError> {
     check_cache(&settings.cache_path)?;
     std::fs::create_dir_all(&settings.runtime_dir).map_err(io(format!(
         "fs.runtime_dir {}",
         settings.runtime_dir.display()
-    )))?;
+    )))
+}
+
+/// Makes the directories a fresh start needs: those of [`make_state_directories`] and the mount
+/// point. Only a start that makes the mount calls this: the mount point of a connection that is
+/// taken over is a live mount whose root has no cache time, so a `stat` of it is a request to the
+/// process that is not serving yet.
+fn make_directories(settings: &FsSettings) -> Result<(), StartError> {
+    make_state_directories(settings)?;
     std::fs::create_dir_all(&settings.mountpoint).map_err(io(format!(
         "fs.mountpoint {}",
         settings.mountpoint.display()
@@ -275,7 +284,8 @@ impl Running {
     }
 
     /// Serves the connection of `device`, which an earlier process set up and `prepared` describes:
-    /// no mount is made and no handshake is run. `control` is the control socket the earlier
+    /// no mount is made and no handshake is run, and nothing is asked of the mount point (it is the
+    /// live mount, and the readers that would answer are not started yet). `control` is the control socket the earlier
     /// process gave over, or none to bind it afresh. `resend` asks the kernel for the requests the
     /// earlier process read and did not answer, where the connection can.
     ///
@@ -287,7 +297,7 @@ impl Running {
         device: OwnedFd,
         (control, resend): (Option<std::os::unix::net::UnixListener>, bool),
     ) -> Result<Self, StartError> {
-        make_directories(settings)?;
+        make_state_directories(settings)?;
         let Prepared {
             record,
             saved,
