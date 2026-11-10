@@ -481,7 +481,9 @@ pub(super) struct Inner {
     /// One permit for each fill of the fill socket that may run; a request waits for one.
     source_permits: Arc<Semaphore>,
     /// The fills of the fill socket that are running, by the name of the object: concurrent
-    /// requests for one blob share the fetch.
+    /// requests for one blob share the fetch. A delete or put of the name marks these fills in
+    /// `invalidated` as it does those of `flights` (lock order: `flights`, `source_flights`,
+    /// `invalidated`).
     source_flights: Mutex<HashMap<String, source::Flight>>,
     /// One permit for each put that may be copied to the stage directory; held until it ends.
     keeps: Arc<Semaphore>,

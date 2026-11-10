@@ -1,6 +1,6 @@
 //! The scrub: what it drops, what it keeps, how much it reads a tick, and when it runs.
 
-use std::os::unix::fs::PermissionsExt as _;
+use std::os::unix::fs::{MetadataExt as _, PermissionsExt as _};
 use std::sync::Arc;
 use std::time::Duration;
 
@@ -192,6 +192,34 @@ async fn an_object_whose_fill_is_running_is_not_touched() {
     assert_eq!(rig.cache.held(), (400, 1));
 
     drop(super::locked(&rig.cache.inner.flights).remove(&hex));
+    let pass = rig.cache.scrub_once(&mut state);
+    assert_eq!((pass.scrubbed, pass.dropped), (1, 1));
+    assert!(!rig.has_file(&keys[0]));
+}
+
+/// Asserts that an object with a fill of the fill socket running (its name is in the socket's
+/// table) is not touched by a pass even if its bytes are wrong, nor dropped by `drop_if_unchanged`
+/// with the file as it is, and is dropped once the socket's fill is gone.
+#[tokio::test]
+async fn an_object_whose_socket_fill_is_running_is_not_touched() {
+    let rig = Rig::new("tscache-scrub-socket");
+    let keys = fill(&rig, 1, 400).await;
+    rot(&rig, &keys[0]);
+    let hex = name_of(&keys[0]).hex;
+    let (_sender, receiver) = tokio::sync::oneshot::channel();
+    let running = super::Inner::flight_of(receiver);
+    drop(super::locked(&rig.cache.inner.source_flights).insert(hex.clone(), running));
+
+    let mut state = Scrubber::new(1 << 20);
+    assert_eq!(rig.cache.scrub_once(&mut state), ScrubPass::default());
+    assert!(rig.has_file(&keys[0]));
+    assert_eq!(rig.cache.held(), (400, 1));
+    let file = std::fs::metadata(rig.file(&keys[0])).unwrap();
+    let hashed = Some((file.dev(), file.ino()));
+    assert!(!rig.cache.inner.drop_if_unchanged(&hex, hashed));
+    assert!(rig.has_file(&keys[0]));
+
+    drop(super::locked(&rig.cache.inner.source_flights).remove(&hex));
     let pass = rig.cache.scrub_once(&mut state);
     assert_eq!((pass.scrubbed, pass.dropped), (1, 1));
     assert!(!rig.has_file(&keys[0]));

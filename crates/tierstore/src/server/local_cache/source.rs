@@ -131,14 +131,24 @@ pub(super) type Flight = Shared<BoxFuture<'static, Result<(), FillError>>>;
 
 /// A fill's place in the table of the socket's fills: taken out when it is dropped, whether the
 /// fill ended, panicked or was cancelled.
-struct Flying {
-    inner: Arc<Inner>,
-    hex: String,
+pub(super) struct Flying {
+    pub(super) inner: Arc<Inner>,
+    pub(super) hex: String,
 }
 
 impl Drop for Flying {
     fn drop(&mut self) {
-        drop(locked(&self.inner.source_flights).remove(&self.hex));
+        let (flights, gone) = {
+            let flights = locked(&self.inner.flights);
+            let gone = locked(&self.inner.source_flights).remove(&self.hex);
+            // The mark of a delete goes with the last fill of the name (see `Flight`).
+            if !flights.contains_key(&self.hex) {
+                locked(&self.inner.invalidated).remove(&self.hex);
+            }
+            (flights, gone)
+        };
+        drop(flights);
+        drop(gone);
     }
 }
 
@@ -193,7 +203,9 @@ impl Inner {
     }
 
     /// The fill that waits for the task that `receiver` is to be given, and for its end.
-    fn flight_of(receiver: oneshot::Receiver<JoinHandle<Result<(), FillError>>>) -> Flight {
+    pub(super) fn flight_of(
+        receiver: oneshot::Receiver<JoinHandle<Result<(), FillError>>>,
+    ) -> Flight {
         let waiting = async move {
             let task = OptionFuture::from(receiver.await.ok()).await;
             task.and_then(Result::ok).unwrap_or(Err(FillError::Aborted))

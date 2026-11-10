@@ -293,10 +293,13 @@ impl Drop for Flight {
     fn drop(&mut self) {
         let gone = {
             let mut flights = locked(&self.inner.flights);
-            // The mark of a delete is of this fill only: it goes with it (lock order: flights,
-            // then invalidated).
-            locked(&self.inner.invalidated).remove(&self.hex);
-            flights.remove(&self.hex)
+            let gone = flights.remove(&self.hex);
+            // The mark of a delete is of the fills of the name: it goes with the last of them,
+            // the socket's included (lock order: flights, source_flights, then invalidated).
+            if !locked(&self.inner.source_flights).contains_key(&self.hex) {
+                locked(&self.inner.invalidated).remove(&self.hex);
+            }
+            gone
         };
         drop(gone);
     }
