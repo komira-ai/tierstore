@@ -71,6 +71,26 @@ pub(in crate::server) enum NfsError {
         /// What the last try said.
         said: String,
     },
+    /// Something is mounted at the mount point, from another address than this instance serves on.
+    #[error(
+        "{path} is mounted from {was}, and this instance serves on {now}: the mount would reach \
+         nothing; set fs.nfs.listen back to {was}, or unmount {path}"
+    )]
+    MountedFrom {
+        /// The mount point.
+        path: PathBuf,
+        /// The address the mount was made from.
+        was: String,
+        /// The address of this instance.
+        now: SocketAddr,
+    },
+    /// The hand-off of the listening socket failed.
+    #[error("{0}")]
+    Handoff(#[from] crate::server::handoff::HandoffError),
+    /// The identity of the boot could not be read, so a mount of this boot cannot be told from an
+    /// earlier one.
+    #[error("the identity of this boot: {0}")]
+    Boot(String),
     /// The unmount did not succeed.
     #[error("unmounting {path}: {said}")]
     Unmount {

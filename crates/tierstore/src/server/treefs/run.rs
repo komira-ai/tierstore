@@ -27,7 +27,7 @@ use super::locked;
 use super::recover;
 use super::serving::Serving;
 use super::start::{
-    Setup, StartError, control_error, core_of, create_mount_point, create_runtime_dir, io,
+    Identity, Setup, StartError, control_error, core_of, create_mount_point, create_runtime_dir, io,
 };
 use super::table::TreeTable;
 
@@ -152,7 +152,8 @@ impl Running {
             core,
             mount_id,
             _control: control,
-        } = Setup::start(settings, true)?;
+            ..
+        } = Setup::start(settings, true, Identity::Fresh)?;
         let serving = Serving::mount(&core, settings)
             .map_err(io(format!("mounting {}", settings.mountpoint.display())))?;
         let record = Record::first(serving.outcome(), mount_id);

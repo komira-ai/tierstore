@@ -19,7 +19,7 @@ is one JSON object; every step idempotent.
 ## 0. Live update by listening-socket hand-off (server side)
 
 This replaces the port-forward of sections 1 to 4 and the slot ports. The hook uses it (`server/handoff/`, entered through
-`run_handing`, with the control socket named by `server.handoff_socket`), on Linux; macOS has no hand-over and restarts.
+`run_handing`, with the control socket named by `server.handoff_socket`), on Linux; for `tierstore` on macOS there is no hand-over and it restarts (`tierstore fs` has one for its NFS socket, below).
 The binary calls it: `run_serving` passes the hand-off of the settings, `server.handoff_socket` and `server.handoff_wait`
 (default 10s, 1ms to 1h), to `run_handing`; without `server.handoff_socket` it binds as before and makes no control socket.
 A build node and a storage node with `[local_cache]` hand off through the same `run_handing` machinery: `bind_fronts`
@@ -66,8 +66,33 @@ Edge cases, each proved by a test in `server/handoff/` or `tests/s3_front/handof
   change them (`settings_that_name_other_addresses_take_nothing`).
 - A taker of another user is refused (`a_taker_of_another_user_is_refused`).
 
+The same code hands over the NFS socket of `tierstore fs` on a Mac (`fs.nfs.handoff_socket`, `server/treefs/nfs/run.rs`): a
+front kind `nfs` is a new line of the offer (`<front> <address>`; a taker that meets a front it does not know skips the line
+and closes the descriptor, `an_old_release_ignores_the_new_front_kind_line`, so a front can be added without breaking the
+update to or from a release that lacks it). What differs from the S3 front: the taker asks before it opens the table of tree
+numbers or binds the control socket of `fs`, since the running process holds both, and it makes no mount, since the mount is
+there. The old process stops accepting when `offer.serve` returns, answers the requests it has read, shuts down its side of
+each connection and waits for the clients to close theirs (up to `fs.nfs.drain_wait`) so that no reply it wrote is lost to a
+reset, and exits without unmounting (`the_old_instance_stops_accepting_at_ack_and_answers_every_owed_reply_before_it_exits`,
+`the_write_side_of_each_connection_is_shut_down_before_exit`). A request it had not read is not answered: the client sends it
+again on its new connection, and requests on trees are idempotent. The drain is `NFSTcp::handle_until` of the `komira-ai/nfsserve`
+fork; a client that never closes is let go when `fs.nfs.drain_wait` has passed
+(`a_client_that_never_closes_is_let_go_when_the_drain_wait_has_passed`).
+
+Two processes must not write the table of tree numbers and the attachments file, which the taker reads after `done`. The offer
+therefore calls a hold when a taker answers `ack`, before `done` is sent (`the_hold_is_told_before_the_taker_has_its_done`), and
+releases it if that taker does not complete (`the_hold_is_released_when_the_taker_does_not_complete`); the hold waits for the attach
+or detach in progress, and every later one is refused (`a_held_core_changes_neither_the_table_nor_the_attachments`,
+`the_old_instance_writes_no_state_once_the_new_one_has_the_socket`). The old process gives numbers only at an attach, so it gives
+none after the ack. And the taker finds what can fail in its start (the directories, the table, the attachments file, the
+directory of its control socket) before it asks, since a start that fails after the ack leaves no one listening
+(`a_start_that_cannot_work_is_refused_before_the_running_instance_gives_up_its_socket`). What it cannot find before (the
+bind of the control socket itself, a full disk) is not checked.
+
 Not built yet: the proxy id that does not derive from a port. No package sets either key, and the macOS package is not to
-set `server.handoff_socket`: an update on a Mac is a restart, for every shape.
+set `server.handoff_socket`: an update on a Mac is a restart, for every shape, until the launchd jobs `tierstore-fs@a` and
+`@b` and the hook's record and rollback for them land (the next change); `fs.nfs.handoff_socket` is for an operator or a hook
+that starts the two processes by hand.
 
 ### The hook on top of it
 

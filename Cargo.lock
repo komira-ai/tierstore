@@ -1595,7 +1595,7 @@ dependencies = [
 [[package]]
 name = "nfsserve"
 version = "0.11.0"
-source = "git+https://github.com/komira-ai/nfsserve?rev=6d9ea25d9960910cc0016daa6a69d47ca395c66e#6d9ea25d9960910cc0016daa6a69d47ca395c66e"
+source = "git+https://github.com/komira-ai/nfsserve?rev=f2665dd518e1b32f85cd457fef75fffe6d8a61b3#f2665dd518e1b32f85cd457fef75fffe6d8a61b3"
 dependencies = [
  "anyhow",
  "async-trait",

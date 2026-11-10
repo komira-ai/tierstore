@@ -18,6 +18,14 @@ pub(super) const RUN: &str = "run-1";
 /// The user id the tests serve.
 pub(super) const UID: u32 = 4242;
 
+/// The epoch of the mount the tests serve.
+pub(super) const EPOCH: u32 = 0x5eed_0001;
+
+/// The bytes of the handle of `ino` in the mount of [`EPOCH`].
+pub(super) fn handle_of(ino: u64) -> Vec<u8> {
+    [ino.to_le_bytes().as_slice(), EPOCH.to_le_bytes().as_slice()].concat()
+}
+
 /// A patience that never runs out: no read is answered `NFS3ERR_JUKEBOX`.
 pub(super) fn endless() -> Patience {
     Arc::new(|| Box::pin(std::future::pending()))
@@ -43,6 +51,7 @@ pub(super) fn fs_of(rig: &Rig, settings: &NfsSettings, patience: Patience) -> Tr
         settings,
         HashSet::from([UID]),
         patience,
+        EPOCH,
     )
 }
 
@@ -73,6 +82,7 @@ pub(super) fn fs_over(core: Arc<crate::server::treefs::core::Core>, patience: Pa
         &NfsSettings::default(),
         HashSet::from([UID]),
         patience,
+        EPOCH,
     )
 }
 

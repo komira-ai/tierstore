@@ -20,7 +20,7 @@ async fn taking(
     s3: &[std::net::SocketAddr],
     oci: &[std::net::SocketAddr],
 ) -> Result<Option<super::Inherited>, HandoffError> {
-    take(handoff, &Want { s3, oci }).await
+    take(handoff, &Want { s3, oci, nfs: &[] }).await
 }
 
 /// Asserts that with no file at the control socket's path nothing answers, so the caller starts
@@ -205,7 +205,7 @@ type Case = (
 
 /// Asserts that each answer that is not the protocol is refused with its own message: a frame
 /// that is not an offer, a number of lines that is not the number of sockets, a socket line
-/// that is not `<front> <address>`, a front that is not one, and an end that is not `done`.
+/// that is not `<front> <address>`, an address that is not one, and an end that is not `done`.
 #[tokio::test]
 async fn an_answer_that_is_not_the_protocol_is_refused() {
     let (extra, _) = listening();
@@ -219,12 +219,6 @@ async fn an_answer_that_is_not_the_protocol_is_refused() {
         ),
         (
             vec!["offer", "nonsense"],
-            1,
-            None,
-            "a socket line that is not <front> <address>",
-        ),
-        (
-            vec!["offer", "ftp 127.0.0.1:1"],
             1,
             None,
             "a socket line that is not <front> <address>",
@@ -277,7 +271,11 @@ async fn a_taker_that_cannot_copy_the_sockets_refuses_before_the_running_instanc
             .unwrap()
             .serve(),
     );
-    let want = Want { s3: &[a], oci: &[] };
+    let want = Want {
+        s3: &[a],
+        oci: &[],
+        nfs: &[],
+    };
     let error = super::exchange(&path, &want, no_copy).await.err().unwrap();
     assert_eq!(
         error.to_string(),
@@ -335,4 +333,74 @@ async fn the_taken_sockets_are_close_on_exec() {
         let flags = fcntl_getfd(listener).unwrap();
         assert!(flags.contains(FdFlags::CLOEXEC), "{flags:?}");
     }
+}
+
+/// Asserts that a line that names a front this release does not know (one added after it, as `nfs`
+/// was) is skipped with its descriptor closed, and the sockets of the fronts it knows are taken: an
+/// older release that is offered a newer front's socket does not fail the update.
+#[tokio::test]
+async fn an_old_release_ignores_the_new_front_kind_line() {
+    let (_dir, path) = scratch();
+    let ((s3, a), (later, b)) = (listening(), listening());
+    let lines = vec!["offer".to_owned(), format!("later {b}"), format!("s3 {a}")];
+    let fake = pretending(&path, lines, vec![later, s3], Some(vec!["done".to_owned()]));
+    let taken = taking(&handoff(path), &[a], &[]).await.unwrap().unwrap();
+    fake.await.unwrap();
+    assert_eq!(taken.s3_addrs, vec![a]);
+    assert_eq!(taken.s3.len(), 1);
+    assert!(taken.oci.is_empty() && taken.nfs.is_empty());
+    assert_eq!(taken.copies.len(), 1);
+}
+
+/// Asserts that the NFS front's socket is taken with its address and a copy offered under the same
+/// front, and that a running instance that listens on another NFS address than the taker names is
+/// refused with both lists in the message, without the sockets being taken.
+#[tokio::test]
+async fn the_nfs_front_is_taken_by_its_address_and_a_mismatch_is_refused() {
+    let (_dir, path) = scratch();
+    let (nfs, a) = listening();
+    let serving = tokio::spawn(
+        Offer::bind(&path, vec![socket(Front::Nfs, &nfs)])
+            .unwrap()
+            .serve(),
+    );
+    let elsewhere: std::net::SocketAddr = "127.0.0.1:1".parse().unwrap();
+    let error = take(
+        &handoff(path.clone()),
+        &Want {
+            s3: &[],
+            oci: &[],
+            nfs: &[elsewhere],
+        },
+    )
+    .await
+    .err()
+    .unwrap();
+    assert_eq!(
+        error.to_string(),
+        format!(
+            "hand-off: the running instance listens on [\"nfs {a}\"], these settings name [\"nfs {elsewhere}\"]"
+        )
+    );
+    assert!(!serving.is_finished());
+    let taken = take(
+        &handoff(path),
+        &Want {
+            s3: &[],
+            oci: &[],
+            nfs: &[a],
+        },
+    )
+    .await
+    .unwrap()
+    .unwrap();
+    serving.await.unwrap();
+    assert_eq!(taken.nfs_addrs, vec![a]);
+    assert_eq!(taken.nfs.len(), 1);
+    let copies: Vec<_> = taken
+        .copies
+        .iter()
+        .map(|c| (c.front(), c.local_addr().unwrap()))
+        .collect();
+    assert_eq!(copies, vec![(Front::Nfs, a)]);
 }

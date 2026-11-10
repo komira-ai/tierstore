@@ -18,7 +18,7 @@
 
 use std::io::{BufRead as _, BufReader, Read as _, Write as _};
 use std::os::fd::{AsFd as _, OwnedFd};
-use std::os::unix::fs::PermissionsExt as _;
+use std::os::unix::fs::{MetadataExt as _, PermissionsExt as _};
 use std::os::unix::net::{UnixListener, UnixStream};
 use std::path::{Path, PathBuf};
 use std::sync::{Arc, Condvar, Mutex};
@@ -51,11 +51,16 @@ pub(super) fn handle(core: &Arc<Core>, line: &str) -> serde_json::Value {
         }
         (Some("detach"), [run]) => match core.detach(run) {
             Some(failures) => serde_json::json!({"ok": true, "failures": failures_of(&failures)}),
+            None if core.is_held() => refused(&AttachError::Replaced.to_string()),
             None => refused("not attached"),
         },
         (Some("detach-all-except"), runs) => {
             let keep: Vec<String> = runs.iter().map(|run| (*run).to_owned()).collect();
-            serde_json::json!({"ok": true, "detached": core.detach_all_except(&keep)})
+            let detached = core.detach_all_except(&keep);
+            if core.is_held() {
+                return refused(&AttachError::Replaced.to_string());
+            }
+            serde_json::json!({"ok": true, "detached": detached})
         }
         (Some("attachments"), []) => {
             let listed: Vec<_> = core
@@ -179,6 +184,9 @@ struct Acceptor {
 /// The socket and the thread that serves it.
 pub(in crate::server) struct Control {
     path: PathBuf,
+    /// The device and inode of the socket's file as this bound it: a file at the path of another
+    /// is the successor's (`nfs/run.rs`), and is not removed.
+    file: (u64, u64),
     listener: Arc<UnixListener>,
     core: Arc<Core>,
     gate: Arc<Gate>,
@@ -216,8 +224,10 @@ impl Control {
         listener: UnixListener,
         path: &Path,
     ) -> std::io::Result<Self> {
+        let meta = std::fs::metadata(path)?;
         let mut control = Self {
             path: path.to_owned(),
+            file: (meta.dev(), meta.ino()),
             listener: Arc::new(listener),
             core,
             gate: Arc::new(Gate::default()),
@@ -298,14 +308,17 @@ impl Control {
 }
 
 impl Drop for Control {
-    /// Stops accepting and removes the socket file, unless it was given to a successor.
-    /// Connections that are open finish their request and end when their client closes.
+    /// Stops accepting and removes the socket file, unless it was given to a successor or is
+    /// another's by now. Connections that are open finish their request and end when their client
+    /// closes.
     fn drop(&mut self) {
         if let Some(Acceptor { stop, thread }) = self.acceptor.take() {
             let _ = rustix::io::write(&stop, &[0]);
             let _ = thread.join();
         }
-        if self.owns_path {
+        let ours =
+            std::fs::metadata(&self.path).is_ok_and(|meta| (meta.dev(), meta.ino()) == self.file);
+        if self.owns_path && ours {
             let _ = std::fs::remove_file(&self.path);
         }
     }

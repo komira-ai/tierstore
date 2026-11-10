@@ -14,8 +14,10 @@
   notification of readiness.
 
   This job is not in hostkeeper's package yet, as tierstore-fs@.service is not for Linux: the
-  update hook learns it with the hand-over of the NFS socket. Until then an operator installs the
-  file, and it restarts in place with a gap in serving: a hard mount makes the clients wait.
+  update hook learns it with the two alternating jobs that the hand-over of the NFS socket
+  (`fs.nfs.handoff_socket`) needs. Until then an operator installs the file, and it restarts in
+  place with a gap in serving: a hard mount makes the clients wait, and the restarted process
+  finds the mount, reopens its table of tree numbers and serves on the same port.
 
   launchd sends SIGTERM on bootout. The process unmounts and exits 0; ExitTimeOut (30 s) is far
   more than that takes. KeepAlive starts the process again whenever it exits while the job is

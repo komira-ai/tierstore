@@ -160,3 +160,49 @@ fn an_unknown_nfs_key_is_ignored_and_the_file_loads() {
         "tierstore fs: fs.nfs.futuristic is not a key of this release; ignored\n"
     );
 }
+
+/// Asserts the keys of the hand-off: none by default (an update is a restart), a control socket
+/// that is an absolute path of a file that fits a Unix socket's address, a wait that is a time in
+/// range and needs the socket, and a drain wait in range.
+#[test]
+fn the_handoff_keys_are_taken_and_each_refusal_names_its_key() {
+    let defaults = NfsSettings::default();
+    assert_eq!(defaults.handoff, None);
+    assert_eq!(defaults.drain_wait, Duration::from_secs(10));
+    let set = from_text(
+        &with("handoff_socket = \"/var/run/tierstore/fs-handoff.sock\"\nhandoff_wait = \"3s\"\ndrain_wait = \"2s\"\n"),
+        "",
+    )
+    .unwrap()
+    .nfs;
+    let handoff = set.handoff.unwrap();
+    assert_eq!(
+        handoff.socket,
+        std::path::Path::new("/var/run/tierstore/fs-handoff.sock")
+    );
+    assert_eq!(handoff.wait, Duration::from_secs(3));
+    assert_eq!(set.drain_wait, Duration::from_secs(2));
+    let waits = from_text(&with("handoff_socket = \"/run/x.sock\""), "")
+        .unwrap()
+        .nfs;
+    assert_eq!(waits.handoff.unwrap().wait, Duration::from_secs(10));
+    let long = format!("handoff_socket = \"/{}\"", "x".repeat(120));
+    for (text, key) in [
+        ("handoff_wait = \"3s\"".to_owned(), "fs.nfs.handoff_wait"),
+        (
+            "handoff_socket = \"run/x.sock\"".to_owned(),
+            "fs.nfs.handoff_socket",
+        ),
+        ("handoff_socket = \"/\"".to_owned(), "fs.nfs.handoff_socket"),
+        (long, "fs.nfs.handoff_socket"),
+        (
+            "handoff_socket = \"/run/x\"\nhandoff_wait = \"0s\"".to_owned(),
+            "fs.nfs.handoff_wait",
+        ),
+        ("drain_wait = \"0s\"".to_owned(), "fs.nfs.drain_wait"),
+        ("drain_wait = \"2h\"".to_owned(), "fs.nfs.drain_wait"),
+    ] {
+        let why = refused(&text);
+        assert!(why.contains(key), "{text}: {why}");
+    }
+}

@@ -218,6 +218,12 @@ impl Client {
         cred: Cred,
         args: Enc,
     ) -> Reply {
+        self.send(program, procedure, cred, args).await;
+        self.read().await
+    }
+
+    /// Sends the call, and does not wait for its reply: [`Client::read`] reads it.
+    pub(super) async fn send(&mut self, program: u32, procedure: u32, cred: Cred, args: Enc) {
         self.xid += 1;
         let (flavor, body) = match cred {
             Cred::None => (0, Enc::default()),
@@ -247,10 +253,17 @@ impl Client {
         let header = (1u32 << 31) | u32::try_from(record.len()).unwrap();
         self.stream.write_all(&header.to_be_bytes()).await.unwrap();
         self.stream.write_all(&record).await.unwrap();
-        self.read().await
     }
 
-    async fn read(&mut self) -> Reply {
+    /// Whether the server ends the connection cleanly: its side is shut down and nothing more
+    /// comes (`true`), and not with a reset (`false`).
+    pub(super) async fn ended_cleanly(&mut self) -> bool {
+        let mut byte = [0u8; 1];
+        matches!(self.stream.read(&mut byte).await, Ok(0))
+    }
+
+    /// The reply of the last call sent.
+    pub(super) async fn read(&mut self) -> Reply {
         let mut header = [0u8; 4];
         self.stream.read_exact(&mut header).await.unwrap();
         let length = (u32::from_be_bytes(header) & !(1 << 31)) as usize;

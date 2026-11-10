@@ -18,7 +18,7 @@ use std::collections::{HashMap, HashSet};
 use std::fs::File;
 use std::io;
 use std::path::{Path, PathBuf};
-use std::sync::atomic::{AtomicU64, Ordering};
+use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
 use std::sync::{Arc, Mutex, OnceLock};
 use std::time::Duration;
 
@@ -175,6 +175,10 @@ pub(super) enum AttachError {
     /// The attachments file could not be written.
     #[error("the attachments file: {0}")]
     File(#[from] io::Error),
+    /// A successor is taking over (`Core::hold`): it keeps the table of tree numbers and the
+    /// attachments file from now on.
+    #[error("this instance is being replaced by its successor: ask its control socket")]
+    Replaced,
 }
 
 /// The settings of a core that are not the other parts it is made of.
@@ -205,6 +209,9 @@ pub(in crate::server) struct Core {
     /// Held by an attach, a restore and a detach for all of their work, so that a detach cannot
     /// unpin a tree that an attach has just taken.
     lifecycle: Mutex<()>,
+    /// Whether a successor is taking over: no attach or detach is done, so that this process
+    /// writes neither the table of tree numbers nor the attachments file (`Core::hold`).
+    held: AtomicBool,
     /// The trees a thread is filling now for an attach that asked for `prefetch = "all"`, each
     /// with the token of its thread: a detach removes the entry, and a thread whose token is no
     /// longer the tree's has been replaced and stops.
@@ -237,6 +244,7 @@ impl Core {
                 attachments: Attachments::new(runtime_dir),
             }),
             lifecycle: Mutex::new(()),
+            held: AtomicBool::new(false),
             prefetching: Mutex::new(HashMap::new()),
             backing: OnceLock::new(),
             backing_file: runtime_dir.join(backing::FILE),
@@ -364,6 +372,9 @@ impl Core {
             return Err(AttachError::Run);
         }
         let _lifecycle = locked(&self.lifecycle);
+        if self.is_held() {
+            return Err(AttachError::Replaced);
+        }
         let number = self.table.number_of(&digest)?;
         let _ = self.load_unless_loaded(number, digest)?;
         {
@@ -435,6 +446,9 @@ impl Core {
     /// forgets its inodes.
     pub(super) fn detach(&self, run: &str) -> Option<Vec<Failure>> {
         let _lifecycle = locked(&self.lifecycle);
+        if self.is_held() {
+            return None;
+        }
         let (freed, failures) = {
             let mut state = locked(&self.state);
             let trees = state.attachments.remove(run)?;
@@ -461,6 +475,21 @@ impl Core {
             self.drop_if_forgotten(number);
         }
         Some(failures)
+    }
+
+    /// Stops this process from changing the table of tree numbers and the attachments file
+    /// (`on`), or lets it do so again. A successor that takes over reads both once it has taken
+    /// the sockets, and this process must have written its last by then: the call waits for the
+    /// attach or detach that is in progress, and every later one is refused (`AttachError::Replaced`,
+    /// and, for a detach, an answer of none; ask `Core::is_held`).
+    pub(super) fn hold(&self, on: bool) {
+        let _lifecycle = locked(&self.lifecycle);
+        self.held.store(on, Ordering::SeqCst);
+    }
+
+    /// Whether [`Core::hold`] is on.
+    pub(super) fn is_held(&self) -> bool {
+        self.held.load(Ordering::SeqCst)
     }
 
     /// Ends the attachments of every run that is not in `keep`; the number of runs.

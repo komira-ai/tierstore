@@ -237,6 +237,25 @@ fn the_socket_has_mode_0660_replaces_a_stale_file_and_is_removed_on_drop() {
     assert!(!path.exists());
 }
 
+/// Asserts that an instance that is handed over from ends without removing the socket of the one
+/// that took over: the successor binds the same path while this one is alive, this one's drop
+/// returns (its thread is woken without a connection to the path) and leaves the successor's
+/// socket answering.
+#[test]
+fn a_control_that_was_replaced_leaves_the_successors_socket_when_dropped() {
+    let rig = Rig::new("tfs-control-replaced", sample());
+    let path = rig.dir.path().join("control.sock");
+    let gid = std::fs::metadata(&rig.runtime).unwrap().gid();
+    let old = Control::serve(rig.core.clone(), &path, gid).unwrap();
+    let new = Control::serve(rig.core.clone(), &path, gid).unwrap();
+    drop(old);
+    assert!(path.exists());
+    let mut client = Client::connect(&path);
+    assert_eq!(client.ask("attachments")["ok"], json!(true));
+    drop(new);
+    assert!(!path.exists());
+}
+
 /// Asserts that a socket that cannot be bound is an error: in a directory that is not there, over a
 /// file that cannot be replaced.
 #[test]
@@ -270,6 +289,34 @@ fn the_handler_refuses_what_it_does_not_know() {
         handle(&rig.core, "x"),
         json!({"ok": false, "error": "unknown request"})
     );
+}
+
+/// Asserts that a control socket of a held core (its successor is taking over) refuses an attach,
+/// a detach and a detach-all-except by saying so, not as "not attached" or as a count of none,
+/// and answers a listing, and that the requests work again once the hold is released.
+#[test]
+fn a_held_core_refuses_changes_in_words_and_still_lists() {
+    let (rig, _control) = served("tfs-control-held");
+    let mut client = Client::connect(&rig.dir.path().join("control.sock"));
+    let root = root(&rig);
+    assert_eq!(client.ask(&format!("attach {root} for run-1"))["ok"], true);
+    rig.core.hold(true);
+    let replaced = json!({
+        "ok": false,
+        "error": "this instance is being replaced by its successor: ask its control socket"
+    });
+    assert_eq!(client.ask(&format!("attach {root} for run-2")), replaced);
+    assert_eq!(client.ask("detach run-1"), replaced);
+    assert_eq!(client.ask("detach-all-except"), replaced);
+    assert_eq!(
+        client.ask("attachments")["attachments"]
+            .as_array()
+            .unwrap()
+            .len(),
+        1
+    );
+    rig.core.hold(false);
+    assert_eq!(client.ask("detach run-1")["ok"], true);
 }
 
 /// Asserts the pause of a hand-over: a request on an open connection is refused as handed over and

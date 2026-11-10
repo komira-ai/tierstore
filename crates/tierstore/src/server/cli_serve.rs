@@ -365,6 +365,7 @@ pub(super) async fn bind_fronts(
             let want = Want {
                 s3,
                 oci: &oci_addrs,
+                nfs: &[],
             };
             take(handoff, &want).await?
         }
@@ -396,8 +397,10 @@ pub(super) async fn bind_fronts(
     let Inherited {
         s3: listeners,
         oci: oci_sockets,
+        nfs: _,
         s3_addrs,
         oci_addrs,
+        nfs_addrs: _,
         copies,
     } = inherited;
     let oci = match (oci, front) {

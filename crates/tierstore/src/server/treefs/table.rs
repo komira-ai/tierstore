@@ -1,14 +1,21 @@
 //! The table of tree numbers: a file in the runtime directory of fixed-size records, record `n`
 //! (from 1) being the digest of the tree numbered `n`. A header says which layout of inode numbers
-//! the numbers are of (`layout 1`: `tree_number << 24 | index`, `ino.rs`).
+//! the numbers are of (`layout 1`: `tree_number << 24 | index`, `ino.rs`), and, in the word after
+//! the layout, the epoch of the mount the numbers belong to.
 //!
 //! A number is written before the first reply that names an inode of the tree, and is read by
 //! number, so a start reads neither the whole file nor needs the trees it names. The table lives
 //! as long as the mount: a new mount starts it empty (a reboot takes the mount with it).
+//!
+//! The epoch is 0 for a FUSE mount, whose table is made afresh by every start (a new mount has a
+//! new connection and holds no number). An NFS mount outlives the server, so its start reopens the
+//! table, and keeps the numbers, when the file holds the epoch the start is of (a hash of the
+//! machine's boot, `nfs/boot.rs`); a file of another epoch, or of no epoch, is replaced. The word
+//! was reserved and zero before: a release that reads it as reserved reads this file unchanged.
 
 use std::collections::HashMap;
 use std::fs::File;
-use std::io;
+use std::io::{self, Read as _};
 use std::os::unix::fs::FileExt as _;
 use std::path::Path;
 use std::sync::Mutex;
@@ -52,6 +59,8 @@ pub(in crate::server) enum TableError {
 #[derive(Debug)]
 pub(super) struct TreeTable {
     file: File,
+    /// The epoch in the header.
+    epoch: u32,
     /// The number of each digest the table has, and the last number given.
     state: Mutex<(HashMap<TreeDigest, u64>, u64)>,
 }
@@ -62,6 +71,11 @@ impl TreeTable {
     /// # Errors
     /// What the system said.
     pub(super) fn create(dir: &Path) -> Result<Self, TableError> {
+        Self::create_of(dir, 0)
+    }
+
+    /// Makes the table afresh, of the mount `epoch`.
+    fn create_of(dir: &Path, epoch: u32) -> Result<Self, TableError> {
         let file = File::options()
             .read(true)
             .write(true)
@@ -71,11 +85,86 @@ impl TreeTable {
         let mut header = [0u8; HEADER as usize];
         header[..8].copy_from_slice(MAGIC);
         header[8..12].copy_from_slice(&LAYOUT.to_le_bytes());
+        header[12..16].copy_from_slice(&epoch.to_le_bytes());
         file.write_all_at(&header, 0)?;
         Ok(Self {
             file,
+            epoch,
             state: Mutex::new((HashMap::new(), 0)),
         })
+    }
+
+    /// The table `<dir>/trees` as the mount of `epoch` left it, with every number it gave, if the
+    /// file is a table of this layout and of this epoch (an epoch of 0 is never reopened);
+    /// otherwise a table made afresh. The second is whether the numbers were kept.
+    ///
+    /// # Errors
+    /// What the system said.
+    pub(super) fn open_or_create(dir: &Path, epoch: u32) -> Result<(Self, bool), TableError> {
+        if epoch != 0
+            && let Some(table) = Self::load(dir)?.filter(|table| table.epoch == epoch)
+        {
+            return Ok((table, true));
+        }
+        Ok((Self::create_of(dir, epoch)?, false))
+    }
+
+    /// Whether the file `<dir>/trees`, if there is one, can be opened for reading and writing.
+    ///
+    /// # Errors
+    /// What the system said, other than that the file is missing.
+    pub(super) fn check(dir: &Path) -> Result<(), TableError> {
+        match File::options().read(true).write(true).open(dir.join(FILE)) {
+            Err(error) if error.kind() != io::ErrorKind::NotFound => Err(error.into()),
+            _ => Ok(()),
+        }
+    }
+
+    /// The table in `<dir>/trees`, whatever its epoch: none when there is no such file, or it is
+    /// not a table of this layout. A partly written last record is not a number.
+    ///
+    /// # Errors
+    /// What the system said, other than that the file is missing.
+    pub(super) fn load(dir: &Path) -> Result<Option<Self>, TableError> {
+        let file = match File::options().read(true).write(true).open(dir.join(FILE)) {
+            Ok(file) => file,
+            Err(error) if error.kind() == io::ErrorKind::NotFound => return Ok(None),
+            Err(error) => return Err(error.into()),
+        };
+        let mut bytes = Vec::new();
+        (&file).read_to_end(&mut bytes)?;
+        let layout = bytes
+            .get(8..12)
+            .and_then(|word| <[u8; 4]>::try_from(word).ok());
+        let epoch = bytes
+            .get(12..16)
+            .and_then(|word| <[u8; 4]>::try_from(word).ok());
+        let (Some(layout), Some(epoch)) = (layout, epoch) else {
+            return Ok(None);
+        };
+        if &bytes[..8] != MAGIC || u32::from_le_bytes(layout) != LAYOUT {
+            return Ok(None);
+        }
+        let records = bytes[HEADER as usize..].chunks_exact(RECORD as usize);
+        let last = records.len() as u64;
+        // A record is 32 bytes, which always read as a digest.
+        let numbers = (1..)
+            .zip(records)
+            .filter_map(|(number, record)| {
+                TreeDigest::from_hex(&hex::encode(record)).map(|digest| (digest, number))
+            })
+            .collect();
+        Ok(Some(Self {
+            file,
+            epoch: u32::from_le_bytes(epoch),
+            state: Mutex::new((numbers, last)),
+        }))
+    }
+
+    /// The epoch of the mount the table belongs to; 0 is none.
+    #[cfg(test)]
+    pub(super) fn epoch(&self) -> u32 {
+        self.epoch
     }
 
     /// Opens the table `<dir>/trees` that an earlier process of the same mount made, with the
@@ -106,6 +195,7 @@ impl TreeTable {
         }
         Ok(Self {
             file,
+            epoch: u32::from_le_bytes([header[12], header[13], header[14], header[15]]),
             state: Mutex::new((known, records)),
         })
     }

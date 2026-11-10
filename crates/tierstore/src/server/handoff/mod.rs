@@ -25,6 +25,9 @@
 //! One that is not answered within [`Handoff::wait`] does not: the running instance may be
 //! alive, so the start fails.
 //!
+//! A line that names a front this release does not know is skipped, with its descriptor closed,
+//! so that a front added later (as `nfs` was) is no protocol error for a taker that predates it.
+//!
 //! The same code runs on Linux and macOS: `SCM_RIGHTS` and Unix sockets are POSIX.
 
 mod offer;
@@ -35,7 +38,7 @@ use std::net::SocketAddr;
 use std::path::PathBuf;
 use std::time::Duration;
 
-pub(crate) use offer::{Offer, Socket, check_control_path};
+pub(crate) use offer::{Hold, Offer, Socket, check_control_path};
 
 /// The most listening sockets one instance can hand over: what one message carries.
 pub(crate) const MAX_SOCKETS: usize = wire::MAX_FDS;
@@ -59,6 +62,8 @@ pub(crate) enum Front {
     S3,
     /// The OCI read front.
     Oci,
+    /// The NFS front of `tierstore fs` (macOS).
+    Nfs,
 }
 
 impl Front {
@@ -67,6 +72,7 @@ impl Front {
         match self {
             Self::S3 => "s3",
             Self::Oci => "oci",
+            Self::Nfs => "nfs",
         }
     }
 
@@ -75,6 +81,7 @@ impl Front {
         match name {
             "s3" => Some(Self::S3),
             "oci" => Some(Self::Oci),
+            "nfs" => Some(Self::Nfs),
             _ => None,
         }
     }

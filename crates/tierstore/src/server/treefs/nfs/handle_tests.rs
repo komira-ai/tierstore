@@ -7,27 +7,42 @@ use nfsserve::vfs::NFSFileSystem as _;
 use super::{ino_of, of};
 use crate::server::treefs::ino;
 use crate::server::treefs::nfs::config::NfsSettings;
-use crate::server::treefs::nfs::fixtures::{RUN, attached, endless, failed, fs_of, fs_over};
+use crate::server::treefs::nfs::fixtures::{EPOCH, RUN, attached, endless, failed, fs_of, fs_over};
 
-/// Asserts that a handle is the eight bytes of the inode number, and reads back as it.
+/// Asserts that a handle is the eight bytes of the inode number and the four of the epoch, and
+/// reads back as the inode number.
 #[test]
-fn handle_is_eight_bytes_of_the_core_ino() {
+fn handle_is_the_core_ino_and_the_mount_epoch() {
     let id = ino::of(3, 77);
-    let handle = of(id);
-    assert_eq!(handle.data, id.to_le_bytes());
-    assert_eq!(handle.data.len(), 8);
-    assert_eq!(ino_of(&handle).unwrap(), id);
+    let handle = of(id, EPOCH);
+    assert_eq!(handle.data[..8], id.to_le_bytes());
+    assert_eq!(handle.data[8..], EPOCH.to_le_bytes());
+    assert_eq!(handle.data.len(), 12);
+    assert_eq!(ino_of(&handle, EPOCH).unwrap(), id);
+}
+
+/// Asserts that a handle of the mount of another epoch (a boot that is gone) is `NFS3ERR_STALE`,
+/// for every call that takes one, and that the same inode number of this epoch is served.
+#[tokio::test]
+async fn a_handle_of_another_mount_id_is_stale() {
+    let (rig, _) = attached("nfs-handle-epoch");
+    let fs = fs_of(&rig, &NfsSettings::default(), endless());
+    let stale = nfsstat3::NFS3ERR_STALE as u32;
+    let earlier = of(ino::ROOT, EPOCH ^ 1);
+    assert_eq!(failed(fs.fh_to_id(&earlier)), stale);
+    assert_eq!(fs.fh_to_id(&of(ino::ROOT, EPOCH)).unwrap(), ino::ROOT);
+    assert_eq!(fs.fh_to_id(&fs.id_to_fh(ino::TREES)).unwrap(), ino::TREES);
 }
 
 /// Asserts that a handle of any other length is `NFS3ERR_BADHANDLE`.
 #[test]
 fn handle_with_wrong_length_is_badhandle() {
-    for length in [0, 7, 9, 16] {
+    for length in [0, 7, 8, 9, 16] {
         let handle = nfs_fh3 {
             data: vec![1; length],
         };
         assert_eq!(
-            failed(ino_of(&handle)),
+            failed(ino_of(&handle, EPOCH)),
             nfsstat3::NFS3ERR_BADHANDLE as u32,
             "{length}"
         );

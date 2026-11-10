@@ -337,3 +337,95 @@ fn the_system_runner_runs_a_program_and_reports_what_it_said() {
     assert_eq!(empty.kind(), std::io::ErrorKind::InvalidInput);
     System.pause(Duration::ZERO);
 }
+
+/// A runner whose listing of the mounts is `listing`, or that cannot run it.
+struct Lister(Option<String>);
+
+impl Runner for Lister {
+    fn run(&self, argv: &[String]) -> std::io::Result<Ran> {
+        assert_eq!(argv, ["/sbin/mount"]);
+        match &self.0 {
+            Some(text) => Ok(said(true, text, "")),
+            None => Err(std::io::Error::from(std::io::ErrorKind::NotFound)),
+        }
+    }
+
+    fn pause(&self, _how_long: Duration) {}
+}
+
+/// Asserts that the listing of the mounts finds an NFS mount at the mount point, by the path as it
+/// is named and by the path it resolves to (macOS lists `/private/var` for `/var`), and not a
+/// mount at another path whose name begins with it; and that a listing that cannot be run is an
+/// error that names the command.
+#[test]
+fn a_mount_at_the_mount_point_is_found_in_the_listing() {
+    let (dir, path, _) = mountpoint("nfs-mounted");
+    let link = dir.path().join("link");
+    std::os::unix::fs::symlink(&path, &link).unwrap();
+    let nfs = NfsSettings::default();
+    let at = |listing: &str, mountpoint: &std::path::Path| {
+        Mounter::new(
+            Arc::new(Lister(Some(listing.to_owned()))),
+            &nfs,
+            mountpoint.to_owned(),
+            0,
+        )
+        .is_mounted()
+        .unwrap()
+    };
+    let line =
+        |at: &std::path::Path| format!("127.0.0.1:/ on {} (nfs, nodev, read-only)\n", at.display());
+    // The listing names the path the kernel resolved (`/private/var` where the test directory is
+    // under `/var`), which is not the path as named.
+    let real = std::fs::canonicalize(&path).unwrap();
+    assert!(at(&line(&path), &path));
+    assert!(at(&line(&real), &path), "listed by the path it resolves to");
+    assert!(at(&line(&real), &link), "named by a link to it");
+    assert!(!at("/dev/disk1s1 on / (apfs, local)\n", &path));
+    assert!(!at(&line(&dir.path().join("mnt2")), &path));
+    let gone = dir.path().join("gone");
+    assert!(
+        at(&line(&gone), &gone),
+        "a path that does not resolve is compared as named"
+    );
+    let error = Mounter::new(Arc::new(Lister(None)), &nfs, path, 0)
+        .is_mounted()
+        .unwrap_err();
+    assert!(
+        error.to_string().starts_with("running /sbin/mount: "),
+        "{error}"
+    );
+}
+
+/// Asserts the note of the address a mount was made from: written next to the runtime directory's
+/// files, an error that names the directory when it cannot be written, and read back by `agrees`,
+/// which accepts the address it names and a mount with no note, and refuses another address with
+/// both in the message.
+#[test]
+fn the_address_of_a_mount_is_noted_and_checked() {
+    let dir = TestDir::under(std::env::temp_dir(), "nfs-mount-note");
+    let mounter = Mounter::new(Fake::new(501), &loopback(), dir.path().join("mnt"), 501);
+    let here: std::net::SocketAddr = "127.0.0.1:12049".parse().unwrap();
+    mounter.agrees(dir.path(), here).unwrap();
+    Mounter::record(dir.path(), here).unwrap();
+    assert_eq!(
+        std::fs::read_to_string(dir.path().join("nfs-mounted")).unwrap(),
+        "127.0.0.1:12049"
+    );
+    mounter.agrees(dir.path(), here).unwrap();
+    let there: std::net::SocketAddr = "127.0.0.1:12050".parse().unwrap();
+    let why = mounter.agrees(dir.path(), there).unwrap_err();
+    assert!(matches!(why, NfsError::MountedFrom { .. }), "{why}");
+    assert!(
+        why.to_string().contains(
+            "is mounted from 127.0.0.1:12049, and this instance serves on 127.0.0.1:12050"
+        ),
+        "{why}"
+    );
+    let missing = dir.path().join("none");
+    let why = Mounter::record(&missing, here).unwrap_err().to_string();
+    assert!(
+        why.starts_with("writing the address of the mount:"),
+        "{why}"
+    );
+}

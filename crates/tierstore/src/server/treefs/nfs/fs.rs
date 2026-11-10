@@ -119,17 +119,20 @@ pub(super) struct TreeNfs {
     fds: Arc<FdCache>,
     allowed: HashSet<u32>,
     patience: Patience,
+    /// The epoch of the mount, which its handles carry.
+    epoch: u32,
     /// The fills that are on, by inode.
     filling: Arc<Mutex<HashMap<fileid3, watch::Receiver<Fill>>>>,
 }
 
 impl TreeNfs {
-    /// The file system of `core`, which serves the users `allowed`.
+    /// The file system of `core`, the mount of `epoch`, which serves the users `allowed`.
     pub(super) fn new(
         core: Arc<Core>,
         settings: &NfsSettings,
         allowed: HashSet<u32>,
         patience: Patience,
+        epoch: u32,
     ) -> Self {
         Self {
             core,
@@ -139,6 +142,7 @@ impl TreeNfs {
             )),
             allowed,
             patience,
+            epoch,
             filling: Arc::default(),
         }
     }
@@ -404,11 +408,11 @@ impl NFSFileSystem for TreeNfs {
     }
 
     fn id_to_fh(&self, id: fileid3) -> nfs_fh3 {
-        handle::of(id)
+        handle::of(id, self.epoch)
     }
 
     fn fh_to_id(&self, fh: &nfs_fh3) -> Result<fileid3, nfsstat3> {
-        handle::ino_of(fh)
+        handle::ino_of(fh, self.epoch)
     }
 
     fn serverid(&self) -> nfsserve::nfs::cookieverf3 {
