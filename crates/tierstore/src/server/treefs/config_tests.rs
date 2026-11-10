@@ -38,6 +38,9 @@ fn the_needed_keys_alone_give_the_defaults() {
         threads: 16,
         passthrough: true,
         max_backing_ids: 65_536,
+        handoff_socket: PathBuf::from("/run/tierstore-fs/handoff.sock"),
+        handoff_wait: Duration::from_secs(120),
+        recover_wait: Duration::from_secs(30),
         allow_other: true,
     };
     assert_eq!(got, want);
@@ -49,7 +52,8 @@ fn the_needed_keys_alone_give_the_defaults() {
 fn every_key_is_taken_when_it_is_set() {
     let text = "[fs]\nmountpoint = \"/m\"\nruntime_dir = \"/r\"\nclient_group = \"77\"\n\
         owner = \"5:6\"\nfill_socket = \"/f\"\ncache_path = \"/c\"\nfetch_timeout = \"5s\"\n\
-        threads = 3\npassthrough = false\nmax_backing_ids = 7\n";
+        threads = 3\npassthrough = false\nmax_backing_ids = 7\n\
+        handoff_socket = \"/h.sock\"\nhandoff_wait = \"5s\"\nrecover_wait = \"2m\"\n";
     let got = from_text(text, "").unwrap();
     assert_eq!(got.mountpoint, PathBuf::from("/m"));
     assert_eq!(got.control_socket, PathBuf::from("/r/control.sock"));
@@ -59,6 +63,18 @@ fn every_key_is_taken_when_it_is_set() {
         (Duration::from_secs(5), 3)
     );
     assert_eq!((got.passthrough, got.max_backing_ids), (false, 7));
+    assert_eq!(got.handoff_socket, PathBuf::from("/h.sock"));
+    assert_eq!(
+        (got.handoff_wait, got.recover_wait),
+        (Duration::from_secs(5), Duration::from_secs(120))
+    );
+    // Left out, the hand-over socket follows the runtime directory that was set.
+    let text = "[fs]\nruntime_dir = \"/r\"\nclient_group = \"77\"\nowner = \"5:6\"\n\
+        fill_socket = \"/f\"\ncache_path = \"/c\"\n";
+    assert_eq!(
+        from_text(text, "").unwrap().handoff_socket,
+        PathBuf::from("/r/handoff.sock")
+    );
     let own = fs("control_socket = \"/elsewhere.sock\"\n");
     assert_eq!(
         from_text(&own, GROUPS).unwrap().control_socket,
@@ -77,6 +93,15 @@ fn every_refusal_names_its_key() {
             fs(&format!("control_socket = \"/{}\"\n", "s".repeat(120))),
             "fs.control_socket",
         ),
+        (fs("handoff_socket = \"relative.sock\"\n"), "fs.handoff_socket"),
+        (
+            fs(&format!("handoff_socket = \"/{}\"\n", "s".repeat(120))),
+            "fs.handoff_socket",
+        ),
+        (fs("handoff_wait = \"999ms\"\n"), "fs.handoff_wait"),
+        (fs("handoff_wait = \"2h\"\n"), "fs.handoff_wait"),
+        (fs("recover_wait = \"0s\"\n"), "fs.recover_wait"),
+        (fs("recover_wait = \"3h\"\n"), "fs.recover_wait"),
         (fs("fetch_timeout = \"0ms\"\n"), "fs.fetch_timeout"),
         (fs("fetch_timeout = \"2h\"\n"), "fs.fetch_timeout"),
         (fs("threads = 0\n"), "fs.threads"),

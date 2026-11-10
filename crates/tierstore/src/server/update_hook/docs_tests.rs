@@ -117,13 +117,15 @@ fn the_page_says_the_build_lists_the_hand_off() {
             "handover-v1",
             HANDOFF_CAPABILITY,
             CACHE_HANDOFF_CAPABILITY,
-            HANDOFF_STATE_DIR_CAPABILITY
+            HANDOFF_STATE_DIR_CAPABILITY,
+            crate::server::build_info::HANDOFF_FS_CAPABILITY
         ]
     );
     for needle in [
         "`handoff-socket-v1`",
         "`handoff-cache-v1`",
         "`handoff-state-dir-v1`",
+        "`handoff-fs-v1`",
         "`[local_cache]`",
         "`server.handoff_socket`",
         "`server.handoff_wait`",

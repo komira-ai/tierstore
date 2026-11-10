@@ -7,6 +7,9 @@
 //! core is made over the fill socket; the attachments the file holds are made again (the manifests
 //! are read through the fill socket); the cache is told which trees are attached, so that it
 //! drops the pins of any other; and the control socket is bound.
+//!
+//! The pieces a process that takes a connection over also needs (the directories, the core over a
+//! table that was read, the control socket's error) are here too: `run.rs` calls them.
 
 use std::io::Read as _;
 use std::path::Path;
@@ -46,6 +49,19 @@ pub(in crate::server) enum StartError {
     /// The table of tree numbers could not be made.
     #[error("{0}")]
     Table(#[from] TableError),
+    /// The record of the `INIT` handshake could not be read or written.
+    #[cfg(target_os = "linux")]
+    #[error("{0}")]
+    Record(#[from] super::init_record::RecordError),
+    /// The hand-over of the mount from the running instance failed.
+    #[cfg(target_os = "linux")]
+    #[error("{0}")]
+    Handover(#[from] super::handover::HandoverError),
+    /// Requests of the connection stayed unanswered after a restart on a kernel that cannot send
+    /// them again, and the connection was aborted so that they fail; the unit starts again.
+    #[cfg(target_os = "linux")]
+    #[error("the connection was aborted: requests the process before read stayed unanswered")]
+    Aborted,
 }
 
 impl StartError {
@@ -66,7 +82,7 @@ pub(super) fn io(what: impl Into<String>) -> impl FnOnce(std::io::Error) -> Star
     move |source| StartError::Io { what, source }
 }
 
-/// An id for this start: sixteen random bytes as hex, which the pins are made under.
+/// An id for this mount: sixteen random bytes as hex, which the pins are made under.
 fn new_mount_id() -> Result<String, StartError> {
     let mut bytes = [0u8; 16];
     std::fs::File::open("/dev/urandom")
@@ -86,62 +102,91 @@ fn remove_stale(path: &Path) -> Result<(), StartError> {
     }
 }
 
+/// Makes the runtime directory and the mount point.
+pub(super) fn create_directories(settings: &FsSettings) -> Result<(), StartError> {
+    std::fs::create_dir_all(&settings.runtime_dir).map_err(io(format!(
+        "fs.runtime_dir {}",
+        settings.runtime_dir.display()
+    )))?;
+    std::fs::create_dir_all(&settings.mountpoint).map_err(io(format!(
+        "fs.mountpoint {}",
+        settings.mountpoint.display()
+    )))
+}
+
+/// A core over `table` for the mount `mount_id`, whose file handles are numbered for `generation`,
+/// with the attachments the file holds made again and the cache told which trees are attached.
+/// `count_lookups` is whether the core counts the lookups of its inodes (a frontend that is told
+/// when they are forgotten, FUSE), or drops a tree when it is detached (one that is not told).
+pub(super) fn core_of(
+    settings: &FsSettings,
+    table: TreeTable,
+    (mount_id, generation): (String, u32),
+    count_lookups: bool,
+) -> Result<Arc<Core>, StartError> {
+    let fills = FillClient::new(settings.fill_socket.clone(), settings.fetch_timeout);
+    let core = Arc::new(Core::new(
+        core::Settings {
+            owner: settings.owner,
+            cache_path: settings.cache_path.clone(),
+            mountpoint: settings.mountpoint.clone(),
+            mount_id,
+            max_backing_ids: settings.max_backing_ids,
+            generation,
+            count_lookups,
+        },
+        fills,
+        table,
+        &settings.runtime_dir,
+    ));
+    let saved =
+        Attachments::saved(&settings.runtime_dir).map_err(io("reading the attachments file"))?;
+    core.restore(saved);
+    core.pins_live();
+    Ok(core)
+}
+
+/// The text `what` names: the control socket's path in an error.
+pub(super) fn control_error(settings: &FsSettings) -> impl FnOnce(std::io::Error) -> StartError {
+    io(format!(
+        "fs.control_socket {}",
+        settings.control_socket.display()
+    ))
+}
+
 /// What a start makes before a frontend serves: the core, and the control socket it is driven by.
 pub(super) struct Setup {
     /// The core a frontend serves from.
     pub core: Arc<Core>,
+    /// The id of this mount, which the pins are made under.
+    pub mount_id: String,
     /// The control socket; it is closed when this is dropped.
     pub _control: Control,
 }
 
 impl Setup {
-    /// Does what a start does up to a frontend's mount. `count_lookups` is whether the core counts
-    /// the lookups of its inodes (a frontend that is told when they are forgotten, FUSE), or drops
-    /// a tree when it is detached (one that is not told).
+    /// Does what a start does up to a frontend's mount: the directories are made (a start that has
+    /// made them already is not harmed), the table of tree numbers is made afresh, and the core and
+    /// the control socket are made. `count_lookups` is as for [`core_of`].
     ///
     /// # Errors
     /// [`StartError`]: why nothing was made.
     pub(super) fn start(settings: &FsSettings, count_lookups: bool) -> Result<Self, StartError> {
-        std::fs::create_dir_all(&settings.runtime_dir).map_err(io(format!(
-            "fs.runtime_dir {}",
-            settings.runtime_dir.display()
-        )))?;
-        std::fs::create_dir_all(&settings.mountpoint).map_err(io(format!(
-            "fs.mountpoint {}",
-            settings.mountpoint.display()
-        )))?;
+        create_directories(settings)?;
         let table = TreeTable::create(&settings.runtime_dir)?;
         // The backing ids of an earlier mount belong to its connection, which is gone.
         remove_stale(&settings.runtime_dir.join(backing::FILE))?;
-        let fills = FillClient::new(settings.fill_socket.clone(), settings.fetch_timeout);
-        let core = Arc::new(Core::new(
-            core::Settings {
-                owner: settings.owner,
-                cache_path: settings.cache_path.clone(),
-                mountpoint: settings.mountpoint.clone(),
-                mount_id: new_mount_id()?,
-                max_backing_ids: settings.max_backing_ids,
-                count_lookups,
-            },
-            fills,
-            table,
-            &settings.runtime_dir,
-        ));
-        let saved = Attachments::saved(&settings.runtime_dir)
-            .map_err(io("reading the attachments file"))?;
-        core.restore(saved);
-        core.pins_live();
+        let mount_id = new_mount_id()?;
+        let core = core_of(settings, table, (mount_id.clone(), 1), count_lookups)?;
         let control = Control::serve(
             Arc::clone(&core),
             &settings.control_socket,
             settings.client_group,
         )
-        .map_err(io(format!(
-            "fs.control_socket {}",
-            settings.control_socket.display()
-        )))?;
+        .map_err(control_error(settings))?;
         Ok(Self {
             core,
+            mount_id,
             _control: control,
         })
     }
@@ -170,10 +215,6 @@ impl Signals {
             futures::future::select(Box::pin(self.term.recv()), Box::pin(self.int.recv())).await;
     }
 }
-
-/// Tests that send signals to the process go one at a time: a signal is for every handler.
-#[cfg(test)]
-pub(super) static SIGNALS: std::sync::Mutex<()> = std::sync::Mutex::new(());
 
 #[cfg(test)]
 #[path = "start_tests.rs"]
