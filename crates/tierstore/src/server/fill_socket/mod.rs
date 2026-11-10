@@ -45,7 +45,7 @@ use tokio::task::JoinSet;
 use super::ACCEPT_PAUSE;
 use super::local_cache::{Blob, FillError};
 use super::local_cache::{LocalCache, Mode};
-use request::{MAX_LINE, Refusal, Request, parse};
+use request::{MAX_LINE, Request, parse};
 
 /// How long the socket waits after it could not be bound before it tries again.
 const REBIND_PAUSE: Duration = Duration::from_secs(1);
@@ -214,8 +214,22 @@ async fn session(cache: LocalCache, stream: UnixStream, uid: u32) {
                 cache.touch_blobs(digests.iter().map(String::as_str));
                 continue;
             }
-            Ok(request) => run(&cache, request).await,
-            Err(refusal) => refused(&refusal),
+            Ok(Request::Blob {
+                sha256,
+                size,
+                from,
+                offset,
+            }) => {
+                let blob = Blob {
+                    sha256: &sha256,
+                    size,
+                    from: &from,
+                    offset,
+                };
+                said(cache.fill_blob(&blob).await)
+            }
+            Ok(Request::Manifest { sha256 }) => said(cache.fill_manifest(&sha256).await),
+            Err(refusal) => format!("refused {refusal}"),
         };
         if write
             .write_all(format!("{answer}\n").as_bytes())
@@ -227,35 +241,9 @@ async fn session(cache: LocalCache, stream: UnixStream, uid: u32) {
     }
 }
 
-/// The answer to a request that is a refusal.
-fn refused(refusal: &Refusal) -> String {
-    format!("refused {refusal}")
-}
-
 /// The answer to a fill: `ok`, or the words of the failure.
-async fn run(cache: &LocalCache, request: Request) -> String {
-    let filled: Result<(), FillError> = match &request {
-        Request::Blob {
-            sha256,
-            size,
-            from,
-            offset,
-        } => {
-            let blob = Blob {
-                sha256,
-                size: *size,
-                from,
-                offset: *offset,
-            };
-            cache.fill_blob(&blob).await
-        }
-        Request::Manifest { sha256 } => cache.fill_manifest(sha256).await,
-        Request::Touch(_) => Ok(()),
-    };
-    match filled {
-        Ok(()) => "ok".to_owned(),
-        Err(error) => error.to_string(),
-    }
+fn said(filled: Result<(), FillError>) -> String {
+    filled.map_or_else(|error| error.to_string(), |()| "ok".to_owned())
 }
 
 #[cfg(test)]

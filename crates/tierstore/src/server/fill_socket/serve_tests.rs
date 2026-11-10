@@ -365,6 +365,10 @@ async fn a_socket_that_cannot_be_bound_is_tried_again() {
     let dir = place.path.with_file_name("later");
     let path = dir.join("fill.sock");
     let served = Served::start(&rig.cache, &path);
+    // The first try fails: the directory is not there.
+    for _ in 0..20 {
+        tokio::task::yield_now().await;
+    }
     std::fs::create_dir(&dir).unwrap();
     wait_advancing(
         "the socket was tried again and bound",
