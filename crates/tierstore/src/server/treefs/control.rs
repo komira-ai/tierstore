@@ -50,11 +50,16 @@ pub(super) fn handle(core: &Arc<Core>, line: &str) -> serde_json::Value {
         }
         (Some("detach"), [run]) => match core.detach(run) {
             Some(failures) => serde_json::json!({"ok": true, "failures": failures_of(&failures)}),
+            None if core.is_held() => refused(&AttachError::Replaced.to_string()),
             None => refused("not attached"),
         },
         (Some("detach-all-except"), runs) => {
             let keep: Vec<String> = runs.iter().map(|run| (*run).to_owned()).collect();
-            serde_json::json!({"ok": true, "detached": core.detach_all_except(&keep)})
+            let detached = core.detach_all_except(&keep);
+            if core.is_held() {
+                return refused(&AttachError::Replaced.to_string());
+            }
+            serde_json::json!({"ok": true, "detached": detached})
         }
         (Some("attachments"), []) => {
             let listed: Vec<_> = core

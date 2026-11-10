@@ -5,6 +5,7 @@
 
 use std::net::SocketAddr;
 
+use super::super::config::NfsSettings;
 use super::super::fixtures::{EPOCH, attached, loopback, settings};
 use super::super::wire_client::{Client, Cred, Dec, Enc, GETATTR, LOOKUP, NFS, READ};
 use super::Running;
@@ -256,4 +257,62 @@ async fn a_mount_that_is_there_is_not_made_again() {
         .collect();
     assert_eq!(programs, ["/sbin/mount", "/sbin/mount_nfs"]);
     running.stop().await.unwrap();
+}
+
+/// Asserts that a mount is noted with the address it was made from, and that a start in the same
+/// boot that serves on another address than the mount at the mount point was made from is refused
+/// by name with both addresses, since that mount would reach nothing; and that a start on the same
+/// address goes on with the mount.
+#[tokio::test]
+async fn a_mount_made_from_another_address_is_refused_by_name() {
+    let (rig, _) = attached("nfs-restart-mounted-from");
+    let first = Running::start(
+        &settings(&rig, loopback()),
+        Recorder::new(true),
+        euid(),
+        None,
+        EPOCH,
+    )
+    .await
+    .unwrap();
+    let was = first.address;
+    let noted = std::fs::read_to_string(rig.runtime.join("nfs-mounted")).unwrap();
+    assert_eq!(noted, was.to_string());
+    first.stop().await.unwrap();
+
+    let same = NfsSettings {
+        listen: was,
+        ..loopback()
+    };
+    let again = Running::start(
+        &settings(&rig, same),
+        Recorder::mounted_at(&rig.mountpoint),
+        euid(),
+        None,
+        EPOCH,
+    )
+    .await
+    .unwrap();
+    again.stop().await.unwrap();
+
+    // Port 0 binds another port than `was`, which the stopped server has released.
+    let other = Running::start(
+        &settings(&rig, loopback()),
+        Recorder::mounted_at(&rig.mountpoint),
+        euid(),
+        None,
+        EPOCH,
+    )
+    .await;
+    let why = other.err().unwrap().to_string();
+    assert!(
+        why.contains(&format!(
+            "is mounted from {was}, and this instance serves on 127.0.0.1:"
+        )),
+        "{why}"
+    );
+    assert!(
+        why.contains(&format!("set fs.nfs.listen back to {was}")),
+        "{why}"
+    );
 }

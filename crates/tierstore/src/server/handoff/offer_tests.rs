@@ -387,3 +387,62 @@ async fn a_connection_that_closes_without_a_request_changes_nothing() {
     serving.await.unwrap();
     assert!(!path.exists());
 }
+
+/// A hold that records what it is told.
+fn recording() -> (std::sync::Arc<std::sync::Mutex<Vec<bool>>>, super::Hold) {
+    let told = std::sync::Arc::new(std::sync::Mutex::new(Vec::new()));
+    let seen = std::sync::Arc::clone(&told);
+    let hold: super::Hold = std::sync::Arc::new(move |on| seen.lock().unwrap().push(on));
+    (told, hold)
+}
+
+/// Asserts that the hold is told to hold once a taker has answered `ack`, and before the taker
+/// has its `done` (so that what the instance writes is written before the taker reads it): by the
+/// time `take` returns the hold has been told once, to hold, and it is not released after a hand-
+/// over that completed.
+#[tokio::test]
+async fn the_hold_is_told_before_the_taker_has_its_done() {
+    let (_dir, path) = scratch();
+    let (s3, a) = listening();
+    let (told, hold) = recording();
+    let serving = tokio::spawn(
+        Offer::bind(&path, vec![socket(Front::S3, &s3)])
+            .unwrap()
+            .with_hold(hold)
+            .serve(),
+    );
+    let setup = crate::server::handoff::testing::handoff(path.clone());
+    let wanted = [a];
+    let want = super::super::take::Want {
+        s3: &wanted,
+        oci: &[],
+        nfs: &[],
+    };
+    super::super::take::take(&setup, &want)
+        .await
+        .unwrap()
+        .unwrap();
+    assert_eq!(*told.lock().unwrap(), [true]);
+    serving.await.unwrap();
+    assert_eq!(*told.lock().unwrap(), [true]);
+}
+
+/// Asserts that a taker that answers `ack` and is gone before `done` leaves the hold released: the
+/// instance goes on, and what it writes is its own again.
+#[tokio::test]
+async fn the_hold_is_released_when_the_taker_does_not_complete() {
+    let (_dir, path) = scratch();
+    let (s3, _) = listening();
+    let (told, hold) = recording();
+    let serving = tokio::spawn(
+        Offer::bind(&path, vec![socket(Front::S3, &s3)])
+            .unwrap()
+            .with_hold(hold)
+            .serve(),
+    );
+    let was = inode(&path);
+    ack_and_go(&path).await;
+    remade(&path, was).await;
+    assert_eq!(*told.lock().unwrap(), [true, false]);
+    assert!(!serving.is_finished());
+}

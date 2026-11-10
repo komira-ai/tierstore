@@ -14,6 +14,8 @@ use super::Running;
 use super::serve_with;
 use super::tests::{Recorder, closed, euid};
 use crate::server::handoff::Handoff;
+use crate::server::handoff::testing::within;
+use crate::server::treefs::core::AttachError;
 use crate::server::treefs::start::SIGNALS;
 use crate::server::treefs::testing::Rig;
 use crate::server::treefs::testing::until;
@@ -220,6 +222,7 @@ async fn a_failed_ack_leaves_the_old_instance_serving() {
         "{why}"
     );
     assert_eq!(why.status(), 1);
+    assert!(!old._setup.core.is_held(), "a refused taker holds nothing");
     assert_eq!(getattr(&mut client, &root).await, 0);
     let mut fresh = Client::connect(old.address).await;
     assert_eq!(fresh.mount("/").await, root);
@@ -323,7 +326,11 @@ async fn a_process_that_cannot_make_its_control_socket_after_a_takeover_serves_w
     let log =
         crate::server::build_info::stderr_log::LineLog::new(stderr.clone(), tracing::Level::WARN);
     let offer = tracing::subscriber::with_default(log, || {
-        super::offer_after_takeover(&rig.dir.path().join("none/handoff.sock"), Vec::new())
+        super::offer_after_takeover(
+            &rig.dir.path().join("none/handoff.sock"),
+            Vec::new(),
+            std::sync::Arc::new(|_| {}),
+        )
     });
     assert!(offer.is_none());
     let said = String::from_utf8(stderr.0.lock().unwrap().clone()).unwrap();
@@ -338,6 +345,110 @@ async fn a_process_that_cannot_make_its_control_socket_after_a_takeover_serves_w
         "{said}"
     );
     assert!(
-        super::offer_after_takeover(&rig.dir.path().join("handoff.sock"), Vec::new()).is_some()
+        super::offer_after_takeover(
+            &rig.dir.path().join("handoff.sock"),
+            Vec::new(),
+            std::sync::Arc::new(|_| {})
+        )
+        .is_some()
     );
+}
+
+/// Asserts that once the next process has taken the socket, the old one changes neither the table
+/// of tree numbers nor the attachments file, though its clients are connected to it still: an
+/// attach and a detach through its core are refused, the files are as they were when the next
+/// process read them, and the next process's attach is done.
+#[tokio::test]
+async fn the_old_instance_writes_no_state_once_the_new_one_has_the_socket() {
+    let (rig, digest) = attached("nfs-handoff-held");
+    let (old, client, _, _) = running(&rig).await;
+    let table = std::fs::read(rig.runtime.join("trees")).unwrap();
+    let saved = std::fs::read(rig.runtime.join("attachments")).unwrap();
+    let (new, _) = taking_over(&rig, &old).await;
+    let core = &old._setup.core;
+    assert!(core.is_held());
+    let why = core.attach(&digest, "late-run").unwrap_err();
+    assert!(matches!(why, AttachError::Replaced), "{why}");
+    assert_eq!(core.detach("run-1"), None);
+    assert_eq!(std::fs::read(rig.runtime.join("trees")).unwrap(), table);
+    assert_eq!(
+        std::fs::read(rig.runtime.join("attachments")).unwrap(),
+        saved
+    );
+    let _ = new._setup.core.attach(&digest, "late-run").unwrap();
+    drop(client);
+    let mut old = old;
+    old.handed_over().await;
+    old.stop().await.unwrap();
+    new.stop().await.unwrap();
+}
+
+/// Asserts that a start whose runtime directory cannot be used (the file of the table of tree
+/// numbers is a directory) is refused before it asks for the socket: the running process still
+/// has its socket, its hand-off socket and its clients, holds nothing, and the next start that can
+/// be used takes the socket.
+#[tokio::test]
+async fn a_start_that_cannot_work_is_refused_before_the_running_instance_gives_up_its_socket() {
+    let (rig, _) = attached("nfs-handoff-preflight");
+    let (old, mut client, root, _) = running(&rig).await;
+    let table = rig.runtime.join("trees");
+    let kept = std::fs::read(&table).unwrap();
+    std::fs::remove_file(&table).unwrap();
+    std::fs::create_dir(&table).unwrap();
+    let why = Running::start(
+        &handing(&rig, old.address.port()),
+        Recorder::mounted_at(&rig.mountpoint),
+        euid(),
+        Some(endless()),
+        EPOCH,
+    )
+    .await
+    .err()
+    .unwrap();
+    assert!(why.to_string().contains("table of tree numbers"), "{why}");
+    assert!(!old._setup.core.is_held());
+    assert!(rig.dir.path().join("handoff.sock").exists());
+    assert_eq!(getattr(&mut client, &root).await, 0);
+    let mut fresh = Client::connect(old.address).await;
+    assert_eq!(fresh.mount("/").await, root);
+    std::fs::remove_dir(&table).unwrap();
+    std::fs::write(&table, kept).unwrap();
+    let (new, _) = taking_over(&rig, &old).await;
+    assert_eq!(new.address, old.address);
+    drop((client, fresh));
+    let mut old = old;
+    old.handed_over().await;
+    old.stop().await.unwrap();
+    new.stop().await.unwrap();
+}
+
+/// Asserts that a client that sees the end of the stream and never closes its side does not keep
+/// the old process: once `fs.nfs.drain_wait` has passed after the hand-over it ends without the
+/// client having closed (`handed_over` returns while the client is still held), without an
+/// unmount, and the new process serves. The wait is set to a millisecond; the test asserts that
+/// the process ends, not how long that took.
+#[tokio::test]
+async fn a_client_that_never_closes_is_let_go_when_the_drain_wait_has_passed() {
+    let (rig, _) = attached("nfs-handoff-drain");
+    let mut impatient = handing(&rig, 0);
+    impatient.nfs.drain_wait = std::time::Duration::from_millis(1);
+    let runner = Recorder::new(true);
+    let mut old = Running::start(&impatient, runner.clone(), euid(), Some(endless()), EPOCH)
+        .await
+        .unwrap();
+    let mut stubborn = Client::connect(old.address).await;
+    let root = stubborn.mount("/").await;
+    let (new, _) = taking_over(&rig, &old).await;
+    assert!(stubborn.ended_cleanly().await);
+    within(
+        "the old process ends without the client closing",
+        old.handed_over(),
+    )
+    .await;
+    old.stop().await.unwrap();
+    assert!(runner.calls().iter().all(|call| call[0] != "/sbin/umount"));
+    let mut later = Client::connect(new.address).await;
+    assert_eq!(later.mount("/").await, root);
+    drop((stubborn, later));
+    new.stop().await.unwrap();
 }

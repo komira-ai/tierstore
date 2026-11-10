@@ -793,3 +793,31 @@ fn a_restore_with_no_number_left_or_no_file_still_keeps_what_it_can() {
     rig.core.restore(vec![(digest, RUN.to_owned())]);
     assert_eq!(rig.core.attachments().len(), 1);
 }
+
+/// Asserts that a core held for its successor writes neither the table of tree numbers nor the
+/// attachments file: an attach of a tree that has no number is refused and gives it none, a detach
+/// ends nothing, and the attachments file is as it was; and that releasing the hold makes both
+/// work again.
+#[test]
+fn a_held_core_changes_neither_the_table_nor_the_attachments() {
+    let rig = attached("tfs-core-held");
+    let core = &rig.core;
+    let first = rig.upstream.built.lock().unwrap().root.clone();
+    let before = std::fs::read(rig.runtime.join("attachments")).unwrap();
+    let table = std::fs::read(rig.runtime.join("trees")).unwrap();
+    core.hold(true);
+    let second = "ab".repeat(32);
+    let why = core.attach(&second, "run-2").unwrap_err();
+    assert!(matches!(why, AttachError::Replaced), "{why}");
+    assert_eq!(core.detach("run-1"), None);
+    assert!(core.is_held());
+    assert_eq!(core.attachments().len(), 1);
+    assert_eq!(
+        std::fs::read(rig.runtime.join("attachments")).unwrap(),
+        before
+    );
+    assert_eq!(std::fs::read(rig.runtime.join("trees")).unwrap(), table);
+    core.hold(false);
+    let _ = core.attach(&first, "run-2").unwrap();
+    assert_eq!(core.detach("run-1"), Some(Vec::new()));
+}

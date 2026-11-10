@@ -8,13 +8,18 @@
 //! root and is asked to mount as another user runs the commands through `sudo -u`; one that is
 //! neither refuses.
 
+use std::net::SocketAddr;
 use std::os::unix::fs::MetadataExt as _;
-use std::path::PathBuf;
+use std::path::{Path, PathBuf};
 use std::sync::Arc;
 use std::time::Duration;
 
 use super::config::NfsSettings;
 use super::error::NfsError;
+use crate::server::treefs::start::io;
+
+/// The file in the runtime directory that says which address the mount was made from.
+const MOUNTED: &str = "nfs-mounted";
 
 /// The program that mounts.
 const MOUNT_NFS: &str = "/sbin/mount_nfs";
@@ -194,6 +199,34 @@ impl Mounter {
             .stdout
             .lines()
             .any(|line| marks.iter().any(|mark| line.contains(mark.as_str()))))
+    }
+
+    /// Notes where the export that was just mounted is served, for the next start in this boot
+    /// (`fs.runtime_dir/nfs-mounted`).
+    ///
+    /// # Errors
+    /// [`NfsError::Start`] if the file cannot be written.
+    pub(super) fn record(runtime_dir: &Path, address: SocketAddr) -> Result<(), NfsError> {
+        std::fs::write(runtime_dir.join(MOUNTED), address.to_string())
+            .map_err(io("writing the address of the mount"))?;
+        Ok(())
+    }
+
+    /// Checks that the mount that is at the mount point was made from `address`, as the file of
+    /// [`Mounter::record`] says. A mount with no such file (made by a release that did not write
+    /// it) is taken to be this one's.
+    ///
+    /// # Errors
+    /// [`NfsError::MountedFrom`] for a mount made from another address.
+    pub(super) fn agrees(&self, runtime_dir: &Path, address: SocketAddr) -> Result<(), NfsError> {
+        match std::fs::read_to_string(runtime_dir.join(MOUNTED)) {
+            Ok(was) if was.trim() != address.to_string() => Err(NfsError::MountedFrom {
+                path: self.mountpoint.clone(),
+                was: was.trim().to_owned(),
+                now: address,
+            }),
+            _ => Ok(()),
+        }
     }
 
     /// Mounts the export served on `host:port` at the mount point, as the mount user, trying again

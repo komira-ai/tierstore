@@ -109,7 +109,47 @@ pub(super) struct Setup {
     pub reopened: bool,
 }
 
+/// Makes the runtime directory and the mount point.
+fn make_directories(settings: &FsSettings) -> Result<(), StartError> {
+    std::fs::create_dir_all(&settings.runtime_dir).map_err(io(format!(
+        "fs.runtime_dir {}",
+        settings.runtime_dir.display()
+    )))?;
+    std::fs::create_dir_all(&settings.mountpoint).map_err(io(format!(
+        "fs.mountpoint {}",
+        settings.mountpoint.display()
+    )))
+}
+
 impl Setup {
+    /// Does what [`Setup::start`] needs to be able to do, without changing what a running
+    /// instance holds, so that a start that would fail fails before it has taken that instance's
+    /// listening socket (the instance ends once it has handed the socket over): the directories
+    /// are made, the runtime directory and the directory of the control socket may be written, and
+    /// the table of tree numbers and the attachments file, if they are there, can be opened.
+    ///
+    /// # Errors
+    /// [`StartError`]: what `start` would fail with.
+    pub(super) fn preflight(settings: &FsSettings) -> Result<(), StartError> {
+        make_directories(settings)?;
+        let may = rustix::fs::Access::WRITE_OK | rustix::fs::Access::EXEC_OK;
+        let control = &settings.control_socket;
+        let places = [
+            ("fs.runtime_dir", settings.runtime_dir.as_path()),
+            (
+                "fs.control_socket",
+                control.parent().unwrap_or(&settings.runtime_dir),
+            ),
+        ];
+        for (key, dir) in places {
+            rustix::fs::access(dir, may)
+                .map_err(|errno| io(format!("{key}: {}", dir.display()))(errno.into()))?;
+        }
+        TreeTable::check(&settings.runtime_dir)?;
+        Attachments::saved(&settings.runtime_dir).map_err(io("reading the attachments file"))?;
+        Ok(())
+    }
+
     /// Does what a start does up to a frontend's mount. `count_lookups` is whether the core counts
     /// the lookups of its inodes (a frontend that is told when they are forgotten, FUSE), or drops
     /// a tree when it is detached (one that is not told).
@@ -121,14 +161,7 @@ impl Setup {
         count_lookups: bool,
         identity: Identity,
     ) -> Result<Self, StartError> {
-        std::fs::create_dir_all(&settings.runtime_dir).map_err(io(format!(
-            "fs.runtime_dir {}",
-            settings.runtime_dir.display()
-        )))?;
-        std::fs::create_dir_all(&settings.mountpoint).map_err(io(format!(
-            "fs.mountpoint {}",
-            settings.mountpoint.display()
-        )))?;
+        make_directories(settings)?;
         let (table, reopened, mount_id) = match identity {
             Identity::Fresh => (
                 TreeTable::create(&settings.runtime_dir)?,

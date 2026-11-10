@@ -55,7 +55,7 @@ async fn status(client: &mut Client, procedure: u32, args: Enc) -> (u32, Vec<u8>
 }
 
 /// Asserts a mount and a read, as `mount_nfs` and a build make them: MOUNT gives the handle of
-/// the root, which is the eight bytes of its inode; LOOKUPs walk `trees/<digest>/bin/tool`; GETATTR,
+/// the root, which is the twelve bytes of its inode and the epoch; LOOKUPs walk `trees/<digest>/bin/tool`; GETATTR,
 /// READLINK, ACCESS and READ answer from the core, a cold blob is filled by the first READ, and the
 /// bytes and the end-of-file flag are the file's.
 #[tokio::test]
@@ -158,7 +158,7 @@ async fn page(client: &mut Client, args: Enc) -> (Vec<super::wire_client::Entry>
 }
 
 /// Asserts READDIRPLUS: all the entries of a directory with their attributes and handles, the
-/// handle being the eight bytes of the file id; the end flag; and that pages bounded by `maxcount`
+/// handle being the twelve bytes of the file id and the epoch; the end flag; and that pages bounded by `maxcount`
 /// (the whole reply fits in it) and by `dircount` resume at the cookie of the last entry without
 /// repeating or skipping any.
 #[tokio::test]

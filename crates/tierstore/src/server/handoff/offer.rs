@@ -45,6 +45,12 @@ impl Socket {
     }
 }
 
+/// What an instance does about its own writes while a taker takes its sockets: called with `true`
+/// once a taker has answered `ack`, before `done` is sent (the taker starts on the state the
+/// instance keeps only after `done`), and with `false` if the hand-off then does not complete and
+/// the instance goes on. It may block.
+pub(crate) type Hold = Arc<dyn Fn(bool) + Send + Sync>;
+
 /// The control socket of a running instance, and the sockets it offers.
 pub(crate) struct Offer {
     /// The control socket: replaced when a taker that answered `ack` was gone before `done`, or
@@ -60,6 +66,8 @@ pub(crate) struct Offer {
     linked: AtomicBool,
     /// How long the loop waits after an accept that failed.
     accept_pause: Duration,
+    /// Told when a taker has answered `ack`, and when that taker did not complete.
+    hold: Option<Hold>,
 }
 
 impl Offer {
@@ -81,7 +89,21 @@ impl Offer {
             taking: Mutex::new(()),
             linked: AtomicBool::new(true),
             accept_pause: ACCEPT_PAUSE,
+            hold: None,
         })
+    }
+
+    /// The same, telling `hold` when a taker has answered `ack` and when it did not complete.
+    pub(crate) fn with_hold(mut self, hold: Hold) -> Self {
+        self.hold = Some(hold);
+        self
+    }
+
+    /// Tells the hold, if there is one, on a thread that may block.
+    async fn held(&self, on: bool) {
+        if let Some(hold) = self.hold.clone() {
+            let _ = tokio::task::spawn_blocking(move || hold(on)).await;
+        }
     }
 
     /// The same, waiting `pause` after an accept that failed ([`ACCEPT_PAUSE`] if this is not
@@ -167,9 +189,9 @@ impl Offer {
 
     /// One taker's conversation, and how it ended.
     async fn session(&self, stream: UnixStream) -> Ended {
-        let mut unlinked = false;
-        match self.converse(&stream, &mut unlinked).await {
-            Ok(true) => Ended::Handed,
+        let (mut unlinked, mut held) = (false, false);
+        let ended = match self.converse(&stream, &mut unlinked, &mut held).await {
+            Ok(true) => return Ended::Handed,
             Ok(false) => Ended::Kept,
             Err(why) => {
                 tracing::warn!("tierstore: a hand-off request failed: {why}");
@@ -179,13 +201,23 @@ impl Offer {
                     Ended::Kept
                 }
             }
+        };
+        if held {
+            self.held(false).await;
         }
+        ended
     }
 
     /// Reads the request, offers the sockets, and on `ack` gives up the control socket. Sets
     /// `unlinked` once this conversation has removed the control socket's file, so that a
-    /// failure after it is told from one before it by this conversation alone.
-    async fn converse(&self, stream: &UnixStream, unlinked: &mut bool) -> std::io::Result<bool> {
+    /// failure after it is told from one before it by this conversation alone; likewise `held`
+    /// for the hold.
+    async fn converse(
+        &self,
+        stream: &UnixStream,
+        unlinked: &mut bool,
+        held: &mut bool,
+    ) -> std::io::Result<bool> {
         let request = wire::recv(stream).await?;
         if request.lines != ["take 1"] {
             return refuse(stream, "the request is not understood").await;
@@ -205,6 +237,10 @@ impl Offer {
         if wire::recv(stream).await?.lines != ["ack"] {
             return Ok(false);
         }
+        // Whatever this instance writes is written before the taker reads it, which it does after
+        // `done`.
+        *held = true;
+        self.held(true).await;
         // The taker binds the control socket once it reads `done`, so the file is gone first;
         // if `done` cannot be sent, the taker is gone and took nothing: the session ends in an
         // error with the file unlinked, and `serve` makes the control socket again.

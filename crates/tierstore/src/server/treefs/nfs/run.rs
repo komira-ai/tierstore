@@ -30,7 +30,7 @@ use super::boot::BootSource;
 use super::error::NfsError;
 use super::fs::{Patience, TreeNfs};
 use super::mount::{Mounter, Runner, System};
-use crate::server::handoff::{Front, Offer, Socket, Want, check_control_path, take};
+use crate::server::handoff::{Front, Hold, Offer, Socket, Want, check_control_path, take};
 use crate::server::treefs::config::FsSettings;
 use crate::server::treefs::start::{Identity, Setup, Signals, io};
 
@@ -74,6 +74,9 @@ impl Running {
         if let Some(handoff) = handoff {
             check_control_path(&handoff.socket)?;
         }
+        // What can fail is found before the running instance gives up its socket: once it has,
+        // it ends, and a start that fails then leaves no one listening.
+        Setup::preflight(settings)?;
         // The running instance, if there is one, hands its socket over before this start binds
         // the control socket or opens the table: it holds both until then.
         let taken = match handoff {
@@ -110,16 +113,22 @@ impl Running {
                 .map_err(listen)?,
         };
         let address = listener.local_addr().map_err(listen)?;
+        let hold = || -> Hold {
+            let core = Arc::clone(&setup.core);
+            Arc::new(move |on| core.hold(on))
+        };
         let offer = match (nfs.handoff.as_ref(), inherited) {
-            (Some(handoff), Some(taken)) => offer_after_takeover(&handoff.socket, taken.copies),
+            (Some(handoff), Some(taken)) => {
+                offer_after_takeover(&handoff.socket, taken.copies, hold())
+            }
             (Some(handoff), None) => {
                 let copy = std::net::TcpListener::from(
                     listener.as_fd().try_clone_to_owned().map_err(listen)?,
                 );
-                Some(Offer::bind(
-                    &handoff.socket,
-                    vec![Socket::new(Front::Nfs, copy)],
-                )?)
+                Some(
+                    Offer::bind(&handoff.socket, vec![Socket::new(Front::Nfs, copy)])?
+                        .with_hold(hold()),
+                )
             }
             (None, _) => None,
         };
@@ -155,11 +164,15 @@ impl Running {
         };
         if nfs.mount {
             let task = mounter.clone();
-            let made = tokio::task::spawn_blocking(move || {
+            let runtime_dir = settings.runtime_dir.clone();
+            let made = tokio::task::spawn_blocking(move || -> Result<bool, NfsError> {
                 if task.is_mounted()? {
+                    task.agrees(&runtime_dir, address)?;
                     return Ok(false);
                 }
-                task.mount(address.ip(), address.port()).map(|()| true)
+                task.mount(address.ip(), address.port())?;
+                Mounter::record(&runtime_dir, address)?;
+                Ok(true)
             })
             .await
             .map_err(|why| io("waiting for the mount")(std::io::Error::other(why.to_string())))?;
@@ -218,8 +231,13 @@ impl Drop for Running {
 /// The control socket of a process that took its listening socket from the one it replaces: the
 /// sockets it took are what it offers to its own successor. A process that cannot make the control
 /// socket says so and serves without one, since the update has happened and cannot be undone.
-fn offer_after_takeover(socket: &std::path::Path, copies: Vec<Socket>) -> Option<Offer> {
+fn offer_after_takeover(
+    socket: &std::path::Path,
+    copies: Vec<Socket>,
+    hold: Hold,
+) -> Option<Offer> {
     Offer::bind(socket, copies)
+        .map(|offer| offer.with_hold(hold))
         .map_err(|why| {
             tracing::warn!(
                 "tierstore fs: {why}; this instance serves without a control socket and \

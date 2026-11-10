@@ -290,3 +290,31 @@ fn the_handler_refuses_what_it_does_not_know() {
         json!({"ok": false, "error": "unknown request"})
     );
 }
+
+/// Asserts that a control socket of a held core (its successor is taking over) refuses an attach,
+/// a detach and a detach-all-except by saying so, not as "not attached" or as a count of none,
+/// and answers a listing, and that the requests work again once the hold is released.
+#[test]
+fn a_held_core_refuses_changes_in_words_and_still_lists() {
+    let (rig, _control) = served("tfs-control-held");
+    let mut client = Client::connect(&rig.dir.path().join("control.sock"));
+    let root = root(&rig);
+    assert_eq!(client.ask(&format!("attach {root} for run-1"))["ok"], true);
+    rig.core.hold(true);
+    let replaced = json!({
+        "ok": false,
+        "error": "this instance is being replaced by its successor: ask its control socket"
+    });
+    assert_eq!(client.ask(&format!("attach {root} for run-2")), replaced);
+    assert_eq!(client.ask("detach run-1"), replaced);
+    assert_eq!(client.ask("detach-all-except"), replaced);
+    assert_eq!(
+        client.ask("attachments")["attachments"]
+            .as_array()
+            .unwrap()
+            .len(),
+        1
+    );
+    rig.core.hold(false);
+    assert_eq!(client.ask("detach run-1")["ok"], true);
+}

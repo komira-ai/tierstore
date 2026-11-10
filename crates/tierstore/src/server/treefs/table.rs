@@ -105,6 +105,17 @@ impl TreeTable {
         Ok((Self::create_of(dir, epoch)?, false))
     }
 
+    /// Whether the file `<dir>/trees`, if there is one, can be opened for reading and writing.
+    ///
+    /// # Errors
+    /// What the system said, other than that the file is missing.
+    pub(super) fn check(dir: &Path) -> Result<(), TableError> {
+        match File::options().read(true).write(true).open(dir.join(FILE)) {
+            Err(error) if error.kind() != io::ErrorKind::NotFound => Err(error.into()),
+            _ => Ok(()),
+        }
+    }
+
     /// The table in `<dir>/trees`, whatever its epoch: none when there is no such file, or it is
     /// not a table of this layout. A partly written last record is not a number.
     ///

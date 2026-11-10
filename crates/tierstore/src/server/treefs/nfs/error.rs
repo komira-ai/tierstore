@@ -71,6 +71,19 @@ pub(in crate::server) enum NfsError {
         /// What the last try said.
         said: String,
     },
+    /// Something is mounted at the mount point, from another address than this instance serves on.
+    #[error(
+        "{path} is mounted from {was}, and this instance serves on {now}: the mount would reach \
+         nothing; set fs.nfs.listen back to {was}, or unmount {path}"
+    )]
+    MountedFrom {
+        /// The mount point.
+        path: PathBuf,
+        /// The address the mount was made from.
+        was: String,
+        /// The address of this instance.
+        now: SocketAddr,
+    },
     /// The hand-off of the listening socket failed.
     #[error("{0}")]
     Handoff(#[from] crate::server::handoff::HandoffError),

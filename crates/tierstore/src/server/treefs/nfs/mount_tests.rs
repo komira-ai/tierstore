@@ -392,3 +392,36 @@ fn a_mount_at_the_mount_point_is_found_in_the_listing() {
         "{error}"
     );
 }
+
+/// Asserts the note of the address a mount was made from: written next to the runtime directory's
+/// files, an error that names the directory when it cannot be written, and read back by `agrees`,
+/// which accepts the address it names and a mount with no note, and refuses another address with
+/// both in the message.
+#[test]
+fn the_address_of_a_mount_is_noted_and_checked() {
+    let dir = TestDir::under(std::env::temp_dir(), "nfs-mount-note");
+    let mounter = Mounter::new(Fake::new(501), &loopback(), dir.path().join("mnt"), 501);
+    let here: std::net::SocketAddr = "127.0.0.1:12049".parse().unwrap();
+    mounter.agrees(dir.path(), here).unwrap();
+    Mounter::record(dir.path(), here).unwrap();
+    assert_eq!(
+        std::fs::read_to_string(dir.path().join("nfs-mounted")).unwrap(),
+        "127.0.0.1:12049"
+    );
+    mounter.agrees(dir.path(), here).unwrap();
+    let there: std::net::SocketAddr = "127.0.0.1:12050".parse().unwrap();
+    let why = mounter.agrees(dir.path(), there).unwrap_err();
+    assert!(matches!(why, NfsError::MountedFrom { .. }), "{why}");
+    assert!(
+        why.to_string().contains(
+            "is mounted from 127.0.0.1:12049, and this instance serves on 127.0.0.1:12050"
+        ),
+        "{why}"
+    );
+    let missing = dir.path().join("none");
+    let why = Mounter::record(&missing, here).unwrap_err().to_string();
+    assert!(
+        why.starts_with("writing the address of the mount:"),
+        "{why}"
+    );
+}

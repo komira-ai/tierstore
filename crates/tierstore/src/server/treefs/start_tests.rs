@@ -192,3 +192,35 @@ fn sigterm_and_sigint_end_the_wait_even_if_they_came_first() {
         }
     });
 }
+
+/// Asserts that the preflight of a start (what it does before a running instance is asked for its
+/// socket) makes the directories and passes when a start can work, and refuses by name, changing
+/// nothing in the runtime directory, a table of tree numbers that cannot be opened, an
+/// attachments file that cannot be read, and a control socket whose directory is not there.
+#[test]
+fn preflight_passes_what_can_start_and_names_what_cannot() {
+    let rig = Rig::new("tfs-start-preflight", sample());
+    let mut settings = settings(&rig);
+    settings.runtime_dir = rig.dir.path().join("made/runtime");
+    settings.control_socket = settings.runtime_dir.join("control.sock");
+    Setup::preflight(&settings).unwrap();
+    assert!(settings.runtime_dir.is_dir());
+    assert!(
+        !settings.runtime_dir.join("trees").exists(),
+        "a table is not made"
+    );
+
+    std::fs::create_dir(settings.runtime_dir.join("trees")).unwrap();
+    let why = Setup::preflight(&settings).unwrap_err().to_string();
+    assert!(why.starts_with("the table of tree numbers:"), "{why}");
+    std::fs::remove_dir(settings.runtime_dir.join("trees")).unwrap();
+
+    std::fs::create_dir(settings.runtime_dir.join("attachments")).unwrap();
+    let why = Setup::preflight(&settings).unwrap_err().to_string();
+    assert!(why.starts_with("reading the attachments file:"), "{why}");
+    std::fs::remove_dir(settings.runtime_dir.join("attachments")).unwrap();
+
+    settings.control_socket = rig.dir.path().join("none/control.sock");
+    let why = Setup::preflight(&settings).unwrap_err().to_string();
+    assert!(why.starts_with("fs.control_socket: "), "{why}");
+}
