@@ -1,8 +1,14 @@
 //! The `[fs.nfs]` table: defaults, every key, every refusal, and that a file without it loads.
 
+use std::io::Write;
 use std::net::SocketAddr;
+use std::sync::{Arc, Mutex};
 use std::time::Duration;
 
+use tracing::Level;
+use tracing::subscriber::with_default;
+
+use crate::server::build_info::stderr_log::LineLog;
 use crate::server::treefs::config::from_text;
 
 use super::NfsSettings;
@@ -122,13 +128,35 @@ fn nfs_listen_must_be_loopback() {
     assert_eq!(nfs.listen.port(), 0);
 }
 
-/// Asserts that a key this release does not know, in the table or beside it, is ignored with a
-/// warning and the file loads, as the other keys of `[fs]` are (B8: a release does not refuse the
-/// file of the next).
+/// A writer whose bytes the test reads back: the operator's stderr.
+#[derive(Clone, Default)]
+struct Stderr(Arc<Mutex<Vec<u8>>>);
+
+impl Write for Stderr {
+    fn write(&mut self, bytes: &[u8]) -> std::io::Result<usize> {
+        self.0.lock().unwrap().extend_from_slice(bytes);
+        Ok(bytes.len())
+    }
+
+    fn flush(&mut self) -> std::io::Result<()> {
+        Ok(())
+    }
+}
+
+/// Asserts that a key this release does not know, in the table or beside it, is ignored with one
+/// warning that names it and the file loads, as the other keys of `[fs]` are (B8: a release does
+/// not refuse the file of the next).
 #[test]
 fn an_unknown_nfs_key_is_ignored_and_the_file_loads() {
-    let nfs = from_text(&with("futuristic = 3\nmount_wait = \"3s\"\n"), "")
-        .unwrap()
-        .nfs;
+    let stderr = Stderr::default();
+    let text = with("futuristic = 3\nmount_wait = \"3s\"\n");
+    let nfs = with_default(LineLog::new(stderr.clone(), Level::WARN), || {
+        from_text(&text, "").unwrap().nfs
+    });
     assert_eq!(nfs.mount_wait, Duration::from_secs(3));
+    let said = String::from_utf8(stderr.0.lock().unwrap().clone()).unwrap();
+    assert_eq!(
+        said,
+        "tierstore fs: fs.nfs.futuristic is not a key of this release; ignored\n"
+    );
 }

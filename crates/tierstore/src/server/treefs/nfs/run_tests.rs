@@ -20,6 +20,8 @@ use crate::server::treefs::testing::until;
 struct Recorder {
     calls: Mutex<Vec<Vec<String>>>,
     mount_works: bool,
+    /// The program whose run panics.
+    panics: Option<&'static str>,
 }
 
 impl Recorder {
@@ -27,6 +29,15 @@ impl Recorder {
         Arc::new(Self {
             calls: Mutex::new(Vec::new()),
             mount_works,
+            panics: None,
+        })
+    }
+
+    fn panicking(program: &'static str) -> Arc<Self> {
+        Arc::new(Self {
+            calls: Mutex::new(Vec::new()),
+            mount_works: true,
+            panics: Some(program),
         })
     }
 
@@ -48,6 +59,7 @@ impl Recorder {
 impl Runner for Recorder {
     fn run(&self, argv: &[String]) -> std::io::Result<Ran> {
         locked(&self.calls).push(argv.to_vec());
+        assert_ne!(self.panics, Some(argv[0].as_str()), "the command dies");
         let fails = argv[0] == "/sbin/mount_nfs" && !self.mount_works;
         Ok(Ran {
             success: !fails,
@@ -290,4 +302,36 @@ async fn the_patience_of_a_start_is_a_timer_of_fs_nfs_jukebox_after() {
     assert!(futures::poll!(&mut waiting).is_pending());
     tokio::time::advance(Duration::from_secs(6)).await;
     assert!(futures::poll!(&mut waiting).is_ready());
+}
+
+/// Asserts that a mount command that dies is a failed start with the reason, and an unmount
+/// command that dies is a failed stop with the reason, and not a panic of the process.
+#[tokio::test]
+async fn a_command_that_dies_fails_the_start_or_the_stop() {
+    let (rig, _) = attached("nfs-run-dies");
+    let settings = settings(&rig, loopback());
+    let why = Running::start(
+        &settings,
+        Recorder::panicking("/sbin/mount_nfs"),
+        euid(),
+        None,
+    )
+    .await
+    .err()
+    .unwrap();
+    assert!(
+        why.to_string().starts_with("waiting for the mount: "),
+        "{why}"
+    );
+
+    let (rig, _) = attached("nfs-run-dies-umount");
+    let settings = self::settings(&rig, loopback());
+    let running = Running::start(&settings, Recorder::panicking("/sbin/umount"), euid(), None)
+        .await
+        .unwrap();
+    let why = running.stop().await.unwrap_err();
+    assert!(
+        why.to_string().starts_with("waiting for the unmount: "),
+        "{why}"
+    );
 }

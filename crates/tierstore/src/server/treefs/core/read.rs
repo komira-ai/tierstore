@@ -10,7 +10,7 @@ use std::os::unix::fs::FileExt as _;
 
 use crate::tree_manifest::EntryKind;
 
-use super::{Core, DirItem, Entry, Errno, Kind, TREE_TTL, ino};
+use super::{Core, DirItem, Entry, Errno, TREE_TTL, ino};
 
 /// Reads up to `size` bytes of `file` at `offset`; fewer at the end of the file.
 ///
@@ -54,6 +54,7 @@ impl Core {
         offset: u64,
         size: u32,
     ) -> Result<Vec<u8>, Errno> {
+        use super::Kind;
         self.note("read_ino");
         let attr = self.getattr(ino)?.attr;
         match attr.kind {

@@ -238,3 +238,76 @@ fn forget_core_keeps_a_tree_until_forgotten_after_detach_unchanged() {
     core.forget(ino::of(1, 0), 1);
     assert_eq!(core.trees_in_memory(), 0);
 }
+
+/// Asserts the cache file of a file by inode: its bytes and its length, none for a file of no
+/// bytes, and the refusals for a directory, the namespace, a link and an inode no tree has.
+#[test]
+fn blob_file_gives_the_cache_file_and_the_length_of_a_file() {
+    use std::os::unix::fs::FileExt as _;
+    let rig = attached_uncounted("tfs-blob-file");
+    let core = &rig.core;
+    let (file, length) = core.blob_file(ino::of(1, 4)).unwrap().unwrap();
+    assert_eq!(length, 10);
+    let mut bytes = [0u8; 10];
+    file.read_exact_at(&mut bytes, 0).unwrap();
+    assert_eq!(bytes.to_vec(), blob_with_length(&rig, 10));
+    assert!(core.blob_file(ino::of(1, 5)).unwrap().is_none());
+    for dir in [ino::of(1, 2), ino::ROOT, ino::TREES] {
+        assert_eq!(core.blob_file(dir).unwrap_err(), Errno::IsDir, "{dir}");
+    }
+    assert_eq!(core.blob_file(ino::of(1, 8)).unwrap_err(), Errno::Inval);
+    assert_eq!(core.blob_file(ino::of(1, 99)).unwrap_err(), Errno::NoEnt);
+    assert_eq!(core.blob_file(ino::of(9, 1)).unwrap_err(), Errno::NoEnt);
+}
+
+/// Asserts the parent of an inode: the directory above an entry, `trees/` for the root of a tree,
+/// the mount's root for `trees/` and for itself, and the refusals for an inode that is none.
+#[test]
+fn parent_is_the_directory_above() {
+    let rig = attached_uncounted("tfs-parent");
+    let core = &rig.core;
+    assert_eq!(core.parent(ino::of(1, 4)).unwrap(), ino::of(1, 2));
+    assert_eq!(core.parent(ino::of(1, 2)).unwrap(), ino::of(1, 0));
+    assert_eq!(core.parent(ino::of(1, 0)).unwrap(), ino::TREES);
+    assert_eq!(core.parent(ino::TREES).unwrap(), ino::ROOT);
+    assert_eq!(core.parent(ino::ROOT).unwrap(), ino::ROOT);
+    assert_eq!(core.parent(3).unwrap_err(), Errno::NoEnt);
+    assert_eq!(core.parent(ino::of(1, 99)).unwrap_err(), Errno::NoEnt);
+    assert_eq!(core.parent(ino::of(9, 0)).unwrap_err(), Errno::NoEnt);
+}
+
+/// Asserts a listing from the last inode seen: all entries after 0, in order and without `.` and
+/// `..`; those above an inode that is or is not an entry; the end when the sink says stop; and
+/// the refusals for the namespace, a file and a tree that is not there.
+#[test]
+fn readdir_after_lists_the_entries_above_an_inode() {
+    let rig = attached_uncounted("tfs-readdir-after");
+    let core = &rig.core;
+    let list = |dir: u64, after: u64, most: usize| {
+        let mut names = Vec::new();
+        core.readdir_after(dir, after, &mut |item| {
+            names.push(item.name);
+            names.len() < most
+        })
+        .map(|()| names)
+    };
+    let root = ino::of(1, 0);
+    assert_eq!(
+        list(root, 0, 99).unwrap(),
+        ["big.bin", "bin", "empty.h", "include", "lib"]
+    );
+    assert_eq!(
+        list(root, ino::of(1, 2), 99).unwrap(),
+        ["empty.h", "include", "lib"]
+    );
+    assert_eq!(
+        list(root, ino::of(1, 3), 99).unwrap(),
+        ["empty.h", "include", "lib"]
+    );
+    assert!(list(root, ino::of(1, 8), 99).unwrap().is_empty());
+    assert_eq!(list(root, 0, 2).unwrap(), ["big.bin", "bin"]);
+    assert_eq!(list(ino::of(1, 2), 0, 99).unwrap(), ["cc", "tool"]);
+    assert_eq!(list(ino::ROOT, 0, 9), Err(Errno::Acces));
+    assert_eq!(list(ino::of(1, 1), 0, 9), Err(Errno::NotDir));
+    assert_eq!(list(ino::of(9, 0), 0, 9), Err(Errno::NoEnt));
+}

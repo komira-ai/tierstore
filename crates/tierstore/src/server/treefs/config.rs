@@ -233,9 +233,7 @@ pub(in crate::server) fn from_text(text: &str, groups: &str) -> Result<FsSetting
         .and_then(toml::Value::as_table);
     for key in nfs.into_iter().flat_map(|table| table.keys()) {
         if !nfs_known.contains(&key.as_str()) {
-            tracing::warn!(
-                "tierstore fs: fs.nfs.{key} is not a key of this release and is ignored"
-            );
+            tracing::warn!("tierstore fs: fs.nfs.{key} is not a key of this release; ignored");
         }
     }
     FsSettings::of(file.fs, groups)

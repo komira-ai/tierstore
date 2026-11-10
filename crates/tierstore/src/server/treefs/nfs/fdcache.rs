@@ -50,10 +50,12 @@ impl FdCache {
             return;
         }
         shard.order.push_back(ino);
-        if shard.order.len() > self.per_shard
-            && let Some(oldest) = shard.order.pop_front()
-        {
-            let _ = shard.files.remove(&oldest);
+        if shard.order.len() > self.per_shard {
+            // The order holds more than one inode here, so the oldest is there.
+            let oldest = shard.order.pop_front();
+            oldest.iter().for_each(|ino| {
+                let _ = shard.files.remove(ino);
+            });
         }
     }
 

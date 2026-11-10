@@ -203,6 +203,12 @@ fn a_mount_user_the_machine_lacks_is_refused() {
         mounter(runner, &nfs, &path, owner).mount(LOOP, 7),
         Err(NfsError::User { .. })
     ));
+    // A number from a command that failed is no answer.
+    let runner = Fake::with(said(false, "5\n", "boom\n"), vec![], said(true, "", ""));
+    let why = mounter(runner, &nfs, &path, owner)
+        .mount(LOOP, 7)
+        .unwrap_err();
+    assert_eq!(why.to_string(), "fs.nfs.mount_user ghost: boom");
     let runner = Fake::refusing();
     let why = mounter(runner, &nfs, &path, owner)
         .mount(LOOP, 7)

@@ -405,11 +405,18 @@ On a Mac `tierstore fs` has no FUSE: it serves the same trees read-only over NFS
 | `fs.nfs.mount_wait` | duration, `30s` (1s to 1h) | how long a mount that fails is tried again |
 | `fs.nfs.mount_retry` | duration, `500ms` (1ms to 1m) | the pause between two tries |
 | `fs.nfs.fd_cache_shards` | count, 64 (1 to 4096) | the shards of the cache of open cache files, each with a lock of its own |
-| `fs.nfs.fd_cache_per_shard` | count, 64 (1 to 65536) | the open files one shard keeps; the oldest is closed first. Shards times this is the most descriptors the cache holds |
+| `fs.nfs.fd_cache_per_shard` | count, 64 (1 to 65536) | the open files one shard keeps; the oldest is closed first. Shards times this is the most descriptors the cache holds, and the process needs a limit of open files above that (the launchd job sets 65536; with the default 256 of a shell, a read that cannot open a cache file is `NFS3ERR_IO`) |
 | `fs.nfs.allowed_uids` | list of user ids, the mount user and the user of `fs.owner` | the users whose requests (`AUTH_SYS`) are served; any other, and a request with no user, is `NFS3ERR_ACCES`. This is a fence against other local users, not authentication: any local process can send any user id to the loopback socket |
 | `fs.nfs.jukebox_after` | duration, `5s` (1ms to 10m) | how long a read waits for a fill before the client is told to ask again (`NFS3ERR_JUKEBOX`); the fill goes on |
 
 ```toml
+[fs]
+client_group = "builders"
+owner = "501:20"
+fill_socket = "/var/lib/tierstore/fill.sock"
+cache_path = "/usr/local/tierstore/cache"
+mountpoint = "/Users/builder/tierstore"
+
 [fs.nfs]
 mount_user = "builder"
 allowed_uids = [501]

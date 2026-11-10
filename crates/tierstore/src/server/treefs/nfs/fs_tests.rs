@@ -7,8 +7,8 @@ use nfsserve::nfs::{
 };
 use nfsserve::vfs::{NFSFileSystem as _, VFSCapabilities};
 
-use super::{TreeNfs, class_bits, fattr};
-use crate::server::treefs::core::{Attr, Kind};
+use super::{TreeNfs, class_bits, fattr, handled, status};
+use crate::server::treefs::core::{Attr, Errno, Kind};
 use crate::server::treefs::ino;
 use crate::server::treefs::locked;
 use crate::server::treefs::nfs::config::NfsSettings;
@@ -529,4 +529,43 @@ async fn fd_cache_evicts_within_a_shard_and_reopens_correctly() {
     assert_eq!(blob_files(&fs), 3);
     assert_eq!(fs.read(id(BIG), 100, 10).await.unwrap().0, big[100..110]);
     assert_eq!((blob_files(&fs), fs.fds.len()), (4, 2));
+}
+
+/// Asserts the status each failure of the core is answered with, and that a handle the core does
+/// not know is stale where a name it does not know is missing.
+#[test]
+fn each_failure_of_the_core_has_its_nfs_status() {
+    let cases = [
+        (
+            Errno::NoEnt,
+            nfsstat3::NFS3ERR_NOENT,
+            nfsstat3::NFS3ERR_STALE,
+        ),
+        (
+            Errno::Acces,
+            nfsstat3::NFS3ERR_ACCES,
+            nfsstat3::NFS3ERR_ACCES,
+        ),
+        (
+            Errno::NotDir,
+            nfsstat3::NFS3ERR_NOTDIR,
+            nfsstat3::NFS3ERR_NOTDIR,
+        ),
+        (
+            Errno::IsDir,
+            nfsstat3::NFS3ERR_ISDIR,
+            nfsstat3::NFS3ERR_ISDIR,
+        ),
+        (
+            Errno::Inval,
+            nfsstat3::NFS3ERR_INVAL,
+            nfsstat3::NFS3ERR_INVAL,
+        ),
+        (Errno::Io, nfsstat3::NFS3ERR_IO, nfsstat3::NFS3ERR_IO),
+        (Errno::RoFs, nfsstat3::NFS3ERR_ROFS, nfsstat3::NFS3ERR_ROFS),
+    ];
+    for (errno, by_name, by_handle) in cases {
+        assert_eq!(code(status(errno)), code(by_name), "{errno:?}");
+        assert_eq!(code(handled(errno)), code(by_handle), "{errno:?}");
+    }
 }
