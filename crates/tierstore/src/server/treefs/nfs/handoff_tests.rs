@@ -16,8 +16,8 @@ use super::tests::{Recorder, closed, euid};
 use crate::server::handoff::Handoff;
 use crate::server::handoff::testing::within;
 use crate::server::treefs::core::AttachError;
-use crate::server::treefs::start::SIGNALS;
 use crate::server::treefs::testing::Rig;
+use crate::server::treefs::testing::SIGNALS;
 use crate::server::treefs::testing::until;
 
 fn me() -> Cred {

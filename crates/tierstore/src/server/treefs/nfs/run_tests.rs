@@ -14,7 +14,7 @@ use super::{Running, serve, serve_with, timer};
 use crate::server::treefs::config::FsSettings;
 use crate::server::treefs::ino;
 use crate::server::treefs::locked;
-use crate::server::treefs::start::SIGNALS;
+use crate::server::treefs::testing::SIGNALS;
 use crate::server::treefs::testing::until;
 
 /// Records the commands, answers every one with success unless told to fail the mount.

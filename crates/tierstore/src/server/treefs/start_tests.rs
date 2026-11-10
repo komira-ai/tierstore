@@ -1,35 +1,17 @@
 //! The neutral start: what it makes without a mount. It runs on every target.
 
-use super::{Identity, SIGNALS, Setup, Signals, StartError, new_mount_id};
+use super::{Identity, Setup, Signals, StartError, new_mount_id};
 use crate::server::treefs::config::FsSettings;
 use crate::server::treefs::core::Errno;
 use crate::server::treefs::ino;
-use crate::server::treefs::testing::{Rig, file, sample};
+use crate::server::treefs::testing::{Rig, SIGNALS, file, sample};
 
 use std::io::{BufRead as _, BufReader, Write as _};
-use std::os::unix::fs::MetadataExt as _;
 use std::os::unix::net::UnixStream;
 
 /// Settings over the scratch directories of a rig.
 fn settings(rig: &Rig) -> FsSettings {
-    FsSettings {
-        mountpoint: rig.mountpoint.clone(),
-        runtime_dir: rig.runtime.clone(),
-        control_socket: rig.dir.path().join("control.sock"),
-        client_group: std::fs::metadata(&rig.runtime).unwrap().gid(),
-        owner: (
-            rustix::process::geteuid().as_raw(),
-            rustix::process::getegid().as_raw(),
-        ),
-        fill_socket: rig.dir.path().join("fill.sock"),
-        cache_path: rig.cache.clone(),
-        fetch_timeout: std::time::Duration::from_secs(5),
-        threads: 4,
-        passthrough: true,
-        max_backing_ids: 100,
-        allow_other: false,
-        nfs: crate::server::treefs::nfs::config::NfsSettings::default(),
-    }
+    rig.settings()
 }
 
 fn ask(path: &std::path::Path, request: &str) -> serde_json::Value {

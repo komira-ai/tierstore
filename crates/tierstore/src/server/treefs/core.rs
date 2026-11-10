@@ -30,6 +30,7 @@ use crate::tree_manifest::{
 use super::attach::{Attachments, Failure, is_run};
 use super::backing::{self, Backing, BackingTable, Registrar};
 use super::fill_client::FillClient;
+use super::handle;
 use super::ino;
 use super::locked;
 use super::table::{TableError, TreeTable};
@@ -190,6 +191,9 @@ pub(super) struct Settings {
     pub mount_id: String,
     /// The most backing ids the kernel is given at once (`fs.max_backing_ids`).
     pub max_backing_ids: usize,
+    /// How many processes have served this connection, this one included (`init_record`): in the
+    /// numbers of the file handles this core gives out.
+    pub generation: u32,
     /// Whether the lookups of a tree's inodes are counted and a detached tree stays in memory
     /// until they are forgotten (a frontend that is told of forgets). If not, a tree is dropped
     /// when it is detached.
@@ -249,6 +253,12 @@ impl Core {
             #[cfg(test)]
             served: Mutex::new(Vec::new()),
         }
+    }
+
+    /// The settings of the core.
+    #[cfg(test)]
+    pub(super) fn settings(&self) -> &Settings {
+        &self.settings
     }
 
     /// Notes that a request of the kind `what` was served.
@@ -773,7 +783,12 @@ impl Core {
 
     /// A handle for an open, which stays until [`Core::release`].
     fn new_handle(&self, handle: Handle) -> u64 {
-        let fh = self.next_handle.fetch_add(1, Ordering::AcqRel);
+        let count = self.next_handle.fetch_add(1, Ordering::AcqRel);
+        let fh = handle::make(
+            self.settings.generation,
+            count,
+            matches!(handle, Handle::Backed(_)),
+        );
         let _ = locked(&self.handles).insert(fh, Arc::new(handle));
         fh
     }
@@ -916,6 +931,7 @@ fn path_of(tree: &Tree, index: u32) -> String {
     format!("/{}", names.join("/"))
 }
 
+mod adopt;
 mod passthrough;
 mod prefetch;
 mod read;

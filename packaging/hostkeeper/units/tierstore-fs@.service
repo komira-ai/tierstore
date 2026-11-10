@@ -14,19 +14,27 @@
 # /dev/fuse; CAP_SYS_ADMIN as the only capability (the mount, and the backing ids of passthrough:
 # FUSE_DEV_IOC_BACKING_OPEN and _CLOSE check it in the initial user namespace, on this process, so
 # it stays in the bounding set and the ambient set; without it the process does not ask for
-# passthrough and runs in the mode of Linux 6.8); the system calls of @mount;
-# Type=notify (the process says READY=1 when the mount is made); a start limit of 5 in 60 s, after
-# which the unit is left failed and the kernel aborts the connection, so jobs fail instead of
-# hanging; and two RuntimeDirectories, kept across restarts: /run/tierstore-fs for its state and
-# /run/tierstore, the parent of its mount point (the process makes /run/tierstore/fs). What changes:
-# RestrictAddressFamilies is AF_UNIX alone. What stays: User, NoNewPrivileges,
-# MemoryDenyWriteExecute, UMask, and the marker file, restart settings and release link of the
-# template. The descriptor store (a restart keeping the mount) and the hand-over between the two
-# instances are later changes; until then an instance that stops takes its mount with it.
+# passthrough and runs in the mode of Linux 6.8); the system calls of @mount, and pidfd_open and
+# pidfd_getfd (the process takes the descriptor the service manager passes it as an owned
+# duplicate, with no unsafe code); Type=notify (the process says READY=1 when the mount is
+# served); a descriptor store of one (FileDescriptorStoreMax=1, kept across a restart with
+# FileDescriptorStorePreserve=restart): the process gives it the /dev/fuse descriptor of the
+# mount, so a crash or a restart of the unit does not unmount it and the next process serves it
+# (docs/design/virtual-build-fs.md sections 7.2 and 7.3, crates/tierstore/docs/operations.md
+# "Crash recovery and the hand-over of the mount"); a start limit of 5 in 60 s, after which the
+# unit is left failed, systemd drops the store and the kernel aborts the connection, so jobs fail
+# instead of hanging; and two RuntimeDirectories, kept across restarts: /run/tierstore-fs for its
+# state and /run/tierstore, the parent of its mount point (the process makes
+# /run/tierstore/fs). What changes: RestrictAddressFamilies is AF_UNIX alone. What stays: User,
+# NoNewPrivileges, MemoryDenyWriteExecute, UMask, and the marker file, restart settings and
+# release link of the template. The hand-over between the two instances is done by the processes
+# themselves (`handoff-fs-v1`, on fs.handoff_socket in the runtime directory): a new instance
+# asks the running one for the mount before it says READY=1.
 #
 # An instance starts only when its marker file, /var/lib/tierstore/run-fs-%i, exists. Nothing
-# writes it yet: the update hook learns this unit in the change that adds the hand-over, and until
-# then an operator creates the marker for instance a. The mount must be made before the job runtime
+# writes it yet: the update hook does not act on this unit yet (crates/tierstore/docs/
+# update-hook.md "The second unit"), and until it does an operator creates the marker for
+# instance a. The mount must be made before the job runtime
 # starts: the runtime's unit orders itself After= this one.
 #
 # /etc/tierstore/fs.toml has the `[fs]` table; the cache directory and the fill socket it names are
@@ -63,7 +71,9 @@ RestrictRealtime=yes
 LockPersonality=yes
 MemoryDenyWriteExecute=yes
 SystemCallArchitectures=native
-SystemCallFilter=@system-service @mount
+SystemCallFilter=@system-service @mount pidfd_open pidfd_getfd
+FileDescriptorStoreMax=1
+FileDescriptorStorePreserve=restart
 
 [Install]
 WantedBy=multi-user.target

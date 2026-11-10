@@ -32,7 +32,7 @@
 
 mod offer;
 mod take;
-mod wire;
+pub(crate) mod wire;
 
 use std::net::SocketAddr;
 use std::path::PathBuf;

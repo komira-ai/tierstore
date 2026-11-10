@@ -49,6 +49,10 @@ pub(in crate::server) enum TableError {
     /// Every tree number is taken.
     #[error("the table of tree numbers is full")]
     Full,
+    /// The file is not a table, or is one of a layout of inode numbers this release does not
+    /// know.
+    #[error("the table of tree numbers is not a table of layout {LAYOUT}")]
+    Layout,
 }
 
 /// The table and what it holds, by digest.
@@ -161,6 +165,39 @@ impl TreeTable {
     #[cfg(test)]
     pub(super) fn epoch(&self) -> u32 {
         self.epoch
+    }
+
+    /// Opens the table `<dir>/trees` that an earlier process of the same mount made, with the
+    /// numbers it gave. A record that was half written when that process died is not one: the
+    /// next number is written over it.
+    ///
+    /// # Errors
+    /// [`TableError::Layout`] for a file that does not begin as this release's table does (the
+    /// numbers of another layout would name other inodes); what the system said.
+    pub(super) fn open(dir: &Path) -> Result<Self, TableError> {
+        let file = File::options()
+            .read(true)
+            .write(true)
+            .open(dir.join(FILE))?;
+        let mut header = [0u8; HEADER as usize];
+        if file.read_exact_at(&mut header, 0).is_err()
+            || &header[..8] != MAGIC
+            || header[8..12] != LAYOUT.to_le_bytes()
+        {
+            return Err(TableError::Layout);
+        }
+        let records = file.metadata()?.len().saturating_sub(HEADER) / RECORD;
+        let mut known = HashMap::new();
+        let mut record = [0u8; RECORD as usize];
+        for number in 1..=records {
+            file.read_exact_at(&mut record, HEADER + (number - 1) * RECORD)?;
+            known.extend(TreeDigest::from_hex(&hex::encode(record)).map(|digest| (digest, number)));
+        }
+        Ok(Self {
+            file,
+            epoch: u32::from_le_bytes([header[12], header[13], header[14], header[15]]),
+            state: Mutex::new((known, records)),
+        })
     }
 
     /// The number of the tree `digest`, given it if it has none: the record is written first.

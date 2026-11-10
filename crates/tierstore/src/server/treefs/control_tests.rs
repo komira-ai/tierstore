@@ -318,3 +318,89 @@ fn a_held_core_refuses_changes_in_words_and_still_lists() {
     rig.core.hold(false);
     assert_eq!(client.ask("detach run-1")["ok"], true);
 }
+
+/// Asserts the pause of a hand-over: a request on an open connection is refused as handed over and
+/// the connection ends; a client that connects meanwhile waits in the backlog and is answered when
+/// the socket answers again; and the socket's file stays.
+#[test]
+fn a_paused_socket_refuses_open_connections_and_a_resumed_one_answers_the_waiting() {
+    let (rig, mut control) = served("tfs-control-pause");
+    let path = rig.dir.path().join("control.sock");
+    let mut open = Client::connect(&path);
+    assert_eq!(open.ask("attachments")["ok"], json!(true));
+    control.pause();
+    assert_eq!(
+        open.ask("attachments"),
+        json!({"ok": false, "error": "handed over"})
+    );
+    let mut line = String::new();
+    assert_eq!(
+        open.read.read_line(&mut line).unwrap(),
+        0,
+        "the connection ends"
+    );
+    let mut waiting = UnixStream::connect(&path).unwrap();
+    waiting.write_all(b"attachments\n").unwrap();
+    control.resume().unwrap();
+    let mut answered = String::new();
+    BufReader::new(&mut waiting)
+        .read_line(&mut answered)
+        .unwrap();
+    assert!(answered.contains("\"ok\":true"), "{answered}");
+    assert!(path.exists());
+    // Paused twice or resumed twice is the same.
+    control.pause();
+    control.pause();
+    control.resume().unwrap();
+    assert_eq!(Client::connect(&path).ask("attachments")["ok"], json!(true));
+}
+
+/// Asserts that a listening socket given by an earlier instance is served with its file, that a copy
+/// of the descriptor accepts the same connections, and that an instance that gave up the file does
+/// not remove it.
+#[test]
+fn a_socket_given_over_is_served_copied_and_left_in_place() {
+    let rig = Rig::new("tfs-control-given", sample());
+    let path = rig.dir.path().join("given.sock");
+    let listener = std::os::unix::net::UnixListener::bind(&path).unwrap();
+    let mut control = Control::serve_on(rig.core.clone(), listener, &path).unwrap();
+    assert_eq!(Client::connect(&path).ask("attachments")["ok"], json!(true));
+    let copy = control.listener_fd().unwrap();
+    control.pause();
+    let copy = std::os::unix::net::UnixListener::from(copy);
+    // The descriptor is the same socket, so it is as non-blocking as the instance made it.
+    copy.set_nonblocking(false).unwrap();
+    let _client = UnixStream::connect(&path).unwrap();
+    let (stream, _) = copy.accept().unwrap();
+    drop(stream);
+    control.leave_path();
+    drop(control);
+    assert!(path.exists());
+}
+
+/// Asserts the gate: it passes requests while open, counts them, refuses when closed, and a close
+/// returns only when the requests that passed have ended.
+#[test]
+fn a_closed_gate_waits_for_the_requests_that_passed_it() {
+    use std::sync::Arc;
+    use std::sync::atomic::{AtomicBool, Ordering};
+    let gate = Arc::new(super::Gate::default());
+    let first = gate.enter().unwrap();
+    let ended = Arc::new(AtomicBool::new(false));
+    let closer = std::thread::spawn({
+        let (gate, ended) = (Arc::clone(&gate), Arc::clone(&ended));
+        move || {
+            gate.close_and_drain();
+            ended.load(Ordering::Acquire)
+        }
+    });
+    crate::server::treefs::testing::until(|| gate.enter().is_none());
+    ended.store(true, Ordering::Release);
+    drop(first);
+    assert!(
+        closer.join().unwrap(),
+        "the close returned before the request ended"
+    );
+    gate.open();
+    assert!(gate.enter().is_some());
+}
