@@ -540,6 +540,8 @@ pub(in crate::server) struct FakeDisk {
     pub(in crate::server) space: Mutex<Option<Space>>,
     /// Every call of `touch`, in order.
     pub(in crate::server) touched: Mutex<Vec<(PathBuf, u64)>>,
+    /// The number of calls of `finish_stage`.
+    finished: AtomicU64,
     /// The number of calls of `link`.
     links_made: Mutex<u32>,
     /// The gate that holds every write to a stage file, once set.
@@ -562,6 +564,7 @@ impl FakeDisk {
             quirk: Mutex::new(Quirk::None),
             space: Mutex::new(None),
             touched: Mutex::new(Vec::new()),
+            finished: AtomicU64::new(0),
             links_made: Mutex::new(0),
             write_gate: Mutex::new(None),
             link_gate: Mutex::new(None),
@@ -605,6 +608,11 @@ impl FakeDisk {
             .unwrap_or_else(PoisonError::into_inner);
         *held = Some(Arc::clone(&gate));
         gate
+    }
+
+    /// How many stage files have been ended (a fill or a keep wrote one and handed it over).
+    pub(in crate::server) fn finished(&self) -> u64 {
+        self.finished.load(Ordering::SeqCst)
     }
 
     /// How many calls of `space` wait at the gate of [`hold_space`](Self::hold_space).
@@ -720,6 +728,11 @@ impl Disk for FakeDisk {
             _ => {}
         }
         Ok(())
+    }
+
+    fn finish_stage<'a>(&'a self, file: &'a mut tokio::fs::File) -> BoxFuture<'a, io::Result<()>> {
+        let _ = self.finished.fetch_add(1, Ordering::SeqCst);
+        async move { tokio::io::AsyncWriteExt::flush(file).await }.boxed()
     }
 
     fn write_stage<'a>(

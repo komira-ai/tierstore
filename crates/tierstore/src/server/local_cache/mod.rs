@@ -191,6 +191,8 @@ mod scrub_tests;
 #[cfg(test)]
 mod selfcheck_tests;
 #[cfg(test)]
+mod size_tests;
+#[cfg(test)]
 mod source_tests;
 #[cfg(test)]
 mod stale_index_tests;

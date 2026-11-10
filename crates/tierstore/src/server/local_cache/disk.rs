@@ -57,6 +57,15 @@ pub trait Disk: Send + Sync {
     ) -> BoxFuture<'a, io::Result<()>> {
         async move { tokio::io::AsyncWriteExt::write_all(file, bytes).await }.boxed()
     }
+
+    /// Ends the writing of the stage file `file`: what the cache wrote is handed to the operating
+    /// system, so that every reader sees it. The default does no more: the cache is a copy and a
+    /// fill does not ask the drive to make its bytes durable (no `fsync`, which on macOS is a full
+    /// flush of the drive, about 10 ms a blob). It is a call of the disk so that a test counts the
+    /// ends of fills.
+    fn finish_stage<'a>(&'a self, file: &'a mut tokio::fs::File) -> BoxFuture<'a, io::Result<()>> {
+        async move { tokio::io::AsyncWriteExt::flush(file).await }.boxed()
+    }
 }
 
 /// The file system of the machine.

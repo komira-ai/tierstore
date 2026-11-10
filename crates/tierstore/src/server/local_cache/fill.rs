@@ -196,11 +196,12 @@ impl Staged {
         })
     }
 
-    /// Writes the end of the file to the disk, so that a name linked to it is whole after a
-    /// crash.
+    /// Writes the end of the file to the operating system, so that a name linked to it is whole
+    /// for every reader. It does not make the bytes durable: the cache is a copy, and a file a
+    /// power cut left short is found by the size check of every open (see `open_whole`).
     pub(super) async fn finish(&mut self) -> io::Result<()> {
-        self.file.flush().await?;
-        self.file.sync_data().await
+        let disk = Arc::clone(&self.inner.disk);
+        disk.finish_stage(&mut self.file).await
     }
 }
 

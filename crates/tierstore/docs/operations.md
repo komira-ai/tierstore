@@ -257,6 +257,17 @@ Eviction keeps the cache under `local_cache.budget`: above `high_water` percent 
 
 At start the process makes the directory, removes what a fill left half done, reads the kept objects back (sizes only; an object whose sidecar does not say what the file holds is deleted), and asks the file system four questions with a probe object. A file system that answers one wrongly exits the process with status 3, naming the check. The upstream is not asked anything at start. On SIGTERM it drains as a storage node does.
 
+### The cache and a power cut
+
+The cache is a copy, so a fill, and the copy of a put, do not ask the disk to make the bytes durable: no `fsync` (on macOS, no full flush of the drive, which costs about 10 ms a blob; a cold attach of 12,394 manifests took 134 s with it). What survives a power cut is whatever the disk took; the jobs that were running are not restarted, and the process starts again with what is on the disk.
+
+A file a power cut left short must not be served, and the size is what says so: the size of every object is recorded when it is kept (in its sidecar, and in the index, which has it from the scan), and is compared with the size of the file.
+
+- **At start** the scan deletes an object whose file is not the size its sidecar says, or whose sidecar does not parse (counted in `tierstore_cache_discarded_at_start_total`).
+- **At every open** of a file the cache serves, and at every fill request the filesystem process makes, the size of the file is compared with the recorded one, which costs one `fstat` of a file that is opened anyway. An object whose file is another size (shorter, or longer) is dropped and fetched again from the upstream: the read is a miss, and the fill request is not answered `ok`.
+
+The bytes are never hashed on a read. A file of the right size whose bytes a power cut left as zeros is therefore not found by this check; it is found only by the scrub (not in a release yet, see [limits](limits.md)), and until then it is served until it is evicted. The pins file is written the same way and is not synced either: a pins file the power cut left unreadable is ignored and said on stderr, and the trees are pinned again when their clients attach. Only the cache is relaxed. What a tier of the node stores as its truth (a `dir` tier's objects and sidecars, which are synced before a put is answered) and the state of the update hook are still written durably.
+
 ### The cache lock and read-only mode
 
 Two processes may have one cache directory open at once, for example a new binary started beside the one that is draining. Only one of them writes to it. The directory has a lock file, `.lock`, and the process that holds an exclusive lock on it is read-write: it fills, keeps, evicts and records the use of objects. A process that finds the lock held is read-only. A lone process takes the lock before it binds the address, so it is read-write from its first answer; the system frees the lock when the holder exits or crashes.

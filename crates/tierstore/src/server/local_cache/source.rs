@@ -246,13 +246,19 @@ impl Inner {
     }
 
     /// Whether the object is in the cache, counted as used. An entry whose file is not there (an
-    /// eviction removed it while a fill linked it) is dropped, so that the fill makes it again.
+    /// eviction removed it while a fill linked it) or is not the size recorded for it (a power cut
+    /// left it short) is dropped, so that the fill makes it again.
     async fn present(&self, name: &Name) -> bool {
-        if locked(&self.index).get(&name.hex).is_none() {
+        let Some(size) = locked(&self.index).get(&name.hex).map(|entry| entry.size) else {
             return false;
-        }
+        };
+        // The size of the file is the size recorded when it was kept: the filesystem process
+        // opens the file as it is, so a file a power cut left short must not be answered `ok`.
         let file = data_path(&self.config.path, &name.hex);
-        if tokio::fs::metadata(&file).await.is_err() {
+        let whole = tokio::fs::metadata(&file)
+            .await
+            .is_ok_and(|meta| meta.len() == size);
+        if !whole {
             self.drop_entry(&name.hex);
             return false;
         }

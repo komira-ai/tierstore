@@ -56,14 +56,17 @@ async fn read_piece(file: Arc<File>, offset: u64, len: u64) -> io::Result<Bytes>
     reading.await.expect("a read does not panic")
 }
 
-/// The file at `path`, opened, if it is a regular file of at least `need` bytes.
-fn open_whole(path: &std::path::Path, need: u64) -> io::Result<File> {
+/// The file at `path`, opened, if it is a regular file of exactly `size` bytes, the size the
+/// cache recorded when it kept the object. A file of another size (a power cut left it short,
+/// the cache does not sync its fills) is `UnexpectedEof`, which the caller takes as a lost object.
+/// The check costs one `fstat` of a file that is being opened anyway.
+fn open_whole(path: &std::path::Path, size: u64) -> io::Result<File> {
     let file = File::open(path)?;
     let meta = file.metadata()?;
     if !meta.is_file() {
         return Err(io::Error::other("the object's name is not a file"));
     }
-    if meta.len() < need {
+    if meta.len() != size {
         return Err(io::Error::from(io::ErrorKind::UnexpectedEof));
     }
     Ok(file)
@@ -84,7 +87,7 @@ pub(super) struct Believed {
 /// describes. A mismatch is `InvalidData`.
 fn open_believed(root: &std::path::Path, hex: &str, believed: &Believed) -> io::Result<File> {
     let file = open_whole(&data_path(root, hex), believed.size)?;
-    if file.metadata()?.len() != believed.size || !same_version_on_disk(root, hex, believed) {
+    if !same_version_on_disk(root, hex, believed) {
         return Err(io::Error::from(io::ErrorKind::InvalidData));
     }
     Ok(file)
@@ -211,7 +214,7 @@ impl Inner {
         let hex = name.hex.clone();
         let opening = tokio::task::spawn_blocking(move || match believed {
             Some(believed) => open_believed(&root, &hex, &believed),
-            None => open_whole(&data_path(&root, &hex), offset + len),
+            None => open_whole(&data_path(&root, &hex), size),
         });
         match opening.await.expect("an open does not panic") {
             Ok(file) => {
