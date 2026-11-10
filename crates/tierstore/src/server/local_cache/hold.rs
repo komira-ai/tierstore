@@ -50,7 +50,7 @@ use tokio::sync::{Notify, watch};
 use crate::server::lock::{self, LockFile};
 
 use super::evict::joined;
-use super::{Inner, LocalCache, layout, locked};
+use super::{Inner, LocalCache, layout, locked, pins};
 use super::{add, index_of};
 
 /// The rounds a take makes at most to remove the files of the names noted while it ran.
@@ -247,8 +247,18 @@ impl Inner {
         self.config.path.join(LOCK)
     }
 
-    /// One try of the lock; see [`LocalCache::tick`].
+    /// One try of the lock, and the write of the pins file if the cache holds the lock and the file
+    /// is due; see [`LocalCache::tick`].
     pub(super) fn tick(&self) -> io::Result<Tick> {
+        let outcome = self.try_lock();
+        if matches!(outcome, Ok(Tick::Held | Tick::Took)) {
+            self.save_pins(false);
+        }
+        outcome
+    }
+
+    /// One try of the lock.
+    fn try_lock(&self) -> io::Result<Tick> {
         let mut standing = locked(&self.hold.standing);
         if let Standing::Holding(file) = &*standing {
             if file.is_current() {
@@ -324,7 +334,9 @@ impl Inner {
                     &self.counters.discarded_at_start,
                     scanned.discarded + removed,
                 );
-                *locked(&self.index) = index_of(found);
+                let mut index = index_of(found);
+                pins::restore(&self.config, &mut index);
+                *locked(&self.index) = index;
                 *forgotten = Forgotten::default();
                 let _ = self.hold.read_write.swap(true, Ordering::SeqCst);
                 let _ = self.hold.mode.send_replace(Mode::ReadWrite);
@@ -432,7 +444,8 @@ impl LocalCache {
         self.inner.tick()
     }
 
-    /// Calls [`tick`](Self::tick) every `interval` until `halt` is notified. A tick runs on a
+    /// Calls [`tick`](Self::tick) every `interval` until `halt` is notified, and then writes the
+    /// pins file, as the cache gives up the lock. A tick runs on a
     /// thread that may block, so nothing waits on the lock inside a request or on the runtime.
     /// What a tick changed, and what went wrong, is said on stderr.
     pub async fn hold(&self, interval: Duration, halt: Arc<Notify>) {
@@ -454,5 +467,7 @@ impl LocalCache {
             #[cfg(test)]
             self.inner.trace_after_tick();
         }
+        // Halted: the cache gives up the lock, and the next holder reads the pins.
+        self.inner.save_pins(true);
     }
 }

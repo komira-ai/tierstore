@@ -137,6 +137,9 @@ pub(super) struct LocalCacheTable {
     /// The percent of the file system that is kept free.
     #[serde(default)]
     pub free_floor: Option<u8>,
+    /// The most bytes of objects that trees may pin (0 to the budget, default half the budget).
+    #[serde(default)]
+    pub pin_limit: Option<Size>,
     /// The most fills that run at once (1 to 64, default 4).
     #[serde(default)]
     pub max_concurrent_fills: Option<u8>,
@@ -387,6 +390,9 @@ impl CachePart {
         }
         if let Some(limit) = table.whole_fill_limit {
             cache.whole_limit = within("local_cache", "whole_fill_limit", limit.0, 1, budget)?;
+        }
+        if let Some(limit) = table.pin_limit {
+            cache.pin_limit = within("local_cache", "pin_limit", limit.0, 0, budget)?;
         }
         Ok(Self {
             config: cache,

@@ -21,6 +21,8 @@ pub struct Pass {
     pub freed: u64,
     /// The objects skipped because another name holds them (a link count over one).
     pub pinned: usize,
+    /// The objects skipped because a tree pins them.
+    pub pin_skips: usize,
 }
 
 /// Clears the flag of a running pass when the pass ends, however it ends.
@@ -83,6 +85,11 @@ impl Inner {
             if pass.freed >= need {
                 break;
             }
+            if locked(&self.index).pins.is_pinned(&hex) {
+                bump(&self.counters.pin_skips);
+                pass.pin_skips += 1;
+                continue;
+            }
             match self.disk.links(&data_path(&config.path, &hex)) {
                 Ok(links) if links > 1 => {
                     bump(&self.counters.pinned_skips);
@@ -102,7 +109,12 @@ impl Inner {
             } else {
                 Evicted::Floor
             };
-            self.drop_entry(&hex);
+            // Pinned since the look above: it stays.
+            if !self.evict_entry(&hex) {
+                bump(&self.counters.pin_skips);
+                pass.pin_skips += 1;
+                continue;
+            }
             self.counters.evicted(why);
             pass.evicted += 1;
             pass.freed += size;
