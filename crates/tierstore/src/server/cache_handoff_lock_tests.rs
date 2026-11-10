@@ -31,21 +31,10 @@ use super::combined_cli_tests::Node as CombinedNode;
 use super::config::settings_from_text;
 use super::config_cache::CacheSettings;
 use super::config_combined::CombinedSettings;
-use super::local_cache::testing::{Rig, Seen, age, digest, pattern, wait_until};
+use super::local_cache::testing::{Rig, age, digest, pattern, tree, wait_until};
 use super::local_cache::{Disk, SystemDisk};
 use super::lock::try_take;
 use crate::{Backend, Op};
-
-/// The listing of `root` as [`testing::tree`](super::local_cache::testing::tree) gives it, less the
-/// directory's own entry and the clean-stop marker `.clean`: the old instance, which is draining,
-/// writes the marker as it ends, and that is its write, not the successor's, which these tests
-/// are about.
-fn tree(root: &Path) -> std::collections::BTreeMap<PathBuf, Seen> {
-    let mut listing = super::local_cache::testing::tree(root);
-    let _ = listing.remove(Path::new(""));
-    let _ = listing.remove(Path::new(".clean"));
-    listing
-}
 
 /// The size of every object of these tests.
 const SIZE: u64 = 1000;

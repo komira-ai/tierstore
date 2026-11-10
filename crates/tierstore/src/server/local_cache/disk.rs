@@ -48,17 +48,6 @@ pub trait Disk: Send + Sync {
     /// What the system said.
     fn touch(&self, path: &Path, millis: u64) -> io::Result<()>;
 
-    /// Writes every change the machine has not yet written to its disks (`sync`). The cache calls
-    /// it once, as it ends in order, before it writes its clean-stop marker (see `clean`); a fill
-    /// never does.
-    ///
-    /// # Errors
-    /// What the system said.
-    fn flush_all(&self) -> io::Result<()> {
-        rustix::fs::sync();
-        Ok(())
-    }
-
     /// Appends `bytes` to the stage file `file`, which the copy of a put is written to. The
     /// default writes it; it is a call of the disk so that a test can make a write wait or fail.
     fn write_stage<'a>(
@@ -67,6 +56,15 @@ pub trait Disk: Send + Sync {
         bytes: &'a [u8],
     ) -> BoxFuture<'a, io::Result<()>> {
         async move { tokio::io::AsyncWriteExt::write_all(file, bytes).await }.boxed()
+    }
+
+    /// Ends the writing of the stage file `file`: what the cache wrote is handed to the operating
+    /// system, so that every reader sees it. The default does no more: the cache is a copy and a
+    /// fill does not ask the drive to make its bytes durable (no `fsync`, which on macOS is a full
+    /// flush of the drive, about 10 ms a blob). It is a call of the disk so that a test counts the
+    /// ends of fills.
+    fn finish_stage<'a>(&'a self, file: &'a mut tokio::fs::File) -> BoxFuture<'a, io::Result<()>> {
+        async move { tokio::io::AsyncWriteExt::flush(file).await }.boxed()
     }
 }
 

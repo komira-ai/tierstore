@@ -50,8 +50,8 @@ use tokio::sync::{Notify, watch};
 use crate::server::lock::{self, LockFile};
 
 use super::evict::joined;
-use super::{Index, add};
 use super::{Inner, LocalCache, layout, locked, pins};
+use super::{add, index_of};
 
 /// The rounds a take makes at most to remove the files of the names noted while it ran.
 const MAX_ROUNDS: u32 = 8;
@@ -334,7 +334,7 @@ impl Inner {
                     &self.counters.discarded_at_start,
                     scanned.discarded + removed,
                 );
-                let mut index = Index::of(found, scanned.unclean);
+                let mut index = index_of(found);
                 pins::restore(&self.config, &mut index);
                 *locked(&self.index) = index;
                 *forgotten = Forgotten::default();
@@ -469,6 +469,5 @@ impl LocalCache {
         }
         // Halted: the cache gives up the lock, and the next holder reads the pins.
         self.inner.save_pins(true);
-        self.inner.seal();
     }
 }

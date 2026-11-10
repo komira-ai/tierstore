@@ -126,7 +126,6 @@
 //! changed on the disk; see [`scrub`].
 
 mod calls;
-mod clean;
 mod disk;
 mod evict;
 mod fill;
@@ -145,8 +144,6 @@ mod source;
 mod stream;
 mod write;
 
-#[cfg(test)]
-mod clean_tests;
 #[cfg(test)]
 mod evict_tests;
 #[cfg(test)]
@@ -193,6 +190,8 @@ mod revalidate_tests;
 mod scrub_tests;
 #[cfg(test)]
 mod selfcheck_tests;
+#[cfg(test)]
+mod size_tests;
 #[cfg(test)]
 mod source_tests;
 #[cfg(test)]
@@ -526,6 +525,19 @@ fn stage_prefix() -> String {
     format!("{:x}-{nanos:x}-{number:x}", std::process::id())
 }
 
+/// The index of the objects a scan found, the least recently used first.
+fn index_of(mut found: Vec<layout::Found>) -> Index {
+    found.sort_by(|a, b| (a.used, &a.hex).cmp(&(b.used, &b.hex)));
+    let mut index = Index::default();
+    for found in found {
+        let sidecar = found.sidecar;
+        // Found on the disk: how long ago the upstream last held this version is not known.
+        let (size, tag, modified) = (sidecar.size, sidecar.tag, sidecar.modified);
+        index.insert(&found.hex, (size, tag, modified), None);
+    }
+    index
+}
+
 /// A read-through cache of an upstream, on a directory of the local file system.
 #[derive(Clone)]
 pub struct LocalCache {
@@ -616,7 +628,7 @@ impl LocalCache {
             add(&counters.discarded_at_start, scanned.discarded + removed);
             scanned
         };
-        let mut index = Index::of(scanned.found, scanned.unclean);
+        let mut index = index_of(scanned.found);
         if !matches!(standing, Standing::Waiting) {
             pins::restore(&config, &mut index);
         }

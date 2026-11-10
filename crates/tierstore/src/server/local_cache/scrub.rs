@@ -278,7 +278,7 @@ impl Inner {
     }
 
     /// Hashes the object `hex` again and drops it if it does not match.
-    pub(super) fn scrub_object(&self, hex: &str, state: &Scrubber, chunk: &dyn Fn()) -> Verdict {
+    fn scrub_object(&self, hex: &str, state: &Scrubber, chunk: &dyn Fn()) -> Verdict {
         self.scrub_object_judging(hex, state, chunk, || {})
     }
 

@@ -531,8 +531,6 @@ pub(in crate::server) enum Quirk {
     LinkFails(io::ErrorKind),
     /// `space` fails, as a `statvfs` that the system refuses.
     SpaceFails,
-    /// `flush_all` fails.
-    FlushFails,
 }
 
 /// The file system of the machine, with the answers a test changes.
@@ -542,10 +540,10 @@ pub(in crate::server) struct FakeDisk {
     pub(in crate::server) space: Mutex<Option<Space>>,
     /// Every call of `touch`, in order.
     pub(in crate::server) touched: Mutex<Vec<(PathBuf, u64)>>,
+    /// The number of calls of `finish_stage`.
+    finished: AtomicU64,
     /// The number of calls of `link`.
     links_made: Mutex<u32>,
-    /// The number of calls of `flush_all`.
-    flushes: AtomicU64,
     /// The gate that holds every write to a stage file, once set.
     write_gate: Mutex<Option<Arc<Semaphore>>>,
     /// The gate that holds every `link`, once set (the thread that calls it waits).
@@ -566,8 +564,8 @@ impl FakeDisk {
             quirk: Mutex::new(Quirk::None),
             space: Mutex::new(None),
             touched: Mutex::new(Vec::new()),
+            finished: AtomicU64::new(0),
             links_made: Mutex::new(0),
-            flushes: AtomicU64::new(0),
             write_gate: Mutex::new(None),
             link_gate: Mutex::new(None),
             space_gate: Mutex::new(None),
@@ -612,9 +610,9 @@ impl FakeDisk {
         gate
     }
 
-    /// How many times the whole machine was asked to write its disks.
-    pub(in crate::server) fn flushes(&self) -> u64 {
-        self.flushes.load(Ordering::SeqCst)
+    /// How many stage files have been ended (a fill or a keep wrote one and handed it over).
+    pub(in crate::server) fn finished(&self) -> u64 {
+        self.finished.load(Ordering::SeqCst)
     }
 
     /// How many calls of `space` wait at the gate of [`hold_space`](Self::hold_space).
@@ -732,6 +730,11 @@ impl Disk for FakeDisk {
         Ok(())
     }
 
+    fn finish_stage<'a>(&'a self, file: &'a mut tokio::fs::File) -> BoxFuture<'a, io::Result<()>> {
+        let _ = self.finished.fetch_add(1, Ordering::SeqCst);
+        async move { tokio::io::AsyncWriteExt::flush(file).await }.boxed()
+    }
+
     fn write_stage<'a>(
         &'a self,
         file: &'a mut tokio::fs::File,
@@ -755,14 +758,6 @@ impl Disk for FakeDisk {
         match self.quirk() {
             Quirk::OneLink => Ok(1),
             _ => SystemDisk.links(path),
-        }
-    }
-
-    fn flush_all(&self) -> io::Result<()> {
-        let _ = self.flushes.fetch_add(1, Ordering::SeqCst);
-        match self.quirk() {
-            Quirk::FlushFails => Err(io::Error::other("the disk would not flush")),
-            _ => SystemDisk.flush_all(),
         }
     }
 

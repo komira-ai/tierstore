@@ -137,8 +137,6 @@ pub(super) struct Scanned {
     pub found: Vec<Found>,
     /// The files that were not part of a whole object and were deleted.
     pub discarded: u64,
-    /// The last process did not end cleanly (see `clean`): no object found is trusted yet.
-    pub unclean: bool,
 }
 
 /// Empties the stage directory (making it if it is not there): a fill that was running when the
@@ -213,11 +211,7 @@ fn is_sidecar(path: &Path) -> bool {
 /// What the system said about making the directory.
 pub(super) fn scan(root: &Path) -> io::Result<Scanned> {
     make_dirs(root, &objects_dir(root))?;
-    let unclean = super::clean::take(root)?;
-    Ok(Scanned {
-        unclean,
-        ..walk(root, true)
-    })
+    Ok(walk(root, true))
 }
 
 /// Reads the object directory as [`scan`] does and changes nothing in it: the directory is not
@@ -225,10 +219,7 @@ pub(super) fn scan(root: &Path) -> io::Result<Scanned> {
 /// is what a cache that does not hold the lock of its directory may do: the file may be the
 /// middle of a publish by the one that does. A directory that is not there has no objects.
 pub(super) fn read_only_scan(root: &Path) -> Scanned {
-    Scanned {
-        unclean: !super::clean::sealed(root),
-        ..walk(root, false)
-    }
+    walk(root, false)
 }
 
 /// Removes `path` if `delete`, and says whether it did.
