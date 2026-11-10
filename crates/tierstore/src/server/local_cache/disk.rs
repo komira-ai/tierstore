@@ -48,6 +48,17 @@ pub trait Disk: Send + Sync {
     /// What the system said.
     fn touch(&self, path: &Path, millis: u64) -> io::Result<()>;
 
+    /// Writes every change the machine has not yet written to its disks (`sync`). The cache calls
+    /// it once, as it ends in order, before it writes its clean-stop marker (see `clean`); a fill
+    /// never does.
+    ///
+    /// # Errors
+    /// What the system said.
+    fn flush_all(&self) -> io::Result<()> {
+        rustix::fs::sync();
+        Ok(())
+    }
+
     /// Appends `bytes` to the stage file `file`, which the copy of a put is written to. The
     /// default writes it; it is a call of the disk so that a test can make a write wait or fail.
     fn write_stage<'a>(

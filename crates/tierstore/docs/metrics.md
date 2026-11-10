@@ -77,7 +77,7 @@ What they do not count:
 | `tierstore_cache_pin_skips_total` | counter | none | an eviction pass passed over an object because a tree pins it (see `local_cache.pin_limit`) |
 | `tierstore_cache_scrubbed_objects_total` | counter | none | the scrub hashed an object again |
 | `tierstore_cache_scrubbed_bytes_total` | counter | none | the bytes the scrub read for those objects |
-| `tierstore_cache_scrub_mismatches_total` | counter | none | the scrub dropped an object whose bytes no longer matched its digest |
+| `tierstore_cache_scrub_mismatches_total` | counter | none | the scrub, or the first read of an object after an unclean stop, dropped an object whose bytes no longer matched its digest |
 | `tierstore_cache_scrub_errors_total` | counter | none | the scrub could not judge an object because a read failed, or its check panicked |
 | `tierstore_cache_discarded_at_start_total` | counter | none | a file was removed at start: a file the scan did not find whole, or what a fill left in the stage directory at the last stop |
 

@@ -257,6 +257,18 @@ Eviction keeps the cache under `local_cache.budget`: above `high_water` percent 
 
 At start the process makes the directory, removes what a fill left half done, reads the kept objects back (sizes only; an object whose sidecar does not say what the file holds is deleted), and asks the file system four questions with a probe object. A file system that answers one wrongly exits the process with status 3, naming the check. The upstream is not asked anything at start. On SIGTERM it drains as a storage node does.
 
+### The cache and a power cut
+
+The cache is a copy, so a fill, and the copy of a put, do not ask the disk to make the bytes durable: no `fsync` (on macOS, no full flush of the drive, which costs about 10 ms a blob). What is kept through a power cut is whatever the disk took; the jobs that were running are not restarted, and the process starts again with what is on the disk.
+
+A file a power cut left short, or full of zeros under a name whose sidecar says it is whole, must never be served. The directory has a marker file, `.clean`, for that. A process that holds the directory removes it at start (and syncs the directory, so a power cut after the first fill cannot bring it back), and writes it again only when it ends in order: after the fronts drained and the pins were written, it asks the machine once to write its disks (`sync`) and then writes the marker. It writes none while a fill or a copy still has a staging file. At start:
+
+- **A marker was there (the last stop was in order).** Nothing is checked, and the start costs what it did.
+- **No marker was there (a crash, a kill, a power cut, or a first start with this release).** The scan still deletes an object whose file is not the size its sidecar says, or whose sidecar does not parse. Every object that is left is checked on its first read: the process hashes the file and compares the SHA-256 with the digest of the sidecar (the name, for a `cas/l/` key). An object that matches is served from then on with no further cost; one that does not is dropped and the read is answered by a new fill from the upstream. Drops are counted in `tierstore_cache_scrub_mismatches_total` and said on stderr. The check reads the whole object once, from the disk, before its first byte is sent, so the first read of a large object after a power cut is slower by that read.
+- **A process that does not hold the lock** (see below) finds no marker while the holder is running, because the holder removed it. It therefore checks the hits it serves the same way, and when one fails it deletes nothing: the read is answered from the upstream and the holder drops the file when it reads it.
+
+The pins file is written the same way and is not synced either: a pins file the power cut left unreadable is ignored and said on stderr, and the trees are pinned again when their clients attach. Only the cache is relaxed. What a tier of the node stores as its truth (a `dir` tier's objects and sidecars, which are synced before a put is answered) and the state of the update hook are still written durably.
+
 ### The cache lock and read-only mode
 
 Two processes may have one cache directory open at once, for example a new binary started beside the one that is draining. Only one of them writes to it. The directory has a lock file, `.lock`, and the process that holds an exclusive lock on it is read-write: it fills, keeps, evicts and records the use of objects. A process that finds the lock held is read-only. A lone process takes the lock before it binds the address, so it is read-write from its first answer; the system frees the lock when the holder exits or crashes.

@@ -22,6 +22,10 @@ pub(super) struct Entry {
     checked: Option<u64>,
     /// The place in the order of use.
     used: u64,
+    /// Found on the disk after a stop that was not clean, and not yet checked against its digest
+    /// (see `clean`): it is not served until it has been. An entry made by a fill is checked as it
+    /// is written.
+    unverified: bool,
 }
 
 impl Entry {
@@ -81,12 +85,42 @@ impl Index {
             modified,
             checked,
             used,
+            unverified: false,
         };
         self.order.insert(used, hex.to_owned());
         self.entries.insert(hex.to_owned(), entry);
         self.bytes += size;
         // An object written over is still the one the trees pin.
         self.pins.resize(hex, size);
+    }
+
+    /// The index of the objects a scan found, the least recently used first. After a stop that was
+    /// not clean (`unclean`) none of them is trusted until it has been checked.
+    pub(super) fn of(mut found: Vec<super::layout::Found>, unclean: bool) -> Self {
+        found.sort_by(|a, b| (a.used, &a.hex).cmp(&(b.used, &b.hex)));
+        let mut index = Self::default();
+        for found in found {
+            let sidecar = found.sidecar;
+            // Found on the disk: how long ago the upstream last held this version is not known.
+            let (size, tag, modified) = (sidecar.size, sidecar.tag, sidecar.modified);
+            index.insert(&found.hex, (size, tag, modified), None);
+            if let Some(entry) = index.entries.get_mut(&found.hex) {
+                entry.unverified = unclean;
+            }
+        }
+        index
+    }
+
+    /// Whether the object `hex` is there and has not been checked since an unclean stop.
+    pub(super) fn is_unverified(&self, hex: &str) -> bool {
+        self.entries.get(hex).is_some_and(|entry| entry.unverified)
+    }
+
+    /// Says the object `hex` has been checked.
+    pub(super) fn verified(&mut self, hex: &str) {
+        if let Some(entry) = self.entries.get_mut(hex) {
+            entry.unverified = false;
+        }
     }
 
     /// Takes the right to check the object `hex` against the upstream, if a check is due at

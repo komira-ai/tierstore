@@ -194,6 +194,10 @@ impl Inner {
         let Some(size) = used else {
             return Ok(None);
         };
+        // An object found after an unclean stop is served only once its bytes have been checked.
+        if !self.vouched(&name.hex).await {
+            return Ok(None);
+        }
         // A read-only cache's index is its scan, and the holder may have put the object again
         // since: the file and its sidecar are checked against the index. The bytes of a key named
         // by its content cannot change.

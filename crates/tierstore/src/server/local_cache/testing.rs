@@ -531,6 +531,8 @@ pub(in crate::server) enum Quirk {
     LinkFails(io::ErrorKind),
     /// `space` fails, as a `statvfs` that the system refuses.
     SpaceFails,
+    /// `flush_all` fails.
+    FlushFails,
 }
 
 /// The file system of the machine, with the answers a test changes.
@@ -542,6 +544,8 @@ pub(in crate::server) struct FakeDisk {
     pub(in crate::server) touched: Mutex<Vec<(PathBuf, u64)>>,
     /// The number of calls of `link`.
     links_made: Mutex<u32>,
+    /// The number of calls of `flush_all`.
+    flushes: AtomicU64,
     /// The gate that holds every write to a stage file, once set.
     write_gate: Mutex<Option<Arc<Semaphore>>>,
     /// The gate that holds every `link`, once set (the thread that calls it waits).
@@ -563,6 +567,7 @@ impl FakeDisk {
             space: Mutex::new(None),
             touched: Mutex::new(Vec::new()),
             links_made: Mutex::new(0),
+            flushes: AtomicU64::new(0),
             write_gate: Mutex::new(None),
             link_gate: Mutex::new(None),
             space_gate: Mutex::new(None),
@@ -605,6 +610,11 @@ impl FakeDisk {
             .unwrap_or_else(PoisonError::into_inner);
         *held = Some(Arc::clone(&gate));
         gate
+    }
+
+    /// How many times the whole machine was asked to write its disks.
+    pub(in crate::server) fn flushes(&self) -> u64 {
+        self.flushes.load(Ordering::SeqCst)
     }
 
     /// How many calls of `space` wait at the gate of [`hold_space`](Self::hold_space).
@@ -745,6 +755,14 @@ impl Disk for FakeDisk {
         match self.quirk() {
             Quirk::OneLink => Ok(1),
             _ => SystemDisk.links(path),
+        }
+    }
+
+    fn flush_all(&self) -> io::Result<()> {
+        let _ = self.flushes.fetch_add(1, Ordering::SeqCst);
+        match self.quirk() {
+            Quirk::FlushFails => Err(io::Error::other("the disk would not flush")),
+            _ => SystemDisk.flush_all(),
         }
     }
 

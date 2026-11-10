@@ -343,7 +343,7 @@ The read cache of a build node, or of a storage node that keeps it in front of i
 
 | Key | Type, default | What |
 |---|---|---|
-| `local_cache.path` | path, required | the directory of the cache, made if it is not there; put it on the file system that the jobs' scratch is on |
+| `local_cache.path` | path, required | the directory of the cache, made if it is not there; put it on the file system that the jobs' scratch is on. Its files are not synced to the disk (see [the cache and a power cut](operations.md#the-cache-and-a-power-cut)) |
 | `local_cache.layout` | string, `"digest-v1"` | the only layout: raw bytes, one file for each object |
 | `local_cache.budget` | size, required | the bytes the cache is meant to hold. The marks are shares of it |
 | `local_cache.high_water` | percent, 90 | above this share of the budget, a pass evicts |
