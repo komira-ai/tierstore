@@ -30,8 +30,9 @@ use fuser::InitFlags;
 use super::config::FsSettings;
 use super::handover::{self, Offer, Paths};
 use super::recover;
-use super::run::{Kernel, Prepared, Running, Signals, StartError, discard_mount, io};
+use super::run::{Kernel, Prepared, Running, discard_mount};
 use super::sd::{self, FUSE_NAME, Manager, Stored};
+use super::start::{Signals, StartError, io};
 
 /// What the platform gives the process: the channel to the service manager and the descriptors it
 /// passed.

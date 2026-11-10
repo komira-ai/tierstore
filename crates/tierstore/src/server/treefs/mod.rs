@@ -9,6 +9,9 @@
 //! - [`attach`], [`control`]: the attachments and the control socket they are made on.
 //! - [`fill_client`]: the client of the fill socket (fills, touches and pins).
 //! - [`core`]: the operations of a filesystem on inode numbers, with no protocol in them.
+//! - `start`: what a start does before a frontend serves (the runtime directory, the core, the
+//!   attachments made again, the control socket), and the signals that end the process. It has no
+//!   mount in it, so that the FUSE frontend and one without FUSE call it alike.
 //! - `fuse` and `run` (Linux): the FUSE frontend and the process around it.
 //! - `launch`, `serving`, `sd`, `init_record`, `handle`, `recover` and `handover` (Linux): crash
 //!   recovery and the hand-over of the mount. The mount's `/dev/fuse` descriptor is kept by the
@@ -18,6 +21,11 @@
 //!   (`handle`); a kernel that cannot send the unanswered requests again is waited on for a bounded
 //!   time (`recover`); and a running instance hands the connection to a new one with no moment in
 //!   which no one holds it (`handover`). `launch` decides at a start which of these applies.
+//!
+//! The core serves a frontend in either of two ways: with opens and handles, and a count of the
+//! lookups the kernel holds until it forgets them (FUSE); or by inode alone, with the reads of
+//! [`core::Core::read_ino`] and no count, so that a tree leaves memory when it is detached (a
+//! protocol with no open and no forget, as NFS).
 //!
 //! Two modes, chosen at start from what the kernel's `INIT` offers (`fuse`): with passthrough
 //! (kernel 6.9 and later, `CAP_SYS_ADMIN`, `fs.passthrough` not false) every non-empty file is
@@ -52,6 +60,10 @@ mod run;
 mod sd;
 #[cfg(target_os = "linux")]
 mod serving;
+// Linux's start is the FUSE one; on other targets the start is built for the tests until a
+// frontend there calls it.
+#[cfg(any(target_os = "linux", test))]
+mod start;
 
 pub(super) use config::{FsSettings, load};
 #[cfg(test)]
@@ -59,7 +71,7 @@ pub(super) use config::{FsTable, from_text};
 #[cfg(target_os = "linux")]
 pub(super) use launch::serve;
 #[cfg(target_os = "linux")]
-pub(super) use run::StartError;
+pub(super) use start::StartError;
 
 use std::sync::{Mutex, MutexGuard};
 

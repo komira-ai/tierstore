@@ -12,8 +12,9 @@ use crate::server::handoff::testing::within;
 use crate::server::treefs::config::FsSettings;
 use crate::server::treefs::fakedev;
 use crate::server::treefs::init_record::{self, Record};
-use crate::server::treefs::run::{Kernel, StartError};
+use crate::server::treefs::run::Kernel;
 use crate::server::treefs::sd::{FUSE_NAME, Manager, Stored};
+use crate::server::treefs::start::StartError;
 use crate::server::treefs::testing::{FakeManager, Rig, SIGNALS, sample, until, with_fuse};
 
 /// The kernel's files, as a test makes them: a mount table and a directory of connections.

@@ -353,6 +353,20 @@ impl Rig {
         owner: (u32, u32),
         most: usize,
     ) -> Self {
+        Self::made(name, built, (owner, most), true)
+    }
+
+    /// A rig whose core does not count lookups: a frontend with no forget.
+    pub(in crate::server) fn uncounted(name: &str, built: Built) -> Self {
+        Self::made(name, built, (OWNER, 100), false)
+    }
+
+    fn made(
+        name: &str,
+        built: Built,
+        (owner, most): ((u32, u32), usize),
+        count_lookups: bool,
+    ) -> Self {
         let dir = TestDir::under(std::env::temp_dir(), name);
         let cache = dir.path().join("cache");
         let runtime = dir.path().join("run");
@@ -380,6 +394,7 @@ impl Rig {
                 mount_id: "mount-1".to_owned(),
                 max_backing_ids: most,
                 generation: 1,
+                count_lookups,
             },
             fills,
             TreeTable::create(&runtime).unwrap(),

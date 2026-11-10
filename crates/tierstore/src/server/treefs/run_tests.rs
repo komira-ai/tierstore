@@ -6,12 +6,10 @@ use std::os::unix::net::UnixStream;
 
 use serde_json::{Value, json};
 
-use super::{
-    ECRYPTFS, OVERLAYFS, Prepared, Running, Signals, StartError, check_cache, new_mount_id,
-    refuse_stacked, stacked_name,
-};
+use super::{ECRYPTFS, OVERLAYFS, Prepared, Running, check_cache, refuse_stacked, stacked_name};
 use crate::server::treefs::config::FsSettings;
-use crate::server::treefs::testing::{Rig, SIGNALS, sample, with_fuse};
+use crate::server::treefs::start::StartError;
+use crate::server::treefs::testing::{Rig, sample, with_fuse};
 
 /// Settings over the scratch directories of a rig, with the sample tree to be served.
 fn settings(rig: &Rig) -> FsSettings {
@@ -208,35 +206,6 @@ fn a_cache_on_a_stacked_file_system_is_refused_by_name() {
     assert!(refuse_stacked(std::path::Path::new("/cache"), 0xef53).is_ok());
     let rig = Rig::new("tfs-run-cache", sample());
     check_cache(&rig.cache).unwrap();
-}
-
-/// Asserts that a mount id is thirty-two hex digits and two are not alike.
-#[test]
-fn a_mount_id_is_random_hex() {
-    let (a, b) = (new_mount_id().unwrap(), new_mount_id().unwrap());
-    assert_eq!(a.len(), 32);
-    assert!(a.bytes().all(|c| c.is_ascii_hexdigit()));
-    assert_ne!(a, b);
-}
-
-/// Asserts that SIGTERM and SIGINT, each, end the wait, and that one that came before the wait is
-/// not lost.
-#[test]
-fn sigterm_and_sigint_end_the_wait_even_if_they_came_first() {
-    let _one_at_a_time = SIGNALS
-        .lock()
-        .unwrap_or_else(std::sync::PoisonError::into_inner);
-    let runtime = tokio::runtime::Builder::new_current_thread()
-        .enable_all()
-        .build()
-        .unwrap();
-    runtime.block_on(async {
-        let mut signals = Signals::install().unwrap();
-        for signal in [rustix::process::Signal::TERM, rustix::process::Signal::INT] {
-            rustix::process::kill_process(rustix::process::getpid(), signal).unwrap();
-            signals.wait().await;
-        }
-    });
 }
 
 /// Asserts that a start that makes the mount records the handshake: generation 1, the id the pins

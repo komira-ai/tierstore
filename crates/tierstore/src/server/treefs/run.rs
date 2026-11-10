@@ -1,36 +1,35 @@
-//! The process of `tierstore fs`: what a start checks and makes, and the wait for the signal that
-//! ends it. Linux only: the mount is a FUSE mount.
+//! The FUSE side of the process of `tierstore fs`: what a start checks and makes around the neutral
+//! start (`start.rs`). Linux only: the mount is a FUSE mount.
 //!
 //! A start, in order: the cache directory must be on a file system that is not stacked (the job's
-//! overlay above this mount must stay within the kernel's depth of stacking); the runtime directory
-//! gets a table of tree numbers afresh (a new mount); the attachments the file holds are made again
-//! (the manifests are read through the fill socket); the cache is told which trees are attached,
-//! so that it drops the pins of any other; the control socket is bound; the mount is made and the
-//! record of its `INIT` handshake written. That is [`Running::start`]. [`Running::adopt`] is the
+//! overlay above this mount must stay within the kernel's depth of stacking); the neutral start is
+//! done (`Setup`: a table of tree numbers afresh, the attachments made again, the cache told
+//! which trees are attached, the control socket bound); the mount is made and the record of its
+//! `INIT` handshake written. That is [`Running::start`]. [`Running::adopt`] is the
 //! start of a process that takes a connection over (after a crash or a restart, with the
 //! descriptor the service manager kept, or in a hand-over from the running instance): the same
 //! state is read from the runtime directory instead of made, and nothing is mounted. What
 //! decides between them, tells the service manager and waits for the signal that ends the process
 //! is in `launch`.
 
-use std::io::Read as _;
 use std::os::fd::OwnedFd;
 use std::path::{Path, PathBuf};
 use std::sync::{Arc, Mutex};
 
 use rustix::mount::UnmountFlags;
 
-use super::attach::Attachments;
 use super::backing::{self, Saved};
 use super::config::FsSettings;
 use super::control::Control;
-use super::core::{self, Core};
-use super::fill_client::FillClient;
-use super::init_record::{self, Record, RecordError};
+use super::core::Core;
+use super::init_record::{self, Record};
 use super::locked;
 use super::recover;
 use super::serving::Serving;
-use super::table::{TableError, TreeTable};
+use super::start::{
+    Setup, StartError, control_error, core_of, create_mount_point, create_runtime_dir, io,
+};
+use super::table::TreeTable;
 
 /// The mounts of this process's namespace.
 const MOUNTINFO: &str = "/proc/self/mountinfo";
@@ -40,60 +39,6 @@ const OVERLAYFS: i64 = 0x794c_7630;
 
 /// The magic number of an eCryptfs file system (`ECRYPTFS_SUPER_MAGIC`).
 const ECRYPTFS: i64 = 0xf15f;
-
-/// Why a start was refused.
-#[derive(Debug, thiserror::Error)]
-pub(in crate::server) enum StartError {
-    /// The cache directory is on a stacked file system.
-    #[error(
-        "fs.cache_path {path}: the file system is {name}, a stacked one; the job's overlay above \
-         the mount would pass the kernel's depth of stacking; put the cache on XFS or ext4"
-    )]
-    Stacked {
-        /// The cache directory.
-        path: String,
-        /// The kind of the file system.
-        name: &'static str,
-    },
-    /// Something the start needs could not be done.
-    #[error("{what}: {source}")]
-    Io {
-        /// What was being done.
-        what: String,
-        /// What the system said.
-        source: std::io::Error,
-    },
-    /// The table of tree numbers could not be made.
-    #[error("{0}")]
-    Table(#[from] TableError),
-    /// The record of the `INIT` handshake could not be read or written.
-    #[error("{0}")]
-    Record(#[from] RecordError),
-    /// The hand-over of the mount from the running instance failed.
-    #[error("{0}")]
-    Handover(#[from] super::handover::HandoverError),
-    /// Requests of the connection stayed unanswered after a restart on a kernel that cannot send
-    /// them again, and the connection was aborted so that they fail; the unit starts again.
-    #[error("the connection was aborted: requests the process before read stayed unanswered")]
-    Aborted,
-}
-
-impl StartError {
-    /// The exit status of a start that this refused: 3 for a cache on a stacked file system, as
-    /// for a cache directory whose file system fails the check of the cache, else 1.
-    pub(in crate::server) fn status(&self) -> u8 {
-        match self {
-            Self::Stacked { .. } => 3,
-            _ => 1,
-        }
-    }
-}
-
-/// The error of `what` failing with `source`.
-pub(super) fn io(what: impl Into<String>) -> impl FnOnce(std::io::Error) -> StartError {
-    let what = what.into();
-    move |source| StartError::Io { what, source }
-}
 
 /// The name of the stacked file system with the magic number `magic`, if it is one.
 fn stacked_name(magic: i64) -> Option<&'static str> {
@@ -122,26 +67,6 @@ fn check_cache(path: &Path) -> Result<(), StartError> {
         .map_err(|errno| std::io::Error::from_raw_os_error(errno.raw_os_error()))
         .map_err(io(format!("fs.cache_path {}", path.display())))?;
     refuse_stacked(path, stat.f_type as i64)
-}
-
-/// An id for this mount: sixteen random bytes as hex, which the pins are made under.
-fn new_mount_id() -> Result<String, StartError> {
-    let mut bytes = [0u8; 16];
-    std::fs::File::open("/dev/urandom")
-        .and_then(|mut random| random.read_exact(&mut bytes))
-        .map_err(io("reading /dev/urandom"))?;
-    Ok(hex::encode(bytes))
-}
-
-/// Removes the file at `path`, which a mount that is gone left; none is no fault.
-fn remove_stale(path: &Path) -> Result<(), StartError> {
-    match std::fs::remove_file(path) {
-        Err(error) if error.kind() != std::io::ErrorKind::NotFound => Err(StartError::Io {
-            what: format!("removing {}", path.display()),
-            source: error,
-        }),
-        _ => Ok(()),
-    }
 }
 
 /// What a process that takes over a connection reads before it takes it: the record of the `INIT`
@@ -189,10 +114,7 @@ pub(super) struct Running {
 /// system, and the runtime directory is made. It touches nothing at the mount point.
 fn make_state_directories(settings: &FsSettings) -> Result<(), StartError> {
     check_cache(&settings.cache_path)?;
-    std::fs::create_dir_all(&settings.runtime_dir).map_err(io(format!(
-        "fs.runtime_dir {}",
-        settings.runtime_dir.display()
-    )))
+    create_runtime_dir(settings)
 }
 
 /// Makes the directories a fresh start needs: those of [`make_state_directories`] and the mount
@@ -201,10 +123,7 @@ fn make_state_directories(settings: &FsSettings) -> Result<(), StartError> {
 /// process that is not serving yet.
 fn make_directories(settings: &FsSettings) -> Result<(), StartError> {
     make_state_directories(settings)?;
-    std::fs::create_dir_all(&settings.mountpoint).map_err(io(format!(
-        "fs.mountpoint {}",
-        settings.mountpoint.display()
-    )))
+    create_mount_point(settings)
 }
 
 /// What a fresh start does first: `discard`, which detaches a dead mount at the mount point, and
@@ -213,42 +132,6 @@ fn make_directories(settings: &FsSettings) -> Result<(), StartError> {
 fn begin(settings: &FsSettings, discard: impl FnOnce()) -> Result<(), StartError> {
     discard();
     make_directories(settings)
-}
-
-/// A core over `table` for the mount `mount_id`, whose file handles are numbered for `generation`,
-/// with the attachments the file holds made again and the cache told which trees are attached.
-fn core_of(
-    settings: &FsSettings,
-    table: TreeTable,
-    (mount_id, generation): (String, u32),
-) -> Result<Arc<Core>, StartError> {
-    let fills = FillClient::new(settings.fill_socket.clone(), settings.fetch_timeout);
-    let core = Arc::new(Core::new(
-        core::Settings {
-            owner: settings.owner,
-            cache_path: settings.cache_path.clone(),
-            mountpoint: settings.mountpoint.clone(),
-            mount_id,
-            max_backing_ids: settings.max_backing_ids,
-            generation,
-        },
-        fills,
-        table,
-        &settings.runtime_dir,
-    ));
-    let saved =
-        Attachments::saved(&settings.runtime_dir).map_err(io("reading the attachments file"))?;
-    core.restore(saved);
-    core.pins_live();
-    Ok(core)
-}
-
-/// The text `what` names: the control socket's path in an error.
-fn control_error(settings: &FsSettings) -> impl FnOnce(std::io::Error) -> StartError {
-    io(format!(
-        "fs.control_socket {}",
-        settings.control_socket.display()
-    ))
 }
 
 impl Running {
@@ -265,17 +148,11 @@ impl Running {
                 &Kernel::real(),
             );
         })?;
-        let table = TreeTable::create(&settings.runtime_dir)?;
-        // The backing ids of an earlier mount belong to its connection, which is gone.
-        remove_stale(&settings.runtime_dir.join(backing::FILE))?;
-        let mount_id = new_mount_id()?;
-        let core = core_of(settings, table, (mount_id.clone(), 1))?;
-        let control = Control::serve(
-            Arc::clone(&core),
-            &settings.control_socket,
-            settings.client_group,
-        )
-        .map_err(control_error(settings))?;
+        let Setup {
+            core,
+            mount_id,
+            _control: control,
+        } = Setup::start(settings, true)?;
         let serving = Serving::mount(&core, settings)
             .map_err(io(format!("mounting {}", settings.mountpoint.display())))?;
         let record = Record::first(serving.outcome(), mount_id);
@@ -307,6 +184,7 @@ impl Running {
             settings,
             table,
             (record.mount_id.clone(), record.generation),
+            true,
         )?;
         let control = match control {
             Some(listener) => {
@@ -495,30 +373,6 @@ fn discard_with(
     let shown = mountpoint.display();
     if let Err(why) = detach(mountpoint) {
         tracing::warn!("tierstore fs: cannot detach {shown}: {why}");
-    }
-}
-
-/// The signals that end the process, caught.
-pub(super) struct Signals {
-    term: tokio::signal::unix::Signal,
-    int: tokio::signal::unix::Signal,
-}
-
-impl Signals {
-    /// Catches SIGTERM and SIGINT from now on: one that comes before [`Signals::wait`] is kept.
-    /// This must run inside a Tokio runtime.
-    pub(super) fn install() -> Result<Self, StartError> {
-        use tokio::signal::unix::{SignalKind, signal};
-        Ok(Self {
-            term: signal(SignalKind::terminate()).map_err(io("handling SIGTERM"))?,
-            int: signal(SignalKind::interrupt()).map_err(io("handling SIGINT"))?,
-        })
-    }
-
-    /// Waits for SIGTERM or SIGINT.
-    pub(super) async fn wait(&mut self) {
-        let _ =
-            futures::future::select(Box::pin(self.term.recv()), Box::pin(self.int.recv())).await;
     }
 }
 

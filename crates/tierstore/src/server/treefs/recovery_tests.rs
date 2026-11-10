@@ -9,7 +9,8 @@ use super::config::FsSettings;
 use super::fakedev::{self, Message};
 use super::init_record::{self, Record, RecordError};
 use super::ino;
-use super::run::{Prepared, Running, StartError};
+use super::run::{Prepared, Running};
+use super::start::StartError;
 use super::testing::{FakeKernel, Rig, sample, sha};
 
 /// The rig and its settings, with the record the process that mounted left.
