@@ -33,6 +33,9 @@ crc = "3.4.0"
 crc32c = "0.6.8"
 crc32fast = "1.5.2"
 futures = "0.3.34"
+# The FUSE protocol of `tierstore fs` (Linux only; the crate's `server` feature). It mounts as
+# root through mount(2), and as another user through `fusermount3`. MIT.
+fuser = { version = "0.18.0", default-features = false }
 hex = "0.4.3"
 # Header maps; already in the tree through hyper.
 http = "1.5.0"

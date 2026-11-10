@@ -244,8 +244,7 @@ use keep::Sent;
 use layout::{Name, data_path, name_of};
 use metrics::{add, bump};
 use revalidate::Verdict;
-#[cfg(test)]
-pub(super) use source::blob_path;
+pub(super) use source::{blob_path, manifest_path};
 pub(super) use source::{Blob, FillError};
 use stream::eager;
 

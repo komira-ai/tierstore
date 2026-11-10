@@ -5,9 +5,10 @@
 //! tierstore update-hook <prepare|cutover|verify|rollback|cleanup> [<artifact>] --params <file>
 //! tierstore format-epoch (--check|--drain|--cancel|--activate|--activate-marks|--restore-entries) --hot <tier> [flags]
 //! tierstore entries (ls|show --key <key>) --hot <tier> [flags]
+//! tierstore fs [attachments] --config <file>
 //! ```
 //!
-//! `update-hook` is [`update_hook`]. `format-epoch` ([`format_epoch`]) and `entries`
+//! `fs` ([`fs`]) is the virtual build file system. `update-hook` is [`update_hook`]. `format-epoch` ([`format_epoch`]) and `entries`
 //! ([`entries`]) are the operator's: they read and write only tierstore's own objects in the hot
 //! tier (`_tiering/format`, `_tiering/proxies/`, `_entries/`) and never ask a store how it behaves.
 //! Both take the hot tier by the flags of the server that name it (`--hot`, `--hot-endpoint`,
@@ -16,6 +17,7 @@
 
 mod entries;
 mod format_epoch;
+mod fs;
 mod registrations;
 
 use std::ffi::OsString;
@@ -37,6 +39,8 @@ use crate::{Backend, SystemClock, TokioSleeper};
 pub(super) const FORMAT_EPOCH: &str = "format-epoch";
 /// The name of the verb that lists and shows the journal entries of keys.
 pub(super) const ENTRIES: &str = "entries";
+/// The name of the verb that runs the virtual build file system.
+pub(super) const FS: &str = "fs";
 
 /// Why a verb did not do what it was asked.
 #[derive(Debug, thiserror::Error)]
@@ -208,6 +212,7 @@ pub(super) fn answer(args: &[OsString]) -> Option<ExitCode> {
             &TokioSleeper,
         )),
         Some(ENTRIES) => Some(entries::run(args, &mut out, &mut err, &SystemClock)),
+        Some(FS) => Some(fs::run(args, &mut out, &mut err)),
         _ => None,
     }
 }

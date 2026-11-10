@@ -4,9 +4,14 @@
 //! fill <sha256> <size> from <key> @ <offset>   a blob inside the upstream object <key>
 //! fill <sha256>                                the whole object cas/l/<sha256>
 //! touch <sha256> [<sha256> ...]                these blobs were used now (no answer)
+//! pin <mount> <tree> <sha256> [<sha256> ...]   keep these blobs for the tree of the mount
+//! unpin <mount> <tree>                         take away every pin of the tree of the mount
+//! pins-live <mount> [<tree> ...]               keep the pins of these trees of the mount only
 //! ```
 //!
-//! A digest is sixty-four lower-case hex digits; a number is decimal digits only. `<key>` is the
+//! A digest is sixty-four lower-case hex digits; a number is decimal digits only; a mount and a
+//! tree are each one word of at most [`MAX_NAME`] visible ASCII characters (the boot id of the
+//! mount, and the digest of the tree). `<key>` is the
 //! rest of the line between `from ` and the last ` @ `, so a key may hold spaces; it is not
 //! under a prefix the proxy keeps for itself.
 
@@ -15,6 +20,9 @@ use crate::server::local_cache::layout::is_digest;
 
 /// The longest line a request may be, in bytes: a `touch` of about a thousand digests.
 pub(super) const MAX_LINE: usize = 64 * 1024;
+
+/// The longest name of a mount or a tree, in bytes.
+const MAX_NAME: usize = 128;
 
 /// The longest key of an S3 object, in bytes.
 const MAX_KEY: usize = 1024;
@@ -33,6 +41,16 @@ pub(super) enum Request {
     Manifest { sha256: String },
     /// Count these blobs as used now; only the digests that are digests are kept.
     Touch(Vec<String>),
+    /// Pin these blobs for `tree` of `mount`.
+    Pin {
+        mount: String,
+        tree: String,
+        blobs: Vec<String>,
+    },
+    /// Take away every pin of `tree` of `mount`.
+    Unpin { mount: String, tree: String },
+    /// Keep the pins of `trees` of `mount` and take away every other pin.
+    PinsLive { mount: String, trees: Vec<String> },
 }
 
 /// Why a line is not a request. The text follows `refused ` in the answer.
@@ -65,6 +83,9 @@ pub(super) enum Refusal {
     /// A key under a prefix the proxy keeps for itself.
     #[error("reserved key")]
     Reserved,
+    /// A mount or a tree that is empty, longer than [`MAX_NAME`] or not visible ASCII.
+    #[error("not a usable name")]
+    Name,
 }
 
 /// The digest `text`, or why it is not one.
@@ -74,6 +95,14 @@ fn digest(text: &str) -> Result<String, Refusal> {
     } else {
         Err(Refusal::Digest)
     }
+}
+
+/// The mount or tree name `text`, or why it is not one.
+fn name(text: &str) -> Result<String, Refusal> {
+    if text.is_empty() || text.len() > MAX_NAME || !text.bytes().all(|b| b.is_ascii_graphic()) {
+        return Err(Refusal::Name);
+    }
+    Ok(text.to_owned())
 }
 
 /// The number `text` writes in decimal digits (no sign, no space).
@@ -100,8 +129,35 @@ pub(super) fn parse(line: &[u8]) -> Result<Request, Refusal> {
                 .map(str::to_owned)
                 .collect(),
         )),
+        "pin" => pin(rest),
+        "unpin" => {
+            let (mount, tree) = rest.split_once(' ').ok_or(Refusal::Malformed)?;
+            Ok(Request::Unpin {
+                mount: name(mount)?,
+                tree: name(tree)?,
+            })
+        }
+        "pins-live" => {
+            let (mount, trees) = rest.split_once(' ').unwrap_or((rest, ""));
+            let trees = trees.split(' ').filter(|word| !word.is_empty());
+            Ok(Request::PinsLive {
+                mount: name(mount)?,
+                trees: trees.map(name).collect::<Result<_, _>>()?,
+            })
+        }
         _ => Err(Refusal::Unknown),
     }
+}
+
+/// The request `pin <rest>` is.
+fn pin(rest: &str) -> Result<Request, Refusal> {
+    let (mount, rest) = rest.split_once(' ').ok_or(Refusal::Malformed)?;
+    let (tree, blobs) = rest.split_once(' ').ok_or(Refusal::Malformed)?;
+    Ok(Request::Pin {
+        mount: name(mount)?,
+        tree: name(tree)?,
+        blobs: blobs.split(' ').map(digest).collect::<Result<_, _>>()?,
+    })
 }
 
 /// The request `fill <rest>` is.

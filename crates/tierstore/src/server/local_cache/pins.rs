@@ -7,8 +7,8 @@
 //! read-only cache answers [`PinError::ReadOnly`], and the caller asks again of the one that
 //! holds it.
 //!
-//! - [`LocalCache::pin`] pins the blobs, named by the SHA-256 of their bytes (the `cas/l/`
-//!   keys). A blob the cache does not hold is not pinned (it is counted as absent: the caller
+//! - [`LocalCache::pin`] pins the blobs, named by the SHA-256 of their bytes: the blob a fill for
+//!   a tree kept (`_tiering/fill/<sha256>`), else the object `cas/l/<sha256>`. A blob the cache does not hold is not pinned (it is counted as absent: the caller
 //!   pins it again once it has been read). A pin that would take the pinned bytes over
 //!   [`CacheConfig::pin_limit`] is refused, and the blob is counted as used, so that it is kept
 //!   by recency only: pins buy speed, and running out of them must not stop a job.
@@ -38,6 +38,7 @@ use thiserror::Error;
 
 use super::index::Index;
 use super::layout::is_digest;
+use super::source::blob_name;
 use super::pin_set::{Owner, Pinned, PinsFile};
 use super::{CacheConfig, Inner, LocalCache, locked};
 
@@ -92,7 +93,15 @@ impl Inner {
         let (limit, now) = (self.config.pin_limit, self.clock.now());
         let mut answer = PinAnswer::default();
         let mut index = locked(&self.index);
-        for hex in blobs {
+        for sha256 in blobs {
+            // A blob filled for a tree (`fill_blob`) is kept under its reserved key; else the name
+            // is the object `cas/l/<sha256>`'s.
+            let filled = blob_name(sha256);
+            let hex = if index.get(&filled).is_some() {
+                &filled
+            } else {
+                sha256
+            };
             let size = index.get(hex).map(|entry| entry.size);
             match index.pins.pin(&owner, hex, size, limit) {
                 Pinned::Yes => answer.pinned += 1,

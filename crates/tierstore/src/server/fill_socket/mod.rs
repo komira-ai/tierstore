@@ -28,7 +28,11 @@
 //! several. `ok` answers a fill that is in the cache; the other answers are the words of
 //! `FillError` (`upstream <status>`, `mismatch`, `short`, `no space`, `too large`, `busy`,
 //! `read-only`, `io`, `changed`, `aborted`) and `refused <why>` for a line that is not a request.
-//! A `touch` is never answered.
+//! A `touch` is never answered. The pin requests are answered `ok <pinned> <refused> <absent>`
+//! (`pin`: the blobs now pinned by the tree, the blobs refused for the cache's `pin_limit`, the
+//! blobs the cache does not hold), `ok <blobs>` (`unpin`: the blobs the tree had pinned) and
+//! `ok <trees>` (`pins-live`: the trees whose pins were taken away), or `read-only` from an
+//! instance that does not hold the lock of the cache directory.
 
 mod request;
 
@@ -44,7 +48,7 @@ use tokio::task::JoinSet;
 
 use super::ACCEPT_PAUSE;
 use super::local_cache::{Blob, FillError};
-use super::local_cache::{LocalCache, Mode};
+use super::local_cache::{LocalCache, Mode, PinError};
 use request::{MAX_LINE, Request, parse};
 
 /// How long the socket waits after it could not be bound before it tries again.
@@ -229,6 +233,19 @@ async fn session(cache: LocalCache, stream: UnixStream, uid: u32) {
                 said(cache.fill_blob(&blob).await)
             }
             Ok(Request::Manifest { sha256 }) => said(cache.fill_manifest(&sha256).await),
+            Ok(Request::Pin {
+                mount,
+                tree,
+                blobs,
+            }) => pinned(cache.pin(&mount, &tree, &blobs).map(|got| {
+                format!("{} {} {}", got.pinned, got.refused, got.absent)
+            })),
+            Ok(Request::Unpin { mount, tree }) => {
+                pinned(cache.unpin(&mount, &tree).map(|count| count.to_string()))
+            }
+            Ok(Request::PinsLive { mount, trees }) => {
+                pinned(cache.pins_live(&mount, &trees).map(|count| count.to_string()))
+            }
             Err(refusal) => format!("refused {refusal}"),
         };
         if write
@@ -239,6 +256,12 @@ async fn session(cache: LocalCache, stream: UnixStream, uid: u32) {
             return;
         }
     }
+}
+
+/// The answer to a pin request: `ok` and the numbers, or the words of the failure. Every digest
+/// was checked when the line was parsed, so the one failure left is a read-only cache.
+fn pinned(done: Result<String, PinError>) -> String {
+    done.map_or_else(|_| "read-only".to_owned(), |numbers| format!("ok {numbers}"))
 }
 
 /// The answer to a fill: `ok`, or the words of the failure.
