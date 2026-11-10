@@ -33,6 +33,8 @@ fn settings(rig: &Rig) -> FsSettings {
         cache_path: rig.cache.clone(),
         fetch_timeout: std::time::Duration::from_secs(5),
         threads: 4,
+        passthrough: true,
+        max_backing_ids: 100,
         allow_other: false,
     }
 }
@@ -66,8 +68,12 @@ fn start_and_stop() {
     let rig = Rig::new("tfs-run-start", sample());
     let root = rig.upstream.built.lock().unwrap().root.clone();
     let settings = settings(&rig);
+    // The backing table of a mount that is gone belongs to a connection that is gone.
+    std::fs::write(rig.runtime.join("backing"), "stale\n").unwrap();
     let running = Running::start(&settings).unwrap();
     assert!(mounted(&rig.mountpoint));
+    let table = std::fs::read_to_string(rig.runtime.join("backing")).unwrap_or_default();
+    assert!(!table.contains("stale"), "{table}");
     let answer = ask(
         &settings.control_socket,
         &format!("attach {root} for run-1"),
@@ -162,6 +168,18 @@ fn a_start_that_cannot_do_what_it_needs_says_what() {
         assert!(error.to_string().contains(what), "{what}: {error}");
         assert_eq!(error.status(), 1);
     }
+    assert!(!mounted(&rig.mountpoint));
+}
+
+/// Asserts that a start that cannot remove the backing table of an earlier mount says so and
+/// mounts nothing.
+#[test]
+fn a_backing_table_that_cannot_be_removed_stops_the_start() {
+    let rig = Rig::new("tfs-run-stale", sample());
+    let stuck = rig.runtime.join("backing");
+    std::fs::create_dir_all(stuck.join("inside")).unwrap();
+    let error = Running::start(&settings(&rig)).err().unwrap();
+    assert!(error.to_string().contains("removing"), "{error}");
     assert!(!mounted(&rig.mountpoint));
 }
 

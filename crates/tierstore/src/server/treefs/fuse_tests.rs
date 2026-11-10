@@ -8,10 +8,10 @@ use std::path::Path;
 
 use fuser::{BackgroundSession, Session};
 
-use super::{Frontend, config};
+use super::{Frontend, Mode, config, id_in, privileged};
 use crate::server::treefs::core::FIXED_MTIME;
 use crate::server::treefs::ino;
-use crate::server::treefs::testing::{Built, Rig, file, sample, sha, until, with_fuse};
+use crate::server::treefs::testing::{Built, Rig, file, sample, sha, skipped, until, with_fuse};
 
 /// A rig, and its core served on a mount of its mountpoint.
 struct Mounted {
@@ -21,8 +21,13 @@ struct Mounted {
     root: String,
 }
 
-/// The mount of the sample tree, attached for one run.
+/// The mount of the sample tree, attached for one run, in the 6.8 mode.
 fn mounted(name: &str, built: Built) -> Mounted {
+    mounted_asking(name, built, false)
+}
+
+/// The mount of `built`, attached for one run, asking for passthrough or not.
+fn mounted_asking(name: &str, built: Built, passthrough: bool) -> Mounted {
     let me = (
         rustix::process::geteuid().as_raw(),
         rustix::process::getegid().as_raw(),
@@ -30,7 +35,7 @@ fn mounted(name: &str, built: Built) -> Mounted {
     let rig = Rig::owned(name, built, me);
     let root = rig.upstream.built.lock().unwrap().root.clone();
     let _ = rig.core.attach(&root, "run-1").unwrap();
-    let frontend = Frontend::new(rig.core.clone());
+    let frontend = Frontend::new(rig.core.clone(), passthrough);
     let session = Session::new(frontend, &rig.mountpoint, &config(4, false)).unwrap();
     let session = session.spawn().unwrap();
     Mounted { session, rig, root }
@@ -414,4 +419,103 @@ fn each_refusal_of_the_core_is_an_errno_of_the_kernel() {
     for (core, kernel) in cases {
         assert_eq!(super::errno(core), kernel, "{core:?}");
     }
+}
+
+/// Asserts the choice of the mode for every combination of what the kernel offers, what the
+/// settings ask and whether the process holds the capability: passthrough only when all three
+/// hold, and the reason otherwise.
+#[test]
+fn passthrough_is_chosen_only_where_offered_asked_for_and_privileged() {
+    for offered in [false, true] {
+        for wanted in [false, true] {
+            for held in [false, true] {
+                let mode = Mode::chosen(offered, wanted, held);
+                if offered && wanted && held {
+                    assert_eq!(mode, Mode::Passthrough);
+                    continue;
+                }
+                let Mode::Cached(why) = mode else {
+                    panic!("passthrough chosen for {offered} {wanted} {held}");
+                };
+                // The setting is named first, then the kernel, then the capability.
+                let want = if !wanted {
+                    "fs.passthrough is false"
+                } else if !offered {
+                    "the kernel does not offer passthrough"
+                } else {
+                    "the process lacks CAP_SYS_ADMIN"
+                };
+                assert_eq!(why, want);
+            }
+        }
+    }
+}
+
+/// Asserts that the capability is read as the kernel's status of the process says (bit 21 of the
+/// effective set), and that a process without it does not ask for passthrough.
+#[test]
+fn the_capability_is_read_from_the_effective_set_of_the_process() {
+    let status = std::fs::read_to_string("/proc/self/status").unwrap();
+    let effective = status
+        .lines()
+        .find_map(|line| line.strip_prefix("CapEff:"))
+        .unwrap();
+    let bits = u64::from_str_radix(effective.trim(), 16).unwrap();
+    assert_eq!(privileged(), bits & (1 << 21) != 0);
+}
+
+/// Asserts that the backing id is read from the text `fuser` prints for it, and that text without
+/// one has none.
+#[test]
+fn the_backing_id_is_read_from_the_text_fuser_prints() {
+    assert_eq!(
+        id_in("BackingId { channel: (Weak), backing_id: 7 }"),
+        Some(7)
+    );
+    assert_eq!(
+        id_in("BackingId { backing_id: 4294967295 }"),
+        Some(u32::MAX)
+    );
+    assert_eq!(id_in("BackingId { backing_id: 4294967296 }"), None);
+    assert_eq!(id_in("BackingId { backing_id: x }"), None);
+    assert_eq!(id_in("BackingId { channel: (Weak) }"), None);
+}
+
+/// Asserts, where the kernel and the process allow passthrough, that a mount in that mode serves
+/// the bytes of a file to the reader with no read reaching the core, that opens of one blob are
+/// counted on its one id, and that the table is empty when they are closed. Where either is
+/// missing the test says which and ends.
+#[test]
+fn a_passthrough_mount_serves_reads_without_the_core() {
+    with_fuse(|| {
+        let m = mounted_asking("tfs-fuse-passthrough", sample(), true);
+        // The first request of the mount has been answered after INIT, which decided the mode.
+        let _ = std::fs::metadata(m.at("bin/cc")).unwrap();
+        let Some(table) = m.rig.core.backing_table() else {
+            let why = if privileged() {
+                "the kernel does not offer passthrough"
+            } else {
+                "the test process lacks CAP_SYS_ADMIN"
+            };
+            return skipped(why);
+        };
+        let blobs = m.rig.upstream.built.lock().unwrap().blobs.clone();
+        let cc = std::fs::File::open(m.at("bin/cc")).unwrap();
+        let again = std::fs::File::open(m.at("bin/cc")).unwrap();
+        let mut bytes = Vec::new();
+        (&cc).read_to_end(&mut bytes).unwrap();
+        assert_eq!(bytes, blobs[&sha(&bytes)]);
+        assert_eq!(bytes.len(), 3000);
+        let digest = crate::tree_manifest::TreeDigest::from_hex(&sha(&bytes)).unwrap();
+        assert_eq!(table.opens(&digest), 2);
+        assert_eq!(std::fs::read(m.at("include/a.h")).unwrap(), b"int a;");
+        assert!(std::fs::read(m.at("empty.h")).unwrap().is_empty());
+        assert_eq!(m.served("read"), 0);
+        drop((cc, again));
+        until(|| table.live() == 0);
+        assert_eq!(
+            std::fs::read_to_string(m.rig.runtime.join("backing")).unwrap(),
+            ""
+        );
+    });
 }

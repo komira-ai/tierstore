@@ -7,19 +7,22 @@
 //! derivable (`ino.rs`), so a tree that is not in memory is read again, from the table of tree
 //! numbers and the manifests, whenever a request names one of its inodes.
 
-use std::collections::HashMap;
+use std::collections::{HashMap, HashSet};
 use std::fs::File;
 use std::io;
 use std::os::unix::fs::FileExt as _;
 use std::path::{Path, PathBuf};
 use std::sync::atomic::{AtomicU64, Ordering};
-use std::sync::{Arc, Mutex};
+use std::sync::{Arc, Mutex, OnceLock};
 use std::time::Duration;
 
 use crate::server::local_cache::{blob_path, manifest_path};
-use crate::tree_manifest::{EntryKind, MAX_MANIFEST_BYTES, TreeDigest, TreeEntry, flatten};
+use crate::tree_manifest::{
+    BlobSource, EntryKind, MAX_MANIFEST_BYTES, TreeDigest, TreeEntry, flatten,
+};
 
 use super::attach::{Attachments, Failure, is_run};
+use super::backing::{self, Backing, BackingTable, Registrar};
 use super::fill_client::FillClient;
 use super::ino;
 use super::locked;
@@ -108,7 +111,7 @@ struct Loaded {
     /// The lookups of its inodes the kernel has not forgotten yet.
     lookups: AtomicU64,
     /// The blobs this tree has asked the cache to pin.
-    pinned: Mutex<std::collections::HashSet<TreeDigest>>,
+    pinned: Mutex<HashSet<TreeDigest>>,
 }
 
 /// An open file.
@@ -118,6 +121,23 @@ enum Handle {
     Empty,
     /// The cache file of a blob.
     Cached(File),
+    /// A blob served by kernel passthrough: reads never reach this process, and the release is
+    /// counted on the blob's backing id.
+    Backed(TreeDigest),
+}
+
+/// What an open is answered with.
+#[derive(Debug)]
+pub(super) enum Opened {
+    /// A cached open: the page cache is kept, and every read it misses reaches [`Core::read`].
+    Cached(u64),
+    /// An open served by passthrough from the blob's backing id.
+    Backed {
+        /// The handle of the open.
+        fh: u64,
+        /// The id to answer with.
+        backing: Backing,
+    },
 }
 
 /// The trees in memory and the attachments.
@@ -155,6 +175,8 @@ pub(super) struct Settings {
     pub mountpoint: PathBuf,
     /// The id of this mount, which the pins are made under.
     pub mount_id: String,
+    /// The most backing ids the kernel is given at once (`fs.max_backing_ids`).
+    pub max_backing_ids: usize,
 }
 
 /// The core.
@@ -166,6 +188,12 @@ pub(in crate::server) struct Core {
     /// Held by an attach, a restore and a detach for all of their work, so that a detach cannot
     /// unpin a tree that an attach has just taken.
     lifecycle: Mutex<()>,
+    /// The trees a thread is filling now for an attach that asked for `prefetch = "all"`.
+    prefetching: Mutex<HashSet<u64>>,
+    /// The backing table, once the kernel offered passthrough and it was chosen.
+    backing: OnceLock<Arc<BackingTable>>,
+    /// Where the backing table is kept.
+    backing_file: PathBuf,
     handles: Mutex<HashMap<u64, Arc<Handle>>>,
     next_handle: AtomicU64,
     /// The requests served, by name, for the tests that count what reaches the core.
@@ -190,6 +218,9 @@ impl Core {
                 attachments: Attachments::new(runtime_dir),
             }),
             lifecycle: Mutex::new(()),
+            prefetching: Mutex::new(HashSet::new()),
+            backing: OnceLock::new(),
+            backing_file: runtime_dir.join(backing::FILE),
             handles: Mutex::new(HashMap::new()),
             next_handle: AtomicU64::new(1),
             #[cfg(test)]
@@ -276,7 +307,7 @@ impl Core {
             digest,
             tree,
             lookups: AtomicU64::new(0),
-            pinned: Mutex::new(std::collections::HashSet::new()),
+            pinned: Mutex::new(HashSet::new()),
         });
         let mut state = locked(&self.state);
         Ok(Arc::clone(state.loaded.entry(number).or_insert(loaded)))
@@ -287,7 +318,22 @@ impl Core {
     ///
     /// # Errors
     /// [`AttachError`]: why nothing was attached.
-    pub(super) fn attach(&self, digest: &str, run: &str) -> Result<PathBuf, AttachError> {
+    pub(super) fn attach(
+        self: &Arc<Self>,
+        digest: &str,
+        run: &str,
+    ) -> Result<PathBuf, AttachError> {
+        self.attach_asking(digest, run, false)
+    }
+
+    /// [`Core::attach`], and, with `prefetch` (`prefetch = "all"`), every blob of the tree is
+    /// filled in the background, in manifest order, without delaying the answer.
+    pub(super) fn attach_asking(
+        self: &Arc<Self>,
+        digest: &str,
+        run: &str,
+        prefetch: bool,
+    ) -> Result<PathBuf, AttachError> {
         let digest = TreeDigest::from_hex(digest).ok_or(AttachError::Digest)?;
         if !is_run(run) {
             return Err(AttachError::Run);
@@ -295,13 +341,18 @@ impl Core {
         let _lifecycle = locked(&self.lifecycle);
         let number = self.table.number_of(&digest)?;
         let _ = self.load_unless_loaded(number, digest)?;
-        let mut state = locked(&self.state);
-        let added = state.attachments.add(run, number, digest);
-        if let Err(error) = state.attachments.save() {
-            if added {
-                state.attachments.remove_one(run, number);
+        {
+            let mut state = locked(&self.state);
+            let added = state.attachments.add(run, number, digest);
+            if let Err(error) = state.attachments.save() {
+                if added {
+                    state.attachments.remove_one(run, number);
+                }
+                return Err(error.into());
             }
-            return Err(error.into());
+        }
+        if prefetch {
+            self.start_prefetch(number);
         }
         Ok(self
             .settings
@@ -374,6 +425,7 @@ impl Core {
             (freed, failures)
         };
         for (number, digest) in freed {
+            let _ = locked(&self.prefetching).remove(&number);
             let loaded = locked(&self.state).loaded.get(&number).cloned();
             loaded
                 .iter()
@@ -623,10 +675,19 @@ impl Core {
     /// does not hold it. A fill that fails fails the open (`Errno::Io`) and is recorded on the
     /// attachments of the tree.
     ///
+    /// Where passthrough was chosen (`Core::enable_passthrough`), a non-empty file is answered
+    /// with its blob's backing id: the live one, or one that `register` makes from the cache
+    /// file. Otherwise, and for an empty file, the open is a cached one.
+    ///
     /// # Errors
     /// [`Errno::RoFs`] for an open for writing, [`Errno::IsDir`] for a directory, [`Errno::Inval`]
-    /// for a link, [`Errno::Io`] for a blob that cannot be had.
-    pub(super) fn open(&self, ino: u64, writing: bool) -> Result<u64, Errno> {
+    /// for a link, [`Errno::Io`] for a blob that cannot be had or an id that cannot be registered.
+    pub(super) fn open(
+        &self,
+        ino: u64,
+        writing: bool,
+        register: &mut Registrar<'_>,
+    ) -> Result<Opened, Errno> {
         #[cfg(test)]
         self.note("open");
         if writing {
@@ -648,13 +709,70 @@ impl Core {
                 source,
                 ..
             } => {
-                let file = self.blob(&loaded, number, entry, (digest, *size, source.as_ref()))?;
-                Handle::Cached(file)
+                let blob = (digest, *size, source.as_ref());
+                if let Some(table) = self.backing.get() {
+                    return self.open_backed(table, (&loaded, number, entry), blob, register);
+                }
+                Handle::Cached(self.blob(&loaded, number, entry, blob)?)
             }
         };
+        Ok(Opened::Cached(self.new_handle(handle)))
+    }
+
+    /// A handle for an open, which stays until [`Core::release`].
+    fn new_handle(&self, handle: Handle) -> u64 {
         let fh = self.next_handle.fetch_add(1, Ordering::AcqRel);
         let _ = locked(&self.handles).insert(fh, Arc::new(handle));
-        Ok(fh)
+        fh
+    }
+
+    /// The cache file of a blob, filled if the cache does not hold it; why not, in the words of
+    /// the fill socket's answer.
+    fn cache_file(
+        &self,
+        (digest, size, source): (&TreeDigest, u64, Option<&BlobSource>),
+    ) -> Result<File, String> {
+        let sha = digest.to_string();
+        let path = blob_path(&self.settings.cache_path, &sha);
+        if let Ok(file) = File::open(&path) {
+            return Ok(file);
+        }
+        let filled = match source {
+            Some(source) => self.fills.fill_blob(&sha, size, &source.key, source.offset),
+            None => self.fills.fill_blob(&sha, size, &format!("cas/l/{sha}"), 0),
+        };
+        filled.and_then(|()| File::open(&path).map_err(|_| "io".to_owned()))
+    }
+
+    /// Records that the blob of the entry `index` of the tree `number` could not be had.
+    fn failed(
+        &self,
+        (loaded, number): (&Loaded, u64),
+        index: u32,
+        digest: &TreeDigest,
+        reason: String,
+    ) {
+        let failure = Failure {
+            path: path_of(&loaded.tree, index),
+            digest: digest.to_string(),
+            reason,
+        };
+        locked(&self.state).attachments.fail(number, &failure);
+    }
+
+    /// Asks the cache to keep the blob for `loaded`, the first time it is opened under it.
+    fn pin_once(&self, loaded: &Loaded, digest: &TreeDigest) {
+        if locked(&loaded.pinned).contains(digest) {
+            return;
+        }
+        let sha = digest.to_string();
+        self.fills.touch(&[&sha]);
+        let pinned = self
+            .fills
+            .pin(&self.settings.mount_id, &loaded.digest.to_string(), &[&sha]);
+        if pinned.is_ok_and(|answer| answer.starts_with("ok")) {
+            let _ = locked(&loaded.pinned).insert(*digest);
+        }
     }
 
     /// The cache file of a blob, filled if it must be; the blob is pinned for the tree the first
@@ -664,42 +782,15 @@ impl Core {
         loaded: &Loaded,
         number: u64,
         entry: &TreeEntry,
-        (digest, size, source): (&TreeDigest, u64, Option<&crate::tree_manifest::BlobSource>),
+        blob: (&TreeDigest, u64, Option<&BlobSource>),
     ) -> Result<File, Errno> {
-        let sha = digest.to_string();
-        let path = blob_path(&self.settings.cache_path, &sha);
-        let file = match File::open(&path) {
-            Ok(file) => Ok(file),
-            Err(_) => {
-                let filled = match source {
-                    Some(source) => self.fills.fill_blob(&sha, size, &source.key, source.offset),
-                    None => self.fills.fill_blob(&sha, size, &format!("cas/l/{sha}"), 0),
-                };
-                filled.and_then(|()| File::open(&path).map_err(|_| "io".to_owned()))
-            }
-        };
-        match file {
+        match self.cache_file(blob) {
             Ok(file) => {
-                if !locked(&loaded.pinned).contains(digest) {
-                    self.fills.touch(&[&sha]);
-                    let pinned = self.fills.pin(
-                        &self.settings.mount_id,
-                        &loaded.digest.to_string(),
-                        &[&sha],
-                    );
-                    if pinned.is_ok_and(|answer| answer.starts_with("ok")) {
-                        let _ = locked(&loaded.pinned).insert(*digest);
-                    }
-                }
+                self.pin_once(loaded, blob.0);
                 Ok(file)
             }
             Err(reason) => {
-                let failure = Failure {
-                    path: path_of(&loaded.tree, entry.index),
-                    digest: sha,
-                    reason,
-                };
-                locked(&self.state).attachments.fail(number, &failure);
+                self.failed((loaded, number), entry.index, blob.0, reason);
                 Err(Errno::Io)
             }
         }
@@ -716,8 +807,11 @@ impl Core {
             .get(&fh)
             .cloned()
             .ok_or(Errno::Inval)?;
-        let Handle::Cached(file) = handle.as_ref() else {
-            return Ok(Vec::new());
+        let file = match handle.as_ref() {
+            Handle::Cached(file) => file,
+            Handle::Empty => return Ok(Vec::new()),
+            // The kernel reads a passthrough file itself: a request for one is a fault.
+            Handle::Backed(_) => return Err(Errno::Io),
         };
         let mut data = vec![0u8; size as usize];
         let mut have = 0;
@@ -736,7 +830,10 @@ impl Core {
 
     /// Closes the open file `fh`.
     pub(super) fn release(&self, fh: u64) {
-        let _ = locked(&self.handles).remove(&fh);
+        let handle = locked(&self.handles).remove(&fh);
+        if let (Some(Handle::Backed(blob)), Some(table)) = (handle.as_deref(), self.backing.get()) {
+            table.release(blob);
+        }
     }
 
     /// The number of files open now.
@@ -776,6 +873,9 @@ fn path_of(tree: &Tree, index: u32) -> String {
     names.reverse();
     format!("/{}", names.join("/"))
 }
+
+mod passthrough;
+mod prefetch;
 
 #[cfg(test)]
 #[path = "core_tests.rs"]

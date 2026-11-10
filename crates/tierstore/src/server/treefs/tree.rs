@@ -39,6 +39,11 @@ impl Tree {
         }
     }
 
+    /// Every entry, in the order of their indices: the manifest's, depth first.
+    pub(super) fn entries(&self) -> &[TreeEntry] {
+        &self.entries
+    }
+
     /// The entry with index `index`.
     pub(super) fn entry(&self, index: u32) -> Option<&TreeEntry> {
         self.entries.get(index as usize)

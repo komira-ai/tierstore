@@ -1246,7 +1246,8 @@ Small, and each has a recommendation.
 | Tree manifest | The JSON listing of one directory of a tree, with the digest, size and source of each file; its format is `crates/tierstore/docs/tree-manifest.md`. |
 | Frontend (of `tierstore fs`) | A protocol adapter that decodes the kernel's FUSE requests (later also NFS) into calls of the core; not one of the server's fronts. |
 | Core (of `tierstore fs`) | The protocol-independent filesystem of `tierstore fs`: the attached trees, their inode numbers, attributes, lookups, listings and opens. |
-| Attachment | A client's statement, on the control socket, that a run will use a tree on this node: `attach <digest> for <run>`, ended by `detach <run>`. |
+| Attachment | A client's statement, on the control socket, that a run will use a tree on this node: `attach <digest> for <run>`, ended by `detach <run>`. With `prefetch all` the tree's blobs are also filled in the background. |
+| Passthrough, backing id | Linux 6.9 and later: the kernel reads a file's bytes from a backing file it was given (`FUSE_DEV_IOC_BACKING_OPEN`), so reads never reach `tierstore fs`. A blob has one backing id for as long as any open of it lives; the backing table (`<runtime dir>/backing`) lists them. Kernel 6.8 has none, and the mount then runs with cached opens. |
 | Control socket | The Unix socket of `tierstore fs` (`fs.control_socket`) that attachments are made on. |
 | Fill socket | The Unix socket of a build node's `tierstore` (`local_cache.fill_socket`) over which `tierstore fs` asks for source fills, touches and pins. |
 | Source fill | A copy of one blob into the node's cache, from an object key and an offset that a tree manifest names, kept under `_tiering/fill/<sha256>`. |

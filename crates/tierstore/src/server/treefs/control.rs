@@ -4,6 +4,9 @@
 //!
 //! ```text
 //! attach <sha256> for <run>        {"ok":true,"path":"<mountpoint>/trees/<sha256>"}
+//! attach <sha256> for <run> prefetch all   the same; every blob of the tree is also filled in the
+//!                                  background, in manifest order, and pinned, without delaying
+//!                                  the answer
 //! detach <run>                     {"ok":true,"failures":[{"path":..,"digest":..,"reason":..}]}
 //! detach-all-except [<run> ...]    {"ok":true,"detached":<number of runs>}
 //! attachments                      {"ok":true,"attachments":[{"tree":..,"run":..}]}
@@ -21,7 +24,7 @@ use std::sync::Arc;
 use std::sync::atomic::{AtomicBool, Ordering};
 
 use super::attach::Failure;
-use super::core::Core;
+use super::core::{AttachError, Core};
 
 /// The longest request, in bytes: a `detach-all-except` of about a thousand runs.
 const MAX_LINE: usize = 64 * 1024;
@@ -37,13 +40,13 @@ fn refused(why: &str) -> serde_json::Value {
 }
 
 /// The answer to the request `line`.
-pub(super) fn handle(core: &Core, line: &str) -> serde_json::Value {
+pub(super) fn handle(core: &Arc<Core>, line: &str) -> serde_json::Value {
     let mut words = line.split(' ');
     match (words.next(), words.collect::<Vec<_>>().as_slice()) {
-        (Some("attach"), [digest, "for", run]) => match core.attach(digest, run) {
-            Ok(path) => serde_json::json!({"ok": true, "path": path}),
-            Err(why) => refused(&why.to_string()),
-        },
+        (Some("attach"), [digest, "for", run]) => attached(core.attach(digest, run)),
+        (Some("attach"), [digest, "for", run, "prefetch", "all"]) => {
+            attached(core.attach_asking(digest, run, true))
+        }
         (Some("detach"), [run]) => match core.detach(run) {
             Some(failures) => serde_json::json!({"ok": true, "failures": failures_of(&failures)}),
             None => refused("not attached"),
@@ -64,13 +67,21 @@ pub(super) fn handle(core: &Core, line: &str) -> serde_json::Value {
     }
 }
 
+/// The answer to an attach that ended in `result`.
+fn attached(result: Result<PathBuf, AttachError>) -> serde_json::Value {
+    match result {
+        Ok(path) => serde_json::json!({"ok": true, "path": path}),
+        Err(why) => refused(&why.to_string()),
+    }
+}
+
 /// The failures as JSON.
 fn failures_of(failures: &[Failure]) -> serde_json::Value {
     serde_json::json!(failures)
 }
 
 /// One connection: the requests it sends, answered in order, until it closes.
-fn session(core: &Core, stream: UnixStream) {
+fn session(core: &Arc<Core>, stream: UnixStream) {
     let (mut read, mut write) = (BufReader::new(&stream), &stream);
     let mut line = Vec::new();
     loop {

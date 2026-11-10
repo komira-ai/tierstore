@@ -8,7 +8,7 @@ use std::path::Path;
 use serde_json::{Value, json};
 
 use super::{Control, handle};
-use crate::server::treefs::testing::{Rig, sample};
+use crate::server::treefs::testing::{Rig, open_cached, sample};
 
 /// A connection to the control socket.
 struct Client {
@@ -108,11 +108,7 @@ fn a_detach_answers_the_failures_the_run_recorded() {
         .lock()
         .unwrap()
         .insert(cc.clone(), "no space".to_owned());
-    assert!(
-        rig.core
-            .open(crate::server::treefs::ino::of(1, 3), false)
-            .is_err()
-    );
+    assert!(open_cached(&rig.core, crate::server::treefs::ino::of(1, 3), false).is_err());
     let answer = client.ask("detach run-1");
     assert_eq!(
         answer["failures"],
@@ -144,6 +140,13 @@ fn a_request_that_is_refused_is_answered_in_words_and_the_connection_goes_on() {
     assert_eq!(client.ask("detach a b"), refused("unknown request"));
     assert_eq!(client.ask("attachments now"), refused("unknown request"));
     assert_eq!(client.ask("frob"), refused("unknown request"));
+    assert_eq!(
+        client.ask(&format!(
+            "attach {} for run-1 prefetch some",
+            "ab".repeat(32)
+        )),
+        refused("unknown request")
+    );
     assert_eq!(client.ask(""), refused("unknown request"));
     let missing = format!("attach {} for run-1", "ab".repeat(32));
     assert!(
@@ -153,6 +156,24 @@ fn a_request_that_is_refused_is_answered_in_words_and_the_connection_goes_on() {
             .contains("upstream 404")
     );
     assert_eq!(client.ask("attachments")["ok"], json!(true));
+}
+
+/// Asserts that an attach with `prefetch all` is answered with the path and has the tree filled
+/// and pinned in the background, and that the plain attach of another tree fills nothing.
+#[test]
+fn an_attach_that_asks_for_prefetch_has_the_tree_filled() {
+    let (rig, _control) = served("tfs-control-prefetch");
+    let mut client = Client::connect(&rig.dir.path().join("control.sock"));
+    let root = root(&rig);
+    let answer = client.ask(&format!("attach {root} for run-1 prefetch all"));
+    assert_eq!(answer["ok"], json!(true));
+    crate::server::treefs::testing::until(|| !rig.upstream.asked("pin").is_empty());
+    crate::server::treefs::testing::until(|| rig.core.prefetching() == 0);
+    let blobs = rig.upstream.asked("fill");
+    assert_eq!(
+        blobs.iter().filter(|line| line.contains(" from ")).count(),
+        4
+    );
 }
 
 /// Asserts that a line longer than a request may be is refused and the connection closed, that a

@@ -36,6 +36,8 @@ fn the_needed_keys_alone_give_the_defaults() {
         cache_path: PathBuf::from("/var/cache/tierstore"),
         fetch_timeout: Duration::from_secs(60),
         threads: 16,
+        passthrough: true,
+        max_backing_ids: 65_536,
         allow_other: true,
     };
     assert_eq!(got, want);
@@ -47,7 +49,7 @@ fn the_needed_keys_alone_give_the_defaults() {
 fn every_key_is_taken_when_it_is_set() {
     let text = "[fs]\nmountpoint = \"/m\"\nruntime_dir = \"/r\"\nclient_group = \"77\"\n\
         owner = \"5:6\"\nfill_socket = \"/f\"\ncache_path = \"/c\"\nfetch_timeout = \"5s\"\n\
-        threads = 3\n";
+        threads = 3\npassthrough = false\nmax_backing_ids = 7\n";
     let got = from_text(text, "").unwrap();
     assert_eq!(got.mountpoint, PathBuf::from("/m"));
     assert_eq!(got.control_socket, PathBuf::from("/r/control.sock"));
@@ -56,6 +58,7 @@ fn every_key_is_taken_when_it_is_set() {
         (got.fetch_timeout, got.threads),
         (Duration::from_secs(5), 3)
     );
+    assert_eq!((got.passthrough, got.max_backing_ids), (false, 7));
     let own = fs("control_socket = \"/elsewhere.sock\"\n");
     assert_eq!(
         from_text(&own, GROUPS).unwrap().control_socket,
@@ -78,6 +81,8 @@ fn every_refusal_names_its_key() {
         (fs("fetch_timeout = \"2h\"\n"), "fs.fetch_timeout"),
         (fs("threads = 0\n"), "fs.threads"),
         (fs("threads = 1025\n"), "fs.threads"),
+        (fs("max_backing_ids = 0\n"), "fs.max_backing_ids"),
+        (fs("max_backing_ids = 1048577\n"), "fs.max_backing_ids"),
         (
             "[fs]\nowner = \"1:2\"\nfill_socket = \"/f\"\ncache_path = \"/c\"\n".to_owned(),
             "fs.client_group",
@@ -124,6 +129,8 @@ fn a_file_that_is_not_the_table_is_a_syntax_error_without_values() {
     assert!(refused("[server]\nid = 1\n").contains("fs"));
     let why = refused("[fs]\nthreads = \"seventeen\"\n");
     assert!(!why.contains("seventeen"), "{why}");
+    // A switch is true or false, nothing else.
+    assert!(refused(&fs("passthrough = \"yes\"\n")).contains("expected a boolean"));
 }
 
 /// Asserts that a key this release does not know is ignored and the file loads.

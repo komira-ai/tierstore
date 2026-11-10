@@ -16,6 +16,7 @@ use std::sync::Arc;
 use fuser::{BackgroundSession, Session};
 
 use super::attach::Attachments;
+use super::backing;
 use super::config::FsSettings;
 use super::control::Control;
 use super::core::{self, Core};
@@ -111,6 +112,17 @@ fn new_mount_id() -> Result<String, StartError> {
     Ok(hex::encode(bytes))
 }
 
+/// Removes the file at `path`, which a mount that is gone left; none is no fault.
+fn remove_stale(path: &Path) -> Result<(), StartError> {
+    match std::fs::remove_file(path) {
+        Err(error) if error.kind() != std::io::ErrorKind::NotFound => Err(StartError::Io {
+            what: format!("removing {}", path.display()),
+            source: error,
+        }),
+        _ => Ok(()),
+    }
+}
+
 /// A started `tierstore fs`: the core, the control socket and the mount.
 pub(super) struct Running {
     _core: Arc<Core>,
@@ -134,6 +146,8 @@ impl Running {
             settings.mountpoint.display()
         )))?;
         let table = TreeTable::create(&settings.runtime_dir)?;
+        // The backing ids of an earlier mount belong to its connection, which is gone.
+        remove_stale(&settings.runtime_dir.join(backing::FILE))?;
         let fills = FillClient::new(settings.fill_socket.clone(), settings.fetch_timeout);
         let core = Arc::new(Core::new(
             core::Settings {
@@ -141,6 +155,7 @@ impl Running {
                 cache_path: settings.cache_path.clone(),
                 mountpoint: settings.mountpoint.clone(),
                 mount_id: new_mount_id()?,
+                max_backing_ids: settings.max_backing_ids,
             },
             fills,
             table,
@@ -161,7 +176,7 @@ impl Running {
         )))?;
         let config = fuse::config(settings.threads, settings.allow_other);
         let session = Session::new(
-            Frontend::new(Arc::clone(&core)),
+            Frontend::new(Arc::clone(&core), settings.passthrough),
             &settings.mountpoint,
             &config,
         )

@@ -11,10 +11,14 @@
 //! - [`core`]: the operations of a filesystem on inode numbers, with no protocol in them.
 //! - `fuse` and `run` (Linux): the FUSE frontend and the process around it.
 //!
-//! This release runs the mode of a kernel without passthrough: cached opens, and every read the
-//! page cache misses is answered by `pread` of the cache file.
+//! Two modes, chosen at start from what the kernel's `INIT` offers (`fuse`): with passthrough
+//! (kernel 6.9 and later, `CAP_SYS_ADMIN`, `fs.passthrough` not false) every non-empty file is
+//! opened by the kernel from the cache file, under one backing id per blob (`backing`); without,
+//! the mode of kernel 6.8: cached opens, and every read the page cache misses is answered by
+//! `pread` of the cache file.
 
 mod attach;
+mod backing;
 mod config;
 pub(in crate::server) mod control;
 pub(in crate::server) mod core;

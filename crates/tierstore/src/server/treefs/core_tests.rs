@@ -6,7 +6,7 @@ use std::time::Duration;
 
 use super::{AttachError, Attr, Core, DirItem, Entry, Errno, Failure, Kind, Looked, TREE_TTL};
 use crate::server::treefs::ino;
-use crate::server::treefs::testing::{Built, OWNER, Rig, file, sample, sha};
+use crate::server::treefs::testing::{Built, OWNER, Rig, file, open_cached, sample, sha};
 
 const RUN: &str = "run-1";
 
@@ -338,7 +338,7 @@ fn an_open_fills_the_blob_and_reads_its_bytes() {
     let core = &rig.core;
     let built = rig.upstream.built.lock().unwrap().blobs.clone();
     let big = built[&blob_of(&rig, 300_000)].clone();
-    let fh = core.open(ino::of(1, 1), false).unwrap();
+    let fh = open_cached(core, ino::of(1, 1), false).unwrap();
     let blob = blob_of(&rig, 300_000);
     assert_eq!(
         rig.upstream.asked("fill").last().unwrap(),
@@ -351,14 +351,14 @@ fn an_open_fills_the_blob_and_reads_its_bytes() {
     assert!(core.read(fh, 400_000, 10).unwrap().is_empty());
     assert!(core.read(fh, 0, 0).unwrap().is_empty());
     let tool = blob_of(&rig, 10);
-    let fh2 = core.open(ino::of(1, 4), false).unwrap();
+    let fh2 = open_cached(core, ino::of(1, 4), false).unwrap();
     assert_eq!(
         rig.upstream.asked("fill").last().unwrap(),
         &format!("fill {tool} 10 from cas/l/{tool} @ 0")
     );
     assert_eq!(core.read(fh2, 0, 100).unwrap(), b"tool bytes");
     let fills = rig.upstream.asked("fill").len();
-    let empty = core.open(ino::of(1, 5), false).unwrap();
+    let empty = open_cached(core, ino::of(1, 5), false).unwrap();
     assert!(core.read(empty, 0, 100).unwrap().is_empty());
     assert_eq!(rig.upstream.asked("fill").len(), fills);
     assert_eq!(core.open_files(), 3);
@@ -380,9 +380,9 @@ fn a_blob_in_the_cache_is_not_filled_again_and_is_pinned_once_per_tree() {
     let root = rig.upstream.built.lock().unwrap().root.clone();
     let cc = blob_of(&rig, 3000);
     let fills = |rig: &Rig| rig.upstream.asked("fill").len();
-    let first = core.open(ino::of(1, 3), false).unwrap();
+    let first = open_cached(core, ino::of(1, 3), false).unwrap();
     let after_first = fills(&rig);
-    let second = core.open(ino::of(1, 3), false).unwrap();
+    let second = open_cached(core, ino::of(1, 3), false).unwrap();
     assert_eq!(fills(&rig), after_first);
     assert_eq!(
         rig.upstream.asked("pin"),
@@ -390,7 +390,7 @@ fn a_blob_in_the_cache_is_not_filled_again_and_is_pinned_once_per_tree() {
     );
     assert_eq!(rig.upstream.asked("touch"), [format!("touch {cc}")]);
     let a = blob_of(&rig, 6);
-    let third = core.open(ino::of(1, 7), false).unwrap();
+    let third = open_cached(core, ino::of(1, 7), false).unwrap();
     assert_eq!(rig.upstream.asked("pin").len(), 2);
     assert_eq!(
         rig.upstream.asked("pin")[1],
@@ -407,11 +407,11 @@ fn a_blob_in_the_cache_is_not_filled_again_and_is_pinned_once_per_tree() {
 fn an_open_is_refused_for_writing_and_for_what_is_not_a_file() {
     let rig = attached("tfs-core-open-refused");
     let core = &rig.core;
-    assert_eq!(core.open(ino::of(1, 1), true), Err(Errno::RoFs));
-    assert_eq!(core.open(ino::of(1, 2), false), Err(Errno::IsDir));
-    assert_eq!(core.open(ino::ROOT, false), Err(Errno::IsDir));
-    assert_eq!(core.open(ino::of(1, 8), false), Err(Errno::Inval));
-    assert_eq!(core.open(ino::of(1, 99), false), Err(Errno::NoEnt));
+    assert_eq!(open_cached(core, ino::of(1, 1), true), Err(Errno::RoFs));
+    assert_eq!(open_cached(core, ino::of(1, 2), false), Err(Errno::IsDir));
+    assert_eq!(open_cached(core, ino::ROOT, false), Err(Errno::IsDir));
+    assert_eq!(open_cached(core, ino::of(1, 8), false), Err(Errno::Inval));
+    assert_eq!(open_cached(core, ino::of(1, 99), false), Err(Errno::NoEnt));
     assert_eq!(core.open_files(), 0);
     assert!(rig.upstream.asked("fill").len() == 3);
 }
@@ -443,10 +443,10 @@ fn a_failed_fill_fails_the_open_and_is_recorded_for_every_run_of_the_tree() {
         .unwrap()
         .insert(tool.clone(), "ok".to_owned());
     let held = rig.upstream.built.lock().unwrap().blobs.remove(&a).unwrap();
-    assert_eq!(core.open(ino::of(1, 3), false), Err(Errno::Io));
-    assert_eq!(core.open(ino::of(1, 3), false), Err(Errno::Io));
-    assert_eq!(core.open(ino::of(1, 4), false), Err(Errno::Io));
-    assert_eq!(core.open(ino::of(1, 7), false), Err(Errno::Io));
+    assert_eq!(open_cached(core, ino::of(1, 3), false), Err(Errno::Io));
+    assert_eq!(open_cached(core, ino::of(1, 3), false), Err(Errno::Io));
+    assert_eq!(open_cached(core, ino::of(1, 4), false), Err(Errno::Io));
+    assert_eq!(open_cached(core, ino::of(1, 7), false), Err(Errno::Io));
     assert_eq!(core.open_files(), 0);
     assert!(rig.upstream.asked("pin").is_empty());
     let want = vec![
@@ -469,7 +469,7 @@ fn a_failed_fill_fails_the_open_and_is_recorded_for_every_run_of_the_tree() {
     let _ = rig.upstream.built.lock().unwrap().blobs.insert(a, held);
     assert_eq!(core.detach("run-1").unwrap(), want);
     rig.upstream.failing.lock().unwrap().clear();
-    assert!(core.open(ino::of(1, 3), false).is_ok());
+    assert!(open_cached(core, ino::of(1, 3), false).is_ok());
     assert_eq!(core.detach("run-2").unwrap(), want);
     assert!(core.detach("run-2").is_none());
 }
@@ -481,12 +481,12 @@ fn an_evicted_blob_that_is_open_is_still_read_and_filled_again_on_the_next_open(
     let rig = attached("tfs-core-evicted");
     let core = &rig.core;
     let cc = blob_of(&rig, 3000);
-    let fh = core.open(ino::of(1, 3), false).unwrap();
+    let fh = open_cached(core, ino::of(1, 3), false).unwrap();
     let path = crate::server::local_cache::blob_path(&rig.cache, &cc);
     std::fs::remove_file(&path).unwrap();
     assert_eq!(core.read(fh, 0, 3000).unwrap().len(), 3000);
     let fills = rig.upstream.asked("fill").len();
-    let again = core.open(ino::of(1, 3), false).unwrap();
+    let again = open_cached(core, ino::of(1, 3), false).unwrap();
     assert_eq!(rig.upstream.asked("fill").len(), fills + 1);
     assert!(path.exists());
     core.release(fh);
@@ -498,7 +498,7 @@ fn an_evicted_blob_that_is_open_is_still_read_and_filled_again_on_the_next_open(
 fn a_read_that_the_system_fails_is_an_io_error() {
     let rig = attached("tfs-core-readfail");
     let core = &rig.core;
-    let handle = core.open(ino::of(1, 3), false).unwrap();
+    let handle = open_cached(core, ino::of(1, 3), false).unwrap();
     // Replace the open file with a directory: reading it fails.
     let directory = std::fs::File::open(&rig.cache).unwrap();
     let _ = super::locked(&core.handles).insert(
@@ -681,11 +681,11 @@ fn a_tree_attached_again_pins_the_blobs_it_opens_again() {
     let root = rig.upstream.built.lock().unwrap().root.clone();
     let cc = blob_of(&rig, 3000);
     let _ = found(core, ino::TREES, &root);
-    let first = core.open(ino::of(1, 3), false).unwrap();
+    let first = open_cached(core, ino::of(1, 3), false).unwrap();
     assert!(core.detach(RUN).is_some());
     assert_eq!(core.trees_in_memory(), 1);
     let _ = core.attach(&root, "run-2").unwrap();
-    let second = core.open(ino::of(1, 3), false).unwrap();
+    let second = open_cached(core, ino::of(1, 3), false).unwrap();
     assert_eq!(
         rig.upstream.asked("pin"),
         vec![format!("pin mount-1 {root} {cc}"); 2]
@@ -701,10 +701,10 @@ fn a_refused_pin_is_asked_again_by_the_next_open() {
     let rig = attached("tfs-core-pin-refused");
     let core = &rig.core;
     *rig.upstream.pin_answer.lock().unwrap() = Some("busy".to_owned());
-    let first = core.open(ino::of(1, 3), false).unwrap();
+    let first = open_cached(core, ino::of(1, 3), false).unwrap();
     *rig.upstream.pin_answer.lock().unwrap() = None;
-    let second = core.open(ino::of(1, 3), false).unwrap();
-    let third = core.open(ino::of(1, 3), false).unwrap();
+    let second = open_cached(core, ino::of(1, 3), false).unwrap();
+    let third = open_cached(core, ino::of(1, 3), false).unwrap();
     assert_eq!(rig.upstream.asked("pin").len(), 2);
     for fh in [first, second, third] {
         core.release(fh);

@@ -6,24 +6,33 @@
 //! The mount (`docs/design/virtual-build-fs.md` section 6.3): `default_permissions` (the kernel
 //! checks the modes, which the core reports), `allow_other` (jobs run as other users), the
 //! capabilities `FUSE_CACHE_SYMLINKS`, `FUSE_PARALLEL_DIROPS` and `FUSE_DO_READDIRPLUS`, and
-//! `max_background` 1024. Opens are cached opens (`FOPEN_KEEP_CACHE`): every read the page cache
-//! misses is answered here from the cache file; the kernel here offers no passthrough in the
-//! mode this release runs (the 6.8 mode).
+//! `max_background` 1024.
+//!
+//! Two modes, chosen in `init` from what the kernel offers (D20). With passthrough (the kernel
+//! offers `FUSE_PASSTHROUGH`, the process holds `CAP_SYS_ADMIN` in the initial namespace, and
+//! `fs.passthrough` is not false) the connection's `max_stack_depth` is 1, so that the job's
+//! overlay can stack on the mount, and an open of a non-empty file registers the cache file with
+//! the kernel (`FUSE_DEV_IOC_BACKING_OPEN`) and answers `FOPEN_PASSTHROUGH` with the blob's one
+//! id: reads then never reach this process. Without it (the 6.8 mode) opens are cached opens
+//! (`FOPEN_KEEP_CACHE`) and every read the page cache misses is answered here from the cache
+//! file. An empty file is a cached open in both.
 
 use std::ffi::OsStr;
+use std::fs::File;
 use std::io;
 use std::path::Path;
 use std::sync::Arc;
 use std::time::{Duration, SystemTime, UNIX_EPOCH};
 
 use fuser::{
-    BsdFileFlags, Config, Errno, FileAttr, FileHandle, FileType, Filesystem, FopenFlags,
+    BackingId, BsdFileFlags, Config, Errno, FileAttr, FileHandle, FileType, Filesystem, FopenFlags,
     Generation, INodeNo, InitFlags, KernelConfig, LockOwner, MountOption, OpenAccMode, OpenFlags,
     RenameFlags, ReplyAttr, ReplyCreate, ReplyData, ReplyDirectory, ReplyDirectoryPlus, ReplyEmpty,
     ReplyEntry, ReplyOpen, ReplyXattr, Request, SessionACL, TimeOrNow,
 };
 
-use super::core::{self, Attr, Core, Kind, Looked};
+use super::backing::Registered;
+use super::core::{self, Attr, Core, Kind, Looked, Opened};
 
 /// The background requests the kernel may have outstanding at once.
 const MAX_BACKGROUND: u16 = 1024;
@@ -102,15 +111,71 @@ pub(super) fn config(threads: usize, allow_other: bool) -> Config {
     config
 }
 
+/// How the bytes of the files are served, as `INIT` decided.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub(super) enum Mode {
+    /// The kernel reads the cache files itself.
+    Passthrough,
+    /// Cached opens; reads reach this process. The words say why not passthrough.
+    Cached(&'static str),
+}
+
+impl Mode {
+    /// The mode for a kernel that offers passthrough or not, a setting that asks for it or not,
+    /// and a process that may register backing files or not. A server that asks for passthrough
+    /// without `CAP_SYS_ADMIN` would fail every open with `EIO`, so it does not ask.
+    pub(super) fn chosen(offered: bool, wanted: bool, privileged: bool) -> Self {
+        if !wanted {
+            Self::Cached("fs.passthrough is false")
+        } else if !offered {
+            Self::Cached("the kernel does not offer passthrough")
+        } else if !privileged {
+            Self::Cached("the process lacks CAP_SYS_ADMIN")
+        } else {
+            Self::Passthrough
+        }
+    }
+}
+
+/// Whether this process holds `CAP_SYS_ADMIN` (in the initial namespace, which is what
+/// `FUSE_DEV_IOC_BACKING_OPEN` asks): a process that cannot read its capabilities holds none.
+fn privileged() -> bool {
+    rustix::thread::capabilities(None).is_ok_and(|sets| {
+        sets.effective
+            .contains(rustix::thread::CapabilitySet::SYS_ADMIN)
+    })
+}
+
+/// The number in the text `{:?}` makes of a [`BackingId`] (`... backing_id: 7 }`): `fuser` 0.18
+/// has no other way to read it, and the backing table records it.
+fn id_in(debug: &str) -> Option<u32> {
+    let (_, after) = debug.split_once("backing_id: ")?;
+    let digits: String = after.chars().take_while(char::is_ascii_digit).collect();
+    digits.parse().ok()
+}
+
+/// Registers `file` with the kernel as a backing file, in answer to the open `reply` is for.
+fn register(reply: &ReplyOpen, file: &File) -> io::Result<Registered> {
+    let id = reply.open_backing(file)?;
+    let raw = id_in(&format!("{id:?}"))
+        .ok_or_else(|| io::Error::other("fuser does not print the backing id as it did"))?;
+    Ok(Registered {
+        id: raw,
+        guard: Arc::new(id),
+    })
+}
+
 /// The filesystem the kernel sees.
 pub(super) struct Frontend {
     core: Arc<Core>,
+    /// Whether to ask for passthrough if the kernel offers it (`fs.passthrough`).
+    passthrough: bool,
 }
 
 impl Frontend {
     /// A frontend over `core`.
-    pub(super) fn new(core: Arc<Core>) -> Self {
-        Self { core }
+    pub(super) fn new(core: Arc<Core>, passthrough: bool) -> Self {
+        Self { core, passthrough }
     }
 }
 
@@ -162,7 +227,14 @@ impl Filesystem for Frontend {
         let offered = config.capabilities();
         let passthrough = offered.contains(InitFlags::FUSE_PASSTHROUGH);
         let resend = offered.contains(InitFlags::FUSE_HAS_RESEND);
-        tracing::info!(passthrough, resend, "tierstore fs: kernel offers");
+        let mode = Mode::chosen(passthrough, self.passthrough, privileged());
+        if mode == Mode::Passthrough {
+            // Offered, so these succeed; a stack depth of 1 lets the job's overlay stack on the mount.
+            let _ = config.add_capabilities(InitFlags::FUSE_PASSTHROUGH);
+            let _ = config.set_max_stack_depth(1);
+            self.core.enable_passthrough();
+        }
+        tracing::info!(passthrough, resend, ?mode, "tierstore fs: kernel offers");
         Ok(())
     }
 
@@ -201,9 +273,23 @@ impl Filesystem for Frontend {
 
     fn open(&self, _req: &Request, ino: INodeNo, flags: OpenFlags, reply: ReplyOpen) {
         let writing = flags.acc_mode() != OpenAccMode::O_RDONLY;
-        finish(self.core.open(ino.0, writing), reply, |fh, reply| {
-            reply.opened(FileHandle(fh), FopenFlags::FOPEN_KEEP_CACHE);
-        });
+        let opened = self
+            .core
+            .open(ino.0, writing, &mut |file| register(&reply, file));
+        match opened {
+            Err(error) => reply.error(errno(error)),
+            Ok(Opened::Cached(fh)) => {
+                reply.opened(FileHandle(fh), FopenFlags::FOPEN_KEEP_CACHE);
+            }
+            Ok(Opened::Backed { fh, backing }) => match backing.guard::<BackingId>() {
+                Some(id) => reply.opened_passthrough(FileHandle(fh), FopenFlags::empty(), id),
+                None => {
+                    // Only this frontend registers ids, so this is not seen.
+                    self.core.release(fh);
+                    reply.error(Errno::EIO);
+                }
+            },
+        }
     }
 
     fn read(

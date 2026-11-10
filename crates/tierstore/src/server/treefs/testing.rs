@@ -5,14 +5,15 @@ use std::collections::HashMap;
 use std::io::{BufRead as _, BufReader, Write as _};
 use std::os::unix::net::{UnixListener, UnixStream};
 use std::path::{Path, PathBuf};
-use std::sync::atomic::{AtomicBool, Ordering};
-use std::sync::{Arc, Mutex};
+use std::sync::atomic::{AtomicBool, AtomicU32, Ordering};
+use std::sync::{Arc, Condvar, Mutex};
 use std::time::Duration;
 
 use sha2::{Digest as _, Sha256};
 use tierstore_testkit::dir::TestDir;
 
-use super::core::{Core, Settings};
+use super::backing::Registered;
+use super::core::{Core, Errno, Opened, Settings};
 use super::fill_client::FillClient;
 use super::locked;
 use super::table::TreeTable;
@@ -135,6 +136,9 @@ pub(in crate::server) struct Upstream {
     pub pin_answer: Mutex<Option<String>>,
     /// The requests received, in order.
     pub requests: Mutex<Vec<String>>,
+    /// Whether the fills of blobs wait (see [`Upstream::hold_fills`]).
+    holding: Mutex<bool>,
+    released: Condvar,
 }
 
 impl Upstream {
@@ -150,6 +154,9 @@ impl Upstream {
         match words[0] {
             "fill" => {
                 let sha = words[1];
+                if words.len() > 2 {
+                    self.wait_while_held();
+                }
                 if let Some(why) = locked(&self.failing).get(sha) {
                     // `ok` is an answer that leaves no file.
                     return Some(why.clone());
@@ -175,6 +182,28 @@ impl Upstream {
                     .unwrap_or_else(|| format!("ok {} 0 0", words.len() - 3)),
             ),
             _ => Some("ok 0".to_owned()),
+        }
+    }
+
+    /// Makes every fill of a blob wait, once it is received, until [`Upstream::release_fills`]: for
+    /// a test that needs a fill in flight.
+    pub(in crate::server) fn hold_fills(&self) {
+        *locked(&self.holding) = true;
+    }
+
+    /// Lets the fills that wait go on, and those that come.
+    pub(in crate::server) fn release_fills(&self) {
+        *locked(&self.holding) = false;
+        self.released.notify_all();
+    }
+
+    fn wait_while_held(&self) {
+        let mut holding = locked(&self.holding);
+        while *holding {
+            holding = self
+                .released
+                .wait(holding)
+                .unwrap_or_else(std::sync::PoisonError::into_inner);
         }
     }
 
@@ -273,6 +302,8 @@ impl Rig {
             failing: Mutex::new(HashMap::new()),
             pin_answer: Mutex::new(None),
             requests: Mutex::new(Vec::new()),
+            holding: Mutex::new(false),
+            released: Condvar::new(),
         });
         let socket = dir.path().join("fill.sock");
         let fill = FakeFill::start(&socket, Arc::clone(&upstream));
@@ -283,6 +314,7 @@ impl Rig {
                 cache_path: cache.clone(),
                 mountpoint: mountpoint.clone(),
                 mount_id: "mount-1".to_owned(),
+                max_backing_ids: 100,
             },
             fills,
             TreeTable::create(&runtime).unwrap(),
@@ -297,6 +329,80 @@ impl Rig {
             _fill: fill,
             core,
         }
+    }
+}
+
+/// The kernel's backing ids, as the tests of the core have them: numbers it gives, the files it was
+/// asked to register, and the ids closed (an id is closed when its guard is dropped).
+pub(in crate::server::treefs) struct FakeKernel {
+    next: AtomicU32,
+    /// Whether the next registrations are refused (`EPERM`).
+    pub refusing: AtomicBool,
+    /// The registrations, as the length of each file registered.
+    pub registered: Mutex<Vec<u64>>,
+    /// The ids closed, in order.
+    pub closed: Arc<Mutex<Vec<u32>>>,
+}
+
+/// Closes an id of a [`FakeKernel`] when dropped.
+struct Closes {
+    id: u32,
+    closed: Arc<Mutex<Vec<u32>>>,
+}
+
+impl Drop for Closes {
+    fn drop(&mut self) {
+        locked(&self.closed).push(self.id);
+    }
+}
+
+impl FakeKernel {
+    pub(in crate::server::treefs) fn new() -> Self {
+        Self {
+            next: AtomicU32::new(100),
+            refusing: AtomicBool::new(false),
+            registered: Mutex::new(Vec::new()),
+            closed: Arc::new(Mutex::new(Vec::new())),
+        }
+    }
+
+    /// Registers `file`: the next number, or the refusal of a process without the capability.
+    pub(in crate::server::treefs) fn register(
+        &self,
+        file: &std::fs::File,
+    ) -> std::io::Result<Registered> {
+        if self.refusing.load(Ordering::Acquire) {
+            return Err(std::io::Error::from_raw_os_error(1));
+        }
+        locked(&self.registered).push(file.metadata()?.len());
+        Ok(self.registration())
+    }
+
+    /// The next number, as a registration: closed when its guard is dropped.
+    pub(in crate::server::treefs) fn registration(&self) -> Registered {
+        let id = self.next.fetch_add(1, Ordering::AcqRel);
+        let closed = Arc::clone(&self.closed);
+        Registered {
+            id,
+            guard: Arc::new(Closes { id, closed }),
+        }
+    }
+
+    /// An open of `ino` on `core`, registering with this kernel.
+    pub(in crate::server::treefs) fn open(&self, core: &Core, ino: u64) -> Result<Opened, Errno> {
+        core.open(ino, false, &mut |file| self.register(file))
+    }
+}
+
+/// A cached open of `ino` on a core that has not chosen passthrough: the handle.
+pub(in crate::server::treefs) fn open_cached(
+    core: &Core,
+    ino: u64,
+    writing: bool,
+) -> Result<u64, Errno> {
+    match core.open(ino, writing, &mut |file| FakeKernel::new().register(file)) {
+        Ok(Opened::Cached(fh) | Opened::Backed { fh, .. }) => Ok(fh),
+        Err(error) => Err(error),
     }
 }
 

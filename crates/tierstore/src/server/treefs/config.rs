@@ -12,6 +12,8 @@
 //! | `fs.cache_path` | the node's `local_cache.path` | needed |
 //! | `fs.fetch_timeout` | how long a fill, or a closed fill socket, is waited for | `60s` |
 //! | `fs.threads` | threads that serve the kernel's requests (a fill blocks one) | `16` |
+//! | `fs.passthrough` | ask the kernel for passthrough when it offers it; `false` forces the mode of kernel 6.8 | `true` |
+//! | `fs.max_backing_ids` | the most backing ids live at once; past it an open waits for a release | `65536` |
 
 use std::path::{Path, PathBuf};
 use std::time::Duration;
@@ -45,6 +47,12 @@ const DEFAULT_FETCH_TIMEOUT: Duration = Duration::from_secs(60);
 /// The threads that serve the kernel's requests when the file leaves out `fs.threads`.
 const DEFAULT_THREADS: u32 = 16;
 
+/// The backing ids live at once when the file leaves out `fs.max_backing_ids`.
+const DEFAULT_MAX_BACKING_IDS: u32 = 65_536;
+
+/// The most `fs.max_backing_ids` may be.
+const MOST_BACKING_IDS: u32 = 1 << 20;
+
 /// The file: only its `[fs]` table is read.
 #[derive(Debug, Deserialize)]
 struct File {
@@ -63,6 +71,8 @@ pub(in crate::server) struct FsTable {
     cache_path: Option<PathBuf>,
     fetch_timeout: Option<Dur>,
     threads: Option<u32>,
+    passthrough: Option<bool>,
+    max_backing_ids: Option<u32>,
 }
 
 /// What `tierstore fs` runs with.
@@ -79,6 +89,10 @@ pub(in crate::server) struct FsSettings {
     pub cache_path: PathBuf,
     pub fetch_timeout: Duration,
     pub threads: usize,
+    /// Whether to ask the kernel for passthrough when `INIT` offers it.
+    pub passthrough: bool,
+    /// The most backing ids live at once.
+    pub max_backing_ids: usize,
     /// Whether users other than the one who mounts may use the mount: always, but in the tests,
     /// where the mounting user is not root and `fusermount3` allows it only by `/etc/fuse.conf`.
     pub allow_other: bool,
@@ -158,6 +172,13 @@ impl FsSettings {
             1,
             1024,
         )?;
+        let max_backing_ids = within(
+            "fs",
+            "max_backing_ids",
+            table.max_backing_ids.unwrap_or(DEFAULT_MAX_BACKING_IDS),
+            1,
+            MOST_BACKING_IDS,
+        )?;
         let group = require("fs", "client_group", table.client_group)?;
         let owner = require("fs", "owner", table.owner)?;
         Ok(Self {
@@ -176,6 +197,8 @@ impl FsSettings {
             )?,
             fetch_timeout: timeout,
             threads: threads as usize,
+            passthrough: table.passthrough.unwrap_or(true),
+            max_backing_ids: max_backing_ids as usize,
             allow_other: true,
         })
     }

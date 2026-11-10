@@ -11,7 +11,10 @@
 # own, from which a mount would not reach the host, is therefore left out: PrivateDevices,
 # PrivateTmp, ProtectSystem, ProtectHome, ProtectKernelTunables, ProtectKernelModules,
 # ProtectKernelLogs, ProtectControlGroups and RestrictNamespaces. What is added: DeviceAllow for
-# /dev/fuse; CAP_SYS_ADMIN as the only capability (the mount); the system calls of @mount;
+# /dev/fuse; CAP_SYS_ADMIN as the only capability (the mount, and the backing ids of passthrough:
+# FUSE_DEV_IOC_BACKING_OPEN and _CLOSE check it in the initial user namespace, on this process, so
+# it stays in the bounding set and the ambient set; without it the process does not ask for
+# passthrough and runs in the mode of Linux 6.8); the system calls of @mount;
 # Type=notify (the process says READY=1 when the mount is made); a start limit of 5 in 60 s, after
 # which the unit is left failed and the kernel aborts the connection, so jobs fail instead of
 # hanging; and two RuntimeDirectories, kept across restarts: /run/tierstore-fs for its state and
