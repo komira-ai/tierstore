@@ -3,6 +3,7 @@
 
 use std::cell::Cell;
 use std::collections::HashMap;
+use std::sync::Arc;
 
 use crate::tree_manifest::count_entries;
 use crate::{
@@ -139,7 +140,7 @@ fn every_kind_is_read_with_its_attributes() {
                     size: 1_048_576,
                     exec: true,
                     source: Some(BlobSource {
-                        key: "cas/d/n7/b2/0000000000000041".to_string(),
+                        key: "cas/d/n7/b2/0000000000000041".into(),
                         offset: 524_288
                     }),
                 }
@@ -156,7 +157,7 @@ fn every_kind_is_read_with_its_attributes() {
             (
                 "lib",
                 EntryKind::Symlink {
-                    target: "bin".to_string()
+                    target: "bin".into()
                 }
             ),
         ]
@@ -495,12 +496,7 @@ fn entries_are_numbered_depth_first_in_manifest_order() {
             size: store.blobs[&root].len() as u64
         }
     );
-    assert_eq!(
-        entries[8].kind,
-        EntryKind::Symlink {
-            target: "b".to_string()
-        }
-    );
+    assert_eq!(entries[8].kind, EntryKind::Symlink { target: "b".into() });
 }
 
 /// A root with nothing in it is the one entry 0.
@@ -572,6 +568,71 @@ fn a_shared_subtree_is_listed_at_each_place_and_fetched_once() {
         2,
         "the root and the shared manifest, once each"
     );
+}
+
+/// A link target and a file source key are held once however many places list them: the entries
+/// of a shared subtree point at the same strings, so the memory of a tree does not grow with the
+/// number of places that name the subtree.
+#[test]
+fn a_shared_subtree_shares_its_strings_between_places() {
+    let mut store = Store::default();
+    let shared = store.put(manifest(&[
+        format!(
+            r#"{{"name":"f","kind":"file","sha256":"{SHA_A}","size":1,"source":{{"key":"k","offset":0}}}}"#
+        ),
+        link("l", "target"),
+    ]));
+    let root = store.put(manifest(&[dir("a", &shared), dir("b", &shared)]));
+    let entries = store.flatten(&root).unwrap();
+    let (
+        EntryKind::File {
+            source: Some(s1), ..
+        },
+        EntryKind::File {
+            source: Some(s2), ..
+        },
+    ) = (&entries[2].kind, &entries[5].kind)
+    else {
+        panic!("the files were not listed");
+    };
+    assert!(Arc::ptr_eq(&s1.key, &s2.key));
+    let (EntryKind::Symlink { target: t1 }, EntryKind::Symlink { target: t2 }) =
+        (&entries[3].kind, &entries[6].kind)
+    else {
+        panic!("the links were not listed");
+    };
+    assert!(Arc::ptr_eq(t1, t2));
+    assert_eq!(t1.as_ref(), "target");
+}
+
+/// The text of a manifest of 65536 links, and the directory `next` if there is one.
+fn wide_manifest(next: Option<&TreeDigest>) -> String {
+    let mut children: Vec<String> = (0..65536).map(|i| link(&format!("{i:05}"), "")).collect();
+    children.extend(next.map(|d| dir("zzzzz", d)));
+    manifest(&children)
+}
+
+/// The children of the manifests fetched are added up as each is opened, and the walk stops
+/// when they pass the limit, not when it unwinds from the bottom of the chain. A chain of 300
+/// distinct manifests of 65537 children is over the limit at the 256th, and no more are asked
+/// for.
+#[test]
+fn a_chain_of_wide_manifests_is_refused_as_the_entries_pass_the_limit() {
+    let mut levels = vec![TreeDigest::of(wide_manifest(None).as_bytes())];
+    for _ in 1..300 {
+        let text = wide_manifest(levels.last());
+        levels.push(TreeDigest::of(text.as_bytes()));
+    }
+    let asked = Cell::new(0);
+    let fetch = |digest: &TreeDigest| -> Result<Vec<u8>, String> {
+        asked.set(asked.get() + 1);
+        let level = levels.iter().position(|d| d == digest).unwrap();
+        let next = level.checked_sub(1).map(|n| &levels[n]);
+        Ok(wide_manifest(next).into_bytes())
+    };
+    let root = levels[299];
+    assert_eq!(flatten(&root, fetch), Err(TreeError::TreeTooLarge));
+    assert_eq!(asked.get(), 256);
 }
 
 /// A function that cannot give a manifest, and one that gives the wrong bytes, are reported

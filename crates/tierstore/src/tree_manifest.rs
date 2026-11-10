@@ -132,8 +132,8 @@ impl fmt::Debug for TreeDigest {
 /// Where a file's bytes are in the store: the length is the file's size.
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub struct BlobSource {
-    /// The object key.
-    pub key: String,
+    /// The object key; shared by every place the file is listed.
+    pub key: Arc<str>,
     /// The offset of the first byte in that object.
     pub offset: u64,
 }
@@ -162,8 +162,8 @@ pub enum EntryKind {
     },
     /// A symbolic link.
     Symlink {
-        /// What the link says.
-        target: String,
+        /// What the link says; shared by every place the link is listed.
+        target: Arc<str>,
     },
 }
 
@@ -317,7 +317,7 @@ fn child_of(raw: Raw) -> Result<TreeChild, TreeError> {
                 return Err(TreeError::SourceOverflow(name));
             }
             let source = source.map(|s| BlobSource {
-                key: s.key,
+                key: s.key.into(),
                 offset: s.offset,
             });
             let exec = exec.unwrap_or(false);
@@ -333,7 +333,12 @@ fn child_of(raw: Raw) -> Result<TreeChild, TreeError> {
         }
         Raw::Symlink { name, target } => {
             check_name(&name)?;
-            (name, EntryKind::Symlink { target })
+            (
+                name,
+                EntryKind::Symlink {
+                    target: target.into(),
+                },
+            )
         }
     };
     Ok(TreeChild {
@@ -405,10 +410,14 @@ struct Measured {
 }
 
 /// Fetches the manifest `digest` and opens a frame for it. Its children are at `depth`: a
-/// manifest with any is refused when that is over [`MAX_DEPTH`].
+/// manifest with any is refused when that is over [`MAX_DEPTH`]. `opened` is the children of
+/// all the distinct manifests opened so far, which this one's are added to: each is held once,
+/// and every one is in the tree at least once, so a sum over [`MAX_ENTRIES`] is a tree over it
+/// and nothing more is fetched.
 fn open<E: fmt::Display>(
     digest: &TreeDigest,
     depth: usize,
+    opened: &mut u64,
     fetch: &mut impl FnMut(&TreeDigest) -> Result<Vec<u8>, E>,
 ) -> Result<Frame, TreeError> {
     let bytes = fetch(digest).map_err(|e| TreeError::Fetch {
@@ -417,6 +426,10 @@ fn open<E: fmt::Display>(
     })?;
     let manifest = Arc::new(parse_manifest(&bytes, digest)?);
     let below = Below::of(&manifest);
+    *opened += below.entries;
+    if *opened > MAX_ENTRIES {
+        return Err(TreeError::TreeTooLarge);
+    }
     if below.height > 0 && depth > MAX_DEPTH {
         return Err(TreeError::TreeTooDeep);
     }
@@ -430,7 +443,8 @@ fn open<E: fmt::Display>(
 
 /// Fetches every manifest of the tree once and counts its entries and levels, refusing a tree
 /// over a limit as soon as the walk passes it. It allocates per distinct manifest, never per
-/// entry, so a tree of 2^24 entries made of shared subtrees costs a few manifests. The walk
+/// entry, so a tree of 2^24 entries made of shared subtrees costs a few manifests, and the
+/// children of the manifests it holds never add up to more than [`MAX_ENTRIES`]. The walk
 /// keeps its own stack, so its depth is not the thread's.
 fn measure<E: fmt::Display>(
     root: &TreeDigest,
@@ -438,7 +452,8 @@ fn measure<E: fmt::Display>(
 ) -> Result<Measured, TreeError> {
     let mut manifests = HashMap::new();
     let mut finished: HashMap<TreeDigest, Below> = HashMap::new();
-    let mut current = open(root, 1, &mut fetch)?;
+    let mut opened = 0;
+    let mut current = open(root, 1, &mut opened, &mut fetch)?;
     manifests.insert(*root, current.manifest.clone());
     let mut parents: Vec<Frame> = Vec::new();
     loop {
@@ -459,7 +474,7 @@ fn measure<E: fmt::Display>(
             }
         }
         if let Some(digest) = descend {
-            let child = open(&digest, depth + 1, &mut fetch)?;
+            let child = open(&digest, depth + 1, &mut opened, &mut fetch)?;
             manifests.insert(digest, child.manifest.clone());
             parents.push(std::mem::replace(&mut current, child));
         } else {

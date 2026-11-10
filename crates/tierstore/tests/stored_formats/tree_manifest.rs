@@ -45,7 +45,7 @@ fn the_version_1_example_hashes_to_its_digest_and_reads_to_its_children() {
                     size: 1_048_576,
                     exec: true,
                     source: Some(BlobSource {
-                        key: "cas/d/n7/b2/0000000000000041".to_string(),
+                        key: "cas/d/n7/b2/0000000000000041".into(),
                         offset: 524_288
                     }),
                 }
@@ -64,7 +64,7 @@ fn the_version_1_example_hashes_to_its_digest_and_reads_to_its_children() {
             (
                 "lib".to_string(),
                 EntryKind::Symlink {
-                    target: "bin".to_string()
+                    target: "bin".into()
                 }
             ),
         ]
