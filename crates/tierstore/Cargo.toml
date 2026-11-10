@@ -37,6 +37,7 @@ server = [
     "dep:hyper",
     "dep:hyper-util",
     "dep:md-5",
+    "dep:nfsserve",
     "dep:percent-encoding",
     "dep:ring",
     "dep:rustix",
@@ -85,6 +86,9 @@ hyper = { workspace = true, features = ["client", "http1", "server"], optional =
 hyper-util = { workspace = true, features = ["tokio"], optional = true }
 # The MD5 a client may send as the `Content-MD5` of a body (`server`).
 md-5 = { workspace = true, optional = true }
+# The NFSv3 and MOUNT protocol of the NFS frontend of `tierstore fs` (`server`): the frontend is
+# built, and tested, on every target, and is what `tierstore fs` serves on macOS.
+nfsserve = { workspace = true, optional = true }
 # `s3` only: the S3 client that `S3Backend` adapts.
 objstore-s3 = { workspace = true, optional = true }
 # The decoding of a request's path and query, and the encoding SigV4 signs (`server`).

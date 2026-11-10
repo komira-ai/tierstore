@@ -28,6 +28,7 @@ fn settings(rig: &Rig) -> FsSettings {
         passthrough: true,
         max_backing_ids: 100,
         allow_other: false,
+        nfs: crate::server::treefs::nfs::config::NfsSettings::default(),
     }
 }
 

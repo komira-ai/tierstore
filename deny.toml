@@ -44,4 +44,8 @@ allow-registry = ["https://github.com/rust-lang/crates.io-index"]
 # dependencies of crates/xtask, which writes the release index and unpacks and loads each package
 # with them, and dev-dependencies its tests read the package with (the root `Cargo.toml` names the
 # commits).
-allow-git = ["https://github.com/komira-ai/tierstore", "https://github.com/komira-ai/hostkeeper"]
+#
+# And `nfsserve`, the NFSv3 protocol of `tierstore fs` on macOS, from our fork at a pinned commit:
+# `nfsserve` 0.11.0 plus the patches the frontend needs (the root `Cargo.toml` names the commit and
+# what they are). It returns to crates.io once upstream releases such a change.
+allow-git = ["https://github.com/komira-ai/tierstore", "https://github.com/komira-ai/hostkeeper", "https://github.com/komira-ai/nfsserve"]

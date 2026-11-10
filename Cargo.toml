@@ -47,6 +47,14 @@ hyper-util = { version = "0.1.21", default-features = false }
 # `kill` and the descriptor calls of the test helpers (tierstore-testkit).
 libc = "0.2.190"
 md-5 = "0.11.0"
+# The NFSv3 and MOUNT protocol of `tierstore fs` on macOS (BSD-3-Clause), `nfsserve` 0.11.0 from
+# crates.io plus one commit on the branch `komira-0.11` of our fork: the transaction tracker
+# sweeps its map once a second and not on every request (the largest single factor of a cold walk
+# of a tree, about 3x), `NFSFileSystem::authorize` and `NFSFileSystem::access` hooks (the uid
+# fence, and execute that follows the mode bits), and `NFSTcpListener::from_listener` (a socket
+# handed over by the instance a new one replaces). An upstream pull request is not opened. This
+# returns to crates.io once upstream releases such a change.
+nfsserve = { git = "https://github.com/komira-ai/nfsserve", rev = "cc3754176179df4425819f33b3bffb942522e46e", default-features = false }
 percent-encoding = "2.3.2"
 # Test certificates only. ring is the crypto provider the rustls below uses too.
 rcgen = { version = "0.14", default-features = false, features = ["crypto", "pem", "ring"] }

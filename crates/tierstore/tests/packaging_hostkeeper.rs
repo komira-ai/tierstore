@@ -123,7 +123,12 @@ fn plist_value(node: roxmltree::Node<'_, '_>) -> Plist {
 
 /// The plist's top-level dictionary.
 fn plist() -> BTreeMap<String, Plist> {
-    let text = read("tierstore.plist");
+    plist_of("tierstore.plist")
+}
+
+/// The top-level dictionary of the plist `file`.
+fn plist_of(file: &str) -> BTreeMap<String, Plist> {
+    let text = read(file);
     let options = roxmltree::ParsingOptions {
         allow_dtd: true,
         ..roxmltree::ParsingOptions::default()
@@ -449,4 +454,47 @@ fn the_fs_marker_is_not_a_marker_of_the_s3_instances() {
         let ours = marker.replace("%i", instance.letter());
         assert_ne!(Path::new(&ours), theirs.as_path());
     }
+}
+
+/// Asserts the launchd job of `tierstore fs`: its label is its file's name, it runs the `fs` verb of
+/// the binary of the release link with a `--config` the binary reads (a file that is not there is
+/// status 2, naming it), it is restarted when it exits, it has time to unmount, it sets no
+/// environment variable, and no word of it names a secret. It would catch a verb or a flag renamed
+/// under the job.
+#[test]
+fn the_fs_launchd_job_runs_the_fs_verb_of_the_current_release() {
+    let job = plist_of("tierstore-fs.plist");
+    assert_eq!(
+        job.get("Label"),
+        Some(&Plist::Text("tierstore-fs".to_owned()))
+    );
+    let Some(Plist::Array(words)) = job.get("ProgramArguments") else {
+        panic!("ProgramArguments is an array");
+    };
+    let words: Vec<String> = words
+        .iter()
+        .map(|word| match word {
+            Plist::Text(text) => text.clone(),
+            other => panic!("an argument is {other:?}"),
+        })
+        .collect();
+    assert_eq!(words[0], format!("{CURRENT}/{RELEASE_BINARY}"));
+    assert_eq!(
+        words[1..],
+        ["fs", "--config", "/usr/local/tierstore/etc/fs.toml"]
+    );
+    assert_eq!(job.get("KeepAlive"), Some(&Plist::Bool(true)));
+    assert_eq!(job.get("RunAtLoad"), Some(&Plist::Bool(true)));
+    assert!(matches!(job.get("ExitTimeOut"), Some(Plist::Integer(seconds)) if *seconds >= 10));
+    for key in job.keys() {
+        assert!(!key.contains("Environment"), "{key}");
+    }
+    let scratch = tierstore_testkit::dir::TestDir::under(std::env::temp_dir(), "tfs-plist");
+    let out = std::process::Command::new(env!("CARGO_BIN_EXE_tierstore"))
+        .args(["fs", "--config"])
+        .arg(scratch.path().join("fs.toml"))
+        .output()
+        .expect("the binary runs");
+    assert_eq!(out.status.code(), Some(2));
+    assert!(String::from_utf8_lossy(&out.stderr).contains("fs.toml"));
 }

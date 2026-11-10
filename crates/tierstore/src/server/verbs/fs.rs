@@ -2,7 +2,7 @@
 //! what is attached.
 //!
 //! ```text
-//! tierstore fs --config <file>                serve the mount (Linux), until SIGTERM or SIGINT
+//! tierstore fs --config <file>                serve the mount (FUSE on Linux, NFS on macOS), until SIGTERM or SIGINT
 //! tierstore fs attachments --config <file>    list the attachments: `<tree digest> <run>`
 //! ```
 //!
@@ -17,6 +17,8 @@ use std::process::ExitCode;
 use clap::{Parser, Subcommand};
 
 use super::parsed;
+#[cfg(not(target_os = "linux"))]
+use crate::server::treefs::NfsError;
 #[cfg(target_os = "linux")]
 use crate::server::treefs::StartError;
 use crate::server::treefs::{FsSettings, load};
@@ -89,11 +91,16 @@ fn serve(settings: &FsSettings, err: &mut dyn Write) -> ExitCode {
     finished(crate::server::treefs::serve(settings), err)
 }
 
-/// The mount is Linux's.
+/// Serves the NFS export and mounts it.
 #[cfg(not(target_os = "linux"))]
-fn serve(_settings: &FsSettings, err: &mut dyn Write) -> ExitCode {
-    let _ = writeln!(err, "tierstore fs: the mount is made on Linux only");
-    ExitCode::from(2)
+fn serve(settings: &FsSettings, err: &mut dyn Write) -> ExitCode {
+    match crate::server::treefs::serve(settings) {
+        Ok(()) => ExitCode::SUCCESS,
+        Err(why) => {
+            let _ = writeln!(err, "tierstore fs: {why}");
+            ExitCode::from(NfsError::status(&why))
+        }
+    }
 }
 
 /// The exit status of `tierstore fs <args>`.

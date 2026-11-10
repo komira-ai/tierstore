@@ -13,10 +13,12 @@
 //!   attachments made again, the control socket), and the signals that end the process. It has no
 //!   mount in it, so that the FUSE frontend and one without FUSE call it alike.
 //! - `fuse` and `run` (Linux): the FUSE frontend and the process around it.
+//! - [`nfs`] (macOS serves it; built and tested everywhere): the NFSv3 frontend, over loopback,
+//!   and the mount around it.
 //!
 //! The core serves a frontend in either of two ways: with opens and handles, and a count of the
 //! lookups the kernel holds until it forgets them (FUSE); or by inode alone, with the reads of
-//! [`core::Core::read_ino`] and no count, so that a tree leaves memory when it is detached (a
+//! [`core::Core::blob_file`] and no count, so that a tree leaves memory when it is detached (a
 //! protocol with no open and no forget, as NFS).
 //!
 //! Two modes, chosen at start from what the kernel's `INIT` offers (`fuse`): with passthrough
@@ -39,14 +41,27 @@ mod tree;
 mod fuse;
 #[cfg(target_os = "linux")]
 mod run;
-// Linux's start is the FUSE one; on other targets the start is built for the tests until a
-// frontend there calls it.
-#[cfg(any(target_os = "linux", test))]
+// The start is the FUSE frontend's on Linux and the NFS frontend's on macOS; on a target that serves
+// neither it is built for the tests.
+#[cfg(any(target_os = "linux", target_os = "macos", test))]
 mod start;
+
+// Built on every target, so that it is tested, and measured, where the FUSE frontend is the one
+// that serves; macOS serves it.
+#[cfg_attr(
+    all(target_os = "linux", not(test)),
+    expect(
+        dead_code,
+        reason = "the NFS frontend serves on macOS; Linux serves FUSE"
+    )
+)]
+mod nfs;
 
 pub(super) use config::{FsSettings, load};
 #[cfg(test)]
 pub(super) use config::{FsTable, from_text};
+#[cfg(not(target_os = "linux"))]
+pub(super) use nfs::{NfsError, serve};
 #[cfg(target_os = "linux")]
 pub(super) use run::serve;
 #[cfg(target_os = "linux")]

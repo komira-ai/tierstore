@@ -39,6 +39,7 @@ fn the_needed_keys_alone_give_the_defaults() {
         passthrough: true,
         max_backing_ids: 65_536,
         allow_other: true,
+        nfs: crate::server::treefs::nfs::config::NfsSettings::default(),
     };
     assert_eq!(got, want);
 }
