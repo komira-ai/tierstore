@@ -48,7 +48,7 @@ What does not change: every read still works with no prefetch (read-through, the
 | D11 | **Bounds are config keys with defaults from the start** (section 6). No key is required. | Tunables are config. |
 | D12 | **Failure and loss are silent to the job.** `hydrate` is answered `202` before any fill; a blob whose fill fails is counted and, while the hold is open, recorded for `release`'s answer; the read that follows is an ordinary miss. | The client's design already treats a late or failed hydrate as speed lost, never a start. |
 | D13 | **Pack-span reads on S3 are an optional later step.** The one thing the digest entry does not serve is a ranged `GET` of a pack key (the daemon's `PackedCas` path), because the S3 front knows a key and a range, not a digest. A small in-memory table of the spans a list named (`{key, offset, size}` to digest, bounded, dropped with the hold) lets such a read whose range is exactly a listed span join the digest's flight or hit its entry. It is task 5 and built only if the daemon path is to use prefetch (Q2). | The tree-job path reads by the mount and needs none of it; building it first would be speculation (avoid one-way doors). |
-| D14 | A storage node answers 501 `HydrateNotAvailable` (a code of its own, so that it differs from the 501 `NotImplemented` a previous release gives to an unknown path). A read-only instance answers 503 `SlowDown`. | A storage node has no local cache; a read-only instance holds no lock of the cache directory. |
+| D14 | A storage node answers 501 `HydrateNotAvailable` (a code of its own, so that it differs from the answer a previous release gives to the path: 404 `NoSuchBucket`, see the compatibility table). A read-only instance answers 503 `SlowDown`. | A storage node has no local cache; a read-only instance holds no lock of the cache directory. |
 
 ### What this replaces
 
@@ -170,7 +170,7 @@ Answer to `hydrate`: `202` with `{"hold": "...", "accepted": n}` (a count, since
 | Case | Mechanism |
 |---|---|
 | Storage node, or `prefetch_concurrency = 0` | 501 `HydrateNotAvailable`. |
-| Previous release | 501 `NotImplemented` for the path (pinned by a test on main now); the client treats any 501 as "unsupported now", backs off and probes again after, so a host updated by the updater is found without a client restart. 503 and 429 back off the same way. |
+| Previous release | A signed POST to the bare path `/_tierstore/v1/hydrate` is read as a request to a bucket named `_tierstore` and answers 404 `NoSuchBucket` (501 `NotImplemented` comes only under a real bucket, `/<bucket>/_tierstore/v1/hydrate`); both are pinned by tests on main now. The client treats a 404 or a 501 on that path as "unsupported now", backs off and probes again after, so a host updated by the updater is found without a client restart. 503 and 429 back off the same way. |
 | Read-only instance | 503 `SlowDown` for the call. |
 | A blob already present | Marked used and pinned; no request. |
 | Blob does not exist upstream (404 on the span or object) | Dropped, counted `not_found`; no negative cache; the read gets its own error. |
@@ -210,7 +210,7 @@ Rust, hermetic (the fake store, scratch directories, injected clock and permits 
 11. `list_larger_than_the_cache_is_cut_at_high_water_in_list_order`; `blob_larger_than_budget_is_too_large`; `prefetch_never_evicts`; `a_joined_fill_is_never_dropped_at_commit`.
 12. `queue_bound_busy`, `max_blobs_413`, `max_bytes_drops_the_rest`, `queue_ttl_expires` (injected clock), `hold_count_429`; exact-equality messages (T13).
 13. `scoped_key_is_checked_per_blob`, `read_only_key_may_hydrate`, `presigned_keys_cannot_hydrate`, `reserved_source_key_is_refused`.
-14. Compatibility (B8): `entries_of_the_previous_layout_are_renamed_at_start` and `previous_release_runs_on_the_new_directory` (and the reverse); an unknown field in the body is accepted; `previous_release_answers_hydrate_501_not_implemented` pinned on main now.
+14. Compatibility (B8): `entries_of_the_previous_layout_are_renamed_at_start` and `previous_release_runs_on_the_new_directory` (and the reverse); an unknown field in the body is accepted; `an_unknown_path_outside_the_bucket_answers_404_no_such_bucket` and `an_unknown_path_under_the_bucket_answers_501_not_implemented` pinned on main now.
 15. One test per counter of section 8 asserting its exact value after a scripted run.
 
 Coverage of every touched crate stays at 99% lines and branches (T1). `local_cache/mod.rs` is near 1000 lines and does not grow (R12): the table, queue and holds are new files (`local_cache/flights.rs`, `local_cache/prefetch.rs`, `local_cache/holds.rs`, `server/hydrate.rs`).
@@ -219,7 +219,7 @@ Coverage of every touched crate stays at 99% lines and branches (T1). `local_cac
 
 | # | Where | Task | Size |
 |---|---|---|---|
-| 0 | tierstore | Pin-down tests on main that pass today and fail when the design changes: the two names differ now (`s3_object_and_mount_blob_of_one_digest_are_different_cache_entries`), and the unknown path answers 501 `NotImplemented`. Task 1 changes the first on purpose. | S |
+| 0 | tierstore | Pin-down tests on main that pass today and fail when the design changes: the two names differ now (`s3_object_and_mount_blob_of_one_digest_are_different_cache_entries`), and the unknown path answers 404 `NoSuchBucket` outside the bucket and 501 `NotImplemented` under it. Task 1 changes the first on purpose. | S |
 | 1 | tierstore | **Unify the entry and the flight table** (section 4): digest-named blob entries, origin in the sidecar, one `flights` table with `join_or_start(name, plan, class)`, start-up rename of old fill entries, and tests 1, 2, 5, 6, 14. No new call, no new key. A refactor with a stated behaviour change (one fetch where two happened) and no API (P7). | M (about 500 lines) |
 | 2 | tierstore | The prefetch queue and workers in the table, the `queued` state and **promotion**, admission, counters, config keys `prefetch_concurrency`, `prefetch_queue`, `prefetch_queue_ttl`; no HTTP; driven by tests 3, 4, 11, 12 (queue part), 15. | M (about 450 lines) |
 | 3 | tierstore | Holds and pins by hold (`holds.rs`, `hold_max`, `hold_max_count`), by the existing pin machinery; tests 8 to 10. | M (about 350 lines) |
