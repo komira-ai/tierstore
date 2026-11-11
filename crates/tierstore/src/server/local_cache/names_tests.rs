@@ -113,6 +113,52 @@ async fn the_sidecar_says_the_origin_and_leaves_it_out_for_an_object() {
     assert_eq!(rig.reopen().held(), (800, 2));
 }
 
+/// Asserts what the previous release finds on a directory this release filled with a blob cut out
+/// of a pack, which that release reads only by name: the data file is named by the digest, the
+/// sidecar reads as its own (the origin is a field it ignores), its scan keeps the entry, and the
+/// name it looks `cas/l/<sha256>` up under is the digest, so it answers the object present from
+/// that file, which this release does not (`served_name` is none). This is the rollback hazard of
+/// the one-entry-per-digest layout, which the operations guide answers with an empty directory
+/// before the rollback; the test holds the exact behaviour on record.
+#[tokio::test]
+async fn previous_release_runs_on_the_new_directory() {
+    let rig = Rig::new("tnames-previous-release");
+    let pack = Pack::put(&rig, "packs/previous", &[300, 400]).await;
+    rig.cache.fill_blob(&pack.blob(0)).await.unwrap();
+    let digest = pack.blobs[0].0.clone();
+    let key = format!("cas/l/{digest}");
+
+    // The previous release's name for the key is the digest, and a file is there under it.
+    let name = name_of(&key);
+    assert_eq!(name.hex, digest);
+    let root = &rig.config.path;
+    assert_eq!(
+        std::fs::metadata(data_path(root, &digest)).unwrap().len(),
+        300
+    );
+    // Its sidecar reads with the fields it knows, whatever else it holds.
+    #[derive(serde::Deserialize)]
+    struct Previous {
+        key: String,
+        size: u64,
+        sha256: String,
+    }
+    let text = std::fs::read_to_string(meta_path(root, &digest)).unwrap();
+    let previous: Previous = serde_json::from_str(&text).unwrap();
+    assert_eq!(
+        (previous.key, previous.size, previous.sha256),
+        (key.clone(), 300, digest)
+    );
+
+    // Its scan keeps the entry (a second open of the directory finds it whole), and the index
+    // answers the name present: the previous release has no origin to ask.
+    let reopened = rig.reopen();
+    assert_eq!(reopened.held(), (300, 1));
+    assert!(reopened.inner.kept(&name).is_some());
+    // This release does not serve it as the object.
+    assert!(reopened.inner.served_name(&key).is_none());
+}
+
 /// Asserts that an entry of origin `span` is not an S3 object: a `GET`, a ranged `GET` and a
 /// `HEAD` of `cas/l/<sha256>` go to the upstream and answer what it says (not found, when no
 /// object has that key), and when the upstream does have the object the read is served from the
