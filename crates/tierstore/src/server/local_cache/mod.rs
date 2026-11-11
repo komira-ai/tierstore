@@ -130,6 +130,7 @@
 mod calls;
 mod disk;
 mod evict;
+mod expand;
 mod fill;
 mod hold;
 mod holds;
@@ -248,7 +249,10 @@ pub use disk::{Disk, Space, SystemDisk};
 pub use hold::{Mode, Tick};
 pub use metrics::Counters;
 pub use pins::{PinAnswer, PinError};
-pub use prefetch::{PREFETCH_CONCURRENCY, PREFETCH_QUEUE, PREFETCH_QUEUE_TTL, PrefetchConfig};
+pub use prefetch::{
+    HYDRATE_MAX_BLOBS, HYDRATE_MAX_BYTES, HYDRATE_MAX_TREES, PREFETCH_CONCURRENCY, PREFETCH_QUEUE,
+    PREFETCH_QUEUE_TTL, PrefetchConfig,
+};
 pub use scrub::{Every, SCRUB_MIN_ROUND, SCRUB_RATE, SCRUB_TICK, ScrubPass, Scrubber, Ticker};
 pub use selfcheck::{LocalTierFailure, check_local};
 
