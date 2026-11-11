@@ -22,8 +22,9 @@
 //! past [`MAX_ENTRIES`] entries of distinct manifests or [`MAX_DEPTH`] levels, as the library's
 //! flatten does, and a manifest [`parse_manifest`] refuses.
 //!
-//! The bounds of a call (`hydrate_max_trees`, `hydrate_max_blobs` and `hydrate_max_bytes`) are
-//! kept in [`Call`]: a call with more trees than `hydrate_max_trees` is refused whole. The walk
+//! The bounds (`hydrate_max_trees`, `hydrate_max_blobs` and `hydrate_max_bytes`) are
+//! kept in [`Call`], which a hold's task carries from one call's trees to the next: a call with more
+//! trees than `hydrate_max_trees` is refused whole. The walk
 //! stops at the first blob to queue once `hydrate_max_blobs` are queued, and the trees after it
 //! are cut without a request. A file larger than the bytes left under `hydrate_max_bytes` is left
 //! out (counted, its tree ends `Cut`) and the walk goes on to the files that fit, and to the later
@@ -31,19 +32,21 @@
 //! and is judged against no bound: only the blobs and bytes newly queued count.
 //!
 //! A call of the hydrate endpoint ([`LocalCache::hydrate`]) opens a hold for its trees, answers, and
-//! expands the trees on a task of its own: each blob is handed to the queue for the hold
-//! ([`LocalCache::hold_blob`]), which pins it when it is in the cache. A key that is scoped may
-//! expand only what it may read: each manifest and each `source.key` is judged against its read
-//! prefixes before anything is fetched, and a manifest outside ends the tree (`access_denied`), a
-//! blob outside is left out (`access_denied`). When the hold has ended (released, or its time passed)
-//! the next blob the walk hands over finds no hold, and the walk stops there, the later trees
-//! unread.
+//! has the one task of the hold expand them (`drain`): each blob is handed to the queue for the hold
+//! ([`LocalCache::hold_blob`]), which pins it when it is in the cache. The trees of later calls for
+//! the hold wait in its list, and the bounds above are the hold's, over all its calls. A key that
+//! is scoped may expand only what it may read: each manifest and each `source.key` is judged
+//! against its read prefixes before anything is fetched, and a manifest outside ends the tree
+//! (`access_denied`), a blob outside is left out (`access_denied`). When the hold has ended
+//! (released, or its time passed) the walk finds it so before the next entry, whether that is a
+//! manifest to fetch or a blob to hand over, and stops there, the later trees unread; the fetch
+//! that is running when the hold ends is the only one it makes after.
 
 use std::collections::HashSet;
 use std::path::Path;
 use std::sync::Arc;
 
-use super::holds::HoldError;
+use super::holds::{HoldError, Spent};
 use super::metrics::{Turned, Walked};
 use super::prefetch::Prefetched;
 use super::source::{Blob, FillError, manifest_path};
@@ -170,8 +173,9 @@ struct Call {
     /// Whether the tree being walked had a file left out for `hydrate_max_bytes`: the walk goes
     /// on past it, to the files that fit.
     skipped: bool,
-    /// The hold the blobs are handed to the queue for; none for a walk that only queues.
-    hold: Option<String>,
+    /// The hold, by id and generation, that the blobs are handed to the queue for; none for a walk
+    /// that only queues.
+    hold: Option<(String, u64)>,
     /// The tree being walked, as the hold names it.
     tree: String,
     /// What the key of the call may read; none for a key that may read everything.
@@ -179,17 +183,40 @@ struct Call {
 }
 
 impl Call {
-    fn new(limits: Limits, hold: Option<&str>, reads: Option<Arc<Scopes>>) -> Self {
+    fn new(limits: Limits, hold: Option<(&str, u64)>, reads: Option<Arc<Scopes>>) -> Self {
         Self {
             limits,
             blobs: 0,
             bytes: 0,
             reached: None,
             skipped: false,
-            hold: hold.map(str::to_owned),
+            hold: hold.map(|(id, generation)| (id.to_owned(), generation)),
             tree: String::new(),
             reads,
         }
+    }
+
+    /// What the call has queued so far.
+    fn spent(&self) -> Spent {
+        Spent {
+            blobs: self.blobs,
+            bytes: self.bytes,
+            reached: self.reached,
+        }
+    }
+
+    /// Takes up what the walks of the hold queued before this one.
+    fn resume(&mut self, spent: Spent) {
+        self.blobs = spent.blobs;
+        self.bytes = spent.bytes;
+        self.reached = spent.reached;
+    }
+
+    /// Whether the hold of the call, if it has one, has ended.
+    fn ended(&self, inner: &Inner) -> bool {
+        self.hold
+            .as_ref()
+            .is_some_and(|(id, generation)| !inner.hold_live((id, *generation)))
     }
 
     /// Whether the key of the call may read the object `key`.
@@ -256,7 +283,7 @@ impl Inner {
             offset,
         };
         let handed = match &call.hold {
-            Some(hold) => match self.hold_blob(hold, &call.tree, &blob) {
+            Some((id, generation)) => match self.hold_blob((id, *generation), &call.tree, &blob) {
                 Ok(handed) => handed,
                 Err(_) => return Some(Bound::Released),
             },
@@ -296,11 +323,20 @@ impl LocalCache {
         call.skipped = false;
         call.tree = root.to_string();
         let mut opened = HashSet::from([*root]);
+        if call.ended(&self.inner) {
+            call.reached = Some(Bound::Released);
+            return Ok(());
+        }
         let first = self.manifest(root, call).await?;
         let mut entries = first.manifest.children.len() as u64;
         call.limits.admit(entries, entries as usize, 1)?;
         let mut stack = vec![first];
         while let Some(frame) = stack.last_mut() {
+            // Before every entry, so before every manifest fetched and every blob handed over.
+            if call.ended(&self.inner) {
+                call.reached = Some(Bound::Released);
+                return Ok(());
+            }
             let Some(child) = frame.manifest.children.get(frame.next) else {
                 let _ = stack.pop();
                 continue;
@@ -338,45 +374,54 @@ impl LocalCache {
         Ok(())
     }
 
-    /// Expands `trees` in the order given, one at a time, for one call, for the hold `hold` if
-    /// there is one, as far as `reads` reaches.
-    async fn expand(
-        &self,
-        limits: Limits,
-        who: (Option<&str>, Option<Arc<Scopes>>),
-        trees: &[TreeDigest],
-    ) -> Vec<Tree> {
-        let mut call = Call::new(limits, who.0, who.1);
+    /// Walks the tree `tree` for `call` and says how it ended, counting it.
+    async fn expand_one(&self, tree: &TreeDigest, call: &mut Call) -> (Tree, Walked) {
+        let end = match call.reached {
+            Some(bound) => Tree::Cut(bound),
+            None => match self.walk(tree, call).await {
+                Err(refusal) => Tree::Refused(refusal),
+                Ok(()) => match (call.reached, call.skipped) {
+                    (Some(bound), _) => Tree::Cut(bound),
+                    (None, true) => Tree::Cut(Bound::Bytes),
+                    (None, false) => Tree::Expanded,
+                },
+            },
+        };
+        let how = match end {
+            Tree::Expanded => Walked::Expanded,
+            Tree::Cut(_) => Walked::Cut,
+            Tree::Refused(Refusal::Denied { .. }) => Walked::AccessDenied,
+            Tree::Refused(_) => Walked::Refused,
+        };
+        self.inner.counters.walked(how);
+        (end, how)
+    }
+
+    /// Expands `trees` in the order given, one at a time, for one call that has no hold.
+    #[cfg(test)]
+    async fn expand(&self, limits: Limits, trees: &[TreeDigest]) -> Vec<Tree> {
+        let mut call = Call::new(limits, None, None);
         let mut listed = HashSet::new();
         let mut ended = Vec::with_capacity(trees.len());
         for tree in trees {
-            if !listed.insert(*tree) {
-                continue;
+            if listed.insert(*tree) {
+                ended.push(self.expand_one(tree, &mut call).await.0);
             }
-            let end = match call.reached {
-                Some(bound) => Tree::Cut(bound),
-                None => match self.walk(tree, &mut call).await {
-                    Err(refusal) => Tree::Refused(refusal),
-                    Ok(()) => match (call.reached, call.skipped) {
-                        (Some(bound), _) => Tree::Cut(bound),
-                        (None, true) => Tree::Cut(Bound::Bytes),
-                        (None, false) => Tree::Expanded,
-                    },
-                },
-            };
-            let how = match end {
-                Tree::Expanded => Walked::Expanded,
-                Tree::Cut(_) => Walked::Cut,
-                Tree::Refused(Refusal::Denied { .. }) => Walked::AccessDenied,
-                Tree::Refused(_) => Walked::Refused,
-            };
-            self.inner.counters.walked(how);
-            if let Some(hold) = who.0 {
-                self.inner.hold_walked(hold, how);
-            }
-            ended.push(end);
         }
         ended
+    }
+
+    /// The task of the hold `id` of `generation`: expands the trees its calls added, one at a
+    /// time, as far as `reads` reaches, until none is left or the hold has ended. The only task
+    /// of its hold, so the bounds are the hold's.
+    async fn drain(&self, at: (&str, u64), reads: Option<Arc<Scopes>>) {
+        let mut call = Call::new(Limits::LIBRARY, Some(at), reads);
+        while let Some((tree, spent)) = self.inner.next_tree(at) {
+            call.resume(spent);
+            let (_, how) = self.expand_one(&tree, &mut call).await;
+            // A walk the hold's end cut leaves `Released`, which the next tree finds out above.
+            self.inner.hold_walked(at, how, call.spent());
+        }
     }
 
     /// Whether `given` trees are no more than `hydrate_max_trees`.
@@ -403,18 +448,20 @@ impl LocalCache {
         Ok(())
     }
 
-    /// Takes a hydrate call: opens (or adds to) the hold `hold` for `trees`, and starts expanding
-    /// them on a task of its own, in the order given, as far as `reads` reaches. It answers at
-    /// once, before any manifest is read: the number of distinct trees accepted. A tree listed
-    /// twice is expanded once.
+    /// Takes a hydrate call of the key `owner`: opens (or adds to) the hold `hold` for `trees`,
+    /// and has the task of the hold expand them, in the order given, as far as `reads` reaches. It
+    /// answers at once, before any manifest is read: the number of distinct trees of the call. A tree the hold is for already is not expanded again, and a tree listed twice is
+    /// expanded once.
     ///
     /// # Errors
     /// [`HydrateError::Off`] and the read-only [`HoldError`] as [`hydrate_ready`](Self::hydrate_ready);
-    /// [`TooManyTrees`] for more trees than `hydrate_max_trees`, with nothing opened or read;
-    /// [`HoldError::TooMany`] if `hold_max_count` other holds are open.
+    /// [`TooManyTrees`] for more trees than `hydrate_max_trees` in the call, and
+    /// [`HoldError::TooManyTrees`] for more in the hold, with nothing opened or read;
+    /// [`HoldError::TooMany`] if `hold_max_count` other holds are open;
+    /// [`HoldError::NoSuchHold`] if another key opened a hold of this name.
     pub(in crate::server) fn hydrate(
         &self,
-        hold: &str,
+        (hold, owner): (&str, &str),
         expires_ms: Option<u64>,
         trees: &[TreeDigest],
         reads: Option<Arc<Scopes>>,
@@ -428,14 +475,20 @@ impl LocalCache {
             .copied()
             .collect();
         let names: Vec<String> = distinct.iter().map(ToString::to_string).collect();
-        let _ = self.open_hold(hold, expires_ms, &names)?;
+        let opened = self.inner.open_hold(hold, owner, expires_ms, &names)?;
         self.inner.counters.hydrated();
-        let (cache, id) = (self.clone(), hold.to_owned());
-        drop(tokio::spawn(async move {
-            let _ = cache
-                .expand(Limits::LIBRARY, (Some(&id), reads), &distinct)
-                .await;
-        }));
+        let at = (hold.to_owned(), opened.generation);
+        let new: HashSet<&String> = opened.added.iter().collect();
+        let added: Vec<TreeDigest> = distinct
+            .into_iter()
+            .filter(|tree| new.contains(&tree.to_string()))
+            .collect();
+        if self.inner.queue_walk((&at.0, at.1), &added) {
+            let cache = self.clone();
+            drop(tokio::spawn(async move {
+                cache.drain((&at.0, at.1), reads).await;
+            }));
+        }
         Ok(names.len())
     }
 
@@ -451,7 +504,7 @@ impl LocalCache {
         trees: &[TreeDigest],
     ) -> Result<Vec<Tree>, TooManyTrees> {
         self.check_trees(trees.len())?;
-        Ok(self.expand(Limits::LIBRARY, (None, None), trees).await)
+        Ok(self.expand(Limits::LIBRARY, trees).await)
     }
 }
 

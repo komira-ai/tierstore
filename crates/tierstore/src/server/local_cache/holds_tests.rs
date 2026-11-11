@@ -8,14 +8,17 @@ use bytes::Bytes;
 use futures::StreamExt as _;
 use futures::stream;
 
-use super::holds::{HoldError, Released};
+use super::expand::Bound;
+use super::holds::{HoldError, Released, Spent};
 use super::locked;
+use super::metrics::Walked;
 use super::pack_testing::distinct;
 use super::pin_set::{HOLD_MOUNT, PinsFile};
 use super::prefetch::Prefetched;
 use super::prefetch_tests::{Stored, in_table, rig, stored, waiting};
 use super::source::Blob;
 use super::testing::{Rig, digest, until};
+use crate::tree_manifest::TreeDigest;
 use crate::{Backend, Op};
 
 /// A tree digest for the tests: any 64 hex digits.
@@ -662,4 +665,117 @@ async fn a_blob_joined_to_a_keep_is_pinned_when_the_keep_commits() {
         ..Released::default()
     };
     assert_eq!(rig.cache.release_hold("job"), Ok(want));
+}
+
+/// Asserts that a hold belongs to the key that opened it: another key that names the id finds no
+/// hold, to add trees or to end it, and the hold is as it was; the key that opened it ends it. It
+/// would catch a hold that any key may release or add to.
+#[tokio::test]
+async fn a_hold_is_the_key_that_opened_it_and_no_other_may_add_to_it_or_end_it() {
+    let rig = rig("thold-owner", 1);
+    let (t1, t2) = (tree(1), tree(2));
+    let inner = &rig.cache.inner;
+    let opened = inner.open_hold("job-42", "full", None, std::slice::from_ref(&t1));
+    assert!(opened.is_ok());
+
+    let absent = HoldError::NoSuchHold("job-42".to_owned());
+    let more = inner.open_hold("job-42", "scoped", None, std::slice::from_ref(&t2));
+    assert_eq!(more.err(), Some(absent));
+    let absent = HoldError::NoSuchHold("job-42".to_owned());
+    assert_eq!(rig.cache.release_hold_of("job-42", "scoped"), Err(absent));
+    assert!(
+        rig.cache
+            .metrics()
+            .contains("tierstore_cache_holds_open 1\n")
+    );
+
+    let own = inner.open_hold("job-42", "full", None, &[t1.clone(), t2.clone()]);
+    assert_eq!(own.map(|opened| opened.added), Ok(vec![t2]));
+    let ended = rig.cache.release_hold_of("job-42", "full");
+    assert_eq!(ended.map(|released| released.trees), Ok(2));
+}
+
+/// Asserts that the generation of a hold tells it from a later hold of the same id: after a
+/// release and a new hold of the name, the first hold's generation is not live, a blob handed over
+/// for it is refused and queued nowhere, trees offered for it start no task and it is given none,
+/// while the new hold takes all of these. It would catch an expansion that writes into the hold
+/// that took the name of the one it was started for.
+#[tokio::test]
+async fn an_expansion_of_an_ended_hold_does_not_write_into_the_hold_that_took_its_name() {
+    let rig = rig("thold-gen", 1);
+    let blob = stored(&rig, 1, 300).await;
+    let t = tree(1);
+    let root = TreeDigest::from_hex(&t).unwrap();
+    let inner = &rig.cache.inner;
+    let names = [t.clone()];
+    let first = inner.open_hold("h", "k", None, &names).unwrap().generation;
+    assert_eq!(rig.cache.release_hold("h").map(|r| r.trees), Ok(1));
+    let second = inner.open_hold("h", "k", None, &names).unwrap().generation;
+    assert_ne!(first, second);
+
+    assert!(!inner.hold_live(("h", first)));
+    assert!(inner.hold_live(("h", second)));
+    let absent = HoldError::NoSuchHold("h".to_owned());
+    assert_eq!(inner.hold_blob(("h", first), &t, &blob.blob()), Err(absent));
+    assert!(!inner.queue_walk(("h", first), &[root]));
+    assert!(inner.next_tree(("h", first)).is_none());
+    assert_eq!((waiting(&rig), in_table(&rig)), (0, 0));
+    assert_eq!(rig.calls_on(Op::Get, &blob.key), 0);
+
+    let handed = inner.hold_blob(("h", second), &t, &blob.blob());
+    assert_eq!(handed, Ok(Prefetched::Queued));
+}
+
+/// Asserts that a hold has one task: the first trees offered start it, trees offered while it runs
+/// start none and are taken by it in the order offered, and once it has found the list empty the
+/// next trees start a new one. The bounds it has spent are kept for that one. It would catch a
+/// hold that expands with a task per call.
+#[tokio::test]
+async fn a_hold_has_one_task_that_takes_its_trees_in_the_order_offered() {
+    let rig = rig("thold-task", 1);
+    let inner = &rig.cache.inner;
+    let ids = [tree(1), tree(2), tree(3)];
+    let [one, two, three] = ids.clone().map(|id| TreeDigest::from_hex(&id).unwrap());
+    let generation = inner.open_hold("h", "k", None, &ids).unwrap().generation;
+    let at = ("h", generation);
+
+    assert!(!inner.queue_walk(at, &[]));
+    assert!(inner.queue_walk(at, &[one]));
+    assert!(!inner.queue_walk(at, &[two, three]));
+    let spent = Spent {
+        blobs: 4,
+        bytes: 9,
+        reached: Some(Bound::Blobs),
+    };
+    let (first, before) = inner.next_tree(at).unwrap();
+    assert_eq!((first, before.blobs), (one, 0));
+    inner.hold_walked(at, Walked::Cut, spent);
+    let (second, kept) = inner.next_tree(at).unwrap();
+    assert_eq!((second, kept.blobs, kept.bytes), (two, 4, 9));
+    assert_eq!(kept.reached, Some(Bound::Blobs));
+    assert_eq!(inner.next_tree(at).map(|(tree, _)| tree), Some(three));
+    assert!(inner.next_tree(at).is_none());
+    assert!(inner.queue_walk(at, &[one]));
+}
+
+/// Asserts that a hold is for at most `hydrate_max_trees` trees however many calls added them: a
+/// call that would take it past the bound is refused with the count and adds none of its trees,
+/// and a tree it is for already costs nothing. It would catch a bound that restarts with each call.
+#[tokio::test]
+async fn a_hold_takes_at_most_max_trees_over_all_its_calls() {
+    let rig = Rig::with("thold-trees", |config| config.prefetch.max_trees = 2);
+    let inner = &rig.cache.inner;
+    let ids = [tree(1), tree(2), tree(3)];
+    assert!(inner.open_hold("h", "k", None, &ids[..2]).is_ok());
+    let over = inner.open_hold("h", "k", None, &ids[2..]).err().unwrap();
+    assert_eq!(over, HoldError::TooManyTrees { given: 3, max: 2 });
+    assert_eq!(over.to_string(), "3 trees in the hold, at most 2");
+    let all = inner.open_hold("g", "k", None, &ids).err().unwrap();
+    assert_eq!(all, HoldError::TooManyTrees { given: 3, max: 2 });
+    assert!(inner.open_hold("h", "k", None, &ids[..1]).is_ok());
+    assert_eq!(rig.cache.release_hold("h").map(|r| r.trees), Ok(2));
+    assert_eq!(
+        rig.cache.release_hold("g"),
+        Err(HoldError::NoSuchHold("g".to_owned()))
+    );
 }

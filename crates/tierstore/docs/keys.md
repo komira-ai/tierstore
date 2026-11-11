@@ -81,7 +81,7 @@ The lists are not interchangeable: a write prefix does not let the key read what
 
 ## The hydrate call
 
-A build node takes two experimental calls that warm its cache before a job (see [the hydrate call](operations.md#the-hydrate-call)): a signed `POST` to `/_tierstore/v1/hydrate` and to `/_tierstore/v1/release`. The full key and a read-only key may make them: they give a way to spend cache space and upstream reads, bounded by the `hydrate_*` and `hold_*` keys of `[local_cache]`, and no way to read what the key may not. A scoped key with a read prefix may make them and expands only what it may read: each manifest and each `source.key` it meets is held to its read prefixes, and what is outside is left out and counted `access_denied`. A scoped key with no read prefix, a presigning key and a presigned URL are refused `403 AccessDenied`.
+A build node takes two experimental calls that warm its cache before a job (see [the hydrate call](operations.md#the-hydrate-call)): a signed `POST` to `/_tierstore/v1/hydrate` and to `/_tierstore/v1/release`. The full key and a read-only key may make them: they give a way to spend cache space and upstream reads, bounded by the `hydrate_*` and `hold_*` keys of `[local_cache]`, and no way to read what the key may not. A scoped key with a read prefix may make them and expands only what it may read: each manifest and each `source.key` it meets is held to its read prefixes, and what is outside is left out and counted `access_denied`. A hold belongs to the key that opened it: another key, whatever its rights, that sends the hold's id to either call is answered `404 NoSuchHold`. A scoped key with no read prefix, a presigning key and a presigned URL are refused `403 AccessDenied`.
 
 ## Rotation
 

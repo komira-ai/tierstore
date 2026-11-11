@@ -14,7 +14,10 @@
 //!   call) as soon as the call is accepted: nothing is fetched before the answer. The cache then
 //!   expands the trees on a task of its own (see `local_cache::expand`) and the blobs are filled by
 //!   the prefetch workers, so a job that opens one that is still being fetched waits for that fetch.
-//!   The same `hold` sent again adds its trees to the hold and changes nothing else.
+//!   The same `hold` sent again by the same key adds its trees to the hold (at most
+//!   `hydrate_max_trees` in all; a tree the hold has is not expanded again) and changes nothing
+//!   else: one task expands the hold's trees in the order added. A hold belongs to the key that
+//!   opened it, and another key that names its id is answered as for a hold that is not open.
 //! - `POST /_tierstore/v1/release`, body `{"hold": "<id>"}`: ends the hold, unpins what it pinned,
 //!   drops its blobs that still wait for a worker and that nothing else wants, and stops the
 //!   expansion of its trees that is still running. It is answered `200` with
@@ -23,7 +26,8 @@
 //!
 //! The answers that are not 2xx: `400` for a body that is not the shape, a hold id that is empty or
 //! over 128 bytes, or a tree that is not a digest; `403` for a key that may not call (see below);
-//! `413` for more trees than `hydrate_max_trees` (the body is read up to what that many digests
+//! `404` `NoSuchHold` for a hold that is not open or that another key opened;
+//! `413` for more trees than `hydrate_max_trees`, in the call or in the hold (the body is read up to what that many digests
 //! take); `429` when `hold_max_count` holds are open; `501` `HydrateNotAvailable` for a node that
 //! has no local cache, or whose `prefetch_concurrency` is 0; `503` `SlowDown` for a cache that does
 //! not hold the lock of its directory. A server that does not know the path (a release before this
@@ -48,7 +52,7 @@ use serde_json::json;
 use crate::tree_manifest::TreeDigest;
 
 use super::Server;
-use super::auth::{Refusal, Signed};
+use super::auth::{self, Refusal, Signed};
 use super::keys::Role;
 use super::local_cache::LocalCache;
 use super::local_cache::expand::HydrateError;
@@ -140,7 +144,7 @@ fn refused(error: &HydrateError) -> S3Error {
             "HydrateNotAvailable",
             format!("This tierstore does not take hydrate calls: {text}."),
         ),
-        HydrateError::TooManyTrees(_) => {
+        HydrateError::TooManyTrees(_) | HydrateError::Hold(HoldError::TooManyTrees { .. }) => {
             S3Error::new(StatusCode::PAYLOAD_TOO_LARGE, "EntityTooLarge", text)
         }
         HydrateError::Hold(HoldError::ReadOnly) => S3Error::new(
@@ -162,20 +166,28 @@ fn refused(error: &HydrateError) -> S3Error {
     }
 }
 
-/// What the key that signed the call may read: everything, or what a scoped key's prefixes cover.
+/// The key that signed a call, and what it may read: everything, or what a scoped key's prefixes
+/// cover (none).
+struct Caller<'a> {
+    /// The access key id: the owner of the holds the key opens.
+    key: &'a str,
+    reads: Option<Arc<Scopes>>,
+}
+
+/// Who the call is by: its key and what the key may read.
 ///
 /// # Errors
 /// An `AccessDenied` for a presigned URL, a presigning key, and a scoped key with no read prefix.
-fn reach(parts: &Parts, signed: &Signed) -> Result<Option<Arc<Scopes>>, Refusal> {
-    if signed.presign.is_some() || !parts.headers.contains_key("authorization") {
-        return Err(NOT_ALLOWED);
-    }
-    match &signed.role {
-        Role::Full | Role::ReadOnly => Ok(None),
-        Role::PresignPut => Err(PUT_ONLY),
-        Role::Scoped(scopes) if scopes.reads() => Ok(Some(Arc::clone(scopes))),
-        Role::Scoped(_) => Err(NOT_ALLOWED),
-    }
+fn reach<'a>(parts: &'a Parts, signed: &Signed) -> Result<Caller<'a>, Refusal> {
+    let key = auth::key_id(parts).filter(|_| signed.presign.is_none());
+    let key = key.ok_or(NOT_ALLOWED)?;
+    let reads = match &signed.role {
+        Role::Full | Role::ReadOnly => None,
+        Role::PresignPut => return Err(PUT_ONLY),
+        Role::Scoped(scopes) if scopes.reads() => Some(Arc::clone(scopes)),
+        Role::Scoped(_) => return Err(NOT_ALLOWED),
+    };
+    Ok(Caller { key, reads })
 }
 
 /// The answer of a call that went through: JSON, with the status.
@@ -199,7 +211,7 @@ impl Server {
         B::Data: Send,
         B::Error: Into<BoxError>,
     {
-        let reads = reach(parts, signed)?;
+        let caller = reach(parts, signed)?;
         let Some(cache) = &self.config.cache else {
             return Err(refused(&HydrateError::Off));
         };
@@ -220,37 +232,38 @@ impl Server {
             .read_all(check)
             .await?;
         match call {
-            Call::Hydrate => hydrate(cache, &bytes, reads),
-            Call::Release => release(cache, &bytes),
+            Call::Hydrate => hydrate(cache, &bytes, caller),
+            Call::Release => release(cache, &bytes, caller.key),
         }
     }
 }
 
 /// Takes a hydrate call whose body is `bytes`.
-fn hydrate(
-    cache: &LocalCache,
-    bytes: &[u8],
-    reads: Option<Arc<Scopes>>,
-) -> Result<Answer, S3Error> {
+fn hydrate(cache: &LocalCache, bytes: &[u8], caller: Caller<'_>) -> Result<Answer, S3Error> {
     let shape = "The body must be a JSON object with \"hold\" (a string), \"trees\" (an array of \
                  strings) and, optionally, \"expires_ms\" (a number).";
     let request: Hydrate = serde_json::from_slice(bytes).map_err(|_| malformed(shape))?;
     check_hold(&request.hold)?;
     let trees = trees_of(&request.trees)?;
     let accepted = cache
-        .hydrate(&request.hold, request.expires_ms, &trees, reads)
+        .hydrate(
+            (&request.hold, caller.key),
+            request.expires_ms,
+            &trees,
+            caller.reads,
+        )
         .map_err(|error| refused(&error))?;
     let body = json!({"hold": request.hold, "accepted": accepted});
     Ok(ok(StatusCode::ACCEPTED, &body))
 }
 
 /// Takes a release call whose body is `bytes`.
-fn release(cache: &LocalCache, bytes: &[u8]) -> Result<Answer, S3Error> {
+fn release(cache: &LocalCache, bytes: &[u8], key: &str) -> Result<Answer, S3Error> {
     let shape = "The body must be a JSON object with \"hold\" (a string).";
     let request: Release = serde_json::from_slice(bytes).map_err(|_| malformed(shape))?;
     check_hold(&request.hold)?;
     let released = cache
-        .release_hold(&request.hold)
+        .release_hold_of(&request.hold, key)
         .map_err(|error| refused(&HydrateError::Hold(error)))?;
     let body = json!({
         "trees": released.trees,

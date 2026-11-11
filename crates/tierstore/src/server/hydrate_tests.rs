@@ -446,6 +446,163 @@ async fn release_stops_the_expansion_of_its_hold() {
     );
 }
 
+/// Asserts that a hold is the key's that opened it: another key, a read-only one and a scoped
+/// one that both may call, is answered `404 NoSuchHold` when it releases the hold or adds trees to
+/// it, the hold stays open for its own key with the trees it had, and the id is free to the
+/// other key once the hold has ended. It would catch a hold that any key may end or add to.
+#[tokio::test]
+async fn a_key_cannot_release_or_add_to_the_hold_of_another_key() {
+    let f = fixture("hyd-owner").await;
+    let (mine, theirs) = (
+        stored(&f.cache, 1, 100).await,
+        stored(&f.cache, 2, 100).await,
+    );
+    let root = manifest(&f.cache, &[mine.file("a")]).await;
+    let other = manifest(&f.cache, &[theirs.file("a")]).await;
+    f.post("hydrate", &hydrate_body("job-42", &[root])).await;
+    f.filled(1).await;
+
+    let absent = (
+        404,
+        "NoSuchHold".to_owned(),
+        r#"no hold "job-42" is open"#.to_owned(),
+    );
+    let release = f.post_as(READER, "release", r#"{"hold":"job-42"}"#).await;
+    assert_eq!(error_of(&release), absent);
+    let add = hydrate_body("job-42", &[other]);
+    let reply = f.post_as(NARROW, "hydrate", &add).await;
+    assert_eq!(error_of(&reply), absent);
+    assert_eq!(f.metric("tierstore_cache_holds_open"), 1);
+    assert_eq!(f.metric("tierstore_cache_hydrate_requests_total"), 1);
+
+    let released = f.post("release", r#"{"hold":"job-42"}"#).await;
+    assert_eq!(json_of(&released)["trees"], json!(1));
+    let reply = f.post_as(NARROW, "hydrate", &add).await;
+    assert_eq!(json_of(&reply), json!({"hold": "job-42", "accepted": 1}));
+}
+
+/// Asserts that the calls of one hold are expanded by one task, one tree after the other: with the
+/// manifest of the first tree held at the gate, a second call for the same hold is answered `202`
+/// and its tree's manifest is not asked for, and when the gate opens both trees are expanded. It
+/// would catch a call that starts a task of its own.
+#[tokio::test]
+async fn the_calls_of_one_hold_are_expanded_one_tree_after_the_other() {
+    let f = fixture("hyd-one-task").await;
+    let (a, b) = (
+        stored(&f.cache, 1, 100).await,
+        stored(&f.cache, 2, 100).await,
+    );
+    let (first, second) = (
+        manifest(&f.cache, &[a.file("a")]).await,
+        manifest(&f.cache, &[b.file("b")]).await,
+    );
+    let gate = f.cache.tamper.hold_key(&key_of(&first));
+    f.post("hydrate", &hydrate_body("h", &[first])).await;
+    until("the task is at the first manifest", || {
+        f.cache.calls_on(Op::Get, &key_of(&first)) == 1
+    })
+    .await;
+
+    let reply = f.post("hydrate", &hydrate_body("h", &[second])).await;
+    assert_eq!(json_of(&reply), json!({"hold": "h", "accepted": 1}));
+    for _ in 0..64 {
+        tokio::task::yield_now().await;
+    }
+    assert_eq!(f.cache.calls_on(Op::Get, &key_of(&second)), 0);
+
+    gate.add_permits(64);
+    f.trees("expanded", 2).await;
+    f.filled(2).await;
+    assert_eq!(f.cache.calls_on(Op::Get, &key_of(&second)), 1);
+    let released = f.post("release", r#"{"hold":"h"}"#).await;
+    assert_eq!(json_of(&released)["trees"], json!(2));
+}
+
+/// Asserts that a hold is for at most `hydrate_max_trees` trees over all its calls: a call that
+/// would take the hold past it is `413 EntityTooLarge` with the count, adds none of its trees, and
+/// a tree the hold has already is accepted and costs nothing. It would catch a bound that restarts
+/// with each call, which lets one hold queue a walk without end.
+#[tokio::test]
+async fn a_hold_is_for_at_most_max_trees_over_all_its_calls() {
+    let f = fixture_with("hyd-hold-trees", |config| config.prefetch.max_trees = 2).await;
+    let trees = [
+        TreeDigest::of(b"1"),
+        TreeDigest::of(b"2"),
+        TreeDigest::of(b"3"),
+    ];
+    let reply = f.post("hydrate", &hydrate_body("h", &trees[..2])).await;
+    assert_eq!(json_of(&reply), json!({"hold": "h", "accepted": 2}));
+    f.trees("refused", 2).await;
+
+    let reply = f.post("hydrate", &hydrate_body("h", &trees[2..])).await;
+    let message = "3 trees in the hold, at most 2".to_owned();
+    let wanted = (413, "EntityTooLarge".to_owned(), message);
+    assert_eq!(error_of(&reply), wanted);
+    let again = f.post("hydrate", &hydrate_body("h", &trees[..1])).await;
+    assert_eq!(json_of(&again), json!({"hold": "h", "accepted": 1}));
+    let released = f.post("release", r#"{"hold":"h"}"#).await;
+    assert_eq!(json_of(&released)["trees"], json!(2));
+}
+
+/// Asserts that `hydrate_max_blobs` is the hold's over all its calls: with room for one blob, the
+/// first call queues the blob of its tree, and the second call's tree is cut at once and its blob
+/// is never asked for. It would catch bounds that restart with each call.
+#[tokio::test]
+async fn the_blob_bound_is_the_holds_over_all_its_calls() {
+    let f = fixture_with("hyd-hold-blobs", |config| config.prefetch.max_blobs = 1).await;
+    let (a, b) = (
+        stored(&f.cache, 1, 100).await,
+        stored(&f.cache, 2, 100).await,
+    );
+    let first = manifest(&f.cache, &[a.file("a")]).await;
+    let second = manifest(&f.cache, &[b.file("b")]).await;
+    f.post("hydrate", &hydrate_body("h", &[first])).await;
+    f.trees("expanded", 1).await;
+    f.filled(1).await;
+
+    f.post("hydrate", &hydrate_body("h", &[second])).await;
+    f.trees("cut", 1).await;
+    assert_eq!(f.cache.calls_on(Op::Get, &b.key), 0);
+    let released = f.post("release", r#"{"hold":"h"}"#).await;
+    let expected = json!({
+        "trees": 2, "expanded": 1, "cut": 1, "refused": 0,
+        "blobs": {"filled": 1, "present": 0, "dropped": 0, "failed": 0, "pending": 0},
+    });
+    assert_eq!(json_of(&released), expected);
+}
+
+/// Asserts that a release stops a walk that meets no blob: the walk of a tree of two directories
+/// is at the first one's manifest, the hold is released, and when the gate opens the second
+/// directory's manifest is not asked for, though no blob is there to find the hold gone. It would
+/// catch a walk that notices a release only when it hands over a blob.
+#[tokio::test]
+async fn release_stops_a_walk_before_its_next_manifest() {
+    let f = fixture("hyd-stop-dirs").await;
+    let blob = stored(&f.cache, 1, 100).await;
+    let (below, after) = (
+        manifest(&f.cache, &[]).await,
+        manifest(&f.cache, &[blob.file("f")]).await,
+    );
+    let dir = |name: &str, tree: &TreeDigest| {
+        format!(r#"{{"name":"{name}","kind":"dir","sha256":"{tree}","size":1}}"#)
+    };
+    let root = manifest(&f.cache, &[dir("b", &below), dir("c", &after)]).await;
+    let gate = f.cache.tamper.hold_key(&key_of(&below));
+
+    f.post("hydrate", &hydrate_body("h", &[root])).await;
+    until("the walk is at the first directory", || {
+        f.cache.calls_on(Op::Get, &key_of(&below)) == 1
+    })
+    .await;
+    let released = f.post("release", r#"{"hold":"h"}"#).await;
+    assert_eq!(released.status, StatusCode::OK);
+
+    gate.add_permits(64);
+    f.trees("cut", 1).await;
+    assert_eq!(f.cache.calls_on(Op::Get, &key_of(&after)), 0);
+    assert_eq!(f.cache.calls_on(Op::Get, &blob.key), 0);
+}
+
 /// Asserts that a node with no local cache answers `501 HydrateNotAvailable` to both calls, and
 /// so does a cache whose `prefetch_concurrency` is 0, each with its own message. It would catch a
 /// node that falls through to the bucket's answer, or one that opens holds it cannot fill.
@@ -510,6 +667,10 @@ fn every_failure_of_the_cache_has_its_own_status_and_code() {
         ),
         (
             TooManyTrees { given: 3, max: 2 }.into(),
+            (413, "EntityTooLarge"),
+        ),
+        (
+            HoldError::TooManyTrees { given: 3, max: 2 }.into(),
             (413, "EntityTooLarge"),
         ),
         (no_tree.into(), (400, "InvalidRequest")),
