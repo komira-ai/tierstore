@@ -130,6 +130,12 @@ impl Scopes {
             .any(|prefix| base.starts_with(prefix.as_str()))
     }
 
+    /// Whether the key may read the object `key`: it is longer than a read prefix of the key, and a
+    /// plain name that is not one of the proxy's.
+    pub(crate) fn may_read(&self, key: &str) -> bool {
+        covers(&self.read, key, true).is_ok()
+    }
+
     /// Whether the key has a read prefix: only a key that does may sign a presigned GET URL.
     pub(crate) fn reads(&self) -> bool {
         !self.read.is_empty()

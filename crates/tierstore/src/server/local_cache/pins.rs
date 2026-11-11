@@ -17,8 +17,8 @@
 //! - [`LocalCache::pins_live`] takes away every pin of another mount and of a tree not in the
 //!   list: the pins never outlive their mount or their attachment. The pins of a hold (module
 //!   `holds`) are the one exception: they have an owner of their own, are not in the file below,
-//!   and end with their hold. A
-//!   `pin` of a mount for a tree a hold lists moves the hold's pins on it to that mount.
+//!   and end with their hold. A `pin` of a mount for a tree a hold lists moves the hold's pins on
+//!   it to that mount.
 //!
 //! A pinned object is skipped by the eviction pass and counted in `pin_skips`; it stays charged
 //! to the budget. Removals that are not eviction (the scrub finding bad bytes, a revalidation, a

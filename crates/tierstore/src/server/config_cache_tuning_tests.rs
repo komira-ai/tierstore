@@ -361,66 +361,6 @@ fn the_prefetch_keys_have_defaults_ranges_and_reach_the_queue() {
     }
 }
 
-/// Asserts the keys of the holds: a file that gives none has the defaults of the code (4 hours, 256
-/// holds), a value given reaches the setting, a value out of range is refused naming the key, the
-/// value and the range, the ends of each range are taken, and the keys are fields of the table.
-#[test]
-fn the_hold_keys_have_defaults_ranges_and_reach_the_holds() {
-    let old = cache_of("").cache.prefetch;
-    assert_eq!(
-        (old.hold_max, old.hold_max_count),
-        (Duration::from_secs(4 * 3600), 256)
-    );
-
-    let set = cache_of("hold_max = \"90m\"\nhold_max_count = 7")
-        .cache
-        .prefetch;
-    assert_eq!(
-        (set.hold_max, set.hold_max_count),
-        (Duration::from_secs(5400), 7)
-    );
-
-    assert_eq!(
-        refusal("hold_max = \"59s\""),
-        "local_cache.hold_max: 59000ms is not between 60000ms and 86400000ms"
-    );
-    assert_eq!(
-        refusal("hold_max = \"25h\""),
-        "local_cache.hold_max: 90000000ms is not between 60000ms and 86400000ms"
-    );
-    let hold_max = |value: &str| {
-        let text = format!("hold_max = \"{value}\"");
-        cache_of(&text).cache.prefetch.hold_max
-    };
-    assert_eq!(hold_max("1m"), Duration::from_secs(60));
-    assert_eq!(hold_max("24h"), Duration::from_secs(24 * 3600));
-
-    assert_eq!(
-        refusal("hold_max_count = 0"),
-        "local_cache.hold_max_count: 0 is not between 1 and 100000"
-    );
-    assert_eq!(
-        refusal("hold_max_count = 100001"),
-        "local_cache.hold_max_count: 100001 is not between 1 and 100000"
-    );
-    assert_eq!(
-        cache_of("hold_max_count = 1").cache.prefetch.hold_max_count,
-        1
-    );
-    assert_eq!(
-        cache_of("hold_max_count = 100000")
-            .cache
-            .prefetch
-            .hold_max_count,
-        100_000
-    );
-
-    let fields = fields_of::<LocalCacheTable>();
-    for key in ["hold_max", "hold_max_count"] {
-        assert!(fields.contains(&key), "{key}");
-    }
-}
-
 /// Asserts the keys that bound a call that expands trees: a file that gives none has the defaults
 /// of the code (64 trees, 500000 blobs, 32 GiB), a value given reaches the setting, a value out of
 /// range is refused naming the key, the value and the range, both ends of each range are taken, and
@@ -483,6 +423,66 @@ fn the_hydrate_keys_have_defaults_ranges_and_reach_the_call() {
         "hydrate_max_blobs",
         "hydrate_max_bytes",
     ] {
+        assert!(fields.contains(&key), "{key}");
+    }
+}
+
+/// Asserts the keys of the holds: a file that gives none has the defaults of the code (4 hours, 256
+/// holds), a value given reaches the setting, a value out of range is refused naming the key, the
+/// value and the range, the ends of each range are taken, and the keys are fields of the table.
+#[test]
+fn the_hold_keys_have_defaults_ranges_and_reach_the_holds() {
+    let old = cache_of("").cache.prefetch;
+    assert_eq!(
+        (old.hold_max, old.hold_max_count),
+        (Duration::from_secs(4 * 3600), 256)
+    );
+
+    let set = cache_of("hold_max = \"90m\"\nhold_max_count = 7")
+        .cache
+        .prefetch;
+    assert_eq!(
+        (set.hold_max, set.hold_max_count),
+        (Duration::from_secs(5400), 7)
+    );
+
+    assert_eq!(
+        refusal("hold_max = \"59s\""),
+        "local_cache.hold_max: 59000ms is not between 60000ms and 86400000ms"
+    );
+    assert_eq!(
+        refusal("hold_max = \"25h\""),
+        "local_cache.hold_max: 90000000ms is not between 60000ms and 86400000ms"
+    );
+    let hold_max = |value: &str| {
+        let text = format!("hold_max = \"{value}\"");
+        cache_of(&text).cache.prefetch.hold_max
+    };
+    assert_eq!(hold_max("1m"), Duration::from_secs(60));
+    assert_eq!(hold_max("24h"), Duration::from_secs(24 * 3600));
+
+    assert_eq!(
+        refusal("hold_max_count = 0"),
+        "local_cache.hold_max_count: 0 is not between 1 and 100000"
+    );
+    assert_eq!(
+        refusal("hold_max_count = 100001"),
+        "local_cache.hold_max_count: 100001 is not between 1 and 100000"
+    );
+    assert_eq!(
+        cache_of("hold_max_count = 1").cache.prefetch.hold_max_count,
+        1
+    );
+    assert_eq!(
+        cache_of("hold_max_count = 100000")
+            .cache
+            .prefetch
+            .hold_max_count,
+        100_000
+    );
+
+    let fields = fields_of::<LocalCacheTable>();
+    for key in ["hold_max", "hold_max_count"] {
         assert!(fields.contains(&key), "{key}");
     }
 }

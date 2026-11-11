@@ -90,6 +90,11 @@ struct State {
     etag: Option<String>,
     /// The tag of the lease object of another holder, and when this contender first saw it.
     seen: Option<Seen>,
+    /// True from the start of a write of the lease object (a take or a renewal) until the
+    /// answer is recorded. A call that is dropped in between (a halt cuts a round) leaves it
+    /// true: the object may carry this holder's body while `etag` is not its tag, and the
+    /// release looks at the body's nonce instead.
+    writing: bool,
 }
 
 struct Seen {
@@ -266,14 +271,23 @@ impl Lease {
     }
 
     /// Gives the lease up, if it is held and the lease object is still the one this holder
-    /// wrote: a holder that lost the lease without knowing leaves the new holder's alone.
+    /// wrote: a holder that lost the lease without knowing leaves the new holder's alone. A take
+    /// or a renewal that was dropped before its answer was recorded (a halt cuts the round) may
+    /// have written the object without the holder knowing its tag; then the object is the
+    /// holder's if the nonce in its body is, and is deleted.
     pub(crate) async fn release(&self) {
         let mut state = self.shared.state.lock().await;
         self.shared.valid_until.store(0, Ordering::SeqCst);
-        if let Some(etag) = state.etag.take() {
-            let ours = match self.shared.hot.head(LEASE_KEY).await {
-                Ok(meta) => meta.tag == etag,
-                Err(_) => false,
+        let cut = std::mem::take(&mut state.writing);
+        let etag = state.etag.take();
+        if cut || etag.is_some() {
+            let ours = if cut {
+                self.shared.wrote_body().await
+            } else {
+                match self.shared.hot.head(LEASE_KEY).await {
+                    Ok(meta) => etag == Some(meta.tag),
+                    Err(_) => false,
+                }
             };
             if ours {
                 let deleted = self.shared.hot.delete(LEASE_KEY).await;
@@ -311,7 +325,9 @@ impl Shared {
 
     async fn renew(&self, state: &mut State, etag: &str) -> bool {
         let body = self.body(state);
+        state.writing = true;
         state.etag = self.hot.put_if_match(LEASE_KEY, body, etag).await.ok();
+        state.writing = false;
         if state.etag.is_some() {
             state.seen = None;
         }
@@ -320,9 +336,20 @@ impl Shared {
 
     async fn acquire(&self, state: &mut State) -> bool {
         let body = self.body(state);
-        match self.hot.put(LEASE_KEY, body).await {
+        state.writing = true;
+        let held = match self.hot.put(LEASE_KEY, body).await {
             Ok(()) => self.learn_tag(state).await,
             Err(Error::AlreadyExists(_)) => self.take_over(state).await,
+            Err(_) => false,
+        };
+        state.writing = false;
+        held
+    }
+
+    /// Whether the lease object has a body this holder wrote (its nonce is the second line).
+    async fn wrote_body(&self) -> bool {
+        match self.hot.get(LEASE_KEY, None).await {
+            Ok(body) => body.split(|byte| *byte == b'\n').nth(1) == Some(self.nonce.as_bytes()),
             Err(_) => false,
         }
     }

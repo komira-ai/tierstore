@@ -1,6 +1,6 @@
 # Use it from your code
 
-Point any S3 client at the address of an `s3` interface, with path-style addressing, the region `us-east-1` and the key from the key file. tierstore has no credentials of its own: the key id is the first line of `server.access_key_file` and the secret the second. Each snippet sets the SDK's request and response checksum options to "when required".
+Point any S3 client at the address of an `s3` interface, with path-style addressing, the region `us-east-1` and the key from the key file. tierstore has no credentials of its own: the key id is the first line of `server.access_key_file` and the secret the second. Each snippet sets the SDK's request and response checksum options to "when required". A build node also takes two experimental `POST` calls, which no SDK has a call for and a client signs itself, to warm its cache with the trees of a job before the job starts: see [the hydrate call](operations.md#the-hydrate-call).
 
 ## AWS CLI
 

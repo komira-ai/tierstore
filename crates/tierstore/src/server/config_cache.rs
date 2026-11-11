@@ -26,11 +26,11 @@
 //! # prefetch_concurrency    = 2
 //! # prefetch_queue          = 16384
 //! # prefetch_queue_ttl      = "120s"
-//! # hold_max                = "4h"
-//! # hold_max_count          = 256
 //! # hydrate_max_trees       = 64
 //! # hydrate_max_blobs       = 500000
 //! # hydrate_max_bytes       = "32GiB"
+//! # hold_max                = "4h"
+//! # hold_max_count          = 256
 //!
 //! [cold_store]                  # the upstream: an S3 endpoint
 //! kind             = "s3"
@@ -235,12 +235,6 @@ pub(super) struct LocalCacheTable {
     /// The longest a blob waits in the prefetch queue (1s to 1h, default `120s`).
     #[serde(default)]
     pub prefetch_queue_ttl: Option<Dur>,
-    /// The longest a hold of the prefetch queue lives (1m to 24h, default `4h`).
-    #[serde(default)]
-    pub hold_max: Option<Dur>,
-    /// The most holds open at once (1 to 100000, default 256).
-    #[serde(default)]
-    pub hold_max_count: Option<u32>,
     /// The trees one call may expand into the queue (1 to 4096, default 64).
     #[serde(default)]
     pub hydrate_max_trees: Option<u32>,
@@ -250,6 +244,12 @@ pub(super) struct LocalCacheTable {
     /// The bytes of the blobs one call may queue (1MiB to 1TiB, default 32GiB).
     #[serde(default)]
     pub hydrate_max_bytes: Option<Size>,
+    /// The longest a hold of the prefetch queue lives (1m to 24h, default `4h`).
+    #[serde(default)]
+    pub hold_max: Option<Dur>,
+    /// The most holds open at once (1 to 100000, default 256).
+    #[serde(default)]
+    pub hold_max_count: Option<u32>,
 }
 
 /// What a build-node file stands for.

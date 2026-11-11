@@ -27,20 +27,35 @@ async fn an_unknown_path_under_the_bucket_answers_501_not_implemented() {
     }
 }
 
-/// Asserts that the same POST to `/_tierstore/v1/hydrate` and `/_tierstore/v1/release`, outside
-/// any bucket (the form the design names), is answered 404 `NoSuchBucket` today, not 501: the
-/// path is read as a bucket named `_tierstore`. A release that adds the call changes this answer
-/// on purpose and changes this test with it.
+/// Asserts what is left of the path outside any bucket once the hydrate call is served from it: the
+/// signed POST of `/_tierstore/v1/hydrate` and of `/_tierstore/v1/release` is the call, and a node
+/// with no cache (this rig) answers it 501 `HydrateNotAvailable`, a code of its own that differs
+/// from the 501 `NotImplemented` under the bucket; any other method or any other path under
+/// `/_tierstore/` is still read as a bucket named `_tierstore` and answers 404 `NoSuchBucket`.
 #[tokio::test]
-async fn an_unknown_path_outside_the_bucket_answers_404_no_such_bucket() {
+async fn the_hydrate_paths_outside_the_bucket_are_the_call_and_the_rest_is_a_bucket() {
     let rig = Rig::new(MEBIBYTE).await;
     for call in ["hydrate", "release"] {
         let path = format!("/_tierstore/v1/{call}");
         let reply = rig.send("POST", &path, &[], BODY).await;
         assert_eq!(
             (reply.status, reply.code()),
-            (StatusCode::NOT_FOUND, "NoSuchBucket".to_owned()),
+            (
+                StatusCode::NOT_IMPLEMENTED,
+                "HydrateNotAvailable".to_owned()
+            ),
             "{path}"
         );
+        let got = rig.send("GET", &path, &[], b"").await;
+        assert_eq!(
+            (got.status, got.code()),
+            (StatusCode::NOT_FOUND, "NoSuchBucket".to_owned()),
+            "GET {path}"
+        );
     }
+    let other = rig.send("POST", "/_tierstore/v1/other", &[], BODY).await;
+    assert_eq!(
+        (other.status, other.code()),
+        (StatusCode::NOT_FOUND, "NoSuchBucket".to_owned())
+    );
 }

@@ -50,12 +50,13 @@
 //!
 //! The filesystem process of the node asks for blobs over the fill socket (see
 //! [`fill_socket`](crate::server::fill_socket)): `source` fills a blob that lies inside a larger
-//! upstream object, ranged, as the entry of `cas/l/<sha256>` (origin `span`), and a whole
-//! `cas/l/<sha256>`, with the same fetch as every fill. Those fills have their own permits
-//! (`fill_socket_concurrency`) and wait for one up to `fill_socket_wait`; they never take one of
-//! `max_concurrent_fills`, and the S3 path never takes theirs. One table of running fills serves
-//! both paths: a request for a digest with a fill running joins it and takes no permit. A cache
-//! that does not hold the lock fills nothing for the socket.
+//! upstream object, ranged, as the entry named by `<sha256>` (the entry of the object
+//! `cas/l/<sha256>`, of origin `span`), and a whole `cas/l/<sha256>`, with the same fetch as every
+//! fill. Those fills have their own permits (`fill_socket_concurrency`) and wait for one up to
+//! `fill_socket_wait`; they never take one of `max_concurrent_fills`, and the S3 path never takes
+//! theirs. There is one table of running fills for both paths: a request for a digest that has a
+//! fill running, whichever path started it, joins it and takes no permit. A cache that does not
+//! hold the lock fills nothing for the socket.
 //!
 //! # A read
 //!
@@ -126,10 +127,10 @@
 mod calls;
 mod disk;
 mod evict;
-mod expand;
+pub(super) mod expand;
 mod fill;
 mod hold;
-mod holds;
+pub(super) mod holds;
 mod index;
 mod keep;
 pub(super) mod layout;
@@ -157,6 +158,8 @@ mod forget_tests;
 mod front_tests;
 #[cfg(test)]
 mod hit_tests;
+#[cfg(test)]
+mod hold_handover_tests;
 #[cfg(test)]
 mod hold_tests;
 #[cfg(test)]
@@ -489,7 +492,7 @@ pub(super) struct Inner {
     config: CacheConfig,
     index: Mutex<Index>,
     counters: Counters,
-    /// The fills that are running, by the name of the object: one table for every path.
+    /// The fills that are running, by the name of the object: one table for every path that fills.
     flights: Mutex<HashMap<String, Pending>>,
     /// The fills that are running for an object that was deleted or replaced since they began:
     /// they must not keep what they read. A name is put here only while it has a fill in
@@ -634,11 +637,11 @@ impl LocalCache {
         let permits = Arc::new(Semaphore::new(config.max_concurrent_fills.max(1)));
         let keeps = Arc::new(Semaphore::new(config.max_concurrent_keeps.max(1)));
         let source_permits = Arc::new(Semaphore::new(config.fill_socket_concurrency.max(1)));
-        let prefetch = prefetch::Prefetch::new(&config.prefetch);
         let inner = Inner {
             upstream,
             disk,
             clock,
+            prefetch: prefetch::Prefetch::new(&config.prefetch),
             config,
             index: Mutex::new(index),
             counters,
@@ -650,7 +653,6 @@ impl LocalCache {
             reserved: AtomicU64::new(0),
             permits,
             source_permits,
-            prefetch,
             keeps,
             observer,
             #[cfg(test)]

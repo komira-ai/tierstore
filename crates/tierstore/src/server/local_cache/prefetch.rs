@@ -42,12 +42,6 @@ pub const PREFETCH_QUEUE: usize = 16_384;
 /// How long a blob may wait in the queue, unless the settings say otherwise.
 pub const PREFETCH_QUEUE_TTL: Duration = Duration::from_secs(120);
 
-/// The longest a hold lives, unless the settings say otherwise.
-pub(super) const HOLD_MAX: Duration = Duration::from_secs(4 * 3600);
-
-/// The holds that may be open at once, unless the settings say otherwise.
-pub(super) const HOLD_MAX_COUNT: usize = 256;
-
 /// The trees one call may expand, unless the settings say otherwise.
 pub const HYDRATE_MAX_TREES: usize = 64;
 
@@ -57,9 +51,16 @@ pub const HYDRATE_MAX_BLOBS: usize = 500_000;
 /// The bytes of the blobs one call may queue, unless the settings say otherwise.
 pub const HYDRATE_MAX_BYTES: u64 = 32 << 30;
 
-/// The settings of the prefetch queue (`local_cache.prefetch_concurrency`, `prefetch_queue` and
-/// `prefetch_queue_ttl`), of the holds that fill it (`hold_max` and `hold_max_count`) and of the
-/// expansion of trees into it (`hydrate_max_trees`, `hydrate_max_blobs` and `hydrate_max_bytes`).
+/// The longest a hold lives, unless the settings say otherwise.
+pub(super) const HOLD_MAX: Duration = Duration::from_secs(4 * 3600);
+
+/// The holds that may be open at once, unless the settings say otherwise.
+pub(super) const HOLD_MAX_COUNT: usize = 256;
+
+/// The settings of the prefetch queue, of the expansion of trees into it (`hydrate_max_trees`,
+/// `hydrate_max_blobs` and `hydrate_max_bytes`) and of the holds that fill it
+/// (`hold_max` and `hold_max_count`), with `local_cache.prefetch_concurrency`, `prefetch_queue` and
+/// `prefetch_queue_ttl`.
 #[derive(Clone, Copy, Debug)]
 pub struct PrefetchConfig {
     /// The most blobs filled at once by the queue: a pool of permits of its own, which no read
@@ -70,10 +71,6 @@ pub struct PrefetchConfig {
     pub queue: usize,
     /// The longest a blob waits in the queue; older, it is dropped when its turn comes.
     pub ttl: Duration,
-    /// The longest a hold lives (see the module `holds`); the time a caller asks for is cut to it.
-    pub hold_max: Duration,
-    /// The most holds open at once; a hold past it is turned away.
-    pub hold_max_count: usize,
     /// The most trees one call may expand: a call with more is refused whole.
     pub max_trees: usize,
     /// The most blobs one call may queue, all its trees together; the walk stops at the first
@@ -82,6 +79,10 @@ pub struct PrefetchConfig {
     /// The most bytes of the blobs one call may queue; a file that would pass it is
     /// left out and the walk goes on.
     pub max_bytes: u64,
+    /// The longest a hold lives (see the module `holds`); the time a caller asks for is cut to it.
+    pub hold_max: Duration,
+    /// The most holds open at once; a hold past it is turned away.
+    pub hold_max_count: usize,
 }
 
 impl Default for PrefetchConfig {
@@ -90,11 +91,11 @@ impl Default for PrefetchConfig {
             concurrency: PREFETCH_CONCURRENCY,
             queue: PREFETCH_QUEUE,
             ttl: PREFETCH_QUEUE_TTL,
-            hold_max: HOLD_MAX,
-            hold_max_count: HOLD_MAX_COUNT,
             max_trees: HYDRATE_MAX_TREES,
             max_blobs: HYDRATE_MAX_BLOBS,
             max_bytes: HYDRATE_MAX_BYTES,
+            hold_max: HOLD_MAX,
+            hold_max_count: HOLD_MAX_COUNT,
         }
     }
 }

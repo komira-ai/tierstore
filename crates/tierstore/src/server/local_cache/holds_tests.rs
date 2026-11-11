@@ -8,30 +8,33 @@ use bytes::Bytes;
 use futures::StreamExt as _;
 use futures::stream;
 
-use super::holds::{HoldError, Released};
+use super::expand::Bound;
+use super::holds::{HoldError, Released, Spent};
 use super::locked;
+use super::metrics::Walked;
 use super::pack_testing::distinct;
 use super::pin_set::{HOLD_MOUNT, PinsFile};
 use super::prefetch::Prefetched;
 use super::prefetch_tests::{Stored, in_table, rig, stored, waiting};
 use super::source::Blob;
 use super::testing::{Rig, digest, until};
+use crate::tree_manifest::TreeDigest;
 use crate::{Backend, Op};
 
 /// A tree digest for the tests: any 64 hex digits.
-fn tree(n: u8) -> String {
+pub(super) fn tree(n: u8) -> String {
     digest(&[n])
 }
 
 /// The owners that pin the blob `hex` now.
-fn pinners(rig: &Rig, hex: &str) -> Vec<(String, String)> {
+pub(super) fn pinners(rig: &Rig, hex: &str) -> Vec<(String, String)> {
     let index = locked(&rig.cache.inner.index);
     let owners = index.pins.owners_of(hex);
     owners.into_iter().map(|o| (o.mount, o.tree)).collect()
 }
 
 /// The owner of the pins of `tree` of the hold `id`.
-fn held_by(id: &str, tree: &str) -> (String, String) {
+pub(super) fn held_by(id: &str, tree: &str) -> (String, String) {
     (HOLD_MOUNT.to_owned(), format!("{id}/{tree}"))
 }
 
@@ -664,330 +667,115 @@ async fn a_blob_joined_to_a_keep_is_pinned_when_the_keep_commits() {
     assert_eq!(rig.cache.release_hold("job"), Ok(want));
 }
 
-/// The names of the trees the pins file lists, each with the mount and the blobs, as the file has
-/// them now.
-fn file_of(rig: &Rig) -> serde_json::Value {
-    rig.cache.inner.save_pins(true);
-    let text = std::fs::read(rig.config.path.join("pins")).unwrap();
-    serde_json::from_slice(&text).unwrap()
-}
-
-/// Asserts that the first pin of a mount for a tree a hold lists moves every pin of the hold on
-/// that tree to the attachment, the blobs the request did not name included: the owners of each
-/// blob are then the attachment alone, the pinned bytes do not change, the hold counts the
-/// handover once however many pins follow, and the pins file lists the attachment's tree with both
-/// blobs and no tree of the hold.
+/// Asserts that a hold belongs to the key that opened it: another key that names the id finds no
+/// hold, to add trees or to end it, and the hold is as it was; the key that opened it ends it. It
+/// would catch a hold that any key may release or add to.
 #[tokio::test]
-async fn attach_moves_the_holds_pins_to_the_attachment() {
-    let rig = rig("thold-handover", 1);
-    let (a, b) = (stored(&rig, 1, 3000).await, stored(&rig, 2, 2000).await);
-    let t = tree(1);
-    for blob in [&a, &b] {
-        assert_eq!(rig.cache.fill_blob(&blob.blob()).await, Ok(()));
-    }
-    assert_eq!(
-        rig.cache.open_hold("job", None, std::slice::from_ref(&t)),
-        Ok(1)
-    );
-    for blob in [&a, &b] {
-        assert_eq!(
-            rig.cache.hold_blob("job", &t, &blob.blob()),
-            Ok(Prefetched::Present)
-        );
-    }
-    assert_eq!(pinners(&rig, &b.sha), vec![held_by("job", &t)]);
+async fn a_hold_is_the_key_that_opened_it_and_no_other_may_add_to_it_or_end_it() {
+    let rig = rig("thold-owner", 1);
+    let (t1, t2) = (tree(1), tree(2));
+    let inner = &rig.cache.inner;
+    let opened = inner.open_hold("job-42", "full", None, std::slice::from_ref(&t1));
+    assert!(opened.is_ok());
+
+    let absent = HoldError::NoSuchHold("job-42".to_owned());
+    let more = inner.open_hold("job-42", "scoped", None, std::slice::from_ref(&t2));
+    assert_eq!(more.err(), Some(absent));
+    let absent = HoldError::NoSuchHold("job-42".to_owned());
+    assert_eq!(rig.cache.release_hold_of("job-42", "scoped"), Err(absent));
     assert!(
         rig.cache
             .metrics()
-            .contains("tierstore_cache_hold_handovers_total 0\n")
+            .contains("tierstore_cache_holds_open 1\n")
     );
 
-    let attached = (String::from("boot-1"), t.clone());
-    let answer = rig
-        .cache
-        .pin("boot-1", &t, std::slice::from_ref(&a.sha))
-        .unwrap();
-    assert_eq!(answer.pinned, 1);
-    assert_eq!(pinners(&rig, &a.sha), vec![attached.clone()]);
-    assert_eq!(pinners(&rig, &b.sha), vec![attached.clone()]);
-    assert_eq!(rig.cache.pinned_bytes(), 5000);
-    assert_eq!(
-        rig.cache
-            .pin("boot-1", &t, std::slice::from_ref(&b.sha))
-            .unwrap()
-            .pinned,
-        1
-    );
-    assert!(
-        rig.cache
-            .metrics()
-            .contains("tierstore_cache_hold_handovers_total 1\n")
-    );
-
-    let mut blobs = vec![a.sha.clone(), b.sha.clone()];
-    blobs.sort();
-    let want = serde_json::json!({"trees": [{"mount": "boot-1", "tree": t, "blobs": blobs}]});
-    assert_eq!(file_of(&rig), want);
+    let own = inner.open_hold("job-42", "full", None, &[t1.clone(), t2.clone()]);
+    assert_eq!(own.map(|opened| opened.added), Ok(vec![t2]));
+    let ended = rig.cache.release_hold_of("job-42", "full");
+    assert_eq!(ended.map(|released| released.trees), Ok(2));
 }
 
-/// Asserts that a blob whose fill ends after the tree was attached is pinned for each attachment
-/// of the tree, not for the hold, and that a second mount that attaches the tree is pinned for
-/// too.
+/// Asserts that the generation of a hold tells it from a later hold of the same id: after a
+/// release and a new hold of the name, the first hold's generation is not live, a blob handed over
+/// for it is refused and queued nowhere, trees offered for it start no task and it is given none,
+/// while the new hold takes all of these. It would catch an expansion that writes into the hold
+/// that took the name of the one it was started for.
 #[tokio::test]
-async fn blob_filled_after_attach_is_pinned_for_the_attachment() {
-    let rig = rig("thold-after", 1);
-    let a = stored(&rig, 1, 3000).await;
+async fn an_expansion_of_an_ended_hold_does_not_write_into_the_hold_that_took_its_name() {
+    let rig = rig("thold-gen", 1);
+    let blob = stored(&rig, 1, 300).await;
     let t = tree(1);
-    let gate = rig.tamper.hold_key(&a.key);
-    assert_eq!(
-        rig.cache.open_hold("job", None, std::slice::from_ref(&t)),
-        Ok(1)
-    );
-    assert_eq!(
-        rig.cache.hold_blob("job", &t, &a.blob()),
-        Ok(Prefetched::Queued)
-    );
-    until("the worker is at a", || rig.calls_on(Op::Get, &a.key) == 1).await;
-    assert_eq!(rig.cache.pin("boot-1", &t, &[]).unwrap().pinned, 0);
-    assert_eq!(rig.cache.pin("boot-2", &t, &[]).unwrap().pinned, 0);
+    let root = TreeDigest::from_hex(&t).unwrap();
+    let inner = &rig.cache.inner;
+    let names = [t.clone()];
+    let first = inner.open_hold("h", "k", None, &names).unwrap().generation;
+    assert_eq!(rig.cache.release_hold("h").map(|r| r.trees), Ok(1));
+    let second = inner.open_hold("h", "k", None, &names).unwrap().generation;
+    assert_ne!(first, second);
 
-    gate.add_permits(64);
-    until("a is pinned when it lands", || {
-        rig.cache.pinned_bytes() == 3000
-    })
-    .await;
-    let mut owners = pinners(&rig, &a.sha);
-    owners.sort();
-    let want = vec![
-        ("boot-1".to_owned(), t.clone()),
-        ("boot-2".to_owned(), t.clone()),
-    ];
-    assert_eq!(owners, want);
-    let filled = Released {
-        trees: 1,
-        filled: 1,
-        ..Released::default()
+    assert!(!inner.hold_live(("h", first)));
+    assert!(inner.hold_live(("h", second)));
+    let absent = HoldError::NoSuchHold("h".to_owned());
+    assert_eq!(inner.hold_blob(("h", first), &t, &blob.blob()), Err(absent));
+    assert!(!inner.queue_walk(("h", first), &[root]));
+    assert!(inner.next_tree(("h", first)).is_none());
+    assert_eq!((waiting(&rig), in_table(&rig)), (0, 0));
+    assert_eq!(rig.calls_on(Op::Get, &blob.key), 0);
+
+    let handed = inner.hold_blob(("h", second), &t, &blob.blob());
+    assert_eq!(handed, Ok(Prefetched::Queued));
+}
+
+/// Asserts that a hold has one task: the first trees offered start it, trees offered while it runs
+/// start none and are taken by it in the order offered, and once it has found the list empty the
+/// next trees start a new one. The bounds it has spent are kept for that one. It would catch a
+/// hold that expands with a task per call.
+#[tokio::test]
+async fn a_hold_has_one_task_that_takes_its_trees_in_the_order_offered() {
+    let rig = rig("thold-task", 1);
+    let inner = &rig.cache.inner;
+    let ids = [tree(1), tree(2), tree(3)];
+    let [one, two, three] = ids.clone().map(|id| TreeDigest::from_hex(&id).unwrap());
+    let generation = inner.open_hold("h", "k", None, &ids).unwrap().generation;
+    let at = ("h", generation);
+
+    assert!(!inner.queue_walk(at, &[]));
+    assert!(inner.queue_walk(at, &[one]));
+    assert!(!inner.queue_walk(at, &[two, three]));
+    let spent = Spent {
+        blobs: 4,
+        bytes: 9,
+        reached: Some(Bound::Blobs),
     };
-    assert_eq!(rig.cache.release_hold("job"), Ok(filled));
+    let (first, before) = inner.next_tree(at).unwrap();
+    assert_eq!((first, before.blobs), (one, 0));
+    inner.hold_walked(at, Walked::Cut, spent);
+    let (second, kept) = inner.next_tree(at).unwrap();
+    assert_eq!((second, kept.blobs, kept.bytes), (two, 4, 9));
+    assert_eq!(kept.reached, Some(Bound::Blobs));
+    assert_eq!(inner.next_tree(at).map(|(tree, _)| tree), Some(three));
+    assert!(inner.next_tree(at).is_none());
+    assert!(inner.queue_walk(at, &[one]));
 }
 
-/// Asserts that the release of a hold after the handover leaves the attachment's pins, that the
-/// unpin of the tree (the detach) then ends them, and that a fill that ends after that is pinned
-/// for nobody: the hold gave the tree up and the attachment is gone.
+/// Asserts that a hold is for at most `hydrate_max_trees` trees however many calls added them: a
+/// call that would take it past the bound is refused with the count and adds none of its trees,
+/// and a tree it is for already costs nothing. It would catch a bound that restarts with each call.
 #[tokio::test]
-async fn release_after_attach_leaves_the_attachments_pins() {
-    let rig = rig("thold-release", 1);
-    let (a, b) = (stored(&rig, 1, 3000).await, stored(&rig, 2, 2000).await);
-    let t = tree(1);
-    assert_eq!(rig.cache.fill_blob(&a.blob()).await, Ok(()));
-    let gate = rig.tamper.hold_key(&b.key);
+async fn a_hold_takes_at_most_max_trees_over_all_its_calls() {
+    let rig = Rig::with("thold-trees", |config| config.prefetch.max_trees = 2);
+    let inner = &rig.cache.inner;
+    let ids = [tree(1), tree(2), tree(3)];
+    assert!(inner.open_hold("h", "k", None, &ids[..2]).is_ok());
+    let over = inner.open_hold("h", "k", None, &ids[2..]).err().unwrap();
+    assert_eq!(over, HoldError::TooManyTrees { given: 3, max: 2 });
+    assert_eq!(over.to_string(), "3 trees in the hold, at most 2");
+    let all = inner.open_hold("g", "k", None, &ids).err().unwrap();
+    assert_eq!(all, HoldError::TooManyTrees { given: 3, max: 2 });
+    assert!(inner.open_hold("h", "k", None, &ids[..1]).is_ok());
+    assert_eq!(rig.cache.release_hold("h").map(|r| r.trees), Ok(2));
     assert_eq!(
-        rig.cache.open_hold("job", None, std::slice::from_ref(&t)),
-        Ok(1)
+        rig.cache.release_hold("g"),
+        Err(HoldError::NoSuchHold("g".to_owned()))
     );
-    assert_eq!(
-        rig.cache.hold_blob("job", &t, &a.blob()),
-        Ok(Prefetched::Present)
-    );
-    assert_eq!(
-        rig.cache.hold_blob("job", &t, &b.blob()),
-        Ok(Prefetched::Queued)
-    );
-    assert_eq!(
-        rig.cache
-            .pin("boot-1", &t, std::slice::from_ref(&a.sha))
-            .unwrap()
-            .pinned,
-        1
-    );
-
-    // The release leaves the fill that runs, and the attachment's pin of a.
-    let released = Released {
-        trees: 1,
-        present: 1,
-        pending: 1,
-        ..Released::default()
-    };
-    assert_eq!(rig.cache.release_hold("job"), Ok(released));
-    assert_eq!(
-        pinners(&rig, &a.sha),
-        vec![("boot-1".to_owned(), t.clone())]
-    );
-    assert_eq!(rig.cache.pinned_bytes(), 3000);
-
-    assert_eq!(rig.cache.unpin("boot-1", &t), Ok(1));
-    assert_eq!(rig.cache.pinned_bytes(), 0);
-    gate.add_permits(64);
-    until("b is in the cache", || rig.cache.held() == (5000, 2)).await;
-    assert_eq!(rig.cache.pinned_bytes(), 0);
-}
-
-/// Asserts that a hold opened for a tree that a mount has pinned already pins nothing for itself:
-/// the blob the cache holds and the blob that fills later are both pinned for the attachment
-/// alone, and no handover is counted, since no pin of the hold moved.
-#[tokio::test]
-async fn attach_before_hydrate_leaves_the_hold_pinning_nothing() {
-    let rig = rig("thold-before", 1);
-    let (a, b) = (stored(&rig, 1, 3000).await, stored(&rig, 2, 2000).await);
-    let t = tree(1);
-    assert_eq!(rig.cache.fill_blob(&a.blob()).await, Ok(()));
-    assert_eq!(
-        rig.cache
-            .pin("boot-1", &t, std::slice::from_ref(&a.sha))
-            .unwrap()
-            .pinned,
-        1
-    );
-    let gate = rig.tamper.hold_key(&b.key);
-
-    assert_eq!(
-        rig.cache.open_hold("job", None, std::slice::from_ref(&t)),
-        Ok(1)
-    );
-    assert_eq!(
-        rig.cache.hold_blob("job", &t, &a.blob()),
-        Ok(Prefetched::Present)
-    );
-    assert_eq!(
-        rig.cache.hold_blob("job", &t, &b.blob()),
-        Ok(Prefetched::Queued)
-    );
-    gate.add_permits(64);
-    until("b is in the cache", || rig.cache.held() == (5000, 2)).await;
-    until("b is pinned", || rig.cache.pinned_bytes() == 5000).await;
-
-    let attached = ("boot-1".to_owned(), t.clone());
-    assert_eq!(pinners(&rig, &a.sha), vec![attached.clone()]);
-    assert_eq!(pinners(&rig, &b.sha), vec![attached]);
-    assert!(
-        rig.cache
-            .metrics()
-            .contains("tierstore_cache_hold_handovers_total 0\n")
-    );
-    let filled = Released {
-        trees: 1,
-        filled: 1,
-        present: 1,
-        ..Released::default()
-    };
-    assert_eq!(rig.cache.release_hold("job"), Ok(filled));
-    assert_eq!(rig.cache.pinned_bytes(), 5000);
-}
-
-/// Asserts that the attachments of a handed tree follow the mounts: a mount that unpins the tree
-/// stops being pinned for while another mount of it still is, and a mount that sweeps the tree
-/// away with `pins_live` stops being pinned for too.
-#[tokio::test]
-async fn a_fill_pins_for_the_attachments_that_are_left() {
-    let rig = rig("thold-left", 1);
-    let (a, b) = (stored(&rig, 1, 300).await, stored(&rig, 2, 200).await);
-    let t = tree(1);
-    let (gate_a, gate_b) = (rig.tamper.hold_key(&a.key), rig.tamper.hold_key(&b.key));
-    assert_eq!(
-        rig.cache.open_hold("job", None, std::slice::from_ref(&t)),
-        Ok(1)
-    );
-    assert_eq!(
-        rig.cache.hold_blob("job", &t, &a.blob()),
-        Ok(Prefetched::Queued)
-    );
-    for mount in ["boot-1", "boot-2"] {
-        assert_eq!(rig.cache.pin(mount, &t, &[]).unwrap().pinned, 0);
-    }
-    assert_eq!(rig.cache.unpin("boot-1", &t), Ok(0));
-    gate_a.add_permits(64);
-    until("a is pinned", || rig.cache.pinned_bytes() == 300).await;
-    assert_eq!(
-        pinners(&rig, &a.sha),
-        vec![("boot-2".to_owned(), t.clone())]
-    );
-
-    // The tree is still listed by boot-2: a sweep that names it keeps it.
-    assert_eq!(
-        rig.cache.pins_live("boot-2", std::slice::from_ref(&t)),
-        Ok(0)
-    );
-    assert_eq!(
-        rig.cache.hold_blob("job", &t, &b.blob()),
-        Ok(Prefetched::Queued)
-    );
-    gate_b.add_permits(64);
-    until("b is pinned", || rig.cache.pinned_bytes() == 500).await;
-    assert_eq!(
-        pinners(&rig, &b.sha),
-        vec![("boot-2".to_owned(), t.clone())]
-    );
-
-    assert_eq!(rig.cache.unpin("boot-2", &t), Ok(2));
-    assert_eq!(rig.cache.pinned_bytes(), 0);
-}
-
-/// A sweep by one mount takes the pins of every other mount, so it takes their attachments too:
-/// a blob that fills after a new mount swept is pinned for nobody, and the pins file has none of
-/// it. A mount that pins the tree again is the attachment from then on.
-#[tokio::test]
-async fn a_sweep_by_another_mount_forgets_the_attachments_it_dropped() {
-    let rig = rig("thold-sweep-other", 1);
-    let (a, b) = (stored(&rig, 1, 300).await, stored(&rig, 2, 200).await);
-    let t = tree(1);
-    let (gate_a, gate_b) = (rig.tamper.hold_key(&a.key), rig.tamper.hold_key(&b.key));
-    assert_eq!(
-        rig.cache.open_hold("job", None, std::slice::from_ref(&t)),
-        Ok(1)
-    );
-    assert_eq!(
-        rig.cache.hold_blob("job", &t, &a.blob()),
-        Ok(Prefetched::Queued)
-    );
-    assert_eq!(rig.cache.pin("boot-a", &t, &[]).unwrap().pinned, 0);
-    assert_eq!(rig.cache.pins_live("boot-b", &[]), Ok(0));
-    gate_a.add_permits(64);
-    until("a is in the cache", || rig.cache.held() == (300, 1)).await;
-    assert!(pinners(&rig, &a.sha).is_empty());
-    assert_eq!(rig.cache.pinned_bytes(), 0);
-
-    assert_eq!(rig.cache.pin("boot-b", &t, &[]).unwrap().pinned, 0);
-    assert_eq!(
-        rig.cache.hold_blob("job", &t, &b.blob()),
-        Ok(Prefetched::Queued)
-    );
-    gate_b.add_permits(64);
-    until("b is pinned", || rig.cache.pinned_bytes() == 200).await;
-    assert_eq!(
-        pinners(&rig, &b.sha),
-        vec![("boot-b".to_owned(), t.clone())]
-    );
-}
-
-/// Asserts that the handover leaves the pins file as it was: the file has the same keys, one
-/// entry for the attachment's tree with its blobs and none for the hold, so the previous release
-/// reads it as the pins of an attachment, and a cache opened over the directory again pins those
-/// blobs for the attachment and has no hold.
-#[tokio::test]
-async fn handed_over_pins_are_in_the_pins_file_and_a_restart_keeps_them() {
-    let rig = rig("thold-compat", 1);
-    let a = stored(&rig, 1, 3000).await;
-    let t = tree(1);
-    assert_eq!(rig.cache.fill_blob(&a.blob()).await, Ok(()));
-    assert_eq!(
-        rig.cache.open_hold("job", None, std::slice::from_ref(&t)),
-        Ok(1)
-    );
-    assert_eq!(
-        rig.cache.hold_blob("job", &t, &a.blob()),
-        Ok(Prefetched::Present)
-    );
-    assert_eq!(file_of(&rig), serde_json::json!({"trees": []}));
-    assert_eq!(rig.cache.pin("boot-1", &t, &[]).unwrap().pinned, 0);
-    let want = serde_json::json!({"trees": [{"mount": "boot-1", "tree": t, "blobs": [a.sha]}]});
-    assert_eq!(file_of(&rig), want);
-
-    let restarted = rig.reopen();
-    assert_eq!(restarted.pinned_bytes(), 3000);
-    assert_eq!(
-        restarted.release_hold("job"),
-        Err(HoldError::NoSuchHold("job".to_owned()))
-    );
-    assert_eq!(restarted.unpin("boot-1", &t), Ok(1));
-    assert_eq!(restarted.pinned_bytes(), 0);
 }
