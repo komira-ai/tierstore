@@ -92,25 +92,22 @@
 //! do not hash to the name is the reader's error, not passed through. A hit is not hashed again:
 //! the scrub does that.
 //!
-//! At most `max_concurrent_fills` fills run at once, each holding one chunk (`fill_chunk`, 8 MiB)
-//! in memory at a time, so the fills hold at most that many chunks. A miss of a key that has no
-//! fill running, when every permit is taken, does not wait for one: it is served from the upstream
-//! as a pass-through, keeps nothing and is counted in `fills_skipped` and `fills_skipped_busy`.
-//! The readers of a key that has a fill running share it and need no permit. A fill that panics
-//! or is cancelled frees its key and its permit, and the readers that waited for it get an error
+//! At most `max_concurrent_fills` fills run at once, each holding one chunk (`fill_chunk`, 8 MiB) in memory at a time,
+//! so the fills hold at most that many chunks. A miss of a key that has no fill running, when every permit is taken,
+//! does not wait for one: it is served from the upstream as a pass-through, keeps nothing and is counted in
+//! `fills_skipped` and `fills_skipped_busy`. The readers of a key that has a fill running share it and need no permit.
+//! A fill that panics or is cancelled frees its key and its permit, and the readers that waited for it get an error
 //! (`Unavailable`, counted as a failed fill with the reason `aborted`).
 //!
 //! # Eviction
 //!
-//! The cache keeps its objects under `budget` bytes. Above `high_water` percent of it, and
-//! whenever the file system's free space is under `free_floor` percent, a pass
-//! ([`LocalCache::evict`]) removes the least recently used objects until the cache is down to
-//! `low_water` percent and the free space is back at the floor. The order of use is in memory,
-//! seeded at start from the files' times and written back to them (`utimensat`, once per object
-//! per pass however often it was used) so that a restart keeps it. An object with more than one
-//! link is in use by another tree: it is skipped, counted, and stays charged to the budget.
-//! So is an object that a tree pins (module `pins`), counted separately. Files in `.stage/` are
-//! never evicted and are removed at start.
+//! The cache keeps its objects under `budget` bytes. Above `high_water` percent of it, and whenever the file system's
+//! free space is under `free_floor` percent, a pass ([`LocalCache::evict`]) removes the least recently used objects
+//! until the cache is down to `low_water` percent and the free space is back at the floor. The order of use is in
+//! memory, seeded at start from the files' times and written back to them (`utimensat`, once per object per pass
+//! however often it was used) so that a restart keeps it. An object with more than one link is in use by another tree:
+//! it is skipped, counted, and stays charged to the budget. So is an object that a tree pins (module `pins`), counted
+//! separately. Files in `.stage/` are never evicted and are removed at start.
 //!
 //! # The lock and read-only mode
 //!
