@@ -163,9 +163,7 @@ impl Inner {
             }
             // A fill that is only queued is not joined: this request starts it (`join_or_start`
             // takes it out of the queue), on a permit of its own pool.
-            let running = locked(&self.flights).get(&wanted.name.hex).cloned();
-            let running = running.filter(|_| !self.queued(&wanted.name.hex));
-            let pending = match running {
+            let pending = match self.joinable(&wanted.name.hex) {
                 Some(running) => {
                     self.counters.joined(false);
                     running

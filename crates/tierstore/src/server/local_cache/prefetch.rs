@@ -25,7 +25,7 @@ use std::time::Duration;
 
 use tokio::sync::{OwnedSemaphorePermit, Semaphore};
 
-use super::fill::{Class, Ended, Filled, Held, Launch, Plan, Stop};
+use super::fill::{Class, Ended, Filled, Held, Launch, Pending, Plan, Stop};
 use super::layout::name_of;
 use super::metrics::{PrefetchFailed, bump};
 use super::source::{Blob, object_key};
@@ -211,8 +211,19 @@ impl Inner {
     }
 
     /// Whether the blob of `hex` waits in the queue.
-    pub(super) fn queued(&self, hex: &str) -> bool {
+    fn queued(&self, hex: &str) -> bool {
         locked(&self.prefetch.queue).contains(hex)
+    }
+
+    /// The fill of `hex` that a read may join: one that runs. A blob that is only queued is none
+    /// (the read starts it), and a blob that was queued is none once it is dropped. The table is
+    /// locked for the lookup and the check together, and the queue drops a blob and takes it out of
+    /// the table under that same lock, so a place found here that is not queued stays the place of
+    /// a fill that will run.
+    pub(super) fn joinable(&self, hex: &str) -> Option<Pending> {
+        let flights = locked(&self.flights);
+        let running = flights.get(hex)?;
+        (!self.queued(hex)).then(|| running.clone())
     }
 
     /// Takes the blob of `hex` out of the queue, if it waits there, for a read to start on a
@@ -247,7 +258,7 @@ impl Inner {
     /// The blob that has waited longest and is still to be filled; the ones before it that are
     /// not are dropped, and leave the table with the table and the queue locked, so that no read
     /// finds a place that nothing will fill.
-    fn next_queued(&self) -> Option<Queued> {
+    pub(super) fn next_queued(&self) -> Option<Queued> {
         let mut flights = locked(&self.flights);
         let mut queue = locked(&self.prefetch.queue);
         let mut gone = Vec::new();

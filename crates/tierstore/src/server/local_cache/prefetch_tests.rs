@@ -364,6 +364,70 @@ async fn queue_ttl_expires() {
     assert_eq!(rig.calls_on(Op::Get, &old.key), 1);
 }
 
+/// Asserts that a read looks for a fill to join and for the blob being queued in one step of the
+/// table: the queue drops an expired blob (it takes it out of the queue and the table with the
+/// table locked) while the lookup waits for the table, and the lookup then finds no place, not a
+/// place whose fill will never run. A blob that is only queued, and one that is dropped, are none to
+/// join; a fill that runs is one. It would catch a lookup that clones the place and asks the queue
+/// afterwards, which ends a mount open of a dropped blob as an aborted fill.
+#[tokio::test]
+async fn a_read_never_joins_a_queued_blob_the_queue_drops_as_it_looks() {
+    let rig = Rig::with("tprefetch-lookup", |config| {
+        config.prefetch.concurrency = 1;
+        config.prefetch.ttl = Duration::from_secs(10);
+    });
+    let (a, b) = (stored(&rig, 1, 300).await, stored(&rig, 2, 310).await);
+    let (a_hex, b_hex) = (
+        super::layout::name_of(&a.key).hex,
+        super::layout::name_of(&b.key).hex,
+    );
+    let gate = rig.tamper.hold_key(&a.key);
+    assert_eq!(rig.cache.prefetch(&a.blob()), Prefetched::Queued);
+    until("the worker is at a", || rig.calls_on(Op::Get, &a.key) == 1).await;
+    assert_eq!(rig.cache.prefetch(&b.blob()), Prefetched::Queued);
+    let inner = Arc::clone(&rig.cache.inner);
+    assert!(inner.joinable(&a_hex).is_some());
+    assert!(inner.joinable(&b_hex).is_none());
+    assert!(inner.joinable("absent").is_none());
+    rig.clock.advance(20_000);
+
+    // The queue is held, so that the drop of b stops with the table locked.
+    let queue = locked(&inner.prefetch.queue);
+    let dropper = {
+        let inner = Arc::clone(&inner);
+        std::thread::spawn(move || inner.next_queued().is_none())
+    };
+    while inner.flights.try_lock().is_ok() {
+        std::thread::yield_now();
+    }
+    let looker = {
+        let inner = Arc::clone(&inner);
+        let hex = b_hex.clone();
+        std::thread::spawn(move || inner.joinable(&hex).is_none())
+    };
+    drop(queue);
+    assert!(
+        dropper.join().unwrap_or(false),
+        "the queue has nothing to start"
+    );
+    assert!(
+        looker.join().unwrap_or(false),
+        "the lookup finds no place of a dropped blob"
+    );
+    assert_eq!(
+        rig.cache
+            .counters()
+            .prefetch_failures(PrefetchFailed::Expired),
+        1
+    );
+    assert_eq!(in_table(&rig), 1);
+
+    // The read of the dropped blob is an ordinary miss that starts its own fill.
+    gate.add_permits(64);
+    assert_eq!(rig.cache.fill_blob(&b.blob()).await, Ok(()));
+    assert_eq!(rig.calls_on(Op::Get, &b.key), 1);
+}
+
 /// Asserts that a queued blob that the cache holds when its turn comes (a put through the cache
 /// kept it meanwhile) is dropped without a request, and that nothing is counted as a failure.
 #[tokio::test]
