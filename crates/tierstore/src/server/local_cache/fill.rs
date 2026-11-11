@@ -22,9 +22,11 @@ use tokio::task::JoinHandle;
 
 use crate::{ByteRange, Error, Meta};
 
-use super::layout::{Name, Sidecar, data_path, make_dirs, meta_path, object_dir, stage_dir};
+use super::layout::{
+    Name, Origin, Sidecar, data_path, make_dirs, meta_path, object_dir, stage_dir,
+};
 use super::metrics::{FailedFill, bump};
-use super::{Disk, Inner, locked, percent_of};
+use super::{Disk, Inner, WHOLE_FILL_LIMIT, locked, percent_of};
 
 /// How a fill ended, for the readers that waited for it.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -73,12 +75,19 @@ pub(super) enum Live {
     },
 }
 
-/// A fill that is running: its end, which every reader of the key waits on, and its progress,
+/// How a fill ended, as every path that waits for it can read it: the fill's own verdict, from
+/// which the S3 front and the fill socket each take their answer.
+pub(super) type Ended = Result<Filled, Stop>;
+
+/// A fill that is running: its end, which every reader of the name waits on, and its progress,
 /// which a reader that streams from the staged file follows.
 #[derive(Clone)]
 pub(super) struct Pending {
-    done: Shared<BoxFuture<'static, Result<Filled, Error>>>,
+    done: Shared<BoxFuture<'static, Ended>>,
     pub(super) live: watch::Receiver<Live>,
+    /// Whether the fill cuts its bytes out of a larger object (see [`Origin::Span`]): the S3
+    /// front does not wait for it, since the name is not an object of the upstream.
+    span: bool,
 }
 
 impl Pending {
@@ -88,7 +97,11 @@ impl Pending {
     pub(super) fn never() -> Self {
         let done = futures::future::pending().boxed().shared();
         let (_, live) = watch::channel(Live::Starting);
-        Self { done, live }
+        Self {
+            done,
+            live,
+            span: false,
+        }
     }
 
     /// A fill that is over already, with no object and no progress: what a keep leaves in the table
@@ -97,7 +110,42 @@ impl Pending {
         let done = futures::future::ready(Ok(filled)).boxed().shared();
         // The sender is dropped at once: nothing is ever written.
         let (_, live) = watch::channel(Live::Starting);
-        Self { done, live }
+        Self {
+            done,
+            live,
+            span: false,
+        }
+    }
+
+    /// The end of the fill, as the fill socket reads it.
+    pub(super) async fn ended(self) -> Ended {
+        self.done.await
+    }
+}
+
+/// What a fill that ended as `ended` says to a reader of the S3 front.
+pub(super) fn s3_answer(ended: Ended) -> Result<Filled, Error> {
+    match ended {
+        Ok(filled) => Ok(filled),
+        Err(Stop::Upstream(error)) => Err(error),
+        // The readers of a fill that could not finish it go to the upstream.
+        Err(Stop::Short | Stop::Local | Stop::Invalidated | Stop::Lost) => Ok(Filled::Skipped),
+        // Readers may have been given bytes of the first version already: each reader decides by
+        // what it was given.
+        Err(Stop::Changed) => Ok(Filled::Changed),
+        Err(Stop::Mismatch) => {
+            // The bytes are known to be wrong: they go to nobody.
+            let text = "the upstream's bytes do not hash to the name of the object";
+            Err(Error::Unavailable(text.to_owned()))
+        }
+        Err(Stop::TooLarge) => {
+            let text = "the object is larger than a whole-object fill may be";
+            Err(Error::Unavailable(text.to_owned()))
+        }
+        Err(Stop::Aborted) => {
+            let text = "the fill of the object did not finish";
+            Err(Error::Unavailable(text.to_owned()))
+        }
     }
 }
 
@@ -105,12 +153,12 @@ impl Future for Pending {
     type Output = Result<Filled, Error>;
 
     fn poll(self: Pin<&mut Self>, cx: &mut Context<'_>) -> Poll<Self::Output> {
-        Pin::new(&mut self.get_mut().done).poll(cx)
+        Pin::new(&mut self.get_mut().done).poll(cx).map(s3_answer)
     }
 }
 
 /// The task of a fill.
-type Task = JoinHandle<Result<Filled, Error>>;
+type Task = JoinHandle<Ended>;
 
 /// What a fill reads from the upstream.
 pub(super) enum Read<'a> {
@@ -128,8 +176,44 @@ pub(super) enum Read<'a> {
     },
 }
 
+/// What a fill reads, owned, so that the task of the fill holds it.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub(super) enum Plan {
+    /// The object of the key, whole, whose size the fill asks the upstream for.
+    Object,
+    /// The object `cas/l/<sha256>`, whole, up to [`WHOLE_FILL_LIMIT`](super::WHOLE_FILL_LIMIT):
+    /// the file a tree's manifest is, which the caller knows by its hash and not its size.
+    Manifest,
+    /// A blob inside another object: `size` bytes from `offset` of the upstream object `from`.
+    Blob {
+        from: String,
+        offset: u64,
+        size: u64,
+    },
+}
+
+impl Plan {
+    /// Where the bytes of the fill of `key` come from: a blob read from the start of the very
+    /// object `key` is that object, any other is cut out of a larger one.
+    fn origin(&self, key: &str) -> Origin {
+        match self {
+            Plan::Blob { from, offset, .. } if from != key || *offset != 0 => Origin::Span,
+            Plan::Blob { .. } | Plan::Object | Plan::Manifest => Origin::Object,
+        }
+    }
+}
+
+/// The pool of permits a fill starts under. A fill that joins one that runs takes none.
+pub(super) enum Class {
+    /// A miss of the S3 front: a permit of `max_concurrent_fills`, which is not waited for.
+    S3,
+    /// A fill asked for over the fill socket, which has waited for a permit of
+    /// `fill_socket_concurrency`.
+    Mount(OwnedSemaphorePermit),
+}
+
 /// Why a fill ended without an object.
-#[derive(Debug)]
+#[derive(Clone, Debug)]
 pub(super) enum Stop {
     /// The upstream failed, or has no such object.
     Upstream(Error),
@@ -146,6 +230,10 @@ pub(super) enum Stop {
     Changed,
     /// The cache lost the lock of its directory while the fill ran: nothing more is written.
     Lost,
+    /// A whole object is larger than a manifest may be.
+    TooLarge,
+    /// The task of the fill panicked or was cancelled.
+    Aborted,
 }
 
 impl From<io::Error> for Stop {
@@ -295,11 +383,8 @@ impl Drop for Flight {
         let gone = {
             let mut flights = locked(&self.inner.flights);
             let gone = flights.remove(&self.hex);
-            // The mark of a delete is of the fills of the name: it goes with the last of them,
-            // the socket's included (lock order: flights, source_flights, then invalidated).
-            if !locked(&self.inner.source_flights).contains_key(&self.hex) {
-                locked(&self.inner.invalidated).remove(&self.hex);
-            }
+            // The mark of a delete is of the fill of the name: it goes with it.
+            locked(&self.inner.invalidated).remove(&self.hex);
             gone
         };
         drop(gone);
@@ -338,7 +423,13 @@ impl Inner {
     }
 
     /// The fill of `key` to wait for (`Ok`), started if none is running; or (`Err`) the answer
-    /// that needs no wait. It does not wait, and it holds no lock when it returns.
+    /// that needs no wait. It does not wait, and it holds no lock when it returns. This is the
+    /// one way into the table of the fills that run, for every path: the name has one fill
+    /// whoever asks, and `class` says which pool a fill that has to be started takes its permit
+    /// from.
+    ///
+    /// The S3 front does not take an entry of origin `span` for an object of the upstream: it
+    /// is answered [`Filled::Skipped`], so its read goes to the upstream.
     ///
     /// The fill is started after the table of the fills that run is unlocked. The task is
     /// spawned with its [`Flight`], and a spawn that drops the task at once (the runtime is
@@ -349,28 +440,46 @@ impl Inner {
         self: &Arc<Self>,
         key: &str,
         name: &Name,
+        plan: Plan,
+        class: Class,
     ) -> Result<Pending, Filled> {
+        let s3 = matches!(class, Class::S3);
         let (pending, launch) = {
             let mut flights = locked(&self.flights);
             // A fill that ended after the reader missed, and before it got here, left the object
             // in the index (it is put there before the flight is removed): that is not a miss
             // to fill again.
-            if locked(&self.index).get(&name.hex).is_some() {
-                return Err(Filled::Kept);
+            if let Some(entry) = locked(&self.index).get(&name.hex) {
+                let served = !(s3 && entry.origin == Origin::Span);
+                return Err(if served {
+                    Filled::Kept
+                } else {
+                    Filled::Skipped
+                });
             }
             match flights.entry(name.hex.clone()) {
+                Entry::Occupied(running) if s3 && running.get().span => {
+                    return Err(Filled::Skipped);
+                }
                 Entry::Occupied(running) => (running.get().clone(), None),
                 Entry::Vacant(slot) => {
-                    let Ok(permit) = Arc::clone(&self.permits).try_acquire_owned() else {
-                        bump(&self.counters.fills_skipped);
-                        bump(&self.counters.fills_skipped_busy);
-                        return Err(Filled::Skipped);
+                    let permit = match class {
+                        Class::Mount(permit) => permit,
+                        Class::S3 => {
+                            let Ok(permit) = Arc::clone(&self.permits).try_acquire_owned() else {
+                                bump(&self.counters.fills_skipped);
+                                bump(&self.counters.fills_skipped_busy);
+                                return Err(Filled::Skipped);
+                            };
+                            permit
+                        }
                     };
                     let (sender, receiver) = oneshot::channel();
                     let (live, progress) = watch::channel(Live::Starting);
                     let pending = Pending {
                         done: self.waiting(receiver),
                         live: progress,
+                        span: plan.origin(key) == Origin::Span,
                     };
                     slot.insert(pending.clone());
                     (pending, Some((permit, sender, live)))
@@ -378,7 +487,7 @@ impl Inner {
             }
         };
         if let Some((permit, sender, live)) = launch {
-            self.start(key, name, (permit, live), sender);
+            self.start(key, name, plan, (permit, live), sender);
         }
         Ok(pending)
     }
@@ -388,16 +497,15 @@ impl Inner {
     fn waiting(
         self: &Arc<Self>,
         receiver: oneshot::Receiver<Task>,
-    ) -> Shared<BoxFuture<'static, Result<Filled, Error>>> {
+    ) -> Shared<BoxFuture<'static, Ended>> {
         let inner = Arc::clone(self);
         let waiting = async move {
             let task = OptionFuture::from(receiver.await.ok()).await;
             match task.and_then(Result::ok) {
-                Some(filled) => filled,
+                Some(ended) => ended,
                 None => {
                     inner.counters.failed(FailedFill::Aborted);
-                    let text = "the fill of the object did not finish";
-                    Err(Error::Unavailable(text.to_owned()))
+                    Err(Stop::Aborted)
                 }
             }
         };
@@ -412,6 +520,7 @@ impl Inner {
         self: &Arc<Self>,
         key: &str,
         name: &Name,
+        plan: Plan,
         held: (OwnedSemaphorePermit, watch::Sender<Live>),
         sender: oneshot::Sender<Task>,
     ) {
@@ -424,55 +533,75 @@ impl Inner {
         let task = tokio::spawn(async move {
             let (_permit, live) = held;
             let _flight = flight;
-            inner.fill(&key, &name, &live).await
+            inner.fill(&key, &name, &plan, &live).await
         });
         // The receiver is in the fill that is in the table, and in the caller: it is there.
         let _ = sender.send(task);
     }
 
-    /// Reads the object into the stage directory and, if it is whole and is what its name says,
-    /// puts it in the cache.
+    /// Reads what `plan` says into the stage directory and, if it is whole and is what its name
+    /// says, puts it in the cache. A fill that stopped is counted here, once, whoever waits.
     async fn fill(
         self: &Arc<Self>,
         key: &str,
         name: &Name,
+        plan: &Plan,
         live: &watch::Sender<Live>,
-    ) -> Result<Filled, Error> {
-        match self.fetch(key, name, live).await {
-            Ok(filled) => Ok(filled),
-            Err(Stop::Upstream(error)) => {
+    ) -> Ended {
+        let ended = self.carry_out(key, name, plan, live).await;
+        if let Err(stop) = &ended {
+            self.count(stop);
+        }
+        ended
+    }
+
+    /// Counts a fill that stopped for `stop` as a fill that failed, or skipped.
+    pub(super) fn count(&self, stop: &Stop) {
+        match stop {
+            Stop::Upstream(error) => {
                 if !matches!(error, Error::NotFound(_)) {
                     self.counters.failed(FailedFill::UpstreamError);
                 }
-                Err(error)
             }
-            Err(Stop::Short) => self.skipped(FailedFill::ShortBody),
-            Err(Stop::Local) => self.skipped(FailedFill::LocalIo),
-            Err(Stop::Changed) => {
-                // Readers may have been given bytes of the first version already: each reader
-                // decides by what it was given.
-                self.counters.failed(FailedFill::Changed);
-                Ok(Filled::Changed)
-            }
-            Err(Stop::Invalidated) => self.skipped(FailedFill::Changed),
-            Err(Stop::Lost) => {
-                // Not a failure of the fill: the directory is another cache's now.
-                bump(&self.counters.fills_skipped);
-                Ok(Filled::Skipped)
-            }
-            Err(Stop::Mismatch) => {
-                // The bytes are known to be wrong: they go to nobody.
-                self.counters.failed(FailedFill::HashMismatch);
-                let text = "the upstream's bytes do not hash to the name of the object";
-                Err(Error::Unavailable(text.to_owned()))
-            }
+            Stop::Short => self.counters.failed(FailedFill::ShortBody),
+            Stop::Local => self.counters.failed(FailedFill::LocalIo),
+            Stop::Changed | Stop::Invalidated => self.counters.failed(FailedFill::Changed),
+            // Not a failure of the fill: the directory is another cache's now.
+            Stop::Lost => bump(&self.counters.fills_skipped),
+            Stop::Mismatch => self.counters.failed(FailedFill::HashMismatch),
+            // Not failures of the upstream; an abort is counted where it is noticed.
+            Stop::TooLarge | Stop::Aborted => {}
         }
     }
 
-    /// Counts a fill that failed for `why`; its readers go to the upstream.
-    fn skipped(&self, why: FailedFill) -> Result<Filled, Error> {
-        self.counters.failed(why);
-        Ok(Filled::Skipped)
+    /// The fetch that `plan` says.
+    async fn carry_out(
+        self: &Arc<Self>,
+        key: &str,
+        name: &Name,
+        plan: &Plan,
+        live: &watch::Sender<Live>,
+    ) -> Ended {
+        match plan {
+            Plan::Object => self.fetch_from(key, name, live, &Read::Object).await,
+            Plan::Manifest => {
+                let meta = self.upstream_head(key).await?;
+                tagged(key, &meta)?;
+                if meta.size > WHOLE_FILL_LIMIT {
+                    return Err(Stop::TooLarge);
+                }
+                self.fetch_from(key, name, live, &Read::Headed(meta)).await
+            }
+            Plan::Blob { from, offset, size } => {
+                let read = Read::Range {
+                    from,
+                    offset: *offset,
+                    size: *size,
+                    sha256: &name.hex,
+                };
+                self.fetch_from(key, name, live, &read).await
+            }
+        }
     }
 
     /// Reads the object into the stage directory and puts it in the cache. The fill remembers
@@ -481,16 +610,8 @@ impl Inner {
     /// puts the object in the index: a cache that lost the lock of its directory meanwhile
     /// writes nothing more ([`Stop::Lost`]). The lock is noticed lost by a tick at most once a
     /// second, so the step that is running when the lock file is replaced can still finish.
-    async fn fetch(
-        self: &Arc<Self>,
-        key: &str,
-        name: &Name,
-        live: &watch::Sender<Live>,
-    ) -> Result<Filled, Stop> {
-        self.fetch_from(key, name, live, &Read::Object).await
-    }
-
-    /// [`fetch`](Self::fetch) of what `read` says: the object of `key`, or a range of another
+    ///
+    /// What `read` says is read: the object of `key`, or a range of another
     /// object kept as `key`. A range is checked against the hash it was asked under, and its
     /// sidecar takes that hash as its tag, since the bytes are named by their content.
     pub(super) async fn fetch_from(
@@ -576,6 +697,10 @@ impl Inner {
             sha256: digest,
             tag: meta.tag.clone(),
             modified: meta.modified,
+            origin: match read {
+                Read::Range { from, offset, .. } if *from != key || *offset != 0 => Origin::Span,
+                _ => Origin::Object,
+            },
         };
         let fresh = match self.commit(&staged, name, &sidecar, generation).await? {
             Published::New => true,
@@ -591,7 +716,8 @@ impl Inner {
             return Err(Stop::Lost);
         }
         let checked = Some(self.clock.now());
-        locked(&self.index).insert(&name.hex, (meta.size, meta.tag, meta.modified), checked);
+        let kept = (meta.size, meta.tag, meta.modified);
+        locked(&self.index).insert_from(&name.hex, kept, checked, sidecar.origin);
         // A delete that came while the object was being read marked this fill: what it read is
         // gone from the upstream, so it is not kept (the mark is looked for after the entry is
         // in the index; see `forget`).

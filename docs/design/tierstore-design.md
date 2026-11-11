@@ -1252,7 +1252,7 @@ Small, and each has a recommendation.
 | Passthrough, backing id | Linux 6.9 and later: the kernel reads a file's bytes from a backing file it was given (`FUSE_DEV_IOC_BACKING_OPEN`), so reads never reach `tierstore fs`. A blob has one backing id for as long as any open of it lives; the backing table (`<runtime dir>/backing`) lists them. Kernel 6.8 has none, and the mount then runs with cached opens. |
 | Control socket | The Unix socket of `tierstore fs` (`fs.control_socket`) that attachments are made on. |
 | Fill socket | The Unix socket of a build node's `tierstore` (`local_cache.fill_socket`) over which `tierstore fs` asks for source fills, touches and pins. |
-| Source fill | A copy of one blob into the node's cache, from an object key and an offset that a tree manifest names, kept under `_tiering/fill/<sha256>`. |
+| Source fill | A copy of one blob into the node's cache, from an object key and an offset that a tree manifest names, kept as the entry named by `<sha256>` (origin `span`; earlier releases kept it under `_tiering/fill/<sha256>`). |
 | Pin | A tree's claim on the node's cache: the blobs a pinned tree has opened are not evicted while it is attached; capped by `local_cache.pin_limit`. |
 | Tree number | The small number `tierstore fs` gives a tree digest the first time it is attached on a mount; the top bits of the inode numbers of the tree. |
 | Inode number | The 64-bit number the kernel names a FUSE inode by: `tree_number << 24 \| index`, so that any instance of `tierstore fs` can answer for any inode the mount handed out. |

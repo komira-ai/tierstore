@@ -96,7 +96,7 @@ use crate::{Error, Meta, PartBody, PutAnswer, PutClaim};
 
 use super::calls::counting;
 use super::fill::{Filled, Flight, Pending, Published, Reserved, Staged};
-use super::layout::{Name, Sidecar};
+use super::layout::{Name, Origin, Sidecar};
 use super::metrics::{SkippedKeep, add, bump};
 use super::write::Writing;
 use super::{Inner, locked};
@@ -642,6 +642,7 @@ impl Inner {
             sha256: digest,
             tag: meta.tag.clone(),
             modified: meta.modified,
+            origin: Origin::Object,
         };
         let mut publishing = self.begin_commit(&staged, name, &sidecar, generation);
         let published = match tokio::time::timeout_at(deadline, &mut publishing).await {

@@ -50,11 +50,13 @@
 //!
 //! The filesystem process of the node asks for blobs over the fill socket (see
 //! [`fill_socket`](crate::server::fill_socket)): `source` fills a blob that lies inside a larger
-//! upstream object, ranged, under the reserved key `_tiering/fill/<sha256>`, and a whole
-//! `cas/l/<sha256>`, with the same fetch as every fill. Those fills have their own permits
-//! (`fill_socket_concurrency`) and wait for one up to `fill_socket_wait`; they never take one of
-//! `max_concurrent_fills`, and the S3 path never takes theirs. Concurrent requests for one blob share
-//! one fetch. A cache that does not hold the lock fills nothing for the socket.
+//! upstream object, ranged, as the entry named by `<sha256>` (the entry of the object
+//! `cas/l/<sha256>`, of origin `span`), and a whole `cas/l/<sha256>`, with the same fetch as every
+//! fill. Those fills have their own permits (`fill_socket_concurrency`) and wait for one up to
+//! `fill_socket_wait`; they never take one of `max_concurrent_fills`, and the S3 path never takes
+//! theirs. There is one table of running fills for both paths: a request for a digest that has a
+//! fill running, whichever path started it, joins it and takes no permit. A cache that does not
+//! hold the lock fills nothing for the socket.
 //!
 //! # A read
 //!
@@ -148,6 +150,8 @@ mod write;
 mod evict_tests;
 #[cfg(test)]
 mod fill_tests;
+#[cfg(test)]
+mod flights_tests;
 #[cfg(test)]
 mod forget_tests;
 #[cfg(test)]
@@ -475,7 +479,8 @@ pub(super) struct Inner {
     config: CacheConfig,
     index: Mutex<Index>,
     counters: Counters,
-    /// The fills that are running, by the name of the object.
+    /// The fills that are running, by the name of the object: one table for every path that
+    /// fills (the S3 front, the fill socket), so that a name has one fill whoever asks.
     flights: Mutex<HashMap<String, Pending>>,
     /// The fills that are running for an object that was deleted or replaced since they began:
     /// they must not keep what they read. A name is put here only while it has a fill in
@@ -495,11 +500,6 @@ pub(super) struct Inner {
     permits: Arc<Semaphore>,
     /// One permit for each fill of the fill socket that may run; a request waits for one.
     source_permits: Arc<Semaphore>,
-    /// The fills of the fill socket that are running, by the name of the object: concurrent
-    /// requests for one blob share the fetch. A delete or put of the name marks these fills in
-    /// `invalidated` as it does those of `flights` (lock order: `flights`, `source_flights`,
-    /// `invalidated`).
-    source_flights: Mutex<HashMap<String, source::Flight>>,
     /// One permit for each put that may be copied to the stage directory; held until it ends.
     keeps: Arc<Semaphore>,
     /// Called after a keep has put its object in the index.
@@ -535,7 +535,7 @@ fn index_of(mut found: Vec<layout::Found>) -> Index {
         let sidecar = found.sidecar;
         // Found on the disk: how long ago the upstream last held this version is not known.
         let (size, tag, modified) = (sidecar.size, sidecar.tag, sidecar.modified);
-        index.insert(&found.hex, (size, tag, modified), None);
+        index.insert_from(&found.hex, (size, tag, modified), None, sidecar.origin);
     }
     index
 }
@@ -632,7 +632,7 @@ impl LocalCache {
         };
         let mut index = index_of(scanned.found);
         if !matches!(standing, Standing::Waiting) {
-            pins::restore(&config, &mut index);
+            pins::restore(&config, &mut index, &scanned.renamed);
         }
         let permits = Arc::new(Semaphore::new(config.max_concurrent_fills.max(1)));
         let keeps = Arc::new(Semaphore::new(config.max_concurrent_keeps.max(1)));
@@ -652,7 +652,6 @@ impl LocalCache {
             reserved: AtomicU64::new(0),
             permits,
             source_permits,
-            source_flights: Mutex::new(HashMap::new()),
             keeps,
             observer,
             #[cfg(test)]
@@ -896,7 +895,7 @@ impl Backend for LocalCache {
             let offset = range.map_or(0, ByteRange::offset);
             eager(inner.chunked(key, offset, range.map(ByteRange::size), None))
         };
-        let Some(name) = inner.cacheable(key) else {
+        let Some(name) = inner.served_name(key) else {
             return passed(range).await;
         };
         // An old hit is checked first. An entry that is not the upstream's any more is dropped
@@ -918,7 +917,7 @@ impl Backend for LocalCache {
                 return passed(Some(wanted)).await;
             }
         }
-        match inner.join_or_start(key, &name) {
+        match inner.join_or_start(key, &name, fill::Plan::Object, fill::Class::S3) {
             Ok(pending) => eager(inner.follow(key, range, pending)).await,
             Err(fill::Filled::Kept) => match inner.open_kept(&name, range, false).await? {
                 Some(body) => Ok(body),
@@ -931,7 +930,7 @@ impl Backend for LocalCache {
     async fn head(&self, key: &str) -> Result<Meta, Error> {
         refuse_reserved(key)?;
         let inner = &self.inner;
-        let name = inner.cacheable(key);
+        let name = inner.served_name(key);
         let kept = name.as_ref().and_then(|name| inner.kept(name));
         // A HEAD the index answers is a head hit, and one the upstream answers a head miss.
         let (Some(meta), Some(name)) = (kept, name) else {

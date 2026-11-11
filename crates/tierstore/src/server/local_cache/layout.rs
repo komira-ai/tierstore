@@ -6,11 +6,16 @@
 //! <path>/.stage/                    fills in progress; emptied at start, never served
 //! ```
 //!
+//! The sidecar's `origin` says whether the bytes are the upstream object of the key (the default,
+//! left out of the file) or a `span` cut out of a pack; the fill socket's blobs are entries named
+//! by their digest like any `cas/l/<sha256>` object.
+//!
 //! `<hex>` is the SHA-256 of the key's name, except for a key `cas/l/<sha256>`, which is the
 //! content's own SHA-256 (the name says what the bytes must hash to); `<aa>` and `<bb>` are its
 //! first two pairs of digits. The data file is created last, by a create-only link, so a name
 //! that has a data file has its `.meta`.
 
+use std::collections::{HashMap, HashSet};
 use std::io;
 use std::os::unix::fs::PermissionsExt as _;
 use std::path::{Path, PathBuf};
@@ -29,6 +34,9 @@ const SIDECAR: &str = ".meta";
 
 /// The prefix of the keys that are named by the SHA-256 of their bytes.
 const WHOLE_BLOBS: &str = "cas/l/";
+
+/// The prefix of the keys that the previous release kept the fill socket's blobs under.
+const OLD_FILL_PREFIX: &str = "_tiering/fill/";
 
 /// What a key is called on disk, and what its bytes must hash to.
 #[derive(Clone, Debug, PartialEq, Eq)]
@@ -119,6 +127,29 @@ pub(super) struct Sidecar {
     pub tag: String,
     /// The time the upstream gave the object, in milliseconds.
     pub modified: u64,
+    /// Where the bytes came from. A sidecar of the previous release has no such field, and
+    /// reads as [`Origin::Object`]; a release that does not know the field ignores it.
+    #[serde(default, skip_serializing_if = "Origin::is_object")]
+    pub origin: Origin,
+}
+
+/// Where the bytes of an entry named by a digest came from.
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "lowercase")]
+pub(super) enum Origin {
+    /// The bytes are the upstream object `cas/l/<sha256>`, whole.
+    #[default]
+    Object,
+    /// The bytes were cut out of a larger object (a pack): no upstream object has the key
+    /// `cas/l/<sha256>`, so the S3 front does not serve the entry as one.
+    Span,
+}
+
+impl Origin {
+    /// Whether this is [`Origin::Object`], which a sidecar leaves out.
+    fn is_object(&self) -> bool {
+        matches!(self, Origin::Object)
+    }
 }
 
 /// An object that the scan found whole.
@@ -137,6 +168,9 @@ pub(super) struct Scanned {
     pub found: Vec<Found>,
     /// The files that were not part of a whole object and were deleted.
     pub discarded: u64,
+    /// The entries of the previous release's fill keys that were given the name of their digest:
+    /// the old name, and the new one (a pins file of that release names the old).
+    pub renamed: HashMap<String, String>,
 }
 
 /// Empties the stage directory (making it if it is not there): a fill that was running when the
@@ -211,7 +245,79 @@ fn is_sidecar(path: &Path) -> bool {
 /// What the system said about making the directory.
 pub(super) fn scan(root: &Path) -> io::Result<Scanned> {
     make_dirs(root, &objects_dir(root))?;
-    Ok(walk(root, true))
+    let mut scanned = walk(root, true);
+    rename_fill_entries(root, &mut scanned);
+    Ok(scanned)
+}
+
+/// The digest of an entry that the previous release kept under the key `_tiering/fill/<sha256>`
+/// (the name of such an entry is the hash of that key).
+fn old_fill_digest(key: &str) -> Option<String> {
+    let digest = key.strip_prefix(OLD_FILL_PREFIX)?;
+    is_digest(digest).then(|| digest.to_owned())
+}
+
+/// Gives each entry of the previous release's fill keys the name of its digest, which is the
+/// name every blob has now. The entry keeps its recency (the data file is renamed, so its time
+/// of change stays). If the digest name is taken the old entry is removed: it holds the same
+/// bytes. An entry that cannot be renamed is removed too, which costs a refill. Each step leaves
+/// a state the scan reads back whole or deletes, so a crash in the middle loses at most the entry.
+fn rename_fill_entries(root: &Path, scanned: &mut Scanned) {
+    let found = std::mem::take(&mut scanned.found);
+    let mut taken: HashSet<String> = found.iter().map(|entry| entry.hex.clone()).collect();
+    for entry in found {
+        let Some(digest) = old_fill_digest(&entry.sidecar.key) else {
+            scanned.found.push(entry);
+            continue;
+        };
+        let moved = if taken.contains(&digest) {
+            None
+        } else {
+            rename_entry(root, &entry, &digest)
+        };
+        match moved {
+            Some(moved) => {
+                taken.insert(digest.clone());
+                scanned.renamed.insert(entry.hex, digest);
+                scanned.found.push(moved);
+            }
+            None => {
+                let gone = std::fs::remove_file(data_path(root, &entry.hex));
+                let _ = std::fs::remove_file(meta_path(root, &entry.hex));
+                scanned.discarded += u64::from(gone.is_ok());
+            }
+        }
+    }
+}
+
+/// Moves `entry` to the name `digest`, as an entry of origin `span` under the key
+/// `cas/l/<digest>`: the new sidecar first, then the data file, then the old sidecar.
+fn rename_entry(root: &Path, entry: &Found, digest: &str) -> Option<Found> {
+    let sidecar = Sidecar {
+        key: format!("{WHOLE_BLOBS}{digest}"),
+        origin: Origin::Span,
+        ..entry.sidecar.clone()
+    };
+    let text = serde_json::to_vec(&sidecar).ok()?;
+    make_dirs(root, &object_dir(root, digest)).ok()?;
+    let mut temporary = meta_path(root, digest).into_os_string();
+    temporary.push(".new");
+    let temporary = PathBuf::from(temporary);
+    let meta = meta_path(root, digest);
+    std::fs::write(&temporary, text)
+        .and_then(|()| std::fs::set_permissions(&temporary, std::fs::Permissions::from_mode(0o644)))
+        .and_then(|()| std::fs::rename(&temporary, &meta))
+        .ok()?;
+    if std::fs::rename(data_path(root, &entry.hex), data_path(root, digest)).is_err() {
+        let _ = std::fs::remove_file(&meta);
+        return None;
+    }
+    let _ = std::fs::remove_file(meta_path(root, &entry.hex));
+    Some(Found {
+        hex: digest.to_owned(),
+        sidecar,
+        used: entry.used,
+    })
 }
 
 /// Reads the object directory as [`scan`] does and changes nothing in it: the directory is not

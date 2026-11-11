@@ -9,7 +9,7 @@ use bytes::Bytes;
 use futures::stream;
 use futures::{FutureExt as _, StreamExt as _};
 
-use super::layout::{Sidecar, data_path, meta_path, name_of, object_dir};
+use super::layout::{Origin, Sidecar, data_path, meta_path, name_of, object_dir};
 use super::metrics::{SkippedKeep, read};
 use super::testing::{BlockingGate, Rig, digest, never_expires, tree, wait_until};
 use super::{LocalCache, Mode, Tick};
@@ -212,6 +212,7 @@ async fn an_abandoned_keep_leaves_the_object_of_the_new_ownership_alone() {
         sha256: digest(b"the new one"),
         tag: "new".to_owned(),
         modified: 0,
+        origin: Origin::Object,
     };
     std::fs::write(meta_path(root, &hex), serde_json::to_vec(&sidecar).unwrap()).unwrap();
     super::locked(&first.inner.index).insert(&hex, (11, "new".to_owned(), 0), None);

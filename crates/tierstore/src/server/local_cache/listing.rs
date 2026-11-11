@@ -60,7 +60,7 @@ impl Inner {
     fn with_kept_tags(&self, objects: &mut [Listed]) {
         for object in objects {
             let kept = self
-                .cacheable(&object.key)
+                .served_name(&object.key)
                 .and_then(|name| self.kept(&name));
             if let Some(meta) = kept {
                 object.tag = meta.tag;

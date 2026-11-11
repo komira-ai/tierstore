@@ -206,9 +206,8 @@ async fn an_object_whose_socket_fill_is_running_is_not_touched() {
     let keys = fill(&rig, 1, 400).await;
     rot(&rig, &keys[0]);
     let hex = name_of(&keys[0]).hex;
-    let (_sender, receiver) = tokio::sync::oneshot::channel();
-    let running = super::Inner::flight_of(receiver);
-    drop(super::locked(&rig.cache.inner.source_flights).insert(hex.clone(), running));
+    let running = super::fill::Pending::never();
+    drop(super::locked(&rig.cache.inner.flights).insert(hex.clone(), running));
 
     let mut state = Scrubber::new(1 << 20);
     assert_eq!(rig.cache.scrub_once(&mut state), ScrubPass::default());
@@ -219,7 +218,7 @@ async fn an_object_whose_socket_fill_is_running_is_not_touched() {
     assert!(!rig.cache.inner.drop_if_unchanged(&hex, hashed));
     assert!(rig.has_file(&keys[0]));
 
-    drop(super::locked(&rig.cache.inner.source_flights).remove(&hex));
+    drop(super::locked(&rig.cache.inner.flights).remove(&hex));
     let pass = rig.cache.scrub_once(&mut state);
     assert_eq!((pass.scrubbed, pass.dropped), (1, 1));
     assert!(!rig.has_file(&keys[0]));
