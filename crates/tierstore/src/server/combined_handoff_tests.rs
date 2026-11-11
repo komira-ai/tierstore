@@ -115,9 +115,10 @@ async fn lease_lines(hot: &Path) -> Vec<String> {
 }
 
 /// The nonce of the lease in `hot`, which tells one holder of the lease from another (renewals
-/// keep it), once there is a lease whose nonce is not `not`. Looks at most [`TRIES`] times.
+/// keep it), once there is a lease whose nonce is not `not`. It looks until there is one: a lease
+/// that never comes is stopped by nextest's hang guard, not by a bound of this test.
 async fn nonce_other_than(hot: &Path, not: Option<&str>) -> String {
-    for _ in 0..TRIES {
+    loop {
         if let Some(nonce) = lease_lines(hot).await.get(1)
             && Some(nonce.as_str()) != not
         {
@@ -125,7 +126,6 @@ async fn nonce_other_than(hot: &Path, not: Option<&str>) -> String {
         }
         tokio::time::sleep(PAUSE).await;
     }
-    panic!("no lease other than {not:?} was taken");
 }
 
 /// The two instances of a hand-over and the channels that drive them. See [`handover`].
@@ -294,10 +294,13 @@ async fn the_second_cache_is_read_only_until_the_first_exits_and_then_read_write
 /// Asserts that the reconciler of the second instance waits for the first: while the first
 /// instance runs (a connection left open keeps its drain going) the hot tier's lock file is held,
 /// seen by a try of it from outside, and the lease in the hot tier keeps the nonce the first
-/// instance's reconciler took, so the second wrote none; once the connection is closed and the
+/// instance's reconciler took, so the second wrote none (the second's own try of the lock came in
+/// its start, before it bound, while the first held it); once the connection is closed and the
 /// first has ended, the lease is taken anew (another nonce) and the lock is held again, by the
-/// second. Catches: a successor whose reconciler works beside the first's, or one that never
-/// takes the lock and the lease the first gave up.
+/// second; and the lease is gone when the second has stopped, however far its reconciler was in
+/// a write of the lease when the stop came. Catches: a successor whose reconciler works beside the
+/// first's, one that never takes the lock and the lease the first gave up, and one that leaves its
+/// lease behind when it is stopped.
 #[tokio::test]
 async fn the_second_reconciler_waits_for_the_lock_file_and_the_lease_of_the_first() {
     let node = Node::new("tscombined-handoff-lease");
@@ -315,16 +318,17 @@ async fn the_second_reconciler_waits_for_the_lock_file_and_the_lease_of_the_firs
         h.go.send(()).unwrap();
         let taken = h.new_bound.await.unwrap();
         assert_eq!(taken, at);
-        // The second has served from the proxy; its reconciler has had many tries of the lock.
-        for _ in 0..100 {
-            assert!(
-                try_take(&lock).unwrap().is_none(),
-                "the first holds the lock"
-            );
-            let lines = lease_lines(&hot).await;
-            assert_eq!(lines.get(1), Some(&first_nonce), "{lines:?}");
-            tokio::time::sleep(PAUSE).await;
-        }
+        // The second took the lock file's try in its start, before it bound, and the first held
+        // the lock then, so the second is outside the lock and the lease while the first runs. It
+        // serves from the proxy: its answer is the event that it is up, not a wait.
+        let (status, _) = probe(at.s3, "/healthz").await;
+        assert_eq!(status, 200);
+        assert!(
+            try_take(&lock).unwrap().is_none(),
+            "the first holds the lock"
+        );
+        let lines = lease_lines(&hot).await;
+        assert_eq!(lines.get(1), Some(&first_nonce), "{lines:?}");
         drop(before);
         let _ = h.old_ended.await;
         let second_nonce = nonce_other_than(&hot, Some(&first_nonce)).await;
