@@ -23,10 +23,12 @@
 //! flatten does, and a manifest [`parse_manifest`] refuses.
 //!
 //! The bounds of a call (`hydrate_max_trees`, `hydrate_max_blobs` and `hydrate_max_bytes`) are
-//! kept in [`Call`]: a call with more trees than `hydrate_max_trees` is refused whole; the walk
-//! stops at the first blob that would take the call past the others, and the trees after it are
-//! cut without a request. A blob the cache holds, or that is queued or running already, costs the
-//! call nothing: only the blobs and bytes newly queued count.
+//! kept in [`Call`]: a call with more trees than `hydrate_max_trees` is refused whole. The walk
+//! stops at the first blob to queue once `hydrate_max_blobs` are queued, and the trees after it
+//! are cut without a request. A file larger than the bytes left under `hydrate_max_bytes` is left
+//! out (counted, its tree ends `Cut`) and the walk goes on to the files that fit, and to the later
+//! trees. A blob the cache holds, or that is queued or running already, costs the call nothing,
+//! and is judged against no bound: only the blobs and bytes newly queued count.
 #![cfg_attr(
     not(test),
     expect(
@@ -76,9 +78,9 @@ pub(in crate::server) enum Refusal {
 /// A bound of a call that the walk reached.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub(in crate::server) enum Bound {
-    /// `hydrate_max_blobs` blobs were queued.
+    /// `hydrate_max_blobs` blobs were queued: the walk stopped.
     Blobs,
-    /// The next blob would pass `hydrate_max_bytes`.
+    /// A file would have passed `hydrate_max_bytes` and was left out: the walk went on.
     Bytes,
 }
 
@@ -137,8 +139,11 @@ struct Call {
     limits: Limits,
     blobs: usize,
     bytes: u64,
-    /// The bound the call reached, once it has.
+    /// The bound the call reached, once it has: the walk stops there.
     reached: Option<Bound>,
+    /// Whether the tree being walked had a file left out for `hydrate_max_bytes`: the walk goes
+    /// on past it, to the files that fit.
+    skipped: bool,
 }
 
 impl Call {
@@ -148,6 +153,7 @@ impl Call {
             blobs: 0,
             bytes: 0,
             reached: None,
+            skipped: false,
         }
     }
 }
@@ -184,13 +190,18 @@ impl Inner {
             self.counters.turned(Turned::ReservedKey);
             return None;
         }
-        if call.blobs >= self.config.prefetch.max_blobs {
-            self.counters.turned(Turned::TooManyBlobs);
-            return Some(Bound::Blobs);
-        }
-        if size > self.config.prefetch.max_bytes.saturating_sub(call.bytes) {
-            self.counters.turned(Turned::TooManyBytes);
-            return Some(Bound::Bytes);
+        // A blob the cache holds, or that is queued or running, costs the call nothing, so the
+        // bounds are judged only for a blob that would be queued.
+        if !self.holds(&sha256) {
+            if call.blobs >= self.config.prefetch.max_blobs {
+                self.counters.turned(Turned::TooManyBlobs);
+                return Some(Bound::Blobs);
+            }
+            if size > self.config.prefetch.max_bytes.saturating_sub(call.bytes) {
+                self.counters.turned(Turned::TooManyBytes);
+                call.skipped = true;
+                return None;
+            }
         }
         let blob = Blob {
             sha256: &sha256,
@@ -225,6 +236,7 @@ impl LocalCache {
 
     /// Walks the tree `root`, handing its blobs to the queue as it meets them.
     async fn walk(&self, root: &TreeDigest, call: &mut Call) -> Result<(), Refusal> {
+        call.skipped = false;
         let mut opened = HashSet::from([*root]);
         let first = self.manifest(root).await?;
         let mut entries = first.manifest.children.len() as u64;
@@ -281,7 +293,11 @@ impl LocalCache {
                 Some(bound) => Tree::Cut(bound),
                 None => match self.walk(tree, &mut call).await {
                     Err(refusal) => Tree::Refused(refusal),
-                    Ok(()) => call.reached.map_or(Tree::Expanded, Tree::Cut),
+                    Ok(()) => match (call.reached, call.skipped) {
+                        (Some(bound), _) => Tree::Cut(bound),
+                        (None, true) => Tree::Cut(Bound::Bytes),
+                        (None, false) => Tree::Expanded,
+                    },
                 },
             };
             self.inner.counters.walked(match end {

@@ -66,10 +66,10 @@ pub struct PrefetchConfig {
     /// The most trees one call may expand: a call with more is refused whole.
     pub max_trees: usize,
     /// The most blobs one call may queue, all its trees together; the walk stops at the first
-    /// that would pass it.
+    /// blob to queue past it.
     pub max_blobs: usize,
-    /// The most bytes of the blobs one call may queue; the walk stops at the first blob that
-    /// would pass it.
+    /// The most bytes of the blobs one call may queue; a file that would pass it is
+    /// left out and the walk goes on.
     pub max_bytes: u64,
 }
 
@@ -201,6 +201,15 @@ impl Inner {
             self.pump();
         }
         outcome
+    }
+
+    /// Whether the cache holds the blob of `sha256`, or a fill of it is queued or running: a
+    /// blob [`queue_blob`](Self::queue_blob) would say `Present` or `Joined` of, without queueing.
+    pub(super) fn holds(&self, sha256: &str) -> bool {
+        let name = name_of(&object_key(sha256));
+        let flights = locked(&self.flights);
+        let now = self.clock.now();
+        flights.contains_key(&name.hex) || locked(&self.index).used(&name.hex, now).is_some()
     }
 
     /// Puts the blob in the table and the queue, unless it is turned away.

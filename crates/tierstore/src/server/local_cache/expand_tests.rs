@@ -493,10 +493,10 @@ async fn blobs_the_cache_holds_cost_the_call_nothing() {
     assert_eq!(counters.blobs(Prefetched::Queued), 2);
 }
 
-/// Asserts that the walk stops at the blob that would take the call past `hydrate_max_bytes`, counted
-/// `too_many_bytes`, with the blobs before it queued; that blobs adding up to exactly the bound are
-/// whole; and that a blob larger than the bound by itself ends the walk with nothing queued. It would
-/// catch a bound off by one, or one judged after the blob is queued.
+/// Asserts that the blob that would take the call past `hydrate_max_bytes` is left out, counted
+/// `too_many_bytes`, with the blobs before it queued and the tree ended `Cut`; that blobs adding up
+/// to exactly the bound are whole; and that a blob larger than the bound by itself queues nothing.
+/// It would catch a bound off by one, or one judged after the blob is queued.
 #[tokio::test]
 async fn max_bytes_after_expansion_drops_the_rest() {
     let change = |config: &mut CacheConfig| config.prefetch.max_bytes = 5000;
@@ -528,6 +528,81 @@ async fn max_bytes_after_expansion_drops_the_rest() {
     let ended = rig.cache.expand_trees(&[large]).await.unwrap();
     assert_eq!(ended, [Tree::Cut(Bound::Bytes)]);
     assert_eq!(tally(&rig), (0, 0, 1, 0));
+}
+
+/// Asserts that a blob the cache holds or has in flight is judged against no bound, wherever the
+/// walk meets it: with `hydrate_max_blobs` of 1, a tree of a new blob, a held one, then a new one
+/// counts the held one `present` and stops at the third (`too_many_blobs`), where it used to be
+/// stopped at the second; and a tree whose files all fit the bound or are held is whole, though
+/// the call is at the bound when the held file is met. It would catch a bound judged before the
+/// blob is looked up.
+#[tokio::test]
+async fn a_held_blob_met_at_the_bound_is_free_and_the_walk_goes_on() {
+    let rig = rig_with("texpand-held-at-bound", |config| {
+        config.prefetch.max_blobs = 1
+    });
+    let blobs = several(&rig, 3, 100).await;
+    let held = flat(&rig, &blobs[1..2]).await;
+    assert_eq!(
+        rig.cache.expand_trees(&[held]).await.unwrap(),
+        [Tree::Expanded]
+    );
+    filled(&rig, 1).await;
+
+    let whole = manifest(&rig, &[blobs[0].file("a"), blobs[1].file("b")]).await;
+    assert_eq!(
+        rig.cache.expand_trees(&[whole]).await.unwrap(),
+        [Tree::Expanded]
+    );
+    filled(&rig, 2).await;
+
+    let rig = rig_with("texpand-held-then-new", |config| {
+        config.prefetch.max_blobs = 1
+    });
+    let blobs = several(&rig, 3, 100).await;
+    let held = flat(&rig, &blobs[1..2]).await;
+    let _ = rig.cache.expand_trees(&[held]).await.unwrap();
+    filled(&rig, 1).await;
+    let three = flat(&rig, &blobs).await;
+    assert_eq!(
+        rig.cache.expand_trees(&[three]).await.unwrap(),
+        [Tree::Cut(Bound::Blobs)]
+    );
+    filled(&rig, 2).await;
+    let counters = rig.cache.counters();
+    assert_eq!(counters.blobs(Prefetched::Present), 1);
+    assert_eq!(counters.turned_count(Turned::TooManyBlobs), 1);
+    assert!(rig.has_file(&blobs[0].key));
+    assert!(!rig.has_file(&blobs[2].key));
+}
+
+/// Asserts that a file larger than the bytes left under `hydrate_max_bytes` is left out and counted
+/// `too_many_bytes`, and the walk goes on: the smaller files after it are queued, a held file larger
+/// than the bound is free, the tree ends `Cut(Bytes)`, and the tree after it in the call is
+/// expanded. It would catch a walk that ends at the first file that does not fit.
+#[tokio::test]
+async fn a_file_too_big_for_the_bytes_left_is_skipped_and_the_walk_goes_on() {
+    let rig = rig_with("texpand-bytes-skip", |config| {
+        config.prefetch.max_bytes = 5000
+    });
+    let big = stored(&rig, 1, 6000).await;
+    let small = several(&rig, 3, 1000).await;
+    let next = stored(&rig, 9, 1000).await;
+    let mixed = manifest(
+        &rig,
+        &[big.file("a"), small[0].file("b"), small[1].file("c")],
+    )
+    .await;
+    let after = flat(&rig, &[next]).await;
+    let ended = rig.cache.expand_trees(&[mixed, after]).await.unwrap();
+    assert_eq!(ended, [Tree::Cut(Bound::Bytes), Tree::Expanded]);
+    filled(&rig, 3).await;
+    assert_eq!(tally(&rig), (1, 0, 1, 3));
+    let counters = rig.cache.counters();
+    assert_eq!(counters.turned_count(Turned::TooManyBytes), 1);
+    assert!(!rig.has_file(&big.key));
+    assert!(rig.has_file(&small[0].key) && rig.has_file(&small[1].key));
+    assert_eq!(rig.calls_on(Op::Get, &key_of(&after)), 1);
 }
 
 /// Asserts that a file whose `source.key` is under a prefix the proxy keeps for itself is not handed
