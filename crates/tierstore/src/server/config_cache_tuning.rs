@@ -89,8 +89,9 @@ pub(super) fn apply(table: &LocalCacheTable, cache: &mut CacheConfig) -> Result<
 }
 
 /// The queue's keys: `prefetch_concurrency`, `prefetch_queue` and `prefetch_queue_ttl` (one second
-/// to an hour), the holds': `hold_max` (a minute to a day) and `hold_max_count`, and the bounds of a call
-/// that expands trees into it: `hydrate_max_trees`, `hydrate_max_blobs` and `hydrate_max_bytes`.
+/// to an hour), the holds': `hold_max` (a minute to a day) and `hold_max_count`, and the bounds of
+/// a call that expands trees into it: `hydrate_max_trees`, `hydrate_max_blobs` and
+/// `hydrate_max_bytes`.
 fn prefetch(table: &LocalCacheTable, cache: &mut CacheConfig) -> Result<(), ConfigError> {
     let wanted = |value: Option<u32>, default: usize| {
         value.unwrap_or_else(|| u32::try_from(default).unwrap_or(u32::MAX))

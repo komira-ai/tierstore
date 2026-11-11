@@ -57,9 +57,9 @@ pub const HYDRATE_MAX_BLOBS: usize = 500_000;
 /// The bytes of the blobs one call may queue, unless the settings say otherwise.
 pub const HYDRATE_MAX_BYTES: u64 = 32 << 30;
 
-/// The settings of the prefetch queue and of the holds that fill it (`local_cache.prefetch_concurrency`,
-/// `prefetch_queue`, `prefetch_queue_ttl`, `hold_max` and `hold_max_count`) and of the expansion of trees
-/// into it (`hydrate_max_trees`, `hydrate_max_blobs` and `hydrate_max_bytes`).
+/// The settings of the prefetch queue (`local_cache.prefetch_concurrency`, `prefetch_queue` and
+/// `prefetch_queue_ttl`), of the holds that fill it (`hold_max` and `hold_max_count`) and of the
+/// expansion of trees into it (`hydrate_max_trees`, `hydrate_max_blobs` and `hydrate_max_bytes`).
 #[derive(Clone, Copy, Debug)]
 pub struct PrefetchConfig {
     /// The most blobs filled at once by the queue: a pool of permits of its own, which no read
