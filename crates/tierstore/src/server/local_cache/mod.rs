@@ -133,6 +133,7 @@ mod evict;
 mod expand;
 mod fill;
 mod hold;
+mod holds;
 mod index;
 mod keep;
 pub(super) mod layout;
@@ -162,6 +163,8 @@ mod front_tests;
 mod hit_tests;
 #[cfg(test)]
 mod hold_tests;
+#[cfg(test)]
+mod holds_tests;
 #[cfg(test)]
 mod keep_head_tests;
 #[cfg(test)]

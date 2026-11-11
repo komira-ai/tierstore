@@ -15,7 +15,9 @@
 //!   by recency only: pins buy speed, and running out of them must not stop a job.
 //! - [`LocalCache::unpin`] takes away every pin of a tree.
 //! - [`LocalCache::pins_live`] takes away every pin of another mount and of a tree not in the
-//!   list: the pins never outlive their mount or their attachment.
+//!   list: the pins never outlive their mount or their attachment. The pins of a hold (module
+//!   `holds`) are the one exception: they have an owner of their own, are not in the file below,
+//!   and end with their hold.
 //!
 //! A pinned object is skipped by the eviction pass and counted in `pin_skips`; it stays charged
 //! to the budget. Removals that are not eviction (the scrub finding bad bytes, a revalidation, a
@@ -40,7 +42,7 @@ use thiserror::Error;
 
 use super::index::Index;
 use super::layout::is_digest;
-use super::pin_set::{Owner, Pinned, PinsFile};
+use super::pin_set::{HOLD_MOUNT, Owner, Pinned, PinsFile};
 use super::{CacheConfig, Inner, LocalCache, locked};
 
 /// The name of the pins file in the cache directory.
@@ -58,6 +60,9 @@ pub enum PinError {
     /// A blob is named by something that is not the lower-case hex of a SHA-256.
     #[error("{0:?} is not the lower-case hex of a SHA-256")]
     NotADigest(String),
+    /// The mount id is the one that holds pin under, which no caller may name.
+    #[error("the mount id {0:?} is reserved for holds")]
+    ReservedMount(String),
 }
 
 /// What [`LocalCache::pin`] did with the blobs of a request.
@@ -71,6 +76,16 @@ pub struct PinAnswer {
     pub absent: usize,
 }
 
+/// Refuses the mount id that holds pin under: only the cache's holds name it, so that no request
+/// makes pins that nothing ends.
+fn not_reserved(mount: &str) -> Result<(), PinError> {
+    if mount == HOLD_MOUNT {
+        Err(PinError::ReservedMount(mount.to_owned()))
+    } else {
+        Ok(())
+    }
+}
+
 impl Inner {
     /// Fails unless this cache may write to its directory.
     fn pins_writable(&self) -> Result<(), PinError> {
@@ -82,7 +97,12 @@ impl Inner {
     }
 
     /// See [`LocalCache::pin`].
-    fn pin(&self, mount: &str, tree: &str, blobs: &[String]) -> Result<PinAnswer, PinError> {
+    pub(super) fn pin(
+        &self,
+        mount: &str,
+        tree: &str,
+        blobs: &[String],
+    ) -> Result<PinAnswer, PinError> {
         self.pins_writable()?;
         if let Some(bad) = blobs.iter().find(|blob| !is_digest(blob)) {
             return Err(PinError::NotADigest(bad.clone()));
@@ -178,8 +198,10 @@ impl LocalCache {
     ///
     /// # Errors
     /// [`PinError::ReadOnly`] if this cache does not hold the lock of its directory;
-    /// [`PinError::NotADigest`] for a name that is not a digest, with nothing pinned.
+    /// [`PinError::NotADigest`] for a name that is not a digest, with nothing pinned;
+    /// [`PinError::ReservedMount`] for the mount id of the holds.
     pub fn pin(&self, mount: &str, tree: &str, sha256: &[String]) -> Result<PinAnswer, PinError> {
+        not_reserved(mount)?;
         self.inner.pin(mount, tree, sha256)
     }
 
@@ -188,6 +210,7 @@ impl LocalCache {
     /// # Errors
     /// [`PinError::ReadOnly`] if this cache does not hold the lock of its directory.
     pub fn unpin(&self, mount: &str, tree: &str) -> Result<usize, PinError> {
+        not_reserved(mount)?;
         self.inner.pins_writable()?;
         let owner = Owner {
             mount: mount.to_owned(),
@@ -202,6 +225,7 @@ impl LocalCache {
     /// # Errors
     /// [`PinError::ReadOnly`] if this cache does not hold the lock of its directory.
     pub fn pins_live(&self, mount: &str, trees: &[String]) -> Result<usize, PinError> {
+        not_reserved(mount)?;
         self.inner.pins_writable()?;
         Ok(locked(&self.inner.index).pins.retain_live(mount, trees))
     }

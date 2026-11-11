@@ -208,6 +208,8 @@ cache  = true
         "hydrate_max_trees = 3",
         "hydrate_max_blobs = 3",
         "hydrate_max_bytes = \"2MiB\"",
+        "hold_max = \"1h\"",
+        "hold_max_count = 4",
     ] {
         let text = node.replace("KEY", line);
         let key = line.split(' ').next().unwrap();

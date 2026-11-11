@@ -26,6 +26,7 @@ use std::time::Duration;
 use tokio::sync::{OwnedSemaphorePermit, Semaphore};
 
 use super::fill::{Class, Ended, Filled, Held, Launch, Pending, Plan, Stop};
+use super::holds::{Holds, State};
 use super::layout::name_of;
 use super::metrics::{PrefetchFailed, bump};
 use super::source::{Blob, object_key};
@@ -50,9 +51,16 @@ pub const HYDRATE_MAX_BLOBS: usize = 500_000;
 /// The bytes of the blobs one call may queue, unless the settings say otherwise.
 pub const HYDRATE_MAX_BYTES: u64 = 32 << 30;
 
-/// The settings of the prefetch queue (`local_cache.prefetch_concurrency`, `prefetch_queue` and
-/// `prefetch_queue_ttl`) and of the expansion of trees into it (`hydrate_max_trees`,
-/// `hydrate_max_blobs` and `hydrate_max_bytes`).
+/// The longest a hold lives, unless the settings say otherwise.
+pub(super) const HOLD_MAX: Duration = Duration::from_secs(4 * 3600);
+
+/// The holds that may be open at once, unless the settings say otherwise.
+pub(super) const HOLD_MAX_COUNT: usize = 256;
+
+/// The settings of the prefetch queue, of the expansion of trees into it (`hydrate_max_trees`,
+/// `hydrate_max_blobs` and `hydrate_max_bytes`) and of the holds that fill it
+/// (`hold_max` and `hold_max_count`), with `local_cache.prefetch_concurrency`, `prefetch_queue` and
+/// `prefetch_queue_ttl`.
 #[derive(Clone, Copy, Debug)]
 pub struct PrefetchConfig {
     /// The most blobs filled at once by the queue: a pool of permits of its own, which no read
@@ -71,6 +79,10 @@ pub struct PrefetchConfig {
     /// The most bytes of the blobs one call may queue; a file that would pass it is
     /// left out and the walk goes on.
     pub max_bytes: u64,
+    /// The longest a hold lives (see the module `holds`); the time a caller asks for is cut to it.
+    pub hold_max: Duration,
+    /// The most holds open at once; a hold past it is turned away.
+    pub hold_max_count: usize,
 }
 
 impl Default for PrefetchConfig {
@@ -82,6 +94,8 @@ impl Default for PrefetchConfig {
             max_trees: HYDRATE_MAX_TREES,
             max_blobs: HYDRATE_MAX_BLOBS,
             max_bytes: HYDRATE_MAX_BYTES,
+            hold_max: HOLD_MAX,
+            hold_max_count: HOLD_MAX_COUNT,
         }
     }
 }
@@ -130,7 +144,7 @@ impl Queue {
         self.waiting.len()
     }
 
-    fn contains(&self, hex: &str) -> bool {
+    pub(super) fn contains(&self, hex: &str) -> bool {
         self.places.contains_key(hex)
     }
 
@@ -149,7 +163,7 @@ impl Queue {
     }
 
     /// The blob of `hex`, taken out of the queue.
-    fn take(&mut self, hex: &str) -> Option<Queued> {
+    pub(super) fn take(&mut self, hex: &str) -> Option<Queued> {
         let place = self.places.remove(hex)?;
         self.waiting.remove(&place)
     }
@@ -166,6 +180,8 @@ impl Queue {
 pub(super) struct Prefetch {
     pub(super) queue: Mutex<Queue>,
     pub(super) workers: Arc<Semaphore>,
+    /// The holds that asked for blobs of the queue.
+    pub(super) holds: Mutex<Holds>,
 }
 
 impl Prefetch {
@@ -173,6 +189,7 @@ impl Prefetch {
         Self {
             queue: Mutex::new(Queue::default()),
             workers: Arc::new(Semaphore::new(config.concurrency)),
+            holds: Mutex::default(),
         }
     }
 }
@@ -294,7 +311,7 @@ impl Inner {
 
     /// The blob that has waited longest and is still to be filled; the ones before it that are
     /// not are dropped, and leave the table with the table and the queue locked, so that no read
-    /// finds a place that nothing will fill.
+    /// finds a place that nothing will fill. A hold that waited for a dropped blob is told.
     pub(super) fn next_queued(&self) -> Option<Queued> {
         let mut flights = locked(&self.flights);
         let mut queue = locked(&self.prefetch.queue);
@@ -307,9 +324,14 @@ impl Inner {
             match self.waiting_blob(&queued) {
                 Ok(()) => break Some(queued),
                 Err(why) => {
-                    if let Dropped::Failed(failure) = why {
-                        self.counters.prefetch_failed(failure);
-                    }
+                    let state = match why {
+                        Dropped::Present => State::Present,
+                        Dropped::Failed(failure) => {
+                            self.counters.prefetch_failed(failure);
+                            State::Dropped
+                        }
+                    };
+                    self.hold_settle(hex, state);
                     gone.push(flights.remove(hex));
                     let _ = locked(&self.invalidated).remove(hex);
                 }

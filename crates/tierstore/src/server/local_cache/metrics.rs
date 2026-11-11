@@ -267,13 +267,14 @@ const MODE: &str = "tierstore_cache_mode";
 const PREFETCH_FILLS: &str = "tierstore_cache_prefetch_fills_total";
 const PREFETCH_PROMOTIONS: &str = "tierstore_cache_prefetch_promotions_total";
 const PREFETCH_QUEUE_DEPTH: &str = "tierstore_cache_prefetch_queue_depth";
+const HOLDS_OPEN: &str = "tierstore_cache_holds_open";
 const HYDRATE_BLOBS: &str = "tierstore_cache_hydrate_blobs_total";
 const HYDRATE_TREES: &str = "tierstore_cache_hydrate_trees_total";
 const PREFETCH_FILL_FAILURES: &str = "tierstore_cache_prefetch_fill_failures_total";
 const FILL_JOINS: &str = "tierstore_cache_fill_joins_total";
 
 /// The families of one sample, with their kinds, in the order `/metricz` shows them.
-pub(super) const PLAIN: [(&str, &str); 29] = [
+pub(super) const PLAIN: [(&str, &str); 30] = [
     (HITS, COUNTER),
     (MISSES, COUNTER),
     (BYTES_SERVED_LOCAL, COUNTER),
@@ -303,6 +304,7 @@ pub(super) const PLAIN: [(&str, &str); 29] = [
     (PREFETCH_FILLS, COUNTER),
     (PREFETCH_PROMOTIONS, COUNTER),
     (PREFETCH_QUEUE_DEPTH, GAUGE),
+    (HOLDS_OPEN, GAUGE),
 ];
 
 /// The families of one sample for each value of a label: the name, the kind, the name of the
@@ -378,6 +380,8 @@ pub struct Counters {
     pub(super) prefetch_fills: AtomicU64,
     /// The queued blobs that a read started before a worker did.
     pub(super) prefetch_promotions: AtomicU64,
+    /// The holds open now (a gauge, set when a hold opens or ends).
+    pub(super) holds_open: AtomicU64,
     /// The blobs handed to the queue, by [`Prefetched`].
     blobs: [AtomicU64; BLOBS.len()],
     /// The trees expanded, by [`Walked`].
@@ -576,6 +580,7 @@ impl Counters {
             read(&self.prefetch_fills),
             read(&self.prefetch_promotions),
             queue_depth,
+            read(&self.holds_open),
         ];
         for ((name, kind), value) in PLAIN.iter().zip(plain) {
             let _ = writeln!(text, "# TYPE {name} {kind}");

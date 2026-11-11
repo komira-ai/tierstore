@@ -34,7 +34,7 @@ fn families(text: &str) -> Result<Vec<(String, String, Vec<String>)>, String> {
 
 /// Asserts that every family of the block has exactly one `# TYPE` line, before its first
 /// sample, that its samples follow it together, that the gauges (bytes, objects, free
-/// bytes, staging files, the mode and the depth of the prefetch queue) are typed `gauge` and every other family `counter`, and
+/// bytes, staging files, the mode, the depth of the prefetch queue and the holds open) are typed `gauge` and every other family `counter`, and
 /// that a labelled family has one sample for each of its values. It fails on a sample with no
 /// type, a family typed twice or with the wrong kind, and a missing label value.
 #[test]
@@ -52,6 +52,7 @@ fn every_family_has_one_type_line_of_its_kind_before_its_samples() {
         "tierstore_cache_staging_files",
         "tierstore_cache_mode",
         "tierstore_cache_prefetch_queue_depth",
+        "tierstore_cache_holds_open",
     ];
     for (name, kind) in &kinds {
         let want = if gauges.contains(name) {
