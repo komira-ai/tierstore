@@ -304,11 +304,11 @@ A build node's cache keeps a queue of blobs to fill before a read asks for them,
 
 The counters are in [metrics](metrics.md#the-prefetch-queue).
 
-#### Holds
+### Holds
 
 A caller that queues blobs ahead of a job names the queueing a **hold** (not in a release yet; nothing opens a hold until the hydrate call lands). A hold is a name, the trees it is for, and the blobs of those trees that it handed to the queue:
 
-- A blob of a hold is **pinned** for the hold when it is in the cache: at once if the cache held it, else when the fill that brings it ends, whoever started that fill (a worker, or a read that took the blob from the queue). The pin is the pin of [the fill socket's `pin`](operations.md#the-fill-socket) with an owner of its own, the mount `hold` and the tree `<hold>/<tree>`, so a blob of two trees or two holds is pinned for each and charged once, and `local_cache.pin_limit` bounds the pinned bytes as it does for the attachments of a mount: a blob past it is kept by recency only. A fill that ends without the blob, and a blob the queue drops when its turn comes (it waited too long, or does not fit), pin nothing.
+- A blob of a hold is **pinned** for the hold when it is in the cache: at once if the cache held it, else when the fill that brings it ends, whoever started that fill (a worker, or a read that took the blob from the queue). The pin is a `pin` of [the fill socket](operations.md#the-fill-socket) with an owner of its own, the mount `hold` and the tree `<hold>/<tree>`, so a blob of two trees or two holds is pinned for each and charged once, and `local_cache.pin_limit` bounds the pinned bytes as it does for the attachments of a mount: a blob past it is kept by recency only. A fill that ends without the blob, and a blob the queue drops when its turn comes (it waited too long, or does not fit), pin nothing.
 - A hold ends when it is released, or at the time its caller gave, cut to `local_cache.hold_max` (default 4 hours), noticed at the cache's next tick (`local_cache.lock_interval`, one second unless set). Ending it takes away its pins and drops the blobs it queued that still wait for a worker and that no other hold waits for; a fill that has started is left to finish. What the hold asked for is told by the state of each blob: filled, present, dropped, failed, or still queued for another hold or filling.
 - At most `local_cache.hold_max_count` holds are open (default 256). A hold opened again keeps its time and gains the trees.
 - The pins of a hold are in memory only. They are not in the pins file, the `pins-live` request of the fill socket leaves them, and a restart forgets the holds and their pins: a pin whose hold is gone would never end.
