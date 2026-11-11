@@ -139,6 +139,7 @@ mod listing;
 mod metrics;
 mod pin_set;
 mod pins;
+mod prefetch;
 mod revalidate;
 mod scrub;
 mod selfcheck;
@@ -187,6 +188,8 @@ mod pin_set_tests;
 #[cfg(test)]
 mod pins_tests;
 #[cfg(test)]
+mod prefetch_tests;
+#[cfg(test)]
 mod read_only_tasks_tests;
 #[cfg(test)]
 mod read_only_tests;
@@ -222,9 +225,9 @@ mod write_tests;
 use std::collections::{HashMap, HashSet};
 use std::io;
 use std::path::{Path, PathBuf};
-use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
+use std::sync::atomic::{AtomicBool, AtomicU64};
 use std::sync::{Arc, Mutex, MutexGuard, PoisonError};
-use std::time::{Duration, SystemTime, UNIX_EPOCH};
+use std::time::Duration;
 
 use async_trait::async_trait;
 use bytes::{Bytes, BytesMut};
@@ -242,6 +245,7 @@ pub use disk::{Disk, Space, SystemDisk};
 pub use hold::{Mode, Tick};
 pub use metrics::Counters;
 pub use pins::{PinAnswer, PinError};
+pub use prefetch::{PREFETCH_CONCURRENCY, PREFETCH_QUEUE, PREFETCH_QUEUE_TTL, PrefetchConfig};
 pub use scrub::{Every, SCRUB_MIN_ROUND, SCRUB_RATE, SCRUB_TICK, ScrubPass, Scrubber, Ticker};
 pub use selfcheck::{LocalTierFailure, check_local};
 
@@ -382,6 +386,8 @@ pub struct CacheConfig {
     /// requests more of the proxy for every put of a new key (a hot HEAD, a marker GET and a cold
     /// HEAD), and with `false` the put is only the upstream's own (see `put_through`, in `keep`).
     pub head_before_put: bool,
+    /// The queue of blobs filled before a read asks for them (see the module `prefetch`).
+    pub prefetch: PrefetchConfig,
 }
 
 impl CacheConfig {
@@ -415,6 +421,7 @@ impl CacheConfig {
             listing_calls: listing::LISTING_CALLS,
             revalidate_after: None,
             head_before_put: true,
+            prefetch: PrefetchConfig::default(),
         }
     }
 
@@ -500,6 +507,8 @@ pub(super) struct Inner {
     permits: Arc<Semaphore>,
     /// One permit for each fill of the fill socket that may run; a request waits for one.
     source_permits: Arc<Semaphore>,
+    /// The blobs that wait to be filled, and the workers that fill them.
+    prefetch: prefetch::Prefetch,
     /// One permit for each put that may be copied to the stage directory; held until it ends.
     keeps: Arc<Semaphore>,
     /// Called after a keep has put its object in the index.
@@ -511,20 +520,6 @@ pub(super) struct Inner {
     evicting: AtomicBool,
     /// Whether this cache may write to its directory, and the lock that says so.
     hold: Hold,
-}
-
-/// A prefix for the staging files of one cache that no other cache has: the process id, the time
-/// of the open in nanoseconds and the number of caches opened in this process before it.
-fn stage_prefix() -> String {
-    static OPENED: AtomicU64 = AtomicU64::new(0);
-    #[expect(
-        clippy::disallowed_methods,
-        reason = "a name no other cache shares, not a time anyone judges"
-    )]
-    let since = SystemTime::now().duration_since(UNIX_EPOCH);
-    let nanos = since.map_or(0, |elapsed| elapsed.as_nanos());
-    let number = OPENED.fetch_add(1, Ordering::Relaxed);
-    format!("{:x}-{nanos:x}-{number:x}", std::process::id())
 }
 
 /// The index of the objects a scan found, the least recently used first.
@@ -637,6 +632,7 @@ impl LocalCache {
         let permits = Arc::new(Semaphore::new(config.max_concurrent_fills.max(1)));
         let keeps = Arc::new(Semaphore::new(config.max_concurrent_keeps.max(1)));
         let source_permits = Arc::new(Semaphore::new(config.fill_socket_concurrency.max(1)));
+        let prefetch = prefetch::Prefetch::new(&config.prefetch);
         let inner = Inner {
             upstream,
             disk,
@@ -648,10 +644,11 @@ impl LocalCache {
             invalidated: Mutex::new(HashSet::new()),
             writers: Mutex::new(HashMap::new()),
             staged: AtomicU64::new(0),
-            stage_prefix: stage_prefix(),
+            stage_prefix: layout::stage_prefix(),
             reserved: AtomicU64::new(0),
             permits,
             source_permits,
+            prefetch,
             keeps,
             observer,
             #[cfg(test)]
@@ -694,9 +691,9 @@ impl LocalCache {
             .space(&inner.config.path)
             .map_or(0, |space| space.free);
         let read_write = inner.read_write();
-        inner
-            .counters
-            .render(bytes, objects as u64, free, read_write)
+        let depth = locked(&inner.prefetch.queue).len() as u64;
+        let counters = &inner.counters;
+        counters.render(bytes, objects as u64, free, read_write, depth)
     }
 }
 

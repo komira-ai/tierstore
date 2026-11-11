@@ -19,6 +19,8 @@ use std::collections::{HashMap, HashSet};
 use std::io;
 use std::os::unix::fs::PermissionsExt as _;
 use std::path::{Path, PathBuf};
+use std::sync::atomic::{AtomicU64, Ordering};
+use std::time::{SystemTime, UNIX_EPOCH};
 
 use serde::{Deserialize, Serialize};
 use sha2::{Digest, Sha256};
@@ -363,4 +365,18 @@ fn walk(root: &Path, delete: bool) -> Scanned {
         }
     }
     scanned
+}
+
+/// A prefix for the staging files of one cache that no other cache has: the process id, the time
+/// of the open in nanoseconds and the number of caches opened in this process before it.
+pub(super) fn stage_prefix() -> String {
+    static OPENED: AtomicU64 = AtomicU64::new(0);
+    #[expect(
+        clippy::disallowed_methods,
+        reason = "a name no other cache shares, not a time anyone judges"
+    )]
+    let since = SystemTime::now().duration_since(UNIX_EPOCH);
+    let nanos = since.map_or(0, |elapsed| elapsed.as_nanos());
+    let number = OPENED.fetch_add(1, Ordering::Relaxed);
+    format!("{:x}-{nanos:x}-{number:x}", std::process::id())
 }

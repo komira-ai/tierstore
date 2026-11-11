@@ -187,7 +187,7 @@ impl Future for Pending {
 }
 
 /// The task of a fill.
-type Task = JoinHandle<Ended>;
+pub(super) type Task = JoinHandle<Ended>;
 
 /// What a fill reads from the upstream.
 pub(super) enum Read<'a> {
@@ -239,6 +239,42 @@ pub(super) enum Class {
     /// A fill asked for over the fill socket, which has waited for a permit of
     /// `fill_socket_concurrency`.
     Mount(OwnedSemaphorePermit),
+}
+
+/// The permit a fill that is running holds, which says which pool it came from.
+pub(super) struct Held {
+    permit: OwnedSemaphorePermit,
+    /// Whether the permit is one of `prefetch_concurrency`: when the fill ends, the next queued
+    /// blob starts on it.
+    prefetch: bool,
+}
+
+impl Held {
+    /// A permit of a pool of the reads: `max_concurrent_fills` or `fill_socket_concurrency`.
+    pub(super) fn foreground(permit: OwnedSemaphorePermit) -> Self {
+        Self {
+            permit,
+            prefetch: false,
+        }
+    }
+
+    /// A permit of the prefetch workers.
+    pub(super) fn worker(permit: OwnedSemaphorePermit) -> Self {
+        Self {
+            permit,
+            prefetch: true,
+        }
+    }
+}
+
+/// What starts a fill that has its place in the table: the object it reads, the sender that
+/// gives its task to the readers that wait for it, and the sender of its progress.
+pub(super) struct Launch {
+    pub(super) key: String,
+    pub(super) name: Name,
+    pub(super) plan: Plan,
+    live: watch::Sender<Live>,
+    sender: oneshot::Sender<Task>,
 }
 
 /// Why a fill ended without an object.
@@ -462,6 +498,11 @@ impl Inner {
     /// The S3 front does not take an entry of origin `span` for an object of the upstream: it
     /// is answered [`Filled::Skipped`], so its read goes to the upstream.
     ///
+    /// A fill that is queued (see the module `prefetch`) has its place in the table and has not
+    /// started: the read that finds it starts it, on the permit of `class`, and the queue forgets
+    /// it. The S3 front, which waits for no permit, is answered [`Filled::Skipped`] if all are
+    /// taken, and the blob stays queued.
+    ///
     /// The fill is started after the table of the fills that run is unlocked. The task is
     /// spawned with its [`Flight`], and a spawn that drops the task at once (the runtime is
     /// shutting down) drops the flight on this thread, which locks the table: with the table
@@ -492,36 +533,64 @@ impl Inner {
                 Entry::Occupied(running) if s3 && running.get().span => {
                     return Err(Filled::Skipped);
                 }
-                Entry::Occupied(running) => (running.get().clone(), None),
+                Entry::Occupied(running) => {
+                    let pending = running.get().clone();
+                    // A fill that is still queued is started now, on the permit of this read.
+                    let launch = self.take_queued(&name.hex, class)?;
+                    if launch.is_none() && !pending.keeping {
+                        self.counters.joined(s3);
+                    }
+                    (pending, launch)
+                }
                 Entry::Vacant(slot) => {
-                    let permit = match class {
-                        Class::Mount(permit) => permit,
-                        Class::S3 => {
-                            let Ok(permit) = Arc::clone(&self.permits).try_acquire_owned() else {
-                                bump(&self.counters.fills_skipped);
-                                bump(&self.counters.fills_skipped_busy);
-                                return Err(Filled::Skipped);
-                            };
-                            permit
-                        }
-                    };
-                    let (sender, receiver) = oneshot::channel();
-                    let (live, progress) = watch::channel(Live::Starting);
-                    let pending = Pending {
-                        done: self.waiting(receiver),
-                        live: progress,
-                        span: plan.origin(key) == Origin::Span,
-                        keeping: false,
-                    };
+                    let permit = self.foreground_permit(class)?;
+                    let (pending, launch) = self.place(key, name, plan);
                     slot.insert(pending.clone());
-                    (pending, Some((permit, sender, live)))
+                    (pending, Some((launch, Held::foreground(permit))))
                 }
             }
         };
-        if let Some((permit, sender, live)) = launch {
-            self.start(key, name, plan, (permit, live), sender);
+        if let Some((launch, held)) = launch {
+            self.start(launch, held);
         }
         Ok(pending)
+    }
+
+    /// The permit of the pool of `class` for a read that starts a fill: the one it holds, or, for
+    /// the S3 front, one it does not wait for (the read is answered from the upstream if all are
+    /// taken).
+    pub(super) fn foreground_permit(&self, class: Class) -> Result<OwnedSemaphorePermit, Filled> {
+        match class {
+            Class::Mount(permit) => Ok(permit),
+            Class::S3 => Arc::clone(&self.permits).try_acquire_owned().map_err(|_| {
+                bump(&self.counters.fills_skipped);
+                bump(&self.counters.fills_skipped_busy);
+                Filled::Skipped
+            }),
+        }
+    }
+
+    /// The place of a fill of `plan` in the table of the fills (to be put there by the caller,
+    /// which holds the table) and what starts it. A reader that waits on the place waits for the
+    /// task that `start` gives it.
+    pub(super) fn place(self: &Arc<Self>, key: &str, name: &Name, plan: Plan) -> (Pending, Launch) {
+        let (sender, receiver) = oneshot::channel();
+        let (live, progress) = watch::channel(Live::Starting);
+        let pending = Pending {
+            done: self.waiting(receiver),
+            live: progress,
+            span: plan.origin(key) == Origin::Span,
+            keeping: false,
+        };
+        let (key, name) = (key.to_owned(), name.clone());
+        let launch = Launch {
+            key,
+            name,
+            plan,
+            live,
+            sender,
+        };
+        (pending, launch)
     }
 
     /// The fill that waits for the task that `receiver` is to be given, and for its end. A task
@@ -548,15 +617,15 @@ impl Inner {
     /// takes it out of the table of the fills that run when it ends, panics or is cancelled. The
     /// permit is held until then. The task is sent to the fill that waits for it. The table must
     /// not be locked by the caller (see [`join_or_start`](Self::join_or_start)).
-    fn start(
-        self: &Arc<Self>,
-        key: &str,
-        name: &Name,
-        plan: Plan,
-        held: (OwnedSemaphorePermit, watch::Sender<Live>),
-        sender: oneshot::Sender<Task>,
-    ) {
-        let (inner, key, name) = (Arc::clone(self), key.to_owned(), name.clone());
+    pub(super) fn start(self: &Arc<Self>, launch: Launch, held: Held) {
+        let Launch {
+            key,
+            name,
+            plan,
+            live,
+            sender,
+        } = launch;
+        let inner = Arc::clone(self);
         // Built before the spawn, so a task dropped before its first poll still takes its key out.
         let flight = Flight {
             inner: Arc::clone(&inner),
@@ -564,9 +633,13 @@ impl Inner {
             _gate: None,
         };
         let task = tokio::spawn(async move {
-            let (_permit, live) = held;
             let _flight = flight;
-            inner.fill(&key, &name, &plan, &live).await
+            let ended = inner.fill(&key, &name, &plan, &live).await;
+            let Held { permit, prefetch } = held;
+            if prefetch {
+                inner.prefetch_ended(&ended, permit);
+            }
+            ended
         });
         // The receiver is in the fill that is in the table, and in the caller: it is there.
         let _ = sender.send(task);

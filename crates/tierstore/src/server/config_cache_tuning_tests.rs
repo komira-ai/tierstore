@@ -8,7 +8,8 @@ use super::super::config_cache::{CacheSettings, LocalCacheTable};
 use super::super::config_testing::DEFAULTS;
 use super::super::config_unknown::fields_of;
 use super::super::local_cache::{
-    CacheConfig, FILL_CHUNK, FORGET_LIMIT, LOCK_INTERVAL, PASS_INTERVAL, SCRUB_TICK,
+    CacheConfig, FILL_CHUNK, FORGET_LIMIT, LOCK_INTERVAL, PASS_INTERVAL, PREFETCH_CONCURRENCY,
+    PREFETCH_QUEUE, PREFETCH_QUEUE_TTL, SCRUB_TICK,
 };
 
 /// The least a build node's file can say, with `more` lines in `[local_cache]`.
@@ -274,4 +275,87 @@ fn pin_limit_is_half_the_budget_unless_given_and_is_held_to_the_budget() {
         refusal("pin_limit = 1001"),
         "local_cache.pin_limit: 1001 is not between 0 and 1000"
     );
+}
+
+/// Asserts the keys of the prefetch queue: a file that gives none has the defaults of the code
+/// (2 workers, 16384 blobs, 120 seconds), a value given reaches the setting, a value out of range is
+/// refused naming the key, the value and the range, the ends of each range are taken (0 workers
+/// turns the queue off), and the keys are fields of the table.
+#[test]
+fn the_prefetch_keys_have_defaults_ranges_and_reach_the_queue() {
+    let old = cache_of("").cache.prefetch;
+    let defaults = (PREFETCH_CONCURRENCY, PREFETCH_QUEUE, PREFETCH_QUEUE_TTL);
+    assert_eq!(defaults, (2, 16_384, Duration::from_secs(120)));
+    assert_eq!((old.concurrency, old.queue, old.ttl), defaults);
+
+    let given = "prefetch_concurrency = 5\nprefetch_queue = 7\nprefetch_queue_ttl = \"30s\"";
+    let set = cache_of(given).cache.prefetch;
+    assert_eq!((set.concurrency, set.queue), (5, 7));
+    assert_eq!(set.ttl, Duration::from_secs(30));
+
+    let counts = [
+        ("prefetch_concurrency", 0_u64, 64_u64),
+        ("prefetch_queue", 1, 1_000_000),
+    ];
+    for (key, low, high) in counts {
+        let under = low.checked_sub(1);
+        if let Some(under) = under {
+            let why = refusal(&format!("{key} = {under}"));
+            assert!(why.starts_with(&format!("local_cache.{key}")), "{why}");
+        }
+        let over = high + 1;
+        assert_eq!(
+            refusal(&format!("{key} = {over}")),
+            format!("local_cache.{key}: {over} is not between {low} and {high}")
+        );
+    }
+    assert_eq!(
+        refusal("prefetch_queue = 0"),
+        "local_cache.prefetch_queue: 0 is not between 1 and 1000000"
+    );
+    assert_eq!(
+        cache_of("prefetch_concurrency = 0")
+            .cache
+            .prefetch
+            .concurrency,
+        0
+    );
+    assert_eq!(
+        cache_of("prefetch_concurrency = 64")
+            .cache
+            .prefetch
+            .concurrency,
+        64
+    );
+    assert_eq!(cache_of("prefetch_queue = 1").cache.prefetch.queue, 1);
+    assert_eq!(
+        cache_of("prefetch_queue = 1000000").cache.prefetch.queue,
+        1_000_000
+    );
+
+    assert_eq!(
+        refusal("prefetch_queue_ttl = \"999ms\""),
+        "local_cache.prefetch_queue_ttl: 999ms is not between 1000ms and 3600000ms"
+    );
+    assert_eq!(
+        refusal("prefetch_queue_ttl = \"61m\""),
+        "local_cache.prefetch_queue_ttl: 3660000ms is not between 1000ms and 3600000ms"
+    );
+    let ttl = |value: &str| {
+        cache_of(&format!("prefetch_queue_ttl = \"{value}\""))
+            .cache
+            .prefetch
+            .ttl
+    };
+    assert_eq!(ttl("1s"), Duration::from_secs(1));
+    assert_eq!(ttl("1h"), Duration::from_secs(3600));
+
+    let fields = fields_of::<LocalCacheTable>();
+    for key in [
+        "prefetch_concurrency",
+        "prefetch_queue",
+        "prefetch_queue_ttl",
+    ] {
+        assert!(fields.contains(&key), "{key}");
+    }
 }

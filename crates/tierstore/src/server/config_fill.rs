@@ -70,8 +70,8 @@ pub(super) fn check_fill_outside_cache(socket: &Path, cache: &Path) -> Result<()
     Ok(())
 }
 
-/// Refuses the keys of the fill socket in a file whose node has no fill socket: a storage node
-/// with a cache in front of its proxy.
+/// Refuses the keys of the fill socket, and of the prefetch queue, in a file whose node has none: a
+/// storage node with a cache in front of its proxy.
 ///
 /// # Errors
 /// A key of the fill socket that is given; it names the key.
@@ -84,6 +84,13 @@ pub(super) fn refuse_fill_keys(table: &LocalCacheTable) -> Result<(), ConfigErro
             table.fill_socket_concurrency.is_some(),
         ),
         ("fill_socket_wait", table.fill_socket_wait.is_some()),
+    ];
+    refuse("local_cache", why, &keys)?;
+    let why = "only a build node has a prefetch queue";
+    let keys = [
+        ("prefetch_concurrency", table.prefetch_concurrency.is_some()),
+        ("prefetch_queue", table.prefetch_queue.is_some()),
+        ("prefetch_queue_ttl", table.prefetch_queue_ttl.is_some()),
     ];
     refuse("local_cache", why, &keys)
 }

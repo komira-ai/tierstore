@@ -16,8 +16,9 @@
 //! These fills have a pool of permits of their own (`fill_socket_concurrency`) and wait for one
 //! up to `fill_socket_wait`: a request that finds none free is answered [`FillError::Busy`]. They
 //! never take a permit of `max_concurrent_fills`, which a miss of the S3 front takes without
-//! waiting. A request for a digest that has a fill running, started by this socket or by the S3
-//! front, joins it and takes no permit; every fetch is a task of its own, so a caller that gives
+//! waiting. A request for a digest that has a fill running, started by this socket, by the S3
+//! front or by a worker of the prefetch queue, joins it and takes no permit; one for a digest that
+//! is only queued starts it, on a permit of this socket's pool. Every fetch is a task of its own, so a caller that gives
 //! up does not stop it. A cache that does not hold the lock of its
 //! directory fills nothing ([`FillError::ReadOnly`]).
 //!
@@ -97,7 +98,7 @@ pub(super) fn status_of(error: &Error) -> u16 {
 }
 
 /// The key of the object the entry named by `sha256` stands for.
-fn object_key(sha256: &str) -> String {
+pub(super) fn object_key(sha256: &str) -> String {
     format!("cas/l/{sha256}")
 }
 
@@ -160,9 +161,15 @@ impl Inner {
             if self.present(&wanted.name).await {
                 return Ok(());
             }
+            // A fill that is only queued is not joined: this request starts it (`join_or_start`
+            // takes it out of the queue), on a permit of its own pool.
             let running = locked(&self.flights).get(&wanted.name.hex).cloned();
+            let running = running.filter(|_| !self.queued(&wanted.name.hex));
             let pending = match running {
-                Some(running) => running,
+                Some(running) => {
+                    self.counters.joined(false);
+                    running
+                }
                 None => {
                     let waiting = self.source_permits.clone().acquire_owned();
                     let waited = tokio::time::timeout(self.config.fill_socket_wait, waiting).await;
