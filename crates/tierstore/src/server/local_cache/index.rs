@@ -8,6 +8,7 @@ use std::collections::{BTreeMap, HashMap};
 
 use crate::Meta;
 
+use super::layout::Origin;
 use super::pin_set::PinSet;
 
 /// One object.
@@ -22,6 +23,8 @@ pub(super) struct Entry {
     checked: Option<u64>,
     /// The place in the order of use.
     used: u64,
+    /// Where the bytes came from: an entry of origin `span` is not an object of the upstream.
+    pub(super) origin: Origin,
 }
 
 impl Entry {
@@ -66,11 +69,17 @@ impl Index {
 
     /// Adds the object `hex`, as the most recently used; replaces one of that name. `checked` is
     /// when the upstream was last seen to hold this version of it (see [`Entry::checked`]).
-    pub(super) fn insert(
+    pub(super) fn insert(&mut self, hex: &str, meta: (u64, String, u64), checked: Option<u64>) {
+        self.insert_from(hex, meta, checked, Origin::Object);
+    }
+
+    /// [`insert`](Self::insert) of an object of the given origin.
+    pub(super) fn insert_from(
         &mut self,
         hex: &str,
         (size, tag, modified): (u64, String, u64),
         checked: Option<u64>,
+        origin: Origin,
     ) {
         let _ = self.detach(hex);
         let used = self.next;
@@ -81,6 +90,7 @@ impl Index {
             modified,
             checked,
             used,
+            origin,
         };
         self.order.insert(used, hex.to_owned());
         self.entries.insert(hex.to_owned(), entry);

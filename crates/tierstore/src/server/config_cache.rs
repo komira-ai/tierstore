@@ -23,6 +23,12 @@
 //! # fill_socket        = "/var/lib/tierstore/fill.sock"   # default: fill.sock in the state dir
 //! # fill_socket_concurrency = 16
 //! # fill_socket_wait        = "60s"
+//! # prefetch_concurrency    = 2
+//! # prefetch_queue          = 16384
+//! # prefetch_queue_ttl      = "120s"
+//! # hydrate_max_trees       = 64
+//! # hydrate_max_blobs       = 500000
+//! # hydrate_max_bytes       = "32GiB"
 //!
 //! [cold_store]                  # the upstream: an S3 endpoint
 //! kind             = "s3"
@@ -218,6 +224,24 @@ pub(super) struct LocalCacheTable {
     /// 1h, default `60s`).
     #[serde(default)]
     pub fill_socket_wait: Option<Dur>,
+    /// The blobs the prefetch queue fills at once (0 to 64, default 2; 0 turns the queue off).
+    #[serde(default)]
+    pub prefetch_concurrency: Option<u32>,
+    /// The blobs that may wait in the prefetch queue (1 to 1000000, default 16384).
+    #[serde(default)]
+    pub prefetch_queue: Option<u32>,
+    /// The longest a blob waits in the prefetch queue (1s to 1h, default `120s`).
+    #[serde(default)]
+    pub prefetch_queue_ttl: Option<Dur>,
+    /// The trees one call may expand into the queue (1 to 4096, default 64).
+    #[serde(default)]
+    pub hydrate_max_trees: Option<u32>,
+    /// The blobs one call may queue, all its trees together (1 to 10000000, default 500000).
+    #[serde(default)]
+    pub hydrate_max_blobs: Option<u32>,
+    /// The bytes of the blobs one call may queue (1MiB to 1TiB, default 32GiB).
+    #[serde(default)]
+    pub hydrate_max_bytes: Option<Size>,
 }
 
 /// What a build-node file stands for.

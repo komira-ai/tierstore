@@ -3,7 +3,7 @@
 use std::path::Path;
 
 use super::index::Index;
-use super::layout::{self, Sidecar, data_path, is_digest, meta_path, name_of, stage_dir};
+use super::layout::{self, Origin, Sidecar, data_path, is_digest, meta_path, name_of, stage_dir};
 use super::metrics::read;
 use super::testing::{Quirk, Rig, digest, pattern};
 use super::{CacheConfig, Disk, LocalCache, SystemDisk};
@@ -29,6 +29,7 @@ fn sidecar(size: u64) -> Vec<u8> {
         sha256: digest(b"x"),
         tag: "tag".to_owned(),
         modified: 0,
+        origin: Origin::Object,
     };
     serde_json::to_vec(&sidecar).unwrap()
 }

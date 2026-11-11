@@ -380,11 +380,12 @@ Two processes on a build node, one binary, one package:
   `PrivateDevices=yes`, an empty capability set). It gains a **fill socket**: a Unix socket in its runtime directory, mode
   0600, its own user only, peer credentials checked as the hand-off socket checks them (`server/handoff/`). It accepts:
   - `fill <sha256> <size> from <key> @ <offset>`: fetch that range from upstream, check that it hashes to `<sha256>`,
-    and publish it in the cache under the key `_tiering/fill/<sha256>`, then answer `ok`, or the reason it did not
-    (`upstream <status>`, `mismatch`, `no space`). `_tiering/` is a reserved prefix (`journal.rs`: `RESERVED_PREFIXES`)
-    that every front refuses to clients and the cache refuses to read for them (`local_cache/hit_tests.rs`:
-    `a_read_of_a_reserved_key_is_refused_before_the_upstream_is_asked`), so a source fill is never visible to an S3
-    client, on any release. A request without `<size>` and source (a tree manifest, whose root size the attaching client
+    and publish it in the cache as the entry named by `<sha256>` (since the prefetch design, the same entry the object
+    `cas/l/<sha256>` has; earlier releases kept it under the reserved key `_tiering/fill/<sha256>`), then answer `ok`, or
+    the reason it did not (`upstream <status>`, `mismatch`, `no space`). The entry's sidecar says its origin: `span` for
+    a blob cut out of a pack, which the S3 front does not serve as the object `cas/l/<sha256>` (a `GET` or `HEAD` of
+    that key goes to the upstream), so a source fill is never visible to an S3 client as an object that was written
+    (`local_cache/names_tests.rs`: `span_entry_is_not_an_s3_object`). A request without `<size>` and source (a tree manifest, whose root size the attaching client
     does not know) fills the whole object `cas/l/<sha256>`, up to the 64 MiB manifest limit.
   - `touch <sha256> ...`: mark those blobs used now, for the cache's recency. Not answered; best effort.
   - `pin <mount id> <tree> <sha256> ...`, `unpin <mount id> <tree>`, `pins-live <mount id> <trees>`: section 6.5. Each
@@ -407,7 +408,7 @@ Two processes on a build node, one binary, one package:
   privilege, because the NFS export is mounted at boot (8) and `mount_nfs` of a loopback export needs no root when the mount point is owned by the mounting user (Measured: macos E14). It has **no network**: on Linux `RestrictAddressFamilies=AF_UNIX`;
   on macOS its NFS listener is bound to loopback (or a Unix socket, MP1) and it makes no outbound connection. It talks to
   the node's tierstore over the fill socket only, and opens the cache's files read-only, at the path the cache's layout
-  gives the key `_tiering/fill/<sha256>` (`local_cache/layout.rs`: `name_of`, `data_path`).
+  gives the digest (`cas/l/<sha256>`) (`local_cache/layout.rs`: `name_of`, `data_path`).
 
 The Linux unit of `tierstore fs` must make its mount in the host's mount namespace, so that the job runtime and the next
 instance see it. Every option of `tierstore@.service` that gives a service a mount namespace of its own, from which a mount
@@ -578,7 +579,7 @@ On an `OPEN` of a non-empty file of an attached tree:
 
 1. If a backing id is live for the blob (some open of it, in any tree, is not released), reply `FOPEN_PASSTHROUGH` with
    that id and count the open.
-2. Else, if the cache file of `_tiering/fill/<sha256>` exists, open it read-only, register it
+2. Else, if the cache file of the digest `<sha256>` exists, open it read-only, register it
    (`FUSE_DEV_IOC_BACKING_OPEN`), record blob, id and count in the backing table (7.1), send `touch <sha256>` (and `pin`,
    6.5) on the fill socket, and reply as in step 1. From then on the job's `read`, `mmap` and `splice` go to the cache
    file in the kernel and never reach `tierstore fs` [S1].
@@ -1235,9 +1236,10 @@ New formats, each versioned and additive from its first release:
   `meta/tmp`) is read by the release that serves the view and by the runtime's output collector; it is versioned by
   `meta/layout` and lives only as
   long as its run.
-- **Source fills and pins** (6.2, 6.5) are cache entries under `_tiering/fill/`, a prefix every release already refuses to
-  clients, and a new file `<cache>/pins`. A release without them finds the entries in its index at start and evicts them
-  like any other, and ignores the pins file (the cache's scan reads `obj/` and `.stage/` only, `local_cache/layout.rs`;
+- **Source fills and pins** (6.2, 6.5) were cache entries under `_tiering/fill/`, a prefix every release already refuses
+  to clients, and a new file `<cache>/pins`; they are now entries named by their digest with an additive sidecar field
+  `origin` (prefetch-api.md, section 4), and a start renames the old ones. A release without them finds the entries in
+  its index at start and evicts them like any other, and ignores the pins file (the cache's scan reads `obj/` and `.stage/` only, `local_cache/layout.rs`;
   to be pinned by a test in the pull request that adds pins).
 - **The fill socket, the control socket and the hand-off conversation of `tierstore fs`** are local interfaces between
   processes of one node, not public ones; each is versioned by its first line (`take-fs 1`), and a release offers the
@@ -1566,7 +1568,7 @@ owner has not confirmed them.** Two decisions are open and new: the Linux kernel
 | `fuse-overlayfs` (a userspace overlay) on Linux | Every write would cross to userspace; the kernel overlay is what both runtimes already run, and the core's views are the userspace overlay where one is needed. |
 | tierstore reads REAPI `Directory` messages | Binds tierstore to one protocol, and still needs blob locations from the client. |
 | Lazy metadata (load a directory on its first lookup, as Buildbarn [S6]) | Inode numbers would depend on lookup order, which a restarted or new process cannot recover (6.3). |
-| Source fills under the client-visible key `cas/l/<sha256>` | A `HEAD` would say the object exists on this node when upstream has no such key, and a client could skip an upload; `_tiering/fill/` is invisible to clients on every release. |
+| Source fills under the client-visible key `cas/l/<sha256>`, served as objects | A `HEAD` would say the object exists on this node when upstream has no such key, and a client could skip an upload. Superseded: the entry is named by the digest and its sidecar origin `span` keeps the S3 front from serving it (prefetch-api.md, section 4). |
 | Pins as hard links made by `tierstore fs` in the cache directory | A second writer in a single-writer directory, and the cache's non-eviction removals would leave the linked copy outside the budget (6.5). |
 | Pins by an in-memory count only | Lost on the cache's restart and update; the pins file keeps them. |
 | A whole-store namespace (`/tierstore/blobs/<digest>`) | Exposes every blob to every reader; the CEO's framing excludes it. |

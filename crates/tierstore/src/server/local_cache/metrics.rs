@@ -5,6 +5,8 @@ use std::sync::atomic::{AtomicU64, Ordering};
 
 use crate::Error;
 
+use super::prefetch::Prefetched;
+
 /// Why a fill did not leave an object in the cache.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub(super) enum FailedFill {
@@ -144,6 +146,83 @@ pub(super) enum Call {
 /// The label of each [`Call`], in the order of the enum.
 const CALLS: [&str; 4] = ["get", "head", "list", "list_uploads"];
 
+/// Why a fill of the prefetch queue left nothing in the cache.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub(super) enum PrefetchFailed {
+    /// The upstream failed.
+    Upstream,
+    /// The upstream has no such object.
+    NotFound,
+    /// The bytes are not the digest.
+    BadDigest,
+    /// No room: the cache would pass its high water mark, or its critical mark, for the blob.
+    NoSpace,
+    /// The object was written over or deleted while it was read.
+    Changed,
+    /// The blob waited in the queue for longer than `prefetch_queue_ttl`.
+    Expired,
+    /// Any other end of a fill: a short body, the disk, the lock lost, a task that did not end.
+    Other,
+}
+
+/// The label of each [`PrefetchFailed`], in the order of the enum.
+const PREFETCH_FAILED: [&str; 7] = [
+    "upstream",
+    "not_found",
+    "bad_digest",
+    "no_space",
+    "changed",
+    "expired",
+    "other",
+];
+
+/// The label of each [`Prefetched`] (what became of a blob handed to the queue), in the order of
+/// the enum, then of each [`Turned`] (a blob the expansion of a tree did not hand to the queue).
+const BLOBS: [&str; 10] = [
+    "present",
+    "joined",
+    "queued",
+    "too_large",
+    "busy",
+    "off",
+    "read_only",
+    "too_many_blobs",
+    "too_many_bytes",
+    "reserved_key",
+];
+
+/// How many of the labels of [`BLOBS`] are those of [`Prefetched`]; the rest are [`Turned`]'s.
+const HANDED: usize = 7;
+
+/// Why a blob of a tree was not handed to the queue at all.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub(super) enum Turned {
+    /// The call had queued `hydrate_max_blobs` blobs already.
+    TooManyBlobs,
+    /// The blob would take the call past `hydrate_max_bytes`.
+    TooManyBytes,
+    /// The blob's `source.key` is under a prefix the proxy keeps for itself.
+    ReservedKey,
+}
+
+/// How the expansion of a tree ended.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub(super) enum Walked {
+    /// Every blob of the tree was handed to the queue.
+    Expanded,
+    /// The tree was not expanded: a manifest was refused or could not be fetched.
+    Refused,
+    /// The walk stopped at a bound of the call, or never began for it.
+    Cut,
+}
+
+/// The label of each [`Walked`], in the order of the enum.
+const TREES: [&str; 3] = ["expanded", "refused", "cut"];
+
+/// The label of the path of each read that joined a fill that was running, in the order of
+/// [`Counters::joined`]'s argument: the fill socket (the mount), then the S3 front.
+const JOIN_PATHS: [&str; 2] = ["mount", "s3"];
+
 /// The kind of a family that only goes up (or is set once, when the cache is opened).
 const COUNTER: &str = "counter";
 
@@ -185,9 +264,16 @@ const WRITE_KEEP_SKIPPED: &str = "tierstore_cache_write_keep_skipped_total";
 const EVICTIONS: &str = "tierstore_cache_evictions_total";
 const REVALIDATIONS: &str = "tierstore_cache_revalidations_total";
 const MODE: &str = "tierstore_cache_mode";
+const PREFETCH_FILLS: &str = "tierstore_cache_prefetch_fills_total";
+const PREFETCH_PROMOTIONS: &str = "tierstore_cache_prefetch_promotions_total";
+const PREFETCH_QUEUE_DEPTH: &str = "tierstore_cache_prefetch_queue_depth";
+const HYDRATE_BLOBS: &str = "tierstore_cache_hydrate_blobs_total";
+const HYDRATE_TREES: &str = "tierstore_cache_hydrate_trees_total";
+const PREFETCH_FILL_FAILURES: &str = "tierstore_cache_prefetch_fill_failures_total";
+const FILL_JOINS: &str = "tierstore_cache_fill_joins_total";
 
 /// The families of one sample, with their kinds, in the order `/metricz` shows them.
-pub(super) const PLAIN: [(&str, &str); 26] = [
+pub(super) const PLAIN: [(&str, &str); 29] = [
     (HITS, COUNTER),
     (MISSES, COUNTER),
     (BYTES_SERVED_LOCAL, COUNTER),
@@ -214,11 +300,14 @@ pub(super) const PLAIN: [(&str, &str); 26] = [
     (OBJECTS, GAUGE),
     (FS_FREE_BYTES, GAUGE),
     (STAGING_FILES, GAUGE),
+    (PREFETCH_FILLS, COUNTER),
+    (PREFETCH_PROMOTIONS, COUNTER),
+    (PREFETCH_QUEUE_DEPTH, GAUGE),
 ];
 
 /// The families of one sample for each value of a label: the name, the kind, the name of the
 /// label and its values, in the order `/metricz` shows them, after [`PLAIN`].
-pub(super) const LABELLED: [(&str, &str, &str, &[&str]); 7] = [
+pub(super) const LABELLED: [(&str, &str, &str, &[&str]); 11] = [
     (FILL_FAILURES, COUNTER, "reason", &FAILED),
     (UPSTREAM_READS, COUNTER, "op", &CALLS),
     (UPSTREAM_PUT_FAILURES, COUNTER, "reason", &PUT_FAILED),
@@ -226,6 +315,10 @@ pub(super) const LABELLED: [(&str, &str, &str, &[&str]); 7] = [
     (EVICTIONS, COUNTER, "reason", &EVICTED),
     (REVALIDATIONS, COUNTER, "result", &REVALIDATED),
     (MODE, GAUGE, "mode", &MODES),
+    (HYDRATE_BLOBS, COUNTER, "outcome", &BLOBS),
+    (HYDRATE_TREES, COUNTER, "outcome", &TREES),
+    (PREFETCH_FILL_FAILURES, COUNTER, "reason", &PREFETCH_FAILED),
+    (FILL_JOINS, COUNTER, "path", &JOIN_PATHS),
 ];
 
 /// The label of each mode of the cache, in the order `/metricz` shows them.
@@ -281,6 +374,18 @@ pub struct Counters {
     pub(super) discarded_at_start: AtomicU64,
     /// The files in the stage directory now.
     pub(super) staging_files: AtomicU64,
+    /// The fills of the prefetch queue that left their blob in the cache.
+    pub(super) prefetch_fills: AtomicU64,
+    /// The queued blobs that a read started before a worker did.
+    pub(super) prefetch_promotions: AtomicU64,
+    /// The blobs handed to the queue, by [`Prefetched`].
+    blobs: [AtomicU64; BLOBS.len()],
+    /// The trees expanded, by [`Walked`].
+    trees: [AtomicU64; TREES.len()],
+    /// The fills of the prefetch queue that left nothing, by [`PrefetchFailed`].
+    prefetch_failures: [AtomicU64; PREFETCH_FAILED.len()],
+    /// The reads that joined a fill that was running instead of starting one, by path.
+    joins: [AtomicU64; JOIN_PATHS.len()],
 }
 
 /// One more of `counter`.
@@ -372,6 +477,62 @@ impl Counters {
         read(&self.evictions[why as usize])
     }
 
+    /// Counts a blob handed to the queue that became `outcome`.
+    pub(super) fn blob(&self, outcome: Prefetched) {
+        bump(&self.blobs[outcome as usize]);
+    }
+
+    /// The blobs handed to the queue that became `outcome`.
+    #[cfg(test)]
+    pub(super) fn blobs(&self, outcome: Prefetched) -> u64 {
+        read(&self.blobs[outcome as usize])
+    }
+
+    /// Counts a blob of a tree that was not handed to the queue, for `why`.
+    pub(super) fn turned(&self, why: Turned) {
+        bump(&self.blobs[HANDED + why as usize]);
+    }
+
+    /// The blobs of trees that were not handed to the queue, for `why`.
+    #[cfg(test)]
+    pub(super) fn turned_count(&self, why: Turned) -> u64 {
+        read(&self.blobs[HANDED + why as usize])
+    }
+
+    /// Counts a tree whose expansion ended as `how`.
+    pub(super) fn walked(&self, how: Walked) {
+        bump(&self.trees[how as usize]);
+    }
+
+    /// The trees whose expansion ended as `how`.
+    #[cfg(test)]
+    pub(super) fn trees(&self, how: Walked) -> u64 {
+        read(&self.trees[how as usize])
+    }
+
+    /// Counts a fill of the queue that left nothing, for `why`.
+    pub(super) fn prefetch_failed(&self, why: PrefetchFailed) {
+        bump(&self.prefetch_failures[why as usize]);
+    }
+
+    /// The fills of the queue that left nothing, for `why`.
+    #[cfg(test)]
+    pub(super) fn prefetch_failures(&self, why: PrefetchFailed) -> u64 {
+        read(&self.prefetch_failures[why as usize])
+    }
+
+    /// Counts a read that joined a fill that was running, of the S3 front if `s3`, else of the
+    /// fill socket.
+    pub(super) fn joined(&self, s3: bool) {
+        bump(&self.joins[usize::from(s3)]);
+    }
+
+    /// The reads of the S3 front (`s3`) or of the fill socket that joined a running fill.
+    #[cfg(test)]
+    pub(super) fn joins(&self, s3: bool) -> u64 {
+        read(&self.joins[usize::from(s3)])
+    }
+
     /// The text of `/metricz`, with the gauges the caller measured now. Each family has one
     /// `# TYPE` line, before its first sample, as the OCI front's have.
     pub(super) fn render(
@@ -380,6 +541,7 @@ impl Counters {
         cache_objects: u64,
         fs_free_bytes: u64,
         read_write: bool,
+        queue_depth: u64,
     ) -> String {
         let mut text = String::new();
         // In the order of `PLAIN`, which holds the name and the kind of each.
@@ -411,6 +573,9 @@ impl Counters {
             cache_objects,
             fs_free_bytes,
             read(&self.staging_files),
+            read(&self.prefetch_fills),
+            read(&self.prefetch_promotions),
+            queue_depth,
         ];
         for ((name, kind), value) in PLAIN.iter().zip(plain) {
             let _ = writeln!(text, "# TYPE {name} {kind}");
@@ -426,6 +591,10 @@ impl Counters {
             self.evictions.iter().map(read).collect(),
             self.revalidations.iter().map(read).collect(),
             modes.to_vec(),
+            self.blobs.iter().map(read).collect(),
+            self.trees.iter().map(read).collect(),
+            self.prefetch_failures.iter().map(read).collect(),
+            self.joins.iter().map(read).collect(),
         ];
         for ((name, kind, label, labels), values) in LABELLED.iter().zip(values) {
             let _ = writeln!(text, "# TYPE {name} {kind}");

@@ -8,7 +8,8 @@
 //! holds it.
 //!
 //! - [`LocalCache::pin`] pins the blobs, named by the SHA-256 of their bytes: the blob a fill for
-//!   a tree kept (`_tiering/fill/<sha256>`), else the object `cas/l/<sha256>`. A blob the cache does not hold is not pinned (it is counted as absent: the caller
+//!   a tree kept and the object `cas/l/<sha256>` are one entry, named by the digest. A blob the
+//!   cache does not hold is not pinned (it is counted as absent: the caller
 //!   pins it again once it has been read). A pin that would take the pinned bytes over
 //!   [`CacheConfig::pin_limit`] is refused, and the blob is counted as used, so that it is kept
 //!   by recency only: pins buy speed, and running out of them must not stop a job.
@@ -31,6 +32,7 @@
 //! directory reads `obj/` and `.stage/` only, so a release that has no pins starts over a
 //! directory that has this file, and leaves it where it is.
 
+use std::collections::HashMap;
 use std::io;
 use std::path::Path;
 
@@ -39,7 +41,6 @@ use thiserror::Error;
 use super::index::Index;
 use super::layout::is_digest;
 use super::pin_set::{Owner, Pinned, PinsFile};
-use super::source::blob_name;
 use super::{CacheConfig, Inner, LocalCache, locked};
 
 /// The name of the pins file in the cache directory.
@@ -94,14 +95,8 @@ impl Inner {
         let mut answer = PinAnswer::default();
         let mut index = locked(&self.index);
         for sha256 in blobs {
-            // A blob filled for a tree (`fill_blob`) is kept under its reserved key; else the name
-            // is the object `cas/l/<sha256>`'s.
-            let filled = blob_name(sha256);
-            let hex = if index.get(&filled).is_some() {
-                &filled
-            } else {
-                sha256
-            };
+            // A blob is the entry named by its digest, whichever path filled it.
+            let hex = sha256;
             let size = index.get(hex).map(|entry| entry.size);
             match index.pins.pin(&owner, hex, size, limit) {
                 Pinned::Yes => answer.pinned += 1,
@@ -160,13 +155,16 @@ fn read_pins(root: &Path) -> PinsFile {
 
 /// Pins in `index` what the file of the cache directory holds, for the blobs `index` has and
 /// as far as the limit of `config` goes.
-pub(super) fn restore(config: &CacheConfig, index: &mut Index) {
+/// An entry that the previous release kept under another name (see `layout::Scanned::renamed`)
+/// is pinned under its digest.
+pub(super) fn restore(config: &CacheConfig, index: &mut Index, renamed: &HashMap<String, String>) {
     for tree in read_pins(&config.path).trees {
         let owner = Owner {
             mount: tree.mount,
             tree: tree.tree,
         };
         for hex in tree.blobs {
+            let hex = renamed.get(&hex).cloned().unwrap_or(hex);
             let size = index.get(&hex).map(|entry| entry.size);
             let _ = index.pins.pin(&owner, &hex, size, config.pin_limit);
         }

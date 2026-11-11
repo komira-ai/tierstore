@@ -8,7 +8,7 @@ use std::sync::{Arc, Condvar, Mutex};
 
 use super::fill::Stop;
 use super::hold::Trace;
-use super::layout::{Sidecar, meta_path, name_of};
+use super::layout::{Origin, Sidecar, meta_path, name_of};
 use super::metrics::{FailedFill, read};
 use super::pack_testing::Pack;
 use super::source::{Blob, FillError, blob_path, status_of};
@@ -21,13 +21,14 @@ fn staged(rig: &Rig) -> usize {
     rig.staged_files()
 }
 
-/// Asserts that a blob inside a larger object is kept under the reserved key `_tiering/fill/<sha256>`:
-/// the file holds exactly the blob's bytes, mode 0444, at the path the layout gives that key; the
-/// sidecar names the key, the size and the digest; the upstream was asked for the range and not
-/// for the object (no HEAD, one GET); nothing is left in the stage directory; and the fill is
-/// counted. A defect that kept the whole pack, or the wrong range, would show in the bytes.
+/// Asserts that a blob inside a larger object is kept as the entry named by its digest: the file
+/// holds exactly the blob's bytes, mode 0444, at the path the layout gives `cas/l/<sha256>`; the
+/// sidecar names that key, the size, the digest and the origin `span`; the upstream was asked for
+/// the range and not for the object (no HEAD, one GET); nothing is left in the stage directory;
+/// and the fill is counted. A defect that kept the whole pack, or the wrong range, would show in
+/// the bytes.
 #[tokio::test]
-async fn a_blob_inside_a_larger_object_is_kept_under_its_reserved_key() {
+async fn a_blob_inside_a_larger_object_is_kept_as_the_entry_named_by_its_digest() {
     let rig = Rig::new("tsrc-blob");
     let pack = Pack::put(&rig, "packs/one", &[3000, 5000, 700]).await;
     rig.cache.fill_blob(&pack.blob(1)).await.unwrap();
@@ -38,11 +39,12 @@ async fn a_blob_inside_a_larger_object_is_kept_under_its_reserved_key() {
         std::fs::metadata(&file).unwrap().permissions().mode() & 0o777,
         0o444
     );
-    let key = format!("_tiering/fill/{sha}");
+    let key = format!("cas/l/{sha}");
     assert_eq!(file, rig.file(&key));
     let text = std::fs::read(meta_path(&rig.config.path, &name_of(&key).hex)).unwrap();
     let sidecar: Sidecar = serde_json::from_slice(&text).unwrap();
     assert_eq!((sidecar.key.as_str(), sidecar.size), (key.as_str(), 5000));
+    assert_eq!(sidecar.origin, Origin::Span);
     assert_eq!(&sidecar.sha256, sha);
     assert_eq!((rig.calls(Op::Head), rig.calls(Op::Get)), (0, 1));
     assert_eq!(staged(&rig), 0);
@@ -72,7 +74,7 @@ async fn a_fill_of_a_blob_already_kept_asks_nothing_and_counts_as_a_use() {
     let pack = Pack::put(&rig, "packs/three", &[400, 500]).await;
     rig.cache.fill_blob(&pack.blob(0)).await.unwrap();
     rig.cache.fill_blob(&pack.blob(1)).await.unwrap();
-    let first = name_of(&format!("_tiering/fill/{}", pack.blobs[0].0)).hex;
+    let first = pack.blobs[0].0.clone();
     let order = |rig: &Rig| locked(&rig.cache.inner.index).oldest_first();
     assert_eq!(order(&rig)[0].0, first);
     rig.cache.fill_blob(&pack.blob(0)).await.unwrap();
@@ -274,7 +276,7 @@ async fn concurrent_fills_of_one_blob_share_one_fetch() {
     }
     assert_eq!(rig.calls(Op::Get), 1);
     assert_eq!(read(&rig.cache.counters().fills), 1);
-    assert!(locked(&rig.cache.inner.source_flights).is_empty());
+    assert!(locked(&rig.cache.inner.flights).is_empty());
     assert_eq!(rig.cache.inner.source_permits.available_permits(), 16);
 }
 
@@ -400,7 +402,7 @@ async fn a_fill_that_panics_is_aborted_and_frees_its_blob() {
         rig.cache.fill_blob(&pack.blob(0)).await,
         Err(FillError::Aborted)
     );
-    assert!(locked(&rig.cache.inner.source_flights).is_empty());
+    assert!(locked(&rig.cache.inner.flights).is_empty());
     assert_eq!(rig.cache.inner.source_permits.available_permits(), 16);
     assert_eq!(staged(&rig), 0);
     assert_eq!(rig.cache.fill_blob(&pack.blob(0)).await, Ok(()));
@@ -419,20 +421,29 @@ async fn a_disk_that_cannot_link_is_io() {
     assert_eq!(staged(&rig), 0);
 }
 
-/// Asserts the answer and the counter of each way a fetch can stop.
+/// Asserts the answer of the socket and the counter of each way a fetch can stop (the fill counts
+/// a stop once, and the socket and the S3 front each read the answer from it).
 #[tokio::test]
 async fn each_stop_of_a_fetch_has_its_answer() {
     let rig = Rig::new("tsrc-stops");
     let inner = &rig.cache.inner;
     let counters = rig.cache.counters();
     let blocked = Stop::Upstream(Error::Unavailable("x".to_owned()));
-    assert_eq!(inner.stopped(blocked), FillError::Upstream(503));
-    assert_eq!(inner.stopped(Stop::Short), FillError::Short);
-    assert_eq!(inner.stopped(Stop::Local), FillError::Io);
-    assert_eq!(inner.stopped(Stop::Changed), FillError::Changed);
-    assert_eq!(inner.stopped(Stop::Invalidated), FillError::Changed);
-    assert_eq!(inner.stopped(Stop::Lost), FillError::ReadOnly);
-    assert_eq!(inner.stopped(Stop::Mismatch), FillError::Mismatch);
+    let stops = [
+        (blocked, FillError::Upstream(503)),
+        (Stop::Short, FillError::Short),
+        (Stop::Local, FillError::Io),
+        (Stop::Changed, FillError::Changed),
+        (Stop::Invalidated, FillError::Changed),
+        (Stop::Lost, FillError::ReadOnly),
+        (Stop::Mismatch, FillError::Mismatch),
+        (Stop::TooLarge, FillError::TooLarge),
+        (Stop::Aborted, FillError::Aborted),
+    ];
+    for (stop, answer) in stops {
+        inner.count(&stop);
+        assert_eq!(super::source::answer(Err(stop)), Err(answer));
+    }
     assert_eq!(counters.failures(FailedFill::UpstreamError), 1);
     assert_eq!(counters.failures(FailedFill::ShortBody), 1);
     assert_eq!(counters.failures(FailedFill::LocalIo), 1);
@@ -592,7 +603,7 @@ async fn touch_counts_blobs_and_objects_as_used() {
     rig.cache.fill_blob(&pack.blob(0)).await.unwrap();
     rig.cache.fill_manifest(&sha).await.unwrap();
     rig.cache.fill_blob(&pack.blob(1)).await.unwrap();
-    let blob = |i: usize| name_of(&format!("_tiering/fill/{}", pack.blobs[i].0)).hex;
+    let blob = |i: usize| pack.blobs[i].0.clone();
     let order = || -> Vec<String> {
         let all = locked(&rig.cache.inner.index).oldest_first();
         all.into_iter().map(|(hex, _)| hex).collect()

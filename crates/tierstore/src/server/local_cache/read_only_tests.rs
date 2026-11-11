@@ -17,7 +17,9 @@ use std::time::Duration;
 use bytes::Bytes;
 use tokio::sync::Notify;
 
-use super::layout::{Sidecar, data_path, meta_path, name_of, object_dir, objects_dir, stage_dir};
+use super::layout::{
+    Origin, Sidecar, data_path, meta_path, name_of, object_dir, objects_dir, stage_dir,
+};
 use super::metrics::read;
 use super::testing::{Rig, age, digest, pattern, set_dir_modes, tree};
 use super::{Mode, Tick};
@@ -42,6 +44,7 @@ fn sidecar(size: u64) -> Vec<u8> {
         sha256: digest(b"x"),
         tag: "tag".to_owned(),
         modified: 0,
+        origin: Origin::Object,
     };
     serde_json::to_vec(&sidecar).unwrap()
 }

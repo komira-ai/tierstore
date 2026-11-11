@@ -335,7 +335,7 @@ impl Inner {
                     scanned.discarded + removed,
                 );
                 let mut index = index_of(found);
-                pins::restore(&self.config, &mut index);
+                pins::restore(&self.config, &mut index, &scanned.renamed);
                 *locked(&self.index) = index;
                 *forgotten = Forgotten::default();
                 let _ = self.hold.read_write.swap(true, Ordering::SeqCst);

@@ -9,7 +9,7 @@ use std::sync::atomic::Ordering;
 
 use tierstore_testkit::dir::TestDir;
 
-use super::fill::{Published, publish};
+use super::fill::{Class, Plan, Published, publish};
 use super::hold::Trace;
 use super::layout::{data_path, meta_path, name_of, object_dir, stage_dir};
 use super::metrics::read;
@@ -214,7 +214,10 @@ async fn a_chunk_that_arrives_after_the_lock_was_lost_is_written_nowhere() {
     let first = rig.locked();
     let gate = rig.tamper.hold();
     let name = name_of("cas/b/obj");
-    let Ok(pending) = first.inner.join_or_start("cas/b/obj", &name) else {
+    let Ok(pending) = first
+        .inner
+        .join_or_start("cas/b/obj", &name, Plan::Object, Class::S3)
+    else {
         panic!("the miss starts a fill");
     };
     wait_until("the fill made its stage file", || {
