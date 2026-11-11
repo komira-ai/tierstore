@@ -126,6 +126,7 @@ Blobs queued to be filled before a read asks for them (see [operations](operatio
 | `tierstore_cache_fill_joins_total` | counter | `path`: `mount`, `s3` | a request of the fill socket (`mount`) or a read of the S3 front joined a fill that was running instead of starting one; a read that started a queued blob counts a promotion, not a join |
 | `tierstore_cache_prefetch_queue_depth` | gauge | none | blobs waiting for a worker now |
 | `tierstore_cache_holds_open` | gauge | none | holds open now (see [holds](operations.md#holds)): opened and not yet released or expired |
+| `tierstore_cache_hold_handovers_total` | counter | none | trees of a hold whose pins moved to an attachment, at the first pin of a mount for the tree (see [holds](operations.md#holds)); a tree attached before the hold asked for its blobs moves nothing and is not counted |
 
 ### The cache mode
 

@@ -153,6 +153,29 @@ impl PinSet {
         blobs.len()
     }
 
+    /// Moves every pin of `from` to `to`, whatever `to` pins already; gives the number of blobs
+    /// moved. The pinned bytes do not change: each blob stays pinned, by another owner.
+    pub(super) fn transfer(&mut self, from: &Owner, to: &Owner) -> usize {
+        let Some(blobs) = self.by_owner.remove(from) else {
+            return 0;
+        };
+        self.dirty = true;
+        let shared = self
+            .by_owner
+            .get_key_value(to)
+            .map_or_else(|| Arc::new(to.clone()), |(known, _)| Arc::clone(known));
+        for hex in &blobs {
+            let pin = self.by_blob.get_mut(hex);
+            pin.into_iter().for_each(|pin| {
+                pin.owners.remove(from);
+                pin.owners.insert(Arc::clone(&shared));
+            });
+        }
+        let moved = blobs.len();
+        self.by_owner.entry(shared).or_default().extend(blobs);
+        moved
+    }
+
     /// Takes away the pins of every owner that is not a tree of `mount` in `trees`, except the
     /// owners that are holds; gives the number of owners dropped.
     pub(super) fn retain_live(&mut self, mount: &str, trees: &[String]) -> usize {
