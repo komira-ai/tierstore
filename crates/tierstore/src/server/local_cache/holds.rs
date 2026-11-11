@@ -11,6 +11,11 @@
 //! `pins_live` leaves them, because the holds are lost at a restart and a pin whose owner is gone
 //! would never end.
 //!
+//! The first `pin` of a mount for a tree of the hold hands the tree over ([`Inner::attach_holds`]):
+//! the hold's pins on it move to the mount's owner, and a blob of the tree that settles later is
+//! pinned for the mounts that have pinned for the tree, never for the hold. A tree that a mount
+//! had pinned for before the hold asked for a blob of it is handed over at that first blob.
+//!
 //! A hold ends at [`LocalCache::release_hold`], or when `hold_max` (or the time the caller gave,
 //! if shorter) has passed, noticed at the next tick of the cache. Ending it unpins what it owns
 //! and drops the blobs it queued that are still waiting for a worker and that no other hold
@@ -29,7 +34,7 @@
 //! Locks are taken in the order table of fills, queue, holds, index; the holds are never locked
 //! while the caller holds the index.
 
-use std::collections::{BTreeSet, HashMap, VecDeque};
+use std::collections::{BTreeMap, BTreeSet, HashMap, VecDeque};
 use thiserror::Error;
 
 use super::expand::Bound;
@@ -145,6 +150,9 @@ struct Hold {
     walking: bool,
     spent: Spent,
     trees: BTreeSet<String>,
+    /// The trees that were attached to a mount while the hold was open (or before it asked for a
+    /// blob of them): it pins nothing of them, the attachments do.
+    handed: BTreeSet<String>,
     blobs: HashMap<String, Wanted>,
     /// The trees whose expansion has ended, by how it ended: expanded, refused, cut.
     walked: [usize; 3],
@@ -158,6 +166,9 @@ pub(super) struct Holds {
     generations: u64,
     /// For each blob that a hold still waits for, the holds.
     waiting: HashMap<String, BTreeSet<String>>,
+    /// For each tree that a mount has pinned for (see [`Inner::attach_holds`]), the mounts: the
+    /// attachments a blob of a handed tree is pinned for.
+    attached: BTreeMap<String, BTreeSet<String>>,
 }
 
 /// The trees of `listed` that `had` does not have, each once.
@@ -192,6 +203,10 @@ impl Holds {
         });
         let _ = wanted.trees.insert(tree.to_owned());
         wanted.state = State::Pending;
+        // A tree that is attached already is the attachments' to pin, from the first blob.
+        if self.attached.contains_key(tree) {
+            let _ = hold.handed.insert(tree.to_owned());
+        }
         let _ = self
             .waiting
             .entry(hex.to_owned())
@@ -200,22 +215,43 @@ impl Holds {
         Ok(())
     }
 
-    /// Marks `hex` as `state` for every hold that waited for it; the owner trees to pin if it is
-    /// in the cache.
-    fn settle(&mut self, hex: &str, state: State) -> Vec<String> {
+    /// Marks `hex` as `state` for every hold that waited for it; the owners to pin it for if it is
+    /// in the cache: the hold's, for a tree it still owns the pins of, and else the attachments'.
+    fn settle(&mut self, hex: &str, state: State) -> Vec<Owner> {
         let ids = self.waiting.remove(hex).unwrap_or_default();
         let mut owners = Vec::new();
         for id in ids {
-            let found = self
-                .by_id
-                .get_mut(&id)
-                .and_then(|hold| hold.blobs.get_mut(hex));
-            found.into_iter().for_each(|wanted| {
+            let found = self.by_id.get_mut(&id).and_then(|hold| {
+                let Hold { blobs, handed, .. } = hold;
+                blobs.get_mut(hex).map(|wanted| (wanted, &*handed))
+            });
+            found.into_iter().for_each(|(wanted, handed)| {
                 wanted.state = state;
-                owners.extend(wanted.trees.iter().map(|tree| owner_tree(&id, tree)));
+                for tree in &wanted.trees {
+                    if handed.contains(tree) {
+                        let mounts = self.attached.get(tree).into_iter().flatten();
+                        owners.extend(mounts.map(|mount| Owner {
+                            mount: mount.clone(),
+                            tree: tree.clone(),
+                        }));
+                    } else {
+                        owners.push(Owner {
+                            mount: HOLD_MOUNT.to_owned(),
+                            tree: owner_tree(&id, tree),
+                        });
+                    }
+                }
             });
         }
         owners
+    }
+
+    /// Forgets every attachment `live` does not keep: it is given the mount and the tree.
+    fn unattach(&mut self, live: impl Fn(&str, &str) -> bool) {
+        self.attached.retain(|tree, mounts| {
+            mounts.retain(|mount| live(mount, tree));
+            !mounts.is_empty()
+        });
     }
 
     /// Marks `hex` as `state` for the hold `id` alone, which waits for it no more.
@@ -291,6 +327,7 @@ impl Inner {
             walking: false,
             spent: Spent::default(),
             trees: BTreeSet::new(),
+            handed: BTreeSet::new(),
             blobs: HashMap::new(),
             walked: [0; 3],
         });
@@ -378,9 +415,47 @@ impl Inner {
             let blobs = [hex.to_owned()];
             for owner in owners {
                 // Past `pin_limit` the pin is refused and the blob counted as used: recency only.
-                let _ = self.pin(HOLD_MOUNT, &owner, &blobs);
+                let _ = self.pin(&owner.mount, &owner.tree, &blobs);
             }
         }
+    }
+
+    /// A mount has pinned for `tree`: the tree is attached. The pins of every hold that lists it
+    /// and has not handed it over yet move to the attachment, and from then on the blobs of the
+    /// tree that a fill settles for the hold are pinned for the attachments. Called after each
+    /// successful pin of a mount (never for the mount of the holds).
+    pub(super) fn attach_holds(&self, mount: &str, tree: &str) {
+        let mut holds = locked(&self.prefetch.holds);
+        let _ = holds
+            .attached
+            .entry(tree.to_owned())
+            .or_default()
+            .insert(mount.to_owned());
+        let to = Owner {
+            mount: mount.to_owned(),
+            tree: tree.to_owned(),
+        };
+        let mut index = locked(&self.index);
+        let mut handovers = 0;
+        for (id, hold) in &mut holds.by_id {
+            if hold.trees.contains(tree) && hold.handed.insert(tree.to_owned()) {
+                let from = Owner {
+                    mount: HOLD_MOUNT.to_owned(),
+                    tree: owner_tree(id, tree),
+                };
+                let _ = index.pins.transfer(&from, &to);
+                handovers += 1;
+            }
+        }
+        self.counters
+            .hold_handovers
+            .fetch_add(handovers, Ordering::Relaxed);
+    }
+
+    /// Some attachments are gone (a mount unpinned a tree, or a sweep took the pins of the mounts
+    /// and trees `live` does not keep): a hold that handed a tree over pins nothing of it for them.
+    pub(super) fn detach_holds(&self, live: impl Fn(&str, &str) -> bool) {
+        locked(&self.prefetch.holds).unattach(live);
     }
 
     /// See [`LocalCache::release_hold`]; also what the end of a hold's time does (`owner` none).

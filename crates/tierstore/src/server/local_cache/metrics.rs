@@ -274,13 +274,14 @@ const PREFETCH_PROMOTIONS: &str = "tierstore_cache_prefetch_promotions_total";
 const PREFETCH_QUEUE_DEPTH: &str = "tierstore_cache_prefetch_queue_depth";
 const HOLDS_OPEN: &str = "tierstore_cache_holds_open";
 const HYDRATE_REQUESTS: &str = "tierstore_cache_hydrate_requests_total";
+const HOLD_HANDOVERS: &str = "tierstore_cache_hold_handovers_total";
 const HYDRATE_BLOBS: &str = "tierstore_cache_hydrate_blobs_total";
 const HYDRATE_TREES: &str = "tierstore_cache_hydrate_trees_total";
 const PREFETCH_FILL_FAILURES: &str = "tierstore_cache_prefetch_fill_failures_total";
 const FILL_JOINS: &str = "tierstore_cache_fill_joins_total";
 
 /// The families of one sample, with their kinds, in the order `/metricz` shows them.
-pub(super) const PLAIN: [(&str, &str); 31] = [
+pub(super) const PLAIN: [(&str, &str); 32] = [
     (HITS, COUNTER),
     (MISSES, COUNTER),
     (BYTES_SERVED_LOCAL, COUNTER),
@@ -312,6 +313,7 @@ pub(super) const PLAIN: [(&str, &str); 31] = [
     (PREFETCH_QUEUE_DEPTH, GAUGE),
     (HOLDS_OPEN, GAUGE),
     (HYDRATE_REQUESTS, COUNTER),
+    (HOLD_HANDOVERS, COUNTER),
 ];
 
 /// The families of one sample for each value of a label: the name, the kind, the name of the
@@ -391,6 +393,8 @@ pub struct Counters {
     pub(super) holds_open: AtomicU64,
     /// The hydrate calls the cache accepted.
     pub(super) hydrate_requests: AtomicU64,
+    /// The trees of a hold whose pins moved to an attachment.
+    pub(super) hold_handovers: AtomicU64,
     /// The blobs handed to the queue, by [`Prefetched`].
     blobs: [AtomicU64; BLOBS.len()],
     /// The trees expanded, by [`Walked`].
@@ -596,6 +600,7 @@ impl Counters {
             queue_depth,
             read(&self.holds_open),
             read(&self.hydrate_requests),
+            read(&self.hold_handovers),
         ];
         for ((name, kind), value) in PLAIN.iter().zip(plain) {
             let _ = writeln!(text, "# TYPE {name} {kind}");

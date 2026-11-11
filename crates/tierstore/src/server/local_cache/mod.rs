@@ -159,6 +159,8 @@ mod front_tests;
 #[cfg(test)]
 mod hit_tests;
 #[cfg(test)]
+mod hold_handover_tests;
+#[cfg(test)]
 mod hold_tests;
 #[cfg(test)]
 mod holds_tests;

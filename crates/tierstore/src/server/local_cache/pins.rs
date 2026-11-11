@@ -17,7 +17,8 @@
 //! - [`LocalCache::pins_live`] takes away every pin of another mount and of a tree not in the
 //!   list: the pins never outlive their mount or their attachment. The pins of a hold (module
 //!   `holds`) are the one exception: they have an owner of their own, are not in the file below,
-//!   and end with their hold.
+//!   and end with their hold. A `pin` of a mount for a tree a hold lists moves the hold's pins on
+//!   it to that mount.
 //!
 //! A pinned object is skipped by the eviction pass and counted in `pin_skips`; it stays charged
 //! to the budget. Removals that are not eviction (the scrub finding bad bytes, a revalidation, a
@@ -202,7 +203,9 @@ impl LocalCache {
     /// [`PinError::ReservedMount`] for the mount id of the holds.
     pub fn pin(&self, mount: &str, tree: &str, sha256: &[String]) -> Result<PinAnswer, PinError> {
         not_reserved(mount)?;
-        self.inner.pin(mount, tree, sha256)
+        let answer = self.inner.pin(mount, tree, sha256)?;
+        self.inner.attach_holds(mount, tree);
+        Ok(answer)
     }
 
     /// Takes away every pin of `tree` of `mount`; gives the number of blobs it pinned.
@@ -212,6 +215,8 @@ impl LocalCache {
     pub fn unpin(&self, mount: &str, tree: &str) -> Result<usize, PinError> {
         not_reserved(mount)?;
         self.inner.pins_writable()?;
+        self.inner
+            .detach_holds(|attached, attached_tree| attached != mount || attached_tree != tree);
         let owner = Owner {
             mount: mount.to_owned(),
             tree: tree.to_owned(),
@@ -227,6 +232,9 @@ impl LocalCache {
     pub fn pins_live(&self, mount: &str, trees: &[String]) -> Result<usize, PinError> {
         not_reserved(mount)?;
         self.inner.pins_writable()?;
+        self.inner.detach_holds(|attached, attached_tree| {
+            attached == mount && trees.iter().any(|tree| tree == attached_tree)
+        });
         Ok(locked(&self.inner.index).pins.retain_live(mount, trees))
     }
 

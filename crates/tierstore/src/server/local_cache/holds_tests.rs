@@ -22,19 +22,19 @@ use crate::tree_manifest::TreeDigest;
 use crate::{Backend, Op};
 
 /// A tree digest for the tests: any 64 hex digits.
-fn tree(n: u8) -> String {
+pub(super) fn tree(n: u8) -> String {
     digest(&[n])
 }
 
 /// The owners that pin the blob `hex` now.
-fn pinners(rig: &Rig, hex: &str) -> Vec<(String, String)> {
+pub(super) fn pinners(rig: &Rig, hex: &str) -> Vec<(String, String)> {
     let index = locked(&rig.cache.inner.index);
     let owners = index.pins.owners_of(hex);
     owners.into_iter().map(|o| (o.mount, o.tree)).collect()
 }
 
 /// The owner of the pins of `tree` of the hold `id`.
-fn held_by(id: &str, tree: &str) -> (String, String) {
+pub(super) fn held_by(id: &str, tree: &str) -> (String, String) {
     (HOLD_MOUNT.to_owned(), format!("{id}/{tree}"))
 }
 
