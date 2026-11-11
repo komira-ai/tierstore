@@ -17,6 +17,12 @@ use super::local_cache::CacheConfig;
 /// The least `prefetch_queue_ttl`.
 const SECOND: Duration = Duration::from_secs(1);
 
+/// The least `hydrate_max_bytes`: a mebibyte.
+const MIB: u64 = 1 << 20;
+
+/// The most `hydrate_max_bytes`: a tebibyte.
+const TIB: u64 = 1 << 40;
+
 /// A bound on the largest read, or queue, of a key in bytes: a gibibyte.
 const GIB: u64 = 1 << 30;
 
@@ -78,7 +84,8 @@ pub(super) fn apply(table: &LocalCacheTable, cache: &mut CacheConfig) -> Result<
 }
 
 /// The queue's keys: `prefetch_concurrency`, `prefetch_queue` and `prefetch_queue_ttl` (one second
-/// to an hour).
+/// to an hour), and the bounds of a call that expands trees into it: `hydrate_max_trees`,
+/// `hydrate_max_blobs` and `hydrate_max_bytes`.
 fn prefetch(table: &LocalCacheTable, cache: &mut CacheConfig) -> Result<(), ConfigError> {
     let wanted = |value: Option<u32>, default: usize| {
         value.unwrap_or_else(|| u32::try_from(default).unwrap_or(u32::MAX))
@@ -91,6 +98,16 @@ fn prefetch(table: &LocalCacheTable, cache: &mut CacheConfig) -> Result<(), Conf
     cache.prefetch.queue = queue as usize;
     let ttl = table.prefetch_queue_ttl;
     cache.prefetch.ttl = time_from("prefetch_queue_ttl", ttl, cache.prefetch.ttl, SECOND)?;
+    let trees = wanted(table.hydrate_max_trees, cache.prefetch.max_trees);
+    let trees = within("local_cache", "hydrate_max_trees", trees, 1, 4096)?;
+    cache.prefetch.max_trees = trees as usize;
+    let blobs = wanted(table.hydrate_max_blobs, cache.prefetch.max_blobs);
+    let blobs = within("local_cache", "hydrate_max_blobs", blobs, 1, 10_000_000)?;
+    cache.prefetch.max_blobs = blobs as usize;
+    let bytes = table
+        .hydrate_max_bytes
+        .map_or(cache.prefetch.max_bytes, |size| size.0);
+    cache.prefetch.max_bytes = within("local_cache", "hydrate_max_bytes", bytes, MIB, TIB)?;
     Ok(())
 }
 

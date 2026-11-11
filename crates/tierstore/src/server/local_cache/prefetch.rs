@@ -41,8 +41,18 @@ pub const PREFETCH_QUEUE: usize = 16_384;
 /// How long a blob may wait in the queue, unless the settings say otherwise.
 pub const PREFETCH_QUEUE_TTL: Duration = Duration::from_secs(120);
 
+/// The trees one call may expand, unless the settings say otherwise.
+pub const HYDRATE_MAX_TREES: usize = 64;
+
+/// The blobs one call may queue, unless the settings say otherwise.
+pub const HYDRATE_MAX_BLOBS: usize = 500_000;
+
+/// The bytes of the blobs one call may queue, unless the settings say otherwise.
+pub const HYDRATE_MAX_BYTES: u64 = 32 << 30;
+
 /// The settings of the prefetch queue (`local_cache.prefetch_concurrency`, `prefetch_queue` and
-/// `prefetch_queue_ttl`).
+/// `prefetch_queue_ttl`) and of the expansion of trees into it (`hydrate_max_trees`,
+/// `hydrate_max_blobs` and `hydrate_max_bytes`).
 #[derive(Clone, Copy, Debug)]
 pub struct PrefetchConfig {
     /// The most blobs filled at once by the queue: a pool of permits of its own, which no read
@@ -53,6 +63,14 @@ pub struct PrefetchConfig {
     pub queue: usize,
     /// The longest a blob waits in the queue; older, it is dropped when its turn comes.
     pub ttl: Duration,
+    /// The most trees one call may expand: a call with more is refused whole.
+    pub max_trees: usize,
+    /// The most blobs one call may queue, all its trees together; the walk stops at the first
+    /// that would pass it.
+    pub max_blobs: usize,
+    /// The most bytes of the blobs one call may queue; the walk stops at the first blob that
+    /// would pass it.
+    pub max_bytes: u64,
 }
 
 impl Default for PrefetchConfig {
@@ -61,6 +79,9 @@ impl Default for PrefetchConfig {
             concurrency: PREFETCH_CONCURRENCY,
             queue: PREFETCH_QUEUE,
             ttl: PREFETCH_QUEUE_TTL,
+            max_trees: HYDRATE_MAX_TREES,
+            max_blobs: HYDRATE_MAX_BLOBS,
+            max_bytes: HYDRATE_MAX_BYTES,
         }
     }
 }
@@ -113,6 +134,13 @@ impl Queue {
         self.places.contains_key(hex)
     }
 
+    /// The names of the blobs that wait, in the order they will start.
+    #[cfg(test)]
+    pub(super) fn order(&self) -> Vec<String> {
+        let names = self.waiting.values();
+        names.map(|queued| queued.launch.name.hex.clone()).collect()
+    }
+
     fn push(&mut self, queued: Queued) {
         let place = self.next;
         self.next += 1;
@@ -160,7 +188,7 @@ enum Dropped {
 impl Inner {
     /// Queues the blob, or says why not: see [`Prefetched`]. A blob that is queued is filled at
     /// once if a worker is free.
-    fn queue_blob(self: &Arc<Self>, blob: &Blob<'_>) -> Prefetched {
+    pub(super) fn queue_blob(self: &Arc<Self>, blob: &Blob<'_>) -> Prefetched {
         let outcome = if !self.read_write() {
             Prefetched::ReadOnly
         } else if self.config.prefetch.concurrency == 0 {

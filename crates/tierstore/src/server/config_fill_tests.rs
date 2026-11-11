@@ -205,6 +205,9 @@ cache  = true
         "prefetch_concurrency = 1",
         "prefetch_queue = 10",
         "prefetch_queue_ttl = \"5s\"",
+        "hydrate_max_trees = 3",
+        "hydrate_max_blobs = 3",
+        "hydrate_max_bytes = \"2MiB\"",
     ] {
         let text = node.replace("KEY", line);
         let key = line.split(' ').next().unwrap();
