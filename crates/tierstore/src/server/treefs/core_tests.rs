@@ -760,11 +760,14 @@ fn a_restore_keeps_the_record_of_a_tree_it_cannot_read() {
     let root = rig.upstream.built.lock().unwrap().root.clone();
     let gone = "ab".repeat(32);
     let digest = |hex: &str| crate::tree_manifest::TreeDigest::from_hex(hex).unwrap();
-    core.restore(vec![
-        (digest(&gone), "run-1".to_owned()),
-        (digest(&root), "run-2".to_owned()),
-        (digest(&root), "run-3".to_owned()),
-    ]);
+    core.restore(
+        vec![
+            (digest(&gone), "run-1".to_owned()),
+            (digest(&root), "run-2".to_owned()),
+            (digest(&root), "run-3".to_owned()),
+        ],
+        4,
+    );
     assert_eq!(core.attachments().len(), 2);
     let file = || std::fs::read_to_string(rig.runtime.join("attachments")).unwrap();
     assert!(file().contains(&format!("{gone} run-1\n")));
@@ -782,7 +785,7 @@ fn a_restore_with_no_number_left_or_no_file_still_keeps_what_it_can() {
     let root = rig.upstream.built.lock().unwrap().root.clone();
     let digest = crate::tree_manifest::TreeDigest::from_hex(&root).unwrap();
     rig.core.table.exhaust();
-    rig.core.restore(vec![(digest, RUN.to_owned())]);
+    rig.core.restore(vec![(digest, RUN.to_owned())], 4);
     assert!(rig.core.attachments().is_empty());
     assert_eq!(
         std::fs::read_to_string(rig.runtime.join("attachments")).unwrap(),
@@ -790,7 +793,7 @@ fn a_restore_with_no_number_left_or_no_file_still_keeps_what_it_can() {
     );
     let rig = Rig::new("tfs-core-restore-nofile", sample());
     std::fs::remove_dir_all(&rig.runtime).unwrap();
-    rig.core.restore(vec![(digest, RUN.to_owned())]);
+    rig.core.restore(vec![(digest, RUN.to_owned())], 4);
     assert_eq!(rig.core.attachments().len(), 1);
 }
 

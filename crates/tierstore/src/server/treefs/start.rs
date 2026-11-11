@@ -169,7 +169,7 @@ pub(super) fn core_of(
     ));
     let saved =
         Attachments::saved(&settings.runtime_dir).map_err(io("reading the attachments file"))?;
-    core.restore(saved);
+    core.restore(saved, settings.reattach_concurrency);
     core.pins_live();
     Ok(core)
 }
