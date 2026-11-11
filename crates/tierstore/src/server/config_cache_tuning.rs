@@ -22,6 +22,11 @@ const MINUTE: Duration = Duration::from_secs(60);
 
 /// The most `hold_max`.
 const DAY: Duration = Duration::from_secs(24 * 3600);
+/// The least `hydrate_max_bytes`: a mebibyte.
+const MIB: u64 = 1 << 20;
+
+/// The most `hydrate_max_bytes`: a tebibyte.
+const TIB: u64 = 1 << 40;
 
 /// A bound on the largest read, or queue, of a key in bytes: a gibibyte.
 const GIB: u64 = 1 << 30;
@@ -84,7 +89,9 @@ pub(super) fn apply(table: &LocalCacheTable, cache: &mut CacheConfig) -> Result<
 }
 
 /// The queue's keys: `prefetch_concurrency`, `prefetch_queue` and `prefetch_queue_ttl` (one second
-/// to an hour), and the holds': `hold_max` (a minute to a day) and `hold_max_count`.
+/// to an hour), the holds': `hold_max` (a minute to a day) and `hold_max_count`, and the bounds of
+/// a call that expands trees into it: `hydrate_max_trees`, `hydrate_max_blobs` and
+/// `hydrate_max_bytes`.
 fn prefetch(table: &LocalCacheTable, cache: &mut CacheConfig) -> Result<(), ConfigError> {
     let wanted = |value: Option<u32>, default: usize| {
         value.unwrap_or_else(|| u32::try_from(default).unwrap_or(u32::MAX))
@@ -105,6 +112,16 @@ fn prefetch(table: &LocalCacheTable, cache: &mut CacheConfig) -> Result<(), Conf
     let holds = wanted(table.hold_max_count, cache.prefetch.hold_max_count);
     let holds = within("local_cache", "hold_max_count", holds, 1, 100_000)?;
     cache.prefetch.hold_max_count = holds as usize;
+    let trees = wanted(table.hydrate_max_trees, cache.prefetch.max_trees);
+    let trees = within("local_cache", "hydrate_max_trees", trees, 1, 4096)?;
+    cache.prefetch.max_trees = trees as usize;
+    let blobs = wanted(table.hydrate_max_blobs, cache.prefetch.max_blobs);
+    let blobs = within("local_cache", "hydrate_max_blobs", blobs, 1, 10_000_000)?;
+    cache.prefetch.max_blobs = blobs as usize;
+    let bytes = table
+        .hydrate_max_bytes
+        .map_or(cache.prefetch.max_bytes, |size| size.0);
+    cache.prefetch.max_bytes = within("local_cache", "hydrate_max_bytes", bytes, MIB, TIB)?;
     Ok(())
 }
 

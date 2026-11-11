@@ -48,8 +48,18 @@ pub(super) const HOLD_MAX: Duration = Duration::from_secs(4 * 3600);
 /// The holds that may be open at once, unless the settings say otherwise.
 pub(super) const HOLD_MAX_COUNT: usize = 256;
 
-/// The settings of the prefetch queue and of the holds that fill it (`local_cache.prefetch_concurrency`,
-/// `prefetch_queue`, `prefetch_queue_ttl`, `hold_max` and `hold_max_count`).
+/// The trees one call may expand, unless the settings say otherwise.
+pub const HYDRATE_MAX_TREES: usize = 64;
+
+/// The blobs one call may queue, unless the settings say otherwise.
+pub const HYDRATE_MAX_BLOBS: usize = 500_000;
+
+/// The bytes of the blobs one call may queue, unless the settings say otherwise.
+pub const HYDRATE_MAX_BYTES: u64 = 32 << 30;
+
+/// The settings of the prefetch queue (`local_cache.prefetch_concurrency`, `prefetch_queue` and
+/// `prefetch_queue_ttl`), of the holds that fill it (`hold_max` and `hold_max_count`) and of the
+/// expansion of trees into it (`hydrate_max_trees`, `hydrate_max_blobs` and `hydrate_max_bytes`).
 #[derive(Clone, Copy, Debug)]
 pub struct PrefetchConfig {
     /// The most blobs filled at once by the queue: a pool of permits of its own, which no read
@@ -64,6 +74,14 @@ pub struct PrefetchConfig {
     pub hold_max: Duration,
     /// The most holds open at once; a hold past it is turned away.
     pub hold_max_count: usize,
+    /// The most trees one call may expand: a call with more is refused whole.
+    pub max_trees: usize,
+    /// The most blobs one call may queue, all its trees together; the walk stops at the first
+    /// blob to queue past it.
+    pub max_blobs: usize,
+    /// The most bytes of the blobs one call may queue; a file that would pass it is
+    /// left out and the walk goes on.
+    pub max_bytes: u64,
 }
 
 impl Default for PrefetchConfig {
@@ -74,6 +92,9 @@ impl Default for PrefetchConfig {
             ttl: PREFETCH_QUEUE_TTL,
             hold_max: HOLD_MAX,
             hold_max_count: HOLD_MAX_COUNT,
+            max_trees: HYDRATE_MAX_TREES,
+            max_blobs: HYDRATE_MAX_BLOBS,
+            max_bytes: HYDRATE_MAX_BYTES,
         }
     }
 }
@@ -124,6 +145,13 @@ impl Queue {
 
     pub(super) fn contains(&self, hex: &str) -> bool {
         self.places.contains_key(hex)
+    }
+
+    /// The names of the blobs that wait, in the order they will start.
+    #[cfg(test)]
+    pub(super) fn order(&self) -> Vec<String> {
+        let names = self.waiting.values();
+        names.map(|queued| queued.launch.name.hex.clone()).collect()
     }
 
     fn push(&mut self, queued: Queued) {
@@ -189,6 +217,15 @@ impl Inner {
             self.pump();
         }
         outcome
+    }
+
+    /// Whether the cache holds the blob of `sha256`, or a fill of it is queued or running: a
+    /// blob [`queue_blob`](Self::queue_blob) would say `Present` or `Joined` of, without queueing.
+    pub(super) fn holds(&self, sha256: &str) -> bool {
+        let name = name_of(&object_key(sha256));
+        let flights = locked(&self.flights);
+        let now = self.clock.now();
+        flights.contains_key(&name.hex) || locked(&self.index).used(&name.hex, now).is_some()
     }
 
     /// Puts the blob in the table and the queue, unless it is turned away.
