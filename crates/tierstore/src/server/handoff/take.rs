@@ -8,6 +8,7 @@ use std::path::Path;
 use rustix::io::{FdFlags, fcntl_setfd};
 use tokio::net::{TcpListener, UnixStream};
 
+use super::offer::{BYE, NOT_UNDERSTOOD, READY, TAKE};
 use super::wire::{self, Frame};
 use super::{Front, Handoff, HandoffError, Socket, line};
 
@@ -34,6 +35,38 @@ pub(crate) struct Inherited {
     /// A copy of each socket, in the order the running instance offered them, for the taker's
     /// own control socket.
     pub(crate) copies: Vec<Socket>,
+    /// The connection on which this taker says `ready`, when it asked for that step
+    /// ([`take_with_ready`]) and the running instance takes part in it. While it is held the
+    /// running instance has not handed the sockets over: it ends when `ready` is sent, and goes
+    /// on serving when the connection ends without it.
+    pub(crate) ready: Option<Ready>,
+}
+
+/// The end of a hand-off that asked for the `ready` step: the connection to the running instance.
+pub(crate) struct Ready(UnixStream);
+
+impl Ready {
+    /// Tells the running instance that this one serves the sockets: it ends.
+    ///
+    /// # Errors
+    /// The running instance is gone from the connection: it did not wait for `ready` (it went on
+    /// serving) and this instance must not serve beside it.
+    pub(crate) async fn send(self) -> Result<(), HandoffError> {
+        let io = HandoffError::io("telling the running instance it can end");
+        wire::send(&self.0, &[READY.to_owned()], &[])
+            .await
+            .map_err(HandoffError::io("telling the running instance it can end"))?;
+        // The running instance ends only after it has read `ready` and answered `bye`; a
+        // connection that closes instead means it gave up first and serves on.
+        let answer = wire::recv(&self.0).await.map_err(io)?;
+        if answer.lines == [BYE] {
+            Ok(())
+        } else {
+            Err(HandoffError::Protocol(
+                "something other than bye after ready",
+            ))
+        }
+    }
 }
 
 /// A copy of a listening socket's descriptor, as a listener of `std`.
@@ -56,7 +89,32 @@ pub(crate) async fn take(
     handoff: &Handoff,
     want: &Want<'_>,
 ) -> Result<Option<Inherited>, HandoffError> {
-    let exchanging = exchange(&handoff.socket, want, duplicate);
+    take_as(handoff, want, false).await
+}
+
+/// [`take`], asking the running instance to wait for this one's `ready` (the connection is in
+/// [`Inherited::ready`]): until it is sent, or the connection ends, the running instance has
+/// handed nothing over, so a taker that dies before it serves leaves the running instance
+/// serving. A running instance of a release that does not know the step refuses the request as
+/// not understood, and the taker asks again without it: then `ready` is `None` and the running
+/// instance ends at `done`, as it did.
+///
+/// # Errors
+/// As [`take`].
+pub(crate) async fn take_with_ready(
+    handoff: &Handoff,
+    want: &Want<'_>,
+) -> Result<Option<Inherited>, HandoffError> {
+    take_as(handoff, want, true).await
+}
+
+/// [`take`] and [`take_with_ready`]: `ready` is whether the step is asked for.
+async fn take_as(
+    handoff: &Handoff,
+    want: &Want<'_>,
+    ready: bool,
+) -> Result<Option<Inherited>, HandoffError> {
+    let exchanging = exchange(&handoff.socket, want, duplicate, ready);
     match tokio::time::timeout(handoff.wait, exchanging).await {
         Ok(taken) => taken,
         Err(_) => Err(HandoffError::Timeout(handoff.socket.clone())),
@@ -74,11 +132,13 @@ fn all_cover(wanted: &[SocketAddr], offered: &[SocketAddr]) -> bool {
     wanted.len() == offered.len() && wanted.iter().zip(offered).all(|(w, o)| covers(*w, *o))
 }
 
-/// The whole exchange with the running instance; `copy` makes the copies of [`Inherited`].
+/// The whole exchange with the running instance; `copy` makes the copies of [`Inherited`], and
+/// `ready` is whether the request asks for the `ready` step.
 async fn exchange(
     path: &Path,
     want: &Want<'_>,
     copy: Copy,
+    ready: bool,
 ) -> Result<Option<Inherited>, HandoffError> {
     let stream = match UnixStream::connect(path).await {
         Ok(stream) => stream,
@@ -93,7 +153,11 @@ async fn exchange(
         Err(why) => return Err(HandoffError::io("connecting to the control socket")(why)),
     };
     let io = HandoffError::io;
-    wire::send(&stream, &["take 1".to_owned()], &[])
+    let mut request = vec![TAKE.to_owned()];
+    if ready {
+        request.push(READY.to_owned());
+    }
+    wire::send(&stream, &request, &[])
         .await
         .map_err(io("asking for the sockets"))?;
     let offer = wire::recv(&stream).await.map_err(io("reading the offer"))?;
@@ -101,6 +165,10 @@ async fn exchange(
     let head = lines.first().map_or("", String::as_str);
     let rest = lines.get(1..).unwrap_or_default();
     if head == "refused" {
+        if ready && rest == [NOT_UNDERSTOOD] {
+            // A release that has no `ready` step: ask as it understands.
+            return Box::pin(exchange(path, want, copy, false)).await;
+        }
         return Err(HandoffError::Refused(rest.join(" ")));
     }
     if head != "offer" {
@@ -156,7 +224,7 @@ async fn exchange(
         });
     }
     let fronts = offered.iter().map(|entry| entry.map(|(front, _)| front));
-    let inherited = match adopt(fronts.zip(fds), copy) {
+    let mut inherited = match adopt(fronts.zip(fds), copy) {
         Ok(inherited) => inherited,
         Err(why) => {
             // The running instance goes on as if nothing had been asked.
@@ -177,6 +245,7 @@ async fn exchange(
             "something other than done after ack",
         ));
     }
+    inherited.ready = ready.then_some(Ready(stream));
     Ok(Some(inherited))
 }
 
@@ -194,6 +263,7 @@ fn adopt(
         nfs: Vec::new(),
         nfs_addrs: Vec::new(),
         copies: Vec::new(),
+        ready: None,
     };
     for (front, fd) in offered {
         // A front this release does not know: the descriptor is closed.
@@ -221,6 +291,9 @@ fn listener_of(fd: OwnedFd) -> std::io::Result<TcpListener> {
     TcpListener::from_std(listener)
 }
 
+#[cfg(test)]
+#[path = "take_ready_tests.rs"]
+mod ready_tests;
 #[cfg(test)]
 #[path = "take_tests.rs"]
 mod tests;

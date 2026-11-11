@@ -276,7 +276,10 @@ async fn a_taker_that_cannot_copy_the_sockets_refuses_before_the_running_instanc
         oci: &[],
         nfs: &[],
     };
-    let error = super::exchange(&path, &want, no_copy).await.err().unwrap();
+    let error = super::exchange(&path, &want, no_copy, false)
+        .await
+        .err()
+        .unwrap();
     assert_eq!(
         error.to_string(),
         "hand-off: taking over a socket: Too many open files (os error 24)"

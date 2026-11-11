@@ -185,10 +185,26 @@ fn the_handoff_keys_are_taken_and_each_refusal_names_its_key() {
     let waits = from_text(&with("handoff_socket = \"/run/x.sock\""), "")
         .unwrap()
         .nfs;
+    assert_eq!(waits.ready_wait, Duration::from_secs(120));
     assert_eq!(waits.handoff.unwrap().wait, Duration::from_secs(10));
+    let ready = from_text(
+        &with("handoff_socket = \"/run/x.sock\"\nhandoff_ready_wait = \"7s\""),
+        "",
+    )
+    .unwrap()
+    .nfs;
+    assert_eq!(ready.ready_wait, Duration::from_secs(7));
     let long = format!("handoff_socket = \"/{}\"", "x".repeat(120));
     for (text, key) in [
         ("handoff_wait = \"3s\"".to_owned(), "fs.nfs.handoff_wait"),
+        (
+            "handoff_ready_wait = \"3s\"".to_owned(),
+            "fs.nfs.handoff_ready_wait",
+        ),
+        (
+            "handoff_socket = \"/run/x\"\nhandoff_ready_wait = \"0s\"".to_owned(),
+            "fs.nfs.handoff_ready_wait",
+        ),
         (
             "handoff_socket = \"run/x.sock\"".to_owned(),
             "fs.nfs.handoff_socket",

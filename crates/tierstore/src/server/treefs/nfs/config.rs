@@ -12,7 +12,8 @@
 //! | `fs.nfs.fd_cache_per_shard` | open cache files kept in one shard | `64` |
 //! | `fs.nfs.allowed_uids` | the user ids whose requests are served (`AUTH_SYS`); a fence against other local users, not authentication | the mount user and the owner (`fs.owner`) |
 //! | `fs.nfs.handoff_socket` | the control socket on which a running instance hands its listening socket to the next one (a file in a directory only the user of the process may write); none: no hand-off, an update is a restart | none |
-//! | `fs.nfs.handoff_wait` | how long a new instance waits for the running one to hand over | `10s` |
+//! | `fs.nfs.handoff_wait` | how long a new instance waits for the running one's `done` | `10s` |
+//! | `fs.nfs.handoff_ready_wait` | how long the running instance gives the new one after `done` to say `ready` (it covers the new one's whole start) before it serves on | `120s` |
 //! | `fs.nfs.drain_wait` | how long an instance that handed over waits for the clients to close their connections before it ends | `10s` |
 //! | `fs.nfs.jukebox_after` | how long a read waits for a fill before the client is told to ask again | `5s` |
 
@@ -46,8 +47,13 @@ const DEFAULT_PER_SHARD: u32 = 64;
 /// The wait for a fill when the file leaves out `fs.nfs.jukebox_after`.
 const DEFAULT_JUKEBOX_AFTER: Duration = Duration::from_secs(5);
 
-/// The wait for the running instance when the file leaves out `fs.nfs.handoff_wait`.
+/// The wait of a new instance for the running one when the file leaves out `fs.nfs.handoff_wait`.
 const DEFAULT_HANDOFF_WAIT: Duration = Duration::from_secs(10);
+
+/// The wait of the running instance for the successor's `ready` when the file leaves out
+/// `fs.nfs.handoff_ready_wait`: it covers the successor's whole start, which makes the
+/// attachments again (about two minutes cold).
+const DEFAULT_READY_WAIT: Duration = Duration::from_secs(120);
 
 /// The wait for the clients when the file leaves out `fs.nfs.drain_wait`.
 const DEFAULT_DRAIN_WAIT: Duration = Duration::from_secs(10);
@@ -69,6 +75,7 @@ pub(in crate::server) struct NfsTable {
     jukebox_after: Option<Dur>,
     handoff_socket: Option<std::path::PathBuf>,
     handoff_wait: Option<Dur>,
+    handoff_ready_wait: Option<Dur>,
     drain_wait: Option<Dur>,
 }
 
@@ -90,6 +97,8 @@ pub(in crate::server) struct NfsSettings {
     pub jukebox_after: Duration,
     /// The hand-off of the listening socket to a successor, if the file names a control socket.
     pub handoff: Option<Handoff>,
+    /// How long a running instance waits for its successor's `ready` after `done`.
+    pub ready_wait: Duration,
     /// How long an instance that handed over waits for the clients to close their connections.
     pub drain_wait: Duration,
 }
@@ -107,6 +116,7 @@ impl Default for NfsSettings {
             allowed_uids: None,
             jukebox_after: DEFAULT_JUKEBOX_AFTER,
             handoff: None,
+            ready_wait: DEFAULT_READY_WAIT,
             drain_wait: DEFAULT_DRAIN_WAIT,
         }
     }
@@ -170,13 +180,16 @@ fn span(
 fn handoff_of(
     socket: Option<std::path::PathBuf>,
     wait: Option<Dur>,
+    ready_wait: Option<Dur>,
 ) -> Result<Option<Handoff>, ConfigError> {
     let Some(socket) = socket else {
-        if wait.is_some() {
-            return Err(invalid(
-                "fs.nfs.handoff_wait",
-                "is the wait for the running instance of fs.nfs.handoff_socket, which is not given",
-            ));
+        for (key, given) in [("handoff_wait", wait), ("handoff_ready_wait", ready_wait)] {
+            if given.is_some() {
+                return Err(invalid(
+                    &format!("fs.nfs.{key}"),
+                    "is a wait of the hand-off of fs.nfs.handoff_socket, which is not given",
+                ));
+            }
         }
         return Ok(None);
     };
@@ -251,7 +264,17 @@ impl NfsSettings {
                 DEFAULT_JUKEBOX_AFTER,
                 (MS, Duration::from_secs(600)),
             )?,
-            handoff: handoff_of(table.handoff_socket, table.handoff_wait)?,
+            handoff: handoff_of(
+                table.handoff_socket,
+                table.handoff_wait,
+                table.handoff_ready_wait,
+            )?,
+            ready_wait: span(
+                "handoff_ready_wait",
+                table.handoff_ready_wait,
+                DEFAULT_READY_WAIT,
+                (MS, HOUR),
+            )?,
             drain_wait: span(
                 "drain_wait",
                 table.drain_wait,

@@ -19,6 +19,16 @@ use crate::server::{ACCEPT_PAUSE, pause_after};
 use super::wire::{self, MAX_FDS};
 use super::{Front, HandoffError, line};
 
+/// The first line of a request.
+pub(super) const TAKE: &str = "take 1";
+/// The second line of a request that asks for the `ready` step, and the taker's last frame.
+pub(super) const READY: &str = "ready";
+/// The running instance's answer to `ready`, after which it ends.
+pub(super) const BYE: &str = "bye";
+/// Why a request is refused when it is not one this instance understands: a taker that asked for
+/// the `ready` step then asks again without it.
+pub(super) const NOT_UNDERSTOOD: &str = "the request is not understood";
+
 /// A listening socket the instance offers: a copy of the descriptor the front serves from, so
 /// that the offer outlives nothing but itself.
 pub(crate) struct Socket {
@@ -68,6 +78,9 @@ pub(crate) struct Offer {
     accept_pause: Duration,
     /// Told when a taker has answered `ack`, and when that taker did not complete.
     hold: Option<Hold>,
+    /// How long after `done` a taker that asked for the `ready` step has to say it; none: this
+    /// instance does not take part in the step and refuses a request that names it.
+    ready_wait: Option<Duration>,
 }
 
 impl Offer {
@@ -90,7 +103,18 @@ impl Offer {
             linked: AtomicBool::new(true),
             accept_pause: ACCEPT_PAUSE,
             hold: None,
+            ready_wait: None,
         })
+    }
+
+    /// The same, taking part in the `ready` step: a taker that asks for it (`take 1 ready`) has
+    /// `wait` after `done` to say `ready`, and until it does this instance has not handed
+    /// anything over: if the taker ends the conversation first, sends something else, or is
+    /// silent for `wait`, this instance makes its control socket again, lets the hold go and
+    /// goes on, as for a taker that was gone before `done`.
+    pub(crate) fn with_ready_wait(mut self, wait: Duration) -> Self {
+        self.ready_wait = Some(wait);
+        self
     }
 
     /// The same, telling `hold` when a taker has answered `ack` and when it did not complete.
@@ -125,9 +149,10 @@ impl Offer {
     /// `nak`, or its connection ends) leaves the instance as it was, ready for the next. An
     /// accept that fails is said and followed by a pause, as the fronts' accept loops do.
     ///
-    /// A taker that answered `ack` and was gone before `done` reached it has not taken the
-    /// sockets: the instance makes its control socket again and goes on (if it cannot, it says so
-    /// and goes on serving with none, so that it is never handed over and never drains for it).
+    /// A taker that answered `ack` and was gone before `done` reached it, or (when it asked for
+    /// the `ready` step) did not say `ready` in time, has not taken the sockets: the instance
+    /// makes its control socket again and goes on (if it cannot, it says so and goes on serving
+    /// with none, so that it is never handed over and never drains for it).
     pub(crate) async fn serve(self) {
         let mut sessions = FuturesUnordered::new();
         loop {
@@ -219,9 +244,11 @@ impl Offer {
         held: &mut bool,
     ) -> std::io::Result<bool> {
         let request = wire::recv(stream).await?;
-        if request.lines != ["take 1"] {
-            return refuse(stream, "the request is not understood").await;
-        }
+        let ready_wait = match (request.lines.as_slice(), self.ready_wait) {
+            ([take], _) if take == TAKE => None,
+            ([take, ready], Some(wait)) if take == TAKE && ready == READY => Some(wait),
+            _ => return refuse(stream, NOT_UNDERSTOOD).await,
+        };
         if stream.peer_cred()?.uid() != self.uid {
             return refuse(stream, "the taker is not the user of this instance").await;
         }
@@ -252,7 +279,31 @@ impl Offer {
         }
         *unlinked = true;
         wire::send(stream, &["done".to_owned()], &[]).await?;
+        if let Some(wait) = ready_wait {
+            awaits_ready(stream, wait).await?;
+        }
         Ok(true)
+    }
+}
+
+/// Reads the taker's `ready`, which it has `wait` to send after `done`.
+///
+/// # Errors
+/// The taker ended the conversation, sent something else, or said nothing within `wait`.
+async fn awaits_ready(stream: &UnixStream, wait: Duration) -> std::io::Result<()> {
+    let timed_out = |_| std::io::Error::new(std::io::ErrorKind::TimedOut, "no ready in time");
+    let frame = tokio::time::timeout(wait, wire::recv(stream))
+        .await
+        .map_err(timed_out)??;
+    if frame.lines == [READY] {
+        // The taker serves only once it has read this: an instance that gave up closed the
+        // connection instead, so the two never both serve.
+        wire::send(stream, &[BYE.to_owned()], &[]).await
+    } else {
+        Err(std::io::Error::new(
+            std::io::ErrorKind::InvalidData,
+            "something other than ready after done",
+        ))
     }
 }
 
@@ -262,8 +313,8 @@ enum Ended {
     Handed,
     /// Nothing changed: the instance goes on with its control socket.
     Kept,
-    /// The taker answered `ack` and was gone before `done`: the control socket's file is gone
-    /// and must be made again.
+    /// The taker answered `ack` and was gone before `done`, or did not say `ready`: the control
+    /// socket's file is gone and must be made again.
     Unlinked,
 }
 
@@ -338,6 +389,9 @@ impl Drop for Offer {
     }
 }
 
+#[cfg(test)]
+#[path = "offer_ready_tests.rs"]
+mod ready_tests;
 #[cfg(test)]
 #[path = "offer_tests.rs"]
 mod tests;

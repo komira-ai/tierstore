@@ -12,10 +12,14 @@
 //! of readiness.
 //!
 //! An instance with a control socket offers its listening socket to the next instance. When that
-//! takes it, this one stops accepting, answers the requests it has read, shuts down the write side
-//! of each connection (the clients reconnect to the new instance, which holds the socket), waits
-//! for them to close for at most `fs.nfs.drain_wait`, and ends with status 0 without unmounting:
-//! the mount is the new instance's now.
+//! has taken it and says `ready` (the next instance does so when its start is done and it is about
+//! to serve; until then this one goes on accepting and answering), this one stops accepting,
+//! answers the requests it has read, shuts down the write side of each connection (the clients
+//! reconnect to the new instance, which holds the socket), waits for them to close for at most
+//! `fs.nfs.drain_wait`, and ends with status 0 without unmounting: the mount is the new
+//! instance's now. If the next instance is gone before `ready`, or says it later than
+//! `fs.nfs.handoff_ready_wait` after `done`, this one has handed nothing over: it serves on, takes
+//! attaches again, and binds its control socket again where the next had replaced it.
 
 use std::collections::HashSet;
 use std::os::fd::AsFd as _;
@@ -30,8 +34,12 @@ use super::boot::BootSource;
 use super::error::NfsError;
 use super::fs::{Patience, TreeNfs};
 use super::mount::{Mounter, Runner, System};
-use crate::server::handoff::{Front, Hold, Offer, Socket, Want, check_control_path, take};
+use crate::server::handoff::{
+    Front, Hold, Offer, Socket, Want, check_control_path, take_with_ready,
+};
 use crate::server::treefs::config::FsSettings;
+use crate::server::treefs::control::Control;
+use crate::server::treefs::core::Core;
 use crate::server::treefs::start::{Identity, Setup, Signals, io};
 
 /// A patience that is a timer of `after`.
@@ -42,6 +50,8 @@ fn timer(after: Duration) -> Patience {
 /// A started NFS frontend: the core, the socket it serves on, and the mount.
 pub(super) struct Running {
     _setup: Setup,
+    /// What the hold of a hand-off does, and the control socket it made again.
+    _keeper: Arc<Keeper>,
     server: tokio::task::JoinHandle<()>,
     /// Ends the server: a stop. A hand-over ends it by itself.
     stopping: Option<oneshot::Sender<()>>,
@@ -81,7 +91,7 @@ impl Running {
         // the control socket or opens the table: it holds both until then.
         let taken = match handoff {
             Some(handoff) => {
-                take(
+                take_with_ready(
                     handoff,
                     &Want {
                         s3: &[],
@@ -113,24 +123,13 @@ impl Running {
                 .map_err(listen)?,
         };
         let address = listener.local_addr().map_err(listen)?;
-        let hold = || -> Hold {
-            let core = Arc::clone(&setup.core);
-            Arc::new(move |on| core.hold(on))
-        };
-        let offer = match (nfs.handoff.as_ref(), inherited) {
-            (Some(handoff), Some(taken)) => {
-                offer_after_takeover(&handoff.socket, taken.copies, hold())
-            }
-            (Some(handoff), None) => {
-                let copy = std::net::TcpListener::from(
-                    listener.as_fd().try_clone_to_owned().map_err(listen)?,
-                );
-                Some(
-                    Offer::bind(&handoff.socket, vec![Socket::new(Front::Nfs, copy)])?
-                        .with_hold(hold()),
-                )
-            }
-            (None, _) => None,
+        let keeper = Arc::new(Keeper::new(&setup.core, settings));
+        // A cold start's copy of the socket, which its own offer hands to the next instance.
+        let cold = match (nfs.handoff.as_ref(), inherited.as_ref()) {
+            (Some(_), None) => Some(std::net::TcpListener::from(
+                listener.as_fd().try_clone_to_owned().map_err(listen)?,
+            )),
+            _ => None,
         };
         let fs = TreeNfs::new(
             Arc::clone(&setup.core),
@@ -140,6 +139,27 @@ impl Running {
             epoch,
         );
         let listener = NFSTcpListener::from_listener(listener, fs).map_err(listen)?;
+        // Everything that can fail before this instance serves is done: the running instance, if
+        // it waits, may end now. A start that failed before this point dropped the connection,
+        // and the running instance went on serving.
+        if let Some(ready) = inherited.as_mut().and_then(|taken| taken.ready.take()) {
+            ready.send().await?;
+        }
+        let hold = || -> Hold {
+            let keeper = Arc::clone(&keeper);
+            Arc::new(move |on| keeper.hold(on))
+        };
+        let offer = match (nfs.handoff.as_ref(), inherited, cold) {
+            (Some(handoff), Some(taken), _) => {
+                offer_after_takeover(&handoff.socket, taken.copies, nfs.ready_wait, hold())
+            }
+            (Some(handoff), None, Some(copy)) => Some(
+                Offer::bind(&handoff.socket, vec![Socket::new(Front::Nfs, copy)])?
+                    .with_ready_wait(nfs.ready_wait)
+                    .with_hold(hold()),
+            ),
+            _ => None,
+        };
         let (stopping, stop) = oneshot::channel();
         let handed = Arc::new(AtomicBool::new(false));
         let server = tokio::spawn(serve_until(
@@ -155,6 +175,7 @@ impl Running {
         );
         let mut running = Self {
             _setup: setup,
+            _keeper: keeper,
             server,
             stopping: Some(stopping),
             handed,
@@ -228,16 +249,78 @@ impl Drop for Running {
     }
 }
 
+/// What an instance does about its own state while a successor is taking its socket, and when
+/// that does not complete.
+///
+/// The hold makes the core refuse attaches and detaches from the `ack` on (the successor reads
+/// the state after `done`). If the hand-off does not complete (the successor is gone, or does
+/// not say `ready`), the hold is let go, and the control socket is made again where a successor
+/// that began to start had replaced it: the successor binds `fs.control_socket` in its start,
+/// and one that died there leaves a file no one listens on, so without this an instance that
+/// goes on serving could not be asked to attach a tree again until it restarted.
+struct Keeper {
+    core: Arc<Core>,
+    control: std::path::PathBuf,
+    group: u32,
+    /// The device and inode of the control socket's file as this instance's start left it.
+    file: Option<(u64, u64)>,
+    /// The control socket made again, kept so that it serves.
+    revived: std::sync::Mutex<Option<Control>>,
+}
+
+impl Keeper {
+    /// The keeper of `core`, which serves the control socket of `settings`.
+    fn new(core: &Arc<Core>, settings: &FsSettings) -> Self {
+        Self {
+            core: Arc::clone(core),
+            control: settings.control_socket.clone(),
+            group: settings.client_group,
+            file: file_of(&settings.control_socket),
+            revived: std::sync::Mutex::new(None),
+        }
+    }
+
+    /// The hold of the hand-off: `on` at `ack`, off when the hand-off does not complete.
+    fn hold(&self, on: bool) {
+        self.core.hold(on);
+        if on || file_of(&self.control) == self.file {
+            return;
+        }
+        let made = Control::serve(Arc::clone(&self.core), &self.control, self.group);
+        *self
+            .revived
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner) = made
+            .map_err(|why| {
+                tracing::warn!(
+                    "tierstore fs: the control socket at {} cannot be made again ({why}); this \
+                     instance goes on serving and takes no attach until it restarts",
+                    self.control.display()
+                );
+            })
+            .ok();
+    }
+}
+
+/// The device and inode of the file at `path`, if there is one.
+fn file_of(path: &std::path::Path) -> Option<(u64, u64)> {
+    use std::os::unix::fs::MetadataExt as _;
+    std::fs::metadata(path)
+        .ok()
+        .map(|meta| (meta.dev(), meta.ino()))
+}
+
 /// The control socket of a process that took its listening socket from the one it replaces: the
 /// sockets it took are what it offers to its own successor. A process that cannot make the control
 /// socket says so and serves without one, since the update has happened and cannot be undone.
 fn offer_after_takeover(
     socket: &std::path::Path,
     copies: Vec<Socket>,
+    ready_wait: Duration,
     hold: Hold,
 ) -> Option<Offer> {
     Offer::bind(socket, copies)
-        .map(|offer| offer.with_hold(hold))
+        .map(|offer| offer.with_ready_wait(ready_wait).with_hold(hold))
         .map_err(|why| {
             tracing::warn!(
                 "tierstore fs: {why}; this instance serves without a control socket and \
@@ -331,6 +414,9 @@ pub(in crate::server) fn serve(settings: &FsSettings) -> Result<(), NfsError> {
 #[cfg(test)]
 #[path = "handoff_tests.rs"]
 mod handoff_tests;
+#[cfg(test)]
+#[path = "ready_tests.rs"]
+mod ready_tests;
 #[cfg(test)]
 #[path = "restart_tests.rs"]
 mod restart_tests;
