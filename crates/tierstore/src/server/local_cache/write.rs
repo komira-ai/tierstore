@@ -54,6 +54,7 @@ use crate::{Error, PartBody};
 
 use super::calls::counting;
 use super::keep::Sent;
+use super::layout::Origin;
 use super::metrics::{add, bump};
 use super::{Inner, READ_ONLY, locked};
 
@@ -152,13 +153,17 @@ impl Inner {
         let Some(name) = self.cacheable(key) else {
             return;
         };
+        // An entry of origin `span` is no object of the upstream: nothing was deleted there,
+        // and the blob a mount pinned stays.
+        if locked(&self.index)
+            .get(&name.hex)
+            .is_some_and(|entry| entry.origin == Origin::Span)
+        {
+            return;
+        }
         {
             let flights = locked(&self.flights);
-            // A fill of the socket for the same name is marked as well (lock order: flights,
-            // source_flights, invalidated).
-            if flights.contains_key(&name.hex)
-                || locked(&self.source_flights).contains_key(&name.hex)
-            {
+            if flights.contains_key(&name.hex) {
                 locked(&self.invalidated).insert(name.hex.clone());
             }
         }

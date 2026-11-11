@@ -18,7 +18,7 @@ use tokio::sync::Notify;
 
 use super::LocalCache;
 use super::hold::Trace;
-use super::layout::{Sidecar, data_path, meta_path, name_of, stage_dir};
+use super::layout::{Origin, Sidecar, data_path, meta_path, name_of, stage_dir};
 use super::metrics::{Evicted, read};
 use super::scrub::{ScrubPass, Scrubber};
 use super::testing::{Rig, age, pattern, tree, wait_advancing};
@@ -254,6 +254,7 @@ fn leave_the_middle_of_a_publish_and_a_fill(root: &Path) {
         sha256: "0".repeat(64),
         tag: "tag".to_owned(),
         modified: 0,
+        origin: Origin::Object,
     };
     write(
         &meta_path(root, &hex("aabb")),

@@ -7,7 +7,7 @@ use std::sync::{Arc, Mutex};
 use bytes::Bytes;
 use tokio::task::JoinHandle;
 
-use super::fill::{Filled, Pending};
+use super::fill::{Class, Filled, Pending, Plan};
 use super::layout::name_of;
 use super::metrics::{FailedFill, read};
 use super::testing::{Rig, digest, pattern};
@@ -185,7 +185,12 @@ fn a_fill_dropped_by_its_spawn_leaves_no_key_in_the_table() {
 
     impl Drop for Starter {
         fn drop(&mut self) {
-            let joined = self.inner.join_or_start("cas/b/obj", &name_of("cas/b/obj"));
+            let joined = self.inner.join_or_start(
+                "cas/b/obj",
+                &name_of("cas/b/obj"),
+                Plan::Object,
+                Class::S3,
+            );
             *locked(&self.joined) = Some(joined);
         }
     }

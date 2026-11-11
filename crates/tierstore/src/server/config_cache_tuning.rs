@@ -14,17 +14,30 @@ use super::config_tuning::{HOUR, MS};
 use super::config_units::Dur;
 use super::local_cache::CacheConfig;
 
+/// The least `prefetch_queue_ttl`.
+const SECOND: Duration = Duration::from_secs(1);
+
 /// A bound on the largest read, or queue, of a key in bytes: a gibibyte.
 const GIB: u64 = 1 << 30;
 
 /// The duration of `local_cache.key`, from 1 ms to an hour; `default` if the file leaves it out.
 fn time(key: &str, value: Option<Dur>, default: Duration) -> Result<Duration, ConfigError> {
+    time_from(key, value, default, MS)
+}
+
+/// The duration of `local_cache.key`, from `low` to an hour; `default` if the file leaves it out.
+fn time_from(
+    key: &str,
+    value: Option<Dur>,
+    default: Duration,
+    low: Duration,
+) -> Result<Duration, ConfigError> {
     let got = value.map_or(default, |dur| dur.0);
-    if got < MS || got > HOUR {
+    if got < low || got > HOUR {
         let why = format!(
             "{}ms is not between {}ms and {}ms",
             got.as_millis(),
-            MS.as_millis(),
+            low.as_millis(),
             HOUR.as_millis()
         );
         return Err(super::config::invalid(&format!("local_cache.{key}"), why));
@@ -61,6 +74,23 @@ pub(super) fn apply(table: &LocalCacheTable, cache: &mut CacheConfig) -> Result<
         table.fill_socket_wait,
         cache.fill_socket_wait,
     )?;
+    prefetch(table, cache)
+}
+
+/// The queue's keys: `prefetch_concurrency`, `prefetch_queue` and `prefetch_queue_ttl` (one second
+/// to an hour).
+fn prefetch(table: &LocalCacheTable, cache: &mut CacheConfig) -> Result<(), ConfigError> {
+    let wanted = |value: Option<u32>, default: usize| {
+        value.unwrap_or_else(|| u32::try_from(default).unwrap_or(u32::MAX))
+    };
+    let workers = wanted(table.prefetch_concurrency, cache.prefetch.concurrency);
+    let workers = within("local_cache", "prefetch_concurrency", workers, 0, 64)?;
+    cache.prefetch.concurrency = workers as usize;
+    let queue = wanted(table.prefetch_queue, cache.prefetch.queue);
+    let queue = within("local_cache", "prefetch_queue", queue, 1, 1_000_000)?;
+    cache.prefetch.queue = queue as usize;
+    let ttl = table.prefetch_queue_ttl;
+    cache.prefetch.ttl = time_from("prefetch_queue_ttl", ttl, cache.prefetch.ttl, SECOND)?;
     Ok(())
 }
 

@@ -75,6 +75,15 @@ impl PinSet {
         self.bytes
     }
 
+    /// The owners that pin `hex`, for a caller that replaces the object and pins the new one for
+    /// them (see [`PinSet::pin`]).
+    pub(super) fn owners_of(&self, hex: &str) -> Vec<Owner> {
+        self.by_blob
+            .get(hex)
+            .map(|pin| pin.owners.iter().map(|owner| Owner::clone(owner)).collect())
+            .unwrap_or_default()
+    }
+
     /// Whether any owner pins `hex`.
     pub(super) fn is_pinned(&self, hex: &str) -> bool {
         self.by_blob.contains_key(hex)

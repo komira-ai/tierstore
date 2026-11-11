@@ -5,7 +5,8 @@ use std::sync::atomic::Ordering;
 
 use bytes::Bytes;
 
-use super::layout::{Sidecar, data_path, meta_path, name_of};
+use super::fill::{Class, Plan};
+use super::layout::{Origin, Sidecar, data_path, meta_path, name_of};
 use super::metrics::{FailedFill, read};
 use super::testing::{Quirk, Rig, digest, pattern};
 use crate::{Backend, Error, Op};
@@ -84,6 +85,7 @@ async fn a_kept_object_is_raw_bytes_under_its_name_with_a_sidecar() {
             sha256: sha.clone(),
             tag: upstream.tag,
             modified: upstream.modified,
+            origin: Origin::Object,
         };
         assert_eq!(sidecar, expected);
     }
@@ -245,6 +247,7 @@ async fn a_name_that_exists_is_kept_and_the_fill_is_not_counted() {
         sha256: digest(&body),
         tag: upstream.tag,
         modified: upstream.modified,
+        origin: Origin::Object,
     };
     std::fs::write(&meta, serde_json::to_vec(&sidecar).unwrap()).unwrap();
     assert_eq!(rig.get("cas/b/obj").await.unwrap(), body);
@@ -375,7 +378,10 @@ async fn a_fill_that_ended_after_the_miss_is_not_run_again() {
     assert_eq!(rig.get("cas/b/obj").await.unwrap().len(), 100);
     let (heads, gets) = (rig.calls(Op::Head), rig.calls(Op::Get));
     let name = name_of("cas/b/obj");
-    let late = rig.cache.inner.join_or_start("cas/b/obj", &name);
+    let late = rig
+        .cache
+        .inner
+        .join_or_start("cas/b/obj", &name, Plan::Object, Class::S3);
     assert_eq!(late.err(), Some(super::fill::Filled::Kept));
     assert_eq!((rig.calls(Op::Head), rig.calls(Op::Get)), (heads, gets));
     assert_eq!(read(&rig.cache.counters().fills), 1);

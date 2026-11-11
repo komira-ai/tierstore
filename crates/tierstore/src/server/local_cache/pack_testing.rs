@@ -83,7 +83,8 @@ pub(in crate::server) fn recency(cache: &LocalCache) -> Vec<String> {
         .collect()
 }
 
-/// The name on disk of the blob `sha256` of the fill socket.
+/// The name on disk of the blob `sha256` of the fill socket: its digest, as for any object
+/// `cas/l/<sha256>`.
 pub(in crate::server) fn blob_hex(sha256: &str) -> String {
-    name_of(&format!("_tiering/fill/{sha256}")).hex
+    name_of(&format!("cas/l/{sha256}")).hex
 }
