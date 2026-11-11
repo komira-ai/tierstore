@@ -713,3 +713,100 @@ async fn ensure_margin_answers_false_for_a_lease_that_was_taken_over() {
     assert!(!a.margin_ok());
     assert_eq!(tag(&hot).await, current);
 }
+
+/// A holder whose calls go through a gate, over a hot tier it shares with the test.
+fn gated_holder() -> (Arc<MemoryBackend>, Arc<GateBackend>, Arc<TestClock>, Lease) {
+    let clock = Arc::new(TestClock::new());
+    let hot = Arc::new(MemoryBackend::with_clock(Arc::clone(&clock)));
+    let gated = Arc::new(GateBackend::new(hot.clone()));
+    let holder = Lease::new(gated.clone(), clock.clone(), "p", TTL, RENEW, MARGIN);
+    (hot, gated, clock, holder)
+}
+
+/// Asserts that a release after a take that was cut gives the lease up. The take's create-only put
+/// is done and its HEAD for the tag is parked; the call is dropped there (a halt cuts the round),
+/// so the holder has no tag, and the release deletes the object because its body has the
+/// holder's nonce. Catches a release that does nothing for a holder with no tag, which leaves its
+/// lease in the hot tier until another holder has waited out the ttl.
+#[tokio::test]
+async fn a_release_after_a_cut_take_deletes_the_lease_the_take_wrote() {
+    let (hot, gated, _clock, holder) = gated_holder();
+    let gate = gated.gate(Op::Head, LEASE_KEY, Phase::Pre);
+    {
+        let mut taking = pin!(holder.ensure());
+        tokio::select! {
+            _ = &mut taking => panic!("the take ended while its HEAD was held"),
+            () = gate.parked() => {}
+        }
+    }
+    assert_eq!(count(&hot).await, "1");
+
+    holder.release().await;
+    assert_eq!(tag(&hot).await, None);
+}
+
+/// Asserts that a release after a renewal that was cut gives the lease up. The renewal's `If-Match`
+/// put is done and its answer is parked; the call is dropped there, so the holder has the tag
+/// before the write and the object has the one after, and the release deletes the object because
+/// its body has the holder's nonce. Catches a release that compares the tag alone, and leaves
+/// the lease of a holder that was cut in the middle of a renewal.
+#[tokio::test]
+async fn a_release_after_a_cut_renewal_deletes_the_lease_the_renewal_wrote() {
+    let (hot, gated, clock, holder) = gated_holder();
+    assert!(holder.ensure().await);
+    clock.set(10_001);
+    let gate = gated.gate(Op::PutIfMatch, LEASE_KEY, Phase::Post);
+    {
+        let mut renewing = pin!(holder.ensure());
+        tokio::select! {
+            _ = &mut renewing => panic!("the renewal ended while its answer was held"),
+            () = gate.parked() => {}
+        }
+    }
+    assert_eq!(count(&hot).await, "2");
+
+    holder.release().await;
+    assert_eq!(tag(&hot).await, None);
+}
+
+/// Asserts that a release after a cut take leaves another holder's lease alone: the take's put
+/// found an object (so wrote none), and the object's body has the other holder's nonce.
+/// Catches a release of a cut call that deletes whatever object stands.
+#[tokio::test]
+async fn a_release_after_a_cut_take_leaves_another_holders_lease() {
+    let (hot, gated, clock, holder) = gated_holder();
+    let other = Lease::new(hot.clone(), clock, "q", TTL, RENEW, MARGIN);
+    assert!(other.ensure().await);
+    let gate = gated.gate(Op::Head, LEASE_KEY, Phase::Pre);
+    {
+        let mut taking = pin!(holder.ensure());
+        tokio::select! {
+            _ = &mut taking => panic!("the take ended while its HEAD was held"),
+            () = gate.parked() => {}
+        }
+    }
+    let current = tag(&hot).await;
+    assert!(current.is_some());
+
+    holder.release().await;
+    assert_eq!(tag(&hot).await, current);
+}
+
+/// Asserts that a release after a cut take, when the object is gone, deletes nothing and does not
+/// fail: the take was cut, and the lease was deleted by someone else before the release.
+#[tokio::test]
+async fn a_release_after_a_cut_take_finds_no_lease_to_delete() {
+    let (hot, gated, _clock, holder) = gated_holder();
+    let gate = gated.gate(Op::Head, LEASE_KEY, Phase::Pre);
+    {
+        let mut taking = pin!(holder.ensure());
+        tokio::select! {
+            _ = &mut taking => panic!("the take ended while its HEAD was held"),
+            () = gate.parked() => {}
+        }
+    }
+    hot.delete(LEASE_KEY).await.unwrap();
+
+    holder.release().await;
+    assert_eq!(tag(&hot).await, None);
+}
