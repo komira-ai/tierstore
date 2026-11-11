@@ -50,13 +50,12 @@
 //!
 //! The filesystem process of the node asks for blobs over the fill socket (see
 //! [`fill_socket`](crate::server::fill_socket)): `source` fills a blob that lies inside a larger
-//! upstream object, ranged, as the entry named by `<sha256>` (the entry of the object
-//! `cas/l/<sha256>`, of origin `span`), and a whole `cas/l/<sha256>`, with the same fetch as every
-//! fill. Those fills have their own permits (`fill_socket_concurrency`) and wait for one up to
-//! `fill_socket_wait`; they never take one of `max_concurrent_fills`, and the S3 path never takes
-//! theirs. There is one table of running fills for both paths: a request for a digest that has a
-//! fill running, whichever path started it, joins it and takes no permit. A cache that does not
-//! hold the lock fills nothing for the socket.
+//! upstream object, ranged, as the entry of `cas/l/<sha256>` (origin `span`), and a whole
+//! `cas/l/<sha256>`, with the same fetch as every fill. Those fills have their own permits
+//! (`fill_socket_concurrency`) and wait for one up to `fill_socket_wait`; they never take one of
+//! `max_concurrent_fills`, and the S3 path never takes theirs. One table of running fills serves
+//! both paths: a request for a digest with a fill running joins it and takes no permit. A cache
+//! that does not hold the lock fills nothing for the socket.
 //!
 //! # A read
 //!
@@ -493,8 +492,7 @@ pub(super) struct Inner {
     config: CacheConfig,
     index: Mutex<Index>,
     counters: Counters,
-    /// The fills that are running, by the name of the object: one table for every path that
-    /// fills (the S3 front, the fill socket), so that a name has one fill whoever asks.
+    /// The fills that are running, by the name of the object: one table for every path.
     flights: Mutex<HashMap<String, Pending>>,
     /// The fills that are running for an object that was deleted or replaced since they began:
     /// they must not keep what they read. A name is put here only while it has a fill in
