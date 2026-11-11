@@ -884,9 +884,8 @@ impl Server {
             ops::refuse_unsigned_overrides(parts)?;
         }
         let signed = auth::verify(&self.config, parts)?;
-        if hosted.is_none()
-            && let Some(call) = hydrate::asked(&parts.method, parts.uri.path())
-        {
+        let call = hydrate::asked(&parts.method, parts.uri.path());
+        if let Some(call) = call.filter(|_| hosted.is_none()) {
             return self.hydrate(parts, call, &signed, body).await;
         }
         let reads = matches!(parts.method, Method::GET | Method::HEAD);

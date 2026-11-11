@@ -493,8 +493,7 @@ pub(super) struct Inner {
     config: CacheConfig,
     index: Mutex<Index>,
     counters: Counters,
-    /// The fills that are running, by the name of the object: one table for every path that
-    /// fills (the S3 front, the fill socket), so that a name has one fill whoever asks.
+    /// The fills that are running, by the name of the object: one table for every path that fills.
     flights: Mutex<HashMap<String, Pending>>,
     /// The fills that are running for an object that was deleted or replaced since they began:
     /// they must not keep what they read. A name is put here only while it has a fill in
@@ -639,11 +638,11 @@ impl LocalCache {
         let permits = Arc::new(Semaphore::new(config.max_concurrent_fills.max(1)));
         let keeps = Arc::new(Semaphore::new(config.max_concurrent_keeps.max(1)));
         let source_permits = Arc::new(Semaphore::new(config.fill_socket_concurrency.max(1)));
-        let prefetch = prefetch::Prefetch::new(&config.prefetch);
         let inner = Inner {
             upstream,
             disk,
             clock,
+            prefetch: prefetch::Prefetch::new(&config.prefetch),
             config,
             index: Mutex::new(index),
             counters,
@@ -655,7 +654,6 @@ impl LocalCache {
             reserved: AtomicU64::new(0),
             permits,
             source_permits,
-            prefetch,
             keeps,
             observer,
             #[cfg(test)]
