@@ -215,7 +215,8 @@ impl LocalCache {
     pub fn unpin(&self, mount: &str, tree: &str) -> Result<usize, PinError> {
         not_reserved(mount)?;
         self.inner.pins_writable()?;
-        self.inner.detach_holds(mount, |attached| attached != tree);
+        self.inner
+            .detach_holds(|attached, attached_tree| attached != mount || attached_tree != tree);
         let owner = Owner {
             mount: mount.to_owned(),
             tree: tree.to_owned(),
@@ -231,8 +232,9 @@ impl LocalCache {
     pub fn pins_live(&self, mount: &str, trees: &[String]) -> Result<usize, PinError> {
         not_reserved(mount)?;
         self.inner.pins_writable()?;
-        self.inner
-            .detach_holds(mount, |attached| trees.iter().any(|tree| tree == attached));
+        self.inner.detach_holds(|attached, attached_tree| {
+            attached == mount && trees.iter().any(|tree| tree == attached_tree)
+        });
         Ok(locked(&self.inner.index).pins.retain_live(mount, trees))
     }
 

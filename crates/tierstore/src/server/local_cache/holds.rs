@@ -185,12 +185,10 @@ impl Holds {
         owners
     }
 
-    /// Forgets the attachments of `mount` for the trees `live` does not name.
-    fn unattach(&mut self, mount: &str, live: impl Fn(&str) -> bool) {
+    /// Forgets every attachment `live` does not keep: it is given the mount and the tree.
+    fn unattach(&mut self, live: impl Fn(&str, &str) -> bool) {
         self.attached.retain(|tree, mounts| {
-            if !live(tree) {
-                let _ = mounts.remove(mount);
-            }
+            mounts.retain(|mount| live(mount, tree));
             !mounts.is_empty()
         });
     }
@@ -326,10 +324,10 @@ impl Inner {
             .fetch_add(handovers, Ordering::Relaxed);
     }
 
-    /// A mount no longer pins for the trees `live` does not name (it unpinned one, or swept the
-    /// rest): a hold that handed one over pins nothing of it for the attachments that are gone.
-    pub(super) fn detach_holds(&self, mount: &str, live: impl Fn(&str) -> bool) {
-        locked(&self.prefetch.holds).unattach(mount, live);
+    /// Some attachments are gone (a mount unpinned a tree, or a sweep took the pins of the mounts
+    /// and trees `live` does not keep): a hold that handed a tree over pins nothing of it for them.
+    pub(super) fn detach_holds(&self, live: impl Fn(&str, &str) -> bool) {
+        locked(&self.prefetch.holds).unattach(live);
     }
 
     /// See [`LocalCache::release_hold`]; also what the end of a hold's time does.

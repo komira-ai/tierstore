@@ -891,21 +891,20 @@ async fn a_fill_pins_for_the_attachments_that_are_left() {
         rig.cache.hold_blob("job", &t, &a.blob()),
         Ok(Prefetched::Queued)
     );
-    for mount in ["boot-1", "boot-2", "boot-3"] {
+    for mount in ["boot-1", "boot-2"] {
         assert_eq!(rig.cache.pin(mount, &t, &[]).unwrap().pinned, 0);
     }
     assert_eq!(rig.cache.unpin("boot-1", &t), Ok(0));
-    assert_eq!(rig.cache.pins_live("boot-2", &[]), Ok(0));
     gate_a.add_permits(64);
     until("a is pinned", || rig.cache.pinned_bytes() == 300).await;
     assert_eq!(
         pinners(&rig, &a.sha),
-        vec![("boot-3".to_owned(), t.clone())]
+        vec![("boot-2".to_owned(), t.clone())]
     );
 
-    // The tree is still listed by boot-3: a sweep that names it keeps it.
+    // The tree is still listed by boot-2: a sweep that names it keeps it.
     assert_eq!(
-        rig.cache.pins_live("boot-3", std::slice::from_ref(&t)),
+        rig.cache.pins_live("boot-2", std::slice::from_ref(&t)),
         Ok(0)
     );
     assert_eq!(
@@ -916,11 +915,48 @@ async fn a_fill_pins_for_the_attachments_that_are_left() {
     until("b is pinned", || rig.cache.pinned_bytes() == 500).await;
     assert_eq!(
         pinners(&rig, &b.sha),
-        vec![("boot-3".to_owned(), t.clone())]
+        vec![("boot-2".to_owned(), t.clone())]
     );
 
-    assert_eq!(rig.cache.unpin("boot-3", &t), Ok(2));
+    assert_eq!(rig.cache.unpin("boot-2", &t), Ok(2));
     assert_eq!(rig.cache.pinned_bytes(), 0);
+}
+
+/// A sweep by one mount takes the pins of every other mount, so it takes their attachments too:
+/// a blob that fills after a new mount swept is pinned for nobody, and the pins file has none of
+/// it. A mount that pins the tree again is the attachment from then on.
+#[tokio::test]
+async fn a_sweep_by_another_mount_forgets_the_attachments_it_dropped() {
+    let rig = rig("thold-sweep-other", 1);
+    let (a, b) = (stored(&rig, 1, 300).await, stored(&rig, 2, 200).await);
+    let t = tree(1);
+    let (gate_a, gate_b) = (rig.tamper.hold_key(&a.key), rig.tamper.hold_key(&b.key));
+    assert_eq!(
+        rig.cache.open_hold("job", None, std::slice::from_ref(&t)),
+        Ok(1)
+    );
+    assert_eq!(
+        rig.cache.hold_blob("job", &t, &a.blob()),
+        Ok(Prefetched::Queued)
+    );
+    assert_eq!(rig.cache.pin("boot-a", &t, &[]).unwrap().pinned, 0);
+    assert_eq!(rig.cache.pins_live("boot-b", &[]), Ok(0));
+    gate_a.add_permits(64);
+    until("a is in the cache", || rig.cache.held() == (300, 1)).await;
+    assert!(pinners(&rig, &a.sha).is_empty());
+    assert_eq!(rig.cache.pinned_bytes(), 0);
+
+    assert_eq!(rig.cache.pin("boot-b", &t, &[]).unwrap().pinned, 0);
+    assert_eq!(
+        rig.cache.hold_blob("job", &t, &b.blob()),
+        Ok(Prefetched::Queued)
+    );
+    gate_b.add_permits(64);
+    until("b is pinned", || rig.cache.pinned_bytes() == 200).await;
+    assert_eq!(
+        pinners(&rig, &b.sha),
+        vec![("boot-b".to_owned(), t.clone())]
+    );
 }
 
 /// Asserts that the handover leaves the pins file as it was: the file has the same keys, one
