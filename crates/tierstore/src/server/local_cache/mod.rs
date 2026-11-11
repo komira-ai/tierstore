@@ -92,25 +92,22 @@
 //! do not hash to the name is the reader's error, not passed through. A hit is not hashed again:
 //! the scrub does that.
 //!
-//! At most `max_concurrent_fills` fills run at once, each holding one chunk (`fill_chunk`, 8 MiB)
-//! in memory at a time, so the fills hold at most that many chunks. A miss of a key that has no
-//! fill running, when every permit is taken, does not wait for one: it is served from the upstream
-//! as a pass-through, keeps nothing and is counted in `fills_skipped` and `fills_skipped_busy`.
-//! The readers of a key that has a fill running share it and need no permit. A fill that panics
-//! or is cancelled frees its key and its permit, and the readers that waited for it get an error
+//! At most `max_concurrent_fills` fills run at once, each holding one chunk (`fill_chunk`, 8 MiB) in memory at a time,
+//! so the fills hold at most that many chunks. A miss of a key that has no fill running, when every permit is taken,
+//! does not wait for one: it is served from the upstream as a pass-through, keeps nothing and is counted in
+//! `fills_skipped` and `fills_skipped_busy`. The readers of a key that has a fill running share it and need no permit.
+//! A fill that panics or is cancelled frees its key and its permit, and the readers that waited for it get an error
 //! (`Unavailable`, counted as a failed fill with the reason `aborted`).
 //!
 //! # Eviction
 //!
-//! The cache keeps its objects under `budget` bytes. Above `high_water` percent of it, and
-//! whenever the file system's free space is under `free_floor` percent, a pass
-//! ([`LocalCache::evict`]) removes the least recently used objects until the cache is down to
-//! `low_water` percent and the free space is back at the floor. The order of use is in memory,
-//! seeded at start from the files' times and written back to them (`utimensat`, once per object
-//! per pass however often it was used) so that a restart keeps it. An object with more than one
-//! link is in use by another tree: it is skipped, counted, and stays charged to the budget.
-//! So is an object that a tree pins (module `pins`), counted separately. Files in `.stage/` are
-//! never evicted and are removed at start.
+//! The cache keeps its objects under `budget` bytes. Above `high_water` percent of it, and whenever the file system's
+//! free space is under `free_floor` percent, a pass ([`LocalCache::evict`]) removes the least recently used objects
+//! until the cache is down to `low_water` percent and the free space is back at the floor. The order of use is in
+//! memory, seeded at start from the files' times and written back to them (`utimensat`, once per object per pass
+//! however often it was used) so that a restart keeps it. An object with more than one link is in use by another tree:
+//! it is skipped, counted, and stays charged to the budget. So is an object that a tree pins (module `pins`), counted
+//! separately. Files in `.stage/` are never evicted and are removed at start.
 //!
 //! # The lock and read-only mode
 //!
@@ -130,9 +127,10 @@
 mod calls;
 mod disk;
 mod evict;
-mod expand;
+pub(super) mod expand;
 mod fill;
 mod hold;
+pub(super) mod holds;
 mod index;
 mod keep;
 pub(super) mod layout;
@@ -162,6 +160,8 @@ mod front_tests;
 mod hit_tests;
 #[cfg(test)]
 mod hold_tests;
+#[cfg(test)]
+mod holds_tests;
 #[cfg(test)]
 mod keep_head_tests;
 #[cfg(test)]
@@ -490,8 +490,7 @@ pub(super) struct Inner {
     config: CacheConfig,
     index: Mutex<Index>,
     counters: Counters,
-    /// The fills that are running, by the name of the object: one table for every path that
-    /// fills (the S3 front, the fill socket), so that a name has one fill whoever asks.
+    /// The fills that are running, by the name of the object: one table for every path that fills.
     flights: Mutex<HashMap<String, Pending>>,
     /// The fills that are running for an object that was deleted or replaced since they began:
     /// they must not keep what they read. A name is put here only while it has a fill in
@@ -636,11 +635,11 @@ impl LocalCache {
         let permits = Arc::new(Semaphore::new(config.max_concurrent_fills.max(1)));
         let keeps = Arc::new(Semaphore::new(config.max_concurrent_keeps.max(1)));
         let source_permits = Arc::new(Semaphore::new(config.fill_socket_concurrency.max(1)));
-        let prefetch = prefetch::Prefetch::new(&config.prefetch);
         let inner = Inner {
             upstream,
             disk,
             clock,
+            prefetch: prefetch::Prefetch::new(&config.prefetch),
             config,
             index: Mutex::new(index),
             counters,
@@ -652,7 +651,6 @@ impl LocalCache {
             reserved: AtomicU64::new(0),
             permits,
             source_permits,
-            prefetch,
             keeps,
             observer,
             #[cfg(test)]

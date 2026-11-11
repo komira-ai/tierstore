@@ -263,6 +263,13 @@ pub(super) fn string_to_sign_for(stamp: &str, scope: (&str, &str), request: &str
     format!("AWS4-HMAC-SHA256\n{stamp}\n{scope}\n{digest}")
 }
 
+/// The id of the access key a request names in its `Authorization` header: the key of a request
+/// that [`verify`] passed. None for a request with no such header (a presigned URL).
+pub(crate) fn key_id(parts: &Parts) -> Option<&str> {
+    let text = header(&parts.headers, "authorization")?;
+    Some(Authorization::parse(text)?.key_id)
+}
+
 /// Checks the signature of a request.
 ///
 /// Gives the value of its `x-amz-content-sha256` header, the hash of the body that the

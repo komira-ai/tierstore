@@ -773,7 +773,7 @@ fn the_whole_fill_limit_is_a_size_between_one_byte_and_the_budget() {
 }
 
 /// The keys of `[local_cache]`, which the README of the packaging must document each in a row.
-const LOCAL_CACHE_KEYS: [&str; 35] = [
+const LOCAL_CACHE_KEYS: [&str; 37] = [
     "fill_socket",
     "fill_socket_concurrency",
     "fill_socket_wait",
@@ -783,6 +783,8 @@ const LOCAL_CACHE_KEYS: [&str; 35] = [
     "hydrate_max_trees",
     "hydrate_max_blobs",
     "hydrate_max_bytes",
+    "hold_max",
+    "hold_max_count",
     "path",
     "layout",
     "budget",

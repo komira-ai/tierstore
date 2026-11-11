@@ -29,6 +29,8 @@
 //! # hydrate_max_trees       = 64
 //! # hydrate_max_blobs       = 500000
 //! # hydrate_max_bytes       = "32GiB"
+//! # hold_max                = "4h"
+//! # hold_max_count          = 256
 //!
 //! [cold_store]                  # the upstream: an S3 endpoint
 //! kind             = "s3"
@@ -242,6 +244,12 @@ pub(super) struct LocalCacheTable {
     /// The bytes of the blobs one call may queue (1MiB to 1TiB, default 32GiB).
     #[serde(default)]
     pub hydrate_max_bytes: Option<Size>,
+    /// The longest a hold of the prefetch queue lives (1m to 24h, default `4h`).
+    #[serde(default)]
+    pub hold_max: Option<Dur>,
+    /// The most holds open at once (1 to 100000, default 256).
+    #[serde(default)]
+    pub hold_max_count: Option<u32>,
 }
 
 /// What a build-node file stands for.

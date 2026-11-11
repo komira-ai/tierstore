@@ -94,6 +94,8 @@ pub(super) fn refuse_fill_keys(table: &LocalCacheTable) -> Result<(), ConfigErro
         ("hydrate_max_trees", table.hydrate_max_trees.is_some()),
         ("hydrate_max_blobs", table.hydrate_max_blobs.is_some()),
         ("hydrate_max_bytes", table.hydrate_max_bytes.is_some()),
+        ("hold_max", table.hold_max.is_some()),
+        ("hold_max_count", table.hold_max_count.is_some()),
     ];
     refuse("local_cache", why, &keys)
 }

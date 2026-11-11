@@ -60,6 +60,8 @@ const LOCAL_CACHE_KEYS: &[&str] = &[
     "hydrate_max_trees",
     "hydrate_max_blobs",
     "hydrate_max_bytes",
+    "hold_max",
+    "hold_max_count",
 ];
 
 /// Whether `key` is a name some table of the file holds: the last part of a key in [`KEYS`], a

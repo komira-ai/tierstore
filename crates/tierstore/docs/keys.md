@@ -79,6 +79,10 @@ The three rights, each on the prefixes of its list:
 
 The lists are not interchangeable: a write prefix does not let the key read what it wrote, and a read prefix does not let it write. A put by a scoped key is create-only (no `If-Match`, no copy), and a delete needs a delete prefix. A call outside the prefixes of the right it needs is 403 `AccessDenied`.
 
+## The hydrate call
+
+A build node takes two experimental calls that warm its cache before a job (see [the hydrate call](operations.md#the-hydrate-call)): a signed `POST` to `/_tierstore/v1/hydrate` and to `/_tierstore/v1/release`. The full key and a read-only key may make them: they give a way to spend cache space and upstream reads, bounded by the `hydrate_*` and `hold_*` keys of `[local_cache]`, and no way to read what the key may not. A scoped key with a read prefix may make them and expands only what it may read: each manifest and each `source.key` it meets is held to its read prefixes, and what is outside is left out and counted `access_denied`. A hold belongs to the key that opened it: another key, whatever its rights, that sends the hold's id to either call is answered `404 NoSuchHold`. A scoped key with no read prefix, a presigning key and a presigned URL are refused `403 AccessDenied`.
+
 ## Rotation
 
 The server reads its key files once, at start. To rotate a key, write the new file, then restart the unit: it drains first (see [operations](operations.md)). There is no reload.

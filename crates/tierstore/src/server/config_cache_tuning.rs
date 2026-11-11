@@ -23,28 +23,34 @@ const MIB: u64 = 1 << 20;
 /// The most `hydrate_max_bytes`: a tebibyte.
 const TIB: u64 = 1 << 40;
 
+/// The least `hold_max`.
+const MINUTE: Duration = Duration::from_secs(60);
+
+/// The most `hold_max`.
+const DAY: Duration = Duration::from_secs(24 * 3600);
+
 /// A bound on the largest read, or queue, of a key in bytes: a gibibyte.
 const GIB: u64 = 1 << 30;
 
 /// The duration of `local_cache.key`, from 1 ms to an hour; `default` if the file leaves it out.
 fn time(key: &str, value: Option<Dur>, default: Duration) -> Result<Duration, ConfigError> {
-    time_from(key, value, default, MS)
+    time_between(key, value, default, (MS, HOUR))
 }
 
-/// The duration of `local_cache.key`, from `low` to an hour; `default` if the file leaves it out.
-fn time_from(
+/// The duration of `local_cache.key`, from `low` to `high`; `default` if the file leaves it out.
+fn time_between(
     key: &str,
     value: Option<Dur>,
     default: Duration,
-    low: Duration,
+    (low, high): (Duration, Duration),
 ) -> Result<Duration, ConfigError> {
     let got = value.map_or(default, |dur| dur.0);
-    if got < low || got > HOUR {
+    if got < low || got > high {
         let why = format!(
             "{}ms is not between {}ms and {}ms",
             got.as_millis(),
             low.as_millis(),
-            HOUR.as_millis()
+            high.as_millis()
         );
         return Err(super::config::invalid(&format!("local_cache.{key}"), why));
     }
@@ -84,8 +90,9 @@ pub(super) fn apply(table: &LocalCacheTable, cache: &mut CacheConfig) -> Result<
 }
 
 /// The queue's keys: `prefetch_concurrency`, `prefetch_queue` and `prefetch_queue_ttl` (one second
-/// to an hour), and the bounds of a call that expands trees into it: `hydrate_max_trees`,
-/// `hydrate_max_blobs` and `hydrate_max_bytes`.
+/// to an hour), the bounds of a call that expands trees into it: `hydrate_max_trees`,
+/// `hydrate_max_blobs` and `hydrate_max_bytes`, and the holds': `hold_max` (a minute to a day) and
+/// `hold_max_count`.
 fn prefetch(table: &LocalCacheTable, cache: &mut CacheConfig) -> Result<(), ConfigError> {
     let wanted = |value: Option<u32>, default: usize| {
         value.unwrap_or_else(|| u32::try_from(default).unwrap_or(u32::MAX))
@@ -97,7 +104,15 @@ fn prefetch(table: &LocalCacheTable, cache: &mut CacheConfig) -> Result<(), Conf
     let queue = within("local_cache", "prefetch_queue", queue, 1, 1_000_000)?;
     cache.prefetch.queue = queue as usize;
     let ttl = table.prefetch_queue_ttl;
-    cache.prefetch.ttl = time_from("prefetch_queue_ttl", ttl, cache.prefetch.ttl, SECOND)?;
+    let ttl_range = (SECOND, HOUR);
+    cache.prefetch.ttl = time_between("prefetch_queue_ttl", ttl, cache.prefetch.ttl, ttl_range)?;
+    let hold_max = table.hold_max;
+    let hold_range = (MINUTE, DAY);
+    cache.prefetch.hold_max =
+        time_between("hold_max", hold_max, cache.prefetch.hold_max, hold_range)?;
+    let holds = wanted(table.hold_max_count, cache.prefetch.hold_max_count);
+    let holds = within("local_cache", "hold_max_count", holds, 1, 100_000)?;
+    cache.prefetch.hold_max_count = holds as usize;
     let trees = wanted(table.hydrate_max_trees, cache.prefetch.max_trees);
     let trees = within("local_cache", "hydrate_max_trees", trees, 1, 4096)?;
     cache.prefetch.max_trees = trees as usize;

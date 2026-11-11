@@ -32,7 +32,8 @@
 //! (`pin`: the blobs now pinned by the tree, the blobs refused for the cache's `pin_limit`, the
 //! blobs the cache does not hold), `ok <blobs>` (`unpin`: the blobs the tree had pinned) and
 //! `ok <trees>` (`pins-live`: the trees whose pins were taken away), or `read-only` from an
-//! instance that does not hold the lock of the cache directory.
+//! instance that does not hold the lock of the cache directory; the mount id `hold`, which the
+//! cache's holds pin under, is refused with its words (`the mount id "hold" is reserved for holds`).
 
 mod request;
 
@@ -259,12 +260,14 @@ async fn session(cache: LocalCache, stream: UnixStream, uid: u32) {
 }
 
 /// The answer to a pin request: `ok` and the numbers, or the words of the failure. Every digest
-/// was checked when the line was parsed, so the one failure left is a read-only cache.
+/// was checked when the line was parsed, so the failures left are a read-only cache and the mount
+/// id of the holds.
 fn pinned(done: Result<String, PinError>) -> String {
-    done.map_or_else(
-        |_| "read-only".to_owned(),
-        |numbers| format!("ok {numbers}"),
-    )
+    match done {
+        Ok(numbers) => format!("ok {numbers}"),
+        Err(PinError::ReadOnly) => "read-only".to_owned(),
+        Err(other) => other.to_string(),
+    }
 }
 
 /// The answer to a fill: `ok`, or the words of the failure.

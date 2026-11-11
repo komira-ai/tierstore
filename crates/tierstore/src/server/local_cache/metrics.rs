@@ -178,7 +178,7 @@ const PREFETCH_FAILED: [&str; 7] = [
 
 /// The label of each [`Prefetched`] (what became of a blob handed to the queue), in the order of
 /// the enum, then of each [`Turned`] (a blob the expansion of a tree did not hand to the queue).
-const BLOBS: [&str; 10] = [
+const BLOBS: [&str; 11] = [
     "present",
     "joined",
     "queued",
@@ -189,6 +189,7 @@ const BLOBS: [&str; 10] = [
     "too_many_blobs",
     "too_many_bytes",
     "reserved_key",
+    "access_denied",
 ];
 
 /// How many of the labels of [`BLOBS`] are those of [`Prefetched`]; the rest are [`Turned`]'s.
@@ -203,6 +204,8 @@ pub(super) enum Turned {
     TooManyBytes,
     /// The blob's `source.key` is under a prefix the proxy keeps for itself.
     ReservedKey,
+    /// The blob's source key is one the key that made the call may not read.
+    AccessDenied,
 }
 
 /// How the expansion of a tree ended.
@@ -212,12 +215,14 @@ pub(super) enum Walked {
     Expanded,
     /// The tree was not expanded: a manifest was refused or could not be fetched.
     Refused,
-    /// The walk stopped at a bound of the call, or never began for it.
+    /// The walk stopped at a bound of the call, or because its hold ended, or never began for it.
     Cut,
+    /// The key that made the call may not read a manifest of the tree: it was not expanded.
+    AccessDenied,
 }
 
 /// The label of each [`Walked`], in the order of the enum.
-const TREES: [&str; 3] = ["expanded", "refused", "cut"];
+const TREES: [&str; 4] = ["expanded", "refused", "cut", "access_denied"];
 
 /// The label of the path of each read that joined a fill that was running, in the order of
 /// [`Counters::joined`]'s argument: the fill socket (the mount), then the S3 front.
@@ -267,13 +272,15 @@ const MODE: &str = "tierstore_cache_mode";
 const PREFETCH_FILLS: &str = "tierstore_cache_prefetch_fills_total";
 const PREFETCH_PROMOTIONS: &str = "tierstore_cache_prefetch_promotions_total";
 const PREFETCH_QUEUE_DEPTH: &str = "tierstore_cache_prefetch_queue_depth";
+const HOLDS_OPEN: &str = "tierstore_cache_holds_open";
+const HYDRATE_REQUESTS: &str = "tierstore_cache_hydrate_requests_total";
 const HYDRATE_BLOBS: &str = "tierstore_cache_hydrate_blobs_total";
 const HYDRATE_TREES: &str = "tierstore_cache_hydrate_trees_total";
 const PREFETCH_FILL_FAILURES: &str = "tierstore_cache_prefetch_fill_failures_total";
 const FILL_JOINS: &str = "tierstore_cache_fill_joins_total";
 
 /// The families of one sample, with their kinds, in the order `/metricz` shows them.
-pub(super) const PLAIN: [(&str, &str); 29] = [
+pub(super) const PLAIN: [(&str, &str); 31] = [
     (HITS, COUNTER),
     (MISSES, COUNTER),
     (BYTES_SERVED_LOCAL, COUNTER),
@@ -303,6 +310,8 @@ pub(super) const PLAIN: [(&str, &str); 29] = [
     (PREFETCH_FILLS, COUNTER),
     (PREFETCH_PROMOTIONS, COUNTER),
     (PREFETCH_QUEUE_DEPTH, GAUGE),
+    (HOLDS_OPEN, GAUGE),
+    (HYDRATE_REQUESTS, COUNTER),
 ];
 
 /// The families of one sample for each value of a label: the name, the kind, the name of the
@@ -378,6 +387,10 @@ pub struct Counters {
     pub(super) prefetch_fills: AtomicU64,
     /// The queued blobs that a read started before a worker did.
     pub(super) prefetch_promotions: AtomicU64,
+    /// The holds open now (a gauge, set when a hold opens or ends).
+    pub(super) holds_open: AtomicU64,
+    /// The hydrate calls the cache accepted.
+    pub(super) hydrate_requests: AtomicU64,
     /// The blobs handed to the queue, by [`Prefetched`].
     blobs: [AtomicU64; BLOBS.len()],
     /// The trees expanded, by [`Walked`].
@@ -499,6 +512,11 @@ impl Counters {
         read(&self.blobs[HANDED + why as usize])
     }
 
+    /// Counts a hydrate call that was accepted.
+    pub(super) fn hydrated(&self) {
+        bump(&self.hydrate_requests);
+    }
+
     /// Counts a tree whose expansion ended as `how`.
     pub(super) fn walked(&self, how: Walked) {
         bump(&self.trees[how as usize]);
@@ -576,6 +594,8 @@ impl Counters {
             read(&self.prefetch_fills),
             read(&self.prefetch_promotions),
             queue_depth,
+            read(&self.holds_open),
+            read(&self.hydrate_requests),
         ];
         for ((name, kind), value) in PLAIN.iter().zip(plain) {
             let _ = writeln!(text, "# TYPE {name} {kind}");

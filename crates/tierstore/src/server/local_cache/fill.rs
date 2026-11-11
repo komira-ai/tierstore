@@ -22,6 +22,7 @@ use tokio::task::JoinHandle;
 
 use crate::{ByteRange, Error, Meta};
 
+use super::holds::State;
 use super::layout::{
     Name, Origin, Sidecar, data_path, make_dirs, meta_path, object_dir, stage_dir,
 };
@@ -455,6 +456,15 @@ impl Drop for Flight {
             gone
         };
         drop(gone);
+        // Whatever ended the flight (a fill, a keep, a task cancelled or panicked), the holds that
+        // wait for the blob are told, after the place is out of the table: a hold that asks later
+        // finds no flight. The index says whether the blob is in the cache.
+        let state = if locked(&self.inner.index).get(&self.hex).is_some() {
+            State::Filled
+        } else {
+            State::Failed
+        };
+        self.inner.hold_settle(&self.hex, state);
     }
 }
 
