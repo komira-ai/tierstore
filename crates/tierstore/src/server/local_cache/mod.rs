@@ -130,10 +130,10 @@
 mod calls;
 mod disk;
 mod evict;
-mod expand;
+pub(super) mod expand;
 mod fill;
 mod hold;
-mod holds;
+pub(super) mod holds;
 mod index;
 mod keep;
 pub(super) mod layout;

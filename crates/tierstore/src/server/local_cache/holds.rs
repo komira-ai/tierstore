@@ -24,6 +24,7 @@ use std::collections::{BTreeSet, HashMap};
 use thiserror::Error;
 
 use super::layout::is_digest;
+use super::metrics::Walked;
 use super::pin_set::{HOLD_MOUNT, Owner};
 use super::prefetch::Prefetched;
 use super::source::Blob;
@@ -56,6 +57,13 @@ pub(in crate::server) enum HoldError {
 pub(in crate::server) struct Released {
     /// The trees the hold was for.
     pub(in crate::server) trees: usize,
+    /// The trees of the hold whose expansion ended with every blob handed to the queue.
+    pub(in crate::server) expanded: usize,
+    /// The trees that were not expanded: a manifest was refused or could not be fetched, or the
+    /// key of the call may not read it.
+    pub(in crate::server) refused: usize,
+    /// The trees whose walk stopped at a bound of the call, or because the hold ended.
+    pub(in crate::server) cut: usize,
     /// The blobs a fill kept after the hold asked for them.
     pub(in crate::server) filled: usize,
     /// The blobs the cache held when the hold asked for them, or by the time their turn came.
@@ -97,6 +105,8 @@ struct Hold {
     expires: u64,
     trees: BTreeSet<String>,
     blobs: HashMap<String, Wanted>,
+    /// The trees whose expansion has ended, by how it ended: expanded, refused, cut.
+    walked: [usize; 3],
 }
 
 /// The open holds.
@@ -208,6 +218,7 @@ impl Inner {
             expires,
             trees: BTreeSet::new(),
             blobs: HashMap::new(),
+            walked: [0; 3],
         });
         hold.trees.extend(trees.iter().cloned());
         let accepted = hold.trees.len();
@@ -218,7 +229,7 @@ impl Inner {
     }
 
     /// See [`LocalCache::hold_blob`].
-    fn hold_blob(
+    pub(super) fn hold_blob(
         self: &Arc<Self>,
         id: &str,
         tree: &str,
@@ -264,8 +275,12 @@ impl Inner {
             .by_id
             .remove(id)
             .ok_or_else(|| HoldError::NoSuchHold(id.to_owned()))?;
+        let [expanded, refused, cut] = hold.walked;
         let mut released = Released {
             trees: hold.trees.len(),
+            expanded,
+            refused,
+            cut,
             ..Released::default()
         };
         let mut gone = Vec::new();
@@ -307,6 +322,19 @@ impl Inner {
         Ok(released)
     }
 
+    /// Notes that the expansion of a tree of the hold `id` ended as `how`. A hold that has ended
+    /// since has nothing to note.
+    pub(super) fn hold_walked(&self, id: &str, how: Walked) {
+        let slot = match how {
+            Walked::Expanded => 0,
+            Walked::Refused | Walked::AccessDenied => 1,
+            Walked::Cut => 2,
+        };
+        if let Some(hold) = locked(&self.prefetch.holds).by_id.get_mut(id) {
+            hold.walked[slot] += 1;
+        }
+    }
+
     /// Ends the holds whose time has passed. Called at every tick of the cache.
     pub(super) fn expire_holds(&self) {
         let now = self.clock.now();
@@ -332,13 +360,6 @@ impl LocalCache {
     /// [`HoldError::ReadOnly`] if this cache does not hold the lock of its directory;
     /// [`HoldError::TooMany`] if `hold_max_count` other holds are open;
     /// [`HoldError::NotADigest`] for a tree that is not a digest, with nothing opened.
-    #[cfg_attr(
-        not(test),
-        expect(
-            dead_code,
-            reason = "the hydrate call that opens the holds is a later change"
-        )
-    )]
     pub(in crate::server) fn open_hold(
         &self,
         id: &str,
@@ -356,13 +377,7 @@ impl LocalCache {
     /// [`HoldError::NoSuchHold`] if the hold is not open (it was released or it expired), with
     /// nothing queued; [`HoldError::NoSuchTree`] if it is not for `tree`;
     /// [`HoldError::NotADigest`] for a blob that is not named by a digest.
-    #[cfg_attr(
-        not(test),
-        expect(
-            dead_code,
-            reason = "the tree expansion that queues the blobs is a later change"
-        )
-    )]
+    #[cfg(test)]
     pub(in crate::server) fn hold_blob(
         &self,
         id: &str,
@@ -377,13 +392,6 @@ impl LocalCache {
     ///
     /// # Errors
     /// [`HoldError::NoSuchHold`] if the hold is not open.
-    #[cfg_attr(
-        not(test),
-        expect(
-            dead_code,
-            reason = "the hydrate call that releases a hold is a later change"
-        )
-    )]
     pub(in crate::server) fn release_hold(&self, id: &str) -> Result<Released, HoldError> {
         self.inner.end_hold(id)
     }

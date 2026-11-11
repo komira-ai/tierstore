@@ -310,6 +310,7 @@ pub mod gc;
 pub mod handoff;
 mod handover;
 mod hosted;
+mod hydrate;
 mod idle;
 mod keys;
 mod launch;
@@ -883,6 +884,11 @@ impl Server {
             ops::refuse_unsigned_overrides(parts)?;
         }
         let signed = auth::verify(&self.config, parts)?;
+        if hosted.is_none()
+            && let Some(call) = hydrate::asked(&parts.method, parts.uri.path())
+        {
+            return self.hydrate(parts, call, &signed, body).await;
+        }
         let reads = matches!(parts.method, Method::GET | Method::HEAD);
         if self.config.cache.is_some() && !self.config.cache_writes && !reads {
             return Err(S3Error::read_cache());

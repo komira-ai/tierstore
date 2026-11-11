@@ -680,7 +680,7 @@ async fn a_tree_over_the_entry_or_depth_limit_is_refused_by_name() {
     let with = |entries, depth| Limits { entries, depth };
     let walk = |limits: Limits, tree: TreeDigest| {
         let cache = &rig.cache;
-        async move { cache.expand(limits, &[tree]).await.remove(0) }
+        async move { cache.expand(limits, (None, None), &[tree]).await.remove(0) }
     };
     assert_eq!(walk(with(100, 3), root).await, Tree::Expanded);
     let too_deep = Tree::Refused(Refusal::Manifest(TreeError::TreeTooDeep));
