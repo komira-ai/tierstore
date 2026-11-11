@@ -235,6 +235,11 @@ async fn an_old_entry_is_removed_when_its_digest_name_is_taken_or_cannot_be_made
     assert_eq!(rig.get(&key).await.unwrap(), pack.content(0));
     let old = write_previous(&rig, &first, pack.content(0));
     let stuck = write_previous(&rig, &blocked, pack.content(2));
+    let pack2 = Pack::new("packs/taken2", &[400]);
+    let moved_in = pack2.blobs[0].0.clone();
+    let jammed = write_previous(&rig, &moved_in, pack2.content(0));
+    // The data file cannot be moved to the digest's name: a directory is there.
+    std::fs::create_dir_all(data_path(&rig.config.path, &moved_in)).unwrap();
     let pins = serde_json::json!({"trees": [{
         "mount": "m1", "tree": "t1", "blobs": [old.clone()],
     }]});
@@ -248,7 +253,7 @@ async fn an_old_entry_is_removed_when_its_digest_name_is_taken_or_cannot_be_made
     assert_eq!(cache.held(), (600, 1));
     // The pin of the removed old entry is on the entry at the digest's name.
     assert_eq!(cache.pinned_bytes(), 600);
-    for gone in [&old, &stuck] {
+    for gone in [&old, &stuck, &jammed] {
         assert!(!data_path(root, gone).exists());
         assert!(!meta_path(root, gone).exists());
     }
@@ -311,4 +316,48 @@ async fn a_delete_of_the_digest_of_a_pinned_span_leaves_it() {
     assert_eq!(rig.cache.held(), (900, 1));
     assert_eq!(rig.cache.pinned_bytes(), 900);
     assert!(rig.has_file(&format!("cas/l/{sha}")));
+}
+
+/// Asserts the origin of a blob by where it lies in its upstream object: the whole object read
+/// from offset 0 is an `object`; a blob at another offset of the object named for it, or at
+/// offset 0 of another object, is a `span`. The S3 class is turned away from a `span` entry that
+/// a fill left in the index (it is no object), the socket class is told the entry is kept.
+#[tokio::test]
+async fn the_origin_follows_the_place_of_the_blob_and_the_s3_class_is_turned_away_from_a_span() {
+    use super::fill::{Class, Filled, Plan};
+    let rig = Rig::new("tnames-origin");
+    let body = pattern(500);
+    let tail = &body[100..];
+    let sha = digest(tail);
+    let key = format!("cas/l/{sha}");
+    rig.put(&key, &body).await;
+    let shifted = Blob {
+        sha256: &sha,
+        size: tail.len() as u64,
+        from: &key,
+        offset: 100,
+    };
+    rig.cache.fill_blob(&shifted).await.unwrap();
+    let text = std::fs::read_to_string(meta_path(&rig.config.path, &sha)).unwrap();
+    assert!(text.contains(r#""origin":"span""#), "{text}");
+
+    let name = name_of(&key);
+    let plan = Plan::Object;
+    let s3 = rig
+        .cache
+        .inner
+        .join_or_start(&key, &name, plan.clone(), Class::S3);
+    assert!(matches!(s3, Err(Filled::Skipped)));
+    let permit = rig
+        .cache
+        .inner
+        .source_permits
+        .clone()
+        .try_acquire_owned()
+        .unwrap();
+    let mount = rig
+        .cache
+        .inner
+        .join_or_start(&key, &name, plan, Class::Mount(permit));
+    assert!(matches!(mount, Err(Filled::Kept)));
 }

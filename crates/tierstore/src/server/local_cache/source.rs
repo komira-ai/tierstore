@@ -30,7 +30,7 @@ use tokio::sync::watch;
 
 use crate::Error;
 
-use super::fill::{Class, Ended, Filled, Plan, Stop};
+use super::fill::{Class, Ended, Filled, Pending, Plan, Stop};
 use super::layout::{Name, Origin, data_path, name_of};
 use super::{Inner, LocalCache, Mode, locked};
 
@@ -137,6 +137,17 @@ pub(super) fn answer(ended: Ended) -> Result<(), FillError> {
     }
 }
 
+/// The answer of the socket to the fill `pending`, once it ends; none if it is the place of a keep
+/// that has left the table, and the request is to look again.
+async fn waited(pending: Pending) -> Option<Result<(), FillError>> {
+    if pending.keeping {
+        pending.released().await;
+        None
+    } else {
+        Some(answer(pending.ended().await))
+    }
+}
+
 impl Inner {
     /// The fill of `wanted`: at once if it is in the cache, else shared with the fill that runs
     /// for its name (whichever path started it), else started when a permit of the socket's pool
@@ -150,28 +161,29 @@ impl Inner {
                 return Ok(());
             }
             let running = locked(&self.flights).get(&wanted.name.hex).cloned();
-            if let Some(running) = running {
-                if running.keeping {
-                    // A client's put of the key: it ends within its deadline, and leaves the
-                    // object in the cache or not; either way this request looks again.
-                    running.released().await;
-                    continue;
+            let pending = match running {
+                Some(running) => running,
+                None => {
+                    let waiting = self.source_permits.clone().acquire_owned();
+                    let waited = tokio::time::timeout(self.config.fill_socket_wait, waiting).await;
+                    let Ok(Ok(permit)) = waited else {
+                        return Err(FillError::Busy);
+                    };
+                    let class = Class::Mount(permit);
+                    match self.join_or_start(&wanted.key, &wanted.name, wanted.plan.clone(), class)
+                    {
+                        Ok(pending) => pending,
+                        // A fill that ended while this request waited for its permit left the
+                        // object in the index: it is not filled again. (A request of this class
+                        // is refused only so: the S3 class is the one that is turned away.)
+                        Err(_) => return Ok(()),
+                    }
                 }
-                return answer(running.ended().await);
-            }
-            let waiting = self.source_permits.clone().acquire_owned();
-            let permit = match tokio::time::timeout(self.config.fill_socket_wait, waiting).await {
-                Ok(Ok(permit)) => permit,
-                _ => return Err(FillError::Busy),
             };
-            let class = Class::Mount(permit);
-            match self.join_or_start(&wanted.key, &wanted.name, wanted.plan.clone(), class) {
-                Ok(pending) if pending.keeping => pending.released().await,
-                Ok(pending) => return answer(pending.ended().await),
-                // A fill that ended while this request waited for its permit left the object in
-                // the index: it is not filled again.
-                Err(Filled::Kept) => return Ok(()),
-                Err(Filled::Skipped | Filled::Changed) => return Err(FillError::NoSpace),
+            // The place of a client's put (a keep) ends within the keep's deadline, and leaves
+            // the object in the cache or not; either way this request looks again.
+            if let Some(answered) = waited(pending).await {
+                return answered;
             }
         }
     }

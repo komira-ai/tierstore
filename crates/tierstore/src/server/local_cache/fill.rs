@@ -142,7 +142,8 @@ impl Pending {
 
     /// Ends when the keep that holds this place is over and has left the table.
     pub(super) async fn released(mut self) {
-        while self.live.changed().await.is_ok() {}
+        // Nothing is ever sent: the call ends in the error of the sender's drop.
+        let _ = self.live.changed().await;
     }
 
     /// The end of the fill, as the fill socket reads it.
