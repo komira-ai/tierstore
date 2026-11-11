@@ -6,7 +6,7 @@ use futures::poll;
 
 use super::fill::{Ended, Filled, Stop, s3_answer};
 use super::pack_testing::Pack;
-use super::source::{Blob, FillError};
+use super::source::Blob;
 use super::testing::{Rig, digest, pattern, until};
 use crate::{Backend as _, Error, Op};
 
@@ -124,21 +124,32 @@ async fn s3_get_during_span_fill_does_not_wait_for_it() {
 }
 
 /// Asserts that a request of the fill socket for a digest whose place in the table is a keep (a
-/// put through the cache: a fill that is over, with no object) joins that place and is answered
-/// that it did not fit, and is filled once the place is gone.
+/// put through the cache) is not answered `no space`: it waits for the keep to leave the table
+/// and then fills, and an S3 reader that finds the place is answered from the upstream at once.
 #[tokio::test]
-async fn a_request_that_joins_a_place_with_no_object_is_answered_no_space() {
+async fn a_request_that_finds_a_keep_waits_for_it_and_is_then_filled() {
     let rig = Rig::new("tflights-place");
     let body = pattern(300);
     let sha = digest(&body);
     let key = format!("cas/l/{sha}");
     rig.put(&key, &body).await;
     let hex = super::layout::name_of(&key).hex;
-    let place = super::fill::Pending::finished(Filled::Skipped);
-    drop(super::locked(&rig.cache.inner.flights).insert(hex.clone(), place));
-    assert_eq!(rig.cache.fill_manifest(&sha).await, Err(FillError::NoSpace));
+    let (place, gate) = super::fill::Pending::keeping();
+    drop(super::locked(&rig.cache.inner.flights).insert(hex.clone(), place.clone()));
+    assert_eq!(place.clone().await, Ok(Filled::Skipped));
+
+    let cache = rig.cache.clone();
+    let asked = tokio::spawn(async move { cache.fill_manifest(&sha).await });
+    for _ in 0..1000 {
+        tokio::task::yield_now().await;
+    }
+    assert!(!asked.is_finished());
+    assert_eq!(rig.calls(Op::Get), 0);
+
     drop(super::locked(&rig.cache.inner.flights).remove(&hex));
-    assert_eq!(rig.cache.fill_manifest(&sha).await, Ok(()));
+    drop(gate);
+    assert_eq!(asked.await.unwrap(), Ok(()));
+    assert_eq!(rig.cache.held(), (300, 1));
 }
 
 /// Asserts what an S3 reader is told by each way a fill can end: the exact answer of

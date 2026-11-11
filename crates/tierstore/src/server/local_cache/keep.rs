@@ -95,7 +95,7 @@ use tokio::time::Instant;
 use crate::{Error, Meta, PartBody, PutAnswer, PutClaim};
 
 use super::calls::counting;
-use super::fill::{Filled, Flight, Pending, Published, Reserved, Staged};
+use super::fill::{Flight, Pending, Published, Reserved, Staged};
 use super::layout::{Name, Origin, Sidecar};
 use super::metrics::{SkippedKeep, add, bump};
 use super::write::Writing;
@@ -555,12 +555,14 @@ impl Inner {
     /// Takes the place of a fill of the key in the table of the fills that run, so that a
     /// delete marks the keep. None if a fill is running for the key.
     ///
-    /// A reader that finds the place taken does not wait: the entry stands for a keep, which a
-    /// reader has no reason to wait for (the keep may be held up by a disk that hangs, and the
-    /// object is at the upstream), so it is a fill that is already over, with no object: the
-    /// reader is answered from the upstream and starts no fill.
+    /// A reader of the S3 front that finds the place taken does not wait: the entry stands for a
+    /// keep, which such a reader has no reason to wait for (the keep may be held up by a disk that
+    /// hangs, and the object is at the upstream), so it is a fill that is already over, with no
+    /// object: that reader is answered from the upstream and starts no fill. A request of the fill
+    /// socket waits for the place to leave the table (the keep ends within its deadline) and then
+    /// looks again (see [`Pending::keeping`]).
     fn enter(self: &Arc<Self>, name: &Name) -> Option<Flight> {
-        let pending = Pending::finished(Filled::Skipped);
+        let (pending, gate) = Pending::keeping();
         {
             let mut flights = locked(&self.flights);
             if flights.contains_key(&name.hex) {
@@ -571,6 +573,7 @@ impl Inner {
         Some(Flight {
             inner: Arc::clone(self),
             hex: name.hex.clone(),
+            _gate: Some(gate),
         })
     }
 
@@ -635,6 +638,10 @@ impl Inner {
         // and taken again before this runs, it removes an entry and files of the new
         // ownership, which costs a refill of a whole object and never gives wrong bytes: what
         // is removed is a valid object or nothing, and a read that misses goes to the upstream.
+        //
+        // The entry may be a blob a mount pinned (a `span` of the same digest: the bytes are
+        // the same by their hash), whose owners keep their pins on the object that replaces it.
+        let owners = locked(&self.index).pins.owners_of(&name.hex);
         self.drop_entry(&name.hex);
         let sidecar = Sidecar {
             key: key.to_owned(),
@@ -681,7 +688,13 @@ impl Inner {
             return Err(SkippedKeep::ReadOnly);
         }
         let checked = Some(self.clock.now());
-        locked(&self.index).insert(&name.hex, (size, meta.tag, meta.modified), checked);
+        {
+            let mut index = locked(&self.index);
+            index.insert(&name.hex, (size, meta.tag, meta.modified), checked);
+            for owner in &owners {
+                let _ = index.pins.pin(owner, &name.hex, Some(size), u64::MAX);
+            }
+        }
         // A delete that finished after the HEAD marked this keep (see `forget`), and may have
         // dropped nothing because the entry was not in yet: the object is gone from the
         // upstream. The mark is looked for after the entry is in the index.

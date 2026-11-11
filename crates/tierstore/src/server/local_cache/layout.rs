@@ -271,6 +271,8 @@ fn rename_fill_entries(root: &Path, scanned: &mut Scanned) {
             continue;
         };
         let moved = if taken.contains(&digest) {
+            // The digest entry holds the same bytes: the pins of the old name go to it.
+            scanned.renamed.insert(entry.hex.clone(), digest.clone());
             None
         } else {
             rename_entry(root, &entry, &digest)

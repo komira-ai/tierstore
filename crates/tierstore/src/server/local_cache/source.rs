@@ -145,25 +145,34 @@ impl Inner {
         if !self.read_write() {
             return Err(FillError::ReadOnly);
         }
-        if self.present(&wanted.name).await {
-            return Ok(());
-        }
-        let running = locked(&self.flights).get(&wanted.name.hex).cloned();
-        if let Some(running) = running {
-            return answer(running.ended().await);
-        }
-        let waiting = self.source_permits.clone().acquire_owned();
-        let permit = match tokio::time::timeout(self.config.fill_socket_wait, waiting).await {
-            Ok(Ok(permit)) => permit,
-            _ => return Err(FillError::Busy),
-        };
-        let class = Class::Mount(permit);
-        match self.join_or_start(&wanted.key, &wanted.name, wanted.plan, class) {
-            Ok(pending) => answer(pending.ended().await),
-            // A fill that ended while this request waited for its permit left the object in the
-            // index: it is not filled again.
-            Err(Filled::Kept) => Ok(()),
-            Err(Filled::Skipped | Filled::Changed) => Err(FillError::NoSpace),
+        loop {
+            if self.present(&wanted.name).await {
+                return Ok(());
+            }
+            let running = locked(&self.flights).get(&wanted.name.hex).cloned();
+            if let Some(running) = running {
+                if running.keeping {
+                    // A client's put of the key: it ends within its deadline, and leaves the
+                    // object in the cache or not; either way this request looks again.
+                    running.released().await;
+                    continue;
+                }
+                return answer(running.ended().await);
+            }
+            let waiting = self.source_permits.clone().acquire_owned();
+            let permit = match tokio::time::timeout(self.config.fill_socket_wait, waiting).await {
+                Ok(Ok(permit)) => permit,
+                _ => return Err(FillError::Busy),
+            };
+            let class = Class::Mount(permit);
+            match self.join_or_start(&wanted.key, &wanted.name, wanted.plan.clone(), class) {
+                Ok(pending) if pending.keeping => pending.released().await,
+                Ok(pending) => return answer(pending.ended().await),
+                // A fill that ended while this request waited for its permit left the object in
+                // the index: it is not filled again.
+                Err(Filled::Kept) => return Ok(()),
+                Err(Filled::Skipped | Filled::Changed) => return Err(FillError::NoSpace),
+            }
         }
     }
 

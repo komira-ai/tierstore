@@ -10,6 +10,9 @@ use super::pack_testing::{Pack, blob_hex};
 use super::source::Blob;
 use super::testing::{Rig, digest, pattern};
 use crate::{Backend as _, Error, Op};
+use bytes::Bytes;
+use futures::StreamExt as _;
+use futures::stream;
 
 /// The blob `bytes` as a mount asks for it when it is the whole upstream object `cas/l/<sha256>`.
 fn whole<'a>(sha: &'a str, key: &'a str, bytes: &[u8]) -> Blob<'a> {
@@ -224,7 +227,7 @@ async fn entries_of_the_previous_layout_are_renamed_at_start() {
 /// made (the directory of the digest's name is a file) is removed and costs only a refill.
 #[tokio::test]
 async fn an_old_entry_is_removed_when_its_digest_name_is_taken_or_cannot_be_made() {
-    let rig = Rig::new("tnames-taken");
+    let rig = Rig::with("tnames-taken", |config| config.pin_limit = 1 << 20);
     let pack = Pack::new("packs/taken", &[600, 800, 500]);
     let (first, blocked) = (pack.blobs[0].0.clone(), pack.blobs[2].0.clone());
     let key = format!("cas/l/{first}");
@@ -232,6 +235,10 @@ async fn an_old_entry_is_removed_when_its_digest_name_is_taken_or_cannot_be_made
     assert_eq!(rig.get(&key).await.unwrap(), pack.content(0));
     let old = write_previous(&rig, &first, pack.content(0));
     let stuck = write_previous(&rig, &blocked, pack.content(2));
+    let pins = serde_json::json!({"trees": [{
+        "mount": "m1", "tree": "t1", "blobs": [old.clone()],
+    }]});
+    std::fs::write(rig.config.path.join("pins"), pins.to_string()).unwrap();
     let root = &rig.config.path;
     let digest_dir = object_dir(root, &blocked);
     std::fs::create_dir_all(digest_dir.parent().unwrap()).unwrap();
@@ -239,6 +246,8 @@ async fn an_old_entry_is_removed_when_its_digest_name_is_taken_or_cannot_be_made
 
     let cache = rig.reopen();
     assert_eq!(cache.held(), (600, 1));
+    // The pin of the removed old entry is on the entry at the digest's name.
+    assert_eq!(cache.pinned_bytes(), 600);
     for gone in [&old, &stuck] {
         assert!(!data_path(root, gone).exists());
         assert!(!meta_path(root, gone).exists());
@@ -249,4 +258,57 @@ async fn an_old_entry_is_removed_when_its_digest_name_is_taken_or_cannot_be_made
         std::fs::read(data_path(root, &first)).unwrap(),
         pack.content(0)
     );
+}
+
+/// Pins the blob `i` of `pack` as a `span` entry for a tree of a mount, and gives its digest.
+async fn pinned_span(rig: &Rig, pack: &Pack, i: usize) -> String {
+    let sha = pack.blobs[i].0.clone();
+    rig.cache.fill_blob(&pack.blob(i)).await.unwrap();
+    let answer = rig
+        .cache
+        .pin("m1", "t1", std::slice::from_ref(&sha))
+        .unwrap();
+    assert_eq!((answer.pinned, answer.absent), (1, 0));
+    sha
+}
+
+/// Asserts that a client's put of `cas/l/<sha256>` over a blob of the same digest that a mount
+/// pinned keeps the pin: the entry becomes an object (the sidecar loses its `origin`) and the
+/// tree still pins its bytes, so eviction cannot take it from under the job.
+#[tokio::test]
+async fn a_put_of_the_digest_of_a_pinned_span_keeps_the_pin() {
+    let rig = Rig::with("tnames-put-pinned", |config| {
+        config.write_through = true;
+        config.pin_limit = 1 << 20;
+    });
+    let pack = Pack::put(&rig, "packs/put", &[900, 700]).await;
+    let sha = pinned_span(&rig, &pack, 0).await;
+    let key = format!("cas/l/{sha}");
+    let body = Bytes::copy_from_slice(pack.content(0));
+    let sent = stream::once(async move { Ok(body) }).boxed();
+    assert_eq!(rig.cache.put_stream(&key, Some(900), sent).await, Ok(()));
+    let meta = meta_path(&rig.config.path, &sha);
+    for _ in 0..1_000_000 {
+        let text = std::fs::read_to_string(&meta).unwrap_or_default();
+        if !text.is_empty() && !text.contains("origin") {
+            break;
+        }
+        tokio::task::yield_now().await;
+    }
+    let text = std::fs::read_to_string(&meta).unwrap();
+    assert!(!text.contains("origin"), "{text}");
+    assert_eq!(rig.cache.pinned_bytes(), 900);
+}
+
+/// Asserts that a delete of `cas/l/<sha256>` leaves a pinned blob of that digest that is only a
+/// `span` where it is: no object of the upstream was deleted.
+#[tokio::test]
+async fn a_delete_of_the_digest_of_a_pinned_span_leaves_it() {
+    let rig = Rig::with("tnames-del-pinned", |config| config.pin_limit = 1 << 20);
+    let pack = Pack::put(&rig, "packs/del", &[900, 700]).await;
+    let sha = pinned_span(&rig, &pack, 0).await;
+    rig.cache.inner.forget(&format!("cas/l/{sha}"));
+    assert_eq!(rig.cache.held(), (900, 1));
+    assert_eq!(rig.cache.pinned_bytes(), 900);
+    assert!(rig.has_file(&format!("cas/l/{sha}")));
 }

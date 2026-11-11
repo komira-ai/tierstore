@@ -88,6 +88,8 @@ pub(super) struct Pending {
     /// Whether the fill cuts its bytes out of a larger object (see [`Origin::Span`]): the S3
     /// front does not wait for it, since the name is not an object of the upstream.
     span: bool,
+    /// Whether this is the place a keep of the key holds (see [`Pending::keeping`]).
+    pub(super) keeping: bool,
 }
 
 impl Pending {
@@ -101,11 +103,13 @@ impl Pending {
             done,
             live,
             span: false,
+            keeping: false,
         }
     }
 
-    /// A fill that is over already, with no object and no progress: what a keep leaves in the table
-    /// of the fills that run (see `keep.rs`). A reader that finds it is answered from the upstream.
+    /// A fill that is over already, with no object and no progress, for the tests that need one
+    /// (a keep's place is [`Pending::keeping`]).
+    #[cfg(test)]
     pub(super) fn finished(filled: Filled) -> Self {
         let done = futures::future::ready(Ok(filled)).boxed().shared();
         // The sender is dropped at once: nothing is ever written.
@@ -114,7 +118,31 @@ impl Pending {
             done,
             live,
             span: false,
+            keeping: false,
         }
+    }
+
+    /// The place a keep of a key holds in the table of the fills that run: [`Pending::finished`]
+    /// with no object, so that a reader of the S3 front is answered from the upstream, and a
+    /// sender that the keep's [`Flight`] holds until it leaves the table, which ends the wait of
+    /// [`Pending::released`]: a request of the fill socket waits for the keep to end (it is
+    /// bounded by the keep's deadline) and then fills, since the keep is no reason for it to be
+    /// answered `no space`.
+    pub(super) fn keeping() -> (Self, watch::Sender<Live>) {
+        let done = futures::future::ready(Ok(Filled::Skipped)).boxed().shared();
+        let (gate, live) = watch::channel(Live::Starting);
+        let place = Self {
+            done,
+            live,
+            span: false,
+            keeping: true,
+        };
+        (place, gate)
+    }
+
+    /// Ends when the keep that holds this place is over and has left the table.
+    pub(super) async fn released(mut self) {
+        while self.live.changed().await.is_ok() {}
     }
 
     /// The end of the fill, as the fill socket reads it.
@@ -376,6 +404,8 @@ impl Drop for Reserved {
 pub(super) struct Flight {
     pub(super) inner: Arc<Inner>,
     pub(super) hex: String,
+    /// Held by a keep, and dropped after the place is out of the table: see [`Pending::keeping`].
+    pub(super) _gate: Option<watch::Sender<Live>>,
 }
 
 impl Drop for Flight {
@@ -480,6 +510,7 @@ impl Inner {
                         done: self.waiting(receiver),
                         live: progress,
                         span: plan.origin(key) == Origin::Span,
+                        keeping: false,
                     };
                     slot.insert(pending.clone());
                     (pending, Some((permit, sender, live)))
@@ -529,6 +560,7 @@ impl Inner {
         let flight = Flight {
             inner: Arc::clone(&inner),
             hex: name.hex.clone(),
+            _gate: None,
         };
         let task = tokio::spawn(async move {
             let (_permit, live) = held;
