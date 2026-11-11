@@ -410,6 +410,8 @@ mod header_timeout_tests;
 #[cfg(test)]
 mod hosted_tests;
 #[cfg(test)]
+mod hydrate_pin_down_tests;
+#[cfg(test)]
 mod idle_tests;
 #[cfg(test)]
 mod key_rules_tests;

@@ -175,6 +175,8 @@ mod lost_tests;
 #[cfg(test)]
 mod metrics_text_tests;
 #[cfg(test)]
+mod names_tests;
+#[cfg(test)]
 pub(in crate::server) mod pack_testing;
 #[cfg(test)]
 mod pin_set_tests;
