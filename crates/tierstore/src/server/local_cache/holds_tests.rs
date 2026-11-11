@@ -4,14 +4,19 @@
 
 use std::time::Duration;
 
+use bytes::Bytes;
+use futures::StreamExt as _;
+use futures::stream;
+
 use super::holds::{HoldError, Released};
 use super::locked;
+use super::pack_testing::distinct;
 use super::pin_set::{HOLD_MOUNT, PinsFile};
 use super::prefetch::Prefetched;
 use super::prefetch_tests::{Stored, in_table, rig, stored, waiting};
 use super::source::Blob;
 use super::testing::{Rig, digest, until};
-use crate::Op;
+use crate::{Backend, Op};
 
 /// A tree digest for the tests: any 64 hex digits.
 fn tree(n: u8) -> String {
@@ -572,4 +577,89 @@ async fn hold_pins_are_not_in_the_pins_file_and_pins_live_leaves_them() {
         restarted.release_hold("job"),
         Err(HoldError::NoSuchHold("job".to_owned()))
     );
+}
+
+/// Asserts that no caller can name the mount id the holds pin under: `pin`, `unpin` and
+/// `pins_live` refuse it with the exact words and change nothing, so a hold's pins are the hold's
+/// to end and no request makes pins that nothing ends.
+#[tokio::test]
+async fn the_mount_of_the_holds_cannot_be_named_by_a_caller() {
+    let rig = rig("thold-reserved", 1);
+    let a = stored(&rig, 1, 300).await;
+    let t = tree(1);
+    assert_eq!(rig.cache.fill_blob(&a.blob()).await, Ok(()));
+    assert_eq!(
+        rig.cache.open_hold("job", None, std::slice::from_ref(&t)),
+        Ok(1)
+    );
+    assert_eq!(
+        rig.cache.hold_blob("job", &t, &a.blob()),
+        Ok(Prefetched::Present)
+    );
+    let words = "the mount id \"hold\" is reserved for holds";
+    let sha = vec![a.sha.clone()];
+    let owner = format!("job/{t}");
+
+    let pin = rig.cache.pin(HOLD_MOUNT, "x", &sha).unwrap_err();
+    assert_eq!(pin.to_string(), words);
+    let unpin = rig.cache.unpin(HOLD_MOUNT, &owner).unwrap_err();
+    assert_eq!(unpin.to_string(), words);
+    let live = rig.cache.pins_live(HOLD_MOUNT, &[]).unwrap_err();
+    assert_eq!(live.to_string(), words);
+    assert_eq!(pinners(&rig, &a.sha), vec![held_by("job", &t)]);
+}
+
+/// Asserts that a blob a keep (the write-through of an S3 PUT) is committing, which a hold finds
+/// in the table of the fills and joins, is pinned for the hold when the keep ends: the hold is
+/// settled by the end of the flight, not by the fill task alone. The keep is held at its link.
+#[tokio::test]
+async fn a_blob_joined_to_a_keep_is_pinned_when_the_keep_commits() {
+    let rig = Rig::with("thold-keep", |config| {
+        config.write_through = true;
+        config.prefetch.concurrency = 1;
+    });
+    let body = distinct(7, 3000);
+    let sha = digest(&body);
+    let key = format!("cas/l/{sha}");
+    let t = tree(1);
+    let gate = rig.disk.hold_links();
+    let (cache, name, bytes) = (rig.cache.clone(), key.clone(), Bytes::from(body.clone()));
+    let putting = tokio::spawn(async move {
+        let part = stream::once(async move { Ok(bytes) }).boxed();
+        cache.put_stream(&name, Some(3000), part).await
+    });
+    until("the link began", || {
+        !rig.disk.linked.lock().unwrap().is_empty()
+    })
+    .await;
+
+    assert_eq!(
+        rig.cache.open_hold("job", None, std::slice::from_ref(&t)),
+        Ok(1)
+    );
+    let blob = Blob {
+        sha256: &sha,
+        size: 3000,
+        from: &key,
+        offset: 0,
+    };
+    assert_eq!(
+        rig.cache.hold_blob("job", &t, &blob),
+        Ok(Prefetched::Joined)
+    );
+    assert_eq!(rig.cache.pinned_bytes(), 0);
+
+    gate.open();
+    until("the blob is pinned when the keep ends", || {
+        rig.cache.pinned_bytes() == 3000
+    })
+    .await;
+    assert_eq!(pinners(&rig, &sha), vec![held_by("job", &t)]);
+    assert!(putting.await.unwrap().is_ok());
+    let want = Released {
+        trees: 1,
+        filled: 1,
+        ..Released::default()
+    };
+    assert_eq!(rig.cache.release_hold("job"), Ok(want));
 }

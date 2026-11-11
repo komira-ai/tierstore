@@ -462,4 +462,8 @@ async fn the_pin_requests_pin_unpin_and_keep_the_live_trees() {
 fn a_pin_request_of_a_read_only_cache_is_answered_read_only() {
     assert_eq!(pinned(Err(PinError::ReadOnly)), "read-only");
     assert_eq!(pinned(Ok("1 0 0".to_owned())), "ok 1 0 0");
+    assert_eq!(
+        pinned(Err(PinError::ReservedMount("hold".to_owned()))),
+        "the mount id \"hold\" is reserved for holds"
+    );
 }

@@ -456,6 +456,15 @@ impl Drop for Flight {
             gone
         };
         drop(gone);
+        // Whatever ended the flight (a fill, a keep, a task cancelled or panicked), the holds that
+        // wait for the blob are told, after the place is out of the table: a hold that asks later
+        // finds no flight. The index says whether the blob is in the cache.
+        let state = if locked(&self.inner.index).get(&self.hex).is_some() {
+            State::Filled
+        } else {
+            State::Failed
+        };
+        self.inner.hold_settle(&self.hex, state);
     }
 }
 
@@ -636,8 +645,6 @@ impl Inner {
         let task = tokio::spawn(async move {
             let _flight = flight;
             let ended = inner.fill(&key, &name, &plan, &live).await;
-            let kept = matches!(ended, Ok(Filled::Kept));
-            inner.hold_settle(&name.hex, if kept { State::Filled } else { State::Failed });
             let Held { permit, prefetch } = held;
             if prefetch {
                 inner.prefetch_ended(&ended, permit);
