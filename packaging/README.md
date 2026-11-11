@@ -581,6 +581,8 @@ put 403.
 | `local_cache.prefetch_concurrency` | the blobs the prefetch queue fills at once (0 to 64, default 2; 0 turns the queue off), a pool apart from the pools of the reads; a build node's key (not in a release yet) |
 | `local_cache.prefetch_queue` | the most blobs that may wait in the prefetch queue (1 to 1000000, default 16384); past it a blob is turned away |
 | `local_cache.prefetch_queue_ttl` | the longest a blob waits in the prefetch queue (1s to 1h, default `120s`); older, it is dropped when its turn comes |
+| `local_cache.hold_max` | the longest a hold of the prefetch queue lives (1m to 24h, default `4h`); the time a caller asks for is cut to it |
+| `local_cache.hold_max_count` | the most holds open at once (1 to 100000, default 256); one more is turned away |
 | `local_cache.revalidate_after` | how old a hit may be (since its entry was filled or last checked) before one HEAD to the upstream checks it, comparing the version and never reading the body; unset, the default, never checks, and `0s` checks every hit. A changed or missing object drops the entry and the read goes upstream; a HEAD that fails serves the cached copy and is logged and counted |
 | `local_cache.head_before_put` | `true` by default: a create-only put first asks the upstream for the key with one HEAD and refuses a key it holds before the body is read. `false`: the put goes to the upstream as it is; for an upstream that refuses a key it holds before it reads the body (a proxy whose format is `active-marks`), where the HEAD is three requests more for every put of a new key |
 | `cold_store.endpoints` | a list of exactly one endpoint, in place of `endpoint`: several are refused as not supported yet, since the cache reads from one upstream |

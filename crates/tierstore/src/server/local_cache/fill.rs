@@ -22,6 +22,7 @@ use tokio::task::JoinHandle;
 
 use crate::{ByteRange, Error, Meta};
 
+use super::holds::State;
 use super::layout::{
     Name, Origin, Sidecar, data_path, make_dirs, meta_path, object_dir, stage_dir,
 };
@@ -635,6 +636,8 @@ impl Inner {
         let task = tokio::spawn(async move {
             let _flight = flight;
             let ended = inner.fill(&key, &name, &plan, &live).await;
+            let kept = matches!(ended, Ok(Filled::Kept));
+            inner.hold_settle(&name.hex, if kept { State::Filled } else { State::Failed });
             let Held { permit, prefetch } = held;
             if prefetch {
                 inner.prefetch_ended(&ended, permit);

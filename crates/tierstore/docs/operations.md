@@ -304,6 +304,18 @@ A build node's cache keeps a queue of blobs to fill before a read asks for them,
 
 The counters are in [metrics](metrics.md#the-prefetch-queue).
 
+#### Holds
+
+A caller that queues blobs ahead of a job names the queueing a **hold** (not in a release yet; nothing opens a hold until the hydrate call lands). A hold is a name, the trees it is for, and the blobs of those trees that it handed to the queue:
+
+- A blob of a hold is **pinned** for the hold when it is in the cache: at once if the cache held it, else when the fill that brings it ends, whoever started that fill (a worker, or a read that took the blob from the queue). The pin is the pin of [the fill socket's `pin`](operations.md#the-fill-socket) with an owner of its own, the mount `hold` and the tree `<hold>/<tree>`, so a blob of two trees or two holds is pinned for each and charged once, and `local_cache.pin_limit` bounds the pinned bytes as it does for the attachments of a mount: a blob past it is kept by recency only. A fill that ends without the blob, and a blob the queue drops when its turn comes (it waited too long, or does not fit), pin nothing.
+- A hold ends when it is released, or at the time its caller gave, cut to `local_cache.hold_max` (default 4 hours), noticed at the cache's next tick (`local_cache.lock_interval`, one second unless set). Ending it takes away its pins and drops the blobs it queued that still wait for a worker and that no other hold waits for; a fill that has started is left to finish. What the hold asked for is told by the state of each blob: filled, present, dropped, failed, or still queued for another hold or filling.
+- At most `local_cache.hold_max_count` holds are open (default 256). A hold opened again keeps its time and gains the trees.
+- The pins of a hold are in memory only. They are not in the pins file, the `pins-live` request of the fill socket leaves them, and a restart forgets the holds and their pins: a pin whose hold is gone would never end.
+- A read-only cache (one that does not hold the lock of its directory) opens no hold.
+
+The gauge is in [metrics](metrics.md#the-prefetch-queue).
+
 ### The virtual build file system
 
 `tierstore fs --config <file>` is a process of its own, beside the build node's `tierstore`, that shows trees of content-addressed files as one FUSE mount (`fs.mountpoint`, default `/run/tierstore/fs`), for the jobs of the node. A tree is named by the SHA-256 of its root [tree manifest](tree-manifest.md); a client attaches it for a run, the job runtime gives `<mountpoint>/trees/<digest>` to the job (as the lower layer of the job's overlay, where the job writes), and the first open of each file fetches that file's bytes into the node's cache over [the fill socket](operations.md#the-fill-socket), so a job reads only what it opens. The design is [virtual-build-fs.md](https://github.com/komira-ai/tierstore/blob/main/docs/design/virtual-build-fs.md). The keys of the file are the `[fs]` table of [configuration](configuration.md#fs); it is not the file of the node's `tierstore`, and it holds no secret. The unit is `tierstore-fs@.service` (`packaging/hostkeeper/units`), which holds `CAP_SYS_ADMIN` alone, for the mount, and whose `RuntimeDirectory=` makes `/run/tierstore-fs` (the runtime directory) and `/run/tierstore` (the parent of the default mount point) for the account of the unit. It starts only under the marker `/var/lib/tierstore/run-fs-<instance>`, which nothing writes yet: an operator creates it for instance `a` until the update hook learns the unit (see [the second unit](update-hook.md#the-second-unit-tierstore-fs)). The unit keeps the mount's descriptor in the service manager's store, so a crash or a restart does not unmount it (see [crash recovery and the hand-over of the mount](operations.md#crash-recovery-and-the-hand-over-of-the-mount)).
@@ -365,6 +377,6 @@ A job that holds no key reads its objects with presigned GET URLs. The service t
 ## Not in a release yet
 
 - **The fill socket** of a build node (`local_cache.fill_socket`, `fill_socket_concurrency` and `fill_socket_wait`; see [the fill socket](operations.md#the-fill-socket)), and so a default `fill.sock` in the state directory. A storage node with a cache has none and refuses the keys.
-- **The prefetch queue** of a build node (`local_cache.prefetch_concurrency`, `prefetch_queue` and `prefetch_queue_ttl`; see [the prefetch queue](operations.md#the-prefetch-queue)). A storage node with a cache has none and refuses the keys.
+- **The prefetch queue** of a build node (`local_cache.prefetch_concurrency`, `prefetch_queue`, `prefetch_queue_ttl`, `hold_max` and `hold_max_count`; see [the prefetch queue](operations.md#the-prefetch-queue) and [holds](operations.md#holds)). A storage node with a cache has none and refuses the keys.
 - **The virtual build file system** (see [the virtual build file system](operations.md#the-virtual-build-file-system)): `tierstore fs`, its `[fs]` table and its unit, and the pin requests of the fill socket.
 - **Waiting for a put slot** A put over `server.max_concurrent_puts` waits up to `server.put_permit_wait` (15 s) for a slot before it is answered 503 `SlowDown`.

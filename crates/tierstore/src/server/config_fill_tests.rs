@@ -205,6 +205,8 @@ cache  = true
         "prefetch_concurrency = 1",
         "prefetch_queue = 10",
         "prefetch_queue_ttl = \"5s\"",
+        "hold_max = \"1h\"",
+        "hold_max_count = 4",
     ] {
         let text = node.replace("KEY", line);
         let key = line.split(' ').next().unwrap();

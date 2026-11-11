@@ -19,15 +19,15 @@ use super::testing::{Rig, digest, until};
 use crate::{Error, Op};
 
 /// An object of the upstream named by its digest.
-struct Stored {
-    key: String,
-    sha: String,
-    body: Vec<u8>,
+pub(super) struct Stored {
+    pub(super) key: String,
+    pub(super) sha: String,
+    pub(super) body: Vec<u8>,
 }
 
 impl Stored {
     /// The blob as the cache is asked for it: the whole object.
-    fn blob(&self) -> Blob<'_> {
+    pub(super) fn blob(&self) -> Blob<'_> {
         Blob {
             sha256: &self.sha,
             size: self.body.len() as u64,
@@ -39,7 +39,7 @@ impl Stored {
 
 /// The object `cas/l/<sha256>` of `len` bytes, put in the upstream; `seed` makes it differ from
 /// the others.
-async fn stored(rig: &Rig, seed: usize, len: usize) -> Stored {
+pub(super) async fn stored(rig: &Rig, seed: usize, len: usize) -> Stored {
     let body = distinct(seed, len);
     let sha = digest(&body);
     let key = format!("cas/l/{sha}");
@@ -48,7 +48,7 @@ async fn stored(rig: &Rig, seed: usize, len: usize) -> Stored {
 }
 
 /// A cache with `workers` prefetch workers.
-fn rig(name: &str, workers: usize) -> Rig {
+pub(super) fn rig(name: &str, workers: usize) -> Rig {
     Rig::with(name, |config| config.prefetch.concurrency = workers)
 }
 
@@ -63,12 +63,12 @@ fn free(rig: &Rig) -> (usize, usize, usize) {
 }
 
 /// The blobs that wait for a worker.
-fn waiting(rig: &Rig) -> usize {
+pub(super) fn waiting(rig: &Rig) -> usize {
     locked(&rig.cache.inner.prefetch.queue).len()
 }
 
 /// The fills in the table, queued or running.
-fn in_table(rig: &Rig) -> usize {
+pub(super) fn in_table(rig: &Rig) -> usize {
     locked(&rig.cache.inner.flights).len()
 }
 

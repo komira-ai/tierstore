@@ -91,6 +91,8 @@ pub(super) fn refuse_fill_keys(table: &LocalCacheTable) -> Result<(), ConfigErro
         ("prefetch_concurrency", table.prefetch_concurrency.is_some()),
         ("prefetch_queue", table.prefetch_queue.is_some()),
         ("prefetch_queue_ttl", table.prefetch_queue_ttl.is_some()),
+        ("hold_max", table.hold_max.is_some()),
+        ("hold_max_count", table.hold_max_count.is_some()),
     ];
     refuse("local_cache", why, &keys)
 }

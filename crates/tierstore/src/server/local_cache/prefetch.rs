@@ -26,6 +26,7 @@ use std::time::Duration;
 use tokio::sync::{OwnedSemaphorePermit, Semaphore};
 
 use super::fill::{Class, Ended, Filled, Held, Launch, Pending, Plan, Stop};
+use super::holds::{Holds, State};
 use super::layout::name_of;
 use super::metrics::{PrefetchFailed, bump};
 use super::source::{Blob, object_key};
@@ -41,8 +42,14 @@ pub const PREFETCH_QUEUE: usize = 16_384;
 /// How long a blob may wait in the queue, unless the settings say otherwise.
 pub const PREFETCH_QUEUE_TTL: Duration = Duration::from_secs(120);
 
-/// The settings of the prefetch queue (`local_cache.prefetch_concurrency`, `prefetch_queue` and
-/// `prefetch_queue_ttl`).
+/// The longest a hold lives, unless the settings say otherwise.
+pub(super) const HOLD_MAX: Duration = Duration::from_secs(4 * 3600);
+
+/// The holds that may be open at once, unless the settings say otherwise.
+pub(super) const HOLD_MAX_COUNT: usize = 256;
+
+/// The settings of the prefetch queue and of the holds that fill it (`local_cache.prefetch_concurrency`,
+/// `prefetch_queue`, `prefetch_queue_ttl`, `hold_max` and `hold_max_count`).
 #[derive(Clone, Copy, Debug)]
 pub struct PrefetchConfig {
     /// The most blobs filled at once by the queue: a pool of permits of its own, which no read
@@ -53,6 +60,10 @@ pub struct PrefetchConfig {
     pub queue: usize,
     /// The longest a blob waits in the queue; older, it is dropped when its turn comes.
     pub ttl: Duration,
+    /// The longest a hold lives (see the module `holds`); the time a caller asks for is cut to it.
+    pub hold_max: Duration,
+    /// The most holds open at once; a hold past it is turned away.
+    pub hold_max_count: usize,
 }
 
 impl Default for PrefetchConfig {
@@ -61,6 +72,8 @@ impl Default for PrefetchConfig {
             concurrency: PREFETCH_CONCURRENCY,
             queue: PREFETCH_QUEUE,
             ttl: PREFETCH_QUEUE_TTL,
+            hold_max: HOLD_MAX,
+            hold_max_count: HOLD_MAX_COUNT,
         }
     }
 }
@@ -109,7 +122,7 @@ impl Queue {
         self.waiting.len()
     }
 
-    fn contains(&self, hex: &str) -> bool {
+    pub(super) fn contains(&self, hex: &str) -> bool {
         self.places.contains_key(hex)
     }
 
@@ -121,7 +134,7 @@ impl Queue {
     }
 
     /// The blob of `hex`, taken out of the queue.
-    fn take(&mut self, hex: &str) -> Option<Queued> {
+    pub(super) fn take(&mut self, hex: &str) -> Option<Queued> {
         let place = self.places.remove(hex)?;
         self.waiting.remove(&place)
     }
@@ -138,6 +151,8 @@ impl Queue {
 pub(super) struct Prefetch {
     pub(super) queue: Mutex<Queue>,
     pub(super) workers: Arc<Semaphore>,
+    /// The holds that asked for blobs of the queue.
+    pub(super) holds: Mutex<Holds>,
 }
 
 impl Prefetch {
@@ -145,6 +160,7 @@ impl Prefetch {
         Self {
             queue: Mutex::new(Queue::default()),
             workers: Arc::new(Semaphore::new(config.concurrency)),
+            holds: Mutex::default(),
         }
     }
 }
@@ -160,7 +176,7 @@ enum Dropped {
 impl Inner {
     /// Queues the blob, or says why not: see [`Prefetched`]. A blob that is queued is filled at
     /// once if a worker is free.
-    fn queue_blob(self: &Arc<Self>, blob: &Blob<'_>) -> Prefetched {
+    pub(super) fn queue_blob(self: &Arc<Self>, blob: &Blob<'_>) -> Prefetched {
         let outcome = if !self.read_write() {
             Prefetched::ReadOnly
         } else if self.config.prefetch.concurrency == 0 {
@@ -257,7 +273,7 @@ impl Inner {
 
     /// The blob that has waited longest and is still to be filled; the ones before it that are
     /// not are dropped, and leave the table with the table and the queue locked, so that no read
-    /// finds a place that nothing will fill.
+    /// finds a place that nothing will fill. A hold that waited for a dropped blob is told.
     pub(super) fn next_queued(&self) -> Option<Queued> {
         let mut flights = locked(&self.flights);
         let mut queue = locked(&self.prefetch.queue);
@@ -270,9 +286,14 @@ impl Inner {
             match self.waiting_blob(&queued) {
                 Ok(()) => break Some(queued),
                 Err(why) => {
-                    if let Dropped::Failed(failure) = why {
-                        self.counters.prefetch_failed(failure);
-                    }
+                    let state = match why {
+                        Dropped::Present => State::Present,
+                        Dropped::Failed(failure) => {
+                            self.counters.prefetch_failed(failure);
+                            State::Dropped
+                        }
+                    };
+                    self.hold_settle(hex, state);
                     gone.push(flights.remove(hex));
                     let _ = locked(&self.invalidated).remove(hex);
                 }

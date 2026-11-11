@@ -124,6 +124,7 @@ Blobs queued to be filled before a read asks for them (see [operations](operatio
 | `tierstore_cache_prefetch_promotions_total` | counter | none | a read of a queued blob started it before a worker did |
 | `tierstore_cache_fill_joins_total` | counter | `path`: `mount`, `s3` | a request of the fill socket (`mount`) or a read of the S3 front joined a fill that was running instead of starting one; a read that started a queued blob counts a promotion, not a join |
 | `tierstore_cache_prefetch_queue_depth` | gauge | none | blobs waiting for a worker now |
+| `tierstore_cache_holds_open` | gauge | none | holds open now (see [holds](operations.md#holds)): opened and not yet released or expired |
 
 ### The cache mode
 
@@ -323,7 +324,7 @@ ships. Do not build alerts on these series until they are in a release.
 The series of "The build-node cache (v1)" above change as follows, and the cache gains the series
 of the sections after this one. They all start with `tierstore_cache_`.
 
-- Each family gets one `# TYPE` line, before its samples: a counter, or a gauge for `tierstore_cache_bytes`, `tierstore_cache_objects`, `tierstore_cache_fs_free_bytes`, `tierstore_cache_staging_files`, `tierstore_cache_prefetch_queue_depth` and `tierstore_cache_mode`. `tierstore_cache_discarded_at_start_total` is declared a counter that is set once, when the cache is opened.
+- Each family gets one `# TYPE` line, before its samples: a counter, or a gauge for `tierstore_cache_bytes`, `tierstore_cache_objects`, `tierstore_cache_fs_free_bytes`, `tierstore_cache_staging_files`, `tierstore_cache_prefetch_queue_depth`, `tierstore_cache_holds_open` and `tierstore_cache_mode`. `tierstore_cache_discarded_at_start_total` is declared a counter that is set once, when the cache is opened.
 - A read of a kept key that the cache does not serve is one miss on every path, counted right after the lookup and before any call the read itself makes to the upstream (only the HEAD that checks an old hit, with `local_cache.revalidate_after`, comes before the lookup): a ranged GET whose size HEAD to the upstream then fails, a ranged GET of an object over the whole-object limit, a fill that then fails, and every miss of a read-only cache. So a ranged GET whose HEAD fails now counts a miss. A range past the end of a held object is still neither a hit nor a miss.
 - The bytes the cache fetched from the upstream are `tierstore_cache_upstream_bytes_read_total`, in the next section.
 

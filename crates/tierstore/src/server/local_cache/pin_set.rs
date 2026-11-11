@@ -1,6 +1,7 @@
 //! The set of pins, in memory: which trees pin which blobs, and how many bytes that is.
 //!
-//! A pin is held for a tree of a mount by the owner `(mount id, tree)`; a blob is pinned while
+//! A pin is held for a tree of a mount by the owner `(mount id, tree)` (or for a tree of a hold, by
+//! the owner `("hold", "<hold>/<tree>")`, see `holds`); a blob is pinned while
 //! any owner pins it, and its bytes count once however many trees pin it. The set knows nothing
 //! of the objects but their sizes, which the caller gives when it pins; the index calls
 //! [`PinSet::forget`] when it removes an object and [`PinSet::resize`] when it replaces one.
@@ -12,6 +13,10 @@ use serde::{Deserialize, Serialize};
 
 /// The least time, in milliseconds, between two writes of the file.
 pub(super) const SAVE_EVERY: u64 = 1000;
+
+/// The mount of the owners that are holds (see the module `holds`): their pins are in memory only,
+/// are not in the file, and `pins_live` leaves them.
+pub(super) const HOLD_MOUNT: &str = "hold";
 
 /// The holder of a pin: a tree attached on a mount.
 #[derive(Clone, Debug, PartialEq, Eq, PartialOrd, Ord)]
@@ -148,12 +153,13 @@ impl PinSet {
         blobs.len()
     }
 
-    /// Takes away the pins of every owner that is not a tree of `mount` in `trees`; gives the
-    /// number of owners dropped.
+    /// Takes away the pins of every owner that is not a tree of `mount` in `trees`, except the
+    /// owners that are holds; gives the number of owners dropped.
     pub(super) fn retain_live(&mut self, mount: &str, trees: &[String]) -> usize {
         let dead: Vec<Owner> = self
             .by_owner
             .keys()
+            .filter(|owner| owner.mount != HOLD_MOUNT)
             .filter(|owner| owner.mount != mount || !trees.contains(&owner.tree))
             .map(|owner| Owner::clone(owner))
             .collect();
@@ -189,11 +195,13 @@ impl PinSet {
         }
     }
 
-    /// The pins as a file holds them, the trees in order and their blobs in order.
+    /// The pins as a file holds them, the trees in order and their blobs in order; the pins of
+    /// holds are not in it.
     pub(super) fn to_file(&self) -> PinsFile {
         let trees = self
             .by_owner
             .iter()
+            .filter(|(owner, _)| owner.mount != HOLD_MOUNT)
             .map(|(owner, blobs)| TreePins {
                 mount: owner.mount.clone(),
                 tree: owner.tree.clone(),

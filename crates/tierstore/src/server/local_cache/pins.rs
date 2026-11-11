@@ -15,7 +15,9 @@
 //!   by recency only: pins buy speed, and running out of them must not stop a job.
 //! - [`LocalCache::unpin`] takes away every pin of a tree.
 //! - [`LocalCache::pins_live`] takes away every pin of another mount and of a tree not in the
-//!   list: the pins never outlive their mount or their attachment.
+//!   list: the pins never outlive their mount or their attachment. The pins of a hold (module
+//!   `holds`) are the one exception: they have an owner of their own, are not in the file below,
+//!   and end with their hold.
 //!
 //! A pinned object is skipped by the eviction pass and counted in `pin_skips`; it stays charged
 //! to the budget. Removals that are not eviction (the scrub finding bad bytes, a revalidation, a
@@ -82,7 +84,12 @@ impl Inner {
     }
 
     /// See [`LocalCache::pin`].
-    fn pin(&self, mount: &str, tree: &str, blobs: &[String]) -> Result<PinAnswer, PinError> {
+    pub(super) fn pin(
+        &self,
+        mount: &str,
+        tree: &str,
+        blobs: &[String],
+    ) -> Result<PinAnswer, PinError> {
         self.pins_writable()?;
         if let Some(bad) = blobs.iter().find(|blob| !is_digest(blob)) {
             return Err(PinError::NotADigest(bad.clone()));
