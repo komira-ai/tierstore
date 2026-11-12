@@ -20,7 +20,7 @@ use std::process::{Command, Output};
 const COMMIT: &str = "0123456789abcdef0123456789abcdef01234567";
 const VERSION: &str = "0.4.0+0123456789ab";
 const ALL: [&str; 3] = ["linux-x86_64", "linux-arm64", "macos-arm64"];
-const LINUX: [&str; 2] = ["linux-x86_64", "linux-arm64"];
+const LINUX: [&str; 1] = ["linux-x86_64"];
 
 /// Gives `path` and every directory below it mode 0700.
 fn open_up(path: &Path) {
@@ -165,8 +165,8 @@ fn the_packages_index_sums_and_unpack_chain_of_a_push() {
 }
 
 #[test]
-fn the_index_of_a_pull_request_needs_the_two_linux_packages_and_writes_nothing() {
-    // Catches: a pull request writing an index of two platforms, a push accepting a set without
+fn the_index_of_a_pull_request_needs_the_linux_x86_64_package_and_writes_nothing() {
+    // Catches: a pull request writing an index of one platform, a push accepting a set without
     // the macOS package, and a bad --commit not reported as a usage error.
     let d = fresh("pull-request");
     packages(&d, &LINUX);

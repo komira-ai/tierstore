@@ -44,23 +44,20 @@
 //!
 //! [`release_platform_problems`] refuses `release.yml` when its `verify` job does not download
 //! every platform's assets merged into `dist`, the sums into `published` and `bundles` into
-//! `dist`. [`pull_request_macos_problems`] refuses any workflow a pull request starts that has a
-//! job on a macOS runner without [`NOT_FOR_A_PULL_REQUEST`], other than the job `macos` of
-//! `macos.yml` under its one `if:` (`super::macos_pr::MAC_IF`), and holds every job a pull
-//! request runs on macOS to no secret, no token and `contents: read` alone. The release build of
-//! macOS and its tests run in `artifacts.yml` on a push and by hand (`workflow_dispatch`), whose
-//! triggers [`TRIGGERS`] pins; a pull request that changes a path the macOS build reads runs the
-//! same build, with the tests of the whole workspace, in `macos.yml`.
+//! `dist`. [`pull_request_runner_problems`] refuses any workflow a pull request starts that has a
+//! job on a runner other than a GitHub-hosted Linux x86_64 one (macOS, Windows, `-arm`) without
+//! [`NOT_FOR_A_PULL_REQUEST`]. The builds and tests of the other platforms (linux-arm64 and
+//! macos-arm64) are the beta stage of the release: they run in `artifacts.yml` on a push and by
+//! hand (`workflow_dispatch`), whose triggers [`TRIGGERS`] pins, and no pull request starts them.
 
 use super::glibc_floor::{self, Zig};
-use super::lint::{SIGN_IF, entries, entry, names, runs};
-use super::macos_pr::{MAC_IF, MAC_JOB, MACOS_PR, pull_request_job_problems, scalars};
+use super::lint::{SIGN_IF, entries, entry, names, runs, scalars};
 use super::yaml::{self, Node, Value};
 
 /// A platform's build job: its runner (GitHub-hosted, of the platform's own OS and architecture,
 /// so the binary runs where it is built), its Rust target, the variable of the file's `env` that
 /// pins the SHA-256 of its cargo-cyclonedx, the `if:` of the job (none: it runs for every event),
-/// whether it runs the tests (the platform whose tests no pull-request check runs), the target
+/// whether it runs the tests of the workspace (the beta platforms: no pull request runs them), the target
 /// the Homebrew tap's formula names the platform's tarball by (`tap`, the last part of
 /// `tierstore-<version>-<tap>.tar.gz`), and the Debian and RPM architectures of its packages, if it
 /// has them.
@@ -78,21 +75,22 @@ pub struct Build {
     pub zig: Option<Zig>,
 }
 
-/// The `if:` of a job on a macOS runner in a workflow a pull request starts: never for a pull
-/// request.
+/// The `if:` of a job on a runner other than Linux x86_64 in a workflow a pull request starts:
+/// never for a pull request (those platforms are the beta stage of the release).
 pub const NOT_FOR_A_PULL_REQUEST: &str = "${{ github.event_name != 'pull_request' }}";
 
-/// The `if:` of `sums`: for a pull request the macOS job is skipped and the Linux files are
-/// summed; for a push or a run by hand every build job must have succeeded.
-pub const SUMS_IF: &str = "${{ !cancelled() && needs.linux-x86_64.result == 'success' && needs.linux-arm64.result == 'success' && (needs.macos-arm64.result == 'success' || (github.event_name == 'pull_request' && needs.macos-arm64.result == 'skipped')) }}";
+/// The `if:` of `sums`: for a pull request the beta jobs (linux-arm64, macos-arm64) are skipped and
+/// the linux-x86_64 files are summed; for a push or a run by hand every build job must have succeeded.
+pub const SUMS_IF: &str = "${{ !cancelled() && needs.linux-x86_64.result == 'success' && ((needs.linux-arm64.result == 'success' && needs.macos-arm64.result == 'success') || (github.event_name == 'pull_request' && needs.linux-arm64.result == 'skipped' && needs.macos-arm64.result == 'skipped')) }}";
 
 /// The triggers of `artifacts.yml`: a pull request, a push to main, and by hand (the macOS build
 /// of a branch, tried before it merges).
 pub const TRIGGERS: [&str; 3] = ["pull_request", "push", "workflow_dispatch"];
 
-/// The tests the macOS build job runs: every test of the crates the binary is made of, none left
-/// out (no `--no-run`, no filter).
-pub const MAC_TESTS: &str = "cargo test --locked -p tierstore -p objstore-s3 -p tierstore-testkit --features tierstore/s3 --no-fail-fast";
+/// The tests a beta build job (linux-arm64, macos-arm64) runs before it builds: every test of
+/// every crate of the workspace, none left out (no `--no-run`, no filter).
+pub const BETA_TESTS: &str =
+    "cargo test --locked --workspace --features tierstore/s3 --no-fail-fast";
 
 /// The build job of every release platform.
 pub const BUILDS: &[Build] = &[
@@ -117,8 +115,8 @@ pub const BUILDS: &[Build] = &[
         runner: "ubuntu-24.04-arm",
         target: "aarch64-unknown-linux-gnu",
         pin: "CYCLONEDX_SHA256_AARCH64_LINUX",
-        job_if: None,
-        tests: false,
+        job_if: Some(NOT_FOR_A_PULL_REQUEST),
+        tests: true,
         tap: "linux-aarch64",
         deb: Some("arm64"),
         rpm: Some("aarch64"),
@@ -215,7 +213,7 @@ pub fn build_commands(b: &Build) -> Vec<String> {
         commands.push(format!("cargo xtask release rpm-info \"dist/{file}\""));
     }
     if b.tests {
-        commands.insert(3, MAC_TESTS.to_owned());
+        commands.insert(3, BETA_TESTS.to_owned());
     }
     if b.platform == "macos-arm64" {
         commands.push(CODESIGN.to_owned());
@@ -904,21 +902,31 @@ pub fn release_platform_problems(text: &str, platforms: &[&str]) -> Vec<String> 
     )
 }
 
-/// Whether `job` runs on a macOS runner: a label of its `runs-on` (a name, a list of labels, or
-/// a group and its labels) starts with `macos`.
-fn on_macos(job: &Node) -> bool {
+/// Whether `label` is a GitHub-hosted Linux x86_64 runner: `ubuntu-<version>` or `ubuntu-latest`,
+/// not an `-arm` image, not a larger-runner or self-hosted label.
+fn linux_x86_64(label: &str) -> bool {
+    let label = label.to_ascii_lowercase();
+    label.strip_prefix("ubuntu-").is_some_and(|v| {
+        v == "latest" || (!v.is_empty() && v.chars().all(|c| c.is_ascii_digit() || c == '.'))
+    })
+}
+
+/// The labels of the `runs-on` of `job` that are not [`linux_x86_64`].
+fn other_platform_labels(job: &Node) -> Vec<String> {
     let mut labels = Vec::new();
     if let Some(runs_on) = entry(job, "runs-on") {
         scalars(runs_on, &mut labels);
     }
     labels
-        .iter()
-        .any(|l| l.to_ascii_lowercase().starts_with("macos"))
+        .into_iter()
+        .filter(|l| !l.contains("${{") && !linux_x86_64(l))
+        .map(str::to_owned)
+        .collect()
 }
 
 /// One line per job of a workflow a pull request starts whose runner the lint cannot see: a
 /// `runs-on` that is an expression (a matrix value, an input), or a call of a reusable workflow
-/// (a job-level `uses:`), either of which could put the job on macOS unseen.
+/// (a job-level `uses:`), either of which could put the job on another platform unseen.
 fn unseen_runner_problems(file: &str, name: &str, job: &Node) -> Vec<String> {
     let mut problems = Vec::new();
     let mut labels = Vec::new();
@@ -927,7 +935,7 @@ fn unseen_runner_problems(file: &str, name: &str, job: &Node) -> Vec<String> {
     }
     if labels.iter().any(|l| l.contains("${{")) {
         problems.push(format!(
-            "{file}: the job {name} of a pull request runs on an expression; name its runner, so the lint can tell whether it is macOS"
+            "{file}: the job {name} of a pull request runs on an expression; name its runner, so the lint can tell its platform"
         ));
     }
     if entry(job, "uses").is_some() {
@@ -938,14 +946,13 @@ fn unseen_runner_problems(file: &str, name: &str, job: &Node) -> Vec<String> {
     problems
 }
 
-/// One line per job of the workflow `file` (`text`) that a pull request runs on a macOS runner
-/// where it may not, or with what it may not hold. The workflow has a `pull_request` trigger and
-/// the job is on macOS ([`on_macos`]) under another `if:` than [`NOT_FOR_A_PULL_REQUEST`]: it is
-/// refused unless it is the job [`MAC_JOB`] of `macos.yml` under [`MAC_IF`], and each
-/// such job is held to [`pull_request_job_problems`] (`contents: read` alone, no environment, no
-/// secret and no token in it or in the workflow's `env`). A job of such a workflow whose runner
-/// is an expression, or that calls a reusable workflow, is refused ([`unseen_runner_problems`]).
-pub fn pull_request_macos_problems(file: &str, text: &str) -> Vec<String> {
+/// One line per job of the workflow `file` (`text`) that a pull request runs on a platform other
+/// than Linux x86_64. The workflow has a `pull_request` trigger and a job names a runner that is not
+/// a GitHub-hosted `ubuntu-*` x86_64 one ([`linux_x86_64`]: macOS, Windows and `-arm` images are
+/// not) under another `if:` than [`NOT_FOR_A_PULL_REQUEST`]. The other platforms build and test
+/// as the beta stage of the release, after a merge. A job of such a workflow whose runner is an
+/// expression, or that calls a reusable workflow, is refused ([`unseen_runner_problems`]).
+pub fn pull_request_runner_problems(file: &str, text: &str) -> Vec<String> {
     let doc = match yaml::load(text) {
         Ok(doc) => doc,
         Err(e) => return vec![format!("{file}: {e}")],
@@ -957,22 +964,15 @@ pub fn pull_request_macos_problems(file: &str, text: &str) -> Vec<String> {
     for (name, job) in entry(&doc, "jobs").map_or(&[][..], entries) {
         let name = name.as_str().unwrap_or_default();
         problems.extend(unseen_runner_problems(file, name, job));
-        let condition = at(job, &["if"]);
-        if !on_macos(job) || condition == Some(NOT_FOR_A_PULL_REQUEST) {
+        if at(job, &["if"]) == Some(NOT_FOR_A_PULL_REQUEST) {
             continue;
         }
-        let allowed = file == MACOS_PR && name == MAC_JOB && condition == Some(MAC_IF);
-        if !allowed {
+        let others = other_platform_labels(job);
+        if !others.is_empty() {
             problems.push(format!(
-                "{file}: the job {name} runs on macOS for a pull request; only the job {MAC_JOB} of {MACOS_PR}, under `if: {MAC_IF}`, may"
+                "{file}: the job {name} runs on {others:?} for a pull request; a pull request runs on Linux x86_64 (ubuntu-*, not -arm) alone, and other platforms are the beta stage of the release, under `if: {NOT_FOR_A_PULL_REQUEST}`"
             ));
         }
-        problems.extend(pull_request_job_problems(
-            file,
-            name,
-            job,
-            entry(&doc, "env"),
-        ));
     }
     problems
 }

@@ -59,8 +59,14 @@ fn sha256_hex(bytes: &[u8]) -> String {
     hex::encode(Sha256::digest(bytes))
 }
 
+fn missing_line(platform: &str) -> String {
+    format!(
+        "no hostkeeper package for {platform}: index.json lists every platform, and hostkeeper refuses a host of a platform it lacks (no_package_for_platform)"
+    )
+}
+
 fn missing_macos_line() -> String {
-    "no hostkeeper package for macos-arm64: index.json lists every platform, and hostkeeper refuses a host of a platform it lacks (no_package_for_platform)".to_owned()
+    missing_line("macos-arm64")
 }
 
 #[test]
@@ -174,22 +180,26 @@ fn output_gets_the_package_version_appended_to_what_is_there() {
 }
 
 #[test]
-fn a_push_or_manual_run_without_the_macos_package_is_refused_and_writes_nothing() {
-    // Catches: a release index of two platforms, which leaves every Mac on its old version.
+fn a_push_or_manual_run_without_the_arm64_and_macos_packages_is_refused_and_writes_nothing() {
+    // Catches: a release index of one platform, which leaves every Mac on its old version.
     for event in ["push", "workflow_dispatch"] {
         let dir = scratch(&format!("no-macos-{event}"));
         put_all(&dir, &PULL_REQUEST_PLATFORMS);
         let lines = refused(hostkeeper_index(&dir, COMMIT, event, None));
-        assert_eq!(lines, [missing_macos_line()], "{event}");
+        assert_eq!(
+            lines,
+            [missing_line("linux-arm64"), missing_macos_line()],
+            "{event}"
+        );
         assert!(!dir.join("index.json").exists(), "{event}");
         assert!(!dir.join("SHA256SUMS.index").exists(), "{event}");
     }
 }
 
 #[test]
-fn a_pull_request_with_the_two_linux_packages_writes_nothing() {
-    // Catches: an index written for a pull request (an index of two platforms), or a pull
-    // request run refused for lacking the macOS job's package.
+fn a_pull_request_with_the_linux_x86_64_package_writes_nothing() {
+    // Catches: an index written for a pull request (an index of one platform), or a pull
+    // request run refused for lacking the packages of the platforms it does not build.
     let dir = scratch("pr-ok");
     put_all(&dir, &PULL_REQUEST_PLATFORMS);
     let output = dir.join("github-output");
@@ -198,7 +208,7 @@ fn a_pull_request_with_the_two_linux_packages_writes_nothing() {
     assert_eq!(
         lines,
         [
-            "a pull request: the macOS job does not run for one, so no index.json is written; the Linux packages of 0.4.0+0123456789ab are there"
+            "a pull request: only linux-x86_64 builds for one, so no index.json is written; its package of 0.4.0+0123456789ab is there"
         ]
     );
     assert!(!dir.join("index.json").exists());
@@ -207,15 +217,16 @@ fn a_pull_request_with_the_two_linux_packages_writes_nothing() {
 }
 
 #[test]
-fn a_pull_request_with_the_macos_package_or_one_linux_package_is_refused() {
-    // Catches: a pull request run that accepts a macOS package it does not build, or only one
-    // of the two Linux packages.
-    let with_macos = scratch("pr-macos");
-    put_all(&with_macos, &Platform::ALL);
+fn a_pull_request_with_another_platforms_package_or_without_linux_x86_64_is_refused() {
+    // Catches: a pull request run that accepts the arm64 or macOS package it does not build, or
+    // a run without the linux-x86_64 package.
+    let with_others = scratch("pr-others");
+    put_all(&with_others, &Platform::ALL);
     assert_eq!(
-        refused(hostkeeper_index(&with_macos, COMMIT, "pull_request", None)),
+        refused(hostkeeper_index(&with_others, COMMIT, "pull_request", None)),
         [
-            "a hostkeeper package for macos-arm64, which a pull request does not build (the macOS job does not run for one)"
+            "a hostkeeper package for linux-arm64, which a pull request does not build (only linux-x86_64 builds for one)",
+            "a hostkeeper package for macos-arm64, which a pull request does not build (only linux-x86_64 builds for one)"
         ]
     );
     let one = scratch("pr-one");
@@ -223,7 +234,8 @@ fn a_pull_request_with_the_macos_package_or_one_linux_package_is_refused() {
     assert_eq!(
         refused(hostkeeper_index(&one, COMMIT, "pull_request", None)),
         [
-            "no hostkeeper package for linux-x86_64: index.json lists every platform, and hostkeeper refuses a host of a platform it lacks (no_package_for_platform)"
+            missing_line("linux-x86_64"),
+            "a hostkeeper package for linux-arm64, which a pull request does not build (only linux-x86_64 builds for one)".to_owned()
         ]
     );
 }

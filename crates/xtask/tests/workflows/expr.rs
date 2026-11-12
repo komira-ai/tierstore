@@ -1,4 +1,4 @@
-//! The GitHub Actions expressions the conditions of `macos.yml` are written in, evaluated, so a
+//! The GitHub Actions expressions the conditions of the workflows are written in, evaluated, so a
 //! test can run a condition of the file against each outcome of the jobs it names.
 //!
 //! The subset: `${{ … }}` around the expression; `||`, `&&`, `!`, `==` and `!=` with GitHub's

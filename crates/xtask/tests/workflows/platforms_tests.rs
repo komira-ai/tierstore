@@ -1,12 +1,11 @@
-//! The release platforms in `artifacts.yml` and `release.yml`, and no macOS runner in a pull
-//! request's checks outside `macos.yml` ([`super::platforms`]):
+//! The release platforms in `artifacts.yml` and `release.yml`, and no runner but Linux x86_64
+//! in a pull request's checks ([`super::platforms`]):
 //! the files of the repository pass, and each way of leaving a platform out, of building, signing
 //! or checking it with the wrong inputs, or of skipping a step that checks it, is named.
 
-use super::macos_pr::MAC_IF;
 use super::platforms::{
-    BUILDS, MAC_TESTS, artifacts_platform_problems, attest_commands, build_commands, matches,
-    pull_request_macos_problems, release_platform_problems,
+    BETA_TESTS, BUILDS, artifacts_platform_problems, attest_commands, build_commands, matches,
+    pull_request_runner_problems, release_platform_problems,
 };
 use super::{text_of, workflows};
 use xtask::package::Platform;
@@ -80,7 +79,7 @@ fn the_workflows_build_sign_and_check_every_release_platform() {
     );
     let mut on_macos = Vec::new();
     for (file, text) in workflows() {
-        on_macos.extend(pull_request_macos_problems(&file, &text));
+        on_macos.extend(pull_request_runner_problems(&file, &text));
     }
     assert_eq!(on_macos, Vec::<String>::new());
 }
@@ -141,16 +140,18 @@ fn the_build_and_signing_commands_name_the_platform_and_nothing_else() {
     assert_eq!(checked.len(), 2, "the built binary and the unpacked one");
     assert!(!commands.iter().any(|c| c.contains("linux")));
     assert_eq!(
-        commands[3], MAC_TESTS,
+        commands[3], BETA_TESTS,
         "the macOS job runs the tests before it builds"
     );
-    for linux in &BUILDS[..2] {
-        assert!(
-            !build_commands(linux).iter().any(|c| c == MAC_TESTS),
-            "{}: the Linux tests run in ci.yml",
-            linux.platform
-        );
-    }
+    assert!(
+        !build_commands(&BUILDS[0]).iter().any(|c| c == BETA_TESTS),
+        "linux-x86_64: its tests run in ci.yml, for a pull request"
+    );
+    assert_eq!(
+        build_commands(&BUILDS[1])[3],
+        BETA_TESTS,
+        "linux-arm64 is a beta platform: it runs the tests of the workspace before it builds"
+    );
     let attest = attest_commands(&["macos-arm64"]);
     assert_eq!(
         attest.len(),
@@ -423,15 +424,39 @@ const EXECUTION_DEFECTS: &[(&str, &str, &str, &str)] = &[
     ),
     (
         MAC,
-        "-p tierstore -p objstore-s3",
+        "--workspace",
         "-p objstore-s3",
         "macos-arm64: does not run `cargo test",
     ),
     (
+        "linux-arm64",
+        "    if: ${{ github.event_name != 'pull_request' }}\n",
+        "",
+        "linux-arm64: runs under `if: None`",
+    ),
+    (
+        "linux-arm64",
+        "--no-fail-fast\n",
+        "--no-fail-fast --no-run\n",
+        "linux-arm64: does not run `cargo test",
+    ),
+    (
+        "linux-arm64",
+        "--workspace",
+        "-p objstore-s3",
+        "linux-arm64: does not run `cargo test",
+    ),
+    (
+        "linux-arm64",
+        "      - name: The tests of the workspace, on linux-arm64\n",
+        "      - name: The tests of the workspace, on linux-arm64\n        continue-on-error: true\n",
+        "linux-arm64: the step `The tests of the workspace, on linux-arm64` has continue-on-error",
+    ),
+    (
         MAC,
-        "      - name: The tests, on macOS\n",
-        "      - name: The tests, on macOS\n        continue-on-error: true\n",
-        "macos-arm64: the step `The tests, on macOS` has continue-on-error",
+        "      - name: The tests of the workspace, on macOS\n",
+        "      - name: The tests of the workspace, on macOS\n        continue-on-error: true\n",
+        "macos-arm64: the step `The tests of the workspace, on macOS` has continue-on-error",
     ),
     (
         MAC,
@@ -453,8 +478,14 @@ const EXECUTION_DEFECTS: &[(&str, &str, &str, &str)] = &[
     ),
     (
         "sums",
-        " || (github.event_name == 'pull_request' && needs.macos-arm64.result == 'skipped')",
+        " || (github.event_name == 'pull_request' && needs.linux-arm64.result == 'skipped' && needs.macos-arm64.result == 'skipped')",
         " || needs.macos-arm64.result == 'skipped'",
+        "sums: runs under",
+    ),
+    (
+        "sums",
+        "(needs.linux-arm64.result == 'success' && needs.macos-arm64.result == 'success')",
+        "needs.macos-arm64.result == 'success'",
         "sums: runs under",
     ),
     (
@@ -811,80 +842,74 @@ fn a_release_yml_that_does_not_take_the_macos_files_where_it_checks_them_is_name
 }
 
 #[test]
-fn a_macos_job_that_a_pull_request_runs_is_named() {
-    // Catches: a macOS runner added to a pull request's checks outside macos.yml (ci.yml given a
-    // macOS job, the macOS build of artifacts.yml without its condition, a runner named in a
-    // list of labels), macos.yml's job copied into another workflow, and macos.yml's job given
-    // another condition than its own (a skipped job passes as a check), none, or renamed; while a
-    // workflow no pull request starts may have one, and macos.yml's own job is accepted.
-    let only = format!("only the job macos of macos.yml, under `if: {MAC_IF}`, may");
+fn a_job_off_linux_x86_64_that_a_pull_request_runs_is_named() {
+    // Catches: a macOS, Windows, linux-arm64 or other non-x86_64 runner added to a pull request's
+    // checks (ci.yml given a macOS job, a beta build of artifacts.yml without its condition, a
+    // runner named in a list of labels), and a reusable-workflow call or runner expression that
+    // hides the platform; while a workflow no pull request starts may have such a job, and a job
+    // under the beta condition (`github.event_name != 'pull_request'`) is accepted.
     let ci = text_of("ci.yml").replace(
         "jobs:\n",
         "jobs:\n  macos:\n    runs-on: macos-15\n    steps:\n      - run: cargo test --locked\n",
     );
     assert_eq!(
-        pull_request_macos_problems("ci.yml", &ci),
-        [
-            format!("ci.yml: the job macos runs on macOS for a pull request; {only}"),
-            "ci.yml: the job macos runs on macOS for a pull request with permissions [], not contents: read alone".to_owned(),
-        ]
+        pull_request_runner_problems("ci.yml", &ci),
+        [runner_line("ci.yml", "macos", "[\"macos-15\"]")]
     );
-    let artifacts = in_job(
-        &text_of("artifacts.yml"),
-        MAC,
-        "    if: ${{ github.event_name != 'pull_request' }}\n",
-        "",
-    );
-    assert_eq!(
-        pull_request_macos_problems("artifacts.yml", &artifacts),
-        [format!(
-            "artifacts.yml: the job macos-arm64 runs on macOS for a pull request; {only}"
-        )]
-    );
-    let labelled = "on:\n  pull_request:\njobs:\n  mac:\n    runs-on: [macos-15, arm64]\n    permissions:\n      contents: read\n";
-    assert_eq!(
-        pull_request_macos_problems("x.yml", labelled),
-        [format!(
-            "x.yml: the job mac runs on macOS for a pull request; {only}"
-        )]
-    );
-    let macos = text_of("macos.yml");
-    assert_eq!(
-        pull_request_macos_problems("macos.yml", &macos),
-        Vec::<String>::new()
-    );
-    assert_eq!(
-        pull_request_macos_problems("other.yml", &macos),
-        [format!(
-            "other.yml: the job macos runs on macOS for a pull request; {only}"
-        )]
-    );
-    for with in [
-        "    if: ${{ github.event.pull_request.draft == false }}\n",
-        "",
-    ] {
-        let conditioned = in_job(&macos, "macos", &format!("    if: {MAC_IF}\n"), with);
+    for (job, label) in [(MAC, "macos-15"), ("linux-arm64", "ubuntu-24.04-arm")] {
+        let artifacts = in_job(
+            &text_of("artifacts.yml"),
+            job,
+            "    if: ${{ github.event_name != 'pull_request' }}\n",
+            "",
+        );
         assert_eq!(
-            pull_request_macos_problems("macos.yml", &conditioned),
-            [format!(
-                "macos.yml: the job macos runs on macOS for a pull request; {only}"
-            )],
-            "{with:?}"
+            pull_request_runner_problems("artifacts.yml", &artifacts),
+            [runner_line("artifacts.yml", job, &format!("[\"{label}\"]"))],
+            "{job}"
         );
     }
-    let renamed = macos.replacen("\n  macos:\n", "\n  macos-arm64:\n", 1);
     assert_eq!(
-        pull_request_macos_problems("macos.yml", &renamed),
-        [format!(
-            "macos.yml: the job macos-arm64 runs on macOS for a pull request; {only}"
-        )]
+        pull_request_runner_problems("artifacts.yml", &text_of("artifacts.yml")),
+        Vec::<String>::new(),
+        "the beta jobs of artifacts.yml carry the condition"
     );
+    for (label, listed) in [
+        ("[macos-15, arm64]", "[\"macos-15\", \"arm64\"]"),
+        ("windows-2025", "[\"windows-2025\"]"),
+        ("ubuntu-24.04-arm", "[\"ubuntu-24.04-arm\"]"),
+        ("[ubuntu-24.04, ubuntu-22.04-arm]", "[\"ubuntu-22.04-arm\"]"),
+        ("self-hosted", "[\"self-hosted\"]"),
+    ] {
+        let text = format!("on:\n  pull_request:\njobs:\n  other:\n    runs-on: {label}\n");
+        assert_eq!(
+            pull_request_runner_problems("x.yml", &text),
+            [runner_line("x.yml", "other", listed)],
+            "{label}"
+        );
+    }
+    for label in ["ubuntu-24.04", "ubuntu-latest", "[ubuntu-22.04]"] {
+        let text = format!("on:\n  pull_request:\njobs:\n  ok:\n    runs-on: {label}\n");
+        assert_eq!(
+            pull_request_runner_problems("x.yml", &text),
+            Vec::<String>::new(),
+            "{label}"
+        );
+    }
+    let matrix = "on:\n  pull_request:\njobs:\n  m:\n    runs-on: ${{ matrix.os }}\n  c:\n    uses: ./.github/workflows/x.yml\n";
+    assert_eq!(pull_request_runner_problems("x.yml", matrix).len(), 2);
     let by_hand = "on:\n  workflow_dispatch:\njobs:\n  mac:\n    runs-on: macos-15\n";
     assert_eq!(
-        pull_request_macos_problems("x.yml", by_hand),
+        pull_request_runner_problems("x.yml", by_hand),
         Vec::<String>::new()
     );
-    assert_eq!(pull_request_macos_problems("x.yml", "jobs: [").len(), 1);
+    assert_eq!(pull_request_runner_problems("x.yml", "jobs: [").len(), 1);
+}
+
+fn runner_line(file: &str, job: &str, listed: &str) -> String {
+    format!(
+        "{file}: the job {job} runs on {listed} for a pull request; a pull request runs on Linux x86_64 (ubuntu-*, not -arm) alone, and other platforms are the beta stage of the release, under `if: ${{{{ github.event_name != 'pull_request' }}}}`"
+    )
 }
 
 #[test]
