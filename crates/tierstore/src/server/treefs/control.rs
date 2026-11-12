@@ -14,7 +14,8 @@
 //!
 //! A request that is refused is answered `{"ok":false,"error":"<why>"}`. `attach` is answered when
 //! the tree's manifests are read and flattened. `detach` of a run that attached nothing is
-//! answered `not attached`.
+//! answered `not attached`. These are the attachments of runs: a tree a lookup attached with no run
+//! (`core/implicit.rs`) is not listed, and no request here ends it.
 
 use std::io::{BufRead as _, BufReader, Read as _, Write as _};
 #[cfg(any(target_os = "linux", test))]

@@ -148,6 +148,19 @@ impl TreeNfs {
         }
     }
 
+    /// The core's answer to a lookup of `name` in `dirid`. A lookup in `trees/` may read a tree
+    /// that no run has attached through the fill socket (`core/implicit.rs`), so it runs on a
+    /// blocking thread, as a fill for a read does, and holds up no other request.
+    async fn looked(&self, dirid: fileid3, name: &str) -> Result<Looked, Errno> {
+        if dirid != ino::TREES {
+            return self.core.lookup(dirid, name);
+        }
+        let (core, name) = (Arc::clone(&self.core), name.to_owned());
+        tokio::task::spawn_blocking(move || core.lookup(ino::TREES, &name))
+            .await
+            .unwrap_or(Err(Errno::Io))
+    }
+
     /// The open cache file of the file `id`: the cached descriptor, else the core's, which fills
     /// the blob first. The fill goes on in a thread of its own, so that a read that waits longer
     /// than the patience is answered `NFS3ERR_JUKEBOX` and finds the descriptor cached when the
@@ -253,7 +266,7 @@ impl NFSFileSystem for TreeNfs {
                 .map(|entry| entry.attr.ino)
                 .map_err(handled),
             ".." => self.core.parent(dirid).map_err(handled),
-            _ => match self.core.lookup(dirid, name) {
+            _ => match self.looked(dirid, name).await {
                 Ok(Looked::Found(entry)) => Ok(entry.attr.ino),
                 Ok(Looked::Absent(_)) => Err(nfsstat3::NFS3ERR_NOENT),
                 // A name the namespace lacks is a missing name; a directory the core lacks is a

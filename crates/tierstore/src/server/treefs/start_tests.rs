@@ -26,7 +26,8 @@ fn ask(path: &std::path::Path, request: &str) -> serde_json::Value {
 
 /// Asserts that a start makes attachments again from the file in the runtime directory (leaving out
 /// a tree it cannot read), tells the cache which trees are attached, and serves the control socket:
-/// a client attaches over it and the core has the attachment.
+/// a client attaches over it and the core has the attachment; and starts the thread that detaches
+/// the idle trees lookups attached.
 #[test]
 fn setup_restores_saved_attachments_and_serves_the_control_socket() {
     let rig = Rig::new("tfs-start-restore", sample());
@@ -54,6 +55,7 @@ fn setup_restores_saved_attachments_and_serves_the_control_socket() {
     );
     assert_eq!(answer["ok"], serde_json::json!(true));
     assert_eq!(setup.core.attachments().len(), 2);
+    assert!(setup.core.sweeping());
 }
 
 /// Asserts that a start that cannot do what it needs says which key it was doing it for: a runtime

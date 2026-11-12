@@ -15,7 +15,7 @@ use crate::server::treefs::nfs::config::NfsSettings;
 use crate::server::treefs::nfs::fixtures::{
     UID, attached, auth, blob_of, endless, failed, fs_of, names, none,
 };
-use crate::server::treefs::testing::{OWNER, until};
+use crate::server::treefs::testing::{OWNER, file, until};
 
 const BIG: u64 = 1;
 const BIN: u64 = 2;
@@ -75,6 +75,35 @@ async fn lookup_finds_a_name_in_a_tree_and_misses_with_noent() {
     assert_eq!(
         failed(fs.lookup(id(BIG), &name("x")).await),
         code(nfsstat3::NFS3ERR_NOTDIR)
+    );
+}
+
+/// Asserts that a lookup in `trees/` of a tree no run has attached resolves it, on a blocking thread
+/// of the runtime, and attaches it with no run, and that a tree that cannot be read is
+/// `NFS3ERR_IO`.
+#[tokio::test]
+async fn lookup_resolves_a_tree_no_run_attached_and_a_broken_one_is_an_io_error() {
+    let (rig, _) = attached("nfs-fs-resolve");
+    let fs = fs_of(&rig, &NfsSettings::default(), endless());
+    let (other, broken) = {
+        let mut built = rig.upstream.built.lock().unwrap();
+        (
+            built.add_tree(vec![("x", file(b"x"))]),
+            built.add_tree(vec![("y", file(b"y"))]),
+        )
+    };
+    let _ = rig
+        .upstream
+        .failing
+        .lock()
+        .unwrap()
+        .insert(broken.clone(), "mismatch".to_owned());
+    let tree = fs.lookup(ino::TREES, &name(&other)).await.unwrap();
+    assert_eq!(tree, ino::of(2, 0));
+    assert_eq!(rig.core.implicit(), vec![2]);
+    assert_eq!(
+        failed(fs.lookup(ino::TREES, &name(&broken)).await),
+        code(nfsstat3::NFS3ERR_IO)
     );
 }
 

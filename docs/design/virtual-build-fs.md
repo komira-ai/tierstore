@@ -222,7 +222,7 @@ Non-goals:
 
 | Point | Verdict | Why |
 |---|---|---|
-| One directory per input tree, addressed by digest (`/tierstore/trees/<digest>/...`), never the whole store | **Kept** | A tree is immutable, so the kernel may cache everything below its root for as long as it likes (6.3). "Never the whole store" is enforced by attachment: a digest no client has attached is not there (6.3). |
+| One directory per input tree, addressed by digest (`/tierstore/trees/<digest>/...`), never the whole store | **Kept** | A tree is immutable, so the kernel may cache everything below its root for as long as it likes (6.3). "Never the whole store" is kept by name: no listing of `trees/` is allowed, and a tree is reached only by its digest, which a lookup resolves (6.3). |
 | One protocol-independent core with thin frontends, as Buildbarn split its FUSE code into a virtual layer plus FUSE and NFS adapters [S5] | **Kept** | 6.2. The core is Rust (decision C2). |
 | Resolvable handles: an immutable file's handle carries what is needed to serve it, so the server keeps no per-file state [S5] | **Kept, extended** | Every inode number and NFS handle is derivable from the tree's manifests and a small table (invariant I1, 6.3), and so is every handle of a view (6.6). That is what makes a crash and an update survivable (section 7). |
 | Lazy Merkle expansion, one directory level on first access [S6] | **Changed: metadata eager per tree, data lazy** | A directory expanded on first access gets an inode number that depends on the order of lookups, which a restarted process cannot recover. Flattening a tree when it is first attached keeps numbers derivable; its cost is spike SP4 (6.3, D7). |
@@ -464,16 +464,16 @@ passthrough and the mount declares no `max_stack_depth` (6.4). On macOS the moun
 ```
 <mount>/                 mode 0711: anyone may pass through, nobody may list
 <mount>/trees/           mode 0711: same
-<mount>/trees/<digest>/  the root of an attached tree, read-only; absent unless attached
+<mount>/trees/<digest>/  the root of a tree, read-only: attached by a run, or by the lookup itself
 <mount>/views/<run>/     a run's writable view (macOS, only if the core builds views); absent unless attached
 ```
 
-- **Attachment is the only way in.** A lookup of `trees/<digest>` or `views/<run>` succeeds only for what some client has
-  attached (6.5). A listing of the mount's root, `trees/` or `views/` is refused (`EACCES`). Any digest of any manifest
-  anybody wrote to the store is not reachable by naming it; that is "never the whole store".
+- **A tree resolves on lookup** (replacing "attachment is the only way in", so that a job runtime that opens `trees/<digest>` as a host path needs
+  no control socket). A lookup of a digest no client attached (6.5) reads its manifests (`fill <digest>`) and attaches it
+  with no run until no request names it for `fs.tree_idle_secs`; a root the upstream lacks is `ENOENT`, any other failure `EIO`, neither taking a tree number. `views/<run>` needs an attach. Listing the mount's root, `trees/` or `views/` is refused (`EACCES`).
 - **The namespace is not cached; the trees are.** Replies for the mount's root, `trees/`, `views/` and the names in them
-  carry entry and attribute timeouts of 0, and a name that is not attached is answered `ENOENT` with no cached negative
-  entry, so an attach or a detach is seen by the next lookup. Below a tree's root everything is immutable, so every entry,
+  carry entry and attribute timeouts of 0, and a name that is not there is answered `ENOENT` with no cached negative
+  entry, so an attach, a detach, or a tree written after a miss is seen by the next lookup. Below a tree's root everything is immutable, so every entry,
   attribute and absent name carries the longest timeout the protocol allows: an absent name is answered with inode number
   0 and a timeout, which the kernel keeps as a negative entry until the timeout ([S2]: `fs/fuse/dir.c`, "Zero nodeid is
   same as -ENOENT, but with valid timeout"). That is what keeps a compiler's repeated include-path misses out of
@@ -638,7 +638,7 @@ Two different things depend on a tree, and the design keeps them apart:
 
 - **Whether the tree can be read** depends on the kernel: as long as any inode of the tree is referenced (a job's overlay
   holds its lower root), every inode number of it must be answerable. I1 makes that free: `tierstore fs` never stops being
-  able to answer a tree number. The last detach of a tree only makes `trees/<digest>` absent for new lookups.
+  able to answer a tree number. The last detach of a tree only ends its pins; the next lookup of `trees/<digest>` attaches it again.
 - **What the cache keeps** decides only speed. An evicted blob that is open stays readable (6.4); one that is not open yet
   is filled again on its next open.
 
@@ -648,7 +648,7 @@ one writer and one budget:
 - `tierstore fs` sends `pin <mount id> <tree> <sha256> ...` for each blob the first time it is opened under an attached
   tree (the pin is per tree, so two runs of one tree share it), and for every blob of the tree when the attachment asked
   for `prefetch = "all"` (the warm-up), batched to at most one request per tree per second; it sends
-  `unpin <mount id> <tree>` when the tree's last attachment is detached. `<mount id>` is the boot id of the mount. Each
+  `unpin <mount id> <tree>` when the tree's last attachment ends (a run's detach, or an implicit one's idle end; an open of a tree not attached pins nothing). `<mount id>` is the boot id of the mount. Each
   request is answered, and `tierstore fs` sends it again until it is, so one lost while the cache changes hands (7.3) is
   not lost. `tierstore fs` records, per attached tree, the blobs it has pinned, in its runtime directory.
 - The unit of reference counting is the attached tree, not the file and not the process, so no process attribution is
@@ -657,7 +657,7 @@ one writer and one budget:
   (rewritten by rename, by the cache's lock holder only, at most once a second and when it gives up the lock), so pins
   survive a restart and a hand-over of the cache process: the new holder reads the file when it takes the lock.
 - **Pins never outlive their mount or their attachment.** At every start of either process, and after a hand-over of
-  either, `tierstore fs` sends `pins-live <mount id> <trees>`, the trees attached now, and the cache drops every pin of
+  either, `tierstore fs` sends `pins-live <mount id> <trees>`, the trees attached now (by runs and by lookups), and the cache drops every pin of
   another mount id or of a tree not in the list. A reboot makes a new mount id, so the old mount's pins go at the first
   `pins-live`.
 - Eviction skips a pinned entry and counts it in a new counter, `tierstore_cache_pin_skips_total`; the existing
@@ -852,8 +852,8 @@ a design of the executor's own; spike SP5 is its throwaway form, and section 12 
   is above `Off`, and such a run keeps today's copy. Buildbarn's `bb_virtual_tmp` serves a different symlink target per
   `AUTH_SYS` uid [S23]; that is the same mechanism, and Buildbarn does not offer it as an isolation boundary.
 - A host process (outside every container and sandbox) of any user can read an attached tree by its digest, as it can read
-  the executor's cache and tree store today (mode 0711 directories, files readable by others). Attaching is limited to the control
-  socket's group. A tree's contents are build inputs, not secrets; a deployment that needs them hidden from host users sets
+  the executor's cache and tree store today (mode 0711 directories, files readable by others). A host process that can reach the mount
+  can also attach any tree by looking its digest up (6.3), not only the control socket's group. A tree's contents are build inputs, not secrets; a deployment that needs them hidden from host users sets
   the mountpoint under a 0710 directory of the runtime's group (D6). A view is readable only by its run's user.
 
 ### 6.9 Disk and memory accounting
@@ -998,7 +998,7 @@ new (tierstore-fs@b)                                    old (tierstore-fs@a, run
 |---|---|---|
 | A blob's fill fails (upstream down past `fs.fetch_timeout`, default 60 s; source missing; hash mismatch; no space) | `EIO` on `open` (or `read`, NFS v3) | the path, the digest and the reason |
 | `tierstore fs` left failed by systemd (7.2), or down past the macOS bound (7.5) | an error on lookups and opens | the abort, recorded by the next start |
-| A tree manifest is invalid (unsorted, duplicate, bad name, unknown kind, too large, wrong hash) | nothing: the attach is refused, by name, before the job starts | n/a |
+| A tree manifest is invalid (unsorted, duplicate, bad name, unknown kind, too large, wrong hash) | an attach is refused by name before the job starts; a lookup that resolves the tree (6.3) is `EIO`, the reason on stderr | n/a |
 | A view's upper directory runs out of space | `ENOSPC` on the write, as on a copy | nothing: the same as today |
 | A stall that ends well (a slow fill, a restart, an NFS grace period) | a slower run | `stall_ms`: the time the run's requests waited |
 
@@ -1132,7 +1132,7 @@ So the core's views (6.6) move out of the Linux design altogether and stay on ma
   maximum; a view's entries report their real mtime, so what the run just changed is cached briefly; `trees/` and
   `views/` report the time of the last attach or detach, so an attach is seen soon. How soon, and whether the client's
   negative name cache (which `nonegnamecache` turns off for the whole mount) hides an attach after a miss, is probe MP4;
-  the runtime attaches before it first looks up a path, so a miss before an attach does not arise in normal use.
+  a lookup attaches the tree itself, so a miss arises only for a digest whose tree is not written yet, which a job is not given.
 - **The version** is NFSv4.0 or NFSv3: NFSv4.0's compound operations cut round trips, which is why
   Buildbarn chose it ("NFSv3 ... far more chatty") [S5]; NFSv3 has no state to recover (7.5) and a mature Rust crate
   (`nfsserve`, BSD-3-Clause [S12]). **Only NFSv3 was measured**: no NFSv4.0 server was available (macOS `nfsd` serves v2 and v3 only, no Rust v4 server crate could be
@@ -1179,7 +1179,7 @@ So the core's views (6.6) move out of the Linux design altogether and stay on ma
 | Two jobs attach one tree | One tree number, one set of pins; on Linux two overlays with their own upper directories; on macOS two views. With passthrough, one set of pages per blob (Inferred; not measured). |
 | A tree attached, detached and attached again | The same tree number (tree numbers are per digest for the mount's life); new lookups work again. |
 | A job's overlay still references a tree whose last attachment was detached | Its lookups keep working (6.5): a tree number is answerable for the mount's life. |
-| A host process looked up `trees/<digest>` before it was attached | Not cached (6.3): the attach is seen by the next lookup. |
+| A host process looked up `trees/<digest>` before its tree was written | `ENOENT`, not cached (6.3): the next lookup after the write resolves it. |
 | A blob is evicted while open | The open files keep the backing file; later opens reuse the live backing id (6.4). |
 | A blob of an attached tree reaches the evictor | Skipped while pinned (6.5); if the pin was refused for `pin_limit`, it may be evicted and is filled again on its next open. |
 | One blob in two places in a tree, or in many trees | One cache file and, while any is open, one backing id; separate inodes (not reported as hard links); one set of pages (Inferred; not measured). |

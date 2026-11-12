@@ -96,8 +96,8 @@ impl Core {
         self.pin_batch((number, token), &loaded, &mut batch);
     }
 
-    /// Whether any run has the tree `number`.
-    fn attached(&self, number: u64) -> bool {
+    /// Whether any run has the tree `number`, or a lookup attached it.
+    pub(super) fn attached(&self, number: u64) -> bool {
         locked(&self.state).attachments.is_attached(number)
     }
 

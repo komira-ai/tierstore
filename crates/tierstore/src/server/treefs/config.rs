@@ -19,6 +19,7 @@
 //! | `fs.handoff_wait` | how long the hand-over of the mount may last, from the connect to the end | `120s` |
 //! | `fs.reattach_concurrency` | how many trees a start reads the manifests of at once when it makes the attachments again, before it serves (1 reads them one after the other) | `16` |
 //! | `fs.recover_wait` | after a restart on a kernel without resend: how long the connection may show requests no one answers before it is aborted | `30s` |
+//! | `fs.tree_idle_secs` | how long, in seconds, a tree a lookup attached stays attached with no request naming it | `900` |
 
 use std::path::{Path, PathBuf};
 use std::time::Duration;
@@ -77,6 +78,13 @@ const MOST_REATTACH_CONCURRENCY: u32 = 1024;
 /// The most `fs.max_backing_ids` may be.
 const MOST_BACKING_IDS: u32 = 1 << 20;
 
+/// The seconds a tree attached by a lookup stays attached with no use when the file leaves out
+/// `fs.tree_idle_secs`.
+const DEFAULT_TREE_IDLE_SECS: u64 = 900;
+
+/// The most `fs.tree_idle_secs` may be: a week.
+const MOST_TREE_IDLE_SECS: u64 = 7 * 24 * 3600;
+
 /// The file: only its `[fs]` table is read.
 #[derive(Debug, Deserialize)]
 struct File {
@@ -102,6 +110,7 @@ pub(in crate::server) struct FsTable {
     handoff_wait: Option<Dur>,
     recover_wait: Option<Dur>,
     reattach_concurrency: Option<u32>,
+    tree_idle_secs: Option<u64>,
 }
 
 /// What `tierstore fs` runs with.
@@ -131,6 +140,8 @@ pub(in crate::server) struct FsSettings {
     pub recover_wait: Duration,
     /// How many trees a start reads at once when it makes the attachments again.
     pub reattach_concurrency: usize,
+    /// How long a tree a lookup attached stays attached with no request naming it.
+    pub tree_idle: Duration,
     /// Whether users other than the one who mounts may use the mount: always, but in the tests,
     /// where the mounting user is not root and `fusermount3` allows it only by `/etc/fuse.conf`.
     pub allow_other: bool,
@@ -253,6 +264,13 @@ impl FsSettings {
             1,
             MOST_REATTACH_CONCURRENCY,
         )?;
+        let tree_idle_secs = within(
+            "fs",
+            "tree_idle_secs",
+            table.tree_idle_secs.unwrap_or(DEFAULT_TREE_IDLE_SECS),
+            1,
+            MOST_TREE_IDLE_SECS,
+        )?;
         let group = require("fs", "client_group", table.client_group)?;
         let owner = require("fs", "owner", table.owner)?;
         Ok(Self {
@@ -277,6 +295,7 @@ impl FsSettings {
             handoff_wait,
             recover_wait,
             reattach_concurrency: reattach_concurrency as usize,
+            tree_idle: Duration::from_secs(tree_idle_secs),
             allow_other: true,
             nfs: NfsSettings::of(table.nfs)?,
         })

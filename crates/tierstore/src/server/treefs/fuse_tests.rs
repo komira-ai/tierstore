@@ -124,11 +124,11 @@ fn a_tree_reads_through_the_mount_as_its_manifests_say() {
 }
 
 /// Asserts the namespace through the mount: the root and `trees` can be passed through and not
-/// listed (`EACCES`), `views` and an unattached digest are not there, the answers about the
-/// namespace are not kept by the kernel (a second miss is a second request), and an attach after a
-/// miss is seen by the next lookup.
+/// listed (`EACCES`), `views` and a digest the upstream has no tree of are not there, the answers
+/// about the namespace are not kept by the kernel (a second miss is a second request), and a tree
+/// the upstream gains after a miss is found by the next lookup, which attaches it with no run.
 #[test]
-fn the_namespace_can_be_passed_through_and_not_listed_and_an_attach_is_seen_at_once() {
+fn the_namespace_can_be_passed_through_and_not_listed_and_a_tree_resolves_at_the_next_lookup() {
     with_mount("tfs-fuse-namespace", |m| {
         let mount = &m.rig.mountpoint;
         assert_eq!(errno_of(&std::fs::read_dir(mount).unwrap_err()), EACCES);
@@ -161,9 +161,8 @@ fn the_namespace_can_be_passed_through_and_not_listed_and_an_attach_is_seen_at_o
             built.blobs.extend(tree.blobs);
         }
         let there = mount.join("trees").join(&digest);
-        assert_eq!(errno_of(&std::fs::metadata(&there).unwrap_err()), ENOENT);
-        let _ = m.rig.core.attach(&digest, "run-2").unwrap();
         assert_eq!(std::fs::read(there.join("only")).unwrap(), b"later");
+        assert_eq!(m.rig.core.implicit().len(), 1);
     });
 }
 
