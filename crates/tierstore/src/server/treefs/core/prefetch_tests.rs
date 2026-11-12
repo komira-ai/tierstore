@@ -137,6 +137,41 @@ fn a_detach_stops_the_prefetch_and_nothing_is_pinned_after_it() {
     assert!(pinned(&rig).is_empty());
 }
 
+/// Asserts that a prefetch goes on when the last run detaches while a lookup has the tree attached
+/// with no run: with a fill paused mid-prefetch, the run's detach unpins nothing, and once the fill
+/// goes on every blob of the tree is filled and pinned for it, the implicit attachment still there.
+#[test]
+fn a_prefetch_goes_on_after_the_last_run_detaches_while_a_lookup_has_the_tree() {
+    let rig = Rig::new("tfs-prefetch-implicit", sample());
+    let digest = root(&rig);
+    assert!(matches!(
+        rig.core.lookup(crate::server::treefs::ino::TREES, &digest),
+        Ok(super::super::Looked::Found(_))
+    ));
+    assert_eq!(rig.core.implicit(), vec![1]);
+    rig.upstream.hold_fills();
+    let _ = rig.core.attach_asking(&digest, RUN, true).unwrap();
+    until(|| !blob_fills(&rig).is_empty());
+    assert!(rig.core.detach(RUN).is_some());
+    assert!(rig.upstream.asked("unpin").is_empty());
+    rig.upstream.release_fills();
+    until(|| rig.core.prefetching() == 0);
+    assert_eq!(blob_fills(&rig), sample_blobs());
+    let mut named = pinned(&rig);
+    named.sort();
+    let mut want = sample_blobs();
+    want.sort();
+    assert_eq!(named, want);
+    assert!(
+        rig.upstream
+            .asked("pin")
+            .iter()
+            .all(|line| line.starts_with(&format!("pin mount-1 {digest} ")))
+    );
+    assert_eq!(rig.core.implicit(), vec![1]);
+    assert!(rig.upstream.asked("unpin").is_empty());
+}
+
 /// Asserts that the blob in flight when the tree is detached is not pinned when it lands.
 #[test]
 fn the_last_blob_to_land_after_a_detach_is_not_pinned() {
