@@ -107,19 +107,43 @@ pub fn entry(version: &str, digest: &str, min_hostkeeper: &str) -> Value {
     })
 }
 
-/// The `release desired-apt` verb: the lines to print.
+/// Refuses a `--min-hostkeeper` that is not `<major>.<minor>.<patch>` or an `--apt-url` that is
+/// not an https URL without a trailing `/` (usage errors), before anything is read.
+///
+/// # Errors
+/// As above.
+pub fn usage(min_hostkeeper: &str, apt_url: &str) -> Result<(), Error> {
+    if !is_plain_version(min_hostkeeper) {
+        return Err(Error::Usage(format!(
+            "--min-hostkeeper {min_hostkeeper:?} is not <major>.<minor>.<patch>"
+        )));
+    }
+    if !apt_url.starts_with("https://") || apt_url.ends_with('/') {
+        return Err(Error::Usage(format!(
+            "--apt-url {apt_url:?} is not an https URL without a trailing /"
+        )));
+    }
+    Ok(())
+}
+
+/// What the coordinator is given for a release in the testing suite.
+#[derive(Debug)]
+pub struct Found {
+    /// `package-version=<X.Y.Z>` and `targets=<JSON>`, the lines of `--output`.
+    pub lines: [String; 2],
+    /// The line that says what was checked.
+    pub summary: String,
+}
+
+/// The package version and `targets` of `r`'s release, held to the testing suite and the
+/// release's `SHA256SUMS`.
 ///
 /// # Errors
 /// A `--version` or `--min-hostkeeper` that is not `<major>.<minor>.<patch>` or an `--apt-url`
 /// that is not an https URL (usage errors); no published release of that version or one without
 /// `SHA256SUMS`; a download that fails; or one line per package the sums do not list or the
 /// testing suite does not list with the digest of the sums.
-pub fn desired_apt(
-    gh: &dyn Gh,
-    host: &dyn Host,
-    r: &Request,
-    output: Option<&Path>,
-) -> Result<Vec<String>, Error> {
+pub fn apt_targets(gh: &dyn Gh, host: &dyn Host, r: &Request) -> Result<Found, Error> {
     let Request {
         curl,
         repo,
@@ -128,18 +152,12 @@ pub fn desired_apt(
         dir,
         apt_url,
     } = *r;
-    for (flag, value) in [("--version", version), ("--min-hostkeeper", min_hostkeeper)] {
-        if !is_plain_version(value) {
-            return Err(Error::Usage(format!(
-                "{flag} {value:?} is not <major>.<minor>.<patch>"
-            )));
-        }
-    }
-    if !apt_url.starts_with("https://") || apt_url.ends_with('/') {
+    if !is_plain_version(version) {
         return Err(Error::Usage(format!(
-            "--apt-url {apt_url:?} is not an https URL without a trailing /"
+            "--version {version:?} is not <major>.<minor>.<patch>"
         )));
     }
+    usage(min_hostkeeper, apt_url)?;
     let tag = format!("v{version}");
     let (commit, assets) = super::desired::release(gh, repo, &tag)?;
     if !assets.iter().any(|(n, _)| n == SUMS) {
@@ -232,17 +250,33 @@ pub fn desired_apt(
         return Err(Error::Refused(problems));
     }
     let count = targets.len();
-    let out = [
-        format!("package-version={version}"),
-        format!("targets={}", Value::Object(targets)),
-    ];
+    Ok(Found {
+        lines: [
+            format!("package-version={version}"),
+            format!("targets={}", Value::Object(targets)),
+        ],
+        summary: format!(
+            "release {tag} ({commit}): the testing suite lists tierstore {version} for each of {count} architectures, each with the digest {SUMS} lists"
+        ),
+    })
+}
+
+/// The `release desired-apt` verb: the lines to print.
+///
+/// # Errors
+/// Those of [`apt_targets`], and `--output` cannot be appended to.
+pub fn desired_apt(
+    gh: &dyn Gh,
+    host: &dyn Host,
+    r: &Request,
+    output: Option<&Path>,
+) -> Result<Vec<String>, Error> {
+    let found = apt_targets(gh, host, r)?;
     if let Some(output) = output {
-        append_output(output, &out)?;
+        append_output(output, &found.lines)?;
     }
-    let mut printed = vec![format!(
-        "release {tag} ({commit}): the testing suite lists tierstore {version} for each of {count} architectures, each with the digest {SUMS} lists"
-    )];
-    printed.extend(out);
+    let mut printed = vec![found.summary];
+    printed.extend(found.lines);
     Ok(printed)
 }
 

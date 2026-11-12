@@ -45,16 +45,16 @@
 //! `release deb` ([`deb`]) builds `tierstore_<version>_<arch>.deb` of a Linux binary, and `release rpm`
 //! ([`rpm`]) builds `tierstore-<version>-1.<arch>.rpm` of it.
 //!
-//! After a release, or by hand: `release desired` ([`desired`]) reads the release index and the
-//! hostkeeper packages of a published release and gives the version, the index and the targets
-//! ([`desired_targets`]) `.github/workflows/hostkeeper-desired.yml` sets on the hostkeeper
-//! coordinator, or refuses a release whose index lacks a platform.
+//! After a release, or by hand: `release desired` ([`desired`]) chooses a published release and
+//! gives the version and the targets `.github/workflows/hostkeeper-desired.yml` sets on the
+//! hostkeeper coordinator: the apt entries `release desired-apt` ([`desired_apt`]) gives the lab
+//! stage of `release.yml`, or a refusal when the testing suite does not list the release's `.deb`s
+//! with the digests of its `SHA256SUMS`.
 
 mod binary;
 pub mod deb;
 pub mod desired;
 pub mod desired_apt;
-pub mod desired_targets;
 pub mod glibc;
 pub mod hostkeeper_index;
 pub mod hostkeeper_package;

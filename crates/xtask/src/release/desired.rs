@@ -1,8 +1,8 @@
-//! `release desired --repo <owner/repo> (--version <X.Y.Z> | --after-run <id>) --dir <dir>
-//! [--output <file>] [--gh <program>]`: what `.github/workflows/hostkeeper-desired.yml` sets as
-//! the desired version of tierstore on the hostkeeper coordinator, or why it sets nothing. It runs
-//! before any step of that workflow can hold a token, so a refusal here means the coordinator is
-//! never called.
+//! `release desired --repo <owner/repo> (--version <X.Y.Z> | --after-run <id>) --min-hostkeeper
+//! <x.y.z> --dir <dir> [--apt-url <url>] [--output <file>] [--gh <program>] [--curl <program>]`:
+//! what `.github/workflows/hostkeeper-desired.yml` sets as the desired version of tierstore on the
+//! hostkeeper coordinator, or why it sets nothing. It runs before any step of that workflow can
+//! hold a token, so a refusal here means the coordinator is never called.
 //!
 //! Which release:
 //!
@@ -16,52 +16,32 @@
 //!   and the verb succeeds.
 //!
 //! Exactly one of the two is given; an empty one counts as not given, so the workflow passes both
-//! from its two events and one is always empty.
+//! from its two events and one is always empty. `--min-hostkeeper` and `--apt-url` are checked
+//! first, whichever way it is.
 //!
-//! The release must be a published GitHub release (not a draft, not a pre-release) whose commit is
-//! a full SHA, with the assets `index.json` and `SHA256SUMS`. These, the package of each platform
-//! and its `.sigstore.json` bundle are downloaded into `<dir>` (`gh release download`), and then:
+//! What is set for the release is what the lab stage of `release.yml` sets for it
+//! ([`super::desired_apt`], with the same `--min-hostkeeper`): the hosts install tierstore from the
+//! testing suite through hostkeeper's apt installer, so each Linux platform's list is one `apt`
+//! entry of the host's repository entry `komira-testing`, the package version `X.Y.Z` and the
+//! `.deb`'s SHA-256, held to the suite as a client reads it and to the release's `SHA256SUMS`. A
+//! list of `hostkeeper-archive` entries alone orders no host: the coordinator holds every host that
+//! runs tierstore from apt `installer_dropped`. There is no `macos-arm64` list: tierstore ships no
+//! package a Mac's daemon installs (no `.pkg`; the archive installer is withdrawn), so a Mac is
+//! ordered nothing (`no_target`) and keeps what it runs. No release index is sent: it would list
+//! archive entries the targets do not have.
 //!
-//! - `index.json` has the SHA-256 that `SHA256SUMS` lists for it, and is at most
-//!   [`MAX_INDEX_BYTES`] (hostkeeper's CI client passes no longer one);
-//! - hostkeeper's strict reader (`hostkeeper_config::index`) reads it as the index of tierstore
-//!   `<X.Y.Z>+<the first 12 digits of the release's commit>`, the version the packages carry, and it
-//!   is in that reader's canonical form;
-//! - it lists a package for each of linux-x86_64, linux-arm64 and macos-arm64. A host whose
-//!   platform a release lacks is ordered nothing, so an index without the macOS package would
-//!   leave every Mac behind while the Linux hosts converge;
-//! - each package it lists is an asset of the release, `tierstore-<version>-<platform>.tar.zst`,
-//!   of the size the index gives; the downloaded file has that size and the SHA-256 the index
-//!   gives; its bundle is a provenance bundle whose one subject is that SHA-256
-//!   ([`crate::bundles::check`]); and hostkeeper's own unpacker unpacks it into `<dir>/unpacked`
-//!   as a host does, which gives the `min_hostkeeper` of its manifest.
-//!
-//! Every problem found is reported, one line each. When there is none, `--output` (on Actions,
-//! `GITHUB_OUTPUT`) gets `set=true`, `package-version=<X.Y.Z+12 hex>` (the version the
-//! coordinator is given), `release-index=<the text of index.json>`, `release-index-digest=<its
-//! SHA-256>` and `targets=<JSON>`, the targets of the release ([`super::desired_targets`]).
+//! When the run published nothing, `--output` (on Actions, `GITHUB_OUTPUT`) gets `set=false`.
+//! Otherwise every problem found is reported, one line each, and when there is none `--output`
+//! gets `set=true`, `package-version=<X.Y.Z>` and `targets=<JSON>`.
 
 use std::path::Path;
 
-use hostkeeper_config::index::ReleaseIndex;
-
-use super::desired_targets::{Archive, Release, targets};
-use super::hostkeeper_index::{
-    INDEX, host_platform, index_failed, our_platform, service, sha256_file, version as host_version,
-};
-use super::hostkeeper_package::{file_name, is_plain_version};
-use super::hostkeeper_verify::unpack;
+use super::desired_apt::{self, apt_targets};
+use super::hostkeeper_package::is_plain_version;
 use super::{Gh, append_output, array};
 use crate::Error;
 use crate::build_commit::is_commit;
-use crate::bundles;
-use crate::fetch::Sha256;
-use crate::package::Platform;
-use crate::sums::{SUMS, read_sums};
-
-/// The most bytes of `index.json`: the `release_index` input of hostkeeper's CI client is at
-/// most 3 KiB.
-pub const MAX_INDEX_BYTES: usize = 3 * 1024;
+use crate::channels::check::Host;
 
 /// The job of `release.yml` that publishes a release.
 pub const PUBLISH_JOB: &str = "publish";
@@ -78,8 +58,15 @@ pub struct Request<'a> {
     pub version: &'a str,
     /// `--after-run`; empty when not given.
     pub after_run: &'a str,
-    /// Where the release's files are downloaded and the packages unpacked.
+    /// The `minHostkeeper` of every entry: the first hostkeeper release whose daemon runs the
+    /// hook command of an `apt` entry.
+    pub min_hostkeeper: &'a str,
+    /// Where the release's `SHA256SUMS` and the `Packages` files read are put.
     pub dir: &'a Path,
+    /// The apt repository whose suite `testing` the hosts install from.
+    pub apt_url: &'a str,
+    /// The program that reads the suite.
+    pub curl: &'a Path,
     pub output: Option<&'a Path>,
 }
 
@@ -147,102 +134,6 @@ fn newest(gh: &dyn Gh, repo: &str) -> Result<String, Error> {
         .ok_or_else(|| Error::Failed(format!("{repo} has no published release vX.Y.Z")))
 }
 
-/// One line per way the index `text` of the package version `version` does not let every host
-/// take the version from the release with the assets `assets`.
-fn index_problems(text: &str, index: &ReleaseIndex, version: &str, assets: &Assets) -> Vec<String> {
-    let mut problems = Vec::new();
-    if text != index.to_json() {
-        problems.push(format!(
-            "{INDEX} is not the canonical JSON of its index (keys sorted, no white space)"
-        ));
-    }
-    if text.len() > MAX_INDEX_BYTES {
-        problems.push(format!(
-            "{INDEX} is {} bytes, over the {MAX_INDEX_BYTES} hostkeeper's CI client passes",
-            text.len()
-        ));
-    }
-    for platform in Platform::ALL {
-        let entry = match index.entry_for(host_platform(platform)) {
-            Ok(entry) => entry,
-            Err(e) => {
-                problems.push(format!(
-                    "{INDEX}: {e} ({}): a host of {} would be ordered nothing, so it is not set",
-                    e.reason(),
-                    platform.name()
-                ));
-                continue;
-            }
-        };
-        let name = file_name(version, platform);
-        match assets.iter().find(|(n, _)| *n == name) {
-            None => problems.push(format!(
-                "{INDEX} lists {name}, which is not an asset of the release"
-            )),
-            Some((_, size)) if *size != Some(entry.bytes) => problems.push(format!(
-                "{name}: the release's asset has {size:?} bytes, not the {} {INDEX} lists",
-                entry.bytes
-            )),
-            Some(_) => {}
-        }
-        let bundle = bundles::name_of(&name);
-        if !assets.iter().any(|(n, _)| *n == bundle) {
-            problems.push(format!(
-                "{name} has no bundle {bundle} in the release: every archive entry carries its attestation"
-            ));
-        }
-    }
-    problems
-}
-
-/// The archive of `platform` in `dir`, measured against the index entry `listed`, its bundle
-/// checked and its manifest read by unpacking it into `<dir>/unpacked`; or every problem found.
-fn archive(
-    dir: &Path,
-    version: &str,
-    platform: Platform,
-    listed: &hostkeeper_config::index::PackageEntry,
-) -> Result<Result<Archive, Vec<String>>, Error> {
-    let name = file_name(version, platform);
-    let (sha, bytes) = sha256_file(&dir.join(&name))?;
-    let mut problems = Vec::new();
-    // The SHA-256 decides: other bytes of the listed size are other bytes too.
-    if sha.to_string() != listed.sha256.as_str() {
-        problems.push(format!(
-            "{name}: sha256 {sha} and {bytes} bytes, not the sha256 {} and {} bytes {INDEX} lists (package_digest_mismatch)",
-            listed.sha256.as_str(),
-            listed.bytes
-        ));
-    }
-    let bundle_name = bundles::name_of(&name);
-    let path = dir.join(&bundle_name);
-    let bundle = std::fs::read(&path).map_err(Error::spawn(format!("read {}", path.display())))?;
-    problems.extend(
-        bundles::check(&bundle, &sha)
-            .into_iter()
-            .map(|p| format!("{bundle_name}: {p}")),
-    );
-    if !problems.is_empty() {
-        return Ok(Err(problems));
-    }
-    let scratch = dir.join("unpacked").join(platform.name());
-    let unpacked = unpack(
-        &dir.join(&name),
-        version,
-        platform,
-        listed.sha256.clone(),
-        &scratch,
-    )?;
-    Ok(Ok(Archive {
-        platform,
-        digest: sha.to_string(),
-        bytes,
-        bundle_digest: Sha256::of(&bundle).to_string(),
-        bundle_bytes: bundle.len() as u64,
-        min_hostkeeper: unpacked.manifest.min_hostkeeper.to_string(),
-    }))
-}
-
 /// The plain version the request names: `--version`, or the newest release when the run of
 /// `--after-run` published one; `None` when it published none.
 fn chosen(gh: &dyn Gh, request: &Request<'_>) -> Result<Option<String>, Error> {
@@ -273,34 +164,17 @@ fn chosen(gh: &dyn Gh, request: &Request<'_>) -> Result<Option<String>, Error> {
     }
 }
 
-/// Downloads `names` of the release `tag` of `repo` into `dir`.
-fn download(gh: &dyn Gh, repo: &str, tag: &str, dir: &Path, names: &[String]) -> Result<(), Error> {
-    std::fs::create_dir_all(dir).map_err(Error::spawn(format!("create {}", dir.display())))?;
-    let mut args: Vec<String> = ["release", "download", tag, "--repo", repo, "--dir"]
-        .iter()
-        .map(|a| (*a).to_owned())
-        .collect();
-    args.push(dir.display().to_string());
-    for name in names {
-        args.push("--pattern".to_owned());
-        args.push(name.clone());
-    }
-    gh.run(&args).map(drop)
-}
-
 /// The `release desired` verb: the lines to print.
 ///
 /// # Errors
-/// Neither or both of `--version` and `--after-run`, a `--version` that is not
+/// A `--min-hostkeeper` that is not `<major>.<minor>.<patch>` or an `--apt-url` that is not an
+/// https URL; neither or both of `--version` and `--after-run`, a `--version` that is not
 /// `<major>.<minor>.<patch>` or an `--after-run` that is not digits (usage errors); a run of
 /// `--after-run` that GitHub does not know or lists in more than one page, or a repository with no
-/// published release; no published release of the version, or one whose commit is not a full SHA;
-/// a release without `index.json` or `SHA256SUMS`; the download fails; `index.json` is not what
-/// `SHA256SUMS` lists, is refused by hostkeeper's reader, is not canonical, is too long, lacks a
-/// platform, or lists a package the release does not hold at that size or without its bundle; a
-/// package is not the one the index lists, its bundle is not its provenance bundle, or
-/// hostkeeper's unpacker refuses it; `--output` cannot be appended to.
-pub fn desired(gh: &dyn Gh, request: &Request<'_>) -> Result<Vec<String>, Error> {
+/// published release; then those of [`apt_targets`] for the release chosen; `--output` cannot be
+/// appended to.
+pub fn desired(gh: &dyn Gh, host: &dyn Host, request: &Request<'_>) -> Result<Vec<String>, Error> {
+    desired_apt::usage(request.min_hostkeeper, request.apt_url)?;
     let Some(version) = chosen(gh, request)? else {
         let lines = vec!["set=false".to_owned()];
         if let Some(output) = request.output {
@@ -314,80 +188,24 @@ pub fn desired(gh: &dyn Gh, request: &Request<'_>) -> Result<Vec<String>, Error>
             lines[0].clone(),
         ]);
     };
-    let (repo, dir) = (request.repo, request.dir);
-    let tag = format!("v{version}");
-    let (commit, assets) = release(gh, repo, &tag)?;
-    let missing: Vec<String> = [INDEX, SUMS]
-        .iter()
-        .filter(|name| !assets.iter().any(|(n, _)| n == *name))
-        .map(|name| {
-            format!("release {tag} has no {name}: it has no hostkeeper packages for a host to take")
-        })
-        .collect();
-    if !missing.is_empty() {
-        return Err(Error::Refused(missing));
-    }
-    let package_version = format!("{version}+{}", &commit[..12]);
-    download(gh, repo, &tag, dir, &[INDEX.to_owned(), SUMS.to_owned()])?;
-    let path = dir.join(INDEX);
-    let bytes = std::fs::read(&path).map_err(Error::spawn(format!("read {}", path.display())))?;
-    let digest = Sha256::of(&bytes);
-    let listed = read_sums(&dir.join(SUMS))?
-        .into_iter()
-        .find(|l| l.name == INDEX)
-        .map(|l| l.sha256);
-    if listed.as_ref() != Some(&digest) {
-        let said = listed.map_or_else(|| "no line".to_owned(), |s| format!("sha256 {s}"));
-        return Err(Error::Failed(format!(
-            "{INDEX} has sha256 {digest}; {SUMS} of release {tag} lists {said} for it"
-        )));
-    }
-    let text = String::from_utf8(bytes)
-        .map_err(|_| Error::Failed(format!("{INDEX} of release {tag} is not UTF-8")))?;
-    let index = ReleaseIndex::parse(&text, &service()?, &host_version(&package_version)?)
-        .map_err(index_failed)?;
-    let problems = index_problems(&text, &index, &package_version, &assets);
-    if !problems.is_empty() {
-        return Err(Error::Refused(problems));
-    }
-    let packages: Vec<String> = Platform::ALL
-        .iter()
-        .map(|p| file_name(&package_version, *p))
-        .flat_map(|name| [bundles::name_of(&name), name])
-        .collect();
-    download(gh, repo, &tag, dir, &packages)?;
-    let mut archives = Vec::new();
-    let mut problems = Vec::new();
-    // Every platform: index_problems refused an index that lacks one.
-    for listed in index.packages() {
-        let platform = our_platform(listed.platform);
-        match archive(dir, &package_version, platform, listed)? {
-            Ok(found) => archives.push(found),
-            Err(found) => problems.extend(found),
-        }
-    }
-    if !problems.is_empty() {
-        return Err(Error::Refused(problems));
-    }
-    let release = Release {
-        repo,
-        tag: &tag,
-        version: &package_version,
-    };
-    let lines = [
-        "set=true".to_owned(),
-        format!("package-version={package_version}"),
-        format!("release-index={text}"),
-        format!("release-index-digest={digest}"),
-        format!("targets={}", targets(release, &archives)?),
-    ];
+    let found = apt_targets(
+        gh,
+        host,
+        &desired_apt::Request {
+            curl: request.curl,
+            repo: request.repo,
+            version: &version,
+            min_hostkeeper: request.min_hostkeeper,
+            dir: request.dir,
+            apt_url: request.apt_url,
+        },
+    )?;
+    let [package_version, targets] = found.lines;
+    let lines = ["set=true".to_owned(), package_version, targets];
     if let Some(output) = request.output {
         append_output(output, &lines)?;
     }
-    let mut printed = vec![format!(
-        "release {tag} ({commit}): {INDEX} lists tierstore {package_version} for each of {} platforms; each package is the one it lists, attested, and unpacks as a host unpacks it",
-        Platform::ALL.len()
-    )];
+    let mut printed = vec![found.summary];
     printed.extend(lines);
     Ok(printed)
 }
