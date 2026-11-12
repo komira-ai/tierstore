@@ -7,10 +7,13 @@ silicon), as a tarball with its SBOM and its provenance bundle, and as a hostkee
 of those platforms with its provenance bundle and one release index, `index.json`
 (`docs/ci-and-release.md`; `cargo xtask release hostkeeper-package` builds the package from
 `hostkeeper/`, see its README), and as a Debian package for the two Linux platforms
-(`tierstore_<version>_<arch>.deb`, built by `cargo xtask release deb` from the unit, the sysusers
-entry and the example configuration below: it places them as "Placing the unit" does, except the
-unit at `/usr/lib/systemd/system`); no container image is released. These files, for Linux hosts, go
-beside the binary.
+(`tierstore_<version>_<arch>.deb`, built by `cargo xtask release deb`; an RPM package holds the
+same files). The package installs the binary, the instance template `tierstore@.service` at
+`/usr/lib/systemd/system`, the sysusers entry, and the example configuration as
+`/usr/share/doc/tierstore/examples/config.toml`, which nothing reads. It writes nothing in
+`/etc`, enables and starts no instance, and leaves the configuration to the host
+([The Debian and RPM template](#the-debian-and-rpm-template)). No container image is released.
+These files, for Linux hosts, go beside the binary.
 
 The Linux binaries (and so the Debian and RPM packages, which hold the same bytes) are linked by
 `cargo zigbuild` against glibc 2.28, so they run on Debian 10, Ubuntu 18.10, RHEL 8, AlmaLinux 8,
@@ -22,9 +25,10 @@ fails a build whose binary asks for a newer `GLIBC_` symbol version (`docs/ci-an
 
 | file | what |
 |---|---|
-| `tierstore.service` | the unit: the binary as `tierstore` run with the file, an account that is not root, a stop that waits for the drain, and the hardening of the other example units |
+| `tierstore.service` | the unit to place by hand: the binary as `tierstore` run with `/etc/tierstore/config.toml`, an account that is not root, a stop that waits for the drain, and the hardening of the other example units |
+| `tierstore@.service` | the instance template the deb and rpm packages install at `/usr/lib/systemd/system`: `tierstore@a` and `tierstore@b`, each running `/usr/libexec/tierstore/tierstore --config /etc/tierstore/config.toml` and starting only under its marker file ([The Debian and RPM template](#the-debian-and-rpm-template)) |
 | `tierstore.conf` | the sysusers.d entry of the `tierstore` account (no login, no home) |
-| `tierstore.toml` | the configuration file of `tierstore.service`: one `s3` interface, the keys, and an S3 bucket for each tier |
+| `config.toml` | the example of `/etc/tierstore/config.toml`, the configuration file of every Linux route (`tierstore.service`, `tierstore@.service`, hostkeeper's template): one `s3` interface, the keys, and an S3 bucket for each tier |
 | `hostkeeper/units/tierstore@.service` | the instance template of the update hook on Linux: `tierstore@a.service` and `tierstore@b.service`, each running `bin/tierstore` of hostkeeper's release link `current` and starting only under its marker file ([Moving to the update hook](#moving-to-the-update-hook)) |
 | `hostkeeper/units/tierstore.plist` | the LaunchDaemon of the update hook on a Mac: one job, labelled `tierstore`, running `bin/tierstore` of the same link |
 
@@ -70,7 +74,7 @@ package instead is updated by hostkeeper through `tierstore update-hook`
 install -m 0644 tierstore.conf /etc/sysusers.d/tierstore.conf
 systemd-sysusers /etc/sysusers.d/tierstore.conf
 install -d -m 0750 -o root -g tierstore /etc/tierstore
-install -m 0640 -o root -g tierstore tierstore.toml /etc/tierstore/tierstore.toml
+install -m 0640 -o root -g tierstore config.toml /etc/tierstore/config.toml
 install -m 0644 tierstore.service /etc/systemd/system/tierstore.service
 systemctl daemon-reload
 ```
@@ -142,7 +146,7 @@ On a Mac the package has one job, `tierstore.plist` (label `tierstore`, installe
 `/Library/LaunchDaemons/tierstore.plist`), and an update is a restart with a gap: `launchctl
 bootout`, then `launchctl bootstrap`.
 
-The edits of the host's `tierstore.toml` (the bucket, the tiers, the endpoints, `hot_store.budget`)
+The edits of the host's configuration file (the bucket, the tiers, the endpoints, `hot_store.budget`)
 go into `/etc/tierstore/config.toml` on Linux and `/usr/local/tierstore/etc/tierstore.toml` on a
 Mac, the files the two units name. `packaging/macos/tierstore.toml` is the example of that
 file for a Mac (a build node on loopback); the declaration and plist that directory held for the earlier update path are removed.
@@ -346,8 +350,8 @@ settings. The process takes no flag for any of it: the flags of earlier builds t
 refused at the start, with exit status 2 and the key that replaces each. The unit above gives the
 file, and nothing else. `crates/tierstore/docs/configuration.md`
 lists every key with its default and what the loader refuses; this section has what only the
-packaging needs. The example for the unit is `tierstore.toml`, placed as
-`/etc/tierstore/tierstore.toml`; it lists one `s3` interface, the full and one read-only key, and
+packaging needs. The example for the unit is `config.toml`, placed as
+`/etc/tierstore/config.toml`; it lists one `s3` interface, the full and one read-only key, and
 an S3 bucket for each tier. `crates/tierstore/tests/packaging.rs` loads it with the binary's own
 loader.
 
@@ -672,7 +676,7 @@ instead of running with settings it did not read.
 
 ## Filling in the file
 
-`tierstore.toml` is the file to edit, and the unit does not change:
+`/etc/tierstore/config.toml` is the file to edit, and the unit does not change:
 
 | key | what |
 |---|---|
@@ -1006,9 +1010,10 @@ which serves nothing else. Without an `oci` interface the path says the front is
 
 ## Starting it
 
-The unit does not start at install and does not start at boot: it has no `[Install]` section,
-so `systemctl enable` has nothing to link, and it is skipped while `/etc/tierstore/access.key`
-does not exist. Start it by hand when the files are in place:
+The unit placed by hand (`tierstore.service`) does not start at install and does not start at
+boot: it has no `[Install]` section, so `systemctl enable` has nothing to link, and it is skipped
+while `/etc/tierstore/access.key` does not exist. (The template of the deb and rpm packages starts
+under a marker file instead: see below.) Start it by hand when the files are in place:
 
 ```sh
 systemctl start tierstore
@@ -1017,6 +1022,43 @@ systemctl start tierstore
 To start it at boot, add the section in a drop-in (`systemctl edit tierstore` takes
 `[Install]` and `WantedBy=multi-user.target`) and run `systemctl enable tierstore`; that is
 the operator's choice, and the shipped file does not make it.
+
+### The Debian and RPM template
+
+The deb and rpm packages install `tierstore@.service`, the a/b template of the update hook, in
+place of a single unit. It is the template of `hostkeeper/units` except that it runs
+`/usr/libexec/tierstore/tierstore --config /etc/tierstore/config.toml`. An instance starts only
+when its marker, `/var/lib/tierstore/run-a` or `run-b`, exists (`ConditionPathExists=`); the
+template has `StateDirectory=tierstore` (mode 0700, holding the markers and the hand-over socket),
+`ProtectSystem=strict` and `[Install] WantedBy=multi-user.target`. The packages write no file in
+`/etc` (no conffile, no `%config` file) and no marker, and nothing starts or enables an instance,
+so a fresh install with no configuration starts no server. The post-install step creates the
+account and, only when nothing is at `/etc/tierstore`, that directory (mode 0750, group
+`tierstore`); an existing `/etc/tierstore` and its files are left as they are. Removing the package
+runs `daemon-reload` only, and keeps the account and `/etc/tierstore`.
+
+On a host that does not run the update hook, write `/etc/tierstore/config.toml` and the key files
+as in "Placing the unit", then start an instance by hand:
+
+```sh
+install -d -m 0700 -o tierstore -g tierstore /var/lib/tierstore   # optional; systemd makes it
+touch /var/lib/tierstore/run-a
+systemctl enable --now tierstore@a
+```
+
+After `apt upgrade`, `systemctl restart tierstore@a` takes the new binary, with a gap in serving;
+under hostkeeper the update hook hands over instead.
+
+A configuration that writes outside the state directory (a `dir` hot tier, the path of
+`[local_cache]`, `hot_store.lock_file`) needs those paths in a drop-in of the host's own,
+`/etc/systemd/system/tierstore@.service.d/*.conf`, with `ReadWritePaths=` (and
+`RequiresMountsFor=` for a path on its own mount). The package never writes there.
+
+An earlier package shipped `tierstore.service` and the conffile `/etc/tierstore/tierstore.toml`.
+Upgrading from it removes `tierstore.service` (a running process runs on until stopped) and keeps
+the old file on disk (dpkg as an obsolete conffile, rpm as `.rpmsave` when it was edited). Move or
+copy that file to `/etc/tierstore/config.toml`, stop `tierstore.service`, and start `tierstore@a`
+as above.
 
 ## Stopping it
 

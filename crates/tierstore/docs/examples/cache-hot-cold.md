@@ -58,7 +58,7 @@ With `[hot_store]`, `[cold_store]` and `[local_cache]` in one file the node owns
 ## Commands
 
 ```sh
-tierstore --config /etc/tierstore/tierstore.toml
+tierstore --config /etc/tierstore/config.toml
 ```
 
 The first start of a new hot tier writes its format object itself, so writes work at once.

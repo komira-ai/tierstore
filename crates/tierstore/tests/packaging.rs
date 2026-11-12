@@ -78,7 +78,7 @@ fn parse(unit: &str) -> Cli {
 }
 
 /// Asserts that the command line of the unit runs the binary of the release as `tierstore`, that
-/// it parses with the flags the binary has, and that the file it names (`tierstore.toml`) is one
+/// it parses with the flags the binary has, and that the file it names (`config.toml`) is one
 /// the binary's loader takes and describes two different S3 tiers, each with an endpoint, and
 /// four key files of absolute paths that are not the same file: the full key, one read-only key
 /// (the daemons') and the key of each tier.
@@ -121,7 +121,7 @@ fn the_command_line_is_the_binarys_flags_for_two_s3_tiers() {
 #[test]
 fn no_secret_is_on_the_command_line_or_in_the_environment() {
     let unit = read("tierstore.service");
-    assert_no_secret_in_the_flags_or_the_file(&exec_start(&unit), &read("tierstore.toml"));
+    assert_no_secret_in_the_flags_or_the_file(&exec_start(&unit), &read("config.toml"));
     let lines = unit.lines();
     let environment = lines.filter(|line| line.starts_with("Environment"));
     assert_eq!(environment.count(), 0);

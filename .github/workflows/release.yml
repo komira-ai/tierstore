@@ -67,16 +67,17 @@
 #               the same repository, once the repository variable RPM_REPO_READY is `true`).
 # 2. checks     check-apt (a clean Ubuntu container pinned by digest, amd64 and arm64: adds the
 #               repository with its published keyring and the suite testing, installs
-#               tierstore=<version>, the binary says the release, the unit, sysusers.d entry and
-#               conffile are there, the service is neither enabled nor running), check-brew (the
-#               rendered formula from a local tap, on macos-15) and check-install-sh (install.sh
-#               from tierstore.dev with --version, on Linux and on macOS) and check-rpm (clean
-#               containers of Fedora, AlmaLinux 9 and Amazon Linux 2023 pinned by digest, x86_64
-#               and aarch64: adds the repository file of the suite testing, installs
-#               tierstore-<version> with dnf, `rpm -K` accepts the package, the binary says the
-#               release, the unit and the conffile are there, the service is not enabled). A
-#               failure stops the
-#               release before anything public changes.
+#               tierstore=<version>, the binary says the release, the unit template, sysusers.d
+#               entry and example configuration are there, /etc/tierstore is 0750 with no
+#               config.toml and no start marker was written, no instance is enabled or running),
+#               check-brew (the rendered formula from a local tap, on macos-15) and
+#               check-install-sh (install.sh from tierstore.dev with --version, on Linux and on
+#               macOS) and check-rpm (clean containers of Fedora, AlmaLinux 9 and Amazon Linux 2023
+#               pinned by digest, x86_64 and aarch64: adds the repository file of the suite
+#               testing, installs tierstore-<version> with dnf, `rpm -K` accepts the package, the
+#               binary says the release, the unit template and the example are there, no file is
+#               %config, /etc/tierstore is 750 with no config.toml and no start marker, no
+#               instance is enabled). A failure stops the release before anything public changes.
 # 3. the lab    farm-check, farm, soak: hostkeeper installs the Debian package of the suite testing
 #               on the lab and the coordinator moves it. Unless the repository variable
 #               TIERSTORE_LAB_INSTALL is `true`, or without the lab's settings, the stage is
@@ -1806,8 +1807,9 @@ jobs:
   #               is given. No release index and no package digest: tierstore ships no archive.
   #   farm        hostkeeper's reusable workflow set-desired.yml, pinned to a revision of its own
   #               (a job that calls a workflow has no steps, which is why the gate is the
-  #               job before it): it proves the pinned hostkeeper (0.1.216 is the first release
-  #               whose daemon announces apt, and it is the floor in every entry), joins the
+  #               job before it): it proves the pinned hostkeeper (0.1.225 is the first release
+  #               whose daemon runs the hook command of an apt entry, the package's
+  #               `tierstore update-hook`, and it is the floor in every entry), joins the
   #               tailnet when the tailnet's variables are set, sets the desired version and
   #               targets of the service tierstore with this job's OIDC token and reads the convergence every 10 seconds until the
   #               coordinator reports the service converged. It fails otherwise, and so nothing
@@ -1870,7 +1872,7 @@ jobs:
         if: ${{ steps.gate.outputs.enabled == 'true' }}
         env:
           GH_TOKEN: ${{ github.token }}
-        run: cargo xtask release desired-apt --repo "$GITHUB_REPOSITORY" --version "${TAG#v}" --min-hostkeeper 0.1.216 --dir "$RUNNER_TEMP/desired" --output "$GITHUB_OUTPUT"
+        run: cargo xtask release desired-apt --repo "$GITHUB_REPOSITORY" --version "${TAG#v}" --min-hostkeeper 0.1.225 --dir "$RUNNER_TEMP/desired" --output "$GITHUB_OUTPUT"
 
   farm:
     needs: [plan, farm-check]
@@ -1878,13 +1880,13 @@ jobs:
     permissions:
       contents: read
       id-token: write
-    uses: komira-ai/hostkeeper/.github/workflows/set-desired.yml@7307de84415a86623c0713316f4be36215461694 # v0.1.216
+    uses: komira-ai/hostkeeper/.github/workflows/set-desired.yml@2c684190fbe5b6cfb11f42573e044edb334f27aa # v0.1.225
     with:
       service: tierstore
       version: ${{ needs.farm-check.outputs.package-version }}
       targets: ${{ needs.farm-check.outputs.targets }}
-      hostkeeper_version: 0.1.216
-      hostkeeper_commit: 7307de84415a86623c0713316f4be36215461694
+      hostkeeper_version: 0.1.225
+      hostkeeper_commit: 2c684190fbe5b6cfb11f42573e044edb334f27aa
       coordinator_url: ${{ vars.HOSTKEEPER_COORDINATOR_URL }}
       coordinator_ca: ${{ vars.HOSTKEEPER_COORDINATOR_CA }}
       audience: tierstore-hostkeeper-release

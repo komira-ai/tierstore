@@ -8,8 +8,10 @@
 //!   adds `packages.komira.ai` with the published keyring (a binary `.gpg`, referred to by a
 //!   deb822 `Signed-By`) and the suite `testing`, installs `tierstore=<version>`, and then holds
 //!   the installed system to what the package promises: the package is at the version, the binary
-//!   says `tierstore <version>+<commit>`, the unit, the `sysusers.d` entry and the conffile are
-//!   there, and the service is neither enabled nor running.
+//!   says `tierstore <version>+<commit>`, the unit template, the `sysusers.d` entry and the example
+//!   configuration are there, `/etc/tierstore` is a directory of mode 0750, the package wrote no
+//!   `/etc/tierstore/config.toml` (the live configuration is the host's) and no start marker of an
+//!   instance, and no instance is enabled or running.
 //! - `check-brew` installs the rendered formula from a local tap (`brew` refuses a bare path) and
 //!   runs the binary it installed.
 //! - `check-install-sh` downloads `install.sh` from the site, installs the version with it into a
@@ -25,18 +27,37 @@ use std::process::Command;
 use super::aws::Answer;
 use crate::Error;
 use crate::release::check_said;
+use crate::release::deb;
 use crate::release::hostkeeper_package::is_plain_version;
 
 /// The package and the program it installs.
 const PACKAGE: &str = "tierstore";
 
 /// Where the package puts the binary (below the root).
-pub const BINARY: &str = "usr/libexec/tierstore/tierstore";
+pub const BINARY: &str = deb::BINARY_PATH;
 
-/// The unit, the `sysusers.d` entry and the conffile of the package (below the root).
-pub const UNIT: &str = "usr/lib/systemd/system/tierstore.service";
+/// The unit template, the `sysusers.d` entry and the example configuration of the package (below
+/// the root).
+pub const UNIT: &str = deb::UNIT_PATH;
 pub const SYSUSERS: &str = "usr/lib/sysusers.d/tierstore.conf";
-pub const CONFFILE: &str = "etc/tierstore/tierstore.toml";
+pub const EXAMPLE: &str = deb::EXAMPLE_PATH;
+
+/// The directory of the host's configuration, which the scripts make (below the root).
+pub const CONFIG_DIR: &str = "etc/tierstore";
+
+/// The host's configuration file (below the root), which the package must not write.
+pub const CONFIG: &str = "etc/tierstore/config.toml";
+
+/// The directory of the start markers of the instances (below the root), which the package must
+/// not write a marker into.
+pub const MARKER_DIR: &str = "var/lib/tierstore";
+
+/// The units of the package: the template and its two instances.
+pub const UNITS: [&str; 3] = [
+    "tierstore@.service",
+    "tierstore@a.service",
+    "tierstore@b.service",
+];
 
 /// Where the keyring is put (below the root) and the name the source file refers to it by.
 pub const KEYRING: &str = "usr/share/keyrings/komira-archive-keyring.gpg";
@@ -145,19 +166,23 @@ pub fn source(apt_url: &str, arch: &str) -> String {
     )
 }
 
-/// Is `path` a service entry of systemd's `wants` or `requires` directories, or a unit of the
-/// administrator, for the package's unit below `etc/systemd/system`?
-fn enabled_links(root: &Path) -> Vec<PathBuf> {
+/// The service entries of systemd's `wants` or `requires` directories, and the units of the
+/// administrator, for the package's template or one of its instances, below `etc/systemd/system`.
+pub(super) fn enabled_links(root: &Path) -> Vec<PathBuf> {
     let base = root.join("etc/systemd/system");
     let mut found = Vec::new();
-    let unit = base.join("tierstore.service");
-    if unit.symlink_metadata().is_ok() {
-        found.push(unit);
+    for unit in UNITS {
+        let unit = base.join(unit);
+        if unit.symlink_metadata().is_ok() {
+            found.push(unit);
+        }
     }
     for dir in std::fs::read_dir(&base).into_iter().flatten().flatten() {
-        let link = dir.path().join("tierstore.service");
-        if dir.path().is_dir() && link.symlink_metadata().is_ok() {
-            found.push(link);
+        for unit in UNITS {
+            let link = dir.path().join(unit);
+            if dir.path().is_dir() && link.symlink_metadata().is_ok() {
+                found.push(link);
+            }
         }
     }
     found.sort();
@@ -190,14 +215,15 @@ fn installed_problems(r: &Apt, installed: &str) -> Vec<String> {
         ));
     }
     for (what, rel) in [
-        ("the unit", UNIT),
+        ("the unit template", UNIT),
         ("the sysusers.d entry", SYSUSERS),
-        ("the conffile", CONFFILE),
+        ("the example configuration", EXAMPLE),
     ] {
         if !r.root.join(rel).is_file() {
             problems.push(format!("{what} /{rel} is not installed"));
         }
     }
+    problems.extend(config_problems(r.root));
     for link in enabled_links(r.root) {
         problems.push(format!(
             "the service is enabled: {} exists, and the package enables nothing",
@@ -207,6 +233,42 @@ fn installed_problems(r: &Apt, installed: &str) -> Vec<String> {
     for pid in running(r.root) {
         problems.push(format!(
             "the service is running (process {pid}), and the package starts nothing"
+        ));
+    }
+    problems
+}
+
+/// What the scripts and the package left of the host's configuration and the markers below `root`,
+/// as problems: `/etc/tierstore` is a directory (not a link) of mode 0750, and neither
+/// `/etc/tierstore/config.toml` nor anything in `/var/lib/tierstore` is there.
+pub(super) fn config_problems(root: &Path) -> Vec<String> {
+    use std::os::unix::fs::PermissionsExt;
+    let mut problems = Vec::new();
+    match root.join(CONFIG_DIR).symlink_metadata() {
+        Ok(meta) if meta.is_dir() && meta.permissions().mode() & 0o7777 == 0o750 => {}
+        Ok(meta) if meta.is_dir() => problems.push(format!(
+            "/{CONFIG_DIR} has mode {:04o}, not 0750",
+            meta.permissions().mode() & 0o7777
+        )),
+        Ok(_) => problems.push(format!("/{CONFIG_DIR} is not a directory")),
+        Err(_) => problems.push(format!("/{CONFIG_DIR} was not made")),
+    }
+    if root.join(CONFIG).symlink_metadata().is_ok() {
+        problems.push(format!(
+            "/{CONFIG} is there, and the package never writes the host's configuration"
+        ));
+    }
+    for entry in std::fs::read_dir(root.join(MARKER_DIR))
+        .into_iter()
+        .flatten()
+        .flatten()
+    {
+        problems.push(format!(
+            "{} is there, and the package writes no start marker",
+            Path::new("/")
+                .join(MARKER_DIR)
+                .join(entry.file_name())
+                .display()
         ));
     }
     problems
@@ -316,7 +378,7 @@ pub fn check_apt(host: &dyn Host, r: &Apt) -> Result<Vec<String>, Error> {
         return Err(Error::Refused(problems));
     }
     Ok(vec![format!(
-        "check-apt: {PACKAGE} {} installed from the suite testing on {}; it says {said:?}; the unit, the sysusers.d entry and the conffile are there; the service is neither enabled nor running",
+        "check-apt: {PACKAGE} {} installed from the suite testing on {}; it says {said:?}; the unit template, the sysusers.d entry and the example configuration are there; /{CONFIG_DIR} is 0750 with no config.toml and no start marker was written; no instance is enabled or running",
         r.version, r.arch
     )])
 }

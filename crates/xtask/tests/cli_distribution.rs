@@ -148,7 +148,7 @@ fn the_build_jobs_chain_of_a_linux_platform_gives_sums_that_verify() {
         stdout(&o)
     );
     assert!(
-        stdout(&o).contains("-0640 root:root /etc/tierstore/tierstore.toml %config(noreplace)"),
+        stdout(&o).contains("-0644 root:root /usr/share/doc/tierstore/examples/config.toml\n"),
         "{}",
         stdout(&o)
     );

@@ -2,13 +2,14 @@
 # New objects are written to the hot tier, copied to the cold one in the background, and freed
 # from the hot one when it fills.
 #
-# An example, not a package: nothing installs or enables it. The binary is the release asset
-# tierstore-<commit>-<platform>.tar.gz (docs/ci-and-release.md), placed by digest at the path of
-# ExecStart= (README.md says how). The unit has no [Install] section, so placing it starts
-# nothing and `systemctl enable` has nothing to link; start it with `systemctl start tierstore`
-# once the files below are in place.
+# An example for a host placed by hand, not a package: nothing installs or enables it (the deb
+# and rpm packages install the template tierstore@.service instead, which reads the same file).
+# The binary is the release asset tierstore-<commit>-<platform>.tar.gz (docs/ci-and-release.md),
+# placed by digest at the path of ExecStart= (README.md says how). The unit has no [Install]
+# section, so placing it starts nothing and `systemctl enable` has nothing to link; start it with
+# `systemctl start tierstore` once the files below are in place.
 #
-# Edit tierstore.toml (placed as /etc/tierstore/tierstore.toml) before use: the address of the s3
+# Edit config.toml (placed as /etc/tierstore/config.toml) before use: the address of the s3
 # interface (192.0.2.10 is a documentation address), the proxy id (keep it across restarts, and
 # give each process over the same tiers one of its own), the buckets, the endpoints
 # (http://host[:port], no path) and the hot tier's budget (the bytes it is meant to hold). The unit
@@ -46,7 +47,7 @@ StartLimitBurst=5
 Type=simple
 User=tierstore
 ExecStart=/usr/libexec/tierstore/tierstore \
-  --config /etc/tierstore/tierstore.toml
+  --config /etc/tierstore/config.toml
 # On SIGTERM the process drains: /readyz says 503 and it serves for server.drain_lb_wait, then stops
 # accepting, closes idle connections and waits for those in flight for at most server.drain_deadline, gives up the
 # reconciler's lease (5 s at most) and exits 0. Seconds: 960 is the 10 s and the 15 m that those keys
