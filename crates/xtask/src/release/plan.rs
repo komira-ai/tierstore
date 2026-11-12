@@ -47,9 +47,6 @@ pub const DOCS_PATHS: [&str; 4] = ["docs/", "**/*.md", "crates/*/docs/", "crates
 /// The most files a GitHub compare lists; a change of that many may have more, so it is code.
 const FILES_LIMIT: usize = 300;
 
-/// The most tag refs one page lists; a repository with that many may have more.
-const TAG_REFS_LIMIT: usize = 100;
-
 /// The most commit titles a release note lists.
 const NOTE_TITLES: usize = 20;
 
@@ -167,18 +164,12 @@ fn one_line(text: &str) -> String {
 }
 
 /// The release tags of the repository.
+///
+/// GitHub's `git/matching-refs` is not paginated: one answer lists every ref that matches, and
+/// it ignores `per_page` and `page`. So the answer holds the highest tag however many there are.
 fn release_tags(gh: &dyn Gh, repo: &str) -> Result<Vec<String>, Error> {
-    let refs = gh.api(&format!(
-        "repos/{repo}/git/matching-refs/tags/v?per_page=100"
-    ))?;
-    let refs = super::array(&refs);
-    if refs.len() >= TAG_REFS_LIMIT {
-        return Err(Error::Failed(format!(
-            "{} tags start with v: more than one page of tags, so the highest may be missing",
-            refs.len()
-        )));
-    }
-    Ok(refs
+    let refs = gh.api(&format!("repos/{repo}/git/matching-refs/tags/v"))?;
+    Ok(super::array(&refs)
         .iter()
         .filter_map(|r| r["ref"].as_str()?.strip_prefix("refs/tags/"))
         .map(str::to_owned)

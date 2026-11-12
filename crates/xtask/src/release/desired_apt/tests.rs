@@ -1,8 +1,10 @@
 use std::cell::RefCell;
+use std::io::Read;
 
 use serde_json::{Value, json};
 
 use super::*;
+use crate::channels::apt::deb::control_of;
 use crate::channels::apt::index::sha256_hex;
 use crate::channels::apt::package_names;
 use crate::channels::aws::Answer;
@@ -441,6 +443,212 @@ fn a_hostkeeper_floor_that_is_not_a_plain_version_is_a_usage_error() {
         assert_eq!(
             e.to_string(),
             format!("--min-hostkeeper {floor:?} is not <major>.<minor>.<patch>"),
+        );
+    }
+}
+
+/// The systemd unit directories a package may put a unit file in (below the root).
+const UNIT_DIRS: [&str; 3] = [
+    "usr/lib/systemd/system/",
+    "lib/systemd/system/",
+    "etc/systemd/system/",
+];
+
+/// The regular files of the package `deb` (an `ar` archive whose `data.tar.gz` holds the files):
+/// path below the root, without `./`, and mode.
+fn data_files(deb: &[u8]) -> Vec<(String, u32)> {
+    let mut rest = deb.strip_prefix(b"!<arch>\n").expect("an ar archive");
+    let data = loop {
+        assert!(rest.len() >= 60, "no data.tar.gz in the package");
+        let name = String::from_utf8_lossy(&rest[..16]).trim_end().to_owned();
+        let len: usize = String::from_utf8_lossy(&rest[48..58])
+            .trim_end()
+            .parse()
+            .expect("a member size");
+        if name == "data.tar.gz" {
+            break &rest[60..60 + len];
+        }
+        rest = &rest[60 + len + len % 2..];
+    };
+    let mut tar = Vec::new();
+    flate2::read::GzDecoder::new(data)
+        .read_to_end(&mut tar)
+        .expect("gzip");
+    let mut files = Vec::new();
+    for entry in tar::Archive::new(&tar[..]).entries().expect("a tar") {
+        let entry = entry.expect("an entry");
+        if entry.header().entry_type() == tar::EntryType::Regular {
+            let path = String::from_utf8_lossy(&entry.path_bytes()).into_owned();
+            let path = path.strip_prefix("./").unwrap_or(&path).to_owned();
+            files.push((path, entry.header().mode().expect("a mode")));
+        }
+    }
+    files
+}
+
+/// Every way the run units and the hook program of the entry `sent` differ from what the package
+/// whose regular files are `files` installs: a run unit must be a unit file of the package or an
+/// instance (`name@i.service`) of one of its templates (`name@.service`), never a template; each
+/// unit file must be run, a template by at least one instance; and the hook's program must be an
+/// executable file of the package.
+fn install_problems(sent: &Value, files: &[(String, u32)]) -> Vec<String> {
+    let units: Vec<&str> = files
+        .iter()
+        .filter_map(|(path, _)| UNIT_DIRS.iter().find_map(|d| path.strip_prefix(d)))
+        .collect();
+    let run: Vec<&str> = sent["manifest"]["run"]
+        .as_array()
+        .expect("run")
+        .iter()
+        .map(|u| u.as_str().expect("a unit"))
+        .collect();
+    let template_of = |unit: &str| {
+        let (name, rest) = unit.split_once('@')?;
+        let instance = rest.strip_suffix(".service")?;
+        (!instance.is_empty()).then(|| format!("{name}@.service"))
+    };
+    let mut problems = Vec::new();
+    for unit in &run {
+        if unit.ends_with("@.service") {
+            problems.push(format!(
+                "the entry runs the template {unit}, not an instance of it"
+            ));
+        } else if !units.contains(unit)
+            && !template_of(unit).is_some_and(|t| units.contains(&t.as_str()))
+        {
+            problems.push(format!(
+                "the entry runs {unit}, which is neither a unit file of the package nor an instance of one of its templates"
+            ));
+        }
+    }
+    for unit in &units {
+        let ran = if unit.ends_with("@.service") {
+            run.iter().any(|r| template_of(r).as_deref() == Some(*unit))
+        } else {
+            run.contains(unit)
+        };
+        if !ran {
+            problems.push(format!(
+                "the package installs {unit}, and the entry runs neither it nor an instance of it"
+            ));
+        }
+    }
+    let program = sent["manifest"]["hook"]["command"][0]
+        .as_str()
+        .expect("a hook program");
+    let executable = program.strip_prefix('/').is_some_and(|p| {
+        files
+            .iter()
+            .any(|(path, mode)| path == p && mode & 0o111 == 0o111)
+    });
+    if !executable {
+        problems.push(format!(
+            "the hook runs {program}, which is not an executable file of the package"
+        ));
+    }
+    problems
+}
+
+#[test]
+fn the_run_units_and_hook_of_each_entry_are_the_unit_files_and_binary_of_the_deb_release_deb_builds()
+ {
+    // Catches: an entry whose run units are not what the package installs, read from the
+    // package's own bytes: the entry of the earlier package (`tierstore.service`), which
+    // hostkeeper refuses for the slot template's package; a template sent as a run unit; a unit
+    // file of the package that the entry does not run; and a hook program the package does not
+    // install as an executable. The package is the one `release deb` writes for each platform, and
+    // the entry names its package and version as its control file does.
+    let dir = scratch("built-deb");
+    let binary = dir.join("tierstore");
+    std::fs::write(&binary, b"\x7fELF stand-in").expect("binary");
+    let licenses = dir.join("THIRD-PARTY-LICENSES.txt");
+    std::fs::write(&licenses, b"notice\n").expect("notice");
+    let out = dir.join("out");
+    let mut built = 0;
+    for platform in Platform::ALL {
+        let Some(arch) = architecture(platform) else {
+            continue;
+        };
+        super::super::deb::deb(&binary, "1.2.3", platform, &licenses, &out).expect("release deb");
+        let bytes = std::fs::read(out.join(file_name("1.2.3", arch))).expect("the package");
+        let sent = entry("1.2.3", &Sha256::of(&bytes).to_string(), FLOOR);
+        let files = data_files(&bytes);
+        assert!(
+            files
+                .iter()
+                .any(|(p, _)| UNIT_DIRS.iter().any(|d| p.starts_with(d))),
+            "{arch}: the package installs no unit file: {files:?}"
+        );
+        assert_eq!(
+            install_problems(&sent, &files),
+            Vec::<String>::new(),
+            "{arch}"
+        );
+        let control = control::parse(&control_of(&bytes).expect("control")).expect("fields");
+        assert_eq!(
+            control::get(&control, "Package"),
+            sent["manifest"]["package"].as_str(),
+            "{arch}"
+        );
+        assert_eq!(
+            control::get(&control, "Version"),
+            sent["packageVersion"].as_str(),
+            "{arch}"
+        );
+        built += 1;
+    }
+    assert_eq!(built, 2);
+}
+
+#[test]
+fn an_entry_and_a_package_whose_units_differ_are_named_each_way() {
+    // Catches: a comparison that passes whatever the package installs, so that the test above
+    // could not fail on the entry of the earlier package or on a package without the template.
+    let unit = |name: &str| (format!("usr/lib/systemd/system/{name}"), 0o644);
+    let program = ("usr/libexec/tierstore/tierstore".to_owned(), 0o755);
+    let template = [program.clone(), unit("tierstore@.service")];
+    let current = entry("1.2.3", &digest_of("x"), FLOOR);
+    let mut earlier = current.clone();
+    earlier["manifest"]["run"] = json!(["tierstore.service"]);
+    assert_eq!(
+        install_problems(&earlier, &template),
+        [
+            "the entry runs tierstore.service, which is neither a unit file of the package nor an instance of one of its templates",
+            "the package installs tierstore@.service, and the entry runs neither it nor an instance of it",
+        ]
+    );
+    let single = [program.clone(), unit("tierstore.service")];
+    assert_eq!(
+        install_problems(&current, &single),
+        [
+            "the entry runs tierstore@a.service, which is neither a unit file of the package nor an instance of one of its templates",
+            "the entry runs tierstore@b.service, which is neither a unit file of the package nor an instance of one of its templates",
+            "the package installs tierstore.service, and the entry runs neither it nor an instance of it",
+        ]
+    );
+    assert_eq!(install_problems(&earlier, &single), Vec::<String>::new());
+    let mut both = current.clone();
+    both["manifest"]["run"] = json!(["tierstore@.service", "tierstore@.service.d"]);
+    assert_eq!(
+        install_problems(&both, &template),
+        [
+            "the entry runs the template tierstore@.service, not an instance of it",
+            "the entry runs tierstore@.service.d, which is neither a unit file of the package nor an instance of one of its templates",
+            "the package installs tierstore@.service, and the entry runs neither it nor an instance of it",
+        ]
+    );
+    let not_executable = [
+        ("usr/libexec/tierstore/tierstore".to_owned(), 0o644),
+        unit("tierstore@.service"),
+    ];
+    let mut relative = current.clone();
+    relative["manifest"]["hook"]["command"][0] = json!("usr/libexec/tierstore/tierstore");
+    for (sent, files) in [(&current, &not_executable[..]), (&relative, &template[..])] {
+        let problems = install_problems(sent, files);
+        assert_eq!(problems.len(), 1, "{problems:?}");
+        assert!(
+            problems[0].ends_with("which is not an executable file of the package"),
+            "{problems:?}"
         );
     }
 }
