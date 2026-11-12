@@ -6,8 +6,7 @@
 |---|---|---|
 | `ci.yml` | pull request, push to `main` | `lint`: format, cargo-deny (licences, bans, sources), clippy, the workflow lint. `test`: every test under cargo-llvm-cov with branch coverage, and the 99% gate on lines and branches of every crate (`crates/coverage-gate`). |
 | `advisories.yml` | daily, push to `main` | `cargo deny check advisories`; the result is kept in one issue, and the run is green whatever it finds. |
-| `artifacts.yml` | pull request, push to `main`; by hand | builds `tierstore` (`--features server`) for linux-x86_64, linux-arm64 and macos-arm64, each on a GitHub-hosted runner of its platform, packages it with its SBOM and as a hostkeeper package (and, for the Homebrew tap and apt, as a tap-named tarball and, on Linux, a Debian package and an RPM package), writes the release index of the hostkeeper packages, makes `SHA256SUMS`. The macos-arm64 job also runs the tests of `tierstore`, `objstore-s3` and `tierstore-testkit` on macOS, the update hook's among them (both of its arms are built and tested on every system, each against fakes of its service manager, and the macOS packaging). This workflow runs no macOS job for a pull request (`macos.yml` does, for every pull request that changes a path the macOS build reads): for a pull request its macos-arm64 job is skipped and the sums cover the Linux files; a push to `main` builds every platform, and a run by hand (`gh workflow run artifacts.yml --ref <branch>`) builds and sums every platform of a branch and signs nothing. On a push to `main` it also signs (build provenance and SBOM attestations) and checks what it signed. The Linux binaries are linked against glibc 2.28 by `cargo zigbuild`, not against the runner's glibc, and each Linux job fails when the binary asks for a newer `GLIBC_` symbol version (see "The glibc floor of the Linux binaries"). |
-| `macos.yml` | pull request | `changes` (Linux) lists the paths the pull request changes (its merge commit against the base, a rename as its old and new path) and judges them with `cargo xtask macos-paths`: the macOS job is not needed when every one is documentation (`docs/`, a top-level `*.md`), `LICENSE`, the lint configuration (`clippy.toml`, `deny.toml`, `rustfmt.toml`), an issue or pull request template, or a workflow that puts nothing on macOS (the list is `SKIPPABLE_DIRS` and `SKIPPABLE_FILES` in `crates/xtask/src/macos_paths.rs`); any other path, a path that is not UTF-8, or a list that is empty or cannot be read runs it. `version` (Linux) computes the version the build is given, as artifacts.yml's `version` job does. `macos` runs on `macos-15` unless `changes` passed and answered that it is not needed: every test of the workspace (`cargo test --workspace --features tierstore/s3`), then the commands of artifacts.yml's macos-arm64 job (build, SBOM, licence notice, tarball, hostkeeper package unpacked with hostkeeper's unpacker, code signature), uploading and signing nothing, with `contents: read` alone and no secret or token. It restores artifacts.yml's macOS cache and saves none. It is not named `macos-arm64`: a pull request's run of artifacts.yml skips its job of that name, and a skipped job passes as a check. If `version` fails, `macos` is skipped and the run fails on `version`. `macos-checks` (Linux) runs after the three whatever they did, a cancelled run included, and passes only when `version` and `macos` passed, or `macos` was skipped on that answer of a `changes` that passed. A newer push to a pull request cancels its older run. |
+| `artifacts.yml` | pull request (linux-x86_64 only), push to `main`; by hand | builds `tierstore` (`--features server`) for linux-x86_64, linux-arm64 and macos-arm64, each on a GitHub-hosted runner of its platform, packages it with its SBOM and as a hostkeeper package (and, for the Homebrew tap and apt, as a tap-named tarball and, on Linux, a Debian package and an RPM package), writes the release index of the hostkeeper packages, makes `SHA256SUMS`. A pull request runs on Linux x86_64 alone: for it only the linux-x86_64 job runs, and the sums cover its files. The other platforms are the beta stage of the release: the linux-arm64 and macos-arm64 jobs run on a push to `main` and by hand, each running every test of the workspace (`cargo test --workspace --features tierstore/s3`; on macOS the update hook's launchd steps and the macOS packaging among them) before it builds, packages, unpacks the hostkeeper package and, on macOS, checks the code signature; `sums` waits for them, so their files are summed, signed and released only when they pass. a push to `main` builds every platform, and a run by hand (`gh workflow run artifacts.yml --ref <branch>`) builds and sums every platform of a branch and signs nothing. On a push to `main` it also signs (build provenance and SBOM attestations) and checks what it signed. The Linux binaries are linked against glibc 2.28 by `cargo zigbuild`, not against the runner's glibc, and each Linux job fails when the binary asks for a newer `GLIBC_` symbol version (see "The glibc floor of the Linux binaries"). |
 | `release.yml` | when `ci` or `artifacts` finishes on a push to `main` (automatic, see Releases); by hand | `plan` decides which commit of `main` is released and as which tag (the newest whose build recorded that version); `verify` and `publish` attach the files that commit's push built and signed to a GitHub release, after checking them again; the release then goes through four stages (see The order of a release): `testing-upload`, `formula` and the `testing-apt-*` jobs publish it to testing, `check-apt`, `check-brew` and `check-install-sh` install it from there, `farm-check`, `farm` and `soak` put it on the lab through hostkeeper when the lab is switched on (`TIERSTORE_LAB_INSTALL`) and configured, and `promote-check` then lets `promote-latest`, `tap` and the `stable-apt-*` jobs make it public. Builds nothing of tierstore. |
 | `tierstore-site.yml` | pull request, push to `main`, when the site changes | typecheck, tests and build of tierstore.dev. |
 | `tierstore-site-publish.yml` | push to `main` / by hand | builds the site again; uploads it only when the repository variable `TIERSTORE_SITE_PUBLISH` is `true`. |
@@ -20,13 +19,13 @@ one job that needs each, under the exact `if:` the lint lists for it (`attestati
 `id-token` of the signing job, only on a push to `main`).
 
 `main` has no branch protection rule, so GitHub requires no check by name. A pull request is
-merged only when every check of its head commit has passed. The macOS checks are made to fit that:
-every pull request starts `macos.yml`, whose macOS job is skipped only for a pull request
-`changes` found it is not needed, and `macos-checks`, never skipped, fails when the macOS job was
-needed and did not pass. A rule requiring checks by name needs `macos-checks` alone of this
-workflow (a skipped `macos` passes as a check). The macOS job is not named `macos-arm64`, the
-name of artifacts.yml's macOS job, which a pull request's run of artifacts.yml skips (a check of
-that name would pass with no macOS run behind it).
+merged only when every check of its head commit has passed. Pull requests run on Linux x86_64
+alone (`ci.yml`, and `artifacts.yml`'s `linux-x86_64`, `version` and `sums` jobs), because those
+hosted runners are plentiful; macOS and linux-arm64 are the beta stage of the release, in
+`artifacts.yml` on a push to `main`. The workflow lint fails when a workflow a pull request starts
+names another runner without `if: ${{ github.event_name != 'pull_request' }}`. A rule requiring
+checks by name must not name `macos-checks`, `macos`, `macos-arm64` or `linux-arm64`: no pull
+request runs them.
 
 ## The release files
 
@@ -207,8 +206,8 @@ version and the platform. The macOS job then checks the code signature of the bi
   own writer: schema 1, keys sorted, packages sorted by platform, at most one per platform, the
   same bytes for the same packages. A release's index lists all three platforms, because
   hostkeeper refuses a host whose platform its release lacks (`no_package_for_platform`): on a push
-  or a run by hand the job refuses a run without the macOS package. For a pull request, which has
-  no macOS job in this workflow, it checks the two Linux packages are there and writes no index;
+  or a run by hand the job refuses a run without the macOS package. For a pull request, which
+  builds linux-x86_64 alone, it checks that package is there and writes no index;
 - the `attest` job signs each package as its own subject, as it does each tarball, and names the
   bundle `<package>.sigstore.json`; the provenance of the sums covers the packages and the index;
 - the `verify` job (and `release.yml`'s `verify` and `publish`) makes the index again from the
@@ -275,9 +274,9 @@ In `artifacts.yml` the `attest` job signs each of these files as its own subject
 push, never on a pull request) requires the three tap tarballs, the macOS one included as it
 requires the macOS hostkeeper package, and the two Debian packages and the two RPM packages, each
 with its bundle; `verify-assets attestations` verifies a Debian or an RPM package for provenance
-and its bundle, as it does a hostkeeper package; and the release attaches them all. A pull request builds the Linux ones and
+and its bundle, as it does a hostkeeper package; and the release attaches them all. A pull request builds the linux-x86_64 ones and
 sums them; the tap tarball of macOS is made by the macOS job, which `artifacts.yml` runs on a push
-and by hand and `macos.yml` runs for every pull request.
+and by hand.
 
 ### The order of a release
 

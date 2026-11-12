@@ -43,9 +43,6 @@ mod graph_tests;
 mod hostkeeper;
 mod hostkeeper_tests;
 mod lint;
-mod macos_gate_tests;
-mod macos_pr;
-mod macos_pr_tests;
 mod platforms;
 mod platforms_tests;
 mod rpm;
@@ -117,7 +114,6 @@ fn the_workflows_a_release_needs_are_all_there() {
         "advisories.yml",
         "artifacts.yml",
         "ci.yml",
-        "macos.yml",
         "release.yml",
         "tierstore-site-publish.yml",
         "tierstore-site.yml",

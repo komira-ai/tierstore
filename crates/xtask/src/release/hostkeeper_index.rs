@@ -17,9 +17,9 @@
 //! (`no_package_for_platform`), so a release without the macos-arm64 package would leave every Mac
 //! on its old version. Unless `--event` is `pull_request`, a `<dir>` without the package of each
 //! of linux-x86_64, linux-arm64 and macos-arm64 is refused and nothing is written. For a pull
-//! request (`--event pull_request`, on Actions `GITHUB_EVENT_NAME`) the macOS job does not run:
-//! the two Linux packages must be there and the macOS one must not, and no index is written,
-//! since an index of a pull request would be one of two platforms.
+//! request (`--event pull_request`, on Actions `GITHUB_EVENT_NAME`) only the linux-x86_64 job runs
+//! (the other platforms build after a merge): its package must be there and no other must, and no
+//! index is written, since an index of a pull request would be one of one platform.
 //!
 //! `--output` appends `package-version=<version>` to a file (on Actions, `GITHUB_OUTPUT`: the
 //! attest job names the packages it signs by it). The packages are read once each, in pieces.
@@ -51,8 +51,8 @@ pub const INDEX_PART: &str = "index";
 /// The event of a pull request's run (`GITHUB_EVENT_NAME`), for which no index is written.
 pub const PULL_REQUEST: &str = "pull_request";
 
-/// The platforms a pull request builds: the macOS job does not run for one.
-pub const PULL_REQUEST_PLATFORMS: [Platform; 2] = [Platform::LinuxX86_64, Platform::LinuxArm64];
+/// The platforms a pull request builds: linux-x86_64 alone; the others build after a merge.
+pub const PULL_REQUEST_PLATFORMS: [Platform; 1] = [Platform::LinuxX86_64];
 
 /// The prefix of a package's file name.
 const PREFIX: &str = "tierstore-";
@@ -160,7 +160,7 @@ pub fn set_problems(found: &[Platform], wanted: &[Platform]) -> Vec<String> {
     }
     for platform in found.iter().filter(|p| !wanted.contains(p)) {
         problems.push(format!(
-            "a hostkeeper package for {}, which a pull request does not build (the macOS job does not run for one)",
+            "a hostkeeper package for {}, which a pull request does not build (only linux-x86_64 builds for one)",
             platform.name()
         ));
     }
@@ -265,7 +265,7 @@ pub fn hostkeeper_index(
     }
     if pull_request {
         return Ok(vec![format!(
-            "a pull request: the macOS job does not run for one, so no {INDEX} is written; the Linux packages of {} are there",
+            "a pull request: only linux-x86_64 builds for one, so no {INDEX} is written; its package of {} is there",
             found.version
         )]);
     }

@@ -51,22 +51,31 @@ fn the_workflows_write_sign_and_check_the_index_of_the_hostkeeper_packages() {
 }
 
 #[test]
-fn a_pull_request_builds_and_sums_the_linux_packages_and_never_signs_them_or_starts_the_macos_job()
+fn a_pull_request_builds_and_sums_the_linux_x86_64_package_and_never_signs_it_or_starts_a_beta_job()
 {
-    // Catches: a pull request that does not build or unpack the Linux hostkeeper packages, whose
-    // sums job would wait for (or refuse without) the macOS package, that signs anything, or that
-    // starts the macOS job. The index step's own answer for a pull request (the Linux two, no
-    // index written) is the unit test of `release hostkeeper-index`.
+    // Catches: a pull request that does not build or unpack the linux-x86_64 hostkeeper package,
+    // whose sums job would wait for (or refuse without) the arm64 or macOS package, that signs
+    // anything, or that starts a beta job (linux-arm64, macos-arm64). The index step's own answer
+    // for a pull request (the linux-x86_64 package, no index written) is the unit test of
+    // `release hostkeeper-index`.
     let doc = yaml::load(&text_of("artifacts.yml")).expect("artifacts.yml");
     let triggers = super::lint::names(entry(&doc, "on"));
     assert!(triggers.iter().any(|t| t == "pull_request"), "{triggers:?}");
-    for linux in &BUILDS[..2] {
-        let name = linux.platform;
+    for (build, condition) in BUILDS.iter().zip([
+        None,
+        Some(NOT_FOR_A_PULL_REQUEST),
+        Some(NOT_FOR_A_PULL_REQUEST),
+    ]) {
+        let name = build.platform;
         assert_eq!(
-            job_value(&doc, name, &["if"]),
-            None,
-            "{name} runs for every event"
+            job_value(&doc, name, &["if"]).as_deref(),
+            condition,
+            "{name}: runs for a pull request only if it is linux-x86_64"
         );
+        let linux = build;
+        if name == "macos-arm64" {
+            continue;
+        }
         let commands = build_commands(linux);
         assert!(
             commands.iter().any(|c| c.starts_with(
@@ -82,13 +91,9 @@ fn a_pull_request_builds_and_sums_the_linux_packages_and_never_signs_them_or_sta
         );
         assert!(!commands.iter().any(|c| c == CODESIGN), "{name}");
     }
-    assert_eq!(
-        job_value(&doc, "macos-arm64", &["if"]).as_deref(),
-        Some(NOT_FOR_A_PULL_REQUEST)
-    );
     assert_eq!(job_value(&doc, "sums", &["if"]).as_deref(), Some(SUMS_IF));
     assert!(SUMS_IF.contains(
-        "(github.event_name == 'pull_request' && needs.macos-arm64.result == 'skipped')"
+        "(github.event_name == 'pull_request' && needs.linux-arm64.result == 'skipped' && needs.macos-arm64.result == 'skipped')"
     ));
     assert!(SUMS_INDEX.contains("--event \"$GITHUB_EVENT_NAME\""));
     for signer in ["attest", "verify"] {

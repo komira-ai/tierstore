@@ -277,7 +277,7 @@ fn triggers(on: &Node) -> Vec<String> {
 }
 
 /// Every scalar of the tree, keys and values.
-fn scalars<'a>(node: &'a Node, out: &mut Vec<&'a str>) {
+pub fn scalars<'a>(node: &'a Node, out: &mut Vec<&'a str>) {
     match &node.value {
         Value::Scalar { .. } => out.extend(node.as_str()),
         Value::Seq(items) => items.iter().for_each(|i| scalars(i, out)),
