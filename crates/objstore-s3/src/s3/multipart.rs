@@ -10,6 +10,13 @@
 //! task of its own. An abort that itself fails is logged; a bucket lifecycle rule
 //! (`AbortIncompleteMultipartUpload`) is the backstop for those and for a crash.
 //!
+//! An upload that names the SHA-256 of the whole object ([`put`] given `sha256`) is created with
+//! `x-amz-checksum-algorithm: SHA256` and the digest as the object's metadata `x-amz-meta-sha256`
+//! (hex); each part carries `x-amz-checksum-sha256`, the base64 SHA-256 of the part, which the
+//! store checks against the bytes it took, and the completion names each part's checksum. The
+//! store keeps a checksum of the part checksums for such an object (`COMPOSITE`), which is not
+//! the SHA-256 of its bytes, so the metadata is what records that.
+//!
 //! S3's rules, which [`part_size`] keeps: every part but the last is at least
 //! [`MIN_PART_BYTES`], none is over [`MAX_PART_BYTES`], and an object has at most
 //! [`MAX_PARTS`] parts.
@@ -17,8 +24,10 @@
 use std::fmt;
 use std::sync::Arc;
 
+use base64::Engine as _;
 use bytes::Bytes;
 use reqwest::{Method, Response, StatusCode};
+use sha2::{Digest as _, Sha256};
 
 use super::{Conn, failure, transport, xml};
 use crate::body::{Parts, Unsized};
@@ -83,20 +92,31 @@ pub(super) enum Rule<'a> {
     Match(&'a str),
 }
 
+/// The metadata header that records the SHA-256 of an object, as 64 lower-case hex digits: sent
+/// with a PUT and a CreateMultipartUpload that name the digest, and read back by a HEAD.
+pub(super) const SHA256_META: &str = "x-amz-meta-sha256";
+
+/// The base64 of `digest`, as S3 takes and gives an `x-amz-checksum-sha256`.
+pub(super) fn base64_of(digest: &[u8]) -> String {
+    base64::engine::general_purpose::STANDARD.encode(digest)
+}
+
 /// Writes `body`, `len` bytes, under `key` as a multipart upload that the completion makes an
-/// object by `rule`. Gives the `ETag` of the object, quotes included, if the completion carries
-/// one.
+/// object by `rule`, with a SHA-256 checksum on every part and `sha256` as the object's metadata
+/// when given (see the module docs). Gives the `ETag` of the object, quotes included, if the
+/// completion carries one.
 pub(super) async fn put(
     conn: &Arc<Conn>,
     key: &ObjectKey,
     len: u64,
     body: BodyStream,
     rule: Rule<'_>,
+    sha256: Option<&[u8; 32]>,
 ) -> Result<Option<String>, ObjectStoreError> {
     let size = part_size_of(len, conn.tuning.part_bytes).ok_or(ObjectStoreError::Unsupported(
         "an object larger than 10,000 parts of 5 GiB",
     ))?;
-    let upload = create(conn, key).await?;
+    let upload = create(conn, key, sha256).await?;
     let sent = send(&upload, len, size, body, rule).await;
     settle(upload, sent).await
 }
@@ -115,7 +135,7 @@ pub(super) async fn put_unsized(
     rest: Unsized,
     etag: &str,
 ) -> Result<Option<String>, ObjectStoreError> {
-    let upload = create(conn, key).await?;
+    let upload = create(conn, key, None).await?;
     let sent = send_unsized(&upload, first, rest, etag).await;
     settle(upload, sent).await
 }
@@ -146,12 +166,12 @@ async fn send_unsized(
     etag: &str,
 ) -> Result<Option<String>, ObjectStoreError> {
     let len = part_len(&upload.conn.tuning);
-    let mut etags = vec![upload_part(upload, 1, first).await?];
+    let mut sent = vec![upload_part(upload, 1, first).await?];
     while rest.more().await? {
         let part = rest.next(len).await?;
-        etags.push(upload_part(upload, etags.len() + 1, part).await?);
+        sent.push(upload_part(upload, sent.len() + 1, part).await?);
     }
-    complete(upload, &etags, Rule::Match(etag)).await
+    complete(upload, &sent, Rule::Match(etag)).await
 }
 
 /// An upload in progress. Dropped while open, it is aborted from a task of its own.
@@ -160,6 +180,8 @@ struct Upload {
     key: ObjectKey,
     id: String,
     open: bool,
+    /// Every part carries its SHA-256 checksum (the upload was created with the algorithm).
+    checksummed: bool,
 }
 
 impl Upload {
@@ -196,9 +218,18 @@ impl Drop for Upload {
 
 /// CreateMultipartUpload: the id of the new upload.
 pub(super) async fn create_id(conn: &Conn, key: &ObjectKey) -> Result<String, ObjectStoreError> {
+    create_id_with(conn, key, Vec::new()).await
+}
+
+/// CreateMultipartUpload with `headers`: the id of the new upload.
+async fn create_id_with(
+    conn: &Conn,
+    key: &ObjectKey,
+    headers: Vec<(&'static str, String)>,
+) -> Result<String, ObjectStoreError> {
     let query = [("uploads", String::new())];
     let resp = conn
-        .send(Method::POST, Some(key), &query, Vec::new(), Bytes::new())
+        .send(Method::POST, Some(key), &query, headers, Bytes::new())
         .await?;
     if resp.status() != StatusCode::OK {
         return Err(failure(resp).await);
@@ -207,14 +238,27 @@ pub(super) async fn create_id(conn: &Conn, key: &ObjectKey) -> Result<String, Ob
     xml::upload_id(&body)
 }
 
-/// CreateMultipartUpload, as an upload that aborts itself if it is dropped open.
-async fn create(conn: &Arc<Conn>, key: &ObjectKey) -> Result<Upload, ObjectStoreError> {
-    let id = create_id(conn, key).await?;
+/// CreateMultipartUpload, as an upload that aborts itself if it is dropped open; one whose parts
+/// carry SHA-256 checksums, and that records `sha256` as the object's metadata, if it is given.
+async fn create(
+    conn: &Arc<Conn>,
+    key: &ObjectKey,
+    sha256: Option<&[u8; 32]>,
+) -> Result<Upload, ObjectStoreError> {
+    let headers = match sha256 {
+        Some(digest) => vec![
+            ("x-amz-checksum-algorithm", "SHA256".to_owned()),
+            (SHA256_META, hex::encode(digest)),
+        ],
+        None => Vec::new(),
+    };
+    let id = create_id_with(conn, key, headers).await?;
     Ok(Upload {
         conn: Arc::clone(conn),
         key: key.clone(),
         id,
         open: true,
+        checksummed: sha256.is_some(),
     })
 }
 
@@ -227,34 +271,45 @@ async fn send(
     rule: Rule<'_>,
 ) -> Result<Option<String>, ObjectStoreError> {
     let mut parts = Parts::new(body, len);
-    let mut etags = Vec::new();
+    let mut sent = Vec::new();
     // `Parts` answers `None` only after the body has ended with exactly `len` bytes,
     // so an upload is never completed over a body that failed at its end.
     while let Some(part) = parts.next(size).await? {
-        let number = etags.len() + 1;
-        etags.push(upload_part(upload, number, part).await?);
+        let number = sent.len() + 1;
+        sent.push(upload_part(upload, number, part).await?);
     }
-    complete(upload, &etags, rule).await
+    complete(upload, &sent, rule).await
 }
 
-/// UploadPart: answers the part's ETag.
+/// A part the store took: its ETag, and the base64 SHA-256 checksum it was sent with, if the
+/// upload's parts carry one.
+type SentPart = (String, Option<String>);
+
+/// UploadPart: answers the part's ETag, and its checksum if the upload's parts carry one.
 async fn upload_part(
     upload: &Upload,
     number: usize,
     part: Bytes,
-) -> Result<String, ObjectStoreError> {
+) -> Result<SentPart, ObjectStoreError> {
     let query = [
         ("partNumber", number.to_string()),
         ("uploadId", upload.id.clone()),
     ];
+    let checksum = upload
+        .checksummed
+        .then(|| base64_of(&Sha256::digest(&part)));
+    let headers = checksum
+        .iter()
+        .map(|sum| ("x-amz-checksum-sha256", sum.clone()))
+        .collect();
     let resp = upload
         .conn
-        .send(Method::PUT, Some(&upload.key), &query, Vec::new(), part)
+        .send(Method::PUT, Some(&upload.key), &query, headers, part)
         .await?;
     if resp.status() != StatusCode::OK {
         return Err(failure(resp).await);
     }
-    part_etag(&resp, &upload.key, number)
+    Ok((part_etag(&resp, &upload.key, number)?, checksum))
 }
 
 /// The ETag in the answer to the upload of part `number` of `key`.
@@ -279,10 +334,10 @@ pub(super) fn part_etag(
 /// an `<Error>` body: that is a failure too.
 async fn complete(
     upload: &Upload,
-    etags: &[String],
+    parts: &[SentPart],
     rule: Rule<'_>,
 ) -> Result<Option<String>, ObjectStoreError> {
-    let request = xml::complete_request(etags);
+    let request = xml::complete_request(parts);
     let (conn, key, id) = (&upload.conn, &upload.key, &upload.id);
     match rule {
         Rule::Match(etag) => complete_replacing(conn, key, id, request, etag).await,

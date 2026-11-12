@@ -310,7 +310,7 @@ impl Inner {
             Ok(file) => file,
             // The file is gone: the entry is a lie, and is forgotten if nothing has put a file
             // there since.
-            Err(error) if super::gone(&error) => {
+            Err(error) if super::stream::gone(&error) => {
                 let _ = self.drop_if_unchanged(hex, None);
                 return Verdict::Left;
             }

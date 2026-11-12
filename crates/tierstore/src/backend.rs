@@ -5,7 +5,7 @@ use bytes::{Bytes, BytesMut};
 use futures::StreamExt;
 use futures::stream::BoxStream;
 
-use crate::{Error, PutClaim};
+use crate::{Error, PutClaim, PutOutcome, TreeDigest};
 
 /// The body of a part of a multipart upload, as the chunks it arrives in, so that a part of any
 /// size is stored without being held in memory whole.
@@ -525,6 +525,35 @@ pub trait Backend: Send + Sync {
             whole.extend_from_slice(&chunk?);
         }
         self.put_tagged(key, whole.freeze()).await
+    }
+
+    /// Writes an object of `len` bytes that hash to `sha256`, only if the key does not exist
+    /// (`If-None-Match: *`); and if it exists, answers [`PutOutcome::Existed`] when the object there
+    /// is `len` bytes that hash to `sha256` (the same put sent again after its answer was lost),
+    /// and [`Error::AlreadyExists`] when it is not.
+    ///
+    /// The body is checked as it passes: one that is not `len` bytes hashing to `sha256` ends
+    /// with [`Error::BadDigest`] in place of its last chunk, so the backend stores nothing (as for
+    /// [`Backend::put_stream`]). The S3 backend also sends the digest for the store to check,
+    /// records it in the object's metadata and, for a key that exists, compares the digest a
+    /// HEAD reads back (the `put` request of the fill socket, in the operations guide). The provided
+    /// implementation is [`Backend::put_stream`] of the checked body and, for a key that exists,
+    /// a read of the whole object to hash it.
+    ///
+    /// # Errors
+    /// [`Error::AlreadyExists`] if the key holds other bytes. [`Error::BadDigest`] if the body is
+    /// not `len` bytes that hash to `sha256`, or the store refused it for its checksum.
+    /// [`Error::TooLarge`] if the store refused it for its size. [`Error::Conflict`] if the object
+    /// was deleted between the refusal and the read that compares it. As
+    /// [`Backend::put_stream`] otherwise.
+    async fn put_stream_sha256(
+        &self,
+        key: &str,
+        len: u64,
+        body: PartBody<'_>,
+        sha256: TreeDigest,
+    ) -> Result<PutOutcome, Error> {
+        crate::put_sha256::put(self, key, len, body, sha256).await
     }
 
     /// Replaces the object, only if its content tag is `etag` (`If-Match`), and gives the

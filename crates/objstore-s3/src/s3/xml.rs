@@ -216,9 +216,13 @@ pub(crate) fn parts_page(body: &[u8]) -> Result<PartsPage, ObjectStoreError> {
     Ok(PartsPage { parts, next })
 }
 
-/// The body of CompleteMultipartUpload: each part's number and ETag, in order.
-pub(crate) fn complete_request(etags: &[String]) -> String {
-    complete_document((1..).zip(etags.iter().map(String::as_str)))
+/// The body of CompleteMultipartUpload: each part's number and ETag, in order, and its SHA-256
+/// checksum (base64) for a part that was sent with one.
+pub(crate) fn complete_request(parts: &[(String, Option<String>)]) -> String {
+    let named = parts
+        .iter()
+        .map(|(etag, sum)| (etag.as_str(), sum.as_deref()));
+    complete_document((1..).zip(named).map(|(n, (etag, sum))| (n, etag, sum)))
 }
 
 /// The body of CompleteMultipartUpload for parts a caller numbers itself: each part's number
@@ -227,18 +231,22 @@ pub(crate) fn complete_parts_request(parts: &[(u32, String)]) -> String {
     complete_document(parts.iter().map(numbered))
 }
 
-/// A part a caller numbered, as a number and an ETag.
-fn numbered(part: &(u32, String)) -> (u64, &str) {
-    (u64::from(part.0), part.1.as_str())
+/// A part a caller numbered, as a number and an ETag, with no checksum.
+fn numbered(part: &(u32, String)) -> (u64, &str, Option<&str>) {
+    (u64::from(part.0), part.1.as_str(), None)
 }
 
-/// A CompleteMultipartUpload document naming these parts, a number and an ETag each.
-fn complete_document<'a>(parts: impl Iterator<Item = (u64, &'a str)>) -> String {
+/// A CompleteMultipartUpload document naming these parts, a number and an ETag each, and a
+/// SHA-256 checksum for a part that has one.
+fn complete_document<'a>(parts: impl Iterator<Item = (u64, &'a str, Option<&'a str>)>) -> String {
     let mut out =
         String::from("<CompleteMultipartUpload xmlns=\"http://s3.amazonaws.com/doc/2006-03-01/\">");
-    for (number, etag) in parts {
+    for (number, etag, sum) in parts {
+        let sum = sum.map_or_else(String::new, |sum| {
+            format!("<ChecksumSHA256>{}</ChecksumSHA256>", escape(sum))
+        });
         out.push_str(&format!(
-            "<Part><PartNumber>{number}</PartNumber><ETag>{}</ETag></Part>",
+            "<Part><PartNumber>{number}</PartNumber><ETag>{}</ETag>{sum}</Part>",
             escape(etag)
         ));
     }
@@ -395,13 +403,21 @@ mod tests {
         assert!(upload_id(b"\xff\xfe").is_err(), "not UTF-8");
         assert!(upload_id(b"<unclosed").is_err(), "not XML");
         assert!(upload_id(b"<Error><UploadId>x</UploadId></Error>").is_err());
-        let body = complete_request(&["\"a1\"".into(), "b&2".into()]);
+        let body = complete_request(&[("\"a1\"".into(), None), ("b&2".into(), None)]);
         assert!(
             body.contains(
                 "<Part><PartNumber>1</PartNumber><ETag>\"a1\"</ETag></Part>\
                  <Part><PartNumber>2</PartNumber><ETag>b&amp;2</ETag></Part>"
             ),
             "{body}"
+        );
+        let summed = complete_request(&[("\"a\"".into(), Some("q+/=".into()))]);
+        assert!(
+            summed.contains(
+                "<Part><PartNumber>1</PartNumber><ETag>\"a\"</ETag>\
+                 <ChecksumSHA256>q+/=</ChecksumSHA256></Part>"
+            ),
+            "{summed}"
         );
         let done = format!(
             "<CompleteMultipartUploadResult {NS}><ETag>\"x-2\"</ETag></CompleteMultipartUploadResult>"

@@ -26,6 +26,11 @@
 //! part or an abort and 400 for a completion). The 5 MiB that every part but the last must
 //! have can be lowered ([`FakeS3::set_min_part_bytes`]) for a test that sends small parts.
 //!
+//! A PUT, and the parts of an upload begun with `x-amz-checksum-algorithm: SHA256`, are checked
+//! against the `x-amz-checksum-sha256` they carry, the checksum is kept, and a HEAD gives it when
+//! asked; `x-amz-meta-*` headers are kept with the object (`fake/checksums.rs`). A test can make
+//! the service ignore checksums ([`FakeS3::ignore_checksums`]).
+//!
 //! It keeps what a test asks about: the uploads begun and not yet completed or aborted
 //! ([`FakeS3::incomplete_uploads`]), how many single PUTs and parts it took and the
 //! largest request body ([`FakeS3::stats`]). A test can fail any step of an upload,
@@ -42,18 +47,21 @@ use std::hash::{Hash, Hasher};
 use std::sync::{Arc, Mutex, MutexGuard, PoisonError};
 use std::time::Duration;
 
-use bytes::Bytes;
 use md5::{Digest, Md5};
 use tokio::io::{AsyncReadExt, AsyncWriteExt};
 use tokio::net::{TcpListener, TcpStream};
 use tokio::sync::Notify;
 
+mod checksums;
 mod dates;
 mod escape;
+mod kept;
 mod uploads;
 
+use self::checksums::Sums;
 use self::dates::{http_date, iso_date, system_seconds};
 use self::escape::{unescape, xml_text};
+use self::kept::Kept;
 use self::uploads::{list_parts, list_uploads};
 use super::sigv4::{Request as Signed, Signer};
 use super::{Credentials, S3Config, S3Store, S3Tuning};
@@ -61,8 +69,6 @@ use crate::{Capabilities, ObjectKey};
 
 /// The runs bytes are cut into when kept: a run of all zeros is only counted.
 const RUN: usize = 64 << 10;
-
-static ZEROS: [u8; RUN] = [0; RUN];
 
 /// What the service took, for a test to check.
 #[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
@@ -77,71 +83,6 @@ pub struct FakeStats {
     pub aborted: u64,
     /// The largest request body received.
     pub largest_body: u64,
-}
-
-/// Bytes kept compactly.
-#[derive(Clone, Debug, Default)]
-struct Kept {
-    /// Runs in order: `Err(n)` is `n` zero bytes.
-    runs: Vec<Result<Bytes, u64>>,
-    len: u64,
-}
-
-impl Kept {
-    fn of(bytes: &[u8]) -> Self {
-        let mut kept = Self::default();
-        for run in bytes.chunks(RUN) {
-            if run == &ZEROS[..run.len()] {
-                kept.push(Err(run.len() as u64));
-            } else {
-                kept.push(Ok(Bytes::copy_from_slice(run)));
-            }
-        }
-        kept
-    }
-
-    fn push(&mut self, run: Result<Bytes, u64>) {
-        let n = match &run {
-            Ok(b) => b.len() as u64,
-            Err(n) => *n,
-        };
-        self.len += n;
-        match (self.runs.last_mut(), run) {
-            (Some(Err(zeros)), Err(more)) => *zeros += more,
-            (_, run) => self.runs.push(run),
-        }
-    }
-
-    fn extend(&mut self, other: &Self) {
-        for run in &other.runs {
-            self.push(run.clone());
-        }
-    }
-
-    /// Bytes `[from, to)`.
-    fn read(&self, from: u64, to: u64) -> Vec<u8> {
-        let mut out = Vec::with_capacity(usize::try_from(to - from).unwrap_or(0));
-        let mut at = 0u64;
-        for run in &self.runs {
-            let n = match run {
-                Ok(b) => b.len() as u64,
-                Err(n) => *n,
-            };
-            let (start, end) = (from.max(at), to.min(at + n));
-            if start < end {
-                let (a, b) = ((start - at) as usize, (end - at) as usize);
-                match run {
-                    Ok(bytes) => out.extend_from_slice(&bytes[a..b]),
-                    Err(_) => out.resize(out.len() + (b - a), 0),
-                }
-            }
-            at += n;
-            if at >= to {
-                break;
-            }
-        }
-        out
-    }
 }
 
 /// A request [`FakeS3::fail`] makes the service fail, once.
@@ -175,13 +116,14 @@ impl State {
     }
 
     /// Keeps `kept` under `key`, stamped with the time of the service, with the entity tag
-    /// `joined` if it is made of parts and the tag of its bytes if not.
-    fn store(&mut self, key: String, kept: Kept, joined: Option<String>) {
+    /// `joined` if it is made of parts and the tag of its bytes if not, and with `sums`.
+    fn store(&mut self, key: String, kept: Kept, joined: Option<String>, sums: Sums) {
         let modified = self.time.unwrap_or_else(system_seconds);
         let stored = Stored {
             kept,
             modified,
             joined,
+            sums,
         };
         self.objects.insert(key, stored);
     }
@@ -229,6 +171,10 @@ struct Upload {
     parts: BTreeMap<u32, (String, Kept)>,
     /// The second each part was stored, by the clock of the service.
     stored_at: BTreeMap<u32, u64>,
+    /// The metadata of the object, and whether every part carries a checksum.
+    begun: Sums,
+    /// The SHA-256 of each part, for an upload whose parts carry a checksum.
+    part_sums: BTreeMap<u32, Vec<u8>>,
 }
 
 /// An object held, with the second it was last written.
@@ -238,6 +184,8 @@ struct Stored {
     modified: u64,
     /// The entity tag of an object made of parts; none for an object of one PUT.
     joined: Option<String>,
+    /// Its metadata and checksum.
+    sums: Sums,
 }
 
 impl Stored {
@@ -267,6 +215,8 @@ struct State {
     min_part: Option<u64>,
     /// A DELETE takes the object whatever its `If-Match` says ([`FakeS3::ignore_delete_condition`]).
     ignore_delete_condition: bool,
+    /// Checksums are taken and neither checked nor kept ([`FakeS3::ignore_checksums`]).
+    ignore_checksums: bool,
     /// How many HEADs, and how many DELETEs of a whole object, the service has taken.
     heads: u32,
     deletes: u32,
@@ -407,6 +357,13 @@ impl FakeS3 {
     /// S3-compatible stores accept it and ignore it).
     pub fn ignore_delete_condition(&self) {
         self.lock().ignore_delete_condition = true;
+    }
+
+    /// Makes the service a store that does no checksums: it takes `x-amz-checksum-*` headers and
+    /// checks and keeps none of them, as a store without flexible checksums does. It still keeps
+    /// `x-amz-meta-*` headers.
+    pub fn ignore_checksums(&self) {
+        self.lock().ignore_checksums = true;
     }
 
     /// Holds the next AbortMultipartUpload request unanswered and unhandled: the
@@ -633,6 +590,8 @@ fn handle(state: &mut State, request: &Request) -> Vec<u8> {
                 initiated,
                 parts,
                 stored_at: BTreeMap::new(),
+                begun: checksums::of_create(request, state.ignore_checksums),
+                part_sums: BTreeMap::new(),
             };
             state.uploads.insert(id.clone(), upload);
             let body = format!(
@@ -655,6 +614,11 @@ fn handle(state: &mut State, request: &Request) -> Vec<u8> {
             let Some(upload) = upload else {
                 return error("404 Not Found", "NoSuchUpload");
             };
+            match checksums::of_part(request, upload.begun.sha256.is_some()) {
+                Ok(Some(sum)) => drop(upload.part_sums.insert(number, sum)),
+                Ok(None) => {}
+                Err(refused) => return refused,
+            }
             let kept = Kept::of(&request.body);
             let etag = part_tag(&kept);
             upload.stored_at.insert(number, stored_at);
@@ -697,7 +661,7 @@ fn handle(state: &mut State, request: &Request) -> Vec<u8> {
             if state.take(Failure::Head(state.heads)) {
                 return error("500 Internal Server Error", "InternalError");
             }
-            head(state, &key)
+            head(state, &key, request)
         }
         _ => error("501 Not Implemented", "NotImplemented"),
     }
@@ -726,9 +690,13 @@ fn put_object(state: &mut State, key: String, conditional: bool, request: &Reque
     if conditional && state.objects.contains_key(&key) {
         return error("412 Precondition Failed", "PreconditionFailed");
     }
+    let sums = match checksums::of_put(request, state.ignore_checksums) {
+        Ok(sums) => sums,
+        Err(refused) => return refused,
+    };
     let kept = Kept::of(&request.body);
     let headers = vec![("etag", etag_of(&kept))];
-    state.store(key, kept, None);
+    state.store(key, kept, None, sums);
     state.stats.single_puts += 1;
     answer("200 OK", &headers, b"")
 }
@@ -858,10 +826,11 @@ fn complete(
     let body = request.body.as_slice();
     let min_part = state.min_part.unwrap_or(super::MIN_PART_BYTES);
     let upload = state.uploads.get(id).filter(|u| u.key == key);
-    let assembled = upload
-        .ok_or("NoSuchUpload")
-        .and_then(|u| assemble(u, body, min_part));
-    let (object, joined) = match assembled {
+    let assembled = upload.ok_or("NoSuchUpload").and_then(|u| {
+        let sums = checksums::completed(&u.begun, u.parts.keys().map(|n| u.part_sums.get(n)));
+        assemble(u, body, min_part).map(|(object, joined)| (object, joined, sums))
+    });
+    let (object, joined, sums) = match assembled {
         Ok(assembled) => assembled,
         Err(code) => return error("400 Bad Request", code),
     };
@@ -879,7 +848,7 @@ fn complete(
         return refused;
     }
     state.uploads.remove(id);
-    state.store(key.to_owned(), object, Some(joined.clone()));
+    state.store(key.to_owned(), object, Some(joined.clone()), sums);
     state.stats.completed += 1;
     let done = format!(
         "<CompleteMultipartUploadResult><ETag>{joined}</ETag>\
@@ -888,15 +857,17 @@ fn complete(
     answer("200 OK", &[], done.as_bytes())
 }
 
-/// A HEAD: the size, entity tag and time of last write of an object, and no body.
-fn head(state: &State, key: &str) -> Vec<u8> {
+/// A HEAD: the size, entity tag and time of last write of an object, its metadata and, if asked,
+/// its checksum, and no body.
+fn head(state: &State, key: &str, request: &Request) -> Vec<u8> {
     let Some(stored) = state.objects.get(key) else {
         return answer("404 Not Found", &[], b"");
     };
-    let headers = [
+    let mut headers = vec![
         ("etag", stored.etag()),
         ("last-modified", http_date(stored.modified)),
     ];
+    headers.extend(checksums::head_headers(&stored.sums, request));
     answer_sized("200 OK", stored.kept.len, &headers, b"")
 }
 

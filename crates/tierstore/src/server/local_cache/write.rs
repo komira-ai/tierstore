@@ -76,7 +76,9 @@ impl Inner {
     pub(super) async fn put_whole(self: &Arc<Self>, key: &str, body: Bytes) -> Result<(), Error> {
         let len = body.len() as u64;
         let once: PartBody<'_> = stream::once(async move { Ok(body) }).boxed();
-        self.put_through(key, Some(len), once, Sent::Creates).await
+        self.put_through(key, Some(len), once, Sent::Creates)
+            .await
+            .map(drop)
     }
 
     /// Deletes the object: the entry first, then the upstream's. A read that fills the key
