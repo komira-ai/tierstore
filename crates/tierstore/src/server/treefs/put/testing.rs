@@ -13,9 +13,12 @@ use tracing::subscriber::{DefaultGuard, set_default};
 
 use super::commit::PutOutcome;
 use super::error::PutError;
+use super::fake::{FakePutSocket, FakePuts};
 use super::names::{PutDir, Sha256Digest};
 use super::replay::Replayed;
+use super::space::PutSpace;
 use super::store::{Handle, PutSettings, Rename, StagedStore};
+use super::upload::Uploader;
 use crate::TestClock;
 use crate::server::build_info::stderr_log::LineLog;
 use crate::server::local_cache::testing::FakeDisk;
@@ -175,4 +178,72 @@ pub(super) fn warnings() -> (DefaultGuard, Warnings) {
     let warnings = Warnings::default();
     let guard = set_default(LineLog::new(warnings.clone(), Level::WARN));
     (guard, warnings)
+}
+
+/// The commit deadline of a [`SpaceRig`].
+pub(super) const DEADLINE: Duration = Duration::from_secs(30);
+
+/// The owner of the files and of the directories under a prefix of a [`SpaceRig`].
+pub(super) const OWNER: (u32, u32) = (1234, 5678);
+
+/// A put directory over the store of a [`Rig`], uploading to a [`FakePuts`] on a socket in the
+/// scratch directory, with the rig's clock, whose pauses between tries move that clock and are
+/// recorded.
+pub(super) struct SpaceRig {
+    pub space: PutSpace,
+    pub puts: Arc<FakePuts>,
+    /// The pauses the uploads took, in order.
+    pub pauses: Arc<Mutex<Vec<Duration>>>,
+    _socket: Option<FakePutSocket>,
+    /// Last: the scratch directory goes after the socket in it is closed.
+    pub rig: Rig,
+}
+
+impl SpaceRig {
+    /// A put directory of generation 1 in a new scratch directory named after `name`.
+    pub(super) fn new(name: &str) -> Self {
+        Self::of(Rig::new(name), 1, true)
+    }
+
+    /// A put directory of `generation` over the store of `rig`, with a socket that answers or
+    /// none.
+    pub(super) fn of(rig: Rig, generation: u32, socket: bool) -> Self {
+        let path = rig.root.path().join("fill.sock");
+        let puts = Arc::new(FakePuts::default());
+        let socket = socket.then(|| FakePutSocket::start(&path, Arc::clone(&puts)));
+        let pauses = Arc::new(Mutex::new(Vec::new()));
+        let (clock, taken) = (rig.clock.clone(), Arc::clone(&pauses));
+        let pause = Arc::new(move |pause: Duration| {
+            taken.lock().unwrap().push(pause);
+            clock.advance(u64::try_from(pause.as_millis()).unwrap());
+        });
+        let uploader = Uploader::new(&path, DEADLINE, rig.clock.clone(), pause);
+        let space = PutSpace::new(
+            rig.open(),
+            uploader,
+            (OWNER, generation),
+            DEADLINE,
+            rig.clock.clone(),
+        );
+        Self {
+            space,
+            puts,
+            pauses,
+            _socket: socket,
+            rig,
+        }
+    }
+
+    /// The process after this one: a store opened again over the same stage, and the generation
+    /// after.
+    pub(super) fn successor(self, generation: u32) -> Self {
+        let Self {
+            space,
+            _socket,
+            rig,
+            ..
+        } = self;
+        drop((space, _socket));
+        Self::of(rig, generation, true)
+    }
 }

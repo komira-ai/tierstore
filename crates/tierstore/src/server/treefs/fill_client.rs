@@ -1,7 +1,7 @@
 //! The client of the fill socket (`server/fill_socket`): one line out, one line back, over
 //! connections kept for the next request. The requests of this process: `fill` (a blob inside an
 //! upstream object, or the whole object `cas/l/<sha256>` of a manifest), `touch` (not answered),
-//! and the pin requests.
+//! the pin requests, and `put` (a staged file of the put directory, answered in JSON).
 //!
 //! A request that meets a closed socket, or a connection that went away (the S3 instance of the
 //! node is being updated: the old instance keeps answering through its drain, and the new one
@@ -200,6 +200,19 @@ impl FillClient {
     /// Takes away the pins of `tree` of `mount`.
     pub(super) fn unpin(&self, mount: &str, tree: &str) -> Result<String, AskError> {
         self.ask_line(&format!("unpin {mount} {tree}"), true)
+    }
+
+    /// Asks for the `size` bytes of the file at `path`, which hash to `sha256`, to be put as the
+    /// object `key`, create-only; the answer is the line of JSON the socket gives.
+    pub(super) fn put(
+        &self,
+        key: &str,
+        sha256: &str,
+        size: u64,
+        path: &std::path::Path,
+    ) -> Result<String, AskError> {
+        let line = format!("put {key} {sha256} {size} from {}", path.display());
+        self.ask_line(&line, true)
     }
 
     /// Keeps the pins of `trees` of `mount` and takes away the others.

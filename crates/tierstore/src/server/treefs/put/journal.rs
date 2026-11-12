@@ -118,6 +118,10 @@ pub(super) fn decode(text: &[u8]) -> (Vec<Record>, u64) {
 #[derive(Debug)]
 pub(super) struct Journal {
     /// The stage directory.
+    #[cfg_attr(
+        not(test),
+        expect(dead_code, reason = "read only by the tests, which break the appends")
+    )]
     dir: PathBuf,
     /// `journal`, open to append.
     file: File,
