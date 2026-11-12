@@ -15,15 +15,20 @@
 //! (which verifies the signature of the repository metadata and of the package, and imports the
 //! key), and then holds the installed system to what the package promises: the package is at the
 //! version and release, `rpm -K` of the package downloaded from the pool says its digests and
-//! signatures are OK, the binary says `tierstore <version>+<commit>`, the unit, the `sysusers.d`
-//! entry and the conffile are there (the conffile registered as one with `rpm -qc`), and the
-//! service is not enabled.
+//! signatures are OK, the binary says `tierstore <version>+<commit>`, the unit template, the
+//! `sysusers.d` entry and the example configuration are there, `rpm -qc` lists no configuration
+//! file (nothing in `/etc` is the package's), `/etc/tierstore` is a directory of mode 0750 with no
+//! `config.toml` in it (the live configuration is the host's), no start marker of an instance was
+//! written, and no instance is enabled.
 
 use std::path::{Path, PathBuf};
 use std::process::Command;
 
 use super::aws::Answer;
-use super::check::{BINARY, CONFFILE, Host, SYSUSERS, UNIT, must, says, version_flag};
+use super::check::{
+    BINARY, CONFIG, CONFIG_DIR, EXAMPLE, Host, MARKER_DIR, SYSUSERS, UNIT, UNITS, must, says,
+    version_flag,
+};
 use crate::Error;
 
 /// The package.
@@ -175,28 +180,68 @@ pub fn check_rpm(host: &dyn Host, r: &Rpm) -> Result<Vec<String>, Error> {
     }
     let said = says(host, Path::new(&format!("/{BINARY}")), r.version, r.commit)?;
     for (what, path) in [
-        ("the unit", UNIT),
+        ("the unit template", UNIT),
         ("the sysusers.d entry", SYSUSERS),
-        ("the conffile", CONFFILE),
+        ("the example configuration", EXAMPLE),
     ] {
         let args = ["-c", "test -f \"$1\"", "sh", &format!("/{path}")].map(str::to_owned);
         if !host.run(program("sh"), &args)?.ok {
             problems.push(format!("{what} /{path} is not installed"));
         }
     }
+    // `rpm -qc` says `(contains no files)` for a package with no configuration file.
     let conffiles = must(host, program("rpm"), &["-qc", PACKAGE])?;
-    if !conffiles.lines().any(|l| l == format!("/{CONFFILE}")) {
+    for file in conffiles.lines().filter(|l| l.starts_with('/')) {
         problems.push(format!(
-            "/{CONFFILE} is not registered as a configuration file of the package"
+            "{file} is a configuration file of the package, and nothing in /etc is the package's"
         ));
     }
-    let enabled = must(
+    let mode = must(
         host,
         program("sh"),
         &[
             "-c",
-            "ls /etc/systemd/system/*.wants/tierstore.service /etc/systemd/system/tierstore.service 2>/dev/null; true",
+            "if [ -d \"$1\" ] && [ ! -L \"$1\" ]; then stat -c %a \"$1\"; fi",
+            "sh",
+            &format!("/{CONFIG_DIR}"),
         ],
+    )?;
+    match mode.trim() {
+        "750" => {}
+        "" => problems.push(format!("/{CONFIG_DIR} is not a directory the package made")),
+        other => problems.push(format!("/{CONFIG_DIR} has mode {other}, not 750")),
+    }
+    let left = must(
+        host,
+        program("sh"),
+        &[
+            "-c",
+            "ls -d \"$1\" 2>/dev/null; ls -A \"$2\" 2>/dev/null; true",
+            "sh",
+            &format!("/{CONFIG}"),
+            &format!("/{MARKER_DIR}"),
+        ],
+    )?;
+    for line in left.lines().filter(|l| !l.is_empty()) {
+        if line == format!("/{CONFIG}") {
+            problems.push(format!(
+                "/{CONFIG} is there, and the package never writes the host's configuration"
+            ));
+        } else {
+            problems.push(format!(
+                "/{MARKER_DIR}/{line} is there, and the package writes no start marker"
+            ));
+        }
+    }
+    let listing = UNITS
+        .iter()
+        .map(|u| format!("/etc/systemd/system/*.wants/{u} /etc/systemd/system/{u}"))
+        .collect::<Vec<_>>()
+        .join(" ");
+    let enabled = must(
+        host,
+        program("sh"),
+        &["-c", &format!("ls -d {listing} 2>/dev/null; true")],
     )?;
     for link in enabled.lines() {
         problems.push(format!(
@@ -207,7 +252,7 @@ pub fn check_rpm(host: &dyn Host, r: &Rpm) -> Result<Vec<String>, Error> {
         return Err(Error::Refused(problems));
     }
     Ok(vec![format!(
-        "check-rpm: {PACKAGE} {} installed from the suite testing on {}; rpm -K says OK; it says {said:?}; the unit, the sysusers.d entry and the conffile are there; the service is not enabled",
+        "check-rpm: {PACKAGE} {} installed from the suite testing on {}; rpm -K says OK; it says {said:?}; the unit template, the sysusers.d entry and the example configuration are there; no configuration file is the package's; /{CONFIG_DIR} is 750 with no config.toml and no start marker was written; no instance is enabled",
         r.version, r.arch
     )])
 }

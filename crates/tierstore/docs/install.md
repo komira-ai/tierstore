@@ -118,7 +118,7 @@ The example unit runs as a `tierstore` account with no login and no home. The sy
 install -m 0644 tierstore.conf /etc/sysusers.d/tierstore.conf
 systemd-sysusers /etc/sysusers.d/tierstore.conf
 install -d -m 0750 -o root -g tierstore /etc/tierstore
-install -m 0640 -o root -g tierstore tierstore.toml /etc/tierstore/tierstore.toml
+install -m 0640 -o root -g tierstore config.toml /etc/tierstore/config.toml
 install -m 0644 tierstore.service /etc/systemd/system/tierstore.service
 systemctl daemon-reload
 ```
@@ -136,7 +136,7 @@ Write each key file owned by `tierstore` with mode 0600 or 0400. [Keys and roles
 
 ## Edit the configuration file
 
-The values in the example file are examples: `192.0.2.10` is a documentation address, the endpoints are `s3-hot.example` and `s3-cold.example`. Edit the address of the `s3` interface, the proxy id, the bucket names, the tiers and `hot_store.budget` in `/etc/tierstore/tierstore.toml`. Give each process over the same tiers a proxy id of its own. [Configuration](configuration.md) lists every key. The unit gives only `--config` and the two flags of the drain.
+The values in the example file are examples: `192.0.2.10` is a documentation address, the endpoints are `s3-hot.example` and `s3-cold.example`. Edit the address of the `s3` interface, the proxy id, the bucket names, the tiers and `hot_store.budget` in `/etc/tierstore/config.toml`. Give each process over the same tiers a proxy id of its own. [Configuration](configuration.md) lists every key. The unit gives only `--config` and the two flags of the drain.
 
 The unit has no `[Install]` section, so installing it starts nothing and `systemctl enable` has nothing to link; it is also skipped while `/etc/tierstore/access.key` does not exist. If systemd already loaded the unit (the `daemon-reload` above does that), it keeps that copy until the next `daemon-reload` and warns that the unit changed on disk, so run it again after the edit to make the edit take effect. Start it by hand once the files are in place:
 
@@ -164,7 +164,9 @@ A host can instead let hostkeeper update tierstore through `tierstore update-hoo
 | `tierstore@.service`, the instance template | Linux: the units `tierstore@a` and `tierstore@b`, both run `current/bin/tierstore` and both serve port 9300 |
 | `tierstore.plist` | macOS: the one LaunchDaemon `/Library/LaunchDaemons/tierstore.plist` |
 
-On Linux an instance starts only when its marker file, `/var/lib/tierstore/run-a` or `run-b`, exists: the hook writes the marker before it starts the instance and removes it when it retires it, and at boot only the instance the hook's record names starts. The hook's record and its lock are in `/var/lib/tierstore-hook`. Both units are enabled; a standby instance is inactive by design. On a Mac the update is a restart with a gap.
+On Linux an instance starts only when its marker file, `/var/lib/tierstore/run-a` or `run-b`, exists: the hook writes the marker before it starts the instance and removes it when it retires it, and at boot only the instance the hook's record names starts. The hook's record and its lock are in `/var/lib/tierstore-hook`. With the archive package both units are enabled; with the Debian or RPM package hostkeeper starts the run units at its own start and the boot step `restore` starts the recorded one. A standby instance is inactive by design. On a Mac the update is a restart with a gap.
+
+A release of the Debian or RPM package is updated the same way: its units are the template of the package (see "What the packages place"), which runs `/usr/libexec/tierstore/tierstore`; the package manager replaces that binary before `cutover`, and hostkeeper re-installs the previous package before a rollback.
 
 ### What this does not do yet
 
@@ -229,7 +231,30 @@ sudo dnf install tierstore
 
 ### What the packages place
 
-The deb and the rpm place the binary at `/usr/libexec/tierstore/tierstore`, as "Place the binary" above does by hand, and nothing on the `PATH`: run it by that path, or link it from a directory that is on the `PATH` yourself. They also place the unit, the `sysusers.d` entry and the example configuration `/etc/tierstore/tierstore.toml` (a conffile, so an upgrade keeps your edits), create the `tierstore` account, and run `systemctl daemon-reload`. They start nothing and enable nothing: the key files and the configuration are still yours to write, as in the sections above. The package manager updates the binary on its own `apt upgrade` or `dnf upgrade`, with a restart of the unit left to you.
+The deb and the rpm place the binary at `/usr/libexec/tierstore/tierstore`, as "Place the binary" above does by hand, and nothing on the `PATH`: run it by that path, or link it from a directory that is on the `PATH` yourself. They also place the unit, the `sysusers.d` entry and the example configuration, create the `tierstore` account, and run `systemctl daemon-reload`:
+
+| path | what |
+|---|---|
+| `/usr/lib/systemd/system/tierstore@.service` | the template of the update hook's two instances, `tierstore@a` and `tierstore@b`; it runs `/usr/libexec/tierstore/tierstore --config /etc/tierstore/config.toml`, starts only when `/var/lib/tierstore/run-<instance>` exists, and is wanted by `multi-user.target` once enabled |
+| `/usr/lib/sysusers.d/tierstore.conf` | the `tierstore` account |
+| `/usr/share/doc/tierstore/examples/config.toml` | the example configuration; nothing reads it (the rpm's licence is under `/usr/share/licenses/tierstore`) |
+
+The package places no file in `/etc`: there is no conffile, and an upgrade or a purge touches nothing of yours. The instances read `/etc/tierstore/config.toml`, which you write. The package makes `/etc/tierstore` (mode 0750, group `tierstore`) only when nothing is at that path; an existing directory and the files in it are left as they are. It starts and enables nothing, and writes no start marker, so a host with no configuration starts no server. The key files and the configuration are yours to write, as in the sections above.
+
+A host without the update hook starts an instance by hand. Write `/etc/tierstore/config.toml` (start from the example) and the key files, then:
+
+```sh
+sudo install -d -m 0700 -o tierstore -g tierstore /var/lib/tierstore   # systemd makes it at start if you skip this
+sudo touch /var/lib/tierstore/run-a
+sudo systemctl enable tierstore@a
+sudo systemctl start tierstore@a
+```
+
+The unit runs with `ProtectSystem=strict` and `StateDirectory=tierstore`. A configuration that writes outside `/var/lib/tierstore` (a `dir` hot tier, a `[local_cache]` path, `hot_store.lock_file`) needs its paths in a drop-in of your own, `/etc/systemd/system/tierstore@.service.d/*.conf`, with `ReadWritePaths=` (and `RequiresMountsFor=` for a path on a mount of its own). The package never writes there.
+
+The package manager replaces the binary on `apt upgrade` or `dnf upgrade`; the running instance keeps the old one until `sudo systemctl restart tierstore@a` (a restart, with a gap in serving). Under hostkeeper the update hook hands over instead (see [Updates through hostkeeper](install.md#updates-through-hostkeeper)).
+
+An earlier package placed `tierstore.service` and the conffile `/etc/tierstore/tierstore.toml`. An upgrade from it removes the unit file and leaves the old configuration file on disk (dnf keeps an edited one as `.rpmsave`); a `tierstore.service` that is running keeps running until stopped. Move the file to `/etc/tierstore/config.toml`, then `sudo systemctl stop tierstore.service`, create the marker, enable and start `tierstore@a` as above.
 
 ### Release files on tierstore.dev
 

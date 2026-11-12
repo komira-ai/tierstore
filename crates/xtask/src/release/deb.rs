@@ -6,26 +6,32 @@
 //! macOS has no package. Nothing here runs `dpkg`; the build job of `artifacts.yml` runs
 //! `dpkg-deb --info` and `dpkg-deb --contents` on the result.
 //!
-//! The package installs, as `docs/install.md` of the `tierstore` crate places them by hand:
+//! The package installs:
 //!
 //! | path | mode | what |
 //! |---|---|---|
 //! | `/usr/libexec/tierstore/tierstore` | 0755 | the binary, the exact bytes given |
-//! | `/usr/lib/systemd/system/tierstore.service` | 0644 | `packaging/tierstore.service` |
+//! | `/usr/lib/systemd/system/tierstore@.service` | 0644 | `packaging/tierstore@.service`, the template of the two instances the update hook alternates between |
 //! | `/usr/lib/sysusers.d/tierstore.conf` | 0644 | `packaging/tierstore.conf`, the account of the unit |
-//! | `/etc/tierstore/tierstore.toml` | 0640 | `packaging/tierstore.toml`, an example; a conffile, so an upgrade keeps the host's edits |
+//! | `/usr/share/doc/tierstore/examples/config.toml` | 0644 | `packaging/config.toml`, an example that nothing reads |
 //! | `/usr/share/doc/tierstore/copyright` | 0644 | the repository's `LICENSE` |
 //! | `/usr/share/doc/tierstore/THIRD-PARTY-LICENSES.txt` | 0644 | the notice of the crates linked into the binary (`--licenses`) |
 //!
-//! The package depends on `systemd` and on `libc6 (>= 2.28)` ([`glibc::FLOOR`]), the glibc the
-//! binary is linked against, so `apt` and `dpkg` refuse to install it on a host with an older one.
+//! Nothing in `/etc` is the package's, so it has no conffile: the instances read the host's
+//! `/etc/tierstore/config.toml`, which the package never writes, and a purge removes nothing of the
+//! host's. The package depends on `systemd` and on `libc6 (>= 2.28)` ([`glibc::FLOOR`]), the glibc
+//! the binary is linked against, so `apt` and `dpkg` refuse to install it on a host with an older
+//! one.
 //!
 //! The maintainer scripts ([`POSTINST`], [`POSTRM`]) create the account with `systemd-sysusers`,
-//! give `/etc/tierstore` and the example file to its group (mode 0750 and 0640, as `docs/install.md`
-//! has them) and run `systemctl daemon-reload`. Nothing starts the unit and nothing enables it: the
-//! unit has no `[Install]` section and `ConditionPathExists=/etc/tierstore/access.key` keeps it
-//! from starting before the keys are placed. Removing the package leaves the account and
-//! `/etc/tierstore` (which holds the keys) in place.
+//! make `/etc/tierstore` (root, group `tierstore`, mode 0750) only when there is nothing at that
+//! path and the group exists, and run `systemctl daemon-reload` when systemd runs. An
+//! `/etc/tierstore` that is there is left as it is. Nothing starts an instance and nothing enables
+//! one: an instance starts only under its marker file (`/var/lib/tierstore/run-<letter>`), which
+//! the update hook writes and the package does not, so a host with no configuration starts no
+//! server. Removing the package leaves the account and `/etc/tierstore` (which holds the keys) in
+//! place. Both scripts take the paths they look at below `$DPKG_ROOT`, the root dpkg installs into
+//! (empty for the host itself).
 //!
 //! The file is the same bytes for the same inputs on every runner: an `ar` archive of
 //! `debian-binary`, `control.tar.gz` and `data.tar.gz`, in that order, every member and entry
@@ -46,7 +52,7 @@ use crate::release::glibc;
 use crate::release::hostkeeper_package::is_plain_version;
 use crate::sums;
 
-/// The package's name, and the directory of its files below `usr/share/doc` and `etc`.
+/// The package's name, and the directory of its files below `usr/share/doc`.
 pub const NAME: &str = "tierstore";
 
 /// The time of every member and entry: 2026-09-01T00:00:00Z. A fixed date so the same inputs give
@@ -67,39 +73,49 @@ pub const DESCRIPTION: [&str; 5] = [
     "New objects are written to the hot tier, copied to the cold tier in the background,",
     "and freed from the hot tier when it fills.",
     "",
-    "The package installs the binary, the systemd unit and an example configuration. It starts",
-    "and enables nothing: write the key files under /etc/tierstore, then start tierstore.service.",
+    "The package installs the binary, the systemd unit template tierstore@.service and an example",
+    "configuration. It starts and enables nothing: write /etc/tierstore/config.toml and its keys.",
 ];
 
-/// The unit, as `packaging/tierstore.service`.
-pub const UNIT: &str = include_str!("../../../../packaging/tierstore.service");
+/// The unit template, as `packaging/tierstore@.service`.
+pub const UNIT: &str = include_str!("../../../../packaging/tierstore@.service");
+
+/// Where the package puts the binary (below the root), the path the template's `ExecStart=`
+/// runs and the update hook finds in a staged version's tree.
+pub const BINARY_PATH: &str = "usr/libexec/tierstore/tierstore";
+
+/// Where the package puts the unit template (below the root).
+pub const UNIT_PATH: &str = "usr/lib/systemd/system/tierstore@.service";
+
+/// Where the package puts the example configuration (below the root).
+pub const EXAMPLE_PATH: &str = "usr/share/doc/tierstore/examples/config.toml";
+
+/// The configuration file the template's instances read: the host's, never the package's.
+pub const CONFIG_FILE: &str = "/etc/tierstore/config.toml";
 
 /// The sysusers.d entry of the unit's account, as `packaging/tierstore.conf`.
 pub const SYSUSERS: &str = include_str!("../../../../packaging/tierstore.conf");
 
-/// The example configuration, as `packaging/tierstore.toml`.
-pub const EXAMPLE_CONFIG: &str = include_str!("../../../../packaging/tierstore.toml");
+/// The example configuration, as `packaging/config.toml`.
+pub const EXAMPLE_CONFIG: &str = include_str!("../../../../packaging/config.toml");
 
 /// The licence of the project, as `LICENSE`: the package's `copyright` file.
 pub const LICENCE: &str = include_str!("../../../../LICENSE");
 
-/// The configuration file, the one conffile (an absolute path, as `conffiles` lists it).
-pub const CONFFILE: &str = "/etc/tierstore/tierstore.toml";
-
-/// The directories whose mode is not 0755, below the root, with their mode.
-const DIRECTORY_MODES: [(&str, u32); 1] = [("etc/tierstore", 0o750)];
-
 /// The `postinst` script.
 pub const POSTINST: &str = "#!/bin/sh
-# Creates the tierstore account, gives /etc/tierstore to its group and tells systemd about the
-# unit. It starts nothing and enables nothing.
+# Creates the tierstore account, makes /etc/tierstore for the host's configuration when nothing is
+# at that path, and tells systemd about the unit template. It starts nothing and enables nothing,
+# and it leaves an /etc/tierstore that is there, and every file in it, as it is.
 set -e
 if [ \"$1\" = configure ]; then
     systemd-sysusers /usr/lib/sysusers.d/tierstore.conf
-    chgrp tierstore /etc/tierstore /etc/tierstore/tierstore.toml
-    chmod 0750 /etc/tierstore
-    chmod 0640 /etc/tierstore/tierstore.toml
-    if [ -d /run/systemd/system ]; then
+    if [ ! -e \"$DPKG_ROOT/etc/tierstore\" ] && [ ! -L \"$DPKG_ROOT/etc/tierstore\" ] \\
+        && getent group tierstore >/dev/null; then
+        mkdir -m 0750 \"$DPKG_ROOT/etc/tierstore\"
+        chgrp tierstore \"$DPKG_ROOT/etc/tierstore\"
+    fi
+    if [ -d \"$DPKG_ROOT/run/systemd/system\" ]; then
         systemctl daemon-reload
     fi
 fi
@@ -108,10 +124,11 @@ exit 0
 
 /// The `postrm` script.
 pub const POSTRM: &str = "#!/bin/sh
-# Tells systemd the unit is gone. The account and /etc/tierstore, which holds the keys, stay.
+# Tells systemd the unit template is gone. The account and /etc/tierstore, which holds the
+# configuration and the keys, stay.
 set -e
 if [ \"$1\" = remove ] || [ \"$1\" = purge ]; then
-    if [ -d /run/systemd/system ]; then
+    if [ -d \"$DPKG_ROOT/run/systemd/system\" ]; then
         systemctl daemon-reload
     fi
 fi
@@ -139,22 +156,14 @@ pub fn file_name(version: &str, architecture: &str) -> String {
 pub fn files(binary: &[u8], notice: &[u8]) -> Vec<File> {
     let file = |path: &str, mode: u32, bytes: &[u8]| (path.to_owned(), mode, bytes.to_vec());
     vec![
-        file("usr/libexec/tierstore/tierstore", 0o755, binary),
-        file(
-            "usr/lib/systemd/system/tierstore.service",
-            0o644,
-            UNIT.as_bytes(),
-        ),
+        file(BINARY_PATH, 0o755, binary),
+        file(UNIT_PATH, 0o644, UNIT.as_bytes()),
         file(
             "usr/lib/sysusers.d/tierstore.conf",
             0o644,
             SYSUSERS.as_bytes(),
         ),
-        file(
-            "etc/tierstore/tierstore.toml",
-            0o640,
-            EXAMPLE_CONFIG.as_bytes(),
-        ),
+        file(EXAMPLE_PATH, 0o644, EXAMPLE_CONFIG.as_bytes()),
         file(
             "usr/share/doc/tierstore/copyright",
             0o644,
@@ -201,8 +210,8 @@ pub fn md5sums(files: &[File]) -> String {
 /// One entry of a tar: path, mode and content; a directory has none.
 type Entry = (String, u32, Option<Vec<u8>>);
 
-/// The directories above `files` (every prefix of a path, each once) as `./a/b/` entries, and
-/// the files as `./a/b/c`, sorted by path, each directory before what is in it.
+/// The directories above `files` (every prefix of a path, each once, mode 0755) as `./a/b/`
+/// entries, and the files as `./a/b/c`, sorted by path, each directory before what is in it.
 fn data_entries(files: &[File]) -> Vec<Entry> {
     let mut dirs = BTreeSet::new();
     for (path, _, _) in files {
@@ -215,11 +224,7 @@ fn data_entries(files: &[File]) -> Vec<Entry> {
     }
     let mut entries: Vec<Entry> = vec![("./".to_owned(), 0o755, None)];
     for dir in dirs {
-        let mode = DIRECTORY_MODES
-            .iter()
-            .find(|(name, _)| *name == dir)
-            .map_or(0o755, |(_, mode)| *mode);
-        entries.push((format!("./{dir}/"), mode, None));
+        entries.push((format!("./{dir}/"), 0o755, None));
     }
     for (path, mode, content) in files {
         entries.push((format!("./{path}"), *mode, Some(content.clone())));
@@ -317,11 +322,6 @@ pub fn build(version: &str, architecture: &str, files: &[File]) -> Result<Vec<u8
             "./control".to_owned(),
             0o644,
             script(&control(version, architecture, files)),
-        ),
-        (
-            "./conffiles".to_owned(),
-            0o644,
-            script(&format!("{CONFFILE}\n")),
         ),
         ("./md5sums".to_owned(), 0o644, script(&md5sums(files))),
         ("./postinst".to_owned(), 0o755, script(POSTINST)),

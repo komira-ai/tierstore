@@ -1,6 +1,8 @@
+use std::os::unix::fs::PermissionsExt;
 use std::path::PathBuf;
 
 use super::*;
+use crate::release::script_host::{GETENT_CALL, Host, RELOAD_CALL, SYSUSERS_CALL};
 use crate::testdir::TestDir;
 
 /// A stand-in binary and notice.
@@ -46,8 +48,8 @@ fn content(bytes: &[u8], path: &str) -> Vec<u8> {
 fn the_package_names_the_release_and_architecture_in_its_header() {
     // Catches: a name, version, release or architecture other than the file name says, which
     // `dnf` would take for another package; a payload that is not gzip, which an EL8 `rpm`
-    // reads but a zstd or xz one it may not; a dependency other than `systemd`, the shell of
-    // the scriptlets and the `config(tierstore)` that rpm adds for a %config file.
+    // reads but a zstd or xz one it may not; a dependency other than `systemd` and the shell of
+    // the scriptlets (a `config(tierstore)` would mean a %config file, and the package has none).
     let info = inspect(&package()).expect("inspect");
     assert_eq!(
         info.nevra,
@@ -59,15 +61,7 @@ fn the_package_names_the_release_and_architecture_in_its_header() {
         )
     );
     assert_eq!(info.compression, "gzip");
-    assert_eq!(
-        info.requires,
-        [
-            "/bin/sh",
-            "config(tierstore) = 0.4.0-1",
-            "glibc >= 2.28",
-            "systemd"
-        ]
-    );
+    assert_eq!(info.requires, ["/bin/sh", "glibc >= 2.28", "systemd"]);
     let other = inspect(&build("0.4.1", "aarch64", &files(BINARY, NOTICE)).expect("build"))
         .expect("inspect");
     assert_eq!(other.nevra.1, "0.4.1");
@@ -77,8 +71,9 @@ fn the_package_names_the_release_and_architecture_in_its_header() {
 #[test]
 fn the_package_lists_the_files_of_the_deb_at_the_same_modes_owned_by_root() {
     // Catches: a file at another path or mode than the Debian package places it, an owner that
-    // is not root, a directory the package does not own, the example configuration replaced on
-    // upgrade (it must be %config(noreplace)), and the licence not marked as %license.
+    // is not root, a directory the package does not own, anything in /etc (whose files are the
+    // host's, which an erase would remove) or a %config file, and the licence not marked as
+    // %license.
     let entry = |path: &str, mode: u16, directory: bool, flags: (bool, bool, bool)| Entry {
         path: path.to_owned(),
         mode,
@@ -92,15 +87,8 @@ fn the_package_lists_the_files_of_the_deb_at_the_same_modes_owned_by_root() {
     assert_eq!(
         inspect(&package()).expect("inspect").entries,
         [
-            entry("/etc/tierstore", 0o750, true, none),
             entry(
-                "/etc/tierstore/tierstore.toml",
-                0o640,
-                false,
-                (true, true, false)
-            ),
-            entry(
-                "/usr/lib/systemd/system/tierstore.service",
+                "/usr/lib/systemd/system/tierstore@.service",
                 0o644,
                 false,
                 none
@@ -111,6 +99,13 @@ fn the_package_lists_the_files_of_the_deb_at_the_same_modes_owned_by_root() {
             entry("/usr/share/doc/tierstore", 0o755, true, none),
             entry(
                 "/usr/share/doc/tierstore/THIRD-PARTY-LICENSES.txt",
+                0o644,
+                false,
+                none
+            ),
+            entry("/usr/share/doc/tierstore/examples", 0o755, true, none),
+            entry(
+                "/usr/share/doc/tierstore/examples/config.toml",
                 0o644,
                 false,
                 none
@@ -157,16 +152,16 @@ fn the_payload_holds_the_binary_the_packaging_files_the_licence_and_the_notice()
     };
     assert_eq!(content(&bytes, "/usr/libexec/tierstore/tierstore"), BINARY);
     assert_eq!(
-        content(&bytes, "/usr/lib/systemd/system/tierstore.service"),
-        packaging("tierstore.service")
+        content(&bytes, "/usr/lib/systemd/system/tierstore@.service"),
+        packaging("tierstore@.service")
     );
     assert_eq!(
         content(&bytes, "/usr/lib/sysusers.d/tierstore.conf"),
         packaging("tierstore.conf")
     );
     assert_eq!(
-        content(&bytes, "/etc/tierstore/tierstore.toml"),
-        packaging("tierstore.toml")
+        content(&bytes, "/usr/share/doc/tierstore/examples/config.toml"),
+        packaging("config.toml")
     );
     assert_eq!(
         content(&bytes, "/usr/share/licenses/tierstore/LICENSE"),
@@ -182,8 +177,8 @@ fn the_payload_holds_the_binary_the_packaging_files_the_licence_and_the_notice()
 #[test]
 fn the_scriptlets_run_with_sh_and_start_and_enable_nothing() {
     // Catches: a scriptlet that is not valid sh (only a host's rpm would find it), one with
-    // another interpreter, one that starts or enables the unit (which must wait for the keys
-    // under /etc/tierstore), and a %postun that reloads systemd on an upgrade, not only when
+    // another interpreter, one that starts or enables an instance (which must wait for the
+    // host's configuration and keys under /etc/tierstore), and a %postun that reloads systemd on an upgrade, not only when
     // the last version goes.
     let info = inspect(&package()).expect("inspect");
     assert_eq!(info.post, (POST.to_owned(), vec!["/bin/sh".to_owned()]));
@@ -220,17 +215,39 @@ fn the_scriptlets_run_with_sh_and_start_and_enable_nothing() {
 
 #[test]
 fn the_scriptlets_do_what_the_postinst_does_where_a_host_has_systemd() {
-    // Catches: a %post whose account, group and modes differ from the Debian postinst's, so a
-    // host would run the same unit under another account or read the keys with another mode.
-    for line in [
-        "chgrp tierstore /etc/tierstore /etc/tierstore/tierstore.toml",
-        "chmod 0750 /etc/tierstore",
-        "chmod 0640 /etc/tierstore/tierstore.toml",
-        "systemd-sysusers /usr/lib/sysusers.d/tierstore.conf",
-        "systemctl daemon-reload",
+    // Catches: a %post whose account, group, mode or condition for /etc/tierstore differs from
+    // the Debian postinst's (whose behaviour its own tests run), so a host would run the same
+    // unit under another account, read the keys with another mode, or have a directory of its
+    // own changed by one package and not the other.
+    for (deb_line, rpm_line) in [
+        (
+            "if [ ! -e \"$DPKG_ROOT/etc/tierstore\" ] && [ ! -L \"$DPKG_ROOT/etc/tierstore\" ] \\",
+            "if [ ! -e /etc/tierstore ] && [ ! -L /etc/tierstore ] && getent group tierstore >/dev/null 2>&1; then",
+        ),
+        (
+            "mkdir -m 0750 \"$DPKG_ROOT/etc/tierstore\"",
+            "mkdir -m 0750 /etc/tierstore",
+        ),
+        (
+            "chgrp tierstore \"$DPKG_ROOT/etc/tierstore\"",
+            "chgrp tierstore /etc/tierstore",
+        ),
+        (
+            "systemd-sysusers /usr/lib/sysusers.d/tierstore.conf",
+            "systemd-sysusers /usr/lib/sysusers.d/tierstore.conf",
+        ),
+        ("systemctl daemon-reload", "systemctl daemon-reload"),
     ] {
-        assert!(deb::POSTINST.contains(line), "{line}");
-        assert!(POST.contains(line), "{line}");
+        assert!(
+            deb::POSTINST.lines().any(|l| l.trim() == deb_line),
+            "{deb_line}"
+        );
+        assert!(POST.lines().any(|l| l.trim() == rpm_line), "{rpm_line}");
+    }
+    assert!(deb::POSTINST.contains("&& getent group tierstore >/dev/null; then"));
+    for script in [deb::POSTINST, POST] {
+        assert!(!script.contains("chmod"), "{script}");
+        assert!(!script.contains("config.toml"), "{script}");
     }
 }
 
@@ -446,19 +463,18 @@ fn rpm_info_lists_the_header_and_the_files_as_rpm_does() {
             "Release: 1",
             "Architecture: x86_64",
             "Compression: gzip",
-            "Requires: /bin/sh, config(tierstore) = 0.4.0-1, glibc >= 2.28, systemd",
+            "Requires: /bin/sh, glibc >= 2.28, systemd",
         ]
     );
     assert!(
-        lines.contains(
-            &"-0640 root:root /etc/tierstore/tierstore.toml %config(noreplace)".to_owned()
-        )
+        lines.contains(&"-0644 root:root /usr/share/doc/tierstore/examples/config.toml".to_owned())
     );
-    assert!(lines.contains(&"d0750 root:root /etc/tierstore".to_owned()));
+    assert!(lines.contains(&"d0755 root:root /usr/share/doc/tierstore/examples".to_owned()));
     assert!(
         lines
             .contains(&"-0644 root:root /usr/share/licenses/tierstore/LICENSE %license".to_owned())
     );
+    assert!(lines.iter().all(|l| !l.contains("/etc/")), "{lines:?}");
     assert_eq!(lines.len(), 6 + 10);
     let mut bad = package();
     let last = bad.len() - 1;
@@ -502,4 +518,113 @@ fn a_requirement_is_written_as_rpm_writes_it() {
     ] {
         assert_eq!(requirement(dependency), text);
     }
+}
+
+#[test]
+fn rpm_info_marks_a_configuration_file_as_rpm_does() {
+    // Catches: a read-back that would not show a %config(noreplace) file, so a package that
+    // gained one (a file in /etc an erase would remove) would read back like this one.
+    let mut builder = PackageBuilder::new("t", "1.0.0", "Apache-2.0", "x86_64", "t");
+    builder
+        .using_config(BuildConfig::v4().source_date(deb::MTIME))
+        .build_host(BUILD_HOST)
+        .packager(deb::MAINTAINER)
+        .post_install_script(Scriptlet::new(POST).prog(vec!["/bin/sh"]))
+        .post_uninstall_script(Scriptlet::new(POSTUN).prog(vec!["/bin/sh"]))
+        .with_file_contents(
+            b"x".to_vec(),
+            FileOptions::new("/etc/t/t.toml")
+                .mode(FileMode::regular(0o640))
+                .config()
+                .noreplace(),
+        )
+        .expect("a file");
+    let mut bytes = Vec::new();
+    builder
+        .build()
+        .expect("a package")
+        .write(&mut bytes)
+        .expect("written");
+    let dir = scratch("info-config");
+    let lines = rpm_info(&put(&dir, "t.rpm", &bytes)).expect("info");
+    assert!(
+        lines.contains(&"-0640 root:root /etc/t/t.toml %config(noreplace)".to_owned()),
+        "{lines:?}"
+    );
+}
+
+/// `script` with its absolute paths of the host taken below the root of `host`, as the Debian
+/// scripts take them below `$DPKG_ROOT` (rpm has no such variable).
+fn rooted(host: &Host, script: &str) -> String {
+    let root = host.root().display().to_string();
+    script
+        .replace("/etc/tierstore", &format!("{root}/etc/tierstore"))
+        .replace("/run/systemd/system", &format!("{root}/run/systemd/system"))
+}
+
+#[test]
+fn post_makes_the_config_directory_only_where_nothing_is_and_starts_nothing() {
+    // Catches: a %post that does not make /etc/tierstore (root, group tierstore, 0750) on a host
+    // that has none, one that changes a host's /etc/tierstore or a file in it on an install or an
+    // upgrade, one that fails on a link there, one that fails without the group or without
+    // systemd, and one that starts, enables or writes the configuration or a start marker.
+    let host = Host::new("rpm-post-fresh", true, true);
+    let post = rooted(&host, POST);
+    let dir = host.root().join("etc/tierstore");
+    let (ok, calls) = host.run(&post, &["1"]);
+    assert!(ok);
+    assert_eq!(
+        calls,
+        [
+            SYSUSERS_CALL.to_owned(),
+            GETENT_CALL.to_owned(),
+            format!("chgrp tierstore {}", dir.display()),
+            RELOAD_CALL.to_owned(),
+        ]
+    );
+    assert_eq!(host.config_dir_mode(), Some(0o750));
+    assert_eq!(std::fs::read_dir(&dir).expect("read").count(), 0);
+    assert!(!host.root().join("var").exists(), "no start marker");
+    std::fs::set_permissions(&dir, std::fs::Permissions::from_mode(0o700)).expect("mode");
+    put(&dir, "config.toml", b"# the host's\n");
+    let (ok, calls) = host.run(&post, &["2"]);
+    assert!(ok);
+    assert_eq!(calls, [SYSUSERS_CALL, RELOAD_CALL]);
+    assert_eq!(host.config_dir_mode(), Some(0o700));
+    assert_eq!(
+        std::fs::read(dir.join("config.toml")).expect("kept"),
+        b"# the host's\n"
+    );
+
+    let host = Host::new("rpm-post-link", true, true);
+    std::os::unix::fs::symlink("/nonexistent-tierstore", host.root().join("etc/tierstore"))
+        .expect("a dangling link");
+    let (ok, calls) = host.run(&rooted(&host, POST), &["1"]);
+    assert!(ok);
+    assert_eq!(calls, [SYSUSERS_CALL, RELOAD_CALL]);
+
+    let host = Host::new("rpm-post-no-group", false, false);
+    let (ok, calls) = host.run(&rooted(&host, POST), &["1"]);
+    assert!(ok);
+    assert_eq!(calls, [SYSUSERS_CALL, GETENT_CALL]);
+    assert_eq!(host.config_dir_mode(), None);
+}
+
+#[test]
+fn postun_reloads_systemd_only_when_the_last_version_goes_and_leaves_the_host_files() {
+    // Catches: a %postun that reloads on an upgrade (an argument above 0), deletes the host's
+    // /etc/tierstore, or calls systemctl with no systemd.
+    let host = Host::new("rpm-postun", true, true);
+    let dir = host.root().join("etc/tierstore");
+    std::fs::create_dir_all(&dir).expect("the host's directory");
+    put(&dir, "config.toml", b"# the host's\n");
+    let postun = rooted(&host, POSTUN);
+    assert_eq!(
+        host.run(&postun, &["0"]),
+        (true, vec![RELOAD_CALL.to_owned()])
+    );
+    assert_eq!(host.run(&postun, &["1"]), (true, Vec::new()));
+    assert!(dir.join("config.toml").is_file());
+    let host = Host::new("rpm-postun-no-systemd", false, true);
+    assert_eq!(host.run(&rooted(&host, POSTUN), &["0"]), (true, Vec::new()));
 }

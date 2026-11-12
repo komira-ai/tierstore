@@ -23,15 +23,15 @@
 //! `package-version=<X.Y.Z>` and `targets=<JSON>`: the proto3 JSON of hostkeeper's `TargetList`
 //! per platform (`linux-x86_64` for `amd64`, `linux-arm64` for `arm64`; no `macos-arm64`, which
 //! has no package here), as hostkeeper's `cargo xtask release targets` writes it for its own
-//! native packages. The manifest of an entry is the hook bounds, run unit and health URL that
-//! [`entry`] names (no hook command: hostkeeper's built-in steps run); `--min-hostkeeper` is its `minHostkeeper`, the first hostkeeper release whose
-//! daemon announces `apt`.
+//! native packages. The manifest of an entry is the update hook, its bounds and params, the run
+//! units and the health URL that [`entry`] names; `--min-hostkeeper` is its `minHostkeeper`, the
+//! first hostkeeper release whose daemon runs the hook command of an `apt` entry.
 
 use std::path::Path;
 
 use serde_json::{Value, json};
 
-use super::deb::{architecture, file_name};
+use super::deb::{BINARY_PATH, CONFIG_FILE, architecture, file_name};
 use super::hostkeeper_package::is_plain_version;
 use super::{Gh, append_output};
 use crate::Error;
@@ -63,16 +63,19 @@ fn packages_url(apt_url: &str, arch: &str) -> String {
 
 /// The entry of the installer `apt` for the `.deb` of `version` whose SHA-256 is `digest`.
 ///
-/// The hook's bounds and deadlines and the health URL are those of the package's archive manifest
-/// (`packaging/hostkeeper/manifest.toml.in`; a test holds the two equal). The entry names no
-/// `hook.command`, no `hook.boot` and no `params`, so hostkeeper runs its built-in steps (stop,
-/// swap, start): an update of the `.deb` is a restart. `tierstore update-hook` is not adapted to
-/// the `.deb`'s single unit yet (it reads `<release>/bin/tierstore` and hands the sockets over
-/// between the instances `tierstore@a` and `tierstore@b`), and hostkeeper refuses a `boot` step
-/// with no command, so the archive manifest's `boot = "restore"` is not sent. The built-in steps
-/// ignore `params`, so the update hook's are not sent either. The run unit is `tierstore.service`,
-/// the one regular unit file of the `.deb`: an instance of `tierstore@.service` cannot be a `run`
-/// unit of a package.
+/// The `.deb` installs the template `tierstore@.service`, and the entry runs it as the archive
+/// manifest (`packaging/hostkeeper/manifest.toml.in`) does: the run units are the instances
+/// `tierstore@a.service` and `tierstore@b.service`, and the hook is `tierstore update-hook`, the
+/// package's binary at its installed path ([`BINARY_PATH`]), which hostkeeper runs from the
+/// version's sealed tree. The hook alternates between the instances with a hand-over of the
+/// listening sockets, starts the one its record names at boot (`boot = "restore"`), and, in
+/// `prepare`, has the staged release (and the previous one) check the host's configuration file,
+/// the `config_file` param ([`CONFIG_FILE`]), before anything is installed: a host with no
+/// configuration, or one the release refuses, fails `prepare` and starts nothing. The hook's
+/// bounds and deadlines, the boot step and the health URL are the archive manifest's (a test holds
+/// them equal). The template has a `[Install]` section, but hostkeeper finds no unit file named
+/// after an instance in the tree, so it writes no enablement link; it starts the run units at its
+/// own start instead, and only the instance with a start marker runs.
 pub fn entry(version: &str, digest: &str, min_hostkeeper: &str) -> Value {
     json!({
         "installer": "apt",
@@ -82,6 +85,8 @@ pub fn entry(version: &str, digest: &str, min_hostkeeper: &str) -> Value {
         "manifest": {
             "package": "tierstore",
             "hook": {
+                "command": [format!("/{BINARY_PATH}"), "update-hook"],
+                "boot": "restore",
                 "timeoutSecs": {
                     "prepare": "0", "cutover": "300", "verify": "1000",
                     "rollback": "600", "cleanup": "1300", "uninstall": "300",
@@ -90,8 +95,12 @@ pub fn entry(version: &str, digest: &str, min_hostkeeper: &str) -> Value {
                 "promotionCeilingSecs": "3600",
                 "cleanupRetries": 3,
             },
-            "run": ["tierstore.service"],
+            "run": ["tierstore@a.service", "tierstore@b.service"],
             "healthUrl": "http://127.0.0.1:9300/readyz",
+            "params": {
+                "config_file": {"text": CONFIG_FILE},
+                "service_manager": {"text": "systemd"},
+            },
             "minHostkeeper": min_hostkeeper,
             "installerBounds": {"stageSecs": "600", "activateSecs": "300", "removeSecs": "300"},
         },

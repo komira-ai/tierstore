@@ -1,0 +1,79 @@
+# tierstore (crates/tierstore) as one of the two instances of the update hook, as the deb and rpm
+# packages install it: the template of tierstore@a.service and tierstore@b.service, at
+# /usr/lib/systemd/system/tierstore@.service. %i is the instance's letter. It is the template of
+# hostkeeper's archive package (packaging/hostkeeper/units/tierstore@.service) but for the binary,
+# which is the package's, /usr/libexec/tierstore/tierstore; a test holds the two equal otherwise.
+# Both instances serve port 9300, and the update hook (`tierstore update-hook`,
+# crates/tierstore/docs/update-hook.md) alternates between them: an update starts the idle one,
+# which takes the listening sockets of the live one over the hand-over socket, and the live one
+# drains and exits 0, which this unit does not restart (Restart=on-failure). The package manager
+# replaces the binary before the hook starts the idle instance; the live one runs on from the file
+# it started.
+#
+# An instance starts only when its marker file, /var/lib/tierstore/run-%i, exists
+# (ConditionPathExists= below). The hook writes the marker before it starts the instance and
+# removes it when it retires the instance. The package writes no marker, starts nothing and enables
+# nothing, so installing it on a host with no configuration starts no server. On a host the hook
+# does not run, start one instance by hand once /etc/tierstore/config.toml and its key files are in
+# place: create /var/lib/tierstore/run-a and `systemctl enable --now tierstore@a`. At boot, with
+# both instances enabled, only the one with a marker starts. A skipped condition is not a failure:
+# the unit stays inactive.
+#
+# The hand-over socket lives in the StateDirectory: systemd sets STATE_DIRECTORY for it, and a
+# process that has it and a configuration without `server.handoff_socket` uses
+# /var/lib/tierstore/handoff.sock, so the file need not name it. Under ProtectSystem=strict the
+# StateDirectory is the only place the process may write: a configuration that writes elsewhere (a
+# directory hot tier, `[local_cache]`, `hot_store.lock_file`) needs a drop-in of the host's in
+# /etc/systemd/system/tierstore@.service.d/ that gives the path in ReadWritePaths= (and, for a path
+# on a mount of its own, RequiresMountsFor=). The package never writes there.
+#
+# The drain is the defaults of `server.drain_lb_wait` (10 s) and `server.drain_deadline` (15 m),
+# which TimeoutStopSec= is above; the unit passes no flag for it.
+#
+# /etc/tierstore/config.toml is the host's: the package ships packaging/config.toml only as the
+# example /usr/share/doc/tierstore/examples/config.toml, which nothing reads. Its key files are
+# owned by the account of User=, mode 0600, and the keys of the file that name them are the only way
+# the process is given a secret (it reads no environment variable).
+[Unit]
+Description=tierstore instance %i, an S3 server over a hot and a cold tier
+Documentation=https://github.com/komira-ai/tierstore/blob/main/packaging/README.md
+After=network-online.target
+Wants=network-online.target
+ConditionPathExists=/var/lib/tierstore/run-%i
+StartLimitIntervalSec=1h
+StartLimitBurst=5
+
+[Service]
+Type=simple
+User=tierstore
+StateDirectory=tierstore
+StateDirectoryMode=0700
+ExecStart=/usr/libexec/tierstore/tierstore \
+  --config /etc/tierstore/config.toml
+KillSignal=SIGTERM
+TimeoutStopSec=960
+Restart=on-failure
+RestartSec=30
+RestartPreventExitStatus=2 3
+LimitNOFILE=65536
+UMask=0077
+NoNewPrivileges=yes
+ProtectSystem=strict
+ProtectHome=yes
+PrivateTmp=yes
+PrivateDevices=yes
+CapabilityBoundingSet=
+RestrictAddressFamilies=AF_UNIX AF_INET AF_INET6
+RestrictNamespaces=yes
+RestrictRealtime=yes
+LockPersonality=yes
+MemoryDenyWriteExecute=yes
+ProtectKernelTunables=yes
+ProtectKernelModules=yes
+ProtectKernelLogs=yes
+ProtectControlGroups=yes
+SystemCallArchitectures=native
+SystemCallFilter=@system-service
+
+[Install]
+WantedBy=multi-user.target

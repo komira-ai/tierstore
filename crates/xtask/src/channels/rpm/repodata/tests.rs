@@ -58,8 +58,8 @@ fn the_chunks_of_a_package_are_what_createrepo_writes() {
   <description>New objects are written to the hot tier, copied to the cold tier in the background,
 and freed from the hot tier when it fills.
 
-The package installs the binary, the systemd unit and an example configuration. It starts
-and enables nothing: write the key files under /etc/tierstore, then start tierstore.service.</description>
+The package installs the binary, the systemd unit template tierstore@.service and an example
+configuration. It starts and enables nothing: write /etc/tierstore/config.toml and its keys.</description>
   <packager>tierstore authors &lt;tierstore@users.noreply.github.com&gt;</packager>
   <url>https://tierstore.dev</url>
   <time file=\"1788220800\" build=\"1788220800\"/>
@@ -73,7 +73,6 @@ and enables nothing: write the key files under /etc/tierstore, then start tierst
     <rpm:sourcerpm></rpm:sourcerpm>
     <rpm:header-range start=\"{start}\" end=\"{end}\"/>
     <rpm:provides>
-      <rpm:entry name=\"config(tierstore)\" flags=\"EQ\" epoch=\"0\" ver=\"1.2.3\" rel=\"1\"/>
       <rpm:entry name=\"group(tierstore)\"/>
       <rpm:entry name=\"tierstore\" flags=\"EQ\" epoch=\"0\" ver=\"1.2.3\" rel=\"1\"/>
       <rpm:entry name=\"tierstore(x86-64)\" flags=\"EQ\" epoch=\"0\" ver=\"1.2.3\" rel=\"1\"/>
@@ -81,21 +80,21 @@ and enables nothing: write the key files under /etc/tierstore, then start tierst
         file.len()
     );
     assert!(p.primary.starts_with(&primary), "{}", p.primary);
-    assert!(p.primary.contains("    <rpm:requires>\n      <rpm:entry name=\"/bin/sh\"/>\n      <rpm:entry name=\"config(tierstore)\" flags=\"EQ\" epoch=\"0\" ver=\"1.2.3\" rel=\"1\"/>\n      <rpm:entry name=\"glibc\" flags=\"GE\" epoch=\"0\" ver=\"2.28\"/>\n      <rpm:entry name=\"systemd\"/>\n    </rpm:requires>\n    <file>/etc/tierstore/tierstore.toml</file>\n  </format>\n</package>\n"));
+    assert!(p.primary.ends_with("    <rpm:requires>\n      <rpm:entry name=\"/bin/sh\"/>\n      <rpm:entry name=\"glibc\" flags=\"GE\" epoch=\"0\" ver=\"2.28\"/>\n      <rpm:entry name=\"systemd\"/>\n    </rpm:requires>\n  </format>\n</package>\n"), "{}", p.primary);
     assert!(!p.primary.contains("rpmlib("));
     assert_eq!(
         p.filelists,
         format!(
             "<package pkgid=\"{pkgid}\" name=\"tierstore\" arch=\"x86_64\">
   <version epoch=\"0\" ver=\"1.2.3\" rel=\"1\"/>
-  <file type=\"dir\">/etc/tierstore</file>
-  <file>/etc/tierstore/tierstore.toml</file>
-  <file>/usr/lib/systemd/system/tierstore.service</file>
+  <file>/usr/lib/systemd/system/tierstore@.service</file>
   <file>/usr/lib/sysusers.d/tierstore.conf</file>
   <file type=\"dir\">/usr/libexec/tierstore</file>
   <file>/usr/libexec/tierstore/tierstore</file>
   <file type=\"dir\">/usr/share/doc/tierstore</file>
   <file>/usr/share/doc/tierstore/THIRD-PARTY-LICENSES.txt</file>
+  <file type=\"dir\">/usr/share/doc/tierstore/examples</file>
+  <file>/usr/share/doc/tierstore/examples/config.toml</file>
   <file type=\"dir\">/usr/share/licenses/tierstore</file>
   <file>/usr/share/licenses/tierstore/LICENSE</file>
 </package>
@@ -114,6 +113,32 @@ and enables nothing: write the key files under /etc/tierstore, then start tierst
     );
     assert_eq!(p.href, format!("../../pool/tierstore/{FILE}"));
     assert_eq!(p.pkgid, pkgid);
+}
+
+#[test]
+fn primary_lists_the_files_a_dependency_may_name_and_no_other() {
+    // Catches: a file under /etc or a bin directory left out of primary.xml (dnf would not
+    // resolve a dependency on it without the file lists), and another file put in it.
+    let mut files = build::files(b"x86_64", b"notice");
+    for path in [
+        "etc/tierstore/a.toml",
+        "usr/bin/a",
+        "usr/sbin/b",
+        "bin/c",
+        "sbin/d",
+    ] {
+        files.push((path.to_owned(), 0o644, b"x".to_vec()));
+    }
+    let file = build::build("1.2.3", "x86_64", &files).expect("build");
+    let p = package_of(FILE, &file).expect("package");
+    assert!(
+        p.primary.ends_with(
+            "    <file>/bin/c</file>\n    <file>/etc/tierstore/a.toml</file>\n    <file>/sbin/d</file>\n    <file>/usr/bin/a</file>\n    <file>/usr/sbin/b</file>\n  </format>\n</package>\n"
+        ),
+        "{}",
+        p.primary
+    );
+    assert_eq!(p.primary.matches("<file>").count(), 5, "{}", p.primary);
 }
 
 #[test]

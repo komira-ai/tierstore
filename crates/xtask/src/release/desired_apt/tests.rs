@@ -13,7 +13,7 @@ use crate::testdir::TestDir;
 
 const REPO: &str = "example/tierstore";
 const COMMIT: &str = "0123456789abcdef0123456789abcdef01234567";
-const FLOOR: &str = "0.1.216";
+const FLOOR: &str = "0.1.225";
 const URL: &str = "https://packages.komira.ai/apt";
 
 fn scratch(name: &str) -> TestDir {
@@ -187,6 +187,8 @@ fn expected_entry(arch: &str) -> Value {
         "manifest": {
             "package": "tierstore",
             "hook": {
+                "command": ["/usr/libexec/tierstore/tierstore", "update-hook"],
+                "boot": "restore",
                 "timeoutSecs": {
                     "prepare": "0", "cutover": "300", "verify": "1000",
                     "rollback": "600", "cleanup": "1300", "uninstall": "300",
@@ -195,9 +197,13 @@ fn expected_entry(arch: &str) -> Value {
                 "promotionCeilingSecs": "3600",
                 "cleanupRetries": 3,
             },
-            "run": ["tierstore.service"],
+            "run": ["tierstore@a.service", "tierstore@b.service"],
             "healthUrl": "http://127.0.0.1:9300/readyz",
-            "minHostkeeper": "0.1.216",
+            "params": {
+                "config_file": {"text": "/etc/tierstore/config.toml"},
+                "service_manager": {"text": "systemd"},
+            },
+            "minHostkeeper": "0.1.225",
             "installerBounds": {"stageSecs": "600", "activateSecs": "300", "removeSecs": "300"},
         },
     })
@@ -274,8 +280,10 @@ fn the_hook_and_health_of_an_entry_are_those_of_the_archive_manifest() {
         sent_hook["cleanupRetries"],
         json!(hook["cleanup_retries"].as_integer().expect("retries"))
     );
-    // The archive manifest keeps its boot step; the apt entry has none (see the next test).
-    assert_eq!(hook["boot"].as_str(), Some("restore"));
+    assert_eq!(
+        sent_hook["boot"],
+        json!(hook["boot"].as_str().expect("boot"))
+    );
     for (step, want) in hook["timeout_secs"].as_table().expect("timeouts") {
         assert_eq!(
             sent_hook["timeoutSecs"][step],
@@ -290,17 +298,63 @@ fn the_hook_and_health_of_an_entry_are_those_of_the_archive_manifest() {
 }
 
 #[test]
-fn the_apt_entry_has_no_hook_command_no_boot_step_and_no_params_so_the_built_in_steps_run() {
-    // Catches: a `boot` step with no command (hostkeeper refuses it at the coordinator), or a
-    // command or params for `tierstore update-hook`, which is not adapted to the `.deb` yet.
+fn the_apt_entry_runs_the_hook_of_the_package_on_the_instances_of_its_template() {
+    // Catches: an entry whose run units are not the instances the template of the `.deb` makes
+    // (hostkeeper would start a unit the package does not have, or the built-in steps would
+    // restart both instances where the hook hands over between them), a hook command that names
+    // a program the package does not install or that is not executable (stage refuses it), a hook
+    // that is not `update-hook` with the archive's leading arguments, and params that differ from
+    // the archive's, so that `prepare` checks another file than the instances read, or none.
+    let archive: toml::Table = manifest(Platform::LinuxX86_64, "1.2.3+0123456789ab", FLOOR)
+        .parse()
+        .expect("the archive manifest is TOML");
     let sent = entry("1.2.3", &digest_of("x"), FLOOR);
-    let manifest = sent["manifest"].as_object().expect("manifest");
-    let hook = manifest["hook"].as_object().expect("hook");
-    for absent in ["boot", "command"] {
-        assert!(!hook.contains_key(absent), "hook.{absent}");
+    let manifest = &sent["manifest"];
+    let units: Vec<&str> = archive["units"]["run"]
+        .as_array()
+        .expect("run")
+        .iter()
+        .map(|u| u.as_str().expect("a unit"))
+        .collect();
+    assert_eq!(manifest["run"], json!(units));
+    for unit in &units {
+        let (template, instance) = unit.split_once('@').expect("an instance");
+        assert_eq!(
+            format!("usr/lib/systemd/system/{template}@.service"),
+            super::super::deb::UNIT_PATH,
+            "{instance}"
+        );
     }
-    assert!(!manifest.contains_key("params"));
-    assert!(hook.contains_key("timeoutSecs"));
+    let command: Vec<&str> = manifest["hook"]["command"]
+        .as_array()
+        .expect("a command")
+        .iter()
+        .map(|w| w.as_str().expect("a word"))
+        .collect();
+    let archive_command: Vec<&str> = archive["hook"]["command"]
+        .as_array()
+        .expect("the archive's command")
+        .iter()
+        .map(|w| w.as_str().expect("a word"))
+        .collect();
+    assert_eq!(command[1..], archive_command[1..]);
+    let program = command[0].strip_prefix('/').expect("an absolute path");
+    assert!(
+        super::super::deb::files(b"binary", b"notice")
+            .iter()
+            .any(|(path, mode, _)| path == program && mode & 0o111 == 0o111),
+        "{program} is not an executable file of the package"
+    );
+    let params = archive["params"].as_table().expect("params");
+    let sent_params = manifest["params"].as_object().expect("params");
+    assert_eq!(sent_params.len(), params.len());
+    for (key, value) in params {
+        assert_eq!(
+            sent_params[key],
+            json!({"text": value.as_str().expect(key)}),
+            "{key}"
+        );
+    }
 }
 
 #[test]

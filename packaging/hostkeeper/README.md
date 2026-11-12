@@ -20,6 +20,9 @@ from one version to the next. The package holds nothing of a node's own: the con
 key files it names and the account (`tierstore`, `_tierstore` on a Mac) are placed on the node
 beforehand.
 
+The Debian and RPM packages ship the same Linux template with the package's own binary
+(`packaging/tierstore@.service`, running `/usr/libexec/tierstore/tierstore`).
+
 The units are the update hook's (`crates/tierstore/docs/update-hook.md`), which
 `crates/tierstore/tests/packaging_hostkeeper.rs` checks against the hook and the binary; the
 tests here check the package that carries them.

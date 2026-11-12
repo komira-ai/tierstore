@@ -28,6 +28,10 @@ struct Machine {
     omit: Vec<&'static str>,
     /// Links below `etc/systemd/system` the install creates.
     enable: Vec<&'static str>,
+    /// The mode the install gives `etc/tierstore`; none: it makes no directory there.
+    config_dir: Option<u32>,
+    /// Files below the root the install writes that the package must not.
+    stray: Vec<&'static str>,
     /// Does a process named `tierstore` run?
     running: bool,
     /// A command line (joined) containing this text is refused.
@@ -45,6 +49,8 @@ impl Machine {
             says: SAYS,
             omit: Vec::new(),
             enable: Vec::new(),
+            config_dir: Some(0o750),
+            stray: Vec::new(),
             running: false,
             refuse: None,
         }
@@ -69,10 +75,19 @@ impl Machine {
     }
 
     fn install(&self) {
-        for rel in [BINARY, UNIT, SYSUSERS, CONFFILE] {
+        for rel in [BINARY, UNIT, SYSUSERS, EXAMPLE] {
             if !self.omit.contains(&rel) {
                 self.put(rel, b"file");
             }
+        }
+        if let Some(mode) = self.config_dir {
+            use std::os::unix::fs::PermissionsExt;
+            let dir = self.root.join(CONFIG_DIR);
+            std::fs::create_dir_all(&dir).expect("the directory");
+            std::fs::set_permissions(&dir, std::fs::Permissions::from_mode(mode)).expect("mode");
+        }
+        for rel in &self.stray {
+            self.put(rel, b"stray");
         }
         for link in &self.enable {
             self.put(link, b"link");
@@ -184,22 +199,68 @@ fn a_clean_install_from_testing_is_checked_and_adds_the_repository_the_way_a_use
 }
 
 #[test]
-fn a_package_missing_its_unit_sysusers_entry_or_conffile_is_named() {
+fn a_package_missing_its_unit_template_sysusers_entry_or_example_is_named() {
     // Catches: a package that installs without the files the service needs.
     let dir = scratch("apt-files");
     let mut machine = Machine::new(&dir);
-    machine.omit = vec![UNIT, SYSUSERS, CONFFILE];
+    machine.omit = vec![UNIT, SYSUSERS, EXAMPLE];
     let Err(Error::Refused(problems)) = check_apt(&machine, &apt(&dir)) else {
         panic!("not refused");
     };
     assert_eq!(
         problems,
         [
-            "the unit /usr/lib/systemd/system/tierstore.service is not installed",
+            "the unit template /usr/lib/systemd/system/tierstore@.service is not installed",
             "the sysusers.d entry /usr/lib/sysusers.d/tierstore.conf is not installed",
-            "the conffile /etc/tierstore/tierstore.toml is not installed"
+            "the example configuration /usr/share/doc/tierstore/examples/config.toml is not installed"
         ]
     );
+}
+
+#[test]
+fn an_install_that_writes_the_live_configuration_or_a_start_marker_is_named() {
+    // Catches: a package that writes /etc/tierstore/config.toml (the example as the live file, so
+    // an instance would serve the example's tiers) or a start marker (an instance would start at
+    // the next boot with no configuration of the host's).
+    let dir = scratch("apt-stray");
+    let mut machine = Machine::new(&dir);
+    machine.stray = vec![CONFIG, "var/lib/tierstore/run-a"];
+    let Err(Error::Refused(problems)) = check_apt(&machine, &apt(&dir)) else {
+        panic!("not refused");
+    };
+    assert_eq!(
+        problems,
+        [
+            "/etc/tierstore/config.toml is there, and the package never writes the host's configuration",
+            "/var/lib/tierstore/run-a is there, and the package writes no start marker",
+        ]
+    );
+}
+
+#[test]
+fn a_config_directory_that_is_missing_open_or_not_a_directory_is_named() {
+    // Catches: a postinst that does not make /etc/tierstore, makes it readable by others, or
+    // leaves something else at that path.
+    for (mode, problem) in [
+        (None, "/etc/tierstore was not made"),
+        (Some(0o755), "/etc/tierstore has mode 0755, not 0750"),
+    ] {
+        let dir = scratch("apt-config-dir");
+        let mut machine = Machine::new(&dir);
+        machine.config_dir = mode;
+        let Err(Error::Refused(problems)) = check_apt(&machine, &apt(&dir)) else {
+            panic!("not refused");
+        };
+        assert_eq!(problems, [problem]);
+    }
+    let dir = scratch("apt-config-file");
+    let mut machine = Machine::new(&dir);
+    machine.config_dir = None;
+    machine.stray = vec![CONFIG_DIR];
+    let Err(Error::Refused(problems)) = check_apt(&machine, &apt(&dir)) else {
+        panic!("not refused");
+    };
+    assert_eq!(problems, ["/etc/tierstore is not a directory"]);
 }
 
 #[test]
@@ -209,25 +270,28 @@ fn a_service_that_the_install_enabled_or_started_is_named() {
     let dir = scratch("apt-enabled");
     let mut machine = Machine::new(&dir);
     machine.enable = vec![
-        "etc/systemd/system/multi-user.target.wants/tierstore.service",
-        "etc/systemd/system/tierstore.service",
+        "etc/systemd/system/multi-user.target.wants/tierstore@a.service",
+        "etc/systemd/system/multi-user.target.wants/tierstore@b.service",
+        "etc/systemd/system/tierstore@.service",
     ];
     machine.running = true;
     let Err(Error::Refused(problems)) = check_apt(&machine, &apt(&dir)) else {
         panic!("not refused");
     };
-    assert_eq!(problems.len(), 3, "{problems:?}");
-    assert!(problems[0].starts_with("the service is enabled: "));
-    assert!(problems[0].ends_with("etc/systemd/system/multi-user.target.wants/tierstore.service exists, and the package enables nothing"), "{problems:?}");
-    assert!(
-        problems[1].ends_with(
-            "etc/systemd/system/tierstore.service exists, and the package enables nothing"
-        ),
-        "{problems:?}"
-    );
+    let enabled = |unit: &str| {
+        format!(
+            "the service is enabled: {} exists, and the package enables nothing",
+            dir.join("etc/systemd/system").join(unit).display()
+        )
+    };
     assert_eq!(
-        problems[2],
-        "the service is running (process 42), and the package starts nothing"
+        problems,
+        [
+            enabled("multi-user.target.wants/tierstore@a.service"),
+            enabled("multi-user.target.wants/tierstore@b.service"),
+            enabled("tierstore@.service"),
+            "the service is running (process 42), and the package starts nothing".to_owned(),
+        ]
     );
 }
 

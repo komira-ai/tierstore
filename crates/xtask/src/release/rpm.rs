@@ -7,22 +7,24 @@
 //! of `artifacts.yml` reads the result back with [`inspect`] (`release rpm-info`).
 //!
 //! The package has the files of the Debian package ([`deb::files`]) at the same paths and modes,
-//! with the two differences the RPM conventions ask for: the licence is installed as a `%license`
-//! file, `/usr/share/licenses/tierstore/LICENSE`, and not as `/usr/share/doc/tierstore/copyright`,
-//! and the example configuration is `%config(noreplace)`, so an upgrade keeps the host's edits
-//! (and writes a new example beside it as `.rpmnew`). Every file is owned by `root`, the
-//! directories this package owns (`/etc/tierstore` is 0750, the others 0755) are in the package,
-//! and the package requires `systemd`, which provides `systemd-sysusers`, and `glibc >= 2.28`
+//! with the one difference the RPM conventions ask for: the licence is installed as a `%license`
+//! file, `/usr/share/licenses/tierstore/LICENSE`, and not as `/usr/share/doc/tierstore/copyright`.
+//! As in the Debian package, nothing in `/etc` is the package's: it has no `%config` file, the
+//! example configuration is `/usr/share/doc/tierstore/examples/config.toml`, which nothing reads,
+//! and the instances of the unit template read the host's `/etc/tierstore/config.toml`. Every file
+//! is owned by `root`, the directories this package owns (each 0755) are in the package, and the
+//! package requires `systemd`, which provides `systemd-sysusers`, and `glibc >= 2.28`
 //! ([`glibc::FLOOR`]), the glibc the binary is linked against, so a host with an older one refuses
 //! the install instead of failing to start the service.
 //!
 //! The scriptlets ([`POST`], [`POSTUN`]) do what the Debian maintainer scripts do. `%post` runs
-//! on every install and upgrade: it creates the account with `systemd-sysusers`, gives
-//! `/etc/tierstore` and the example file to its group and tells a running systemd about the unit,
-//! each step only where its tool or the group is there, so a container without systemd still
-//! installs. `%postun` tells systemd the unit is gone, when the last version is removed. Nothing
-//! starts the unit and nothing enables it; removing the package leaves the account and
-//! `/etc/tierstore`.
+//! on every install and upgrade: it creates the account with `systemd-sysusers`, makes
+//! `/etc/tierstore` (root, group `tierstore`, mode 0750) only when there is nothing at that path
+//! and the group exists, and tells a running systemd about the unit template, each step only where
+//! its tool or the group is there, so a container without systemd still installs. An
+//! `/etc/tierstore` that is there is left as it is. `%postun` tells systemd the unit template is
+//! gone, when the last version is removed. Nothing starts an instance and nothing enables one;
+//! removing the package leaves the account and `/etc/tierstore`.
 //!
 //! The file is the same bytes for the same inputs on every runner: the build time, the time of
 //! every file and the build host are fixed ([`deb::MTIME`], [`BUILD_HOST`]), the payload is gzip
@@ -62,23 +64,23 @@ const DEB_LICENSE_PATH: &str = "usr/share/doc/tierstore/copyright";
 
 /// The directories the package owns, with their mode.
 const DIRECTORIES: [(&str, u16); 4] = [
-    ("/etc/tierstore", 0o750),
     ("/usr/libexec/tierstore", 0o755),
     ("/usr/share/doc/tierstore", 0o755),
+    ("/usr/share/doc/tierstore/examples", 0o755),
     ("/usr/share/licenses/tierstore", 0o755),
 ];
 
 /// The `%post` scriptlet, run with `/bin/sh` on every install and upgrade.
 pub const POST: &str =
-    "# Creates the tierstore account, gives /etc/tierstore to its group and tells systemd about the
-# unit. It starts nothing and enables nothing; each step is skipped where its tool is missing.
+    "# Creates the tierstore account, makes /etc/tierstore for the host's configuration when nothing is
+# at that path, and tells systemd about the unit template. It starts nothing and enables nothing,
+# leaves an /etc/tierstore that is there as it is, and skips each step where its tool is missing.
 if command -v systemd-sysusers >/dev/null 2>&1; then
     systemd-sysusers /usr/lib/sysusers.d/tierstore.conf
 fi
-if getent group tierstore >/dev/null 2>&1; then
-    chgrp tierstore /etc/tierstore /etc/tierstore/tierstore.toml
-    chmod 0750 /etc/tierstore
-    chmod 0640 /etc/tierstore/tierstore.toml
+if [ ! -e /etc/tierstore ] && [ ! -L /etc/tierstore ] && getent group tierstore >/dev/null 2>&1; then
+    mkdir -m 0750 /etc/tierstore
+    chgrp tierstore /etc/tierstore
 fi
 if [ -d /run/systemd/system ]; then
     systemctl daemon-reload
@@ -87,8 +89,9 @@ exit 0
 ";
 
 /// The `%postun` scriptlet, run with `/bin/sh` after every removal and upgrade.
-pub const POSTUN: &str = "# Tells systemd the unit is gone when the last version is removed. The account and /etc/tierstore,
-# which holds the keys, stay.
+pub const POSTUN: &str =
+    "# Tells systemd the unit template is gone when the last version is removed. The
+# account and /etc/tierstore, which holds the configuration and the keys, stay.
 if [ \"$1\" -eq 0 ] && [ -d /run/systemd/system ]; then
     systemctl daemon-reload
 fi
@@ -160,9 +163,7 @@ pub fn build(version: &str, architecture: &str, files: &[File]) -> Result<Vec<u8
             .mode(FileMode::regular(*mode as u16))
             .user("root")
             .group("root");
-        if path == deb::CONFFILE.trim_start_matches('/') {
-            options = options.config().noreplace();
-        } else if path == LICENSE_PATH {
+        if path == LICENSE_PATH {
             options = options.license();
         }
         builder

@@ -75,7 +75,7 @@ credentials_file = "/etc/tierstore/cold.credentials"
 `presign_key_files` and `gc_key_files` hold scoped keys: one signs presigned PUT URLs, the other lists and deletes under one prefix for garbage collection (see [keys](keys.md)). Leave both out if you do not use them. Start it with the file and nothing else:
 
 ```sh
-/usr/libexec/tierstore/tierstore --config /etc/tierstore/tierstore.toml
+/usr/libexec/tierstore/tierstore --config /etc/tierstore/config.toml
 ```
 
 ## A file for a build node

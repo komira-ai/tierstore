@@ -1,7 +1,9 @@
 use std::io::Read;
+use std::os::unix::fs::PermissionsExt;
 use std::path::PathBuf;
 
 use super::*;
+use crate::release::script_host::{GETENT_CALL, Host, RELOAD_CALL, SYSUSERS_CALL};
 use crate::testdir::TestDir;
 
 /// A stand-in binary and notice.
@@ -134,8 +136,9 @@ fn an_ar_header_holds_ten_digits_of_size_and_no_more() {
 
 #[test]
 fn the_data_holds_each_file_at_its_path_and_mode_owned_by_root_with_directories_first() {
-    // Catches: a file at another path or mode than docs/install.md places it, a directory after
-    // what is in it, an owner that is not root, a time that is not the fixed one.
+    // Catches: a file at another path or mode than the table of the module says, anything below
+    // /etc (whose files are the host's, and which a purge would delete), a directory after what is
+    // in it, an owner that is not root, a time that is not the fixed one.
     let members = ar_members(&package());
     let (items, gzip_time) = items(&members[2].1);
     assert_eq!(gzip_time, MTIME);
@@ -147,14 +150,11 @@ fn the_data_holds_each_file_at_its_path_and_mode_owned_by_root_with_directories_
         listed,
         [
             ("./", true, 0o755),
-            ("./etc/", true, 0o755),
-            ("./etc/tierstore/", true, 0o750),
-            ("./etc/tierstore/tierstore.toml", false, 0o640),
             ("./usr/", true, 0o755),
             ("./usr/lib/", true, 0o755),
             ("./usr/lib/systemd/", true, 0o755),
             ("./usr/lib/systemd/system/", true, 0o755),
-            ("./usr/lib/systemd/system/tierstore.service", false, 0o644),
+            ("./usr/lib/systemd/system/tierstore@.service", false, 0o644),
             ("./usr/lib/sysusers.d/", true, 0o755),
             ("./usr/lib/sysusers.d/tierstore.conf", false, 0o644),
             ("./usr/libexec/", true, 0o755),
@@ -169,6 +169,12 @@ fn the_data_holds_each_file_at_its_path_and_mode_owned_by_root_with_directories_
                 0o644
             ),
             ("./usr/share/doc/tierstore/copyright", false, 0o644),
+            ("./usr/share/doc/tierstore/examples/", true, 0o755),
+            (
+                "./usr/share/doc/tierstore/examples/config.toml",
+                false,
+                0o644
+            ),
         ]
     );
     for item in &items {
@@ -206,16 +212,16 @@ fn the_files_hold_the_binary_the_packaging_files_the_licence_and_the_notice() {
     };
     assert_eq!(content("./usr/libexec/tierstore/tierstore"), BINARY);
     assert_eq!(
-        content("./usr/lib/systemd/system/tierstore.service"),
-        packaging("tierstore.service")
+        content("./usr/lib/systemd/system/tierstore@.service"),
+        packaging("tierstore@.service")
     );
     assert_eq!(
         content("./usr/lib/sysusers.d/tierstore.conf"),
         packaging("tierstore.conf")
     );
     assert_eq!(
-        content("./etc/tierstore/tierstore.toml"),
-        packaging("tierstore.toml")
+        content("./usr/share/doc/tierstore/examples/config.toml"),
+        packaging("config.toml")
     );
     assert_eq!(
         content("./usr/share/doc/tierstore/copyright"),
@@ -228,20 +234,55 @@ fn the_files_hold_the_binary_the_packaging_files_the_licence_and_the_notice() {
     );
 }
 
+/// The values of the `key=` lines of a unit, its `\` continuations joined.
+fn unit_values(unit: &str, key: &str) -> Vec<String> {
+    let prefix = format!("{key}=");
+    unit.replace("\\\n", " ")
+        .lines()
+        .filter_map(|line| line.strip_prefix(prefix.as_str()))
+        .map(str::to_owned)
+        .collect()
+}
+
 #[test]
-fn the_unit_runs_the_installed_binary_as_the_account_the_scripts_create() {
-    // Catches: a unit whose ExecStart is not where the package puts the binary, and scripts that
-    // name an account the sysusers entry does not create.
-    assert!(UNIT.contains("ExecStart=/usr/libexec/tierstore/tierstore "));
-    assert!(UNIT.contains("User=tierstore\n"));
+fn the_template_runs_the_installed_binary_on_the_hosts_file_as_the_account_the_scripts_create() {
+    // Catches: a template whose ExecStart is not where the package puts the binary or reads
+    // another file than the host's /etc/tierstore/config.toml (the example, say), an instance
+    // that starts without the start marker the update hook writes (a fresh install would start a
+    // server with no configuration), and a template that runs as an account the sysusers entry
+    // does not create.
+    let exec: Vec<String> = unit_values(UNIT, "ExecStart")
+        .iter()
+        .flat_map(|v| v.split_whitespace().map(str::to_owned).collect::<Vec<_>>())
+        .collect();
+    assert_eq!(
+        exec,
+        [
+            format!("/{BINARY_PATH}"),
+            "--config".to_owned(),
+            CONFIG_FILE.to_owned()
+        ]
+    );
+    assert!(
+        files(BINARY, NOTICE)
+            .iter()
+            .any(|(path, mode, _)| path == BINARY_PATH && *mode == 0o755)
+    );
+    assert_eq!(
+        unit_values(UNIT, "ConditionPathExists"),
+        ["/var/lib/tierstore/run-%i"]
+    );
+    assert_eq!(unit_values(UNIT, "User"), ["tierstore"]);
+    assert_eq!(unit_values(UNIT, "StateDirectory"), ["tierstore"]);
+    assert_eq!(unit_values(UNIT, "WantedBy"), ["multi-user.target"]);
     assert!(SYSUSERS.contains("\nu tierstore "));
     assert!(EXAMPLE_CONFIG.contains("/etc/tierstore/access.key"));
     assert!(
         files(BINARY, NOTICE)
             .iter()
-            .any(|(path, _, _)| format!("/{path}") == CONFFILE)
+            .all(|(path, _, _)| !path.starts_with("etc/") && !path.starts_with("var/")),
+        "the package installs nothing in /etc or /var"
     );
-    assert!(POSTINST.contains("chgrp tierstore /etc/tierstore /etc/tierstore/tierstore.toml"));
 }
 
 #[test]
@@ -261,16 +302,17 @@ fn the_control_file_names_the_package_its_version_architecture_and_size_in_kibib
          Description: S3 server over a hot and a cold tier of S3-compatible stores\n \
          New objects are written to the hot tier, copied to the cold tier in the background,\n \
          and freed from the hot tier when it fills.\n .\n \
-         The package installs the binary, the systemd unit and an example configuration. It starts\n \
-         and enables nothing: write the key files under /etc/tierstore, then start tierstore.service.\n"
+         The package installs the binary, the systemd unit template tierstore@.service and an example\n \
+         configuration. It starts and enables nothing: write /etc/tierstore/config.toml and its keys.\n"
     );
     assert!(control("1.2.3", "arm64", &[]).contains("Installed-Size: 0\n"));
 }
 
 #[test]
-fn the_control_archive_holds_the_control_file_the_one_conffile_the_sums_and_the_scripts() {
-    // Catches: a missing conffile (an upgrade would overwrite the host's edits), md5sums that do
-    // not match the files, and scripts that are not executable.
+fn the_control_archive_holds_the_control_file_the_sums_and_the_scripts_and_no_conffile() {
+    // Catches: a conffile (the package has no file in /etc, and a purge would delete the host's
+    // file of that name), md5sums that do not match the files, and scripts that are not
+    // executable.
     let members = ar_members(&package());
     let (items, gzip_time) = items(&members[1].1);
     assert_eq!(gzip_time, MTIME);
@@ -280,7 +322,6 @@ fn the_control_archive_holds_the_control_file_the_one_conffile_the_sums_and_the_
         [
             ("./", 0o755),
             ("./control", 0o644),
-            ("./conffiles", 0o644),
             ("./md5sums", 0o644),
             ("./postinst", 0o755),
             ("./postrm", 0o755),
@@ -288,10 +329,9 @@ fn the_control_archive_holds_the_control_file_the_one_conffile_the_sums_and_the_
     );
     let text = |n: usize| String::from_utf8(items[n].content.clone()).expect("text");
     assert_eq!(text(1), control("0.4.0", "amd64", &files(BINARY, NOTICE)));
-    assert_eq!(text(2), "/etc/tierstore/tierstore.toml\n");
-    assert_eq!(text(3), md5sums(&files(BINARY, NOTICE)));
-    assert_eq!(text(4), POSTINST);
-    assert_eq!(text(5), POSTRM);
+    assert_eq!(text(2), md5sums(&files(BINARY, NOTICE)));
+    assert_eq!(text(3), POSTINST);
+    assert_eq!(text(4), POSTRM);
     assert!(items.iter().all(|i| i.user == "root" && i.group == "root"));
 }
 
@@ -510,4 +550,136 @@ fn the_package_depends_on_the_glibc_the_binary_is_linked_against() {
         depends.as_deref(),
         Some("Depends: systemd, libc6 (>= 2.28)")
     );
+}
+
+#[test]
+fn postinst_configure_on_a_fresh_host_makes_the_config_directory_and_starts_nothing() {
+    // Catches: a postinst that does not make /etc/tierstore (root, group tierstore, 0750) on a
+    // host that has none, one that writes a configuration (the example as the live file) or a
+    // start marker, so that an instance would start with no configuration of the host's, and one
+    // that starts, enables or restarts a unit.
+    let host = Host::new("postinst-fresh", true, true);
+    let (ok, calls) = host.run(POSTINST, &["configure", ""]);
+    assert!(ok);
+    let dir = host.root().join("etc/tierstore");
+    assert_eq!(
+        calls,
+        [
+            SYSUSERS_CALL.to_owned(),
+            GETENT_CALL.to_owned(),
+            format!("chgrp tierstore {}", dir.display()),
+            RELOAD_CALL.to_owned(),
+        ]
+    );
+    assert_eq!(host.config_dir_mode(), Some(0o750));
+    assert!(dir.symlink_metadata().expect("made").is_dir());
+    assert_eq!(std::fs::read_dir(&dir).expect("read").count(), 0);
+    assert!(!host.root().join("var").exists(), "no start marker");
+}
+
+#[test]
+fn postinst_leaves_a_config_directory_that_is_there_as_it_is() {
+    // Catches: a postinst that changes the group or the mode of a host's /etc/tierstore, or a
+    // file in it, on an install or an upgrade (the farm's files there are root's and its own),
+    // and one that fails on a link there (a dangling one included).
+    let host = Host::new("postinst-there", true, true);
+    let dir = host.root().join("etc/tierstore");
+    std::fs::create_dir_all(&dir).expect("the host's directory");
+    std::fs::set_permissions(&dir, std::fs::Permissions::from_mode(0o700)).expect("mode");
+    put(&dir, "config.toml", b"# the host's\n");
+    for version in ["", "0.4.0"] {
+        let (ok, calls) = host.run(POSTINST, &["configure", version]);
+        assert!(ok);
+        assert_eq!(calls, [SYSUSERS_CALL, RELOAD_CALL]);
+        assert_eq!(host.config_dir_mode(), Some(0o700));
+        assert_eq!(
+            std::fs::read(dir.join("config.toml")).expect("kept"),
+            b"# the host's\n"
+        );
+    }
+    let host = Host::new("postinst-link", true, true);
+    std::fs::create_dir_all(host.root().join("etc")).expect("etc");
+    std::os::unix::fs::symlink("/nonexistent-tierstore", host.root().join("etc/tierstore"))
+        .expect("a dangling link");
+    let (ok, calls) = host.run(POSTINST, &["configure", ""]);
+    assert!(ok);
+    assert_eq!(calls, [SYSUSERS_CALL, RELOAD_CALL]);
+    assert!(
+        host.root()
+            .join("etc/tierstore")
+            .symlink_metadata()
+            .expect("kept")
+            .file_type()
+            .is_symlink()
+    );
+}
+
+#[test]
+fn postinst_makes_no_directory_without_the_group_and_no_reload_without_systemd() {
+    // Catches: a postinst that fails the install when the account's group is not named
+    // tierstore (a host whose account was made by hand), one that makes a directory the service
+    // could not read, and one that calls systemctl in a container or chroot with no systemd.
+    let host = Host::new("postinst-no-group", true, false);
+    let (ok, calls) = host.run(POSTINST, &["configure", ""]);
+    assert!(ok);
+    assert_eq!(calls, [SYSUSERS_CALL, GETENT_CALL, RELOAD_CALL]);
+    assert_eq!(host.config_dir_mode(), None);
+    let host = Host::new("postinst-no-systemd", false, true);
+    let (ok, calls) = host.run(POSTINST, &["configure", ""]);
+    assert!(ok);
+    assert_eq!(
+        calls,
+        [
+            SYSUSERS_CALL.to_owned(),
+            GETENT_CALL.to_owned(),
+            format!(
+                "chgrp tierstore {}",
+                host.root().join("etc/tierstore").display()
+            ),
+        ]
+    );
+}
+
+#[test]
+fn postinst_does_nothing_but_on_configure() {
+    // Catches: a postinst that acts on the unwinding of a failed upgrade or removal, where dpkg
+    // asks it to put back what was there and nothing else.
+    let host = Host::new("postinst-abort", true, true);
+    for action in [
+        "abort-upgrade",
+        "abort-remove",
+        "abort-deconfigure",
+        "triggered",
+    ] {
+        let (ok, calls) = host.run(POSTINST, &[action, "0.4.0"]);
+        assert!(ok, "{action}");
+        assert!(calls.is_empty(), "{action}: {calls:?}");
+    }
+    assert_eq!(host.config_dir_mode(), None);
+}
+
+#[test]
+fn postrm_reloads_systemd_on_remove_and_purge_and_leaves_the_host_files() {
+    // Catches: a postrm that deletes /etc/tierstore or a file in it (the host's configuration
+    // and keys) on a purge, one that reloads on an upgrade, and one that calls systemctl with no
+    // systemd.
+    let host = Host::new("postrm", true, true);
+    let dir = host.root().join("etc/tierstore");
+    std::fs::create_dir_all(&dir).expect("the host's directory");
+    put(&dir, "config.toml", b"# the host's\n");
+    for action in ["remove", "purge"] {
+        let (ok, calls) = host.run(POSTRM, &[action]);
+        assert!(ok, "{action}");
+        assert_eq!(calls, [RELOAD_CALL], "{action}");
+    }
+    for action in ["upgrade", "failed-upgrade", "abort-install", "disappear"] {
+        let (ok, calls) = host.run(POSTRM, &[action, "0.4.0"]);
+        assert!(ok, "{action}");
+        assert!(calls.is_empty(), "{action}: {calls:?}");
+    }
+    assert!(dir.join("config.toml").is_file());
+    let host = Host::new("postrm-no-systemd", false, true);
+    let (ok, calls) = host.run(POSTRM, &["purge"]);
+    assert!(ok);
+    assert!(calls.is_empty(), "{calls:?}");
 }

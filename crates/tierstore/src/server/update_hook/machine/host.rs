@@ -13,7 +13,7 @@ use std::time::Duration;
 use rustix::process::geteuid;
 
 use super::super::ports::{Host, PortError, PortKind};
-use super::super::{RELEASE_BINARY, SERVICE_ACCOUNT};
+use super::super::{PACKAGE_RELEASE_BINARY, RELEASE_BINARY, SERVICE_ACCOUNT};
 use super::Fault;
 use super::runner::{Call, Runner, checked, run};
 
@@ -111,8 +111,28 @@ impl<'a> SystemHost<'a> {
     }
 
     /// The binary of `release`, checked, and the directory it is in, checked too: neither a link.
+    ///
+    /// An archive release has it at [`RELEASE_BINARY`], a release of the Debian or RPM package at
+    /// [`PACKAGE_RELEASE_BINARY`]. The archive's path is taken when anything is at it or at its
+    /// `bin` (so a link, a directory or a missing file there is refused, never passed over), the
+    /// package's when nothing is at either and something is at the package's path, and neither is
+    /// an error naming both.
     fn binary_of(&self, release: &Path) -> Result<PathBuf, Fault> {
-        let binary = under(&self.root, &release.join(RELEASE_BINARY));
+        let archive = under(&self.root, &release.join(RELEASE_BINARY));
+        let package = under(&self.root, &release.join(PACKAGE_RELEASE_BINARY));
+        let there = |path: &Path| fs::symlink_metadata(path).is_ok();
+        let archive_there = there(&archive) || archive.parent().is_some_and(there);
+        let binary = match (archive_there, there(&package)) {
+            (false, true) => package,
+            (false, false) => {
+                return Err(Fault(format!(
+                    "{} is not there, nor {}",
+                    archive.display(),
+                    package.display()
+                )));
+            }
+            (true, _) => archive,
+        };
         let bin_dir = binary.parent().unwrap_or(&binary);
         self.check(bin_dir, fs::FileType::is_dir, "directory")?;
         self.check(&binary, fs::FileType::is_file, "regular file")?;
@@ -163,7 +183,8 @@ impl Host for SystemHost<'_> {
             .map_err(|fault| PortError::failed(KIND, format!("read {}: {fault}", at.display())))
     }
 
-    /// Runs `<release>/bin/tierstore --capabilities`: exit 0 and one capability per line. Exit 2,
+    /// Runs `<release>/bin/tierstore --capabilities` (or, for a release of the Debian or RPM
+    /// package, its `tree/usr/libexec/tierstore/tierstore`): exit 0 and one capability per line. Exit 2,
     /// the status of an unknown flag, means a release that predates the flag: no capabilities.
     /// Any other status, a binary that cannot be started and one that does not end are errors.
     ///
@@ -192,10 +213,11 @@ impl Host for SystemHost<'_> {
             .collect())
     }
 
-    /// Runs `<release>/bin/tierstore --config <config> --check-config`: exit 0 is a
-    /// configuration it accepts, exit 2 one it refuses (its standard error is the line). Any
-    /// other status, a binary that cannot be started and one that does not end are errors, so
-    /// that a release that cannot say is not taken for one that refuses.
+    /// Runs `<release>/bin/tierstore --config <config> --check-config` (or the package's binary,
+    /// as for `--capabilities`): exit 0 is a configuration it accepts, exit 2 one it refuses (its
+    /// standard error is the line). Any other status, a binary that cannot be started and one
+    /// that does not end are errors, so that a release that cannot say is not taken for one that
+    /// refuses.
     ///
     /// The binary is held to the same checks as for `--capabilities`. When the hook runs as
     /// root it runs as the service account, found in `etc/passwd` under the root (an account
