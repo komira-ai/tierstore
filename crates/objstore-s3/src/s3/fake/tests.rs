@@ -80,3 +80,92 @@ fn the_entity_tag_is_the_quoted_md5_of_the_bytes() {
     joined.extend(&Kept::of(b"bc"));
     assert_eq!(etag_of(&joined), etag_of(&whole));
 }
+
+/// A request of `method` to `/bucket/<key>?<query>` with `headers` and `body`.
+fn request(
+    method: &str,
+    key: &str,
+    query: &[(&str, &str)],
+    headers: &[(&str, &str)],
+    body: &[u8],
+) -> Request {
+    let pairs = |list: &[(&str, &str)]| {
+        let owned = list.iter().map(|(k, v)| ((*k).to_owned(), (*v).to_owned()));
+        owned.collect::<BTreeMap<String, String>>()
+    };
+    Request {
+        method: method.to_owned(),
+        path: format!("/bucket/{key}"),
+        query: pairs(query),
+        headers: pairs(headers),
+        body: body.to_vec(),
+    }
+}
+
+/// The status line of an answer.
+fn status(answer: &[u8]) -> String {
+    let text = String::from_utf8_lossy(answer);
+    text.lines().next().unwrap_or_default().to_owned()
+}
+
+/// Asserts that an upload begun with the SHA-256 algorithm refuses a part that carries no
+/// checksum (400) and one whose checksum is not its bytes' (400 `BadDigest`), and takes a part
+/// whose checksum is right; and that an upload begun with another algorithm wants none.
+#[test]
+fn the_parts_of_a_checksummed_upload_must_carry_their_checksum() {
+    let mut state = State::default();
+    let algorithm = [("x-amz-checksum-algorithm", "SHA256")];
+    let begun = handle(
+        &mut state,
+        &request("POST", "k", &[("uploads", "")], &algorithm, b""),
+    );
+    assert_eq!(status(&begun), "HTTP/1.1 200 OK");
+    let part = [("partNumber", "1"), ("uploadId", "upload-1")];
+    let bare = handle(&mut state, &request("PUT", "k", &part, &[], b"abc"));
+    assert_eq!(status(&bare), "HTTP/1.1 400 Bad Request");
+    assert!(String::from_utf8_lossy(&bare).contains("InvalidRequest"));
+    let wrong = [("x-amz-checksum-sha256", "AAAA")];
+    let refused = handle(&mut state, &request("PUT", "k", &part, &wrong, b"abc"));
+    assert!(String::from_utf8_lossy(&refused).contains("BadDigest"));
+    // The base64 SHA-256 of "abc".
+    let right = [(
+        "x-amz-checksum-sha256",
+        "ungWv48Bz+pBQUDeXa4iI7ADYaOWF3qctBD/YfIAFa0=",
+    )];
+    let taken = handle(&mut state, &request("PUT", "k", &part, &right, b"abc"));
+    assert_eq!(status(&taken), "HTTP/1.1 200 OK");
+    let crc = [("x-amz-checksum-algorithm", "CRC32")];
+    handle(
+        &mut state,
+        &request("POST", "j", &[("uploads", "")], &crc, b""),
+    );
+    let part = [("partNumber", "1"), ("uploadId", "upload-2")];
+    let plain = handle(&mut state, &request("PUT", "j", &part, &[], b"abc"));
+    assert_eq!(status(&plain), "HTTP/1.1 200 OK");
+}
+
+/// Asserts that a HEAD gives an object's checksum only when it asks for it, and its metadata
+/// whether it asks or not.
+#[test]
+fn a_head_gives_the_checksum_only_when_asked() {
+    let mut state = State::default();
+    let headers = [
+        (
+            "x-amz-checksum-sha256",
+            "ungWv48Bz+pBQUDeXa4iI7ADYaOWF3qctBD/YfIAFa0=",
+        ),
+        ("x-amz-meta-sha256", "ba78"),
+    ];
+    handle(&mut state, &request("PUT", "k", &[], &headers, b"abc"));
+    let plain = handle(&mut state, &request("HEAD", "k", &[], &[], b""));
+    let plain = String::from_utf8_lossy(&plain).into_owned();
+    assert!(plain.contains("x-amz-meta-sha256: ba78\r\n"), "{plain}");
+    assert!(!plain.contains("x-amz-checksum"), "{plain}");
+    let mode = [("x-amz-checksum-mode", "ENABLED")];
+    let asked = handle(&mut state, &request("HEAD", "k", &[], &mode, b""));
+    let asked = String::from_utf8_lossy(&asked).into_owned();
+    assert!(
+        asked.contains("x-amz-checksum-type: FULL_OBJECT\r\n"),
+        "{asked}"
+    );
+}

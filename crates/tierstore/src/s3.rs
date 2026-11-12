@@ -155,8 +155,10 @@ use tokio::sync::mpsc;
 use crate::backend::open_by_head;
 use crate::{
     Backend, ByteRange, Error, Listed, Meta, OpenUpload, Opened, PartBody, PutAnswer, PutClaim,
-    ReadBody, Span, UploadedPart, UploadsAfter, Window,
+    PutOutcome, ReadBody, Span, TreeDigest, UploadedPart, UploadsAfter, Window,
 };
+
+mod sha256;
 
 pub use objstore_s3::Capabilities;
 pub use objstore_s3::s3::{Credentials, S3Config, S3ConfigError, S3Tuning};
@@ -654,6 +656,18 @@ impl Backend for S3Backend {
         let sent = streamed(body, len, self.chunks_waiting, sending).await?;
         let answer = sent.map_err(|e| map_error(e, key))?;
         Ok(put_answer(answer))
+    }
+
+    /// The digest goes to the store as the body's checksum and the object's metadata, and a
+    /// key that exists is compared by the digest a HEAD reads back (`s3/sha256.rs`).
+    async fn put_stream_sha256(
+        &self,
+        key: &str,
+        len: u64,
+        body: PartBody<'_>,
+        sha256: TreeDigest,
+    ) -> Result<PutOutcome, Error> {
+        sha256::put(self, key, len, body, sha256).await
     }
 
     async fn put_if_match(&self, key: &str, body: Bytes, etag: &str) -> Result<String, Error> {

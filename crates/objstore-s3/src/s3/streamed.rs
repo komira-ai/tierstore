@@ -151,7 +151,7 @@ impl S3Store {
             let condition = Some(("if-match", etag.to_owned()));
             self.put_whole(key, len, body, condition).await?
         } else {
-            multipart::put(&self.conn, key, len, body, Rule::Match(etag)).await?
+            multipart::put(&self.conn, key, len, body, Rule::Match(etag), None).await?
         };
         done.ok_or_else(|| bad(key, "the answer carries no ETag"))
     }
@@ -178,7 +178,7 @@ impl S3Store {
         let done = if self.sends_whole(len) {
             self.put_whole(key, len, body, self.create_only()).await?
         } else {
-            multipart::put(&self.conn, key, len, body, Rule::Create).await?
+            multipart::put(&self.conn, key, len, body, Rule::Create, None).await?
         };
         done.ok_or_else(|| bad(key, "the answer carries no ETag"))
     }
@@ -233,6 +233,21 @@ impl S3Store {
             .as_ref()
             .is_some_and(|(name, _)| *name == "if-none-match");
         let headers = condition.into_iter().collect();
+        self.put_whole_with(key, len, body, headers, create_only)
+            .await
+    }
+
+    /// [`put_whole_answered`](Self::put_whole_answered) with `headers` as they are; a 412 is
+    /// [`ObjectStoreError::AlreadyExists`] if `create_only` (the headers carry
+    /// `If-None-Match: *`).
+    pub(super) async fn put_whole_with(
+        &self,
+        key: &ObjectKey,
+        len: u64,
+        body: BodyStream,
+        headers: Vec<(&'static str, String)>,
+        create_only: bool,
+    ) -> Result<PutAnswer, ObjectStoreError> {
         let resp = self
             .conn
             .send_streamed(key, &[], headers, len, body)
@@ -274,7 +289,7 @@ impl S3Store {
                 .put_whole_answered(key, len, body, self.create_only())
                 .await;
         }
-        let etag = multipart::put(&self.conn, key, len, body, Rule::Create).await?;
+        let etag = multipart::put(&self.conn, key, len, body, Rule::Create, None).await?;
         Ok(PutAnswer {
             etag,
             modified_millis: None,
@@ -304,7 +319,7 @@ impl S3Store {
         if self.sends_whole(len) {
             return self.put_whole_answered(key, len, body, None).await;
         }
-        let etag = multipart::put(&self.conn, key, len, body, Rule::Replace).await?;
+        let etag = multipart::put(&self.conn, key, len, body, Rule::Replace, None).await?;
         Ok(PutAnswer {
             etag,
             modified_millis: None,

@@ -30,7 +30,30 @@ use crate::{ByteRange, Error, Meta, ReadBody};
 use super::fill::{Filled, Live, Pending, tagged, written_over};
 use super::layout::{Name, Sidecar, data_path, meta_path};
 use super::metrics::{add, bump};
-use super::{Inner, gone, locked, window};
+use super::{Inner, locked};
+
+/// The offset and length that `range` asks of an object of `size` bytes.
+pub(super) fn window(range: Option<ByteRange>, size: u64) -> Result<(u64, u64), Error> {
+    let Some(range) = range else {
+        return Ok((0, size));
+    };
+    if range.offset() > size {
+        let text = format!(
+            "range starting at {} is past the end of the {size}-byte object",
+            range.offset()
+        );
+        return Err(Error::Other(text));
+    }
+    Ok((range.offset(), range.size().min(size - range.offset())))
+}
+
+/// Whether `error` says the file is not there, or not as long as the cache believes.
+pub(super) fn gone(error: &io::Error) -> bool {
+    matches!(
+        error.kind(),
+        io::ErrorKind::NotFound | io::ErrorKind::UnexpectedEof
+    )
+}
 
 /// Where the bytes of a read came from, for the counters.
 #[derive(Clone, Copy)]

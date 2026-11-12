@@ -7,14 +7,19 @@
 //! pin <mount> <tree> <sha256> [<sha256> ...]   keep these blobs for the tree of the mount
 //! unpin <mount> <tree>                         take away every pin of the tree of the mount
 //! pins-live <mount> [<tree> ...]               keep the pins of these trees of the mount only
+//! put <key> <sha256> <size> from <path>         a create-only put of the file at <path>
 //! ```
 //!
 //! A digest is sixty-four lower-case hex digits; a number is decimal digits only; a mount and a
 //! tree are each one word of at most [`MAX_NAME`] visible ASCII characters (the boot id of the
 //! mount, and the digest of the tree). `<key>` is the
 //! rest of the line between `from ` and the last ` @ `, so a key may hold spaces; it is not
-//! under a prefix the proxy keeps for itself.
+//! under a prefix the proxy keeps for itself. The `<key>` of a `put` is one word (no spaces), with
+//! the same rules, and its `<path>` is the rest of the line after `from `, an absolute path.
 
+use std::path::PathBuf;
+
+use crate::TreeDigest;
 use crate::journal::is_reserved;
 use crate::server::local_cache::layout::is_digest;
 
@@ -51,6 +56,14 @@ pub(super) enum Request {
     Unpin { mount: String, tree: String },
     /// Keep the pins of `trees` of `mount` and take away every other pin.
     PinsLive { mount: String, trees: Vec<String> },
+    /// Put the `size` bytes of the file at `path`, which are to hash to `sha256`, as the object
+    /// `key`, create-only.
+    Put {
+        key: String,
+        sha256: TreeDigest,
+        size: u64,
+        path: PathBuf,
+    },
 }
 
 /// Why a line is not a request. The text follows `refused ` in the answer.
@@ -86,6 +99,9 @@ pub(super) enum Refusal {
     /// A mount or a tree that is empty, longer than [`MAX_NAME`] or not visible ASCII.
     #[error("not a usable name")]
     Name,
+    /// A path that is not absolute.
+    #[error("not an absolute path")]
+    Path,
 }
 
 /// The digest `text`, or why it is not one.
@@ -130,6 +146,7 @@ pub(super) fn parse(line: &[u8]) -> Result<Request, Refusal> {
                 .collect(),
         )),
         "pin" => pin(rest),
+        "put" => put(rest),
         "unpin" => {
             let (mount, tree) = rest.split_once(' ').ok_or(Refusal::Malformed)?;
             Ok(Request::Unpin {
@@ -160,6 +177,41 @@ fn pin(rest: &str) -> Result<Request, Refusal> {
     })
 }
 
+/// The object key `text`, or why it cannot be written: empty, longer than an S3 key, or under a
+/// prefix the proxy keeps for itself.
+fn key(text: &str) -> Result<String, Refusal> {
+    if text.is_empty() || text.len() > MAX_KEY {
+        return Err(Refusal::Key);
+    }
+    if is_reserved(text) {
+        return Err(Refusal::Reserved);
+    }
+    Ok(text.to_owned())
+}
+
+/// The request `put <rest>` is.
+fn put(rest: &str) -> Result<Request, Refusal> {
+    let mut words = rest.splitn(4, ' ');
+    let (Some(target), Some(sha256), Some(size), Some(source)) =
+        (words.next(), words.next(), words.next(), words.next())
+    else {
+        return Err(Refusal::Malformed);
+    };
+    let path = source.strip_prefix("from ").ok_or(Refusal::Malformed)?;
+    let sha256 = TreeDigest::from_hex(sha256).ok_or(Refusal::Digest)?;
+    let size = number(size)?;
+    let key = key(target)?;
+    if !path.starts_with('/') {
+        return Err(Refusal::Path);
+    }
+    Ok(Request::Put {
+        key,
+        sha256,
+        size,
+        path: PathBuf::from(path),
+    })
+}
+
 /// The request `fill <rest>` is.
 fn fill(rest: &str) -> Result<Request, Refusal> {
     let Some((sha256, source)) = rest.split_once(' ') else {
@@ -178,16 +230,10 @@ fn fill(rest: &str) -> Result<Request, Refusal> {
     if offset.checked_add(size).is_none() {
         return Err(Refusal::Overflow);
     }
-    if from.is_empty() || from.len() > MAX_KEY {
-        return Err(Refusal::Key);
-    }
-    if is_reserved(from) {
-        return Err(Refusal::Reserved);
-    }
     Ok(Request::Blob {
         sha256,
         size,
-        from: from.to_owned(),
+        from: key(from)?,
         offset,
     })
 }

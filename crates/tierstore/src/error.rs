@@ -37,9 +37,16 @@ pub enum Error {
     #[error("key {0:?} has a path segment that is `.` or `..`, which the store does not take")]
     InvalidSegment(String),
     /// A body whose bytes do not hash to the name of the object it is written under (a key
-    /// named by its content). Nothing is stored.
+    /// named by its content), or to the SHA-256 a put names for it
+    /// ([`Backend::put_stream_sha256`](crate::Backend::put_stream_sha256)), or that the store
+    /// refused for a checksum the bytes do not have. Nothing is stored.
     #[error("the body of {0} does not hash to the name of the object")]
     BadDigest(String),
+    /// An object larger than the backend stores: the store refused it for its size
+    /// (`EntityTooLarge`), or it is more than an S3 multipart upload can hold. Nothing is stored,
+    /// and a retry is refused the same way.
+    #[error("object {0} is larger than the backend stores")]
+    TooLarge(String),
     /// A completion of a multipart upload names a part that was not uploaded, or one whose
     /// content tag is not the one that was named.
     #[error("invalid part: {0}")]

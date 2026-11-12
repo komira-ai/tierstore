@@ -241,7 +241,7 @@ use crate::journal::is_reserved;
 use crate::server::lock;
 use crate::{
     Backend, ByteRange, Clock, Error, Listed, Meta, OpenUpload, PartBody, PutAnswer, PutClaim,
-    ReadBody, UploadedPart, UploadsAfter,
+    PutOutcome, ReadBody, TreeDigest, UploadedPart, UploadsAfter,
 };
 
 pub use disk::{Disk, Space, SystemDisk};
@@ -458,29 +458,6 @@ fn percent_of(total: u64, percent: u8) -> u64 {
 /// kept consistent by each step.
 fn locked<T>(mutex: &Mutex<T>) -> MutexGuard<'_, T> {
     mutex.lock().unwrap_or_else(PoisonError::into_inner)
-}
-
-/// The offset and length that `range` asks of an object of `size` bytes.
-fn window(range: Option<ByteRange>, size: u64) -> Result<(u64, u64), Error> {
-    let Some(range) = range else {
-        return Ok((0, size));
-    };
-    if range.offset() > size {
-        let text = format!(
-            "range starting at {} is past the end of the {size}-byte object",
-            range.offset()
-        );
-        return Err(Error::Other(text));
-    }
-    Ok((range.offset(), range.size().min(size - range.offset())))
-}
-
-/// Whether `error` says the file is not there, or not as long as the cache believes.
-fn gone(error: &io::Error) -> bool {
-    matches!(
-        error.kind(),
-        io::ErrorKind::NotFound | io::ErrorKind::UnexpectedEof
-    )
 }
 
 /// What the cache is made of; a [`LocalCache`] is a handle to one, so a fill that runs on its
@@ -804,7 +781,10 @@ impl Backend for LocalCache {
         len: Option<u64>,
         body: PartBody<'_>,
     ) -> Result<(), Error> {
-        self.inner.put_through(key, len, body, Sent::Creates).await
+        self.inner
+            .put_through(key, len, body, Sent::Creates)
+            .await?;
+        Ok(())
     }
 
     async fn put_stream_hot_only(
@@ -813,9 +793,22 @@ impl Backend for LocalCache {
         len: Option<u64>,
         body: PartBody<'_>,
     ) -> Result<(), Error> {
-        self.inner
-            .put_through(key, len, body, Sent::CreatesHotOnly)
-            .await
+        let sent = Sent::CreatesHotOnly;
+        self.inner.put_through(key, len, body, sent).await?;
+        Ok(())
+    }
+
+    /// Sent to the upstream's own call, through the cache as a create-only put is (see
+    /// `put_through`, in `keep`).
+    async fn put_stream_sha256(
+        &self,
+        key: &str,
+        len: u64,
+        body: PartBody<'_>,
+        sha256: TreeDigest,
+    ) -> Result<PutOutcome, Error> {
+        let sent = Sent::Checked(len, sha256);
+        self.inner.put_through(key, Some(len), body, sent).await
     }
 
     /// A plain `PUT`: sent to the upstream as its plain put, and the cache keeps the new copy

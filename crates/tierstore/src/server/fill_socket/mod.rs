@@ -34,7 +34,10 @@
 //! `ok <trees>` (`pins-live`: the trees whose pins were taken away), or `read-only` from an
 //! instance that does not hold the lock of the cache directory; the mount id `hold`, which the
 //! cache's holds pin under, is refused with its words (`the mount id "hold" is reserved for holds`).
+//! A `put` is answered with one line of JSON (see [`put`]), the one request whose answer is not
+//! plain words; a `put` line that is not a request is answered `refused <why>` as any other.
 
+mod put;
 mod request;
 
 use std::os::unix::fs::{MetadataExt as _, PermissionsExt as _};
@@ -247,6 +250,12 @@ async fn session(cache: LocalCache, stream: UnixStream, uid: u32) {
                     .pins_live(&mount, &trees)
                     .map(|count| count.to_string()),
             ),
+            Ok(Request::Put {
+                key,
+                sha256,
+                size,
+                path,
+            }) => put::answer(&cache, &key, sha256, size, &path).await,
             Err(refusal) => format!("refused {refusal}"),
         };
         if write

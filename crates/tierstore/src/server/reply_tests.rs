@@ -64,8 +64,8 @@ fn check(error: Error, status: u16, code: &str, fixed: Option<&str>) {
 
 /// Asserts the status and the S3 code of each failure of the store: a key that is not there,
 /// one that is, a condition that does not hold, no room, a reserved key, a part a completion
-/// names wrongly, a call the store does not do, a store that does not answer, and any other
-/// failure.
+/// names wrongly, a body that is not its digest, an object too large, a call the store does not
+/// do, a store that does not answer, and any other failure.
 #[test]
 fn each_failure_of_the_store_has_its_status_and_code() {
     let k = || "k".to_owned();
@@ -99,6 +99,8 @@ fn each_failure_of_the_store_has_its_status_and_code() {
     check(Error::InvalidKey(k()), 400, "KeyTooLongError", None);
     check(Error::InvalidSegment(k()), 400, "InvalidArgument", None);
     check(Error::InvalidPart(k()), 400, "InvalidPart", None);
+    check(Error::BadDigest(k()), 400, "BadDigest", None);
+    check(Error::TooLarge(k()), 400, "EntityTooLarge", None);
     check(
         Error::Unsupported(k()),
         501,

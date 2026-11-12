@@ -1,6 +1,9 @@
 //! The lines of the fill socket: what each form parses to, and every refusal.
 
+use std::path::PathBuf;
+
 use super::{Refusal, Request, parse};
+use crate::TreeDigest;
 
 const SHA: &str = "0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef";
 const OTHER: &str = "fedcba9876543210fedcba9876543210fedcba9876543210fedcba9876543210";
@@ -153,6 +156,7 @@ fn a_refusal_says_in_words_what_was_wrong() {
         (Refusal::Key, "not a usable key"),
         (Refusal::Reserved, "reserved key"),
         (Refusal::Name, "not a usable name"),
+        (Refusal::Path, "not an absolute path"),
     ];
     for (refusal, text) in words {
         assert_eq!(refusal.to_string(), text);
@@ -187,4 +191,56 @@ fn the_pin_requests_name_the_mount_the_tree_and_the_blobs() {
     assert_eq!(line("pins-live boot-1"), Ok(none));
     let edge = "m".repeat(128);
     assert!(line(&format!("pins-live {edge}")).is_ok());
+}
+
+/// The `put` that `text` is, or why it is refused.
+fn put_of(key: &str, size: u64, path: &str) -> Request {
+    Request::Put {
+        key: key.to_owned(),
+        sha256: TreeDigest::from_hex(SHA).unwrap(),
+        size,
+        path: PathBuf::from(path),
+    }
+}
+
+/// Asserts that a put names its key, digest, size and staged file; that the path is the rest of
+/// the line, spaces and ` from ` included; and that a size of zero (an empty object) and the
+/// largest size are taken.
+#[test]
+fn a_put_names_its_key_digest_size_and_staged_file() {
+    let line_of = |rest: &str| line(&format!("put cas/b/1/n/pack {SHA} {rest}"));
+    let want = put_of("cas/b/1/n/pack", 4096, "/stage/7");
+    assert_eq!(line_of("4096 from /stage/7"), Ok(want));
+    let spaced = put_of("cas/b/1/n/pack", 1, "/st age/a from b");
+    assert_eq!(line_of("1 from /st age/a from b"), Ok(spaced));
+    assert_eq!(line_of("0 from /s"), Ok(put_of("cas/b/1/n/pack", 0, "/s")));
+    let largest = put_of("cas/b/1/n/pack", u64::MAX, "/s");
+    assert_eq!(line_of(&format!("{} from /s", u64::MAX)), Ok(largest));
+}
+
+/// Asserts every refusal of a put: missing words, no `from`, a digest that is not one (upper case
+/// included), a size that is not a number, a key that is empty, too long or reserved, and a path
+/// that is not absolute or is empty.
+#[test]
+fn a_put_that_is_not_one_is_refused_with_its_reason() {
+    let long = "k".repeat(1025);
+    let upper = SHA.to_ascii_uppercase();
+    let cases = [
+        ("put".to_owned(), Refusal::Malformed),
+        (format!("put k {SHA} 1"), Refusal::Malformed),
+        (format!("put k {SHA} 1 to /s"), Refusal::Malformed),
+        (format!("put k {upper} 1 from /s"), Refusal::Digest),
+        ("put k nope 1 from /s".to_owned(), Refusal::Digest),
+        (format!("put k {SHA} -1 from /s"), Refusal::Number),
+        (format!("put  {SHA} 1 from /s"), Refusal::Key),
+        (format!("put {long} {SHA} 1 from /s"), Refusal::Key),
+        (format!("put _journal/x {SHA} 1 from /s"), Refusal::Reserved),
+        (format!("put k {SHA} 1 from stage/7"), Refusal::Path),
+        (format!("put k {SHA} 1 from "), Refusal::Path),
+    ];
+    for (text, refusal) in cases {
+        assert_eq!(line(&text), Err(refusal), "{text}");
+    }
+    let edge = "k".repeat(1024);
+    assert!(line(&format!("put {edge} {SHA} 1 from /s")).is_ok());
 }
