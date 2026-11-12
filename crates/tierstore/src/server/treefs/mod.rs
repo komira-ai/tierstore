@@ -45,6 +45,15 @@ mod fill_client;
 #[cfg(any(target_os = "linux", test))]
 mod handle;
 mod ino;
+// The staged-file store of the put directory; its FUSE and NFS frontends are later changes.
+#[cfg_attr(
+    not(test),
+    expect(
+        dead_code,
+        reason = "the FUSE and NFS frontends of the put directory, which call the store, are later changes"
+    )
+)]
+mod put;
 mod table;
 mod tree;
 
