@@ -3,7 +3,9 @@
 
 use tierstore_testkit::dir::TestDir;
 
-use super::{FILE, Handed, HeldDir, decode, encode, read, remove, write};
+use super::{
+    FILE, Handed, HeldDir, decode, encode, read, remove, remove_or_say, write, write_or_say,
+};
 
 /// What this release writes.
 const FIXTURE: &str = include_str!("../../../../tests/stored_formats/fixtures/fs_put_handover.txt");
@@ -120,4 +122,24 @@ fn a_file_that_cannot_be_written_or_read_is_an_error() {
     assert!(write(dir.path(), &fixture()).is_err());
     assert!(read(dir.path()).is_err());
     assert!(remove(dir.path()).is_err());
+}
+
+/// Asserts that a write or a remove that fails is said with what the system said, and one that
+/// does not says nothing.
+#[test]
+fn a_write_or_a_remove_that_fails_is_said() {
+    let dir = TestDir::under(std::env::temp_dir(), "put-carry-say");
+    let (guard, warnings) = super::super::testing::warnings();
+    write_or_say(dir.path(), &fixture());
+    remove_or_say(dir.path());
+    assert_eq!(warnings.text(), "");
+    write_or_say(&dir.path().join("missing"), &fixture());
+    std::fs::create_dir(dir.path().join(FILE)).unwrap();
+    remove_or_say(dir.path());
+    drop(guard);
+    let said = warnings.text();
+    let lines: Vec<&str> = said.lines().collect();
+    assert_eq!(lines.len(), 2, "{said}");
+    assert!(lines[0].starts_with("tierstore fs: the put directory's hand-over is not written: "));
+    assert!(lines[1].starts_with("tierstore fs: the put directory's hand-over is not removed: "));
 }

@@ -239,6 +239,22 @@ fn what_the_put_directory_does_not_do_is_refused_through_the_mount() {
             .create_new(true)
             .open(job.join("a b.part"));
         assert_eq!(errno_of(&spaced.unwrap_err()), libc_errno::EINVAL);
+        assert!(
+            std::fs::metadata(served.rig.mountpoint.join("trees"))
+                .unwrap()
+                .is_dir()
+        );
+        let mut both = OpenOptions::new()
+            .read(true)
+            .write(true)
+            .create_new(true)
+            .open(job.join("rw.part"))
+            .unwrap();
+        both.write_all(b"rw").unwrap();
+        let mut back = [0_u8; 2];
+        let read = std::io::Read::read(&mut both, &mut back);
+        assert_eq!(errno_of(&read.unwrap_err()), libc_errno::EACCES);
+        drop(both);
         let part = job.join("a.part");
         let file = OpenOptions::new()
             .write(true)
@@ -281,6 +297,14 @@ fn what_the_put_directory_does_not_do_is_refused_through_the_mount() {
         assert_eq!(node.unwrap_err().raw_os_error(), libc_errno::EPERM);
         let set = rustix::fs::setxattr(&part, "user.x", b"v", XattrFlags::empty());
         assert_eq!(set.unwrap_err().raw_os_error(), libc_errno::EPERM);
+        let exchanged = rustix::fs::renameat_with(
+            CWD,
+            &part,
+            CWD,
+            job.join("rw.part"),
+            rustix::fs::RenameFlags::EXCHANGE,
+        );
+        assert_eq!(exchanged.unwrap_err().raw_os_error(), libc_errno::EPERM);
         let other = served.at("cas/b/build/other");
         assert!(std::fs::metadata(&other).unwrap().is_dir());
         let across = std::fs::rename(&part, other.join("a.part"));
@@ -469,6 +493,37 @@ fn a_hand_over_keeps_the_job_s_open_file_its_staged_files_and_its_directory() {
         drop(made);
         rustix::fs::renameat(empty.as_fd(), "late.part", empty.as_fd(), "late").unwrap();
         assert_eq!(served.object("cas/b/build/empty/late").unwrap(), b"late");
+    });
+}
+
+/// Asserts that a hand-over that does not complete leaves the running instance serving the put
+/// directory: the resume removes the hand-over file and the job's commits go on; and that a
+/// resume whose journal cannot be written afresh does not serve, and serves once it can.
+#[test]
+fn a_hand_over_that_does_not_complete_leaves_the_instance_serving() {
+    with_fuse(|| {
+        let served = Served::start("put-mount-resume");
+        let job = served.at(JOB);
+        write_file(&job.join("pack.part"), b"kept");
+        let running = served.running.as_ref().unwrap();
+        let handover = served.settings.runtime_dir.join("put-handover");
+        running.quiesce();
+        assert!(handover.exists());
+        running.resume().unwrap();
+        assert!(!handover.exists());
+        std::fs::rename(job.join("pack.part"), job.join("pack")).unwrap();
+        assert_eq!(served.object(&format!("{JOB}/pack")).unwrap(), b"kept");
+        let stuck = served.rig.dir.path().join("stage").join("journal.new");
+        std::fs::create_dir(&stuck).unwrap();
+        std::fs::write(stuck.join("in-the-way"), b"").unwrap();
+        running.quiesce();
+        assert!(running.resume().is_err());
+        std::fs::remove_file(stuck.join("in-the-way")).unwrap();
+        std::fs::remove_dir(&stuck).unwrap();
+        running.resume().unwrap();
+        write_file(&job.join("L0.part"), b"after");
+        std::fs::rename(job.join("L0.part"), job.join("L0")).unwrap();
+        assert_eq!(served.object(&format!("{JOB}/L0")).unwrap(), b"after");
     });
 }
 

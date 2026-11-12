@@ -152,3 +152,37 @@ impl Drop for FakePutSocket {
         let _ = std::fs::remove_file(&self.path);
     }
 }
+
+#[cfg(test)]
+mod tests {
+    use super::{FakePuts, failed};
+
+    /// Asserts the fake's own refusals, so that a test that gets one knows the request was wrong:
+    /// a line that is not a `put` is refused, a staged file that cannot be read is `stage`, and
+    /// bytes that are not the size or SHA-256 named are `checksum`.
+    #[test]
+    fn the_fake_refuses_what_the_upstream_would() {
+        let puts = FakePuts::default();
+        assert_eq!(puts.answer("fill x"), "refused malformed");
+        assert_eq!(puts.answer("put k"), "refused malformed");
+        let dir = tierstore_testkit::dir::TestDir::under(std::env::temp_dir(), "put-fake");
+        let missing = dir.path().join("missing");
+        let sha = "0".repeat(64);
+        assert_eq!(
+            puts.answer(&format!("put k {sha} 1 from {}", missing.display())),
+            failed("stage")
+        );
+        let file = dir.path().join("file");
+        std::fs::write(&file, b"x").unwrap();
+        assert_eq!(
+            puts.answer(&format!("put k {sha} 1 from {}", file.display())),
+            failed("checksum")
+        );
+        assert_eq!(
+            puts.answer(&format!("put k {sha} 2 from {}", file.display())),
+            failed("checksum")
+        );
+        assert_eq!(puts.count(), 5);
+        assert_eq!(puts.object("k"), None);
+    }
+}

@@ -356,9 +356,7 @@ impl Filesystem for Frontend {
     }
 
     fn readlink(&self, _req: &Request, ino: INodeNo, reply: ReplyData) {
-        if self.put_of(ino).is_some() {
-            return reply.error(Errno::EINVAL);
-        }
+        // The kernel asks only for a link, and the put directory has none.
         finish(self.core.readlink(ino.0), reply, |target, reply| {
             reply.data(target.as_bytes())
         });
@@ -593,15 +591,18 @@ impl Filesystem for Frontend {
         let Some(put) = self.put_of(ino) else {
             return reply.error(Errno::EROFS);
         };
-        let others = uid.is_some()
-            || gid.is_some()
-            || atime.is_some()
-            || mtime.is_some()
-            || ctime.is_some()
-            || crtime.is_some()
-            || chgtime.is_some()
-            || bkuptime.is_some()
-            || flags.is_some();
+        let others = [
+            uid.is_some(),
+            gid.is_some(),
+            atime.is_some(),
+            mtime.is_some(),
+            ctime.is_some(),
+            crtime.is_some(),
+            chgtime.is_some(),
+            bkuptime.is_some(),
+            flags.is_some(),
+        ]
+        .contains(&true);
         fuse_put::attr(put.setattr(ino.0, (mode, size), others), reply);
     }
 

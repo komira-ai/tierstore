@@ -93,9 +93,7 @@ fn serve_put(
 fn hand_put(core: &Core, runtime_dir: &Path) {
     if let Some(put) = core.put() {
         put.hold(true);
-        if let Err(error) = carry::write(runtime_dir, &put.handed()) {
-            tracing::warn!("tierstore fs: the put directory's hand-over is not written: {error}");
-        }
+        carry::write_or_say(runtime_dir, &put.handed());
     }
 }
 
@@ -264,9 +262,7 @@ impl Running {
             .map_err(io("reading the put directory's hand-over"))?;
         serve_put(settings, &core, record.generation, Some(handed))?;
         // Taken over: a later start must not take it over again.
-        if let Err(error) = carry::remove(&settings.runtime_dir) {
-            tracing::warn!("tierstore fs: the put directory's hand-over is not removed: {error}");
-        }
+        carry::remove_or_say(&settings.runtime_dir);
         let control = match control {
             Some(listener) => {
                 Control::serve_on(Arc::clone(&core), listener, &settings.control_socket)
@@ -357,11 +353,7 @@ impl Running {
             // process appends to a file of its own again before it serves, or does not serve.
             put.store().reopen_journal()?;
             put.hold(false);
-            if let Err(error) = carry::remove(&self.settings.runtime_dir) {
-                tracing::warn!(
-                    "tierstore fs: the put directory's hand-over is not removed: {error}"
-                );
-            }
+            carry::remove_or_say(&self.settings.runtime_dir);
         }
         self.core.hold(false);
         parts.serving.restart(&self.core, &self.settings)?;

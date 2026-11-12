@@ -158,6 +158,21 @@ pub(in crate::server) fn remove(runtime_dir: &Path) -> io::Result<()> {
     }
 }
 
+/// Writes `handed` as [`write`] does, and says a failure: the successor then finds what the
+/// store holds.
+pub(in crate::server) fn write_or_say(runtime_dir: &Path, handed: &Handed) {
+    if let Err(error) = write(runtime_dir, handed) {
+        tracing::warn!("tierstore fs: the put directory's hand-over is not written: {error}");
+    }
+}
+
+/// Removes the file as [`remove`] does, and says a failure.
+pub(in crate::server) fn remove_or_say(runtime_dir: &Path) {
+    if let Err(error) = remove(runtime_dir) {
+        tracing::warn!("tierstore fs: the put directory's hand-over is not removed: {error}");
+    }
+}
+
 #[cfg(test)]
 #[path = "carry_tests.rs"]
 mod tests;
