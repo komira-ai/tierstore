@@ -105,6 +105,12 @@ impl TreeDigest {
         Self(Sha256::digest(bytes).into())
     }
 
+    /// The 32 bytes of the digest.
+    #[must_use]
+    pub fn as_bytes(&self) -> &[u8; 32] {
+        &self.0
+    }
+
     /// Reads 64 lowercase hex digits; anything else is `None`.
     pub fn from_hex(text: &str) -> Option<Self> {
         let lowercase = text.bytes().all(|b| matches!(b, b'0'..=b'9' | b'a'..=b'f'));

@@ -467,3 +467,24 @@ fn a_pin_request_of_a_read_only_cache_is_answered_read_only() {
         "the mount id \"hold\" is reserved for holds"
     );
 }
+
+/// Asserts that a put over the socket is answered with its line of JSON: a staged file put as an
+/// object is `created: true`, and the same request again on the same connection is
+/// `created: false`.
+#[tokio::test]
+async fn a_put_over_the_socket_is_answered_in_json() {
+    let rig = Rig::writing("tfs-put-socket");
+    let place = Place::new("tfs-put-socket-sock");
+    let served = Served::start(&rig.cache, &place.path);
+    let staged = rig.dir.path().join("pack.part");
+    std::fs::write(&staged, b"pack").unwrap();
+    let request = format!(
+        "put cas/b/1/n/pack {} 4 from {}",
+        digest(b"pack"),
+        staged.display()
+    );
+    let mut client = Client::connect(&place.path).await;
+    assert_eq!(client.ask(&request).await, r#"{"ok":true,"created":true}"#);
+    assert_eq!(client.ask(&request).await, r#"{"ok":true,"created":false}"#);
+    served.stop().await;
+}

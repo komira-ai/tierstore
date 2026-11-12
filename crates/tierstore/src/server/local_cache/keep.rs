@@ -78,6 +78,11 @@
 //!   `deleted`, as a delete is): the order in which the upstream took them is not known here, and
 //!   the first read of the object fills it (see `Writing`, in `write`).
 //! - A multipart upload is not kept: the first read of the object fills it.
+//! - A put that names the SHA-256 of its body (the `put` of the fill socket) is sent with
+//!   [`put_stream_sha256`](crate::Backend::put_stream_sha256), with no HEAD before it (a key that
+//!   exists is compared, not refused, by that call). One that finds the object there already
+//!   ([`PutOutcome::Existed`]) wrote nothing and keeps nothing: the first read of the object
+//!   fills it.
 
 use std::future::Future;
 use std::io;
@@ -92,7 +97,7 @@ use tokio::sync::{OwnedSemaphorePermit, mpsc};
 use tokio::task::JoinHandle;
 use tokio::time::Instant;
 
-use crate::{Error, Meta, PartBody, PutAnswer, PutClaim};
+use crate::{Error, Meta, PartBody, PutAnswer, PutClaim, PutOutcome, TreeDigest};
 
 use super::calls::counting;
 use super::fill::{Flight, Pending, Published, Reserved, Staged};
@@ -122,6 +127,9 @@ pub(super) enum Sent<'a> {
     /// A plain put: the key is replaced where the upstream replaces (see
     /// [`put_stream_replacing`](crate::Backend::put_stream_replacing)).
     Replaces(&'a PutClaim),
+    /// Create-only, of a body of this length that is to hash to this digest (see
+    /// [`put_stream_sha256`](crate::Backend::put_stream_sha256)).
+    Checked(u64, TreeDigest),
 }
 
 /// The task that writes the chunks of a body to the stage file, and the way to it.
@@ -352,15 +360,21 @@ pub(super) fn tee<'a>(key: &'a str, body: PartBody<'a>, keeping: &'a mut Keeping
 }
 
 impl Inner {
-    /// Sends a body to the upstream as `sent` says.
+    /// Sends a body to the upstream as `sent` says. Gives what the upstream did, and what its
+    /// answer said of the object with the time of the cache's clock when it arrived (none if it
+    /// gave no tag).
     async fn send_put(
         &self,
         key: &str,
         len: Option<u64>,
         body: PartBody<'_>,
         sent: Sent<'_>,
-    ) -> Result<Option<(PutAnswer, u64)>, Error> {
+    ) -> Result<(PutOutcome, Option<(PutAnswer, u64)>), Error> {
         let answer = match sent {
+            Sent::Checked(len, sha256) => {
+                let put = self.upstream.put_stream_sha256(key, len, body, sha256);
+                return Ok((put.await?, None));
+            }
             Sent::Creates => {
                 let put = self.upstream.put_stream_answered(key, len, body, false);
                 put.await?
@@ -374,7 +388,8 @@ impl Inner {
                 put.await?
             }
         };
-        Ok(answer.map(|answer| (answer, self.clock.now())))
+        let answered = answer.map(|answer| (answer, self.clock.now()));
+        Ok((PutOutcome::Created, answered))
     }
 
     /// A put of a body that arrives as chunks, sent as `sent` says.
@@ -385,15 +400,19 @@ impl Inner {
     /// read that fills between the two reads the old object, and its entry, or the one the cache
     /// had, goes with the second (see [`forget`](Inner::forget)). Then the new copy is kept like
     /// that of a create-only put, under the tag of the answer.
+    ///
+    /// Gives what the upstream did: [`PutOutcome::Existed`] only for a put that names its digest
+    /// and found the object there.
     pub(super) async fn put_through(
         self: &Arc<Self>,
         key: &str,
         len: Option<u64>,
         body: PartBody<'_>,
         sent: Sent<'_>,
-    ) -> Result<(), Error> {
+    ) -> Result<PutOutcome, Error> {
         self.writable(key)?;
         let replaces = matches!(sent, Sent::Replaces(_));
+        let checked = matches!(sent, Sent::Checked(..));
         // One HEAD before the body is read (`head_before_put`), for an upstream of two tiers as for
         // any other: a key that only the first tier holds is refused by the proxy's own put, under
         // the entry protocol, only after the whole body has been written to that tier, so the HEAD
@@ -401,7 +420,7 @@ impl Inner {
         // put of a key it holds before it reads the body, and the HEAD is then a read of its own
         // that the put repeats (through such a proxy a hot HEAD, a marker GET and a cold HEAD);
         // with the setting off the put is the upstream's alone.
-        if self.config.head_before_put && !replaces {
+        if self.config.head_before_put && !replaces && !checked {
             match self.upstream_head(key).await {
                 Ok(_) => {
                     bump(&self.counters.write_exists);
@@ -443,7 +462,10 @@ impl Inner {
             self.forget(key);
         }
         match sent {
-            Ok(answer) => {
+            // Nothing was written, and the body may not have been read to its end: nothing to
+            // keep or count as a write.
+            Ok((PutOutcome::Existed, _)) => return Ok(PutOutcome::Existed),
+            Ok((PutOutcome::Created, answer)) => {
                 if let Some(keeping) = &mut keeping {
                     keeping.answer = answer;
                     keeping.writing = writing;
@@ -490,7 +512,7 @@ impl Inner {
                 bump(&self.counters.keeps_expired);
             }
         }
-        Ok(())
+        Ok(PutOutcome::Created)
     }
 
     /// The copy for a body of `len` bytes: a keep permit, room for the bytes and a stage file

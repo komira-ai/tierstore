@@ -26,8 +26,13 @@
 //! and [`S3Store::abort_multipart`]; [`S3Store::list_multipart_uploads`] lists the uploads
 //! that are neither completed nor aborted.
 //!
+//! A create-only write can name the SHA-256 of its body for the store to check, and a HEAD reads
+//! the digest an object was written with back (`checksum.rs`):
+//! [`S3Store::put_stream_new_sha256`] and [`S3Store::head_sha256`].
+//!
 //! Not built yet: TLS (an `https` endpoint is refused).
 
+mod checksum;
 #[cfg(feature = "testkit")]
 pub mod fake;
 mod multipart;
@@ -41,6 +46,7 @@ mod times;
 mod tuning;
 mod xml;
 
+pub use checksum::StoredSha256;
 pub use multipart::{
     MAX_PART_BYTES, MAX_PARTS, MIN_PART_BYTES, PART_BYTES, SINGLE_PUT_MAX, part_size, part_size_of,
 };
@@ -724,7 +730,7 @@ impl ObjectStore for S3Store {
             let sent = self.put_whole(key, len, body, self.create_only()).await;
             return sent.map(drop);
         }
-        multipart::put(&self.conn, key, len, body, multipart::Rule::Create)
+        multipart::put(&self.conn, key, len, body, multipart::Rule::Create, None)
             .await
             .map(drop)
     }

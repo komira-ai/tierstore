@@ -396,6 +396,7 @@ impl From<Error> for S3Error {
             Error::InvalidSegment(_) => (StatusCode::BAD_REQUEST, "InvalidArgument"),
             Error::InvalidPart(_) => (StatusCode::BAD_REQUEST, "InvalidPart"),
             Error::BadDigest(_) => (StatusCode::BAD_REQUEST, "BadDigest"),
+            Error::TooLarge(_) => (StatusCode::BAD_REQUEST, "EntityTooLarge"),
             Error::Unsupported(_) => (StatusCode::NOT_IMPLEMENTED, "NotImplemented"),
             Error::Unavailable(_) => (StatusCode::SERVICE_UNAVAILABLE, "ServiceUnavailable"),
             Error::Other(_) => (StatusCode::INTERNAL_SERVER_ERROR, "InternalError"),
