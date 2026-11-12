@@ -27,12 +27,13 @@
 //! again: a staged one is `EPERM`, a committed one `EACCES`, and a read `EACCES`. `setattr` is a
 //! change of nothing (the size it has, the mode it has), else `EPERM`, so the set-id bits are never
 //! set. The commit is the rename of a `.part` name to a final name in the same directory: it waits,
-//! until `fs.put.commit_deadline_secs`, while the file is busy (a handle the kernel has not
-//! released yet, since FUSE sends the release of a closed file after the close returns, or a
-//! commit of the file or of the key running), then uploads the file ([`super::upload`]) and
+//! until `fs.put.commit_deadline_secs`, while the file is busy for a while only (a handle whose
+//! descriptors were all closed and flushed and whose release has not come yet, since FUSE sends it
+//! after the close returns, or a commit of the file or of the key running), and is `EBUSY` at once
+//! for a handle still open; then it uploads the file ([`super::upload`]) and
 //! records the answer. Errors are the errnos of `super::error`.
 
-use std::collections::BTreeMap;
+use std::collections::{BTreeMap, BTreeSet};
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::{Arc, Condvar, Mutex, Weak, mpsc};
 use std::time::Duration;
@@ -41,6 +42,7 @@ use rustix::io::Errno;
 use sha2::{Digest as _, Sha256};
 
 use super::carry::{Handed, HeldDir};
+use super::commit::HANDLE_OPEN;
 use super::error::PutError;
 use super::names::{PutDir, check_component, is_part};
 use super::store::{Handle, Kind, Rename, StagedStore};
@@ -99,6 +101,9 @@ struct State {
     dirs: BTreeMap<u64, Dir>,
     /// The store's handle of each open the kernel holds, by the number the kernel was given.
     handles: BTreeMap<u64, Handle>,
+    /// The opens the kernel has flushed (each `close` of a descriptor flushes its open) and not
+    /// written through since: opens that are being closed, whose release may still come.
+    flushed: BTreeSet<u64>,
     /// The count of the opens this process gave out.
     opens: u64,
 }
@@ -128,6 +133,9 @@ pub(in crate::server) struct PutSpace {
     changed: Condvar,
     /// Whether a successor is taking over: the sweep does nothing.
     held: AtomicBool,
+    /// Held by a sweep for the whole of it, and by a hold while it is set, so that no sweep that
+    /// began before a hold goes on after it.
+    sweeping: Mutex<()>,
     /// The end of the channel the sweep's thread waits on; dropped with the space, which ends it.
     sweeper: Mutex<Option<mpsc::Sender<()>>>,
     /// The waits for a change begun, for the tests that act once a commit waits.
@@ -194,6 +202,7 @@ impl PutSpace {
             changes: Mutex::new(0),
             changed: Condvar::new(),
             held: AtomicBool::new(false),
+            sweeping: Mutex::new(()),
             sweeper: Mutex::new(None),
             #[cfg(test)]
             waits: std::sync::atomic::AtomicU64::new(0),
@@ -544,6 +553,7 @@ impl PutSpace {
         bytes: &[u8],
     ) -> Result<usize, Errno> {
         let handle = self.handle_of(ino, fh)?;
+        let _ = locked(&self.state).flushed.remove(&fh);
         self.store
             .write(handle, offset, bytes)
             .map_err(|error| errno(&error))
@@ -552,11 +562,41 @@ impl PutSpace {
     /// The kernel has closed the open `fh`: a commit waiting for the file goes on. An open this
     /// process does not know is one an earlier process gave out and nobody wrote through since.
     pub(in crate::server) fn release(&self, fh: u64) {
-        let handle = locked(&self.state).handles.remove(&fh);
+        let handle = {
+            let mut state = locked(&self.state);
+            let _ = state.flushed.remove(&fh);
+            state.handles.remove(&fh)
+        };
         if let Some(handle) = handle {
             self.store.release(handle);
         }
         self.note_change();
+    }
+
+    /// The kernel flushed the open `fh`: a descriptor of it was closed. Its release follows if it
+    /// was the last.
+    pub(in crate::server) fn flush(&self, fh: u64) {
+        let mut state = locked(&self.state);
+        if state.handles.contains_key(&fh) {
+            let _ = state.flushed.insert(fh);
+        }
+    }
+
+    /// Whether every open of the staged file numbered `id` has been flushed since its last write:
+    /// the file is being closed, and its releases are on their way.
+    fn closing(&self, id: u64) -> bool {
+        let of_handle: BTreeMap<u64, u64> = self
+            .store
+            .open_handles()
+            .into_iter()
+            .map(|(handle, file)| (handle.0, file))
+            .collect();
+        let state = locked(&self.state);
+        state
+            .handles
+            .iter()
+            .filter(|(_, handle)| of_handle.get(&handle.0) == Some(&id))
+            .all(|(fh, _)| state.flushed.contains(fh))
     }
 
     /// Removes the `.part` file `name` of `parent` (the abort).
@@ -601,7 +641,14 @@ impl PutSpace {
                 Ok(Rename::Renamed) => return Ok(()),
                 Ok(Rename::Commit(commit)) => break commit,
                 Err(PutError::Busy(why)) => {
-                    if !self.wait_for_change(seen, deadline) {
+                    // A file still open is not waited for: only one being closed, whose release
+                    // FUSE sends after the close returns, or another commit of the file or key.
+                    let open = why == HANDLE_OPEN
+                        && !self
+                            .store
+                            .find(&dir, name)
+                            .is_some_and(|(id, _)| self.closing(id));
+                    if open || !self.wait_for_change(seen, deadline) {
                         tracing::warn!("tierstore fs: the commit of {parent}/{new}: {why}");
                         return Err(Errno::BUSY);
                     }
@@ -655,11 +702,13 @@ impl PutSpace {
 
     /// Stops the sweep, for a successor that takes over (`true`), or starts it again (`false`).
     pub(in crate::server) fn hold(&self, on: bool) {
+        let _sweeping = locked(&self.sweeping);
         self.held.store(on, Ordering::Release);
     }
 
     /// Runs the sweep of the store, unless held.
     pub(in crate::server) fn sweep(&self) {
+        let _sweeping = locked(&self.sweeping);
         if self.held.load(Ordering::Acquire) {
             return;
         }

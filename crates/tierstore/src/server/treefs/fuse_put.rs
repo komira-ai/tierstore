@@ -3,9 +3,11 @@
 //! what FUSE alone has: every answer has a timeout of zero (the store changes under the kernel); a
 //! create is answered with `FOPEN_DIRECT_IO`, so that each write reaches the store with its offset,
 //! no page of a staged file is cached, and a file is never mapped; `rename` takes only
-//! `RENAME_NOREPLACE` of its flags; `flush` and `fsync` do nothing (the commit is the rename);
-//! `statfs` is the stage's volume; and what the put directory does not do (`link`, `symlink`,
-//! `mknod`, `rmdir`, the extended attributes) is `EPERM`.
+//! `RENAME_NOREPLACE` of its flags; `flush` tells the put directory that a descriptor was closed
+//! and `fsync` does nothing (the commit is the rename); `statfs` is the stage's volume; and what
+//! the put directory does not do (`link`, `symlink`, `mknod`, `rmdir`, setting or removing an
+//! extended attribute) is `EPERM`, while reading the extended attributes is `ENOSYS`, as on the
+//! trees (the kernel then answers `EOPNOTSUPP` without asking again).
 
 use std::ffi::OsStr;
 use std::time::{Duration, UNIX_EPOCH};

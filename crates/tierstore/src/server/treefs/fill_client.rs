@@ -110,9 +110,18 @@ impl FillClient {
         }
     }
 
-    /// Sends `line` and reads one line back; with `answered` false nothing is read.
-    fn exchange(connection: &mut Connection, line: &str, answered: bool) -> Result<String, Failed> {
+    /// Sends `line` and reads one line back, waiting `wait` for it where given; with `answered`
+    /// false nothing is read.
+    fn exchange(
+        connection: &mut Connection,
+        line: &str,
+        (answered, wait): (bool, Option<Duration>),
+    ) -> Result<String, Failed> {
         let stream = connection.reader.get_mut();
+        if let Some(wait) = wait {
+            // A duration that is not zero is always taken.
+            let _ = stream.set_read_timeout(Some(wait.max(Duration::from_millis(1))));
+        }
         stream
             .write_all(format!("{line}\n").as_bytes())
             .map_err(|_| Failed::Gone)?;
@@ -139,11 +148,21 @@ impl FillClient {
     /// The answer to `line`, asked again over a new connection when a connection fails, with a
     /// pause when a new connection fails too.
     fn ask_line(&self, line: &str, answered: bool) -> Result<String, AskError> {
+        self.ask(line, (answered, None))
+    }
+
+    /// [`FillClient::ask_line`], waiting `wait` for the answer where given instead of the
+    /// client's own time.
+    fn ask(
+        &self,
+        line: &str,
+        (answered, wait): (bool, Option<Duration>),
+    ) -> Result<String, AskError> {
         let mut paused = 0;
         loop {
             let (connection, kept) = self.connection();
             if let Some(mut connection) = connection {
-                match Self::exchange(&mut connection, line, answered) {
+                match Self::exchange(&mut connection, line, (answered, wait)) {
                     Ok(answer) => {
                         self.keep(connection);
                         return Ok(answer);
@@ -203,16 +222,16 @@ impl FillClient {
     }
 
     /// Asks for the `size` bytes of the file at `path`, which hash to `sha256`, to be put as the
-    /// object `key`, create-only; the answer is the line of JSON the socket gives.
+    /// object `key`, create-only, waiting at most `wait` for the answer; the answer is the line of
+    /// JSON the socket gives.
     pub(super) fn put(
         &self,
-        key: &str,
-        sha256: &str,
-        size: u64,
+        (key, sha256, size): (&str, &str, u64),
         path: &std::path::Path,
+        wait: Duration,
     ) -> Result<String, AskError> {
         let line = format!("put {key} {sha256} {size} from {}", path.display());
-        self.ask_line(&line, true)
+        self.ask(&line, (true, Some(wait)))
     }
 
     /// Keeps the pins of `trees` of `mount` and takes away the others.

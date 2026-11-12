@@ -449,14 +449,18 @@ impl Filesystem for Frontend {
         &self,
         _req: &Request,
         ino: INodeNo,
-        _fh: FileHandle,
+        fh: FileHandle,
         _lock_owner: LockOwner,
         reply: ReplyEmpty,
     ) {
-        // Nothing is kept to flush: a write reaches the store before it is answered. A tree is
-        // never written, and the kernel stops asking after the first `ENOSYS`, as before.
+        // Nothing is kept to flush: a write reaches the store before it is answered; the flush
+        // says the open is being closed. A tree is never written, and the kernel stops asking
+        // after the first `ENOSYS`, as before.
         match self.put_of(ino) {
-            Some(_) => reply.ok(),
+            Some(put) => {
+                put.flush(fh.0);
+                reply.ok();
+            }
             None => reply.error(Errno::ENOSYS),
         }
     }

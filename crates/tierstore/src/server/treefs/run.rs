@@ -260,9 +260,13 @@ impl Running {
             record.generation,
             true,
         )?;
-        let handed = carry::take(&settings.runtime_dir)
+        let handed = carry::read(&settings.runtime_dir)
             .map_err(io("reading the put directory's hand-over"))?;
         serve_put(settings, &core, record.generation, Some(handed))?;
+        // Taken over: a later start must not take it over again.
+        if let Err(error) = carry::remove(&settings.runtime_dir) {
+            tracing::warn!("tierstore fs: the put directory's hand-over is not removed: {error}");
+        }
         let control = match control {
             Some(listener) => {
                 Control::serve_on(Arc::clone(&core), listener, &settings.control_socket)
@@ -348,18 +352,21 @@ impl Running {
     /// What the system said when the readers or the control socket cannot start again.
     pub(super) fn resume(&self) -> std::io::Result<()> {
         let mut parts = locked(&self.parts);
+        if let Some(put) = self.core.put() {
+            // A successor that did not complete its start may have rewritten the journal: this
+            // process appends to a file of its own again before it serves, or does not serve.
+            put.store().reopen_journal()?;
+            put.hold(false);
+            if let Err(error) = carry::remove(&self.settings.runtime_dir) {
+                tracing::warn!(
+                    "tierstore fs: the put directory's hand-over is not removed: {error}"
+                );
+            }
+        }
         self.core.hold(false);
         parts.serving.restart(&self.core, &self.settings)?;
         // The counts written exact at the pause are a lower bound again once opens go on.
         self.core.write_backing_inexact();
-        if let Some(put) = self.core.put() {
-            // A successor that did not complete its start may have rewritten the journal.
-            if let Err(error) = put.store().reopen_journal() {
-                tracing::warn!("tierstore fs: the put journal is not written again: {error}");
-            }
-            put.hold(false);
-            carry::remove(&self.settings.runtime_dir)?;
-        }
         parts.control.resume()
     }
 

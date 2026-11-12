@@ -84,3 +84,30 @@ fn the_pause_doubles_to_a_ceiling_and_is_spread_by_the_digest() {
 fn millis(duration: Duration) -> u64 {
     u64::try_from(duration.as_millis()).unwrap()
 }
+
+/// Asserts that a try whose answer does not come waits no longer than its commit's deadline
+/// leaves (here 5 ms of a 30 s answer timeout), and that the upload then ends `Upstream` with no
+/// second try, since no pause fits before the deadline.
+#[test]
+fn a_try_waits_for_its_answer_no_longer_than_the_deadline_leaves() {
+    let rig = super::super::testing::SpaceRig::new("put-upload-left");
+    let socket = rig.rig.root.path().join("fill.sock");
+    let clock = rig.rig.clock.clone();
+    let uploader = super::Uploader::new(
+        &socket,
+        Duration::from_secs(30),
+        clock.clone(),
+        std::sync::Arc::new(|_| {}),
+    );
+    rig.puts.hold();
+    let staged = rig.rig.root.path().join("staged");
+    std::fs::write(&staged, b"x").unwrap();
+    let outcome = uploader.put(
+        ("cas/b/k", super::super::testing::sha(b"x"), 1),
+        &staged,
+        clock.now() + 5,
+    );
+    assert_eq!(outcome, PutOutcome::Upstream);
+    assert_eq!(rig.puts.count(), 1);
+    rig.puts.let_go();
+}

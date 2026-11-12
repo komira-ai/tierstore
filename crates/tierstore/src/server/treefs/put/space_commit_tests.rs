@@ -189,15 +189,17 @@ fn a_name_whose_digest_is_not_that_of_the_bytes_is_ebadmsg() {
     assert_eq!(rig.puts.object(&format!("{DIR}/pack")).unwrap(), b"bytes");
 }
 
-/// Asserts that a commit made while the file's handle is open waits for its release (FUSE sends
-/// the release after the close returns), and then commits the bytes.
+/// Asserts that a commit made after the file was closed but before its release arrived (FUSE sends
+/// the release after the close returns, the flush before) waits for the release, and then commits
+/// the bytes.
 #[test]
-fn a_commit_waits_for_the_release_of_the_file() {
+fn a_commit_of_a_closed_file_waits_for_its_release() {
     let rig = SpaceRig::new("put-commit-release");
     let space = &rig.space;
     let dir = nonce(space);
     let (attr, fh) = space.create(dir, "pack.part").unwrap();
     let _ = space.write((attr.ino, fh), 0, b"late").unwrap();
+    space.flush(fh);
     std::thread::scope(|scope| {
         let commit = scope.spawn(|| space.rename((dir, "pack.part"), (dir, "pack"), false));
         until(|| space.waits.load(Ordering::Acquire) > 0);
@@ -208,15 +210,44 @@ fn a_commit_waits_for_the_release_of_the_file() {
     assert_eq!(rig.puts.object(&format!("{DIR}/pack")).unwrap(), b"late");
 }
 
-/// Asserts that a commit whose file is still open when the deadline comes is `EBUSY`, uploads
-/// nothing, and leaves the file staged.
+/// Asserts that a commit of a file still open (never flushed, or written after its flush, or
+/// flushed through one open while another is not) is `EBUSY` at once, with no wait and nothing
+/// uploaded, so that a job holding its file open never holds a thread of the mount.
 #[test]
-fn a_file_still_open_at_the_deadline_is_ebusy() {
+fn a_commit_of_a_file_still_open_is_ebusy_at_once() {
+    let rig = SpaceRig::new("put-commit-open");
+    let space = &rig.space;
+    let dir = nonce(space);
+    let (attr, fh) = space.create(dir, "pack.part").unwrap();
+    let _ = space.write((attr.ino, fh), 0, b"open").unwrap();
+    let commit = || space.rename((dir, "pack.part"), (dir, "pack"), false);
+    assert_eq!(commit(), Err(Errno::BUSY));
+    space.flush(fh);
+    let _ = space.write((attr.ino, fh), 4, b"!").unwrap();
+    assert_eq!(commit(), Err(Errno::BUSY));
+    space.flush(crate::server::treefs::handle::make(1, 999, false));
+    let other = crate::server::treefs::handle::make(7, 1, false);
+    let _ = space.write((attr.ino, other), 5, b"?").unwrap();
+    space.flush(fh);
+    assert_eq!(commit(), Err(Errno::BUSY));
+    assert_eq!(space.waits.load(Ordering::Acquire), 0);
+    assert_eq!(rig.puts.count(), 0);
+    space.release(fh);
+    space.release(other);
+    commit().unwrap();
+    assert_eq!(rig.puts.object(&format!("{DIR}/pack")).unwrap(), b"open!?");
+}
+
+/// Asserts that a commit of a closed file whose release does not come by the deadline is `EBUSY`,
+/// uploads nothing, and leaves the file staged.
+#[test]
+fn a_closed_file_not_released_by_the_deadline_is_ebusy() {
     let rig = SpaceRig::new("put-commit-busy");
     let space = &rig.space;
     let dir = nonce(space);
     let (attr, fh) = space.create(dir, "pack.part").unwrap();
     let _ = space.write((attr.ino, fh), 0, b"held").unwrap();
+    space.flush(fh);
     std::thread::scope(|scope| {
         let commit = scope.spawn(|| space.rename((dir, "pack.part"), (dir, "pack"), false));
         until(|| space.waits.load(Ordering::Acquire) > 0);
@@ -442,6 +473,11 @@ fn a_successor_takes_over_the_directories_and_the_opens_it_is_handed() {
     assert_eq!(space.lookup(dir, "sub").unwrap().unwrap().ino, made.ino);
     assert_eq!(space.store.open_handles().len(), 2);
     assert_eq!(space.write((open.ino, fh), 4, b"done"), Ok(4));
+    assert_eq!(
+        space.rename((dir, "open.part"), (dir, "open"), false),
+        Err(Errno::BUSY)
+    );
+    space.flush(fh);
     std::thread::scope(|scope| {
         let commit = scope.spawn(|| space.rename((dir, "open.part"), (dir, "open"), false));
         until(|| space.waits.load(Ordering::Acquire) > 0);

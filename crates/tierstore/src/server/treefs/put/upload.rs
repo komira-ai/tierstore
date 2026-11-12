@@ -92,6 +92,8 @@ pub(super) fn pause_before(tries: u32, sha256: &Sha256Digest) -> Duration {
 pub(in crate::server) struct Uploader {
     /// A client of the fill socket that does not wait for it itself: the waits are this one's.
     client: FillClient,
+    /// The longest a try waits for its answer.
+    most: Duration,
     /// The time the deadlines are told by, in milliseconds.
     clock: Arc<dyn Clock>,
     /// Takes a pause between two tries; a test replaces it.
@@ -99,16 +101,23 @@ pub(in crate::server) struct Uploader {
 }
 
 impl Uploader {
-    /// Uploads over the socket at `socket`, waiting at most `answer_timeout` for an answer.
+    /// Uploads over the socket at `socket`; each try waits for its answer until the deadline of
+    /// its commit, and no longer than `answer_timeout`.
     pub(in crate::server) fn new(
         socket: &Path,
         answer_timeout: Duration,
         clock: Arc<dyn Clock>,
         pause: Arc<dyn Fn(Duration) + Send + Sync>,
     ) -> Self {
-        let client = FillClient::pausing(socket.to_owned(), 0, answer_timeout, Arc::new(|_| {}));
+        let client = FillClient::pausing(
+            socket.to_owned(),
+            0,
+            answer_timeout,
+            Arc::new(std::mem::drop::<Duration>),
+        );
         Self {
             client,
+            most: answer_timeout,
             clock,
             pause,
         }
@@ -126,7 +135,10 @@ impl Uploader {
         let hex = sha256.to_string();
         let mut tries = 0;
         loop {
-            let tried = match self.client.put(key, &hex, size, path) {
+            // A try waits for its answer no longer than the deadline leaves.
+            let left =
+                Duration::from_millis(deadline.saturating_sub(self.clock.now())).min(self.most);
+            let tried = match self.client.put((key, &hex, size), path, left) {
                 Ok(line) => read_answer(&line),
                 Err(error) => {
                     tracing::warn!("tierstore fs: the put of {key}: {error}");

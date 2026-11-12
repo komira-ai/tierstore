@@ -1,8 +1,8 @@
 //! What a process that stops serving the mount hands the put directory's successor: the file
 //! `put-handover` in `fs.runtime_dir`, written by a rename when the process has stopped reading
 //! requests (for a hand-over, and before a restart that leaves the mount to the service manager),
-//! read once by the process that takes the connection over, and removed by it, and by a process
-//! that serves again after a hand-over that did not complete.
+//! read by the process that takes the connection over and removed by it once its put directory
+//! serves, and removed by a process that serves again after a hand-over that did not complete.
 //!
 //! ```text
 //! tierstore-fs-put-handover 1
@@ -16,7 +16,8 @@
 //! hold names from the store, and takes an open over at its first request.
 //!
 //! A reader takes the lines it knows and leaves out any other, and the words after those it knows,
-//! so a later release may add both. A line that is not what it says is left out. The fixtures are
+//! so a later release may add both; it reads a file of any version by those lines (a version is
+//! the format's count of changes, all additive). A line that is not what it says is left out. The fixtures are
 //! `fs_put_handover.txt` and `fs_put_handover_newer.txt` in
 //! `crates/tierstore/tests/stored_formats/fixtures/`.
 
@@ -67,10 +68,7 @@ pub(in crate::server) fn encode(handed: &Handed) -> String {
 /// What the text `text` hands over; none when it is not a hand-over file.
 pub(in crate::server) fn decode(text: &str) -> Option<Handed> {
     let mut lines = text.lines();
-    let version = lines.next()?.strip_prefix("tierstore-fs-put-handover ")?;
-    if version.split(' ').next()? != "1" {
-        return None;
-    }
+    let _version = lines.next()?.strip_prefix("tierstore-fs-put-handover ")?;
     let mut handed = Handed::default();
     for line in lines {
         let mut words = line.split(' ');
@@ -125,19 +123,19 @@ pub(in crate::server) fn write(runtime_dir: &Path, handed: &Handed) -> io::Resul
     std::fs::rename(&beside, path)
 }
 
-/// What the file in `runtime_dir` hands over, and removes it: none when there is none, or it is
-/// not a hand-over file (said).
+/// What the file in `runtime_dir` hands over: none when there is none, or it is not a hand-over
+/// file (said). The file stays until [`remove`], so that a start that fails after reading it leaves
+/// it for the next.
 ///
 /// # Errors
-/// What the system said when the file is there and cannot be read or removed.
-pub(in crate::server) fn take(runtime_dir: &Path) -> io::Result<Option<Handed>> {
+/// What the system said when the file is there and cannot be read.
+pub(in crate::server) fn read(runtime_dir: &Path) -> io::Result<Option<Handed>> {
     let path = runtime_dir.join(FILE);
     let text = match std::fs::read_to_string(&path) {
         Ok(text) => text,
         Err(error) if error.kind() == io::ErrorKind::NotFound => return Ok(None),
         Err(error) => return Err(error),
     };
-    std::fs::remove_file(&path)?;
     let handed = decode(&text);
     if handed.is_none() {
         tracing::warn!(
@@ -148,8 +146,8 @@ pub(in crate::server) fn take(runtime_dir: &Path) -> io::Result<Option<Handed>> 
     Ok(handed)
 }
 
-/// Removes the file in `runtime_dir`, if it is there: for a process that serves again after a
-/// hand-over that did not complete.
+/// Removes the file in `runtime_dir`, if it is there: for the process that took it over, once it
+/// serves, and for a process that serves again after a hand-over that did not complete.
 ///
 /// # Errors
 /// What the system said.
