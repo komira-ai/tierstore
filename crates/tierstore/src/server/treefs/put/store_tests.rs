@@ -2,6 +2,7 @@
 //! `.part` name to another, unlink, lookup and list, and the quotas.
 
 use std::fs::File;
+use std::os::unix::fs::PermissionsExt as _;
 use std::sync::Arc;
 
 use rustix::io::Errno;
@@ -15,7 +16,8 @@ use crate::server::local_cache::testing::Quirk;
 use crate::server::treefs::locked;
 
 /// Asserts that a created `.part` file holds what was written, in a file of the stage named by its
-/// number and not by its key, and that its name, size and time are looked up and listed.
+/// number and not by its key, of mode 0600 (no set-id bits, this process alone), and that its name,
+/// size and time are looked up and listed.
 #[test]
 fn a_created_part_is_staged_under_an_internal_number() {
     let rig = Rig::new("put-create");
@@ -34,6 +36,11 @@ fn a_created_part_is_staged_under_an_internal_number() {
         std::fs::read(rig.stage().join(stage_name(0))).unwrap(),
         b"hello"
     );
+    let mode = std::fs::metadata(rig.stage().join(stage_name(0)))
+        .unwrap()
+        .permissions()
+        .mode();
+    assert_eq!(mode & 0o7777, 0o600);
     let (records, _) = decode(rig.journal().as_bytes());
     assert_eq!(
         records,
@@ -143,12 +150,21 @@ fn a_write_past_max_object_bytes_is_too_large() {
     let refused = store.write(handle, 10, b"x").unwrap_err();
     assert!(matches!(refused, PutError::TooLarge));
     assert_eq!(refused.errno(), Errno::FBIG);
+    assert_eq!(
+        std::fs::read(rig.stage().join(stage_name(0))).unwrap(),
+        b"0123456789"
+    );
     assert_eq!(store.write(handle, 0, b"ab").unwrap(), 2);
     assert_eq!(store.lookup(&out, "a.part").unwrap().size, 10);
     assert!(matches!(
         store.write(handle, u64::MAX, b"x"),
         Err(PutError::TooLarge)
     ));
+    store.release(handle);
+    let Rename::Commit(commit) = store.rename(&out, "a.part", "a").unwrap() else {
+        panic!("a commit");
+    };
+    assert_eq!((commit.sha256(), commit.size()), (sha(b"ab23456789"), 10));
 }
 
 /// Asserts that the staged bytes of a directory stay at most `max_dir_bytes` across its files (the
@@ -165,6 +181,11 @@ fn a_directory_holds_at_most_max_dir_bytes_staged() {
     let refused = store.write(b, 4, b"x").unwrap_err();
     assert!(matches!(refused, PutError::Quota("bytes")));
     assert_eq!(refused.errno(), Errno::DQUOT);
+    assert_eq!(
+        std::fs::read(rig.stage().join(stage_name(1))).unwrap(),
+        b"0123"
+    );
+    assert_eq!(locked(&store.table).dirs["cas/b/1/n"].bytes, 10);
     assert_eq!(store.write(a, 0, b"abcdef").unwrap(), 6);
     let other = written(&store, &dir("cas/b/1/m"), "c.part", b"0123456789");
     store.release(other);

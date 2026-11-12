@@ -62,7 +62,10 @@ fn a_restart_stages_the_files_of_the_process_before() {
     assert_eq!(store.lookup(&out, "a.part").unwrap().size, 5);
     assert_eq!(store.lookup(&out, "a.part").unwrap().ms, START_MS);
     assert_eq!(store.lookup(&out, &named).unwrap().kind, Kind::Staged);
-    assert!(store.write(old_handle, 5, b"x").is_err());
+    assert!(matches!(
+        store.write(old_handle, 5, b"x"),
+        Err(PutError::BadHandle)
+    ));
     let Rename::Commit(commit) = store.rename(&out, &named, "b").unwrap() else {
         panic!("a commit");
     };
@@ -97,6 +100,75 @@ fn a_restart_shows_the_committed_names_again() {
         (attr.size, attr.ms, attr.kind),
         (3, START_MS, Kind::Committed(sha(b"abc")))
     );
+    drop(store);
+    let (store, replayed) = rig.open_replayed();
+    assert_eq!(
+        replayed,
+        Replayed {
+            committed: 1,
+            orphans: 1,
+            ..Replayed::default()
+        }
+    );
+    assert_eq!(store.lookup(&out, "a"), Some(attr));
+    rig.clock.advance(600_000);
+    assert_eq!(store.sweep().committed, 1);
+    assert_eq!(store.lookup(&out, "a"), None);
+}
+
+/// Asserts that a committed name and a staged file outlive a sweep that rewrites the journal and a
+/// restart after it, as they were.
+#[test]
+fn a_rewritten_journal_replays_to_the_same_names() {
+    let rig = Rig::new("put-replay-compacted");
+    let out = dir("cas/b/1/n");
+    {
+        let store = rig.open();
+        staged(&store, &out, "a.part", b"abc");
+        commit(&store, &out, "a.part", "a", PutOutcome::Created).unwrap();
+        staged(&store, &out, "b.part", b"de");
+        for _ in 0..40 {
+            staged(&store, &out, "x.part", b"x");
+            store.unlink(&out, "x.part").unwrap();
+        }
+        let _ = store.sweep();
+        assert_eq!(locked(&store.table).journal.lines(), 3);
+    }
+    let (store, replayed) = rig.open_replayed();
+    assert_eq!(
+        replayed,
+        Replayed {
+            staged: 1,
+            committed: 1,
+            ..Replayed::default()
+        }
+    );
+    let names: Vec<(String, u64, Kind)> = store
+        .list(&out)
+        .into_iter()
+        .map(|(name, attr)| (name, attr.size, attr.kind))
+        .collect();
+    assert_eq!(
+        names,
+        vec![
+            ("a".to_owned(), 3, Kind::Committed(sha(b"abc"))),
+            ("b.part".to_owned(), 2, Kind::Staged),
+        ]
+    );
+}
+
+/// Asserts that a staged file the stage holds as a symbolic link is not followed: the start that
+/// would open it is refused, naming the file.
+#[test]
+fn a_staged_file_that_is_a_symlink_is_not_followed() {
+    let rig = Rig::new("put-replay-symlink");
+    let outside = rig.root.path().join("outside");
+    std::fs::write(&outside, b"secret").unwrap();
+    journal_of(&rig, &[create(0, "cas/b/1/n", "a.part")]);
+    std::os::unix::fs::symlink(&outside, rig.stage().join(stage_name(0))).unwrap();
+    let path = rig.stage().join(stage_name(0));
+    assert!(matches!(open_err(&rig), OpenError::Io(at, _) if at == path));
+    assert_eq!(std::fs::read(&outside).unwrap(), b"secret");
 }
 
 /// Asserts that a staged entry whose file is gone is dropped at the start, and that the journal the

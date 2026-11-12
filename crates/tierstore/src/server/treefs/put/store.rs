@@ -278,7 +278,7 @@ impl StagedStore {
     /// # Errors
     /// - [`PutError::InvalidName`], [`PutError::NameTooLong`]: not a name.
     /// - [`PutError::NotPermitted`]: the name does not end in `.part`.
-    /// - [`PutError::Exists`]: the name is staged in `dir`.
+    /// - [`PutError::Exists`]: the name is taken in `dir`.
     /// - [`PutError::Quota`]: `dir` holds `max_dir_files` names.
     /// - [`PutError::NoSpace`]: the stage's volume has less than `min_free_bytes` free.
     /// - [`PutError::Io`]: the free space, the staged file or the journal could not be had.

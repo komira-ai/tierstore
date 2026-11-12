@@ -9,7 +9,7 @@ use rustix::io::Errno;
 use super::commit::PutOutcome;
 use super::error::PutError;
 use super::journal::{Record, decode};
-use super::store::{Attr, Kind, Rename, stage_name};
+use super::store::{Attr, DirUse, Kind, Rename, stage_name};
 use super::testing::{Rig, START_MS, commit, dir, sha, staged, warnings, written};
 use crate::server::treefs::locked;
 
@@ -175,6 +175,13 @@ fn a_failed_upload_leaves_the_file_staged_for_the_same_rename() {
         assert_eq!(store.lookup(&out, "pack.part").unwrap().kind, Kind::Staged);
         assert_eq!(store.lookup(&out, "pack"), None);
         assert!(locked(&store.table).uploading.is_empty());
+        let use_ = locked(&store.table).dirs["cas/b/1/n"];
+        assert_eq!(use_, DirUse { files: 1, bytes: 5 });
+        assert_eq!(
+            std::fs::read(rig.stage().join(stage_name(0))).unwrap(),
+            b"hello"
+        );
+        assert_eq!(decode(rig.journal().as_bytes()).0.len(), 1);
     }
     commit(&store, &out, "pack.part", "pack", PutOutcome::Created).unwrap();
 }

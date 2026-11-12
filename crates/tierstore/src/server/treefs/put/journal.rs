@@ -19,10 +19,11 @@
 //! A reader ignores fields it does not know and skips a line it cannot read (an `op` it does not
 //! know, or the torn last line of a process that stopped while it wrote), so a later release adds
 //! fields and operations without a version. The lines are written without `fsync`: the journal
-//! serves a restart of the process (the hand-over of the mount), and a start removes the staged
-//! files that have no entry. A start rewrites the journal with the live entries alone, to
-//! `journal.new`, synced and renamed over `journal`, and so does a sweep that finds more dead
-//! lines than live ones.
+//! serves a restart of the process (the hand-over of the mount), and the first sweep ten minutes
+//! after a start removes the staged files that have no entry. A start rewrites the journal with
+//! the live entries alone (a committed entry as a `create` of its final name and its `commit`), to
+//! `journal.new`, synced and renamed over `journal`, and so does a sweep once the journal has more
+//! than twice as many lines as live entries, plus 64.
 //!
 //! The fixtures are `fs_put_journal.jsonl` and `fs_put_journal_newer.jsonl` in
 //! `crates/tierstore/tests/stored_formats/fixtures/`.

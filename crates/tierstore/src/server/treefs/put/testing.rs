@@ -26,7 +26,7 @@ pub(super) const START_MS: u64 = 1_800_000_000_000;
 /// The prefix the settings of a rig allow.
 pub(super) const PREFIX: &str = "cas/b/";
 
-/// The settings of the design's defaults, under [`PREFIX`], with no limit.
+/// The default TTLs (12 hours staged, 10 minutes committed), under [`PREFIX`], with no limit.
 pub(super) fn settings() -> PutSettings {
     PutSettings {
         prefixes: vec![PREFIX.to_owned()],

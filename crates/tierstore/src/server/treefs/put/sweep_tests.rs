@@ -2,6 +2,7 @@
 //! rewrite of a journal of mostly dead lines.
 
 use super::commit::PutOutcome;
+use super::error::PutError;
 use super::journal::{NEW_FILE, decode};
 use super::store::{Kind, Rename, stage_name};
 use super::sweep::{COMPACT_SLACK, SweepReport};
@@ -35,7 +36,10 @@ fn a_staged_file_is_swept_at_the_stage_ttl() {
     assert_eq!(store.lookup(&out, "a.part"), None);
     assert_eq!(rig.stage_files(), vec!["journal".to_owned()]);
     assert!(locked(&store.table).dirs.is_empty());
-    assert!(store.write(handle, 4, b"e").is_err());
+    assert!(matches!(
+        store.write(handle, 4, b"e"),
+        Err(PutError::BadHandle)
+    ));
     assert_eq!(decode(rig.journal().as_bytes()).0.len(), 2);
 }
 

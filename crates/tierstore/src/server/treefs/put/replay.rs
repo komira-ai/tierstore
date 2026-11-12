@@ -9,7 +9,9 @@
 //!   file and its line, or a commit's file was not removed) is an orphan: the first sweep at least
 //!   ten minutes after the start removes it. Files of other names are left alone.
 //! - A line that cannot be read, or that names what cannot be (a name taken, a directory or name
-//!   that is not one, a `.part` name committed), is skipped and counted.
+//!   that is not one, a `.part` name committed, a staged entry whose name is final), is skipped
+//!   and counted. A create of a final name followed by its commit is how a rewrite writes a
+//!   committed entry.
 //! - The next staged file is numbered after every number a line of the journal or a file of the
 //!   stage names, so no number is used twice.
 
@@ -47,8 +49,9 @@ pub(in crate::server) struct Replayed {
     pub skipped: u64,
 }
 
-/// Fails unless the device numbers of the stage and of the cache are the same: a commit links the
-/// staged file into the cache.
+/// Fails unless the device numbers of the stage and of the cache are the same, so that a staged
+/// file the server is handed can become a file of the cache without a copy (`fs.put.stage_dir` must
+/// be on the cache volume).
 pub(super) fn same_volume(stage: (&Path, u64), cache: (&Path, u64)) -> Result<(), OpenError> {
     if stage.1 != cache.1 {
         return Err(OpenError::OtherVolume {
@@ -68,6 +71,11 @@ pub(super) fn apply(records: Vec<Record>) -> (BTreeMap<u64, Entry>, u64) {
             skipped += 1;
         }
     }
+    // A create's name is final only when a commit follows it (a rewritten committed entry); a
+    // staged entry left with a final name is not one a job made.
+    let before = entries.len();
+    entries.retain(|_, entry| entry.committed.is_some() || is_part(&entry.name));
+    skipped += (before - entries.len()) as u64;
     (entries, skipped)
 }
 
@@ -83,8 +91,7 @@ fn holder(entries: &BTreeMap<u64, Entry>, dir: &str, name: &str) -> Option<u64> 
 fn apply_one(entries: &mut BTreeMap<u64, Entry>, record: Record) -> bool {
     match record {
         Record::Create { id, dir, name, ms } => {
-            let good =
-                PutDir::parse(&dir).is_ok() && check_component(&name).is_ok() && is_part(&name);
+            let good = PutDir::parse(&dir).is_ok() && check_component(&name).is_ok();
             if !good || entries.contains_key(&id) || holder(entries, &dir, &name).is_some() {
                 return false;
             }

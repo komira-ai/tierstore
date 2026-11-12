@@ -4,7 +4,8 @@
 //! `.part` name to a final name, hands the caller the staged file, its key and its SHA-256 to put
 //! upstream (the fill socket's `put` verb), and then records the answer.
 //!
-//! The rules (the kbf design "kbf jobs on jobscheduler and tierstore", sections 3, 5 and 7):
+//! The rules, from the design of the put directory (`docs/design/jobs-on-jobscheduler-and-tierstore.md`
+//! of komira-ai/kbf, sections 3, 5 and 7); the store knows nothing of what the objects hold:
 //!
 //! - Only a directory under one of the allowed key prefixes takes files ([`names::PutDir`]); its
 //!   components are UTF-8 names of 1 to 255 bytes, never `.` or `..`, and at most

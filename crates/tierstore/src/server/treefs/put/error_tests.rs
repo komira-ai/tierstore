@@ -1,4 +1,4 @@
-//! The errno of each refusal of the put directory (the kbf design's mapping, section 3).
+//! The errno of each refusal of the put directory.
 
 use std::io;
 use std::path::PathBuf;
