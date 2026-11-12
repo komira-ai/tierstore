@@ -166,10 +166,11 @@ fn the_namespace_is_two_directories_nobody_lists() {
 }
 
 /// Asserts that `trees/<digest>` is found for an attached tree with no timeout, owned by the
-/// owner of the mount, and is not found for a tree nobody has attached, a name that is not a
-/// digest, or a tree after its last run detached.
+/// owner of the mount; is not found for a digest the upstream has no tree of, or a name that is
+/// not a digest (upper-case hex included); and is found again, under the same number, by a lookup
+/// after its last run detached, which attaches it with no run.
 #[test]
-fn a_tree_is_found_by_digest_only_while_attached() {
+fn a_tree_is_found_by_digest_while_attached_and_a_lookup_attaches_it_again() {
     let rig = attached("tfs-core-trees");
     let core = &rig.core;
     let root = rig.upstream.built.lock().unwrap().root.clone();
@@ -185,8 +186,10 @@ fn a_tree_is_found_by_digest_only_while_attached() {
         Err(Errno::NoEnt)
     );
     assert!(core.detach(RUN).is_some());
-    assert_eq!(core.lookup(ino::TREES, &root), Err(Errno::NoEnt));
-    // Attached again: the same number.
+    assert!(core.attachments().is_empty());
+    assert_eq!(found(core, ino::TREES, &root).attr.ino, root_ino());
+    assert_eq!(core.implicit(), vec![1]);
+    // Attached by a run again: the same number.
     let _ = core.attach(&root, "run-2").unwrap();
     assert_eq!(found(core, ino::TREES, &root).attr.ino, root_ino());
 }

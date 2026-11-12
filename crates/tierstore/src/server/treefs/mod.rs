@@ -1,12 +1,14 @@
 //! `tierstore fs`: the virtual build file system, a subcommand of the `tierstore` binary
 //! (`docs/design/virtual-build-fs.md`). One FUSE mount per node, `fs.mountpoint`, shows the trees
-//! that clients attach by digest for their runs, lazily: a file's bytes are fetched from the
-//! node's tierstore, over its fill socket, on the file's first open.
+//! that clients attach by digest for their runs, and any tree whose digest a lookup names
+//! (`core/implicit.rs`, until it is idle for `fs.tree_idle_secs`), lazily: a file's bytes are
+//! fetched from the node's tierstore, over its fill socket, on the file's first open.
 //!
 //! - [`config`]: the `[fs]` table of the file.
 //! - [`ino`], [`table`], [`tree`]: the inode numbers (invariant I1), the table of tree numbers in
 //!   the runtime directory, and a flattened tree.
-//! - [`attach`], [`control`]: the attachments and the control socket they are made on.
+//! - [`attach`], [`control`]: the attachments (of runs, and of lookups) and the control socket
+//!   the attachments of runs are made on.
 //! - [`fill_client`]: the client of the fill socket (fills, touches and pins).
 //! - [`core`]: the operations of a filesystem on inode numbers, with no protocol in them.
 //! - `start`: what a start does before a frontend serves (the runtime directory, the core, the

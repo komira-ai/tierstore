@@ -18,6 +18,8 @@ use std::io::Read as _;
 use std::path::Path;
 use std::sync::Arc;
 
+use crate::MonotonicClock;
+
 use super::attach::Attachments;
 #[cfg(any(target_os = "linux", test))]
 use super::backing;
@@ -138,8 +140,9 @@ pub(super) fn create_mount_point(settings: &FsSettings) -> Result<(), StartError
     )))
 }
 
-/// A core over `table` for the mount `mount_id`, with the attachments the file holds made again
-/// and the cache told which trees are attached. `generation`, which numbers the file handles, exists
+/// A core over `table` for the mount `mount_id`, with the attachments the file holds made again,
+/// the cache told which trees are attached, and the thread that detaches the trees a lookup
+/// attached once they are idle (`fs.tree_idle_secs`) started. `generation`, which numbers the file handles, exists
 /// only on Linux (and in tests), since only the FUSE frontend has file handles.
 /// `count_lookups` is whether the core counts the lookups of its inodes (a frontend that is told
 /// when they are forgotten, FUSE), or drops a tree when it is detached (one that is not told).
@@ -162,6 +165,8 @@ pub(super) fn core_of(
             #[cfg(any(target_os = "linux", test))]
             generation,
             count_lookups,
+            tree_idle: settings.tree_idle,
+            clock: Arc::new(MonotonicClock::new()),
         },
         fills,
         table,
@@ -171,6 +176,8 @@ pub(super) fn core_of(
         Attachments::saved(&settings.runtime_dir).map_err(io("reading the attachments file"))?;
     core.restore(saved, settings.reattach_concurrency);
     core.pins_live();
+    core.sweep_idle(core::look_every(settings.tree_idle))
+        .map_err(io("starting the thread that detaches idle trees"))?;
     Ok(core)
 }
 

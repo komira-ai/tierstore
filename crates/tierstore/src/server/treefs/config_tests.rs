@@ -42,6 +42,7 @@ fn the_needed_keys_alone_give_the_defaults() {
         handoff_wait: Duration::from_secs(120),
         recover_wait: Duration::from_secs(30),
         reattach_concurrency: 16,
+        tree_idle: Duration::from_secs(900),
         allow_other: true,
         nfs: crate::server::treefs::nfs::config::NfsSettings::default(),
     };
@@ -55,7 +56,8 @@ fn every_key_is_taken_when_it_is_set() {
     let text = "[fs]\nmountpoint = \"/m\"\nruntime_dir = \"/r\"\nclient_group = \"77\"\n\
         owner = \"5:6\"\nfill_socket = \"/f\"\ncache_path = \"/c\"\nfetch_timeout = \"5s\"\n\
         threads = 3\npassthrough = false\nmax_backing_ids = 7\n\
-        handoff_socket = \"/h.sock\"\nhandoff_wait = \"5s\"\nrecover_wait = \"2m\"\nreattach_concurrency = 3\n";
+        handoff_socket = \"/h.sock\"\nhandoff_wait = \"5s\"\nrecover_wait = \"2m\"\nreattach_concurrency = 3\n\
+        tree_idle_secs = 604800\n";
     let got = from_text(text, "").unwrap();
     assert_eq!(got.mountpoint, PathBuf::from("/m"));
     assert_eq!(got.control_socket, PathBuf::from("/r/control.sock"));
@@ -66,6 +68,7 @@ fn every_key_is_taken_when_it_is_set() {
     );
     assert_eq!((got.passthrough, got.max_backing_ids), (false, 7));
     assert_eq!(got.reattach_concurrency, 3);
+    assert_eq!(got.tree_idle, Duration::from_secs(604_800));
     assert_eq!(got.handoff_socket, PathBuf::from("/h.sock"));
     assert_eq!(
         (got.handoff_wait, got.recover_wait),
@@ -105,6 +108,8 @@ fn every_refusal_names_its_key() {
         (fs("handoff_wait = \"2h\"\n"), "fs.handoff_wait"),
         (fs("reattach_concurrency = 0\n"), "fs.reattach_concurrency"),
         (fs("reattach_concurrency = 1025\n"), "fs.reattach_concurrency"),
+        (fs("tree_idle_secs = 0\n"), "fs.tree_idle_secs"),
+        (fs("tree_idle_secs = 604801\n"), "fs.tree_idle_secs"),
         (fs("recover_wait = \"0s\"\n"), "fs.recover_wait"),
         (fs("recover_wait = \"3h\"\n"), "fs.recover_wait"),
         (fs("fetch_timeout = \"0ms\"\n"), "fs.fetch_timeout"),

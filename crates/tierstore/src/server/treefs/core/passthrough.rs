@@ -52,7 +52,7 @@ impl Core {
                 return Ok(Opened::Cached(fh));
             }
             Slot::Live(backing) => {
-                self.pin_once(loaded, digest);
+                self.pin_once((loaded, number), digest);
                 backing
             }
             // On an error the ticket is dropped, and the opens that wait for this blob go on.

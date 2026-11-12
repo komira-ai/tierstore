@@ -2,8 +2,12 @@
 //! in the runtime directory that keeps the attachments across a restart of the process.
 //!
 //! An attachment is a run's statement that it will use a tree. Two attaches of one tree for one
-//! run are one attachment. A tree is attached while any run has it. The file holds one line,
-//! `<digest> <run>`, for each attachment; it is rewritten by a rename after every change.
+//! run are one attachment. A lookup of `trees/<digest>` that no run has attached attaches the tree
+//! with no run (an implicit attachment), which ends when the tree has been idle for
+//! `fs.tree_idle_secs`. A tree is attached while any run has it or it is attached implicitly. The
+//! file holds one line, `<digest> <run>`, for each attachment of a run; it is rewritten by a rename
+//! after every change. The implicit attachments are not in it: a start has none, and a lookup
+//! attaches again.
 
 use std::collections::{BTreeMap, BTreeSet};
 use std::io;
@@ -60,6 +64,8 @@ pub(super) struct Attachments {
     /// The pairs of tree digest and run a restart could not attach again: not served, but kept in
     /// the file so that a transient failure does not delete the record.
     kept: BTreeSet<(String, String)>,
+    /// The trees a lookup attached with no run, by tree number.
+    implicit: BTreeMap<u64, TreeDigest>,
 }
 
 impl Attachments {
@@ -69,6 +75,7 @@ impl Attachments {
             file: dir.join(FILE),
             runs: BTreeMap::new(),
             kept: BTreeSet::new(),
+            implicit: BTreeMap::new(),
         }
     }
 
@@ -141,16 +148,40 @@ impl Attachments {
     }
 
     /// Whether any run has the tree `number`.
-    pub(super) fn is_attached(&self, number: u64) -> bool {
+    pub(super) fn has_run(&self, number: u64) -> bool {
         self.runs.values().any(|trees| trees.contains_key(&number))
     }
 
-    /// The trees attached now, by digest.
+    /// Whether any run has the tree `number`, or a lookup attached it.
+    pub(super) fn is_attached(&self, number: u64) -> bool {
+        self.implicit.contains_key(&number) || self.has_run(number)
+    }
+
+    /// Records that a lookup attached the tree `number`, `digest`, with no run.
+    pub(super) fn add_implicit(&mut self, number: u64, digest: TreeDigest) {
+        let _ = self.implicit.insert(number, digest);
+    }
+
+    /// Ends the implicit attachment of the tree `number`.
+    pub(super) fn remove_implicit(&mut self, number: u64) {
+        let _ = self.implicit.remove(&number);
+    }
+
+    /// The trees a lookup attached, with their digests, by number.
+    pub(super) fn implicit(&self) -> Vec<(u64, TreeDigest)> {
+        self.implicit
+            .iter()
+            .map(|(number, digest)| (*number, *digest))
+            .collect()
+    }
+
+    /// The trees attached now, by a run or by a lookup, by digest.
     pub(super) fn trees(&self) -> Vec<TreeDigest> {
         let mut trees: Vec<TreeDigest> = self
             .runs
             .values()
             .flat_map(|trees| trees.values().map(|got| got.digest))
+            .chain(self.implicit.values().copied())
             .collect();
         trees.sort_by_key(ToString::to_string);
         trees.dedup();

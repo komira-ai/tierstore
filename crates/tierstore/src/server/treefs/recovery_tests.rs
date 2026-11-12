@@ -125,7 +125,8 @@ fn the_kernel_is_asked_to_send_requests_again_before_the_readers_start() {
 }
 
 /// Asserts the pause of a hand-over: after `quiesce` no request is read (a request that comes waits
-/// for the next reader), and `resume` reads again and answers what waited.
+/// for the next reader) and the core is held, so that it detaches no idle tree of the successor's;
+/// and `resume` lets the hold go, reads again and answers what waited.
 #[test]
 fn a_quiesced_process_reads_nothing_and_a_resumed_one_answers_what_waited() {
     let (_rig, settings) = left_behind("tfs-rec-quiesce", false);
@@ -133,10 +134,13 @@ fn a_quiesced_process_reads_nothing_and_a_resumed_one_answers_what_waited() {
     let running = adopt(&settings, device, false);
     kernel.getattr(1, ino::ROOT);
     answered(&kernel.reply(), 1);
+    assert!(!running.core().is_held());
     running.quiesce();
+    assert!(running.core().is_held());
     kernel.getattr(2, ino::ROOT);
     kernel.assert_silent();
     running.resume().unwrap();
+    assert!(!running.core().is_held());
     answered(&kernel.reply(), 2);
     kernel.getattr(3, ino::ROOT);
     answered(&kernel.reply(), 3);

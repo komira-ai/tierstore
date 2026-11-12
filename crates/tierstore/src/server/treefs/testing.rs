@@ -23,6 +23,8 @@ use rustix::net::{RecvAncillaryBuffer, RecvAncillaryMessage, RecvFlags, recvmsg}
 use sha2::{Digest as _, Sha256};
 use tierstore_testkit::dir::TestDir;
 
+use crate::{Clock, Mono};
+
 use super::backing::{Guard, Registered};
 use super::config::FsSettings;
 use super::core::{Core, Errno, Opened, Settings};
@@ -172,9 +174,15 @@ struct Gate {
 }
 
 impl Upstream {
+    /// Writes `bytes` at `path` by a rename of a file written beside it, so that a reader never
+    /// sees a part of them, as the cache links a whole file into place.
     fn put(path: &Path, bytes: &[u8]) {
+        static NEXT: AtomicU32 = AtomicU32::new(0);
         std::fs::create_dir_all(path.parent().unwrap()).unwrap();
-        std::fs::write(path, bytes).unwrap();
+        let mut beside = path.as_os_str().to_owned();
+        beside.push(format!(".part-{}", NEXT.fetch_add(1, Ordering::Relaxed)));
+        std::fs::write(&beside, bytes).unwrap();
+        std::fs::rename(&beside, path).unwrap();
     }
 
     /// The answer to a line, or none for a request that is not answered.
@@ -354,6 +362,8 @@ impl Drop for FakeFill {
 pub(in crate::server) struct Rig {
     pub core: Arc<Core>,
     pub upstream: Arc<Upstream>,
+    /// The clock of the core, which only the test moves.
+    pub clock: Arc<Mono>,
     _fill: FakeFill,
     pub cache: PathBuf,
     pub runtime: PathBuf,
@@ -385,6 +395,7 @@ impl Rig {
             handoff_wait: Duration::from_secs(30),
             recover_wait: Duration::from_secs(30),
             reattach_concurrency: 4,
+            tree_idle: TREE_IDLE,
             allow_other: false,
             nfs: crate::server::treefs::nfs::config::NfsSettings::default(),
         }
@@ -412,6 +423,9 @@ impl Rig {
 
 /// Tests that send signals to the process go one at a time: a signal is for every handler.
 pub(in crate::server::treefs) static SIGNALS: Mutex<()> = Mutex::new(());
+
+/// How long a tree a lookup attached stays attached with no use, in the rigs.
+pub(in crate::server) const TREE_IDLE: Duration = Duration::from_secs(60);
 
 /// The owner every entry of the rigs reports.
 pub(in crate::server) const OWNER: (u32, u32) = (1234, 5678);
@@ -458,6 +472,8 @@ impl Rig {
                 max_backing_ids: 100,
                 generation: 1,
                 count_lookups: false,
+                tree_idle: TREE_IDLE,
+                clock: Arc::clone(&self.clock) as Arc<dyn Clock>,
             },
             fills,
             TreeTable::create(&runtime).unwrap(),
@@ -492,6 +508,7 @@ impl Rig {
         let socket = dir.path().join("fill.sock");
         let fill = FakeFill::start(&socket, Arc::clone(&upstream));
         let fills = FillClient::pausing(socket, 3, Duration::from_secs(30), Arc::new(|_| {}));
+        let clock = Arc::new(Mono::new());
         let core = Arc::new(Core::new(
             Settings {
                 owner,
@@ -501,6 +518,8 @@ impl Rig {
                 max_backing_ids: most,
                 generation: 1,
                 count_lookups,
+                tree_idle: TREE_IDLE,
+                clock: Arc::clone(&clock) as Arc<dyn Clock>,
             },
             fills,
             TreeTable::create(&runtime).unwrap(),
@@ -512,6 +531,7 @@ impl Rig {
             runtime,
             mountpoint,
             upstream,
+            clock,
             _fill: fill,
             core,
         }

@@ -10,9 +10,11 @@
 //! leaves memory when it is detached. `Settings::count_lookups` chooses.
 //!
 //! The namespace is the mount's root (`ino::ROOT`) and `trees/` (`ino::TREES`); below `trees/`
-//! are the roots of the trees that some run has attached. Every inode number of a tree is
-//! derivable (`ino.rs`), so a tree that is not in memory is read again, from the table of tree
-//! numbers and the manifests, whenever a request names one of its inodes.
+//! are the roots of the trees that some run has attached, and a lookup of any other digest reads
+//! that tree and attaches it with no run (`core/implicit.rs`), until it has been idle for
+//! `fs.tree_idle_secs`. Every inode number of a tree is derivable (`ino.rs`), so a tree that is
+//! not in memory is read again, from the table of tree numbers and the manifests, whenever a
+//! request names one of its inodes.
 
 use std::collections::{HashMap, HashSet};
 use std::fs::File;
@@ -21,12 +23,14 @@ use std::path::{Path, PathBuf};
 #[cfg(any(target_os = "linux", test))]
 use std::sync::OnceLock;
 use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
-use std::sync::{Arc, Mutex};
+use std::sync::{Arc, Mutex, mpsc};
 use std::time::Duration;
+
+use crate::Clock;
 
 use crate::server::local_cache::{blob_path, manifest_path};
 use crate::tree_manifest::{
-    BlobSource, EntryKind, MAX_MANIFEST_BYTES, TreeDigest, TreeEntry, flatten,
+    BlobSource, EntryKind, MAX_MANIFEST_BYTES, TreeDigest, TreeEntry, TreeError, flatten,
 };
 
 use super::attach::{Attachments, Failure, is_run};
@@ -122,6 +126,8 @@ struct Loaded {
     tree: Tree,
     /// The lookups of its inodes the kernel has not forgotten yet.
     lookups: AtomicU64,
+    /// When a request last named the tree or one of its inodes, on the core's clock.
+    used: AtomicU64,
     /// The blobs this tree has asked the cache to pin.
     pinned: Mutex<HashSet<TreeDigest>>,
 }
@@ -189,7 +195,7 @@ pub(super) enum AttachError {
 }
 
 /// The settings of a core that are not the other parts it is made of.
-#[derive(Clone, Debug)]
+#[derive(Clone)]
 pub(super) struct Settings {
     pub owner: (u32, u32),
     pub cache_path: PathBuf,
@@ -207,6 +213,11 @@ pub(super) struct Settings {
     /// until they are forgotten (a frontend that is told of forgets). If not, a tree is dropped
     /// when it is detached.
     pub count_lookups: bool,
+    /// How long a tree a lookup attached stays attached with no request naming it
+    /// (`fs.tree_idle_secs`).
+    pub tree_idle: Duration,
+    /// The clock the use of a tree is told by, in milliseconds: only its differences count.
+    pub clock: Arc<dyn Clock>,
 }
 
 /// The core.
@@ -218,6 +229,11 @@ pub(in crate::server) struct Core {
     /// Held by an attach, a restore and a detach for all of their work, so that a detach cannot
     /// unpin a tree that an attach has just taken.
     lifecycle: Mutex<()>,
+    /// Held by an open's pin of a blob, from its look at whether the tree is attached to its record
+    /// of the pin, and by a detach from the end of the attachments to the unpin: a pin is never
+    /// made after the unpin of a tree it saw attached. (Not the lifecycle lock, which an attach
+    /// holds while it reads manifests.)
+    pinning: Mutex<()>,
     /// Whether a successor is taking over: no attach or detach is done, so that this process
     /// writes neither the table of tree numbers nor the attachments file (`Core::hold`).
     held: AtomicBool,
@@ -225,6 +241,9 @@ pub(in crate::server) struct Core {
     /// with the token of its thread: a detach removes the entry, and a thread whose token is no
     /// longer the tree's has been replaced and stops.
     prefetching: Mutex<HashMap<u64, Arc<()>>>,
+    /// The end of the channel the thread that detaches idle trees waits on: dropped with the
+    /// core, which ends the thread (`core/implicit.rs`).
+    sweeper: Mutex<Option<mpsc::Sender<()>>>,
     /// The backing table, once the kernel offered passthrough and it was chosen.
     #[cfg(any(target_os = "linux", test))]
     backing: OnceLock<Arc<BackingTable>>,
@@ -257,8 +276,10 @@ impl Core {
                 attachments: Attachments::new(runtime_dir),
             }),
             lifecycle: Mutex::new(()),
+            pinning: Mutex::new(()),
             held: AtomicBool::new(false),
             prefetching: Mutex::new(HashMap::new()),
+            sweeper: Mutex::new(None),
             #[cfg(any(target_os = "linux", test))]
             backing: OnceLock::new(),
             #[cfg(any(target_os = "linux", test))]
@@ -322,7 +343,7 @@ impl Core {
 
     /// Reads the tree `digest`: its manifests, fetched through the fill socket where the cache
     /// does not hold them, and flattened.
-    fn read_tree(&self, digest: &TreeDigest) -> Result<Tree, String> {
+    fn read_tree(&self, digest: &TreeDigest) -> Result<Tree, TreeError> {
         let fetch = |wanted: &TreeDigest| -> Result<Vec<u8>, String> {
             let hex = wanted.to_string();
             let path = manifest_path(&self.settings.cache_path, &hex);
@@ -332,14 +353,13 @@ impl Core {
             self.fills.fill_manifest(&hex)?;
             read_manifest(&path).map_err(|error| error.to_string())
         };
-        flatten(digest, fetch)
-            .map(Tree::new)
-            .map_err(|error| error.to_string())
+        flatten(digest, fetch).map(Tree::new)
     }
 
-    /// The tree numbered `number`, read if it is not in memory.
+    /// The tree numbered `number`, read if it is not in memory; the request is a use of it.
     fn tree(&self, number: u64) -> Result<Arc<Loaded>, Errno> {
         if let Some(loaded) = locked(&self.state).loaded.get(&number) {
+            loaded.used.store(self.now(), Ordering::Release);
             return Ok(Arc::clone(loaded));
         }
         let digest = self
@@ -352,15 +372,31 @@ impl Core {
 
     /// Reads the tree `digest`, which is numbered `number`, and keeps it in memory.
     fn load(&self, number: u64, digest: TreeDigest) -> Result<Arc<Loaded>, String> {
-        let tree = self.read_tree(&digest)?;
-        let loaded = Arc::new(Loaded {
-            digest,
-            tree,
-            lookups: AtomicU64::new(0),
-            pinned: Mutex::new(HashSet::new()),
-        });
+        let tree = self.read_tree(&digest).map_err(|error| error.to_string())?;
+        Ok(self.keep(number, digest, tree))
+    }
+
+    /// Keeps the tree `digest`, numbered `number`, in memory, unless it is there already: the one
+    /// in memory, as used now.
+    fn keep(&self, number: u64, digest: TreeDigest, tree: Tree) -> Arc<Loaded> {
+        let now = self.now();
         let mut state = locked(&self.state);
-        Ok(Arc::clone(state.loaded.entry(number).or_insert(loaded)))
+        let loaded = state.loaded.entry(number).or_insert_with(|| {
+            Arc::new(Loaded {
+                digest,
+                tree,
+                lookups: AtomicU64::new(0),
+                used: AtomicU64::new(now),
+                pinned: Mutex::new(HashSet::new()),
+            })
+        });
+        loaded.used.store(now, Ordering::Release);
+        Arc::clone(loaded)
+    }
+
+    /// The time on the core's clock.
+    fn now(&self) -> u64 {
+        self.settings.clock.now()
     }
 
     /// Makes `run` use the tree `digest` (sixty-four hex digits): reads and flattens it, records
@@ -427,10 +463,11 @@ impl Core {
     }
 
     /// Ends every attachment of `run`: the failures its attachments recorded, or none if it
-    /// attached nothing. A tree no run has now is unpinned, and left memory when the kernel
-    /// forgets its inodes.
+    /// attached nothing. A tree no run has now and no lookup attached is unpinned, and left memory
+    /// when the kernel forgets its inodes.
     pub(super) fn detach(&self, run: &str) -> Option<Vec<Failure>> {
         let _lifecycle = locked(&self.lifecycle);
+        let _pinning = locked(&self.pinning);
         if self.is_held() {
             return None;
         }
@@ -503,7 +540,8 @@ impl Core {
         let _ = self.fills.pins_live(&self.settings.mount_id, &trees);
     }
 
-    /// Takes the tree `number` out of memory if no run has it and the kernel holds no inode of it.
+    /// Takes the tree `number` out of memory if it is not attached and the kernel holds no inode
+    /// of it.
     fn drop_if_forgotten(&self, number: u64) {
         let mut state = locked(&self.state);
         let forgotten = state
@@ -557,20 +595,13 @@ impl Core {
         }
     }
 
-    /// The tree with digest `digest`, if some run has attached it: its number.
-    fn attached_number(&self, digest: &str) -> Option<u64> {
-        let number = self.table.find(&TreeDigest::from_hex(digest)?)?;
-        locked(&self.state)
-            .attachments
-            .is_attached(number)
-            .then_some(number)
-    }
-
-    /// Looks up `name` in the directory `parent`.
+    /// Looks up `name` in the directory `parent`. A digest in `trees/` that no run has attached is
+    /// attached by the lookup (`Core::resolve`).
     ///
     /// # Errors
-    /// [`Errno::NoEnt`] for a name the namespace does not have, [`Errno::NotDir`] for a parent
-    /// that is not a directory.
+    /// [`Errno::NoEnt`] for a name the namespace does not have (a digest of a tree the upstream
+    /// does not have), [`Errno::NotDir`] for a parent that is not a directory, [`Errno::Io`] for a
+    /// tree that cannot be read.
     pub(super) fn lookup(&self, parent: u64, name: &str) -> Result<Looked, Errno> {
         let (number, index) = ino::split(parent);
         #[cfg(test)]
@@ -579,7 +610,7 @@ impl Core {
             return match (parent, name) {
                 (ino::ROOT, "trees") => Ok(Looked::Found(self.namespace(ino::TREES))),
                 (ino::TREES, digest) => {
-                    let number = self.attached_number(digest).ok_or(Errno::NoEnt)?;
+                    let number = self.resolve(digest)?;
                     let loaded = self.counted(number)?;
                     let root = self.root_entry(number, &loaded, Duration::ZERO)?;
                     Ok(Looked::Found(root))
@@ -817,9 +848,12 @@ impl Core {
         locked(&self.state).attachments.fail(number, &failure);
     }
 
-    /// Asks the cache to keep the blob for `loaded`, the first time it is opened under it.
-    fn pin_once(&self, loaded: &Loaded, digest: &TreeDigest) {
-        if locked(&loaded.pinned).contains(digest) {
+    /// Asks the cache to keep the blob for `loaded`, the tree `number`, the first time it is opened
+    /// under it while the tree is attached: a tree no run and no lookup has attached is kept by
+    /// recency alone, since nothing would take its pins away.
+    fn pin_once(&self, (loaded, number): (&Loaded, u64), digest: &TreeDigest) {
+        let _pinning = locked(&self.pinning);
+        if locked(&loaded.pinned).contains(digest) || !self.attached(number) {
             return;
         }
         let sha = digest.to_string();
@@ -833,7 +867,7 @@ impl Core {
     }
 
     /// The cache file of a blob, filled if it must be; the blob is pinned for the tree the first
-    /// time it is opened under it.
+    /// time it is opened under it (`Core::pin_once`).
     fn blob(
         &self,
         loaded: &Loaded,
@@ -843,7 +877,7 @@ impl Core {
     ) -> Result<File, Errno> {
         match self.cache_file(blob) {
             Ok(file) => {
-                self.pin_once(loaded, blob.0);
+                self.pin_once((loaded, number), blob.0);
                 Ok(file)
             }
             Err(reason) => {
@@ -925,12 +959,14 @@ fn path_of(tree: &Tree, index: u32) -> String {
 
 #[cfg(any(target_os = "linux", test))]
 mod adopt;
+mod implicit;
 #[cfg(any(target_os = "linux", test))]
 mod passthrough;
 mod prefetch;
 mod read;
 mod restore;
 
+pub(super) use implicit::look_every;
 pub(super) use read::read_file;
 
 #[cfg(test)]

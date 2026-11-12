@@ -260,6 +260,9 @@ impl Running {
         let mut parts = locked(&self.parts);
         parts.control.pause();
         parts.serving.stop_reading();
+        // From here the successor numbers trees and owns the pins of this mount: no idle tree is
+        // detached (an unpin of a tree the successor pinned again) until a resume.
+        self.core.hold(true);
         self.core.write_backing_exact();
     }
 
@@ -269,6 +272,7 @@ impl Running {
     /// What the system said when the readers or the control socket cannot start again.
     pub(super) fn resume(&self) -> std::io::Result<()> {
         let mut parts = locked(&self.parts);
+        self.core.hold(false);
         parts.serving.restart(&self.core, &self.settings)?;
         // The counts written exact at the pause are a lower bound again once opens go on.
         self.core.write_backing_inexact();
