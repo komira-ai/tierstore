@@ -302,10 +302,13 @@ section 5). Nobody approves a step.
    was published for it to read, and a failure stops the release before anything public changes:
    - `check-apt` (amd64 on `ubuntu-24.04`, arm64 on `ubuntu-24.04-arm`) runs `xtask` in a clean
      `ubuntu@sha256:...` container, adds `packages.komira.ai` with the published keyring and the
-     suite `testing` (a deb822 source with `Signed-By`), installs `tierstore=<version>` (after an
-     `apt-get update` and `apt-get dist-upgrade` of the image, which the digest pin leaves older than
-     the archive, and before the install of `ca-certificates` and `curl`), and checks
-     that `tierstore --version` prints the release, the unit template, the `sysusers.d` entry and the
+     suite `testing` (a deb822 source with `Signed-By`), and installs `tierstore=<version>`. Before
+     it adds the repository it runs `apt-get update` and `apt-get dist-upgrade` on the image, which
+     the digest pin leaves older than the archive, and then installs `ca-certificates` and `curl`.
+     Just before the install of `tierstore` it removes the image's dpkg drop-in
+     `/etc/dpkg/dpkg.cfg.d/excludes`: the image is minimized, and the drop-in leaves out
+     `/usr/share/doc` and with it the example, where a standard Ubuntu install has no such file. It
+     then checks that `tierstore --version` prints the release, the unit template, the `sysusers.d` entry and the
      example exist, `/etc/tierstore` is a directory of mode 0750 with no `config.toml`,
      `/var/lib/tierstore` holds nothing (no start marker), and no instance is enabled or running
      (`cargo xtask channels check-apt`).

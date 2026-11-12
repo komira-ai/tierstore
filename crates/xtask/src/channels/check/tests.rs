@@ -74,9 +74,31 @@ impl Machine {
         write(&self.root.join(rel), bytes).expect("write");
     }
 
+    /// The image's dpkg drop-in of a minimized Ubuntu, as the job's `ubuntu:24.04` has it.
+    fn minimized(&self) {
+        self.put(
+            DPKG_EXCLUDES,
+            b"path-exclude=/usr/share/man/*\npath-exclude=/usr/share/doc/*\npath-include=/usr/share/doc/*/copyright\n",
+        );
+    }
+
+    /// Is `rel` left out by a `path-exclude=<dir>/*` line of the dpkg drop-ins below the root, as
+    /// dpkg leaves it out when it unpacks a package?
+    fn excluded(&self, rel: &str) -> bool {
+        let dir = self.root.join("etc/dpkg/dpkg.cfg.d");
+        std::fs::read_dir(dir)
+            .into_iter()
+            .flatten()
+            .flatten()
+            .filter_map(|f| std::fs::read_to_string(f.path()).ok())
+            .flat_map(|text| text.lines().map(str::to_owned).collect::<Vec<_>>())
+            .filter_map(|l| l.strip_prefix("path-exclude=/").map(str::to_owned))
+            .any(|pattern| rel.starts_with(pattern.trim_end_matches('*')))
+    }
+
     fn install(&self) {
         for rel in [BINARY, UNIT, SYSUSERS, EXAMPLE] {
-            if !self.omit.contains(&rel) {
+            if !self.omit.contains(&rel) && !self.excluded(rel) {
                 self.put(rel, b"file");
             }
         }
@@ -157,6 +179,7 @@ fn a_clean_install_from_testing_is_checked_and_adds_the_repository_the_way_a_use
     // installed at no version, and the order (update, upgrade, certificates, keyring, source, update, install).
     let dir = scratch("apt-ok");
     let machine = Machine::new(&dir);
+    machine.minimized();
     let said = check_apt(&machine, &apt(&dir)).expect("checked");
     assert_eq!(
         machine
@@ -633,5 +656,49 @@ fn the_image_is_updated_and_upgraded_before_certificates_and_curl_are_installed(
             "apt-get update",
             "apt-get install -y --no-install-recommends tierstore=1.2.3",
         ]
+    );
+}
+
+#[test]
+fn the_minimized_images_dpkg_drop_in_is_removed_before_the_package_is_installed_so_its_example_is_unpacked()
+ {
+    // Catches: the failure of the install checks of v0.3.99, "the example configuration
+    // /usr/share/doc/tierstore/examples/config.toml is not installed" on both architectures,
+    // because the job's ubuntu:24.04 image is minimized and its dpkg drop-in leaves out
+    // everything below /usr/share/doc; and a removal made after the install, when dpkg has
+    // already left the file out.
+    let dir = scratch("apt-minimized");
+    let machine = Machine::new(&dir);
+    machine.minimized();
+    assert!(machine.excluded(EXAMPLE) && !machine.excluded(UNIT));
+    check_apt(&machine, &apt(&dir)).expect("checked");
+    assert!(dir.join(EXAMPLE).is_file());
+    assert!(!dir.join(DPKG_EXCLUDES).exists());
+    // An image without the drop-in (a standard install) is checked the same way.
+    let dir = scratch("apt-standard");
+    let machine = Machine::new(&dir);
+    check_apt(&machine, &apt(&dir)).expect("checked");
+    assert!(dir.join(EXAMPLE).is_file());
+}
+
+#[test]
+fn a_dpkg_drop_in_that_cannot_be_removed_fails_the_check_before_the_package_is_installed() {
+    // Catches: a removal whose failure is passed over, so that the install goes on and the check
+    // names a missing example instead of the drop-in it could not remove.
+    let dir = scratch("apt-excludes-dir");
+    let machine = Machine::new(&dir);
+    std::fs::create_dir_all(dir.join(DPKG_EXCLUDES).join("x")).expect("a directory");
+    let e = check_apt(&machine, &apt(&dir)).unwrap_err().to_string();
+    assert!(
+        e.contains(&format!("remove {}", dir.join(DPKG_EXCLUDES).display())),
+        "{e}"
+    );
+    assert!(
+        !machine
+            .calls()
+            .iter()
+            .any(|c| c.contains("tierstore=1.2.3")),
+        "{:?}",
+        machine.calls()
     );
 }
