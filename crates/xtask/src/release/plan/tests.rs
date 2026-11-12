@@ -52,7 +52,7 @@ fn green(id: u64) -> Value {
 }
 
 fn tags_path() -> String {
-    format!("repos/{REPO}/git/matching-refs/tags/v?per_page=100")
+    format!("repos/{REPO}/git/matching-refs/tags/v")
 }
 
 fn compare_path(tag: &str) -> String {
@@ -535,15 +535,33 @@ fn a_repository_without_a_release_tag_releases_the_first_commit() {
     );
 }
 
+/// The release tags `v0.0.0` to `v0.0.<count - 1>`, highest first, so that neither the order of
+/// the answer nor the order of the text puts the highest last.
+fn many_tags(count: usize) -> Vec<String> {
+    (0..count).rev().map(|n| format!("v0.0.{n}")).collect()
+}
+
 #[test]
-fn a_hundred_tags_are_more_than_one_page_and_are_refused() {
-    // Catches: the highest tag taken from a page that may not hold it, which would pick a tag
-    // that exists.
-    let names: Vec<String> = (0..100).map(|n| format!("v0.0.{n}")).collect();
-    let names: Vec<&str> = names.iter().map(String::as_str).collect();
-    let gh = repo(&names, "ahead", &["Cargo.lock"], &["fix"]);
-    let e = plan(&gh, &request(None, "", None)).expect_err("page");
-    assert!(e.to_string().contains("page"), "{e}");
+fn a_hundred_tags_or_more_are_one_answer_and_the_plan_takes_the_highest() {
+    // Catches: the failure of the first plan after v0.3.99, refused with "100 tags start with v:
+    // more than one page of tags", although GitHub's matching-refs lists every tag in one answer
+    // (a repository of 177 release tags is answered with all 177); and a highest tag taken by
+    // text order (v0.0.99 above v0.0.100) or by position in the answer.
+    for count in [99, 100, 101, 177] {
+        let names = many_tags(count);
+        let names: Vec<&str> = names.iter().map(String::as_str).collect();
+        let gh = repo(&names, "ahead", &["Cargo.lock"], &["fix"]);
+        let planned = plan(&gh, &request(None, "", None)).expect("a plan");
+        let want = format!("tag=v0.0.{count}");
+        assert!(planned.contains(&want), "{count}: {planned:?}");
+        assert!(
+            gh.asked
+                .borrow()
+                .contains(&compare_path(&format!("v0.0.{}", count - 1))),
+            "{count}: {:?}",
+            gh.asked.borrow()
+        );
+    }
 }
 
 #[test]
@@ -637,7 +655,7 @@ fn the_version_of_a_commit_is_the_one_the_plan_would_tag() {
 #[test]
 fn the_version_is_appended_to_the_output_file_and_a_bad_input_is_an_error() {
     // Catches: the answer not reaching `GITHUB_OUTPUT`, a VERSION that is not a version being
-    // built under, and a page of tags that may hide the highest.
+    // built under, and a hundred tags refused as a page that may hide the highest.
     let dir = scratch("version-out");
     let out = dir.join("out");
     let gh = repo(&["v0.3.1"], "ahead", &[], &[]);
@@ -649,10 +667,15 @@ fn the_version_is_appended_to_the_output_file_and_a_bad_input_is_an_error() {
     );
     let e = version(&gh, REPO, Some("soon"), None, None).expect_err("bad");
     assert!(e.to_string().contains("VERSION"), "{e}");
-    let names: Vec<String> = (0..100).map(|n| format!("v0.0.{n}")).collect();
+    let names = many_tags(100);
     let names: Vec<&str> = names.iter().map(String::as_str).collect();
     let gh = repo(&names, "ahead", &[], &[]);
-    assert!(version(&gh, REPO, None, None, None).is_err());
+    version(&gh, REPO, None, Some(&out), None).expect("a hundred tags");
+    assert!(
+        std::fs::read_to_string(&out)
+            .expect("out")
+            .ends_with("version=0.0.100\n")
+    );
 }
 
 mod walk;

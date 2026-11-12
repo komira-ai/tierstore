@@ -404,7 +404,7 @@ fn release_plan_reads_the_version_file_and_the_freeze_and_appends_its_outputs() 
     }
     put(
         &d,
-        &format!("repos/{REPO}/git/matching-refs/tags/v?per_page=100"),
+        &format!("repos/{REPO}/git/matching-refs/tags/v"),
         "[{\"ref\":\"refs/tags/v0.3.1\"}]",
     );
     put(
@@ -463,11 +463,7 @@ fn release_manual_hands_the_tag_commit_and_note_on_and_refuses_a_bad_tag_with_st
     // Catches: the flags of `release manual` not reaching it, and a bad tag not being a
     // usage error.
     let d = dir("manual");
-    put(
-        &d,
-        &format!("repos/{REPO}/git/matching-refs/tags/v?per_page=100"),
-        "[]",
-    );
+    put(&d, &format!("repos/{REPO}/git/matching-refs/tags/v"), "[]");
     let o = run(
         &d,
         &[
@@ -502,7 +498,7 @@ fn release_manual_hands_the_tag_commit_and_note_on_and_refuses_a_bad_tag_with_st
     // A tag already covers the commit: refused, exit status 1, naming the tag.
     put(
         &d,
-        &format!("repos/{REPO}/git/matching-refs/tags/v?per_page=100"),
+        &format!("repos/{REPO}/git/matching-refs/tags/v"),
         "[{\"ref\":\"refs/tags/v1.2.0\"}]",
     );
     put(
@@ -532,7 +528,7 @@ fn release_version_prints_the_version_the_plan_would_tag_and_appends_it() {
     let d = dir("version");
     put(
         &d,
-        &format!("repos/{REPO}/git/matching-refs/tags/v?per_page=100"),
+        &format!("repos/{REPO}/git/matching-refs/tags/v"),
         "[{\"ref\":\"refs/tags/v0.3.1\"}]",
     );
     let version = |extra: &[&str]| {
