@@ -16,59 +16,52 @@
 #  - HOSTKEEPER_COORDINATOR_URL      the coordinator's private listener, https://<host>[:<port>],
 #                                    by the name it has on the tailnet and in its certificate;
 #  - HOSTKEEPER_COORDINATOR_CA       the PEM certificates of the CA that listener chains to;
-#  - HOSTKEEPER_RELEASE_CHANNEL      the release channel's base URL, https://<host>[/<path>], as
-#                                    the hosts' `release_channel`; the job `channel` reads it, on
-#                                    the tailnet when it joins one;
 #  - HOSTKEEPER_TAILNET_CLIENT_ID    the client ID of the tailnet's federated identity for this
-#                                    repository; empty: no runner joins the tailnet (the channel
-#                                    is then a public one);
+#                                    repository; empty: the runner does not join the tailnet;
 #  - HOSTKEEPER_TAILNET_AUDIENCE     the audience of that federated identity;
 #  - HOSTKEEPER_TAILNET_COORDINATOR  the coordinator's name on the tailnet, which the join pings;
 #  - HOSTKEEPER_TAILNET_TAG          the tag the join gives the runner's node, the one that
-#                                    identity's trust credential issues (such as `tag:ci`); both
-#                                    joins give it.
+#                                    identity's trust credential issues (such as `tag:ci`).
 # The coordinator lets the job's OIDC token set the version only through an allow-list entry for
 # this repository (by id), refs/heads/main, the events workflow_run and workflow_dispatch, the
 # audience below, the service tierstore, and the `job_workflow_ref` of the called workflow pinned
 # below (komira-ai/hostkeeper/.github/workflows/set-desired.yml@<that commit>). Moving the pin
 # moves the `job_workflow_ref`, so the entry moves with it.
 #
-# Three jobs:
+# The jobs, in order:
 #  - check        holds no token that writes, and is the one job that runs code of this
 #                 repository. `cargo xtask release desired` (crates/xtask,
 #                 src/release/desired.rs) decides the release (`--version` by hand,
 #                 `--after-run` after a run of release.yml; one of the two is empty) and hands on
-#                 `set=false` when that run published none. Otherwise it refuses a release unless
-#                 its index.json is the one its SHA256SUMS lists, hostkeeper's own reader reads it
-#                 as the index of tierstore <version>+<the first 12 digits of the release's
-#                 commit> in canonical form, and it lists a package of each of linux-x86_64,
-#                 linux-arm64 and macos-arm64; each package is the one the index lists, its
-#                 bundle is its provenance bundle, and hostkeeper's unpacker unpacks it as a host
-#                 does. It hands on the package version, the index (its exact text) and its
-#                 SHA-256, and the release's targets (src/release/desired_targets.rs): today one
-#                 hostkeeper-archive entry per platform.
-#  - channel      needs check, runs only when it said `set=true`, checks nothing out and runs no
-#                 code of this repository. When HOSTKEEPER_TAILNET_CLIENT_ID is set it first joins
-#                 the runner to the tailnet, as set-desired does (the same pinned action, Tailscale
-#                 release, federated identity and tag; an ephemeral node; `id-token: write` is for
-#                 this join), since the release channel may be on the tailnet only. Then it waits
-#                 until the release channel serves the index `check` handed on, its SHA-256 the
-#                 one `check` computed, for at most about half an hour: the coordinator refuses a
-#                 version the channel does not hold (`not_in_channel`), and the channel takes a
-#                 release by its own sync, which CI does not run.
-#  - set-desired  needs check and channel, and is hostkeeper's reusable workflow (the CI client), pinned below
-#                 with the hostkeeper release whose hkctl makes the call, the revision
-#                 hostkeeper's own release.yml pins (komira-ai/hostkeeper,
-#                 docs/deploy/ci-client.md): it proves that release (SHA256SUMS, the attestation
-#                 by its artifacts.yml on refs/heads/main, the attested commit, `hkctl
-#                 --version`) before any step can hold a token, joins the runner to the tailnet
-#                 when HOSTKEEPER_TAILNET_CLIENT_ID is set (the coordinator's private listener is
-#                 on the tailnet only), and calls `releases set-desired` with the job's OIDC
-#                 token, naming the release by its targets and by its index with the index's
-#                 digest (a daemon before targets is ordered its archive through the index). It
-#                 does not wait for the fleet: the coordinator's update plan rolls the version
-#                 out stage by stage, longer than a job should hold this workflow's group. The job
-#                 ends once the coordinator stored the version (`reason` `not_waited`).
+#                 `set=false` when that run published none. Otherwise it hands on what the lab
+#                 stage of release.yml sets for the release (`release desired-apt`,
+#                 src/release/desired_apt.rs, with the same `--min-hostkeeper`): the package
+#                 version `X.Y.Z` and the targets, one `apt` entry for each of linux-x86_64 and
+#                 linux-arm64, of the hosts' repository entry `komira-testing`, pinned by the
+#                 `.deb`'s SHA-256. It refuses a release unless the suite `testing`, read as a
+#                 client reads it, lists both `.deb`s with the digests the release's SHA256SUMS
+#                 lists. The farm nodes install tierstore with apt, so a list of
+#                 `hostkeeper-archive` entries would order none of them (`installer_dropped`).
+#                 No macos-arm64 list: tierstore ships no package a Mac's daemon installs, so a
+#                 Mac is not covered (`no_target`; it keeps what it runs). No release index: it
+#                 would list archive entries the targets do not have.
+#  - set-desired  needs check, and is hostkeeper's reusable workflow (the CI client), pinned below
+#                 with the hostkeeper release whose hkctl makes the call (komira-ai/hostkeeper,
+#                 docs/deploy/ci-client.md; its hkctl sends the targets as they are, the `apt`
+#                 entries included): it proves that release (SHA256SUMS, the attestation by its
+#                 artifacts.yml on refs/heads/main, the attested commit, `hkctl --version`) before
+#                 any step can hold a token, joins the runner to the tailnet when
+#                 HOSTKEEPER_TAILNET_CLIENT_ID is set (the coordinator's private listener is on the
+#                 tailnet only), calls `releases set-desired` with the job's OIDC token, naming the
+#                 release by its targets alone, and then waits for the fleet (`wait: true`), one
+#                 call the coordinator holds for at most `max_polls` times 10 seconds, the most the
+#                 client takes (half an hour). The job is green only when the coordinator reports
+#                 the service converged on the version (`reason` `converged`). A version no host
+#                 can be ordered (every host `installer_dropped` or `no_build_for_host`) never
+#                 converges, so the job ends red (`not_converged`) instead of green with
+#                 `not_waited`; so does a rollout still going after half an hour, a halt
+#                 (`halted`) and a newer version set meanwhile (`superseded`). The roll goes on
+#                 whatever the job says; `hkctl releases status --service tierstore` says where.
 #
 # One run at a time of each way in, never cancelled: the runs after a release share the group
 # `hostkeeper-desired-release`, where a newer waiting run replaces an older one (each derives the
@@ -101,15 +94,13 @@ jobs:
   check:
     if: ${{ github.ref == 'refs/heads/main' && vars.TIERSTORE_SETS_DESIRED == 'true' && (github.event_name == 'workflow_dispatch' || (github.event_name == 'workflow_run' && github.event.workflow_run.conclusion == 'success' && github.event.workflow_run.head_branch == 'main' && github.event.workflow_run.head_repository.full_name == github.repository)) }}
     runs-on: ubuntu-24.04
-    timeout-minutes: 20
+    timeout-minutes: 30
     permissions:
       contents: read
       actions: read
     outputs:
       set: ${{ steps.desired.outputs.set }}
       package-version: ${{ steps.desired.outputs.package-version }}
-      release-index: ${{ steps.desired.outputs.release-index }}
-      release-index-digest: ${{ steps.desired.outputs.release-index-digest }}
       targets: ${{ steps.desired.outputs.targets }}
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
@@ -120,53 +111,18 @@ jobs:
         run: cargo xtask --help
       # The input and the run id are read as environment variables of the step, never spliced into
       # a script. One of the two is empty: the input on a workflow_run, the run id on a dispatch.
-      - name: The release to set, refused when its index lacks a platform
+      # The testing suite is read through the CDN, as a host's apt reads it; curl retries a CDN
+      # that has not caught up for a few minutes.
+      - name: The release to set, refused unless the testing suite lists its .debs with the digests of its SHA256SUMS
         id: desired
         env:
           GH_TOKEN: ${{ github.token }}
           VERSION: ${{ inputs.version }}
           RUN_ID: ${{ github.event.workflow_run.id }}
-        run: cargo xtask release desired --repo "$GITHUB_REPOSITORY" --version "$VERSION" --after-run "$RUN_ID" --dir "$RUNNER_TEMP/desired" --output "$GITHUB_OUTPUT"
-
-  # Runs no code of this repository and checks nothing out: it holds `id-token: write` only for the
-  # tailnet join, which exchanges the job's OIDC token for an ephemeral node.
-  channel:
-    needs: [check]
-    if: ${{ github.ref == 'refs/heads/main' && vars.TIERSTORE_SETS_DESIRED == 'true' && needs.check.outputs.set == 'true' }}
-    runs-on: ubuntu-24.04
-    timeout-minutes: 40
-    permissions:
-      id-token: write
-    steps:
-      # A release channel on the tailnet is not reachable from a GitHub-hosted runner without the
-      # join; with the variable empty the channel is a public one and the job does not join. The
-      # inputs are those of the join of hostkeeper's set-desired.yml, but for `ping`: the channel
-      # need not be the coordinator's node, and the wait below retries until it answers.
-      - name: Join the tailnet
-        if: ${{ vars.HOSTKEEPER_TAILNET_CLIENT_ID != '' }}
-        uses: tailscale/github-action@d1b6cd204f8dceda5b3eaad7f1f767be390056cd # v4.2.0
-        with:
-          oauth-client-id: ${{ vars.HOSTKEEPER_TAILNET_CLIENT_ID }}
-          audience: ${{ vars.HOSTKEEPER_TAILNET_AUDIENCE }}
-          tags: ${{ vars.HOSTKEEPER_TAILNET_TAG }}
-          version: 1.94.2
-          sha256sum: c6f99a5d774c7783b56902188d69e9756fc3dddfb08ac6be4cb2585f3fecdc32
-          use-cache: false
-      # curl's own retries, a fixed 40 seconds apart, 404 included (`--retry-all-errors`), until
-      # 1800 seconds have passed: a channel that never serves the version fails the job.
-      - name: Wait until the release channel serves the release's index
-        env:
-          RELEASE_CHANNEL: ${{ vars.HOSTKEEPER_RELEASE_CHANNEL }}
-          PACKAGE_VERSION: ${{ needs.check.outputs.package-version }}
-        run: curl --proto =https --proto-redir =https --tlsv1.2 --fail --silent --show-error --max-time 30 --retry 45 --retry-delay 40 --retry-max-time 1800 --retry-all-errors --output "$RUNNER_TEMP/served-index.json" "$RELEASE_CHANNEL/tierstore/$PACKAGE_VERSION/index.json"
-      # The SHA-256 of the served bytes is the one `check` computed over the index it checked.
-      - name: The channel serves the release's index, byte for byte
-        env:
-          INDEX_DIGEST: ${{ needs.check.outputs.release-index-digest }}
-        run: printf '%s  %s\n' "$INDEX_DIGEST" "$RUNNER_TEMP/served-index.json" | sha256sum --check --strict
+        run: cargo xtask release desired --repo "$GITHUB_REPOSITORY" --version "$VERSION" --after-run "$RUN_ID" --min-hostkeeper 0.1.225 --dir "$RUNNER_TEMP/desired" --output "$GITHUB_OUTPUT"
 
   set-desired:
-    needs: [check, channel]
+    needs: [check]
     if: ${{ github.ref == 'refs/heads/main' && vars.TIERSTORE_SETS_DESIRED == 'true' && needs.check.outputs.set == 'true' }}
     permissions:
       contents: read
@@ -175,15 +131,14 @@ jobs:
     with:
       service: tierstore
       version: ${{ needs.check.outputs.package-version }}
-      release_index: ${{ needs.check.outputs.release-index }}
-      release_index_digest: ${{ needs.check.outputs.release-index-digest }}
       targets: ${{ needs.check.outputs.targets }}
       hostkeeper_version: 0.1.184
       hostkeeper_commit: 2c767d1842a88edb7120073d2dff3b4bfccc834c
       coordinator_url: ${{ vars.HOSTKEEPER_COORDINATOR_URL }}
       coordinator_ca: ${{ vars.HOSTKEEPER_COORDINATOR_CA }}
       audience: tierstore-hostkeeper-desired
-      wait: false
+      wait: true
+      max_polls: 180
       join_tailnet: ${{ vars.HOSTKEEPER_TAILNET_CLIENT_ID != '' }}
       tailnet_client_id: ${{ vars.HOSTKEEPER_TAILNET_CLIENT_ID }}
       tailnet_audience: ${{ vars.HOSTKEEPER_TAILNET_AUDIENCE }}

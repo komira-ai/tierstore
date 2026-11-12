@@ -10,7 +10,7 @@
 | `release.yml` | when `ci` or `artifacts` finishes on a push to `main` (automatic, see Releases); by hand | `plan` decides which commit of `main` is released and as which tag (the newest whose build recorded that version); `verify` and `publish` attach the files that commit's push built and signed to a GitHub release, after checking them again; the release then goes through four stages (see The order of a release): `testing-upload`, `formula` and the `testing-apt-*` jobs publish it to testing, `check-apt`, `check-brew` and `check-install-sh` install it from there, `farm-check`, `farm` and `soak` put it on the lab through hostkeeper when the lab is switched on (`TIERSTORE_LAB_INSTALL`) and configured, and `promote-check` then lets `promote-latest`, `tap` and the `stable-apt-*` jobs make it public. Builds nothing of tierstore. |
 | `tierstore-site.yml` | pull request, push to `main`, when the site changes | typecheck, tests and build of tierstore.dev. |
 | `tierstore-site-publish.yml` | push to `main` / by hand | builds the site again; uploads it only when the repository variable `TIERSTORE_SITE_PUBLISH` is `true`. |
-| `hostkeeper-desired.yml` | the completion of a run of `release.yml` on `main`, and by hand from `main` | sets the desired version of tierstore on the hostkeeper coordinator to a published release, by its targets: after a release run that published one, the newest release; by hand, the version given. Skipped while the repository variable `TIERSTORE_SETS_DESIRED` is not `true`. See [Setting the desired version on the hostkeeper coordinator](#setting-the-desired-version-on-the-hostkeeper-coordinator). |
+| `hostkeeper-desired.yml` | the completion of a run of `release.yml` on `main`, and by hand from `main` | sets the desired version of tierstore on the hostkeeper coordinator to a published release, by its apt targets (the testing `.deb` of each Linux platform), and waits for the fleet to converge on it: after a release run that published one, the newest release; by hand, the version given. Skipped while the repository variable `TIERSTORE_SETS_DESIRED` is not `true`. See [Setting the desired version on the hostkeeper coordinator](#setting-the-desired-version-on-the-hostkeeper-coordinator). |
 
 Every workflow is held to the same rules by `crates/xtask/tests/workflows`: every `uses:` is a
 40-digit commit SHA with a version comment, `permissions: {}` at the top, no
@@ -494,8 +494,9 @@ is made from a commit whose `artifacts.yml` run computed that same version.
 ## Setting the desired version on the hostkeeper coordinator
 
 Hosts take tierstore through hostkeeper: the coordinator holds the version each service should
-run, and every host's daemon fetches that version from the release channel
-(`{release_channel}/tierstore/<version>/`) and installs the package of its own platform.
+run, and every host's daemon installs what the version's targets name for its platform. The farm
+nodes install tierstore's Debian package from the suite `testing` through hostkeeper's apt
+installer (the host's repository entry `komira-testing`).
 `hostkeeper-desired.yml` sets that version for a published release, two ways:
 
 - after each run of `release.yml` on `main` that succeeded and whose job `publish` succeeded, it
@@ -509,33 +510,31 @@ Both are off until the repository variable `TIERSTORE_SETS_DESIRED` is `true`, e
 anything else, every job is skipped.
 
 Its `check` job (`cargo xtask release desired`, no token that writes) decides the release and
-refuses it unless its `index.json` is the one its `SHA256SUMS` lists, hostkeeper's own reader reads
-it as the index of tierstore `X.Y.Z+<the first 12 digits of the release's commit>`, and it lists a
-package for each of linux-x86_64, linux-arm64 and macos-arm64; each package must be the one the
-index lists, its `.sigstore.json` bundle its provenance bundle, and hostkeeper's unpacker must
-unpack it as a host does. A host whose platform a release lacks is ordered nothing, so an index
-without the macOS package would leave every Mac behind; a release made before the hostkeeper
-packages has no index and is refused too. The job hands on the package version, the index and its
-SHA-256, and the release's **targets**: today one `hostkeeper-archive` entry per platform (the
-archive's size and SHA-256, its bundle, its two locations, the release channel's and the GitHub
-asset's, and the `min_hostkeeper` of its manifest). The `apt` entry of the Debian package is sent
-by the lab stage of `release.yml` instead (`release desired-apt`, above).
-Then the `channel` job waits, for at most about half an hour, until the release channel serves the
-release's `index.json`, its SHA-256 the one `check` computed: the channel takes a release by its own
-sync, which CI does not run, and the coordinator refuses a version the channel does not hold
-(`not_in_channel`). When `HOSTKEEPER_TAILNET_CLIENT_ID` is set the job first joins the runner to the
-tailnet, as `set-desired` does (the same pinned `tailscale/github-action`, Tailscale release,
-federated identity and `HOSTKEEPER_TAILNET_TAG`; an ephemeral node), since the channel may be on the
-tailnet only; unset, it reads a public channel directly. It checks nothing out and runs no code of
-this repository, and holds `id-token: write` for the join alone, so `check`, which does run this
-repository's code, still holds no token that writes.
+hands on what the lab stage of `release.yml` sets for it (`release desired-apt`, above, with the
+same `--min-hostkeeper 0.1.225`): the version `X.Y.Z`, the plain version apt installs, and the
+**targets**, for `linux-x86_64` and `linux-arm64` one `apt` entry each, of the repository entry
+`komira-testing`, pinned by the `.deb`'s SHA-256. It refuses the release unless the suite
+`testing`, read through the CDN as a client reads it, lists both `.deb`s with the digests the
+release's `SHA256SUMS` lists. The same version set by both gets the same targets, so the second
+set is taken (the coordinator refuses a version set again with other targets, `release_exists`).
+A list of `hostkeeper-archive` entries alone would order none of the farm nodes: the coordinator
+holds every host that runs tierstore from apt `installer_dropped`. **The Macs are not covered**:
+tierstore ships no package a Mac's daemon installs (no `.pkg`, and the archive installer is
+withdrawn), so the targets have no `macos-arm64` list and a Mac is ordered nothing (`no_target`)
+and keeps what it runs. No release index is sent.
 
 The `set-desired` job then calls hostkeeper's CI client (`set-desired.yml` of
-komira-ai/hostkeeper, pinned to the revision hostkeeper's own `release.yml` pins), which proves
-that hostkeeper release, joins the runner to the tailnet (the coordinator's private listener is on
-the tailnet only) and sets the version with the job's OIDC token, naming the release by its
-targets and by its index. It does not wait for the fleet: the coordinator's update plan rolls the
-version out stage by stage. Watch the roll with `hkctl releases converge --service tierstore`.
+komira-ai/hostkeeper, pinned to v0.1.184, whose hkctl sends the targets as they are, the `apt`
+entries included), which proves that hostkeeper release, joins the runner to the tailnet (the
+coordinator's private listener is on the tailnet only), sets the version with the job's OIDC
+token, naming the release by its targets alone, and **waits for the fleet**: one call the
+coordinator holds for at most half an hour (`max_polls: 180`, the most the client takes). The job
+is green only when the coordinator reports the service converged on the version. A version no host
+can be ordered (every host `installer_dropped` or `no_build_for_host`) never converges, so the job
+ends red with `reason` `not_converged`, not green with `not_waited`; a roll still going after half
+an hour, a halt (`halted`) and a newer version set meanwhile (`superseded`) end it red too. The
+roll goes on whatever the job says: `hkctl releases status --service tierstore` shows each host and
+why it is not ordered.
 
 The workflow is off until a maintainer sets it up once:
 
@@ -549,7 +548,6 @@ The workflow is off until a maintainer sets it up once:
    private listener (komira-ai/hostkeeper, `docs/deploy/ci-client.md`, "Reaching the coordinator").
 3. The repository variables: `HOSTKEEPER_COORDINATOR_URL` (the listener, `https://<host>[:<port>]`,
    by its name on the tailnet), `HOSTKEEPER_COORDINATOR_CA` (the PEM certificates of its CA),
-   `HOSTKEEPER_RELEASE_CHANNEL` (the channel's base URL, as the hosts' `release_channel`),
    `HOSTKEEPER_TAILNET_CLIENT_ID` and `HOSTKEEPER_TAILNET_AUDIENCE` (the federated identity's),
    `HOSTKEEPER_TAILNET_COORDINATOR` (the coordinator's name on the tailnet) and
    `HOSTKEEPER_TAILNET_TAG` (the tag that identity issues, such as `tag:ci`; the client checks it

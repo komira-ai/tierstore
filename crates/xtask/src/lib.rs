@@ -425,9 +425,9 @@ enum ReleaseVerb {
         #[arg(long)]
         output: Option<PathBuf>,
     },
-    /// The version, release index and targets of a published release to set as tierstore's
-    /// desired version on the hostkeeper coordinator; refuses a release whose index lacks a
-    /// platform.
+    /// The version and `targets` (the apt installer's entry per architecture, as `desired-apt`
+    /// gives them) of a published release to set as tierstore's desired version on the hostkeeper
+    /// coordinator, chosen by `--version` or as the newest after a run that published one.
     Desired {
         #[arg(long)]
         repo: String,
@@ -439,16 +439,25 @@ enum ReleaseVerb {
         /// succeeded; nothing (`set=false`) otherwise. Empty, or not given, with `--version`.
         #[arg(long, default_value = "")]
         after_run: String,
-        /// Where the release's index, sums, packages and bundles are downloaded and the
-        /// packages unpacked; created when missing.
+        /// `<major>.<minor>.<patch>`: the first hostkeeper release whose daemon runs the hook
+        /// command of an `apt` entry, the `minHostkeeper` of every entry.
+        #[arg(long)]
+        min_hostkeeper: String,
+        /// Where `SHA256SUMS` of the release and the `Packages` files read are put; created when
+        /// missing.
         #[arg(long)]
         dir: PathBuf,
-        /// Append `set=`, and with `set=true` `package-version=`, `release-index=`,
-        /// `release-index-digest=` and `targets=`, to this file (`GITHUB_OUTPUT`).
+        /// The apt repository.
+        #[arg(long, default_value = "https://packages.komira.ai/apt")]
+        apt_url: String,
+        /// Append `set=`, and with `set=true` `package-version=` and `targets=`, to this file
+        /// (`GITHUB_OUTPUT`).
         #[arg(long)]
         output: Option<PathBuf>,
         #[arg(long, default_value = "gh")]
         gh: PathBuf,
+        #[arg(long, default_value = "curl")]
+        curl: PathBuf,
     },
     /// The version and `targets` (the apt installer's entry per architecture) of a release in the
     /// suite `testing` to set as tierstore's desired version on the hostkeeper coordinator;
@@ -755,16 +764,23 @@ fn run(cli: Cli) -> Result<Vec<String>, Error> {
             repo,
             version,
             after_run,
+            min_hostkeeper,
             dir,
+            apt_url,
             output,
             gh,
+            curl,
         }) => release::desired::desired(
             &release::RealGh(gh),
+            &channels::check::RealHost,
             &release::desired::Request {
                 repo: &repo,
                 version: &version,
                 after_run: &after_run,
+                min_hostkeeper: &min_hostkeeper,
                 dir: &dir,
+                apt_url: &apt_url,
+                curl: &curl,
                 output: output.as_deref(),
             },
         ),

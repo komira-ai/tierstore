@@ -1,29 +1,30 @@
 //! `hostkeeper-desired.yml` ([`super::desired`]): the file of the repository passes, each way of
-//! breaking what it is held to is named, its `id-token: write` is held by `channel` and
-//! `set-desired` alone and under the variable gate, the release channel is read only by
-//! `channel` and only after its tailnet join, and no workflow reads another coordinator's
-//! variable, names `deploy-farm`, or calls the run.
+//! breaking what it is held to is named, its `id-token: write` is held by `set-desired` alone and
+//! under the variable gate, it sets the lab's apt targets and waits for the fleet, and no workflow
+//! reads another coordinator's variable, names `deploy-farm`, or calls the run.
 
 use super::desired::{
-    AUDIENCE, CHANNEL_SAME, CHANNEL_WAIT, CHECK, CLIENT_COMMIT, CLIENT_RELEASE, COORDINATOR_VARS,
-    DESIRED_IF, FILE, JOIN_IF, JOIN_WITH, RELEASE_CHANNEL, SET_DESIRED, SET_IF, TAILSCALE,
-    caller_problems, coordinator_problems, desired_problems, with_wanted,
+    AUDIENCE, CLIENT_COMMIT, CLIENT_RELEASE, COORDINATOR_VARS, DESIRED_IF, FILE, MAX_POLLS,
+    SET_DESIRED, SET_IF, caller_problems, check_command, coordinator_problems, desired_problems,
+    with_wanted,
 };
+use super::farm::{APT_FLOOR, farm_problems};
 use super::lint::lint;
 use super::platforms_tests::in_job;
-use super::{text_of, workflows};
+use super::{text_of, workflows, yaml};
 
 #[test]
 fn hostkeeper_desired_yml_checks_the_release_then_sets_it_by_its_targets() {
     // Catches: any change to hostkeeper-desired.yml that breaks what it is held to: a trigger
-    // added or dropped, the gate dropped from a job, the check or the channel wait skipped or not
-    // handed on, hostkeeper's workflow called with another release, pin, coordinator or tailnet.
+    // added or dropped, the gate dropped from a job, the check skipped or not handed on,
+    // hostkeeper's workflow called with another release, pin, coordinator or tailnet, or without
+    // its wait.
     assert_eq!(desired_problems(&text_of(FILE)), Vec::<String>::new());
     assert_eq!(lint(FILE, &text_of(FILE)), Vec::<String>::new());
 }
 
 #[test]
-fn the_variable_gate_is_the_job_level_if_of_all_three_jobs() {
+fn the_variable_gate_is_the_job_level_if_of_both_jobs() {
     // Catches: a gate on a step (the job would start, and the token exist, with the deploy off),
     // a gate on another variable or on a value other than `true`, a job that runs from a branch
     // other than main, and a release run acted on although it failed, ran on another branch or
@@ -57,20 +58,19 @@ fn the_variable_gate_is_the_job_level_if_of_all_three_jobs() {
             "check without {part:?}"
         );
     }
-    for job in ["channel", "set-desired"] {
-        let spoiled = in_job(&text, job, " && needs.check.outputs.set == 'true'", "");
-        assert!(
-            desired_problems(&spoiled)
-                .iter()
-                .any(|p| p.starts_with(&format!("{job}: `if` is"))),
-            "{job} whatever check said"
-        );
-    }
-    for (job, condition) in [
-        ("check", DESIRED_IF),
-        ("channel", SET_IF),
-        ("set-desired", SET_IF),
-    ] {
+    let spoiled = in_job(
+        &text,
+        "set-desired",
+        " && needs.check.outputs.set == 'true'",
+        "",
+    );
+    assert!(
+        desired_problems(&spoiled)
+            .iter()
+            .any(|p| p.starts_with("set-desired: `if` is")),
+        "set-desired whatever check said"
+    );
+    for (job, condition) in [("check", DESIRED_IF), ("set-desired", SET_IF)] {
         let spoiled = in_job(&text, job, &format!("    if: {condition}\n"), "");
         assert!(
             desired_problems(&spoiled)
@@ -82,21 +82,43 @@ fn the_variable_gate_is_the_job_level_if_of_all_three_jobs() {
 }
 
 #[test]
-fn the_token_is_held_by_channel_and_set_desired_alone_and_only_under_the_gate() {
-    // Catches: `id-token: write` moved to the check job, which runs this repository's code, or
-    // held by channel or set-desired under a condition that lets a run without the variable, or
-    // from another branch, through.
+fn the_token_is_held_by_set_desired_alone_and_only_under_the_gate() {
+    // Catches: `id-token: write` moved to the check job, which runs this repository's code, held
+    // by set-desired under a condition that lets a run without the variable, or from another
+    // branch, through, and the job that joined the tailnet to read the release channel coming
+    // back with the token.
     let text = text_of(FILE);
-    for job in ["channel", "set-desired"] {
-        let spoiled = in_job(&text, job, SET_IF, "${{ github.ref == 'refs/heads/main' }}");
-        assert!(
-            lint(FILE, &spoiled)
-                .iter()
-                .any(|p| p
-                    == &format!("job {job}: `id-token: write` needs the exact `if: {SET_IF}`")),
-            "{job} under another condition"
-        );
-    }
+    let spoiled = in_job(
+        &text,
+        "set-desired",
+        SET_IF,
+        "${{ github.ref == 'refs/heads/main' }}",
+    );
+    assert!(
+        lint(FILE, &spoiled)
+            .iter()
+            .any(|p| p
+                == &format!("job set-desired: `id-token: write` needs the exact `if: {SET_IF}`")),
+        "set-desired under another condition"
+    );
+    let channel = text.replacen(
+        "  set-desired:\n",
+        &format!(
+            "  channel:\n    needs: [check]\n    if: {SET_IF}\n    runs-on: ubuntu-24.04\n    permissions:\n      id-token: write\n    steps:\n      - run: true\n\n  set-desired:\n"
+        ),
+        1,
+    );
+    assert!(
+        lint(FILE, &channel)
+            .iter()
+            .any(|p| p == "job channel: `id-token: write` is not allowed in hostkeeper-desired.yml"),
+        "channel with id-token: write"
+    );
+    assert!(
+        desired_problems(&channel).iter().any(|p| p
+            == "jobs are [\"channel\", \"check\", \"set-desired\"], not check and set-desired"),
+        "a third job"
+    );
     let spoiled = in_job(
         &text,
         "check",
@@ -151,6 +173,21 @@ const DEFECTS: &[(&str, &str, &str, &str)] = &[
         "",
         "check: the step `desired` does not run",
     ),
+    // Another floor than the lab's: the same version set by both with other targets, which the
+    // coordinator refuses (`release_exists`).
+    (
+        "check",
+        "--min-hostkeeper 0.1.225",
+        "--min-hostkeeper 0.1.184",
+        "check: the step `desired` does not run",
+    ),
+    // The verb of the lab alone, which never sets `set=false` after a run that published none.
+    (
+        "check",
+        "cargo xtask release desired ",
+        "cargo xtask release desired-apt ",
+        "check: the step `desired` does not run",
+    ),
     (
         "check",
         "        id: desired\n",
@@ -183,182 +220,21 @@ const DEFECTS: &[(&str, &str, &str, &str)] = &[
     ),
     (
         "check",
-        "release-index: ${{ steps.desired.outputs.release-index }}",
-        "release-index: ''",
-        "check: output release-index is",
-    ),
-    (
-        "check",
-        "release-index-digest: ${{ steps.desired.outputs.release-index-digest }}",
-        "release-index-digest: ''",
-        "check: output release-index-digest is",
-    ),
-    (
-        "check",
         "targets: ${{ steps.desired.outputs.targets }}",
         "targets: '{}'",
         "check: output targets is",
     ),
-    // The channel job: the join dropped, skipped while the client ID is set, run on another
-    // condition, or given another identity, tag, Tailscale release or a cache; the wait or the
-    // comparison dropped, made conditional or reading another value; another step (a checkout,
-    // which would run this repository's code beside the token); other permissions or needs.
-    (
-        "channel",
-        "    needs: [check]\n",
-        "    needs: [check, set-desired]\n",
-        "channel: needs are [\"check\", \"set-desired\"], not [\"check\"]",
-    ),
-    (
-        "channel",
-        "      id-token: write\n",
-        "      id-token: write\n      contents: read\n",
-        "channel: permissions are [\"contents: read\", \"id-token: write\"], not id-token: write alone",
-    ),
-    (
-        "channel",
-        "      id-token: write\n",
-        "      id-token: none\n",
-        "channel: permissions are [\"id-token: none\"], not id-token: write alone",
-    ),
-    (
-        "channel",
-        "        uses: tailscale/github-action@d1b6cd204f8dceda5b3eaad7f1f767be390056cd # v4.2.0\n",
-        "        uses: tailscale/github-action@6986d2c82a91fbac2949fe01f5bab95cf21b5102 # v3.2.2\n",
-        "channel: the first step does not use tailscale/github-action@d1b6cd204f8dceda5b3eaad7f1f767be390056cd",
-    ),
-    (
-        "channel",
-        "        if: ${{ vars.HOSTKEEPER_TAILNET_CLIENT_ID != '' }}\n",
-        "        if: ${{ vars.HOSTKEEPER_TAILNET_CLIENT_ID == '' }}\n",
-        "channel: the join's `if` is not ${{ vars.HOSTKEEPER_TAILNET_CLIENT_ID != '' }}",
-    ),
-    (
-        "channel",
-        "        if: ${{ vars.HOSTKEEPER_TAILNET_CLIENT_ID != '' }}\n",
-        "        if: false\n",
-        "channel: the join's `if` is not",
-    ),
-    (
-        "channel",
-        "        if: ${{ vars.HOSTKEEPER_TAILNET_CLIENT_ID != '' }}\n",
-        "",
-        "channel: the join's `if` is not",
-    ),
-    (
-        "channel",
-        "oauth-client-id: ${{ vars.HOSTKEEPER_TAILNET_CLIENT_ID }}",
-        "oauth-client-id: ${{ vars.OTHER_CLIENT_ID }}",
-        "channel: the join's inputs are",
-    ),
-    (
-        "channel",
-        "audience: ${{ vars.HOSTKEEPER_TAILNET_AUDIENCE }}",
-        "audience: tierstore",
-        "channel: the join's inputs are",
-    ),
-    // The action's default tag, which the federation of this repository may not issue.
-    (
-        "channel",
-        "          tags: ${{ vars.HOSTKEEPER_TAILNET_TAG }}\n",
-        "",
-        "channel: the join's inputs are",
-    ),
-    (
-        "channel",
-        "version: 1.94.2",
-        "version: latest",
-        "channel: the join's inputs are",
-    ),
-    (
-        "channel",
-        "          sha256sum: c6f99a5d774c7783b56902188d69e9756fc3dddfb08ac6be4cb2585f3fecdc32\n",
-        "",
-        "channel: the join's inputs are",
-    ),
-    (
-        "channel",
-        "use-cache: false",
-        "use-cache: true",
-        "channel: the join's inputs are",
-    ),
-    (
-        "channel",
-        "          use-cache: false\n",
-        "          use-cache: false\n          ping: ${{ vars.HOSTKEEPER_TAILNET_COORDINATOR }}\n",
-        "channel: the join's inputs are",
-    ),
-    (
-        "channel",
-        "--retry-max-time 1800",
-        "--retry-max-time 60",
-        "channel: step 2 does not run `curl",
-    ),
-    (
-        "channel",
-        "        run: printf",
-        "        run: true || printf",
-        "channel: step 3 does not run `printf",
-    ),
-    (
-        "channel",
-        "        env:\n          RELEASE_CHANNEL",
-        "        if: ${{ always() }}\n        env:\n          RELEASE_CHANNEL",
-        "channel: the wait has `if` Some(\"${{ always() }}\"); it runs whenever the job does",
-    ),
-    (
-        "channel",
-        "        env:\n          INDEX_DIGEST",
-        "        if: ${{ success() }}\n        env:\n          INDEX_DIGEST",
-        "channel: the comparison has `if` Some(\"${{ success() }}\")",
-    ),
-    (
-        "channel",
-        "RELEASE_CHANNEL: ${{ vars.HOSTKEEPER_RELEASE_CHANNEL }}",
-        "RELEASE_CHANNEL: https://channel.example",
-        "channel: the wait reads",
-    ),
-    (
-        "channel",
-        "PACKAGE_VERSION: ${{ needs.check.outputs.package-version }}",
-        "PACKAGE_VERSION: ${{ inputs.version }}",
-        "channel: the wait reads",
-    ),
-    (
-        "channel",
-        "          PACKAGE_VERSION: ${{ needs.check.outputs.package-version }}\n",
-        "          PACKAGE_VERSION: ${{ needs.check.outputs.package-version }}\n          CURL_HOME: .\n",
-        "channel: the wait reads",
-    ),
-    (
-        "channel",
-        "INDEX_DIGEST: ${{ needs.check.outputs.release-index-digest }}",
-        "INDEX_DIGEST: ${{ needs.check.outputs.package-version }}",
-        "channel: the comparison reads",
-    ),
-    (
-        "channel",
-        "    steps:\n",
-        "    steps:\n      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1\n",
-        "channel: has 4 steps, not the join, the wait and the comparison",
-    ),
     (
         "set-desired",
-        "needs: [check, channel]",
         "needs: [check]",
-        "set-desired: needs are [\"check\"], not [\"channel\", \"check\"]",
+        "needs: [check, publish]",
+        "set-desired: needs are [\"check\", \"publish\"], not [\"check\"]",
     ),
     (
         "set-desired",
-        "needs: [check, channel]",
-        "needs: [check, channel, publish]",
-        "set-desired: needs are [\"channel\", \"check\", \"publish\"], not [\"channel\", \"check\"]",
-    ),
-    (
-        "set-desired",
-        "    needs: [check, channel]\n",
+        "    needs: [check]\n",
         "",
-        "set-desired: needs are [], not [\"channel\", \"check\"]",
+        "set-desired: needs are [], not [\"check\"]",
     ),
     (
         "set-desired",
@@ -397,44 +273,39 @@ const DEFECTS: &[(&str, &str, &str, &str)] = &[
         "service: hello",
         "set-desired: with.service",
     ),
-    // The tag alone: not the version the packages carry.
+    // The input, not what check found and handed on.
     (
         "set-desired",
         "version: ${{ needs.check.outputs.package-version }}",
         "version: ${{ inputs.version }}",
         "set-desired: with.version",
     ),
-    (
-        "set-desired",
-        "release_index: ${{ needs.check.outputs.release-index }}",
-        "release_index: ''",
-        "set-desired: with.release_index is",
-    ),
-    (
-        "set-desired",
-        "release_index_digest: ${{ needs.check.outputs.release-index-digest }}",
-        "release_index_digest: ''",
-        "set-desired: with.release_index_digest",
-    ),
-    // Targets dropped: the release named by its index alone.
+    // Targets dropped: a set that names no artifact.
     (
         "set-desired",
         "      targets: ${{ needs.check.outputs.targets }}\n",
         "",
         "set-desired: with.targets is None",
     ),
-    // One digest for every platform, beside the targets: the client refuses it.
+    // An index beside the apt targets: it must list archive entries they do not have.
     (
         "set-desired",
-        "      wait: false\n",
-        "      wait: false\n      package_digest: ${{ needs.check.outputs.release-index-digest }}\n",
-        "set-desired: with.package_digest is not an input it gives",
+        "      wait: true\n",
+        "      wait: true\n      release_index: ${{ needs.check.outputs.release-index }}\n",
+        "set-desired: with.release_index is not an input it gives",
     ),
     (
         "set-desired",
-        "      wait: false\n",
-        "      wait: false\n      max_polls: 180\n",
-        "set-desired: with.max_polls is not an input it gives",
+        "      wait: true\n",
+        "      wait: true\n      release_index_digest: ${{ needs.check.outputs.release-index-digest }}\n",
+        "set-desired: with.release_index_digest is not an input it gives",
+    ),
+    // One digest for every platform, beside the targets: the client refuses it.
+    (
+        "set-desired",
+        "      wait: true\n",
+        "      wait: true\n      package_digest: ${{ needs.check.outputs.package-digest }}\n",
+        "set-desired: with.package_digest is not an input it gives",
     ),
     (
         "set-desired",
@@ -465,13 +336,6 @@ const DEFECTS: &[(&str, &str, &str, &str)] = &[
         "audience: tierstore-hostkeeper-desired",
         "audience: tierstore",
         "set-desired: with.audience",
-    ),
-    // A wait would hold the group for a staged rollout, and fail when it is longer.
-    (
-        "set-desired",
-        "wait: false",
-        "wait: true",
-        "set-desired: with.wait is Some(\"true\"), not \"false\"",
     ),
     // Without the join a GitHub-hosted runner does not reach the private listener.
     (
@@ -522,91 +386,67 @@ fn each_defect_in_hostkeeper_desired_yml_is_named_by_the_lint() {
 }
 
 #[test]
-fn the_channel_is_read_only_after_the_tailnet_join_and_compared_after_the_wait() {
-    // Catches: the channel read before the runner joins the tailnet (a tailnet-only channel
-    // cannot be reached, and the wait runs out its half hour), the comparison made before the
-    // served index was downloaded, and the wait moved back into check, or into set-desired,
-    // where no join comes before it.
+fn a_set_that_orders_no_host_ends_the_job_red_not_green_with_not_waited() {
+    // Catches: the call made without its wait (`wait: false`, or the input dropped and left to the
+    // client's default), where the client ends the job green (`not_waited`) whatever the hosts do,
+    // so that a version every host holds `installer_dropped` or `no_build_for_host` passes; a wait
+    // the client refuses (`max_polls` above 180, `invalid_wait`) or one too short for any roll;
+    // and the input left to the client's default, which another pin may change.
     let text = text_of(FILE);
-    let join_step = format!(
-        "      - name: Join the tailnet\n        if: {JOIN_IF}\n        uses: {TAILSCALE} # v4.2.0\n        with:\n{}",
-        JOIN_WITH
-            .iter()
-            .map(|(k, v)| format!("          {k}: {v}\n"))
-            .collect::<String>()
-    );
-    let wait_step = format!(
-        "      - name: Wait until the release channel serves the release's index\n        env:\n          RELEASE_CHANNEL: ${{{{ vars.{RELEASE_CHANNEL} }}}}\n          PACKAGE_VERSION: ${{{{ needs.check.outputs.package-version }}}}\n        run: {CHANNEL_WAIT}\n"
-    );
-    let same_step = format!(
-        "      - name: The channel serves the release's index, byte for byte\n        env:\n          INDEX_DIGEST: ${{{{ needs.check.outputs.release-index-digest }}}}\n        run: {CHANNEL_SAME}\n"
-    );
-    for step in [&join_step, &wait_step, &same_step] {
-        assert!(text.contains(step.as_str()), "{step}");
-    }
-    let wait_first = text.replacen(&join_step, "", 1).replacen(
-        &same_step,
-        &format!("{same_step}{join_step}"),
-        1,
-    );
-    let problems = desired_problems(&wait_first);
-    assert!(
-        problems.contains(&format!(
-            "channel: the first step does not use {TAILSCALE}; the channel is read before the tailnet join"
-        )),
-        "{problems:?}"
-    );
-    let swapped = text.replacen(&same_step, "", 1).replacen(
-        &wait_step,
-        &format!("{same_step}{wait_step}"),
-        1,
-    );
-    let problems = desired_problems(&swapped);
-    assert!(
-        problems.contains(&format!("channel: step 2 does not run `{CHANNEL_WAIT}`")),
-        "{problems:?}"
-    );
-    assert!(
-        problems.contains(&format!("channel: step 3 does not run `{CHANNEL_SAME}`")),
-        "{problems:?}"
-    );
-    // The join dropped: the channel's wait is then the first step.
-    let unjoined = text.replacen(&join_step, "", 1);
-    let problems = desired_problems(&unjoined);
-    assert!(
-        problems.contains(
-            &"channel: has 2 steps, not the join, the wait and the comparison".to_owned()
+    assert!(text.contains("      wait: true\n      max_polls: 180\n"));
+    assert_eq!(MAX_POLLS, "180");
+    for (replace, with, says) in [
+        (
+            "      wait: true\n",
+            "      wait: false\n",
+            "set-desired: with.wait is Some(\"false\"), not \"true\"",
         ),
-        "{problems:?}"
-    );
+        (
+            "      wait: true\n",
+            "",
+            "set-desired: with.wait is None, not \"true\"",
+        ),
+        (
+            "      max_polls: 180\n",
+            "      max_polls: 181\n",
+            "set-desired: with.max_polls is Some(\"181\"), not \"180\"",
+        ),
+        (
+            "      max_polls: 180\n",
+            "      max_polls: 1\n",
+            "set-desired: with.max_polls is Some(\"1\"), not \"180\"",
+        ),
+        (
+            "      max_polls: 180\n",
+            "",
+            "set-desired: with.max_polls is None, not \"180\"",
+        ),
+    ] {
+        let problems = desired_problems(&in_job(&text, "set-desired", replace, with));
+        assert!(
+            problems.iter().any(|p| p == says),
+            "{replace:?} -> {with:?} must say {says:?}: {problems:?}"
+        );
+    }
+}
+
+#[test]
+fn the_check_gives_the_floor_the_lab_stage_of_release_yml_is_held_to() {
+    // Catches: hostkeeper-desired.yml and the lab stage of release.yml building the targets of
+    // the same release with two hostkeeper floors, so that the second set of the version is
+    // refused (`release_exists`) and the fleet is not moved; and a floor that the lab's lint
+    // moves without this workflow following.
+    let command = check_command();
     assert!(
-        problems.contains(&format!(
-            "channel: the first step does not use {TAILSCALE}; the channel is read before the tailnet join"
-        )),
-        "{problems:?}"
+        command.contains(&format!(" --min-hostkeeper {APT_FLOOR} ")),
+        "{command}"
     );
-    // The wait back in check, where it was before, without a join: named.
-    let output = "--output \"$GITHUB_OUTPUT\"\n";
-    assert!(text.contains(output));
-    let in_check = in_job(&text, "check", output, &format!("{output}{wait_step}"));
-    assert!(
-        desired_problems(&in_check).contains(&format!(
-            "check: names {RELEASE_CHANNEL}; only channel, after the tailnet join, reads it"
-        )),
-        "the wait in check"
-    );
-    let in_set = in_job(
-        &text,
-        "set-desired",
-        "      wait: false\n",
-        &format!("      wait: false\n      channel: ${{{{ vars.{RELEASE_CHANNEL} }}}}\n"),
-    );
-    assert!(
-        desired_problems(&in_set).contains(&format!(
-            "set-desired: names {RELEASE_CHANNEL}; only channel, after the tailnet join, reads it"
-        )),
-        "the channel read in set-desired"
-    );
+    let release = text_of("release.yml");
+    assert!(release.contains(&format!(
+        "cargo xtask release desired-apt --repo \"$GITHUB_REPOSITORY\" --version \"${{TAG#v}}\" --min-hostkeeper {APT_FLOOR} "
+    )));
+    let doc = yaml::load(&release).expect("release.yml parses");
+    assert_eq!(farm_problems(&doc, &release), Vec::<String>::new());
 }
 
 #[test]
@@ -615,7 +455,7 @@ fn a_trigger_an_input_or_a_job_other_than_the_two_ways_in_is_named() {
     // whose success says nothing of a release) or of release on another branch, the dispatch
     // dropped (no rollback by hand), the two ways in sharing one concurrency group or a run
     // cancelled, a second input or none, an input that is not a required
-    // string, a job beside the three, and a document that does not parse being read as clean.
+    // string, a job beside the two, and a document that does not parse being read as clean.
     let text = text_of(FILE);
     for (replace, with, says) in [
         (
@@ -682,7 +522,7 @@ fn a_trigger_an_input_or_a_job_other_than_the_two_ways_in_is_named() {
         (
             "jobs:\n  check:\n",
             "jobs:\n  publish:\n    runs-on: ubuntu-24.04\n  check:\n",
-            "jobs are [\"channel\", \"check\", \"publish\", \"set-desired\"], not check, channel and set-desired",
+            "jobs are [\"check\", \"publish\", \"set-desired\"], not check and set-desired",
         ),
     ] {
         assert!(text.contains(replace), "{replace:?} is not in {FILE}");
@@ -698,11 +538,11 @@ fn a_trigger_an_input_or_a_job_other_than_the_two_ways_in_is_named() {
 #[test]
 fn the_check_runs_the_verb_and_the_call_pins_the_client_hostkeeper_releases_with() {
     // Catches: set-desired starting without the check (it needs it), the check running another
-    // command than the verb whose unit tests refuse an index without a platform
+    // command than the verb whose unit tests hand on the apt targets of the testing suite
     // (src/release/desired/tests.rs), and a pin whose commit and release disagree with the
     // inputs that name them.
     let text = text_of(FILE);
-    assert!(text.contains(&format!("        run: {CHECK}\n")));
+    assert!(text.contains(&format!("        run: {}\n", check_command())));
     assert!(text.contains("    needs: [check]\n"));
     assert!(text.contains(&format!(
         "    uses: {SET_DESIRED}@{CLIENT_COMMIT} # v{CLIENT_RELEASE}\n"
@@ -711,7 +551,9 @@ fn the_check_runs_the_verb_and_the_call_pins_the_client_hostkeeper_releases_with
     let wanted = with_wanted();
     assert!(wanted.contains(&("hostkeeper_commit", CLIENT_COMMIT)));
     assert!(wanted.contains(&("hostkeeper_version", CLIENT_RELEASE)));
-    assert!(!wanted.iter().any(|(k, _)| *k == "package_digest"));
+    for absent in ["package_digest", "release_index", "release_index_digest"] {
+        assert!(!wanted.iter().any(|(k, _)| *k == absent), "{absent}");
+    }
 }
 
 #[test]
