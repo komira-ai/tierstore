@@ -491,7 +491,7 @@ run, and every host's daemon fetches that version from the release channel
   (a rollback).
 
 Both are off until the repository variable `TIERSTORE_SETS_DESIRED` is `true`, exactly: unset, or
-anything else, both jobs are skipped.
+anything else, every job is skipped.
 
 Its `check` job (`cargo xtask release desired`, no token that writes) decides the release and
 refuses it unless its `index.json` is the one its `SHA256SUMS` lists, hostkeeper's own reader reads
@@ -505,9 +505,15 @@ SHA-256, and the release's **targets**: today one `hostkeeper-archive` entry per
 archive's size and SHA-256, its bundle, its two locations, the release channel's and the GitHub
 asset's, and the `min_hostkeeper` of its manifest). Once hostkeeper's apt installer ships, the Linux
 lists gain an `apt` entry ahead of the archive (`crates/xtask/src/release/desired_targets.rs`).
-Then the job waits, for at most about half an hour, until the release channel serves the release's
-`index.json` byte for byte: the channel takes a release by its own sync, which CI does not run, and
-the coordinator refuses a version the channel does not hold (`not_in_channel`).
+Then the `channel` job waits, for at most about half an hour, until the release channel serves the
+release's `index.json`, its SHA-256 the one `check` computed: the channel takes a release by its own
+sync, which CI does not run, and the coordinator refuses a version the channel does not hold
+(`not_in_channel`). When `HOSTKEEPER_TAILNET_CLIENT_ID` is set the job first joins the runner to the
+tailnet, as `set-desired` does (the same pinned `tailscale/github-action`, Tailscale release,
+federated identity and `HOSTKEEPER_TAILNET_TAG`; an ephemeral node), since the channel may be on the
+tailnet only; unset, it reads a public channel directly. It checks nothing out and runs no code of
+this repository, and holds `id-token: write` for the join alone, so `check`, which does run this
+repository's code, still holds no token that writes.
 
 The `set-desired` job then calls hostkeeper's CI client (`set-desired.yml` of
 komira-ai/hostkeeper, pinned to the revision hostkeeper's own `release.yml` pins), which proves

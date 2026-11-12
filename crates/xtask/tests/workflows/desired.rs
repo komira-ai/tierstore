@@ -1,7 +1,8 @@
 //! `hostkeeper-desired.yml`: the run that sets the desired version of tierstore on the hostkeeper
 //! coordinator for a published release, by its targets, after each release run that published one
 //! and by hand, once `cargo xtask release desired` has refused a release whose index lacks a
-//! platform and the release channel serves its index.
+//! platform and the release channel serves its index (read over the tailnet when the tailnet's
+//! client ID is set).
 //!
 //! [`desired_problems`] refuses the file when:
 //! - anything but `workflow_run` and `workflow_dispatch` starts it; the `workflow_run` is not the
@@ -9,15 +10,23 @@
 //!   `version`;
 //! - its concurrency is not [`GROUP`] with `cancel-in-progress: false` (a run by hand is never
 //!   replaced by the completion of a release run while it waits, nor any run cancelled);
-//! - its jobs are not `check` and `set-desired`; `check`'s `if:` is not [`DESIRED_IF`] (the
-//!   repository variable is the gate, at the job level, only `main` runs it, and a release run is
-//!   acted on only when it succeeded, on `main` of this repository) or `set-desired`'s is not
-//!   [`SET_IF`] (the same gate, and `check` said `set=true`);
+//! - its jobs are not `check`, `channel` and `set-desired`; `check`'s `if:` is not
+//!   [`DESIRED_IF`] (the repository variable is the gate, at the job level, only `main` runs it,
+//!   and a release run is acted on only when it succeeded, on `main` of this repository) or the
+//!   `if:` of `channel` or `set-desired` is not [`SET_IF`] (the same gate, and `check` said
+//!   `set=true`);
 //! - `check` needs a job, holds other than `actions: read` and `contents: read`, does not run
 //!   [`CHECK`] as its step `desired` with `VERSION` and `RUN_ID` read from the input and from the
-//!   run that started it, does not hand on that step's five outputs, or does not wait for the
-//!   release channel ([`CHANNEL_WAIT`], then [`CHANNEL_SAME`], each under [`SET_STEP_IF`]);
-//! - `set-desired` needs anything but `check`, is not hostkeeper's reusable workflow
+//!   run that started it, or does not hand on that step's five outputs;
+//! - `channel` needs anything but `check`, holds other than `id-token: write`, or its steps are
+//!   not exactly, in this order: the tailnet join ([`TAILSCALE`] under [`JOIN_IF`], its inputs
+//!   exactly [`JOIN_WITH`]), the wait for the release channel ([`CHANNEL_WAIT`]) and the
+//!   comparison of the served index's SHA-256 with the one `check` handed on ([`CHANNEL_SAME`]),
+//!   each reading what it reads from the step's environment; so the job checks nothing out and
+//!   runs no code of this repository, and it reads the channel only after the join;
+//! - a job other than `channel` names [`RELEASE_CHANNEL`]: a read of the channel anywhere else
+//!   would be made without the join;
+//! - `set-desired` needs anything but `check` and `channel`, is not hostkeeper's reusable workflow
 //!   ([`SET_DESIRED`]) pinned to [`CLIENT_COMMIT`] with the comment `# v`[`CLIENT_RELEASE`],
 //!   holds other than `contents: read` and `id-token: write`, or its inputs are not exactly those
 //!   [`with_wanted`] gives, no more: the service, what `check` handed on, the hostkeeper release the pin
@@ -30,7 +39,7 @@
 //! job that set it through the farm coordinator before hostkeeper does not come back.
 
 use super::hostkeeper::{at, steps};
-use super::lint::{entries, entry, names};
+use super::lint::{entries, entry, names, scalars};
 use super::yaml::{self, Node};
 
 /// The workflow's file.
@@ -44,21 +53,60 @@ pub const DESIRED_IF: &str = "${{ github.ref == 'refs/heads/main' && vars.TIERST
 pub const GROUP: &str =
     "hostkeeper-desired-${{ github.event_name == 'workflow_dispatch' && 'dispatch' || 'release' }}";
 
-/// The `if:` of `set-desired`: the gate again, and `check` chose a release.
+/// The `if:` of `channel` and of `set-desired`: the gate again, and `check` chose a release.
 pub const SET_IF: &str = "${{ github.ref == 'refs/heads/main' && vars.TIERSTORE_SETS_DESIRED == 'true' && needs.check.outputs.set == 'true' }}";
-
-/// The `if:` of the steps of `check` after `desired`.
-pub const SET_STEP_IF: &str = "${{ steps.desired.outputs.set == 'true' }}";
 
 /// The command of the step `desired` of `check`.
 pub const CHECK: &str = "cargo xtask release desired --repo \"$GITHUB_REPOSITORY\" --version \"$VERSION\" --after-run \"$RUN_ID\" --dir \"$RUNNER_TEMP/desired\" --output \"$GITHUB_OUTPUT\"";
 
-/// The wait of `check` for the release channel to serve the release's index.
+/// The wait of `channel` for the release channel to serve the release's index.
 pub const CHANNEL_WAIT: &str = "curl --proto =https --proto-redir =https --tlsv1.2 --fail --silent --show-error --max-time 30 --retry 45 --retry-delay 40 --retry-max-time 1800 --retry-all-errors --output \"$RUNNER_TEMP/served-index.json\" \"$RELEASE_CHANNEL/tierstore/$PACKAGE_VERSION/index.json\"";
 
-/// The comparison of the served index with the checked one.
-pub const CHANNEL_SAME: &str =
-    "cmp \"$RUNNER_TEMP/desired/index.json\" \"$RUNNER_TEMP/served-index.json\"";
+/// The comparison of the served index with the checked one: its SHA-256 is the digest `check`
+/// computed over the index it checked and handed on.
+pub const CHANNEL_SAME: &str = "printf '%s  %s\\n' \"$INDEX_DIGEST\" \"$RUNNER_TEMP/served-index.json\" | sha256sum --check --strict";
+
+/// The repository variable of the release channel's base URL, which only `channel` reads.
+pub const RELEASE_CHANNEL: &str = "HOSTKEEPER_RELEASE_CHANNEL";
+
+/// The action that joins the runner to the tailnet, pinned to the commit hostkeeper's
+/// `set-desired.yml` (at [`CLIENT_COMMIT`]) pins for its own join.
+pub const TAILSCALE: &str = "tailscale/github-action@d1b6cd204f8dceda5b3eaad7f1f767be390056cd";
+
+/// The `if:` of the join: the tailnet's client ID is set; empty, the channel is a public one.
+pub const JOIN_IF: &str = "${{ vars.HOSTKEEPER_TAILNET_CLIENT_ID != '' }}";
+
+/// The inputs of the join, exactly, and no other: the federated identity and tag of
+/// `set-desired`'s join, and the Tailscale release pinned by version and SHA-256, uncached.
+pub const JOIN_WITH: [(&str, &str); 6] = [
+    (
+        "oauth-client-id",
+        "${{ vars.HOSTKEEPER_TAILNET_CLIENT_ID }}",
+    ),
+    ("audience", "${{ vars.HOSTKEEPER_TAILNET_AUDIENCE }}"),
+    ("tags", "${{ vars.HOSTKEEPER_TAILNET_TAG }}"),
+    ("version", "1.94.2"),
+    (
+        "sha256sum",
+        "c6f99a5d774c7783b56902188d69e9756fc3dddfb08ac6be4cb2585f3fecdc32",
+    ),
+    ("use-cache", "false"),
+];
+
+/// The environment of the steps of `channel` after the join, each exactly, and no other.
+pub const WAIT_ENV: [(&str, &str); 2] = [
+    ("RELEASE_CHANNEL", "${{ vars.HOSTKEEPER_RELEASE_CHANNEL }}"),
+    (
+        "PACKAGE_VERSION",
+        "${{ needs.check.outputs.package-version }}",
+    ),
+];
+
+/// The environment of the comparison, exactly.
+pub const SAME_ENV: [(&str, &str); 1] = [(
+    "INDEX_DIGEST",
+    "${{ needs.check.outputs.release-index-digest }}",
+)];
 
 /// The outputs `check` hands on, each its step `desired`'s.
 pub const OUTPUTS: [&str; 5] = [
@@ -172,29 +220,38 @@ pub fn desired_problems(text: &str) -> Vec<String> {
     let jobs = entry(&doc, "jobs").map_or(&[][..], entries);
     let mut found: Vec<&str> = jobs.iter().filter_map(|(k, _)| k.as_str()).collect();
     found.sort_unstable();
-    if found != ["check", "set-desired"] {
-        problems.push(format!("jobs are {found:?}, not check and set-desired"));
+    if found != ["channel", "check", "set-desired"] {
+        problems.push(format!(
+            "jobs are {found:?}, not check, channel and set-desired"
+        ));
     }
-    for (name, want) in [("check", DESIRED_IF), ("set-desired", SET_IF)] {
+    for (name, want) in [
+        ("check", DESIRED_IF),
+        ("channel", SET_IF),
+        ("set-desired", SET_IF),
+    ] {
         let condition = job(jobs, name).and_then(|j| at(j, &["if"]));
         if condition != Some(want) {
             problems.push(format!("{name}: `if` is {condition:?}, not {want}"));
         }
     }
     problems.extend(check_problems(job(jobs, "check")));
+    problems.extend(channel_problems(job(jobs, "channel")));
+    for (name, body) in jobs {
+        let name = name.as_str().unwrap_or_default();
+        let mut words = Vec::new();
+        scalars(body, &mut words);
+        if name != "channel" && words.iter().any(|w| w.contains(RELEASE_CHANNEL)) {
+            problems.push(format!(
+                "{name}: names {RELEASE_CHANNEL}; only channel, after the tailnet join, reads it"
+            ));
+        }
+    }
     problems.extend(set_desired_problems(text, job(jobs, "set-desired")));
     problems
 }
 
-/// The step of `job` whose `run` is `command`.
-fn step_running<'a>(job: Option<&'a Node>, command: &str) -> Option<&'a Node> {
-    steps(job)
-        .iter()
-        .find(|s| at(s, &["run"]).map(str::trim_end) == Some(command))
-}
-
-/// One line per way the job `check` is not the read-only check that hands on the release and
-/// waits for the release channel.
+/// One line per way the job `check` is not the read-only check that hands on the release.
 fn check_problems(check: Option<&Node>) -> Vec<String> {
     let mut problems = Vec::new();
     let needs = names(check.and_then(|j| entry(j, "needs")));
@@ -230,37 +287,98 @@ fn check_problems(check: Option<&Node>) -> Vec<String> {
             problems.push(format!("check: output {output} is {got:?}, not {want}"));
         }
     }
-    let mut after = step.unwrap_or(all.len());
-    for command in [CHANNEL_WAIT, CHANNEL_SAME] {
-        let found = all
-            .iter()
-            .position(|s| at(s, &["run"]).map(str::trim_end) == Some(command));
-        match found {
-            Some(i) if i > after => after = i,
-            _ => problems.push(format!(
-                "check: no step after the ones before it runs `{command}`"
-            )),
-        }
-        let condition = step_running(check, command).and_then(|s| at(s, &["if"]));
-        if condition != Some(SET_STEP_IF) {
-            problems.push(format!(
-                "check: the step that runs `{command}` has `if` {condition:?}, not {SET_STEP_IF}"
-            ));
-        }
+    problems
+}
+
+/// One line per way `env` (a map) is not exactly `want`, for the step `step` of `channel`.
+fn env_problems(step: &str, env: Option<&Node>, want: &[(&str, &str)]) -> Vec<String> {
+    let mut got: Vec<(&str, &str)> = env
+        .map_or(&[][..], entries)
+        .iter()
+        .map(|(k, v)| {
+            (
+                k.as_str().unwrap_or_default(),
+                v.as_str().unwrap_or_default(),
+            )
+        })
+        .collect();
+    got.sort_unstable();
+    let mut want = want.to_vec();
+    want.sort_unstable();
+    if got == want {
+        Vec::new()
+    } else {
+        vec![format!("channel: the {step} reads {got:?}, not {want:?}")]
     }
-    let wait = step_running(check, CHANNEL_WAIT);
-    for (var, want) in [
-        ("RELEASE_CHANNEL", "${{ vars.HOSTKEEPER_RELEASE_CHANNEL }}"),
-        (
-            "PACKAGE_VERSION",
-            "${{ steps.desired.outputs.package-version }}",
-        ),
+}
+
+/// One line per way the job `channel` is not the tailnet join (when the client ID is set), then
+/// the wait for the release channel and the comparison, and nothing else.
+fn channel_problems(channel: Option<&Node>) -> Vec<String> {
+    let mut problems = Vec::new();
+    let needs = names(channel.and_then(|j| entry(j, "needs")));
+    if needs != ["check"] {
+        problems.push(format!("channel: needs are {needs:?}, not [\"check\"]"));
+    }
+    let held = held(channel);
+    if held != ["id-token: write"] {
+        problems.push(format!(
+            "channel: permissions are {held:?}, not id-token: write alone"
+        ));
+    }
+    let all = steps(channel);
+    if all.len() != 3 {
+        problems.push(format!(
+            "channel: has {} steps, not the join, the wait and the comparison",
+            all.len()
+        ));
+    }
+    let join = all.first();
+    if join.and_then(|s| at(s, &["uses"])) != Some(TAILSCALE) {
+        problems.push(format!(
+            "channel: the first step does not use {TAILSCALE}; the channel is read before the tailnet join"
+        ));
+    }
+    if join.and_then(|s| at(s, &["if"])) != Some(JOIN_IF) {
+        problems.push(format!("channel: the join's `if` is not {JOIN_IF}"));
+    }
+    let mut given: Vec<(&str, &str)> = join
+        .and_then(|s| entry(s, "with"))
+        .map_or(&[][..], entries)
+        .iter()
+        .map(|(k, v)| {
+            (
+                k.as_str().unwrap_or_default(),
+                v.as_str().unwrap_or_default(),
+            )
+        })
+        .collect();
+    given.sort_unstable();
+    let mut want = JOIN_WITH.to_vec();
+    want.sort_unstable();
+    if given != want {
+        problems.push(format!(
+            "channel: the join's inputs are {given:?}, not {want:?}"
+        ));
+    }
+    for (index, name, command, env) in [
+        (1, "wait", CHANNEL_WAIT, &WAIT_ENV[..]),
+        (2, "comparison", CHANNEL_SAME, &SAME_ENV[..]),
     ] {
-        if wait.and_then(|s| at(s, &["env", var])) != Some(want) {
+        let step = all.get(index);
+        if step.and_then(|s| at(s, &["run"])).map(str::trim_end) != Some(command) {
             problems.push(format!(
-                "check: the wait for the channel does not read {var} from {want}"
+                "channel: step {} does not run `{command}`",
+                index + 1
             ));
         }
+        if let Some(condition) = step.and_then(|s| entry(s, "if")) {
+            problems.push(format!(
+                "channel: the {name} has `if` {:?}; it runs whenever the job does",
+                condition.as_str()
+            ));
+        }
+        problems.extend(env_problems(name, step.and_then(|s| entry(s, "env")), env));
     }
     problems
 }
@@ -307,8 +425,10 @@ pub fn with_wanted() -> [(&'static str, &'static str); 16] {
 fn set_desired_problems(text: &str, job: Option<&Node>) -> Vec<String> {
     let mut problems = Vec::new();
     let needs = names(job.and_then(|j| entry(j, "needs")));
-    if needs != ["check"] {
-        problems.push(format!("set-desired: needs are {needs:?}, not [\"check\"]"));
+    if needs != ["channel", "check"] {
+        problems.push(format!(
+            "set-desired: needs are {needs:?}, not [\"channel\", \"check\"]"
+        ));
     }
     let held = held(job);
     if held != ["contents: read", "id-token: write"] {
