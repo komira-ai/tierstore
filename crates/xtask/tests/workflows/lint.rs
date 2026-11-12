@@ -11,8 +11,9 @@
 //!   [`WRITE_ALLOWED`] for that workflow file and job, or grants it under another `if:` than
 //!   the one the table gives. So `id-token` and `attestations` (the scopes that sign) are
 //!   written by the one `attest` job of `artifacts.yml`, on a push to `main` alone, `id-token`
-//!   also by the site's deploy job and by the `set-desired` job of `hostkeeper-desired.yml`
-//!   (the token the hostkeeper coordinator admits) and by the release's `farm` job (the same token
+//!   also by the site's deploy job, by the `set-desired` job of `hostkeeper-desired.yml`
+//!   (the token the hostkeeper coordinator admits) and its `channel` job (the token the tailnet's
+//!   federated identity exchanges for a node), and by the release's `farm` job (the same token
 //!   for the farm), and by the release's `testing-upload` and `promote-latest` jobs (the
 //!   token the release-files role admits) and its twelve apt jobs that read and write the
 //!   repository (the token the apt role admits), six for the suite `testing` and six for `stable`, and the same twelve for the rpm tree; `contents: write` by the release's `publish` job
@@ -65,6 +66,12 @@ pub const WRITE_ALLOWED: &[Allowed] = &[
     Allowed {
         file: "hostkeeper-desired.yml",
         job: "set-desired",
+        scope: "id-token",
+        condition: DESIRED_SET_IF,
+    },
+    Allowed {
+        file: "hostkeeper-desired.yml",
+        job: "channel",
         scope: "id-token",
         condition: DESIRED_SET_IF,
     },

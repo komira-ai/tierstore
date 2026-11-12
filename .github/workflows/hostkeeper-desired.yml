@@ -11,27 +11,31 @@
 #   (its tag without the v), an older one included (a rollback).
 #
 # It is OFF until the repository variable TIERSTORE_SETS_DESIRED is `true`, exactly: unset, or
-# anything else, both jobs are skipped (their job-level `if:`), whichever way it started. Its
+# anything else, every job is skipped (their job-level `if:`), whichever way it started. Its
 # other settings are repository variables too; none is a secret:
 #  - HOSTKEEPER_COORDINATOR_URL      the coordinator's private listener, https://<host>[:<port>],
 #                                    by the name it has on the tailnet and in its certificate;
 #  - HOSTKEEPER_COORDINATOR_CA       the PEM certificates of the CA that listener chains to;
 #  - HOSTKEEPER_RELEASE_CHANNEL      the release channel's base URL, https://<host>[/<path>], as
-#                                    the hosts' `release_channel`; a GitHub-hosted runner reads it;
+#                                    the hosts' `release_channel`; the job `channel` reads it, on
+#                                    the tailnet when it joins one;
 #  - HOSTKEEPER_TAILNET_CLIENT_ID    the client ID of the tailnet's federated identity for this
-#                                    repository; empty: the runner does not join the tailnet;
+#                                    repository; empty: no runner joins the tailnet (the channel
+#                                    is then a public one);
 #  - HOSTKEEPER_TAILNET_AUDIENCE     the audience of that federated identity;
 #  - HOSTKEEPER_TAILNET_COORDINATOR  the coordinator's name on the tailnet, which the join pings;
 #  - HOSTKEEPER_TAILNET_TAG          the tag the join gives the runner's node, the one that
-#                                    identity's trust credential issues (such as `tag:ci`).
+#                                    identity's trust credential issues (such as `tag:ci`); both
+#                                    joins give it.
 # The coordinator lets the job's OIDC token set the version only through an allow-list entry for
 # this repository (by id), refs/heads/main, the events workflow_run and workflow_dispatch, the
 # audience below, the service tierstore, and the `job_workflow_ref` of the called workflow pinned
 # below (komira-ai/hostkeeper/.github/workflows/set-desired.yml@<that commit>). Moving the pin
 # moves the `job_workflow_ref`, so the entry moves with it.
 #
-# Two jobs:
-#  - check        holds no token that writes. `cargo xtask release desired` (crates/xtask,
+# Three jobs:
+#  - check        holds no token that writes, and is the one job that runs code of this
+#                 repository. `cargo xtask release desired` (crates/xtask,
 #                 src/release/desired.rs) decides the release (`--version` by hand,
 #                 `--after-run` after a run of release.yml; one of the two is empty) and hands on
 #                 `set=false` when that run published none. Otherwise it refuses a release unless
@@ -42,11 +46,17 @@
 #                 bundle is its provenance bundle, and hostkeeper's unpacker unpacks it as a host
 #                 does. It hands on the package version, the index (its exact text) and its
 #                 SHA-256, and the release's targets (src/release/desired_targets.rs): today one
-#                 hostkeeper-archive entry per platform. Then the job waits until the release
-#                 channel serves that index, byte for byte, for at most about half an hour: the
-#                 coordinator refuses a version the channel does not hold (`not_in_channel`), and
-#                 the channel takes a release by its own sync, which CI does not run.
-#  - set-desired  needs check, and is hostkeeper's reusable workflow (the CI client), pinned below
+#                 hostkeeper-archive entry per platform.
+#  - channel      needs check, runs only when it said `set=true`, checks nothing out and runs no
+#                 code of this repository. When HOSTKEEPER_TAILNET_CLIENT_ID is set it first joins
+#                 the runner to the tailnet, as set-desired does (the same pinned action, Tailscale
+#                 release, federated identity and tag; an ephemeral node; `id-token: write` is for
+#                 this join), since the release channel may be on the tailnet only. Then it waits
+#                 until the release channel serves the index `check` handed on, its SHA-256 the
+#                 one `check` computed, for at most about half an hour: the coordinator refuses a
+#                 version the channel does not hold (`not_in_channel`), and the channel takes a
+#                 release by its own sync, which CI does not run.
+#  - set-desired  needs check and channel, and is hostkeeper's reusable workflow (the CI client), pinned below
 #                 with the hostkeeper release whose hkctl makes the call, the revision
 #                 hostkeeper's own release.yml pins (komira-ai/hostkeeper,
 #                 docs/deploy/ci-client.md): it proves that release (SHA256SUMS, the attestation
@@ -91,7 +101,7 @@ jobs:
   check:
     if: ${{ github.ref == 'refs/heads/main' && vars.TIERSTORE_SETS_DESIRED == 'true' && (github.event_name == 'workflow_dispatch' || (github.event_name == 'workflow_run' && github.event.workflow_run.conclusion == 'success' && github.event.workflow_run.head_branch == 'main' && github.event.workflow_run.head_repository.full_name == github.repository)) }}
     runs-on: ubuntu-24.04
-    timeout-minutes: 50
+    timeout-minutes: 20
     permissions:
       contents: read
       actions: read
@@ -117,20 +127,46 @@ jobs:
           VERSION: ${{ inputs.version }}
           RUN_ID: ${{ github.event.workflow_run.id }}
         run: cargo xtask release desired --repo "$GITHUB_REPOSITORY" --version "$VERSION" --after-run "$RUN_ID" --dir "$RUNNER_TEMP/desired" --output "$GITHUB_OUTPUT"
+
+  # Runs no code of this repository and checks nothing out: it holds `id-token: write` only for the
+  # tailnet join, which exchanges the job's OIDC token for an ephemeral node.
+  channel:
+    needs: [check]
+    if: ${{ github.ref == 'refs/heads/main' && vars.TIERSTORE_SETS_DESIRED == 'true' && needs.check.outputs.set == 'true' }}
+    runs-on: ubuntu-24.04
+    timeout-minutes: 40
+    permissions:
+      id-token: write
+    steps:
+      # A release channel on the tailnet is not reachable from a GitHub-hosted runner without the
+      # join; with the variable empty the channel is a public one and the job does not join. The
+      # inputs are those of the join of hostkeeper's set-desired.yml, but for `ping`: the channel
+      # need not be the coordinator's node, and the wait below retries until it answers.
+      - name: Join the tailnet
+        if: ${{ vars.HOSTKEEPER_TAILNET_CLIENT_ID != '' }}
+        uses: tailscale/github-action@d1b6cd204f8dceda5b3eaad7f1f767be390056cd # v4.2.0
+        with:
+          oauth-client-id: ${{ vars.HOSTKEEPER_TAILNET_CLIENT_ID }}
+          audience: ${{ vars.HOSTKEEPER_TAILNET_AUDIENCE }}
+          tags: ${{ vars.HOSTKEEPER_TAILNET_TAG }}
+          version: 1.94.2
+          sha256sum: c6f99a5d774c7783b56902188d69e9756fc3dddfb08ac6be4cb2585f3fecdc32
+          use-cache: false
       # curl's own retries, a fixed 40 seconds apart, 404 included (`--retry-all-errors`), until
       # 1800 seconds have passed: a channel that never serves the version fails the job.
       - name: Wait until the release channel serves the release's index
-        if: ${{ steps.desired.outputs.set == 'true' }}
         env:
           RELEASE_CHANNEL: ${{ vars.HOSTKEEPER_RELEASE_CHANNEL }}
-          PACKAGE_VERSION: ${{ steps.desired.outputs.package-version }}
+          PACKAGE_VERSION: ${{ needs.check.outputs.package-version }}
         run: curl --proto =https --proto-redir =https --tlsv1.2 --fail --silent --show-error --max-time 30 --retry 45 --retry-delay 40 --retry-max-time 1800 --retry-all-errors --output "$RUNNER_TEMP/served-index.json" "$RELEASE_CHANNEL/tierstore/$PACKAGE_VERSION/index.json"
+      # The SHA-256 of the served bytes is the one `check` computed over the index it checked.
       - name: The channel serves the release's index, byte for byte
-        if: ${{ steps.desired.outputs.set == 'true' }}
-        run: cmp "$RUNNER_TEMP/desired/index.json" "$RUNNER_TEMP/served-index.json"
+        env:
+          INDEX_DIGEST: ${{ needs.check.outputs.release-index-digest }}
+        run: printf '%s  %s\n' "$INDEX_DIGEST" "$RUNNER_TEMP/served-index.json" | sha256sum --check --strict
 
   set-desired:
-    needs: [check]
+    needs: [check, channel]
     if: ${{ github.ref == 'refs/heads/main' && vars.TIERSTORE_SETS_DESIRED == 'true' && needs.check.outputs.set == 'true' }}
     permissions:
       contents: read
