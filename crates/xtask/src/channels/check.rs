@@ -4,9 +4,10 @@
 //! its install-check jobs, on hosted runners and at release time only.
 //!
 //! - `check-apt` runs in a clean Ubuntu container (the image is pinned by digest by the job): it
-//!   brings the image's packages up to date (the pinned image is older than the archive),
-//!   adds `packages.komira.ai` with the published keyring (a binary `.gpg`, referred to by a
-//!   deb822 `Signed-By`) and the suite `testing`, installs `tierstore=<version>`, and then holds
+//!   brings the image's packages up to date (the pinned image is older than the archive), adds
+//!   `packages.komira.ai` with the published keyring (a binary `.gpg`, referred to by a
+//!   deb822 `Signed-By`) and the suite `testing`, removes the image's dpkg drop-in that leaves out
+//!   `/usr/share/doc` ([`DPKG_EXCLUDES`]) just before it installs `tierstore=<version>`, and then holds
 //!   the installed system to what the package promises: the package is at the version, the binary
 //!   says `tierstore <version>+<commit>`, the unit template, the `sysusers.d` entry and the example
 //!   configuration are there, `/etc/tierstore` is a directory of mode 0750, the package wrote no
@@ -58,6 +59,13 @@ pub const UNITS: [&str; 3] = [
     "tierstore@a.service",
     "tierstore@b.service",
 ];
+
+/// The dpkg drop-in of a minimized Ubuntu image (below the root), the one the job's
+/// `ubuntu:24.04` has: its `path-exclude=/usr/share/doc/*` keeps dpkg from unpacking everything
+/// below `/usr/share/doc` but the copyright files, the package's example configuration among it.
+/// A standard Ubuntu install has no such file, so `check-apt` removes it before it installs the
+/// package, and the files it then holds the install to are the ones a standard install gets.
+pub const DPKG_EXCLUDES: &str = "etc/dpkg/dpkg.cfg.d/excludes";
 
 /// Where the keyring is put (below the root) and the name the source file refers to it by.
 pub const KEYRING: &str = "usr/share/keyrings/komira-archive-keyring.gpg";
@@ -360,6 +368,13 @@ pub fn check_apt(host: &dyn Host, r: &Apt) -> Result<Vec<String>, Error> {
     }
     write(&r.root.join(SOURCES), source(r.apt_url, r.arch).as_bytes())?;
     must(host, r.apt_get, &["update"])?;
+    let excludes = r.root.join(DPKG_EXCLUDES);
+    match std::fs::remove_file(&excludes) {
+        Err(e) if e.kind() != std::io::ErrorKind::NotFound => {
+            return Err(Error::spawn(format!("remove {}", excludes.display()))(e));
+        }
+        _ => {}
+    }
     let target = format!("{PACKAGE}={}", r.version);
     must(
         host,
