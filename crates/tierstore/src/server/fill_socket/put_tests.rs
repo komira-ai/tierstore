@@ -93,8 +93,8 @@ async fn a_file_that_is_not_its_digest_or_its_size_is_checksum() {
 }
 
 /// Asserts that a staged path that is not a regular file the cache may open is `stage` and sends
-/// nothing upstream: no file, a link (not followed, even to a good file), a directory and a FIFO
-/// (opened without waiting for a writer).
+/// nothing upstream: no file, a link (not followed, even to a good file), a directory, a socket
+/// and, on Linux, a FIFO (opened without waiting for a writer).
 #[tokio::test]
 async fn a_path_that_is_not_a_regular_file_is_stage() {
     let rig = Rig::writing("tfs-put-stage");
@@ -104,15 +104,33 @@ async fn a_path_that_is_not_a_regular_file_is_stage() {
     std::os::unix::fs::symlink(&good, &link).unwrap();
     let dir = rig.dir.path().join("dir.part");
     std::fs::create_dir(&dir).unwrap();
-    let fifo = rig.dir.path().join("fifo.part");
-    let mode = rustix::fs::Mode::RUSR | rustix::fs::Mode::WUSR;
-    rustix::fs::mknodat(rustix::fs::CWD, &fifo, rustix::fs::FileType::Fifo, mode, 0).unwrap();
+    let socket = rig.dir.path().join("socket.part");
+    let _listener = std::os::unix::net::UnixListener::bind(&socket).unwrap();
     let missing = rig.dir.path().join("missing.part");
-    for path in [missing, link, dir, fifo] {
+    let mut paths = vec![missing, link, dir, socket];
+    paths.extend(fifo(&rig));
+    for path in paths {
         let got = put(&rig, "cas/b/k", &path, b"abc").await;
         assert_eq!(got, failed("stage"), "{}", path.display());
     }
     assert_eq!(rig.calls(Op::Put), 0);
+}
+
+/// A FIFO in the rig's scratch directory.
+#[cfg(target_os = "linux")]
+fn fifo(rig: &Rig) -> Option<PathBuf> {
+    let fifo = rig.dir.path().join("fifo.part");
+    let mode = rustix::fs::Mode::RUSR | rustix::fs::Mode::WUSR;
+    rustix::fs::mknodat(rustix::fs::CWD, &fifo, rustix::fs::FileType::Fifo, mode, 0).unwrap();
+    Some(fifo)
+}
+
+/// No FIFO on macOS: rustix has neither `mknodat` nor `mkfifoat` there, the standard library
+/// makes none, and this workspace adds no `unsafe` to call libc's `mkfifo`. The socket of the
+/// test is the special file that macOS checks.
+#[cfg(not(target_os = "linux"))]
+fn fifo(_rig: &Rig) -> Option<PathBuf> {
+    None
 }
 
 /// Asserts the words for the upstream's refusals: an object too large is `toolarge`, and a store
