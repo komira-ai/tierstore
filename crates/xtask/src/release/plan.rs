@@ -47,8 +47,12 @@ pub const DOCS_PATHS: [&str; 4] = ["docs/", "**/*.md", "crates/*/docs/", "crates
 /// The most files a GitHub compare lists; a change of that many may have more, so it is code.
 const FILES_LIMIT: usize = 300;
 
-/// The most tag refs one page lists; a repository with that many may have more.
+/// The most tag refs one page lists; a page with that many may be followed by another.
 const TAG_REFS_LIMIT: usize = 100;
+
+/// The most pages of tag refs read: a listing that still goes on past them is refused, rather than
+/// read forever.
+const TAG_PAGES_LIMIT: usize = 100;
 
 /// The most commit titles a release note lists.
 const NOTE_TITLES: usize = 20;
@@ -166,23 +170,32 @@ fn one_line(text: &str) -> String {
         .collect::<String>()
 }
 
-/// The release tags of the repository.
+/// The release tags of the repository: every page of them, the second and later asked for by
+/// number, until a page that is not full.
 fn release_tags(gh: &dyn Gh, repo: &str) -> Result<Vec<String>, Error> {
-    let refs = gh.api(&format!(
-        "repos/{repo}/git/matching-refs/tags/v?per_page=100"
-    ))?;
-    let refs = super::array(&refs);
-    if refs.len() >= TAG_REFS_LIMIT {
-        return Err(Error::Failed(format!(
-            "{} tags start with v: more than one page of tags, so the highest may be missing",
-            refs.len()
-        )));
+    let first = format!("repos/{repo}/git/matching-refs/tags/v?per_page={TAG_REFS_LIMIT}");
+    let mut tags = Vec::new();
+    for page in 1..=TAG_PAGES_LIMIT {
+        let path = if page == 1 {
+            first.clone()
+        } else {
+            format!("{first}&page={page}")
+        };
+        let refs = gh.api(&path)?;
+        let refs = super::array(&refs);
+        tags.extend(
+            refs.iter()
+                .filter_map(|r| r["ref"].as_str()?.strip_prefix("refs/tags/"))
+                .map(str::to_owned),
+        );
+        if refs.len() < TAG_REFS_LIMIT {
+            return Ok(tags);
+        }
     }
-    Ok(refs
-        .iter()
-        .filter_map(|r| r["ref"].as_str()?.strip_prefix("refs/tags/"))
-        .map(str::to_owned)
-        .collect())
+    Err(Error::Failed(format!(
+        "{} tags start with v and the listing goes on past {TAG_PAGES_LIMIT} pages",
+        tags.len()
+    )))
 }
 
 /// What the commits after the latest release tag are.

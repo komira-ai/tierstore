@@ -536,14 +536,57 @@ fn a_repository_without_a_release_tag_releases_the_first_commit() {
 }
 
 #[test]
-fn a_hundred_tags_are_more_than_one_page_and_are_refused() {
-    // Catches: the highest tag taken from a page that may not hold it, which would pick a tag
-    // that exists.
+fn every_page_of_tags_is_read_and_the_highest_is_taken() {
+    // Catches: the highest tag taken from the first page alone, which would plan a tag that
+    // exists once a repository has a hundred.
+    let names: Vec<String> = (0..100).map(|n| format!("v0.0.{n}")).collect();
+    let names: Vec<&str> = names.iter().map(String::as_str).collect();
+    let mut gh = repo(&names, "ahead", &["Cargo.lock"], &["fix"]);
+    gh.api.push((
+        format!("{}&page=2", tags_path()),
+        refs(&["v0.1.0", "v0.0.100"]),
+    ));
+    let compared = gh
+        .api
+        .iter()
+        .find(|(p, _)| *p == compare_path("v0.3.1"))
+        .expect("compare")
+        .1
+        .clone();
+    gh.api.push((compare_path("v0.1.0"), compared));
+    for (path, value) in &mut gh.api {
+        if *path == artifacts_path(11) {
+            *value = recorded(&["0.1.1"]);
+        }
+    }
+    let planned = plan(&gh, &request(None, "", None)).expect("plan");
+    assert!(format!("{planned:?}").contains("v0.1.1"), "{planned:?}");
+    assert!(gh.asked.borrow().iter().any(|p| p.ends_with("&page=2")));
+    assert!(!gh.asked.borrow().iter().any(|p| p.ends_with("&page=3")));
+}
+
+#[test]
+fn exactly_a_page_of_tags_asks_for_the_next_and_finds_none() {
     let names: Vec<String> = (0..100).map(|n| format!("v0.0.{n}")).collect();
     let names: Vec<&str> = names.iter().map(String::as_str).collect();
     let gh = repo(&names, "ahead", &["Cargo.lock"], &["fix"]);
-    let e = plan(&gh, &request(None, "", None)).expect_err("page");
-    assert!(e.to_string().contains("page"), "{e}");
+    let planned = plan(&gh, &request(None, "", None)).expect("plan");
+    assert!(format!("{planned:?}").contains("v0.0.100"), "{planned:?}");
+    assert!(gh.asked.borrow().iter().any(|p| p.ends_with("&page=2")));
+}
+
+#[test]
+fn a_listing_of_tags_that_never_ends_is_refused() {
+    // Catches: a listing whose pages never run short read forever.
+    let names: Vec<String> = (0..100).map(|n| format!("v0.0.{n}")).collect();
+    let names: Vec<&str> = names.iter().map(String::as_str).collect();
+    let mut gh = repo(&names, "ahead", &["Cargo.lock"], &["fix"]);
+    for page in 2..=100 {
+        gh.api
+            .push((format!("{}&page={page}", tags_path()), refs(&names)));
+    }
+    let e = plan(&gh, &request(None, "", None)).expect_err("pages");
+    assert!(e.to_string().contains("past 100 pages"), "{e}");
 }
 
 #[test]
@@ -637,7 +680,7 @@ fn the_version_of_a_commit_is_the_one_the_plan_would_tag() {
 #[test]
 fn the_version_is_appended_to_the_output_file_and_a_bad_input_is_an_error() {
     // Catches: the answer not reaching `GITHUB_OUTPUT`, a VERSION that is not a version being
-    // built under, and a page of tags that may hide the highest.
+    // built under, and a full page of tags with no second.
     let dir = scratch("version-out");
     let out = dir.join("out");
     let gh = repo(&["v0.3.1"], "ahead", &[], &[]);
@@ -652,7 +695,12 @@ fn the_version_is_appended_to_the_output_file_and_a_bad_input_is_an_error() {
     let names: Vec<String> = (0..100).map(|n| format!("v0.0.{n}")).collect();
     let names: Vec<&str> = names.iter().map(String::as_str).collect();
     let gh = repo(&names, "ahead", &[], &[]);
-    assert!(version(&gh, REPO, None, None, None).is_err());
+    version(&gh, REPO, None, Some(&out), None).expect("a full page and no second");
+    assert!(
+        std::fs::read_to_string(&out)
+            .expect("out")
+            .ends_with("version=0.0.100\n")
+    );
 }
 
 mod walk;
