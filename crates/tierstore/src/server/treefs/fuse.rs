@@ -1,7 +1,9 @@
 //! The FUSE frontend: decodes the kernel's requests into the calls of the core (`core.rs`) and
 //! encodes the answers. It decides nothing: what a lookup, an open or a listing answers is the
 //! core's; every request that would change a tree is answered `EROFS`, and the extended
-//! attributes `ENOSYS`, so that the kernel stops asking after the first.
+//! attributes `ENOSYS`, so that the kernel stops asking after the first. Where `fs.put` is
+//! enabled, `put/` and every inode below it are the put directory's, whose requests go to
+//! `fuse_put.rs`.
 //!
 //! The mount (`docs/design/virtual-build-fs.md` section 6.3): `default_permissions` (the kernel
 //! checks the modes, which the core reports), `allow_other` (jobs run as other users), the
@@ -35,11 +37,15 @@ use fuser::{
     BackingId, BsdFileFlags, Config, Errno, FileAttr, FileHandle, FileType, Filesystem, FopenFlags,
     Generation, INodeNo, InitFlags, KernelConfig, LockOwner, MountOption, OpenAccMode, OpenFlags,
     RenameFlags, ReplyAttr, ReplyCreate, ReplyData, ReplyDirectory, ReplyDirectoryPlus, ReplyEmpty,
-    ReplyEntry, ReplyOpen, ReplyXattr, Request, SessionACL, TimeOrNow,
+    ReplyEntry, ReplyOpen, ReplyStatfs, ReplyWrite, ReplyXattr, Request, SessionACL, TimeOrNow,
+    WriteFlags,
 };
 
 use super::backing::Registered;
 use super::core::{self, Attr, Core, Kind, Looked, Opened};
+use super::fuse_put;
+use super::ino;
+use super::put::space::PutSpace;
 
 /// The background requests the kernel may have outstanding at once.
 const MAX_BACKGROUND: u16 = 1024;
@@ -190,6 +196,8 @@ fn register(reply: &ReplyOpen, file: &File) -> io::Result<Registered> {
 /// The filesystem the kernel sees.
 pub(super) struct Frontend {
     core: Arc<Core>,
+    /// The put directory, where it is served (the core's).
+    put: Option<Arc<PutSpace>>,
     /// Whether to ask for passthrough if the kernel offers it (`fs.passthrough`).
     passthrough: bool,
     /// Told when the session ends and the kernel's requests are no longer read.
@@ -200,10 +208,27 @@ impl Frontend {
     /// A frontend over `core`.
     pub(super) fn new(core: Arc<Core>, passthrough: bool) -> Self {
         Self {
+            put: core.put().cloned(),
             core,
             passthrough,
             ended: None,
         }
+    }
+
+    /// The answer to a request that neither a tree nor the put directory does, on `ino`: `EPERM`
+    /// in the put directory, `EROFS` elsewhere.
+    fn refusal(&self, ino: INodeNo) -> Errno {
+        if self.put_of(ino).is_some() {
+            Errno::EPERM
+        } else {
+            Errno::EROFS
+        }
+    }
+
+    /// The put directory, when `ino` is one of its inodes and it is served.
+    fn put_of(&self, ino: INodeNo) -> Option<&PutSpace> {
+        let put = self.put.as_deref()?;
+        ino::put_of(ino.0).map(|_| put)
     }
 
     /// The same, sending on `ended` when the session ends: when its readers have stopped and
@@ -283,6 +308,21 @@ impl Filesystem for Frontend {
     }
 
     fn lookup(&self, _req: &Request, parent: INodeNo, name: &OsStr, reply: ReplyEntry) {
+        if let Some(put) = self.put_of(parent) {
+            return fuse_put::lookup(put, parent.0, name, reply);
+        }
+        if let Some(put) = self
+            .put
+            .as_deref()
+            .filter(|_| parent.0 == ino::ROOT && name == "put")
+        {
+            return match put.getattr(ino::PUT) {
+                Ok(attr) => {
+                    reply.entry(&Duration::ZERO, &fuse_put::file_attr(&attr), Generation(0))
+                }
+                Err(error) => reply.error(Errno::from_i32(error.raw_os_error())),
+            };
+        }
         let Some(name) = name.to_str() else {
             return reply.error(Errno::ENOENT);
         };
@@ -300,22 +340,32 @@ impl Filesystem for Frontend {
     }
 
     fn forget(&self, _req: &Request, ino: INodeNo, nlookup: u64) {
+        if let Some(put) = self.put_of(ino) {
+            return put.forget(ino.0, nlookup);
+        }
         self.core.forget(ino.0, nlookup);
     }
 
     fn getattr(&self, _req: &Request, ino: INodeNo, _fh: Option<FileHandle>, reply: ReplyAttr) {
+        if let Some(put) = self.put_of(ino) {
+            return fuse_put::attr(put.getattr(ino.0), reply);
+        }
         finish(self.core.getattr(ino.0), reply, |entry, reply| {
             reply.attr(&entry.ttl, &file_attr(&entry.attr));
         });
     }
 
     fn readlink(&self, _req: &Request, ino: INodeNo, reply: ReplyData) {
+        // The kernel asks only for a link, and the put directory has none.
         finish(self.core.readlink(ino.0), reply, |target, reply| {
             reply.data(target.as_bytes())
         });
     }
 
     fn open(&self, _req: &Request, ino: INodeNo, flags: OpenFlags, reply: ReplyOpen) {
+        if let Some(put) = self.put_of(ino) {
+            return fuse_put::open(put.open(ino.0), reply);
+        }
         let writing = flags.acc_mode() != OpenAccMode::O_RDONLY;
         let opened = self
             .core
@@ -347,6 +397,9 @@ impl Filesystem for Frontend {
         _lock_owner: Option<LockOwner>,
         reply: ReplyData,
     ) {
+        if self.put_of(ino).is_some() {
+            return reply.error(Errno::EACCES);
+        }
         finish(
             self.core.read_open(ino.0, fh.0, offset, size),
             reply,
@@ -364,11 +417,78 @@ impl Filesystem for Frontend {
         _flush: bool,
         reply: ReplyEmpty,
     ) {
+        if let Some(put) = self.put_of(ino) {
+            put.release(fh.0);
+            return reply.ok();
+        }
         self.core.release_open(ino.0, fh.0);
         reply.ok();
     }
 
+    fn write(
+        &self,
+        _req: &Request,
+        ino: INodeNo,
+        fh: FileHandle,
+        offset: u64,
+        data: &[u8],
+        _write_flags: WriteFlags,
+        _flags: OpenFlags,
+        _lock_owner: Option<LockOwner>,
+        reply: ReplyWrite,
+    ) {
+        match self.put_of(ino) {
+            Some(put) => fuse_put::write(put, (ino.0, fh.0), offset, data, reply),
+            None => reply.error(Errno::EROFS),
+        }
+    }
+
+    fn flush(
+        &self,
+        _req: &Request,
+        ino: INodeNo,
+        fh: FileHandle,
+        _lock_owner: LockOwner,
+        reply: ReplyEmpty,
+    ) {
+        // Nothing is kept to flush: a write reaches the store before it is answered; the flush
+        // says the open is being closed. A tree is never written, and the kernel stops asking
+        // after the first `ENOSYS`, as before.
+        match self.put_of(ino) {
+            Some(put) => {
+                put.flush(fh.0);
+                reply.ok();
+            }
+            None => reply.error(Errno::ENOSYS),
+        }
+    }
+
+    fn fsync(
+        &self,
+        _req: &Request,
+        ino: INodeNo,
+        _fh: FileHandle,
+        _datasync: bool,
+        reply: ReplyEmpty,
+    ) {
+        // The commit is the rename; a staged file needs no sync to be one.
+        match self.put_of(ino) {
+            Some(_) => reply.ok(),
+            None => reply.error(Errno::ENOSYS),
+        }
+    }
+
+    fn statfs(&self, _req: &Request, ino: INodeNo, reply: ReplyStatfs) {
+        match self.put_of(ino) {
+            Some(put) => fuse_put::statfs(put, reply),
+            None => reply.statfs(0, 0, 0, 0, 0, 512, 255, 0),
+        }
+    }
+
     fn opendir(&self, _req: &Request, ino: INodeNo, _flags: OpenFlags, reply: ReplyOpen) {
+        if let Some(put) = self.put_of(ino) {
+            return fuse_put::open(put.opendir(ino.0), reply);
+        }
         finish(self.core.opendir(ino.0), reply, |(), reply| {
             reply.opened(FileHandle(0), FopenFlags::FOPEN_CACHE_DIR);
         });
@@ -382,6 +502,9 @@ impl Filesystem for Frontend {
         offset: u64,
         mut reply: ReplyDirectory,
     ) {
+        if let Some(put) = self.put_of(ino) {
+            return fuse_put::readdir(put, ino.0, offset, reply);
+        }
         let listed = self.core.readdir(ino.0, offset, &mut |next, item| {
             let kind = file_attr(&item.entry.attr).kind;
             !reply.add(INodeNo(item.entry.attr.ino), next, kind, &item.name)
@@ -397,6 +520,9 @@ impl Filesystem for Frontend {
         offset: u64,
         mut reply: ReplyDirectoryPlus,
     ) {
+        if let Some(put) = self.put_of(ino) {
+            return fuse_put::readdirplus(put, ino.0, offset, reply);
+        }
         let core = &self.core;
         let listed = core.readdir(ino.0, offset, &mut |next, item| {
             let attr = file_attr(&item.entry.attr);
@@ -447,120 +573,149 @@ impl Filesystem for Frontend {
     fn setattr(
         &self,
         _req: &Request,
-        _ino: INodeNo,
-        _mode: Option<u32>,
-        _uid: Option<u32>,
-        _gid: Option<u32>,
-        _size: Option<u64>,
-        _atime: Option<TimeOrNow>,
-        _mtime: Option<TimeOrNow>,
-        _ctime: Option<SystemTime>,
+        ino: INodeNo,
+        mode: Option<u32>,
+        uid: Option<u32>,
+        gid: Option<u32>,
+        size: Option<u64>,
+        atime: Option<TimeOrNow>,
+        mtime: Option<TimeOrNow>,
+        ctime: Option<SystemTime>,
         _fh: Option<FileHandle>,
-        _crtime: Option<SystemTime>,
-        _chgtime: Option<SystemTime>,
-        _bkuptime: Option<SystemTime>,
-        _flags: Option<BsdFileFlags>,
+        crtime: Option<SystemTime>,
+        chgtime: Option<SystemTime>,
+        bkuptime: Option<SystemTime>,
+        flags: Option<BsdFileFlags>,
         reply: ReplyAttr,
     ) {
-        reply.error(Errno::EROFS);
+        let Some(put) = self.put_of(ino) else {
+            return reply.error(Errno::EROFS);
+        };
+        let others = [
+            uid.is_some(),
+            gid.is_some(),
+            atime.is_some(),
+            mtime.is_some(),
+            ctime.is_some(),
+            crtime.is_some(),
+            chgtime.is_some(),
+            bkuptime.is_some(),
+            flags.is_some(),
+        ]
+        .contains(&true);
+        fuse_put::attr(put.setattr(ino.0, (mode, size), others), reply);
     }
 
     fn mknod(
         &self,
         _req: &Request,
-        _parent: INodeNo,
+        parent: INodeNo,
         _name: &OsStr,
         _mode: u32,
         _umask: u32,
         _rdev: u32,
         reply: ReplyEntry,
     ) {
-        reply.error(Errno::EROFS);
+        reply.error(self.refusal(parent));
     }
 
     fn mkdir(
         &self,
         _req: &Request,
-        _parent: INodeNo,
-        _name: &OsStr,
+        parent: INodeNo,
+        name: &OsStr,
         _mode: u32,
         _umask: u32,
         reply: ReplyEntry,
     ) {
-        reply.error(Errno::EROFS);
+        match self.put_of(parent) {
+            Some(put) => fuse_put::mkdir(put, parent.0, name, reply),
+            None => reply.error(Errno::EROFS),
+        }
     }
 
-    fn unlink(&self, _req: &Request, _parent: INodeNo, _name: &OsStr, reply: ReplyEmpty) {
-        reply.error(Errno::EROFS);
+    fn unlink(&self, _req: &Request, parent: INodeNo, name: &OsStr, reply: ReplyEmpty) {
+        match self.put_of(parent) {
+            Some(put) => fuse_put::unlink(put, parent.0, name, reply),
+            None => reply.error(Errno::EROFS),
+        }
     }
 
-    fn rmdir(&self, _req: &Request, _parent: INodeNo, _name: &OsStr, reply: ReplyEmpty) {
-        reply.error(Errno::EROFS);
+    fn rmdir(&self, _req: &Request, parent: INodeNo, _name: &OsStr, reply: ReplyEmpty) {
+        reply.error(self.refusal(parent));
     }
 
     fn symlink(
         &self,
         _req: &Request,
-        _parent: INodeNo,
+        parent: INodeNo,
         _link_name: &OsStr,
         _target: &Path,
         reply: ReplyEntry,
     ) {
-        reply.error(Errno::EROFS);
+        reply.error(self.refusal(parent));
     }
 
     fn rename(
         &self,
         _req: &Request,
-        _parent: INodeNo,
-        _name: &OsStr,
-        _newparent: INodeNo,
-        _newname: &OsStr,
-        _flags: RenameFlags,
+        parent: INodeNo,
+        name: &OsStr,
+        newparent: INodeNo,
+        newname: &OsStr,
+        flags: RenameFlags,
         reply: ReplyEmpty,
     ) {
-        reply.error(Errno::EROFS);
+        match self.put_of(parent) {
+            Some(put) => {
+                fuse_put::rename(put, (parent.0, name), (newparent.0, newname), flags, reply)
+            }
+            None => reply.error(Errno::EROFS),
+        }
     }
 
     fn link(
         &self,
         _req: &Request,
-        _ino: INodeNo,
+        ino: INodeNo,
         _newparent: INodeNo,
         _newname: &OsStr,
         reply: ReplyEntry,
     ) {
-        reply.error(Errno::EROFS);
+        reply.error(self.refusal(ino));
     }
 
     fn create(
         &self,
         _req: &Request,
-        _parent: INodeNo,
-        _name: &OsStr,
+        parent: INodeNo,
+        name: &OsStr,
         _mode: u32,
         _umask: u32,
         _flags: i32,
         reply: ReplyCreate,
     ) {
-        reply.error(Errno::EROFS);
+        match self.put_of(parent) {
+            Some(put) => fuse_put::create(put, parent.0, name, reply),
+            None => reply.error(Errno::EROFS),
+        }
     }
 
     fn setxattr(
         &self,
         _req: &Request,
-        _ino: INodeNo,
+        ino: INodeNo,
         _name: &OsStr,
         _value: &[u8],
         _flags: i32,
         _position: u32,
         reply: ReplyEmpty,
     ) {
-        reply.error(Errno::EROFS);
+        reply.error(self.refusal(ino));
     }
 
-    fn removexattr(&self, _req: &Request, _ino: INodeNo, _name: &OsStr, reply: ReplyEmpty) {
-        reply.error(Errno::EROFS);
+    fn removexattr(&self, _req: &Request, ino: INodeNo, _name: &OsStr, reply: ReplyEmpty) {
+        reply.error(self.refusal(ino));
     }
 }
 

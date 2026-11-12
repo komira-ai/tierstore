@@ -63,6 +63,10 @@ pub(in crate::server) enum StartError {
     #[cfg(target_os = "linux")]
     #[error("{0}")]
     Handover(#[from] super::handover::HandoverError),
+    /// The stage directory of the put directory could not be used.
+    #[cfg(target_os = "linux")]
+    #[error("fs.put: {0}")]
+    Put(#[from] super::put::OpenError),
     /// Requests of the connection stayed unanswered after a restart on a kernel that cannot send
     /// them again, and the connection was aborted so that they fail; the unit starts again.
     #[cfg(target_os = "linux")]

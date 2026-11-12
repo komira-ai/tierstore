@@ -22,6 +22,7 @@ use super::error::PutError;
 use super::hasher::InlineHash;
 use super::journal::{Journal, Record};
 use super::names::{PutDir, Sha256Digest, check_component, is_part};
+use super::replay::live_records;
 use super::sweep::Orphan;
 use crate::Clock;
 use crate::server::local_cache::Disk;
@@ -33,7 +34,7 @@ pub(in crate::server) use super::commit::Commit;
 const STAGE_SUFFIX: &str = ".stage";
 
 /// The settings of the put directory (`fs.put.*`). A limit that is `None` is not applied.
-#[derive(Clone, Debug)]
+#[derive(Clone, Debug, PartialEq, Eq)]
 pub(in crate::server) struct PutSettings {
     /// The key prefixes a job may write under, each ending in `/` (`fs.put.prefixes`).
     pub prefixes: Vec<String>,
@@ -500,22 +501,109 @@ impl StagedStore {
         Ok(())
     }
 
-    /// The attributes of the name `name` of `dir`, if it has one.
+    /// The attributes of the name `name` of `dir`, if it has one (a frontend asks [`find`],
+    /// which gives the number too).
+    ///
+    /// [`find`]: StagedStore::find
+    #[cfg(test)]
     pub(in crate::server) fn lookup(&self, dir: &PutDir, name: &str) -> Option<Attr> {
-        let table = locked(&self.table);
-        let id = table.id_of(dir, name)?;
-        table.entries.get(&id).map(attr)
+        self.find(dir, name).map(|(_, attr)| attr)
     }
 
-    /// The names of `dir` and their attributes, in the order of their bytes.
-    pub(in crate::server) fn list(&self, dir: &PutDir) -> Vec<(String, Attr)> {
+    /// The directory, the name and the attributes of the name numbered `id`, if there is one.
+    pub(in crate::server) fn by_id(&self, id: u64) -> Option<(String, String, Attr)> {
+        let table = locked(&self.table);
+        let entry = table.entries.get(&id)?;
+        Some((entry.dir.clone(), entry.name.clone(), attr(entry)))
+    }
+
+    /// A new handle of the staged file numbered `id`, open to write: the handle of an open that
+    /// the process before this one gave out, which a request names after a takeover.
+    ///
+    /// # Errors
+    /// [`PutError::BadHandle`]: no file numbered `id` is staged (it was committed or removed).
+    pub(in crate::server) fn adopt(&self, id: u64) -> Result<Handle, PutError> {
+        let mut table = locked(&self.table);
+        if !table.bodies.contains_key(&id) {
+            return Err(PutError::BadHandle);
+        }
+        let handle = table.next_handle;
+        table.next_handle += 1;
+        let _ = table.handles.insert(handle, id);
+        Ok(Handle(handle))
+    }
+
+    /// The open handles and the number of the staged file of each, in the order of the handles.
+    pub(in crate::server) fn open_handles(&self) -> Vec<(Handle, u64)> {
+        locked(&self.table)
+            .handles
+            .iter()
+            .map(|(handle, id)| (Handle(*handle), *id))
+            .collect()
+    }
+
+    /// Whether a name is in the directory `dir` itself.
+    pub(in crate::server) fn holds(&self, dir: &str) -> bool {
+        locked(&self.table).dirs.contains_key(dir)
+    }
+
+    /// Whether a name is in the directory `dir` or in one below it.
+    pub(in crate::server) fn holds_under(&self, dir: &str) -> bool {
+        let below = format!("{dir}/");
+        let table = locked(&self.table);
+        table.dirs.contains_key(dir)
+            || table
+                .dirs
+                .range(below.clone()..)
+                .next()
+                .is_some_and(|(of, _)| of.starts_with(&below))
+    }
+
+    /// The directories that hold a name, in the order of their bytes.
+    pub(in crate::server) fn dirs(&self) -> Vec<String> {
+        locked(&self.table).dirs.keys().cloned().collect()
+    }
+
+    /// Writes the journal afresh with the live names alone, and appends to that file from now on:
+    /// for a process that serves again after a successor that did not complete its start may
+    /// have replaced the file.
+    ///
+    /// # Errors
+    /// What the system said; the journal is then the one before.
+    pub(in crate::server) fn reopen_journal(&self) -> io::Result<()> {
+        let mut table = locked(&self.table);
+        table.journal = Journal::rewrite(&self.stage, &live_records(&table.entries))?;
+        Ok(())
+    }
+
+    /// The number and the attributes of the name `name` of `dir`, if it has one.
+    pub(in crate::server) fn find(&self, dir: &PutDir, name: &str) -> Option<(u64, Attr)> {
+        let table = locked(&self.table);
+        let id = table.id_of(dir, name)?;
+        table.entries.get(&id).map(|entry| (id, attr(entry)))
+    }
+
+    /// The names of `dir`, each with its number and its attributes, in the order of their bytes.
+    pub(in crate::server) fn list_numbered(&self, dir: &PutDir) -> Vec<(String, u64, Attr)> {
         let table = locked(&self.table);
         let from = (dir.as_str().to_owned(), String::new());
         table
             .names
             .range(from..)
             .take_while(|((of, _), _)| of == dir.as_str())
-            .filter_map(|((_, name), id)| Some((name.clone(), attr(table.entries.get(id)?))))
+            .filter_map(|((_, name), id)| Some((name.clone(), *id, attr(table.entries.get(id)?))))
+            .collect()
+    }
+
+    /// The names of `dir` and their attributes, in the order of their bytes (a frontend asks
+    /// [`list_numbered`], which gives the numbers too).
+    ///
+    /// [`list_numbered`]: StagedStore::list_numbered
+    #[cfg(test)]
+    pub(in crate::server) fn list(&self, dir: &PutDir) -> Vec<(String, Attr)> {
+        self.list_numbered(dir)
+            .into_iter()
+            .map(|(name, _, attr)| (name, attr))
             .collect()
     }
 }

@@ -41,6 +41,8 @@ use super::fill_client::FillClient;
 use super::handle;
 use super::ino;
 use super::locked;
+#[cfg(any(target_os = "linux", test))]
+use super::put::space::PutSpace;
 use super::table::{TableError, TreeTable};
 use super::tree::Tree;
 
@@ -247,6 +249,9 @@ pub(in crate::server) struct Core {
     /// The backing table, once the kernel offered passthrough and it was chosen.
     #[cfg(any(target_os = "linux", test))]
     backing: OnceLock<Arc<BackingTable>>,
+    /// The put directory the frontend serves as `put/`, where `fs.put` is enabled.
+    #[cfg(any(target_os = "linux", test))]
+    put: OnceLock<Arc<PutSpace>>,
     /// Where the backing table is kept.
     #[cfg(any(target_os = "linux", test))]
     backing_file: PathBuf,
@@ -283,6 +288,8 @@ impl Core {
             #[cfg(any(target_os = "linux", test))]
             backing: OnceLock::new(),
             #[cfg(any(target_os = "linux", test))]
+            put: OnceLock::new(),
+            #[cfg(any(target_os = "linux", test))]
             backing_file: runtime_dir.join(backing::FILE),
             #[cfg(any(target_os = "linux", test))]
             handles: Mutex::new(HashMap::new()),
@@ -291,6 +298,18 @@ impl Core {
             #[cfg(test)]
             served: Mutex::new(Vec::new()),
         }
+    }
+
+    /// Serves `space` as `put/` from now on (once).
+    #[cfg(any(target_os = "linux", test))]
+    pub(super) fn serve_put(&self, space: Arc<PutSpace>) {
+        let _ = self.put.set(space);
+    }
+
+    /// The put directory, where it is served.
+    #[cfg(any(target_os = "linux", test))]
+    pub(super) fn put(&self) -> Option<&Arc<PutSpace>> {
+        self.put.get()
     }
 
     /// The settings of the core.

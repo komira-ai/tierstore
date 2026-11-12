@@ -30,6 +30,7 @@ use super::config::FsSettings;
 use super::core::{Core, Errno, Opened, Settings};
 use super::fill_client::FillClient;
 use super::locked;
+use super::put::fake::FakePuts;
 use super::table::TreeTable;
 use crate::server::local_cache::{blob_path, manifest_path};
 
@@ -150,6 +151,8 @@ pub(in crate::server) struct Upstream {
     pub pin_answer: Mutex<Option<String>>,
     /// The requests received, in order.
     pub requests: Mutex<Vec<String>>,
+    /// What answers the `put` requests.
+    pub puts: Arc<FakePuts>,
     /// Whether the fills of blobs wait (see [`Upstream::hold_fills`]).
     holding: Mutex<bool>,
     released: Condvar,
@@ -201,6 +204,7 @@ impl Upstream {
                 self.answer_fill(words[1], words.len())
             }
             "touch" => None,
+            "put" => Some(self.puts.answer(line)),
             "pin" => Some(
                 locked(&self.pin_answer)
                     .clone()
@@ -398,6 +402,7 @@ impl Rig {
             tree_idle: TREE_IDLE,
             allow_other: false,
             nfs: crate::server::treefs::nfs::config::NfsSettings::default(),
+            put: None,
         }
     }
 
@@ -500,6 +505,7 @@ impl Rig {
             failing: Mutex::new(HashMap::new()),
             pin_answer: Mutex::new(None),
             requests: Mutex::new(Vec::new()),
+            puts: Arc::new(FakePuts::default()),
             holding: Mutex::new(false),
             released: Condvar::new(),
             gate: Mutex::new(Gate::default()),

@@ -390,7 +390,7 @@ The file of `tierstore fs`, the virtual build file system of a build node (see [
 | Key | Type, default | What |
 |---|---|---|
 | `fs.mountpoint` | path, `/run/tierstore/fs` (absolute) | where the one FUSE mount is made, before the job runtime starts; made if it is not there. Jobs are given `<mountpoint>/trees/<digest>` |
-| `fs.runtime_dir` | path, `/run/tierstore-fs` (absolute) | the state that outlives the process: the table of tree numbers, the attachments, the record of the kernel's handshake (`init`) and the backing table (`backing`). The unit's `RuntimeDirectory=`, kept across restarts |
+| `fs.runtime_dir` | path, `/run/tierstore-fs` (absolute) | the state that outlives the process: the table of tree numbers, the attachments, the record of the kernel's handshake (`init`), the backing table (`backing`) and, across a hand-over, what the kernel holds of `put/` (`put-handover`). The unit's `RuntimeDirectory=`, kept across restarts |
 | `fs.control_socket` | path, `control.sock` in `fs.runtime_dir` (absolute, at most 103 bytes) | the Unix socket clients attach and detach on; mode 0660 |
 | `fs.client_group` | group name or number, required | the group of the control socket. The process must be a member of it |
 | `fs.owner` | `"uid:gid"`, required | the user and group id every entry of every tree reports: the host id of the user the jobs run as, so that a job may change what it copies up |
@@ -439,6 +439,36 @@ mountpoint = "/Volumes/tierstore"
 [fs.nfs]
 mount_user = "builder"
 allowed_uids = [501]
+```
+
+### `[fs.put]`
+
+The put directory, `<mountpoint>/put/` (Linux): a job writes a file under one of the prefixes as `<name>.part` and renames it to `<name>`, and the rename returns once the node's `tierstore` has put it upstream as the object `<path below put/>/<name>`, create-only and with its SHA-256 (the fill socket's `put` request). Without the table, or with `enabled = false`, there is no `put/`. Off Linux an enabled table is refused: the NFS frontend does not serve it in this release.
+
+| Key | Type, default | What |
+|---|---|---|
+| `fs.put.enabled` | `true` or `false`, `false` | whether `put/` is served |
+| `fs.put.prefixes` | list of key prefixes, required when enabled | the prefixes a job may write under, each names joined by `/` and ending in `/` (`["cas/b/"]`), none under a prefix the proxy keeps for itself (`_journal/`, `_tiering/`, `_entries/`). A directory at or under one exists as soon as it is named, and takes files; `put/` and the directories that lead to a prefix take none and are never listed. A name holds no white space or control character |
+| `fs.put.stage_dir` | path, required when enabled (absolute) | where the bytes are staged, with the journal of what is staged; on the volume of `fs.cache_path` (checked at the start), made with mode 0700 if it is not there |
+| `fs.put.max_object_bytes` | bytes (at least 1), no limit | the most bytes of one file; a write past it is `EFBIG` |
+| `fs.put.max_dir_bytes` | bytes (at least 1), no limit | the most staged bytes of one directory; a write past it is `EDQUOT` |
+| `fs.put.max_dir_files` | count (at least 1), no limit | the most names of one directory, staged or committed; a create past it is `EDQUOT` |
+| `fs.put.min_free_bytes` | bytes, no limit | a create is `ENOSPC` while the stage's volume has less free |
+| `fs.put.commit_deadline_secs` | integer, `30` (1 to 3600) | how long a commit rename may take: it waits for the file's last handle to close (FUSE sends the release after the close returns) and asks the upload again with a back-off while the upstream does not take it; past the deadline it is `EBUSY` or `EIO`, and the file stays staged for the same rename |
+| `fs.put.stage_ttl_secs` | integer, `43200` (901 to 604800) | how long a staged file is kept from its create; set it above the longest wall time of a job plus 900 |
+| `fs.put.committed_ttl_secs` | integer, `600` (1 to 604800) | how long a committed name is shown (for the job's `stat`; it is never read) from its commit |
+
+```toml
+[fs]
+client_group = "builders"
+owner = "1000:1000"
+fill_socket = "/var/lib/tierstore/fill.sock"
+cache_path = "/var/cache/tierstore"
+
+[fs.put]
+enabled = true
+prefixes = ["cas/b/"]
+stage_dir = "/var/cache/tierstore/put-stage"
 ```
 
 The mount is made with `allow_other` and `default_permissions` (the kernel checks the modes, which are 0644, 0755 for an executable file or a directory, and 0777 for a link), `max_background` 1024 and, with passthrough, `max_stack_depth` 1, and, where the kernel offers them, `FUSE_CACHE_SYMLINKS`, `FUSE_PARALLEL_DIROPS`, `FUSE_DO_READDIRPLUS` and `FUSE_READDIRPLUS_AUTO`. An example:

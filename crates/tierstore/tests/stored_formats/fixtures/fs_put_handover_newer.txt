@@ -1,0 +1,12 @@
+tierstore-fs-put-handover 1 a-later-word
+dir 3 seen cas extra words
+open 1099511627777 4 later
+mount-id 0123
+dir x seen bad/count
+dir 1 maybe bad/flag
+dir 1 seen
+open one 2
+open 3
+
+dir 2 made cas/b/n
+dir

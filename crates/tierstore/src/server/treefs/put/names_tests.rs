@@ -19,7 +19,21 @@ fn a_component_is_one_name_of_1_to_255_bytes() {
     check_component("..x").unwrap();
     check_component(&"a".repeat(MAX_NAME_BYTES)).unwrap();
     check_component("é").unwrap();
-    for bad in ["", ".", "..", "a/b", "a\0b"] {
+    for bad in [
+        "",
+        ".",
+        "..",
+        "a/b",
+        "a\0b",
+        "a b",
+        "a\nb",
+        "a\rb",
+        "a\tb",
+        "a\u{1b}b",
+        "a\u{85}b",
+        "a\u{a0}b",
+        "a\u{2028}b",
+    ] {
         assert!(
             matches!(check_component(bad), Err(PutError::InvalidName(_))),
             "{bad:?}"
@@ -29,6 +43,17 @@ fn a_component_is_one_name_of_1_to_255_bytes() {
         check_component(&"a".repeat(MAX_NAME_BYTES + 1)),
         Err(PutError::NameTooLong)
     ));
+}
+
+/// Asserts that a name with white space or a control character in it, which would split or end the
+/// line of the fill socket's `put` request, says why it is refused.
+#[test]
+fn a_name_that_a_put_request_cannot_carry_is_refused() {
+    assert_eq!(
+        check_component("pack part").unwrap_err().to_string(),
+        "not a name of the put directory: a name with white space or a control character in it"
+    );
+    assert!(PutDir::new("cas/b/a b", &prefixes()).is_err());
 }
 
 /// Asserts that a directory at or under an allowed prefix is taken, and one beside it, above it, or

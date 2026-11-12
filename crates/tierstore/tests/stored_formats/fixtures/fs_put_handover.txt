@@ -1,0 +1,7 @@
+tierstore-fs-put-handover 1
+dir 3 seen cas
+dir 1 seen cas/b
+dir - seen cas/b/build-1
+dir 1 made cas/b/build-1/nonce-1/sub
+open 1099511627777 4
+open 2199023255554 7

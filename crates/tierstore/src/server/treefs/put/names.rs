@@ -51,15 +51,23 @@ impl fmt::Debug for Sha256Digest {
 
 /// Checks one component of a directory or a file name.
 ///
+/// A name holds no white space and no control character: a key is one word of the one line of the
+/// fill socket's `put` request, so a name that a job chooses can neither split it nor end it.
+///
 /// # Errors
-/// [`PutError::InvalidName`] for an empty name, `.`, `..`, or a name with `/` or NUL in it;
-/// [`PutError::NameTooLong`] for one of more than [`MAX_NAME_BYTES`].
-pub(super) fn check_component(name: &str) -> Result<(), PutError> {
+/// [`PutError::InvalidName`] for an empty name, `.`, `..`, or a name with `/`, NUL, white space or
+/// a control character in it; [`PutError::NameTooLong`] for one of more than [`MAX_NAME_BYTES`].
+pub(in crate::server) fn check_component(name: &str) -> Result<(), PutError> {
     if name.is_empty() || name == "." || name == ".." {
         return Err(PutError::InvalidName("an empty name, `.` or `..`"));
     }
     if name.bytes().any(|b| b == b'/' || b == 0) {
         return Err(PutError::InvalidName("a name with `/` or NUL in it"));
+    }
+    if name.chars().any(|c| c.is_whitespace() || c.is_control()) {
+        return Err(PutError::InvalidName(
+            "a name with white space or a control character in it",
+        ));
     }
     if name.len() > MAX_NAME_BYTES {
         return Err(PutError::NameTooLong);
@@ -114,7 +122,7 @@ impl PutDir {
     ///
     /// # Errors
     /// [`PutError::NameTooLong`] when the key is over [`MAX_KEY_BYTES`].
-    pub(super) fn key(&self, name: &str) -> Result<String, PutError> {
+    pub(in crate::server) fn key(&self, name: &str) -> Result<String, PutError> {
         let key = format!("{}/{name}", self.0);
         if key.len() > MAX_KEY_BYTES {
             return Err(PutError::NameTooLong);
@@ -127,7 +135,7 @@ impl PutDir {
 ///
 /// # Errors
 /// The first prefix that is not, by its text.
-pub(super) fn check_prefixes(prefixes: &[String]) -> Result<(), String> {
+pub(in crate::server) fn check_prefixes(prefixes: &[String]) -> Result<(), String> {
     for prefix in prefixes {
         let good = prefix
             .strip_suffix('/')
@@ -140,7 +148,7 @@ pub(super) fn check_prefixes(prefixes: &[String]) -> Result<(), String> {
 }
 
 /// Whether `name` is a `.part` name, which a job creates and commits from.
-pub(super) fn is_part(name: &str) -> bool {
+pub(in crate::server) fn is_part(name: &str) -> bool {
     name.ends_with(PART)
 }
 

@@ -20,6 +20,7 @@
 //! | `fs.reattach_concurrency` | how many trees a start reads the manifests of at once when it makes the attachments again, before it serves (1 reads them one after the other) | `16` |
 //! | `fs.recover_wait` | after a restart on a kernel without resend: how long the connection may show requests no one answers before it is aborted | `30s` |
 //! | `fs.tree_idle_secs` | how long, in seconds, a tree a lookup attached stays attached with no request naming it | `900` |
+//! | `[fs.put]` | the put directory, `<mountpoint>/put/`, see `put/config.rs` | not served |
 
 use std::path::{Path, PathBuf};
 use std::time::Duration;
@@ -34,6 +35,7 @@ use crate::server::config_units::Dur;
 use crate::server::config_unknown::fields_of;
 
 use super::nfs::config::{NfsSettings, NfsTable};
+use super::put::config::{self as put_config, PutConfig, PutTable};
 
 /// The mount point when the file leaves out `fs.mountpoint`.
 const DEFAULT_MOUNTPOINT: &str = "/run/tierstore/fs";
@@ -111,6 +113,7 @@ pub(in crate::server) struct FsTable {
     recover_wait: Option<Dur>,
     reattach_concurrency: Option<u32>,
     tree_idle_secs: Option<u64>,
+    put: Option<PutTable>,
 }
 
 /// What `tierstore fs` runs with.
@@ -147,6 +150,8 @@ pub(in crate::server) struct FsSettings {
     pub allow_other: bool,
     /// The settings of the NFS frontend.
     pub nfs: NfsSettings,
+    /// The settings of the put directory; none when it is not served.
+    pub put: Option<PutConfig>,
 }
 
 /// `path`, which is the value of `key`, if it is absolute.
@@ -298,6 +303,7 @@ impl FsSettings {
             tree_idle: Duration::from_secs(tree_idle_secs),
             allow_other: true,
             nfs: NfsSettings::of(table.nfs)?,
+            put: put_config::of(table.put)?,
         })
     }
 }
@@ -325,6 +331,15 @@ pub(in crate::server) fn from_text(text: &str, groups: &str) -> Result<FsSetting
     for key in nfs.into_iter().flat_map(|table| table.keys()) {
         if !nfs_known.contains(&key.as_str()) {
             tracing::warn!("tierstore fs: fs.nfs.{key} is not a key of this release; ignored");
+        }
+    }
+    let put_known = fields_of::<PutTable>();
+    let put = table
+        .and_then(|table| table.get("put"))
+        .and_then(toml::Value::as_table);
+    for key in put.into_iter().flat_map(|table| table.keys()) {
+        if !put_known.contains(&key.as_str()) {
+            tracing::warn!("tierstore fs: fs.put.{key} is not a key of this release; ignored");
         }
     }
     FsSettings::of(file.fs, groups)

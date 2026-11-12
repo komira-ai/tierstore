@@ -45,6 +45,7 @@ fn the_needed_keys_alone_give_the_defaults() {
         tree_idle: Duration::from_secs(900),
         allow_other: true,
         nfs: crate::server::treefs::nfs::config::NfsSettings::default(),
+        put: None,
     };
     assert_eq!(got, want);
 }

@@ -15,6 +15,9 @@ use super::names::{PutDir, Sha256Digest, expected_digest};
 use super::store::{Entry, StagedStore};
 use crate::server::treefs::locked;
 
+/// Why a commit is refused while a handle of its file is open.
+pub(in crate::server) const HANDLE_OPEN: &str = "a handle of the file is open";
+
 /// The answer of the upstream to the put of a commit (the `put` verb's reply).
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub(in crate::server) enum PutOutcome {
@@ -147,7 +150,7 @@ impl StagedStore {
                 return Err(PutError::Busy("a commit of the file is running"));
             }
             if table.handles.values().any(|of| *of == id) {
-                return Err(PutError::Busy("a handle of the file is open"));
+                return Err(PutError::Busy(HANDLE_OPEN));
             }
             if table.uploading.values().any(|of| *of == key) {
                 return Err(PutError::Busy("a commit of the key is running"));

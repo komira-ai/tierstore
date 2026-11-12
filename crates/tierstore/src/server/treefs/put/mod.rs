@@ -1,8 +1,10 @@
-//! The staged-file store of the put directory: the core that the FUSE frontend (Linux) and the NFS
-//! frontend (macOS) of `<mountpoint>/put/` will share. It has no protocol in it and no upload: a
-//! file a job writes under `put/<key prefix>/` is staged here, and its commit, a `rename` of a
-//! `.part` name to a final name, hands the caller the staged file, its key and its SHA-256 to put
-//! upstream (the fill socket's `put` verb), and then records the answer.
+//! The put directory, `<mountpoint>/put/`: the core that the FUSE frontend (Linux, `fuse_put.rs`)
+//! serves and the NFS frontend (macOS) will share, with no protocol in it. A file a job writes under
+//! `put/<key prefix>/` is staged in the staged-file store ([`store`]), and its commit, a `rename` of
+//! a `.part` name to a final name, hands over the staged file, its key and its SHA-256, which are put
+//! upstream through the fill socket's `put` verb ([`upload`]); the answer is then recorded.
+//! [`space`] is the namespace of inode numbers over the store that a frontend answers from, and
+//! [`carry`] what it hands a successor; [`config`] is the `[fs.put]` table.
 //!
 //! The rules, from the design of the put directory (its interfaces, its failure and GC rules and its
 //! security); the store knows nothing of what the objects hold:
@@ -33,17 +35,34 @@
 //!
 //! [`error::PutError::errno`] is the errno a frontend answers for each refusal.
 
+#[cfg(any(target_os = "linux", test))]
+pub(in crate::server) mod carry;
 mod commit;
+pub(in crate::server) mod config;
 mod error;
 mod hasher;
 mod journal;
 mod names;
 mod replay;
+#[cfg(any(target_os = "linux", test))]
+pub(in crate::server) mod space;
 mod store;
 mod sweep;
+#[cfg(any(target_os = "linux", test))]
+mod upload;
+
+#[cfg(any(target_os = "linux", test))]
+pub(in crate::server) use error::OpenError;
+pub(in crate::server) use store::PutSettings;
+#[cfg(any(target_os = "linux", test))]
+pub(in crate::server) use store::StagedStore;
+#[cfg(any(target_os = "linux", test))]
+pub(in crate::server) use upload::Uploader;
 
 #[cfg(test)]
 mod error_tests;
+#[cfg(test)]
+pub(in crate::server) mod fake;
 #[cfg(test)]
 mod hasher_tests;
 #[cfg(test)]
@@ -54,6 +73,8 @@ mod names_tests;
 mod replay_tests;
 #[cfg(test)]
 mod store_commit_tests;
+#[cfg(test)]
+mod store_frontend_tests;
 #[cfg(test)]
 mod store_tests;
 #[cfg(test)]

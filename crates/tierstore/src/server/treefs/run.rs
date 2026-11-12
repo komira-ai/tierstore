@@ -11,6 +11,10 @@
 //! state is read from the runtime directory instead of made, and nothing is mounted. What
 //! decides between them, tells the service manager and waits for the signal that ends the process
 //! is in `launch`.
+//!
+//! Where `fs.put` is enabled, both open the put directory's stage (replaying its journal) before
+//! the frontend serves; a process that stops reading for a hand-over or a restart writes what the
+//! kernel holds of the put directory for its successor (`put/carry.rs`), which takes it over.
 
 use std::os::fd::OwnedFd;
 use std::path::{Path, PathBuf};
@@ -24,12 +28,74 @@ use super::control::Control;
 use super::core::Core;
 use super::init_record::{self, Record};
 use super::locked;
+use super::put::carry;
+use super::put::space::{PutSpace, SWEEP_EVERY};
+use super::put::{StagedStore, Uploader};
 use super::recover;
 use super::serving::Serving;
 use super::start::{
     Identity, Setup, StartError, control_error, core_of, create_mount_point, create_runtime_dir, io,
 };
 use super::table::TreeTable;
+use crate::server::local_cache::SystemDisk;
+use crate::{MonotonicClock, SystemClock};
+
+/// Serves the put directory of `settings` from `core`, where `fs.put` is enabled: the stage opened
+/// and its journal replayed, the hand-over of the process before taken over (`handed`, none for a
+/// fresh mount or a start after a crash), and the sweep started. `generation` numbers the handles.
+///
+/// # Errors
+/// [`StartError::Put`] for a stage that cannot be used, [`StartError::Io`] for the sweep's thread.
+fn serve_put(
+    settings: &FsSettings,
+    core: &Core,
+    generation: u32,
+    handed: Option<Option<carry::Handed>>,
+) -> Result<(), StartError> {
+    let Some(put) = &settings.put else {
+        return Ok(());
+    };
+    let (store, replayed) = StagedStore::open(
+        put.store.clone(),
+        &put.stage_dir,
+        &settings.cache_path,
+        Arc::new(SystemClock),
+        Arc::new(SystemDisk),
+    )?;
+    tracing::info!(?replayed, "tierstore fs: the put directory's stage is open");
+    let clock = Arc::new(MonotonicClock::new());
+    let uploader = Uploader::new(
+        &settings.fill_socket,
+        put.commit_deadline,
+        clock.clone(),
+        Arc::new(std::thread::sleep),
+    );
+    let space = PutSpace::new(
+        store,
+        uploader,
+        (settings.owner, generation),
+        put.commit_deadline,
+        clock,
+    );
+    if let Some(handed) = handed {
+        space.take_over(handed);
+    }
+    let space = Arc::new(space);
+    space
+        .start_sweep(SWEEP_EVERY)
+        .map_err(io("starting the thread that sweeps the put directory"))?;
+    core.serve_put(space);
+    Ok(())
+}
+
+/// What the kernel holds of the put directory of `core`, written for the successor; a failure is
+/// said, and the successor then finds what the store holds.
+fn hand_put(core: &Core, runtime_dir: &Path) {
+    if let Some(put) = core.put() {
+        put.hold(true);
+        carry::write_or_say(runtime_dir, &put.handed());
+    }
+}
 
 /// The mounts of this process's namespace.
 const MOUNTINFO: &str = "/proc/self/mountinfo";
@@ -154,6 +220,10 @@ impl Running {
             _control: control,
             ..
         } = Setup::start(settings, true, Identity::Fresh)?;
+        // A hand-over left by an earlier mount names nothing of this one.
+        carry::remove(&settings.runtime_dir)
+            .map_err(io("removing the put directory's hand-over"))?;
+        serve_put(settings, &core, 1, None)?;
         let serving = Serving::mount(&core, settings)
             .map_err(io(format!("mounting {}", settings.mountpoint.display())))?;
         let record = Record::first(serving.outcome(), mount_id);
@@ -188,6 +258,11 @@ impl Running {
             record.generation,
             true,
         )?;
+        let handed = carry::read(&settings.runtime_dir)
+            .map_err(io("reading the put directory's hand-over"))?;
+        serve_put(settings, &core, record.generation, Some(handed))?;
+        // Taken over: a later start must not take it over again.
+        carry::remove_or_say(&settings.runtime_dir);
         let control = match control {
             Some(listener) => {
                 Control::serve_on(Arc::clone(&core), listener, &settings.control_socket)
@@ -264,6 +339,7 @@ impl Running {
         // detached (an unpin of a tree the successor pinned again) until a resume.
         self.core.hold(true);
         self.core.write_backing_exact();
+        hand_put(&self.core, &self.settings.runtime_dir);
     }
 
     /// Answers again after [`Running::quiesce`]: a hand-over that did not complete.
@@ -272,6 +348,13 @@ impl Running {
     /// What the system said when the readers or the control socket cannot start again.
     pub(super) fn resume(&self) -> std::io::Result<()> {
         let mut parts = locked(&self.parts);
+        if let Some(put) = self.core.put() {
+            // A successor that did not complete its start may have rewritten the journal: this
+            // process appends to a file of its own again before it serves, or does not serve.
+            put.store().reopen_journal()?;
+            put.hold(false);
+            carry::remove_or_say(&self.settings.runtime_dir);
+        }
         self.core.hold(false);
         parts.serving.restart(&self.core, &self.settings)?;
         // The counts written exact at the pause are a lower bound again once opens go on.
@@ -294,6 +377,7 @@ impl Running {
         // The successor of a restart adopts the ids, and trusts the counts of a line that says
         // they are exact; the ids must stay open in the kernel when this process's table goes.
         self.core.write_backing_exact();
+        hand_put(&self.core, &self.settings.runtime_dir);
         self.core.abandon_backing();
     }
 

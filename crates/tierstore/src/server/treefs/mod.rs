@@ -47,12 +47,12 @@ mod fill_client;
 #[cfg(any(target_os = "linux", test))]
 mod handle;
 mod ino;
-// The staged-file store of the put directory; its FUSE and NFS frontends are later changes.
+// The put directory: served by the FUSE frontend on Linux; its NFS frontend is a later change.
 #[cfg_attr(
-    not(test),
+    all(not(test), not(target_os = "linux")),
     expect(
         dead_code,
-        reason = "the FUSE and NFS frontends of the put directory, which call the store, are later changes"
+        reason = "the NFS frontend of the put directory, which calls the store, is a later change"
     )
 )]
 mod put;
@@ -61,6 +61,8 @@ mod tree;
 
 #[cfg(target_os = "linux")]
 mod fuse;
+#[cfg(target_os = "linux")]
+mod fuse_put;
 #[cfg(target_os = "linux")]
 mod handover;
 #[cfg(target_os = "linux")]
