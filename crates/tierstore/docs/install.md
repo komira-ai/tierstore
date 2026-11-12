@@ -246,14 +246,15 @@ A host without the update hook starts an instance by hand. Write `/etc/tierstore
 ```sh
 sudo install -d -m 0700 -o tierstore -g tierstore /var/lib/tierstore   # systemd makes it at start if you skip this
 sudo touch /var/lib/tierstore/run-a
-sudo systemctl enable --now tierstore@a
+sudo systemctl enable tierstore@a
+sudo systemctl start tierstore@a
 ```
 
 The unit runs with `ProtectSystem=strict` and `StateDirectory=tierstore`. A configuration that writes outside `/var/lib/tierstore` (a `dir` hot tier, a `[local_cache]` path, `hot_store.lock_file`) needs its paths in a drop-in of your own, `/etc/systemd/system/tierstore@.service.d/*.conf`, with `ReadWritePaths=` (and `RequiresMountsFor=` for a path on a mount of its own). The package never writes there.
 
-The package manager replaces the binary on `apt upgrade` or `dnf upgrade`; the running instance keeps the old one until `sudo systemctl restart tierstore@a` (a restart, with a gap in serving). Under hostkeeper the update hook hands over instead (see [Updates through hostkeeper](#updates-through-hostkeeper)).
+The package manager replaces the binary on `apt upgrade` or `dnf upgrade`; the running instance keeps the old one until `sudo systemctl restart tierstore@a` (a restart, with a gap in serving). Under hostkeeper the update hook hands over instead (see [Updates through hostkeeper](install.md#updates-through-hostkeeper)).
 
-An earlier package placed `tierstore.service` and the conffile `/etc/tierstore/tierstore.toml`. An upgrade from it removes the unit file and leaves the old configuration file on disk (dnf keeps an edited one as `.rpmsave`); a `tierstore.service` that is running keeps running until stopped. Move the file to `/etc/tierstore/config.toml`, then `sudo systemctl stop tierstore.service`, create the marker and `sudo systemctl enable --now tierstore@a` as above.
+An earlier package placed `tierstore.service` and the conffile `/etc/tierstore/tierstore.toml`. An upgrade from it removes the unit file and leaves the old configuration file on disk (dnf keeps an edited one as `.rpmsave`); a `tierstore.service` that is running keeps running until stopped. Move the file to `/etc/tierstore/config.toml`, then `sudo systemctl stop tierstore.service`, create the marker, enable and start `tierstore@a` as above.
 
 ### Release files on tierstore.dev
 
