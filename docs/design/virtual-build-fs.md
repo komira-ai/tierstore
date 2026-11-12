@@ -468,8 +468,8 @@ passthrough and the mount declares no `max_stack_depth` (6.4). On macOS the moun
 <mount>/views/<run>/     a run's writable view (macOS, only if the core builds views); absent unless attached
 ```
 
-- **A tree resolves on lookup** (replacing "attachment is the only way in", for a runtime that opens `trees/<digest>` with no control socket: kbf's
-  `docs/design/jobs-on-jobscheduler-and-tierstore.md`, section 2). A lookup of a digest no client attached (6.5) reads its manifests (`fill <digest>`) and attaches it
+- **A tree resolves on lookup** (replacing "attachment is the only way in", so that a job runtime that opens `trees/<digest>` as a host path needs
+  no control socket). A lookup of a digest no client attached (6.5) reads its manifests (`fill <digest>`) and attaches it
   with no run until no request names it for `fs.tree_idle_secs`; a root the upstream lacks is `ENOENT`, any other failure `EIO`, neither taking a tree number. `views/<run>` needs an attach. Listing the mount's root, `trees/` or `views/` is refused (`EACCES`).
 - **The namespace is not cached; the trees are.** Replies for the mount's root, `trees/`, `views/` and the names in them
   carry entry and attribute timeouts of 0, and a name that is not there is answered `ENOENT` with no cached negative
