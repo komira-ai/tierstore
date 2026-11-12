@@ -1,6 +1,8 @@
+use std::os::unix::fs::PermissionsExt;
 use std::path::PathBuf;
 
 use super::*;
+use crate::release::script_host::{GETENT_CALL, Host, RELOAD_CALL, SYSUSERS_CALL};
 use crate::testdir::TestDir;
 
 /// A stand-in binary and notice.
@@ -549,4 +551,80 @@ fn rpm_info_marks_a_configuration_file_as_rpm_does() {
         lines.contains(&"-0640 root:root /etc/t/t.toml %config(noreplace)".to_owned()),
         "{lines:?}"
     );
+}
+
+/// `script` with its absolute paths of the host taken below the root of `host`, as the Debian
+/// scripts take them below `$DPKG_ROOT` (rpm has no such variable).
+fn rooted(host: &Host, script: &str) -> String {
+    let root = host.root().display().to_string();
+    script
+        .replace("/etc/tierstore", &format!("{root}/etc/tierstore"))
+        .replace("/run/systemd/system", &format!("{root}/run/systemd/system"))
+}
+
+#[test]
+fn post_makes_the_config_directory_only_where_nothing_is_and_starts_nothing() {
+    // Catches: a %post that does not make /etc/tierstore (root, group tierstore, 0750) on a host
+    // that has none, one that changes a host's /etc/tierstore or a file in it on an install or an
+    // upgrade, one that fails on a link there, one that fails without the group or without
+    // systemd, and one that starts, enables or writes the configuration or a start marker.
+    let host = Host::new("rpm-post-fresh", true, true);
+    let post = rooted(&host, POST);
+    let dir = host.root().join("etc/tierstore");
+    let (ok, calls) = host.run(&post, &["1"]);
+    assert!(ok);
+    assert_eq!(
+        calls,
+        [
+            SYSUSERS_CALL.to_owned(),
+            GETENT_CALL.to_owned(),
+            format!("chgrp tierstore {}", dir.display()),
+            RELOAD_CALL.to_owned(),
+        ]
+    );
+    assert_eq!(host.config_dir_mode(), Some(0o750));
+    assert_eq!(std::fs::read_dir(&dir).expect("read").count(), 0);
+    assert!(!host.root().join("var").exists(), "no start marker");
+    std::fs::set_permissions(&dir, std::fs::Permissions::from_mode(0o700)).expect("mode");
+    put(&dir, "config.toml", b"# the host's\n");
+    let (ok, calls) = host.run(&post, &["2"]);
+    assert!(ok);
+    assert_eq!(calls, [SYSUSERS_CALL, RELOAD_CALL]);
+    assert_eq!(host.config_dir_mode(), Some(0o700));
+    assert_eq!(
+        std::fs::read(dir.join("config.toml")).expect("kept"),
+        b"# the host's\n"
+    );
+
+    let host = Host::new("rpm-post-link", true, true);
+    std::os::unix::fs::symlink("/nonexistent-tierstore", host.root().join("etc/tierstore"))
+        .expect("a dangling link");
+    let (ok, calls) = host.run(&rooted(&host, POST), &["1"]);
+    assert!(ok);
+    assert_eq!(calls, [SYSUSERS_CALL, RELOAD_CALL]);
+
+    let host = Host::new("rpm-post-no-group", false, false);
+    let (ok, calls) = host.run(&rooted(&host, POST), &["1"]);
+    assert!(ok);
+    assert_eq!(calls, [SYSUSERS_CALL, GETENT_CALL]);
+    assert_eq!(host.config_dir_mode(), None);
+}
+
+#[test]
+fn postun_reloads_systemd_only_when_the_last_version_goes_and_leaves_the_host_files() {
+    // Catches: a %postun that reloads on an upgrade (an argument above 0), deletes the host's
+    // /etc/tierstore, or calls systemctl with no systemd.
+    let host = Host::new("rpm-postun", true, true);
+    let dir = host.root().join("etc/tierstore");
+    std::fs::create_dir_all(&dir).expect("the host's directory");
+    put(&dir, "config.toml", b"# the host's\n");
+    let postun = rooted(&host, POSTUN);
+    assert_eq!(
+        host.run(&postun, &["0"]),
+        (true, vec![RELOAD_CALL.to_owned()])
+    );
+    assert_eq!(host.run(&postun, &["1"]), (true, Vec::new()));
+    assert!(dir.join("config.toml").is_file());
+    let host = Host::new("rpm-postun-no-systemd", false, true);
+    assert_eq!(host.run(&rooted(&host, POSTUN), &["0"]), (true, Vec::new()));
 }

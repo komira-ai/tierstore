@@ -3,6 +3,7 @@ use std::os::unix::fs::PermissionsExt;
 use std::path::PathBuf;
 
 use super::*;
+use crate::release::script_host::{GETENT_CALL, Host, RELOAD_CALL, SYSUSERS_CALL};
 use crate::testdir::TestDir;
 
 /// A stand-in binary and notice.
@@ -550,91 +551,6 @@ fn the_package_depends_on_the_glibc_the_binary_is_linked_against() {
         Some("Depends: systemd, libc6 (>= 2.28)")
     );
 }
-
-/// The commands a stand-in records: its name and its arguments, as one line of `$STUB_LOG`.
-const STUB: &str = "#!/bin/sh\nprintf '%s\\n' \"${0##*/} $*\" >> \"$STUB_LOG\"\n";
-
-/// `getent`'s stand-in: it records itself and finds the group when `$STUB_GROUP` exists.
-const STUB_GETENT: &str =
-    "#!/bin/sh\nprintf '%s\\n' \"${0##*/} $*\" >> \"$STUB_LOG\"\n[ -e \"$STUB_GROUP\" ]\n";
-
-/// A host for one run of a maintainer script: the root dpkg installs into (`$DPKG_ROOT`), with
-/// systemd running or not and the group `tierstore` there or not, and stand-ins of the programs
-/// the scripts call (`systemd-sysusers`, `getent`, `chgrp`, `systemctl`) first on `PATH`, which
-/// record each call. `mkdir` and the shell are the system's.
-struct Host {
-    dir: TestDir,
-}
-
-impl Host {
-    fn new(name: &str, systemd: bool, group: bool) -> Host {
-        let dir = scratch(name);
-        let stubs = dir.join("stubs");
-        std::fs::create_dir_all(&stubs).expect("stubs");
-        for (program, text) in [
-            ("systemd-sysusers", STUB),
-            ("getent", STUB_GETENT),
-            ("chgrp", STUB),
-            ("systemctl", STUB),
-        ] {
-            let path = put(&stubs, program, text.as_bytes());
-            std::fs::set_permissions(&path, std::fs::Permissions::from_mode(0o755))
-                .expect("a stand-in that runs");
-        }
-        std::fs::create_dir_all(dir.join("root/etc")).expect("the root and its etc");
-        if systemd {
-            std::fs::create_dir_all(dir.join("root/run/systemd/system")).expect("systemd");
-        }
-        if group {
-            put(&dir, "group", b"");
-        }
-        Host { dir }
-    }
-
-    /// The root the script installs into.
-    fn root(&self) -> PathBuf {
-        self.dir.join("root")
-    }
-
-    /// Runs `script` with `args`: whether it exited 0, and the calls it made, in order.
-    fn run(&self, script: &str, args: &[&str]) -> (bool, Vec<String>) {
-        let path = put(&self.dir, "script", script.as_bytes());
-        let log = self.dir.join("log");
-        let _ = std::fs::remove_file(&log);
-        let status = std::process::Command::new("sh")
-            .arg(&path)
-            .args(args)
-            .env_clear()
-            .env(
-                "PATH",
-                format!("{}:/usr/bin:/bin", self.dir.join("stubs").display()),
-            )
-            .env("DPKG_ROOT", self.root())
-            .env("STUB_LOG", &log)
-            .env("STUB_GROUP", self.dir.join("group"))
-            .status()
-            .expect("sh");
-        let calls = std::fs::read_to_string(&log)
-            .unwrap_or_default()
-            .lines()
-            .map(str::to_owned)
-            .collect();
-        (status.success(), calls)
-    }
-
-    /// The mode of `etc/tierstore` below the root, if anything is there (not following a link).
-    fn config_dir_mode(&self) -> Option<u32> {
-        self.root()
-            .join("etc/tierstore")
-            .symlink_metadata()
-            .ok()
-            .map(|m| m.permissions().mode() & 0o7777)
-    }
-}
-
-const SYSUSERS_CALL: &str = "systemd-sysusers /usr/lib/sysusers.d/tierstore.conf";
-const GETENT_CALL: &str = "getent group tierstore";
-const RELOAD_CALL: &str = "systemctl daemon-reload";
 
 #[test]
 fn postinst_configure_on_a_fresh_host_makes_the_config_directory_and_starts_nothing() {
