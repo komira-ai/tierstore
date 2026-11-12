@@ -458,7 +458,7 @@ The put directory, `<mountpoint>/put/` (Linux): a job writes a file under one of
 | `fs.put.stage_ttl_secs` | integer, `43200` (901 to 604800) | how long a staged file is kept from its create; set it above the longest wall time of a job plus 900 |
 | `fs.put.committed_ttl_secs` | integer, `600` (1 to 604800) | how long a committed name is shown (for the job's `stat`; it is never read) from its commit |
 
-```toml
+```toml linux
 [fs]
 client_group = "builders"
 owner = "1000:1000"

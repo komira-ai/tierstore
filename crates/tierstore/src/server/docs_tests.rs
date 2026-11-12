@@ -3,9 +3,11 @@
 //! Every page of `crates/tierstore/docs/` is read, not only the guide's: a flag it names must be
 //! one of the binary's (read from clap, `Args::command().get_arguments()`), a `section.key` it
 //! names must be in the config file's key table, a TOML block must load through the real loader
-//! (or be marked `toml fragment`, which has only its keys checked), a metric name must occur in
-//! the source, and a block marked `message` must quote text that the source holds. The other way
-//! round, every flag of the binary and every key of the table must be named by some page.
+//! (or be marked `toml fragment`, which has only its keys checked, or `toml linux`, which must load
+//! on Linux and be refused for the put directory elsewhere: see `docs_linux_only.rs`), a metric
+//! name must occur in the source, and a block marked `message` must quote text that the source
+//! holds. The other way round, every flag of the binary and every key of the table must be named
+//! by some page.
 //!
 //! A section titled exactly `Not in a release yet` (a heading of any level; it runs to the next
 //! heading of the same or a higher level) is skipped by the exists-in-code checks: it is where a
@@ -30,6 +32,10 @@ use super::config_policy::Policy;
 use super::config_testing::{DEFAULTS, loads};
 use super::config_unknown::fields_of;
 use super::treefs::FsTable;
+use linux_only::{LINUX_ONLY, judged};
+
+#[path = "docs_linux_only.rs"]
+mod linux_only;
 
 /// The title of the sections that the exists-in-code checks leave out.
 const NOT_YET: &str = "Not in a release yet";
@@ -405,7 +411,8 @@ fn check(docs: &[Doc], code: &Code) -> Vec<String> {
         }
         for block in &page.blocks {
             let at = format!("{name}:{}", block.line);
-            if block.info == "toml" || block.info == "toml fragment" {
+            let linux_only = block.info == LINUX_ONLY;
+            if block.info == "toml" || block.info == "toml fragment" || linux_only {
                 match toml::from_str::<toml::Table>(&block.body) {
                     Err(why) => {
                         problems.push(format!("{at}: the TOML does not parse: {}", why.message()))
@@ -420,10 +427,12 @@ fn check(docs: &[Doc], code: &Code) -> Vec<String> {
                         }
                     }
                 }
-                if block.info == "toml"
-                    && let Err(why) = loads(&block.body, DEFAULTS)
-                {
-                    problems.push(format!("{at}: the loader refuses the file: {why}"));
+                if block.info != "toml fragment" {
+                    let loaded = loads(&block.body, DEFAULTS);
+                    let on_linux = cfg!(target_os = "linux");
+                    if let Some(why) = judged(loaded, linux_only, on_linux) {
+                        problems.push(format!("{at}: {why}"));
+                    }
                 }
             } else if block.info == "message" {
                 for line in block.body.lines().filter(|l| !l.trim().is_empty()) {
