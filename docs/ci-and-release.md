@@ -244,24 +244,30 @@ archive.
   `<out>/SHA256SUMS.<platform>`. The package is an `ar` archive of `debian-binary`,
   `control.tar.gz` and `data.tar.gz`, the same bytes for the same inputs (every owner `root`, every
   time 2026-09-01, sorted entries, no gzip file name). It installs
-  `/usr/libexec/tierstore/tierstore` (0755), `/usr/lib/systemd/system/tierstore.service` and
+  `/usr/libexec/tierstore/tierstore` (0755), `/usr/lib/systemd/system/tierstore@.service` (from
+  `packaging/tierstore@.service`, the a/b slot template of the update hook: the instances
+  `tierstore@a` and `tierstore@b` start only under the marker `/var/lib/tierstore/run-%i`, and it
+  has `StateDirectory=tierstore` and `[Install] WantedBy=multi-user.target`),
   `/usr/lib/sysusers.d/tierstore.conf` (from `packaging/`), the example
-  `/etc/tierstore/tierstore.toml` (0640, from `packaging/tierstore.toml`; the one conffile, so an
-  upgrade keeps a host's edits), and `/usr/share/doc/tierstore/copyright` (the repository's
-  `LICENSE`) and `THIRD-PARTY-LICENSES.txt`. It depends on `systemd` and `libc6 (>= 2.28)`. Its `postinst` runs `systemd-sysusers`, gives
-  `/etc/tierstore` (0750) and the example file (0640) to the `tierstore` group, and runs `systemctl
-  daemon-reload`; it never starts or enables the unit, which also waits for
-  `/etc/tierstore/access.key`. Removing the package leaves the account and `/etc/tierstore`, which
-  holds the keys. The build job then has `dpkg-deb --info` and `dpkg-deb --contents` read the file.
+  `/usr/share/doc/tierstore/examples/config.toml` (from `packaging/config.toml`, which nothing
+  reads), and `/usr/share/doc/tierstore/copyright` (the repository's `LICENSE`) and
+  `THIRD-PARTY-LICENSES.txt`. No file is in `/etc` and there is no conffile: the instances read the
+  host's `/etc/tierstore/config.toml`, which the package never writes. It depends on `systemd` and
+  `libc6 (>= 2.28)`. Its `postinst` (on `configure` only) runs `systemd-sysusers`; only when nothing
+  is at `/etc/tierstore` and the group `tierstore` exists does it make `/etc/tierstore` (0750, group
+  `tierstore`), and it leaves an existing directory and its files as they are; then it runs
+  `systemctl daemon-reload` when systemd runs. Its `postrm` (`remove` and `purge`) runs only the
+  `daemon-reload`. The scripts take their paths below `$DPKG_ROOT`. It never starts or enables an
+  instance and writes no marker, so a fresh install with no configuration starts no server.
+  Removing the package leaves the account and `/etc/tierstore`, which holds the keys. The build job then has `dpkg-deb --info` and `dpkg-deb --contents` read the file.
 - `cargo xtask release rpm --binary <path> --version <X.Y.Z> --platform <platform> --licenses
   <file> --out <dir>` writes `tierstore-<version>-1.<arch>.rpm` (`x86_64` or `aarch64`) and its line
   in `<out>/SHA256SUMS.<platform>`. It has the files of the Debian package at the same paths and
-  modes, every owner `root`, with two differences the RPM conventions ask for: the licence is the
-  `%license` file `/usr/share/licenses/tierstore/LICENSE`, and the example configuration is
-  `%config(noreplace)`. The package requires `systemd` and `glibc >= 2.28`. Its `%post` (every install and upgrade)
+  modes, every owner `root`, with one difference the RPM conventions ask for: the licence is the
+  `%license` file `/usr/share/licenses/tierstore/LICENSE`. It has no `%config` file. The package requires `systemd` and `glibc >= 2.28`. Its `%post` (every install and upgrade)
   does what the `postinst` does, each step only where its tool or the `tierstore` group is there,
   so a container without systemd installs; its `%postun` runs `systemctl daemon-reload` when the
-  last version is removed. Nothing starts or enables the unit, and removing the package leaves the
+  last version is removed. Nothing starts or enables an instance, and removing the package leaves the
   account and `/etc/tierstore`. The file is the same bytes for the same inputs (build time and file
   times 2026-09-01, build host `localhost`, gzip level 9, no signature: the signature header holds
   the digests only). It is built with the `rpm` crate, without its signing and compression
@@ -299,8 +305,9 @@ section 5). Nobody approves a step.
      suite `testing` (a deb822 source with `Signed-By`), installs `tierstore=<version>` (after an
      `apt-get update` and `apt-get dist-upgrade` of the image, which the digest pin leaves older than
      the archive, and before the install of `ca-certificates` and `curl`), and checks
-     that `tierstore --version` prints the release, the unit, the `sysusers.d` entry and the
-     conffile exist, and the service is neither enabled nor running
+     that `tierstore --version` prints the release, the unit template, the `sysusers.d` entry and the
+     example exist, `/etc/tierstore` is a directory of mode 0750 with no `config.toml`,
+     `/var/lib/tierstore` holds nothing (no start marker), and no instance is enabled or running
      (`cargo xtask channels check-apt`).
    - `check-rpm` (x86_64 on `ubuntu-24.04`, aarch64 on `ubuntu-24.04-arm`; the current Fedora,
      AlmaLinux 9 and Amazon Linux 2023, each a clean container pinned by digest) starts the
@@ -310,8 +317,9 @@ section 5). Nobody approves a step.
      archive key at `packages.komira.ai/apt/komira-archive-keyring.asc`), installs
      `tierstore-<version>` with `dnf`, and checks that `rpm -K` of the package from the pool says
      its digests and signatures are OK, that `tierstore --version` prints the release
-     (`/usr/libexec/tierstore/tierstore`), that the unit, the `sysusers.d` entry and the conffile
-     exist (the conffile registered as one with `rpm -qc`), and that the service is not enabled.
+     (`/usr/libexec/tierstore/tierstore`), that the unit template, the `sysusers.d` entry and the example
+     exist, that `rpm -qc` lists no file, that `/etc/tierstore` is a directory of mode 0750 with no
+     `config.toml`, that `/var/lib/tierstore` holds nothing, and that no instance is enabled.
    - `check-brew` (`macos-15`) installs the rendered formula from a local tap and runs the binary
      (`cargo xtask channels check-brew`).
    - `check-install-sh` (`ubuntu-24.04` and `macos-15`) runs `install.sh` from tierstore.dev with
@@ -331,14 +339,18 @@ section 5). Nobody approves a step.
    installer: for `linux-x86_64` and `linux-arm64` one entry that names the host's repository
    entry `komira-testing`, the package version and the `.deb`'s digest as the pin (no release
    index and no package digest: tierstore ships no archive, and a host that does not announce
-   `apt` is ordered nothing). Every entry carries `minHostkeeper` 0.1.216, the first hostkeeper
-   release whose daemon announces `apt`; hosts need a daemon of that release or later, and the
-   switch stays off until they have it and the `.deb` meets the installer's rules
+   `apt` is ordered nothing). Every entry names the update hook as its command (`/usr/libexec/tierstore/tierstore update-hook`,
+   `boot = restore`), runs `tierstore@a.service` and `tierstore@b.service`, passes the params
+   `config_file` (`/etc/tierstore/config.toml`) and `service_manager` (`systemd`), and carries
+   `minHostkeeper` 0.1.225, the first hostkeeper release whose daemon runs the hook command of an
+   apt entry; hosts need a daemon of that release or later, and the coordinator's allow-list entry
+   must name the `job_workflow_ref` of the pin below before the switch is turned on
+   (`release.yml` passes `--min-hostkeeper 0.1.225`)
    (`docs/design/distribution.md`, section 5.3, "The apt target"). The tailnet's three
    variables (`HOSTKEEPER_TAILNET_CLIENT_ID`, `HOSTKEEPER_TAILNET_AUDIENCE`,
    `HOSTKEEPER_TAILNET_COORDINATOR`) are all set or none: all makes `farm` join the tailnet, some is
    red. `farm` calls hostkeeper's `set-desired.yml` (a pin of its own, not the one of
-   `hostkeeper-desired.yml`; release 0.1.216, which has `targets` and the apt installer, and its
+   `hostkeeper-desired.yml`; v0.1.225 (commit `2c684190fbe5b6cfb11f42573e044edb334f27aa`), and its
    `tailnet_tag` is the variable `HOSTKEEPER_TAILNET_TAG`, as in `hostkeeper-desired.yml`) for the
    service `tierstore`, with the audience
    `tierstore-hostkeeper-release`, and waits for the coordinator to report every lab host on the
@@ -503,8 +515,8 @@ without the macOS package would leave every Mac behind; a release made before th
 packages has no index and is refused too. The job hands on the package version, the index and its
 SHA-256, and the release's **targets**: today one `hostkeeper-archive` entry per platform (the
 archive's size and SHA-256, its bundle, its two locations, the release channel's and the GitHub
-asset's, and the `min_hostkeeper` of its manifest). Once hostkeeper's apt installer ships, the Linux
-lists gain an `apt` entry ahead of the archive (`crates/xtask/src/release/desired_targets.rs`).
+asset's, and the `min_hostkeeper` of its manifest). The `apt` entry of the Debian package is sent
+by the lab stage of `release.yml` instead (`release desired-apt`, above).
 Then the `channel` job waits, for at most about half an hour, until the release channel serves the
 release's `index.json`, its SHA-256 the one `check` computed: the channel takes a release by its own
 sync, which CI does not run, and the coordinator refuses a version the channel does not hold

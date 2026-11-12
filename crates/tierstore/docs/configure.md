@@ -5,7 +5,7 @@ This page is for an operator who is setting tierstore up: which few keys to set,
 The process is started with the file and nothing else for the data path:
 
 ```sh
-/usr/libexec/tierstore/tierstore --config /etc/tierstore/tierstore.toml
+/usr/libexec/tierstore/tierstore --config /etc/tierstore/config.toml
 ```
 
 Write the file, then enable the service; a file the process refuses is named on stderr (`journalctl -u tierstore`) with the key.

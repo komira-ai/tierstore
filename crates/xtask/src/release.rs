@@ -62,6 +62,8 @@ pub mod hostkeeper_verify;
 mod plan;
 mod publish;
 pub mod rpm;
+#[cfg(test)]
+pub(crate) mod script_host;
 mod set_version;
 pub mod tap_tarball;
 

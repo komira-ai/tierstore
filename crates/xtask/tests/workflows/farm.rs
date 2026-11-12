@@ -43,10 +43,11 @@ pub const SOAK_IF: &str = after_if!("needs.farm.outputs.converged == 'true'");
 /// workflow names (not the one of `hostkeeper-desired.yml`, whose entry admits another event).
 pub const AUDIENCE: &str = "tierstore-hostkeeper-release";
 
-/// The first release of hostkeeper whose daemon announces `apt` (its pull request 256): before it
-/// no host is ordered an apt entry. The pin of `farm` is at this release or later, and
-/// `desired-apt` is given it as `--min-hostkeeper`.
-pub const APT_FLOOR: &str = "0.1.216";
+/// The first release of hostkeeper whose daemon runs the hook command of an `apt` entry (an
+/// absolute path of a program the package installs, run from the version's sealed tree): an older
+/// daemon refuses the entry, whose hook is `/usr/libexec/tierstore/tierstore update-hook`. The pin
+/// of `farm` is at this release or later, and `desired-apt` is given it as `--min-hostkeeper`.
+pub const APT_FLOOR: &str = "0.1.225";
 
 /// The repository variable that switches the lab stage on.
 const SWITCH: &str = "TIERSTORE_LAB_INSTALL";
@@ -336,7 +337,7 @@ fn farm_job_problems(farm: &Node, text: &str) -> Vec<String> {
     };
     if version_at_least(release, APT_FLOOR) != Some(true) {
         problems.push(format!(
-            "farm: the pin is release {release:?}, not {APT_FLOOR} or later: before it no daemon announces apt, so the entry would never be ordered"
+            "farm: the pin is release {release:?}, not {APT_FLOOR} or later: before it no daemon runs the hook command of an apt entry, so the entry would be refused"
         ));
     }
     let wanted = with_wanted(commit, release);

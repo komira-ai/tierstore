@@ -13,6 +13,10 @@ struct Machine {
     checked: &'static str,
     says: &'static str,
     conffiles: &'static str,
+    /// What `stat -c %a` says of `/etc/tierstore` (nothing: not a directory).
+    config_mode: &'static str,
+    /// What the listing of `/etc/tierstore/config.toml` and of the marker directory says.
+    left: &'static str,
     enabled: &'static str,
     /// Files the install does not create.
     omit: Vec<&'static str>,
@@ -28,7 +32,9 @@ impl Machine {
             installed: "1.2.3-1.x86_64",
             checked: "/root/tierstore-1.2.3-1.x86_64.rpm: digests signatures OK\n",
             says: "tierstore 1.2.3+0123456789ab\n",
-            conffiles: "/etc/tierstore/tierstore.toml\n",
+            conffiles: "(contains no files)\n",
+            config_mode: "750\n",
+            left: "",
             enabled: "",
             omit: Vec::new(),
             refuse: None,
@@ -67,7 +73,9 @@ impl Host for Machine {
                 stdout: String::new(),
                 stderr: String::new(),
             },
-            "sh" if args[1].starts_with("ls ") => ok(self.enabled),
+            "sh" if args[1].starts_with("if [ -d") => ok(self.config_mode),
+            "sh" if args[1].starts_with("ls -d \"$1\"") => ok(self.left),
+            "sh" if args[1].starts_with("ls -d /etc/systemd/") => ok(self.enabled),
             "/usr/libexec/tierstore/tierstore" => ok(self.says),
             _ => ok(""),
         })
@@ -112,15 +120,32 @@ fn the_release_is_installed_from_the_repository_file_of_testing_and_held_to_what
     assert!(calls.contains(&"rpm -K /root/tierstore-1.2.3-1.x86_64.rpm".to_owned()));
     assert!(calls.contains(&"/usr/libexec/tierstore/tierstore --version".to_owned()));
     for file in [
-        "/usr/lib/systemd/system/tierstore.service",
+        "/usr/lib/systemd/system/tierstore@.service",
         "/usr/lib/sysusers.d/tierstore.conf",
-        "/etc/tierstore/tierstore.toml",
+        "/usr/share/doc/tierstore/examples/config.toml",
     ] {
         assert!(
             calls.contains(&format!("sh -c test -f \"$1\" sh {file}")),
             "{file}"
         );
     }
+    assert!(calls.contains(
+        &"sh -c if [ -d \"$1\" ] && [ ! -L \"$1\" ]; then stat -c %a \"$1\"; fi sh /etc/tierstore"
+            .to_owned()
+    ));
+    assert!(calls.contains(
+        &"sh -c ls -d \"$1\" 2>/dev/null; ls -A \"$2\" 2>/dev/null; true sh /etc/tierstore/config.toml /var/lib/tierstore"
+            .to_owned()
+    ));
+    assert!(calls.contains(&format!(
+        "sh -c ls -d {} 2>/dev/null; true",
+        [
+            "/etc/systemd/system/*.wants/tierstore@.service /etc/systemd/system/tierstore@.service",
+            "/etc/systemd/system/*.wants/tierstore@a.service /etc/systemd/system/tierstore@a.service",
+            "/etc/systemd/system/*.wants/tierstore@b.service /etc/systemd/system/tierstore@b.service",
+        ]
+        .join(" ")
+    )));
     assert_eq!(repo_file(URL).matches("gpgcheck=1").count(), 2);
     assert_eq!(
         file_name("1.2.3", "aarch64"),
@@ -171,7 +196,9 @@ fn a_program_that_fails_ends_the_check_with_what_it_said() {
         "-K ",
         "--version",
         "-qc",
-        "ls /etc/systemd",
+        "stat -c",
+        "ls -A",
+        "ls -d /etc/systemd",
         "-q --qf",
         "uname",
     ] {
@@ -190,31 +217,50 @@ fn a_program_that_fails_ends_the_check_with_what_it_said() {
 #[test]
 fn each_way_the_installed_system_is_not_what_the_package_promises_is_a_problem() {
     // Catches: a package at another version or release, one rpm does not accept the signature of,
-    // a unit, sysusers entry or conffile that is not installed (or not registered as a conffile),
-    // and a service the package enabled.
+    // a unit template, sysusers entry or example that is not installed, a configuration file of
+    // the package (a file in /etc that an erase would remove), an /etc/tierstore open to others,
+    // a live configuration or a start marker the package wrote, and an instance the package
+    // enabled.
     let mut m = Machine::new();
     m.installed = "1.2.2-1.x86_64";
     m.checked = "x: digests SIGNATURES NOT OK\n";
     m.omit = vec![
-        "usr/lib/systemd/system/tierstore.service",
+        "usr/lib/systemd/system/tierstore@.service",
         "usr/lib/sysusers.d/tierstore.conf",
-        "etc/tierstore/tierstore.toml",
+        "usr/share/doc/tierstore/examples/config.toml",
     ];
-    m.conffiles = "";
-    m.enabled = "/etc/systemd/system/multi-user.target.wants/tierstore.service\n";
+    m.conffiles = "/etc/tierstore/config.toml\n";
+    m.config_mode = "755\n";
+    m.left = "/etc/tierstore/config.toml\nrun-a\n";
+    m.enabled = "/etc/systemd/system/multi-user.target.wants/tierstore@a.service\n";
     let Err(Error::Refused(problems)) = check_rpm(&m, &ask("x86_64", "1.2.3", URL, "/root")) else {
         panic!("refused")
     };
-    assert_eq!(problems.len(), 7, "{problems:?}");
+    assert_eq!(problems.len(), 10, "{problems:?}");
     assert!(problems[0].contains("\"1.2.2-1.x86_64\" is installed, not \"1.2.3-1.x86_64\""));
     assert!(problems[1].contains("rpm -K says"));
-    assert!(
-        problems[2].contains("the unit /usr/lib/systemd/system/tierstore.service is not installed")
+    assert_eq!(
+        problems[2..],
+        [
+            "the unit template /usr/lib/systemd/system/tierstore@.service is not installed",
+            "the sysusers.d entry /usr/lib/sysusers.d/tierstore.conf is not installed",
+            "the example configuration /usr/share/doc/tierstore/examples/config.toml is not installed",
+            "/etc/tierstore/config.toml is a configuration file of the package, and nothing in /etc is the package's",
+            "/etc/tierstore has mode 755, not 750",
+            "/etc/tierstore/config.toml is there, and the package never writes the host's configuration",
+            "/var/lib/tierstore/run-a is there, and the package writes no start marker",
+            "the service is enabled: /etc/systemd/system/multi-user.target.wants/tierstore@a.service exists, and the package enables nothing",
+        ]
     );
-    assert!(problems[3].contains("the sysusers.d entry"));
-    assert!(problems[4].contains("the conffile /etc/tierstore/tierstore.toml is not installed"));
-    assert!(problems[5].contains("not registered as a configuration file"));
-    assert!(problems[6].contains("the service is enabled: /etc/systemd/system/multi-user.target.wants/tierstore.service exists"));
+    let mut m = Machine::new();
+    m.config_mode = "";
+    let Err(Error::Refused(problems)) = check_rpm(&m, &ask("x86_64", "1.2.3", URL, "/root")) else {
+        panic!("refused")
+    };
+    assert_eq!(
+        problems,
+        ["/etc/tierstore is not a directory the package made"]
+    );
     // A signature line that says OK and NOT OK is not a pass either.
     let mut m = Machine::new();
     m.checked = "x: digests signatures OK, signatures NOT OK\n";

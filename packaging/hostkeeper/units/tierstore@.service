@@ -23,9 +23,9 @@
 # hostkeeper's own Force, which starts every `run` unit and waits for all of them, finds the
 # standby instance inactive by design and reports it; the service is up all the same.
 #
-# /etc/tierstore/config.toml is edited before use, as tierstore.toml for tierstore.service; its
-# key files are owned by the account of User=, mode 0600, and the keys of the file that name them
-# are the only way the process is given a secret (it reads no environment variable).
+# /etc/tierstore/config.toml (the example is packaging/config.toml) is edited before use; its key
+# files are owned by the account of User=, mode 0600, and the keys of the file that name them are
+# the only way the process is given a secret (it reads no environment variable).
 [Unit]
 Description=tierstore instance %i, an S3 server over a hot and a cold tier
 Documentation=https://github.com/komira-ai/tierstore/blob/main/packaging/README.md

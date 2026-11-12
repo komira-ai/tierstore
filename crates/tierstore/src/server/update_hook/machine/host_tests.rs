@@ -250,7 +250,8 @@ fn a_binary_of_another_owner_is_not_run() {
 }
 
 /// Asserts that a link in place of the binary, a directory, no binary at all, a link in place of
-/// `bin` and a release with the binary at its top only are not run.
+/// `bin` and a release with the binary at its top only (an error that names both places a release
+/// may have it) are not run.
 #[test]
 fn a_binary_that_is_a_link_a_directory_missing_or_not_under_bin_is_not_run() {
     let (_guard, root) = scratch("host-caps-kinds");
@@ -270,7 +271,16 @@ fn a_binary_that_is_a_link_a_directory_missing_or_not_under_bin_is_not_run() {
     fs::remove_dir(&binary).unwrap();
     fs::remove_dir(&bin).unwrap();
     fs::write(release_dir(&root).join("tierstore"), "#!").unwrap();
-    assert!(message(host.capabilities(release).unwrap_err()).contains("No such file"));
+    assert_eq!(
+        message(host.capabilities(release).unwrap_err()),
+        format!(
+            "{} is not there, nor {}",
+            release_dir(&root).join("bin/tierstore").display(),
+            release_dir(&root)
+                .join("tree/usr/libexec/tierstore/tierstore")
+                .display()
+        )
+    );
     symlink(root.as_path(), &bin).unwrap();
     assert!(message(host.capabilities(release).unwrap_err()).ends_with("is not a directory"));
     assert!(runner.calls().is_empty());
@@ -449,4 +459,128 @@ fn the_service_account_is_the_user_of_the_unit_file() {
         .find_map(|line| line.strip_prefix("User="))
         .expect("the unit file has a User=");
     assert_eq!(user, super::super::SERVICE_ACCOUNT);
+}
+
+/// A release under `root` laid out as hostkeeper stages the Debian or RPM package: the package's
+/// files in `tree/`, the binary at `tree/usr/libexec/tierstore/tierstore` of mode `bits`.
+fn package_release_with(root: &Path, bits: u32) -> PathBuf {
+    let dir = release_dir(root).join("tree/usr/libexec/tierstore");
+    fs::create_dir_all(&dir).unwrap();
+    mode(&dir, 0o755);
+    let binary = dir.join("tierstore");
+    fs::write(&binary, "#!").unwrap();
+    mode(&binary, bits);
+    binary
+}
+
+/// Asserts that a release of the Debian or RPM package, which has no `bin/tierstore` and has the
+/// binary at `tree/usr/libexec/tierstore/tierstore` (the path the package installs, under the
+/// tree hostkeeper extracts it to), is asked its capabilities and checks the configuration with
+/// that binary. Catches a hook that fails `prepare` of every update from the package with
+/// `host_failed` because it looks for `bin/tierstore` only.
+#[test]
+fn a_release_of_the_package_is_asked_with_the_binary_of_its_tree() {
+    let (_guard, root) = scratch("host-package");
+    let binary = package_release_with(&root, 0o755);
+    let runner = FakeRunner::replying(vec![exit(0, "handoff-socket-v1\n", ""), exit(0, "", "")]);
+    let host = host(&root, &runner).with_hook_user(1000);
+    let release = Path::new(RELEASE);
+    assert_eq!(
+        host.capabilities(release).unwrap(),
+        vec!["handoff-socket-v1".to_owned()]
+    );
+    assert_eq!(
+        host.check_config(release, Path::new("/etc/tierstore/config.toml"))
+            .unwrap(),
+        None
+    );
+    let calls = runner.calls();
+    let program = binary.to_str().unwrap();
+    assert_eq!(
+        calls,
+        vec![
+            Call::new(program, &["--capabilities"], LIMIT),
+            Call::new(
+                program,
+                &check_args(&root)
+                    .iter()
+                    .map(String::as_str)
+                    .collect::<Vec<_>>(),
+                LIMIT
+            ),
+        ]
+    );
+}
+
+/// Asserts that when a release has both, `bin/tierstore` is the one run, and that a release with a
+/// `bin` whose `tierstore` is not a binary to run (a link, a directory, nothing) is refused rather
+/// than passed over for the package's binary. Catches a lookup that prefers the tree, or that falls through
+/// to it past a link an archive release should not have.
+#[test]
+fn the_archive_binary_is_taken_first_and_never_passed_over() {
+    let (_guard, root) = scratch("host-package-both");
+    release_with(&root, 0o755);
+    package_release_with(&root, 0o755);
+    let runner = FakeRunner::replying(vec![exit(0, "", "")]);
+    let host = host(&root, &runner);
+    let release = Path::new(RELEASE);
+    host.capabilities(release).unwrap();
+    let archive = release_dir(&root).join("bin/tierstore");
+    assert_eq!(runner.calls()[0].program, archive.to_str().unwrap());
+    fs::remove_file(&archive).unwrap();
+    symlink("/bin/true", &archive).unwrap();
+    assert!(message(host.capabilities(release).unwrap_err()).ends_with("is not a regular file"));
+    fs::remove_file(&archive).unwrap();
+    fs::create_dir(&archive).unwrap();
+    assert!(message(host.capabilities(release).unwrap_err()).ends_with("is not a regular file"));
+    fs::remove_dir(&archive).unwrap();
+    assert!(message(host.capabilities(release).unwrap_err()).contains("No such file"));
+    assert_eq!(runner.calls().len(), 1);
+}
+
+/// Asserts that the package's binary is held to the checks of the archive's: one that a group or
+/// others can write, one in a directory they can write, a link, and one of another owner are not
+/// run.
+#[test]
+fn the_package_binary_that_is_not_one_to_run_is_not_run() {
+    for bits in [0o775, 0o757] {
+        let (_guard, root) = scratch("host-package-writable");
+        package_release_with(&root, bits);
+        let runner = FakeRunner::replying(vec![]);
+        let text = message(
+            host(&root, &runner)
+                .capabilities(Path::new(RELEASE))
+                .unwrap_err(),
+        );
+        assert!(
+            text.ends_with("can be written by a group or others"),
+            "{text}"
+        );
+        assert!(runner.calls().is_empty());
+    }
+    let (_guard, root) = scratch("host-package-kinds");
+    let binary = package_release_with(&root, 0o755);
+    let runner = FakeRunner::replying(vec![]);
+    let release = Path::new(RELEASE);
+    mode(binary.parent().unwrap(), 0o777);
+    assert!(
+        message(host(&root, &runner).capabilities(release).unwrap_err())
+            .ends_with("can be written by a group or others")
+    );
+    mode(binary.parent().unwrap(), 0o755);
+    let strange = SystemHost::new(root.clone(), &runner, LIMIT).with_release_owner(me() + 1);
+    assert!(
+        message(strange.capabilities(release).unwrap_err()).contains(&format!(
+            "is owned by user {}, not {}",
+            me(),
+            me() + 1
+        ))
+    );
+    fs::remove_file(&binary).unwrap();
+    symlink("/bin/true", &binary).unwrap();
+    assert!(
+        message(host(&root, &runner).capabilities(release).unwrap_err())
+            .ends_with("is not a regular file")
+    );
+    assert!(runner.calls().is_empty());
 }

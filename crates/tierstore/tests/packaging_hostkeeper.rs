@@ -3,7 +3,9 @@
 //! release link `current` with flags the binary parses, starts only under the marker file the hook
 //! writes (`marker_path`), is enabled at boot, and waits for the drain; the launchd plist
 //! `tierstore.plist` runs the same binary as `_tierstore`, is installed under the name the hook
-//! bootstraps (`LAUNCHD_PLIST`), and lets launchd wait for the drain.
+//! bootstraps (`LAUNCHD_PLIST`), and lets launchd wait for the drain. The template the deb and rpm
+//! packages install (`packaging/tierstore@.service`) is held to this one but for the binary, which
+//! is the package's, at the path the hook finds in a staged release of the package.
 
 #![allow(
     clippy::unwrap_used,
@@ -17,7 +19,9 @@ use std::time::Duration;
 
 use clap::Parser;
 use tierstore::server::cli::{Args, Cli};
-use tierstore::server::update_hook::{Instance, LAUNCHD_PLIST, RELEASE_BINARY, marker_path};
+use tierstore::server::update_hook::{
+    Instance, LAUNCHD_PLIST, PACKAGE_RELEASE_BINARY, RELEASE_BINARY, marker_path,
+};
 
 /// The words in the name of a flag that say it holds a secret.
 const SECRET_WORDS: [&str; 5] = ["key", "secret", "credential", "token", "password"];
@@ -37,7 +41,7 @@ const MACOS_DRAIN: (Duration, Duration) = (Duration::from_secs(1), Duration::fro
 
 /// The settings of the example storage node's file, whose drain is the defaults.
 fn defaults() -> Cli {
-    let file = Path::new(env!("CARGO_MANIFEST_DIR")).join("../../packaging/tierstore.toml");
+    let file = Path::new(env!("CARGO_MANIFEST_DIR")).join("../../packaging/config.toml");
     let text = std::fs::read_to_string(file).expect("the example file");
     Cli::from_config_text(&text).expect("the example file loads")
 }
@@ -503,4 +507,67 @@ fn the_fs_launchd_job_runs_the_fs_verb_of_the_current_release() {
         .expect("the binary runs");
     assert_eq!(out.status.code(), Some(2));
     assert!(String::from_utf8_lossy(&out.stderr).contains("fs.toml"));
+}
+
+/// The template the deb and rpm packages install.
+fn package_template() -> String {
+    let file = Path::new(env!("CARGO_MANIFEST_DIR")).join("../../packaging/tierstore@.service");
+    std::fs::read_to_string(file).expect("the package's template")
+}
+
+/// The lines of a unit that systemd reads: no comment, no blank line.
+fn settings_of(unit: &str) -> Vec<String> {
+    unit.lines()
+        .filter(|line| !line.starts_with('#') && !line.trim().is_empty())
+        .map(str::to_owned)
+        .collect()
+}
+
+/// Asserts that the template of the deb and rpm packages says what the archive's template says,
+/// line for line, but for the binary of `ExecStart=`: the same marker condition, state directory,
+/// account, drain, restarts, hardening and `[Install]`. It would catch a package template that
+/// drifts from the one the update hook was written against (a condition the hook's markers do not
+/// meet, a state directory without the hand-over socket, a hardening the hook's hand-over cannot
+/// run under).
+#[test]
+fn the_package_template_is_the_archive_template_but_for_the_binary() {
+    let archive = settings_of(&read(TEMPLATE));
+    let package = settings_of(&package_template());
+    let package_binary = format!("/{}", PACKAGE_RELEASE_BINARY.trim_start_matches("tree/"));
+    let as_archive: Vec<String> = package
+        .iter()
+        .map(|line| line.replace(&package_binary, &format!("{CURRENT}/{RELEASE_BINARY}")))
+        .collect();
+    assert_eq!(as_archive, archive);
+    assert_ne!(
+        package, archive,
+        "the package's template runs its own binary"
+    );
+}
+
+/// Asserts that the template of the packages runs the binary the hook asks in a staged release of
+/// the package (`PACKAGE_RELEASE_BINARY` below the version's `tree/`, which is the root of the
+/// package's files), on the host's `/etc/tierstore/config.toml`, with flags the binary parses.
+/// It would catch a template that runs another binary than the one the hook checked the
+/// configuration with, or that reads the example.
+#[test]
+fn the_package_template_runs_the_binary_the_hook_finds_in_a_release_of_the_package() {
+    let unit = package_template();
+    let words = exec_start(&unit);
+    let in_tree = PACKAGE_RELEASE_BINARY
+        .strip_prefix("tree")
+        .expect("the binary is under the tree");
+    assert_eq!(words[0], in_tree);
+    let args = Args::try_parse_from(&words).expect("the template's flags");
+    assert_eq!(
+        args.config.as_deref(),
+        Some(Path::new("/etc/tierstore/config.toml"))
+    );
+    assert_eq!(
+        value(&unit, "ConditionPathExists"),
+        marker_path(Instance::A)
+            .to_str()
+            .expect("utf-8")
+            .replace("run-a", "run-%i")
+    );
 }
