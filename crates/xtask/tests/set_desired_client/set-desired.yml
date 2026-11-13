@@ -31,24 +31,19 @@
 # action. The first step of the job checks `tailnet_tag`, whether or not the job joins: no other
 # step but the join reads it.
 #
-# Then the verified hkctl makes two calls, each one command that asks the runner for its own
-# OIDC token (`--github-oidc-audience`): `releases set-desired`, with the request the `request`
-# step wrote (the version, and the one package digest, or the release index and its digest, or
-# the targets, alone or with the index and its digest; the coordinator checks them); and, when
+# Then the verified hkctl makes two calls, each one hkctl command that asks the runner for its
+# own OIDC token (`--github-oidc-audience`; the set's diagnostics also go to its log): `releases set-desired`, with the request the `request`
+# step wrote (the version and the targets; the coordinator checks them); and, when
 # `wait` is true and the set succeeded,
 # `releases wait-converged`, one call the coordinator holds until the fleet converges, the
-# service halts, another version is set or `max_polls` times 10 seconds pass. hkctl keeps the
+# service halts, another version is set or `max_polls` times 10 seconds pass. Both pass
+# `--host-group` only when the `host_group` input is not empty: hkctl writes every flag it is
+# given into the request, and a coordinator older than its client refuses a field it does not
+# know, so an empty input sends the bytes it sent before the input existed. hkctl keeps the
 # token in a shell variable and hands it to curl through a pipe: no file holds it, no argument
 # list and no other step's environment. Each call runs with `continue-on-error`, its answer in
 # a file (`--response-file`) and its diagnostics in another, so that the last step, which runs
 # whatever happened before it, reads them with one jq program and writes the job's outputs.
-#
-# Call it only once the release of the service is in the release channel: a host fetches the
-# version from the channel, and `cargo xtask release channel-sync` stages a published release
-# there (docs/deploy/release-channel.md, "Sync new releases into the channel"). The order is:
-# the release is published, channel-sync stages it, then this workflow sets the desired version.
-# A version set before the channel holds it leaves every host failing its fetch (`fetch_failed`)
-# and retrying until it arrives.
 #
 # The names of the release's asset and tag are written once, in the job's `env`.
 name: set-desired
@@ -64,22 +59,15 @@ on:
         description: The version of the service to set.
         type: string
         required: true
-      package_digest:
-        description: The SHA-256 of the one package of this version that every host is ordered, 64 lower-case hex digits. For a fleet of one platform. Give this, or release_index with release_index_digest, or targets; never this with another.
-        type: string
-        required: false
-      release_index:
-        description: The text of the version's release index (index.json), byte for byte, at most 3 KiB (a coordinator before SetDesired took targets takes a request of at most 4 KiB). Each host is ordered the package its platform has in it. Comes with release_index_digest; not with package_digest.
-        type: string
-        required: false
-      release_index_digest:
-        description: The SHA-256 of release_index, 64 lower-case hex digits, as the release job that published the index wrote it down.
-        type: string
-        required: false
       targets:
-        description: "The targets of the version, one JSON object keyed by platform (linux-x86_64, linux-arm64, macos-arm64), each value {\"entries\": [...]} in the order the service prefers, as `cargo xtask release targets` writes them; under 128 KiB, the most the runner passes in one environment value or argument. Each host is ordered the entry of the installer it runs, else the first its daemon can install (docs/design/packages.md, section 3). Alone, or with release_index and release_index_digest, which must then list exactly the hostkeeper-archive entries, so that a daemon before targets is ordered its archive through the release channel; not with package_digest. Needs a coordinator that takes SetDesired with targets."
+        description: "The targets of the version, one JSON object keyed by platform (linux-x86_64, linux-arm64, macos-arm64), each value {\"entries\": [...]} in the order the service prefers, as `cargo xtask release targets` writes them; under 128 KiB, the most the runner passes in one environment value or argument. Each host is ordered the entry of the installer it runs, else the first its daemon can install (docs/design/packages.md, section 3). Needs a coordinator that takes SetDesired with targets."
         type: string
         required: false
+      host_group:
+        description: "The host group the version is set in and waited on, as the coordinator names it. Empty: each group that lists the service (for a token whose allow-list entry names host_groups, each of those that lists it), the call sending no group, as before this input. A non-empty value needs a coordinator that holds host groups and the hkctl of a hostkeeper release that has --host-group."
+        type: string
+        required: false
+        default: ""
       hostkeeper_version:
         description: The hostkeeper release whose command line, hkctl, makes the calls, X.Y.Z, pinned by the caller.
         type: string
@@ -143,7 +131,7 @@ on:
         description: "`true` when the fleet converged on the version, `false` otherwise."
         value: ${{ jobs.set-desired.outputs.converged }}
       reason:
-        description: "Why the job ended where it did, one token (a refusal token of the coordinator among them, such as `not_in_channel`, which is retryable once the release channel holds the version, or `channel_digest_mismatch`)."
+        description: "Why the job ended where it did, one token (a refusal token of the coordinator among them, such as `target_invalid`)."
         value: ${{ jobs.set-desired.outputs.reason }}
 
 permissions: {}
@@ -179,12 +167,12 @@ jobs:
         run: |
           jq --null-input --arg tag "$TAILNET_TAG" 'if $tag | test("^tag:[a-z][a-z0-9-]*\\z") then empty else error("tailnet_tag is not tag: followed by a Tailscale tag name (a lower-case letter, then lower-case letters, digits and -)") end'
 
-      # The download proves nothing: the release channel is not trusted, the next three steps
+      # The download proves nothing: the download is not trusted, the next three steps
       # decide (docs/deploy/verify-a-release.md, step 1).
       - name: Download hkctl of the hostkeeper release
         id: download
         run: |
-          curl --proto =https --proto-redir =https --tlsv1.2 --fail --retry 5 --retry-delay 5 --retry-max-time 300 --retry-all-errors --silent --show-error --location \
+          curl --proto =https --proto-redir =https --tlsv1.2 --fail --retry 60 --retry-delay 10 --retry-max-time 600 --retry-all-errors --silent --show-error --location \
             --create-dirs --output-dir "$RUNNER_TEMP/hkctl-release" \
             --remote-name "https://github.com/komira-ai/hostkeeper/releases/download/$HOSTKEEPER_TAG/$HKCTL_ASSET" \
             --remote-name "https://github.com/komira-ai/hostkeeper/releases/download/$HOSTKEEPER_TAG/SHA256SUMS"
@@ -256,38 +244,34 @@ jobs:
           COORDINATOR_CA: ${{ inputs.coordinator_ca }}
         run: printf '%s\n' "$COORDINATOR_CA" > "$RUNNER_TEMP/hkctl-coordinator-ca.pem"
 
-      # The request of the set, in the request's canonical JSON names: the version, and the one
-      # package digest, or the release index (its exact text, as one JSON string) with its
-      # digest, or the targets (the JSON object of the input, as an object), alone or with the
-      # index and its digest. Every value comes from the step's environment, never written into
-      # the script. A job that names no way of the release, the package digest with another, half
-      # of the index, or targets that are not one JSON object, stops here, before any token
-      # exists.
+      # The request of the set, in the request's canonical JSON names: the version and the
+      # targets (the JSON object of the input, as an object). Every value comes from the step's
+      # environment, never written into the script. A job whose targets are empty or are not one
+      # JSON object stops here, before any token exists.
       - name: Write the request of the set
         id: request
         env:
           VERSION: ${{ inputs.version }}
-          PACKAGE_DIGEST: ${{ inputs.package_digest }}
-          RELEASE_INDEX: ${{ inputs.release_index }}
-          RELEASE_INDEX_DIGEST: ${{ inputs.release_index_digest }}
           TARGETS: ${{ inputs.targets }}
         run: |
           jq --null-input --compact-output \
             --arg version "$VERSION" \
-            --arg package_digest "$PACKAGE_DIGEST" \
-            --arg release_index "$RELEASE_INDEX" \
-            --arg release_index_digest "$RELEASE_INDEX_DIGEST" \
             --arg targets "$TARGETS" \
-            '(if $targets == "" then null else [$targets | try fromjson catch null] | if length == 1 and (.[0] | type) == "object" then .[0] else error("targets is not one JSON object") end end) as $parsed | {desired: {version: $version}} as $set | if $package_digest != "" and $release_index == "" and $release_index_digest == "" and $parsed == null then $set + {packageDigest: $package_digest} elif $package_digest == "" and $release_index != "" and $release_index_digest != "" then $set + {releaseIndex: $release_index, releaseIndexDigest: $release_index_digest} + (if $parsed == null then {} else {targets: $parsed} end) elif $package_digest == "" and $release_index == "" and $release_index_digest == "" and $parsed != null then $set + {targets: $parsed} else error("give package_digest, or release_index with release_index_digest, or targets alone or with both of those; never package_digest with another") end' \
+            '(if $targets == "" then error("give targets") else [$targets | try fromjson catch null] | if length == 1 and (.[0] | type) == "object" then .[0] else error("targets is not one JSON object") end end) as $parsed | {desired: {version: $version}, targets: $parsed}' \
             > "$RUNNER_TEMP/hkctl-request.json"
 
       # The first step that requests an OIDC token for the coordinator. Its outcome, its answer
-      # and its diagnostics are read by the outputs step, so a failure goes on to it.
+      # and its diagnostics are read by the outputs step, so a failure goes on to it. The
+      # diagnostics also go to the step's own log (`tee`), so a failed set names its cause there
+      # (the coordinator's code and its `refused: <token>` line); the step ends with hkctl's exit
+      # code. `--host-group` is passed as the one word `${HOST_GROUP:+"--host-group=$HOST_GROUP"}`,
+      # which bash expands to nothing when the input is empty and to one argument otherwise.
       - name: Set the desired version
         id: set-desired
         continue-on-error: true
         env:
           SERVICE: ${{ inputs.service }}
+          HOST_GROUP: ${{ inputs.host_group }}
           COORDINATOR_URL: ${{ inputs.coordinator_url }}
           AUDIENCE: ${{ inputs.audience }}
         run: |
@@ -299,11 +283,12 @@ jobs:
             releases set-desired \
             --service "$SERVICE" \
             --request "$RUNNER_TEMP/hkctl-request.json" \
-            2> "$RUNNER_TEMP/hkctl-set.err"
+            ${HOST_GROUP:+"--host-group=$HOST_GROUP"} \
+            2> >(tee "$RUNNER_TEMP/hkctl-set.err" >&2)
 
       # One held call, with a token of its own. `--wait-secs` is `max_polls` with a 0 appended,
       # ten times it, as text: no arithmetic is done on an input. The coordinator refuses a wait
-      # above 1800 seconds (`invalid_wait`).
+      # above 1800 seconds (`invalid_wait`). `--host-group` is passed as in the set.
       - name: Wait for the fleet to converge
         id: wait
         if: ${{ inputs.wait && steps.set-desired.outcome == 'success' }}
@@ -311,6 +296,7 @@ jobs:
         env:
           SERVICE: ${{ inputs.service }}
           VERSION: ${{ inputs.version }}
+          HOST_GROUP: ${{ inputs.host_group }}
           COORDINATOR_URL: ${{ inputs.coordinator_url }}
           AUDIENCE: ${{ inputs.audience }}
           MAX_POLLS: ${{ inputs.max_polls }}
@@ -324,6 +310,7 @@ jobs:
             --service "$SERVICE" \
             --version "$VERSION" \
             --wait-secs "${MAX_POLLS}0" \
+            ${HOST_GROUP:+"--host-group=$HOST_GROUP"} \
             2> "$RUNNER_TEMP/hkctl-wait.err"
 
       # Runs whatever happened before it. The program below (OUTPUTS_PROGRAM) reads the outcomes

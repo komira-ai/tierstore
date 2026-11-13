@@ -524,8 +524,11 @@ withdrawn), so the targets have no `macos-arm64` list and a Mac is ordered nothi
 and keeps what it runs. No release index is sent.
 
 The `set-desired` job then calls hostkeeper's CI client (`set-desired.yml` of
-komira-ai/hostkeeper, pinned to v0.1.184, whose hkctl sends the targets as they are, the `apt`
-entries included), which proves that hostkeeper release, joins the runner to the tailnet (the
+komira-ai/hostkeeper, pinned to v0.1.312, whose hkctl sends the targets as they are, the `apt`
+entries included; the call names the host group `all-in-one`, the Linux build nodes, so the version
+is one deployment to that group and the wait is on that group alone, and the coordinator's
+allow-list entry for this repository must admit that group), which proves that hostkeeper release,
+joins the runner to the tailnet (the
 coordinator's private listener is on the tailnet only), sets the version with the job's OIDC
 token, naming the release by its targets alone, and **waits for the fleet**: one call the
 coordinator holds for at most half an hour (`max_polls: 180`, the most the client takes). The job

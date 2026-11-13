@@ -3,7 +3,7 @@
 //! coordinator gives: whether the job `set-desired` of `hostkeeper-desired.yml` ends red or green.
 //!
 //! `set_desired_client/set-desired.yml` is that file, byte for byte, from komira-ai/hostkeeper at
-//! [`CLIENT_COMMIT`] (Apache-2.0; its git blob is `fa315f6ed6b6b14d23cf7242a31db9408f18a988`, and
+//! [`CLIENT_COMMIT`] (Apache-2.0; its git blob is `0b11047ad3e9dd92c0ec928da4956192c1e61a34`, and
 //! [`CLIENT_SHA256`] is the SHA-256 of its bytes). The step `Write the job's outputs` is the one
 //! that decides: its `run:` text is run with `bash --noprofile --norc -eo pipefail -c` (GitHub's
 //! `bash` shell on `ubuntu-24.04`) and the host's `jq`, with the step's environment as the client
@@ -42,9 +42,9 @@ const CLIENT: &str = concat!(
     "/tests/set_desired_client/set-desired.yml"
 );
 /// The commit of komira-ai/hostkeeper the copy was taken at, the one `hostkeeper-desired.yml` pins.
-const CLIENT_COMMIT: &str = "2c767d1842a88edb7120073d2dff3b4bfccc834c";
+const CLIENT_COMMIT: &str = "cc1f624d8a01439a2468a2bde0773b49351739b3";
 /// The SHA-256 of the copy's bytes.
-const CLIENT_SHA256: &str = "c42f9a8b520a61fecb2511ae1f4ded060c51748a95aa5586813e414335990227";
+const CLIENT_SHA256: &str = "331a40823f75e2ff2f2b9c5689e3caa42a11125e7aa1f79c50a61229e5d71540";
 /// The version set in every case.
 const VERSION: &str = "0.4.0";
 
