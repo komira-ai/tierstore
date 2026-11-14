@@ -251,21 +251,21 @@ const DEFECTS: &[(&str, &str, &str, &str)] = &[
     // The revision before the client could join the tailnet or take targets.
     (
         "set-desired",
-        "set-desired.yml@2c767d1842a88edb7120073d2dff3b4bfccc834c",
+        "set-desired.yml@30141591c292d8881ce5bc16c9d0b3ba7fcfdca1",
         "set-desired.yml@32a9cc6f8242d0efbc3476391302062ff444dd47",
         "set-desired: `uses` is not",
     ),
     (
         "set-desired",
-        " # v0.1.184",
+        " # v0.1.317",
         " # v0.1.44",
-        "set-desired: the pin's comment names Some(\"0.1.44\"), not v0.1.184",
+        "set-desired: the pin's comment names Some(\"0.1.44\"), not v0.1.317",
     ),
     (
         "set-desired",
-        " # v0.1.184",
+        " # v0.1.317",
         "",
-        "set-desired: the pin's comment names None, not v0.1.184",
+        "set-desired: the pin's comment names None, not v0.1.317",
     ),
     (
         "set-desired",
@@ -307,15 +307,28 @@ const DEFECTS: &[(&str, &str, &str, &str)] = &[
         "      wait: true\n      package_digest: ${{ needs.check.outputs.package-digest }}\n",
         "set-desired: with.package_digest is not an input it gives",
     ),
+    // The call names no group, or another: it would set each group that lists tierstore.
     (
         "set-desired",
-        "hostkeeper_version: 0.1.184",
-        "hostkeeper_version: 0.1.183",
-        "set-desired: with.hostkeeper_version is Some(\"0.1.183\"), not \"0.1.184\"",
+        "      host_group: all-in-one\n",
+        "",
+        "set-desired: with.host_group is None, not \"all-in-one\"",
     ),
     (
         "set-desired",
-        "hostkeeper_commit: 2c767d1842a88edb7120073d2dff3b4bfccc834c",
+        "host_group: all-in-one",
+        "host_group: mac",
+        "set-desired: with.host_group is Some(\"mac\"), not \"all-in-one\"",
+    ),
+    (
+        "set-desired",
+        "hostkeeper_version: 0.1.317",
+        "hostkeeper_version: 0.1.183",
+        "set-desired: with.hostkeeper_version is Some(\"0.1.183\"), not \"0.1.317\"",
+    ),
+    (
+        "set-desired",
+        "hostkeeper_commit: 30141591c292d8881ce5bc16c9d0b3ba7fcfdca1",
         "hostkeeper_commit: 0123456789abcdef0123456789abcdef01234567",
         "set-desired: with.hostkeeper_commit",
     ),

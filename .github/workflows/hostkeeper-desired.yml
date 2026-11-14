@@ -24,7 +24,8 @@
 #                                    identity's trust credential issues (such as `tag:ci`).
 # The coordinator lets the job's OIDC token set the version only through an allow-list entry for
 # this repository (by id), refs/heads/main, the events workflow_run and workflow_dispatch, the
-# audience below, the service tierstore, and the `job_workflow_ref` of the called workflow pinned
+# audience below, the service tierstore, the host group all-in-one (an entry that names `host_groups`
+# must list it), and the `job_workflow_ref` of the called workflow pinned
 # below (komira-ai/hostkeeper/.github/workflows/set-desired.yml@<that commit>). Moving the pin
 # moves the `job_workflow_ref`, so the entry moves with it.
 #
@@ -127,13 +128,14 @@ jobs:
     permissions:
       contents: read
       id-token: write
-    uses: komira-ai/hostkeeper/.github/workflows/set-desired.yml@2c767d1842a88edb7120073d2dff3b4bfccc834c # v0.1.184
+    uses: komira-ai/hostkeeper/.github/workflows/set-desired.yml@30141591c292d8881ce5bc16c9d0b3ba7fcfdca1 # v0.1.317
     with:
       service: tierstore
+      host_group: all-in-one
       version: ${{ needs.check.outputs.package-version }}
       targets: ${{ needs.check.outputs.targets }}
-      hostkeeper_version: 0.1.184
-      hostkeeper_commit: 2c767d1842a88edb7120073d2dff3b4bfccc834c
+      hostkeeper_version: 0.1.317
+      hostkeeper_commit: 30141591c292d8881ce5bc16c9d0b3ba7fcfdca1
       coordinator_url: ${{ vars.HOSTKEEPER_COORDINATOR_URL }}
       coordinator_ca: ${{ vars.HOSTKEEPER_COORDINATOR_CA }}
       audience: tierstore-hostkeeper-desired

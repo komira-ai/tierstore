@@ -70,10 +70,15 @@ pub const SET_DESIRED: &str = "komira-ai/hostkeeper/.github/workflows/set-desire
 /// waits for the fleet; its hkctl sends the request file's targets as they are, so an `apt` entry
 /// reaches the coordinator whole. Moving it moves the `job_workflow_ref` of the coordinator's
 /// allow-list entry, so it is a reviewed change here.
-pub const CLIENT_COMMIT: &str = "2c767d1842a88edb7120073d2dff3b4bfccc834c";
+pub const CLIENT_COMMIT: &str = "30141591c292d8881ce5bc16c9d0b3ba7fcfdca1";
 
 /// The hostkeeper release of [`CLIENT_COMMIT`], whose hkctl makes the call.
-pub const CLIENT_RELEASE: &str = "0.1.184";
+pub const CLIENT_RELEASE: &str = "0.1.317";
+
+/// The host group the version is set in and waited on: the six Linux build nodes. Naming it makes
+/// the call a deployment to one group (hostkeeper's hostgroups design, section 2.1), not to each
+/// group that lists tierstore.
+pub const HOST_GROUP: &str = "all-in-one";
 
 /// The audience of the job's OIDC token, which the coordinator's allow-list entry names.
 pub const AUDIENCE: &str = "tierstore-hostkeeper-desired";
@@ -227,9 +232,10 @@ fn check_problems(check: Option<&Node>) -> Vec<String> {
 }
 
 /// What each input of hostkeeper's workflow must be, and no other input is given.
-pub fn with_wanted() -> [(&'static str, &'static str); 15] {
+pub fn with_wanted() -> [(&'static str, &'static str); 16] {
     [
         ("service", "tierstore"),
+        ("host_group", HOST_GROUP),
         ("version", "${{ needs.check.outputs.package-version }}"),
         ("targets", "${{ needs.check.outputs.targets }}"),
         ("hostkeeper_version", CLIENT_RELEASE),
