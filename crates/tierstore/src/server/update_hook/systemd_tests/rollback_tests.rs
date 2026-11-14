@@ -177,6 +177,23 @@ fn the_rollback_of_a_first_install_reports_the_port_that_fails() {
     }
 }
 
+/// Asserts that the rollback of a first install whose instance is no longer running (hostkeeper
+/// took the package and its unit file off the host before the step, so `systemctl stop` of the
+/// unit would fail) stops nothing and still declines with `no_previous_release`, so that the
+/// install ends failed and not in a halt.
+#[test]
+fn the_rollback_of_a_first_install_whose_unit_is_gone_declines_without_stopping_it() {
+    let fake = SystemdFake::empty();
+    let p = params(NEW, None);
+    fake.drive(&p, &[Prepare, Cutover]);
+    let next = fake.running()[0];
+    fake.set_unit(next, UnitState::Inactive, None, false);
+    fake.fail_on(Some("units.stop"));
+    assert_failed(&fake.run(Rollback, &p), Reason::NoPreviousRelease);
+    assert!(fake.running().is_empty());
+    assert!(fake.markers().is_empty());
+}
+
 /// Asserts that an update that began on a host where nothing served (no record, no instance)
 /// is rolled back onto the other letter than the one `cutover` started: it has no live instance
 /// to return to, so the previous release starts on b.
