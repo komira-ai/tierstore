@@ -368,3 +368,6 @@ fn check_config_of_a_combined_node_reads_its_key_files() {
     );
     assert!(!node.cache_dir().exists());
 }
+
+#[path = "combined_fill_socket_tests.rs"]
+mod fill_socket;

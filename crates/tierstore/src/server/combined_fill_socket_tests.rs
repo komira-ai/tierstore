@@ -8,14 +8,14 @@ use bytes::Bytes;
 use tokio::io::{AsyncBufReadExt as _, AsyncWriteExt as _, BufReader};
 use tokio::net::UnixStream;
 
-use super::Drained;
-use super::cache_cli_tests::probe;
-use super::combined_cli_tests::{Node, QUICK, serving};
-use super::config::settings_from_text;
-use super::local_cache::pack_testing::Pack;
-use super::local_cache::testing::until;
-use super::local_cache::{Disk, SystemDisk};
+use super::{Node, QUICK, serving};
 use crate::Backend;
+use crate::server::Drained;
+use crate::server::cache_cli_tests::probe;
+use crate::server::config::settings_from_text;
+use crate::server::local_cache::pack_testing::Pack;
+use crate::server::local_cache::testing::until;
+use crate::server::local_cache::{Disk, SystemDisk};
 
 /// Asserts that a combined node with `local_cache.fill_socket` binds the socket while it serves;
 /// that a fill over it of a blob inside a pack that only the cold tier holds is answered `ok`
