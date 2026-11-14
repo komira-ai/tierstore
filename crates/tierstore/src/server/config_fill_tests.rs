@@ -156,8 +156,8 @@ fn the_pool_of_the_socket_has_defaults_and_ranges() {
     );
 }
 
-/// Asserts that a storage node with a cache in front of its proxy has no fill socket and no
-/// prefetch queue and refuses the keys of them by name.
+/// Asserts that a storage node with a cache in front of its proxy has no prefetch queue and
+/// refuses the keys of it by name; its fill-socket keys are read (see `config_combined_tests`).
 #[test]
 fn a_storage_node_with_a_cache_refuses_the_keys_of_the_socket() {
     let node = r#"
@@ -188,19 +188,6 @@ KEY
 prefix = "cas/b/"
 cache  = true
 "#;
-    for line in [
-        "fill_socket = \"/run/t/f.sock\"",
-        "fill_socket_concurrency = 4",
-        "fill_socket_wait = \"5s\"",
-    ] {
-        let text = node.replace("KEY", line);
-        let key = line.split(' ').next().unwrap();
-        let why = refusal(&text, DEFAULTS);
-        assert_eq!(
-            why,
-            format!("local_cache.{key}: only a build node has a fill socket")
-        );
-    }
     for line in [
         "prefetch_concurrency = 1",
         "prefetch_queue = 10",

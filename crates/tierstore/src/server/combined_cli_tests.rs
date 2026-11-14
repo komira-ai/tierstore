@@ -131,7 +131,7 @@ cache  = true
 }
 
 /// Runs `serve_combined` on this disk, calls `work` with the address, then stops it.
-async fn serving<F, Fut>(
+pub(super) async fn serving<F, Fut>(
     settings: &CombinedSettings,
     disk: Arc<dyn Disk>,
     work: F,
@@ -368,3 +368,6 @@ fn check_config_of_a_combined_node_reads_its_key_files() {
     );
     assert!(!node.cache_dir().exists());
 }
+
+#[path = "combined_fill_socket_tests.rs"]
+mod fill_socket;
