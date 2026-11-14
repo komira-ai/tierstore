@@ -33,6 +33,11 @@
 //! refused. The cache's upstream is the proxy, which says what one version of an object is (see
 //! `Backend::same_version`).
 //!
+//! The cache also answers the fill socket (`local_cache.fill_socket`, `fill_socket_concurrency`,
+//! `fill_socket_wait`, as a build node's file has them; see
+//! [`config_fill`](super::config_fill)): the cache's upstream is the node's own proxy, so a fill
+//! of a blob that only the cold tier holds is read through it.
+//!
 //! What it refuses, besides what every file does: the refusals of a storage node's file, those of
 //! a build node's `[local_cache]` table, `write_through = false`, and a cache directory that is
 //! the directory of a `dir` tier, inside it or around it (the tier would list the cache's files
@@ -47,7 +52,7 @@ use std::path::{Component, Path, PathBuf};
 use super::cli::Cli;
 use super::config::{ConfigError, OciFlags, PerRun, ServerTable, TierTable, invalid, storage};
 use super::config_cache::{CachePart, LocalCacheTable, check_oci_is_kept};
-use super::config_fill::refuse_fill_keys;
+use super::config_fill::{check_fill_outside_cache, fill_socket_of, refuse_prefetch_keys};
 use super::config_interface::Interfaces;
 use super::config_policy::{Policy, check_policies, require_keeping};
 
@@ -58,6 +63,9 @@ pub(super) struct CombinedSettings {
     pub node: Cli,
     /// The cache in front of its proxy.
     pub cache: CachePart,
+    /// The fill socket (`local_cache.fill_socket`, else `fill.sock` in the state directory), or
+    /// none: the cache answers it with the proxy as its upstream.
+    pub fill_socket: Option<PathBuf>,
 }
 
 /// The settings of the tables of a file with `[hot_store]`, `[cold_store]` and `[local_cache]`.
@@ -75,13 +83,22 @@ pub(super) fn combined(
         let why = "a node that owns the data takes writes, and they pass through the cache so that its entries stay right: leave it out or give true";
         return Err(invalid("local_cache.write_through", why));
     }
-    refuse_fill_keys(&table)?;
+    refuse_prefetch_keys(&table)?;
+    let state_dir = per_run.state_dir.clone();
     let node = storage(server, tiers, fronts, per_run)?;
     overlap(&table.path, &node)?;
+    let fill_socket = fill_socket_of(&table, node.handoff.as_ref(), state_dir.as_deref())?;
+    if let Some(socket) = &fill_socket {
+        check_fill_outside_cache(socket, &table.path)?;
+    }
     let mut cache = CachePart::new(table, policy)?;
     cache.config.write_through = true;
     check_oci_is_kept(&oci_flags(&node), policy)?;
-    Ok(CombinedSettings { node, cache })
+    Ok(CombinedSettings {
+        node,
+        cache,
+        fill_socket,
+    })
 }
 
 /// The `oci` interfaces of the node, as the settings that stand for them.

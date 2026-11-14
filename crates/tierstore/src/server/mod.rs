@@ -371,6 +371,8 @@ mod cli_heartbeat_tests;
 #[cfg(test)]
 mod combined_cli_tests;
 #[cfg(test)]
+mod combined_fill_socket_tests;
+#[cfg(test)]
 mod combined_handoff_tests;
 #[cfg(test)]
 mod combined_order_tests;

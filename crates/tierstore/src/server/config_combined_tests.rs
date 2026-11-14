@@ -1,7 +1,9 @@
 //! The file of a storage node with a local cache in front of its proxy: what it makes, and what it
 //! refuses.
 
-use super::config::{from_text, settings_from_text};
+use std::path::PathBuf;
+
+use super::config::{PerRun, from_text, settings_from_text};
 use super::config_combined::CombinedSettings;
 use super::config_testing::{DEFAULTS, oci_interface};
 
@@ -234,4 +236,69 @@ fn a_combined_file_is_not_the_settings_of_a_storage_node() {
     assert!(settings.into_cache().is_none());
     let node = settings_from_text(NODE, DEFAULTS).unwrap();
     assert!(node.into_combined().is_none());
+}
+
+/// The run of a service whose state directory is `/var/lib/tierstore`.
+fn serviced() -> PerRun {
+    PerRun {
+        state_dir: Some(PathBuf::from("/var/lib/tierstore")),
+        ..DEFAULTS
+    }
+}
+
+fn with_cache_line(line: &str) -> String {
+    text().replacen(
+        "budget = \"40GiB\"",
+        &format!("budget = \"40GiB\"\n{line}"),
+        1,
+    )
+}
+
+/// Asserts that a combined node has no fill socket without a key or a state directory, has
+/// `fill.sock` in the state directory when it has one, and takes the path the key names over it;
+/// and that `fill_socket_concurrency` and `fill_socket_wait` size its pool. A file without these
+/// keys reads as it did.
+#[test]
+fn a_combined_node_places_and_sizes_its_fill_socket() {
+    use std::time::Duration;
+    assert_eq!(combined(&text()).fill_socket, None);
+    let made = settings_from_text(&text(), serviced()).unwrap();
+    let default = Some(PathBuf::from("/var/lib/tierstore/fill.sock"));
+    assert_eq!(made.into_combined().unwrap().fill_socket, default);
+    let named = with_cache_line("fill_socket = \"/run/tierstore/fill.sock\"");
+    let wanted = Some(PathBuf::from("/run/tierstore/fill.sock"));
+    assert_eq!(combined(&named).fill_socket, wanted);
+    let made = settings_from_text(&named, serviced()).unwrap();
+    assert_eq!(made.into_combined().unwrap().fill_socket, wanted);
+
+    let sized = with_cache_line("fill_socket_concurrency = 4\nfill_socket_wait = \"5s\"");
+    let cache = combined(&sized).cache;
+    assert_eq!(cache.config.fill_socket_concurrency, 4);
+    assert_eq!(cache.config.fill_socket_wait, Duration::from_secs(5));
+}
+
+/// Asserts what a fill socket path is refused for in a combined file: a relative path, the
+/// hand-off socket's path, and a path inside the cache directory.
+#[test]
+fn a_combined_node_refuses_a_fill_socket_it_cannot_bind() {
+    let relative = with_cache_line("fill_socket = \"fill.sock\"");
+    assert!(refusal(&relative).starts_with("local_cache.fill_socket: "));
+    let same = text().replacen(
+        "access_key_file = \"/etc/tierstore/access.key\"",
+        "access_key_file = \"/etc/tierstore/access.key\"\nhandoff_socket = \"/run/t/s.sock\"",
+        1,
+    );
+    let same = same.replacen(
+        "budget = \"40GiB\"",
+        "budget = \"40GiB\"\nfill_socket = \"/run/t/s.sock\"",
+        1,
+    );
+    let why = refusal(&same);
+    assert!(why.contains("server.handoff_socket too"), "{why}");
+    let inside = with_cache_line("fill_socket = \"/var/lib/tierstore-cache/obj/fill.sock\"");
+    let why = refusal(&inside);
+    assert!(
+        why.starts_with("local_cache.path: must not hold local_cache.fill_socket"),
+        "{why}"
+    );
 }

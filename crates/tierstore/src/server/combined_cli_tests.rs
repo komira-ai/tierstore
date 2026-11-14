@@ -131,7 +131,7 @@ cache  = true
 }
 
 /// Runs `serve_combined` on this disk, calls `work` with the address, then stops it.
-async fn serving<F, Fut>(
+pub(super) async fn serving<F, Fut>(
     settings: &CombinedSettings,
     disk: Arc<dyn Disk>,
     work: F,
