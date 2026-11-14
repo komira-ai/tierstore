@@ -22,13 +22,35 @@ pub(super) fn verify(c: &Ctx<'_, '_>, params: &Params, record: &Record) -> Resul
     }
     let next = next_of(record)?;
     let state = c.ports.units.state(next)?;
-    if state != UnitState::Active {
-        return Err(Done::fail(
-            Reason::NotReady,
-            format!("{} is {state:?}, not active", unit_name(next)),
-        ));
+    match state {
+        UnitState::Active => {}
+        // The new instance waits for the cache lock the old one holds until the old one drains:
+        // hostkeeper asks again, and ends the deferrals itself at `verify_deadline_secs`.
+        UnitState::Activating => {
+            return Err(Done::deferred(
+                Reason::NotReady,
+                format!("{} is still activating", unit_name(next)),
+                params.verify_retry_secs,
+            ));
+        }
+        other => {
+            return Err(Done::fail(
+                Reason::NotReady,
+                format!("{} is {other:?}, not active", unit_name(next)),
+            ));
+        }
     }
-    let mode = c.look().observed(target)?;
+    let mode = c.look().observed(target).map_err(|done| {
+        if done.report.reason == Some(Reason::NotReady) {
+            Done::deferred(
+                Reason::NotReady,
+                format!("{} does not answer /readyz yet", unit_name(next)),
+                params.verify_retry_secs,
+            )
+        } else {
+            done
+        }
+    })?;
     // `verified` follows its act: everything above was observed.
     if !record.has(Marker::Verified) {
         c.save(&record.with(Marker::Verified))?;
