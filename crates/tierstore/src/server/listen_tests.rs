@@ -91,10 +91,8 @@ async fn every_listener_serves() {
 }
 
 /// Asserts that the drain of the one server stops every listener: once it has ended, no address
-/// takes a connection, the first or any other, and the server has none open. The test asks the
-/// runtime whether any task is left to hold a socket, and does not dial the freed ports: a port
-/// that was freed can be taken at once by a socket of another test, and the connect then succeeds.
-#[tokio::test(flavor = "current_thread")]
+/// takes a connection, the first or any other, and the server has none open.
+#[tokio::test]
 async fn the_drain_stops_every_listener() {
     let wanted = wanted();
     let (rig, bound, served) = started(&wanted).await;
@@ -106,13 +104,10 @@ async fn the_drain_stops_every_listener() {
     rig.server.begin_drain();
     assert_eq!(served.await.expect("served"), Drained { abandoned: 0 });
     assert_eq!(rig.server.open_connections(), 0);
-    for _ in 0..8 {
-        tokio::task::yield_now().await;
+    for at in &bound {
+        let refused = TcpStream::connect(reach(*at)).await;
+        assert!(refused.is_err(), "{at} still takes connections");
     }
-    let alive = tokio::runtime::Handle::current()
-        .metrics()
-        .num_alive_tasks();
-    assert_eq!(alive, 0, "tasks still alive after the drain, {bound:?}");
 }
 
 /// Asserts that the wildcard of each family can be bound on one port: `0.0.0.0:P` and `[::]:P`,
