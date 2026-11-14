@@ -9,7 +9,6 @@ use reqwest::Client;
 use rustix::process::Signal;
 use tierstore::server::Drained;
 use tierstore::server::cli::{Addresses, Cli, run_serving};
-use tokio::net::TcpStream;
 use tokio::sync::oneshot;
 
 use crate::binary::{run, start};
@@ -45,8 +44,8 @@ fn cli(files: &Files, tables: &Tables) -> Cli {
 /// Asserts that `run_serving` binds a socket for each address of the `s3` interfaces and of the
 /// `oci` interfaces, says every address to `ready` (the first as `s3` and `oci`), serves the S3
 /// and the registry calls on all of them, and that the stop ends the one drain with nothing cut and
-/// closes every socket.
-#[tokio::test]
+/// leaves no task alive that could still hold a socket.
+#[tokio::test(flavor = "current_thread")]
 async fn every_address_is_served_and_drained_together() {
     let files = Files::new("listeners-all");
     let mut s3 = vec!["127.0.0.1:0", "0.0.0.0:0"];
@@ -90,15 +89,30 @@ async fn every_address_is_served_and_drained_together() {
             let status = answer.send().await.unwrap().status();
             assert_eq!(status, 200, "OCI at {at}");
         }
+        let alive = tokio::runtime::Handle::current()
+            .metrics()
+            .num_alive_tasks();
+        assert!(
+            alive > 0,
+            "no accept task is running, so the end proves nothing"
+        );
         stop.send(()).unwrap();
         bound
     };
     let (drained, bound) = tokio::join!(running, driving);
     assert_eq!(drained.unwrap(), Drained { abandoned: 0 });
-    for at in bound.s3_all.iter().chain(&bound.oci_all) {
-        let refused = TcpStream::connect(reach(*at)).await;
-        assert!(refused.is_err(), "{at} still takes connections");
+    // A listener is owned by the serving future and the accept tasks it spawned, and this test's
+    // runtime is its own: once the drain has returned and the tasks that were ending have run, a
+    // task that is still alive would be one still holding a socket. The kernel's refusal of a new
+    // connection is not asked: a port that was freed can be taken at once by a socket of another
+    // test, or by the dial itself, and then the connect succeeds.
+    for _ in 0..8 {
+        tokio::task::yield_now().await;
     }
+    let alive = tokio::runtime::Handle::current()
+        .metrics()
+        .num_alive_tasks();
+    assert_eq!(alive, 0, "tasks still alive after the drain, {bound:?}");
 }
 
 /// Asserts that an address given twice is refused before anything is bound or served, for an
