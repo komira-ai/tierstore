@@ -16,6 +16,9 @@
 //! - `launchd_label` (required with `service_manager = "launchd"`): the label of the one job;
 //! - `config_file` (optional here, required by the `prepare` that reads it): the path of the
 //!   node's tierstore configuration;
+//! - `verify_retry_secs` (optional, default [`DEFAULT_VERIFY_RETRY_SECS`]): the seconds
+//!   hostkeeper waits before it runs `verify` again when the new instance is still starting or
+//!   not yet answering. hostkeeper ends the deferrals itself at `verify_deadline_secs`;
 //! - `mode` (optional): the string `"restart"`, the one value accepted, which makes an update of
 //!   the systemd arm a plain restart even when both releases could hand their sockets over. Set
 //!   on a storage node whose hot tier is a `dir:` tier, where the lease's compare-and-swap is
@@ -49,6 +52,10 @@ pub const CONFIG_FILE_KEY: &str = "config_file";
 pub const MODE_KEY: &str = "mode";
 /// The one value [`MODE_KEY`] takes.
 pub const RESTART_MODE: &str = "restart";
+/// The key of the seconds before `verify` is asked again while the new instance starts.
+pub const VERIFY_RETRY_KEY: &str = "verify_retry_secs";
+/// The default of [`VERIFY_RETRY_KEY`].
+pub const DEFAULT_VERIFY_RETRY_SECS: u64 = 5;
 /// The value of [`SERVICE_MANAGER_KEY`] for systemd.
 pub const SYSTEMD: &str = "systemd";
 /// The value of [`SERVICE_MANAGER_KEY`] for launchd.
@@ -139,6 +146,8 @@ pub struct Params {
     pub config_file: Option<PathBuf>,
     /// Whether the params say `mode = "restart"`.
     pub declared_restart: bool,
+    /// Seconds hostkeeper waits before a deferred `verify` runs again (`verify_retry_secs`).
+    pub verify_retry_secs: u64,
 }
 
 impl Params {
@@ -209,6 +218,17 @@ impl Params {
             Some(toml::Value::String(text)) if text == RESTART_MODE => true,
             Some(_) => return Err(ParamsError::BadMode(MODE_KEY)),
         };
+        let verify_retry_secs = table
+            .get(VERIFY_RETRY_KEY)
+            .map(|value| {
+                value
+                    .as_integer()
+                    .and_then(|n| u64::try_from(n).ok())
+                    .filter(|n| *n > 0)
+                    .ok_or(ParamsError::NotNumber(VERIFY_RETRY_KEY))
+            })
+            .transpose()?
+            .unwrap_or(DEFAULT_VERIFY_RETRY_SECS);
         Ok(Params {
             staged_release,
             target_version,
@@ -217,6 +237,7 @@ impl Params {
             service_manager,
             config_file: path_of(&table, CONFIG_FILE_KEY)?,
             declared_restart,
+            verify_retry_secs,
         })
     }
 

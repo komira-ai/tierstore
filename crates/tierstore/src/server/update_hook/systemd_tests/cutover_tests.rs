@@ -214,23 +214,53 @@ fn verify_records_verified_and_run_again_writes_nothing() {
     assert!(!fake.log()[before..].iter().any(|line| line == "state.save"));
 }
 
-/// Asserts that `verify` needs the new instance to be active and the release to answer: an
-/// instance that is only activating, or a release that is mute, is `not_ready`; ports that fail
-/// are `unit_failed` and `state_io`.
+/// Asserts that `verify` defers, and does not fail, while the new instance is only activating
+/// (it waits for the cache lock the old instance holds until that drains) or the release does
+/// not answer yet: the answer is `not_ready` with the params' `verify_retry_secs`, 5 by default
+/// and as set when given, and the record is left as it was. This is an intended change: it
+/// failed `not_ready` and rolled the update back.
 #[test]
-fn verify_fails_when_the_new_instance_is_not_active_or_not_answering() {
+fn verify_defers_while_the_new_instance_is_activating_or_not_answering() {
     let p = params(NEW, Some(OLD));
     let fake = SystemdFake::installed();
     fake.drive(&p, &[Prepare, Cutover]);
     fake.set_unit(Instance::B, UnitState::Activating, Some(NEW), true);
+    let before = fake.record();
     let done = fake.run(Verify, &p);
-    assert_failed(&done, Reason::NotReady);
-    assert!(detail(&done).contains("Activating"), "{done:?}");
+    assert_deferred(&done, Reason::NotReady, 5);
+    assert!(detail(&done).contains("activating"), "{done:?}");
+    assert_eq!(fake.record(), before);
+
+    let tuned = params_with(NEW, Some(OLD), "verify_retry_secs = 9\n");
+    assert_deferred(&fake.run(Verify, &tuned), Reason::NotReady, 9);
 
     let fake = SystemdFake::installed();
     fake.drive(&p, &[Prepare, Cutover]);
     fake.mute(NEW);
-    assert_failed(&fake.run(Verify, &p), Reason::NotReady);
+    let done = fake.run(Verify, &p);
+    assert_deferred(&done, Reason::NotReady, 5);
+    assert!(detail(&done).contains("/readyz"), "{done:?}");
+    assert!(!fake.record().has(Marker::Verified));
+}
+
+/// Asserts that `verify` still fails `not_ready` when the new instance's unit is `failed`,
+/// `inactive` or `deactivating`, which no wait repairs, and that ports that fail are
+/// `unit_failed` and `state_io`.
+#[test]
+fn verify_fails_when_the_new_instance_is_failed_inactive_or_stopping() {
+    let p = params(NEW, Some(OLD));
+    for state in [
+        UnitState::Failed,
+        UnitState::Inactive,
+        UnitState::Deactivating,
+    ] {
+        let fake = SystemdFake::installed();
+        fake.drive(&p, &[Prepare, Cutover]);
+        fake.set_unit(Instance::B, state, Some(NEW), true);
+        let done = fake.run(Verify, &p);
+        assert_failed(&done, Reason::NotReady);
+        assert!(detail(&done).contains("not active"), "{done:?}");
+    }
 
     let fake = SystemdFake::installed();
     fake.drive(&p, &[Prepare, Cutover]);

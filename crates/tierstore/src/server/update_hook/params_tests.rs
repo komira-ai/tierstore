@@ -61,6 +61,7 @@ fn the_required_keys_are_read_and_the_rest_default() {
             service_manager: ServiceManager::Systemd,
             config_file: None,
             declared_restart: false,
+            verify_retry_secs: 5,
         }
     );
     assert!(params.first_install());
@@ -335,4 +336,20 @@ fn a_params_file_is_read_from_disk() {
     let missing = Params::read(&dir.path().join("none.toml")).unwrap_err();
     assert!(matches!(missing, ParamsError::Read(_)));
     assert!(missing.to_string().contains("cannot read the params file"));
+}
+
+/// Asserts that `verify_retry_secs` is 5 when absent, is read as a positive whole number, and
+/// that zero, a negative number, a float and a string are refused with the key named.
+#[test]
+fn the_verify_retry_is_a_positive_whole_number_of_seconds_and_defaults_to_five() {
+    assert_eq!(Params::parse(&with("")).unwrap().verify_retry_secs, 5);
+    let params = Params::parse(&with("verify_retry_secs = 12\n")).unwrap();
+    assert_eq!(params.verify_retry_secs, 12);
+    for bad in ["0", "-5", "1.5", "\"x\""] {
+        let why = refused(&with(&format!("verify_retry_secs = {bad}\n")));
+        assert!(
+            matches!(why, ParamsError::NotNumber("verify_retry_secs")),
+            "{bad}: {why}"
+        );
+    }
 }
