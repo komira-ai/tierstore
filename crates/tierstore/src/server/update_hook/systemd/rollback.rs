@@ -46,11 +46,15 @@ pub(super) fn rollback(c: &Ctx<'_, '_>, params: &Params, record: &Record) -> Res
     )))
 }
 
-/// A first install has no release to go back to: what `cutover` started is stopped, and the
-/// failure says so. The update stays on record with nothing done, so that a run again says the
+/// A first install has no release to go back to: what `cutover` started is stopped (an instance
+/// that is not running is left alone: hostkeeper takes the package, and with it the unit file,
+/// off the host before `rollback`, and `systemctl stop` of a unit that is no longer loaded
+/// fails), and the failure says so. The update stays on record with nothing done, so that a run again says the
 /// same and a later `prepare` may start afresh.
 fn first_install(c: &Ctx<'_, '_>, record: &Record, next: Instance) -> Result<Done, Done> {
-    c.ports.units.stop(next)?;
+    if c.ports.units.state(next)?.running() {
+        c.ports.units.stop(next)?;
+    }
     c.ports.markers.clear(next)?;
     if !record.markers.is_empty() {
         let mut bare = record.clone();
