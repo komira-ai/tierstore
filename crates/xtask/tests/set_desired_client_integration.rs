@@ -42,7 +42,7 @@ const CLIENT: &str = concat!(
     "/tests/set_desired_client/set-desired.yml"
 );
 /// The commit of komira-ai/hostkeeper the copy was taken at, the one `hostkeeper-desired.yml` pins.
-const CLIENT_COMMIT: &str = "cc1f624d8a01439a2468a2bde0773b49351739b3";
+const CLIENT_COMMIT: &str = "30141591c292d8881ce5bc16c9d0b3ba7fcfdca1";
 /// The SHA-256 of the copy's bytes.
 const CLIENT_SHA256: &str = "331a40823f75e2ff2f2b9c5689e3caa42a11125e7aa1f79c50a61229e5d71540";
 /// The version set in every case.

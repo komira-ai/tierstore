@@ -128,14 +128,14 @@ jobs:
     permissions:
       contents: read
       id-token: write
-    uses: komira-ai/hostkeeper/.github/workflows/set-desired.yml@cc1f624d8a01439a2468a2bde0773b49351739b3 # v0.1.312
+    uses: komira-ai/hostkeeper/.github/workflows/set-desired.yml@30141591c292d8881ce5bc16c9d0b3ba7fcfdca1 # v0.1.317
     with:
       service: tierstore
       host_group: all-in-one
       version: ${{ needs.check.outputs.package-version }}
       targets: ${{ needs.check.outputs.targets }}
-      hostkeeper_version: 0.1.312
-      hostkeeper_commit: cc1f624d8a01439a2468a2bde0773b49351739b3
+      hostkeeper_version: 0.1.317
+      hostkeeper_commit: 30141591c292d8881ce5bc16c9d0b3ba7fcfdca1
       coordinator_url: ${{ vars.HOSTKEEPER_COORDINATOR_URL }}
       coordinator_ca: ${{ vars.HOSTKEEPER_COORDINATOR_CA }}
       audience: tierstore-hostkeeper-desired

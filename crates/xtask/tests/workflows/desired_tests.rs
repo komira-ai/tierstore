@@ -251,21 +251,21 @@ const DEFECTS: &[(&str, &str, &str, &str)] = &[
     // The revision before the client could join the tailnet or take targets.
     (
         "set-desired",
-        "set-desired.yml@cc1f624d8a01439a2468a2bde0773b49351739b3",
+        "set-desired.yml@30141591c292d8881ce5bc16c9d0b3ba7fcfdca1",
         "set-desired.yml@32a9cc6f8242d0efbc3476391302062ff444dd47",
         "set-desired: `uses` is not",
     ),
     (
         "set-desired",
-        " # v0.1.312",
+        " # v0.1.317",
         " # v0.1.44",
-        "set-desired: the pin's comment names Some(\"0.1.44\"), not v0.1.312",
+        "set-desired: the pin's comment names Some(\"0.1.44\"), not v0.1.317",
     ),
     (
         "set-desired",
-        " # v0.1.312",
+        " # v0.1.317",
         "",
-        "set-desired: the pin's comment names None, not v0.1.312",
+        "set-desired: the pin's comment names None, not v0.1.317",
     ),
     (
         "set-desired",
@@ -322,13 +322,13 @@ const DEFECTS: &[(&str, &str, &str, &str)] = &[
     ),
     (
         "set-desired",
-        "hostkeeper_version: 0.1.312",
+        "hostkeeper_version: 0.1.317",
         "hostkeeper_version: 0.1.183",
-        "set-desired: with.hostkeeper_version is Some(\"0.1.183\"), not \"0.1.312\"",
+        "set-desired: with.hostkeeper_version is Some(\"0.1.183\"), not \"0.1.317\"",
     ),
     (
         "set-desired",
-        "hostkeeper_commit: cc1f624d8a01439a2468a2bde0773b49351739b3",
+        "hostkeeper_commit: 30141591c292d8881ce5bc16c9d0b3ba7fcfdca1",
         "hostkeeper_commit: 0123456789abcdef0123456789abcdef01234567",
         "set-desired: with.hostkeeper_commit",
     ),

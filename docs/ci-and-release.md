@@ -524,7 +524,7 @@ withdrawn), so the targets have no `macos-arm64` list and a Mac is ordered nothi
 and keeps what it runs. No release index is sent.
 
 The `set-desired` job then calls hostkeeper's CI client (`set-desired.yml` of
-komira-ai/hostkeeper, pinned to v0.1.312, whose hkctl sends the targets as they are, the `apt`
+komira-ai/hostkeeper, pinned to v0.1.317, whose hkctl sends the targets as they are, the `apt`
 entries included; the call names the host group `all-in-one`, the Linux build nodes, so the version
 is one deployment to that group and the wait is on that group alone, and the coordinator's
 allow-list entry for this repository must admit that group), which proves that hostkeeper release,
