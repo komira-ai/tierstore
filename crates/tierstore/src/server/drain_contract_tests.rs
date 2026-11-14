@@ -543,7 +543,11 @@ async fn assert_serving_through_the_settle(shape: Shape, handoff: bool) {
 }
 
 /// Asserts that once the settle is over and the run has returned, a connect to either front is
-/// refused by the kernel ([`NEW`] of them), or, under a hand-off, is answered by the successor.
+/// answered by the successor under a hand-off ([`NEW`] to each front), and, without one, no task
+/// is left alive that could still hold the sockets.
+/// Without a hand-off the freed ports are not dialled: a freed port can be taken at once by a
+/// socket of another test, and the connect then succeeds. The test asks the runtime instead
+/// whether any task is left that could hold a socket.
 async fn assert_listener_after_the_settle(shape: Shape, handoff: bool) {
     let rig = Rig::new(shape).await;
     let spec = Spec {
@@ -559,6 +563,15 @@ async fn assert_listener_after_the_settle(shape: Shape, handoff: bool) {
             assert_eq!((new.s3, new.oci), (players.old.s3, players.old.oci));
         }
         let oci = players.old.oci.expect("an OCI front");
+        if !handoff {
+            for _ in 0..8 {
+                tokio::task::yield_now().await;
+            }
+            let alive = tokio::runtime::Handle::current()
+                .metrics()
+                .num_alive_tasks();
+            return (ended, 0, 0, alive);
+        }
         let (mut refused, mut answered) = (0, 0);
         for _ in 0..NEW {
             for (at, path) in [(players.old.s3, "/healthz"), (oci, "/v2/")] {
@@ -576,16 +589,16 @@ async fn assert_listener_after_the_settle(shape: Shape, handoff: bool) {
                 }
             }
         }
-        (ended, refused, answered)
+        (ended, refused, answered, 0)
     })
     .await;
-    let (ended, refused, answered) = played.out;
+    let (ended, refused, answered, alive) = played.out;
     assert_eq!(ended, Ok(Drained { abandoned: 0 }));
     assert_eq!(played.old, Some(ended));
     if handoff {
         assert_eq!((refused, answered), (0, 2 * NEW));
     } else {
-        assert_eq!((refused, answered), (2 * NEW, 0));
+        assert_eq!(alive, 0, "tasks still alive after the stop");
     }
 }
 
@@ -641,7 +654,7 @@ macro_rules! contract {
                 assert_serving_through_the_settle(Shape::$shape, true).await;
             }
 
-            #[doc = concat!("Asserts (T31c) that, once ", $what, " has been stopped by its stop future and has returned with nothing cut, every connect to its S3 and OCI addresses (sixteen) is refused by the kernel, and none is accepted.")]
+            #[doc = concat!("Asserts (T31c) that, once ", $what, " has been stopped by its stop future and has returned with nothing cut, no task is left alive that could still hold its S3 or OCI socket.")]
             #[tokio::test]
             async fn stop_then_the_kernel_refuses_connects() {
                 assert_listener_after_the_settle(Shape::$shape, false).await;
