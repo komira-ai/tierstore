@@ -221,7 +221,8 @@ impl Beater {
     }
 }
 
-/// Beats, then waits for `period` through `sleeper`, until the stop is signalled. A stop that
+/// Beats, then waits through `sleeper` for what is left of `period` since the beat began, until
+/// the stop is signalled. A stop that
 /// comes during a beat ends the loop after that beat.
 async fn run(
     mut beater: Beater,
@@ -230,12 +231,17 @@ async fn run(
     mut stop: watch::Receiver<bool>,
 ) {
     loop {
-        // A beat that fails is tried again after the period, and says nothing else: `live_until`
-        // does not move, which is what the failure means.
+        // A beat that fails is tried again, and says nothing else: `live_until` does not move,
+        // which is what the failure means. The period runs from the start of a beat, so one that
+        // was cut after its limit (a store that holds the call, as one with a stalled disk does)
+        // is followed at once and not a whole period later; a beat that is quick waits the rest of
+        // the period, as before.
+        let started = beater.mono.now();
         let _ = beater.beat().await;
         beater.look_at_format().await;
+        let took = Duration::from_millis(beater.mono.now().saturating_sub(started));
         let stopped = Box::pin(stop.changed());
-        let waited = Box::pin(sleeper.sleep(period));
+        let waited = Box::pin(sleeper.sleep(period.saturating_sub(took)));
         if matches!(select(stopped, waited).await, Either::Left(_)) {
             return;
         }
