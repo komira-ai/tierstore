@@ -107,7 +107,7 @@ These four are gauges, measured when `/metricz` is read.
 
 | name | type | what it is |
 |---|---|---|
-| `tierstore_cache_bytes` | gauge | bytes of objects in the cache |
+| `tierstore_cache_bytes` | gauge | bytes of objects in the cache, and the filled bytes of the entries by extents (a pack of which only some ranges are in the cache) |
 | `tierstore_cache_objects` | gauge | objects in the cache |
 | `tierstore_cache_fs_free_bytes` | gauge | free bytes of the file system of the cache directory |
 | `tierstore_cache_staging_files` | gauge | files in the stage directory now: fills that are running |
@@ -146,7 +146,7 @@ A build node's cache is read-write when its process holds the lock of the cache 
 |---|---|---|---|
 | `tierstore_cache_mode` | gauge | `mode`: `read_only`, `read_write` | one series for each mode: 1 for the mode the cache is in now, 0 for the other |
 
-In a read-only process the families of fills, evictions and pinned skips stay at 0, `tierstore_cache_staging_files` is 0, and `tierstore_cache_discarded_at_start_total` is 0 (a read-only start deletes nothing); it counts what the process deletes when it takes the lock. `tierstore_cache_bytes` and `tierstore_cache_objects` are the scan the process made until it takes the lock. Two processes over one directory count the same directory and the same file system twice in `tierstore_cache_bytes`, `tierstore_cache_objects` and `tierstore_cache_fs_free_bytes`: read the gauges of the directory from the process whose mode is `read_write`. The counters of hits, misses and bytes served are each process's own, and their sum is right.
+In a read-only process the families of fills, evictions and pinned skips stay at 0, `tierstore_cache_staging_files` is 0, and `tierstore_cache_discarded_at_start_total` is 0 (a read-only start deletes nothing); it counts what the process deletes when it takes the lock. `tierstore_cache_bytes` and `tierstore_cache_objects` are the scan the process made until it takes the lock; that scan reads `obj/` only, so entries by extents are not in them in a read-only process. Two processes over one directory count the same directory and the same file system twice in `tierstore_cache_bytes`, `tierstore_cache_objects` and `tierstore_cache_fs_free_bytes`: read the gauges of the directory from the process whose mode is `read_write`. The counters of hits, misses and bytes served are each process's own, and their sum is right.
 
 ### The check of an old hit
 

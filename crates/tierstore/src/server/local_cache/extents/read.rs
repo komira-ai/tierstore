@@ -86,6 +86,10 @@ pub(in crate::server::local_cache) fn build_index(
 
 /// Where the bytes of a range are: the file of the pack and the place in it. The span is the
 /// pack's own bytes, not a copy.
+///
+/// The path is good only until the entry is made whole (its file in `extents-v1/` is then
+/// removed for the pack's file in `obj/`), evicted or dropped. A caller that gets `ENOENT` on it
+/// asks again with [`LocalCache::span_of`]; a file it has open stays readable.
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub struct Span {
     /// The file that holds the range: the pack's file in `obj/` if the pack is whole in the

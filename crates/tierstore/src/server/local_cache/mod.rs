@@ -106,8 +106,8 @@
 //!
 //! # Eviction
 //!
-//! The cache keeps its objects under `budget` bytes. Above `high_water` percent of it, and whenever the file system's
-//! free space is under `free_floor` percent, a pass ([`LocalCache::evict`]) removes the least recently used objects
+//! The cache keeps its objects, and the filled bytes of its entries by extents, under `budget` bytes. Above `high_water` percent of it, and whenever the file system's
+//! free space is under `free_floor` percent, a pass ([`LocalCache::evict`]) removes the least recently used objects and entries
 //! until the cache is down to `low_water` percent and the free space is back at the floor. The order of use is in
 //! memory, seeded at start from the files' times and written back to them (`utimensat`, once per object per pass
 //! however often it was used) so that a restart keeps it. An object with more than one link is in use by another tree:

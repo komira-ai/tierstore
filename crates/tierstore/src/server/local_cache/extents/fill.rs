@@ -90,11 +90,12 @@ impl Drop for Place {
 }
 
 /// A fill's hold of an entry: the entry is not evicted while one is held, and an entry that has
-/// no range when the last hold ends is removed.
-struct Holding {
-    inner: Arc<Inner>,
-    hex: String,
-    serial: u64,
+/// no range when the last hold ends is removed. An entry that a delete or a new version removed
+/// while the fill ran leaves no files: the fill may have made its data file after the removal.
+pub(super) struct Holding {
+    pub(super) inner: Arc<Inner>,
+    pub(super) hex: String,
+    pub(super) serial: u64,
 }
 
 impl Drop for Holding {
@@ -102,6 +103,8 @@ impl Drop for Holding {
         let mut index = locked(&self.inner.index);
         if index.extent_release(&self.hex, self.serial) {
             let _ = index.extent_drop(&self.hex);
+            files::remove(&self.inner.config.path, &self.hex);
+        } else if index.partials.get(&self.hex).is_none() {
             files::remove(&self.inner.config.path, &self.hex);
         }
     }
@@ -370,7 +373,7 @@ impl Inner {
 
     /// The data file of the entry, opened for writing, made as a sparse file of `size` bytes if
     /// it is not there.
-    async fn extent_file(&self, hex: &str, size: u64) -> Result<Arc<File>, RangeError> {
+    pub(super) async fn extent_file(&self, hex: &str, size: u64) -> Result<Arc<File>, RangeError> {
         let (root, hex) = (self.config.path.clone(), hex.to_owned());
         let file = blocking(move || -> std::io::Result<File> {
             files::make(&root, &hex)?;

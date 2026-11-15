@@ -900,3 +900,32 @@ async fn a_chunk_inside_held_bytes_is_not_written() {
     assert_eq!(file[..3000], pack.bytes()[..3000]);
     assert_eq!(sidecar(&rig, &pack).extents, vec![[0, 3000]]);
 }
+
+/// Asserts that a fill whose entry was deleted after it took its hold, and that then made the
+/// data file, leaves no file behind when the hold ends: the entry is gone and so is its data.
+#[tokio::test]
+async fn a_hold_that_ends_on_a_removed_entry_removes_the_data_file_it_made() {
+    let rig = Rig::new("tsext-orphan");
+    let pack = pack_in(&rig).await;
+    fill(&rig, &pack, 0, 100).await.unwrap();
+    let hex = name_of(&pack.key).hex;
+    let object = locked(&rig.cache.inner.index)
+        .partials
+        .get(&hex)
+        .map(|entry| entry.object.clone())
+        .unwrap();
+    let serial = locked(&rig.cache.inner.index)
+        .extent_hold(&hex, &object)
+        .unwrap();
+    let hold = super::fill::Holding {
+        inner: std::sync::Arc::clone(&rig.cache.inner),
+        hex: hex.clone(),
+        serial,
+    };
+    rig.cache.inner.forget(&pack.key);
+    rig.cache.inner.extent_file(&hex, 6000).await.unwrap();
+    assert!(data(&rig, &pack).exists());
+    drop(hold);
+    assert!(!data(&rig, &pack).exists());
+    assert_eq!(rig.cache.extents_held(), (0, 0));
+}
