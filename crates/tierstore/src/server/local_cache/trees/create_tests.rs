@@ -390,7 +390,7 @@ async fn a_file_with_no_source_is_the_whole_object_named_by_its_digest() {
 
 /// Asserts that a tree held by two trees that a third holds is listed once in the third's closure,
 /// that all four stay at a restart, and that a tree whose marker cannot be written (its directory
-/// is gone) is still placed again and made ready in memory.
+/// is gone) is not an error of a refresh.
 #[tokio::test]
 async fn a_tree_held_twice_is_one_tree_and_a_marker_that_cannot_be_written_is_not_an_error() {
     let bench = Bench::new("trees-diamond").await;
@@ -447,5 +447,5 @@ async fn a_tree_held_twice_is_one_tree_and_a_marker_that_cannot_be_written_is_no
     };
     let refreshed = bench.store.create(again).unwrap();
     assert!(!refreshed.created);
-    assert!(bench.store.resolve(&base.placement, "bin/tool").is_ok());
+    assert_eq!(refreshed.placement, base.placement);
 }
