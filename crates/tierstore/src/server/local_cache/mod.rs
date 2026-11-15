@@ -150,6 +150,7 @@ mod scrub;
 mod selfcheck;
 mod source;
 mod stream;
+pub mod trees;
 mod write;
 
 #[cfg(test)]

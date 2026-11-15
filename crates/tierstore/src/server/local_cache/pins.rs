@@ -16,9 +16,9 @@
 //! - [`LocalCache::unpin`] takes away every pin of a tree.
 //! - [`LocalCache::pins_live`] takes away every pin of another mount and of a tree not in the
 //!   list: the pins never outlive their mount or their attachment. The pins of a hold (module
-//!   `holds`) are the one exception: they have an owner of their own, are not in the file below,
-//!   and end with their hold. A `pin` of a mount for a tree a hold lists moves the hold's pins on
-//!   it to that mount.
+//!   `holds`) and of a created tree (module `trees`) are the exception: they have an owner of
+//!   their own, are not in the file below, and end with their hold or their tree. A `pin` of a
+//!   mount for a tree a hold lists moves the hold's pins on it to that mount.
 //!
 //! A pinned object is skipped by the eviction pass and counted in `pin_skips`; it stays charged
 //! to the budget. Removals that are not eviction (the scrub finding bad bytes, a revalidation, a
@@ -43,7 +43,7 @@ use thiserror::Error;
 
 use super::index::Index;
 use super::layout::is_digest;
-use super::pin_set::{HOLD_MOUNT, Owner, Pinned, PinsFile};
+use super::pin_set::{HOLD_MOUNT, Owner, Pinned, PinsFile, TREE_MOUNT};
 use super::{CacheConfig, Inner, LocalCache, locked};
 
 /// The name of the pins file in the cache directory.
@@ -64,6 +64,9 @@ pub enum PinError {
     /// The mount id is the one that holds pin under, which no caller may name.
     #[error("the mount id {0:?} is reserved for holds")]
     ReservedMount(String),
+    /// The mount id is the one that created trees pin under, which no caller may name.
+    #[error("the mount id {0:?} is reserved for created trees")]
+    ReservedForTrees(String),
 }
 
 /// What [`LocalCache::pin`] did with the blobs of a request.
@@ -77,13 +80,13 @@ pub struct PinAnswer {
     pub absent: usize,
 }
 
-/// Refuses the mount id that holds pin under: only the cache's holds name it, so that no request
-/// makes pins that nothing ends.
+/// Refuses the mount ids that holds and created trees pin under: only the cache's holds and tree
+/// store name them, so that no request makes pins that nothing ends.
 fn not_reserved(mount: &str) -> Result<(), PinError> {
-    if mount == HOLD_MOUNT {
-        Err(PinError::ReservedMount(mount.to_owned()))
-    } else {
-        Ok(())
+    match mount {
+        HOLD_MOUNT => Err(PinError::ReservedMount(mount.to_owned())),
+        TREE_MOUNT => Err(PinError::ReservedForTrees(mount.to_owned())),
+        _ => Ok(()),
     }
 }
 

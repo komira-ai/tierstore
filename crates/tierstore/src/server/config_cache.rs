@@ -87,6 +87,7 @@ use super::config_tuning::S3Client;
 use super::config_units::{Dur, Size, parse_size};
 use super::front::FrontSettings;
 use super::handoff::Handoff;
+use super::local_cache::trees::TreesConfig;
 use super::local_cache::{CacheConfig, SCRUB_MIN_ROUND, SCRUB_RATE};
 
 /// The only layout of the cache directory.
@@ -278,6 +279,8 @@ pub(super) struct CacheSettings {
     pub handoff: Option<Handoff>,
     /// The fill socket (`local_cache.fill_socket`), or none.
     pub fill_socket: Option<std::path::PathBuf>,
+    /// The node-local trees (`[trees]`; the defaults if the file has none).
+    pub trees: TreesConfig,
 }
 
 /// The percent in `value`, or `default`, from `low` to `high`.
@@ -442,6 +445,7 @@ impl CacheSettings {
         fronts: Interfaces,
         policy: &[Policy],
         per_run: PerRun,
+        trees: TreesConfig,
     ) -> Result<Self, ConfigError> {
         let (table, cold) = tables;
         check_policies(policy, true)?;
@@ -478,6 +482,7 @@ impl CacheSettings {
             scrub_rate: part.scrub_rate,
             handoff,
             fill_socket,
+            trees,
         })
     }
 }

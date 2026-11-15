@@ -18,6 +18,17 @@ pub(super) const SAVE_EVERY: u64 = 1000;
 /// are not in the file, and `pins_live` leaves them.
 pub(super) const HOLD_MOUNT: &str = "hold";
 
+/// The mount of the owners that are created trees (see the module `trees`): as the holds', their
+/// pins are in memory only, are not in the file, and `pins_live` leaves them. The tree store
+/// pins again what it keeps when it starts.
+pub(super) const TREE_MOUNT: &str = "tree";
+
+/// Whether pins of `mount` are the cache's own, kept in memory and out of the file: a hold's or a
+/// created tree's.
+pub(super) fn is_internal(mount: &str) -> bool {
+    mount == HOLD_MOUNT || mount == TREE_MOUNT
+}
+
 /// The holder of a pin: a tree attached on a mount.
 #[derive(Clone, Debug, PartialEq, Eq, PartialOrd, Ord)]
 pub(super) struct Owner {
@@ -177,12 +188,12 @@ impl PinSet {
     }
 
     /// Takes away the pins of every owner that is not a tree of `mount` in `trees`, except the
-    /// owners that are holds; gives the number of owners dropped.
+    /// owners that are holds or created trees; gives the number of owners dropped.
     pub(super) fn retain_live(&mut self, mount: &str, trees: &[String]) -> usize {
         let dead: Vec<Owner> = self
             .by_owner
             .keys()
-            .filter(|owner| owner.mount != HOLD_MOUNT)
+            .filter(|owner| !is_internal(&owner.mount))
             .filter(|owner| owner.mount != mount || !trees.contains(&owner.tree))
             .map(|owner| Owner::clone(owner))
             .collect();
@@ -219,12 +230,12 @@ impl PinSet {
     }
 
     /// The pins as a file holds them, the trees in order and their blobs in order; the pins of
-    /// holds are not in it.
+    /// holds and of created trees are not in it.
     pub(super) fn to_file(&self) -> PinsFile {
         let trees = self
             .by_owner
             .iter()
-            .filter(|(owner, _)| owner.mount != HOLD_MOUNT)
+            .filter(|(owner, _)| !is_internal(&owner.mount))
             .map(|(owner, blobs)| TreePins {
                 mount: owner.mount.clone(),
                 tree: owner.tree.clone(),

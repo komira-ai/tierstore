@@ -15,6 +15,7 @@ use super::config::{File, ServerTable, TierTable};
 use super::config_cache::LocalCacheTable;
 use super::config_interface::OciTable;
 use super::config_policy::Policy;
+use super::local_cache::trees::TreesTable;
 
 /// A deserializer that is asked for a struct and answers with the names of its fields, which is
 /// all the derive of `Deserialize` tells a deserializer about it.
@@ -79,6 +80,7 @@ pub(super) fn unknown_key_warnings(file: &toml::Table) -> Vec<String> {
             "hot_store" | "cold_store" => fields_of::<TierTable>(),
             "oci" => fields_of::<OciTable>(),
             "local_cache" => fields_of::<LocalCacheTable>(),
+            "trees" => fields_of::<TreesTable>(),
             "policy" => fields_of::<Policy>(),
             // An `[[interface]]` entry keeps refusing a key it does not have: see `config_interface`.
             "interface" => continue,

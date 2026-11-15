@@ -123,6 +123,9 @@ impl Mode {
     /// The mode of a directory with none given, and of the root: 0755.
     pub const DIR: Self = Self(0o755);
 
+    /// The mode a symbolic link is served with, as one always is: 0777. It is in no record.
+    pub const SYMLINK: Self = Self(0o777);
+
     /// The mode with these bits, or [`RecordError::ModeTooLarge`] for a bit above 07777.
     pub fn new(bits: u16) -> Result<Self, RecordError> {
         if bits > 0o7777 {

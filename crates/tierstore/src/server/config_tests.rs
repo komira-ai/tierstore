@@ -773,7 +773,7 @@ fn retired_keys_names_each_retired_key_a_hot_store_sets() {
     )
     .unwrap();
     assert_eq!(
-        super::retired_keys(&table),
+        super::super::config_hot_only::retired_keys(&table),
         [
             "hot_store.journal_linger",
             "hot_store.journal_retention",
@@ -786,7 +786,7 @@ fn retired_keys_names_each_retired_key_a_hot_store_sets() {
         ]
     );
     let none: super::TierTable = toml::from_str("kind = \"memory\"\nlease_ttl = \"1s\"").unwrap();
-    assert!(super::retired_keys(&none).is_empty());
+    assert!(super::super::config_hot_only::retired_keys(&none).is_empty());
 }
 
 /// Asserts that a storage node's settings are made of the text with `Cli::from_config_text`, and

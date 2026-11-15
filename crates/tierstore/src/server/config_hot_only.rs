@@ -87,3 +87,46 @@ pub(super) fn refuse_hot_keys(cold: &TierTable) -> Result<(), ConfigError> {
     refuse("cold_store", "only [hot_store] has it", &cold_has)?;
     refuse_marks_keys(cold)
 }
+
+/// The retired keys of `[hot_store]` that `hot` sets, as `hot_store.<key>`: the keys of the
+/// journal and of the journal reconciler (`journal_linger`, `journal_retention`,
+/// `reconcile_interval`, `registration_retention`, `journal_batch_entries`, `journal_page_size`,
+/// `copy_rounds` and `delete_rounds`).
+pub(super) fn retired_keys(hot: &TierTable) -> Vec<&'static str> {
+    let set = [
+        ("hot_store.journal_linger", hot.journal_linger.is_some()),
+        (
+            "hot_store.journal_retention",
+            hot.journal_retention.is_some(),
+        ),
+        (
+            "hot_store.reconcile_interval",
+            hot.reconcile_interval.is_some(),
+        ),
+        (
+            "hot_store.registration_retention",
+            hot.registration_retention.is_some(),
+        ),
+        (
+            "hot_store.journal_batch_entries",
+            hot.journal_batch_entries.is_some(),
+        ),
+        (
+            "hot_store.journal_page_size",
+            hot.journal_page_size.is_some(),
+        ),
+        ("hot_store.copy_rounds", hot.copy_rounds.is_some()),
+        ("hot_store.delete_rounds", hot.delete_rounds.is_some()),
+    ];
+    set.into_iter()
+        .filter_map(|(key, given)| given.then_some(key))
+        .collect()
+}
+
+/// Says on the operator's stderr, once for each key, that a retired key of `[hot_store]` is
+/// accepted and ignored: a file written for the releases before the entries still starts.
+pub(super) fn warn_retired_keys(hot: &TierTable) {
+    for key in retired_keys(hot) {
+        tracing::warn!("tierstore: {key} is ignored: the journal and its reconciler were removed");
+    }
+}
