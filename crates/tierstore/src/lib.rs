@@ -204,6 +204,9 @@ mod tiered;
 mod tree_manifest;
 #[cfg(test)]
 mod tree_manifest_tests;
+mod tree_record;
+#[cfg(test)]
+mod tree_record_tests;
 
 pub use backend::{
     Backend, ByteRange, Listed, Meta, OpenUpload, Opened, PartBody, PutAnswer, ReadBody, Span,
@@ -250,4 +253,8 @@ pub use tiered::{
 pub use tree_manifest::{
     BlobSource, EntryKind, MAX_DEPTH, MAX_ENTRIES, MAX_MANIFEST_BYTES, TreeChild, TreeDigest,
     TreeEntry, TreeError, TreeManifest, flatten, parse_manifest,
+};
+pub use tree_record::{
+    BuiltFile, BuiltTree, Mode, NewEntry, NewKind, RecordChild, RecordError, TreeLimits,
+    TreeRecord, build_tree,
 };
