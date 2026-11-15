@@ -5,6 +5,7 @@ use std::sync::Arc;
 use std::time::Duration;
 
 use super::handover::PIECES_QUEUED;
+use super::local_cache::trees::TreeStore;
 use super::{
     AccessKey, GcKey, ListenTuning, LocalCache, OCI_HANDSHAKE, PresignKey, ScopedKey, oci,
 };
@@ -111,6 +112,9 @@ pub struct ServerConfig {
     /// its body is read, and `/metricz` shows the cache's counters. The binary sets the cache it
     /// serves, which is also the server's backend.
     pub cache: Option<LocalCache>,
+    /// The node-local trees kept beside `cache`: none by default, and on a node whose file has no
+    /// `[trees]` table. The binary sets the store it opens with the cache.
+    pub trees: Option<TreeStore>,
     /// Whether a server that is the front of a local cache takes writes: false by default, and
     /// then the refusal of `cache` stands, before the role of the key is looked at. With it the
     /// roles of the keys decide, as on a storage node. It does nothing without `cache`. The
@@ -180,6 +184,7 @@ impl ServerConfig {
             drain_deadline: Duration::from_secs(900),
             proxy: None,
             cache: None,
+            trees: None,
             cache_writes: false,
             usage_stale_after: Duration::from_secs(120),
             oci_metrics: None,

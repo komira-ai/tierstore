@@ -66,6 +66,7 @@ use super::fill_socket;
 use super::front::{InvalidFlags, server_config};
 use super::handoff::Handoff;
 use super::listen::{LoopbackBind, bind_set, bind_with, joined};
+use super::local_cache::trees::{TreeStore, TreesConfig};
 use super::local_cache::{CacheConfig, Disk, Every, LocalCache, Mode, SystemDisk, check_local};
 use super::oci::OciListener;
 use super::stop_watcher::{oci_cut_note, serve_fronts, serve_oci, stop_watcher};
@@ -239,6 +240,7 @@ pub(super) async fn serve_cache(
         beating: None,
         handoff: settings.handoff.as_ref(),
         fill_socket: settings.fill_socket.as_deref(),
+        trees: Some(settings.trees.clone()),
     };
     serve_front(
         cache,
@@ -274,6 +276,9 @@ pub(super) struct Fronts<'a> {
     /// The fill socket (`local_cache.fill_socket`), bound while the cache holds the lock of its
     /// directory (see [`fill_socket`](super::fill_socket)); none for a node without one.
     pub(super) fill_socket: Option<&'a std::path::Path>,
+    /// The node-local trees (`[trees]`), kept beside the cache; none for a node whose file has no
+    /// such table (a storage node with a cache).
+    pub(super) trees: Option<TreesConfig>,
 }
 
 /// Serves the S3 front (and the OCI front, if there is a setup) over `cache`, with the loops of
@@ -300,6 +305,17 @@ pub(super) async fn serve_front(
     beside: impl Future<Output = ()>,
 ) -> Result<Drained, Error> {
     config.cache = Some(cache.clone());
+    let trees = fronts
+        .trees
+        .map(|trees| TreeStore::open(cache.clone(), trees))
+        .transpose()
+        .map_err(|why| {
+            format!(
+                "opening the trees at {}: {why}",
+                cache.config().path.display()
+            )
+        })?;
+    config.trees.clone_from(&trees);
     let listen = config.listen;
     // The registry front reads what the S3 front reads: through the cache.
     let backend: Arc<dyn Backend> = Arc::new(cache.clone());
@@ -326,14 +342,15 @@ pub(super) async fn serve_front(
     let (watcher, oci_stopped) = stop_watcher(stop, Arc::clone(&server), oci_drain, fronts.lb_wait);
     // One Notify for each loop: `notify_one` wakes one waiter, and keeps the wake for a loop that
     // is not waiting just now.
-    let halts: [Arc<Notify>; 5] = [
+    let halts: [Arc<Notify>; 6] = [
+        Arc::new(Notify::new()),
         Arc::new(Notify::new()),
         Arc::new(Notify::new()),
         Arc::new(Notify::new()),
         Arc::new(Notify::new()),
         Arc::clone(&fronts.beside_halt),
     ];
-    let [halt, lock_halt, scrub_halt, fill_halt, _] = halts.clone();
+    let [halt, lock_halt, scrub_halt, fill_halt, trees_halt, _] = halts.clone();
     let beating = fronts.beating.clone();
     let serving = async move {
         let after = async {
@@ -375,8 +392,21 @@ pub(super) async fn serve_front(
             tracing::debug!("tierstore: fill socket ended");
         }
     };
-    let ((drained, oci_cut), (), (), (), (), ()) =
-        tokio::join!(serving, beside, maintaining, holding, scrubbing, filling);
+    let sweeping = async {
+        if let Some(trees) = &trees {
+            trees.maintain(loops.pass, trees_halt).await;
+            tracing::debug!("tierstore: trees ended");
+        }
+    };
+    let ((drained, oci_cut), (), (), (), (), (), ()) = tokio::join!(
+        serving,
+        beside,
+        maintaining,
+        holding,
+        scrubbing,
+        filling,
+        sweeping
+    );
     watcher.abort();
     super::build_info::stderr_log::notes(&cut_note(drained));
     super::build_info::stderr_log::notes(&oci_cut_note(oci_cut));

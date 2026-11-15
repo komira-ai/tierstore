@@ -383,6 +383,32 @@ The read cache of a build node, or of a storage node that keeps it in front of i
 
 The upstream is `[cold_store]`, with any `kind`. In place of `endpoint` it may have a list `endpoints`, whose addresses the upstream requests go to in turn. With `write_through = true` the node takes create-only puts, plain puts, presigned puts, multipart uploads and deletes, and sends each to the upstream before it answers; the keys' roles apply as on a storage node, and a put that replaces on a tag (`If-Match`) and a copy are still refused. A plain `PUT` (no `If-None-Match`) is sent to the upstream as a plain put, with no HEAD before it, and replaces the object where the upstream replaces: a proxy whose format is `active-marks`, or an S3 bucket (a proxy on the entry protocol creates only, and refuses a key it holds with 412, as it does for any plain put). A put under a `cache = true` prefix, create-only or plain, is also kept on the node before it is answered, so its next read is a local hit; a plain put forgets the node's older copy of the key, also when the upstream refuses it, and keeps the new one under the tag the upstream answered. A copy that cannot be kept never fails the put; two puts of one key that run at once on the node, one of them plain, keep no copy, and the next read fills it. A build node leaves out `skip_checks` and the reconciler's keys and `server.backend_check_wait`. It may have an `oci` interface (an `[[interface]]` with `type = "oci"`): the registry front then reads through the cache, and the start refuses the file unless a `[[policy]]` with `cache = true` covers the blobs, the keys under `blobs/sha256/` below `params.prefix`.
 
+## `[trees]`
+
+The node-local trees of a build node (designed in `docs/design/node-local-trees.md` of the repository): a tree is a directory structure whose files are spans of packs in the cache, made by one create call and placed at locations of the S3 front or of `tierstore fs`. The table is the build node's, a file with `[local_cache]` and `[cold_store]` and no `[hot_store]`: a file of another shape that has it is refused, naming `trees`, and a file without it takes every default below. No key is required. The trees and their placements are kept in `trees/` and `placements/` of `local_cache.path`, and the bytes of their files are cache entries, held against eviction by the pins of `local_cache.pin_limit`. Nothing is written to a tier or seen by another node.
+
+| Key | Type, default | What |
+|---|---|---|
+| `trees.enabled` | boolean, `true` | `false` reads nothing and makes no placement |
+| `trees.ttl` | duration, `4h` (1s to 7d, not above `ttl_max`) | the lease of a placement made with no `ttl`; a create of the same tree at the same locations renews it |
+| `trees.ttl_max` | duration, `24h` (1s to 7d) | the longest `ttl` taken: a longer one is taken as this |
+| `trees.max_entries` | count, 16777215 (1 to 16777215) | the entries of one create, below the root |
+| `trees.max_depth` | count, 4096 (1 to 4096) | the names on a path |
+| `trees.max_dir_entries` | count, 1000000 (1 to 1000000) | the children of one directory |
+| `trees.max_request_bytes` | size, `256MiB` (1KiB to 1GiB) | the body of one create |
+| `trees.max_bytes` | size, `32GiB` (1MiB to 1TiB) | the file bytes of one tree |
+| `trees.max_placements` | count, 1024 (1 to 1000000) | the placements alive at once |
+| `trees.fill_concurrency` | count, 8 (1 to 1024) | the ranged reads of creates that run at once, node-wide |
+| `trees.fill_rate` | rate, `"off"` | a size and `/s`, such as `"200MiB/s"`: the bytes a second of all creates together; `"off"` or `"0B/s"` for no limit |
+| `trees.fill_queue` | count, 16384 (1 to 10000000) | the blobs waiting to be fetched |
+| `trees.coalesce_gap` | size, `256KiB` (0 to 1GiB) | ranges of one object this near one another are one read |
+| `trees.prefetch_default` | `"none"`, `"background"` or `"wait"`, `"wait"` | what a create with no `prefetch` does |
+| `trees.whole_pack_percent` | percent, 50 (1 to 100) | the share of a pack the needed ranges must cover for the whole pack to be read in one request |
+| `trees.create_timeout` | duration, `120s` (1s to 1h) | the longest a create that waits for its files waits |
+| `trees.max_failures` | count, 20 (1 to 1000) | the failed entries an answer names |
+
+The store answers where a key or a path falls, and what a path is, from memory, one directory record at a time; `ttl`, `ttl_max`, `enabled`, `max_entries`, `max_depth`, `max_dir_entries`, `max_bytes` and `max_placements` are what this release holds a create to. The other keys are read and checked at the start and take effect with the create call that fetches the files of a tree. A start drops a tree that is short, whose record does not hash to its name, whose bytes the cache lost or whose placement's lease has ended, and removes its files; a cache that does not hold the lock of its directory removes nothing.
+
 ## `[fs]`
 
 The file of `tierstore fs`, the virtual build file system of a build node (see [the virtual build file system](operations.md#the-virtual-build-file-system)). It is read with `tierstore fs --config <path>`; it is a file of its own, not the file of the node's `tierstore` (which has no `[fs]` table), and it holds no secret. A key it has that this release does not know is a warning on stderr. On a Mac the file may also have an `[fs.nfs]` table (below). Three keys are needed, and two of them repeat what the node's `tierstore` was told, so that the two files agree.

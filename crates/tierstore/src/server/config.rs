@@ -58,7 +58,7 @@ use super::config_cache::{CacheSettings, LocalCacheTable};
 use super::config_combined::{CombinedSettings, combined};
 use super::config_entry::entry_tuning;
 use super::config_handoff::handoff_of;
-use super::config_hot_only::refuse_hot_keys;
+use super::config_hot_only::{refuse_hot_keys, warn_retired_keys};
 use super::config_interface::{
     InterfaceTable, Interfaces, OciTable, UpstreamTable, interfaces, with_legacy,
 };
@@ -72,6 +72,7 @@ use super::front::{FrontSettings, S3Tls};
 use super::hosted::valid_domain;
 use super::keys::DEFAULT_MIN_SECRET_BYTES;
 use super::listen::Addrs;
+use super::local_cache::trees::{TreesTable, check_trees};
 use super::lock::check_lock_path;
 
 /// The key of each flag that the file holds, or held before the flags went: the flag's name
@@ -283,6 +284,9 @@ pub(super) struct File {
     pub local_cache: Option<LocalCacheTable>,
     #[serde(default)]
     pub policy: Vec<Policy>,
+    /// The node-local trees of a build node.
+    #[serde(default)]
+    pub trees: Option<TreesTable>,
 }
 
 /// `[server]`: what the process is, its limits, and two retired no-op `grant_*` keys. A key that
@@ -624,49 +628,6 @@ pub(super) enum Settings {
     Combined(Box<CombinedSettings>),
 }
 
-/// The retired keys of `[hot_store]` that `hot` sets, as `hot_store.<key>`: the keys of the
-/// journal and of the journal reconciler (`journal_linger`, `journal_retention`,
-/// `reconcile_interval`, `registration_retention`, `journal_batch_entries`, `journal_page_size`,
-/// `copy_rounds` and `delete_rounds`).
-pub(super) fn retired_keys(hot: &TierTable) -> Vec<&'static str> {
-    let set = [
-        ("hot_store.journal_linger", hot.journal_linger.is_some()),
-        (
-            "hot_store.journal_retention",
-            hot.journal_retention.is_some(),
-        ),
-        (
-            "hot_store.reconcile_interval",
-            hot.reconcile_interval.is_some(),
-        ),
-        (
-            "hot_store.registration_retention",
-            hot.registration_retention.is_some(),
-        ),
-        (
-            "hot_store.journal_batch_entries",
-            hot.journal_batch_entries.is_some(),
-        ),
-        (
-            "hot_store.journal_page_size",
-            hot.journal_page_size.is_some(),
-        ),
-        ("hot_store.copy_rounds", hot.copy_rounds.is_some()),
-        ("hot_store.delete_rounds", hot.delete_rounds.is_some()),
-    ];
-    set.into_iter()
-        .filter_map(|(key, given)| given.then_some(key))
-        .collect()
-}
-
-/// Says on the operator's stderr, once for each key, that a retired key of `[hot_store]` is
-/// accepted and ignored: a file written for the releases before the entries still starts.
-fn warn_retired_keys(hot: &TierTable) {
-    for key in retired_keys(hot) {
-        tracing::warn!("tierstore: {key} is ignored: the journal and its reconciler were removed");
-    }
-}
-
 #[cfg(test)]
 impl Settings {
     /// The settings of a storage node, if that is what these are.
@@ -704,7 +665,9 @@ pub(super) fn settings(file: File, per_run: PerRun) -> Result<Settings, ConfigEr
         oci,
         local_cache,
         policy,
+        trees,
     } = file;
+    let trees = check_trees(trees.as_ref(), hot_store.is_none() && local_cache.is_some())?;
     if let Some(hot) = &hot_store {
         warn_retired_keys(hot);
     }
@@ -717,7 +680,7 @@ pub(super) fn settings(file: File, per_run: PerRun) -> Result<Settings, ConfigEr
             Ok(Settings::Storage(Box::new(cli)))
         }
         (None, Some(cold), Some(cache)) => {
-            let cache = CacheSettings::new(server, (cache, cold), fronts, &policy, per_run)?;
+            let cache = CacheSettings::new(server, (cache, cold), fronts, &policy, per_run, trees)?;
             Ok(Settings::Cache(Box::new(cache)))
         }
         (Some(hot), Some(cold), Some(cache)) => {
