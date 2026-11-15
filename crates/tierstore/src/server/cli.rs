@@ -551,6 +551,18 @@ impl S3Flags<'_> {
 }
 
 impl Cli {
+    /// Where the hot tier is, for the heartbeat's log lines: the endpoints of an S3 tier, joined
+    /// by a comma, and for any other tier its `--hot` value.
+    pub(super) fn hot_where(&self) -> String {
+        match self.hot_endpoint.as_deref() {
+            Some(first) => std::iter::once(first)
+                .chain(self.hot_more_endpoints.iter().map(String::as_str))
+                .collect::<Vec<_>>()
+                .join(","),
+            None => self.hot.clone(),
+        }
+    }
+
     /// The flags of the hot tier that are for an S3 bucket.
     fn hot_s3(&self) -> S3Flags<'_> {
         S3Flags {
@@ -759,6 +771,7 @@ pub(super) fn build(cli: &Cli) -> Result<Built, Error> {
     let mut proxy = ProxyConfig::new(&cli.proxy_id, cli.hot_bytes, Arc::clone(&clock));
     proxy.marks.clone_from(&marks);
     proxy.marks_name = marks_name(&cli.hot_marks);
+    proxy.hot_endpoint = cli.hot_where();
     proxy.critical = share(cli.critical);
     let tuning = &cli.hot_tuning;
     proxy.usage_refresh = tuning.usage_refresh;

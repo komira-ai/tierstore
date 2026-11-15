@@ -32,6 +32,7 @@ use bytes::Bytes;
 use futures::future::{Either, select};
 use tokio::sync::{Mutex as AsyncMutex, watch};
 
+use super::heartbeat_log::{BeatLog, say};
 use super::pause::{self, Pause};
 use super::peers::Peers;
 use super::{Inner, Proxy, locked};
@@ -230,15 +231,19 @@ async fn run(
     sleeper: Arc<dyn Sleeper>,
     period: Duration,
     mut stop: watch::Receiver<bool>,
+    mut log: BeatLog,
 ) {
     loop {
-        // A beat that fails is tried again, and says nothing else: `live_until` does not move,
-        // which is what the failure means. The period runs from the start of a beat, so one that
+        // A beat that fails is tried again, and `log` says it (once for each distinct cause) and
+        // the lapse and return of the registration: `live_until` does not move, which is what
+        // the failure means. The period runs from the start of a beat, so one that
         // was cut after its limit (a store that holds the call, as one with a stalled disk does)
         // is followed at once and not a whole period later; a beat that is quick waits the rest of
         // the period, as before.
         let started = beater.mono.now();
-        let _ = beater.beat().await;
+        let beat = beater.beat().await;
+        let live = beater.deadline.is_live();
+        say(&log.after(started, beater.mono.now(), &beat, live));
         beater.look_at_format().await;
         let took = Duration::from_millis(beater.mono.now().saturating_sub(started));
         let stopped = Box::pin(stop.changed());
@@ -283,8 +288,9 @@ impl Proxy {
         let (stop, stopped) = watch::channel(false);
         let (over, ended) = watch::channel(());
         let period = config.heartbeat;
+        let log = BeatLog::new(&config.hot_endpoint);
         tokio::spawn(async move {
-            run(beater, sleeper, period, stopped).await;
+            run(beater, sleeper, period, stopped, log).await;
             drop(over);
         });
         *state = State::Running(stop, ended);
