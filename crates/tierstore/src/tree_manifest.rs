@@ -105,6 +105,12 @@ impl TreeDigest {
         Self(Sha256::digest(bytes).into())
     }
 
+    /// The digest whose 32 bytes are `bytes`.
+    #[must_use]
+    pub fn from_bytes(bytes: [u8; 32]) -> Self {
+        Self(bytes)
+    }
+
     /// The 32 bytes of the digest.
     #[must_use]
     pub fn as_bytes(&self) -> &[u8; 32] {
@@ -353,16 +359,22 @@ fn child_of(raw: Raw) -> Result<TreeChild, TreeError> {
     })
 }
 
-fn check_name(name: &str) -> Result<(), TreeError> {
-    let bad = name.is_empty()
+pub(crate) fn check_name(name: &str) -> Result<(), TreeError> {
+    if is_valid_name(name) {
+        Ok(())
+    } else {
+        Err(TreeError::UnsupportedName(name.to_string()))
+    }
+}
+
+/// Whether `name` may be the name of an entry: not empty, not `.` or `..`, no `/` or NUL, and
+/// not beginning `.wh.`.
+pub(crate) fn is_valid_name(name: &str) -> bool {
+    !(name.is_empty()
         || name == "."
         || name == ".."
         || name.contains(['/', '\0'])
-        || name.starts_with(WHITEOUT_PREFIX);
-    if bad {
-        return Err(TreeError::UnsupportedName(name.to_string()));
-    }
-    Ok(())
+        || name.starts_with(WHITEOUT_PREFIX))
 }
 
 fn digest_of(name: &str, text: &str) -> Result<TreeDigest, TreeError> {
