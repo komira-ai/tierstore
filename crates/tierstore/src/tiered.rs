@@ -35,6 +35,8 @@ mod entry_retry;
 mod entry_retry_tests;
 mod heartbeat;
 #[cfg(test)]
+mod heartbeat_pace_tests;
+#[cfg(test)]
 mod heartbeat_tests;
 mod listing;
 mod lock_hold;
