@@ -8,6 +8,7 @@ use std::collections::{BTreeMap, HashMap};
 
 use crate::Meta;
 
+use super::extents::ExtentTable;
 use super::layout::Origin;
 use super::pin_set::PinSet;
 
@@ -43,18 +44,20 @@ impl Entry {
 pub(super) struct Index {
     entries: HashMap<String, Entry>,
     order: BTreeMap<u64, String>,
-    next: u64,
+    pub(super) next: u64,
     bytes: u64,
     /// The objects used since the last [`Index::take_touched`], with the time of the last use.
-    touched: HashMap<String, u64>,
+    pub(super) touched: HashMap<String, u64>,
     /// The trees that pin objects (see `pins`).
     pub(super) pins: PinSet,
+    /// The entries by extents (see `extents`): they are not objects, and `get` never gives one.
+    pub(super) partials: ExtentTable,
 }
 
 impl Index {
-    /// The bytes of all the objects.
+    /// The bytes of all the objects, and the filled bytes of the entries by extents.
     pub(super) fn bytes(&self) -> u64 {
-        self.bytes
+        self.bytes + self.partials.bytes()
     }
 
     /// The number of objects.
@@ -162,12 +165,22 @@ impl Index {
     }
 
     /// The names and sizes of the objects, the least recently used first.
+    #[cfg(test)]
     pub(super) fn oldest_first(&self) -> Vec<(String, u64)> {
         let size = |hex: &String| self.entries.get(hex).map_or(0, |entry| entry.size);
         self.order
             .values()
             .map(|hex| (hex.clone(), size(hex)))
             .collect()
+    }
+
+    /// The place in the order of use and the name, size and kind of each object.
+    pub(super) fn order_with_used(&self) -> impl Iterator<Item = (u64, (String, u64, bool))> + '_ {
+        let entries = &self.entries;
+        self.order.iter().map(move |(used, hex)| {
+            let size = entries.get(hex).map_or(0, |entry| entry.size);
+            (*used, (hex.clone(), size, false))
+        })
     }
 
     /// The objects used since the last call, with the time of the last use of each.

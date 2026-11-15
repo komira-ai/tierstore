@@ -126,6 +126,15 @@ Blobs queued to be filled before a read asks for them (see [operations](operatio
 | `tierstore_cache_fill_joins_total` | counter | `path`: `mount`, `s3` | a request of the fill socket (`mount`) or a read of the S3 front joined a fill that was running instead of starting one; a read that started a queued blob counts a promotion, not a join |
 | `tierstore_cache_prefetch_queue_depth` | gauge | none | blobs waiting for a worker now |
 | `tierstore_cache_holds_open` | gauge | none | holds open now (see [holds](operations.md#holds)): opened and not yet released or expired |
+| `tierstore_cache_extent_entries` | gauge | none | the packs the cache holds only some ranges of (entries by extents, in `extents-v1/` beside `obj/`); `tierstore_cache_objects` does not count them |
+| `tierstore_cache_extent_bytes` | gauge | none | the bytes those entries have filled, each counted once; they are in `tierstore_cache_bytes`, in the budget and in the marks |
+| `tierstore_cache_extent_fills_total` | counter | none | ranges filled from the upstream and hashed against the digest the caller gave |
+| `tierstore_cache_extent_fill_bytes_total` | counter | none | the bytes those fills added to the cache (a byte a held range has is not added again) |
+| `tierstore_cache_extent_fill_failures_total` | counter | `reason`: `upstream`, `mismatch`, `short`, `no_space`, `busy`, `read_only`, `io`, `changed`, `aborted` | a fill of a range left nothing: the upstream failed or has no such pack, the bytes did not hash to the digest, the upstream gave another length, the range does not fit the budget or the critical mark, no permit of the fill socket's pool came free in `fill_socket_wait`, this process does not hold the lock of the cache directory, the directory could not be written, the entry was removed or replaced while it was read, or the task did not end |
+| `tierstore_cache_extent_joins_total` | counter | none | a request for a range joined a fill of the same range that was running |
+| `tierstore_cache_extent_held_total` | counter | none | a request for a range found it in the cache (an entry by extents or the whole pack) and asked the upstream nothing |
+| `tierstore_cache_extent_promotions_total` | counter | none | an entry filled to the whole pack and was moved into `obj/` as an ordinary object |
+| `tierstore_cache_extent_evictions_total` | counter | none | an entry was removed by the eviction pass (`tierstore_cache_evictions_total` counts objects only) |
 | `tierstore_cache_hydrate_requests_total` | counter | none | a hydrate call was accepted (see [the hydrate call](operations.md#the-hydrate-call)): the hold was opened and the expansion of its trees started |
 | `tierstore_cache_hold_handovers_total` | counter | none | trees of a hold whose pins moved to an attachment, at the first pin of a mount for the tree (see [holds](operations.md#holds)); a tree attached before the hold asked for its blobs moves nothing and is not counted |
 

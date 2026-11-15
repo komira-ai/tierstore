@@ -218,7 +218,7 @@ impl Inner {
     ) -> Result<Option<ReadBody>, Error> {
         let used = locked(&self.index).used(&name.hex, self.clock.now());
         let Some(size) = used else {
-            return Ok(None);
+            return self.open_extent(name, range).await;
         };
         // A read-only cache's index is its scan, and the holder may have put the object again
         // since: the file and its sidecar are checked against the index. The bytes of a key named
@@ -255,6 +255,35 @@ impl Inner {
                 Ok(None)
             }
             // Out of descriptors, a failing disk: the object may be fine, so it stays.
+            Err(_) => Ok(None),
+        }
+    }
+
+    /// A read of a range that an entry by extents holds whole (see `extents`), as a hit is read;
+    /// none if no entry does, or the file is not what the entry says (the entry is dropped).
+    #[expect(
+        clippy::expect_used,
+        reason = "a blocking task's panic is a bug, passed on"
+    )]
+    async fn open_extent(
+        self: &Arc<Self>,
+        name: &Name,
+        range: Option<ByteRange>,
+    ) -> Result<Option<ReadBody>, Error> {
+        let Some((size, window)) = self.extent_window(name, range) else {
+            return Ok(None);
+        };
+        let path = self.extent_path(&name.hex);
+        let opening = tokio::task::spawn_blocking(move || open_whole(&path, size));
+        match opening.await.expect("an open does not panic") {
+            Ok(file) => {
+                bump(&self.counters.hits);
+                Ok(Some(self.from_file(Arc::new(file), window, Served::Local)))
+            }
+            Err(error) if gone(&error) => {
+                self.drop_partial(&name.hex);
+                Ok(None)
+            }
             Err(_) => Ok(None),
         }
     }

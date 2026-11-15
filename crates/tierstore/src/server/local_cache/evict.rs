@@ -50,7 +50,11 @@ impl Inner {
                 break;
             }
             // An object that was evicted since it was used has no file to stamp.
-            let _ = self.disk.touch(&data_path(&self.config.path, &hex), at);
+            if locked(&self.index).partials.get(&hex).is_some() {
+                self.touch_extent(&hex, at);
+            } else {
+                let _ = self.disk.touch(&data_path(&self.config.path, &hex), at);
+            }
         }
     }
 
@@ -68,7 +72,7 @@ impl Inner {
         self.flush_touches();
         let (held, order) = {
             let index = locked(&self.index);
-            (index.bytes(), index.oldest_first())
+            (index.bytes(), index.oldest_all())
         };
         let config = &self.config;
         let budget_need = if held > percent_of(config.budget, config.high_water) {
@@ -81,9 +85,21 @@ impl Inner {
         let floor_need = percent_of(space.total, config.free_floor).saturating_sub(space.free);
         let need = budget_need.max(floor_need);
         let mut pass = Pass::default();
-        for (hex, size) in order {
+        for (hex, size, partial) in order {
             if pass.freed >= need {
                 break;
+            }
+            if partial {
+                // An entry by extents: no other tree links its file, so only a pin or a fill
+                // that writes to it keeps it.
+                if !self.evict_partial(&hex) {
+                    bump(&self.counters.pin_skips);
+                    pass.pin_skips += 1;
+                    continue;
+                }
+                pass.evicted += 1;
+                pass.freed += size;
+                continue;
             }
             if locked(&self.index).pins.is_pinned(&hex) {
                 bump(&self.counters.pin_skips);

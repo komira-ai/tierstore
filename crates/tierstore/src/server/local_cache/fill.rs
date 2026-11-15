@@ -834,6 +834,7 @@ impl Inner {
         let checked = Some(self.clock.now());
         let kept = (meta.size, meta.tag, meta.modified);
         locked(&self.index).insert_from(&name.hex, kept, checked, sidecar.origin);
+        self.retire_partial(&name.hex);
         // A delete that came while the object was being read marked this fill: what it read is
         // gone from the upstream, so it is not kept (the mark is looked for after the entry is
         // in the index; see `forget`).

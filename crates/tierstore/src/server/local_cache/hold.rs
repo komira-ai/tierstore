@@ -51,7 +51,7 @@ use crate::server::lock::{self, LockFile};
 
 use super::evict::joined;
 use super::{Inner, LocalCache, layout, locked, pins};
-use super::{add, index_of};
+use super::{add, extents};
 
 /// The rounds a take makes at most to remove the files of the names noted while it ran.
 const MAX_ROUNDS: u32 = 8;
@@ -314,6 +314,7 @@ impl Inner {
         let removed = layout::clear_stage(&self.config.path)?;
         let scanned = layout::scan(&self.config.path)?;
         let mut found = scanned.found;
+        let partials = extents::scan(&self.config, &self.counters, &found, true);
         let mut pending = std::mem::take(&mut *locked(&self.hold.forgotten));
         let mut rounds = 0;
         loop {
@@ -335,7 +336,9 @@ impl Inner {
                     &self.counters.discarded_at_start,
                     scanned.discarded + removed,
                 );
-                let mut index = index_of(found);
+                let distrust = |hex: &str| pending.overflowed || pending.names.contains(hex);
+                let root = &self.config.path;
+                let mut index = extents::build_index(root, found, partials, &distrust);
                 pins::restore(&self.config, &mut index, &scanned.renamed);
                 *locked(&self.index) = index;
                 *forgotten = Forgotten::default();

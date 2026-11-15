@@ -210,7 +210,7 @@ impl Inner {
     /// Whether the object is in the cache, counted as used. An entry whose file is not there (an
     /// eviction removed it while a fill linked it) or is not the size recorded for it (a power cut
     /// left it short) is dropped, so that the fill makes it again.
-    async fn present(&self, name: &Name) -> bool {
+    pub(super) async fn present(&self, name: &Name) -> bool {
         let Some(size) = locked(&self.index).get(&name.hex).map(|entry| entry.size) else {
             return false;
         };

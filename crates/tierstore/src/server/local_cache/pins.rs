@@ -118,7 +118,7 @@ impl Inner {
         for sha256 in blobs {
             // A blob is the entry named by its digest, whichever path filled it.
             let hex = sha256;
-            let size = index.get(hex).map(|entry| entry.size);
+            let size = index.held_size(hex);
             match index.pins.pin(&owner, hex, size, limit) {
                 Pinned::Yes => answer.pinned += 1,
                 Pinned::Absent => answer.absent += 1,
@@ -186,7 +186,7 @@ pub(super) fn restore(config: &CacheConfig, index: &mut Index, renamed: &HashMap
         };
         for hex in tree.blobs {
             let hex = renamed.get(&hex).cloned().unwrap_or(hex);
-            let size = index.get(&hex).map(|entry| entry.size);
+            let size = index.held_size(&hex);
             let _ = index.pins.pin(&owner, &hex, size, config.pin_limit);
         }
     }
