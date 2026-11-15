@@ -19,9 +19,12 @@
 //! A call is signed as an S3 request is, with the access keys the server already has (the same
 //! `Authorization: AWS4-HMAC-SHA256` header over `host`, `x-amz-content-sha256` and `x-amz-date`;
 //! the method is `POST` and the path is the gRPC path, `/tierstore.trees.v1.TreesService/<method>`).
-//! `host` is the `:authority` of the call when the client sends no `host` header. The body is not
-//! covered: the payload hash is `UNSIGNED-PAYLOAD`, as a presigned URL's is, so serve the
-//! interface over TLS when it is not on loopback. No new permission exists (design 3.2, Q7):
+//! `host` is the `:authority` of the call when the client sends no `host` header. The signature
+//! covers the body: `x-amz-content-sha256` is the hex SHA-256 of the whole request body (the gRPC
+//! frames), the body is read and hashed before the service sees it, and a body that is not the
+//! hashed one is `UNAUTHENTICATED`; `UNSIGNED-PAYLOAD` is not accepted. A signed head cannot be
+//! replayed with another body. A call is still readable and replayable with its own body for 15
+//! minutes on a plain address, so serve the interface over TLS when it is not on loopback. No new permission exists (design 3.2, Q7):
 //!
 //! - the full key may make every call;
 //! - a read-only key may `GetPlacement` and nothing that changes a placement;

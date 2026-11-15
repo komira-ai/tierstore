@@ -15,7 +15,7 @@ use super::rig::{
     FULL, FakeCore, HOST, NOW, READER, SCOPED, assert_refused, config, config_at, framed,
     signed_request,
 };
-use super::service::{TreesFront, authenticate, with_host};
+use super::service::{TreesFront, authenticate, signed_body, with_host};
 use super::{Caller, Reason, TreeCore};
 use crate::server::keys::Role;
 use crate::server::presign::presign_get;
@@ -361,4 +361,78 @@ async fn a_refusal_of_the_core_is_answered_with_its_status() {
             .await;
         assert_refused(&deleted.expect_err("refused"), code, message);
     }
+}
+
+/// The head of a call whose `x-amz-content-sha256` is `payload`, and the body it is given.
+fn head_claiming(payload: &str) -> Parts {
+    let mut parts = parts(FULL, "GetPlacement");
+    parts
+        .headers
+        .insert("x-amz-content-sha256", payload.parse().expect("a header"));
+    parts
+}
+
+/// A body that gives `first` and then fails, as a connection that is reset does.
+struct Broken(Option<bytes::Bytes>);
+
+impl hyper::body::Body for Broken {
+    type Data = bytes::Bytes;
+    type Error = std::io::Error;
+
+    fn poll_frame(
+        mut self: std::pin::Pin<&mut Self>,
+        _: &mut std::task::Context<'_>,
+    ) -> std::task::Poll<Option<Result<hyper::body::Frame<Self::Data>, Self::Error>>> {
+        let frame = self.0.take().map(hyper::body::Frame::data);
+        std::task::Poll::Ready(match frame {
+            Some(frame) => Some(Ok(frame)),
+            None => Some(Err(std::io::Error::other("reset"))),
+        })
+    }
+}
+
+/// Asserts the body of a call is read only when it is the one whose SHA-256 the signature covers:
+/// the signed body is given back whole; another body, a payload of `UNSIGNED-PAYLOAD` and a
+/// payload that is not a digest are `UNAUTHENTICATED` with exact words; a body over the limit is
+/// `OUT_OF_RANGE`; a body that fails to its end is `INVALID_ARGUMENT`.
+#[tokio::test]
+async fn the_body_of_a_call_is_the_one_the_signature_covers() {
+    use sha2::Digest as _;
+    let message = framed(&GetPlacementRequest::default());
+    let head = parts(FULL, "GetPlacement");
+    let body = || http_body_util::Full::new(bytes::Bytes::from(message.clone()));
+    let got = signed_body(&head, body(), 1000).await.expect("the signed body");
+    assert_eq!(got.as_ref(), message.as_slice());
+
+    let wanted = "unauthenticated: the body is not the one the signature covers: x-amz-content-sha256 is not its SHA-256";
+    let other = http_body_util::Full::new(bytes::Bytes::from_static(b"another body"));
+    let status = signed_body(&head, other, 1000).await.expect_err("another body");
+    assert_refused(&status, Code::Unauthenticated, wanted);
+    for payload in ["UNSIGNED-PAYLOAD", "not a digest", &"0".repeat(64)] {
+        let status = signed_body(&head_claiming(payload), body(), 1000)
+            .await
+            .expect_err("a payload that is not the hash");
+        assert_refused(&status, Code::Unauthenticated, wanted);
+    }
+    let mut none = head_claiming("x");
+    none.headers.remove("x-amz-content-sha256");
+    let status = signed_body(&none, body(), 1000).await.expect_err("no payload");
+    assert_refused(&status, Code::Unauthenticated, wanted);
+
+    let long = http_body_util::Full::new(bytes::Bytes::from(vec![7_u8; 20]));
+    let digest = hex::encode(sha2::Sha256::digest([7_u8; 20]));
+    let status = signed_body(&head_claiming(&digest), long, 14)
+        .await
+        .expect_err("a body over the limit");
+    assert_refused(&status, Code::OutOfRange, "request too large: the limit is 14 bytes");
+    let long = http_body_util::Full::new(bytes::Bytes::from(vec![7_u8; 19]));
+    let digest = hex::encode(sha2::Sha256::digest([7_u8; 19]));
+    signed_body(&head_claiming(&digest), long, 14)
+        .await
+        .expect("a body of the limit and the frame head");
+
+    let status = signed_body(&head, Broken(Some(bytes::Bytes::from_static(b"ab"))), 1000)
+        .await
+        .expect_err("a body that fails");
+    assert_refused(&status, Code::InvalidArgument, "the request body could not be read");
 }

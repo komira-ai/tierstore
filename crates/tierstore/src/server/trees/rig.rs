@@ -12,6 +12,7 @@ use hyper::body::Incoming;
 use hyper::client::conn::http2::{self, SendRequest};
 use hyper_util::rt::{TokioExecutor, TokioIo};
 use prost::Message;
+use sha2::Digest as _;
 use tierstore_trees_api::v1::{
     CreateTreeRequest, CreateTreeResponse, DeleteTreeRequest, DeleteTreeResponse,
     GetPlacementRequest, GetPlacementResponse, PlacementState,
@@ -152,13 +153,14 @@ pub(super) fn signed_request(
 ) -> Request<Full<Bytes>> {
     let path = tierstore_trees_api::path(method);
     let extra = [("content-type", "application/grpc"), ("te", "trailers")];
+    let payload = hex::encode(sha2::Sha256::digest(&body));
     let signed = sign_on(
         authority,
         config,
         key,
         ("POST", &path),
         &extra,
-        "UNSIGNED-PAYLOAD",
+        &payload,
         &body,
     );
     let (mut parts, body) = signed.into_parts();

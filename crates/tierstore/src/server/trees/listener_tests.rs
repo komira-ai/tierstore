@@ -449,6 +449,32 @@ async fn a_request_over_the_limit_is_refused() {
     assert_eq!(running.stopped().await, 0);
 }
 
+/// Asserts a signed head replayed with another body is refused and the core is not asked: the
+/// head of a full key's `DeleteTree` carries the hash of its own body, so a body of a `CreateTree`
+/// under it is `UNAUTHENTICATED`, and the call with its own body is answered.
+#[tokio::test]
+async fn a_signed_head_with_another_body_is_refused() {
+    let (core, wanted) = recording();
+    let running = run(wanted).await;
+    let mut sender = running.client().await;
+    let authority = running.addr.to_string();
+    let own = framed(&DeleteTreeRequest::default());
+    let mut replayed = signed_request(&running.server, FULL, &authority, "DeleteTree", own.clone());
+    *replayed.body_mut() = Full::new(Bytes::from(framed(&create_request())));
+    let answer = send(&mut sender, replayed).await;
+    assert_refused(
+        &answer.status,
+        Code::Unauthenticated,
+        "unauthenticated: the body is not the one the signature covers: x-amz-content-sha256 is not its SHA-256",
+    );
+    assert!(core.seen.lock().expect("calls").is_empty());
+    let request = signed_request(&running.server, FULL, &authority, "DeleteTree", own);
+    let answer = send(&mut sender, request).await;
+    assert_eq!(answer.status.code(), Code::Ok);
+    drop(sender);
+    assert_eq!(running.stopped().await, 0);
+}
+
 /// Asserts that after a stop the listener's sockets are closed, a connection that is idle is
 /// closed, and nothing was cut.
 #[tokio::test]

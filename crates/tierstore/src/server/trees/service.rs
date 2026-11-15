@@ -4,14 +4,17 @@
 use std::convert::Infallible;
 use std::sync::Arc;
 
+use bytes::Bytes;
+use http_body_util::{BodyExt as _, Full, LengthLimitError, Limited};
 use hyper::Request;
-use hyper::body::Incoming;
+use hyper::body::{Body as HttpBody, Incoming};
 use hyper::http::request::Parts;
 use tierstore_trees_api::v1::trees_service_server::{TreesService, TreesServiceServer};
 use tierstore_trees_api::v1::{
     CreateTreeRequest, CreateTreeResponse, DeleteTreeRequest, DeleteTreeResponse,
     GetPlacementRequest, GetPlacementResponse,
 };
+use sha2::{Digest as _, Sha256};
 use tonic::body::Body;
 use tonic::codegen::Service as _;
 use tonic::{Request as GrpcRequest, Response as GrpcResponse, Status};
@@ -115,11 +118,50 @@ pub(super) fn authenticate(config: &ServerConfig, parts: &Parts) -> Result<Calle
     })
 }
 
+/// The bytes of a call's body, once they are the ones its signature covers: the head carries
+/// `x-amz-content-sha256`, which the signature covers (`authenticate` checked it), so the body
+/// is read whole (at most `max` message bytes and the 5 of the gRPC frame) and its SHA-256 must be
+/// that header's value. A signed head replayed with another body, or a body changed on the way,
+/// is refused. `UNSIGNED-PAYLOAD` is not accepted: a call states the hash of what it sends.
+///
+/// # Errors
+/// [`Status`] `OutOfRange` when the body is longer than `max` allows; `InvalidArgument` when it
+/// cannot be read to its end; `Unauthenticated` when its hash is not the signed one.
+pub(super) async fn signed_body<B>(parts: &Parts, body: B, max: usize) -> Result<Bytes, Status>
+where
+    B: HttpBody,
+    B::Error: Into<Box<dyn std::error::Error + Send + Sync>>,
+{
+    let limit = max.saturating_add(FRAME_HEAD);
+    let read = Limited::new(body, limit).collect().await;
+    let bytes = match read {
+        Ok(collected) => collected.to_bytes(),
+        Err(error) if error.downcast_ref::<LengthLimitError>().is_some() => {
+            let text = format!("request too large: the limit is {max} bytes");
+            return Err(Status::out_of_range(text));
+        }
+        Err(_) => return Err(Status::invalid_argument("the request body could not be read")),
+    };
+    let claimed = parts
+        .headers
+        .get("x-amz-content-sha256")
+        .and_then(|value| value.to_str().ok());
+    if claimed != Some(hex::encode(Sha256::digest(&bytes)).as_str()) {
+        let why = "the body is not the one the signature covers: x-amz-content-sha256 is not its SHA-256";
+        return Err(Refusal::about(Reason::Unauthenticated, why).into());
+    }
+    Ok(bytes)
+}
+
+/// The bytes of a gRPC frame before its message: a compression flag and the length.
+const FRAME_HEAD: usize = 5;
+
 /// The trees interface as a connection serves it: the keys that sign its calls, and the service.
 #[derive(Clone)]
 pub(crate) struct Served {
     config: Arc<ServerConfig>,
     service: TreesServiceServer<TreesFront>,
+    max_request_bytes: usize,
 }
 
 impl Served {
@@ -131,10 +173,14 @@ impl Served {
         max_request_bytes: usize,
     ) -> Self {
         let service = TreesServiceServer::new(front).max_decoding_message_size(max_request_bytes);
-        Self { config, service }
+        Self {
+            config,
+            service,
+            max_request_bytes,
+        }
     }
 
-    /// Answers one HTTP/2 request: the status of a refused key, or the answer of the service.
+    /// Answers one HTTP/2 request: the status of a refused key or body, or the answer of the service.
     pub(crate) async fn handle(
         &self,
         request: Request<Incoming>,
@@ -144,9 +190,15 @@ impl Served {
         match authenticate(&self.config, &parts) {
             Err(refusal) => Ok(Status::from(refusal).into_http()),
             Ok(caller) => {
-                let mut request = Request::from_parts(parts, body);
-                request.extensions_mut().insert(caller);
-                self.service.clone().call(request).await
+                let bound = signed_body(&parts, body, self.max_request_bytes).await;
+                match bound {
+                    Err(status) => Ok(status.into_http()),
+                    Ok(bytes) => {
+                        let mut request = Request::from_parts(parts, Body::new(Full::new(bytes)));
+                        request.extensions_mut().insert(caller);
+                        self.service.clone().call(request).await
+                    }
+                }
             }
         }
     }
