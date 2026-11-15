@@ -222,8 +222,9 @@ impl Beater {
 }
 
 /// Beats, then waits through `sleeper` for what is left of `period` since the beat began, until
-/// the stop is signalled. A stop that
-/// comes during a beat ends the loop after that beat.
+/// the stop is signalled. The period is measured over the beat and the format look together, so
+/// the two can take up to two periods and the next beat then follows at once. A stop that comes
+/// during a beat ends the loop after that beat.
 async fn run(
     mut beater: Beater,
     sleeper: Arc<dyn Sleeper>,
