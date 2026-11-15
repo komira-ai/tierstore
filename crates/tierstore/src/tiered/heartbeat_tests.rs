@@ -50,7 +50,7 @@ impl Stepped {
         self.go.add_permits(1);
     }
 
-    fn asked(&self) -> Vec<Duration> {
+    pub(super) fn asked(&self) -> Vec<Duration> {
         self.asked.lock().unwrap().clone()
     }
 }
