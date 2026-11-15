@@ -212,6 +212,25 @@ fn trees_config(table: &TreesTable) -> Result<TreesConfig, ConfigError> {
     })
 }
 
+/// The keys of `table` that the file sets and that nothing reads yet: they are checked and held
+/// for the create call that fetches the files of a tree.
+pub(super) fn unused_keys(table: &TreesTable) -> Vec<&'static str> {
+    [
+        ("max_request_bytes", table.max_request_bytes.is_some()),
+        ("fill_concurrency", table.fill_concurrency.is_some()),
+        ("fill_rate", table.fill_rate.is_some()),
+        ("fill_queue", table.fill_queue.is_some()),
+        ("coalesce_gap", table.coalesce_gap.is_some()),
+        ("prefetch_default", table.prefetch_default.is_some()),
+        ("whole_pack_percent", table.whole_pack_percent.is_some()),
+        ("create_timeout", table.create_timeout.is_some()),
+        ("max_failures", table.max_failures.is_some()),
+    ]
+    .into_iter()
+    .filter_map(|(key, set)| set.then_some(key))
+    .collect()
+}
+
 /// The settings of the node's trees: those `table` asks for, or the defaults if the file has no
 /// `[trees]`. Only a build node (a cache and no `[hot_store]`) has the table.
 ///
@@ -226,7 +245,13 @@ pub(in crate::server) fn check_trees(
             "trees",
             "only a build node has trees: a file with [local_cache] and [cold_store] and no [hot_store]",
         )),
-        Some(table) => trees_config(table),
+        Some(table) => {
+            let config = trees_config(table)?;
+            for key in unused_keys(table) {
+                tracing::warn!("tierstore: trees.{key} is accepted and not yet used by this release");
+            }
+            Ok(config)
+        }
         None => Ok(TreesConfig::default()),
     }
 }

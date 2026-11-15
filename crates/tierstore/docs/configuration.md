@@ -390,24 +390,24 @@ The node-local trees of a build node (designed in `docs/design/node-local-trees.
 | Key | Type, default | What |
 |---|---|---|
 | `trees.enabled` | boolean, `true` | `false` reads nothing and makes no placement |
-| `trees.ttl` | duration, `4h` (1s to 7d, not above `ttl_max`) | the lease of a placement made with no `ttl`; a create of the same tree at the same locations renews it |
+| `trees.ttl` | duration, `4h` (1s to 7d, not above `ttl_max`) | the lease of a placement made with no `ttl`; a create of the same tree at the same locations renews it, to the later of the old end and the new one |
 | `trees.ttl_max` | duration, `24h` (1s to 7d) | the longest `ttl` taken: a longer one is taken as this |
 | `trees.max_entries` | count, 16777215 (1 to 16777215) | the entries of one create, below the root |
 | `trees.max_depth` | count, 4096 (1 to 4096) | the names on a path |
 | `trees.max_dir_entries` | count, 1000000 (1 to 1000000) | the children of one directory |
-| `trees.max_request_bytes` | size, `256MiB` (1KiB to 1GiB) | the body of one create |
+| `trees.max_request_bytes` | size, `256MiB` (1KiB to 1GiB) | (accepted, not yet used) the body of one create |
 | `trees.max_bytes` | size, `32GiB` (1MiB to 1TiB) | the file bytes of one tree |
 | `trees.max_placements` | count, 1024 (1 to 1000000) | the placements alive at once |
-| `trees.fill_concurrency` | count, 8 (1 to 1024) | the ranged reads of creates that run at once, node-wide |
-| `trees.fill_rate` | rate, `"off"` | a size and `/s`, such as `"200MiB/s"`: the bytes a second of all creates together; `"off"` or `"0B/s"` for no limit |
-| `trees.fill_queue` | count, 16384 (1 to 10000000) | the blobs waiting to be fetched |
-| `trees.coalesce_gap` | size, `256KiB` (0 to 1GiB) | ranges of one object this near one another are one read |
-| `trees.prefetch_default` | `"none"`, `"background"` or `"wait"`, `"wait"` | what a create with no `prefetch` does |
-| `trees.whole_pack_percent` | percent, 50 (1 to 100) | the share of a pack the needed ranges must cover for the whole pack to be read in one request |
-| `trees.create_timeout` | duration, `120s` (1s to 1h) | the longest a create that waits for its files waits |
-| `trees.max_failures` | count, 20 (1 to 1000) | the failed entries an answer names |
+| `trees.fill_concurrency` | count, 8 (1 to 1024) | (accepted, not yet used) the ranged reads of creates that run at once, node-wide |
+| `trees.fill_rate` | rate, `"off"` | (accepted, not yet used) a size and `/s`, such as `"200MiB/s"`: the bytes a second of all creates together; `"off"` or `"0B/s"` for no limit |
+| `trees.fill_queue` | count, 16384 (1 to 10000000) | (accepted, not yet used) the blobs waiting to be fetched |
+| `trees.coalesce_gap` | size, `256KiB` (0 to 1GiB) | (accepted, not yet used) ranges of one object this near one another are one read |
+| `trees.prefetch_default` | `"none"`, `"background"` or `"wait"`, `"wait"` | (accepted, not yet used) what a create with no `prefetch` does |
+| `trees.whole_pack_percent` | percent, 50 (1 to 100) | (accepted, not yet used) the share of a pack the needed ranges must cover for the whole pack to be read in one request |
+| `trees.create_timeout` | duration, `120s` (1s to 1h) | (accepted, not yet used) the longest a create that waits for its files waits |
+| `trees.max_failures` | count, 20 (1 to 1000) | (accepted, not yet used) the failed entries an answer names |
 
-The store answers where a key or a path falls, and what a path is, from memory, one directory record at a time; `ttl`, `ttl_max`, `enabled`, `max_entries`, `max_depth`, `max_dir_entries`, `max_bytes` and `max_placements` are what this release holds a create to. The other keys are read and checked at the start and take effect with the create call that fetches the files of a tree. A start drops a tree that is short, whose record does not hash to its name, whose bytes the cache lost or whose placement's lease has ended, and removes its files; a cache that does not hold the lock of its directory removes nothing.
+The store answers where a key or a path falls, and what a path is, from memory, one directory record at a time; `ttl`, `ttl_max`, `enabled`, `max_entries`, `max_depth`, `max_dir_entries`, `max_bytes` and `max_placements` are what this release holds a create to. The nine keys marked "accepted, not yet used" are read and checked at the start, and a file that sets one gets a warning that this release does not use it; they take effect with the create call that fetches the files of a tree. A start drops a tree that is short, whose record does not hash to its name, whose bytes the cache lost or whose placement's lease has ended, and removes its files; a cache that does not hold the lock of its directory removes nothing.
 
 ## `[fs]`
 

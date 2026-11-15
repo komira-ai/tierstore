@@ -194,13 +194,17 @@ impl Shared {
     }
 
     /// Writes the file of a placement.
-    fn write_placement(&self, placement: &Placement) -> Result<(), CreateError> {
+    fn write_placement(
+        &self,
+        placement: &Placement,
+        expires_ms: u64,
+    ) -> Result<(), CreateError> {
         let file = PlacementFile {
             v: 1,
             tree: placement.tree.to_string(),
             at: placement.locations.iter().map(At::of).collect(),
             created_ms: placement.created_ms,
-            expires_ms: placement.expires_ms,
+            expires_ms,
         };
         let text = serde_json::to_vec(&file).map_err(|why| CreateError::Io(why.to_string()))?;
         write_new(&placement_file(&self.root, &placement.id), &text).map_err(|why| io_error(&why))
@@ -210,8 +214,8 @@ impl Shared {
 impl TreeStore {
     /// Makes the tree of `request` and places it at its locations, or refreshes the placement
     /// that is there: the same tree at the same locations is one placement, and a create of it
-    /// again only moves its lease. A call blocks on the files it writes: make it on a thread that
-    /// may.
+    /// again only lengthens its lease (a refresh never cuts a lease short). A call blocks on the
+    /// files it writes: make it on a thread that may.
     ///
     /// # Errors
     /// See [`CreateError`]; nothing is made when one is given.
@@ -268,9 +272,11 @@ impl TreeStore {
             pins: PinAnswer::default(),
         };
         if let Some(placement) = state.placements.get_mut(&id).filter(|p| !p.released) {
-            // The same tree at the same places: a refresh.
+            // The same tree at the same places: a refresh. It never shortens the lease, and the
+            // lease in memory moves only once the file has it.
+            let expires_ms = placement.expires_ms.max(expires_ms);
+            shared.write_placement(placement, expires_ms)?;
             placement.expires_ms = expires_ms;
-            shared.write_placement(placement)?;
             state
                 .trees
                 .get(&built.root)
@@ -278,6 +284,7 @@ impl TreeStore {
                 .for_each(|info| self.set_ready(info, ready));
             return Ok(Created {
                 created: false,
+                expires_ms,
                 ..summary
             });
         }
@@ -321,7 +328,7 @@ impl TreeStore {
                 .into_iter()
                 .for_each(|info| self.set_ready(info, ready));
         }
-        if let Err(why) = shared.write_placement(&placement) {
+        if let Err(why) = shared.write_placement(&placement, placement.expires_ms) {
             // The tree this made, if any, has no placement: it goes.
             shared.drop_unreached(state);
             return Err(why);

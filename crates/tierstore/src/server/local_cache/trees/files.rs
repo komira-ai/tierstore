@@ -292,6 +292,9 @@ pub(super) struct PlacementFile {
 pub(super) enum At {
     S3 { bucket: String, prefix: String },
     Fs { path: String },
+    /// An interface a later release added: the file is left where it is, not read.
+    #[serde(other)]
+    Other,
 }
 
 impl At {
@@ -306,11 +309,13 @@ impl At {
         }
     }
 
-    /// The location, if what was written is one.
-    pub(super) fn location(&self) -> Result<Location, LocationError> {
+    /// The location, if what was written is one; none for an interface this release does not
+    /// know.
+    pub(super) fn location(&self) -> Result<Option<Location>, LocationError> {
         match self {
-            Self::S3 { bucket, prefix } => Location::s3(bucket, prefix),
-            Self::Fs { path } => Location::fs(path),
+            Self::S3 { bucket, prefix } => Location::s3(bucket, prefix).map(Some),
+            Self::Fs { path } => Location::fs(path).map(Some),
+            Self::Other => Ok(None),
         }
     }
 }

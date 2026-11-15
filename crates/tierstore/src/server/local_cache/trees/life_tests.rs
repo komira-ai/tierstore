@@ -8,7 +8,7 @@ use tokio::sync::Notify;
 
 use super::super::PinAnswer;
 use super::super::testing::{Rig, digest, pattern};
-use super::files::placement_file;
+use super::files::{At, PlacementFile, placement_file, write_new};
 use super::testing::{Bench, built, fs_at, s3_at, tree_path};
 use super::{
     CreateRequest, LifeError, PlacementId, ReadError, SweepReport, TreeStore, TreesConfig,
@@ -500,17 +500,77 @@ async fn a_step_that_cannot_read_the_directory_leaves_the_store_read_only() {
 }
 
 /// Asserts that a placement held by an attachment and a read, whose lease is over when the
-/// directory is read again, is not made again, and that dropping the read then takes nothing.
+/// directory is read again, is kept as it was by the reread, and that it goes with its last holder.
 #[tokio::test]
-async fn a_held_placement_whose_lease_ended_is_not_placed_again_by_a_reread() {
+async fn a_held_placement_whose_lease_ended_is_kept_by_a_reread_until_its_holders_let_go() {
     let (bench, id) = placed("trees-held-ended").await;
     let store = &bench.store;
     store.attach(&id, "run").unwrap();
     let read = store.open_read(&id).unwrap();
     bench.rig.clock.advance(9 * HOUR);
     store.load().unwrap();
-    assert!(store.placement(&id).is_none());
-    assert_eq!(store.sizes(), (0, 0));
+    let info = store.placement(&id).unwrap();
+    assert_eq!((info.attachments, info.reads), (1, 1));
+    assert_eq!(store.sizes(), (1, 1));
     drop(read);
+    assert_eq!(store.sizes(), (1, 1));
+    assert!(store.detach(&id, "run"));
+    assert_eq!(store.sizes(), (0, 0));
+}
+
+/// Asserts that a released placement that a read holds is kept by a reread, still released (its
+/// locations are not found) with its tree, and goes when the read ends.
+#[tokio::test]
+async fn a_released_placement_held_by_a_read_is_kept_by_a_reread() {
+    let (bench, id) = placed("trees-held-released").await;
+    let store = &bench.store;
+    let read = store.open_read(&id).unwrap();
+    store.release(&id).unwrap();
+    assert!(store.locate_fs("jobs/1").is_none());
+    store.load().unwrap();
+    assert!(store.placement(&id).unwrap().released);
+    assert!(store.locate_fs("jobs/1").is_none());
+    assert_eq!(store.sizes(), (1, 1));
+    drop(read);
+    assert_eq!(store.sizes(), (0, 0));
+}
+
+/// Asserts that a reread keeps a held placement whose locations a placement of the directory also
+/// has: the held one is kept and the one of the directory is dropped, so the holder is not cut off.
+#[tokio::test]
+async fn a_reread_keeps_the_held_placement_where_the_directory_has_one_that_meets_it() {
+    let (bench, id) = placed("trees-held-meets").await;
+    let store = &bench.store;
+    store.attach(&id, "run").unwrap();
+    let tree = bench.built().root;
+    let rival = [fs_at("jobs/1/inside")];
+    let rival_id = PlacementId::of(&tree, &rival);
+    let file = PlacementFile {
+        v: 1,
+        tree: tree.to_string(),
+        at: rival.iter().map(At::of).collect(),
+        created_ms: 1,
+        expires_ms: 9 * HOUR,
+    };
+    let rival_path = placement_file(&bench.rig.config.path, &rival_id);
+    write_new(&rival_path, &serde_json::to_vec(&file).unwrap()).unwrap();
+    store.load().unwrap();
+    assert_eq!(store.placement(&id).unwrap().attachments, 1);
+    assert_eq!(store.sizes(), (1, 1));
+    assert!(store.placement(&rival_id).is_none());
+    assert!(!rival_path.exists());
+}
+
+/// Asserts that a held placement whose tree directory was damaged on disk is let go by a reread,
+/// as there is nothing to serve from.
+#[tokio::test]
+async fn a_held_placement_whose_tree_is_gone_from_the_directory_is_let_go_by_a_reread() {
+    let (bench, id) = placed("trees-held-no-tree").await;
+    let store = &bench.store;
+    store.attach(&id, "run").unwrap();
+    let tree = bench.built().root;
+    std::fs::remove_dir_all(tree_path(&bench.rig, &tree)).unwrap();
+    store.load().unwrap();
+    assert!(store.placement(&id).is_none());
     assert_eq!(store.sizes(), (0, 0));
 }

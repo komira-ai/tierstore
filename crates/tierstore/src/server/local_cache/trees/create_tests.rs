@@ -84,26 +84,39 @@ async fn a_new_tree_made_ready_is_marked_and_pinned() {
 }
 
 /// Asserts that a create of the same tree at the same locations is one placement: the answer says
-/// it was not made, the lease moves to the new time and ttl, and no tree, pin or file is added; and
-/// that the same tree at other locations is a new placement of the tree the node has.
+/// it was not made, a longer lease moves to the new time and ttl and a shorter one leaves the lease
+/// as it was, and no tree, pin or file is added; and that the same tree at other locations is a
+/// new placement of the tree the node has.
 #[tokio::test]
 async fn the_same_tree_at_the_same_locations_refreshes_and_at_others_places_again() {
     let bench = Bench::new("trees-refresh").await;
     bench.fill_all().await;
     let first = bench.store.create(bench.request(vec![fs_at("a")])).unwrap();
     bench.rig.clock.advance(1000);
-    let request = CreateRequest {
+    let lease = first.expires_ms;
+    assert_eq!(lease, 4 * 3600 * 1000);
+    let shorter = CreateRequest {
         ttl: Some(Duration::from_secs(60)),
         ..bench.request(vec![fs_at("a")])
     };
-    let again = bench.store.create(request).unwrap();
+    let again = bench.store.create(shorter).unwrap();
     assert_eq!(again.placement, first.placement);
     assert!(!again.created && !again.new_tree);
-    assert_eq!(again.expires_ms, 1000 + 60_000);
+    assert_eq!(again.expires_ms, lease);
     assert_eq!(again.pins.pinned, 0);
     assert_eq!(
         bench.store.placement(&first.placement).unwrap().expires_ms,
-        61_000
+        lease
+    );
+    let longer = CreateRequest {
+        ttl: Some(Duration::from_secs(8 * 3600)),
+        ..bench.request(vec![fs_at("a")])
+    };
+    let again = bench.store.create(longer).unwrap();
+    assert_eq!(again.expires_ms, 1000 + 8 * 3600 * 1000);
+    assert_eq!(
+        bench.store.placement(&first.placement).unwrap().expires_ms,
+        1000 + 8 * 3600 * 1000
     );
     assert_eq!(bench.store.sizes(), (1, 1));
     let other = bench.store.create(bench.request(vec![fs_at("b")])).unwrap();
@@ -357,6 +370,19 @@ async fn a_placement_that_cannot_be_written_leaves_no_tree_it_made() {
     std::fs::write(&placements, b"a file").unwrap();
     assert!(bench.store.create(bench.request(vec![fs_at("a")])).is_err());
     assert!(bench.store.placement(&made.placement).is_some());
+    // The lease in memory is the one in the file: a refresh that failed moved neither.
+    let longer = CreateRequest {
+        ttl: Some(Duration::from_secs(8 * 3600)),
+        ..bench.request(vec![fs_at("a")])
+    };
+    assert!(matches!(
+        bench.store.create(longer).unwrap_err(),
+        CreateError::Io(_)
+    ));
+    assert_eq!(
+        bench.store.placement(&made.placement).unwrap().expires_ms,
+        made.expires_ms
+    );
     assert!(bench.store.create(bench.request(vec![fs_at("b")])).is_err());
     assert_eq!(bench.store.sizes(), (1, 1));
     assert!(tree_path(&bench.rig, &made.tree).exists());

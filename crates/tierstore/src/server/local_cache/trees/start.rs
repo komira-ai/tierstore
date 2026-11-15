@@ -149,7 +149,7 @@ impl Shared {
     }
 
     /// Reads the directory and checks it (see the module docs).
-    pub(super) fn read_directory(&self, owned: bool) -> State {
+    pub(super) fn read_directory(&self, owned: bool, held: Vec<Placement>) -> State {
         let now = self.now();
         let mut read = HashMap::new();
         for (name, path) in entries(&trees_dir(&self.root)) {
@@ -217,9 +217,33 @@ impl Shared {
             };
             state.trees.insert(root, Arc::new(info));
         }
+        self.keep_held(&mut state, held);
         self.read_placements(&mut state, now);
         self.drop_unreached(&mut state);
         state
+    }
+
+    /// Puts back the placements that something held before the directory was read, as they were:
+    /// a lease that ended or a release does not take a placement from its holders. One whose tree
+    /// the directory no longer has cannot be served and is let go.
+    fn keep_held(&self, state: &mut State, held: Vec<Placement>) {
+        for placement in held {
+            if !state.trees.contains_key(&placement.tree) {
+                continue;
+            }
+            let keys: Vec<String> = placement.locations.iter().map(Location::key).collect();
+            let taken = !placement.released
+                && keys.iter().any(|key| meets(&state.table, key).is_some());
+            if taken {
+                continue;
+            }
+            if !placement.released {
+                for key in keys {
+                    state.table.insert(key, placement.id.clone());
+                }
+            }
+            state.placements.insert(placement.id.clone(), placement);
+        }
     }
 
     /// Reads `placements/` into `state`, keeping what the module docs say.
@@ -230,9 +254,13 @@ impl Shared {
                 discard(state.owned, &path);
                 continue;
             };
+            if state.placements.contains_key(&id) {
+                // Held in memory, as it was: the file says no more than that.
+                continue;
+            }
             match self.read_placement(state, now, &id, &path) {
                 Ok(Some(placement)) => kept.push(placement),
-                // A file of a later release's version: left where it is.
+                // A file of a later release's version or interface: left where it is.
                 Ok(None) => {}
                 Err(why) => {
                     tracing::warn!("tierstore: trees: placement {name} is dropped: {why}");
@@ -270,8 +298,8 @@ impl Shared {
         }
     }
 
-    /// The placement file at `path` named `id`, none if it is of a version this release does not
-    /// know, or why it is not kept.
+    /// The placement file at `path` named `id`, none if it is of a version, or has a location of an
+    /// interface, this release does not know, or why it is not kept.
     fn read_placement(
         &self,
         state: &State,
@@ -288,8 +316,12 @@ impl Shared {
         if !state.trees.contains_key(&tree) {
             return Err("its tree is gone".to_owned());
         }
-        let at: Result<Vec<Location>, _> = file.at.iter().map(At::location).collect();
+        let at: Result<Vec<Option<Location>>, _> = file.at.iter().map(At::location).collect();
         let at = at.map_err(|why| why.to_string())?;
+        // A location of an interface a later release added: the file is left where it is.
+        let Some(at) = at.into_iter().collect::<Option<Vec<Location>>>() else {
+            return Ok(None);
+        };
         if at.is_empty() || PlacementId::of(&tree, &at) != *id {
             return Err("it is not named by what it holds".to_owned());
         }
@@ -337,27 +369,23 @@ impl TreeStore {
             std::fs::create_dir_all(trees_dir(&shared.root))?;
             std::fs::create_dir_all(placements_dir(&shared.root))?;
         }
-        // What holds a placement now goes on holding it: the directory knows nothing of it.
-        let holds: Vec<_> = shared
-            .lock()
+        // One hold of the lock from the first look at what is held to the swap: an attach or a
+        // read that comes meanwhile waits for the new state and finds the placement in it.
+        let mut guard = shared.lock();
+        // What holds a placement now goes on holding it, with its lease or released as it is: the
+        // directory knows nothing of its holders.
+        let held: Vec<Placement> = guard
             .placements
-            .values()
-            .filter(|placement| placement.held())
-            .map(|p| (p.id.clone(), p.attachments.clone(), p.reads))
+            .extract_if(|_, placement| placement.held())
+            .map(|(_, placement)| placement)
             .collect();
-        let mut state = shared.read_directory(owned);
-        for (id, attachments, reads) in holds {
-            if let Some(placement) = state.placements.get_mut(&id) {
-                placement.attachments = attachments;
-                placement.reads = reads;
-            }
-        }
+        let state = shared.read_directory(owned, held);
         if owned {
             for info in state.trees.values() {
                 let _ = shared.pin(info);
             }
         }
-        *shared.lock() = state;
+        *guard = state;
         Ok(())
     }
 }

@@ -2,6 +2,7 @@
 
 use std::time::Duration;
 
+use super::table::unused_keys;
 use super::{Prefetch, TreesConfig, TreesTable};
 use crate::server::config::settings_from_text;
 use crate::server::config_cache::CacheSettings;
@@ -235,4 +236,25 @@ fn only_a_build_node_has_the_table_and_an_unknown_key_is_a_warning() {
         unknown_key_warnings(&table),
         ["tierstore: config key trees.new_knob is not known to this release and is ignored"]
     );
+}
+
+/// Asserts that the keys of `[trees]` nothing reads yet are named, and only the ones the file sets.
+#[test]
+fn the_keys_nothing_reads_yet_are_named_when_the_file_sets_them() {
+    assert!(unused_keys(&TreesTable::default()).is_empty());
+    let table: TreesTable = toml::from_str(
+        "ttl = \"1h\"\nfill_rate = \"1MiB/s\"\nmax_failures = 3\ncreate_timeout = \"5s\"\n",
+    )
+    .unwrap();
+    assert_eq!(
+        unused_keys(&table),
+        ["fill_rate", "create_timeout", "max_failures"]
+    );
+    let all: TreesTable = toml::from_str(
+        "max_request_bytes = \"1MiB\"\nfill_concurrency = 2\nfill_rate = \"off\"\nfill_queue = 5\ncoalesce_gap = \"1KiB\"\nprefetch_default = \"none\"\nwhole_pack_percent = 10\ncreate_timeout = \"5s\"\nmax_failures = 3\n",
+    )
+    .unwrap();
+    assert_eq!(unused_keys(&all).len(), 9);
+    let text = file("[trees]\nfill_queue = 5\n");
+    assert_eq!(cache_of(&text).trees.fill_queue, 5);
 }

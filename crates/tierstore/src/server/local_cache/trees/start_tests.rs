@@ -493,3 +493,23 @@ async fn discard_of_a_path_that_is_not_there_is_a_warning_and_a_store_that_is_no
     super::start::discard(true, &kept);
     assert!(!kept.exists());
 }
+
+/// Asserts that a placement file with a location of an interface this release does not know (what
+/// a later release of `v` 1 may write) is not read and is not removed by a start of this release,
+/// so a rollback and a roll forward again lose nothing; the placement is not served meanwhile.
+#[tokio::test]
+async fn a_placement_of_an_interface_a_later_release_added_is_left_where_it_is() {
+    let bench = Bench::new("trees-later-interface").await;
+    let made = bench
+        .store
+        .create(bench.request(vec![fs_at("jobs/1")]))
+        .unwrap();
+    let path = placement_file(&bench.rig.config.path, &made.placement);
+    let text = std::fs::read_to_string(&path).unwrap();
+    let later = text.replace(r#""interface":"fs""#, r#""interface":"gcs""#);
+    assert_ne!(text, later);
+    std::fs::write(&path, &later).unwrap();
+    let store = Bench::reopen(bench.rig.reopen());
+    assert!(store.locate_fs("jobs/1").is_none());
+    assert_eq!(std::fs::read_to_string(&path).unwrap(), later);
+}

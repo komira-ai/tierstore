@@ -201,7 +201,11 @@ fn a_placement_file_holds_its_locations_and_ignores_a_key_it_does_not_know() {
     );
     let newer = text.replace(r#""v":1"#, r#""v":1,"owner":"x""#);
     let read: PlacementFile = serde_json::from_str(&newer).unwrap();
-    let back: Vec<Location> = read.at.iter().map(|at| at.location().unwrap()).collect();
+    let back: Vec<Location> = read
+        .at
+        .iter()
+        .map(|at| at.location().unwrap().unwrap())
+        .collect();
     assert_eq!(back, locations);
     let bad = At::Fs {
         path: "trees".to_owned(),
@@ -212,6 +216,8 @@ fn a_placement_file_holds_its_locations_and_ignores_a_key_it_does_not_know() {
         prefix: "no-slash".to_owned(),
     };
     assert!(bad.location().is_err());
+    let later: At = serde_json::from_str(r#"{"interface":"gcs","bucket":"b"}"#).unwrap();
+    assert_eq!(later.location(), Ok(None));
 }
 
 /// Asserts that a file written by `write_new` is there whole under its name with nothing beside
