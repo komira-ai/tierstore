@@ -306,7 +306,7 @@ What this changes in the cache, read against `local_cache` as it is today (it ke
 
 ```mermaid
 sequenceDiagram
-    participant K as the build frontend frontend
+    participant K as the build frontend
     participant S as storage S3
     participant N as node tierstore
     participant F as tierstore fs
@@ -320,7 +320,7 @@ sequenceDiagram
 
 ```mermaid
 sequenceDiagram
-    participant K as the build frontend frontend
+    participant K as the build frontend
     participant N as node S3 listener
     participant C as tree store + cache
     participant U as upstream tier
@@ -450,7 +450,7 @@ One point for the build frontend design, since it is cheap now and costly later:
 sequenceDiagram
     participant A as action A job
     participant S as store (output ZIP)
-    participant K as the build frontend frontend
+    participant K as the build frontend
     participant N as node tierstore
     A->>S: write output ZIP (stored, ZIP64, descriptors, sha256 in central directory)
     K->>S: ranged GET of the end of the object (central directory)
@@ -493,5 +493,5 @@ A downstream action's input tree is then entries into the upstream actions' outp
 - **Q5 (answered 2026-11-15).** `hydrate` is not a separate API: it is superseded by create with `prefetch`, kept accepted for one release and then removed (8.2).
 - **Q6 (decided 2026-11-15).** Each file's `sha256` is required (D5). A request without it is refused, so the digest is computable by the client before the call and every span is verified as it is filled.
 - **Q7 (decided 2026-11-15, option a).** No new permission. A create needs read on every source object and write on every target location, checked per object and per location (3.2); a read under a placement is judged as a read of that key.
-- **Q8 (answered 2026-11-15).** The the build frontend output object is a ZIP (stored, ZIP64, data descriptors, SHA-256 in a central-directory extra field); the footer carries each member's `sha256` (section 13).
+- **Q8 (answered 2026-11-15).** The build frontend output object is a ZIP (stored, ZIP64, data descriptors, SHA-256 in a central-directory extra field); the footer carries each member's `sha256` (section 13).
 - **Q9.** The issue this work is tracked under: the commit says `Refs komira-ai/tierstore#274`; no issue exists for it.
