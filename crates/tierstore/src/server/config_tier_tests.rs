@@ -225,3 +225,24 @@ fn the_endpoints_of_an_s3_tier_are_refused_when_both_empty_twice_or_missing() {
         "hot_store.endpoints: not for kind \"memory\""
     );
 }
+
+/// Asserts that the place the heartbeat names for the hot tier in its log lines is the endpoints of
+/// an `s3` tier in order, joined by a comma (one endpoint alone, or a list), and the tier's own
+/// value for a tier that has none.
+#[test]
+fn the_hot_tier_is_named_in_the_log_by_its_endpoints_or_its_kind() {
+    let memory = from_text(MINIMAL, DEFAULTS).unwrap();
+    assert_eq!(memory.hot_where(), "memory");
+    let one = from_text(GOLDEN, DEFAULTS).unwrap();
+    assert_eq!(one.hot_where(), "http://192.0.2.10:9200");
+    let several = GOLDEN.replacen(
+        "endpoint           = \"http://192.0.2.10:9200\"",
+        "endpoints          = [\"http://192.0.2.11:9200\", \"http://192.0.2.12:9200\"]",
+        1,
+    );
+    let cli = from_text(&several, DEFAULTS).unwrap();
+    assert_eq!(
+        cli.hot_where(),
+        "http://192.0.2.11:9200,http://192.0.2.12:9200"
+    );
+}

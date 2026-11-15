@@ -34,6 +34,9 @@ mod entry_retry;
 #[cfg(test)]
 mod entry_retry_tests;
 mod heartbeat;
+mod heartbeat_log;
+#[cfg(test)]
+mod heartbeat_log_tests;
 #[cfg(test)]
 mod heartbeat_pace_tests;
 #[cfg(test)]
@@ -130,6 +133,9 @@ pub struct ProxyConfig {
     /// How often the proxy rewrites its registration once [`Proxy::start_heartbeat`] has been
     /// called, and the longest a call of the heartbeat may take.
     pub heartbeat: Duration,
+    /// Where the hot tier is, as the operator named it, which the heartbeat's log lines say (the
+    /// endpoints of an S3 tier, or the tier's own name). It is read by nothing else.
+    pub hot_endpoint: String,
     /// How long a proxy that is not heard of stays live, less `deadline_margin`: `live_until`
     /// is the send time of the last acknowledged beat plus this less the margin. Only the
     /// puts and deletes made on entries read it ([`Proxy::is_live`]); the reconciler counts the
@@ -194,6 +200,7 @@ impl ProxyConfig {
             clock,
             mono: Arc::new(MonotonicClock::new()),
             heartbeat: Duration::from_secs(10),
+            hot_endpoint: "the hot tier".to_owned(),
             departure: Duration::from_secs(60),
             deadline_margin: Duration::from_secs(10),
             entry_rounds: 3,
