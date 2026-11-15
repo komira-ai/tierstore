@@ -99,6 +99,11 @@
 //! A fill that panics or is cancelled frees its key and its permit, and the readers that waited for it get an error
 //! (`Unavailable`, counted as a failed fill with the reason `aborted`).
 //!
+//! # Entries by extents
+//!
+//! A pack of which only some ranges are wanted is kept as an entry by extents, in `extents-v1/` beside
+//! `obj/`: see the module `extents`.
+//!
 //! # Eviction
 //!
 //! The cache keeps its objects under `budget` bytes. Above `high_water` percent of it, and whenever the file system's
@@ -128,6 +133,7 @@ mod calls;
 mod disk;
 mod evict;
 pub(super) mod expand;
+mod extents;
 mod fill;
 mod hold;
 pub(super) mod holds;
@@ -245,6 +251,7 @@ use crate::{
 };
 
 pub use disk::{Disk, Space, SystemDisk};
+pub use extents::{RangeError, RangeWant, Span};
 pub use hold::{Mode, Tick};
 pub use metrics::Counters;
 pub use pins::{PinAnswer, PinError};
@@ -493,6 +500,8 @@ pub(super) struct Inner {
     prefetch: prefetch::Prefetch,
     /// One permit for each put that may be copied to the stage directory; held until it ends.
     keeps: Arc<Semaphore>,
+    /// The fills of ranges of packs and their counters (see `extents`).
+    extents: extents::ExtentState,
     /// Called after a keep has put its object in the index.
     observer: Option<KeepObserver>,
     /// Run by a test just before a kept object is put in the index (see `keep`).
@@ -607,8 +616,10 @@ impl LocalCache {
             add(&counters.discarded_at_start, scanned.discarded + removed);
             scanned
         };
-        let mut index = index_of(scanned.found);
-        if !matches!(standing, Standing::Waiting) {
+        let writable = !matches!(standing, Standing::Waiting);
+        let partials = extents::scan(&config, &counters, &scanned.found, writable);
+        let mut index = extents::build_index(&config.path, scanned.found, partials, &|_| false);
+        if writable {
             pins::restore(&config, &mut index, &scanned.renamed);
         }
         let permits = Arc::new(Semaphore::new(config.max_concurrent_fills.max(1)));
@@ -631,6 +642,7 @@ impl LocalCache {
             permits,
             source_permits,
             keeps,
+            extents: extents::ExtentState::default(),
             observer,
             #[cfg(test)]
             before_insert: Mutex::new(None),
@@ -659,22 +671,6 @@ impl LocalCache {
     #[must_use]
     pub fn counters(&self) -> &Counters {
         &self.inner.counters
-    }
-
-    /// The text of `/metricz`: the counters, the bytes in the cache and the free space of the
-    /// file system now.
-    #[must_use]
-    pub fn metrics(&self) -> String {
-        let inner = &self.inner;
-        let (bytes, objects) = self.held();
-        let free = inner
-            .disk
-            .space(&inner.config.path)
-            .map_or(0, |space| space.free);
-        let read_write = inner.read_write();
-        let depth = locked(&inner.prefetch.queue).len() as u64;
-        let counters = &inner.counters;
-        counters.render(bytes, objects as u64, free, read_write, depth)
     }
 }
 

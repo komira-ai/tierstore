@@ -155,6 +155,8 @@ impl Inner {
         let Some(name) = self.cacheable(key) else {
             return;
         };
+        // What was kept by extents of the object is of a version that is gone.
+        self.drop_partial(&name.hex);
         // An entry of origin `span` is no object of the upstream: nothing was deleted there,
         // and the blob a mount pinned stays.
         if locked(&self.index)

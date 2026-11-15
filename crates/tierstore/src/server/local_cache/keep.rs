@@ -608,7 +608,7 @@ impl Inner {
 
     /// Runs the hook a test set to act just before a kept object is put in the index.
     #[cfg(test)]
-    fn run_before_insert(&self) {
+    pub(super) fn run_before_insert(&self) {
         if let Some(hook) = locked(&self.before_insert).as_ref() {
             hook();
         }
@@ -717,6 +717,7 @@ impl Inner {
                 let _ = index.pins.pin(owner, &name.hex, Some(size), u64::MAX);
             }
         }
+        self.retire_partial(&name.hex);
         // A delete that finished after the HEAD marked this keep (see `forget`), and may have
         // dropped nothing because the entry was not in yet: the object is gone from the
         // upstream. The mark is looked for after the entry is in the index.

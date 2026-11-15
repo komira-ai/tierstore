@@ -12,6 +12,7 @@
     reason = "an integration test: a failed unwrap or expect is the failure it reports"
 )]
 
+mod cache_extents;
 mod entry_objects;
 mod format_object;
 mod hook_records;

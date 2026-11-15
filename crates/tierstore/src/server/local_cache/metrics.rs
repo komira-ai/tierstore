@@ -6,6 +6,7 @@ use std::sync::atomic::{AtomicU64, Ordering};
 use crate::Error;
 
 use super::prefetch::Prefetched;
+use super::{LocalCache, locked};
 
 /// Why a fill did not leave an object in the cache.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -627,6 +628,32 @@ impl Counters {
                 let _ = writeln!(text, "{name}{{{label}=\"{value_label}\"}} {value}");
             }
         }
+        text
+    }
+}
+
+impl LocalCache {
+    /// The text of `/metricz`: the counters, the bytes in the cache (the entries by extents
+    /// counted by the bytes they have filled) and the free space of the file system now, and then
+    /// the counters of the entries by extents.
+    #[must_use]
+    pub fn metrics(&self) -> String {
+        let inner = &self.inner;
+        let (bytes, objects) = self.held();
+        let free = inner
+            .disk
+            .space(&inner.config.path)
+            .map_or(0, |space| space.free);
+        let read_write = inner.read_write();
+        let depth = locked(&inner.prefetch.queue).len() as u64;
+        let (entries, filled) = {
+            let index = locked(&inner.index);
+            (index.partials.len() as u64, index.partials.bytes())
+        };
+        let mut text = inner
+            .counters
+            .render(bytes, objects as u64, free, read_write, depth);
+        text.push_str(&inner.extents.counters.render(entries, filled));
         text
     }
 }
