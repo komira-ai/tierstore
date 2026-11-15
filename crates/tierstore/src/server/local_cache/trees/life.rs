@@ -98,10 +98,12 @@ impl Shared {
             .filter(|placement| !placement.retained(now))
             .map(|placement| placement.id.clone())
             .collect();
-        for id in &ended {
-            if let Some(placement) = state.placements.remove(id) {
-                self.forget_placement(state, &placement);
-            }
+        let removed: Vec<Placement> = ended
+            .iter()
+            .filter_map(|id| state.placements.remove(id))
+            .collect();
+        for placement in &removed {
+            self.forget_placement(state, placement);
         }
         let before = state.trees.len();
         self.drop_unreached(state);
@@ -146,17 +148,15 @@ impl TreeStore {
             return Err(LifeError::ReadOnly);
         }
         let now = shared.now();
-        let alive = state.placements.get(id).filter(|p| p.locatable(now));
+        let alive = state.placements.get_mut(id).filter(|p| p.locatable(now));
         let Some(placement) = alive else {
             return Err(LifeError::UnknownPlacement);
         };
+        placement.released = true;
         for location in &placement.locations {
             state.table.remove(&location.key());
         }
         let _ = std::fs::remove_file(placement_file(&shared.root, id));
-        if let Some(placement) = state.placements.get_mut(id) {
-            placement.released = true;
-        }
         shared.purge(state, now);
         Ok(())
     }

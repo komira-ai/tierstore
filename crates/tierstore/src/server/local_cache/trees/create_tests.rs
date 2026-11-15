@@ -387,3 +387,65 @@ async fn a_file_with_no_source_is_the_whole_object_named_by_its_digest() {
     assert_eq!((made.files, made.bytes, made.packs), (1, 100, 1));
     assert_eq!((made.pins.absent, made.pins.pinned), (1, 0));
 }
+
+/// Asserts that a tree held by two trees that a third holds is listed once in the third's closure,
+/// that all four stay at a restart, and that a tree whose marker cannot be written (its directory
+/// is gone) is still placed again and made ready in memory.
+#[tokio::test]
+async fn a_tree_held_twice_is_one_tree_and_a_marker_that_cannot_be_written_is_not_an_error() {
+    let bench = Bench::new("trees-diamond").await;
+    bench.fill_all().await;
+    let base = bench
+        .store
+        .create(bench.request(vec![fs_at("base")]))
+        .unwrap();
+    let held = |name: &str, below: TreeDigest, at: &str| CreateRequest {
+        built: built(vec![tree_entry(name, below)]),
+        at: vec![fs_at(at)],
+        ttl: None,
+        ready: false,
+    };
+    let left = bench.store.create(held("l", base.tree, "left")).unwrap();
+    let right = bench.store.create(held("r", base.tree, "right")).unwrap();
+    let top = bench
+        .store
+        .create(CreateRequest {
+            built: built(vec![
+                tree_entry("left", left.tree),
+                tree_entry("right", right.tree),
+            ]),
+            at: vec![fs_at("top")],
+            ttl: None,
+            ready: false,
+        })
+        .unwrap();
+    assert_eq!(bench.store.sizes(), (4, 4));
+    assert!(
+        bench
+            .store
+            .resolve(&top.placement, "left/l/bin/tool")
+            .is_ok()
+    );
+    assert!(
+        bench
+            .store
+            .resolve(&top.placement, "right/r/bin/tool")
+            .is_ok()
+    );
+    let store = Bench::reopen(bench.rig.reopen());
+    assert_eq!(store.sizes(), (4, 4));
+    assert!(
+        store
+            .resolve(&top.placement, "right/r/lib/deep/data")
+            .is_ok()
+    );
+
+    std::fs::remove_dir_all(tree_path(&bench.rig, &base.tree)).unwrap();
+    let again = CreateRequest {
+        ready: true,
+        ..bench.request(vec![fs_at("base")])
+    };
+    let refreshed = bench.store.create(again).unwrap();
+    assert!(!refreshed.created);
+    assert!(bench.store.resolve(&base.placement, "bin/tool").is_ok());
+}

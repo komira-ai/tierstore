@@ -477,3 +477,19 @@ async fn a_directory_that_cannot_be_read_is_an_error_or_empty() {
     assert_eq!(store.sizes(), (0, 0));
     drop(holder);
 }
+
+/// Asserts that a file or a directory the store may not remove is said and kept going: a path that
+/// is not there warns and nothing else happens, and a store that does not own the directory
+/// removes nothing at all.
+#[tokio::test]
+async fn discard_of_a_path_that_is_not_there_is_a_warning_and_a_store_that_is_not_owner_keeps_it() {
+    let bench = Bench::new("trees-discard").await;
+    let root = bench.rig.config.path.clone();
+    super::start::discard(true, &root.join("not-there"));
+    let kept = root.join("kept");
+    std::fs::write(&kept, b"x").unwrap();
+    super::start::discard(false, &kept);
+    assert!(kept.exists());
+    super::start::discard(true, &kept);
+    assert!(!kept.exists());
+}

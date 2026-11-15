@@ -271,9 +271,11 @@ impl TreeStore {
             // The same tree at the same places: a refresh.
             placement.expires_ms = expires_ms;
             shared.write_placement(placement)?;
-            if let Some(info) = state.trees.get(&built.root) {
-                self.set_ready(info, ready);
-            }
+            state
+                .trees
+                .get(&built.root)
+                .into_iter()
+                .for_each(|info| self.set_ready(info, ready));
             return Ok(Created {
                 created: false,
                 ..summary
@@ -312,8 +314,12 @@ impl TreeStore {
             };
             pins = shared.pin(&info);
             state.trees.insert(built.root, Arc::new(info));
-        } else if let Some(info) = state.trees.get(&built.root) {
-            self.set_ready(info, ready);
+        } else {
+            state
+                .trees
+                .get(&built.root)
+                .into_iter()
+                .for_each(|info| self.set_ready(info, ready));
         }
         if let Err(why) = shared.write_placement(&placement) {
             // The tree this made, if any, has no placement: it goes.

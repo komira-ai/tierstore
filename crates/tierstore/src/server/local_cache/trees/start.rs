@@ -46,7 +46,7 @@ fn entries(dir: &Path) -> Vec<(String, std::path::PathBuf)> {
 }
 
 /// Removes a directory or a file the store has no use for, if the store may.
-fn discard(owned: bool, path: &Path) {
+pub(super) fn discard(owned: bool, path: &Path) {
     if !owned {
         return;
     }

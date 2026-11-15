@@ -455,3 +455,58 @@ async fn a_store_that_is_off_makes_no_directory() {
     assert!(!bench.store.config().enabled);
     assert!(bench.store.locate_fs("a").is_none());
 }
+
+/// Asserts that a marker that cannot be written (the tree's directory is gone) is no error of
+/// `mark_ready`, that a tree already marked is not marked twice, and that a tree that is not
+/// there is refused.
+#[tokio::test]
+async fn mark_ready_is_once_and_a_marker_that_cannot_be_written_is_not_an_error() {
+    let (bench, _) = placed("trees-mark").await;
+    let tree = bench.built().root;
+    std::fs::remove_dir_all(tree_path(&bench.rig, &tree)).unwrap();
+    assert!(bench.store.mark_ready(&tree).is_ok());
+    assert!(bench.store.mark_ready(&tree).is_ok());
+    let unknown = TreeDigest::of(b"no such tree");
+    assert_eq!(
+        bench.store.mark_ready(&unknown).unwrap_err(),
+        LifeError::UnknownTree
+    );
+}
+
+/// Asserts that a step that cannot read the directory (the `trees` directory is a file) says so
+/// and leaves the store as it was: still without the lock, and still refusing a create.
+#[tokio::test]
+async fn a_step_that_cannot_read_the_directory_leaves_the_store_read_only() {
+    let bench = Bench::new("trees-step-fails").await;
+    let holder = bench.rig.locked();
+    let waiting = bench.rig.locked();
+    let store = Bench::reopen(waiting.clone());
+    let trees = bench.rig.config.path.join("trees");
+    std::fs::remove_dir_all(&trees).unwrap();
+    std::fs::write(&trees, b"a file").unwrap();
+    drop(holder);
+    assert!(waiting.tick().unwrap() == super::super::Tick::Took);
+    store.step();
+    assert_eq!(
+        store
+            .create(bench.request(vec![fs_at("jobs/1")]))
+            .unwrap_err(),
+        super::CreateError::ReadOnly
+    );
+}
+
+/// Asserts that a placement held by an attachment and a read, whose lease is over when the
+/// directory is read again, is not made again, and that dropping the read then takes nothing.
+#[tokio::test]
+async fn a_held_placement_whose_lease_ended_is_not_placed_again_by_a_reread() {
+    let (bench, id) = placed("trees-held-ended").await;
+    let store = &bench.store;
+    store.attach(&id, "run").unwrap();
+    let read = store.open_read(&id).unwrap();
+    bench.rig.clock.advance(9 * HOUR);
+    store.load().unwrap();
+    assert!(store.placement(&id).is_none());
+    assert_eq!(store.sizes(), (0, 0));
+    drop(read);
+    assert_eq!(store.sizes(), (0, 0));
+}

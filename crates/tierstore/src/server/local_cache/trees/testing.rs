@@ -36,11 +36,16 @@ impl Bench {
 
     /// The file `path` whose bytes are the blob `blob` of the pack.
     pub(super) fn member(&self, path: &str, blob: usize) -> NewEntry {
+        self.member_with(path, blob, None)
+    }
+
+    /// The same with the mode `mode`.
+    fn member_with(&self, path: &str, blob: usize, mode: Option<Mode>) -> NewEntry {
         let (sha256, offset, size) = &self.pack.blobs[blob];
         NewEntry {
             path: path.to_owned(),
             kind: NewKind::File {
-                mode: None,
+                mode,
                 sha256: TreeDigest::from_hex(sha256).expect("a digest"),
                 size: *size,
                 from: Some(BlobSource {
@@ -54,10 +59,7 @@ impl Bench {
     /// The members of the pack as a tree of two directories, a symbolic link and an empty
     /// directory, and one empty file.
     pub(super) fn entries(&self) -> Vec<NewEntry> {
-        let mut shown = self.member("bin/tool", 0);
-        if let NewKind::File { mode, .. } = &mut shown.kind {
-            *mode = Some(Mode::new(0o4755).expect("a mode"));
-        }
+        let shown = self.member_with("bin/tool", 0, Some(Mode::new(0o4755).expect("a mode")));
         vec![
             shown,
             self.member("bin/other", 1),

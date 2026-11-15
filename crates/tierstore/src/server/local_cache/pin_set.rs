@@ -157,8 +157,8 @@ impl PinSet {
                 pin.owners.remove(owner);
                 pin.owners.is_empty()
             });
-            if emptied && let Some(pin) = self.by_blob.remove(hex) {
-                self.bytes -= pin.size;
+            if emptied {
+                self.bytes -= self.by_blob.remove(hex).map_or(0, |pin| pin.size);
             }
         }
         blobs.len()
