@@ -420,12 +420,16 @@ async fn the_loop_sweeps_on_its_interval_and_stops_when_told() {
         tokio::spawn(async move { store.maintain(Duration::from_secs(10), halt).await })
     };
     bench.rig.clock.advance(5 * HOUR);
-    for _ in 0..50 {
+    // A step runs on a thread of the blocking pool, which the paused clock does not wait for: each
+    // round lets a blocking job through, and the loop ends when the sweep is seen, not by time.
+    for _ in 0..100_000 {
         tokio::time::advance(Duration::from_secs(10)).await;
         if bench.store.sizes() == (0, 0) {
             break;
         }
-        tokio::task::yield_now().await;
+        tokio::task::spawn_blocking(std::thread::yield_now)
+            .await
+            .unwrap();
     }
     assert_eq!(bench.store.sizes(), (0, 0));
     halt.notify_one();
