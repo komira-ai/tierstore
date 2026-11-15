@@ -333,6 +333,32 @@ async fn the_bucket_calls_and_the_calls_that_are_not_done() {
     }
 }
 
+/// Asserts what the server answers, today, to a `tree` subresource of the bucket (`POST`,
+/// `GET` and `DELETE` of `/<bucket>?tree`) while no handler for it exists: the same
+/// `NotImplemented` (501) as any query parameter it does not know, with its fixed text, and
+/// nothing stored or listed by the call. A client that falls back on this answer reads it
+/// as "no create-tree here".
+#[tokio::test(start_paused = true)]
+async fn unknown_tree_subresource_answers_as_before_the_endpoint() {
+    let rig = Rig::new(MEBIBYTE).await;
+    rig.put("a", b"x").await;
+    for method in ["POST", "GET", "DELETE"] {
+        let reply = rig
+            .send(method, &format!("/{BUCKET}?tree"), &[], b"{}")
+            .await;
+        assert_eq!(reply.status, StatusCode::NOT_IMPLEMENTED, "{method}");
+        assert_eq!(reply.code(), "NotImplemented", "{method}");
+        assert_eq!(
+            texts(&reply.body, "Message").concat(),
+            "this query parameter is not supported",
+            "{method}"
+        );
+    }
+    let listed = rig.list("").await;
+    assert_eq!(texts(&listed.body, "Key"), ["a"]);
+    assert_eq!(rig.get("a", None).await.body, "x");
+}
+
 /// Asserts how the store's failures are answered: no room in either tier is `SlowDown` (503),
 /// a tier that does not answer is `ServiceUnavailable` (503), and any other failure is
 /// `InternalError` (500) with its text.
