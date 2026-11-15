@@ -124,6 +124,8 @@ struct Flags {
     cert: &'static str,
     key: &'static str,
     both: &'static str,
+    /// The protocol the handshake offers (ALPN): the HTTP version the front speaks.
+    alpn: &'static [u8],
 }
 
 /// The flags of the OCI front.
@@ -131,6 +133,7 @@ const OCI_FLAGS: Flags = Flags {
     cert: "--oci-tls-cert",
     key: "--oci-tls-key",
     both: "--oci-tls-cert and --oci-tls-key",
+    alpn: b"http/1.1",
 };
 
 /// The flags of the S3 front.
@@ -138,6 +141,15 @@ const S3_FLAGS: Flags = Flags {
     cert: "--tls-cert",
     key: "--tls-key",
     both: "--tls-cert and --tls-key",
+    alpn: b"http/1.1",
+};
+
+/// The flags of the trees front, which speaks gRPC, that is HTTP/2.
+const TREES_FLAGS: Flags = Flags {
+    cert: "params.tls_cert_file",
+    key: "params.tls_key_file",
+    both: "params.tls_cert_file and params.tls_key_file",
+    alpn: b"h2",
 };
 
 /// The acceptor for the certificate chain in `cert` and the key in `key` (both PEM), which serves
@@ -184,6 +196,26 @@ pub fn s3_acceptor(
     listen: &[SocketAddr],
 ) -> Result<TlsAcceptor, OciError> {
     acceptor_with(cert, key, S3_FLAGS, &|facts| {
+        if facts.dns.is_empty() {
+            listen.iter().find_map(|addr| unnamed(&facts.ips, *addr))
+        } else {
+            None
+        }
+    })
+}
+
+/// The acceptor of the trees front, which `params.tls_cert_file` and `params.tls_key_file` of a
+/// `trees` interface name, for a front that listens at `listen`: as [`s3_acceptor`], except that
+/// it offers HTTP/2, which gRPC needs.
+///
+/// # Errors
+/// As [`acceptor_for`], with the params of the trees front in the messages.
+pub fn trees_acceptor(
+    cert: &Path,
+    key: &Path,
+    listen: &[SocketAddr],
+) -> Result<TlsAcceptor, OciError> {
+    acceptor_with(cert, key, TREES_FLAGS, &|facts| {
         if facts.dns.is_empty() {
             listen.iter().find_map(|addr| unnamed(&facts.ips, *addr))
         } else {
@@ -247,7 +279,7 @@ fn acceptor_with(
         flags: flags.both,
         why: why.to_string(),
     })?;
-    config.alpn_protocols = vec![b"http/1.1".to_vec()];
+    config.alpn_protocols = vec![flags.alpn.to_vec()];
     Ok(TlsAcceptor::from(Arc::new(config)))
 }
 

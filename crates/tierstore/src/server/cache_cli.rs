@@ -68,7 +68,10 @@ use super::handoff::Handoff;
 use super::listen::{LoopbackBind, bind_set, bind_with, joined};
 use super::local_cache::{CacheConfig, Disk, Every, LocalCache, Mode, SystemDisk, check_local};
 use super::oci::OciListener;
-use super::stop_watcher::{oci_cut_note, serve_fronts, serve_oci, stop_watcher};
+use super::stop_watcher::{
+    oci_cut_note, serve_fronts, serve_oci, serve_trees, stop_watcher, trees_cut_note,
+};
+use super::trees::{TreesSetup, trees_setup_of};
 use super::{Drained, Server, ServerConfig};
 
 /// The times of the loops that run beside the server of a cache, from its settings.
@@ -224,6 +227,7 @@ pub(super) async fn serve_cache(
     let mut config = server_config(&settings.front, Arc::clone(&clock), true)?;
     // The front's flags and files are checked before the cache is opened, as the storage node's.
     let oci = oci_setup_of(&settings.oci, &config, true)?;
+    let trees = trees_setup_of(&settings.trees, &config, true)?;
     config.oci_metrics = oci.as_ref().map(|setup| Arc::clone(&setup.metrics));
     let run = probe_run_id(&settings.front.proxy_id, clock.now(), std::process::id());
     let cache = open(&settings.cache, &upstream, &disk, &run).await?;
@@ -239,6 +243,7 @@ pub(super) async fn serve_cache(
         beating: None,
         handoff: settings.handoff.as_ref(),
         fill_socket: settings.fill_socket.as_deref(),
+        trees,
     };
     serve_front(
         cache,
@@ -274,6 +279,8 @@ pub(super) struct Fronts<'a> {
     /// The fill socket (`local_cache.fill_socket`), bound while the cache holds the lock of its
     /// directory (see [`fill_socket`](super::fill_socket)); none for a node without one.
     pub(super) fill_socket: Option<&'a std::path::Path>,
+    /// The trees front, if the settings have a `trees` interface.
+    pub(super) trees: Option<TreesSetup>,
 }
 
 /// Serves the S3 front (and the OCI front, if there is a setup) over `cache`, with the loops of
@@ -320,10 +327,19 @@ pub(super) async fn serve_front(
     .map_err(super::cli::HandingError::into_boxed)?;
     let offer = offer.map(|offer| offer.with_accept_pause(listen.accept_pause));
     let stop = stopped_by(stop, offer);
+    let trees = match fronts.trees {
+        Some(setup) => Some(setup.bind().await?),
+        None => None,
+    };
+    let mut addresses = addresses;
+    if let Some(trees) = &trees {
+        addresses.trees_all = trees.local_addrs()?;
+    }
     ready(addresses);
     let oci_drain = oci.as_ref().map(OciListener::drain);
     let (late_s3, late_oci) = (Arc::clone(&server), oci_drain.clone());
     let (watcher, oci_stopped) = stop_watcher(stop, Arc::clone(&server), oci_drain, fronts.lb_wait);
+    let trees_stopped = oci_stopped.clone();
     // One Notify for each loop: `notify_one` wakes one waiter, and keeps the wake for a loop that
     // is not waiting just now.
     let halts: [Arc<Notify>; 5] = [
@@ -343,7 +359,12 @@ pub(super) async fn serve_front(
         };
         let ended = serve_fronts(
             server.serve_all(listeners),
-            serve_oci(oci, oci_stopped),
+            async {
+                tokio::join!(
+                    serve_oci(oci, oci_stopped),
+                    serve_trees(trees, trees_stopped)
+                )
+            },
             after,
         )
         .await;
@@ -375,11 +396,12 @@ pub(super) async fn serve_front(
             tracing::debug!("tierstore: fill socket ended");
         }
     };
-    let ((drained, oci_cut), (), (), (), (), ()) =
+    let ((drained, (oci_cut, trees_cut)), (), (), (), (), ()) =
         tokio::join!(serving, beside, maintaining, holding, scrubbing, filling);
     watcher.abort();
     super::build_info::stderr_log::notes(&cut_note(drained));
     super::build_info::stderr_log::notes(&oci_cut_note(oci_cut));
+    super::build_info::stderr_log::notes(&trees_cut_note(trees_cut));
     super::build_info::stderr_log::notes(&late_of(&late_s3, late_oci.as_ref()));
     Ok(drained)
 }
@@ -430,6 +452,9 @@ pub(super) async fn serve_cache_until_signalled(settings: CacheSettings) -> Resu
         if bound.oci.is_some() {
             let how = bound.oci_mode.unwrap_or_default().as_str();
             line.push_str(&format!(" oci-listen={} ({how})", joined(&bound.oci_all)));
+        }
+        if !bound.trees_all.is_empty() {
+            line.push_str(&format!(" trees-listen={}", joined(&bound.trees_all)));
         }
         super::build_info::stderr_log::answer(&format!("{line} commit={COMMIT}\n"));
     };

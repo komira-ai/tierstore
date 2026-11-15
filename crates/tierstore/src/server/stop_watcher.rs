@@ -10,6 +10,7 @@ use tokio::task::JoinHandle;
 
 use super::Server;
 use super::oci::{OciDrain, OciListener};
+use super::trees::TreesListener;
 
 /// Spawns the task that waits for `stop`, begins the drain of the S3 front `server` and of the
 /// OCI front (`oci`, if there is one), waits `lb_wait` for the load balancer to notice, and then
@@ -56,6 +57,18 @@ pub(super) async fn serve_oci(
     }
 }
 
+/// Serves the trees front until `stopped` says so, the end of the settle; the connections it cut. 0
+/// when there is none.
+pub(super) async fn serve_trees(
+    listener: Option<TreesListener>,
+    stopped: watch::Receiver<bool>,
+) -> usize {
+    match listener {
+        Some(listener) => listener.serve(stopped).await,
+        None => 0,
+    }
+}
+
 /// Serves both fronts, and when both are done runs `after`: what they return, in order. The
 /// proxy's heartbeat is stopped by `after`, so that it beats until the in-flight requests of the S3
 /// front and of the OCI front are finished or cut, not only those of whichever front ends first.
@@ -79,5 +92,14 @@ pub(super) fn oci_cut_note(cut: usize) -> String {
     match cut {
         0 => String::new(),
         cut => format!("tierstore: {cut} OCI connections were cut at the drain deadline\n"),
+    }
+}
+
+/// What a drain reports on stderr when its deadline cut trees connections: a line, and nothing
+/// when it cut none.
+pub(super) fn trees_cut_note(cut: usize) -> String {
+    match cut {
+        0 => String::new(),
+        cut => format!("tierstore: {cut} trees connections were cut at the drain deadline\n"),
     }
 }

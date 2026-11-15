@@ -624,6 +624,7 @@ fn code() -> Code {
         "params.port",
         "params.addresses",
         "params.upstream",
+        "params.max_request_bytes",
     ];
     let keys = KEYS
         .iter()
