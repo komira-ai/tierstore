@@ -59,7 +59,10 @@ pub(super) fn cleanup(c: &Ctx<'_, '_>, params: &Params, record: &Record) -> Resu
     )))
 }
 
-/// Looks afresh at what `verify` saw: `next` runs and the staged release answers.
+/// Looks afresh at what `verify` saw: `next` runs and the staged release answers. In a
+/// hand-over the old instance still drains on the same listening sockets and answers `/readyz`
+/// with 503 until it exits, so a look that reaches it is no verdict: `confirm` waits for
+/// `/readyz` as `cutover` does, then probes for the build.
 fn confirm(c: &Ctx<'_, '_>, next: Instance, target: &str) -> Result<(), Done> {
     let not_confirmed = |why: String| Done::fail(Reason::NotConfirmed, why);
     let state = c.ports.units.state(next)?;
@@ -69,7 +72,7 @@ fn confirm(c: &Ctx<'_, '_>, next: Instance, target: &str) -> Result<(), Done> {
             unit_name(next)
         )));
     }
-    c.look().observed(target).map(|_| ()).map_err(|failed| {
+    c.look().serves(target).map(|_| ()).map_err(|failed| {
         not_confirmed(format!(
             "{target} was not seen serving: {}",
             failed.report.detail.unwrap_or_default()

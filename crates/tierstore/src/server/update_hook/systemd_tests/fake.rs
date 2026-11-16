@@ -69,6 +69,11 @@ pub fn version_of(release: &str) -> String {
 /// The params of an update to `staged` (a first install when `previous` is `None`), with the
 /// optional lines `optional`.
 pub fn params_with(staged: &str, previous: Option<&str>, optional: &str) -> Params {
+    Params::parse(&params_text(staged, previous, optional)).expect("params")
+}
+
+/// The text of the params file of [`params_with`], as hostkeeper writes it.
+pub fn params_text(staged: &str, previous: Option<&str>, optional: &str) -> String {
     let mut text = format!(
         "\"updater.staged_release\" = \"{staged}\"\n\"updater.target_version\" = \"{}\"\n",
         version_of(staged)
@@ -81,7 +86,7 @@ pub fn params_with(staged: &str, previous: Option<&str>, optional: &str) -> Para
         ));
     }
     text.push_str(optional);
-    Params::parse(&text).expect("params")
+    text
 }
 
 /// The params of an update to `staged`, with the node's configuration named.
@@ -159,6 +164,9 @@ struct World {
     fail_prefix: Option<String>,
     late_prefix: Option<String>,
     drain_looks: u32,
+    /// How many of the next looks at `/readyz` the old instance answers, still draining on the
+    /// same sockets.
+    draining_looks: u32,
 }
 
 impl World {
@@ -277,6 +285,7 @@ impl SystemdFake {
                 fail_prefix: None,
                 late_prefix: None,
                 drain_looks: 0,
+                draining_looks: 0,
             }),
         }
     }
@@ -406,6 +415,12 @@ impl SystemdFake {
     /// How many `state` looks a draining instance is still seen running.
     pub fn set_drain_looks(&self, looks: u32) {
         self.w.borrow_mut().drain_looks = looks;
+    }
+
+    /// The next `looks` looks at `/readyz` reach the old instance, which drains on the same
+    /// sockets and says 503 `draining`.
+    pub fn answer_draining(&self, looks: u32) {
+        self.w.borrow_mut().draining_looks = looks;
     }
 
     /// The instance of `release` reports `version` instead of its own.
@@ -640,7 +655,14 @@ impl Markers for SystemdFake {
 impl Instances for SystemdFake {
     fn get(&self, _port: u16, path: &str) -> Result<Reply, PortError> {
         self.count(format!("get {path}"), PortKind::Instances)?;
-        let w = self.w.borrow();
+        let mut w = self.w.borrow_mut();
+        if path == "/readyz" && w.draining_looks > 0 {
+            w.draining_looks -= 1;
+            return Ok(Reply {
+                status: 503,
+                body: "draining".to_owned(),
+            });
+        }
         let release = w
             .units
             .values()

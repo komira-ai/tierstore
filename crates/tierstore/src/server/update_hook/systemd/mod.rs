@@ -20,8 +20,9 @@
 //! - `verify` observes the staged release on the public port and records `verified`.
 //! - `rollback` brings the previous release back on the instance that served it (or stops the
 //!   only instance of a first install) and records nothing in flight. Before the commit only.
-//! - `cleanup` confirms afresh, records `stopping` (the commit), waits for the old instance to
-//!   have exited, removes its marker and records that `next` is now `live`.
+//! - `cleanup` confirms afresh (it waits for `/readyz`, which the old instance, still draining
+//!   on the same sockets, answers 503), records `stopping` (the commit), waits for the old
+//!   instance to have exited, removes its marker and records that `next` is now `live`.
 //! - `uninstall` stops both instances and removes both markers; the data stays.
 //! - `restore`, the boot step, makes the markers say what the record says and starts that
 //!   instance.
