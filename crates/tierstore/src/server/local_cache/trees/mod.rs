@@ -58,7 +58,9 @@
 
 mod config;
 mod create;
+mod fetch;
 mod files;
+mod keys;
 mod life;
 mod location;
 mod read;
@@ -69,7 +71,11 @@ mod table;
 #[cfg(test)]
 mod create_tests;
 #[cfg(test)]
+mod fetch_tests;
+#[cfg(test)]
 mod files_tests;
+#[cfg(test)]
+mod keys_tests;
 #[cfg(test)]
 mod life_tests;
 #[cfg(test)]
@@ -89,6 +95,8 @@ use std::sync::{Arc, Mutex};
 
 pub use config::{Prefetch, TreesConfig};
 pub use create::{CreateError, CreateRequest, Created};
+pub use fetch::{FetchError, OpenFile};
+pub use keys::TreeKey;
 pub use life::{LifeError, PlacementInfo, ReadHold, SweepReport};
 pub use location::{Located, Location, LocationError, PlacementId};
 pub use read::{FileSpan, Kind, Listing, ReadError, Resolved, Stat};

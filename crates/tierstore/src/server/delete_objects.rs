@@ -17,6 +17,7 @@ use crate::journal::is_reserved;
 use super::Server;
 use super::digests::Algorithm;
 use super::ops::detached;
+use super::ops::placed::read_only;
 use super::reply::{Answer, S3Error, xml_answer};
 use super::request::{BoxError, Check, Reader};
 use super::xml::{self, Outcome};
@@ -108,7 +109,11 @@ impl Server {
         if asked.objects.is_empty() || asked.objects.len() > DELETE_KEYS {
             return Err(malformed());
         }
-        let plans: Vec<Plan> = asked.objects.iter().map(plan).collect();
+        let plans: Vec<Plan> = asked
+            .objects
+            .iter()
+            .map(|object| plan(object, self.placed(&object.key)))
+            .collect();
         let mut seen = HashSet::new();
         let doomed: Vec<String> = asked
             .objects
@@ -155,11 +160,18 @@ impl Server {
     }
 }
 
-/// What the call does with `object`: a key of the proxy or a version id is refused for that key
-/// alone.
-fn plan(object: &xml::DeleteObject) -> Plan {
+/// What the call does with `object`: a key of the proxy, a key under a placement of a node-local
+/// tree (`placed`) or a version id is refused for that key alone.
+fn plan(object: &xml::DeleteObject, placed: bool) -> Plan {
     if is_reserved(&object.key) {
         return Plan::Refuse(failed(Error::Reserved(object.key.clone())));
+    }
+    if placed {
+        let refused = read_only();
+        return Plan::Refuse(Outcome::Failed {
+            code: refused.code(),
+            message: refused.message().to_owned(),
+        });
     }
     if object.versioned {
         return Plan::Refuse(Outcome::Failed {
