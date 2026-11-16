@@ -72,7 +72,8 @@ impl Look<'_> {
     }
 
     /// Waits for `/readyz`, then probes for `version`: what a step does after it started a
-    /// release. `NotReady` or `ProbeFailed` when it does not serve.
+    /// release, and what `cleanup` confirms before the commit. `NotReady` or `ProbeFailed` when
+    /// it does not serve.
     pub fn serves(&self, version: &str) -> Result<CacheMode, Done> {
         let mode = self.wait_ready().ok_or_else(|| {
             Done::fail(
@@ -89,8 +90,8 @@ impl Look<'_> {
         Ok(mode)
     }
 
-    /// One look at `/readyz`, then the probe for `version`: what `verify` and `cleanup` observe.
-    /// `NotReady` or `WrongBuild` when it is not seen.
+    /// One look at `/readyz`, then the probe for `version`: what `verify` observes (it defers a
+    /// `NotReady`). `NotReady` or `WrongBuild` when it is not seen.
     pub fn observed(&self, version: &str) -> Result<CacheMode, Done> {
         let mode = self.ready().ok_or_else(|| {
             Done::fail(

@@ -424,3 +424,56 @@ fn cleanup_defers_while_the_old_instance_drains_and_a_later_run_finishes() {
     assert_eq!(fake.markers(), [Instance::B]);
     assert_eq!(fake.running(), [Instance::B]);
 }
+
+/// Asserts that `cleanup` confirms past the old instance of a hand-over, which still drains on
+/// the same sockets and answers `/readyz` with 503: it looks again until the new instance
+/// answers, then commits and finishes. Catches a confirm that takes one 503 from the draining
+/// instance as its verdict and fails `not_confirmed`, which rolled a healthy update back.
+#[test]
+fn cleanup_looks_past_the_503_of_the_draining_old_instance_and_commits() {
+    let p = params(NEW, Some(OLD));
+    let fake = SystemdFake::installed();
+    fake.drive(&p, &[Prepare, Cutover, Verify]);
+    fake.answer_draining(2);
+    let before = fake.log().len();
+    let done = fake.run(Cleanup, &p);
+    assert_ok(&done);
+    let looks = fake.log()[before..]
+        .iter()
+        .filter(|line| *line == "get /readyz")
+        .count();
+    assert_eq!(looks, 3);
+    let finished = fake.record();
+    assert!(!finished.updating);
+    assert_eq!(finished.live, Some(Instance::B));
+    assert_eq!(fake.markers(), [Instance::B]);
+}
+
+/// Asserts the bound of that wait: a draining instance that answers 503 to one look fewer than
+/// `READY_ATTEMPTS` still lets `cleanup` commit, and one that answers every look fails it
+/// `not_confirmed` naming `/readyz`, reversible, with nothing committed and no marker removed.
+#[test]
+fn cleanup_waits_for_readyz_at_most_ready_attempts_looks() {
+    let p = params(NEW, Some(OLD));
+    let fake = SystemdFake::installed();
+    fake.drive(&p, &[Prepare, Cutover, Verify]);
+    fake.answer_draining(READY_ATTEMPTS - 1);
+    assert_ok(&fake.run(Cleanup, &p));
+    assert!(!fake.record().updating);
+
+    let fake = SystemdFake::installed();
+    fake.drive(&p, &[Prepare, Cutover, Verify]);
+    fake.answer_draining(READY_ATTEMPTS);
+    let done = fake.run(Cleanup, &p);
+    assert_failed(&done, Reason::NotConfirmed);
+    assert_eq!(
+        detail(&done),
+        format!(
+            "{} was not seen serving: port 9300 does not answer /readyz",
+            version_of(NEW)
+        )
+    );
+    assert!(done.report.reversible);
+    assert!(!fake.record().committed());
+    assert_eq!(fake.markers(), [Instance::A, Instance::B]);
+}

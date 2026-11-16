@@ -140,7 +140,8 @@ is there (`ConditionPathExists=`), so at boot only the recorded one runs.
   exits 0, which the template does not restart. In a restart the old instance is stopped first. It then waits for `/readyz` and for
   the build gauge of 9300 to name the target version.
 - `verify` observes the same and says `promotion_pending` while a build node still serves read-only. `cleanup` is the commit: it
-  confirms afresh, records `stopping`, waits for the old instance to exit and removes its marker. `rollback` starts the previous release
+  confirms afresh (it waits for `/readyz` as `cutover` does: the old instance still drains on the same sockets and answers 503 until
+  it exits), records `stopping`, waits for the old instance to exit and removes its marker. `rollback` starts the previous release
   on the old letter (the link is back), the new instance gives the sockets back and exits. `restore` starts only the recorded instance.
 - A first install starts `tierstore@a` with a normal bind; its `rollback` stops it and fails with `no_previous_release`.
 - On macOS one launchd job is booted out and bootstrapped again: an update has a gap.
