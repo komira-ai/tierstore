@@ -30,8 +30,8 @@ pub use launchd::{
 };
 pub use markers::MarkerFiles;
 pub use runner::{Call, Output, RunError, Runner, SystemRunner};
-pub use state::{LOCK_FILE, STATE_FILE, StateFiles};
-pub use units::SystemdUnits;
+pub use state::{CONFIG_STATE_FILE, LOCK_FILE, STATE_FILE, StateFiles};
+pub use units::{GuardUnit, SystemdUnits};
 
 /// Where the Debian and Ubuntu package puts `systemctl`.
 pub const SYSTEMCTL_PROGRAM: &str = "/usr/bin/systemctl";

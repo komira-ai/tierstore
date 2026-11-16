@@ -584,3 +584,44 @@ fn the_package_binary_that_is_not_one_to_run_is_not_run() {
     );
     assert!(runner.calls().is_empty());
 }
+
+/// Asserts that a host given one binary asks that binary for every release, the capabilities
+/// and the check alike, and checks it as a release's binary: one that others can write is not
+/// run.
+#[test]
+fn a_host_given_one_binary_asks_it_for_every_release() {
+    let (_guard, root) = scratch("host-one-binary");
+    let bin = root.join("usr/libexec/tierstore");
+    fs::create_dir_all(&bin).unwrap();
+    mode(&bin, 0o755);
+    let binary = bin.join("tierstore");
+    fs::write(&binary, "#!").unwrap();
+    mode(&binary, 0o755);
+    let runner = FakeRunner::replying(vec![exit(0, "handoff-socket-v1\n", ""), exit(0, "", "")]);
+    let one = host(&root, &runner).with_binary(PathBuf::from("/usr/libexec/tierstore/tierstore"));
+    assert_eq!(
+        one.capabilities(Path::new("/packages/config/1")).unwrap(),
+        vec!["handoff-socket-v1".to_owned()]
+    );
+    assert_eq!(
+        one.check_config(
+            Path::new("/elsewhere"),
+            Path::new("/etc/tierstore/config.toml")
+        )
+        .unwrap(),
+        None
+    );
+    let programs: Vec<String> = runner.calls().into_iter().map(|c| c.program).collect();
+    let want = binary.to_str().unwrap().to_owned();
+    assert_eq!(programs, vec![want.clone(), want]);
+    mode(&binary, 0o777);
+    let runner = FakeRunner::replying(vec![]);
+    let one = host(&root, &runner).with_binary(PathBuf::from("/usr/libexec/tierstore/tierstore"));
+    let text = message(one.capabilities(Path::new("/r")).unwrap_err());
+    assert!(text.contains("tierstore"), "{text}");
+    assert!(runner.calls().is_empty());
+    mode(&binary, 0o755);
+    mode(&bin, 0o777);
+    let text = message(one.capabilities(Path::new("/r")).unwrap_err());
+    assert!(text.contains("usr/libexec/tierstore"), "{text}");
+}

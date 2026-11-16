@@ -31,7 +31,9 @@ const KIND: PortKind = PortKind::State;
 pub const LOCK_FILE: &str = "lock";
 /// The record, in the state directory.
 pub const STATE_FILE: &str = "state.json";
-const TEMP_FILE: &str = "state.json.tmp";
+/// The record of the config hook (`tierstore config-hook`), in the same directory, under the
+/// same lock: a config package's update is kept apart from the release's record.
+pub const CONFIG_STATE_FILE: &str = "config-state.json";
 /// The one mode the state directory may have: the hook's alone.
 const DIR_MODE: Mode = Mode::from_bits_truncate(0o700);
 /// The mode of the parents of the directory when the hook makes them.
@@ -51,6 +53,9 @@ pub(super) fn others_write(mode: Mode) -> bool {
 pub struct StateFiles {
     dir: PathBuf,
     owner: u32,
+    /// The record's file name, and the name of its temporary file.
+    record: &'static str,
+    temp: String,
     fd: OnceCell<OwnedFd>,
 }
 
@@ -78,8 +83,19 @@ impl StateFiles {
         StateFiles {
             dir,
             owner,
+            record: STATE_FILE,
+            temp: format!("{STATE_FILE}.tmp"),
             fd: OnceCell::new(),
         }
+    }
+
+    /// The same directory and lock, with the record in the file `record` (and its temporary
+    /// file `<record>.tmp`) in place of [`STATE_FILE`].
+    #[must_use]
+    pub fn with_record(mut self, record: &'static str) -> StateFiles {
+        self.record = record;
+        self.temp = format!("{record}.tmp");
+        self
     }
 
     /// Makes the directory when it is absent: mode 0700, and the parents that are missing 0755.
@@ -171,7 +187,7 @@ impl StateFiles {
     fn open_record(&self, dir: BorrowedFd<'_>) -> Result<Option<OwnedFd>, Fault> {
         match openat(
             dir,
-            STATE_FILE,
+            self.record,
             OFlags::RDONLY | OFlags::NOFOLLOW | OFlags::CLOEXEC,
             Mode::empty(),
         ) {
@@ -184,10 +200,10 @@ impl StateFiles {
     /// Writes the temporary file anew (one a crash left, or a link put there, is removed: the
     /// link itself, not what it points at), made with `O_EXCL | O_NOFOLLOW`.
     fn write_temp(&self, dir: BorrowedFd<'_>, bytes: &[u8]) -> io::Result<()> {
-        let _ = unlinkat(dir, TEMP_FILE, AtFlags::empty());
+        let _ = unlinkat(dir, self.temp.as_str(), AtFlags::empty());
         let fd = openat(
             dir,
-            TEMP_FILE,
+            self.temp.as_str(),
             OFlags::WRONLY | OFlags::CREATE | OFlags::EXCL | OFlags::NOFOLLOW | OFlags::CLOEXEC,
             Mode::from_bits_truncate(0o600),
         )
@@ -202,7 +218,7 @@ impl StateFiles {
         // An existing record that the service could have written is not replaced.
         self.open_record(dir)?;
         self.write_temp(dir, bytes)?;
-        renameat(dir, TEMP_FILE, dir, STATE_FILE).map_err(io_error)?;
+        renameat(dir, self.temp.as_str(), dir, self.record).map_err(io_error)?;
         fsync(dir).map_err(io_error)?;
         Ok(())
     }
@@ -229,7 +245,7 @@ impl StateDir for StateFiles {
 
     fn load(&self) -> Result<Option<Vec<u8>>, PortError> {
         let dir = self.dir_fd()?;
-        let path = self.dir.join(STATE_FILE);
+        let path = self.dir.join(self.record);
         let read = |fault: Fault| failed(&format!("read {}", path.display()), &fault.to_string());
         let Some(fd) = self.open_record(dir).map_err(read)? else {
             return Ok(None);
@@ -244,9 +260,9 @@ impl StateDir for StateFiles {
     fn save(&self, bytes: &[u8]) -> Result<(), PortError> {
         let dir = self.dir_fd()?;
         self.replace(dir, bytes).map_err(|fault| {
-            let _ = unlinkat(dir, TEMP_FILE, AtFlags::empty());
+            let _ = unlinkat(dir, self.temp.as_str(), AtFlags::empty());
             failed(
-                &format!("write {}", self.dir.join(STATE_FILE).display()),
+                &format!("write {}", self.dir.join(self.record).display()),
                 &fault.to_string(),
             )
         })

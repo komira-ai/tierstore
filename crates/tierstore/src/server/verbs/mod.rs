@@ -3,12 +3,13 @@
 //!
 //! ```text
 //! tierstore update-hook <prepare|cutover|verify|rollback|cleanup> [<artifact>] --params <file>
+//! tierstore config-hook <prepare|cutover|verify|rollback|cleanup|uninstall> [<artifact>] --params <file>
 //! tierstore format-epoch (--check|--drain|--cancel|--activate|--activate-marks|--restore-entries) --hot <tier> [flags]
 //! tierstore entries (ls|show --key <key>) --hot <tier> [flags]
 //! tierstore fs [attachments] --config <file>
 //! ```
 //!
-//! `fs` ([`fs`]) is the virtual build file system. `update-hook` is [`update_hook`]. `format-epoch` ([`format_epoch`]) and `entries`
+//! `fs` ([`fs`]) is the virtual build file system. `update-hook` is [`update_hook`], and `config-hook`, the hook of a package of the node's configuration files, is [`update_hook::config_hook`]. `format-epoch` ([`format_epoch`]) and `entries`
 //! ([`entries`]) are the operator's: they read and write only tierstore's own objects in the hot
 //! tier (`_tiering/format`, `_tiering/proxies/`, `_entries/`) and never ask a store how it behaves.
 //! Both take the hot tier by the flags of the server that name it (`--hot`, `--hot-endpoint`,
@@ -204,6 +205,8 @@ pub(super) fn answer(args: &[OsString]) -> Option<ExitCode> {
     match args.get(1).and_then(|verb| verb.to_str()) {
         #[cfg(any(target_os = "linux", target_os = "macos"))]
         Some(update_hook::VERB) => Some(update_hook::main(args)),
+        #[cfg(any(target_os = "linux", target_os = "macos"))]
+        Some(update_hook::config_hook::VERB) => Some(update_hook::config_hook::main(args)),
         Some(FORMAT_EPOCH) => Some(format_epoch::run(
             args,
             &mut out,

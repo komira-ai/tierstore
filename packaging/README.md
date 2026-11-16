@@ -1058,7 +1058,9 @@ absent or skipped does not stop the instance from starting. The guard is a unit 
 while the new one serves, and the stop of one instance would delete the guard under the other.
 Stopping an instance leaves the guard loaded. The package enables nothing, so on a host with the
 file, `systemctl enable --now tierstore-guard.service` makes it load at boot, and after a change of
-the file `systemctl reload-or-restart tierstore-guard.service` replaces the table in one step.
+the file `systemctl reload-or-restart tierstore-guard.service` replaces the table in one step. A
+config package's hook does that reload itself (`tierstore config-hook`, in
+`crates/tierstore/docs/update-hook.md`, "The config hook").
 
 On a host that does not run the update hook, write `/etc/tierstore/config.toml` and the key files
 as in "Placing the unit", then start an instance by hand:

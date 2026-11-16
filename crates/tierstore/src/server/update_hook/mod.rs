@@ -30,6 +30,7 @@
 //! params, not by the system the hook was built for.
 
 mod args;
+pub mod config_hook;
 mod launchd;
 mod look;
 pub mod machine;
@@ -154,10 +155,13 @@ impl Refusal {
     }
 }
 
+/// How a verb reads its params file.
+type ReadParams = fn(&std::path::Path) -> Result<Params, ParamsError>;
+
 /// Reads the command line and the params file and runs the step they name.
-fn step_of(args: &[OsString], machine: &Machine<'_>) -> Result<Done, Refusal> {
+fn step_of(args: &[OsString], machine: &Machine<'_>, read: ReadParams) -> Result<Done, Refusal> {
     let invocation = Invocation::parse(args.iter().skip(2).cloned()).map_err(Refusal::Args)?;
-    let params = Params::read(&invocation.params).map_err(Refusal::Params)?;
+    let params = read(&invocation.params).map_err(Refusal::Params)?;
     // `prepare` is given the staged tree twice, by argument and by the table; they must agree.
     if let Some(given) = &invocation.artifact
         && given.as_os_str() != params.staged_release.as_os_str()
@@ -178,8 +182,21 @@ pub fn run(
     err: &mut dyn Write,
     machine: &Machine<'_>,
 ) -> ExitCode {
-    let done = step_of(args, machine).unwrap_or_else(|refusal| {
-        let _ = writeln!(err, "tierstore update-hook: {refusal}");
+    run_verb(VERB, args, out, err, machine, Params::read)
+}
+
+/// Runs the verb `verb` on `args` with the params file read by `read`: the update hook's and the
+/// config hook's command line, last line and exit status are one contract.
+fn run_verb(
+    verb: &str,
+    args: &[OsString],
+    out: &mut dyn Write,
+    err: &mut dyn Write,
+    machine: &Machine<'_>,
+    read: ReadParams,
+) -> ExitCode {
+    let done = step_of(args, machine, read).unwrap_or_else(|refusal| {
+        let _ = writeln!(err, "tierstore {verb}: {refusal}");
         refusal.done()
     });
     // A closed standard output cannot be reported anywhere; the status still is.

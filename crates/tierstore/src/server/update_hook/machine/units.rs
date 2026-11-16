@@ -8,7 +8,9 @@
 
 use std::time::Duration;
 
-use super::super::ports::{Instance, PortError, PortKind, UnitState, Units};
+use std::path::PathBuf;
+
+use super::super::ports::{Guard, Instance, PortError, PortKind, UnitState, Units};
 use super::runner::{Call, Runner, checked, run};
 
 /// Where the Debian and Ubuntu package puts `systemctl`.
@@ -107,5 +109,37 @@ impl Units for SystemdUnits<'_> {
                 format!("{}: unknown ActiveState {:?}", call.describe(), text.trim()),
             )
         })
+    }
+}
+
+/// The guard unit of a Linux node, reloaded through `systemctl` when its file is there.
+pub struct GuardUnit<'a> {
+    units: &'a SystemdUnits<'a>,
+    unit: &'static str,
+    file: PathBuf,
+}
+
+impl<'a> GuardUnit<'a> {
+    /// The unit `unit`, whose file is `file` (the path on this machine), through the `systemctl`
+    /// of `units`, bounded by its start timeout.
+    #[must_use]
+    pub fn new(units: &'a SystemdUnits<'a>, unit: &'static str, file: PathBuf) -> GuardUnit<'a> {
+        GuardUnit { units, unit, file }
+    }
+}
+
+impl Guard for GuardUnit<'_> {
+    fn reload(&self) -> Result<(), PortError> {
+        if let Err(error) = std::fs::symlink_metadata(&self.file)
+            && error.kind() == std::io::ErrorKind::NotFound
+        {
+            return Ok(());
+        }
+        let call = Call::new(
+            &self.units.program,
+            &["reload-or-restart", "--", self.unit],
+            self.units.start_timeout,
+        );
+        checked(run(self.units.runner, &call, KIND)?, &call, KIND).map(|_| ())
     }
 }

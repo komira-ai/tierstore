@@ -156,3 +156,31 @@ fn the_program_can_be_named() {
         .unwrap();
     assert_eq!(runner.calls()[0].program, "/opt/systemctl");
 }
+
+/// Asserts that the guard is reloaded (or started) through `systemctl reload-or-restart` with
+/// the start's time limit when its file is there, that nothing runs without the file, and that
+/// a failed reload is a units failure.
+#[test]
+fn the_guard_reloads_only_with_its_file() {
+    use super::super::ports::Guard;
+    use super::GuardUnit;
+    let (_dir, root) = super::testing::scratch("guard-unit");
+    let file = root.join("guard.nft");
+    let runner = FakeRunner::replying(vec![exit(0, "", ""), exit(1, "", "failed")]);
+    let systemd = units(&runner);
+    let guard = GuardUnit::new(&systemd, "tierstore-guard.service", file.clone());
+    guard.reload().unwrap();
+    assert!(runner.calls().is_empty());
+    std::fs::write(&file, "table inet tierstore_guard\n").unwrap();
+    guard.reload().unwrap();
+    assert_eq!(
+        runner.calls(),
+        vec![Call::new(
+            super::SYSTEMCTL_PROGRAM,
+            &["reload-or-restart", "--", "tierstore-guard.service"],
+            START
+        )]
+    );
+    let text = message(guard.reload().unwrap_err());
+    assert!(text.contains("failed"), "{text}");
+}

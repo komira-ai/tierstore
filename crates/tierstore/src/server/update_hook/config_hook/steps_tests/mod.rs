@@ -1,0 +1,312 @@
+//! The steps of the config hook over the fakes of the two arms: a config update by hand-over and
+//! by restart, the refusals of `prepare` and `verify`, the guard, the rollback of a config
+//! package and of the node's first, what `cleanup` writes into the release's record, and the
+//! same steps on a Mac.
+
+use std::cell::{Cell, RefCell};
+use std::collections::{BTreeMap, BTreeSet};
+use std::path::{Path, PathBuf};
+
+use super::super::ports::Guard;
+use super::super::systemd_tests::fake as lin;
+use super::super::{
+    CACHE_HANDOFF_CAPABILITY, Done, HANDOFF_CAPABILITY, HANDOFF_STATE_DIR_CAPABILITY, Host,
+    Instance, Lock, Marker, Mode, Params, PortError, PortKind, Record, StateDir, Step,
+    SystemdPorts,
+};
+use super::{Common, Running, staged_copy, systemd_step};
+
+use Step::{Cleanup, Cutover, Prepare, Verify};
+
+const PKG_OLD: &str = "/var/lib/hostkeeper/packages/tierstore-config/1.0.0";
+const PKG_NEW: &str = "/var/lib/hostkeeper/packages/tierstore-config/1.1.0";
+
+/// The files a node reads, as the host port of the config hook sees them: the text of each path,
+/// the lines the serving binary refuses a path with, and the paths that cannot be read.
+struct Files {
+    texts: RefCell<BTreeMap<PathBuf, String>>,
+    refusals: RefCell<BTreeMap<PathBuf, String>>,
+    unreadable: RefCell<BTreeSet<PathBuf>>,
+    checks_fail: Cell<bool>,
+    checked: RefCell<Vec<(PathBuf, PathBuf)>>,
+    capabilities: Vec<String>,
+}
+
+impl Files {
+    fn new(capabilities: &[&str]) -> Files {
+        Files {
+            texts: RefCell::new(BTreeMap::new()),
+            refusals: RefCell::new(BTreeMap::new()),
+            unreadable: RefCell::new(BTreeSet::new()),
+            checks_fail: Cell::new(false),
+            checked: RefCell::new(Vec::new()),
+            capabilities: capabilities.iter().map(|word| (*word).to_owned()).collect(),
+        }
+    }
+
+    fn put(&self, path: &Path, text: &str) {
+        self.texts
+            .borrow_mut()
+            .insert(path.to_path_buf(), text.to_owned());
+    }
+
+    fn refuse(&self, path: &Path, line: &str) {
+        self.refusals
+            .borrow_mut()
+            .insert(path.to_path_buf(), line.to_owned());
+    }
+
+    fn checked(&self) -> Vec<(PathBuf, PathBuf)> {
+        self.checked.borrow().clone()
+    }
+}
+
+impl Host for Files {
+    fn config(&self, path: &Path) -> Result<Option<String>, PortError> {
+        if self.unreadable.borrow().contains(path) {
+            return Err(PortError::failed(PortKind::Host, "unreadable"));
+        }
+        Ok(self.texts.borrow().get(path).cloned())
+    }
+
+    fn capabilities(&self, _release: &Path) -> Result<Vec<String>, PortError> {
+        Ok(self.capabilities.clone())
+    }
+
+    fn check_config(&self, release: &Path, config: &Path) -> Result<Option<String>, PortError> {
+        self.checked
+            .borrow_mut()
+            .push((release.to_path_buf(), config.to_path_buf()));
+        if self.checks_fail.get() {
+            return Err(PortError::failed(PortKind::Host, "the binary did not run"));
+        }
+        Ok(self.refusals.borrow().get(config).cloned())
+    }
+}
+
+/// A network guard that counts its reloads and can refuse them.
+struct CountingGuard {
+    reloads: Cell<u32>,
+    broken: Cell<bool>,
+}
+
+impl CountingGuard {
+    fn new() -> CountingGuard {
+        CountingGuard {
+            reloads: Cell::new(0),
+            broken: Cell::new(false),
+        }
+    }
+}
+
+impl Guard for CountingGuard {
+    fn reload(&self) -> Result<(), PortError> {
+        self.reloads.set(self.reloads.get() + 1);
+        if self.broken.get() {
+            return Err(PortError::failed(PortKind::Units, "nft: syntax error"));
+        }
+        Ok(())
+    }
+}
+
+/// The update hook's record of the release, in memory.
+struct Mem {
+    bytes: RefCell<Option<Vec<u8>>>,
+    fail_load: Cell<bool>,
+    fail_save: Cell<bool>,
+}
+
+impl Mem {
+    fn holding(record: Option<&Record>) -> Mem {
+        Mem {
+            bytes: RefCell::new(record.map(Record::encode)),
+            fail_load: Cell::new(false),
+            fail_save: Cell::new(false),
+        }
+    }
+
+    fn set(&self, record: &Record) {
+        *self.bytes.borrow_mut() = Some(record.encode());
+    }
+
+    fn get(&self) -> Option<Record> {
+        self.bytes
+            .borrow()
+            .as_deref()
+            .map(|bytes| Record::decode(bytes).expect("a record"))
+    }
+}
+
+impl StateDir for Mem {
+    fn lock(&self) -> Result<Lock, PortError> {
+        Ok(Lock::new(()))
+    }
+
+    fn load(&self) -> Result<Option<Vec<u8>>, PortError> {
+        if self.fail_load.get() {
+            return Err(PortError::failed(PortKind::State, "unreadable"));
+        }
+        Ok(self.bytes.borrow().clone())
+    }
+
+    fn save(&self, bytes: &[u8]) -> Result<(), PortError> {
+        if self.fail_save.get() {
+            return Err(PortError::failed(PortKind::State, "disk full"));
+        }
+        *self.bytes.borrow_mut() = Some(bytes.to_vec());
+        Ok(())
+    }
+}
+
+fn build() -> String {
+    lin::version_of(lin::OLD)
+}
+
+/// The release's record as the update hook left it: serving `live`, with the update that
+/// installed the binary still named in `to` and `version`.
+fn release_record(live: Instance) -> Record {
+    Record {
+        markers: BTreeSet::from([Marker::Swapped, Marker::Verified, Marker::Stopping]),
+        to: Some(PathBuf::from(lin::OLD)),
+        version: Some(build()),
+        ..Record::idle(Some(live))
+    }
+}
+
+/// A record with an update in flight and no marker yet.
+fn in_flight(live: Option<Instance>) -> Record {
+    Record {
+        updating: true,
+        to: Some(PathBuf::from(PKG_NEW)),
+        version: Some(build()),
+        ..Record::idle(live)
+    }
+}
+
+fn staged(config: &str) -> PathBuf {
+    staged_copy(Path::new(PKG_NEW), Path::new(config))
+}
+
+fn with_interface(interface: &str) -> String {
+    format!("interface = \"{interface}\"\n{}", lin::WITH_SOCKET)
+}
+
+fn with_socket(socket: &str) -> String {
+    format!("[server]\nhandoff_socket = \"{socket}\"\n")
+}
+
+/// A node of two systemd instances: `A` serves the binary of `lin::OLD`, the config hook's record
+/// is the fake's, the release's record is `service`.
+struct Linux {
+    fake: lin::SystemdFake,
+    files: Files,
+    guard: CountingGuard,
+    service: Mem,
+}
+
+impl Linux {
+    /// A node serving with the file `serving` (none: the file is missing) and a config package
+    /// that stages `staged_text`.
+    fn new(serving: Option<&str>, staged_text: &str) -> Linux {
+        let files = Files::new(&[
+            HANDOFF_CAPABILITY,
+            CACHE_HANDOFF_CAPABILITY,
+            HANDOFF_STATE_DIR_CAPABILITY,
+        ]);
+        if let Some(text) = serving {
+            files.put(Path::new(lin::CONFIG), text);
+        }
+        files.put(&staged(lin::CONFIG), staged_text);
+        Linux {
+            fake: lin::SystemdFake::installed(),
+            files,
+            guard: CountingGuard::new(),
+            service: Mem::holding(Some(&release_record(Instance::A))),
+        }
+    }
+
+    /// A node whose config package changes nothing a hand-over cares about.
+    fn alike() -> Linux {
+        Linux::new(
+            Some(lin::WITH_SOCKET),
+            &format!("{}proxy_id = \"p2\"\n", lin::WITH_SOCKET),
+        )
+    }
+
+    fn step(&self, step: Step, params: &Params) -> Done {
+        let build = build();
+        let running = Running {
+            host: &self.files,
+            release: Path::new(lin::OLD),
+        };
+        let ports = SystemdPorts {
+            units: &self.fake,
+            markers: &self.fake,
+            instances: &self.fake,
+            host: &running,
+            clock: &self.fake,
+            state: &self.fake,
+        };
+        let common = Common {
+            service: &self.service,
+            release: Path::new(lin::OLD),
+            build: &build,
+        };
+        systemd_step(step, params, &ports, &self.guard, &common)
+    }
+
+    /// Runs `steps`, each of which must succeed.
+    fn go(&self, params: &Params, steps: &[Step]) {
+        for step in steps {
+            lin::assert_ok(&self.step(*step, params));
+        }
+    }
+
+    fn reloads(&self) -> u32 {
+        self.guard.reloads.get()
+    }
+}
+
+fn update() -> Params {
+    lin::params(PKG_NEW, Some(PKG_OLD))
+}
+
+fn first() -> Params {
+    lin::params(PKG_NEW, None)
+}
+
+fn committed_record(live: Instance) -> Record {
+    Record {
+        updating: true,
+        markers: BTreeSet::from([Marker::Swapped, Marker::Verified, Marker::Stopping]),
+        to: Some(PathBuf::from(PKG_NEW)),
+        version: Some(build()),
+        live: Some(live),
+        next: Some(live.other()),
+        mode: Some(Mode::Handover),
+        ..Record::idle(None)
+    }
+}
+
+/// Runs a config update from a node serving `serving` to the file `staged_text` and asserts that
+/// it is a restart: the old instance is stopped before the new one starts, and cleanup leaves the
+/// new one alone.
+fn assert_restarts(serving: Option<&str>, staged_text: &str, params: &Params) {
+    let node = Linux::new(serving, staged_text);
+    node.go(params, &[Prepare]);
+    assert_eq!(node.fake.record().mode, Some(Mode::Restart));
+    node.go(params, &[Cutover]);
+    assert_eq!(
+        node.fake.actions(),
+        ["units.stop a", "markers.set b", "units.start b"]
+    );
+    assert_eq!(node.fake.running(), [Instance::B]);
+    node.go(params, &[Verify, Cleanup]);
+    assert_eq!(node.fake.running(), [Instance::B]);
+    assert_eq!(node.fake.markers(), [Instance::B]);
+    assert_eq!(node.fake.record().live, Some(Instance::B));
+}
+
+mod macos;
+mod systemd_rollback;
+mod systemd_update;
