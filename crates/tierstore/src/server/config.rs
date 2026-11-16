@@ -5,14 +5,16 @@
 //! The file is read into the settings of a start ([`Cli`], or those of a build node), with the
 //! defaults the keys document.
 //!
-//! There are three shapes, told apart by the tables the file has:
+//! There are four shapes, told apart by the tables the file has:
 //!
 //! - a storage node: `[hot_store]` and `[cold_store]`;
 //! - a build node: `[local_cache]` and `[cold_store]` and no `[hot_store]`, a read cache in
 //!   front of one upstream (see [`config_cache`](super::config_cache) and
 //!   [`local_cache`](super::local_cache));
 //! - a storage node with a cache: all three tables, a disk cache in front of the node's own
-//!   proxy (see [`config_combined`](super::config_combined)).
+//!   proxy (see [`config_combined`](super::config_combined));
+//! - a node over the cold tier: `[cold_store]` alone, the fronts served over the cold store
+//!   (see `config_cold.rs`).
 //!
 //! The tables:
 //!

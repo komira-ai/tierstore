@@ -3,7 +3,7 @@
 use std::path::PathBuf;
 
 use super::super::{from_text, settings_from_text};
-use crate::server::config_testing::DEFAULTS;
+use crate::server::config_testing::{DEFAULTS, MINIMAL};
 
 /// A node over the cold tier alone: an S3 interface, the server's keys, a hand-off socket and
 /// one S3 cold store reached through two endpoints.
@@ -58,6 +58,11 @@ fn a_file_with_the_cold_store_alone_makes_a_node_over_the_cold_tier() {
     let handoff = cold.handoff.expect("the hand-off the file names");
     assert_eq!(handoff.socket, PathBuf::from("/run/tierstore/handoff.sock"));
     assert!(cold.oci.listen.is_empty());
+    let storage = settings_from_text(MINIMAL, DEFAULTS).unwrap();
+    assert!(
+        storage.into_cold().is_none(),
+        "two tiers are a storage node"
+    );
     assert!(!cold.s3_request_timeout.is_zero());
 }
 
@@ -130,4 +135,32 @@ fn the_settings_of_a_storage_node_refuse_a_file_with_the_cold_store_alone() {
         "hot_store: is needed: a file with [cold_store] alone is a node over the cold tier, which \
          these settings of a storage node cannot hold"
     );
+}
+
+/// Asserts that the rules every file is held to still hold in this shape, each refusal naming its
+/// key: an `s3` cold store without its bucket, a relative hand-off socket, and a request limit of
+/// zero.
+#[test]
+fn the_rules_of_the_cold_store_and_the_server_hold_for_a_node_over_the_cold_tier() {
+    let cases = [
+        (
+            cold_with("bucket           = \"tierstore-cold\"\n", ""),
+            "cold_store.bucket: ",
+        ),
+        (
+            cold_with("\"/run/tierstore/handoff.sock\"", "\"handoff.sock\""),
+            "server.handoff_socket: ",
+        ),
+        (
+            cold_with(
+                "proxy_id        = \"front-1\"\n",
+                "proxy_id        = \"front-1\"\nmax_request_bytes = 0\n",
+            ),
+            "server.max_request_bytes: ",
+        ),
+    ];
+    for (text, key) in cases {
+        let why = refusal(&text);
+        assert!(why.starts_with(key), "{key}: {why}");
+    }
 }

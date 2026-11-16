@@ -300,9 +300,10 @@ fn never_bound(_: Addresses) {
 }
 
 /// Asserts that a start with a request timeout of zero is refused with the exact message before
-/// anything is bound, and `--check-config` refuses the same file with the same message; and that a
-/// cold directory that cannot be made is refused with the message naming the tier, before
-/// anything is bound.
+/// anything is bound, and `--check-config` refuses the same file with the same message; that a
+/// cold directory that cannot be made is refused with the message naming the tier; and that an
+/// access key file that is not there is refused with the message naming it. Nothing is bound in
+/// any of them.
 #[tokio::test]
 async fn a_start_with_no_request_time_or_a_cold_tier_it_cannot_open_is_refused() {
     let node = Node::new("tscold-refused");
@@ -329,6 +330,14 @@ async fn a_start_with_no_request_time_or_a_cold_tier_it_cannot_open_is_refused()
         .to_string();
     let named = format!("--cold \"dir:{}\": ", under.display());
     assert!(why.starts_with(&named), "{why}");
+
+    let text = cold_text(&node, "").replace(&node.key.display().to_string(), "/no/such/access.key");
+    let keyless = cold_settings(&text);
+    let why = run_cold(&keyless, std::future::pending::<()>(), never_bound)
+        .await
+        .unwrap_err()
+        .to_string();
+    assert!(why.contains("/no/such/access.key"), "{why}");
 }
 
 /// Asserts what `--check-config` finds in the file of a node over the cold tier: a whole file

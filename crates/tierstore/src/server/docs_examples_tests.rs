@@ -1,7 +1,7 @@
 //! The examples of the operator guide run through the real configuration loader.
 //!
-//! Every ```` ```toml ```` block of the landing page of the docs (`docs/index.md`) and of each
-//! example (`docs/examples/*.md`) is a whole file, and must load as the start loads it, into the
+//! Every ```` ```toml ```` block of the landing page of the docs (`docs/index.md`), of each
+//! example (`docs/examples/*.md`) and of the configuring guide (`docs/configure.md`) is a whole file, and must load as the start loads it, into the
 //! shape the page says it is. `docs_tests` holds the same pages to the code for flags, keys and
 //! links; this holds the files themselves, so an example cannot go stale when a rule of the loader
 //! changes.
@@ -72,7 +72,8 @@ fn shape_of(settings: &Settings) -> Shape {
     }
 }
 
-/// Asserts that every TOML file of the docs landing page and of the three examples loads through
+/// Asserts that every TOML file of the docs landing page, of the examples and of the configuring
+/// guide loads through
 /// the loader into the shape its page names. Catches an example that a change of the loader (a
 /// renamed key, a new rule, a shape refused) left behind.
 #[test]
@@ -112,7 +113,10 @@ fn a_file_the_loader_refuses_is_found() {
 /// file, the commands, what to expect and the limits.
 #[test]
 fn every_example_has_a_diagram_a_file_commands_and_limits() {
-    for (page, _) in PAGES.iter().skip(1) {
+    let examples = PAGES
+        .iter()
+        .filter(|(page, _)| page.starts_with("examples/"));
+    for (page, _) in examples {
         let text = read(page);
         for heading in [
             "## What it is for",

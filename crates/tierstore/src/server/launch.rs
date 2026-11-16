@@ -15,7 +15,7 @@ use super::config::{ConfigError, PerRun, Settings, load, removed};
 /// What the command line made.
 #[derive(Debug)]
 pub(super) struct Launch {
-    /// The settings of the file, of any of the three shapes.
+    /// The settings of the file, of any of the four shapes.
     pub settings: Settings,
     /// Whether `--check-config` was given: the settings are checked and nothing is started.
     pub check_only: bool,
