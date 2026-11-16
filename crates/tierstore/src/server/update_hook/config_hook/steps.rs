@@ -287,12 +287,14 @@ fn systemd_first_back(ports: &SystemdPorts<'_>) -> Result<Done, Done> {
 
 /// Writes the instance the config hook's record says serves into the release's record, which
 /// the boot step reads; a release's record that is absent, or in an update, is left as it is.
+/// The config hook's own record was written by the arm's `cleanup` just before; one that cannot
+/// be decoded names no instance, and nothing is written back (the boot step then starts the
+/// instance the release's record names, which serves the same files).
 fn write_back(config: &dyn StateDir, service: &dyn StateDir) -> Result<(), Done> {
     let _lock = config.lock()?;
     let Some(live) = config
         .load()?
-        .map(|bytes| Record::decode(&bytes))
-        .transpose()?
+        .and_then(|bytes| Record::decode(&bytes).ok())
         .and_then(|record| record.live)
     else {
         return Ok(());
@@ -360,7 +362,8 @@ fn stop_for_new_file(label: &str, ports: &LaunchdPorts<'_>) -> Result<(), Done> 
         return Ok(());
     };
     let record = Record::decode(&bytes)?;
-    if record.updating && !record.committed() && !record.has(Marker::Swapped) {
+    // A committed record has `swapped` (the record's rules), so this is an update before the swap.
+    if record.updating && !record.has(Marker::Swapped) {
         ports.launchd.bootout(label)?;
     }
     Ok(())

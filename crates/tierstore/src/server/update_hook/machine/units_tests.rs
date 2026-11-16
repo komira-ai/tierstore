@@ -184,3 +184,21 @@ fn the_guard_reloads_only_with_its_file() {
     let text = message(guard.reload().unwrap_err());
     assert!(text.contains("failed"), "{text}");
 }
+
+/// Asserts that a guard file that cannot be looked at for another reason than its absence (a
+/// path under a regular file) is not taken for an absent one: the reload runs, and systemd says
+/// what is wrong.
+#[test]
+fn a_guard_file_that_cannot_be_looked_at_is_reloaded_not_skipped() {
+    use super::super::ports::Guard;
+    use super::GuardUnit;
+    let (_dir, root) = super::testing::scratch("guard-unit-not-dir");
+    let file = root.join("plain");
+    std::fs::write(&file, "").unwrap();
+    let runner = FakeRunner::replying(vec![exit(0, "", "")]);
+    let systemd = units(&runner);
+    GuardUnit::new(&systemd, "tierstore-guard.service", file.join("guard.nft"))
+        .reload()
+        .unwrap();
+    assert_eq!(runner.calls().len(), 1);
+}

@@ -258,3 +258,23 @@ fn a_mac_restore_is_refused_as_not_a_step() {
     let node = Mac::new();
     lin::assert_failed(&node.step(Step::Restore, &mac_update()), Reason::BadArgs);
 }
+
+/// Asserts that a Mac `cutover` with no config update on record boots nothing out and is refused
+/// out of order, and that a record it cannot lock, read or decode fails the step before any
+/// bootout.
+#[test]
+fn a_mac_cutover_boots_nothing_out_without_an_update_on_record_or_a_record_it_can_read() {
+    let node = Mac::new();
+    let p = mac_update();
+    lin::assert_failed(&node.step(Cutover, &p), Reason::OutOfOrder);
+    assert!(!node.fake.launchd_calls().contains(&bootout()));
+    node.go(&p, &[Prepare]);
+    node.fake.set_busy(true);
+    lin::assert_failed(&node.step(Cutover, &p), Reason::Locked);
+    node.fake.set_busy(false);
+    node.fake.fail_nth("state.load", 1);
+    lin::assert_failed(&node.step(Cutover, &p), Reason::StateIo);
+    node.fake.set_record_bytes(Some(b"not json"));
+    lin::assert_failed(&node.step(Cutover, &p), Reason::StateInvalid);
+    assert!(!node.fake.launchd_calls().contains(&bootout()));
+}
