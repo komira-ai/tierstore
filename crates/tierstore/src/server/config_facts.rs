@@ -11,7 +11,10 @@
 //! that the rest of the file is checked and a prefix that cannot make an id is refused. [`load`]
 //! (in `config_load.rs`) reads the facts file, once, for a start and for `--check-config`.
 //!
-//! A refusal names the key, the path and the host id, and nothing else of the facts file.
+//! Every refusal is made under the key `server.proxy_id_from_facts` (or `server.proxy_id` when
+//! neither key is given). A refusal of the facts file names its path and what is wrong with it
+//! (unreadable, not a JSON object, the `schema`, the `host_id`), never a value read from it. The
+//! refusal of an id with a `/` names the id the prefix and the host id make, and not the path.
 //!
 //! [`load`]: super::load
 
