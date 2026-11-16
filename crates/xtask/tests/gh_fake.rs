@@ -459,3 +459,80 @@ fn a_verification_appends_its_arguments_to_the_record_file_when_one_is_named() {
         "only the asset, the ledger and the expectation"
     );
 }
+
+#[test]
+fn release_download_copies_the_prepared_asset_and_fails_without_one() {
+    // Catches: a `gh release download` stand-in that writes nothing or the wrong file, one that
+    // succeeds for an asset nobody prepared, and a malformed command line taken for a download.
+    let d = dir("release-download");
+    std::fs::create_dir_all(d.join("release-assets/v1.2.3")).expect("assets");
+    std::fs::create_dir_all(d.join("into")).expect("into");
+    std::fs::write(d.join("release-assets/v1.2.3/a.pkg"), "pkg bytes").expect("asset");
+    let download = |name: &str| {
+        fake()
+            .current_dir(&d)
+            .args([
+                "release", "download", "v1.2.3", "--repo", "o/r", "--dir", "into",
+            ])
+            .args(["--pattern", name])
+            .output()
+            .expect("run")
+    };
+    let o = download("a.pkg");
+    assert_eq!(o.status.code(), Some(0), "{}", stderr(&o));
+    assert_eq!(
+        std::fs::read_to_string(d.join("into/a.pkg")).expect("copied"),
+        "pkg bytes"
+    );
+    let o = download("b.pkg");
+    assert_eq!(o.status.code(), Some(1));
+    assert!(
+        stderr(&o).contains("release-assets/v1.2.3/b.pkg"),
+        "{}",
+        stderr(&o)
+    );
+    assert!(!d.join("into/b.pkg").exists());
+    let o = fake()
+        .current_dir(&d)
+        .args(["release", "view"])
+        .output()
+        .expect("run");
+    assert_eq!(o.status.code(), Some(2));
+}
+
+#[test]
+fn curl_copies_the_reply_prepared_for_the_url_to_the_output_file_and_fails_without_one() {
+    // Catches: a `curl` stand-in that ignores `--output`, answers a url nobody prepared, or
+    // mixes up two urls; and a command line without a url taken for a request.
+    let d = dir("curl");
+    std::fs::create_dir_all(d.join("curl-replies/example.org/apt")).expect("replies");
+    std::fs::write(d.join("curl-replies/example.org/apt/Packages"), "stanza").expect("reply");
+    let curl = |url: &str| {
+        fake()
+            .current_dir(&d)
+            .args(["--proto", "=https", "--fail", "--output", "got", url])
+            .output()
+            .expect("run")
+    };
+    let o = curl("https://example.org/apt/Packages");
+    assert_eq!(o.status.code(), Some(0), "{}", stderr(&o));
+    assert_eq!(
+        std::fs::read_to_string(d.join("got")).expect("got"),
+        "stanza"
+    );
+    let _ = std::fs::remove_file(d.join("got"));
+    let o = curl("https://example.org/apt/Other");
+    assert_eq!(o.status.code(), Some(22));
+    assert!(
+        stderr(&o).contains("curl-replies/example.org/apt/Other"),
+        "{}",
+        stderr(&o)
+    );
+    assert!(!d.join("got").exists());
+    let o = fake()
+        .current_dir(&d)
+        .args(["--proto", "=https"])
+        .output()
+        .expect("run");
+    assert_eq!(o.status.code(), Some(2));
+}

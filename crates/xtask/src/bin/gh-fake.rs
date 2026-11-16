@@ -36,6 +36,12 @@
 //!   (an empty file is an empty reply), with `(HTTP 404)` when `<path>.404` is there, with a
 //!   failure when `<path>.fail` is, and with a failure otherwise; a body on stdin
 //!   (`--input -`) is saved as `<path>.body`;
+//! - `release download <tag> --repo <repo> --dir <dir> --pattern <name>` copies the file
+//!   `release-assets/<tag>/<name>` of the working directory into `<dir>` (which must exist), and
+//!   fails when no such file is prepared;
+//! - a `curl` command line (`--proto ... --output <file> <url>`, what `release desired` makes to
+//!   read an apt `Packages` file) copies the file `curl-replies/<url without its scheme>` of the
+//!   working directory to `<file>`, and fails with status 22 when none is prepared;
 //! - `deny ...` (the `cargo deny` of the advisories verb) exits with the number in `deny.code`
 //!   of the working directory (0 when there is none) and prints `deny.stderr` on stderr;
 //! - `print <text>` and `fail <text>` print on stdout and exit 0, and print on stderr and
@@ -69,6 +75,8 @@ fn main() -> ExitCode {
             ExitCode::SUCCESS
         }
         Some("api") => api(&args[1..]),
+        Some("release") => release(&args[1..]),
+        Some("--proto") => curl(&args),
         Some("deny") => deny(),
         Some("print") => {
             println!("{}", args[1..].join(" "));
@@ -120,6 +128,55 @@ fn api(args: &[String]) -> ExitCode {
         eprintln!("gh-fake: no reply is prepared for {path}");
     }
     ExitCode::FAILURE
+}
+
+/// `release download <tag> --repo <repo> --dir <dir> --pattern <name>`: see the header.
+fn release(args: &[String]) -> ExitCode {
+    let value = |flag: &str| {
+        args.iter()
+            .position(|a| a == flag)
+            .and_then(|i| args.get(i + 1))
+    };
+    let (Some("download"), Some(tag), Some(dir), Some(name)) = (
+        args.first().map(String::as_str),
+        args.get(1),
+        value("--dir"),
+        value("--pattern"),
+    ) else {
+        eprintln!(
+            "gh-fake: only `release download <tag> --dir <dir> --pattern <name>` is understood: {args:?}"
+        );
+        return ExitCode::from(2);
+    };
+    let prepared = Path::new("release-assets").join(tag).join(name);
+    match std::fs::copy(&prepared, Path::new(dir).join(name)) {
+        Ok(_) => ExitCode::SUCCESS,
+        Err(e) => {
+            eprintln!(
+                "gh-fake: no asset is prepared at {} or it cannot be copied: {e}",
+                prepared.display()
+            );
+            ExitCode::FAILURE
+        }
+    }
+}
+
+/// `curl ... --output <file> <url>`: see the header.
+fn curl(args: &[String]) -> ExitCode {
+    let output = args
+        .iter()
+        .position(|a| a == "--output")
+        .and_then(|i| args.get(i + 1));
+    let (Some(output), Some(url)) = (output, args.last()) else {
+        eprintln!("gh-fake: a curl command line needs --output <file> and a url: {args:?}");
+        return ExitCode::from(2);
+    };
+    let reply = Path::new("curl-replies").join(url.split_once("://").map_or(url.as_str(), |s| s.1));
+    if std::fs::copy(&reply, output).is_ok() {
+        return ExitCode::SUCCESS;
+    }
+    eprintln!("curl: (22) no reply is prepared at {}", reply.display());
+    ExitCode::from(22)
 }
 
 /// `deny ...`: see the header.
