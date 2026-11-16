@@ -310,3 +310,21 @@ fn assert_restarts(serving: Option<&str>, staged_text: &str, params: &Params) {
 mod macos;
 mod systemd_rollback;
 mod systemd_update;
+
+/// Asserts that the write-back after `cleanup` leaves the release's record alone when the config
+/// hook's record is absent, cannot be decoded, or names no serving instance.
+#[test]
+fn a_config_record_that_names_no_instance_writes_nothing_back() {
+    let release = Record::idle(Some(super::super::Instance::A));
+    let unreadable = Mem::holding(None);
+    *unreadable.bytes.borrow_mut() = Some(b"not json".to_vec());
+    for config in [
+        Mem::holding(None),
+        unreadable,
+        Mem::holding(Some(&Record::idle(None))),
+    ] {
+        let service = Mem::holding(Some(&release));
+        super::steps::write_back(&config, &service).unwrap();
+        assert_eq!(service.get(), Some(release.clone()));
+    }
+}

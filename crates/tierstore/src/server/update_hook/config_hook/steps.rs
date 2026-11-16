@@ -290,7 +290,7 @@ fn systemd_first_back(ports: &SystemdPorts<'_>) -> Result<Done, Done> {
 /// The config hook's own record was written by the arm's `cleanup` just before; one that cannot
 /// be decoded names no instance, and nothing is written back (the boot step then starts the
 /// instance the release's record names, which serves the same files).
-fn write_back(config: &dyn StateDir, service: &dyn StateDir) -> Result<(), Done> {
+pub(super) fn write_back(config: &dyn StateDir, service: &dyn StateDir) -> Result<(), Done> {
     let _lock = config.lock()?;
     let Some(live) = config
         .load()?

@@ -266,6 +266,10 @@ fn a_mac_restore_is_refused_as_not_a_step() {
 fn a_mac_cutover_boots_nothing_out_without_an_update_on_record_or_a_record_it_can_read() {
     let node = Mac::new();
     let p = mac_update();
+    node.fake.set_record_bytes(None);
+    lin::assert_failed(&node.step(Cutover, &p), Reason::OutOfOrder);
+    assert!(!node.fake.launchd_calls().contains(&bootout()));
+    node.fake.set_record(&Record::idle(None));
     lin::assert_failed(&node.step(Cutover, &p), Reason::OutOfOrder);
     assert!(!node.fake.launchd_calls().contains(&bootout()));
     node.go(&p, &[Prepare]);
