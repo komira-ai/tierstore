@@ -25,9 +25,6 @@ pub(crate) const DEFAULT_CONNECTIONS: u32 = 64;
 /// The default of `params.connection_lifetime`.
 pub(crate) const DEFAULT_LIFETIME: Duration = Duration::from_secs(3600);
 
-/// The default of `params.max_request_bytes`: the design's `trees.max_request_bytes`, 256 MiB.
-pub(crate) const DEFAULT_MAX_REQUEST_BYTES: u64 = 256 << 20;
-
 /// The settings of the trees front, as the `trees` interfaces make them: the values the front
 /// checks at start. Checked by `config_interface`: the TLS files go together, and the numbers are
 /// in range.
@@ -39,7 +36,6 @@ pub(crate) struct TreesFlags {
     pub(crate) tls_key: Option<PathBuf>,
     pub(crate) max_connections: Option<u32>,
     pub(crate) connection_lifetime: Option<Duration>,
-    pub(crate) max_request_bytes: Option<u64>,
 }
 
 /// The trees front, as far as the flags and files go: the node's core is not made yet.
@@ -59,13 +55,15 @@ pub(crate) struct TreesSetup {
 /// Checks the TLS files of the `trees` interfaces and makes the front's settings; `None` when
 /// there is no interface. A certificate or key that cannot work is an `InvalidFlags` (exit 2, as a
 /// restart cannot mend it); a file that cannot be read is exit 1. `warn` says whether the warning
-/// for a plain-text listener is printed; `--check-config` leaves it out.
+/// for a plain-text listener is printed; `--check-config` leaves it out. `max_request_bytes` is
+/// the longest call, `trees.max_request_bytes` of the node's `[trees]` table.
 ///
 /// # Errors
 /// A certificate or key that is refused (see `trees_acceptor`).
 pub(crate) fn trees_setup_of(
     flags: &TreesFlags,
     server: &ServerConfig,
+    max_request_bytes: u64,
     warn: bool,
 ) -> Result<Option<TreesSetup>, Error> {
     if flags.listen.is_empty() {
@@ -92,13 +90,12 @@ pub(crate) fn trees_setup_of(
         drain_deadline: server.drain_deadline,
         listen: server.listen,
     };
-    let max = flags.max_request_bytes.unwrap_or(DEFAULT_MAX_REQUEST_BYTES);
     Ok(Some(TreesSetup {
         listen,
         acceptor,
         limits,
         config: Arc::new(server.clone()),
-        max_request_bytes: usize::try_from(max).unwrap_or(usize::MAX),
+        max_request_bytes: usize::try_from(max_request_bytes).unwrap_or(usize::MAX),
         core: None,
     }))
 }

@@ -74,7 +74,7 @@ async fn a_build_node_serves_the_trees_interface_of_its_file() {
 
 /// Asserts `--check-config` refuses a `trees` interface whose certificate does not name its address
 /// as the other TLS fronts are refused, exit status 2, and accepts one that does and one with no
-/// TLS; a combined node's file is checked the same.
+/// TLS.
 #[test]
 fn check_config_judges_the_tls_files_of_the_trees_interface() {
     let node = Node::new("trees-check");

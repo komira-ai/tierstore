@@ -8,8 +8,11 @@ use sha2::{Digest as _, Sha256};
 use tierstore_trees_api::v1::{CreateTreeRequest, entry, location};
 
 use super::{Caller, Reason, Refusal};
+use crate::journal::is_reserved;
 use crate::server::auth;
 use crate::server::keys::Role;
+use crate::server::presign::check_name;
+use crate::server::scoped::Scopes;
 
 /// The object a file with no `from` is the whole of: `cas/l/<sha256 in hex>`.
 const WHOLE_OBJECT: &str = "cas/l/";
@@ -43,9 +46,19 @@ pub(super) fn permit_delete(caller: &Caller) -> Result<(), Refusal> {
     }
 }
 
+/// Whether a scoped key may place a tree at the S3 prefix `prefix`: a plain name (no `.` or `..`
+/// segment) that is not one of the proxy's, under a write prefix of the key. The same test as a
+/// read's, so a prefix such as `jobs/../_journal/` is not under `jobs/`.
+fn may_write_at(scopes: &Scopes, prefix: &str) -> bool {
+    check_name(prefix).is_ok() && !is_reserved(prefix) && scopes.writes_under(prefix)
+}
+
 /// Whether `caller` may ask `CreateTree` for this request: the full key may; a read-only and a
 /// presigning key may not; a scoped key may when it may read every source object and write every
-/// location, each judged on its own, and it names the first that it may not.
+/// location, each judged on its own, and it names the first that it may not. A tree entry (a
+/// tree already on the node, by digest) is the full key's alone: what that tree reads is not in
+/// the request, so the front cannot judge it, and a scoped key could otherwise place, under its
+/// own prefix, files it may not read.
 ///
 /// # Errors
 /// [`Reason::AccessDenied`] naming the key or the location, or [`Reason::MalformedDigest`] naming
@@ -59,8 +72,16 @@ pub(super) fn permit_create(caller: &Caller, request: &CreateTreeRequest) -> Res
         Role::Scoped(scopes) => scopes,
     };
     for entry in &request.entries {
-        let Some(entry::Kind::File(file)) = &entry.kind else {
-            continue;
+        let file = match &entry.kind {
+            Some(entry::Kind::File(file)) => file,
+            Some(entry::Kind::Tree(_)) => {
+                let why = format!(
+                    "only the full key may place a tree by digest at {}",
+                    entry.path
+                );
+                return Err(denied(&why));
+            }
+            Some(entry::Kind::Dir(_) | entry::Kind::Symlink(_)) | None => continue,
         };
         let key = match &file.from {
             Some(from) => from.key.clone(),
@@ -75,7 +96,7 @@ pub(super) fn permit_create(caller: &Caller, request: &CreateTreeRequest) -> Res
     }
     for at in &request.at {
         match &at.r#where {
-            Some(location::Where::S3(s3)) if scopes.writes_under(&s3.prefix) => {}
+            Some(location::Where::S3(s3)) if may_write_at(scopes, &s3.prefix) => {}
             Some(location::Where::S3(s3)) => {
                 return Err(denied(&format!("this key may not write {}", s3.prefix)));
             }

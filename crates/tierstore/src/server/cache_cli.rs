@@ -228,7 +228,12 @@ pub(super) async fn serve_cache(
     let mut config = server_config(&settings.front, Arc::clone(&clock), true)?;
     // The front's flags and files are checked before the cache is opened, as the storage node's.
     let oci = oci_setup_of(&settings.oci, &config, true)?;
-    let trees_front = trees_setup_of(&settings.trees_front, &config, true)?;
+    let trees_front = trees_setup_of(
+        &settings.trees_front,
+        &config,
+        settings.trees.max_request_bytes,
+        true,
+    )?;
     config.oci_metrics = oci.as_ref().map(|setup| Arc::clone(&setup.metrics));
     let run = probe_run_id(&settings.front.proxy_id, clock.now(), std::process::id());
     let cache = open(&settings.cache, &upstream, &disk, &run).await?;
@@ -327,6 +332,17 @@ pub(super) async fn serve_front(
     // The registry front reads what the S3 front reads: through the cache.
     let backend: Arc<dyn Backend> = Arc::new(cache.clone());
     let server = Server::new(Arc::clone(&backend), config);
+    // The trees sockets are bound beside a running instance's (`SO_REUSEPORT`, they are not handed
+    // over), and before the S3 and OCI sockets are taken from it: a trees address that cannot be
+    // bound fails the start while the running instance still serves.
+    let trees_front = match fronts.trees_front {
+        Some(setup) => Some(setup.bind().await?),
+        None => None,
+    };
+    let trees_all = match &trees_front {
+        Some(front) => front.local_addrs()?,
+        None => Vec::new(),
+    };
     let Bound {
         s3: listeners,
         oci,
@@ -343,14 +359,8 @@ pub(super) async fn serve_front(
     .map_err(super::cli::HandingError::into_boxed)?;
     let offer = offer.map(|offer| offer.with_accept_pause(listen.accept_pause));
     let stop = stopped_by(stop, offer);
-    let trees_front = match fronts.trees_front {
-        Some(setup) => Some(setup.bind().await?),
-        None => None,
-    };
     let mut addresses = addresses;
-    if let Some(front) = &trees_front {
-        addresses.trees_all = front.local_addrs()?;
-    }
+    addresses.trees_all = trees_all;
     ready(addresses);
     let oci_drain = oci.as_ref().map(OciListener::drain);
     let (late_s3, late_oci) = (Arc::clone(&server), oci_drain.clone());

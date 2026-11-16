@@ -26,9 +26,10 @@
 //! `max_connections` and `connection_lifetime`, must agree on those five (one registry front has
 //! one certificate and one prefix); one that differs from the first is refused. The `trees`
 //! entries are served together in the same way and take `tls_cert_file`, `tls_key_file`,
-//! `max_connections`, `connection_lifetime` and `max_request_bytes`, which they must agree on. An
-//! `s3` interface has no TLS params yet. At least one `s3` interface is needed. A `trees`
-//! interface needs a node with `[local_cache]`: the trees live in the cache.
+//! `max_connections` and `connection_lifetime`, which they must agree on (the longest call is
+//! `trees.max_request_bytes` of the `[trees]` table). An `s3` interface has no TLS params yet. At
+//! least one `s3` interface is needed. A `trees` interface is a build node's alone: its `[trees]`
+//! keep the trees.
 //!
 //! The keys of the release before stay readable: `server.listen` is an `s3` interface at those
 //! addresses and the `[oci]` table (`listen` and the same five params, with `listen` needed) is an
@@ -99,7 +100,6 @@ pub(super) struct Params {
     pub read_chunk_bytes: Option<u64>,
     pub echo_bytes: Option<u64>,
     pub upstream: Option<UpstreamTable>,
-    pub max_request_bytes: Option<u64>,
 }
 
 /// `[oci]`, the table of the release before: the registry front, which is an `oci` interface.
@@ -207,7 +207,6 @@ fn check_s3(at: &str, params: &Params) -> Result<(), ConfigError> {
         ("read_chunk_bytes", params.read_chunk_bytes.is_some()),
         ("echo_bytes", params.echo_bytes.is_some()),
         ("upstream", params.upstream.is_some()),
-        ("max_request_bytes", params.max_request_bytes.is_some()),
     ];
     super::config::refuse(&place, "not for type \"s3\"", &others)
 }
@@ -231,10 +230,6 @@ fn trees_of(at: &str, params: &Params, listen: Vec<SocketAddr>) -> Result<TreesF
         Some(count) => Some(within(&place, "max_connections", count, 1, u32::MAX)?),
         None => None,
     };
-    let max_request_bytes = match params.max_request_bytes {
-        Some(bytes) => Some(within(&place, "max_request_bytes", bytes, 1, u64::MAX)?),
-        None => None,
-    };
     if params
         .connection_lifetime
         .is_some_and(|dur| dur.0.is_zero())
@@ -248,7 +243,6 @@ fn trees_of(at: &str, params: &Params, listen: Vec<SocketAddr>) -> Result<TreesF
         tls_key: params.tls_key_file.clone(),
         max_connections,
         connection_lifetime: params.connection_lifetime.map(|dur| dur.0),
-        max_request_bytes,
     })
 }
 
@@ -270,8 +264,6 @@ fn together(place: &str, params: &Params) -> Result<(), ConfigError> {
 /// The settings of the front that an `oci` interface says, with `listen` its addresses.
 fn oci_of(at: &str, params: &Params, listen: Vec<SocketAddr>) -> Result<OciFlags, ConfigError> {
     let place = format!("{at}.params");
-    let others = [("max_request_bytes", params.max_request_bytes.is_some())];
-    refuse(&place, "not for type \"oci\"", &others)?;
     together(&place, params)?;
     let max_connections = match params.max_connections {
         Some(count) => Some(within(&place, "max_connections", count, 1, u32::MAX)?),
@@ -376,25 +368,24 @@ fn differing_trees(first: &TreesFlags, next: &TreesFlags) -> Option<&'static str
             "connection_lifetime",
             first.connection_lifetime == next.connection_lifetime,
         ),
-        (
-            "max_request_bytes",
-            first.max_request_bytes == next.max_request_bytes,
-        ),
     ];
     same.iter().find(|(_, same)| !same).map(|(name, _)| *name)
 }
 
-/// Refuses the `trees` interfaces of a file that has no `[local_cache]`: the trees are kept in
-/// the cache, so a node without one has nothing to serve them from.
+/// Refuses the `trees` interfaces of a file that is not a build node's (`node` says what it is):
+/// the tree store is a build node's, kept beside its cache by its `[trees]` table, so another
+/// node has nothing to serve the interface from.
 ///
 /// # Errors
-/// A [`ConfigError`] naming the `trees` interface's addresses param.
-pub(super) fn no_trees(fronts: &Interfaces) -> Result<(), ConfigError> {
+/// A [`ConfigError`] on the key `trees interface`.
+pub(super) fn no_trees(fronts: &Interfaces, node: &str) -> Result<(), ConfigError> {
     if fronts.trees.listen.is_empty() {
         return Ok(());
     }
-    let why = "a trees interface needs [local_cache]: the trees are kept in the cache";
-    Err(invalid("trees interface", why))
+    let why = format!(
+        "{node} has no tree store: a trees interface needs a build node ([local_cache] and [cold_store] without [hot_store]), whose [trees] keep the trees"
+    );
+    Err(invalid("trees interface", &why))
 }
 
 /// The entries of a file with the ones its `server.listen` and `[oci]` stand for after them.
@@ -498,7 +489,7 @@ pub(super) fn interfaces(tables: &[InterfaceTable]) -> Result<Interfaces, Config
                 Some((first_at, first)) => {
                     if let Some(name) = differing_trees(first, &this) {
                         let why = format!(
-                            "it differs from interface[{first_at}]: one trees front serves every trees interface, so they share tls_cert_file, tls_key_file, max_connections, connection_lifetime and max_request_bytes"
+                            "it differs from interface[{first_at}]: one trees front serves every trees interface, so they share tls_cert_file, tls_key_file, max_connections and connection_lifetime"
                         );
                         return Err(invalid(&format!("{at}.params.{name}"), why));
                     }

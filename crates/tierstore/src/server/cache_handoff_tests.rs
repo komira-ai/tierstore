@@ -404,3 +404,41 @@ async fn an_instance_that_never_answers_fails_the_build_node_start() {
     );
     drop(silent);
 }
+
+/// Asserts that a successor whose `trees` interface names an address this host does not have
+/// (192.0.2.1, a documentation address) fails its start before it takes the sockets: the error
+/// names the address, the running node goes on answering `/readyz` 200 and keeps its control
+/// socket, and it ends with nothing cut. Catches: a start that takes the S3 sockets first and then
+/// fails on the trees address, leaving the node with no instance serving.
+#[tokio::test]
+async fn a_successor_whose_trees_address_cannot_be_bound_leaves_the_running_node_serving() {
+    let node = Node::new("tscache-handoff-trees");
+    let (_dir, socket) = control();
+    let first = handing(&node, &socket, "1h", "127.0.0.1:0", "");
+    let unbindable =
+        "[[interface]]\ntype = \"trees\"\nparams = { addresses = [\"192.0.2.1:9600\"] }\n";
+    let second = handing(&node, &socket, "1h", "127.0.0.1:0", unbindable);
+    let upstream: Arc<dyn Backend> = Arc::new(MemoryBackend::new());
+    let disk: Arc<dyn Disk> = Arc::new(SystemDisk);
+    let seen = socket.clone();
+    let work = |at: SocketAddr| {
+        let (upstream, disk) = (Arc::clone(&upstream), Arc::clone(&disk));
+        async move {
+            let refused = serve_cache(&second, upstream, disk, async {}, |bound| {
+                panic!("bound {bound:?}")
+            })
+            .await
+            .unwrap_err();
+            assert!(
+                refused.to_string().starts_with("binding 192.0.2.1:9600: "),
+                "{refused}"
+            );
+            assert_eq!(probe(at, "/readyz").await.0, 200);
+            assert_control_socket(&seen);
+        }
+    };
+    let drained = serving(&first, Arc::clone(&upstream), Arc::clone(&disk), work)
+        .await
+        .unwrap();
+    assert_eq!(drained, Drained { abandoned: 0 });
+}

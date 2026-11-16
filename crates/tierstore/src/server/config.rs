@@ -632,7 +632,7 @@ pub(super) fn settings(file: File, per_run: PerRun) -> Result<Settings, ConfigEr
     match (hot_store, cold_store, local_cache) {
         (Some(hot), Some(cold), None) => {
             check_policies(&policy, false)?;
-            no_trees(&fronts)?;
+            no_trees(&fronts, "a storage node")?;
             let cli = storage(server, (hot, cold), fronts, per_run)?;
             Ok(Settings::Storage(Box::new(cli)))
         }
@@ -641,6 +641,7 @@ pub(super) fn settings(file: File, per_run: PerRun) -> Result<Settings, ConfigEr
             Ok(Settings::Cache(Box::new(cache)))
         }
         (Some(hot), Some(cold), Some(cache)) => {
+            no_trees(&fronts, "a storage node with a cache")?;
             let tiers = (hot, cold);
             let node = combined(server, tiers, cache, fronts, &policy, per_run)?;
             Ok(Settings::Combined(Box::new(node)))
@@ -685,7 +686,7 @@ pub(super) fn storage(
     let reconcile_tuning = reconcile_tuning(&hot, lease_ttl)?;
     let entry_tuning = entry_tuning(&hot, lease_ttl, reconcile_tuning.lease_margin)?;
     let handoff = handoff_of(&server, lock_file.as_deref(), per_run.state_dir.as_deref())?;
-    let (oci, trees_front) = (fronts.oci, fronts.trees);
+    let oci = fronts.oci;
     let shared = front_of(server, fronts.s3, per_run)?;
     let front = shared.front;
     Ok(Cli {
@@ -758,7 +759,6 @@ pub(super) fn storage(
         oci_read_chunk_bytes: oci.read_chunk_bytes,
         oci_echo_bytes: oci.echo_bytes,
         oci_upstream: oci.upstream,
-        trees_front,
     })
 }
 

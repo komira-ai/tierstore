@@ -107,7 +107,7 @@ fn a_trees_interface_with_nothing_given_listens_on_the_default_port() {
 /// that two entries are served together on the addresses of both.
 #[test]
 fn the_params_of_a_trees_interface_are_the_front() {
-    let all = "port = 9700, tls_cert_file = \"/etc/tierstore/trees.crt\", tls_key_file = \"/etc/tierstore/trees.key\", max_connections = 8, connection_lifetime = \"10m\", max_request_bytes = 1048576";
+    let all = "port = 9700, tls_cert_file = \"/etc/tierstore/trees.crt\", tls_key_file = \"/etc/tierstore/trees.key\", max_connections = 8, connection_lifetime = \"10m\"";
     let flags = trees_of(&[s3(), entry("trees", all)]);
     let wanted = TreesFlags {
         listen: addrs(&["0.0.0.0:9700"]),
@@ -115,7 +115,6 @@ fn the_params_of_a_trees_interface_are_the_front() {
         tls_key: Some("/etc/tierstore/trees.key".into()),
         max_connections: Some(8),
         connection_lifetime: Some(std::time::Duration::from_secs(600)),
-        max_request_bytes: Some(1_048_576),
     };
     assert_eq!(flags, wanted);
 
@@ -153,9 +152,11 @@ fn a_trees_interface_is_refused_for_a_param_that_is_wrong() {
         check("max_connections = 0"),
         "interface[1].params.max_connections: 0 is not between 1 and 4294967295"
     );
+    // The longest call is `trees.max_request_bytes` of the `[trees]` table: no param of an
+    // interface says it.
     assert_eq!(
-        check("max_request_bytes = 0"),
-        "interface[1].params.max_request_bytes: 0 is not between 1 and 18446744073709551615"
+        check("max_request_bytes = 1048576"),
+        "line 7, column 12: params: unknown field `max_request_bytes`, expected one of `port`, `addresses`, `tls_cert_file`, `tls_key_file`, `prefix`, `max_connections`, `connection_lifetime`, `require_auth`, `stage_read`, `max_manifest_bytes`, `read_chunk_bytes`, `echo_bytes`, `upstream`"
     );
     let clash = refusal(
         BUILD_NODE,
@@ -167,8 +168,7 @@ fn a_trees_interface_is_refused_for_a_param_that_is_wrong() {
     );
 }
 
-/// Asserts a `trees` interface takes none of the params of the other types, and that the `s3` and
-/// the `oci` interface take none of its own that the others lack.
+/// Asserts a `trees` interface takes none of the params of the other types.
 #[test]
 fn the_params_of_the_other_types_are_not_the_trees_interfaces() {
     for param in [
@@ -187,22 +187,6 @@ fn the_params_of_the_other_types_are_not_the_trees_interfaces() {
             format!("interface[1].params.{name}: not for type \"trees\""),
         );
     }
-    let on_s3 = refusal(
-        BUILD_NODE,
-        &[entry("s3", "port = 9300, max_request_bytes = 1")],
-    );
-    assert_eq!(
-        on_s3,
-        "interface[0].params.max_request_bytes: not for type \"s3\""
-    );
-    let on_oci = refusal(
-        BUILD_NODE,
-        &[s3(), entry("oci", "port = 5000, max_request_bytes = 1")],
-    );
-    assert_eq!(
-        on_oci,
-        "interface[1].params.max_request_bytes: not for type \"oci\""
-    );
 }
 
 /// Asserts entries of the type serve as one front: a param that differs from the first entry's is
@@ -216,11 +200,6 @@ fn trees_interfaces_must_agree_on_the_front() {
             "max_connections = 1",
             "max_connections = 2",
             "max_connections",
-        ),
-        (
-            "max_request_bytes = 1",
-            "max_request_bytes = 2",
-            "max_request_bytes",
         ),
         (
             "connection_lifetime = \"1m\"",
@@ -241,24 +220,24 @@ fn trees_interfaces_must_agree_on_the_front() {
     for (one, other, name) in cases {
         let why = refusal(BUILD_NODE, &[s3(), first(one), second(other)]);
         let wanted = format!(
-            "interface[2].params.{name}: it differs from interface[1]: one trees front serves every trees interface, so they share tls_cert_file, tls_key_file, max_connections, connection_lifetime and max_request_bytes"
+            "interface[2].params.{name}: it differs from interface[1]: one trees front serves every trees interface, so they share tls_cert_file, tls_key_file, max_connections and connection_lifetime"
         );
         assert_eq!(why, wanted);
     }
 }
 
-/// Asserts a storage node with a cache makes the front too, and that a storage node with none is
-/// refused, because the trees are kept in the cache.
+/// Asserts a trees interface is a build node's alone: a storage node, with or without a cache, has
+/// no tree store, and is refused with the exact words naming what it is.
 #[test]
-fn a_trees_interface_needs_a_node_with_a_local_cache() {
-    let text = format!("{}{}{COMBINED_NODE}", s3(), entry("trees", "port = 9600"));
-    let settings = settings_from_text(&text, DEFAULTS).expect("a combined node");
-    let combined = settings.into_combined().expect("a combined node");
-    assert_eq!(combined.node.trees_front.listen, addrs(&["0.0.0.0:9600"]));
-
-    let why = refusal(STORAGE_NODE, &[s3(), entry("trees", "port = 9600")]);
+fn a_trees_interface_needs_a_build_node() {
+    let tail = "has no tree store: a trees interface needs a build node ([local_cache] and [cold_store] without [hot_store]), whose [trees] keep the trees";
+    let why = refusal(COMBINED_NODE, &[s3(), entry("trees", "port = 9600")]);
     assert_eq!(
         why,
-        "trees interface: a trees interface needs [local_cache]: the trees are kept in the cache"
+        format!("trees interface: a storage node with a cache {tail}")
     );
+    let why = refusal(STORAGE_NODE, &[s3(), entry("trees", "port = 9600")]);
+    assert_eq!(why, format!("trees interface: a storage node {tail}"));
+    let without = format!("{}{COMBINED_NODE}", s3());
+    assert!(settings_from_text(&without, DEFAULTS).is_ok());
 }

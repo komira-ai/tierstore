@@ -132,10 +132,6 @@ fn a_scoped_key_may_create_what_its_prefixes_cover() {
             })),
         },
         Entry {
-            path: "toolchain".to_owned(),
-            kind: Some(entry::Kind::Tree(ChildTree { tree: vec![0; 32] })),
-        },
-        Entry {
             path: "nothing".to_owned(),
             kind: None,
         },
@@ -217,4 +213,54 @@ fn a_scoped_key_may_not_write_outside_its_prefixes_or_to_a_path() {
         Code::PermissionDenied,
         "access denied: only the full key may place a tree at the path jobs/1/root",
     );
+}
+
+/// Asserts a tree entry (a tree on the node, by digest) is refused to a scoped key, naming its
+/// path, after the files before it are judged, and that the full key may place one.
+#[test]
+fn a_scoped_key_may_not_place_a_tree_by_digest() {
+    let child = Entry {
+        path: "toolchain".to_owned(),
+        kind: Some(entry::Kind::Tree(ChildTree { tree: vec![0; 32] })),
+    };
+    let request = create(
+        vec![file("a", vec![1], Some("cas/x/1")), child.clone()],
+        vec![s3("jobs/1/")],
+    );
+    let refused = permit_create(&caller(SCOPED), &request).expect_err("refused");
+    assert_refused(
+        &Status::from(refused),
+        Code::PermissionDenied,
+        "access denied: only the full key may place a tree by digest at toolchain",
+    );
+    assert_eq!(permit_create(&caller(FULL), &request), Ok(()));
+
+    let unreadable = create(
+        vec![file("a", vec![1], Some("secret/y")), child],
+        vec![s3("jobs/1/")],
+    );
+    let refused = permit_create(&caller(SCOPED), &unreadable).expect_err("refused");
+    assert_refused(
+        &Status::from(refused),
+        Code::PermissionDenied,
+        "access denied: this key may not read secret/y",
+    );
+}
+
+/// Asserts an S3 location under a write prefix of a scoped key is refused when it is not a plain
+/// name: a `..` or `.` segment that leaves the prefix, or a segment named like the proxy's.
+#[test]
+fn a_scoped_key_may_not_write_through_a_dot_segment_or_to_a_reserved_prefix() {
+    let source = vec![file("a", vec![1], Some("cas/x/1"))];
+    for prefix in ["jobs/../_journal/", "jobs/1/../../builds/", "jobs/./1/"] {
+        let request = create(source.clone(), vec![s3(prefix)]);
+        let refused = permit_create(&caller(SCOPED), &request).expect_err(prefix);
+        assert_refused(
+            &Status::from(refused),
+            Code::PermissionDenied,
+            &format!("access denied: this key may not write {prefix}"),
+        );
+    }
+    let fine = create(source, vec![s3("jobs/1/..a/")]);
+    assert_eq!(permit_create(&caller(SCOPED), &fine), Ok(()));
 }

@@ -61,7 +61,6 @@ async fn run(wanted: Wanted) -> Running {
         listen: vec!["127.0.0.1:0".parse().expect("an address")],
         max_connections: wanted.max_connections,
         connection_lifetime: wanted.lifetime,
-        max_request_bytes: wanted.max_request_bytes,
         ..TreesFlags::default()
     };
     let mut connector = None;
@@ -73,7 +72,8 @@ async fn run(wanted: Wanted) -> Running {
         connector = Some(connector_for(&authority.pem()));
     }
     let server = config();
-    let mut setup = trees_setup_of(&flags, &server, false)
+    let max = wanted.max_request_bytes.unwrap_or(256 << 20);
+    let mut setup = trees_setup_of(&flags, &server, max, false)
         .expect("setup")
         .expect("a front");
     setup.core = wanted.core;
@@ -425,7 +425,7 @@ async fn a_refusal_of_the_core_and_an_unknown_method_reach_the_caller() {
     assert_eq!(running.stopped().await, 0);
 }
 
-/// Asserts a request longer than `params.max_request_bytes` is refused by its length, and a shorter
+/// Asserts a request longer than `trees.max_request_bytes` is refused by its length, and a shorter
 /// one is not.
 #[tokio::test]
 async fn a_request_over_the_limit_is_refused() {
@@ -708,7 +708,7 @@ async fn a_listener_binds_beside_a_running_one() {
         listen: vec![first.addr],
         ..TreesFlags::default()
     };
-    let setup = trees_setup_of(&flags, &first.server, false)
+    let setup = trees_setup_of(&flags, &first.server, 256 << 20, false)
         .expect("setup")
         .expect("a front");
     let second = setup.bind().await.expect("bound beside the first");

@@ -10,7 +10,7 @@ use tracing::Level;
 use tracing::subscriber::with_default;
 
 use super::rig::config;
-use super::setup::{DEFAULT_CONNECTIONS, DEFAULT_LIFETIME, DEFAULT_MAX_REQUEST_BYTES};
+use super::setup::{DEFAULT_CONNECTIONS, DEFAULT_LIFETIME};
 use super::{TreesFlags, trees_setup_of};
 use crate::server::build_info::stderr_log::LineLog;
 use crate::server::cli::exit_status;
@@ -39,6 +39,9 @@ impl Write for Stderr {
     }
 }
 
+/// The request limit the tests give: the default of `trees.max_request_bytes`.
+const MAX: u64 = 256 << 20;
+
 fn at(text: &str) -> TreesFlags {
     TreesFlags {
         listen: vec![text.parse().expect("an address")],
@@ -47,17 +50,18 @@ fn at(text: &str) -> TreesFlags {
 }
 
 /// Asserts a node with no `trees` interface has no front, and one with an interface and nothing
-/// else given has the defaults of the design: 64 connections, an hour of lifetime, 256 MiB of
-/// request, the server's handshake time and drain deadline, and plain HTTP/2.
+/// else given has the defaults of the design: 64 connections, an hour of lifetime, the server's
+/// handshake time and drain deadline, plain HTTP/2, and the request limit it is given (the
+/// `trees.max_request_bytes` of the node).
 #[test]
 fn no_interface_is_no_front_and_a_bare_one_has_the_defaults() {
     let server = config();
     assert!(
-        trees_setup_of(&TreesFlags::default(), &server, true)
+        trees_setup_of(&TreesFlags::default(), &server, MAX, true)
             .expect("setup")
             .is_none()
     );
-    let setup = trees_setup_of(&at("127.0.0.1:9600"), &server, true)
+    let setup = trees_setup_of(&at("127.0.0.1:9600"), &server, MAX, true)
         .expect("setup")
         .expect("a front");
     assert_eq!(
@@ -69,19 +73,18 @@ fn no_interface_is_no_front_and_a_bare_one_has_the_defaults() {
     assert_eq!(setup.limits.lifetime, DEFAULT_LIFETIME);
     assert_eq!(setup.limits.handshake_timeout, server.oci_handshake_timeout);
     assert_eq!(setup.limits.drain_deadline, server.drain_deadline);
-    assert_eq!(setup.max_request_bytes as u64, DEFAULT_MAX_REQUEST_BYTES);
+    assert_eq!(setup.max_request_bytes as u64, MAX);
     assert!(setup.core.is_none());
 }
 
-/// Asserts what the interface gives replaces the defaults, and a request limit too big for the
-/// platform's `usize` is the largest there is.
+/// Asserts what the interface gives replaces the defaults, and
+/// the request limit is the one given.
 #[test]
 fn what_the_interface_gives_replaces_the_defaults() {
     let mut flags = at("127.0.0.1:9600");
     flags.max_connections = Some(3);
     flags.connection_lifetime = Some(Duration::from_secs(5));
-    flags.max_request_bytes = Some(1024);
-    let setup = trees_setup_of(&flags, &config(), false)
+    let setup = trees_setup_of(&flags, &config(), 1024, false)
         .expect("setup")
         .expect("a front");
     assert_eq!(setup.limits.max_connections, 3);
@@ -106,12 +109,12 @@ fn the_tls_files_are_checked_as_the_other_fronts_are() {
         ..at("127.0.0.1:9600")
     };
     for files in [&named, &dns_named] {
-        let setup = trees_setup_of(&with(files), &server, true)
+        let setup = trees_setup_of(&with(files), &server, MAX, true)
             .expect("setup")
             .expect("a front");
         assert!(setup.acceptor.is_some());
     }
-    let refused = trees_setup_of(&with(&stranger), &server, true)
+    let refused = trees_setup_of(&with(&stranger), &server, MAX, true)
         .err()
         .expect("refused");
     let text = refused.to_string();
@@ -127,7 +130,7 @@ fn the_tls_files_are_checked_as_the_other_fronts_are() {
         tls_key: Some(named.key.clone()),
         ..at("127.0.0.1:9600")
     };
-    let refused = trees_setup_of(&missing, &server, true)
+    let refused = trees_setup_of(&missing, &server, MAX, true)
         .err()
         .expect("refused");
     assert!(refused.to_string().starts_with("params.tls_cert_file "));
@@ -143,7 +146,7 @@ fn plain_text_off_loopback_is_warned_of() {
         let stderr = Stderr::default();
         let logged = LineLog::new(stderr.clone(), Level::INFO);
         with_default(logged, || {
-            trees_setup_of(flags, &server, warn).expect("setup")
+            trees_setup_of(flags, &server, MAX, warn).expect("setup")
         });
         stderr.text()
     };

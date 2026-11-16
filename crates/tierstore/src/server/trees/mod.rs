@@ -10,9 +10,9 @@
 //! The contract is `trees.proto` of the `tierstore-trees-api` crate (package
 //! `tierstore.trees.v1`, service `TreesService`: `CreateTree`, `GetPlacement`, `DeleteTree`). This
 //! module is the front, not the work: it listens, authenticates, refuses what a key may not ask
-//! and what the design names a refusal of, and hands the call to a [`TreeCore`]. The core, the
-//! node-local tree store, comes in another change; until a node has one, every call that gets past
-//! the key check is answered `UNAVAILABLE` with the message `NotServing`.
+//! and what the design names a refusal of, and hands the call to a [`TreeCore`]. The front is
+//! not yet connected to the node's tree store (`local_cache::trees`): until it is, every call that
+//! gets past the key check is answered `UNAVAILABLE` with the message `NotServing`.
 //!
 //! # Keys
 //!
@@ -30,8 +30,9 @@
 //! - a read-only key may `GetPlacement` and nothing that changes a placement;
 //! - a scoped key (a GC key has no right here, as it has no read or write prefix) may `CreateTree`
 //!   when it may read every source object (`from.key`, or `cas/l/<sha256>`) and may write every
-//!   `s3` location (a write prefix that is a prefix of the location's); an `fs` location may be
-//!   placed by the full key alone. It may `DeleteTree` and `GetPlacement` as far as the core finds
+//!   `s3` location (a plain name with no `.` or `..` segment and none of the proxy's, under a
+//!   write prefix); an `fs` location, and an entry that places a tree of the node by its digest
+//!   (what that tree reads is not in the request), are the full key's alone. It may `DeleteTree` and `GetPlacement` as far as the core finds
 //!   the placement's locations to be its own.
 //!
 //! A call with no key, an unknown one, a wrong signature or a stale time is `UNAUTHENTICATED`; a
