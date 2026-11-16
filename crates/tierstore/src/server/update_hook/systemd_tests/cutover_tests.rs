@@ -1,12 +1,18 @@
 //! `cutover`, `verify` and `cleanup`: the modes, the runs again, and every way they fail.
 
+use std::ffi::OsString;
+use std::process::ExitCode;
+
+use tierstore_testkit::dir::TestDir;
+
 use crate::server::update_hook::{
-    Clock, Instance, Marker, Mode, Params, READY_ATTEMPTS, Reason, Record, Step, UnitState,
+    Clock, Instance, Invocation, Machine, Marker, Mode, Params, READY_ATTEMPTS, Reason, Record,
+    Step, UnitState, run,
 };
 
 use super::fake::{
     CONFIG, NEW, OLD, SystemdFake, assert_deferred, assert_failed, assert_ok, detail, params,
-    params_with, version_of,
+    params_text, params_with, version_of,
 };
 
 use Step::{Cleanup, Cutover, Prepare, Rollback, Verify};
@@ -423,4 +429,108 @@ fn cleanup_defers_while_the_old_instance_drains_and_a_later_run_finishes() {
     assert_eq!(finished.live, Some(Instance::B));
     assert_eq!(fake.markers(), [Instance::B]);
     assert_eq!(fake.running(), [Instance::B]);
+}
+
+/// Asserts that `cleanup` confirms past the old instance of a hand-over, which still drains on
+/// the same sockets and answers `/readyz` with 503: it looks again until the new instance
+/// answers, then commits and finishes. Catches a confirm that takes one 503 from the draining
+/// instance as its verdict and fails `not_confirmed`, which rolled a healthy update back.
+#[test]
+fn cleanup_looks_past_the_503_of_the_draining_old_instance_and_commits() {
+    let p = params(NEW, Some(OLD));
+    let fake = SystemdFake::installed();
+    fake.drive(&p, &[Prepare, Cutover, Verify]);
+    fake.answer_draining(2);
+    let before = fake.log().len();
+    let done = fake.run(Cleanup, &p);
+    assert_ok(&done);
+    let looks = fake.log()[before..]
+        .iter()
+        .filter(|line| *line == "get /readyz")
+        .count();
+    assert_eq!(looks, 3);
+    let finished = fake.record();
+    assert!(!finished.updating);
+    assert_eq!(finished.live, Some(Instance::B));
+    assert_eq!(fake.markers(), [Instance::B]);
+}
+
+/// Asserts the bound of that wait: a draining instance that answers 503 to one look fewer than
+/// `READY_ATTEMPTS` still lets `cleanup` commit, and one that answers every look fails it
+/// `not_confirmed` naming `/readyz`, reversible, with nothing committed and no marker removed.
+#[test]
+fn cleanup_waits_for_readyz_at_most_ready_attempts_looks() {
+    let p = params(NEW, Some(OLD));
+    let fake = SystemdFake::installed();
+    fake.drive(&p, &[Prepare, Cutover, Verify]);
+    fake.answer_draining(READY_ATTEMPTS - 1);
+    assert_ok(&fake.run(Cleanup, &p));
+    assert!(!fake.record().updating);
+
+    let fake = SystemdFake::installed();
+    fake.drive(&p, &[Prepare, Cutover, Verify]);
+    fake.answer_draining(READY_ATTEMPTS);
+    let done = fake.run(Cleanup, &p);
+    assert_failed(&done, Reason::NotConfirmed);
+    assert_eq!(
+        detail(&done),
+        format!(
+            "{} was not seen serving: port 9300 does not answer /readyz",
+            version_of(NEW)
+        )
+    );
+    assert!(done.report.reversible);
+    assert!(!fake.record().committed());
+    assert_eq!(fake.markers(), [Instance::A, Instance::B]);
+}
+
+/// Runs `tierstore update-hook cleanup --params <file>` as hostkeeper does, through the verb's
+/// command line and params file, with the systemd steps over `fake`: the exit status and the
+/// report line.
+fn cleanup_on_the_command_line(fake: &SystemdFake, name: &str) -> (ExitCode, serde_json::Value) {
+    let dir = TestDir::under(std::env::temp_dir(), name);
+    let file = dir.path().join("params.toml");
+    let text = params_text(NEW, Some(OLD), &format!("config_file = \"{CONFIG}\"\n"));
+    std::fs::write(&file, text).unwrap();
+    let mut args: Vec<OsString> = ["tierstore", "update-hook", "cleanup", "--params"]
+        .into_iter()
+        .map(OsString::from)
+        .collect();
+    args.push(file.into_os_string());
+    let step = |invocation: &Invocation, params: &Params| fake.run(invocation.step, params);
+    let machine = Machine { step: &step };
+    let (mut out, mut err) = (Vec::new(), Vec::new());
+    let code = run(&args, &mut out, &mut err, &machine);
+    assert!(err.is_empty(), "{}", String::from_utf8_lossy(&err));
+    let out = String::from_utf8(out).unwrap();
+    (code, serde_json::from_str(out.trim_end()).unwrap())
+}
+
+/// Asserts the same two ends through the verb hostkeeper runs, `update-hook cleanup --params`:
+/// past two 503 answers of the draining old instance it exits 0 with a report that is not
+/// reversible and the update committed and finished; when the draining instance answers every
+/// look it exits 1 with `not_confirmed`, reversible, and nothing committed.
+#[test]
+fn update_hook_cleanup_on_the_command_line_commits_past_the_draining_503() {
+    let p = params(NEW, Some(OLD));
+    let fake = SystemdFake::installed();
+    fake.drive(&p, &[Prepare, Cutover, Verify]);
+    fake.answer_draining(2);
+    let (code, line) = cleanup_on_the_command_line(&fake, "tierstore-hook-cleanup-503");
+    assert_eq!(format!("{code:?}"), format!("{:?}", ExitCode::from(0)));
+    assert!(line.get("reason").is_none(), "{line}");
+    assert_eq!(line["reversible"], false);
+    let finished = fake.record();
+    assert!(finished.committed());
+    assert!(!finished.updating);
+    assert_eq!(finished.live, Some(Instance::B));
+
+    let fake = SystemdFake::installed();
+    fake.drive(&p, &[Prepare, Cutover, Verify]);
+    fake.answer_draining(READY_ATTEMPTS);
+    let (code, line) = cleanup_on_the_command_line(&fake, "tierstore-hook-cleanup-mute");
+    assert_eq!(format!("{code:?}"), format!("{:?}", ExitCode::from(1)));
+    assert_eq!(line["reason"], "not_confirmed");
+    assert_eq!(line["reversible"], true);
+    assert!(!fake.record().committed());
 }
