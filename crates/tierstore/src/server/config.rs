@@ -59,8 +59,9 @@ use super::config_combined::{CombinedSettings, combined};
 use super::config_entry::entry_tuning;
 use super::config_handoff::handoff_of;
 use super::config_hot_only::{refuse_hot_keys, warn_retired_keys};
+pub(super) use super::config_interface::OciFlags;
 use super::config_interface::{
-    InterfaceTable, Interfaces, OciTable, UpstreamTable, interfaces, with_legacy,
+    InterfaceTable, Interfaces, OciTable, interfaces, no_trees, with_legacy,
 };
 use super::config_io::io_tuning;
 use super::config_policy::{Policy, check_policies};
@@ -572,51 +573,6 @@ pub(super) fn duration(value: Option<Dur>, default: Duration) -> Duration {
     value.map_or(default, |dur| dur.0)
 }
 
-/// The settings of the OCI front, as the `oci` interfaces make them: the values the front checks
-/// at start.
-#[derive(Clone, Debug)]
-pub(super) struct OciFlags {
-    /// The addresses; none when there is no front.
-    pub listen: Vec<SocketAddr>,
-    pub tls_cert: Option<PathBuf>,
-    pub tls_key: Option<PathBuf>,
-    pub prefix: Option<String>,
-    pub max_connections: Option<u32>,
-    pub connection_lifetime: Option<Duration>,
-    /// Whether the front asks its clients for an access key of the server.
-    pub require_auth: bool,
-    /// The most bytes of a stored chunk read in one call at the end of an upload.
-    pub stage_read: Option<u64>,
-    /// The largest manifest, in bytes.
-    pub max_manifest_bytes: Option<u64>,
-    /// The most bytes asked of the store at once for a blob.
-    pub read_chunk_bytes: Option<u64>,
-    /// The longest piece of request text an error repeats, in bytes.
-    pub echo_bytes: Option<u64>,
-    /// The registry a miss is pulled from, checked by `config_interface`; none pulls nothing.
-    pub upstream: Option<UpstreamTable>,
-}
-
-impl OciFlags {
-    /// No front.
-    pub(super) fn none() -> Self {
-        Self {
-            listen: Vec::new(),
-            tls_cert: None,
-            tls_key: None,
-            prefix: None,
-            max_connections: None,
-            connection_lifetime: None,
-            require_auth: false,
-            stage_read: None,
-            max_manifest_bytes: None,
-            read_chunk_bytes: None,
-            echo_bytes: None,
-            upstream: None,
-        }
-    }
-}
-
 /// What a file makes: the settings of one of the three shapes.
 #[derive(Debug)]
 pub(super) enum Settings {
@@ -676,6 +632,7 @@ pub(super) fn settings(file: File, per_run: PerRun) -> Result<Settings, ConfigEr
     match (hot_store, cold_store, local_cache) {
         (Some(hot), Some(cold), None) => {
             check_policies(&policy, false)?;
+            no_trees(&fronts, "a storage node")?;
             let cli = storage(server, (hot, cold), fronts, per_run)?;
             Ok(Settings::Storage(Box::new(cli)))
         }
@@ -684,6 +641,7 @@ pub(super) fn settings(file: File, per_run: PerRun) -> Result<Settings, ConfigEr
             Ok(Settings::Cache(Box::new(cache)))
         }
         (Some(hot), Some(cold), Some(cache)) => {
+            no_trees(&fronts, "a storage node with a cache")?;
             let tiers = (hot, cold);
             let node = combined(server, tiers, cache, fronts, &policy, per_run)?;
             Ok(Settings::Combined(Box::new(node)))

@@ -63,6 +63,12 @@ md-5 = "0.11.0"
 # returns to crates.io once upstream releases such a change.
 nfsserve = { git = "https://github.com/komira-ai/nfsserve", rev = "f2665dd518e1b32f85cd457fef75fffe6d8a61b3", default-features = false }
 percent-encoding = "2.3.2"
+# The protobuf runtime of the trees API (Apache-2.0), and its descriptor types, which the test
+# of the proto's additivity reads the golden descriptor with.
+prost = "0.14.1"
+prost-types = "0.14.1"
+# The `.proto` compiler of the trees API's build: pure Rust (MIT or Apache-2.0), so no `protoc`.
+protox = "0.10.0"
 # Test certificates only. ring is the crypto provider the rustls below uses too.
 rcgen = { version = "0.14", default-features = false, features = ["crypto", "pem", "ring"] }
 # Plain HTTP only: TLS brings a crypto provider, added with the first TLS endpoint.
@@ -81,6 +87,12 @@ serde = { version = "1.0.229", features = ["derive"] }
 serde_json = "1.0.151"
 sha2 = "0.11.0"
 thiserror = "2.0.21"
+# gRPC (MIT): the generated service of the trees API, with tonic's own transport and TLS left off;
+# `tierstore` serves it over its own hyper listener. `tonic-prost` is its prost codec and
+# `tonic-prost-build` the code generator of the trees API's build.
+tonic = { version = "0.14.2", default-features = false }
+tonic-prost = { version = "0.14.2", default-features = false }
+tonic-prost-build = { version = "0.14.2", default-features = false }
 # The `--config` file of the `tierstore` binary; no datetime or display support.
 toml = { version = "1.1.8", default-features = false, features = ["display", "parse", "serde", "std"] }
 tokio = "1.53.3"
@@ -95,6 +107,8 @@ objstore-s3 = { path = "crates/objstore-s3" }
 # The hot/cold object store library; it depends on no other workspace crate unless its `s3`
 # feature is on.
 tierstore = { path = "crates/tierstore" }
+# The wire contract of the trees interface (`trees.proto`) and its generated stubs.
+tierstore-trees-api = { path = "crates/tierstore-trees-api" }
 # Scratch directories, loopback ports and child processes for tests.
 tierstore-testkit = { path = "crates/tierstore-testkit" }
 # The previous release: `v0.3.17`, the tag of the commit below, taken from the public repository

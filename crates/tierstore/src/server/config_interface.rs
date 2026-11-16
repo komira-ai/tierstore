@@ -11,18 +11,25 @@
 //! ```
 //!
 //! An interface is a front over the same proxy. The types are `s3` (the S3 API, `/healthz`,
-//! `/readyz`, `/usagez` and `/metricz`) and `oci` (the read-only registry front); `fs` comes
-//! later and is refused today. Every entry says where it listens with one of two params:
+//! `/readyz`, `/usagez` and `/metricz`), `oci` (the read-only registry front) and `trees` (the
+//! gRPC API of node-local trees, see [`trees`](super::trees)); `fs` comes later and is refused
+//! today. Every entry says where it listens with one of two params:
 //! `port`, the wildcard of IPv4 (`0.0.0.0:<port>`), or `addresses`, a socket address or a list
-//! of them. Both, or neither, are refused, and so is an address that two interfaces (or one
-//! interface twice) listen on, but for a port of 0, which asks the system for a port.
+//! of them. Both are refused, and so is neither, but for a `trees` interface, which listens on
+//! port 9600 of the wildcard when it says neither. An address that two interfaces (or one
+//! interface twice) listen on is refused too, but for a port of 0, which asks the system for a
+//! port.
 //!
 //! The entries of a type are served together: one server, one drain, and for `oci` one limit
 //! on connections, per type, on every address of the entries of that type. So the `s3` entries take no other
 //! param, and the `oci` entries, which also take `tls_cert_file`, `tls_key_file`, `prefix`,
 //! `max_connections` and `connection_lifetime`, must agree on those five (one registry front has
-//! one certificate and one prefix); one that differs from the first is refused. An `s3`
-//! interface has no TLS params yet. At least one `s3` interface is needed.
+//! one certificate and one prefix); one that differs from the first is refused. The `trees`
+//! entries are served together in the same way and take `tls_cert_file`, `tls_key_file`,
+//! `max_connections` and `connection_lifetime`, which they must agree on (the longest call is
+//! `trees.max_request_bytes` of the `[trees]` table). An `s3` interface has no TLS params yet. At
+//! least one `s3` interface is needed. A `trees` interface is a build node's alone: its `[trees]`
+//! keep the trees.
 //!
 //! The keys of the release before stay readable: `server.listen` is an `s3` interface at those
 //! addresses and the `[oci]` table (`listen` and the same five params, with `listen` needed) is an
@@ -31,12 +38,14 @@
 
 use std::net::{Ipv4Addr, SocketAddr};
 use std::path::PathBuf;
+use std::time::Duration;
 
 use serde::Deserialize;
 
-use super::config::{ConfigError, OciFlags, invalid, refuse, require, within};
+use super::config::{ConfigError, invalid, refuse, require, within};
 use super::config_units::Dur;
 use super::listen::Addrs;
+use super::trees::{DEFAULT_PORT, TreesFlags};
 
 /// `params.upstream` of an `oci` interface: the registry the front pulls an object from when its
 /// store has none (see `oci::upstream`). The password is in the file `password_file`, never in the
@@ -67,7 +76,7 @@ pub(super) struct UpstreamTable {
 #[derive(Debug, Deserialize)]
 #[serde(deny_unknown_fields)]
 pub(super) struct InterfaceTable {
-    /// `s3` or `oci`.
+    /// `s3`, `oci` or `trees`.
     #[serde(rename = "type")]
     pub kind: String,
     #[serde(default)]
@@ -105,6 +114,51 @@ pub(super) struct OciTable {
     pub connection_lifetime: Option<Dur>,
 }
 
+/// The settings of the OCI front, as the `oci` interfaces make them: the values the front checks
+/// at start.
+#[derive(Clone, Debug)]
+pub(super) struct OciFlags {
+    /// The addresses; none when there is no front.
+    pub listen: Vec<SocketAddr>,
+    pub tls_cert: Option<PathBuf>,
+    pub tls_key: Option<PathBuf>,
+    pub prefix: Option<String>,
+    pub max_connections: Option<u32>,
+    pub connection_lifetime: Option<Duration>,
+    /// Whether the front asks its clients for an access key of the server.
+    pub require_auth: bool,
+    /// The most bytes of a stored chunk read in one call at the end of an upload.
+    pub stage_read: Option<u64>,
+    /// The largest manifest, in bytes.
+    pub max_manifest_bytes: Option<u64>,
+    /// The most bytes asked of the store at once for a blob.
+    pub read_chunk_bytes: Option<u64>,
+    /// The longest piece of request text an error repeats, in bytes.
+    pub echo_bytes: Option<u64>,
+    /// The registry a miss is pulled from, checked by `config_interface`; none pulls nothing.
+    pub upstream: Option<UpstreamTable>,
+}
+
+impl OciFlags {
+    /// No front.
+    pub(super) fn none() -> Self {
+        Self {
+            listen: Vec::new(),
+            tls_cert: None,
+            tls_key: None,
+            prefix: None,
+            max_connections: None,
+            connection_lifetime: None,
+            require_auth: false,
+            stage_read: None,
+            max_manifest_bytes: None,
+            read_chunk_bytes: None,
+            echo_bytes: None,
+            upstream: None,
+        }
+    }
+}
+
 /// What the interfaces of a file stand for.
 #[derive(Debug)]
 pub(super) struct Interfaces {
@@ -112,6 +166,8 @@ pub(super) struct Interfaces {
     pub s3: Vec<SocketAddr>,
     /// The OCI front: no address when there is no `oci` interface.
     pub oci: OciFlags,
+    /// The trees front: no address when there is no `trees` interface.
+    pub trees: TreesFlags,
 }
 
 /// Where an interface listens: the wildcard of IPv4 at its `port`, or its `addresses`.
@@ -155,20 +211,60 @@ fn check_s3(at: &str, params: &Params) -> Result<(), ConfigError> {
     super::config::refuse(&place, "not for type \"s3\"", &others)
 }
 
-/// The settings of the front that an `oci` interface says, with `listen` its addresses.
-fn oci_of(at: &str, params: &Params, listen: Vec<SocketAddr>) -> Result<OciFlags, ConfigError> {
+/// The settings of the front that a `trees` interface says, with `listen` its addresses: the TLS
+/// files go together, and the numbers are at least 1.
+fn trees_of(at: &str, params: &Params, listen: Vec<SocketAddr>) -> Result<TreesFlags, ConfigError> {
     let place = format!("{at}.params");
+    let others = [
+        ("prefix", params.prefix.is_some()),
+        ("require_auth", params.require_auth.is_some()),
+        ("stage_read", params.stage_read.is_some()),
+        ("max_manifest_bytes", params.max_manifest_bytes.is_some()),
+        ("read_chunk_bytes", params.read_chunk_bytes.is_some()),
+        ("echo_bytes", params.echo_bytes.is_some()),
+        ("upstream", params.upstream.is_some()),
+    ];
+    refuse(&place, "not for type \"trees\"", &others)?;
+    together(&place, params)?;
+    let max_connections = match params.max_connections {
+        Some(count) => Some(within(&place, "max_connections", count, 1, u32::MAX)?),
+        None => None,
+    };
+    if params
+        .connection_lifetime
+        .is_some_and(|dur| dur.0.is_zero())
+    {
+        let why = "it must be longer than zero";
+        return Err(invalid(&format!("{place}.connection_lifetime"), why));
+    }
+    Ok(TreesFlags {
+        listen,
+        tls_cert: params.tls_cert_file.clone(),
+        tls_key: params.tls_key_file.clone(),
+        max_connections,
+        connection_lifetime: params.connection_lifetime.map(|dur| dur.0),
+    })
+}
+
+/// Refuses a `tls_cert_file` without a `tls_key_file`, and the other way round.
+fn together(place: &str, params: &Params) -> Result<(), ConfigError> {
     match (&params.tls_cert_file, &params.tls_key_file) {
         (Some(_), None) => {
             let why = "it is needed with tls_cert_file: give both, or neither";
-            return Err(invalid(&format!("{place}.tls_key_file"), why));
+            Err(invalid(&format!("{place}.tls_key_file"), why))
         }
         (None, Some(_)) => {
             let why = "it is needed with tls_key_file: give both, or neither";
-            return Err(invalid(&format!("{place}.tls_cert_file"), why));
+            Err(invalid(&format!("{place}.tls_cert_file"), why))
         }
-        _ => {}
+        _ => Ok(()),
     }
+}
+
+/// The settings of the front that an `oci` interface says, with `listen` its addresses.
+fn oci_of(at: &str, params: &Params, listen: Vec<SocketAddr>) -> Result<OciFlags, ConfigError> {
+    let place = format!("{at}.params");
+    together(&place, params)?;
     let max_connections = match params.max_connections {
         Some(count) => Some(within(&place, "max_connections", count, 1, u32::MAX)?),
         None => None,
@@ -259,6 +355,39 @@ fn differing(first: &OciFlags, next: &OciFlags) -> Option<&'static str> {
     same.iter().find(|(_, same)| !same).map(|(name, _)| *name)
 }
 
+/// The first param of `next` that is not that of `first`, by name.
+fn differing_trees(first: &TreesFlags, next: &TreesFlags) -> Option<&'static str> {
+    let same = [
+        ("tls_cert_file", first.tls_cert == next.tls_cert),
+        ("tls_key_file", first.tls_key == next.tls_key),
+        (
+            "max_connections",
+            first.max_connections == next.max_connections,
+        ),
+        (
+            "connection_lifetime",
+            first.connection_lifetime == next.connection_lifetime,
+        ),
+    ];
+    same.iter().find(|(_, same)| !same).map(|(name, _)| *name)
+}
+
+/// Refuses the `trees` interfaces of a file that is not a build node's (`node` says what it is):
+/// the tree store is a build node's, kept beside its cache by its `[trees]` table, so another
+/// node has nothing to serve the interface from.
+///
+/// # Errors
+/// A [`ConfigError`] on the key `trees interface`.
+pub(super) fn no_trees(fronts: &Interfaces, node: &str) -> Result<(), ConfigError> {
+    if fronts.trees.listen.is_empty() {
+        return Ok(());
+    }
+    let why = format!(
+        "{node} has no tree store: a trees interface needs a build node ([local_cache] and [cold_store] without [hot_store]), whose [trees] keep the trees"
+    );
+    Err(invalid("trees interface", &why))
+}
+
 /// The entries of a file with the ones its `server.listen` and `[oci]` stand for after them.
 ///
 /// # Errors
@@ -314,21 +443,28 @@ pub(super) fn with_legacy(
 pub(super) fn interfaces(tables: &[InterfaceTable]) -> Result<Interfaces, ConfigError> {
     let mut s3 = Vec::new();
     let mut oci: Option<(usize, OciFlags)> = None;
+    let mut trees: Option<(usize, TreesFlags)> = None;
     let mut taken: Vec<(SocketAddr, usize)> = Vec::new();
     for (index, table) in tables.iter().enumerate() {
         let at = format!("interface[{index}]");
         match table.kind.as_str() {
-            "s3" | "oci" => {}
+            "s3" | "oci" | "trees" => {}
             "fs" => {
-                let why = "\"fs\" is not an interface of this process: `tierstore fs` is a process of its own, with an `[fs]` table; the types are \"s3\" and \"oci\"";
+                let why = "\"fs\" is not an interface of this process: `tierstore fs` is a process of its own, with an `[fs]` table; the types are \"s3\", \"oci\" and \"trees\"";
                 return Err(invalid(&format!("{at}.type"), why));
             }
             _ => {
-                let why = "not an interface type; the types are \"s3\" and \"oci\"";
+                let why = "not an interface type; the types are \"s3\", \"oci\" and \"trees\"";
                 return Err(invalid(&format!("{at}.type"), why));
             }
         }
-        let listen = addresses_of(&at, &table.params)?;
+        let params = &table.params;
+        let listen = if table.kind == "trees" && params.port.is_none() && params.addresses.is_none()
+        {
+            vec![SocketAddr::new(Ipv4Addr::UNSPECIFIED.into(), DEFAULT_PORT)]
+        } else {
+            addresses_of(&at, params)?
+        };
         for addr in listen.iter().filter(|addr| addr.port() != 0) {
             // A port of 0 asks the system for one: two of them are two ports.
             if let Some((_, other)) = taken.iter().find(|(used, _)| used == addr) {
@@ -346,7 +482,23 @@ pub(super) fn interfaces(tables: &[InterfaceTable]) -> Result<Interfaces, Config
             s3.extend(listen);
             continue;
         }
-        let this = oci_of(&at, &table.params, listen)?;
+        if table.kind == "trees" {
+            let this = trees_of(&at, params, listen)?;
+            match &mut trees {
+                None => trees = Some((index, this)),
+                Some((first_at, first)) => {
+                    if let Some(name) = differing_trees(first, &this) {
+                        let why = format!(
+                            "it differs from interface[{first_at}]: one trees front serves every trees interface, so they share tls_cert_file, tls_key_file, max_connections and connection_lifetime"
+                        );
+                        return Err(invalid(&format!("{at}.params.{name}"), why));
+                    }
+                    first.listen.extend(this.listen);
+                }
+            }
+            continue;
+        }
+        let this = oci_of(&at, params, listen)?;
         match &mut oci {
             None => oci = Some((index, this)),
             Some((first_at, first)) => {
@@ -365,7 +517,8 @@ pub(super) fn interfaces(tables: &[InterfaceTable]) -> Result<Interfaces, Config
         return Err(invalid("interface", why));
     }
     let oci = oci.map_or_else(OciFlags::none, |(_, flags)| flags);
-    Ok(Interfaces { s3, oci })
+    let trees = trees.map(|(_, flags)| flags).unwrap_or_default();
+    Ok(Interfaces { s3, oci, trees })
 }
 
 #[cfg(test)]
@@ -375,3 +528,7 @@ mod tests;
 #[cfg(test)]
 #[path = "config_upstream_tests.rs"]
 mod upstream_tests;
+
+#[cfg(test)]
+#[path = "config_trees_tests.rs"]
+mod trees_tests;

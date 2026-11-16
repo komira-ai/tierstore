@@ -1,0 +1,40 @@
+[package]
+name = "tierstore-trees-api"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+repository.workspace = true
+publish.workspace = true
+description = "The wire contract of the tierstore trees interface: trees.proto (package tierstore.trees.v1) and its generated messages, client and server stubs."
+
+# The types are generated from `proto/tierstore/trees/v1/trees.proto` by `build.rs`, with the
+# pure-Rust protobuf compiler `protox`, so no build or CI host needs `protoc`. The crate holds no
+# logic: `tierstore` serves it behind its `server` feature, a client takes the `client` feature.
+
+[features]
+# The generated client stub (`TreesServiceClient`).
+client = []
+# The generated server trait and service (`TreesServiceServer`).
+server = []
+
+[dependencies]
+# The generated service is a `tower` service over tonic's body type; no transport, no TLS.
+prost.workspace = true
+tonic = { workspace = true, features = ["codegen"] }
+tonic-prost.workspace = true
+
+[build-dependencies]
+protox.workspace = true
+tonic-prost-build.workspace = true
+
+[dev-dependencies]
+# Both halves for the crate's own tests, as `tierstore` does for its `server` feature.
+tierstore-trees-api = { workspace = true, features = ["client", "server"] }
+# The descriptor of the checked-in golden of the additivity test is compared with the proto's, which
+# the test compiles as `build.rs` does.
+prost-types.workspace = true
+protox.workspace = true
+
+[lints]
+workspace = true

@@ -47,6 +47,8 @@ server = [
     "dep:tokio-rustls",
     "dep:x509-parser",
     "dep:toml",
+    "dep:tierstore-trees-api",
+    "dep:tonic",
     "dep:tracing",
     "s3",
     "tokio/macros",
@@ -82,7 +84,7 @@ hmac = { workspace = true, optional = true }
 # The request bodies the S3 front reads and the answers it sends (`server`).
 http-body-util = { workspace = true, optional = true }
 # The HTTP/1.1 server under the S3 front (`server`).
-hyper = { workspace = true, features = ["client", "http1", "server"], optional = true }
+hyper = { workspace = true, features = ["client", "http1", "http2", "server"], optional = true }
 hyper-util = { workspace = true, features = ["tokio"], optional = true }
 # The MD5 a client may send as the `Content-MD5` of a body (`server`).
 md-5 = { workspace = true, optional = true }
@@ -108,6 +110,11 @@ rustls = { workspace = true, optional = true }
 # The system's trusted CA certificates, which the pull-through from an https upstream registry
 # trusts beside the `params.upstream.ca_file` (`server`).
 rustls-native-certs = { workspace = true, optional = true }
+# The wire contract of the trees interface and its server stub (`server`).
+tierstore-trees-api = { workspace = true, features = ["server"], optional = true }
+# `Status` and the body of a gRPC call, which the trees front answers with; tonic's own transport
+# and TLS are not used (`server`).
+tonic = { workspace = true, features = ["codegen"], optional = true }
 # The journal objects, the checkpoints and the usage object are JSON.
 serde.workspace = true
 serde_json.workspace = true
@@ -143,6 +150,8 @@ hmac.workspace = true
 # S3 service of the tests of `S3Backend`. A dev-dependency is built for every test build, with
 # the `s3` feature or without it, though only the `s3` tests use the service.
 objstore-s3 = { workspace = true, features = ["testkit"] }
+# Encodes the messages the tests of the trees front send.
+prost.workspace = true
 # Scratch directories and key files of the tests of the binary.
 tierstore-testkit.workspace = true
 # A test CA and a leaf with IP subjectAltNames, for the tests of the OCI read front.
