@@ -154,7 +154,11 @@ fn the_data_holds_each_file_at_its_path_and_mode_owned_by_root_with_directories_
             ("./usr/lib/", true, 0o755),
             ("./usr/lib/systemd/", true, 0o755),
             ("./usr/lib/systemd/system/", true, 0o755),
-            ("./usr/lib/systemd/system/tierstore-guard.service", false, 0o644),
+            (
+                "./usr/lib/systemd/system/tierstore-guard.service",
+                false,
+                0o644
+            ),
             ("./usr/lib/systemd/system/tierstore@.service", false, 0o644),
             ("./usr/lib/sysusers.d/", true, 0o755),
             ("./usr/lib/sysusers.d/tierstore.conf", false, 0o644),
@@ -296,7 +300,10 @@ fn the_guard_unit_loads_the_hosts_ruleset_on_a_host_that_has_one_and_removes_its
     // not a oneshot that stays active (the stop would run at once and delete the table), a reload
     // that is not the same atomic `nft -f`, a stop that fails when the table is gone or deletes
     // another table, and a unit that is enabled by the package or ordered under an instance.
-    assert_eq!(unit_values(GUARD_UNIT, "ConditionPathExists"), ["/etc/tierstore/guard.nft"]);
+    assert_eq!(
+        unit_values(GUARD_UNIT, "ConditionPathExists"),
+        ["/etc/tierstore/guard.nft"]
+    );
     assert_eq!(unit_values(GUARD_UNIT, "Type"), ["oneshot"]);
     assert_eq!(unit_values(GUARD_UNIT, "RemainAfterExit"), ["yes"]);
     assert_eq!(
@@ -312,7 +319,14 @@ fn the_guard_unit_loads_the_hosts_ruleset_on_a_host_that_has_one_and_removes_its
         ["-/usr/sbin/nft delete table inet tierstore_guard"]
     );
     assert_eq!(unit_values(GUARD_UNIT, "WantedBy"), ["multi-user.target"]);
-    for key in ["Requires", "RequiredBy", "Before", "After", "PartOf", "BindsTo"] {
+    for key in [
+        "Requires",
+        "RequiredBy",
+        "Before",
+        "After",
+        "PartOf",
+        "BindsTo",
+    ] {
         assert_eq!(unit_values(GUARD_UNIT, key), Vec::<String>::new(), "{key}");
     }
     assert!(
@@ -330,8 +344,14 @@ fn the_template_wants_the_guard_and_starts_after_it_so_a_stop_of_one_instance_le
     // (an absent guard.nft would stop the instance from starting), one that binds the guard's
     // stop to an instance's (a hand-over would delete the guard under the new instance), and
     // an After= that dropped the network ordering.
-    assert_eq!(unit_values(UNIT, "Wants"), ["network-online.target", "tierstore-guard.service"]);
-    assert_eq!(unit_values(UNIT, "After"), ["network-online.target", "tierstore-guard.service"]);
+    assert_eq!(
+        unit_values(UNIT, "Wants"),
+        ["network-online.target", "tierstore-guard.service"]
+    );
+    assert_eq!(
+        unit_values(UNIT, "After"),
+        ["network-online.target", "tierstore-guard.service"]
+    );
     for key in ["Requires", "BindsTo", "PartOf", "Before"] {
         assert_eq!(unit_values(UNIT, key), Vec::<String>::new(), "{key}");
     }
