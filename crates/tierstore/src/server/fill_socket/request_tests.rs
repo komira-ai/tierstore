@@ -404,3 +404,25 @@ fn the_refusals_of_the_mount_requests_say_what_was_wrong() {
     assert_eq!(Refusal::MountPath.to_string(), "not a path of the mount");
     assert_eq!(Refusal::Placement.to_string(), "not a placement id");
 }
+
+/// Asserts that `places-live` names the mount and the placements it keeps, none included, and
+/// that a mount or a placement id that is not one is refused.
+#[test]
+fn places_live_names_the_mount_and_the_placements_it_keeps() {
+    assert_eq!(
+        line("places-live boot-1"),
+        Ok(Request::Mount(MountRequest::PlacesLive {
+            mount: "boot-1".to_owned(),
+            keep: Vec::new(),
+        }))
+    );
+    assert_eq!(
+        line(&format!("places-live boot-1 {PLACEMENT} {PLACEMENT}")),
+        Ok(Request::Mount(MountRequest::PlacesLive {
+            mount: "boot-1".to_owned(),
+            keep: vec![id(), id()],
+        }))
+    );
+    assert_eq!(line("places-live"), Err(Refusal::Name));
+    assert_eq!(line("places-live boot-1 nope"), Err(Refusal::Placement));
+}

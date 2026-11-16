@@ -33,13 +33,15 @@ use std::time::Duration;
 use sha2::{Digest as _, Sha256};
 
 use crate::server::local_cache::trees::{FlatKind, FlatTree, Location};
-use crate::tree_manifest::{BlobSource, EntryKind, TreeDigest, TreeEntry, TreeError, flatten};
+use crate::tree_manifest::{
+    BlobSource, EntryKind, MAX_MANIFEST_BYTES, TreeDigest, TreeEntry, TreeError, flatten,
+};
 
 use super::super::fill_client::Place;
 use super::super::ino;
 use super::super::tree::Tree;
 use super::read::FileBytes;
-use super::{Core, Errno, Looked, locked, read_manifest};
+use super::{Core, Errno, Looked, locked};
 use crate::server::local_cache::manifest_path;
 
 /// The bytes 16 to 24 of the key a placement's tree at a location is numbered under; the first
@@ -51,6 +53,17 @@ const ABSENT: &str = "upstream 404";
 
 /// The most entries a tree of the mount may have: what the index of an inode number counts.
 const MOST_ENTRIES: usize = 1 << 24;
+
+/// The bytes of the manifest file at `path`, at most [`MAX_MANIFEST_BYTES`] and one more byte, so
+/// that a larger file is refused by its size and not read whole.
+fn read_manifest(path: &std::path::Path) -> std::io::Result<Vec<u8>> {
+    use std::io::Read as _;
+    let mut bytes = Vec::new();
+    let _ = File::open(path)?
+        .take(MAX_MANIFEST_BYTES as u64 + 1)
+        .read_to_end(&mut bytes)?;
+    Ok(bytes)
+}
 
 /// Why a tree was not read.
 #[derive(Debug, PartialEq, Eq)]
@@ -241,13 +254,12 @@ impl Core {
         match place.map_err(|why| asked(&path, &why))? {
             Place::Tree(id) => {
                 let key = key_of(&id, &path).ok_or_else(|| asked(&path, &id))?;
-                let number = self.resolve_digest(key)?;
-                let loaded = self.counted(number)?;
-                Ok(Looked::Found(self.root_entry(
-                    number,
-                    &loaded,
-                    Duration::ZERO,
-                )?))
+                let found = self.resolve_digest(key).and_then(|number| {
+                    let loaded = self.counted(number)?;
+                    self.root_entry(number, &loaded, Duration::ZERO)
+                });
+                self.settle_hold(&key, &path);
+                found.map(Looked::Found)
             }
             Place::Dir => {
                 let ino = dir_ino(&path);
@@ -255,6 +267,21 @@ impl Core {
                 Ok(Looked::Found(self.namespace(ino)))
             }
             Place::Nothing => Err(Errno::NoEnt),
+        }
+    }
+
+    /// Makes the node's hold of the placement whose tree at `path` has the key `key` agree with
+    /// the attachment, under the lock an idle detach gives holds back under: held again if the
+    /// tree is attached (a detach between the lookup's `place` and its attach gave it back), given
+    /// back if it is not (the lookup failed, or the tree went idle since).
+    fn settle_hold(&self, key: &TreeDigest, path: &str) {
+        let _lifecycle = locked(&self.lifecycle);
+        let number = self.table.find(key);
+        let attached = number.is_some_and(|n| locked(&self.state).attachments.is_attached(n));
+        if attached {
+            let _ = self.fills.place(&self.settings.mount_id, path);
+        } else {
+            self.let_go(key);
         }
     }
 

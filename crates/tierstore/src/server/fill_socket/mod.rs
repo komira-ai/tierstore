@@ -1,5 +1,6 @@
 //! The fill socket of a build node: a Unix socket in the node's state directory, over which the
-//! filesystem process (`tierstore fs`) asks the node's tierstore to put blobs in its cache. The
+//! filesystem process (`tierstore fs`) asks the node's tierstore to put blobs in its cache, to put
+//! files upstream, and where the node's placements are. The
 //! requests are in [`request`]; what each does to the cache is in
 //! [`local_cache`](super::local_cache) (module `source`).
 //!
@@ -37,7 +38,7 @@
 //! A `put` is answered with one line of JSON (see [`put`]), the one request whose answer is not
 //! plain words; a `put` line that is not a request is answered `refused <why>` as any other.
 //! The mount's requests about the placements of the node (`place`, `mounted`, `flat`, `span`,
-//! `unplace`) are answered from the node's tree store, `mounted` and `flat` in one line of JSON
+//! `unplace`, `places-live`) are answered from the node's tree store, `mounted` and `flat` in one line of JSON
 //! (see [`mount`]).
 
 mod mount;

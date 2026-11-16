@@ -223,3 +223,76 @@ fn a_name_that_is_no_location_is_not_found_in_the_root() {
         Some(Errno::NoEnt)
     );
 }
+
+/// Answers the requests of `verb` of the fake fill socket of `rig` with `answer`.
+fn answer(rig: &Rig, verb: &str, answer: &str) {
+    let _ = crate::server::treefs::locked(&rig.upstream.answers)
+        .insert(verb.to_owned(), answer.to_owned());
+}
+
+/// Asserts that a node that answers a `place` with a placement id that is not one, or with words
+/// that are no answer of `place`, makes the lookup an I/O error, and that a placement whose tree
+/// the node says is damaged is an I/O error too and gives the hold of the placement back.
+#[test]
+fn a_node_that_answers_place_or_flat_wrongly_makes_the_lookup_an_io_error() {
+    let rig = Rig::new("tfs-placed-wrong", Built::of(Vec::new()));
+    answer(&rig, "place", "tree not-a-placement-id");
+    assert_eq!(rig.core.lookup(ino::ROOT, "jobs").err(), Some(Errno::Io));
+    answer(&rig, "place", "read-only");
+    assert_eq!(rig.core.lookup(ino::ROOT, "jobs").err(), Some(Errno::Io));
+    answer(&rig, "place", &format!("tree {ID}"));
+    answer(&rig, "flat", "damaged");
+    assert_eq!(rig.core.lookup(ino::ROOT, "jobs").err(), Some(Errno::Io));
+    assert_eq!(
+        rig.upstream.asked("unplace"),
+        vec![format!("unplace mount-1 {ID}")]
+    );
+    // A placement the node no longer has is not there.
+    answer(&rig, "flat", "none");
+    assert_eq!(rig.core.lookup(ino::ROOT, "jobs").err(), Some(Errno::NoEnt));
+}
+
+/// Asserts that a directory above the locations whose path the core does not know is an I/O
+/// error when the node's list of locations cannot be read, and not there when the list does not
+/// have it.
+#[test]
+fn an_unknown_directory_above_the_locations_is_found_through_the_node_or_not_at_all() {
+    let rig = Rig::new("tfs-placed-mounted", Built::of(Vec::new()));
+    answer(&rig, "mounted", "junk");
+    assert_eq!(
+        rig.core.lookup(dir_ino("jobs"), "1f3a").err(),
+        Some(Errno::Io)
+    );
+    assert_eq!(rig.core.parent(dir_ino("jobs")).err(), Some(Errno::Io));
+    answer(&rig, "mounted", r#"["jobs/1f3a/root"]"#);
+    assert_eq!(rig.core.parent(dir_ino("jobs/1f3a")), Ok(dir_ino("jobs")));
+    assert_eq!(rig.core.parent(dir_ino("jobs")), Ok(ino::ROOT));
+    assert_eq!(rig.core.parent(dir_ino("other")).err(), Some(Errno::NoEnt));
+}
+
+/// Asserts that a tree of manifests still mounts and reads as before the placements: a lookup of
+/// `trees/<digest>` reads its manifests through the fill socket and a file of it reads its bytes,
+/// with no request about placements.
+#[test]
+fn old_manifest_tree_still_mounts() {
+    use crate::server::treefs::testing::file;
+    let built = Built::of(vec![("hello", file(b"hello, tree"))]);
+    let root = built.root.clone();
+    let rig = Rig::new("tfs-placed-old", built);
+    let Ok(crate::server::treefs::core::Looked::Found(entry)) = rig.core.lookup(ino::TREES, &root)
+    else {
+        panic!("the tree is there");
+    };
+    let Ok(crate::server::treefs::core::Looked::Found(file)) =
+        rig.core.lookup(entry.attr.ino, "hello")
+    else {
+        panic!("the file is there");
+    };
+    assert_eq!(file.attr.perm, 0o644);
+    assert_eq!(
+        rig.core.read_ino(file.attr.ino, 0, 100).unwrap(),
+        b"hello, tree"
+    );
+    assert!(rig.upstream.asked("place").is_empty());
+    assert!(rig.upstream.asked("flat").is_empty());
+}

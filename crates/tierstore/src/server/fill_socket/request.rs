@@ -13,6 +13,7 @@
 //! flat <placement>                             the tree of a placement, flattened for the mount
 //! span <sha256> <size> from <pack> @ <offset>  the range of a pack that is a file of a tree
 //! unplace <mount> <placement>                  the mount no longer holds the placement
+//! places-live <mount> [<placement> ...]        the mount holds these placements and no other
 //! ```
 //!
 //! A digest is sixty-four lower-case hex digits; a number is decimal digits only; a mount and a
@@ -99,6 +100,11 @@ pub(super) enum MountRequest {
     Unplace {
         mount: String,
         placement: PlacementId,
+    },
+    /// The mount `mount` holds the placements `keep` and no other.
+    PlacesLive {
+        mount: String,
+        keep: Vec<PlacementId>,
     },
 }
 
@@ -211,6 +217,14 @@ pub(super) fn parse(line: &[u8]) -> Result<Request, Refusal> {
                 size,
                 pack,
                 offset,
+            }))
+        }
+        "places-live" => {
+            let (mount, ids) = rest.split_once(' ').unwrap_or((rest, ""));
+            let ids = ids.split(' ').filter(|word| !word.is_empty());
+            Ok(Request::Mount(MountRequest::PlacesLive {
+                mount: name(mount)?,
+                keep: ids.map(placement).collect::<Result<_, _>>()?,
             }))
         }
         "unplace" => {

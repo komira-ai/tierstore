@@ -8,6 +8,7 @@
 //! span <sha256> <size> from <pack> @ <offset>
 //!                          ok <offset> <file> | why not | none
 //! unplace <mount> <placement>   ok
+//! places-live <mount> [<placement> ...]   ok <holds ended>
 //! ```
 //!
 //! `place` answers `tree` for a path that is the fs location of a placement, which it then holds
@@ -17,12 +18,17 @@
 //! in it (the file is the last word, the rest of the line); the mount reads the file there, and
 //! nothing is copied out of the pack. Why not is the text of the tree store's `FetchError`: `fill:`
 //! and the words of the cache's fill of a range (`fill: upstream 404`, `fill: mismatch`, ...), or
-//! that the range was gone once filled.
+//! that the range was gone once filled. `places-live` ends the holds of the mount on every
+//! placement it does not list: a mount that starts sends it, so that holds a process before it
+//! left are not kept. `flat` reads the tree's records on a blocking thread.
 //!
 //! A node with no tree store (no `[trees]`, or `trees.enabled = false`) has no placement: `place`
-//! is `none`, `mounted` an empty list, `flat` and `span` are `none`, and `unplace` is `ok`.
+//! is `none`, `mounted` an empty list, `flat` and `span` are `none`, `unplace` is `ok` and
+//! `places-live` is `ok 0`.
 
-use crate::server::local_cache::trees::{FileSpan, FlatError, MountPlace, ReadError, TreeStore};
+use crate::server::local_cache::trees::{
+    FileSpan, FlatError, FlatTree, MountPlace, ReadError, TreeStore,
+};
 
 use super::request::MountRequest;
 
@@ -32,6 +38,7 @@ pub(super) async fn answer(trees: Option<&TreeStore>, request: MountRequest) -> 
         return match request {
             MountRequest::Mounted => "[]".to_owned(),
             MountRequest::Unplace { .. } => "ok".to_owned(),
+            MountRequest::PlacesLive { .. } => "ok 0".to_owned(),
             _ => "none".to_owned(),
         };
     };
@@ -46,12 +53,11 @@ pub(super) async fn answer(trees: Option<&TreeStore>, request: MountRequest) -> 
             MountPlace::Nothing => "none".to_owned(),
         },
         MountRequest::Mounted => json(&trees.mount_paths()),
-        MountRequest::Flat { placement } => match trees.flat(&placement) {
-            Ok(tree) => json(&tree),
-            Err(FlatError::Read(ReadError::NoPlacement)) => "none".to_owned(),
-            Err(FlatError::Read(_)) => "damaged".to_owned(),
-            Err(FlatError::TooLarge) => "too large".to_owned(),
-        },
+        MountRequest::Flat { placement } => {
+            let store = trees.clone();
+            let flat = tokio::task::spawn_blocking(move || store.flat(&placement)).await;
+            flat.map_or_else(|_| "damaged".to_owned(), |flat| flat_answer(&flat))
+        }
         MountRequest::Span {
             sha256,
             size,
@@ -68,6 +74,19 @@ pub(super) async fn answer(trees: Option<&TreeStore>, request: MountRequest) -> 
             let _ = trees.detach(&placement, &mount);
             "ok".to_owned()
         }
+        MountRequest::PlacesLive { mount, keep } => {
+            format!("ok {}", trees.holds_live(&mount, &keep))
+        }
+    }
+}
+
+/// The answer to a `flat` whose tree is `flat`.
+fn flat_answer(flat: &Result<FlatTree, FlatError>) -> String {
+    match flat {
+        Ok(tree) => json(tree),
+        Err(FlatError::Read(ReadError::NoPlacement)) => "none".to_owned(),
+        Err(FlatError::Read(_)) => "damaged".to_owned(),
+        Err(FlatError::TooLarge) => "too large".to_owned(),
     }
 }
 

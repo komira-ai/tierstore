@@ -9,7 +9,8 @@
 //! handle, no open and no count, because the protocol has no open, release or forget; a tree
 //! leaves memory when it is detached. `Settings::count_lookups` chooses.
 //!
-//! The namespace is the mount's root (`ino::ROOT`) and `trees/` (`ino::TREES`); below `trees/`
+//! The namespace is the mount's root (`ino::ROOT`), `trees/` (`ino::TREES`) and the directories
+//! above the fs locations of the node's placements (`core/placed.rs`); below `trees/`
 //! are the roots of the trees that some run has attached, and a lookup of any other digest reads
 //! that tree and attaches it with no run (`core/implicit.rs`), until it has been idle for
 //! `fs.tree_idle_secs`. Every inode number of a tree is derivable (`ino.rs`), so a tree that is
@@ -30,7 +31,7 @@ use std::time::Duration;
 use crate::Clock;
 
 use crate::server::local_cache::blob_path;
-use crate::tree_manifest::{BlobSource, EntryKind, MAX_MANIFEST_BYTES, TreeDigest, TreeEntry};
+use crate::tree_manifest::{BlobSource, EntryKind, TreeDigest, TreeEntry};
 
 use super::attach::{Attachments, Failure, is_run};
 #[cfg(any(target_os = "linux", test))]
@@ -538,16 +539,17 @@ impl Core {
     }
 
     /// Tells the cache which trees are attached now, so that it drops every other pin of this
-    /// mount.
+    /// mount, and the tree store which placements, so that it ends every other hold of it.
     pub(super) fn pins_live(&self) {
-        let trees: Vec<String> = locked(&self.state)
-            .attachments
-            .trees()
+        let attached = locked(&self.state).attachments.trees();
+        let (keys, trees): (Vec<_>, Vec<_>) = attached
             .iter()
-            .filter(|digest| placed::placement_of(digest).is_none())
-            .map(ToString::to_string)
-            .collect();
+            .partition(|digest| placed::placement_of(digest).is_some());
+        let trees: Vec<String> = trees.iter().map(ToString::to_string).collect();
         let _ = self.fills.pins_live(&self.settings.mount_id, &trees);
+        // And the node's holds of placements: those of the trees placed here, and no other.
+        let ids: Vec<String> = keys.iter().filter_map(|key| placed::placement_of(key)).map(|(id, _)| id).collect();
+        self.fills.places_live(&self.settings.mount_id, &ids);
     }
 
     /// Takes the tree `number` out of memory if it is not attached and the kernel holds no inode
@@ -606,12 +608,14 @@ impl Core {
     }
 
     /// Looks up `name` in the directory `parent`. A digest in `trees/` that no run has attached is
-    /// attached by the lookup (`Core::resolve`).
+    /// attached by the lookup (`Core::resolve`); a name in the root or in a directory above the fs
+    /// locations is asked of the node's tree store over the fill socket (`Core::lookup_placed`).
     ///
     /// # Errors
     /// [`Errno::NoEnt`] for a name the namespace does not have (a digest of a tree the upstream
-    /// does not have), [`Errno::NotDir`] for a parent that is not a directory, [`Errno::Io`] for a
-    /// tree that cannot be read.
+    /// does not have, a path that is no location and above none), [`Errno::NotDir`] for a parent
+    /// that is not a directory, [`Errno::Io`] for a tree that cannot be read or a fill socket that
+    /// does not answer.
     pub(super) fn lookup(&self, parent: u64, name: &str) -> Result<Looked, Errno> {
         let (number, index) = ino::split(parent);
         let namespace = number == 0 || ino::is_placed_dir(parent);
@@ -657,7 +661,8 @@ impl Core {
         })
     }
 
-    /// The attributes of `ino`.
+    /// The attributes of `ino`. Every number of the range of the directories above the fs
+    /// locations is such a directory: they are all alike, so none is looked up.
     ///
     /// # Errors
     /// [`Errno::NoEnt`] for an inode no tree and no namespace has.
@@ -702,7 +707,8 @@ impl Core {
     /// Opens the directory `ino` for listing.
     ///
     /// # Errors
-    /// [`Errno::Acces`] for the mount's root and `trees/`, which nobody may list.
+    /// [`Errno::Acces`] for the mount's root, `trees/` and the directories above the fs
+    /// locations, which nobody may list.
     pub(super) fn opendir(&self, ino: u64) -> Result<(), Errno> {
         let (number, index) = ino::split(ino);
         if number == 0 || ino::is_placed_dir(ino) {
@@ -958,17 +964,6 @@ impl Core {
     pub(super) fn trees_in_memory(&self) -> usize {
         locked(&self.state).loaded.len()
     }
-}
-
-/// The bytes of the manifest file at `path`, at most [`MAX_MANIFEST_BYTES`] and one more byte, so
-/// that a larger file is refused by its size and not read whole.
-fn read_manifest(path: &Path) -> io::Result<Vec<u8>> {
-    use std::io::Read as _;
-    let mut bytes = Vec::new();
-    let _ = File::open(path)?
-        .take(MAX_MANIFEST_BYTES as u64 + 1)
-        .read_to_end(&mut bytes)?;
-    Ok(bytes)
 }
 
 /// The path of the entry `index` in its tree, from the root: `/a/b/c`.

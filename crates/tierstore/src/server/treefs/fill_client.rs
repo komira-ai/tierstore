@@ -315,6 +315,12 @@ impl FillClient {
         let _ = self.ask_line(&format!("unplace {mount} {id}"), true);
     }
 
+    /// Ends the holds of `mount` on every placement but `ids`; nothing is lost if the socket is
+    /// away or the node does not know the request.
+    pub(super) fn places_live(&self, mount: &str, ids: &[String]) {
+        let _ = self.ask_line(&format!("places-live {mount} {}", ids.join(" ")), true);
+    }
+
     /// Keeps the pins of `trees` of `mount` and takes away the others.
     pub(super) fn pins_live(&self, mount: &str, trees: &[String]) -> Result<String, AskError> {
         self.ask_line(&format!("pins-live {mount} {}", trees.join(" ")), true)

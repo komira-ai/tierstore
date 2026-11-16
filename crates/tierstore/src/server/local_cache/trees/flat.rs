@@ -118,8 +118,9 @@ impl Packs {
         if let Some(place) = self.places.get(&key) {
             return *place;
         }
-        // At most one pack for each file, and the files are fewer than `MAX_FLAT_ENTRIES`.
-        let place = u32::try_from(self.keys.len()).unwrap_or(u32::MAX);
+        // At most one pack for each file, and the files are fewer than `MAX_FLAT_ENTRIES`, which
+        // fits 32 bits.
+        let place = self.keys.len() as u32;
         self.keys.push(key.clone());
         let _ = self.places.insert(key, place);
         place
@@ -173,6 +174,23 @@ impl TreeStore {
             .filter_map(|(held, _)| held.strip_prefix(FS_SCOPE)?.strip_suffix('/'))
             .map(str::to_owned)
             .collect()
+    }
+
+    /// Ends the holds of the run `run` (the mount) on every placement but those in `keep`; how
+    /// many ended. A mount that starts says which placements it holds, so the holds of a process
+    /// before it that ended without giving them back do not keep placements forever.
+    pub(in crate::server) fn holds_live(&self, run: &str, keep: &[PlacementId]) -> usize {
+        let mut guard = self.shared.lock();
+        let state = &mut *guard;
+        let mut ended = 0;
+        for placement in state.placements.values_mut() {
+            if !keep.contains(&placement.id) && placement.attachments.remove(run) {
+                ended += 1;
+            }
+        }
+        let now = self.shared.now();
+        let _ = self.shared.purge(state, now);
+        ended
     }
 
     /// The tree of the placement `id`, flattened for the mount at its fs locations.

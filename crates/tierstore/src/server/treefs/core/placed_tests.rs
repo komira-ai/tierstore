@@ -10,7 +10,7 @@ use crate::server::local_cache::trees::testing::{built, fs_at};
 use crate::server::local_cache::trees::{CreateRequest, Created};
 use crate::server::treefs::core::{AttachError, Core, Entry, Errno, Kind, Looked, Opened};
 use crate::server::treefs::ino;
-use crate::server::treefs::live_testing::Live;
+use crate::server::treefs::live_testing::{Live, MOUNT};
 use crate::server::treefs::testing::{TREE_IDLE, open_cached};
 use crate::{NewKind, Op, TreeDigest};
 
@@ -375,4 +375,63 @@ async fn a_lookup_with_no_socket_is_an_io_error_except_for_names_of_the_mount() 
         assert_eq!(core.lookup(ino::ROOT, "put"), Err(Errno::NoEnt));
     })
     .await;
+}
+
+/// Asserts that a lookup of a location whose tree is attached holds the placement again when its
+/// hold was given back in between (an idle detach of another process's view, or an `unplace`
+/// that came between the lookup's `place` and its attach), so that a tree the mount serves is
+/// always held.
+#[tokio::test(flavor = "multi_thread")]
+async fn a_lookup_of_an_attached_tree_holds_its_placement_again() {
+    let live = Live::new("tfs-placed-rehold").await;
+    let created = live.place(vec![fs_at("jobs/1f3a/root")]);
+    let _ = live
+        .on_core(|core| walk(core, &["jobs", "1f3a", "root"]))
+        .await;
+    assert_eq!(attachments(&live, &created), 1);
+    assert!(live.bench.store.detach(&created.placement, MOUNT));
+    assert_eq!(attachments(&live, &created), 0);
+    let _ = live
+        .on_core(|core| walk(core, &["jobs", "1f3a", "root"]))
+        .await;
+    assert_eq!(attachments(&live, &created), 1);
+}
+
+/// Asserts that a lookup of a location whose tree cannot be read gives back the hold its `place`
+/// took: the tree's records are damaged, the lookup is an I/O error, and the placement is held by
+/// nothing.
+#[tokio::test(flavor = "multi_thread")]
+async fn a_lookup_that_fails_gives_the_hold_back() {
+    let live = Live::new("tfs-placed-fail-hold").await;
+    let created = live.place(vec![fs_at("jobs/1f3a/root")]);
+    let records = crate::server::local_cache::trees::testing::tree_path(&live.bench.rig, &created.tree)
+        .join("records");
+    std::fs::write(&records, b"damaged").unwrap();
+    let looked = live
+        .on_core(|core| {
+            let _ = walk(core, &["jobs", "1f3a"]);
+            core.lookup(dir_ino("jobs/1f3a"), "root").err()
+        })
+        .await;
+    assert_eq!(looked, Some(Errno::Io));
+    assert_eq!(attachments(&live, &created), 0);
+}
+
+/// Asserts that a start's `pins_live` keeps the holds of the placements whose trees are attached
+/// and ends the others of the mount: a process that takes over with nothing attached ends the hold
+/// a process before it left, and one that has the tree attached keeps it.
+#[tokio::test(flavor = "multi_thread")]
+async fn a_start_ends_the_holds_of_placements_it_does_not_have() {
+    let live = Live::new("tfs-placed-live").await;
+    let created = live.place(vec![fs_at("jobs/1f3a/root")]);
+    let _ = live
+        .on_core(|core| walk(core, &["jobs", "1f3a", "root"]))
+        .await;
+    live.on_core(Core::pins_live).await;
+    assert_eq!(attachments(&live, &created), 1);
+    let successor = live.successor();
+    tokio::task::spawn_blocking(move || successor.pins_live())
+        .await
+        .unwrap();
+    assert_eq!(attachments(&live, &created), 0);
 }

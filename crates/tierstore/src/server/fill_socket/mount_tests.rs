@@ -222,6 +222,50 @@ async fn a_node_with_no_tree_store_has_no_placements() {
     assert_eq!(answer(None, span(&bench, 0)).await, "none");
     assert_eq!(answer(None, MountRequest::Mounted).await, "[]");
     assert_eq!(answer(None, unplace(&unknown())).await, "ok");
+    let live = MountRequest::PlacesLive {
+        mount: MOUNT.to_owned(),
+        keep: Vec::new(),
+    };
+    assert_eq!(answer(None, live).await, "ok 0");
+}
+
+/// Asserts that `places-live` ends the holds of the mount on the placements it does not list and
+/// keeps those it lists and the holds of other mounts, answering how many ended.
+#[tokio::test]
+async fn places_live_ends_the_holds_of_the_mount_it_does_not_list() {
+    let (bench, kept) = placed("mount-places-live").await;
+    let other = bench
+        .store
+        .create(bench.request(vec![fs_at("jobs/2/root")]))
+        .unwrap()
+        .placement;
+    assert_eq!(answer(Some(&bench.store), place("jobs/1/root")).await, format!("tree {kept}"));
+    assert_eq!(answer(Some(&bench.store), place("jobs/2/root")).await, format!("tree {other}"));
+    bench.store.attach(&other, "mount-2").unwrap();
+    let live = |keep: Vec<PlacementId>| MountRequest::PlacesLive {
+        mount: MOUNT.to_owned(),
+        keep,
+    };
+    assert_eq!(answer(Some(&bench.store), live(vec![kept.clone()])).await, "ok 1");
+    assert_eq!(bench.store.placement(&kept).unwrap().attachments, 1);
+    assert_eq!(bench.store.placement(&other).unwrap().attachments, 1);
+    assert_eq!(answer(Some(&bench.store), live(Vec::new())).await, "ok 1");
+    assert_eq!(bench.store.placement(&kept).unwrap().attachments, 0);
+    assert_eq!(answer(Some(&bench.store), live(Vec::new())).await, "ok 0");
+}
+
+/// Asserts that a tree too large for the mount is answered `too large`, and the other answers of
+/// a flat by what went wrong.
+#[test]
+fn a_flat_too_large_for_the_mount_is_answered_so() {
+    use crate::server::local_cache::trees::{FlatError, ReadError};
+    use super::flat_answer;
+    assert_eq!(flat_answer(&Err(FlatError::TooLarge)), "too large");
+    assert_eq!(flat_answer(&Err(FlatError::Read(ReadError::NoPlacement))), "none");
+    assert_eq!(
+        flat_answer(&Err(FlatError::Read(ReadError::Corrupt("x".to_owned())))),
+        "damaged"
+    );
 }
 
 /// Sends `lines` over one connection to the socket at `path` and reads one answer line for each.
