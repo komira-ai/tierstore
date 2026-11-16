@@ -18,7 +18,9 @@
 //! - `verify` has the binary check the installed file (`--check-config`) and reads `/readyz`
 //!   and the build of the instance that serves.
 //! - `rollback`, after hostkeeper has put the previous package's files back, reloads the guard
-//!   and hands back to the instance that served.
+//!   and hands back to the instance that served. A node's first config package has no files to
+//!   go back to: its rollback reloads nothing, leaves the instance that runs serving and fails
+//!   `no_previous_release`.
 //! - `cleanup` retires the old instance, as for an update.
 //! - `uninstall` changes nothing: the service keeps what it read.
 //!

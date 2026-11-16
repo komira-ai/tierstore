@@ -79,7 +79,7 @@ fn the_serving_binary_checks_the_staged_file_and_then_the_installed_one() {
 fn a_config_update_that_changes_the_interface_restarts() {
     assert_restarts(
         Some(&with_interface("0.0.0.0")),
-        &with_interface("10.0.0.7"),
+        &with_interface("192.0.2.7"),
         &update(),
     );
 }
