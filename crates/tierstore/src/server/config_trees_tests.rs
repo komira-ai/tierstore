@@ -182,28 +182,26 @@ fn the_params_of_the_other_types_are_not_the_trees_interfaces() {
     ] {
         let name = param.split(' ').next().expect("a name");
         let why = refusal(BUILD_NODE, &[s3(), entry("trees", param)]);
-        assert!(
-            why.starts_with("interface[1].params: ")
-                && why.contains(name)
-                && why.contains("not for type \"trees\""),
-            "{why}"
+        assert_eq!(
+            why,
+            format!("interface[1].params.{name}: not for type \"trees\""),
         );
     }
     let on_s3 = refusal(
         BUILD_NODE,
         &[entry("s3", "port = 9300, max_request_bytes = 1")],
     );
-    assert!(
-        on_s3.contains("max_request_bytes") && on_s3.contains("not for type \"s3\""),
-        "{on_s3}"
+    assert_eq!(
+        on_s3,
+        "interface[0].params.max_request_bytes: not for type \"s3\""
     );
     let on_oci = refusal(
         BUILD_NODE,
         &[s3(), entry("oci", "port = 5000, max_request_bytes = 1")],
     );
-    assert!(
-        on_oci.contains("max_request_bytes") && on_oci.contains("not for type \"oci\""),
-        "{on_oci}"
+    assert_eq!(
+        on_oci,
+        "interface[1].params.max_request_bytes: not for type \"oci\""
     );
 }
 
