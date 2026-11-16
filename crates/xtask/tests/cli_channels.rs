@@ -852,3 +852,62 @@ fn decide_latest_and_the_install_checks_are_dispatched_and_report_what_fails() {
 }
 
 const COMMIT_SHA: &str = "0123456789abcdef0123456789abcdef01234567";
+
+#[test]
+fn the_pkg_verbs_are_wired_report_the_first_failing_aws_call_and_refuse_a_bad_tag() {
+    // Asserts: `channels pkg upload` and `channels pkg promote` reach their verbs from the command
+    // line: a tag without the v is a usage error (status 2), and a release whose installer and
+    // sums are there goes as far as the first `aws` call, which the stand-in refuses (status 1,
+    // naming the first key of the version's directory).
+    let d = fresh("pkg");
+    let bad = |verb: &str| {
+        run(
+            &d,
+            &[
+                "channels", "pkg", verb, "dist", "--tag", "1.2.3", "--commit", "0", "--bucket",
+                "b", "--work", "work", "--aws", FAKE,
+            ],
+        )
+    };
+    assert_eq!(bad("upload").status.code(), Some(2));
+    assert_eq!(bad("promote").status.code(), Some(2));
+
+    let dist = d.join("dist");
+    std::fs::create_dir(&dist).unwrap();
+    let name = "tierstore-1.2.3-macos-arm64.pkg";
+    std::fs::write(dist.join(name), "pkg").unwrap();
+    std::fs::write(dist.join(format!("{name}.sigstore.json")), "bundle").unwrap();
+    std::fs::write(
+        dist.join("SHA256SUMS"),
+        format!("{}  {name}\n", sha256(b"pkg")),
+    )
+    .unwrap();
+    for verb in ["upload", "promote"] {
+        let o = run(
+            &d,
+            &[
+                "channels",
+                "pkg",
+                verb,
+                "dist",
+                "--tag",
+                "v1.2.3",
+                "--commit",
+                "0123456789abcdef0123456789abcdef01234567",
+                "--bucket",
+                "b",
+                "--work",
+                "work",
+                "--aws",
+                FAKE,
+            ],
+        );
+        assert_eq!(o.status.code(), Some(1), "{verb}: {}", stderr(&o));
+        assert!(
+            stderr(&o)
+                .contains("pkg/tierstore/1.2.3/tierstore-1.2.3-macos-arm64.pkg.sigstore.json"),
+            "{verb}: {}",
+            stderr(&o)
+        );
+    }
+}

@@ -18,7 +18,8 @@
 //! - `release check <dir> --commit <sha>` ([`check`]): `<dir>` passes `verify-assets sums`,
 //!   `SHA256SUMS` lists exactly the assets of that commit ([`expected_assets`],
 //!   [`hostkeeper_assets`] of the one version of its hostkeeper packages, and
-//!   [`distribution_assets`] of the release version that version names) and no other,
+//!   [`distribution_assets`] of the release version that version names, and its
+//!   [`macos_pkg_name`]) and no other,
 //!   and each tarball, package, Debian package and RPM package has exactly one provenance bundle whose one
 //!   subject is that file's digest ([`crate::bundles`]), and no bundle is there for anything
 //!   else.
@@ -45,6 +46,15 @@
 //! `release deb` ([`deb`]) builds `tierstore_<version>_<arch>.deb` of a Linux binary, and `release rpm`
 //! ([`rpm`]) builds `tierstore-<version>-1.<arch>.rpm` of it.
 //!
+//! The Mac's installer package: `release macos-pkg` ([`macos_pkg`]) builds
+//! `tierstore-<version>-macos-arm64.pkg` of the macOS binary (unsigned; `pkgbuild` and
+//! `productbuild` run on the macOS runner), `release check-macos-pkg` reads back the product
+//! `pkgutil --expand` made of it and refuses anything but what the builder writes, and `release
+//! check-pkg-signature` ([`pkg_signature`]) refuses a signed one unless `pkgutil` trusts its
+//! signature, timestamped, by exactly the named Developer ID Installer identity.
+//! [`macos_pkg::manifest_json`]
+//! is the hostkeeper manifest of the package for a Mac.
+//!
 //! After a release, or by hand: `release desired` ([`desired`]) chooses a published release and
 //! gives the version and the targets `.github/workflows/hostkeeper-desired.yml` sets on the
 //! hostkeeper coordinator: the apt entries `release desired-apt` ([`desired_apt`]) gives the lab
@@ -55,10 +65,13 @@ mod binary;
 pub mod deb;
 pub mod desired;
 pub mod desired_apt;
+pub mod desired_macos;
 pub mod glibc;
 pub mod hostkeeper_index;
 pub mod hostkeeper_package;
 pub mod hostkeeper_verify;
+pub mod macos_pkg;
+pub mod pkg_signature;
 mod plan;
 mod publish;
 pub mod rpm;
@@ -102,10 +115,11 @@ pub const CI_WORKFLOW: &str = "ci.yml";
 /// The artifacts a push run of [`BUILD_WORKFLOW`] leaves, all of which a release needs: the
 /// files of each platform (`assets-<platform>`, one per [`Platform::ALL`]), the sums, and the
 /// provenance bundles of every platform's tarball and hostkeeper package.
-pub const ARTIFACTS: [&str; 5] = [
+pub const ARTIFACTS: [&str; 6] = [
     "assets-linux-x86_64",
     "assets-linux-arm64",
     "assets-macos-arm64",
+    "assets-pkg-macos-arm64",
     "sha256sums",
     "bundles",
 ];
@@ -156,6 +170,11 @@ pub fn distribution_assets(version: &str) -> Vec<String> {
     names
 }
 
+/// The signed macOS installer of the release `version`, `tierstore-<version>-macos-arm64.pkg`.
+pub fn macos_pkg_name(version: &str) -> String {
+    format!("{BINARY}-{version}-macos-arm64.pkg")
+}
+
 /// The one version of the hostkeeper packages of `commit` that `listed` names (by their names,
 /// `tierstore-<version>-<platform>.tar.zst`, the version ending `+<the first 12 digits>`), or
 /// the problem.
@@ -194,6 +213,7 @@ pub fn check(dir: &Path, commit: &str) -> Result<Vec<String>, Error> {
             // `X.Y.Z+<12 hex>`: the release's version is what is before the `+`.
             let release = version.split_once('+').map_or(&version[..], |(v, _)| v);
             expected.extend(distribution_assets(release));
+            expected.push(macos_pkg_name(release));
         }
         Err(problem) => problems.push(problem),
     }

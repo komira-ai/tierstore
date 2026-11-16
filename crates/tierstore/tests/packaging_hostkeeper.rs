@@ -545,6 +545,27 @@ fn the_package_template_is_the_archive_template_but_for_the_binary() {
     );
 }
 
+/// Asserts that both templates want the nft guard unit and start after it, besides the network
+/// ordering they already have, and that neither requires it or is stopped with it: the guard is
+/// its own unit, so the stop of the old instance in a hand-over leaves it under the new one, and a
+/// host without `guard.nft` (whose guard unit is skipped) still starts its instances.
+#[test]
+fn both_templates_want_the_guard_and_start_after_it_without_requiring_it() {
+    for unit in [read(TEMPLATE), package_template()] {
+        assert_eq!(
+            values(&unit, "Wants"),
+            ["network-online.target", "tierstore-guard.service"]
+        );
+        assert_eq!(
+            values(&unit, "After"),
+            ["network-online.target", "tierstore-guard.service"]
+        );
+        for key in ["Requires", "BindsTo", "PartOf", "Before"] {
+            assert_eq!(values(&unit, key), Vec::<String>::new(), "{key}");
+        }
+    }
+}
+
 /// Asserts that the template of the packages runs the binary the hook asks in a staged release of
 /// the package (`PACKAGE_RELEASE_BINARY` below the version's `tree/`, which is the root of the
 /// package's files), on the host's `/etc/tierstore/config.toml`, with flags the binary parses.

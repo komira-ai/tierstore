@@ -42,7 +42,7 @@ Each key, in one line:
 |---|---|
 | `interface.type` | what this entry serves; `"s3"` is the S3 API |
 | `interface.params` | where it listens: `addresses` is a list of `host:port` |
-| `server.proxy_id` | the name of this process; keep it across restarts and give each process over the same tiers its own |
+| `server.proxy_id` | the name of this process; keep it across restarts and give each process over the same tiers its own (or `server.proxy_id_from_facts`: a prefix and the host id of hostkeeper's facts file) |
 | `server.bucket` | the one bucket clients see |
 | `server.access_key_file` | the key file: an access key id on the first line, the secret on the second; mode 0600 |
 | `hot_store.kind` | the kind of the hot tier: `dir` here, a directory |

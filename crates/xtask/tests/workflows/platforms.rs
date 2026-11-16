@@ -51,7 +51,12 @@
 //! hand (`workflow_dispatch`), whose triggers [`TRIGGERS`] pins, and no pull request starts them.
 
 use super::glibc_floor::{self, Zig};
-use super::lint::{SIGN_IF, entries, entry, names, runs, scalars};
+use super::lint::{SIGN_IF, entries, entry, names, runs};
+use super::pkg::{
+    MACOS_PKG_COMMANDS, PKG_JOB_IF, PKG_SIGNED, PKG_UNSIGNED, assets_of, pkg_attest_problems,
+    pkg_copy, pkg_jobs_problems,
+};
+pub use super::pr_runners::pull_request_runner_problems;
 use super::yaml::{self, Node, Value};
 
 /// A platform's build job: its runner (GitHub-hosted, of the platform's own OS and architecture,
@@ -81,7 +86,10 @@ pub const NOT_FOR_A_PULL_REQUEST: &str = "${{ github.event_name != 'pull_request
 
 /// The `if:` of `sums`: for a pull request the beta jobs (linux-arm64, macos-arm64) are skipped and
 /// the linux-x86_64 files are summed; for a push or a run by hand every build job must have succeeded.
-pub const SUMS_IF: &str = "${{ !cancelled() && needs.linux-x86_64.result == 'success' && ((needs.linux-arm64.result == 'success' && needs.macos-arm64.result == 'success') || (github.event_name == 'pull_request' && needs.linux-arm64.result == 'skipped' && needs.macos-arm64.result == 'skipped')) }}";
+/// The signed macOS installer is a file of every release a push builds: `sums` waits for
+/// `check-pkg`, which runs on a push alone, so it must have succeeded on a push and be skipped
+/// on a pull request and on a run by hand, which sign nothing.
+pub const SUMS_IF: &str = "${{ !cancelled() && needs.linux-x86_64.result == 'success' && ((needs.linux-arm64.result == 'success' && needs.macos-arm64.result == 'success') || (github.event_name == 'pull_request' && needs.linux-arm64.result == 'skipped' && needs.macos-arm64.result == 'skipped')) && (needs.check-pkg.result == 'success' || (github.event_name != 'push' && needs.check-pkg.result == 'skipped')) }}";
 
 /// The triggers of `artifacts.yml`: a pull request, a push to main, and by hand (the macOS build
 /// of a branch, tried before it merges).
@@ -217,6 +225,7 @@ pub fn build_commands(b: &Build) -> Vec<String> {
     }
     if b.platform == "macos-arm64" {
         commands.push(CODESIGN.to_owned());
+        commands.extend(MACOS_PKG_COMMANDS.map(str::to_owned));
     }
     commands
 }
@@ -285,6 +294,9 @@ pub fn attest_commands(platforms: &[&str]) -> Vec<String> {
     }
     for build in platforms.iter().filter_map(|p| build_of(p)) {
         commands.extend(build.rpm.map(rpm_copy));
+    }
+    if platforms.contains(&"macos-arm64") {
+        commands.push(pkg_copy());
     }
     commands
 }
@@ -414,8 +426,8 @@ pub fn execution_problems(name: &str, job: &Node, job_if: Option<&str>) -> Vec<S
     problems
 }
 
-const DOWNLOAD: &str = "actions/download-artifact@";
-const UPLOAD: &str = "actions/upload-artifact@";
+pub const DOWNLOAD: &str = "actions/download-artifact@";
+pub const UPLOAD: &str = "actions/upload-artifact@";
 
 /// One line per way the downloads of the job `name` do not take every platform's assets into
 /// `dist`, merged, alone; and do not take each artifact of `named` (`(artifact, directory)`)
@@ -560,9 +572,14 @@ fn build_problems(doc: &Node, b: &Build, build: &Node) -> Vec<String> {
         .map(|s| (at(s, &["with", "name"]), at(s, &["with", "path"])))
         .collect();
     let want = format!("assets-{platform}");
-    if uploads != [(Some(want.as_str()), Some("dist/"))] {
+    let mut wanted = Vec::new();
+    if platform == "macos-arm64" {
+        wanted.push((Some(PKG_UNSIGNED), Some("pkg/")));
+    }
+    wanted.push((Some(want.as_str()), Some("dist/")));
+    if uploads != wanted {
         problems.push(format!(
-            "{platform}: uploads {uploads:?}, not [\"{want}\"] from dist/"
+            "{platform}: uploads {uploads:?}, not {wanted:?} (the unsigned installer from pkg/ on macOS, then the files from dist/)"
         ));
     }
     problems
@@ -636,32 +653,39 @@ pub fn artifacts_platform_problems(
         let name = name.as_str().unwrap_or_default();
         let job_if = match name {
             "attest" | "verify" => Some(SIGN_IF),
+            "sign-pkg" | "check-pkg" => Some(PKG_JOB_IF),
             "sums" => Some(SUMS_IF),
             _ => BUILDS
                 .iter()
                 .find(|b| b.platform == name)
                 .and_then(|b| b.job_if),
         };
-        problems.extend(execution_problems(name, body, job_if));
+        let mut found = execution_problems(name, body, job_if);
+        if name == "sign-pkg" {
+            // The two cleanup steps run under `if: ${{ always() }}`; `sign_pkg_problems` pins them.
+            found.retain(|p| !p.contains("has an `if:`"));
+        }
+        problems.extend(found);
     }
-
     let needs = names(job("sums").and_then(|j| entry(j, "needs")));
     for platform in platforms {
         if !needs.iter().any(|n| n == platform) {
             problems.push(format!("sums: does not need {platform}"));
         }
     }
-    problems.extend(download_problems("sums", job("sums"), platforms, &[]));
+    problems.extend(pkg_jobs_problems(platforms, jobs, &needs));
+    let with_pkg = assets_of(platforms);
+    problems.extend(download_problems("sums", job("sums"), &with_pkg, &[]));
     problems.extend(download_problems(
         "attest",
         job("attest"),
-        platforms,
+        &with_pkg,
         &[(SUMS, "dist")],
     ));
     problems.extend(download_problems(
         "verify",
         job("verify"),
-        platforms,
+        &with_pkg,
         &[(SUMS, "published"), (BUNDLES, "dist")],
     ));
     problems.extend(attest_problems(job("attest"), platforms));
@@ -692,10 +716,13 @@ pub fn artifacts_platform_problems(
         .collect();
     uploaded.sort_unstable();
     let mut wanted = artifacts.to_vec();
+    if platforms.contains(&"macos-arm64") {
+        wanted.extend([PKG_UNSIGNED, PKG_SIGNED]);
+    }
     wanted.sort_unstable();
     if uploaded != wanted {
         problems.push(format!(
-            "the jobs upload {uploaded:?}, not the artifacts a release waits for, {wanted:?}"
+            "the jobs upload {uploaded:?}, not the artifacts a release waits for and the unsigned and signed installer, {wanted:?}"
         ));
     }
     problems
@@ -752,6 +779,9 @@ fn attest_problems(attest: Option<&Node>, platforms: &[&str]) -> Vec<String> {
             &provenance_steps,
             platform,
         ));
+    }
+    if platforms.contains(&"macos-arm64") {
+        problems.extend(pkg_attest_problems(attest, &provenance_steps));
     }
     problems.extend(action_problems(
         "attest",
@@ -897,82 +927,7 @@ pub fn release_platform_problems(text: &str, platforms: &[&str]) -> Vec<String> 
     download_problems(
         "release.yml verify",
         verify,
-        platforms,
+        &assets_of(platforms),
         &[(SUMS, "published"), (BUNDLES, "dist")],
     )
-}
-
-/// Whether `label` is a GitHub-hosted Linux x86_64 runner: `ubuntu-<version>` or `ubuntu-latest`,
-/// not an `-arm` image, not a larger-runner or self-hosted label.
-fn linux_x86_64(label: &str) -> bool {
-    let label = label.to_ascii_lowercase();
-    label.strip_prefix("ubuntu-").is_some_and(|v| {
-        v == "latest" || (!v.is_empty() && v.chars().all(|c| c.is_ascii_digit() || c == '.'))
-    })
-}
-
-/// The labels of the `runs-on` of `job` that are not [`linux_x86_64`].
-fn other_platform_labels(job: &Node) -> Vec<String> {
-    let mut labels = Vec::new();
-    if let Some(runs_on) = entry(job, "runs-on") {
-        scalars(runs_on, &mut labels);
-    }
-    labels
-        .into_iter()
-        .filter(|l| !l.contains("${{") && !linux_x86_64(l))
-        .map(str::to_owned)
-        .collect()
-}
-
-/// One line per job of a workflow a pull request starts whose runner the lint cannot see: a
-/// `runs-on` that is an expression (a matrix value, an input), or a call of a reusable workflow
-/// (a job-level `uses:`), either of which could put the job on another platform unseen.
-fn unseen_runner_problems(file: &str, name: &str, job: &Node) -> Vec<String> {
-    let mut problems = Vec::new();
-    let mut labels = Vec::new();
-    if let Some(runs_on) = entry(job, "runs-on") {
-        scalars(runs_on, &mut labels);
-    }
-    if labels.iter().any(|l| l.contains("${{")) {
-        problems.push(format!(
-            "{file}: the job {name} of a pull request runs on an expression; name its runner, so the lint can tell its platform"
-        ));
-    }
-    if entry(job, "uses").is_some() {
-        problems.push(format!(
-            "{file}: the job {name} of a pull request calls a reusable workflow, whose runners the lint cannot see"
-        ));
-    }
-    problems
-}
-
-/// One line per job of the workflow `file` (`text`) that a pull request runs on a platform other
-/// than Linux x86_64. The workflow has a `pull_request` trigger and a job names a runner that is not
-/// a GitHub-hosted `ubuntu-*` x86_64 one ([`linux_x86_64`]: macOS, Windows and `-arm` images are
-/// not) under another `if:` than [`NOT_FOR_A_PULL_REQUEST`]. The other platforms build and test
-/// as the beta stage of the release, after a merge. A job of such a workflow whose runner is an
-/// expression, or that calls a reusable workflow, is refused ([`unseen_runner_problems`]).
-pub fn pull_request_runner_problems(file: &str, text: &str) -> Vec<String> {
-    let doc = match yaml::load(text) {
-        Ok(doc) => doc,
-        Err(e) => return vec![format!("{file}: {e}")],
-    };
-    if !names(entry(&doc, "on")).iter().any(|t| t == "pull_request") {
-        return Vec::new();
-    }
-    let mut problems = Vec::new();
-    for (name, job) in entry(&doc, "jobs").map_or(&[][..], entries) {
-        let name = name.as_str().unwrap_or_default();
-        problems.extend(unseen_runner_problems(file, name, job));
-        if at(job, &["if"]) == Some(NOT_FOR_A_PULL_REQUEST) {
-            continue;
-        }
-        let others = other_platform_labels(job);
-        if !others.is_empty() {
-            problems.push(format!(
-                "{file}: the job {name} runs on {others:?} for a pull request; a pull request runs on Linux x86_64 (ubuntu-*, not -arm) alone, and other platforms are the beta stage of the release, under `if: {NOT_FOR_A_PULL_REQUEST}`"
-            ));
-        }
-    }
-    problems
 }

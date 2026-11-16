@@ -64,6 +64,8 @@ use super::config_interface::{
     InterfaceTable, Interfaces, OciTable, interfaces, no_trees, with_legacy,
 };
 use super::config_io::io_tuning;
+use super::config_load::facts::FactsId;
+use super::config_load::facts::proxy_id_of;
 use super::config_policy::{Policy, check_policies};
 use super::config_reconcile::reconcile_tuning;
 pub(super) use super::config_tier::{TierParts, tier};
@@ -298,7 +300,15 @@ pub(super) struct ServerTable {
     /// [`with_legacy`]).
     #[serde(default)]
     pub listen: Option<Addrs>,
-    pub proxy_id: String,
+    /// The id of this proxy, as the file gives it; exactly one of this and `proxy_id_from_facts`.
+    #[serde(default)]
+    pub proxy_id: Option<String>,
+    /// The id of this proxy as a prefix and the host id of the facts file that hostkeeper writes.
+    #[serde(default)]
+    pub proxy_id_from_facts: Option<FactsId>,
+    /// The proxy id the file makes, which [`settings`] sets from the two keys above.
+    #[serde(skip)]
+    pub id: String,
     #[serde(default)]
     pub slot: Option<u16>,
     pub bucket: String,
@@ -612,7 +622,14 @@ impl Settings {
 }
 
 /// The settings a file stands for, with the knobs of this run, by the shape its tables make.
-pub(super) fn settings(file: File, per_run: PerRun) -> Result<Settings, ConfigError> {
+///
+/// `host` is the host id of the facts file when `server.proxy_id_from_facts` is given and the
+/// file was read (see [`load`]); a loader of text, which reads no file, passes none.
+pub(super) fn settings(
+    file: File,
+    per_run: PerRun,
+    host: Option<&str>,
+) -> Result<Settings, ConfigError> {
     let File {
         mut server,
         hot_store,
@@ -623,6 +640,11 @@ pub(super) fn settings(file: File, per_run: PerRun) -> Result<Settings, ConfigEr
         policy,
         trees,
     } = file;
+    server.id = proxy_id_of(
+        server.proxy_id.as_deref(),
+        server.proxy_id_from_facts.as_ref(),
+        host,
+    )?;
     let trees = check_trees(trees.as_ref(), hot_store.is_none() && local_cache.is_some())?;
     if let Some(hot) = &hot_store {
         warn_retired_keys(hot);
@@ -835,7 +857,7 @@ pub(super) fn front_of(
     )?;
     let front = FrontSettings {
         listen,
-        proxy_id: server.proxy_id,
+        proxy_id: server.id,
         slot: slot_of(server.slot)?,
         bucket: server.bucket,
         region: server.region.unwrap_or_else(|| DEFAULT_REGION.to_owned()),

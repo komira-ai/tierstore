@@ -62,9 +62,9 @@ fn the_tap_debian_and_rpm_names_are_the_ones_the_tap_apt_and_dnf_take() {
             .any(|c| c.contains("deb") || c.contains("rpm"))
     );
     let attest = attest_commands(&platforms());
-    assert_eq!(attest.len(), 2 + 3 + 3 + 3 + 2 + 2);
+    assert_eq!(attest.len(), 2 + 3 + 3 + 3 + 2 + 2 + 1);
     assert_eq!(
-        attest[attest.len() - 4..],
+        attest[attest.len() - 5..attest.len() - 1],
         [
             "cp \"$BUNDLE\" \"dist/tierstore_${RELEASE_VERSION}_amd64.deb.sigstore.json\"",
             "cp \"$BUNDLE\" \"dist/tierstore_${RELEASE_VERSION}_arm64.deb.sigstore.json\"",

@@ -9,7 +9,8 @@
 //! The package has the files of the Debian package ([`deb::files`]) at the same paths and modes,
 //! with the one difference the RPM conventions ask for: the licence is installed as a `%license`
 //! file, `/usr/share/licenses/tierstore/LICENSE`, and not as `/usr/share/doc/tierstore/copyright`.
-//! As in the Debian package, nothing in `/etc` is the package's: it has no `%config` file, the
+//! The guard unit `tierstore-guard.service` is among them. As in the Debian package, nothing in
+//! `/etc` is the package's: it has no `%config` file, the
 //! example configuration is `/usr/share/doc/tierstore/examples/config.toml`, which nothing reads,
 //! and the instances of the unit template read the host's `/etc/tierstore/config.toml`. Every file
 //! is owned by `root`, the directories this package owns (each 0755) are in the package, and the

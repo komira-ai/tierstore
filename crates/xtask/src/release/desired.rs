@@ -25,23 +25,29 @@
 //! entry of the host's repository entry `komira-testing`, the package version `X.Y.Z` and the
 //! `.deb`'s SHA-256, held to the suite as a client reads it and to the release's `SHA256SUMS`. A
 //! list of `hostkeeper-archive` entries alone orders no host: the coordinator holds every host that
-//! runs tierstore from apt `installer_dropped`. There is no `macos-arm64` list: tierstore ships no
-//! package a Mac's daemon installs (no `.pkg`; the archive installer is withdrawn), so a Mac is
-//! ordered nothing (`no_target`) and keeps what it runs. No release index is sent: it would list
+//! runs tierstore from apt `installer_dropped`. `targets` has no `macos-arm64`
+//! list: they are exactly the lab's, so that the version the lab set is set again with equal
+//! targets. With `--macos-pkg` (the workflow's way) a fourth output, `targets-mac=<JSON>`, is the
+//! same targets with a `macos-arm64` list of one `macos-pkg` entry of the release's signed `.pkg`
+//! ([`super::desired_macos`]), downloaded and held to the digest of `SHA256SUMS`: what the
+//! second `set-desired` call sets for the host group of the Macs. No release index is sent: it would list
 //! archive entries the targets do not have.
 //!
 //! When the run published nothing, `--output` (on Actions, `GITHUB_OUTPUT`) gets `set=false`.
 //! Otherwise every problem found is reported, one line each, and when there is none `--output`
-//! gets `set=true`, `package-version=<X.Y.Z>` and `targets=<JSON>`.
+//! gets `set=true`, `package-version=<X.Y.Z>` and `targets=<JSON>` (and `targets-mac=<JSON>` with
+//! `--macos-pkg`).
 
 use std::path::Path;
 
 use super::desired_apt::{self, apt_targets};
+use super::desired_macos;
 use super::hostkeeper_package::is_plain_version;
 use super::{Gh, append_output, array};
 use crate::Error;
 use crate::build_commit::is_commit;
 use crate::channels::check::Host;
+use crate::sums::SUMS;
 
 /// The job of `release.yml` that publishes a release.
 pub const PUBLISH_JOB: &str = "publish";
@@ -65,6 +71,9 @@ pub struct Request<'a> {
     pub dir: &'a Path,
     /// The apt repository whose suite `testing` the hosts install from.
     pub apt_url: &'a str,
+    /// Also give `targets-mac`: the apt targets and the `macos-arm64` list, one `macos-pkg` entry
+    /// of the release's signed `.pkg`. `targets` stays what the lab sets.
+    pub macos_pkg: bool,
     /// The program that reads the suite.
     pub curl: &'a Path,
     pub output: Option<&'a Path>,
@@ -201,11 +210,32 @@ pub fn desired(gh: &dyn Gh, host: &dyn Host, request: &Request<'_>) -> Result<Ve
         },
     )?;
     let [package_version, targets] = found.lines;
-    let lines = ["set=true".to_owned(), package_version, targets];
+    let mut summary = found.summary;
+    let mut lines = vec!["set=true".to_owned(), package_version, targets];
+    if request.macos_pkg {
+        let entry = desired_macos::macos_entry(
+            gh,
+            request.repo,
+            &format!("v{version}"),
+            &version,
+            request.dir,
+            request.min_hostkeeper,
+        )?;
+        let mut all = found.targets;
+        all.insert(
+            desired_macos::PLATFORM.to_owned(),
+            serde_json::json!({"entries": [entry]}),
+        );
+        lines.push(format!("targets-mac={}", serde_json::Value::Object(all)));
+        summary.push_str(&format!(
+            "; the release's {} has the digest {SUMS} lists",
+            super::macos_pkg_name(&version)
+        ));
+    }
     if let Some(output) = request.output {
         append_output(output, &lines)?;
     }
-    let mut printed = vec![found.summary];
+    let mut printed = vec![summary];
     printed.extend(lines);
     Ok(printed)
 }

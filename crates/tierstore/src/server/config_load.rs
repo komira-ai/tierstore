@@ -5,6 +5,9 @@
 
 use std::path::Path;
 
+#[path = "config_facts.rs"]
+pub(super) mod facts;
+
 use super::cli::Cli;
 use super::config::{ConfigError, File, KEYS, PerRun, Settings, invalid, settings};
 use super::config_syntax::{find_secret, syntax};
@@ -15,10 +18,20 @@ use super::config_unknown::announce_unknown_keys;
 /// # Errors
 /// A [`ConfigError`]: text that is not a file of this format.
 pub(super) fn settings_from_text(text: &str, per_run: PerRun) -> Result<Settings, ConfigError> {
+    settings_with_host(text, per_run, None)
+}
+
+/// The settings of the TOML `text`, with the knobs of this run and the host id of the facts file
+/// that `server.proxy_id_from_facts` names, if that was read.
+fn settings_with_host(
+    text: &str,
+    per_run: PerRun,
+    host: Option<&str>,
+) -> Result<Settings, ConfigError> {
     let table: toml::Table = toml::from_str(text).map_err(|e| syntax(text, &e))?;
     find_secret("", &table)?;
     let file: File = toml::from_str(text).map_err(|e| syntax(text, &e))?;
-    settings(file, per_run)
+    settings(file, per_run, host)
 }
 
 /// The settings of a storage-node file.
@@ -82,7 +95,8 @@ pub(super) fn removed(flag: &str) -> Option<String> {
     ))
 }
 
-/// The settings of the file at `path`, with the knobs of this run.
+/// The settings of the file at `path`, with the knobs of this run. When the file gives
+/// `server.proxy_id_from_facts`, the facts file it names is read here, once.
 ///
 /// # Errors
 /// A [`ConfigError`] that names the file: it cannot be read, or is not a file of this format.
@@ -94,10 +108,15 @@ pub(super) fn load(path: &Path, per_run: PerRun) -> Result<Settings, ConfigError
             return Err(ConfigError::Read { path, source });
         }
     };
-    let settings = settings_from_text(&text, per_run).map_err(|source| ConfigError::In {
+    let in_file = |source| ConfigError::In {
         path: path.to_owned(),
         source: Box::new(source),
-    })?;
+    };
+    let host = match facts::facts_path(&text) {
+        Some(facts) => Some(facts::read_host_id(&facts).map_err(in_file)?),
+        None => None,
+    };
+    let settings = settings_with_host(&text, per_run, host.as_deref()).map_err(in_file)?;
     announce_unknown_keys(&text);
     Ok(settings)
 }

@@ -165,6 +165,23 @@ A release that refuses `server.handoff_socket` on a build node or a storage node
 | `state_io` | environment | the record or a start marker could not be read or written |
 | `host_failed` | environment | the host could not be asked: the configuration, or `--capabilities` or `--check-config` of a release (no binary at `bin/tierstore` or `tree/usr/libexec/tierstore/tierstore`, cannot be run, exits any status but its answer, or does not end), or the account `tierstore` is not in `/etc/passwd` |
 
+## The config hook
+
+`tierstore config-hook` is the hook of a **config package**: a package of one host group that replaces only the node's configuration files (`/etc/tierstore/config.toml` and the network guard's file beside it on Linux, `/usr/local/tierstore/etc/tierstore.toml` on a Mac) and carries no binary. hostkeeper runs it as it runs this hook: the same command line (`tierstore config-hook <step> [<staged release>] --params <file>`), the same params file, exit statuses, last line and reasons. Its steps are `prepare`, `cutover`, `verify`, `rollback`, `cleanup` and `uninstall`; it has no boot step, and `restore` is refused (`bad_args`).
+
+The params may leave out `config_file` and `service_manager`: on Linux the file is `/etc/tierstore/config.toml` and the manager systemd; on a Mac the file is `/usr/local/tierstore/etc/tierstore.toml` and the manager launchd, with the job `tierstore`. What the params name is kept.
+
+The release does not change, so the version every step looks for in the build gauge is the build of the binary that runs the hook: run it as the service's installed binary (`/usr/libexec/tierstore/tierstore config-hook` with the Debian or RPM package), and every check of a configuration is that binary's `--check-config`. hostkeeper runs a hook program that the package itself installs, so a config package ships a one-line wrapper as its `hook.command` that runs the installed binary with its own arguments (`exec /usr/libexec/tierstore/tierstore config-hook "$@"`). The steps move the same instances as an update of the release:
+
+- `prepare` refuses (`out_of_order`) while an update of the release is in flight. It has the binary check the file the package staged, `<staged release>/tree/<config file>`, before it is installed (`config_missing` when the package stages none, `config_refused` with the binary's line when it refuses it). It chooses a hand-over when the file that serves and the staged one have the same `[[interface]]` tables, the same listening keys of `[server]` and the same `server.handoff_socket`, and neither has a hot tier of kind `dir`; otherwise, or with `mode = "restart"`, a restart. Nothing is started.
+- `cutover` reloads the network guard first (`systemctl reload-or-restart tierstore-guard.service`, only on a node that has the guard's file), then starts the other instance on the new file, by the hand-over or the restart of an update. On a Mac it boots the job out and bootstraps it.
+- `verify` has the binary check the installed file (`config_refused`), then observes `/readyz` and the build, as for an update.
+- `rollback` comes after hostkeeper has put the previous package's files back: it reloads the guard and hands back to the instance that served. A node's first config package has no files to go back to (hostkeeper takes the package and its files off the node): the rollback leaves the instance that runs serving on what it read, records nothing in flight, and fails with `no_previous_release`; the node needs a configuration before its next start.
+- `cleanup` commits and retires the old instance, as for an update, and writes the instance that now serves into the release's record (`state.json`), which `restore` reads at boot.
+- `uninstall` changes nothing: the service keeps the configuration it read.
+
+The config hook keeps its own record, `config-state.json`, beside `state.json` in `/var/lib/tierstore-hook` and under the same lock, so a config update never changes the release's `to`, `version` or promotion.
+
 ## First install
 
 A `prepare` whose params have no previous release is a first install. The hook starts `tierstore@a` (or bootstraps the job) with a normal bind. If it fails and hostkeeper rolls back, the instance is stopped, the step exits 1 with `no_previous_release`, and no instance is left running.

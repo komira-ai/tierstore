@@ -7,15 +7,17 @@ use std::time::Duration;
 use rustix::process::geteuid;
 
 use super::args::Invocation;
+use super::config_hook::{Common, GUARD_FILE, GUARD_UNIT, Running, launchd_step, systemd_step};
 use super::look::POLL_INTERVAL;
 use super::machine::{
-    LaunchctlJobs, LaunchdTimes, LoopbackInstances, MarkerFiles, MonotonicClock, Runner,
-    StateFiles, SystemHost, SystemRunner, SystemdUnits,
+    CONFIG_STATE_FILE, GuardUnit, LaunchctlJobs, LaunchdTimes, LoopbackInstances, MarkerFiles,
+    MonotonicClock, Runner, StateFiles, SystemHost, SystemRunner, SystemdUnits,
 };
 use super::params::{Params, ServiceManager};
 use super::ports::{LaunchdPorts, SystemdPorts};
 use super::report::{Done, Reason};
 use super::{MARKER_DIR, STATE_DIR};
+use crate::server::build_info::VERSION as BUILD_VERSION;
 
 /// Where the Debian and Ubuntu package puts `systemctl`.
 pub(super) const SYSTEMCTL_PROGRAM: &str = super::machine::SYSTEMCTL_PROGRAM;
@@ -109,6 +111,102 @@ pub(super) fn run_on(config: &SystemConfig<'_>, invocation: &Invocation, params:
             };
             super::launchd::run_step(invocation.step, params, label, &ports)
         }
+    }
+}
+
+/// Runs a step of the config hook on the machine described by `config`: the ports are the
+/// machine's, every release check runs `binary` (the binary of the service that serves, the one
+/// running this hook), and the record is the config hook's own.
+pub(super) fn config_run_on(
+    config: &SystemConfig<'_>,
+    binary: &Path,
+    invocation: &Invocation,
+    params: &Params,
+) -> Done {
+    let runner = config.runner;
+    let host = SystemHost::new(config.root.clone(), runner, CAPABILITIES_TIMEOUT)
+        .with_release_owner(config.release_owner)
+        .with_binary(binary.to_path_buf());
+    let release = Path::new("/");
+    let running = Running {
+        host: &host,
+        release,
+    };
+    let instances = LoopbackInstances::new(CONNECT_TIMEOUT, READ_TIMEOUT);
+    let clock = MonotonicClock::new().with_pause(config.poll);
+    let state = StateFiles::new(under(&config.root, STATE_DIR), config.owner)
+        .with_record(CONFIG_STATE_FILE);
+    let service = StateFiles::new(under(&config.root, STATE_DIR), config.owner);
+    let common = Common {
+        service: &service,
+        release,
+        build: BUILD_VERSION,
+    };
+    match &params.service_manager {
+        ServiceManager::Unknown(value) => Done::fail(
+            Reason::ServiceManagerUnknown,
+            format!("service_manager {value:?} is neither \"systemd\" nor \"launchd\""),
+        ),
+        ServiceManager::Systemd => {
+            let units = SystemdUnits::new(runner, START_TIMEOUT, STOP_TIMEOUT, SHOW_TIMEOUT)
+                .with_program(config.systemctl);
+            let markers = MarkerFiles::new(under(&config.root, MARKER_DIR));
+            let guard = GuardUnit::new(&units, GUARD_UNIT, under(&config.root, GUARD_FILE));
+            let ports = SystemdPorts {
+                units: &units,
+                markers: &markers,
+                instances: &instances,
+                host: &running,
+                clock: &clock,
+                state: &state,
+            };
+            systemd_step(invocation.step, params, &ports, &guard, &common)
+        }
+        ServiceManager::Launchd { label } => {
+            let times = LaunchdTimes {
+                call: LAUNCHCTL_TIMEOUT,
+                bootout: BOOTOUT_TIMEOUT,
+                gone_attempts: GONE_ATTEMPTS,
+                poll: config.poll,
+            };
+            let launchd = LaunchctlJobs::new(runner, &clock, times).with_program(config.launchctl);
+            let ports = LaunchdPorts {
+                launchd: &launchd,
+                instances: &instances,
+                host: &running,
+                clock: &clock,
+                state: &state,
+            };
+            launchd_step(invocation.step, params, label, &ports, &common)
+        }
+    }
+}
+
+/// Runs a step of the config hook on the host the process is running on, with the binary of
+/// this process as the one that serves.
+pub(super) fn config_on_this_machine(invocation: &Invocation, params: &Params) -> Done {
+    config_run_as(
+        &system_config(&SystemRunner),
+        std::env::current_exe(),
+        invocation,
+        params,
+    )
+}
+
+/// Runs a step of the config hook with `binary`, the path of the binary of this process as the
+/// system gave it, as the one that serves.
+pub(super) fn config_run_as(
+    config: &SystemConfig<'_>,
+    binary: std::io::Result<PathBuf>,
+    invocation: &Invocation,
+    params: &Params,
+) -> Done {
+    match binary {
+        Ok(binary) => config_run_on(config, &binary, invocation, params),
+        Err(error) => Done::fail(
+            Reason::HostFailed,
+            format!("the path of this binary cannot be read: {error}"),
+        ),
     }
 }
 

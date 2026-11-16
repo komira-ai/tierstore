@@ -303,6 +303,18 @@ pub trait StateDir {
     fn save(&self, bytes: &[u8]) -> Result<(), PortError>;
 }
 
+/// The network guard of a Linux node, `tierstore-guard.service`, which loads the node's
+/// `guard.nft`. Only the config hook touches it: a config package may replace that file.
+pub trait Guard {
+    /// Makes the guard load the node's guard file as it now is (`systemctl reload-or-restart`,
+    /// which starts the unit when it is not running). A node without the guard file has no guard:
+    /// nothing is done.
+    ///
+    /// # Errors
+    /// The program failed.
+    fn reload(&self) -> Result<(), PortError>;
+}
+
 /// Everything a step of the systemd arm may touch.
 pub struct SystemdPorts<'a> {
     /// The two instances' units.

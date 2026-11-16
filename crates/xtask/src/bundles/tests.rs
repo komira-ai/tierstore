@@ -343,6 +343,7 @@ fn a_tarball_a_hostkeeper_package_a_debian_package_and_an_rpm_need_a_bundle_and_
         "x.tar.zst",
         "tierstore_0.4.0_amd64.deb",
         "tierstore-0.4.0-1.x86_64.rpm",
+        "tierstore-0.4.0-macos-arm64.pkg",
     ] {
         assert!(needs_bundle(yes), "{yes}");
     }
@@ -357,6 +358,8 @@ fn a_tarball_a_hostkeeper_package_a_debian_package_and_an_rpm_need_a_bundle_and_
         "x.debian",
         "x.rpm.txt",
         "x.rpmnew",
+        "x.pkg.txt",
+        "x.pkgs",
     ] {
         assert!(!needs_bundle(no), "{no}");
     }

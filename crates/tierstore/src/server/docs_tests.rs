@@ -119,6 +119,7 @@ const FLAGLESS_KEYS: &[&str] = &[
     "hot_store.lock_retry",
     "hot_store.first_beat_poll",
     "server.handoff_socket",
+    "server.proxy_id_from_facts",
     "server.handoff_wait",
     "server.drain_lb_wait",
     "server.drain_deadline",

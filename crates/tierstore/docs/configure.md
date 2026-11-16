@@ -17,7 +17,7 @@ Most of the table of keys is tuning that has a default for a reason. A new file 
 | Key | What to put | Shape |
 |---|---|---|
 | `interface.type` and `params.addresses` | `"s3"` and the address or addresses to listen on: a private address on a storage node, `127.0.0.1` on a build node | all |
-| `server.proxy_id` | a name of this process; give each process over the same tiers its own, and keep it across restarts | all |
+| `server.proxy_id` | a name of this process; give each process over the same tiers its own, and keep it across restarts. On a host that runs hostkeeper, `server.proxy_id_from_facts` (`{ path = "/var/lib/hostkeeper/facts.json", prefix = "tierstore-" }`) makes it of the prefix and the host id in hostkeeper's facts file instead; give one of the two | all |
 | `server.bucket` | the one bucket clients see | all |
 | `server.access_key_file` | the full key file | all |
 | `hot_store.kind` and, for `s3`, `hot_store.bucket`, `hot_store.endpoint` or `hot_store.endpoints`, `hot_store.credentials_file` | the hot tier; for `dir`, `hot_store.path` | storage node, three tiers |

@@ -31,6 +31,13 @@ pub const GATE_IF: &str = "${{ steps.gate.outputs.enabled == 'true' }}";
 /// The role the upload assumes.
 const ROLE: &str = "${{ vars.TIERSTORE_RELEASES_ROLE_ARN }}";
 
+/// The role the installer's upload assumes: the one of the apt jobs, in the environment
+/// `apt-publish`.
+const PKG_ROLE: &str = "${{ vars.APT_PUBLISH_ROLE_ARN }}";
+
+/// The jobs that put the signed macOS installer in the package repository and move its pointer.
+pub const PKG_JOBS: [&str; 2] = ["testing-pkg-upload", "promote-pkg"];
+
 /// What a channel job is held to.
 pub struct Channel {
     pub job: &'static str,
@@ -67,6 +74,24 @@ pub const CHANNELS: &[Channel] = &[
         requires: &["UPLOADED"],
     },
     Channel {
+        job: "testing-pkg-upload",
+        environment: "apt-publish",
+        permissions: &["contents: read", "id-token: write"],
+        settings: &["APT_BUCKET", "APT_PUBLISH_ROLE_ARN"],
+        needs: &["plan", "publish"],
+        condition: RELEASE_IF,
+        requires: &[],
+    },
+    Channel {
+        job: "promote-pkg",
+        environment: "apt-publish",
+        permissions: &["contents: read", "id-token: write"],
+        settings: &["APT_BUCKET", "APT_DISTRIBUTION_ID", "APT_PUBLISH_ROLE_ARN"],
+        needs: &["plan", "promote-check", "testing-pkg-upload"],
+        condition: PROMOTE_IF,
+        requires: &["UPLOADED"],
+    },
+    Channel {
         job: "tap",
         environment: "release",
         permissions: &["contents: read"],
@@ -85,6 +110,7 @@ const OWNED: &[(&str, &[&str])] = &[
     ("TIERSTORE_RELEASES_", &["testing-upload", "promote-latest"]),
     ("channels upload", &["testing-upload"]),
     ("channels latest", &["promote-latest"]),
+    ("channels pkg", &["testing-pkg-upload", "promote-pkg"]),
 ];
 
 pub(super) fn steps(job: &Node) -> &[Node] {
@@ -217,7 +243,7 @@ fn job_problems(channel: &Channel, job: &Node) -> Vec<String> {
         }
     }
     match name {
-        "testing-upload" | "promote-latest" => {
+        "testing-upload" | "promote-latest" | "testing-pkg-upload" | "promote-pkg" => {
             problems.extend(upload_problems(name, &all[gate + 1..]));
         }
         _ => problems.extend(tap_problems(&all[gate + 1..])),
@@ -271,10 +297,12 @@ fn gate_problems(channel: &Channel, gate: &Node) -> Vec<String> {
 /// (`channels upload --no-latest`); `promote-latest` reads them back and replaces the pointer
 /// (`channels latest`) and uploads nothing.
 fn upload_problems(name: &str, after_gate: &[Node]) -> Vec<String> {
-    let verb = if name == "testing-upload" {
-        "cargo xtask channels upload"
-    } else {
-        "cargo xtask channels latest"
+    // The verb, the role and the variable of the bucket each upload job is held to.
+    let (verb, want_role, bucket) = match name {
+        "testing-upload" => ("cargo xtask channels upload", ROLE, "$BUCKET"),
+        "promote-latest" => ("cargo xtask channels latest", ROLE, "$BUCKET"),
+        "testing-pkg-upload" => ("cargo xtask channels pkg upload", PKG_ROLE, "$APT_BUCKET"),
+        _ => ("cargo xtask channels pkg promote", PKG_ROLE, "$APT_BUCKET"),
     };
     let mut problems = Vec::new();
     let roles: Vec<usize> = after_gate
@@ -294,9 +322,9 @@ fn upload_problems(name: &str, after_gate: &[Node]) -> Vec<String> {
             let given = entry(&after_gate[*role], "env")
                 .and_then(|e| entry(e, "ROLE_ARN"))
                 .and_then(Node::as_str);
-            if given != Some(ROLE) {
+            if given != Some(want_role) {
                 problems.push(format!(
-                    "{name}: the role assumed is not {ROLE}, the environment's"
+                    "{name}: the role assumed is not {want_role}, the environment's"
                 ));
             }
             let assume = text(&after_gate[*role], "run");
@@ -323,7 +351,7 @@ fn upload_problems(name: &str, after_gate: &[Node]) -> Vec<String> {
             for argument in [
                 "--tag \"$TAG\"",
                 "--commit \"$COMMIT\"",
-                "--bucket \"$BUCKET\"",
+                &format!("--bucket \"{bucket}\""),
             ] {
                 if !run.contains(argument) {
                     problems.push(format!("{name}: `{verb}` is not given {argument}"));

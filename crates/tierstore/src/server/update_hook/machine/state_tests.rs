@@ -340,3 +340,25 @@ fn a_record_that_a_group_could_write_is_not_read() {
         "{text}"
     );
 }
+
+/// Asserts that a second record of the same directory is its own file, which the first never
+/// reads or replaces, under the one lock of the directory.
+#[test]
+fn a_second_record_is_its_own_file_under_the_same_lock() {
+    let (_guard, dir) = scratch_state("state-second-record");
+    let first = files(&dir);
+    let second = files(&dir).with_record(super::CONFIG_STATE_FILE);
+    second.save(b"{\"config\":1}").unwrap();
+    assert_eq!(first.load().unwrap(), None);
+    first.save(b"{\"release\":1}").unwrap();
+    assert_eq!(
+        second.load().unwrap().as_deref(),
+        Some(&b"{\"config\":1}"[..])
+    );
+    assert!(dir.join("config-state.json").is_file());
+    assert!(!dir.join("config-state.json.tmp").exists());
+    let held = first.lock().unwrap();
+    assert_eq!(second.lock().err(), Some(PortError::Busy));
+    drop(held);
+    second.lock().unwrap();
+}

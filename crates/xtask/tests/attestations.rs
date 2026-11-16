@@ -37,6 +37,10 @@ fn package_name(platform: &str) -> String {
 }
 
 /// The file name of the RPM package of `architecture`.
+fn pkg_name() -> String {
+    "tierstore-0.4.0-macos-arm64.pkg".to_owned()
+}
+
 fn rpm_name(architecture: &str) -> String {
     format!("tierstore-0.4.0-1.{architecture}.rpm")
 }
@@ -185,6 +189,7 @@ impl Release {
             (deb_name("arm64"), "deb of arm64"),
             (rpm_name("x86_64"), "rpm of x86_64"),
             (rpm_name("aarch64"), "rpm of aarch64"),
+            (pkg_name(), "signed macOS installer"),
         ];
         for (file, content) in packages {
             let bytes = content.to_owned().into_bytes();
@@ -573,7 +578,7 @@ fn a_sums_file_that_lists_neither_a_tarball_nor_an_sbom_is_refused() {
     let failed = failure(release.verify());
     assert!(
         failed.contains(
-            "SHA256SUMS lists NOTES, which is neither a tarball, an SBOM, a hostkeeper package, a Debian package, an RPM package nor the release index"
+            "SHA256SUMS lists NOTES, which is neither a tarball, an SBOM, a hostkeeper package, a Debian package, an RPM package, a macOS installer nor the release index"
         ),
         "{failed}"
     );
@@ -689,11 +694,13 @@ fn a_release_with_tap_tarballs_debian_and_rpm_packages_verifies_each_as_its_own_
         let line = format!("verified: {} (provenance, bundle)", rpm_name(architecture));
         assert!(printed.contains(&line), "{printed:?}");
     }
+    let line = format!("verified: {} (provenance, bundle)", pkg_name());
+    assert!(printed.contains(&line), "{printed:?}");
     for target in ["linux-aarch64", "linux-x86_64", "macos-arm64"] {
         let line = format!("verified: tierstore-0.4.0-{target}.tar.gz (provenance, SBOM, bundle)");
         assert!(printed.contains(&line), "{printed:?}");
     }
-    assert_eq!(printed.len(), 6 + 7 + 1, "{printed:?}");
+    assert_eq!(printed.len(), 6 + 8 + 1, "{printed:?}");
 }
 
 #[test]
@@ -701,7 +708,7 @@ fn a_package_without_its_bundle_or_provenance_or_signed_by_another_workflow_is_r
     // Catches: a Debian or an RPM package listed in the sums that nothing verifies, because only tarballs
     // and hostkeeper packages were taken for subjects.
     let good = Release::with_distribution("distribution-deb");
-    for name in [deb_name("arm64"), rpm_name("aarch64")] {
+    for name in [deb_name("arm64"), rpm_name("aarch64"), pkg_name()] {
         let digest = good.digest_of(&name);
 
         let mut no_bundle = Release::with_distribution(&format!("distribution-no-bundle-{name}"));

@@ -5,7 +5,7 @@
 mod boot_tests;
 mod crash_tests;
 mod cutover_tests;
-mod fake;
+pub(in crate::server::update_hook) mod fake;
 mod prepare_tests;
 mod rollback_tests;
 mod session_tests;

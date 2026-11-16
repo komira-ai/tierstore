@@ -3,7 +3,7 @@
 //! the convergence of every step after a failure at each of its calls.
 
 mod crash;
-mod fake;
+pub(in crate::server::update_hook) mod fake;
 mod flow;
 mod lifecycle;
 mod refusals;

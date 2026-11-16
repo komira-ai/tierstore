@@ -13,6 +13,9 @@
 //! - `channels latest <dir> --tag <tag> ...` ([`upload::latest`]): the pointer alone. It reads the
 //!   files of `releases/<version>/` back, holds them to the release's `SHA256SUMS`, and then
 //!   replaces `releases/latest.json`.
+//! - `channels pkg upload|promote ...` ([`pkg`]): the signed macOS installer into
+//!   `pkg/tierstore/<version>/` of the organisation's repository bucket, and the pointer
+//!   `pkg/tierstore/stable.json` to the promoted one.
 //! - `channels decide ...` ([`decide`]): whether the release is promoted from testing to the
 //!   public channels, from the results of the jobs before it.
 //! - `channels check-apt|check-brew|check-install-sh ...` ([`check`]): the release installed from
@@ -45,6 +48,7 @@ pub mod check_rpm;
 pub mod decide;
 pub mod formula;
 pub mod gate;
+pub mod pkg;
 pub mod rpm;
 pub mod soak;
 pub mod tap;
@@ -190,6 +194,11 @@ pub enum Verb {
         /// The `aws` program.
         #[arg(long, default_value = "aws")]
         aws: PathBuf,
+    },
+    /// The signed macOS installer into the repository bucket, and the pointer to it.
+    Pkg {
+        #[command(subcommand)]
+        verb: pkg::Verb,
     },
     /// Whether the release in testing goes on to the public channels.
     Decide {
@@ -446,6 +455,7 @@ pub fn run(verb: Verb) -> Result<Vec<String>, Error> {
                 latest: true,
             },
         ),
+        Verb::Pkg { verb } => pkg::run(verb),
         Verb::Decide {
             results,
             farm_enabled,

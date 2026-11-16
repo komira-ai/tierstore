@@ -288,9 +288,11 @@ pub const JOBS: [Job; 18] = [
 
 /// Is `name` an apt or rpm job that holds the cloud role (a read or a write)?
 pub fn is_role_job(name: &str) -> bool {
-    JOBS.iter()
-        .chain(super::rpm::JOBS.iter())
-        .any(|j| j.name == name && j.kind != Kind::Index)
+    super::channels::PKG_JOBS.contains(&name)
+        || JOBS
+            .iter()
+            .chain(super::rpm::JOBS.iter())
+            .any(|j| j.name == name && j.kind != Kind::Index)
 }
 
 /// The verb each kind of job runs, and no other kind: the index job of the suite `testing` merges

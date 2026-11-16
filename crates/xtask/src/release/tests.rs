@@ -115,6 +115,7 @@ fn all_assets() -> Vec<String> {
     let mut names = expected_assets(COMMIT);
     names.extend(hostkeeper_assets(HK_VERSION));
     names.extend(distribution_assets(VERSION));
+    names.push(macos_pkg_name(VERSION));
     names.sort();
     names
 }
@@ -402,7 +403,11 @@ fn the_build_run_artifacts_are_each_platforms_assets_the_sums_and_one_bundles() 
         .iter()
         .map(|p| format!("assets-{}", p.name()))
         .collect();
-    want.extend(["sha256sums".to_owned(), "bundles".to_owned()]);
+    want.extend([
+        "assets-pkg-macos-arm64".to_owned(),
+        "sha256sums".to_owned(),
+        "bundles".to_owned(),
+    ]);
     assert_eq!(ARTIFACTS.to_vec(), want);
 }
 
@@ -413,7 +418,7 @@ fn a_complete_directory_passes_the_check() {
     assets(&dir);
     let printed = check(&dir, COMMIT).expect("check");
     assert!(
-        printed.last().is_some_and(|l| l.contains("17 files")),
+        printed.last().is_some_and(|l| l.contains("18 files")),
         "{printed:?}"
     );
 }
@@ -561,7 +566,7 @@ fn locate_refuses_what_a_release_must_not_be_cut_from() {
     assert!(locate(&gh, REPO, COMMIT, None).is_err(), "not a push run");
 
     let mut gh = good_repo();
-    gh.api[3].1["artifacts"][4]["expired"] = json!(true);
+    gh.api[3].1["artifacts"][5]["expired"] = json!(true);
     let problems = refused(locate(&gh, REPO, COMMIT, None));
     assert_eq!(problems, ["run 11 holds no unexpired artifact bundles"]);
 
@@ -662,13 +667,13 @@ fn publish_creates_a_draft_with_every_file_reads_it_back_and_publishes_it() {
     // 6 assets (a tarball and an SBOM per platform) + 4 (a package per platform and the index)
     // + 7 (a tap tarball per platform, a Debian and an RPM package per Linux platform) + 13
     // bundles (a tarball, a hostkeeper package and a tap tarball per platform, and the Debian
-    // and RPM packages) + the sums.
+    // and RPM packages) + the signed macOS installer and its bundle + the sums.
     assert_eq!(
         create
             .iter()
             .filter(|a| Path::new(a).starts_with(&*dir))
             .count(),
-        31
+        33
     );
     assert_eq!(ran[1][..3], ["release", "edit", "v0.3.0"]);
     assert!(ran[1].contains(&"--draft=false".to_owned()));
@@ -818,4 +823,28 @@ fn locate_without_an_output_file_only_prints() {
     // Catches: a locate that needs `--output`, and one that prints the run id wrongly without.
     let printed = locate(&good_repo(), REPO, COMMIT, None).expect("locate");
     assert_eq!(printed.last().map(String::as_str), Some("run-id=11"));
+}
+
+#[test]
+fn the_macos_installer_is_named_by_the_release_version_and_is_an_asset_with_a_bundle() {
+    // Asserts: the installer's name, that a release without it is refused by name (its sums
+    // match their files, so the check of the set refuses it), and that one without its bundle is
+    // refused for the bundle.
+    let pkg = macos_pkg_name(VERSION);
+    assert_eq!(pkg, "tierstore-0.4.0-macos-arm64.pkg");
+    let all = all_assets();
+    let dir = scratch("check-no-pkg");
+    let rest: Vec<String> = all.iter().filter(|n| **n != pkg).cloned().collect();
+    assets_of(&dir, &rest);
+    assert_eq!(
+        refused(check(&dir, COMMIT)),
+        [format!("{SUMS} does not list {pkg}")]
+    );
+    let dir = scratch("check-no-pkg-bundle");
+    assets(&dir);
+    std::fs::remove_file(dir.join(bundles::name_of(&pkg))).expect("rm");
+    assert_eq!(
+        refused(check(&dir, COMMIT)),
+        [format!("{pkg}: no provenance bundle {pkg}.sigstore.json")]
+    );
 }

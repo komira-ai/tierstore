@@ -54,8 +54,19 @@ impl Node {
 
     /// The file, written, and its path.
     fn file(&self, server_extra: &str, hot_extra: &str, cold_extra: &str) -> OsString {
+        self.file_with_id("proxy_id = \"p1\"", server_extra, hot_extra, cold_extra)
+    }
+
+    /// As `file`, with `id` (a line of `[server]`) as the one that gives the proxy id.
+    fn file_with_id(
+        &self,
+        id: &str,
+        server_extra: &str,
+        hot_extra: &str,
+        cold_extra: &str,
+    ) -> OsString {
         let text = format!(
-            "[server]\nlisten = \"127.0.0.1:0\"\nproxy_id = \"p1\"\nbucket = \"tier-bucket\"\n\
+            "[server]\nlisten = \"127.0.0.1:0\"\n{id}\nbucket = \"tier-bucket\"\n\
              access_key_file = \"{key}\"\n{server_extra}\n\n\
              [hot_store]\nkind = \"s3\"\nbucket = \"hot\"\nendpoint = \"http://hot.invalid\"\n\
              credentials_file = \"{credentials}\"\nbudget = 1000\n{hot_extra}\n\n\
@@ -444,4 +455,27 @@ fn the_drain_keys_are_read_here_and_the_old_flags_are_still_taken() {
 
     let keyed = node.file(keys, "", "");
     assert_eq!(status(tierstore::server::cli::main(flags(&keyed))), refused);
+}
+
+/// Asserts that a file whose proxy id comes from a facts file (`server.proxy_id_from_facts`, with a
+/// real facts file in the scratch directory) is read by this release and refused by the release
+/// before with status 2 (it needs `proxy_id`), so a host that may roll back keeps `proxy_id` until
+/// every process has this release; that this release refuses the same file once the facts file is
+/// gone; and that a file with `proxy_id` is read by both.
+#[test]
+fn proxy_id_from_facts_is_read_here_and_refused_by_the_release_before() {
+    let node = Node::new("compat-config-proxy-id-from-facts");
+    let ok = status(ExitCode::SUCCESS);
+    let refused = status(ExitCode::from(2));
+    let facts = node.dir.path().join("facts.json");
+    std::fs::write(&facts, r#"{"schema":1,"host_id":"web-04","labels":{}}"#).unwrap();
+    let line = format!(
+        "proxy_id_from_facts = {{ path = {:?}, prefix = \"tierstore-\" }}",
+        facts.display().to_string()
+    );
+    let file = node.file_with_id(&line, "", "", "");
+    assert_eq!(both(&file), (ok.clone(), refused.clone()));
+    std::fs::remove_file(&facts).unwrap();
+    assert_eq!(both(&file), (refused.clone(), refused));
+    assert_eq!(both(&node.file("", "", "")), (ok.clone(), ok));
 }

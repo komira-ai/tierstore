@@ -48,6 +48,8 @@ pub struct SystemHost<'a> {
     release_owner: u32,
     hook_uid: u32,
     account: String,
+    /// The one binary every release is answered by, when set: the config hook's.
+    binary: Option<PathBuf>,
 }
 
 /// `path` below `root`: an absolute path is taken as if the root were `/`.
@@ -67,7 +69,17 @@ impl<'a> SystemHost<'a> {
             release_owner: 0,
             hook_uid: geteuid().as_raw(),
             account: SERVICE_ACCOUNT.to_owned(),
+            binary: None,
         }
+    }
+
+    /// The same, with `binary` (an absolute path on the host) as the binary of every release:
+    /// the config hook asks the binary that serves, whatever release a step names. It is checked
+    /// as a release's binary is.
+    #[must_use]
+    pub fn with_binary(mut self, binary: PathBuf) -> SystemHost<'a> {
+        self.binary = Some(binary);
+        self
     }
 
     /// The same, with `uid` as the user the hook runs as (the user of the process unless this
@@ -118,6 +130,16 @@ impl<'a> SystemHost<'a> {
     /// package's when nothing is at either and something is at the package's path, and neither is
     /// an error naming both.
     fn binary_of(&self, release: &Path) -> Result<PathBuf, Fault> {
+        if let Some(binary) = &self.binary {
+            let binary = under(&self.root, binary);
+            self.check(
+                binary.parent().unwrap_or(&binary),
+                fs::FileType::is_dir,
+                "directory",
+            )?;
+            self.check(&binary, fs::FileType::is_file, "regular file")?;
+            return Ok(binary);
+        }
         let archive = under(&self.root, &release.join(RELEASE_BINARY));
         let package = under(&self.root, &release.join(PACKAGE_RELEASE_BINARY));
         let there = |path: &Path| fs::symlink_metadata(path).is_ok();

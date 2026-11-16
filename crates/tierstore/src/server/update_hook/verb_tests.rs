@@ -217,7 +217,7 @@ fn the_artifact_must_be_the_staged_release_of_the_params() {
 fn a_refusal_names_its_reason() {
     let step = |_: &Invocation, _: &Params| -> Done { panic!("a step ran") };
     let machine = Machine { step: &step };
-    let args_refusal = step_of(&args(&["bounce"]), &machine).unwrap_err();
+    let args_refusal = step_of(&args(&["bounce"]), &machine, Params::read).unwrap_err();
     assert!(matches!(
         args_refusal,
         Refusal::Args(ArgsError::UnknownStep(_))

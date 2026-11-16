@@ -42,6 +42,11 @@ fn arch_of(name: &str) -> &str {
         .unwrap_or_default()
 }
 
+/// The bytes of the signed macOS installer of the fake release.
+fn pkg_bytes() -> Vec<u8> {
+    b"bytes of the signed pkg".to_vec()
+}
+
 /// The `SHA256SUMS` of the release of `version`: a line for each `.deb`.
 fn sums_of(version: &str) -> Vec<u8> {
     let lines: Vec<Line> = package_names(version)
@@ -72,6 +77,8 @@ struct FakeGh {
     answers: Vec<(String, Value)>,
     /// The bytes `gh release download` writes as `SHA256SUMS`.
     sums: Vec<u8>,
+    /// The bytes it writes as the macOS installer, when the pattern asks for it.
+    pkg: Vec<u8>,
     /// Every `gh api` path asked.
     asked: RefCell<Vec<String>>,
     /// Every `gh <args>` run.
@@ -90,7 +97,12 @@ impl Gh for FakeGh {
 
     fn run(&self, args: &[String]) -> Result<String, Error> {
         self.ran.borrow_mut().push(args.to_vec());
-        std::fs::write(Path::new(&args[6]).join(SUMS), &self.sums).expect("write");
+        let (name, bytes) = if args[8] == SUMS {
+            (SUMS, &self.sums)
+        } else {
+            (args[8].as_str(), &self.pkg)
+        };
+        std::fs::write(Path::new(&args[6]).join(name), bytes).expect("write");
         Ok(String::new())
     }
 }
@@ -111,6 +123,7 @@ fn released(version: &str) -> FakeGh {
     FakeGh {
         answers: vec![(tag_path(&tag), release_of(&tag))],
         sums: sums_of(version),
+        pkg: pkg_bytes(),
         asked: RefCell::new(Vec::new()),
         ran: RefCell::new(Vec::new()),
     }
@@ -211,6 +224,7 @@ fn by_version(version: &'static str) -> Request<'static> {
         min_hostkeeper: FLOOR,
         dir: Path::new(""),
         apt_url: URL,
+        macos_pkg: false,
         curl: Path::new("curl"),
         output: None,
     }
@@ -683,4 +697,83 @@ fn a_version_with_no_published_release_or_no_sums_is_refused_before_the_suite_is
     );
     assert!(gh.ran.borrow().is_empty());
     assert!(cdn.asked.borrow().is_empty());
+}
+
+#[test]
+fn with_the_macos_pkg_the_targets_gain_one_macos_pkg_entry_held_to_the_sums() {
+    // Asserts: `targets` is the apt targets alone, as the lab sets them, and `targets-mac` is
+    // those plus `macos-arm64` with the exact macos-pkg entry (installer, the apt entries'
+    // repository, package version, SHA-256 and size of the signed pkg, its manifest).
+    let s = scratch("macos");
+    let output = s.join("output");
+    let mut gh = good();
+    let mut text = String::from_utf8(gh.sums.clone()).expect("text");
+    text.push_str(&format!(
+        "{}  tierstore-{VERSION}-macos-arm64.pkg\n",
+        Sha256::of(&pkg_bytes())
+    ));
+    gh.sums = text.into_bytes();
+    let cdn = testing(&[VERSION]);
+    let dir = s.join("d");
+    let request = Request {
+        macos_pkg: true,
+        ..at(by_version(VERSION), &dir, Some(&output))
+    };
+    let printed = desired(&gh, &cdn, &request).expect("set");
+    let written = std::fs::read_to_string(&output).expect("the output");
+    let lines: Vec<&str> = written.lines().collect();
+    let targets: Value =
+        serde_json::from_str(lines[2].strip_prefix("targets=").expect("targets")).expect("JSON");
+    let apt_only = json!({
+        "linux-x86_64": { "entries": [apt_entry(VERSION, "amd64")] },
+        "linux-arm64": { "entries": [apt_entry(VERSION, "arm64")] },
+    });
+    assert_eq!(targets, apt_only, "`targets` stays what the lab sets");
+    assert_eq!(lines.len(), 4, "{written}");
+    let mac: Value =
+        serde_json::from_str(lines[3].strip_prefix("targets-mac=").expect("targets-mac"))
+            .expect("JSON");
+    assert_eq!(
+        mac,
+        json!({
+            "linux-x86_64": { "entries": [apt_entry(VERSION, "amd64")] },
+            "linux-arm64": { "entries": [apt_entry(VERSION, "arm64")] },
+            "macos-arm64": { "entries": [{
+                "installer": "macos-pkg",
+                "repository": "komira-testing",
+                "packageVersion": VERSION,
+                "digest": Sha256::of(&pkg_bytes()).to_string(),
+                "bytes": pkg_bytes().len().to_string(),
+                "manifest": crate::release::macos_pkg::manifest_json(FLOOR),
+            }] },
+        })
+    );
+    assert_eq!(
+        printed[0],
+        format!(
+            "release {TAG} ({COMMIT}): the testing suite lists tierstore {VERSION} for each of 2 architectures, each with the digest SHA256SUMS lists; the release's tierstore-{VERSION}-macos-arm64.pkg has the digest SHA256SUMS lists"
+        )
+    );
+}
+
+#[test]
+fn with_the_macos_pkg_a_release_that_has_none_is_refused_and_nothing_is_set() {
+    // Asserts: a release whose SHA256SUMS lists no macOS installer is refused with its line, and
+    // the output is never written.
+    let s = scratch("macos-missing");
+    let output = s.join("output");
+    let gh = good();
+    let cdn = testing(&[VERSION]);
+    let dir = s.join("d");
+    let request = Request {
+        macos_pkg: true,
+        ..at(by_version(VERSION), &dir, Some(&output))
+    };
+    assert_eq!(
+        refused(desired(&gh, &cdn, &request)),
+        [
+            "SHA256SUMS of release v0.4.0 lists no tierstore-0.4.0-macos-arm64.pkg: the release has no macOS installer"
+        ]
+    );
+    assert!(!output.exists());
 }

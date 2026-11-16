@@ -88,6 +88,12 @@ fn the_package_lists_the_files_of_the_deb_at_the_same_modes_owned_by_root() {
         inspect(&package()).expect("inspect").entries,
         [
             entry(
+                "/usr/lib/systemd/system/tierstore-guard.service",
+                0o644,
+                false,
+                none
+            ),
+            entry(
                 "/usr/lib/systemd/system/tierstore@.service",
                 0o644,
                 false,
@@ -154,6 +160,10 @@ fn the_payload_holds_the_binary_the_packaging_files_the_licence_and_the_notice()
     assert_eq!(
         content(&bytes, "/usr/lib/systemd/system/tierstore@.service"),
         packaging("tierstore@.service")
+    );
+    assert_eq!(
+        content(&bytes, "/usr/lib/systemd/system/tierstore-guard.service"),
+        packaging("tierstore-guard.service")
     );
     assert_eq!(
         content(&bytes, "/usr/lib/sysusers.d/tierstore.conf"),
@@ -475,7 +485,7 @@ fn rpm_info_lists_the_header_and_the_files_as_rpm_does() {
             .contains(&"-0644 root:root /usr/share/licenses/tierstore/LICENSE %license".to_owned())
     );
     assert!(lines.iter().all(|l| !l.contains("/etc/")), "{lines:?}");
-    assert_eq!(lines.len(), 6 + 10);
+    assert_eq!(lines.len(), 6 + 11);
     let mut bad = package();
     let last = bad.len() - 1;
     bad[last] ^= 1;
