@@ -32,6 +32,10 @@ use super::xml::{
     self, Listing, ListingV1, NULL_VERSION, PartListing, UploadListing, VersionListing,
 };
 
+pub(super) mod placed;
+#[cfg(test)]
+mod placed_tests;
+
 /// The query parameters this front understands. A request with another is not served.
 /// `delimiter` and `encoding-type` are parameters of ListObjectsV2, ListObjects (which also
 /// has `marker`) and ListMultipartUploads, and with `fetch-owner=true` the objects of a listing carry the `Owner` that S3 adds then
@@ -453,6 +457,7 @@ impl Server {
         if setting.is_none() && !buckets {
             refuse_unsupported(parts, query, !parts.headers.contains_key("authorization"))?;
         }
+        self.refuse_placed_write(method, &target, query)?;
         let deleting = deletes_many(&parts.method, &target, query);
         if query.has("delete") && !deleting {
             return Err(S3Error::unsupported("this operation is not supported"));
@@ -520,6 +525,9 @@ impl Server {
     /// condition that is not met, or a range that is not satisfiable, drops the body unread.
     async fn get_object(&self, parts: &Parts, query: &Query, key: &str) -> Result<Answer, S3Error> {
         refuse_reserved(key)?;
+        if let Some(placed) = self.read_placed(parts, query, key, true).await? {
+            return Ok(placed);
+        }
         let set = overrides(query)?;
         let span = asked(header(&parts.headers, "range"));
         let Opened { meta, window, body } = self.backend.open_read(key, span).await?;
@@ -550,6 +558,9 @@ impl Server {
         key: &str,
     ) -> Result<Answer, S3Error> {
         refuse_reserved(key)?;
+        if let Some(placed) = self.read_placed(parts, query, key, false).await? {
+            return Ok(placed);
+        }
         let set = overrides(query)?;
         let meta = self.backend.head(key).await?;
         if let Some(early) = conditional(parts, key, &meta)? {
@@ -711,7 +722,7 @@ impl Server {
         } else {
             max_keys + 1
         };
-        let backend = self.backend.as_ref();
+        let backend = &self.keys();
         let marker = query.get("marker").unwrap_or_default();
         let start = if version2 {
             list_token::start(query)?
@@ -780,7 +791,7 @@ impl Server {
             max_keys + 1
         };
         let start = (!key_marker.is_empty()).then(|| Start::After(key_marker.to_owned()));
-        let backend = self.backend.as_ref();
+        let backend = &self.keys();
         let page = listing::page(backend, prefix, delimiter, start, max_keys, batch).await?;
         let next = page.next.as_ref().map(|start| match start {
             Start::After(key) => (key.as_str(), NULL_VERSION),

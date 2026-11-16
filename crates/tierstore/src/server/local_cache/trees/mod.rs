@@ -61,6 +61,7 @@ mod create;
 mod fetch;
 mod files;
 mod flat;
+mod keys;
 mod life;
 mod location;
 mod read;
@@ -71,7 +72,11 @@ mod table;
 #[cfg(test)]
 mod create_tests;
 #[cfg(test)]
+mod fetch_tests;
+#[cfg(test)]
 mod files_tests;
+#[cfg(test)]
+mod keys_tests;
 #[cfg(test)]
 mod life_tests;
 #[cfg(test)]
@@ -93,6 +98,7 @@ pub use config::{Prefetch, TreesConfig};
 pub use create::{CreateError, CreateRequest, Created};
 pub use fetch::{FetchError, OpenFile};
 pub(in crate::server) use flat::{FlatError, FlatKind, FlatTree, MountPlace, placement_id};
+pub use keys::TreeKey;
 pub use life::{LifeError, PlacementInfo, ReadHold, SweepReport};
 pub use location::{Located, Location, LocationError, PlacementId};
 pub use read::{FileSpan, Kind, Listing, ReadError, Resolved, Stat};

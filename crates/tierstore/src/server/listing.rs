@@ -7,7 +7,36 @@
 //! front (a JSON listing of a GCS bucket, a directory listing) can use the same walk and give its
 //! own tokens.
 
+use async_trait::async_trait;
+
 use crate::{Backend, Error, Listed, OpenUpload};
+
+/// Where a listing of objects reads its keys: a page of at most `limit` keys that begin with
+/// `prefix`, after `after`, in key order, as [`Backend::list_page`] gives them (a short page is the
+/// last). A backend is one; the S3 front's is the backend merged with the placements of node-local
+/// trees.
+#[async_trait]
+pub(super) trait Keys: Send + Sync {
+    /// The page of keys.
+    async fn list_page(
+        &self,
+        prefix: &str,
+        after: Option<&str>,
+        limit: usize,
+    ) -> Result<Vec<Listed>, Error>;
+}
+
+#[async_trait]
+impl<B: Backend> Keys for B {
+    async fn list_page(
+        &self,
+        prefix: &str,
+        after: Option<&str>,
+        limit: usize,
+    ) -> Result<Vec<Listed>, Error> {
+        Backend::list_page(self, prefix, after, limit).await
+    }
+}
 
 /// One entry of a page, which counts one against the size of the page: an item (an object or an
 /// upload), or a common prefix, the prefix of the request and the text up to and with the first
@@ -146,7 +175,7 @@ fn split<T>(entries: Vec<Entry<T>>) -> (Vec<T>, Vec<String>) {
 /// from the backend at a time. (Without a delimiter every key is an entry, and one read of
 /// `max_keys + 1` keys is enough; the caller says so with `batch`.)
 pub(super) async fn page(
-    backend: &dyn Backend,
+    backend: &dyn Keys,
     prefix: &str,
     delimiter: Option<&str>,
     start: Option<Start>,
