@@ -90,8 +90,9 @@ impl Look<'_> {
         Ok(mode)
     }
 
-    /// One look at `/readyz`, then the probe for `version`: what `verify` observes (it defers a
-    /// `NotReady`). `NotReady` or `WrongBuild` when it is not seen.
+    /// One look at `/readyz`, then the probe for `version`, with no wait for `/readyz`: what
+    /// `verify` observes (it defers a `NotReady`), and the checks of whether a release already
+    /// serves. `NotReady` or `WrongBuild` when it is not seen.
     pub fn observed(&self, version: &str) -> Result<CacheMode, Done> {
         let mode = self.ready().ok_or_else(|| {
             Done::fail(
