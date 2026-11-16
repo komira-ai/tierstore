@@ -4,11 +4,12 @@ tierstore reads one TOML file, given with `--config`. This page helps you pick a
 
 ## Pick a shape
 
-A file has one of three shapes; one tier alone is refused. Pick by where the data lives:
+A file has one of four shapes; a file without a cold tier is refused. Pick by where the data lives:
 
 - [Two directories as one S3 bucket](examples/directory-as-bucket.md): a hot tier and a cold tier on one machine, a fast disk and a big one. Start here if you have nothing else running.
 - [A cache in front of a remote S3-compatible store](examples/cache-in-front-of-s3.md): a disk cache on a build machine, in front of a MinIO or RustFS bucket that is far away or slow. It takes no writes.
 - [A cache in front of a hot and a cold store](examples/cache-hot-cold.md): a storage node that is also read heavily by its own machine: a cache, a hot directory and a cold remote store in one process.
+- [A front over the cold tier alone](configure.md#a-front-over-the-cold-tier-alone): the S3 front over a cold store, keeping nothing on its machine.
 
 Tiers today are directories or self-hosted S3-compatible stores (MinIO, RustFS) reached over `http://`. AWS S3 is not supported as a tier yet, and TLS to tiers is not built.
 
@@ -73,7 +74,7 @@ cat out.txt
 
 ## All configuration options
 
-Every table of the file, with each key's type, its default and what it does. The full reference, with the rules a start checks, is [Configuration](configuration.md). A shape of file has one of three forms: a hot and a cold tier, a local cache and a cold tier, or all three in one process; a file with one tier alone is refused.
+Every table of the file, with each key's type, its default and what it does. The full reference, with the rules a start checks, is [Configuration](configuration.md). A shape of file has one of four forms: a hot and a cold tier, a local cache and a cold tier, all three in one process, or a cold tier alone; a file without a cold tier is refused.
 
 ## Examples
 

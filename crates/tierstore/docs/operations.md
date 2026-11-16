@@ -408,6 +408,28 @@ The start opens the proxy, then opens the cache directory: its own lock, the fil
 
 The delete and one-winner guarantees of a delete or a put that races a copy-back depend on the fixes to the proxy and the reconciler that make a delete conditional on what it found. They hold once every process over the tiers runs a version that has those fixes; while processes of different versions share the tiers, they do not.
 
+## Turning the hot tier off
+
+A node with `[hot_store]`, `[cold_store]` and `[local_cache]` becomes a node with the cache and the cold tier alone (see [configure](configure.md#a-node-that-owns-the-data-with-a-cache-and-the-cold-tier)) when `[hot_store]` is removed from its file and it is restarted by the hand-off: the new instance takes the sockets, the old one drains, gives up the reconciler's lease and its `hot_store.lock_file`, and exits. A storage node with no cache moves the same way to a file with `[cold_store]` alone (see [configure](configure.md#a-front-over-the-cold-tier-alone)): the new instance takes the same sockets and serves the cold store directly.
+
+The hot tier can hold what the cold tier does not, and a node without it reads the cold tier only:
+
+- an object written through a process with the hot tier, until the reconciler has copied it (its marker in the marks bucket says `DIRTY`);
+- a delete the cold tier has not had yet (a marker with `gone` true): the cold copy is still there, and a node without the hot tier serves it again;
+- a multipart upload begun on the hot tier (its upload id begins `ts-hot~`);
+- an object whose marker was never written, which the reconciler's sweep of strays finds after `hot_store.stray_grace`.
+
+So the reconciler must go on until the hot tier owes nothing, and only a process with the hot tier runs it. Turn the processes off one at a time and keep the last one on the hot tier until the checks below pass. While processes with and without the hot tier share the cold bucket, an object written through one with it is seen by one without it only once it is copied, and a delete through one without it does not stop a copy that was still owed, so keep that time short.
+
+Before the last process is turned off:
+
+1. `tierstore format-epoch --check --hot <tier>` lists every registration: `live` for a process still on the hot tier, `silent` for one turned off once its beats have lapsed. It then refuses unless each silent one is named with `--departed <id>`; the list is the part to read.
+2. The marks bucket has no marker that says `DIRTY`, `LOCK` or `CLEARING`, and none with `gone` true. A `WANT` marker owes nothing.
+3. Every object of the hot bucket outside `_tiering/`, `_journal/` and `_entries/` is in the cold bucket with the same size, and with the same tag where both tags are plain MD5 sums; compare the bytes of the others.
+4. The hot bucket has no multipart upload in progress.
+
+After that the hot bucket and the marks bucket are read by nothing; delete them when the time to go back has passed.
+
 ## Metrics
 
 `GET /metricz` on the S3 listener (unsigned) answers 200 in the Prometheus text format. It has the hit, miss, byte and cold-read counters of the hot and cold tiers, the counters of the OCI read front, such as `tierstore_oci_requests_total`, and the counters of the cache of a build node, all named `tierstore_` and a word; without an `oci` interface it says the front is not enabled, and a node with no cache says so on a line of its own. The full list of metric names, their labels and queries to alert on is in [metrics](metrics.md).

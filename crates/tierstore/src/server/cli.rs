@@ -891,6 +891,7 @@ pub fn main(args: Vec<OsString>) -> ExitCode {
         Settings::Storage(cli) => blocking(serve_until_signalled(*cli)),
         Settings::Cache(cache) => blocking(serve_cache_until_signalled(*cache)),
         Settings::Combined(node) => blocking(serve_combined_until_signalled(*node)),
+        Settings::Cold(node) => blocking(super::cli_serve::cold::serve_cold_until_signalled(*node)),
     };
     match started {
         Ok(()) => ExitCode::SUCCESS,
@@ -941,6 +942,13 @@ pub(super) fn checked(settings: &Settings) -> Result<(), Error> {
         Settings::Combined(combined) => {
             let server = server_config(&combined.node.front(), clock, false)?;
             oci_setup(&combined.node, &server, false).map(drop)
+        }
+        Settings::Cold(cold) if cold.s3_request_timeout.is_zero() => {
+            Err("--s3-request-timeout must be longer than zero".into())
+        }
+        Settings::Cold(cold) => {
+            let server = server_config(&cold.front, clock, false)?;
+            oci_setup_of(&cold.oci, &server, false).map(drop)
         }
     }
 }

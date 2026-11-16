@@ -64,6 +64,44 @@ The three water marks are written out at their defaults so that they are in fron
 
 A second storage node over the same tiers is the same file with its own `server.proxy_id` and its own address. Both tiers are shared, not copied: see the next section.
 
+## A node that owns the data with a cache and the cold tier
+
+One process on a machine that takes writes and keeps a disk cache, with no hot tier: `[local_cache]` with `write_through = true` and `[cold_store]`, and no `[hot_store]`. A write goes to the cold store before it is acknowledged, and a put under a `cache = true` prefix is kept on the node as well; a hit is answered from the local disk, and a miss reads the cold store.
+
+Use it rather than the three tiers in one process when the hot tier would be on the drives the cache is on. There each object would be written to those drives twice (once for the cache, once for the hot tier, and read back for the copy to the cold tier), and the cache's reads would wait behind those writes. A hot tier helps a node only on drives of its own.
+
+```toml
+[[interface]]
+type   = "s3"
+params = { addresses = ["127.0.0.1:9300"] }
+
+[server]
+proxy_id        = "node-17"
+bucket          = "tierstore"
+access_key_file = "/etc/tierstore/access.key"
+
+[local_cache]
+path          = "/var/lib/tierstore-cache"
+budget        = "150GiB"
+free_floor    = 10
+write_through = true
+
+[cold_store]
+kind             = "s3"
+bucket           = "tierstore-cold"
+endpoint         = "http://s3-cold.example:9000"
+credentials_file = "/etc/tierstore/cold.credentials"
+
+[[policy]]
+prefix = "cas/"
+cache  = true
+```
+
+- `cold_store.credentials_file` holds a key that may write. Without `local_cache.write_through = true` the node refuses every call but GET and HEAD with 403.
+- The node has no registration, lease or reconciler: it owes the hot tier nothing, and a restart or a hand-off leaves no work behind.
+- A key one node writes is readable through another as soon as the put is acknowledged, since it is in the cold store by then. A copy another node already keeps is not dropped by that write: a delete, or a put of other bytes of the same size, is seen there only once the copy leaves its cache.
+- A node that ran with a hot tier is moved to this shape by removing `[hot_store]` from its file and restarting it by the hand-off; see [Turning the hot tier off](operations.md#turning-the-hot-tier-off) first.
+
 ## A build node with all three tiers in one process
 
 One process on a build machine that owns the data and keeps a disk cache in front of its own proxy: `[local_cache]`, `[hot_store]` and `[cold_store]` in one file. The jobs on the machine read from the loopback address, hits come from the local disk, and a miss reads through the proxy.
@@ -113,6 +151,7 @@ What to hold to in this shape:
 - **The endpoints are one store.** The addresses of `endpoints` must be addresses of the same store (the three nodes of one MinIO cluster, say), so that any of them serves any request, the parts of a multipart upload and its completion included. Do not list the addresses of two stores.
 - **Failover is for connections that could not be made.** A request that never reached an endpoint (refused, no route, name not resolved, connect timeout) is sent to the next one. A request that may have reached a store is not sent again by this key: the caller's retry goes to the next address.
 - **The cache is a node's own.** `local_cache.path` is on the disk the jobs' scratch is on, not inside either tier's directory.
+- **The hot tier has drives of its own.** Where the hot tier would share drives with the cache, use [the cache and the cold tier alone](configure.md#a-node-that-owns-the-data-with-a-cache-and-the-cold-tier).
 - **Writes pass through.** In this shape `local_cache.write_through` is true whether it is left out or given. A put under a cached prefix is also kept on the node.
 
 ## A build node chained to storage nodes
@@ -150,6 +189,31 @@ cache  = true
 - The two addresses must be storage nodes over the same tiers, so that either serves any object. The cache fills from whichever answers.
 - The upstream is not asked anything at start. A wrong address or key is found by the first miss, not by the start.
 - Give the jobs scoped keys (`server.scoped_key_files`, see [Keys and roles](keys.md)) rather than the full key: anyone who may read through the front may read what the upstream's key can read.
+
+## A front over the cold tier alone
+
+One process that serves the S3 front over a cold store and keeps nothing on its machine: `[cold_store]` with no `[hot_store]` and no `[local_cache]`. A write is in the cold store when it is acknowledged, a read goes to the cold store, and the process has no registration, lease or reconciler. It suits a front on a machine that must not hold data, in front of a cold store that other nodes write too.
+
+```toml
+[[interface]]
+type   = "s3"
+params = { addresses = ["127.0.0.1:9300"] }
+
+[server]
+proxy_id        = "front-1"
+bucket          = "tierstore"
+access_key_file = "/etc/tierstore/access.key"
+
+[cold_store]
+kind             = "s3"
+bucket           = "tierstore-cold"
+endpoints        = ["http://storage-1.example:9000", "http://storage-2.example:9000"]
+credentials_file = "/etc/tierstore/cold.credentials"
+```
+
+- `cold_store.credentials_file` holds a key that may write, since the front's writes go straight to the store.
+- A `[[policy]]` with `cache = true`, a `[trees]` table, a `trees` interface and the keys only `[hot_store]` has are refused: there is no cache, tree store or hot tier to use them.
+- A storage node over the same cold tier becomes this shape by removing `[hot_store]` from its file and restarting it by the hand-off; see [Turning the hot tier off](operations.md#turning-the-hot-tier-off).
 
 ## Sizing budgets and water marks
 

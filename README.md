@@ -156,8 +156,11 @@ cache  = true
 
 ### All-in-one
 
-One process that is both: the storage node's two tiers and the build node's disk cache in front of them, for a single
-machine. Its file has `[hot_store]`, `[cold_store]` and `[local_cache]`; see
+One process on a machine that both takes writes and keeps a disk cache. Where the cache and a hot tier would share
+drives, its file has `[local_cache]` with `write_through = true` and `[cold_store]`, and no `[hot_store]`: every write goes
+to the cold store and the cache keeps what is read; see
+[A node that owns the data with a cache and the cold tier](crates/tierstore/docs/configure.md#a-node-that-owns-the-data-with-a-cache-and-the-cold-tier).
+Where the machine has drives for a hot tier of their own, the file can have all three tables; see
 [A file for a storage node with a cache](crates/tierstore/docs/configuration.md#a-file-for-a-storage-node-with-a-cache).
 
 ## Documentation

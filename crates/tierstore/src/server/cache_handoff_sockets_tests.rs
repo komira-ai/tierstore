@@ -1,7 +1,8 @@
 //! A node with a local cache: the sockets a hand-off moves, and a hand-off that fails.
 //!
-//! The three shapes of node are run through the same cases: a build node, a storage node with
-//! `[local_cache]`, and, as a control that must stay as it is, a storage node with none.
+//! Three shapes of node are run through the same cases: a build node, a storage node with
+//! `[local_cache]`, and, as a control that must stay as it is, a storage node with none. The
+//! hand-off of a node over the cold tier alone is in `cold_cli_tests`.
 
 use std::fs::Permissions;
 use std::future::Future;

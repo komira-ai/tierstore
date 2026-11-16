@@ -5,14 +5,16 @@
 //! The file is read into the settings of a start ([`Cli`], or those of a build node), with the
 //! defaults the keys document.
 //!
-//! There are three shapes, told apart by the tables the file has:
+//! There are four shapes, told apart by the tables the file has:
 //!
 //! - a storage node: `[hot_store]` and `[cold_store]`;
 //! - a build node: `[local_cache]` and `[cold_store]` and no `[hot_store]`, a read cache in
 //!   front of one upstream (see [`config_cache`](super::config_cache) and
 //!   [`local_cache`](super::local_cache));
 //! - a storage node with a cache: all three tables, a disk cache in front of the node's own
-//!   proxy (see [`config_combined`](super::config_combined)).
+//!   proxy (see [`config_combined`](super::config_combined));
+//! - a node over the cold tier: `[cold_store]` alone, the fronts served over the cold store
+//!   (see `config_cold.rs`).
 //!
 //! The tables:
 //!
@@ -56,6 +58,8 @@ use super::cli::{
 use super::cli_heartbeat::HeartbeatFlags;
 use super::config_cache::{CacheSettings, LocalCacheTable};
 use super::config_combined::{CombinedSettings, combined};
+#[path = "config_cold.rs"]
+pub(super) mod cold;
 use super::config_entry::entry_tuning;
 use super::config_handoff::handoff_of;
 use super::config_hot_only::{refuse_hot_keys, warn_retired_keys};
@@ -77,6 +81,7 @@ use super::keys::DEFAULT_MIN_SECRET_BYTES;
 use super::listen::Addrs;
 use super::local_cache::trees::{TreesTable, check_trees};
 use super::lock::check_lock_path;
+use cold::ColdSettings;
 
 /// The key of each flag that the file holds, or held before the flags went: the flag's name
 /// without `--`, then the keys that stand for it, the first of them the one an error message
@@ -583,7 +588,7 @@ pub(super) fn duration(value: Option<Dur>, default: Duration) -> Duration {
     value.map_or(default, |dur| dur.0)
 }
 
-/// What a file makes: the settings of one of the three shapes.
+/// What a file makes: the settings of one of the four shapes.
 #[derive(Debug)]
 pub(super) enum Settings {
     /// A storage node: the settings of a file with both tiers.
@@ -592,6 +597,8 @@ pub(super) enum Settings {
     Cache(Box<CacheSettings>),
     /// A storage node with a local cache in front of its proxy, which has no flags.
     Combined(Box<CombinedSettings>),
+    /// A node over the cold tier alone, which has no flags.
+    Cold(Box<ColdSettings>),
 }
 
 #[cfg(test)]
@@ -600,14 +607,14 @@ impl Settings {
     pub(super) fn into_storage(self) -> Option<Cli> {
         match self {
             Settings::Storage(cli) => Some(*cli),
-            Settings::Cache(_) | Settings::Combined(_) => None,
+            Settings::Cache(_) | Settings::Combined(_) | Settings::Cold(_) => None,
         }
     }
 
     /// The settings of a build node, if that is what these are.
     pub(super) fn into_cache(self) -> Option<CacheSettings> {
         match self {
-            Settings::Storage(_) | Settings::Combined(_) => None,
+            Settings::Storage(_) | Settings::Combined(_) | Settings::Cold(_) => None,
             Settings::Cache(cache) => Some(*cache),
         }
     }
@@ -616,7 +623,15 @@ impl Settings {
     pub(super) fn into_combined(self) -> Option<CombinedSettings> {
         match self {
             Settings::Combined(combined) => Some(*combined),
-            Settings::Storage(_) | Settings::Cache(_) => None,
+            Settings::Storage(_) | Settings::Cache(_) | Settings::Cold(_) => None,
+        }
+    }
+
+    /// The settings of a node over the cold tier alone, if that is what these are.
+    pub(super) fn into_cold(self) -> Option<ColdSettings> {
+        match self {
+            Settings::Cold(cold) => Some(*cold),
+            Settings::Storage(_) | Settings::Cache(_) | Settings::Combined(_) => None,
         }
     }
 }
@@ -668,8 +683,12 @@ pub(super) fn settings(
             let node = combined(server, tiers, cache, fronts, &policy, per_run)?;
             Ok(Settings::Combined(Box::new(node)))
         }
+        (None, Some(cold), None) => {
+            let node = ColdSettings::new(server, &cold, fronts, &policy, per_run)?;
+            Ok(Settings::Cold(Box::new(node)))
+        }
         _ => {
-            let why = "the file needs both [hot_store] and [cold_store] (the storage-node shape), or [local_cache] and [cold_store] without [hot_store] (the build-node shape)";
+            let why = "the file needs [cold_store]: with [hot_store] (the storage-node shape), with [local_cache] (the build-node shape), with both, or alone (a node over the cold tier)";
             Err(invalid("hot_store, cold_store, local_cache", why))
         }
     }

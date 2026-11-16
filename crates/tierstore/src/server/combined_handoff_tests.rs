@@ -445,3 +445,137 @@ async fn a_start_with_other_addresses_is_refused_and_the_running_instance_goes_o
         Some(HandingError::Handoff(HandoffError::Mismatch { .. }))
     ));
 }
+
+/// The file of `text` (a node with a cache) with `write_through = true` in `[local_cache]`, as the
+/// nodes' files say it, and, when `hot` is false, without the `[hot_store]` table: the file of a
+/// node whose hot tier is turned off.
+fn with_hot(text: &str, hot: bool) -> String {
+    let text = text.replace("[local_cache]\n", "[local_cache]\nwrite_through = true\n");
+    if hot {
+        return text;
+    }
+    let mut kept = Vec::new();
+    let mut in_hot = false;
+    for line in text.lines() {
+        if line.starts_with('[') {
+            in_hot = line == "[hot_store]";
+        }
+        if !in_hot {
+            kept.push(line);
+        }
+    }
+    kept.join("\n")
+}
+
+/// Asserts the restart of a node with a cache whose new file has no `[hot_store]` (the cache and
+/// the cold tier only): the second start, of the build-node shape, takes the first's sockets while
+/// a request of the first is half written and says the very addresses; the half-written request
+/// is answered; once the first has ended the second is `ready read-write`, and the first has given
+/// the hot tier's lease and lock file up; an object the cold tier holds reads back through the
+/// second, and a put through the second is in the cold directory and not in the hot one; both
+/// end with nothing cut. Catches: a node whose hot tier is turned off binding beside the running
+/// instance or dropping its requests, a first instance that keeps the lease or the lock file (so
+/// the reconciler of the nodes still on the hot tier cannot take over), and a second instance that
+/// still writes to the hot tier.
+#[tokio::test]
+async fn a_combined_node_hands_its_sockets_to_a_start_without_the_hot_tier() {
+    let node = Node::new("tscombined-handoff-cold-only");
+    node.activate().await;
+    let (_dir, socket) = control();
+    let (lock, line) = lock_line(&node);
+    let server = format!("handoff_socket = {:?}", socket.display().to_string());
+    let old_text = with_hot(&node.text_with(&server, &line, ""), true);
+    let old = settings_from_text(&old_text, QUICK)
+        .unwrap()
+        .into_combined()
+        .unwrap();
+    let new_text = with_hot(&node.text_with(&server, &line, ""), false);
+    assert!(!new_text.contains("hot_store"), "{new_text}");
+    let new = settings_from_text(&new_text, QUICK)
+        .unwrap()
+        .into_cache()
+        .unwrap();
+    let (cold_dir, hot) = (node.cold(), node.hot());
+    let cold = Node::tier(cold_dir.clone());
+    {
+        use crate::Backend as _;
+        cold.put("cas/demoted", bytes::Bytes::from_static(b"in cold"))
+            .await
+            .unwrap();
+    }
+    let (old_told, old_bound) = oneshot::channel::<Addresses>();
+    let (new_told, new_bound) = oneshot::channel::<Addresses>();
+    let (old_done, old_ended) = oneshot::channel::<()>();
+    let (go, going) = oneshot::channel::<()>();
+    let (stop_old, stopped_old) = oneshot::channel::<()>();
+    let (stop_new, stopped_new) = oneshot::channel::<()>();
+    let first = instance(&old, old_told, stopped_old, Some(old_done));
+    let second = async {
+        going.await.unwrap();
+        let upstream: Arc<dyn crate::Backend> = Arc::new(Node::tier(cold_dir.clone()));
+        let disk: Arc<dyn Disk> = Arc::new(SystemDisk);
+        super::cache_cli::serve_cache(
+            &new,
+            upstream,
+            disk,
+            async move {
+                let _ = stopped_new.await;
+            },
+            move |at| drop(new_told.send(at)),
+        )
+        .await
+    };
+    let (hot_in, lock_in, cold_in) = (hot.clone(), lock.clone(), cold_dir.clone());
+    let drive = async move {
+        use crate::Backend as _;
+        use objstore_s3::{ByteRange, ObjectKey, ObjectStore as _};
+        let at = old_bound.await.unwrap();
+        let first_nonce = nonce_other_than(&hot_in, None).await;
+        assert!(!first_nonce.is_empty());
+        let mut before = half_written(at.s3).await;
+        go.send(()).unwrap();
+        let taken = new_bound.await.unwrap();
+        assert_eq!(taken, at, "the second serves the very sockets");
+        let late = finish_request(&mut before).await;
+        assert!(late.starts_with("HTTP/1.1 200"), "{late}");
+        drop(before);
+        let _ = old_ended.await;
+        let mut said = String::new();
+        for _ in 0..TRIES {
+            said = probe(at.s3, "/readyz").await.1;
+            if said == "ready read-write" {
+                break;
+            }
+            tokio::time::sleep(PAUSE).await;
+        }
+        assert_eq!(said, "ready read-write");
+        assert_eq!(lease_lines(&hot_in).await, Vec::<String>::new());
+        let held = try_take(&lock_in).unwrap();
+        assert!(held.is_some(), "the first gave the lock file up");
+        drop(held);
+
+        let store = super::cache_cli_tests::client(at.s3);
+        let demoted = ObjectKey::new("cas/demoted").unwrap();
+        let all = ByteRange::new(0, 7).unwrap();
+        let read = store.get_range(&demoted, all).await.unwrap();
+        assert_eq!(&read[..], b"in cold");
+        let fresh = ObjectKey::new("cas/fresh").unwrap();
+        store
+            .put_new(&fresh, bytes::Bytes::from_static(b"new"), None)
+            .await
+            .unwrap();
+        let landed = Node::tier(cold_in).head("cas/fresh").await.unwrap();
+        assert_eq!(landed.size, 3);
+        let in_hot = Node::tier(hot_in.clone()).head("cas/fresh").await;
+        assert_eq!(in_hot, Err(crate::Error::NotFound("cas/fresh".to_owned())));
+        let _ = stop_new.send(());
+        drop(stop_old);
+    };
+    let (first, second, ()) = tokio::join!(first, second, drive);
+    assert_eq!(first.unwrap(), Drained { abandoned: 0 });
+    assert_eq!(second.unwrap(), Drained { abandoned: 0 });
+    assert!(
+        !socket.exists(),
+        "a stop with no successor removes the socket"
+    );
+}

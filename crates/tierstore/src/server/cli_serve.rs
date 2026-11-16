@@ -477,6 +477,9 @@ pub(super) async fn stopped_by(
     }
 }
 
+#[path = "cold_cli.rs"]
+pub(super) mod cold;
+
 #[cfg(test)]
 #[path = "cli_serve_tests.rs"]
 mod tests;

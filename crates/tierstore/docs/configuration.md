@@ -1,10 +1,11 @@
 # Configuration
 
-tierstore is configured by one TOML file, given with `--config <path>`. A key that is left out has the default this page gives, and a file holds no secret, only the paths of key files. A file has one of three shapes, told apart by its tables; every shape has at least one `[[interface]]` of type `s3`, and a file with one tier alone is refused:
+tierstore is configured by one TOML file, given with `--config <path>`. A key that is left out has the default this page gives, and a file holds no secret, only the paths of key files. A file has one of four shapes, told apart by its tables; every shape has `[cold_store]` and at least one `[[interface]]` of type `s3`, and a file without `[cold_store]` is refused:
 
 - **A storage node**: `[hot_store]` and `[cold_store]`. New objects go to the hot tier and are copied to the cold tier. See [Two directories as one S3 bucket](examples/directory-as-bucket.md).
 - **A build node**: `[local_cache]` and `[cold_store]`, a read cache on local disk in front of one upstream. See [A cache in front of a remote S3-compatible store](examples/cache-in-front-of-s3.md).
 - **A storage node with a cache**: all three tables in one process. See [A cache in front of a hot and a cold store](examples/cache-hot-cold.md).
+- **A front over the cold tier**: `[cold_store]` alone, the S3 front over the cold store with nothing kept on the node. See [A front over the cold tier alone](configure.md#a-front-over-the-cold-tier-alone).
 
 Tiers today are directories or self-hosted S3-compatible stores (MinIO, RustFS) reached over `http://`. AWS S3 is not supported as a tier yet, and TLS to tiers is not built. Flags of earlier builds no longer set any of this; see [Moving from flags](configuration.md#moving-from-flags).
 
@@ -590,7 +591,8 @@ Each of these exits with status 2 and names the file and the key (a syntax error
 
 - a value of the wrong type in a key this release has (a key or a table it does not have is not refused, see the next section);
 - a key that holds a secret: keys and credentials are paths of files whose names end in `_file` or `_files`; `secret_access_key`, `access_key_id`, `password`, a name with `token` in it and the like are refused anywhere;
-- a file that is none of a storage node's (`[hot_store]` and `[cold_store]`), a build node's (`[local_cache]` and `[cold_store]`, no `[hot_store]`) and a storage node's with a cache (all three tables);
+- a file without `[cold_store]`, which is none of a storage node's (`[hot_store]` and `[cold_store]`), a build node's (`[local_cache]` and `[cold_store]`, no `[hot_store]`), a storage node's with a cache (all three tables) and a front's over the cold tier (`[cold_store]` alone);
+- in the file of a front over the cold tier, a `[[policy]]` with `cache = true`, a `[trees]` table, a `trees` interface, a key only `[hot_store]` has, `cold_store.skip_checks` and `server.backend_check_wait`;
 - in a storage node's file with a cache, `write_through = false`, a relative cache `path`, `dir` tier directory, `lock_file` or `oci` key file, and a cache `path` that is a tier's directory, inside it or around it (or around the lock file or the key files of an `oci` interface);
 - in the file of a build node or of a storage node with a cache, an `oci` interface whose blobs no `[[policy]]` with `cache = true` keeps, a `layout` other than `digest-v1`, `cache = false`, marks out of order, and no `[[policy]]` with `cache = true`;
 - an `s3` tier with both `endpoint` and `endpoints`, with an empty `endpoints` or with an address in it twice, a key a tier's `kind` does not take (`endpoints` included), a `dir` tier without `path`, an `s3` tier without `bucket`, `endpoint` (or `endpoints`) or `credentials_file`, and a key only one tier has in the other (`budget` and the reconciler's keys belong to `[hot_store]`, `skip_checks` to `[cold_store]`);

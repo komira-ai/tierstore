@@ -45,7 +45,7 @@ The configuration file:
 --config is needed: the settings are in a file (docs/configuration.md), and tierstore takes no flag for them
 --<flag> was removed: the file given with --config holds it; <instead>
 <key>: a node without [local_cache] keeps no cache: give it [local_cache]
-<key>: the file needs both [hot_store] and [cold_store] (the storage-node shape), or [local_cache] and [cold_store] without [hot_store] (the build-node shape)
+<key>: the file needs [cold_store]: with [hot_store] (the storage-node shape), with [local_cache] (the build-node shape), with both, or alone (a node over the cold tier)
 <key>: a node that owns the data takes writes, and they pass through the cache so that its entries stay right: leave it out or give true
 <key>: must not be the directory of <tier>, inside it or around it: the tier would list the cache's files as objects
 <key>: must be an absolute path (it is compared with the directories of the tiers)
@@ -55,7 +55,7 @@ The configuration file:
 <key>: the blobs under <prefix> are covered by the [[policy]] with prefix <prefix>, which has cache = false, so every pull would go to the upstream; give a [[policy]] with prefix = <prefix> and cache = true
 ```
 
-Move the setting into the file as a path; give the file one of the three shapes: a storage node's, a build node's, or a storage node's with a `[local_cache]` in front of it (all three tables). A cache needs a `[[policy]]` with `cache = true`, a `write_through` that is not `false` when the node has a hot store, and a `path` that is absolute and is not a tier's directory, inside it or around it (a `dir` tier's directory is absolute too). A message of a syntax error reads `line <N>, column <M>: <key>: ...` and never repeats the value.
+Move the setting into the file as a path; give the file one of the four shapes, each with `[cold_store]`: a storage node's, a build node's, a storage node's with a `[local_cache]` in front of it (all three tables), or a front's over the cold tier (`[cold_store]` alone). A cache needs a `[[policy]]` with `cache = true`, a `write_through` that is not `false` when the node has a hot store, and a `path` that is absolute and is not a tier's directory, inside it or around it (a `dir` tier's directory is absolute too). A message of a syntax error reads `line <N>, column <M>: <key>: ...` and never repeats the value.
 
 The tiers:
 

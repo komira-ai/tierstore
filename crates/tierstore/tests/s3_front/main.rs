@@ -15,6 +15,7 @@ mod binary;
 mod cache_node;
 mod chunked;
 mod client;
+mod cold_node;
 mod combined_node;
 mod config_file;
 mod drain;
