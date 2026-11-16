@@ -11,8 +11,11 @@
 //!
 //! The table is written to `<runtime dir>/backing`, one line `<sha256> <id> <opens>` for each live
 //! blob, by a rename, at each first open and each last release and without `fsync`: it has to
-//! outlive the process and not the machine. A successor that takes over the connection needs it
-//! before its first open (an inode open across the hand-over would otherwise get a new id and the
+//! outlive the process and not the machine. The file is written outside the lock of the table, so
+//! that an open or a release that changes no line never waits for it: each change is numbered, a
+//! first open or last release returns once the file holds its change or a later one, and the
+//! changes made while one write is in progress are written together by the next. A successor that
+//! takes over the connection needs it before its first open (an inode open across the hand-over would otherwise get a new id and the
 //! open would fail with `EIO`; linux E6, case 3b), and reads it ([`saved`], [`BackingTable::adopt`]).
 //! The `opens` of a line is the count at that write, which is a lower bound of the opens there are
 //! (an open of a blob that has an id is not written). A process that stops reading to hand the
@@ -34,7 +37,6 @@
 
 use std::any::Any;
 use std::collections::{HashMap, HashSet};
-use std::fmt::Write as _;
 use std::fs::File;
 use std::io;
 use std::path::{Path, PathBuf};
@@ -160,7 +162,13 @@ struct Inner {
     spilled: HashMap<TreeDigest, u32>,
     /// The opens that wait for a registration.
     waiting: usize,
+    /// The number of the latest change to the lines of the file.
+    changes: u64,
 }
+
+/// A line of the file as the table holds it: the blob, its id, its opens, and whether that count
+/// is known exactly.
+type Line = (TreeDigest, u32, u32, bool);
 
 /// The table.
 pub(super) struct BackingTable {
@@ -168,6 +176,9 @@ pub(super) struct BackingTable {
     most: usize,
     inner: Mutex<Inner>,
     changed: Condvar,
+    /// Held by the thread that writes the file, never while `inner` is held; the number of the
+    /// latest change the file holds.
+    written: Mutex<u64>,
 }
 
 /// What an open of a blob is told to do.
@@ -196,8 +207,9 @@ impl BackingTable {
             most,
             inner: Mutex::new(Inner::default()),
             changed: Condvar::new(),
+            written: Mutex::new(0),
         });
-        table.write(&locked(&table.inner), false);
+        table.write(false);
         table
     }
 
@@ -235,8 +247,9 @@ impl BackingTable {
                 ..Inner::default()
             }),
             changed: Condvar::new(),
+            written: Mutex::new(0),
         });
-        table.write(&locked(&table.inner), false);
+        table.write(false);
         table
     }
 
@@ -291,7 +304,9 @@ impl BackingTable {
             return;
         };
         live.opens -= 1;
-        self.drop_if_unused(&mut inner, blob);
+        let change = Self::drop_if_unused(&mut inner, blob);
+        drop(inner);
+        self.dropped(change);
     }
 
     /// Ends one open of `blob` that an earlier process made; the last one of all drops its id. An
@@ -306,31 +321,45 @@ impl BackingTable {
             Foreign::Exact(_) => Foreign::None,
             other => other,
         };
-        self.drop_if_unused(&mut inner, blob);
+        let change = Self::drop_if_unused(&mut inner, blob);
+        drop(inner);
+        self.dropped(change);
     }
 
-    /// Drops the id of `blob` if no open of this process or of an earlier one uses it.
-    fn drop_if_unused(&self, inner: &mut Inner, blob: &TreeDigest) {
+    /// Drops the id of `blob` if no open of this process or of an earlier one uses it, and gives
+    /// the number of that change. The id is closed here, with the lock held, so that the ids open
+    /// in the kernel are never more than `most`.
+    fn drop_if_unused(inner: &mut Inner, blob: &TreeDigest) -> Option<u64> {
         let unused = inner
             .live
             .get(blob)
             .is_some_and(|live| live.opens == 0 && live.foreign == Foreign::None);
-        if unused {
-            // Dropping the guard closes the id.
-            let _ = inner.live.remove(blob);
-            self.write(inner, false);
+        if !unused {
+            return None;
+        }
+        // Dropping the guard closes the id.
+        let _ = inner.live.remove(blob);
+        inner.changes += 1;
+        Some(inner.changes)
+    }
+
+    /// Writes the file for the change [`BackingTable::drop_if_unused`] made, if it made one, with
+    /// the lock of the table not held.
+    fn dropped(&self, change: Option<u64>) {
+        if let Some(change) = change {
+            self.persist(change);
         }
     }
 
     /// Writes the file with every count as it is now and `exact` on each line whose count is: for
     /// a process that has stopped reading requests and is about to hand the connection over.
     pub(super) fn write_exact(&self) {
-        self.write(&locked(&self.inner), true);
+        self.write(true);
     }
 
     /// Writes the file with no line marked `exact`.
     pub(super) fn write_inexact(&self) {
-        self.write(&locked(&self.inner), false);
+        self.write(false);
     }
 
     /// Keeps every live id open in the kernel after this table is dropped: one reference to each
@@ -342,10 +371,52 @@ impl BackingTable {
         }
     }
 
-    /// Writes the file; a file that cannot be written is said and the table goes on. With `exact`
-    /// the lines whose count is known say so.
-    fn write(&self, inner: &Inner, exact: bool) {
-        let mut lines: Vec<(String, u32, u32, bool)> = inner
+    /// Returns once the file holds the change numbered `change` or a later one: writes it unless
+    /// a write that started after the change has done so.
+    fn persist(&self, change: u64) {
+        let mut written = locked(&self.written);
+        if *written < change {
+            *written = self.write_held(false);
+        }
+    }
+
+    /// Writes the file as the table is now.
+    fn write(&self, exact: bool) {
+        let mut written = locked(&self.written);
+        *written = self.write_held(exact);
+    }
+
+    /// Writes the file as the table is now, with `written` held, and gives the number of the
+    /// change it holds; a file that cannot be written is said and the table goes on. With `exact`
+    /// the lines whose count is known say so. The lock of the table is held only to copy the lines.
+    fn write_held(&self, exact: bool) -> u64 {
+        let (lines, change) = {
+            let inner = locked(&self.inner);
+            (Self::lines(&inner), inner.changes)
+        };
+        let mut lines: Vec<String> = lines
+            .into_iter()
+            .map(|(blob, id, opens, known)| {
+                let mark = if exact && known { " exact" } else { "" };
+                format!("{blob} {id} {opens}{mark}\n")
+            })
+            .collect();
+        // The hex of the blob leads each line, and no two lines have one blob.
+        lines.sort_unstable();
+        let text = lines.concat();
+        let mut new = self.file.clone().into_os_string();
+        new.push(".new");
+        let written = std::fs::write(&new, text).and_then(|()| std::fs::rename(&new, &self.file));
+        if let Err(why) = written {
+            let file = self.file.display();
+            tracing::warn!("tierstore fs: cannot write the backing table {file}: {why}");
+        }
+        change
+    }
+
+    /// The lines of the file, as the table holds them now.
+    fn lines(inner: &Inner) -> Vec<Line> {
+        inner
             .live
             .iter()
             .map(|(blob, live)| {
@@ -354,22 +425,9 @@ impl BackingTable {
                     Foreign::Exact(opens) => (opens, true),
                     Foreign::Unknown(opens) => (opens, false),
                 };
-                (blob.to_string(), live.id, live.opens + foreign, known)
+                (*blob, live.id, live.opens + foreign, known)
             })
-            .collect();
-        lines.sort();
-        let mut text = String::new();
-        for (blob, id, opens, known) in lines {
-            let mark = if exact && known { " exact" } else { "" };
-            let _ = writeln!(text, "{blob} {id} {opens}{mark}");
-        }
-        let mut new = self.file.clone().into_os_string();
-        new.push(".new");
-        let written = std::fs::write(&new, text).and_then(|()| std::fs::rename(&new, &self.file));
-        if let Err(why) = written {
-            let file = self.file.display();
-            tracing::warn!("tierstore fs: cannot write the backing table {file}: {why}");
-        }
+            .collect()
     }
 
     /// The blobs with a live id.
@@ -382,6 +440,12 @@ impl BackingTable {
     #[cfg(test)]
     pub(super) fn spilled(&self, blob: &TreeDigest) -> u32 {
         locked(&self.inner).spilled.get(blob).copied().unwrap_or(0)
+    }
+
+    /// Whether no thread holds the lock of the table now: an open would not wait for it.
+    #[cfg(all(test, target_os = "linux"))]
+    pub(super) fn unlocked(&self) -> bool {
+        self.inner.try_lock().is_ok()
     }
 
     /// The opens that wait now.
@@ -407,18 +471,24 @@ impl Ticket {
             id: registered.id,
             guard: Arc::clone(&registered.guard),
         };
-        let mut inner = locked(&self.table.inner);
-        let _ = inner.registering.remove(&self.blob);
-        let _ = inner.live.insert(
-            self.blob,
-            Live {
-                id: registered.id,
-                guard: registered.guard,
-                opens: 1,
-                foreign: Foreign::None,
-            },
-        );
-        self.table.write(&inner, false);
+        let change = {
+            let mut inner = locked(&self.table.inner);
+            let _ = inner.registering.remove(&self.blob);
+            let _ = inner.live.insert(
+                self.blob,
+                Live {
+                    id: registered.id,
+                    guard: registered.guard,
+                    opens: 1,
+                    foreign: Foreign::None,
+                },
+            );
+            inner.changes += 1;
+            inner.changes
+        };
+        // The opens that wait for this blob find its id now, before the file is written.
+        self.table.changed.notify_all();
+        self.table.persist(change);
         backing
     }
 }

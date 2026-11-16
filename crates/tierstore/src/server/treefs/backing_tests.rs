@@ -335,3 +335,164 @@ fn a_table_written_exact_is_written_again_without_the_mark() {
     table.write_inexact();
     assert_eq!(text(dir.path()), format!("{a} 100 2\n"));
 }
+
+/// A table adopted from `count` lines, each a blob with an id and no open: more text than a pipe
+/// holds (64 KiB), so that a write into a FIFO stays in its write until the test reads the rest.
+#[cfg(target_os = "linux")]
+fn adopted(dir: &TestDir, kernel: &FakeKernel, count: u32) -> (Arc<BackingTable>, Vec<Saved>) {
+    let lines: Vec<Saved> = (0..count)
+        .map(|n| Saved {
+            blob: blob(&n.to_string()),
+            id: n + 1,
+            opens: 0,
+            exact: true,
+        })
+        .collect();
+    let table = BackingTable::adopt(dir.path().join(FILE), 2 * count as usize, &lines, &|id| {
+        kernel.wrap(id)
+    });
+    (table, lines)
+}
+
+/// The text of the file of a table whose blobs are `lines`, with no open.
+#[cfg(target_os = "linux")]
+fn file_of(lines: &[Saved]) -> String {
+    let mut sorted: Vec<String> = lines
+        .iter()
+        .map(|line| format!("{} {} 0\n", line.blob, line.id))
+        .collect();
+    sorted.sort();
+    sorted.concat()
+}
+
+/// Puts a FIFO where the table writes its next file, and gives the release of the one open of
+/// `gone`'s blob, the last, which writes into it from a thread of its own; returns with that
+/// thread inside the write (the test has read its first byte), and the FIFO's reading end.
+#[cfg(target_os = "linux")]
+fn release_into_fifo(
+    dir: &TestDir,
+    table: &Arc<BackingTable>,
+    gone: &Saved,
+) -> (std::thread::JoinHandle<()>, std::fs::File, u8) {
+    use std::io::Read;
+    let new = dir.path().join(format!("{FILE}.new"));
+    let mode = rustix::fs::Mode::RUSR | rustix::fs::Mode::WUSR;
+    rustix::fs::mkfifoat(rustix::fs::CWD, &new, mode).unwrap();
+    assert_eq!(live(table.open(&gone.blob)), gone.id);
+    let releasing = {
+        let (table, blob) = (Arc::clone(table), gone.blob);
+        std::thread::spawn(move || table.release(&blob))
+    };
+    // Opening the reading end returns once the writer has opened the other.
+    let mut fifo = std::fs::File::open(&new).unwrap();
+    let mut first = [0_u8; 1];
+    fifo.read_exact(&mut first).unwrap();
+    (releasing, fifo, first[0])
+}
+
+/// The rest of the text in `fifo`, after `first`.
+#[cfg(target_os = "linux")]
+fn drained(mut fifo: std::fs::File, first: u8) -> String {
+    use std::io::Read;
+    let mut text = vec![first];
+    fifo.read_to_end(&mut text).unwrap();
+    String::from_utf8(text).unwrap()
+}
+
+/// Asserts that while a last release is writing the file, the table is not locked: an open of a
+/// blob with a live id, and a release that is not the last, are answered at once and do not wait
+/// for the write; and that the write holds the table without the released blob, whose id is closed.
+/// Catches a table that writes its file with its lock held, which makes every open of the mount
+/// wait for each first open's and last release's write.
+#[cfg(target_os = "linux")]
+#[test]
+fn an_open_is_answered_while_a_release_writes_the_file() {
+    let dir = TestDir::under(std::env::temp_dir(), "tfs-backing-unlocked");
+    let kernel = FakeKernel::new();
+    let (table, lines) = adopted(&dir, &kernel, 1200);
+    let (gone, rest) = lines.split_first().unwrap();
+    let (releasing, fifo, first) = release_into_fifo(&dir, &table, gone);
+
+    assert!(table.unlocked());
+    let other = rest[0];
+    assert_eq!(live(table.open(&other.blob)), other.id);
+    assert_eq!(live(table.open(&other.blob)), other.id);
+    table.release(&other.blob);
+    assert_eq!(table.opens(&other.blob), 1);
+
+    assert_eq!(drained(fifo, first), file_of(rest));
+    releasing.join().unwrap();
+    assert_eq!(*locked(&kernel.closed), [gone.id]);
+    assert_eq!(table.live(), rest.len());
+}
+
+/// Asserts that last releases made while another release is writing the file are in the file
+/// when they return: the write that was in progress holds the table as it was before them, and the
+/// next one holds it without any of the three blobs. Both releases changed the table before the
+/// write in progress ended, so the first of them to write takes both changes.
+#[cfg(target_os = "linux")]
+#[test]
+fn releases_during_a_write_are_in_the_file_when_they_return() {
+    let dir = TestDir::under(std::env::temp_dir(), "tfs-backing-overlap");
+    let kernel = FakeKernel::new();
+    let (table, lines) = adopted(&dir, &kernel, 1200);
+    let (gone, rest) = lines.split_first().unwrap();
+    let (releasing, fifo, first) = release_into_fifo(&dir, &table, gone);
+
+    let later: Vec<_> = rest[..2]
+        .iter()
+        .map(|line| {
+            assert_eq!(live(table.open(&line.blob)), line.id);
+            let (table, blob) = (Arc::clone(&table), line.blob);
+            std::thread::spawn(move || table.release(&blob))
+        })
+        .collect();
+    // Both have taken their blob out of the table, and wait for the write in progress.
+    until(|| table.live() == rest.len() - 2);
+    assert_eq!(drained(fifo, first), file_of(rest));
+    releasing.join().unwrap();
+    later.into_iter().for_each(|thread| thread.join().unwrap());
+    assert_eq!(text(dir.path()), file_of(&rest[2..]));
+    let mut closed = locked(&kernel.closed).clone();
+    closed.sort_unstable();
+    assert_eq!(closed, [gone.id, rest[0].id, rest[1].id]);
+}
+
+/// Asserts that an open that waits for another open's registration of the same blob is answered
+/// with the registered id while that registration is still writing the file: it does not wait for
+/// the write. Catches a registration that wakes the waiting opens only after its write.
+#[cfg(target_os = "linux")]
+#[test]
+fn an_open_waiting_for_a_registration_is_answered_before_its_write() {
+    use std::io::Read;
+    let dir = TestDir::under(std::env::temp_dir(), "tfs-backing-wake");
+    let kernel = FakeKernel::new();
+    let (table, _) = adopted(&dir, &kernel, 1200);
+    let a = blob("a");
+    let first = ticket(table.open(&a));
+    let waiter = {
+        let table = Arc::clone(&table);
+        std::thread::spawn(move || live(table.open(&a)))
+    };
+    until(|| table.waiting() == 1);
+
+    let new = dir.path().join(format!("{FILE}.new"));
+    let mode = rustix::fs::Mode::RUSR | rustix::fs::Mode::WUSR;
+    rustix::fs::mkfifoat(rustix::fs::CWD, &new, mode).unwrap();
+    let registration = kernel.registration();
+    let id = registration.id;
+    let registering = std::thread::spawn(move || first.registered(registration).id);
+    // Opening the reading end returns once the writer has opened the other; the first byte read
+    // means the registration is inside its write, which stays there until the rest is read.
+    let mut fifo = std::fs::File::open(&new).unwrap();
+    let mut first_byte = [0_u8; 1];
+    fifo.read_exact(&mut first_byte).unwrap();
+
+    until(|| waiter.is_finished());
+    assert_eq!(waiter.join().unwrap(), id);
+    assert_eq!(table.waiting(), 0);
+
+    let _ = drained(fifo, first_byte[0]);
+    assert_eq!(registering.join().unwrap(), id);
+    assert_eq!(table.opens(&a), 2);
+}
