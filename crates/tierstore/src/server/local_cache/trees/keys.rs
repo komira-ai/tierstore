@@ -112,7 +112,8 @@ impl TreeStore {
             };
             if walk.may_hold(&meeting.at) {
                 match self.walk_dir(&meeting.id, "", &meeting.at, &mut walk) {
-                    Ok(()) | Err(ReadError::NoPlacement) => {}
+                    Ok(()) => {}
+                    Err(ReadError::NoPlacement) => walk.out.clear(),
                     Err(error) => return Err(error),
                 }
             }

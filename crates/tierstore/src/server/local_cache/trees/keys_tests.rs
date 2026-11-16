@@ -406,8 +406,8 @@ async fn damaged_records_answer_corrupt() {
 }
 
 /// Asserts that a directory of more children than one page of the store's listing (1000) is read
-/// whole: all 1001 files of it are listed, in key order, and a start in the second page of the
-/// directory's children gives the rest.
+/// whole: all 1001 files of it are listed, in key order; a start at the last child of the first
+/// page gives the one child of the second, and a start at that child gives none.
 #[tokio::test]
 async fn a_directory_of_more_than_a_page_of_children_is_listed_whole() {
     let bench = Bench::new("keys-many").await;
@@ -436,4 +436,9 @@ async fn a_directory_of_more_than_a_page_of_children_is_listed_whole() {
         .unwrap();
     let rest: Vec<&str> = rest.iter().map(|key| key.key.as_str()).collect();
     assert_eq!(rest, vec!["p/many/f1000"]);
+    let past = bench
+        .store
+        .s3_keys(BUCKET, "", Some("p/many/f1000"), 5000)
+        .unwrap();
+    assert_eq!(past, vec![]);
 }

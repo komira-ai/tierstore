@@ -8,7 +8,7 @@ use http_body_util::BodyExt;
 use hyper::StatusCode;
 use hyper::header::HeaderMap;
 
-use super::placed::{file_body, span_body, unanswered, unfilled};
+use super::placed::{file_body, unanswered, unfilled};
 use crate::server::auth::sign;
 use crate::server::delete_objects_tests::{document, errors};
 use crate::server::local_cache::pack_testing::Pack;
@@ -22,6 +22,8 @@ use crate::server::request::Query;
 use crate::server::testing::{BUCKET, Rig, checksum, texts};
 use crate::server::time::http_date;
 use crate::{BlobSource, Mode, NewEntry, NewKind, Op, TreeDigest, TreeLimits, build_tree};
+
+mod more;
 
 /// The key prefix the small tree is placed at.
 const ROOT: &str = "jobs/1/root/";
@@ -909,23 +911,6 @@ async fn a_file_body_answers_each_way_a_file_is_not_had() {
     };
     let missing = file_body("k", Ok(open(Some(missing))), 0, 10).err();
     assert_eq!(missing.expect("an error").code(), "SlowDown");
-}
-
-/// Asserts that a body read from a cache file shorter than the span ends with an error after the
-/// bytes it had, so the answer is cut and not completed with other bytes.
-#[tokio::test]
-async fn a_short_cache_file_ends_the_body_with_an_error() {
-    let fx = Fixture::new("placed-short").await;
-    let id = fx.placed();
-    let path = fx.cache.config.path.join("short");
-    std::fs::write(&path, b"0123456789").expect("a file");
-    let hold = fx.store.open_read(&id).expect("a hold");
-    let body = span_body(&path, 2, 20, hold).expect("an open file");
-    let pieces: Vec<_> = body.collect().await;
-    assert_eq!(pieces.len(), 1);
-    assert!(
-        matches!(&pieces[0], Err(crate::Error::Other(why)) if why.starts_with("reading a tree file: "))
-    );
 }
 
 /// Asserts that a placement released and swept after a key was located under it, and before the

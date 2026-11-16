@@ -51,7 +51,7 @@ use crate::server::reply::{Answer, S3Error, answer};
 use crate::server::request::{Query, Target, header};
 
 /// The most bytes read from a pack's file at a time for a response.
-const CHUNK: u64 = 1 << 20;
+pub(super) const CHUNK: u64 = 1 << 20;
 
 /// The refusal of a write under a placement.
 pub(in crate::server) fn read_only() -> S3Error {
@@ -358,6 +358,11 @@ impl Keys for Merged<'_> {
             })?;
         // The backend's keys up to the `limit`-th one not under a placement, or to its end: the
         // first `limit` keys of the merge are then among those and the placements' first `limit`.
+        // Once the placements give `limit` keys, a backend key after the last of them cannot be
+        // among the first `limit`, so the backend is read no further than that key.
+        let bound = placed
+            .get(limit.wrapping_sub(1))
+            .map(|last| last.key.clone());
         let mut keys = Vec::new();
         let mut cursor = after.map(str::to_owned);
         loop {
@@ -373,7 +378,10 @@ impl Keys for Merged<'_> {
                 .into_iter()
                 .filter(|listed| trees.locate_s3(self.bucket, &listed.key).is_none());
             keys.extend(shown);
-            if !more || keys.len() >= limit {
+            let passed = bound
+                .as_ref()
+                .is_some_and(|bound| cursor.as_ref() >= Some(bound));
+            if !more || keys.len() >= limit || passed {
                 break;
             }
         }
