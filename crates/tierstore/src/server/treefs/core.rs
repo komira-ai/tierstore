@@ -542,14 +542,13 @@ impl Core {
     /// mount, and the tree store which placements, so that it ends every other hold of it.
     pub(super) fn pins_live(&self) {
         let attached = locked(&self.state).attachments.trees();
-        let (keys, trees): (Vec<_>, Vec<_>) = attached
+        let trees: Vec<String> = attached
             .iter()
-            .partition(|digest| placed::placement_of(digest).is_some());
-        let trees: Vec<String> = trees.iter().map(ToString::to_string).collect();
+            .filter(|digest| placed::placement_of(digest).is_none())
+            .map(ToString::to_string)
+            .collect();
         let _ = self.fills.pins_live(&self.settings.mount_id, &trees);
-        // And the node's holds of placements: those of the trees placed here, and no other.
-        let ids: Vec<String> = keys.iter().filter_map(|key| placed::placement_of(key)).map(|(id, _)| id).collect();
-        self.fills.places_live(&self.settings.mount_id, &ids);
+        self.places_live(&attached);
     }
 
     /// Takes the tree `number` out of memory if it is not attached and the kernel holds no inode

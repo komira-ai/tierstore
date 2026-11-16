@@ -56,7 +56,7 @@ const MOST_ENTRIES: usize = 1 << 24;
 
 /// The bytes of the manifest file at `path`, at most [`MAX_MANIFEST_BYTES`] and one more byte, so
 /// that a larger file is refused by its size and not read whole.
-fn read_manifest(path: &std::path::Path) -> std::io::Result<Vec<u8>> {
+pub(super) fn read_manifest(path: &std::path::Path) -> std::io::Result<Vec<u8>> {
     use std::io::Read as _;
     let mut bytes = Vec::new();
     let _ = File::open(path)?
@@ -283,6 +283,17 @@ impl Core {
         } else {
             self.let_go(key);
         }
+    }
+
+    /// Tells the node's tree store which placements this mount holds, those of the trees of
+    /// `attached` that are placed, so that it ends the mount's other holds.
+    pub(in crate::server::treefs) fn places_live(&self, attached: &[TreeDigest]) {
+        let ids: Vec<String> = attached
+            .iter()
+            .filter_map(placement_of)
+            .map(|(id, _)| id)
+            .collect();
+        self.fills.places_live(&self.settings.mount_id, &ids);
     }
 
     /// The path of the directory `dir` above the fs locations: from the paths this core has

@@ -239,14 +239,23 @@ async fn places_live_ends_the_holds_of_the_mount_it_does_not_list() {
         .create(bench.request(vec![fs_at("jobs/2/root")]))
         .unwrap()
         .placement;
-    assert_eq!(answer(Some(&bench.store), place("jobs/1/root")).await, format!("tree {kept}"));
-    assert_eq!(answer(Some(&bench.store), place("jobs/2/root")).await, format!("tree {other}"));
+    assert_eq!(
+        answer(Some(&bench.store), place("jobs/1/root")).await,
+        format!("tree {kept}")
+    );
+    assert_eq!(
+        answer(Some(&bench.store), place("jobs/2/root")).await,
+        format!("tree {other}")
+    );
     bench.store.attach(&other, "mount-2").unwrap();
     let live = |keep: Vec<PlacementId>| MountRequest::PlacesLive {
         mount: MOUNT.to_owned(),
         keep,
     };
-    assert_eq!(answer(Some(&bench.store), live(vec![kept.clone()])).await, "ok 1");
+    assert_eq!(
+        answer(Some(&bench.store), live(vec![kept.clone()])).await,
+        "ok 1"
+    );
     assert_eq!(bench.store.placement(&kept).unwrap().attachments, 1);
     assert_eq!(bench.store.placement(&other).unwrap().attachments, 1);
     assert_eq!(answer(Some(&bench.store), live(Vec::new())).await, "ok 1");
@@ -258,10 +267,13 @@ async fn places_live_ends_the_holds_of_the_mount_it_does_not_list() {
 /// a flat by what went wrong.
 #[test]
 fn a_flat_too_large_for_the_mount_is_answered_so() {
-    use crate::server::local_cache::trees::{FlatError, ReadError};
     use super::flat_answer;
+    use crate::server::local_cache::trees::{FlatError, ReadError};
     assert_eq!(flat_answer(&Err(FlatError::TooLarge)), "too large");
-    assert_eq!(flat_answer(&Err(FlatError::Read(ReadError::NoPlacement))), "none");
+    assert_eq!(
+        flat_answer(&Err(FlatError::Read(ReadError::NoPlacement))),
+        "none"
+    );
     assert_eq!(
         flat_answer(&Err(FlatError::Read(ReadError::Corrupt("x".to_owned())))),
         "damaged"

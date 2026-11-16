@@ -404,8 +404,9 @@ async fn a_lookup_of_an_attached_tree_holds_its_placement_again() {
 async fn a_lookup_that_fails_gives_the_hold_back() {
     let live = Live::new("tfs-placed-fail-hold").await;
     let created = live.place(vec![fs_at("jobs/1f3a/root")]);
-    let records = crate::server::local_cache::trees::testing::tree_path(&live.bench.rig, &created.tree)
-        .join("records");
+    let records =
+        crate::server::local_cache::trees::testing::tree_path(&live.bench.rig, &created.tree)
+            .join("records");
     std::fs::write(&records, b"damaged").unwrap();
     let looked = live
         .on_core(|core| {
