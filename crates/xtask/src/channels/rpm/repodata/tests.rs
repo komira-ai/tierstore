@@ -58,8 +58,9 @@ fn the_chunks_of_a_package_are_what_createrepo_writes() {
   <description>New objects are written to the hot tier, copied to the cold tier in the background,
 and freed from the hot tier when it fills.
 
-The package installs the binary, the systemd unit template tierstore@.service and an example
-configuration. It starts and enables nothing: write /etc/tierstore/config.toml and its keys.</description>
+The package installs the binary, the systemd unit template tierstore@.service, the unit
+tierstore-guard.service and an example configuration. It starts and enables nothing: write
+/etc/tierstore/config.toml and its keys.</description>
   <packager>tierstore authors &lt;tierstore@users.noreply.github.com&gt;</packager>
   <url>https://tierstore.dev</url>
   <time file=\"1788220800\" build=\"1788220800\"/>
@@ -87,6 +88,7 @@ configuration. It starts and enables nothing: write /etc/tierstore/config.toml a
         format!(
             "<package pkgid=\"{pkgid}\" name=\"tierstore\" arch=\"x86_64\">
   <version epoch=\"0\" ver=\"1.2.3\" rel=\"1\"/>
+  <file>/usr/lib/systemd/system/tierstore-guard.service</file>
   <file>/usr/lib/systemd/system/tierstore@.service</file>
   <file>/usr/lib/sysusers.d/tierstore.conf</file>
   <file type=\"dir\">/usr/libexec/tierstore</file>

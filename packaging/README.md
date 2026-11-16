@@ -8,8 +8,8 @@ of those platforms with its provenance bundle and one release index, `index.json
 (`docs/ci-and-release.md`; `cargo xtask release hostkeeper-package` builds the package from
 `hostkeeper/`, see its README), and as a Debian package for the two Linux platforms
 (`tierstore_<version>_<arch>.deb`, built by `cargo xtask release deb`; an RPM package holds the
-same files). The package installs the binary, the instance template `tierstore@.service` at
-`/usr/lib/systemd/system`, the sysusers entry, and the example configuration as
+same files). The package installs the binary, the instance template `tierstore@.service` and the
+nft guard unit `tierstore-guard.service` at `/usr/lib/systemd/system`, the sysusers entry, and the example configuration as
 `/usr/share/doc/tierstore/examples/config.toml`, which nothing reads. It writes nothing in
 `/etc`, enables and starts no instance, and leaves the configuration to the host
 ([The Debian and RPM template](#the-debian-and-rpm-template)). No container image is released.
@@ -28,6 +28,7 @@ fails a build whose binary asks for a newer `GLIBC_` symbol version (`docs/ci-an
 | `tierstore.service` | the unit to place by hand: the binary as `tierstore` run with `/etc/tierstore/config.toml`, an account that is not root, a stop that waits for the drain, and the hardening of the other example units |
 | `tierstore@.service` | the instance template the deb and rpm packages install at `/usr/lib/systemd/system`: `tierstore@a` and `tierstore@b`, each running `/usr/libexec/tierstore/tierstore --config /etc/tierstore/config.toml` and starting only under its marker file ([The Debian and RPM template](#the-debian-and-rpm-template)) |
 | `tierstore.conf` | the sysusers.d entry of the `tierstore` account (no login, no home) |
+| `tierstore-guard.service` | the nft guard the deb and rpm packages install at `/usr/lib/systemd/system`: it loads `/etc/tierstore/guard.nft` when the host has that file, and `tierstore@.service` wants it and starts after it ([The nft guard unit](#the-nft-guard-unit)) |
 | `config.toml` | the example of `/etc/tierstore/config.toml`, the configuration file of every Linux route (`tierstore.service`, `tierstore@.service`, hostkeeper's template): one `s3` interface, the keys, and an S3 bucket for each tier |
 | `hostkeeper/units/tierstore@.service` | the instance template of the update hook on Linux: `tierstore@a.service` and `tierstore@b.service`, each running `bin/tierstore` of hostkeeper's release link `current` and starting only under its marker file ([Moving to the update hook](#moving-to-the-update-hook)) |
 | `hostkeeper/units/tierstore.plist` | the LaunchDaemon of the update hook on a Mac: one job, labelled `tierstore`, running `bin/tierstore` of the same link |
@@ -130,7 +131,8 @@ hostkeeper puts a new release of tierstore in place through `tierstore update-ho
 (`crates/tierstore/docs/update-hook.md`). The files of `hostkeeper/units` are the units of
 hostkeeper's package of tierstore, and hostkeeper installs and links them; nothing here is placed
 by hand. There are no slots, no nftables redirect, no polkit rule, no account of the hook's own and
-no declaration file: the hook runs as root, as hostkeeper's step, and reaches the machine through
+no declaration file (the nft guard is the separate `tierstore-guard.service` of the deb and rpm packages, see
+[The nft guard unit](#the-nft-guard-unit)): the hook runs as root, as hostkeeper's step, and reaches the machine through
 `systemctl` or `launchctl` only.
 
 On Linux the package has one template, `tierstore@.service`, and the hook alternates between its
@@ -1036,6 +1038,27 @@ so a fresh install with no configuration starts no server. The post-install step
 account and, only when nothing is at `/etc/tierstore`, that directory (mode 0750, group
 `tierstore`); an existing `/etc/tierstore` and its files are left as they are. Removing the package
 runs `daemon-reload` only, and keeps the account and `/etc/tierstore`.
+
+#### The nft guard unit
+
+The packages also install `tierstore-guard.service`, a `Type=oneshot` unit with
+`RemainAfterExit=yes` that runs `/usr/sbin/nft -f /etc/tierstore/guard.nft` to start, the same
+command to reload (`ExecReload=`), and `nft delete table inet tierstore_guard` to stop (the leading
+`-` makes a table that is already gone no failure). The package does not ship `guard.nft`: another
+package of the host's places it (root, mode 0644, in `/etc/tierstore`), and it must define
+`table inet tierstore_guard`, starting with `table inet tierstore_guard` and `delete table inet
+tierstore_guard` before the definition, so that `nft -f` replaces the table atomically; a ruleset
+in a table of another name is not removed by the stop. A host without `/etc/tierstore/guard.nft`
+skips the unit (`ConditionPathExists=`), and it stays inactive without a failure.
+
+`tierstore@.service` has `Wants=tierstore-guard.service` and `After=tierstore-guard.service`, so
+starting an instance loads the guard first when the file is there; a `Wants=` of a unit that is
+absent or skipped does not stop the instance from starting. The guard is a unit of its own, not an
+`ExecStartPre=` and `ExecStopPost=` of the instance, because in a hand-over the old instance stops
+while the new one serves, and the stop of one instance would delete the guard under the other.
+Stopping an instance leaves the guard loaded. The package enables nothing, so on a host with the
+file, `systemctl enable --now tierstore-guard.service` makes it load at boot, and after a change of
+the file `systemctl reload-or-restart tierstore-guard.service` replaces the table in one step.
 
 On a host that does not run the update hook, write `/etc/tierstore/config.toml` and the key files
 as in "Placing the unit", then start an instance by hand:

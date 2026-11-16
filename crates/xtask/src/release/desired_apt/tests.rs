@@ -486,10 +486,13 @@ fn data_files(deb: &[u8]) -> Vec<(String, u32)> {
     files
 }
 
+/// The nft guard unit of the package: wanted by the template, and not a run unit.
+const GUARD_UNIT: &str = "tierstore-guard.service";
+
 /// Every way the run units and the hook program of the entry `sent` differ from what the package
 /// whose regular files are `files` installs: a run unit must be a unit file of the package or an
 /// instance (`name@i.service`) of one of its templates (`name@.service`), never a template; each
-/// unit file must be run, a template by at least one instance; and the hook's program must be an
+/// unit file other than the guard must be run, a template by at least one instance; and the hook's program must be an
 /// executable file of the package.
 fn install_problems(sent: &Value, files: &[(String, u32)]) -> Vec<String> {
     let units: Vec<&str> = files
@@ -522,6 +525,11 @@ fn install_problems(sent: &Value, files: &[(String, u32)]) -> Vec<String> {
         }
     }
     for unit in &units {
+        // The guard is wanted by the template, not run by hostkeeper: a host without its ruleset
+        // skips it, which must not read as a run unit that failed to start.
+        if *unit == GUARD_UNIT {
+            continue;
+        }
         let ran = if unit.ends_with("@.service") {
             run.iter().any(|r| template_of(r).as_deref() == Some(*unit))
         } else {

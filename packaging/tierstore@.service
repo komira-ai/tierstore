@@ -34,11 +34,20 @@
 # example /usr/share/doc/tierstore/examples/config.toml, which nothing reads. Its key files are
 # owned by the account of User=, mode 0600, and the keys of the file that name them are the only way
 # the process is given a secret (it reads no environment variable).
+#
+# The nft guard, when the host has one, is loaded before an instance starts: the unit
+# tierstore-guard.service (packaging/tierstore-guard.service, which the deb and rpm packages
+# install; a host of the archive package places its own) is wanted and ordered before this one. A
+# Wants= of a unit that is absent, or whose condition (/etc/tierstore/guard.nft) fails, does not
+# stop the instance from starting, and a stop of this instance does not stop the guard, which the
+# other instance of a hand-over still needs.
 [Unit]
 Description=tierstore instance %i, an S3 server over a hot and a cold tier
 Documentation=https://github.com/komira-ai/tierstore/blob/main/packaging/README.md
 After=network-online.target
 Wants=network-online.target
+After=tierstore-guard.service
+Wants=tierstore-guard.service
 ConditionPathExists=/var/lib/tierstore/run-%i
 StartLimitIntervalSec=1h
 StartLimitBurst=5

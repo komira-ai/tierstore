@@ -10,7 +10,7 @@ with hostkeeper's own unpacker, manifest loader and placed-path lint.
 | file | in the package | what |
 |---|---|---|
 | `manifest.toml.in` | `manifest.toml` | the manifest: the version the binary reports, the platform, the oldest hostkeeper, the update hook (`bin/tierstore update-hook`) and its bounds, the units hostkeeper starts, stops and observes, the health URL, and the params the hook reads (`config_file`, `service_manager`, and `launchd_label` on macOS) |
-| `units/tierstore@.service` | `units/tierstore@.service` (Linux) | the template of the two instances `tierstore@a.service` and `tierstore@b.service`, which the update hook alternates between with a hand-over of the listening sockets |
+| `units/tierstore@.service` | `units/tierstore@.service` (Linux) | the template of the two instances `tierstore@a.service` and `tierstore@b.service`, which the update hook alternates between with a hand-over of the listening sockets; it wants and starts after `tierstore-guard.service` when the host has that unit, which this package does not ship |
 | `units/tierstore.plist` | `units/tierstore.plist` (macOS) | the one launchd job, label `tierstore`, which an update restarts |
 
 The binary is `bin/tierstore`, the exact bytes of the build. Every unit runs it as

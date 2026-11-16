@@ -1,0 +1,35 @@
+# The nft guard of tierstore, as the deb and rpm packages install it, at
+# /usr/lib/systemd/system/tierstore-guard.service: it loads the nftables ruleset the host's
+# /etc/tierstore/guard.nft holds and deletes it again when the unit stops. The file is not this
+# package's: a separate configuration package places it (root, mode 0644), and this package writes
+# nothing in /etc. The ruleset must define `table inet tierstore_guard`, and it should start with
+# `table inet tierstore_guard`, `delete table inet tierstore_guard` and then the table's
+# definition, so that `nft -f` replaces an earlier copy of the table atomically; ExecStop= and the
+# reload below name that table, and a ruleset in another table is neither removed nor replaced by
+# them.
+#
+# A node with no /etc/tierstore/guard.nft skips the unit (ConditionPathExists= below); a skipped
+# condition is not a failure, and the unit stays inactive. The package starts and enables nothing:
+# `systemctl enable --now tierstore-guard.service` on a node that has the file. A change of the
+# file is loaded by `systemctl reload-or-restart tierstore-guard.service` (ExecReload=), which
+# replaces the table atomically, so there is no moment without it.
+#
+# It is a unit of its own, and not an ExecStartPre= and ExecStopPost= of tierstore@.service, because
+# in a hand-over the old instance stops while the new one serves, and a stop of one instance would
+# delete the guard under the other. tierstore@.service wants this unit and starts after it
+# (Wants= and After=), so a start of an instance loads the guard first; a stop of an instance does
+# not stop it.
+[Unit]
+Description=nft guard of tierstore (/etc/tierstore/guard.nft)
+Documentation=https://github.com/komira-ai/tierstore/blob/main/packaging/README.md
+ConditionPathExists=/etc/tierstore/guard.nft
+
+[Service]
+Type=oneshot
+RemainAfterExit=yes
+ExecStart=/usr/sbin/nft -f /etc/tierstore/guard.nft
+ExecReload=/usr/sbin/nft -f /etc/tierstore/guard.nft
+ExecStop=-/usr/sbin/nft delete table inet tierstore_guard
+
+[Install]
+WantedBy=multi-user.target

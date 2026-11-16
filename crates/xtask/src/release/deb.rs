@@ -12,10 +12,14 @@
 //! |---|---|---|
 //! | `/usr/libexec/tierstore/tierstore` | 0755 | the binary, the exact bytes given |
 //! | `/usr/lib/systemd/system/tierstore@.service` | 0644 | `packaging/tierstore@.service`, the template of the two instances the update hook alternates between |
+//! | `/usr/lib/systemd/system/tierstore-guard.service` | 0644 | `packaging/tierstore-guard.service`, the nft guard: loads the host's `/etc/tierstore/guard.nft` (placed by another package) and is skipped on a host without it |
 //! | `/usr/lib/sysusers.d/tierstore.conf` | 0644 | `packaging/tierstore.conf`, the account of the unit |
 //! | `/usr/share/doc/tierstore/examples/config.toml` | 0644 | `packaging/config.toml`, an example that nothing reads |
 //! | `/usr/share/doc/tierstore/copyright` | 0644 | the repository's `LICENSE` |
 //! | `/usr/share/doc/tierstore/THIRD-PARTY-LICENSES.txt` | 0644 | the notice of the crates linked into the binary (`--licenses`) |
+//!
+//! The template wants the guard unit and starts after it; the guard unit is its own unit, so that
+//! a stop of one instance in a hand-over does not delete the guard under the other.
 //!
 //! Nothing in `/etc` is the package's, so it has no conffile: the instances read the host's
 //! `/etc/tierstore/config.toml`, which the package never writes, and a purge removes nothing of the
@@ -69,16 +73,20 @@ pub const HOMEPAGE: &str = "https://tierstore.dev";
 pub const SYNOPSIS: &str = "S3 server over a hot and a cold tier of S3-compatible stores";
 
 /// The description after its first line, one string per line; an empty one is written ` .`.
-pub const DESCRIPTION: [&str; 5] = [
+pub const DESCRIPTION: [&str; 6] = [
     "New objects are written to the hot tier, copied to the cold tier in the background,",
     "and freed from the hot tier when it fills.",
     "",
-    "The package installs the binary, the systemd unit template tierstore@.service and an example",
-    "configuration. It starts and enables nothing: write /etc/tierstore/config.toml and its keys.",
+    "The package installs the binary, the systemd unit template tierstore@.service, the unit",
+    "tierstore-guard.service and an example configuration. It starts and enables nothing: write",
+    "/etc/tierstore/config.toml and its keys.",
 ];
 
 /// The unit template, as `packaging/tierstore@.service`.
 pub const UNIT: &str = include_str!("../../../../packaging/tierstore@.service");
+
+/// The nft guard unit, as `packaging/tierstore-guard.service`.
+pub const GUARD_UNIT: &str = include_str!("../../../../packaging/tierstore-guard.service");
 
 /// Where the package puts the binary (below the root), the path the template's `ExecStart=`
 /// runs and the update hook finds in a staged version's tree.
@@ -86,6 +94,9 @@ pub const BINARY_PATH: &str = "usr/libexec/tierstore/tierstore";
 
 /// Where the package puts the unit template (below the root).
 pub const UNIT_PATH: &str = "usr/lib/systemd/system/tierstore@.service";
+
+/// Where the package puts the nft guard unit (below the root).
+pub const GUARD_UNIT_PATH: &str = "usr/lib/systemd/system/tierstore-guard.service";
 
 /// Where the package puts the example configuration (below the root).
 pub const EXAMPLE_PATH: &str = "usr/share/doc/tierstore/examples/config.toml";
@@ -158,6 +169,7 @@ pub fn files(binary: &[u8], notice: &[u8]) -> Vec<File> {
     vec![
         file(BINARY_PATH, 0o755, binary),
         file(UNIT_PATH, 0o644, UNIT.as_bytes()),
+        file(GUARD_UNIT_PATH, 0o644, GUARD_UNIT.as_bytes()),
         file(
             "usr/lib/sysusers.d/tierstore.conf",
             0o644,

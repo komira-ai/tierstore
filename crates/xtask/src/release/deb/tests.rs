@@ -154,6 +154,7 @@ fn the_data_holds_each_file_at_its_path_and_mode_owned_by_root_with_directories_
             ("./usr/lib/", true, 0o755),
             ("./usr/lib/systemd/", true, 0o755),
             ("./usr/lib/systemd/system/", true, 0o755),
+            ("./usr/lib/systemd/system/tierstore-guard.service", false, 0o644),
             ("./usr/lib/systemd/system/tierstore@.service", false, 0o644),
             ("./usr/lib/sysusers.d/", true, 0o755),
             ("./usr/lib/sysusers.d/tierstore.conf", false, 0o644),
@@ -214,6 +215,10 @@ fn the_files_hold_the_binary_the_packaging_files_the_licence_and_the_notice() {
     assert_eq!(
         content("./usr/lib/systemd/system/tierstore@.service"),
         packaging("tierstore@.service")
+    );
+    assert_eq!(
+        content("./usr/lib/systemd/system/tierstore-guard.service"),
+        packaging("tierstore-guard.service")
     );
     assert_eq!(
         content("./usr/lib/sysusers.d/tierstore.conf"),
@@ -286,6 +291,53 @@ fn the_template_runs_the_installed_binary_on_the_hosts_file_as_the_account_the_s
 }
 
 #[test]
+fn the_guard_unit_loads_the_hosts_ruleset_on_a_host_that_has_one_and_removes_its_table_on_stop() {
+    // Catches: a guard that runs on a host with no guard.nft (a failed unit at boot), one that is
+    // not a oneshot that stays active (the stop would run at once and delete the table), a reload
+    // that is not the same atomic `nft -f`, a stop that fails when the table is gone or deletes
+    // another table, and a unit that is enabled by the package or ordered under an instance.
+    assert_eq!(unit_values(GUARD_UNIT, "ConditionPathExists"), ["/etc/tierstore/guard.nft"]);
+    assert_eq!(unit_values(GUARD_UNIT, "Type"), ["oneshot"]);
+    assert_eq!(unit_values(GUARD_UNIT, "RemainAfterExit"), ["yes"]);
+    assert_eq!(
+        unit_values(GUARD_UNIT, "ExecStart"),
+        ["/usr/sbin/nft -f /etc/tierstore/guard.nft"]
+    );
+    assert_eq!(
+        unit_values(GUARD_UNIT, "ExecReload"),
+        ["/usr/sbin/nft -f /etc/tierstore/guard.nft"]
+    );
+    assert_eq!(
+        unit_values(GUARD_UNIT, "ExecStop"),
+        ["-/usr/sbin/nft delete table inet tierstore_guard"]
+    );
+    assert_eq!(unit_values(GUARD_UNIT, "WantedBy"), ["multi-user.target"]);
+    for key in ["Requires", "RequiredBy", "Before", "After", "PartOf", "BindsTo"] {
+        assert_eq!(unit_values(GUARD_UNIT, key), Vec::<String>::new(), "{key}");
+    }
+    assert!(
+        files(BINARY, NOTICE)
+            .iter()
+            .any(|(path, mode, content)| path == GUARD_UNIT_PATH
+                && *mode == 0o644
+                && content == GUARD_UNIT.as_bytes())
+    );
+}
+
+#[test]
+fn the_template_wants_the_guard_and_starts_after_it_so_a_stop_of_one_instance_leaves_it() {
+    // Catches: a template that does not load the guard before an instance, one that Requires it
+    // (an absent guard.nft would stop the instance from starting), one that binds the guard's
+    // stop to an instance's (a hand-over would delete the guard under the new instance), and
+    // an After= that dropped the network ordering.
+    assert_eq!(unit_values(UNIT, "Wants"), ["network-online.target", "tierstore-guard.service"]);
+    assert_eq!(unit_values(UNIT, "After"), ["network-online.target", "tierstore-guard.service"]);
+    for key in ["Requires", "BindsTo", "PartOf", "Before"] {
+        assert_eq!(unit_values(UNIT, key), Vec::<String>::new(), "{key}");
+    }
+}
+
+#[test]
 fn the_control_file_names_the_package_its_version_architecture_and_size_in_kibibytes() {
     // Catches: a field out of order or missing, an Installed-Size rounded down, a description
     // line that dpkg would read as a new field.
@@ -302,8 +354,9 @@ fn the_control_file_names_the_package_its_version_architecture_and_size_in_kibib
          Description: S3 server over a hot and a cold tier of S3-compatible stores\n \
          New objects are written to the hot tier, copied to the cold tier in the background,\n \
          and freed from the hot tier when it fills.\n .\n \
-         The package installs the binary, the systemd unit template tierstore@.service and an example\n \
-         configuration. It starts and enables nothing: write /etc/tierstore/config.toml and its keys.\n"
+         The package installs the binary, the systemd unit template tierstore@.service, the unit\n \
+         tierstore-guard.service and an example configuration. It starts and enables nothing: write\n \
+         /etc/tierstore/config.toml and its keys.\n"
     );
     assert!(control("1.2.3", "arm64", &[]).contains("Installed-Size: 0\n"));
 }

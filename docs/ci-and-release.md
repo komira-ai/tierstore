@@ -247,7 +247,10 @@ archive.
   `/usr/libexec/tierstore/tierstore` (0755), `/usr/lib/systemd/system/tierstore@.service` (from
   `packaging/tierstore@.service`, the a/b slot template of the update hook: the instances
   `tierstore@a` and `tierstore@b` start only under the marker `/var/lib/tierstore/run-%i`, and it
-  has `StateDirectory=tierstore` and `[Install] WantedBy=multi-user.target`),
+  has `StateDirectory=tierstore` and `[Install] WantedBy=multi-user.target`, and wants and starts
+  after `tierstore-guard.service`), `/usr/lib/systemd/system/tierstore-guard.service` (from
+  `packaging/tierstore-guard.service`: a oneshot that loads `/etc/tierstore/guard.nft`, which a
+  separate package places, and is skipped on a host without that file),
   `/usr/lib/sysusers.d/tierstore.conf` (from `packaging/`), the example
   `/usr/share/doc/tierstore/examples/config.toml` (from `packaging/config.toml`, which nothing
   reads), and `/usr/share/doc/tierstore/copyright` (the repository's `LICENSE`) and
