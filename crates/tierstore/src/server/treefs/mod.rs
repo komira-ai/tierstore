@@ -117,6 +117,8 @@ fn locked<T>(mutex: &Mutex<T>) -> MutexGuard<'_, T> {
 #[cfg(target_os = "linux")]
 mod fakedev;
 #[cfg(test)]
+pub(in crate::server) mod live_testing;
+#[cfg(test)]
 #[cfg(target_os = "linux")]
 mod recovery_tests;
 #[cfg(test)]

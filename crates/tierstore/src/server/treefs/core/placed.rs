@@ -1,0 +1,354 @@
+//! Placements at fs locations (`docs/design/node-local-trees.md` section 6.2): the tree of a
+//! placement made by the node's trees API appears at `<mount>/<path>` of its fs location, and is
+//! read with no manifest.
+//!
+//! A lookup of a name in the mount's root, or in a directory above a location, asks the node's
+//! tree store over the fill socket where the path is (`place`). A path that is a location is the
+//! root of its placement's tree: the tree store holds the placement for this mount, and the core
+//! reads the tree whole (`flat`), numbers it under the placement's key in the table of tree numbers
+//! and attaches it as a lookup attaches a tree of `trees/`: implicitly, until it is idle for
+//! `fs.tree_idle_secs`, when the hold of the tree store is given back (`unplace`). A path that a
+//! location is below is a directory the mount passes through, of mode 0711 as the root is, which
+//! nobody lists. Anything else is `ENOENT`. Every answer of the namespace is given with a timeout
+//! of zero, so a placement that is released stops resolving at the next lookup.
+//!
+//! A tree is numbered under its placement and location, not its digest: one tree placed at two
+//! locations, by two placements or by one, is two trees of the mount, so no directory has two
+//! paths. The key is the placement's sixteen bytes of id, the eight bytes [`PLACED`], and the first
+//! eight bytes of the SHA-256 of the location's path; a digest of a tree of manifests has those
+//! eight bytes in that place with a chance of one in 2^64. A process that reads the tree again
+//! finds the location among the placement's by the hash. A directory above the locations is numbered by the hash of its path
+//! (`ino::placed_dir`); a process that took the mount over and does not know the path of such a
+//! number asks the tree store for the paths of the locations (`mounted`) and finds it there.
+//!
+//! A file of a placed tree is a span of a cached pack: an open asks the fill socket for the span
+//! (`span`), which fills it if the cache does not hold it, and reads the pack's own file at the
+//! span's offset. It is never opened by passthrough, since the kernel would map the whole pack onto
+//! the file, and the core pins nothing for it: the tree store pins the packs of its trees.
+
+use std::fs::File;
+use std::sync::Arc;
+use std::time::Duration;
+
+use sha2::{Digest as _, Sha256};
+
+use crate::server::local_cache::trees::{FlatKind, FlatTree, Location};
+use crate::tree_manifest::{BlobSource, EntryKind, TreeDigest, TreeEntry, TreeError, flatten};
+
+use super::super::fill_client::Place;
+use super::super::ino;
+use super::super::tree::Tree;
+use super::read::FileBytes;
+use super::{Core, Errno, Looked, locked, read_manifest};
+use crate::server::local_cache::manifest_path;
+
+/// The bytes 16 to 24 of the key a placement's tree at a location is numbered under; the first
+/// sixteen are the placement's id, the last eight the start of the SHA-256 of the location's path.
+const PLACED: &[u8; 8] = b"tsplaced";
+
+/// The answer of the fill socket for an object the upstream does not have.
+const ABSENT: &str = "upstream 404";
+
+/// The most entries a tree of the mount may have: what the index of an inode number counts.
+const MOST_ENTRIES: usize = 1 << 24;
+
+/// Why a tree was not read.
+#[derive(Debug, PartialEq, Eq)]
+pub(in crate::server::treefs) enum Unread {
+    /// There is no such tree: the upstream does not have the root manifest, or the placement has
+    /// ended; why, in words.
+    Gone(String),
+    /// The tree cannot be read now: why.
+    Failed(String),
+}
+
+impl std::fmt::Display for Unread {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        match self {
+            Self::Gone(why) | Self::Failed(why) => f.write_str(why),
+        }
+    }
+}
+
+/// The start of the SHA-256 of `path`.
+fn path_hash(path: &str) -> [u8; 8] {
+    let digest = Sha256::digest(path.as_bytes());
+    let mut first = [0_u8; 8];
+    first.copy_from_slice(&digest[..8]);
+    first
+}
+
+/// The key the tree of the placement `id` (thirty-two lower-case hex digits) at the fs location
+/// `path` is numbered under.
+pub(in crate::server::treefs) fn key_of(id: &str, path: &str) -> Option<TreeDigest> {
+    let lower = id.bytes().all(|b| matches!(b, b'0'..=b'9' | b'a'..=b'f'));
+    let bytes = hex::decode(id).ok().filter(|b| b.len() == 16 && lower)?;
+    let mut key = [0_u8; 32];
+    key[..16].copy_from_slice(&bytes);
+    key[16..24].copy_from_slice(PLACED);
+    key[24..].copy_from_slice(&path_hash(path));
+    Some(TreeDigest::from_bytes(key))
+}
+
+/// The id of the placement whose tree at a location `digest` is the key of, and the hash of the
+/// location's path; none for a tree of manifests.
+pub(in crate::server::treefs) fn placement_of(digest: &TreeDigest) -> Option<(String, [u8; 8])> {
+    let bytes = digest.as_bytes();
+    let mut hash = [0_u8; 8];
+    hash.copy_from_slice(&bytes[24..]);
+    (bytes[16..24] == PLACED[..]).then(|| (hex::encode(&bytes[..16]), hash))
+}
+
+/// The inode number of the directory `path` above the fs locations.
+pub(in crate::server::treefs) fn dir_ino(path: &str) -> u64 {
+    ino::placed_dir(u64::from_le_bytes(path_hash(path)))
+}
+
+/// The tree of the mount that `flat` is at its location `path`: its entries, as a tree of
+/// manifests has them, and the stored modes. Refused unless the root comes first, every other
+/// entry follows the directory that holds it, and every file names a pack of the list.
+fn tree_of(flat: &FlatTree, path: String) -> Result<Tree, String> {
+    let damaged = |why: &str| format!("the flattened tree at {path} is damaged: {why}");
+    if flat.entries.len() > MOST_ENTRIES {
+        return Err(damaged("too many entries"));
+    }
+    let packs: Vec<Arc<str>> = flat
+        .packs
+        .iter()
+        .map(|pack| Arc::from(pack.as_str()))
+        .collect();
+    let mut entries: Vec<TreeEntry> = Vec::with_capacity(flat.entries.len());
+    let mut modes = Vec::with_capacity(flat.entries.len());
+    for (at, entry) in flat.entries.iter().enumerate() {
+        // At most `MOST_ENTRIES`, which fits 32 bits.
+        let index = at as u32;
+        let holder = entry.parent.and_then(|parent| entries.get(parent as usize));
+        let placed = match (index, holder) {
+            (0, None) => entry.parent.is_none() && entry.kind == FlatKind::Dir,
+            (_, Some(holder)) => matches!(holder.kind, EntryKind::Dir { .. }),
+            _ => false,
+        };
+        if !placed {
+            return Err(damaged("an entry is not below a directory before it"));
+        }
+        let kind = match &entry.kind {
+            FlatKind::Dir => EntryKind::Dir {
+                digest: TreeDigest::from_bytes([0; 32]),
+                size: 0,
+            },
+            FlatKind::File {
+                size,
+                sha256,
+                pack,
+                offset,
+            } => {
+                let source = match pack {
+                    Some(pack) => {
+                        let key = packs.get(*pack as usize).ok_or_else(|| damaged("a pack"))?;
+                        Some(BlobSource {
+                            key: Arc::clone(key),
+                            offset: *offset,
+                        })
+                    }
+                    None => None,
+                };
+                EntryKind::File {
+                    digest: TreeDigest::from_hex(sha256).ok_or_else(|| damaged("a digest"))?,
+                    size: *size,
+                    exec: entry.mode & 0o111 != 0,
+                    source,
+                }
+            }
+            FlatKind::Symlink { target } => EntryKind::Symlink {
+                target: Arc::from(target.as_str()),
+            },
+        };
+        entries.push(TreeEntry {
+            index,
+            parent: entry.parent,
+            name: Arc::from(entry.name.as_str()),
+            kind,
+        });
+        modes.push(entry.mode);
+    }
+    Ok(Tree::placed(entries, modes, path))
+}
+
+impl Core {
+    /// Reads the tree `digest`: a placement's from the node's tree store, whole; any other's from
+    /// its manifests, fetched through the fill socket where the cache does not hold them, and
+    /// flattened.
+    pub(in crate::server::treefs) fn read_tree(&self, digest: &TreeDigest) -> Result<Tree, Unread> {
+        if let Some((id, hash)) = placement_of(digest) {
+            let gone = || Unread::Gone(format!("no placement {id} at that location"));
+            let flat = match self.fills.flat(&id) {
+                Ok(flat) => flat,
+                Err(answer) if answer == "none" => return Err(gone()),
+                Err(answer) => return Err(Unread::Failed(answer)),
+            };
+            let path = flat.paths.iter().find(|path| path_hash(path) == hash);
+            let path = path.cloned().ok_or_else(gone)?;
+            return tree_of(&flat, path).map_err(Unread::Failed);
+        }
+        let fetch = |wanted: &TreeDigest| -> Result<Vec<u8>, String> {
+            let hex = wanted.to_string();
+            let path = manifest_path(&self.settings.cache_path, &hex);
+            if let Ok(bytes) = read_manifest(&path) {
+                return Ok(bytes);
+            }
+            self.fills.fill_manifest(&hex)?;
+            read_manifest(&path).map_err(|error| error.to_string())
+        };
+        flatten(digest, fetch).map(Tree::new).map_err(|why| {
+            let gone = matches!(
+                &why,
+                TreeError::Fetch { digest: missing, reason } if missing == digest && reason == ABSENT
+            );
+            if gone {
+                Unread::Gone(why.to_string())
+            } else {
+                Unread::Failed(why.to_string())
+            }
+        })
+    }
+
+    /// Looks up `name` in `parent`, the mount's root or a directory above the fs locations: the
+    /// root of a placement's tree, a directory above a location, or `ENOENT`.
+    ///
+    /// # Errors
+    /// [`Errno::NoEnt`] for a path that is no location and is above none (and for a name that
+    /// cannot be one), [`Errno::Io`] for a fill socket that does not answer or a tree that cannot
+    /// be read.
+    pub(in crate::server::treefs) fn lookup_placed(
+        &self,
+        parent: u64,
+        name: &str,
+    ) -> Result<Looked, Errno> {
+        let path = if parent == ino::ROOT {
+            name.to_owned()
+        } else {
+            format!("{}/{name}", self.dir_path(parent)?)
+        };
+        // A name of a tree has no newline in the fill socket's lines, and the mount's own names
+        // (`trees`, `views`, `put`) are no location.
+        if path.contains('\n') || Location::fs(&path).is_err() {
+            return Err(Errno::NoEnt);
+        }
+        let place = self.fills.place(&self.settings.mount_id, &path);
+        match place.map_err(|why| asked(&path, &why))? {
+            Place::Tree(id) => {
+                let key = key_of(&id, &path).ok_or_else(|| asked(&path, &id))?;
+                let number = self.resolve_digest(key)?;
+                let loaded = self.counted(number)?;
+                Ok(Looked::Found(self.root_entry(
+                    number,
+                    &loaded,
+                    Duration::ZERO,
+                )?))
+            }
+            Place::Dir => {
+                let ino = dir_ino(&path);
+                let _ = locked(&self.state).dirs.insert(ino, path);
+                Ok(Looked::Found(self.namespace(ino)))
+            }
+            Place::Nothing => Err(Errno::NoEnt),
+        }
+    }
+
+    /// The path of the directory `dir` above the fs locations: from the paths this core has
+    /// looked up, else from the locations there are now.
+    ///
+    /// # Errors
+    /// [`Errno::NoEnt`] for a number that is no such directory now, [`Errno::Io`] for a fill
+    /// socket that does not answer.
+    pub(in crate::server::treefs) fn dir_path(&self, dir: u64) -> Result<String, Errno> {
+        if let Some(path) = locked(&self.state).dirs.get(&dir) {
+            return Ok(path.clone());
+        }
+        let paths = self.fills.mounted().map_err(|why| asked("", &why))?;
+        let mut state = locked(&self.state);
+        for path in &paths {
+            for (at, _) in path.match_indices('/') {
+                let above = &path[..at];
+                let _ = state.dirs.insert(dir_ino(above), above.to_owned());
+            }
+        }
+        state.dirs.get(&dir).cloned().ok_or(Errno::NoEnt)
+    }
+
+    /// The inode of the directory that holds the root of `tree`: `trees/` for a tree of manifests;
+    /// for a placed tree, the directory above its location, or the mount's root.
+    pub(in crate::server::treefs) fn root_parent(&self, tree: &Tree) -> u64 {
+        let Some(location) = tree.location() else {
+            return ino::TREES;
+        };
+        let Some((above, _)) = location.rsplit_once('/') else {
+            return ino::ROOT;
+        };
+        let ino = dir_ino(above);
+        let mut state = locked(&self.state);
+        let _ = state.dirs.entry(ino).or_insert_with(|| above.to_owned());
+        ino
+    }
+
+    /// The inode of the directory that holds `dir`, a directory above the fs locations.
+    ///
+    /// # Errors
+    /// As [`Core::dir_path`].
+    pub(in crate::server::treefs) fn placed_parent(&self, dir: u64) -> Result<u64, Errno> {
+        let path = self.dir_path(dir)?;
+        Ok(path
+            .rsplit_once('/')
+            .map_or(ino::ROOT, |(up, _)| dir_ino(up)))
+    }
+
+    /// The bytes of a file of a placed tree: the span of the pack that holds them, filled first if
+    /// the cache does not hold it; why not, in the words of the fill socket's answer.
+    pub(in crate::server::treefs) fn span_file(
+        &self,
+        (digest, size, source): (&TreeDigest, u64, Option<&BlobSource>),
+    ) -> Result<FileBytes, String> {
+        let source = source.ok_or("the file has no source")?;
+        let sha = digest.to_string();
+        let (base, path) = self.fills.span(&sha, size, &source.key, source.offset)?;
+        let file = File::open(path).map_err(|_| "io".to_owned())?;
+        Ok(FileBytes { file, base, size })
+    }
+
+    /// Gives back the hold of the node's tree store on the placement whose tree at a location has
+    /// the key `digest`, unless the tree of another of its locations is attached still; a tree of
+    /// manifests is unpinned instead.
+    pub(in crate::server::treefs) fn let_go(&self, digest: &TreeDigest) {
+        match placement_of(digest) {
+            Some((id, _)) => {
+                let trees = locked(&self.state).attachments.trees();
+                let held = trees
+                    .iter()
+                    .any(|other| placement_of(other).is_some_and(|(other, _)| other == id));
+                if !held {
+                    self.fills.unplace(&self.settings.mount_id, &id);
+                }
+            }
+            None => {
+                let _ = self
+                    .fills
+                    .unpin(&self.settings.mount_id, &digest.to_string());
+            }
+        }
+    }
+}
+
+/// What a question to the fill socket about `path` that was not answered is: `EIO`, said on
+/// stderr.
+fn asked(path: &str, why: &str) -> Errno {
+    tracing::warn!("tierstore fs: cannot look up the placement at {path:?}: {why}");
+    Errno::Io
+}
+
+#[cfg(test)]
+#[path = "placed_tests.rs"]
+mod tests;
+
+#[cfg(test)]
+#[path = "placed_flat_tests.rs"]
+mod flat_tests;

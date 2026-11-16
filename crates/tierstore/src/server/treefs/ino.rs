@@ -6,6 +6,12 @@
 //! first time it is attached after the mount was made, and an index is the entry's position in the
 //! tree flattened depth first in manifest order, the root being 0. So the number of an entry is a
 //! function of the manifests and the table of tree numbers alone.
+//!
+//! A placement shown at an fs location (`core/placed.rs`) has a tree number of its own, given to a
+//! key made of its id, and its entries are numbered as a tree's, depth first in name order. The
+//! directories the mount passes through above the locations (`jobs/` of `jobs/1f3a/root`) are
+//! numbered by the hash of their path, in the range whose top two bits are `0b10`: the part of the
+//! range of the views that the put directory left.
 
 /// The bits of an index, below the tree number.
 const INDEX_BITS: u32 = 24;
@@ -29,6 +35,22 @@ const PUT_FILE: u64 = 1 << 61;
 
 /// The bits below [`PUT_FILE`]: a directory's hash, or a file's number.
 const PUT_LOW: u64 = PUT_FILE - 1;
+
+/// The top two bits of the inode number of a directory above the fs location of a placement.
+const PLACED_RANGE: u64 = 0b10 << 62;
+
+/// The bits below the top two: a directory's hash.
+const LOW_62: u64 = (1 << 62) - 1;
+
+/// The inode number of the directory above the fs locations whose path hashes to `hash`.
+pub(super) fn placed_dir(hash: u64) -> u64 {
+    PLACED_RANGE | (hash & LOW_62)
+}
+
+/// Whether `ino` is the number of a directory above the fs locations.
+pub(super) fn is_placed_dir(ino: u64) -> bool {
+    ino & PUT_RANGE == PLACED_RANGE
+}
 
 /// The inode number of the put directory's directory whose path hashes to `hash`.
 pub(super) fn put_dir(hash: u64) -> u64 {

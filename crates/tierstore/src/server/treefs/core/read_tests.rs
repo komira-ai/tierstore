@@ -249,7 +249,7 @@ fn blob_file_gives_the_cache_file_and_the_length_of_a_file() {
     let (file, length) = core.blob_file(ino::of(1, 4)).unwrap().unwrap();
     assert_eq!(length, 10);
     let mut bytes = [0u8; 10];
-    file.read_exact_at(&mut bytes, 0).unwrap();
+    file.file.read_exact_at(&mut bytes, 0).unwrap();
     assert_eq!(bytes.to_vec(), blob_with_length(&rig, 10));
     assert!(core.blob_file(ino::of(1, 5)).unwrap().is_none());
     for dir in [ino::of(1, 2), ino::ROOT, ino::TREES] {

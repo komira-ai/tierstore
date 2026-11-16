@@ -36,7 +36,11 @@
 //! cache's holds pin under, is refused with its words (`the mount id "hold" is reserved for holds`).
 //! A `put` is answered with one line of JSON (see [`put`]), the one request whose answer is not
 //! plain words; a `put` line that is not a request is answered `refused <why>` as any other.
+//! The mount's requests about the placements of the node (`place`, `mounted`, `flat`, `span`,
+//! `unplace`) are answered from the node's tree store, `mounted` and `flat` in one line of JSON
+//! (see [`mount`]).
 
+mod mount;
 mod put;
 mod request;
 
@@ -51,6 +55,7 @@ use tokio::sync::Notify;
 use tokio::task::JoinSet;
 
 use super::ACCEPT_PAUSE;
+use super::local_cache::trees::TreeStore;
 use super::local_cache::{Blob, FillError};
 use super::local_cache::{LocalCache, Mode, PinError};
 use request::{MAX_LINE, Request, parse};
@@ -110,11 +115,12 @@ impl Listening {
     }
 
     /// Takes the next connection and serves it on a task of its own, or reaps one that ended.
-    async fn step(&mut self, cache: &LocalCache, uid: u32) {
+    async fn step(&mut self, (cache, trees): (&LocalCache, Option<&TreeStore>), uid: u32) {
         tokio::select! {
             accepted = self.listener.accept() => match accepted {
                 Ok((stream, _)) => {
-                    let _ = self.connections.spawn(session(cache.clone(), stream, uid));
+                    let stores = (cache.clone(), trees.cloned());
+                    let _ = self.connections.spawn(session(stores, stream, uid));
                 }
                 Err(why) => {
                     tracing::warn!("tierstore: the fill socket cannot accept: {why}");
@@ -127,22 +133,33 @@ impl Listening {
 }
 
 /// One step of `socket`, or never when there is none.
-async fn step(socket: Option<&mut Listening>, cache: &LocalCache, uid: u32) {
+async fn step(socket: Option<&mut Listening>, stores: (&LocalCache, Option<&TreeStore>), uid: u32) {
     match socket {
-        Some(socket) => socket.step(cache, uid).await,
+        Some(socket) => socket.step(stores, uid).await,
         None => std::future::pending().await,
     }
 }
 
-/// Serves the fill socket at `path` for `cache` until `halt` is notified: bound while the cache
-/// is read-write, closed while it is not. Requests that are being answered when `halt` comes are
-/// dropped with their connection; the fills they started go on.
-pub(super) async fn serve(cache: LocalCache, path: &Path, halt: Arc<Notify>) {
-    serve_as(cache, path, halt, rustix::process::geteuid().as_raw()).await;
+/// Serves the fill socket at `path` for `cache`, and `trees`, the node's tree store if it has one,
+/// until `halt` is notified: bound while the cache is read-write, closed while it is not.
+/// Requests that are being answered when `halt` comes are dropped with their connection; the
+/// fills they started go on.
+pub(super) async fn serve(
+    (cache, trees): (LocalCache, Option<TreeStore>),
+    path: &Path,
+    halt: Arc<Notify>,
+) {
+    let uid = rustix::process::geteuid().as_raw();
+    serve_as((cache, trees), path, halt, uid).await;
 }
 
 /// [`serve`] for peers of the user `uid`.
-async fn serve_as(cache: LocalCache, path: &Path, halt: Arc<Notify>, uid: u32) {
+async fn serve_as(
+    (cache, trees): (LocalCache, Option<TreeStore>),
+    path: &Path,
+    halt: Arc<Notify>,
+    uid: u32,
+) {
     let mut modes = cache.watch_mode();
     let mut socket: Option<Listening> = None;
     loop {
@@ -158,7 +175,7 @@ async fn serve_as(cache: LocalCache, path: &Path, halt: Arc<Notify>, uid: u32) {
             () = halt.notified() => break,
             _ = modes.changed() => {}
             () = pause_if(rebind, REBIND_PAUSE) => {}
-            () = step(socket.as_mut(), &cache, uid) => {}
+            () = step(socket.as_mut(), (&cache, trees.as_ref()), uid) => {}
         }
     }
 }
@@ -190,7 +207,7 @@ async fn pause_if(wanted: bool, pause: Duration) {
 }
 
 /// One connection: the requests it sends, answered in order, until it closes.
-async fn session(cache: LocalCache, stream: UnixStream, uid: u32) {
+async fn session((cache, trees): (LocalCache, Option<TreeStore>), stream: UnixStream, uid: u32) {
     // A peer whose credentials cannot be read is as good as another user.
     let user = stream.peer_cred().map(|cred| cred.uid());
     let (read, mut write) = stream.into_split();
@@ -256,6 +273,7 @@ async fn session(cache: LocalCache, stream: UnixStream, uid: u32) {
                 size,
                 path,
             }) => put::answer(&cache, &key, sha256, size, &path).await,
+            Ok(Request::Mount(request)) => mount::answer(trees.as_ref(), request).await,
             Err(refusal) => format!("refused {refusal}"),
         };
         if write

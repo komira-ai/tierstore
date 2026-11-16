@@ -205,6 +205,9 @@ impl Upstream {
             }
             "touch" => None,
             "put" => Some(self.puts.answer(line)),
+            // This upstream has no placements.
+            "place" => Some("none".to_owned()),
+            "mounted" => Some("[]".to_owned()),
             "pin" => Some(
                 locked(&self.pin_answer)
                     .clone()

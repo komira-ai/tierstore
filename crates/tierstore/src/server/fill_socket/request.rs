@@ -8,6 +8,11 @@
 //! unpin <mount> <tree>                         take away every pin of the tree of the mount
 //! pins-live <mount> [<tree> ...]               keep the pins of these trees of the mount only
 //! put <key> <sha256> <size> from <path>         a create-only put of the file at <path>
+//! place <mount> <path>                         where the path of the mount is among the placements
+//! mounted                                      the paths of the placements' fs locations
+//! flat <placement>                             the tree of a placement, flattened for the mount
+//! span <sha256> <size> from <pack> @ <offset>  the range of a pack that is a file of a tree
+//! unplace <mount> <placement>                  the mount no longer holds the placement
 //! ```
 //!
 //! A digest is sixty-four lower-case hex digits; a number is decimal digits only; a mount and a
@@ -15,13 +20,17 @@
 //! mount, and the digest of the tree). `<key>` is the
 //! rest of the line between `from ` and the last ` @ `, so a key may hold spaces; it is not
 //! under a prefix the proxy keeps for itself. The `<key>` of a `put` is one word (no spaces), with
-//! the same rules, and its `<path>` is the rest of the line after `from `, an absolute path.
+//! the same rules, and its `<path>` is the rest of the line after `from `, an absolute path. The
+//! `<path>` of a `place` is the rest of the line after the mount: names of a tree joined by `/`,
+//! none at either end, the first not one of the mount's own (`trees`, `views`, `put`). A
+//! `<placement>` is thirty-two lower-case hex digits. A `span` has the words of a `fill` of a blob.
 
 use std::path::PathBuf;
 
 use crate::TreeDigest;
 use crate::journal::is_reserved;
 use crate::server::local_cache::layout::is_digest;
+use crate::server::local_cache::trees::{Location, PlacementId, placement_id};
 
 /// The longest line a request may be, in bytes: a `touch` of about a thousand digests.
 pub(super) const MAX_LINE: usize = 64 * 1024;
@@ -64,6 +73,33 @@ pub(super) enum Request {
         size: u64,
         path: PathBuf,
     },
+    /// A question of the mount about the placements of the node.
+    Mount(MountRequest),
+}
+
+/// A request of the mount about the placements of the node (module `mount`).
+#[derive(Debug, PartialEq, Eq)]
+pub(super) enum MountRequest {
+    /// Where the path `path` of the mount `mount` is among the fs locations of the placements; a
+    /// placement found there is held for the mount.
+    Place { mount: String, path: String },
+    /// The paths of the fs locations of the placements.
+    Mounted,
+    /// The tree of the placement, flattened for the mount.
+    Flat { placement: PlacementId },
+    /// The `size` bytes at `offset` of the pack `pack`, which are to hash to `sha256`, in the
+    /// cache: where they are, filled first if the cache does not hold them.
+    Span {
+        sha256: TreeDigest,
+        size: u64,
+        pack: String,
+        offset: u64,
+    },
+    /// The mount `mount` no longer holds the placement.
+    Unplace {
+        mount: String,
+        placement: PlacementId,
+    },
 }
 
 /// Why a line is not a request. The text follows `refused ` in the answer.
@@ -102,6 +138,13 @@ pub(super) enum Refusal {
     /// A path that is not absolute.
     #[error("not an absolute path")]
     Path,
+    /// A path of the mount that is not names joined by `/`, or begins with a name of the mount's
+    /// own.
+    #[error("not a path of the mount")]
+    MountPath,
+    /// A placement id that is not thirty-two lower-case hex digits.
+    #[error("not a placement id")]
+    Placement,
 }
 
 /// The digest `text`, or why it is not one.
@@ -147,6 +190,36 @@ pub(super) fn parse(line: &[u8]) -> Result<Request, Refusal> {
         )),
         "pin" => pin(rest),
         "put" => put(rest),
+        "place" => {
+            let (mount, path) = rest.split_once(' ').ok_or(Refusal::Malformed)?;
+            Location::fs(path).map_err(|_| Refusal::MountPath)?;
+            Ok(Request::Mount(MountRequest::Place {
+                mount: name(mount)?,
+                path: path.to_owned(),
+            }))
+        }
+        "mounted" => (text == "mounted")
+            .then_some(Request::Mount(MountRequest::Mounted))
+            .ok_or(Refusal::Malformed),
+        "flat" => Ok(Request::Mount(MountRequest::Flat {
+            placement: placement(rest)?,
+        })),
+        "span" => {
+            let (sha256, size, pack, offset) = blob(rest)?;
+            Ok(Request::Mount(MountRequest::Span {
+                sha256: TreeDigest::from_hex(&sha256).ok_or(Refusal::Digest)?,
+                size,
+                pack,
+                offset,
+            }))
+        }
+        "unplace" => {
+            let (mount, id) = rest.split_once(' ').ok_or(Refusal::Malformed)?;
+            Ok(Request::Mount(MountRequest::Unplace {
+                mount: name(mount)?,
+                placement: placement(id)?,
+            }))
+        }
         "unpin" => {
             let (mount, tree) = rest.split_once(' ').ok_or(Refusal::Malformed)?;
             Ok(Request::Unpin {
@@ -212,13 +285,30 @@ fn put(rest: &str) -> Result<Request, Refusal> {
     })
 }
 
+/// The placement id `text`, or why it is not one.
+fn placement(text: &str) -> Result<PlacementId, Refusal> {
+    placement_id(text).ok_or(Refusal::Placement)
+}
+
 /// The request `fill <rest>` is.
 fn fill(rest: &str) -> Result<Request, Refusal> {
-    let Some((sha256, source)) = rest.split_once(' ') else {
+    if !rest.contains(' ') {
         return Ok(Request::Manifest {
             sha256: digest(rest)?,
         });
-    };
+    }
+    let (sha256, size, from, offset) = blob(rest)?;
+    Ok(Request::Blob {
+        sha256,
+        size,
+        from,
+        offset,
+    })
+}
+
+/// The digest, size, key and offset of `<sha256> <size> from <key> @ <offset>`.
+fn blob(rest: &str) -> Result<(String, u64, String, u64), Refusal> {
+    let (sha256, source) = rest.split_once(' ').ok_or(Refusal::Malformed)?;
     let sha256 = digest(sha256)?;
     let (size, source) = source.split_once(' ').ok_or(Refusal::Malformed)?;
     let source = source.strip_prefix("from ").ok_or(Refusal::Malformed)?;
@@ -230,12 +320,7 @@ fn fill(rest: &str) -> Result<Request, Refusal> {
     if offset.checked_add(size).is_none() {
         return Err(Refusal::Overflow);
     }
-    Ok(Request::Blob {
-        sha256,
-        size,
-        from: key(from)?,
-        offset,
-    })
+    Ok((sha256, size, key(from)?, offset))
 }
 
 #[cfg(test)]

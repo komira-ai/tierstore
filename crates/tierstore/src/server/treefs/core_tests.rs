@@ -506,7 +506,9 @@ fn a_read_that_the_system_fails_is_an_io_error() {
     let directory = std::fs::File::open(&rig.cache).unwrap();
     let _ = super::locked(&core.handles).insert(
         handle,
-        std::sync::Arc::new(super::Handle::Cached(directory)),
+        std::sync::Arc::new(super::Handle::Cached(super::FileBytes::whole(
+            directory, 10,
+        ))),
     );
     assert_eq!(core.read(handle, 0, 10), Err(Errno::Io));
 }

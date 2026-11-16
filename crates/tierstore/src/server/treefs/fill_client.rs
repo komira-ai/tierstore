@@ -1,7 +1,8 @@
 //! The client of the fill socket (`server/fill_socket`): one line out, one line back, over
 //! connections kept for the next request. The requests of this process: `fill` (a blob inside an
 //! upstream object, or the whole object `cas/l/<sha256>` of a manifest), `touch` (not answered),
-//! the pin requests, and `put` (a staged file of the put directory, answered in JSON).
+//! the pin requests, `put` (a staged file of the put directory, answered in JSON), and the
+//! questions about the placements of the node (`place`, `mounted`, `flat`, `span`, `unplace`).
 //!
 //! A request that meets a closed socket, or a connection that went away (the S3 instance of the
 //! node is being updated: the old instance keeps answering through its drain, and the new one
@@ -12,10 +13,15 @@
 use std::io::{BufRead as _, BufReader, Write as _};
 use std::os::unix::net::UnixStream;
 use std::path::PathBuf;
+
+use crate::server::local_cache::trees::FlatTree;
 use std::sync::{Arc, Mutex};
 use std::time::Duration;
 
 use super::locked;
+
+/// The answer of a fill socket to a request it does not know: a node of an earlier release.
+const UNKNOWN: &str = "refused unknown request";
 
 /// How long a request waits between two tries over a socket that is not there.
 const PAUSE: Duration = Duration::from_secs(1);
@@ -37,6 +43,17 @@ pub(super) enum AskError {
 /// The answer to a fill that did not put the blob in the cache: the words of the socket
 /// (`upstream 404`, `mismatch`, `no space`, ...), or that nobody answered.
 pub(super) type FillFailure = String;
+
+/// Where a path of the mount is among the placements of the node: the answer to `place`.
+#[derive(Debug, PartialEq, Eq)]
+pub(super) enum Place {
+    /// The fs location of the placement with this id, which the node now holds for the mount.
+    Tree(String),
+    /// A directory above a location.
+    Dir,
+    /// Nothing is there.
+    Nothing,
+}
 
 /// Why an exchange over a connection failed.
 enum Failed {
@@ -232,6 +249,70 @@ impl FillClient {
     ) -> Result<String, AskError> {
         let line = format!("put {key} {sha256} {size} from {}", path.display());
         self.ask(&line, (true, Some(wait)))
+    }
+
+    /// Where the path `path` (names joined by `/`) is among the placements of the node; a
+    /// placement found there is held for `mount` until [`FillClient::unplace`]. A node of a
+    /// release before the placements, which does not know the request, has none. The error is the
+    /// answer that is none of these, or that nobody answered.
+    pub(super) fn place(&self, mount: &str, path: &str) -> Result<Place, String> {
+        let answer = self
+            .ask_line(&format!("place {mount} {path}"), true)
+            .map_err(|error| error.to_string())?;
+        match answer.split_once(' ') {
+            Some(("tree", id)) => Ok(Place::Tree(id.to_owned())),
+            None if answer == "dir" => Ok(Place::Dir),
+            None if answer == "none" => Ok(Place::Nothing),
+            _ if answer == UNKNOWN => Ok(Place::Nothing),
+            _ => Err(answer),
+        }
+    }
+
+    /// The paths of the fs locations of the placements of the node: none from a node of a release
+    /// before the placements.
+    pub(super) fn mounted(&self) -> Result<Vec<String>, String> {
+        let answer = self
+            .ask_line("mounted", true)
+            .map_err(|error| error.to_string())?;
+        if answer == UNKNOWN {
+            return Ok(Vec::new());
+        }
+        serde_json::from_str(&answer).map_err(|_| answer)
+    }
+
+    /// The tree of the placement `id`, flattened. The error is the answer (`none` for a
+    /// placement that is gone, `damaged`, `too large`) or that nobody answered.
+    pub(super) fn flat(&self, id: &str) -> Result<FlatTree, String> {
+        let answer = self
+            .ask_line(&format!("flat {id}"), true)
+            .map_err(|error| error.to_string())?;
+        serde_json::from_str(&answer).map_err(|_| answer)
+    }
+
+    /// The file of the cache that holds the `size` bytes at `offset` of the pack `pack`, which
+    /// hash to `sha256`, and the offset of their first byte in it: filled first if the cache does
+    /// not hold them. The error is the words of the answer, or that nobody answered.
+    pub(super) fn span(
+        &self,
+        sha256: &str,
+        size: u64,
+        pack: &str,
+        offset: u64,
+    ) -> Result<(u64, PathBuf), String> {
+        let line = format!("span {sha256} {size} from {pack} @ {offset}");
+        let answer = self.ask_line(&line, true).map_err(|e| e.to_string())?;
+        let held = answer
+            .strip_prefix("ok ")
+            .and_then(|rest| rest.split_once(' '));
+        match held.map(|(base, path)| (base.parse::<u64>(), path)) {
+            Some((Ok(base), path)) => Ok((base, PathBuf::from(path))),
+            _ => Err(answer),
+        }
+    }
+
+    /// Ends the hold of `mount` on the placement `id`; nothing is lost if the socket is away.
+    pub(super) fn unplace(&self, mount: &str, id: &str) {
+        let _ = self.ask_line(&format!("unplace {mount} {id}"), true);
     }
 
     /// Keeps the pins of `trees` of `mount` and takes away the others.

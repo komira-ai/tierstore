@@ -14,7 +14,8 @@
 //! that tree and attaches it with no run (`core/implicit.rs`), until it has been idle for
 //! `fs.tree_idle_secs`. Every inode number of a tree is derivable (`ino.rs`), so a tree that is
 //! not in memory is read again, from the table of tree numbers and the manifests, whenever a
-//! request names one of its inodes.
+//! request names one of its inodes. The trees of the node's placements appear at their fs
+//! locations, below the root, and are read from the node's tree store (`core/placed.rs`).
 
 use std::collections::{HashMap, HashSet};
 use std::fs::File;
@@ -28,10 +29,8 @@ use std::time::Duration;
 
 use crate::Clock;
 
-use crate::server::local_cache::{blob_path, manifest_path};
-use crate::tree_manifest::{
-    BlobSource, EntryKind, MAX_MANIFEST_BYTES, TreeDigest, TreeEntry, TreeError, flatten,
-};
+use crate::server::local_cache::blob_path;
+use crate::tree_manifest::{BlobSource, EntryKind, MAX_MANIFEST_BYTES, TreeDigest, TreeEntry};
 
 use super::attach::{Attachments, Failure, is_run};
 #[cfg(any(target_os = "linux", test))]
@@ -140,11 +139,11 @@ struct Loaded {
 enum Handle {
     /// A file of no bytes: nothing to read.
     Empty,
-    /// The cache file of a blob.
-    Cached(File),
+    /// The cache file of a blob, or the span of a pack that a file of a placed tree is.
+    Cached(FileBytes),
     /// The cache file of a blob that got no backing id because `fs.max_backing_ids` were live; the
     /// release is counted on the blob in the backing table.
-    Spilled(File, TreeDigest),
+    Spilled(FileBytes, TreeDigest),
     /// A blob served by kernel passthrough: reads never reach this process, and the release is
     /// counted on the blob's backing id.
     Backed(TreeDigest),
@@ -170,6 +169,8 @@ pub(super) enum Opened {
 struct State {
     loaded: HashMap<u64, Arc<Loaded>>,
     attachments: Attachments,
+    /// The path of each directory above the fs locations that a lookup found, by inode number.
+    dirs: HashMap<u64, String>,
 }
 
 /// Why an attach was refused.
@@ -279,6 +280,7 @@ impl Core {
             state: Mutex::new(State {
                 loaded: HashMap::new(),
                 attachments: Attachments::new(runtime_dir),
+                dirs: HashMap::new(),
             }),
             lifecycle: Mutex::new(()),
             pinning: Mutex::new(()),
@@ -353,26 +355,12 @@ impl Core {
             ino: ino::of(number, entry.index),
             kind,
             size,
-            perm,
+            // A placed tree's modes are served as stored.
+            perm: tree.mode(entry.index).unwrap_or(perm),
             nlink,
             uid: self.settings.owner.0,
             gid: self.settings.owner.1,
         }
-    }
-
-    /// Reads the tree `digest`: its manifests, fetched through the fill socket where the cache
-    /// does not hold them, and flattened.
-    fn read_tree(&self, digest: &TreeDigest) -> Result<Tree, TreeError> {
-        let fetch = |wanted: &TreeDigest| -> Result<Vec<u8>, String> {
-            let hex = wanted.to_string();
-            let path = manifest_path(&self.settings.cache_path, &hex);
-            if let Ok(bytes) = read_manifest(&path) {
-                return Ok(bytes);
-            }
-            self.fills.fill_manifest(&hex)?;
-            read_manifest(&path).map_err(|error| error.to_string())
-        };
-        flatten(digest, fetch).map(Tree::new)
     }
 
     /// The tree numbered `number`, read if it is not in memory; the request is a use of it.
@@ -439,7 +427,9 @@ impl Core {
         run: &str,
         prefetch: bool,
     ) -> Result<PathBuf, AttachError> {
-        let digest = TreeDigest::from_hex(digest).ok_or(AttachError::Digest)?;
+        let digest = TreeDigest::from_hex(digest)
+            .filter(|digest| placed::placement_of(digest).is_none())
+            .ok_or(AttachError::Digest)?;
         if !is_run(run) {
             return Err(AttachError::Run);
         }
@@ -554,6 +544,7 @@ impl Core {
             .attachments
             .trees()
             .iter()
+            .filter(|digest| placed::placement_of(digest).is_none())
             .map(ToString::to_string)
             .collect();
         let _ = self.fills.pins_live(&self.settings.mount_id, &trees);
@@ -623,9 +614,10 @@ impl Core {
     /// tree that cannot be read.
     pub(super) fn lookup(&self, parent: u64, name: &str) -> Result<Looked, Errno> {
         let (number, index) = ino::split(parent);
+        let namespace = number == 0 || ino::is_placed_dir(parent);
         #[cfg(test)]
-        self.note(if number == 0 { "namespace" } else { "lookup" });
-        if number == 0 {
+        self.note(if namespace { "namespace" } else { "lookup" });
+        if namespace {
             return match (parent, name) {
                 (ino::ROOT, "trees") => Ok(Looked::Found(self.namespace(ino::TREES))),
                 (ino::TREES, digest) => {
@@ -634,6 +626,8 @@ impl Core {
                     let root = self.root_entry(number, &loaded, Duration::ZERO)?;
                     Ok(Looked::Found(root))
                 }
+                (ino::ROOT, _) => self.lookup_placed(parent, name),
+                (dir, _) if ino::is_placed_dir(dir) => self.lookup_placed(dir, name),
                 _ => Err(Errno::NoEnt),
             };
         }
@@ -671,9 +665,10 @@ impl Core {
         #[cfg(test)]
         self.note("getattr");
         let (number, index) = ino::split(ino);
-        if number == 0 {
+        if number == 0 || ino::is_placed_dir(ino) {
             return match ino {
                 ino::ROOT | ino::TREES => Ok(self.namespace(ino)),
+                dir if ino::is_placed_dir(dir) => Ok(self.namespace(dir)),
                 _ => Err(Errno::NoEnt),
             };
         }
@@ -693,7 +688,7 @@ impl Core {
         #[cfg(test)]
         self.note("readlink");
         let (number, index) = ino::split(ino);
-        if number == 0 {
+        if number == 0 || ino::is_placed_dir(ino) {
             return Err(Errno::Inval);
         }
         let loaded = self.tree(number)?;
@@ -710,7 +705,7 @@ impl Core {
     /// [`Errno::Acces`] for the mount's root and `trees/`, which nobody may list.
     pub(super) fn opendir(&self, ino: u64) -> Result<(), Errno> {
         let (number, index) = ino::split(ino);
-        if number == 0 {
+        if number == 0 || ino::is_placed_dir(ino) {
             return Err(Errno::Acces);
         }
         let loaded = self.tree(number)?;
@@ -739,7 +734,10 @@ impl Core {
         let (number, index) = ino::split(ino);
         let loaded = self.tree(number)?;
         let parent = loaded.tree.entry(index).and_then(|entry| entry.parent);
-        let parent_ino = parent.map_or(ino::TREES, |parent| ino::of(number, parent));
+        let parent_ino = parent.map_or_else(
+            || self.root_parent(&loaded.tree),
+            |parent| ino::of(number, parent),
+        );
         let kids = loaded.tree.children(index);
         let first = usize::try_from(offset).unwrap_or(usize::MAX);
         for position in first..kids.len().saturating_add(2) {
@@ -795,11 +793,16 @@ impl Core {
             return Err(Errno::RoFs);
         }
         let (number, index) = ino::split(ino);
-        if number == 0 {
+        if number == 0 || ino::is_placed_dir(ino) {
             return Err(Errno::IsDir);
         }
         let loaded = self.tree(number)?;
         let entry = loaded.tree.entry(index).ok_or(Errno::NoEnt)?;
+        // A file of a placed tree is a span of a pack: never opened by passthrough.
+        let backing = self
+            .backing
+            .get()
+            .filter(|_| loaded.tree.location().is_none());
         let handle = match &entry.kind {
             EntryKind::Dir { .. } => return Err(Errno::IsDir),
             EntryKind::Symlink { .. } => return Err(Errno::Inval),
@@ -811,7 +814,7 @@ impl Core {
                 ..
             } => {
                 let blob = (digest, *size, source.as_ref());
-                if let Some(table) = self.backing.get() {
+                if let Some(table) = backing {
                     return self.open_backed(table, (&loaded, number, entry), blob, register);
                 }
                 Handle::Cached(self.blob(&loaded, number, entry, blob)?)
@@ -885,20 +888,26 @@ impl Core {
         }
     }
 
-    /// The cache file of a blob, filled if it must be; the blob is pinned for the tree the first
-    /// time it is opened under it (`Core::pin_once`).
+    /// The bytes of a file: the cache file of its blob, filled if it must be, which is pinned for
+    /// the tree the first time it is opened under it (`Core::pin_once`); for a placed tree, the
+    /// span of the pack, which the tree store pins.
     fn blob(
         &self,
         loaded: &Loaded,
         number: u64,
         entry: &TreeEntry,
         blob: (&TreeDigest, u64, Option<&BlobSource>),
-    ) -> Result<File, Errno> {
-        match self.cache_file(blob) {
-            Ok(file) => {
+    ) -> Result<FileBytes, Errno> {
+        let got = if loaded.tree.location().is_some() {
+            self.span_file(blob)
+        } else {
+            self.cache_file(blob).map(|file| {
                 self.pin_once((loaded, number), blob.0);
-                Ok(file)
-            }
+                FileBytes::whole(file, blob.1)
+            })
+        };
+        match got {
+            Ok(bytes) => Ok(bytes),
             Err(reason) => {
                 self.failed((loaded, number), entry.index, blob.0, reason);
                 Err(Errno::Io)
@@ -918,13 +927,13 @@ impl Core {
             .get(&fh)
             .cloned()
             .ok_or(Errno::Inval)?;
-        let file = match handle.as_ref() {
-            Handle::Cached(file) | Handle::Spilled(file, _) => file,
+        let bytes = match handle.as_ref() {
+            Handle::Cached(bytes) | Handle::Spilled(bytes, _) => bytes,
             Handle::Empty => return Ok(Vec::new()),
             // The kernel reads a passthrough file itself: a request for one is a fault.
             Handle::Backed(_) => return Err(Errno::Io),
         };
-        read_file(file, offset, size as usize)
+        bytes.read(offset, size as usize)
     }
 
     /// Closes the open file `fh`.
@@ -981,12 +990,13 @@ mod adopt;
 mod implicit;
 #[cfg(any(target_os = "linux", test))]
 mod passthrough;
+mod placed;
 mod prefetch;
 mod read;
 mod restore;
 
 pub(super) use implicit::look_every;
-pub(super) use read::read_file;
+pub(super) use read::FileBytes;
 
 #[cfg(test)]
 #[path = "core_tests.rs"]

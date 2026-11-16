@@ -11,18 +11,18 @@ use crate::{BlobSource, BuiltTree, Mode, NewEntry, NewKind, TreeDigest, TreeLimi
 
 /// A cache of a mebibyte with the pack `cas/pack/one` of three blobs (1000, 2000 and 3000 bytes)
 /// in its upstream, and a tree store over it.
-pub(super) struct Bench {
+pub(in crate::server) struct Bench {
     pub rig: Rig,
     pub pack: Pack,
     pub store: TreeStore,
 }
 
 impl Bench {
-    pub(super) async fn new(name: &str) -> Self {
+    pub(in crate::server) async fn new(name: &str) -> Self {
         Self::with(name, TreesConfig::default()).await
     }
 
-    pub(super) async fn with(name: &str, config: TreesConfig) -> Self {
+    pub(in crate::server) async fn with(name: &str, config: TreesConfig) -> Self {
         let rig = Rig::new(name);
         let pack = Pack::put(&rig, "cas/pack/one", &[1000, 2000, 3000]).await;
         let store = TreeStore::open(rig.cache.clone(), config).expect("a store");
@@ -30,12 +30,12 @@ impl Bench {
     }
 
     /// The store again over the same directory, as after a restart, over `cache`.
-    pub(super) fn reopen(cache: LocalCache) -> TreeStore {
+    pub(in crate::server) fn reopen(cache: LocalCache) -> TreeStore {
         TreeStore::open(cache, TreesConfig::default()).expect("a store")
     }
 
     /// The file `path` whose bytes are the blob `blob` of the pack.
-    pub(super) fn member(&self, path: &str, blob: usize) -> NewEntry {
+    pub(in crate::server) fn member(&self, path: &str, blob: usize) -> NewEntry {
         self.member_with(path, blob, None)
     }
 
@@ -58,7 +58,7 @@ impl Bench {
 
     /// The members of the pack as a tree of two directories, a symbolic link and an empty
     /// directory, and one empty file.
-    pub(super) fn entries(&self) -> Vec<NewEntry> {
+    pub(in crate::server) fn entries(&self) -> Vec<NewEntry> {
         let shown = self.member_with("bin/tool", 0, Some(Mode::new(0o4755).expect("a mode")));
         vec![
             shown,
@@ -86,12 +86,12 @@ impl Bench {
         ]
     }
 
-    pub(super) fn built(&self) -> BuiltTree {
+    pub(in crate::server) fn built(&self) -> BuiltTree {
         built(self.entries())
     }
 
     /// A request to place the small tree at `at`.
-    pub(super) fn request(&self, at: Vec<Location>) -> CreateRequest {
+    pub(in crate::server) fn request(&self, at: Vec<Location>) -> CreateRequest {
         CreateRequest {
             built: self.built(),
             at,
@@ -101,7 +101,7 @@ impl Bench {
     }
 
     /// Fills the range of the blob `blob` of the pack.
-    pub(super) async fn fill(&self, blob: usize) {
+    pub(in crate::server) async fn fill(&self, blob: usize) {
         let (sha256, offset, size) = &self.pack.blobs[blob];
         let want = RangeWant {
             pack: &self.pack.key,
@@ -113,7 +113,7 @@ impl Bench {
         self.rig.cache.fill_range(&want).await.expect("a fill");
     }
 
-    pub(super) async fn fill_all(&self) {
+    pub(in crate::server) async fn fill_all(&self) {
         for blob in 0..self.pack.blobs.len() {
             self.fill(blob).await;
         }
@@ -121,19 +121,19 @@ impl Bench {
 }
 
 /// The tree of `entries`.
-pub(super) fn built(entries: Vec<NewEntry>) -> BuiltTree {
+pub(in crate::server) fn built(entries: Vec<NewEntry>) -> BuiltTree {
     build_tree(None, entries, &TreeLimits::default()).expect("a tree")
 }
 
-pub(super) fn fs_at(path: &str) -> Location {
+pub(in crate::server) fn fs_at(path: &str) -> Location {
     Location::fs(path).expect("a location")
 }
 
-pub(super) fn s3_at(prefix: &str) -> Location {
+pub(in crate::server) fn s3_at(prefix: &str) -> Location {
     Location::s3("build-cas", prefix).expect("a location")
 }
 
 /// The directory of the tree `tree` in the cache directory of `rig`.
-pub(super) fn tree_path(rig: &Rig, tree: &TreeDigest) -> std::path::PathBuf {
+pub(in crate::server) fn tree_path(rig: &Rig, tree: &TreeDigest) -> std::path::PathBuf {
     super::files::tree_dir(&rig.config.path, tree)
 }
