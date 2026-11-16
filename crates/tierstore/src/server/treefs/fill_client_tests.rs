@@ -10,7 +10,7 @@ use std::time::Duration;
 
 use tierstore_testkit::dir::TestDir;
 
-use super::{AskError, FillClient};
+use super::{AskError, FillClient, Place};
 
 /// A client that pauses `tries` times at most, counting the pauses instead of taking them.
 fn client(path: &Path, tries: u32, wait: Duration) -> (FillClient, Arc<AtomicUsize>) {
@@ -269,4 +269,106 @@ fn the_pauses_of_a_client_are_the_whole_seconds_of_its_timeout() {
     let client = FillClient::new(path, Duration::from_millis(2500));
     assert_eq!(client.tries, 2);
     assert_eq!(client.answer_timeout, Duration::from_millis(2500));
+}
+
+/// A client over a socket that answers every line with `reply`, and the lines it was sent.
+fn replying(name: &str, reply: &'static str) -> (FillClient, Arc<Mutex<Vec<String>>>, TestDir) {
+    let (dir, path) = place(name);
+    let lines = Arc::new(Mutex::new(Vec::new()));
+    serve(
+        UnixListener::bind(&path).unwrap(),
+        Arc::clone(&lines),
+        move |_| Some(reply.to_owned()),
+    );
+    let (client, _) = client(&path, 3, Duration::from_secs(30));
+    (client, lines, dir)
+}
+
+/// Asserts that a place is one line of the mount and the path, and that its answers read as a
+/// placement, a directory above locations, nothing (also from a node that does not know the
+/// request), and any other answer as the error it is.
+#[test]
+fn a_place_reads_a_placement_a_directory_nothing_and_refuses_other_answers() {
+    for (reply, wanted) in [
+        ("tree 0123abcd", Ok(Place::Tree("0123abcd".to_owned()))),
+        ("dir", Ok(Place::Dir)),
+        ("none", Ok(Place::Nothing)),
+        ("refused unknown request", Ok(Place::Nothing)),
+        ("read-only", Err("read-only".to_owned())),
+        ("ok 0", Err("ok 0".to_owned())),
+        ("tree", Err("tree".to_owned())),
+    ] {
+        let (client, lines, _dir) = replying("tfs-fc-place", reply);
+        assert_eq!(client.place("m-1", "jobs/1f3a"), wanted, "{reply}");
+        assert_eq!(*lines.lock().unwrap(), ["place m-1 jobs/1f3a"]);
+    }
+}
+
+/// Asserts that mounted is one line, reads the JSON list of paths, reads the refusal of a node
+/// that does not know it as no paths, and refuses anything else as the answer.
+#[test]
+fn mounted_reads_a_list_of_paths_and_an_unknown_request_as_none() {
+    let (client, lines, _dir) = replying("tfs-fc-mounted", r#"["jobs/1","a b/c"]"#);
+    assert_eq!(
+        client.mounted(),
+        Ok(vec!["jobs/1".to_owned(), "a b/c".to_owned()])
+    );
+    assert_eq!(*lines.lock().unwrap(), ["mounted"]);
+    let (client, _, _dir) = replying("tfs-fc-mounted-old", "refused unknown request");
+    assert_eq!(client.mounted(), Ok(Vec::new()));
+    let (client, _, _dir) = replying("tfs-fc-mounted-junk", "junk");
+    assert_eq!(client.mounted(), Err("junk".to_owned()));
+}
+
+/// Asserts that flat sends the placement id, reads the JSON of the tree, and gives the answer as
+/// the error when it is not a tree, such as `none` for a placement that is gone.
+#[test]
+fn flat_reads_the_tree_of_a_placement_and_gives_other_answers_as_errors() {
+    let json = r#"{"paths":["jobs/1"],"packs":["p"],"entries":[{"name":"","mode":493,"kind":"dir"},{"parent":0,"name":"f","mode":420,"kind":"file","size":3,"sha256":"aa","pack":0,"offset":9}]}"#;
+    let (client, lines, _dir) = replying("tfs-fc-flat", json);
+    let flat = client.flat("0123abcd").unwrap();
+    assert_eq!(*lines.lock().unwrap(), ["flat 0123abcd"]);
+    assert_eq!(flat.paths, ["jobs/1"]);
+    assert_eq!(flat.packs, ["p"]);
+    assert_eq!(flat.entries.len(), 2);
+    assert_eq!(flat.entries[1].name, "f");
+    assert_eq!(flat.entries[1].parent, Some(0));
+    let (client, _, _dir) = replying("tfs-fc-flat-none", "none");
+    assert_eq!(client.flat("0123abcd").err(), Some("none".to_owned()));
+}
+
+/// Asserts that span sends the sha256, the size, the pack and the offset, reads the offset and the
+/// path of the file (spaces kept), and refuses a failure, an offset that is not a number and an
+/// answer with no path, as the answer.
+#[test]
+fn a_span_reads_the_offset_and_path_and_refuses_other_answers() {
+    let (client, lines, _dir) = replying("tfs-fc-span", "ok 4096 /cache/a dir/pack 1");
+    assert_eq!(
+        client.span("ab", 12, "cas/pack/one", 100),
+        Ok((4096, PathBuf::from("/cache/a dir/pack 1")))
+    );
+    assert_eq!(
+        *lines.lock().unwrap(),
+        ["span ab 12 from cas/pack/one @ 100"]
+    );
+    for reply in ["fill: mismatch", "ok x /p", "ok 5", "ok"] {
+        let (client, _, _dir) = replying("tfs-fc-span-bad", reply);
+        assert_eq!(
+            client.span("ab", 12, "k", 0),
+            Err(reply.to_owned()),
+            "{reply}"
+        );
+    }
+}
+
+/// Asserts that an unplace sends the mount and the placement, and that nothing is raised when the
+/// socket is not there.
+#[test]
+fn an_unplace_sends_the_mount_and_the_placement_and_survives_a_missing_socket() {
+    let (client, lines, _dir) = replying("tfs-fc-unplace", "ok");
+    client.unplace("m-1", "0123abcd");
+    assert_eq!(*lines.lock().unwrap(), ["unplace m-1 0123abcd"]);
+    let (_dir, path) = place("tfs-fc-unplace-gone");
+    let (client, _) = client_for_quit(&path);
+    client.unplace("m-1", "0123abcd");
 }

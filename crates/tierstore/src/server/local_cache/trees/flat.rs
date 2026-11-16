@@ -178,7 +178,8 @@ impl TreeStore {
     /// The tree of the placement `id`, flattened for the mount at its fs locations.
     ///
     /// # Errors
-    /// [`ReadError::NoPlacement`] for a placement that is not alive or has no fs location,
+    /// [`ReadError::NoPlacement`] for a placement that is not alive (one that was released and
+    /// that something still holds is alive, and is flattened for its holder) or has no fs location,
     /// [`ReadError::Corrupt`] for a tree whose files are damaged, and [`FlatError::TooLarge`] for
     /// a tree of more entries than [`MAX_FLAT_ENTRIES`].
     pub(in crate::server) fn flat(&self, id: &PlacementId) -> Result<FlatTree, FlatError> {

@@ -63,3 +63,23 @@ fn a_directory_has_two_links_and_one_for_each_subdirectory() {
     assert_eq!(empty.children(0), &[] as &[u32]);
     assert_eq!(empty.child(0, "x"), None);
 }
+
+/// Asserts that a tree of manifests has no modes and no location, and that a placed tree reports
+/// the mode of each entry by index, none past the last, and its location.
+#[test]
+fn a_placed_tree_has_modes_and_a_location_and_a_tree_of_manifests_has_neither() {
+    let plain = tree_of(vec![("a", file(b"1"))]);
+    assert_eq!(plain.mode(0), None);
+    assert_eq!(plain.mode(1), None);
+    assert_eq!(plain.location(), None);
+    let placed = Tree::placed(
+        plain.entries().to_vec(),
+        vec![0o711, 0o4755],
+        "jobs/1".to_owned(),
+    );
+    assert_eq!(placed.mode(0), Some(0o711));
+    assert_eq!(placed.mode(1), Some(0o4755));
+    assert_eq!(placed.mode(2), None);
+    assert_eq!(placed.location(), Some("jobs/1"));
+    assert_eq!(placed.child(0, "a"), Some(1));
+}

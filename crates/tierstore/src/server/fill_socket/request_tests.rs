@@ -2,8 +2,9 @@
 
 use std::path::PathBuf;
 
-use super::{Refusal, Request, parse};
+use super::{MountRequest, Refusal, Request, parse};
 use crate::TreeDigest;
+use crate::server::local_cache::trees::{PlacementId, placement_id};
 
 const SHA: &str = "0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef";
 const OTHER: &str = "fedcba9876543210fedcba9876543210fedcba9876543210fedcba9876543210";
@@ -243,4 +244,163 @@ fn a_put_that_is_not_one_is_refused_with_its_reason() {
     }
     let edge = "k".repeat(1024);
     assert!(line(&format!("put {edge} {SHA} 1 from /s")).is_ok());
+}
+
+const PLACEMENT: &str = "0123456789abcdef0123456789abcdef";
+
+fn id() -> PlacementId {
+    placement_id(PLACEMENT).unwrap()
+}
+
+/// Asserts that a place names the mount and the path, that a path with spaces in it is kept whole,
+/// and that a path of one name or of several is taken.
+#[test]
+fn a_place_names_the_mount_and_the_path() {
+    let place = |mount: &str, path: &str| {
+        Ok(Request::Mount(MountRequest::Place {
+            mount: mount.to_owned(),
+            path: path.to_owned(),
+        }))
+    };
+    assert_eq!(
+        line("place boot-1 jobs/1/root"),
+        place("boot-1", "jobs/1/root")
+    );
+    assert_eq!(line("place boot-1 jobs"), place("boot-1", "jobs"));
+    assert_eq!(line("place boot-1 a b/c  d"), place("boot-1", "a b/c  d"));
+    assert_eq!(line("place boot-1 treesx/a"), place("boot-1", "treesx/a"));
+}
+
+/// Asserts every refusal of a place: no path, a mount that is not a name, and a path that is
+/// empty, begins with a name of the mount's own, has an empty name, a dot name, or a slash at
+/// either end.
+#[test]
+fn a_place_that_is_not_one_is_refused_with_its_reason() {
+    let cases = [
+        ("place", Refusal::Malformed),
+        ("place boot-1", Refusal::Malformed),
+        ("place  jobs/1", Refusal::Name),
+        ("place bo\u{e9} jobs/1", Refusal::Name),
+        ("place boot-1 ", Refusal::MountPath),
+        ("place boot-1 trees/x", Refusal::MountPath),
+        ("place boot-1 views", Refusal::MountPath),
+        ("place boot-1 put/a", Refusal::MountPath),
+        ("place boot-1 a//b", Refusal::MountPath),
+        ("place boot-1 /a", Refusal::MountPath),
+        ("place boot-1 a/", Refusal::MountPath),
+        ("place boot-1 a/../b", Refusal::MountPath),
+        ("place boot-1 a/./b", Refusal::MountPath),
+    ];
+    for (text, why) in cases {
+        assert_eq!(line(text), Err(why), "{text:?}");
+    }
+    let long = format!("place {} jobs/1", "m".repeat(129));
+    assert_eq!(line(&long), Err(Refusal::Name));
+}
+
+/// Asserts that mounted is the request with no words after it, and that anything after it, a space
+/// alone included, or a longer word that begins with it, is not.
+#[test]
+fn mounted_takes_no_argument() {
+    assert_eq!(line("mounted"), Ok(Request::Mount(MountRequest::Mounted)));
+    for text in ["mounted ", "mounted x", "mounted boot-1"] {
+        assert_eq!(line(text), Err(Refusal::Malformed), "{text:?}");
+    }
+    assert_eq!(line("mountedx"), Err(Refusal::Unknown));
+}
+
+/// Asserts that a flat names the placement, and refuses a missing, short, long, upper case or
+/// non-hex id.
+#[test]
+fn a_flat_names_a_placement_and_refuses_what_is_not_one() {
+    let want = Request::Mount(MountRequest::Flat { placement: id() });
+    assert_eq!(line(&format!("flat {PLACEMENT}")), Ok(want));
+    let bad = [
+        "flat".to_owned(),
+        "flat ".to_owned(),
+        format!("flat {}", &PLACEMENT[1..]),
+        format!("flat {PLACEMENT}0"),
+        format!("flat {}", PLACEMENT.to_uppercase()),
+        format!("flat {}g", &PLACEMENT[1..]),
+        format!("flat {PLACEMENT} x"),
+    ];
+    for text in bad {
+        assert_eq!(line(&text), Err(Refusal::Placement), "{text:?}");
+    }
+}
+
+/// Asserts that a span has the words of a fill of a blob and names the digest, the size, the pack
+/// and the offset, that a pack key may hold spaces, and that it has the refusals of a fill: size
+/// zero, an end past 64 bits, a bad digest, a reserved key, and missing words.
+#[test]
+fn a_span_has_the_words_and_the_refusals_of_a_blob_fill() {
+    let want = Request::Mount(MountRequest::Span {
+        sha256: TreeDigest::from_hex(SHA).unwrap(),
+        size: 4096,
+        pack: "cas/pack/a b".to_owned(),
+        offset: 8192,
+    });
+    assert_eq!(
+        line(&format!("span {SHA} 4096 from cas/pack/a b @ 8192")),
+        Ok(want)
+    );
+    let upper = SHA.to_uppercase();
+    let cases = [
+        (format!("span {SHA} 0 from p @ 0"), Refusal::Empty),
+        (
+            format!("span {SHA} 2 from p @ {}", u64::MAX - 1),
+            Refusal::Overflow,
+        ),
+        (format!("span {upper} 1 from p @ 0"), Refusal::Digest),
+        ("span nonsense 1 from p @ 0".to_owned(), Refusal::Digest),
+        (
+            format!("span {SHA} 1 from _journal/x @ 0"),
+            Refusal::Reserved,
+        ),
+        (format!("span {SHA} 1 from  @ 0"), Refusal::Key),
+        (format!("span {SHA} x from p @ 0"), Refusal::Number),
+        (format!("span {SHA} 1 from p @ x"), Refusal::Number),
+        (format!("span {SHA} 1 from p"), Refusal::Malformed),
+        (format!("span {SHA}"), Refusal::Malformed),
+        ("span".to_owned(), Refusal::Malformed),
+    ];
+    for (text, why) in cases {
+        assert_eq!(line(&text), Err(why), "{text}");
+    }
+}
+
+/// Asserts that an unplace names the mount and the placement, and refuses a missing id, a mount
+/// that is not a name, and an id that is not a placement.
+#[test]
+fn an_unplace_names_the_mount_and_the_placement() {
+    let want = Request::Mount(MountRequest::Unplace {
+        mount: "boot-1".to_owned(),
+        placement: id(),
+    });
+    assert_eq!(line(&format!("unplace boot-1 {PLACEMENT}")), Ok(want));
+    let cases = [
+        ("unplace".to_owned(), Refusal::Malformed),
+        ("unplace boot-1".to_owned(), Refusal::Malformed),
+        (format!("unplace  {PLACEMENT}"), Refusal::Name),
+        ("unplace boot-1 ".to_owned(), Refusal::Placement),
+        (
+            format!("unplace boot-1 {}", &PLACEMENT[1..]),
+            Refusal::Placement,
+        ),
+        (
+            format!("unplace boot-1 {}", PLACEMENT.to_uppercase()),
+            Refusal::Placement,
+        ),
+        (format!("unplace boot-1 {PLACEMENT} x"), Refusal::Placement),
+    ];
+    for (text, why) in cases {
+        assert_eq!(line(&text), Err(why), "{text:?}");
+    }
+}
+
+/// Asserts the words the refusals of the mount's requests put after `refused `.
+#[test]
+fn the_refusals_of_the_mount_requests_say_what_was_wrong() {
+    assert_eq!(Refusal::MountPath.to_string(), "not a path of the mount");
+    assert_eq!(Refusal::Placement.to_string(), "not a placement id");
 }

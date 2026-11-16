@@ -1,7 +1,7 @@
 //! The reads by inode of a frontend with no open, and the core that does not count lookups.
 
 use super::super::Looked;
-use super::{Core, Errno};
+use super::{Core, Errno, FileBytes};
 use crate::server::treefs::ino;
 use crate::server::treefs::testing::{Rig, sample};
 
@@ -310,4 +310,62 @@ fn readdir_after_lists_the_entries_above_an_inode() {
     assert_eq!(list(ino::ROOT, 0, 9), Err(Errno::Acces));
     assert_eq!(list(ino::of(1, 1), 0, 9), Err(Errno::NotDir));
     assert_eq!(list(ino::of(9, 0), 0, 9), Err(Errno::NoEnt));
+}
+
+/// A file of the bytes 0, 1, 2 ... 39 in a scratch directory, opened.
+fn counting_file(name: &str) -> (tierstore_testkit::dir::TestDir, std::fs::File) {
+    let dir = tierstore_testkit::dir::TestDir::under(std::env::temp_dir(), name);
+    let path = dir.path().join("bytes");
+    std::fs::write(&path, (0..40u8).collect::<Vec<u8>>()).unwrap();
+    (dir, std::fs::File::open(path).unwrap())
+}
+
+/// Asserts that the bytes of a file that starts at a base are clipped to its size: a read of more
+/// than the file has gives its five bytes from the base, a read from the middle gives the rest,
+/// and a read at its end or past it is empty, never the bytes that follow it in the file.
+#[test]
+fn file_bytes_reads_are_clipped_to_the_size_at_the_base() {
+    let (_dir, file) = counting_file("tfs-bytes-clip");
+    let bytes = FileBytes {
+        file,
+        base: 10,
+        size: 5,
+    };
+    assert_eq!(bytes.read(0, 100).unwrap(), [10, 11, 12, 13, 14]);
+    assert_eq!(bytes.read(3, 100).unwrap(), [13, 14]);
+    assert_eq!(bytes.read(1, 2).unwrap(), [11, 12]);
+    assert_eq!(bytes.read(0, 0).unwrap(), Vec::<u8>::new());
+    assert_eq!(bytes.read(5, 1).unwrap(), Vec::<u8>::new());
+    assert_eq!(bytes.read(99, 1).unwrap(), Vec::<u8>::new());
+    assert_eq!(bytes.read(u64::MAX, 1).unwrap(), Vec::<u8>::new());
+}
+
+/// Asserts that the bytes of a whole file are the file from its start, and that a size that
+/// reaches past the end of the file gives the bytes the file has.
+#[test]
+fn file_bytes_of_a_whole_file_start_at_zero_and_end_where_the_file_ends() {
+    let (_dir, file) = counting_file("tfs-bytes-whole");
+    let whole = FileBytes::whole(file.try_clone().unwrap(), 40);
+    assert_eq!(whole.read(0, 3).unwrap(), [0, 1, 2]);
+    assert_eq!(whole.read(38, 100).unwrap(), [38, 39]);
+    let long = FileBytes {
+        file,
+        base: 35,
+        size: 100,
+    };
+    assert_eq!(long.read(0, 100).unwrap(), [35, 36, 37, 38, 39]);
+}
+
+/// Asserts that a read of a descriptor that is a directory is `EIO`, and that a read past the
+/// size of the bytes is empty and asks nothing of it.
+#[test]
+fn file_bytes_over_a_directory_fails_with_io() {
+    let dir = tierstore_testkit::dir::TestDir::under(std::env::temp_dir(), "tfs-bytes-dir");
+    let bytes = FileBytes {
+        file: std::fs::File::open(dir.path()).unwrap(),
+        base: 0,
+        size: 10,
+    };
+    assert_eq!(bytes.read(0, 4), Err(Errno::Io));
+    assert_eq!(bytes.read(10, 4).unwrap(), Vec::<u8>::new());
 }

@@ -112,6 +112,9 @@ fn tree_of(flat: &FlatTree, path: String) -> Result<Tree, String> {
     if flat.entries.len() > MOST_ENTRIES {
         return Err(damaged("too many entries"));
     }
+    if flat.entries.is_empty() {
+        return Err(damaged("no root"));
+    }
     let packs: Vec<Arc<str>> = flat
         .packs
         .iter()

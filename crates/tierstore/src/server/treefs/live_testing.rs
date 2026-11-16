@@ -20,8 +20,9 @@ use crate::server::local_cache::trees::testing::Bench;
 use crate::server::local_cache::trees::{Created, Location};
 use crate::{Clock, Mono};
 
-use super::core::{Core, Settings};
+use super::core::{Core, Looked, Settings};
 use super::fill_client::FillClient;
+use super::ino;
 use super::table::TreeTable;
 use super::testing::{OWNER, TREE_IDLE};
 
@@ -134,6 +135,21 @@ impl Live {
             &self.runtime,
         ))
     }
+}
+
+/// The inode at the path `names` from the root of the mount, looked up on `core`.
+///
+/// # Panics
+/// When a name is not there.
+pub(in crate::server) fn walk(core: &Core, names: &[&str]) -> u64 {
+    let mut at = ino::ROOT;
+    for name in names {
+        at = match core.lookup(at, name).unwrap() {
+            Looked::Found(entry) => entry.attr.ino,
+            Looked::Absent(_) => panic!("{name} is not there"),
+        };
+    }
+    at
 }
 
 impl Drop for Live {
