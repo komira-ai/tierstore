@@ -423,7 +423,7 @@ So the reconciler must go on until the hot tier owes nothing, and only a process
 
 Before the last process is turned off:
 
-1. `tierstore format-epoch --check` lists every registration; the processes still on the hot tier are `live`, those turned off are `silent`.
+1. `tierstore format-epoch --check --hot <tier>` lists every registration: `live` for a process still on the hot tier, `silent` for one turned off once its beats have lapsed. It then refuses unless each silent one is named with `--departed <id>`; the list is the part to read.
 2. The marks bucket has no marker that says `DIRTY`, `LOCK` or `CLEARING`, and none with `gone` true. A `WANT` marker owes nothing.
 3. Every object of the hot bucket outside `_tiering/`, `_journal/` and `_entries/` is in the cold bucket with the same size, and with the same tag where both tags are plain MD5 sums; compare the bytes of the others.
 4. The hot bucket has no multipart upload in progress.

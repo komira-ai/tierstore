@@ -73,7 +73,7 @@ Use it rather than the three tiers in one process when the hot tier would be on 
 ```toml
 [[interface]]
 type   = "s3"
-params = { port = 9300 }
+params = { addresses = ["127.0.0.1:9300"] }
 
 [server]
 proxy_id        = "node-17"
@@ -99,7 +99,7 @@ cache  = true
 
 - `cold_store.credentials_file` holds a key that may write. Without `local_cache.write_through = true` the node refuses every call but GET and HEAD with 403.
 - The node has no registration, lease or reconciler: it owes the hot tier nothing, and a restart or a hand-off leaves no work behind.
-- Nodes over the same cold bucket see each other's writes as soon as they are acknowledged, since each is in the cold store by then.
+- A key one node writes is readable through another as soon as the put is acknowledged, since it is in the cold store by then. A copy another node already keeps is not dropped by that write: a delete, or a put of other bytes of the same size, is seen there only once the copy leaves its cache.
 - A node that ran with a hot tier is moved to this shape by removing `[hot_store]` from its file and restarting it by the hand-off; see [Turning the hot tier off](operations.md#turning-the-hot-tier-off) first.
 
 ## A build node with all three tiers in one process
@@ -151,7 +151,7 @@ What to hold to in this shape:
 - **The endpoints are one store.** The addresses of `endpoints` must be addresses of the same store (the three nodes of one MinIO cluster, say), so that any of them serves any request, the parts of a multipart upload and its completion included. Do not list the addresses of two stores.
 - **Failover is for connections that could not be made.** A request that never reached an endpoint (refused, no route, name not resolved, connect timeout) is sent to the next one. A request that may have reached a store is not sent again by this key: the caller's retry goes to the next address.
 - **The cache is a node's own.** `local_cache.path` is on the disk the jobs' scratch is on, not inside either tier's directory.
-- **The hot tier has drives of its own.** Where the hot tier would share drives with the cache, use [the cache and the cold tier alone](#a-node-that-owns-the-data-with-a-cache-and-the-cold-tier).
+- **The hot tier has drives of its own.** Where the hot tier would share drives with the cache, use [the cache and the cold tier alone](configure.md#a-node-that-owns-the-data-with-a-cache-and-the-cold-tier).
 - **Writes pass through.** In this shape `local_cache.write_through` is true whether it is left out or given. A put under a cached prefix is also kept on the node.
 
 ## A build node chained to storage nodes
