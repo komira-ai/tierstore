@@ -116,7 +116,7 @@ fn the_token_is_held_by_set_desired_alone_and_only_under_the_gate() {
     );
     assert!(
         desired_problems(&channel).iter().any(|p| p
-            == "jobs are [\"channel\", \"check\", \"set-desired\"], not check and set-desired"),
+            == "jobs are [\"channel\", \"check\", \"set-desired\", \"set-desired-mac\"], not check, set-desired and set-desired-mac"),
         "a third job"
     );
     let spoiled = in_job(
@@ -131,16 +131,117 @@ fn the_token_is_held_by_set_desired_alone_and_only_under_the_gate() {
             .any(|p| p == "job check: `id-token: write` is not allowed in hostkeeper-desired.yml"),
         "check with id-token: write"
     );
+    let spoiled = in_job(
+        &text,
+        "set-desired-mac",
+        SET_IF,
+        "${{ github.ref == 'refs/heads/main' }}",
+    );
+    assert!(
+        lint(FILE, &spoiled).iter().any(|p| p
+            == &format!("job set-desired-mac: `id-token: write` needs the exact `if: {SET_IF}`")),
+        "set-desired-mac under another condition"
+    );
     // The same job in another file is refused.
     assert!(
         lint("release.yml", &text)
             .iter()
             .any(|p| p == "job set-desired: `id-token: write` is not allowed in release.yml")
     );
+    assert!(
+        lint("release.yml", &text)
+            .iter()
+            .any(|p| p == "job set-desired-mac: `id-token: write` is not allowed in release.yml")
+    );
 }
 
 /// `(job, text to replace once in it, its replacement, what a problem must say)`.
 const DEFECTS: &[(&str, &str, &str, &str)] = &[
+    // The macOS entry is asked for, and the same call is made a second time for the Macs.
+    (
+        "check",
+        " --macos-pkg",
+        "",
+        "check: the step `desired` does not run `cargo xtask release desired",
+    ),
+    (
+        "set-desired-mac",
+        "host_group: mac-build",
+        "host_group: all-in-one",
+        "set-desired-mac: with.host_group is Some(\"all-in-one\"), not \"mac-build\"",
+    ),
+    (
+        "set-desired-mac",
+        "      host_group: mac-build\n",
+        "",
+        "set-desired-mac: with.host_group is None, not \"mac-build\"",
+    ),
+    (
+        "set-desired",
+        "host_group: all-in-one",
+        "host_group: mac-build",
+        "set-desired: with.host_group is Some(\"mac-build\"), not \"all-in-one\"",
+    ),
+    (
+        "set-desired-mac",
+        "targets: ${{ needs.check.outputs.targets-mac }}",
+        "targets: ${{ needs.check.outputs.targets }}",
+        "set-desired-mac: with.targets is Some(\"${{ needs.check.outputs.targets }}\")",
+    ),
+    (
+        "set-desired",
+        "targets: ${{ needs.check.outputs.targets }}",
+        "targets: ${{ needs.check.outputs.targets-mac }}",
+        "set-desired: with.targets is Some(\"${{ needs.check.outputs.targets-mac }}\")",
+    ),
+    (
+        "check",
+        "      targets-mac: ${{ steps.desired.outputs.targets-mac }}\n",
+        "      targets-mac: '{}'\n",
+        "check: output targets-mac is",
+    ),
+    (
+        "set-desired-mac",
+        "version: ${{ needs.check.outputs.package-version }}",
+        "version: 0.0.1",
+        "set-desired-mac: with.version is",
+    ),
+    (
+        "set-desired-mac",
+        "needs: [check]",
+        "needs: []",
+        "set-desired-mac: needs are [], not [\"check\"]",
+    ),
+    (
+        "set-desired-mac",
+        "      id-token: write\n",
+        "",
+        "set-desired-mac: permissions are",
+    ),
+    (
+        "set-desired-mac",
+        "      wait: true\n",
+        "      wait: false\n",
+        "set-desired-mac: with.wait is Some(\"false\"), not \"true\"",
+    ),
+    (
+        "set-desired-mac",
+        "komira-ai/hostkeeper/.github/workflows/set-desired.yml@30141591c292d8881ce5bc16c9d0b3ba7fcfdca1",
+        "komira-ai/hostkeeper/.github/workflows/set-desired.yml@32a9cc6f8242d0efbc3476391302062ff444dd47",
+        "set-desired-mac: `uses` is not",
+    ),
+    (
+        "set-desired-mac",
+        "    if: ${{ github.ref == 'refs/heads/main' && vars.TIERSTORE_SETS_DESIRED == 'true' && needs.check.outputs.set == 'true' }}\n",
+        "",
+        "set-desired-mac: `if` is None",
+    ),
+    (
+        "set-desired-mac",
+        "      audience: tierstore-hostkeeper-desired\n",
+        "      audience: tierstore-hostkeeper-desired\n      package_digest: abc\n",
+        "set-desired-mac: with.package_digest is not an input it gives",
+    ),
     (
         "check",
         "    runs-on: ubuntu-24.04\n",
@@ -535,7 +636,7 @@ fn a_trigger_an_input_or_a_job_other_than_the_two_ways_in_is_named() {
         (
             "jobs:\n  check:\n",
             "jobs:\n  publish:\n    runs-on: ubuntu-24.04\n  check:\n",
-            "jobs are [\"check\", \"publish\", \"set-desired\"], not check and set-desired",
+            "jobs are [\"check\", \"publish\", \"set-desired\", \"set-desired-mac\"], not check, set-desired and set-desired-mac",
         ),
     ] {
         assert!(text.contains(replace), "{replace:?} is not in {FILE}");

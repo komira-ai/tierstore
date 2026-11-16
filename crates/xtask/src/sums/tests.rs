@@ -453,3 +453,32 @@ fn assemble_and_verify_cover_the_macos_arm64_files_beside_the_linux_ones() {
         [format!("{mac}: does not match its line")]
     );
 }
+
+#[test]
+fn assemble_lists_each_pkg_of_the_directory_by_its_own_digest_and_a_pkg_twice_is_refused() {
+    // Asserts: the signed macOS installer, which no build job wrote a part for, gets its line
+    // from the file's own bytes, sorted among the others; a part that also lists it is refused
+    // as listed twice.
+    let dir = scratch("assemble-pkg");
+    let a = line(A, b"a");
+    parts(&dir, &[("linux-x86_64", &a)]);
+    let pkg = "tierstore-0.4.0-macos-arm64.pkg";
+    std::fs::write(dir.join(pkg), b"signed pkg").expect("pkg");
+    let printed = assemble(&dir, None, None, None).expect("assemble");
+    let want = format!("{a}{}", line(pkg, b"signed pkg"));
+    let mut lines: Vec<&str> = want.lines().collect();
+    lines.sort_by_key(|l| l.split("  ").nth(1).map(str::to_owned));
+    assert_eq!(printed, lines);
+    assert_eq!(
+        std::fs::read_to_string(dir.join(SUMS)).expect("sums"),
+        printed.join("\n") + "\n"
+    );
+
+    let dir = scratch("assemble-pkg-twice");
+    parts(&dir, &[("macos-arm64", &line(pkg, b"signed pkg"))]);
+    std::fs::write(dir.join(pkg), b"signed pkg").expect("pkg");
+    assert_eq!(
+        assemble(&dir, None, None, None),
+        Err(Error::Refused(vec![format!("listed twice: {pkg}")]))
+    );
+}

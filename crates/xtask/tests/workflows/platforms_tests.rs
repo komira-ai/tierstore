@@ -155,14 +155,18 @@ fn the_build_and_signing_commands_name_the_platform_and_nothing_else() {
     let attest = attest_commands(&["macos-arm64"]);
     assert_eq!(
         attest.len(),
-        5,
-        "the two sums checks, the tarball's bundle, the package's, the tap tarball's"
+        6,
+        "the two sums checks, the tarball's bundle, the package's, the tap tarball's, the installer's"
     );
     assert!(attest[2].ends_with("-macos-arm64.tar.gz.sigstore.json\""));
     assert!(attest[3].ends_with("-macos-arm64.tar.zst.sigstore.json\""));
     assert_eq!(
         attest[4],
         "cp \"$BUNDLE\" \"dist/tierstore-${RELEASE_VERSION}-macos-arm64.tar.gz.sigstore.json\""
+    );
+    assert_eq!(
+        attest[5],
+        "cp \"$BUNDLE\" \"dist/tierstore-${RELEASE_VERSION}-macos-arm64.pkg.sigstore.json\""
     );
 }
 
@@ -189,7 +193,7 @@ fn a_download_pattern_takes_what_github_would_take() {
     assert!(!matches("ab*ba", "aba"));
 }
 
-const MAC: &str = "macos-arm64";
+pub const MAC: &str = "macos-arm64";
 const PIN: &str = "CYCLONEDX_SHA256_AARCH64_MACOS: 4c53dfa21e70b65bf7f8d2592aadde3bcb02c1a40b6ec63b877e5ca65a29e180";
 
 /// Changes to the macOS build job: each leaves a valid workflow that builds, checks or packages
@@ -514,8 +518,8 @@ const EXECUTION_DEFECTS: &[(&str, &str, &str, &str)] = &[
 const CONSUMER_DEFECTS: &[(&str, &str, &str, &str)] = &[
     (
         "sums",
-        "needs: [linux-x86_64, linux-arm64, macos-arm64]",
-        "needs: [linux-x86_64, linux-arm64]",
+        "needs: [linux-x86_64, linux-arm64, macos-arm64, check-pkg]",
+        "needs: [linux-x86_64, linux-arm64, check-pkg]",
         "sums: does not need macos-arm64",
     ),
     (
@@ -793,7 +797,7 @@ fn artifacts_other_than_the_ones_a_release_waits_for_are_named() {
     assert_eq!(problems.len(), 1, "{problems:?}");
 }
 
-fn release_problems_of(text: &str) -> Vec<String> {
+pub fn release_problems_of(text: &str) -> Vec<String> {
     release_platform_problems(text, &platforms())
 }
 
@@ -906,7 +910,7 @@ fn a_job_off_linux_x86_64_that_a_pull_request_runs_is_named() {
     assert_eq!(pull_request_runner_problems("x.yml", "jobs: [").len(), 1);
 }
 
-fn runner_line(file: &str, job: &str, listed: &str) -> String {
+pub fn runner_line(file: &str, job: &str, listed: &str) -> String {
     format!(
         "{file}: the job {job} runs on {listed} for a pull request; a pull request runs on Linux x86_64 (ubuntu-*, not -arm) alone, and other platforms are the beta stage of the release, under `if: ${{{{ github.event_name != 'pull_request' }}}}`"
     )

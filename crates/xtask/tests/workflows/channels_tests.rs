@@ -14,11 +14,100 @@ fn the_channel_jobs_of_release_yml_pass_and_are_the_three_the_design_names() {
     let doc = yaml::load(&text_of("release.yml")).expect("release.yml parses");
     assert_eq!(channel_problems(&doc), Vec::<String>::new());
     let jobs: Vec<&str> = CHANNELS.iter().map(|c| c.job).collect();
-    assert_eq!(jobs, ["testing-upload", "promote-latest", "tap"]);
+    assert_eq!(
+        jobs,
+        [
+            "testing-upload",
+            "promote-latest",
+            "testing-pkg-upload",
+            "promote-pkg",
+            "tap"
+        ]
+    );
 }
 
 /// `(job, text to replace once in it, its replacement, what the problem must say)`.
 const DEFECTS: &[(&str, &str, &str, &str)] = &[
+    // The jobs of the signed macOS installer: the apt repository's environment and role, the
+    // installer's verbs, the pointer moved only after a promotion.
+    (
+        "testing-pkg-upload",
+        "needs: [plan, publish]",
+        "needs: [plan]",
+        "testing-pkg-upload: needs are not",
+    ),
+    (
+        "testing-pkg-upload",
+        "environment: apt-publish",
+        "environment: prod-releases-tierstore",
+        "testing-pkg-upload: environment is not apt-publish",
+    ),
+    (
+        "testing-pkg-upload",
+        "      id-token: write\n",
+        "",
+        "testing-pkg-upload: permissions are [\"contents: read\"]",
+    ),
+    (
+        "testing-pkg-upload",
+        " --setting \"APT_BUCKET=${APT_BUCKET:+set}\"",
+        "",
+        "testing-pkg-upload: the gate is not given the setting APT_BUCKET",
+    ),
+    (
+        "testing-pkg-upload",
+        "--bucket \"$APT_BUCKET\" --work",
+        "--work",
+        "testing-pkg-upload: `cargo xtask channels pkg upload` is not given --bucket \"$APT_BUCKET\"",
+    ),
+    (
+        "testing-pkg-upload",
+        "          ROLE_ARN: ${{ vars.APT_PUBLISH_ROLE_ARN }}\n        run: cargo xtask channels assume",
+        "          ROLE_ARN: ${{ vars.TIERSTORE_RELEASES_ROLE_ARN }}\n        run: cargo xtask channels assume",
+        "testing-pkg-upload: the role assumed is not ${{ vars.APT_PUBLISH_ROLE_ARN }}",
+    ),
+    (
+        "testing-pkg-upload",
+        "cargo xtask channels pkg upload",
+        "cargo xtask channels pkg promote",
+        "testing-pkg-upload: it needs one step that assumes the role and one that runs `cargo xtask channels pkg upload`",
+    ),
+    (
+        "promote-pkg",
+        "needs: [plan, promote-check, testing-pkg-upload]",
+        "needs: [plan, testing-pkg-upload]",
+        "promote-pkg: needs are not",
+    ),
+    (
+        "promote-pkg",
+        "!cancelled() && !failure() && ",
+        "",
+        "promote-pkg: `if` is not",
+    ),
+    (
+        "promote-pkg",
+        " --require \"UPLOADED=$UPLOADED\"",
+        "",
+        "promote-pkg: the gate is not given --require \"UPLOADED=$UPLOADED\"",
+    ),
+    (
+        "promote-pkg",
+        "cargo xtask channels pkg promote dist",
+        "cargo xtask channels pkg upload dist",
+        "promote-pkg: it needs one step that assumes the role and one that runs `cargo xtask channels pkg promote`",
+    ),
+    (
+        "promote-pkg",
+        "      - name: The files are exactly the assets of this commit\n        if: ${{ steps.gate.outputs.enabled == 'true' }}\n        run: cargo xtask release check dist",
+        "      - name: The files are exactly the assets of this commit\n        if: ${{ steps.gate.outputs.enabled == 'true' }}\n        run: echo",
+        "promote-pkg: no step checks the downloaded files",
+    ),
+    (
+        "publish",
+        "      TAG: ${{ needs.plan.outputs.tag }}\n    steps:",
+        "      TAG: ${{ needs.plan.outputs.tag }}\n      PKG: cargo xtask channels pkg upload\n    steps:",
+        "publish: names channels pkg, which only testing-pkg-upload and promote-pkg may",
+    ),
     (
         "testing-upload",
         "needs: [plan, publish]",
@@ -327,6 +416,8 @@ fn a_job_that_is_missing_or_too_short_is_named() {
         [
             "testing-upload: there is no such job",
             "promote-latest: there is no such job",
+            "testing-pkg-upload: there is no such job",
+            "promote-pkg: there is no such job",
             "tap: there is no such job"
         ]
     );
@@ -363,7 +454,7 @@ fn the_upload_assumes_the_role_before_it_uploads() {
         let upload =
             "      - name: Put the files of the version once each (latest.json is not touched)\n";
         let role = "      - name: Assume the release-files role through OIDC\n";
-        let tap = "\n  # TESTING, the apt repository";
+        let tap = "\n  # TESTING, the macOS installer";
         let (before, rest) = text.split_once(role).expect("role step");
         let (role_step, rest) = rest.split_once(upload).expect("upload step");
         let (upload_step, after) = rest.split_once(tap).expect("the tap job");

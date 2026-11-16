@@ -22,7 +22,7 @@
 //! Every problem found is reported, one line each. When there is none, `--output` gets
 //! `package-version=<X.Y.Z>` and `targets=<JSON>`: the proto3 JSON of hostkeeper's `TargetList`
 //! per platform (`linux-x86_64` for `amd64`, `linux-arm64` for `arm64`; no `macos-arm64`, which
-//! has no package here), as hostkeeper's `cargo xtask release targets` writes it for its own
+//! has no apt package; `release desired --macos-pkg` adds it from [`super::desired_macos`]), as hostkeeper's `cargo xtask release targets` writes it for its own
 //! native packages. The manifest of an entry is the update hook, its bounds and params, the run
 //! units and the health URL that [`entry`] names; `--min-hostkeeper` is its `minHostkeeper`, the
 //! first hostkeeper release whose daemon runs the hook command of an `apt` entry.
@@ -133,6 +133,8 @@ pub struct Found {
     pub lines: [String; 2],
     /// The line that says what was checked.
     pub summary: String,
+    /// The targets of `lines[1]` by platform, for a caller that adds a platform's list.
+    pub targets: serde_json::Map<String, Value>,
 }
 
 /// The package version and `targets` of `r`'s release, held to the testing suite and the
@@ -253,8 +255,9 @@ pub fn apt_targets(gh: &dyn Gh, host: &dyn Host, r: &Request) -> Result<Found, E
     Ok(Found {
         lines: [
             format!("package-version={version}"),
-            format!("targets={}", Value::Object(targets)),
+            format!("targets={}", Value::Object(targets.clone())),
         ],
+        targets,
         summary: format!(
             "release {tag} ({commit}): the testing suite lists tierstore {version} for each of {count} architectures, each with the digest {SUMS} lists"
         ),

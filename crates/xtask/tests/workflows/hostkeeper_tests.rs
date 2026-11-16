@@ -9,6 +9,7 @@ use super::hostkeeper::{
     release_index_problems, verify_index,
 };
 use super::lint::{SIGN_IF, entry};
+use super::pkg::MACOS_PKG_COMMANDS;
 use super::platforms::{
     BUILDS, CODESIGN, NOT_FOR_A_PULL_REQUEST, SUMS_IF, artifacts_platform_problems, build_commands,
     package_copy,
@@ -134,10 +135,16 @@ fn a_main_or_manual_run_builds_the_macos_package_in_the_macos_job_and_its_index_
         })
         .expect("and unpacks it");
     assert!(package < unpack);
-    assert_eq!(
-        commands.last().map(String::as_str),
-        Some(CODESIGN),
-        "the signature of the unpacked binary is checked last"
+    let codesign = commands
+        .iter()
+        .position(|c| c == CODESIGN)
+        .expect("the signature of the unpacked binary is checked");
+    assert!(
+        commands[codesign + 1..]
+            .iter()
+            .map(String::as_str)
+            .eq(MACOS_PKG_COMMANDS),
+        "only the installer's commands come after the signature check"
     );
     assert!(SUMS_IF.contains("needs.macos-arm64.result == 'success'"));
     assert_eq!(

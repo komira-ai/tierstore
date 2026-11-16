@@ -487,6 +487,10 @@ enum ReleaseVerb {
         /// The apt repository.
         #[arg(long, default_value = "https://packages.komira.ai/apt")]
         apt_url: String,
+        /// Add the `macos-arm64` list: one `macos-pkg` entry of the release's signed `.pkg`,
+        /// downloaded from the release and held to the digest of its `SHA256SUMS`.
+        #[arg(long)]
+        macos_pkg: bool,
         /// Append `set=`, and with `set=true` `package-version=` and `targets=`, to this file
         /// (`GITHUB_OUTPUT`).
         #[arg(long)]
@@ -826,6 +830,7 @@ fn run(cli: Cli) -> Result<Vec<String>, Error> {
             min_hostkeeper,
             dir,
             apt_url,
+            macos_pkg,
             output,
             gh,
             curl,
@@ -839,6 +844,7 @@ fn run(cli: Cli) -> Result<Vec<String>, Error> {
                 min_hostkeeper: &min_hostkeeper,
                 dir: &dir,
                 apt_url: &apt_url,
+                macos_pkg,
                 curl: &curl,
                 output: output.as_deref(),
             },

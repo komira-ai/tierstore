@@ -6,7 +6,8 @@
 //!
 //! - `sums assemble <dir> [--expect <file>] [--summary <file>] [--digest-output <file>]` ([`assemble`]): merges
 //!   the `SHA256SUMS.<platform>` files `package` and `release hostkeeper-package` wrote, and the
-//!   `SHA256SUMS.index` file `release hostkeeper-index` wrote when there is one, into
+//!   `SHA256SUMS.index` file `release hostkeeper-index` wrote when there is one, and a line for
+//!   each `.pkg` in `<dir>` (the signed macOS installer, made after the build jobs), into
 //!   `<dir>/SHA256SUMS`, sorted by name, and removes them. A name in two of them, or a
 //!   `SHA256SUMS.<suffix>` that names neither a platform nor the index, is refused. `--expect` refuses a result that is not byte for
 //!   byte that file (the published one); `--summary` appends the result to a file (the
@@ -52,6 +53,10 @@ use crate::bundles;
 use crate::fetch::Sha256;
 use crate::package::{Platform, read, write_new};
 use crate::release::hostkeeper_index::{INDEX, INDEX_PART, SUFFIX as PACKAGE_SUFFIX};
+
+/// The suffix of the macOS installers `sums assemble` lists from the files themselves: the
+/// signed `.pkg` is made after the build jobs wrote their sums.
+pub const PKG_SUFFIX: &str = ".pkg";
 
 /// The file name of the merged sums file.
 pub const SUMS: &str = "SHA256SUMS";
@@ -187,6 +192,14 @@ pub fn assemble(
     let mut lines = Vec::new();
     for part in &parts {
         lines.extend(read_sums(part)?);
+    }
+    for name in files_in(dir)? {
+        if name.ends_with(PKG_SUFFIX) {
+            lines.push(Line {
+                sha256: Sha256::of(&read(&dir.join(&name))?),
+                name,
+            });
+        }
     }
     let twice = duplicates(&lines);
     if !twice.is_empty() {
@@ -499,6 +512,7 @@ pub fn verify_attestations(dir: &Path, a: &Attestations) -> Result<Vec<String>, 
         } else if l.name.ends_with(PACKAGE_SUFFIX)
             || l.name.ends_with(".deb")
             || l.name.ends_with(".rpm")
+            || l.name.ends_with(PKG_SUFFIX)
         {
             // A hostkeeper package: the build provenance of the sums and its own bundle, the
             // one hostkeeper verifies offline. A Debian or an RPM package has the same two.
@@ -511,7 +525,7 @@ pub fn verify_attestations(dir: &Path, a: &Attestations) -> Result<Vec<String>, 
             printed.push(format!("verified: {} (provenance)", l.name));
         } else {
             return Err(Error::Failed(format!(
-                "{SUMS} lists {}, which is neither a tarball, an SBOM, a hostkeeper package, a Debian package, an RPM package nor the release index",
+                "{SUMS} lists {}, which is neither a tarball, an SBOM, a hostkeeper package, a Debian package, an RPM package, a macOS installer nor the release index",
                 l.name
             )));
         }

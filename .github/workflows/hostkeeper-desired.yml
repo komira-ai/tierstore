@@ -43,9 +43,10 @@
 #                 client reads it, lists both `.deb`s with the digests the release's SHA256SUMS
 #                 lists. The farm nodes install tierstore with apt, so a list of
 #                 `hostkeeper-archive` entries would order none of them (`installer_dropped`).
-#                 No macos-arm64 list: tierstore ships no package a Mac's daemon installs, so a
-#                 Mac is not covered (`no_target`; it keeps what it runs). No release index: it
-#                 would list archive entries the targets do not have.
+#                 And, with `--macos-pkg`, the `macos-arm64` list: one `macos-pkg` entry of the
+#                 release's signed `.pkg` (`tierstore-<X.Y.Z>-macos-arm64.pkg`, downloaded from the
+#                 release and held to the digest of its SHA256SUMS), for the Macs. No release
+#                 index: it would list archive entries the targets do not have.
 #  - set-desired  needs check, and is hostkeeper's reusable workflow (the CI client), pinned below
 #                 with the hostkeeper release whose hkctl makes the call (komira-ai/hostkeeper,
 #                 docs/deploy/ci-client.md; its hkctl sends the targets as they are, the `apt`
@@ -63,6 +64,11 @@
 #                 `not_waited`; so does a rollout still going after half an hour, a halt
 #                 (`halted`) and a newer version set meanwhile (`superseded`). The roll goes on
 #                 whatever the job says; `hkctl releases status --service tierstore` says where.
+#  - set-desired-mac  the same call a second time, for the host group `mac-build` (the Macs): same
+#                 targets, same pin, same wait. A Mac installs its `macos-pkg` entry; the Linux
+#                 entries are ignored there, as the macOS entry is on the Linux hosts. It needs an
+#                 entry of the coordinator's allow-list for the host group mac-build, as the first
+#                 call has one for all-in-one.
 #
 # One run at a time of each way in, never cancelled: the runs after a release share the group
 # `hostkeeper-desired-release`, where a newer waiting run replaces an older one (each derives the
@@ -103,6 +109,7 @@ jobs:
       set: ${{ steps.desired.outputs.set }}
       package-version: ${{ steps.desired.outputs.package-version }}
       targets: ${{ steps.desired.outputs.targets }}
+      targets-mac: ${{ steps.desired.outputs.targets-mac }}
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
         with:
@@ -120,7 +127,7 @@ jobs:
           GH_TOKEN: ${{ github.token }}
           VERSION: ${{ inputs.version }}
           RUN_ID: ${{ github.event.workflow_run.id }}
-        run: cargo xtask release desired --repo "$GITHUB_REPOSITORY" --version "$VERSION" --after-run "$RUN_ID" --min-hostkeeper 0.1.225 --dir "$RUNNER_TEMP/desired" --output "$GITHUB_OUTPUT"
+        run: cargo xtask release desired --repo "$GITHUB_REPOSITORY" --version "$VERSION" --after-run "$RUN_ID" --min-hostkeeper 0.1.225 --macos-pkg --dir "$RUNNER_TEMP/desired" --output "$GITHUB_OUTPUT"
 
   set-desired:
     needs: [check]
@@ -134,6 +141,31 @@ jobs:
       host_group: all-in-one
       version: ${{ needs.check.outputs.package-version }}
       targets: ${{ needs.check.outputs.targets }}
+      hostkeeper_version: 0.1.317
+      hostkeeper_commit: 30141591c292d8881ce5bc16c9d0b3ba7fcfdca1
+      coordinator_url: ${{ vars.HOSTKEEPER_COORDINATOR_URL }}
+      coordinator_ca: ${{ vars.HOSTKEEPER_COORDINATOR_CA }}
+      audience: tierstore-hostkeeper-desired
+      wait: true
+      max_polls: 180
+      join_tailnet: ${{ vars.HOSTKEEPER_TAILNET_CLIENT_ID != '' }}
+      tailnet_client_id: ${{ vars.HOSTKEEPER_TAILNET_CLIENT_ID }}
+      tailnet_audience: ${{ vars.HOSTKEEPER_TAILNET_AUDIENCE }}
+      tailnet_coordinator: ${{ vars.HOSTKEEPER_TAILNET_COORDINATOR }}
+      tailnet_tag: ${{ vars.HOSTKEEPER_TAILNET_TAG }}
+
+  set-desired-mac:
+    needs: [check]
+    if: ${{ github.ref == 'refs/heads/main' && vars.TIERSTORE_SETS_DESIRED == 'true' && needs.check.outputs.set == 'true' }}
+    permissions:
+      contents: read
+      id-token: write
+    uses: komira-ai/hostkeeper/.github/workflows/set-desired.yml@30141591c292d8881ce5bc16c9d0b3ba7fcfdca1 # v0.1.317
+    with:
+      service: tierstore
+      host_group: mac-build
+      version: ${{ needs.check.outputs.package-version }}
+      targets: ${{ needs.check.outputs.targets-mac }}
       hostkeeper_version: 0.1.317
       hostkeeper_commit: 30141591c292d8881ce5bc16c9d0b3ba7fcfdca1
       coordinator_url: ${{ vars.HOSTKEEPER_COORDINATOR_URL }}

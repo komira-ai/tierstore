@@ -6,11 +6,11 @@
 |---|---|---|
 | `ci.yml` | pull request, push to `main` | `lint`: format, cargo-deny (licences, bans, sources), clippy, the workflow lint. `test`: every test under cargo-llvm-cov with branch coverage, and the 99% gate on lines and branches of every crate (`crates/coverage-gate`). |
 | `advisories.yml` | daily, push to `main` | `cargo deny check advisories`; the result is kept in one issue, and the run is green whatever it finds. |
-| `artifacts.yml` | pull request (linux-x86_64 only), push to `main`; by hand | builds `tierstore` (`--features server`) for linux-x86_64, linux-arm64 and macos-arm64, each on a GitHub-hosted runner of its platform, packages it with its SBOM and as a hostkeeper package (and, for the Homebrew tap and apt, as a tap-named tarball and, on Linux, a Debian package and an RPM package), writes the release index of the hostkeeper packages, makes `SHA256SUMS`. A pull request runs on Linux x86_64 alone: for it only the linux-x86_64 job runs, and the sums cover its files. The other platforms are the beta stage of the release: the linux-arm64 and macos-arm64 jobs run on a push to `main` and by hand, each running every test of the workspace (`cargo test --workspace --features tierstore/s3`; on macOS the update hook's launchd steps and the macOS packaging among them) before it builds, packages, unpacks the hostkeeper package and, on macOS, checks the code signature; `sums` waits for them, so their files are summed, signed and released only when they pass. a push to `main` builds every platform, and a run by hand (`gh workflow run artifacts.yml --ref <branch>`) builds and sums every platform of a branch and signs nothing. On a push to `main` it also signs (build provenance and SBOM attestations) and checks what it signed. The Linux binaries are linked against glibc 2.28 by `cargo zigbuild`, not against the runner's glibc, and each Linux job fails when the binary asks for a newer `GLIBC_` symbol version (see "The glibc floor of the Linux binaries"). |
+| `artifacts.yml` | pull request (linux-x86_64 only), push to `main`; by hand | builds `tierstore` (`--features server`) for linux-x86_64, linux-arm64 and macos-arm64, each on a GitHub-hosted runner of its platform, packages it with its SBOM and as a hostkeeper package (and, for the Homebrew tap and apt, as a tap-named tarball and, on Linux, a Debian package and an RPM package), writes the release index of the hostkeeper packages, makes `SHA256SUMS`. A pull request runs on Linux x86_64 alone: for it only the linux-x86_64 job runs, and the sums cover its files. The other platforms are the beta stage of the release: the linux-arm64 and macos-arm64 jobs run on a push to `main` and by hand, each running every test of the workspace (`cargo test --workspace --features tierstore/s3`; on macOS the update hook's launchd steps and the macOS packaging among them) before it builds, packages, unpacks the hostkeeper package and, on macOS, checks the code signature; `sums` waits for them, so their files are summed, signed and released only when they pass. a push to `main` builds every platform, and a run by hand (`gh workflow run artifacts.yml --ref <branch>`) builds and sums every platform of a branch and signs nothing. On a push to `main` it also builds the macOS installer unsigned and signs it with the Developer ID Installer identity (`sign-pkg`, then `check-pkg`; see "The macOS installer"), signs (build provenance and SBOM attestations) and checks what it signed. The Linux binaries are linked against glibc 2.28 by `cargo zigbuild`, not against the runner's glibc, and each Linux job fails when the binary asks for a newer `GLIBC_` symbol version (see "The glibc floor of the Linux binaries"). |
 | `release.yml` | when `ci` or `artifacts` finishes on a push to `main` (automatic, see Releases); by hand | `plan` decides which commit of `main` is released and as which tag (the newest whose build recorded that version); `verify` and `publish` attach the files that commit's push built and signed to a GitHub release, after checking them again; the release then goes through four stages (see The order of a release): `testing-upload`, `formula` and the `testing-apt-*` jobs publish it to testing, `check-apt`, `check-brew` and `check-install-sh` install it from there, `farm-check`, `farm` and `soak` put it on the lab through hostkeeper when the lab is switched on (`TIERSTORE_LAB_INSTALL`) and configured, and `promote-check` then lets `promote-latest`, `tap` and the `stable-apt-*` jobs make it public. Builds nothing of tierstore. |
 | `tierstore-site.yml` | pull request, push to `main`, when the site changes | typecheck, tests and build of tierstore.dev. |
 | `tierstore-site-publish.yml` | push to `main` / by hand | builds the site again; uploads it only when the repository variable `TIERSTORE_SITE_PUBLISH` is `true`. |
-| `hostkeeper-desired.yml` | the completion of a run of `release.yml` on `main`, and by hand from `main` | sets the desired version of tierstore on the hostkeeper coordinator to a published release, by its apt targets (the testing `.deb` of each Linux platform), and waits for the fleet to converge on it: after a release run that published one, the newest release; by hand, the version given. Skipped while the repository variable `TIERSTORE_SETS_DESIRED` is not `true`. See [Setting the desired version on the hostkeeper coordinator](#setting-the-desired-version-on-the-hostkeeper-coordinator). |
+| `hostkeeper-desired.yml` | the completion of a run of `release.yml` on `main`, and by hand from `main` | sets the desired version of tierstore on the hostkeeper coordinator to a published release, by its apt targets (the testing `.deb` of each Linux platform) for the Linux build nodes and by its apt targets plus the signed macOS installer for the Macs (host group `mac-build`), and waits for each fleet to converge on it: after a release run that published one, the newest release; by hand, the version given. Skipped while the repository variable `TIERSTORE_SETS_DESIRED` is not `true`. See [Setting the desired version on the hostkeeper coordinator](#setting-the-desired-version-on-the-hostkeeper-coordinator). |
 
 Every workflow is held to the same rules by `crates/xtask/tests/workflows`: every `uses:` is a
 40-digit commit SHA with a version comment, `permissions: {}` at the top, no
@@ -61,11 +61,12 @@ For a commit `<commit>` (the full SHA) and each platform (`linux-x86_64`, `linux
 - `tierstore-<version>-1.<arch>.rpm`, with `<arch>` `x86_64` (linux-x86_64) or `aarch64`
   (linux-arm64): the RPM package of the binary, and its `.rpm.sigstore.json`; there is none for
   macOS;
-- `tierstore-<version>-macos-arm64.pkg`: the installer package of the macOS binary, signed with a
-  Developer ID Installer identity (see "The macOS installer package" below); there is none for
-  Linux;
+- `tierstore-<version>-macos-arm64.pkg`, where `<version>` is the release's `X.Y.Z`: the macOS
+  installer hostkeeper's `macos-pkg` installer puts on a Mac (see "The macOS installer" below),
+  signed with the Developer ID Installer identity and not notarized, and its
+  `.pkg.sigstore.json`; there is none for Linux;
 - `SHA256SUMS`: the SHA-256 of the tarballs, SBOMs, hostkeeper packages, `index.json`, tap tarballs,
-  Debian packages and RPM packages.
+  Debian packages, RPM packages and the macOS installer.
 
 The release assets are what an operator copies into hostkeeper's release channel, as
 `tierstore/<version>/index.json` and the packages and bundles beside it.
@@ -540,6 +541,41 @@ A tag or release that exists is refused, and so is a commit that the highest rel
 covers (no second tag is made for a released commit). The binary must say the tag you give, so a release by hand
 is made from a commit whose `artifacts.yml` run computed that same version.
 
+## The macOS installer
+
+hostkeeper installs tierstore on the Macs of the host group `mac-build` from a signed `.pkg`,
+`tierstore-<X.Y.Z>-macos-arm64.pkg` (identifier `com.komira.tierstore`; `cargo xtask release
+macos-pkg` builds it with `pkgbuild` and `productbuild`, so only on the macOS runner, and
+`release check-macos-pkg` reads the expanded package back against the builder). In `artifacts.yml`:
+
+1. `macos-arm64` (a push to `main` and by hand) builds it unsigned into `pkg/`, expands it with
+   `pkgutil --expand`, checks it, and uploads it as `pkg-unsigned-macos-arm64` (not a release file).
+2. `sign-pkg` (a push to `main` only, `macos-15`, environment `pkg-signing`, `contents: read`; no
+   checkout and no cargo, so no repository code runs where the identity is) imports the identity
+   (the secrets `MACOS_INSTALLER_P12` and `MACOS_INSTALLER_P12_PASSWORD`) into a keychain of the job
+   in `$RUNNER_TEMP`, signs with `productsign --timestamp` as `Developer ID Installer: Komira AI,
+   Inc. (U7RTX4XD3X)`, deletes the keychain and the PKCS#12 file whether or not it worked, and
+   uploads `pkg-signed-macos-arm64`. Not notarized: a host's installer takes a signed package.
+3. `check-pkg` (a push to `main` only, no secret) runs `release check-pkg-signature` (pkgutil must
+   trust the signature, timestamped, by exactly that identity under Apple's chain), checks that the
+   signed and the unsigned package expand to the same files, and uploads the signed one as
+   `assets-pkg-macos-arm64`. `sums` waits for it (skipped, as it is for a pull request or a run by
+   hand, which sign nothing, it holds nothing back), `sums assemble` lists every `.pkg` of the
+   directory, and `attest` signs it as a subject of its own with its `.pkg.sigstore.json`: the
+   release carries the signed bytes.
+
+`release.yml` publishes it to `packages.komira.ai` with the apt jobs' environment (`apt-publish`)
+and role: `testing-pkg-upload` (after `publish`) puts the package, its bundle and a `SHA256SUMS`
+of the two once each under `pkg/tierstore/<X.Y.Z>/` (`channels pkg upload`: `If-None-Match: *`; the
+same bytes twice pass, other bytes at a key fail), and `promote-pkg` (after `promote-check`) reads
+them back against the release's `SHA256SUMS` and then writes the pointer `pkg/tierstore/stable.json`
+(`version`, `tag`, `commit` and each file's `sha256` and `size`) with `If-Match` on the ETag read,
+never over a newer version, and invalidates it (`channels pkg promote`). Settings: `APT_PUBLISH_ROLE_ARN`,
+`APT_BUCKET` and, for the pointer, `APT_DISTRIBUTION_ID`; the role needs `s3:PutObject` and
+`s3:GetObject` on `pkg/tierstore/*`. The repository's descriptor (`hostkeeper-repository.json`) must
+list `macos-arm64` under `formats["macos-pkg"].platforms`; the directory of a package defaults to
+its name, `tierstore`, which is the directory used here.
+
 ## Setting the desired version on the hostkeeper coordinator
 
 Hosts take tierstore through hostkeeper: the coordinator holds the version each service should
@@ -567,12 +603,16 @@ same `--min-hostkeeper 0.1.225`): the version `X.Y.Z`, the plain version apt ins
 release's `SHA256SUMS` lists. The same version set by both gets the same targets, so the second
 set is taken (the coordinator refuses a version set again with other targets, `release_exists`).
 A list of `hostkeeper-archive` entries alone would order none of the farm nodes: the coordinator
-holds every host that runs tierstore from apt `installer_dropped`. **The Macs are not covered by
-`release desired-apt`**: it writes the Linux entries only, so the targets have no `macos-arm64` list
-and a Mac is ordered nothing (`no_target`) and keeps what it runs. The installer package a Mac's
-daemon installs, and the manifest for it, are built by the verbs of "The macOS installer package". No release index is sent.
+holds every host that runs tierstore from apt `installer_dropped`. `targets` is
+exactly the lab's. With `--macos-pkg` the step also hands on `targets-mac`: the same targets and a
+`macos-arm64` list of one `macos-pkg` entry, `{"installer": "macos-pkg", "repository":
+"komira-testing", "packageVersion": "X.Y.Z", "digest": <SHA-256>, "bytes": <size>, "manifest":
+{...}}`, for the release's signed `tierstore-<X.Y.Z>-macos-arm64.pkg`, which the verb downloads from
+the release and holds to the digest `SHA256SUMS` lists (the coordinator turns it into the location
+`pkg/tierstore/<X.Y.Z>/` of the repository). No release index is sent.
 
-The `set-desired` job then calls hostkeeper's CI client (`set-desired.yml` of
+The `set-desired` job (host group `all-in-one`) and, beside it, `set-desired-mac` (host group
+`mac-build`, with `targets-mac`) then call hostkeeper's CI client (`set-desired.yml` of
 komira-ai/hostkeeper, pinned to v0.1.317, whose hkctl sends the targets as they are, the `apt`
 entries included; the call names the host group `all-in-one`, the Linux build nodes, so the version
 is one deployment to that group and the wait is on that group alone, and the coordinator's

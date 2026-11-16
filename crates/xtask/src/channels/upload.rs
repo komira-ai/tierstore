@@ -72,15 +72,15 @@ pub struct Request<'a> {
 }
 
 /// One file to put: its name in `releases/<version>/`, where it is, and what it is.
-struct Entry {
-    name: String,
-    path: PathBuf,
-    sha256: Sha256,
-    size: u64,
+pub(crate) struct Entry {
+    pub(crate) name: String,
+    pub(crate) path: PathBuf,
+    pub(crate) sha256: Sha256,
+    pub(crate) size: u64,
 }
 
 /// The digest and size of the file at `path`, read once.
-fn digest_file(path: &Path) -> Result<(Sha256, u64), Error> {
+pub(crate) fn digest_file(path: &Path) -> Result<(Sha256, u64), Error> {
     let what = || format!("read {}", path.display());
     let mut file = std::fs::File::open(path).map_err(Error::spawn(what()))?;
     let mut hash = sha2::Sha256::new();
@@ -113,7 +113,7 @@ pub(crate) fn is_distribution_id(id: &str) -> bool {
 }
 
 /// The version of `tag`, after the flags are held to their forms.
-fn check_request(r: &Request) -> Result<String, Error> {
+pub(crate) fn check_request(r: &Request) -> Result<String, Error> {
     let version = r
         .tag
         .strip_prefix('v')
@@ -194,26 +194,28 @@ fn content_type(name: &str) -> &'static str {
         "application/vnd.debian.binary-package"
     } else if name.ends_with(".rpm") {
         "application/x-rpm"
+    } else if name.ends_with(".pkg") {
+        "application/octet-stream"
     } else {
         "application/gzip"
     }
 }
 
-fn strings(args: &[&str]) -> Vec<String> {
+pub(crate) fn strings(args: &[&str]) -> Vec<String> {
     args.iter().map(|a| (*a).to_owned()).collect()
 }
 
 /// Whether `stderr` is S3's answer to a write whose condition did not hold.
-fn precondition_failed(stderr: &str) -> bool {
+pub(crate) fn precondition_failed(stderr: &str) -> bool {
     stderr.contains("PreconditionFailed") || stderr.contains("(412)")
 }
 
-fn refusal(what: &str, answer: &Answer) -> Error {
+pub(crate) fn refusal(what: &str, answer: &Answer) -> Error {
     Error::Failed(format!("{what}: {}", answer.stderr.trim_end()))
 }
 
 /// Puts `path` at `key` once. A `412` passes only if the stored file's digest is `sha256`.
-fn put_once(
+pub(crate) fn put_once(
     aws: &dyn Aws,
     r: &Request,
     key: &str,
@@ -271,7 +273,7 @@ fn put_once(
 }
 
 /// `SHA256SUMS` of `entries`.
-fn sums_text(entries: &[Entry]) -> String {
+pub(crate) fn sums_text(entries: &[Entry]) -> String {
     sums::render(
         &entries
             .iter()

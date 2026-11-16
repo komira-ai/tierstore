@@ -61,6 +61,7 @@ pub fn needs_bundle(name: &str) -> bool {
         || name.ends_with(".tar.zst")
         || name.ends_with(".deb")
         || name.ends_with(".rpm")
+        || name.ends_with(".pkg")
 }
 
 /// `commit` with its last hex digit changed: a commit the bundle was not made for.

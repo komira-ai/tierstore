@@ -77,14 +77,16 @@ fn block(text: &str, key: &str) -> String {
     out
 }
 
-/// The `wait` input `hostkeeper-desired.yml` passes the client.
+/// The `wait` input `hostkeeper-desired.yml` passes the client, in each of its two calls.
 fn wait_input() -> String {
     let text = fs::read_to_string(WORKFLOW).unwrap();
     let values: Vec<&str> = text
         .lines()
         .filter_map(|l| l.strip_prefix("      wait: "))
         .collect();
-    assert_eq!(values.len(), 1, "one `wait` input: {values:?}");
+    // One call for the Linux build nodes and one for the Macs: each passes the same `wait`.
+    assert_eq!(values.len(), 2, "one `wait` input per call: {values:?}");
+    assert_eq!(values[0], values[1], "the same `wait` in both calls");
     values[0].trim().to_owned()
 }
 

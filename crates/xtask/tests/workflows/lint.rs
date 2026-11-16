@@ -70,6 +70,12 @@ pub const WRITE_ALLOWED: &[Allowed] = &[
         condition: DESIRED_SET_IF,
     },
     Allowed {
+        file: "hostkeeper-desired.yml",
+        job: "set-desired-mac",
+        scope: "id-token",
+        condition: DESIRED_SET_IF,
+    },
+    Allowed {
         file: "release.yml",
         job: "publish",
         scope: "contents",
@@ -86,6 +92,18 @@ pub const WRITE_ALLOWED: &[Allowed] = &[
         job: "testing-upload",
         scope: "id-token",
         condition: RELEASE_IF,
+    },
+    Allowed {
+        file: "release.yml",
+        job: "testing-pkg-upload",
+        scope: "id-token",
+        condition: RELEASE_IF,
+    },
+    Allowed {
+        file: "release.yml",
+        job: "promote-pkg",
+        scope: "id-token",
+        condition: super::apt::PROMOTE_IF,
     },
     Allowed {
         file: "release.yml",
@@ -502,9 +520,11 @@ pub fn release_problems(text: &str) -> Vec<String> {
         "plan",
         "promote-check",
         "promote-latest",
+        "promote-pkg",
         "publish",
         "soak",
         "tap",
+        "testing-pkg-upload",
         "testing-upload",
         "verify",
     ];
@@ -513,7 +533,7 @@ pub fn release_problems(text: &str) -> Vec<String> {
     expected.sort_unstable();
     if listed != expected {
         problems.push(format!(
-            "jobs are {listed:?}, not plan, verify, publish, formula, testing-upload, the install checks, the lab (farm-check, farm, soak), promote-check, promote-latest, tap and the apt and rpm jobs {expected:?}"
+            "jobs are {listed:?}, not plan, verify, publish, formula, testing-upload, testing-pkg-upload, the install checks, the lab (farm-check, farm, soak), promote-check, promote-latest, promote-pkg, tap and the apt and rpm jobs {expected:?}"
         ));
     }
     for (name, job) in jobs {
