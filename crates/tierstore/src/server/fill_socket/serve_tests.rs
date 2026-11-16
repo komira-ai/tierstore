@@ -49,8 +49,8 @@ impl Served {
         let (cache, path, notify) = (cache.clone(), path.to_owned(), Arc::clone(&halt));
         let task = tokio::spawn(async move {
             match uid {
-                Some(uid) => serve_as(cache, &path, notify, uid).await,
-                None => serve(cache, &path, notify).await,
+                Some(uid) => serve_as((cache, None), &path, notify, uid).await,
+                None => serve((cache, None), &path, notify).await,
             }
         });
         Self { halt, task }

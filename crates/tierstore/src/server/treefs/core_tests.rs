@@ -506,7 +506,9 @@ fn a_read_that_the_system_fails_is_an_io_error() {
     let directory = std::fs::File::open(&rig.cache).unwrap();
     let _ = super::locked(&core.handles).insert(
         handle,
-        std::sync::Arc::new(super::Handle::Cached(directory)),
+        std::sync::Arc::new(super::Handle::Cached(super::FileBytes::whole(
+            directory, 10,
+        ))),
     );
     assert_eq!(core.read(handle, 0, 10), Err(Errno::Io));
 }
@@ -658,9 +660,9 @@ fn a_manifest_file_is_read_up_to_one_byte_past_the_limit() {
     let file = std::fs::File::create(&path).unwrap();
     file.set_len(crate::tree_manifest::MAX_MANIFEST_BYTES as u64 + 10)
         .unwrap();
-    let bytes = super::read_manifest(&path).unwrap();
+    let bytes = super::placed::read_manifest(&path).unwrap();
     assert_eq!(bytes.len(), crate::tree_manifest::MAX_MANIFEST_BYTES + 1);
-    assert!(super::read_manifest(&rig.cache.join("none")).is_err());
+    assert!(super::placed::read_manifest(&rig.cache.join("none")).is_err());
 }
 
 /// Asserts the path of an entry in its tree: the root is `/`, a deep entry is its names from the

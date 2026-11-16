@@ -4,9 +4,12 @@
 use std::sync::Arc;
 
 use super::super::{Core, Errno, Opened};
+use crate::server::local_cache::trees::testing::fs_at;
 use crate::server::treefs::backing::{self, Saved};
 use crate::server::treefs::ino;
+use crate::server::treefs::live_testing::{Live, walk};
 use crate::server::treefs::locked;
+use crate::server::treefs::testing::open_cached;
 use crate::server::treefs::testing::{FakeKernel, Rig, sample, sha};
 use crate::tree_manifest::TreeDigest;
 
@@ -223,4 +226,70 @@ fn passthrough_is_adopted_once() {
     next.adopt_passthrough(&[first], &|id| kernel.wrap(id));
     next.adopt_passthrough(&[], &|id| kernel.wrap(id));
     assert_eq!(next.backing_table().unwrap().live(), 1);
+}
+
+/// Asserts that a read of a handle of a placed file that the process before gave out makes the
+/// open again as the file's span of the pack: the bytes are the file's, not the first bytes of the
+/// pack, a read from the middle and one past the end are clipped to the file, and the release ends
+/// the open.
+#[tokio::test(flavor = "multi_thread")]
+async fn a_foreign_handle_of_a_placed_file_is_made_again_as_its_span() {
+    let live = Live::new("tfs-adopt-placed").await;
+    let _ = live.place(vec![fs_at("jobs/1f3a/root")]);
+    let (ino, fh) = live
+        .on_core(|core| {
+            let ino = walk(core, &["jobs", "1f3a", "root", "bin", "other"]);
+            let fh = open_cached(core, ino, false).unwrap();
+            (ino, fh)
+        })
+        .await;
+    let other = live.bench.pack.content(1).to_vec();
+    assert_ne!(other[..100], live.bench.pack.content(0)[..100]);
+    let next = live.successor();
+    let (whole, middle, tail, past, open, closed) = tokio::task::spawn_blocking(move || {
+        assert_eq!(next.read(fh, 0, 10), Err(Errno::Inval));
+        let whole = next.read_open(ino, fh, 0, u32::MAX).unwrap();
+        let middle = next.read_open(ino, fh, 100, 50).unwrap();
+        let tail = next.read_open(ino, fh, 1990, 100).unwrap();
+        let past = next.read_open(ino, fh, 2000, 100).unwrap();
+        let open = next.open_files();
+        next.release_open(ino, fh);
+        (whole, middle, tail, past, open, next.open_files())
+    })
+    .await
+    .unwrap();
+    assert_eq!(whole, other);
+    assert_eq!(middle, other[100..150]);
+    assert_eq!(tail, other[1990..]);
+    assert!(past.is_empty());
+    assert_eq!((open, closed), (1, 0));
+}
+
+/// Asserts that the handles of the other kinds of member of a placed tree that an earlier process
+/// gave out are treated as those of a tree of manifests: the handle of the empty file is made
+/// again as an empty open, and that of a symbolic link is `EINVAL`.
+#[tokio::test(flavor = "multi_thread")]
+async fn a_foreign_handle_of_a_placed_empty_file_or_link_is_as_for_a_manifest_tree() {
+    let live = Live::new("tfs-adopt-placed-kinds").await;
+    let _ = live.place(vec![fs_at("jobs/1f3a/root")]);
+    let (zero, link) = live
+        .on_core(|core| {
+            (
+                walk(core, &["jobs", "1f3a", "root", "zero"]),
+                walk(core, &["jobs", "1f3a", "root", "link"]),
+            )
+        })
+        .await;
+    let next = live.successor();
+    let foreign = crate::server::treefs::handle::make(1, 77, false);
+    let (empty, linked) = tokio::task::spawn_blocking(move || {
+        (
+            next.read_open(zero, foreign, 0, 10),
+            next.read_open(link, foreign + 1, 0, 10),
+        )
+    })
+    .await
+    .unwrap();
+    assert_eq!(empty, Ok(Vec::new()));
+    assert_eq!(linked, Err(Errno::Inval));
 }

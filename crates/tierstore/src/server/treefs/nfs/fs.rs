@@ -9,7 +9,6 @@
 //! again, while the fill goes on.
 
 use std::collections::{HashMap, HashSet};
-use std::fs::File;
 use std::future::Future;
 use std::pin::Pin;
 use std::sync::{Arc, Mutex};
@@ -27,7 +26,7 @@ use tokio::sync::watch;
 use super::config::NfsSettings;
 use super::fdcache::FdCache;
 use super::handle;
-use crate::server::treefs::core::{Attr, Core, Errno, FIXED_MTIME, Kind, Looked, read_file};
+use crate::server::treefs::core::{Attr, Core, Errno, FIXED_MTIME, FileBytes, Kind, Looked};
 use crate::server::treefs::{ino, locked};
 
 /// A future that is ready when a read has waited long enough for a fill; one is made for each read
@@ -35,7 +34,7 @@ use crate::server::treefs::{ino, locked};
 pub(super) type Patience = Arc<dyn Fn() -> Pin<Box<dyn Future<Output = ()> + Send>> + Send + Sync>;
 
 /// The state of a fill: not done, or the open file or why there is none.
-type Fill = Option<Result<Arc<File>, nfsstat3>>;
+type Fill = Option<Result<Arc<FileBytes>, nfsstat3>>;
 
 /// The cookie verifier of every listing: the same for every start, so that a client's cookies
 /// outlive a restart.
@@ -148,15 +147,16 @@ impl TreeNfs {
         }
     }
 
-    /// The core's answer to a lookup of `name` in `dirid`. A lookup in `trees/` may read a tree
-    /// that no run has attached through the fill socket (`core/implicit.rs`), so it runs on a
-    /// blocking thread, as a fill for a read does, and holds up no other request.
+    /// The core's answer to a lookup of `name` in `dirid`. A lookup in the namespace may read a
+    /// tree that no run has attached through the fill socket (`core/implicit.rs`), or ask it where
+    /// a path is among the placements (`core/placed.rs`), so it runs on a blocking thread, as a
+    /// fill for a read does, and holds up no other request.
     async fn looked(&self, dirid: fileid3, name: &str) -> Result<Looked, Errno> {
-        if dirid != ino::TREES {
+        if !namespace(dirid) {
             return self.core.lookup(dirid, name);
         }
         let (core, name) = (Arc::clone(&self.core), name.to_owned());
-        tokio::task::spawn_blocking(move || core.lookup(ino::TREES, &name))
+        tokio::task::spawn_blocking(move || core.lookup(dirid, &name))
             .await
             .unwrap_or(Err(Errno::Io))
     }
@@ -165,7 +165,7 @@ impl TreeNfs {
     /// the blob first. The fill goes on in a thread of its own, so that a read that waits longer
     /// than the patience is answered `NFS3ERR_JUKEBOX` and finds the descriptor cached when the
     /// client asks again.
-    async fn file(&self, id: fileid3) -> Result<Arc<File>, nfsstat3> {
+    async fn file(&self, id: fileid3) -> Result<Arc<FileBytes>, nfsstat3> {
         if let Some(file) = self.fds.get(id) {
             return Ok(file);
         }
@@ -239,10 +239,9 @@ impl NFSFileSystem for TreeNfs {
         let auth = auth.ok_or(nfsstat3::NFS3ERR_ACCES)?;
         let attr = self.core.getattr(id).map_err(handled)?.attr;
         let bits = class_bits(&attr, auth);
-        let namespace = ino::split(id).0 == 0;
         let mut granted = 0;
         // Nobody lists the namespace, whatever its mode says (the core's rule).
-        if bits & 0o4 != 0 && !namespace {
+        if bits & 0o4 != 0 && !namespace(id) {
             granted |= ACCESS3_READ;
         }
         if bits & 0o1 != 0 {
@@ -271,7 +270,7 @@ impl NFSFileSystem for TreeNfs {
                 Ok(Looked::Absent(_)) => Err(nfsstat3::NFS3ERR_NOENT),
                 // A name the namespace lacks is a missing name; a directory the core lacks is a
                 // stale handle.
-                Err(Errno::NoEnt) if ino::split(dirid).0 == 0 => Err(nfsstat3::NFS3ERR_NOENT),
+                Err(Errno::NoEnt) if namespace(dirid) => Err(nfsstat3::NFS3ERR_NOENT),
                 Err(errno) => Err(handled(errno)),
             },
         }
@@ -306,7 +305,7 @@ impl NFSFileSystem for TreeNfs {
         }
         let file = self.file(id).await?;
         // `wanted` is at most `count`, a `u32`.
-        let data = read_file(&file, offset, wanted as usize).map_err(status)?;
+        let data = file.read(offset, wanted as usize).map_err(status)?;
         let end = offset + data.len() as u64 >= attr.size;
         Ok((data, end))
     }
@@ -432,6 +431,12 @@ impl NFSFileSystem for TreeNfs {
     fn serverid(&self) -> nfsserve::nfs::cookieverf3 {
         SERVER_ID
     }
+}
+
+/// Whether `id` is a directory of the namespace: the mount's root, `trees/`, or a directory above
+/// the fs locations of the placements.
+fn namespace(id: fileid3) -> bool {
+    ino::split(id).0 == 0 || ino::is_placed_dir(id)
 }
 
 #[cfg(test)]
