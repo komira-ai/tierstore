@@ -120,6 +120,7 @@ use super::listen::joined;
 use super::local_cache::LocalTierFailure;
 use super::lock::check_lock_path;
 use super::oci::{self, OciAuth, OciLimits, OciMetrics, OciPrefix, Upstream};
+use super::trees::{TreesFlags, TreesSetup, trees_setup_of};
 
 /// A start-up error, for the operator.
 pub type Error = Box<dyn std::error::Error + Send + Sync>;
@@ -486,6 +487,8 @@ pub struct Cli {
     pub oci_echo_bytes: Option<u64>,
     /// `params.upstream`: the registry the OCI front pulls a missing object from.
     pub(super) oci_upstream: Option<UpstreamTable>,
+    /// The `trees` interfaces of the node (served by a node with a local cache).
+    pub(super) trees_front: TreesFlags,
 }
 
 /// The share of a budget that a percent is.
@@ -506,6 +509,8 @@ pub(super) struct Built {
     /// `active-marks` that names it.
     pub(super) marks: Option<(String, Arc<dyn Backend>)>,
     pub(super) oci: Option<OciSetup>,
+    /// The trees front, if there is a `trees` interface.
+    pub(super) trees_front: Option<TreesSetup>,
 }
 
 /// The OCI front, as far as the flags and files go: the proxy it reads is not open yet.
@@ -788,6 +793,7 @@ pub(super) fn build(cli: &Cli) -> Result<Built, Error> {
     cli.heartbeat.apply(&mut proxy);
     cli.entry_tuning.apply_proxy(&mut proxy);
     let oci = oci_setup(cli, &server, true)?;
+    let trees_front = trees_setup_of(&cli.trees_front, &server, true)?;
     server.oci_metrics = oci.as_ref().map(|setup| Arc::clone(&setup.metrics));
     Ok(Built {
         server,
@@ -800,6 +806,7 @@ pub(super) fn build(cli: &Cli) -> Result<Built, Error> {
             .zip(marks_name(&cli.hot_marks))
             .map(|(store, name)| (name, store)),
         oci,
+        trees_front,
     })
 }
 
@@ -933,11 +940,13 @@ pub(super) fn checked(settings: &Settings) -> Result<(), Error> {
         Settings::Cache(cache) => {
             let server = server_config(&cache.front, clock, false)?;
             // The `[oci]` table, with the checks a start makes of it.
-            oci_setup_of(&cache.oci, &server, false).map(drop)
+            oci_setup_of(&cache.oci, &server, false)?;
+            trees_setup_of(&cache.trees_front, &server, false).map(drop)
         }
         Settings::Combined(combined) => {
             let server = server_config(&combined.node.front(), clock, false)?;
-            oci_setup(&combined.node, &server, false).map(drop)
+            oci_setup(&combined.node, &server, false)?;
+            trees_setup_of(&combined.node.trees_front, &server, false).map(drop)
         }
     }
 }

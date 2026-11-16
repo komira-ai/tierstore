@@ -109,6 +109,7 @@ pub(super) async fn serve_combined(
         handoff: cli.handoff.as_ref(),
         fill_socket: settings.fill_socket.as_deref(),
         trees: None,
+        trees_front: built.trees_front,
     };
     let (server, oci) = (built.server, built.oci);
     serve_front(cache, server, oci, fronts, stop, ready, reconciling).await
@@ -125,6 +126,9 @@ pub(super) async fn serve_combined_until_signalled(
         if bound.oci.is_some() {
             let how = bound.oci_mode.unwrap_or_default().as_str();
             line.push_str(&format!(" oci-listen={} ({how})", joined(&bound.oci_all)));
+        }
+        if !bound.trees_all.is_empty() {
+            line.push_str(&format!(" trees-listen={}", joined(&bound.trees_all)));
         }
         super::build_info::stderr_log::answer(&format!("{line} commit={COMMIT}\n"));
     };

@@ -267,89 +267,19 @@
 //! `tierstore_oci_drain_late_requests_total`.
 
 mod auth;
-mod bucket;
-pub mod build_info;
-mod cache_cli;
-mod chunked;
-pub mod cli;
-mod cli_heartbeat;
-mod cli_oci;
-mod cli_reconcile;
-mod cli_serve;
-mod cli_text;
-mod combined_cli;
-mod config;
-mod config_cache;
-mod config_cache_tuning;
-mod config_combined;
-mod config_entry;
-mod config_fill;
-mod config_handoff;
-mod config_hot_only;
-mod config_interface;
-mod config_io;
-mod config_load;
-mod config_policy;
-mod config_reconcile;
-mod config_syntax;
-mod config_tier;
-mod config_tuning;
-mod config_units;
-mod config_unknown;
-mod counted;
-mod delete_objects;
-mod deprecated;
-mod digests;
-mod door;
-mod drain;
-mod fill_socket;
-mod first_beat;
-mod first_format;
-mod front;
-pub mod gc;
-pub mod handoff;
-mod handover;
-mod hosted;
-mod hydrate;
-mod idle;
-mod keys;
-mod launch;
-mod linger;
-mod list_token;
-mod listen;
-mod listing;
-pub mod local_cache;
-mod lock;
-mod memory_format;
-pub mod oci;
-mod oci_upstream_setup;
-mod ops;
-pub mod presign;
-mod reply;
-mod request;
-mod rounds;
-mod s3_tls;
-pub mod scoped;
-mod server_config;
-mod stop_watcher;
-mod time;
-mod treefs;
-#[cfg(any(target_os = "linux", target_os = "macos"))]
-pub mod update_hook;
-mod usage_probe;
-mod verbs;
-mod xml;
-
 #[cfg(test)]
 mod auth_tests;
 #[cfg(test)]
 mod body_stall_tests;
+mod bucket;
 #[cfg(test)]
 mod bucket_config_tests;
 #[cfg(test)]
 mod bucket_life_tests;
 #[cfg(test)]
 mod bucket_tests;
+pub mod build_info;
+mod cache_cli;
 #[cfg(test)]
 mod cache_cli_tests;
 #[cfg(test)]
@@ -364,10 +294,18 @@ mod cache_handoff_tests;
 mod cache_handoff_traffic_tests;
 #[cfg(test)]
 mod cache_lock_tests;
+mod chunked;
 #[cfg(test)]
 mod chunked_tests;
+pub mod cli;
+mod cli_heartbeat;
 #[cfg(test)]
 mod cli_heartbeat_tests;
+mod cli_oci;
+mod cli_reconcile;
+mod cli_serve;
+mod cli_text;
+mod combined_cli;
 #[cfg(test)]
 mod combined_cli_tests;
 #[cfg(test)]
@@ -380,42 +318,79 @@ mod completion_tests;
 mod conditional_date_tests;
 #[cfg(test)]
 mod conditional_delete_tests;
+mod config;
+mod config_cache;
 #[cfg(test)]
 mod config_cache_tests;
+mod config_cache_tuning;
+mod config_combined;
 #[cfg(test)]
 mod config_combined_tests;
+mod config_entry;
+mod config_fill;
+mod config_handoff;
+mod config_hot_only;
+mod config_interface;
+mod config_io;
+mod config_load;
+mod config_policy;
+mod config_reconcile;
+mod config_syntax;
 #[cfg(test)]
 mod config_testing;
+mod config_tier;
+mod config_tuning;
+mod config_units;
+mod config_unknown;
+mod counted;
+mod delete_objects;
 #[cfg(test)]
 mod delete_objects_marks_tests;
 #[cfg(test)]
 mod delete_objects_tests;
+mod deprecated;
+mod digests;
 #[cfg(test)]
 mod digests_tests;
 #[cfg(test)]
 mod docs_examples_tests;
 #[cfg(test)]
 mod docs_tests;
+mod door;
+mod drain;
 #[cfg(test)]
 mod drain_contract_tests;
 #[cfg(test)]
 mod drain_switch_tests;
 #[cfg(test)]
 mod drain_tests;
+mod fill_socket;
+mod first_beat;
+mod first_format;
+mod front;
+pub mod gc;
 #[cfg(test)]
 mod gc_server_tests;
 #[cfg(test)]
 mod gc_tests;
+pub mod handoff;
+mod handover;
 #[cfg(test)]
 mod header_timeout_tests;
+mod hosted;
 #[cfg(test)]
 mod hosted_tests;
+mod hydrate;
 #[cfg(test)]
 mod hydrate_pin_down_tests;
+mod idle;
 #[cfg(test)]
 mod idle_tests;
 #[cfg(test)]
 mod key_rules_tests;
+mod keys;
+mod launch;
+mod linger;
 #[cfg(test)]
 mod list_delimiter_tests;
 #[cfg(test)]
@@ -426,24 +401,34 @@ mod list_objects_v1_tests;
 mod list_options_tests;
 #[cfg(test)]
 mod list_parts_tests;
+mod list_token;
 #[cfg(test)]
 mod list_uploads_delimiter_tests;
 #[cfg(test)]
 mod list_versions_tests;
+mod listen;
+mod listing;
+pub mod local_cache;
+mod lock;
 #[cfg(test)]
 mod lock_tests;
+mod memory_format;
 #[cfg(test)]
 mod metrics_page_tests;
 #[cfg(test)]
 mod metrics_tests;
+pub mod oci;
+mod oci_upstream_setup;
 #[cfg(test)]
 mod one_call_get_tests;
+mod ops;
 #[cfg(test)]
 mod ops_detached_tests;
 #[cfg(test)]
 mod ops_tests;
 #[cfg(test)]
 mod pipes;
+pub mod presign;
 #[cfg(test)]
 mod presign_get_tests;
 #[cfg(test)]
@@ -452,8 +437,10 @@ mod presign_server_tests;
 mod ready_tests;
 #[cfg(test)]
 mod reconcile_lock_tests;
+mod reply;
 #[cfg(test)]
 mod reply_tests;
+mod request;
 #[cfg(test)]
 mod request_tests;
 #[cfg(test)]
@@ -462,28 +449,41 @@ mod reserved_tests;
 mod response_override_tests;
 #[cfg(test)]
 mod role_tests;
+mod rounds;
+mod s3_tls;
+pub mod scoped;
 #[cfg(test)]
 mod scoped_rights_tests;
 #[cfg(test)]
 mod scoped_server_tests;
 #[cfg(test)]
 mod scoped_tests;
+mod server_config;
 #[cfg(test)]
 mod server_tests;
 #[cfg(test)]
 mod slow_reader_tests;
+mod stop_watcher;
 #[cfg(test)]
 mod stream_put_tests;
 #[cfg(test)]
 mod stream_wire_tests;
 #[cfg(test)]
 mod testing;
+mod time;
 #[cfg(test)]
 mod time_tests;
+mod treefs;
+mod trees;
 #[cfg(test)]
 mod unlistable_key_tests;
+#[cfg(any(target_os = "linux", target_os = "macos"))]
+pub mod update_hook;
 #[cfg(test)]
 mod uploads_tests;
+mod usage_probe;
+mod verbs;
+mod xml;
 #[cfg(test)]
 mod xml_tests;
 

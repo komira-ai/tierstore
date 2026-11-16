@@ -89,6 +89,7 @@ use super::front::FrontSettings;
 use super::handoff::Handoff;
 use super::local_cache::trees::TreesConfig;
 use super::local_cache::{CacheConfig, SCRUB_MIN_ROUND, SCRUB_RATE};
+use super::trees::TreesFlags;
 
 /// The only layout of the cache directory.
 const LAYOUT: &str = "digest-v1";
@@ -269,6 +270,8 @@ pub(super) struct CacheSettings {
     pub cache: CacheConfig,
     /// The OCI front, as the `oci` interfaces make it: `listen` is empty for none.
     pub oci: OciFlags,
+    /// The trees front, as the `trees` interfaces make it: `listen` is empty for none.
+    pub trees_front: TreesFlags,
     /// The rate of the scrub in bytes a second: the default if the file gave none; none if the
     /// file turned it off.
     pub scrub_rate: Option<u64>,
@@ -463,7 +466,7 @@ impl CacheSettings {
         if let Some(socket) = &fill_socket {
             check_fill_outside_cache(socket, &part.config.path)?;
         }
-        let oci = fronts.oci;
+        let (oci, trees_front) = (fronts.oci, fronts.trees);
         if oci.upstream.is_some() {
             let why =
                 "a pull is stored, and a build node takes no writes: use a storage node's file";
@@ -479,6 +482,7 @@ impl CacheSettings {
             cache: part.config,
             scrub_min_round: part.scrub_min_round,
             oci,
+            trees_front,
             scrub_rate: part.scrub_rate,
             handoff,
             fill_socket,

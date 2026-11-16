@@ -43,6 +43,8 @@ pub struct Addresses {
     pub oci_all: Vec<SocketAddr>,
     /// How the OCI front carries its connections: `Some` exactly when [`oci`](Self::oci) is.
     pub oci_mode: Option<OciMode>,
+    /// Every address the trees front is bound to; empty when there is none.
+    pub trees_all: Vec<SocketAddr>,
 }
 
 impl Addresses {
@@ -61,6 +63,7 @@ impl Addresses {
             oci: oci_all.first().copied(),
             oci_all,
             oci_mode: oci.map(OciListener::mode),
+            trees_all: Vec::new(),
         })
     }
 
@@ -79,6 +82,7 @@ impl Addresses {
             oci: oci_all.first().copied(),
             oci_all,
             oci_mode,
+            trees_all: Vec::new(),
         }
     }
 }

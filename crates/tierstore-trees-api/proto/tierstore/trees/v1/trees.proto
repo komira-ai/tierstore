@@ -1,0 +1,114 @@
+syntax = "proto3";
+package tierstore.trees.v1;
+
+service TreesService {
+  rpc CreateTree(CreateTreeRequest) returns (CreateTreeResponse);
+  rpc GetPlacement(GetPlacementRequest) returns (GetPlacementResponse);
+  rpc DeleteTree(DeleteTreeRequest) returns (DeleteTreeResponse);
+}
+
+message CreateTreeRequest {
+  repeated Entry entries = 1;
+  repeated Location at = 2;
+  Prefetch prefetch = 3;            // PREFETCH_UNSPECIFIED: the node's trees.prefetch_default
+  optional uint32 ttl_secs = 4;     // unset: trees.ttl
+  optional uint32 root_mode = 5;    // unset: 0755
+  optional bytes tree = 6;          // the client's own digest T (32 bytes), checked
+}
+
+message Entry {
+  string path = 1;                  // "/"-separated names below the root
+  oneof kind {
+    File file = 2;
+    Dir dir = 3;                    // an empty directory, or one with a mode of its own
+    Symlink symlink = 4;
+    ChildTree tree = 5;             // structural sharing: a tree already created on this node
+  }
+}
+
+message File {
+  optional uint32 mode = 1;         // permission bits, setuid, setgid, sticky: 0 to 07777; unset: 0644
+  bytes sha256 = 2;                 // 32 bytes, required
+  uint64 size = 3;
+  optional Source from = 4;         // unset: the whole object cas/l/<sha256>
+}
+
+message Source { string key = 1; uint64 offset = 2; }   // the size bytes at offset of the object key
+message Dir { optional uint32 mode = 1; }                // unset: 0755
+message Symlink { string target = 1; }
+message ChildTree { bytes tree = 1; }                    // 32 bytes
+
+message Location {
+  oneof where {
+    S3Location s3 = 1;
+    FsLocation fs = 2;
+  }
+}
+message S3Location { string bucket = 1; string prefix = 2; }   // prefix ends in "/"
+message FsLocation { string path = 1; }                        // names under the mount
+
+enum Prefetch {
+  PREFETCH_UNSPECIFIED = 0;
+  PREFETCH_NONE = 1;
+  PREFETCH_BACKGROUND = 2;
+  PREFETCH_WAIT = 3;
+}
+
+enum PlacementState {
+  PLACEMENT_STATE_UNSPECIFIED = 0;
+  PLACEMENT_STATE_LAZY = 1;
+  PLACEMENT_STATE_FILLING = 2;
+  PLACEMENT_STATE_READY = 3;
+  PLACEMENT_STATE_FAILED = 4;
+}
+
+message CreateTreeResponse {
+  bytes tree = 1;                   // T, 32 bytes
+  string placement = 2;             // the id (3.5)
+  repeated Location at = 3;
+  uint64 entries = 4;
+  uint64 files = 5;
+  uint64 bytes = 6;
+  uint64 packs = 7;
+  uint64 filled = 8;                // spans this call filled
+  uint64 present = 9;               // spans already in the cache
+  uint64 fill_bytes = 10;
+  bool created = 11;                // false: the same tree was already placed at these locations
+  uint64 expires_ms = 12;
+  PlacementState state = 13;        // READY for wait, FILLING for background, LAZY for none
+}
+
+message GetPlacementRequest {
+  string placement = 1;
+  optional ListDir list = 2;        // set: also the children of one directory
+}
+message ListDir { string path = 1; string after = 2; uint32 limit = 3; }   // limit 0: 1000
+
+message GetPlacementResponse {
+  string placement = 1;
+  bytes tree = 2;
+  PlacementState state = 3;
+  repeated Location at = 4;
+  uint64 files = 5;
+  uint64 total_bytes = 6;
+  uint64 filled_bytes = 7;
+  repeated Failure failures = 8;    // at most trees.max_failures
+  uint64 created_ms = 9;
+  uint64 expires_ms = 10;
+  uint32 attachments = 11;
+  repeated DirEntry children = 12;  // when list was set
+  string next = 13;                 // pass as list.after; empty at the end
+}
+
+message Failure { string path = 1; string code = 2; }       // code: the reason of 3.6
+message DirEntry {
+  string name = 1;
+  EntryKind kind = 2;
+  uint32 mode = 3;
+  uint64 size = 4;
+  bytes sha256 = 5;                 // files
+}
+enum EntryKind { ENTRY_KIND_UNSPECIFIED = 0; ENTRY_KIND_FILE = 1; ENTRY_KIND_DIR = 2; ENTRY_KIND_SYMLINK = 3; }
+
+message DeleteTreeRequest { string placement = 1; }
+message DeleteTreeResponse {}
