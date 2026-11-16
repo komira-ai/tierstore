@@ -6,7 +6,10 @@ use super::*;
 fn problems_of(text: &str) -> Vec<String> {
     static NEXT: std::sync::atomic::AtomicUsize = std::sync::atomic::AtomicUsize::new(0);
     let n = NEXT.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
-    let expanded = Expanded::good(&format!("macos-pkg-distribution-{n}"));
+    let expanded = Expanded::good(&format!(
+        "macos-pkg-distribution-{}-{n}",
+        std::process::id()
+    ));
     std::fs::write(expanded.product().join(DISTRIBUTION), text).expect("the distribution");
     match expanded.check() {
         Ok(_) => Vec::new(),

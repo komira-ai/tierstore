@@ -255,6 +255,7 @@ fn release_locate_prints_the_run_and_appends_it_to_the_output_file() {
         "assets-linux-x86_64",
         "assets-linux-arm64",
         "assets-macos-arm64",
+        "assets-pkg-macos-arm64",
         "sha256sums",
         "bundles",
     ];
