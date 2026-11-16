@@ -362,12 +362,13 @@ prefix is a key name, not a secret) and the address of an interface that is list
 refusal names the line, the column and the key; any other refusal names the key. A number above
 9223372036854775807 (the largest TOML integer) cannot go in a file.
 
-A file has one of three shapes, told apart by its tables: a storage node (`[server]`,
+A file has one of four shapes, told apart by its tables: a storage node (`[server]`,
 `[hot_store]` and `[cold_store]`, `[[interface]]` entries (an `s3` one is needed, an `oci` one,
 the registry front, is optional) and `[[policy]]`), a build node (`[server]`,
 `[local_cache]` and `[cold_store]` with no `[hot_store]`, the same interfaces, and `[[policy]]`),
-which is a read cache (see "A build node" below), and a storage node with a cache in front of its
-own proxy (all three tables; see the end of "A build node").
+which is a read cache (see "A build node" below), a storage node with a cache in front of its
+own proxy (all three tables; see the end of "A build node"), and a front over the cold tier
+(`[cold_store]` alone, the fronts over the cold store with nothing kept on the node).
 
 ### A build node
 

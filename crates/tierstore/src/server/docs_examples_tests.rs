@@ -17,6 +17,7 @@ enum Shape {
     Storage,
     Cache,
     Combined,
+    Cold,
 }
 
 /// The pages: file under `docs/`, how many TOML blocks it has, and the shape of each.
@@ -25,6 +26,16 @@ const PAGES: &[(&str, &[Shape])] = &[
     ("examples/directory-as-bucket.md", &[Shape::Storage]),
     ("examples/cache-in-front-of-s3.md", &[Shape::Cache]),
     ("examples/cache-hot-cold.md", &[Shape::Combined]),
+    (
+        "configure.md",
+        &[
+            Shape::Storage,
+            Shape::Cache,
+            Shape::Combined,
+            Shape::Cache,
+            Shape::Cold,
+        ],
+    ),
 ];
 
 fn read(page: &str) -> String {
@@ -57,6 +68,7 @@ fn shape_of(settings: &Settings) -> Shape {
         Settings::Storage(_) => Shape::Storage,
         Settings::Cache(_) => Shape::Cache,
         Settings::Combined(_) => Shape::Combined,
+        Settings::Cold(_) => Shape::Cold,
     }
 }
 
@@ -81,7 +93,8 @@ fn every_toml_file_of_the_docs_landing_page_and_the_examples_loads() {
 }
 
 /// Asserts that a block the loader refuses is found by this test's own check: a hot tier with no
-/// budget (which every hot-tier example needs) and a file with one tier alone are both refused.
+/// budget (which every hot-tier example needs) and a file with a hot tier and no cold tier are both
+/// refused.
 #[test]
 fn a_file_the_loader_refuses_is_found() {
     let example = &toml_blocks(&read("examples/directory-as-bucket.md"))[0];

@@ -77,17 +77,16 @@ Several processes may run over the same tiers; each has its own proxy and fronts
 
 ![The three configurations: build node, storage node, and the single-process combination](diagrams/configurations.svg)
 
-The configuration file ([server/config.rs](../../crates/tierstore/src/server/config.rs)) has three shapes, told apart by the tables it has; a file with `[cold_store]` alone is refused.
+The configuration file ([server/config.rs](../../crates/tierstore/src/server/config.rs)) has four shapes, told apart by the tables it has; a file without `[cold_store]` is refused. B, the storage node, is the design of sections 5 to 10.
 
 | | Tables | What the process runs | Status |
 |---|---|---|---|
 | A. Build node | `[local_cache]` + `[cold_store]` | Fronts over a `LocalCache` over one upstream. No entries, lease or reconciler. | supported |
 | B. Storage node | `[hot_store]` + `[cold_store]` | Fronts, proxy (every write on the entry of its key), entry reconciler, lease. | supported |
 | C. All three | `[local_cache]` + `[hot_store]` + `[cold_store]` | A and B in one process: fronts, then local cache, then proxy over hot and cold, with the reconciler. | supported |
+| D. Cold tier alone | `[cold_store]` | Fronts over the cold store, nothing between: no cache, entries, lease or reconciler. For a front on a machine that must hold no data. | supported |
 
 **A: build node.** `cold_store` is the upstream: usually the S3 endpoint of a storage node's tierstore, or any S3-compatible store. A hit is answered from local disk with no call upstream. A miss on a whole get fills the object; a miss on a ranged get fills the whole object if it is at most 64 MiB and otherwise passes the range through and keeps nothing; the misses of one key fill it once. By default the front refuses every write, so the cache has nothing to recover but files it can delete. With `write_through = true` the cache accepts writes and sends every one to the upstream before acknowledging it; a create-only put under a `cache = true` policy is also kept on the node, best effort, and never fails the put. OCI reads are served from the cache too ([server/local_cache/mod.rs](../../crates/tierstore/src/server/local_cache/mod.rs) module docs). The cache's keep check compares sizes, not content: a key deleted and re-put with a same-size body can be served from an old copy on a build node. That is a separate, documented limit (section 11, R8); no write id is added to fix it (section 12).
-
-**B: storage node.** This is the design of sections 5 to 10.
 
 **C: all three.** The local cache sits in front of the proxy: a cache hit never reaches the hot tier, and the hot+cold pair (the proxy) is the cache's upstream through the same store interface (`Backend`) that a build node's cache uses for its S3 upstream (section 15, decision 12; [server/combined_cli.rs](../../crates/tierstore/src/server/combined_cli.rs)). It is for a node that serves its own reads from NVMe, owns the data, and has drives for the hot tier of their own. A machine that owns the data on one set of fast drives runs A with `write_through = true` instead: its cache and a hot tier would share the drives, so every object would be written to them twice and read back once more for the copy to the cold tier, and the cache's reads would wait behind that traffic. Every write then goes to the cold store before it is acknowledged, and the node has no registration, lease or reconciler. A node moves from C to A by dropping `[hot_store]` and restarting by the hand-off once the hot tier owes the cold tier nothing ([operations.md](../../crates/tierstore/docs/operations.md), "Turning the hot tier off").
 

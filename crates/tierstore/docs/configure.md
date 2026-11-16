@@ -89,7 +89,7 @@ write_through = true
 [cold_store]
 kind             = "s3"
 bucket           = "tierstore-cold"
-endpoint         = "http://cold.example:9000"
+endpoint         = "http://s3-cold.example:9000"
 credentials_file = "/etc/tierstore/cold.credentials"
 
 [[policy]]
@@ -189,6 +189,31 @@ cache  = true
 - The two addresses must be storage nodes over the same tiers, so that either serves any object. The cache fills from whichever answers.
 - The upstream is not asked anything at start. A wrong address or key is found by the first miss, not by the start.
 - Give the jobs scoped keys (`server.scoped_key_files`, see [Keys and roles](keys.md)) rather than the full key: anyone who may read through the front may read what the upstream's key can read.
+
+## A front over the cold tier alone
+
+One process that serves the S3 front over a cold store and keeps nothing on its machine: `[cold_store]` with no `[hot_store]` and no `[local_cache]`. A write is in the cold store when it is acknowledged, a read goes to the cold store, and the process has no registration, lease or reconciler. It suits a front on a machine that must not hold data, in front of a cold store that other nodes write too.
+
+```toml
+[[interface]]
+type   = "s3"
+params = { addresses = ["127.0.0.1:9300"] }
+
+[server]
+proxy_id        = "front-1"
+bucket          = "tierstore"
+access_key_file = "/etc/tierstore/access.key"
+
+[cold_store]
+kind             = "s3"
+bucket           = "tierstore-cold"
+endpoints        = ["http://storage-1.example:9000", "http://storage-2.example:9000"]
+credentials_file = "/etc/tierstore/cold.credentials"
+```
+
+- `cold_store.credentials_file` holds a key that may write, since the front's writes go straight to the store.
+- A `[[policy]]` with `cache = true`, a `[trees]` table, a `trees` interface and the keys only `[hot_store]` has are refused: there is no cache, tree store or hot tier to use them.
+- A storage node over the same cold tier becomes this shape by removing `[hot_store]` from its file and restarting it by the hand-off; see [Turning the hot tier off](operations.md#turning-the-hot-tier-off).
 
 ## Sizing budgets and water marks
 

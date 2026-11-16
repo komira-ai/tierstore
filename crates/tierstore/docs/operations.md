@@ -410,7 +410,7 @@ The delete and one-winner guarantees of a delete or a put that races a copy-back
 
 ## Turning the hot tier off
 
-A node with `[hot_store]`, `[cold_store]` and `[local_cache]` becomes a node with the cache and the cold tier alone (see [configure](configure.md#a-node-that-owns-the-data-with-a-cache-and-the-cold-tier)) when `[hot_store]` is removed from its file and it is restarted by the hand-off: the new instance takes the sockets, the old one drains, gives up the reconciler's lease and its `hot_store.lock_file`, and exits. A file with `[cold_store]` alone is refused, so a storage node with no cache keeps its hot tier.
+A node with `[hot_store]`, `[cold_store]` and `[local_cache]` becomes a node with the cache and the cold tier alone (see [configure](configure.md#a-node-that-owns-the-data-with-a-cache-and-the-cold-tier)) when `[hot_store]` is removed from its file and it is restarted by the hand-off: the new instance takes the sockets, the old one drains, gives up the reconciler's lease and its `hot_store.lock_file`, and exits. A storage node with no cache moves the same way to a file with `[cold_store]` alone (see [configure](configure.md#a-front-over-the-cold-tier-alone)): the new instance takes the same sockets and serves the cold store directly.
 
 The hot tier can hold what the cold tier does not, and a node without it reads the cold tier only:
 

@@ -8,7 +8,9 @@ use std::time::Duration;
 use tierstore_testkit::dir::TestDir;
 
 use super::super::config_units::parse_size;
-use super::{ConfigError, KEYS, PerRun, from_text, keys_for_flags, load, removed};
+use super::{
+    ConfigError, KEYS, PerRun, from_text, keys_for_flags, load, removed, settings_from_text,
+};
 use crate::server::cli::{Cli, parse_duration};
 use crate::server::config_testing::{DEFAULT_DRAIN, DEFAULTS, GOLDEN, MINIMAL};
 
@@ -339,11 +341,18 @@ fn a_hot_store_with_a_local_cache_needs_what_a_cache_needs_and_other_shapes_are_
     );
     assert!(refusal(&only_cache).contains("[local_cache] and [cold_store]"));
     let no_cold = minimal_with("[cold_store]\nkind = \"memory\"\n", "");
+    assert_eq!(
+        refusal(&no_cold),
+        "hot_store, cold_store, local_cache: the file needs [cold_store]: with [hot_store] (the \
+         storage-node shape), with [local_cache] (the build-node shape), with both, or alone (a \
+         node over the cold tier)"
+    );
     let no_hot = minimal_with("[hot_store]\nkind   = \"memory\"\nbudget = 1000\n", "");
-    for text in [no_cold, no_hot] {
-        let why = refusal(&text);
-        assert!(why.contains("both [hot_store] and [cold_store]"), "{why}");
-    }
+    let cold = settings_from_text(&no_hot, DEFAULTS).unwrap();
+    assert!(
+        cold.into_cold().is_some(),
+        "[cold_store] alone is a node over the cold tier"
+    );
 }
 
 /// Asserts that a key of a tier is refused when it does not fit the tier's kind (a path for a

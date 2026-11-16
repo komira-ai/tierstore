@@ -50,6 +50,10 @@ pub(super) fn from_text(text: &str, per_run: PerRun) -> Result<Cli, ConfigError>
             let why = "is in a file with [hot_store] too, which these settings of a storage node cannot hold";
             Err(invalid("local_cache", why))
         }
+        Settings::Cold(_) => {
+            let why = "is needed: a file with [cold_store] alone is a node over the cold tier, which these settings of a storage node cannot hold";
+            Err(invalid("hot_store", why))
+        }
     }
 }
 
