@@ -278,10 +278,7 @@ type Stored = (String, String, (u64, u64, u64));
 
 /// The pointer as stored: its ETag, its version and the version's numbers; none when there is no
 /// such key (or the role may not read it: S3 says `AccessDenied` for a missing key then).
-fn read_pointer(
-    aws: &dyn Aws,
-    r: &Request,
-) -> Result<Option<Stored>, Error> {
+fn read_pointer(aws: &dyn Aws, r: &Request) -> Result<Option<Stored>, Error> {
     let current = r.work.join("pointer.current");
     let got = aws.run(&strings(&[
         "s3api",
