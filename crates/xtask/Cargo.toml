@@ -33,6 +33,8 @@ hostkeeper-config.workspace = true
 hostkeeper-unpack.workspace = true
 # xz for the tar.xz archive of cargo-cyclonedx that `fetch` unpacks.
 lzma-rs = "0.3.0"
+# The launchd plist the macOS installer package holds, read as XML by `release check-macos-pkg`.
+roxmltree.workspace = true
 # The MD5 sums a Debian package lists its files with (`release deb`).
 md-5 = "0.11.0"
 # The RPM packages `release rpm` builds and `release rpm-info` reads back; the builder and reader
@@ -54,8 +56,6 @@ ureq = { version = "3.4.2", default-features = false, features = ["rustls-no-pro
 # placed-path lint, at the commit of hostkeeper's loader and unpacker (the root `Cargo.toml` says
 # which).
 hostkeeper-placed.workspace = true
-# The launchd plist of the macOS package, read as XML.
-roxmltree.workspace = true
 # The manifest of the hostkeeper package, read as TOML.
 toml.workspace = true
 # The YAML parser the workflow lint (tests/workflows.rs) reads each workflow with.

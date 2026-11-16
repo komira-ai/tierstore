@@ -45,6 +45,15 @@
 //! `release deb` ([`deb`]) builds `tierstore_<version>_<arch>.deb` of a Linux binary, and `release rpm`
 //! ([`rpm`]) builds `tierstore-<version>-1.<arch>.rpm` of it.
 //!
+//! The Mac's installer package: `release macos-pkg` ([`macos_pkg`]) builds
+//! `tierstore-<version>-macos-arm64.pkg` of the macOS binary (unsigned; `pkgbuild` and
+//! `productbuild` run on the macOS runner), `release check-macos-pkg` reads back the product
+//! `pkgutil --expand` made of it and refuses anything but what the builder writes, and `release
+//! check-pkg-signature` ([`pkg_signature`]) refuses a signed one unless `pkgutil` trusts its
+//! signature, timestamped, by exactly the named Developer ID Installer identity.
+//! [`macos_pkg::manifest_json`]
+//! is the hostkeeper manifest of the package for a Mac.
+//!
 //! After a release, or by hand: `release desired` ([`desired`]) chooses a published release and
 //! gives the version and the targets `.github/workflows/hostkeeper-desired.yml` sets on the
 //! hostkeeper coordinator: the apt entries `release desired-apt` ([`desired_apt`]) gives the lab
@@ -59,6 +68,8 @@ pub mod glibc;
 pub mod hostkeeper_index;
 pub mod hostkeeper_package;
 pub mod hostkeeper_verify;
+pub mod macos_pkg;
+pub mod pkg_signature;
 mod plan;
 mod publish;
 pub mod rpm;

@@ -1,0 +1,63 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
+<!--
+  /Library/LaunchDaemons/tierstore.plist: tierstore as a LaunchDaemon on a Mac, installed by the
+  signed installer package (`cargo xtask release macos-pkg`), which hostkeeper's `macos-pkg`
+  installer installs. root:wheel, mode 0644. It is the plist of hostkeeper's archive package
+  (packaging/hostkeeper/units/tierstore.plist) with one difference, the program: the binary the
+  installer package lays down, /Library/Application Support/tierstore/bin/tierstore. The label is
+  `tierstore`, which the manifest's run entry and the hook's `launchd_label` param name; the
+  update hook (`tierstore update-hook`, crates/tierstore/docs/update-hook.md) boots the job out
+  and bootstraps it by that label, so an update is a restart with a gap in serving.
+
+  Configuration is the file, nothing else; the drain is the macOS defaults of the file's
+  server.drain_lb_wait (1 s) and server.drain_deadline (60 s). launchd sends SIGTERM on bootout;
+  ExitTimeOut (90 s) is the 1 s, the 60 s and a margin, so that launchd never sends SIGKILL to a
+  drain in progress. KeepAlive starts the process again whenever it exits while the job is
+  loaded, at most once in ThrottleInterval (30 s).
+
+  crates/tierstore/tests/packaging_macos.rs holds this file to the other plist and the binary to
+  its command line.
+-->
+<plist version="1.0">
+<dict>
+  <key>Label</key>
+  <string>tierstore</string>
+  <key>ProgramArguments</key>
+  <array>
+    <string>/Library/Application Support/tierstore/bin/tierstore</string>
+    <string>--config</string>
+    <string>/usr/local/tierstore/etc/tierstore.toml</string>
+  </array>
+  <key>UserName</key>
+  <string>_tierstore</string>
+  <key>GroupName</key>
+  <string>_tierstore</string>
+  <key>RunAtLoad</key>
+  <true/>
+  <key>KeepAlive</key>
+  <true/>
+  <key>ThrottleInterval</key>
+  <integer>30</integer>
+  <key>ExitTimeOut</key>
+  <integer>90</integer>
+  <key>ProcessType</key>
+  <string>Standard</string>
+  <key>Umask</key>
+  <integer>63</integer>
+  <key>SoftResourceLimits</key>
+  <dict>
+    <key>NumberOfFiles</key>
+    <integer>65536</integer>
+  </dict>
+  <key>HardResourceLimits</key>
+  <dict>
+    <key>NumberOfFiles</key>
+    <integer>65536</integer>
+  </dict>
+  <key>StandardOutPath</key>
+  <string>/usr/local/tierstore/log/tierstore.out.log</string>
+  <key>StandardErrorPath</key>
+  <string>/usr/local/tierstore/log/tierstore.err.log</string>
+</dict>
+</plist>

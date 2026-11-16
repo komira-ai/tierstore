@@ -61,6 +61,9 @@ For a commit `<commit>` (the full SHA) and each platform (`linux-x86_64`, `linux
 - `tierstore-<version>-1.<arch>.rpm`, with `<arch>` `x86_64` (linux-x86_64) or `aarch64`
   (linux-arm64): the RPM package of the binary, and its `.rpm.sigstore.json`; there is none for
   macOS;
+- `tierstore-<version>-macos-arm64.pkg`: the installer package of the macOS binary, signed with a
+  Developer ID Installer identity (see "The macOS installer package" below); there is none for
+  Linux;
 - `SHA256SUMS`: the SHA-256 of the tarballs, SBOMs, hostkeeper packages, `index.json`, tap tarballs,
   Debian packages and RPM packages.
 
@@ -286,6 +289,49 @@ with its bundle; `verify-assets attestations` verifies a Debian or an RPM packag
 and its bundle, as it does a hostkeeper package; and the release attaches them all. A pull request builds the linux-x86_64 ones and
 sums them; the tap tarball of macOS is made by the macOS job, which `artifacts.yml` runs on a push
 and by hand.
+
+### The macOS installer package
+
+A Mac installs tierstore through hostkeeper's `macos-pkg` installer, which takes a signed `.pkg`
+(hostkeeper's `docs/design/packages-repositories.md`, section 4.7). The release machinery builds it
+from the macOS binary with three verbs; `pkgbuild`, `productbuild` and `pkgutil` exist on macOS
+only, so they run on the macOS runner, and every verb reaches them through one port that the tests
+fake.
+
+- `cargo xtask release macos-pkg --version <X.Y.Z> --binary <path> --stage <dir> --out <dir>` writes
+  `<out>/tierstore-<X.Y.Z>-macos-arm64.pkg`, unsigned: a distribution pkg of one component
+  (`pkgbuild`, identifier `com.komira.tierstore`, version `<X.Y.Z>`, install location `/`, ownership
+  `recommended`, no scripts directory) wrapped by `productbuild`. `--stage` must not exist; the
+  payload is laid out in it first. The payload is exactly the binary
+  `/Library/Application Support/tierstore/bin/tierstore` (0755, the given binary's bytes, so it keeps
+  its code signature) and the job `/Library/LaunchDaemons/tierstore.plist` (0644,
+  `packaging/macos-pkg/tierstore.plist`), with the directories above them (0755), everything
+  `root:wheel`. There is no `postinstall` and no script at all: hostkeeper's hook (`tierstore
+  update-hook`) bootstraps the job at its `cutover`. The plist is the one of the hostkeeper archive
+  package (`packaging/hostkeeper/units/tierstore.plist`) but for the program path, and
+  `crates/tierstore/tests/packaging_macos.rs` holds the two together.
+- `cargo xtask release check-macos-pkg <dir> --version <X.Y.Z> --binary <path>` reads the directory
+  `pkgutil --expand` made of the pkg and refuses anything but what the builder writes: the
+  `Distribution` names the one component with no installer script, installation check or volume
+  check; `PackageInfo` names the identifier, the version and the location `/` and no script or
+  bundle; the component holds `Bom`, `PackageInfo` and `Payload` and no `Scripts`; the payload
+  holds exactly the entries above, with their modes and bytes, each owned by root, group wheel or
+  admin (so nothing is group or other writable, set-id or sticky); the plist's label is `tierstore`
+  and its program is a file of the payload. Every deviation is listed.
+- `cargo xtask release check-pkg-signature <pkg> --identity "Developer ID Installer: <name> (<team>)"`
+  runs `pkgutil --check-signature` and refuses the pkg unless the signature is trusted, carries a
+  trusted timestamp, and its certificate chain is exactly the identity, Apple's Developer ID
+  Certification Authority and Apple Root CA. An identity that is not a Developer ID Installer one is
+  refused before `pkgutil` runs.
+
+`xtask::release::macos_pkg::manifest_json(min_hostkeeper)` is the hostkeeper manifest of the pkg, in
+the proto3 JSON of hostkeeper's release proto, as `release desired-apt` writes the apt entry's: the
+package `com.komira.tierstore`, the run label `tierstore`, the hook `/Library/Application
+Support/tierstore/bin/tierstore update-hook` with the boot step `restore` and the bounds and deadlines
+of `packaging/hostkeeper/manifest.toml.in`, the params `config_file`
+(`/usr/local/tierstore/etc/tierstore.toml`), `service_manager` `launchd` and `launchd_label`
+`tierstore`, and the health URL `http://127.0.0.1:9300/readyz`. How a Mac gets the package and the
+file it needs is in `packaging/macos/README.md`.
 
 ### The order of a release
 
@@ -521,10 +567,10 @@ same `--min-hostkeeper 0.1.225`): the version `X.Y.Z`, the plain version apt ins
 release's `SHA256SUMS` lists. The same version set by both gets the same targets, so the second
 set is taken (the coordinator refuses a version set again with other targets, `release_exists`).
 A list of `hostkeeper-archive` entries alone would order none of the farm nodes: the coordinator
-holds every host that runs tierstore from apt `installer_dropped`. **The Macs are not covered**:
-tierstore ships no package a Mac's daemon installs (no `.pkg`, and the archive installer is
-withdrawn), so the targets have no `macos-arm64` list and a Mac is ordered nothing (`no_target`)
-and keeps what it runs. No release index is sent.
+holds every host that runs tierstore from apt `installer_dropped`. **The Macs are not covered by
+`release desired-apt`**: it writes the Linux entries only, so the targets have no `macos-arm64` list
+and a Mac is ordered nothing (`no_target`) and keeps what it runs. The installer package a Mac's
+daemon installs, and the manifest for it, are built by the verbs of "The macOS installer package". No release index is sent.
 
 The `set-desired` job then calls hostkeeper's CI client (`set-desired.yml` of
 komira-ai/hostkeeper, pinned to v0.1.317, whose hkctl sends the targets as they are, the `apt`

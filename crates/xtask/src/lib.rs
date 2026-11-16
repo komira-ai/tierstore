@@ -396,6 +396,43 @@ enum ReleaseVerb {
         #[arg(long)]
         out: PathBuf,
     },
+    /// The installer pkg of the macOS binary, `<out>/tierstore-<version>-macos-arm64.pkg`
+    /// (unsigned; run on macOS, where `pkgbuild` and `productbuild` are).
+    MacosPkg {
+        /// `<major>.<minor>.<patch>`, the release's version.
+        #[arg(long)]
+        version: String,
+        /// The macOS tierstore binary; it is not run.
+        #[arg(long)]
+        binary: PathBuf,
+        /// An empty scratch directory (it must not exist) to lay the payload out in.
+        #[arg(long)]
+        stage: PathBuf,
+        /// The directory the pkg is written to; created when missing.
+        #[arg(long)]
+        out: PathBuf,
+    },
+    /// Refuse an expanded installer pkg (`pkgutil --expand`) that is not exactly what
+    /// `macos-pkg` writes for the version and binary.
+    CheckMacosPkg {
+        /// The directory `pkgutil --expand` made of the pkg.
+        expanded: PathBuf,
+        /// `<major>.<minor>.<patch>`, the release's version.
+        #[arg(long)]
+        version: String,
+        /// The macOS tierstore binary the pkg must hold, byte for byte.
+        #[arg(long)]
+        binary: PathBuf,
+    },
+    /// Refuse an installer pkg unless `pkgutil --check-signature` says it is trusted, timestamped
+    /// and signed by exactly `--identity` under Apple's Developer ID chain.
+    CheckPkgSignature {
+        /// The signed pkg.
+        pkg: PathBuf,
+        /// The signer, `Developer ID Installer: <name> (<team>)`.
+        #[arg(long)]
+        identity: String,
+    },
     /// Refuse a Linux binary that needs a glibc symbol version above `--max`.
     CheckGlibc {
         /// The built binary; it is read, not run, so it may be of any platform.
@@ -750,6 +787,28 @@ fn run(cli: Cli) -> Result<Vec<String>, Error> {
             licenses,
             out,
         }) => release::rpm::rpm(&binary, &version, platform, &licenses, &out),
+        Verb::Release(ReleaseVerb::MacosPkg {
+            version,
+            binary,
+            stage,
+            out,
+        }) => release::macos_pkg::build(
+            &release::macos_pkg::PkgTools::system(),
+            &release::macos_pkg::Request {
+                version: &version,
+                binary: &binary,
+                stage: &stage,
+                out: &out,
+            },
+        ),
+        Verb::Release(ReleaseVerb::CheckMacosPkg {
+            expanded,
+            version,
+            binary,
+        }) => release::macos_pkg::check(&expanded, &version, &binary),
+        Verb::Release(ReleaseVerb::CheckPkgSignature { pkg, identity }) => {
+            release::pkg_signature::check(&release::macos_pkg::PkgTools::system(), &pkg, &identity)
+        }
         Verb::Release(ReleaseVerb::CheckGlibc { binary, max }) => {
             release::glibc::check_glibc(&binary, &max)
         }

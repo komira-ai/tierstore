@@ -81,12 +81,23 @@ fn value(node: roxmltree::Node<'_, '_>) -> Value {
 
 /// The plist's top-level dictionary.
 fn plist() -> BTreeMap<String, Value> {
-    let text = plist_text();
+    plist_in(&plist_text())
+}
+
+/// The launchd plist of the installer package (`cargo xtask release macos-pkg`).
+fn package_plist_text() -> String {
+    let file =
+        Path::new(env!("CARGO_MANIFEST_DIR")).join("../../packaging/macos-pkg/tierstore.plist");
+    std::fs::read_to_string(&file).unwrap_or_else(|e| panic!("{}: {e}", file.display()))
+}
+
+/// The top-level dictionary of the property list `text`.
+fn plist_in(text: &str) -> BTreeMap<String, Value> {
     let options = roxmltree::ParsingOptions {
         allow_dtd: true,
         ..roxmltree::ParsingOptions::default()
     };
-    let doc = roxmltree::Document::parse_with_options(&text, options).expect("XML");
+    let doc = roxmltree::Document::parse_with_options(text, options).expect("XML");
     let root = doc.root_element();
     assert_eq!(root.tag_name().name(), "plist");
     assert_eq!(root.attribute("version"), Some("1.0"));
@@ -279,4 +290,64 @@ fn the_binary_accepts_the_plists_command_line_and_file() {
         ),
         (Some(0), String::new(), String::new())
     );
+}
+
+/// The program of the installer package's plist: the binary the package lays down.
+const PACKAGE_PROGRAM: &str = "/Library/Application Support/tierstore/bin/tierstore";
+
+/// The `ProgramArguments` of the property list `dict`.
+fn words(dict: &BTreeMap<String, Value>) -> Vec<String> {
+    match dict.get("ProgramArguments") {
+        Some(Value::Array(words)) => words
+            .iter()
+            .map(|w| match w {
+                Value::Text(t) => t.clone(),
+                other => panic!("an argument is {other:?}"),
+            })
+            .collect(),
+        other => panic!("ProgramArguments is {other:?}"),
+    }
+}
+
+/// Asserts that the plist of the installer package is the plist of hostkeeper's archive package
+/// but for the program: every key is the same, and the first of `ProgramArguments` is the
+/// package's binary instead of the release link's, the rest of the command line unchanged. It
+/// would catch a change to one plist that the other does not follow, which would run a Mac with
+/// another account, limit or drain than the archive's.
+#[test]
+fn the_package_plist_differs_from_the_archive_plist_only_in_the_program() {
+    let archive = plist();
+    let package = plist_in(&package_plist_text());
+    let mut changed = archive.clone();
+    let Some(Value::Array(program)) = changed.get_mut("ProgramArguments") else {
+        panic!("ProgramArguments is an array");
+    };
+    assert_eq!(
+        program[0],
+        Value::Text("/var/lib/hostkeeper/packages/tierstore/current/bin/tierstore".to_owned())
+    );
+    program[0] = Value::Text(PACKAGE_PROGRAM.to_owned());
+    assert_eq!(package, changed);
+}
+
+/// Asserts that the binary accepts the command line of the installer package's plist: run with
+/// the plist's flags and `--check-config`, it gets past the flags and refuses the one thing a
+/// scratch machine lacks, the file `--config` names (it says so, and does not say it met an
+/// argument it does not know). It would catch a flag the binary refuses, which would leave the job
+/// restarting for ever.
+#[test]
+fn the_binary_accepts_the_package_plists_command_line() {
+    let words = words(&plist_in(&package_plist_text()));
+    assert_eq!(words[0], PACKAGE_PROGRAM);
+    assert_eq!(words[1], "--config");
+    let mut args = words[1..].to_vec();
+    args.push("--check-config".to_owned());
+    let out = Command::new(env!("CARGO_BIN_EXE_tierstore"))
+        .args(&args)
+        .output()
+        .expect("the binary runs");
+    let said = String::from_utf8_lossy(&out.stderr).into_owned();
+    assert!(!out.status.success());
+    assert!(!said.contains("unexpected argument"), "{said}");
+    assert!(said.contains("tierstore.toml"), "{said}");
 }
