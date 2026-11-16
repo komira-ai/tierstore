@@ -457,3 +457,42 @@ fn releases_during_a_write_are_in_the_file_when_they_return() {
     closed.sort_unstable();
     assert_eq!(closed, [gone.id, rest[0].id, rest[1].id]);
 }
+
+/// Asserts that an open that waits for another open's registration of the same blob is answered
+/// with the registered id while that registration is still writing the file: it does not wait for
+/// the write. Catches a registration that wakes the waiting opens only after its write.
+#[cfg(target_os = "linux")]
+#[test]
+fn an_open_waiting_for_a_registration_is_answered_before_its_write() {
+    use std::io::Read;
+    let dir = TestDir::under(std::env::temp_dir(), "tfs-backing-wake");
+    let kernel = FakeKernel::new();
+    let (table, _) = adopted(&dir, &kernel, 1200);
+    let a = blob("a");
+    let first = ticket(table.open(&a));
+    let waiter = {
+        let table = Arc::clone(&table);
+        std::thread::spawn(move || live(table.open(&a)))
+    };
+    until(|| table.waiting() == 1);
+
+    let new = dir.path().join(format!("{FILE}.new"));
+    let mode = rustix::fs::Mode::RUSR | rustix::fs::Mode::WUSR;
+    rustix::fs::mkfifoat(rustix::fs::CWD, &new, mode).unwrap();
+    let registration = kernel.registration();
+    let id = registration.id;
+    let registering = std::thread::spawn(move || first.registered(registration).id);
+    // Opening the reading end returns once the writer has opened the other; the first byte read
+    // means the registration is inside its write, which stays there until the rest is read.
+    let mut fifo = std::fs::File::open(&new).unwrap();
+    let mut first_byte = [0_u8; 1];
+    fifo.read_exact(&mut first_byte).unwrap();
+
+    until(|| waiter.is_finished());
+    assert_eq!(waiter.join().unwrap(), id);
+    assert_eq!(table.waiting(), 0);
+
+    let _ = drained(fifo, first_byte[0]);
+    assert_eq!(registering.join().unwrap(), id);
+    assert_eq!(table.opens(&a), 2);
+}
