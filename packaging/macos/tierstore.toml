@@ -1,12 +1,20 @@
-# /usr/local/tierstore/etc/tierstore.toml: tierstore on a Mac, a build node (a read cache on local
-# disk in front of the cold store), as hostkeeper/units/tierstore.plist starts it. root:_tierstore, mode
-# 0640. crates/tierstore/docs/configuration.md says what every key does.
+# /usr/local/tierstore/etc/tierstore.toml: tierstore on a Mac, as hostkeeper/units/tierstore.plist
+# starts it. root:_tierstore, mode 0640. crates/tierstore/docs/configuration.md says what every key does.
 #
-# Edit before use: the bucket, the endpoint and the budget. Keep the s3 interface as it is: the update
-# hook probes the instance on 127.0.0.1:9300 (PUBLIC_PORT in src/server/update_hook/mod.rs) and
-# matches the version of its build gauge, and the build daemon of this Mac reads through it on that
-# address. `slot` is kept at the same port only because the build daemon and the packaging test expect
-# it; the hook does not read it. Nothing else on the network reaches it.
+# On a Mac tierstore is only a local read cache on loopback: no hot tier, no server role, no hand-off
+# socket and no firewall redirect. Reads that miss the cache go to the tierstore S3 servers of the
+# storage nodes, port 9300.
+#
+# Edit before use: replace the six addresses in [cold_store] (documentation addresses here) with
+# the addresses of the storage nodes, and set the bucket and the cache budget. Keep the s3 interface as
+# it is: the update hook probes the instance on 127.0.0.1:9300 (PUBLIC_PORT in
+# src/server/update_hook/mod.rs) and matches the version of its build gauge, and the build daemon of
+# this Mac reads through it on that address. `slot` is kept at the same port only because the build
+# daemon and the packaging test expect it; the hook does not read it. Nothing else on the network
+# reaches it.
+#
+# The proxy id is "tierstore-cache-" and the host id of the facts file hostkeeper writes
+# (/var/lib/hostkeeper/facts.json), read at each start; a change of the facts takes a restart.
 #
 # The key files are owned by _tierstore, mode 0600; the process refuses one its group or others
 # can read.
@@ -16,22 +24,32 @@ type   = "s3"
 params = { addresses = ["127.0.0.1:9300"] }
 
 [server]
-proxy_id            = "tierstore-cache"
+proxy_id_from_facts = { path = "/var/lib/hostkeeper/facts.json", prefix = "tierstore-cache-" }
 slot                = 9300
 bucket              = "tierstore"
 access_key_file     = "/usr/local/tierstore/etc/access.key"
 read_only_key_files = ["/usr/local/tierstore/etc/daemons.key"]
 
 [local_cache]
-path   = "/usr/local/tierstore/cache"
-budget = "200GiB"
+path             = "/usr/local/tierstore/cache"
+budget           = "200GiB"
+whole_fill_limit = "128MiB"
 
 [cold_store]
 kind             = "s3"
 bucket           = "tierstore"
-endpoint         = "http://s3-cold.example:9000"
+# The storage nodes' tierstore S3 servers. A read goes to the next one when a connect fails
+# (docs/design/multi-endpoint-store.md).
+endpoints        = [
+    "http://192.0.2.1:9300",
+    "http://192.0.2.2:9300",
+    "http://192.0.2.3:9300",
+    "http://192.0.2.4:9300",
+    "http://192.0.2.5:9300",
+    "http://192.0.2.6:9300",
+]
 credentials_file = "/usr/local/tierstore/etc/upstream-read.key"
 
 [[policy]]
-prefix = "cas/b/"
+prefix = "cas/"
 cache  = true

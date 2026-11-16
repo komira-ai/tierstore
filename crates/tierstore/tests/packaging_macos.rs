@@ -18,6 +18,8 @@ use tierstore_testkit::dir::TestDir;
 
 /// The directory of the Mac's release links, configuration, cache and logs.
 const LAUNCHD_LINKS_DIR: &str = "/usr/local/tierstore";
+/// Where hostkeeper writes the facts file that the proxy id is read from.
+const FACTS_PATH: &str = "/var/lib/hostkeeper/facts.json";
 /// The words in the name of a flag or a key that say it holds a secret.
 const SECRET_WORDS: [&str; 5] = ["key", "secret", "credential", "token", "password"];
 
@@ -186,6 +188,52 @@ fn the_plist_runs_a_local_cache_on_loopback_from_its_file() {
     }
 }
 
+/// Asserts that the file is only a local read cache: the proxy id is made from the facts file
+/// hostkeeper writes, with the prefix `tierstore-cache-` (and no literal `proxy_id`); there is no
+/// hot tier, no `handoff_socket` and no `[oci]` or `[trees]` role; `[local_cache]` fills whole
+/// objects up to 128MiB; `[cold_store]` is the `s3` store of the six storage nodes' S3 servers
+/// (six distinct documentation addresses at port 9300, tried in turn); and the one policy is
+/// `cas/`, cached. It would catch a Mac that took a storage node's role, a proxy id that two Macs
+/// share, or a cache that reaches only one storage node.
+#[test]
+fn the_file_is_a_cache_of_the_storage_nodes_with_a_proxy_id_from_the_facts_file() {
+    let file = config();
+    assert!(!file.contains_key("hot_store"));
+    assert!(!file.contains_key("oci"));
+    assert!(!file.contains_key("trees"));
+    let server = table(&file, "server");
+    assert!(!server.contains_key("proxy_id"));
+    assert!(!server.contains_key("handoff_socket"));
+    let facts = table(server, "proxy_id_from_facts");
+    assert_eq!(facts.len(), 2);
+    assert_eq!(facts["path"].as_str(), Some(FACTS_PATH));
+    assert_eq!(facts["prefix"].as_str(), Some("tierstore-cache-"));
+    let cache = table(&file, "local_cache");
+    assert_eq!(cache["whole_fill_limit"].as_str(), Some("128MiB"));
+    assert!(
+        cache["path"]
+            .as_str()
+            .is_some_and(|path| Path::new(path).starts_with(format!("{LAUNCHD_LINKS_DIR}/cache")))
+    );
+    let cold = table(&file, "cold_store");
+    assert_eq!(cold["kind"].as_str(), Some("s3"));
+    assert!(!cold.contains_key("endpoint"));
+    let endpoints: Vec<&str> = cold["endpoints"]
+        .as_array()
+        .expect("endpoints")
+        .iter()
+        .map(|endpoint| endpoint.as_str().expect("an endpoint"))
+        .collect();
+    assert_eq!(endpoints.len(), 6, "{endpoints:?}");
+    for (at, endpoint) in endpoints.iter().enumerate() {
+        assert_eq!(*endpoint, format!("http://192.0.2.{}:9300", at + 1));
+    }
+    let policies = file["policy"].as_array().expect("[[policy]]");
+    assert_eq!(policies.len(), 1);
+    assert_eq!(policies[0]["prefix"].as_str(), Some("cas/"));
+    assert_eq!(policies[0]["cache"].as_bool(), Some(true));
+}
+
 /// Asserts that the binary itself takes the plist's command line and the shipped file: the
 /// file, copied into a scratch directory with its key files and its cache there (keys of the
 /// form the process reads, mode 0600), is checked by the binary run with the plist's own
@@ -208,6 +256,10 @@ fn the_binary_accepts_the_plists_command_line_and_file() {
         assert!(text.contains(&shipped), "{shipped}");
         text = text.replace(&shipped, &key.display().to_string());
     }
+    let facts = scratch.path().join("facts.json");
+    std::fs::write(&facts, r#"{"schema":1,"host_id":"mac-7","labels":{}}"#).unwrap();
+    assert!(text.contains(FACTS_PATH), "{FACTS_PATH}");
+    text = text.replace(FACTS_PATH, &facts.display().to_string());
     let cache = format!("{LAUNCHD_LINKS_DIR}/cache");
     text = text.replace(&cache, &scratch.path().join("cache").display().to_string());
     let file = scratch.path().join("tierstore.toml");

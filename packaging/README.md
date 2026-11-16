@@ -151,7 +151,7 @@ bootout`, then `launchctl bootstrap`.
 The edits of the host's configuration file (the bucket, the tiers, the endpoints, `hot_store.budget`)
 go into `/etc/tierstore/config.toml` on Linux and `/usr/local/tierstore/etc/tierstore.toml` on a
 Mac, the files the two units name. `packaging/macos/tierstore.toml` is the example of that
-file for a Mac (a build node on loopback); the declaration and plist that directory held for the earlier update path are removed.
+file for a Mac (only a read cache on loopback, its proxy id from hostkeeper's facts file, its upstream the storage nodes' S3 servers); the declaration and plist that directory held for the earlier update path are removed.
 
 ## Presigned PUT URLs
 
@@ -683,7 +683,7 @@ instead of running with settings it did not read.
 | key | what |
 |---|---|
 | `[[interface]]` of type `s3` | the address the S3 API, `/healthz`, `/readyz` and `/usagez` are served on: `params.addresses`, or `params.port` for the IPv4 wildcard. Further entries or addresses are served by the same server |
-| `server.proxy_id` | names this process's registration in the hot tier and the entries it holds; give each process over the same tiers one of its own |
+| `server.proxy_id` | names this process's registration in the hot tier and the entries it holds; give each process over the same tiers one of its own. Or give `server.proxy_id_from_facts = { path, prefix }` instead: the id is the prefix and the `host_id` of the facts file hostkeeper writes (`/var/lib/hostkeeper/facts.json`), read at each start and each `--check-config`; exactly one of the two keys |
 | `server.bucket` | the name of the one bucket clients see |
 | `server.access_key_file`, `server.read_only_key_files` | the full key, and the read-only keys (a list); see above |
 | `server.tls_cert_file`, `server.tls_key_file` | the certificate chain and the key (PEM) that make the S3 front serve HTTPS; both, or neither (plain HTTP, the default) |
