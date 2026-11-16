@@ -111,8 +111,8 @@ enum Node {
 }
 
 /// The trees a lookup reads: the placement's, and the ones it holds by digest.
-struct Snapshot {
-    root: TreeDigest,
+pub(super) struct Snapshot {
+    pub(super) root: TreeDigest,
     closure: Vec<Arc<TreeInfo>>,
 }
 
@@ -148,7 +148,7 @@ impl TreeStore {
     }
 
     /// The trees of the placement, if it is alive.
-    fn snapshot(&self, id: &PlacementId) -> Result<Snapshot, ReadError> {
+    pub(super) fn snapshot(&self, id: &PlacementId) -> Result<Snapshot, ReadError> {
         let state = self.shared.lock();
         let now = self.shared.now();
         let placement = state
@@ -169,7 +169,11 @@ impl TreeStore {
     }
 
     /// The record `digest`, read from the file of the first tree that holds it.
-    fn record(&self, snapshot: &Snapshot, digest: &TreeDigest) -> Result<TreeRecord, ReadError> {
+    pub(super) fn record(
+        &self,
+        snapshot: &Snapshot,
+        digest: &TreeDigest,
+    ) -> Result<TreeRecord, ReadError> {
         let held = snapshot
             .closure
             .iter()
@@ -236,7 +240,7 @@ impl TreeStore {
 
     /// Where the bytes of a file of `size` bytes whose SHA-256 is `sha256` are fetched from: the
     /// first of the placement's trees that has a source for it. An empty file has none.
-    fn span(
+    pub(super) fn span(
         snapshot: &Snapshot,
         sha256: &TreeDigest,
         size: u64,

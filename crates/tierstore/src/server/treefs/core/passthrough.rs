@@ -58,7 +58,7 @@ impl Core {
             // On an error the ticket is dropped, and the opens that wait for this blob go on.
             Slot::Register(ticket) => {
                 let file = self.blob(loaded, number, entry, blob)?;
-                let registered = register(&file).map_err(|why| {
+                let registered = register(&file.file).map_err(|why| {
                     tracing::error!("tierstore fs: cannot register {digest}: {why}");
                     Errno::Io
                 })?;

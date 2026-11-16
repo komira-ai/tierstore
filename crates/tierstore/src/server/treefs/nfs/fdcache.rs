@@ -4,15 +4,15 @@
 //! (a cache file is immutable, so a descriptor never goes stale).
 
 use std::collections::{HashMap, VecDeque};
-use std::fs::File;
 use std::sync::{Arc, Mutex};
 
+use crate::server::treefs::core::FileBytes;
 use crate::server::treefs::locked;
 
 /// One shard.
 #[derive(Default)]
 struct Shard {
-    files: HashMap<u64, Arc<File>>,
+    files: HashMap<u64, Arc<FileBytes>>,
     /// The inodes of `files`, oldest first.
     order: VecDeque<u64>,
 }
@@ -38,13 +38,13 @@ impl FdCache {
     }
 
     /// The open file of `ino`, if the cache has it.
-    pub(super) fn get(&self, ino: u64) -> Option<Arc<File>> {
+    pub(super) fn get(&self, ino: u64) -> Option<Arc<FileBytes>> {
         locked(self.shard(ino)).files.get(&ino).cloned()
     }
 
     /// Keeps `file` as the open file of `ino`, closing the oldest of its shard if the shard is
     /// full.
-    pub(super) fn insert(&self, ino: u64, file: Arc<File>) {
+    pub(super) fn insert(&self, ino: u64, file: Arc<FileBytes>) {
         let mut shard = locked(self.shard(ino));
         if shard.files.insert(ino, file).is_some() {
             return;

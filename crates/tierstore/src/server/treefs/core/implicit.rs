@@ -10,6 +10,10 @@
 //! is `EIO`, said on stderr. A digest that cannot be read gets no tree number, so lookups of
 //! digests that are not trees do not fill the table of tree numbers.
 //!
+//! A placement's tree at its fs location is attached the same way (`core/placed.rs`), by its key;
+//! its idle end gives back the tree store's hold of the placement instead of unpinning it, and a
+//! key is not a name of `trees/`.
+//!
 //! The implicit attachments are in memory only. While a successor takes over (`Core::hold`) no
 //! tree is attached and none detached: a lookup of a tree that has a tree number is answered with
 //! no attachment made, and of one that has none is `EIO`, since only the successor may number it.
@@ -19,12 +23,10 @@ use std::sync::mpsc::{self, RecvTimeoutError};
 use std::sync::{Arc, Weak};
 use std::time::Duration;
 
-use crate::tree_manifest::{TreeDigest, TreeError};
+use crate::tree_manifest::TreeDigest;
 
+use super::placed::{Unread, placement_of};
 use super::{Core, Errno, locked};
-
-/// The answer of the fill socket for an object the upstream does not have.
-const ABSENT: &str = "upstream 404";
 
 /// The shortest and the longest time between two looks for idle trees.
 const LOOK_BOUNDS: (Duration, Duration) = (Duration::from_secs(1), Duration::from_secs(60));
@@ -42,7 +44,18 @@ impl Core {
     /// [`Errno::NoEnt`] for a name that is not a digest or a tree whose root manifest the upstream
     /// does not have, [`Errno::Io`] for any other tree that cannot be read or numbered.
     pub(super) fn resolve(&self, digest: &str) -> Result<u64, Errno> {
-        let digest = TreeDigest::from_hex(digest).ok_or(Errno::NoEnt)?;
+        let digest = TreeDigest::from_hex(digest)
+            .filter(|digest| placement_of(digest).is_none())
+            .ok_or(Errno::NoEnt)?;
+        self.resolve_digest(digest)
+    }
+
+    /// The number of the tree `digest`, or of the placement whose key it is: attached already,
+    /// or read and attached now.
+    ///
+    /// # Errors
+    /// As [`Core::resolve`].
+    pub(super) fn resolve_digest(&self, digest: TreeDigest) -> Result<u64, Errno> {
         let attached = self
             .table
             .find(&digest)
@@ -144,9 +157,7 @@ impl Core {
             loaded
                 .iter()
                 .for_each(|loaded| locked(&loaded.pinned).clear());
-            let _ = self
-                .fills
-                .unpin(&self.settings.mount_id, &digest.to_string());
+            self.let_go(digest);
             self.drop_if_forgotten(*number);
         }
         freed.len()
@@ -185,15 +196,13 @@ impl Core {
     }
 }
 
-/// What a lookup of the tree `digest` that could not be read is answered: `ENOENT` when the
-/// upstream does not have its root manifest, else `EIO`, said on stderr.
-fn refusal(digest: &TreeDigest, why: TreeError) -> Errno {
+/// What a lookup of the tree `digest` that could not be read is answered: `ENOENT` when there is
+/// no such tree (the upstream does not have its root manifest, or the placement has ended), else
+/// `EIO`, said on stderr.
+fn refusal(digest: &TreeDigest, why: Unread) -> Errno {
     match why {
-        TreeError::Fetch {
-            digest: missing,
-            reason,
-        } if missing == *digest && reason == ABSENT => Errno::NoEnt,
-        why => {
+        Unread::Gone(_) => Errno::NoEnt,
+        Unread::Failed(why) => {
             tracing::warn!("tierstore fs: cannot attach {digest} on a lookup: {why}");
             Errno::Io
         }

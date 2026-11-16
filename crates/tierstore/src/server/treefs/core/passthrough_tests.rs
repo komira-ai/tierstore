@@ -4,7 +4,9 @@
 use std::sync::Arc;
 
 use super::{Errno, Opened};
+use crate::server::local_cache::trees::testing::fs_at;
 use crate::server::treefs::ino;
+use crate::server::treefs::live_testing::{Live, walk};
 use crate::server::treefs::locked;
 use crate::server::treefs::testing::{Built, FakeKernel, Rig, file, sample, until};
 use crate::tree_manifest::TreeDigest;
@@ -282,4 +284,64 @@ fn past_the_most_ids_a_blob_is_opened_cached_and_never_waits() {
     rig.core.release(held);
     assert_eq!(table.live(), 0);
     assert_eq!(backed(kernel.open(&rig.core, a_h).unwrap()).1, 101);
+}
+
+/// Asserts that with passthrough chosen a file of a placed tree is opened as a cached open: the
+/// kernel is asked to register nothing, the table of backing ids stays empty through two opens,
+/// and the reads go through the core and give the bytes of the file's span of the pack.
+#[tokio::test(flavor = "multi_thread")]
+async fn a_placed_file_is_opened_without_a_backing_id_and_read_through_the_core() {
+    let live = Live::new("tfs-pt-placed").await;
+    let _ = live.place(vec![fs_at("jobs/1f3a/root")]);
+    let other = live.bench.pack.content(1).to_vec();
+    let want = other.clone();
+    let (registered, live_ids, one, two, past) = live
+        .on_core(move |core| {
+            core.enable_passthrough();
+            let kernel = FakeKernel::new();
+            let ino = walk(core, &["jobs", "1f3a", "root", "bin", "other"]);
+            let cached = |opened: Opened| match opened {
+                Opened::Cached(fh) => fh,
+                Opened::Backed { .. } => panic!("a placed file was opened by passthrough"),
+            };
+            let first = cached(kernel.open(core, ino).unwrap());
+            let second = cached(kernel.open(core, ino).unwrap());
+            let one = core.read(first, 0, u32::MAX).unwrap();
+            let two = core.read(second, 5, 10).unwrap();
+            let past = core.read(first, other.len() as u64, 10).unwrap();
+            let registered = locked(&kernel.registered).len();
+            let table = core.backing_table().expect("passthrough was chosen");
+            (registered, table.live(), one, two, past)
+        })
+        .await;
+    assert_eq!(registered, 0);
+    assert_eq!(live_ids, 0);
+    assert_eq!(one, want);
+    assert_eq!(two, want[5..15]);
+    assert!(past.is_empty());
+}
+
+/// Asserts that the choice of passthrough leaves the other members of a placement as they are: the
+/// symbolic link is refused with `EINVAL`, the empty file opens empty, and nothing is registered.
+#[tokio::test(flavor = "multi_thread")]
+async fn passthrough_leaves_a_placed_link_and_empty_file_as_they_are() {
+    let live = Live::new("tfs-pt-placed-others").await;
+    let _ = live.place(vec![fs_at("jobs/1f3a/root")]);
+    let (link, zero, registered) = live
+        .on_core(|core| {
+            core.enable_passthrough();
+            let kernel = FakeKernel::new();
+            let link = walk(core, &["jobs", "1f3a", "root", "link"]);
+            let zero = walk(core, &["jobs", "1f3a", "root", "zero"]);
+            let link = kernel.open(core, link).err();
+            let zero = match kernel.open(core, zero).unwrap() {
+                Opened::Cached(fh) => core.read(fh, 0, 10).unwrap(),
+                Opened::Backed { .. } => panic!("an empty file was opened by passthrough"),
+            };
+            (link, zero, locked(&kernel.registered).len())
+        })
+        .await;
+    assert_eq!(link, Some(Errno::Inval));
+    assert!(zero.is_empty());
+    assert_eq!(registered, 0);
 }

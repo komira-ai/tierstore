@@ -60,6 +60,7 @@ mod config;
 mod create;
 mod fetch;
 mod files;
+mod flat;
 mod keys;
 mod life;
 mod location;
@@ -87,7 +88,7 @@ mod start_tests;
 #[cfg(test)]
 mod table_tests;
 #[cfg(test)]
-mod testing;
+pub(in crate::server) mod testing;
 
 use std::io;
 use std::sync::atomic::AtomicU64;
@@ -96,6 +97,7 @@ use std::sync::{Arc, Mutex};
 pub use config::{Prefetch, TreesConfig};
 pub use create::{CreateError, CreateRequest, Created};
 pub use fetch::{FetchError, OpenFile};
+pub(in crate::server) use flat::{FlatError, FlatKind, FlatTree, MountPlace, placement_id};
 pub use keys::TreeKey;
 pub use life::{LifeError, PlacementInfo, ReadHold, SweepReport};
 pub use location::{Located, Location, LocationError, PlacementId};

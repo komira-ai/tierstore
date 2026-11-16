@@ -1,5 +1,6 @@
 //! A tree flattened for lookups: its entries in the order of their indices, and for each
-//! directory the indices of its children.
+//! directory the indices of its children. A tree a placement shows at an fs location also has the
+//! mode of each entry, as stored, and the path of the location.
 
 use crate::tree_manifest::{EntryKind, TreeEntry};
 
@@ -12,6 +13,11 @@ pub(super) struct Tree {
     /// The indices of the children of every entry, grouped by parent, each group in the order of
     /// the manifest (sorted by name).
     kids: Vec<u32>,
+    /// The mode of every entry, by index, for a placed tree; empty for a tree of manifests, whose
+    /// modes follow from the kinds.
+    modes: Vec<u16>,
+    /// The fs location of a placed tree: names joined by `/`.
+    location: Option<String>,
 }
 
 impl Tree {
@@ -36,7 +42,29 @@ impl Tree {
             entries,
             starts,
             kids,
+            modes: Vec::new(),
+            location: None,
         }
+    }
+
+    /// The tree of `entries` that a placement shows at the fs location `location`, with the mode
+    /// of each entry in `modes`, by index.
+    pub(super) fn placed(entries: Vec<TreeEntry>, modes: Vec<u16>, location: String) -> Self {
+        Self {
+            modes,
+            location: Some(location),
+            ..Self::new(entries)
+        }
+    }
+
+    /// The stored mode of the entry `index` of a placed tree; none for a tree of manifests.
+    pub(super) fn mode(&self, index: u32) -> Option<u16> {
+        self.modes.get(index as usize).copied()
+    }
+
+    /// The fs location a placed tree is shown at; none for a tree of manifests.
+    pub(super) fn location(&self) -> Option<&str> {
+        self.location.as_deref()
     }
 
     /// Every entry, in the order of their indices: the manifest's, depth first.

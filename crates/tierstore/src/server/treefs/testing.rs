@@ -151,6 +151,8 @@ pub(in crate::server) struct Upstream {
     pub pin_answer: Mutex<Option<String>>,
     /// The requests received, in order.
     pub requests: Mutex<Vec<String>>,
+    /// The answer to every request of a verb, by verb, instead of the usual one.
+    pub answers: Mutex<HashMap<String, String>>,
     /// What answers the `put` requests.
     pub puts: Arc<FakePuts>,
     /// Whether the fills of blobs wait (see [`Upstream::hold_fills`]).
@@ -192,6 +194,9 @@ impl Upstream {
     fn answer(&self, line: &str) -> Option<String> {
         locked(&self.requests).push(line.to_owned());
         let words: Vec<&str> = line.split(' ').collect();
+        if let Some(answer) = locked(&self.answers).get(words[0]) {
+            return Some(answer.clone());
+        }
         match words[0] {
             "fill" if words.len() == 2 => {
                 self.enter_manifest();
@@ -205,6 +210,9 @@ impl Upstream {
             }
             "touch" => None,
             "put" => Some(self.puts.answer(line)),
+            // This upstream has no placements.
+            "place" => Some("none".to_owned()),
+            "mounted" => Some("[]".to_owned()),
             "pin" => Some(
                 locked(&self.pin_answer)
                     .clone()
@@ -505,6 +513,7 @@ impl Rig {
             failing: Mutex::new(HashMap::new()),
             pin_answer: Mutex::new(None),
             requests: Mutex::new(Vec::new()),
+            answers: Mutex::new(HashMap::new()),
             puts: Arc::new(FakePuts::default()),
             holding: Mutex::new(false),
             released: Condvar::new(),

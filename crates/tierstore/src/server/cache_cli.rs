@@ -419,7 +419,7 @@ pub(super) async fn serve_front(
     };
     let filling = async {
         if let Some(path) = fronts.fill_socket {
-            fill_socket::serve(cache.clone(), path, fill_halt).await;
+            fill_socket::serve((cache.clone(), trees.clone()), path, fill_halt).await;
             tracing::debug!("tierstore: fill socket ended");
         }
     };
