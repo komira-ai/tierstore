@@ -69,6 +69,11 @@ pub fn version_of(release: &str) -> String {
 /// The params of an update to `staged` (a first install when `previous` is `None`), with the
 /// optional lines `optional`.
 pub fn params_with(staged: &str, previous: Option<&str>, optional: &str) -> Params {
+    Params::parse(&params_text(staged, previous, optional)).expect("params")
+}
+
+/// The text of the params file of [`params_with`], as hostkeeper writes it.
+pub fn params_text(staged: &str, previous: Option<&str>, optional: &str) -> String {
     let mut text = format!(
         "\"updater.staged_release\" = \"{staged}\"\n\"updater.target_version\" = \"{}\"\n",
         version_of(staged)
@@ -81,7 +86,7 @@ pub fn params_with(staged: &str, previous: Option<&str>, optional: &str) -> Para
         ));
     }
     text.push_str(optional);
-    Params::parse(&text).expect("params")
+    text
 }
 
 /// The params of an update to `staged`, with the node's configuration named.
