@@ -1,7 +1,7 @@
 //! Making a file of a placement readable: the span of the cached pack that holds its bytes, filled
-//! from the upstream first if the cache does not hold it. Every interface reads a file this way,
-//! the S3 front by placement and path ([`TreeStore::open_file`]) and the mount by the span it
-//! already knows ([`TreeStore::fetch_span`]), so both answer with the same bytes.
+//! from the upstream first if the cache does not hold it. The S3 front reads a file by placement
+//! and path ([`TreeStore::open_file`]), which resolves the path and makes its span readable with
+//! [`TreeStore::fetch_span`]; a caller that already knows a file's span calls the second alone.
 
 use super::super::{RangeError, RangeWant, Span};
 use super::read::{FileSpan, ReadError, Resolved};
