@@ -8,10 +8,9 @@
 # Edit before use: replace the six addresses in [cold_store] (documentation addresses here) with
 # the addresses of the storage nodes, and set the bucket and the cache budget. Keep the s3 interface as
 # it is: the update hook probes the instance on 127.0.0.1:9300 (PUBLIC_PORT in
-# src/server/update_hook/mod.rs) and matches the version of its build gauge, and the build daemon of
-# this Mac reads through it on that address. `slot` is kept at the same port only because the build
-# daemon and the packaging test expect it; the hook does not read it. Nothing else on the network
-# reaches it.
+# src/server/update_hook/mod.rs) and matches the version of its build gauge, and the jobs of this
+# Mac read through it on that address. `slot` is kept at the same port only because the packaging
+# test expects it; the hook does not read it. Nothing else on the network reaches it.
 #
 # The proxy id is "tierstore-cache-" and the host id of the facts file hostkeeper writes
 # (/var/lib/hostkeeper/facts.json), read at each start; a change of the facts takes a restart.
