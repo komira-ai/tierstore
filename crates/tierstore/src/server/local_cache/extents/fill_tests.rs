@@ -782,6 +782,7 @@ async fn a_flight_whose_range_was_filled_while_it_waited_asks_nothing() {
         start: 10,
         end: 90,
         sha256: digest(b"unchecked"),
+        parts: vec![(10, 90, digest(b"unchecked"))],
     };
     let gets = rig.calls(Op::Get);
     rig.cache

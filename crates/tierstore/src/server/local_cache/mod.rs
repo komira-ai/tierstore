@@ -255,7 +255,7 @@ use crate::{
 };
 
 pub use disk::{Disk, Space, SystemDisk};
-pub use extents::{RangeError, RangeWant, Span};
+pub use extents::{PartsWant, RangeError, RangePart, RangeWant, Span};
 pub use hold::{Mode, Tick};
 pub use metrics::Counters;
 pub use pins::{PinAnswer, PinError};

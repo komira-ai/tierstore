@@ -313,3 +313,58 @@ async fn two_members_of_a_pack_are_two_spans_of_one_file() {
     );
     assert_eq!(upstream_calls(&bench), before);
 }
+
+/// The blob `blob` of the pack as `fetch_parts` is asked: offset, size and digest.
+fn part_of(bench: &Bench, blob: usize) -> (u64, u64, TreeDigest) {
+    let (span, size, sha) = blob_of(bench, blob);
+    (span.offset, size, sha)
+}
+
+/// Asserts that `fetch_parts` of two blobs of a pack is one GET over them, that after it both
+/// spans are held and `span_held` says so while it says no for the blob between them and for a
+/// pack the cache has not seen, and that the bytes at each span are the blob's.
+#[tokio::test]
+async fn parts_are_fetched_in_one_read_and_their_spans_are_held() {
+    let bench = Bench::new("trees-fetch-parts").await;
+    let (first, third) = (part_of(&bench, 0), part_of(&bench, 2));
+    let (_, size, _) = blob_of(&bench, 1);
+    let (span, _, _) = blob_of(&bench, 1);
+    assert!(!bench.store.span_held(&bench.pack.key, first.0, first.1));
+    bench
+        .store
+        .fetch_parts(&bench.pack.key, &[first, third])
+        .await
+        .unwrap();
+    assert_eq!(bench.rig.calls(Op::Get), 1);
+    assert!(bench.store.span_held(&bench.pack.key, first.0, first.1));
+    assert!(bench.store.span_held(&bench.pack.key, third.0, third.1));
+    assert!(!bench.store.span_held(&span.pack, span.offset, size));
+    assert!(!bench.store.span_held("cas/pack/none", 0, 10));
+    let held = bench
+        .rig
+        .cache
+        .span_of(&bench.pack.key, third.0, third.1)
+        .unwrap();
+    assert_eq!(
+        read_at(&held.path, held.offset, third.1),
+        bench.pack.content(2)
+    );
+}
+
+/// Asserts that `fetch_parts` with one wrong digest is the fill's mismatch, with the part that was
+/// right kept and the wrong one not held.
+#[tokio::test]
+async fn a_part_with_a_wrong_digest_is_a_mismatch_and_the_other_stays_held() {
+    let bench = Bench::new("trees-fetch-parts-wrong").await;
+    let (first, third) = (part_of(&bench, 0), part_of(&bench, 2));
+    let wrong = (third.0, third.1, TreeDigest::of(b"other bytes"));
+    assert_eq!(
+        bench
+            .store
+            .fetch_parts(&bench.pack.key, &[first, wrong])
+            .await,
+        Err(FetchError::Fill(RangeError::Mismatch))
+    );
+    assert!(bench.store.span_held(&bench.pack.key, first.0, first.1));
+    assert!(!bench.store.span_held(&bench.pack.key, third.0, third.1));
+}

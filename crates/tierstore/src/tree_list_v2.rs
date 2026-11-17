@@ -1,6 +1,6 @@
 //! The tree list, version 2 (the `TSTREE` format): a tree as fixed 32-byte records in
 //! breadth-first order over a table of digests, a table of pack keys and a blob of names, which a
-//! reader checks in one walk without copying, and that holds the reads to issue.
+//! reader checks in one walk over its own bytes, and that holds the reads to issue.
 //!
 //! `crates/tierstore/docs/tree-manifest.md` ("The tree list, version 2") is the reference. The
 //! object is a 64-byte header and six sections, each 8-byte aligned, in this order:
@@ -16,12 +16,14 @@
 //! ranges       count x 24 bytes: {key, offset, length} of the packs, sorted and merged
 //! ```
 //!
-//! [`TreeListV2::open`] checks the header, where each section is, the keys and the ranges, and
-//! copies nothing. [`TreeListV2::build`] then walks the entries once, directory by directory: it
-//! checks each child, hands its caller the span of every file whose digest it has not met before
-//! as soon as the file is checked, and finally hashes the directories into a [`BuiltTree`]. The
-//! ranges are a hint of what to read, pack by pack, merged across small gaps; the spans are what
-//! the walk hands out, since each is checked against its file's digest as it is read.
+//! [`TreeListV2::open`] checks the header, where each section is, the keys and the ranges; it
+//! borrows the sections from the bytes and copies only the keys. [`TreeListV2::check`] then walks
+//! the entries once, directory by directory: it checks each child and hands its caller the span of
+//! every file whose digest it has not met before as soon as the file is checked. What it gives
+//! makes the tree store's records ([`Checked::build`]); [`TreeListV2::build`] does both. The
+//! ranges ([`TreeListV2::ranges`]) are the reads to issue, pack by pack, merged across small
+//! gaps: the mount provider reads the spans the walk handed out a range at a time, each span
+//! checked against its own digest as its bytes pass.
 //!
 //! The object is named and stored as a version 1 list is: `cas/l/<SHA-256 of its bytes>`
 //! ([`tree_list_key`](crate::tree_list_key)), create-only. Neither function here checks that
@@ -34,7 +36,7 @@ use std::sync::Arc;
 
 use crate::tree_list::MAX_TREE_LIST_BYTES;
 
-pub use crate::tree_list_v2_build::ListSpan;
+pub use crate::tree_list_v2_build::{Checked, ListSpan};
 
 /// The first eight bytes of every version 2 tree list. A version 1 list begins `{`.
 pub const TREE_LIST_V2_MAGIC: [u8; 8] = *b"TSTREE\0\0";
@@ -258,8 +260,8 @@ pub enum EntryFault {
 /// A range of a pack the writer says the tree reads: a hint, checked only to be in bounds.
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub struct ListRange {
-    /// The key of the pack.
-    pub key: Arc<str>,
+    /// The number of the key of the pack, in [`TreeListV2::keys`].
+    pub key: u32,
     /// The first byte.
     pub offset: u64,
     /// The number of bytes, above 0.
@@ -374,6 +376,13 @@ impl<'a> TreeListV2<'a> {
         Ok(list)
     }
 
+    /// The keys of the objects that hold the files' bytes, which a span or a range names by its
+    /// number.
+    #[must_use]
+    pub fn keys(&self) -> &[Arc<str>] {
+        &self.keys
+    }
+
     /// How many entries the list has, the root included.
     #[must_use]
     pub fn len(&self) -> usize {
@@ -397,15 +406,12 @@ impl<'a> TreeListV2<'a> {
     /// Range `index`, if it names a key, is not empty and ends within 64 bits.
     fn range(&self, index: u32) -> Option<ListRange> {
         let at = index as usize * RANGE_LEN;
-        let key = self.keys.get(le_u32(self.ranges, at) as usize)?;
+        let key = le_u32(self.ranges, at);
         let offset = le_u64(self.ranges, at + 8);
         let len = le_u64(self.ranges, at + 16);
-        let valid = len > 0 && offset.checked_add(len).is_some();
-        valid.then(|| ListRange {
-            key: key.clone(),
-            offset,
-            len,
-        })
+        let valid =
+            (key as usize) < self.keys.len() && len > 0 && offset.checked_add(len).is_some();
+        valid.then_some(ListRange { key, offset, len })
     }
 }
 

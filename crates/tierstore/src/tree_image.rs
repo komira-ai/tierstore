@@ -19,8 +19,8 @@ use std::sync::Arc;
 use bytes::Bytes;
 
 use crate::tree_list_v2::{KIND_DIR, KIND_FILE, RECORD_LEN, TreeListV2, TreeListV2Error};
-use crate::tree_list_v2_build::{Record, Spans, Walked};
-use crate::{ListSpan, Mode, TreeDigest, TreeLimits};
+use crate::tree_list_v2_build::{Counted, Record, Spans};
+use crate::{ListRange, ListSpan, Mode, TreeDigest, TreeLimits};
 
 /// A version 2 tree list whose every entry was checked, held whole and read in place.
 #[derive(Debug)]
@@ -35,8 +35,10 @@ pub struct TreeImage {
     names: Bytes,
     /// The keys of the packs, shared by the spans of their files.
     keys: Vec<Arc<str>>,
+    /// The ranges of the packs the list's writer says the tree reads.
+    ranges: Vec<ListRange>,
     /// The files and their bytes.
-    walked: Walked,
+    counted: Counted,
 }
 
 /// One entry of a [`TreeImage`], read from its record.
@@ -82,15 +84,16 @@ const SHAPE: TreeLimits = TreeLimits {
 
 impl TreeImage {
     /// Opens the version 2 tree list `bytes` and walks it once ([`TreeListV2::open`], then the
-    /// checks of [`TreeListV2::build`] against `limits`), calling `on_span` with each span of a
-    /// file of size above 0 as the walk meets it, each distinct span once. Nothing of the list is
-    /// copied but the keys of its packs; its SHA-256 is not checked here.
+    /// checks of [`TreeListV2::check`] against `limits`), calling `on_span` with each span of a
+    /// file of size above 0 as the walk meets it, each distinct span once (a file is read at its
+    /// own span). Nothing of the list is copied but the keys of its packs and its ranges; its
+    /// SHA-256 is not checked here.
     ///
     /// The spans handed out before a refusal are not taken back, as with
-    /// [`TreeListV2::build`]: each is checked against its digest when it is read.
+    /// [`TreeListV2::check`]: each is checked against its digest when it is read.
     ///
     /// # Errors
-    /// What [`TreeListV2::open`] and [`TreeListV2::build`] refuse.
+    /// What [`TreeListV2::open`] and [`TreeListV2::check`] refuse.
     pub fn open(
         bytes: Bytes,
         limits: &TreeLimits,
@@ -112,13 +115,14 @@ impl TreeImage {
         on_span: impl FnMut(ListSpan),
     ) -> Result<Self, TreeListV2Error> {
         let list = TreeListV2::open(&bytes)?;
-        let walked = list.walk(limits, spans, on_span)?;
+        let (_, counted) = list.walk(limits, spans, on_span)?;
         Ok(Self {
             entries: bytes.slice_ref(list.entries),
             digests: bytes.slice_ref(list.digests),
             names: bytes.slice_ref(list.names),
+            ranges: list.ranges().collect(),
             keys: list.keys,
-            walked,
+            counted,
             bytes,
         })
     }
@@ -144,18 +148,25 @@ impl TreeImage {
     /// The number of files of the tree, of any size.
     #[must_use]
     pub fn files(&self) -> u64 {
-        self.walked.files
+        self.counted.files
     }
 
     /// The bytes of the files of the tree together, at most `u64::MAX`.
     #[must_use]
     pub fn file_bytes(&self) -> u64 {
-        self.walked.bytes
+        self.counted.bytes
     }
 
-    /// The keys of the packs the files are read from, each once.
+    /// The keys of the packs the files are read from, each once: a span's key is its number
+    /// here.
     pub(crate) fn keys(&self) -> &[Arc<str>] {
         &self.keys
+    }
+
+    /// The ranges of the packs the list's writer says the tree reads: a hint, as
+    /// [`TreeListV2::ranges`] gives them.
+    pub(crate) fn ranges(&self) -> impl Iterator<Item = ListRange> + '_ {
+        self.ranges.iter().cloned()
     }
 
     fn record(&self, index: u32) -> Option<Record> {

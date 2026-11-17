@@ -41,14 +41,42 @@ pub struct RangeWant<'a> {
     pub sha256: &'a str,
 }
 
-/// What a flight is of, owned, so that its task holds it.
+/// One part of a range of a pack: a span of it, and the SHA-256 its bytes must have.
+#[derive(Clone, Copy, Debug)]
+pub struct RangePart<'a> {
+    /// The first byte of the part.
+    pub offset: u64,
+    /// The number of bytes, above 0.
+    pub len: u64,
+    /// The SHA-256 the bytes must have, as sixty-four lower-case hex digits.
+    pub sha256: &'a str,
+}
+
+/// Parts of a pack to fill in one read: the bytes from the first part's start to the last
+/// part's end.
+#[derive(Clone, Copy, Debug)]
+pub struct PartsWant<'a> {
+    /// The key of the pack, an object of the upstream.
+    pub pack: &'a str,
+    /// What the caller knows of the pack, as for [`RangeWant::known`].
+    pub known: Option<&'a Meta>,
+    /// The parts, in any order; they may leave gaps between them, which are read and not kept.
+    pub parts: &'a [RangePart<'a>],
+}
+
+/// What a flight is of, owned, so that its task holds it: the range read, and the parts of it
+/// recorded, each if its bytes hash to its digest (a fill of one range is one part, the range).
 #[derive(Clone, Debug)]
 pub(super) struct Wanted {
     pub(super) key: String,
     pub(super) known: Option<Meta>,
     pub(super) start: u64,
     pub(super) end: u64,
+    /// The digest of a fill of one range; for a fill of parts, `parts:` and the SHA-256 of what
+    /// the parts are, so that only a fill of the same parts joins it.
     pub(super) sha256: String,
+    /// `(start, end, sha256)` of each part.
+    pub(super) parts: Vec<(u64, u64, String)>,
 }
 
 /// A fill of a range that is running, shared by the requests for it.
@@ -118,6 +146,19 @@ impl LocalCache {
     pub async fn fill_range(&self, want: &RangeWant<'_>) -> Result<(), RangeError> {
         self.inner.fill_range(want).await
     }
+
+    /// Keeps each of the parts of the pack in the cache, read from the upstream in one pass from
+    /// the first part's start to the last part's end and hashed part by part on its way to the
+    /// disk: a part whose bytes hash to its digest is recorded as filled, and the bytes between
+    /// the parts are read and not kept. Gives at once if every part is in the cache; a fill of the
+    /// same parts that is running is joined, and one of an overlapping range is waited for.
+    ///
+    /// # Errors
+    /// Why not every part was kept: see [`RangeError`]. [`RangeError::Mismatch`] if a part's
+    /// bytes did not hash to its digest, after the parts that did are recorded.
+    pub async fn fill_parts(&self, want: &PartsWant<'_>) -> Result<(), RangeError> {
+        self.inner.fill_parts(want).await
+    }
 }
 
 impl Inner {
@@ -138,13 +179,51 @@ impl Inner {
             start: want.offset,
             end,
             sha256: want.sha256.to_owned(),
+            parts: vec![(want.offset, end, want.sha256.to_owned())],
         };
+        self.fill_wanted(&name, &wanted).await
+    }
+
+    /// See [`LocalCache::fill_parts`].
+    async fn fill_parts(self: &Arc<Self>, want: &PartsWant<'_>) -> Result<(), RangeError> {
+        if !self.read_write() {
+            return Err(RangeError::ReadOnly);
+        }
+        let name = self.cacheable(want.pack).ok_or(RangeError::NotKept)?;
+        let mut parts = Vec::with_capacity(want.parts.len());
+        let mut whole = Sha256::new();
+        for part in want.parts {
+            let end = part.offset.checked_add(part.len);
+            let Some(end) = end.filter(|_| part.len > 0 && is_digest(part.sha256)) else {
+                return Err(RangeError::Empty);
+            };
+            whole.update(format!("{} {end} {}\n", part.offset, part.sha256));
+            parts.push((part.offset, end, part.sha256.to_owned()));
+        }
+        let start = parts.iter().map(|part| part.0).min();
+        let end = parts.iter().map(|part| part.1).max();
+        let (Some(start), Some(end)) = (start, end) else {
+            return Err(RangeError::Empty);
+        };
+        let wanted = Wanted {
+            key: want.pack.to_owned(),
+            known: want.known.cloned(),
+            start,
+            end,
+            sha256: format!("parts:{}", hex::encode(whole.finalize())),
+            parts,
+        };
+        self.fill_wanted(&name, &wanted).await
+    }
+
+    /// Fills what `wanted` names unless it is held: the flight of it, joined if one runs.
+    async fn fill_wanted(self: &Arc<Self>, name: &Name, wanted: &Wanted) -> Result<(), RangeError> {
         loop {
-            if self.range_held(&name, wanted.start, end).await? {
+            if self.wanted_held(name, wanted).await? {
                 bump(&self.extents.counters.held);
                 return Ok(());
             }
-            match self.range_flight(&name, &wanted) {
+            match self.range_flight(name, wanted) {
                 Entered::Joined(running) => {
                     bump(&self.extents.counters.joins);
                     return running.await;
@@ -153,6 +232,16 @@ impl Inner {
                 Entered::Started(started) => return started.await,
             }
         }
+    }
+
+    /// Whether every part of `wanted` is in the cache, each counted as used.
+    async fn wanted_held(&self, name: &Name, wanted: &Wanted) -> Result<bool, RangeError> {
+        for (start, end, _) in &wanted.parts {
+            if !self.range_held(name, *start, *end).await? {
+                return Ok(false);
+            }
+        }
+        Ok(true)
     }
 
     /// Whether `[start, end)` of the pack `name` is in the cache, whole in `obj/` or in an entry
@@ -256,7 +345,7 @@ impl Inner {
             return Err(RangeError::Busy);
         };
         // A range that was filled while this waited for its permit is held.
-        if self.range_held(name, wanted.start, wanted.end).await? {
+        if self.wanted_held(name, wanted).await? {
             return Ok(());
         }
         let generation = self.generation();
@@ -330,7 +419,7 @@ impl Inner {
             return Err(RangeError::ReadOnly);
         }
         let file = self.extent_file(hex, object.size).await?;
-        let mut hasher = Sha256::new();
+        let mut hashers: Vec<Sha256> = wanted.parts.iter().map(|_| Sha256::new()).collect();
         let mut at = wanted.start;
         while at < wanted.end {
             let want = self.config.fill_chunk.max(1).min(wanted.end - at);
@@ -343,18 +432,35 @@ impl Inner {
             if !self.owns(generation) {
                 return Err(RangeError::ReadOnly);
             }
-            hasher.update(&chunk);
+            let until = at + want;
+            for ((start, end, _), hasher) in wanted.parts.iter().zip(&mut hashers) {
+                let (from, to) = ((*start).max(at), (*end).min(until));
+                if from < to {
+                    hasher.update(&chunk[(from - at) as usize..(to - at) as usize]);
+                }
+            }
             let piece = (Arc::clone(&file), gaps.clone(), at, chunk);
             blocking(move || write_gaps(&piece.0, &piece.1, piece.2, &piece.3)).await?;
             at += want;
         }
-        if hex::encode(hasher.finalize()) != wanted.sha256 {
+        let checked: Vec<(u64, u64)> = wanted
+            .parts
+            .iter()
+            .zip(hashers)
+            .filter(|((_, _, sha256), hasher)| hex::encode(hasher.clone().finalize()) == *sha256)
+            .map(|((start, end, _), _)| (*start, *end))
+            .collect();
+        if checked.is_empty() {
             return Err(RangeError::Mismatch);
         }
-        let added = locked(&self.index).extent_add(hex, serial, (wanted.start, wanted.end));
-        let Some((added, whole)) = added else {
-            return Err(RangeError::Changed);
-        };
+        let (mut added, mut whole) = (0, false);
+        for part in &checked {
+            let Some((more, now_whole)) = locked(&self.index).extent_add(hex, serial, *part) else {
+                return Err(RangeError::Changed);
+            };
+            added += more;
+            whole |= now_whole;
+        }
         drop(reservation);
         bump(&self.extents.counters.fills);
         add(&self.extents.counters.fill_bytes, added);
@@ -363,6 +469,9 @@ impl Inner {
             self.move_whole(name, (object, serial), generation).await;
         }
         self.relieve().await;
+        if checked.len() < wanted.parts.len() {
+            return Err(RangeError::Mismatch);
+        }
         Ok(())
     }
 

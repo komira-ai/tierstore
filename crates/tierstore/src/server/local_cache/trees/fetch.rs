@@ -3,7 +3,7 @@
 //! and path ([`TreeStore::open_file`]), which resolves the path and makes its span readable with
 //! [`TreeStore::fetch_span`]; a caller that already knows a file's span calls the second alone.
 
-use super::super::{RangeError, RangeWant, Span};
+use super::super::{PartsWant, RangeError, RangePart, RangeWant, Span};
 use super::read::{FileSpan, ReadError, Resolved};
 use super::{PlacementId, ReadHold, TreeStore};
 use crate::{Mode, TreeDigest};
@@ -104,5 +104,41 @@ impl TreeStore {
         cache
             .span_of(&span.pack, span.offset, size)
             .ok_or(FetchError::Lost)
+    }
+
+    /// Fills the `parts` of `pack`, each `(offset, size above 0, SHA-256)`, in one read from the
+    /// first part's start to the last part's end, each part checked against its digest and kept
+    /// if it holds; the bytes between the parts are read and not kept. An open of a file whose
+    /// span is one of the parts, while this runs, waits for it and then finds the span held.
+    ///
+    /// # Errors
+    /// [`FetchError::Fill`] if not every part was kept (those that were stay kept).
+    pub async fn fetch_parts(
+        &self,
+        pack: &str,
+        parts: &[(u64, u64, TreeDigest)],
+    ) -> Result<(), FetchError> {
+        let hexes: Vec<String> = parts.iter().map(|(_, _, sha)| sha.to_string()).collect();
+        let parts: Vec<RangePart<'_>> = parts
+            .iter()
+            .zip(&hexes)
+            .map(|((offset, len, _), sha256)| RangePart {
+                offset: *offset,
+                len: *len,
+                sha256,
+            })
+            .collect();
+        let want = PartsWant {
+            pack,
+            known: None,
+            parts: &parts,
+        };
+        Ok(self.shared.cache.fill_parts(&want).await?)
+    }
+
+    /// Whether the `size` bytes (above 0) at `offset` of `pack` are in the cache.
+    #[must_use]
+    pub fn span_held(&self, pack: &str, offset: u64, size: u64) -> bool {
+        self.shared.cache.span_of(pack, offset, size).is_some()
     }
 }
