@@ -1,6 +1,6 @@
 //! The flattened tree: children by name, in the order of the manifest, and the link count.
 
-use super::Tree;
+use super::{Kids, Tree};
 use crate::server::treefs::testing::{Built, Node, dir, file};
 use crate::tree_manifest::{TreeDigest, flatten};
 
@@ -31,13 +31,13 @@ fn children_are_found_by_name_and_listed_in_manifest_order() {
     // Depth first in manifest order: root 0, a 1, b 2 (x 3, y 4), c 5.
     let names = |dir: u32| -> Vec<String> {
         tree.children(dir)
-            .iter()
-            .map(|&k| tree.at(k).name.to_string())
+            .from(0)
+            .map(|k| tree.entry(k).unwrap().name.to_string())
             .collect()
     };
     assert_eq!(names(0), ["a", "b", "c"]);
     assert_eq!(names(2), ["x", "y"]);
-    assert_eq!(tree.children(1), &[] as &[u32]);
+    assert_eq!(tree.children(1), Kids::Listed(&[]));
     assert_eq!(tree.child(0, "b"), Some(2));
     assert_eq!(tree.child(2, "y"), Some(4));
     assert_eq!(tree.child(0, "zz"), None);
@@ -60,7 +60,7 @@ fn a_directory_has_two_links_and_one_for_each_subdirectory() {
     assert_eq!(tree.links(1), 2);
     let empty = tree_of(Vec::new());
     assert_eq!(empty.links(0), 2);
-    assert_eq!(empty.children(0), &[] as &[u32]);
+    assert_eq!(empty.children(0), Kids::Listed(&[]));
     assert_eq!(empty.child(0, "x"), None);
 }
 
@@ -73,7 +73,7 @@ fn a_placed_tree_has_modes_and_a_location_and_a_tree_of_manifests_has_neither() 
     assert_eq!(plain.mode(1), None);
     assert_eq!(plain.location(), None);
     let placed = Tree::placed(
-        plain.entries().to_vec(),
+        (0..2).map(|index| plain.entry(index).unwrap()).collect(),
         vec![0o711, 0o4755],
         "jobs/1".to_owned(),
     );

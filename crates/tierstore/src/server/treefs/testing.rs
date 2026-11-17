@@ -212,6 +212,9 @@ impl Upstream {
             "put" => Some(self.puts.answer(line)),
             // This upstream has no placements.
             "place" => Some("none".to_owned()),
+            // Nor images: it answers as a node of the release before them, and the mount asks
+            // `flat` instead.
+            "image" => Some("refused unknown request".to_owned()),
             "mounted" => Some("[]".to_owned()),
             "pin" => Some(
                 locked(&self.pin_answer)

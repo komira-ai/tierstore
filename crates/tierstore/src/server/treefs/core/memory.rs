@@ -327,7 +327,7 @@ fn said(
         return None;
     }
     let what = match read {
-        Ok(loaded) => format!("{} entries", loaded.tree.entries().len()),
+        Ok(loaded) => format!("{} entries", loaded.tree.len()),
         Err(why) => format!("failed: {why}"),
     };
     Some(format!(

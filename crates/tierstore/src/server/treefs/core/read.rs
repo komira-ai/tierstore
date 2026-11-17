@@ -140,7 +140,7 @@ impl Core {
         if length == 0 {
             return Ok(None);
         }
-        let file = self.blob(&loaded, number, entry, (digest, length, source.as_ref()))?;
+        let file = self.blob(&loaded, number, &entry, (digest, length, source.as_ref()))?;
         Ok(Some((file, length)))
     }
 
@@ -190,13 +190,13 @@ impl Core {
         let (number, index) = ino::split(ino);
         let loaded = self.tree(number)?;
         let kids = loaded.tree.children(index);
-        let first = kids.partition_point(|kid| ino::of(number, *kid) <= after);
-        for kid in &kids[first..] {
-            let entry = loaded.tree.at(*kid);
+        let first = kids.partition_point(|kid| ino::of(number, kid) <= after);
+        let entries = kids.from(first).filter_map(|kid| loaded.tree.entry(kid));
+        for entry in entries {
             let item = DirItem {
                 name: entry.name.to_string(),
                 entry: Entry {
-                    attr: self.attr_of(number, &loaded.tree, entry),
+                    attr: self.attr_of(number, &loaded.tree, &entry),
                     ttl: TREE_TTL,
                 },
             };

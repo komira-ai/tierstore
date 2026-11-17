@@ -1,5 +1,6 @@
-//! One preparation of a version 2 tree list run to its end: the tree placed with the root a
-//! version 1 list of the same entries gives, the spans read as the walk queues them, a list that
+//! One preparation of a version 2 tree list run to its end: the list placed as its own tree, named
+//! by its digest, whose every path resolves as in the tree a version 1 list of the same entries
+//! gives, the spans read as the walk queues them, a list that
 //! does not hash to its key, a record or a header the reader refuses, a tree the store refuses, a
 //! release before or during the placement, and a file whose pack is not there.
 
@@ -11,7 +12,7 @@ use tokio::sync::watch;
 use super::names::SourceId;
 use super::prepare::{Job, run};
 use super::sources::Stage;
-use super::testing::{AGENT, Rig, list_of, member};
+use super::testing::{AGENT, READ_ONLY, Rig, list_of, member, source};
 use crate::server::local_cache::trees::TreesConfig;
 use crate::{BlobSource, ListEntry, ListKind, Mode, Op, TreeDigest, TreeList, tree_list_digest};
 
@@ -97,10 +98,12 @@ fn break_entry(bytes: &mut [u8], index: usize) {
 }
 
 /// Asserts that a version 2 list run to its end leaves the source placed, every file's span read
-/// once into the cache, and the tree marked ready, and that the tree has the root of the version 1
-/// list of the same entries.
+/// once into the cache, and the tree marked ready; that the tree is the list itself, named by the
+/// list's own digest and not by the records a version 1 list makes; and that every path of it
+/// (the root, the directories the paths imply, each entry, and a name that is not there) resolves
+/// as it does in the tree of the version 1 list of the same entries.
 #[tokio::test]
-async fn a_v2_list_run_to_its_end_places_the_tree_of_the_v1_list_and_reads_every_file() {
+async fn a_v2_list_run_to_its_end_places_the_list_as_its_tree_and_reads_every_file() {
     let rig = Rig::new("prov-v2-ready").await;
     let key = rig.put_list_v2(&list_of(&rig.bench.pack)).await;
     assert_ne!(key, rig.key);
@@ -112,12 +115,24 @@ async fn a_v2_list_run_to_its_end_places_the_tree_of_the_v1_list_and_reads_every
     assert!(store.placement(&located.placement).unwrap().ready);
     assert!((0..3).all(|blob| rig.holds(blob)));
     assert_eq!(pack_reads(&rig), 3);
+    assert_eq!(located.tree, tree_list_digest(&key).unwrap());
 
     let (job1, seen1) = held(&rig, "js.1", &rig.key);
     run(Arc::clone(&rig.provider.shared), job1).await;
     assert_eq!(*seen1.borrow(), Stage::Placed);
     let v1 = store.locate_fs(&Rig::place_of("js.1", 0)).unwrap();
-    assert_eq!(located.tree, v1.tree);
+    assert_ne!(located.tree, v1.tree);
+    let paths = [
+        "", "bin", "bin/other", "bin/tool", "empty", "lib", "lib/deep", "lib/deep/data", "link",
+        "zero", "absent", "bin/tool/below",
+    ];
+    for path in paths {
+        assert_eq!(
+            store.resolve(&located.placement, path),
+            store.resolve(&v1.placement, path),
+            "{path}"
+        );
+    }
 }
 
 /// Asserts that a version 2 list whose bytes do not hash to the digest the job names is refused
@@ -317,7 +332,9 @@ async fn a_v2_list_of_a_released_source_ends_released_with_no_placement() {
 async fn an_earlier_v2_preparation_leaves_a_later_ones_placement() {
     let rig = Rig::new("prov-v2-newer").await;
     let key = rig.put_list_v2(&list_of(&rig.bench.pack)).await;
-    rig.mounted("js.1", 0).await;
+    let later = rig.provider.prepare(source("js.1", 0), &key, READ_ONLY);
+    later.expect("prepared");
+    rig.provider.mount(source("js.1", 0)).await.expect("mounted");
     let (earlier, seen) = job("js.1", &key, false);
     run(Arc::clone(&rig.provider.shared), earlier).await;
     assert_eq!(*seen.borrow(), Stage::Released);

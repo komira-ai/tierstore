@@ -2,7 +2,9 @@
 //!
 //! The in-memory part of a lookup is a snapshot of the placement's tree and the trees it holds by
 //! digest, taken under the lock; the records are then read from their files with no lock held,
-//! one directory at a time, so a lookup of `a/b/c` reads three records and none of the rest.
+//! one directory at a time, so a lookup of `a/b/c` reads three records and none of the rest. A
+//! tree that is an image is in memory whole and is read in place: a lookup is a binary search of
+//! each directory's children, and nothing is read from a file.
 
 use std::os::unix::fs::FileExt as _;
 use std::sync::Arc;
@@ -10,8 +12,9 @@ use std::sync::Arc;
 use super::TreeStore;
 use super::files::{RECORDS, Source};
 use super::location::{Located, PlacementId, under};
-use super::state::TreeInfo;
-use crate::{Mode, RecordChild, TreeDigest, TreeRecord};
+use super::state::{Content, TreeInfo};
+use crate::tree_image::{ImageEntry, ImageKind, ImagePathError};
+use crate::{Mode, RecordChild, TreeDigest, TreeImage, TreeRecord};
 
 /// Why a question about a path was not answered.
 #[derive(Debug, PartialEq, Eq, thiserror::Error)]
@@ -90,7 +93,9 @@ pub struct Stat {
     pub mode: Mode,
 }
 
-/// A page of the children of a directory, in name order.
+/// A page of the children of a directory, in name order. A directory of a tree that is an image
+/// has no record and no digest of its own: its child entry says the digest of no bytes' tree,
+/// all zeros, and a caller that wants what is below it lists its path.
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub struct Listing {
     /// The children of the page.
@@ -114,6 +119,55 @@ enum Node {
 pub(super) struct Snapshot {
     pub(super) root: TreeDigest,
     closure: Vec<Arc<TreeInfo>>,
+}
+
+impl Snapshot {
+    /// The image the placement's tree is, if it is one.
+    pub(super) fn image(&self) -> Option<&Arc<TreeImage>> {
+        self.closure.first().and_then(|tree| tree.image())
+    }
+}
+
+/// The entry of `image` that `path` leads to.
+fn image_entry<'a>(image: &'a TreeImage, path: &str) -> Result<ImageEntry<'a>, ReadError> {
+    let index = image.find(path).map_err(|why| match why {
+        ImagePathError::NotADirectory => ReadError::NotADirectory,
+        ImagePathError::NotFound => ReadError::NotFound,
+    })?;
+    image
+        .entry(index)
+        .ok_or_else(|| ReadError::Corrupt(format!("entry {index} is missing")))
+}
+
+/// The span of a file of an image: its own.
+pub(super) fn image_span(span: Option<(&Arc<str>, u64)>) -> Option<FileSpan> {
+    span.map(|(key, offset)| FileSpan {
+        pack: key.to_string(),
+        offset,
+    })
+}
+
+/// The child entry of a listing that the entry `entry` of an image is.
+fn image_child(entry: ImageEntry<'_>) -> RecordChild {
+    let name = entry.name.to_owned();
+    match entry.kind {
+        ImageKind::Dir { .. } => RecordChild::Dir {
+            name,
+            digest: TreeDigest::from_bytes([0; 32]),
+        },
+        ImageKind::File {
+            mode, size, sha256, ..
+        } => RecordChild::File {
+            name,
+            mode,
+            size,
+            sha256,
+        },
+        ImageKind::Symlink { target } => RecordChild::Symlink {
+            name,
+            target: target.to_owned(),
+        },
+    }
 }
 
 impl TreeStore {
@@ -174,10 +228,10 @@ impl TreeStore {
         snapshot: &Snapshot,
         digest: &TreeDigest,
     ) -> Result<TreeRecord, ReadError> {
-        let held = snapshot
-            .closure
-            .iter()
-            .find_map(|tree| tree.records.get(digest).map(|place| (tree, *place)));
+        let held = snapshot.closure.iter().find_map(|tree| match &tree.content {
+            Content::Records { records, .. } => records.get(digest).map(|place| (tree, *place)),
+            Content::Image(_) => None,
+        });
         let (tree, place) =
             held.ok_or_else(|| ReadError::Corrupt(format!("record {digest} is missing")))?;
         let path = super::files::tree_dir(&self.shared.root, &tree.root).join(RECORDS);
@@ -223,6 +277,28 @@ impl TreeStore {
     /// [`ReadError`].
     pub fn resolve(&self, id: &PlacementId, path: &str) -> Result<Resolved, ReadError> {
         let snapshot = self.snapshot(id)?;
+        if let Some(image) = snapshot.image() {
+            return Ok(match image_entry(image, path)?.kind {
+                ImageKind::Dir { mode, children } => Resolved::Dir {
+                    mode,
+                    entries: children.len(),
+                },
+                ImageKind::File {
+                    mode,
+                    size,
+                    sha256,
+                    span,
+                } => Resolved::File {
+                    mode,
+                    size,
+                    sha256,
+                    span: image_span(span),
+                },
+                ImageKind::Symlink { target } => Resolved::Symlink {
+                    target: target.to_owned(),
+                },
+            });
+        }
         Ok(match self.walk(&snapshot, path)? {
             Node::Dir(record) => Resolved::Dir {
                 mode: record.mode(),
@@ -248,14 +324,17 @@ impl TreeStore {
         if size == 0 {
             return Ok(None);
         }
-        let found = snapshot.closure.iter().find_map(|tree| {
-            let source: &Source = tree.sources.files.get(sha256.as_bytes())?;
-            Some((tree, source))
+        let found = snapshot.closure.iter().find_map(|tree| match &tree.content {
+            Content::Records { sources, .. } => {
+                let source: &Source = sources.files.get(sha256.as_bytes())?;
+                Some((sources, source))
+            }
+            Content::Image(_) => None,
         });
-        let (tree, source) =
+        let (sources, source) =
             found.ok_or_else(|| ReadError::Corrupt(format!("no source for {sha256}")))?;
         Ok(Some(FileSpan {
-            pack: tree.sources.packs[source.pack as usize].clone(),
+            pack: sources.packs[source.pack as usize].clone(),
             offset: source.offset,
         }))
     }
@@ -266,6 +345,25 @@ impl TreeStore {
     /// [`ReadError`].
     pub fn stat(&self, id: &PlacementId, path: &str) -> Result<Stat, ReadError> {
         let snapshot = self.snapshot(id)?;
+        if let Some(image) = snapshot.image() {
+            return Ok(match image_entry(image, path)?.kind {
+                ImageKind::Dir { mode, .. } => Stat {
+                    kind: Kind::Dir,
+                    size: 0,
+                    mode,
+                },
+                ImageKind::File { mode, size, .. } => Stat {
+                    kind: Kind::File,
+                    size,
+                    mode,
+                },
+                ImageKind::Symlink { target } => Stat {
+                    kind: Kind::Symlink,
+                    size: target.len() as u64,
+                    mode: Mode::SYMLINK,
+                },
+            });
+        }
         Ok(match self.walk(&snapshot, path)? {
             Node::Dir(record) => Stat {
                 kind: Kind::Dir,
@@ -298,6 +396,9 @@ impl TreeStore {
         limit: usize,
     ) -> Result<Listing, ReadError> {
         let snapshot = self.snapshot(id)?;
+        if let Some(image) = snapshot.image() {
+            return image_list(image, path, after, limit);
+        }
         let Node::Dir(record) = self.walk(&snapshot, path)? else {
             return Err(ReadError::NotADirectory);
         };
@@ -313,4 +414,29 @@ impl TreeStore {
             next,
         })
     }
+}
+
+/// [`TreeStore::list`] of the directory `path` of `image`.
+fn image_list(
+    image: &TreeImage,
+    path: &str,
+    after: Option<&str>,
+    limit: usize,
+) -> Result<Listing, ReadError> {
+    let dir = image_entry(image, path)?;
+    let ImageKind::Dir { children, .. } = dir.kind else {
+        return Err(ReadError::NotADirectory);
+    };
+    let rest = after.map_or(children, |after| image.children_after(dir.index, after));
+    let take = rest.len().min(limit.max(1));
+    let page = rest.start..rest.start + take as u32;
+    let entries: Vec<RecordChild> = page
+        .clone()
+        .filter_map(|index| image.entry(index))
+        .map(image_child)
+        .collect();
+    let next = (page.end < rest.end)
+        .then(|| entries.last().map(|last| last.name().to_owned()))
+        .flatten();
+    Ok(Listing { entries, next })
 }

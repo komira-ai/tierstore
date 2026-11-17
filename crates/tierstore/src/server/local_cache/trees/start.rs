@@ -3,7 +3,9 @@
 //!
 //! A tree is kept only if its records file reads and every record hashes to the digest it is
 //! named by, its root among them, its sources file reads, every tree it holds by digest is kept
-//! and, if it was ready, the cache still holds every range of its files. A placement is kept only
+//! and, if it was ready, the cache still holds every range of its files. A tree that is an image
+//! is kept only if its image hashes to the digest it is named by and is a version 2 tree list
+//! whose every entry checks, and, if it was ready, the cache still holds every file's span. A placement is kept only
 //! if its file reads, it is named by the id of what it holds, its tree is kept, its lease has not
 //! ended and no location of it meets one kept before (in the order of the ids). A tree no kept
 //! placement reaches is dropped. The holder of the lock removes what it drops; a cache that holds
@@ -17,12 +19,13 @@ use std::sync::atomic::AtomicBool;
 
 use super::TreeStore;
 use super::files::{
-    At, PlacementFile, READY, RECORDS, SOURCES, STAGING, Sources, parse_records, placement_file,
-    placements_dir, tree_dir, trees_dir,
+    At, IMAGE, PlacementFile, READY, RECORDS, SOURCES, STAGING, Sources, parse_records,
+    placement_file, placements_dir, tree_dir, trees_dir,
 };
 use super::location::{Location, PlacementId, meets};
-use super::state::{Placement, Shared, State, TreeInfo};
-use crate::{RecordChild, TreeDigest, TreeRecord};
+use super::state::{Content, Placement, Shared, State, TreeInfo};
+use crate::tree_image::ImageKind;
+use crate::{RecordChild, TreeDigest, TreeImage, TreeRecord};
 
 /// The entries of the directory `dir`, by name: none if it is not there.
 fn entries(dir: &Path) -> Vec<(String, std::path::PathBuf)> {
@@ -67,13 +70,18 @@ pub(super) fn discard(owned: bool, path: &Path) {
 struct Read {
     root: TreeDigest,
     children: Vec<TreeDigest>,
-    records: HashMap<TreeDigest, super::files::Place>,
-    sources: Sources,
+    content: Content,
     ready: bool,
 }
 
 /// Reads the directory of the tree `root`, or says why it is not a tree.
 fn read_tree(dir: &Path, root: TreeDigest) -> Result<Read, String> {
+    let ready = dir.join(READY).exists();
+    match std::fs::read(dir.join(IMAGE)) {
+        Ok(bytes) => return read_image(bytes, root, ready),
+        Err(why) if why.kind() != io::ErrorKind::NotFound => return Err(format!("image: {why}")),
+        Err(_) => {}
+    }
     let bytes = std::fs::read(dir.join(RECORDS)).map_err(|why| format!("records: {why}"))?;
     let index = parse_records(&bytes).map_err(|why| format!("records: {why}"))?;
     let mut records = HashMap::new();
@@ -107,9 +115,22 @@ fn read_tree(dir: &Path, root: TreeDigest) -> Result<Read, String> {
     Ok(Read {
         root,
         children,
-        records,
-        sources,
-        ready: dir.join(READY).exists(),
+        content: Content::Records { records, sources },
+        ready,
+    })
+}
+
+/// The tree `root` whose directory holds the image `bytes`.
+fn read_image(bytes: Vec<u8>, root: TreeDigest, ready: bool) -> Result<Read, String> {
+    if TreeDigest::of(&bytes) != root {
+        return Err("the image does not hash to its name".to_owned());
+    }
+    let image = TreeImage::checked(bytes.into()).map_err(|why| format!("image: {why}"))?;
+    Ok(Read {
+        root,
+        children: Vec::new(),
+        content: Content::Image(Arc::new(image)),
+        ready,
     })
 }
 
@@ -140,12 +161,24 @@ struct Kept {
 impl Shared {
     /// Whether the cache holds every range of the files of `tree`.
     fn holds_all(&self, tree: &Read) -> bool {
-        tree.sources.files.values().all(|source| {
-            let pack = &tree.sources.packs[source.pack as usize];
-            self.cache
-                .span_of(pack, source.offset, source.size)
-                .is_some()
-        })
+        match &tree.content {
+            Content::Records { sources, .. } => sources.files.values().all(|source| {
+                let pack = &sources.packs[source.pack as usize];
+                self.cache
+                    .span_of(pack, source.offset, source.size)
+                    .is_some()
+            }),
+            Content::Image(image) => (0..image.len() as u32)
+                .filter_map(|index| image.entry(index))
+                .all(|entry| match entry.kind {
+                    ImageKind::File {
+                        size,
+                        span: Some((key, offset)),
+                        ..
+                    } => self.cache.span_of(key, offset, size).is_some(),
+                    _ => true,
+                }),
+        }
     }
 
     /// Reads the directory and checks it (see the module docs).
@@ -211,8 +244,7 @@ impl Shared {
             let info = TreeInfo {
                 root,
                 closure: closures[&root].clone(),
-                records: tree.records,
-                sources: tree.sources,
+                content: tree.content,
                 ready: AtomicBool::new(tree.ready),
             };
             state.trees.insert(root, Arc::new(info));

@@ -8,12 +8,12 @@ use std::time::Duration;
 use super::super::PinAnswer;
 use super::TreeStore;
 use super::files::{
-    At, Place, PlacementFile, READY, RECORDS, SOURCES, STAGING, Source, Sources, encode_records,
+    At, IMAGE, PlacementFile, READY, RECORDS, SOURCES, STAGING, Source, Sources, encode_records,
     placement_file, tree_dir, trees_dir, write_new,
 };
 use super::location::{Location, Meets, PlacementId, Table, meets};
-use super::state::{Placement, Shared, TreeInfo, closure};
-use crate::{BuiltFile, BuiltTree, RecordChild, TreeDigest};
+use super::state::{Content, Placement, Shared, TreeInfo, closure};
+use crate::{BuiltFile, BuiltTree, RecordChild, TreeDigest, TreeImage};
 
 /// What [`TreeStore::create`] makes a tree and a placement of.
 #[derive(Debug)]
@@ -24,6 +24,24 @@ pub struct CreateRequest {
     pub at: Vec<Location>,
     /// How long the placement lasts after this create; none is `trees.ttl`. A longer one than
     /// `trees.ttl_max` is taken as that.
+    pub ttl: Option<Duration>,
+    /// Whether every range of the tree's files is in the cache already, as the caller has seen.
+    pub ready: bool,
+}
+
+/// What [`TreeStore::create_image`] makes a tree and a placement of: a tree served straight from
+/// its version 2 tree list.
+#[derive(Debug)]
+pub struct ImageRequest {
+    /// The tree list, opened and walked.
+    pub image: Arc<TreeImage>,
+    /// The SHA-256 of the image's bytes, which names the tree. The caller has checked it: the
+    /// mount provider, against the key the list is stored under, on a thread of its own while it
+    /// walks the list. The store does not hash the image again.
+    pub digest: TreeDigest,
+    /// Where the tree appears: at least one location.
+    pub at: Vec<Location>,
+    /// How long the placement lasts after this create, as [`CreateRequest::ttl`].
     pub ttl: Option<Duration>,
     /// Whether every range of the tree's files is in the cache already, as the caller has seen.
     pub ready: bool,
@@ -43,7 +61,8 @@ pub struct Created {
     pub new_tree: bool,
     /// When the lease ends, in milliseconds since the Unix epoch.
     pub expires_ms: u64,
-    /// The files of the entries of the request (not of the trees it holds by digest).
+    /// The files of the entries of the request (not of the trees it holds by digest), of any
+    /// size.
     pub files: u64,
     /// Their bytes.
     pub bytes: u64,
@@ -72,7 +91,8 @@ pub enum CreateError {
     /// A location is inside, or around, another of the request or of a placement.
     #[error("location overlaps: {0}")]
     Overlaps(Location),
-    /// The tree holds a tree by digest that this node does not have.
+    /// The tree holds a tree by digest that this node does not have, or has only as an image
+    /// (which has no records to hold).
     #[error("unknown child tree {0}")]
     UnknownChild(TreeDigest),
     /// The files of the tree are more bytes than `trees.max_bytes`.
@@ -136,6 +156,50 @@ fn children_of(built: &BuiltTree) -> Vec<TreeDigest> {
     children
 }
 
+/// A tree a create makes, if the node does not have it.
+enum NewTree {
+    /// Records and files, as [`build_tree`](crate::build_tree) made them, and the sources of
+    /// the files.
+    Built(BuiltTree, Sources),
+    /// A version 2 tree list, named by the SHA-256 of its bytes.
+    Image {
+        digest: TreeDigest,
+        image: Arc<TreeImage>,
+    },
+}
+
+impl NewTree {
+    /// The digest that names the tree.
+    fn root(&self) -> TreeDigest {
+        match self {
+            Self::Built(built, _) => built.root,
+            Self::Image { digest, .. } => *digest,
+        }
+    }
+
+    /// The number of the files and their bytes together.
+    fn files(&self) -> (u64, u64) {
+        match self {
+            Self::Built(built, _) => {
+                let bytes = built
+                    .files
+                    .iter()
+                    .fold(0u64, |total, file| total.saturating_add(file.size));
+                (built.files.len() as u64, bytes)
+            }
+            Self::Image { image, .. } => (image.files(), image.file_bytes()),
+        }
+    }
+
+    /// The number of the packs the files are read from.
+    fn packs(&self) -> usize {
+        match self {
+            Self::Built(_, sources) => sources.packs.len(),
+            Self::Image { image, .. } => image.keys().len(),
+        }
+    }
+}
+
 /// The first of the locations whose key meets another's, or a placement's in `table`.
 fn clash(table: &Table, at: &[Location]) -> Option<CreateError> {
     let mut own = Table::new();
@@ -164,31 +228,48 @@ fn millis(ttl: Duration) -> u64 {
 }
 
 impl Shared {
-    /// Writes the directory of a new tree under a staging name and renames it to its own; gives
-    /// where each of its records is in the records file.
+    /// Writes the directory of a new tree, its `files` and its `ready` marker if `ready`, under a
+    /// staging name, and renames it to its own.
     fn write_tree(
         &self,
-        built: &BuiltTree,
-        sources: &Sources,
+        root: &TreeDigest,
+        files: &[(&str, &[u8])],
         ready: bool,
-    ) -> Result<Vec<(TreeDigest, Place)>, CreateError> {
+    ) -> Result<(), CreateError> {
         let number = self.staged.fetch_add(1, Ordering::Relaxed);
         let staging = trees_dir(&self.root).join(format!("{STAGING}{number}"));
-        let (records, places) = encode_records(&built.records);
         let written = (|| {
             std::fs::create_dir_all(&staging)?;
-            std::fs::write(staging.join(RECORDS), records)?;
-            std::fs::write(staging.join(SOURCES), sources.encode())?;
+            for (name, bytes) in files {
+                std::fs::write(staging.join(name), bytes)?;
+            }
             if ready {
                 std::fs::write(staging.join(READY), b"")?;
             }
-            std::fs::rename(&staging, tree_dir(&self.root, &built.root))
+            std::fs::rename(&staging, tree_dir(&self.root, root))
         })();
-        match written {
-            Ok(()) => Ok(places),
-            Err(why) => {
-                let _ = std::fs::remove_dir_all(&staging);
-                Err(io_error(&why))
+        written.map_err(|why| {
+            let _ = std::fs::remove_dir_all(&staging);
+            io_error(&why)
+        })
+    }
+
+    /// Writes the directory of the new tree `tree` and gives what the store keeps of it.
+    fn write_new_tree(&self, tree: NewTree, ready: bool) -> Result<Content, CreateError> {
+        let root = tree.root();
+        match tree {
+            NewTree::Built(built, sources) => {
+                let (records, places) = encode_records(&built.records);
+                let files = [(RECORDS, &records[..]), (SOURCES, &sources.encode()[..])];
+                self.write_tree(&root, &files, ready)?;
+                Ok(Content::Records {
+                    records: places.into_iter().collect(),
+                    sources,
+                })
+            }
+            NewTree::Image { image, .. } => {
+                self.write_tree(&root, &[(IMAGE, &image.bytes()[..])], ready)?;
+                Ok(Content::Image(image))
             }
         }
     }
@@ -216,29 +297,57 @@ impl TreeStore {
     /// # Errors
     /// See [`CreateError`]; nothing is made when one is given.
     pub fn create(&self, request: CreateRequest) -> Result<Created, CreateError> {
-        let shared = &self.shared;
-        let config = &shared.config;
-        if !config.enabled {
-            return Err(CreateError::Disabled);
-        }
         let CreateRequest {
             built,
             at,
             ttl,
             ready,
         } = request;
+        let sources = sources_of(&built.files);
+        self.make(NewTree::Built(built, sources), at, ttl, ready)
+    }
+
+    /// Makes the tree of the version 2 tree list of `request` and places it at its locations, as
+    /// [`TreeStore::create`] does: the tree is named by the digest of the request and is the list
+    /// itself, written to the tree's directory as it is (`image`) and read in place; it has no
+    /// directory records and holds no tree by digest.
+    ///
+    /// # Errors
+    /// As [`TreeStore::create`].
+    pub fn create_image(&self, request: ImageRequest) -> Result<Created, CreateError> {
+        let ImageRequest {
+            image,
+            digest,
+            at,
+            ttl,
+            ready,
+        } = request;
+        self.make(NewTree::Image { digest, image }, at, ttl, ready)
+    }
+
+    /// Makes `tree`, if the node does not have it, and places it at `at`.
+    fn make(
+        &self,
+        tree: NewTree,
+        at: Vec<Location>,
+        ttl: Option<Duration>,
+        ready: bool,
+    ) -> Result<Created, CreateError> {
+        let shared = &self.shared;
+        let config = &shared.config;
+        if !config.enabled {
+            return Err(CreateError::Disabled);
+        }
         if at.is_empty() {
             return Err(CreateError::NoLocation);
         }
-        let bytes = built
-            .files
-            .iter()
-            .fold(0u64, |total, file| total.saturating_add(file.size));
+        let (files, bytes) = tree.files();
         if bytes > config.max_bytes {
             let max = config.max_bytes;
             return Err(CreateError::TooLarge { bytes, max });
         }
-        let id = PlacementId::of(&built.root, &at);
+        let root = tree.root();
+        let id = PlacementId::of(&root, &at);
         let mut guard = shared.lock();
         let state = &mut *guard;
         if !shared.writable(state) {
@@ -246,25 +355,31 @@ impl TreeStore {
         }
         let now = shared.now();
         shared.purge(state, now);
-        let children = children_of(&built);
-        if let Some(missing) = children
-            .iter()
-            .find(|child| !state.trees.contains_key(child))
-        {
+        let children = match &tree {
+            NewTree::Built(built, _) => children_of(built),
+            NewTree::Image { .. } => Vec::new(),
+        };
+        // A tree is held by its records: an image has none to hold.
+        let held = |child: &TreeDigest| {
+            state
+                .trees
+                .get(child)
+                .is_some_and(|info| info.image().is_none())
+        };
+        if let Some(missing) = children.iter().find(|child| !held(child)) {
             return Err(CreateError::UnknownChild(*missing));
         }
         let ttl = ttl.unwrap_or(config.ttl).min(config.ttl_max);
         let expires_ms = now.saturating_add(millis(ttl));
-        let sources = sources_of(&built.files);
         let summary = Created {
-            tree: built.root,
+            tree: root,
             placement: id.clone(),
             created: true,
             new_tree: false,
             expires_ms,
-            files: built.files.len() as u64,
+            files,
             bytes,
-            packs: sources.packs.len(),
+            packs: tree.packs(),
             pins: PinAnswer::default(),
         };
         if let Some(placement) = state.placements.get_mut(&id).filter(|p| !p.released) {
@@ -273,7 +388,7 @@ impl TreeStore {
             shared.write_placement(placement)?;
             state
                 .trees
-                .get(&built.root)
+                .get(&root)
                 .into_iter()
                 .for_each(|info| self.set_ready(info, ready));
             return Ok(Created {
@@ -293,7 +408,7 @@ impl TreeStore {
         });
         let placement = Placement {
             id: id.clone(),
-            tree: built.root,
+            tree: root,
             locations: at,
             created_ms,
             expires_ms,
@@ -301,23 +416,22 @@ impl TreeStore {
             attachments,
             reads,
         };
-        let new_tree = !state.trees.contains_key(&built.root);
+        let new_tree = !state.trees.contains_key(&root);
         let mut pins = PinAnswer::default();
         if new_tree {
-            let places = shared.write_tree(&built, &sources, ready)?;
+            let content = shared.write_new_tree(tree, ready)?;
             let info = TreeInfo {
-                root: built.root,
-                closure: closure(&state.trees, built.root, &children),
-                records: places.into_iter().collect(),
-                sources,
+                root,
+                closure: closure(&state.trees, root, &children),
+                content,
                 ready: AtomicBool::new(ready),
             };
             pins = shared.pin(&info);
-            state.trees.insert(built.root, Arc::new(info));
+            state.trees.insert(root, Arc::new(info));
         } else {
             state
                 .trees
-                .get(&built.root)
+                .get(&root)
                 .into_iter()
                 .for_each(|info| self.set_ready(info, ready));
         }

@@ -28,24 +28,46 @@ pub struct ListSpan {
     pub sha256: TreeDigest,
 }
 
+/// Which spans a walk hands out.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub(crate) enum Spans {
+    /// One for each digest, its first file's: the span the tree store keeps for a digest of a
+    /// tree of records.
+    PerDigest,
+    /// One for each distinct span of a digest: a tree served from its list reads each file at
+    /// its own span, so every span a file has is read once.
+    PerSpan,
+    /// None: the list is only checked.
+    None,
+}
+
+/// What a walk counted.
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
+pub(crate) struct Walked {
+    /// The files, of any size.
+    pub files: u64,
+    /// Their bytes together, at most `u64::MAX`.
+    pub bytes: u64,
+}
+
 /// The fields of one 32-byte entry record.
 #[derive(Clone, Copy)]
-struct Record {
-    parent: u32,
-    name_off: u32,
+pub(crate) struct Record {
+    pub(crate) parent: u32,
+    pub(crate) name_off: u32,
     /// A file's key index, a directory's first child.
-    x: u32,
-    kind: u8,
+    pub(crate) x: u32,
+    pub(crate) kind: u8,
     mode: u16,
-    name_len: u8,
+    pub(crate) name_len: u8,
     /// A file's offset, a directory's child count, a link target's offset.
-    a: u64,
+    pub(crate) a: u64,
     /// A file's size, a link target's length.
-    b: u64,
+    pub(crate) b: u64,
 }
 
 impl Record {
-    fn of(bytes: &[u8]) -> Self {
+    pub(crate) fn of(bytes: &[u8]) -> Self {
         let kind_mode = le_u16(bytes, 12);
         Self {
             parent: le_u32(bytes, 0),
@@ -60,7 +82,7 @@ impl Record {
     }
 
     /// The mode: twelve bits are never above 07777.
-    fn mode(self) -> Mode {
+    pub(crate) fn mode(self) -> Mode {
         Mode::new(self.mode).unwrap_or(Mode::FILE)
     }
 }
@@ -109,8 +131,23 @@ impl<'a> TreeListV2<'a> {
     pub fn build(
         &self,
         limits: &TreeLimits,
-        mut on_span: impl FnMut(ListSpan),
+        on_span: impl FnMut(ListSpan),
     ) -> Result<BuiltTree, TreeListV2Error> {
+        self.walk(limits, Spans::PerDigest, on_span)?;
+        Ok(self.finish())
+    }
+
+    /// The walk of [`build`](Self::build), with no tree made: checks every entry, calls `on_span`
+    /// with the spans `spans` asks for as it meets them, and counts the files and their bytes.
+    /// A list it accepts is one whose entries may be read in place: every directory's children
+    /// are the entries `first..first + count`, sorted by name, and every name, target, key index
+    /// and range is within the list.
+    pub(crate) fn walk(
+        &self,
+        limits: &TreeLimits,
+        spans: Spans,
+        mut on_span: impl FnMut(ListSpan),
+    ) -> Result<Walked, TreeListV2Error> {
         let count = self.len();
         let refuse = |error| Err(TreeListV2Error::Tree(error));
         if (count - 1) as u64 > limits.max_entries {
@@ -126,6 +163,7 @@ impl<'a> TreeListV2<'a> {
         // The depth and the path length of each entry, set as its directory is walked.
         let mut depths = vec![(0u32, 0u32); count];
         let mut spanned = HashSet::new();
+        let mut walked = Walked::default();
         // The bytes of every path together: names are shared, so a small object could name far
         // more path bytes than it holds, which `finish` makes into strings.
         let mut path_bytes = 0usize;
@@ -167,23 +205,34 @@ impl<'a> TreeListV2<'a> {
                     return refuse(RecordError::TooDeep(self.path(child)));
                 }
                 let record = self.record(child);
-                if record.kind == KIND_FILE && record.b > 0 {
-                    let digest = self.digest(child);
-                    if spanned.insert(digest) {
-                        on_span(ListSpan {
-                            key: self.keys[record.x as usize].clone(),
-                            offset: record.a,
-                            size: record.b,
-                            sha256: TreeDigest::from_bytes(digest),
-                        });
-                    }
+                if record.kind != KIND_FILE {
+                    continue;
+                }
+                walked.files += 1;
+                walked.bytes = walked.bytes.saturating_add(record.b);
+                if record.b == 0 {
+                    continue;
+                }
+                let digest = self.digest(child);
+                let new = match spans {
+                    Spans::PerDigest => spanned.insert((digest, 0, 0)),
+                    Spans::PerSpan => spanned.insert((digest, record.x, record.a)),
+                    Spans::None => false,
+                };
+                if new {
+                    on_span(ListSpan {
+                        key: self.keys[record.x as usize].clone(),
+                        offset: record.a,
+                        size: record.b,
+                        sha256: TreeDigest::from_bytes(digest),
+                    });
                 }
             }
         }
         if next != count {
             return Err(TreeListV2Error::Orphans(next as u32));
         }
-        Ok(self.finish())
+        Ok(walked)
     }
 
     /// Checks entry `child` of directory `dir`, whose name must sort after `previous`.

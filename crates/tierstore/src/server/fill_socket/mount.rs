@@ -5,6 +5,7 @@
 //! place <mount> <path>     tree <placement> | dir | none
 //! mounted                  ["<path>", ...]                         (one line of JSON)
 //! flat <placement>         {"paths": [...], "packs": [...], "entries": [...]} | none | damaged | too large
+//! image <placement>        image <tree> ["<path>", ...] | {"paths": ...} (as flat) | none | damaged | too large
 //! span <sha256> <size> from <pack> @ <offset>
 //!                          ok <offset> <file> | why not | none
 //! unplace <mount> <placement>   ok
@@ -20,14 +21,19 @@
 //! and the words of the cache's fill of a range (`fill: upstream 404`, `fill: mismatch`, ...), or
 //! that the range was gone once filled. `places-live` ends the holds of the mount on every
 //! placement it does not list: a mount that starts sends it, so that holds a process before it
-//! left are not kept. `flat` reads the tree's records on a blocking thread.
+//! left are not kept. `flat` reads the tree's records on a blocking thread. `image` answers, for a
+//! tree that is a version 2 tree list, `image`, the tree's digest and the paths of the
+//! placement's fs locations (one line of JSON): the mount reads the image from the tree's
+//! directory in the cache directory, `trees/<tree>/image`, and the placement it holds keeps it
+//! there. For a tree of records it answers what `flat` does. A node of the release before
+//! answers it `refused unknown request`, and the mount asks `flat` instead.
 //!
 //! A node with no tree store (no `[trees]`, or `trees.enabled = false`) has no placement: `place`
-//! is `none`, `mounted` an empty list, `flat` and `span` are `none`, `unplace` is `ok` and
+//! is `none`, `mounted` an empty list, `flat`, `image` and `span` are `none`, `unplace` is `ok` and
 //! `places-live` is `ok 0`.
 
 use crate::server::local_cache::trees::{
-    FileSpan, FlatError, FlatTree, MountPlace, ReadError, TreeStore,
+    FileSpan, FlatError, FlatTree, MountPlace, MountTree, ReadError, TreeStore,
 };
 
 use super::request::MountRequest;
@@ -57,6 +63,16 @@ pub(super) async fn answer(trees: Option<&TreeStore>, request: MountRequest) -> 
             let store = trees.clone();
             let flat = tokio::task::spawn_blocking(move || store.flat(&placement)).await;
             flat.map_or_else(|_| "damaged".to_owned(), |flat| flat_answer(&flat))
+        }
+        MountRequest::Image { placement } => {
+            let store = trees.clone();
+            let tree = tokio::task::spawn_blocking(move || store.mount_tree(&placement)).await;
+            match tree {
+                Ok(Ok(MountTree::Image { tree, paths })) => format!("image {tree} {}", json(&paths)),
+                Ok(Ok(MountTree::Flat(flat))) => json(&flat),
+                Ok(Err(why)) => flat_answer(&Err(why)),
+                Err(_) => "damaged".to_owned(),
+            }
         }
         MountRequest::Span {
             sha256,

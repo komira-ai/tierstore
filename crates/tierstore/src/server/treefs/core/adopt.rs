@@ -118,7 +118,7 @@ impl Core {
             } => Ok(Handle::Cached(self.blob(
                 &loaded,
                 number,
-                entry,
+                &entry,
                 (digest, *size, source.as_ref()),
             )?)),
             _ => Err(Errno::Inval),

@@ -91,7 +91,7 @@ fn a_well_formed_flat_tree_becomes_a_tree_with_modes_and_its_location() {
         r#"{{"parent":1,"name":"f","mode":493,"kind":"file","size":5,"sha256":"{HEX}","pack":1,"offset":7}}"#
     );
     let tree = tree_of(&flat_with(&last), "a/b".to_owned()).unwrap();
-    assert_eq!(tree.entries().len(), 3);
+    assert_eq!(tree.len(), 3);
     assert_eq!(tree.location(), Some("a/b"));
     assert_eq!(
         [tree.mode(0), tree.mode(1), tree.mode(2), tree.mode(3)],
@@ -99,8 +99,8 @@ fn a_well_formed_flat_tree_becomes_a_tree_with_modes_and_its_location() {
     );
     assert_eq!(tree.child(0, "d"), Some(1));
     assert_eq!(tree.child(1, "f"), Some(2));
-    assert!(matches!(tree.at(0).kind, EntryKind::Dir { .. }));
-    match &tree.at(2).kind {
+    assert!(matches!(tree.entry(0).unwrap().kind, EntryKind::Dir { .. }));
+    match &tree.entry(2).unwrap().kind {
         EntryKind::File {
             digest,
             size,
@@ -128,7 +128,7 @@ fn files_without_exec_bits_empty_files_and_links_are_read_as_they_are() {
     ));
     let tree = tree_of(&flat, "a/b".to_owned()).unwrap();
     assert!(matches!(
-        tree.at(1).kind,
+        tree.entry(1).unwrap().kind,
         EntryKind::File {
             size: 0,
             exec: false,
@@ -136,9 +136,9 @@ fn files_without_exec_bits_empty_files_and_links_are_read_as_they_are() {
             ..
         }
     ));
-    assert!(matches!(&tree.at(2).kind, EntryKind::Symlink { target } if &**target == "e"));
+    assert!(matches!(&tree.entry(2).unwrap().kind, EntryKind::Symlink { target } if &**target == "e"));
     assert!(matches!(
-        tree.at(3).kind,
+        tree.entry(3).unwrap().kind,
         EntryKind::File {
             exec: false,
             source: Some(_),
