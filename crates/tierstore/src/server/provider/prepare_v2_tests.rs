@@ -11,7 +11,7 @@ use tokio::sync::watch;
 use super::names::SourceId;
 use super::prepare::{Job, run};
 use super::sources::Stage;
-use super::testing::{AGENT, READ_ONLY, Rig, list_of, member};
+use super::testing::{AGENT, Rig, list_of, member};
 use crate::server::local_cache::trees::TreesConfig;
 use crate::{BlobSource, ListEntry, ListKind, Mode, Op, TreeDigest, TreeList, tree_list_digest};
 
@@ -76,15 +76,24 @@ fn list_of_missing_pack(rig: &Rig) -> TreeList {
     }
 }
 
-/// The offset in a version 2 list's header of the number of the version.
+/// The offset in a version 2 list's header of the major version.
 const VERSION_AT: usize = 8;
-/// The offset in a version 2 list's header of where the records begin.
-const RECORDS_AT: usize = 36;
+/// The offset in a version 2 list's header of the entries section's offset, then its count.
+const ENTRIES_AT: usize = 16;
 
-/// The record at `index` of `bytes`, from the header's start of the records, 64 bytes each.
-fn record_at(bytes: &[u8], index: usize) -> usize {
-    let start = u32::from_le_bytes(bytes[RECORDS_AT..RECORDS_AT + 4].try_into().unwrap());
-    start as usize + index * 64
+/// The number of entries in a version 2 list.
+fn entry_count(bytes: &[u8]) -> usize {
+    u32::from_le_bytes(bytes[ENTRIES_AT + 4..ENTRIES_AT + 8].try_into().unwrap()) as usize
+}
+
+/// Sets the kind of the entry `index` of `bytes` to an unknown one (3), keeping its mode: the kind
+/// is the top four bits of the u16 at byte 12 of the 32-byte record.
+fn break_entry(bytes: &mut [u8], index: usize) {
+    let start = u32::from_le_bytes(bytes[ENTRIES_AT..ENTRIES_AT + 4].try_into().unwrap()) as usize;
+    let at = start + index * 32 + 12;
+    let kind_mode = u16::from_le_bytes(bytes[at..at + 2].try_into().unwrap());
+    let broken = (3 << 12) | (kind_mode & 0x0fff);
+    bytes[at..at + 2].copy_from_slice(&broken.to_le_bytes());
 }
 
 /// Asserts that a version 2 list run to its end leaves the source placed, every file's span read
@@ -112,11 +121,11 @@ async fn a_v2_list_run_to_its_end_places_the_tree_of_the_v1_list_and_reads_every
 }
 
 /// Asserts that a version 2 list whose bytes do not hash to the digest the job names is refused
-/// with the message that names both digests, before any span is read and before any tree is
-/// placed. The cache checks a `cas/l/` object against its key as it reads it, so the job here is
+/// with the message that names both digests and is not placed (the hash gates the placement, not
+/// the reads). The cache checks a `cas/l/` object against its key as it reads it, so the job here is
 /// one whose digest is not its key's: the check of the preparation itself.
 #[tokio::test]
-async fn a_v2_list_that_does_not_hash_to_its_digest_is_refused_and_reads_nothing() {
+async fn a_v2_list_that_does_not_hash_to_its_digest_is_refused_and_not_placed() {
     let rig = Rig::new("prov-v2-digest").await;
     let bytes = v2_bytes(&rig);
     let key = rig.put_bytes(&bytes).await;
@@ -131,26 +140,6 @@ async fn a_v2_list_that_does_not_hash_to_its_digest_is_refused_and_reads_nothing
             "tree list digest mismatch: expected {expected}, the bytes hash to {actual}"
         ))
     );
-    assert_eq!(pack_reads(&rig), 0);
-    assert!(rig.bench.store.mount_paths().is_empty());
-}
-
-/// Asserts that a version 2 list with a record of an unknown kind is refused with the reader's
-/// message naming the record, and that no tree is placed.
-#[tokio::test]
-async fn a_v2_list_with_a_bad_record_is_refused_and_not_placed() {
-    let rig = Rig::new("prov-v2-record").await;
-    let mut bytes = v2_bytes(&rig);
-    let at = record_at(&bytes, 0);
-    bytes[at] = 9;
-    let key = rig.put_bytes(&bytes).await;
-    let (job, seen) = held(&rig, "js.1", &key);
-    run(Arc::clone(&rig.provider.shared), job).await;
-    assert_eq!(
-        *seen.borrow(),
-        Stage::Refused("tree list record 0: unknown kind 9".to_owned())
-    );
-    assert_eq!(pack_reads(&rig), 0);
     assert!(rig.bench.store.mount_paths().is_empty());
     assert!(
         rig.bench
@@ -160,25 +149,70 @@ async fn a_v2_list_with_a_bad_record_is_refused_and_not_placed() {
     );
 }
 
-/// Asserts that a version 2 list refused after some of its spans were queued (a bad record among
-/// the files) is refused with the reader's message and has no placement: the reads it started are
-/// the only cost.
+/// Asserts that a version 2 list with an entry of kind 3 is refused with the reader's message
+/// naming the entry, and that no tree is placed.
 #[tokio::test]
-async fn a_v2_list_with_a_bad_file_record_after_its_first_spans_is_not_placed() {
-    let rig = Rig::new("prov-v2-late-record").await;
+async fn a_v2_list_with_a_bad_entry_is_refused_and_not_placed() {
+    let rig = Rig::new("prov-v2-record").await;
     let mut bytes = v2_bytes(&rig);
-    // The last record is the file of size 0: a kind below the one before it is out of order.
-    let count = u32::from_le_bytes(bytes[20..24].try_into().unwrap()) as usize;
-    let at = record_at(&bytes, count - 1);
-    bytes[at] = 1;
+    break_entry(&mut bytes, 1);
     let key = rig.put_bytes(&bytes).await;
     let (job, seen) = held(&rig, "js.1", &key);
     run(Arc::clone(&rig.provider.shared), job).await;
     assert_eq!(
         *seen.borrow(),
+        Stage::Refused("tree list entry 1: unknown kind 3".to_owned())
+    );
+    assert!(rig.bench.store.mount_paths().is_empty());
+    assert!(
+        rig.bench
+            .store
+            .locate_fs(&Rig::place_of("js.1", 0))
+            .is_none()
+    );
+}
+
+/// Asserts that a version 2 list with a bad entry after its first file spans (so spans were
+/// queued before the fault) is refused with the reader's message and has no placement.
+#[tokio::test]
+async fn a_v2_list_with_a_bad_entry_after_its_first_spans_is_not_placed() {
+    let rig = Rig::new("prov-v2-late-record").await;
+    let mut bytes = v2_bytes(&rig);
+    let last = entry_count(&bytes) - 1;
+    break_entry(&mut bytes, last);
+    let key = rig.put_bytes(&bytes).await;
+    let (job, seen) = held(&rig, "js.1", &key);
+    run(Arc::clone(&rig.provider.shared), job).await;
+    assert_eq!(
+        *seen.borrow(),
+        Stage::Refused(format!("tree list entry {last}: unknown kind 3"))
+    );
+    assert!(rig.bench.store.mount_paths().is_empty());
+    assert!(
+        rig.bench
+            .store
+            .locate_fs(&Rig::place_of("js.1", 0))
+            .is_none()
+    );
+}
+
+/// Asserts that a version 2 list with both a bad entry and bytes that do not hash to the job's
+/// digest reports the digest mismatch, not the entry.
+#[tokio::test]
+async fn a_v2_list_with_a_bad_entry_and_the_wrong_digest_reports_the_digest() {
+    let rig = Rig::new("prov-v2-both").await;
+    let mut bytes = v2_bytes(&rig);
+    break_entry(&mut bytes, 1);
+    let key = rig.put_bytes(&bytes).await;
+    let (mut job, seen) = held(&rig, "js.1", &key);
+    let expected = TreeDigest::of(b"other bytes");
+    job.digest = expected;
+    run(Arc::clone(&rig.provider.shared), job).await;
+    let actual = TreeDigest::of(&bytes);
+    assert_eq!(
+        *seen.borrow(),
         Stage::Refused(format!(
-            "tree list record {}: out of order: the directories come first, then the links, then the files",
-            count - 1
+            "tree list digest mismatch: expected {expected}, the bytes hash to {actual}"
         ))
     );
     assert!(rig.bench.store.mount_paths().is_empty());
@@ -293,9 +327,6 @@ async fn an_earlier_v2_preparation_leaves_a_later_ones_placement() {
             .locate_fs(&Rig::place_of("js.1", 0))
             .is_some()
     );
-    rig.provider
-        .prepare(super::testing::source("js.1", 0), &rig.key, READ_ONLY)
-        .unwrap();
 }
 
 /// Asserts that a version 2 list with a file of a pack that is not there leaves the tree placed,

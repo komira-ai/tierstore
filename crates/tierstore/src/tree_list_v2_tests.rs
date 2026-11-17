@@ -1,723 +1,701 @@
-//! The version 2 tree list: the reader's open and every fault it gives, the strings and limits it
-//! judges, the messages of its errors, and the bytes the writer makes and the tree they read as.
+//! The version 2 tree list reader's `open`: every refusal of the object, header, keys and ranges,
+//! the limits at their exact values, and the text of every error. The writer's tests are in
+//! `encode`.
 
-use crate::tree_list::{MAX_TARGET_BYTES, MAX_TREE_LIST_BYTES};
+use crate::tree_list::MAX_TREE_LIST_BYTES;
 use crate::tree_list_v2::{
-    HEADER_LEN, HeaderFault, KIND_DIR, KIND_FILE, MAX_KEY_BYTES, NONE, RECORD_LEN, RecordFault,
-    Section, StringFault, TREE_LIST_V2_MAGIC, Table, TreeListV2, TreeListV2Error, is_tree_list_v2,
-    le_u64, read_u32, valid_key, valid_name, valid_target,
+    EntryFault, HeaderFault, KeyFault, ListRange, MAX_KEY_BYTES, Section, TREE_LIST_V2_MAGIC,
+    TreeListV2, TreeListV2Error, is_tree_list_v2, le_u16, le_u32, le_u64,
 };
 use crate::tree_record::RecordError;
 
-// ---------------------------------------------------------------------------------------------
-// Hand-built objects
-// ---------------------------------------------------------------------------------------------
+mod encode;
 
-/// A string table of `strings`: the count, the ends, the bytes.
-fn table(strings: &[&[u8]]) -> Vec<u8> {
-    let mut ends = Vec::new();
-    let mut data = Vec::new();
-    for string in strings {
-        data.extend_from_slice(string);
-        ends.push(data.len() as u32);
-    }
-    table_raw(&ends, &data)
+/// Where the offset of section `at` is in the header.
+const fn offset_at(at: usize) -> usize {
+    16 + 8 * at
 }
 
-/// A string table with the given `ends` as written and the given bytes.
-fn table_raw(ends: &[u32], data: &[u8]) -> Vec<u8> {
-    let mut out = (ends.len() as u32).to_le_bytes().to_vec();
-    for end in ends {
-        out.extend_from_slice(&end.to_le_bytes());
-    }
-    out.extend_from_slice(data);
-    out
+/// Where the count of section `at` is in the header.
+const fn count_at(at: usize) -> usize {
+    20 + 8 * at
 }
 
-/// A record of 64 bytes.
-fn rec(kind: u8, mode: u16, name: u32, parent: u32, key: u32, size: u64, offset: u64) -> Vec<u8> {
-    let mut out = vec![kind, 0];
-    out.extend_from_slice(&mode.to_le_bytes());
-    out.extend_from_slice(&name.to_le_bytes());
-    out.extend_from_slice(&parent.to_le_bytes());
-    out.extend_from_slice(&key.to_le_bytes());
-    out.extend_from_slice(&size.to_le_bytes());
-    out.extend_from_slice(&offset.to_le_bytes());
-    out.extend_from_slice(&[9; 32]);
-    out
-}
+const ENTRIES: usize = 0;
+const DIGESTS: usize = 1;
+const KEY_OFFSETS: usize = 2;
+const KEYS: usize = 3;
+const NAMES: usize = 4;
+const RANGES: usize = 5;
 
-/// The parts of an object; each test changes one.
+/// The sections of an object, as bytes; [`Parts::object`] lays them out after a header, each at the
+/// next multiple of 8, so that a test changes one part and nothing else.
+#[derive(Clone)]
 struct Parts {
-    version: u32,
-    header_len: u32,
-    record_len: u32,
-    /// The record count; the number of records in `records` when none.
-    count: Option<u32>,
-    /// The key, name and target tables.
-    tables: [Vec<u8>; 3],
-    records: Vec<u8>,
+    entries: Vec<u8>,
+    digests: Vec<u8>,
+    key_offsets: Vec<u8>,
+    keys: Vec<u8>,
+    names: Vec<u8>,
+    ranges: Vec<u8>,
+}
+
+/// One range record.
+fn range_record(key: u32, offset: u64, len: u64) -> Vec<u8> {
+    let mut record = key.to_le_bytes().to_vec();
+    record.extend_from_slice(&[0; 4]);
+    record.extend_from_slice(&offset.to_le_bytes());
+    record.extend_from_slice(&len.to_le_bytes());
+    record
+}
+
+/// Key offsets, little-endian.
+fn offsets(values: &[u32]) -> Vec<u8> {
+    values.iter().flat_map(|v| v.to_le_bytes()).collect()
 }
 
 impl Parts {
-    /// A good list: one directory `d` holding one file `f` of key `k`.
-    fn good() -> Self {
-        let mut records = rec(KIND_DIR, 0o755, 0, NONE, NONE, 0, 0);
-        records.extend(rec(KIND_FILE, 0o644, 1, 0, 0, 5, 0));
+    /// A well formed object: the root alone, keys `a` and `bc`, three bytes of names and two
+    /// ranges.
+    fn valid() -> Self {
+        let mut root = [0u8; 32];
+        root[12..14].copy_from_slice(&0x11edu16.to_le_bytes());
         Self {
-            version: 2,
-            header_len: HEADER_LEN,
-            record_len: RECORD_LEN,
-            count: None,
-            tables: [
-                table(&[b"k"]),
-                table(
-                    &[b"f", b"d"].map(|s| s as &[u8])[..]
-                        .iter()
-                        .rev()
-                        .copied()
-                        .collect::<Vec<_>>(),
-                ),
-                table(&[]),
-            ],
-            records,
+            entries: root.to_vec(),
+            digests: vec![0; 32],
+            key_offsets: offsets(&[0, 1, 3]),
+            keys: b"abc".to_vec(),
+            names: b"xyz".to_vec(),
+            ranges: [range_record(0, 0, 4), range_record(1, 10, 5)].concat(),
         }
     }
 
-    /// An object with no strings and no records.
-    fn empty() -> Self {
+    /// The same, with the key offsets and key bytes given and no ranges, which name keys.
+    fn with_keys(values: &[u32], keys: &[u8]) -> Self {
         Self {
-            records: Vec::new(),
-            tables: [table(&[]), table(&[]), table(&[])],
-            ..Self::good()
+            key_offsets: offsets(values),
+            keys: keys.to_vec(),
+            ranges: Vec::new(),
+            ..Self::valid()
         }
     }
 
-    fn bytes(&self) -> Vec<u8> {
-        let [keys, names, targets] = &self.tables;
-        let keys_at = self.header_len;
-        let names_at = keys_at + keys.len() as u32;
-        let targets_at = names_at + names.len() as u32;
-        let records_at = targets_at + targets.len() as u32;
-        let count = self
-            .count
-            .unwrap_or((self.records.len() / self.record_len.max(1) as usize) as u32);
-        let mut out = TREE_LIST_V2_MAGIC.to_vec();
-        for field in [
-            self.version,
-            self.header_len,
-            self.record_len,
-            count,
-            keys_at,
-            names_at,
-            targets_at,
-            records_at,
-        ] {
-            out.extend_from_slice(&field.to_le_bytes());
+    fn counts(&self) -> [u32; 6] {
+        [
+            (self.entries.len() / 32) as u32,
+            (self.digests.len() / 32) as u32,
+            (self.key_offsets.len() / 4 - 1) as u32,
+            self.keys.len() as u32,
+            self.names.len() as u32,
+            (self.ranges.len() / 24) as u32,
+        ]
+    }
+
+    /// The object: the header, then the sections each at the next multiple of 8.
+    fn object(&self) -> Vec<u8> {
+        let sections = [
+            &self.entries,
+            &self.digests,
+            &self.key_offsets,
+            &self.keys,
+            &self.names,
+            &self.ranges,
+        ];
+        let counts = self.counts();
+        let mut out = Vec::new();
+        out.extend_from_slice(&TREE_LIST_V2_MAGIC);
+        out.extend_from_slice(&1u16.to_le_bytes());
+        out.extend_from_slice(&[0; 6]);
+        let mut at = 64usize;
+        let mut places = Vec::new();
+        for bytes in sections {
+            at = at.next_multiple_of(8);
+            places.push(at);
+            at += bytes.len();
         }
-        out.resize(self.header_len as usize, 0);
-        out.extend_from_slice(keys);
-        out.extend_from_slice(names);
-        out.extend_from_slice(targets);
-        out.extend_from_slice(&self.records);
+        for (place, count) in places.iter().zip(counts) {
+            out.extend_from_slice(&(*place as u32).to_le_bytes());
+            out.extend_from_slice(&count.to_le_bytes());
+        }
+        for (place, bytes) in places.iter().zip(sections) {
+            out.resize(*place, 0);
+            out.extend_from_slice(bytes);
+        }
         out
     }
 }
 
-/// Overwrites the `u32` at `at` of `bytes`.
-fn patch(bytes: &mut [u8], at: usize, value: u32) {
+fn set_u32(bytes: &mut [u8], at: usize, value: u32) {
     bytes[at..at + 4].copy_from_slice(&value.to_le_bytes());
 }
 
-/// The error opening `bytes` gives.
-fn open_err(bytes: &[u8]) -> TreeListV2Error {
-    TreeListV2::open(bytes).unwrap_err()
+fn set_u16(bytes: &mut [u8], at: usize, value: u16) {
+    bytes[at..at + 2].copy_from_slice(&value.to_le_bytes());
 }
 
-fn section(table: Table) -> TreeListV2Error {
-    TreeListV2Error::Header(HeaderFault::Section(Section::Table(table)))
+/// The fault of opening `bytes`, which must be one.
+fn fault(bytes: &[u8]) -> TreeListV2Error {
+    TreeListV2::open(bytes).expect_err("the object must be refused")
 }
 
-fn key_fault(index: u32, fault: StringFault) -> TreeListV2Error {
-    TreeListV2Error::Table {
-        table: Table::Keys,
-        index,
-        fault,
-    }
+fn header(fault: HeaderFault) -> TreeListV2Error {
+    TreeListV2Error::Header(fault)
 }
 
-// ---------------------------------------------------------------------------------------------
-// is_tree_list_v2, open, len
-// ---------------------------------------------------------------------------------------------
+const SECTION_NAMES: [(usize, Section, &str); 6] = [
+    (ENTRIES, Section::Entries, "entry"),
+    (DIGESTS, Section::Digests, "sha256"),
+    (KEY_OFFSETS, Section::KeyOffsets, "key offset"),
+    (KEYS, Section::Keys, "key"),
+    (NAMES, Section::Names, "name"),
+    (RANGES, Section::Ranges, "range"),
+];
 
-/// Asserts that the magic tells a version 2 list from a version 1 list and from anything shorter.
+/// Asserts that the first eight bytes are what tells a version 2 list from a version 1 list, from
+/// anything else, and from an object too short to say.
 #[test]
-fn the_magic_tells_version_2_from_other_bytes() {
-    assert_eq!(&TREE_LIST_V2_MAGIC, b"TSLIST\r\n");
-    assert!(is_tree_list_v2(b"TSLIST\r\n"));
-    assert!(is_tree_list_v2(&Parts::good().bytes()));
-    assert!(!is_tree_list_v2(b"TSLIST\r"));
-    assert!(!is_tree_list_v2(b"{\"format\":\"tierstore.tree-list\"}\n"));
+fn is_tree_list_v2_tells_the_magic() {
+    assert!(is_tree_list_v2(&Parts::valid().object()));
+    assert!(is_tree_list_v2(&TREE_LIST_V2_MAGIC));
+    assert!(!is_tree_list_v2(b"{\"format\":\"tierstore.tree-list\""));
+    assert!(!is_tree_list_v2(b"TSTREE\0"));
     assert!(!is_tree_list_v2(b""));
+    assert!(!is_tree_list_v2(b"TSTREE\0\x01"));
+    assert_eq!(&TREE_LIST_V2_MAGIC, b"TSTREE\0\0");
 }
 
-/// Asserts that a good object opens, `len` is its record count and `is_empty` is false.
+/// Asserts that a well formed object opens, with the root alone it is empty and has one entry, and
+/// that it opens whatever the minor version.
 #[test]
-fn a_good_list_opens_with_its_record_count() {
-    let bytes = Parts::good().bytes();
+fn a_well_formed_object_opens() {
+    let mut bytes = Parts::valid().object();
+    let list = TreeListV2::open(&bytes).unwrap();
+    assert_eq!(list.len(), 1);
+    assert!(list.is_empty());
+    set_u16(&mut bytes, 10, 9);
+    assert_eq!(TreeListV2::open(&bytes).unwrap().len(), 1);
+}
+
+/// Asserts that a list of more than the root is not empty, and that `len` counts the entries.
+#[test]
+fn a_list_of_two_entries_is_not_empty() {
+    let parts = Parts {
+        entries: vec![0; 64],
+        digests: vec![0; 64],
+        ..Parts::valid()
+    };
+    let bytes = parts.object();
     let list = TreeListV2::open(&bytes).unwrap();
     assert_eq!(list.len(), 2);
     assert!(!list.is_empty());
-    assert_eq!(&*list.keys[0], "k");
 }
 
-/// Asserts that a list with no records is empty and opens with empty tables.
+/// Asserts that an object with no keys and no ranges opens, with no ranges to give.
 #[test]
-fn a_list_with_no_records_is_empty() {
-    let bytes = Parts::empty().bytes();
+fn an_object_with_no_keys_and_no_ranges_opens() {
+    let parts = Parts {
+        key_offsets: offsets(&[0]),
+        keys: Vec::new(),
+        ranges: Vec::new(),
+        ..Parts::valid()
+    };
+    let bytes = parts.object();
     let list = TreeListV2::open(&bytes).unwrap();
-    assert_eq!(list.len(), 0);
-    assert!(list.is_empty());
-    assert!(list.keys.is_empty());
+    assert_eq!(list.ranges().count(), 0);
 }
 
-/// Asserts that an object of exactly the largest size gets past the size check (and is then
-/// refused for its magic), and one byte more is `TooLarge` with its size and the bound.
+/// Asserts that an object one byte over the bound is refused as too large before anything else is
+/// read, with the size and the bound.
 #[test]
-fn an_object_over_the_largest_size_is_too_large() {
-    let at_most = vec![0u8; MAX_TREE_LIST_BYTES];
-    assert_eq!(open_err(&at_most), TreeListV2Error::BadMagic);
-    let over = vec![0u8; MAX_TREE_LIST_BYTES + 1];
+fn an_object_over_the_bound_is_too_large() {
+    let bytes = vec![0u8; MAX_TREE_LIST_BYTES + 1];
+    let error = fault(&bytes);
     assert_eq!(
-        open_err(&over),
+        error,
         TreeListV2Error::TooLarge {
             size: MAX_TREE_LIST_BYTES + 1,
             max: MAX_TREE_LIST_BYTES,
         }
     );
-}
-
-/// Asserts that bytes that do not begin with the magic are `BadMagic`, a version 1 list included.
-#[test]
-fn bytes_without_the_magic_are_bad_magic() {
-    assert_eq!(open_err(b""), TreeListV2Error::BadMagic);
-    assert_eq!(open_err(b"TSLIST\r"), TreeListV2Error::BadMagic);
     assert_eq!(
-        open_err(b"{\"format\":\"tierstore.tree-list\",\"version\":1}\n"),
-        TreeListV2Error::BadMagic
+        error.to_string(),
+        "tree list too large: 268435457 bytes, at most 268435456"
     );
-    let mut bytes = Parts::good().bytes();
-    bytes[7] = b'\r';
-    assert_eq!(open_err(&bytes), TreeListV2Error::BadMagic);
 }
 
-/// Asserts that a version other than 2 is refused with that version, whatever follows.
+/// Asserts that an object that does not begin with the magic is refused as having a bad magic,
+/// whatever its length, a version 1 list and an empty object included.
 #[test]
-fn a_version_other_than_2_is_unsupported() {
-    for version in [0, 1, 3, u32::MAX] {
-        let bytes = Parts {
-            version,
-            ..Parts::good()
+fn an_object_without_the_magic_is_refused() {
+    for bytes in [
+        &b""[..],
+        &b"TSTREE"[..],
+        &b"{\"format\":\"tierstore.tree-list\",\"version\":1}\n"[..],
+        &[0u8; 100][..],
+    ] {
+        assert_eq!(fault(bytes), TreeListV2Error::BadMagic);
+    }
+    let mut bytes = Parts::valid().object();
+    bytes[7] = 1;
+    assert_eq!(fault(&bytes), TreeListV2Error::BadMagic);
+    assert_eq!(
+        TreeListV2Error::BadMagic.to_string(),
+        "not a version 2 tree list: bad magic"
+    );
+}
+
+/// Asserts that an object with the magic and fewer than 64 bytes, from 8 to 63, is refused as a
+/// truncated header, and that 64 bytes of it are read as a header.
+#[test]
+fn a_header_shorter_than_64_bytes_is_truncated() {
+    let object = Parts::valid().object();
+    for len in 8..64 {
+        assert_eq!(
+            fault(&object[..len]),
+            header(HeaderFault::Truncated),
+            "{len} bytes"
+        );
+    }
+    assert_ne!(fault(&object[..64]), header(HeaderFault::Truncated));
+    assert_eq!(
+        header(HeaderFault::Truncated).to_string(),
+        "tree list header: truncated"
+    );
+}
+
+/// Asserts that a major version other than 1, either side of it, is refused with the version it
+/// names.
+#[test]
+fn a_major_version_other_than_1_is_unsupported() {
+    for major in [0u16, 2, 0xffff] {
+        let mut bytes = Parts::valid().object();
+        set_u16(&mut bytes, 8, major);
+        assert_eq!(fault(&bytes), TreeListV2Error::UnsupportedVersion(major));
+    }
+    assert_eq!(
+        TreeListV2Error::UnsupportedVersion(2).to_string(),
+        "unsupported tree list version 2"
+    );
+}
+
+/// Asserts that a required flag set, any bit, is refused with all the flags the header holds.
+#[test]
+fn a_required_flag_is_refused() {
+    for flags in [1u32, 0x10, 0x8000_0000, 0xffff_ffff] {
+        let mut bytes = Parts::valid().object();
+        set_u32(&mut bytes, 12, flags);
+        assert_eq!(fault(&bytes), header(HeaderFault::RequiredFlags(flags)));
+    }
+    assert_eq!(
+        header(HeaderFault::RequiredFlags(0x10)).to_string(),
+        "tree list header: unknown required flags 0x10"
+    );
+}
+
+/// Asserts that for each section an offset that is not a multiple of 8 is refused as misaligned,
+/// naming the section.
+#[test]
+fn a_misaligned_section_is_refused() {
+    for (at, section, _) in SECTION_NAMES {
+        for skew in [1u32, 4, 7] {
+            let mut bytes = Parts::valid().object();
+            let offset = le_u32(&bytes, offset_at(at));
+            set_u32(&mut bytes, offset_at(at), offset + skew);
+            assert_eq!(fault(&bytes), header(HeaderFault::Misaligned(section)));
         }
-        .bytes();
-        assert_eq!(
-            open_err(&bytes),
-            TreeListV2Error::UnsupportedVersion(version)
-        );
     }
-    // The version is read first: a magic and a version alone give it, not a truncated header.
-    let mut short = TREE_LIST_V2_MAGIC.to_vec();
-    short.extend_from_slice(&7u32.to_le_bytes());
-    assert_eq!(open_err(&short), TreeListV2Error::UnsupportedVersion(7));
+    assert_eq!(
+        header(HeaderFault::Misaligned(Section::Keys)).to_string(),
+        "tree list header: the key section is not 8-byte aligned"
+    );
 }
 
-/// Asserts that an object cut anywhere between its magic and the end of its 40-byte header is a
-/// truncated header, whichever field it cuts.
+/// Asserts that for each section an offset before the end of the section before it (the header,
+/// for the first) is refused as an overlap, naming the section.
 #[test]
-fn a_cut_header_is_truncated() {
-    let bytes = Parts::good().bytes();
-    for len in 8..12 {
-        assert_eq!(
-            open_err(&bytes[..len]),
-            TreeListV2Error::Header(HeaderFault::Truncated),
-            "length {len}"
-        );
+fn an_overlapping_section_is_refused() {
+    for (at, section, _) in SECTION_NAMES {
+        let mut bytes = Parts::valid().object();
+        let before = if at == 0 {
+            56
+        } else {
+            le_u32(&bytes, offset_at(at - 1))
+        };
+        set_u32(&mut bytes, offset_at(at), before);
+        assert_eq!(fault(&bytes), header(HeaderFault::Overlap(section)));
     }
-    for len in 12..40 {
-        let error = open_err(&bytes[..len]);
+    assert_eq!(
+        header(HeaderFault::Overlap(Section::Names)).to_string(),
+        "tree list header: the name section overlaps the one before it"
+    );
+}
+
+/// Asserts that a section that begins exactly at the end of the one before it is not an overlap
+/// (the digests at 96, where the 32 bytes of entries end), the boundary of the check.
+#[test]
+fn a_section_that_begins_where_the_one_before_ends_is_not_an_overlap() {
+    let mut bytes = Parts::valid().object();
+    assert_eq!(le_u32(&bytes, offset_at(ENTRIES)), 64);
+    set_u32(&mut bytes, offset_at(DIGESTS), 96);
+    assert_eq!(TreeListV2::open(&bytes).unwrap().len(), 1);
+    set_u32(&mut bytes, offset_at(DIGESTS), 88);
+    assert_eq!(
+        fault(&bytes),
+        header(HeaderFault::Overlap(Section::Digests))
+    );
+}
+
+/// Asserts that for each section a count that makes it end past the end of the object is refused,
+/// naming the section, and so is an offset past the end.
+#[test]
+fn a_section_past_the_end_is_refused() {
+    for (at, section, _) in SECTION_NAMES {
+        let mut bytes = Parts::valid().object();
+        let count = le_u32(&bytes, count_at(at));
+        set_u32(&mut bytes, count_at(at), count + 1000);
+        assert_eq!(fault(&bytes), header(HeaderFault::PastEnd(section)));
+
+        let mut bytes = Parts::valid().object();
+        set_u32(&mut bytes, count_at(at), u32::MAX);
+        assert_eq!(fault(&bytes), header(HeaderFault::PastEnd(section)));
+
+        let mut bytes = Parts::valid().object();
+        set_u32(&mut bytes, offset_at(at), 0xffff_fff8);
+        assert_eq!(fault(&bytes), header(HeaderFault::PastEnd(section)));
+    }
+    assert_eq!(
+        header(HeaderFault::PastEnd(Section::Ranges)).to_string(),
+        "tree list header: the range section is past the end"
+    );
+}
+
+/// Asserts that a section that ends exactly at the end of the object is within it, and one byte
+/// further is past it.
+#[test]
+fn a_section_may_end_at_the_end_of_the_object() {
+    let bytes = Parts::valid().object();
+    assert_eq!(bytes.len(), le_u32(&bytes, offset_at(RANGES)) as usize + 48);
+    assert!(TreeListV2::open(&bytes).is_ok());
+    assert_eq!(
+        fault(&bytes[..bytes.len() - 1]),
+        header(HeaderFault::PastEnd(Section::Ranges))
+    );
+}
+
+/// Asserts that an entry count of 0 is refused with the count.
+#[test]
+fn an_entry_count_of_zero_is_refused() {
+    let mut bytes = Parts::valid().object();
+    set_u32(&mut bytes, count_at(ENTRIES), 0);
+    assert_eq!(fault(&bytes), header(HeaderFault::EntryCount(0)));
+    assert_eq!(
+        header(HeaderFault::EntryCount(0)).to_string(),
+        "tree list header: bad entry count 0"
+    );
+}
+
+/// Asserts that an entry count of 2^24 + 1 is refused: an object of at most 256 MiB cannot hold
+/// that many 32-byte records, so it is refused as a section past the end.
+#[test]
+fn an_entry_count_over_the_most_is_refused() {
+    let mut bytes = Parts::valid().object();
+    set_u32(&mut bytes, count_at(ENTRIES), (1 << 24) + 1);
+    assert_eq!(
+        fault(&bytes),
+        header(HeaderFault::PastEnd(Section::Entries))
+    );
+}
+
+/// Asserts that a digest count that is not the entry count, fewer or more, is refused with the
+/// digest count.
+#[test]
+fn a_digest_count_other_than_the_entry_count_is_refused() {
+    let mut bytes = Parts::valid().object();
+    set_u32(&mut bytes, count_at(DIGESTS), 0);
+    assert_eq!(fault(&bytes), header(HeaderFault::DigestCount(0)));
+
+    let parts = Parts {
+        digests: vec![0; 64],
+        ..Parts::valid()
+    };
+    assert_eq!(fault(&parts.object()), header(HeaderFault::DigestCount(2)));
+    assert_eq!(
+        header(HeaderFault::DigestCount(2)).to_string(),
+        "tree list header: 2 digests for another count of entries"
+    );
+}
+
+/// Asserts that a first key offset that is not 0 is refused as key 0 not beginning at 0.
+#[test]
+fn the_first_key_must_begin_at_0() {
+    let bytes = Parts::with_keys(&[1, 3], b"abc").object();
+    let error = fault(&bytes);
+    assert_eq!(
+        error,
+        TreeListV2Error::Key {
+            index: 0,
+            fault: KeyFault::Start,
+        }
+    );
+    assert_eq!(error.to_string(), "tree list key 0: does not begin at 0");
+}
+
+/// Asserts that a key whose end is its start (equal neighbouring offsets) is refused as empty,
+/// naming the key, whether it is the first, a middle one or the last.
+#[test]
+fn an_empty_key_is_refused() {
+    let first = Parts::with_keys(&[0, 0, 3], b"abc").object();
+    let middle = Parts::with_keys(&[0, 1, 1, 3], b"abc").object();
+    let last = Parts::with_keys(&[0, 3, 3], b"abc").object();
+    for (bytes, index) in [(first, 0), (middle, 1), (last, 1)] {
+        let error = fault(&bytes);
         assert_eq!(
             error,
-            TreeListV2Error::Header(HeaderFault::Truncated),
-            "length {len}"
+            TreeListV2Error::Key {
+                index,
+                fault: KeyFault::Empty,
+            }
         );
     }
-}
-
-/// Asserts that a header length below 40 is refused with that length, and 40 is taken.
-#[test]
-fn a_header_length_below_40_is_refused() {
-    for header_len in [0u32, 8, 39] {
-        let mut bytes = Parts::good().bytes();
-        patch(&mut bytes, 12, header_len);
-        assert_eq!(
-            open_err(&bytes),
-            TreeListV2Error::Header(HeaderFault::HeaderLength(header_len))
-        );
-    }
-}
-
-/// Asserts that a header length past the end of the object is refused with that length, and one
-/// that reaches exactly the end is taken.
-#[test]
-fn a_header_length_past_the_end_is_refused() {
-    let mut bytes = Parts::good().bytes();
-    let len = bytes.len() as u32;
-    patch(&mut bytes, 12, len + 1);
     assert_eq!(
-        open_err(&bytes),
-        TreeListV2Error::Header(HeaderFault::HeaderLength(len + 1))
-    );
-    patch(&mut bytes, 12, u32::MAX);
-    assert_eq!(
-        open_err(&bytes),
-        TreeListV2Error::Header(HeaderFault::HeaderLength(u32::MAX))
-    );
-    patch(&mut bytes, 12, len);
-    TreeListV2::open(&bytes).unwrap();
-}
-
-/// Asserts that a header length is judged before a record length: both bad gives the header's.
-#[test]
-fn the_header_length_is_judged_before_the_record_length() {
-    let mut bytes = Parts::good().bytes();
-    patch(&mut bytes, 12, 3);
-    patch(&mut bytes, 16, 3);
-    assert_eq!(
-        open_err(&bytes),
-        TreeListV2Error::Header(HeaderFault::HeaderLength(3))
-    );
-}
-
-/// Asserts that a record length below 64 is refused with that length.
-#[test]
-fn a_record_length_below_64_is_refused() {
-    for record_len in [0u32, 1, 63] {
-        let bytes = Parts {
-            record_len,
-            count: Some(0),
-            ..Parts::empty()
+        TreeListV2Error::Key {
+            index: 1,
+            fault: KeyFault::Empty,
         }
-        .bytes();
-        assert_eq!(
-            open_err(&bytes),
-            TreeListV2Error::Header(HeaderFault::RecordLength(record_len))
-        );
-    }
-}
-
-/// Asserts that a header and records longer than the least are taken, and each record is read at
-/// the longer stride.
-#[test]
-fn a_longer_header_and_longer_records_are_taken() {
-    let mut records = rec(KIND_DIR, 0o755, 0, NONE, NONE, 0, 0);
-    records.extend_from_slice(&[0xee; 8]);
-    records.extend(rec(KIND_DIR, 0o755, 0, 0, NONE, 0, 0));
-    records.extend_from_slice(&[0xee; 8]);
-    let bytes = Parts {
-        header_len: 48,
-        record_len: 72,
-        records,
-        ..Parts::good()
-    }
-    .bytes();
-    let list = TreeListV2::open(&bytes).unwrap();
-    assert_eq!(list.len(), 2);
-    assert_eq!(list.record_len, 72);
-    assert_eq!(list.records.len(), 144);
-}
-
-/// Asserts that a record count whose records do not fit in the object is a records section past
-/// the end, one record more than fits included, and a count that fits exactly is taken.
-#[test]
-fn records_past_the_end_are_refused() {
-    let past = TreeListV2Error::Header(HeaderFault::Section(Section::Records));
-    let fits = Parts::good().bytes();
-    let mut bytes = fits.clone();
-    patch(&mut bytes, 20, 3);
-    assert_eq!(open_err(&bytes), past);
-    patch(&mut bytes, 20, u32::MAX);
-    assert_eq!(open_err(&bytes), past);
-    patch(&mut bytes, 20, 2);
-    TreeListV2::open(&bytes).unwrap();
-    // The records begin past the end, or so late that the last does not fit.
-    let mut late = fits.clone();
-    patch(&mut late, 36, fits.len() as u32 + 1);
-    assert_eq!(open_err(&late), past);
-    patch(&mut late, 36, u32::MAX);
-    assert_eq!(open_err(&late), past);
-    patch(&mut late, 36, fits.len() as u32 - 127);
-    assert_eq!(open_err(&late), past);
-    // A record length that makes the product huge.
-    let mut huge = fits;
-    patch(&mut huge, 16, u32::MAX);
-    patch(&mut huge, 20, u32::MAX);
-    assert_eq!(open_err(&huge), past);
-}
-
-/// Asserts that, for each of the three tables, an offset past the end, a count whose ends do not
-/// fit and a last end past the end of the object are that table's section past the end.
-#[test]
-fn a_table_that_does_not_fit_is_a_section_past_the_end() {
-    for (n, which) in [Table::Keys, Table::Names, Table::Targets]
-        .into_iter()
-        .enumerate()
-    {
-        let good = Parts::good().bytes();
-        // The offset of the table is past the end, or its count is cut by the end.
-        let mut bytes = good.clone();
-        patch(&mut bytes, 24 + n * 4, good.len() as u32);
-        assert_eq!(
-            open_err(&bytes),
-            section(which),
-            "{which:?} offset at the end"
-        );
-        patch(&mut bytes, 24 + n * 4, good.len() as u32 - 3);
-        assert_eq!(open_err(&bytes), section(which), "{which:?} count cut");
-        patch(&mut bytes, 24 + n * 4, u32::MAX);
-        assert_eq!(open_err(&bytes), section(which), "{which:?} offset huge");
-
-        // The count is more than the object has ends for.
-        let mut parts = Parts::good();
-        parts.tables[n] = (0x4000_0000u32).to_le_bytes().to_vec();
-        assert_eq!(
-            open_err(&parts.bytes()),
-            section(which),
-            "{which:?} count huge"
-        );
-
-        // The ends fit but the last end is past the bytes the object has.
-        let mut parts = Parts::good();
-        parts.tables[n] = table_raw(&[100_000], b"ab");
-        assert_eq!(
-            open_err(&parts.bytes()),
-            section(which),
-            "{which:?} data short"
-        );
-    }
-}
-
-/// Asserts that tables are judged in order keys, names, targets, and all three before the
-/// records are: with every section past the end, the keys are named first.
-#[test]
-fn the_sections_are_judged_in_order() {
-    let mut bytes = Parts::good().bytes();
-    patch(&mut bytes, 36, u32::MAX);
-    patch(&mut bytes, 24, u32::MAX);
-    patch(&mut bytes, 28, u32::MAX);
-    patch(&mut bytes, 32, u32::MAX);
-    // The records are judged before the tables.
-    assert_eq!(
-        open_err(&bytes),
-        TreeListV2Error::Header(HeaderFault::Section(Section::Records))
+        .to_string(),
+        "tree list key 1: empty"
     );
-    patch(&mut bytes, 36, 40);
-    assert_eq!(open_err(&bytes), section(Table::Keys));
-    patch(&mut bytes, 24, 40);
-    assert_eq!(open_err(&bytes), section(Table::Names));
-    patch(&mut bytes, 28, 40);
-    assert_eq!(open_err(&bytes), section(Table::Targets));
 }
 
-/// Asserts that a key table whose end is below the one before it is a bounds fault at that key.
+/// Asserts that an offset that goes back (an end before its start) is refused as an empty key.
 #[test]
-fn a_key_end_below_the_end_before_is_a_bounds_fault() {
-    let mut parts = Parts::empty();
-    parts.tables[0] = table_raw(&[2, 1, 5], b"abcde");
-    assert_eq!(open_err(&parts.bytes()), key_fault(1, StringFault::Bounds));
+fn a_key_whose_end_is_before_its_start_is_refused() {
+    let bytes = Parts::with_keys(&[0, 2, 1], b"abc").object();
+    assert_eq!(
+        fault(&bytes),
+        TreeListV2Error::Key {
+            index: 1,
+            fault: KeyFault::Empty,
+        }
+    );
 }
 
-/// Asserts that a key end past the bytes of its table, when it is not the last end, is a bounds
-/// fault at that key.
+/// Asserts that a key of 1024 bytes is read and one of 1025 is refused as too long, naming it.
 #[test]
-fn a_key_end_past_the_data_is_a_bounds_fault() {
-    let mut parts = Parts::empty();
-    parts.tables[0] = table_raw(&[9, 3], b"abc");
-    assert_eq!(open_err(&parts.bytes()), key_fault(0, StringFault::Bounds));
+fn a_key_over_1024_bytes_is_refused() {
+    assert_eq!(MAX_KEY_BYTES, 1024);
+    let long = vec![b'k'; 1025];
+    let ok = Parts::with_keys(&[0, 1024], &long[..1024]).object();
+    let list = TreeListV2::open(&ok).unwrap();
+    assert_eq!(list.keys[0].len(), 1024);
+
+    let bytes = Parts::with_keys(&[0, 1025], &long).object();
+    let error = fault(&bytes);
+    assert_eq!(
+        error,
+        TreeListV2Error::Key {
+            index: 0,
+            fault: KeyFault::TooLong,
+        }
+    );
+    assert_eq!(error.to_string(), "tree list key 0: over 1024 bytes");
 }
 
-/// Asserts that a key that is not UTF-8 is refused at its index.
+/// Asserts that a key that is not UTF-8 is refused, naming it, and that a multi-byte UTF-8 key is
+/// read.
 #[test]
 fn a_key_that_is_not_utf8_is_refused() {
-    let mut parts = Parts::empty();
-    parts.tables[0] = table(&[b"a", b"\xff\xfe"]);
-    assert_eq!(open_err(&parts.bytes()), key_fault(1, StringFault::NotUtf8));
+    let bytes = Parts::with_keys(&[0, 1, 3], &[b'a', 0xff, 0xfe]).object();
+    let error = fault(&bytes);
+    assert_eq!(
+        error,
+        TreeListV2Error::Key {
+            index: 1,
+            fault: KeyFault::NotUtf8,
+        }
+    );
+    assert_eq!(error.to_string(), "tree list key 1: not UTF-8");
+
+    let utf8 = Parts::with_keys(&[0, 2], "é".as_bytes()).object();
+    assert_eq!(&*TreeListV2::open(&utf8).unwrap().keys[0], "é");
 }
 
-/// Asserts that keys not strictly ascending are refused at the first that is not after the one
-/// before: lower and equal neighbours both.
+/// Asserts that a last key offset that is not the length of the key bytes, short of it or past
+/// it, is refused as key offsets that do not end at the end of the keys.
 #[test]
-fn keys_not_strictly_ascending_are_refused() {
-    let mut parts = Parts::empty();
-    parts.tables[0] = table(&[b"b", b"a"]);
+fn key_offsets_that_do_not_end_at_the_end_of_the_keys_are_refused() {
+    let short = Parts::with_keys(&[0, 1, 2], b"abc").object();
+    assert_eq!(fault(&short), header(HeaderFault::KeysLength));
+    let past = Parts::with_keys(&[0, 1, 9], b"abc").object();
+    assert_eq!(fault(&past), header(HeaderFault::KeysLength));
+    let nothing = Parts::with_keys(&[0], b"abc").object();
+    assert_eq!(fault(&nothing), header(HeaderFault::KeysLength));
     assert_eq!(
-        open_err(&parts.bytes()),
-        key_fault(1, StringFault::NotAscending)
+        header(HeaderFault::KeysLength).to_string(),
+        "tree list header: the key offsets do not end at the end of the keys"
     );
-    parts.tables[0] = table(&[b"a", b"b", b"b"]);
-    assert_eq!(
-        open_err(&parts.bytes()),
-        key_fault(2, StringFault::NotAscending)
-    );
-    // A prefix sorts before what extends it.
-    parts.tables[0] = table(&[b"ab", b"a"]);
-    assert_eq!(
-        open_err(&parts.bytes()),
-        key_fault(1, StringFault::NotAscending)
-    );
-    parts.tables[0] = table(&[b"a", b"ab"]);
-    TreeListV2::open(&parts.bytes()).unwrap();
 }
 
-/// Asserts that an empty key is a bad key, and so is one byte over the longest, while one of
-/// exactly the longest is taken.
+/// Asserts that a range that names a key the table lacks is refused with its number, though the
+/// ranges before it are fine.
 #[test]
-fn an_empty_or_overlong_key_is_a_bad_key() {
-    let mut parts = Parts::empty();
-    parts.tables[0] = table(&[b""]);
-    assert_eq!(open_err(&parts.bytes()), key_fault(0, StringFault::BadKey));
-    parts.tables[0] = table(&[b"a", &vec![b'z'; MAX_KEY_BYTES + 1]]);
-    assert_eq!(open_err(&parts.bytes()), key_fault(1, StringFault::BadKey));
-    let longest = vec![b'z'; MAX_KEY_BYTES];
-    parts.tables[0] = table(&[b"a", &longest]);
-    let bytes = parts.bytes();
+fn a_range_of_a_key_past_the_table_is_refused() {
+    let parts = Parts {
+        ranges: [range_record(0, 0, 4), range_record(2, 0, 4)].concat(),
+        ..Parts::valid()
+    };
+    let error = fault(&parts.object());
+    assert_eq!(error, TreeListV2Error::Range(1));
+    assert_eq!(
+        error.to_string(),
+        "tree list range 1: no such key, empty, or past 2^64"
+    );
+}
+
+/// Asserts that a range of length 0 is refused with its number.
+#[test]
+fn a_range_of_length_0_is_refused() {
+    let parts = Parts {
+        ranges: range_record(1, 5, 0),
+        ..Parts::valid()
+    };
+    assert_eq!(fault(&parts.object()), TreeListV2Error::Range(0));
+}
+
+/// Asserts that a range whose offset plus length passes 2^64 is refused, and one that ends exactly
+/// at 2^64 - 1 is read.
+#[test]
+fn a_range_that_overflows_is_refused() {
+    let parts = Parts {
+        ranges: range_record(0, u64::MAX, 1),
+        ..Parts::valid()
+    };
+    assert_eq!(fault(&parts.object()), TreeListV2Error::Range(0));
+    let parts = Parts {
+        ranges: range_record(0, u64::MAX - 5, 10),
+        ..Parts::valid()
+    };
+    assert_eq!(fault(&parts.object()), TreeListV2Error::Range(0));
+    let parts = Parts {
+        ranges: range_record(0, u64::MAX - 5, 5),
+        ..Parts::valid()
+    };
+    let bytes = parts.object();
     let list = TreeListV2::open(&bytes).unwrap();
-    assert_eq!(list.keys.len(), 2);
-    assert_eq!(list.keys[1].len(), MAX_KEY_BYTES);
-}
-
-/// Asserts that a key fault is judged in the order bounds, UTF-8, ascending, key: a key that is
-/// out of order and bad is out of order.
-#[test]
-fn a_string_is_judged_for_utf8_then_order_then_its_own_rule() {
-    let mut parts = Parts::empty();
-    parts.tables[0] = table(&[b"b", b""]);
     assert_eq!(
-        open_err(&parts.bytes()),
-        key_fault(1, StringFault::NotAscending)
+        list.ranges().collect::<Vec<_>>(),
+        [ListRange {
+            key: "a".into(),
+            offset: u64::MAX - 5,
+            len: 5,
+        }]
     );
-    parts.tables[0] = table(&[b"b", b"\xff"]);
-    assert_eq!(open_err(&parts.bytes()), key_fault(1, StringFault::NotUtf8));
 }
 
-/// Asserts that the names and targets are not judged at open (their faults are the walk's), only
-/// that they lie within the object.
+/// Asserts that `ranges` gives the ranges in the order of the list, each with its key, offset and
+/// length, and that a key is shared by the ranges that name it.
 #[test]
-fn open_does_not_judge_the_name_and_target_strings() {
-    let mut parts = Parts::empty();
-    parts.tables[1] = table(&[b"b", b"a", b"/"]);
-    parts.tables[2] = table(&[b"", b"\xff"]);
-    let bytes = parts.bytes();
+fn ranges_are_given_in_the_order_of_the_list() {
+    let parts = Parts {
+        ranges: [
+            range_record(1, 10, 5),
+            range_record(0, 0, 4),
+            range_record(1, 100, 7),
+        ]
+        .concat(),
+        ..Parts::valid()
+    };
+    let bytes = parts.object();
     let list = TreeListV2::open(&bytes).unwrap();
-    assert_eq!(list.names.len(), 3);
-    assert_eq!(list.targets.len(), 2);
-}
-
-// ---------------------------------------------------------------------------------------------
-// The string rules and readers
-// ---------------------------------------------------------------------------------------------
-
-/// Asserts that a key is 1 to 1024 bytes.
-#[test]
-fn a_key_is_one_to_the_longest_bytes() {
-    assert!(!valid_key(""));
-    assert!(valid_key("k"));
-    assert!(valid_key(&"k".repeat(MAX_KEY_BYTES)));
-    assert!(!valid_key(&"k".repeat(MAX_KEY_BYTES + 1)));
-    assert_eq!(MAX_KEY_BYTES, 1024);
-}
-
-/// Asserts that a name is refused when it is empty, `.`, `..`, over 255 bytes, has a `/` or a
-/// NUL or begins `.wh.`, and taken at 255 bytes.
-#[test]
-fn a_name_follows_the_name_rules() {
-    assert!(valid_name("a"));
-    assert!(valid_name(&"n".repeat(255)));
-    assert!(!valid_name(&"n".repeat(256)));
-    for bad in ["", ".", "..", "a/b", "a\0b", ".wh.x"] {
-        assert!(!valid_name(bad), "{bad:?}");
-    }
-    assert!(valid_name(".hidden"));
-}
-
-/// Asserts that a target is 1 to 4096 bytes with no NUL.
-#[test]
-fn a_target_is_one_to_the_longest_bytes_with_no_nul() {
-    assert!(!valid_target(""));
-    assert!(valid_target("t"));
-    assert!(valid_target(&"t".repeat(MAX_TARGET_BYTES)));
-    assert!(!valid_target(&"t".repeat(MAX_TARGET_BYTES + 1)));
-    assert!(!valid_target("a\0b"));
-    assert!(valid_target("../a/b"));
-}
-
-/// Asserts that `read_u32` reads little-endian, gives nothing past the end, and gives nothing
-/// rather than overflowing for an offset near the largest.
-#[test]
-fn read_u32_stays_inside_its_bytes() {
-    let bytes = [1, 0, 0, 0, 2, 0, 0, 0];
-    assert_eq!(read_u32(&bytes, 0), Some(1));
-    assert_eq!(read_u32(&bytes, 4), Some(2));
-    assert_eq!(read_u32(&bytes, 5), None);
-    assert_eq!(read_u32(&bytes, 8), None);
-    assert_eq!(read_u32(&bytes, usize::MAX), None);
-    assert_eq!(read_u32(&[0x78, 0x56, 0x34, 0x12], 0), Some(0x1234_5678));
-}
-
-/// Asserts that `le_u64` reads the first eight bytes little-endian.
-#[test]
-fn le_u64_reads_eight_bytes() {
-    assert_eq!(le_u64(&[1, 2, 3, 4, 5, 6, 7, 8, 9]), 0x0807_0605_0403_0201);
-}
-
-// ---------------------------------------------------------------------------------------------
-// Messages
-// ---------------------------------------------------------------------------------------------
-
-/// Asserts the exact message of every `TreeListV2Error`, and of the header, string and record
-/// faults, tables and sections inside them.
-#[test]
-fn every_error_says_what_is_wrong() {
-    let cases: Vec<(TreeListV2Error, &str)> = vec![
-        (
-            TreeListV2Error::TooLarge { size: 9, max: 5 },
-            "tree list too large: 9 bytes, at most 5",
-        ),
-        (
-            TreeListV2Error::BadMagic,
-            "not a version 2 tree list: bad magic",
-        ),
-        (
-            TreeListV2Error::UnsupportedVersion(3),
-            "unsupported tree list version 3",
-        ),
-        (
-            TreeListV2Error::Header(HeaderFault::Truncated),
-            "tree list header: truncated",
-        ),
-        (
-            TreeListV2Error::Header(HeaderFault::HeaderLength(7)),
-            "tree list header: bad header length 7",
-        ),
-        (
-            TreeListV2Error::Header(HeaderFault::RecordLength(9)),
-            "tree list header: bad record length 9",
-        ),
-        (
-            TreeListV2Error::Header(HeaderFault::Section(Section::Table(Table::Keys))),
-            "tree list header: the key section is past the end",
-        ),
-        (
-            TreeListV2Error::Header(HeaderFault::Section(Section::Table(Table::Names))),
-            "tree list header: the name section is past the end",
-        ),
-        (
-            TreeListV2Error::Header(HeaderFault::Section(Section::Table(Table::Targets))),
-            "tree list header: the target section is past the end",
-        ),
-        (
-            TreeListV2Error::Header(HeaderFault::Section(Section::Records)),
-            "tree list header: the record section is past the end",
-        ),
-        (
-            TreeListV2Error::Table {
-                table: Table::Names,
-                index: 3,
-                fault: StringFault::NotAscending,
+    let ranges: Vec<ListRange> = list.ranges().collect();
+    assert_eq!(
+        ranges,
+        [
+            ListRange {
+                key: "bc".into(),
+                offset: 10,
+                len: 5,
             },
-            "tree list name 3: not strictly ascending",
-        ),
-        (
-            TreeListV2Error::Table {
-                table: Table::Targets,
-                index: 0,
-                fault: StringFault::BadTarget,
+            ListRange {
+                key: "a".into(),
+                offset: 0,
+                len: 4,
             },
-            "tree list target 0: bad target",
-        ),
-        (
-            TreeListV2Error::Record {
-                index: 7,
-                fault: RecordFault::Parent(9),
+            ListRange {
+                key: "bc".into(),
+                offset: 100,
+                len: 7,
             },
-            "tree list record 7: parent 9 is not a directory before it",
-        ),
-        (
-            TreeListV2Error::Tree(RecordError::TooManyEntries(4)),
-            "the tree is refused: tree too large: more than 4 entries",
-        ),
+        ]
+    );
+    assert!(std::sync::Arc::ptr_eq(&ranges[0].key, &ranges[2].key));
+}
+
+/// Asserts that the little-endian readers read two, four and eight bytes at an offset, the least
+/// significant first, and nothing around it.
+#[test]
+fn the_little_endian_readers_read_at_an_offset() {
+    let bytes = [
+        0xff, 0x01, 0x02, 0x03, 0x04, 0x05, 0x06, 0x07, 0x08, 0x09, 0xff,
     ];
-    for (error, message) in cases {
-        assert_eq!(error.to_string(), message);
-    }
+    assert_eq!(le_u16(&bytes, 1), 0x0201);
+    assert_eq!(le_u32(&bytes, 1), 0x0403_0201);
+    assert_eq!(le_u64(&bytes, 1), 0x0807_0605_0403_0201);
+    assert_eq!(le_u16(&bytes, 9), 0xff09);
+    assert_eq!(le_u64(&[0xff; 8], 0), u64::MAX);
 }
 
-/// Asserts the exact message of every string fault.
+/// Asserts that every section prints the word the errors use, and that the errors of an entry, of
+/// entries no directory holds and of a tree over a limit print as the reference says.
 #[test]
-fn every_string_fault_says_what_is_wrong() {
-    let cases = [
-        (StringFault::Bounds, "past the end of its table"),
-        (StringFault::NotUtf8, "not UTF-8"),
-        (StringFault::NotAscending, "not strictly ascending"),
-        (StringFault::BadKey, "bad key"),
-        (StringFault::BadName, "bad name"),
-        (StringFault::BadTarget, "bad target"),
-    ];
-    for (fault, message) in cases {
-        assert_eq!(fault.to_string(), message);
+fn every_section_and_error_prints() {
+    for (_, section, name) in SECTION_NAMES {
+        assert_eq!(section.to_string(), name);
     }
-}
-
-/// Asserts the exact message of every record fault.
-#[test]
-fn every_record_fault_says_what_is_wrong() {
-    let cases = [
-        (RecordFault::UnknownKind(9), "unknown kind 9"),
+    let entry = |fault| TreeListV2Error::Entry { index: 7, fault };
+    let faults = [
         (
-            RecordFault::KindOrder,
-            "out of order: the directories come first, then the links, then the files",
+            EntryFault::Root,
+            "the root is not a directory with no name and parent 0",
         ),
-        (RecordFault::BadMode(0o17777), "bad mode 17777"),
-        (RecordFault::Name(4), "no name 4"),
+        (EntryFault::UnknownKind(9), "unknown kind 9"),
         (
-            RecordFault::Parent(5),
-            "parent 5 is not a directory before it",
+            EntryFault::Unreachable,
+            "a directory before the children of the directories before it",
         ),
-        (RecordFault::Key(6), "no key 6"),
-        (RecordFault::Target(8), "no target 8"),
         (
-            RecordFault::KeyAndSize,
-            "a file of size 0 has no key, and a larger one has one",
+            EntryFault::Children,
+            "children not where the breadth-first order puts them",
         ),
-        (RecordFault::RangeOverflow, "range overflow"),
-        (RecordFault::Unsorted, "files not sorted by key and offset"),
         (
-            RecordFault::EmptyDigest,
+            EntryFault::Parent(3),
+            "parent 3 is not the directory that holds it",
+        ),
+        (EntryFault::NameBounds, "name past the end of the names"),
+        (EntryFault::BadName, "bad name"),
+        (EntryFault::NotAscending, "name not after its sibling's"),
+        (EntryFault::PathTooLong, "path over 4096 bytes"),
+        (EntryFault::Key(4), "no key 4"),
+        (EntryFault::RangeOverflow, "range overflow"),
+        (
+            EntryFault::EmptyDigest,
             "a file of size 0 has the digest of no bytes",
         ),
+        (EntryFault::Target, "bad target"),
     ];
-    for (fault, message) in cases {
-        assert_eq!(fault.to_string(), message);
+    for (fault, text) in faults {
+        assert_eq!(fault.to_string(), text);
+        assert_eq!(
+            entry(fault).to_string(),
+            format!("tree list entry 7: {text}")
+        );
     }
+    assert_eq!(
+        TreeListV2Error::Orphans(90).to_string(),
+        "tree list entries from 90 on are in no directory"
+    );
+    assert_eq!(
+        TreeListV2Error::Tree(RecordError::TooManyEntries(5)).to_string(),
+        "the tree is refused: tree too large: more than 5 entries"
+    );
 }
-
-/// Asserts that a table and a section print as their singular noun.
-#[test]
-fn tables_and_sections_print_their_noun() {
-    assert_eq!(Table::Keys.to_string(), "key");
-    assert_eq!(Table::Names.to_string(), "name");
-    assert_eq!(Table::Targets.to_string(), "target");
-    assert_eq!(Section::Table(Table::Names).to_string(), "name");
-    assert_eq!(Section::Records.to_string(), "record");
-}
-
-mod encode;

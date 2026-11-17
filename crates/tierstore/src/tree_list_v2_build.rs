@@ -1,16 +1,16 @@
-//! The one walk of a version 2 tree list: each record checked, its span handed to the caller to
-//! read, and its entry put in the tree; then the directories hashed, children first. See
-//! [`tree_list_v2`](crate::tree_list_v2).
+//! The one walk of a version 2 tree list: each directory's children checked, the span of each new
+//! digest handed to the caller as its file is checked; then the directories hashed, children
+//! first. See [`tree_list_v2`](crate::tree_list_v2).
 
 use std::collections::HashSet;
 use std::sync::Arc;
 
-use crate::tree_list::EMPTY_SHA256;
+use crate::tree_list::{EMPTY_SHA256, MAX_PATH_BYTES, MAX_TARGET_BYTES};
 use crate::tree_list_v2::{
-    KIND_DIR, KIND_FILE, KIND_SYMLINK, NONE, RecordFault, StringFault, TreeListV2, TreeListV2Error,
-    le_u64, read_u32, valid_name, valid_target,
+    EntryFault, KIND_DIR, KIND_FILE, KIND_SYMLINK, RECORD_LEN, TreeListV2, TreeListV2Error, le_u16,
+    le_u32, le_u64,
 };
-use crate::tree_manifest::{BlobSource, TreeDigest};
+use crate::tree_manifest::{BlobSource, TreeDigest, is_valid_name};
 use crate::tree_record::{
     BuiltFile, BuiltTree, Mode, RecordChild, RecordError, TreeLimits, TreeRecord,
 };
@@ -28,83 +28,77 @@ pub struct ListSpan {
     pub sha256: TreeDigest,
 }
 
-/// One record, its fields read and not yet judged.
-struct Fields<'a> {
+/// The fields of one 32-byte entry record.
+#[derive(Clone, Copy)]
+struct Record {
+    parent: u32,
+    name_off: u32,
+    /// A file's key index, a directory's first child.
+    x: u32,
     kind: u8,
     mode: u16,
-    name: u32,
-    parent: u32,
-    key: u32,
-    size: u64,
-    offset: u64,
-    sha256: &'a [u8],
+    name_len: u8,
+    /// A file's offset, a directory's child count, a link target's offset.
+    a: u64,
+    /// A file's size, a link target's length.
+    b: u64,
 }
 
-impl<'a> Fields<'a> {
-    /// The fields of a record of at least 64 bytes.
-    fn of(record: &'a [u8]) -> Self {
-        let word = |at| read_u32(record, at).unwrap_or(NONE);
+impl Record {
+    fn of(bytes: &[u8]) -> Self {
+        let kind_mode = le_u16(bytes, 12);
         Self {
-            kind: record[0],
-            mode: u16::from_le_bytes([record[2], record[3]]),
-            name: word(4),
-            parent: word(8),
-            key: word(12),
-            size: le_u64(&record[16..24]),
-            offset: le_u64(&record[24..32]),
-            sha256: &record[32..64],
+            parent: le_u32(bytes, 0),
+            name_off: le_u32(bytes, 4),
+            x: le_u32(bytes, 8),
+            kind: (kind_mode >> 12) as u8,
+            mode: kind_mode & 0o7777,
+            name_len: bytes[14],
+            a: le_u64(bytes, 16),
+            b: le_u64(bytes, 24),
         }
+    }
+
+    /// The mode: twelve bits are never above 07777.
+    fn mode(self) -> Mode {
+        Mode::new(self.mode).unwrap_or(Mode::FILE)
     }
 }
 
-/// A child of a directory while the tree is built, named by its name's number.
-enum Child {
-    /// A directory, by its number among the directories (the root is 0).
-    Dir(usize),
-    File {
-        mode: Mode,
-        size: u64,
-        sha256: TreeDigest,
-    },
-    Symlink(u32),
-}
-
-/// A directory while the tree is built: the root is 0, the directory of record `i` is `i + 1`.
-struct Dir {
-    mode: Mode,
-    /// The directory it is in, and its name; none for the root.
-    parent: Option<(usize, u32)>,
-    /// How many names from the root.
-    depth: usize,
-    children: Vec<(u32, Child)>,
-}
-
-/// A file of the list, until the names are checked and its path can be made.
-struct File {
-    dir: usize,
-    name: u32,
-    size: u64,
-    sha256: TreeDigest,
-    source: Option<BlobSource>,
-}
-
-/// The walk: what the records so far have made.
-struct Walk<'l, 'a> {
-    list: &'l TreeListV2<'a>,
-    limits: &'l TreeLimits,
-    dirs: Vec<Dir>,
-    files: Vec<File>,
-    /// The digests whose span was handed out.
-    spanned: HashSet<[u8; 32]>,
-    /// The kind of the record before, and the key and offset of the file before.
-    last_kind: u8,
-    last_place: (u32, u64),
-}
-
 impl<'a> TreeListV2<'a> {
-    /// Walks the records once, in order: checks each, calls `on_span` with the span of every file
-    /// with bytes whose digest it has not met before (pack by pack, ascending offset), and puts
-    /// each entry in the tree. Then checks the name and target tables, and hashes the directories.
+    fn record(&self, index: usize) -> Record {
+        Record::of(&self.entries[index * RECORD_LEN..(index + 1) * RECORD_LEN])
+    }
+
+    fn digest(&self, index: usize) -> [u8; 32] {
+        let mut digest = [0; 32];
+        digest.copy_from_slice(&self.digests[index * RECORD_LEN..(index + 1) * RECORD_LEN]);
+        digest
+    }
+
+    /// The name of an entry whose name the walk has checked.
+    fn name(&self, record: Record) -> &'a str {
+        let start = record.name_off as usize;
+        let bytes = &self.names[start..start + record.name_len as usize];
+        std::str::from_utf8(bytes).unwrap_or_default()
+    }
+
+    /// The path of an entry whose ancestors the walk has checked: for a refusal.
+    fn path(&self, index: usize) -> String {
+        let mut names = Vec::new();
+        let mut at = index;
+        while at != 0 {
+            let record = self.record(at);
+            names.push(self.name(record));
+            at = record.parent as usize;
+        }
+        names.reverse();
+        names.join("/")
+    }
+
+    /// Walks the entries once, each directory's children in order: checks each child, calls
+    /// `on_span` with the span of every file of size above 0 whose digest it has not met before,
+    /// and records each entry's depth. Then hashes the directories, children before parents.
     ///
     /// The files of the result are in the order of the list. The span handed out for a digest is
     /// that of its first file in that order, which is the span the tree store keeps for the digest
@@ -117,233 +111,222 @@ impl<'a> TreeListV2<'a> {
         limits: &TreeLimits,
         mut on_span: impl FnMut(ListSpan),
     ) -> Result<BuiltTree, TreeListV2Error> {
-        if u64::from(self.count) > limits.max_entries {
-            return Err(TreeListV2Error::Tree(RecordError::TooManyEntries(
-                limits.max_entries,
-            )));
+        let count = self.len();
+        let refuse = |error| Err(TreeListV2Error::Tree(error));
+        if (count - 1) as u64 > limits.max_entries {
+            return refuse(RecordError::TooManyEntries(limits.max_entries));
         }
-        let mut walk = Walk {
-            list: self,
-            limits,
-            dirs: vec![Dir {
-                mode: Mode::DIR,
-                parent: None,
-                depth: 0,
-                children: Vec::new(),
-            }],
-            files: Vec::with_capacity(self.len()),
-            spanned: HashSet::new(),
-            last_kind: KIND_DIR,
-            last_place: (0, 0),
-        };
-        for (index, record) in self.records.chunks_exact(self.record_len).enumerate() {
-            // `open` bounded the count to a `u32`.
-            let index = index as u32;
-            walk.record(&Fields::of(record), &mut on_span)
-                .map_err(|fault| TreeListV2Error::Record { index, fault })?;
+        let root = self.record(0);
+        if root.kind != KIND_DIR || root.parent != 0 || root.name_len != 0 {
+            return Err(TreeListV2Error::Entry {
+                index: 0,
+                fault: EntryFault::Root,
+            });
         }
-        self.names.check(valid_name, StringFault::BadName)?;
-        self.targets.check(valid_target, StringFault::BadTarget)?;
-        walk.finish()
+        // The depth and the path length of each entry, set as its directory is walked.
+        let mut depths = vec![(0u32, 0u32); count];
+        let mut spanned = HashSet::new();
+        let mut next = 1;
+        for dir in 0..count {
+            let record = self.record(dir);
+            if record.kind != KIND_DIR {
+                continue;
+            }
+            let fault = |fault| TreeListV2Error::Entry {
+                index: dir as u32,
+                fault,
+            };
+            if next <= dir {
+                return Err(fault(EntryFault::Unreachable));
+            }
+            if record.x as usize != next || record.a > (count - next) as u64 {
+                return Err(fault(EntryFault::Children));
+            }
+            let first = next;
+            next += record.a as usize;
+            if next - first > limits.max_dir_entries {
+                return refuse(RecordError::DirectoryTooLarge(self.path(dir)));
+            }
+            let mut previous: &[u8] = &[];
+            for child in first..next {
+                self.child(dir, child, &mut previous, &mut depths)
+                    .map_err(|fault| TreeListV2Error::Entry {
+                        index: child as u32,
+                        fault,
+                    })?;
+                if depths[child].0 as usize > limits.max_depth {
+                    return refuse(RecordError::TooDeep(self.path(child)));
+                }
+                let record = self.record(child);
+                if record.kind == KIND_FILE && record.b > 0 {
+                    let digest = self.digest(child);
+                    if spanned.insert(digest) {
+                        on_span(ListSpan {
+                            key: self.keys[record.x as usize].clone(),
+                            offset: record.a,
+                            size: record.b,
+                            sha256: TreeDigest::from_bytes(digest),
+                        });
+                    }
+                }
+            }
+        }
+        if next != count {
+            return Err(TreeListV2Error::Orphans(next as u32));
+        }
+        Ok(self.finish())
     }
-}
 
-impl Walk<'_, '_> {
-    /// Checks one record and puts its entry in the tree.
-    fn record(
-        &mut self,
-        fields: &Fields<'_>,
-        on_span: &mut impl FnMut(ListSpan),
-    ) -> Result<(), RecordFault> {
-        let kind = fields.kind;
-        if !(KIND_DIR..=KIND_FILE).contains(&kind) {
-            return Err(RecordFault::UnknownKind(kind));
+    /// Checks entry `child` of directory `dir`, whose name must sort after `previous`.
+    fn child(
+        &self,
+        dir: usize,
+        child: usize,
+        previous: &mut &'a [u8],
+        depths: &mut [(u32, u32)],
+    ) -> Result<(), EntryFault> {
+        let record = self.record(child);
+        if record.parent as usize != dir {
+            return Err(EntryFault::Parent(record.parent));
         }
-        if kind < self.last_kind {
-            return Err(RecordFault::KindOrder);
+        if record.kind > KIND_SYMLINK {
+            return Err(EntryFault::UnknownKind(record.kind));
         }
-        self.last_kind = kind;
-        if fields.name >= self.list.names.len() {
-            return Err(RecordFault::Name(fields.name));
+        let start = record.name_off as usize;
+        let name = self
+            .names
+            .get(start..start + record.name_len as usize)
+            .ok_or(EntryFault::NameBounds)?;
+        let text = std::str::from_utf8(name).map_err(|_| EntryFault::BadName)?;
+        if !is_valid_name(text) {
+            return Err(EntryFault::BadName);
         }
-        // The directories come first, each after its parent: a parent is a directory exactly
-        // when its number is below the count of directories so far.
-        let dir = match fields.parent {
-            NONE => 0,
-            parent if (parent as usize) < self.dirs.len() - 1 => parent as usize + 1,
-            parent => return Err(RecordFault::Parent(parent)),
+        if *previous >= name {
+            return Err(EntryFault::NotAscending);
+        }
+        *previous = name;
+        let (depth, len) = depths[dir];
+        // A path is at most 4096 bytes and a name 255, so neither sum overflows.
+        let len = match dir {
+            0 => name.len() as u32,
+            _ => len + 1 + name.len() as u32,
         };
-        let child = match kind {
-            KIND_DIR => {
-                let mode = mode_of(fields.mode)?;
-                self.dirs.push(Dir {
-                    mode,
-                    parent: Some((dir, fields.name)),
-                    depth: self.dirs[dir].depth + 1,
-                    children: Vec::new(),
-                });
-                Child::Dir(self.dirs.len() - 1)
+        if len as usize > MAX_PATH_BYTES {
+            return Err(EntryFault::PathTooLong);
+        }
+        depths[child] = (depth + 1, len);
+        match record.kind {
+            KIND_FILE if record.b == 0 && self.digest(child) != EMPTY_SHA256 => {
+                return Err(EntryFault::EmptyDigest);
+            }
+            KIND_FILE if record.b == 0 => {}
+            KIND_FILE => {
+                if record.x as usize >= self.keys.len() {
+                    return Err(EntryFault::Key(record.x));
+                }
+                if record.a.checked_add(record.b).is_none() {
+                    return Err(EntryFault::RangeOverflow);
+                }
             }
             KIND_SYMLINK => {
-                if fields.key >= self.list.targets.len() {
-                    return Err(RecordFault::Target(fields.key));
+                let target = usize::try_from(record.a)
+                    .ok()
+                    .zip(usize::try_from(record.b).ok())
+                    .filter(|(_, len)| (1..=MAX_TARGET_BYTES).contains(len))
+                    .and_then(|(start, len)| self.names.get(start..start.checked_add(len)?))
+                    .and_then(|bytes| std::str::from_utf8(bytes).ok())
+                    .filter(|target| !target.contains('\0'));
+                if target.is_none() {
+                    return Err(EntryFault::Target);
                 }
-                Child::Symlink(fields.key)
             }
-            _ => self.file(dir, fields, on_span)?,
-        };
-        self.dirs[dir].children.push((fields.name, child));
+            _ => {}
+        }
         Ok(())
     }
 
-    /// Checks a file record, hands out its span if its digest is new, and keeps it.
-    fn file(
-        &mut self,
-        dir: usize,
-        fields: &Fields<'_>,
-        on_span: &mut impl FnMut(ListSpan),
-    ) -> Result<Child, RecordFault> {
-        let mode = mode_of(fields.mode)?;
-        let mut digest = [0; 32];
-        digest.copy_from_slice(fields.sha256);
-        let place = (fields.key, fields.offset);
-        // The first file compares with (0, 0), which no file sorts before.
-        if place < self.last_place {
-            return Err(RecordFault::Unsorted);
-        }
-        self.last_place = place;
-        let source = match (fields.key, fields.size) {
-            (NONE, 0) => {
-                if digest != EMPTY_SHA256 {
-                    return Err(RecordFault::EmptyDigest);
-                }
-                None
-            }
-            (NONE, _) | (_, 0) => return Err(RecordFault::KeyAndSize),
-            (key, size) => {
-                let key = self
-                    .list
-                    .keys
-                    .get(key as usize)
-                    .ok_or(RecordFault::Key(key))?;
-                if fields.offset.checked_add(size).is_none() {
-                    return Err(RecordFault::RangeOverflow);
-                }
-                if self.spanned.insert(digest) {
-                    on_span(ListSpan {
-                        key: key.clone(),
-                        offset: fields.offset,
-                        size,
-                        sha256: TreeDigest::from_bytes(digest),
-                    });
-                }
-                Some(BlobSource {
-                    key: key.clone(),
-                    offset: fields.offset,
-                })
-            }
-        };
-        let sha256 = TreeDigest::from_bytes(digest);
-        self.files.push(File {
-            dir,
-            name: fields.name,
-            size: fields.size,
-            sha256,
-            source,
-        });
-        Ok(Child::File {
-            mode,
-            size: fields.size,
-            sha256,
-        })
-    }
-
-    /// The path of directory `dir`, from the names, which are checked: for a refusal or a file.
-    fn path(&self, dir: usize, name: Option<u32>) -> String {
-        let mut names = Vec::new();
-        names.extend(name);
-        let mut at = dir;
-        while let Some((parent, name)) = self.dirs[at].parent {
-            names.push(name);
-            at = parent;
-        }
-        let names: Vec<&str> = names
-            .iter()
-            .rev()
-            .map(|n| self.list.names.get(*n))
-            .collect();
-        names.join("/")
-    }
-
-    /// Checks the depth and size of every directory and that no name is twice in one, and hashes
-    /// the directories, children before parents and the root last.
-    fn finish(mut self) -> Result<BuiltTree, TreeListV2Error> {
-        let refuse = |error| Err(TreeListV2Error::Tree(error));
-        let mut digests = vec![TreeDigest::from_bytes([0; 32]); self.dirs.len()];
+    /// The tree of the walked entries: the directories hashed from the last to the root, the
+    /// files in the order of the list.
+    fn finish(&self) -> BuiltTree {
+        let count = self.len();
+        let mut digests = vec![TreeDigest::from_bytes([0; 32]); count];
         let mut records = Vec::new();
         let mut seen = HashSet::new();
-        for at in (0..self.dirs.len()).rev() {
-            let mut children = std::mem::take(&mut self.dirs[at].children);
-            children.sort_unstable_by_key(|(name, _)| *name);
-            let deepest = self.dirs[at].depth + 1;
-            if !children.is_empty() && deepest > self.limits.max_depth {
-                return refuse(RecordError::TooDeep(self.path(at, Some(children[0].0))));
+        for dir in (0..count).rev() {
+            let record = self.record(dir);
+            if record.kind != KIND_DIR {
+                continue;
             }
-            if children.len() > self.limits.max_dir_entries {
-                return refuse(RecordError::DirectoryTooLarge(self.path(at, None)));
-            }
-            if let Some(pair) = children.windows(2).find(|pair| pair[0].0 == pair[1].0) {
-                return refuse(RecordError::Duplicate(self.path(at, Some(pair[0].0))));
-            }
-            let names = &self.list.names;
-            let targets = &self.list.targets;
-            let children = children
-                .into_iter()
-                .map(|(name, child)| {
-                    let name = names.get(name).to_owned();
-                    match child {
-                        Child::Dir(dir) => RecordChild::Dir {
+            let first = record.x as usize;
+            let children = (first..first + record.a as usize)
+                .map(|index| {
+                    let child = self.record(index);
+                    let name = self.name(child).to_owned();
+                    match child.kind {
+                        KIND_DIR => RecordChild::Dir {
                             name,
-                            digest: digests[dir],
+                            digest: digests[index],
                         },
-                        Child::File { mode, size, sha256 } => RecordChild::File {
+                        KIND_FILE => RecordChild::File {
                             name,
-                            mode,
-                            size,
-                            sha256,
+                            mode: child.mode(),
+                            size: child.b,
+                            sha256: TreeDigest::from_bytes(self.digest(index)),
                         },
-                        Child::Symlink(target) => RecordChild::Symlink {
+                        _ => RecordChild::Symlink {
                             name,
-                            target: targets.get(target).to_owned(),
+                            target: self.target(child).to_owned(),
                         },
                     }
                 })
                 .collect();
-            let record = TreeRecord::from_sorted(self.dirs[at].mode, children);
-            let digest = record.digest();
-            digests[at] = digest;
+            let tree = TreeRecord::from_sorted(record.mode(), children);
+            let digest = tree.digest();
+            digests[dir] = digest;
             if seen.insert(digest) {
-                records.push((digest, record));
+                records.push((digest, tree));
             }
         }
-        let files = std::mem::take(&mut self.files)
-            .into_iter()
-            .map(|file| BuiltFile {
-                path: self.path(file.dir, Some(file.name)),
-                sha256: file.sha256,
-                size: file.size,
-                source: file.source,
-            })
-            .collect();
-        Ok(BuiltTree {
+        let mut paths = vec![String::new(); count];
+        let mut files = Vec::new();
+        for dir in 0..count {
+            let record = self.record(dir);
+            if record.kind != KIND_DIR {
+                continue;
+            }
+            let first = record.x as usize;
+            for index in first..first + record.a as usize {
+                let child = self.record(index);
+                let path = match dir {
+                    0 => self.name(child).to_owned(),
+                    _ => format!("{}/{}", paths[dir], self.name(child)),
+                };
+                match child.kind {
+                    KIND_DIR => paths[index] = path,
+                    KIND_FILE => files.push(BuiltFile {
+                        path,
+                        sha256: TreeDigest::from_bytes(self.digest(index)),
+                        size: child.b,
+                        source: (child.b > 0).then(|| BlobSource {
+                            key: self.keys[child.x as usize].clone(),
+                            offset: child.a,
+                        }),
+                    }),
+                    _ => {}
+                }
+            }
+        }
+        BuiltTree {
             root: digests[0],
             records,
             files,
-        })
+        }
     }
-}
 
-/// The mode of `bits`, if it has no bit above 07777.
-fn mode_of(bits: u16) -> Result<Mode, RecordFault> {
-    Mode::new(bits).map_err(|_| RecordFault::BadMode(bits))
+    /// The target of a link the walk has checked.
+    fn target(&self, record: Record) -> &'a str {
+        let start = record.a as usize;
+        let bytes = &self.names[start..start + record.b as usize];
+        std::str::from_utf8(bytes).unwrap_or_default()
+    }
 }

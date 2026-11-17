@@ -100,10 +100,11 @@
 //!   ([`tree_list_key`]), which a client writes before it asks a node's mount provider for the
 //!   tree. [`TreeList::into_entries`] gives the entries [`build_tree`] makes the tree of. The same
 //!   page is the reference.
-//! - [`TreeListV2`] reads, and [`TreeList::encode_v2`] writes, version 2 of the tree list: the same
-//!   entries as fixed little-endian records over tables of the distinct keys, names and targets,
-//!   under the same key. [`TreeListV2::open`] checks the header and the keys without copying;
-//!   [`TreeListV2::build`] walks the records once, handing out each span to read as it meets it,
+//! - [`TreeListV2`] reads, and [`TreeList::encode_v2`] writes, version 2 of the tree list (the
+//!   `TSTREE` format): the same entries as fixed 32-byte little-endian records in breadth-first
+//!   order, with tables of their digests and pack keys, a blob of names and the ranges to read,
+//!   under the same key. [`TreeListV2::open`] checks the header, keys and ranges without copying;
+//!   [`TreeListV2::build`] walks the entries once, handing out each span to read as it meets it,
 //!   and gives the [`BuiltTree`]. The same page is the reference.
 //!
 //! The keys under `_journal/` (the per-node journals of the releases before the entries, which
@@ -276,8 +277,8 @@ pub use tree_list::{
     tree_list_digest, tree_list_key,
 };
 pub use tree_list_v2::{
-    HeaderFault, ListSpan, MAX_KEY_BYTES, RecordFault, Section, StringFault, TREE_LIST_V2_MAGIC,
-    Table, TreeListV2, TreeListV2Error, is_tree_list_v2,
+    EntryFault, HeaderFault, KeyFault, ListRange, ListSpan, MAX_KEY_BYTES, Section,
+    TREE_LIST_V2_MAGIC, TreeListV2, TreeListV2Error, is_tree_list_v2,
 };
 pub use tree_manifest::{
     BlobSource, EntryKind, MAX_DEPTH, MAX_ENTRIES, MAX_MANIFEST_BYTES, TreeChild, TreeDigest,

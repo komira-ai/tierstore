@@ -92,6 +92,10 @@ pub enum TreeListError {
     /// its line): a node-local tree's digest covers the contents.
     #[error("file {0:?} has no sha256")]
     MissingSha256(String),
+    /// A name over 255 bytes, which a version 2 list cannot hold: written by
+    /// [`TreeList::encode_v2`] only.
+    #[error("name too long in {0:?}")]
+    NameTooLong(String),
 }
 
 /// What is wrong with one line of a tree list.

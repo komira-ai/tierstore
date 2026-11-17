@@ -1,15 +1,12 @@
-//! The writer of the version 2 tree list: the bytes `TreeList::encode_v2` makes, its refusals,
-//! and the tree those bytes read as.
+//! The writer of the version 2 tree list: the bytes `TreeList::encode_v2` makes, field by field,
+//! its order, its refusals, and the tree those bytes read as.
 
-use crate::tree_list::{
-    EMPTY_SHA256, ListEntry, ListKind, MAX_TREE_LIST_BYTES, TreeList, TreeListError,
-};
-use crate::tree_list_v2::{
-    KIND_DIR, KIND_FILE, KIND_SYMLINK, NONE, TREE_LIST_V2_MAGIC, TreeListV2, TreeListV2Error,
-    le_u64, read_u32,
-};
-use crate::tree_record::RecordError;
-use crate::{BlobSource, Mode, TreeDigest, TreeLimits, build_tree};
+use std::collections::HashSet;
+
+use super::*;
+use crate::tree_list::{EMPTY_SHA256, ListEntry, ListKind, TreeList, TreeListError};
+use crate::tree_list_v2_encode::RANGE_MERGE_GAP;
+use crate::{BlobSource, BuiltTree, Mode, NewKind, TreeDigest, TreeLimits, build_tree};
 
 const SHA: [u8; 32] = [7; 32];
 
@@ -30,6 +27,15 @@ fn file(path: &str, size: u64, source: Option<(&str, u64)>, sha: Option<[u8; 32]
             sha256: sha.map(TreeDigest::from_bytes),
         },
     }
+}
+
+/// A file of `size` bytes at `offset` of pack `key`, with a digest of its own.
+fn packed(path: &str, key: &str, offset: u64, size: u64) -> ListEntry {
+    let mut sha = [0u8; 32];
+    sha[..8].copy_from_slice(&offset.to_le_bytes());
+    sha[8..16].copy_from_slice(&size.to_le_bytes());
+    sha[16] = path.len() as u8;
+    file(path, size, Some((key, offset)), Some(sha))
 }
 
 fn dir(path: &str, bits: u16) -> ListEntry {
@@ -55,471 +61,540 @@ fn list(entries: Vec<ListEntry>) -> TreeList {
 /// One record of an encoded list, decoded.
 #[derive(Debug, PartialEq, Eq)]
 struct Row {
-    kind: u8,
-    pad: u8,
-    mode: u16,
     name: String,
     parent: u32,
-    key: u32,
-    size: u64,
-    offset: u64,
+    name_off: u32,
+    /// A file's key, a directory's first child.
+    x: u32,
+    kind: u8,
+    mode: u16,
+    flags: u8,
+    /// A file's offset, a directory's child count, a link's target offset.
+    a: u64,
+    /// A file's size, a link's target length.
+    b: u64,
     sha: [u8; 32],
 }
 
-/// The records of `bytes`, with each name looked up.
 fn rows(bytes: &[u8]) -> Vec<Row> {
     let list = TreeListV2::open(bytes).unwrap();
-    list.records
-        .chunks_exact(list.record_len)
-        .map(|r| Row {
-            kind: r[0],
-            pad: r[1],
-            mode: u16::from_le_bytes([r[2], r[3]]),
-            name: list.names.get(read_u32(r, 4).unwrap()).to_owned(),
-            parent: read_u32(r, 8).unwrap(),
-            key: read_u32(r, 12).unwrap(),
-            size: le_u64(&r[16..]),
-            offset: le_u64(&r[24..]),
-            sha: r[32..64].try_into().unwrap(),
+    (0..list.len())
+        .map(|i| {
+            let r = &list.entries[i * 32..i * 32 + 32];
+            let name_off = le_u32(r, 4);
+            let len = r[14] as usize;
+            let kind_mode = le_u16(r, 12);
+            Row {
+                name: String::from_utf8(list.names[name_off as usize..][..len].to_vec()).unwrap(),
+                parent: le_u32(r, 0),
+                name_off,
+                x: le_u32(r, 8),
+                kind: (kind_mode >> 12) as u8,
+                mode: kind_mode & 0o7777,
+                flags: r[15],
+                a: le_u64(r, 16),
+                b: le_u64(r, 24),
+                sha: list.digests[i * 32..i * 32 + 32].try_into().unwrap(),
+            }
         })
         .collect()
 }
 
-/// The names of `rows` in order, with their kind.
-fn names(bytes: &[u8]) -> Vec<(u8, String)> {
-    rows(bytes).into_iter().map(|r| (r.kind, r.name)).collect()
+fn names_of(bytes: &[u8]) -> Vec<String> {
+    rows(bytes).into_iter().map(|row| row.name).collect()
 }
 
-/// Asserts that the bytes of a small list are exactly the layout the reference gives: the header,
-/// the key, name and target tables and one record, with nothing between them and zero in every
-/// ignored field.
-#[test]
-fn a_small_list_is_written_as_the_reference_lays_it_out() {
-    let bytes = list(vec![file("a", 0, None, None)]).encode_v2().unwrap();
-    let mut want = TREE_LIST_V2_MAGIC.to_vec();
-    for field in [2u32, 40, 64, 1, 40, 44, 53, 57] {
-        want.extend_from_slice(&field.to_le_bytes());
-    }
-    want.extend_from_slice(&0u32.to_le_bytes()); // keys: none
-    want.extend_from_slice(&1u32.to_le_bytes()); // names: one, ending at 1
-    want.extend_from_slice(&1u32.to_le_bytes());
-    want.push(b'a');
-    want.extend_from_slice(&0u32.to_le_bytes()); // targets: none
-    want.push(KIND_FILE);
-    want.push(0);
-    want.extend_from_slice(&0o644u16.to_le_bytes());
-    want.extend_from_slice(&0u32.to_le_bytes()); // name 0
-    want.extend_from_slice(&NONE.to_le_bytes()); // root
-    want.extend_from_slice(&NONE.to_le_bytes()); // no key
-    want.extend_from_slice(&0u64.to_le_bytes());
-    want.extend_from_slice(&0u64.to_le_bytes());
-    want.extend_from_slice(&EMPTY_SHA256);
-    assert_eq!(bytes, want);
+fn encode(entries: Vec<ListEntry>) -> Vec<u8> {
+    list(entries).encode_v2().unwrap()
 }
 
-/// Asserts that a list with no entries is written as a header and three empty tables that open
-/// as an empty list.
-#[test]
-fn an_empty_list_is_written_and_read_as_empty() {
-    let bytes = TreeList::default().encode_v2().unwrap();
-    assert_eq!(bytes.len(), 40 + 12);
+/// The ranges `encode_v2` wrote for `entries`, as (key, offset, len).
+fn ranges_of(entries: Vec<ListEntry>) -> Vec<(String, u64, u64)> {
+    let bytes = encode(entries);
     let opened = TreeListV2::open(&bytes).unwrap();
-    assert!(opened.is_empty());
+    opened
+        .ranges()
+        .map(|r| (r.key.to_string(), r.offset, r.len))
+        .collect()
 }
 
-/// Asserts that every directory a path implies is a record of its own, in mode 0755, each after
-/// its parent, the first with no parent.
-#[test]
-fn implied_directories_get_records_of_mode_0755() {
-    let bytes = list(vec![file("a/b/c.txt", 3, Some(("k", 0)), Some(SHA))])
-        .encode_v2()
-        .unwrap();
-    let rows = rows(&bytes);
-    assert_eq!(rows.len(), 3);
-    assert_eq!(
-        (rows[0].kind, rows[0].mode, rows[0].parent),
-        (KIND_DIR, 0o755, NONE)
-    );
-    assert_eq!(rows[0].name, "a");
-    assert_eq!(
-        (rows[1].kind, rows[1].mode, rows[1].parent),
-        (KIND_DIR, 0o755, 0)
-    );
-    assert_eq!(rows[1].name, "b");
-    assert_eq!(
-        (rows[2].kind, rows[2].parent, rows[2].mode),
-        (KIND_FILE, 1, 0o644)
-    );
-    assert_eq!(rows[2].name, "c.txt");
+fn range(key: &str, offset: u64, len: u64) -> (String, u64, u64) {
+    (key.to_owned(), offset, len)
 }
 
-/// Asserts that an explicit directory sets the mode of the record an implied one would have been,
-/// whether it is listed before or after the entries below it, and a directory listed alone, empty,
-/// gets its record.
+/// Asserts that a list of one file in one pack is written as exactly these bytes, field by field:
+/// the header, the root and the file's record, the digests, the key offsets, the key, the name and
+/// the range, each section at the next multiple of 8 with zero between.
 #[test]
-fn an_explicit_directory_sets_the_mode_of_an_implied_one() {
-    for order in [false, true] {
-        let mut entries = vec![
-            dir("a", 0o700),
-            file("a/b/f", 1, Some(("k", 0)), Some(SHA)),
-            dir("a/b", 0o1777),
-            dir("empty", 0o500),
-        ];
-        if order {
-            entries.reverse();
-        }
-        let bytes = list(entries).encode_v2().unwrap();
-        let rows = rows(&bytes);
-        let dirs: Vec<(&str, u16, u32)> = rows
-            .iter()
-            .filter(|r| r.kind == KIND_DIR)
-            .map(|r| (r.name.as_str(), r.mode, r.parent))
-            .collect();
-        assert_eq!(
-            dirs,
-            vec![("a", 0o700, NONE), ("b", 0o1777, 0), ("empty", 0o500, NONE)]
-        );
+fn a_tiny_list_is_written_as_these_bytes() {
+    let bytes = encode(vec![file("a", 3, Some(("k", 5)), Some(SHA))]);
+    let mut expected: Vec<u8> = Vec::new();
+    // Header: magic, major 1, minor 0, flags 0.
+    expected.extend_from_slice(b"TSTREE\0\0");
+    expected.extend_from_slice(&[1, 0, 0, 0, 0, 0, 0, 0]);
+    // Six (offset, count): entries 64 x2, digests 128 x2, key offsets 192 x1, keys 200 x1,
+    // names 208 x1, ranges 216 x1.
+    for (offset, count) in [
+        (64u32, 2u32),
+        (128, 2),
+        (192, 1),
+        (200, 1),
+        (208, 1),
+        (216, 1),
+    ] {
+        expected.extend_from_slice(&offset.to_le_bytes());
+        expected.extend_from_slice(&count.to_le_bytes());
     }
+    assert_eq!(expected.len(), 64);
+    // The root: parent 0, name offset 0, first child 1, directory 0755, name length 0, flags 0,
+    // one child, size 0.
+    expected.extend_from_slice(&0u32.to_le_bytes());
+    expected.extend_from_slice(&0u32.to_le_bytes());
+    expected.extend_from_slice(&1u32.to_le_bytes());
+    expected.extend_from_slice(&0x11edu16.to_le_bytes());
+    expected.extend_from_slice(&[0, 0]);
+    expected.extend_from_slice(&1u64.to_le_bytes());
+    expected.extend_from_slice(&0u64.to_le_bytes());
+    // File a: parent 0, name offset 0, key 0, file 0644, name length 1, flags 0, offset 5, size 3.
+    expected.extend_from_slice(&0u32.to_le_bytes());
+    expected.extend_from_slice(&0u32.to_le_bytes());
+    expected.extend_from_slice(&0u32.to_le_bytes());
+    expected.extend_from_slice(&0x01a4u16.to_le_bytes());
+    expected.extend_from_slice(&[1, 0]);
+    expected.extend_from_slice(&5u64.to_le_bytes());
+    expected.extend_from_slice(&3u64.to_le_bytes());
+    assert_eq!(expected.len(), 128);
+    // Digests: zero for the root, the file's.
+    expected.extend_from_slice(&[0; 32]);
+    expected.extend_from_slice(&SHA);
+    assert_eq!(expected.len(), 192);
+    // Key offsets 0 and 1, then the key, padded to 208.
+    expected.extend_from_slice(&0u32.to_le_bytes());
+    expected.extend_from_slice(&1u32.to_le_bytes());
+    expected.extend_from_slice(b"k");
+    expected.extend_from_slice(&[0; 7]);
+    // The names, padded to 216.
+    expected.extend_from_slice(b"a");
+    expected.extend_from_slice(&[0; 7]);
+    // The range: key 0, 4 zero bytes, offset 5, length 3.
+    expected.extend_from_slice(&0u32.to_le_bytes());
+    expected.extend_from_slice(&[0; 4]);
+    expected.extend_from_slice(&5u64.to_le_bytes());
+    expected.extend_from_slice(&3u64.to_le_bytes());
+    assert_eq!(bytes, expected);
 }
 
-/// Asserts that the directories come sorted by path, so a directory follows the one it is in, and
-/// a child names its parent by the parent's record number.
+/// Asserts that a list of nothing is the root alone, with no keys, no names and no ranges.
 #[test]
-fn directories_are_sorted_by_path_and_name_their_parents_by_number() {
-    let bytes = list(vec![
-        dir("z", 0o755),
-        dir("a/x/y", 0o755),
-        dir("a-b", 0o755),
-        file("a/x/y/f", 1, Some(("k", 0)), Some(SHA)),
-    ])
-    .encode_v2()
-    .unwrap();
-    let rows = rows(&bytes);
-    let dirs: Vec<(&str, u32)> = rows
-        .iter()
-        .filter(|r| r.kind == KIND_DIR)
-        .map(|r| (r.name.as_str(), r.parent))
-        .collect();
-    // Paths sorted: "a", "a-b", "a/x", "a/x/y", "z" ('-' sorts before '/').
+fn an_empty_list_is_the_root_alone() {
+    let bytes = encode(Vec::new());
+    let found = rows(&bytes);
+    assert_eq!(found.len(), 1);
+    assert_eq!(found[0].kind, 1);
+    assert_eq!(found[0].mode, 0o755);
+    assert_eq!(found[0].a, 0);
+    assert_eq!(found[0].x, 1);
+    assert!(TreeListV2::open(&bytes).unwrap().is_empty());
+    assert_eq!(le_u32(&bytes, count_at(RANGES)), 0);
+    assert_eq!(le_u32(&bytes, count_at(NAMES)), 0);
+}
+
+/// Asserts that a directory only the paths imply is an entry of its own with mode 0755, at each
+/// level, with its children counted and its parent set.
+#[test]
+fn an_implied_directory_is_an_entry_of_mode_0755() {
+    let bytes = encode(vec![file("a/b/c", 0, None, None)]);
+    let found = rows(&bytes);
+    assert_eq!(names_of(&bytes), ["", "a", "b", "c"]);
     assert_eq!(
-        dirs,
-        vec![("a", NONE), ("a-b", NONE), ("x", 0), ("y", 2), ("z", NONE)]
+        (found[1].kind, found[1].mode, found[1].parent),
+        (1, 0o755, 0)
     );
-    assert_eq!(rows[5].parent, 3);
+    assert_eq!(
+        (found[2].kind, found[2].mode, found[2].parent),
+        (1, 0o755, 1)
+    );
+    assert_eq!((found[3].kind, found[3].parent), (0, 2));
+    assert_eq!((found[1].x, found[1].a), (2, 1));
+    assert_eq!((found[2].x, found[2].a), (3, 1));
+}
+
+/// Asserts that a directory the list gives a mode, before or after the paths below it, keeps that
+/// mode over the 0755 the paths imply, and that an explicit directory with nothing in it is an
+/// entry with no children.
+#[test]
+fn an_explicit_directory_mode_overrides_the_implied_one() {
+    for entries in [
+        vec![dir("a", 0o700), file("a/f", 0, None, None)],
+        vec![file("a/f", 0, None, None), dir("a", 0o700)],
+    ] {
+        let found = rows(&encode(entries));
+        assert_eq!((found[1].name.as_str(), found[1].mode), ("a", 0o700));
+    }
+    let found = rows(&encode(vec![dir("x/y", 0o1777), dir("e", 0o500)]));
+    let by_name = |name: &str| found.iter().find(|row| row.name == name).unwrap();
+    assert_eq!(by_name("x").mode, 0o755);
+    assert_eq!(by_name("y").mode, 0o1777);
+    assert_eq!((by_name("e").mode, by_name("e").a), (0o500, 0));
+}
+
+/// Asserts that the entries are breadth first from the root, siblings sorted bytewise (an upper
+/// case name before a lower case one, a prefix before its extension), each directory's children
+/// right after those of the directories before it.
+#[test]
+fn entries_are_breadth_first_with_siblings_sorted_bytewise() {
+    let bytes = encode(vec![
+        file("b/x", 0, None, None),
+        file("a/z", 0, None, None),
+        file("a/y/q", 0, None, None),
+        file("B", 0, None, None),
+        file("ab", 0, None, None),
+        file("a/y2", 0, None, None),
+    ]);
+    assert_eq!(
+        names_of(&bytes),
+        ["", "B", "a", "ab", "b", "y", "y2", "z", "x", "q"]
+    );
+    let found = rows(&bytes);
+    // Children of a: entries 5..8, of b: 8..9, of a/y: 9..10.
+    assert_eq!((found[2].x, found[2].a), (5, 3));
+    assert_eq!((found[4].x, found[4].a), (8, 1));
+    assert_eq!((found[5].x, found[5].a), (9, 1));
+    let parents: Vec<u32> = found.iter().map(|row| row.parent).collect();
+    assert_eq!(parents, [0, 0, 0, 0, 0, 2, 2, 2, 4, 5]);
+    assert_eq!((found[0].x, found[0].a), (1, 4));
+}
+
+/// Asserts that a name is in the names once, however many directories hold an entry of it, so two
+/// files of one name in two directories share an offset.
+#[test]
+fn a_name_is_in_the_names_once() {
+    let bytes = encode(vec![
+        file("d1/same", 0, None, None),
+        file("d2/same", 0, None, None),
+    ]);
+    let found = rows(&bytes);
+    assert_eq!(names_of(&bytes), ["", "d1", "d2", "same", "same"]);
+    assert_eq!(found[3].name_off, found[4].name_off);
+    assert_eq!(found[3].name_off, 4);
+    let opened = TreeListV2::open(&bytes).unwrap();
+    assert_eq!(opened.names, b"d1d2same");
+}
+
+/// Asserts that a link's target is in the names right after the link's name, with its offset and
+/// length in the record, kind 2, mode 0 and no digest, and that two links of one target each have
+/// their own copy of it.
+#[test]
+fn a_link_target_follows_its_name() {
+    let bytes = encode(vec![link("l1", "t"), link("l2", "t")]);
+    let opened = TreeListV2::open(&bytes).unwrap();
+    assert_eq!(opened.names, b"l1tl2t");
+    let found = rows(&bytes);
+    assert_eq!((found[1].kind, found[1].mode), (2, 0));
+    assert_eq!((found[1].name_off, found[1].a, found[1].b), (0, 2, 1));
+    assert_eq!((found[2].name_off, found[2].a, found[2].b), (3, 5, 1));
+    assert_eq!(found[1].sha, [0; 32]);
+    assert_eq!(found[1].x, 0);
+}
+
+/// Asserts that a link's name is interned like a file's of the same name in another directory, and
+/// its target is read back whole from after the name.
+#[test]
+fn a_link_name_is_interned_like_any_other() {
+    let bytes = encode(vec![link("a/n", "../far/away"), file("b/n", 0, None, None)]);
+    let found = rows(&bytes);
+    let opened = TreeListV2::open(&bytes).unwrap();
+    assert_eq!(names_of(&bytes), ["", "a", "b", "n", "n"]);
+    assert_eq!(found[3].name_off, found[4].name_off);
+    assert_eq!(
+        &opened.names[found[3].a as usize..][..found[3].b as usize],
+        b"../far/away"
+    );
+}
+
+/// Asserts that the keys are sorted and each is in the key table once, and a file's key number is
+/// its place in that order.
+#[test]
+fn keys_are_sorted_and_each_is_once() {
+    let bytes = encode(vec![
+        packed("a", "z", 0, 1),
+        packed("b", "a", 0, 2),
+        packed("c", "m", 0, 3),
+        packed("d", "a", 9, 4),
+        file("e", 0, None, None),
+    ]);
+    let opened = TreeListV2::open(&bytes).unwrap();
+    let keys: Vec<&str> = opened.keys.iter().map(|k| &**k).collect();
+    assert_eq!(keys, ["a", "m", "z"]);
+    let found = rows(&bytes);
+    let key_of = |name: &str| found.iter().find(|r| r.name == name).unwrap().x;
+    assert_eq!(
+        [
+            key_of("a"),
+            key_of("b"),
+            key_of("c"),
+            key_of("d"),
+            key_of("e")
+        ],
+        [2, 0, 1, 0, 0]
+    );
+}
+
+/// Asserts that ranges are sorted by key then offset whatever the order of the entries, and that
+/// bytes of two keys are two ranges even when they touch.
+#[test]
+fn ranges_are_sorted_and_two_keys_never_merge() {
+    let found = ranges_of(vec![
+        packed("a", "b", 10, 10),
+        packed("b", "a", 100_000_000, 5),
+        packed("c", "a", 0, 10),
+        packed("d", "b", 0, 10),
+    ]);
+    assert_eq!(
+        found,
+        [
+            range("a", 0, 10),
+            range("a", 100_000_000, 5),
+            range("b", 0, 20)
+        ]
+    );
+    let touching = ranges_of(vec![packed("a", "a", 0, 10), packed("b", "b", 10, 10)]);
+    assert_eq!(touching, [range("a", 0, 10), range("b", 10, 10)]);
+}
+
+/// Asserts that adjacent bytes of a pack are one range.
+#[test]
+fn adjacent_spans_merge() {
+    let found = ranges_of(vec![packed("a", "k", 0, 10), packed("b", "k", 10, 10)]);
+    assert_eq!(found, [range("k", 0, 20)]);
+}
+
+/// Asserts that a gap of exactly 64 KiB between two files of a pack is merged, with the gap in
+/// the range, and a gap of 64 KiB and one byte is not.
+#[test]
+fn a_gap_of_64_kib_merges_and_one_byte_more_does_not() {
+    assert_eq!(RANGE_MERGE_GAP, 65_536);
+    let at = |gap: u64| ranges_of(vec![packed("a", "k", 0, 10), packed("b", "k", 10 + gap, 5)]);
+    assert_eq!(at(RANGE_MERGE_GAP), [range("k", 0, 10 + 65_536 + 5)]);
+    assert_eq!(
+        at(RANGE_MERGE_GAP + 1),
+        [range("k", 0, 10), range("k", 10 + 65_537, 5)]
+    );
+}
+
+/// Asserts that files whose bytes overlap, or lie within the bytes of another, are one range that
+/// ends at the furthest end, and a merged range goes on merging what follows it.
+#[test]
+fn overlapping_and_contained_spans_merge() {
+    let overlap = ranges_of(vec![packed("a", "k", 0, 10), packed("b", "k", 5, 10)]);
+    assert_eq!(overlap, [range("k", 0, 15)]);
+    let contained = ranges_of(vec![packed("a", "k", 0, 100), packed("b", "k", 10, 5)]);
+    assert_eq!(contained, [range("k", 0, 100)]);
+    let chain = ranges_of(vec![
+        packed("a", "k", 0, 10),
+        packed("b", "k", 50_000, 10),
+        packed("c", "k", 110_000, 10),
+    ]);
+    assert_eq!(chain, [range("k", 0, 110_010)]);
+}
+
+/// Asserts that a file whose offset and size pass 2^64 is written with the range ending at 2^64 - 1
+/// rather than wrapping, and the list opens.
+#[test]
+fn a_span_past_2_64_ends_at_the_most() {
+    let found = ranges_of(vec![packed("a", "k", u64::MAX - 1, 10)]);
+    assert_eq!(found, [range("k", u64::MAX - 1, 1)]);
 }
 
 /// Asserts that the same entries in any order are the same bytes.
 #[test]
 fn the_same_entries_in_any_order_are_the_same_bytes() {
     let entries = vec![
-        file("b/two", 2, Some(("pk/2", 10)), Some([2; 32])),
-        file("b/one", 1, Some(("pk/1", 0)), Some([1; 32])),
-        file("a/three", 3, Some(("pk/1", 5)), Some([3; 32])),
+        packed("z/a", "k2", 7, 100),
+        packed("z/b", "k1", 0, 50),
+        link("l", "z/a"),
+        dir("e", 0o700),
         file("empty", 0, None, None),
-        link("l/y", "../b"),
-        link("l/x", "../a"),
-        dir("a", 0o700),
-        dir("hollow", 0o755),
+        packed("a/b/c", "k1", 60, 5),
     ];
-    let want = list(entries.clone()).encode_v2().unwrap();
+    let expected = encode(entries.clone());
     let mut reversed = entries.clone();
     reversed.reverse();
-    assert_eq!(list(reversed).encode_v2().unwrap(), want);
-    for turn in 1..entries.len() {
-        let mut rotated = entries.clone();
-        rotated.rotate_left(turn);
-        assert_eq!(
-            list(rotated).encode_v2().unwrap(),
-            want,
-            "rotated by {turn}"
-        );
-    }
-    let mut swapped = entries;
-    swapped.swap(0, 5);
-    swapped.swap(2, 7);
-    assert_eq!(list(swapped).encode_v2().unwrap(), want);
+    assert_eq!(encode(reversed), expected);
+    let mut rotated = entries;
+    rotated.rotate_left(2);
+    assert_eq!(encode(rotated), expected);
 }
 
-/// Asserts that the records are the directories, then the links sorted by path, then the files
-/// with bytes sorted by key, offset and path, then the files of size 0 sorted by path.
+/// Asserts that a file of size 0 with no digest gets the digest of no bytes and no key, a file of
+/// size 0 with a digest keeps it, and a directory and a link have the zero digest.
 #[test]
-fn the_records_come_directories_links_files_then_empty_files() {
-    let bytes = list(vec![
-        file("zz-empty", 0, None, None),
-        file("m", 4, Some(("pack-b", 0)), Some([1; 32])),
-        file("n", 4, Some(("pack-a", 40)), Some([2; 32])),
-        file("o", 4, Some(("pack-a", 8)), Some([3; 32])),
-        file("p", 4, Some(("pack-a", 8)), Some([4; 32])),
-        file("aa-empty", 0, None, None),
-        link("lk-b", "t"),
-        link("lk-a", "t"),
+fn a_file_of_size_0_without_a_digest_has_the_empty_digest() {
+    let bytes = encode(vec![
+        file("e", 0, None, None),
+        file("f", 0, None, Some(SHA)),
         dir("d", 0o755),
-    ])
-    .encode_v2()
-    .unwrap();
-    let order: Vec<String> = rows(&bytes)
-        .into_iter()
-        .map(|r| format!("{}:{}", r.kind, r.name))
-        .collect();
-    assert_eq!(
-        order,
-        [
-            "1:d",
-            "2:lk-a",
-            "2:lk-b",
-            "3:o",
-            "3:p",
-            "3:n",
-            "3:m",
-            "3:aa-empty",
-            "3:zz-empty"
-        ]
-    );
+        link("l", "e"),
+    ]);
+    let found = rows(&bytes);
+    let row = |name: &str| found.iter().find(|r| r.name == name).unwrap();
+    assert_eq!(row("e").sha, EMPTY_SHA256);
+    assert_eq!(row("f").sha, SHA);
+    assert_eq!(row("d").sha, [0; 32]);
+    assert_eq!(row("l").sha, [0; 32]);
+    assert_eq!((row("e").x, row("e").a, row("e").b), (0, 0, 0));
+    assert!(found.iter().all(|r| r.flags == 0));
+    assert_eq!(le_u32(&bytes, count_at(RANGES)), 0);
 }
 
-/// Asserts that a key and a target are in their tables once however many entries use them, the
-/// tables are ascending, and each record names its key and target by number.
+/// Asserts that a file of size above 0 with no digest is refused, naming its path, and that the
+/// refusal says so in words.
 #[test]
-fn each_key_and_target_is_in_its_table_once() {
-    let bytes = list(vec![
-        file("f1", 1, Some(("pk/b", 0)), Some([1; 32])),
-        file("f2", 1, Some(("pk/a", 0)), Some([2; 32])),
-        file("f3", 1, Some(("pk/b", 1)), Some([3; 32])),
-        link("l1", "z"),
-        link("l2", "a"),
-        link("l3", "z"),
-    ])
-    .encode_v2()
-    .unwrap();
-    let opened = TreeListV2::open(&bytes).unwrap();
-    let keys: Vec<&str> = opened.keys.iter().map(|k| &**k).collect();
-    assert_eq!(keys, ["pk/a", "pk/b"]);
-    assert_eq!(opened.targets.len(), 2);
-    assert_eq!(opened.targets.get(0), "a");
-    assert_eq!(opened.targets.get(1), "z");
-    let rows = rows(&bytes);
-    let links: Vec<u32> = rows
-        .iter()
-        .filter(|r| r.kind == KIND_SYMLINK)
-        .map(|r| r.key)
-        .collect();
-    assert_eq!(links, [1, 0, 1]);
-    let files: Vec<(&str, u32, u64)> = rows
-        .iter()
-        .filter(|r| r.kind == KIND_FILE)
-        .map(|r| (r.name.as_str(), r.key, r.offset))
-        .collect();
-    assert_eq!(files, [("f2", 0, 0), ("f1", 1, 0), ("f3", 1, 1)]);
-}
-
-/// Asserts that a name used in several directories is in the name table once.
-#[test]
-fn a_name_in_several_directories_is_in_the_table_once() {
-    let bytes = list(vec![
-        file("a/x", 1, Some(("k", 0)), Some([1; 32])),
-        file("b/x", 1, Some(("k", 1)), Some([2; 32])),
-        link("x", "a"),
-    ])
-    .encode_v2()
-    .unwrap();
-    let opened = TreeListV2::open(&bytes).unwrap();
-    assert_eq!(opened.names.len(), 3);
-    let all: Vec<&str> = (0..3).map(|i| opened.names.get(i)).collect();
-    assert_eq!(all, ["a", "b", "x"]);
-}
-
-/// Asserts that a link has mode 0 and no size, offset or digest, and a directory has no key,
-/// size, offset or digest: every ignored field is zero (and a directory's key is `NONE`).
-#[test]
-fn ignored_fields_are_written_as_zero() {
-    let bytes = list(vec![link("l", "t"), dir("d", 0o700)])
+fn a_file_without_a_digest_is_refused() {
+    let error = list(vec![file("a/b", 1, Some(("k", 0)), None)])
         .encode_v2()
-        .unwrap();
-    let rows = rows(&bytes);
-    assert_eq!(
-        rows[0],
-        Row {
-            kind: KIND_DIR,
-            pad: 0,
-            mode: 0o700,
-            name: "d".into(),
-            parent: NONE,
-            key: NONE,
-            size: 0,
-            offset: 0,
-            sha: [0; 32],
-        }
-    );
-    assert_eq!(
-        rows[1],
-        Row {
-            kind: KIND_SYMLINK,
-            pad: 0,
-            mode: 0,
-            name: "l".into(),
-            parent: NONE,
-            key: 0,
-            size: 0,
-            offset: 0,
-            sha: [0; 32],
-        }
-    );
+        .unwrap_err();
+    assert_eq!(error, TreeListError::MissingSha256("a/b".to_owned()));
+    assert_eq!(error.to_string(), "file \"a/b\" has no sha256");
 }
 
-/// Asserts that a file of size 0 with no `sha256` is written with the SHA-256 of no bytes and no
-/// key, and one that gives a `sha256` keeps it.
+/// Asserts that a name of 255 bytes is written and one of 256 is refused, naming the path, for a
+/// file, for a directory the path implies and for a link.
 #[test]
-fn an_empty_file_without_a_digest_gets_the_digest_of_no_bytes() {
-    let bytes = list(vec![
-        file("a", 0, None, None),
-        file("b", 0, None, Some([5; 32])),
-    ])
-    .encode_v2()
-    .unwrap();
-    let rows = rows(&bytes);
-    assert_eq!(
-        (rows[0].key, rows[0].size, rows[0].sha),
-        (NONE, 0, EMPTY_SHA256)
-    );
-    assert_eq!((rows[1].key, rows[1].sha), (NONE, [5; 32]));
-    assert_eq!(
-        EMPTY_SHA256,
-        *TreeDigest::of(b"").as_bytes(),
-        "the digest of no bytes"
-    );
+fn a_name_over_255_bytes_is_refused() {
+    let ok = "n".repeat(255);
+    let long = "n".repeat(256);
+    let bytes = encode(vec![file(&ok, 0, None, None)]);
+    assert_eq!(rows(&bytes)[1].name, ok);
+
+    let error = list(vec![file(&long, 0, None, None)])
+        .encode_v2()
+        .unwrap_err();
+    assert_eq!(error, TreeListError::NameTooLong(long.clone()));
+    assert_eq!(error.to_string(), format!("name too long in {long:?}"));
+
+    let in_dir = format!("{long}/f");
+    let error = list(vec![file(&in_dir, 0, None, None)])
+        .encode_v2()
+        .unwrap_err();
+    assert_eq!(error, TreeListError::NameTooLong(long.clone()));
+    let error = list(vec![link(&long, "t")]).encode_v2().unwrap_err();
+    assert_eq!(error, TreeListError::NameTooLong(long));
 }
 
-/// Asserts that a file of size above 0 with no `sha256` is refused with its path, with the exact
-/// message.
+/// Asserts that an object that would be over the bound is refused as too large, with the size it
+/// would have: here a link whose target is a little under the bound.
 #[test]
-fn a_file_with_bytes_and_no_digest_is_refused() {
-    let error = list(vec![
-        file("ok", 1, Some(("k", 0)), Some(SHA)),
-        file("d/no-digest", 5, Some(("k", 1)), None),
-    ])
-    .encode_v2()
-    .unwrap_err();
-    assert_eq!(error, TreeListError::MissingSha256("d/no-digest".into()));
-    assert_eq!(error.to_string(), "file \"d/no-digest\" has no sha256");
-}
-
-/// Asserts that a list whose bytes would pass the largest size is refused with the size it would
-/// have and the bound, and that one a few bytes under is written: a single link target is bounded
-/// only by the reader.
-#[test]
-fn a_list_over_the_largest_size_is_refused() {
-    // header 40 + keys 4 + names (4 + 4 + 1) + targets (4 + 4 + n) + one record of 64.
-    let fixed = 40 + 4 + 9 + 8 + 64;
-    let target = "t".repeat(MAX_TREE_LIST_BYTES - fixed + 1);
+fn an_object_over_the_bound_is_not_written() {
+    let target = "t".repeat(MAX_TREE_LIST_BYTES - 100);
     let error = list(vec![link("l", &target)]).encode_v2().unwrap_err();
+    // The entries and digests end at 192, the key offsets at 196, the keys (none) at 200, the
+    // names (`l` and the target) end at 201 + target, and the ranges (none) begin at the next
+    // multiple of 8.
+    let size = (201 + target.len()).next_multiple_of(8);
     assert_eq!(
         error,
         TreeListError::TooLarge {
-            size: MAX_TREE_LIST_BYTES + 1,
+            size,
             max: MAX_TREE_LIST_BYTES,
         }
     );
+    assert!(size > MAX_TREE_LIST_BYTES);
     assert_eq!(
         error.to_string(),
-        "tree list too large: 268435457 bytes, at most 268435456"
+        format!("tree list too large: {size} bytes, at most 268435456")
     );
-    let target = "t".repeat(MAX_TREE_LIST_BYTES - fixed);
-    let bytes = list(vec![link("l", &target)]).encode_v2().unwrap();
-    assert_eq!(bytes.len(), MAX_TREE_LIST_BYTES);
 }
 
-/// Asserts that what the writer writes reads back, open and build, as the tree `build_tree` makes
-/// of the same entries: the same root digest, the same directory records, the same files and
-/// sources.
+/// Asserts that a file of size 0 that names a pack (a list made in code) is written with no key
+/// and no range, as a list the reader opens: the bytes are those of the same file with no pack
+/// beside a key table that still names the pack.
 #[test]
-fn what_the_writer_writes_reads_back_as_the_same_tree() {
-    let source = list(vec![
-        file("bin/cc", 10, Some(("out/a1/0", 4096)), Some([1; 32])),
-        file("bin/ld", 20, Some(("out/a1/0", 8192)), Some([2; 32])),
-        file("bin/ld2", 20, Some(("out/a0/0", 0)), Some([2; 32])),
-        file("share/doc/readme", 7, Some(("out/b0/1", 16)), Some([3; 32])),
-        file("share/empty", 0, None, None),
-        link("lib", "bin"),
-        link("share/doc/up", "../.."),
-        dir("tmp", 0o1777),
-        dir("share/private", 0o700),
+fn a_file_of_size_0_with_a_source_is_written_as_a_list_that_opens() {
+    let bytes = encode(vec![file("e", 0, Some(("k", 3)), None)]);
+    let list = TreeListV2::open(&bytes).unwrap();
+    assert_eq!(list.ranges().count(), 0);
+    let built = list.build(&TreeLimits::default(), drop).unwrap();
+    assert_eq!(built.files[0].source, None);
+    assert_eq!(built.files[0].size, 0);
+}
+
+/// The root, the records as a sorted set and the files as a sorted set of what `built` holds.
+fn summary(built: BuiltTree) -> (TreeDigest, Vec<String>, Vec<String>) {
+    let mut records: Vec<String> = built.records.iter().map(|r| format!("{r:?}")).collect();
+    records.sort();
+    let mut files: Vec<String> = built.files.iter().map(|f| format!("{f:?}")).collect();
+    files.sort();
+    (built.root, records, files)
+}
+
+/// Asserts that opening and building what `encode_v2` writes gives the tree that `build_tree`
+/// makes of the version 1 entries, digest for digest: the root, the records as a set and the
+/// files, for several trees, and that the spans handed out are those of the files of size above 0,
+/// one for each digest.
+#[test]
+fn what_encode_v2_writes_builds_the_tree_the_entries_make() {
+    let trees = vec![
+        list(Vec::new()),
+        list(vec![file("only", 0, None, None)]),
+        list(vec![
+            packed("bin/cc", "p1", 0, 100),
+            packed("bin/ld", "p1", 100, 50),
+            packed("lib/x/y/libz.so", "p2", 0, 70_000),
+            link("bin/cc2", "cc"),
+            dir("tmp", 0o1777),
+            dir("lib/x/empty", 0o700),
+            file("etc/e", 0, None, None),
+            file("etc/dup1", 4, Some(("p3", 9)), Some(SHA)),
+            file("etc/dup2", 4, Some(("p3", 400_000)), Some(SHA)),
+        ]),
+        list(vec![
+            dir("a", 0o750),
+            packed("a/B", "k", 5, 5),
+            packed("a/b", "k", 0, 5),
+            packed("é/ü", "k", 20, 5),
+            link("a/l", "../é"),
+        ]),
+    ];
+    for tree in trees {
+        let bytes = tree.encode_v2().unwrap();
+        let opened = TreeListV2::open(&bytes).unwrap();
+        let mut spans = Vec::new();
+        let built = opened
+            .build(&TreeLimits::default(), |span| spans.push(span))
+            .unwrap();
+        let entries = tree.clone().into_entries().unwrap();
+        let expected = build_tree(None, entries.clone(), &TreeLimits::default()).unwrap();
+        assert_eq!(summary(built), summary(expected));
+
+        let digests: HashSet<[u8; 32]> = spans.iter().map(|s| *s.sha256.as_bytes()).collect();
+        assert_eq!(digests.len(), spans.len());
+        let wanted: HashSet<[u8; 32]> = entries
+            .iter()
+            .filter_map(|e| match &e.kind {
+                NewKind::File { sha256, size, .. } if *size > 0 => Some(*sha256.as_bytes()),
+                _ => None,
+            })
+            .collect();
+        assert_eq!(digests, wanted);
+    }
+}
+
+/// Asserts that of two files of one digest the first in the order of the entries gives the span:
+/// `etc/dup1` sorts before `etc/dup2` whatever the order they were listed in.
+#[test]
+fn the_span_of_a_digest_is_that_of_its_first_file() {
+    let tree = list(vec![
+        file("etc/dup2", 4, Some(("p3", 400_000)), Some(SHA)),
+        file("etc/dup1", 4, Some(("p3", 9)), Some(SHA)),
     ]);
-    let bytes = source.encode_v2().unwrap();
-    let opened = TreeListV2::open(&bytes).unwrap();
-    assert_eq!(opened.len(), 12);
+    let bytes = tree.encode_v2().unwrap();
     let mut spans = Vec::new();
-    let built = opened
-        .build(&TreeLimits::default(), |span| spans.push(span))
-        .unwrap();
-
-    let want = build_tree(None, source.into_entries().unwrap(), &TreeLimits::default()).unwrap();
-    assert_eq!(built.root, want.root);
-    // The records are the same set; only the order of sibling directories may differ.
-    assert_eq!(built.records.last().map(|r| r.0), Some(want.root));
-    let mut got = built.records;
-    let mut expected = want.records;
-    got.sort_by_key(|(digest, _)| *digest.as_bytes());
-    expected.sort_by_key(|(digest, _)| *digest.as_bytes());
-    assert_eq!(got, expected);
-    let mut files = built.files;
-    files.sort_by(|a, b| a.path.cmp(&b.path));
-    assert_eq!(files, want.files);
-    // The digest [2; 32] is read once, for its first file in the order of the records.
-    assert_eq!(spans.len(), 3);
-}
-
-/// Asserts that an empty list reads back as the tree of no entries.
-#[test]
-fn an_empty_list_reads_back_as_the_empty_tree() {
-    let bytes = TreeList::default().encode_v2().unwrap();
-    let mut spans = Vec::new();
-    let built = TreeListV2::open(&bytes)
+    TreeListV2::open(&bytes)
         .unwrap()
         .build(&TreeLimits::default(), |span| spans.push(span))
         .unwrap();
-    let want = build_tree(None, Vec::new(), &TreeLimits::default()).unwrap();
-    assert_eq!(built, want);
-    assert_eq!(spans, Vec::new());
-}
-
-/// Asserts that bytes the writer makes of a list the reader would refuse are written as they
-/// are (the writer judges nothing the reader judges), and the reader then refuses them: a path
-/// twice is a tree the walk refuses.
-#[test]
-fn the_writer_writes_what_the_reader_refuses_and_the_reader_refuses_it() {
-    let bytes = list(vec![
-        file("a", 1, Some(("k", 0)), Some([1; 32])),
-        file("a", 1, Some(("k", 1)), Some([2; 32])),
-    ])
-    .encode_v2()
-    .unwrap();
-    let error = TreeListV2::open(&bytes)
-        .unwrap()
-        .build(&TreeLimits::default(), |_| {})
-        .unwrap_err();
-    assert_eq!(
-        error,
-        TreeListV2Error::Tree(RecordError::Duplicate("a".into()))
-    );
-}
-
-/// Asserts that the order of the names the writer keeps is by kind then name (the names helper
-/// reads names back in record order).
-#[test]
-fn names_read_back_in_record_order() {
-    let bytes = list(vec![
-        file("f", 1, Some(("k", 0)), Some(SHA)),
-        dir("d", 0o755),
-        link("l", "d"),
-    ])
-    .encode_v2()
-    .unwrap();
-    assert_eq!(
-        names(&bytes),
-        [
-            (KIND_DIR, "d".to_owned()),
-            (KIND_SYMLINK, "l".to_owned()),
-            (KIND_FILE, "f".to_owned())
-        ]
-    );
+    assert_eq!(spans.len(), 1);
+    assert_eq!((spans[0].offset, spans[0].size), (9, 4));
+    assert_eq!(&*spans[0].key, "p3");
 }

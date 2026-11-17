@@ -1,18 +1,18 @@
 //! Measures the tree list, version 1 (JSON Lines) against version 2 (binary), on a real tree.
 //!
 //! ```text
-//! cargo run --release -p tierstore --example tree_list_bench -- [--runs N] [--pack-mib M] DIR...
+//! cargo run --release -p tierstore --example tree_list_bench -- [--runs N] [--pack-mib M] [--save PATH] DIR...
 //! ```
 //!
 //! Each `DIR` is walked (links not followed) and put in one tree under its own name; each file's
 //! bytes are hashed, and the files are laid out in packs of `M` MiB (64) in the order of the walk,
-//! as a client that packs a build's outputs would. Both lists of that tree are then encoded and
+//! as a client that packs a build's outputs would. `--save` writes the version 2 list to a file. Both lists of that tree are then encoded and
 //! read `N` times (25), and the median of each step printed:
 //!
 //! - the size of each list;
 //! - the SHA-256 of each list, which the reader checks against its key;
 //! - version 1: the parse, and the parse and the tree built (the first span is read after both);
-//! - version 2: the open; the first span handed out, without and with the list's SHA-256 checked
+//! - version 2: the open; the open and the first range of the ranges table; the first span handed out, without and with the list's SHA-256 checked
 //!   first (as the mount provider does); and the whole walk with the tree built.
 //!
 //! The two trees are checked to have the same digest.
@@ -139,6 +139,7 @@ fn first_span(
     digest: bool,
 ) -> Result<Duration, Failure> {
     let mut times = Vec::with_capacity(runs);
+    let mut kept = Vec::with_capacity(runs);
     let expected = TreeDigest::of(bytes);
     for _ in 0..runs {
         let start = Instant::now();
@@ -147,10 +148,14 @@ fn first_span(
             return Err("the list changed".into());
         }
         let list = TreeListV2::open(bytes)?;
-        list.build(limits, |_| {
+        let tree = list.build(limits, |_| {
             first.get_or_insert_with(|| start.elapsed());
         })?;
         times.push(first.ok_or("the list has no span to read")?);
+        // Kept until the runs end: freeing a whole tree makes the allocator's next small
+        // allocation (the next run's first) pay to gather what was freed, which is a cost of
+        // the run before, not of this reader.
+        kept.push(tree);
     }
     times.sort();
     Ok(times[runs / 2])
@@ -164,16 +169,18 @@ fn main() -> Result<(), Failure> {
     let mut runs: usize = 25;
     let mut pack_mib: u64 = 64;
     let mut dirs: Vec<PathBuf> = Vec::new();
+    let mut save: Option<PathBuf> = None;
     let mut args = std::env::args().skip(1);
     while let Some(arg) = args.next() {
         match arg.as_str() {
             "--runs" => runs = args.next().ok_or("--runs N")?.parse()?,
             "--pack-mib" => pack_mib = args.next().ok_or("--pack-mib M")?.parse()?,
+            "--save" => save = Some(args.next().ok_or("--save PATH")?.into()),
             _ => dirs.push(arg.into()),
         }
     }
     if dirs.is_empty() || runs == 0 {
-        return Err("usage: tree_list_bench [--runs N] [--pack-mib M] DIR...".into());
+        return Err("usage: tree_list_bench [--runs N] [--pack-mib M] [--save PATH] DIR...".into());
     }
     let mut walk = Walk {
         entries: Vec::new(),
@@ -198,6 +205,9 @@ fn main() -> Result<(), Failure> {
         .count();
     let v1 = list.encode();
     let v2 = list.encode_v2()?;
+    if let Some(save) = &save {
+        std::fs::write(save, &v2)?;
+    }
     let limits = TreeLimits::default();
     let digest1 = TreeDigest::of(&v1);
     println!(
@@ -216,6 +226,11 @@ fn main() -> Result<(), Failure> {
     })?;
     println!("v1: parse (with its sha256) {parse1:?}; parse and tree {built1:?} = first span");
     let (open2, _) = time(runs, || TreeListV2::open(&v2).map(|list| list.len()))?;
+    let (range2, ranges) = time(runs, || -> Result<_, Failure> {
+        let list = TreeListV2::open(&v2)?;
+        let first = list.ranges().next().ok_or("the list has no range")?;
+        Ok((first, list.ranges().count()))
+    })?;
     let first2 = first_span(runs, &v2, &limits, false)?;
     let checked2 = first_span(runs, &v2, &limits, true)?;
     let (built2, (tree2, spans)) = time(runs, || -> Result<_, Failure> {
@@ -225,7 +240,8 @@ fn main() -> Result<(), Failure> {
         Ok((tree, spans))
     })?;
     println!(
-        "v2: open {open2:?}; first span {first2:?}, with the sha256 first {checked2:?}; walk and tree {built2:?} ({spans} spans)"
+        "v2: open {open2:?}; first range {range2:?} ({} ranges); first span {first2:?}, with the sha256 first {checked2:?}; walk and tree {built2:?} ({spans} spans)",
+        ranges.1
     );
     if tree1.root != tree2.root {
         return Err(format!(

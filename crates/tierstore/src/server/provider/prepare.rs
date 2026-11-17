@@ -2,10 +2,11 @@
 //! built and placed at the source's path, and the bytes of its files read into the cache.
 //!
 //! The placement and the reads run together, joined by a queue of spans. A version 2 list
-//! ([`TreeListV2`]) queues each span as its one walk meets it, so the first read starts while the
-//! rest of the list is still being walked and long before the tree is placed; a version 1 list
-//! queues its spans once its tree is placed. If the list is refused, or the source is no longer
-//! this preparation's, the spans still queued are not read.
+//! ([`TreeListV2`]) queues each span as its one walk meets it, while another thread hashes the
+//! list: the first read starts while the rest of the list is still being walked, and long before
+//! the tree is placed, which waits for the hash. A version 1 list queues its spans once its tree
+//! is placed. If the list is refused, or the source is no longer this preparation's, the spans
+//! still queued are not read.
 //!
 //! The files are read one call each, by [`TreeStore::fetch_span`] with the file's own span, size
 //! and digest: the call an open of the mount makes for the file, which joins a fill of the same
@@ -164,16 +165,29 @@ fn built_v1(bytes: &[u8], digest: &TreeDigest, limits: &TreeLimits) -> Result<Bu
 }
 
 /// The tree of the version 2 list in `bytes`, which must hash to `digest`, each span queued on
-/// `spans` as the walk meets it. The digest is checked before the walk, so no span of a list
-/// that is not the one the ref names is read; it is about a third of the time to the first span
-/// (the reference's measurements).
+/// `spans` as the walk meets it. The bytes are hashed on a thread of their own beside the walk,
+/// so the first span is queued before the hash is done; the tree is made only once the hash is
+/// the one the key names (a mismatch is the refusal, whatever the walk found). A span queued from
+/// a list that is then refused is read as any other, against its own file's digest.
 fn built_v2(
     bytes: &[u8],
     digest: &TreeDigest,
     limits: &TreeLimits,
     spans: &UnboundedSender<ListSpan>,
 ) -> Result<BuiltTree, Stage> {
-    let actual = TreeDigest::of(bytes);
+    let refused = |why: crate::TreeListV2Error| Stage::Refused(why.to_string());
+    let (actual, walked) = std::thread::scope(|scope| {
+        let hashing = scope.spawn(|| TreeDigest::of(bytes));
+        let walked = TreeListV2::open(bytes).and_then(|list| {
+            list.build(limits, |span| {
+                let _ = spans.unbounded_send(span);
+            })
+        });
+        let actual = hashing
+            .join()
+            .unwrap_or_else(|panic| std::panic::resume_unwind(panic));
+        (actual, walked)
+    });
     if actual != *digest {
         let why = TreeListError::DigestMismatch {
             expected: *digest,
@@ -181,13 +195,7 @@ fn built_v2(
         };
         return Err(Stage::Refused(why.to_string()));
     }
-    let refused = |why: crate::TreeListV2Error| Stage::Refused(why.to_string());
-    TreeListV2::open(bytes)
-        .map_err(refused)?
-        .build(limits, |span| {
-            let _ = spans.unbounded_send(span);
-        })
-        .map_err(refused)
+    walked.map_err(refused)
 }
 
 /// The stage a refusal of the tree store leaves a source at: a tree this node cannot make now is a

@@ -1,910 +1,911 @@
-//! The walk of a version 2 tree list: every refusal of a record, of the tree and of the name and
-//! target tables, the spans handed out, the tree built (equal to a version 1 list's), and hostile
-//! bytes.
+//! The walk of a version 2 tree list: every refusal of an entry by name and index, the limits at
+//! their exact values, the spans handed out, the tree equal to the one a version 1 list builds,
+//! and hostile bytes.
 
-use std::collections::HashMap;
 use std::sync::Arc;
 
-use crate::tree_list::{
-    EMPTY_SHA256, ListEntry, ListKind, MAX_NAME_BYTES, MAX_TARGET_BYTES, TreeList,
-};
+use crate::tree_list::{ListEntry, ListKind, MAX_TARGET_BYTES, TreeList};
 use crate::tree_list_v2::{
-    HeaderFault, KIND_DIR, KIND_FILE, KIND_SYMLINK, NONE, RecordFault, Section, StringFault, Table,
-    TreeListV2, TreeListV2Error,
+    EntryFault, HeaderFault, ListSpan, Section, TreeListV2, TreeListV2Error,
 };
-use crate::tree_list_v2_build::ListSpan;
-use crate::tree_record::{BuiltTree, RecordError};
-use crate::{BlobSource, Mode, TreeDigest, TreeLimits, build_tree};
+use crate::{
+    BlobSource, BuiltFile, BuiltTree, Mode, RecordError, TreeDigest, TreeLimits, build_tree,
+};
 
-// ----- helpers -----
-
-fn sha(byte: u8) -> TreeDigest {
+fn digest(byte: u8) -> TreeDigest {
     TreeDigest::from_bytes([byte; 32])
 }
 
-fn mode(bits: u16) -> Mode {
-    Mode::new(bits).unwrap()
+fn key(text: &str, offset: u64) -> Option<BlobSource> {
+    Some(BlobSource {
+        key: Arc::from(text),
+        offset,
+    })
 }
 
-fn file(
-    path: &str,
-    size: u64,
-    source: Option<(&str, u64)>,
-    digest: Option<TreeDigest>,
-) -> ListEntry {
+fn file(path: &str, size: u64, source: Option<BlobSource>, sha: u8) -> ListEntry {
     ListEntry {
-        path: path.into(),
+        path: path.to_owned(),
         kind: ListKind::File {
-            mode: mode(0o644),
+            mode: Mode::FILE,
             size,
-            source: source.map(|(key, offset)| BlobSource {
-                key: key.into(),
-                offset,
-            }),
-            sha256: digest,
+            source,
+            sha256: Some(digest(sha)),
         },
     }
 }
 
-fn file_mode(path: &str, bits: u16, size: u64, source: (&str, u64), digest: u8) -> ListEntry {
-    let mut entry = file(path, size, Some(source), Some(sha(digest)));
-    if let ListKind::File { mode: m, .. } = &mut entry.kind {
-        *m = mode(bits);
+fn empty_file(path: &str) -> ListEntry {
+    ListEntry {
+        path: path.to_owned(),
+        kind: ListKind::File {
+            mode: Mode::FILE,
+            size: 0,
+            source: None,
+            sha256: None,
+        },
     }
-    entry
 }
 
-fn dir(path: &str, bits: u16) -> ListEntry {
+fn dir(path: &str, mode: u16) -> ListEntry {
     ListEntry {
-        path: path.into(),
-        kind: ListKind::Dir { mode: mode(bits) },
+        path: path.to_owned(),
+        kind: ListKind::Dir {
+            mode: Mode::new(mode).unwrap(),
+        },
     }
 }
 
 fn link(path: &str, target: &str) -> ListEntry {
     ListEntry {
-        path: path.into(),
+        path: path.to_owned(),
         kind: ListKind::Symlink {
-            target: target.into(),
+            target: target.to_owned(),
         },
     }
 }
 
-/// Eleven entries: nested directories, an explicit one, links, files of shared digests and files
-/// of size 0. The records are, in order: directories `b`, `b/e`, `empty` (0 to 2); links `b/ln2`,
-/// `ln` (3, 4); files `a.txt`, `b/c.txt`, `b/d.txt`, `b/e/f` (5 to 8); empty files `b/zz`, `z`
-/// (9, 10). The keys are `k1`, `k2`; the targets `../a.txt`, `a.txt`.
-fn sample_list() -> TreeList {
-    TreeList {
-        entries: vec![
-            dir("empty", 0o700),
-            file("a.txt", 5, Some(("k1", 0)), Some(sha(0xa))),
-            file("b/c.txt", 5, Some(("k1", 5)), Some(sha(0xb))),
-            file("b/d.txt", 5, Some(("k2", 0)), Some(sha(0xa))),
-            file_mode("b/e/f", 0o755, 3, ("k2", 8), 0xc),
-            link("ln", "a.txt"),
-            link("b/ln2", "../a.txt"),
-            file("z", 0, None, None),
-            file("b/zz", 0, None, None),
-        ],
-    }
+fn encode(entries: Vec<ListEntry>) -> Vec<u8> {
+    TreeList { entries }.encode_v2().unwrap()
 }
 
-fn sample() -> Vec<u8> {
-    sample_list().encode_v2().unwrap()
+/// The list the patches below work on. Entries: 0 root, 1 `d`, 2 `f`, 3 `g` (size 0), 4 `l`
+/// (a link to `d/x`), 5 `d/x`. Keys: `k1` is 0, `k2` is 1.
+fn base() -> Vec<u8> {
+    encode(vec![
+        file("d/x", 5, key("k1", 0), 1),
+        file("f", 3, key("k2", 10), 2),
+        empty_file("g"),
+        link("l", "d/x"),
+    ])
 }
 
-fn u32_at(bytes: &[u8], at: usize) -> u32 {
-    u32::from_le_bytes(bytes[at..at + 4].try_into().unwrap())
+fn le32(bytes: &[u8], at: usize) -> usize {
+    u32::from_le_bytes(bytes[at..at + 4].try_into().unwrap()) as usize
 }
 
-/// Where record `index` of an `encode_v2` output begins.
-fn record_at(bytes: &[u8], index: usize) -> usize {
-    u32_at(bytes, 36) as usize + 64 * index
+fn put(bytes: &mut [u8], at: usize, value: &[u8]) {
+    bytes[at..at + value.len()].copy_from_slice(value);
 }
 
-/// `bytes` with `with` written at `at`.
-fn patched(bytes: &[u8], at: usize, with: &[u8]) -> Vec<u8> {
-    let mut out = bytes.to_vec();
-    out[at..at + with.len()].copy_from_slice(with);
-    out
+/// Where entry `index` begins: its parent (4 bytes), name offset (4), first child or key index
+/// (4), kind and mode (2), name length (1), padding (1), offset or child count (8), size (8).
+fn rec(bytes: &[u8], index: usize) -> usize {
+    le32(bytes, 16) + index * 32
 }
 
-/// `sample()` with `with` written at `field` of record `index`.
-fn patched_record(index: usize, field: usize, with: &[u8]) -> Vec<u8> {
-    let bytes = sample();
-    let at = record_at(&bytes, index) + field;
-    patched(&bytes, at, with)
+fn digest_at(bytes: &[u8], index: usize) -> usize {
+    le32(bytes, 24) + index * 32
 }
 
-const F_KIND: usize = 0;
-const F_MODE: usize = 2;
-const F_NAME: usize = 4;
-const F_PARENT: usize = 8;
-const F_KEY: usize = 12;
-const F_SIZE: usize = 16;
-const F_OFFSET: usize = 24;
-const F_SHA: usize = 32;
+fn names_at(bytes: &[u8]) -> usize {
+    le32(bytes, 48)
+}
 
-/// The result of opening and building `bytes` with `limits`, and the spans handed out.
-fn run_with(
-    bytes: &[u8],
-    limits: &TreeLimits,
-) -> (Result<BuiltTree, TreeListV2Error>, Vec<ListSpan>) {
+fn names_len(bytes: &[u8]) -> usize {
+    le32(bytes, 52)
+}
+
+fn set_parent(bytes: &mut [u8], index: usize, parent: u32) {
+    let at = rec(bytes, index);
+    put(bytes, at, &parent.to_le_bytes());
+}
+
+fn set_name(bytes: &mut [u8], index: usize, offset: u32, len: u8) {
+    let at = rec(bytes, index);
+    put(bytes, at + 4, &offset.to_le_bytes());
+    bytes[at + 14] = len;
+}
+
+fn set_x(bytes: &mut [u8], index: usize, x: u32) {
+    let at = rec(bytes, index);
+    put(bytes, at + 8, &x.to_le_bytes());
+}
+
+fn set_kind(bytes: &mut [u8], index: usize, kind: u16) {
+    let at = rec(bytes, index);
+    let old = u16::from_le_bytes([bytes[at + 12], bytes[at + 13]]);
+    put(
+        bytes,
+        at + 12,
+        &((kind << 12) | (old & 0o7777)).to_le_bytes(),
+    );
+}
+
+fn set_a(bytes: &mut [u8], index: usize, a: u64) {
+    let at = rec(bytes, index);
+    put(bytes, at + 16, &a.to_le_bytes());
+}
+
+fn set_b(bytes: &mut [u8], index: usize, b: u64) {
+    let at = rec(bytes, index);
+    put(bytes, at + 24, &b.to_le_bytes());
+}
+
+fn walk(bytes: &[u8], limits: &TreeLimits) -> (Result<BuiltTree, TreeListV2Error>, Vec<ListSpan>) {
+    let list = TreeListV2::open(bytes).unwrap();
     let mut spans = Vec::new();
-    let result =
-        TreeListV2::open(bytes).and_then(|list| list.build(limits, |span| spans.push(span)));
-    (result, spans)
+    let built = list.build(limits, |span| spans.push(span));
+    (built, spans)
 }
 
-fn build(bytes: &[u8]) -> Result<BuiltTree, TreeListV2Error> {
-    run_with(bytes, &TreeLimits::default()).0
+fn built(bytes: &[u8]) -> BuiltTree {
+    walk(bytes, &TreeLimits::default()).0.unwrap()
 }
 
-fn build_err(bytes: &[u8]) -> TreeListV2Error {
-    build(bytes).unwrap_err()
+fn refusal(bytes: &[u8]) -> TreeListV2Error {
+    walk(bytes, &TreeLimits::default()).0.unwrap_err()
 }
 
-/// Asserts that building `bytes` is refused as `fault` of record `index`.
-fn assert_fault(bytes: &[u8], index: u32, fault: RecordFault) {
-    assert_eq!(build_err(bytes), record_err(index, fault));
+/// Asserts that `bytes` are refused as entry `index` with `fault`, whose message is `message`.
+fn expect(bytes: &[u8], index: u32, fault: EntryFault, message: &str) {
+    let error = refusal(bytes);
+    assert_eq!(error, TreeListV2Error::Entry { index, fault });
+    assert_eq!(
+        error.to_string(),
+        format!("tree list entry {index}: {message}")
+    );
 }
 
-/// Asserts that building `bytes` is refused as `fault` of string `index` of `table`.
-fn assert_table(bytes: &[u8], table: Table, index: u32, fault: StringFault) {
-    assert_eq!(build_err(bytes), table_err(table, index, fault));
+fn one_file(name: &str) -> Vec<u8> {
+    encode(vec![file(name, 1, key("k", 0), 1)])
 }
 
-fn record_err(index: u32, fault: RecordFault) -> TreeListV2Error {
-    TreeListV2Error::Record { index, fault }
+/// A path of `len` bytes: twenty names of 200 bytes, then a last name.
+fn long_path(len: usize) -> String {
+    let mut parts = vec!["a".repeat(200); 20];
+    parts.push("b".repeat(len - 20 * 201));
+    parts.join("/")
 }
 
-fn table_err(table: Table, index: u32, fault: StringFault) -> TreeListV2Error {
-    TreeListV2Error::Table {
-        table,
-        index,
-        fault,
-    }
+const BASE_MESSAGE_ROOT: &str = "the root is not a directory with no name and parent 0";
+
+/// Asserts that the base list is walked into its six entries, and that the later tests refuse
+/// copies of it, not a list that was never valid.
+#[test]
+fn the_base_list_is_a_valid_tree_of_five_entries_and_a_root() {
+    let bytes = base();
+    let list = TreeListV2::open(&bytes).unwrap();
+    assert_eq!(list.len(), 6);
+    let tree = built(&bytes);
+    let paths: Vec<_> = tree.files.iter().map(|f| f.path.as_str()).collect();
+    assert_eq!(paths, ["f", "g", "d/x"]);
+    assert_eq!(tree.records.len(), 2);
 }
 
-/// One record of a hand-made list.
-#[derive(Clone, Copy)]
-struct Rec {
-    kind: u8,
-    mode: u16,
-    name: u32,
-    parent: u32,
-    key: u32,
-    size: u64,
-    offset: u64,
-    sha: [u8; 32],
+/// Asserts that a root that is a file is refused as entry 0 `Root`.
+#[test]
+fn a_root_that_is_not_a_directory_is_refused() {
+    let mut bytes = base();
+    set_kind(&mut bytes, 0, 0);
+    expect(&bytes, 0, EntryFault::Root, BASE_MESSAGE_ROOT);
 }
 
-impl Rec {
-    fn dir(name: u32, parent: u32) -> Self {
-        Self {
-            kind: KIND_DIR,
-            mode: 0o755,
-            name,
-            parent,
-            key: NONE,
-            size: 0,
-            offset: 0,
-            sha: [0; 32],
-        }
-    }
-
-    fn link(name: u32, parent: u32, target: u32) -> Self {
-        Self {
-            kind: KIND_SYMLINK,
-            mode: 0,
-            key: target,
-            ..Self::dir(name, parent)
-        }
-    }
-
-    fn file(name: u32, parent: u32, key: u32, size: u64, offset: u64, sha: u8) -> Self {
-        Self {
-            kind: KIND_FILE,
-            mode: 0o644,
-            key,
-            size,
-            offset,
-            sha: [sha; 32],
-            ..Self::dir(name, parent)
-        }
-    }
-
-    fn empty_file(name: u32, parent: u32) -> Self {
-        Self {
-            sha: EMPTY_SHA256,
-            ..Self::file(name, parent, NONE, 0, 0, 0)
-        }
-    }
+/// Asserts that a root whose parent is not 0 is refused as `Root`.
+#[test]
+fn a_root_with_a_parent_is_refused() {
+    let mut bytes = base();
+    set_parent(&mut bytes, 0, 1);
+    expect(&bytes, 0, EntryFault::Root, BASE_MESSAGE_ROOT);
 }
 
-/// The bytes of a string table of `strings`, in the order given.
-fn table<S: AsRef<[u8]>>(strings: &[S]) -> Vec<u8> {
-    let mut ends = Vec::new();
-    let mut data = Vec::new();
-    for text in strings {
-        data.extend_from_slice(text.as_ref());
-        ends.extend_from_slice(&(data.len() as u32).to_le_bytes());
-    }
-    let mut out = (strings.len() as u32).to_le_bytes().to_vec();
-    out.extend(ends);
-    out.extend(data);
-    out
+/// Asserts that a root with a name is refused as `Root`.
+#[test]
+fn a_root_with_a_name_is_refused() {
+    let mut bytes = base();
+    set_name(&mut bytes, 0, 0, 1);
+    expect(&bytes, 0, EntryFault::Root, BASE_MESSAGE_ROOT);
 }
 
-/// A table of `count` strings with the `ends` and `data` as given, however wrong.
-fn table_raw(ends: &[u32], data: &[u8]) -> Vec<u8> {
-    let mut out = (ends.len() as u32).to_le_bytes().to_vec();
-    for end in ends {
-        out.extend_from_slice(&end.to_le_bytes());
-    }
-    out.extend_from_slice(data);
-    out
-}
-
-/// A list assembled by hand, its tables as bytes, with room to make the header and the records
-/// longer than the writer's.
-struct Spec {
-    keys: Vec<u8>,
-    names: Vec<u8>,
-    targets: Vec<u8>,
-    records: Vec<Rec>,
-    header_extra: usize,
-    record_extra: usize,
-}
-
-impl Spec {
-    fn new(names: &[&str], records: Vec<Rec>) -> Self {
-        let strs = |s: &[&str]| s.iter().map(|s| s.as_bytes().to_vec()).collect::<Vec<_>>();
-        let names = strs(names);
-        Self {
-            keys: table(&["k1", "k2"]),
-            names: table(&names.iter().map(Vec::as_slice).collect::<Vec<_>>()),
-            targets: table(&["t1", "t2"]),
-            records,
-            header_extra: 0,
-            record_extra: 0,
-        }
-    }
-
-    fn bytes(&self) -> Vec<u8> {
-        let header_len = 40 + self.header_extra;
-        let record_len = 64 + self.record_extra;
-        let keys_at = header_len;
-        let names_at = keys_at + self.keys.len();
-        let targets_at = names_at + self.names.len();
-        let records_at = targets_at + self.targets.len();
-        let mut out = b"TSLIST\r\n".to_vec();
-        for field in [
+/// Asserts that kinds 3 and 15 are refused as `UnknownKind` with the kind, at the entry.
+#[test]
+fn a_kind_above_the_link_is_refused() {
+    for kind in [3u16, 15] {
+        let mut bytes = base();
+        set_kind(&mut bytes, 2, kind);
+        expect(
+            &bytes,
             2,
-            header_len,
-            record_len,
-            self.records.len(),
-            keys_at,
-            names_at,
-            targets_at,
-            records_at,
-        ] {
-            out.extend_from_slice(&(field as u32).to_le_bytes());
-        }
-        out.resize(header_len, 0xee);
-        out.extend_from_slice(&self.keys);
-        out.extend_from_slice(&self.names);
-        out.extend_from_slice(&self.targets);
-        for r in &self.records {
-            let mut rec = vec![r.kind, 0];
-            rec.extend_from_slice(&r.mode.to_le_bytes());
-            for word in [r.name, r.parent, r.key] {
-                rec.extend_from_slice(&word.to_le_bytes());
-            }
-            rec.extend_from_slice(&r.size.to_le_bytes());
-            rec.extend_from_slice(&r.offset.to_le_bytes());
-            rec.extend_from_slice(&r.sha);
-            rec.resize(record_len, 0xee);
-            out.extend(rec);
-        }
-        out
-    }
-}
-
-/// Names `a`, `b`, `c`, `d`.
-fn spec(records: Vec<Rec>) -> Spec {
-    Spec::new(&["a", "b", "c", "d"], records)
-}
-
-fn limits(max_entries: u64, max_depth: usize, max_dir_entries: usize) -> TreeLimits {
-    TreeLimits {
-        max_entries,
-        max_depth,
-        max_dir_entries,
-    }
-}
-
-// ----- the sample builds -----
-
-/// Asserts that a list from `encode_v2` builds, its spans are those of the first file of each
-/// digest in record order, and its files are in record order with full paths and their sources.
-#[test]
-fn the_sample_builds_with_its_spans_and_files_in_record_order() {
-    let bytes = sample();
-    let (built, spans) = run_with(&bytes, &TreeLimits::default());
-    let built = built.unwrap();
-    let key = |k: &str| -> Arc<str> { Arc::from(k) };
-    assert_eq!(
-        spans,
-        vec![
-            ListSpan {
-                key: key("k1"),
-                offset: 0,
-                size: 5,
-                sha256: sha(0xa)
-            },
-            ListSpan {
-                key: key("k1"),
-                offset: 5,
-                size: 5,
-                sha256: sha(0xb)
-            },
-            ListSpan {
-                key: key("k2"),
-                offset: 8,
-                size: 3,
-                sha256: sha(0xc)
-            },
-        ]
-    );
-    let src = |k: &str, offset| {
-        Some(BlobSource {
-            key: key(k),
-            offset,
-        })
-    };
-    let empty = TreeDigest::from_bytes(EMPTY_SHA256);
-    let got: Vec<_> = built
-        .files
-        .iter()
-        .map(|f| (f.path.as_str(), f.size, f.sha256, f.source.clone()))
-        .collect();
-    assert_eq!(
-        got,
-        vec![
-            ("a.txt", 5, sha(0xa), src("k1", 0)),
-            ("b/c.txt", 5, sha(0xb), src("k1", 5)),
-            ("b/d.txt", 5, sha(0xa), src("k2", 0)),
-            ("b/e/f", 3, sha(0xc), src("k2", 8)),
-            ("b/zz", 0, empty, None),
-            ("z", 0, empty, None),
-        ]
-    );
-}
-
-/// Asserts that the key of a span is the same allocation as the key of the file's source, and
-/// that files sharing a key share it.
-#[test]
-fn a_span_key_is_the_string_of_its_key_and_is_shared_with_the_sources() {
-    let bytes = sample();
-    let (built, spans) = run_with(&bytes, &TreeLimits::default());
-    let built = built.unwrap();
-    assert_eq!(&*spans[0].key, "k1");
-    let source_key = &built.files[0].source.as_ref().unwrap().key;
-    assert!(Arc::ptr_eq(&spans[0].key, source_key));
-    assert!(Arc::ptr_eq(
-        &built.files[0].source.as_ref().unwrap().key,
-        &built.files[1].source.as_ref().unwrap().key
-    ));
-}
-
-/// Asserts that two files of one digest hand out one span, the first record's, and a file of size
-/// 0 hands out none.
-#[test]
-fn a_digest_is_handed_out_once_and_a_file_of_size_0_never() {
-    let list = TreeList {
-        entries: vec![
-            file("x", 4, Some(("k1", 10)), Some(sha(1))),
-            file("y", 4, Some(("k1", 20)), Some(sha(1))),
-            file("z", 4, Some(("k2", 0)), Some(sha(1))),
-            file("e", 0, None, None),
-        ],
-    };
-    let (built, spans) = run_with(&list.encode_v2().unwrap(), &TreeLimits::default());
-    assert_eq!(built.unwrap().files.len(), 4);
-    assert_eq!(
-        spans,
-        vec![ListSpan {
-            key: Arc::from("k1"),
-            offset: 10,
-            size: 4,
-            sha256: sha(1)
-        }]
-    );
-}
-
-/// Asserts that spans handed out before a fault stay handed out: a bad record after two files
-/// still reports both spans.
-#[test]
-fn spans_before_a_fault_were_handed_out() {
-    let mut records = vec![
-        Rec::file(0, NONE, 0, 3, 0, 1),
-        Rec::file(1, NONE, 0, 3, 3, 2),
-        Rec::file(2, NONE, 0, 3, 6, 3),
-    ];
-    records[2].mode = 0o10000;
-    let bytes = spec(records).bytes();
-    let (result, spans) = run_with(&bytes, &TreeLimits::default());
-    assert_eq!(
-        result.unwrap_err(),
-        record_err(2, RecordFault::BadMode(0o10000))
-    );
-    assert_eq!(spans.len(), 2);
-    assert_eq!(spans[1].offset, 3);
-}
-
-// ----- the same tree as version 1 -----
-
-/// The tree of a version 2 build and of `build_tree` over the same entries.
-fn same_tree(list: TreeList) {
-    let bytes = list.encode_v2().unwrap();
-    let v2 = build(&bytes).unwrap();
-    let v1 = build_tree(None, list.into_entries().unwrap(), &TreeLimits::default()).unwrap();
-    assert_eq!(v2.root, v1.root);
-    assert_eq!(v2.records.len(), v1.records.len());
-    let by_digest = |t: &BuiltTree| {
-        t.records
-            .iter()
-            .map(|(d, r)| (*d, r.clone()))
-            .collect::<HashMap<_, _>>()
-    };
-    assert_eq!(by_digest(&v2), by_digest(&v1));
-    let mut v2_files = v2.files;
-    v2_files.sort_by(|a, b| a.path.cmp(&b.path));
-    assert_eq!(v2_files, v1.files);
-}
-
-/// Asserts that an empty list has the root digest and the one record `build_tree` makes.
-#[test]
-fn an_empty_list_is_the_tree_of_no_entries() {
-    same_tree(TreeList::default());
-    let built = build(&TreeList::default().encode_v2().unwrap()).unwrap();
-    assert_eq!(built.records.len(), 1);
-    assert!(built.files.is_empty());
-}
-
-/// Asserts that files at the root only make the tree `build_tree` makes.
-#[test]
-fn root_level_files_are_the_tree_of_build_tree() {
-    same_tree(TreeList {
-        entries: vec![
-            file("b", 2, Some(("k", 0)), Some(sha(2))),
-            file("a", 2, Some(("k", 2)), Some(sha(3))),
-            file("c", 0, None, None),
-        ],
-    });
-}
-
-/// Asserts that nested directories with explicit modes, links and empty directories make the
-/// tree `build_tree` makes.
-#[test]
-fn nested_directories_modes_and_links_are_the_tree_of_build_tree() {
-    same_tree(sample_list());
-    same_tree(TreeList {
-        entries: vec![
-            dir("a", 0o1777),
-            dir("a/b", 0o700),
-            dir("a/b/c", 0o755),
-            dir("empty", 0o755),
-            link("a/b/l", "../../x"),
-            file_mode("a/b/c/f", 0o4755, 1, ("p", 0), 9),
-        ],
-    });
-}
-
-/// Asserts that directories with the same contents share one record, as in `build_tree`, and that
-/// files of one digest at many paths keep every path.
-#[test]
-fn shared_digests_and_equal_directories_make_the_tree_of_build_tree() {
-    let list = TreeList {
-        entries: vec![
-            file("p/x", 3, Some(("k", 0)), Some(sha(7))),
-            file("q/x", 3, Some(("k", 3)), Some(sha(7))),
-            file("r/s/x", 3, Some(("k", 6)), Some(sha(7))),
-        ],
-    };
-    same_tree(list.clone());
-    let built = build(&list.encode_v2().unwrap()).unwrap();
-    // p, q and r/s hold the same file: one record for the three, and the root, and r.
-    assert_eq!(built.records.len(), 3);
-    assert_eq!(built.files.len(), 3);
-}
-
-// ----- longer header and records -----
-
-/// Asserts that a header length above 40 and a record length above 64 are read, the bytes beyond
-/// the fields skipped.
-#[test]
-fn a_longer_header_and_longer_records_are_read() {
-    let records = vec![
-        Rec::dir(0, NONE),
-        Rec::link(1, 0, 1),
-        Rec::file(2, 0, 1, 4, 0, 5),
-        Rec::empty_file(3, NONE),
-    ];
-    let plain = spec(records.clone());
-    let mut longer = spec(records);
-    longer.header_extra = 24;
-    longer.record_extra = 17;
-    let (a, b) = (
-        build(&plain.bytes()).unwrap(),
-        build(&longer.bytes()).unwrap(),
-    );
-    assert_eq!(a, b);
-    assert_eq!(a.files.len(), 2);
-}
-
-// ----- record faults -----
-
-/// Asserts that kind 0 and kinds above 3 are refused with the record's number.
-#[test]
-fn an_unknown_kind_is_refused() {
-    for kind in [0u8, 4, 255] {
-        assert_fault(
-            &patched_record(2, F_KIND, &[kind]),
-            2,
-            RecordFault::UnknownKind(kind),
+            EntryFault::UnknownKind(kind as u8),
+            &format!("unknown kind {kind}"),
         );
     }
 }
 
-/// Asserts that a directory after a link, a link after a file and a directory after a file are
-/// refused as out of order.
+/// Asserts that a directory no children slice before it holds is refused as `Unreachable`.
 #[test]
-fn a_kind_before_the_kind_before_it_is_refused() {
-    // Record 5 is the first file, after a link.
-    assert_fault(
-        &patched_record(5, F_KIND, &[KIND_DIR]),
+fn a_directory_outside_every_children_slice_is_unreachable() {
+    let mut bytes = base();
+    set_a(&mut bytes, 1, 0);
+    set_kind(&mut bytes, 5, 1);
+    expect(
+        &bytes,
         5,
-        RecordFault::KindOrder,
-    );
-    // Record 6 is a file after a file.
-    assert_fault(
-        &patched_record(6, F_KIND, &[KIND_SYMLINK]),
-        6,
-        RecordFault::KindOrder,
-    );
-    assert_fault(
-        &patched_record(6, F_KIND, &[KIND_DIR]),
-        6,
-        RecordFault::KindOrder,
+        EntryFault::Unreachable,
+        "a directory before the children of the directories before it",
     );
 }
 
-/// Asserts that a mode with a bit above 07777 is refused in a directory and in a file, and 07777
-/// is taken; the mode of a link is not read.
+/// Asserts that a directory whose first child is not the next free entry is refused as `Children`.
 #[test]
-fn a_mode_above_07777_is_refused_in_a_directory_and_a_file() {
-    assert_fault(
-        &patched_record(0, F_MODE, &0o10000u16.to_le_bytes()),
-        0,
-        RecordFault::BadMode(0o10000),
+fn a_directory_whose_first_child_is_not_next_is_refused() {
+    let mut bytes = base();
+    set_x(&mut bytes, 1, 4);
+    expect(
+        &bytes,
+        1,
+        EntryFault::Children,
+        "children not where the breadth-first order puts them",
     );
-    assert_fault(
-        &patched_record(5, F_MODE, &0xffffu16.to_le_bytes()),
-        5,
-        RecordFault::BadMode(0xffff),
-    );
-    build(&patched_record(5, F_MODE, &0o7777u16.to_le_bytes())).unwrap();
-    build(&patched_record(3, F_MODE, &0xffffu16.to_le_bytes())).unwrap();
 }
 
-/// Asserts that a name number at or past the name table is refused in each kind, and the last
-/// name is taken.
+/// Asserts that children running past the last entry are refused as `Children`, one past the end
+/// and 2^64 - 1, and that exactly the last entry is accepted.
 #[test]
-fn a_name_out_of_range_is_refused() {
-    let bytes = sample();
-    let names = u32_at(&bytes, 28) as usize;
-    let count = u32_at(&bytes, names);
-    for record in [0, 3, 5] {
-        for name in [count, count + 1, NONE] {
-            assert_fault(
-                &patched_record(record, F_NAME, &name.to_le_bytes()),
-                record as u32,
-                RecordFault::Name(name),
-            );
+fn children_past_the_end_are_refused() {
+    let mut bytes = base();
+    set_a(&mut bytes, 1, 2);
+    expect(
+        &bytes,
+        1,
+        EntryFault::Children,
+        "children not where the breadth-first order puts them",
+    );
+    let mut bytes = base();
+    set_a(&mut bytes, 0, u64::MAX);
+    assert_eq!(
+        refusal(&bytes),
+        TreeListV2Error::Entry {
+            index: 0,
+            fault: EntryFault::Children
         }
-    }
-    assert_eq!(count, 11);
+    );
+    let mut bytes = base();
+    set_a(&mut bytes, 1, 1);
+    built(&bytes);
 }
 
-/// Asserts that a parent that is the record itself, a later directory, a link record's number or
-/// a file record's number is refused, and NONE and an earlier directory are taken.
+/// Asserts that a child whose parent is not the directory it is among is refused as `Parent`.
 #[test]
-fn a_parent_that_is_not_a_directory_before_the_record_is_refused() {
-    let set = |index, parent: u32| patched_record(index, F_PARENT, &parent.to_le_bytes());
-    // The directory itself, and a later directory.
-    assert_fault(&set(0, 0), 0, RecordFault::Parent(0));
-    assert_fault(&set(1, 2), 1, RecordFault::Parent(2));
-    // The file after the three directories names a link, a file and a record past the end.
-    assert_fault(&set(5, 3), 5, RecordFault::Parent(3));
-    assert_fault(&set(5, 7), 5, RecordFault::Parent(7));
-    assert_fault(&set(5, 99), 5, RecordFault::Parent(99));
-    // A link names a link.
-    assert_fault(&set(4, 3), 4, RecordFault::Parent(3));
-    // Directory 1 may be a child of directory 0, and a file of directory 2.
-    build(&set(1, 0)).unwrap();
-    build(&set(5, 2)).unwrap();
-    build(&set(5, NONE)).unwrap();
-}
-
-/// Asserts that a key number at or past the key table is refused.
-#[test]
-fn a_key_out_of_range_is_refused() {
-    for key in [2u32, 3, NONE - 1] {
-        assert_fault(
-            &patched_record(5, F_KEY, &key.to_le_bytes()),
-            5,
-            RecordFault::Key(key),
-        );
-    }
-}
-
-/// Asserts that a target number at or past the target table is refused, and the last is taken.
-#[test]
-fn a_target_out_of_range_is_refused() {
-    for target in [2u32, 5, NONE] {
-        assert_fault(
-            &patched_record(3, F_KEY, &target.to_le_bytes()),
-            3,
-            RecordFault::Target(target),
-        );
-    }
-    build(&patched_record(3, F_KEY, &1u32.to_le_bytes())).unwrap();
-}
-
-/// Asserts that a file with no key and a size above 0 is refused.
-#[test]
-fn a_file_with_no_key_and_bytes_is_refused() {
-    assert_fault(
-        &patched_record(5, F_KEY, &NONE.to_le_bytes()),
+fn a_child_of_another_parent_is_refused() {
+    let mut bytes = base();
+    set_parent(&mut bytes, 5, 3);
+    expect(
+        &bytes,
         5,
-        RecordFault::KeyAndSize,
+        EntryFault::Parent(3),
+        "parent 3 is not the directory that holds it",
     );
 }
 
-/// Asserts that a file with a key and a size of 0 is refused.
+/// Asserts that a name past the end of the names is refused as `NameBounds`, one byte past and
+/// at the largest offset.
 #[test]
-fn a_file_with_a_key_and_no_bytes_is_refused() {
-    assert_fault(
-        &patched_record(5, F_SIZE, &0u64.to_le_bytes()),
-        5,
-        RecordFault::KeyAndSize,
-    );
+fn a_name_past_the_names_is_refused() {
+    let message = "name past the end of the names";
+    let mut bytes = base();
+    let end = names_len(&bytes) as u32;
+    set_name(&mut bytes, 2, end, 1);
+    expect(&bytes, 2, EntryFault::NameBounds, message);
+    let mut bytes = base();
+    set_name(&mut bytes, 2, u32::MAX, 255);
+    expect(&bytes, 2, EntryFault::NameBounds, message);
+    let mut bytes = base();
+    set_name(&mut bytes, 2, end - 1, 2);
+    expect(&bytes, 2, EntryFault::NameBounds, message);
 }
 
-/// Asserts that an offset and a size whose sum passes 64 bits are refused, and a sum of exactly
-/// 2^64 - 1 is taken.
+/// Asserts that an empty name is refused as `BadName`.
 #[test]
-fn a_range_that_overflows_is_refused() {
-    let at_edge = u64::MAX - 5;
-    assert_fault(
-        &patched_record(5, F_OFFSET, &(at_edge + 1).to_le_bytes()),
-        5,
-        RecordFault::RangeOverflow,
-    );
-    // The records after it are out of order; only this one is judged here.
-    let edge = patched_record(5, F_OFFSET, &at_edge.to_le_bytes());
-    assert_fault(&edge, 6, RecordFault::Unsorted);
+fn an_empty_name_is_refused() {
+    let mut bytes = one_file("a");
+    set_name(&mut bytes, 1, 0, 0);
+    expect(&bytes, 1, EntryFault::BadName, "bad name");
 }
 
-/// Asserts that a file whose offset is below the offset of the file before it in one key is
-/// refused.
+/// Asserts that `.`, `..`, a name beginning `.wh.`, and a name with a NUL are refused as `BadName`.
 #[test]
-fn an_offset_going_down_in_one_key_is_refused() {
-    assert_fault(
-        &patched_record(5, F_OFFSET, &9u64.to_le_bytes()),
-        6,
-        RecordFault::Unsorted,
-    );
+fn names_a_tree_may_not_have_are_refused() {
+    for name in [".", "..", ".wh.x", "a\0b"] {
+        expect(&one_file(name), 1, EntryFault::BadName, "bad name");
+    }
 }
 
-/// Asserts that a key going down is refused, and equal places (two files at one key and offset)
-/// are taken.
+/// Asserts that a name with a `/` and a name that is not UTF-8 are refused as `BadName`.
 #[test]
-fn a_key_going_down_is_refused() {
-    assert_fault(
-        &patched_record(8, F_KEY, &0u32.to_le_bytes()),
-        8,
-        RecordFault::Unsorted,
-    );
-    // b/c.txt at the place of a.txt.
-    build(&patched_record(6, F_OFFSET, &0u64.to_le_bytes())).unwrap();
+fn a_slash_and_invalid_utf8_in_a_name_are_refused() {
+    for byte in [b'/', 0xFF] {
+        let mut bytes = one_file("a");
+        let at = names_at(&bytes);
+        bytes[at] = byte;
+        expect(&bytes, 1, EntryFault::BadName, "bad name");
+    }
 }
 
-/// Asserts that a file of size 0 with a digest other than the SHA-256 of no bytes is refused.
+/// Asserts that two siblings of one name are refused as `NotAscending`.
+#[test]
+fn siblings_of_one_name_are_refused() {
+    let mut bytes = encode(vec![
+        file("a", 1, key("k", 0), 1),
+        file("b", 1, key("k", 1), 2),
+    ]);
+    set_name(&mut bytes, 2, 0, 1);
+    expect(
+        &bytes,
+        2,
+        EntryFault::NotAscending,
+        "name not after its sibling's",
+    );
+}
+
+/// Asserts that siblings in descending order are refused as `NotAscending`, at the second.
+#[test]
+fn siblings_in_descending_order_are_refused() {
+    let mut bytes = encode(vec![
+        file("a", 1, key("k", 0), 1),
+        file("b", 1, key("k", 1), 2),
+    ]);
+    let at = names_at(&bytes);
+    put(&mut bytes, at, b"ba");
+    expect(
+        &bytes,
+        2,
+        EntryFault::NotAscending,
+        "name not after its sibling's",
+    );
+}
+
+/// Asserts that a path of 4096 bytes is walked and one of 4097 is refused as `PathTooLong` at the
+/// entry that makes it.
+#[test]
+fn a_path_over_4096_bytes_is_refused() {
+    let ok = encode(vec![file(&long_path(4096), 1, key("k", 0), 1)]);
+    let tree = built(&ok);
+    assert_eq!(tree.files[0].path.len(), 4096);
+    let long = encode(vec![file(&long_path(4097), 1, key("k", 0), 1)]);
+    let last = TreeListV2::open(&long).unwrap().len() as u32 - 1;
+    expect(&long, last, EntryFault::PathTooLong, "path over 4096 bytes");
+}
+
+/// Asserts that a file of size above 0 whose key index is the key count, or higher, is refused as
+/// `Key`, and the last key is accepted.
+#[test]
+fn a_file_with_no_such_key_is_refused() {
+    let mut bytes = base();
+    set_x(&mut bytes, 2, 2);
+    expect(&bytes, 2, EntryFault::Key(2), "no key 2");
+    set_x(&mut bytes, 2, u32::MAX);
+    assert_eq!(
+        refusal(&bytes),
+        TreeListV2Error::Entry {
+            index: 2,
+            fault: EntryFault::Key(u32::MAX)
+        }
+    );
+    set_x(&mut bytes, 2, 1);
+    built(&bytes);
+}
+
+/// Asserts that a file whose offset plus size passes 2^64 is refused as `RangeOverflow`, and one
+/// that ends at 2^64 - 1 is walked.
+#[test]
+fn a_file_range_past_2_pow_64_is_refused() {
+    let mut bytes = base();
+    set_a(&mut bytes, 2, u64::MAX);
+    expect(&bytes, 2, EntryFault::RangeOverflow, "range overflow");
+    set_a(&mut bytes, 2, u64::MAX - 3);
+    built(&bytes);
+}
+
+/// Asserts that a file of size 0 whose digest is not that of no bytes is refused as `EmptyDigest`.
 #[test]
 fn an_empty_file_with_another_digest_is_refused() {
-    for at in [0usize, 31] {
-        let bytes = sample();
-        let sha_at = record_at(&bytes, 9) + F_SHA + at;
-        let bad = patched(&bytes, sha_at, &[bytes[sha_at] ^ 1]);
-        assert_fault(&bad, 9, RecordFault::EmptyDigest);
-    }
-}
-
-/// Asserts that every record fault has its message, in the message of the list's error.
-#[test]
-fn a_record_fault_says_what_is_wrong() {
-    let cases = [
-        (
-            RecordFault::UnknownKind(9),
-            "tree list record 3: unknown kind 9",
-        ),
-        (
-            RecordFault::KindOrder,
-            "tree list record 3: out of order: the directories come first, then the links, then the files",
-        ),
-        (
-            RecordFault::BadMode(0o10000),
-            "tree list record 3: bad mode 10000",
-        ),
-        (RecordFault::Name(7), "tree list record 3: no name 7"),
-        (
-            RecordFault::Parent(4),
-            "tree list record 3: parent 4 is not a directory before it",
-        ),
-        (RecordFault::Key(2), "tree list record 3: no key 2"),
-        (RecordFault::Target(5), "tree list record 3: no target 5"),
-        (
-            RecordFault::KeyAndSize,
-            "tree list record 3: a file of size 0 has no key, and a larger one has one",
-        ),
-        (
-            RecordFault::RangeOverflow,
-            "tree list record 3: range overflow",
-        ),
-        (
-            RecordFault::Unsorted,
-            "tree list record 3: files not sorted by key and offset",
-        ),
-        (
-            RecordFault::EmptyDigest,
-            "tree list record 3: a file of size 0 has the digest of no bytes",
-        ),
-    ];
-    for (fault, text) in cases {
-        assert_eq!(record_err(3, fault).to_string(), text);
-    }
-}
-
-/// Asserts that the first fault in record order is the one reported, with its number from 0.
-#[test]
-fn the_first_faulty_record_is_reported() {
-    let bytes = patched_record(7, F_KIND, &[0]);
-    let bytes = patched(
+    let mut bytes = base();
+    let at = digest_at(&bytes, 3);
+    bytes[at] ^= 1;
+    expect(
         &bytes,
-        record_at(&bytes, 2) + F_MODE,
-        &0xffffu16.to_le_bytes(),
+        3,
+        EntryFault::EmptyDigest,
+        "a file of size 0 has the digest of no bytes",
     );
-    assert_fault(&bytes, 2, RecordFault::BadMode(0xffff));
 }
 
-// ----- limits and the tree -----
+/// Asserts that a file of size 0 ignores its key index and offset: nonsense in them gives the
+/// tree, the files and the spans of the list without it.
+#[test]
+fn an_empty_file_ignores_its_key_and_offset() {
+    let bytes = base();
+    let (clean, clean_spans) = walk(&bytes, &TreeLimits::default());
+    let mut patched = bytes.clone();
+    set_x(&mut patched, 3, u32::MAX);
+    set_a(&mut patched, 3, u64::MAX);
+    let (tree, spans) = walk(&patched, &TreeLimits::default());
+    assert_eq!(tree.unwrap(), clean.unwrap());
+    assert_eq!(spans, clean_spans);
+}
 
-/// Asserts that more records than `max_entries` are refused before any record is read, and a
-/// count equal to it is taken.
+/// Asserts that a link whose target has length 0 is refused as `Target`.
+#[test]
+fn a_link_with_an_empty_target_is_refused() {
+    let mut bytes = base();
+    set_b(&mut bytes, 4, 0);
+    expect(&bytes, 4, EntryFault::Target, "bad target");
+}
+
+/// Asserts that a target of 4096 bytes is walked and one of 4097 is refused as `Target`.
+#[test]
+fn a_link_target_over_4096_bytes_is_refused() {
+    let ok = encode(vec![link("l", &"t".repeat(MAX_TARGET_BYTES))]);
+    built(&ok);
+    let long = encode(vec![link("l", &"t".repeat(MAX_TARGET_BYTES + 1))]);
+    expect(&long, 1, EntryFault::Target, "bad target");
+}
+
+/// Asserts that a target past the end of the names, and one whose offset plus length overflows,
+/// are refused as `Target`, and that one ending at the end of the names is walked.
+#[test]
+fn a_link_target_outside_the_names_is_refused() {
+    let mut bytes = base();
+    let end = names_len(&bytes) as u64;
+    set_a(&mut bytes, 4, end);
+    set_b(&mut bytes, 4, 1);
+    expect(&bytes, 4, EntryFault::Target, "bad target");
+    set_a(&mut bytes, 4, end - 1);
+    built(&bytes);
+    set_a(&mut bytes, 4, u64::MAX - 1);
+    set_b(&mut bytes, 4, 3);
+    expect(&bytes, 4, EntryFault::Target, "bad target");
+}
+
+/// Asserts that a target that is not UTF-8, and one with a NUL, are refused as `Target`.
+#[test]
+fn a_link_target_that_is_not_text_is_refused() {
+    for byte in [0xFF, 0] {
+        let mut bytes = base();
+        let at = names_at(&bytes) + le32(&bytes, rec(&bytes, 4) + 16);
+        bytes[at] = byte;
+        expect(&bytes, 4, EntryFault::Target, "bad target");
+    }
+}
+
+/// Asserts that entries no directory holds are refused as `Orphans` with the first of them.
+#[test]
+fn entries_no_directory_holds_are_orphans() {
+    let mut bytes = encode(vec![
+        file("a", 1, key("k", 0), 1),
+        file("b", 1, key("k", 1), 2),
+        file("c", 1, key("k", 2), 3),
+    ]);
+    set_a(&mut bytes, 0, 2);
+    let error = refusal(&bytes);
+    assert_eq!(error, TreeListV2Error::Orphans(3));
+    assert_eq!(
+        error.to_string(),
+        "tree list entries from 3 on are in no directory"
+    );
+}
+
+/// Asserts that the entry limit is judged from the count alone, before any entry is read: a
+/// list one over it is refused as `TooManyEntries` even when its root is bad, and a list at it is
+/// walked.
 #[test]
 fn too_many_entries_is_refused_before_the_walk() {
-    // Every record is garbage: a fault in the walk would be a Record error.
-    let garbage = Rec {
-        kind: 0,
-        ..Rec::dir(0, NONE)
+    let limits = |max_entries| TreeLimits {
+        max_entries,
+        ..TreeLimits::default()
     };
-    let bytes = spec(vec![garbage, garbage, garbage]).bytes();
-    let (result, spans) = run_with(&bytes, &limits(2, 10, 10));
+    let bytes = base();
+    assert!(walk(&bytes, &limits(5)).0.is_ok());
+    let error = walk(&bytes, &limits(4)).0.unwrap_err();
+    assert_eq!(error, TreeListV2Error::Tree(RecordError::TooManyEntries(4)));
     assert_eq!(
-        result.unwrap_err(),
-        TreeListV2Error::Tree(RecordError::TooManyEntries(2))
+        error.to_string(),
+        "the tree is refused: tree too large: more than 4 entries"
     );
-    assert!(spans.is_empty());
+    let mut bad_root = base();
+    set_kind(&mut bad_root, 0, 0);
     assert_eq!(
-        run_with(&bytes, &limits(3, 10, 10)).0.unwrap_err(),
-        record_err(0, RecordFault::UnknownKind(0))
-    );
-    assert_eq!(
-        TreeListV2Error::Tree(RecordError::TooManyEntries(2)).to_string(),
-        "the tree is refused: tree too large: more than 2 entries"
+        walk(&bad_root, &limits(4)).0.unwrap_err(),
+        TreeListV2Error::Tree(RecordError::TooManyEntries(4))
     );
 }
 
-/// Asserts that a path with more names than `max_depth` is refused at the path of its first
-/// child, and a tree of exactly that depth, or an empty one at depth 0, is taken.
+/// Asserts that a path of more names than `max_depth` is refused as `TooDeep` with the path, and
+/// one of exactly `max_depth` is walked.
 #[test]
 fn a_tree_deeper_than_the_limit_is_refused() {
-    let bytes = sample();
-    let (result, _) = run_with(&bytes, &limits(100, 2, 100));
+    let bytes = encode(vec![file("a/b/c/f", 1, key("k", 0), 1)]);
+    let limits = |max_depth| TreeLimits {
+        max_depth,
+        ..TreeLimits::default()
+    };
+    assert!(walk(&bytes, &limits(4)).0.is_ok());
+    let error = walk(&bytes, &limits(3)).0.unwrap_err();
     assert_eq!(
-        result.unwrap_err(),
-        TreeListV2Error::Tree(RecordError::TooDeep("b/e/f".into()))
+        error,
+        TreeListV2Error::Tree(RecordError::TooDeep("a/b/c/f".to_owned()))
     );
-    run_with(&bytes, &limits(100, 3, 100)).0.unwrap();
-    let (result, _) = run_with(&sample(), &limits(100, 0, 100));
     assert_eq!(
-        result.unwrap_err(),
-        TreeListV2Error::Tree(RecordError::TooDeep("b/e/f".into()))
-    );
-    let empty = TreeList::default().encode_v2().unwrap();
-    run_with(&empty, &limits(100, 0, 100)).0.unwrap();
-    assert_eq!(
-        TreeListV2Error::Tree(RecordError::TooDeep("b/e/f".into())).to_string(),
-        "the tree is refused: tree too deep at \"b/e/f\""
+        error.to_string(),
+        "the tree is refused: tree too deep at \"a/b/c/f\""
     );
 }
 
-/// Asserts that a directory with more children than `max_dir_entries` is refused at its path, the
-/// root's being empty, and a directory of exactly the limit is taken.
+/// Asserts that a directory with more children than `max_dir_entries` is refused as
+/// `DirectoryTooLarge` with its path (empty for the root), and one with exactly that many is
+/// walked.
 #[test]
 fn a_directory_over_the_limit_is_refused() {
-    let bytes = sample();
-    // b holds c.txt, d.txt, e, ln2, zz.
-    let (result, _) = run_with(&bytes, &limits(100, 10, 4));
-    assert_eq!(
-        result.unwrap_err(),
-        TreeListV2Error::Tree(RecordError::DirectoryTooLarge("b".into()))
-    );
-    run_with(&bytes, &limits(100, 10, 5)).0.unwrap();
-    // The root holds a.txt, b, empty, ln, z.
-    let small = TreeList {
-        entries: vec![file("a", 0, None, None), file("b", 0, None, None)],
+    let limits = |max_dir_entries| TreeLimits {
+        max_dir_entries,
+        ..TreeLimits::default()
     };
-    let (result, _) = run_with(&small.encode_v2().unwrap(), &limits(100, 10, 1));
+    let bytes = encode(vec![
+        file("p/q/x", 1, key("k", 0), 1),
+        file("p/q/y", 1, key("k", 1), 2),
+    ]);
+    assert!(walk(&bytes, &limits(2)).0.is_ok());
+    let error = walk(&bytes, &limits(1)).0.unwrap_err();
     assert_eq!(
-        result.unwrap_err(),
+        error,
+        TreeListV2Error::Tree(RecordError::DirectoryTooLarge("p/q".to_owned()))
+    );
+    assert_eq!(
+        error.to_string(),
+        "the tree is refused: directory too large at \"p/q\""
+    );
+    let wide = encode(vec![
+        file("a", 1, key("k", 0), 1),
+        file("b", 1, key("k", 1), 2),
+    ]);
+    assert_eq!(
+        walk(&wide, &limits(1)).0.unwrap_err(),
         TreeListV2Error::Tree(RecordError::DirectoryTooLarge(String::new()))
     );
-    assert_eq!(
-        TreeListV2Error::Tree(RecordError::DirectoryTooLarge("b".into())).to_string(),
-        "the tree is refused: directory too large at \"b\""
-    );
 }
 
-/// Asserts that two files of one parent and name are refused at their path.
+fn some_files() -> Vec<ListEntry> {
+    vec![
+        file("z/deep", 4, key("k1", 100), 3),
+        file("a", 5, key("k1", 0), 1),
+        file("b", 6, key("k2", 7), 1),
+        empty_file("c"),
+        file("m", 7, key("k2", 50), 2),
+    ]
+}
+
+/// Asserts that the spans are handed out in entry order, once for a digest (the second file of
+/// digest 1 gets none), none for a file of size 0, each with the key of its file.
 #[test]
-fn two_files_of_one_name_in_one_directory_are_refused() {
-    let list = TreeList {
-        entries: vec![
-            file("d/x", 1, Some(("k", 0)), Some(sha(1))),
-            file("d/x", 1, Some(("k", 1)), Some(sha(2))),
-        ],
+fn spans_come_in_entry_order_once_per_digest() {
+    let bytes = encode(some_files());
+    let (tree, spans) = walk(&bytes, &TreeLimits::default());
+    tree.unwrap();
+    let want = |k: &str, offset, size, sha| ListSpan {
+        key: Arc::from(k),
+        offset,
+        size,
+        sha256: digest(sha),
     };
     assert_eq!(
-        build_err(&list.encode_v2().unwrap()),
-        TreeListV2Error::Tree(RecordError::Duplicate("d/x".into()))
-    );
-    assert_eq!(
-        build_err(&list.encode_v2().unwrap()).to_string(),
-        "the tree is refused: duplicate path \"d/x\""
+        spans,
+        [
+            want("k1", 0, 5, 1),
+            want("k2", 50, 7, 2),
+            want("k1", 100, 4, 3)
+        ]
     );
 }
 
-/// Asserts that a directory and a file of one name in one directory are refused.
+/// Asserts that a span's key is the list's own key, shared and not copied.
 #[test]
-fn a_directory_and_a_file_of_one_name_are_refused() {
-    let list = TreeList {
-        entries: vec![file("a", 0, None, None), file("a/x", 0, None, None)],
-    };
-    assert_eq!(
-        build_err(&list.encode_v2().unwrap()),
-        TreeListV2Error::Tree(RecordError::Duplicate("a".into()))
-    );
-    // The same name in two directories is not a duplicate.
-    let apart = TreeList {
-        entries: vec![file("a/x", 0, None, None), file("b/x", 0, None, None)],
-    };
-    build(&apart.encode_v2().unwrap()).unwrap();
+fn a_span_shares_the_key_of_the_list() {
+    let bytes = encode(vec![file("a", 5, key("k1", 0), 1)]);
+    let list = TreeListV2::open(&bytes).unwrap();
+    let mut spans = Vec::new();
+    list.build(&TreeLimits::default(), |span| spans.push(span))
+        .unwrap();
+    assert!(Arc::ptr_eq(&spans[0].key, &list.keys[0]));
+    assert_eq!(&*spans[0].key, "k1");
 }
 
-#[path = "tree_list_v2_build_tables_tests.rs"]
-mod tables;
+/// Asserts that the files of the result are in entry order with their full paths, and that each
+/// has its source, except a file of size 0.
+#[test]
+fn files_are_in_entry_order_with_full_paths() {
+    let tree = built(&encode(some_files()));
+    let paths: Vec<_> = tree.files.iter().map(|f| f.path.as_str()).collect();
+    assert_eq!(paths, ["a", "b", "c", "m", "z/deep"]);
+    assert_eq!(
+        tree.files[0],
+        BuiltFile {
+            path: "a".to_owned(),
+            sha256: digest(1),
+            size: 5,
+            source: key("k1", 0),
+        }
+    );
+    assert_eq!(tree.files[2].source, None);
+    assert_eq!(tree.files[2].size, 0);
+    assert_eq!(tree.files[4].source, key("k1", 100));
+}
+
+/// Asserts that the spans handed out before a fault stay handed out: the files before the bad
+/// entry have theirs.
+#[test]
+fn spans_before_a_fault_were_handed_out() {
+    let mut bytes = encode(vec![
+        file("a", 1, key("k", 0), 1),
+        file("b", 1, key("k", 1), 2),
+        file("c", 1, key("k", 2), 3),
+    ]);
+    set_a(&mut bytes, 3, u64::MAX);
+    let (tree, spans) = walk(&bytes, &TreeLimits::default());
+    assert_eq!(
+        tree.unwrap_err(),
+        TreeListV2Error::Entry {
+            index: 3,
+            fault: EntryFault::RangeOverflow
+        }
+    );
+    assert_eq!(spans.len(), 2);
+}
+
+/// Asserts that the tree built from `entries` has the root, the records (as a set) and the files
+/// (by path) of the tree the version 1 builder makes of the same entries.
+fn assert_same_as_v1(entries: Vec<ListEntry>) {
+    let list = TreeList { entries };
+    let bytes = list.encode_v2().unwrap();
+    let v2 = built(&bytes);
+    let v1 = build_tree(None, list.into_entries().unwrap(), &TreeLimits::default()).unwrap();
+    assert_eq!(v2.root, v1.root);
+    let mut r2 = v2.records;
+    let mut r1 = v1.records;
+    r2.sort_by_key(|(d, _)| *d.as_bytes());
+    r1.sort_by_key(|(d, _)| *d.as_bytes());
+    assert_eq!(r2, r1);
+    let mut f2 = v2.files;
+    f2.sort_by(|a, b| a.path.cmp(&b.path));
+    assert_eq!(f2, v1.files);
+}
+
+/// Asserts that a list of only the root builds the tree the version 1 builder makes of no entries.
+#[test]
+fn only_the_root_matches_version_1() {
+    assert_same_as_v1(vec![]);
+}
+
+/// Asserts that files at the root build the tree version 1 does.
+#[test]
+fn root_files_match_version_1() {
+    assert_same_as_v1(
+        some_files()
+            .into_iter()
+            .filter(|e| !e.path.contains('/'))
+            .collect(),
+    );
+}
+
+/// Asserts that nested directories with explicit modes build the tree version 1 does.
+#[test]
+fn nested_directories_with_modes_match_version_1() {
+    assert_same_as_v1(vec![
+        dir("a", 0o700),
+        dir("a/b", 0o750),
+        file("a/b/f", 3, key("k", 0), 1),
+        file("a/g", 3, key("k", 3), 2),
+        file("h", 3, key("k", 6), 3),
+    ]);
+}
+
+/// Asserts that empty directories build the tree version 1 does.
+#[test]
+fn empty_directories_match_version_1() {
+    assert_same_as_v1(vec![dir("e", 0o755), dir("f/g", 0o700), dir("h", 0o555)]);
+}
+
+/// Asserts that links build the tree version 1 does.
+#[test]
+fn links_match_version_1() {
+    assert_same_as_v1(vec![
+        link("l", "../up"),
+        link("d/m", "/abs/target"),
+        file("d/f", 2, key("k", 0), 1),
+    ]);
+}
+
+/// Asserts that files of one digest, and subtrees that are equal, build the tree version 1 does,
+/// each record once.
+#[test]
+fn shared_digests_match_version_1() {
+    let entries = vec![
+        file("p/x", 3, key("k1", 0), 9),
+        file("q/x", 3, key("k2", 8), 9),
+        file("r", 3, key("k1", 90), 9),
+    ];
+    assert_same_as_v1(entries.clone());
+    let bytes = encode(entries);
+    let tree = built(&bytes);
+    assert_eq!(tree.records.len(), 2);
+}
+
+/// Asserts that setuid, setgid and sticky bits of files and directories build the tree version 1
+/// does.
+#[test]
+fn special_mode_bits_match_version_1() {
+    let mut setuid = file("s", 3, key("k", 0), 1);
+    setuid.kind = ListKind::File {
+        mode: Mode::new(0o4755).unwrap(),
+        size: 3,
+        source: key("k", 0),
+        sha256: Some(digest(1)),
+    };
+    assert_same_as_v1(vec![
+        setuid,
+        dir("t", 0o1777),
+        dir("g", 0o2755),
+        file("t/f", 3, key("k", 4), 2),
+    ]);
+}
+
+/// Asserts that a count or an offset near 2^32 is refused without a panic or an allocation of that
+/// size: each section with 2^32 - 1 records is past the end; an offset of 2^32 - 8 is past the end,
+/// and one that is not a multiple of 8 is misaligned.
+#[test]
+fn counts_and_offsets_near_2_pow_32_are_refused() {
+    let sections = [
+        Section::Entries,
+        Section::Digests,
+        Section::KeyOffsets,
+        Section::Keys,
+        Section::Names,
+        Section::Ranges,
+    ];
+    let valid = encode(vec![]);
+    for (at, section) in sections.into_iter().enumerate() {
+        let mut bytes = valid.clone();
+        put(&mut bytes, 20 + 8 * at, &u32::MAX.to_le_bytes());
+        assert_eq!(
+            TreeListV2::open(&bytes).unwrap_err(),
+            TreeListV2Error::Header(HeaderFault::PastEnd(section))
+        );
+        let mut bytes = valid.clone();
+        put(&mut bytes, 16 + 8 * at, &(u32::MAX - 7).to_le_bytes());
+        assert_eq!(
+            TreeListV2::open(&bytes).unwrap_err(),
+            TreeListV2Error::Header(HeaderFault::PastEnd(section))
+        );
+        let mut bytes = valid.clone();
+        put(&mut bytes, 16 + 8 * at, &u32::MAX.to_le_bytes());
+        assert_eq!(
+            TreeListV2::open(&bytes).unwrap_err(),
+            TreeListV2Error::Header(HeaderFault::Misaligned(section))
+        );
+    }
+}
+
+fn xorshift(state: &mut u64) -> u64 {
+    *state ^= *state << 13;
+    *state ^= *state >> 7;
+    *state ^= *state << 17;
+    *state
+}
+
+/// A valid list of about sixty entries: directories, links, and files of three keys, some of
+/// size 0.
+fn hostile_base() -> Vec<u8> {
+    let mut entries = Vec::new();
+    for d in 0..6u8 {
+        entries.push(dir(&format!("d{d}"), 0o755));
+        for f in 0..5u8 {
+            let path = format!("d{d}/f{f}");
+            let n = d * 5 + f;
+            entries.push(match f {
+                0 => empty_file(&path),
+                1 => link(&path, &format!("../d{}/f2", (d + 1) % 6)),
+                _ => file(
+                    &path,
+                    u64::from(n) + 1,
+                    key(&format!("key{}", n % 3), u64::from(n) * 100),
+                    n,
+                ),
+            });
+        }
+    }
+    entries.push(file("top", 9, key("key1", 5), 200));
+    encode(entries)
+}
+
+fn run(bytes: &[u8]) {
+    if let Ok(list) = TreeListV2::open(bytes) {
+        let _ = list.build(&TreeLimits::default(), |_| {});
+    }
+}
+
+/// Asserts that the list the hostile tests mutate is valid and has about sixty entries.
+#[test]
+fn the_hostile_base_is_valid() {
+    let bytes = hostile_base();
+    let list = TreeListV2::open(&bytes).unwrap();
+    assert!(list.len() > 35);
+    let (tree, spans) = walk(&bytes, &TreeLimits::default());
+    tree.unwrap();
+    assert!(!spans.is_empty());
+}
+
+/// Asserts that 20,000 lists with one to four bytes changed, half of them in the header and the
+/// entries and every fiftieth cut short, are each opened and walked to a result, never a panic.
+#[test]
+fn mutated_lists_never_panic() {
+    let base = hostile_base();
+    let head = le32(&base, 16) + le32(&base, 20) * 32;
+    let mut state = 0x9E37_79B9_7F4A_7C15u64;
+    for round in 1..=20_000u32 {
+        let mut bytes = base.clone();
+        for _ in 0..1 + xorshift(&mut state) % 4 {
+            let region = if xorshift(&mut state).is_multiple_of(2) {
+                head
+            } else {
+                bytes.len()
+            };
+            let at = (xorshift(&mut state) % region as u64) as usize;
+            match xorshift(&mut state) % 3 {
+                0 => bytes[at] ^= 1 << (xorshift(&mut state) % 8),
+                1 => bytes[at] = xorshift(&mut state) as u8,
+                _ => bytes[at] = 0xFF,
+            }
+        }
+        if round % 50 == 0 {
+            let len = (xorshift(&mut state) % (bytes.len() as u64 + 1)) as usize;
+            bytes.truncate(len);
+        }
+        run(&bytes);
+    }
+}
+
+/// Asserts that every truncation of a valid list, to every length from 0, is opened and walked to
+/// a result, never a panic, and that only the whole list is walked to a tree.
+#[test]
+fn every_truncation_is_refused_without_a_panic() {
+    let base = hostile_base();
+    for len in 0..base.len() {
+        run(&base[..len]);
+    }
+    for len in 0..le32(&base, 16) {
+        assert!(TreeListV2::open(&base[..len]).is_err());
+    }
+    assert!(walk(&base, &TreeLimits::default()).0.is_ok());
+}
+
+/// Asserts that a 0xFF at every offset of a valid list, one at a time, is opened and walked to a
+/// result, never a panic.
+#[test]
+fn a_0xff_at_every_offset_never_panics() {
+    let base = hostile_base();
+    for at in 0..base.len() {
+        let mut bytes = base.clone();
+        bytes[at] = 0xFF;
+        run(&bytes);
+    }
+}

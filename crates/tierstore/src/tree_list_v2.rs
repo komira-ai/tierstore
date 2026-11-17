@@ -1,62 +1,62 @@
-//! The tree list, version 2: the entries of a tree as fixed little-endian records over tables of
-//! the distinct pack keys, names and link targets, which a reader checks once and walks once.
+//! The tree list, version 2 (the `TSTREE` format): a tree as fixed 32-byte records in
+//! breadth-first order over a table of digests, a table of pack keys and a blob of names, which a
+//! reader checks in one walk without copying, and that holds the reads to issue.
 //!
 //! `crates/tierstore/docs/tree-manifest.md` ("The tree list, version 2") is the reference. The
-//! object is a header, three string tables and the records:
+//! object is a 64-byte header and six sections, each 8-byte aligned, in this order:
 //!
 //! ```text
-//! header   magic "TSLIST\r\n", version 2, header length, record length, record count,
-//!          and where the key, name and target tables and the records begin
-//! keys     each object key a file's bytes are in, once, strictly ascending
-//! names    each name of an entry, once, strictly ascending
-//! targets  each symbolic link target, once, strictly ascending
-//! records  {kind, mode, name, parent, key or target, size, offset, sha256}, 64 bytes each:
-//!          every directory first, each after its parent; then the links; then the files,
-//!          ordered by key and offset, the files of size 0 last
+//! header       magic "TSTREE\0\0", major 1, minor, required flags, six (offset, count)
+//! entries      count x 32 bytes: the root first, then breadth first, each directory's children
+//!              next to one another and sorted by name, bytewise
+//! sha256       count x 32 bytes: the SHA-256 of entry i's bytes (zero for a directory or link)
+//! key offsets  (keys + 1) x 4 bytes: where each pack key begins in the key blob, then its end
+//! keys         the pack keys, back to back, each 1 to 1024 bytes
+//! names        the names of the entries and the targets of the links, back to back
+//! ranges       count x 24 bytes: {key, offset, length} of the packs, sorted and merged
 //! ```
 //!
-//! [`TreeListV2::open`] checks the header, where each section is and the key table, and nothing
-//! else: it copies nothing and allocates once for the keys. [`TreeListV2::build`] then walks the
-//! records once, in their order: it checks each, hands every span to read to its caller as it
-//! meets it, each digest once, and puts the entry in the tree; after the walk it checks the name
-//! and target tables and hashes the directories, children before parents. Because the files are
-//! ordered by key and offset, the spans come pack by pack, each pack's in ascending offset; because
-//! the names are ascending, a directory's children sort by their name's number.
+//! [`TreeListV2::open`] checks the header, where each section is, the keys and the ranges, and
+//! copies nothing. [`TreeListV2::build`] then walks the entries once, directory by directory: it
+//! checks each child, hands its caller the span of every file whose digest it has not met before
+//! as soon as the file is checked, and finally hashes the directories into a [`BuiltTree`]. The
+//! ranges are a hint of what to read, pack by pack, merged across small gaps; the spans are what
+//! the walk hands out, since each is checked against its file's digest as it is read.
 //!
 //! The object is named and stored as a version 1 list is: `cas/l/<SHA-256 of its bytes>`
-//! ([`tree_list_key`](crate::tree_list_key)), create-only. Neither reader here checks that digest:
-//! the caller does, beside the walk ([`server::provider`](crate) hashes on another thread while
-//! the walk runs and refuses the list before its tree is placed).
+//! ([`tree_list_key`](crate::tree_list_key)), create-only. Neither function here checks that
+//! digest: the mount provider hashes the object on another thread while it walks it, and places
+//! the tree only once the digest is the one the key names.
+//!
+//! [`BuiltTree`]: crate::BuiltTree
 
 use std::sync::Arc;
 
-use crate::tree_list::{MAX_NAME_BYTES, MAX_TARGET_BYTES, MAX_TREE_LIST_BYTES};
-use crate::tree_manifest::is_valid_name;
-use crate::tree_record::RecordError;
+use crate::tree_list::MAX_TREE_LIST_BYTES;
 
 pub use crate::tree_list_v2_build::ListSpan;
 
 /// The first eight bytes of every version 2 tree list. A version 1 list begins `{`.
-pub const TREE_LIST_V2_MAGIC: [u8; 8] = *b"TSLIST\r\n";
+pub const TREE_LIST_V2_MAGIC: [u8; 8] = *b"TSTREE\0\0";
 
-/// The version this module reads and writes.
-pub(crate) const VERSION: u32 = 2;
+/// The major version this module reads and writes; a reader refuses any other.
+pub(crate) const MAJOR: u16 = 1;
 
-/// The length of the header this module writes, and the least a reader takes.
-pub(crate) const HEADER_LEN: u32 = 40;
+/// The length of the header.
+pub(crate) const HEADER_LEN: usize = 64;
 
-/// The length of a record this module writes, and the least a reader takes.
-pub(crate) const RECORD_LEN: u32 = 64;
+/// The length of an entry record, and of a digest.
+pub(crate) const RECORD_LEN: usize = 32;
 
-/// The index that names nothing: the parent of an entry at the root, the key of a file of size 0.
-pub(crate) const NONE: u32 = u32::MAX;
+/// The length of a range record.
+pub(crate) const RANGE_LEN: usize = 24;
 
-/// The kind of a directory record.
+/// The kind of a file, in the top four bits of `kind_mode`.
+pub(crate) const KIND_FILE: u8 = 0;
+/// The kind of a directory.
 pub(crate) const KIND_DIR: u8 = 1;
-/// The kind of a symbolic link record.
+/// The kind of a symbolic link.
 pub(crate) const KIND_SYMLINK: u8 = 2;
-/// The kind of a file record.
-pub(crate) const KIND_FILE: u8 = 3;
 
 /// The longest key of a pack, in bytes.
 pub const MAX_KEY_BYTES: usize = 1024;
@@ -81,34 +81,37 @@ pub enum TreeListV2Error {
     /// The object does not begin with [`TREE_LIST_V2_MAGIC`].
     #[error("not a version 2 tree list: bad magic")]
     BadMagic,
-    /// A version other than 2.
+    /// A major version other than 1.
     #[error("unsupported tree list version {0}")]
-    UnsupportedVersion(u32),
-    /// The header, or where it says a section is, does not fit the object.
+    UnsupportedVersion(u16),
+    /// The header, or where it says a section is, is not what the format says.
     #[error("tree list header: {0}")]
     Header(HeaderFault),
-    /// A string of a table that is not what the format says.
-    #[error("tree list {table} {index}: {fault}")]
-    Table {
-        /// The table.
-        table: Table,
-        /// The number of the string in it, from 0.
+    /// A pack key that is not what the format says, numbered from 0.
+    #[error("tree list key {index}: {fault}")]
+    Key {
+        /// The number of the key.
         index: u32,
         /// What is wrong with it.
-        fault: StringFault,
+        fault: KeyFault,
     },
-    /// A record that is not what the format says, numbered from 0.
-    #[error("tree list record {index}: {fault}")]
-    Record {
-        /// The number of the record.
+    /// A range that names no key, is empty, or ends past 2^64, numbered from 0.
+    #[error("tree list range {0}: no such key, empty, or past 2^64")]
+    Range(u32),
+    /// An entry that is not what the format says, numbered from 0 (the root).
+    #[error("tree list entry {index}: {fault}")]
+    Entry {
+        /// The number of the entry.
         index: u32,
         /// What is wrong with it.
-        fault: RecordFault,
+        fault: EntryFault,
     },
-    /// The records are well formed, but not a tree this node makes: a name twice in one
-    /// directory, or over a limit.
+    /// Entries from this number on are in no directory's children.
+    #[error("tree list entries from {0} on are in no directory")]
+    Orphans(u32),
+    /// The entries are well formed, but not a tree this node makes: over a limit.
     #[error("the tree is refused: {0}")]
-    Tree(RecordError),
+    Tree(crate::RecordError),
 }
 
 /// What is wrong with the header of a version 2 tree list.
@@ -117,247 +120,182 @@ pub enum HeaderFault {
     /// The object is shorter than a header.
     #[error("truncated")]
     Truncated,
-    /// A header length below 40 or past the end of the object.
-    #[error("bad header length {0}")]
-    HeaderLength(u32),
-    /// A record length below 64.
-    #[error("bad record length {0}")]
-    RecordLength(u32),
-    /// A section that does not fit in the object.
+    /// A required flag this reader does not know.
+    #[error("unknown required flags {0:#x}")]
+    RequiredFlags(u32),
+    /// A section whose offset is not a multiple of 8.
+    #[error("the {0} section is not 8-byte aligned")]
+    Misaligned(Section),
+    /// A section that begins before the end of the one before it.
+    #[error("the {0} section overlaps the one before it")]
+    Overlap(Section),
+    /// A section that ends past the end of the object.
     #[error("the {0} section is past the end")]
-    Section(Section),
+    PastEnd(Section),
+    /// An entry count of 0: there is always the root. (The size of the object bounds the count
+    /// from above: at most 2^23 records of 32 bytes fit in 256 MiB.)
+    #[error("bad entry count {0}")]
+    EntryCount(u32),
+    /// A digest table whose count is not the entry count.
+    #[error("{0} digests for another count of entries")]
+    DigestCount(u32),
+    /// Key offsets that do not end at the end of the key blob, or point past it.
+    #[error("the key offsets do not end at the end of the keys")]
+    KeysLength,
 }
 
 /// A section of a version 2 tree list.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum Section {
-    /// A string table.
-    Table(Table),
-    /// The records.
-    Records,
+    /// The entry records.
+    Entries,
+    /// The digests of the entries.
+    Digests,
+    /// The offsets of the keys.
+    KeyOffsets,
+    /// The bytes of the keys.
+    Keys,
+    /// The bytes of the names and targets.
+    Names,
+    /// The ranges to read.
+    Ranges,
 }
+
+/// The sections, in the order of the header and of the object.
+const SECTIONS: [Section; 6] = [
+    Section::Entries,
+    Section::Digests,
+    Section::KeyOffsets,
+    Section::Keys,
+    Section::Names,
+    Section::Ranges,
+];
 
 impl std::fmt::Display for Section {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
-        match self {
-            Self::Table(table) => write!(f, "{table}"),
-            Self::Records => f.write_str("record"),
-        }
-    }
-}
-
-/// A string table of a version 2 tree list.
-#[derive(Clone, Copy, Debug, PartialEq, Eq)]
-pub enum Table {
-    /// The keys of the objects that hold the bytes of the files.
-    Keys,
-    /// The names of the entries.
-    Names,
-    /// The targets of the symbolic links.
-    Targets,
-}
-
-impl std::fmt::Display for Table {
-    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         f.write_str(match self {
+            Self::Entries => "entry",
+            Self::Digests => "sha256",
+            Self::KeyOffsets => "key offset",
             Self::Keys => "key",
             Self::Names => "name",
-            Self::Targets => "target",
+            Self::Ranges => "range",
         })
     }
 }
 
-/// What is wrong with one string of a table.
+/// What is wrong with one pack key.
 #[derive(Clone, Copy, Debug, PartialEq, Eq, thiserror::Error)]
-pub enum StringFault {
-    /// Its end is before its start, or past the end of the object.
-    #[error("past the end of its table")]
-    Bounds,
+pub enum KeyFault {
+    /// The first key does not begin at 0.
+    #[error("does not begin at 0")]
+    Start,
+    /// A key of no bytes: its end is not after its start.
+    #[error("empty")]
+    Empty,
+    /// A key over [`MAX_KEY_BYTES`].
+    #[error("over 1024 bytes")]
+    TooLong,
     /// Not UTF-8.
     #[error("not UTF-8")]
     NotUtf8,
-    /// Not after the string before it, bytewise.
-    #[error("not strictly ascending")]
-    NotAscending,
-    /// A key that is empty or over [`MAX_KEY_BYTES`].
-    #[error("bad key")]
-    BadKey,
-    /// A name that is empty, `.`, `..`, over 255 bytes, has a `/` or a NUL, or begins `.wh.`.
-    #[error("bad name")]
-    BadName,
-    /// A target that is empty, over 4096 bytes or has a NUL.
-    #[error("bad target")]
-    BadTarget,
 }
 
-/// What is wrong with one record.
+/// What is wrong with one entry.
 #[derive(Clone, Copy, Debug, PartialEq, Eq, thiserror::Error)]
-pub enum RecordFault {
-    /// A kind other than 1 (directory), 2 (link) and 3 (file).
+pub enum EntryFault {
+    /// Entry 0 is not a directory with parent 0 and no name.
+    #[error("the root is not a directory with no name and parent 0")]
+    Root,
+    /// A kind other than 0 (file), 1 (directory) and 2 (link).
     #[error("unknown kind {0}")]
     UnknownKind(u8),
-    /// A record of a kind that comes before the kind of the record before it.
-    #[error("out of order: the directories come first, then the links, then the files")]
-    KindOrder,
-    /// A mode with a bit above 07777.
-    #[error("bad mode {0:o}")]
-    BadMode(u16),
-    /// A name index that is not in the name table.
-    #[error("no name {0}")]
-    Name(u32),
-    /// A parent that is not a directory record before this one.
-    #[error("parent {0} is not a directory before it")]
+    /// A directory that no directory before it holds.
+    #[error("a directory before the children of the directories before it")]
+    Unreachable,
+    /// A directory whose first child is not the entry after the children of the directories
+    /// before it, or whose children run past the last entry.
+    #[error("children not where the breadth-first order puts them")]
+    Children,
+    /// A child whose parent is not the directory whose children it is among.
+    #[error("parent {0} is not the directory that holds it")]
     Parent(u32),
-    /// A key index that is not in the key table.
+    /// A name past the end of the name blob.
+    #[error("name past the end of the names")]
+    NameBounds,
+    /// A name that is empty, `.`, `..`, not UTF-8, has a `/` or a NUL, or begins `.wh.`.
+    #[error("bad name")]
+    BadName,
+    /// A name that does not sort after its sibling's before it, bytewise: two siblings of one
+    /// name, or children out of order.
+    #[error("name not after its sibling's")]
+    NotAscending,
+    /// A path over 4096 bytes.
+    #[error("path over 4096 bytes")]
+    PathTooLong,
+    /// A file of size above 0 whose key index is not in the key table.
     #[error("no key {0}")]
     Key(u32),
-    /// A target index that is not in the target table.
-    #[error("no target {0}")]
-    Target(u32),
-    /// A file of size 0 with a key, or a larger one without one.
-    #[error("a file of size 0 has no key, and a larger one has one")]
-    KeyAndSize,
     /// A file whose offset plus size does not fit in 64 bits.
     #[error("range overflow")]
     RangeOverflow,
-    /// A file whose key and offset sort before the file's before it.
-    #[error("files not sorted by key and offset")]
-    Unsorted,
     /// A file of size 0 whose digest is not the SHA-256 of no bytes.
     #[error("a file of size 0 has the digest of no bytes")]
     EmptyDigest,
+    /// A link target that is empty, over 4096 bytes, past the end of the names, not UTF-8, or
+    /// has a NUL.
+    #[error("bad target")]
+    Target,
 }
 
-/// One string table: `count` ends, each the end of a string in the bytes that follow them.
-#[derive(Clone, Copy, Debug)]
-pub(crate) struct Strings<'a> {
-    table: Table,
-    count: u32,
-    /// The `count` little-endian ends.
-    ends: &'a [u8],
-    /// The bytes of the strings, the first at 0.
-    data: &'a [u8],
+/// A range of a pack the writer says the tree reads: a hint, checked only to be in bounds.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct ListRange {
+    /// The key of the pack.
+    pub key: Arc<str>,
+    /// The first byte.
+    pub offset: u64,
+    /// The number of bytes, above 0.
+    pub len: u64,
 }
 
-impl<'a> Strings<'a> {
-    /// The table at `at` of `bytes`, if its count, its ends and its last end fit.
-    fn at(bytes: &'a [u8], at: u32, table: Table) -> Result<Self, TreeListV2Error> {
-        let past = || TreeListV2Error::Header(HeaderFault::Section(Section::Table(table)));
-        let at = at as usize;
-        let count = read_u32(bytes, at).ok_or_else(past)?;
-        let ends_at = at + 4;
-        let ends_len = count as usize * 4;
-        let ends = bytes.get(ends_at..ends_at + ends_len).ok_or_else(past)?;
-        let data_at = ends_at + ends_len;
-        let len = match count {
-            0 => 0,
-            _ => read_u32(ends, ends_len - 4).unwrap_or(0) as usize,
-        };
-        let data = bytes.get(data_at..data_at + len).ok_or_else(past)?;
-        Ok(Self {
-            table,
-            count,
-            ends,
-            data,
-        })
-    }
-
-    /// How many strings the table has.
-    pub(crate) fn len(&self) -> u32 {
-        self.count
-    }
-
-    /// The bytes of string `index` (below [`len`](Self::len)), or a fault if its ends do not hold.
-    fn raw(&self, index: u32) -> Result<&'a [u8], StringFault> {
-        let i = index as usize;
-        let end = read_u32(self.ends, i * 4).unwrap_or(0) as usize;
-        let start = match i {
-            0 => 0,
-            _ => read_u32(self.ends, i * 4 - 4).unwrap_or(0) as usize,
-        };
-        self.data.get(start..end).ok_or(StringFault::Bounds)
-    }
-
-    /// String `index`, which [`check`](Self::check) has found good.
-    pub(crate) fn get(&self, index: u32) -> &'a str {
-        self.raw(index)
-            .ok()
-            .and_then(|raw| std::str::from_utf8(raw).ok())
-            .unwrap_or_default()
-    }
-
-    /// Checks every string: in bounds, UTF-8, strictly ascending, and accepted by `valid`.
-    pub(crate) fn check(
-        &self,
-        valid: fn(&str) -> bool,
-        bad: StringFault,
-    ) -> Result<(), TreeListV2Error> {
-        let mut previous: Option<&[u8]> = None;
-        for index in 0..self.count {
-            let fault = |fault| TreeListV2Error::Table {
-                table: self.table,
-                index,
-                fault,
-            };
-            let raw = self.raw(index).map_err(fault)?;
-            let text = std::str::from_utf8(raw).map_err(|_| fault(StringFault::NotUtf8))?;
-            if previous.is_some_and(|previous| previous >= raw) {
-                return Err(fault(StringFault::NotAscending));
-            }
-            if !valid(text) {
-                return Err(fault(bad));
-            }
-            previous = Some(raw);
-        }
-        Ok(())
-    }
+/// The little-endian `u16` at `at` of `bytes`, which the caller has bounded.
+pub(crate) fn le_u16(bytes: &[u8], at: usize) -> u16 {
+    u16::from_le_bytes([bytes[at], bytes[at + 1]])
 }
 
-/// Whether `key` may be the key of a pack: 1 to [`MAX_KEY_BYTES`] bytes.
-pub(crate) fn valid_key(key: &str) -> bool {
-    !key.is_empty() && key.len() <= MAX_KEY_BYTES
-}
-
-/// Whether `name` may be the name of an entry.
-pub(crate) fn valid_name(name: &str) -> bool {
-    name.len() <= MAX_NAME_BYTES && is_valid_name(name)
-}
-
-/// Whether `target` may be the target of a link: 1 to 4096 bytes, no NUL.
-pub(crate) fn valid_target(target: &str) -> bool {
-    !target.is_empty() && target.len() <= MAX_TARGET_BYTES && !target.contains('\0')
-}
-
-/// The little-endian `u32` at `at` of `bytes`, if it is there.
-pub(crate) fn read_u32(bytes: &[u8], at: usize) -> Option<u32> {
-    let four = bytes.get(at..at.checked_add(4)?)?;
-    Some(u32::from_le_bytes([four[0], four[1], four[2], four[3]]))
+/// The little-endian `u32` at `at` of `bytes`, which the caller has bounded.
+pub(crate) fn le_u32(bytes: &[u8], at: usize) -> u32 {
+    u32::from_le_bytes([bytes[at], bytes[at + 1], bytes[at + 2], bytes[at + 3]])
 }
 
 /// The little-endian `u64` at `at` of `bytes`, which the caller has bounded.
-pub(crate) fn le_u64(bytes: &[u8]) -> u64 {
+pub(crate) fn le_u64(bytes: &[u8], at: usize) -> u64 {
     let mut eight = [0; 8];
-    eight.copy_from_slice(&bytes[..8]);
+    eight.copy_from_slice(&bytes[at..at + 8]);
     u64::from_le_bytes(eight)
 }
 
-/// A version 2 tree list, its header and key table checked, over the bytes of the object.
+/// A version 2 tree list, its header, keys and ranges checked, over the bytes of the object.
 #[derive(Clone, Debug)]
 pub struct TreeListV2<'a> {
-    /// The records, `count` of `record_len` bytes each.
-    pub(crate) records: &'a [u8],
+    /// The entry records, `count` of 32 bytes.
+    pub(crate) entries: &'a [u8],
+    /// The digests, `count` of 32 bytes.
+    pub(crate) digests: &'a [u8],
     pub(crate) count: u32,
-    pub(crate) record_len: usize,
     /// The keys, each shared by the files whose bytes it holds.
     pub(crate) keys: Vec<Arc<str>>,
-    pub(crate) names: Strings<'a>,
-    pub(crate) targets: Strings<'a>,
+    /// The names and targets.
+    pub(crate) names: &'a [u8],
+    /// The range records.
+    ranges: &'a [u8],
 }
 
 impl<'a> TreeListV2<'a> {
-    /// Opens the list in `bytes`: checks the size, the magic, the version, that every section is
-    /// within the object, and every key. The records, the names and the targets are checked by
-    /// [`build`](Self::build), as it walks them.
+    /// Opens the list in `bytes`: checks the size, the magic, the version, the required flags,
+    /// that the sections are aligned, in order and within the object, the counts, every key and
+    /// every range. The entries are checked by [`build`](Self::build), as it walks them.
     pub fn open(bytes: &'a [u8]) -> Result<Self, TreeListV2Error> {
         if bytes.len() > MAX_TREE_LIST_BYTES {
             return Err(TreeListV2Error::TooLarge {
@@ -368,59 +306,131 @@ impl<'a> TreeListV2<'a> {
         if !is_tree_list_v2(bytes) {
             return Err(TreeListV2Error::BadMagic);
         }
-        let field = |at| read_u32(bytes, at).ok_or(TreeListV2Error::Header(HeaderFault::Truncated));
-        let version = field(8)?;
-        if version != VERSION {
-            return Err(TreeListV2Error::UnsupportedVersion(version));
+        let header = TreeListV2Error::Header;
+        if bytes.len() < HEADER_LEN {
+            return Err(header(HeaderFault::Truncated));
         }
-        let header_len = field(12)?;
-        let record_len = field(16)?;
-        let count = field(20)?;
-        let (keys_at, names_at, targets_at, records_at) =
-            (field(24)?, field(28)?, field(32)?, field(36)?);
-        if header_len < HEADER_LEN || header_len as usize > bytes.len() {
-            return Err(TreeListV2Error::Header(HeaderFault::HeaderLength(
-                header_len,
-            )));
+        let major = le_u16(bytes, 8);
+        if major != MAJOR {
+            return Err(TreeListV2Error::UnsupportedVersion(major));
         }
-        if record_len < RECORD_LEN {
-            return Err(TreeListV2Error::Header(HeaderFault::RecordLength(
-                record_len,
-            )));
+        let flags = le_u32(bytes, 12);
+        if flags != 0 {
+            return Err(header(HeaderFault::RequiredFlags(flags)));
         }
-        let records_len = u64::from(count) * u64::from(record_len);
-        let records = usize::try_from(records_len)
-            .ok()
-            .and_then(|len| bytes.get(records_at as usize..(records_at as usize).checked_add(len)?))
-            .ok_or(TreeListV2Error::Header(HeaderFault::Section(
-                Section::Records,
-            )))?;
-        let key_table = Strings::at(bytes, keys_at, Table::Keys)?;
-        let names = Strings::at(bytes, names_at, Table::Names)?;
-        let targets = Strings::at(bytes, targets_at, Table::Targets)?;
-        key_table.check(valid_key, StringFault::BadKey)?;
-        let keys = (0..key_table.len())
-            .map(|index| Arc::from(key_table.get(index)))
-            .collect();
-        Ok(Self {
-            records,
+        let mut slices: [&[u8]; 6] = [&[]; 6];
+        let mut counts = [0u32; 6];
+        let mut previous_end = HEADER_LEN;
+        for (at, section) in SECTIONS.iter().enumerate() {
+            let offset = le_u32(bytes, 16 + 8 * at) as usize;
+            let count = le_u32(bytes, 20 + 8 * at);
+            // No sum or product overflows: a count is below 2^32, an offset too, and a section
+            // is at most 32 bytes a count.
+            let len = match section {
+                Section::Entries | Section::Digests => count as usize * RECORD_LEN,
+                Section::KeyOffsets => (count as usize + 1) * 4,
+                Section::Keys | Section::Names => count as usize,
+                Section::Ranges => count as usize * RANGE_LEN,
+            };
+            if !offset.is_multiple_of(8) {
+                return Err(header(HeaderFault::Misaligned(*section)));
+            }
+            if offset < previous_end {
+                return Err(header(HeaderFault::Overlap(*section)));
+            }
+            let end = offset + len;
+            slices[at] = bytes
+                .get(offset..end)
+                .ok_or(header(HeaderFault::PastEnd(*section)))?;
+            counts[at] = count;
+            previous_end = end;
+        }
+        let count = counts[0];
+        if count == 0 {
+            return Err(header(HeaderFault::EntryCount(count)));
+        }
+        if counts[1] != count {
+            return Err(header(HeaderFault::DigestCount(counts[1])));
+        }
+        let keys = keys_of(slices[2], slices[3])?;
+        let list = Self {
+            entries: slices[0],
+            digests: slices[1],
             count,
-            record_len: record_len as usize,
             keys,
-            names,
-            targets,
-        })
+            names: slices[4],
+            ranges: slices[5],
+        };
+        for index in 0..counts[5] {
+            list.range(index).ok_or(TreeListV2Error::Range(index))?;
+        }
+        Ok(list)
     }
 
-    /// How many entries the list has.
+    /// How many entries the list has, the root included.
     #[must_use]
     pub fn len(&self) -> usize {
         self.count as usize
     }
 
-    /// Whether the list has no entries.
+    /// Whether the list has nothing but the root.
     #[must_use]
     pub fn is_empty(&self) -> bool {
-        self.count == 0
+        self.count == 1
     }
+
+    /// The ranges of the packs the writer says the tree reads, in the order of the list: a hint
+    /// of what to read, merged across small gaps, which [`open`](Self::open) checked to name a key
+    /// and to be in bounds, and nothing more.
+    pub fn ranges(&self) -> impl Iterator<Item = ListRange> + '_ {
+        let count = (self.ranges.len() / RANGE_LEN) as u32;
+        (0..count).filter_map(|index| self.range(index))
+    }
+
+    /// Range `index`, if it names a key, is not empty and ends within 64 bits.
+    fn range(&self, index: u32) -> Option<ListRange> {
+        let at = index as usize * RANGE_LEN;
+        let key = self.keys.get(le_u32(self.ranges, at) as usize)?;
+        let offset = le_u64(self.ranges, at + 8);
+        let len = le_u64(self.ranges, at + 16);
+        let valid = len > 0 && offset.checked_add(len).is_some();
+        valid.then(|| ListRange {
+            key: key.clone(),
+            offset,
+            len,
+        })
+    }
+}
+
+/// The keys of the key offsets `offsets` into `blob`: each 1 to [`MAX_KEY_BYTES`] bytes of UTF-8,
+/// the first at 0, the last ending at the end of `blob`.
+fn keys_of(offsets: &[u8], blob: &[u8]) -> Result<Vec<Arc<str>>, TreeListV2Error> {
+    let count = offsets.len() / 4 - 1;
+    let fault = |index: usize, fault| TreeListV2Error::Key {
+        index: index as u32,
+        fault,
+    };
+    if le_u32(offsets, 0) != 0 {
+        return Err(fault(0, KeyFault::Start));
+    }
+    let mut keys = Vec::with_capacity(count);
+    for index in 0..count {
+        let start = le_u32(offsets, index * 4) as usize;
+        let end = le_u32(offsets, index * 4 + 4) as usize;
+        if end <= start {
+            return Err(fault(index, KeyFault::Empty));
+        }
+        if end - start > MAX_KEY_BYTES {
+            return Err(fault(index, KeyFault::TooLong));
+        }
+        let raw = blob
+            .get(start..end)
+            .ok_or(TreeListV2Error::Header(HeaderFault::KeysLength))?;
+        let key = std::str::from_utf8(raw).map_err(|_| fault(index, KeyFault::NotUtf8))?;
+        keys.push(Arc::from(key));
+    }
+    if le_u32(offsets, count * 4) as usize != blob.len() {
+        return Err(TreeListV2Error::Header(HeaderFault::KeysLength));
+    }
+    Ok(keys)
 }
