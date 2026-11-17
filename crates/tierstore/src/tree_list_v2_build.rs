@@ -5,7 +5,7 @@
 use std::collections::HashSet;
 use std::sync::Arc;
 
-use crate::tree_list::{EMPTY_SHA256, MAX_PATH_BYTES, MAX_TARGET_BYTES};
+use crate::tree_list::{EMPTY_SHA256, MAX_PATH_BYTES, MAX_TARGET_BYTES, MAX_TREE_LIST_BYTES};
 use crate::tree_list_v2::{
     EntryFault, KIND_DIR, KIND_FILE, KIND_SYMLINK, RECORD_LEN, TreeListV2, TreeListV2Error, le_u16,
     le_u32, le_u64,
@@ -126,6 +126,9 @@ impl<'a> TreeListV2<'a> {
         // The depth and the path length of each entry, set as its directory is walked.
         let mut depths = vec![(0u32, 0u32); count];
         let mut spanned = HashSet::new();
+        // The bytes of every path together: names are shared, so a small object could name far
+        // more path bytes than it holds, which `finish` makes into strings.
+        let mut path_bytes = 0usize;
         let mut next = 1;
         for dir in 0..count {
             let record = self.record(dir);
@@ -154,6 +157,12 @@ impl<'a> TreeListV2<'a> {
                         index: child as u32,
                         fault,
                     })?;
+                path_bytes += depths[child].1 as usize;
+                if path_bytes > MAX_TREE_LIST_BYTES {
+                    return Err(TreeListV2Error::PathBytes {
+                        max: MAX_TREE_LIST_BYTES,
+                    });
+                }
                 if depths[child].0 as usize > limits.max_depth {
                     return refuse(RecordError::TooDeep(self.path(child)));
                 }

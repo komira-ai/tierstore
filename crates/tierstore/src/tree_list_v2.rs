@@ -109,6 +109,13 @@ pub enum TreeListV2Error {
     /// Entries from this number on are in no directory's children.
     #[error("tree list entries from {0} on are in no directory")]
     Orphans(u32),
+    /// Paths that together are over the bound: a tree whose version 1 list could not be stored,
+    /// and whose paths the walk would otherwise make from far fewer bytes of shared names.
+    #[error("tree list paths over {max} bytes together")]
+    PathBytes {
+        /// The bound, [`MAX_TREE_LIST_BYTES`].
+        max: usize,
+    },
     /// The entries are well formed, but not a tree this node makes: over a limit.
     #[error("the tree is refused: {0}")]
     Tree(crate::RecordError),

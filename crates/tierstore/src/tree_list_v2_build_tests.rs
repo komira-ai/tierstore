@@ -909,3 +909,33 @@ fn a_0xff_at_every_offset_never_panics() {
         run(&bytes);
     }
 }
+
+/// Asserts that a list whose paths together are over 256 MiB is refused by the walk, though the
+/// object is a few MiB: fifteen directories of 255-byte names hold 70,000 files, so each file's
+/// path is about 3,850 bytes, from names stored once.
+#[test]
+fn paths_over_the_bound_together_are_refused() {
+    let deep = (0..15)
+        .map(|level| format!("{level:x}").repeat(255))
+        .collect::<Vec<_>>()
+        .join("/");
+    let entries = (0..70_000)
+        .map(|n| empty_file(&format!("{deep}/f{n:05}")))
+        .collect();
+    let bytes = TreeList { entries }.encode_v2().unwrap();
+    assert!(bytes.len() < 8 << 20);
+    let refused = TreeListV2::open(&bytes)
+        .unwrap()
+        .build(&TreeLimits::default(), drop)
+        .unwrap_err();
+    assert_eq!(
+        refused,
+        TreeListV2Error::PathBytes {
+            max: crate::MAX_TREE_LIST_BYTES
+        }
+    );
+    assert_eq!(
+        refused.to_string(),
+        "tree list paths over 268435456 bytes together"
+    );
+}
