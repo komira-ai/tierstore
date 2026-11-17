@@ -118,7 +118,7 @@ fn a_header_alone_is_empty_and_unknown_members_are_ignored() {
     assert_eq!(parse(&list(&[])).unwrap(), TreeList::default());
     let bytes = format!(
         concat!(
-            r#"{{"format":"tierstore.tree-list","version":1,"writer":"kbf"}}"#,
+            r#"{{"format":"tierstore.tree-list","version":1,"writer":"a client"}}"#,
             "\n",
             r#"{{"path":"a","kind":"file","mode":420,"size":1,"key":"k","offset":0,"sha256":"{}","xattr":{{}}}}"#,
             "\n",

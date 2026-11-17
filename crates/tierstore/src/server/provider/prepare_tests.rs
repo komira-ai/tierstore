@@ -126,7 +126,8 @@ async fn a_tree_with_a_file_not_read_is_placed_and_not_marked_ready() {
                 key: pack.key.as_str().into(),
                 offset: *offset,
             }),
-            sha256: Some(TreeDigest::from_hex(&pack.blobs[1].0).unwrap()),
+            // A digest no blob of the pack has: the bytes the fill reads do not hash to it.
+            sha256: Some(TreeDigest::of(b"other bytes")),
         },
     };
     let list = TreeList {
