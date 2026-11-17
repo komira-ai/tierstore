@@ -22,6 +22,13 @@
 type   = "s3"
 params = { addresses = ["127.0.0.1:9300"] }
 
+# The mount provider jobscheduler's agent on this Mac asks for a job's input tree
+# (crates/tierstore/docs/operations.md, "The mount provider"): a Unix socket only, mode 0600, in a
+# directory _tierstore owns; `mountpoint` is the Mac's `fs.mountpoint` of tierstore fs.
+[[interface]]
+type   = "mount-provider"
+params = { socket = "/usr/local/tierstore/run/provider.sock", mountpoint = "/private/var/tierstore/fs" }
+
 [server]
 proxy_id_from_facts = { path = "/var/lib/hostkeeper/facts.json", prefix = "tierstore-cache-" }
 slot                = 9300

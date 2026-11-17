@@ -1,0 +1,50 @@
+// The protocol a node-local mount provider serves to the jobscheduler agent of its host, gRPC over
+// a Unix socket: jobscheduler's contract (komira-ai/jobscheduler, docs/design/mount-providers.md
+// section 3), vendored here as tierstore serves it. A change is made there first and copied here.
+syntax = "proto3";
+package jobscheduler.provider.v1;
+
+service MountProvider {
+  rpc Prepare(PrepareRequest) returns (PrepareResponse);
+  rpc Mount(MountRequest) returns (MountResponse);
+  rpc Release(ReleaseRequest) returns (ReleaseResponse);
+  rpc Sweep(SweepRequest) returns (SweepResponse);
+}
+
+// A source of a job: the agent's instance, the run ("js.<run id>") and the source's place in the
+// job.
+message Source {
+  string agent = 1;
+  string run = 2;
+  uint32 index = 3;
+}
+
+// The same numbers as jobscheduler.v1.MountMode.
+enum MountMode {
+  MOUNT_MODE_UNSPECIFIED = 0;
+  READ_ONLY = 1;
+  READ_WRITE = 2;
+  COPY_ON_WRITE = 3;
+}
+
+message PrepareRequest {
+  Source source = 1;
+  string ref = 2;
+  MountMode mode = 3;
+  string host = 4;
+}
+message PrepareResponse {}
+
+message MountRequest { Source source = 1; }
+// An absolute host path of a directory.
+message MountResponse { string path = 1; }
+
+message ReleaseRequest { Source source = 1; }
+message ReleaseResponse {}
+
+// keep: the runs of the agent to keep, "js.<run id>".
+message SweepRequest {
+  string agent = 1;
+  repeated string keep = 2;
+}
+message SweepResponse { uint32 released = 1; }

@@ -630,6 +630,35 @@ a build node with the front shows the OCI block and then the cache block; a proc
 the three has one line that says so; the proxy's series are in "Metrics" in
 `crates/tierstore/README.md`.
 
+### The mount provider of a build node
+
+A build node that runs jobs (the host groups `all-in-one` and `mac-build`) also serves the mount
+provider, which makes a job's input tree local while jobscheduler's agent readies the job's
+container: a `mount-provider` entry of `[[interface]]`, on a Unix socket in the unit's
+`StateDirectory` (`/var/lib/tierstore`, writable under `ProtectSystem=strict`):
+
+```toml
+[[interface]]
+type   = "mount-provider"
+params = { socket = "/var/lib/tierstore/provider.sock", mountpoint = "/run/tierstore/fs" }
+```
+
+`mountpoint` is the node's mount of `tierstore fs` (`fs.mountpoint` of `/etc/tierstore/fs.toml`),
+under which the provider places each job's tree; `tierstore fs` must run on the node for a job to
+read it. The host group's configuration package puts the entry in `/etc/tierstore/config.toml`, and
+the agent's flags file of the same host group gives the agent the socket and the mount root:
+
+```text
+--mount-provider tierstore=/var/lib/tierstore/provider.sock
+--mount-root-ro tierstore-fs=/run/tierstore/fs/mount-provider
+```
+
+The socket is mode 0600 and owned by `tierstore`; the agent, which runs as root, connects to it. It
+is bound only while the instance holds the lock of the cache directory, so during a hand-over the
+old instance answers until it exits, and the new one binds when it takes the lock. A Mac's file has
+the same entry with its own paths (`macos/tierstore.toml`). What the provider does, and what each
+of its answers means to a job, is in `crates/tierstore/docs/operations.md`, "The mount provider".
+
 ### The registry front
 
 The registry front (see The OCI read front) is an `[[interface]]` of type `oci` in a storage
@@ -698,6 +727,7 @@ instead of running with settings it did not read.
 | `hot_store.budget` | the bytes the hot tier is meant to hold; the water marks are shares of it (`hot_store.high_water`, `hot_store.low_water`, `hot_store.critical`) |
 | `hot_store.usage_stale_after` | how old the usage that the reconciler publishes may be (2m by default, longer than `hot_store.lease_ttl`) before `/usagez` says 503 with the reason |
 | an `oci` interface | the registry front (read-only unless it asks for keys), off unless the file has one; see The OCI read front |
+| a `mount-provider` interface | a build node's mount provider for jobscheduler's agent: `params.socket` and the mount of `tierstore fs`; see The mount provider of a build node |
 
 The drain on SIGTERM is two keys of `[server]`: `drain_lb_wait` is how long `/readyz` says 503
 while the server goes on accepting and serving (the settle, `10s`; `1s` on macOS), and `drain_deadline` is how long it

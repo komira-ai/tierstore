@@ -110,6 +110,7 @@ pub(super) async fn serve_combined(
         fill_socket: settings.fill_socket.as_deref(),
         trees: None,
         trees_front: None,
+        provider: None,
     };
     let (server, oci) = (built.server, built.oci);
     serve_front(cache, server, oci, fronts, stop, ready, reconciling).await

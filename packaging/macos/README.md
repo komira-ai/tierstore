@@ -18,7 +18,7 @@ As root, from this directory, once the package is installed:
 dscl . -read /Users/_tierstore >/dev/null   # the account exists (made with dscl or sysadminctl)
 install -d -m 0755 -o root -g wheel /usr/local/tierstore
 install -d -m 0750 -o root -g _tierstore /usr/local/tierstore/etc
-install -d -m 0700 -o _tierstore -g _tierstore /usr/local/tierstore/cache /usr/local/tierstore/log
+install -d -m 0700 -o _tierstore -g _tierstore /usr/local/tierstore/cache /usr/local/tierstore/log /usr/local/tierstore/run
 install -m 0640 -o root -g _tierstore tierstore.toml /usr/local/tierstore/etc/tierstore.toml
 ```
 
@@ -27,5 +27,6 @@ What the file holds that is the Mac's own:
 - **The proxy id** is not written in the file. `server.proxy_id_from_facts` makes it of the prefix `tierstore-cache-` and the `host_id` of the facts file that hostkeeper writes (`/var/lib/hostkeeper/facts.json`, readable by every user), so each Mac has an id of its own. The file is read at each start and each `--check-config`; a start is refused (exit 2) if it is missing or has no `schema` of 1 or no `host_id`. A change of the Mac's facts takes a restart of the job.
 - **The upstream** is the tierstore S3 servers of the six storage nodes, port 9300, in `cold_store.endpoints`. The file ships the documentation addresses `192.0.2.1` to `192.0.2.6`: replace them with the storage nodes' addresses before use. A read goes to the next address when a connect fails ([multi-endpoint store](../../docs/design/multi-endpoint-store.md)).
 - **The cache** is under `/usr/local/tierstore/cache`, with a budget to set for the disk, `whole_fill_limit = "128MiB"` (at least the largest pack), and one policy, `cas/`, cached.
+- **The mount provider** (a `mount-provider` interface) answers jobscheduler's agent on the socket `/usr/local/tierstore/run/provider.sock`, mode 0600 and owned by `_tierstore` (the agent runs as root), in the directory made above; the trees it makes appear under `/private/var/tierstore/fs`, the Mac's `fs.mountpoint` of `tierstore fs`. The agent is given `--mount-provider tierstore=/usr/local/tierstore/run/provider.sock` ([operations](../../crates/tierstore/docs/operations.md#the-mount-provider) says what it does).
 
 Then the key files in `/usr/local/tierstore/etc` (each owned by `_tierstore`, mode 0600), and hostkeeper starts the job. `crates/tierstore/tests/packaging_macos.rs` checks that the binary accepts the plist's command line and this file, and that the file serves `[local_cache]` on loopback only, on the port the hook probes.

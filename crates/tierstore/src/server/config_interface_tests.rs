@@ -93,13 +93,15 @@ fn an_unknown_type_and_the_fs_type_are_refused() {
     let unknown = refusal(&[entry("s3", "port = 9300"), entry("ftp", "port = 21")]);
     assert_eq!(
         unknown,
-        "interface[1].type: not an interface type; the types are \"s3\", \"oci\" and \"trees\""
+        "interface[1].type: not an interface type; the types are \"s3\", \"oci\", \"trees\" and \
+         \"mount-provider\""
     );
     let fs = refusal(&[entry("s3", "port = 9300"), entry("fs", "port = 21")]);
     assert_eq!(
         fs,
         "interface[1].type: \"fs\" is not an interface of this process: `tierstore fs` is a process of \
-         its own, with an `[fs]` table; the types are \"s3\", \"oci\" and \"trees\""
+         its own, with an `[fs]` table; the types are \"s3\", \"oci\", \"trees\" and \
+         \"mount-provider\""
     );
 }
 

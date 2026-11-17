@@ -6,7 +6,7 @@ rust-version.workspace = true
 license.workspace = true
 repository.workspace = true
 publish.workspace = true
-description = "The wire contract of the tierstore trees interface: trees.proto (package tierstore.trees.v1) and its generated messages, client and server stubs."
+description = "The wire contract of the tierstore trees interface (trees.proto, package tierstore.trees.v1) and of the jobscheduler mount provider tierstore serves (provider.proto, package jobscheduler.provider.v1): their generated messages, client and server stubs."
 
 # The types are generated from `proto/tierstore/trees/v1/trees.proto` by `build.rs`, with the
 # pure-Rust protobuf compiler `protox`, so no build or CI host needs `protoc`. The crate holds no

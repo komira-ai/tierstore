@@ -83,12 +83,14 @@ use super::config_handoff::{check_outside_cache, handoff_of};
 use super::config_hot_only::refuse_hot_keys;
 use super::config_interface::Interfaces;
 use super::config_policy::{Policy, check_policies, require_keeping};
+use super::config_provider::check_provider_socket;
 use super::config_tuning::S3Client;
 use super::config_units::{Dur, Size, parse_size};
 use super::front::FrontSettings;
 use super::handoff::Handoff;
 use super::local_cache::trees::TreesConfig;
 use super::local_cache::{CacheConfig, SCRUB_MIN_ROUND, SCRUB_RATE};
+use super::provider::ProviderFlags;
 use super::trees::TreesFlags;
 
 /// The only layout of the cache directory.
@@ -284,6 +286,8 @@ pub(super) struct CacheSettings {
     pub fill_socket: Option<std::path::PathBuf>,
     /// The node-local trees (`[trees]`; the defaults if the file has none).
     pub trees: TreesConfig,
+    /// The mount provider, as the `mount-provider` interface makes it; none without one.
+    pub provider: Option<ProviderFlags>,
 }
 
 /// The percent in `value`, or `default`, from `low` to `high`.
@@ -466,7 +470,15 @@ impl CacheSettings {
         if let Some(socket) = &fill_socket {
             check_fill_outside_cache(socket, &part.config.path)?;
         }
-        let (oci, trees_front) = (fronts.oci, fronts.trees);
+        let (oci, trees_front, provider) = (fronts.oci, fronts.trees, fronts.provider);
+        let sockets = [
+            (
+                "server.handoff_socket",
+                handoff.as_ref().map(|handoff| handoff.socket.as_path()),
+            ),
+            ("local_cache.fill_socket", fill_socket.as_deref()),
+        ];
+        check_provider_socket(provider.as_ref(), &sockets)?;
         if oci.upstream.is_some() {
             let why =
                 "a pull is stored, and a build node takes no writes: use a storage node's file";
@@ -487,6 +499,7 @@ impl CacheSettings {
             handoff,
             fill_socket,
             trees,
+            provider,
         })
     }
 }

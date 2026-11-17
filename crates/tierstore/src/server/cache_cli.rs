@@ -69,6 +69,7 @@ use super::listen::{LoopbackBind, bind_set, bind_with, joined};
 use super::local_cache::trees::{TreeStore, TreesConfig};
 use super::local_cache::{CacheConfig, Disk, Every, LocalCache, Mode, SystemDisk, check_local};
 use super::oci::OciListener;
+use super::provider::{self, Provider, ProviderFlags};
 use super::stop_watcher::{
     oci_cut_note, serve_fronts, serve_oci, serve_trees, stop_watcher, trees_cut_note,
 };
@@ -251,6 +252,7 @@ pub(super) async fn serve_cache(
         fill_socket: settings.fill_socket.as_deref(),
         trees: Some(settings.trees.clone()),
         trees_front,
+        provider: settings.provider.as_ref(),
     };
     serve_front(
         cache,
@@ -291,6 +293,10 @@ pub(super) struct Fronts<'a> {
     pub(super) trees: Option<TreesConfig>,
     /// The trees front, if the settings have a `trees` interface.
     pub(super) trees_front: Option<TreesSetup>,
+    /// The mount provider, if the settings have a `mount-provider` interface: served over the
+    /// node's trees, while the cache holds the lock of its directory (see
+    /// [`provider`](super::provider)).
+    pub(super) provider: Option<&'a ProviderFlags>,
 }
 
 /// Serves the S3 front (and the OCI front, if there is a setup) over `cache`, with the loops of
@@ -368,7 +374,8 @@ pub(super) async fn serve_front(
     let trees_stopped = oci_stopped.clone();
     // One Notify for each loop: `notify_one` wakes one waiter, and keeps the wake for a loop that
     // is not waiting just now.
-    let halts: [Arc<Notify>; 6] = [
+    let halts: [Arc<Notify>; 7] = [
+        Arc::new(Notify::new()),
         Arc::new(Notify::new()),
         Arc::new(Notify::new()),
         Arc::new(Notify::new()),
@@ -376,7 +383,15 @@ pub(super) async fn serve_front(
         Arc::new(Notify::new()),
         Arc::clone(&fronts.beside_halt),
     ];
-    let [halt, lock_halt, scrub_halt, fill_halt, trees_halt, _] = halts.clone();
+    let [
+        halt,
+        lock_halt,
+        scrub_halt,
+        fill_halt,
+        trees_halt,
+        provider_halt,
+        _,
+    ] = halts.clone();
     let beating = fronts.beating.clone();
     let serving = async move {
         let after = async {
@@ -429,14 +444,24 @@ pub(super) async fn serve_front(
             tracing::debug!("tierstore: trees ended");
         }
     };
-    let ((drained, (oci_cut, trees_cut)), (), (), (), (), (), ()) = tokio::join!(
+    // A file with a mount-provider interface is a build node's, which has a tree store.
+    let provided = fronts.provider.zip(trees.clone());
+    let providing = async {
+        if let Some((flags, store)) = provided {
+            let provider = Provider::new(store, cache.clone(), flags);
+            provider::serve(provider, &cache, &flags.socket, provider_halt).await;
+            tracing::debug!("tierstore: mount provider ended");
+        }
+    };
+    let ((drained, (oci_cut, trees_cut)), (), (), (), (), (), (), ()) = tokio::join!(
         serving,
         beside,
         maintaining,
         holding,
         scrubbing,
         filling,
-        sweeping
+        sweeping,
+        providing
     );
     watcher.abort();
     super::build_info::stderr_log::notes(&cut_note(drained));

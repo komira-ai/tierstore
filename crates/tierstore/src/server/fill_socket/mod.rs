@@ -62,11 +62,11 @@ use super::local_cache::{LocalCache, Mode, PinError};
 use request::{MAX_LINE, Request, parse};
 
 /// How long the socket waits after it could not be bound before it tries again.
-const REBIND_PAUSE: Duration = Duration::from_secs(1);
+pub(super) const REBIND_PAUSE: Duration = Duration::from_secs(1);
 
 /// The socket file this process made, and removed when it is dropped if the name still leads to
 /// it.
-struct SocketFile {
+pub(super) struct SocketFile {
     path: PathBuf,
     identity: (u64, u64),
 }
@@ -95,19 +95,27 @@ struct Listening {
     _file: SocketFile,
 }
 
+/// Binds `path`, replacing the file an instance that is gone left there, with mode 0600: the
+/// listener, and the file, which is removed when it is dropped if the name still leads to it. The
+/// fill socket and the socket of the mount provider are bound so.
+pub(super) fn bind_socket(path: &Path) -> std::io::Result<(UnixListener, SocketFile)> {
+    match std::fs::remove_file(path) {
+        Err(why) if why.kind() != std::io::ErrorKind::NotFound => return Err(why),
+        _ => {}
+    }
+    let listener = UnixListener::bind(path)?;
+    let file = SocketFile {
+        path: path.to_owned(),
+        identity: SocketFile::identity_of(path).unwrap_or_default(),
+    };
+    std::fs::set_permissions(path, std::fs::Permissions::from_mode(0o600))?;
+    Ok((listener, file))
+}
+
 impl Listening {
-    /// Binds `path`, replacing the file an instance that is gone left there, with mode 0600.
+    /// Binds `path`, as [`bind_socket`] does.
     fn bind(path: &Path) -> std::io::Result<Self> {
-        match std::fs::remove_file(path) {
-            Err(why) if why.kind() != std::io::ErrorKind::NotFound => return Err(why),
-            _ => {}
-        }
-        let listener = UnixListener::bind(path)?;
-        let file = SocketFile {
-            path: path.to_owned(),
-            identity: SocketFile::identity_of(path).unwrap_or_default(),
-        };
-        std::fs::set_permissions(path, std::fs::Permissions::from_mode(0o600))?;
+        let (listener, file) = bind_socket(path)?;
         Ok(Self {
             listener,
             connections: JoinSet::new(),
@@ -199,7 +207,7 @@ fn bind(path: &Path) -> Option<Listening> {
 }
 
 /// Waits `pause` if `wanted`; never otherwise.
-async fn pause_if(wanted: bool, pause: Duration) {
+pub(super) async fn pause_if(wanted: bool, pause: Duration) {
     if wanted {
         tokio::time::sleep(pause).await;
     } else {
