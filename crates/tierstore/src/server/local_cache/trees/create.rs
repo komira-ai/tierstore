@@ -50,7 +50,8 @@ pub struct ImageRequest {
     pub ready: bool,
     /// The image written ahead by [`TreeStore::stage_image`], if it was: a create of a tree the
     /// node does not have renames it into place rather than writing the image, if it holds the
-    /// image's own bytes (the same buffer). Otherwise it is removed.
+    /// image's own bytes (the same buffer) and is still there. Otherwise it is removed, and the
+    /// create writes the image itself.
     pub staged: Option<StagedImage>,
 }
 
@@ -335,9 +336,13 @@ impl Shared {
                 })
             }
             NewTree::Image { image, staged, .. } => {
-                match staged.and_then(|mut staged| staged.take_for(image.bytes())) {
-                    Some(staging) => self.settle(&staging, &root, ready)?,
-                    None => self.write_tree(&root, &[(IMAGE, &image.bytes()[..])], ready)?,
+                // A staged image that cannot be renamed into place (a read of the directory when
+                // the cache took its lock again removes what is staged) is written again here.
+                let staging = staged.and_then(|mut staged| staged.take_for(image.bytes()));
+                let settled =
+                    staging.is_some_and(|staging| self.settle(&staging, &root, ready).is_ok());
+                if !settled {
+                    self.write_tree(&root, &[(IMAGE, &image.bytes()[..])], ready)?;
                 }
                 Ok(Content::Image(image))
             }

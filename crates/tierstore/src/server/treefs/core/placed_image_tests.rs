@@ -248,8 +248,9 @@ fn a_file_of_an_image_placement_reads_as_its_span() {
     rig.core.release(fh);
 }
 
-/// Asserts that an image file that is not in the tree's directory, one that is not a tree list and
-/// one that is cut short each make the lookup an I/O error.
+/// Asserts that an image file that is not in the tree's directory, one that is not a tree list, one
+/// that is cut short and one a byte over the largest tree list each make the lookup an I/O error,
+/// and that the lookup succeeds once the file is the image again.
 #[test]
 fn a_missing_or_malformed_image_file_makes_the_lookup_an_io_error() {
     let (rig, tree) = placed("tfs-img-bad");
@@ -261,13 +262,18 @@ fn a_missing_or_malformed_image_file_makes_the_lookup_an_io_error() {
     assert_eq!(rig.core.lookup(ino::ROOT, "jobs").err(), Some(Errno::Io));
     std::fs::write(&file, &good[..good.len() / 2]).unwrap();
     assert_eq!(rig.core.lookup(ino::ROOT, "jobs").err(), Some(Errno::Io));
+    // One byte over the largest list: refused by its size (a sparse file, read no further).
+    let over = std::fs::File::create(&file).unwrap();
+    over.set_len(crate::MAX_TREE_LIST_BYTES as u64 + 1).unwrap();
+    drop(over);
+    assert_eq!(rig.core.lookup(ino::ROOT, "jobs").err(), Some(Errno::Io));
     std::fs::write(&file, &good).unwrap();
     assert!(rig.core.lookup(ino::ROOT, "jobs").is_ok());
 }
 
 /// Asserts that an image answer whose paths do not hold the location is not found, that `none` is
-/// not found, that an answer that is neither an image nor a tree is an I/O error, and that a
-/// placement's other location is found by its own hash.
+/// not found, that a refusal of the node (`damaged`) and an image answer that does not parse (a
+/// digest that is not one) are I/O errors, and that the location is found among several paths.
 #[test]
 fn an_image_answer_without_the_location_is_not_found() {
     let (rig, tree) = placed("tfs-img-paths");
@@ -282,6 +288,8 @@ fn an_image_answer_without_the_location_is_not_found() {
     answer(&rig, "image", "none");
     assert_eq!(rig.core.lookup(ino::ROOT, "jobs").err(), Some(Errno::NoEnt));
     answer(&rig, "image", "damaged");
+    assert_eq!(rig.core.lookup(ino::ROOT, "jobs").err(), Some(Errno::Io));
+    answer(&rig, "image", r#"image not-a-digest ["jobs"]"#);
     assert_eq!(rig.core.lookup(ino::ROOT, "jobs").err(), Some(Errno::Io));
     answer(&rig, "image", &format!(r#"image {tree} ["jobs", "jobs2"]"#));
     assert!(rig.core.lookup(ino::ROOT, "jobs").is_ok());

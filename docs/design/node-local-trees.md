@@ -24,7 +24,7 @@ The owner's rule: a tree is a **core** object. It is created once, by a call on 
 |---|---|---|
 | D1 | **A tree is a core object of the node, created by one call: `create tree`.** It is not an S3 object, not a tier object and not a mount-only feature. Each interface is an adapter over the core's `resolve(tree, path)`, `stat` and `list` (section 6). | The owner's rule; the same shape as the front-adapter / core split of [pluggable-interfaces.md](pluggable-interfaces.md). |
 | D2 | **The create call is a gRPC API of its own, a `trees` interface in `[[interface]]`: `tierstore.trees.v1.TreesService` with `CreateTree`, `GetPlacement` and `DeleteTree`** (owner decision, 2026-11-15, tracking issue komira-ai/tierstore#326, replacing the `POST /<bucket>?tree` of the first draft). It reserves no key and no path on the S3 listener, and the local control socket does not carry it. The requests and answers of sections 3.2 and 3.3 are the proto messages of `crates/tierstore-trees-api/proto/tierstore/trees/v1/trees.proto` (the field set of the JSON documents there, in proto types), and each refusal of this document is a gRPC status (the code table is `server/trees/refusal.rs`; the name of the refusal is the message); where sections 3 to 5 write an HTTP method, path or status, read the call and status of that table. TLS is optional (`tls_cert_file`, `tls_key_file`), the port is a config key (default 9600), and a call is signed with the existing keys over its body (`x-amz-content-sha256` is the body's SHA-256) with no new permission. | The owner's decision: the create call is not S3, and a typed contract belongs in proto. The caller is the build frontend, which holds a key of the node already. |
-| D3 | **The tree's identity is a Merkle digest of its content, independent of where the bytes were and of how the request grouped them.** The digest covers names, kinds, the full Unix mode of every file and directory (the root's included), symlink targets, and each file's `sha256` and `size`. It does not cover `{key, offset}`, which are where to fetch the bytes from, not what they are (section 4). | Content addressing is then real: the same tree has the same digest on every node and after a repack. Today's digest covers `source`, so the same tree from two pack layouts is two trees (tree-manifest.md: "Two encodings of one tree are two trees"). |
+| D3 | **The tree's identity is a Merkle digest of its content, independent of where the bytes were and of how the request grouped them.** (A tree of a version 2 tree list is named by the list's own digest instead: section 17.) The digest covers names, kinds, the full Unix mode of every file and directory (the root's included), symlink targets, and each file's `sha256` and `size`. It does not cover `{key, offset}`, which are where to fetch the bytes from, not what they are (section 4). | Content addressing is then real: the same tree has the same digest on every node and after a repack. Today's digest covers `source`, so the same tree from two pack layouts is two trees (tree-manifest.md: "Two encodings of one tree are two trees"). |
 | D4 | **The canonical encoding is binary, one record per directory; the request is a separate, non-canonical JSON document that the server normalises.** The client library in the `tierstore` crate (which the build frontend already uses for `parse_manifest`) computes the digest, so a client may memoise it before the call. | Section 4.3 compares binary and canonical JSON. |
 | D5 | **A file entry requires `sha256`.** A request without one is refused. | Ordinary objects are mutable (design section 16); a `{key, offset, size}` alone does not say which bytes the tree holds. The digest in the entry is what makes the tree content-addressed, and it is checked while the range is filled. The build frontend has the digest of every file. |
 | D6 | **Prefetch is an option of the create call, `"prefetch"` with the values `none`, `background` or `wait`, default `wait` (`trees.prefetch_default`).** `none`: the placement exists when the call returns and a range is filled on its first read. `background`: the call returns at once, every range is pulled in the background and the placement reports readiness. `wait`: the call returns when every range is in the cache and pinned, or fails whole. There is no separate prefetch or hydrate API. | The owner's direction: hydrate is not a second API. One option with three values covers the lazy, the early-reply and the all-ready cases (section 5). `wait` is the default because the owner leans to prefetch everything and a job start then never waits on the network. |
@@ -139,6 +139,8 @@ A **node** of a tree is a directory. Its canonical record (4.2) lists its childr
 
 ### 4.2 The canonical record
 
+(A tree of a version 2 tree list has no records and is read in place: section 17.)
+
 One record per directory:
 
 ```text
@@ -223,6 +225,8 @@ A client that gets any of these from `wait` has no placement on the node for tha
 ## 6. One tree, every interface
 
 ### 6.1 The core operations
+
+(A tree of a version 2 tree list has no records and is read in place: section 17.)
 
 A **tree store** in the node's process (beside the local cache) holds the tree records and the placements, and answers, for a ready or filling placement and a path:
 

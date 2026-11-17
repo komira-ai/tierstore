@@ -1,5 +1,5 @@
-//! A tree flattened for lookups: its entries in the order of their indices, and for each
-//! directory the indices of its children. A tree a placement shows at an fs location also has the
+//! A tree of the mount, for lookups: flattened (its entries in the order of their indices, and for
+//! each directory the indices of its children), or an image read in place (below). A tree a placement shows at an fs location also has the
 //! mode of each entry, as stored, and the path of the location.
 //!
 //! A placed tree that is a version 2 tree list is held as its image ([`TreeImage`]) and read in

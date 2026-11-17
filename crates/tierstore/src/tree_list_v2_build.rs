@@ -285,6 +285,16 @@ impl<'a> TreeListV2<'a> {
         spans: Spans,
         mut on_span: impl FnMut(ListSpan),
     ) -> Result<(Walked<'a>, Counted), TreeListV2Error> {
+        self.walk_with(limits, spans, &mut on_span)
+    }
+
+    /// [`walk`](Self::walk), made once for every caller's `on_span`.
+    fn walk_with(
+        &self,
+        limits: &TreeLimits,
+        spans: Spans,
+        on_span: &mut dyn FnMut(ListSpan),
+    ) -> Result<(Walked<'a>, Counted), TreeListV2Error> {
         let count = self.len();
         let refuse = |error| Err(TreeListV2Error::Tree(error));
         if (count - 1) as u64 > limits.max_entries {

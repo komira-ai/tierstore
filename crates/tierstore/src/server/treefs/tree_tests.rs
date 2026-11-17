@@ -1,4 +1,5 @@
-//! The flattened tree: children by name, in the order of the manifest, and the link count.
+//! The tree of the mount, flattened or an image: children by name, in the order of the manifest
+//! or of the image, and the link count.
 
 use super::{Kids, Tree};
 use crate::TreeImage;

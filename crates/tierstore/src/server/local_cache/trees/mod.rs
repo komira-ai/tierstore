@@ -80,6 +80,8 @@ mod fetch_tests;
 #[cfg(test)]
 mod files_tests;
 #[cfg(test)]
+mod image_create_tests;
+#[cfg(test)]
 mod image_tests;
 #[cfg(test)]
 mod keys_tests;

@@ -33,9 +33,14 @@ pub(super) struct Group {
 /// size and digest) is read once.
 pub(super) fn groups(
     keys: &[Arc<str>],
-    mut spans: Vec<ListSpan>,
+    spans: Vec<ListSpan>,
     ranges: impl Iterator<Item = ListRange>,
 ) -> Vec<Group> {
+    grouped(keys, spans, ranges.collect())
+}
+
+/// [`groups`], made once for every kind of iterator of ranges.
+fn grouped(keys: &[Arc<str>], mut spans: Vec<ListSpan>, mut ranges: Vec<ListRange>) -> Vec<Group> {
     spans.sort_unstable_by(|a, b| {
         (a.key, a.offset, a.size, a.sha256.as_bytes()).cmp(&(
             b.key,
@@ -45,7 +50,6 @@ pub(super) fn groups(
         ))
     });
     spans.dedup();
-    let mut ranges: Vec<ListRange> = ranges.collect();
     ranges.sort_unstable_by_key(|range| (range.key, range.offset));
     let mut groups: Vec<Group> = Vec::new();
     // The range and the first byte of the last group, if it is in a range.
