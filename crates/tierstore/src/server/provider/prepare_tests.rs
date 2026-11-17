@@ -9,7 +9,8 @@ use std::time::Duration;
 use tokio::sync::watch;
 
 use super::names::SourceId;
-use super::prepare::{Job, fill, report, run};
+use super::prepare::{Job, fill, report, run, spans_of};
+use super::sources::Shared;
 use super::sources::Stage;
 use super::testing::{AGENT, READ_ONLY, Rig, member, source};
 use crate::server::local_cache::testing::until;
@@ -90,6 +91,29 @@ fn files(rig: &Rig) -> Vec<BuiltFile> {
         empty,
         elsewhere,
     ]
+}
+
+/// Reads the spans of `files` as a version 1 list's preparation does, with no refusal.
+async fn fill_files(shared: &Shared, files: &[BuiltFile], released: &AtomicBool) -> (usize, usize) {
+    let spans = futures::stream::iter(spans_of(files));
+    fill(shared, spans, released, &AtomicBool::new(false)).await
+}
+
+/// Asserts that the spans of a refused list still queued are not read: each is counted as not
+/// read.
+#[tokio::test]
+async fn a_refused_list_reads_no_more_files() {
+    let rig = Rig::new("prov-fill-refused").await;
+    let spans = futures::stream::iter(spans_of(&files(&rig)));
+    let read = fill(
+        &rig.provider.shared,
+        spans,
+        &AtomicBool::new(false),
+        &AtomicBool::new(true),
+    )
+    .await;
+    assert_eq!(read, (0, 3));
+    assert_eq!(pack_reads(&rig), 0);
 }
 
 /// Asserts that a preparation run to its end leaves the source placed, every file in the cache,
@@ -190,7 +214,7 @@ async fn a_source_released_during_its_reads_ends_with_its_tree_gone() {
 async fn files_sharing_a_span_are_read_once() {
     let rig = Rig::new("prov-fill-shared").await;
     let released = AtomicBool::new(false);
-    let read = fill(&rig.provider.shared, &files(&rig), &released).await;
+    let read = fill_files(&rig.provider.shared, &files(&rig), &released).await;
     assert_eq!(read, (3, 0));
     assert_eq!(pack_reads(&rig), 3);
     assert_eq!(rig.bench.rig.calls_on(Op::Get, "cas/pack/two"), 0);
@@ -203,7 +227,7 @@ async fn a_halted_provider_reads_no_file() {
     let rig = Rig::new("prov-fill-halted").await;
     rig.provider.halt();
     let released = AtomicBool::new(false);
-    let read = fill(&rig.provider.shared, &files(&rig), &released).await;
+    let read = fill_files(&rig.provider.shared, &files(&rig), &released).await;
     assert_eq!(read, (0, 3));
     assert_eq!(pack_reads(&rig), 0);
 }
@@ -213,7 +237,7 @@ async fn a_halted_provider_reads_no_file() {
 async fn a_released_source_reads_no_more_files() {
     let rig = Rig::new("prov-fill-released").await;
     let released = AtomicBool::new(true);
-    let read = fill(&rig.provider.shared, &files(&rig), &released).await;
+    let read = fill_files(&rig.provider.shared, &files(&rig), &released).await;
     assert_eq!(read, (0, 3));
     assert_eq!(pack_reads(&rig), 0);
 }
@@ -228,7 +252,7 @@ async fn files_not_read_within_their_bound_or_not_there_are_counted() {
     .await;
     let _gate = rig.bench.rig.tamper.hold_key(&rig.bench.pack.key);
     let released = AtomicBool::new(false);
-    let read = fill(&rig.provider.shared, &files(&rig), &released).await;
+    let read = fill_files(&rig.provider.shared, &files(&rig), &released).await;
     assert_eq!(read, (0, 3));
 
     let rig = Rig::new("prov-fill-missing").await;
@@ -239,7 +263,7 @@ async fn files_not_read_within_their_bound_or_not_there_are_counted() {
             ..source
         });
     }
-    let read = fill(&rig.provider.shared, &missing, &released).await;
+    let read = fill_files(&rig.provider.shared, &missing, &released).await;
     assert_eq!(read, (0, 3));
 }
 

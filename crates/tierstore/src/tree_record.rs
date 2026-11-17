@@ -201,6 +201,11 @@ pub struct TreeRecord {
 }
 
 impl TreeRecord {
+    /// A record of `children`, which the caller has made with valid names, strictly sorted.
+    pub(crate) fn from_sorted(mode: Mode, children: Vec<RecordChild>) -> Self {
+        Self { mode, children }
+    }
+
     /// A record of `children`, which must have valid names and be strictly sorted by name.
     pub fn new(mode: Mode, children: Vec<RecordChild>) -> Result<Self, RecordError> {
         for child in &children {
