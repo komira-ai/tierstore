@@ -824,6 +824,24 @@ fn the_deploy_of_release_yml_sets_the_release_once_the_testing_suite_lists_it() 
             "{job}: {replace:?} -> {with:?} must say {says:?}: {problems:?}"
         );
     }
+    let tied = text.replacen(
+        "  tap:\n    needs: [plan, promote-check, formula]\n",
+        "  tap:\n    needs: [plan, promote-check, formula, deploy]\n",
+        1,
+    );
+    assert_eq!(
+        deploy(&tied),
+        vec!["tap: needs deploy; only the deploy and red wait for it".to_owned()]
+    );
+    let tied = text.replacen(
+        "  check-brew:\n    needs: [plan, formula]\n",
+        "  check-brew:\n    needs: [plan, formula, deploy-check]\n",
+        1,
+    );
+    assert_eq!(
+        deploy(&tied),
+        vec!["check-brew: needs deploy-check; only the deploy and red wait for it".to_owned()]
+    );
     let gone = text.replacen("\n  deploy-mac:\n", "\n  deploy-macs:\n", 1);
     assert!(
         deploy(&gone).contains(&format!("deploy-mac: `if` is None, not {DEPLOY_IF}")),

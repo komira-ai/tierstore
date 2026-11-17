@@ -271,6 +271,21 @@ pub fn deploy_problems(doc: &Node, text: &str) -> Vec<String> {
             job(jobs, name),
         ));
     }
+    // Nothing but the report waits for the deploy: a job of the release that needed it would
+    // tie the release's checks or promotion to the fleet.
+    for (name, job) in jobs {
+        let name = name.as_str().unwrap_or_default();
+        let waits = names(entry(job, "needs"));
+        for deploy in ["deploy-check", "deploy", "deploy-mac"] {
+            let allowed = name == "red"
+                || (deploy == "deploy-check" && (name == "deploy" || name == "deploy-mac"));
+            if !allowed && waits.iter().any(|w| w == deploy) {
+                problems.push(format!(
+                    "{name}: needs {deploy}; only the deploy and red wait for it"
+                ));
+            }
+        }
+    }
     problems
 }
 

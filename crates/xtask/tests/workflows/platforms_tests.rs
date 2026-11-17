@@ -874,9 +874,9 @@ fn a_verify_job_or_a_cargo_test_step_in_artifacts_yml_is_named() {
         ("sums", "      - run: cargo xtask verify-assets sums dist\n"),
     ];
     for (job, anchor) in after {
-        let planted = in_job(&text, job, anchor, &format!("{anchor}{step}"));
+        let broken = in_job(&text, job, anchor, &format!("{anchor}{step}"));
         assert!(
-            artifacts_problems_of(&planted).contains(&format!(
+            artifacts_problems_of(&broken).contains(&format!(
                 "artifacts.yml: job {job} runs `cargo test`: the workspace tests are beta.yml's and never hold a release"
             )),
             "{job}"

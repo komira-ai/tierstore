@@ -15,8 +15,9 @@
 //! it; its concurrency is not one group per commit ([`BETA_GROUP`]) that never cancels; its jobs
 //! are not `linux-arm64` (on `ubuntu-24.04-arm`), `macos-arm64` (on `macos-15`) and `red`; a test
 //! job needs a job, has an `if:`, lets a step fail (`continue-on-error`) or does not run every
-//! test of the workspace ([`BETA_TESTS`]); or its `red` job breaks the rules above or shares no
-//! group across runs ([`BETA_RED_GROUP`]), so that two runs could open the issue twice.
+//! test of the workspace ([`BETA_TESTS`]); or its `red` job breaks the rules above or is in a
+//! concurrency group (a group keeps one waiting job and drops the one before it, so the report of
+//! a failed commit would be lost).
 
 use super::graph::{ancestors, jobs};
 use super::hostkeeper::{at, steps};
@@ -48,9 +49,6 @@ pub const BETA_RED_COMMAND: &str = "cargo xtask release red --repo \"$GITHUB_REP
 
 /// The concurrency group of beta.yml: one per commit.
 pub const BETA_GROUP: &str = "beta-${{ github.sha }}";
-
-/// The concurrency group of beta.yml's `red`, across runs.
-pub const BETA_RED_GROUP: &str = "release-red-beta";
 
 /// The test jobs of beta.yml and their runners.
 pub const BETA_JOBS: [(&str, &str); 2] = [
@@ -246,13 +244,13 @@ pub fn beta_problems(text: &str) -> Vec<String> {
         BETA_RED_COMMAND,
         &[],
     ));
-    for (key, want) in [("group", BETA_RED_GROUP), ("cancel-in-progress", "false")] {
-        let got = job(&doc, "red").and_then(|r| at(r, &["concurrency", key]));
-        if got != Some(want) {
-            problems.push(format!(
-                "beta.yml: red: concurrency: {key} is {got:?}, not {want}"
-            ));
-        }
+    if job(&doc, "red")
+        .and_then(|r| entry(r, "concurrency"))
+        .is_some()
+    {
+        problems.push(
+            "beta.yml: red: has a concurrency group, which drops a waiting report".to_owned(),
+        );
     }
     problems
 }

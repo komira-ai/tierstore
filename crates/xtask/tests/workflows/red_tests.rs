@@ -97,15 +97,9 @@ const BETA_DEFECTS: &[(&str, &str, &str, &str)] = &[
     ),
     (
         "red",
-        "      group: release-red-beta\n",
-        "      group: release-red-${{ github.sha }}\n",
-        "beta.yml: red: concurrency: group is Some(\"release-red-${{ github.sha }}\"), not release-red-beta",
-    ),
-    (
-        "red",
-        "      cancel-in-progress: false\n",
-        "      cancel-in-progress: true\n",
-        "beta.yml: red: concurrency: cancel-in-progress is Some(\"true\"), not false",
+        "    timeout-minutes: 15\n",
+        "    timeout-minutes: 15\n    concurrency:\n      group: release-red-beta\n      cancel-in-progress: false\n",
+        "beta.yml: red: has a concurrency group, which drops a waiting report",
     ),
 ];
 

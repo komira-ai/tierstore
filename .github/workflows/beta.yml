@@ -15,9 +15,10 @@
 # `red` job runs on main alone, so a branch never opens or closes the issue.
 #
 # One run per commit, never cancelled: two runs of one commit queue, and different commits do not
-# wait for each other. The `red` job has a group of its own across runs, so two runs never race to
-# open the issue. `issues: write` is its one write scope, under its exact `if:` (the workflow
-# lint, crates/xtask/tests/workflows, beta.rs).
+# wait for each other. The `red` job has no group across runs: a group keeps one waiting job and
+# drops the one before it, which would lose the report of a failed commit. Two runs that fail at
+# the same moment can each open the issue; the second is closed by hand. `issues: write` is its
+# one write scope, under its exact `if:` (the workflow lint, crates/xtask/tests/workflows, red.rs).
 name: beta
 
 on:
@@ -107,9 +108,6 @@ jobs:
     if: ${{ !cancelled() && github.ref == 'refs/heads/main' }}
     runs-on: ubuntu-24.04
     timeout-minutes: 15
-    concurrency:
-      group: release-red-beta
-      cancel-in-progress: false
     permissions:
       contents: read
       actions: read
