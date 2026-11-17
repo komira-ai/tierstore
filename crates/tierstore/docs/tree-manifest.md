@@ -161,11 +161,11 @@ The mount provider queues its reads once the walk is done, so they begin after t
 
 | | before, node | after, node | before, workstation | after, workstation |
 |---|---:|---:|---:|---:|
-| the walk (and the records, before) | 37.1 ms | 3.7 ms | 9.1 ms | 1.6 ms |
-| the create | 27.5 ms | 1.9 ms | 14.5 ms | 0.9 ms |
-| the tree made: walk and write beside, then the create | 62.5 ms | 4.1 ms | 22.1 ms | 1.8 ms |
-| ready as the provider makes it: the same with the SHA-256 of the list beside | 64.1 ms | 32.9 ms | 24.6 ms | 4.1 ms |
+| the walk (and the records, before) | 35.9 ms | 3.3 ms | 8.4 ms | 1.4 ms |
+| the create | 28.0 ms | 1.9 ms | 12.4 ms | 0.7 ms |
+| the tree made: walk and write beside, then the create | 62.6 ms | 3.6 ms | 20.6 ms | 1.4 ms |
+| ready as the provider makes it: the same with the SHA-256 of the list beside | 62.8 ms | 32.4 ms | 20.1 ms | 1.7 ms |
 
-On the node the SHA-256 of the list (25 ms alone, slower beside the walk and the write) is what the tree waits for; the tree itself is made in 4.1 ms. The mount reads the image again when a job first looks the tree up, and walks it with no span (3.6 ms on the node, 1.6 ms on the workstation).
+On the node the SHA-256 of the list (25 ms alone, slower beside the walk and the write) is what the tree waits for; the tree itself is made in 3.6 ms. The mount reads the image again when a job first looks the tree up, and walks it with no span (3.2 ms on the node, 1.4 ms on the workstation).
 
 The golden test `tests/stored_formats/tree_list_v2.rs` pins the bytes of an example (`fixtures/tree_list_v2.bin`, the entries of `fixtures/tree_list_v1.jsonl`) and its digest, checks that it makes the same tree as the version 1 list, and reads the same list as a later writer may write it, with a minor version, entry flags and bytes after the sections (`fixtures/tree_list_v2_newer.bin`).
