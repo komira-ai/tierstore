@@ -156,7 +156,11 @@ impl Core {
             *times += 1;
             *times
         };
+        // Out of the table first: a request that comes from now on finds the tree in memory, or,
+        // after a read that failed, reads it again rather than take this failure.
+        let _ = locked(&self.reads.running).remove(&number);
         *locked(&ending.flight.ended) = Some(read.clone());
+        ending.flight.changed.notify_all();
         let waited = ending.flight.waited.load(Ordering::Acquire);
         if let Some(line) = said((&digest, number), &read, (times, took, waited)) {
             if took >= SLOW_READ_MS {

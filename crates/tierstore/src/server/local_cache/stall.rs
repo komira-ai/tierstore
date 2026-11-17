@@ -182,7 +182,7 @@ impl Inner {
 impl LocalCache {
     /// Looks once a second until `halt` is notified at the fills of the fill socket, and says on
     /// stderr when requests wait for a permit while the upstream is asked for nothing.
-    pub async fn watch_fills(&self, halt: Arc<Notify>) {
+    pub(in crate::server) async fn watch_fills(&self, halt: Arc<Notify>) {
         let mut state = Watch::default();
         loop {
             tokio::select! {
