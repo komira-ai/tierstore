@@ -5,8 +5,8 @@
 //! and digest: the call an open of the mount makes for the file, which joins a fill of the same
 //! range already running (the cache's flights, keyed by the pack, the range and the digest). So an
 //! open of a file this preparation is reading waits for that one read, and a file the job opens
-//! before its turn here is read once, by whichever asks first. Files that share one span are read
-//! once.
+//! before its turn here is read once, by whichever asks first. Files of one digest are read once,
+//! at the span the tree store keeps for the digest, which is the one an open reads.
 
 use std::collections::BTreeSet;
 use std::sync::Arc;
@@ -16,8 +16,8 @@ use futures::StreamExt as _;
 use tokio::sync::watch;
 
 use super::names::SourceId;
-use super::sources::{Shared, Stage};
-use crate::server::local_cache::trees::{CreateError, CreateRequest, FileSpan};
+use super::sources::{Owner, Shared, Stage};
+use crate::server::local_cache::trees::{CreateError, CreateRequest, Created, FileSpan};
 use crate::{Backend as _, BuiltFile, Error, TreeDigest, build_tree, parse_tree_list};
 
 /// A preparation: the source, the tree list it names, and what it reports to.
@@ -35,6 +35,18 @@ struct Made {
     files: Vec<BuiltFile>,
 }
 
+/// Sets the stage of a preparation to `now`, unless the source was released: a release is the
+/// last word on a source.
+pub(super) fn report(stage: &watch::Sender<Stage>, now: Stage) {
+    stage.send_if_modified(|current| {
+        let open = *current != Stage::Released;
+        if open {
+            *current = now;
+        }
+        open
+    });
+}
+
 /// Prepares the source of `job`, reporting each stage it reaches.
 pub(super) async fn run(shared: Arc<Shared>, job: Job) {
     let made = match place(&shared, &job).await {
@@ -47,11 +59,11 @@ pub(super) async fn run(shared: Arc<Shared>, job: Job) {
                     job.key
                 );
             }
-            job.stage.send_replace(stage);
+            report(&job.stage, stage);
             return;
         }
     };
-    job.stage.send_replace(Stage::Placed);
+    report(&job.stage, Stage::Placed);
     let (fetched, failed) = fill(&shared, &made.files, &job.released).await;
     tracing::info!(
         "tierstore: mount provider: {} of {}: {fetched} spans in the cache, {failed} not read",
@@ -71,39 +83,47 @@ pub(super) async fn run(shared: Arc<Shared>, job: Job) {
     }
 }
 
-/// Reads the tree list, builds its tree and places it at the source's path; a refusal or a
-/// failure as the stage it leaves the source at. A source released meanwhile has its placement
-/// removed here, since its release may have looked for it before it was made.
+/// Reads the tree list, and checks, builds and places its tree at the source's path on a blocking
+/// thread; a refusal or a failure as the stage it leaves the source at. If the source is no longer
+/// this preparation's when the tree is placed, the placement is left to the preparation that holds
+/// the source now, or, if none does, removed here, since the release may have looked for it before
+/// it was made.
 async fn place(shared: &Shared, job: &Job) -> Result<Made, Stage> {
     let bytes = read_list(shared, &job.key).await?;
-    let list =
-        parse_tree_list(&bytes, &job.digest).map_err(|why| Stage::Refused(why.to_string()))?;
-    let entries = list
-        .into_entries()
-        .map_err(|why| Stage::Refused(why.to_string()))?;
-    let limits = shared.store.config().limits();
-    let built = build_tree(None, entries, &limits)
-        .map_err(|why| Stage::Refused(format!("the tree is refused: {why}")))?;
-    let files = built.files.clone();
-    let request = CreateRequest {
-        built,
-        at: vec![job.id.location()],
-        ttl: Some(shared.settings.ttl),
-        ready: false,
-    };
-    let store = shared.store.clone();
-    let created = tokio::task::spawn_blocking(move || store.create(request))
+    let (digest, at) = (job.digest, job.id.location());
+    let (ttl, store) = (shared.settings.ttl, shared.store.clone());
+    let made = tokio::task::spawn_blocking(move || -> Result<(Created, Vec<BuiltFile>), Stage> {
+        let list =
+            parse_tree_list(&bytes, &digest).map_err(|why| Stage::Refused(why.to_string()))?;
+        let entries = list
+            .into_entries()
+            .map_err(|why| Stage::Refused(why.to_string()))?;
+        let built = build_tree(None, entries, &store.config().limits())
+            .map_err(|why| Stage::Refused(format!("the tree is refused: {why}")))?;
+        let files = built.files.clone();
+        let request = CreateRequest {
+            built,
+            at: vec![at],
+            ttl: Some(ttl),
+            ready: false,
+        };
+        let created = store.create(request).map_err(stage_of)?;
+        Ok((created, files))
+    });
+    let (created, files) = made
         .await
-        .map_err(|why| Stage::Failed(format!("the tree was not made: {why}")))?
-        .map_err(stage_of)?;
-    if job.released.load(Ordering::SeqCst) {
-        let _ = shared.store.release(&created.placement);
-        return Err(Stage::Released);
+        .map_err(|why| Stage::Failed(format!("the tree was not made: {why}")))??;
+    match shared.owner(&job.id, &job.released) {
+        Owner::Ours => Ok(Made {
+            tree: created.tree,
+            files,
+        }),
+        Owner::Newer => Err(Stage::Released),
+        Owner::Gone => {
+            let _ = shared.store.release(&created.placement);
+            Err(Stage::Released)
+        }
     }
-    Ok(Made {
-        tree: created.tree,
-        files,
-    })
 }
 
 /// The stage a refusal of the tree store leaves a source at: a tree this node cannot make now is a
@@ -169,9 +189,9 @@ pub(super) async fn fill(
             };
             Some((span, file.size, file.sha256))
         })
-        .filter(|(span, size, sha256)| {
-            seen.insert((span.pack.clone(), span.offset, *size, *sha256.as_bytes()))
-        })
+        // The tree store keeps one span for each digest, the first file's in path order, and an
+        // open reads that span: so is it read here.
+        .filter(|(_, _, sha256)| seen.insert(*sha256.as_bytes()))
         .collect();
     let at_once = shared.store.config().fill_concurrency;
     let read: Vec<bool> = futures::stream::iter(&spans)

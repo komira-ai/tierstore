@@ -9,16 +9,17 @@ use std::time::Duration;
 use tokio::sync::watch;
 
 use super::names::SourceId;
-use super::prepare::{Job, fill, run};
+use super::prepare::{Job, fill, report, run};
 use super::sources::Stage;
-use super::testing::{AGENT, Rig, member};
+use super::testing::{AGENT, READ_ONLY, Rig, member, source};
 use crate::server::local_cache::testing::until;
 use crate::server::local_cache::trees::TreesConfig;
 use crate::{
     BlobSource, BuiltFile, ListEntry, ListKind, Mode, Op, TreeDigest, TreeList, tree_list_digest,
 };
 
-/// A preparation of the source `run`/0 with `key`, released or not, and the stage it reports.
+/// A preparation of the source `run`/0 with `key` that the provider does not hold (its source was
+/// released, or prepared again by another), and the stage it reports.
 fn job(run: &str, key: &str, released: bool) -> (Job, watch::Receiver<Stage>) {
     let (stage, seen) = watch::channel(Stage::Preparing);
     let job = Job {
@@ -33,6 +34,16 @@ fn job(run: &str, key: &str, released: bool) -> (Job, watch::Receiver<Stage>) {
         released: Arc::new(AtomicBool::new(released)),
     };
     (job, seen)
+}
+
+/// The preparation of the source `run`/0 with `key`, held by the provider as its own.
+fn held(rig: &Rig, run: &str, key: &str) -> (Job, watch::Receiver<Stage>) {
+    let id = SourceId {
+        agent: AGENT.to_owned(),
+        run: run.to_owned(),
+        index: 0,
+    };
+    rig.provider.hold(id, key)
 }
 
 /// The GETs the upstream has had of the pack.
@@ -61,12 +72,23 @@ fn files(rig: &Rig) -> Vec<BuiltFile> {
         size: 0,
         source: None,
     };
+    // The same bytes in a pack that is not there: the tree store keeps the first file's span for
+    // the digest, and so does the fill.
+    let elsewhere = BuiltFile {
+        path: "z".to_owned(),
+        source: Some(BlobSource {
+            key: "cas/pack/two".into(),
+            offset: 0,
+        }),
+        ..file("z", 0)
+    };
     vec![
         file("a", 0),
         file("b", 0),
         file("c", 1),
         file("d", 2),
         empty,
+        elsewhere,
     ]
 }
 
@@ -75,7 +97,7 @@ fn files(rig: &Rig) -> Vec<BuiltFile> {
 #[tokio::test]
 async fn a_tree_whose_files_are_all_read_is_marked_ready() {
     let rig = Rig::new("prov-run-ready").await;
-    let (job, seen) = job("js.1", &rig.key, false);
+    let (job, seen) = held(&rig, "js.1", &rig.key);
     run(Arc::clone(&rig.provider.shared), job).await;
     assert_eq!(*seen.borrow(), Stage::Placed);
     let located = rig
@@ -111,7 +133,7 @@ async fn a_tree_with_a_file_not_read_is_placed_and_not_marked_ready() {
         entries: vec![member(pack, "bin/other", 1, 0o644), wrong],
     };
     let key = rig.put_list(&list).await;
-    let (job, seen) = job("js.1", &key, false);
+    let (job, seen) = held(&rig, "js.1", &key);
     run(Arc::clone(&rig.provider.shared), job).await;
     assert_eq!(*seen.borrow(), Stage::Placed);
     let located = rig
@@ -142,7 +164,7 @@ async fn a_source_released_before_its_tree_is_placed_gives_the_placement_up() {
 async fn a_source_released_during_its_reads_ends_with_its_tree_gone() {
     let rig = Rig::new("prov-run-release-reads").await;
     let gate = rig.bench.rig.tamper.hold_key(&rig.bench.pack.key);
-    let (job, seen) = job("js.1", &rig.key, false);
+    let (job, seen) = held(&rig, "js.1", &rig.key);
     let released = Arc::clone(&job.released);
     let running = tokio::spawn(run(Arc::clone(&rig.provider.shared), job));
     until("the three reads are at the upstream", || {
@@ -160,8 +182,9 @@ async fn a_source_released_during_its_reads_ends_with_its_tree_gone() {
     assert_eq!(store.sizes(), (0, 0));
 }
 
-/// Asserts that files that share one span are read once, that a file of size 0 is not read, and
-/// that every span is counted as in the cache.
+/// Asserts that files of one digest are read once, at the first file's span (the one the tree store
+/// keeps, so the one an open reads), that a file of size 0 is not read, and that every span is
+/// counted as in the cache.
 #[tokio::test]
 async fn files_sharing_a_span_are_read_once() {
     let rig = Rig::new("prov-fill-shared").await;
@@ -169,6 +192,7 @@ async fn files_sharing_a_span_are_read_once() {
     let read = fill(&rig.provider.shared, &files(&rig), &released).await;
     assert_eq!(read, (3, 0));
     assert_eq!(pack_reads(&rig), 3);
+    assert_eq!(rig.bench.rig.calls_on(Op::Get, "cas/pack/two"), 0);
 }
 
 /// Asserts that a provider whose process is stopping reads no file: every span is counted as not
@@ -216,4 +240,47 @@ async fn files_not_read_within_their_bound_or_not_there_are_counted() {
     }
     let read = fill(&rig.provider.shared, &missing, &released).await;
     assert_eq!(read, (0, 3));
+}
+
+/// Asserts that a release is the last stage of a source: a stage reported after it does not
+/// replace it, and one reported before it does.
+#[test]
+fn a_released_stage_is_never_replaced() {
+    let (stage, seen) = watch::channel(Stage::Preparing);
+    report(&stage, Stage::Placed);
+    assert_eq!(*seen.borrow(), Stage::Placed);
+    stage.send_replace(Stage::Released);
+    for later in [
+        Stage::Placed,
+        Stage::Failed("x".into()),
+        Stage::Refused("y".into()),
+    ] {
+        report(&stage, later);
+        assert_eq!(*seen.borrow(), Stage::Released);
+    }
+}
+
+/// Asserts that a preparation that places its tree after its source was released and prepared again
+/// leaves the placement to the later preparation, whose source it now is: the tree stays at the
+/// path and the earlier preparation ends released.
+#[tokio::test]
+async fn an_earlier_preparation_leaves_a_later_ones_placement() {
+    let rig = Rig::new("prov-run-newer").await;
+    rig.mounted("js.1", 0).await;
+    let (earlier, seen) = job("js.1", &rig.key, false);
+    run(Arc::clone(&rig.provider.shared), earlier).await;
+    assert_eq!(*seen.borrow(), Stage::Released);
+    assert!(
+        rig.bench
+            .store
+            .locate_fs(&Rig::place_of("js.1", 0))
+            .is_some()
+    );
+    assert_eq!(
+        rig.provider.mount(source("js.1", 0)).await,
+        Ok(Rig::path_of("js.1", 0))
+    );
+    rig.provider
+        .prepare(source("js.1", 0), &rig.key, READ_ONLY)
+        .unwrap();
 }

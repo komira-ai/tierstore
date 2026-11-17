@@ -140,6 +140,43 @@ async fn the_four_calls_are_answered_over_the_socket() {
         refused.message(),
         "the ref is not the key of a tree list: cas/l/ and 64 lowercase hex digits"
     );
+    let mount_unprepared = MountRequest {
+        source: source("js.9", 0),
+    };
+    let refused = client
+        .call::<MountResponse>("Mount", &mount_unprepared)
+        .await
+        .unwrap_err();
+    assert_eq!(
+        (refused.code(), refused.message()),
+        (Code::Unavailable, "the source is not prepared here")
+    );
+    let release_none = ReleaseRequest { source: None };
+    let refused = client
+        .call::<ReleaseResponse>("Release", &release_none)
+        .await
+        .unwrap_err();
+    assert_eq!(
+        (refused.code(), refused.message()),
+        (Code::InvalidArgument, "no source")
+    );
+    let sweep_none = SweepRequest {
+        agent: String::new(),
+        keep: Vec::new(),
+    };
+    let refused = client
+        .call::<SweepResponse>("Sweep", &sweep_none)
+        .await
+        .unwrap_err();
+    assert_eq!(
+        (refused.code(), refused.message()),
+        (Code::InvalidArgument, "the agent is 1 to 120 bytes")
+    );
+    // A connection that closes is reaped, and the next is served.
+    drop(client);
+    let mut next = Client::connect(&place.path).await;
+    let swept: SweepResponse = next.call("Sweep", &sweep).await.unwrap();
+    assert_eq!(swept.released, 0);
     served.stop().await;
     assert!(!place.path.exists());
 }

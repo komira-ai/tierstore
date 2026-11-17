@@ -3,7 +3,7 @@
 
 use crate::tree_list::{
     LineFault, ListEntry, ListKind, MAX_NAME_BYTES, MAX_PATH_BYTES, MAX_TARGET_BYTES,
-    MAX_TREE_LIST_BYTES, TREE_LIST_PREFIX, TreeList, TreeListError, parse_tree_list,
+    MAX_TREE_LIST_BYTES, TREE_LIST_PREFIX, TreeList, TreeListError, parse_bounded, parse_tree_list,
     tree_list_digest, tree_list_key,
 };
 use crate::{BlobSource, Mode, NewEntry, NewKind, TreeDigest, TreeLimits, build_tree};
@@ -134,27 +134,34 @@ fn a_header_alone_is_empty_and_unknown_members_are_ignored() {
     assert_eq!(read.entries[0], file("a", 1, Some(("k", 0)), Some(SHA_A)));
 }
 
-/// The bytes are judged by size before they are hashed: one byte over the bound is refused, and a
-/// list of exactly the bound is read.
+/// The bytes are judged by size before they are hashed: one byte over the bound is refused naming
+/// both numbers, and a list of exactly the bound is read. The bound of the format is checked at a
+/// small value; the same code holds it at 256 MiB.
 #[test]
 fn the_size_bound_is_exact() {
-    let over = vec![b' '; MAX_TREE_LIST_BYTES + 1];
+    let max = 1024;
+    let over = vec![b' '; max + 1];
+    let refused = parse_bounded(&over, &TreeDigest::of(b"anything"), max).unwrap_err();
+    assert_eq!(refused, TreeListError::TooLarge { size: max + 1, max });
     assert_eq!(
-        parse_tree_list(&over, &TreeDigest::of(b"anything")),
-        Err(TreeListError::TooLarge {
-            size: MAX_TREE_LIST_BYTES + 1
-        })
+        refused.to_string(),
+        "tree list too large: 1025 bytes, at most 1024"
     );
     let mut at = HEADER.as_bytes().to_vec();
-    at.resize(MAX_TREE_LIST_BYTES - 1, b' ');
+    at.resize(max - 1, b' ');
     at.push(b'\n');
-    assert_eq!(parse(&at), Ok(TreeList::default()));
     assert_eq!(
-        parse_tree_list(&over, &TreeDigest::of(b"x"))
-            .unwrap_err()
-            .to_string(),
-        "tree list too large: 268435457 bytes, at most 268435456"
+        parse_bounded(&at, &TreeDigest::of(&at), max),
+        Ok(TreeList::default())
     );
+    let over_format = vec![b' '; MAX_TREE_LIST_BYTES + 1];
+    assert!(matches!(
+        parse_tree_list(&over_format, &TreeDigest::of(b"x")),
+        Err(TreeListError::TooLarge {
+            max: MAX_TREE_LIST_BYTES,
+            ..
+        })
+    ));
 }
 
 /// Bytes that do not hash to the digest their key names are refused, naming both digests.

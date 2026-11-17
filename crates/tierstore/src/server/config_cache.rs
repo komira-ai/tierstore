@@ -478,7 +478,7 @@ impl CacheSettings {
             ),
             ("local_cache.fill_socket", fill_socket.as_deref()),
         ];
-        check_provider_socket(provider.as_ref(), &sockets)?;
+        check_provider_socket(provider.as_ref(), &sockets, &part.config.path)?;
         if oci.upstream.is_some() {
             let why =
                 "a pull is stored, and a build node takes no writes: use a storage node's file";

@@ -36,6 +36,16 @@ pub(super) enum Stage {
     Released,
 }
 
+/// Whose a source is, as a preparation that placed its tree finds it.
+pub(super) enum Owner {
+    /// Still the preparation's own.
+    Ours,
+    /// A later preparation's: the source was released and prepared again meanwhile.
+    Newer,
+    /// Nobody's: the source was released.
+    Gone,
+}
+
 /// What the provider holds of a source it prepared.
 struct Held {
     /// The key of the tree list the source was prepared with, and the digest it names.
@@ -81,6 +91,18 @@ pub(super) struct Shared {
 #[derive(Clone)]
 pub(in crate::server) struct Provider {
     pub(super) shared: Arc<Shared>,
+}
+
+impl Shared {
+    /// Whose the source `id` is, to the preparation whose release flag is `released`.
+    pub(super) fn owner(&self, id: &SourceId, released: &Arc<AtomicBool>) -> Owner {
+        let sources = self.sources.lock().unwrap_or_else(PoisonError::into_inner);
+        match sources.get(id) {
+            Some(held) if Arc::ptr_eq(&held.released, released) => Owner::Ours,
+            Some(_) => Owner::Newer,
+            None => Owner::Gone,
+        }
+    }
 }
 
 impl Provider {
@@ -179,6 +201,27 @@ impl Provider {
         Ok(())
     }
 
+    /// Holds the source `id` as prepared with `key`, and gives the preparation to the test to run.
+    #[cfg(test)]
+    pub(super) fn hold(&self, id: SourceId, key: &str) -> (Job, watch::Receiver<Stage>) {
+        let held = Held {
+            key: key.to_owned(),
+            digest: tree_list_digest(key).expect("a list key"),
+            stage: Arc::new(watch::channel(Stage::Preparing).0),
+            released: Arc::new(AtomicBool::new(false)),
+        };
+        let seen = held.stage.subscribe();
+        let job = Job {
+            id: id.clone(),
+            key: held.key.clone(),
+            digest: held.digest,
+            stage: Arc::clone(&held.stage),
+            released: Arc::clone(&held.released),
+        };
+        self.lock().insert(id, held);
+        (job, seen)
+    }
+
     /// Begins the preparation of `held` again if it failed.
     fn again_if_failed(&self, id: &SourceId, held: &Held) {
         if matches!(*held.stage.borrow(), Stage::Failed(_)) {
@@ -230,6 +273,16 @@ impl Provider {
         // The sender is dropped only after the source's stage was set to released.
         let now = waited.map_or(Stage::Released, |now| (*now).clone());
         match now {
+            // A placement whose lease ended without a release (a run longer than `trees.ttl_max`,
+            // or a clock that moved) is made again.
+            Stage::Preparing | Stage::Placed if self.placement_at(&id).is_none() => {
+                if let Some(held) = self.lock().get(&id) {
+                    self.start(&id, held);
+                }
+                Err(ProviderError::Unavailable(
+                    "the tree is gone: it is being prepared again".to_owned(),
+                ))
+            }
             Stage::Preparing | Stage::Placed => Ok(path),
             Stage::Refused(why) => Err(ProviderError::Refused(why)),
             Stage::Failed(why) => Err(ProviderError::Unavailable(why)),
@@ -305,7 +358,7 @@ impl Provider {
             placed
                 .iter()
                 .filter_map(|path| source_of(path, agent))
-                .filter(|id| swept(id)),
+                .filter(swept),
         );
         let mut released = 0;
         for id in &gone {

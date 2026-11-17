@@ -18,6 +18,7 @@
 use std::path::Path;
 
 use super::config::{ConfigError, invalid, refuse, require};
+use super::config_combined::normalised;
 use super::config_handoff::MOST_SOCKET_PATH;
 use super::config_interface::Params;
 use super::lock::check_lock_path;
@@ -81,25 +82,40 @@ pub(super) fn provider_of(at: &str, params: &Params) -> Result<ProviderFlags, Co
     })
 }
 
-/// Refuses a provider's socket that is another socket of the node: the hand-off socket or the fill
-/// socket, each of which replaces the file at its path when it is bound.
+/// Refuses a provider's socket that is another socket of the node (the hand-off socket or the fill
+/// socket, each of which replaces the file at its path when it is bound) or is inside the cache
+/// directory `cache`, which is not a place for it.
 ///
 /// # Errors
 /// A [`ConfigError`] naming the provider's socket.
 pub(super) fn check_provider_socket(
     provider: Option<&ProviderFlags>,
     others: &[(&str, Option<&Path>)],
+    cache: &Path,
 ) -> Result<(), ConfigError> {
     let Some(provider) = provider else {
         return Ok(());
     };
+    let key = "mount-provider interface params.socket";
+    // The socket is absolute (`provider_of` refuses another); a relative cache path, which a build
+    // node's file may have, is not compared.
+    let inside = normalised(&provider.socket)
+        .zip(normalised(cache))
+        .is_some_and(|(socket, cache)| socket.starts_with(cache));
+    if inside {
+        let why = format!(
+            "{:?} is inside local_cache.path: it is not a place for the cache's files",
+            provider.socket
+        );
+        return Err(invalid(key, why));
+    }
     for (name, other) in others {
         if *other == Some(provider.socket.as_path()) {
             let why = format!(
                 "{:?} is {name} too; the two sockets are two files",
                 provider.socket
             );
-            return Err(invalid("mount-provider interface params.socket", why));
+            return Err(invalid(key, why));
         }
     }
     Ok(())

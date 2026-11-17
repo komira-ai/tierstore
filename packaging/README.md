@@ -632,10 +632,11 @@ the three has one line that says so; the proxy's series are in "Metrics" in
 
 ### The mount provider of a build node
 
-A build node that runs jobs (the host groups `all-in-one` and `mac-build`) also serves the mount
-provider, which makes a job's input tree local while jobscheduler's agent readies the job's
-container: a `mount-provider` entry of `[[interface]]`, on a Unix socket in the unit's
-`StateDirectory` (`/var/lib/tierstore`, writable under `ProtectSystem=strict`):
+A build node that runs jobs can also serve the mount provider, which makes a job's input tree
+local while jobscheduler's agent readies the job's container. It is a `mount-provider` entry of
+`[[interface]]`, which an operator adds to `/etc/tierstore/config.toml` (the example `config.toml`
+is a storage node's and has none), on a Unix socket in the unit's `StateDirectory`
+(`/var/lib/tierstore`, writable under `ProtectSystem=strict`):
 
 ```toml
 [[interface]]
@@ -645,8 +646,8 @@ params = { socket = "/var/lib/tierstore/provider.sock", mountpoint = "/run/tiers
 
 `mountpoint` is the node's mount of `tierstore fs` (`fs.mountpoint` of `/etc/tierstore/fs.toml`),
 under which the provider places each job's tree; `tierstore fs` must run on the node for a job to
-read it. The host group's configuration package puts the entry in `/etc/tierstore/config.toml`, and
-the agent's flags file of the same host group gives the agent the socket and the mount root:
+read it. jobscheduler's agent on the node takes the socket and the provider's directory as a
+read-only mount root, in flags of its own:
 
 ```text
 --mount-provider tierstore=/var/lib/tierstore/provider.sock
@@ -655,9 +656,9 @@ the agent's flags file of the same host group gives the agent the socket and the
 
 The socket is mode 0600 and owned by `tierstore`; the agent, which runs as root, connects to it. It
 is bound only while the instance holds the lock of the cache directory, so during a hand-over the
-old instance answers until it exits, and the new one binds when it takes the lock. A Mac's file has
-the same entry with its own paths (`macos/tierstore.toml`). What the provider does, and what each
-of its answers means to a job, is in `crates/tierstore/docs/operations.md`, "The mount provider".
+old instance answers until it exits, and the new one binds when it takes the lock. A Mac's file
+(`macos/tierstore.toml`) has the entry with its own paths. What the provider does, and what each of
+its answers means to a job, is in `crates/tierstore/docs/operations.md`, "The mount provider".
 
 ### The registry front
 

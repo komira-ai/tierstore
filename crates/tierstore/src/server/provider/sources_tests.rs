@@ -149,8 +149,8 @@ fn empty_files(paths: &[&str]) -> TreeList {
 }
 
 /// Asserts that a ref the provider cannot use is refused at `Mount` with the reason, each by name:
-/// no object at the key, bytes that do not hash to it, a malformed line, a file without its digest,
-/// a tree the builder refuses, a list over the bound, and a tree over the store's limit.
+/// no object at the key, a malformed line, a file without its digest, a tree the builder refuses, a
+/// list over the bound, and a tree over the store's limit.
 #[tokio::test]
 async fn a_ref_the_provider_cannot_use_is_refused_with_its_reason() {
     let config = TreesConfig {
@@ -165,18 +165,6 @@ async fn a_ref_the_provider_cannot_use_is_refused_with_its_reason() {
     assert_eq!(
         refusal_of(&rig, "js.missing", &missing).await,
         format!("no tree list at {missing}")
-    );
-
-    let other = tree_list_key(b"other bytes");
-    let bytes = TreeList::default().encode();
-    rig.bench.rig.put(&other, &bytes).await;
-    assert_eq!(
-        refusal_of(&rig, "js.mismatch", &other).await,
-        format!(
-            "tree list digest mismatch: expected {}, the bytes hash to {}",
-            TreeDigest::of(b"other bytes"),
-            TreeDigest::of(&bytes)
-        )
     );
 
     let malformed = b"{\"format\":\"tierstore.tree-list\",\"version\":1}\n{}\n";
@@ -530,4 +518,86 @@ async fn a_release_the_store_cannot_make_is_unavailable() {
         "the placement was not released: this node does not hold the lock of its cache directory"
     );
     drop(holder);
+}
+
+/// Asserts that an object whose bytes do not hash to its key is unavailable, not refused: the cache
+/// checks the bytes of a key of `cas/l/` as it fills them and fails the read, as it fails a read of
+/// a store that gave bad bytes, which a retry may mend.
+#[tokio::test]
+async fn a_list_that_does_not_hash_to_its_key_is_unavailable() {
+    let rig = Rig::new("prov-mismatch").await;
+    let other = tree_list_key(b"other bytes");
+    rig.bench
+        .rig
+        .put(&other, &TreeList::default().encode())
+        .await;
+    rig.provider
+        .prepare(source("js.1", 0), &other, READ_ONLY)
+        .unwrap();
+    let answer = rig.provider.mount(source("js.1", 0)).await.unwrap_err();
+    let why = unavailable(answer);
+    assert!(why.starts_with("the tree list was not read: "), "{why}");
+    assert!(rig.bench.store.mount_paths().is_empty());
+}
+
+/// Asserts that a source whose placement's lease ended (the run outlived `trees.ttl_max`) is made
+/// again: the next `Mount` is unavailable while it is, and the one after answers the directory.
+#[tokio::test]
+async fn a_placement_whose_lease_ended_is_made_again() {
+    let rig = Rig::new("prov-expired").await;
+    rig.mounted("js.1", 0).await;
+    rig.bench.rig.clock.advance(2 * 3600 * 1000);
+    assert!(
+        rig.bench
+            .store
+            .locate_fs(&Rig::place_of("js.1", 0))
+            .is_none()
+    );
+    let gone = rig.provider.mount(source("js.1", 0)).await.unwrap_err();
+    assert_eq!(
+        unavailable(gone),
+        "the tree is gone: it is being prepared again"
+    );
+    let again = rig.provider.mount(source("js.1", 0)).await;
+    assert_eq!(again, Ok(Rig::path_of("js.1", 0)));
+    assert!(
+        rig.bench
+            .store
+            .locate_fs(&Rig::place_of("js.1", 0))
+            .is_some()
+    );
+}
+
+/// Asserts that a sweep the store cannot make (the cache does not hold the lock of its directory)
+/// is unavailable, as a release is.
+#[tokio::test]
+async fn a_sweep_the_store_cannot_make_is_unavailable() {
+    let rig = Rig::new("prov-sweep-ro").await;
+    rig.mounted("js.1", 0).await;
+    let holder = rig.bench.rig.locked();
+    let waiting = rig.bench.rig.locked();
+    let provider = Provider::with(Bench::reopen(waiting.clone()), waiting, settings());
+    let answer = provider.sweep(AGENT, &[]).unwrap_err();
+    assert!(unavailable(answer).starts_with("the placement was not released: "));
+    drop(holder);
+}
+
+/// Asserts that a source prepared again after a restart of the process (the agent sends the start
+/// again) is the same tree at the same path: the prepare is a success and the mount answers it.
+#[tokio::test]
+async fn a_source_prepared_again_after_a_restart_is_mounted() {
+    let rig = Rig::new("prov-restart-prepare").await;
+    rig.mounted("js.1", 0).await;
+    let restarted = Provider::with(
+        rig.bench.store.clone(),
+        rig.bench.rig.cache.clone(),
+        settings(),
+    );
+    restarted
+        .prepare(source("js.1", 0), &rig.key, READ_ONLY)
+        .unwrap();
+    assert_eq!(
+        restarted.mount(source("js.1", 0)).await,
+        Ok(Rig::path_of("js.1", 0))
+    );
 }

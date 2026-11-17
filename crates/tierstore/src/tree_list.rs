@@ -65,10 +65,12 @@ const EMPTY_SHA256: [u8; 32] = [
 #[derive(Debug, PartialEq, Eq, thiserror::Error)]
 pub enum TreeListError {
     /// The object is over [`MAX_TREE_LIST_BYTES`].
-    #[error("tree list too large: {size} bytes, at most {MAX_TREE_LIST_BYTES}")]
+    #[error("tree list too large: {size} bytes, at most {max}")]
     TooLarge {
         /// The size of the object in bytes.
         size: usize,
+        /// The bound.
+        max: usize,
     },
     /// The bytes do not hash to the digest of the key they were read from.
     #[error("tree list digest mismatch: expected {expected}, the bytes hash to {actual}")]
@@ -231,8 +233,20 @@ pub fn tree_list_digest(key: &str) -> Option<TreeDigest> {
 /// ignored; a format, a version or a kind it does not know is refused, since a reader that left
 /// out an entry would make a wrong tree.
 pub fn parse_tree_list(bytes: &[u8], expected: &TreeDigest) -> Result<TreeList, TreeListError> {
-    if bytes.len() > MAX_TREE_LIST_BYTES {
-        return Err(TreeListError::TooLarge { size: bytes.len() });
+    parse_bounded(bytes, expected, MAX_TREE_LIST_BYTES)
+}
+
+/// [`parse_tree_list`] with the bound `max` in place of [`MAX_TREE_LIST_BYTES`].
+pub(crate) fn parse_bounded(
+    bytes: &[u8],
+    expected: &TreeDigest,
+    max: usize,
+) -> Result<TreeList, TreeListError> {
+    if bytes.len() > max {
+        return Err(TreeListError::TooLarge {
+            size: bytes.len(),
+            max,
+        });
     }
     let actual = TreeDigest::of(bytes);
     if actual != *expected {
