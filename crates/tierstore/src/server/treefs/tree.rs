@@ -56,7 +56,8 @@ impl Kids<'_> {
         let (listed, range) = match self {
             Self::Listed(kids) => (kids.get(at..).unwrap_or_default(), 0..0),
             Self::Range(range) => {
-                let start = u32::try_from(at).map_or(range.end, |at| range.start.saturating_add(at));
+                let start =
+                    u32::try_from(at).map_or(range.end, |at| range.start.saturating_add(at));
                 (&[][..], start.min(range.end)..range.end)
             }
         };
@@ -86,6 +87,11 @@ impl Kids<'_> {
 impl Tree {
     /// The tree of `entries`, which `flatten` made: the root first, a parent before its children.
     pub(super) fn new(entries: Vec<TreeEntry>) -> Self {
+        Self::listed(entries, Vec::new(), None)
+    }
+
+    /// The tree of `entries` with the stored `modes`, at `location` if it is placed.
+    fn listed(entries: Vec<TreeEntry>, modes: Vec<u16>, location: Option<String>) -> Self {
         let mut starts = vec![0u32; entries.len() + 1];
         for parent in entries.iter().filter_map(|entry| entry.parent) {
             starts[parent as usize + 1] += 1;
@@ -106,21 +112,16 @@ impl Tree {
                 entries,
                 starts,
                 kids,
-                modes: Vec::new(),
+                modes,
             },
-            location: None,
+            location,
         }
     }
 
     /// The tree of `entries` that a placement shows at the fs location `location`, with the mode
     /// of each entry in `modes`, by index.
     pub(super) fn placed(entries: Vec<TreeEntry>, modes: Vec<u16>, location: String) -> Self {
-        let mut tree = Self::new(entries);
-        if let Body::Listed { modes: held, .. } = &mut tree.body {
-            *held = modes;
-        }
-        tree.location = Some(location);
-        tree
+        Self::listed(entries, modes, Some(location))
     }
 
     /// The tree a placement shows at the fs location `location` that is the image `image`.
@@ -232,10 +233,7 @@ impl Tree {
                 .iter()
                 .filter(|&&kid| matches!(entries[kid as usize].kind, EntryKind::Dir { .. }))
                 .count(),
-            Body::Image(image) => image
-                .children(dir)
-                .filter(|kid| image.is_dir(*kid))
-                .count(),
+            Body::Image(image) => image.children(dir).filter(|kid| image.is_dir(*kid)).count(),
         };
         2 + u32::try_from(dirs).unwrap_or(u32::MAX)
     }

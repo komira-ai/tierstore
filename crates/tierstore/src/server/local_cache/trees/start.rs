@@ -5,9 +5,10 @@
 //! named by, its root among them, its sources file reads, every tree it holds by digest is kept
 //! and, if it was ready, the cache still holds every range of its files. A tree that is an image
 //! is kept only if its image hashes to the digest it is named by and is a version 2 tree list
-//! whose every entry checks, and, if it was ready, the cache still holds every file's span. A placement is kept only
-//! if its file reads, it is named by the id of what it holds, its tree is kept, its lease has not
-//! ended and no location of it meets one kept before (in the order of the ids). A tree no kept
+//! whose every entry checks, and, if it was ready, the cache still holds every file's span. A
+//! placement is kept only if its file reads, it is named by the id of what it holds, its tree is
+//! kept, its lease has not ended and no location of it meets one kept before (in the order of the
+//! ids). A tree no kept
 //! placement reaches is dropped. The holder of the lock removes what it drops; a cache that holds
 //! no lock only leaves it out of memory.
 

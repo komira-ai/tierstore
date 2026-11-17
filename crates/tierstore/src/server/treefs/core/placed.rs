@@ -425,3 +425,7 @@ mod tests;
 #[cfg(test)]
 #[path = "placed_flat_tests.rs"]
 mod flat_tests;
+
+#[cfg(test)]
+#[path = "placed_image_tests.rs"]
+mod image_tests;

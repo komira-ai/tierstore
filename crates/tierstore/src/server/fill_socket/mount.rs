@@ -67,12 +67,7 @@ pub(super) async fn answer(trees: Option<&TreeStore>, request: MountRequest) -> 
         MountRequest::Image { placement } => {
             let store = trees.clone();
             let tree = tokio::task::spawn_blocking(move || store.mount_tree(&placement)).await;
-            match tree {
-                Ok(Ok(MountTree::Image { tree, paths })) => format!("image {tree} {}", json(&paths)),
-                Ok(Ok(MountTree::Flat(flat))) => json(&flat),
-                Ok(Err(why)) => flat_answer(&Err(why)),
-                Err(_) => "damaged".to_owned(),
-            }
+            tree.map_or_else(|_| "damaged".to_owned(), image_answer)
         }
         MountRequest::Span {
             sha256,
@@ -93,6 +88,15 @@ pub(super) async fn answer(trees: Option<&TreeStore>, request: MountRequest) -> 
         MountRequest::PlacesLive { mount, keep } => {
             format!("ok {}", trees.holds_live(&mount, &keep))
         }
+    }
+}
+
+/// The answer to an `image` whose tree is `tree`.
+fn image_answer(tree: Result<MountTree, FlatError>) -> String {
+    match tree {
+        Ok(MountTree::Image { tree, paths }) => format!("image {tree} {}", json(&paths)),
+        Ok(MountTree::Flat(flat)) => json(&flat),
+        Err(why) => flat_answer(&Err(why)),
     }
 }
 

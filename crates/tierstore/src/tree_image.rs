@@ -23,7 +23,6 @@ use crate::tree_list_v2_build::{Counted, Record, Spans};
 use crate::{ListRange, ListSpan, Mode, TreeDigest, TreeLimits};
 
 /// A version 2 tree list whose every entry was checked, held whole and read in place.
-#[derive(Debug)]
 pub struct TreeImage {
     /// The whole list, as it is stored.
     bytes: Bytes,
@@ -39,6 +38,18 @@ pub struct TreeImage {
     ranges: Vec<ListRange>,
     /// The files and their bytes.
     counted: Counted,
+}
+
+impl std::fmt::Debug for TreeImage {
+    /// The size of the image and what it holds, not its bytes.
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.debug_struct("TreeImage")
+            .field("bytes", &self.bytes.len())
+            .field("entries", &self.len())
+            .field("files", &self.counted.files)
+            .field("keys", &self.keys.len())
+            .finish_non_exhaustive()
+    }
 }
 
 /// One entry of a [`TreeImage`], read from its record.
@@ -301,6 +312,15 @@ impl TreeImage {
             at = self.child(at, name).ok_or(ImagePathError::NotFound)?;
         }
         Ok(at)
+    }
+
+    /// The entry the path `path` leads to, as [`TreeImage::find`] finds it.
+    ///
+    /// # Errors
+    /// As [`TreeImage::find`].
+    pub(crate) fn find_entry(&self, path: &str) -> Result<ImageEntry<'_>, ImagePathError> {
+        // `find` gives the index of an entry of the image.
+        self.entry(self.find(path)?).ok_or(ImagePathError::NotFound)
     }
 }
 

@@ -51,6 +51,14 @@ impl TreeInfo {
         }
     }
 
+    /// The records of the tree and the sources of its files, if it is a tree of records.
+    pub(super) fn records(&self) -> Option<(&HashMap<TreeDigest, Place>, &Sources)> {
+        match &self.content {
+            Content::Records { records, sources } => Some((records, sources)),
+            Content::Image(_) => None,
+        }
+    }
+
     /// The image the tree is, if it is one.
     pub(super) fn image(&self) -> Option<&Arc<TreeImage>> {
         match &self.content {

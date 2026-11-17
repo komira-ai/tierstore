@@ -271,7 +271,9 @@ pub fn run(args: impl IntoIterator<Item = String>, out: &mut dyn Write) -> Resul
 /// to the same digest and size.
 fn same_files(list: &TreeListV2<'_>, store: Option<&TreeStore>) -> Result<bool, Failure> {
     let store = store.ok_or(USAGE)?;
-    let located = store.locate_fs("bench/tree").ok_or("the tree is not placed")?;
+    let located = store
+        .locate_fs("bench/tree")
+        .ok_or("the tree is not placed")?;
     let built = list.build(&TreeLimits::default(), drop)?;
     for file in &built.files {
         let resolved = store.resolve(&located.placement, &file.path)?;

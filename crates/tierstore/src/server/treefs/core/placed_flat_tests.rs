@@ -136,7 +136,9 @@ fn files_without_exec_bits_empty_files_and_links_are_read_as_they_are() {
             ..
         }
     ));
-    assert!(matches!(&tree.entry(2).unwrap().kind, EntryKind::Symlink { target } if &**target == "e"));
+    assert!(
+        matches!(&tree.entry(2).unwrap().kind, EntryKind::Symlink { target } if &**target == "e")
+    );
     assert!(matches!(
         tree.entry(3).unwrap().kind,
         EntryKind::File {

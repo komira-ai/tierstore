@@ -57,12 +57,21 @@ pub struct ImageRequest {
 /// An image written to the store's directory under a staging name before its create
 /// ([`TreeStore::stage_image`]), so that the write runs beside the walk of the list: the create
 /// that takes it renames it into place. One that no create takes is removed when it is dropped.
-#[derive(Debug)]
 pub struct StagedImage {
     /// The bytes written.
     bytes: Bytes,
     /// The staging directory, until a create takes it.
     dir: Option<PathBuf>,
+}
+
+impl std::fmt::Debug for StagedImage {
+    /// Where the image is and its size, not its bytes.
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.debug_struct("StagedImage")
+            .field("bytes", &self.bytes.len())
+            .field("dir", &self.dir)
+            .finish()
+    }
 }
 
 impl StagedImage {
@@ -453,7 +462,7 @@ impl TreeStore {
             state
                 .trees
                 .get(child)
-                .is_some_and(|info| info.image().is_none())
+                .is_some_and(|info| info.records().is_some())
         };
         if let Some(missing) = children.iter().find(|child| !held(child)) {
             return Err(CreateError::UnknownChild(*missing));

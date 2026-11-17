@@ -2,10 +2,12 @@
 //!
 //! A **tree** is a directory structure whose files are spans of cached packs. It is made by one
 //! call, [`TreeStore::create`], from the records and files [`build_tree`](crate::build_tree)
-//! makes of a request, and it appears at one or more **locations**: a bucket and key prefix of the
-//! S3 front, or a path under the mount of `tierstore fs`. A tree and the places it appears at are
-//! separate things: the tree is content (its digest), a **placement** is that tree at a set of
-//! locations, and a placement is what leases, attachments and reads hold. The store keeps them in
+//! makes of a request, or by [`TreeStore::create_image`] from a version 2 tree list, which is the
+//! tree as it is (an **image**: [`TreeImage`](crate::TreeImage)), and it appears at one or more
+//! **locations**: a bucket and key prefix of the S3 front, or a path under the mount of
+//! `tierstore fs`. A tree and the places it appears at are separate things: the tree is content
+//! (its digest), a **placement** is that tree at a set of locations, and a placement is what
+//! leases, attachments and reads hold. The store keeps them in
 //! the cache directory, `trees/<T>/` and `placements/<id>` (module `files` has the layouts), by
 //! rename and with no sync, and in memory, where a table sorted by location answers which
 //! placement a key falls under. Nothing here is written to a tier or seen by another node, and
@@ -19,7 +21,9 @@
 //!   placement is. A file resolves to a **span**, the key of a pack and an offset in it
 //!   ([`FileSpan`]): the interface then asks the cache for the range ([`LocalCache::span_of`]) and
 //!   reads the pack's own file at the offset. Nothing is copied. The answers read one directory
-//!   record at a time from the tree's records file; no tree is read whole.
+//!   record at a time from the tree's records file; no tree of records is read whole. An image is
+//!   in memory whole and is read in place: a name is found by a binary search of its directory's
+//!   children, and nothing is read from a file.
 //!
 //! # Locations
 //!
@@ -76,6 +80,8 @@ mod fetch_tests;
 #[cfg(test)]
 mod files_tests;
 #[cfg(test)]
+mod image_tests;
+#[cfg(test)]
 mod keys_tests;
 #[cfg(test)]
 mod life_tests;
@@ -98,7 +104,9 @@ pub use config::{Prefetch, TreesConfig};
 pub use create::{CreateError, CreateRequest, Created, ImageRequest, StagedImage};
 pub use fetch::{FetchError, OpenFile};
 pub(in crate::server) use files::image_path;
-pub(in crate::server) use flat::{FlatError, FlatKind, FlatTree, MountPlace, MountTree, placement_id};
+pub(in crate::server) use flat::{
+    FlatError, FlatKind, FlatTree, MountPlace, MountTree, placement_id,
+};
 pub use keys::TreeKey;
 pub use life::{LifeError, PlacementInfo, ReadHold, SweepReport};
 pub use location::{Located, Location, LocationError, PlacementId};

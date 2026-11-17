@@ -124,8 +124,18 @@ async fn a_v2_list_run_to_its_end_places_the_list_as_its_tree_and_reads_every_fi
     let v1 = store.locate_fs(&Rig::place_of("js.1", 0)).unwrap();
     assert_ne!(located.tree, v1.tree);
     let paths = [
-        "", "bin", "bin/other", "bin/tool", "empty", "lib", "lib/deep", "lib/deep/data", "link",
-        "zero", "absent", "bin/tool/below",
+        "",
+        "bin",
+        "bin/other",
+        "bin/tool",
+        "empty",
+        "lib",
+        "lib/deep",
+        "lib/deep/data",
+        "link",
+        "zero",
+        "absent",
+        "bin/tool/below",
     ];
     for path in paths {
         assert_eq!(
@@ -335,7 +345,10 @@ async fn an_earlier_v2_preparation_leaves_a_later_ones_placement() {
     let key = rig.put_list_v2(&list_of(&rig.bench.pack)).await;
     let later = rig.provider.prepare(source("js.1", 0), &key, READ_ONLY);
     later.expect("prepared");
-    rig.provider.mount(source("js.1", 0)).await.expect("mounted");
+    rig.provider
+        .mount(source("js.1", 0))
+        .await
+        .expect("mounted");
     let (earlier, seen) = job("js.1", &key, false);
     run(Arc::clone(&rig.provider.shared), earlier).await;
     assert_eq!(*seen.borrow(), Stage::Released);

@@ -12,7 +12,7 @@ use std::sync::Arc;
 use super::TreeStore;
 use super::files::{RECORDS, Source};
 use super::location::{Located, PlacementId, under};
-use super::state::{Content, TreeInfo};
+use super::state::TreeInfo;
 use crate::tree_image::{ImageEntry, ImageKind, ImagePathError};
 use crate::{Mode, RecordChild, TreeDigest, TreeImage, TreeRecord};
 
@@ -130,13 +130,10 @@ impl Snapshot {
 
 /// The entry of `image` that `path` leads to.
 fn image_entry<'a>(image: &'a TreeImage, path: &str) -> Result<ImageEntry<'a>, ReadError> {
-    let index = image.find(path).map_err(|why| match why {
+    image.find_entry(path).map_err(|why| match why {
         ImagePathError::NotADirectory => ReadError::NotADirectory,
         ImagePathError::NotFound => ReadError::NotFound,
-    })?;
-    image
-        .entry(index)
-        .ok_or_else(|| ReadError::Corrupt(format!("entry {index} is missing")))
+    })
 }
 
 /// The span of a file of an image: its own.
@@ -228,9 +225,9 @@ impl TreeStore {
         snapshot: &Snapshot,
         digest: &TreeDigest,
     ) -> Result<TreeRecord, ReadError> {
-        let held = snapshot.closure.iter().find_map(|tree| match &tree.content {
-            Content::Records { records, .. } => records.get(digest).map(|place| (tree, *place)),
-            Content::Image(_) => None,
+        let held = snapshot.closure.iter().find_map(|tree| {
+            let place = tree.records()?.0.get(digest)?;
+            Some((tree, *place))
         });
         let (tree, place) =
             held.ok_or_else(|| ReadError::Corrupt(format!("record {digest} is missing")))?;
@@ -324,12 +321,10 @@ impl TreeStore {
         if size == 0 {
             return Ok(None);
         }
-        let found = snapshot.closure.iter().find_map(|tree| match &tree.content {
-            Content::Records { sources, .. } => {
-                let source: &Source = sources.files.get(sha256.as_bytes())?;
-                Some((sources, source))
-            }
-            Content::Image(_) => None,
+        let found = snapshot.closure.iter().find_map(|tree| {
+            let sources = tree.records()?.1;
+            let source: &Source = sources.files.get(sha256.as_bytes())?;
+            Some((sources, source))
         });
         let (sources, source) =
             found.ok_or_else(|| ReadError::Corrupt(format!("no source for {sha256}")))?;

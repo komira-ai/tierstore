@@ -283,3 +283,109 @@ fn each_digest_of_the_files_is_one_group_at_its_first_file() {
     );
     assert_eq!(alone(&[]), []);
 }
+
+/// The span of key number `key` at `offset` of `size` bytes with the digest of `bytes`.
+fn span_of(key: u32, offset: u64, size: u64, bytes: &[u8]) -> ListSpan {
+    ListSpan {
+        key,
+        offset,
+        size,
+        sha256: TreeDigest::of(bytes),
+    }
+}
+
+/// Asserts that spans that are identical (the same key, offset, size and digest), wherever they are
+/// among the others, are one part of a group, in a range and out of every range.
+#[test]
+fn identical_spans_are_one_part() {
+    let spans = vec![
+        span(0, 10, 10),
+        span(0, 0, 10),
+        span(0, 10, 10),
+        span(0, 0, 10),
+        span(1, 50, 5),
+        span(1, 50, 5),
+    ];
+    let found = groups(&keys(), spans, [range(0, 0, 20)].into_iter());
+    assert_eq!(
+        found,
+        [group("a", &[(0, 10), (10, 10)]), group("b", &[(50, 5)])]
+    );
+}
+
+/// Asserts that spans equal but for their size are two parts, and spans equal but for their digest
+/// are two parts: only a span equal in all four is read once.
+#[test]
+fn spans_that_differ_in_size_or_digest_stay_two_parts() {
+    let (one, other) = (TreeDigest::of(b"one"), TreeDigest::of(b"other"));
+    let spans = vec![span_of(0, 0, 10, b"one"), span_of(0, 0, 12, b"one")];
+    let found = groups(&keys(), spans, std::iter::empty());
+    assert_eq!(
+        found,
+        [
+            Group {
+                pack: Arc::from("a"),
+                parts: vec![(0, 10, one)]
+            },
+            Group {
+                pack: Arc::from("a"),
+                parts: vec![(0, 12, one)]
+            },
+        ]
+    );
+    let spans = vec![span_of(0, 0, 10, b"one"), span_of(0, 0, 10, b"other")];
+    let found = groups(&keys(), spans, std::iter::empty());
+    let mut digests = [one, other];
+    digests.sort_by_key(|digest| *digest.as_bytes());
+    let expected: Vec<Group> = digests
+        .into_iter()
+        .map(|digest| Group {
+            pack: Arc::from("a"),
+            parts: vec![(0, 10, digest)],
+        })
+        .collect();
+    assert_eq!(found, expected);
+}
+
+/// Asserts that spans are ordered by key, then offset, then size, then digest, whatever the order
+/// they came in, so that the groups of one list are always the same: ties at one offset are the
+/// smaller size first, and at one size the smaller digest first; identical spans in the run of ties
+/// are dropped.
+#[test]
+fn the_spans_are_sorted_by_key_offset_size_and_digest_with_ties() {
+    let mut low = [TreeDigest::of(b"x"), TreeDigest::of(b"y")];
+    low.sort_by_key(|digest| *digest.as_bytes());
+    let spans = vec![
+        span_of(1, 0, 5, b"x"),
+        ListSpan {
+            sha256: low[1],
+            ..span(0, 0, 5)
+        },
+        ListSpan {
+            sha256: low[0],
+            ..span(0, 0, 5)
+        },
+        span(0, 0, 3),
+        span(0, 0, 5),
+        ListSpan {
+            sha256: low[0],
+            ..span(0, 0, 5)
+        },
+        span(0, 0, 9),
+    ];
+    let found = groups(&keys(), spans, std::iter::empty());
+    let parts: Vec<(u32, u64, u64, TreeDigest)> = found
+        .iter()
+        .map(|group| {
+            let (offset, size, sha) = group.parts[0];
+            (u32::from(&*group.pack == "b"), offset, size, sha)
+        })
+        .collect();
+    let mut at_five = [low[0], low[1], digest_at(0)];
+    at_five.sort_by_key(|digest| *digest.as_bytes());
+    let mut expected = vec![(0, 0, 3, digest_at(0))];
+    expected.extend(at_five.iter().map(|digest| (0, 0, 5, *digest)));
+    expected.push((0, 0, 9, digest_at(0)));
+    expected.push((1, 0, 5, TreeDigest::of(b"x")));
+    assert_eq!(parts, expected);
+}

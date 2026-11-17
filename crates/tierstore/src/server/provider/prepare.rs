@@ -207,9 +207,8 @@ fn image_v2(
         let actual = hashing
             .join()
             .unwrap_or_else(|panic| std::panic::resume_unwind(panic));
-        let staged = staging
-            .join()
-            .unwrap_or_else(|panic| std::panic::resume_unwind(panic));
+        // A write that panicked is a write not made ahead: the create writes the image.
+        let staged = staging.join().ok().flatten();
         (actual, walked, staged)
     });
     if actual != *digest {

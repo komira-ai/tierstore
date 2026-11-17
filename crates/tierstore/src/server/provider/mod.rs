@@ -45,6 +45,8 @@ mod groups_tests;
 #[cfg(test)]
 mod names_tests;
 #[cfg(test)]
+mod prepare_image_tests;
+#[cfg(test)]
 mod prepare_tests;
 #[cfg(test)]
 mod prepare_v2_tests;

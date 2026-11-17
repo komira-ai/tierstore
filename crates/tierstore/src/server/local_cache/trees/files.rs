@@ -11,8 +11,9 @@
 //! `<T>` is the digest of the tree, sixty-four lower-case hex digits: its root record's, or for a
 //! tree that is an `image` the SHA-256 of the image's bytes (the digest of the key
 //! `cas/l/<T>` it was stored under); `<id>` is a placement's id, thirty-two. A tree's directory
-//! has `records` and `sources`, or `image`; the mount reads `image` itself ([`image_path`]). Each file is written beside its name and renamed into place (a tree's directory is
-//! written under `trees/.new-<n>` and renamed whole), and none is synced: a file that a crash left
+//! has `records` and `sources`, or `image`; the mount reads `image` itself ([`image_path`]).
+//! Each file is written beside its name and renamed into place (a tree's directory is written
+//! under `trees/.new-<n>` and renamed whole), and none is synced: a file that a crash left
 //! short is found at the next start, which drops what does not read or hash to its name.
 //! `docs/stored-formats.md` has the layouts.
 

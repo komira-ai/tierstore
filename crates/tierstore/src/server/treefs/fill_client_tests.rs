@@ -10,7 +10,8 @@ use std::time::Duration;
 
 use tierstore_testkit::dir::TestDir;
 
-use super::{AskError, FillClient, Place};
+use super::{AskError, FillClient, Place, PlacedTree};
+use crate::TreeDigest;
 
 /// A client that pauses `tries` times at most, counting the pauses instead of taking them.
 fn client(path: &Path, tries: u32, wait: Duration) -> (FillClient, Arc<AtomicUsize>) {
@@ -371,4 +372,121 @@ fn an_unplace_sends_the_mount_and_the_placement_and_survives_a_missing_socket() 
     let (_dir, path) = place("tfs-fc-unplace-gone");
     let (client, _) = client_for_quit(&path);
     client.unplace("m-1", "0123abcd");
+}
+
+const FLAT: &str =
+    r#"{"paths":["jobs/1"],"packs":["p"],"entries":[{"name":"","mode":493,"kind":"dir"}]}"#;
+const DIGEST: &str = "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa";
+
+/// Asserts that image sends the placement id and reads `image <tree hex> [paths]` as the image of
+/// that digest with those paths, with the paths' quotes, spaces and escapes kept, and none of them
+/// as an empty list.
+#[test]
+fn image_reads_the_digest_and_the_paths_of_an_image_answer() {
+    let reply: &'static str =
+        Box::leak(format!(r#"image {DIGEST} ["jobs/1", "a b/\"c\""]"#).into_boxed_str());
+    let (client, lines, _dir) = replying("tfs-fc-image", reply);
+    assert_eq!(
+        client.image("0123abcd"),
+        Ok(PlacedTree::Image {
+            tree: TreeDigest::from_hex(DIGEST).unwrap(),
+            paths: vec!["jobs/1".to_owned(), "a b/\"c\"".to_owned()],
+        })
+    );
+    assert_eq!(*lines.lock().unwrap(), ["image 0123abcd"]);
+    let empty: &'static str = Box::leak(format!("image {DIGEST} []").into_boxed_str());
+    let (client, _, _dir) = replying("tfs-fc-image-empty", empty);
+    assert_eq!(
+        client.image("0123abcd"),
+        Ok(PlacedTree::Image {
+            tree: TreeDigest::from_hex(DIGEST).unwrap(),
+            paths: Vec::new(),
+        })
+    );
+}
+
+/// Asserts that an answer of the flat JSON to an image request, from a records tree, is the tree
+/// flattened, and that the request was sent once.
+#[test]
+fn image_reads_the_flat_json_of_a_records_tree() {
+    let (client, lines, _dir) = replying("tfs-fc-image-flat", FLAT);
+    let Ok(PlacedTree::Flat(flat)) = client.image("0123abcd") else {
+        panic!("not flat");
+    };
+    assert_eq!(flat.paths, ["jobs/1"]);
+    assert_eq!(flat.packs, ["p"]);
+    assert_eq!(flat.entries.len(), 1);
+    assert_eq!(*lines.lock().unwrap(), ["image 0123abcd"]);
+}
+
+/// Asserts that a node that does not know `image` is asked `flat` next and its tree is the answer,
+/// and that when it gives no tree to `flat` either, the answer to `flat` is the error.
+#[test]
+fn image_falls_back_to_flat_when_the_node_does_not_know_the_request() {
+    let (dir, path) = place("tfs-fc-image-old");
+    let lines = Arc::new(Mutex::new(Vec::new()));
+    serve(
+        UnixListener::bind(&path).unwrap(),
+        Arc::clone(&lines),
+        |line| {
+            Some(match line.split(' ').next() {
+                Some("image") => "refused unknown request".to_owned(),
+                _ if line.ends_with("gone") => "none".to_owned(),
+                _ => FLAT.to_owned(),
+            })
+        },
+    );
+    let (client, _) = client(&path, 3, Duration::from_secs(30));
+    let Ok(PlacedTree::Flat(flat)) = client.image("0123abcd") else {
+        panic!("not flat");
+    };
+    assert_eq!(flat.paths, ["jobs/1"]);
+    assert_eq!(client.image("gone"), Err("none".to_owned()));
+    assert_eq!(
+        *lines.lock().unwrap(),
+        ["image 0123abcd", "flat 0123abcd", "image gone", "flat gone"]
+    );
+    drop(dir);
+}
+
+/// Asserts that an image answer whose digest is not sixty-four lower-case hex digits, that has no
+/// paths, or whose paths are not a JSON list of strings, is the error, as the answer; and that
+/// `none`, `damaged` and `too large` are the errors as the answers.
+#[test]
+fn image_gives_an_answer_it_cannot_read_as_the_error() {
+    for (at, reply) in [
+        "image zz [\"a\"]",
+        "image aaaa [\"a\"]",
+        "image",
+        "image ",
+        "image  []",
+        "image {DIGEST}",
+        "image {DIGEST} not-json",
+        "image {DIGEST} [1, 2]",
+        "image {DIGEST} {\"a\": 1}",
+        "none",
+        "damaged",
+        "too large",
+        "ok 0",
+    ]
+    .into_iter()
+    .enumerate()
+    {
+        let reply: &'static str = Box::leak(reply.replace("{DIGEST}", DIGEST).into_boxed_str());
+        let (client, _, _dir) = replying(&format!("tfs-fc-image-bad-{at}"), reply);
+        assert_eq!(client.image("0123abcd"), Err(reply.to_owned()), "{reply}");
+    }
+}
+
+/// Asserts that when nobody answers, image gives the words of that as the error, and when the
+/// node does not know the request and nobody answers `flat` either, the same.
+#[test]
+fn image_gives_the_error_of_a_socket_that_does_not_answer() {
+    let (_dir, path) = place("tfs-fc-image-away");
+    let (client, pauses) = client(&path, 2, Duration::from_secs(30));
+    assert_eq!(
+        client.image("0123abcd"),
+        Err("the fill socket is not answering".to_owned())
+    );
+    assert_eq!(pauses.load(Ordering::Acquire), 2);
 }
