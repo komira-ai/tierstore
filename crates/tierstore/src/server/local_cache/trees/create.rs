@@ -1,9 +1,12 @@
 //! Making a tree and its placement.
 
 use std::collections::{HashMap, HashSet};
+use std::path::{Path, PathBuf};
 use std::sync::Arc;
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::time::Duration;
+
+use bytes::Bytes;
 
 use super::super::PinAnswer;
 use super::TreeStore;
@@ -45,6 +48,38 @@ pub struct ImageRequest {
     pub ttl: Option<Duration>,
     /// Whether every range of the tree's files is in the cache already, as the caller has seen.
     pub ready: bool,
+    /// The image written ahead by [`TreeStore::stage_image`], if it was: a create of a tree the
+    /// node does not have renames it into place rather than writing the image, if it holds the
+    /// image's own bytes (the same buffer). Otherwise it is removed.
+    pub staged: Option<StagedImage>,
+}
+
+/// An image written to the store's directory under a staging name before its create
+/// ([`TreeStore::stage_image`]), so that the write runs beside the walk of the list: the create
+/// that takes it renames it into place. One that no create takes is removed when it is dropped.
+#[derive(Debug)]
+pub struct StagedImage {
+    /// The bytes written.
+    bytes: Bytes,
+    /// The staging directory, until a create takes it.
+    dir: Option<PathBuf>,
+}
+
+impl StagedImage {
+    /// The staging directory, if it holds `bytes`: the same buffer, which the image was opened
+    /// from.
+    fn take_for(&mut self, bytes: &Bytes) -> Option<PathBuf> {
+        let same = self.bytes.as_ptr() == bytes.as_ptr() && self.bytes.len() == bytes.len();
+        same.then(|| self.dir.take()).flatten()
+    }
+}
+
+impl Drop for StagedImage {
+    fn drop(&mut self) {
+        if let Some(dir) = self.dir.take() {
+            let _ = std::fs::remove_dir_all(dir);
+        }
+    }
 }
 
 /// What a create made.
@@ -161,10 +196,12 @@ enum NewTree {
     /// Records and files, as [`build_tree`](crate::build_tree) made them, and the sources of
     /// the files.
     Built(BuiltTree, Sources),
-    /// A version 2 tree list, named by the SHA-256 of its bytes.
+    /// A version 2 tree list, named by the SHA-256 of its bytes, and its file if it was written
+    /// ahead.
     Image {
         digest: TreeDigest,
         image: Arc<TreeImage>,
+        staged: Option<StagedImage>,
     },
 }
 
@@ -228,6 +265,41 @@ fn millis(ttl: Duration) -> u64 {
 }
 
 impl Shared {
+    /// Writes `files` to a new directory under a staging name; its path.
+    fn stage(&self, files: &[(&str, &[u8])]) -> Result<PathBuf, CreateError> {
+        let number = self.staged.fetch_add(1, Ordering::Relaxed);
+        let staging = trees_dir(&self.root).join(format!("{STAGING}{number}"));
+        let written = (|| {
+            std::fs::create_dir_all(&staging)?;
+            for (name, bytes) in files {
+                std::fs::write(staging.join(name), bytes)?;
+            }
+            Ok(())
+        })();
+        match written {
+            Ok(()) => Ok(staging),
+            Err(why) => {
+                let _ = std::fs::remove_dir_all(&staging);
+                Err(io_error(&why))
+            }
+        }
+    }
+
+    /// Renames the staging directory `staging` to the directory of the tree `root`, with its
+    /// `ready` marker if `ready`; removes it if it cannot.
+    fn settle(&self, staging: &Path, root: &TreeDigest, ready: bool) -> Result<(), CreateError> {
+        let settled = (|| {
+            if ready {
+                std::fs::write(staging.join(READY), b"")?;
+            }
+            std::fs::rename(staging, tree_dir(&self.root, root))
+        })();
+        settled.map_err(|why| {
+            let _ = std::fs::remove_dir_all(staging);
+            io_error(&why)
+        })
+    }
+
     /// Writes the directory of a new tree, its `files` and its `ready` marker if `ready`, under a
     /// staging name, and renames it to its own.
     fn write_tree(
@@ -236,22 +308,8 @@ impl Shared {
         files: &[(&str, &[u8])],
         ready: bool,
     ) -> Result<(), CreateError> {
-        let number = self.staged.fetch_add(1, Ordering::Relaxed);
-        let staging = trees_dir(&self.root).join(format!("{STAGING}{number}"));
-        let written = (|| {
-            std::fs::create_dir_all(&staging)?;
-            for (name, bytes) in files {
-                std::fs::write(staging.join(name), bytes)?;
-            }
-            if ready {
-                std::fs::write(staging.join(READY), b"")?;
-            }
-            std::fs::rename(&staging, tree_dir(&self.root, root))
-        })();
-        written.map_err(|why| {
-            let _ = std::fs::remove_dir_all(&staging);
-            io_error(&why)
-        })
+        let staging = self.stage(files)?;
+        self.settle(&staging, root, ready)
     }
 
     /// Writes the directory of the new tree `tree` and gives what the store keeps of it.
@@ -267,8 +325,11 @@ impl Shared {
                     sources,
                 })
             }
-            NewTree::Image { image, .. } => {
-                self.write_tree(&root, &[(IMAGE, &image.bytes()[..])], ready)?;
+            NewTree::Image { image, staged, .. } => {
+                match staged.and_then(|mut staged| staged.take_for(image.bytes())) {
+                    Some(staging) => self.settle(&staging, &root, ready)?,
+                    None => self.write_tree(&root, &[(IMAGE, &image.bytes()[..])], ready)?,
+                }
                 Ok(Content::Image(image))
             }
         }
@@ -321,8 +382,36 @@ impl TreeStore {
             at,
             ttl,
             ready,
+            staged,
         } = request;
-        self.make(NewTree::Image { digest, image }, at, ttl, ready)
+        let tree = NewTree::Image {
+            digest,
+            image,
+            staged,
+        };
+        self.make(tree, at, ttl, ready)
+    }
+
+    /// Writes the image `bytes` under a staging name, for the create of its tree to rename into
+    /// place ([`ImageRequest::staged`]): a caller that has the bytes of a version 2 tree list
+    /// before it has walked it writes them beside the walk. A call blocks on the file it writes.
+    ///
+    /// # Errors
+    /// [`CreateError::Disabled`], [`CreateError::ReadOnly`], and [`CreateError::Io`] for a file
+    /// that could not be written; nothing is left in the directory when one is given.
+    pub fn stage_image(&self, bytes: Bytes) -> Result<StagedImage, CreateError> {
+        let shared = &self.shared;
+        if !shared.config.enabled {
+            return Err(CreateError::Disabled);
+        }
+        if !shared.writable(&shared.lock()) {
+            return Err(CreateError::ReadOnly);
+        }
+        let dir = shared.stage(&[(IMAGE, &bytes[..])])?;
+        Ok(StagedImage {
+            bytes,
+            dir: Some(dir),
+        })
     }
 
     /// Makes `tree`, if the node does not have it, and places it at `at`.

@@ -99,38 +99,35 @@ impl Checked<'_, '_> {
 /// once and shared, so most entries name one already checked.
 struct Names<'a> {
     blob: &'a [u8],
-    /// For each offset of the blob (and its end), one more than the number in `checked` of the
-    /// name checked there, or 0.
-    at: Vec<u32>,
-    checked: Vec<&'a str>,
+    /// For each offset of the blob, the length of the name checked there, or 0: a name is 1 to
+    /// 255 bytes.
+    at: Vec<u8>,
 }
 
 impl<'a> Names<'a> {
     fn new(blob: &'a [u8]) -> Self {
         Self {
             blob,
-            at: vec![0; blob.len() + 1],
-            checked: Vec::new(),
+            at: vec![0; blob.len()],
         }
     }
 
-    /// The `len` bytes at `start` as a name an entry may have.
-    fn get(&mut self, start: usize, len: usize) -> Result<&'a str, EntryFault> {
+    /// The `len` bytes at `start` (at most 255), if they are a name an entry may have.
+    fn get(&mut self, start: usize, len: u8) -> Result<&'a [u8], EntryFault> {
         let bytes = self
             .blob
-            .get(start..start + len)
+            .get(start..start + usize::from(len))
             .ok_or(EntryFault::NameBounds)?;
-        let known = self.at[start] as usize;
-        if known > 0 && self.checked[known - 1].len() == len {
-            return Ok(self.checked[known - 1]);
+        if len > 0 && self.at[start] == len {
+            return Ok(bytes);
         }
         let text = std::str::from_utf8(bytes).map_err(|_| EntryFault::BadName)?;
         if !is_valid_name(text) {
             return Err(EntryFault::BadName);
         }
-        self.checked.push(text);
-        self.at[start] = self.checked.len() as u32;
-        Ok(text)
+        // Not empty: a valid name has a byte, so `start` is within the blob.
+        self.at[start] = len;
+        Ok(bytes)
     }
 }
 
@@ -157,9 +154,9 @@ pub(crate) enum Spans {
     /// One for each digest, its first file's: the span the tree store keeps for a digest of a
     /// tree of records.
     PerDigest,
-    /// One for each distinct span of a digest: a tree served from its list reads each file at
-    /// its own span, so every span a file has is read once.
-    PerSpan,
+    /// One for each file of size above 0, as it is: a tree served from its list reads each file
+    /// at its own span. The caller makes each distinct span one read (the provider's groups).
+    PerFile,
     /// None: the list is only checked.
     None,
 }
@@ -304,9 +301,11 @@ impl<'a> TreeListV2<'a> {
         // walked: the children of the directories in order are the entries in order.
         let mut depths = Vec::with_capacity(count);
         depths.push((0u32, 0u32));
-        let mut names = Vec::with_capacity(count);
+        // Only the records need the names, and only they hand out one span for each digest.
+        let records = spans == Spans::PerDigest;
+        let mut names = Vec::with_capacity(if records { count } else { 0 });
         names.push("");
-        let mut spanned = digest_set::<u64>(if spans == Spans::None { 0 } else { count });
+        let mut spanned = digest_set::<u64>(if records { count } else { 0 });
         let mut counted = Counted::default();
         let mut checked = Names::new(self.names);
         // The bytes of every path together: names are shared, so a small object could name far
@@ -339,7 +338,7 @@ impl<'a> TreeListV2<'a> {
                     dir,
                     child,
                     &mut previous,
-                    (&mut depths, &mut names),
+                    (&mut depths, records.then_some(&mut names)),
                     &mut checked,
                 )
                 .map_err(|fault| TreeListV2Error::Entry {
@@ -363,16 +362,7 @@ impl<'a> TreeListV2<'a> {
                 counted.bytes = counted.bytes.saturating_add(record.b);
                 if record.b > 0 && spans != Spans::None {
                     let digest = self.digest(child);
-                    let key = match spans {
-                        // Each of the two by its own odd multiplier, as in `fold`.
-                        Spans::PerSpan => {
-                            fold(&digest)
-                                ^ u64::from(record.x).wrapping_mul(0xd6e8_feb8_6659_fd93)
-                                ^ record.a.wrapping_mul(0xa076_1d64_78bd_642f)
-                        }
-                        _ => fold(&digest),
-                    };
-                    if spanned.insert(key) {
+                    if !records || spanned.insert(fold(&digest)) {
                         on_span(ListSpan {
                             key: record.x,
                             offset: record.a,
@@ -395,7 +385,7 @@ impl<'a> TreeListV2<'a> {
         dir: usize,
         child: usize,
         previous: &mut &'a [u8],
-        (depths, names): (&mut Vec<(u32, u32)>, &mut Vec<&'a str>),
+        (depths, names): (&mut Vec<(u32, u32)>, Option<&mut Vec<&'a str>>),
         checked: &mut Names<'a>,
     ) -> Result<(), EntryFault> {
         let record = self.record(child);
@@ -405,8 +395,7 @@ impl<'a> TreeListV2<'a> {
         if record.kind > KIND_SYMLINK {
             return Err(EntryFault::UnknownKind(record.kind));
         }
-        let text = checked.get(record.name_off as usize, record.name_len as usize)?;
-        let name = text.as_bytes();
+        let name = checked.get(record.name_off as usize, record.name_len)?;
         if *previous >= name {
             return Err(EntryFault::NotAscending);
         }
@@ -421,7 +410,10 @@ impl<'a> TreeListV2<'a> {
             return Err(EntryFault::PathTooLong);
         }
         depths.push((depth + 1, len));
-        names.push(text);
+        if let Some(names) = names {
+            // Checked as text by `get`, now or when its name was first met.
+            names.push(std::str::from_utf8(name).unwrap_or_default());
+        }
         match record.kind {
             KIND_FILE if record.b == 0 && self.digest(child) != EMPTY_SHA256 => {
                 return Err(EntryFault::EmptyDigest);

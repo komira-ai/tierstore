@@ -84,9 +84,9 @@ const SHAPE: TreeLimits = TreeLimits {
 
 impl TreeImage {
     /// Opens the version 2 tree list `bytes` and walks it once ([`TreeListV2::open`], then the
-    /// checks of [`TreeListV2::check`] against `limits`), calling `on_span` with each span of a
-    /// file of size above 0 as the walk meets it, each distinct span once (a file is read at its
-    /// own span). Nothing of the list is copied but the keys of its packs and its ranges; its
+    /// checks of [`TreeListV2::check`] against `limits`), calling `on_span` with the span of each
+    /// file of size above 0 as the walk meets it (a file is read at its own span; the caller reads
+    /// a span that several files have once). Nothing of the list is copied but the keys of its packs and its ranges; its
     /// SHA-256 is not checked here.
     ///
     /// The spans handed out before a refusal are not taken back, as with
@@ -99,7 +99,7 @@ impl TreeImage {
         limits: &TreeLimits,
         on_span: impl FnMut(ListSpan),
     ) -> Result<Self, TreeListV2Error> {
-        Self::walked(bytes, limits, Spans::PerSpan, on_span)
+        Self::walked(bytes, limits, Spans::PerFile, on_span)
     }
 
     /// Opens the version 2 tree list `bytes` as [`TreeImage::open`] does, checking its shape and

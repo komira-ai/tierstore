@@ -29,13 +29,22 @@ pub(super) struct Group {
 
 /// The groups of a version 2 list's `spans`: the spans in one of `ranges` (and of the same key)
 /// grouped while a group spans at most [`GROUP_MAX_BYTES`], every other span alone; in the order
-/// of the keys' numbers and the offsets.
+/// of the keys' numbers and the offsets. A span that several files have (the same key, offset,
+/// size and digest) is read once.
 pub(super) fn groups(
     keys: &[Arc<str>],
     mut spans: Vec<ListSpan>,
     ranges: impl Iterator<Item = ListRange>,
 ) -> Vec<Group> {
-    spans.sort_unstable_by_key(|span| (span.key, span.offset));
+    spans.sort_unstable_by(|a, b| {
+        (a.key, a.offset, a.size, a.sha256.as_bytes()).cmp(&(
+            b.key,
+            b.offset,
+            b.size,
+            b.sha256.as_bytes(),
+        ))
+    });
+    spans.dedup();
     let mut ranges: Vec<ListRange> = ranges.collect();
     ranges.sort_unstable_by_key(|range| (range.key, range.offset));
     let mut groups: Vec<Group> = Vec::new();

@@ -95,7 +95,7 @@ use std::sync::atomic::AtomicU64;
 use std::sync::{Arc, Mutex};
 
 pub use config::{Prefetch, TreesConfig};
-pub use create::{CreateError, CreateRequest, Created, ImageRequest};
+pub use create::{CreateError, CreateRequest, Created, ImageRequest, StagedImage};
 pub use fetch::{FetchError, OpenFile};
 pub(in crate::server) use files::image_path;
 pub(in crate::server) use flat::{FlatError, FlatKind, FlatTree, MountPlace, MountTree, placement_id};

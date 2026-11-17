@@ -35,7 +35,7 @@ use super::groups::{Group, alone, groups};
 use super::names::SourceId;
 use super::sources::{Owner, Shared, Stage};
 use crate::server::local_cache::trees::{
-    CreateError, CreateRequest, Created, FetchError, FileSpan, ImageRequest,
+    CreateError, CreateRequest, Created, FetchError, FileSpan, ImageRequest, StagedImage, TreeStore,
 };
 use crate::{
     Backend as _, BuiltFile, BuiltTree, Error, TreeDigest, TreeImage, TreeLimits, TreeListError,
@@ -128,12 +128,14 @@ async fn place(shared: &Shared, job: &Job, reads: UnboundedSender<Group>) -> Res
     let made = tokio::task::spawn_blocking(move || -> Result<(Created, Vec<BuiltFile>), Stage> {
         let limits = store.config().limits();
         if v2 {
+            let (image, staged) = image_v2(&store, bytes.into(), (&digest, &limits), &walked)?;
             let request = ImageRequest {
-                image: Arc::new(image_v2(bytes.into(), &digest, &limits, &walked)?),
+                image: Arc::new(image),
                 digest,
                 at: vec![at],
                 ttl: Some(ttl),
                 ready: false,
+                staged,
             };
             let created = store.create_image(request).map_err(stage_of)?;
             return Ok((created, Vec::new()));
@@ -177,21 +179,24 @@ fn built_v1(bytes: &[u8], digest: &TreeDigest, limits: &TreeLimits) -> Result<Bu
         .map_err(|why| Stage::Refused(format!("the tree is refused: {why}")))
 }
 
-/// The version 2 list in `bytes`, which must hash to `digest`, opened as the tree it is. The
-/// bytes are hashed on a thread of their own beside the walk; as soon as the walk has checked the
-/// list, its spans are grouped and queued on `reads`. The tree is made only once the hash is the
-/// one the key names (a mismatch is the refusal, whatever the walk found). A read queued from a
-/// list that is then refused is checked as any other, against its own files' digests, and the
-/// reads still queued are not made.
+/// The version 2 list in `bytes`, which must hash to `digest`, opened as the tree it is, and its
+/// file written ahead in `store` if it could be. The bytes are hashed on a thread of their own
+/// and written on another, beside the walk; as soon as the walk has checked the list, its spans
+/// are grouped and queued on `reads`. The tree is made only once the hash is the one the key names
+/// (a mismatch is the refusal, whatever the walk found). A read queued from a list that is then
+/// refused is checked as any other, against its own files' digests, and the reads still queued
+/// are not made. A file that could not be written ahead is written by the create, which says why
+/// if it cannot either.
 fn image_v2(
+    store: &TreeStore,
     bytes: bytes::Bytes,
-    digest: &TreeDigest,
-    limits: &TreeLimits,
+    (digest, limits): (&TreeDigest, &TreeLimits),
     reads: &UnboundedSender<Group>,
-) -> Result<TreeImage, Stage> {
+) -> Result<(TreeImage, Option<StagedImage>), Stage> {
     let refused = |why: crate::TreeListV2Error| Stage::Refused(why.to_string());
-    let (actual, walked) = std::thread::scope(|scope| {
+    let (actual, walked, staged) = std::thread::scope(|scope| {
         let hashing = scope.spawn(|| TreeDigest::of(&bytes));
+        let staging = scope.spawn(|| store.stage_image(bytes.clone()).ok());
         let mut spans = Vec::new();
         let walked = TreeImage::open(bytes.clone(), limits, |span| spans.push(span));
         if let Ok(image) = &walked {
@@ -202,7 +207,10 @@ fn image_v2(
         let actual = hashing
             .join()
             .unwrap_or_else(|panic| std::panic::resume_unwind(panic));
-        (actual, walked)
+        let staged = staging
+            .join()
+            .unwrap_or_else(|panic| std::panic::resume_unwind(panic));
+        (actual, walked, staged)
     });
     if actual != *digest {
         let why = TreeListError::DigestMismatch {
@@ -211,7 +219,7 @@ fn image_v2(
         };
         return Err(Stage::Refused(why.to_string()));
     }
-    walked.map_err(refused)
+    Ok((walked.map_err(refused)?, staged))
 }
 
 /// The stage a refusal of the tree store leaves a source at: a tree this node cannot make now is a
