@@ -28,6 +28,7 @@ use clap::CommandFactory;
 use super::cli::Args;
 use super::config::{KEYS, keys_for_flags};
 use super::config_cache::LocalCacheTable;
+use super::config_interface::Params;
 use super::config_policy::Policy;
 use super::config_testing::{DEFAULTS, loads};
 use super::config_unknown::fields_of;
@@ -618,25 +619,15 @@ fn code() -> Code {
         .get_arguments()
         .filter_map(|arg| arg.get_long().map(|long| format!("--{long}")))
         .collect();
-    // The keys of an `[[interface]]` that are in no flag: its `type` and `params`, and the two
-    // params that say where it listens, `params.upstream` of an `oci` interface, and the params of
-    // a `mount-provider` interface, which have no flag.
-    let interface = [
-        "interface.type",
-        "interface.params",
-        "params.port",
-        "params.addresses",
-        "params.upstream",
-        "params.socket",
-        "params.mountpoint",
-        "params.fetch_timeout",
-    ];
+    // The keys of an `[[interface]]`: its `type` and `params`, and every param its struct reads.
+    let interface = ["interface.type", "interface.params"];
     let keys = KEYS
         .iter()
         .flat_map(|(_, keys)| keys.iter().copied())
         .chain(interface)
         .chain(FLAGLESS_KEYS.iter().copied())
         .map(str::to_owned)
+        .chain(table_keys::<Params>("params"))
         .collect();
     let mut source = String::new();
     source_of(

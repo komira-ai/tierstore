@@ -1,5 +1,5 @@
 //! A `mount-provider` interface: the mount provider of a build node (see
-//! [`provider`](super::provider)), jobscheduler's `MountProvider` protocol on a Unix socket.
+//! [`provider`](super)), jobscheduler's `MountProvider` protocol on a Unix socket.
 //!
 //! ```toml
 //! [[interface]]
@@ -17,12 +17,12 @@
 
 use std::path::Path;
 
-use super::config::{ConfigError, invalid, refuse, require};
-use super::config_combined::normalised;
-use super::config_handoff::MOST_SOCKET_PATH;
-use super::config_interface::Params;
-use super::lock::check_lock_path;
-use super::provider::{DEFAULT_FETCH_TIMEOUT, DEFAULT_MOUNTPOINT, ProviderFlags};
+use super::super::config::{ConfigError, invalid, refuse, require};
+use super::super::config_combined::normalised;
+use super::super::config_handoff::MOST_SOCKET_PATH;
+use super::super::config_interface::Params;
+use super::super::lock::check_lock_path;
+use super::{DEFAULT_FETCH_TIMEOUT, DEFAULT_MOUNTPOINT, ProviderFlags};
 
 /// The settings of the provider that a `mount-provider` interface at `at` says.
 ///
@@ -30,7 +30,10 @@ use super::provider::{DEFAULT_FETCH_TIMEOUT, DEFAULT_MOUNTPOINT, ProviderFlags};
 /// A param the type does not take, no `socket`, a `socket` that is not an absolute path of a file
 /// or is too long, a `mountpoint` that is not absolute, or a `fetch_timeout` of zero; each names
 /// its key.
-pub(super) fn provider_of(at: &str, params: &Params) -> Result<ProviderFlags, ConfigError> {
+pub(in crate::server) fn provider_of(
+    at: &str,
+    params: &Params,
+) -> Result<ProviderFlags, ConfigError> {
     let place = format!("{at}.params");
     let others = [
         ("port", params.port.is_some()),
@@ -88,7 +91,7 @@ pub(super) fn provider_of(at: &str, params: &Params) -> Result<ProviderFlags, Co
 ///
 /// # Errors
 /// A [`ConfigError`] naming the provider's socket.
-pub(super) fn check_provider_socket(
+pub(in crate::server) fn check_provider_socket(
     provider: Option<&ProviderFlags>,
     others: &[(&str, Option<&Path>)],
     cache: &Path,

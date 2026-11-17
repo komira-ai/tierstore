@@ -30,6 +30,7 @@
 //! `trees.ttl_max` from its preparation unless it is released, so a source an agent never released
 //! goes in its turn.
 
+pub(super) mod config;
 mod listener;
 mod names;
 mod prepare;

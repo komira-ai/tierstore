@@ -13,7 +13,7 @@
 //! An interface is a front over the same proxy. The types are `s3` (the S3 API, `/healthz`,
 //! `/readyz`, `/usagez` and `/metricz`), `oci` (the read-only registry front), `trees` (the
 //! gRPC API of node-local trees, see [`trees`](super::trees)) and `mount-provider` (jobscheduler's
-//! mount provider on a Unix socket, see [`config_provider`](super::config_provider), which listens
+//! mount provider on a Unix socket, see [`provider::config`](super::provider::config), which listens
 //! on no address and takes params of its own); `fs` comes later and is refused today. Every other
 //! entry says where it listens with one of two params:
 //! `port`, the wildcard of IPv4 (`0.0.0.0:<port>`), or `addresses`, a socket address or a list
@@ -45,10 +45,10 @@ use std::time::Duration;
 use serde::Deserialize;
 
 use super::config::{ConfigError, invalid, refuse, require, within};
-use super::config_provider::provider_of;
 use super::config_units::Dur;
 use super::listen::Addrs;
 use super::provider::ProviderFlags;
+use super::provider::config::provider_of;
 use super::trees::{DEFAULT_PORT, TreesFlags};
 
 /// `params.upstream` of an `oci` interface: the registry the front pulls an object from when its
