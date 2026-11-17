@@ -56,7 +56,7 @@ pub const MAX_NAME_BYTES: usize = 255;
 pub const MAX_TARGET_BYTES: usize = 4096;
 
 /// The SHA-256 of no bytes: the contents of every file of size 0.
-const EMPTY_SHA256: [u8; 32] = [
+pub(crate) const EMPTY_SHA256: [u8; 32] = [
     0xe3, 0xb0, 0xc4, 0x42, 0x98, 0xfc, 0x1c, 0x14, 0x9a, 0xfb, 0xf4, 0xc8, 0x99, 0x6f, 0xb9, 0x24,
     0x27, 0xae, 0x41, 0xe4, 0x64, 0x9b, 0x93, 0x4c, 0xa4, 0x95, 0x99, 0x1b, 0x78, 0x52, 0xb8, 0x55,
 ];
@@ -92,6 +92,10 @@ pub enum TreeListError {
     /// its line): a node-local tree's digest covers the contents.
     #[error("file {0:?} has no sha256")]
     MissingSha256(String),
+    /// A name over 255 bytes, which a version 2 list cannot hold: written by
+    /// [`TreeList::encode_v2`] only.
+    #[error("name too long in {0:?}")]
+    NameTooLong(String),
 }
 
 /// What is wrong with one line of a tree list.

@@ -8,12 +8,14 @@
 //! job, and the provider makes the source's tree local while the agent readies the container:
 //!
 //! - **`Prepare(source, ref)`** checks the ref, which must be the key of a tree list
-//!   (`cas/l/<64 hex>`, see [`parse_tree_list`](crate::parse_tree_list)), and answers at once. In
+//!   (`cas/l/<64 hex>`, version 1, [`parse_tree_list`](crate::parse_tree_list), or version 2,
+//!   [`TreeListV2`](crate::TreeListV2), told apart by their first bytes), and answers at once. In
 //!   the background it reads that one object through the cache, checks that it hashes to its key,
 //!   builds the tree of exactly its entries, and places it in the tree store at the path of the
-//!   source under the mount of `tierstore fs` (module `names`). Then it reads the bytes of every
-//!   file into the cache, at most `trees.fill_concurrency` files at once across the node, each
-//!   with the call an open of the mount makes for it (`TreeStore::fetch_span`), so that an open of
+//!   source under the mount of `tierstore fs` (module `names`). It reads the bytes of every file
+//!   into the cache (a version 2 list's as its walk meets them, before the tree is placed; a
+//!   version 1 list's once it is placed), at most `trees.fill_concurrency` files at once across
+//!   the node, each with the call an open of the mount makes for it (`TreeStore::fetch_span`), so that an open of
 //!   a file still being read waits for that one read instead of starting another.
 //! - **`Mount(source)`** answers the tree's directory once it is placed (its files may still be
 //!   filling), or `UNAVAILABLE` "not ready" after [`MOUNT_WAIT`], and the agent asks again; a ref
@@ -31,6 +33,7 @@
 //! goes in its turn.
 
 pub(super) mod config;
+mod groups;
 mod listener;
 mod names;
 mod prepare;
@@ -38,9 +41,13 @@ mod service;
 mod sources;
 
 #[cfg(test)]
+mod groups_tests;
+#[cfg(test)]
 mod names_tests;
 #[cfg(test)]
 mod prepare_tests;
+#[cfg(test)]
+mod prepare_v2_tests;
 #[cfg(test)]
 mod serve_tests;
 #[cfg(test)]

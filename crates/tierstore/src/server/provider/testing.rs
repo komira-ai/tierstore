@@ -139,6 +139,16 @@ impl Rig {
         put(&self.bench, &list.encode()).await
     }
 
+    /// Puts the version 2 bytes of `list` in the upstream, under its key; the key.
+    pub(super) async fn put_list_v2(&self, list: &TreeList) -> String {
+        put(&self.bench, &list.encode_v2().expect("a list to encode")).await
+    }
+
+    /// Puts raw `bytes` in the upstream under their own tree list key; the key.
+    pub(super) async fn put_bytes(&self, bytes: &[u8]) -> String {
+        put(&self.bench, bytes).await
+    }
+
     /// The directory the provider answers for the source `index` of `run`.
     pub(super) fn path_of(run: &str, index: u32) -> PathBuf {
         Path::new(MOUNT).join(Self::place_of(run, index))

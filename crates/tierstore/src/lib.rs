@@ -100,6 +100,13 @@
 //!   ([`tree_list_key`]), which a client writes before it asks a node's mount provider for the
 //!   tree. [`TreeList::into_entries`] gives the entries [`build_tree`] makes the tree of. The same
 //!   page is the reference.
+//! - [`TreeListV2`] reads, and [`TreeList::encode_v2`] writes, version 2 of the tree list (the
+//!   `TSTREE` format): the same entries as fixed 32-byte little-endian records in breadth-first
+//!   order, with tables of their digests and pack keys, a blob of names and the ranges to read,
+//!   under the same key. [`TreeListV2::open`] checks the header, keys and ranges, borrowing the
+//!   sections and copying only the keys;
+//!   [`TreeListV2::build`] walks the entries once, handing out each span to read as it meets it,
+//!   and gives the [`BuiltTree`]. The same page is the reference.
 //!
 //! The keys under `_journal/` (the per-node journals of the releases before the entries, which
 //! this release does not apply; their formats stay readable as bytes, see [`decode_journal`]), `_entries/` and `_tiering/` belong to the proxy and the
@@ -209,6 +216,13 @@ mod tiered;
 mod tree_list;
 #[cfg(test)]
 mod tree_list_tests;
+mod tree_list_v2;
+mod tree_list_v2_build;
+#[cfg(test)]
+mod tree_list_v2_build_tests;
+mod tree_list_v2_encode;
+#[cfg(test)]
+mod tree_list_v2_tests;
 mod tree_manifest;
 #[cfg(test)]
 mod tree_manifest_tests;
@@ -262,6 +276,10 @@ pub use tree_list::{
     LineFault, ListEntry, ListKind, MAX_NAME_BYTES, MAX_PATH_BYTES, MAX_TARGET_BYTES,
     MAX_TREE_LIST_BYTES, TREE_LIST_PREFIX, TreeList, TreeListError, parse_tree_list,
     tree_list_digest, tree_list_key,
+};
+pub use tree_list_v2::{
+    Checked, EntryFault, HeaderFault, KeyFault, ListRange, ListSpan, MAX_KEY_BYTES, Section,
+    TREE_LIST_V2_MAGIC, TreeListV2, TreeListV2Error, is_tree_list_v2,
 };
 pub use tree_manifest::{
     BlobSource, EntryKind, MAX_DEPTH, MAX_ENTRIES, MAX_MANIFEST_BYTES, TreeChild, TreeDigest,
