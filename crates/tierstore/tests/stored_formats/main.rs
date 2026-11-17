@@ -20,5 +20,6 @@ mod local_cache_sidecar;
 mod marker_objects;
 mod support;
 mod tier_objects;
+mod tree_list;
 mod tree_manifest;
 mod tree_record;

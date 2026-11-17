@@ -1,0 +1,6 @@
+{"format":"tierstore.tree-list","version":1,"writer":"a later release"}
+{"path":"bin/cc","kind":"file","mode":493,"size":1048576,"key":"out/a1/0","offset":524288,"sha256":"2222222222222222222222222222222222222222222222222222222222222222","xattrs":{"user.a":"b"}}
+{"path":"include/empty.h","kind":"file","mode":420,"size":0,"mtime":0}
+{"path":"lib","kind":"symlink","target":"bin","note":1}
+{"path":"share/doc.txt","kind":"file","mode":420,"size":12,"key":"cas/l/3333333333333333333333333333333333333333333333333333333333333333","offset":0}
+{"path":"tmp","kind":"dir","mode":1023,"owner":"root"}
