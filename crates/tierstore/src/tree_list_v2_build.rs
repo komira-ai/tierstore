@@ -77,7 +77,7 @@ impl Hasher for DigestHasher {
 }
 
 /// The name, and the depth and path length, of every entry, in the order of the list.
-type Walked<'a> = (Vec<&'a str>, Vec<(u32, u32)>);
+pub(crate) type Walked<'a> = (Vec<&'a str>, Vec<(u32, u32)>);
 
 /// A list [`TreeListV2::check`] walked and found good, with what the walk learnt of each entry.
 pub struct Checked<'l, 'a> {
@@ -99,38 +99,35 @@ impl Checked<'_, '_> {
 /// once and shared, so most entries name one already checked.
 struct Names<'a> {
     blob: &'a [u8],
-    /// For each offset of the blob (and its end), one more than the number in `checked` of the
-    /// name checked there, or 0.
-    at: Vec<u32>,
-    checked: Vec<&'a str>,
+    /// For each offset of the blob, the length of the name checked there, or 0: a name is 1 to
+    /// 255 bytes.
+    at: Vec<u8>,
 }
 
 impl<'a> Names<'a> {
     fn new(blob: &'a [u8]) -> Self {
         Self {
             blob,
-            at: vec![0; blob.len() + 1],
-            checked: Vec::new(),
+            at: vec![0; blob.len()],
         }
     }
 
-    /// The `len` bytes at `start` as a name an entry may have.
-    fn get(&mut self, start: usize, len: usize) -> Result<&'a str, EntryFault> {
+    /// The `len` bytes at `start` (at most 255), if they are a name an entry may have.
+    fn get(&mut self, start: usize, len: u8) -> Result<&'a [u8], EntryFault> {
         let bytes = self
             .blob
-            .get(start..start + len)
+            .get(start..start + usize::from(len))
             .ok_or(EntryFault::NameBounds)?;
-        let known = self.at[start] as usize;
-        if known > 0 && self.checked[known - 1].len() == len {
-            return Ok(self.checked[known - 1]);
+        if len > 0 && self.at[start] == len {
+            return Ok(bytes);
         }
         let text = std::str::from_utf8(bytes).map_err(|_| EntryFault::BadName)?;
         if !is_valid_name(text) {
             return Err(EntryFault::BadName);
         }
-        self.checked.push(text);
-        self.at[start] = self.checked.len() as u32;
-        Ok(text)
+        // Not empty: a valid name has a byte, so `start` is within the blob.
+        self.at[start] = len;
+        Ok(bytes)
     }
 }
 
@@ -151,24 +148,46 @@ fn digest_set<T>(capacity: usize) -> HashSet<T, DigestKeys> {
     HashSet::with_capacity_and_hasher(capacity, DigestKeys::new())
 }
 
+/// Which spans a walk hands out.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub(crate) enum Spans {
+    /// One for each digest, its first file's: the span the tree store keeps for a digest of a
+    /// tree of records.
+    PerDigest,
+    /// One for each file of size above 0, as it is: a tree served from its list reads each file
+    /// at its own span. The caller makes each distinct span one read (the provider's groups).
+    PerFile,
+    /// None: the list is only checked.
+    None,
+}
+
+/// What a walk counted of the files of a list.
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
+pub(crate) struct Counted {
+    /// The files, of any size.
+    pub files: u64,
+    /// Their bytes together, at most `u64::MAX`.
+    pub bytes: u64,
+}
+
 /// The fields of one 32-byte entry record.
 #[derive(Clone, Copy)]
-struct Record {
-    parent: u32,
-    name_off: u32,
+pub(crate) struct Record {
+    pub(crate) parent: u32,
+    pub(crate) name_off: u32,
     /// A file's key index, a directory's first child.
-    x: u32,
-    kind: u8,
+    pub(crate) x: u32,
+    pub(crate) kind: u8,
     mode: u16,
-    name_len: u8,
+    pub(crate) name_len: u8,
     /// A file's offset, a directory's child count, a link target's offset.
-    a: u64,
+    pub(crate) a: u64,
     /// A file's size, a link target's length.
-    b: u64,
+    pub(crate) b: u64,
 }
 
 impl Record {
-    fn of(bytes: &[u8]) -> Self {
+    pub(crate) fn of(bytes: &[u8]) -> Self {
         let kind_mode = le_u16(bytes, 12);
         Self {
             parent: le_u32(bytes, 0),
@@ -183,7 +202,7 @@ impl Record {
     }
 
     /// The mode: twelve bits are never above 07777.
-    fn mode(self) -> Mode {
+    pub(crate) fn mode(self) -> Mode {
         Mode::new(self.mode).unwrap_or(Mode::FILE)
     }
 }
@@ -247,7 +266,7 @@ impl<'a> TreeListV2<'a> {
         limits: &TreeLimits,
         on_span: impl FnMut(ListSpan),
     ) -> Result<Checked<'_, 'a>, TreeListV2Error> {
-        let (names, depths) = self.walk(limits, on_span)?;
+        let ((names, depths), _) = self.walk(limits, Spans::PerDigest, on_span)?;
         Ok(Checked {
             list: self,
             names,
@@ -256,12 +275,26 @@ impl<'a> TreeListV2<'a> {
     }
 
     /// The walk of [`check`](Self::check), giving the name, and the depth and path length, of
-    /// every entry, in the order of the list.
-    fn walk(
+    /// every entry, in the order of the list, and the count of the files and their bytes; it
+    /// hands out the spans `spans` asks for. A list it accepts is one whose entries may be read in
+    /// place: every directory's children are the entries `first..first + count`, sorted by name,
+    /// and every name, target, key number and span is within the list.
+    pub(crate) fn walk(
         &self,
         limits: &TreeLimits,
+        spans: Spans,
         mut on_span: impl FnMut(ListSpan),
-    ) -> Result<Walked<'a>, TreeListV2Error> {
+    ) -> Result<(Walked<'a>, Counted), TreeListV2Error> {
+        self.walk_with(limits, spans, &mut on_span)
+    }
+
+    /// [`walk`](Self::walk), made once for every caller's `on_span`.
+    fn walk_with(
+        &self,
+        limits: &TreeLimits,
+        spans: Spans,
+        on_span: &mut dyn FnMut(ListSpan),
+    ) -> Result<(Walked<'a>, Counted), TreeListV2Error> {
         let count = self.len();
         let refuse = |error| Err(TreeListV2Error::Tree(error));
         if (count - 1) as u64 > limits.max_entries {
@@ -278,9 +311,12 @@ impl<'a> TreeListV2<'a> {
         // walked: the children of the directories in order are the entries in order.
         let mut depths = Vec::with_capacity(count);
         depths.push((0u32, 0u32));
-        let mut names = Vec::with_capacity(count);
+        // Only the records need the names, and only they hand out one span for each digest.
+        let records = spans == Spans::PerDigest;
+        let mut names = Vec::with_capacity(if records { count } else { 0 });
         names.push("");
-        let mut spanned = digest_set::<u64>(count);
+        let mut spanned = digest_set::<u64>(if records { count } else { 0 });
+        let mut counted = Counted::default();
         let mut checked = Names::new(self.names);
         // The bytes of every path together: names are shared, so a small object could name far
         // more path bytes than it holds, which `finish` makes into strings.
@@ -312,7 +348,7 @@ impl<'a> TreeListV2<'a> {
                     dir,
                     child,
                     &mut previous,
-                    (&mut depths, &mut names),
+                    (&mut depths, records.then_some(&mut names)),
                     &mut checked,
                 )
                 .map_err(|fault| TreeListV2Error::Entry {
@@ -329,9 +365,14 @@ impl<'a> TreeListV2<'a> {
                     return refuse(RecordError::TooDeep(self.path(child)));
                 }
                 let record = self.record(child);
-                if record.kind == KIND_FILE && record.b > 0 {
+                if record.kind != KIND_FILE {
+                    continue;
+                }
+                counted.files += 1;
+                counted.bytes = counted.bytes.saturating_add(record.b);
+                if record.b > 0 && spans != Spans::None {
                     let digest = self.digest(child);
-                    if spanned.insert(fold(&digest)) {
+                    if !records || spanned.insert(fold(&digest)) {
                         on_span(ListSpan {
                             key: record.x,
                             offset: record.a,
@@ -345,7 +386,7 @@ impl<'a> TreeListV2<'a> {
         if next != count {
             return Err(TreeListV2Error::Orphans(next as u32));
         }
-        Ok((names, depths))
+        Ok(((names, depths), counted))
     }
 
     /// Checks entry `child` of directory `dir`, whose name must sort after `previous`.
@@ -354,7 +395,7 @@ impl<'a> TreeListV2<'a> {
         dir: usize,
         child: usize,
         previous: &mut &'a [u8],
-        (depths, names): (&mut Vec<(u32, u32)>, &mut Vec<&'a str>),
+        (depths, names): (&mut Vec<(u32, u32)>, Option<&mut Vec<&'a str>>),
         checked: &mut Names<'a>,
     ) -> Result<(), EntryFault> {
         let record = self.record(child);
@@ -364,8 +405,7 @@ impl<'a> TreeListV2<'a> {
         if record.kind > KIND_SYMLINK {
             return Err(EntryFault::UnknownKind(record.kind));
         }
-        let text = checked.get(record.name_off as usize, record.name_len as usize)?;
-        let name = text.as_bytes();
+        let name = checked.get(record.name_off as usize, record.name_len)?;
         if *previous >= name {
             return Err(EntryFault::NotAscending);
         }
@@ -380,7 +420,10 @@ impl<'a> TreeListV2<'a> {
             return Err(EntryFault::PathTooLong);
         }
         depths.push((depth + 1, len));
-        names.push(text);
+        if let Some(names) = names {
+            // Checked as text by `get`, now or when its name was first met.
+            names.push(std::str::from_utf8(name).unwrap_or_default());
+        }
         match record.kind {
             KIND_FILE if record.b == 0 && self.digest(child) != EMPTY_SHA256 => {
                 return Err(EntryFault::EmptyDigest);

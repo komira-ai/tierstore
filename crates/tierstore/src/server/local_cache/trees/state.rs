@@ -11,22 +11,61 @@ use super::super::{LocalCache, PinAnswer, locked};
 use super::config::TreesConfig;
 use super::files::{Place, Sources};
 use super::location::{Location, PlacementId, Table};
-use crate::TreeDigest;
+use crate::{TreeDigest, TreeImage};
 
 /// A tree the node holds: what is in its directory, read once.
 #[derive(Debug)]
 pub(super) struct TreeInfo {
-    /// The digest of the tree.
+    /// The digest of the tree: its root record's, or for an image the SHA-256 of the image.
     pub root: TreeDigest,
     /// This tree and every tree below it by digest, this one first: where a record or a source
-    /// the tree's own entries do not hold may be.
+    /// the tree's own entries do not hold may be. An image holds no tree: its own alone.
     pub closure: Vec<TreeDigest>,
-    /// Where each record of the tree's own records file is.
-    pub records: HashMap<TreeDigest, Place>,
-    /// Where the bytes of the tree's own files are fetched from.
-    pub sources: Sources,
+    /// What the tree is made of.
+    pub content: Content,
     /// Whether every range of the tree was in the cache and pinned when it was last said.
     pub ready: AtomicBool,
+}
+
+/// What a tree is made of.
+#[derive(Debug)]
+pub(super) enum Content {
+    /// Directory records named by their digests, read from the tree's records file one at a
+    /// time, and the sources of its files by digest.
+    Records {
+        /// Where each record of the tree's own records file is.
+        records: HashMap<TreeDigest, Place>,
+        /// Where the bytes of the tree's own files are fetched from.
+        sources: Sources,
+    },
+    /// A version 2 tree list, read in place: entries by index, each file at its own span.
+    Image(Arc<TreeImage>),
+}
+
+impl TreeInfo {
+    /// The keys of the packs the tree's own files are read from.
+    pub(super) fn packs(&self) -> Vec<&str> {
+        match &self.content {
+            Content::Records { sources, .. } => sources.packs.iter().map(String::as_str).collect(),
+            Content::Image(image) => image.keys().iter().map(AsRef::as_ref).collect(),
+        }
+    }
+
+    /// The records of the tree and the sources of its files, if it is a tree of records.
+    pub(super) fn records(&self) -> Option<(&HashMap<TreeDigest, Place>, &Sources)> {
+        match &self.content {
+            Content::Records { records, sources } => Some((records, sources)),
+            Content::Image(_) => None,
+        }
+    }
+
+    /// The image the tree is, if it is one.
+    pub(super) fn image(&self) -> Option<&Arc<TreeImage>> {
+        match &self.content {
+            Content::Image(image) => Some(image),
+            Content::Records { .. } => None,
+        }
+    }
 }
 
 /// A tree at a set of locations, and what keeps it.
@@ -110,9 +149,8 @@ impl Shared {
     /// cache that is read-only pins nothing.
     pub(super) fn pin(&self, tree: &TreeInfo) -> PinAnswer {
         let names: Vec<String> = tree
-            .sources
-            .packs
-            .iter()
+            .packs()
+            .into_iter()
             .map(|pack| name_of(pack).hex)
             .collect();
         let owner = tree.root.to_string();

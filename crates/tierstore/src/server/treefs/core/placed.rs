@@ -5,7 +5,8 @@
 //! A lookup of a name in the mount's root, or in a directory above a location, asks the node's
 //! tree store over the fill socket where the path is (`place`). A path that is a location is the
 //! root of its placement's tree: the tree store holds the placement for this mount, and the core
-//! reads the tree whole (`flat`), numbers it under the placement's key in the table of tree numbers
+//! reads the tree whole (`image`, or `flat` from a node of a release before the images), numbers
+//! it under the placement's key in the table of tree numbers
 //! and attaches it as a lookup attaches a tree of `trees/`: implicitly, until it is idle for
 //! `fs.tree_idle_secs`, when the hold of the tree store is given back (`unplace`). A path that a
 //! location is below is a directory the mount passes through, of mode 0711 as the root is, which
@@ -32,12 +33,13 @@ use std::time::Duration;
 
 use sha2::{Digest as _, Sha256};
 
-use crate::server::local_cache::trees::{FlatKind, FlatTree, Location};
+use crate::server::local_cache::trees::{FlatKind, FlatTree, Location, image_path};
 use crate::tree_manifest::{
     BlobSource, EntryKind, MAX_MANIFEST_BYTES, TreeDigest, TreeEntry, TreeError, flatten,
 };
+use crate::{MAX_TREE_LIST_BYTES, TreeImage};
 
-use super::super::fill_client::Place;
+use super::super::fill_client::{Place, PlacedTree};
 use super::super::ino;
 use super::super::tree::Tree;
 use super::read::FileBytes;
@@ -61,6 +63,17 @@ pub(super) fn read_manifest(path: &std::path::Path) -> std::io::Result<Vec<u8>> 
     let mut bytes = Vec::new();
     let _ = File::open(path)?
         .take(MAX_MANIFEST_BYTES as u64 + 1)
+        .read_to_end(&mut bytes)?;
+    Ok(bytes)
+}
+
+/// The bytes of the image file at `path`, at most [`MAX_TREE_LIST_BYTES`] and one more byte, so
+/// that a larger file is refused by its size and not read whole.
+fn read_image(path: &std::path::Path) -> std::io::Result<Vec<u8>> {
+    use std::io::Read as _;
+    let mut bytes = Vec::new();
+    let _ = File::open(path)?
+        .take(MAX_TREE_LIST_BYTES as u64 + 1)
         .read_to_end(&mut bytes)?;
     Ok(bytes)
 }
@@ -191,20 +204,28 @@ fn tree_of(flat: &FlatTree, path: String) -> Result<Tree, String> {
 }
 
 impl Core {
-    /// Reads the tree `digest`: a placement's from the node's tree store, whole; any other's from
-    /// its manifests, fetched through the fill socket where the cache does not hold them, and
-    /// flattened.
+    /// Reads the tree `digest`: a placement's from the node's tree store, whole (an image from
+    /// the tree's directory in the cache directory, which the placement this mount holds keeps
+    /// there); any other's from its manifests, fetched through the fill socket where the cache
+    /// does not hold them, and flattened.
     pub(in crate::server::treefs) fn read_tree(&self, digest: &TreeDigest) -> Result<Tree, Unread> {
         if let Some((id, hash)) = placement_of(digest) {
             let gone = || Unread::Gone(format!("no placement {id} at that location"));
-            let flat = match self.fills.flat(&id) {
-                Ok(flat) => flat,
+            let placed = match self.fills.image(&id) {
+                Ok(placed) => placed,
                 Err(answer) if answer == "none" => return Err(gone()),
                 Err(answer) => return Err(Unread::Failed(answer)),
             };
-            let path = flat.paths.iter().find(|path| path_hash(path) == hash);
+            let paths = match &placed {
+                PlacedTree::Image { paths, .. } => paths,
+                PlacedTree::Flat(flat) => &flat.paths,
+            };
+            let path = paths.iter().find(|path| path_hash(path) == hash);
             let path = path.cloned().ok_or_else(gone)?;
-            return tree_of(&flat, path).map_err(Unread::Failed);
+            return match placed {
+                PlacedTree::Image { tree, .. } => self.image_of(&tree, path),
+                PlacedTree::Flat(flat) => tree_of(&flat, path).map_err(Unread::Failed),
+            };
         }
         let fetch = |wanted: &TreeDigest| -> Result<Vec<u8>, String> {
             let hex = wanted.to_string();
@@ -226,6 +247,17 @@ impl Core {
                 Unread::Failed(why.to_string())
             }
         })
+    }
+
+    /// The tree at the fs location `path` that is the image of the tree `tree`, read from the
+    /// tree's directory and checked: its shape, not its digest, which the tree store checked when
+    /// it took the image and checks at each start.
+    fn image_of(&self, tree: &TreeDigest, path: String) -> Result<Tree, Unread> {
+        let file = image_path(&self.settings.cache_path, tree);
+        let failed = |why: String| Unread::Failed(format!("the image of {tree} at {path}: {why}"));
+        let bytes = read_image(&file).map_err(|why| failed(why.to_string()))?;
+        let image = TreeImage::checked(bytes.into()).map_err(|why| failed(why.to_string()))?;
+        Ok(Tree::image(image, path))
     }
 
     /// Looks up `name` in `parent`, the mount's root or a directory above the fs locations: the
@@ -393,3 +425,7 @@ mod tests;
 #[cfg(test)]
 #[path = "placed_flat_tests.rs"]
 mod flat_tests;
+
+#[cfg(test)]
+#[path = "placed_image_tests.rs"]
+mod image_tests;

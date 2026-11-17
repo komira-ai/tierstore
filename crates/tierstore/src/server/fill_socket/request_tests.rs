@@ -329,6 +329,26 @@ fn a_flat_names_a_placement_and_refuses_what_is_not_one() {
     }
 }
 
+/// Asserts that an image names the placement, and refuses a missing, short, long, upper case or
+/// non-hex id, and extra words.
+#[test]
+fn an_image_names_a_placement_and_refuses_what_is_not_one() {
+    let want = Request::Mount(MountRequest::Image { placement: id() });
+    assert_eq!(line(&format!("image {PLACEMENT}")), Ok(want));
+    let bad = [
+        "image".to_owned(),
+        "image ".to_owned(),
+        format!("image {}", &PLACEMENT[1..]),
+        format!("image {PLACEMENT}0"),
+        format!("image {}", PLACEMENT.to_uppercase()),
+        format!("image {}g", &PLACEMENT[1..]),
+        format!("image {PLACEMENT} x"),
+    ];
+    for text in bad {
+        assert_eq!(line(&text), Err(Refusal::Placement), "{text:?}");
+    }
+}
+
 /// Asserts that a span has the words of a fill of a blob and names the digest, the size, the pack
 /// and the offset, that a pack key may hold spaces, and that it has the refusals of a fill: size
 /// zero, an end past 64 bits, a bad digest, a reserved key, and missing words.

@@ -37,9 +37,9 @@
 //! cache's holds pin under, is refused with its words (`the mount id "hold" is reserved for holds`).
 //! A `put` is answered with one line of JSON (see [`put`]), the one request whose answer is not
 //! plain words; a `put` line that is not a request is answered `refused <why>` as any other.
-//! The mount's requests about the placements of the node (`place`, `mounted`, `flat`, `span`,
-//! `unplace`, `places-live`) are answered from the node's tree store, `mounted` and `flat` in one line of JSON
-//! (see [`mount`]).
+//! The mount's requests about the placements of the node (`place`, `mounted`, `flat`, `image`,
+//! `span`, `unplace`, `places-live`) are answered from the node's tree store, `mounted` and `flat`
+//! in one line of JSON (see [`mount`]).
 
 mod mount;
 mod put;

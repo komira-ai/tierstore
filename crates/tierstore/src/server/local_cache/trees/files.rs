@@ -3,13 +3,17 @@
 //! ```text
 //! <path>/trees/<T>/records     every directory record of the tree T made by its entries
 //! <path>/trees/<T>/sources     where each file's bytes are fetched from
+//! <path>/trees/<T>/image       or, for a tree served from its version 2 tree list, the list
 //! <path>/trees/<T>/ready       present once every range of the tree was in the cache and pinned
 //! <path>/placements/<id>       one placement, JSON
 //! ```
 //!
-//! `<T>` is the digest of the tree, sixty-four lower-case hex digits; `<id>` is a placement's id,
-//! thirty-two. Each file is written beside its name and renamed into place (a tree's directory is
-//! written under `trees/.new-<n>` and renamed whole), and none is synced: a file that a crash left
+//! `<T>` is the digest of the tree, sixty-four lower-case hex digits: its root record's, or for a
+//! tree that is an `image` the SHA-256 of the image's bytes (the digest of the key
+//! `cas/l/<T>` it was stored under); `<id>` is a placement's id, thirty-two. A tree's directory
+//! has `records` and `sources`, or `image`; the mount reads `image` itself ([`image_path`]).
+//! Each file is written beside its name and renamed into place (a tree's directory is written
+//! under `trees/.new-<n>` and renamed whole), and none is synced: a file that a crash left
 //! short is found at the next start, which drops what does not read or hash to its name.
 //! `docs/stored-formats.md` has the layouts.
 
@@ -34,6 +38,9 @@ pub(super) const RECORDS: &str = "records";
 /// The file of a tree's sources.
 pub(super) const SOURCES: &str = "sources";
 
+/// The file of a tree that is a version 2 tree list.
+pub(super) const IMAGE: &str = "image";
+
 /// The file that says a tree's ranges were all in the cache.
 pub(super) const READY: &str = "ready";
 
@@ -57,6 +64,12 @@ pub(super) fn trees_dir(root: &Path) -> PathBuf {
 /// The directory of the tree `tree`.
 pub(super) fn tree_dir(root: &Path, tree: &TreeDigest) -> PathBuf {
     trees_dir(root).join(tree.to_string())
+}
+
+/// The file of the tree `tree`, of the cache directory `root`, if it is an image: what the mount
+/// reads to serve the tree.
+pub(in crate::server) fn image_path(root: &Path, tree: &TreeDigest) -> PathBuf {
+    tree_dir(root, tree).join(IMAGE)
 }
 
 /// The `placements` directory of the cache directory `root`.

@@ -12,8 +12,12 @@ use super::super::request::MountRequest;
 use super::answer;
 use crate::server::local_cache::testing::until;
 use crate::server::local_cache::trees::testing::{Bench, fs_at, s3_at};
-use crate::server::local_cache::trees::{FlatTree, PlacementId, TreeStore, placement_id};
-use crate::{Op, TreeDigest};
+use crate::server::local_cache::trees::{
+    FlatTree, ImageRequest, PlacementId, TreeStore, placement_id,
+};
+use crate::{
+    BlobSource, ListEntry, ListKind, Mode, Op, TreeDigest, TreeImage, TreeLimits, TreeList,
+};
 
 const MOUNT: &str = "mount-1";
 
@@ -339,4 +343,118 @@ async fn the_socket_answers_the_mount_requests_from_the_tree_store() {
     assert_eq!(bench.store.placement(&id).unwrap().attachments, 0);
     halt.notify_one();
     task.await.unwrap();
+}
+
+/// A version 2 list of a file of the bench's first blob, an empty directory and a link, made the
+/// tree `bench.store` holds at `at`, and the placement and the digest of the tree.
+fn image_placed(
+    bench: &Bench,
+    at: Vec<crate::server::local_cache::trees::Location>,
+) -> (PlacementId, TreeDigest) {
+    let (sha256, offset, size) = &bench.pack.blobs[0];
+    let list = TreeList {
+        entries: vec![
+            ListEntry {
+                path: "bin".to_owned(),
+                kind: ListKind::File {
+                    mode: Mode::new(0o755).unwrap(),
+                    size: *size,
+                    source: Some(BlobSource {
+                        key: Arc::from(bench.pack.key.as_str()),
+                        offset: *offset,
+                    }),
+                    sha256: Some(TreeDigest::from_hex(sha256).unwrap()),
+                },
+            },
+            ListEntry {
+                path: "empty".to_owned(),
+                kind: ListKind::Dir {
+                    mode: Mode::new(0o755).unwrap(),
+                },
+            },
+            ListEntry {
+                path: "link".to_owned(),
+                kind: ListKind::Symlink {
+                    target: "bin".to_owned(),
+                },
+            },
+        ],
+    };
+    let bytes = bytes::Bytes::from(list.encode_v2().unwrap());
+    let digest = TreeDigest::of(&bytes);
+    let image = TreeImage::open(bytes, &TreeLimits::default(), |_| {}).unwrap();
+    let created = bench
+        .store
+        .create_image(ImageRequest {
+            image: Arc::new(image),
+            digest,
+            at,
+            ttl: None,
+            ready: false,
+            staged: None,
+        })
+        .unwrap();
+    (created.placement, digest)
+}
+
+/// Asserts that an image of a placement whose tree is a version 2 list is answered `image`, the
+/// tree's digest and the fs paths of the placement, in the order of its locations, as one line of
+/// JSON, with the paths of the fs locations alone.
+#[tokio::test]
+async fn an_image_answers_the_digest_and_the_paths_of_an_image_tree() {
+    let bench = Bench::new("mount-image").await;
+    let at = vec![fs_at("jobs/1/root"), s3_at("jobs/1/root/"), fs_at("a b")];
+    let (id, digest) = image_placed(&bench, at);
+    let request = MountRequest::Image { placement: id };
+    assert_eq!(
+        answer(Some(&bench.store), request).await,
+        format!("image {digest} [\"jobs/1/root\",\"a b\"]")
+    );
+}
+
+/// Asserts that an image of a placement whose tree is made of records is answered with the same
+/// line of JSON as a flat of it.
+#[tokio::test]
+async fn an_image_of_a_records_tree_answers_as_a_flat_does() {
+    let (bench, id) = placed("mount-image-records").await;
+    let store = Some(&bench.store);
+    let flat = answer(
+        store,
+        MountRequest::Flat {
+            placement: id.clone(),
+        },
+    )
+    .await;
+    let image = answer(store, MountRequest::Image { placement: id }).await;
+    assert_eq!(image, flat);
+    assert!(image.starts_with('{'), "{image}");
+}
+
+/// Asserts that an image of a placement that is not there, or one with no fs location, is `none`,
+/// that one whose records are damaged is `damaged`, and that with no tree store every image is
+/// `none`.
+#[tokio::test]
+async fn an_image_answers_none_or_damaged_and_none_with_no_store() {
+    let (bench, id) = placed("mount-image-none").await;
+    let store = Some(&bench.store);
+    let unknown = MountRequest::Image {
+        placement: unknown(),
+    };
+    assert_eq!(answer(store, unknown).await, "none");
+    let s3_only = bench
+        .store
+        .create(bench.request(vec![s3_at("only/")]))
+        .unwrap()
+        .placement;
+    let request = MountRequest::Image { placement: s3_only };
+    assert_eq!(answer(store, request).await, "none");
+    let image = || MountRequest::Image {
+        placement: id.clone(),
+    };
+    assert_eq!(answer(None, image()).await, "none");
+    let records =
+        crate::server::local_cache::trees::testing::tree_path(&bench.rig, &bench.built().root)
+            .join("records");
+    std::fs::write(&records, b"damaged").unwrap();
+    assert_eq!(answer(store, image()).await, "damaged");
 }

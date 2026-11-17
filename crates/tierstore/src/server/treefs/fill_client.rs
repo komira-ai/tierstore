@@ -2,7 +2,8 @@
 //! connections kept for the next request. The requests of this process: `fill` (a blob inside an
 //! upstream object, or the whole object `cas/l/<sha256>` of a manifest), `touch` (not answered),
 //! the pin requests, `put` (a staged file of the put directory, answered in JSON), and the
-//! questions about the placements of the node (`place`, `mounted`, `flat`, `span`, `unplace`).
+//! questions about the placements of the node (`place`, `mounted`, `image`, `flat`, `span`,
+//! `unplace`).
 //!
 //! A request that meets a closed socket, or a connection that went away (the S3 instance of the
 //! node is being updated: the old instance keeps answering through its drain, and the new one
@@ -14,6 +15,7 @@ use std::io::{BufRead as _, BufReader, Write as _};
 use std::os::unix::net::UnixStream;
 use std::path::PathBuf;
 
+use crate::TreeDigest;
 use crate::server::local_cache::trees::FlatTree;
 use std::sync::{Arc, Mutex};
 use std::time::Duration;
@@ -43,6 +45,20 @@ pub(super) enum AskError {
 /// The answer to a fill that did not put the blob in the cache: the words of the socket
 /// (`upstream 404`, `mismatch`, `no space`, ...), or that nobody answered.
 pub(super) type FillFailure = String;
+
+/// Where the mount reads the tree of a placement from, as the node answers `image`.
+#[derive(Debug, PartialEq, Eq)]
+pub(super) enum PlacedTree {
+    /// The tree is the image of this digest, in the tree's directory of the cache directory.
+    Image {
+        /// The digest of the tree.
+        tree: TreeDigest,
+        /// The fs locations of the placement.
+        paths: Vec<String>,
+    },
+    /// The tree, flattened.
+    Flat(FlatTree),
+}
 
 /// Where a path of the mount is among the placements of the node: the answer to `place`.
 #[derive(Debug, PartialEq, Eq)]
@@ -278,6 +294,30 @@ impl FillClient {
             return Ok(Vec::new());
         }
         serde_json::from_str(&answer).map_err(|_| answer)
+    }
+
+    /// Where the tree of the placement `id` is read from: the image of the tree in the cache
+    /// directory, by its digest, or the tree flattened. A node of a release before the images,
+    /// which does not know the request, is asked for the tree flattened. The error is the answer
+    /// (`none` for a placement that is gone, `damaged`, `too large`) or that nobody answered.
+    pub(super) fn image(&self, id: &str) -> Result<PlacedTree, String> {
+        let answer = self
+            .ask_line(&format!("image {id}"), true)
+            .map_err(|error| error.to_string())?;
+        if answer == UNKNOWN {
+            return self.flat(id).map(PlacedTree::Flat);
+        }
+        if let Some(rest) = answer.strip_prefix("image ") {
+            let read = rest.split_once(' ').and_then(|(tree, paths)| {
+                let tree = TreeDigest::from_hex(tree)?;
+                let paths = serde_json::from_str(paths).ok()?;
+                Some(PlacedTree::Image { tree, paths })
+            });
+            return read.ok_or(answer);
+        }
+        serde_json::from_str(&answer)
+            .map(PlacedTree::Flat)
+            .map_err(|_| answer)
     }
 
     /// The tree of the placement `id`, flattened. The error is the answer (`none` for a

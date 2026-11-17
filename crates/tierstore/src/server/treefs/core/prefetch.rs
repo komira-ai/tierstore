@@ -69,7 +69,8 @@ impl Core {
         };
         let mut seen = HashSet::new();
         let mut batch = Vec::new();
-        for entry in loaded.tree.entries() {
+        let entries = (0..loaded.tree.len() as u32).filter_map(|index| loaded.tree.entry(index));
+        for entry in entries {
             let EntryKind::File {
                 digest,
                 size,

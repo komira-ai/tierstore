@@ -3,11 +3,16 @@
 
 use std::sync::Arc;
 
+use bytes::Bytes;
+
 use super::super::pack_testing::Pack;
 use super::super::testing::Rig;
 use super::super::{LocalCache, RangeWant};
-use super::{CreateRequest, Location, TreeStore, TreesConfig};
-use crate::{BlobSource, BuiltTree, Mode, NewEntry, NewKind, TreeDigest, TreeLimits, build_tree};
+use super::{CreateRequest, ImageRequest, Location, TreeStore, TreesConfig};
+use crate::{
+    BlobSource, BuiltTree, ListEntry, ListKind, Mode, NewEntry, NewKind, TreeDigest, TreeImage,
+    TreeLimits, TreeList, build_tree,
+};
 
 /// A cache of a mebibyte with the pack `cas/pack/one` of three blobs (1000, 2000 and 3000 bytes)
 /// in its upstream, and a tree store over it.
@@ -100,6 +105,71 @@ impl Bench {
         }
     }
 
+    /// The file `path` of a tree list whose bytes are the blob `blob` of the pack, with mode `mode`.
+    fn listed(&self, path: &str, blob: usize, mode: u16) -> ListEntry {
+        let (sha256, offset, size) = &self.pack.blobs[blob];
+        ListEntry {
+            path: path.to_owned(),
+            kind: ListKind::File {
+                mode: Mode::new(mode).expect("a mode"),
+                size: *size,
+                source: Some(BlobSource {
+                    key: Arc::from(self.pack.key.as_str()),
+                    offset: *offset,
+                }),
+                sha256: Some(TreeDigest::from_hex(sha256).expect("a digest")),
+            },
+        }
+    }
+
+    /// The tree of [`Bench::entries`] as a tree list: the same paths, kinds and modes.
+    pub(in crate::server) fn list(&self) -> TreeList {
+        TreeList {
+            entries: vec![
+                self.listed("bin/tool", 0, 0o4755),
+                self.listed("bin/other", 1, 0o644),
+                self.listed("lib/deep/data", 2, 0o644),
+                ListEntry {
+                    path: "empty".to_owned(),
+                    kind: ListKind::Dir { mode: Mode::DIR },
+                },
+                ListEntry {
+                    path: "link".to_owned(),
+                    kind: ListKind::Symlink {
+                        target: "bin/tool".to_owned(),
+                    },
+                },
+                ListEntry {
+                    path: "zero".to_owned(),
+                    kind: ListKind::File {
+                        mode: Mode::new(0o644).expect("a mode"),
+                        size: 0,
+                        source: None,
+                        sha256: Some(TreeDigest::of(b"")),
+                    },
+                },
+            ],
+        }
+    }
+
+    /// The version 2 encoding of [`Bench::list`].
+    pub(in crate::server) fn image_bytes(&self) -> Bytes {
+        Bytes::from(self.list().encode_v2().expect("an encoding"))
+    }
+
+    /// A request to place the small tree as an image at `at`, with its image not staged.
+    pub(in crate::server) fn image_request(&self, at: Vec<Location>) -> ImageRequest {
+        let bytes = self.image_bytes();
+        ImageRequest {
+            digest: TreeDigest::of(&bytes),
+            image: open_image(bytes),
+            at,
+            ttl: None,
+            ready: false,
+            staged: None,
+        }
+    }
+
     /// Fills the range of the blob `blob` of the pack.
     pub(in crate::server) async fn fill(&self, blob: usize) {
         let (sha256, offset, size) = &self.pack.blobs[blob];
@@ -118,6 +188,11 @@ impl Bench {
             self.fill(blob).await;
         }
     }
+}
+
+/// The image of the tree list `bytes`, opened under the default limits.
+pub(in crate::server) fn open_image(bytes: Bytes) -> Arc<TreeImage> {
+    Arc::new(TreeImage::open(bytes, &TreeLimits::default(), |_| {}).expect("an image"))
 }
 
 /// The tree of `entries`.

@@ -11,6 +11,7 @@
 //! place <mount> <path>                         where the path of the mount is among the placements
 //! mounted                                      the paths of the placements' fs locations
 //! flat <placement>                             the tree of a placement, flattened for the mount
+//! image <placement>                            where the mount reads the tree of a placement
 //! span <sha256> <size> from <pack> @ <offset>  the range of a pack that is a file of a tree
 //! unplace <mount> <placement>                  the mount no longer holds the placement
 //! places-live <mount> [<placement> ...]        the mount holds these placements and no other
@@ -88,6 +89,9 @@ pub(super) enum MountRequest {
     Mounted,
     /// The tree of the placement, flattened for the mount.
     Flat { placement: PlacementId },
+    /// Where the mount reads the tree of the placement: the image of the tree, or the tree
+    /// flattened.
+    Image { placement: PlacementId },
     /// The `size` bytes at `offset` of the pack `pack`, which are to hash to `sha256`, in the
     /// cache: where they are, filled first if the cache does not hold them.
     Span {
@@ -208,6 +212,9 @@ pub(super) fn parse(line: &[u8]) -> Result<Request, Refusal> {
             .then_some(Request::Mount(MountRequest::Mounted))
             .ok_or(Refusal::Malformed),
         "flat" => Ok(Request::Mount(MountRequest::Flat {
+            placement: placement(rest)?,
+        })),
+        "image" => Ok(Request::Mount(MountRequest::Image {
             placement: placement(rest)?,
         })),
         "span" => {

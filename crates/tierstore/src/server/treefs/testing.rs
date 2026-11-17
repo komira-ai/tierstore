@@ -212,6 +212,9 @@ impl Upstream {
             "put" => Some(self.puts.answer(line)),
             // This upstream has no placements.
             "place" => Some("none".to_owned()),
+            // Nor images: it answers as a node of the release before them, and the mount asks
+            // `flat` instead.
+            "image" => Some("refused unknown request".to_owned()),
             "mounted" => Some("[]".to_owned()),
             "pin" => Some(
                 locked(&self.pin_answer)
@@ -823,6 +826,46 @@ pub(in crate::server) fn until(mut condition: impl FnMut() -> bool) {
         condition()
     });
     let _ = looks.expect("the event never came");
+}
+
+/// The bytes of a version 2 tree list of the entries 0 root, 1 `bin`, 2 `d` (empty, mode 0700),
+/// 3 `empty` (size 0), 4 `link` (to `bin/tool`), 5 `bin/other` (3 bytes of `p0` at 5, mode 0644)
+/// and 6 `bin/tool` (the 5 bytes `hello` of `p0` at 0, mode 0755).
+pub(in crate::server::treefs) fn image_bytes() -> Vec<u8> {
+    use crate::{BlobSource, ListEntry, ListKind, Mode, TreeDigest, TreeList};
+    let file = |path: &str, (mode, size, offset): (u16, u64, u64), content: &[u8]| ListEntry {
+        path: path.to_owned(),
+        kind: ListKind::File {
+            mode: Mode::new(mode).unwrap(),
+            size,
+            source: (size > 0).then(|| BlobSource {
+                key: Arc::from("p0"),
+                offset,
+            }),
+            sha256: Some(TreeDigest::of(content)),
+        },
+    };
+    TreeList {
+        entries: vec![
+            file("bin/tool", (0o755, 5, 0), b"hello"),
+            file("bin/other", (0o644, 3, 5), b"abc"),
+            file("empty", (0o644, 0, 0), b""),
+            ListEntry {
+                path: "link".to_owned(),
+                kind: ListKind::Symlink {
+                    target: "bin/tool".to_owned(),
+                },
+            },
+            ListEntry {
+                path: "d".to_owned(),
+                kind: ListKind::Dir {
+                    mode: Mode::new(0o700).unwrap(),
+                },
+            },
+        ],
+    }
+    .encode_v2()
+    .unwrap()
 }
 
 #[cfg(test)]

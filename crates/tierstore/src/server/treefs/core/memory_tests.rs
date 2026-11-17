@@ -214,7 +214,7 @@ fn a_read_again_or_a_slow_read_is_said_with_its_numbers() {
     let (rig, _) = attached("tfs-memory-said");
     let loaded = rig.core.tree(1).unwrap();
     let digest = loaded.digest;
-    let entries = loaded.tree.entries().len();
+    let entries = loaded.tree.len();
     let ok = Ok(Arc::clone(&loaded));
     assert_eq!(said((&digest, 1), &ok, (1, SLOW_READ_MS - 1, 0)), None);
     assert_eq!(

@@ -2,14 +2,18 @@
 //! the mount is among the fs locations of the placements, the paths of those locations, and the
 //! tree of a placement whole, flattened in the order the mount numbers its inodes.
 //!
-//! The mount numbers the entries of a tree by their place in the tree flattened depth first in
-//! name order, the root being 0 (`server/treefs/ino.rs`), so that the number of an entry is a
-//! function of the tree alone and a process that takes the mount over numbers it the same. A
-//! placement is therefore given to the mount whole, once, as a [`FlatTree`] with the paths of its
-//! fs locations (the mount numbers the tree at each location apart): every record of the
-//! tree is read once at each place it is held (a directory a tree holds twice, by one digest, is
-//! listed at each place), and each file says where its bytes are, by the pack and the offset that
-//! [`TreeStore::fetch_span`] makes readable.
+//! The mount numbers the entries of a tree by their place in the tree as it is given, the root
+//! being 0 (`server/treefs/ino.rs`), so that the number of an entry is a function of the tree
+//! alone and a process that takes the mount over numbers it the same. A tree that is an image is
+//! given by its digest ([`TreeStore::mount_tree`]): the mount reads the image from the tree's
+//! directory ([`image_path`](super::image_path)) and numbers each entry by its index. A tree of
+//! records is given whole, once, as a [`FlatTree`] with the paths of its fs locations (the mount
+//! numbers the tree at each location apart), flattened depth first in name order: every record of
+//! the tree is read once at each place it is held (a directory a tree holds twice, by one digest,
+//! is listed at each place), and each file says where its bytes are, by the pack and the offset
+//! that [`TreeStore::fetch_span`] makes readable. A mount of a release before the images asks for
+//! the [`FlatTree`] of an image too ([`TreeStore::flat`]): its entries are then in the order of
+//! their indices, so that both releases number an image's entries alike.
 
 use std::collections::HashMap;
 
@@ -17,8 +21,9 @@ use serde::{Deserialize, Serialize};
 
 use super::TreeStore;
 use super::location::{Location, PlacementId};
-use super::read::ReadError;
-use crate::{RecordChild, TreeRecord};
+use super::read::{ReadError, image_span};
+use crate::tree_image::ImageKind;
+use crate::{RecordChild, TreeDigest, TreeImage, TreeRecord};
 
 /// The most entries a flattened tree may have, its root included: what the 24 bits of the index
 /// of an inode number count.
@@ -90,6 +95,20 @@ pub(in crate::server) enum FlatKind {
         /// What it says.
         target: String,
     },
+}
+
+/// What the mount reads a placement's tree from.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub(in crate::server) enum MountTree {
+    /// The tree is the image of this digest, in the tree's directory: read it there.
+    Image {
+        /// The digest of the tree.
+        tree: TreeDigest,
+        /// The fs locations of the placement, in the order of the placement.
+        paths: Vec<String>,
+    },
+    /// The tree, flattened.
+    Flat(FlatTree),
 }
 
 /// Where a path of the mount is among the fs locations of the placements.
@@ -193,14 +212,25 @@ impl TreeStore {
         ended
     }
 
-    /// The tree of the placement `id`, flattened for the mount at its fs locations.
+    /// What the mount reads the tree of the placement `id` from: the image, by its digest, for a
+    /// tree that is one; the tree flattened ([`TreeStore::flat`]) for a tree of records.
     ///
     /// # Errors
-    /// [`ReadError::NoPlacement`] for a placement that is not alive (one that was released and
-    /// that something still holds is alive, and is flattened for its holder) or has no fs location,
-    /// [`ReadError::Corrupt`] for a tree whose files are damaged, and [`FlatError::TooLarge`] for
-    /// a tree of more entries than [`MAX_FLAT_ENTRIES`].
-    pub(in crate::server) fn flat(&self, id: &PlacementId) -> Result<FlatTree, FlatError> {
+    /// As [`TreeStore::flat`].
+    pub(in crate::server) fn mount_tree(&self, id: &PlacementId) -> Result<MountTree, FlatError> {
+        let paths = self.fs_paths(id)?;
+        let snapshot = self.snapshot(id)?;
+        if snapshot.image().is_some() {
+            return Ok(MountTree::Image {
+                tree: snapshot.root,
+                paths,
+            });
+        }
+        self.flatten(&snapshot, paths).map(MountTree::Flat)
+    }
+
+    /// The paths of the fs locations of the placement `id`, if it is alive and has one.
+    fn fs_paths(&self, id: &PlacementId) -> Result<Vec<String>, ReadError> {
         let placed = self.placement(id).ok_or(ReadError::NoPlacement)?;
         let paths: Vec<String> = placed
             .locations
@@ -211,10 +241,35 @@ impl TreeStore {
             })
             .collect();
         if paths.is_empty() {
-            return Err(ReadError::NoPlacement.into());
+            return Err(ReadError::NoPlacement);
         }
+        Ok(paths)
+    }
+
+    /// The tree of the placement `id`, flattened for the mount at its fs locations: a tree of
+    /// records depth first in name order, an image in the order of its indices.
+    ///
+    /// # Errors
+    /// [`ReadError::NoPlacement`] for a placement that is not alive (one that was released and
+    /// that something still holds is alive, and is flattened for its holder) or has no fs location,
+    /// [`ReadError::Corrupt`] for a tree whose files are damaged, and [`FlatError::TooLarge`] for
+    /// a tree of more entries than [`MAX_FLAT_ENTRIES`].
+    pub(in crate::server) fn flat(&self, id: &PlacementId) -> Result<FlatTree, FlatError> {
+        let paths = self.fs_paths(id)?;
         let snapshot = self.snapshot(id)?;
-        let root = self.record(&snapshot, &snapshot.root)?;
+        match snapshot.image() {
+            Some(image) => Ok(flat_image(image, paths)),
+            None => self.flatten(&snapshot, paths),
+        }
+    }
+
+    /// The tree of records of `snapshot`, flattened depth first in name order.
+    fn flatten(
+        &self,
+        snapshot: &super::read::Snapshot,
+        paths: Vec<String>,
+    ) -> Result<FlatTree, FlatError> {
+        let root = self.record(snapshot, &snapshot.root)?;
         let mut entries = vec![FlatEntry {
             parent: None,
             name: String::new(),
@@ -238,7 +293,7 @@ impl TreeStore {
             let index = entries.len() as u32;
             let entry = match child {
                 RecordChild::Dir { name, digest } => {
-                    let record = self.record(&snapshot, &digest)?;
+                    let record = self.record(snapshot, &digest)?;
                     let mode = record.mode().bits();
                     stack.push((record, 0, index));
                     FlatEntry {
@@ -254,7 +309,7 @@ impl TreeStore {
                     size,
                     sha256,
                 } => {
-                    let span = Self::span(&snapshot, &sha256, size)?;
+                    let span = Self::span(snapshot, &sha256, size)?;
                     let (pack, offset) = span.map_or((None, 0), |span| {
                         (Some(packs.place(span.pack)), span.offset)
                     });
@@ -284,6 +339,54 @@ impl TreeStore {
             packs: packs.keys,
             entries,
         })
+    }
+}
+
+/// The image `image`, flattened in the order of its indices, at the fs locations `paths`.
+fn flat_image(image: &TreeImage, paths: Vec<String>) -> FlatTree {
+    let mut packs = Packs::default();
+    let entries = (0..image.len() as u32)
+        .filter_map(|index| image.entry(index))
+        .map(|entry| {
+            let (mode, kind) = match entry.kind {
+                ImageKind::Dir { mode, .. } => (mode.bits(), FlatKind::Dir),
+                ImageKind::File {
+                    mode,
+                    size,
+                    sha256,
+                    span,
+                } => {
+                    let span = image_span(span);
+                    let (pack, offset) = span.map_or((None, 0), |span| {
+                        (Some(packs.place(span.pack)), span.offset)
+                    });
+                    let kind = FlatKind::File {
+                        size,
+                        sha256: sha256.to_string(),
+                        pack,
+                        offset,
+                    };
+                    (mode.bits(), kind)
+                }
+                ImageKind::Symlink { target } => (
+                    crate::Mode::SYMLINK.bits(),
+                    FlatKind::Symlink {
+                        target: target.to_owned(),
+                    },
+                ),
+            };
+            FlatEntry {
+                parent: entry.parent,
+                name: entry.name.to_owned(),
+                mode,
+                kind,
+            }
+        })
+        .collect();
+    FlatTree {
+        paths,
+        packs: packs.keys,
+        entries,
     }
 }
 

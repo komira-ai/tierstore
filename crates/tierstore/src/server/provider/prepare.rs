@@ -2,23 +2,27 @@
 //! built and placed at the source's path, and the bytes of its files read into the cache.
 //!
 //! The placement and the reads run together, joined by a queue of reads ([`Group`]). A version 2
-//! list ([`TreeListV2`]) is walked once on a blocking thread while another thread hashes it; as
+//! list ([`TreeImage`]) is walked once on a blocking thread while another thread hashes it; as
 //! soon as the walk has checked it, its spans are grouped by the list's pack ranges and queued, and
-//! the reads begin while the tree's records are built and placed, which waits for the hash. A
-//! version 1 list queues its spans, each alone, once its tree is placed. If the list is refused,
-//! or the source is no longer this preparation's, the reads still queued are not made.
+//! the reads begin while the tree is placed, which waits for the hash. The list is then the tree:
+//! it is placed as it is ([`TreeStore::create_image`]), named by its own digest, with no directory
+//! record made or hashed. A version 1 list is built into records and queues its spans, each
+//! alone, once its tree is placed. If the list is refused, or the source is no longer this
+//! preparation's, the reads still queued are not made.
 //!
 //! A group of one span is read by [`TreeStore::fetch_span`] with the file's own span, size and
 //! digest: the call an open of the mount makes for the file, which joins a fill of the same range
 //! already running (the cache's flights, keyed by the pack, the range and the digest). A group of
 //! several is read by [`TreeStore::fetch_parts`], one read of the pack across the spans, each
 //! checked against its own digest; an open of one of its files waits for it and then finds the
-//! span held. Files of one digest are read once, at the span the tree store keeps for the digest
-//! (that of the digest's first file in the order the tree was built in), which is the one an open
-//! reads.
+//! span held. Files of one digest are read once for each span an open reads them at: for a
+//! version 1 list, the span the tree store keeps for the digest (that of the digest's first file
+//! in the order the tree was built in); for a version 2 list, which serves each file at its own
+//! span, each distinct span of the digest.
 //!
 //! [`TreeStore::fetch_span`]: crate::server::local_cache::trees::TreeStore::fetch_span
 //! [`TreeStore::fetch_parts`]: crate::server::local_cache::trees::TreeStore::fetch_parts
+//! [`TreeStore::create_image`]: crate::server::local_cache::trees::TreeStore::create_image
 
 use std::sync::Arc;
 use std::sync::atomic::{AtomicBool, Ordering};
@@ -31,10 +35,10 @@ use super::groups::{Group, alone, groups};
 use super::names::SourceId;
 use super::sources::{Owner, Shared, Stage};
 use crate::server::local_cache::trees::{
-    CreateError, CreateRequest, Created, FetchError, FileSpan,
+    CreateError, CreateRequest, Created, FetchError, FileSpan, ImageRequest, StagedImage, TreeStore,
 };
 use crate::{
-    Backend as _, BuiltFile, BuiltTree, Error, TreeDigest, TreeLimits, TreeListError, TreeListV2,
+    Backend as _, BuiltFile, BuiltTree, Error, TreeDigest, TreeImage, TreeLimits, TreeListError,
     build_tree, is_tree_list_v2, parse_tree_list,
 };
 
@@ -123,12 +127,21 @@ async fn place(shared: &Shared, job: &Job, reads: UnboundedSender<Group>) -> Res
     let walked = reads.clone();
     let made = tokio::task::spawn_blocking(move || -> Result<(Created, Vec<BuiltFile>), Stage> {
         let limits = store.config().limits();
-        let built = if v2 {
-            built_v2(&bytes, &digest, &limits, &walked)?
-        } else {
-            built_v1(&bytes, &digest, &limits)?
-        };
-        let files = if v2 { Vec::new() } else { built.files.clone() };
+        if v2 {
+            let (image, staged) = image_v2(&store, bytes.into(), (&digest, &limits), &walked)?;
+            let request = ImageRequest {
+                image: Arc::new(image),
+                digest,
+                at: vec![at],
+                ttl: Some(ttl),
+                ready: false,
+                staged,
+            };
+            let created = store.create_image(request).map_err(stage_of)?;
+            return Ok((created, Vec::new()));
+        }
+        let built = built_v1(&bytes, &digest, &limits)?;
+        let files = built.files.clone();
         let request = CreateRequest {
             built,
             at: vec![at],
@@ -166,33 +179,37 @@ fn built_v1(bytes: &[u8], digest: &TreeDigest, limits: &TreeLimits) -> Result<Bu
         .map_err(|why| Stage::Refused(format!("the tree is refused: {why}")))
 }
 
-/// The tree of the version 2 list in `bytes`, which must hash to `digest`. The bytes are hashed
-/// on a thread of their own beside the walk; as soon as the walk has checked the list, its spans
-/// are grouped and queued on `reads`, before the tree's records are built. The tree is made only
-/// once the hash is the one the key names (a mismatch is the refusal, whatever the walk found).
-/// A read queued from a list that is then refused is checked as any other, against its own
-/// files' digests, and the reads still queued are not made.
-fn built_v2(
-    bytes: &[u8],
-    digest: &TreeDigest,
-    limits: &TreeLimits,
+/// The version 2 list in `bytes`, which must hash to `digest`, opened as the tree it is, and its
+/// file written ahead in `store` if it could be. The bytes are hashed on a thread of their own
+/// and written on another, beside the walk; as soon as the walk has checked the list, its spans
+/// are grouped and queued on `reads`. The tree is made only once the hash is the one the key names
+/// (a mismatch is the refusal, whatever the walk found). A read queued from a list that is then
+/// refused is checked as any other, against its own files' digests, and the reads still queued
+/// are not made. A file that could not be written ahead is written by the create, which says why
+/// if it cannot either.
+fn image_v2(
+    store: &TreeStore,
+    bytes: bytes::Bytes,
+    (digest, limits): (&TreeDigest, &TreeLimits),
     reads: &UnboundedSender<Group>,
-) -> Result<BuiltTree, Stage> {
+) -> Result<(TreeImage, Option<StagedImage>), Stage> {
     let refused = |why: crate::TreeListV2Error| Stage::Refused(why.to_string());
-    let (actual, walked) = std::thread::scope(|scope| {
-        let hashing = scope.spawn(|| TreeDigest::of(bytes));
-        let walked = TreeListV2::open(bytes).and_then(|list| {
-            let mut spans = Vec::new();
-            let checked = list.check(limits, |span| spans.push(span))?;
-            for group in groups(list.keys(), spans, list.ranges()) {
+    let (actual, walked, staged) = std::thread::scope(|scope| {
+        let hashing = scope.spawn(|| TreeDigest::of(&bytes));
+        let staging = scope.spawn(|| store.stage_image(bytes.clone()).ok());
+        let mut spans = Vec::new();
+        let walked = TreeImage::open(bytes.clone(), limits, |span| spans.push(span));
+        if let Ok(image) = &walked {
+            for group in groups(image.keys(), spans, image.ranges()) {
                 let _ = reads.unbounded_send(group);
             }
-            Ok(checked.build())
-        });
+        }
         let actual = hashing
             .join()
             .unwrap_or_else(|panic| std::panic::resume_unwind(panic));
-        (actual, walked)
+        // A write that panicked is a write not made ahead: the create writes the image.
+        let staged = staging.join().ok().flatten();
+        (actual, walked, staged)
     });
     if actual != *digest {
         let why = TreeListError::DigestMismatch {
@@ -201,7 +218,7 @@ fn built_v2(
         };
         return Err(Stage::Refused(why.to_string()));
     }
-    walked.map_err(refused)
+    Ok((walked.map_err(refused)?, staged))
 }
 
 /// The stage a refusal of the tree store leaves a source at: a tree this node cannot make now is a

@@ -373,7 +373,7 @@ pub(crate) fn is_valid_name(name: &str) -> bool {
     !(name.is_empty()
         || name == "."
         || name == ".."
-        || name.contains(['/', '\0'])
+        || name.bytes().any(|byte| byte == b'/' || byte == 0)
         || name.starts_with(WHITEOUT_PREFIX))
 }
 

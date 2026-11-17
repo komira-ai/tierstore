@@ -8,7 +8,9 @@
 //! function of the manifests and the table of tree numbers alone.
 //!
 //! A placement shown at an fs location (`core/placed.rs`) has a tree number of its own, given to a
-//! key made of its id, and its entries are numbered as a tree's, depth first in name order. The
+//! key made of its id, and its entries are numbered as the node gives the tree: a tree of records
+//! depth first in name order, a version 2 tree list (an image) by each entry's place in the list,
+//! which is breadth first. Either way the number is a function of the tree alone. The
 //! directories the mount passes through above the locations (`jobs/` of `jobs/1f3a/root`) are
 //! numbered by the hash of their path, in the range whose top two bits are `0b10`: the part of the
 //! range of the views that the put directory left.

@@ -106,7 +106,9 @@
 //!   under the same key. [`TreeListV2::open`] checks the header, keys and ranges, borrowing the
 //!   sections and copying only the keys;
 //!   [`TreeListV2::build`] walks the entries once, handing out each span to read as it meets it,
-//!   and gives the [`BuiltTree`]. The same page is the reference.
+//!   and gives the [`BuiltTree`]. [`TreeImage::open`] makes the same walk and keeps the list as
+//!   the tree, read in place: an entry's number is its index, and nothing is made per entry or
+//!   per directory. The same page is the reference.
 //!
 //! The keys under `_journal/` (the per-node journals of the releases before the entries, which
 //! this release does not apply; their formats stay readable as bytes, see [`decode_journal`]), `_entries/` and `_tiering/` belong to the proxy and the
@@ -213,6 +215,7 @@ mod sleeper;
 #[cfg(test)]
 mod sleeper_tests;
 mod tiered;
+mod tree_image;
 mod tree_list;
 #[cfg(test)]
 mod tree_list_tests;
@@ -272,6 +275,7 @@ pub use tiered::{
     DeleteWait, MarkReads, MarkedPutConfig, PlainPut, Proxy, ProxyConfig, PutBody, PutClaim,
     StepRetry,
 };
+pub use tree_image::TreeImage;
 pub use tree_list::{
     LineFault, ListEntry, ListKind, MAX_NAME_BYTES, MAX_PATH_BYTES, MAX_TARGET_BYTES,
     MAX_TREE_LIST_BYTES, TREE_LIST_PREFIX, TreeList, TreeListError, parse_tree_list,

@@ -561,7 +561,7 @@ impl Core {
             return Ok(Looked::Absent(TREE_TTL));
         };
         self.count_lookup(number, &loaded);
-        let attr = self.attr_of(number, &loaded.tree, child);
+        let attr = self.attr_of(number, &loaded.tree, &child);
         Ok(Looked::Found(Entry {
             attr,
             ttl: TREE_TTL,
@@ -572,7 +572,7 @@ impl Core {
     fn root_entry(&self, number: u64, loaded: &Loaded, ttl: Duration) -> Result<Entry, Errno> {
         let root = loaded.tree.entry(0).ok_or(Errno::NoEnt)?;
         Ok(Entry {
-            attr: self.attr_of(number, &loaded.tree, root),
+            attr: self.attr_of(number, &loaded.tree, &root),
             ttl,
         })
     }
@@ -596,7 +596,7 @@ impl Core {
         let loaded = self.tree(number)?;
         let entry = loaded.tree.entry(index).ok_or(Errno::NoEnt)?;
         Ok(Entry {
-            attr: self.attr_of(number, &loaded.tree, entry),
+            attr: self.attr_of(number, &loaded.tree, &entry),
             ttl: TREE_TTL,
         })
     }
@@ -613,8 +613,8 @@ impl Core {
             return Err(Errno::Inval);
         }
         let loaded = self.tree(number)?;
-        match loaded.tree.entry(index).map(|entry| &entry.kind) {
-            Some(EntryKind::Symlink { target }) => Ok(Arc::clone(target)),
+        match loaded.tree.entry(index).map(|entry| entry.kind) {
+            Some(EntryKind::Symlink { target }) => Ok(target),
             Some(_) => Err(Errno::Inval),
             None => Err(Errno::NoEnt),
         }
@@ -631,7 +631,7 @@ impl Core {
             return Err(Errno::Acces);
         }
         let loaded = self.tree(number)?;
-        match loaded.tree.entry(index).map(|entry| &entry.kind) {
+        match loaded.tree.entry(index).map(|entry| entry.kind) {
             Some(EntryKind::Dir { .. }) => Ok(()),
             Some(_) => Err(Errno::NotDir),
             None => Err(Errno::NoEnt),
@@ -662,26 +662,30 @@ impl Core {
         );
         let kids = loaded.tree.children(index);
         let first = usize::try_from(offset).unwrap_or(usize::MAX);
-        for position in first..kids.len().saturating_add(2) {
-            let item = match position {
-                0 => DirItem {
-                    name: ".".to_owned(),
-                    entry: self.getattr(ino)?,
+        // `.` and `..` are at the positions 0 and 1, the children from 2 on.
+        for (position, (name, at)) in [(".", ino), ("..", parent_ino)].into_iter().enumerate() {
+            if position < first {
+                continue;
+            }
+            let item = DirItem {
+                name: name.to_owned(),
+                entry: self.getattr(at)?,
+            };
+            if !sink(position as u64 + 1, item) {
+                return Ok(());
+            }
+        }
+        let entries = kids
+            .from(first.saturating_sub(2))
+            .filter_map(|kid| loaded.tree.entry(kid));
+        for (at, entry) in entries.enumerate() {
+            let position = first.max(2).saturating_add(at);
+            let item = DirItem {
+                name: entry.name.to_string(),
+                entry: Entry {
+                    attr: self.attr_of(number, &loaded.tree, &entry),
+                    ttl: TREE_TTL,
                 },
-                1 => DirItem {
-                    name: "..".to_owned(),
-                    entry: self.getattr(parent_ino)?,
-                },
-                _ => {
-                    let entry = loaded.tree.at(kids[position - 2]);
-                    DirItem {
-                        name: entry.name.to_string(),
-                        entry: Entry {
-                            attr: self.attr_of(number, &loaded.tree, entry),
-                            ttl: TREE_TTL,
-                        },
-                    }
-                }
             };
             if !sink(position as u64 + 1, item) {
                 break;
@@ -737,9 +741,9 @@ impl Core {
             } => {
                 let blob = (digest, *size, source.as_ref());
                 if let Some(table) = backing {
-                    return self.open_backed(table, (&loaded, number, entry), blob, register);
+                    return self.open_backed(table, (&loaded, number, &entry), blob, register);
                 }
-                Handle::Cached(self.blob(&loaded, number, entry, blob)?)
+                Handle::Cached(self.blob(&loaded, number, &entry, blob)?)
             }
         };
         Ok(Opened::Cached(self.new_handle(handle)))
