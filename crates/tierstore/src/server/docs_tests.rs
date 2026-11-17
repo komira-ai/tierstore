@@ -28,6 +28,7 @@ use clap::CommandFactory;
 use super::cli::Args;
 use super::config::{KEYS, keys_for_flags};
 use super::config_cache::LocalCacheTable;
+use super::config_interface::Params;
 use super::config_policy::Policy;
 use super::config_testing::{DEFAULTS, loads};
 use super::config_unknown::fields_of;
@@ -45,8 +46,10 @@ const NOT_YET: &str = "Not in a release yet";
 /// verify commands of the install guide: `sha256sum -c`, `gh attestation verify` online and with
 /// a bundle and a trusted root, and `cosign verify-blob-attestation`), and the flags of the
 /// verbs (`update-hook`, `format-epoch`, `entries`), which are read before the server's flags and are not among them
-/// (the verbs take the hot tier by `--hot` and its companions, which the server reads from the file).
+/// (the verbs take the hot tier by `--hot` and its companions, which the server reads from the file),
+/// and the flag of jobscheduler's agent that names the mount provider's socket.
 const FOREIGN_FLAGS: &[&str] = &[
+    "--mount-provider",
     "--tls-verify",
     "--endpoint-url",
     "--bucket",
@@ -616,22 +619,15 @@ fn code() -> Code {
         .get_arguments()
         .filter_map(|arg| arg.get_long().map(|long| format!("--{long}")))
         .collect();
-    // The keys of an `[[interface]]` that are in no flag: its `type` and `params`, and the two
-    // params that say where it listens, and `params.upstream` of an `oci` interface, which has no
-    // flag.
-    let interface = [
-        "interface.type",
-        "interface.params",
-        "params.port",
-        "params.addresses",
-        "params.upstream",
-    ];
+    // The keys of an `[[interface]]`: its `type` and `params`, and every param its struct reads.
+    let interface = ["interface.type", "interface.params"];
     let keys = KEYS
         .iter()
         .flat_map(|(_, keys)| keys.iter().copied())
         .chain(interface)
         .chain(FLAGLESS_KEYS.iter().copied())
         .map(str::to_owned)
+        .chain(table_keys::<Params>("params"))
         .collect();
     let mut source = String::new();
     source_of(

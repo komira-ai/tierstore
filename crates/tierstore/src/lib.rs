@@ -95,6 +95,11 @@
 //!   I/O: the caller gives the bytes of a manifest by digest. [`flatten`] numbers the entries of
 //!   a whole tree depth first, the root being 0, and refuses a tree over [`MAX_ENTRIES`],
 //!   [`MAX_DEPTH`] or [`MAX_MANIFEST_BYTES`] by name. `docs/tree-manifest.md` is the reference.
+//! - [`parse_tree_list`] reads, and [`TreeList::encode`] writes, a tree list: every entry of a
+//!   tree in one object, a JSON line each, named `cas/l/<sha256 of its bytes>`
+//!   ([`tree_list_key`]), which a client writes before it asks a node's mount provider for the
+//!   tree. [`TreeList::into_entries`] gives the entries [`build_tree`] makes the tree of. The same
+//!   page is the reference.
 //!
 //! The keys under `_journal/` (the per-node journals of the releases before the entries, which
 //! this release does not apply; their formats stay readable as bytes, see [`decode_journal`]), `_entries/` and `_tiering/` belong to the proxy and the
@@ -201,6 +206,9 @@ mod sleeper;
 #[cfg(test)]
 mod sleeper_tests;
 mod tiered;
+mod tree_list;
+#[cfg(test)]
+mod tree_list_tests;
 mod tree_manifest;
 #[cfg(test)]
 mod tree_manifest_tests;
@@ -249,6 +257,11 @@ pub use sleeper::{RecordingSleeper, Sleeper, TokioSleeper};
 pub use tiered::{
     DeleteWait, MarkReads, MarkedPutConfig, PlainPut, Proxy, ProxyConfig, PutBody, PutClaim,
     StepRetry,
+};
+pub use tree_list::{
+    LineFault, ListEntry, ListKind, MAX_NAME_BYTES, MAX_PATH_BYTES, MAX_TARGET_BYTES,
+    MAX_TREE_LIST_BYTES, TREE_LIST_PREFIX, TreeList, TreeListError, parse_tree_list,
+    tree_list_digest, tree_list_key,
 };
 pub use tree_manifest::{
     BlobSource, EntryKind, MAX_DEPTH, MAX_ENTRIES, MAX_MANIFEST_BYTES, TreeChild, TreeDigest,

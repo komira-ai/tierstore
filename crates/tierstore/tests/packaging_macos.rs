@@ -136,14 +136,23 @@ fn config() -> toml::Table {
     read("tierstore.toml").parse().expect("TOML")
 }
 
-/// The addresses of the one `s3` interface of the file: it has no other.
+/// The entries of the file's `[[interface]]` of type `kind`.
+fn interfaces<'a>(file: &'a toml::Table, kind: &str) -> Vec<&'a toml::Value> {
+    let entries = file["interface"].as_array().expect("[[interface]]");
+    entries
+        .iter()
+        .filter(|entry| entry["type"].as_str() == Some(kind))
+        .collect()
+}
+
+/// The addresses of the one `s3` interface of the file, which has, besides it, only its mount
+/// provider, which listens on no address.
 fn interface_addresses(file: &toml::Table) -> Vec<String> {
     let entries = file["interface"].as_array().expect("[[interface]]");
-    assert_eq!(entries.len(), 1, "one interface");
-    assert_eq!(entries[0]["type"].as_str(), Some("s3"));
-    let addresses = entries[0]["params"]["addresses"]
-        .as_array()
-        .expect("addresses");
+    assert_eq!(entries.len(), 2, "the s3 interface and the mount provider");
+    let s3 = interfaces(file, "s3");
+    assert_eq!(s3.len(), 1, "one s3 interface");
+    let addresses = s3[0]["params"]["addresses"].as_array().expect("addresses");
     addresses
         .iter()
         .map(|address| address.as_str().expect("an address").to_owned())
@@ -243,6 +252,27 @@ fn the_file_is_a_cache_of_the_storage_nodes_with_a_proxy_id_from_the_facts_file(
     assert_eq!(policies.len(), 1);
     assert_eq!(policies[0]["prefix"].as_str(), Some("cas/"));
     assert_eq!(policies[0]["cache"].as_bool(), Some(true));
+}
+
+/// Asserts that the Mac runs the mount provider jobscheduler's agent asks for a job's tree: one
+/// `mount-provider` interface, on a socket in a directory of its own under the Mac's tierstore
+/// directory, answering trees under the Mac's mount of `tierstore fs`. It would catch a Mac whose
+/// jobs cannot have their inputs made local before they start.
+#[test]
+fn the_mac_runs_the_mount_provider_on_its_socket() {
+    let file = config();
+    let providers = interfaces(&file, "mount-provider");
+    assert_eq!(providers.len(), 1);
+    let params = providers[0]["params"].as_table().expect("params");
+    assert_eq!(params.len(), 2, "{params:?}");
+    assert_eq!(
+        params["socket"].as_str(),
+        Some(format!("{LAUNCHD_LINKS_DIR}/run/provider.sock").as_str())
+    );
+    assert_eq!(
+        params["mountpoint"].as_str(),
+        Some("/private/var/tierstore/fs")
+    );
 }
 
 /// Asserts that the binary itself takes the plist's command line and the shipped file: the

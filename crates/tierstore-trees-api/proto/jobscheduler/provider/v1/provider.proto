@@ -1,0 +1,123 @@
+// The protocol a node-local mount provider serves to the jobscheduler agent of its host
+// (docs/design/mount-providers.md, section 3): gRPC over a Unix socket the provider owns
+// and the host's operator names to the agent (`--mount-provider NAME=SOCKET`). A job's
+// layer or mount names a provider and a ref only that provider reads; the agent asks the
+// provider to begin making the tree as soon as it has the job (Prepare), asks for its
+// directory while it readies the container (Mount), tells it when the job's file system
+// is taken apart (Release), and, once it has started, gives up every source of its own
+// that it did not take back from before (Sweep).
+//
+// The file stands alone: it imports nothing, so a provider in another repository copies it
+// as it is. It grows only by additions: a field number is never reused or renumbered, a
+// shipped field is never removed or given another meaning, and a provider ignores a field
+// it does not know. It is compiled apart from package jobscheduler.v1 and is not in that
+// package's descriptor set.
+//
+// Every call is idempotent and names its source in full, so no call depends on the answer
+// to an earlier one:
+// - Prepare of a source already prepared with the same ref succeeds; with another ref it
+//   is refused FAILED_PRECONDITION. It answers within 10 seconds and does its work in the
+//   background. A ref the provider cannot use is refused INVALID_ARGUMENT or
+//   FAILED_PRECONDITION with a reason of at most 256 bytes; any other failure is
+//   UNAVAILABLE, and the agent asks again.
+// - Mount answers once the tree can be opened (its files may still be filling: an open of
+//   one waits for it), or within 30 seconds UNAVAILABLE, and the agent asks again; a tree
+//   that will never be ready is refused FAILED_PRECONDITION.
+// - Release of a source the provider does not know succeeds, and so does one that arrives
+//   while the source's Prepare is still being answered: the provider ends what the Prepare
+//   began. It answers within 5 seconds.
+// - The provider keeps its own collection of sources (a lifetime each): an agent's record
+//   of a run can be lost with its host, and Sweep is the agent's way to catch up, not the
+//   only one.
+
+syntax = "proto3";
+
+package jobscheduler.provider.v1;
+
+// A node-local provider of the trees of jobs' layers and mounts.
+service MountProvider {
+  // Begins making the tree of a source and answers at once.
+  rpc Prepare(PrepareRequest) returns (PrepareResponse);
+  // Answers the directory of a prepared source once it can be opened.
+  rpc Mount(MountRequest) returns (MountResponse);
+  // Gives up what the provider holds for a source.
+  rpc Release(ReleaseRequest) returns (ReleaseResponse);
+  // Releases every source of an agent except those of the runs it keeps.
+  rpc Sweep(SweepRequest) returns (SweepResponse);
+}
+
+// One source of one run: a layer or a mount of a job, named in full in every call.
+message Source {
+  // The agent that asks: the id its host registered under. Several agents of one host
+  // have different ids, so none touches another's sources.
+  string agent = 1;
+  // The run: "js." and the job's id, so a provider that other clients use too keeps the
+  // agent's runs apart from theirs.
+  string run = 2;
+  // The source's place in the job: its layers first, then its mounts, counted from 0.
+  uint32 index = 3;
+}
+
+// How the job will use the tree.
+enum MountMode {
+  // Not given: read as read-only.
+  MOUNT_MODE_UNSPECIFIED = 0;
+  // The job reads the tree and cannot write it (every layer, and a read-only mount).
+  MOUNT_MODE_READ_ONLY = 1;
+  // The job's writes reach the tree.
+  MOUNT_MODE_READ_WRITE = 2;
+  // The job may change the tree; its changes are its own and never reach the tree.
+  MOUNT_MODE_COPY_ON_WRITE = 3;
+}
+
+// Prepare: begin making a source's tree.
+message PrepareRequest {
+  // The source.
+  Source source = 1;
+  // What the job named, untouched: 1 to 1024 bytes of UTF-8 with no control character.
+  string ref = 2;
+  // How the job will use the tree.
+  MountMode mode = 3;
+  // The host the agent runs on: the id it registered under.
+  string host = 4;
+}
+
+// The answer to Prepare: the work has begun.
+message PrepareResponse {}
+
+// Mount: the directory of a prepared source.
+message MountRequest {
+  // The source.
+  Source source = 1;
+}
+
+// The answer to Mount.
+message MountResponse {
+  // An absolute path of a directory on the host, beneath a directory the operator lists to
+  // the agent as a mount root; the agent opens it as it opens any host path and never
+  // trusts its text.
+  string path = 1;
+}
+
+// Release: give up a source.
+message ReleaseRequest {
+  // The source.
+  Source source = 1;
+}
+
+// The answer to Release: the source is given up.
+message ReleaseResponse {}
+
+// Sweep: release an agent's sources of every run it does not keep.
+message SweepRequest {
+  // The agent, as Source.agent.
+  string agent = 1;
+  // The runs whose sources are kept, as Source.run.
+  repeated string keep = 2;
+}
+
+// The answer to Sweep.
+message SweepResponse {
+  // How many sources were released.
+  uint32 released = 1;
+}

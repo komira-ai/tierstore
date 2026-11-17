@@ -85,8 +85,7 @@
 //!   objects does; the markers of a page are its last key and `null`, or a common prefix and no
 //!   id. A `version-id-marker` needs a `key-marker` and can only be `null` (`InvalidArgument`
 //!   otherwise). `versionId=null` on a GetObject, HeadObject or DeleteObject is the call without
-//!   it; any other id is `NoSuchVersion` (404), and `versionId` on another call is
-//!   `NotImplemented`;
+//!   it; another id is `NoSuchVersion` (404); `versionId` on another call is `NotImplemented`;
 //! - HeadBucket of the served bucket, with `x-amz-bucket-region`; CreateBucket of it, which
 //!   exists, so it is answered as S3 answers a create of a bucket one owns (200 in `us-east-1`,
 //!   409 `BucketAlreadyOwnedByYou` elsewhere; a `LocationConstraint` other than the server's
@@ -433,6 +432,7 @@ pub mod presign;
 mod presign_get_tests;
 #[cfg(test)]
 mod presign_server_tests;
+mod provider;
 #[cfg(test)]
 mod ready_tests;
 #[cfg(test)]
