@@ -149,6 +149,7 @@ fn simulate(text: &str, release: &Release) -> BTreeMap<String, &'static str> {
             let mut names = BTreeMap::from([
                 ("needs.plan.outputs.release".to_owned(), "true".to_owned()),
                 ("github.ref".to_owned(), "refs/heads/main".to_owned()),
+                ("vars.TIERSTORE_SETS_DESIRED".to_owned(), "true".to_owned()),
             ]);
             for need in &info.needs {
                 names.insert(format!("needs.{need}.result"), results[need].to_owned());
@@ -190,6 +191,7 @@ fn no_farm() -> Release {
             ("testing-upload", "enabled", "true"),
             ("testing-apt-write", "conflict", "false"),
             ("testing-rpm-write", "conflict", "false"),
+            ("deploy-check", "set", "true"),
             ("farm-check", "enabled", "false"),
             ("promote-check", "promote", "true"),
             ("stable-apt-write", "conflict", "false"),

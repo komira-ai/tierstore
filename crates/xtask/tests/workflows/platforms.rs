@@ -1,8 +1,8 @@
 //! The release platforms in the workflows: every platform a release is built for
 //! (`xtask::package::Platform::ALL`) has its build job in `artifacts.yml` on a GitHub-hosted
 //! runner of its own platform, and every later job, here and in `release.yml`, reads, signs and
-//! checks its files; the macOS build job also runs the tests of the binary's crates, the one
-//! platform whose build the `test` job of `ci.yml` (Linux) does not cover.
+//! checks its files. The tests of the workspace on the other platforms are `beta.yml`'s: no job of
+//! `artifacts.yml`, which every release waits for, runs them.
 //!
 //! The commands of a build job and of the signing job are pinned whole ([`build_commands`],
 //! [`attest_commands`]): a check that looks for a word in a command passes a command that names a
@@ -24,13 +24,15 @@
 //! - the cargo-cyclonedx checksum a build job names is not 64 lowercase hex digits in the file's
 //!   `env`, or any job or step sets a `CYCLONEDX_` variable of its own (which would shadow the pin);
 //! - a Linux build job is not built and checked against glibc 2.28 as [`super::glibc_floor`] says;
-//! - a job other than `attest` and `verify` has an `if:`, those two have another than the
+//! - a job other than `attest` has an `if:`, `attest` has another than the
 //!   signing condition, any job or step has `continue-on-error`, or a step that is not a cache
 //!   save has an `if:` (a required step that can be skipped or fail unseen is no gate);
-//! - `sums` does not need every build job; a download of `sums`, `attest` or `verify` does not
+//! - `sums` does not need every build job; a download of `sums` or `attest` does not
 //!   take every platform's `assets-<platform>` into `dist` merged, or takes `sha256sums` or
-//!   `bundles` with them; `attest` does not take the sums into `dist`, or `verify` the sums into
-//!   `published` and the bundles into `dist`;
+//!   `bundles` with them; `attest` does not take the sums into `dist`;
+//! - a job is named `verify` (the checks of a deployment are `release.yml`'s `verify` job, before
+//!   anything is tagged), or any job has a step that runs `cargo test` (the tests of the workspace
+//!   are `beta.yml`'s and never hold a release);
 //! - `attest` lacks, for any platform, the SBOM attestation of its tarball, the provenance
 //!   attestation of its tarball alone, or the copy of that attestation's bundle under the
 //!   tarball's name, or the same two for its hostkeeper package (named by the sums job's
@@ -62,8 +64,7 @@ use super::yaml::{self, Node, Value};
 /// A platform's build job: its runner (GitHub-hosted, of the platform's own OS and architecture,
 /// so the binary runs where it is built), its Rust target, the variable of the file's `env` that
 /// pins the SHA-256 of its cargo-cyclonedx, the `if:` of the job (none: it runs for every event),
-/// whether it runs the tests of the workspace (the beta platforms: no pull request runs them), the target
-/// the Homebrew tap's formula names the platform's tarball by (`tap`, the last part of
+/// the target the Homebrew tap's formula names the platform's tarball by (`tap`, the last part of
 /// `tierstore-<version>-<tap>.tar.gz`), and the Debian and RPM architectures of its packages, if it
 /// has them.
 pub struct Build {
@@ -72,7 +73,6 @@ pub struct Build {
     pub target: &'static str,
     pub pin: &'static str,
     pub job_if: Option<&'static str>,
-    pub tests: bool,
     pub tap: &'static str,
     pub deb: Option<&'static str>,
     pub rpm: Option<&'static str>,
@@ -95,8 +95,8 @@ pub const SUMS_IF: &str = "${{ !cancelled() && needs.linux-x86_64.result == 'suc
 /// of a branch, tried before it merges).
 pub const TRIGGERS: [&str; 3] = ["pull_request", "push", "workflow_dispatch"];
 
-/// The tests a beta build job (linux-arm64, macos-arm64) runs before it builds: every test of
-/// every crate of the workspace, none left out (no `--no-run`, no filter).
+/// The tests `beta.yml` runs on linux-arm64 and macos-arm64: every test of every crate of the
+/// workspace, none left out (no `--no-run`, no filter). No build job of `artifacts.yml` runs it.
 pub const BETA_TESTS: &str =
     "cargo test --locked --workspace --features tierstore/s3 --no-fail-fast";
 
@@ -108,7 +108,6 @@ pub const BUILDS: &[Build] = &[
         target: "x86_64-unknown-linux-gnu",
         pin: "CYCLONEDX_SHA256_X86_64_LINUX",
         job_if: None,
-        tests: false,
         tap: "linux-x86_64",
         deb: Some("amd64"),
         rpm: Some("x86_64"),
@@ -124,7 +123,6 @@ pub const BUILDS: &[Build] = &[
         target: "aarch64-unknown-linux-gnu",
         pin: "CYCLONEDX_SHA256_AARCH64_LINUX",
         job_if: Some(NOT_FOR_A_PULL_REQUEST),
-        tests: true,
         tap: "linux-aarch64",
         deb: Some("arm64"),
         rpm: Some("aarch64"),
@@ -140,7 +138,6 @@ pub const BUILDS: &[Build] = &[
         target: "aarch64-apple-darwin",
         pin: "CYCLONEDX_SHA256_AARCH64_MACOS",
         job_if: Some(NOT_FOR_A_PULL_REQUEST),
-        tests: true,
         tap: "macos-arm64",
         deb: None,
         rpm: None,
@@ -219,9 +216,6 @@ pub fn build_commands(b: &Build) -> Vec<String> {
             "cargo xtask release rpm --binary \"target/$TARGET/release/tierstore\" --version \"$RELEASE_VERSION\" --platform {platform} --licenses \"$RUNNER_TEMP/THIRD-PARTY-LICENSES.txt\" --out dist"
         ));
         commands.push(format!("cargo xtask release rpm-info \"dist/{file}\""));
-    }
-    if b.tests {
-        commands.insert(3, BETA_TESTS.to_owned());
     }
     if b.platform == "macos-arm64" {
         commands.push(CODESIGN.to_owned());
@@ -585,6 +579,29 @@ fn build_problems(doc: &Node, b: &Build, build: &Node) -> Vec<String> {
     problems
 }
 
+/// One line per way `jobs` of `artifacts.yml` puts onto the release path what is not its own: a
+/// job named `verify` (release.yml's `verify` makes the checks of a deployment before anything is
+/// tagged) and a step that runs `cargo test` (the tests of the workspace are beta.yml's and never
+/// hold a release).
+fn release_path_problems(jobs: &[(Node, Node)]) -> Vec<String> {
+    let mut problems = Vec::new();
+    for (name, body) in jobs {
+        let name = name.as_str().unwrap_or_default();
+        if name == "verify" {
+            problems.push(
+                "artifacts.yml: job `verify` is release.yml's: the checks of a deployment are made there before anything is tagged"
+                    .to_owned(),
+            );
+        }
+        if runs(Some(body)).iter().any(|r| r.contains("cargo test")) {
+            problems.push(format!(
+                "artifacts.yml: job {name} runs `cargo test`: the workspace tests are beta.yml's and never hold a release"
+            ));
+        }
+    }
+    problems
+}
+
 /// One line per `CYCLONEDX_` variable a job or a step of `jobs` sets for itself: it would shadow
 /// the pin of the file's `env` that the check above reads.
 fn shadow_problems(jobs: &[(Node, Node)]) -> Vec<String> {
@@ -652,7 +669,7 @@ pub fn artifacts_platform_problems(
     for (name, body) in jobs {
         let name = name.as_str().unwrap_or_default();
         let job_if = match name {
-            "attest" | "verify" => Some(SIGN_IF),
+            "attest" => Some(SIGN_IF),
             "sign-pkg" | "check-pkg" => Some(PKG_JOB_IF),
             "sums" => Some(SUMS_IF),
             _ => BUILDS
@@ -682,12 +699,7 @@ pub fn artifacts_platform_problems(
         &with_pkg,
         &[(SUMS, "dist")],
     ));
-    problems.extend(download_problems(
-        "verify",
-        job("verify"),
-        &with_pkg,
-        &[(SUMS, "published"), (BUNDLES, "dist")],
-    ));
+    problems.extend(release_path_problems(jobs));
     problems.extend(attest_problems(job("attest"), platforms));
 
     for (name, body) in jobs {

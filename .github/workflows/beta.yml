@@ -1,0 +1,127 @@
+# The beta stage: every test of the workspace on the two platforms a pull request does not run on,
+# linux-arm64 (`ubuntu-24.04-arm`) and macos-arm64 (`macos-15`), on a push to main and by hand.
+# On macOS that includes the update hook's launchd steps, the listener hand-off, the macOS
+# packaging (tests/packaging_macos.rs) and the xtask verbs. ci.yml runs the same tests on Linux
+# x86_64, with coverage, for every pull request and push.
+#
+# It never holds a release. release.yml releases a commit once ci.yml and artifacts.yml have
+# green push runs for it (`cargo xtask release plan`), and nothing reads this workflow's result
+# but its own last job, `red`, which keeps one issue, `RELEASE-RED: tierstore beta`
+# (`cargo xtask release red`): opened, or commented on, with the jobs that failed, were cancelled
+# or timed out; commented on and closed by a run in which both test jobs passed. A failure here is
+# fixed forward: the release that carries the fix is tested here again.
+#
+# A run by hand (`gh workflow run beta.yml --ref <branch>`) tests a branch on both platforms; its
+# `red` job runs on main alone, so a branch never opens or closes the issue.
+#
+# One run per commit, never cancelled: two runs of one commit queue, and different commits do not
+# wait for each other. The `red` job has a group of its own across runs, so two runs never race to
+# open the issue. `issues: write` is its one write scope, under its exact `if:` (the workflow
+# lint, crates/xtask/tests/workflows, beta.rs).
+name: beta
+
+on:
+  push:
+    branches: [main]
+  workflow_dispatch:
+
+permissions: {}
+
+concurrency:
+  group: beta-${{ github.sha }}
+  cancel-in-progress: false
+
+env:
+  CARGO_TERM_COLOR: always
+  CARGO_INCREMENTAL: 0
+
+defaults:
+  run:
+    shell: bash
+
+jobs:
+  linux-arm64:
+    runs-on: ubuntu-24.04-arm
+    timeout-minutes: 45
+    permissions:
+      contents: read
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+      - run: rustup toolchain install
+      # Nothing built here is released, so the build may start from a cache.
+      - uses: actions/cache/restore@55cc8345863c7cc4c66a329aec7e433d2d1c52a9 # v6.1.0
+        id: cargo-cache
+        with:
+          path: |
+            ~/.cargo/registry
+            ~/.cargo/git
+            target
+          key: cargo-beta-${{ runner.os }}-${{ runner.arch }}-${{ hashFiles('Cargo.lock', 'rust-toolchain.toml') }}
+          restore-keys: cargo-beta-${{ runner.os }}-${{ runner.arch }}-
+      - name: The tests of the workspace, on linux-arm64
+        run: cargo test --locked --workspace --features tierstore/s3 --no-fail-fast
+      - uses: actions/cache/save@55cc8345863c7cc4c66a329aec7e433d2d1c52a9 # v6.1.0
+        if: ${{ github.ref == 'refs/heads/main' && steps.cargo-cache.outputs.cache-hit != 'true' }}
+        with:
+          path: |
+            ~/.cargo/registry
+            ~/.cargo/git
+            target
+          key: ${{ steps.cargo-cache.outputs.cache-primary-key }}
+
+  macos-arm64:
+    runs-on: macos-15
+    timeout-minutes: 45
+    permissions:
+      contents: read
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+      - run: rustup toolchain install
+      # Nothing built here is released, so the build may start from a cache.
+      - uses: actions/cache/restore@55cc8345863c7cc4c66a329aec7e433d2d1c52a9 # v6.1.0
+        id: cargo-cache
+        with:
+          path: |
+            ~/.cargo/registry
+            ~/.cargo/git
+            target
+          key: cargo-beta-${{ runner.os }}-${{ runner.arch }}-${{ hashFiles('Cargo.lock', 'rust-toolchain.toml') }}
+          restore-keys: cargo-beta-${{ runner.os }}-${{ runner.arch }}-
+      - name: The tests of the workspace, on macOS
+        run: cargo test --locked --workspace --features tierstore/s3 --no-fail-fast
+      - uses: actions/cache/save@55cc8345863c7cc4c66a329aec7e433d2d1c52a9 # v6.1.0
+        if: ${{ github.ref == 'refs/heads/main' && steps.cargo-cache.outputs.cache-hit != 'true' }}
+        with:
+          path: |
+            ~/.cargo/registry
+            ~/.cargo/git
+            target
+          key: ${{ steps.cargo-cache.outputs.cache-primary-key }}
+
+  red:
+    needs: [linux-arm64, macos-arm64]
+    if: ${{ !cancelled() && github.ref == 'refs/heads/main' }}
+    runs-on: ubuntu-24.04
+    timeout-minutes: 15
+    concurrency:
+      group: release-red-beta
+      cancel-in-progress: false
+    permissions:
+      contents: read
+      actions: read
+      issues: write
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+      - run: rustup toolchain install
+      - name: Compile xtask
+        run: cargo xtask --help
+      - name: Open, comment on or close the issue RELEASE-RED tierstore beta
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: cargo xtask release red --repo "$GITHUB_REPOSITORY" --stage beta --run "$GITHUB_RUN_ID" --job red --commit "$GITHUB_SHA" --complete true

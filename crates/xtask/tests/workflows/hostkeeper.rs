@@ -1,7 +1,7 @@
 //! The release index of the hostkeeper packages in the workflows: the `sums` job of
 //! `artifacts.yml` writes it before it assembles the sums and hands it, with the sums, to the
-//! signing job, and every job that checks a release makes it again from the packages and takes
-//! each package from it as a host does. (The build jobs' commands, which make and unpack each
+//! signing job, and the jobs of `release.yml` that check a release make it again from the packages
+//! and take each package from it as a host does. (The build jobs' commands, which make and unpack each
 //! package, and the signing job's, which sign each package and name its bundle, are pinned with
 //! the rest of those jobs' commands in [`super::platforms`].)
 //!
@@ -10,10 +10,7 @@
 //!   sums would not list the index), does not hand the step's `package-version` on as its own
 //!   output (the signing job names the packages by it), or does not upload `index.json` with
 //!   the sums (the signing job checks every listed file before it signs);
-//! - `attest` does not need `sums`;
-//! - `verify` does not make the index again ([`regenerate`]) before it assembles the sums it
-//!   holds to the published ones, or does not take each package from it ([`verify_index`]) after
-//!   it checks the set of the release.
+//! - `attest` does not need `sums`.
 //!
 //! [`release_index_problems`] refuses `release.yml` when its `verify` job does not make the index
 //! again before it assembles the sums and take each package from it, or its `publish` job does not
@@ -113,7 +110,7 @@ pub fn at<'a>(node: &'a Node, path: &[&str]) -> Option<&'a str> {
 }
 
 /// One line per way `artifacts.yml` (`text`) does not write the index in `sums`, hand it and the
-/// packages' version to `attest`, and make it again and check each package from it in `verify`.
+/// packages' version to `attest`.
 pub fn artifacts_index_problems(text: &str) -> Vec<String> {
     let doc = match yaml::load(text) {
         Ok(doc) => doc,
@@ -152,19 +149,6 @@ pub fn artifacts_index_problems(text: &str) -> Vec<String> {
     if !needs.iter().any(|n| n == "sums") {
         problems.push("attest: does not need sums, whose outputs it reads".to_owned());
     }
-    let verify = job(&doc, "verify");
-    problems.extend(order_problems(
-        "verify",
-        verify,
-        &regenerate("$GITHUB_SHA"),
-        "cargo xtask sums assemble dist --expect",
-    ));
-    problems.extend(order_problems(
-        "verify",
-        verify,
-        "cargo xtask release check dist --commit \"$GITHUB_SHA\"",
-        &verify_index("$GITHUB_SHA"),
-    ));
     problems
 }
 

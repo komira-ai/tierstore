@@ -225,6 +225,7 @@ fn by_version(version: &'static str) -> Request<'static> {
         dir: Path::new(""),
         apt_url: URL,
         macos_pkg: false,
+        skip_superseded: false,
         curl: Path::new("curl"),
         output: None,
     }
@@ -776,4 +777,72 @@ fn with_the_macos_pkg_a_release_that_has_none_is_refused_and_nothing_is_set() {
         ]
     );
     assert!(!output.exists());
+}
+
+/// `gh` with the published release `v<version>` and the list of `releases`.
+fn listing(version: &str, releases: Value) -> FakeGh {
+    let mut gh = released(version);
+    gh.answers
+        .push((format!("repos/{REPO}/releases?per_page=100"), releases));
+    gh
+}
+
+#[test]
+fn a_release_a_newer_one_superseded_is_not_set_by_a_deploy_that_skips_superseded() {
+    // Catches: the deploy of a release run that waited behind a newer release (one made by hand
+    // runs beside the release group) moving the fleet back to the older version, and the suite or
+    // the release being read for a version that is not set.
+    let s = scratch("superseded");
+    let output = s.join("output");
+    let dir = s.join("d");
+    let gh = listing(
+        VERSION,
+        json!([listed(TAG), listed("v0.4.1"), listed("v0.3.12")]),
+    );
+    let request = Request {
+        skip_superseded: true,
+        ..at(by_version(VERSION), &dir, Some(&output))
+    };
+    assert_eq!(
+        desired(&gh, &testing(&[VERSION]), &request).expect("passes"),
+        vec![
+            "v0.4.0 is superseded by v0.4.1, the newest published release of example/tierstore: nothing is set"
+                .to_owned(),
+            "set=false".to_owned(),
+        ]
+    );
+    assert_eq!(
+        std::fs::read_to_string(&output).expect("the output"),
+        "set=false\n"
+    );
+    assert_eq!(
+        gh.asked.borrow().as_slice(),
+        [format!("repos/{REPO}/releases?per_page=100")]
+    );
+    assert!(gh.ran.borrow().is_empty());
+}
+
+#[test]
+fn the_newest_release_is_set_by_a_deploy_that_skips_superseded_and_a_failed_list_is_a_failure() {
+    // Catches: `--skip-superseded` refusing the newest release itself (an equal version is not
+    // newer), and a repository whose releases cannot be listed read as nothing newer.
+    let s = scratch("not-superseded");
+    let output = s.join("output");
+    let dir = s.join("d");
+    let gh = listing(VERSION, json!([listed("v0.3.12"), listed(TAG)]));
+    let request = Request {
+        skip_superseded: true,
+        ..at(by_version(VERSION), &dir, Some(&output))
+    };
+    let printed = desired(&gh, &testing(&[VERSION]), &request).expect("set");
+    assert_eq!(printed[1..3], ["set=true", "package-version=0.4.0"]);
+    assert_eq!(
+        gh.asked.borrow()[..2],
+        [format!("repos/{REPO}/releases?per_page=100"), tag_path(TAG)]
+    );
+    let none = listing(VERSION, json!([]));
+    assert_eq!(
+        failed(desired(&none, &testing(&[VERSION]), &request)),
+        "example/tierstore has no published release vX.Y.Z"
+    );
 }

@@ -16,8 +16,10 @@
 //!   exchanges for a node), and by the release's `farm` job (the same token
 //!   for the farm), and by the release's `testing-upload` and `promote-latest` jobs (the
 //!   token the release-files role admits) and its twelve apt jobs that read and write the
-//!   repository (the token the apt role admits), six for the suite `testing` and six for `stable`, and the same twelve for the rpm tree; `contents: write` by the release's `publish` job
-//!   alone.
+//!   repository (the token the apt role admits), six for the suite `testing` and six for `stable`, and the same twelve for the rpm tree, and by the release's `deploy` and `deploy-mac`
+//!   jobs (the token the hostkeeper coordinator admits, as for `set-desired`); `contents: write`
+//!   by the release's `publish` job alone; `issues` by `advisories.yml` and by the `red` job of
+//!   `release.yml` and of `beta.yml` (the issue `RELEASE-RED: tierstore <stage>`).
 //!
 //! Keys are matched exactly. What this does not evaluate it refuses: a YAML tag, a second
 //! document, an alias to an unfinished node, a document that does not parse.
@@ -261,6 +263,30 @@ pub const WRITE_ALLOWED: &[Allowed] = &[
         scope: "issues",
         condition: MAIN_ONLY,
     },
+    Allowed {
+        file: "release.yml",
+        job: "deploy",
+        scope: "id-token",
+        condition: super::desired::DEPLOY_IF,
+    },
+    Allowed {
+        file: "release.yml",
+        job: "deploy-mac",
+        scope: "id-token",
+        condition: super::desired::DEPLOY_IF,
+    },
+    Allowed {
+        file: "release.yml",
+        job: "red",
+        scope: "issues",
+        condition: super::red::RELEASE_RED_IF,
+    },
+    Allowed {
+        file: "beta.yml",
+        job: "red",
+        scope: "issues",
+        condition: super::red::BETA_RED_IF,
+    },
 ];
 
 pub fn entry<'a>(map: &'a Node, key: &str) -> Option<&'a Node> {
@@ -474,8 +500,9 @@ pub fn names(node: Option<&Node>) -> Vec<String> {
 /// One line per way the text of `release.yml` is not the automatic release chain: started by
 /// the completion of `ci` and `artifacts` on `main` and by hand and by nothing else, one run at
 /// a time and none cancelled, a read-only `plan` job that answers whether and as which tag,
-/// `verify` and `publish` after it (the write scope in `publish` alone), and no step that builds
-/// or signs.
+/// `verify` and `publish` after it (the write scope in `publish` alone), the deploy as soon as
+/// the suite `testing` lists the release (`desired::deploy_problems`), a last job `red` that
+/// reports the run (`red::release_red_problems`), and no step that builds or signs.
 pub fn release_problems(text: &str) -> Vec<String> {
     let doc = match yaml::load(text) {
         Ok(doc) => doc,
@@ -514,6 +541,9 @@ pub fn release_problems(text: &str) -> Vec<String> {
         "check-brew",
         "check-install-sh",
         "check-rpm",
+        "deploy",
+        "deploy-check",
+        "deploy-mac",
         "farm",
         "farm-check",
         "formula",
@@ -522,6 +552,7 @@ pub fn release_problems(text: &str) -> Vec<String> {
         "promote-latest",
         "promote-pkg",
         "publish",
+        "red",
         "soak",
         "tap",
         "testing-pkg-upload",
@@ -533,7 +564,7 @@ pub fn release_problems(text: &str) -> Vec<String> {
     expected.sort_unstable();
     if listed != expected {
         problems.push(format!(
-            "jobs are {listed:?}, not plan, verify, publish, formula, testing-upload, testing-pkg-upload, the install checks, the lab (farm-check, farm, soak), promote-check, promote-latest, promote-pkg, tap and the apt and rpm jobs {expected:?}"
+            "jobs are {listed:?}, not plan, verify, publish, the deploy (deploy-check, deploy, deploy-mac), formula, testing-upload, testing-pkg-upload, the install checks, the lab (farm-check, farm, soak), promote-check, promote-latest, promote-pkg, tap, the apt and rpm jobs and red {expected:?}"
         ));
     }
     for (name, job) in jobs {
@@ -544,17 +575,21 @@ pub fn release_problems(text: &str) -> Vec<String> {
             let writes = level != "read" && level != "none";
             let scope = scope.as_str().unwrap_or_default();
             // `testing-upload` and `promote-latest` hold `id-token: write` for the release-files role, the apt
-            // jobs that read and write the repository for the apt role, and `farm` for the
-            // hostkeeper coordinator, and none anything that writes to the repository;
-            // `channels::channel_problems`, `apt::apt_problems` and `farm::farm_problems` pin
-            // those jobs whole.
+            // jobs that read and write the repository for the apt role, and `farm`, `deploy` and
+            // `deploy-mac` for the hostkeeper coordinator, and none anything that writes to the
+            // repository; `red` holds `issues: write` for its issue and nothing else.
+            // `channels::channel_problems`, `apt::apt_problems`, `farm::farm_problems`,
+            // `desired::deploy_problems` and `red::red_problems` pin those jobs whole.
             let oidc = (name == "testing-upload"
                 || name == "promote-latest"
                 || name == "farm"
+                || name == "deploy"
+                || name == "deploy-mac"
                 || super::apt::is_role_job(name))
                 && scope == "id-token"
                 && level == "write";
-            if writes && name != "publish" && !oidc {
+            let report = name == "red" && scope == "issues" && level == "write";
+            if writes && name != "publish" && !oidc && !report {
                 problems.push(format!(
                     "{name}: permissions grant `{scope}: {level}`; only publish writes"
                 ));
@@ -683,6 +718,8 @@ pub fn release_problems(text: &str) -> Vec<String> {
     problems.extend(super::rpm::rpm_problems(&doc));
     problems.extend(super::checks::check_problems(&doc));
     problems.extend(super::graph::graph_problems(&doc));
+    problems.extend(super::desired::deploy_problems(&doc, text));
+    problems.extend(super::red::release_red_problems(&doc));
     problems
 }
 

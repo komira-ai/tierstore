@@ -57,6 +57,15 @@
 # TESTING, installed from there on clean machines, put on the lab, and only then promoted, as the
 # same bytes: nothing is rebuilt and nothing is uploaded again.
 #
+# The DEPLOY is the fast lane beside that order: `deploy-check`, `deploy` and `deploy-mac` set the
+# release on the hostkeeper coordinator for the build nodes and the Macs as soon as the suite
+# `testing` lists its .debs (plan, verify, publish and the testing-apt jobs are all it waits
+# for), and the install checks, the lab and the promotion go on beside it and never hold it. A
+# failure there does not undo the deploy; the last job, `red`, reports it in the issue
+# `RELEASE-RED: tierstore release` (cargo xtask release red), and it is fixed forward by the next
+# release. The slow suites (every test of the workspace on linux-arm64 and macOS) are beta.yml's,
+# after the push, and never hold a release either.
+#
 # 1. testing    testing-pkg-upload (the signed macOS installer into pkg/tierstore/<version>/ of the
 #               package repository, write-once, no pointer), formula (renders Formula/tierstore.rb and keeps it as an artifact; no pull
 #               request yet), testing-upload (the files at tierstore.dev/releases/<version>/,
@@ -132,7 +141,9 @@
 # workflow lint finds them by what they do and holds each to it (artifacts.yml, which only
 # builds and attests, is exempt and has a group per commit).
 # GitHub keeps one waiting run per group, so a third replaces the second; nothing is lost by
-# that, since every plan walks from the tip of main and measures from the highest tag. A manual run of this workflow takes a group
+# that, since every plan walks from the tip of main and measures from the highest tag: when
+# several merges queue behind a release in flight, only the newest is released and deployed, and
+# `deploy-check` (`--skip-superseded`) never sets a release older than the newest published one. A manual run of this workflow takes a group
 # of its own (publish refuses a tag or release that exists). The lint also holds `contents: write`
 # to the `publish` job alone, `plan` to read access, and this file to no build and no signing
 # step.
@@ -1066,6 +1077,99 @@ jobs:
           APT_DISTRIBUTION_ID: ${{ vars.APT_DISTRIBUTION_ID }}
           APT_HOSTNAME: ${{ vars.APT_HOSTNAME }}
         run: cargo xtask channels apt write --suite testing --bucket "$APT_BUCKET" --distribution-id "$APT_DISTRIBUTION_ID" --hostname "$APT_HOSTNAME" --next "$RUNNER_TEMP/apt-next" --debs dist --version "${TAG#v}" --last --output "$GITHUB_OUTPUT"
+
+  # DEPLOY, the fast lane: the build nodes take the release as soon as the suite `testing` lists
+  # its .debs, and not after the install checks, the lab or the promotion, which go on beside it
+  # and never hold it. `deploy-check` decides what to set (`cargo xtask release desired`, the
+  # command the workflow hostkeeper-desired runs for a version given by hand, with
+  # `--skip-superseded`: a release older than the newest published one is not set, so a run that
+  # waited behind a newer release never moves the fleet back), and `deploy` and `deploy-mac` call
+  # hostkeeper's CI client with it, exactly as the by-hand workflow's `set-desired` and
+  # `set-desired-mac` do (the same pin, audience and inputs, so the same allow-list entries of the
+  # coordinator admit them: the entry is keyed on the called workflow, not the caller). Off until
+  # the repository variable TIERSTORE_SETS_DESIRED is `true`, exactly, as the by-hand workflow
+  # is. The Linux nodes and the Macs are two jobs: a Mac that does not converge leaves the Linux
+  # deploy green, and the `red` job reports it.
+  deploy-check:
+    needs: [plan, testing-apt-write, testing-apt-write-2, testing-apt-write-3]
+    if: ${{ !cancelled() && !failure() && needs.plan.outputs.release == 'true' && github.ref == 'refs/heads/main' && (needs.testing-apt-write.outputs.conflict == 'false' || needs.testing-apt-write-2.outputs.conflict == 'false' || needs.testing-apt-write-3.outputs.conflict == 'false') && vars.TIERSTORE_SETS_DESIRED == 'true' }}
+    runs-on: ubuntu-24.04
+    timeout-minutes: 30
+    permissions:
+      contents: read
+    outputs:
+      set: ${{ steps.desired.outputs.set }}
+      package-version: ${{ steps.desired.outputs.package-version }}
+      targets: ${{ steps.desired.outputs.targets }}
+      targets-mac: ${{ steps.desired.outputs.targets-mac }}
+    env:
+      COMMIT: ${{ needs.plan.outputs.commit }}
+      TAG: ${{ needs.plan.outputs.tag }}
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          ref: ${{ needs.plan.outputs.commit }}
+          persist-credentials: false
+      - run: rustup toolchain install
+      - name: Compile xtask
+        run: cargo xtask --help
+      # The testing suite is read through the CDN, as a host's apt reads it; curl retries a CDN
+      # that has not caught up for a few minutes.
+      - name: The release to set, refused unless the testing suite lists its .debs with the digests of its SHA256SUMS
+        id: desired
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: cargo xtask release desired --repo "$GITHUB_REPOSITORY" --version "${TAG#v}" --skip-superseded --min-hostkeeper 0.1.225 --macos-pkg --dir "$RUNNER_TEMP/desired" --output "$GITHUB_OUTPUT"
+
+  deploy:
+    needs: [deploy-check]
+    if: ${{ !cancelled() && github.ref == 'refs/heads/main' && vars.TIERSTORE_SETS_DESIRED == 'true' && needs.deploy-check.outputs.set == 'true' }}
+    permissions:
+      contents: read
+      id-token: write
+    uses: komira-ai/hostkeeper/.github/workflows/set-desired.yml@30141591c292d8881ce5bc16c9d0b3ba7fcfdca1 # v0.1.317
+    with:
+      service: tierstore
+      host_group: all-in-one
+      version: ${{ needs.deploy-check.outputs.package-version }}
+      targets: ${{ needs.deploy-check.outputs.targets }}
+      hostkeeper_version: 0.1.317
+      hostkeeper_commit: 30141591c292d8881ce5bc16c9d0b3ba7fcfdca1
+      coordinator_url: ${{ vars.HOSTKEEPER_COORDINATOR_URL }}
+      coordinator_ca: ${{ vars.HOSTKEEPER_COORDINATOR_CA }}
+      audience: tierstore-hostkeeper-desired
+      wait: true
+      max_polls: 180
+      join_tailnet: ${{ vars.HOSTKEEPER_TAILNET_CLIENT_ID != '' }}
+      tailnet_client_id: ${{ vars.HOSTKEEPER_TAILNET_CLIENT_ID }}
+      tailnet_audience: ${{ vars.HOSTKEEPER_TAILNET_AUDIENCE }}
+      tailnet_coordinator: ${{ vars.HOSTKEEPER_TAILNET_COORDINATOR }}
+      tailnet_tag: ${{ vars.HOSTKEEPER_TAILNET_TAG }}
+
+  deploy-mac:
+    needs: [deploy-check]
+    if: ${{ !cancelled() && github.ref == 'refs/heads/main' && vars.TIERSTORE_SETS_DESIRED == 'true' && needs.deploy-check.outputs.set == 'true' }}
+    permissions:
+      contents: read
+      id-token: write
+    uses: komira-ai/hostkeeper/.github/workflows/set-desired.yml@30141591c292d8881ce5bc16c9d0b3ba7fcfdca1 # v0.1.317
+    with:
+      service: tierstore
+      host_group: mac-build
+      version: ${{ needs.deploy-check.outputs.package-version }}
+      targets: ${{ needs.deploy-check.outputs.targets-mac }}
+      hostkeeper_version: 0.1.317
+      hostkeeper_commit: 30141591c292d8881ce5bc16c9d0b3ba7fcfdca1
+      coordinator_url: ${{ vars.HOSTKEEPER_COORDINATOR_URL }}
+      coordinator_ca: ${{ vars.HOSTKEEPER_COORDINATOR_CA }}
+      audience: tierstore-hostkeeper-desired
+      wait: true
+      max_polls: 180
+      join_tailnet: ${{ vars.HOSTKEEPER_TAILNET_CLIENT_ID != '' }}
+      tailnet_client_id: ${{ vars.HOSTKEEPER_TAILNET_CLIENT_ID }}
+      tailnet_audience: ${{ vars.HOSTKEEPER_TAILNET_AUDIENCE }}
+      tailnet_coordinator: ${{ vars.HOSTKEEPER_TAILNET_COORDINATOR }}
+      tailnet_tag: ${{ vars.HOSTKEEPER_TAILNET_TAG }}
 
   # TESTING, the rpm tree of the repository packages.komira.ai: the release's RPM packages, signed,
   # into the pool and the repodata of the suite `testing` (docs/design/distribution.md, sections 5
@@ -3277,3 +3381,33 @@ jobs:
           APT_DISTRIBUTION_ID: ${{ vars.APT_DISTRIBUTION_ID }}
           APT_HOSTNAME: ${{ vars.APT_HOSTNAME }}
         run: cargo xtask channels rpm repo write --suite stable --bucket "$APT_BUCKET" --distribution-id "$APT_DISTRIBUTION_ID" --hostname "$APT_HOSTNAME" --next "$RUNNER_TEMP/rpm-next" --no-pool --last --output "$GITHUB_OUTPUT"
+
+  # RELEASE-RED: the last job, after every other (its `needs` are the jobs no other job needs, so
+  # it waits for all of them). It runs when the plan failed or a release was made, and keeps one
+  # open issue, `RELEASE-RED: tierstore release` (cargo xtask release red): opened, or commented
+  # on, with the jobs of this run that failed, were cancelled or timed out; commented on and
+  # closed by a run that released and in which nothing failed. Nothing here holds the deploy
+  # above: it reports what failed beside or after it. `issues: write` is its one write scope,
+  # under its exact `if:` (the workflow lint).
+  red:
+    needs: [plan, deploy, deploy-mac, promote-latest, promote-pkg, tap, stable-apt-write-3, stable-rpm-write-3]
+    if: ${{ !cancelled() && github.ref == 'refs/heads/main' && (needs.plan.result == 'failure' || needs.plan.outputs.release == 'true') }}
+    runs-on: ubuntu-24.04
+    timeout-minutes: 15
+    permissions:
+      contents: read
+      actions: read
+      issues: write
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+      - run: rustup toolchain install
+      - name: Compile xtask
+        run: cargo xtask --help
+      - name: Open, comment on or close the issue RELEASE-RED tierstore release
+        env:
+          GH_TOKEN: ${{ github.token }}
+          COMMIT: ${{ needs.plan.outputs.commit || github.sha }}
+          COMPLETE: ${{ needs.plan.outputs.release == 'true' }}
+        run: cargo xtask release red --repo "$GITHUB_REPOSITORY" --stage release --run "$GITHUB_RUN_ID" --job red --commit "$COMMIT" --complete "$COMPLETE"

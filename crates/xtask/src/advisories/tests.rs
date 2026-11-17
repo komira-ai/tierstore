@@ -90,7 +90,9 @@ impl Tools for Fake {
     fn deny(&mut self) -> Result<DenyRun, Error> {
         Ok(self.deny.take().expect("cargo deny runs once"))
     }
+}
 
+impl Github for Fake {
     fn github(&mut self, call: &Call) -> Result<Option<Value>, Error> {
         self.calls.push(call.clone());
         if call.method == Method::Get {
