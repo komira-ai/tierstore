@@ -97,13 +97,11 @@ fn a_pull_request_builds_and_sums_the_linux_x86_64_package_and_never_signs_it_or
         "(github.event_name == 'pull_request' && needs.linux-arm64.result == 'skipped' && needs.macos-arm64.result == 'skipped')"
     ));
     assert!(SUMS_INDEX.contains("--event \"$GITHUB_EVENT_NAME\""));
-    for signer in ["attest", "verify"] {
-        assert_eq!(
-            job_value(&doc, signer, &["if"]).as_deref(),
-            Some(SIGN_IF),
-            "{signer} runs for a push to main alone"
-        );
-    }
+    assert_eq!(
+        job_value(&doc, "attest", &["if"]).as_deref(),
+        Some(SIGN_IF),
+        "attest runs for a push to main alone"
+    );
     assert_eq!(
         platform_problems_of(&text_of("artifacts.yml")),
         Vec::<String>::new()
@@ -159,8 +157,8 @@ fn a_main_or_manual_run_builds_the_macos_package_in_the_macos_job_and_its_index_
 
 const SUMS_STEP: &str = "      - name: The release index of the hostkeeper packages\n        id: index\n        run: cargo xtask release hostkeeper-index dist --commit \"$GITHUB_SHA\" --event \"$GITHUB_EVENT_NAME\" --output \"$GITHUB_OUTPUT\"\n";
 
-/// Changes to `sums`, `attest` and `verify` that leave the index out of the sums, away from the
-/// signing job, or unchecked.
+/// Changes to `sums` and `attest` that leave the index out of the sums or away from the signing
+/// job.
 const INDEX_DEFECTS: &[(&str, &str, &str, &str)] = &[
     (
         "sums",
@@ -198,32 +196,13 @@ const INDEX_DEFECTS: &[(&str, &str, &str, &str)] = &[
         "    needs: [version]\n",
         "attest: does not need sums",
     ),
-    (
-        "verify",
-        "      - name: The release index, made again from the packages\n        run: cargo xtask release hostkeeper-index dist --commit \"$GITHUB_SHA\" --event \"$GITHUB_EVENT_NAME\"\n",
-        "",
-        "verify: does not run `cargo xtask release hostkeeper-index dist --commit \"$GITHUB_SHA\" --event \"$GITHUB_EVENT_NAME\"`",
-    ),
-    (
-        "verify",
-        "        run: cargo xtask verify-assets hostkeeper-index dist --commit \"$GITHUB_SHA\" --scratch \"$RUNNER_TEMP/hostkeeper\"\n",
-        "        run: cargo xtask verify-assets hostkeeper-package dist\n",
-        "verify: does not run `cargo xtask verify-assets hostkeeper-index",
-    ),
-    (
-        "verify",
-        "        run: cargo xtask release check dist --commit \"$GITHUB_SHA\"\n",
-        "        run: cargo xtask release check dist\n",
-        "verify: does not run `cargo xtask release check dist --commit \"$GITHUB_SHA\"`",
-    ),
 ];
 
 #[test]
 fn each_way_of_leaving_the_index_out_of_the_sums_the_signing_or_the_check_is_named() {
     // Catches: an index the sums do not list, written after them, under another event, not handed
     // to the signing job or not uploaded with the sums, a signing job that cannot read the
-    // packages' version, and a verify job that does not make the index again or take each
-    // package from it.
+    // packages' version.
     each_named("artifacts.yml", artifacts_index_problems, INDEX_DEFECTS);
 }
 
@@ -244,25 +223,6 @@ fn an_index_written_after_the_sums_are_assembled_is_named() {
         problems,
         [format!(
             "sums: runs `{SUMS_INDEX}` after `cargo xtask sums assemble dist...`"
-        )]
-    );
-    let verify_moved = in_job(
-        &text,
-        "verify",
-        "      - name: The release index, made again from the packages\n        run: cargo xtask release hostkeeper-index dist --commit \"$GITHUB_SHA\" --event \"$GITHUB_EVENT_NAME\"\n",
-        "",
-    );
-    let verify_moved = in_job(
-        &verify_moved,
-        "verify",
-        "      - name: Check the files against SHA256SUMS\n",
-        "      - run: cargo xtask release hostkeeper-index dist --commit \"$GITHUB_SHA\" --event \"$GITHUB_EVENT_NAME\"\n      - name: Check the files against SHA256SUMS\n",
-    );
-    assert_eq!(
-        artifacts_index_problems(&verify_moved),
-        [format!(
-            "verify: runs `{}` after `cargo xtask sums assemble dist --expect...`",
-            regenerate("$GITHUB_SHA")
         )]
     );
     assert!(PACKAGE_VERSION.contains("steps.index.outputs"));

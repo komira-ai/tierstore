@@ -14,7 +14,7 @@ use std::path::{Path, PathBuf};
 
 use serde_json::{Value, json};
 use xtask::Error;
-use xtask::advisories::{Call, Method, Process, Tools};
+use xtask::advisories::{Call, Github, Method, Process, Tools};
 use xtask::channels::apt::sign::{Gpg, RealGpg};
 use xtask::channels::aws::{Answer, Aws, RealAws};
 use xtask::channels::soak::{Read, Reader, RealReader};

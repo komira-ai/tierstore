@@ -49,10 +49,13 @@
 #
 # A pull request runs on Linux x86_64 alone: it builds, packages and sums the linux-x86_64 files,
 # their hostkeeper package included, and attests nothing. The other platforms (linux-arm64 and
-# macos-arm64) are the beta stage of the release: their jobs test the workspace, then build and
-# check their files, on a push to main or by hand, and do not run for a pull request, so the pull
-# request's sums cover the linux-x86_64 files alone and it has no release index.
-# A push to main builds every platform, also signs, in the `attest` job, and then checks what it signed (`verify`), as a deployment does. A
+# macos-arm64) build, package and check their files on a push to main or by hand, and do not run
+# for a pull request, so the pull request's sums cover the linux-x86_64 files alone and it has no
+# release index. The tests of the workspace on those platforms are in beta.yml, which runs on a
+# push to main and never holds a release.
+# A push to main builds every platform and also signs, in the `attest` job. release.yml's `verify`
+# job then makes the checks a deployment makes (the attestations, the bundles offline, the index,
+# the assets of the commit) before anything is tagged. A
 # run by hand (workflow_dispatch) on a branch builds every platform, the macOS one included, and
 # sums them, and signs nothing: it is how a change to the macOS build is tried before it merges.
 # The attest job is in THIS file for one reason: the signer identity of an attestation is the
@@ -93,7 +96,7 @@ on:
   push:
     branches: [main]
   # By hand, on any branch: the build jobs (the macOS one included) and the sums, nothing signed
-  # (attest and verify run for a push to main alone).
+  # (attest runs for a push to main alone).
   workflow_dispatch:
 
 permissions: {}
@@ -288,9 +291,9 @@ jobs:
             target
           key: ${{ steps.cargo-cache.outputs.cache-primary-key }}
 
-  # The beta stage, with macos-arm64: not for a pull request (a pull request builds linux-x86_64
-  # alone), on a push and by hand. Its tests of the workspace run before it builds, so the
-  # linux-arm64 files reach `sums` and are signed only when they pass.
+  # With macos-arm64: not for a pull request (a pull request builds linux-x86_64 alone), on a push
+  # and by hand. It builds, packages and checks its files; the tests of the workspace on this
+  # platform are beta.yml's and do not hold the release.
   linux-arm64:
     needs: [version]
     if: ${{ github.event_name != 'pull_request' }}
@@ -322,9 +325,6 @@ jobs:
       - name: Install cargo-cyclonedx (pinned version and checksum)
         run: cargo xtask fetch --url "https://github.com/CycloneDX/cyclonedx-rust-cargo/releases/download/cargo-cyclonedx-$CYCLONEDX_VERSION/cargo-cyclonedx-$TARGET.tar.xz" --sha256 "$CYCLONEDX_SHA256_AARCH64_LINUX" --out "$HOME/.cargo/bin/cargo-cyclonedx" --extract tar.xz --member "cargo-cyclonedx-$TARGET/cargo-cyclonedx"
       - run: cargo cyclonedx --version
-      # Every test of every crate of the workspace, on linux-arm64.
-      - name: The tests of the workspace, on linux-arm64
-        run: cargo test --locked --workspace --features tierstore/s3 --no-fail-fast
       # The crate's version is the release's: the binary reports the version of `Cargo.toml`.
       # `Cargo.lock` gets the same version, so the `--locked` build below accepts it; the SBOM
       # step must leave it exactly as this step wrote it.
@@ -418,9 +418,10 @@ jobs:
   # macOS on Apple silicon. The binary is ad-hoc signed by the linker, as every arm64 macOS
   # binary must be to run, and is not notarized. Only this job can run it: release.yml's
   # check-binary runs the linux-x86_64 binary alone, so the build-commit steps below are the
-  # version check of the macOS binary. It also runs every test of the workspace, which ci.yml
-  # runs on Linux only. The beta stage, with linux-arm64: not for a pull request, on a push and by
-  # hand. Its files reach `sums` and are signed only when its tests and checks pass.
+  # version check of the macOS binary. With linux-arm64: not for a pull request, on a push and by
+  # hand. Its files reach `sums` and are signed only when its build and checks pass; the tests of
+  # the workspace on macOS (the update hook's launchd steps, the listener hand-off, packaging/macos
+  # and the xtask verbs among them) are beta.yml's and do not hold the release.
   macos-arm64:
     needs: [version]
     if: ${{ github.event_name != 'pull_request' }}
@@ -452,10 +453,6 @@ jobs:
       - name: Install cargo-cyclonedx (pinned version and checksum)
         run: cargo xtask fetch --url "https://github.com/CycloneDX/cyclonedx-rust-cargo/releases/download/cargo-cyclonedx-$CYCLONEDX_VERSION/cargo-cyclonedx-$TARGET.tar.xz" --sha256 "$CYCLONEDX_SHA256_AARCH64_MACOS" --out "$HOME/.cargo/bin/cargo-cyclonedx" --extract tar.xz --member "cargo-cyclonedx-$TARGET/cargo-cyclonedx"
       - run: cargo cyclonedx --version
-      # Every test of every crate of the workspace, on macOS: the update hook's launchd steps, the
-      # listener hand-off, packaging/macos (tests/packaging_macos.rs) and the xtask verbs among them.
-      - name: The tests of the workspace, on macOS
-        run: cargo test --locked --workspace --features tierstore/s3 --no-fail-fast
       # The crate's version is the release's: the binary reports the version of `Cargo.toml`.
       # `Cargo.lock` gets the same version, so the `--locked` build below accepts it; the SBOM
       # step must leave it exactly as this step wrote it.
@@ -656,7 +653,7 @@ jobs:
   # SHA256SUMS over every platform's files and the release index of the hostkeeper packages,
   # checked against the files and a flipped copy. The attest job signs these sums, so they are the
   # one list of what a release holds.
-  # For a pull request the beta jobs (linux-arm64, macos-arm64) are skipped, the sums are those
+  # For a pull request the linux-arm64 and macos-arm64 jobs are skipped, the sums are those
   # of the linux-x86_64 files, and no index is written (an index lists every platform); for a push or a run by hand every build job
   # must have succeeded, and the index is refused without the macOS package.
   sums:
@@ -889,63 +886,3 @@ jobs:
           path: dist/*.sigstore.json
           retention-days: 90
           if-no-files-found: error
-
-  # Push to main only, after attest: the checks a deployment makes (cargo xtask verify-assets,
-  # crates/xtask/src/sums.rs), for the branch that was pushed (`--source-ref "$GITHUB_REF"`),
-  # with read-only scopes. The release index is made again and the files are assembled again into
-  # a SHA256SUMS that must be byte for byte the one the sums job published and the attest job
-  # signed, then checked against it, then each verified, each bundle offline as a host does; the
-  # set must be exactly the assets of this commit (cargo xtask release check); and the hostkeeper
-  # packages are taken as hostkeeper takes them (cargo xtask verify-assets hostkeeper-index).
-  verify:
-    needs: [attest]
-    if: ${{ github.event_name == 'push' && github.ref == 'refs/heads/main' }}
-    runs-on: ubuntu-24.04
-    timeout-minutes: 20
-    permissions:
-      contents: read
-      attestations: read
-    steps:
-      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
-        with:
-          persist-credentials: false
-      - run: rustup toolchain install
-      # `assets-*` is the build jobs' artifacts, one per platform, and nothing else: the run's
-      # other artifacts are `sha256sums` and `bundles`.
-      - uses: actions/download-artifact@3e5f45b2cfb9172054b4087a40e8e0b5a5461e7c # v8.0.1
-        with:
-          pattern: assets-*
-          path: dist
-          merge-multiple: true
-      - uses: actions/download-artifact@3e5f45b2cfb9172054b4087a40e8e0b5a5461e7c # v8.0.1
-        with:
-          name: sha256sums
-          path: published
-      # The bundles go in beside the files; the sums do not list them (the attestation that made
-      # them signed the files the sums list), and the check below holds them to one per tarball.
-      - uses: actions/download-artifact@3e5f45b2cfb9172054b4087a40e8e0b5a5461e7c # v8.0.1
-        with:
-          name: bundles
-          path: dist
-      # The release index is made again from the packages, as the sums job made it; the sums
-      # below, which list it, must then be the published ones byte for byte.
-      - name: The release index, made again from the packages
-        run: cargo xtask release hostkeeper-index dist --commit "$GITHUB_SHA" --event "$GITHUB_EVENT_NAME"
-      - name: Assemble SHA256SUMS, which must be the published one
-        run: cargo xtask sums assemble dist --expect published/SHA256SUMS
-      - name: Check the files against SHA256SUMS
-        run: cargo xtask verify-assets sums dist
-      - name: Fetch the Sigstore trusted root, for the offline check of the bundles
-        env:
-          GH_TOKEN: ${{ github.token }}
-        run: gh attestation trusted-root > "$RUNNER_TEMP/trusted_root.jsonl"
-      - name: Verify as a deployment does
-        env:
-          GH_TOKEN: ${{ github.token }}
-        run: cargo xtask verify-assets attestations dist --repo "$GITHUB_REPOSITORY" --workflow-ref "$GITHUB_REPOSITORY/.github/workflows/artifacts.yml" --source-ref "$GITHUB_REF" --commit "$GITHUB_SHA" --trusted-root "$RUNNER_TEMP/trusted_root.jsonl"
-      - name: The files are exactly the assets of this commit, each tarball and package with its bundle
-        run: cargo xtask release check dist --commit "$GITHUB_SHA"
-      # As hostkeeper takes a release: the index lists a package for every platform, each the size
-      # and SHA-256 of its file, and each unpacks under hostkeeper's rules.
-      - name: Each hostkeeper package as a host takes it from the release index
-        run: cargo xtask verify-assets hostkeeper-index dist --commit "$GITHUB_SHA" --scratch "$RUNNER_TEMP/hostkeeper"

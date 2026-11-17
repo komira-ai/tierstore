@@ -55,11 +55,15 @@
 //! [`macos_pkg::manifest_json`]
 //! is the hostkeeper manifest of the package for a Mac.
 //!
-//! After a release, or by hand: `release desired` ([`desired`]) chooses a published release and
-//! gives the version and the targets `.github/workflows/hostkeeper-desired.yml` sets on the
-//! hostkeeper coordinator: the apt entries `release desired-apt` ([`desired_apt`]) gives the lab
+//! In a release run, or by hand: `release desired` ([`desired`]) chooses a published release and
+//! gives the version and the targets the deploy of `release.yml` and
+//! `.github/workflows/hostkeeper-desired.yml` set on the hostkeeper coordinator: the apt entries `release desired-apt` ([`desired_apt`]) gives the lab
 //! stage of `release.yml`, or a refusal when the testing suite does not list the release's `.deb`s
 //! with the digests of its `SHA256SUMS`.
+//!
+//! When a stage that holds no deploy (`beta.yml`, or a job of `release.yml`) fails, `release red`
+//! ([`red`]) keeps one open issue `RELEASE-RED: tierstore <stage>` for it, and closes it when the
+//! stage is green.
 
 mod binary;
 pub mod deb;
@@ -74,6 +78,7 @@ pub mod macos_pkg;
 pub mod pkg_signature;
 mod plan;
 mod publish;
+pub mod red;
 pub mod rpm;
 #[cfg(test)]
 pub(crate) mod script_host;

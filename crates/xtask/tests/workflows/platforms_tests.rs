@@ -139,19 +139,13 @@ fn the_build_and_signing_commands_name_the_platform_and_nothing_else() {
         .collect();
     assert_eq!(checked.len(), 2, "the built binary and the unpacked one");
     assert!(!commands.iter().any(|c| c.contains("linux")));
-    assert_eq!(
-        commands[3], BETA_TESTS,
-        "the macOS job runs the tests before it builds"
-    );
-    assert!(
-        !build_commands(&BUILDS[0]).iter().any(|c| c == BETA_TESTS),
-        "linux-x86_64: its tests run in ci.yml, for a pull request"
-    );
-    assert_eq!(
-        build_commands(&BUILDS[1])[3],
-        BETA_TESTS,
-        "linux-arm64 is a beta platform: it runs the tests of the workspace before it builds"
-    );
+    for b in BUILDS {
+        assert!(
+            !build_commands(b).iter().any(|c| c == BETA_TESTS),
+            "{}: the tests of the workspace are beta.yml's, not a step of a build job",
+            b.platform
+        );
+    }
     let attest = attest_commands(&["macos-arm64"]);
     assert_eq!(
         attest.len(),
@@ -415,52 +409,10 @@ const EXECUTION_DEFECTS: &[(&str, &str, &str, &str)] = &[
         "macos-arm64: runs under `if: None`",
     ),
     (
-        MAC,
-        "--no-fail-fast\n",
-        "--no-fail-fast --no-run\n",
-        "macos-arm64: does not run `cargo test",
-    ),
-    (
-        MAC,
-        "--no-fail-fast\n",
-        "--no-fail-fast -- docs_tests\n",
-        "macos-arm64: does not run `cargo test",
-    ),
-    (
-        MAC,
-        "--workspace",
-        "-p objstore-s3",
-        "macos-arm64: does not run `cargo test",
-    ),
-    (
         "linux-arm64",
         "    if: ${{ github.event_name != 'pull_request' }}\n",
         "",
         "linux-arm64: runs under `if: None`",
-    ),
-    (
-        "linux-arm64",
-        "--no-fail-fast\n",
-        "--no-fail-fast --no-run\n",
-        "linux-arm64: does not run `cargo test",
-    ),
-    (
-        "linux-arm64",
-        "--workspace",
-        "-p objstore-s3",
-        "linux-arm64: does not run `cargo test",
-    ),
-    (
-        "linux-arm64",
-        "      - name: The tests of the workspace, on linux-arm64\n",
-        "      - name: The tests of the workspace, on linux-arm64\n        continue-on-error: true\n",
-        "linux-arm64: the step `The tests of the workspace, on linux-arm64` has continue-on-error",
-    ),
-    (
-        MAC,
-        "      - name: The tests of the workspace, on macOS\n",
-        "      - name: The tests of the workspace, on macOS\n        continue-on-error: true\n",
-        "macos-arm64: the step `The tests of the workspace, on macOS` has continue-on-error",
     ),
     (
         MAC,
@@ -497,12 +449,6 @@ const EXECUTION_DEFECTS: &[(&str, &str, &str, &str)] = &[
         "    if: ${{ !cancelled() &&",
         "    if: ${{ always() &&",
         "sums: runs under",
-    ),
-    (
-        "verify",
-        "    if: ${{ github.event_name == 'push' && github.ref == 'refs/heads/main' }}\n",
-        "    if: ${{ github.event_name == 'push' }}\n",
-        "verify: runs under",
     ),
     (
         "attest",
@@ -551,30 +497,6 @@ const CONSUMER_DEFECTS: &[(&str, &str, &str, &str)] = &[
         "          name: sha256sums\n          path: dist",
         "          name: sha256sums\n          path: published",
         "attest: does not download sha256sums into dist",
-    ),
-    (
-        "verify",
-        "pattern: assets-*",
-        "pattern: assets-linux-*",
-        "verify: no download takes assets-macos-arm64",
-    ),
-    (
-        "verify",
-        "pattern: assets-*",
-        "pattern: '*'",
-        "verify: the assets download `*` also takes sha256sums",
-    ),
-    (
-        "verify",
-        "          name: bundles\n",
-        "          name: bundles-linux\n",
-        "verify: does not download bundles into dist",
-    ),
-    (
-        "verify",
-        "          name: sha256sums\n          path: published",
-        "          name: sha256sums\n          path: dist",
-        "verify: does not download sha256sums into published",
     ),
     (
         "attest",
@@ -930,4 +852,40 @@ fn artifacts_yml_without_its_run_by_hand_is_named() {
             .any(|p| p.starts_with("artifacts.yml: triggers are [\"pull_request\", \"push\"]")),
         "{problems:?}"
     );
+}
+
+#[test]
+fn a_verify_job_or_a_cargo_test_step_in_artifacts_yml_is_named() {
+    // Asserts: artifacts.yml has no job `verify` and no step that runs `cargo test`, so neither
+    // is on the release path; planting the workspace tests into a build job or another job, or a
+    // job `verify`, into the real file is named by its exact line.
+    let text = text_of("artifacts.yml");
+    let clean = artifacts_problems_of(&text);
+    assert!(
+        !clean
+            .iter()
+            .any(|p| p.contains("cargo test") || p.contains("`verify`")),
+        "{clean:?}"
+    );
+    let step = "      - name: The tests of the workspace\n        run: cargo test --locked --workspace --features tierstore/s3 --no-fail-fast\n";
+    let after = [
+        ("linux-arm64", "      - run: cargo cyclonedx --version\n"),
+        ("macos-arm64", "      - run: cargo cyclonedx --version\n"),
+        ("sums", "      - run: cargo xtask verify-assets sums dist\n"),
+    ];
+    for (job, anchor) in after {
+        let broken = in_job(&text, job, anchor, &format!("{anchor}{step}"));
+        assert!(
+            artifacts_problems_of(&broken).contains(&format!(
+                "artifacts.yml: job {job} runs `cargo test`: the workspace tests are beta.yml's and never hold a release"
+            )),
+            "{job}"
+        );
+    }
+    let with_verify = format!(
+        "{text}\n  verify:\n    needs: [attest]\n    runs-on: ubuntu-24.04\n    steps:\n      - run: cargo xtask release check dist\n"
+    );
+    assert!(artifacts_problems_of(&with_verify).contains(
+        &"artifacts.yml: job `verify` is release.yml's: the checks of a deployment are made there before anything is tagged".to_owned()
+    ));
 }

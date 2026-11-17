@@ -6,11 +6,12 @@
 |---|---|---|
 | `ci.yml` | pull request, push to `main` | `lint`: format, cargo-deny (licences, bans, sources), clippy, the workflow lint. `test`: every test under cargo-llvm-cov with branch coverage, and the 99% gate on lines and branches of every crate (`crates/coverage-gate`). |
 | `advisories.yml` | daily, push to `main` | `cargo deny check advisories`; the result is kept in one issue, and the run is green whatever it finds. |
-| `artifacts.yml` | pull request (linux-x86_64 only), push to `main`; by hand | builds `tierstore` (`--features server`) for linux-x86_64, linux-arm64 and macos-arm64, each on a GitHub-hosted runner of its platform, packages it with its SBOM and as a hostkeeper package (and, for the Homebrew tap and apt, as a tap-named tarball and, on Linux, a Debian package and an RPM package), writes the release index of the hostkeeper packages, makes `SHA256SUMS`. A pull request runs on Linux x86_64 alone: for it only the linux-x86_64 job runs, and the sums cover its files. The other platforms are the beta stage of the release: the linux-arm64 and macos-arm64 jobs run on a push to `main` and by hand, each running every test of the workspace (`cargo test --workspace --features tierstore/s3`; on macOS the update hook's launchd steps and the macOS packaging among them) before it builds, packages, unpacks the hostkeeper package and, on macOS, checks the code signature; `sums` waits for them, so their files are summed, signed and released only when they pass. a push to `main` builds every platform, and a run by hand (`gh workflow run artifacts.yml --ref <branch>`) builds and sums every platform of a branch and signs nothing. On a push to `main` it also builds the macOS installer unsigned and signs it with the Developer ID Installer identity (`sign-pkg`, then `check-pkg`; see "The macOS installer"), signs (build provenance and SBOM attestations) and checks what it signed. The Linux binaries are linked against glibc 2.28 by `cargo zigbuild`, not against the runner's glibc, and each Linux job fails when the binary asks for a newer `GLIBC_` symbol version (see "The glibc floor of the Linux binaries"). |
-| `release.yml` | when `ci` or `artifacts` finishes on a push to `main` (automatic, see Releases); by hand | `plan` decides which commit of `main` is released and as which tag (the newest whose build recorded that version); `verify` and `publish` attach the files that commit's push built and signed to a GitHub release, after checking them again; the release then goes through four stages (see The order of a release): `testing-upload`, `formula` and the `testing-apt-*` jobs publish it to testing, `check-apt`, `check-brew` and `check-install-sh` install it from there, `farm-check`, `farm` and `soak` put it on the lab through hostkeeper when the lab is switched on (`TIERSTORE_LAB_INSTALL`) and configured, and `promote-check` then lets `promote-latest`, `tap` and the `stable-apt-*` jobs make it public. Builds nothing of tierstore. |
+| `artifacts.yml` | pull request (linux-x86_64 only), push to `main`; by hand | builds `tierstore` (`--features server`) for linux-x86_64, linux-arm64 and macos-arm64, each on a GitHub-hosted runner of its platform, packages it with its SBOM and as a hostkeeper package (and, for the Homebrew tap and apt, as a tap-named tarball and, on Linux, a Debian package and an RPM package), writes the release index of the hostkeeper packages, makes `SHA256SUMS`. A pull request runs on Linux x86_64 alone: for it only the linux-x86_64 job runs, and the sums cover its files. The other platforms are built on a push to `main` and by hand: the linux-arm64 and macos-arm64 jobs build, package, run the binary, unpack the hostkeeper package and, on macOS, check the code signature; they run no test of the workspace (`beta.yml` does, below). `sums` waits for them, so their files are summed, signed and released only when they pass. A push to `main` builds every platform, and a run by hand (`gh workflow run artifacts.yml --ref <branch>`) builds and sums every platform of a branch and signs nothing. On a push to `main` it also builds the macOS installer unsigned and signs it with the Developer ID Installer identity (`sign-pkg`, then `check-pkg`; see "The macOS installer"), and signs (build provenance and SBOM attestations); the checks of what it signed are made by `release.yml`'s `verify`, before anything is tagged. The Linux binaries are linked against glibc 2.28 by `cargo zigbuild`, not against the runner's glibc, and each Linux job fails when the binary asks for a newer `GLIBC_` symbol version (see "The glibc floor of the Linux binaries"). |
+| `release.yml` | when `ci` or `artifacts` finishes on a push to `main` (automatic, see Releases); by hand | `plan` decides which commit of `main` is released and as which tag (the newest whose build recorded that version); `verify` and `publish` attach the files that commit's push built and signed to a GitHub release, after checking them again; the release then goes through four stages (see The order of a release): `testing-upload`, `formula` and the `testing-apt-*` jobs publish it to testing, `check-apt`, `check-brew` and `check-install-sh` install it from there, `farm-check`, `farm` and `soak` put it on the lab through hostkeeper when the lab is switched on (`TIERSTORE_LAB_INSTALL`) and configured, and `promote-check` then lets `promote-latest`, `tap` and the `stable-apt-*` jobs make it public. The deploy is not among these stages: `deploy-check`, then `deploy` (host group `all-in-one`) and `deploy-mac` (host group `mac-build`), set the release on the hostkeeper coordinator as soon as the suite `testing` lists it, beside the install checks and the lab, and none of them holds it (see The order of a release). Its last job, `red`, keeps the issue `RELEASE-RED: tierstore release` (see RELEASE-RED issues). Builds nothing of tierstore. |
+| `beta.yml` | push to `main`; by hand (no pull request) | runs every test of the workspace (`cargo test --locked --workspace --features tierstore/s3 --no-fail-fast`) on linux-arm64 (`ubuntu-24.04-arm`) and macos-arm64 (`macos-15`; the update hook's launchd steps and the macOS packaging are among the tests). It never holds a release: the release plan reads `ci.yml` and `artifacts.yml` only. Its last job, `red` (on `main` only), keeps the issue `RELEASE-RED: tierstore beta` (see RELEASE-RED issues). One concurrency group per commit, never cancelled. |
 | `tierstore-site.yml` | pull request, push to `main`, when the site changes | typecheck, tests and build of tierstore.dev. |
 | `tierstore-site-publish.yml` | push to `main` / by hand | builds the site again; uploads it only when the repository variable `TIERSTORE_SITE_PUBLISH` is `true`. |
-| `hostkeeper-desired.yml` | the completion of a run of `release.yml` on `main`, and by hand from `main` | sets the desired version of tierstore on the hostkeeper coordinator to a published release, by its apt targets (the testing `.deb` of each Linux platform) for the Linux build nodes and by its apt targets plus the signed macOS installer for the Macs (host group `mac-build`), and waits for each fleet to converge on it: after a release run that published one, the newest release; by hand, the version given. Skipped while the repository variable `TIERSTORE_SETS_DESIRED` is not `true`. See [Setting the desired version on the hostkeeper coordinator](#setting-the-desired-version-on-the-hostkeeper-coordinator). |
+| `hostkeeper-desired.yml` | by hand from `main` only (input `version`) | sets the desired version of tierstore on the hostkeeper coordinator to the published release given, a rollback or a set again, by its apt targets (the testing `.deb` of each Linux platform) for the Linux build nodes and by its apt targets plus the signed macOS installer for the Macs (host group `mac-build`), and waits for each fleet to converge on it. No run of `release.yml` starts it: `release.yml` sets each new release itself (the deploy). Skipped while the repository variable `TIERSTORE_SETS_DESIRED` is not `true`. See [Setting the desired version on the hostkeeper coordinator](#setting-the-desired-version-on-the-hostkeeper-coordinator). |
 
 Every workflow is held to the same rules by `crates/xtask/tests/workflows`: every `uses:` is a
 40-digit commit SHA with a version comment, `permissions: {}` at the top, no
@@ -21,11 +22,11 @@ one job that needs each, under the exact `if:` the lint lists for it (`attestati
 `main` has no branch protection rule, so GitHub requires no check by name. A pull request is
 merged only when every check of its head commit has passed. Pull requests run on Linux x86_64
 alone (`ci.yml`, and `artifacts.yml`'s `linux-x86_64`, `version` and `sums` jobs), because those
-hosted runners are plentiful; macOS and linux-arm64 are the beta stage of the release, in
-`artifacts.yml` on a push to `main`. The workflow lint fails when a workflow a pull request starts
+hosted runners are plentiful; macOS and linux-arm64 are built in
+`artifacts.yml` on a push to `main`, and their tests run in `beta.yml` on a push to `main`. The workflow lint fails when a workflow a pull request starts
 names another runner without `if: ${{ github.event_name != 'pull_request' }}`. A rule requiring
 checks by name must not name `macos-checks`, `macos`, `macos-arm64` or `linux-arm64`: no pull
-request runs them.
+request runs them (`beta.yml` has no `pull_request` trigger).
 
 ## The release files
 
@@ -110,6 +111,8 @@ actions, does not make a workflow release path). It has a group of its own, one 
 (`artifacts-<sha>`, or per ref for a pull request, whose newer run replaces its older); a push run
 is never cancelled, so a commit that is signed is never left half checked, and the build of one
 push does not wait for the release of another.
+
+What holds a release is `ci.yml` and `artifacts.yml` (the plan reads those two), and the checks of `release.yml` before the tag. `beta.yml`, the tests on linux-arm64 and macos-arm64, runs on the same push and never holds one: a failure there opens the issue `RELEASE-RED: tierstore beta` (see RELEASE-RED issues).
 
 Pushes made before an earlier push has been released all build with the same computed version (the
 next number after the tag that exists when they build). Whichever is released first takes it; the
@@ -214,7 +217,7 @@ version and the platform. The macOS job then checks the code signature of the bi
   builds linux-x86_64 alone, it checks that package is there and writes no index;
 - the `attest` job signs each package as its own subject, as it does each tarball, and names the
   bundle `<package>.sigstore.json`; the provenance of the sums covers the packages and the index;
-- the `verify` job (and `release.yml`'s `verify` and `publish`) makes the index again from the
+- `release.yml`'s `verify` and `publish` make the index again from the
   packages, which must give the bytes the sums list, verifies each package's bundle offline as it
   does each tarball's, and takes each package as a host does (`cargo xtask verify-assets
   hostkeeper-index`): the index is read with hostkeeper's strict reader, lists a package for every
@@ -377,9 +380,21 @@ section 5). Nobody approves a step.
      (`cargo xtask channels check-brew`).
    - `check-install-sh` (`ubuntu-24.04` and `macos-15`) runs `install.sh` from tierstore.dev with
      `--version <version>` and runs the binary (`cargo xtask channels check-install-sh`).
+   **The deploy** does not wait for the stages below. As soon as the suite `testing` lists the
+   release (the plan and the three `testing-apt-write` attempts are done), `deploy-check` runs
+   `cargo xtask release desired --skip-superseded --min-hostkeeper 0.1.225` with the macOS
+   installer, and `deploy` (host group `all-in-one`) and `deploy-mac` (host group `mac-build`) call
+   hostkeeper's `set-desired.yml` at the same pin, audience and inputs as `hostkeeper-desired.yml`,
+   waiting for the fleet to converge (see Setting the desired version on the hostkeeper
+   coordinator). The deploy runs beside the install checks, the lab and the promotion, and none
+   of them holds it. It runs only when `TIERSTORE_SETS_DESIRED` is `true`. A release older than the
+   newest one published is not set (`--skip-superseded`: `set` is false), so a run that is late
+   never moves the fleet back. The fleet may therefore be on a release that a later stage then
+   fails: that is not undone, and the failure is reported by the issue `RELEASE-RED: tierstore
+   release` (see RELEASE-RED issues); the fix is a new release.
 3. **The lab**, through hostkeeper. `farm-check` holds the gate. The stage runs only when the
    repository variable `TIERSTORE_LAB_INSTALL` is exactly `true`, whatever the hostkeeper variables
-   are (`hostkeeper-desired.yml` reads the same coordinator variables, and the hand-off here waits
+   are (the deploy reads the same coordinator variables, and the hand-off here waits
    for hostkeeper's apt installer): otherwise `farm-check` ends green with a notice naming
    `TIERSTORE_LAB_INSTALL`, `farm` and `soak` are skipped, and `promote-check` is told the lab is
    not enabled, so **the stage is skipped and does not hold the release**. With the switch `true`
@@ -403,13 +418,13 @@ section 5). Nobody approves a step.
    variables (`HOSTKEEPER_TAILNET_CLIENT_ID`, `HOSTKEEPER_TAILNET_AUDIENCE`,
    `HOSTKEEPER_TAILNET_COORDINATOR`) are all set or none: all makes `farm` join the tailnet, some is
    red. `farm` calls hostkeeper's `set-desired.yml` (a pin of its own, not the one of
-   `hostkeeper-desired.yml`; v0.1.225 (commit `2c684190fbe5b6cfb11f42573e044edb334f27aa`), and its
-   `tailnet_tag` is the variable `HOSTKEEPER_TAILNET_TAG`, as in `hostkeeper-desired.yml`) for the
+   the deploy and `hostkeeper-desired.yml`; v0.1.225 (commit `2c684190fbe5b6cfb11f42573e044edb334f27aa`), and its
+   `tailnet_tag` is the variable `HOSTKEEPER_TAILNET_TAG`, as in the deploy) for the
    service `tierstore`, with the audience
    `tierstore-hostkeeper-release`, and waits for the coordinator to report every lab host on the
    version, reading every 10 seconds, at most `FARM_MAX_POLLS` times (default 360). It is the only
    job here with `id-token: write` for the coordinator, and needs an allow-list entry like the
-   one for `hostkeeper-desired.yml`, with the event `workflow_run` and that audience. `soak` waits
+   one for the deploy, with the event `workflow_run` and that audience. `soak` waits
    `FARM_SOAK_HOURS` (a repository variable; empty is 0, which ends at once; at most 5) after
    `farm` converged, failing at the first read that is not healthy (`cargo xtask channels soak`).
    Only 0 works today: hostkeeper's CI client has no call that only reads, so a larger value fails
@@ -529,6 +544,25 @@ role may not read the pool, so a package that is there already (`412` on `If-Non
 compared by fetching it from the public host. The `check-rpm` job above installs the testing suite
 before anything is promoted.
 
+### RELEASE-RED issues
+
+Two issues record a run that went wrong after it could no longer be stopped; each is kept by
+`cargo xtask release red`, in the last job of its workflow (`red`), and holds one open issue at a
+time.
+
+- `RELEASE-RED: tierstore release`, from `release.yml` (`--stage release`). The job runs after
+  every other job of the run, on `main`, when the plan failed or a release was made. A failed,
+  cancelled or timed-out job opens the issue, or comments on the one that is open, naming those
+  jobs. A run that released and had no failed job comments on the issue and closes it.
+- `RELEASE-RED: tierstore beta`, from `beta.yml` (`--stage beta`). A failed, cancelled or
+  timed-out test job (linux-arm64, macos-arm64) opens the issue or comments on the open one,
+  naming the jobs. A run in which both test jobs passed comments on it and closes it.
+
+Neither issue holds anything: the beta tests never hold a release, and the release's deploy has
+already happened when a later job fails. Both are fixed forward: a change to `main` that makes the
+tests or the stage pass, released as the next version. Nothing is rolled back by the issue; to put
+an earlier version on the fleet, run `hostkeeper-desired.yml` by hand.
+
 ### Releasing by hand
 
 Run the `release` workflow from `main` ("Run workflow"), giving the tag (`vX.Y.Z`), the full SHA
@@ -582,19 +616,21 @@ Hosts take tierstore through hostkeeper: the coordinator holds the version each 
 run, and every host's daemon installs what the version's targets name for its platform. The farm
 nodes install tierstore's Debian package from the suite `testing` through hostkeeper's apt
 installer (the host's repository entry `komira-testing`).
-`hostkeeper-desired.yml` sets that version for a published release, two ways:
+`release.yml` sets that version for each release it makes (the deploy, see The order of a
+release), and `hostkeeper-desired.yml` sets it by hand:
 
-- after each run of `release.yml` on `main` that succeeded and whose job `publish` succeeded, it
-  sets the newest published release. A run of `release.yml` succeeds only once the release passed
-  its install checks, the lab and the promotion, so the fleet is moved last. Most release runs
-  publish nothing (their plan finds no new release), and then nothing is set;
-- by hand, from `main` ("Run workflow"), with a released version `X.Y.Z`, an older one included
-  (a rollback).
+- in `release.yml`, `deploy-check`, `deploy` and `deploy-mac` run as soon as the suite `testing`
+  lists the release, beside the install checks, the lab and the promotion, which never hold them.
+  `--skip-superseded` leaves a release older than the newest published one unset. A failure of a
+  later stage opens or comments on the issue `RELEASE-RED: tierstore release`; the fleet stays on
+  the version set;
+- `hostkeeper-desired.yml`, by hand from `main` ("Run workflow"), with a released version
+  `X.Y.Z`, an older one included (a rollback, or a set again). No run of `release.yml` starts it.
 
 Both are off until the repository variable `TIERSTORE_SETS_DESIRED` is `true`, exactly: unset, or
-anything else, every job is skipped.
+anything else, every job of the deploy and of the workflow is skipped.
 
-Its `check` job (`cargo xtask release desired`, no token that writes) decides the release and
+The `check` job of `hostkeeper-desired.yml` (`contents: read` only) and `deploy-check` of `release.yml` (`cargo xtask release desired`, no token that writes) decides the release and
 hands on what the lab stage of `release.yml` sets for it (`release desired-apt`, above, with the
 same `--min-hostkeeper 0.1.225`): the version `X.Y.Z`, the plain version apt installs, and the
 **targets**, for `linux-x86_64` and `linux-arm64` one `apt` entry each, of the repository entry
@@ -611,8 +647,8 @@ exactly the lab's. With `--macos-pkg` the step also hands on `targets-mac`: the 
 the release and holds to the digest `SHA256SUMS` lists (the coordinator turns it into the location
 `pkg/tierstore/<X.Y.Z>/` of the repository). No release index is sent.
 
-The `set-desired` job (host group `all-in-one`) and, beside it, `set-desired-mac` (host group
-`mac-build`, with `targets-mac`) then call hostkeeper's CI client (`set-desired.yml` of
+In `hostkeeper-desired.yml` the `set-desired` job (host group `all-in-one`) and, beside it, `set-desired-mac` (host group
+`mac-build`, with `targets-mac`) then call; `deploy` and `deploy-mac` of `release.yml` do the same with the same inputs. They call hostkeeper's CI client (`set-desired.yml` of
 komira-ai/hostkeeper, pinned to v0.1.317, whose hkctl sends the targets as they are, the `apt`
 entries included; the call names the host group `all-in-one`, the Linux build nodes, so the version
 is one deployment to that group and the wait is on that group alone, and the coordinator's
@@ -628,10 +664,10 @@ an hour, a halt (`halted`) and a newer version set meanwhile (`superseded`) end 
 roll goes on whatever the job says: `hkctl releases status --service tierstore` shows each host and
 why it is not ordered.
 
-The workflow is off until a maintainer sets it up once:
+The deploy and the workflow are off until a maintainer sets them up once:
 
 1. The coordinator's allow-list entry for this repository: its id, `refs/heads/main`, the events
-   `workflow_run` and `workflow_dispatch`, the audience `tierstore-hostkeeper-desired`, the service
+   `workflow_run` (the deploy of `release.yml`) and `workflow_dispatch`, the audience `tierstore-hostkeeper-desired`, the service
    `tierstore`, and the `job_workflow_ref`
    `komira-ai/hostkeeper/.github/workflows/set-desired.yml@<the pinned commit>`. A new pin in the
    workflow needs a new `job_workflow_ref` in the entry. The coordinator reads it at start.

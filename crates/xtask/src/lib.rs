@@ -240,6 +240,8 @@ enum VerifyAssets {
 
 #[derive(Subcommand)]
 enum ReleaseVerb {
+    /// Keep one open issue per slow stage (`beta`, `release`) whose jobs failed; closes it when green.
+    Red(release::red::Args),
     /// The successful build run of a commit on main; refuses a commit whose tests failed.
     Locate {
         #[arg(long)]
@@ -476,6 +478,9 @@ enum ReleaseVerb {
         /// succeeded; nothing (`set=false`) otherwise. Empty, or not given, with `--version`.
         #[arg(long, default_value = "")]
         after_run: String,
+        /// Set nothing when a published release is newer than the one chosen.
+        #[arg(long)]
+        skip_superseded: bool,
         /// `<major>.<minor>.<patch>`: the first hostkeeper release whose daemon runs the hook
         /// command of an `apt` entry, the `minHostkeeper` of every entry.
         #[arg(long)]
@@ -736,6 +741,7 @@ fn run(cli: Cli) -> Result<Vec<String>, Error> {
                 record.as_deref(),
             )
         }
+        Verb::Release(ReleaseVerb::Red(args)) => release::red::run(&args),
         Verb::Release(ReleaseVerb::SetVersion { version }) => release::set_version(&root, &version),
         Verb::Release(ReleaseVerb::CheckBinary {
             dir,
@@ -827,6 +833,7 @@ fn run(cli: Cli) -> Result<Vec<String>, Error> {
             repo,
             version,
             after_run,
+            skip_superseded,
             min_hostkeeper,
             dir,
             apt_url,
@@ -841,6 +848,7 @@ fn run(cli: Cli) -> Result<Vec<String>, Error> {
                 repo: &repo,
                 version: &version,
                 after_run: &after_run,
+                skip_superseded,
                 min_hostkeeper: &min_hostkeeper,
                 dir: &dir,
                 apt_url: &apt_url,

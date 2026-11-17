@@ -1,21 +1,19 @@
-//! `hostkeeper-desired.yml`: the run that sets the desired version of tierstore on the hostkeeper
-//! coordinator for a published release, by its targets, after each release run that published one
-//! and by hand, once `cargo xtask release desired` has found the release's `.deb`s in the testing
-//! suite with the digests of its `SHA256SUMS`, and that waits for the fleet to converge on it.
+//! The two ways the desired version of tierstore is set on the hostkeeper coordinator, by its
+//! targets, once `cargo xtask release desired` has found the release's `.deb`s in the testing
+//! suite with the digests of its `SHA256SUMS`, each waiting for the fleet to converge on it: the
+//! deploy of `release.yml` (its jobs `deploy-check`, `deploy` and `deploy-mac`, as soon as the
+//! release is in the suite `testing`), and `hostkeeper-desired.yml`, by hand.
 //!
-//! [`desired_problems`] refuses the file when:
-//! - anything but `workflow_run` and `workflow_dispatch` starts it; the `workflow_run` is not the
-//!   completion of `release` on `main`; or the dispatch's inputs are not the one required string
-//!   `version`;
-//! - its concurrency is not [`GROUP`] with `cancel-in-progress: false` (a run by hand is never
-//!   replaced by the completion of a release run while it waits, nor any run cancelled);
+//! [`desired_problems`] refuses `hostkeeper-desired.yml` when:
+//! - anything but `workflow_dispatch` starts it, or the dispatch's inputs are not the one required
+//!   string `version` (a release is deployed by release.yml; this run is a rollback by hand);
+//! - its concurrency is not [`GROUP`] with `cancel-in-progress: false` (no run is cancelled);
 //! - its jobs are not `check`, `set-desired` and `set-desired-mac`; `check`'s `if:` is not [`DESIRED_IF`] (the
-//!   repository variable is the gate, at the job level, only `main` runs it, and a release run is
-//!   acted on only when it succeeded, on `main` of this repository) or the `if:` of `set-desired`
-//!   is not [`SET_IF`] (the same gate, and `check` said `set=true`);
-//! - `check` needs a job, holds other than `actions: read` and `contents: read`, does not run
-//!   [`check_command`] as its step `desired` with `VERSION` and `RUN_ID` read from the input and
-//!   from the run that started it, or does not hand on that step's three outputs ([`OUTPUTS`]).
+//!   repository variable is the gate, at the job level, and only `main` runs it) or the `if:` of
+//!   `set-desired` is not [`SET_IF`] (the same gate, and `check` said `set=true`);
+//! - `check` needs a job, holds other than `contents: read`, does not run [`check_command`] as
+//!   its step `desired` with `VERSION` read from the input, or does not hand on that step's
+//!   outputs ([`OUTPUTS`]).
 //!   The command gives `--min-hostkeeper` [`APT_FLOOR`], the floor the workflow lint holds the lab
 //!   stage of `release.yml` to: the same release set by both gets the same targets, and the
 //!   coordinator refuses a version set again with other targets (`release_exists`);
@@ -28,6 +26,14 @@
 //!   tailnet's inputs from their repository variables. The wait is what makes a set that orders
 //!   no host red: such a version never converges, and the client ends the job `not_converged`;
 //!   without it the job ends green, `not_waited`, whatever the hosts do.
+//!
+//! [`deploy_problems`] holds the deploy of `release.yml` to the same: `deploy-check` is `check`
+//! for the release the run published ([`deploy_command`]: `--version` from the plan's tag and
+//! `--skip-superseded`, so a release a newer one superseded is not set), after the suite `testing`
+//! lists it ([`DEPLOY_CHECK_IF`], needing the plan and the three attempts of `testing-apt-write`),
+//! and `deploy` and `deploy-mac` are `set-desired` and `set-desired-mac` with the targets
+//! `deploy-check` hands on, under [`DEPLOY_IF`]. Nothing else of the release (the install checks,
+//! the lab, the promotion) is in their `needs`: none of them holds the deploy.
 //!
 //! [`coordinator_problems`] refuses a workflow that reads a coordinator setting other than
 //! hostkeeper's two variables ([`COORDINATOR_VARS`]) and the tailnet's name, or that names
@@ -42,13 +48,37 @@ use super::yaml::{self, Node};
 /// The workflow's file.
 pub const FILE: &str = "hostkeeper-desired.yml";
 
-/// The `if:` of `check`: a run of `main` while the repository variable is `true`, by hand, or
-/// after a run of `release.yml` that succeeded on `main` of this repository.
-pub const DESIRED_IF: &str = "${{ github.ref == 'refs/heads/main' && vars.TIERSTORE_SETS_DESIRED == 'true' && (github.event_name == 'workflow_dispatch' || (github.event_name == 'workflow_run' && github.event.workflow_run.conclusion == 'success' && github.event.workflow_run.head_branch == 'main' && github.event.workflow_run.head_repository.full_name == github.repository)) }}";
+/// The `if:` of `check`: a run of `main` while the repository variable is `true`.
+pub const DESIRED_IF: &str =
+    "${{ github.ref == 'refs/heads/main' && vars.TIERSTORE_SETS_DESIRED == 'true' }}";
 
-/// The concurrency group: one for the runs by hand, one for the runs after a release.
-pub const GROUP: &str =
-    "hostkeeper-desired-${{ github.event_name == 'workflow_dispatch' && 'dispatch' || 'release' }}";
+/// The concurrency group of the runs by hand.
+pub const GROUP: &str = "hostkeeper-desired";
+
+/// The `if:` of release.yml's `deploy-check`: that of the install check `check-apt` (an attempt
+/// of `testing-apt-write` listed the release in the suite `testing`, and nothing before it failed),
+/// and the repository variable that turns the deploy on.
+pub const DEPLOY_CHECK_IF: &str = "${{ !cancelled() && !failure() && needs.plan.outputs.release == 'true' && github.ref == 'refs/heads/main' && (needs.testing-apt-write.outputs.conflict == 'false' || needs.testing-apt-write-2.outputs.conflict == 'false' || needs.testing-apt-write-3.outputs.conflict == 'false') && vars.TIERSTORE_SETS_DESIRED == 'true' }}";
+
+/// What `deploy-check` waits for: the plan and the attempts that write the suite `testing`.
+pub const DEPLOY_CHECK_NEEDS: [&str; 4] = [
+    "plan",
+    "testing-apt-write",
+    "testing-apt-write-2",
+    "testing-apt-write-3",
+];
+
+/// The `if:` of release.yml's `deploy` and `deploy-mac`: the variable, and `deploy-check` said
+/// `set=true` (which it says only when it ran, so the run is a release on main).
+pub const DEPLOY_IF: &str = "${{ !cancelled() && github.ref == 'refs/heads/main' && vars.TIERSTORE_SETS_DESIRED == 'true' && needs.deploy-check.outputs.set == 'true' }}";
+
+/// The command of the step `desired` of `deploy-check`: the release the run published, unless a
+/// newer one superseded it, with the lab's hostkeeper floor.
+pub fn deploy_command() -> String {
+    format!(
+        "cargo xtask release desired --repo \"$GITHUB_REPOSITORY\" --version \"${{TAG#v}}\" --skip-superseded --min-hostkeeper {APT_FLOOR} --macos-pkg --dir \"$RUNNER_TEMP/desired\" --output \"$GITHUB_OUTPUT\""
+    )
+}
 
 /// The `if:` of `set-desired`: the gate again, and `check` chose a release.
 pub const SET_IF: &str = "${{ github.ref == 'refs/heads/main' && vars.TIERSTORE_SETS_DESIRED == 'true' && needs.check.outputs.set == 'true' }}";
@@ -56,7 +86,7 @@ pub const SET_IF: &str = "${{ github.ref == 'refs/heads/main' && vars.TIERSTORE_
 /// The command of the step `desired` of `check`, with the lab's hostkeeper floor.
 pub fn check_command() -> String {
     format!(
-        "cargo xtask release desired --repo \"$GITHUB_REPOSITORY\" --version \"$VERSION\" --after-run \"$RUN_ID\" --min-hostkeeper {APT_FLOOR} --macos-pkg --dir \"$RUNNER_TEMP/desired\" --output \"$GITHUB_OUTPUT\""
+        "cargo xtask release desired --repo \"$GITHUB_REPOSITORY\" --version \"$VERSION\" --min-hostkeeper {APT_FLOOR} --macos-pkg --dir \"$RUNNER_TEMP/desired\" --output \"$GITHUB_OUTPUT\""
     )
 }
 
@@ -124,26 +154,15 @@ fn held(job: Option<&Node>) -> Vec<String> {
     held
 }
 
-/// One line per way the triggers of the workflow (its `on`) are not the completion of `release`
-/// on `main` and a dispatch with the one input `version`.
+/// One line per way the triggers of the workflow (its `on`) are not a dispatch with the one input
+/// `version`.
 fn trigger_problems(on: Option<&Node>) -> Vec<String> {
     let mut problems = Vec::new();
     let triggers = names(on);
-    if triggers != ["workflow_dispatch", "workflow_run"] {
+    if triggers != ["workflow_dispatch"] {
         problems.push(format!(
-            "triggers are {triggers:?}, not workflow_dispatch and workflow_run"
+            "triggers are {triggers:?}, not workflow_dispatch alone"
         ));
-    }
-    let run = on.and_then(|o| entry(o, "workflow_run"));
-    for (key, want) in [
-        ("workflows", "release"),
-        ("types", "completed"),
-        ("branches", "main"),
-    ] {
-        let got = names(run.and_then(|r| entry(r, key)));
-        if got != [want] {
-            problems.push(format!("workflow_run.{key} is {got:?}, not [{want:?}]"));
-        }
     }
     let inputs = on
         .and_then(|o| entry(o, "workflow_dispatch"))
@@ -194,51 +213,115 @@ pub fn desired_problems(text: &str) -> Vec<String> {
             problems.push(format!("{name}: `if` is {condition:?}, not {want}"));
         }
     }
-    problems.extend(check_problems(job(jobs, "check")));
-    problems.extend(set_desired_problems(
-        text,
-        "set-desired",
-        HOST_GROUP,
-        job(jobs, "set-desired"),
+    problems.extend(check_problems(
+        "check",
+        job(jobs, "check"),
+        &[],
+        &check_command(),
+        &[("VERSION", "${{ inputs.version }}")],
     ));
-    problems.extend(set_desired_problems(
-        text,
-        "set-desired-mac",
-        MAC_HOST_GROUP,
-        job(jobs, "set-desired-mac"),
-    ));
+    for (name, group) in [
+        ("set-desired", HOST_GROUP),
+        ("set-desired-mac", MAC_HOST_GROUP),
+    ] {
+        problems.extend(set_desired_problems(
+            text,
+            name,
+            "check",
+            group,
+            job(jobs, name),
+        ));
+    }
     problems
 }
 
-/// One line per way the job `check` is not the read-only check that hands on the release.
-fn check_problems(check: Option<&Node>) -> Vec<String> {
+/// One line per way the deploy of `release.yml` (`doc`, from `text`) is not `check`,
+/// `set-desired` and `set-desired-mac` for the release the run published, after the suite
+/// `testing` lists it.
+pub fn deploy_problems(doc: &Node, text: &str) -> Vec<String> {
+    let jobs = entry(doc, "jobs").map_or(&[][..], entries);
     let mut problems = Vec::new();
-    let needs = names(check.and_then(|j| entry(j, "needs")));
-    if !needs.is_empty() {
-        problems.push(format!("check: needs {needs:?}; it needs no job"));
+    for (name, want) in [
+        ("deploy-check", DEPLOY_CHECK_IF),
+        ("deploy", DEPLOY_IF),
+        ("deploy-mac", DEPLOY_IF),
+    ] {
+        let condition = job(jobs, name).and_then(|j| at(j, &["if"]));
+        if condition != Some(want) {
+            problems.push(format!("{name}: `if` is {condition:?}, not {want}"));
+        }
+    }
+    let check = job(jobs, "deploy-check");
+    problems.extend(check_problems(
+        "deploy-check",
+        check,
+        &DEPLOY_CHECK_NEEDS,
+        &deploy_command(),
+        &[],
+    ));
+    if check.and_then(|j| at(j, &["env", "TAG"])) != Some("${{ needs.plan.outputs.tag }}") {
+        problems.push("deploy-check: env TAG is not ${{ needs.plan.outputs.tag }}".to_owned());
+    }
+    for (name, group) in [("deploy", HOST_GROUP), ("deploy-mac", MAC_HOST_GROUP)] {
+        problems.extend(set_desired_problems(
+            text,
+            name,
+            "deploy-check",
+            group,
+            job(jobs, name),
+        ));
+    }
+    // Nothing but the report waits for the deploy: a job of the release that needed it would
+    // tie the release's checks or promotion to the fleet.
+    for (name, job) in jobs {
+        let name = name.as_str().unwrap_or_default();
+        let waits = names(entry(job, "needs"));
+        for deploy in ["deploy-check", "deploy", "deploy-mac"] {
+            let allowed = name == "red"
+                || (deploy == "deploy-check" && (name == "deploy" || name == "deploy-mac"));
+            if !allowed && waits.iter().any(|w| w == deploy) {
+                problems.push(format!(
+                    "{name}: needs {deploy}; only the deploy and red wait for it"
+                ));
+            }
+        }
+    }
+    problems
+}
+
+/// One line per way the job `name` is not the read-only check that hands on the release: it
+/// needs `needs`, holds `contents: read` alone, runs `command` as its step `desired` with the
+/// environment `env` on that step, and hands on the step's outputs.
+fn check_problems(
+    name: &str,
+    check: Option<&Node>,
+    needs: &[&str],
+    command: &str,
+    env: &[(&str, &str)],
+) -> Vec<String> {
+    let mut problems = Vec::new();
+    let got = names(check.and_then(|j| entry(j, "needs")));
+    if got != needs {
+        problems.push(format!("{name}: needs are {got:?}, not {needs:?}"));
     }
     let held = held(check);
-    if held != ["actions: read", "contents: read"] {
+    if held != ["contents: read"] {
         problems.push(format!(
-            "check: permissions are {held:?}, not actions: read and contents: read"
+            "{name}: permissions are {held:?}, not contents: read"
         ));
     }
     let all = steps(check);
     let step = all.iter().position(|s| at(s, &["id"]) == Some("desired"));
     let desired = step.map(|i| &all[i]);
-    let command = check_command();
-    if desired.and_then(|s| at(s, &["run"])).map(str::trim_end) != Some(command.as_str()) {
+    if desired.and_then(|s| at(s, &["run"])).map(str::trim_end) != Some(command) {
         problems.push(format!(
-            "check: the step `desired` does not run `{command}`"
+            "{name}: the step `desired` does not run `{command}`"
         ));
     }
-    for (var, want) in [
-        ("VERSION", "${{ inputs.version }}"),
-        ("RUN_ID", "${{ github.event.workflow_run.id }}"),
-    ] {
-        if desired.and_then(|s| at(s, &["env", var])) != Some(want) {
+    for (var, want) in env {
+        if desired.and_then(|s| at(s, &["env", var])) != Some(*want) {
             problems.push(format!(
-                "check: the step `desired` does not read {var} from {want}"
+                "{name}: the step `desired` does not read {var} from {want}"
             ));
         }
     }
@@ -246,25 +329,24 @@ fn check_problems(check: Option<&Node>) -> Vec<String> {
         let got = check.and_then(|j| at(j, &["outputs", output]));
         let want = format!("${{{{ steps.desired.outputs.{output} }}}}");
         if got != Some(want.as_str()) {
-            problems.push(format!("check: output {output} is {got:?}, not {want}"));
+            problems.push(format!("{name}: output {output} is {got:?}, not {want}"));
         }
     }
     problems
 }
 
-/// What each input of hostkeeper's workflow must be for the host group `group`, and no other
-/// input is given.
-pub fn with_wanted_for(group: &'static str) -> [(&'static str, &'static str); 16] {
+/// What each input of hostkeeper's workflow must be for the host group `group`, with the
+/// release the job `check` hands on, and no other input is given.
+pub fn with_wanted_from(check: &str, group: &'static str) -> Vec<(&'static str, String)> {
+    let output = |key: &str| format!("${{{{ needs.{check}.outputs.{key} }}}}");
     let targets = if group == MAC_HOST_GROUP {
-        "${{ needs.check.outputs.targets-mac }}"
+        output("targets-mac")
     } else {
-        "${{ needs.check.outputs.targets }}"
+        output("targets")
     };
-    [
+    let fixed: [(&'static str, &'static str); 14] = [
         ("service", "tierstore"),
         ("host_group", group),
-        ("version", "${{ needs.check.outputs.package-version }}"),
-        ("targets", targets),
         ("hostkeeper_version", CLIENT_RELEASE),
         ("hostkeeper_commit", CLIENT_COMMIT),
         ("coordinator_url", "${{ vars.HOSTKEEPER_COORDINATOR_URL }}"),
@@ -289,26 +371,32 @@ pub fn with_wanted_for(group: &'static str) -> [(&'static str, &'static str); 16
             "${{ vars.HOSTKEEPER_TAILNET_COORDINATOR }}",
         ),
         ("tailnet_tag", "${{ vars.HOSTKEEPER_TAILNET_TAG }}"),
-    ]
+    ];
+    let mut wanted = vec![("version", output("package-version")), ("targets", targets)];
+    wanted.extend(fixed.iter().map(|(k, v)| (*k, (*v).to_owned())));
+    wanted
 }
 
-/// What each input of hostkeeper's workflow must be for the host group [`HOST_GROUP`].
-pub fn with_wanted() -> [(&'static str, &'static str); 16] {
-    with_wanted_for(HOST_GROUP)
+/// What each input of hostkeeper's workflow must be in `hostkeeper-desired.yml` for the host
+/// group [`HOST_GROUP`].
+pub fn with_wanted() -> Vec<(&'static str, String)> {
+    with_wanted_from("check", HOST_GROUP)
 }
 
-/// One line per way the job `name` (`set-desired` for [`HOST_GROUP`], `set-desired-mac` for
-/// [`MAC_HOST_GROUP`]) is not hostkeeper's workflow, called with the release `check` handed on.
+/// One line per way the job `name` (`set-desired` or `deploy` for [`HOST_GROUP`],
+/// `set-desired-mac` or `deploy-mac` for [`MAC_HOST_GROUP`]) is not hostkeeper's workflow, called
+/// with the release the job `check` handed on, and needing that job alone.
 fn set_desired_problems(
     text: &str,
     name: &str,
+    check: &str,
     group: &'static str,
     job: Option<&Node>,
 ) -> Vec<String> {
     let mut problems = Vec::new();
     let needs = names(job.and_then(|j| entry(j, "needs")));
-    if needs != ["check"] {
-        problems.push(format!("{name}: needs are {needs:?}, not [\"check\"]"));
+    if needs != [check] {
+        problems.push(format!("{name}: needs are {needs:?}, not [{check:?}]"));
     }
     let held = held(job);
     if held != ["contents: read", "id-token: write"] {
@@ -331,10 +419,10 @@ fn set_desired_problems(
             "{name}: the pin's comment names {release:?}, not v{CLIENT_RELEASE}"
         ));
     }
-    let wanted = with_wanted_for(group);
-    for (key, want) in wanted {
+    let wanted = with_wanted_from(check, group);
+    for (key, want) in &wanted {
         let got = job.and_then(|j| at(j, &["with", key]));
-        if got != Some(want) {
+        if got != Some(want.as_str()) {
             problems.push(format!("{name}: with.{key} is {got:?}, not {want:?}"));
         }
     }
@@ -379,7 +467,7 @@ pub fn coordinator_problems(file: &str, text: &str) -> Vec<String> {
 }
 
 /// One line per workflow of `files` (name, text), other than [`FILE`], that names [`FILE`]: none
-/// calls it; it starts on the completion of `release.yml` by its own trigger.
+/// calls it; a person starts it.
 pub fn caller_problems(files: &[(String, String)]) -> Vec<String> {
     files
         .iter()

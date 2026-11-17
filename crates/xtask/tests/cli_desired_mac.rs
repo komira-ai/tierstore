@@ -1,6 +1,7 @@
-//! `xtask release desired --macos-pkg` end to end, through its success path: the real `xtask`
-//! binary runs with the stand-in `gh` (src/bin/gh-fake.rs) as both `--gh` and `--curl`, answered
-//! from files under the test's scratch directory, and the lines it appends to `--output` are read.
+//! `xtask release desired --macos-pkg` (and `--skip-superseded`, as the deploy of release.yml runs
+//! it) end to end: the real `xtask` binary runs with the stand-in `gh` (src/bin/gh-fake.rs) as both
+//! `--gh` and `--curl`, answered from files under the test's scratch directory, and the lines it
+//! appends to `--output` are read.
 
 #![allow(
     clippy::unwrap_used,
@@ -151,4 +152,64 @@ fn release_desired_without_macos_pkg_writes_no_targets_mac_and_asks_for_no_pkg()
         !d.join(format!("desired/tierstore-{VERSION}-macos-arm64.pkg"))
             .exists()
     );
+}
+
+/// `prepared(name)` with the list of published releases holding `tags`.
+fn listing(name: &str, tags: &[&str]) -> PathBuf {
+    let d = prepared(name);
+    let releases: Vec<String> = tags
+        .iter()
+        .map(|t| format!("{{\"tag_name\":\"{t}\",\"draft\":false,\"prerelease\":false}}"))
+        .collect();
+    put(
+        &d,
+        &format!("repos/{REPO}/releases?per_page=100"),
+        format!("[{}]", releases.join(",")).as_bytes(),
+    );
+    d
+}
+
+#[test]
+fn release_desired_with_skip_superseded_sets_nothing_when_a_newer_release_is_published() {
+    // Catches: `--skip-superseded` not reaching the verb from the command line, so a deploy that
+    // waited behind a newer release sets the older one; a superseded release failing the job
+    // instead of handing on `set=false`; and the suite or the `.pkg` being read for a release that
+    // is not set.
+    let d = listing("superseded", &["v1.2.3", "v1.2.4", "v1.2.2"]);
+    let o = desired(&d, &["--skip-superseded", "--macos-pkg"]);
+    assert_eq!(
+        o.status.code(),
+        Some(0),
+        "{}",
+        String::from_utf8_lossy(&o.stderr)
+    );
+    assert_eq!(
+        String::from_utf8_lossy(&o.stdout),
+        "v1.2.3 is superseded by v1.2.4, the newest published release of example/tierstore: nothing is set\nset=false\n"
+    );
+    assert_eq!(
+        std::fs::read_to_string(d.join("github-output")).expect("output"),
+        "set=false\n"
+    );
+    assert!(!d.join("desired").exists());
+}
+
+#[test]
+fn release_desired_with_skip_superseded_sets_the_newest_release() {
+    // Catches: `--skip-superseded` refusing the newest published release itself, which would
+    // leave every release undeployed.
+    let d = listing("newest", &["v1.2.2", "v1.2.3"]);
+    let o = desired(&d, &["--skip-superseded", "--macos-pkg"]);
+    assert_eq!(
+        o.status.code(),
+        Some(0),
+        "{}",
+        String::from_utf8_lossy(&o.stderr)
+    );
+    let text = std::fs::read_to_string(d.join("github-output")).expect("output");
+    assert!(
+        text.starts_with("set=true\npackage-version=1.2.3\n"),
+        "{text}"
+    );
+    assert!(line(&d, "targets-mac").is_some(), "{text}");
 }

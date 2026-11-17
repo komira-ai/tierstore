@@ -1,13 +1,14 @@
-//! `release desired --repo <owner/repo> (--version <X.Y.Z> | --after-run <id>) --min-hostkeeper
-//! <x.y.z> --dir <dir> [--apt-url <url>] [--output <file>] [--gh <program>] [--curl <program>]`:
-//! what `.github/workflows/hostkeeper-desired.yml` sets as the desired version of tierstore on the
-//! hostkeeper coordinator, or why it sets nothing. It runs before any step of that workflow can
-//! hold a token, so a refusal here means the coordinator is never called.
+//! `release desired --repo <owner/repo> (--version <X.Y.Z> | --after-run <id>) [--skip-superseded]
+//! --min-hostkeeper <x.y.z> --dir <dir> [--apt-url <url>] [--output <file>] [--gh <program>]
+//! [--curl <program>]`: what the deploy of `.github/workflows/release.yml` (`deploy-check`) and
+//! `.github/workflows/hostkeeper-desired.yml` (by hand) set as the desired version of tierstore on
+//! the hostkeeper coordinator, or why they set nothing. It runs before any step of those workflows
+//! can hold a token, so a refusal here means the coordinator is never called.
 //!
 //! Which release:
 //!
-//! - `--version X.Y.Z` (a run by hand): the release `vX.Y.Z`, whichever it is, an older one
-//!   included (a rollback).
+//! - `--version X.Y.Z`: the release `vX.Y.Z`, whichever it is (by hand, an older one included: a
+//!   rollback; after a release, the release the run published).
 //! - `--after-run <id>` (the completion of a run of `release.yml`): when the job `publish` of that
 //!   run succeeded, the newest published release of `<owner/repo>` (the highest `vX.Y.Z`, not a
 //!   draft, not a pre-release). Release runs are one at a time, so that is the release the run
@@ -15,9 +16,13 @@
 //!   runs plan no release, and their `publish` is skipped) nothing is set: the output is `set=false`
 //!   and the verb succeeds.
 //!
-//! Exactly one of the two is given; an empty one counts as not given, so the workflow passes both
-//! from its two events and one is always empty. `--min-hostkeeper` and `--apt-url` are checked
-//! first, whichever way it is.
+//! Exactly one of the two is given; an empty one counts as not given. `--min-hostkeeper` and
+//! `--apt-url` are checked first, whichever way it is.
+//!
+//! With `--skip-superseded` (the deploy of `release.yml`, which runs it for the release that run
+//! published), a release older than the newest published one is not set: the output is
+//! `set=false` and the verb succeeds. Release runs are one at a time, but a release made by hand
+//! runs beside them, and a run that waited behind it must not move the fleet back.
 //!
 //! What is set for the release is what the lab stage of `release.yml` sets for it
 //! ([`super::desired_apt`], with the same `--min-hostkeeper`): the hosts install tierstore from the
@@ -74,6 +79,10 @@ pub struct Request<'a> {
     /// Also give `targets-mac`: the apt targets and the `macos-arm64` list, one `macos-pkg` entry
     /// of the release's signed `.pkg`. `targets` stays what the lab sets.
     pub macos_pkg: bool,
+    /// Set nothing (`set=false`) when a published release is newer than the one chosen: the
+    /// deploy of a release run, which must never move the fleet back to a release a newer one
+    /// has superseded. Not given by hand, where an older release is a rollback.
+    pub skip_superseded: bool,
     /// The program that reads the suite.
     pub curl: &'a Path,
     pub output: Option<&'a Path>,
@@ -185,18 +194,26 @@ fn chosen(gh: &dyn Gh, request: &Request<'_>) -> Result<Option<String>, Error> {
 pub fn desired(gh: &dyn Gh, host: &dyn Host, request: &Request<'_>) -> Result<Vec<String>, Error> {
     desired_apt::usage(request.min_hostkeeper, request.apt_url)?;
     let Some(version) = chosen(gh, request)? else {
-        let lines = vec!["set=false".to_owned()];
-        if let Some(output) = request.output {
-            append_output(output, &lines)?;
-        }
-        return Ok(vec![
+        return set_nothing(
+            request,
             format!(
                 "run {} of {} did not publish a release ({PUBLISH_JOB} did not succeed): nothing is set",
                 request.after_run, request.repo
             ),
-            lines[0].clone(),
-        ]);
+        );
     };
+    if request.skip_superseded {
+        let newest = newest(gh, request.repo)?;
+        if numbers(&newest) > numbers(&version) {
+            return set_nothing(
+                request,
+                format!(
+                    "v{version} is superseded by v{newest}, the newest published release of {}: nothing is set",
+                    request.repo
+                ),
+            );
+        }
+    }
     let found = apt_targets(
         gh,
         host,
@@ -238,6 +255,15 @@ pub fn desired(gh: &dyn Gh, host: &dyn Host, request: &Request<'_>) -> Result<Ve
     let mut printed = vec![summary];
     printed.extend(lines);
     Ok(printed)
+}
+
+/// Hand on `set=false` and say `why`.
+fn set_nothing(request: &Request<'_>, why: String) -> Result<Vec<String>, Error> {
+    let lines = vec!["set=false".to_owned()];
+    if let Some(output) = request.output {
+        append_output(output, &lines)?;
+    }
+    Ok(vec![why, lines[0].clone()])
 }
 
 #[cfg(test)]

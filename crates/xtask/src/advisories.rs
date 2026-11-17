@@ -126,7 +126,7 @@ pub struct Call {
 }
 
 impl Call {
-    fn get(path: String) -> Self {
+    pub(crate) fn get(path: String) -> Self {
         Call {
             method: Method::Get,
             path,
@@ -134,7 +134,7 @@ impl Call {
         }
     }
 
-    fn post(path: String, body: Value) -> Self {
+    pub(crate) fn post(path: String, body: Value) -> Self {
         Call {
             method: Method::Post,
             path,
@@ -142,7 +142,7 @@ impl Call {
         }
     }
 
-    fn patch(path: String, body: Value) -> Self {
+    pub(crate) fn patch(path: String, body: Value) -> Self {
         Call {
             method: Method::Patch,
             path,
@@ -152,9 +152,13 @@ impl Call {
 }
 
 /// The two programs the verb runs, so its decisions are tested without either.
-pub trait Tools {
+pub trait Tools: Github {
     /// Run `cargo deny` ([`DENY_ARGS`]) in the repository root.
     fn deny(&mut self) -> Result<DenyRun, Error>;
+}
+
+/// GitHub's REST API, so the verbs that only speak to it are tested without `gh`.
+pub trait Github {
     /// Make `call`: its JSON reply, or `None` for a GET that GitHub answered with 404.
     fn github(&mut self, call: &Call) -> Result<Option<Value>, Error>;
 }
@@ -195,41 +199,48 @@ impl Tools for Process<'_> {
             stderr: String::from_utf8_lossy(&out.stderr).into_owned(),
         })
     }
+}
 
+impl Github for Process<'_> {
     fn github(&mut self, call: &Call) -> Result<Option<Value>, Error> {
-        let what = self.gh.display().to_string();
-        let mut command = Command::new(self.gh);
-        command.args(gh_args(call));
-        command.stdout(Stdio::piped()).stderr(Stdio::piped());
-        command.stdin(if call.body.is_some() {
-            Stdio::piped()
-        } else {
-            Stdio::null()
-        });
-        let mut child = command.spawn().map_err(Error::spawn(what.clone()))?;
-        if let (Some(body), Some(mut stdin)) = (&call.body, child.stdin.take()) {
-            // A write that fails means `gh` is gone; its exit status says why.
-            let _ = stdin.write_all(body.to_string().as_bytes());
-        }
-        let out = child.wait_with_output().map_err(Error::spawn(what))?;
-        let err = String::from_utf8_lossy(&out.stderr);
-        if !out.status.success() {
-            if call.method == Method::Get && err.contains("(HTTP 404)") {
-                return Ok(None);
-            }
-            return Err(Error::Failed(format!(
-                "gh api {}: {}",
-                call.path,
-                err.trim_end()
-            )));
-        }
-        if out.stdout.is_empty() {
-            return Ok(Some(Value::Null));
-        }
-        serde_json::from_slice(&out.stdout)
-            .map(Some)
-            .map_err(|e| Error::Failed(format!("gh api {}: not JSON: {e}", call.path)))
+        gh_api(self.gh, call)
     }
+}
+
+/// `call` through the program `gh`.
+pub(crate) fn gh_api(gh: &Path, call: &Call) -> Result<Option<Value>, Error> {
+    let what = gh.display().to_string();
+    let mut command = Command::new(gh);
+    command.args(gh_args(call));
+    command.stdout(Stdio::piped()).stderr(Stdio::piped());
+    command.stdin(if call.body.is_some() {
+        Stdio::piped()
+    } else {
+        Stdio::null()
+    });
+    let mut child = command.spawn().map_err(Error::spawn(what.clone()))?;
+    if let (Some(body), Some(mut stdin)) = (&call.body, child.stdin.take()) {
+        // A write that fails means `gh` is gone; its exit status says why.
+        let _ = stdin.write_all(body.to_string().as_bytes());
+    }
+    let out = child.wait_with_output().map_err(Error::spawn(what))?;
+    let err = String::from_utf8_lossy(&out.stderr);
+    if !out.status.success() {
+        if call.method == Method::Get && err.contains("(HTTP 404)") {
+            return Ok(None);
+        }
+        return Err(Error::Failed(format!(
+            "gh api {}: {}",
+            call.path,
+            err.trim_end()
+        )));
+    }
+    if out.stdout.is_empty() {
+        return Ok(Some(Value::Null));
+    }
+    serde_json::from_slice(&out.stdout)
+        .map(Some)
+        .map_err(|e| Error::Failed(format!("gh api {}: not JSON: {e}", call.path)))
 }
 
 /// `advisories`: the lines to print when it finished.
@@ -254,7 +265,7 @@ pub fn run(args: &Args, root: &Path, cargo: &OsStr) -> Result<Vec<String>, Error
 
 /// `repo` is `<owner>/<repo>` in the characters GitHub allows, so it is one path segment
 /// pair of every URL built from it.
-fn check_repo(repo: &str) -> Result<(), Error> {
+pub(crate) fn check_repo(repo: &str) -> Result<(), Error> {
     let valid = |s: &str| {
         !matches!(s, "" | "." | "..")
             && s.bytes()
@@ -271,7 +282,7 @@ fn check_repo(repo: &str) -> Result<(), Error> {
 /// Run the check and bring the issue to match it.
 pub fn sync(tools: &mut impl Tools, repo: &str, commit: &str) -> Result<Vec<String>, Error> {
     let found = parse(&tools.deny()?)?;
-    let open = open_issue(tools, repo)?;
+    let open = open_issue(tools, repo, TITLE)?;
     match (found.is_empty(), open) {
         (true, None) => Ok(vec!["no advisories, and no open issue".to_owned()]),
         (true, Some(number)) => {
@@ -309,16 +320,20 @@ pub fn sync(tools: &mut impl Tools, repo: &str, commit: &str) -> Result<Vec<Stri
 }
 
 /// A write, whose reply must exist (only a GET is answered with `None`).
-fn write(tools: &mut impl Tools, call: Call) -> Result<Value, Error> {
+pub(crate) fn write(tools: &mut impl Github, call: Call) -> Result<Value, Error> {
     let path = call.path.clone();
     tools
         .github(&call)?
         .ok_or_else(|| Error::Failed(format!("gh api {path}: no reply")))
 }
 
-/// The number of the open issue titled [`TITLE`], if there is one. A pull request is not
+/// The number of the open issue titled `title`, if there is one. A pull request is not
 /// one, though GitHub lists them with the issues.
-fn open_issue(tools: &mut impl Tools, repo: &str) -> Result<Option<u64>, Error> {
+pub(crate) fn open_issue(
+    tools: &mut impl Github,
+    repo: &str,
+    title: &str,
+) -> Result<Option<u64>, Error> {
     for page in 1.. {
         let path = format!("repos/{repo}/issues?state=open&per_page={PAGE}&page={page}");
         let reply = tools
@@ -329,7 +344,7 @@ fn open_issue(tools: &mut impl Tools, repo: &str) -> Result<Option<u64>, Error> 
         };
         let found = items
             .iter()
-            .find(|i| i["title"] == TITLE && i.get("pull_request").is_none());
+            .find(|i| i["title"] == title && i.get("pull_request").is_none());
         if let Some(issue) = found {
             return issue["number"]
                 .as_u64()
@@ -422,7 +437,7 @@ fn advisory_of(fields: &Value) -> Result<Option<Advisory>, String> {
 }
 
 /// A Markdown table cell: one line, no `|`.
-fn cell(text: &str) -> String {
+pub(crate) fn cell(text: &str) -> String {
     text.split_whitespace()
         .collect::<Vec<_>>()
         .join(" ")

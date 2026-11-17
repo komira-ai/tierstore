@@ -3,10 +3,12 @@
 //! under the variable gate, it sets the lab's apt targets and waits for the fleet, and no workflow
 //! reads another coordinator's variable, names `deploy-farm`, or calls the run.
 
+use super::checks::APT_IF;
 use super::desired::{
-    AUDIENCE, CLIENT_COMMIT, CLIENT_RELEASE, COORDINATOR_VARS, DESIRED_IF, FILE, MAX_POLLS,
-    SET_DESIRED, SET_IF, caller_problems, check_command, coordinator_problems, desired_problems,
-    with_wanted,
+    AUDIENCE, CLIENT_COMMIT, CLIENT_RELEASE, COORDINATOR_VARS, DEPLOY_CHECK_IF, DEPLOY_IF,
+    DESIRED_IF, FILE, MAX_POLLS, SET_DESIRED, SET_IF, caller_problems, check_command,
+    coordinator_problems, deploy_command, deploy_problems, desired_problems, with_wanted,
+    with_wanted_from,
 };
 use super::farm::{APT_FLOOR, farm_problems};
 use super::lint::lint;
@@ -27,8 +29,7 @@ fn hostkeeper_desired_yml_checks_the_release_then_sets_it_by_its_targets() {
 fn the_variable_gate_is_the_job_level_if_of_both_jobs() {
     // Catches: a gate on a step (the job would start, and the token exist, with the deploy off),
     // a gate on another variable or on a value other than `true`, a job that runs from a branch
-    // other than main, and a release run acted on although it failed, ran on another branch or
-    // came from a fork.
+    // other than main.
     for condition in [DESIRED_IF, SET_IF] {
         assert!(condition.contains("github.ref == 'refs/heads/main'"));
         assert!(condition.contains("vars.TIERSTORE_SETS_DESIRED == 'true'"));
@@ -42,12 +43,6 @@ fn the_variable_gate_is_the_job_level_if_of_both_jobs() {
             "vars.TIERSTORE_SETS_DESIRED != ''",
         ),
         ("github.ref == 'refs/heads/main' && ", ""),
-        ("github.event.workflow_run.conclusion == 'success' && ", ""),
-        ("github.event.workflow_run.head_branch == 'main' && ", ""),
-        (
-            " && github.event.workflow_run.head_repository.full_name == github.repository",
-            "",
-        ),
     ] {
         assert!(DESIRED_IF.contains(part), "{part}");
         let spoiled = check_if(&DESIRED_IF.replacen(part, with, 1));
@@ -246,20 +241,20 @@ const DEFECTS: &[(&str, &str, &str, &str)] = &[
         "check",
         "    runs-on: ubuntu-24.04\n",
         "    needs: [set-desired]\n    runs-on: ubuntu-24.04\n",
-        "check: needs [\"set-desired\"]; it needs no job",
+        "check: needs are [\"set-desired\"], not []",
     ),
     (
         "check",
-        "      actions: read\n",
-        "      actions: write\n",
-        "check: permissions are [\"actions: write\", \"contents: read\"], not actions: read and contents: read",
+        "      contents: read\n",
+        "      contents: read\n      actions: write\n",
+        "check: permissions are [\"actions: write\", \"contents: read\"], not contents: read",
     ),
-    // Without `actions: read` the jobs of the release run cannot be read.
+    // It reads a release, not the jobs of a run.
     (
         "check",
-        "      actions: read\n",
-        "",
-        "check: permissions are [\"contents: read\"], not actions: read and contents: read",
+        "      contents: read\n",
+        "      contents: read\n      actions: read\n",
+        "check: permissions are [\"actions: read\", \"contents: read\"], not contents: read",
     ),
     (
         "check",
@@ -267,11 +262,18 @@ const DEFECTS: &[(&str, &str, &str, &str)] = &[
         "--dir dist",
         "check: the step `desired` does not run",
     ),
-    // A run after a release that ignores which run it was: every run would set a release.
+    // A rollback by hand refused because a newer release exists, which is what a rollback is.
     (
         "check",
+        " --version \"$VERSION\"",
+        " --version \"$VERSION\" --skip-superseded",
+        "check: the step `desired` does not run",
+    ),
+    // The release chosen after a run instead of the version given.
+    (
+        "check",
+        " --version \"$VERSION\"",
         " --after-run \"$RUN_ID\"",
-        "",
         "check: the step `desired` does not run",
     ),
     // Another floor than the lab's: the same version set by both with other targets, which the
@@ -300,12 +302,6 @@ const DEFECTS: &[(&str, &str, &str, &str)] = &[
         "VERSION: ${{ inputs.version }}",
         "VERSION: 0.1.0",
         "check: the step `desired` does not read VERSION from ${{ inputs.version }}",
-    ),
-    (
-        "check",
-        "RUN_ID: ${{ github.event.workflow_run.id }}",
-        "RUN_ID: ${{ github.run_id }}",
-        "check: the step `desired` does not read RUN_ID from ${{ github.event.workflow_run.id }}",
     ),
     (
         "check",
@@ -564,43 +560,28 @@ fn the_check_gives_the_floor_the_lab_stage_of_release_yml_is_held_to() {
 }
 
 #[test]
-fn a_trigger_an_input_or_a_job_other_than_the_two_ways_in_is_named() {
-    // Catches: a push or a schedule setting a version, the completion of another workflow (ci,
-    // whose success says nothing of a release) or of release on another branch, the dispatch
-    // dropped (no rollback by hand), the two ways in sharing one concurrency group or a run
-    // cancelled, a second input or none, an input that is not a required
-    // string, a job beside the two, and a document that does not parse being read as clean.
+fn a_trigger_an_input_or_a_job_other_than_the_dispatch_is_named() {
+    // Catches: a push, a schedule or the completion of a release run setting a version (the
+    // deploy of release.yml does that, and a second set after it would set the release again
+    // whatever happened since), the dispatch dropped (no rollback by hand), a run cancelled, a
+    // second input or none, an input that is not a required string, a job beside the three, and
+    // a document that does not parse being read as clean.
     let text = text_of(FILE);
     for (replace, with, says) in [
         (
-            "on:\n  workflow_run:\n",
-            "on:\n  push:\n  workflow_run:\n",
-            "triggers are [\"push\", \"workflow_dispatch\", \"workflow_run\"], not workflow_dispatch and workflow_run",
+            "on:\n  workflow_dispatch:\n",
+            "on:\n  push:\n  workflow_dispatch:\n",
+            "triggers are [\"push\", \"workflow_dispatch\"], not workflow_dispatch alone",
         ),
         (
-            "  workflow_dispatch:\n    inputs:\n      version:\n        description: \"A released version of tierstore, X.Y.Z (the tag without the v)\"\n        type: string\n        required: true\n",
-            "",
-            "triggers are [\"workflow_run\"], not workflow_dispatch and workflow_run",
+            "on:\n  workflow_dispatch:\n",
+            "on:\n  workflow_run:\n    workflows: [release]\n    types: [completed]\n    branches: [main]\n  workflow_dispatch:\n",
+            "triggers are [\"workflow_dispatch\", \"workflow_run\"], not workflow_dispatch alone",
         ),
         (
-            "    workflows: [release]\n",
-            "    workflows: [ci]\n",
-            "workflow_run.workflows is [\"ci\"], not [\"release\"]",
-        ),
-        (
-            "    workflows: [release]\n",
-            "    workflows: [release, ci]\n",
-            "workflow_run.workflows is [\"ci\", \"release\"], not [\"release\"]",
-        ),
-        (
-            "    types: [completed]\n",
-            "    types: [requested]\n",
-            "workflow_run.types is [\"requested\"], not [\"completed\"]",
-        ),
-        (
-            "    branches: [main]\n",
-            "",
-            "workflow_run.branches is [], not [\"main\"]",
+            "on:\n  workflow_dispatch:\n    inputs:\n      version:\n        description: \"A released version of tierstore, X.Y.Z (the tag without the v)\"\n        type: string\n        required: true\n",
+            "on:\n  push:\n",
+            "triggers are [\"push\"], not workflow_dispatch alone",
         ),
         (
             "      version:\n        description",
@@ -622,11 +603,10 @@ fn a_trigger_an_input_or_a_job_other_than_the_two_ways_in_is_named() {
             "        type: string\n        required: false\n",
             "input version: required is Some(\"false\"), not true",
         ),
-        // One group for both ways in: a waiting rollback by hand is replaced by a release run.
         (
-            "  group: hostkeeper-desired-${{ github.event_name == 'workflow_dispatch' && 'dispatch' || 'release' }}\n",
             "  group: hostkeeper-desired\n",
-            "concurrency: group is Some(\"hostkeeper-desired\"), not",
+            "  group: hostkeeper-desired-${{ github.run_id }}\n",
+            "concurrency: group is Some(\"hostkeeper-desired-${{ github.run_id }}\"), not hostkeeper-desired",
         ),
         (
             "  cancel-in-progress: false\n",
@@ -663,8 +643,8 @@ fn the_check_runs_the_verb_and_the_call_pins_the_client_hostkeeper_releases_with
     )));
     assert!(text.contains(&format!("      audience: {AUDIENCE}\n")));
     let wanted = with_wanted();
-    assert!(wanted.contains(&("hostkeeper_commit", CLIENT_COMMIT)));
-    assert!(wanted.contains(&("hostkeeper_version", CLIENT_RELEASE)));
+    assert!(wanted.contains(&("hostkeeper_commit", CLIENT_COMMIT.to_owned())));
+    assert!(wanted.contains(&("hostkeeper_version", CLIENT_RELEASE.to_owned())));
     for absent in ["package_digest", "release_index", "release_index_digest"] {
         assert!(!wanted.iter().any(|(k, _)| *k == absent), "{absent}");
     }
@@ -716,5 +696,197 @@ fn no_workflow_reads_another_coordinator_variable_names_deploy_farm_or_calls_the
     assert_eq!(
         caller_problems(&calling),
         vec!["release.yml: names hostkeeper-desired.yml, which no other workflow calls".to_owned()]
+    );
+}
+
+/// The problems of the deploy of release.yml in `text`.
+fn deploy(text: &str) -> Vec<String> {
+    deploy_problems(&yaml::load(text).expect("parses"), text)
+}
+
+/// `(job, text to replace once in it, its replacement, what a problem must start with)` for the
+/// deploy of release.yml.
+const DEPLOY_DEFECTS: &[(&str, &str, &str, &str)] = &[
+    // The deploy held by a slow or unrelated job: the install checks, the promotion, the lab.
+    (
+        "deploy-check",
+        "    needs: [plan, testing-apt-write, testing-apt-write-2, testing-apt-write-3]\n",
+        "    needs: [plan, testing-apt-write, testing-apt-write-2, testing-apt-write-3, check-apt]\n",
+        "deploy-check: needs are [\"check-apt\", \"plan\",",
+    ),
+    (
+        "deploy",
+        "    needs: [deploy-check]\n",
+        "    needs: [deploy-check, promote-check]\n",
+        "deploy: needs are [\"deploy-check\", \"promote-check\"], not [\"deploy-check\"]",
+    ),
+    (
+        "deploy-mac",
+        "    needs: [deploy-check]\n",
+        "    needs: [deploy-check, check-brew]\n",
+        "deploy-mac: needs are [\"check-brew\", \"deploy-check\"], not [\"deploy-check\"]",
+    ),
+    // A deploy before the suite lists the release, without the variable, or of another release.
+    (
+        "deploy-check",
+        " && vars.TIERSTORE_SETS_DESIRED == 'true' }}",
+        " }}",
+        "deploy-check: `if` is Some(",
+    ),
+    (
+        "deploy-check",
+        " --skip-superseded",
+        "",
+        "deploy-check: the step `desired` does not run",
+    ),
+    (
+        "deploy-check",
+        "--version \"${TAG#v}\"",
+        "--version \"$VERSION\"",
+        "deploy-check: the step `desired` does not run",
+    ),
+    (
+        "deploy-check",
+        "      TAG: ${{ needs.plan.outputs.tag }}\n",
+        "      TAG: v0.0.1\n",
+        "deploy-check: env TAG is not ${{ needs.plan.outputs.tag }}",
+    ),
+    (
+        "deploy-check",
+        "      contents: read\n",
+        "      contents: read\n      id-token: write\n",
+        "deploy-check: permissions are",
+    ),
+    (
+        "deploy-check",
+        "      set: ${{ steps.desired.outputs.set }}\n",
+        "      set: 'true'\n",
+        "deploy-check: output set is",
+    ),
+    // The call: whatever deploy-check said, to another group, with other targets or another pin.
+    (
+        "deploy",
+        " && needs.deploy-check.outputs.set == 'true' }}",
+        " }}",
+        "deploy: `if` is Some(",
+    ),
+    (
+        "deploy-mac",
+        "host_group: mac-build",
+        "host_group: all-in-one",
+        "deploy-mac: with.host_group is Some(\"all-in-one\"), not \"mac-build\"",
+    ),
+    (
+        "deploy",
+        "targets: ${{ needs.deploy-check.outputs.targets }}",
+        "targets: ${{ needs.deploy-check.outputs.targets-mac }}",
+        "deploy: with.targets is Some(\"${{ needs.deploy-check.outputs.targets-mac }}\")",
+    ),
+    (
+        "deploy-mac",
+        "version: ${{ needs.deploy-check.outputs.package-version }}",
+        "version: ${{ needs.check.outputs.package-version }}",
+        "deploy-mac: with.version is",
+    ),
+    (
+        "deploy",
+        "      wait: true\n",
+        "      wait: false\n",
+        "deploy: with.wait is Some(\"false\"), not \"true\"",
+    ),
+    (
+        "deploy",
+        "      audience: tierstore-hostkeeper-desired\n",
+        "      audience: tierstore-hostkeeper-release\n",
+        "deploy: with.audience is Some(\"tierstore-hostkeeper-release\")",
+    ),
+    (
+        "deploy-mac",
+        "komira-ai/hostkeeper/.github/workflows/set-desired.yml@30141591c292d8881ce5bc16c9d0b3ba7fcfdca1",
+        "komira-ai/hostkeeper/.github/workflows/set-desired.yml@32a9cc6f8242d0efbc3476391302062ff444dd47",
+        "deploy-mac: `uses` is not",
+    ),
+];
+
+#[test]
+fn the_deploy_of_release_yml_sets_the_release_once_the_testing_suite_lists_it() {
+    // Catches: the deploy of a release run held by the install checks, the lab or the promotion
+    // (what made a failed macOS upload keep the build nodes on the old release for hours), a deploy
+    // that starts before the suite lists the release or with the variable off, one that moves the
+    // fleet back to a release a newer one superseded, and a call that differs from the one the
+    // coordinator's allow-list entry admits for hostkeeper-desired.yml.
+    let text = text_of("release.yml");
+    assert_eq!(deploy(&text), Vec::<String>::new());
+    for (job, replace, with, says) in DEPLOY_DEFECTS {
+        let problems = deploy(&in_job(&text, job, replace, with));
+        assert!(
+            problems.iter().any(|p| p.starts_with(says)),
+            "{job}: {replace:?} -> {with:?} must say {says:?}: {problems:?}"
+        );
+    }
+    let tied = text.replacen(
+        "  tap:\n    needs: [plan, promote-check, formula]\n",
+        "  tap:\n    needs: [plan, promote-check, formula, deploy]\n",
+        1,
+    );
+    assert_eq!(
+        deploy(&tied),
+        vec!["tap: needs deploy; only the deploy and red wait for it".to_owned()]
+    );
+    let tied = text.replacen(
+        "  check-brew:\n    needs: [plan, formula]\n",
+        "  check-brew:\n    needs: [plan, formula, deploy-check]\n",
+        1,
+    );
+    assert_eq!(
+        deploy(&tied),
+        vec!["check-brew: needs deploy-check; only the deploy and red wait for it".to_owned()]
+    );
+    let gone = text.replacen("\n  deploy-mac:\n", "\n  deploy-macs:\n", 1);
+    assert!(
+        deploy(&gone).contains(&format!("deploy-mac: `if` is None, not {DEPLOY_IF}")),
+        "a missing deploy-mac"
+    );
+}
+
+#[test]
+fn the_deploy_check_waits_as_the_apt_install_check_does_and_sets_what_the_dispatch_sets() {
+    // Catches: the deploy gate drifting from the install check's (it would start after an attempt
+    // that did not land, or not start after one that did), and the deploy and the dispatch
+    // building the targets of one release with two floors or two lists of inputs, so the
+    // coordinator refuses the second set (`release_exists`).
+    assert_eq!(
+        DEPLOY_CHECK_IF,
+        format!(
+            "{} && vars.TIERSTORE_SETS_DESIRED == 'true' }}}}",
+            APT_IF.strip_suffix(" }}").expect("an expression")
+        )
+    );
+    assert_eq!(
+        deploy_command()
+            .replace(" --skip-superseded", "")
+            .replace("${TAG#v}", "$VERSION"),
+        check_command()
+    );
+    let by_hand = with_wanted();
+    let deployed = with_wanted_from("deploy-check", "all-in-one");
+    assert_eq!(by_hand.len(), deployed.len());
+    for ((key, hand), (other, deploy)) in by_hand.iter().zip(&deployed) {
+        assert_eq!(key, other);
+        assert_eq!(hand.replace("needs.check.", "needs.deploy-check."), *deploy);
+    }
+    let text = text_of("release.yml");
+    let spoiled = in_job(
+        &text,
+        "deploy",
+        DEPLOY_IF,
+        "${{ github.ref == 'refs/heads/main' }}",
+    );
+    assert!(
+        lint("release.yml", &spoiled)
+            .iter()
+            .any(|p| p
+                == &format!("job deploy: `id-token: write` needs the exact `if: {DEPLOY_IF}`")),
+        "deploy under another condition"
     );
 }

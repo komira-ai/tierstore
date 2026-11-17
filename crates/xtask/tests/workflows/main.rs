@@ -48,6 +48,8 @@ mod pkg_tests;
 mod platforms;
 mod platforms_tests;
 mod pr_runners;
+mod red;
+mod red_tests;
 mod rpm;
 mod rpm_tests;
 mod yaml;
@@ -116,7 +118,9 @@ fn the_workflows_a_release_needs_are_all_there() {
     for needed in [
         "advisories.yml",
         "artifacts.yml",
+        "beta.yml",
         "ci.yml",
+        "hostkeeper-desired.yml",
         "release.yml",
         "tierstore-site-publish.yml",
         "tierstore-site.yml",

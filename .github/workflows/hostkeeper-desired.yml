@@ -1,18 +1,16 @@
 # Sets the desired version of tierstore on the hostkeeper coordinator to a published release, by
-# its targets: each host is ordered the package of its own platform. Two ways in:
+# its targets, by hand: each host is ordered the package of its own platform. One way in,
+# `workflow_dispatch` from main ("Run workflow"), with one input, the released version `X.Y.Z`
+# (its tag without the v), an older one included (a rollback).
 #
-# - `workflow_run`: the completion of a run of `release.yml` on main of this repository. Only a run
-#   that succeeded is acted on, and of those only one whose job `publish` succeeded: then the
-#   newest published release is set (release runs are one at a time, so it is the release that
-#   run published, or a newer one whose run comes next). Most release runs publish nothing, and
-#   then nothing is set. Since a run of `release.yml` succeeds only once the release passed its
-#   install checks, the lab and the promotion, the fleet is moved last.
-# - `workflow_dispatch`, from main ("Run workflow"), with one input, the released version `X.Y.Z`
-#   (its tag without the v), an older one included (a rollback).
+# A release is deployed by release.yml itself, by its jobs `deploy-check`, `deploy` and
+# `deploy-mac`, as soon as the suite `testing` lists its .debs: the same command, pin, audience and
+# inputs as the jobs below, so the same allow-list entries of the coordinator admit both. This
+# workflow is for a rollback or to set a release again; nothing starts it but a person.
 #
 # It is OFF until the repository variable TIERSTORE_SETS_DESIRED is `true`, exactly: unset, or
-# anything else, every job is skipped (their job-level `if:`), whichever way it started. Its
-# other settings are repository variables too; none is a secret:
+# anything else, every job is skipped (their job-level `if:`), and so are release.yml's deploy
+# jobs. Its other settings are repository variables too; none is a secret:
 #  - HOSTKEEPER_COORDINATOR_URL      the coordinator's private listener, https://<host>[:<port>],
 #                                    by the name it has on the tailnet and in its certificate;
 #  - HOSTKEEPER_COORDINATOR_CA       the PEM certificates of the CA that listener chains to;
@@ -32,10 +30,8 @@
 # The jobs, in order:
 #  - check        holds no token that writes, and is the one job that runs code of this
 #                 repository. `cargo xtask release desired` (crates/xtask,
-#                 src/release/desired.rs) decides the release (`--version` by hand,
-#                 `--after-run` after a run of release.yml; one of the two is empty) and hands on
-#                 `set=false` when that run published none. Otherwise it hands on what the lab
-#                 stage of release.yml sets for the release (`release desired-apt`,
+#                 src/release/desired.rs) checks the release named by `--version` and hands on
+#                 what the lab stage of release.yml sets for the release (`release desired-apt`,
 #                 src/release/desired_apt.rs, with the same `--min-hostkeeper`): the package
 #                 version `X.Y.Z` and the targets, one `apt` entry for each of linux-x86_64 and
 #                 linux-arm64, of the hosts' repository entry `komira-testing`, pinned by the
@@ -70,20 +66,14 @@
 #                 entry of the coordinator's allow-list for the host group mac-build, as the first
 #                 call has one for all-in-one.
 #
-# One run at a time of each way in, never cancelled: the runs after a release share the group
-# `hostkeeper-desired-release`, where a newer waiting run replaces an older one (each derives the
-# newest release itself, so nothing is lost), and the runs by hand share
-# `hostkeeper-desired-dispatch`, so that a rollback waiting for its turn is never replaced by the
-# completion of a release run.
+# One run at a time, never cancelled (the group `hostkeeper-desired`): a second run by hand waits
+# for the first. The deploy of a release run is not in this group; a release set after a rollback
+# by hand replaces it, as a newer release always does.
 #
 # The workflow lint (crates/xtask/tests/workflows, desired.rs) holds this file to what is said here.
 name: hostkeeper-desired
 
 on:
-  workflow_run:
-    workflows: [release]
-    types: [completed]
-    branches: [main]
   workflow_dispatch:
     inputs:
       version:
@@ -94,17 +84,16 @@ on:
 permissions: {}
 
 concurrency:
-  group: hostkeeper-desired-${{ github.event_name == 'workflow_dispatch' && 'dispatch' || 'release' }}
+  group: hostkeeper-desired
   cancel-in-progress: false
 
 jobs:
   check:
-    if: ${{ github.ref == 'refs/heads/main' && vars.TIERSTORE_SETS_DESIRED == 'true' && (github.event_name == 'workflow_dispatch' || (github.event_name == 'workflow_run' && github.event.workflow_run.conclusion == 'success' && github.event.workflow_run.head_branch == 'main' && github.event.workflow_run.head_repository.full_name == github.repository)) }}
+    if: ${{ github.ref == 'refs/heads/main' && vars.TIERSTORE_SETS_DESIRED == 'true' }}
     runs-on: ubuntu-24.04
     timeout-minutes: 30
     permissions:
       contents: read
-      actions: read
     outputs:
       set: ${{ steps.desired.outputs.set }}
       package-version: ${{ steps.desired.outputs.package-version }}
@@ -117,8 +106,7 @@ jobs:
       - run: rustup toolchain install
       - name: Compile xtask
         run: cargo xtask --help
-      # The input and the run id are read as environment variables of the step, never spliced into
-      # a script. One of the two is empty: the input on a workflow_run, the run id on a dispatch.
+      # The input is read as an environment variable of the step, never spliced into a script.
       # The testing suite is read through the CDN, as a host's apt reads it; curl retries a CDN
       # that has not caught up for a few minutes.
       - name: The release to set, refused unless the testing suite lists its .debs with the digests of its SHA256SUMS
@@ -126,8 +114,7 @@ jobs:
         env:
           GH_TOKEN: ${{ github.token }}
           VERSION: ${{ inputs.version }}
-          RUN_ID: ${{ github.event.workflow_run.id }}
-        run: cargo xtask release desired --repo "$GITHUB_REPOSITORY" --version "$VERSION" --after-run "$RUN_ID" --min-hostkeeper 0.1.225 --macos-pkg --dir "$RUNNER_TEMP/desired" --output "$GITHUB_OUTPUT"
+        run: cargo xtask release desired --repo "$GITHUB_REPOSITORY" --version "$VERSION" --min-hostkeeper 0.1.225 --macos-pkg --dir "$RUNNER_TEMP/desired" --output "$GITHUB_OUTPUT"
 
   set-desired:
     needs: [check]

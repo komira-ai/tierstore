@@ -230,12 +230,6 @@ fn pkg_defects() -> Vec<(&'static str, String, String, &'static str)> {
             "attest: no download takes assets-pkg-macos-arm64",
         ),
         d(
-            "verify",
-            "pattern: assets-*",
-            "pattern: assets-linux-*",
-            "verify: no download takes assets-pkg-macos-arm64",
-        ),
-        d(
             "attest",
             "id: provenance-pkg-macos-arm64",
             "id: provenance-pkg",
@@ -261,7 +255,7 @@ fn each_way_the_macos_installer_could_be_unsigned_unchecked_or_left_out_of_the_r
     // Asserts: the identity is held by `sign-pkg` alone, which runs no repository code, only on a
     // push to main, with `contents: read`; the job that checks the signature holds no secret and
     // no environment and runs exactly its checks; the installer is built, read back, summed,
-    // attested with its bundle and taken by the sums, attest and verify downloads; and each
+    // attested with its bundle and taken by the sums and attest downloads; and each
     // change that breaks one of those is named by the lint.
     let text = text_of("artifacts.yml");
     for (job, replace, with, says) in pkg_defects() {
