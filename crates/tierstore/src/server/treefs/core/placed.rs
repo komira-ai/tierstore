@@ -66,7 +66,7 @@ pub(super) fn read_manifest(path: &std::path::Path) -> std::io::Result<Vec<u8>> 
 }
 
 /// Why a tree was not read.
-#[derive(Debug, PartialEq, Eq)]
+#[derive(Clone, Debug, PartialEq, Eq)]
 pub(in crate::server::treefs) enum Unread {
     /// There is no such tree: the upstream does not have the root manifest, or the placement has
     /// ended; why, in words.
