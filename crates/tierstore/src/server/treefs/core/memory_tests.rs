@@ -11,6 +11,7 @@ use crate::server::local_cache::manifest_path;
 use crate::server::treefs::core::placed::Unread;
 use crate::server::treefs::ino;
 use crate::server::treefs::testing::{Rig, TREE_IDLE, sample, until};
+use std::sync::atomic::Ordering;
 
 const RUN: &str = "run-1";
 
@@ -287,4 +288,53 @@ fn a_lookup_of_a_numbered_tree_out_of_memory_reads_it_once_or_fails() {
     rig.upstream.failing.lock().unwrap().clear();
     assert_eq!(found(&rig.core, ino::TREES, &root), root_ino());
     assert_eq!(rig.core.times_read(1), 3);
+}
+
+/// Asserts that requests that waited for a read whose leader stopped before it ended (it
+/// panicked) are answered `EIO`, from the failure such a read leaves (`STOPPED`), and not left
+/// waiting; that the stopped read is out of the table; and that the next request starts a read of
+/// its own, which reads the tree.
+#[test]
+fn requests_that_waited_for_a_read_that_stopped_fail_and_the_next_reads_again() {
+    let (rig, bin) = attached("tfs-memory-stopped");
+    out_of_memory(&rig, bin);
+    let before = root_fills(&rig);
+    let fills = rig.upstream.asked("fill").len();
+    rig.upstream.gate_manifests();
+    rig.core.reads.stop_next.store(true, Ordering::Release);
+    let leader = ask_from(&rig, 1, bin);
+    rig.upstream.wait_for_manifest_fills(fills + 1);
+    let followers = ask_from(&rig, 2, bin);
+    until(|| rig.core.waiting_for_reads() == 2);
+    rig.upstream.permit_manifests(1_000);
+    for asked in leader {
+        assert!(asked.join().is_err(), "the leader stops");
+    }
+    for asked in followers {
+        assert_eq!(asked.join().unwrap(), Err(Errno::Io));
+    }
+    assert_eq!(rig.core.waiting_for_reads(), 0);
+    assert_eq!(
+        rig.core.trees_in_memory(),
+        1,
+        "the stopped read had kept the tree"
+    );
+    assert_eq!(root_fills(&rig), before + 1);
+    // The tree it kept leaves at the next forget; a new request then reads it again.
+    let _ = found(&rig.core, root_ino(), "bin");
+    rig.core.forget(bin, 1);
+    assert_eq!(rig.core.trees_in_memory(), 0);
+    assert_eq!(rig.core.getattr(bin).unwrap().attr.ino, bin);
+    // The read of the attach and this one; the stopped read never ended, so is not counted. (Its
+    // fills left the manifests in the cache, so this read asks the fill socket for none.)
+    assert_eq!(rig.core.times_read(1), 2);
+}
+
+/// Asserts the failure a stopped read leaves to those that waited for it, word for word.
+#[test]
+fn a_stopped_read_says_why() {
+    assert_eq!(
+        Unread::Failed(STOPPED.to_owned()).to_string(),
+        "the read of the tree stopped before it ended"
+    );
 }

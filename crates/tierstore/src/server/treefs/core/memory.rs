@@ -61,6 +61,10 @@ pub(in crate::server::treefs) struct Reads {
     waiting: AtomicU64,
     /// The tree numbers read in this process at least once, and how many times.
     done: Mutex<HashMap<u64, u64>>,
+    /// Makes the next read that leads panic once it has read, before it ends: for the test of
+    /// a read that stops.
+    #[cfg(test)]
+    pub(super) stop_next: AtomicBool,
 }
 
 /// The end of a read that runs: it takes the flight out of the table and wakes the requests
@@ -149,6 +153,10 @@ impl Core {
         let read = self
             .read_tree(&digest)
             .map(|tree| self.keep(number, digest, tree));
+        #[cfg(test)]
+        if self.reads.stop_next.swap(false, Ordering::AcqRel) {
+            panic!("a read that stops before it ends");
+        }
         let took = self.now().saturating_sub(start);
         let times = {
             let mut done = locked(&self.reads.done);
