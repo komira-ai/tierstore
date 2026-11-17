@@ -579,7 +579,9 @@ fn pins_live_names_the_trees_attached_now() {
 
 /// Asserts that a tree stays in memory while the kernel holds an inode of it, however the runs
 /// went, leaves memory at the last forget, and is read again, with the same inode numbers, when a
-/// request names one of its inodes; and that a forget of more than was looked up stops at zero.
+/// request names one of its inodes; that the forget of a lookup this process did not count (the
+/// one that request stands for) keeps the tree, uncounted (`core/memory.rs`); and that a forget
+/// of a tree not in memory, or of the namespace, changes nothing.
 #[test]
 fn a_tree_leaves_memory_when_unattached_and_forgotten_and_comes_back_on_a_request() {
     let rig = attached("tfs-core-memory");
@@ -592,16 +594,18 @@ fn a_tree_leaves_memory_when_unattached_and_forgotten_and_comes_back_on_a_reques
     assert_eq!(core.trees_in_memory(), 1);
     core.forget(bin.attr.ino, 1);
     assert_eq!(core.trees_in_memory(), 1);
-    core.forget(root_ino(), 5);
+    core.forget(root_ino(), 1);
     assert_eq!(core.trees_in_memory(), 0);
     // The kernel still has inodes of it: any request reads the tree again.
     let again = core.getattr(bin.attr.ino).unwrap();
     assert_eq!(again, bin);
     assert_eq!(core.trees_in_memory(), 1);
+    // That lookup was not counted by the tree read again: its forget leaves the tree uncounted.
     core.forget(bin.attr.ino, 1);
-    assert_eq!(core.trees_in_memory(), 0);
+    assert_eq!(core.trees_in_memory(), 1);
     core.forget(ino::of(9, 0), 1);
     core.forget(ino::ROOT, 1);
+    assert_eq!(core.trees_in_memory(), 1);
 }
 
 /// Asserts that a tree attached is never dropped by a forget, and that counting the entries of a
@@ -610,7 +614,8 @@ fn a_tree_leaves_memory_when_unattached_and_forgotten_and_comes_back_on_a_reques
 fn an_attached_tree_is_kept_and_a_counted_listing_entry_is_a_lookup() {
     let rig = attached("tfs-core-count");
     let core = &rig.core;
-    core.forget(root_ino(), 100);
+    core.count(root_ino());
+    core.forget(root_ino(), 1);
     assert_eq!(core.trees_in_memory(), 1);
     core.count(ino::of(1, 2));
     core.count(ino::of(1, 3));

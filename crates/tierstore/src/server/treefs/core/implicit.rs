@@ -68,13 +68,16 @@ impl Core {
 
     /// Reads the tree `digest`, unless it is in memory, and attaches it with no run; its number.
     fn attach_implicitly(&self, digest: TreeDigest) -> Result<u64, Errno> {
-        let in_memory = self
-            .table
-            .find(&digest)
-            .filter(|number| locked(&self.state).loaded.contains_key(number));
-        // Read before the lifecycle lock, so that a slow fill holds up no attach and no detach.
-        let tree = match in_memory {
-            Some(_) => None,
+        // Read before the lifecycle lock, so that a slow fill holds up no attach and no detach. A
+        // tree that has a number is read once for every request that asks for it at the same
+        // time (`core/memory.rs`); one that has none yet is read here, since only this lookup
+        // can name it (the kernel makes one lookup of a name at a time).
+        let tree = match self.table.find(&digest) {
+            Some(number) => {
+                self.load(number, digest)
+                    .map_err(|why| refusal(&digest, why))?;
+                None
+            }
             None => Some(
                 self.read_tree(&digest)
                     .map_err(|why| refusal(&digest, why))?,
@@ -123,7 +126,8 @@ impl Core {
     /// Ends the implicit attachment of every tree no request has named for `fs.tree_idle_secs`;
     /// how many ended. A tree no run has is then unpinned, and leaves memory when the kernel holds
     /// none of its inodes, as at the detach of its last run. Nothing ends while a successor takes
-    /// over.
+    /// over. An uncounted tree that nothing has attached and no request has named for that long
+    /// leaves memory too (`core/memory.rs`).
     pub(in crate::server::treefs) fn detach_idle(&self) -> usize {
         let _lifecycle = locked(&self.lifecycle);
         let _pinning = locked(&self.pinning);
@@ -160,6 +164,7 @@ impl Core {
             self.let_go(digest);
             self.drop_if_forgotten(*number);
         }
+        let _ = self.drop_idle_uncounted(idle);
         freed.len()
     }
 

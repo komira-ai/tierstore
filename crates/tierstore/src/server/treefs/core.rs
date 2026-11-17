@@ -45,6 +45,7 @@ use super::locked;
 use super::put::space::PutSpace;
 use super::table::{TableError, TreeTable};
 use super::tree::Tree;
+use memory::Reads;
 
 /// How long the kernel may keep what it was told below a tree's root: the longest it keeps, about
 /// a year. Everything there is immutable.
@@ -126,8 +127,12 @@ pub(super) struct DirItem {
 struct Loaded {
     digest: TreeDigest,
     tree: Tree,
-    /// The lookups of its inodes the kernel has not forgotten yet.
+    /// The lookups of its inodes the kernel has not forgotten yet, as far as this process
+    /// counted them.
     lookups: AtomicU64,
+    /// Whether the kernel forgot more lookups than were counted: no forget takes the tree out of
+    /// memory (`core/memory.rs`).
+    uncounted: AtomicBool,
     /// When a request last named the tree or one of its inodes, on the core's clock.
     used: AtomicU64,
     /// The blobs this tree has asked the cache to pin.
@@ -245,6 +250,9 @@ pub(in crate::server) struct Core {
     /// with the token of its thread: a detach removes the entry, and a thread whose token is no
     /// longer the tree's has been replaced and stops.
     prefetching: Mutex<HashMap<u64, Arc<()>>>,
+    /// The reads of trees that run now, which every request for the same tree waits for
+    /// (`core/memory.rs`).
+    reads: Reads,
     /// The end of the channel the thread that detaches idle trees waits on: dropped with the
     /// core, which ends the thread (`core/implicit.rs`).
     sweeper: Mutex<Option<mpsc::Sender<()>>>,
@@ -287,6 +295,7 @@ impl Core {
             pinning: Mutex::new(()),
             held: AtomicBool::new(false),
             prefetching: Mutex::new(HashMap::new()),
+            reads: Reads::default(),
             sweeper: Mutex::new(None),
             #[cfg(any(target_os = "linux", test))]
             backing: OnceLock::new(),
@@ -364,44 +373,6 @@ impl Core {
         }
     }
 
-    /// The tree numbered `number`, read if it is not in memory; the request is a use of it.
-    fn tree(&self, number: u64) -> Result<Arc<Loaded>, Errno> {
-        if let Some(loaded) = locked(&self.state).loaded.get(&number) {
-            loaded.used.store(self.now(), Ordering::Release);
-            return Ok(Arc::clone(loaded));
-        }
-        let digest = self
-            .table
-            .digest_of(number)
-            .map_err(|_| Errno::Io)?
-            .ok_or(Errno::NoEnt)?;
-        self.load(number, digest).map_err(|_| Errno::Io)
-    }
-
-    /// Reads the tree `digest`, which is numbered `number`, and keeps it in memory.
-    fn load(&self, number: u64, digest: TreeDigest) -> Result<Arc<Loaded>, String> {
-        let tree = self.read_tree(&digest).map_err(|error| error.to_string())?;
-        Ok(self.keep(number, digest, tree))
-    }
-
-    /// Keeps the tree `digest`, numbered `number`, in memory, unless it is there already: the one
-    /// in memory, as used now.
-    fn keep(&self, number: u64, digest: TreeDigest, tree: Tree) -> Arc<Loaded> {
-        let now = self.now();
-        let mut state = locked(&self.state);
-        let loaded = state.loaded.entry(number).or_insert_with(|| {
-            Arc::new(Loaded {
-                digest,
-                tree,
-                lookups: AtomicU64::new(0),
-                used: AtomicU64::new(now),
-                pinned: Mutex::new(HashSet::new()),
-            })
-        });
-        loaded.used.store(now, Ordering::Release);
-        Arc::clone(loaded)
-    }
-
     /// The time on the core's clock.
     fn now(&self) -> u64 {
         self.settings.clock.now()
@@ -469,7 +440,8 @@ impl Core {
         if let Some(loaded) = locked(&self.state).loaded.get(&number) {
             return Ok(Arc::clone(loaded));
         }
-        self.load(number, digest).map_err(AttachError::Tree)
+        self.load(number, digest)
+            .map_err(|why| AttachError::Tree(why.to_string()))
     }
 
     /// Ends every attachment of `run`: the failures its attachments recorded, or none if it
@@ -551,61 +523,6 @@ impl Core {
         self.places_live(&attached);
     }
 
-    /// Takes the tree `number` out of memory if it is not attached and the kernel holds no inode
-    /// of it.
-    fn drop_if_forgotten(&self, number: u64) {
-        let mut state = locked(&self.state);
-        let forgotten = state
-            .loaded
-            .get(&number)
-            .is_some_and(|loaded| loaded.lookups.load(Ordering::Acquire) == 0);
-        if forgotten && !state.attachments.is_attached(number) {
-            let _ = state.loaded.remove(&number);
-        }
-    }
-
-    /// The tree in memory, if it is, counting one more lookup of it.
-    fn counted(&self, number: u64) -> Result<Arc<Loaded>, Errno> {
-        let loaded = self.tree(number)?;
-        self.count_lookup(&loaded);
-        Ok(loaded)
-    }
-
-    /// Counts one more lookup of the tree `loaded`, if this core counts them.
-    fn count_lookup(&self, loaded: &Loaded) {
-        if self.settings.count_lookups {
-            let _ = loaded.lookups.fetch_add(1, Ordering::AcqRel);
-        }
-    }
-
-    /// Counts a lookup of `ino`, which a listing with entries (`READDIRPLUS`) made.
-    #[cfg(any(target_os = "linux", test))]
-    pub(super) fn count(&self, ino: u64) {
-        #[cfg(test)]
-        self.note("count");
-        let _ = self.counted(ino::split(ino).0);
-    }
-
-    /// The kernel forgets `nlookup` lookups of `ino`.
-    #[cfg(any(target_os = "linux", test))]
-    pub(super) fn forget(&self, ino: u64, nlookup: u64) {
-        #[cfg(test)]
-        self.note("forget");
-        let (number, _) = ino::split(ino);
-        let loaded = locked(&self.state).loaded.get(&number).cloned();
-        if let Some(loaded) = loaded {
-            let left = loaded
-                .lookups
-                .fetch_update(Ordering::AcqRel, Ordering::Acquire, |lookups| {
-                    Some(lookups.saturating_sub(nlookup))
-                })
-                .map_or(0, |before| before.saturating_sub(nlookup));
-            if left == 0 {
-                self.drop_if_forgotten(number);
-            }
-        }
-    }
-
     /// Looks up `name` in the directory `parent`. A digest in `trees/` that no run has attached is
     /// attached by the lookup (`Core::resolve`); a name in the root or in a directory above the fs
     /// locations is asked of the node's tree store over the fill socket (`Core::lookup_placed`).
@@ -643,7 +560,7 @@ impl Core {
         let Some(child) = found.and_then(|child| loaded.tree.entry(child)) else {
             return Ok(Looked::Absent(TREE_TTL));
         };
-        self.count_lookup(&loaded);
+        self.count_lookup(number, &loaded);
         let attr = self.attr_of(number, &loaded.tree, child);
         Ok(Looked::Found(Entry {
             attr,
@@ -982,6 +899,7 @@ fn path_of(tree: &Tree, index: u32) -> String {
 #[cfg(any(target_os = "linux", test))]
 mod adopt;
 mod implicit;
+mod memory;
 #[cfg(any(target_os = "linux", test))]
 mod passthrough;
 mod placed;
