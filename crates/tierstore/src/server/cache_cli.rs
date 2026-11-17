@@ -374,7 +374,8 @@ pub(super) async fn serve_front(
     let trees_stopped = oci_stopped.clone();
     // One Notify for each loop: `notify_one` wakes one waiter, and keeps the wake for a loop that
     // is not waiting just now.
-    let halts: [Arc<Notify>; 7] = [
+    let halts: [Arc<Notify>; 8] = [
+        Arc::new(Notify::new()),
         Arc::new(Notify::new()),
         Arc::new(Notify::new()),
         Arc::new(Notify::new()),
@@ -390,6 +391,7 @@ pub(super) async fn serve_front(
         fill_halt,
         trees_halt,
         provider_halt,
+        watch_halt,
         _,
     ] = halts.clone();
     let beating = fronts.beating.clone();
@@ -438,6 +440,10 @@ pub(super) async fn serve_front(
             tracing::debug!("tierstore: fill socket ended");
         }
     };
+    let watching = async {
+        cache.watch_fills(watch_halt).await;
+        tracing::debug!("tierstore: fill watchdog ended");
+    };
     let sweeping = async {
         if let Some(trees) = &trees {
             trees.maintain(loops.pass, trees_halt).await;
@@ -453,7 +459,7 @@ pub(super) async fn serve_front(
             tracing::debug!("tierstore: mount provider ended");
         }
     };
-    let ((drained, (oci_cut, trees_cut)), (), (), (), (), (), (), ()) = tokio::join!(
+    let ((drained, (oci_cut, trees_cut)), (), (), (), (), (), (), (), ()) = tokio::join!(
         serving,
         beside,
         maintaining,
@@ -461,7 +467,8 @@ pub(super) async fn serve_front(
         scrubbing,
         filling,
         sweeping,
-        providing
+        providing,
+        watching
     );
     watcher.abort();
     super::build_info::stderr_log::notes(&cut_note(drained));

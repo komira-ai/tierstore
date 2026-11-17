@@ -15,12 +15,14 @@ use crate::{ByteRange, Error, Meta, PartBody};
 
 use super::Inner;
 use super::metrics::{Call, add};
+use super::stall::Tally;
 use super::stream::read_within;
 
 impl Inner {
     /// A HEAD of `key` at the upstream, counted.
     pub(super) async fn upstream_head(&self, key: &str) -> Result<Meta, Error> {
         self.counters.called(Call::Head);
+        let _in_flight = Tally::new(&self.counters.upstream_in_flight);
         self.upstream.head(key).await
     }
 
@@ -28,6 +30,7 @@ impl Inner {
     /// once it has returned them all.
     pub(super) async fn upstream_get(&self, key: &str, range: ByteRange) -> Result<Bytes, Error> {
         self.counters.called(Call::Get);
+        let _in_flight = Tally::new(&self.counters.upstream_in_flight);
         let bytes = self.upstream.get(key, Some(range)).await?;
         add(&self.counters.upstream_bytes_read, bytes.len() as u64);
         Ok(bytes)
@@ -43,6 +46,8 @@ impl Inner {
         want: u64,
     ) -> Result<Bytes, Error> {
         self.counters.called(Call::Get);
+        // Counted until the body is read, or the future is dropped.
+        let _in_flight = Tally::new(&self.counters.upstream_in_flight);
         let body = self.upstream.get_stream(key, Some(range)).await?;
         let bytes = read_within(body, want).await?;
         add(&self.counters.upstream_bytes_read, bytes.len() as u64);

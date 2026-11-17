@@ -1,11 +1,13 @@
 //! The counters of the local cache, shown by `GET /metricz` in the Prometheus text format.
 
 use std::fmt::Write as _;
+use std::sync::Mutex;
 use std::sync::atomic::{AtomicU64, Ordering};
 
 use crate::Error;
 
 use super::prefetch::Prefetched;
+use super::stall::BusyLog;
 use super::{LocalCache, locked};
 
 /// Why a fill did not leave an object in the cache.
@@ -280,9 +282,13 @@ const HYDRATE_BLOBS: &str = "tierstore_cache_hydrate_blobs_total";
 const HYDRATE_TREES: &str = "tierstore_cache_hydrate_trees_total";
 const PREFETCH_FILL_FAILURES: &str = "tierstore_cache_prefetch_fill_failures_total";
 const FILL_JOINS: &str = "tierstore_cache_fill_joins_total";
+const FILL_SOCKET_WAITING: &str = "tierstore_cache_fill_socket_waiting";
+const FILL_SOCKET_RUNNING: &str = "tierstore_cache_fill_socket_running";
+const UPSTREAM_READS_IN_FLIGHT: &str = "tierstore_cache_upstream_reads_in_flight";
+const FILL_SOCKET_BUSY: &str = "tierstore_cache_fill_socket_busy_total";
 
 /// The families of one sample, with their kinds, in the order `/metricz` shows them.
-pub(super) const PLAIN: [(&str, &str); 32] = [
+pub(super) const PLAIN: [(&str, &str); 36] = [
     (HITS, COUNTER),
     (MISSES, COUNTER),
     (BYTES_SERVED_LOCAL, COUNTER),
@@ -315,6 +321,10 @@ pub(super) const PLAIN: [(&str, &str); 32] = [
     (HOLDS_OPEN, GAUGE),
     (HYDRATE_REQUESTS, COUNTER),
     (HOLD_HANDOVERS, COUNTER),
+    (FILL_SOCKET_WAITING, GAUGE),
+    (FILL_SOCKET_RUNNING, GAUGE),
+    (UPSTREAM_READS_IN_FLIGHT, GAUGE),
+    (FILL_SOCKET_BUSY, COUNTER),
 ];
 
 /// The families of one sample for each value of a label: the name, the kind, the name of the
@@ -404,6 +414,14 @@ pub struct Counters {
     prefetch_failures: [AtomicU64; PREFETCH_FAILED.len()],
     /// The reads that joined a fill that was running instead of starting one, by path.
     joins: [AtomicU64; JOIN_PATHS.len()],
+    /// The requests of the fill socket that wait for a permit now (a gauge).
+    pub(super) socket_waiting: AtomicU64,
+    /// The HEADs and GETs sent to the upstream and not answered yet (a gauge).
+    pub(super) upstream_in_flight: AtomicU64,
+    /// The requests of the fill socket answered `busy`.
+    pub(super) socket_busy: AtomicU64,
+    /// When a line about those answers was last said.
+    pub(super) busy_log: Mutex<BusyLog>,
 }
 
 /// One more of `counter`.
@@ -565,6 +583,7 @@ impl Counters {
         fs_free_bytes: u64,
         read_write: bool,
         queue_depth: u64,
+        socket_running: u64,
     ) -> String {
         let mut text = String::new();
         // In the order of `PLAIN`, which holds the name and the kind of each.
@@ -602,6 +621,10 @@ impl Counters {
             read(&self.holds_open),
             read(&self.hydrate_requests),
             read(&self.hold_handovers),
+            read(&self.socket_waiting),
+            socket_running,
+            read(&self.upstream_in_flight),
+            read(&self.socket_busy),
         ];
         for ((name, kind), value) in PLAIN.iter().zip(plain) {
             let _ = writeln!(text, "# TYPE {name} {kind}");
@@ -650,9 +673,14 @@ impl LocalCache {
             let index = locked(&inner.index);
             (index.partials.len() as u64, index.partials.bytes())
         };
-        let mut text = inner
-            .counters
-            .render(bytes, objects as u64, free, read_write, depth);
+        let mut text = inner.counters.render(
+            bytes,
+            objects as u64,
+            free,
+            read_write,
+            depth,
+            inner.socket_running(),
+        );
         text.push_str(&inner.extents.counters.render(entries, filled));
         text
     }
