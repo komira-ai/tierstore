@@ -13,14 +13,22 @@
 //! A file is read at its own span, the key, offset and size of its record: two files of one
 //! digest at two spans are two reads, both checked against the digest.
 
+#[cfg(feature = "server")]
 use std::ops::Range;
 use std::sync::Arc;
 
 use bytes::Bytes;
 
-use crate::tree_list_v2::{KIND_DIR, KIND_FILE, RECORD_LEN, TreeListV2, TreeListV2Error};
-use crate::tree_list_v2_build::{Counted, Record, Spans};
-use crate::{ListRange, ListSpan, Mode, TreeDigest, TreeLimits};
+use crate::tree_list_v2::{RECORD_LEN, TreeListV2, TreeListV2Error};
+use crate::tree_list_v2_build::{Counted, Spans};
+use crate::{ListSpan, TreeLimits};
+// The reading of an image in place is the server's (the tree store and the mount).
+#[cfg(feature = "server")]
+use crate::tree_list_v2::{KIND_DIR, KIND_FILE};
+#[cfg(feature = "server")]
+use crate::tree_list_v2_build::Record;
+#[cfg(feature = "server")]
+use crate::{ListRange, Mode, TreeDigest};
 
 /// A version 2 tree list whose every entry was checked, held whole and read in place.
 pub struct TreeImage {
@@ -29,12 +37,15 @@ pub struct TreeImage {
     /// The entry records, 32 bytes each.
     entries: Bytes,
     /// The SHA-256 of each entry, 32 bytes each.
+    #[cfg(feature = "server")]
     digests: Bytes,
     /// The names and link targets.
+    #[cfg(feature = "server")]
     names: Bytes,
     /// The keys of the packs, shared by the spans of their files.
     keys: Vec<Arc<str>>,
     /// The ranges of the packs the list's writer says the tree reads.
+    #[cfg(feature = "server")]
     ranges: Vec<ListRange>,
     /// The files and their bytes.
     counted: Counted,
@@ -52,6 +63,7 @@ impl std::fmt::Debug for TreeImage {
     }
 }
 
+#[cfg(feature = "server")]
 /// One entry of a [`TreeImage`], read from its record.
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub(crate) struct ImageEntry<'a> {
@@ -65,6 +77,7 @@ pub(crate) struct ImageEntry<'a> {
     pub kind: ImageKind<'a>,
 }
 
+#[cfg(feature = "server")]
 /// What an entry of a [`TreeImage`] is.
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub(crate) enum ImageKind<'a> {
@@ -85,6 +98,7 @@ pub(crate) enum ImageKind<'a> {
     Symlink { target: &'a str },
 }
 
+#[cfg(feature = "server")]
 /// The limits a tree is checked against when only its shape matters, as in the mount, which
 /// serves the trees the node's tree store accepted under the node's own limits.
 const SHAPE: TreeLimits = TreeLimits {
@@ -113,6 +127,7 @@ impl TreeImage {
         Self::walked(bytes, limits, Spans::PerFile, on_span)
     }
 
+    #[cfg(feature = "server")]
     /// Opens the version 2 tree list `bytes` as [`TreeImage::open`] does, checking its shape and
     /// none of the node's limits, and handing out no span.
     pub(crate) fn checked(bytes: Bytes) -> Result<Self, TreeListV2Error> {
@@ -129,8 +144,11 @@ impl TreeImage {
         let (_, counted) = list.walk(limits, spans, on_span)?;
         Ok(Self {
             entries: bytes.slice_ref(list.entries),
+            #[cfg(feature = "server")]
             digests: bytes.slice_ref(list.digests),
+            #[cfg(feature = "server")]
             names: bytes.slice_ref(list.names),
+            #[cfg(feature = "server")]
             ranges: list.ranges().collect(),
             keys: list.keys,
             counted,
@@ -167,7 +185,10 @@ impl TreeImage {
     pub fn file_bytes(&self) -> u64 {
         self.counted.bytes
     }
+}
 
+#[cfg(feature = "server")]
+impl TreeImage {
     /// The keys of the packs the files are read from, each once: a span's key is its number
     /// here.
     pub(crate) fn keys(&self) -> &[Arc<str>] {
@@ -324,6 +345,7 @@ impl TreeImage {
     }
 }
 
+#[cfg(feature = "server")]
 /// Why a path of a [`TreeImage`] leads nowhere.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub(crate) enum ImagePathError {
