@@ -193,7 +193,7 @@ async fn a_ref_the_provider_cannot_use_is_refused_with_its_reason() {
     let key = rig.put_list(&unhashed).await;
     assert_eq!(
         refusal_of(&rig, "js.unhashed", &key).await,
-        r#"file "a" has no sha256"#
+        "tree list line 2: file without sha256"
     );
 
     let key = rig.put_list(&empty_files(&["a", "a/b"])).await;

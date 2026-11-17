@@ -88,8 +88,8 @@ pub enum TreeListError {
         /// What is wrong with it.
         fault: LineFault,
     },
-    /// A file of size above 0 with no `sha256`, which a node-local tree needs: its digest covers
-    /// the contents, and each span is checked against it as it is filled.
+    /// A file of size above 0 with no `sha256`, in a list made in code (a read list refuses one at
+    /// its line): a node-local tree's digest covers the contents.
     #[error("file {0:?} has no sha256")]
     MissingSha256(String),
 }
@@ -164,7 +164,8 @@ pub enum ListKind {
         /// Where the bytes are: the `size` bytes at `offset` of the object `key`. None exactly for
         /// a file of size 0, which needs no bytes.
         source: Option<BlobSource>,
-        /// The SHA-256 of the contents, if the writer gave it.
+        /// The SHA-256 of the contents: a read list has it for every file of size above 0, and may
+        /// leave it out for one of size 0.
         sha256: Option<TreeDigest>,
     },
     /// A directory listed on its own: an empty one, or one whose mode is not 0755.
@@ -379,6 +380,14 @@ fn file_of(raw: &RawEntry) -> Result<ListKind, LineFault> {
         }
         _ => return Err(LineFault::KeyAndOffset),
     };
+    // A node-local tree's digest covers each file's contents, and each span is checked against it
+    // as it is filled: a file with bytes needs its digest.
+    if size > 0 && sha256.is_none() {
+        return Err(LineFault::Missing {
+            what: "file",
+            member: "sha256",
+        });
+    }
     Ok(ListKind::File {
         mode,
         size,

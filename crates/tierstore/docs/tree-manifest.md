@@ -78,7 +78,7 @@ The object is JSON Lines: each line one JSON object, ended by `\n`, with no othe
 
 | `kind` | Members | Meaning |
 |---|---|---|
-| `file` | `mode`, `size`, `key` and `offset` exactly when `size` is above 0, optional `sha256` | the `size` bytes at `offset` of the object `key` (a pack, or a whole object `cas/l/<sha256>` at offset 0). A file of size 0 has neither `key` nor `offset`; any other mix is refused `a file of size 0 has no key or offset, and a larger one has both`, and an offset plus size past 2^64 `range overflow`. `sha256` is 64 lowercase hex digits (else `malformed digest`) |
+| `file` | `mode`, `size`, and `key`, `offset` and `sha256` exactly when `size` is above 0 (`sha256` may also be given for a file of size 0) | the `size` bytes at `offset` of the object `key` (a pack, or a whole object `cas/l/<sha256>` at offset 0). A file of size 0 has neither `key` nor `offset`; any other mix is refused `a file of size 0 has no key or offset, and a larger one has both`, and an offset plus size past 2^64 `range overflow`. `sha256` is 64 lowercase hex digits (else `malformed digest`) |
 | `dir` | `mode` | an empty directory, or one with a mode of its own |
 | `symlink` | `target` | what the link says, 1 to 4096 bytes with no NUL (else `bad target`), never followed |
 
@@ -86,6 +86,6 @@ A refusal of a line names it, from 1 for the header: `tree list line 3: not sort
 
 The object is named `cas/l/<SHA-256 of its bytes>` (`tierstore::tree_list_key`) and written create-only, so a client that writes the same tree again finds it there. A reader given the bytes and the key refuses bytes that hash to another digest (`tree list digest mismatch`), and refuses an object over 256 MiB (`tree list too large`) before it hashes it. `TreeList::encode` writes each entry's members in the order of the example, leaves out what is not set, and sorts the entries, so the same entries give the same bytes and the same key.
 
-The mount provider needs a `sha256` on every file of size above 0: a node-local tree's digest covers each file's contents, and each range is checked against its digest as it is filled ([the design](https://github.com/komira-ai/tierstore/blob/main/docs/design/node-local-trees.md), decision D5). A list with a file of bytes and no `sha256` is read, and refused by the provider: `file "<path>" has no sha256`.
+A file of size above 0 without `sha256` is refused at its line (`file without sha256`): a node-local tree's digest covers each file's contents, and each range is checked against its digest as it is filled ([the design](https://github.com/komira-ai/tierstore/blob/main/docs/design/node-local-trees.md), decision D5). A list made in code rather than read is held to the same rule by `TreeList::into_entries`.
 
 The golden test `tests/stored_formats/tree_list.rs` pins the bytes of an example (`fixtures/tree_list_v1.jsonl`) and its digest, and reads the same list as a later writer may write it, with members this reader does not know (`fixtures/tree_list_v1_newer.jsonl`). A tree list and a version 1 manifest are both under `cas/l/`, and neither reader takes the other: a manifest has no header line, and a tree list no `v`.

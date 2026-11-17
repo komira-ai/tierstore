@@ -20,8 +20,8 @@ const MANIFEST_V1: &[u8] = include_bytes!("fixtures/tree_manifest_v1.json");
 
 /// The digest of each fixture's bytes. A tree list is named by this, so a change of one byte of
 /// the fixture, which would be a change of what version 1 is, fails here first.
-const V1_DIGEST: &str = "29a47e905a35a65ce17e0a56133b556a9e4e396af3fd27574363377cb36dd548";
-const NEWER_DIGEST: &str = "d28c8944ac921263226022db9c001672634eac4851963ae3a1822c549f7197bb";
+const V1_DIGEST: &str = "023648314980adbd93d7c8645877befef1fe92c36b0cd3cc61d84ec2e31f1c40";
+const NEWER_DIGEST: &str = "5bca3ac6856eea5726d3bb6cc39ea9d5f428d206dd9c2a4b9a8ee8bdb6b7d3e2";
 
 fn digest(text: &str) -> TreeDigest {
     TreeDigest::from_hex(text).unwrap()
@@ -70,7 +70,7 @@ fn entries() -> Vec<ListEntry> {
                     key: format!("cas/l/{}", "3".repeat(64)).into(),
                     offset: 0,
                 }),
-                sha256: None,
+                sha256: Some(digest(&"4".repeat(64))),
             },
         },
         ListEntry {
@@ -81,8 +81,8 @@ fn entries() -> Vec<ListEntry> {
 }
 
 /// The fixture hashes to the pinned digest and is named by it, reads to its five entries (an
-/// executable file with a source and a digest, an empty file, a link, a file with a source and no
-/// digest, a sticky directory), and those entries encode to exactly the fixture's bytes.
+/// executable file with a source and a digest, an empty file, a link, a whole object, a sticky
+/// directory), and those entries encode to exactly the fixture's bytes.
 #[test]
 fn the_version_1_example_reads_to_its_entries_and_is_written_back_byte_for_byte() {
     assert_eq!(TreeDigest::of(V1), digest(V1_DIGEST));

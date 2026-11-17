@@ -194,11 +194,14 @@ pub(super) async fn fill(
         .filter(|(_, _, sha256)| seen.insert(*sha256.as_bytes()))
         .collect();
     let at_once = shared.store.config().fill_concurrency;
-    let read: Vec<bool> = futures::stream::iter(&spans)
-        .map(|(span, size, sha256)| fetch(shared, span, *size, sha256, released))
-        .buffer_unordered(at_once)
-        .collect()
-        .await;
+    let read: Vec<bool> =
+        futures::stream::iter(spans)
+            .map(|(span, size, sha256)| async move {
+                fetch(shared, &span, size, &sha256, released).await
+            })
+            .buffer_unordered(at_once)
+            .collect()
+            .await;
     let fetched = read.iter().filter(|ok| **ok).count();
     (fetched, read.len() - fetched)
 }

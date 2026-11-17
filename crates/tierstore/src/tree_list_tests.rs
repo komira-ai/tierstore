@@ -393,7 +393,7 @@ fn keys_offsets_and_sizes_must_agree() {
 fn a_range_past_2_to_the_64_is_refused() {
     let line = |size: u64| {
         format!(
-            r#"{{"path":"f","kind":"file","mode":420,"size":{size},"key":"k","offset":{}}}"#,
+            r#"{{"path":"f","kind":"file","mode":420,"size":{size},"key":"k","offset":{},"sha256":"{SHA_A}"}}"#,
             u64::MAX - 1
         )
     };
@@ -514,7 +514,7 @@ fn the_encoding_is_sorted_compact_and_reads_back() {
                     target: "\n\"\\".into(),
                 },
             },
-            file("b", 3, Some(("k\"\\", 1)), None),
+            file("b", 3, Some(("k\"\\", 1)), Some(SHA_A)),
             ListEntry {
                 path: "d".into(),
                 kind: ListKind::Dir { mode: mode(0o700) },
@@ -530,7 +530,7 @@ fn the_encoding_is_sorted_compact_and_reads_back() {
             "\n",
             r#"{{"path":"a\u0001é","kind":"file","mode":420,"size":3,"key":"k","offset":9,"sha256":"{sha}"}}"#,
             "\n",
-            r#"{{"path":"b","kind":"file","mode":420,"size":3,"key":"k\"\\","offset":1}}"#,
+            r#"{{"path":"b","kind":"file","mode":420,"size":3,"key":"k\"\\","offset":1,"sha256":"{sha}"}}"#,
             "\n",
             r#"{{"path":"d","kind":"dir","mode":448}}"#,
             "\n",
@@ -574,4 +574,25 @@ fn the_key_names_the_digest_of_the_bytes() {
     for other in &others {
         assert_eq!(tree_list_digest(other), None, "{other}");
     }
+}
+
+/// Asserts that a file with bytes and no digest is refused at its line, and that a file of size 0
+/// may have one or none.
+#[test]
+fn a_file_with_bytes_needs_its_digest() {
+    let unhashed = r#"{"path":"a","kind":"file","mode":420,"size":5,"key":"k","offset":0}"#;
+    assert_eq!(
+        fault(&list(&[unhashed]), 2),
+        LineFault::Missing {
+            what: "file",
+            member: "sha256"
+        }
+    );
+    assert_eq!(
+        parse(&list(&[unhashed])).unwrap_err().to_string(),
+        "tree list line 2: file without sha256"
+    );
+    let empty =
+        format!(r#"{{"path":"e","kind":"file","mode":420,"size":0,"sha256":"{EMPTY_SHA}"}}"#);
+    assert!(parse(&list(&[&empty])).is_ok());
 }
