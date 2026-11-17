@@ -33,12 +33,15 @@
 //! goes in its turn.
 
 pub(super) mod config;
+mod groups;
 mod listener;
 mod names;
 mod prepare;
 mod service;
 mod sources;
 
+#[cfg(test)]
+mod groups_tests;
 #[cfg(test)]
 mod names_tests;
 #[cfg(test)]

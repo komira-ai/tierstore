@@ -585,15 +585,15 @@ fn a_range_that_overflows_is_refused() {
     assert_eq!(
         list.ranges().collect::<Vec<_>>(),
         [ListRange {
-            key: "a".into(),
+            key: 0,
             offset: u64::MAX - 5,
             len: 5,
         }]
     );
 }
 
-/// Asserts that `ranges` gives the ranges in the order of the list, each with its key, offset and
-/// length, and that a key is shared by the ranges that name it.
+/// Asserts that `ranges` gives the ranges in the order of the list, each with the number of its
+/// key, its offset and its length, and that `keys` gives the keys those numbers name.
 #[test]
 fn ranges_are_given_in_the_order_of_the_list() {
     let parts = Parts {
@@ -612,23 +612,26 @@ fn ranges_are_given_in_the_order_of_the_list() {
         ranges,
         [
             ListRange {
-                key: "bc".into(),
+                key: 1,
                 offset: 10,
                 len: 5,
             },
             ListRange {
-                key: "a".into(),
+                key: 0,
                 offset: 0,
                 len: 4,
             },
             ListRange {
-                key: "bc".into(),
+                key: 1,
                 offset: 100,
                 len: 7,
             },
         ]
     );
-    assert!(std::sync::Arc::ptr_eq(&ranges[0].key, &ranges[2].key));
+    assert_eq!(
+        list.keys().iter().map(|key| &**key).collect::<Vec<_>>(),
+        ["a", "bc"]
+    );
 }
 
 /// Asserts that the little-endian readers read two, four and eight bytes at an offset, the least

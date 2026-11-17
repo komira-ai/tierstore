@@ -8,8 +8,9 @@ use std::time::Duration;
 
 use tokio::sync::watch;
 
+use super::groups::{Group, alone};
 use super::names::SourceId;
-use super::prepare::{Job, fill, report, run, spans_of};
+use super::prepare::{Job, fill, report, run};
 use super::sources::Shared;
 use super::sources::Stage;
 use super::testing::{AGENT, READ_ONLY, Rig, member, source};
@@ -93,9 +94,10 @@ fn files(rig: &Rig) -> Vec<BuiltFile> {
     ]
 }
 
-/// Reads the spans of `files` as a version 1 list's preparation does, with no refusal.
+/// Reads the spans of `files` as a version 1 list's preparation does, each alone, with no
+/// refusal.
 async fn fill_files(shared: &Shared, files: &[BuiltFile], released: &AtomicBool) -> (usize, usize) {
-    let spans = futures::stream::iter(spans_of(files));
+    let spans = futures::stream::iter(alone(files));
     fill(shared, spans, released, &AtomicBool::new(false)).await
 }
 
@@ -104,7 +106,7 @@ async fn fill_files(shared: &Shared, files: &[BuiltFile], released: &AtomicBool)
 #[tokio::test]
 async fn a_refused_list_reads_no_more_files() {
     let rig = Rig::new("prov-fill-refused").await;
-    let spans = futures::stream::iter(spans_of(&files(&rig)));
+    let spans = futures::stream::iter(alone(&files(&rig)));
     let read = fill(
         &rig.provider.shared,
         spans,
@@ -308,4 +310,105 @@ async fn an_earlier_preparation_leaves_a_later_ones_placement() {
     rig.provider
         .prepare(source("js.1", 0), &rig.key, READ_ONLY)
         .unwrap();
+}
+
+/// The group of the pack's blobs `blobs` read together, each part with the digest of its blob except
+/// that of the blob `wrong`, if any, which is given a digest no blob has.
+fn group_of(rig: &Rig, blobs: &[usize], wrong: Option<usize>) -> Group {
+    let pack = &rig.bench.pack;
+    let parts = blobs
+        .iter()
+        .map(|blob| {
+            let (sha, offset, size) = &pack.blobs[*blob];
+            let digest = if wrong == Some(*blob) {
+                TreeDigest::of(b"other bytes")
+            } else {
+                TreeDigest::from_hex(sha).unwrap()
+            };
+            (*offset, *size, digest)
+        })
+        .collect();
+    Group {
+        pack: pack.key.as_str().into(),
+        parts,
+    }
+}
+
+/// Reads `group` alone, with no release and no refusal.
+async fn fill_group(shared: &Shared, group: Group, refused: bool) -> (usize, usize) {
+    let reads = futures::stream::iter([group]);
+    fill(
+        shared,
+        reads,
+        &AtomicBool::new(false),
+        &AtomicBool::new(refused),
+    )
+    .await
+}
+
+/// Asserts that a group of three spans read in one GET of the pack is counted as three spans in
+/// the cache.
+#[tokio::test]
+async fn a_group_of_several_spans_is_one_read_and_all_its_spans_are_counted() {
+    let rig = Rig::new("prov-group-ok").await;
+    let group = group_of(&rig, &[0, 1, 2], None);
+    assert_eq!(fill_group(&rig.provider.shared, group, false).await, (3, 0));
+    assert_eq!(pack_reads(&rig), 1);
+    assert!((0..3).all(|blob| rig.holds(blob)));
+}
+
+/// Asserts that in a group of three spans one of which has a wrong digest the two good spans are
+/// counted as read and kept and the bad one as failed.
+#[tokio::test]
+async fn a_group_with_a_span_of_a_wrong_digest_counts_the_good_spans_and_the_bad_one() {
+    let rig = Rig::new("prov-group-wrong").await;
+    let group = group_of(&rig, &[0, 1, 2], Some(1));
+    assert_eq!(fill_group(&rig.provider.shared, group, false).await, (2, 1));
+    assert_eq!(pack_reads(&rig), 1);
+    assert!(rig.holds(0));
+    assert!(!rig.holds(1));
+    assert!(rig.holds(2));
+}
+
+/// Asserts that a group not read within the bound of a read has every span counted as not read.
+#[tokio::test]
+async fn a_group_not_read_within_its_bound_fails_every_span() {
+    let rig = Rig::with("prov-group-bound", TreesConfig::default(), |settings| {
+        settings.fill_timeout = Duration::ZERO;
+    })
+    .await;
+    let _gate = rig.bench.rig.tamper.hold_key(&rig.bench.pack.key);
+    let group = group_of(&rig, &[0, 1, 2], None);
+    assert_eq!(fill_group(&rig.provider.shared, group, false).await, (0, 3));
+    assert!(!(0..3).any(|blob| rig.holds(blob)));
+}
+
+/// Asserts that a group of several spans of a pack that is not there has every span counted as not
+/// read.
+#[tokio::test]
+async fn a_group_of_a_missing_pack_fails_every_span() {
+    let rig = Rig::new("prov-group-missing").await;
+    let mut group = group_of(&rig, &[0, 1, 2], None);
+    group.pack = "cas/pack/missing".into();
+    assert_eq!(fill_group(&rig.provider.shared, group, false).await, (0, 3));
+}
+
+/// Asserts that a group queued from a refused list is not read: its spans are counted as not read
+/// and the upstream is not asked.
+#[tokio::test]
+async fn a_refused_list_reads_no_group_of_several_spans() {
+    let rig = Rig::new("prov-group-refused").await;
+    let group = group_of(&rig, &[0, 1, 2], None);
+    assert_eq!(fill_group(&rig.provider.shared, group, true).await, (0, 3));
+    assert_eq!(pack_reads(&rig), 0);
+}
+
+/// Asserts that a halted provider counts every span of a group as not read and reads nothing.
+#[tokio::test]
+async fn a_halted_provider_reads_no_group() {
+    let rig = Rig::new("prov-group-halted").await;
+    rig.provider.halt();
+    let group = group_of(&rig, &[0, 1, 2], None);
+    assert_eq!(fill_group(&rig.provider.shared, group, false).await, (0, 3));
+    assert_eq!(pack_reads(&rig), 0);
 }

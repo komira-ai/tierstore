@@ -114,7 +114,7 @@ fn ranges_of(entries: Vec<ListEntry>) -> Vec<(String, u64, u64)> {
     let opened = TreeListV2::open(&bytes).unwrap();
     opened
         .ranges()
-        .map(|r| (r.key.to_string(), r.offset, r.len))
+        .map(|r| (opened.keys()[r.key as usize].to_string(), r.offset, r.len))
         .collect()
 }
 
@@ -596,5 +596,11 @@ fn the_span_of_a_digest_is_that_of_its_first_file() {
         .unwrap();
     assert_eq!(spans.len(), 1);
     assert_eq!((spans[0].offset, spans[0].size), (9, 4));
-    assert_eq!(&*spans[0].key, "p3");
+    assert_eq!(spans[0].key, 0);
+    assert_eq!(&*list_keys(&bytes)[0], "p3");
+}
+
+/// The keys of the list in `bytes`.
+fn list_keys(bytes: &[u8]) -> Vec<std::sync::Arc<str>> {
+    TreeListV2::open(bytes).unwrap().keys().to_vec()
 }

@@ -96,8 +96,9 @@ fn break_entry(bytes: &mut [u8], index: usize) {
     bytes[at..at + 2].copy_from_slice(&broken.to_le_bytes());
 }
 
-/// Asserts that a version 2 list run to its end leaves the source placed, every file's span read
-/// once into the cache, and the tree marked ready, and that the tree has the root of the version 1
+/// Asserts that a version 2 list run to its end leaves the source placed, every file's span in the
+/// cache from one grouped read of the pack (its three files are one range: one GET), and the tree
+/// marked ready, and that the tree has the root of the version 1
 /// list of the same entries.
 #[tokio::test]
 async fn a_v2_list_run_to_its_end_places_the_tree_of_the_v1_list_and_reads_every_file() {
@@ -111,7 +112,7 @@ async fn a_v2_list_run_to_its_end_places_the_tree_of_the_v1_list_and_reads_every
     let located = store.locate_fs(&Rig::place_of("js.2", 0)).unwrap();
     assert!(store.placement(&located.placement).unwrap().ready);
     assert!((0..3).all(|blob| rig.holds(blob)));
-    assert_eq!(pack_reads(&rig), 3);
+    assert_eq!(pack_reads(&rig), 1);
 
     let (job1, seen1) = held(&rig, "js.1", &rig.key);
     run(Arc::clone(&rig.provider.shared), job1).await;
@@ -342,4 +343,48 @@ async fn a_v2_file_of_a_missing_pack_leaves_the_tree_placed_and_not_ready() {
     let located = store.locate_fs(&Rig::place_of("js.1", 0)).unwrap();
     assert!(!store.placement(&located.placement).unwrap().ready);
     assert!(rig.holds(1));
+}
+
+/// A version 2 list of the pack's files in which the file `bin/tool` (the blob 0) has a digest no
+/// blob has.
+fn list_with_a_wrong_digest(rig: &Rig) -> TreeList {
+    let pack = &rig.bench.pack;
+    let (_, offset, size) = &pack.blobs[0];
+    let wrong = ListEntry {
+        path: "bin/tool".to_owned(),
+        kind: ListKind::File {
+            mode: Mode::new(0o755).unwrap(),
+            size: *size,
+            source: Some(BlobSource {
+                key: pack.key.as_str().into(),
+                offset: *offset,
+            }),
+            sha256: Some(TreeDigest::of(b"other bytes")),
+        },
+    };
+    TreeList {
+        entries: vec![
+            member(pack, "bin/other", 1, 0o644),
+            wrong,
+            member(pack, "lib/data", 2, 0o644),
+        ],
+    }
+}
+
+/// Asserts that a version 2 list one of whose files has a wrong digest is read as one group: the
+/// two good files are in the cache, the bad one is not, the tree is placed and not marked ready.
+#[tokio::test]
+async fn a_v2_group_with_a_wrong_digest_places_the_tree_and_keeps_the_good_spans() {
+    let rig = Rig::new("prov-v2-wrong-digest").await;
+    let key = rig.put_list_v2(&list_with_a_wrong_digest(&rig)).await;
+    let (job, seen) = held(&rig, "js.1", &key);
+    run(Arc::clone(&rig.provider.shared), job).await;
+    assert_eq!(*seen.borrow(), Stage::Placed);
+    let store = &rig.bench.store;
+    let located = store.locate_fs(&Rig::place_of("js.1", 0)).unwrap();
+    assert!(!store.placement(&located.placement).unwrap().ready);
+    assert_eq!(pack_reads(&rig), 1);
+    assert!(!rig.holds(0));
+    assert!(rig.holds(1));
+    assert!(rig.holds(2));
 }

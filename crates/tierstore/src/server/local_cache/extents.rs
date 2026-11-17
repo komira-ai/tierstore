@@ -17,6 +17,11 @@
 //!   fills write the same bytes of a file. A fill takes a permit of the fill socket's pool
 //!   (`fill_socket_concurrency`, waited for up to `fill_socket_wait`) and never one of
 //!   `max_concurrent_fills`.
+//! - [`LocalCache::fill_parts`] fills several parts of a pack, each with its own digest, in one
+//!   such pass from the first part's start to the last one's end: each part is hashed as its
+//!   bytes pass and recorded as filled if it hashes to its digest, and the bytes between the
+//!   parts are read and not recorded. It is one flight as a fill of one range is, of the whole
+//!   span it reads: a fill of the same parts joins it, and a fill that overlaps it waits.
 //! - [`LocalCache::span_of`] says which file holds a range and where: the pack's own file, in
 //!   `obj/` if the pack is whole and in `extents-v1/` if not. Nothing is copied: the span is a
 //!   range of the pack's file.
@@ -53,6 +58,8 @@ mod table;
 #[cfg(test)]
 mod files_tests;
 #[cfg(test)]
+mod fill_parts_tests;
+#[cfg(test)]
 mod fill_tests;
 #[cfg(test)]
 mod map_tests;
@@ -63,7 +70,7 @@ mod table_tests;
 
 pub use error::RangeError;
 pub(super) use fill::ExtentState;
-pub use fill::RangeWant;
+pub use fill::{PartsWant, RangePart, RangeWant};
 pub use read::Span;
 pub(super) use read::{build_index, scan};
 pub(super) use table::ExtentTable;

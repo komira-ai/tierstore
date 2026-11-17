@@ -176,22 +176,20 @@ fn records_of(bytes: &[u8]) -> Vec<Rec> {
         .collect()
 }
 
-fn span(key: &str, offset: u64, size: u64, sha: char) -> ListSpan {
+fn span(key: u32, offset: u64, size: u64, sha: char) -> ListSpan {
     ListSpan {
-        key: key.into(),
+        key,
         offset,
         size,
         sha256: digest(&sha.to_string().repeat(64)),
     }
 }
 
-/// The spans the walk hands out for the golden, in the order of the entries: `bin/cc`, then
-/// `share/doc.txt`. `include/empty.h` has size 0 and no span.
+/// The spans the walk hands out for the golden: `bin/cc` (key 1, `out/a1/0`). `share/doc.txt`
+/// (key 0, `cas/l/3..`, 12 bytes, digest of `4` repeated) has size above 0 too, but
+/// The spans the golden's walk hands out: each file of size above 0, in the order of the entries.
 fn expected_spans() -> Vec<ListSpan> {
-    vec![
-        span("out/a1/0", 524_288, 1_048_576, '2'),
-        span(&format!("cas/l/{}", "3".repeat(64)), 0, 12, '4'),
-    ]
+    vec![span(1, 524_288, 1_048_576, '2'), span(0, 0, 12, '4')]
 }
 
 fn build(bytes: &[u8]) -> (tierstore::BuiltTree, Vec<ListSpan>) {
@@ -286,12 +284,12 @@ fn the_other_sections_of_the_example_are_pinned() {
         listed,
         vec![
             ListRange {
-                key: format!("cas/l/{}", "3".repeat(64)).into(),
+                key: 0,
                 offset: 0,
                 len: 12
             },
             ListRange {
-                key: "out/a1/0".into(),
+                key: 1,
                 offset: 524_288,
                 len: 1_048_576
             },

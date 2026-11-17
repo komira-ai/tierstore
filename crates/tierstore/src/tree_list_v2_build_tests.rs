@@ -4,6 +4,8 @@
 
 use std::sync::Arc;
 
+mod check;
+
 use crate::tree_list::{ListEntry, ListKind, MAX_TARGET_BYTES, TreeList};
 use crate::tree_list_v2::{
     EntryFault, HeaderFault, ListSpan, Section, TreeListV2, TreeListV2Error,
@@ -12,8 +14,14 @@ use crate::{
     BlobSource, BuiltFile, BuiltTree, Mode, RecordError, TreeDigest, TreeLimits, build_tree,
 };
 
+/// A digest whose bytes differ from one another, which `byte` names: a digest of one byte repeated
+/// folds to 0, as the span set folds digests, so such digests would not tell one file from another.
 fn digest(byte: u8) -> TreeDigest {
-    TreeDigest::from_bytes([byte; 32])
+    let mut bytes = [0u8; 32];
+    for (at, value) in bytes.iter_mut().enumerate() {
+        *value = byte.wrapping_add((at as u8).wrapping_mul(17));
+    }
+    TreeDigest::from_bytes(bytes)
 }
 
 fn key(text: &str, offset: u64) -> Option<BlobSource> {
@@ -602,32 +610,34 @@ fn spans_come_in_entry_order_once_per_digest() {
     let bytes = encode(some_files());
     let (tree, spans) = walk(&bytes, &TreeLimits::default());
     tree.unwrap();
-    let want = |k: &str, offset, size, sha| ListSpan {
-        key: Arc::from(k),
+    let want = |key, offset, size, sha| ListSpan {
+        key,
         offset,
         size,
         sha256: digest(sha),
     };
     assert_eq!(
         spans,
-        [
-            want("k1", 0, 5, 1),
-            want("k2", 50, 7, 2),
-            want("k1", 100, 4, 3)
-        ]
+        [want(0, 0, 5, 1), want(1, 50, 7, 2), want(0, 100, 4, 3)]
     );
 }
 
-/// Asserts that a span's key is the list's own key, shared and not copied.
+/// Asserts that a span names its key by its number in the list's keys.
 #[test]
-fn a_span_shares_the_key_of_the_list() {
-    let bytes = encode(vec![file("a", 5, key("k1", 0), 1)]);
+fn a_span_names_the_key_of_the_list_by_its_number() {
+    let bytes = encode(vec![
+        file("a", 5, key("k0", 0), 1),
+        file("b", 5, key("k1", 0), 2),
+    ]);
     let list = TreeListV2::open(&bytes).unwrap();
     let mut spans = Vec::new();
     list.build(&TreeLimits::default(), |span| spans.push(span))
         .unwrap();
-    assert!(Arc::ptr_eq(&spans[0].key, &list.keys[0]));
-    assert_eq!(&*spans[0].key, "k1");
+    let keys: Vec<&str> = spans
+        .iter()
+        .map(|span| &*list.keys()[span.key as usize])
+        .collect();
+    assert_eq!(keys, ["k0", "k1"]);
 }
 
 /// Asserts that the files of the result are in entry order with their full paths, and that each
