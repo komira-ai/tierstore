@@ -265,6 +265,7 @@ fn a_slow_read_again_answers_its_request() {
     for asked in asking {
         assert_eq!(asked.join().unwrap(), Ok(bin));
     }
+    assert_eq!(root_fills(&rig), before + 1);
     assert_eq!(rig.core.times_read(1), 2);
 }
 
