@@ -91,10 +91,12 @@ fn requests_at_once_for_a_tree_out_of_memory_read_it_once() {
     let (rig, bin) = attached("tfs-memory-once");
     out_of_memory(&rig, bin);
     let before = root_fills(&rig);
+    let fills = rig.upstream.asked("fill").len();
     rig.upstream.gate_manifests();
     let asking = ask_from(&rig, 4, bin);
-    // The first read is at the fill socket, held there; the three other requests wait for it.
-    rig.upstream.wait_for_manifest_fills(before + 1);
+    // The first read is at the fill socket, held there (the gate counts every fill of a
+    // manifest, those of the attach too); the three other requests wait for it.
+    rig.upstream.wait_for_manifest_fills(fills + 1);
     until(|| rig.core.waiting_for_reads() == 3);
     rig.upstream.permit_manifests(1_000);
     for asked in asking {
@@ -121,9 +123,10 @@ fn requests_that_waited_for_a_failed_read_fail_with_it_and_the_next_reads_again(
         .unwrap()
         .insert(root, "upstream 503".to_owned());
     let before = root_fills(&rig);
+    let fills = rig.upstream.asked("fill").len();
     rig.upstream.gate_manifests();
     let asking = ask_from(&rig, 3, bin);
-    rig.upstream.wait_for_manifest_fills(before + 1);
+    rig.upstream.wait_for_manifest_fills(fills + 1);
     until(|| rig.core.waiting_for_reads() == 2);
     rig.upstream.permit_manifests(1_000);
     for asked in asking {
@@ -243,4 +246,44 @@ fn a_number_the_table_does_not_know_is_no_entry() {
     let (rig, _) = attached("tfs-memory-unknown");
     assert_eq!(rig.core.tree(9).unwrap_err(), Errno::NoEnt);
     assert_eq!(rig.core.times_read(9), 0);
+}
+
+/// Asserts that a read of a tree that takes `SLOW_READ_MS` or more on the core's clock (held here
+/// at the fill socket while the test moves the clock) still answers its request and is counted as
+/// a read, the one that is said at warn.
+#[test]
+fn a_slow_read_again_answers_its_request() {
+    let (rig, bin) = attached("tfs-memory-slow");
+    out_of_memory(&rig, bin);
+    let before = root_fills(&rig);
+    let fills = rig.upstream.asked("fill").len();
+    rig.upstream.gate_manifests();
+    let asking = ask_from(&rig, 1, bin);
+    rig.upstream.wait_for_manifest_fills(fills + 1);
+    rig.clock.advance(Duration::from_millis(SLOW_READ_MS));
+    rig.upstream.permit_manifests(1_000);
+    for asked in asking {
+        assert_eq!(asked.join().unwrap(), Ok(bin));
+    }
+    assert_eq!(rig.core.times_read(1), 2);
+}
+
+/// Asserts that a lookup of `trees/<digest>` for a tree that has a number and is out of memory
+/// reads it through the one read of the tree: a read that fails is `EIO` and leaves nothing
+/// attached, and once the manifests can be had the lookup reads the tree and attaches it.
+#[test]
+fn a_lookup_of_a_numbered_tree_out_of_memory_reads_it_once_or_fails() {
+    let (rig, bin) = attached("tfs-memory-implicit");
+    out_of_memory(&rig, bin);
+    let root = rig.upstream.built.lock().unwrap().root.clone();
+    rig.upstream
+        .failing
+        .lock()
+        .unwrap()
+        .insert(root.clone(), "upstream 503".to_owned());
+    assert_eq!(rig.core.lookup(ino::TREES, &root).unwrap_err(), Errno::Io);
+    assert_eq!(rig.core.trees_in_memory(), 0);
+    rig.upstream.failing.lock().unwrap().clear();
+    assert_eq!(found(&rig.core, ino::TREES, &root), root_ino());
+    assert_eq!(rig.core.times_read(1), 3);
 }

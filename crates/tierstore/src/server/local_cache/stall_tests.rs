@@ -308,3 +308,31 @@ fn busy_answers_are_said_at_most_once_in_ten_seconds_with_the_count_of_the_rest(
     assert_eq!(log.answered(11_000, 16), said(3));
     assert_eq!(log.answered(21_000, 16), said(1));
 }
+
+/// Asserts that the watchdog's loop looks once a second on the tokio clock and goes on through a
+/// stall and its end, and that it ends when it is halted.
+#[tokio::test(start_paused = true)]
+async fn the_watchdog_loop_looks_through_a_stall_and_ends_when_halted() {
+    let rig = rig_of("tstall-loop", Duration::from_secs(3600));
+    let pack = Pack::put(&rig, "packs/loop", &[400]).await;
+    let held = Arc::clone(&rig.cache.inner.source_permits)
+        .try_acquire_owned()
+        .expect("the only permit");
+    let waiting = fill_on_task(&rig, &pack, 0);
+    until("the request waits", || sample(&rig, WAITING) == 1).await;
+    let halt = Arc::new(tokio::sync::Notify::new());
+    let cache = rig.cache.clone();
+    let stop = Arc::clone(&halt);
+    let watching = tokio::spawn(async move { cache.watch_fills(stop).await });
+    // The first look starts the stall; 30 s later on the cache clock it is said.
+    tokio::time::sleep(Duration::from_millis(1_500)).await;
+    rig.clock.advance(STALL_AFTER);
+    tokio::time::sleep(Duration::from_secs(1)).await;
+    waiting.abort();
+    assert!(waiting.await.unwrap_err().is_cancelled());
+    tokio::time::sleep(Duration::from_secs(1)).await;
+    assert!(!watching.is_finished());
+    halt.notify_one();
+    watching.await.expect("the loop ends");
+    drop(held);
+}
