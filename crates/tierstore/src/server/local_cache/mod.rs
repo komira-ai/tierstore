@@ -149,6 +149,7 @@ mod revalidate;
 mod scrub;
 mod selfcheck;
 mod source;
+mod stall;
 mod stream;
 pub mod trees;
 mod write;
@@ -215,6 +216,8 @@ mod size_tests;
 mod source_tests;
 #[cfg(test)]
 mod stale_index_tests;
+#[cfg(test)]
+mod stall_tests;
 #[cfg(test)]
 mod start_tests;
 #[cfg(test)]

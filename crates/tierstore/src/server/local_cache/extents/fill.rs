@@ -252,9 +252,7 @@ impl Inner {
         name: &Name,
         wanted: &Wanted,
     ) -> Result<(), RangeError> {
-        let waiting = Arc::clone(&self.source_permits).acquire_owned();
-        let waited = tokio::time::timeout(self.config.fill_socket_wait, waiting).await;
-        let Ok(Ok(_permit)) = waited else {
+        let Some(_permit) = self.socket_permit().await else {
             return Err(RangeError::Busy);
         };
         // A range that was filled while this waited for its permit is held.

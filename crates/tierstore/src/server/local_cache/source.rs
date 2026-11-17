@@ -169,9 +169,7 @@ impl Inner {
                     running
                 }
                 None => {
-                    let waiting = self.source_permits.clone().acquire_owned();
-                    let waited = tokio::time::timeout(self.config.fill_socket_wait, waiting).await;
-                    let Ok(Ok(permit)) = waited else {
+                    let Some(permit) = self.socket_permit().await else {
                         return Err(FillError::Busy);
                     };
                     let class = Class::Mount(permit);
