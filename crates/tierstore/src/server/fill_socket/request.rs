@@ -15,6 +15,7 @@
 //! span <sha256> <size> from <pack> @ <offset>  the range of a pack that is a file of a tree
 //! unplace <mount> <placement>                  the mount no longer holds the placement
 //! places-live <mount> [<placement> ...]        the mount holds these placements and no other
+//! started <path>                              the mount first looked into the tree at <path>
 //! ```
 //!
 //! A digest is sixty-four lower-case hex digits; a number is decimal digits only; a mount and a
@@ -24,7 +25,8 @@
 //! under a prefix the proxy keeps for itself. The `<key>` of a `put` is one word (no spaces), with
 //! the same rules, and its `<path>` is the rest of the line after `from `, an absolute path. The
 //! `<path>` of a `place` is the rest of the line after the mount: names of a tree joined by `/`,
-//! none at either end, the first not one of the mount's own (`trees`, `views`, `put`). A
+//! none at either end, the first not one of the mount's own (`trees`, `views`, `put`); so is the
+//! `<path>` of a `started`, the rest of the line after the verb. A
 //! `<placement>` is thirty-two lower-case hex digits. A `span` has the words of a `fill` of a blob.
 
 use std::path::PathBuf;
@@ -77,6 +79,9 @@ pub(super) enum Request {
     },
     /// A question of the mount about the placements of the node.
     Mount(MountRequest),
+    /// The mount first looked into the tree at the fs location `path`: the start of the command
+    /// of the run the path is a source of (`local_cache/starts.rs`).
+    Started { path: String },
 }
 
 /// A request of the mount about the placements of the node (module `mount`).
@@ -207,6 +212,12 @@ pub(super) fn parse(line: &[u8]) -> Result<Request, Refusal> {
                 mount: name(mount)?,
                 path: path.to_owned(),
             }))
+        }
+        "started" => {
+            Location::fs(rest).map_err(|_| Refusal::MountPath)?;
+            Ok(Request::Started {
+                path: rest.to_owned(),
+            })
         }
         "mounted" => (text == "mounted")
             .then_some(Request::Mount(MountRequest::Mounted))

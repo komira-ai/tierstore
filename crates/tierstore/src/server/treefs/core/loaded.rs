@@ -16,7 +16,7 @@
 //! ([`Pinned`]), so that the opens of one tree do not queue on one lock.
 
 use std::collections::{HashMap, HashSet};
-use std::sync::atomic::{AtomicU64, Ordering};
+use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
 use std::sync::{Arc, Mutex};
 
 use arc_swap::ArcSwap;
@@ -169,6 +169,9 @@ pub(super) struct Loaded {
     pub(super) used: AtomicU64,
     /// The blobs this tree has asked the cache to pin.
     pub(super) pinned: Pinned,
+    /// Whether a lookup in a directory of the tree, or a listing of one, was served while it is in
+    /// memory (`Core::looked_into`).
+    pub(super) looked_into: AtomicBool,
 }
 
 impl Loaded {
@@ -181,6 +184,7 @@ impl Loaded {
             lookups: Lookups::default(),
             used: AtomicU64::new(used),
             pinned: Pinned::default(),
+            looked_into: AtomicBool::new(false),
         }
     }
 }
