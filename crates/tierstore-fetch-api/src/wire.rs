@@ -15,11 +15,9 @@
 //! re-handshakes with the same holder id (its counter memfd and lifeline are unchanged and are
 //! sent again), re-sends `open-pack` and re-issues every parked `wait`, which is idempotent.
 //!
-//! **Handshake.** The mount sends its counter memfd (one for its whole life, sealed with
-//! [`crate::page::F_SEAL_SHRINK`]: the server maps it, and refuses one that could shrink under the
-//! mapping) and one end of a socketpair it keeps open for its whole life, the lifeline. The server
-//! ends a holder only on the lifeline's `POLLHUP`, never because the protocol connection dropped
-//! (5.1).
+//! **Handshake.** The mount sends its counter memfd (one for its whole life) and one end of a
+//! socketpair it keeps open for its whole life, the lifeline. The server ends a holder only on the
+//! lifeline's `POLLHUP`, never because the protocol connection dropped (5.1).
 
 use crate::engine::WaitOutcome;
 use crate::ids::{ByteRange, CellRun, Class, HolderId, JobId, Rank, TreeRef};
