@@ -107,6 +107,8 @@ x509-parser = "0.18.1"
 # The workspace's own crates.
 # The object store trait and the S3 client, with no dependency on another workspace crate.
 objstore-s3 = { path = "crates/objstore-s3" }
+# The `ObjectStore` conformance suite, and its runner for an S3 endpoint (tests and reference runs).
+objstore-conformance = { path = "crates/objstore-conformance" }
 # The hot/cold object store library; it depends on no other workspace crate unless its `s3`
 # feature is on.
 tierstore = { path = "crates/tierstore" }
