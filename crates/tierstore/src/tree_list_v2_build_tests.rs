@@ -331,11 +331,17 @@ fn an_empty_name_is_refused() {
     expect(&bytes, 1, EntryFault::BadName, "bad name");
 }
 
-/// Asserts that `.`, `..`, a name beginning `.wh.`, and a name with a NUL are refused as `BadName`.
+/// Asserts that `.`, `..` and a name with a NUL are refused as `BadName`, and that the names of an
+/// OCI layer's whiteouts (`.wh.<name>`, `.wh..wh..opq`) are built as the files they are.
 #[test]
 fn names_a_tree_may_not_have_are_refused() {
-    for name in [".", "..", ".wh.x", "a\0b"] {
+    for name in [".", "..", "a\0b"] {
         expect(&one_file(name), 1, EntryFault::BadName, "bad name");
+    }
+    for name in [".wh.", ".wh.ssl", ".wh..wh..opq"] {
+        let tree = built(&one_file(name));
+        let paths: Vec<&str> = tree.files.iter().map(|f| f.path.as_str()).collect();
+        assert_eq!(paths, [name], "{name:?}");
     }
 }
 

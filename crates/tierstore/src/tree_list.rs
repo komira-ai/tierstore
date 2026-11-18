@@ -125,7 +125,7 @@ pub enum LineFault {
     #[error("unknown kind {0:?}")]
     UnknownKind(String),
     /// A path that is empty, over [`MAX_PATH_BYTES`], or has a name that is empty, `.`, `..`,
-    /// over [`MAX_NAME_BYTES`], has a NUL, or begins `.wh.`.
+    /// over [`MAX_NAME_BYTES`], or has a NUL.
     #[error("bad path {0:?}")]
     BadPath(String),
     /// A target that is empty, over [`MAX_TARGET_BYTES`] or has a NUL.

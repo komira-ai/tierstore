@@ -904,3 +904,6 @@ pub(super) use read::FileBytes;
 #[cfg(test)]
 #[path = "core_tests.rs"]
 mod tests;
+#[cfg(test)]
+#[path = "core_whiteout_names_tests.rs"]
+mod whiteout_names_tests;
