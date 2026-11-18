@@ -19,15 +19,7 @@
 //! acknowledgement that stalls the PUT or duplicates the record; a durability claim stronger than
 //! the configuration.
 
-#![allow(
-    clippy::unwrap_used,
-    clippy::expect_used,
-    reason = "an integration test: a failed unwrap or expect is the failure it reports"
-)]
-
-mod support;
-
-use support::{Kind, Rendezvous, Sim, config};
+use crate::support::{Kind, Rendezvous, Sim, config};
 use tierstore_format::crc32c_append;
 use tierstore_format::ids::{BlockId, NodeId};
 use tierstore_format::names::HotName;
@@ -37,7 +29,7 @@ use tierstore_store_api::hot::{
     Acked, Committed, HotError, HotStore, ReplicaAck, ReplicaBatch, ReplicaReject, SealReason,
     SealRefused, Unavailable,
 };
-use tierstore_store_api::index::{EntryLocation, Index, Lookup};
+use tierstore_store_api::index::{EntryLocation, Lookup};
 use tierstore_store_api::placement::Placement;
 
 /// A record the test acknowledged: its key, data and the answer.

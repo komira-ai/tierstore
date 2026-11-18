@@ -3,18 +3,10 @@
 //! `min_acks` copies; a crash before the sync leaves none of the batch visible after restart; at
 //! most one `fdatasync` per batch.
 
-#![allow(
-    clippy::unwrap_used,
-    clippy::expect_used,
-    reason = "an integration test: a failed unwrap or expect is the failure it reports"
-)]
-
-mod support;
-
-use support::{Kind, Sim, config};
+use crate::support::{Kind, Sim, config};
 use tierstore_format::names::HotName;
 use tierstore_harness::disk::{Fault, OpKind};
-use tierstore_store_api::index::{Index, Lookup};
+use tierstore_store_api::index::Lookup;
 
 #[test]
 fn records_queued_while_a_batch_syncs_go_out_together_in_the_next_one() {

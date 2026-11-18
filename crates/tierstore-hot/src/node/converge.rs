@@ -22,10 +22,9 @@ use tierstore_format::record::scan;
 use tierstore_format::seal::SealProposal;
 use tierstore_format::trailer::BlockKind;
 use tierstore_format::{FormatError, crc32c, crc32c_append};
-use tierstore_index::backend::Backend;
 use tierstore_index::blocks::{BlockInfo, BlockState};
 use tierstore_store_api::hot::{HotError, Unavailable};
-use tierstore_store_api::index::{EntryLocation, Fact, Index, IndexEntry};
+use tierstore_store_api::index::{EntryLocation, Fact, IndexEntry};
 use tierstore_store_api::sched::DriveClass;
 
 use super::{FileInfo, FileKind, Node, io_err, other_err, unavailable};
@@ -33,7 +32,7 @@ use super::{FileInfo, FileKind, Node, io_err, other_err, unavailable};
 /// The bytes read per step when a segment is verified or its trailer built.
 pub(crate) const WINDOW: u64 = 8 << 20;
 
-impl<B: Backend + 'static> Node<B> {
+impl Node {
     /// Up to `len` bytes of `path` from `offset`, through the queue.
     pub(crate) async fn read(
         &self,

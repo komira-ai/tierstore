@@ -12,15 +12,7 @@
 //! itself or never commits; an accept nobody answered reported as committed; a stamp error that
 //! stops a seal from committing.
 
-#![allow(
-    clippy::unwrap_used,
-    clippy::expect_used,
-    reason = "an integration test: a failed unwrap or expect is the failure it reports"
-)]
-
-mod support;
-
-use support::{Kind, Sim, config};
+use crate::support::{Kind, Sim, config};
 use tierstore_fetch_api::upstream::DriveState;
 use tierstore_format::ids::{BlockId, NodeId};
 use tierstore_format::seal::Ballot;
@@ -28,14 +20,16 @@ use tierstore_format::stamp::WALL_MAX;
 use tierstore_harness::disk::{FakeDisk, Fault, OpKind};
 use tierstore_index::blocks::BlockState;
 use tierstore_store_api::hot::{Acked, Committed, HotError, HotStore, SealReason, Unavailable};
-use tierstore_store_api::index::{Index, Lookup};
+use tierstore_store_api::index::Lookup;
 use tierstore_store_api::sched::DriveClass;
 use tierstore_store_api::view::{Admin, NodeState};
 
 fn put(sim: &mut Sim, id: u8, key: &str, data: &[u8]) -> Acked {
     let h = sim.append(id, key, data);
     sim.run();
-    h.take().expect("the append finished").expect("acknowledged")
+    h.take()
+        .expect("the append finished")
+        .expect("acknowledged")
 }
 
 fn live(sim: &Sim, id: u8, key: &str) -> bool {
@@ -63,7 +57,7 @@ fn seal(
     id: u8,
     segment: BlockId,
     round: u32,
-) -> support::Handle<Result<Committed, HotError>> {
+) -> crate::support::Handle<Result<Committed, HotError>> {
     let node = sim.node(id);
     let ballot = Ballot {
         round,
@@ -108,7 +102,8 @@ fn files_startup_does_not_know_stay_and_do_not_stop_the_recovery() {
 }
 
 #[test]
-fn a_restart_in_a_minority_seals_nothing_and_the_tick_seals_once_a_majority_answers_and_only_once() {
+fn a_restart_in_a_minority_seals_nothing_and_the_tick_seals_once_a_majority_answers_and_only_once()
+{
     let mut sim = Sim::new(3, config(3, 3));
     let key = sim.key_on(1, "kept");
     put(&mut sim, 1, &key, b"acknowledged");
@@ -118,7 +113,10 @@ fn a_restart_in_a_minority_seals_nothing_and_the_tick_seals_once_a_majority_answ
     sim.net.cut_both(1, 3);
     let report = sim.restart(1);
     assert_eq!((report.sealed, report.unsealed), (0, 1));
-    assert!(report.recovery.is_none(), "recovery runs once all is sealed");
+    assert!(
+        report.recovery.is_none(),
+        "recovery runs once all is sealed"
+    );
     let node = sim.node(1);
     assert!(!node.started());
     assert!(!live(&sim, 1, &key));
@@ -142,7 +140,10 @@ fn a_restart_in_a_minority_seals_nothing_and_the_tick_seals_once_a_majority_answ
     assert!(node.started());
     assert_eq!(block_state(&sim, 1, seg), Some(BlockState::Sealed));
     node.recover(None).unwrap();
-    assert!(live(&sim, 1, &key), "the recovery indexes the sealed record");
+    assert!(
+        live(&sim, 1, &key),
+        "the recovery indexes the sealed record"
+    );
 }
 
 #[test]
@@ -330,7 +331,10 @@ fn a_start_converges_a_committed_seal_whose_block_row_is_still_open() {
     h.take().unwrap().unwrap();
     assert_eq!(block_state(&sim, 2, seg), Some(BlockState::Open));
     let node = sim.node(2);
-    let report = sim.exec.block(async move { node.start(None).await }).unwrap();
+    let report = sim
+        .exec
+        .block(async move { node.start(None).await })
+        .unwrap();
     assert_eq!((report.sealed, report.unsealed), (0, 0));
     assert_eq!(block_state(&sim, 2, seg), Some(BlockState::Sealed));
     assert!(live(&sim, 2, &key));

@@ -12,21 +12,13 @@
 //! make a nested file's directory entries durable; a configuration that cannot survive its
 //! declared failure and is accepted anyway.
 
-#![allow(
-    clippy::unwrap_used,
-    clippy::expect_used,
-    reason = "an integration test: a failed unwrap or expect is the failure it reports"
-)]
-
-mod support;
-
 use std::io::ErrorKind;
 use std::sync::atomic::{AtomicBool, AtomicUsize, Ordering};
 use std::sync::mpsc;
 use std::sync::{Arc, Condvar, Mutex, PoisonError};
 use std::thread;
 
-use support::{Exec, FakeDev, Handle, config};
+use crate::support::{Exec, FakeDev, Handle, config};
 use tierstore_fetch_api::clock::ManualClock;
 use tierstore_fetch_api::upstream::DriveState;
 use tierstore_format::block::BlockGeometry;

@@ -13,21 +13,13 @@
 //! `block_bytes`; an empty segment sealed by age; more open segments than writer, replica set
 //! and class give; a seal counted under the wrong reason.
 
-#![allow(
-    clippy::unwrap_used,
-    clippy::expect_used,
-    reason = "an integration test: a failed unwrap or expect is the failure it reports"
-)]
-
-mod support;
-
-use support::{Kind, Sim, config};
+use crate::support::{Kind, Sim, config};
 use tierstore_format::ids::{BlockId, ExpiryClass, NodeId};
 use tierstore_hot::node::SegmentInfo;
 use tierstore_index::blocks::BlockState;
 use tierstore_metrics::labels::SealReason;
 use tierstore_store_api::hot::{HotError, Unavailable};
-use tierstore_store_api::index::{Index, Lookup};
+use tierstore_store_api::index::Lookup;
 use tierstore_store_api::view::{Admin, NodeState};
 
 const DAY_MS: u64 = 24 * 3600 * 1000;

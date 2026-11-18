@@ -12,7 +12,6 @@ use std::sync::Arc;
 use tierstore_format::ids::{BlockId, NodeId};
 use tierstore_format::names::HotName;
 use tierstore_format::seal::{Ballot, SealProposal, SealState};
-use tierstore_index::backend::Backend;
 use tierstore_store_api::hot::{CopyState, HotError, Promise, SealRefused};
 use tierstore_store_api::sched::DriveClass;
 
@@ -25,7 +24,7 @@ pub(crate) const NO_PROMISE: Ballot = Ballot {
     node: NodeId(0),
 };
 
-impl<B: Backend + 'static> Node<B> {
+impl Node {
     /// The highest ballot this node promised for `segment`, if it voted on it (from memory: every
     /// state this node wrote or read since it started is cached).
     pub(crate) fn promised(&self, segment: BlockId) -> Option<Ballot> {

@@ -11,7 +11,6 @@
 use std::sync::Arc;
 
 use tierstore_format::names::HotName;
-use tierstore_index::backend::Backend;
 use tierstore_metrics::labels::ReclaimKind;
 use tierstore_store_api::hot::{HotError, Unavailable};
 use tierstore_store_api::sched::DriveClass;
@@ -40,7 +39,7 @@ pub struct Fill {
     pub capacity: u64,
 }
 
-impl<B: Backend + 'static> Node<B> {
+impl Node {
     pub(crate) fn fill(&self) -> Fill {
         let st = self.lock();
         let open: u64 = st.writing.values().map(|s| s.lock().written).sum::<u64>()
@@ -143,7 +142,7 @@ impl<B: Backend + 'static> Node<B> {
     }
 }
 
-impl<B: Backend + 'static> HotNode<B> {
+impl HotNode {
     /// The hot tier's fill now.
     pub fn fill(&self) -> Fill {
         self.n.fill()

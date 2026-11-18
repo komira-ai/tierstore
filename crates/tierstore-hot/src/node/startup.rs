@@ -18,7 +18,6 @@
 use std::sync::Arc;
 
 use tierstore_format::names::HotName;
-use tierstore_index::backend::Backend;
 use tierstore_index::blocks::BlockState;
 use tierstore_index::recover::{Recovery, RecoveryReport};
 use tierstore_index::tomblog::TombLog;
@@ -49,7 +48,7 @@ fn sweepable(dir: &str, name: &str) -> bool {
         || dir == "cache"
 }
 
-impl<B: Backend + 'static> HotNode<B> {
+impl HotNode {
     /// The startup sweep, the seal of every open segment, and the index recovery (with the
     /// tombstone log `tomb` when the node keeps one). The caller marks the index ready once its
     /// tombstone pull is done too.
@@ -137,15 +136,16 @@ impl<B: Backend + 'static> HotNode<B> {
     /// its own).
     pub fn recover(&self, tomb: Option<&TombLog>) -> Result<RecoveryReport, HotError> {
         let fs = DevFs::new(Arc::clone(&self.n.dev));
-        Recovery {
-            hot: &fs,
-            cold: Vec::new(),
-            tomb,
-            geometry: self.n.cfg.geometry,
-            window: super::converge::WINDOW,
-        }
-        .run(&*self.n.index)
-        .map_err(other_err("index recovery"))
+        self.n
+            .index
+            .recover(&Recovery {
+                hot: &fs,
+                cold: Vec::new(),
+                tomb,
+                geometry: self.n.cfg.geometry,
+                window: super::converge::WINDOW,
+            })
+            .map_err(other_err("index recovery"))
     }
 
     /// Whether every segment found at startup is sealed.

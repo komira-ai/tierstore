@@ -34,14 +34,11 @@ use tierstore_format::names::HotName;
 use tierstore_format::record::{RecordFlags, RecordIn, record_len};
 use tierstore_format::seal::Ballot;
 use tierstore_format::trailer::BlockKind;
-use tierstore_index::backend::Backend;
 use tierstore_index::blocks::{BlockInfo, BlockState};
 use tierstore_store_api::hot::{
     Acked, AppendRecord, HotError, ReplicaBatch, SealReason, Unavailable,
 };
-use tierstore_store_api::index::{
-    EntryLocation, Index, IndexEntry, IndexError, Lookup, PutOutcome,
-};
+use tierstore_store_api::index::{EntryLocation, IndexEntry, IndexError, Lookup, PutOutcome};
 use tierstore_store_api::proto::ReplicaAnswer;
 use tierstore_store_api::sched::DriveClass;
 use tokio::sync::{oneshot, watch};
@@ -183,7 +180,7 @@ impl Seg {
     }
 }
 
-impl<B: Backend + 'static> Node<B> {
+impl Node {
     /// `HotStore::append` (10.3, 10.5 step 3).
     pub(crate) async fn append(self: &Arc<Self>, record: AppendRecord) -> Result<Acked, HotError> {
         if record.data.len() as u64 > self.cfg.large_min {

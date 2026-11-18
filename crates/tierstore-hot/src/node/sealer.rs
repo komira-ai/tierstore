@@ -15,7 +15,6 @@ use std::sync::Arc;
 use futures::future::join_all;
 use tierstore_format::ids::{BlockId, NodeId};
 use tierstore_format::seal::{Ballot, SealProposal};
-use tierstore_index::backend::Backend;
 use tierstore_metrics::labels::SealRound;
 use tierstore_store_api::hot::{
     Committed, CopyState, HotError, Promise, SealReason, SealRefused, Unavailable,
@@ -71,8 +70,8 @@ fn vote_of_answer(answer: SealAnswer, ballot: Ballot) -> Vote {
 
 /// Seals `segment` under a ballot above every one this node has seen, unless a seal of this node
 /// is already working on it.
-pub(crate) async fn seal_segment<B: Backend + 'static>(
-    n: &Arc<Node<B>>,
+pub(crate) async fn seal_segment(
+    n: &Arc<Node>,
     segment: BlockId,
     reason: SealReason,
 ) -> Result<Committed, HotError> {
@@ -86,8 +85,8 @@ pub(crate) async fn seal_segment<B: Backend + 'static>(
 }
 
 /// `HotStore::seal`: seals `segment` by majority under `ballot`.
-pub(crate) async fn seal<B: Backend + 'static>(
-    n: &Arc<Node<B>>,
+pub(crate) async fn seal(
+    n: &Arc<Node>,
     segment: BlockId,
     ballot: Ballot,
     reason: SealReason,
@@ -166,7 +165,7 @@ pub(crate) async fn seal<B: Backend + 'static>(
 }
 
 /// A ballot of this node above `b`.
-fn above<B: Backend + 'static>(n: &Node<B>, segment: BlockId, b: Ballot) -> Ballot {
+fn above(n: &Node, segment: BlockId, b: Ballot) -> Ballot {
     n.metrics
         .hot_seal_rounds_total
         .with(SealRound::Rejected)
@@ -176,8 +175,8 @@ fn above<B: Backend + 'static>(n: &Node<B>, segment: BlockId, b: Ballot) -> Ball
 }
 
 /// Adopts a seal another sealer committed.
-async fn adopt<B: Backend + 'static>(
-    n: &Arc<Node<B>>,
+async fn adopt(
+    n: &Arc<Node>,
     segment: BlockId,
     ballot: Ballot,
     proposal: SealProposal,
@@ -196,8 +195,8 @@ async fn adopt<B: Backend + 'static>(
 }
 
 /// Records the commit here, converges this node's copy, and broadcasts `sealed`.
-async fn commit<B: Backend + 'static>(
-    n: &Arc<Node<B>>,
+async fn commit(
+    n: &Arc<Node>,
     segment: BlockId,
     proposal: SealProposal,
     voters: &[NodeId],
@@ -218,7 +217,7 @@ async fn commit<B: Backend + 'static>(
     Ok(())
 }
 
-impl<B: Backend + 'static> Node<B> {
+impl Node {
     /// Sends `msg` to every voter (this node first, through its own handlers) and gathers what
     /// each said.
     async fn ask(

@@ -12,7 +12,6 @@ use tierstore_format::digest::GenerationHasher;
 use tierstore_format::names::HotName;
 use tierstore_format::record::{RECORD_HEADER_LEN, RecordHeader};
 use tierstore_format::trailer::BlockKind;
-use tierstore_index::backend::Backend;
 use tierstore_store_api::hot::HotError;
 use tierstore_store_api::sched::DriveClass;
 
@@ -67,7 +66,7 @@ fn name_of(f: &FileInfo) -> Option<HotName> {
     }
 }
 
-impl<B: Backend + 'static> Node<B> {
+impl Node {
     async fn read_whole(&self, path: &str, len: u64) -> Result<Vec<u8>, HotError> {
         let mut out = Vec::with_capacity(len as usize);
         while (out.len() as u64) < len {
@@ -100,7 +99,7 @@ impl<B: Backend + 'static> Node<B> {
     }
 }
 
-impl<B: Backend + 'static> HotNode<B> {
+impl HotNode {
     /// Scrubs every hot file whose last scrub is at least `hot.scrub_period` old.
     pub async fn scrub(&self) -> Result<ScrubReport, HotError> {
         let n = &self.n;

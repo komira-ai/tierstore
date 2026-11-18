@@ -13,19 +13,11 @@
 //! missing file; an unlink error swallowed by reclaim (the file forgotten while still on disk);
 //! a clean file in hot-only mode not counted as dirty.
 
-#![allow(
-    clippy::unwrap_used,
-    clippy::expect_used,
-    reason = "an integration test: a failed unwrap or expect is the failure it reports"
-)]
-
-mod support;
-
+use crate::support::{Kind, Rendezvous, Sim, config};
 use bytes::Bytes;
 use futures::StreamExt;
 use futures::channel::mpsc;
 use futures::stream;
-use support::{Kind, Rendezvous, Sim, config};
 use tierstore_fetch_api::ids::ByteRange;
 use tierstore_format::ids::{ExpiryClass, Generation, KeyHash, NodeId};
 use tierstore_format::names::HotName;
@@ -36,7 +28,7 @@ use tierstore_hot::config::OnFull;
 use tierstore_hot::node::ReadError;
 use tierstore_hot::peers::{LargeAnswer, LargeChunk, LargeOffer};
 use tierstore_store_api::hot::{Acked, HotError, HotStore, LargePut, Unavailable};
-use tierstore_store_api::index::{EntryLocation, Index, Lookup};
+use tierstore_store_api::index::{EntryLocation, Lookup};
 use tierstore_store_api::placement::Placement;
 use tierstore_store_api::proto::Envelope;
 
@@ -301,7 +293,10 @@ fn a_put_of_the_bytes_of_a_deleted_key_commits_over_the_file_the_delete_left() {
 /// A 3-node cluster whose replica `lagged` (not holding anything) is held, and a 9 MiB body fed
 /// in 1 MiB pieces until the writer waits for it; the tick abandons it and the body ends.
 /// Returns what the test needs to finish the PUT: the handle, the key and the lagging node.
-fn lagged_big_put(sim: &mut Sim, key: &str) -> (support::Handle<Result<Acked, HotError>>, u8) {
+fn lagged_big_put(
+    sim: &mut Sim,
+    key: &str,
+) -> (crate::support::Handle<Result<Acked, HotError>>, u8) {
     let rank = Rendezvous.rank(key.as_bytes(), &sim.view);
     let lagged = rank[1].0;
     sim.net.hold(Some(1), lagged, Kind::Large);

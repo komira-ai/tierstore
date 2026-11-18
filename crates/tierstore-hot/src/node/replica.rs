@@ -19,10 +19,9 @@ use tierstore_format::crc32c_append;
 use tierstore_format::ids::{BlockId, NodeId};
 use tierstore_format::names::HotName;
 use tierstore_format::record::{decode_record, scan};
-use tierstore_index::backend::Backend;
 use tierstore_index::blocks::{BlockInfo, BlockState};
 use tierstore_store_api::hot::{ReplicaAck, ReplicaBatch, ReplicaReject};
-use tierstore_store_api::index::{EntryLocation, Fact, Index, IndexEntry};
+use tierstore_store_api::index::{EntryLocation, Fact, IndexEntry};
 use tierstore_store_api::sched::DriveClass;
 
 use super::Node;
@@ -43,8 +42,8 @@ pub(crate) struct CopySt {
 }
 
 /// `PUT /store/v1/hot/replica`: one batch.
-pub(crate) async fn replicate<B: Backend + 'static>(
-    n: &Arc<Node<B>>,
+pub(crate) async fn replicate(
+    n: &Arc<Node>,
     batch: ReplicaBatch,
 ) -> Result<ReplicaAck, ReplicaReject> {
     n.observe(batch.stamp);
@@ -136,11 +135,7 @@ pub(crate) async fn replicate<B: Backend + 'static>(
 }
 
 /// Creates this node's copy of `segment`, which `writer` opened.
-async fn open_copy<B: Backend + 'static>(
-    n: &Arc<Node<B>>,
-    segment: BlockId,
-    writer: NodeId,
-) -> Result<CopySt, ()> {
+async fn open_copy(n: &Arc<Node>, segment: BlockId, writer: NodeId) -> Result<CopySt, ()> {
     let (dev, path) = (Arc::clone(&n.dev), HotName::Segment(segment).path());
     n.sched
         .run(DriveClass::Write, move || {
@@ -197,7 +192,7 @@ pub(crate) fn records_of(
         .collect()
 }
 
-impl<B: Backend + 'static> super::HotNode<B> {
+impl super::HotNode {
     /// Whether this node holds a durable record of `key` in a copy it mirrors that its writer
     /// has not yet said is acknowledged: the key's answer here is then not a definitive miss
     /// (the record may be acknowledged already, and a seal would adopt it).

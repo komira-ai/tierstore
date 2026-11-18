@@ -14,22 +14,14 @@
 //! stale `.repair` file, or brings back the scrub time of a file the node no longer holds; a large
 //! file whose header disagrees with its name passing the scrub.
 
-#![allow(
-    clippy::unwrap_used,
-    clippy::expect_used,
-    reason = "an integration test: a failed unwrap or expect is the failure it reports"
-)]
-
-mod support;
-
 use std::io;
 use std::sync::Arc;
 use std::sync::atomic::{AtomicU64, Ordering};
 
+use crate::support::{Exec, FakeDev, Kind, Rendezvous, Sim, config, view};
 use bytes::Bytes;
 use futures::StreamExt;
 use futures::stream::BoxStream;
-use support::{Exec, FakeDev, Kind, Rendezvous, Sim, config, view};
 use tierstore_fetch_api::clock::{Clock, ManualClock};
 use tierstore_fetch_api::ids::ByteRange;
 use tierstore_format::crc32c;
@@ -139,8 +131,7 @@ fn sealed_segment(sim: &mut Sim) -> (BlockId, String) {
 
 fn sealed(sim: &Sim, id: u8, segment: BlockId, p: SealProposal) -> Result<(), HotError> {
     let node = sim.node(id);
-    sim.exec
-        .block(async move { node.sealed(segment, p).await })
+    sim.exec.block(async move { node.sealed(segment, p).await })
 }
 
 fn too_few_copies(r: &Result<(), HotError>) -> bool {
@@ -264,7 +255,10 @@ fn a_promise_reports_an_empty_copy_cut_on_a_record_or_inside_one_by_its_verified
             .unwrap();
         let copy = promise.copy.unwrap();
         assert_eq!(copy.committed, whole.len() as u64, "node {n}");
-        assert_eq!(copy.verified, first, "node {n}: only the first record holds");
+        assert_eq!(
+            copy.verified, first,
+            "node {n}: only the first record holds"
+        );
         assert_eq!(
             copy.running_crc,
             crc32c(&whole[..first as usize]),
@@ -308,7 +302,11 @@ fn a_short_copy_with_peers_that_hold_no_more_is_not_sealed() {
     }
     let got = sealed(&sim, 1, seg(4), proposal(&all));
     assert!(too_few_copies(&got), "{got:?}");
-    assert_eq!(sim.disk(1).read_all(&path).unwrap(), first, "left as it was");
+    assert_eq!(
+        sim.disk(1).read_all(&path).unwrap(),
+        first,
+        "left as it was"
+    );
     assert!(
         !sim.disk(1)
             .exists(&HotName::BlockIndex(seg(4)).path())
@@ -436,7 +434,7 @@ struct Lab {
     exec: Exec,
     disk: FakeDisk,
     dev: Arc<Lie>,
-    node: HotNode<MemBackend>,
+    node: HotNode,
 }
 
 fn lab(watched: &str) -> Lab {
@@ -447,7 +445,10 @@ fn lab(watched: &str) -> Lab {
     clock.advance(1_000_000);
     let clk: Arc<dyn Clock> = Arc::new(clock);
     let dev = Arc::new(Lie {
-        inner: FakeDev(disk.clone(), Arc::new(std::sync::atomic::AtomicBool::new(true))),
+        inner: FakeDev(
+            disk.clone(),
+            Arc::new(std::sync::atomic::AtomicBool::new(true)),
+        ),
         extra_len: AtomicU64::new(0),
         reads: AtomicU64::new(u64::MAX),
         watched: watched.to_owned(),
@@ -565,7 +566,13 @@ fn a_repair_that_cannot_create_its_file_fails_the_scrub_and_keeps_the_bad_copy()
     sim.disk(1).inject(OpKind::Create, 0, Fault::Eio);
     let node = sim.node(1);
     let got = sim.exec.block(async move { node.scrub().await });
-    assert!(matches!(got, Err(HotError::Io { op: "replace copy", .. })));
+    assert!(matches!(
+        got,
+        Err(HotError::Io {
+            op: "replace copy",
+            ..
+        })
+    ));
     assert_eq!(sim.disk(1).len(&path).unwrap(), 100);
 }
 

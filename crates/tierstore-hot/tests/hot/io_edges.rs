@@ -10,18 +10,10 @@
 //! leaves a half-made copy that blocks the retry; a listing that hides a failure as an empty
 //! directory; an append that treats any failure of `len` as "no file yet".
 
-#![allow(
-    clippy::unwrap_used,
-    clippy::expect_used,
-    reason = "an integration test: a failed unwrap or expect is the failure it reports"
-)]
-
-mod support;
-
 use std::io::ErrorKind;
 use std::sync::Arc;
 
-use support::{Sim, config};
+use crate::support::{Sim, config};
 use tierstore_fetch_api::clock::ManualClock;
 use tierstore_format::crc32c_append;
 use tierstore_format::ids::{BlockId, NodeId};

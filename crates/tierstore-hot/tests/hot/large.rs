@@ -13,23 +13,15 @@
 //! failed PUT; a PUT that hangs when its body ends short; a second file for the same bytes; a
 //! different body under a used key answered 503 instead of 412.
 
-#![allow(
-    clippy::unwrap_used,
-    clippy::expect_used,
-    reason = "an integration test: a failed unwrap or expect is the failure it reports"
-)]
-
-mod support;
-
 use std::collections::{BTreeMap, BTreeSet};
 use std::io;
 use std::sync::{Arc, Mutex, PoisonError};
 
+use crate::support::{FakeDev, Handle, Kind, Rendezvous, Sim, config};
 use bytes::Bytes;
 use futures::StreamExt;
 use futures::channel::mpsc;
 use futures::stream::{self, BoxStream};
-use support::{FakeDev, Handle, Kind, Rendezvous, Sim, config};
 use tierstore_fetch_api::clock::Clock;
 use tierstore_format::ids::{ExpiryClass, Generation, KeyHash, NodeId};
 use tierstore_format::names::HotName;
@@ -39,9 +31,8 @@ use tierstore_harness::disk::OpKind;
 use tierstore_hot::peers::{HotPeers, LargeAnswer, LargeChunk, LargeOffer};
 use tierstore_hot::sched::HotSched;
 use tierstore_hot::{HotNode, HotParts};
-use tierstore_index::backend::mem::MemBackend;
 use tierstore_store_api::hot::{Acked, HotError, HotStore, LargePut, ReplicaBatch, Unavailable};
-use tierstore_store_api::index::{EntryLocation, Index, Lookup};
+use tierstore_store_api::index::{EntryLocation, Lookup};
 use tierstore_store_api::peer::PeerError;
 use tierstore_store_api::placement::Placement;
 use tierstore_store_api::proto::{Envelope, ReplicaAnswer, SealAnswer, SealMessage};
@@ -322,7 +313,7 @@ fn a_body_in_many_small_pieces_is_written_in_chunks_not_buffered_whole() {
 
 /// The nodes of one cluster reached by a wire that can corrupt what one node receives.
 struct Wire {
-    nodes: Mutex<BTreeMap<NodeId, HotNode<MemBackend>>>,
+    nodes: Mutex<BTreeMap<NodeId, HotNode>>,
     corrupt: Mutex<BTreeSet<NodeId>>,
 }
 
@@ -423,7 +414,7 @@ fn wired(sim: &Sim, count: u8) -> Arc<Wire> {
             config: sim.cfg.clone(),
             dev: Arc::new(FakeDev(p.disk.clone(), Arc::new(true.into()))),
             sched: HotSched::inline(sim.cfg.stall_after_ms, Arc::clone(&clock)),
-            index: Arc::clone(&p.index),
+            index: p.index.clone(),
             peers: Arc::new(WirePeers {
                 wire: Arc::clone(&wire),
             }),
@@ -447,7 +438,7 @@ fn wired(sim: &Sim, count: u8) -> Arc<Wire> {
     wire
 }
 
-fn wire_node(wire: &Wire, id: u8) -> HotNode<MemBackend> {
+fn wire_node(wire: &Wire, id: u8) -> HotNode {
     wire.nodes.lock().unwrap_or_else(PoisonError::into_inner)[&NodeId(id)].clone()
 }
 

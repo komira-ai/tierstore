@@ -12,18 +12,10 @@
 //! cache file behind or reports it wrongly; a second PUT of a key that writes a second record,
 //! answers 200 for other bytes, or is admitted when the key check is not definitive.
 
-#![allow(
-    clippy::unwrap_used,
-    clippy::expect_used,
-    reason = "an integration test: a failed unwrap or expect is the failure it reports"
-)]
-
-mod support;
-
+use crate::support::Sim;
+use crate::support::config;
 use bytes::Bytes;
 use futures::StreamExt;
-use support::Sim;
-use support::config;
 use tierstore_fetch_api::ids::ByteRange;
 use tierstore_format::alloc::AllocatedId;
 use tierstore_format::digest::GenerationHasher;
@@ -36,11 +28,10 @@ use tierstore_harness::disk::FakeDisk;
 use tierstore_hot::HotNode;
 use tierstore_hot::config::HotConfig;
 use tierstore_hot::node::ReadError;
-use tierstore_index::backend::mem::MemBackend;
 use tierstore_index::recover::Mode;
 use tierstore_metrics::labels::ReclaimKind;
 use tierstore_store_api::hot::{Acked, HotError, HotStore, LargePut, SealReason, Unavailable};
-use tierstore_store_api::index::{EntryLocation, Index, Lookup};
+use tierstore_store_api::index::{EntryLocation, Lookup};
 
 // ---------------------------------------------------------------------------------------------
 // Helpers.
@@ -150,7 +141,7 @@ fn large_path(acked: &Acked) -> String {
     }
 }
 
-fn live(node: &HotNode<MemBackend>, key: &str) -> bool {
+fn live(node: &HotNode, key: &str) -> bool {
     matches!(node.index().get(key.as_bytes()), Ok(Lookup::Live(_)))
 }
 

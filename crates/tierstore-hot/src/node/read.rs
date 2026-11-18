@@ -10,7 +10,6 @@ use tierstore_fetch_api::ids::ByteRange;
 use tierstore_format::ids::BlockId;
 use tierstore_format::names::HotName;
 use tierstore_format::record::{RECORD_HEADER_LEN, RecordHeader, decode_record};
-use tierstore_index::backend::Backend;
 use tierstore_store_api::hot::HotError;
 use tierstore_store_api::sched::DriveClass;
 
@@ -33,7 +32,7 @@ pub enum ReadError {
     Hot(#[from] HotError),
 }
 
-impl<B: Backend + 'static> HotNode<B> {
+impl HotNode {
     /// Bytes `range` of `file` (fewer at its end).
     pub async fn serve(&self, file: HotName, range: ByteRange) -> Result<Bytes, ReadError> {
         let path = file.path();

@@ -27,20 +27,18 @@ use tierstore_format::ids::{BlockId, ExpiryClass, NodeId};
 use tierstore_format::seal::{Ballot, SealProposal, SealState};
 use tierstore_format::stamp::Stamp;
 use tierstore_format::tomb::LargeFile;
-use tierstore_index::KvIndex;
-use tierstore_index::backend::Backend;
 use tierstore_metrics::Hot;
 use tierstore_store_api::hot::{
     Acked, AppendRecord, Committed, HotError, HotStore, LargePut, Promise, ReplicaAck,
     ReplicaBatch, ReplicaReject, SealReason, SealRefused, Unavailable,
 };
-use tierstore_store_api::index::Index;
 use tierstore_store_api::placement::Placement;
 use tierstore_store_api::proto::Envelope;
 use tierstore_store_api::view::{Admin, View};
 
 use crate::config::HotConfig;
 use crate::dev::HotDev;
+use crate::index::HotIndex;
 use crate::peers::{HotPeers, Spawn};
 use crate::sched::{HotSched, SchedError};
 
@@ -57,7 +55,7 @@ use writer::Seg;
 pub const RETRY_AFTER_MS: u64 = 1000;
 
 /// What a hot node is made of.
-pub struct HotParts<B: Backend + 'static> {
+pub struct HotParts {
     /// This node's id.
     pub id: NodeId,
     /// The hot settings.
@@ -67,7 +65,7 @@ pub struct HotParts<B: Backend + 'static> {
     /// Its I/O queue.
     pub sched: HotSched,
     /// The node's index and block table.
-    pub index: Arc<KvIndex<B>>,
+    pub index: Arc<dyn HotIndex>,
     /// The other storage nodes.
     pub peers: Arc<dyn HotPeers>,
     /// Node rank by rendezvous hashing (10.2).
@@ -137,12 +135,12 @@ pub(crate) struct State {
     pub(crate) votes: BTreeMap<BlockId, SealState>,
 }
 
-pub(crate) struct Node<B: Backend + 'static> {
+pub(crate) struct Node {
     pub(crate) id: NodeId,
     pub(crate) cfg: HotConfig,
     pub(crate) dev: Arc<dyn HotDev>,
     pub(crate) sched: HotSched,
-    pub(crate) index: Arc<KvIndex<B>>,
+    pub(crate) index: Arc<dyn HotIndex>,
     pub(crate) peers: Arc<dyn HotPeers>,
     pub(crate) placement: Arc<dyn Placement>,
     pub(crate) spawn: Arc<dyn Spawn>,
@@ -160,11 +158,11 @@ pub(crate) struct Node<B: Backend + 'static> {
 }
 
 /// The hot store of one node; clones share it.
-pub struct HotNode<B: Backend + 'static> {
-    pub(crate) n: Arc<Node<B>>,
+pub struct HotNode {
+    pub(crate) n: Arc<Node>,
 }
 
-impl<B: Backend + 'static> Clone for HotNode<B> {
+impl Clone for HotNode {
     fn clone(&self) -> Self {
         Self {
             n: Arc::clone(&self.n),
@@ -204,7 +202,7 @@ impl From<SchedError> for HotError {
     }
 }
 
-impl<B: Backend + 'static> Node<B> {
+impl Node {
     pub(crate) fn lock(&self) -> MutexGuard<'_, State> {
         self.st.lock().unwrap_or_else(PoisonError::into_inner)
     }
@@ -272,10 +270,10 @@ impl<B: Backend + 'static> Node<B> {
     }
 }
 
-impl<B: Backend + 'static> HotNode<B> {
+impl HotNode {
     /// A node from its parts. Nothing is read from the device: [`HotNode::start`] runs the
     /// startup sweep and recovery before the node serves.
-    pub fn new(parts: HotParts<B>) -> Self {
+    pub fn new(parts: HotParts) -> Self {
         Self {
             n: Arc::new(Node {
                 id: parts.id,
@@ -305,7 +303,7 @@ impl<B: Backend + 'static> HotNode<B> {
     }
 
     /// The index the node publishes entries to.
-    pub fn index(&self) -> &Arc<KvIndex<B>> {
+    pub fn index(&self) -> &Arc<dyn HotIndex> {
         &self.n.index
     }
 
@@ -371,7 +369,7 @@ impl<B: Backend + 'static> HotNode<B> {
 }
 
 #[async_trait::async_trait]
-impl<B: Backend + 'static> HotStore for HotNode<B> {
+impl HotStore for HotNode {
     async fn append(&self, record: AppendRecord) -> Result<Acked, HotError> {
         self.n.append(record).await
     }

@@ -244,7 +244,7 @@ pub struct Held {
 
 #[derive(Default)]
 struct NetState {
-    nodes: BTreeMap<NodeId, HotNode<MemBackend>>,
+    nodes: BTreeMap<NodeId, HotNode>,
     /// Directed links that are cut: what `from` sends to `to` is lost.
     cuts: BTreeSet<(NodeId, NodeId)>,
     /// Kinds of messages to hold, by (from, to); `None` from matches any sender.
@@ -338,7 +338,7 @@ impl Net {
             .count()
     }
 
-    fn add(&self, node: HotNode<MemBackend>) {
+    fn add(&self, node: HotNode) {
         lock(&self.st).nodes.insert(node.id(), node);
     }
     fn remove(&self, id: NodeId) {
@@ -353,12 +353,7 @@ impl Net {
     }
 
     /// The target node if the request reaches it (after a hold, if one applies).
-    async fn deliver(
-        &self,
-        from: NodeId,
-        to: NodeId,
-        kind: Kind,
-    ) -> Result<HotNode<MemBackend>, PeerError> {
+    async fn deliver(&self, from: NodeId, to: NodeId, kind: Kind) -> Result<HotNode, PeerError> {
         let rx = {
             let mut st = lock(&self.st);
             st.log.push((from, to, kind));
@@ -432,7 +427,7 @@ impl SimPeers {
     }
 }
 
-fn env<T>(node: &HotNode<MemBackend>, body: T) -> Envelope<T> {
+fn env<T>(node: &HotNode, body: T) -> Envelope<T> {
     Envelope {
         from: node.id(),
         stamp: node.last_stamp(),
@@ -682,7 +677,7 @@ impl Sim {
         sim
     }
 
-    fn make(&mut self, id: NodeId) -> HotNode<MemBackend> {
+    fn make(&mut self, id: NodeId) -> HotNode {
         let alive = Arc::new(AtomicBool::new(true));
         self.alive.insert(id, Arc::clone(&alive));
         let p = &self.parts[&id];
@@ -701,7 +696,7 @@ impl Sim {
             config: self.cfg.clone(),
             dev: Arc::new(FakeDev(p.disk.clone(), Arc::clone(&alive))),
             sched: HotSched::inline(self.cfg.stall_after_ms, Arc::clone(&clock)),
-            index: Arc::clone(&p.index),
+            index: p.index.clone(),
             peers,
             placement: Arc::new(Rendezvous),
             spawn: Arc::new(self.exec.clone()),
@@ -726,7 +721,7 @@ impl Sim {
     }
 
     /// The node `id`, as the network reaches it.
-    pub fn node(&self, id: u8) -> HotNode<MemBackend> {
+    pub fn node(&self, id: u8) -> HotNode {
         lock(&self.net.st).nodes[&NodeId(id)].clone()
     }
 

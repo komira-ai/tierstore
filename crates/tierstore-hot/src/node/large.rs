@@ -27,9 +27,8 @@ use tierstore_format::names::HotName;
 use tierstore_format::record::{RECORD_HEADER_LEN, RecordFlags, RecordHeader};
 use tierstore_format::tomb::LargeFile;
 use tierstore_format::{crc32c, crc32c_append};
-use tierstore_index::backend::Backend;
 use tierstore_store_api::hot::{Acked, HotError, LargePut, Unavailable};
-use tierstore_store_api::index::{EntryLocation, Fact, Index, IndexEntry, Lookup};
+use tierstore_store_api::index::{EntryLocation, Fact, IndexEntry, Lookup};
 use tierstore_store_api::proto::Envelope;
 use tierstore_store_api::sched::DriveClass;
 use tokio::sync::Notify;
@@ -77,7 +76,7 @@ impl Upload {
     }
 }
 
-impl<B: Backend + 'static> Node<B> {
+impl Node {
     /// Creates the `.up` of `key` (with its key bytes after the header room) and returns it.
     async fn begin_upload(&self, key: &[u8], size: Option<u64>) -> Result<Upload, HotError> {
         let key_len = u16::try_from(key.len()).map_err(|_| {
@@ -286,7 +285,7 @@ struct Out {
 
 /// Sends `chunk` to every replica still streaming; one that keeps the writer waiting until the
 /// tick abandons it is dropped from the PUT.
-async fn tee<B: Backend + 'static>(n: &Node<B>, nonce: u64, outs: &mut [Out], chunk: &LargeChunk) {
+async fn tee(n: &Node, nonce: u64, outs: &mut [Out], chunk: &LargeChunk) {
     for out in outs.iter_mut() {
         let Some(tx) = out.tx.as_mut() else { continue };
         n.lock()
@@ -319,10 +318,7 @@ async fn tee<B: Backend + 'static>(n: &Node<B>, nonce: u64, outs: &mut [Out], ch
 }
 
 /// `HotStore::put_file`.
-pub(crate) async fn put_file<B: Backend + 'static>(
-    n: &Arc<Node<B>>,
-    put: LargePut,
-) -> Result<Acked, HotError> {
+pub(crate) async fn put_file(n: &Arc<Node>, put: LargePut) -> Result<Acked, HotError> {
     n.admit_put().await?;
     let LargePut {
         key,
@@ -462,7 +458,7 @@ pub(crate) async fn put_file<B: Backend + 'static>(
     })
 }
 
-impl<B: Backend + 'static> HotNode<B> {
+impl HotNode {
     /// A replica's side of a large-file stream (`PUT /store/v1/hot/replica` with a body): writes
     /// its own `.up`, checks the trailer against its own hash and commits like the writer.
     pub async fn receive_large(

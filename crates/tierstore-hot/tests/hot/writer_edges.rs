@@ -13,19 +13,11 @@
 //! lagging replica fed from the wrong offset or a failed read of the local copy that stops the
 //! writer; a replica that is acknowledged on an answer that is not the length sent.
 
-#![allow(
-    clippy::unwrap_used,
-    clippy::expect_used,
-    reason = "an integration test: a failed unwrap or expect is the failure it reports"
-)]
-
-mod support;
-
 use std::sync::Arc;
 
+use crate::support::{Kind, Rendezvous, Sim, config};
 use bytes::Bytes;
 use futures::stream::BoxStream;
-use support::{Kind, Rendezvous, Sim, config};
 use tierstore_fetch_api::ids::ByteRange;
 use tierstore_format::crc32c_append;
 use tierstore_format::ids::{BlockId, Generation, NodeId};
@@ -37,12 +29,12 @@ use tierstore_harness::disk::{Fault, OpKind};
 use tierstore_hot::peers::{HotPeers, LargeAnswer, LargeChunk, LargeOffer};
 use tierstore_index::backend::{Backend, Op, Space};
 use tierstore_store_api::hot::{Acked, HotError, HotStore, ReplicaBatch, Unavailable};
-use tierstore_store_api::index::{EntryLocation, Index, IndexEntry, Lookup, PutOutcome};
+use tierstore_store_api::index::{EntryLocation, IndexEntry, Lookup, PutOutcome};
 use tierstore_store_api::peer::PeerError;
 use tierstore_store_api::placement::Placement;
 use tierstore_store_api::proto::{Envelope, ReplicaAnswer, SealAnswer, SealMessage};
 
-type Append = support::Handle<Result<Acked, HotError>>;
+type Append = crate::support::Handle<Result<Acked, HotError>>;
 
 /// Releases every held message, one at a time, until nothing is held.
 fn drain(sim: &Sim) {
@@ -99,8 +91,8 @@ fn foreign_entry(sim: &mut Sim, seg: BlockId, data: &[u8]) -> IndexEntry {
 
 /// Puts bytes in the index of `node` under `key` that no entry decodes from.
 fn corrupt_entry(sim: &Sim, node: u8, key: &str) {
-    sim.node(node)
-        .index()
+    sim.parts[&NodeId(node)]
+        .index
         .backend()
         .commit(vec![Op::Put {
             space: Space::Entries,

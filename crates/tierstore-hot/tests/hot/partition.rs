@@ -15,17 +15,9 @@
 //! acknowledged record cut off by a seal; a copy left longer than, or different from, the
 //! committed bytes; a damaged copy counted in Choose; a minority that commits or acknowledges.
 
-#![allow(
-    clippy::unwrap_used,
-    clippy::expect_used,
-    reason = "an integration test: a failed unwrap or expect is the failure it reports"
-)]
-
-mod support;
-
 use std::collections::HashSet;
 
-use support::{Handle, Kind, Sim, config};
+use crate::support::{Handle, Kind, Sim, config};
 use tierstore_format::crc32c;
 use tierstore_format::ids::{BlockId, NodeId};
 use tierstore_format::names::HotName;
@@ -35,7 +27,7 @@ use tierstore_index::blocks::BlockState;
 use tierstore_store_api::hot::{
     Acked, Committed, HotError, HotStore, SealReason, SealRefused, Unavailable,
 };
-use tierstore_store_api::index::{EntryLocation, Index, Lookup};
+use tierstore_store_api::index::{EntryLocation, Lookup};
 
 type Appended = Handle<Result<Acked, HotError>>;
 type Sealed = Handle<Result<Committed, HotError>>;

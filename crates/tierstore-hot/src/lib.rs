@@ -9,6 +9,7 @@
 //! - [`sched`]: `HotSched`, the device's I/O queue: depth, class order, stall watchdog.
 //! - [`peers`]: what the hot store needs from the other storage nodes (replication batches,
 //!   seal messages, large-file streams, fetches), and the spawner of its background tasks.
+//! - [`index`]: the part of the node's index and block table the store uses.
 //! - [`choose`]: the Choose rule of the majority seal.
 //! - [`node`]: the store: write segments with group commit and the ack rule, a replica's side
 //!   of replication, the voter and the sealer of the majority seal, converge, seal-and-roll and
@@ -26,6 +27,7 @@ pub mod choose;
 pub mod config;
 pub mod dev;
 pub mod devfs;
+pub mod index;
 pub mod node;
 pub mod peers;
 pub mod sched;

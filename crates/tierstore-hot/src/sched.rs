@@ -30,7 +30,7 @@ pub enum SchedError {
 type Job = Box<dyn FnOnce() + Send>;
 
 /// The answer slot of one queued call: taken once, by the job or by the stall.
-type Slot<T> = Arc<Mutex<Option<oneshot::Sender<Result<T, SchedError>>>>>;
+type Slot = Arc<Mutex<Option<oneshot::Sender<Result<(), SchedError>>>>>;
 
 struct Queued {
     job: Job,
@@ -147,6 +147,18 @@ impl HotSched {
         T: Send + 'static,
         F: FnOnce() -> T + Send + 'static,
     {
+        let out: Arc<Mutex<Option<T>>> = Arc::new(Mutex::new(None));
+        let slot = Arc::clone(&out);
+        let job: Job = Box::new(move || {
+            *slot.lock().unwrap_or_else(PoisonError::into_inner) = Some(op());
+        });
+        self.run_job(class, job).await?;
+        let value = out.lock().unwrap_or_else(PoisonError::into_inner).take();
+        value.ok_or(SchedError::Stalled)
+    }
+
+    /// Runs `job` as a call of `class`: on the caller (inline), or queued for a thread.
+    async fn run_job(&self, class: DriveClass, job: Job) -> Result<(), SchedError> {
         if self.inner.threads == 0 {
             let id = {
                 let mut st = self.inner.lock();
@@ -155,21 +167,24 @@ impl HotSched {
                 }
                 self.inner.start(&mut st)
             };
-            let out = op();
+            job();
             self.inner.lock().running.remove(&id);
-            return Ok(out);
+            return Ok(());
         }
-        let (tx, rx) = oneshot::channel::<Result<T, SchedError>>();
-        let tx: Slot<T> = Arc::new(Mutex::new(Some(tx)));
+        let (tx, rx) = oneshot::channel::<Result<(), SchedError>>();
+        let tx: Slot = Arc::new(Mutex::new(Some(tx)));
         let fail_tx = Arc::clone(&tx);
-        let send = move |tx: &Slot<T>, r| {
+        let send = move |tx: &Slot, r| {
             // The job and the stall are exclusive, so the slot is full here; the caller may have
             // gone away, and nobody then waits for the answer.
             let sender = tx.lock().unwrap_or_else(PoisonError::into_inner).take();
-            drop(sender.map(|tx| tx.send(r)));
+            let _ = sender.map(|tx| tx.send(r));
         };
         let queued = Queued {
-            job: Box::new(move || send(&tx, Ok(op()))),
+            job: Box::new(move || {
+                job();
+                send(&tx, Ok(()));
+            }),
             fail: Box::new(move || send(&fail_tx, Err(SchedError::Stalled))),
         };
         {

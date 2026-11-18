@@ -14,7 +14,6 @@ use std::sync::Arc;
 use futures::FutureExt;
 use tierstore_fetch_api::upstream::DriveState;
 use tierstore_format::ids::{BlockId, NodeId};
-use tierstore_index::backend::Backend;
 use tierstore_store_api::hot::SealReason;
 use tierstore_store_api::view::{Admin, NodeState};
 
@@ -37,7 +36,7 @@ pub struct TickReport {
     pub abandoned: Vec<NodeId>,
 }
 
-impl<B: Backend + 'static> HotNode<B> {
+impl HotNode {
     /// One periodic step at the clock's current time.
     pub fn tick(&self) -> TickReport {
         let n = &self.n;
