@@ -52,7 +52,6 @@ use tierstore_fetch_api::engine::{Engine, PackSpec};
 use tierstore_fetch_api::entry::EntryStore;
 use tierstore_fetch_api::ids::{HolderId, JobId, PackId, PackKey, PackRoot};
 use tierstore_fetch_api::page::CELL_SHIFT;
-use tierstore_fetch_api::upstream::UpstreamError;
 use tierstore_fetch_api::upstream::{Located, Upstream};
 
 use super::stream::eager;
@@ -328,13 +327,6 @@ impl Known {
             modified: self.modified,
         }
     }
-}
-
-/// An upstream's error as the front's: a `503`, whatever it is. A source that does not hold the
-/// object after `LOCATE` named it is a lost location (4.6), not a definitive miss (10.6 step 3),
-/// so it is never a `404`.
-fn upstream_error(key: &str, error: &UpstreamError) -> Error {
-    Error::Unavailable(format!("{key}: {error}"))
 }
 
 impl LocalCache {
