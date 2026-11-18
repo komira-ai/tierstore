@@ -42,10 +42,8 @@ fn serial_rig() -> Rig {
 
 fn add(rig: &Rig, pack: &Pack, node: u8) {
     let size = pack.spec.size;
-    rig.upstream.add(
-        pack,
-        location(Some(generation(1)), size, vec![hot(node, size)]),
-    );
+    rig.upstream
+        .add(pack, location(generation(1), size, vec![hot(node, size)]));
 }
 
 fn cells(pack: &Pack) -> [CellRun; 1] {

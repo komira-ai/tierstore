@@ -125,7 +125,6 @@ impl FakeList {
                             cell_count: layout(*size).cell_count,
                             cell_shift: 20,
                             pack_flags: 0,
-                            upload_part_size: 0,
                         },
                         PackRoot::Digest([i as u8 + 1; 32]),
                     )

@@ -9,8 +9,7 @@
 //!   at `P/2`, the last trimmed to the boundary; every later part is a whole grid part (the last
 //!   one trimmed at the pack's end), and the cells before the first touch are whole grid parts
 //!   plus the head of the first-touch cell's grid part.
-//! - Only for a legacy source with a recorded `upload_part_size`, parts are also cut at the cells
-//!   of those boundaries (4.4; deleted with silo).
+//! - Parts are also cut at the given cells (a chain's block extents), so no part crosses one.
 
 use std::collections::BTreeSet;
 
@@ -69,7 +68,7 @@ pub fn size_class(pack_size: u64) -> u8 {
 }
 
 /// The plan: pieces sorted by first cell, disjoint, covering every cell of the pack, and cut at
-/// every cell of `cuts` (the legacy upload parts, the extents of a chain's blocks).
+/// every cell of `cuts` (the extents of a chain's blocks).
 #[must_use]
 pub fn plan(config: &EngineConfig, input: PlanInput, cuts: &BTreeSet<u32>) -> Vec<Piece> {
     let n = cell_count(input.pack_size).unwrap_or(u32::MAX);
@@ -135,23 +134,6 @@ fn large(config: &EngineConfig, n: u32, ft: u32, p: u32) -> Vec<Piece> {
         at = end;
     }
     pieces
-}
-
-/// The cells at which upload parts of `upload` bytes begin, inside a pack of `size` bytes (none
-/// for 0).
-#[must_use]
-pub fn upload_cuts(size: u64, upload: u64) -> BTreeSet<u32> {
-    let mut cuts = BTreeSet::new();
-    if upload == 0 {
-        return cuts;
-    }
-    let mut at = upload;
-    while at < size {
-        // `at < size`, and the size has fewer than 2^32 cells.
-        cuts.insert((at >> CELL_SHIFT) as u32);
-        at = at.saturating_add(upload);
-    }
-    cuts
 }
 
 fn cut(pieces: &[Piece], cuts: &BTreeSet<u32>) -> Vec<Piece> {

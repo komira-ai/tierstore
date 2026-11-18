@@ -36,10 +36,8 @@ use tokio::sync::Semaphore;
 fn rig_for(pack: &Pack, permits: usize, config: EngineConfig) -> Rig {
     let rig = Rig::new(permits, config);
     let size = pack.spec.size;
-    rig.upstream.add(
-        pack,
-        location(Some(generation(1)), size, vec![hot(1, size)]),
-    );
+    rig.upstream
+        .add(pack, location(generation(1), size, vec![hot(1, size)]));
     rig
 }
 
@@ -411,7 +409,7 @@ async fn gets_carry_the_class_job_and_rank_of_the_want() {
         let pack = Pack::new(&format!("headers-{job}"), 8 * MIB, job as u8);
         rig.upstream.add(
             &pack,
-            location(Some(generation(1)), 8 * MIB, vec![hot(1, 8 * MIB)]),
+            location(generation(1), 8 * MIB, vec![hot(1, 8 * MIB)]),
         );
         rig.engine
             .ensure(&pack.spec, &all_cells(&pack), class, JobId(job), Rank(rank));

@@ -48,10 +48,16 @@ fn data() -> Vec<u8> {
     (0..LEN as u8).collect()
 }
 
+/// The device a request goes to unless a test names another.
+const DEV: DeviceRef = DeviceRef::Hot(NodeId(9));
+
 fn source(device: DeviceRef) -> Source {
     Source {
         device,
-        kind: SourceKind::Legacy,
+        kind: SourceKind::Hot {
+            file: "seg".to_owned(),
+            offset: 0,
+        },
         extent: ByteRange {
             offset: 0,
             len: LEN,
@@ -61,9 +67,9 @@ fn source(device: DeviceRef) -> Source {
 
 fn location() -> Location {
     Location {
-        generation: Some(gen1()),
+        generation: gen1(),
         size: Some(LEN),
-        sources: vec![source(DeviceRef::Legacy)],
+        sources: vec![source(DEV)],
         conflicts: vec![],
     }
 }
@@ -86,7 +92,7 @@ fn request_from(device: DeviceRef, offset: u64, len: u64) -> GetRequest {
         key: key(),
         source: source(device),
         range: ByteRange { offset, len },
-        generation: Some(gen1()),
+        generation: gen1(),
         class: Class::Demand,
         job: JobId(1),
         rank: Rank(0),
@@ -94,7 +100,7 @@ fn request_from(device: DeviceRef, offset: u64, len: u64) -> GetRequest {
 }
 
 fn request(offset: u64, len: u64) -> GetRequest {
-    request_from(DeviceRef::Legacy, offset, len)
+    request_from(DEV, offset, len)
 }
 
 async fn part(u: &CellUpstream, offset: u64, len: u64) -> PartResponse {
@@ -231,7 +237,7 @@ async fn fail_after_yields_pieces_then_a_transport_error() {
 #[tokio::test]
 async fn scripted_failures_answer_the_request() {
     let u = upstream();
-    let dev = DeviceRef::Legacy;
+    let dev = DEV;
     let errors = [
         UpstreamError::PreconditionFailed {
             key: key(),
@@ -286,25 +292,21 @@ async fn a_hung_body_never_yields() {
     assert!(u.is_cancelled(PartId(0)));
 }
 
-/// A request that names another generation is a 412 carrying the object's; no generation is
-/// accepted; an unknown key is `NotFound`; a range outside the object, or one whose end
-/// overflows, is a transport error.
+/// A request that names another generation is a 412 carrying the object's; an unknown key is
+/// `NotFound`; a range outside the object, or one whose end overflows, is a transport error.
 #[tokio::test]
 async fn requests_are_checked_like_the_fake_upstream() {
     let u = upstream();
     let mut other = request(0, 4);
-    other.generation = Some(gen2());
+    other.generation = gen2();
     assert_eq!(
         u.get(other).await.unwrap_err(),
         UpstreamError::PreconditionFailed {
             key: key(),
-            device: DeviceRef::Legacy,
+            device: DEV,
             actual: Some(gen1()),
         }
     );
-    let mut none = request(0, 4);
-    none.generation = None;
-    assert_eq!(u.get(none).await.unwrap().generation, gen1());
     let mut unknown = request(0, 4);
     unknown.key = PackKey("nope".to_owned());
     assert!(matches!(
@@ -459,7 +461,7 @@ async fn locate_and_report_follow_their_scripts() {
         key(),
         Err(UpstreamError::NotFound {
             key: key(),
-            device: DeviceRef::Legacy,
+            device: DEV,
         }),
     );
     assert!(matches!(
@@ -472,12 +474,8 @@ async fn locate_and_report_follow_their_scripts() {
     assert_eq!(u.locate(&other).await.unwrap(), Located::DefinitiveMiss);
     assert_eq!(u.locates(), [key(), key(), key(), other]);
     let range = ByteRange { offset: 0, len: 4 };
-    u.report(&key(), &source(DeviceRef::Legacy), range, Report::Bitrot)
-        .await;
-    assert_eq!(
-        u.reports(),
-        [(key(), source(DeviceRef::Legacy), range, Report::Bitrot)]
-    );
+    u.report(&key(), &source(DEV), range, Report::Bitrot).await;
+    assert_eq!(u.reports(), [(key(), source(DEV), range, Report::Bitrot)]);
 }
 
 /// The cell size is what the upstream was made with, and it must be a power of two.

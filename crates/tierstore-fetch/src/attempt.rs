@@ -78,6 +78,8 @@ pub(crate) struct Attempt {
     pub attempt: u32,
     pub cells: Vec<u32>,
     pub source: Source,
+    /// The fill's pinned generation: the `If-Match` of every part.
+    pub generation: Generation,
     pub kind: GetKind,
     pub class: Class,
     pub job: JobId,
@@ -154,7 +156,8 @@ impl Attempt {
         };
         let class = size_class(fill.spec.size);
         let config = &inner.config;
-        let (generation, first_byte, stall) = {
+        let generation = self.generation;
+        let (first_byte, stall) = {
             let mut st = inner.lock();
             st.stats.count_get(self.kind);
             let first_byte = timeout(
@@ -167,8 +170,7 @@ impl Attempt {
                 config.stall_factor,
                 st.baselines.ms_per_mib(class),
             );
-            let pinned = st.fills.get(&fill.seq).and_then(|fs| fs.pinned);
-            (pinned, first_byte, stall)
+            (first_byte, stall)
         };
         inner.bump();
         let req = GetRequest {
@@ -202,7 +204,7 @@ impl Attempt {
         if signals.drive_state == Some(DriveState::Stalled) {
             return Err(self.refused(FailKind::DriveStalled, signals));
         }
-        if !pin(&inner, &fill, generation, response.generation) {
+        if response.generation != generation {
             return Err(self.refused(FailKind::OtherGeneration, signals));
         }
         // Headers that say the request queued: the drive is serving now, so the pre-first-byte
@@ -276,7 +278,7 @@ impl Attempt {
         let elapsed = inner.now() - first_at.unwrap_or(t0);
         let ms_per_mib = elapsed.saturating_mul(CELL_BYTES) / range.len.max(1);
         inner.parts.budget.observe(Observation::Network {
-            node: self.source.device.node(),
+            node: Some(self.source.device.node()),
             ms_per_mib: u32::try_from(ms_per_mib).unwrap_or(u32::MAX),
         });
         inner.lock().baselines.network(class, ms_per_mib);
@@ -322,23 +324,6 @@ fn classify(e: &UpstreamError) -> (FailKind, DriveSignals) {
         }
         UpstreamError::Transport { .. } => (FailKind::Transport, DriveSignals::default()),
     }
-}
-
-/// Whether a response of generation `got` may be used: the pinned one, or, with none pinned yet
-/// (a legacy-origin pack's first part, section 9), the one it pins now.
-fn pin(inner: &Arc<Inner>, fill: &Arc<Fill>, pinned: Option<Generation>, got: Generation) -> bool {
-    if let Some(g) = pinned {
-        return g == got;
-    }
-    let mut st = inner.lock();
-    let ok = st
-        .fills
-        .get_mut(&fill.seq)
-        .is_some_and(|fs| *fs.pinned.get_or_insert(got) == got);
-    let mask = st.refresh(fill.seq, &inner.config);
-    drop(st);
-    inner.wake_classes(mask);
-    ok
 }
 
 /// The verdict on one cell's bytes: `None` for a pack without cell digests (the serving node

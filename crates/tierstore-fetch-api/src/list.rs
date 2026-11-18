@@ -13,7 +13,9 @@ pub type CellDigest = [u8; 32];
 /// The bit of `pack_flags` that says the pack is fully covered by spans.
 pub const PACK_FULLY_COVERED: u8 = 1;
 
-/// A pack of the list (the 48-byte PACKS record of 3.1, decoded).
+/// A pack of the list (the 48-byte PACKS record of 3.1, decoded). The record's
+/// `upload_part_size` bytes stay in the format and are read by nothing: they only cut the parts of
+/// a fill from the retired silo (4.4).
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct PackRecord {
     /// The pack's object key.
@@ -28,9 +30,6 @@ pub struct PackRecord {
     pub cell_shift: u8,
     /// `pack_flags` ([`PACK_FULLY_COVERED`]).
     pub pack_flags: u8,
-    /// 0 for every pack written to the storage tier; a silo-origin multipart pack keeps its
-    /// recorded value (4.4).
-    pub upload_part_size: u64,
 }
 
 /// A node of the tree: an index of the list's node records (inode numbers are record indexes,

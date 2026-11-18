@@ -32,8 +32,6 @@ pub struct PackSpec {
     pub size: u64,
     /// Its cell digests; `None` for a `digest=none` object (section 9).
     pub digests: Option<PackDigests>,
-    /// The `upload_part_size` of the list (0 in the storage tier; 4.4).
-    pub upload_part_size: u64,
 }
 
 /// What a `wait` ends with (5.4: `ok | eio(cell) | lost`).
