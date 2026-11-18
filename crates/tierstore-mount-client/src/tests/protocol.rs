@@ -627,3 +627,29 @@ fn a_wait_asked_while_the_connection_is_down_is_sent_once_the_pack_is_open_again
     peer.reply(w.id, 2, Message::Waited(WaitOutcome::Ready), &[]);
     assert_eq!(wait.wait(), Ok(WaitOutcome::Ready));
 }
+
+#[test]
+fn a_bad_cell_neither_of_two_joined_reads_needs_is_not_waited_for_again() {
+    let (_script, _clock, client, peer) = connected();
+    let pack = opened(&client, &peer, 0, 1);
+    // A read of cell 0 in a file to the pack's end waits for cells 0 to 7; a read of cell 7
+    // joins it.
+    let a = pack.wait(bytes(0, 1), PACKS[0].1, JobId(1));
+    let (w, _) = peer.next();
+    assert!(matches!(w.message, Message::Wait { range, .. } if range == bytes(0, 8 * MIB)));
+    let b = pack.wait(bytes(7 * MIB, 1), 8 * MIB, JobId(2));
+    stats_until(&client, |s| s.wait_parts_joined == 1);
+    // Cell 3 is bad: neither read needs it.
+    peer.reply(w.id, 1, Message::Waited(WaitOutcome::Eio { cell: 3 }), &[]);
+    // The next wait is cell 0 alone, then cell 7 alone: cell 3 is never waited for again.
+    let (w0, _) = peer.next();
+    assert!(matches!(w0.message, Message::Wait { range, .. } if range == bytes(0, MIB)));
+    peer.reply(w0.id, 1, Message::Waited(WaitOutcome::Ready), &[]);
+    assert_eq!(a.wait(), Ok(WaitOutcome::Ready));
+    let (w7, _) = peer.next();
+    assert!(matches!(w7.message, Message::Wait { range, .. } if range == bytes(7 * MIB, MIB)));
+    peer.reply(w7.id, 1, Message::Waited(WaitOutcome::Ready), &[]);
+    assert_eq!(b.wait(), Ok(WaitOutcome::Ready));
+    let stats = stats_until(&client, |s| s.windows_outstanding == 0);
+    assert_eq!(stats.waits_sent, 3);
+}

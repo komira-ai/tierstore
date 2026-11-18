@@ -18,7 +18,8 @@ arc-swap.workspace = true
 # tierstore-fetch-api are.
 async-trait.workspace = true
 # The one-shot channels that hand a wait's outcome to a reader thread (completed from the client's
-# runtime, received by a plain thread or a task) and the boxed sleep of the timer.
+# runtime, received by a plain thread or a task), and the executor a reader thread blocks on a
+# ticket with.
 futures.workspace = true
 # The PROT_* and MAP_* constants of the mappings (no libc call is made).
 libc.workspace = true

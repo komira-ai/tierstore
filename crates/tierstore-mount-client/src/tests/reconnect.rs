@@ -5,8 +5,9 @@
 //! server's, and re-issues every outstanding `wait`, which the new server answers (section 14:
 //! "Server restart with a stale-epoch reply in flight: dropped; the `wait` re-issued"); a reply
 //! stamped with the previous epoch on the new connection is dropped and the wait stays
-//! outstanding until its own reply; a connection that flaps keeps the server's holder, its hold
-//! and its handle (the server registers the holder once); failed connects back off from 50 ms
+//! outstanding until its own reply; a connection that flaps keeps the server's holder, its hold,
+//! its handle (the server registers the holder once) and the counter of a reader that holds it
+//! across the flap, which the server reads and sees given back; failed connects back off from 50 ms
 //! doubling to the 2 s cap, each delay within its jitter (half the step to the step), and an
 //! accepted handshake starts the steps over.
 
@@ -18,8 +19,10 @@ use tierstore_fetch_api::entry::Entry;
 use tierstore_fetch_api::ids::{ByteRange, JobId};
 use tierstore_fetch_api::wire::{Epoch, Message, PackHandle};
 
+use crate::Attempt;
 use crate::tests::common::{
-    MIB, PACKS, Recorder, Script, ServerSide, first_region, pack_id, spec, stats_until, until, wake,
+    MIB, PACKS, Recorder, Script, ServerSide, first_region, pack_id, run, spec, stats_until, until,
+    wake,
 };
 
 #[test]
@@ -70,6 +73,15 @@ fn a_flapping_connection_keeps_the_holder_its_hold_and_its_handle() {
     let clock = ManualClock::new();
     let client = side.client(1, &clock);
     let pack = client.open(spec(1)).wait().unwrap();
+    // A reader holds the counter of group 0 across the flap.
+    side.publish(1, run(3, 1));
+    let Attempt::Ready(guard) = pack.begin_read(ByteRange {
+        offset: 3 * MIB,
+        len: 5,
+    }) else {
+        panic!("cell 3 is present");
+    };
+    assert_eq!(side.entry(1).group_readers(0), 1);
     side.engine.park(pack_id(1));
     let wait = pack.wait(ByteRange { offset: 0, len: 1 }, PACKS[1].1, JobId(1));
     side.parked(1, 1);
@@ -82,6 +94,11 @@ fn a_flapping_connection_keeps_the_holder_its_hold_and_its_handle() {
     assert_eq!(server.holders_registered, 1);
     assert_eq!(server.holders_hung_up, 0);
     assert_eq!(side.entry(1).holders(), 1);
+    // The server still reads the reader's counter, and sees it given back.
+    assert_eq!(side.entry(1).group_readers(0), 1);
+    assert!(guard.recheck());
+    drop(guard);
+    assert_eq!(side.entry(1).group_readers(0), 0);
 
     side.parked(1, 2);
     assert_eq!(side.engine.complete(&pack_id(1), WaitOutcome::Ready), 1);

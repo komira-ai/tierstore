@@ -8,15 +8,18 @@
 //! next cells ready, or already waited for.
 //!
 //! A window has at most one wait outstanding. A part whose `need` is inside that wait's cells
-//! **joins** it; any other part is **queued** for the window's next wait, whose cells are the hull
-//! of the queued parts' covers. When the outstanding wait ends:
+//! **joins** it; any other part is **queued** for the window's next wait. When the outstanding
+//! wait ends:
 //! - `ready`: every joined part is ready; `lost`: every joined part is lost;
 //! - `eio(cell)` of a cell of the wait: a joined part that needs `cell` ends with it; one that
 //!   does not is queued again with its `need` alone as its cover, since the wait ended before its
 //!   cells did. An `eio` of a cell outside the wait's cells ends every joined part with it (the
-//!   server answered for the range as a whole), so a part is never re-queued forever;
+//!   server answered for the range as a whole);
 //! - the queued parts are returned, and the caller starts the next wait with them (after it drops
-//!   any it finds ready in the state page).
+//!   any it finds ready in the state page). The next wait's cells are the first queued part's
+//!   cover, never a hull of several: the parts it covers join it and the rest stay queued. So a
+//!   part re-queued on its need alone is never waited for again over a cell it does not need,
+//!   and a bad cell between two re-queued parts cannot send the same wait round after round.
 //!
 //! The module is pure: no I/O and no clock. `J` is what a part reports to (the read's waiter).
 
@@ -85,11 +88,6 @@ fn last(r: CellRun) -> u32 {
 /// Whether `inner` is inside `outer`.
 fn contains(outer: CellRun, inner: CellRun) -> bool {
     inner.first >= outer.first && last(inner) <= last(outer)
-}
-
-/// The smallest run holding `a` and `b`.
-pub(crate) fn hull(a: CellRun, b: CellRun) -> CellRun {
-    run(a.first.min(b.first), last(a).max(last(b)))
 }
 
 /// What [`Windows::add`] did with a part.
@@ -177,20 +175,21 @@ impl<J> Windows<J> {
     }
 
     /// Starts the window's wait for `parts` (the queued parts of its last wait, all of one
-    /// window): its cells are the hull of their covers, and every part joins it. `None`, and
-    /// nothing changes, when `parts` is empty.
+    /// window): its cells are the first part's cover; every part whose need is inside them joins
+    /// it, and the others are queued for the wait after it. `None`, and nothing changes, when
+    /// `parts` is empty.
     pub(crate) fn restart(&mut self, parts: Vec<Part<J>>) -> Option<(u32, CellRun)> {
         let first = parts.first()?;
-        let window = first.window;
-        let cells = parts.iter().map(|p| p.cover).fold(first.cover, hull);
-        let joined = parts.into_iter().map(|p| (p.need, p.joiner)).collect();
+        let (window, cells) = (first.window, first.cover);
+        let (joined, queued): (Vec<_>, Vec<_>) =
+            parts.into_iter().partition(|p| contains(cells, p.need));
         self.map.insert(
             window,
             Window {
                 cells,
                 request: None,
-                joined,
-                queued: Vec::new(),
+                joined: joined.into_iter().map(|p| (p.need, p.joiner)).collect(),
+                queued,
             },
         );
         Some((window, cells))
@@ -317,18 +316,18 @@ mod tests {
             vec![part(0, r(1, 1), r(1, 7), 3), part(0, r(0, 1), r(0, 1), 4)]
         );
         assert_eq!(w.len(), 1);
-        // The next wait covers the hull of the queued covers, and both join it.
-        assert_eq!(w.restart(ended.next), Some((0, r(0, 8))));
+        // The next wait covers the first queued part's cover; the other stays queued.
+        assert_eq!(w.restart(ended.next), Some((0, r(1, 7))));
         assert_eq!(w.add(part(0, r(7, 1), r(7, 1), 6)), Added::Joined);
         let ended = w.end(0, WaitOutcome::Lost).unwrap();
         assert_eq!(
             ended.done,
-            vec![
-                (3, WaitOutcome::Lost),
-                (4, WaitOutcome::Lost),
-                (6, WaitOutcome::Lost)
-            ]
+            vec![(3, WaitOutcome::Lost), (6, WaitOutcome::Lost)]
         );
+        assert_eq!(ended.next, vec![part(0, r(0, 1), r(0, 1), 4)]);
+        assert_eq!(w.restart(ended.next), Some((0, r(0, 1))));
+        let ended = w.end(0, WaitOutcome::Ready).unwrap();
+        assert_eq!(ended.done, vec![(4, WaitOutcome::Ready)]);
         assert!(ended.next.is_empty());
         assert_eq!(w.restart(Vec::new()), None);
         assert!(w.end(0, WaitOutcome::Ready).is_none());
@@ -351,6 +350,25 @@ mod tests {
     }
 
     #[test]
+    fn a_bad_cell_between_two_requeued_parts_is_never_waited_for_again() {
+        let mut w = Windows::default();
+        // A read of cell 0 in a file to the window's end; a read of cell 7 joins.
+        assert_eq!(w.add(part(0, r(0, 1), r(0, 8), 1)), Added::New(r(0, 8)));
+        assert_eq!(w.add(part(0, r(7, 1), r(7, 1), 2)), Added::Joined);
+        // Cell 3, which neither needs, is bad: both are re-queued on their own cell.
+        let ended = w.end(0, WaitOutcome::Eio { cell: 3 }).unwrap();
+        assert!(ended.done.is_empty());
+        // The next wait is cell 0 alone (not 0 to 7 again); cell 7 waits for the one after.
+        assert_eq!(w.restart(ended.next), Some((0, r(0, 1))));
+        let ended = w.end(0, WaitOutcome::Ready).unwrap();
+        assert_eq!(ended.done, vec![(1, WaitOutcome::Ready)]);
+        assert_eq!(w.restart(ended.next), Some((0, r(7, 1))));
+        let ended = w.end(0, WaitOutcome::Ready).unwrap();
+        assert_eq!(ended.done, vec![(2, WaitOutcome::Ready)]);
+        assert!(ended.next.is_empty());
+    }
+
+    #[test]
     fn requests_and_drain() {
         let mut w = Windows::default();
         w.add(part(0, r(0, 1), r(0, 1), 1));
@@ -367,9 +385,8 @@ mod tests {
     }
 
     #[test]
-    fn hull_and_contains() {
-        assert_eq!(hull(r(2, 2), r(6, 1)), r(2, 5));
-        assert_eq!(hull(r(6, 1), r(2, 2)), r(2, 5));
+    fn contains_is_inclusive_at_both_ends() {
+        assert!(contains(r(2, 5), r(2, 5)));
         assert!(contains(r(2, 5), r(3, 2)));
         assert!(!contains(r(2, 5), r(1, 2)));
         assert!(!contains(r(2, 5), r(5, 3)));

@@ -9,8 +9,8 @@
 //!   client's frames and answers them frame by frame, descriptors included.
 //! - Packs: [`PACKS`], their ids, specs and cells.
 //!
-//! Nothing here reads a clock or sleeps: the client's timer is a [`ManualClock`], and a test waits
-//! for a count ([`PackClient::wait_for`], [`MountServer::wait_for`]) or a ticket.
+//! Nothing here reads a clock or sleeps: the clients made here have a [`ManualClock`] for timer,
+//! and a test waits for a count ([`PackClient::wait_for`], [`MountServer::wait_for`]) or a ticket.
 
 use std::collections::BTreeMap;
 use std::io::{IoSlice, IoSliceMut};

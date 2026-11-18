@@ -6,9 +6,11 @@
 //! Every test runs the client on its own runtime and plays the readers from plain threads, as
 //! `tsfuse`'s reader threads would. The server is either the real one of T5 over the real entry
 //! store of T1 (its sealed state memfds and data files, its mapping of the mount's counter memfd),
-//! driven by the fake engine, or a peer the test plays frame by frame. No test reads a clock or
-//! sleeps: time is a manual clock the test moves, and every wait is for a reply, a ticket or a
-//! count of the client or the server.
+//! driven by the fake engine, or a peer the test plays frame by frame. Time is a manual clock the
+//! test moves, and every wait is for a reply, a ticket or a count of the client or the server;
+//! no test asserts a duration. One test runs the production timer (`TokioTimer`, at 1 ms steps)
+//! to show the client backs off on it until a socket appears; it asserts only that the client
+//! connects.
 
 mod coalescing;
 mod common;

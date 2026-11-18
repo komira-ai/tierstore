@@ -29,8 +29,8 @@ pub enum StartError {
 /// every reader a coalesced request answers.
 #[derive(Debug, Clone, PartialEq, Eq, thiserror::Error)]
 pub enum ClientError {
-    /// The client's runtime has stopped: every [`crate::PackClient`] and [`crate::Pack`] was
-    /// dropped, or its thread ended.
+    /// The client's runtime has stopped: the last [`crate::PackClient`] was dropped (a
+    /// [`crate::Pack`] does not keep the client running), or its thread ended.
     #[error("the mount client has stopped")]
     Stopped,
     /// The holder was released (a clean unmount): no request is served any more.

@@ -8,8 +8,8 @@
 //! and once a pack is open again re-issues every `wait` outstanding on it. Replies stamped with
 //! another epoch than the connection's are dropped, and so are replies to requests that are not
 //! in flight on this connection (request ids are never reused). When the connection ends (the
-//! server closed it, a frame was not one, or the server refused a request for a handle or a
-//! holder it does not know), the driver sleeps a backoff step (50 ms doubling to 2 s, with
+//! server closed it, a frame was not one, or the server refused an `open-pack` or a `wait` for a
+//! handle or a holder it does not know; a refused `ensure` is a dropped hint), the driver sleeps a backoff step (50 ms doubling to 2 s, with
 //! jitter, from the injected [`Timer`]) and connects again; an accepted handshake resets the
 //! backoff. A reader's view of a pack stays usable through a reconnect: the server's eviction
 //! waits for the grace window after a restart (7), and the re-open swaps the view.
