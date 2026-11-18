@@ -146,3 +146,7 @@ impl Changes {
         changed
     }
 }
+
+#[cfg(test)]
+#[path = "changes_tests.rs"]
+mod tests;
