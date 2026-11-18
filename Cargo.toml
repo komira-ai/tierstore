@@ -65,6 +65,8 @@ hyper-util = { version = "0.1.21", default-features = false }
 # `kill` and the descriptor calls of the test helpers (tierstore-testkit), and the `PROT_*`/`MAP_*`
 # constants of the memfd mappings of the Linux entry store (tierstore-entry).
 libc = "0.2.190"
+# The exhaustive interleaving checker of the models of tierstore-harness (tests only). MIT.
+loom = "0.7.2"
 md-5 = "0.11.0"
 # The NFSv3 and MOUNT protocol of `tierstore fs` on macOS (BSD-3-Clause), `nfsserve` 0.11.0 from
 # crates.io plus one commit on the branch `komira-0.11` of our fork: the transaction tracker
@@ -120,10 +122,16 @@ tracing = "0.1.44"
 vm-memory = { version = "0.18.0", default-features = false }
 # Reads the fields of a client certificate (IP subjectAltNames) that the OCI front's start checks.
 x509-parser = "0.18.1"
+# The `#[repr(C)]` wire structs of the FUSE ABI in `tsfuse` (derives checked for padding, read
+# and written as bytes without `unsafe` in the crate). Already in the tree through other crates.
+# BSD-2-Clause OR Apache-2.0 OR MIT.
+zerocopy = { version = "0.8.60", features = ["derive"] }
 
 # The workspace's own crates.
 # The object store trait and the S3 client, with no dependency on another workspace crate.
 objstore-s3 = { path = "crates/objstore-s3" }
+# The `ObjectStore` conformance suite, and its runner for an S3 endpoint (tests and reference runs).
+objstore-conformance = { path = "crates/objstore-conformance" }
 # The hot/cold object store library; it depends on no other workspace crate unless its `s3`
 # feature is on.
 tierstore = { path = "crates/tierstore" }
@@ -135,6 +143,8 @@ tierstore-testkit = { path = "crates/tierstore-testkit" }
 tierstore-format = { path = "crates/tierstore-format" }
 # The frozen interfaces of the read path on a build node, and their fakes.
 tierstore-fetch-api = { path = "crates/tierstore-fetch-api" }
+# The breadth-first explorer of the protocol models (its `explore` module).
+tierstore-model = { path = "crates/tierstore-model" }
 # The frozen interfaces of the storage tier, the peer protocol, and a fake storage node.
 tierstore-store-api = { path = "crates/tierstore-store-api" }
 # The FUSE library: dispatch with replies bound to their originating device.
@@ -142,8 +152,12 @@ tsfuse = { path = "crates/tsfuse" }
 # A storage node's key index and block table in an embedded store (fjall, or redb), recovery,
 # the tombstone log and the LIST merge (T-S3).
 tierstore-index = { path = "crates/tierstore-index" }
+# The metrics of section 12 of the fetch-cache-serve design and the demand-read trace.
+tierstore-metrics = { path = "crates/tierstore-metrics" }
 # The hash pool: the `Verifier` of the read path (bounded, sha256 on dedicated threads).
 tierstore-hashpool = { path = "crates/tierstore-hashpool" }
+# The journal and snapshot of a node-cache entry (section 8), shared by the entry stores.
+tierstore-journal = { path = "crates/tierstore-journal" }
 # The previous release: `v0.3.17`, the tag of the commit below, taken from the public repository
 # at that commit alone (the `rev` is what pins it; a tag can be moved). Used only by the
 # dev-dependencies of `crates/compat`. When a release is made, move both to the new release's
@@ -201,4 +215,19 @@ incremental = false
 opt-level = 3
 
 [profile.test.package.tierstore-model]
+opt-level = 3
+
+# The models of tierstore-harness (loom and the breadth-first explorer) explore every
+# interleaving of their scenarios: optimise that crate in dev and test builds too.
+[profile.dev.package.tierstore-harness]
+opt-level = 3
+
+[profile.test.package.tierstore-harness]
+opt-level = 3
+
+# loom runs every execution of those models: optimised, they take seconds rather than minutes.
+[profile.dev.package.loom]
+opt-level = 3
+
+[profile.test.package.loom]
 opt-level = 3

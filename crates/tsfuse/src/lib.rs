@@ -1,7 +1,8 @@
 //! `tsfuse`, the FUSE library of tierstore (`docs/design/fetch-cache-serve.md`, 5.2): this crate
-//! holds the dispatch interface frozen by the interface-freeze change (section 18, row T-I).
-//! The ABI module (T-F1), the `/dev/fuse` and io_uring transports (T-F2, T-F5), the splice reply
-//! path (T-F4) and takeover (T-F6) build on it.
+//! holds the dispatch interface frozen by the interface-freeze change (section 18, row T-I) and
+//! the kernel ABI, [`abi`] (row T-F1): the wire structs, the parse of each request, the reply
+//! payloads and INIT negotiation. The `/dev/fuse` and io_uring transports (T-F2, T-F5), the
+//! splice reply path (T-F4) and takeover (T-F6) build on them.
 //!
 //! **Reply affinity.** A reply is matched by `unique` against the processing queue of the device
 //! it is written to, and every cloned `/dev/fuse` descriptor has its own processing queue, so a
@@ -28,6 +29,7 @@
 
 #![forbid(unsafe_code)]
 
+pub mod abi;
 mod fs;
 mod opcode;
 mod reply;

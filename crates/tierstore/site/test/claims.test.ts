@@ -56,8 +56,8 @@ export function code(text: string): string {
   return out.join('\n');
 }
 
-/** The files that export metrics: the OCI front's, the cache's (and its entries by extents') and the tiers'. */
-const EXPORTERS = new Set(['server/oci/metrics.rs', 'server/local_cache/metrics.rs', 'server/local_cache/extents/counts.rs', 'metrics.rs', 'server/build_info.rs', 'server/mod.rs']);
+/** The files that export metrics: the OCI front's, the cache's (and its entries by extents' and its runs' request to start) and the tiers'. */
+const EXPORTERS = new Set(['server/oci/metrics.rs', 'server/local_cache/metrics.rs', 'server/local_cache/extents/counts.rs', 'server/local_cache/starts.rs', 'metrics.rs', 'server/build_info.rs', 'server/mod.rs']);
 
 /** What in the source no longer matches the pages. Each problem names the pages to change. */
 export function staleClaims(src: ReadonlyMap<string, string>): string[] {

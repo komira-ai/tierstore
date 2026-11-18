@@ -294,3 +294,44 @@ fn an_image_answer_without_the_location_is_not_found() {
     answer(&rig, "image", &format!(r#"image {tree} ["jobs", "jobs2"]"#));
     assert!(rig.core.lookup(ino::ROOT, "jobs").is_ok());
 }
+
+/// Asserts that the mount tells the node `started <path>` once for each placed tree it first looks
+/// into (`tierstore_request_to_start_seconds`), and for nothing else: not for a lookup of a tree's
+/// root, its attributes or an open of it for listing (what the agent and the overlay's mount do),
+/// not for a second lookup or listing in the same tree, not for a tree of manifests; a first
+/// listing counts as a first lookup does. The reports leave on one thread in order, so once the
+/// report of the second placed tree is in, any report made before it would be in too.
+#[test]
+fn the_first_look_into_each_placed_tree_is_reported_once_and_nothing_else_is() {
+    let rig = Rig::new("tfs-img-started", Built::of(Vec::new()));
+    let bytes = image_bytes();
+    let tree = TreeDigest::of(&bytes);
+    let file = image_path(&rig.cache, &tree);
+    std::fs::create_dir_all(file.parent().unwrap()).unwrap();
+    std::fs::write(&file, &bytes).unwrap();
+    answer(&rig, "place", &format!("tree {ID}"));
+    answer(&rig, "image", &format!(r#"image {tree} ["jobs","jobs2"]"#));
+    rig.upstream.gate_verb("started");
+    rig.upstream.permit_verb("started", 8);
+    let root = found(&rig, ino::ROOT, "jobs").attr.ino;
+    rig.core.getattr(root).unwrap();
+    rig.core.opendir(root).unwrap();
+    let bin = found(&rig, root, "bin").attr.ino;
+    let _ = found(&rig, bin, "tool");
+    assert!(matches!(
+        rig.core.lookup(root, "nope"),
+        Ok(Looked::Absent(_))
+    ));
+    let _ = listed(&rig, root, 0, usize::MAX);
+    let manifests = rig.upstream.built.lock().unwrap().root.clone();
+    let empty = found(&rig, ino::TREES, &manifests).attr.ino;
+    assert!(matches!(rig.core.lookup(empty, "x"), Ok(Looked::Absent(_))));
+    let second = found(&rig, ino::ROOT, "jobs2").attr.ino;
+    let _ = listed(&rig, second, 0, usize::MAX);
+    let _ = found(&rig, second, "d");
+    rig.upstream.wait_for_verb("started", 2);
+    assert_eq!(
+        rig.upstream.asked("started"),
+        ["started jobs", "started jobs2"]
+    );
+}
