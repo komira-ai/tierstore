@@ -31,21 +31,25 @@
 //! descriptors were all closed and flushed and whose release has not come yet, since FUSE sends it
 //! after the close returns, or a commit of the file or of the key running), and is `EBUSY` at once
 //! for a handle still open; then it uploads the file ([`super::upload`]) and
-//! records the answer. Errors are the errnos of `super::error`.
+//! records the answer. A commit that has to wait or upload runs on a thread of its own and
+//! answers from it, so that it holds none of the threads that serve the release it waits for
+//! (`space_rename.rs`); it waits for the one thing it needs, the release or unlink of its file or
+//! the end of a commit of its file or key, and a change wakes only the waits for that
+//! (`changes.rs`). Errors are the errnos of `super::error`.
 
 use std::collections::{BTreeMap, BTreeSet};
 use std::sync::atomic::{AtomicBool, Ordering};
-use std::sync::{Arc, Condvar, Mutex, Weak, mpsc};
+use std::sync::{Arc, Mutex, Weak, mpsc};
 use std::time::Duration;
 
 use rustix::io::Errno;
 use sha2::{Digest as _, Sha256};
 
 use super::carry::{Handed, HeldDir};
-use super::commit::HANDLE_OPEN;
+use super::changes::{Changes, Topic};
 use super::error::PutError;
 use super::names::{PutDir, check_component, is_part};
-use super::store::{Handle, Kind, Rename, StagedStore};
+use super::store::{Handle, Kind, StagedStore};
 use super::upload::Uploader;
 use crate::Clock;
 use crate::server::local_cache::Space;
@@ -128,9 +132,8 @@ pub(in crate::server) struct PutSpace {
     /// The time the deadlines are told by.
     clock: Arc<dyn Clock>,
     state: Mutex<State>,
-    /// A count of the changes a waiting commit looks for: a release, a commit ended, an unlink.
-    changes: Mutex<u64>,
-    changed: Condvar,
+    /// The waits of the commits for a release, the end of a commit, or an unlink (`changes.rs`).
+    changes: Changes,
     /// Whether a successor is taking over: the sweep does nothing.
     held: AtomicBool,
     /// Held by a sweep for the whole of it, and by a hold while it is set, so that no sweep that
@@ -138,9 +141,15 @@ pub(in crate::server) struct PutSpace {
     sweeping: Mutex<()>,
     /// The end of the channel the sweep's thread waits on; dropped with the space, which ends it.
     sweeper: Mutex<Option<mpsc::Sender<()>>>,
-    /// The waits for a change begun, for the tests that act once a commit waits.
+    /// The tries of the store's rename a commit made, for the tests of who a change wakes.
     #[cfg(test)]
-    pub(super) waits: std::sync::atomic::AtomicU64,
+    pub(super) tries: std::sync::atomic::AtomicU64,
+    /// Called by a commit that is about to wait, for the tests that act in that gap.
+    #[cfg(test)]
+    pub(super) before_wait: Mutex<Option<Arc<dyn Fn() + Send + Sync>>>,
+    /// Whether a commit's thread is not made (set only by the tests of the fallback to the
+    /// request's thread).
+    no_threads: AtomicBool,
 }
 
 impl std::fmt::Debug for PutSpace {
@@ -177,7 +186,7 @@ pub(in crate::server) fn dir_ino(path: &str) -> u64 {
 }
 
 /// The errno of a refusal of the store.
-fn errno(error: &PutError) -> Errno {
+pub(super) fn errno(error: &PutError) -> Errno {
     error.errno()
 }
 
@@ -199,13 +208,15 @@ impl PutSpace {
             deadline,
             clock,
             state: Mutex::new(State::default()),
-            changes: Mutex::new(0),
-            changed: Condvar::new(),
+            changes: Changes::new(),
             held: AtomicBool::new(false),
             sweeping: Mutex::new(()),
             sweeper: Mutex::new(None),
             #[cfg(test)]
-            waits: std::sync::atomic::AtomicU64::new(0),
+            tries: std::sync::atomic::AtomicU64::new(0),
+            #[cfg(test)]
+            before_wait: Mutex::new(None),
+            no_threads: AtomicBool::new(false),
         }
     }
 
@@ -567,10 +578,9 @@ impl PutSpace {
             let _ = state.flushed.remove(&fh);
             state.handles.remove(&fh)
         };
-        if let Some(handle) = handle {
-            self.store.release(handle);
+        if let Some(id) = handle.and_then(|handle| self.store.release(handle)) {
+            self.changes.notify(&[Topic::File(id)]);
         }
-        self.note_change();
     }
 
     /// The kernel flushed the open `fh`: a descriptor of it was closed. Its release follows if it
@@ -585,17 +595,12 @@ impl PutSpace {
     /// Whether every open of the staged file numbered `id` has been flushed since its last write:
     /// the file is being closed, and its releases are on their way.
     fn closing(&self, id: u64) -> bool {
-        let of_handle: BTreeMap<u64, u64> = self
-            .store
-            .open_handles()
-            .into_iter()
-            .map(|(handle, file)| (handle.0, file))
-            .collect();
+        let open = self.store.handles_of(id);
         let state = locked(&self.state);
         state
             .handles
             .iter()
-            .filter(|(_, handle)| of_handle.get(&handle.0) == Some(&id))
+            .filter(|(_, handle)| open.contains(&handle.0))
             .all(|(fh, _)| state.flushed.contains(fh))
     }
 
@@ -607,89 +612,12 @@ impl PutSpace {
     pub(in crate::server) fn unlink(&self, parent: u64, name: &str) -> Result<(), Errno> {
         let parent = self.dir_path(parent)?;
         let dir = self.writable(&parent)?;
+        let id = self.store.find(&dir, name).map(|(id, _)| id);
         let removed = self.store.unlink(&dir, name).map_err(|error| errno(&error));
-        self.note_change();
+        if let Some(id) = id {
+            self.changes.notify(&[Topic::File(id)]);
+        }
         removed
-    }
-
-    /// Renames `name` of `parent` to `new` of `new_parent`: a `.part` name to another, a change of
-    /// the name; to a final name, the commit (see the module). `noreplace` refuses a `new` that is
-    /// there (`RENAME_NOREPLACE`).
-    ///
-    /// # Errors
-    /// `EPERM` for two directories or one not at or under a prefix, `EEXIST` for a `new` that is
-    /// there with `noreplace`, `EBUSY` when the file is still busy at the deadline, `EIO` when the
-    /// upload did not finish by it, and the errnos of the store's rename and of the upload's answer.
-    pub(in crate::server) fn rename(
-        &self,
-        (parent, name): (u64, &str),
-        (new_parent, new): (u64, &str),
-        noreplace: bool,
-    ) -> Result<(), Errno> {
-        if parent != new_parent {
-            return Err(Errno::PERM);
-        }
-        let parent = self.dir_path(parent)?;
-        let dir = self.writable(&parent)?;
-        if noreplace && self.store.find(&dir, new).is_some() {
-            return Err(Errno::EXIST);
-        }
-        let deadline = self.clock.now().saturating_add(millis(self.deadline));
-        let commit = loop {
-            let seen = *locked(&self.changes);
-            match self.store.rename(&dir, name, new) {
-                Ok(Rename::Renamed) => return Ok(()),
-                Ok(Rename::Commit(commit)) => break commit,
-                Err(PutError::Busy(why)) => {
-                    // A file still open is not waited for: only one being closed, whose release
-                    // FUSE sends after the close returns, or another commit of the file or key.
-                    let open = why == HANDLE_OPEN
-                        && !self
-                            .store
-                            .find(&dir, name)
-                            .is_some_and(|(id, _)| self.closing(id));
-                    if open || !self.wait_for_change(seen, deadline) {
-                        tracing::warn!("tierstore fs: the commit of {parent}/{new}: {why}");
-                        return Err(Errno::BUSY);
-                    }
-                }
-                Err(error) => return Err(errno(&error)),
-            }
-        };
-        let outcome = self.uploader.put(
-            (commit.key(), commit.sha256(), commit.size()),
-            &commit.path(),
-            deadline,
-        );
-        let finished = commit.finish(outcome).map_err(|error| errno(&error));
-        self.note_change();
-        finished
-    }
-
-    /// Tells the waiting commits that something they may wait for changed.
-    fn note_change(&self) {
-        *locked(&self.changes) += 1;
-        self.changed.notify_all();
-    }
-
-    /// Waits until a change after `seen`, or `deadline` on the clock; whether a change came first.
-    fn wait_for_change(&self, seen: u64, deadline: u64) -> bool {
-        let mut changes = locked(&self.changes);
-        #[cfg(test)]
-        let _ = self.waits.fetch_add(1, Ordering::AcqRel);
-        while *changes == seen {
-            let now = self.clock.now();
-            if now >= deadline {
-                return false;
-            }
-            let wait = Duration::from_millis(deadline - now);
-            changes = self
-                .changed
-                .wait_timeout(changes, wait)
-                .unwrap_or_else(std::sync::PoisonError::into_inner)
-                .0;
-        }
-        true
     }
 
     /// The size and the free space of the stage's volume.
@@ -811,9 +739,12 @@ impl PutSpace {
 }
 
 /// Milliseconds of `duration`, at most `u64::MAX`.
-fn millis(duration: Duration) -> u64 {
+pub(super) fn millis(duration: Duration) -> u64 {
     u64::try_from(duration.as_millis()).unwrap_or(u64::MAX)
 }
+
+#[path = "space_rename.rs"]
+mod rename;
 
 #[cfg(test)]
 #[path = "space_commit_tests.rs"]

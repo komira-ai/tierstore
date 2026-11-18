@@ -37,7 +37,10 @@
 
 #[cfg(any(target_os = "linux", test))]
 pub(in crate::server) mod carry;
+#[cfg(any(target_os = "linux", test))]
+mod changes;
 mod commit;
+mod compact;
 pub(in crate::server) mod config;
 mod error;
 mod hasher;
@@ -60,6 +63,8 @@ pub(in crate::server) use store::StagedStore;
 pub(in crate::server) use upload::Uploader;
 
 #[cfg(test)]
+mod compact_tests;
+#[cfg(test)]
 mod error_tests;
 #[cfg(test)]
 pub(in crate::server) mod fake;
@@ -75,6 +80,8 @@ mod replay_tests;
 mod store_commit_tests;
 #[cfg(test)]
 mod store_frontend_tests;
+#[cfg(test)]
+mod store_index_tests;
 #[cfg(test)]
 mod store_tests;
 #[cfg(test)]

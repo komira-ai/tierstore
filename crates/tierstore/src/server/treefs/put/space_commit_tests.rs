@@ -9,6 +9,7 @@ use std::time::Duration;
 use rustix::io::Errno;
 
 use super::super::carry::{Handed, HeldDir};
+use super::super::changes::Topic;
 use super::super::fake::failed;
 use super::super::testing::{DEADLINE, Rig, SpaceRig, sha};
 use super::{PutSpace, dir_ino};
@@ -202,7 +203,7 @@ fn a_commit_of_a_closed_file_waits_for_its_release() {
     space.flush(fh);
     std::thread::scope(|scope| {
         let commit = scope.spawn(|| space.rename((dir, "pack.part"), (dir, "pack"), false));
-        until(|| space.waits.load(Ordering::Acquire) > 0);
+        until(|| space.changes.waits.load(Ordering::Acquire) > 0);
         assert_eq!(rig.puts.count(), 0);
         space.release(fh);
         assert_eq!(commit.join().unwrap(), Ok(()));
@@ -230,7 +231,7 @@ fn a_commit_of_a_file_still_open_is_ebusy_at_once() {
     let _ = space.write((attr.ino, other), 5, b"?").unwrap();
     space.flush(fh);
     assert_eq!(commit(), Err(Errno::BUSY));
-    assert_eq!(space.waits.load(Ordering::Acquire), 0);
+    assert_eq!(space.changes.waits.load(Ordering::Acquire), 0);
     assert_eq!(rig.puts.count(), 0);
     space.release(fh);
     space.release(other);
@@ -250,11 +251,14 @@ fn a_closed_file_not_released_by_the_deadline_is_ebusy() {
     space.flush(fh);
     std::thread::scope(|scope| {
         let commit = scope.spawn(|| space.rename((dir, "pack.part"), (dir, "pack"), false));
-        until(|| space.waits.load(Ordering::Acquire) > 0);
+        until(|| space.changes.waits.load(Ordering::Acquire) > 0);
         rig.rig
             .clock
             .advance(u64::try_from(DEADLINE.as_millis()).unwrap());
-        space.note_change();
+        let Some(ino::PutIno::File(id)) = ino::put_of(attr.ino) else {
+            panic!("a file");
+        };
+        space.changes.notify(&[Topic::File(id)]);
         assert_eq!(commit.join().unwrap(), Err(Errno::BUSY));
     });
     assert_eq!(rig.puts.count(), 0);
@@ -280,7 +284,7 @@ fn a_commit_of_a_key_being_committed_waits_and_gets_its_own_answer() {
         let first = scope.spawn(|| space.rename((dir, "a.part"), (dir, "k"), false));
         rig.puts.wait_for_held(1);
         let second = scope.spawn(|| space.rename((dir, "b.part"), (dir, "k"), false));
-        until(|| space.waits.load(Ordering::Acquire) > 0);
+        until(|| space.changes.waits.load(Ordering::Acquire) > 0);
         rig.puts.let_go();
         assert_eq!(first.join().unwrap(), Ok(()));
         assert_eq!(second.join().unwrap(), Ok(()));
@@ -480,7 +484,7 @@ fn a_successor_takes_over_the_directories_and_the_opens_it_is_handed() {
     space.flush(fh);
     std::thread::scope(|scope| {
         let commit = scope.spawn(|| space.rename((dir, "open.part"), (dir, "open"), false));
-        until(|| space.waits.load(Ordering::Acquire) > 0);
+        until(|| space.changes.waits.load(Ordering::Acquire) > 0);
         space.release(fh);
         assert_eq!(commit.join().unwrap(), Ok(()));
     });

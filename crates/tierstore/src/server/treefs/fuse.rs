@@ -579,7 +579,11 @@ impl Filesystem for Frontend {
         flags: RenameFlags,
         reply: ReplyEmpty,
     ) {
-        match self.put_of(parent) {
+        match self
+            .put
+            .as_ref()
+            .filter(|_| ino::put_of(parent.0).is_some())
+        {
             Some(put) => {
                 fuse_put::rename(put, (parent.0, name), (newparent.0, newname), flags, reply)
             }

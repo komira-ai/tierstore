@@ -23,12 +23,14 @@
 //! after a start removes the staged files that have no entry. A start rewrites the journal with
 //! the live entries alone (a committed entry as a `create` of its final name and its `commit`), to
 //! `journal.new`, synced and renamed over `journal`, and so does a sweep once the journal has more
-//! than twice as many lines as live entries, plus 64.
+//! than twice as many lines as live entries, plus 64; the sweep writes `journal.new` while the
+//! store goes on appending to `journal`, and appends what came meanwhile to `journal.new` before it
+//! renames it over `journal` (`compact.rs`).
 //!
 //! The fixtures are `fs_put_journal.jsonl` and `fs_put_journal_newer.jsonl` in
 //! `crates/tierstore/tests/stored_formats/fixtures/`.
 
-use std::fs::{File, OpenOptions};
+use std::fs::File;
 use std::io::{self, Write as _};
 use std::path::{Path, PathBuf};
 
@@ -114,14 +116,18 @@ pub(super) fn decode(text: &[u8]) -> (Vec<Record>, u64) {
     (records, skipped)
 }
 
+/// Syncs the directory `dir`, so that a rename in it stands after a crash.
+///
+/// # Errors
+/// What the open or the sync said.
+pub(super) fn sync_dir(dir: &Path) -> io::Result<()> {
+    File::open(dir)?.sync_all()
+}
+
 /// The journal file a store appends to.
 #[derive(Debug)]
 pub(super) struct Journal {
     /// The stage directory.
-    #[cfg_attr(
-        not(test),
-        expect(dead_code, reason = "read only by the tests, which break the appends")
-    )]
     dir: PathBuf,
     /// `journal`, open to append.
     file: File,
@@ -147,23 +153,44 @@ impl Journal {
     /// # Errors
     /// What a write, sync, rename or open said.
     pub(super) fn rewrite(dir: &Path, records: &[Record]) -> io::Result<Self> {
-        let new = dir.join(NEW_FILE);
+        let mut journal = Self::begin_rewrite(dir, records)?;
+        journal.finish_rewrite(&[])?;
+        sync_dir(dir)?;
+        Ok(journal)
+    }
+
+    /// Writes `records` to `journal.new` of `dir`, synced, and gives it, open to append: the
+    /// journal that [`Journal::finish_rewrite`] puts in place of `journal`. Nothing of `journal`
+    /// changes, so a crash or a failure before the finish leaves the journal as it was.
+    ///
+    /// # Errors
+    /// What the create, write or sync said.
+    pub(super) fn begin_rewrite(dir: &Path, records: &[Record]) -> io::Result<Self> {
         let mut bytes = Vec::new();
         for record in records {
             bytes.extend(encode(record)?);
         }
-        let mut file = File::create(&new)?;
+        let mut file = File::create(dir.join(NEW_FILE))?;
         file.write_all(&bytes)?;
         file.sync_all()?;
-        drop(file);
-        std::fs::rename(&new, dir.join(FILE))?;
-        File::open(dir)?.sync_all()?;
-        let file = OpenOptions::new().append(true).open(dir.join(FILE))?;
         Ok(Self {
             dir: dir.to_owned(),
             file,
             lines: records.len() as u64,
         })
+    }
+
+    /// Appends `records` to the journal begun by [`Journal::begin_rewrite`] and renames its file
+    /// over `journal`; it appends to `journal` from then on. The directory is not synced: the
+    /// caller does (see [`sync_dir`]).
+    ///
+    /// # Errors
+    /// What a write or the rename said; `journal` is then the one before.
+    pub(super) fn finish_rewrite(&mut self, records: &[Record]) -> io::Result<()> {
+        for record in records {
+            self.append(record)?;
+        }
+        std::fs::rename(self.dir.join(NEW_FILE), self.dir.join(FILE))
     }
 
     /// Appends `record`, in one write.
