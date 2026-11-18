@@ -80,14 +80,28 @@ fn facts_and_cpu() {
     let hdd = f.drive("hdd1");
     f.link_dev(&hdd, "sdb");
     let s = Script::default();
+    // One part file of 16 MiB (sparse) under the named directory: it is mapped only when the
+    // directory is named.
+    let part = hdd.join("bucket/obj/uuid/part.1");
+    std::fs::create_dir_all(part.parent().unwrap()).unwrap();
+    std::fs::File::create(&part)
+        .unwrap()
+        .set_len(16 << 20)
+        .unwrap();
+    ok(&f, &format!("facts --node n3 --hdd {}", hdd.display()), &s);
+    assert!(!md(&f, "facts-n3").contains("**fiemap "));
     ok(
         &f,
-        &format!("facts --node n3 --ssd sda --hdd {}", hdd.display()),
+        &format!(
+            "facts --node n3 --ssd sda --hdd {} --parts-dir bucket",
+            hdd.display()
+        ),
         &s,
     );
     let m = md(&f, "facts-n3");
     assert!(m.contains("**sha_ni**\n\n```\ntrue"), "{m}");
     assert!(m.contains(&format!("**xfs_info {}**", hdd.display())));
+    assert!(m.contains(&format!("**fiemap {}**", part.display())), "{m}");
     ok(&f, "cpu --node n3 --ms 2", &s);
     assert!(md(&f, "cpu-n3").contains("sha_ni: yes"));
     let (code, _, _) = cli(

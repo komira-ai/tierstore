@@ -206,6 +206,59 @@ fn the_reader_skips_a_pack_evicted_after_it_was_picked() {
     assert_eq!(read.load(Ordering::SeqCst), 0);
 }
 
+/// A clock whose `n`th sleep sets a stop flag: a loop that checks the flag, then sleeps, runs
+/// exactly `n` iterations.
+struct StopAfter<'a> {
+    inner: StepClock,
+    left: std::sync::atomic::AtomicU32,
+    stop: &'a AtomicBool,
+}
+
+impl Clock for StopAfter<'_> {
+    fn now(&self) -> Duration {
+        self.inner.now()
+    }
+    fn unix_secs(&self) -> u64 {
+        self.inner.unix_secs()
+    }
+    fn sleep(&self, _d: Duration) {
+        if self.left.fetch_sub(1, Ordering::SeqCst) == 1 {
+            self.stop.store(true, Ordering::SeqCst);
+        }
+    }
+}
+
+fn read_n_times(cfg: &Config, store: &Mutex<Store>, n: u32) -> u64 {
+    let stop = AtomicBool::new(false);
+    let clock = StopAfter {
+        inner: StepClock::new(Duration::from_millis(1), 0),
+        left: n.into(),
+        stop: &stop,
+    };
+    let read = AtomicU64::new(0);
+    reader(cfg, store, &stop, &read, &clock).unwrap();
+    read.load(Ordering::SeqCst)
+}
+
+#[test]
+fn the_reader_reads_a_kept_pack_and_counts_exactly_the_bytes_it_read() {
+    let f = Fake::new("churn", &[]);
+    let cfg = config(&f);
+    std::fs::create_dir_all(cfg.dir.join("00")).unwrap();
+    // A pack of two 4 MiB reads: each read is one whole 4 MiB at an aligned offset.
+    std::fs::write(cfg.dir.join("00/big.pack"), vec![7u8; 8 << 20]).unwrap();
+    let store = Mutex::new(Store::default());
+    store.lock().unwrap().add("00/big.pack".into(), 8 * MIB);
+    assert_eq!(read_n_times(&cfg, &store, 3), 3 * 4 * MIB);
+    // A pack shorter than one read counts only its own bytes.
+    std::fs::write(cfg.dir.join("00/small.pack"), vec![7u8; 1 << 20]).unwrap();
+    let store = Mutex::new(Store::default());
+    store.lock().unwrap().add("00/small.pack".into(), MIB);
+    assert_eq!(read_n_times(&cfg, &store, 2), 2 * MIB);
+    // The store's clock moved once for the add and once for each read's pick.
+    assert_eq!(store.lock().unwrap().tick, 3);
+}
+
 /// The packs last seen with their sizes, and the frees not yet reported with the reads left.
 type Seen = (BTreeMap<PathBuf, u64>, Vec<(u64, u32)>);
 

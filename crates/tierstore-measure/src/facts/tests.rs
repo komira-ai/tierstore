@@ -75,7 +75,7 @@ fn node_facts_read_files_dirs_processes_and_commands() {
 #[test]
 fn drive_facts_name_the_drive_and_each_sampled_part() {
     let f = Fake::new("facts", &["sdb"]);
-    let parts = vec![PathBuf::from("/m/kbf-cas/x/part.1")];
+    let parts = vec![PathBuf::from("/m/bucket/x/part.1")];
     let probes = drive_probes(&f.sys(), Path::new("/m"), "sdb", &parts);
     let names: Vec<&str> = probes.iter().map(|p| p.name.as_str()).collect();
     assert_eq!(
@@ -86,7 +86,7 @@ fn drive_facts_name_the_drive_and_each_sampled_part() {
             "free space extents sdb",
             "queue sdb",
             "df /m",
-            "fiemap /m/kbf-cas/x/part.1"
+            "fiemap /m/bucket/x/part.1"
         ]
     );
     let facts = collect(&probes, f.path(), &Script::default());
@@ -103,7 +103,7 @@ fn drive_facts_name_the_drive_and_each_sampled_part() {
 #[test]
 fn sample_parts_finds_big_part_files_within_its_budget() {
     let f = Fake::new("facts", &[]);
-    let root = f.path().join("kbf-cas");
+    let root = f.path().join("bucket");
     for (i, len) in [(0, 10u64), (1, 4096), (2, 4096)] {
         let d = root.join(format!("obj{i}/uuid"));
         std::fs::create_dir_all(&d).unwrap();

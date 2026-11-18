@@ -105,7 +105,11 @@ enum Verb {
         /// HDD mount points, for C-6 drive facts.
         #[arg(long)]
         hdd: Vec<PathBuf>,
-        /// Silo part files to map per drive.
+        /// The directory under each HDD mount point whose part files are mapped (C-6); without
+        /// it no part is mapped.
+        #[arg(long)]
+        parts_dir: Option<String>,
+        /// Part files to map per drive.
         #[arg(long, default_value_t = 4)]
         parts: usize,
     },
@@ -504,6 +508,7 @@ pub fn run(cli: Cli, env: &Env<'_>, stdout: &mut dyn Write) -> Result<(), Error>
             node,
             ssd,
             hdd,
+            parts_dir,
             parts,
         } => {
             let out = Out::new(&common.out, &format!("facts-{node}"))?;
@@ -520,7 +525,9 @@ pub fn run(cli: Cli, env: &Env<'_>, stdout: &mut dyn Write) -> Result<(), Error>
             );
             for m in &hdd {
                 let dev = device_of(m, &common.sys_root)?;
-                let ps = crate::facts::sample_parts(&m.join("kbf-cas"), parts, 16 << 20, 200_000);
+                let ps = parts_dir.as_ref().map_or_else(Vec::new, |d| {
+                    crate::facts::sample_parts(&m.join(d), parts, 16 << 20, 200_000)
+                });
                 facts.extend(crate::facts::collect(
                     &crate::facts::drive_probes(&common.sys_root, m, &dev, &ps),
                     &common.proc_root,

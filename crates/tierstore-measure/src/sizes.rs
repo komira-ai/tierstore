@@ -171,7 +171,7 @@ mod tests {
             (s.p50, s.p90, s.p99),
             (2_097_152, 5_368_709_120, 5_368_709_120)
         );
-        let t = tables("kbf-cas", &s);
+        let t = tables("bucket", &s);
         assert_eq!(t.len(), 3);
         assert!(
             t[0].markdown()

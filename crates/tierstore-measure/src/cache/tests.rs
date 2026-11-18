@@ -204,6 +204,14 @@ fn dontneed_policies_drop_what_they_say() {
         let r = dontneed_test(&cfg, t, p, &resident, &clock()).unwrap();
         assert_eq!(r.lat.unwrap().n, 40, "{p:?}");
         assert!((r.extra["cache_grew_mib"] - 5.0).abs() < 1e-9);
+        // 40 MiB written in commits at 32 and 40 MiB: never drops nothing, at-commit drops all of
+        // it, and a cap of 8 MiB drops the first commit batch and keeps the last 8 MiB.
+        let want = match p {
+            Policy::Never => 0.0,
+            Policy::AtCommit => 40.0,
+            Policy::Cap => 32.0,
+        };
+        assert!((r.extra["dropped_mib"] - want).abs() < 1e-9, "{p:?}");
         assert!(
             r.params
                 .starts_with(&format!("policy={p:?} bytes=40MiB cap=8MiB"))
@@ -224,6 +232,8 @@ fn dontneed_policies_drop_what_they_say() {
             .n,
         4
     );
+    let tight_row = dontneed_test(&tight, t, Policy::Cap, &resident, &clock()).unwrap();
+    assert!((tight_row.extra["dropped_mib"] - 4.0).abs() < 1e-9);
     let failing = || Err(Error::Invalid("no meminfo".into()));
     assert!(dontneed_test(&cfg, t, Policy::Never, &failing, &clock()).is_err());
 }
@@ -297,4 +307,45 @@ fn run_runs_only_the_chosen_tests() {
     let rows = run(&cfg, &[], &Script::default(), &clock(), &out, None).unwrap();
     assert_eq!(rows.len(), 1);
     assert_eq!(rows[0].test, "punch");
+}
+
+#[test]
+fn each_policy_drops_exactly_its_ranges_after_a_commit() {
+    let m = MIB;
+    // Never: nothing, and the kept start does not move.
+    let mut kept = 0;
+    assert!(after_commit(Policy::Never, 8 * m, 32 * m, &mut kept).is_empty());
+    assert_eq!(kept, 0);
+    // At commit: everything written since the last drop, then nothing more for the same end.
+    let mut kept = 0;
+    assert_eq!(
+        after_commit(Policy::AtCommit, 8 * m, 32 * m, &mut kept),
+        [(0, 32 * m)]
+    );
+    assert_eq!(
+        after_commit(Policy::AtCommit, 8 * m, 40 * m, &mut kept),
+        [(32 * m, 8 * m)]
+    );
+    assert!(after_commit(Policy::AtCommit, 8 * m, 40 * m, &mut kept).is_empty());
+    assert_eq!(kept, 40 * m);
+    // Cap: the oldest kept bytes in commit batches until at most the cap is kept; at the cap
+    // exactly, nothing is dropped.
+    let mut kept = 0;
+    assert_eq!(
+        after_commit(Policy::Cap, 8 * m, 96 * m, &mut kept),
+        [(0, 32 * m), (32 * m, 32 * m), (64 * m, 32 * m)]
+    );
+    assert_eq!(kept, 96 * m);
+    let mut kept = 0;
+    assert_eq!(
+        after_commit(Policy::Cap, 40 * m, 72 * m, &mut kept),
+        [(0, 32 * m)]
+    );
+    assert!(after_commit(Policy::Cap, 40 * m, 72 * m, &mut kept).is_empty());
+    let mut kept = 0;
+    assert!(after_commit(Policy::Cap, 8 * m, 8 * m, &mut kept).is_empty());
+    // A batch shorter than a commit (the run's last cells) is dropped whole, never past the end.
+    let mut kept = 0;
+    assert_eq!(after_commit(Policy::Cap, m, 4 * m, &mut kept), [(0, 4 * m)]);
+    assert_eq!(kept, 4 * m);
 }

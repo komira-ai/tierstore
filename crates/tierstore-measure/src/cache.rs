@@ -482,6 +482,32 @@ pub enum Policy {
     Cap,
 }
 
+/// The ranges `(offset, length)` whose pages a policy drops after a commit that ends at `off`,
+/// where the pages from `kept_from` on are still kept; `kept_from` moves past what is dropped.
+/// Never drops nothing; at-commit drops everything since the last drop; cap-driven drops the
+/// oldest kept bytes, one commit batch at a time, until no more than `cap` bytes are kept.
+#[must_use]
+pub fn after_commit(policy: Policy, cap: u64, off: u64, kept_from: &mut u64) -> Vec<(u64, u64)> {
+    let mut v = Vec::new();
+    match policy {
+        Policy::Never => {}
+        Policy::AtCommit => {
+            if off > *kept_from {
+                v.push((*kept_from, off - *kept_from));
+            }
+            *kept_from = off;
+        }
+        Policy::Cap => {
+            while off - *kept_from > cap {
+                let n = SYNC_EVERY.min(off - *kept_from);
+                v.push((*kept_from, n));
+                *kept_from += n;
+            }
+        }
+    }
+    v
+}
+
 /// One `DONTNEED` policy on a read-after-serve pattern: `dontneed_bytes` written in 1 MiB cells,
 /// committed (`fdatasync`) per 32 MiB, pages dropped per the policy; then every cell read back.
 /// `cached` reads the bytes in the page cache of the whole machine (`Cached:` of `/proc/meminfo`
@@ -501,7 +527,7 @@ pub fn dontneed_test(
     let before = cached()?;
     let f = create(&p, Mode::Buffered)?;
     let mut cell = vec![0u8; 1 << 20];
-    let (mut off, mut kept_from) = (0u64, 0u64);
+    let (mut off, mut kept_from, mut dropped) = (0u64, 0u64, 0u64);
     let t0 = clock.now();
     while off < cfg.dontneed_bytes {
         fill(&mut cell, off);
@@ -509,19 +535,9 @@ pub fn dontneed_test(
         off += MIB;
         if off % SYNC_EVERY == 0 || off >= cfg.dontneed_bytes {
             rustix::fs::fdatasync(&f).map_err(|e| Error::io("fdatasync", &p)(e.into()))?;
-            match policy {
-                Policy::Never => {}
-                Policy::AtCommit => {
-                    drop_pages(&f, kept_from, off - kept_from, &p)?;
-                    kept_from = off;
-                }
-                Policy::Cap => {
-                    while off - kept_from > cfg.dontneed_cap {
-                        let n = SYNC_EVERY.min(off - kept_from);
-                        drop_pages(&f, kept_from, n, &p)?;
-                        kept_from += n;
-                    }
-                }
+            for (at, len) in after_commit(policy, cfg.dontneed_cap, off, &mut kept_from) {
+                drop_pages(&f, at, len, &p)?;
+                dropped += len;
             }
         }
     }
@@ -552,6 +568,8 @@ pub fn dontneed_test(
         .insert("write_mb_s".into(), mb_per_s(off, write_secs));
     out.extra
         .insert("cache_grew_mib".into(), grew as f64 / MIB as f64);
+    out.extra
+        .insert("dropped_mib".into(), dropped as f64 / MIB as f64);
     drop((f, r));
     let _ = std::fs::remove_file(&p);
     Ok(out)
