@@ -377,6 +377,13 @@ struct Cache {
     /// The cap of the cap-driven policy in MiB.
     #[arg(long, default_value_t = 256)]
     dontneed_cap_mib: u64,
+    /// The tests to run.
+    #[arg(
+        long,
+        value_delimiter = ',',
+        default_value = "write,fdatasync,mixed,punch,dontneed"
+    )]
+    tests: Vec<String>,
 }
 
 /// Flags of the C-5 write verbs.
@@ -694,6 +701,7 @@ pub fn run(cli: Cli, env: &Env<'_>, stdout: &mut dyn Write) -> Result<(), Error>
                 dontneed_bytes: c.dontneed_mib * MIB,
                 dontneed_cap: c.dontneed_cap_mib * MIB,
                 diskstats: c.common.diskstats(),
+                tests: c.tests.clone(),
             };
             let out = Out::new(&c.common.out, "b")?;
             let guard = c.common.guard();

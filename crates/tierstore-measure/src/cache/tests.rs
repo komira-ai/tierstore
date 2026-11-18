@@ -24,6 +24,9 @@ fn config(f: &Fake) -> Config {
         dontneed_bytes: 40 * MIB,
         dontneed_cap: 8 * MIB,
         diskstats: f.diskstats(),
+        tests: ["write", "fdatasync", "mixed", "punch", "dontneed"]
+            .map(String::from)
+            .to_vec(),
     }
 }
 
@@ -289,4 +292,15 @@ fn run_covers_every_test_and_writes_a_table_per_test() {
     }];
     assert!(run(&cfg, &extras, &failing, &coarse(), &out, None).is_err());
     assert!(tables(&[]).is_empty());
+}
+
+#[test]
+fn run_runs_only_the_chosen_tests() {
+    let f = Fake::new("cache", &["sda"]);
+    let mut cfg = config(&f);
+    cfg.tests = vec!["punch".into()];
+    let out = Out::new(&f.path().join("out"), "b").unwrap();
+    let rows = run(&cfg, &[], &Script::default(), &clock(), &out, None).unwrap();
+    assert_eq!(rows.len(), 1);
+    assert_eq!(rows[0].test, "punch");
 }

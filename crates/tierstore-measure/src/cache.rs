@@ -189,6 +189,8 @@ pub struct Config {
     pub dontneed_cap: u64,
     /// `/proc/diskstats`.
     pub diskstats: PathBuf,
+    /// The tests to run: `write`, `fdatasync`, `mixed`, `punch`, `dontneed`.
+    pub tests: Vec<String>,
 }
 
 fn row(target: &Target, test: &str, params: String) -> Row {
@@ -600,7 +602,7 @@ pub fn run(
         let x = extras.get(i).unwrap_or(&none);
         let trim = x.fstrim.as_deref().map(|m| (runner, m));
         let resident = |p: &Path| fincore(runner, p);
-        let mut tests: Vec<Test<'_>> = Vec::new();
+        let mut tests: Vec<(&str, Test<'_>)> = Vec::new();
         for kib in &cfg.blocks_kib {
             for jobs in &cfg.jobs {
                 for mode in &cfg.modes {
@@ -610,25 +612,35 @@ pub fn run(
                         modes: vec![*mode],
                         ..cfg.clone()
                     };
-                    tests.push(Box::new(move || write_grid(&one, t, clock)));
+                    tests.push(("write", Box::new(move || write_grid(&one, t, clock))));
                 }
             }
         }
-        tests.push(Box::new(|| fsync_test(cfg, t, 0, clock).map(|r| vec![r])));
-        tests.push(Box::new(|| {
-            fsync_test(cfg, t, cfg.sync_background, clock).map(|r| vec![r])
-        }));
-        tests.push(Box::new(|| mixed_test(cfg, t, clock).map(|r| vec![r])));
-        tests.push(Box::new(|| {
-            punch_test(cfg, t, x.image.as_deref(), trim).map(|r| vec![r])
-        }));
+        let bg = cfg.sync_background;
+        tests.push((
+            "fdatasync",
+            Box::new(|| fsync_test(cfg, t, 0, clock).map(|r| vec![r])),
+        ));
+        tests.push((
+            "fdatasync",
+            Box::new(move || fsync_test(cfg, t, bg, clock).map(|r| vec![r])),
+        ));
+        tests.push((
+            "mixed",
+            Box::new(|| mixed_test(cfg, t, clock).map(|r| vec![r])),
+        ));
+        let image = x.image.as_deref();
+        tests.push((
+            "punch",
+            Box::new(move || punch_test(cfg, t, image, trim).map(|r| vec![r])),
+        ));
         for policy in [Policy::Never, Policy::AtCommit, Policy::Cap] {
             let resident = &resident;
-            tests.push(Box::new(move || {
-                dontneed_test(cfg, t, policy, resident, clock).map(|r| vec![r])
-            }));
+            let run = move || dontneed_test(cfg, t, policy, resident, clock).map(|r| vec![r]);
+            tests.push(("dontneed", Box::new(run)));
         }
-        for test in &mut tests {
+        let chosen = |name: &str| cfg.tests.iter().any(|n| n == name);
+        for (_, test) in tests.iter_mut().filter(|(name, _)| chosen(name)) {
             let (got, seen) = guarded(guard, clock, test)?;
             for mut r in got {
                 r.seen = seen;
