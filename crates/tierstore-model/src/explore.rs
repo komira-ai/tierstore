@@ -30,6 +30,11 @@ pub trait Model {
     fn converged(&self, s: &Self::S) -> bool;
     fn show_act(&self, a: &Self::A) -> String;
     fn show_state(&self, s: &Self::S) -> String;
+    /// The message of a liveness failure. It starts with the rule id `A4`, the id the liveness
+    /// check is judged under.
+    fn liveness_violation(&self) -> String {
+        "A4 liveness: from quiescence the leader cannot reach a state with no marker and cold equal to truth".into()
+    }
 }
 
 /// Bounds of one exploration.
@@ -290,7 +295,7 @@ fn liveness<M: Model>(m: &M, g: &Graph<M::S, M::A>, out: &mut Outcome) {
                 ));
             }
             out.trace = Some(Trace {
-                message: "A4 liveness: from quiescence the leader cannot reach a state with no marker and cold equal to truth".into(),
+                message: m.liveness_violation(),
                 steps,
             });
             return;
