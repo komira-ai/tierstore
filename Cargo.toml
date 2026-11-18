@@ -112,6 +112,10 @@ tracing = "0.1.44"
 vm-memory = { version = "0.18.0", default-features = false }
 # Reads the fields of a client certificate (IP subjectAltNames) that the OCI front's start checks.
 x509-parser = "0.18.1"
+# The `#[repr(C)]` wire structs of the FUSE ABI in `tsfuse` (derives checked for padding, read
+# and written as bytes without `unsafe` in the crate). Already in the tree through other crates.
+# BSD-2-Clause OR Apache-2.0 OR MIT.
+zerocopy = { version = "0.8.60", features = ["derive"] }
 
 # The workspace's own crates.
 # The object store trait and the S3 client, with no dependency on another workspace crate.
