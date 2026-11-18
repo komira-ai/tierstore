@@ -303,15 +303,21 @@ mod tests {
 
     #[test]
     fn system_runner_returns_output_and_reports_failures() {
-        assert_eq!(System.run(&["echo", "hi"]).unwrap(), "hi\n");
-        let e = System.run(&["ls", "/nonexistent-ts-measure"]).unwrap_err();
+        // The program run is this test binary itself, so no host program is involved: listing a
+        // test that does not exist succeeds, and an unknown option fails with libtest's message.
+        let exe = std::env::current_exe().unwrap();
+        let exe = exe.to_str().unwrap();
+        let out = System
+            .run(&[exe, "--list", "--exact", "no_such_test"])
+            .unwrap();
+        assert!(out.contains("0 tests"), "{out}");
+        let e = System.run(&[exe, "--no-such-option"]).unwrap_err();
         assert!(
             e.to_string()
-                .starts_with("command `ls /nonexistent-ts-measure`: exit status: 2: ls: "),
+                .starts_with(&format!("command `{exe} --no-such-option`: exit status: ")),
             "{e}"
         );
         assert!(System.run(&["/nonexistent/prog"]).is_err());
         assert!(System.run(&[]).is_err());
-        assert!(System.run(&["false"]).is_err());
     }
 }

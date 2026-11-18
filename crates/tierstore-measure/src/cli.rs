@@ -13,8 +13,10 @@ use crate::blockdev::{backing_file, device_of};
 use crate::clock::Clock;
 use crate::io::MIB;
 use crate::report::Out;
-use crate::run::{Runner, preflight};
-use crate::workload::Pattern;
+use crate::run::Runner;
+
+mod helpers;
+use helpers::{devices_of, hdd_config, idle, labelled, ms, runtime, wait_until, write_config};
 
 /// The farm measurements of tierstore's fetch, cache and cold-tier design.
 #[derive(Debug, Parser)]
@@ -150,10 +152,10 @@ enum Verb {
         #[command(flatten)]
         common: Common,
         /// Silo's S3 endpoint.
-        #[arg(long, default_value = "http://127.0.0.1:30900")]
+        #[arg(long)]
         endpoint: String,
         /// The bucket.
-        #[arg(long, default_value = "kbf-cas")]
+        #[arg(long)]
         bucket: String,
         /// Silo's environment file with its root credentials.
         #[arg(long)]
@@ -167,10 +169,10 @@ enum Verb {
         #[command(flatten)]
         common: Common,
         /// Silo's S3 endpoint.
-        #[arg(long, default_value = "http://127.0.0.1:30900")]
+        #[arg(long)]
         endpoint: String,
         /// The bucket.
-        #[arg(long, default_value = "kbf-cas")]
+        #[arg(long)]
         bucket: String,
         /// Silo's environment file with its root credentials.
         #[arg(long)]
@@ -483,116 +485,12 @@ impl ColdDrives {
     }
 }
 
-fn wait_until(clock: &dyn Clock, at: Option<u64>) {
-    let ahead = at.map_or(0, |t| t.saturating_sub(clock.unix_secs()));
-    let end = clock.now() + Duration::from_secs(ahead);
-    while clock.now() < end {
-        clock.sleep(Duration::from_millis(100));
-    }
-}
-
 /// What a verb runs with: the programs and the clock (fakes in tests).
 pub struct Env<'a> {
     /// The programs.
     pub runner: &'a dyn Runner,
     /// The clock.
     pub clock: &'a dyn Clock,
-}
-
-fn ms(n: u64) -> Duration {
-    Duration::from_millis(n)
-}
-
-fn patterns(names: &[String]) -> Result<Vec<Pattern>, Error> {
-    names
-        .iter()
-        .map(|n| match n.as_str() {
-            "adjacent" => Ok(Pattern::Adjacent),
-            "scattered" => Ok(Pattern::Scattered),
-            other => Err(Error::Invalid(format!(
-                "pattern {other}: want adjacent or scattered"
-            ))),
-        })
-        .collect()
-}
-
-fn labelled(v: &str) -> Result<(String, PathBuf), Error> {
-    v.split_once('=')
-        .map(|(l, p)| (l.to_string(), PathBuf::from(p)))
-        .ok_or_else(|| Error::Invalid(format!("{v}: want label=path")))
-}
-
-/// The devices to sample for a directory: its device, and for a loop the device under its image.
-fn devices_of(dir: &Path, sys: &Path) -> Result<Vec<String>, Error> {
-    let dev = device_of(dir, sys)?;
-    let mut v = vec![dev.clone()];
-    if let Some(img) = backing_file(sys, &dev) {
-        v.push(device_of(&img, sys)?);
-    }
-    Ok(v)
-}
-
-fn idle(c: &Common, devs: &[String], env: &Env<'_>) -> Result<(), Error> {
-    if c.idle_secs > 0 {
-        let s = crate::diskstats::Sampler::new(&c.diskstats(), devs);
-        preflight(&s, env.clock, c.idle_secs, c.idle_max_util)?;
-    }
-    Ok(())
-}
-
-fn hdd_config(h: &Hdd) -> Result<crate::hdd::Config, Error> {
-    let drives = h
-        .dir
-        .iter()
-        .map(|d| {
-            std::fs::create_dir_all(d).map_err(Error::io("mkdir", d))?;
-            Ok(crate::hdd::Drive {
-                dir: d.clone(),
-                dev: device_of(d, &h.common.sys_root)?,
-            })
-        })
-        .collect::<Result<Vec<_>, Error>>()?;
-    Ok(crate::hdd::Config {
-        drives,
-        sets: h.sets.clone(),
-        sizes_mib: h.sizes.clone(),
-        streams: h.streams.clone(),
-        modes: h
-            .modes
-            .iter()
-            .map(|m| crate::hdd::ReadMode::parse(m))
-            .collect::<Result<_, _>>()?,
-        patterns: patterns(&h.patterns)?,
-        files: h.files.max(h.streams.iter().copied().max().unwrap_or(1)),
-        file_size: h.file_mib * MIB,
-        warmup: ms(h.warmup_ms),
-        measure: ms(h.measure_ms),
-        sys: h.common.sys_root.clone(),
-    })
-}
-
-fn write_config(w: &Write5) -> Result<crate::write::Config, Error> {
-    std::fs::create_dir_all(&w.dir).map_err(Error::io("mkdir", &w.dir))?;
-    Ok(crate::write::Config {
-        dir: w.dir.clone(),
-        dev: device_of(&w.dir, &w.common.sys_root)?,
-        sizes_mib: w.sizes.clone(),
-        writers: w.writers.clone(),
-        measure: ms(w.measure_ms),
-        sustained: w.sustained_mib * MIB,
-        pack: w.pack_mib * MIB,
-        window: w.window_mib * MIB,
-        rewrite_cap: w.rewrite_cap_mib * MIB,
-        keep_free: w.keep_free,
-        diskstats: w.common.diskstats(),
-    })
-}
-
-fn runtime() -> Result<tokio::runtime::Runtime, Error> {
-    tokio::runtime::Builder::new_multi_thread()
-        .enable_all()
-        .build()
-        .map_err(Error::net)
 }
 
 /// Runs a parsed command line.

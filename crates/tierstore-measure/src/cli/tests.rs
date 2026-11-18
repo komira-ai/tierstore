@@ -320,7 +320,7 @@ fn silo_list_get_and_analyse() {
     );
     for bad in [
         format!(
-            "silo-list --endpoint {} --credentials {}",
+            "silo-list --endpoint {} --bucket tierstore-fake --credentials {}",
             fake.endpoint(),
             f.path().join("none").display()
         ),
@@ -330,7 +330,7 @@ fn silo_list_get_and_analyse() {
         ),
         format!("analyse --listing {}", f.path().join("none").display()),
         format!(
-            "silo-list --endpoint nope --credentials {}",
+            "silo-list --endpoint nope --bucket tierstore-fake --credentials {}",
             creds.display()
         ),
     ] {

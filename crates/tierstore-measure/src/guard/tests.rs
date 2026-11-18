@@ -2,6 +2,7 @@ use super::*;
 use crate::clock::StepClock;
 use crate::testutil::Fake;
 use std::cell::Cell;
+use std::collections::BTreeMap;
 
 fn proc_with(f: &Fake, silo_bytes: u64, load: &str) -> PathBuf {
     let p = f.path().join("proc");
@@ -43,7 +44,7 @@ fn guard(proc_root: PathBuf) -> Guard {
 fn counts_only_the_guarded_processes_disk_bytes_and_reads_the_load() {
     let f = Fake::new("guard", &[]);
     let g = guard(proc_with(&f, 1000, "2.5"));
-    assert_eq!(g.foreign_bytes().unwrap(), 2000);
+    assert_eq!(g.foreign_bytes().unwrap().values().sum::<u64>(), 2000);
     assert!((g.load1().unwrap() - 2.5).abs() < 1e-9);
     std::fs::write(g.proc_root.join("loadavg"), "x").unwrap();
     assert!(g.load1().is_err());
@@ -135,4 +136,14 @@ fn writes_on_the_watched_drives_make_a_cell_noisy() {
     assert!(seen.foreign_w_s > 5.0);
     g.write_devs = vec!["sdq".into()];
     assert!(g.writes().is_err());
+}
+
+#[test]
+fn bytes_are_counted_per_process_across_a_start_and_an_exit() {
+    let a: BTreeMap<String, u64> = [("1".into(), 100), ("2".into(), 5_000)].into();
+    // Process 2 exited, 1 moved 50 bytes, 3 started and moved 70.
+    let b: BTreeMap<String, u64> = [("1".into(), 150), ("3".into(), 70)].into();
+    assert_eq!(moved(&a, &b), 120);
+    assert_eq!(moved(&b, &b), 0);
+    assert_eq!(moved(&BTreeMap::new(), &BTreeMap::new()), 0);
 }

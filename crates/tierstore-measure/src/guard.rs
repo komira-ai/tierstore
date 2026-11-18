@@ -4,6 +4,7 @@
 //! (`/proc/<pid>/io`) and the load; a cell that saw more than the limits is run again. Every row
 //! records what its cell saw.
 
+use std::collections::BTreeMap;
 use std::path::{Path, PathBuf};
 use std::time::Duration;
 
@@ -51,11 +52,20 @@ pub struct Guard {
 }
 
 /// Foreign activity so far: the guarded processes' disk bytes and the watched drives' writes.
-#[derive(Debug, Clone, Copy)]
+#[derive(Debug, Clone)]
 struct Mark {
-    bytes: u64,
+    bytes: BTreeMap<String, u64>,
     writes: u64,
     at: Duration,
+}
+
+/// The bytes the guarded processes moved between two marks: per process, so one that exits or
+/// starts in between neither hides the others' bytes nor adds what it moved before the first mark.
+/// A process that started in between counts from zero; one that exited counts nothing.
+fn moved(a: &BTreeMap<String, u64>, b: &BTreeMap<String, u64>) -> u64 {
+    b.iter()
+        .map(|(pid, end)| end.saturating_sub(a.get(pid).copied().unwrap_or(0)))
+        .sum()
 }
 
 fn io_bytes(dir: &Path) -> u64 {
@@ -99,22 +109,22 @@ impl Guard {
         })
     }
 
-    fn since(&self, a: Mark, clock: &dyn Clock, attempts: u32) -> Result<Seen, Error> {
+    fn since(&self, a: &Mark, clock: &dyn Clock, attempts: u32) -> Result<Seen, Error> {
         let b = self.mark(clock)?;
         let secs = (b.at - a.at).as_secs_f64();
         Ok(Seen {
-            foreign_mb_s: crate::stats::mb_per_s(b.bytes.saturating_sub(a.bytes), secs),
+            foreign_mb_s: crate::stats::mb_per_s(moved(&a.bytes, &b.bytes), secs),
             foreign_w_s: b.writes.saturating_sub(a.writes) as f64 / secs.max(1e-9),
             load1: self.load1()?,
             attempts,
         })
     }
 
-    /// The disk bytes so far of every guarded process.
+    /// The disk bytes so far of each guarded process, by its proc entry (the pid).
     ///
     /// # Errors
     /// When the proc file system cannot be listed.
-    pub fn foreign_bytes(&self) -> Result<u64, Error> {
+    pub fn foreign_bytes(&self) -> Result<BTreeMap<String, u64>, Error> {
         let rd = std::fs::read_dir(&self.proc_root).map_err(Error::io("list", &self.proc_root))?;
         Ok(rd
             .flatten()
@@ -123,8 +133,11 @@ impl Guard {
                 std::fs::read_to_string(p.join("comm"))
                     .is_ok_and(|c| self.comms.iter().any(|n| n == c.trim()))
             })
-            .map(|p| io_bytes(&p))
-            .sum())
+            .map(|p| {
+                let pid = p.file_name().map(|n| n.to_string_lossy().into_owned());
+                (pid.unwrap_or_default(), io_bytes(&p))
+            })
+            .collect())
     }
 
     /// The one-minute load average.
@@ -145,7 +158,7 @@ impl Guard {
         while clock.now() - a.at < window {
             clock.sleep(Duration::from_millis(250));
         }
-        self.since(a, clock, 0)
+        self.since(&a, clock, 0)
     }
 
     /// Waits until a quiet window (foreign MB/s and load under the limits), or `max_wait`.
@@ -182,7 +195,7 @@ impl Guard {
             self.wait_quiet(clock)?;
             let a = self.mark(clock)?;
             let r = cell()?;
-            let seen = self.since(a, clock, attempt)?;
+            let seen = self.since(&a, clock, attempt)?;
             if self.quiet(&seen) || attempt >= self.attempts {
                 return Ok((r, seen));
             }
