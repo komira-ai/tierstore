@@ -603,7 +603,12 @@ pub struct Sim {
     next_stamp: u64,
     /// The alive flag of each node's current incarnation.
     alive: BTreeMap<NodeId, Arc<AtomicBool>>,
+    /// Wraps the peers of every node made from now on (a node restarted after it is set).
+    pub peers_wrap: Option<PeersWrap>,
 }
+
+/// A function that puts a test's own [`HotPeers`] around a node's simulated network.
+pub type PeersWrap = Arc<dyn Fn(Arc<dyn HotPeers>) -> Arc<dyn HotPeers> + Send + Sync>;
 
 /// A wall clock: the shared manual clock plus an offset.
 struct Wall {
@@ -651,6 +656,7 @@ impl Sim {
             skew: BTreeMap::new(),
             next_stamp: 1,
             alive: BTreeMap::new(),
+            peers_wrap: None,
         };
         sim.clock.advance(1_000_000);
         for i in 1..=nodes {
@@ -681,17 +687,22 @@ impl Sim {
         self.alive.insert(id, Arc::clone(&alive));
         let p = &self.parts[&id];
         let clock: Arc<dyn Clock> = Arc::new(self.clock.clone());
+        let peers: Arc<dyn HotPeers> = Arc::new(SimPeers {
+            me: id,
+            net: self.net.clone(),
+            alive: Arc::clone(&alive),
+        });
+        let peers = match &self.peers_wrap {
+            Some(wrap) => wrap(peers),
+            None => peers,
+        };
         HotNode::new(HotParts {
             id,
             config: self.cfg.clone(),
             dev: Arc::new(FakeDev(p.disk.clone(), Arc::clone(&alive))),
             sched: HotSched::inline(self.cfg.stall_after_ms, Arc::clone(&clock)),
             index: Arc::clone(&p.index),
-            peers: Arc::new(SimPeers {
-                me: id,
-                net: self.net.clone(),
-                alive,
-            }),
+            peers,
             placement: Arc::new(Rendezvous),
             spawn: Arc::new(self.exec.clone()),
             clock,

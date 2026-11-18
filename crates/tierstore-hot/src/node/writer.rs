@@ -203,10 +203,7 @@ impl<B: Backend + 'static> Node<B> {
         self.observe(record.stamp);
         for _ in 0..APPEND_ATTEMPTS {
             let seg = self.segment_for(&record.key, record.expiry).await?;
-            let Some(rx) = self.enqueue(&seg, record.clone()) else {
-                continue;
-            };
-            match rx.await {
+            match self.enqueue(&seg, record.clone()).await {
                 Ok(Outcome::Acked(acked)) => return Ok(acked),
                 Ok(Outcome::Failed(e)) => return Err(e),
                 Ok(Outcome::Retry) | Err(_) => {}
@@ -283,13 +280,28 @@ impl<B: Backend + 'static> Node<B> {
     ) -> Result<Arc<Seg>, HotError> {
         let set = self.replica_set(key)?;
         let k = (set.clone(), class);
-        if let Some(seg) = self.lock().open.get(&k) {
-            return Ok(Arc::clone(seg));
+        // Looked up twice when none is open: again under the lock of opening, which another
+        // append may have held while it opened the segment.
+        let mut opening = None;
+        loop {
+            if let Some(seg) = self.lock().open.get(&k) {
+                return Ok(Arc::clone(seg));
+            }
+            if opening.is_some() {
+                return self.open_segment(k, set, class).await;
+            }
+            opening = Some(self.seg_locks.lock(b"open").await);
         }
-        let _opening = self.seg_locks.lock(b"open").await;
-        if let Some(seg) = self.lock().open.get(&k) {
-            return Ok(Arc::clone(seg));
-        }
+    }
+
+    /// Creates and registers the open segment `k` of `set` and `class`; the caller holds the
+    /// lock of opening and found none.
+    async fn open_segment(
+        self: &Arc<Self>,
+        k: (Vec<NodeId>, ExpiryClass),
+        set: Vec<NodeId>,
+        class: ExpiryClass,
+    ) -> Result<Arc<Seg>, HotError> {
         let id = self.ids.next().map_err(other_err("segment id"))?;
         let path = HotName::Segment(id).path();
         let dev = Arc::clone(&self.dev);
@@ -345,18 +357,12 @@ impl<B: Backend + 'static> Node<B> {
         Ok(seg)
     }
 
-    /// Queues `rec` on `seg` and starts its committer if none runs; `None` if `seg` is closed.
-    fn enqueue(
-        self: &Arc<Self>,
-        seg: &Arc<Seg>,
-        rec: AppendRecord,
-    ) -> Option<oneshot::Receiver<Outcome>> {
+    /// Queues `rec` on `seg` and starts its committer if none runs; a closed segment's
+    /// committer answers the record [`Outcome::Retry`] at once.
+    fn enqueue(self: &Arc<Self>, seg: &Arc<Seg>, rec: AppendRecord) -> oneshot::Receiver<Outcome> {
         let (tx, rx) = oneshot::channel();
         let start = {
             let mut s = seg.lock();
-            if s.closed.is_some() {
-                return None;
-            }
             s.queue.push_back(Pending { rec, tx });
             !std::mem::replace(&mut s.committer, true)
         };
@@ -365,7 +371,7 @@ impl<B: Backend + 'static> Node<B> {
             self.spawn
                 .spawn(async move { n.commit_loop(seg).await }.boxed());
         }
-        Some(rx)
+        rx
     }
 
     /// Removes `seg` from the open segments, so new records go to a new one.
@@ -469,19 +475,20 @@ impl<B: Backend + 'static> Node<B> {
         let mut bytes: Vec<u8> = Vec::new();
         let mut taken: Vec<(Pending, u64)> = Vec::new();
         let mut full = false;
-        while let Some(p) = s.queue.front() {
+        while let Some(p) = s.queue.pop_front() {
             let key_len = p.rec.key.len().min(usize::from(u16::MAX)) as u16;
             let len = record_len(key_len, p.rec.data.len() as u64);
             if !taken.is_empty() && bytes.len() as u64 + len > self.cfg.batch_max {
+                s.queue.push_front(p);
                 break;
             }
             let fits = start + bytes.len() as u64 + len <= self.cfg.seal_bytes
                 && s.builder.fits(key_len, p.rec.data.len() as u64);
             if !fits {
                 full = true;
+                s.queue.push_front(p);
                 break;
             }
-            let Some(p) = s.queue.pop_front() else { break };
             let offset = start + bytes.len() as u64;
             let rec = RecordIn {
                 flags: RecordFlags::default(),
@@ -554,9 +561,8 @@ impl<B: Backend + 'static> Node<B> {
                     return None;
                 }
                 Ok(None) => {
-                    if rx.changed().await.is_err() {
-                        return None;
-                    }
+                    // The sender lives in `seg`, which this call holds.
+                    let _ = rx.changed().await;
                 }
             }
         }
@@ -750,72 +756,39 @@ impl<B: Backend + 'static> Node<B> {
     fn next_send(&self, seg: &Seg, node: NodeId) -> Option<SendJob> {
         let now = self.clock.now_ms();
         let mut s = seg.lock();
-        let (written, acked) = (s.written, s.acked);
-        let cur = s.cur.clone();
-        let link = s.links.get(&node).copied()?;
-        let stop = |s: &mut SegSt| {
-            if let Some(l) = s.links.get_mut(&node) {
-                l.sending = false;
-            }
-            None
-        };
-        if link.failed || link.committed > acked {
-            return stop(&mut s);
-        }
-        let from = link.committed;
-        let job = if from < written {
-            let Some(crc) = s.crcs.get(&written).copied() else {
-                return stop(&mut s);
-            };
-            SendJob {
-                from,
-                to: written,
-                crc,
-                cur,
-            }
-        } else if link.told < acked {
-            let crc = s.crcs.get(&from).copied().unwrap_or_default();
-            SendJob {
-                from,
-                to: from,
-                crc,
-                cur: None,
-            }
+        let job = plan_send(&s, node);
+        let link = s.links.entry(node).or_default();
+        if job.is_some() {
+            link.since = Some(now);
         } else {
-            return stop(&mut s);
-        };
-        if let Some(l) = s.links.get_mut(&node) {
-            l.since = Some(now);
+            link.sending = false;
         }
-        Some(job)
+        job
     }
 
     /// The bytes `[job.from, job.to)`: the batch in memory, with any earlier bytes read back from
     /// the local copy (a replica that lags, with `min_acks` below `replicas`).
     async fn send_bytes(&self, seg: &Seg, job: &SendJob) -> Result<Bytes, HotError> {
         match &job.cur {
-            Some((start, bytes)) if *start == job.from => return Ok(bytes.clone()),
-            _ => {}
-        }
-        let (head_end, tail) = match &job.cur {
-            Some((start, bytes)) if *start > job.from && *start + bytes.len() as u64 == job.to => {
-                (*start, Some(bytes.clone()))
+            Some((start, bytes)) if *start == job.from => Ok(bytes.clone()),
+            cur => {
+                let (head_end, tail) = cur
+                    .as_ref()
+                    .map_or((job.to, None), |(start, bytes)| (*start, Some(bytes)));
+                let (dev, path, from) = (Arc::clone(&self.dev), seg.path.clone(), job.from);
+                let mut out = self
+                    .sched
+                    .run(DriveClass::Write, move || {
+                        dev.read_at(&path, from, head_end - from)
+                    })
+                    .await?
+                    .map_err(io_err("segment read"))?;
+                if let Some(t) = tail {
+                    out.extend_from_slice(t);
+                }
+                Ok(Bytes::from(out))
             }
-            _ => (job.to, None),
-        };
-        let (dev, path, from) = (Arc::clone(&self.dev), seg.path.clone(), job.from);
-        let head = self
-            .sched
-            .run(DriveClass::Write, move || {
-                dev.read_at(&path, from, head_end - from)
-            })
-            .await?
-            .map_err(io_err("segment read"))?;
-        let mut out = head;
-        if let Some(t) = tail {
-            out.extend_from_slice(&t);
         }
-        Ok(Bytes::from(out))
     }
 
     /// Whether this node promised a ballot above `opened` for `segment`: a takeover fences the
@@ -837,6 +810,36 @@ struct SendJob {
     to: u64,
     crc: u32,
     cur: Option<(u64, Bytes)>,
+}
+
+/// What the sender of `node` sends next: the batch in memory, or the bytes from the replica's
+/// committed length, or the bare notice that everything before it is acknowledged.
+fn plan_send(s: &SegSt, node: NodeId) -> Option<SendJob> {
+    let link = s.links.get(&node).copied().unwrap_or_default();
+    if link.committed > s.acked {
+        return None;
+    }
+    let from = link.committed;
+    if from < s.written {
+        // The running crc at the batch end is kept until every replica passes it.
+        let crc = s.crcs.get(&s.written).copied().unwrap_or_default();
+        Some(SendJob {
+            from,
+            to: s.written,
+            crc,
+            cur: s.cur.clone(),
+        })
+    } else if link.told < s.acked {
+        let crc = s.crcs.get(&from).copied().unwrap_or_default();
+        Some(SendJob {
+            from,
+            to: from,
+            crc,
+            cur: None,
+        })
+    } else {
+        None
+    }
 }
 
 fn retry_all(taken: Vec<(Pending, u64)>) {
