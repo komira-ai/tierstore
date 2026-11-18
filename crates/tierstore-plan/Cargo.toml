@@ -1,0 +1,23 @@
+[package]
+name = "tierstore-plan"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+repository.workspace = true
+publish.workspace = true
+description = "The Prepare planner of the tierstore read path (docs/design/fetch-cache-serve.md, section 6): a pure function of a tree list, the ranges a job needs and a first-touch profile, giving the cell runs to ensure with their ranks under the per-drive gap rule and the whole-pack rule."
+
+# Pure: no I/O, no clock, no async, no hash maps. Data in, plan out.
+[dependencies]
+# The list reader trait, cell runs, ranks, byte ranges, pack keys and devices of the frozen read
+# path interfaces.
+tierstore-fetch-api.workspace = true
+thiserror.workspace = true
+
+[dev-dependencies]
+# The node and drive ids of a device, to name one in the tests of `Medium::of`.
+tierstore-format.workspace = true
+
+[lints]
+workspace = true

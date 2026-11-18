@@ -2932,6 +2932,15 @@ name = "tierstore-model"
 version = "0.1.0"
 
 [[package]]
+name = "tierstore-plan"
+version = "0.1.0"
+dependencies = [
+ "thiserror",
+ "tierstore-fetch-api",
+ "tierstore-format",
+]
+
+[[package]]
 name = "tierstore-store-api"
 version = "0.1.0"
 dependencies = [
