@@ -1,8 +1,12 @@
 //! `tsfuse`, the FUSE library of tierstore (`docs/design/fetch-cache-serve.md`, 5.2): this crate
 //! holds the dispatch interface frozen by the interface-freeze change (section 18, row T-I) and
 //! the kernel ABI, [`abi`] (row T-F1): the wire structs, the parse of each request, the reply
-//! payloads and INIT negotiation. The `/dev/fuse` and io_uring transports (T-F2, T-F5), the
-//! splice reply path (T-F4) and takeover (T-F6) build on them.
+//! payloads and INIT negotiation. On Linux it also holds the `/dev/fuse` transport (row T-F2):
+//! [`mount`] (`mount(2)`, or `fusermount3`; unmount and abort), [`DevFd`] (a descriptor of a
+//! connection, cloned with `FUSE_DEV_IOC_CLONE`, writing each reply with one `writev`), the
+//! [`Transport`] trait and its `/dev/fuse` implementation [`DevReader`] on `AsyncFd`, and
+//! [`Session`] (INIT, resume without INIT, clones, one reader thread per descriptor, stop). The
+//! io_uring transport (T-F5), the splice reply path (T-F4) and takeover (T-F6) build on them.
 //!
 //! **Reply affinity.** A reply is matched by `unique` against the processing queue of the device
 //! it is written to, and every cloned `/dev/fuse` descriptor has its own processing queue, so a
@@ -27,15 +31,32 @@
 //! "Takeover with N > 1 clones and parked reads on several"; "All reader threads blocked in a fake
 //! `pread` while `wait` completions still flow".
 
-#![forbid(unsafe_code)]
+// `deny`, not `forbid`: the one call the kernel offers no safe wrapper for, the
+// `FUSE_DEV_IOC_CLONE` ioctl in `dev.rs`, `expect`s it with its reason (AGENTS.md R2).
+#![deny(unsafe_code)]
 
 pub mod abi;
+#[cfg(target_os = "linux")]
+mod dev;
 mod fs;
+#[cfg(target_os = "linux")]
+pub mod mount;
 mod opcode;
 mod reply;
+#[cfg(target_os = "linux")]
+mod session;
 mod tokens;
+#[cfg(target_os = "linux")]
+mod transport;
 
 pub use fs::{Fs, Handled, Request, RequestHeader};
 pub use opcode::Opcode;
 pub use reply::{Completion, Errno, OUT_HEADER_LEN, Replier, ReplyDevice, encode_out_header};
 pub use tokens::{CancelToken, Interrupted, Tokens};
+
+#[cfg(target_os = "linux")]
+pub use dev::{DEV_FUSE, DevFd};
+#[cfg(target_os = "linux")]
+pub use session::{Serving, Session, SessionError, Stopper};
+#[cfg(target_os = "linux")]
+pub use transport::{DevReader, ReaderEnd, Received, Transport};

@@ -3783,6 +3783,7 @@ name = "tsfuse"
 version = "0.1.0"
 dependencies = [
  "futures",
+ "rustix",
  "sha2 0.11.0",
  "thiserror",
  "tierstore-testkit",

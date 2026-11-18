@@ -6,7 +6,7 @@ rust-version.workspace = true
 license.workspace = true
 repository.workspace = true
 publish.workspace = true
-description = "The FUSE library of tierstore (docs/design/fetch-cache-serve.md, 5.2): the dispatch interface `Fs`/`Handled`/`Replier` with replies bound to their originating device, cancel tokens registered at read time and an atomic complete, and the kernel ABI (`abi`: wire structs, per-opcode parse, reply payloads, INIT negotiation). The transports (T-F2, T-F5) build on them."
+description = "The FUSE library of tierstore (docs/design/fetch-cache-serve.md, 5.2): the dispatch interface `Fs`/`Handled`/`Replier` with replies bound to their originating device, cancel tokens registered at read time and an atomic complete, the kernel ABI (`abi`: wire structs, per-opcode parse, reply payloads, INIT negotiation), and on Linux the `/dev/fuse` transport: mount(2) or fusermount3, cloned readers on AsyncFd, writev replies, stop and abort."
 
 # No dependency on a FUSE crate: the library speaks the protocol itself (5.2).
 [dependencies]
@@ -18,12 +18,24 @@ thiserror.workspace = true
 # write it as bytes with no `unsafe` here.
 zerocopy.workspace = true
 
+# The `/dev/fuse` transport (Linux only).
+[target.'cfg(target_os = "linux")'.dependencies]
+# open, fcntl, statx, mount and umount2, socketpair and SCM_RIGHTS, read and writev, and
+# the one ioctl (FUSE_DEV_IOC_CLONE).
+rustix = { workspace = true, features = ["fs", "mount", "net", "process"] }
+# A reader's current-thread runtime, `AsyncFd` and the stop notification.
+tokio = { workspace = true, features = ["net", "rt", "sync"] }
+
 [dev-dependencies]
 # The digest of the pinned uapi header, checked by `tests/abi_layout.rs`.
 sha2.workspace = true
 # The scratch directory `tests/abi_probe.rs` compiles the layout probe into.
 tierstore-testkit.workspace = true
 tokio = { workspace = true, features = ["macros", "rt", "rt-multi-thread", "sync"] }
+
+# Socket pairs, `fcntl` and the device numbers of the tests.
+[target.'cfg(target_os = "linux")'.dev-dependencies]
+rustix = { workspace = true, features = ["fs", "net", "process"] }
 
 [lints]
 workspace = true

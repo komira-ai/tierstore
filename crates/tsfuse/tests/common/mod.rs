@@ -66,3 +66,34 @@ impl ReplyDevice for FakeDevice {
         Ok(())
     }
 }
+
+/// A request: `fuse_in_header` (uid, gid and pid 0) then `body`.
+pub fn request(opcode: u32, unique: u64, nodeid: u64, body: &[u8]) -> Vec<u8> {
+    let header = tsfuse::abi::InHeader {
+        len: (tsfuse::abi::InHeader::SIZE + body.len()) as u32,
+        opcode,
+        unique,
+        nodeid,
+        ..tsfuse::abi::InHeader::default()
+    };
+    [header.as_bytes(), body].concat()
+}
+
+/// An INIT request (unique 1) of protocol `major.minor` offering `flags` (the high half in
+/// `flags2`), with a readahead of 64 KiB.
+pub fn init_request(major: u32, minor: u32, flags: u64) -> Vec<u8> {
+    let init = tsfuse::abi::InitIn {
+        major,
+        minor,
+        max_readahead: 65536,
+        flags: flags as u32,
+        flags2: (flags >> 32) as u32,
+        ..tsfuse::abi::InitIn::default()
+    };
+    request(26, 1, 0, init.as_bytes())
+}
+
+/// A GETATTR of the root.
+pub fn getattr(unique: u64) -> Vec<u8> {
+    request(3, unique, 1, &[0; 16])
+}
