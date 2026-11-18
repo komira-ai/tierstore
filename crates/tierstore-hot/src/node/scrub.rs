@@ -57,7 +57,8 @@ fn good(f: &FileInfo, bytes: &[u8], geometry: tierstore_format::block::BlockGeom
     }
 }
 
-/// The name of a scrubbed file whose copy another node can send.
+/// The name of a scrubbed file whose copy another node can send (a cache segment has none: a
+/// bad one is dropped).
 fn name_of(f: &FileInfo) -> Option<HotName> {
     match f.kind {
         FileKind::Segment(id) => Some(HotName::Segment(id)),
@@ -83,8 +84,7 @@ impl<B: Backend + 'static> Node<B> {
     }
 
     /// A good copy of `path` from another node, if one has it.
-    async fn good_copy(&self, f: &FileInfo) -> Option<Bytes> {
-        let file = name_of(f)?;
+    async fn good_copy(&self, f: &FileInfo, file: HotName) -> Option<Bytes> {
         for node in self.voters().into_iter().filter(|v| *v != self.id) {
             let range = ByteRange {
                 offset: 0,
@@ -119,12 +119,12 @@ impl<B: Backend + 'static> HotNode<B> {
             if !good(&f, &bytes, n.cfg.geometry) {
                 report.bad += 1;
                 n.metrics.hot_scrub_bad_total.with(()).inc();
-                if f.kind == FileKind::Cache {
+                let Some(file) = name_of(&f) else {
                     n.drop_file(&path).await?;
                     report.dropped += 1;
                     continue;
-                }
-                if let Some(copy) = n.good_copy(&f).await {
+                };
+                if let Some(copy) = n.good_copy(&f, file).await {
                     n.replace(&path, copy).await?;
                     report.repaired += 1;
                 }
