@@ -136,6 +136,20 @@ fn mixed_test_reads_and_writes_and_reuses_its_read_set() {
 }
 
 #[test]
+fn a_mixed_job_syncs_its_writes_every_32_mib() {
+    let f = Fake::new("cache", &["sda"]);
+    let d = f.drive("m");
+    let set = vec![d.join("r")];
+    write_data_file(&set[0], MIB, 4096, 0).unwrap();
+    let c = StepClock::new(Duration::from_millis(1), 0);
+    let span = Span::starting(&c, Duration::ZERO, Duration::from_millis(400));
+    let (rd, wr, lat) = mixed_job(0, &set, MIB, &d, &c, span).unwrap();
+    // About 200 operations, 30% of them 1 MiB writes: more than 32 MiB written, so one sync.
+    assert!(wr > 32 * MIB, "{wr}");
+    assert_eq!(rd, lat.len() as u64 * (128 << 10));
+}
+
+#[test]
 fn mixed_job_reports_a_missing_read_file() {
     let f = Fake::new("cache", &["sda"]);
     let c = clock();

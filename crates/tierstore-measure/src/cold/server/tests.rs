@@ -96,6 +96,10 @@ fn serves_exact_ranges_on_both_read_paths() {
             assert!(served.iter().all(|s| s.class == Class::Demand));
             assert!(server.sched("hdd1").unwrap().counts().admitted >= 4);
             assert!(server.sched("hdd9").is_none());
+            assert!(server.counts().admitted >= 4);
+            // An idle connection is still open when the server stops: it ends with it.
+            let idle = TcpStream::connect(addr).unwrap();
+            std::mem::forget(idle);
         });
     }
 }
@@ -216,4 +220,10 @@ fn writes_a_pack_as_a_write_stream() {
         &clock,
     );
     assert!(gone.write_pack("hdd1", "w3.pack", 4096).is_err());
+}
+
+#[test]
+fn a_stopped_reader_is_a_network_error() {
+    assert_eq!(stopped(()).to_string(), "a reader stopped");
+    assert!(errno(rustix::io::Errno::PIPE).to_string().contains("pipe"));
 }

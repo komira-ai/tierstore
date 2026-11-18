@@ -13,7 +13,7 @@ use crate::Error;
 use crate::clock::Clock;
 
 /// What a cell saw of foreign work.
-#[derive(Debug, Clone, Copy, Default, PartialEq, Serialize)]
+#[derive(Debug, Clone, Copy, Default, PartialEq, Serialize, serde::Deserialize)]
 pub struct Seen {
     /// MB/s read and written to disk by the guarded processes during the cell.
     pub foreign_mb_s: f64,
@@ -55,6 +55,12 @@ fn io_bytes(dir: &Path) -> u64 {
 }
 
 impl Guard {
+    /// Whether foreign MB/s and load are both within the limits.
+    #[must_use]
+    pub fn quiet(&self, mb_s: f64, load: f64) -> bool {
+        mb_s <= self.max_mb_s && load <= self.max_load
+    }
+
     /// The disk bytes so far of every guarded process.
     ///
     /// # Errors
@@ -106,9 +112,8 @@ impl Guard {
     pub fn wait_quiet(&self, clock: &dyn Clock) -> Result<bool, Error> {
         let t0 = clock.now();
         loop {
-            if self.rate(clock, self.quiet_window)? <= self.max_mb_s
-                && self.load1()? <= self.max_load
-            {
+            let rate = self.rate(clock, self.quiet_window)?;
+            if self.quiet(rate, self.load1()?) {
                 return Ok(true);
             }
             if clock.now() - t0 >= self.max_wait {
@@ -140,9 +145,7 @@ impl Guard {
                 load1: self.load1()?,
                 attempts: attempt,
             };
-            if (seen.foreign_mb_s <= self.max_mb_s && seen.load1 <= self.max_load)
-                || attempt >= self.attempts
-            {
+            if self.quiet(seen.foreign_mb_s, seen.load1) || attempt >= self.attempts {
                 return Ok((r, seen));
             }
         }

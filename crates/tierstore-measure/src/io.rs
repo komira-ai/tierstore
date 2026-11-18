@@ -303,7 +303,8 @@ mod tests {
     fn space_allocation_punch_and_preallocate() {
         let d = TestDir::under(std::env::temp_dir(), "io");
         let (total, free) = fs_space(d.path()).unwrap();
-        assert!(total >= free && total > 0);
+        assert!(total >= free);
+        assert!(total > 0);
         assert!(fs_space(&d.path().join("none")).is_err());
         let p = d.path().join("f");
         write_data_file(&p, 1 << 20, 1 << 16, 1).unwrap();

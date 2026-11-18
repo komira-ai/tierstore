@@ -60,7 +60,7 @@ pub fn parse(text: &str) -> BTreeMap<String, Counters> {
 }
 
 /// What `iostat -x` shows for one device over an interval.
-#[derive(Debug, Clone, Copy, Default, PartialEq, Serialize)]
+#[derive(Debug, Clone, Copy, Default, PartialEq, Serialize, serde::Deserialize)]
 pub struct IoStat {
     /// Reads per second.
     pub r_s: f64,

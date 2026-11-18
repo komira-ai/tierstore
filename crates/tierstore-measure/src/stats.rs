@@ -3,7 +3,7 @@
 use serde::Serialize;
 
 /// The summary of a set of samples (milliseconds, unless a caller says otherwise).
-#[derive(Debug, Clone, Copy, PartialEq, Serialize)]
+#[derive(Debug, Clone, Copy, PartialEq, Serialize, serde::Deserialize)]
 pub struct Summary {
     /// How many samples.
     pub n: usize,

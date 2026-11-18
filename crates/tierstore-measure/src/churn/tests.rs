@@ -134,7 +134,8 @@ fn the_store_reads_recent_packs_and_evicts_the_least_recently_read() {
 fn statvfs_reads_the_real_file_system_and_summary_groups_turns() {
     let f = Fake::new("churn", &["sdb"]);
     let (total, used) = Statvfs.total_used(f.path()).unwrap();
-    assert!(total >= used && total > 0);
+    assert!(total >= used);
+    assert!(total > 0);
     assert!(Statvfs.total_used(&f.path().join("none")).is_err());
     let r = |phase: &str, mb: f64| Row {
         phase: phase.into(),
@@ -167,4 +168,39 @@ fn statvfs_reads_the_real_file_system_and_summary_groups_turns() {
             .markdown()
             .contains("| churn turn 1 | 70.0 | - |")
     );
+}
+
+/// A clock whose first sleep sets a stop flag: a loop that checks the flag, then sleeps, runs
+/// exactly one iteration.
+struct StopOnSleep<'a> {
+    inner: StepClock,
+    stop: &'a AtomicBool,
+}
+
+impl Clock for StopOnSleep<'_> {
+    fn now(&self) -> Duration {
+        self.inner.now()
+    }
+    fn unix_secs(&self) -> u64 {
+        self.inner.unix_secs()
+    }
+    fn sleep(&self, _d: Duration) {
+        self.stop.store(true, Ordering::SeqCst);
+    }
+}
+
+#[test]
+fn the_reader_skips_a_pack_evicted_after_it_was_picked() {
+    let f = Fake::new("churn", &[]);
+    let cfg = config(&f);
+    let store = Mutex::new(Store::default());
+    store.lock().unwrap().add("00/gone.pack".into(), 8 * MIB);
+    let stop = AtomicBool::new(false);
+    let clock = StopOnSleep {
+        inner: StepClock::new(Duration::from_millis(1), 0),
+        stop: &stop,
+    };
+    let read = AtomicU64::new(0);
+    reader(&cfg, &store, &stop, &read, &clock).unwrap();
+    assert_eq!(read.load(Ordering::SeqCst), 0);
 }

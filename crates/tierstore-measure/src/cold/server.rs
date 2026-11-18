@@ -70,6 +70,14 @@ pub struct Server<'c> {
     served: std::sync::Mutex<Vec<Served>>,
 }
 
+fn stopped<T>(_: T) -> Error {
+    Error::Net("a reader stopped".into())
+}
+
+fn errno(e: rustix::io::Errno) -> Error {
+    net(e.into())
+}
+
 fn net(e: std::io::Error) -> Error {
     Error::Net(e.to_string())
 }
@@ -97,6 +105,21 @@ impl<'c> Server<'c> {
         self.scheds.get(drive)
     }
 
+    /// The counters of every drive's scheduler, summed.
+    #[must_use]
+    pub fn counts(&self) -> crate::cold::sched::Counts {
+        let mut t = crate::cold::sched::Counts::default();
+        for s in self.scheds.values() {
+            let c = s.counts();
+            t.admitted += c.admitted;
+            t.yields += c.yields;
+            t.preemptions += c.preemptions;
+            t.refused += c.refused;
+            t.parks += c.parks;
+        }
+        t
+    }
+
     /// What it served so far (and forgets it).
     pub fn take_served(&self) -> Vec<Served> {
         std::mem::take(
@@ -121,10 +144,8 @@ impl<'c> Server<'c> {
                             let _ = self.connection(sock, stop);
                         });
                     }
-                    Err(e) if e.kind() == ErrorKind::WouldBlock => {
-                        std::thread::sleep(Duration::from_millis(5));
-                    }
-                    Err(e) => return Err(net(e)),
+                    // No connection waiting (or a transient accept error): look again shortly.
+                    Err(_) => std::thread::sleep(Duration::from_millis(5)),
                 }
             }
             Ok(())
@@ -140,21 +161,16 @@ impl<'c> Server<'c> {
             w.set_read_timeout(Some(Duration::from_millis(100)))
                 .map_err(net)?;
             let mut probe = [0u8; 1];
+            // Wait for the next request, looking at the stop flag every 100 ms; a closed or
+            // failed connection ends.
             match w.peek(&mut probe) {
                 Ok(0) => return Ok(()),
                 Ok(_) => {}
-                Err(e) if matches!(e.kind(), ErrorKind::WouldBlock | ErrorKind::TimedOut) => {
-                    if stop.load(Ordering::SeqCst) {
-                        return Ok(());
-                    }
-                    continue;
-                }
-                Err(e) => return Err(net(e)),
+                Err(_) if !stop.load(Ordering::SeqCst) => continue,
+                Err(_) => return Ok(()),
             }
             w.set_read_timeout(None).map_err(net)?;
-            let Some(req) = read_request(&mut r)? else {
-                return Ok(());
-            };
+            let req = read_request(&mut r)?.ok_or(Error::Net("the client left".into()))?;
             self.handle(&mut w, &req)?;
         }
     }
@@ -221,10 +237,8 @@ impl<'c> Server<'c> {
         while sent < buf.len() {
             match w.write(&buf[sent..]) {
                 Ok(n) => sent += n,
-                Err(e)
-                    if matches!(e.kind(), ErrorKind::WouldBlock | ErrorKind::TimedOut)
-                        && !parked =>
-                {
+                // Only the first time out can come: after it the socket has none.
+                Err(e) if matches!(e.kind(), ErrorKind::WouldBlock | ErrorKind::TimedOut) => {
                     sched.park(t);
                     parked = true;
                     w.set_write_timeout(None).map_err(net)?;
@@ -268,9 +282,8 @@ impl<'c> Server<'c> {
                         let mut b = AlignedBuf::new(size);
                         let r =
                             read_full_at(file, b.as_mut_slice(), start + i * chunk).map(|n| (b, n));
-                        if dtx.send(r).is_err() {
-                            return;
-                        }
+                        // A sender that is gone stopped the stream; the next receive ends.
+                        let _ = dtx.send(r);
                     }
                 });
             }
@@ -281,7 +294,7 @@ impl<'c> Server<'c> {
                 }
                 to[usize::try_from(n % depth as u64).unwrap_or(0)]
                     .send(n)
-                    .map_err(|_| Error::Net("a reader stopped".into()))
+                    .map_err(stopped)
             };
             while issued < chunks.min(depth as u64) {
                 issue(issued, &mut waited)?;
@@ -290,7 +303,7 @@ impl<'c> Server<'c> {
             for i in 0..chunks {
                 let (b, n) = from[usize::try_from(i % depth as u64).unwrap_or(0)]
                     .recv()
-                    .map_err(|_| Error::Net("a reader stopped".into()))?
+                    .map_err(stopped)?
                     .map_err(net)?;
                 let lo = i * chunk + start;
                 let a = usize::try_from(req.off.saturating_sub(lo)).unwrap_or(0);
@@ -336,8 +349,7 @@ impl<'c> Server<'c> {
             let from = pos;
             let mut left = want;
             while left > 0 {
-                let n = rustix::fs::sendfile(&*w, file, Some(&mut pos), left)
-                    .map_err(|e| net(e.into()))?;
+                let n = rustix::fs::sendfile(&*w, file, Some(&mut pos), left).map_err(errno)?;
                 if n == 0 {
                     return Err(Error::Net(format!("the file ended at {pos}")));
                 }
@@ -382,10 +394,8 @@ impl<'c> Server<'c> {
                             })
                         })
                         .collect();
-                    hs.into_iter().try_for_each(|h| {
-                        h.join()
-                            .unwrap_or_else(|_| Err(Error::Invalid("a writer panicked".into())))
-                    })
+                    hs.into_iter()
+                        .try_for_each(|h| crate::run::joined(h.join()))
                 })?;
                 off += 2 * chunk;
                 sched.boundary(&t, 2 * chunk);

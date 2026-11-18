@@ -148,9 +148,7 @@ fn writers(
         let mut bytes = 0;
         let mut lat = Vec::new();
         for h in hs {
-            let (b, l) = h
-                .join()
-                .unwrap_or_else(|_| Err(Error::Invalid("a writer panicked".into())))?;
+            let (b, l) = crate::run::joined(h.join())?;
             bytes += b;
             lat.extend(l);
         }
@@ -295,10 +293,7 @@ pub fn fsync_test(
                 off += MIB;
             }
             match bg {
-                Some(h) => h
-                    .join()
-                    .unwrap_or_else(|_| Err(Error::Invalid("a writer panicked".into())))
-                    .map(|_| ()),
+                Some(h) => crate::run::joined(h.join()).map(|_| ()),
                 None => Ok(()),
             }
         })
@@ -346,9 +341,7 @@ pub fn mixed_test(cfg: &Config, t: &Target, clock: &dyn Clock) -> Result<Row, Er
                 .collect();
             let (mut rd, mut wr, mut lat) = (0u64, 0u64, Vec::new());
             for h in hs {
-                let (r, w, l) = h
-                    .join()
-                    .unwrap_or_else(|_| Err(Error::Invalid("a job panicked".into())))?;
+                let (r, w, l) = crate::run::joined(h.join())?;
                 rd += r;
                 wr += w;
                 lat.extend(l);
@@ -599,16 +592,12 @@ pub fn run(
     guard: Option<&Guard>,
 ) -> Result<Vec<Row>, Error> {
     let mut rows = Vec::new();
-    let keep = |(mut r, seen): (Row, Seen), rows: &mut Vec<Row>| -> Result<(), Error> {
-        r.seen = seen;
-        out.record(&r)?;
-        rows.push(r);
-        Ok(())
-    };
-    let g = |f: &mut dyn FnMut() -> Result<Row, Error>| guarded(guard, clock, f);
     let none = Extras::default();
     for (i, t) in cfg.targets.iter().enumerate() {
         let x = extras.get(i).unwrap_or(&none);
+        let trim = x.fstrim.as_deref().map(|m| (runner, m));
+        let resident = |p: &Path| fincore(runner, p);
+        let mut tests: Vec<Box<dyn FnMut() -> Result<Vec<Row>, Error> + '_>> = Vec::new();
         for kib in &cfg.blocks_kib {
             for jobs in &cfg.jobs {
                 for mode in &cfg.modes {
@@ -618,30 +607,31 @@ pub fn run(
                         modes: vec![*mode],
                         ..cfg.clone()
                     };
-                    let (mut r, seen) = guarded(guard, clock, || write_grid(&one, t, clock))?;
-                    if let Some(r) = r.pop() {
-                        keep((r, seen), &mut rows)?;
-                    }
+                    tests.push(Box::new(move || write_grid(&one, t, clock)));
                 }
             }
         }
-        keep(g(&mut || fsync_test(cfg, t, 0, clock))?, &mut rows)?;
-        keep(
-            g(&mut || fsync_test(cfg, t, cfg.sync_background, clock))?,
-            &mut rows,
-        )?;
-        keep(g(&mut || mixed_test(cfg, t, clock))?, &mut rows)?;
-        let trim = x.fstrim.as_deref().map(|m| (runner, m));
-        keep(
-            g(&mut || punch_test(cfg, t, x.image.as_deref(), trim))?,
-            &mut rows,
-        )?;
+        tests.push(Box::new(|| fsync_test(cfg, t, 0, clock).map(|r| vec![r])));
+        tests.push(Box::new(|| {
+            fsync_test(cfg, t, cfg.sync_background, clock).map(|r| vec![r])
+        }));
+        tests.push(Box::new(|| mixed_test(cfg, t, clock).map(|r| vec![r])));
+        tests.push(Box::new(|| {
+            punch_test(cfg, t, x.image.as_deref(), trim).map(|r| vec![r])
+        }));
         for policy in [Policy::Never, Policy::AtCommit, Policy::Cap] {
-            let resident = |p: &Path| fincore(runner, p);
-            keep(
-                g(&mut || dontneed_test(cfg, t, policy, &resident, clock))?,
-                &mut rows,
-            )?;
+            let resident = &resident;
+            tests.push(Box::new(move || {
+                dontneed_test(cfg, t, policy, resident, clock).map(|r| vec![r])
+            }));
+        }
+        for test in &mut tests {
+            let (got, seen) = guarded(guard, clock, test)?;
+            for mut r in got {
+                r.seen = seen;
+                out.record(&r)?;
+                rows.push(r);
+            }
         }
         for i in 0..4 {
             let _ = std::fs::remove_file(t.dir.join(format!("b-read-{i}")));

@@ -27,10 +27,7 @@ pub struct Request {
 /// When the head is not a request this server serves.
 pub fn read_request(r: &mut impl BufRead) -> Result<Option<Request>, Error> {
     let mut line = String::new();
-    if r.read_line(&mut line)
-        .map_err(|e| Error::Net(e.to_string()))?
-        == 0
-    {
+    if r.read_line(&mut line).map_err(Error::net)? == 0 {
         return Ok(None);
     }
     let mut parts = line.split_whitespace();
@@ -44,7 +41,7 @@ pub fn read_request(r: &mut impl BufRead) -> Result<Option<Request>, Error> {
     let (mut range, mut class) = (None, Class::Prepare);
     loop {
         let mut h = String::new();
-        if r.read_line(&mut h).map_err(|e| Error::Net(e.to_string()))? == 0 {
+        if r.read_line(&mut h).map_err(Error::net)? == 0 {
             return Err(Error::Net("the head ended early".into()));
         }
         let h = h.trim_end();
@@ -131,8 +128,7 @@ pub struct Head {
 /// When it is not one.
 pub fn read_head(r: &mut impl BufRead) -> Result<Head, Error> {
     let mut line = String::new();
-    r.read_line(&mut line)
-        .map_err(|e| Error::Net(e.to_string()))?;
+    r.read_line(&mut line).map_err(Error::net)?;
     let status = line
         .split_whitespace()
         .nth(1)
@@ -145,7 +141,7 @@ pub fn read_head(r: &mut impl BufRead) -> Result<Head, Error> {
     };
     loop {
         let mut h = String::new();
-        if r.read_line(&mut h).map_err(|e| Error::Net(e.to_string()))? == 0 {
+        if r.read_line(&mut h).map_err(Error::net)? == 0 {
             return Err(Error::Net("the answer ended early".into()));
         }
         let h = h.trim_end();
@@ -176,9 +172,7 @@ pub fn drain(
     let mut got = 0u64;
     while got < len {
         let want = usize::try_from((len - got).min(buf.len() as u64)).unwrap_or(buf.len());
-        let n = r
-            .read(&mut buf[..want])
-            .map_err(|e| Error::Net(e.to_string()))?;
+        let n = r.read(&mut buf[..want]).map_err(Error::net)?;
         if n == 0 {
             return Err(Error::Net(format!("the body ended at {got} of {len}")));
         }

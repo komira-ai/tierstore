@@ -66,10 +66,8 @@ pub fn prepare(dirs: &[PathBuf], packs: &Packs) -> Result<(), Error> {
                 })
             })
             .collect();
-        hs.into_iter().try_for_each(|h| {
-            h.join()
-                .unwrap_or_else(|_| Err(Error::Invalid("prepare panicked".into())))
-        })
+        hs.into_iter()
+            .try_for_each(|h| crate::run::joined(h.join()))
     })
 }
 
@@ -188,10 +186,8 @@ fn background(
                 })
             })
             .collect();
-        hs.into_iter().try_for_each(|h| {
-            h.join()
-                .unwrap_or_else(|_| Err(Error::Invalid("a stream panicked".into())))
-        })
+        hs.into_iter()
+            .try_for_each(|h| crate::run::joined(h.join()))
     })
 }
 
@@ -248,15 +244,9 @@ fn demands(
         let t0 = clock.now();
         let (first, total, hedged, won) = match &load.hedge {
             None => {
-                let g = Conn::open(addr)?.get(
-                    &load.drive,
-                    &pack,
-                    off,
-                    load.demand,
-                    Class::Demand,
-                    clock,
-                    None,
-                )?;
+                let mut c = Conn::open(addr)?;
+                let d = Class::Demand;
+                let g = c.get(&load.drive, &pack, off, load.demand, d, clock, None)?;
                 (g.first_ms, g.total_ms, false, false)
             }
             Some((other, after)) => hedged_get(
@@ -314,14 +304,9 @@ fn hedged_get(
                     .map(|g| (g, d))
             })
         });
-        let p: Got = primary
-            .join()
-            .unwrap_or_else(|_| Err(Error::Invalid("a demand panicked".into())))?;
+        let p: Got = crate::run::joined(primary.join())?;
         let h = match hedge {
-            Some(h) => Some(
-                h.join()
-                    .unwrap_or_else(|_| Err(Error::Invalid("a hedge panicked".into())))?,
-            ),
+            Some(h) => Some(crate::run::joined(h.join())?),
             None => None,
         };
         Ok(winner(&p, h.as_ref()))
@@ -365,10 +350,8 @@ pub fn run_load(
             let out = &out;
             hs.push(scope.spawn(move || demands(addr, packs, load, clock, span, out)));
         }
-        hs.into_iter().try_for_each(|h| {
-            h.join()
-                .unwrap_or_else(|_| Err(Error::Invalid("a load thread panicked".into())))
-        })
+        hs.into_iter()
+            .try_for_each(|h| crate::run::joined(h.join()))
     })?;
     Ok(out
         .into_inner()
@@ -483,10 +466,8 @@ pub fn local_cell(
         },
         clock,
     );
-    let listener = TcpListener::bind("127.0.0.1:0").map_err(|e| Error::Net(e.to_string()))?;
-    let addr = listener
-        .local_addr()
-        .map_err(|e| Error::Net(e.to_string()))?;
+    let listener = TcpListener::bind("127.0.0.1:0").map_err(Error::net)?;
+    let addr = listener.local_addr().map_err(Error::net)?;
     let stop = AtomicBool::new(false);
     let written = AtomicU64::new(0);
     let r: Result<(Outcome, std::collections::BTreeMap<String, IoStat>), Error> =
@@ -516,33 +497,19 @@ pub fn local_cell(
                     });
                     let o = run_load(addr, packs, &cell.load, clock, span);
                     if let Some(h) = w {
-                        h.join().unwrap_or_else(|_| {
-                            Err(Error::Invalid("the writer panicked".into()))
-                        })?;
+                        crate::run::joined(h.join())?;
                     }
                     o
                 })
             });
             stop.store(true, Ordering::SeqCst);
-            let s = srv
-                .join()
-                .unwrap_or_else(|_| Err(Error::Invalid("the server panicked".into())));
+            let s = crate::run::joined(srv.join());
             let (o, io) = r?;
             s?;
             Ok((o, io))
         });
     let (o, io) = r?;
-    let mut counts = Counts::default();
-    for d in drives.keys() {
-        if let Some(s) = server.sched(d) {
-            let c = s.counts();
-            counts.admitted += c.admitted;
-            counts.yields += c.yields;
-            counts.preemptions += c.preemptions;
-            counts.refused += c.refused;
-            counts.parks += c.parks;
-        }
-    }
+    let counts = server.counts();
     let mut r = row(
         &cell.arm,
         &cell.label,
@@ -724,6 +691,30 @@ pub fn slow_cells(drive: &str) -> Vec<Cell> {
             )
         })
         .collect()
+}
+
+/// The cells of the named sweeps (`c2`, `c3`, `c4`, `mixed`, `slow`), loading drive `first`
+/// (`other` holds the second copy).
+///
+/// # Errors
+/// When a name is none of those.
+pub fn cells_for(arms: &[String], first: &str, other: &str) -> Result<Vec<Cell>, Error> {
+    let mut cells = Vec::new();
+    for a in arms {
+        cells.extend(match a.as_str() {
+            "c2" => c2(first),
+            "c3" => c3(first, other),
+            "c4" => c4(first),
+            "mixed" => mixed(first),
+            "slow" => slow_cells(first),
+            x => {
+                return Err(Error::Invalid(format!(
+                    "arm {x}: want c2, c3, c4, mixed or slow"
+                )));
+            }
+        });
+    }
+    Ok(cells)
 }
 
 /// The tables of the cold arms.

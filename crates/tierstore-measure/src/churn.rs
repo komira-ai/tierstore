@@ -189,9 +189,7 @@ pub fn run(
             size,
         );
         stop.store(true, Ordering::SeqCst);
-        let rd = reader
-            .join()
-            .unwrap_or_else(|_| Err(Error::Invalid("the reader panicked".into())));
+        let rd = crate::run::joined(reader.join());
         let rows = r?;
         rd?;
         Ok(rows)
@@ -250,7 +248,7 @@ fn writer(
         let a = sampler.snapshot()?;
         let t0 = clock.now();
         let r0 = read_bytes.load(Ordering::SeqCst);
-        let (mut wb, mut evicted, mut last) = (0u64, 0u64, None);
+        let (mut wb, mut evicted, mut last) = (0u64, 0u64, String::new());
         while wb < cfg.window {
             let mib =
                 cfg.sizes_mib[usize::try_from(rng.below(cfg.sizes_mib.len() as u64)).unwrap_or(0)];
@@ -262,7 +260,7 @@ fn writer(
                 .lock()
                 .unwrap_or_else(std::sync::PoisonError::into_inner)
                 .add(rel.clone(), mib * MIB);
-            last = Some(rel);
+            last = rel;
             wb += mib * MIB;
             k += 1;
             if fill(space, &cfg.dir)? > cfg.hi {
@@ -286,10 +284,8 @@ fn writer(
         if !was_filling {
             churned += wb;
         }
-        let ext = match &last {
-            Some(n) => extents(runner, &cfg.dir.join(n))?,
-            None => 0,
-        };
+        // A window writes at least one pack (the window is not empty), so `last` names one.
+        let ext = extents(runner, &cfg.dir.join(&last))?;
         rows.push(Row {
             phase: phase.into(),
             written_gib: written as f64 / (1u64 << 30) as f64,

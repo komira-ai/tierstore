@@ -60,7 +60,7 @@ pub fn store(endpoint: &str, bucket: &str, creds: Credentials) -> Result<S3Store
         request_timeout: Duration::from_secs(120),
         min_body_rate: None,
     })
-    .map_err(|e| Error::Net(e.to_string()))
+    .map_err(Error::net)
 }
 
 /// Writes every object under `prefix` as `key<TAB>size` lines to `out`; returns the count.
@@ -79,7 +79,7 @@ pub async fn list(store: &S3Store, prefix: &str, out: &Path) -> Result<u64, Erro
     ));
     let mut n = 0;
     while let Some(o) = s.next().await {
-        let o = o.map_err(|e| Error::Net(e.to_string()))?;
+        let o = o.map_err(Error::net)?;
         writeln!(f, "{}\t{}", o.key.as_str(), o.size).map_err(Error::io("write", out))?;
         n += 1;
     }
@@ -203,11 +203,11 @@ async fn reader(
         let mut read = store
             .get_stream(&k, Some(range))
             .await
-            .map_err(|e| Error::Net(e.to_string()))?;
+            .map_err(Error::net)?;
         let mut first = None;
         let mut n = 0u64;
         while let Some(piece) = read.body.next().await {
-            let piece = piece.map_err(|e| Error::Net(e.to_string()))?;
+            let piece = piece.map_err(Error::net)?;
             first.get_or_insert_with(|| clock.now());
             n += piece.len() as u64;
         }

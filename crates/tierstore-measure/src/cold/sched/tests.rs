@@ -221,3 +221,21 @@ fn the_shared_scheduler_hands_slots_between_threads() {
     assert!(sched.admit(Class::Background, false).is_none());
     sched.release(held);
 }
+
+#[test]
+fn a_parked_waiter_is_no_rival_at_a_slice_end_and_unpark_picks_its_own() {
+    let mut s = State::new(Params { streams: 2, ..p(2) });
+    let a = s.enqueue(Class::Prepare, false, T).unwrap();
+    let b = s.enqueue(Class::Prepare, false, T).unwrap();
+    s.admit_ready(T);
+    s.park(b, T);
+    let c = s.enqueue(Class::Prepare, false, T).unwrap();
+    s.admit_ready(T);
+    assert!(s.is_active(c));
+    // b is parked: it does not make a give up its slot at the end of a slice.
+    assert_eq!(s.boundary(a, 64, T), Boundary::Continue);
+    s.park(a, T);
+    // Unparking b leaves a parked; b takes the free slot.
+    s.unpark(b, T);
+    assert!(s.is_active(b) && !s.is_active(a));
+}

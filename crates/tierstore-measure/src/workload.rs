@@ -249,7 +249,8 @@ mod tests {
             assert_eq!(r.bytes, 4096 * r.lat_ms.len() as u64);
             assert!((r.secs - 0.1).abs() < 1e-9);
             // Every request read took clock steps; none is negative or outside the window.
-            assert!(r.lat_ms.iter().all(|&l| l > 0.0 && l <= 100.0));
+            assert!(r.lat_ms.iter().all(|&l| l > 0.0));
+            assert!(r.lat_ms.iter().all(|&l| l <= 100.0));
             // The window holds at most its share of the clock's reads.
             assert!(r.lat_ms.len() <= 100);
         }

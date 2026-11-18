@@ -179,8 +179,7 @@ pub fn sample_parts(root: &Path, n: usize, min: u64, budget: usize) -> Vec<PathB
                 return out;
             }
             let p = e.path();
-            let Ok(ft) = e.file_type() else { continue };
-            if ft.is_dir() {
+            if e.file_type().is_ok_and(|t| t.is_dir()) {
                 queue.push_back(p);
             } else if e.file_name() == "part.1" && e.metadata().is_ok_and(|m| m.len() >= min) {
                 out.push(p);

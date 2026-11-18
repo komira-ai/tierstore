@@ -35,6 +35,11 @@ pub enum Error {
 }
 
 impl Error {
+    /// An [`Error::Net`] with `e`'s text.
+    pub fn net(e: impl std::fmt::Display) -> Self {
+        Self::Net(e.to_string())
+    }
+
     /// An [`Error::Io`] for `what` on `path`.
     pub fn io<'a>(what: &'static str, path: &'a Path) -> impl FnOnce(std::io::Error) -> Self + 'a {
         move |source| Self::Io {
@@ -53,6 +58,11 @@ mod tests {
     fn io_error_names_the_call_and_the_path() {
         let e = Error::io("open", Path::new("/x/y"))(std::io::Error::other("boom"));
         assert_eq!(e.to_string(), "open /x/y: boom");
+    }
+
+    #[test]
+    fn net_error_keeps_the_text() {
+        assert_eq!(Error::net("refused").to_string(), "refused");
     }
 
     #[test]

@@ -99,9 +99,7 @@ pub fn measure<T: Send>(
         let done = work(span);
         finished.store(true, Ordering::SeqCst);
         let stats = match sampled {
-            Some(h) => h
-                .join()
-                .unwrap_or_else(|_| Err(Error::Invalid("the drive sampler panicked".into())))?,
+            Some(h) => joined(h.join())?,
             None => BTreeMap::new(),
         };
         Ok((done?, stats))
@@ -140,6 +138,14 @@ pub fn check_idle(seen: &BTreeMap<String, IoStat>, secs: u64, max_util: f64) -> 
         }
     }
     Ok(())
+}
+
+/// The result of a joined thread: its own, or an error if it panicked.
+///
+/// # Errors
+/// The thread's error, or [`Error::Invalid`] if it panicked.
+pub fn joined<T>(r: std::thread::Result<Result<T, Error>>) -> Result<T, Error> {
+    r.unwrap_or_else(|_| Err(Error::Invalid("a thread panicked".into())))
 }
 
 /// The programs an arm runs.
@@ -244,6 +250,13 @@ mod tests {
             "sdb was 90.0% busy over 60 s before the run (the limit is 5%): the node is not idle"
         );
         assert!(preflight(&Sampler::new(&d.path().join("x"), &[]), &c, 1, 5.0).is_err());
+    }
+
+    #[test]
+    fn a_panicked_thread_is_an_error() {
+        let r = std::thread::scope(|s| s.spawn(|| -> Result<(), Error> { panic!("boom") }).join());
+        assert_eq!(joined(r).unwrap_err().to_string(), "a thread panicked");
+        assert_eq!(joined(Ok(Ok(3))).unwrap(), 3);
     }
 
     #[test]

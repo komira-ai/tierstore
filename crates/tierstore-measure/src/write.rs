@@ -87,10 +87,8 @@ pub fn write_pack(
                 })
             })
             .collect();
-        hs.into_iter().try_for_each(|h| {
-            h.join()
-                .unwrap_or_else(|_| Err(Error::Invalid("a writer panicked".into())))
-        })
+        hs.into_iter()
+            .try_for_each(|h| crate::run::joined(h.join()))
     })?;
     f.sync_all().map_err(Error::io("fsync", &up))?;
     let fin = dir.join(format!("{name}.pack"));
@@ -181,6 +179,44 @@ fn rm_dir(dir: &Path) {
     let _ = std::fs::remove_dir_all(dir);
 }
 
+/// `writers` writers, each writing packs of `size` bytes back to back into `dir` until `end`;
+/// returns the bytes, each pack's seconds and the packs' names.
+fn writers_until(
+    dir: &Path,
+    writers: usize,
+    size: u64,
+    how: How,
+    clock: &dyn Clock,
+    end: Duration,
+) -> Result<(u64, Vec<f64>, Vec<String>), Error> {
+    std::thread::scope(|scope| {
+        let hs: Vec<_> = (0..writers)
+            .map(|w| {
+                scope.spawn(move || -> Result<(u64, Vec<f64>, Vec<String>), Error> {
+                    let (mut b, mut s, mut n) = (0u64, Vec::new(), Vec::new());
+                    let mut k = 0;
+                    while clock.now() < end {
+                        let name = format!("w{w}-{k}");
+                        s.push(write_pack(dir, &name, size, how, k, clock)?);
+                        b += size;
+                        n.push(name);
+                        k += 1;
+                    }
+                    Ok((b, s, n))
+                })
+            })
+            .collect();
+        let (mut b, mut s, mut n) = (0, Vec::new(), Vec::new());
+        for h in hs {
+            let (b1, s1, n1) = crate::run::joined(h.join())?;
+            b += b1;
+            s.extend(s1);
+            n.extend(n1);
+        }
+        Ok((b, s, n))
+    })
+}
+
 /// The cells: size x writers x extent hint x `fallocate`.
 ///
 /// # Errors
@@ -202,43 +238,11 @@ pub fn cells(cfg: &Config, run: &dyn Runner, clock: &dyn Clock) -> Result<Vec<Ro
                         prealloc,
                         ..DEFAULT
                     };
-                    let ((bytes, secs, names), io) = measure(
-                        clock,
-                        Some(&sampler),
-                        Duration::ZERO,
-                        cfg.measure,
-                        |span| {
-                            std::thread::scope(|scope| {
-                                let hs: Vec<_> = (0..writers)
-                                    .map(|w| {
-                                        let dir = &dir;
-                                        scope.spawn(move || -> Result<(u64, Vec<f64>, Vec<String>), Error> {
-                                            let (mut b, mut s, mut n) = (0u64, Vec::new(), Vec::new());
-                                            let mut k = 0;
-                                            while clock.now() < span.end {
-                                                let name = format!("w{w}-{k}");
-                                                s.push(write_pack(dir, &name, mib * MIB, how, k, clock)?);
-                                                b += mib * MIB;
-                                                n.push(name);
-                                                k += 1;
-                                            }
-                                            Ok((b, s, n))
-                                        })
-                                    })
-                                    .collect();
-                                let (mut b, mut s, mut n) = (0, Vec::new(), Vec::new());
-                                for h in hs {
-                                    let (b1, s1, n1) = h.join().unwrap_or_else(|_| {
-                                        Err(Error::Invalid("a writer panicked".into()))
-                                    })?;
-                                    b += b1;
-                                    s.extend(s1);
-                                    n.extend(n1);
-                                }
-                                Ok((b, s, n))
-                            })
-                        },
-                    )?;
+                    let measured =
+                        measure(clock, Some(&sampler), Duration::ZERO, cfg.measure, |span| {
+                            writers_until(&dir, writers, mib * MIB, how, clock, span.end)
+                        });
+                    let ((bytes, secs, names), io) = measured?;
                     let mut ext = Vec::new();
                     for n in &names {
                         ext.push(extents(run, &dir.join(format!("{n}.pack")))? as f64);

@@ -27,6 +27,8 @@ fn shrink(mut c: Cell) -> Cell {
     c.load.demand = c.load.demand.min(MIB);
     c.load.every = Duration::from_millis(5);
     c.params.slice_bytes = 2 * MIB;
+    // Slow consumers fast enough that a part ends inside the short window.
+    c.load.slow_mb_s *= 100.0;
     c
 }
 
@@ -74,16 +76,10 @@ fn every_sweep_runs_against_a_local_server() {
     for c in cells {
         let c = shrink(c);
         let clock = StepClock::new(Duration::from_millis(1), 0);
-        let r = local_cell(
-            &c,
-            &ds,
-            &small(),
-            &clock,
-            Some(&sampler),
-            Duration::from_millis(1),
-            Duration::from_millis(60),
-        )
-        .unwrap();
+        // A write cell needs a window long enough for a whole pack to be written inside it.
+        let window = Duration::from_millis(if c.writes { 400 } else { 60 });
+        let one = Duration::from_millis(1);
+        let r = local_cell(&c, &ds, &small(), &clock, Some(&sampler), one, window).unwrap();
         assert_eq!(r.io.len(), 1);
         rows.push(r);
     }
@@ -281,4 +277,16 @@ fn the_winner_is_the_earlier_first_byte_counted_from_the_primary_start() {
         winner(&g(35.0, 45.0), Some(&(g(10.0, 20.0), 30.0))),
         (35.0, 45.0, true, false)
     );
+}
+
+#[test]
+fn sweeps_are_named() {
+    let names: Vec<String> = ["c2", "c3", "c4", "mixed", "slow"]
+        .map(String::from)
+        .to_vec();
+    let cells = cells_for(&names, "hdd1", "hdd2").unwrap();
+    assert_eq!(cells.len(), 30);
+    assert_eq!(cells[18].load.stripe, Vec::<String>::new());
+    let e = cells_for(&["c9".to_string()], "a", "b").unwrap_err();
+    assert_eq!(e.to_string(), "arm c9: want c2, c3, c4, mixed or slow");
 }

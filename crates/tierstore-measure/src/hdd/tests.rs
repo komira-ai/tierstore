@@ -82,6 +82,14 @@ fn the_grid_runs_every_cell_restores_readahead_and_writes_tables() {
     let lines = std::fs::read_to_string(out.path("jsonl")).unwrap();
     assert_eq!(lines.lines().count(), 17);
     assert!(lines.lines().last().unwrap().starts_with("{\"derived\""));
+    // Run again over the same output: every cell is resumed from it and none is run (the
+    // drives' files are gone, so a cell that ran would fail).
+    for d in &cfg.drives {
+        std::fs::remove_dir_all(&d.dir).unwrap();
+    }
+    let again = run(&cfg, &clock, &f.diskstats(), &out, None).unwrap();
+    assert_eq!(again.len(), 16);
+    assert!((again[3].mb_s - rows[3].mb_s).abs() < 1e-9);
 }
 
 #[test]
@@ -170,4 +178,23 @@ fn derive_takes_the_best_adjacent_rate_and_the_scattered_median() {
     assert!(t[0].markdown().contains(
         "| 1 | 1 | direct | scattered | 20.0 | - | - | 0 | 0.0 | 0.00 | 0.0 | 0.0 | 0 |"
     ));
+}
+
+#[test]
+fn a_grid_without_the_one_drive_set_derives_nothing() {
+    let f = Fake::new("hdd", &["sdb", "sdc"]);
+    let mut cfg = config(&f, &["both"]);
+    cfg.streams = vec![1];
+    cfg.modes = vec![ReadMode::Direct];
+    cfg.patterns = vec![Pattern::Adjacent];
+    prepare(&cfg).unwrap();
+    let out = Out::new(&f.path().join("out"), "a").unwrap();
+    let clock = StepClock::new(Duration::from_millis(1), 0);
+    let rows = run(&cfg, &clock, &f.diskstats(), &out, None).unwrap();
+    assert_eq!(rows.len(), 1);
+    assert!(
+        !std::fs::read_to_string(out.path("md"))
+            .unwrap()
+            .contains("A, derived")
+    );
 }

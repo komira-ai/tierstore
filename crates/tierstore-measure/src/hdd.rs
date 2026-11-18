@@ -121,15 +121,14 @@ pub fn prepare(cfg: &Config) -> Result<(), Error> {
                 })
             })
             .collect();
-        handles.into_iter().try_for_each(|h| {
-            h.join()
-                .unwrap_or_else(|_| Err(Error::Invalid("prepare panicked".into())))
-        })
+        handles
+            .into_iter()
+            .try_for_each(|h| crate::run::joined(h.join()))
     })
 }
 
 /// One cell's result.
-#[derive(Debug, Clone, Serialize)]
+#[derive(Debug, Clone, Serialize, serde::Deserialize)]
 pub struct Row {
     /// `one` or `both`.
     pub set: String,
@@ -354,12 +353,37 @@ pub fn run(
     out: &Out,
     guard: Option<&Guard>,
 ) -> Result<Vec<Row>, Error> {
+    // A run that stopped is resumed: the cells already in the output are kept, not run again.
+    let done: Vec<Row> = std::fs::read_to_string(out.path("jsonl"))
+        .unwrap_or_default()
+        .lines()
+        .filter_map(|l| serde_json::from_str(l).ok())
+        .collect();
     let mut rows = Vec::new();
     for set in &cfg.sets {
         for &size in &cfg.sizes_mib {
             for &streams in &cfg.streams {
                 for &mode in &cfg.modes {
                     for &pattern in &cfg.patterns {
+                        let same = |r: &&Row| {
+                            (
+                                r.set.as_str(),
+                                r.req_mib,
+                                r.streams,
+                                r.mode.as_str(),
+                                r.pattern.as_str(),
+                            ) == (
+                                set.as_str(),
+                                size,
+                                streams,
+                                mode.name().as_str(),
+                                pattern.name(),
+                            )
+                        };
+                        if let Some(r) = done.iter().find(same) {
+                            rows.push(r.clone());
+                            continue;
+                        }
                         let (mut r, seen) = guarded(guard, clock, || {
                             cell(cfg, clock, set, size, streams, mode, pattern, diskstats)
                         })?;

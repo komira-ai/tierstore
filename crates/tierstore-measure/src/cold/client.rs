@@ -43,11 +43,8 @@ impl Conn {
     pub fn open(addr: SocketAddr) -> Result<Self, Error> {
         let w = TcpStream::connect_timeout(&addr, Duration::from_secs(5))
             .map_err(|e| Error::Net(format!("connect {addr}: {e}")))?;
-        w.set_nodelay(true).map_err(|e| Error::Net(e.to_string()))?;
-        let r = BufReader::with_capacity(
-            1 << 20,
-            w.try_clone().map_err(|e| Error::Net(e.to_string()))?,
-        );
+        w.set_nodelay(true).map_err(Error::net)?;
+        let r = BufReader::with_capacity(1 << 20, w.try_clone().map_err(Error::net)?);
         Ok(Self {
             r,
             w,
@@ -73,7 +70,7 @@ impl Conn {
         let t0 = clock.now();
         self.w
             .write_all(request(drive, file, off, len, class).as_bytes())
-            .map_err(|e| Error::Net(e.to_string()))?;
+            .map_err(Error::net)?;
         let head = read_head(&mut self.r)?;
         let mut first = None;
         let body = if head.status == 206 {
@@ -124,10 +121,9 @@ mod tests {
             for a in answers {
                 loop {
                     let mut line = String::new();
-                    if r.read_line(&mut line).unwrap() == 0 {
-                        return;
-                    }
-                    if line == "\r\n" {
+                    r.read_line(&mut line).unwrap();
+                    // The blank line ends a head (an ended connection reads as blank too).
+                    if line.trim_end().is_empty() {
                         break;
                     }
                 }
@@ -149,7 +145,8 @@ mod tests {
             .get("d", "f", 0, 600_000, Class::Demand, &clock, None)
             .unwrap();
         assert_eq!((g.status, g.bytes, g.wait_ms), (206, 600_000, 2.5));
-        assert!(g.first_ms > 0.0 && g.total_ms >= g.first_ms);
+        assert!(g.first_ms > 0.0);
+        assert!(g.total_ms >= g.first_ms);
         let b = c
             .get("d", "f", 0, 10, Class::Background, &clock, None)
             .unwrap();

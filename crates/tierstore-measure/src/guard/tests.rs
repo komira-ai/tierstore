@@ -96,3 +96,12 @@ fn guarded_without_a_guard_runs_once() {
     let g = guard(proc_with(&f, 0, "1.0"));
     assert_eq!(guarded(Some(&g), &c, || Ok(1)).unwrap().1.attempts, 1);
 }
+
+#[test]
+fn quiet_needs_both_limits() {
+    let f = Fake::new("guard", &[]);
+    let g = guard(proc_with(&f, 0, "1.0"));
+    assert!(g.quiet(1.0, 10.0));
+    assert!(!g.quiet(1.1, 1.0));
+    assert!(!g.quiet(0.0, 10.1));
+}

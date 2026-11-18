@@ -466,10 +466,10 @@ impl ColdDrives {
 }
 
 fn wait_until(clock: &dyn Clock, at: Option<u64>) {
-    if let Some(t) = at {
-        while clock.unix_secs() < t {
-            clock.sleep(Duration::from_millis(100));
-        }
+    let ahead = at.map_or(0, |t| t.saturating_sub(clock.unix_secs()));
+    let end = clock.now() + Duration::from_secs(ahead);
+    while clock.now() < end {
+        clock.sleep(Duration::from_millis(100));
     }
 }
 
@@ -574,7 +574,7 @@ fn runtime() -> Result<tokio::runtime::Runtime, Error> {
     tokio::runtime::Builder::new_multi_thread()
         .enable_all()
         .build()
-        .map_err(|e| Error::Net(e.to_string()))
+        .map_err(Error::net)
 }
 
 /// Runs a parsed command line.
@@ -843,8 +843,8 @@ pub fn run(cli: Cli, env: &Env<'_>, stdout: &mut dyn Write) -> Result<(), Error>
             let other = names
                 .iter()
                 .find(|n| **n != first)
-                .cloned()
-                .unwrap_or_else(|| first.clone());
+                .unwrap_or(&first)
+                .clone();
             let mut devs = Vec::new();
             for p in map.values() {
                 devs.push(device_of(p, &drives.common.sys_root)?);
@@ -853,21 +853,7 @@ pub fn run(cli: Cli, env: &Env<'_>, stdout: &mut dyn Write) -> Result<(), Error>
             let sampler = crate::diskstats::Sampler::new(&drives.common.diskstats(), &devs);
             let guard = drives.common.guard();
             let out = Out::new(&drives.common.out, "cold-local")?;
-            let mut cells = Vec::new();
-            for a in &arms {
-                cells.extend(match a.as_str() {
-                    "c2" => crate::cold::arms::c2(&first),
-                    "c3" => crate::cold::arms::c3(&first, &other),
-                    "c4" => crate::cold::arms::c4(&first),
-                    "mixed" => crate::cold::arms::mixed(&first),
-                    "slow" => crate::cold::arms::slow_cells(&first),
-                    other => {
-                        return Err(Error::Invalid(format!(
-                            "arm {other}: want c2, c3, c4, mixed or slow"
-                        )));
-                    }
-                });
-            }
+            let cells = crate::cold::arms::cells_for(&arms, &first, &other)?;
             let packs = drives.packs();
             let mut rows = Vec::new();
             for c in &cells {
@@ -913,13 +899,10 @@ pub fn run(cli: Cli, env: &Env<'_>, stdout: &mut dyn Write) -> Result<(), Error>
                     env.clock.sleep(Duration::from_millis(100));
                 }
                 stop.store(true, std::sync::atomic::Ordering::SeqCst);
-                h.join()
-                    .unwrap_or_else(|_| Err(Error::Invalid("the server panicked".into())))
+                crate::run::joined(h.join())
             })?;
             let out = Out::new(&drives.common.out, "cold-serve")?;
-            for s in server.take_served() {
-                out.record(&s)?;
-            }
+            out.record(&server.take_served())?;
         }
         Verb::ColdLoad {
             common,
@@ -968,6 +951,23 @@ pub fn run(cli: Cli, env: &Env<'_>, stdout: &mut dyn Write) -> Result<(), Error>
         }
     }
     Ok(())
+}
+
+/// The program: this process's arguments, the machine's clock and programs, its standard
+/// streams.
+#[must_use]
+pub fn main() -> std::process::ExitCode {
+    let clock = crate::clock::RealClock::new();
+    let env = Env {
+        runner: &crate::run::System,
+        clock: &clock,
+    };
+    std::process::ExitCode::from(main_with(
+        std::env::args_os(),
+        &env,
+        &mut std::io::stdout(),
+        &mut std::io::stderr(),
+    ))
 }
 
 /// Parses `args` (the program name first) and runs the verb; returns the exit status: 0, 1 for

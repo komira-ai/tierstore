@@ -54,16 +54,23 @@ fn help_and_bad_command_lines() {
     assert_eq!(cli(&args("--help"), &s).0, 0);
     assert_eq!(cli(&args("frobnicate"), &s).0, 2);
     let f = Fake::new("cli", &["sdb"]);
+    let d = f.drive("d");
+    f.link_dev(&d, "sdb");
     let (code, _, err) = cli(
         &args(&format!(
             "hdd --dir {} --patterns sideways {}",
-            f.drive("d").display(),
+            d.join("a").display(),
             common(&f)
         )),
         &s,
     );
     assert_eq!(code, 1);
-    assert!(err.starts_with("ts-measure: "), "{err}");
+    assert_eq!(
+        err,
+        "ts-measure: pattern sideways: want adjacent or scattered\n"
+    );
+    // The program's own entry point parses this test binary's arguments, which are not a verb.
+    assert_ne!(super::main(), std::process::ExitCode::SUCCESS);
 }
 
 #[test]
@@ -151,6 +158,31 @@ fn cache_on_a_target() {
         let (code, _, _) = cli(&args(&format!("cache {bad} {}", common(&f))), &s);
         assert_eq!(code, 1, "{bad}");
     }
+}
+
+#[test]
+fn cache_on_a_loop_target_samples_the_disk_under_the_image() {
+    let f = Fake::new("cli", &["loop1"]);
+    let d = f.drive("cachefs");
+    f.link_dev(&d, "loop1");
+    let img = f.path().join("cache.img");
+    std::fs::write(&img, vec![0u8; 4096]).unwrap();
+    let back = f.sys().join("block/loop1/loop");
+    std::fs::create_dir_all(&back).unwrap();
+    std::fs::write(back.join("backing_file"), format!("{}\n", img.display())).unwrap();
+    let s = Script {
+        answers: vec![("fincore", "0\n".into())],
+        ..Script::default()
+    };
+    ok(
+        &f,
+        &format!(
+            "cache --target loop={} --blocks 128 --jobs 1 --warmup-ms 1 --measure-ms 5 --sync-commits 1 --read-set-mib 4 --punch-mib 32 --dontneed-mib 4",
+            d.display()
+        ),
+        &s,
+    );
+    assert!(md(&f, "b").contains("image_freed_mib="));
 }
 
 #[test]
@@ -260,7 +292,7 @@ fn silo_list_get_and_analyse() {
     ok(
         &f,
         &format!(
-            "silo-get {base} --listing {} --min-pack-mib 1 --node n3 --start-at 1000000 --parts 1 --conc 1 --devs sdb --warmup-ms 1 --measure-ms 20",
+            "silo-get {base} --listing {} --min-pack-mib 1 --node n3 --start-at 1000001 --parts 1 --conc 1 --devs sdb --warmup-ms 1 --measure-ms 20",
             listing.display()
         ),
         &s,
@@ -311,7 +343,8 @@ fn cold_prep_local_serve_and_load() {
         ),
         &s,
     );
-    assert!(md(&f, "cold-local").contains("### C-4, cold-tier prototype"));
+    let m = md(&f, "cold-local");
+    assert!(m.contains("### C-4, cold-tier prototype"));
     let (code, _, err) = cli(
         &args(&format!("cold-local {drives} --arms c9 {}", common(&f))),
         &s,
@@ -350,8 +383,12 @@ fn cold_prep_local_serve_and_load() {
     assert!(md(&f, "cold-load-peer").contains("| peer |"));
     ok(
         &f,
-        &format!("cold-serve {drives} --listen 127.0.0.1:0 --secs 0"),
+        &format!("cold-serve {drives} --listen 127.0.0.1:0 --secs 1"),
         &s,
+    );
+    assert_eq!(
+        std::fs::read_to_string(f.path().join("out/cold-serve.jsonl")).unwrap(),
+        "[]\n"
     );
     let (code, _, _) = cli(
         &args(&format!(

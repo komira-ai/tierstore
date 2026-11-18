@@ -24,7 +24,7 @@ fn config(f: &Fake) -> Config {
         sizes_mib: vec![1],
         writers: vec![1, 2],
         measure: Duration::from_millis(20),
-        sustained: 4 * MIB,
+        sustained: 3 * MIB,
         pack: MIB,
         window: 2 * MIB,
         rewrite_cap: 2 * MIB,
