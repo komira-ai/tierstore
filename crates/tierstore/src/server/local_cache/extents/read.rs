@@ -10,9 +10,22 @@ use super::super::layout::{Found, Name, data_path, name_of};
 use super::super::metrics::{Counters, add};
 use super::super::pins::{PinAnswer, PinError};
 use super::super::stream::window;
-use super::super::{CacheConfig, Inner, LocalCache, index_of, locked};
+use super::super::{CacheConfig, Inner, LocalCache, locked};
 use super::files;
 use super::table::Object;
+
+/// The index of the objects a scan found, the least recently used first.
+fn index_of(mut found: Vec<Found>) -> Index {
+    found.sort_by(|a, b| (a.used, &a.hex).cmp(&(b.used, &b.hex)));
+    let mut index = Index::default();
+    for found in found {
+        let sidecar = found.sidecar;
+        // Found on the disk: how long ago the upstream last held this version is not known.
+        let (size, tag, modified) = (sidecar.size, sidecar.tag, sidecar.modified);
+        index.insert_from(&found.hex, (size, tag, modified), None, sidecar.origin);
+    }
+    index
+}
 
 /// The entries by extents that the directory `extents-v1` holds, read back; the files that are
 /// not part of a usable entry (or of an object `found` whole in `obj/`) are removed and counted in

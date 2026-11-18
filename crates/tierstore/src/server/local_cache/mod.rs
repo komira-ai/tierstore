@@ -139,6 +139,7 @@ mod hold;
 pub(super) mod holds;
 mod index;
 mod keep;
+pub mod large;
 pub(super) mod layout;
 mod listing;
 mod metrics;
@@ -251,8 +252,8 @@ use tokio::sync::Semaphore;
 use crate::journal::is_reserved;
 use crate::server::lock;
 use crate::{
-    Backend, ByteRange, Clock, Error, Listed, Meta, OpenUpload, PartBody, PutAnswer, PutClaim,
-    PutOutcome, ReadBody, TreeDigest, UploadedPart, UploadsAfter,
+    Backend, ByteRange, Clock, Error, Listed, Meta, OpenUpload, Opened, PartBody, PutAnswer,
+    PutClaim, PutOutcome, ReadBody, TreeDigest, UploadedPart, UploadsAfter,
 };
 
 pub use disk::{Disk, Space, SystemDisk};
@@ -518,19 +519,8 @@ pub(super) struct Inner {
     evicting: AtomicBool,
     /// Whether this cache may write to its directory, and the lock that says so.
     hold: Hold,
-}
-
-/// The index of the objects a scan found, the least recently used first.
-fn index_of(mut found: Vec<layout::Found>) -> Index {
-    found.sort_by(|a, b| (a.used, &a.hex).cmp(&(b.used, &b.hex)));
-    let mut index = Index::default();
-    for found in found {
-        let sidecar = found.sidecar;
-        // Found on the disk: how long ago the upstream last held this version is not known.
-        let (size, tag, modified) = (sidecar.size, sidecar.tag, sidecar.modified);
-        index.insert_from(&found.hex, (size, tag, modified), None, sidecar.origin);
-    }
-    index
+    /// Where the S3 front's GETs of large objects that miss go, once attached (see `large`).
+    large: std::sync::OnceLock<Arc<large::LargeObjects>>,
 }
 
 /// A read-through cache of an upstream, on a directory of the local file system.
@@ -656,6 +646,7 @@ impl LocalCache {
             starts: starts::Starts::default(),
             evicting: AtomicBool::new(false),
             hold: Hold::new(standing),
+            large: std::sync::OnceLock::new(),
         };
         Ok(Self {
             inner: Arc::new(inner),
@@ -922,6 +913,13 @@ impl Backend for LocalCache {
                 None => passed(range).await,
             },
             Err(fill::Filled::Skipped | fill::Filled::Changed) => passed(range).await,
+        }
+    }
+
+    async fn open_read(&self, key: &str, span: Option<crate::Span>) -> Result<Opened, Error> {
+        match self.inner.open_large(key, span).await? {
+            Some(opened) => Ok(opened),
+            None => crate::backend::open_by_head(self, key, span).await,
         }
     }
 
