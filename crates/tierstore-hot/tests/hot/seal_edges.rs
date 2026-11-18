@@ -569,7 +569,7 @@ fn a_repair_that_cannot_create_its_file_fails_the_scrub_and_keeps_the_bad_copy()
     assert!(matches!(
         got,
         Err(HotError::Io {
-            op: "replace copy",
+            op: "repair file",
             ..
         })
     ));

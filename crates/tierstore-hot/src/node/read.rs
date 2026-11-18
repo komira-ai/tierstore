@@ -21,7 +21,8 @@ pub enum ReadError {
     /// No such file here (`404`).
     #[error("no such hot file")]
     NotFound,
-    /// The record's crc32c does not match: another copy serves it and this one is repaired.
+    /// The record's crc32c does not match: the caller serves another copy and queues the repair
+    /// of this one (10.3, 10.6 step 5).
     #[error("crc mismatch in the record at {offset}")]
     Corrupt {
         /// The record's offset.
@@ -33,9 +34,16 @@ pub enum ReadError {
 }
 
 impl HotNode {
-    /// Bytes `range` of `file` (fewer at its end).
+    /// Bytes `range` of `file`: fewer at its end, and at most one read window (8 MiB, or a
+    /// whole record when `hot.large_min` is larger), so a caller that wants more asks again from
+    /// where the answer ended and no read holds a whole file.
     pub async fn serve(&self, file: HotName, range: ByteRange) -> Result<Bytes, ReadError> {
         let path = file.path();
+        let most = super::converge::WINDOW.max(self.n.cfg.large_min + (1 << 17));
+        let range = ByteRange {
+            offset: range.offset,
+            len: range.len.min(most),
+        };
         let (dev, p) = (Arc::clone(&self.n.dev), path.clone());
         let got = self
             .n

@@ -24,7 +24,6 @@ use tierstore_format::names::HotName;
 use tierstore_format::stamp::Stamp;
 use tierstore_format::tomb::{LargeFile, Tombstone};
 use tierstore_harness::disk::{Fault, OpKind};
-use tierstore_hot::config::OnFull;
 use tierstore_hot::node::ReadError;
 use tierstore_hot::peers::{LargeAnswer, LargeChunk, LargeOffer};
 use tierstore_store_api::hot::{Acked, HotError, HotStore, LargePut, Unavailable};
@@ -451,7 +450,7 @@ fn reclaim_of_a_file_already_gone_from_the_disk_forgets_it() {
 #[test]
 fn in_hot_only_mode_a_clean_file_still_counts_as_dirty() {
     let mut cfg = config(3, 2);
-    cfg.on_full = Some(OnFull::Reject);
+    cfg.hot_only = true;
     let mut sim = Sim::new(3, cfg);
     let key = sim.key_on(1, "hotonly");
     clean_large(&mut sim, &key, 7);

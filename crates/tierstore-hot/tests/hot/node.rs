@@ -592,6 +592,25 @@ fn a_flipped_byte_in_a_large_object_is_found_and_replaced_by_a_peers_good_copy()
 }
 
 #[test]
+fn a_flipped_byte_in_the_header_of_a_large_object_is_found_and_repaired() {
+    let mut sim = Sim::new(3, config(3, 3));
+    let data = bytes_of(100_000, 9);
+    let acked = put_large(&mut sim, 1, "a-large-header", &data).unwrap();
+    let path = large_path(&acked);
+    flip(&sim.disk(1), &path, 20);
+    sim.clock.advance(WEEK_MS);
+    let report = scrub(&sim, 1);
+    assert_eq!(
+        (report.checked, report.bad, report.repaired, report.dropped),
+        (1, 1, 1, 0)
+    );
+    assert_eq!(
+        sim.disk(1).read_all(&path).unwrap(),
+        sim.disk(2).read_all(&path).unwrap()
+    );
+}
+
+#[test]
 fn a_bad_cache_segment_is_dropped_and_a_good_one_is_kept() {
     let mut sim = Sim::new(3, config(3, 3));
     let (_, path, key, length) = sealed_segment(&mut sim);

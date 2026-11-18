@@ -21,7 +21,7 @@ use tierstore_format::names::HotName;
 use tierstore_format::record::scan;
 use tierstore_format::seal::SealProposal;
 use tierstore_format::trailer::BlockKind;
-use tierstore_format::{FormatError, crc32c, crc32c_append};
+use tierstore_format::{FormatError, crc32c_append};
 use tierstore_index::blocks::{BlockInfo, BlockState};
 use tierstore_store_api::hot::{HotError, Unavailable};
 use tierstore_store_api::index::{EntryLocation, Fact, IndexEntry};
@@ -82,48 +82,120 @@ impl Node {
         Ok((pos.min(len), crc))
     }
 
+    /// Reads `[from, to)` of `path` in windows and hands each to `each`; `false` when the file
+    /// ends before `to` or `each` says stop.
+    pub(crate) async fn stream(
+        &self,
+        path: &str,
+        from: u64,
+        to: u64,
+        each: &mut (dyn FnMut(&[u8]) -> bool + Send),
+    ) -> Result<bool, HotError> {
+        let mut at = from;
+        while at < to {
+            let got = self
+                .read(DriveClass::Write, path, at, WINDOW.min(to - at))
+                .await?;
+            if got.is_empty() || !each(&got) {
+                return Ok(false);
+            }
+            at += got.len() as u64;
+        }
+        Ok(true)
+    }
+
     /// The crc32c of `[0, len)` of `path` (fewer bytes if the file is shorter: then `None`).
     async fn crc_of(&self, path: &str, len: u64) -> Result<Option<u32>, HotError> {
         let mut crc = 0u32;
-        let mut at = 0u64;
-        while at < len {
-            let got = self
-                .read(DriveClass::Write, path, at, WINDOW.min(len - at))
-                .await?;
-            if got.is_empty() {
-                return Ok(None);
-            }
-            crc = crc32c_append(crc, &got);
-            at += got.len() as u64;
-        }
-        Ok(Some(crc))
+        let whole = self
+            .stream(path, 0, len, &mut |b| {
+                crc = crc32c_append(crc, b);
+                true
+            })
+            .await?;
+        Ok(whole.then_some(crc))
     }
 
-    /// Bytes `range` of `segment` from the first of `sources` (else every other voter) whose
-    /// copy has them all.
-    async fn fetch_from(
-        &self,
-        segment: BlockId,
-        sources: &[NodeId],
-        range: ByteRange,
-    ) -> Result<Bytes, HotError> {
+    /// The other nodes to fetch from: `sources` first, then every other voter.
+    fn fetch_order(&self, sources: &[NodeId]) -> Vec<NodeId> {
         let mut order: Vec<NodeId> = sources.iter().copied().filter(|s| *s != self.id).collect();
         for v in self.voters() {
             if v != self.id && !order.contains(&v) {
                 order.push(v);
             }
         }
-        for node in order {
-            if let Ok(bytes) = self
-                .peers
-                .fetch(node, HotName::Segment(segment), range)
-                .await
-                && bytes.len() as u64 == range.len
-            {
-                return Ok(bytes);
+        order
+    }
+
+    /// Fetches `range` of `file` from the nodes of `order`, one window at a time (each window
+    /// from the first node that has it whole), writes it at the same offsets of `dest` and
+    /// makes it durable; the crc32c of the bytes fetched, appended to `crc`. Nothing larger than
+    /// a window is held.
+    pub(crate) async fn fetch_into(
+        &self,
+        file: HotName,
+        order: &[NodeId],
+        range: ByteRange,
+        dest: &str,
+        mut crc: u32,
+    ) -> Result<u32, HotError> {
+        let end = range.offset + range.len;
+        let mut at = range.offset;
+        while at < end {
+            let window = ByteRange {
+                offset: at,
+                len: WINDOW.min(end - at),
+            };
+            let mut got = None;
+            for node in order {
+                if let Ok(bytes) = self.peers.fetch(*node, file, window).await
+                    && bytes.len() as u64 == window.len
+                {
+                    got = Some(bytes);
+                    break;
+                }
             }
+            let bytes = got.ok_or_else(|| unavailable(Unavailable::TooFewCopies))?;
+            crc = crc32c_append(crc, &bytes);
+            let (dev, p) = (Arc::clone(&self.dev), dest.to_owned());
+            self.sched
+                .run(DriveClass::Write, move || dev.write_at(&p, at, &bytes))
+                .await?
+                .map_err(io_err("fetched write"))?;
+            at = window.offset + window.len;
         }
-        Err(unavailable(Unavailable::TooFewCopies))
+        let (dev, p) = (Arc::clone(&self.dev), dest.to_owned());
+        self.sched
+            .run(DriveClass::Write, move || dev.fdatasync(&p))
+            .await?
+            .map_err(io_err("fetched sync"))?;
+        Ok(crc)
+    }
+
+    /// An empty `<path>.repair`, made or cut.
+    pub(crate) async fn repair_file(&self, path: &str) -> Result<String, HotError> {
+        let tmp = format!("{path}.repair");
+        let (dev, p) = (Arc::clone(&self.dev), tmp.clone());
+        self.sched
+            .run(DriveClass::Write, move || match dev.create(&p) {
+                Err(e) if e.kind() == std::io::ErrorKind::AlreadyExists => dev.set_len(&p, 0),
+                other => other,
+            })
+            .await?
+            .map_err(io_err("repair file"))?;
+        Ok(tmp)
+    }
+
+    /// Renames `tmp` over `path` and makes the rename durable.
+    pub(crate) async fn rename_over(&self, tmp: &str, path: &str) -> Result<(), HotError> {
+        let (dev, t, p) = (Arc::clone(&self.dev), tmp.to_owned(), path.to_owned());
+        self.sched
+            .run(DriveClass::Write, move || {
+                dev.rename(&t, &p, false)?;
+                dev.fsync_dir(crate::dev::dir_of(&p))
+            })
+            .await?
+            .map_err(io_err("replace copy"))
     }
 
     /// Converges this node's copy of `segment` to the committed `proposal` and seals it here;
@@ -138,6 +210,12 @@ impl Node {
         let path = HotName::Segment(segment).path();
         if self.lock().files.contains_key(&path) {
             return Ok(());
+        }
+        // This node's own writer of the segment is fenced by now; its last local write ends
+        // before the copy is cut and sealed.
+        let own = self.lock().writing.get(&segment).cloned();
+        if let Some(seg) = own {
+            seg.idle().await;
         }
         let (dev, p) = (Arc::clone(&self.dev), path.clone());
         let len = match self
@@ -163,18 +241,16 @@ impl Node {
                 offset: len,
                 len: l - len,
             };
-            match self.fetch_from(segment, sources, range).await {
-                Ok(tail) if crc32c_append(have, &tail) == proposal.running_crc => {
-                    self.write_sync(&path, len, tail).await?;
-                    true
-                }
-                _ => false,
-            }
+            let order = self.fetch_order(sources);
+            let fetched = self
+                .fetch_into(HotName::Segment(segment), &order, range, &path, have)
+                .await;
+            matches!(fetched, Ok(crc) if crc == proposal.running_crc)
         };
         if !fixed {
             self.refetch(segment, &path, proposal, sources).await?;
         }
-        self.seal_here(segment, &path, l).await
+        self.seal_here(segment, &path, l, sources).await
     }
 
     async fn set_len(&self, path: &str, len: u64) -> Result<(), HotError> {
@@ -199,8 +275,8 @@ impl Node {
             .map_err(io_err("segment write"))
     }
 
-    /// Replaces this node's copy by the whole `[0, length)` of another copy, through a new file
-    /// renamed over it.
+    /// Replaces this node's copy by the whole `[0, length)` of another copy, fetched window by
+    /// window into a new file that is renamed over it once its running crc is the committed one.
     async fn refetch(
         &self,
         segment: BlockId,
@@ -212,42 +288,35 @@ impl Node {
             offset: 0,
             len: proposal.length,
         };
-        let bytes = self.fetch_from(segment, sources, range).await?;
-        if crc32c(&bytes) != proposal.running_crc {
+        let tmp = self.repair_file(path).await?;
+        let order = self.fetch_order(sources);
+        let fetched = self
+            .fetch_into(HotName::Segment(segment), &order, range, &tmp, 0)
+            .await;
+        if !matches!(fetched, Ok(crc) if crc == proposal.running_crc) {
+            self.unlink(&tmp).await;
             return Err(unavailable(Unavailable::TooFewCopies));
         }
-        self.replace(path, bytes).await
+        self.rename_over(&tmp, path).await
     }
 
     /// Writes `bytes` as the new contents of `path`: a `.repair` file, `fdatasync`, rename over,
     /// directory `fsync`.
     pub(crate) async fn replace(&self, path: &str, bytes: Bytes) -> Result<(), HotError> {
-        let (dev, p) = (Arc::clone(&self.dev), path.to_owned());
-        self.sched
-            .run(DriveClass::Write, move || {
-                let tmp = format!("{p}.repair");
-                match dev.create(&tmp) {
-                    Err(e) if e.kind() == std::io::ErrorKind::AlreadyExists => {
-                        dev.set_len(&tmp, 0)?;
-                    }
-                    other => other?,
-                }
-                dev.write_at(&tmp, 0, &bytes)?;
-                dev.fdatasync(&tmp)?;
-                dev.rename(&tmp, &p, false)?;
-                dev.fsync_dir(crate::dev::dir_of(&p))
-            })
-            .await?
-            .map_err(io_err("replace copy"))
+        let tmp = self.repair_file(path).await?;
+        self.write_sync(&tmp, 0, bytes).await?;
+        self.rename_over(&tmp, path).await
     }
 
     /// Appends the trailer of `[0, length)` to the copy, writes `blk/<id>.idx`, records the
-    /// block as sealed and indexes its records.
+    /// block as sealed (with `holders`, the copies that answered the seal whole, when known) and
+    /// indexes its records.
     async fn seal_here(
         self: &Arc<Self>,
         segment: BlockId,
         path: &str,
         length: u64,
+        holders: &[NodeId],
     ) -> Result<(), HotError> {
         let mut builder = BlockBuilder::new(self.cfg.geometry, BlockKind::Segment)
             .map_err(other_err("segment"))?;
@@ -271,9 +340,20 @@ impl Node {
             Bytes::from(sealed.bytes),
         )
         .await?;
-        let hot_copies = match self.index.block(segment) {
-            Ok(Some(info)) => info.hot_copies,
-            _ => vec![self.id],
+        // The copies that answered the seal with the whole length (the sealer knows them), and
+        // this one; a node that learns the seal from the broadcast keeps the row it has.
+        let hot_copies = if holders.is_empty() {
+            self.index
+                .block(segment)
+                .ok()
+                .flatten()
+                .map_or_else(|| vec![self.id], |info| info.hot_copies)
+        } else {
+            let mut copies: Vec<NodeId> = holders.to_vec();
+            copies.push(self.id);
+            copies.sort_unstable();
+            copies.dedup();
+            copies
         };
         let mut info = BlockInfo::new(BlockState::Sealed);
         info.length = total;

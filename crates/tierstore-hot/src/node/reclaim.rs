@@ -44,7 +44,7 @@ impl Node {
         let st = self.lock();
         let open: u64 = st.writing.values().map(|s| s.lock().written).sum::<u64>()
             + st.copies.values().map(|c| c.committed).sum::<u64>();
-        let hot_only = self.cfg.on_full.is_some();
+        let hot_only = self.cfg.hot_only;
         let (mut dirty, mut total) = (open, open);
         for f in st.files.values() {
             total += f.bytes;

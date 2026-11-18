@@ -14,15 +14,6 @@ const SECOND_MS: u64 = 1000;
 const HOUR_MS: u64 = 3600 * SECOND_MS;
 const DAY_MS: u64 = 24 * HOUR_MS;
 
-/// What happens when the hot tier fills in hot-only mode (`hot.on_full`, 10.14).
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
-pub enum OnFull {
-    /// Never drop data: 503 above `dirty_slow`, 507 above `dirty_reject`.
-    Reject,
-    /// Cache semantics: the writer of a set drops least recently read sealed segments whole.
-    Evict,
-}
-
 /// The dirty marks of 10.5, each a fraction of the hot device.
 #[derive(Debug, Clone, Copy, PartialEq)]
 pub struct Marks {
@@ -84,8 +75,9 @@ pub struct HotConfig {
     pub keep_clean: bool,
     /// `hot.scrub_period` in milliseconds.
     pub scrub_period_ms: u64,
-    /// `hot.on_full`; `Some` exactly in hot-only mode (no cold store).
-    pub on_full: Option<OnFull>,
+    /// Hot-only mode (no cold store, `hot.on_full = "reject"`): the marks count every hot byte,
+    /// since nothing is ever clean.
+    pub hot_only: bool,
     /// The bytes of the hot device (its filesystem's size), the denominator of the marks.
     pub capacity: u64,
     /// The block geometry (`cold.block_bytes`, `cold.block_reserve`, or their defaults without a
@@ -113,7 +105,7 @@ impl HotConfig {
             marks: Marks::default(),
             keep_clean: true,
             scrub_period_ms: 7 * DAY_MS,
-            on_full: None,
+            hot_only: false,
             capacity,
             geometry,
         }

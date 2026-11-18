@@ -151,7 +151,7 @@ impl Node {
             .map_err(io_err("large sync"))
     }
 
-    async fn unlink(&self, path: &str) {
+    pub(crate) async fn unlink(&self, path: &str) {
         let (dev, p) = (Arc::clone(&self.dev), path.to_owned());
         // A file that cannot be removed now is removed by the next startup sweep.
         let _ = self
@@ -330,132 +330,130 @@ pub(crate) async fn put_file(n: &Arc<Node>, put: LargePut) -> Result<Acked, HotE
     let _key = n.keys.lock(&key).await;
     n.observe(stamp);
     let set = n.replica_set(&key)?;
-    let mut up = n.begin_upload(&key, size).await?;
-    let offer = LargeOffer {
-        key: key.clone(),
-        size,
-        expiry,
-        stamp,
-    };
+    // Every way the PUT fails leaves nothing behind: its replica streams are forgotten and its
+    // `.up` removed (after a commit the `.up` name is gone and the unlink does nothing).
     let nonce = n.stamp()?.raw();
-    let mut outs = Vec::new();
-    let mut calls = Vec::new();
-    for node in set.iter().copied().filter(|m| *m != n.id) {
-        let (tx, rx) = mpsc::channel::<LargeChunk>(1);
-        let abandon = Arc::new(Notify::new());
-        n.lock()
-            .large
-            .entry(nonce)
-            .or_default()
-            .abandon
-            .insert(node, Arc::clone(&abandon));
-        let env = n.env(offer.clone())?;
-        calls.push(n.peers.put_large(node, env, rx.boxed()));
-        outs.push(Out {
-            node,
-            tx: Some(tx),
-            abandon,
-            lagged: false,
-        });
-    }
-    let stream = async {
-        let streamed = async {
-            while let Some(piece) = body.next().await {
-                let bytes = piece.map_err(io_err("large body"))?;
-                n.feed_upload(&mut up, &bytes).await?;
-                tee(n, nonce, &mut outs, &LargeChunk::Data(bytes)).await;
+    let mut up = n.begin_upload(&key, size).await?;
+    let out: Result<Acked, HotError> = async {
+        let offer = LargeOffer {
+            key: key.clone(),
+            size,
+            expiry,
+            stamp,
+        };
+        let mut outs = Vec::new();
+        let mut calls = Vec::new();
+        for node in set.iter().copied().filter(|m| *m != n.id) {
+            let (tx, rx) = mpsc::channel::<LargeChunk>(1);
+            let abandon = Arc::new(Notify::new());
+            n.lock()
+                .large
+                .entry(nonce)
+                .or_default()
+                .abandon
+                .insert(node, Arc::clone(&abandon));
+            let env = n.env(offer.clone())?;
+            calls.push(n.peers.put_large(node, env, rx.boxed()));
+            outs.push(Out {
+                node,
+                tx: Some(tx),
+                abandon,
+                lagged: false,
+            });
+        }
+        let stream = async {
+            let streamed = async {
+                while let Some(piece) = body.next().await {
+                    let bytes = piece.map_err(io_err("large body"))?;
+                    n.feed_upload(&mut up, &bytes).await?;
+                    tee(n, nonce, &mut outs, &LargeChunk::Data(bytes)).await;
+                }
+                if size.is_some_and(|s| s != up.size) {
+                    return Err(io_err("large body")(std::io::Error::new(
+                        std::io::ErrorKind::UnexpectedEof,
+                        "the body is not its Content-Length",
+                    )));
+                }
+                let generation = up.hasher.finish();
+                let header = up.header(generation, stamp, &key);
+                n.finish_upload(&mut up, header).await?;
+                tee(n, nonce, &mut outs, &LargeChunk::Trailer(generation)).await;
+                Ok(generation)
             }
-            if size.is_some_and(|s| s != up.size) {
-                return Err(io_err("large body")(std::io::Error::new(
-                    std::io::ErrorKind::UnexpectedEof,
-                    "the body is not its Content-Length",
-                )));
+            .await;
+            // Whether the body ended or failed, the replica streams end with it: a replica that got
+            // no trailer abandons its copy, and the PUT does not wait for it forever.
+            for out in &mut outs {
+                out.tx = None;
             }
-            let generation = up.hasher.finish();
-            let header = up.header(generation, stamp, &key);
-            n.finish_upload(&mut up, header).await?;
-            tee(n, nonce, &mut outs, &LargeChunk::Trailer(generation)).await;
-            Ok(generation)
+            streamed
+        };
+        let (streamed, answers) = futures::join!(stream, join_all(calls));
+        let generation = streamed?;
+        let mut holders: Vec<NodeId> = Vec::new();
+        let mut resend: Vec<NodeId> = Vec::new();
+        for (out, answer) in outs.iter().zip(answers) {
+            match answer.map(|a: Envelope<LargeAnswer>| a.body) {
+                Ok(LargeAnswer::Committed) => holders.push(out.node),
+                _ if out.lagged => resend.push(out.node),
+                _ => {}
+            }
         }
-        .await;
-        // Whether the body ended or failed, the replica streams end with it: a replica that got
-        // no trailer abandons its copy, and the PUT does not wait for it forever.
-        for out in &mut outs {
-            out.tx = None;
-        }
-        streamed
-    };
-    let (streamed, answers) = futures::join!(stream, join_all(calls));
-    n.lock().large.remove(&nonce);
-    let generation = match streamed {
-        Ok(g) => g,
-        Err(e) => {
-            n.unlink(&up.path).await;
-            return Err(e);
-        }
-    };
-    let mut holders: Vec<NodeId> = Vec::new();
-    let mut resend: Vec<NodeId> = Vec::new();
-    for (out, answer) in outs.iter().zip(answers) {
-        match answer.map(|a: Envelope<LargeAnswer>| a.body) {
-            Ok(LargeAnswer::Committed) => holders.push(out.node),
-            _ if out.lagged => resend.push(out.node),
-            _ => {}
-        }
-    }
-    let file = LargeFile {
-        key_hash: KeyHash::of(&key),
-        generation,
-        size: up.size,
-    };
-    let data_at = RECORD_HEADER_LEN as u64 + key.len() as u64;
-    for lagged in resend {
-        let view = n.view();
-        let target = n
-            .placement
-            .rank(&key, &view)
-            .into_iter()
-            .filter(|c| *c != n.id && !holders.contains(c) && view.live_nodes().any(|l| l.id == *c))
-            .find(|c| *c != lagged)
-            .unwrap_or(lagged);
-        if n.resend(
-            target,
-            offer.clone(),
-            &up.path,
-            data_at,
-            up.size,
+        let file = LargeFile {
+            key_hash: KeyHash::of(&key),
             generation,
-        )
-        .await?
-        {
-            holders.push(target);
+            size: up.size,
+        };
+        let data_at = RECORD_HEADER_LEN as u64 + key.len() as u64;
+        for lagged in resend {
+            let view = n.view();
+            let target = n
+                .placement
+                .rank(&key, &view)
+                .into_iter()
+                .filter(|c| {
+                    *c != n.id && !holders.contains(c) && view.live_nodes().any(|l| l.id == *c)
+                })
+                .find(|c| *c != lagged)
+                .unwrap_or(lagged);
+            if n.resend(
+                target,
+                offer.clone(),
+                &up.path,
+                data_at,
+                up.size,
+                generation,
+            )
+            .await?
+            {
+                holders.push(target);
+            }
         }
-    }
-    // The create-only check comes first: a used key answers 412 even when the replicas, which
-    // hold the other bytes too, refused the copy and left the PUT short.
-    let commit = match n.large_check(&key, generation, stamp) {
-        Ok(commit) => commit,
-        Err(e) => {
+        // The create-only check comes first: a used key answers 412 even when the replicas, which
+        // hold the other bytes too, refused the copy and left the PUT short.
+        let commit = n.large_check(&key, generation, stamp)?;
+        let copies = 1 + holders.len();
+        if copies < usize::from(n.cfg.min_acks) {
+            return Err(unavailable(Unavailable::TooFewCopies));
+        }
+        if commit {
+            n.commit_large(&up.path, &key, file, stamp).await?;
+        } else {
             n.unlink(&up.path).await;
-            return Err(e);
         }
-    };
-    let copies = 1 + holders.len();
-    if copies < usize::from(n.cfg.min_acks) {
-        n.unlink(&up.path).await;
-        return Err(unavailable(Unavailable::TooFewCopies));
+        Ok(Acked {
+            generation,
+            location: EntryLocation::Large(file),
+            length: file.size,
+            copies: copies as u8,
+        })
     }
-    if commit {
-        n.commit_large(&up.path, &key, file, stamp).await?;
-    } else {
+    .await;
+    n.lock().large.remove(&nonce);
+    if out.is_err() {
         n.unlink(&up.path).await;
     }
-    Ok(Acked {
-        generation,
-        location: EntryLocation::Large(file),
-        length: file.size,
-        copies: copies as u8,
-    })
+    out
 }
 
 impl HotNode {

@@ -428,7 +428,7 @@ fn the_defaults_of_10_14_pass_their_checks_and_a_small_test_configuration_too() 
     assert_eq!((cfg.replicas, cfg.min_acks), (3, 2));
     assert_eq!(cfg.seal_bytes, BlockGeometry::DEFAULT.max_object());
     assert!(
-        cfg.on_full.is_none(),
+        !cfg.hot_only,
         "the defaults are for a node with a cold store"
     );
     assert_eq!(config(3, 2).validate(3), Ok(()));

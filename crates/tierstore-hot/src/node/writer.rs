@@ -168,6 +168,15 @@ impl Seg {
         first
     }
 
+    /// Waits until no committer of this segment runs, so no local write of a batch is still in
+    /// flight (a converge then truncates and appends the trailer after the last of them).
+    pub(crate) async fn idle(&self) {
+        let mut rx = self.progress.subscribe();
+        while self.lock().committer {
+            let _ = rx.changed().await;
+        }
+    }
+
     pub(crate) fn info(&self) -> SegmentInfo {
         let s = self.lock();
         SegmentInfo {
@@ -465,6 +474,7 @@ impl Node {
             s.committer = false;
             let left: Vec<Pending> = s.queue.drain(..).collect();
             drop(s);
+            seg.bump();
             retry_all(left.into_iter().map(|p| (p, 0)).collect());
             return None;
         }
@@ -511,6 +521,7 @@ impl Node {
             s.committer = false;
             let left: Vec<Pending> = s.queue.drain(..).collect();
             drop(s);
+            seg.bump();
             if full {
                 self.roll(seg, Close::Size);
             }
