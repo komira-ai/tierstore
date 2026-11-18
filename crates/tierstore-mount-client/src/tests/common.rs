@@ -492,8 +492,9 @@ impl Peer {
         (frame, fds)
     }
 
-    /// Reads an `open-pack` and answers it with a pack of `size` bytes as handle `handle`, the
-    /// region it asked for, and `fds` (made by [`pack_fds`] when `None`).
+    /// Reads an `open-pack` and answers it under `epoch` with a pack of `size` bytes as handle
+    /// `handle`, the region it asked for, and the descriptors [`pack_fds`] makes for `size` (every
+    /// cell absent); returns the request and those descriptors.
     pub fn open(&self, epoch: u64, handle: u64, size: u64) -> (Frame, PackFds) {
         let (frame, _) = self.next();
         let Message::OpenPack { region, .. } = frame.message else {
