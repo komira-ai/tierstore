@@ -14,6 +14,9 @@ publish = false
 # `name.workspace = true` (members add features they need). The versions and features are
 # those of the repository this code came from, at the moment of the import.
 [workspace.dependencies]
+# The map of the trees in memory in `tierstore fs`, which every request reads with no lock and
+# a change swaps whole (`server` feature). MIT OR Apache-2.0.
+arc-swap = "1.9.3"
 # The backend trait is used as `dyn Backend`, so its async methods are boxed.
 async-trait = "0.1.92"
 # A stock S3 SDK, to prove it works against the tierstore S3 front (tierstore's tests only).

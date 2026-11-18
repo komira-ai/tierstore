@@ -97,7 +97,7 @@ fn the_file_keeps_the_attachments_and_passes_over_bad_lines() {
     let mut attachments = Attachments::new(dir.path());
     attachments.add("run-b", 2, tree(b"b"));
     attachments.add("run-a", 1, tree(b"a"));
-    attachments.save().unwrap();
+    attachments.snapshot().write().unwrap();
     let text = std::fs::read_to_string(dir.path().join(FILE)).unwrap();
     assert_eq!(text.lines().count(), 2);
     assert!(!dir.path().join("attachments.new").exists());
@@ -120,10 +120,10 @@ fn a_file_that_cannot_be_read_or_written_is_an_error() {
     std::fs::create_dir(dir.path().join(FILE)).unwrap();
     assert!(Attachments::saved(dir.path()).is_err());
     let missing = dir.path().join("none");
-    assert!(Attachments::new(&missing).save().is_err());
+    assert!(Attachments::new(&missing).snapshot().write().is_err());
     std::fs::write(dir.path().join("attachments.new"), "").unwrap();
     std::fs::create_dir(missing.clone()).unwrap();
     std::fs::create_dir(missing.join(FILE)).unwrap();
     // A rename of a file over a directory fails.
-    assert!(Attachments::new(&missing).save().is_err());
+    assert!(Attachments::new(&missing).snapshot().write().is_err());
 }

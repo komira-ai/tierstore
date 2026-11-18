@@ -164,7 +164,12 @@ pub(in crate::server) struct Upstream {
     /// The pins in flight (see [`Upstream::gate_pins`]).
     pins: Mutex<Gate>,
     pins_changed: Condvar,
+    /// The requests of a verb in flight (see [`Upstream::gate_verb`]), by verb.
+    verbs: Mutex<HashMap<String, Arc<VerbGate>>>,
 }
+
+/// The gate of the requests of one verb, and what wakes the requests that wait at it.
+type VerbGate = (Mutex<Gate>, Condvar);
 
 /// The progress of the fills of manifests, or of the pins, which a test may pace.
 #[derive(Default)]
@@ -179,6 +184,9 @@ struct Gate {
     /// The permits given and the permits used.
     given: usize,
     used: usize,
+    /// Whether the permits go to the requests in the order they were received (the gates of
+    /// verbs), and not to whichever asks first.
+    ordered: bool,
 }
 
 impl Upstream {
@@ -193,9 +201,24 @@ impl Upstream {
         std::fs::rename(&beside, path).unwrap();
     }
 
-    /// The answer to a line, or none for a request that is not answered.
+    /// The answer to a line, or none for a request that is not answered: after the gate of its
+    /// verb, if a test has closed one.
     fn answer(&self, line: &str) -> Option<String> {
         locked(&self.requests).push(line.to_owned());
+        let verb = line.split(' ').next().unwrap_or_default();
+        let gate = locked(&self.verbs).get(verb).cloned();
+        if let Some(gate) = &gate {
+            Self::enter(&gate.0, &gate.1);
+        }
+        let answer = self.respond(line);
+        if let Some(gate) = &gate {
+            Self::leave(&gate.0, &gate.1);
+        }
+        answer
+    }
+
+    /// The answer to a line, as the fake gives it.
+    fn respond(&self, line: &str) -> Option<String> {
         let words: Vec<&str> = line.split(' ').collect();
         if let Some(answer) = locked(&self.answers).get(words[0]) {
             return Some(answer.clone());
@@ -309,14 +332,69 @@ impl Upstream {
         locked(&self.pins).most
     }
 
+    /// Makes every request of `verb` received from now on wait for a permit of
+    /// [`Upstream::permit_verb`], once received: for a test that needs a round trip in flight.
+    pub(in crate::server) fn gate_verb(&self, verb: &str) {
+        let gate = Gate {
+            gating: true,
+            ordered: true,
+            ..Gate::default()
+        };
+        let _ = locked(&self.verbs).insert(
+            verb.to_owned(),
+            Arc::new((Mutex::new(gate), Condvar::new())),
+        );
+    }
+
+    /// The gate of `verb`.
+    fn verb(&self, verb: &str) -> Arc<VerbGate> {
+        locked(&self.verbs)
+            .get(verb)
+            .cloned()
+            .expect("a verb with a gate")
+    }
+
+    /// Lets `count` more requests of `verb` go on: the next ones in the order they were received.
+    pub(in crate::server) fn permit_verb(&self, verb: &str, count: usize) {
+        let gate = self.verb(verb);
+        locked(&gate.0).given += count;
+        gate.1.notify_all();
+    }
+
+    /// Waits until `count` requests of `verb` have been received in all.
+    pub(in crate::server) fn wait_for_verb(&self, verb: &str, count: usize) {
+        let gate = self.verb(verb);
+        let _gate = gate
+            .1
+            .wait_while(locked(&gate.0), |gate| gate.started < count)
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
+    }
+
+    /// The requests of `verb` received in all.
+    pub(in crate::server) fn received(&self, verb: &str) -> usize {
+        locked(&self.verb(verb).0).started
+    }
+
+    /// The requests of `verb` received and not answered now.
+    pub(in crate::server) fn in_flight(&self, verb: &str) -> usize {
+        locked(&self.verb(verb).0).in_flight
+    }
+
     /// Counts a request received on `gate`, and waits for a permit if the gate is closed.
     fn enter(gate: &Mutex<Gate>, changed: &Condvar) {
         let mut gate = locked(gate);
         gate.started += 1;
         gate.in_flight += 1;
         gate.most = gate.most.max(gate.in_flight);
+        let mine = gate.started;
         changed.notify_all();
-        while gate.gating && gate.used >= gate.given {
+        while gate.gating
+            && (if gate.ordered {
+                mine > gate.given
+            } else {
+                gate.used >= gate.given
+            })
+        {
             gate = changed
                 .wait(gate)
                 .unwrap_or_else(std::sync::PoisonError::into_inner);
@@ -544,6 +622,7 @@ impl Rig {
             gate_changed: Condvar::new(),
             pins: Mutex::new(Gate::default()),
             pins_changed: Condvar::new(),
+            verbs: Mutex::new(HashMap::new()),
         });
         let socket = dir.path().join("fill.sock");
         let fill = FakeFill::start(&socket, Arc::clone(&upstream));

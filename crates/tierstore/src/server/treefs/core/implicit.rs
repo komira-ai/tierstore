@@ -66,23 +66,24 @@ impl Core {
         }
     }
 
+    /// Reads the tree `digest` before the lifecycle lock is taken, so that a slow fill holds up
+    /// no attach, no detach and no lookup. A tree that has a number is read once for every
+    /// request that asks for it at the same time (`core/memory.rs`), and is in memory when this
+    /// returns; one that has none yet is read here and given back, to be kept under its number
+    /// (only the request that attaches a digest can name it: the kernel makes one lookup of a
+    /// name at a time, and the control socket one attach).
+    pub(super) fn read_ahead(&self, digest: &TreeDigest) -> Result<Option<super::Tree>, Unread> {
+        match self.table.find(digest) {
+            Some(number) => self.load(number, *digest).map(|_| None),
+            None => self.read_tree(digest).map(Some),
+        }
+    }
+
     /// Reads the tree `digest`, unless it is in memory, and attaches it with no run; its number.
     fn attach_implicitly(&self, digest: TreeDigest) -> Result<u64, Errno> {
-        // Read before the lifecycle lock, so that a slow fill holds up no attach and no detach. A
-        // tree that has a number is read once for every request that asks for it at the same
-        // time (`core/memory.rs`); one that has none yet is read here, since only this lookup
-        // can name it (the kernel makes one lookup of a name at a time).
-        let tree = match self.table.find(&digest) {
-            Some(number) => {
-                self.load(number, digest)
-                    .map_err(|why| refusal(&digest, why))?;
-                None
-            }
-            None => Some(
-                self.read_tree(&digest)
-                    .map_err(|why| refusal(&digest, why))?,
-            ),
-        };
+        let tree = self
+            .read_ahead(&digest)
+            .map_err(|why| refusal(&digest, why))?;
         let _lifecycle = locked(&self.lifecycle);
         let held = self.is_held();
         let number = if held {
@@ -97,9 +98,9 @@ impl Core {
             let _ = self.keep(number, digest, tree);
         }
         let now = self.now();
-        let mut state = locked(&self.state);
+        let mut state = self.state();
         // A tree that stayed in memory is used now too, before the lifecycle lock lets a sweep see it.
-        let loaded = state.loaded.get(&number);
+        let loaded = self.trees.get(number);
         loaded
             .iter()
             .for_each(|loaded| loaded.used.store(now, Ordering::Release));
@@ -114,9 +115,9 @@ impl Core {
     /// here is not found idle by a sweep that follows.
     fn used_if_attached(&self, number: u64) -> bool {
         let now = self.now();
-        let state = locked(&self.state);
+        let state = self.state();
         let attached = state.attachments.is_attached(number);
-        let loaded = state.loaded.get(&number).filter(|_| attached);
+        let loaded = self.trees.get(number).filter(|_| attached);
         loaded
             .iter()
             .for_each(|loaded| loaded.used.store(now, Ordering::Release));
@@ -124,26 +125,25 @@ impl Core {
     }
 
     /// Ends the implicit attachment of every tree no request has named for `fs.tree_idle_secs`;
-    /// how many ended. A tree no run has is then unpinned, and leaves memory when the kernel holds
-    /// none of its inodes, as at the detach of its last run. Nothing ends while a successor takes
-    /// over. An uncounted tree that nothing has attached and no request has named for that long
+    /// how many ended. A tree no run has is then unpinned, with no lock of the core held but that
+    /// of its pins (`Core::free_tree`), and leaves memory when the kernel holds none of its
+    /// inodes, as at the detach of its last run. Nothing ends while a successor takes over. An uncounted tree that nothing has attached and no request has named for that long
     /// leaves memory too (`core/memory.rs`).
     pub(in crate::server::treefs) fn detach_idle(&self) -> usize {
-        let _lifecycle = locked(&self.lifecycle);
-        let _pinning = self.no_pins();
-        if self.is_held() {
-            return 0;
-        }
         let now = self.now();
         let idle = u64::try_from(self.settings.tree_idle.as_millis()).unwrap_or(u64::MAX);
         let freed: Vec<(u64, TreeDigest)> = {
-            let mut state = locked(&self.state);
+            let _lifecycle = locked(&self.lifecycle);
+            if self.is_held() {
+                return 0;
+            }
+            let mut state = self.state();
             let ended: Vec<(u64, TreeDigest)> = state
                 .attachments
                 .implicit()
                 .into_iter()
                 .filter(|(number, _)| {
-                    state.loaded.get(number).is_none_or(|loaded| {
+                    self.trees.get(*number).is_none_or(|loaded| {
                         now.saturating_sub(loaded.used.load(Ordering::Acquire)) >= idle
                     })
                 })
@@ -157,12 +157,7 @@ impl Core {
                 .collect()
         };
         for (number, digest) in &freed {
-            let loaded = locked(&self.state).loaded.get(number).cloned();
-            loaded
-                .iter()
-                .for_each(|loaded| locked(&loaded.pinned).clear());
-            self.let_go(digest);
-            self.drop_if_forgotten(*number);
+            self.free_tree(*number, digest);
         }
         let _ = self.drop_idle_uncounted(idle);
         freed.len()

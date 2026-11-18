@@ -51,7 +51,7 @@ impl Core {
                 Some(why) => Err(why.clone()),
                 None => Ok(number),
             });
-            let mut state = locked(&self.state);
+            let mut state = self.state();
             match outcome {
                 Ok(number) => {
                     let _ = state.attachments.add(&run, number, digest);
@@ -62,7 +62,8 @@ impl Core {
                 }
             }
         }
-        if let Err(why) = locked(&self.state).attachments.save() {
+        let snapshot = self.state().attachments.snapshot();
+        if let Err(why) = self.write_attachments(&snapshot) {
             tracing::warn!("tierstore fs: cannot write the attachments file: {why}");
         }
     }

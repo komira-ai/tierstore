@@ -207,11 +207,9 @@ impl Attachments {
         }
     }
 
-    /// Writes the file: the attachments, one line each, by a rename of a file written beside it.
-    ///
-    /// # Errors
-    /// What the system said.
-    pub(super) fn save(&self) -> io::Result<()> {
+    /// The text of the file, and where it goes, as the attachments are now: for a write that does
+    /// not hold the lock of the attachments.
+    pub(super) fn snapshot(&self) -> Snapshot {
         let mut text = String::new();
         let attached = self
             .listing()
@@ -220,9 +218,30 @@ impl Attachments {
         for (digest, run) in attached.chain(self.kept.iter().cloned()) {
             text.push_str(&format!("{digest} {run}\n"));
         }
+        Snapshot {
+            file: self.file.clone(),
+            text,
+        }
+    }
+}
+
+/// The attachments file as it is to be written: the attachments, one line each.
+#[derive(Debug)]
+pub(super) struct Snapshot {
+    file: PathBuf,
+    text: String,
+}
+
+impl Snapshot {
+    /// Writes the file, by a rename of a file written beside it. The caller serialises the writes
+    /// of the file.
+    ///
+    /// # Errors
+    /// What the system said.
+    pub(super) fn write(&self) -> io::Result<()> {
         let mut new = self.file.clone().into_os_string();
         new.push(".new");
-        std::fs::write(&new, text)?;
+        std::fs::write(&new, &self.text)?;
         std::fs::rename(&new, &self.file)
     }
 }

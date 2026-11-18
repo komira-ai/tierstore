@@ -8,15 +8,12 @@
 //! made again on the first read that names it, and a release of one that no read made again has
 //! nothing to end.
 
-use std::path::Path;
-use std::sync::Arc;
-
 use super::super::backing::{Adopted, Guard, Saved};
 use super::super::handle;
 use super::super::ino;
-use super::super::locked;
 use super::{Core, Errno, Handle};
 use crate::tree_manifest::EntryKind;
+use std::path::Path;
 
 impl Core {
     /// Answers the opens of the blobs of `saved` (the lines of the file at `path`, which the
@@ -57,12 +54,9 @@ impl Core {
         offset: u64,
         size: u32,
     ) -> Result<Vec<u8>, Errno> {
-        let known = locked(&self.handles).contains_key(&fh);
-        if !known && self.foreign(fh) {
+        if !self.handles.contains(fh) && self.foreign(fh) {
             let handle = self.reopen(ino)?;
-            let _ = locked(&self.handles)
-                .entry(fh)
-                .or_insert_with(|| Arc::new(handle));
+            self.handles.insert_if_absent(fh, handle);
         }
         self.read(fh, offset, size)
     }
