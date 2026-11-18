@@ -987,3 +987,7 @@ mod tests;
 #[cfg(test)]
 #[path = "core/lifecycle_tests.rs"]
 mod lifecycle_tests;
+
+#[cfg(test)]
+#[path = "core_whiteout_names_tests.rs"]
+mod whiteout_names_tests;

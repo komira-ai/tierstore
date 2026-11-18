@@ -329,8 +329,11 @@ tierstore does not read REAPI. A tree is described in tierstore's own format, so
 location of each blob, which only the client knows, can be part of it.
 
 A **tree manifest** is the listing of one directory: a JSON object, version 1, with the directory's children sorted by
-name (bytewise), each name unique, none empty, `.` or `..`, none containing `/` or NUL, and none beginning `.wh.` (a view's whiteout prefix, 6.6; refused by name,
-`unsupported entry name`):
+name (bytewise), each name unique, none empty, `.` or `..`, and none containing `/` or NUL (refused by name,
+`unsupported entry name`). A name beginning `.wh.` is a name like any other: an OCI layer's whiteouts are plain files that a
+build making a layer writes, and a later action reads them as inputs. On Linux the job's overlay keeps its own whiteouts
+as character devices and extended attributes, never as names; a view, which keeps whiteouts as names, refuses such a
+tree (6.6). An example:
 
 ```json
 {"v":1,"children":[
@@ -766,8 +769,9 @@ survive the process (a crash, an update), not the machine, which takes the run w
 
 **Rules a view keeps.**
 
-- Names beginning `.wh.` cannot be created, renamed to or linked to (`EPERM`), as in an OCI layer; a tree manifest cannot
-  contain them either (6.1).
+- Names beginning `.wh.` cannot be created, renamed to or linked to (`EPERM`), as in an OCI layer. A tree may hold them
+  (6.1), but the mirror could not tell such an entry from a whiteout, so a view over a tree that holds one is refused by
+  name (`whiteout name in tree`, with the path); the tree is still served read-only under `trees/`.
 - **Handles.** An entry still the tree's has the `10` form (view number, tree index); an entry in `root/` has the `11`
   form (view number, id); a copied-up file answers to both, so a handle the client took before the copy-up still leads to
   the copy (6.3). After a restart the core finds an entry by its id or tree index by walking `root/` once and reading the
@@ -1205,7 +1209,7 @@ So the core's views (6.6) move out of the Linux design altogether and stay on ma
 | `tierstore fs` crashes during a copy-up | The half copy is in `meta/tmp/`, not at the path; the intent's roll-forward makes it again. |
 | The macOS client renames an open, removed file to `.nfs…` | The file keeps its id attribute, so the client's handle still leads to it (6.6). |
 | A job creates, renames to or links to a name beginning `.wh.` in a view | `EPERM`, as in an OCI layer. |
-| A tree manifest with a name beginning `.wh.` | The attach is refused by name (`unsupported entry name`). |
+| A tree manifest with a name beginning `.wh.` (an OCI layer's whiteout written as a build output) | Attached and served: the name is a plain entry of the tree, and the job's overlay above it reads it as that file. A view over it (macOS, not built) is refused by name (`whiteout name in tree`, 6.6). |
 | A tree manifest that does not hash to its key, does not parse, or breaks a limit | The attach is refused by name; nothing appears. |
 | A tree of exactly 2^24 - 1 entries; one of 2^24 | Served; refused (`tree too large`). |
 | Two attaches of one tree for one run | One attachment; `detach` ends it once. |

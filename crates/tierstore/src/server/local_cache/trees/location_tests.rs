@@ -58,8 +58,9 @@ fn an_fs_location_is_names_and_never_a_directory_of_the_mount() {
         }
     );
     assert!(Location::fs("jobs/trees").is_ok());
+    assert!(Location::fs("jobs/.wh.x").is_ok());
     for path in [
-        "", "/a", "a/", "a//b", "a/./b", "a/../b", "a/.wh.x", "a\0", "trees", "views/x", "put",
+        "", "/a", "a/", "a//b", "a/./b", "a/../b", "a\0", "trees", "views/x", "put",
     ] {
         assert_eq!(Location::fs(path), Err(LocationError::Path), "{path:?}");
     }
