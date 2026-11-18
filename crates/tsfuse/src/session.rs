@@ -29,7 +29,7 @@ use crate::fs::{Fs, IN_HEADER_LEN, Request};
 use crate::opcode::Opcode;
 use crate::reply::{Errno, ReplyDevice, encode_out_header};
 use crate::tokens::Tokens;
-use crate::transport::{DevReader, ReaderEnd, Received, Stop, read_once, serve};
+use crate::transport::{DevReader, Every, ReaderEnd, Received, Stop, read_once, serve};
 
 /// `FUSE_NOTIFY_RESEND`: the notify code of [`Session::resend`].
 const NOTIFY_RESEND: i32 = 7;
@@ -262,17 +262,32 @@ impl Session {
     pub fn serve(self, fs: Arc<dyn Fs>) -> Result<Serving, SessionError> {
         let stop = Arc::new(Stop::default());
         let buf_len = read_buffer_len(&self.negotiated);
+        let every: Vec<Arc<dyn ReplyDevice>> = self
+            .devices
+            .iter()
+            .cloned()
+            .map(|d| -> Arc<dyn ReplyDevice> { d })
+            .collect();
+        let every = Arc::new(Every(every));
         let mut readers = Vec::with_capacity(self.devices.len());
         for (index, device) in self.devices.iter().enumerate() {
-            let (device, fs, tokens, reader_stop) = (
+            let (device, fs, tokens, reader_stop, every) = (
                 device.clone(),
                 fs.clone(),
                 self.tokens.clone(),
                 stop.clone(),
+                every.clone(),
             );
+            let reader = Reader {
+                fs,
+                tokens,
+                stop: reader_stop,
+                every,
+                buf_len,
+            };
             let spawned = std::thread::Builder::new()
                 .name(format!("tsfuse-reader-{index}"))
-                .spawn(move || run_reader(device, &*fs, &tokens, &reader_stop, buf_len));
+                .spawn(move || reader.run(device));
             // On a failure, the readers started so far see the stop and end on their own.
             let handle = spawned.map_err(|source| stop.failed_start(index, source))?;
             readers.push(handle);
@@ -311,22 +326,28 @@ fn read_blocking(device: &DevFd, buf: &mut [u8]) -> Result<usize, SessionError> 
     }
 }
 
-/// The body of a reader thread: its runtime, its transport, its buffer.
-fn run_reader(
-    device: Arc<DevFd>,
-    fs: &dyn Fs,
-    tokens: &Tokens,
-    stop: &Stop,
+/// What a reader thread shares with the session.
+struct Reader {
+    fs: Arc<dyn Fs>,
+    tokens: Tokens,
+    stop: Arc<Stop>,
+    every: Arc<Every>,
     buf_len: usize,
-) -> io::Result<ReaderEnd> {
-    let runtime = tokio::runtime::Builder::new_current_thread()
-        .enable_io()
-        .build()?;
-    runtime.block_on(async {
-        let transport = DevReader::new(device)?;
-        let mut buf = vec![0u8; buf_len];
-        serve(transport, fs, tokens, stop, &mut buf).await
-    })
+}
+
+impl Reader {
+    /// The body of a reader thread: its runtime, its transport, its buffer.
+    fn run(self, device: Arc<DevFd>) -> io::Result<ReaderEnd> {
+        let runtime = tokio::runtime::Builder::new_current_thread()
+            .enable_io()
+            .build()?;
+        runtime.block_on(async {
+            let transport = DevReader::new(device)?;
+            let mut buf = vec![0u8; self.buf_len];
+            let (fs, tokens) = (&*self.fs, &self.tokens);
+            serve(transport, fs, tokens, &self.stop, &self.every, &mut buf).await
+        })
+    }
 }
 
 /// The readers of a session being served.

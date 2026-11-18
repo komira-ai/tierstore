@@ -53,7 +53,8 @@ impl DevFd {
     /// # Errors
     ///
     /// The `open(2)` error, or the ioctl's when this descriptor is not bound to a connection (no
-    /// mount made it: `EPERM` on Linux 7.0, `EINVAL` before; or it is not a FUSE device).
+    /// mount made it, or it is not a FUSE device): `EINVAL` in the upstream source of
+    /// `fuse_dev_ioctl_clone`, `EPERM` as measured on the farm's Ubuntu kernel 7.0.0-42.
     pub fn clone_reader(&self) -> io::Result<Self> {
         self.clone_at(Path::new(DEV_FUSE))
     }

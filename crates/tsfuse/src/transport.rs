@@ -176,6 +176,7 @@ pub(crate) async fn serve<T: Transport>(
     fs: &dyn Fs,
     tokens: &Tokens,
     stop: &Stop,
+    every: &Every,
     buf: &mut [u8],
 ) -> io::Result<ReaderEnd> {
     loop {
@@ -192,18 +193,43 @@ pub(crate) async fn serve<T: Transport>(
             Received::Ended(end) => return Ok(end),
         };
         let device = transport.device();
-        if let Some(end) = route(&buf[..len], device, fs, tokens) {
+        if let Some(end) = route(&buf[..len], device, fs, tokens, every) {
             return Ok(end);
         }
     }
 }
 
-/// Routes one request; `Some` when the reader ends with it (DESTROY).
+/// Every device of a session, as one: a write is tried on each in turn until one takes it.
+///
+/// The `EAGAIN` that answers an INTERRUPT of a request not registered yet goes here. The kernel
+/// looks for the target only in the processing queue of the device the reply is written to, and
+/// with clones the target may sit in another reader's queue, read and not yet registered: of
+/// all the devices exactly that one takes the reply (the others refuse it with `ENOENT`), and
+/// the kernel queues the INTERRUPT again, to be read once the target is registered.
+pub(crate) struct Every(pub(crate) Vec<Arc<dyn ReplyDevice>>);
+
+impl ReplyDevice for Every {
+    /// Writes to each device until one takes the reply; the last refusal if none does.
+    fn send(&self, parts: &[&[u8]]) -> io::Result<()> {
+        let mut last = io::Error::new(io::ErrorKind::NotFound, "a session with no device");
+        for device in &self.0 {
+            match device.send(parts) {
+                Ok(()) => return Ok(()),
+                Err(e) => last = e,
+            }
+        }
+        Err(last)
+    }
+}
+
+/// Routes one request; `Some` when the reader ends with it (DESTROY). `every` is every device
+/// of the session, for the `EAGAIN` of an INTERRUPT whose target is not registered.
 pub(crate) fn route(
     bytes: &[u8],
     device: Arc<dyn ReplyDevice>,
     fs: &dyn Fs,
     tokens: &Tokens,
+    every: &Every,
 ) -> Option<ReaderEnd> {
     let Some(req) = Request::parse(bytes) else {
         // A request whose header is cut short or names a length past the read: answer it if
@@ -225,7 +251,7 @@ pub(crate) fn route(
             // An INTERRUPT with a short body has no target to cancel, and the kernel expects
             // no reply to it.
             if let Ok(Operation::Interrupt(arg)) = Operation::parse(&req) {
-                let _ = tokens.interrupt(arg.unique, unique, &*device);
+                let _ = tokens.interrupt(arg.unique, unique, every);
             }
             None
         }
@@ -252,7 +278,48 @@ pub(crate) fn route(
 
 #[cfg(test)]
 mod tests {
+    use std::sync::Mutex;
+
     use super::*;
+
+    /// A device that takes replies (recording them) or refuses each with `errno`.
+    struct Dev(Option<i32>, Mutex<usize>);
+
+    impl ReplyDevice for Dev {
+        fn send(&self, _parts: &[&[u8]]) -> io::Result<()> {
+            *self
+                .1
+                .lock()
+                .unwrap_or_else(std::sync::PoisonError::into_inner) += 1;
+            self.0
+                .map_or(Ok(()), |e| Err(io::Error::from_raw_os_error(e)))
+        }
+    }
+
+    fn sends(d: &Arc<Dev>) -> usize {
+        *d.1.lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner)
+    }
+
+    #[test]
+    fn every_tries_each_device_until_one_takes_the_reply() {
+        let refuses = Arc::new(Dev(Some(2), Mutex::new(0)));
+        let takes = Arc::new(Dev(None, Mutex::new(0)));
+        let after = Arc::new(Dev(None, Mutex::new(0)));
+        let every = Every(vec![refuses.clone(), takes.clone(), after.clone()]);
+        every.send(&[b"x"]).unwrap();
+        assert_eq!((sends(&refuses), sends(&takes), sends(&after)), (1, 1, 0));
+    }
+
+    #[test]
+    fn every_fails_with_the_last_refusal_when_no_device_takes_it() {
+        let first = Arc::new(Dev(Some(2), Mutex::new(0)));
+        let second = Arc::new(Dev(Some(19), Mutex::new(0)));
+        let every = Every(vec![first, second]);
+        assert_eq!(every.send(&[b"x"]).unwrap_err().raw_os_error(), Some(19));
+        let none = Every(Vec::new()).send(&[b"x"]).unwrap_err();
+        assert_eq!(none.to_string(), "a session with no device");
+    }
 
     #[test]
     fn a_failed_start_stops_the_readers_and_names_the_reader() {

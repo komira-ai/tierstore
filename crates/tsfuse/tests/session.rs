@@ -573,3 +573,37 @@ fn two_readers_of_one_queue_answer_each_request_once() {
     stopper.stop();
     assert_eq!(joined.join().unwrap().unwrap(), vec![ReaderEnd::Stopped; 2]);
 }
+
+#[test]
+fn an_interrupt_of_a_request_not_yet_registered_is_answered_on_the_first_device_that_takes_it() {
+    // With clones the target may sit, read and not yet registered, in another reader's queue,
+    // and the kernel takes the EAGAIN only on that reader's device: it is tried on each device
+    // in turn. Here reader 0's kernel end is gone, so its write fails and reader 1's takes it.
+    let negotiated = *initialised(0).negotiated();
+    let pairs: Vec<(DevFd, Kernel)> = (0..3).map(|_| fake_device()).collect();
+    let (devices, mut kernels): (Vec<DevFd>, Vec<Kernel>) = pairs.into_iter().unzip();
+    let (stopper, joined) = serve(
+        Session::resume(devices, negotiated).unwrap(),
+        Arc::new(TestFs::default()),
+    );
+    drop(kernels.remove(0));
+    kernels[1]
+        .send(&request(
+            36,
+            300 | 1,
+            0,
+            InterruptIn { unique: 999 }.as_bytes(),
+        ))
+        .unwrap();
+    assert_eq!(read_reply(&kernels[0]), (-11, 300 | 1, 16));
+    assert!(
+        !pending(&kernels[1]),
+        "the reader that read it was not written to"
+    );
+
+    stopper.stop();
+    assert_eq!(
+        joined.join().unwrap().unwrap(),
+        vec![ReaderEnd::Unmounted, ReaderEnd::Stopped, ReaderEnd::Stopped]
+    );
+}

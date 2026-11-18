@@ -162,8 +162,8 @@ fn a_stop_leaves_the_mount_and_a_session_resumed_on_the_kept_descriptors_serves_
 #[test]
 fn a_clone_needs_a_device_bound_to_a_connection() {
     with_fuse(|| {
-        // A device no mount made: open(/dev/fuse) succeeds and the ioctl refuses it (EPERM on
-        // the farm's Linux 7.0, EINVAL on older kernels).
+        // A device no mount made: open(/dev/fuse) succeeds and the ioctl refuses it (EINVAL in
+        // the upstream source, EPERM as measured on the farm's Ubuntu kernel 7.0.0-42).
         let unbound = DevFd::open().unwrap();
         let refused = unbound.clone_reader().unwrap_err().raw_os_error();
         assert!(matches!(refused, Some(1 | 22)), "{refused:?}");

@@ -398,8 +398,8 @@ impl Mounter {
         ))
     }
 
-    /// The first descriptor passed on `socket` (`SCM_RIGHTS`), or `None` when the peer closed it
-    /// without one. Any further descriptor, and any other ancillary message (credentials, on a socket
+    /// The first descriptor passed on `socket` (`SCM_RIGHTS`), or `None` when nothing with one is
+    /// queued. Any further descriptor, and any other ancillary message (credentials, on a socket
     /// that asks for them), is dropped.
     fn receive_fd(&self, socket: &OwnedFd) -> Result<Option<OwnedFd>, MountError> {
         let mut byte = [0u8; 1];
@@ -407,8 +407,13 @@ impl Mounter {
             [MaybeUninit::uninit(); rustix::cmsg_space!(ScmRights(1), ScmCredentials(1))];
         let mut control = RecvAncillaryBuffer::new(&mut space);
         let mut iov = [IoSliceMut::new(&mut byte)];
-        let got = rustix::net::recvmsg(socket, &mut iov, &mut control, RecvFlags::CMSG_CLOEXEC);
-        got.map_err(|e| self.socket_error(e.into()))?;
+        // Never waits: the helper has exited, so what it sent is queued, and nothing more comes
+        // even if a child spawned meanwhile by another thread inherited its end of the pair.
+        let flags = RecvFlags::CMSG_CLOEXEC | RecvFlags::DONTWAIT;
+        let _ = match rustix::net::recvmsg(socket, &mut iov, &mut control, flags) {
+            Err(rustix::io::Errno::AGAIN) => return Ok(None),
+            got => got.map_err(|e| self.socket_error(e.into()))?,
+        };
         let mut fds = control.drain().filter_map(|m| match m {
             RecvAncillaryMessage::ScmRights(rights) => Some(rights),
             _ => None,
@@ -640,6 +645,9 @@ mod tests {
         )
         .unwrap();
         assert!(mounter.receive_fd(&ours).unwrap().is_some());
+        // Nothing queued and the peer's end still open (a child inherited it): no wait.
+        let (open, _peer) = socket_pair().unwrap();
+        assert!(mounter.receive_fd(&open).unwrap().is_none());
         // A descriptor that is not a socket: the error names the helper.
         let dir = std::fs::File::open(".").unwrap();
         let err = mounter.receive_fd(&OwnedFd::from(dir)).unwrap_err();
