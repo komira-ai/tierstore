@@ -161,9 +161,12 @@ pub(in crate::server) struct Upstream {
     /// The fills of manifests in flight (see [`Upstream::gate_manifests`]).
     gate: Mutex<Gate>,
     gate_changed: Condvar,
+    /// The pins in flight (see [`Upstream::gate_pins`]).
+    pins: Mutex<Gate>,
+    pins_changed: Condvar,
 }
 
-/// The progress of the fills of manifests, which a test may pace.
+/// The progress of the fills of manifests, or of the pins, which a test may pace.
 #[derive(Default)]
 struct Gate {
     /// Whether a fill of a manifest waits for a permit.
@@ -216,11 +219,14 @@ impl Upstream {
             // `flat` instead.
             "image" => Some("refused unknown request".to_owned()),
             "mounted" => Some("[]".to_owned()),
-            "pin" => Some(
-                locked(&self.pin_answer)
+            "pin" => {
+                Self::enter(&self.pins, &self.pins_changed);
+                let answer = locked(&self.pin_answer)
                     .clone()
-                    .unwrap_or_else(|| format!("ok {} 0 0", words.len() - 3)),
-            ),
+                    .unwrap_or_else(|| format!("ok {} 0 0", words.len() - 3));
+                Self::leave(&self.pins, &self.pins_changed);
+                Some(answer)
+            }
             _ => Some("ok 0".to_owned()),
         }
     }
@@ -273,23 +279,55 @@ impl Upstream {
     }
 
     fn enter_manifest(&self) {
-        let mut gate = locked(&self.gate);
+        Self::enter(&self.gate, &self.gate_changed);
+    }
+
+    fn leave_manifest(&self) {
+        Self::leave(&self.gate, &self.gate_changed);
+    }
+
+    /// Makes every pin received from now on wait for a permit of [`Upstream::permit_pins`].
+    pub(in crate::server) fn gate_pins(&self) {
+        let mut pins = locked(&self.pins);
+        pins.gating = true;
+        pins.given = pins.used;
+    }
+
+    /// Lets `count` more pins go on.
+    pub(in crate::server) fn permit_pins(&self, count: usize) {
+        locked(&self.pins).given += count;
+        self.pins_changed.notify_all();
+    }
+
+    /// The pins received in all.
+    pub(in crate::server) fn pins_received(&self) -> usize {
+        locked(&self.pins).started
+    }
+
+    /// The most pins that were in flight at once.
+    pub(in crate::server) fn most_pins(&self) -> usize {
+        locked(&self.pins).most
+    }
+
+    /// Counts a request received on `gate`, and waits for a permit if the gate is closed.
+    fn enter(gate: &Mutex<Gate>, changed: &Condvar) {
+        let mut gate = locked(gate);
         gate.started += 1;
         gate.in_flight += 1;
         gate.most = gate.most.max(gate.in_flight);
-        self.gate_changed.notify_all();
+        changed.notify_all();
         while gate.gating && gate.used >= gate.given {
-            gate = self
-                .gate_changed
+            gate = changed
                 .wait(gate)
                 .unwrap_or_else(std::sync::PoisonError::into_inner);
         }
         gate.used += 1;
     }
 
-    fn leave_manifest(&self) {
-        locked(&self.gate).in_flight -= 1;
-        self.gate_changed.notify_all();
+    /// Counts a request of `gate` answered.
+    fn leave(gate: &Mutex<Gate>, changed: &Condvar) {
+        locked(gate).in_flight -= 1;
+        changed.notify_all();
     }
 
     /// Makes every fill of a blob wait, once it is received, until [`Upstream::release_fills`]: for
@@ -522,6 +560,8 @@ impl Rig {
             released: Condvar::new(),
             gate: Mutex::new(Gate::default()),
             gate_changed: Condvar::new(),
+            pins: Mutex::new(Gate::default()),
+            pins_changed: Condvar::new(),
         });
         let socket = dir.path().join("fill.sock");
         let fill = FakeFill::start(&socket, Arc::clone(&upstream));
