@@ -104,9 +104,7 @@ impl<B: Backend + 'static> HotNode<B> {
         }
         for seg in writing {
             let closed_at = seg.lock().closed_at;
-            if closed_at.is_some_and(|t| now.saturating_sub(t) >= cfg.replica_stall_ms)
-                && !report.early.contains(&seg.id)
-            {
+            if closed_at.is_some_and(|t| now.saturating_sub(t) >= cfg.replica_stall_ms) {
                 seg.lock().closed_at = Some(now);
                 self.reseal(seg.id, SealReason::Early);
                 report.retried.push(seg.id);
@@ -117,15 +115,15 @@ impl<B: Backend + 'static> HotNode<B> {
             report.retried.push(id);
         }
         let st = n.lock();
-        for tee in st.large.values() {
-            for (node, since) in &tee.blocked {
-                if now.saturating_sub(*since) >= cfg.put_copy_stall_ms
-                    && let Some(signal) = tee.abandon.get(node)
-                {
-                    signal.notify_one();
-                    report.abandoned.push(*node);
-                }
-            }
+        let lagging = st.large.values().flat_map(|tee| {
+            tee.blocked
+                .iter()
+                .filter(|(_, since)| now.saturating_sub(**since) >= cfg.put_copy_stall_ms)
+                .filter_map(|(node, _)| tee.abandon.get(node).map(|signal| (*node, signal)))
+        });
+        for (node, signal) in lagging {
+            signal.notify_one();
+            report.abandoned.push(node);
         }
         report
     }

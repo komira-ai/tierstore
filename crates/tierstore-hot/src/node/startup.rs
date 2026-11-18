@@ -20,7 +20,7 @@ use std::sync::Arc;
 use tierstore_format::names::HotName;
 use tierstore_index::backend::Backend;
 use tierstore_index::blocks::BlockState;
-use tierstore_index::recover::{RecoverError, Recovery, RecoveryReport};
+use tierstore_index::recover::{Recovery, RecoveryReport};
 use tierstore_index::tomblog::TombLog;
 use tierstore_store_api::hot::{HotError, SealReason};
 use tierstore_store_api::sched::DriveClass;
@@ -145,7 +145,7 @@ impl<B: Backend + 'static> HotNode<B> {
             window: super::converge::WINDOW,
         }
         .run(&*self.n.index)
-        .map_err(|e: RecoverError| other_err("index recovery")(e))
+        .map_err(other_err("index recovery"))
     }
 
     /// Whether every segment found at startup is sealed.
