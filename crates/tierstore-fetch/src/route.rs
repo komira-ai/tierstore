@@ -4,7 +4,7 @@
 //!
 //! - **First choice:** healthy before unhealthy (a device `stalled`, `failed`, `down`, `suspect`,
 //!   `out` or `indexing`, or one that answered `503` within the busy window, is unhealthy), then
-//!   a promoted copy, then hot copies, then cold extents and the legacy upstream, then a degraded
+//!   a promoted copy, then hot copies, then cold extents, then a degraded
 //!   read; among equals the lowest advertised queue wait, then the location's order. So a cold
 //!   shard on a stalled drive goes to the reconstructor, and a hot read goes to the least-loaded
 //!   copy.
@@ -82,7 +82,7 @@ fn tier(kind: &SourceKind) -> u8 {
     match kind {
         SourceKind::HotClean { .. } => 0,
         SourceKind::Hot { .. } => 1,
-        SourceKind::Cold { .. } | SourceKind::Legacy => 2,
+        SourceKind::Cold { .. } => 2,
         SourceKind::Degraded { .. } => 3,
     }
 }
@@ -187,7 +187,7 @@ impl Routing<'_> {
                             .iter()
                             .all(|dev| book.get(*dev).drive_queue == Some(0))
                 }
-                SourceKind::Cold { .. } | SourceKind::Legacy => false,
+                SourceKind::Cold { .. } => false,
             };
             allowed && s.device != current.device && book.healthy(s.device, now)
         };

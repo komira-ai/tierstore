@@ -10,8 +10,7 @@ pub enum Medium {
     /// A hot copy: the NVMe of a storage node (LATER) or the SATA SSD partition of a combined node
     /// (NOW). A seek costs nothing, so no gap is read through.
     Hot,
-    /// A cold data shard on a hard drive (SAS on LATER, SMR on NOW), or the legacy upstream, whose
-    /// erasure set is on hard drives too.
+    /// A cold data shard on a hard drive (SAS on LATER, SMR on NOW).
     Cold,
 }
 
@@ -21,7 +20,7 @@ impl Medium {
     pub const fn of(device: DeviceRef) -> Self {
         match device {
             DeviceRef::Hot(_) => Self::Hot,
-            DeviceRef::Drive(..) | DeviceRef::Legacy => Self::Cold,
+            DeviceRef::Drive(..) => Self::Cold,
         }
     }
 }

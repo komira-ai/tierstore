@@ -37,12 +37,13 @@ use tierstore_fetch_api::entry::{ClaimedCell, Entry};
 use tierstore_fetch_api::ids::{ByteRange, Class, JobId, Rank};
 use tierstore_fetch_api::upstream::{Report, Source, SourceKind};
 use tierstore_fetch_api::verify::Verdict;
+use tierstore_format::ids::Generation;
 use tokio::sync::mpsc;
 use tokio::task::JoinHandle;
 
 use crate::attempt::{Attempt, Event, Fail, FailKind};
 use crate::baseline::timeout;
-use crate::engine::{ALL_CLASSES, Armed, Dispatch, Inner, runs_of};
+use crate::engine::{ALL_CLASSES, Armed, Claimed, Dispatch, Inner, runs_of};
 use crate::fill::{Fill, Phase, Resolved};
 use crate::plan::{CELL_BYTES, size_class};
 use crate::route::Routing;
@@ -73,6 +74,8 @@ struct Op {
     entry: Arc<dyn Entry>,
     id: u64,
     life: u64,
+    /// The fill's pinned generation when the item was claimed: the `If-Match` of every part.
+    generation: Generation,
     class: Class,
     job: JobId,
     rank: Rank,
@@ -88,16 +91,20 @@ struct Op {
     timers: Vec<JoinHandle<()>>,
 }
 
-/// Runs the op of a dispatched item whose cells `tokens` were claimed, under `permit`.
+/// Runs the op of a dispatched item whose cells were `claimed`, under `permit`.
 pub(crate) async fn run(
     inner: Arc<Inner>,
     d: Dispatch,
-    id: u64,
-    entry: Arc<dyn Entry>,
+    claimed: Claimed,
     kind: GetKind,
-    tokens: BTreeMap<u32, ClaimedCell>,
     permit: Permit,
 ) {
+    let Claimed {
+        op: id,
+        entry,
+        generation,
+        tokens,
+    } = claimed;
     let (tx, rx) = mpsc::channel(2);
     let mut op = Op {
         inner,
@@ -105,6 +112,7 @@ pub(crate) async fn run(
         entry,
         id,
         life: d.life,
+        generation,
         class: d.class,
         job: d.job,
         rank: d.rank,
@@ -196,6 +204,7 @@ impl Op {
             attempt,
             cells: cells.clone(),
             source: source.clone(),
+            generation: self.generation,
             kind,
             class,
             job: self.job,

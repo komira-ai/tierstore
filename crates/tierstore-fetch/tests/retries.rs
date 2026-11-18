@@ -92,17 +92,15 @@ fn replicas(rig: &Rig, pack: &Pack) {
     let size = pack.spec.size;
     rig.upstream.add(
         pack,
-        location(Some(generation(1)), size, vec![hot(1, size), hot(2, size)]),
+        location(generation(1), size, vec![hot(1, size), hot(2, size)]),
     );
 }
 
 /// `pack` held by `h1` alone.
 fn single(rig: &Rig, pack: &Pack) {
     let size = pack.spec.size;
-    rig.upstream.add(
-        pack,
-        location(Some(generation(1)), size, vec![hot(1, size)]),
-    );
+    rig.upstream
+        .add(pack, location(generation(1), size, vec![hot(1, size)]));
 }
 
 async fn wait_all(rig: &Rig, pack: &Pack) -> WaitOutcome {
@@ -743,7 +741,7 @@ async fn stalls_on_two_different_drives_are_each_retried_at_once() {
     rig.upstream.add(
         &pack,
         location(
-            Some(generation(1)),
+            generation(1),
             pack.spec.size,
             vec![hot(1, 4 * MIB), second_half],
         ),
@@ -813,7 +811,7 @@ async fn a_stalled_cold_shard_is_retried_as_a_degraded_read() {
     rig.upstream.add(
         &pack,
         location(
-            Some(generation(1)),
+            generation(1),
             size,
             vec![cold(1, 5, 0, size), degraded(9, &sources, 0, size)],
         ),

@@ -23,7 +23,6 @@ root = "/var/lib/tierstore-cache"     # the SSD cache partition (section 11)
 
 [store]
 kind = "tiered"
-legacy_upstream = "<silo S3 endpoint>"      # read-only, during the migration (10.10)
 
 [hot]                                 # SATA SSD partition
 dir = "/var/lib/ts-hot"
@@ -40,7 +39,7 @@ dirty_reject = 0.90
 promo_share = 0.10                    # the build cache beside it absorbs most repeat reads
 
 [cold]
-drives = ["/mnt/hdd1", "/mnt/hdd2"]   # silo's xfs; the tier writes under ts-cold/
+drives = ["/mnt/hdd1", "/mnt/hdd2"]   # the SMR drives' xfs; the tier writes under ts-cold/
 block_bytes = "1GiB"
 failure_domain = "node"
 ec = { k = 4, m = 2 }
@@ -58,6 +57,6 @@ partial_after = "3d"
 node_down_after = "24h"
 share = 0.25
 
-[drive]                               # SMR, shared with silo: one stream until T0-F says otherwise
+[drive]                               # SMR: one stream until T0-F says otherwise
 streams = 1
 write_streams = 1

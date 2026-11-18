@@ -5,7 +5,7 @@
 //! parses), which drive states are load signals, and the exact text of every `UpstreamError`.
 //!
 //! Catches:
-//! - a legacy device attributed to a node, or a drive to the wrong node;
+//! - a device attributed to the wrong node;
 //! - a degraded read that charges less (or more) than `k`, or a plain read that charges other than 1;
 //! - a drive state header that does not round trip, collides, or parses from a miscased value;
 //! - `stalled` or `indexing` counted as a load signal, or any other state not;
@@ -48,18 +48,17 @@ fn key() -> PackKey {
 }
 
 #[test]
-fn a_device_belongs_to_its_storage_node_and_the_legacy_one_to_none() {
+fn a_device_belongs_to_its_storage_node() {
     let d = DriveId([7; 16]);
-    assert_eq!(DeviceRef::Hot(NodeId(3)).node(), Some(NodeId(3)));
-    assert_eq!(DeviceRef::Drive(NodeId(4), d).node(), Some(NodeId(4)));
-    assert_eq!(DeviceRef::Legacy.node(), None);
+    assert_eq!(DeviceRef::Hot(NodeId(3)).node(), NodeId(3));
+    assert_eq!(DeviceRef::Drive(NodeId(4), d).node(), NodeId(4));
 }
 
 #[test]
-fn devices_order_hot_before_drive_before_legacy_and_by_node() {
+fn devices_order_hot_before_drive_and_by_node() {
     let d = DriveId([0; 16]);
     assert!(DeviceRef::Hot(NodeId(9)) < DeviceRef::Drive(NodeId(0), d));
-    assert!(DeviceRef::Drive(NodeId(9), d) < DeviceRef::Legacy);
+    assert!(DeviceRef::Drive(NodeId(1), d) < DeviceRef::Drive(NodeId(2), d));
     assert!(DeviceRef::Hot(NodeId(1)) < DeviceRef::Hot(NodeId(2)));
 }
 
@@ -96,7 +95,6 @@ fn every_other_source_charges_one_stream() {
             shard: "s".into(),
             offset: 3,
         },
-        SourceKind::Legacy,
     ] {
         assert_eq!(source(kind).charge(), 1);
     }
@@ -160,9 +158,12 @@ fn drive_signals_default_to_nothing_said() {
 #[test]
 fn a_located_answer_compares_by_what_it_carries() {
     let loc = Location {
-        generation: Some(Generation([1; 16])),
+        generation: Generation([1; 16]),
         size: Some(10),
-        sources: vec![source(SourceKind::Legacy)],
+        sources: vec![source(SourceKind::Hot {
+            file: "seg".into(),
+            offset: 0,
+        })],
         conflicts: vec![Generation([2; 16])],
     };
     let found = Located::Found(loc.clone());
@@ -178,30 +179,33 @@ fn a_located_answer_compares_by_what_it_carries() {
 fn a_get_request_compares_by_what_it_carries() {
     let req = GetRequest {
         key: key(),
-        source: source(SourceKind::Legacy),
+        source: source(SourceKind::HotClean {
+            file: "cache".into(),
+            offset: 0,
+        }),
         range: range(),
-        generation: None,
+        generation: Generation([2; 16]),
         class: Class::Demand,
         job: JobId(1),
         rank: Rank(0),
     };
     let mut other = req.clone();
     assert_eq!(req, other);
-    other.generation = Some(Generation([3; 16]));
+    other.generation = Generation([3; 16]);
     assert_ne!(req, other);
 }
 
 #[test]
 fn every_upstream_error_names_the_object_the_device_and_the_reason() {
     let k = key();
-    let dev = DeviceRef::Legacy;
+    let dev = DeviceRef::Hot(NodeId(5));
     assert_eq!(
         UpstreamError::NotFound {
             key: k.clone(),
             device: dev
         }
         .to_string(),
-        "PackKey(\"k\"): not found at Legacy"
+        "PackKey(\"k\"): not found at Hot(NodeId(5))"
     );
     assert_eq!(
         UpstreamError::PreconditionFailed {
@@ -220,7 +224,7 @@ fn every_upstream_error_names_the_object_the_device_and_the_reason() {
             signals: DriveSignals::default()
         }
         .to_string(),
-        "PackKey(\"k\"): Legacy unavailable (retry after 250 ms, DriveSignals { queue_wait_ms: None, service_ms: None, drive_queue: None, drive_state: None })"
+        "PackKey(\"k\"): Hot(NodeId(5)) unavailable (retry after 250 ms, DriveSignals { queue_wait_ms: None, service_ms: None, drive_queue: None, drive_state: None })"
     );
     assert_eq!(
         UpstreamError::Corrupt {
@@ -229,7 +233,7 @@ fn every_upstream_error_names_the_object_the_device_and_the_reason() {
             offset: 1_048_576
         }
         .to_string(),
-        "PackKey(\"k\"): Legacy found a crc mismatch at 1048576"
+        "PackKey(\"k\"): Hot(NodeId(5)) found a crc mismatch at 1048576"
     );
     assert_eq!(
         UpstreamError::Transport {
@@ -238,7 +242,7 @@ fn every_upstream_error_names_the_object_the_device_and_the_reason() {
             reason: "connection reset".into()
         }
         .to_string(),
-        "PackKey(\"k\"): transport to Legacy: connection reset"
+        "PackKey(\"k\"): transport to Hot(NodeId(5)): connection reset"
     );
 }
 

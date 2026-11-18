@@ -20,6 +20,7 @@ use tierstore_fetch_api::ids::{ByteRange, CellRun, Class, JobId, PackId, Rank};
 use tierstore_fetch_api::page::CELL_SHIFT;
 use tierstore_fetch_api::upstream::{DeviceRef, DriveSignals, Source, SourceKind, Upstream};
 use tierstore_fetch_api::verify::Verifier;
+use tierstore_format::ids::Generation;
 use tokio::runtime::Handle;
 use tokio::sync::{Notify, watch};
 use tokio::task::JoinHandle;
@@ -131,7 +132,7 @@ impl Inner {
             class,
             parts: source.charge(),
             devices,
-            node: source.device.node(),
+            node: Some(source.device.node()),
         }
     }
 }
@@ -593,8 +594,7 @@ fn pick(inner: &Arc<Inner>, class: Class) -> Option<Dispatch> {
         source,
         charge,
     };
-    // The queue was made before this item was picked: what the fill queues now may differ (a
-    // fill with no pinned generation queues nothing more while its first part is out, 9).
+    // The queue was made before this item was picked: what the fill queues now may differ.
     st.refresh(d.fill.seq, &inner.config);
     Some(d)
 }
@@ -605,14 +605,20 @@ async fn acquire_and_run(inner: Arc<Inner>, d: Dispatch) {
     let claimed = claim(&inner, &d);
     inner.wake_classes(1 << class_index(d.class));
     inner.bump();
-    if let Some((op, entry, tokens)) = claimed {
+    if let Some(claimed) = claimed {
         let kind = [GetKind::GridPart, GetKind::DemandSub][usize::from(d.item & SUB_ITEM != 0)];
-        crate::op::run(inner, d, op, entry, kind, tokens, permit).await;
+        crate::op::run(inner, d, claimed, kind, permit).await;
     }
 }
 
-/// What a dispatched item claimed: its op, the entry, and the claim tokens.
-type Claimed = (u64, Arc<dyn Entry>, BTreeMap<u32, ClaimedCell>);
+/// What a dispatched item claimed: its op, the entry, the fill's pinned generation (the
+/// `If-Match` of every part the op asks for), and the claim tokens.
+pub(crate) struct Claimed {
+    pub op: u64,
+    pub entry: Arc<dyn Entry>,
+    pub generation: Generation,
+    pub tokens: BTreeMap<u32, ClaimedCell>,
+}
 
 /// After the permit: the item's still-pending cells, claimed, and the op that owns them.
 fn claim(inner: &Arc<Inner>, d: &Dispatch) -> Option<Claimed> {
@@ -631,8 +637,8 @@ fn claim(inner: &Arc<Inner>, d: &Dispatch) -> Option<Claimed> {
             true => fs.claimable(d.item),
             false => Vec::new(),
         };
-        // A fill with claimable cells is ready, so its entry is open.
-        for entry in d.fill.entry.get().into_iter() {
+        // A fill with claimable cells is ready, so its entry is open and its generation pinned.
+        for (entry, generation) in d.fill.entry.get().zip(fs.pinned).into_iter() {
             let mut tokens = BTreeMap::new();
             for run in runs_of(&cells) {
                 for t in entry.claim(run) {
@@ -642,7 +648,12 @@ fn claim(inner: &Arc<Inner>, d: &Dispatch) -> Option<Claimed> {
             }
             if !tokens.is_empty() {
                 fs.ops.insert(op, d.class);
-                claimed = Some((op, entry.clone(), tokens));
+                claimed = Some(Claimed {
+                    op,
+                    entry: entry.clone(),
+                    generation,
+                    tokens,
+                });
             }
         }
     }

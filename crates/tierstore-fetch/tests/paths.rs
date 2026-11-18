@@ -55,7 +55,7 @@ fn two_copies(rig: &Rig, pack: &Pack) {
     let size = pack.spec.size;
     rig.upstream.add(
         pack,
-        location(Some(generation(1)), size, vec![hot(1, size), hot(2, size)]),
+        location(generation(1), size, vec![hot(1, size), hot(2, size)]),
     );
 }
 
@@ -208,7 +208,7 @@ async fn a_location_with_no_copy_fails_the_fill() {
     let rig = Rig::default_rig();
     let pack = Pack::new("p", 2 * MIB, 6);
     rig.upstream
-        .add(&pack, location(Some(generation(1)), pack.spec.size, vec![]));
+        .add(&pack, location(generation(1), pack.spec.size, vec![]));
     let out = rig.engine.wait(&pack.spec, pack.all(), JobId(1)).await;
     assert_eq!(out, WaitOutcome::Eio { cell: 0 });
     let s = rig.engine.stats();
@@ -283,10 +283,7 @@ async fn a_part_whose_cells_a_demand_took_while_it_waited_for_its_permit_claims_
     let up = Arc::new(TestUpstream::new());
     let pack = Pack::new("p", 8 * MIB, 8);
     let size = pack.spec.size;
-    up.add(
-        &pack,
-        location(Some(generation(1)), size, vec![hot(1, size)]),
-    );
+    up.add(&pack, location(generation(1), size, vec![hot(1, size)]));
     let gate = Arc::new(Semaphore::new(0));
     up.script(hot(1, 0).device, Script::Gated(gate.clone()));
     let (e, store, budget) = demand_first(&up);
@@ -322,7 +319,7 @@ async fn parts_of_a_fill_lost_meanwhile_stop_and_start_nothing() {
     let up = Arc::new(TestUpstream::new());
     let pack = Pack::new("p", 12 * MIB, 9);
     let size = pack.spec.size;
-    let loc = location(Some(generation(1)), size, vec![hot(1, size)]);
+    let loc = location(generation(1), size, vec![hot(1, size)]);
     up.add(&pack, loc.clone());
     up.script_locate(&pack.key(), Ok(Located::Found(loc)));
     up.script_locate(&pack.key(), Ok(Located::DefinitiveMiss));
@@ -448,14 +445,14 @@ async fn a_copy_that_404s_while_locate_still_names_it_fails_the_fill_after_one_m
     let size = pack.spec.size;
     rig.upstream.add(
         &pack,
-        location(Some(generation(1)), size, vec![support::legacy(size)]),
+        location(generation(1), size, vec![support::hot(1, size)]),
     );
     let gone = UpstreamError::NotFound {
         key: pack.key(),
-        device: support::legacy(0).device,
+        device: support::hot(1, 0).device,
     };
     rig.upstream
-        .script(support::legacy(0).device, Script::Fail(gone));
+        .script(support::hot(1, 0).device, Script::Fail(gone));
     let out = rig.engine.wait(&pack.spec, pack.all(), JobId(1)).await;
     assert_eq!(out, WaitOutcome::Eio { cell: 0 });
     let s = rig.engine.stats();
@@ -473,10 +470,8 @@ async fn retries_after_a_second_relocation_back_off() {
     let rig = Rig::new(8, config);
     let pack = Pack::new("p", 2 * MIB, 14);
     let size = pack.spec.size;
-    rig.upstream.add(
-        &pack,
-        location(Some(generation(1)), size, vec![hot(1, size)]),
-    );
+    rig.upstream
+        .add(&pack, location(generation(1), size, vec![hot(1, size)]));
     let reset = || {
         Script::Fail(UpstreamError::Transport {
             key: pack.key(),

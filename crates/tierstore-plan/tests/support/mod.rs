@@ -52,7 +52,6 @@ pub fn pack(key: &str, size: u64) -> PackRecord {
         cell_count: u32::try_from(size.div_ceil(MIB)).unwrap(),
         cell_shift: 20,
         pack_flags: 0,
-        upload_part_size: 0,
     }
 }
 

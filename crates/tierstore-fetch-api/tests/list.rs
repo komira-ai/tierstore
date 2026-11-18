@@ -78,7 +78,6 @@ fn a_pack_record_and_a_node_index_compare_by_value() {
         cell_count: 1,
         cell_shift: 20,
         pack_flags: PACK_FULLY_COVERED,
-        upload_part_size: 0,
     };
     let mut other = rec.clone();
     assert_eq!(rec, other);

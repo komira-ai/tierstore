@@ -416,10 +416,7 @@ fn node_answers_become_locations_and_failures_no_answer() {
     let NodeAnswer::Hit(hot) = ask("hot") else {
         panic!("hot is a hit")
     };
-    assert_eq!(
-        (hot.generation, hot.size),
-        (Some(sample_generation()), Some(3))
-    );
+    assert_eq!((hot.generation, hot.size), (sample_generation(), Some(3)));
     assert_eq!(
         hot.sources,
         vec![

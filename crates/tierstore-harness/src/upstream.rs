@@ -192,7 +192,7 @@ fn build(
         key: req.key.clone(),
         device: req.source.device,
     })?;
-    if generation.is_none() && req.generation.is_some_and(|g| g != object.generation) {
+    if generation.is_none() && req.generation != object.generation {
         return Err(UpstreamError::PreconditionFailed {
             key: req.key.clone(),
             device: req.source.device,

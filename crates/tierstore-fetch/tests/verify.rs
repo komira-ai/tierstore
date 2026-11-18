@@ -83,7 +83,7 @@ async fn a_corrupt_cell_is_refetched_once_from_the_other_hot_replica() {
     let size = pack.spec.size;
     rig.upstream.add(
         &pack,
-        location(Some(generation(1)), size, vec![hot(1, size), hot(2, size)]),
+        location(generation(1), size, vec![hot(1, size), hot(2, size)]),
     );
     rig.upstream.script(H1, Script::Corrupt(BAD_AT));
     let (out, seen) = tokio::join!(
@@ -123,7 +123,7 @@ async fn a_corrupt_cell_from_a_cold_source_is_refetched_by_a_degraded_read() {
     rig.upstream.add(
         &pack,
         location(
-            Some(generation(1)),
+            generation(1),
             size,
             vec![cold(1, 1, 0, size), reconstruct.clone()],
         ),
@@ -151,10 +151,8 @@ async fn single_copy_corrupt_twice() -> (Rig, Pack, WaitOutcome) {
     let rig = Rig::default_rig();
     let pack = Pack::new("single-copy", 4 * MIB, 3);
     let size = pack.spec.size;
-    rig.upstream.add(
-        &pack,
-        location(Some(generation(1)), size, vec![hot(1, size)]),
-    );
+    rig.upstream
+        .add(&pack, location(generation(1), size, vec![hot(1, size)]));
     rig.upstream.script(H1, Script::Corrupt(BAD_AT));
     rig.upstream.script(H1, Script::Corrupt(BAD_AT));
     let out = rig.engine.wait(&pack.spec, pack.all(), JOB).await;
@@ -216,7 +214,7 @@ async fn a_cell_corrupt_on_both_replicas_is_reported_against_each_and_marked_bad
     let size = pack.spec.size;
     rig.upstream.add(
         &pack,
-        location(Some(generation(1)), size, vec![hot(1, size), hot(2, size)]),
+        location(generation(1), size, vec![hot(1, size), hot(2, size)]),
     );
     rig.upstream.script(H1, Script::Corrupt(BAD_AT));
     rig.upstream.script(H2, Script::Corrupt(BAD_AT));
@@ -269,7 +267,7 @@ async fn a_crc_failure_reported_by_the_node_for_a_digest_none_object_goes_to_the
     let size = pack.spec.size;
     rig.upstream.add(
         &pack,
-        location(Some(generation(7)), size, vec![hot(1, size), hot(2, size)]),
+        location(generation(7), size, vec![hot(1, size), hot(2, size)]),
     );
     rig.upstream.script(H1, corrupt(&pack, H1));
     let (out, seen) = tokio::join!(
@@ -304,7 +302,7 @@ async fn a_crc_failure_on_a_cold_digest_none_object_is_served_by_degraded_read()
     rig.upstream.add(
         &pack,
         location(
-            Some(generation(7)),
+            generation(7),
             size,
             vec![cold(1, 1, 0, size), reconstruct.clone()],
         ),
@@ -326,10 +324,8 @@ async fn a_digest_none_cell_the_node_reports_corrupt_twice_is_bad_and_the_others
     let rig = Rig::default_rig();
     let pack = Pack::etag("etag-single", 4 * MIB, 7, generation(7));
     let size = pack.spec.size;
-    rig.upstream.add(
-        &pack,
-        location(Some(generation(7)), size, vec![hot(1, size)]),
-    );
+    rig.upstream
+        .add(&pack, location(generation(7), size, vec![hot(1, size)]));
     rig.upstream.script(H1, corrupt(&pack, H1));
     rig.upstream.script(H1, corrupt(&pack, H1));
     let out = rig.engine.wait(&pack.spec, pack.all(), JOB).await;
@@ -370,10 +366,8 @@ async fn a_recheck_cell_with_matching_bytes_becomes_present_without_a_get() {
     let rig = Rig::default_rig();
     let pack = Pack::new("recheck-match", 2 * MIB, 8);
     let size = pack.spec.size;
-    rig.upstream.add(
-        &pack,
-        location(Some(generation(1)), size, vec![hot(1, size)]),
-    );
+    rig.upstream
+        .add(&pack, location(generation(1), size, vec![hot(1, size)]));
     restore_recheck(&rig, &pack, &pack.bytes[..MIB as usize]);
     let out = rig.engine.wait(&pack.spec, pack.range(0, MIB), JOB).await;
     assert_eq!(out, WaitOutcome::Ready);
@@ -394,10 +388,8 @@ async fn a_recheck_cell_with_wrong_bytes_is_fetched_again() {
     let rig = Rig::default_rig();
     let pack = Pack::new("recheck-wrong", 2 * MIB, 9);
     let size = pack.spec.size;
-    rig.upstream.add(
-        &pack,
-        location(Some(generation(1)), size, vec![hot(1, size)]),
-    );
+    rig.upstream
+        .add(&pack, location(generation(1), size, vec![hot(1, size)]));
     restore_recheck(&rig, &pack, &pattern(MIB, 200));
     let out = rig.engine.wait(&pack.spec, pack.range(0, MIB), JOB).await;
     assert_eq!(out, WaitOutcome::Ready);
@@ -416,10 +408,8 @@ async fn a_recheck_cell_of_a_digest_none_pack_is_fetched_again() {
     let rig = Rig::default_rig();
     let pack = Pack::etag("etag-recheck", 2 * MIB, 10, generation(7));
     let size = pack.spec.size;
-    rig.upstream.add(
-        &pack,
-        location(Some(generation(7)), size, vec![hot(1, size)]),
-    );
+    rig.upstream
+        .add(&pack, location(generation(7), size, vec![hot(1, size)]));
     restore_recheck(&rig, &pack, &pack.bytes[..MIB as usize]);
     let out = rig.engine.wait(&pack.spec, pack.range(0, MIB), JOB).await;
     assert_eq!(out, WaitOutcome::Ready);
@@ -450,10 +440,8 @@ async fn a_cell_the_list_has_no_digest_for_fails_verification() {
         }),
         pack: 0,
     });
-    rig.upstream.add(
-        &pack,
-        location(Some(generation(1)), size, vec![hot(1, size)]),
-    );
+    rig.upstream
+        .add(&pack, location(generation(1), size, vec![hot(1, size)]));
     let (two, three) = tokio::join!(
         rig.engine.wait(&pack.spec, pack.range(2 * MIB, MIB), JOB),
         rig.engine.wait(&pack.spec, pack.range(3 * MIB, MIB), JOB)
