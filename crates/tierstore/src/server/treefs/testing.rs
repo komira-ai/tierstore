@@ -286,9 +286,11 @@ impl Upstream {
         Self::leave(&self.gate, &self.gate_changed);
     }
 
-    /// Makes every pin wait, once it is received, for a permit of [`Upstream::permit_pins`].
+    /// Makes every pin received from now on wait for a permit of [`Upstream::permit_pins`].
     pub(in crate::server) fn gate_pins(&self) {
-        locked(&self.pins).gating = true;
+        let mut pins = locked(&self.pins);
+        pins.gating = true;
+        pins.given = pins.used;
     }
 
     /// Lets `count` more pins go on.

@@ -456,6 +456,8 @@ fn last_releases_return_while_the_file_is_written_and_the_next_write_has_them_al
     let (table, lines) = adopted(&dir, &kernel, 1200);
     let (gone, rest) = lines.split_first().unwrap();
     let (releasing, fifo, first) = release_into_fifo(&dir, &table, gone);
+    // The release returns while its write is held: a regression fails here, not hangs.
+    until(|| releasing.is_finished());
     releasing.join().unwrap();
 
     let later = release_each(&table, &rest[..8]);
@@ -488,6 +490,8 @@ fn first_opens_during_a_write_return_once_the_next_write_holds_their_ids() {
     let (table, lines) = adopted(&dir, &kernel, 1200);
     let (gone, rest) = lines.split_first().unwrap();
     let (releasing, fifo, first) = release_into_fifo(&dir, &table, gone);
+    // The release returns while its write is held: a regression fails here, not hangs.
+    until(|| releasing.is_finished());
     releasing.join().unwrap();
 
     let blobs: Vec<TreeDigest> = (0..8).map(|n| blob(&format!("new {n}"))).collect();
