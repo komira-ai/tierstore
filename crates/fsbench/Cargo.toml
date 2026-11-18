@@ -1,0 +1,35 @@
+[package]
+name = "fsbench"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+repository.workspace = true
+publish = false
+description = "The FUSE benchmark of tierstore fs: open/read/close processes over a real tree beside CPU burners, and a null file system to compare it with."
+
+# The harness is Linux only: it reads /proc and /sys and mounts FUSE. On another system the
+# binary says so and exits 2 (src/main.rs).
+[target.'cfg(target_os = "linux")'.dependencies]
+# The command line of `fsbench`.
+clap.workspace = true
+# The null file system (`fsbench null-fs`): the same FUSE library, at the same commit, as
+# `tierstore fs`, so the control differs from tierstore in what it serves alone.
+fuser.workspace = true
+# The digest of a file list, written lowercase.
+hex.workspace = true
+# `posix_fadvise` (a cold read), `stat` (the device of a mount) and the clock ticks of /proc.
+rustix = { workspace = true, features = ["fs", "param", "process"] }
+# The records of a run (one JSON object per line) and the messages between the processes.
+serde.workspace = true
+serde_json.workspace = true
+# The digest of a file list and of the server's executable, recorded with every run.
+sha2.workspace = true
+thiserror.workspace = true
+
+[target.'cfg(target_os = "linux")'.dev-dependencies]
+# Scratch directories of the tests.
+tierstore-testkit.workspace = true
+
+[lints]
+workspace = true

@@ -932,6 +932,21 @@ dependencies = [
 ]
 
 [[package]]
+name = "fsbench"
+version = "0.1.0"
+dependencies = [
+ "clap",
+ "fuser",
+ "hex",
+ "rustix",
+ "serde",
+ "serde_json",
+ "sha2 0.11.0",
+ "thiserror",
+ "tierstore-testkit",
+]
+
+[[package]]
 name = "fuser"
 version = "0.18.0"
 source = "git+https://github.com/komira-ai/fuser?rev=0d8f5da4102a043484f52712df33df4e23f83430#0d8f5da4102a043484f52712df33df4e23f83430"
