@@ -73,8 +73,8 @@ pub enum RecordError {
     /// A mode text that is not one to four octal digits.
     #[error("bad mode {0:?}")]
     BadMode(String),
-    /// A name, or the name in a path, that is empty, `.`, `..`, has a `/` or a NUL, or begins
-    /// `.wh.`; the text is the entry's path.
+    /// A name, or the name in a path, that is empty, `.`, `..`, or has a `/` or a NUL; the text is
+    /// the entry's path.
     #[error("unsupported entry name in {0:?}")]
     UnsupportedName(String),
     /// A name that does not sort after the one ahead of it (or equals it).

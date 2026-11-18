@@ -267,24 +267,12 @@ fn bytes_that_are_not_a_manifest_are_malformed() {
     ));
 }
 
-/// A name that is empty, `.`, `..`, has a `/` or a NUL, or begins `.wh.` is refused by name in a
-/// child of every kind.
+/// A name that is empty, `.`, `..`, or has a `/` or a NUL is refused by name in a child of every
+/// kind.
 #[test]
 fn an_unsupported_name_is_refused_in_every_kind() {
     let sub = TreeDigest::of(b"x");
-    for bad in [
-        "",
-        ".",
-        "..",
-        "a/b",
-        "/",
-        "a/",
-        "a\u{0}b",
-        "\u{0}",
-        ".wh.",
-        ".wh.x",
-        ".wh..wh.y",
-    ] {
+    for bad in ["", ".", "..", "a/b", "/", "a/", "a\u{0}b", "\u{0}"] {
         for child in [dir(bad, &sub), file(bad, 1), link(bad, "t")] {
             let err = parse(&manifest(&[child])).unwrap_err();
             assert_eq!(err, TreeError::UnsupportedName(bad.to_string()), "{bad:?}");
@@ -293,13 +281,26 @@ fn an_unsupported_name_is_refused_in_every_kind() {
     }
 }
 
-/// Names that look like the forbidden ones but are not are accepted.
+/// Names that look like the forbidden ones but are not are accepted, and so are the names of an
+/// OCI layer's whiteouts (`.wh.<name>`, `.wh..wh..opq`), which are plain entries of a tree.
 #[test]
 fn names_near_the_forbidden_ones_are_accepted() {
-    let all: Vec<String> = ["...", ".w", ".wh", ".whx", "a b", "a\\b", "é", "~"]
-        .iter()
-        .map(|n| link(n, "t"))
-        .collect();
+    let all: Vec<String> = [
+        "...",
+        ".w",
+        ".wh",
+        ".whx",
+        "a b",
+        "a\\b",
+        "é",
+        "~",
+        ".wh.",
+        ".wh.ssl",
+        ".wh..wh..opq",
+    ]
+    .iter()
+    .map(|n| link(n, "t"))
+    .collect();
     // They are not in order as listed; sort the manifest's way.
     let mut sorted = all.clone();
     sorted.sort_by_key(|c| {
@@ -307,7 +308,45 @@ fn names_near_the_forbidden_ones_are_accepted() {
         value["name"].as_str().unwrap().to_string()
     });
     let parsed = parse(&manifest(&sorted)).unwrap();
-    assert_eq!(parsed.children.len(), 8);
+    assert_eq!(parsed.children.len(), 11);
+}
+
+/// The whiteout names of an OCI layer, the files a build that makes a layer writes, are read as
+/// the entries they are, in a child of every kind and with the name as written: an opaque marker
+/// as a directory, a whiteout as a file, another as a link.
+#[test]
+fn whiteout_names_are_entries_of_every_kind() {
+    let sub = TreeDigest::of(b"x");
+    let text = manifest(&[
+        dir(".wh..wh..opq", &sub),
+        file(".wh.ssl", 0),
+        link(".wh.x", "t"),
+    ]);
+    let parsed = parse(&text).unwrap();
+    let read: Vec<(&str, &EntryKind)> = parsed
+        .children
+        .iter()
+        .map(|child| (&*child.name, &child.kind))
+        .collect();
+    assert_eq!(read.len(), 3);
+    assert_eq!(read[0].0, ".wh..wh..opq");
+    assert!(
+        matches!(read[0].1, EntryKind::Dir { .. }),
+        "{:?}",
+        read[0].1
+    );
+    assert_eq!(read[1].0, ".wh.ssl");
+    assert!(
+        matches!(read[1].1, EntryKind::File { .. }),
+        "{:?}",
+        read[1].1
+    );
+    assert_eq!(read[2].0, ".wh.x");
+    assert!(
+        matches!(read[2].1, EntryKind::Symlink { .. }),
+        "{:?}",
+        read[2].1
+    );
 }
 
 /// Children must be sorted bytewise: a name that sorts before the one ahead is refused, and so

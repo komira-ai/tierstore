@@ -18,7 +18,7 @@ A manifest is a JSON object:
 
 - `v` is the number 1. Any other value is refused: `unsupported manifest version`.
 - `children` is sorted by `name`, bytewise on the UTF-8 bytes, strictly: a name that sorts before the one ahead of it is refused as `entries not sorted by name`, a repeated name as `duplicate entry name`.
-- A `name` is not empty, not `.` or `..`, has no `/` and no NUL, and does not begin `.wh.`. Otherwise: `unsupported entry name`.
+- A `name` is not empty, not `.` or `..`, and has no `/` and no NUL. Otherwise: `unsupported entry name`. A name beginning `.wh.` is a name like any other: the whiteouts of an OCI layer (`.wh.<name>`, `.wh..wh..opq`) are plain files that a build making a layer writes, and a later action reads them as its inputs. The job's overlay above a tree keeps its own whiteouts as character devices and extended attributes, never as names.
 - Every `sha256` is 64 lowercase hex digits. Otherwise: `malformed digest`.
 - A reader ignores fields it does not know, at every level.
 
@@ -72,7 +72,7 @@ The object is JSON Lines: each line one JSON object, ended by `\n`, with no othe
 
 - The header's `format` is `tierstore.tree-list` and its `version` is 1. Any other format is refused `unknown format`, any other version `unsupported version`.
 - The entries are sorted by `path`, bytewise, with no path twice: a path that sorts before the one of the line before is refused `not sorted`, a repeated one `duplicate path`.
-- A `path` is `/`-separated names from the root of the tree: at most 4096 bytes, each name at most 255 bytes, not empty, not `.` or `..`, with no NUL, and not beginning `.wh.`. Otherwise: `bad path`. Every directory a path implies need not be listed; one is listed only when it is empty or its mode is not 0755.
+- A `path` is `/`-separated names from the root of the tree: at most 4096 bytes, each name at most 255 bytes, not empty, not `.` or `..`, and with no NUL. Otherwise: `bad path`. Every directory a path implies need not be listed; one is listed only when it is empty or its mode is not 0755.
 - A `mode` is a number, the permission bits with setuid, setgid and sticky: 0 to 4095 (07777). Anything above is refused `bad mode`.
 - A reader ignores members it does not know, in the header and in every entry. A `kind` that is not in the table is refused `unknown kind`: a reader that left out an entry would make a wrong tree, so a new kind or version is written only after every reader knows it.
 

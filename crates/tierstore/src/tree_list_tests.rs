@@ -279,7 +279,8 @@ fn entries_of_the_wrong_shape_are_refused_naming_the_line() {
 }
 
 /// A path is refused when it is empty, over 4096 bytes, has a name over 255 bytes, or has an empty,
-/// `.`, `..`, NUL-holding or `.wh.` name; the longest path and name are read.
+/// `.`, `..` or NUL-holding name; the longest path and name are read, and so are the names of an
+/// OCI layer's whiteouts (`etc/.wh.ssl`, `etc/ssl/certs/.wh..wh..opq`), which are plain names.
 #[test]
 fn paths_are_judged_by_their_names_and_lengths() {
     let dir = |path: &str| {
@@ -294,6 +295,13 @@ fn paths_are_judged_by_their_names_and_lengths() {
     let longest = format!("{names}/{}", "x".repeat(MAX_PATH_BYTES - names.len() - 1));
     assert_eq!(longest.len(), MAX_PATH_BYTES);
     assert!(parse(&list(&[&dir(&longest)])).is_ok());
+    let whiteouts = parse(&list(&[
+        &dir("etc/.wh.ssl"),
+        &dir("etc/ssl/certs/.wh..wh..opq"),
+    ]))
+    .unwrap();
+    let paths: Vec<&str> = whiteouts.entries.iter().map(|e| e.path.as_str()).collect();
+    assert_eq!(paths, ["etc/.wh.ssl", "etc/ssl/certs/.wh..wh..opq"]);
     let too_long = format!("{longest}m");
     let long_name = "n".repeat(MAX_NAME_BYTES + 1);
     for path in [
@@ -306,7 +314,6 @@ fn paths_are_judged_by_their_names_and_lengths() {
         "a/./b",
         "../a",
         "a\0b",
-        "x/.wh.y",
     ] {
         assert_eq!(
             fault(&list(&[&dir(path)]), 2),

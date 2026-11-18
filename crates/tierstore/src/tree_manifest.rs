@@ -26,9 +26,6 @@ pub const MAX_DEPTH: usize = 4096;
 /// The only version of the manifest format.
 const VERSION: u64 = 1;
 
-/// The prefix of the names a view keeps for whiteouts, which no entry of a tree may have.
-const WHITEOUT_PREFIX: &str = ".wh.";
-
 /// Why a manifest or a tree was refused. The text of each begins with the name the design
 /// gives the refusal.
 #[derive(Debug, PartialEq, Eq, thiserror::Error)]
@@ -56,7 +53,7 @@ pub enum TreeError {
     /// A `kind` other than `dir`, `file` and `symlink`.
     #[error("unsupported entry kind")]
     UnsupportedKind,
-    /// A name that is empty, `.`, `..`, has a `/` or a NUL, or begins `.wh.`.
+    /// A name that is empty, `.`, `..`, or has a `/` or a NUL.
     #[error("unsupported entry name {0:?}")]
     UnsupportedName(String),
     /// A name that sorts before the one ahead of it.
@@ -367,14 +364,17 @@ pub(crate) fn check_name(name: &str) -> Result<(), TreeError> {
     }
 }
 
-/// Whether `name` may be the name of an entry: not empty, not `.` or `..`, no `/` or NUL, and
-/// not beginning `.wh.`.
+/// Whether `name` may be the name of an entry: not empty, not `.` or `..`, and no `/` or NUL.
+///
+/// A name beginning `.wh.` is an entry like any other: an OCI layer's whiteout is a plain file of
+/// that name, and a build that makes a layer has it among its outputs, which are a later action's
+/// inputs. The job's overlay above a tree keeps its own whiteouts as character devices and
+/// extended attributes, never as names, so such a file is read as the file it is.
 pub(crate) fn is_valid_name(name: &str) -> bool {
     !(name.is_empty()
         || name == "."
         || name == ".."
-        || name.bytes().any(|byte| byte == b'/' || byte == 0)
-        || name.starts_with(WHITEOUT_PREFIX))
+        || name.bytes().any(|byte| byte == b'/' || byte == 0))
 }
 
 fn digest_of(name: &str, text: &str) -> Result<TreeDigest, TreeError> {
