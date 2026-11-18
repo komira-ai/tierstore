@@ -179,7 +179,8 @@ impl TombLog {
     }
 
     /// Stores entries of other origins, pulled or pushed. Each must continue its origin's last
-    /// sequence; one at or below it is skipped; a gap is [`LogError::Gap`] and an entry of this
+    /// sequence (the first of an origin this node holds nothing of may carry any sequence, as a
+    /// log whose head was compacted starts there); one at or below it is skipped; a gap is [`LogError::Gap`] and an entry of this
     /// node's own origin [`LogError::OwnOrigin`]. On an error nothing of the call is kept. Returns
     /// how many entries were stored; the files are synced before this returns.
     pub fn store(&self, records: &[LogRecord]) -> Result<u64, LogError> {
@@ -329,7 +330,9 @@ impl TombLog {
             if record.seq <= o.last {
                 continue;
             }
-            if record.seq != o.last + 1 {
+            // An origin this node holds nothing of starts wherever the peer's log starts: the
+            // head of that log may be compacted (the index's cursor takes it the same way).
+            if record.seq != o.last + 1 && !(from_outside && o.last == 0) {
                 return Err(LogError::Gap {
                     origin: record.origin,
                     last: o.last,

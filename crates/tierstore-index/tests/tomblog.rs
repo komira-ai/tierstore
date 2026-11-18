@@ -377,22 +377,27 @@ fn store_refuses_a_gap_and_keeps_nothing_of_the_batch() {
 }
 
 #[test]
-fn store_of_a_new_origin_must_start_at_one() {
+fn store_of_a_new_origin_starts_where_the_peers_compacted_log_starts_and_then_refuses_gaps() {
     let fs = fake();
     let log = open(&fs, 1, MAX).unwrap();
-    let err = log.store(&[rec(2, 5)]).err().unwrap();
+    assert_eq!(log.store(&[rec(2, 5), rec(2, 6)]).unwrap(), 2);
+    assert_eq!(fs.list("tomb/2").unwrap(), ["5.log"]);
+    assert_eq!(log.last(NodeId(2)), 6);
+    let err = log.store(&[rec(2, 8)]).err().unwrap();
     assert!(
         matches!(
             err,
             LogError::Gap {
                 origin: NodeId(2),
-                last: 0,
-                got: 5
+                last: 6,
+                got: 8
             }
         ),
         "{err}"
     );
-    assert_eq!(log.origins(), Vec::<NodeId>::new());
+    drop(log);
+    let log = open(&fs, 1, MAX).unwrap();
+    assert_eq!(seqs(&log.read_all(NodeId(2)).unwrap()), [5, 6]);
 }
 
 #[test]
