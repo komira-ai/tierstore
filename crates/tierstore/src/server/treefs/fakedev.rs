@@ -22,6 +22,7 @@ const GETATTR: u32 = 3;
 const OPEN: u32 = 14;
 const READ: u32 = 15;
 const RELEASE: u32 = 18;
+const INIT: u32 = 26;
 
 /// The kernel's end of the pair.
 pub(in crate::server::treefs) struct FakeDevice {
@@ -91,6 +92,18 @@ impl FakeDevice {
         bytes.extend_from_slice(&0u32.to_ne_bytes());
         bytes.extend_from_slice(body);
         let _ = self.kernel.send(&bytes).unwrap();
+    }
+
+    /// `INIT` of a kernel of protocol 7.40 that offers `offered`.
+    pub(in crate::server::treefs) fn init(&self, unique: u64, offered: InitFlags) {
+        let flags = offered.bits() | InitFlags::FUSE_INIT_EXT.bits();
+        let mut body = Vec::new();
+        let words = [7, 40, 131_072, flags as u32, (flags >> 32) as u32];
+        for word in words {
+            body.extend_from_slice(&word.to_ne_bytes());
+        }
+        body.extend_from_slice(&[0; 44]);
+        self.send(INIT, unique, 0, &body);
     }
 
     /// `GETATTR` of `ino`.

@@ -1,5 +1,5 @@
 //! The trees in memory: one read of a tree for every request that asks for it at the same time,
-//! the lookups counted under the lock of the state, the uncounted trees and the sweep that lets
+//! the lookups counted with no lock, the uncounted trees and the sweep that lets
 //! them go, and the line a read says.
 
 use std::sync::Arc;

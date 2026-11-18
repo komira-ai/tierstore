@@ -1,0 +1,42 @@
+[package]
+name = "objstore-conformance"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+repository.workspace = true
+publish.workspace = true
+description = "The ObjectStore conformance suite (docs/design/fetch-cache-serve.md 10.9 and 14, task T-S0): create-only, 412 on different bytes, ranges, HEAD, DELETE and LIST, run against any store, and a runner for an S3 endpoint named by flags."
+
+# A test target and a report: the suite is a library that the tests of a store call (this crate's
+# own, against an in-memory model and the loopback fake S3; `tierstore`'s, against its S3 front),
+# and the binary `objstore-conformance` runs it against an S3 endpoint for a reference run.
+
+[[bin]]
+name = "objstore-conformance"
+path = "src/main.rs"
+
+[dependencies]
+bytes.workspace = true
+# The runner's flags.
+clap.workspace = true
+# Concurrent writers of one key (`join_all`) and the streamed bodies.
+futures.workspace = true
+# The runner reports whether a store's ETag is the MD5 of the body.
+hex.workspace = true
+md-5.workspace = true
+# The store trait and the S3 client the runner drives.
+objstore-s3.workspace = true
+thiserror.workspace = true
+# The runner's runtime; `net` and `time` for the S3 client's connections and timeouts.
+tokio = { workspace = true, features = ["net", "rt", "time"] }
+
+[dev-dependencies]
+# The loopback fake S3 service (`s3::fake`), the second target of the suite.
+objstore-s3 = { workspace = true, features = ["testkit"] }
+# Scratch directories for the runner's secret file.
+tierstore-testkit.workspace = true
+tokio = { workspace = true, features = ["macros", "rt", "rt-multi-thread", "sync"] }
+
+[lints]
+workspace = true

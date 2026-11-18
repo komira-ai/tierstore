@@ -49,12 +49,13 @@ impl SourceId {
 
     /// The path under the mount where the source's tree appears.
     pub(super) fn path(&self) -> String {
-        format!(
-            "{}{}/{}",
-            agent_dir(&self.agent),
-            hex::encode(&self.run),
-            self.index
-        )
+        format!("{}/{}", self.run_dir(), self.index)
+    }
+
+    /// The directory of the paths of every source of the run, with no `/` at the end: what the
+    /// cache knows the run by between its request and its start (`tierstore_request_to_start_seconds`).
+    pub(super) fn run_dir(&self) -> String {
+        format!("{}{}", agent_dir(&self.agent), hex::encode(&self.run))
     }
 
     /// The path as a location of the tree store.

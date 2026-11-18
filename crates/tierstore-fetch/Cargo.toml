@@ -1,0 +1,30 @@
+[package]
+name = "tierstore-fetch"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+repository.workspace = true
+publish.workspace = true
+description = "The fetch engine of a tierstore build node (docs/design/fetch-cache-serve.md, section 4): single flight per pack, cell claims, the queue (deficit round robin across jobs, then rank and offset), part sizing with a grid-relative ramp, demand sub-ranges, stall retries, hedges, the pinned generation, per-cell failure with failover, the LOCATE step and the lost path. It implements the frozen `Engine` of tierstore-fetch-api."
+
+[dependencies]
+# `Engine`, `Upstream`, `Budget` and `Verifier` are async traits boxed by async-trait.
+async-trait.workspace = true
+bytes.workspace = true
+# Boxed futures, the shared future of one LOCATE per fill, and the part streams.
+futures.workspace = true
+# The frozen interfaces this crate implements and calls.
+tierstore-fetch-api.workspace = true
+tierstore-format.workspace = true
+# Tasks for the parts, the blocking pool for the entry's I/O, channels and the timer of
+# production (`TokioTimer`).
+tokio = { workspace = true, features = ["rt", "sync", "time"] }
+
+[dev-dependencies]
+# The digests of the test packs (the hash the cell tables use, 3.1).
+ring.workspace = true
+tokio = { workspace = true, features = ["macros", "rt", "rt-multi-thread", "sync", "time"] }
+
+[lints]
+workspace = true

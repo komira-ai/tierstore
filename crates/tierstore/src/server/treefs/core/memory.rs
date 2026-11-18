@@ -9,11 +9,15 @@
 //! for itself, each FUSE thread would spend seconds of CPU flattening the same tree, and the
 //! kernel's queue would wait behind them.
 //!
-//! The lookups of a tree's inodes are counted, and a forget takes away what it names, under the
-//! lock of the state. A tree leaves memory at the forget that takes its count to zero while no
-//! run or lookup has it attached ([`Core::forget`]). A count raised outside that lock could
-//! raise the count of a tree that had just left memory. That lookup would then be lost, and
-//! the tree would leave at a later forget while the kernel still held its inodes.
+//! The lookups of a tree's inodes are counted, and a forget takes away what it names, with no
+//! lock (`core/loaded.rs`). A tree leaves memory at the forget that takes its count to zero while
+//! no run or lookup has it attached ([`Core::forget`]): the forget marks the tree as removed, in
+//! the word that holds the count, only if the count is zero at that moment, and then takes it out
+//! of the map. A lookup that finds the mark does not count on that tree. It puts the tree back,
+//! or counts on the tree that is in memory, under the lock of the changes of the map
+//! ([`Core::count_lookup`]). So a lookup is never lost: a count raised for a tree that had just
+//! left memory would otherwise be gone with it, and the tree would leave at a later forget while
+//! the kernel still held its inodes.
 //!
 //! A forget of more lookups than the tree has counted means that this process did not count
 //! every lookup the kernel holds. That is the case after a restart or a hand-over, since
@@ -27,13 +31,13 @@
 //! [`SLOW_READ_MS`] or more is said at warn.
 
 use std::collections::HashMap;
-use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
+use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::{Arc, Condvar, Mutex};
 
 use crate::tree_manifest::TreeDigest;
 
 use super::placed::Unread;
-use super::{Core, Errno, Loaded, State, ino, locked};
+use super::{Core, Errno, Loaded, ino, locked};
 
 /// A read that took at least this long, in milliseconds of the core's clock, is said at warn.
 const SLOW_READ_MS: u64 = 1_000;
@@ -64,7 +68,7 @@ pub(in crate::server::treefs) struct Reads {
     /// Makes the next read that leads panic once it has read, before it ends: for the test of
     /// a read that stops.
     #[cfg(test)]
-    pub(super) stop_next: AtomicBool,
+    pub(super) stop_next: std::sync::atomic::AtomicBool,
 }
 
 /// The end of a read that runs: it takes the flight out of the table and wakes the requests
@@ -105,10 +109,9 @@ impl Core {
 
     /// The tree `number` if it is in memory, as used now.
     fn in_memory(&self, number: u64) -> Option<Arc<Loaded>> {
-        let state = locked(&self.state);
-        let loaded = state.loaded.get(&number)?;
+        let loaded = self.trees.get(number)?;
         loaded.used.store(self.now(), Ordering::Release);
-        Some(Arc::clone(loaded))
+        Some(loaded)
     }
 
     /// The tree `digest`, numbered `number`: in memory, or read and kept in memory, once for
@@ -158,12 +161,7 @@ impl Core {
             panic!("a read that stops before it ends");
         }
         let took = self.now().saturating_sub(start);
-        let times = {
-            let mut done = locked(&self.reads.done);
-            let times = done.entry(number).or_insert(0);
-            *times += 1;
-            *times
-        };
+        let times = self.read_done(number);
         // Out of the table first: a request that comes from now on finds the tree in memory, or,
         // after a read that failed, reads it again rather than take this failure.
         let _ = locked(&self.reads.running).remove(&number);
@@ -178,6 +176,14 @@ impl Core {
             }
         }
         read
+    }
+
+    /// Counts a read of the tree `number` in this process; how many there have been of it.
+    pub(super) fn read_done(&self, number: u64) -> u64 {
+        let mut done = locked(&self.reads.done);
+        let times = done.entry(number).or_insert(0);
+        *times += 1;
+        *times
     }
 
     /// Waits for the read of `flight` and gives its end.
@@ -207,29 +213,40 @@ impl Core {
     }
 
     /// Keeps the tree `digest`, numbered `number`, in memory, unless it is there already: the one
-    /// in memory, as used now.
+    /// in memory, as used now. A tree that is not kept is freed with no lock held.
     pub(super) fn keep(&self, number: u64, digest: TreeDigest, tree: super::Tree) -> Arc<Loaded> {
         let now = self.now();
-        let mut state = locked(&self.state);
-        let loaded = state.loaded.entry(number).or_insert_with(|| {
-            Arc::new(Loaded {
-                digest,
-                tree,
-                lookups: AtomicU64::new(0),
-                uncounted: AtomicBool::new(false),
-                used: AtomicU64::new(now),
-                pinned: Mutex::new(std::collections::HashSet::new()),
-            })
-        });
+        let loaded = self.trees.keep(number, Loaded::new(digest, tree, now));
         loaded.used.store(now, Ordering::Release);
-        Arc::clone(loaded)
+        loaded
     }
 
     /// Takes the tree `number` out of memory if the kernel holds no inode of it, as far as this
     /// process counted, and no run or lookup has it attached.
     pub(super) fn drop_if_forgotten(&self, number: u64) {
-        let mut state = locked(&self.state);
-        drop_forgotten(&mut state, number);
+        let Some(loaded) = self.trees.get(number) else {
+            return;
+        };
+        if loaded.lookups.is_forgotten() && !self.attached(number) {
+            let _ = loaded
+                .lookups
+                .remove_if_forgotten()
+                .then(|| self.take_out(number, loaded));
+        }
+    }
+
+    /// Takes out of the map the tree `number`, which the caller has marked as removed, and frees
+    /// it after every lock is released, unless a lookup has put it back since; whether it did.
+    fn take_out(&self, number: u64, loaded: Arc<Loaded>) -> bool {
+        #[cfg(test)]
+        if let Some(hook) = locked(&self.hooks.marked).as_ref() {
+            hook(self);
+        }
+        let gone = self.trees.take_out(number, &loaded);
+        let taken = gone.is_some();
+        drop(gone);
+        drop(loaded);
+        taken
     }
 
     /// The tree in memory, read if it is not, counting one more lookup of it.
@@ -240,19 +257,14 @@ impl Core {
     }
 
     /// Counts one more lookup of the tree `number`, of which the caller holds `loaded`, if this
-    /// core counts them. The count is raised under the lock of the state, on the tree that is in
-    /// memory now. If the tree left memory since the caller took it, `loaded` goes back, since
-    /// the kernel holds an inode of it again.
+    /// core counts them, with no lock. If the tree is marked as removed, or left memory since the
+    /// caller took it, `loaded` goes back, since the kernel holds an inode of it again; if
+    /// another read of the tree is in memory now, the lookup is counted on that one.
     pub(super) fn count_lookup(&self, number: u64, loaded: &Arc<Loaded>) {
-        if !self.settings.count_lookups {
+        if !self.settings.count_lookups || loaded.lookups.raise() {
             return;
         }
-        let mut state = locked(&self.state);
-        let current = state
-            .loaded
-            .entry(number)
-            .or_insert_with(|| Arc::clone(loaded));
-        let _ = current.lookups.fetch_add(1, Ordering::AcqRel);
+        self.trees.put_back(number, loaded);
     }
 
     /// Counts a lookup of `ino`, which a listing with entries (`READDIRPLUS`) made.
@@ -270,48 +282,26 @@ impl Core {
         #[cfg(test)]
         self.note("forget");
         let (number, _) = ino::split(ino);
-        let mut state = locked(&self.state);
-        let Some(loaded) = state.loaded.get(&number) else {
+        let Some(loaded) = self.trees.get(number) else {
             return;
         };
-        let counted = loaded.lookups.load(Ordering::Acquire);
-        if nlookup > counted && self.settings.count_lookups {
-            loaded.uncounted.store(true, Ordering::Release);
+        if loaded.lookups.forget(nlookup, self.settings.count_lookups) {
+            self.drop_if_forgotten(number);
         }
-        loaded
-            .lookups
-            .store(counted.saturating_sub(nlookup), Ordering::Release);
-        drop_forgotten(&mut state, number);
     }
 
     /// Takes out of memory every uncounted tree that no run and no lookup has attached and that
     /// no request has named for `idle` milliseconds of the core's clock; how many.
     pub(super) fn drop_idle_uncounted(&self, idle: u64) -> usize {
         let now = self.now();
-        let mut state = locked(&self.state);
-        let State {
-            loaded,
-            attachments,
-            ..
-        } = &mut *state;
-        let before = loaded.len();
-        loaded.retain(|number, tree| {
-            let idle_now = now.saturating_sub(tree.used.load(Ordering::Acquire)) >= idle;
-            let uncounted = tree.uncounted.load(Ordering::Acquire);
-            !(uncounted && idle_now && !attachments.is_attached(*number))
-        });
-        before - loaded.len()
-    }
-}
-
-/// Takes the tree `number` out of `state` if it has no lookup counted, is not uncounted, and no
-/// run or lookup has it attached.
-fn drop_forgotten(state: &mut State, number: u64) {
-    let forgotten = state.loaded.get(&number).is_some_and(|loaded| {
-        loaded.lookups.load(Ordering::Acquire) == 0 && !loaded.uncounted.load(Ordering::Acquire)
-    });
-    if forgotten && !state.attachments.is_attached(number) {
-        let _ = state.loaded.remove(&number);
+        let mut dropped = 0;
+        for (number, loaded) in self.trees.all() {
+            let idle_now = now.saturating_sub(loaded.used.load(Ordering::Acquire)) >= idle;
+            if idle_now && !self.attached(number) && loaded.lookups.remove_if_uncounted() {
+                dropped += usize::from(self.take_out(number, loaded));
+            }
+        }
+        dropped
     }
 }
 

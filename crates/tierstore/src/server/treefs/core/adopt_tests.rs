@@ -1,11 +1,12 @@
-//! The core in a process that took a connection over: file handles and backing ids of the process
-//! before it.
+//! The core in a process that took a connection over: file handles of the process before it, and
+//! the backing ids an earlier release registered on the connection.
 
 use std::sync::Arc;
 
 use super::super::{Core, Errno, Opened};
 use crate::server::local_cache::trees::testing::fs_at;
 use crate::server::treefs::backing::{self, Saved};
+use crate::server::treefs::handle;
 use crate::server::treefs::ino;
 use crate::server::treefs::live_testing::{Live, walk};
 use crate::server::treefs::locked;
@@ -31,28 +32,38 @@ fn tool_blob() -> TreeDigest {
     TreeDigest::from_hex(&sha(b"tool bytes")).unwrap()
 }
 
-/// A rig over the sample tree with passthrough chosen and the tree attached.
+/// A rig over the sample tree with the tree attached.
 fn rig(name: &str) -> Rig {
     let rig = Rig::new(name, sample());
-    rig.core.enable_passthrough();
     let root = rig.upstream.built.lock().unwrap().root.clone();
     let _ = rig.core.attach(&root, "run-1").unwrap();
     rig
 }
 
-/// The core of the process after `rig`'s, with its backing table adopted from the file the process
-/// before wrote, and the kernel that closes ids.
-fn successor(rig: &Rig, kernel: &FakeKernel) -> Arc<Core> {
+/// The line an earlier release kept for the blob of `tool`, with the id 100, counted exactly.
+fn tool_line() -> Saved {
+    Saved {
+        blob: tool_blob(),
+        id: 100,
+        opens: 2,
+        exact: true,
+    }
+}
+
+/// The core of the process after `rig`'s, over a connection an earlier release answered with
+/// passthrough and whose file holds `lines`; the ids are made by `kernel`.
+fn successor(rig: &Rig, kernel: &FakeKernel, lines: &[Saved]) -> Arc<Core> {
+    let path = rig.runtime.join(backing::FILE);
     let core = rig.successor();
-    let saved = backing::saved(&rig.runtime.join(backing::FILE)).unwrap();
-    core.adopt_passthrough(&saved, &|id| kernel.wrap(id));
+    core.adopt_backing(&path, lines, &|id| kernel.wrap(id));
     core
 }
 
-fn backed(opened: Opened) -> (u64, u32) {
+/// The handle and the id of an open that must be answered with an adopted id.
+fn adopted(opened: Opened) -> (u64, u32) {
     match opened {
-        Opened::Backed { fh, backing } => (fh, backing.id),
-        Opened::Cached(fh) => panic!("a cached open, handle {fh}, where passthrough was due"),
+        Opened::Adopted { fh, id } => (fh, FakeKernel::id_of(&id).unwrap()),
+        Opened::Cached(fh) => panic!("a cached open, handle {fh}, where an adopted id was due"),
     }
 }
 
@@ -60,23 +71,14 @@ fn backed(opened: Opened) -> (u64, u32) {
 /// answers the bytes, that a second read uses the open it made, and that the release ends it.
 #[test]
 fn a_read_of_a_handle_an_earlier_process_gave_makes_the_open_again() {
-    let rig = Rig::new("tfs-adopt-read", sample());
-    let root = rig.upstream.built.lock().unwrap().root.clone();
-    let _ = rig.core.attach(&root, "run-1").unwrap();
-    let fh = match rig
-        .core
-        .open(header(), false, &mut |_| unreachable!())
-        .unwrap()
-    {
-        Opened::Cached(fh) => fh,
-        Opened::Backed { .. } => panic!("passthrough was not chosen"),
-    };
+    let rig = rig("tfs-adopt-read");
+    let fh = open_cached(&rig.core, header(), false).unwrap();
     let next = rig.successor();
     assert_eq!(next.read(fh, 0, 6), Err(Errno::Inval));
     assert_eq!(next.read_open(header(), fh, 0, 6).unwrap(), b"int a;");
     assert_eq!(next.open_files(), 1);
     assert_eq!(next.read_open(header(), fh, 4, 100).unwrap(), b"a;");
-    next.release_open(header(), fh);
+    next.release(fh);
     assert_eq!(next.open_files(), 0);
     // The first process's own handle is still its own.
     assert_eq!(rig.core.read_open(header(), fh, 0, 3).unwrap(), b"int");
@@ -87,10 +89,8 @@ fn a_read_of_a_handle_an_earlier_process_gave_makes_the_open_again() {
 /// is not open is `EINVAL` as before.
 #[test]
 fn a_foreign_handle_of_something_that_is_not_a_readable_file_is_refused() {
-    let rig = Rig::new("tfs-adopt-refused", sample());
-    let root = rig.upstream.built.lock().unwrap().root.clone();
-    let _ = rig.core.attach(&root, "run-1").unwrap();
-    let foreign = crate::server::treefs::handle::make(1, 77, false);
+    let rig = rig("tfs-adopt-refused");
+    let foreign = handle::make(1, 77);
     let next = rig.successor();
     assert_eq!(
         next.read_open(empty(), foreign, 0, 10).unwrap(),
@@ -104,128 +104,116 @@ fn a_foreign_handle_of_something_that_is_not_a_readable_file_is_refused() {
         next.read_open(ino::of(1, 99), foreign + 2, 0, 10),
         Err(Errno::NoEnt)
     );
-    let own = crate::server::treefs::handle::make(2, 9, false);
+    let own = handle::make(2, 9);
     assert_eq!(next.read_open(header(), own, 0, 10), Err(Errno::Inval));
 }
 
-/// Asserts that a foreign passthrough handle is never read through the core: the kernel reads
-/// those itself, so a request for one is a fault, as for a handle of this process.
+/// Asserts that the handle of a passthrough open an earlier release gave out (bit 63 set) is told
+/// by its generation as any other: a read the kernel sends for it makes a cached open of the file
+/// and answers its bytes, and its release ends that open.
 #[test]
-fn a_read_of_a_foreign_passthrough_handle_is_a_fault() {
-    let rig = rig("tfs-adopt-backed-read");
-    let kernel = FakeKernel::new();
-    let (fh, _) = backed(kernel.open(&rig.core, tool()).unwrap());
-    let next = successor(&rig, &kernel);
-    assert_eq!(next.read_open(tool(), fh, 0, 10), Err(Errno::Inval));
+fn a_handle_an_earlier_release_marked_passthrough_is_an_earlier_process_handle() {
+    let rig = rig("tfs-adopt-marked");
+    let marked = (1 << 63) | handle::make(1, 5);
+    let next = rig.successor();
+    assert_eq!(next.read_open(tool(), marked, 0, 4).unwrap(), b"tool");
+    assert_eq!(next.open_files(), 1);
+    next.release(marked);
     assert_eq!(next.open_files(), 0);
 }
 
-/// Asserts that the ids the process before registered, and wrote down exactly at the end, are
-/// closed by the releases of the opens it made, the last one closing the id and no earlier one.
+/// Asserts that the opens of a blob an earlier release registered an id for are answered with that
+/// id, every time, with no fill and no registration, and that a read of one is a fault (the kernel
+/// reads those itself); that the opens of every other file are cached opens; and that no release,
+/// nor the end of the core, closes the id: the connection keeps it.
 #[test]
-fn the_last_release_of_an_open_an_earlier_process_made_closes_its_id() {
-    let rig = rig("tfs-adopt-release");
-    let old_kernel = FakeKernel::new();
-    let (one, id) = backed(old_kernel.open(&rig.core, tool()).unwrap());
-    let (two, _) = backed(old_kernel.open(&rig.core, tool()).unwrap());
-    assert_eq!(id, 100);
-    rig.core.write_backing_exact();
+fn the_opens_of_a_blob_with_an_adopted_id_are_answered_with_it_and_it_is_never_closed() {
+    let rig = rig("tfs-adopt-answer");
     let kernel = FakeKernel::new();
-    let next = successor(&rig, &kernel);
-    let table = next.backing_table().unwrap();
-    assert_eq!(table.live(), 1);
-    next.release_open(tool(), one);
+    let next = successor(&rig, &kernel, &[tool_line()]);
+    assert_eq!(next.adopted_ids(), 1);
+    let fills = rig.upstream.asked("fill").len();
+    let (one, id) = adopted(next.open(tool(), false).unwrap());
+    let (two, again) = adopted(next.open(tool(), false).unwrap());
+    assert_eq!((id, again), (100, 100));
+    assert_ne!(one, two);
+    assert_eq!(rig.upstream.asked("fill").len(), fills);
+    assert_eq!(next.read(one, 0, 4), Err(Errno::Io));
+    let header = match next.open(header(), false).unwrap() {
+        Opened::Cached(fh) => fh,
+        Opened::Adopted { .. } => panic!("an adopted id for a blob that has none"),
+    };
+    assert_eq!(next.read(header, 0, 6).unwrap(), b"int a;");
+    assert!(matches!(next.open(empty(), false), Ok(Opened::Cached(_))));
+    for fh in [one, two, header] {
+        next.release(fh);
+    }
     assert!(locked(&kernel.closed).is_empty());
-    next.release_open(tool(), two);
-    assert_eq!(*locked(&kernel.closed), [100]);
-    assert_eq!(table.live(), 0);
-    // Another release of the same handle finds no id to end.
-    next.release_open(tool(), two);
-    assert_eq!(*locked(&kernel.closed), [100]);
-}
-
-/// Asserts that a new open of a blob whose id was adopted reuses the id with no registration, that
-/// the releases of the earlier opens do not close it while this process has one open, and that the
-/// last release of all does.
-#[test]
-fn an_open_of_an_adopted_blob_reuses_its_id_and_keeps_it_for_the_earlier_opens() {
-    let rig = rig("tfs-adopt-reuse");
-    let old_kernel = FakeKernel::new();
-    let (old, _) = backed(old_kernel.open(&rig.core, tool()).unwrap());
-    rig.core.write_backing_exact();
-    let kernel = FakeKernel::new();
-    let next = successor(&rig, &kernel);
-    let (new, id) = backed(kernel.open(&next, tool()).unwrap());
-    assert_eq!(id, 100);
-    assert!(locked(&kernel.registered).is_empty());
-    assert_ne!(new, old);
-    next.release_open(tool(), old);
-    assert!(locked(&kernel.closed).is_empty());
-    next.release_open(tool(), new);
-    assert_eq!(*locked(&kernel.closed), [100]);
-}
-
-/// Asserts that a table that was not written at a clean stop (a crash) is a lower bound: the id is
-/// kept through every release of an earlier open, and closed by the release of this process's own
-/// last open only if no earlier one is unaccounted for, which here it is not, so it stays.
-#[test]
-fn an_id_whose_count_was_not_written_exactly_is_kept() {
-    let rig = rig("tfs-adopt-inexact");
-    let old_kernel = FakeKernel::new();
-    let (one, _) = backed(old_kernel.open(&rig.core, tool()).unwrap());
-    let (two, _) = backed(old_kernel.open(&rig.core, tool()).unwrap());
-    // The file says one open, as it does after the first open and until the last release.
-    let kernel = FakeKernel::new();
-    let next = successor(&rig, &kernel);
-    next.release_open(tool(), one);
-    next.release_open(tool(), two);
-    assert!(locked(&kernel.closed).is_empty());
-    assert_eq!(next.backing_table().unwrap().live(), 1);
-    let (own, id) = backed(kernel.open(&next, tool()).unwrap());
-    assert_eq!(id, 100);
-    next.release_open(tool(), own);
+    drop(next);
     assert!(locked(&kernel.closed).is_empty());
 }
 
-/// Asserts that the release of a foreign passthrough handle of an inode that is not a file, or of
-/// a core with no backing table, ends nothing and does not fail.
+/// Asserts that the file an earlier release kept is written again with no line marked `exact`, so
+/// that an earlier release that takes the connection over from this one keeps every id; that a
+/// process after this one reads the same ids from it; and that a file with no line marked is left
+/// as it is.
 #[test]
-fn a_foreign_release_with_nothing_to_end_ends_nothing() {
-    let rig = Rig::new("tfs-adopt-nothing", sample());
-    let root = rig.upstream.built.lock().unwrap().root.clone();
-    let _ = rig.core.attach(&root, "run-1").unwrap();
-    let next = rig.successor();
-    let foreign = crate::server::treefs::handle::make(1, 5, true);
-    next.release_open(tool(), foreign);
-    next.write_backing_exact();
+fn the_backing_table_is_unmarked_once_and_the_next_process_adopts_the_same_ids() {
+    let rig = rig("tfs-adopt-unmark");
+    let path = rig.runtime.join(backing::FILE);
+    let header_blob = TreeDigest::from_hex(&sha(b"int a;")).unwrap();
+    let lines = [
+        tool_line(),
+        Saved {
+            blob: header_blob,
+            id: 101,
+            opens: 1,
+            exact: false,
+        },
+    ];
     let kernel = FakeKernel::new();
-    next.adopt_passthrough(&[], &|id| kernel.wrap(id));
-    next.release_open(include(), foreign);
-    next.release_open(ino::of(1, 99), foreign);
-    next.release_open(tool(), foreign);
-    next.release_open(empty(), foreign);
-    // A handle of this process that is not open, and a cached one of an earlier process, end
-    // nothing either.
-    next.release_open(tool(), crate::server::treefs::handle::make(2, 77, true));
-    next.release_open(tool(), crate::server::treefs::handle::make(1, 78, false));
+    let _ = successor(&rig, &kernel, &lines);
+    let mut expected = [
+        format!("{} 100 2\n", tool_blob()),
+        format!("{header_blob} 101 1\n"),
+    ];
+    expected.sort();
+    assert_eq!(std::fs::read_to_string(&path).unwrap(), expected.concat());
+    let read = backing::saved(&path).unwrap();
+    assert!(read.iter().all(|line| !line.exact));
+    let after = successor(&rig, &kernel, &read);
+    assert_eq!(after.adopted_ids(), 2);
+    assert_eq!(adopted(after.open(header(), false).unwrap()).1, 101);
+    // A file with no line marked exact is not written.
+    let kept = format!("{} 100 2 a-word-a-later-release-adds\n", tool_blob());
+    std::fs::write(&path, &kept).unwrap();
+    let unmarked = backing::saved(&path).unwrap();
+    let _ = successor(&rig, &kernel, &unmarked);
+    assert_eq!(std::fs::read_to_string(&path).unwrap(), kept);
     assert!(locked(&kernel.closed).is_empty());
 }
 
-/// Asserts that a second choice of passthrough leaves the first table (the choice is made once).
+/// Asserts that the ids are taken once: a second adoption (a hand-over that did not complete, then
+/// served again) keeps the first.
 #[test]
-fn passthrough_is_adopted_once() {
+fn the_ids_are_adopted_once() {
     let rig = rig("tfs-adopt-once");
     let kernel = FakeKernel::new();
-    let first: Saved = Saved {
-        blob: tool_blob(),
-        id: 7,
-        opens: 0,
-        exact: true,
-    };
-    let next = rig.successor();
-    next.adopt_passthrough(&[first], &|id| kernel.wrap(id));
-    next.adopt_passthrough(&[], &|id| kernel.wrap(id));
-    assert_eq!(next.backing_table().unwrap().live(), 1);
+    let next = successor(&rig, &kernel, &[tool_line()]);
+    next.adopt_backing(&rig.runtime.join(backing::FILE), &[], &|id| kernel.wrap(id));
+    assert_eq!(next.adopted_ids(), 1);
+    assert_eq!(adopted(next.open(tool(), false).unwrap()).1, 100);
+}
+
+/// Asserts that a core that adopted nothing has no adopted id and opens every file cached.
+#[test]
+fn a_core_with_no_adopted_ids_opens_every_file_cached() {
+    let rig = rig("tfs-adopt-none");
+    assert_eq!(rig.core.adopted_ids(), 0);
+    let kernel = FakeKernel::new();
+    let next = successor(&rig, &kernel, &[]);
+    assert_eq!(next.adopted_ids(), 0);
+    assert!(matches!(next.open(tool(), false), Ok(Opened::Cached(_))));
 }
 
 /// Asserts that a read of a handle of a placed file that the process before gave out makes the
@@ -253,7 +241,7 @@ async fn a_foreign_handle_of_a_placed_file_is_made_again_as_its_span() {
         let tail = next.read_open(ino, fh, 1990, 100).unwrap();
         let past = next.read_open(ino, fh, 2000, 100).unwrap();
         let open = next.open_files();
-        next.release_open(ino, fh);
+        next.release(fh);
         (whole, middle, tail, past, open, next.open_files())
     })
     .await
@@ -281,7 +269,7 @@ async fn a_foreign_handle_of_a_placed_empty_file_or_link_is_as_for_a_manifest_tr
         })
         .await;
     let next = live.successor();
-    let foreign = crate::server::treefs::handle::make(1, 77, false);
+    let foreign = handle::make(1, 77);
     let (empty, linked) = tokio::task::spawn_blocking(move || {
         (
             next.read_open(zero, foreign, 0, 10),

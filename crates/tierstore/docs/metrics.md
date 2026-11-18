@@ -392,6 +392,48 @@ What they do not count:
 - A put that failed at the upstream, or at the HEAD before it, counts no bytes, whatever part of its body was sent. The one put the client is told failed that counts bytes is a `bad_digest` put the upstream had already taken (above).
 - `writes_through_total` counts whole-body puts only, `upstream_puts_total` counts those and completions, and `write_exists_total` counts the HEAD's answer and the upstream's together.
 
+### Build node: request to start
+
+A build node whose cache has a tree store and serves jobscheduler's mount provider (the
+`mount-provider` interface) times each job from its request to the start of its command, for the
+launch budget of the fetch, cache and serve design (`docs/design/fetch-cache-serve.md`, sections 1
+and 12: under 200 ms, aiming for 100). The family is in the cache's block, with a `# TYPE` line, on
+every process with a cache, and stays at zero on one that serves no provider.
+
+| name | type | labels | what it says |
+|---|---|---|---|
+| `tierstore_request_to_start_seconds` | histogram | `le` (on `_bucket`): `0.005`, `0.01`, `0.025`, `0.05`, `0.1`, `0.2`, `0.5`, `1`, `2.5`, `5`, `10`, `30`, `60`, `120`, `300`, `900`, `+Inf` | one sample per run: the seconds from the first `Prepare` of any of the run's sources to the first lookup or listing that `tierstore fs` serves inside any of the run's trees |
+| `tierstore_request_to_start_seconds_bucket` | counter | `le` | the runs sampled at or under `le` seconds |
+| `tierstore_request_to_start_seconds_sum` | counter | none | the seconds of every sample, to the millisecond |
+| `tierstore_request_to_start_seconds_count` | counter | none | the runs sampled |
+
+The two ends:
+
+- **Request.** jobscheduler's agent sends `Prepare` for a job's sources the moment it has the job. The first `Prepare` of a run that the process takes starts its span; a `Prepare` of another source of the run, or the same one again, does not move it.
+- **Start.** The agent opens each tree's root, and the kernel looks the roots up when it mounts the job's overlay; neither reads below a root. The first lookup in a directory of one of the run's trees, or listing of one, is the container runtime making the job's root, or the command itself. `tierstore fs` reports it to the node on the fill socket, from a thread of its own, so the request it serves does not wait for the report.
+
+What it does not count:
+
+- A run whose command never looks inside its trees, and a run released or swept first.
+- A run whose `Prepare` this process did not take. This happens when the process started after it, when the run's request was forgotten because 4096 runs were kept at once (the oldest is forgotten first), or when an `fs` report was lost. A report is lost when 1024 reports wait at once, when the fill socket is away, or when the node is of a release before this one.
+- A tree placed through the trees API rather than the provider.
+
+A report that waits while the fill socket is away (an update of the node's tierstore) ends its
+span when the node takes it, so such a span is longer than the job's real start.
+
+The span is on the node's wall clock: a span across a step of the clock back is 0. Fraction of
+runs within the budget, over a day:
+
+```promql
+sum(increase(tierstore_request_to_start_seconds_bucket{le="0.2"}[1d])) / sum(increase(tierstore_request_to_start_seconds_count[1d]))
+```
+
+The 99th percentile, over an hour:
+
+```promql
+histogram_quantile(0.99, sum by (le) (rate(tierstore_request_to_start_seconds_bucket[1h])))
+```
+
 ## Cache queries (v1)
 
 All of these use a `5m` window. Every `sum` is outside the `rate`. Shorten the window to see a

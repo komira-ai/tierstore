@@ -446,3 +446,30 @@ fn places_live_names_the_mount_and_the_placements_it_keeps() {
     assert_eq!(line("places-live"), Err(Refusal::Name));
     assert_eq!(line("places-live boot-1 nope"), Err(Refusal::Placement));
 }
+
+/// Asserts that a `started` names the path of the tree the mount first looked into, kept whole,
+/// and that a path that is not one a place could name is refused as a place's is.
+#[test]
+fn a_started_names_the_path_and_refuses_what_a_place_refuses() {
+    let started = |path: &str| {
+        Ok(Request::Started {
+            path: path.to_owned(),
+        })
+    };
+    assert_eq!(
+        line("started mount-provider/61/6a73/0"),
+        started("mount-provider/61/6a73/0")
+    );
+    assert_eq!(line("started a b/c  d"), started("a b/c  d"));
+    let cases = [
+        "started",
+        "started ",
+        "started trees/x",
+        "started a//b",
+        "started /a",
+        "started a/",
+    ];
+    for text in cases {
+        assert_eq!(line(text), Err(Refusal::MountPath), "{text:?}");
+    }
+}

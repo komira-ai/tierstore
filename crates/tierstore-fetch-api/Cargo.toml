@@ -1,0 +1,28 @@
+[package]
+name = "tierstore-fetch-api"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+repository.workspace = true
+publish.workspace = true
+description = "The frozen interfaces of the tierstore read path on a build node (docs/design/fetch-cache-serve.md, sections 2 to 9): the cell byte and state page, Entry/EntryStore/StateView, Engine, Budget, Verifier, Upstream, ListL2, the mount protocol, an injected clock, and in-tree fakes."
+
+[dependencies]
+# The traits that are used as `dyn` (Upstream, Engine, Budget, Verifier) have async methods,
+# boxed by async-trait as the `Backend` trait of `tierstore` is.
+async-trait.workspace = true
+# The bytes of a part, as the stream of `Upstream::get` yields them.
+bytes.workspace = true
+# The stream type of a part, and the waker of the injected clock's sleeps.
+futures.workspace = true
+# The ids a location carries (node, drive, generation) are the storage tier's.
+tierstore-format.workspace = true
+thiserror.workspace = true
+
+[dev-dependencies]
+# Runs the futures of the fakes and of the traits' tests.
+tokio = { workspace = true, features = ["macros", "rt", "rt-multi-thread", "sync", "time"] }
+
+[lints]
+workspace = true

@@ -14,6 +14,10 @@ publish = false
 # `name.workspace = true` (members add features they need). The versions and features are
 # those of the repository this code came from, at the moment of the import.
 [workspace.dependencies]
+# The map of the trees in memory in `tierstore fs`, which every request reads with no lock and
+# a change swaps whole (`server` feature); a mount's current view of a pack, swapped whole when a
+# reconnect re-opens it (tierstore-mount-client). MIT OR Apache-2.0.
+arc-swap = "1.9.3"
 # The backend trait is used as `dyn Backend`, so its async methods are boxed.
 async-trait = "0.1.92"
 # A stock S3 SDK, to prove it works against the tierstore S3 front (tierstore's tests only).
@@ -25,9 +29,10 @@ aws-sdk-s3 = { version = "=1.96.0", default-features = false, features = ["behav
 # endpoint. Apache-2.0.
 aws-smithy-http-client = { version = "1.1.4", default-features = false, features = ["default-client"] }
 base64 = "0.23.1"
-# The placement hash of the cold-tier design (weighted rendezvous over blake3), used by the farm
-# measurement of placement (crates/tierstore-measure). CC0-1.0 OR Apache-2.0.
-blake3 = "1.8.2"
+# The blake3 of the storage tier's formats: an object's generation, a key hash, the rendezvous
+# hash of placement, and the digest of a block or shard (tierstore-format; also the farm measurement
+# of placement, tierstore-measure). CC0-1.0 OR Apache-2.0.
+blake3 = "1.8.7"
 bytes = "1.12.1"
 clap = { version = "4.6.7", features = ["derive"] }
 # CRC-64/NVMe, the checksum that the AWS SDKs send by default (MIT or Apache-2.0).
@@ -36,6 +41,11 @@ crc = "3.4.0"
 crc32c = "0.6.8"
 crc32fast = "1.5.2"
 futures = "0.3.34"
+# The embedded ordered store of a storage node's key index and block table (tierstore-index,
+# docs/design/fetch-cache-serve.md 10.2): an LSM-tree, with its journal persisted only at the
+# replay mark. MIT OR Apache-2.0; two of its dependencies are BSL-1.0 and 0BSD (deny.toml names
+# them as exceptions).
+fjall = "3.1.13"
 # The FUSE protocol of `tierstore fs` (Linux only; the crate's `server` feature). It mounts as
 # root through mount(2), and as another user through `fusermount3`. MIT.
 # This is `fuser` 0.18.0 plus two commits, on the branch `komira-0.18-resume` of our fork: a session
@@ -54,8 +64,11 @@ http-body-util = "0.1.5"
 hmac = "0.13.0"
 hyper = { version = "1.12.0", default-features = false }
 hyper-util = { version = "0.1.21", default-features = false }
-# `kill` and the descriptor calls of the test helpers (tierstore-testkit).
+# `kill` and the descriptor calls of the test helpers (tierstore-testkit), and the `PROT_*`/`MAP_*`
+# constants of the memfd mappings of the Linux entry store (tierstore-entry).
 libc = "0.2.190"
+# The exhaustive interleaving checker of the models of tierstore-harness (tests only). MIT.
+loom = "0.7.2"
 md-5 = "0.11.0"
 # The NFSv3 and MOUNT protocol of `tierstore fs` on macOS (BSD-3-Clause), `nfsserve` 0.11.0 from
 # crates.io plus one commit on the branch `komira-0.11` of our fork: the transaction tracker
@@ -74,6 +87,9 @@ prost-types = "0.14.1"
 protox = "0.10.0"
 # Test certificates only. ring is the crypto provider the rustls below uses too.
 rcgen = { version = "0.14", default-features = false, features = ["crypto", "pem", "ring"] }
+# The measured alternative to fjall behind the same `Index` (tierstore-index, 10.2): a
+# copy-on-write B-tree. MIT OR Apache-2.0.
+redb = "4.6.0"
 # Plain HTTP only: TLS brings a crypto provider, added with the first TLS endpoint.
 reqwest = { version = "0.13.5", default-features = false }
 ring = "0.17.14"
@@ -84,7 +100,8 @@ roxmltree = "0.21.1"
 ruzstd = { version = "0.9.1", default-features = false, features = ["hash", "std"] }
 rustls = { version = "0.23.45", default-features = false, features = ["ring", "std", "tls12"] }
 rustls-native-certs = "0.8.4"
-# Directory-relative, no-follow file access, the effective uid and the free space of a file system.
+# Directory-relative, no-follow file access, the effective uid and the free space of a file system;
+# memfds, seals, hole punching, `flock` and `poll` of the Linux entry store (tierstore-entry).
 rustix = "1.1.5"
 serde = { version = "1.0.229", features = ["derive"] }
 serde_json = "1.0.151"
@@ -101,12 +118,23 @@ toml = { version = "1.1.8", default-features = false, features = ["display", "pa
 tokio = "1.53.3"
 tokio-rustls = { version = "0.26.6", default-features = false, features = ["ring"] }
 tracing = "0.1.44"
+# Shared mappings of a memfd with atomic references into them, behind a safe interface: the state
+# memfd and the holders' counter memfds of the Linux entry store (tierstore-entry), and a mount's
+# own mappings of its counter memfd and of the state memfds it is passed (tierstore-mount-client). The rust-vmm
+# project's guest-memory crate; only its `backend-mmap` feature is used. Apache-2.0 OR BSD-3-Clause.
+vm-memory = { version = "0.18.0", default-features = false }
 # Reads the fields of a client certificate (IP subjectAltNames) that the OCI front's start checks.
 x509-parser = "0.18.1"
+# The `#[repr(C)]` wire structs of the FUSE ABI in `tsfuse` (derives checked for padding, read
+# and written as bytes without `unsafe` in the crate). Already in the tree through other crates.
+# BSD-2-Clause OR Apache-2.0 OR MIT.
+zerocopy = { version = "0.8.60", features = ["derive"] }
 
 # The workspace's own crates.
 # The object store trait and the S3 client, with no dependency on another workspace crate.
 objstore-s3 = { path = "crates/objstore-s3" }
+# The `ObjectStore` conformance suite, and its runner for an S3 endpoint (tests and reference runs).
+objstore-conformance = { path = "crates/objstore-conformance" }
 # The hot/cold object store library; it depends on no other workspace crate unless its `s3`
 # feature is on.
 tierstore = { path = "crates/tierstore" }
@@ -114,6 +142,26 @@ tierstore = { path = "crates/tierstore" }
 tierstore-trees-api = { path = "crates/tierstore-trees-api" }
 # Scratch directories, loopback ports and child processes for tests.
 tierstore-testkit = { path = "crates/tierstore-testkit" }
+# The storage tier's on-disk and on-wire formats (pure: bytes in, bytes out).
+tierstore-format = { path = "crates/tierstore-format" }
+# The frozen interfaces of the read path on a build node, and their fakes.
+tierstore-fetch-api = { path = "crates/tierstore-fetch-api" }
+# The breadth-first explorer of the protocol models (its `explore` module).
+tierstore-model = { path = "crates/tierstore-model" }
+# The frozen interfaces of the storage tier, the peer protocol, and a fake storage node.
+tierstore-store-api = { path = "crates/tierstore-store-api" }
+# The FUSE library: dispatch with replies bound to their originating device.
+tsfuse = { path = "crates/tsfuse" }
+# The metrics of section 12 of the fetch-cache-serve design and the demand-read trace.
+tierstore-metrics = { path = "crates/tierstore-metrics" }
+# The hash pool: the `Verifier` of the read path (bounded, sha256 on dedicated threads).
+tierstore-hashpool = { path = "crates/tierstore-hashpool" }
+# The journal and snapshot of a node-cache entry (section 8), shared by the entry stores.
+tierstore-journal = { path = "crates/tierstore-journal" }
+# The node cache's entry store on Linux (T1); the mount client's tests serve from it.
+tierstore-entry = { path = "crates/tierstore-entry" }
+# The server side of the mount protocol (T5); the mount client's tests run against it.
+tierstore-mount-server = { path = "crates/tierstore-mount-server" }
 # The previous release: `v0.3.17`, the tag of the commit below, taken from the public repository
 # at that commit alone (the `rev` is what pins it; a tag can be moved). Used only by the
 # dev-dependencies of `crates/compat`. When a release is made, move both to the new release's
@@ -171,4 +219,19 @@ incremental = false
 opt-level = 3
 
 [profile.test.package.tierstore-model]
+opt-level = 3
+
+# The models of tierstore-harness (loom and the breadth-first explorer) explore every
+# interleaving of their scenarios: optimise that crate in dev and test builds too.
+[profile.dev.package.tierstore-harness]
+opt-level = 3
+
+[profile.test.package.tierstore-harness]
+opt-level = 3
+
+# loom runs every execution of those models: optimised, they take seconds rather than minutes.
+[profile.dev.package.loom]
+opt-level = 3
+
+[profile.test.package.loom]
 opt-level = 3

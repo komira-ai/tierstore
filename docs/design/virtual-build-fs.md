@@ -7,6 +7,8 @@ inputs without a copy, fetches only what it opens, may write anywhere in them pr
 Section 11 holds the results of the first measurements and the plan against today's path on real builds run by the executor; section 12 is the phased plan, with the probes marked done or open. Section 13 records
 the owner's decisions and sets out the macOS frontend (C9, decided 2026-11-10: NFSv3 now, FSKit later if it measures better; the Linux kernel, C8, is decided: upgrade to 7.0 HWE), each with its options and a recommendation.
 
+**Passthrough was removed after tierstore 0.3.121** (see the note at the head of section 6.4): every open is a cached open, `INIT` asks for no passthrough and declares no stack depth, and the process needs `CAP_SYS_ADMIN` for the mount alone. Where this document speaks of passthrough, backing ids, the backing table or `max_stack_depth` 1 as what the process does, it records the design as built before that change.
+
 **What this document starts from.** An earlier proposal, built on researched findings, preceded it and recommended: one tierstore
 filesystem core in Rust with thin frontends (FUSE with passthrough on Linux, an NFSv4.0 loopback server on macOS, FSKit
 later); the per-job writable layer, copy-up included, in that core; pinning of a job's tree in the local cache; and three
@@ -327,8 +329,11 @@ tierstore does not read REAPI. A tree is described in tierstore's own format, so
 location of each blob, which only the client knows, can be part of it.
 
 A **tree manifest** is the listing of one directory: a JSON object, version 1, with the directory's children sorted by
-name (bytewise), each name unique, none empty, `.` or `..`, none containing `/` or NUL, and none beginning `.wh.` (a view's whiteout prefix, 6.6; refused by name,
-`unsupported entry name`):
+name (bytewise), each name unique, none empty, `.` or `..`, and none containing `/` or NUL (refused by name,
+`unsupported entry name`). A name beginning `.wh.` is a name like any other: an OCI layer's whiteouts are plain files that a
+build making a layer writes, and a later action reads them as inputs. On Linux the job's overlay keeps its own whiteouts
+as character devices and extended attributes, never as names; a view, which keeps whiteouts as names, refuses such a
+tree (6.6). An example:
 
 ```json
 {"v":1,"children":[
@@ -555,6 +560,13 @@ so that its dentries and inodes are shared across actions (6.7).
 
 ### 6.4 Opens: lazy fetch and passthrough
 
+**Passthrough was removed after tierstore 0.3.121** ([fetch-cache-serve.md](fetch-cache-serve.md)): a file of a placed tree is a
+span of a pack, which passthrough cannot serve, and the backing table of 7.1, rewritten under one lock at every first open and
+last release, held every open of a loaded node behind it. Every open is now a cached open (`FOPEN_KEEP_CACHE`) and no `INIT` asks
+for passthrough. Because of the `EIO` rule below, a process that takes over a connection that a release up to 0.3.121 answered
+with passthrough still answers the opens of the blobs in that release's `backing` file with their ids, read once and never
+closed (`crates/tierstore/docs/operations.md`). The rest of this section and of 7.1 records the design as it was built.
+
 The kernel's rules for passthrough (`fs/fuse/iomode.c` and `fs/fuse/passthrough.c` at v6.17 [S2]) decide the Linux half
 of this section: an inode with an open passthrough file is bound to that one backing file, and a passthrough open with
 another backing id fails `EBUSY`; a non-passthrough open of an inode with a backing file fails `EIO`; a passthrough open
@@ -757,8 +769,9 @@ survive the process (a crash, an update), not the machine, which takes the run w
 
 **Rules a view keeps.**
 
-- Names beginning `.wh.` cannot be created, renamed to or linked to (`EPERM`), as in an OCI layer; a tree manifest cannot
-  contain them either (6.1).
+- Names beginning `.wh.` cannot be created, renamed to or linked to (`EPERM`), as in an OCI layer. A tree may hold them
+  (6.1), but the mirror could not tell such an entry from a whiteout, so a view over a tree that holds one is refused by
+  name (`whiteout name in tree`, with the path); the tree is still served read-only under `trees/`.
 - **Handles.** An entry still the tree's has the `10` form (view number, tree index); an entry in `root/` has the `11`
   form (view number, id); a copied-up file answers to both, so a handle the client took before the copy-up still leads to
   the copy (6.3). After a restart the core finds an entry by its id or tree index by walking `root/` once and reading the
@@ -1196,7 +1209,7 @@ So the core's views (6.6) move out of the Linux design altogether and stay on ma
 | `tierstore fs` crashes during a copy-up | The half copy is in `meta/tmp/`, not at the path; the intent's roll-forward makes it again. |
 | The macOS client renames an open, removed file to `.nfs…` | The file keeps its id attribute, so the client's handle still leads to it (6.6). |
 | A job creates, renames to or links to a name beginning `.wh.` in a view | `EPERM`, as in an OCI layer. |
-| A tree manifest with a name beginning `.wh.` | The attach is refused by name (`unsupported entry name`). |
+| A tree manifest with a name beginning `.wh.` (an OCI layer's whiteout written as a build output) | Attached and served: the name is a plain entry of the tree, and the job's overlay above it reads it as that file. A view over it (macOS, not built) is refused by name (`whiteout name in tree`, 6.6). |
 | A tree manifest that does not hash to its key, does not parse, or breaks a limit | The attach is refused by name; nothing appears. |
 | A tree of exactly 2^24 - 1 entries; one of 2^24 | Served; refused (`tree too large`). |
 | Two attaches of one tree for one run | One attachment; `detach` ends it once. |

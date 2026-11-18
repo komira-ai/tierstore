@@ -18,14 +18,14 @@
 //! request names one of its inodes. The trees of the node's placements appear at their fs
 //! locations, below the root, and are read from the node's tree store (`core/placed.rs`).
 
-use std::collections::{HashMap, HashSet};
+use std::collections::HashMap;
 use std::fs::File;
 use std::io;
 use std::path::{Path, PathBuf};
 #[cfg(any(target_os = "linux", test))]
 use std::sync::OnceLock;
 use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
-use std::sync::{Arc, Mutex, PoisonError, RwLock, mpsc};
+use std::sync::{Arc, Mutex, MutexGuard, PoisonError, RwLock, RwLockReadGuard, mpsc};
 use std::time::Duration;
 
 use crate::Clock;
@@ -33,9 +33,9 @@ use crate::Clock;
 use crate::server::local_cache::blob_path;
 use crate::tree_manifest::{BlobSource, EntryKind, TreeDigest, TreeEntry};
 
-use super::attach::{Attachments, Failure, is_run};
+use super::attach::{Attachments, Failure, Snapshot, is_run};
 #[cfg(any(target_os = "linux", test))]
-use super::backing::{self, Backing, BackingTable, Registrar};
+use super::backing::{Adopted, Guard};
 use super::fill_client::FillClient;
 #[cfg(any(target_os = "linux", test))]
 use super::handle;
@@ -45,7 +45,11 @@ use super::locked;
 use super::put::space::PutSpace;
 use super::table::{TableError, TreeTable};
 use super::tree::Tree;
+#[cfg(any(target_os = "linux", test))]
+use handles::Handles;
+use loaded::{Loaded, Trees};
 use memory::Reads;
+use pins::PinLocks;
 
 /// How long the kernel may keep what it was told below a tree's root: the longest it keeps, about
 /// a year. Everything there is immutable.
@@ -122,23 +126,6 @@ pub(super) struct DirItem {
     pub entry: Entry,
 }
 
-/// A tree that is in memory.
-#[derive(Debug)]
-struct Loaded {
-    digest: TreeDigest,
-    tree: Tree,
-    /// The lookups of its inodes the kernel has not forgotten yet, as far as this process
-    /// counted them.
-    lookups: AtomicU64,
-    /// Whether the kernel forgot more lookups than were counted: no forget takes the tree out of
-    /// memory (`core/memory.rs`).
-    uncounted: AtomicBool,
-    /// When a request last named the tree or one of its inodes, on the core's clock.
-    used: AtomicU64,
-    /// The blobs this tree has asked the cache to pin.
-    pinned: Mutex<HashSet<TreeDigest>>,
-}
-
 /// An open file.
 #[cfg(any(target_os = "linux", test))]
 #[derive(Debug)]
@@ -147,12 +134,9 @@ enum Handle {
     Empty,
     /// The cache file of a blob, or the span of a pack that a file of a placed tree is.
     Cached(FileBytes),
-    /// The cache file of a blob that got no backing id because `fs.max_backing_ids` were live; the
-    /// release is counted on the blob in the backing table.
-    Spilled(FileBytes, TreeDigest),
-    /// A blob served by kernel passthrough: reads never reach this process, and the release is
-    /// counted on the blob's backing id.
-    Backed(TreeDigest),
+    /// A blob the kernel reads itself, from the backing id an earlier release registered on this
+    /// connection (`backing.rs`): reads never reach this process.
+    Adopted,
 }
 
 /// What an open is answered with.
@@ -161,22 +145,21 @@ enum Handle {
 pub(super) enum Opened {
     /// A cached open: the page cache is kept, and every read it misses reaches [`Core::read`].
     Cached(u64),
-    /// An open served by passthrough from the blob's backing id.
-    Backed {
+    /// An open of a blob that has a backing id from an earlier release (`backing.rs`): answered
+    /// with that id.
+    Adopted {
         /// The handle of the open.
         fh: u64,
-        /// The id to answer with.
-        backing: Backing,
+        /// The frontend's handle on the id.
+        id: Guard,
     },
 }
 
-/// The trees in memory and the attachments.
+/// What the state lock guards: the attachments. A request that names a tree in memory does not
+/// take it (`core/loaded.rs`).
 #[derive(Debug)]
 struct State {
-    loaded: HashMap<u64, Arc<Loaded>>,
     attachments: Attachments,
-    /// The path of each directory above the fs locations that a lookup found, by inode number.
-    dirs: HashMap<u64, String>,
 }
 
 /// Why an attach was refused.
@@ -211,9 +194,6 @@ pub(super) struct Settings {
     pub mountpoint: PathBuf,
     /// The id of this mount, which the pins are made under.
     pub mount_id: String,
-    /// The most backing ids the kernel is given at once (`fs.max_backing_ids`).
-    #[cfg(any(target_os = "linux", test))]
-    pub max_backing_ids: usize,
     /// How many processes have served this connection, this one included (`init_record`): in the
     /// numbers of the file handles this core gives out.
     #[cfg(any(target_os = "linux", test))]
@@ -234,16 +214,27 @@ pub(in crate::server) struct Core {
     settings: Settings,
     fills: FillClient,
     table: TreeTable,
+    /// The attachments, for short looks and changes: never held across a write of the attachments
+    /// file or a round trip on the fill socket.
     state: Mutex<State>,
-    /// Held by an attach, a restore and a detach for all of their work, so that a detach cannot
-    /// unpin a tree that an attach has just taken.
+    /// The trees in memory, read with no lock (`core/loaded.rs`).
+    trees: Trees,
+    /// The path of each directory above the fs locations that a lookup found, by inode number.
+    dirs: Mutex<HashMap<u64, String>>,
+    /// Held by an attach, a restore and a detach for the work that changes the table of tree
+    /// numbers or the attachments (and their file), and by a lookup that attaches a tree: so that
+    /// `Core::hold` waits for that work and none starts after it, and two of them never write the
+    /// attachments file at once. Not held across a round trip on the fill socket, nor while a
+    /// manifest is read, but by the restore at a start, before any request is served.
     lifecycle: Mutex<()>,
-    /// Read by an open's pin of a blob, from its look at whether the tree is attached to its record
-    /// of the pin, and written by a detach from the end of the attachments to the unpin: a pin is
-    /// never made after the unpin of a tree it saw attached. The pins of opens hold it together,
-    /// so that their round trips on the fill socket run at once. (Not the lifecycle lock, which
-    /// an attach holds while it reads manifests.)
-    pinning: RwLock<()>,
+    /// The locks of the pins and unpins of the trees (`core/pins.rs`): a pin is never made after the
+    /// unpin of a tree it saw attached, and a tree attached again is not unpinned.
+    pins: PinLocks,
+    /// Read by a detach from its decision under the lifecycle lock to the end of its unpins,
+    /// which it makes after it released that lock, and written by `Core::hold`: so a hold waits
+    /// for the unpins of the detaches already decided, and no unpin of this process follows the
+    /// pins of a successor. Only the threads that detach and hold take it.
+    freeing: RwLock<()>,
     /// Whether a successor is taking over: no attach or detach is done, so that this process
     /// writes neither the table of tree numbers nor the attachments file (`Core::hold`).
     held: AtomicBool,
@@ -257,22 +248,42 @@ pub(in crate::server) struct Core {
     /// The end of the channel the thread that detaches idle trees waits on: dropped with the
     /// core, which ends the thread (`core/implicit.rs`).
     sweeper: Mutex<Option<mpsc::Sender<()>>>,
-    /// The backing table, once the kernel offered passthrough and it was chosen.
+    /// The backing ids an earlier release left on the connection, where this process took over
+    /// one that has them (`backing.rs`). Set once, before the first request; read with no lock.
     #[cfg(any(target_os = "linux", test))]
-    backing: OnceLock<Arc<BackingTable>>,
+    adopted: OnceLock<Adopted>,
     /// The put directory the frontend serves as `put/`, where `fs.put` is enabled.
     #[cfg(any(target_os = "linux", test))]
     put: OnceLock<Arc<PutSpace>>,
-    /// Where the backing table is kept.
+    /// The open files, in maps split by handle (`core/handles.rs`).
     #[cfg(any(target_os = "linux", test))]
-    backing_file: PathBuf,
-    #[cfg(any(target_os = "linux", test))]
-    handles: Mutex<HashMap<u64, Arc<Handle>>>,
+    handles: Handles,
     #[cfg(any(target_os = "linux", test))]
     next_handle: AtomicU64,
     /// The requests served, by name, for the tests that count what reaches the core.
     #[cfg(test)]
     pub(super) served: Mutex<Vec<&'static str>>,
+    /// The times the state lock was taken.
+    #[cfg(test)]
+    state_locks: AtomicU64,
+    /// What the tests run inside a write of the attachments file, and between the mark of a tree
+    /// as removed and its removal from the map.
+    #[cfg(test)]
+    pub(super) hooks: Hooks,
+}
+
+/// What a test runs at a point of the core's work, with the core.
+#[cfg(test)]
+type Hook = Box<dyn Fn(&Core) + Send + Sync>;
+
+/// The points of the core's work where a test may run something.
+#[cfg(test)]
+#[derive(Default)]
+pub(super) struct Hooks {
+    /// Inside a write of the attachments file, before the file is written.
+    pub(super) saving: Mutex<Option<Hook>>,
+    /// After a tree is marked as removed and before it is taken out of the map.
+    pub(super) marked: Mutex<Option<Hook>>,
 }
 
 impl Core {
@@ -288,29 +299,50 @@ impl Core {
             fills,
             table,
             state: Mutex::new(State {
-                loaded: HashMap::new(),
                 attachments: Attachments::new(runtime_dir),
-                dirs: HashMap::new(),
             }),
+            trees: Trees::default(),
+            dirs: Mutex::new(HashMap::new()),
             lifecycle: Mutex::new(()),
-            pinning: RwLock::new(()),
+            pins: PinLocks::new(),
+            freeing: RwLock::new(()),
             held: AtomicBool::new(false),
             prefetching: Mutex::new(HashMap::new()),
             reads: Reads::default(),
             sweeper: Mutex::new(None),
             #[cfg(any(target_os = "linux", test))]
-            backing: OnceLock::new(),
+            adopted: OnceLock::new(),
             #[cfg(any(target_os = "linux", test))]
             put: OnceLock::new(),
             #[cfg(any(target_os = "linux", test))]
-            backing_file: runtime_dir.join(backing::FILE),
-            #[cfg(any(target_os = "linux", test))]
-            handles: Mutex::new(HashMap::new()),
+            handles: Handles::new(),
             #[cfg(any(target_os = "linux", test))]
             next_handle: AtomicU64::new(1),
             #[cfg(test)]
             served: Mutex::new(Vec::new()),
+            #[cfg(test)]
+            state_locks: AtomicU64::new(0),
+            #[cfg(test)]
+            hooks: Hooks::default(),
         }
+    }
+
+    /// The state, locked.
+    fn state(&self) -> MutexGuard<'_, State> {
+        #[cfg(test)]
+        let _ = self.state_locks.fetch_add(1, Ordering::AcqRel);
+        locked(&self.state)
+    }
+
+    /// Writes the attachments file from `snapshot`, which the caller took under the state lock and
+    /// released it for. The caller holds the lifecycle lock, so no two writes of the file run at
+    /// once.
+    fn write_attachments(&self, snapshot: &Snapshot) -> io::Result<()> {
+        #[cfg(test)]
+        if let Some(hook) = locked(&self.hooks.saving).as_ref() {
+            hook(self);
+        }
+        snapshot.write()
     }
 
     /// Serves `space` as `put/` from now on (once).
@@ -406,21 +438,33 @@ impl Core {
         if !is_run(run) {
             return Err(AttachError::Run);
         }
+        if self.is_held() {
+            return Err(AttachError::Replaced);
+        }
+        // Read before the lifecycle lock, as a lookup that attaches a tree reads it: a slow fill
+        // holds up no attach, no detach and no lookup.
+        let tree = self
+            .read_ahead(&digest)
+            .map_err(|why| AttachError::Tree(why.to_string()))?;
         let _lifecycle = locked(&self.lifecycle);
         if self.is_held() {
             return Err(AttachError::Replaced);
         }
         let number = self.table.number_of(&digest)?;
-        let _ = self.load_unless_loaded(number, digest)?;
-        {
-            let mut state = locked(&self.state);
+        if let Some(tree) = tree {
+            let _ = self.keep(number, digest, tree);
+            let _ = self.read_done(number);
+        }
+        let (added, snapshot) = {
+            let mut state = self.state();
             let added = state.attachments.add(run, number, digest);
-            if let Err(error) = state.attachments.save() {
-                if added {
-                    state.attachments.remove_one(run, number);
-                }
-                return Err(error.into());
+            (added, state.attachments.snapshot())
+        };
+        if let Err(error) = self.write_attachments(&snapshot) {
+            if added {
+                self.state().attachments.remove_one(run, number);
             }
+            return Err(error.into());
         }
         if prefetch {
             self.start_prefetch(number);
@@ -438,58 +482,84 @@ impl Core {
         number: u64,
         digest: TreeDigest,
     ) -> Result<Arc<Loaded>, AttachError> {
-        if let Some(loaded) = locked(&self.state).loaded.get(&number) {
-            return Ok(Arc::clone(loaded));
+        if let Some(loaded) = self.trees.get(number) {
+            return Ok(loaded);
         }
         self.load(number, digest)
             .map_err(|why| AttachError::Tree(why.to_string()))
     }
 
     /// Ends every attachment of `run`: the failures its attachments recorded, or none if it
-    /// attached nothing. A tree no run has now and no lookup attached is unpinned, and left memory
-    /// when the kernel forgets its inodes.
+    /// attached nothing. A tree no run has now and no lookup attached is unpinned, with no lock of
+    /// the core's held but that of its pins (`Core::free_tree`), and left memory when the kernel
+    /// forgets its inodes.
     pub(super) fn detach(&self, run: &str) -> Option<Vec<Failure>> {
-        let _lifecycle = locked(&self.lifecycle);
-        let _pinning = self.no_pins();
-        if self.is_held() {
-            return None;
-        }
-        let (freed, failures) = {
-            let mut state = locked(&self.state);
-            let trees = state.attachments.remove(run)?;
-            let _ = state.attachments.save();
-            let mut failures = Vec::new();
-            let mut freed = Vec::new();
-            for (number, digest, mut failed) in trees {
-                failures.append(&mut failed);
-                if !state.attachments.is_attached(number) {
-                    freed.push((number, digest));
-                }
+        let (freed, failures, _freeing) = {
+            let _lifecycle = locked(&self.lifecycle);
+            if self.is_held() {
+                return None;
             }
-            (freed, failures)
+            let freeing = self.freeing();
+            let (freed, failures, snapshot) = {
+                let mut state = self.state();
+                let trees = state.attachments.remove(run)?;
+                let mut failures = Vec::new();
+                let mut freed = Vec::new();
+                for (number, digest, mut failed) in trees {
+                    failures.append(&mut failed);
+                    if !state.attachments.is_attached(number) {
+                        freed.push((number, digest));
+                    }
+                }
+                (freed, failures, state.attachments.snapshot())
+            };
+            let _ = self.write_attachments(&snapshot);
+            for (number, _) in &freed {
+                let _ = locked(&self.prefetching).remove(number);
+            }
+            (freed, failures, freeing)
         };
         for (number, digest) in freed {
-            let _ = locked(&self.prefetching).remove(&number);
-            let loaded = locked(&self.state).loaded.get(&number).cloned();
-            loaded
-                .iter()
-                .for_each(|loaded| locked(&loaded.pinned).clear());
-            let _ = self
-                .fills
-                .unpin(&self.settings.mount_id, &digest.to_string());
-            self.drop_if_forgotten(number);
+            self.free_tree(number, &digest);
         }
         Some(failures)
+    }
+
+    /// Unpins the tree `number`, `digest`, which a detach has found that nothing attaches, and
+    /// takes it out of memory if the kernel holds none of its inodes. The caller has released
+    /// the lifecycle lock: the round trip to the cache holds only the lock of the tree's pins
+    /// (`core/pins.rs`), and a tree that was attached again since the caller decided is left as
+    /// it is, pinned.
+    pub(super) fn free_tree(&self, number: u64, digest: &TreeDigest) {
+        {
+            let _unpinning = self.pins.unpin(digest);
+            if self.attached(number) {
+                return;
+            }
+            if let Some(loaded) = self.trees.get(number) {
+                loaded.pinned.clear();
+            }
+            self.let_go(digest);
+        }
+        self.drop_if_forgotten(number);
     }
 
     /// Stops this process from changing the table of tree numbers and the attachments file
     /// (`on`), or lets it do so again. A successor that takes over reads both once it has taken
     /// the sockets, and this process must have written its last by then: the call waits for the
-    /// attach or detach that is in progress, and every later one is refused (`AttachError::Replaced`,
-    /// and, for a detach, an answer of none; ask `Core::is_held`).
+    /// attach or detach that is changing them, and for the unpins of the detaches decided
+    /// before it, and every later one is refused (`AttachError::Replaced`, and, for a detach, an
+    /// answer of none; ask `Core::is_held`).
     pub(super) fn hold(&self, on: bool) {
         let _lifecycle = locked(&self.lifecycle);
         self.held.store(on, Ordering::SeqCst);
+        // The unpins of the detaches decided before, which run with the lifecycle lock released.
+        drop(self.freeing.write().unwrap_or_else(PoisonError::into_inner));
+    }
+
+    /// Marks a detach whose unpins are to come, until the guard is dropped (`Core::hold`).
+    pub(super) fn freeing(&self) -> RwLockReadGuard<'_, ()> {
+        self.freeing.read().unwrap_or_else(PoisonError::into_inner)
     }
 
     /// Whether [`Core::hold`] is on.
@@ -499,7 +569,7 @@ impl Core {
 
     /// Ends the attachments of every run that is not in `keep`; the number of runs.
     pub(super) fn detach_all_except(&self, keep: &[String]) -> usize {
-        let runs = locked(&self.state).attachments.runs();
+        let runs = self.state().attachments.runs();
         runs.iter()
             .filter(|run| !keep.contains(run))
             .filter(|run| self.detach(run).is_some())
@@ -508,13 +578,13 @@ impl Core {
 
     /// Each attachment, as a tree digest and a run.
     pub(super) fn attachments(&self) -> Vec<(TreeDigest, String)> {
-        locked(&self.state).attachments.listing()
+        self.state().attachments.listing()
     }
 
     /// Tells the cache which trees are attached now, so that it drops every other pin of this
     /// mount, and the tree store which placements, so that it ends every other hold of it.
     pub(super) fn pins_live(&self) {
-        let attached = locked(&self.state).attachments.trees();
+        let attached = self.state().attachments.trees();
         let trees: Vec<String> = attached
             .iter()
             .filter(|digest| placed::placement_of(digest).is_none())
@@ -553,6 +623,7 @@ impl Core {
             };
         }
         let loaded = self.tree(number)?;
+        self.looked_into(&loaded);
         let dir = loaded.tree.entry(index).ok_or(Errno::NoEnt)?;
         if !matches!(dir.kind, EntryKind::Dir { .. }) {
             return Err(Errno::NotDir);
@@ -656,6 +727,7 @@ impl Core {
         self.opendir(ino)?;
         let (number, index) = ino::split(ino);
         let loaded = self.tree(number)?;
+        self.looked_into(&loaded);
         let parent = loaded.tree.entry(index).and_then(|entry| entry.parent);
         let parent_ino = parent.map_or_else(
             || self.root_parent(&loaded.tree),
@@ -699,21 +771,15 @@ impl Core {
     /// does not hold it. A fill that fails fails the open (`Errno::Io`) and is recorded on the
     /// attachments of the tree.
     ///
-    /// Where passthrough was chosen (`Core::enable_passthrough`), a non-empty file is answered
-    /// with its blob's backing id: the live one, or one that `register` makes from the cache
-    /// file. Otherwise, for an empty file, and for a blob that has no id when `fs.max_backing_ids`
-    /// are live, the open is a cached one.
+    /// Every open is a cached one, but that of a blob an earlier release registered a backing id
+    /// for on this connection (`Core::adopt_backing`), which is answered with that id. No lock the
+    /// opens of other files take is held across a fill or a pin.
     ///
     /// # Errors
     /// [`Errno::RoFs`] for an open for writing, [`Errno::IsDir`] for a directory, [`Errno::Inval`]
-    /// for a link, [`Errno::Io`] for a blob that cannot be had or an id that cannot be registered.
+    /// for a link, [`Errno::Io`] for a blob that cannot be had.
     #[cfg(any(target_os = "linux", test))]
-    pub(super) fn open(
-        &self,
-        ino: u64,
-        writing: bool,
-        register: &mut Registrar<'_>,
-    ) -> Result<Opened, Errno> {
+    pub(super) fn open(&self, ino: u64, writing: bool) -> Result<Opened, Errno> {
         #[cfg(test)]
         self.note("open");
         if writing {
@@ -726,8 +792,8 @@ impl Core {
         let loaded = self.tree(number)?;
         let entry = loaded.tree.entry(index).ok_or(Errno::NoEnt)?;
         // A file of a placed tree is a span of a pack: never opened by passthrough.
-        let backing = self
-            .backing
+        let adopted = self
+            .adopted
             .get()
             .filter(|_| loaded.tree.location().is_none());
         let handle = match &entry.kind {
@@ -740,10 +806,13 @@ impl Core {
                 source,
                 ..
             } => {
-                let blob = (digest, *size, source.as_ref());
-                if let Some(table) = backing {
-                    return self.open_backed(table, (&loaded, number, &entry), blob, register);
+                if let Some(id) = adopted.and_then(|adopted| adopted.get(digest)) {
+                    self.pin_once((&loaded, number), digest);
+                    let fh = self.new_handle(Handle::Adopted);
+                    let id = Arc::clone(id);
+                    return Ok(Opened::Adopted { fh, id });
                 }
+                let blob = (digest, *size, source.as_ref());
                 Handle::Cached(self.blob(&loaded, number, &entry, blob)?)
             }
         };
@@ -754,12 +823,8 @@ impl Core {
     #[cfg(any(target_os = "linux", test))]
     fn new_handle(&self, handle: Handle) -> u64 {
         let count = self.next_handle.fetch_add(1, Ordering::AcqRel);
-        let fh = handle::make(
-            self.settings.generation,
-            count,
-            matches!(handle, Handle::Backed(_)),
-        );
-        let _ = locked(&self.handles).insert(fh, Arc::new(handle));
+        let fh = handle::make(self.settings.generation, count);
+        self.handles.insert(fh, Arc::new(handle));
         fh
     }
 
@@ -794,19 +859,23 @@ impl Core {
             digest: digest.to_string(),
             reason,
         };
-        locked(&self.state).attachments.fail(number, &failure);
+        self.state().attachments.fail(number, &failure);
     }
 
     /// Asks the cache to keep the blob for `loaded`, the tree `number`, the first time it is opened
     /// under it while the tree is attached: a tree no run and no lookup has attached is kept by
     /// recency alone, since nothing would take its pins away. A blob pinned already is seen without
-    /// any lock the core shares; the pins of different opens are asked at once.
+    /// any lock the core shares; the pins of different opens are asked at once. The set of
+    /// pinned blobs and the state are never locked together.
     fn pin_once(&self, (loaded, number): (&Loaded, u64), digest: &TreeDigest) {
-        if locked(&loaded.pinned).contains(digest) {
+        if loaded.pinned.contains(digest) {
             return;
         }
-        let _pinning = self.pinning.read().unwrap_or_else(PoisonError::into_inner);
-        if locked(&loaded.pinned).contains(digest) || !self.attached(number) {
+        let _pinning = self.pins.pin(&loaded.digest);
+        if loaded.pinned.contains(digest) {
+            return;
+        }
+        if !self.attached(number) {
             return;
         }
         let sha = digest.to_string();
@@ -815,13 +884,8 @@ impl Core {
             .fills
             .pin(&self.settings.mount_id, &loaded.digest.to_string(), &[&sha]);
         if pinned.is_ok_and(|answer| answer.starts_with("ok")) {
-            let _ = locked(&loaded.pinned).insert(*digest);
+            loaded.pinned.insert(*digest);
         }
-    }
-
-    /// Holds off every pin of an open: for a detach, from the end of the attachments to the unpin.
-    fn no_pins(&self) -> std::sync::RwLockWriteGuard<'_, ()> {
-        self.pinning.write().unwrap_or_else(PoisonError::into_inner)
     }
 
     /// The bytes of a file: the cache file of its blob, filled if it must be, which is pinned for
@@ -859,15 +923,12 @@ impl Core {
     pub(super) fn read(&self, fh: u64, offset: u64, size: u32) -> Result<Vec<u8>, Errno> {
         #[cfg(test)]
         self.note("read");
-        let handle = locked(&self.handles)
-            .get(&fh)
-            .cloned()
-            .ok_or(Errno::Inval)?;
+        let handle = self.handles.get(fh).ok_or(Errno::Inval)?;
         let bytes = match handle.as_ref() {
-            Handle::Cached(bytes) | Handle::Spilled(bytes, _) => bytes,
+            Handle::Cached(bytes) => bytes,
             Handle::Empty => return Ok(Vec::new()),
             // The kernel reads a passthrough file itself: a request for one is a fault.
-            Handle::Backed(_) => return Err(Errno::Io),
+            Handle::Adopted => return Err(Errno::Io),
         };
         bytes.read(offset, size as usize)
     }
@@ -875,24 +936,19 @@ impl Core {
     /// Closes the open file `fh`.
     #[cfg(any(target_os = "linux", test))]
     pub(super) fn release(&self, fh: u64) {
-        let handle = locked(&self.handles).remove(&fh);
-        if let (Some(Handle::Backed(blob) | Handle::Spilled(_, blob)), Some(table)) =
-            (handle.as_deref(), self.backing.get())
-        {
-            table.release(blob);
-        }
+        self.handles.remove(fh);
     }
 
     /// The number of files open now.
     #[cfg(test)]
     pub(super) fn open_files(&self) -> usize {
-        locked(&self.handles).len()
+        self.handles.len()
     }
 
     /// The trees in memory.
     #[cfg(test)]
     pub(super) fn trees_in_memory(&self) -> usize {
-        locked(&self.state).loaded.len()
+        self.trees.len()
     }
 }
 
@@ -912,10 +968,12 @@ fn path_of(tree: &Tree, index: u32) -> String {
 
 #[cfg(any(target_os = "linux", test))]
 mod adopt;
-mod implicit;
-mod memory;
 #[cfg(any(target_os = "linux", test))]
-mod passthrough;
+mod handles;
+mod implicit;
+mod loaded;
+mod memory;
+mod pins;
 mod placed;
 mod prefetch;
 mod read;
@@ -927,3 +985,11 @@ pub(super) use read::FileBytes;
 #[cfg(test)]
 #[path = "core_tests.rs"]
 mod tests;
+
+#[cfg(test)]
+#[path = "core/lifecycle_tests.rs"]
+mod lifecycle_tests;
+
+#[cfg(test)]
+#[path = "core_whiteout_names_tests.rs"]
+mod whiteout_names_tests;

@@ -5,7 +5,7 @@ use std::time::Duration;
 
 use tierstore_testkit::dir::TestDir;
 
-use super::{FsSettings, from_text, load};
+use super::{FsSettings, from_text, ignored, load};
 
 const GROUPS: &str = "root:x:0:\nbad line\nbuilders:x:2001:alice\nodd:x:notanumber:\n";
 
@@ -36,8 +36,6 @@ fn the_needed_keys_alone_give_the_defaults() {
         cache_path: PathBuf::from("/var/cache/tierstore"),
         fetch_timeout: Duration::from_secs(60),
         threads: 16,
-        passthrough: true,
-        max_backing_ids: 65_536,
         handoff_socket: PathBuf::from("/run/tierstore-fs/handoff.sock"),
         handoff_wait: Duration::from_secs(120),
         recover_wait: Duration::from_secs(30),
@@ -56,7 +54,7 @@ fn the_needed_keys_alone_give_the_defaults() {
 fn every_key_is_taken_when_it_is_set() {
     let text = "[fs]\nmountpoint = \"/m\"\nruntime_dir = \"/r\"\nclient_group = \"77\"\n\
         owner = \"5:6\"\nfill_socket = \"/f\"\ncache_path = \"/c\"\nfetch_timeout = \"5s\"\n\
-        threads = 3\npassthrough = false\nmax_backing_ids = 7\n\
+        threads = 3\n\
         handoff_socket = \"/h.sock\"\nhandoff_wait = \"5s\"\nrecover_wait = \"2m\"\nreattach_concurrency = 3\n\
         tree_idle_secs = 604800\n";
     let got = from_text(text, "").unwrap();
@@ -67,7 +65,6 @@ fn every_key_is_taken_when_it_is_set() {
         (got.fetch_timeout, got.threads),
         (Duration::from_secs(5), 3)
     );
-    assert_eq!((got.passthrough, got.max_backing_ids), (false, 7));
     assert_eq!(got.reattach_concurrency, 3);
     assert_eq!(got.tree_idle, Duration::from_secs(604_800));
     assert_eq!(got.handoff_socket, PathBuf::from("/h.sock"));
@@ -117,8 +114,6 @@ fn every_refusal_names_its_key() {
         (fs("fetch_timeout = \"2h\"\n"), "fs.fetch_timeout"),
         (fs("threads = 0\n"), "fs.threads"),
         (fs("threads = 1025\n"), "fs.threads"),
-        (fs("max_backing_ids = 0\n"), "fs.max_backing_ids"),
-        (fs("max_backing_ids = 1048577\n"), "fs.max_backing_ids"),
         (
             "[fs]\nowner = \"1:2\"\nfill_socket = \"/f\"\ncache_path = \"/c\"\n".to_owned(),
             "fs.client_group",
@@ -166,7 +161,8 @@ fn a_file_that_is_not_the_table_is_a_syntax_error_without_values() {
     let why = refused("[fs]\nthreads = \"seventeen\"\n");
     assert!(!why.contains("seventeen"), "{why}");
     // A switch is true or false, nothing else.
-    assert!(refused(&fs("passthrough = \"yes\"\n")).contains("expected a boolean"));
+    let text = format!("{}[fs.put]\nenabled = \"yes\"\n", fs(""));
+    assert!(refused(&text).contains("expected a boolean"));
 }
 
 /// Asserts that a key this release does not know is ignored and the file loads.
@@ -174,6 +170,34 @@ fn a_file_that_is_not_the_table_is_a_syntax_error_without_values() {
 fn a_key_of_a_later_release_is_ignored() {
     let text = fs("future_knob = 3\n");
     assert!(from_text(&text, GROUPS).is_ok());
+    assert_eq!(
+        ignored("future_knob"),
+        "tierstore fs: fs.future_knob is not a key of this release and is ignored"
+    );
+}
+
+/// Asserts that a file written for a release that had passthrough starts with its keys, whatever
+/// their values (a value the release refused included), with the settings it would have without
+/// them, and that the warning of each names the release that removed it and why.
+#[test]
+fn the_keys_of_passthrough_are_ignored_with_a_warning_that_names_the_release() {
+    let plain = from_text(&fs(""), GROUPS).unwrap();
+    for removed in [
+        "passthrough = false\nmax_backing_ids = 7\n",
+        "passthrough = \"yes\"\nmax_backing_ids = 0\n",
+    ] {
+        assert_eq!(from_text(&fs(removed), GROUPS).unwrap(), plain, "{removed}");
+    }
+    assert_eq!(
+        ignored("passthrough"),
+        "tierstore fs: fs.passthrough is ignored: removed after tierstore 0.3.121, with \
+         passthrough: every open is a cached open"
+    );
+    assert_eq!(
+        ignored("max_backing_ids"),
+        "tierstore fs: fs.max_backing_ids is ignored: removed after tierstore 0.3.121, with \
+         passthrough: no backing id is registered"
+    );
 }
 
 /// Asserts that a file is read from a path, a missing one is an error naming it, and the group file

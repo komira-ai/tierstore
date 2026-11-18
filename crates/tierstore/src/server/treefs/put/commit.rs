@@ -12,11 +12,17 @@ use super::error::PutError;
 use super::hasher::hash_file;
 use super::journal::Record;
 use super::names::{PutDir, Sha256Digest, expected_digest};
-use super::store::{Entry, StagedStore};
+use super::store::{Entry, StagedStore, Table};
 use crate::server::treefs::locked;
 
 /// Why a commit is refused while a handle of its file is open.
 pub(in crate::server) const HANDLE_OPEN: &str = "a handle of the file is open";
+
+/// Why a commit is refused while a commit of its file is running.
+pub(in crate::server) const FILE_RUNNING: &str = "a commit of the file is running";
+
+/// Why a commit is refused while a commit of its key is running.
+pub(in crate::server) const KEY_RUNNING: &str = "a commit of the key is running";
 
 /// The answer of the upstream to the put of a commit (the `put` verb's reply).
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -129,12 +135,44 @@ impl Commit<'_> {
 impl Drop for Commit<'_> {
     fn drop(&mut self) {
         if !self.done {
-            let _ = locked(&self.store.table).uploading.remove(&self.id);
+            locked(&self.store.table).end_upload(self.id);
         }
     }
 }
 
+impl Table {
+    /// The number of the staged file `src` of `dir`, if it can begin a commit to `key` now.
+    fn check_commit(&self, dir: &PutDir, src: &str, key: &str) -> Result<u64, PutError> {
+        let id = self.id_of(dir, src).ok_or(PutError::NotFound)?;
+        if self.uploading.contains_key(&id) {
+            return Err(PutError::Busy(FILE_RUNNING));
+        }
+        if self.open_by_file.contains_key(&id) {
+            return Err(PutError::Busy(HANDLE_OPEN));
+        }
+        if self.uploading_keys.contains(key) {
+            return Err(PutError::Busy(KEY_RUNNING));
+        }
+        Ok(id)
+    }
+}
+
 impl StagedStore {
+    /// What [`StagedStore::rename`] would answer for the commit of `src` of `dir` as `dst` if it
+    /// began now, before it hashes or marks anything: `Ok` when it would begin.
+    ///
+    /// # Errors
+    /// Those of [`StagedStore::rename`] that are known without the bytes.
+    pub(in crate::server) fn probe_commit(
+        &self,
+        dir: &PutDir,
+        src: &str,
+        dst: &str,
+    ) -> Result<(), PutError> {
+        let key = Self::checked_names(dir, src, dst)?;
+        locked(&self.table).check_commit(dir, src, &key).map(|_| ())
+    }
+
     /// Starts the commit of the staged file `src` of `dir` as `dst`, the key `key`.
     pub(super) fn begin_commit(
         &self,
@@ -145,19 +183,10 @@ impl StagedStore {
     ) -> Result<Commit<'_>, PutError> {
         let (id, body, size) = {
             let mut table = locked(&self.table);
-            let id = table.id_of(dir, src).ok_or(PutError::NotFound)?;
-            if table.uploading.contains_key(&id) {
-                return Err(PutError::Busy("a commit of the file is running"));
-            }
-            if table.handles.values().any(|of| *of == id) {
-                return Err(PutError::Busy(HANDLE_OPEN));
-            }
-            if table.uploading.values().any(|of| *of == key) {
-                return Err(PutError::Busy("a commit of the key is running"));
-            }
+            let id = table.check_commit(dir, src, &key)?;
             let body = Arc::clone(table.bodies.get(&id).ok_or(PutError::NotFound)?);
             let size = table.entries.get(&id).ok_or(PutError::NotFound)?.size;
-            let _ = table.uploading.insert(id, key.clone());
+            table.start_upload(id, key.clone());
             (id, body, size)
         };
         // From here on, a failure drops the commit, which ends the upload it marked.

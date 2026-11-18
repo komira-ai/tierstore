@@ -369,6 +369,44 @@ fn children_sort_bytewise() {
     assert_eq!(names, ["B", "a", "b", "z", "é"]);
 }
 
+/// The whiteout names of an OCI layer are entries like any other: a tree of `etc/.wh.ssl` and
+/// `etc/ssl/certs/.wh..wh..opq`, the files a build that makes a layer writes, is built with them
+/// as its files, and each record holding one is read back from its bytes and made again by `new`.
+#[test]
+fn whiteout_names_are_built_and_read_back() {
+    let built = build_tree(
+        None,
+        vec![
+            file("bin/app", "app"),
+            file("etc/.wh.ssl", ""),
+            file("etc/ssl/certs/.wh..wh..opq", ""),
+        ],
+        &TreeLimits::default(),
+    )
+    .unwrap();
+    let paths: Vec<&str> = built.files.iter().map(|f| f.path.as_str()).collect();
+    assert_eq!(
+        paths,
+        ["bin/app", "etc/.wh.ssl", "etc/ssl/certs/.wh..wh..opq"]
+    );
+    let mut seen = Vec::new();
+    for (digest, record) in &built.records {
+        let read = TreeRecord::parse(&record.encode()).unwrap();
+        assert_eq!(&read, record);
+        assert_eq!(read.digest(), *digest);
+        let again = TreeRecord::new(read.mode(), read.children().to_vec()).unwrap();
+        assert_eq!(&again, record);
+        seen.extend(
+            read.children()
+                .iter()
+                .map(|child| child.name().to_owned())
+                .filter(|name| name.starts_with(".wh.")),
+        );
+    }
+    seen.sort();
+    assert_eq!(seen, [".wh..wh..opq", ".wh.ssl"]);
+}
+
 // ---- refusals of the builder
 
 #[test]
@@ -380,18 +418,7 @@ fn a_tree_entry_at_the_root_is_refused() {
 #[test]
 fn bad_names_are_refused_with_the_path() {
     for path in [
-        "",
-        "/",
-        "/a",
-        "a/",
-        "a//b",
-        ".",
-        "..",
-        "a/./b",
-        "a/../b",
-        ".wh.x",
-        "a/.wh.x/b",
-        "a\0b",
+        "", "/", "/a", "a/", "a//b", ".", "..", "a/./b", "a/../b", "a\0b",
     ] {
         assert_eq!(
             refused(vec![file(path, "x")]),

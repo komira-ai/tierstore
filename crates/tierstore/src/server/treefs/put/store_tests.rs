@@ -258,9 +258,7 @@ fn a_write_that_lost_a_race_is_refused_by_the_table() {
     staged(&store, &out, "a.part", b"x");
     assert!(matches!(store.reserve(99, 5), Err(PutError::BadHandle)));
     store.unreserve(99, 5);
-    let _ = locked(&store.table)
-        .uploading
-        .insert(0, "cas/b/1/n/a".to_owned());
+    locked(&store.table).start_upload(0, "cas/b/1/n/a".to_owned());
     assert!(matches!(store.reserve(0, 5), Err(PutError::Busy(_))));
 }
 

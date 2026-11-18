@@ -12,8 +12,6 @@
 //! | `fs.cache_path` | the node's `local_cache.path` | needed |
 //! | `fs.fetch_timeout` | how long a fill, or a closed fill socket, is waited for | `60s` |
 //! | `fs.threads` | threads that serve the kernel's requests (a fill blocks one) | `16` |
-//! | `fs.passthrough` | ask the kernel for passthrough when it offers it; `false` forces the mode of kernel 6.8 | `true` |
-//! | `fs.max_backing_ids` | the most backing ids live at once; past it an open of another blob is a cached open | `65536` |
 //! | `[fs.nfs]` | the settings of the NFS frontend (macOS), see `nfs/config.rs` | its defaults |
 //! | `fs.handoff_socket` | the socket a new instance asks the running one for the mount on (`handoff-fs-v1`) | `<runtime_dir>/handoff.sock` |
 //! | `fs.handoff_wait` | how long the hand-over of the mount may last, from the connect to the end | `120s` |
@@ -21,6 +19,9 @@
 //! | `fs.recover_wait` | after a restart on a kernel without resend: how long the connection may show requests no one answers before it is aborted | `30s` |
 //! | `fs.tree_idle_secs` | how long, in seconds, a tree a lookup attached stays attached with no request naming it | `900` |
 //! | `[fs.put]` | the put directory, `<mountpoint>/put/`, see `put/config.rs` | not served |
+//!
+//! `fs.passthrough` and `fs.max_backing_ids` were removed with passthrough, after tierstore 0.3.121:
+//! a file that has them starts, and each is said in a warning and ignored (`REMOVED`).
 
 use std::path::{Path, PathBuf};
 use std::time::Duration;
@@ -57,9 +58,6 @@ const DEFAULT_FETCH_TIMEOUT: Duration = Duration::from_secs(60);
 /// The threads that serve the kernel's requests when the file leaves out `fs.threads`.
 const DEFAULT_THREADS: u32 = 16;
 
-/// The backing ids live at once when the file leaves out `fs.max_backing_ids`.
-const DEFAULT_MAX_BACKING_IDS: u32 = 65_536;
-
 /// The name of the hand-over socket in the runtime directory when the file leaves out
 /// `fs.handoff_socket`.
 const DEFAULT_HANDOFF_SOCKET: &str = "handoff.sock";
@@ -77,15 +75,33 @@ const DEFAULT_REATTACH_CONCURRENCY: u32 = 16;
 /// The most `fs.reattach_concurrency` may be.
 const MOST_REATTACH_CONCURRENCY: u32 = 1024;
 
-/// The most `fs.max_backing_ids` may be.
-const MOST_BACKING_IDS: u32 = 1 << 20;
-
 /// The seconds a tree attached by a lookup stays attached with no use when the file leaves out
 /// `fs.tree_idle_secs`.
 const DEFAULT_TREE_IDLE_SECS: u64 = 900;
 
 /// The most `fs.tree_idle_secs` may be: a week.
 const MOST_TREE_IDLE_SECS: u64 = 7 * 24 * 3600;
+
+/// The keys of `[fs]` that an earlier release read and this one does not, each with why: a file
+/// written for that release starts with them, and each is said.
+const REMOVED: [(&str, &str); 2] = [
+    (
+        "passthrough",
+        "removed after tierstore 0.3.121, with passthrough: every open is a cached open",
+    ),
+    (
+        "max_backing_ids",
+        "removed after tierstore 0.3.121, with passthrough: no backing id is registered",
+    ),
+];
+
+/// The warning for the key `key` of `[fs]` that this release does not read.
+fn ignored(key: &str) -> String {
+    match REMOVED.iter().find(|(removed, _)| *removed == key) {
+        Some((_, why)) => format!("tierstore fs: fs.{key} is ignored: {why}"),
+        None => format!("tierstore fs: fs.{key} is not a key of this release and is ignored"),
+    }
+}
 
 /// The file: only its `[fs]` table is read.
 #[derive(Debug, Deserialize)]
@@ -105,8 +121,6 @@ pub(in crate::server) struct FsTable {
     cache_path: Option<PathBuf>,
     fetch_timeout: Option<Dur>,
     threads: Option<u32>,
-    passthrough: Option<bool>,
-    max_backing_ids: Option<u32>,
     nfs: Option<NfsTable>,
     handoff_socket: Option<PathBuf>,
     handoff_wait: Option<Dur>,
@@ -130,10 +144,6 @@ pub(in crate::server) struct FsSettings {
     pub cache_path: PathBuf,
     pub fetch_timeout: Duration,
     pub threads: usize,
-    /// Whether to ask the kernel for passthrough when `INIT` offers it.
-    pub passthrough: bool,
-    /// The most backing ids live at once.
-    pub max_backing_ids: usize,
     /// The socket a new instance asks the running one for the mount on.
     pub handoff_socket: PathBuf,
     /// How long a hand-over of the mount may last.
@@ -253,13 +263,6 @@ impl FsSettings {
             1,
             1024,
         )?;
-        let max_backing_ids = within(
-            "fs",
-            "max_backing_ids",
-            table.max_backing_ids.unwrap_or(DEFAULT_MAX_BACKING_IDS),
-            1,
-            MOST_BACKING_IDS,
-        )?;
         let reattach_concurrency = within(
             "fs",
             "reattach_concurrency",
@@ -294,8 +297,6 @@ impl FsSettings {
             )?,
             fetch_timeout: timeout,
             threads: threads as usize,
-            passthrough: table.passthrough.unwrap_or(true),
-            max_backing_ids: max_backing_ids as usize,
             handoff_socket: absolute("fs.handoff_socket", handoff_socket)?,
             handoff_wait,
             recover_wait,
@@ -321,7 +322,7 @@ pub(in crate::server) fn from_text(text: &str, groups: &str) -> Result<FsSetting
     let table = whole.get("fs").and_then(toml::Value::as_table);
     for key in table.into_iter().flat_map(|table| table.keys()) {
         if !known.contains(&key.as_str()) {
-            tracing::warn!("tierstore fs: fs.{key} is not a key of this release and is ignored");
+            tracing::warn!("{}", ignored(key));
         }
     }
     let nfs_known = fields_of::<NfsTable>();

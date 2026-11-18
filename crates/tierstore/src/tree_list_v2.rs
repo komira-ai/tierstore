@@ -232,7 +232,7 @@ pub enum EntryFault {
     /// A name past the end of the name blob.
     #[error("name past the end of the names")]
     NameBounds,
-    /// A name that is empty, `.`, `..`, not UTF-8, has a `/` or a NUL, or begins `.wh.`.
+    /// A name that is empty, `.`, `..`, not UTF-8, or has a `/` or a NUL.
     #[error("bad name")]
     BadName,
     /// A name that does not sort after its sibling's before it, bytewise: two siblings of one

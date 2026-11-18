@@ -2,12 +2,16 @@
 //! calls a frontend makes on them (see the module above).
 //!
 //! One lock, `table`, holds the names, the numbers of the files, the open handles, the use of each
-//! directory and the journal. Each staged file has a lock of its own, `body`, over its file and its
+//! directory and the journal. It is held for short work on the maps only; the file write under it
+//! on a request is the append of a journal line (a single `write(2)`, no `fsync`), which the order
+//! of the lines needs. The sweep's rewrite of the journal (`compact.rs`) is done outside it; the
+//! rewrite at a hand-over ([`StagedStore::reopen_journal`], once, while the sweep is held) is done
+//! under it. Each staged file has a lock of its own, `body`, over its file and its
 //! inline hash, held for the whole of a write (so the write and the hash agree) and for the hash at
 //! a commit. A thread that holds a body may take the table; no thread takes a body while it holds
 //! the table.
 
-use std::collections::BTreeMap;
+use std::collections::{BTreeMap, BTreeSet};
 use std::fs::File;
 use std::io;
 use std::os::fd::OwnedFd;
@@ -29,6 +33,7 @@ use crate::server::local_cache::Disk;
 use crate::server::treefs::locked;
 
 pub(in crate::server) use super::commit::Commit;
+use super::commit::FILE_RUNNING;
 
 /// The ending of the name of a staged file in the stage directory.
 const STAGE_SUFFIX: &str = ".stage";
@@ -128,8 +133,12 @@ pub(super) struct Table {
     pub bodies: BTreeMap<u64, Arc<Mutex<Body>>>,
     /// The staged file of each open handle.
     pub handles: BTreeMap<u64, u64>,
+    /// The open handles of each staged file that has one, kept with `handles`.
+    pub open_by_file: BTreeMap<u64, BTreeSet<u64>>,
     /// The key of each staged file whose commit is running.
     pub uploading: BTreeMap<u64, String>,
+    /// The keys whose commit is running, kept with `uploading`.
+    pub uploading_keys: BTreeSet<String>,
     /// What each directory uses.
     pub dirs: BTreeMap<String, DirUse>,
     /// The files a start found with no entry, removed ten minutes after it.
@@ -140,6 +149,9 @@ pub(super) struct Table {
     pub next_handle: u64,
     /// The journal.
     pub journal: Journal,
+    /// While the journal is being rewritten outside the lock: the records appended since the
+    /// snapshot the rewrite began from, which the new journal ends with.
+    pub captured: Option<Vec<Record>>,
 }
 
 impl Table {
@@ -162,8 +174,10 @@ impl Table {
         let entry = self.entries.remove(&id)?;
         let _ = self.names.remove(&(entry.dir.clone(), entry.name.clone()));
         let _ = self.bodies.remove(&id);
-        let _ = self.uploading.remove(&id);
-        self.handles.retain(|_, of| *of != id);
+        self.end_upload(id);
+        for handle in self.open_by_file.remove(&id).unwrap_or_default() {
+            let _ = self.handles.remove(&handle);
+        }
         let use_ = self.dirs.entry(entry.dir.clone()).or_default();
         use_.files -= 1;
         if entry.committed.is_none() {
@@ -182,9 +196,52 @@ impl Table {
             .copied()
     }
 
+    /// Opens the handle `handle` of the staged file numbered `id`.
+    pub(super) fn open_handle(&mut self, handle: u64, id: u64) {
+        let _ = self.handles.insert(handle, id);
+        let _ = self.open_by_file.entry(id).or_default().insert(handle);
+    }
+
+    /// Ends the handle `handle`, and gives the number of the file it was a handle of (none if it
+    /// was not open).
+    pub(super) fn close_handle(&mut self, handle: u64) -> Option<u64> {
+        let id = self.handles.remove(&handle)?;
+        let open = self.open_by_file.entry(id).or_default();
+        let _ = open.remove(&handle);
+        if open.is_empty() {
+            let _ = self.open_by_file.remove(&id);
+        }
+        Some(id)
+    }
+
+    /// Marks the commit of the staged file numbered `id` to `key` as running.
+    pub(super) fn start_upload(&mut self, id: u64, key: String) {
+        let _ = self.uploading_keys.insert(key.clone());
+        let _ = self.uploading.insert(id, key);
+    }
+
+    /// Ends the running commit of the staged file numbered `id`, if there is one.
+    pub(super) fn end_upload(&mut self, id: u64) {
+        if let Some(key) = self.uploading.remove(&id) {
+            let _ = self.uploading_keys.remove(&key);
+        }
+    }
+
+    /// Appends `record` to the journal, and to the records a rewrite outside the lock follows.
+    ///
+    /// # Errors
+    /// What the write said; the record is then in neither.
+    pub(super) fn append(&mut self, record: &Record) -> io::Result<()> {
+        self.journal.append(record)?;
+        if let Some(captured) = self.captured.as_mut() {
+            captured.push(record.clone());
+        }
+        Ok(())
+    }
+
     /// Appends `record` to the journal; a failure is said, and the change it records stands.
     pub(super) fn note(&mut self, record: &Record) {
-        if let Err(error) = self.journal.append(record) {
+        if let Err(error) = self.append(record) {
             tracing::warn!("tierstore fs: the put journal is not written ({record:?}): {error}");
         }
     }
@@ -204,6 +261,12 @@ pub(in crate::server) struct StagedStore {
     pub(super) disk: Arc<dyn Disk>,
     /// The names, the handles and the journal.
     pub(super) table: Mutex<Table>,
+    /// Held for the whole of a rewrite of the journal, so that one runs at a time; no request
+    /// takes it.
+    pub(super) rewriting: Mutex<()>,
+    /// Called in a compaction while the journal's new file is written, outside the table's lock.
+    #[cfg(test)]
+    pub(super) while_rewriting: Mutex<Option<Arc<dyn Fn() + Send + Sync>>>,
 }
 
 impl std::fmt::Debug for StagedStore {
@@ -312,7 +375,7 @@ impl StagedStore {
             name: name.to_owned(),
             ms,
         };
-        if let Err(error) = table.journal.append(&record) {
+        if let Err(error) = table.append(&record) {
             drop(file);
             self.remove_stage_file(id);
             return Err(error.into());
@@ -320,7 +383,7 @@ impl StagedStore {
         table.next_id += 1;
         let handle = table.next_handle;
         table.next_handle += 1;
-        let _ = table.handles.insert(handle, id);
+        table.open_handle(handle, id);
         let body = Body {
             file,
             hash: InlineHash::new(),
@@ -378,7 +441,7 @@ impl StagedStore {
     pub(super) fn reserve(&self, id: u64, end: u64) -> Result<u64, PutError> {
         let mut table = locked(&self.table);
         if table.uploading.contains_key(&id) {
-            return Err(PutError::Busy("a commit of the file is running"));
+            return Err(PutError::Busy(FILE_RUNNING));
         }
         let Table { entries, dirs, .. } = &mut *table;
         let entry = entries.get_mut(&id).ok_or(PutError::BadHandle)?;
@@ -413,9 +476,9 @@ impl StagedStore {
         }
     }
 
-    /// Ends `handle`. Ending one that is not open does nothing.
-    pub(in crate::server) fn release(&self, handle: Handle) {
-        let _ = locked(&self.table).handles.remove(&handle.0);
+    /// Ends `handle`, and gives the number of its file. Ending one that is not open does nothing.
+    pub(in crate::server) fn release(&self, handle: Handle) -> Option<u64> {
+        locked(&self.table).close_handle(handle.0)
     }
 
     /// Renames the `.part` file `src` of `dir` to `dst` in the same directory: to another `.part`
@@ -438,12 +501,7 @@ impl StagedStore {
         src: &str,
         dst: &str,
     ) -> Result<Rename<'_>, PutError> {
-        check_component(src)?;
-        check_component(dst)?;
-        let key = dir.key(dst)?;
-        if !is_part(src) {
-            return Err(PutError::NotPermitted("only a .part name is renamed"));
-        }
+        let key = Self::checked_names(dir, src, dst)?;
         if is_part(dst) {
             self.rename_part(dir, src, dst)?;
             return Ok(Rename::Renamed);
@@ -451,8 +509,19 @@ impl StagedStore {
         self.begin_commit(dir, src, dst, key).map(Rename::Commit)
     }
 
+    /// The key of `dst` in `dir`, if `src` and `dst` are names and `src` is a `.part` name.
+    pub(super) fn checked_names(dir: &PutDir, src: &str, dst: &str) -> Result<String, PutError> {
+        check_component(src)?;
+        check_component(dst)?;
+        let key = dir.key(dst)?;
+        if !is_part(src) {
+            return Err(PutError::NotPermitted("only a .part name is renamed"));
+        }
+        Ok(key)
+    }
+
     /// Gives the staged file `src` of `dir` the `.part` name `dst`.
-    fn rename_part(&self, dir: &PutDir, src: &str, dst: &str) -> Result<(), PutError> {
+    pub(super) fn rename_part(&self, dir: &PutDir, src: &str, dst: &str) -> Result<(), PutError> {
         let mut table = locked(&self.table);
         let id = table.id_of(dir, src).ok_or(PutError::NotFound)?;
         if src == dst {
@@ -462,13 +531,13 @@ impl StagedStore {
             return Err(PutError::Exists);
         }
         if table.uploading.contains_key(&id) {
-            return Err(PutError::Busy("a commit of the file is running"));
+            return Err(PutError::Busy(FILE_RUNNING));
         }
         let record = Record::Rename {
             id,
             name: dst.to_owned(),
         };
-        table.journal.append(&record)?;
+        table.append(&record)?;
         let Table { entries, names, .. } = &mut *table;
         let entry = entries.get_mut(&id).ok_or(PutError::NotFound)?;
         let src = std::mem::replace(&mut entry.name, dst.to_owned());
@@ -492,7 +561,7 @@ impl StagedStore {
         let mut table = locked(&self.table);
         let id = table.id_of(dir, name).ok_or(PutError::NotFound)?;
         if table.uploading.contains_key(&id) {
-            return Err(PutError::Busy("a commit of the file is running"));
+            return Err(PutError::Busy(FILE_RUNNING));
         }
         let _ = table.take(id);
         table.note(&Record::Remove { id });
@@ -529,7 +598,7 @@ impl StagedStore {
         }
         let handle = table.next_handle;
         table.next_handle += 1;
-        let _ = table.handles.insert(handle, id);
+        table.open_handle(handle, id);
         Ok(Handle(handle))
     }
 
@@ -540,6 +609,14 @@ impl StagedStore {
             .iter()
             .map(|(handle, id)| (Handle(*handle), *id))
             .collect()
+    }
+
+    /// The numbers of the open handles of the staged file numbered `id`.
+    pub(in crate::server) fn handles_of(&self, id: u64) -> Vec<u64> {
+        locked(&self.table)
+            .open_by_file
+            .get(&id)
+            .map_or_else(Vec::new, |open| open.iter().copied().collect())
     }
 
     /// Whether a name is in the directory `dir` itself.
@@ -571,6 +648,7 @@ impl StagedStore {
     /// # Errors
     /// What the system said; the journal is then the one before.
     pub(in crate::server) fn reopen_journal(&self) -> io::Result<()> {
+        let _rewriting = locked(&self.rewriting);
         let mut table = locked(&self.table);
         table.journal = Journal::rewrite(&self.stage, &live_records(&table.entries))?;
         Ok(())
