@@ -75,8 +75,6 @@ fn the_last_release_closes_the_id_and_the_next_open_registers_again() {
     assert!(locked(&kernel.closed).is_empty());
     table.release(&a);
     assert_eq!(*locked(&kernel.closed), [100]);
-    // A last release does not wait for the write of its change: the next write has it.
-    table.flushed();
     assert_eq!(text(dir.path()), format!("{b} 101 1\n"));
     assert_eq!(table.opens(&a), 0);
     assert_eq!(
@@ -283,7 +281,6 @@ fn the_earlier_opens_of_an_adopted_blob_are_counted_down_to_the_close() {
     assert_eq!(table.live(), 1);
     // A blob with no id, and a release for one, are nothing.
     table.release_foreign(&blob("c"));
-    table.flushed();
     assert_eq!(text(dir.path()).lines().count(), 1);
 }
 
@@ -369,9 +366,8 @@ fn file_of(lines: &[Saved]) -> String {
 }
 
 /// Puts a FIFO where the table writes its next file, and gives the release of the one open of
-/// `gone`'s blob, the last, made in a thread of its own; returns with the write of that change
-/// inside the FIFO (the test has read its first byte), and the FIFO's reading end. The write is
-/// made by the table's writer thread, or by the releasing thread for a table that has none.
+/// `gone`'s blob, the last, which writes into it from a thread of its own; returns with that
+/// thread inside the write (the test has read its first byte), and the FIFO's reading end.
 #[cfg(target_os = "linux")]
 fn release_into_fifo(
     dir: &TestDir,
@@ -430,152 +426,36 @@ fn an_open_is_answered_while_a_release_writes_the_file() {
     assert_eq!(table.live(), rest.len());
 }
 
-/// The threads of the last releases of `lines`, one open each, made while the file is written.
-#[cfg(target_os = "linux")]
-fn release_each(table: &Arc<BackingTable>, lines: &[Saved]) -> Vec<std::thread::JoinHandle<()>> {
-    lines
-        .iter()
-        .map(|line| {
-            assert_eq!(live(table.open(&line.blob)), line.id);
-            let (table, blob) = (Arc::clone(table), line.blob);
-            std::thread::spawn(move || table.release(&blob))
-        })
-        .collect()
-}
-
-/// Asserts that last releases made while the file is being written all return while that write
-/// is still held, each with its id closed, and that one next write holds the table without any of
-/// them. Catches a table whose releases wait for a write of the file in turn, behind a lock held
-/// across the write, which on a loaded build node left every FUSE thread parked behind it and
-/// the kernel's queue of opens and getattrs in the hundreds.
+/// Asserts that last releases made while another release is writing the file are in the file
+/// when they return: the write that was in progress holds the table as it was before them, and the
+/// next one holds it without any of the three blobs. Both releases changed the table before the
+/// write in progress ended, so the first of them to write takes both changes.
 #[cfg(target_os = "linux")]
 #[test]
-fn last_releases_return_while_the_file_is_written_and_the_next_write_has_them_all() {
+fn releases_during_a_write_are_in_the_file_when_they_return() {
     let dir = TestDir::under(std::env::temp_dir(), "tfs-backing-overlap");
     let kernel = FakeKernel::new();
     let (table, lines) = adopted(&dir, &kernel, 1200);
     let (gone, rest) = lines.split_first().unwrap();
     let (releasing, fifo, first) = release_into_fifo(&dir, &table, gone);
-    // The release returns while its write is held: a regression fails here, not hangs.
-    until(|| releasing.is_finished());
-    releasing.join().unwrap();
 
-    let later = release_each(&table, &rest[..8]);
-    until(|| later.iter().all(std::thread::JoinHandle::is_finished));
-    later.into_iter().for_each(|thread| thread.join().unwrap());
-    assert_eq!(table.live(), rest.len() - 8);
-    let mut closed = locked(&kernel.closed).clone();
-    closed.sort_unstable();
-    let mut ids: Vec<u32> = lines[..9].iter().map(|line| line.id).collect();
-    ids.sort_unstable();
-    assert_eq!(closed, ids);
-    // The write that was held has the table as it was at the first release.
-    assert_eq!(table.writes_made(), 1);
-    assert_eq!(drained(fifo, first), file_of(rest));
-
-    table.flushed();
-    assert_eq!(text(dir.path()), file_of(&rest[8..]));
-    assert_eq!(table.writes_made(), 3);
-}
-
-/// Asserts that first opens of blobs made while the file is being written all wait for the next
-/// write and return once the file holds their ids: one write wakes them all. Catches a first open
-/// answered before the file holds its id, which a successor that took the connection over after
-/// a crash would not know (the next open of that inode would fail with `EIO`).
-#[cfg(target_os = "linux")]
-#[test]
-fn first_opens_during_a_write_return_once_the_next_write_holds_their_ids() {
-    let dir = TestDir::under(std::env::temp_dir(), "tfs-backing-register");
-    let kernel = FakeKernel::new();
-    let (table, lines) = adopted(&dir, &kernel, 1200);
-    let (gone, rest) = lines.split_first().unwrap();
-    let (releasing, fifo, first) = release_into_fifo(&dir, &table, gone);
-    // The release returns while its write is held: a regression fails here, not hangs.
-    until(|| releasing.is_finished());
-    releasing.join().unwrap();
-
-    let blobs: Vec<TreeDigest> = (0..8).map(|n| blob(&format!("new {n}"))).collect();
-    let registering: Vec<_> = blobs
+    let later: Vec<_> = rest[..2]
         .iter()
-        .map(|blob| {
-            let ticket = ticket(table.open(blob));
-            let registration = kernel.registration();
-            std::thread::spawn(move || ticket.registered(registration).id)
+        .map(|line| {
+            assert_eq!(live(table.open(&line.blob)), line.id);
+            let (table, blob) = (Arc::clone(&table), line.blob);
+            std::thread::spawn(move || table.release(&blob))
         })
         .collect();
-    until(|| table.live() == rest.len() + blobs.len());
-    assert_eq!(drained(fifo, first), file_of(rest));
-
-    let ids: Vec<u32> = registering
-        .into_iter()
-        .map(|thread| thread.join().unwrap())
-        .collect();
-    // Each returned with its line in the file, which no write has changed since.
-    let file = text(dir.path());
-    for (blob, id) in blobs.iter().zip(&ids) {
-        assert!(
-            file.contains(&format!("{blob} {id} 1\n")),
-            "{blob} {id} in {file}"
-        );
-    }
-    assert_eq!(file.lines().count(), rest.len() + blobs.len());
-    assert_eq!(table.writes_made(), 3);
-}
-
-/// Asserts that a table whose writer thread could not be started writes each change in the thread
-/// that made it, before it returns: a first open and a last release each find the file holding
-/// their change; and that changes made while one of them writes are written by the first of their
-/// threads to write, the other finding its change written. Catches a table that, with no writer,
-/// returns before the file holds a first open's id, or never writes a change.
-#[cfg(target_os = "linux")]
-#[test]
-fn a_table_with_no_writer_thread_writes_each_change_before_it_returns() {
-    let dir = TestDir::under(std::env::temp_dir(), "tfs-backing-nowriter");
-    let kernel = FakeKernel::new();
-    // More lines than a FIFO holds, so that a write into one stays in its write.
-    let lines: Vec<Saved> = (0..1200)
-        .map(|n| Saved {
-            blob: blob(&n.to_string()),
-            id: n + 1,
-            opens: 0,
-            exact: true,
-        })
-        .collect();
-    let file = dir.path().join(FILE);
-    let table = BackingTable::without_writer(file, 2400, &lines, &|id| kernel.wrap(id));
-    assert_eq!(text(dir.path()), file_of(&lines));
-    let a = blob("a");
-    let id = ticket(table.open(&a)).registered(kernel.registration()).id;
-    assert!(text(dir.path()).contains(&format!("{a} {id} 1\n")));
-    table.release(&a);
-    assert_eq!(text(dir.path()), file_of(&lines));
-    assert_eq!(table.writes_made(), 3);
-
-    let (gone, rest) = lines.split_first().unwrap();
-    // The release of `gone` writes in its own thread and stays in the FIFO; the two later ones
-    // change the table and wait for that write to end.
-    let (releasing, fifo, first) = release_into_fifo(&dir, &table, gone);
-    let later = release_each(&table, &rest[..2]);
+    // Both have taken their blob out of the table, and wait for the write in progress.
     until(|| table.live() == rest.len() - 2);
     assert_eq!(drained(fifo, first), file_of(rest));
     releasing.join().unwrap();
     later.into_iter().for_each(|thread| thread.join().unwrap());
     assert_eq!(text(dir.path()), file_of(&rest[2..]));
-    assert_eq!(table.writes_made(), 5);
-}
-
-/// Asserts that the writer thread ends when its table is dropped. Catches a thread that keeps the
-/// table, or itself, alive after the table's last holder has let it go.
-#[test]
-fn dropping_the_table_ends_its_writer_thread() {
-    let dir = TestDir::under(std::env::temp_dir(), "tfs-backing-drop");
-    let table = table(&dir, 10);
-    let kernel = FakeKernel::new();
-    let a = blob("a");
-    let _ = ticket(table.open(&a)).registered(kernel.registration());
-    let shared = table.shared();
-    drop(table);
-    until(|| shared.upgrade().is_none());
+    let mut closed = locked(&kernel.closed).clone();
+    closed.sort_unstable();
+    assert_eq!(closed, [gone.id, rest[0].id, rest[1].id]);
 }
 
 /// Asserts that an open that waits for another open's registration of the same blob is answered
