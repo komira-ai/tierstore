@@ -1,0 +1,31 @@
+[package]
+name = "tierstore-store-api"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+repository.workspace = true
+publish.workspace = true
+description = "The frozen interfaces of the tierstore storage tier (docs/design/fetch-cache-serve.md, section 10): Placement, Index, HotStore, ColdStore, DriveSched, PeerClient, the membership view, the peer protocol, and a fake storage node with scripted service times, hangs, errors and crashes on an injected clock."
+
+[dependencies]
+# The traits that are used as `dyn` have async methods, boxed by async-trait.
+async-trait.workspace = true
+bytes.workspace = true
+futures.workspace = true
+# The binary formats travel inside JSON bodies as lowercase hex.
+hex.workspace = true
+# The JSON bodies of the peer protocol's control routes.
+serde.workspace = true
+serde_json.workspace = true
+# The classes, devices, drive states and signals the storage tier shares with the read path, and
+# the injected clock of the fake storage node.
+tierstore-fetch-api.workspace = true
+tierstore-format.workspace = true
+thiserror.workspace = true
+
+[dev-dependencies]
+tokio = { workspace = true, features = ["macros", "rt", "rt-multi-thread", "sync", "time"] }
+
+[lints]
+workspace = true

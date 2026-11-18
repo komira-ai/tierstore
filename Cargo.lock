@@ -2906,8 +2906,46 @@ dependencies = [
 ]
 
 [[package]]
+name = "tierstore-fetch-api"
+version = "0.1.0"
+dependencies = [
+ "async-trait",
+ "bytes",
+ "futures",
+ "thiserror",
+ "tierstore-format",
+ "tokio",
+]
+
+[[package]]
+name = "tierstore-format"
+version = "0.1.0"
+dependencies = [
+ "crc32c",
+ "serde",
+ "serde_json",
+ "thiserror",
+]
+
+[[package]]
 name = "tierstore-model"
 version = "0.1.0"
+
+[[package]]
+name = "tierstore-store-api"
+version = "0.1.0"
+dependencies = [
+ "async-trait",
+ "bytes",
+ "futures",
+ "hex",
+ "serde",
+ "serde_json",
+ "thiserror",
+ "tierstore-fetch-api",
+ "tierstore-format",
+ "tokio",
+]
 
 [[package]]
 name = "tierstore-testkit"
@@ -3225,6 +3263,14 @@ name = "try-lock"
 version = "0.2.5"
 source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "e421abadd41a4225275504ea4d6566923418b7f05506fbc9c0fe86ba7396114b"
+
+[[package]]
+name = "tsfuse"
+version = "0.1.0"
+dependencies = [
+ "futures",
+ "tokio",
+]
 
 [[package]]
 name = "twox-hash"

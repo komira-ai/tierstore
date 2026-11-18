@@ -1,0 +1,68 @@
+//! A fake device shared by the tsfuse tests.
+#![allow(dead_code, reason = "each test binary uses a part of the helpers")]
+#![allow(
+    clippy::unwrap_used,
+    clippy::expect_used,
+    reason = "an integration test: a failed unwrap or expect is the failure it reports"
+)]
+
+use std::io;
+use std::sync::Arc;
+use std::sync::Mutex;
+use std::sync::atomic::{AtomicBool, Ordering};
+
+use tsfuse::ReplyDevice;
+
+/// A decoded reply message.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct Msg {
+    pub len: u32,
+    pub error: i32,
+    pub unique: u64,
+    pub payload: Vec<u8>,
+}
+
+/// Records every reply as the concatenation of its parts; can be told to fail writes.
+#[derive(Default)]
+pub struct FakeDevice {
+    msgs: Mutex<Vec<Vec<u8>>>,
+    fail: AtomicBool,
+}
+
+impl FakeDevice {
+    pub fn new() -> Arc<Self> {
+        Arc::new(Self::default())
+    }
+
+    pub fn failing() -> Arc<Self> {
+        let d = Self::new();
+        d.fail.store(true, Ordering::SeqCst);
+        d
+    }
+
+    pub fn raw(&self) -> Vec<Vec<u8>> {
+        self.msgs.lock().unwrap().clone()
+    }
+
+    pub fn msgs(&self) -> Vec<Msg> {
+        self.raw()
+            .into_iter()
+            .map(|m| Msg {
+                len: u32::from_le_bytes(m[0..4].try_into().unwrap()),
+                error: i32::from_le_bytes(m[4..8].try_into().unwrap()),
+                unique: u64::from_le_bytes(m[8..16].try_into().unwrap()),
+                payload: m[16..].to_vec(),
+            })
+            .collect()
+    }
+}
+
+impl ReplyDevice for FakeDevice {
+    fn send(&self, parts: &[&[u8]]) -> io::Result<()> {
+        if self.fail.load(Ordering::SeqCst) {
+            return Err(io::Error::other("device gone"));
+        }
+        self.msgs.lock().unwrap().push(parts.concat());
+        Ok(())
+    }
+}

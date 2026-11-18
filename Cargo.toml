@@ -114,6 +114,14 @@ tierstore = { path = "crates/tierstore" }
 tierstore-trees-api = { path = "crates/tierstore-trees-api" }
 # Scratch directories, loopback ports and child processes for tests.
 tierstore-testkit = { path = "crates/tierstore-testkit" }
+# The storage tier's on-disk and on-wire formats (pure: bytes in, bytes out).
+tierstore-format = { path = "crates/tierstore-format" }
+# The frozen interfaces of the read path on a build node, and their fakes.
+tierstore-fetch-api = { path = "crates/tierstore-fetch-api" }
+# The frozen interfaces of the storage tier, the peer protocol, and a fake storage node.
+tierstore-store-api = { path = "crates/tierstore-store-api" }
+# The FUSE library: dispatch with replies bound to their originating device.
+tsfuse = { path = "crates/tsfuse" }
 # The previous release: `v0.3.17`, the tag of the commit below, taken from the public repository
 # at that commit alone (the `rev` is what pins it; a tag can be moved). Used only by the
 # dev-dependencies of `crates/compat`. When a release is made, move both to the new release's
