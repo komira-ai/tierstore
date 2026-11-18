@@ -6,8 +6,9 @@
 //! file, `state.json` and its temporary file, the rename and the sync, is made relative to that
 //! descriptor, so a swap of the path after the check changes nothing. The record must be a
 //! regular file of the hook's user that no group or others can write. The lock is `flock` on a
-//! file of the directory, taken without waiting; it is held as long as the descriptor lives, and
-//! the kernel drops it when the process ends, so a crashed step leaves none behind. Nothing here
+//! file of the directory, taken without waiting; it is held until the step's lock is dropped, which
+//! unlocks it before it closes the descriptor, and the kernel drops it when the process ends, so a
+//! crashed step leaves none behind. Nothing here
 //! repairs a mode: a directory or file that is not as it must be is refused.
 
 use std::cell::OnceCell;
@@ -74,6 +75,26 @@ pub(super) fn try_lock(fd: BorrowedFd<'_>) -> Result<(), PortError> {
         Err(Errno::WOULDBLOCK) => Err(PortError::Busy),
         Err(error) => Err(failed("lock", &error.to_string())),
     }
+}
+
+/// The `flock` of the lock file's descriptor, given up when dropped.
+struct Held(OwnedFd);
+
+impl Drop for Held {
+    fn drop(&mut self) {
+        // A `flock` belongs to the open file, not to the descriptor: a process forked meanwhile
+        // to run a program shares the open file until it execs, so the close alone could leave
+        // the lock held after the step. The unlock gives it up for every sharer; when it fails,
+        // the close that follows is what is left, as without it.
+        let _unlocked = flock(self.0.as_fd(), FlockOperation::Unlock);
+    }
+}
+
+/// Takes the lock of `fd` without waiting (`Busy` when another open file holds it), held until
+/// the lock returned is dropped.
+pub(super) fn lock_file(fd: OwnedFd) -> Result<Lock, PortError> {
+    try_lock(fd.as_fd())?;
+    Ok(Lock::new(Held(fd)))
 }
 
 impl StateFiles {
@@ -239,8 +260,7 @@ impl StateDir for StateFiles {
                 &error.to_string(),
             )
         })?;
-        try_lock(file.as_fd())?;
-        Ok(Lock::new(file))
+        lock_file(file)
     }
 
     fn load(&self) -> Result<Option<Vec<u8>>, PortError> {

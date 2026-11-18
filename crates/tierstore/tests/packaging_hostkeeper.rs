@@ -20,7 +20,8 @@ use std::time::Duration;
 use clap::Parser;
 use tierstore::server::cli::{Args, Cli};
 use tierstore::server::update_hook::{
-    Instance, LAUNCHD_PLIST, PACKAGE_RELEASE_BINARY, RELEASE_BINARY, marker_path,
+    Instance, LAUNCHD_PLIST, PACKAGE_RELEASE_BINARY, POLL_INTERVAL, PROBE_ATTEMPTS, READY_ATTEMPTS,
+    RELEASE_BINARY, marker_path,
 };
 
 /// The words in the name of a flag that say it holds a secret.
@@ -591,4 +592,49 @@ fn the_package_template_runs_the_binary_the_hook_finds_in_a_release_of_the_packa
             .expect("utf-8")
             .replace("run-a", "run-%i")
     );
+}
+
+/// The `[hook.timeout_secs]` table of the package's manifest (`packaging/hostkeeper/manifest.toml.in`,
+/// whose other tables have placeholders that are not TOML), in seconds by step.
+fn step_bounds() -> BTreeMap<String, u64> {
+    let file =
+        Path::new(env!("CARGO_MANIFEST_DIR")).join("../../packaging/hostkeeper/manifest.toml.in");
+    let text = std::fs::read_to_string(file).expect("the manifest");
+    let (_, rest) = text
+        .split_once("[hook.timeout_secs]\n")
+        .expect("a [hook.timeout_secs] table");
+    let table = rest.split("\n[").next().expect("its lines");
+    let table: toml::Table = table.parse().expect("the table is TOML");
+    table
+        .into_iter()
+        .map(|(step, secs)| {
+            (
+                step,
+                u64::try_from(secs.as_integer().expect("seconds")).expect("not negative"),
+            )
+        })
+        .collect()
+}
+
+/// Whether a step bound of `secs` is above the looks of a step that starts a release and waits
+/// for it: up to `READY_ATTEMPTS` looks for it to serve and `PROBE_ATTEMPTS` of the probe, a
+/// `POLL_INTERVAL` apart; the rest of the bound is the start itself and the time of the requests.
+fn above_the_looks(secs: u64) -> bool {
+    let looks = POLL_INTERVAL * (READY_ATTEMPTS + PROBE_ATTEMPTS);
+    Duration::from_secs(secs) > looks
+}
+
+/// Asserts that the manifest's bounds of the steps that start a release and wait for it to serve
+/// (`cutover` and `rollback`) and of the one that confirms it again (`cleanup`) are above the
+/// hook's looks, and that the `cutover` bound of 300 s that the manifest had before the wait
+/// covered a slow open of the cache is not. It would catch a wait raised without its bound, after
+/// which hostkeeper would kill a step that was still within its looks.
+#[test]
+fn the_manifests_step_bounds_are_above_the_hooks_looks() {
+    let bounds = step_bounds();
+    for step in ["cutover", "rollback", "cleanup"] {
+        let secs = bounds[step];
+        assert!(above_the_looks(secs), "{step} = {secs} s");
+    }
+    assert!(!above_the_looks(300));
 }

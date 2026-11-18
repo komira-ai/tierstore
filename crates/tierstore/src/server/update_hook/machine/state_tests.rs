@@ -100,6 +100,39 @@ fn a_lock_file_that_is_a_link_is_refused() {
     assert!(text.starts_with("open "), "{text}");
 }
 
+/// Asserts that dropping the lock gives it up even while another descriptor of its open file
+/// lives, as one does in a process that another thread forked to run a program, until it execs:
+/// a second open is `Busy` while the lock is held and takes it once the lock is dropped, the copy
+/// still open. It would catch a lock given up only by the close of its descriptor, which left the
+/// next step of the same process `locked`.
+#[test]
+fn dropping_the_lock_releases_it_while_a_copy_of_its_descriptor_lives() {
+    use std::os::fd::OwnedFd;
+
+    use super::state::lock_file;
+
+    let (_guard, dir) = scratch_state("state-lock-shared");
+    let path = dir.join(LOCK_FILE);
+    let open_it = || {
+        OwnedFd::from(
+            fs::OpenOptions::new()
+                .read(true)
+                .write(true)
+                .create(true)
+                .truncate(false)
+                .open(&path)
+                .unwrap(),
+        )
+    };
+    let fd = open_it();
+    let copy = fd.try_clone().unwrap();
+    let lock = lock_file(fd).unwrap();
+    assert!(matches!(lock_file(open_it()).err(), Some(PortError::Busy)));
+    drop(lock);
+    assert!(lock_file(open_it()).is_ok());
+    drop(copy);
+}
+
 /// Asserts that a failure of `flock` that is not contention is an error, not `Busy`: a
 /// descriptor that cannot be locked (opened for its path only) is `EBADF`. `O_PATH` is Linux's,
 /// so the test is too.

@@ -2,15 +2,15 @@
 
 use crate::server::update_hook::{
     CACHE_HANDOFF_CAPABILITY, Class, HANDOFF_CAPABILITY, HANDOFF_STATE_DIR_CAPABILITY, Instance,
-    Mode, Reason, Record, Step, UnitState,
+    Mode, READY_ATTEMPTS, Reason, Record, Step, UnitState,
 };
 
 use super::fake::{
-    CONFIG, DIR_HOT, NEW, OLD, SystemdFake, WITH_CACHE_SOCKET, WITH_SOCKET, WITHOUT_SOCKET,
-    assert_deferred, assert_failed, assert_ok, detail, params, params_with,
+    CONFIG, DIR_HOT, NEW, NEWER, OLD, SystemdFake, WITH_CACHE_SOCKET, WITH_SOCKET, WITHOUT_SOCKET,
+    assert_deferred, assert_failed, assert_ok, detail, params, params_with, version_of,
 };
 
-use Step::{Cutover, Prepare};
+use Step::{Cleanup, Cutover, Prepare, Rollback, Verify};
 
 /// Asserts that `prepare` of an update refuses a configuration whose `[server] handoff_socket` is
 /// an empty string or not a string, or that is not TOML, with `handoff_not_configured` of class
@@ -279,22 +279,73 @@ fn prepare_defers_while_both_instances_run() {
     assert!(!fake.log().iter().any(|line| line == "state.save"));
 }
 
-/// Asserts that `prepare` run again keeps the record of the first run and asks systemd nothing
-/// more: nothing has been started since, so the instances it chose still stand.
+/// Asserts that `prepare` run again, with nothing started since, chooses the same instances and
+/// writes the same record: it asks systemd again and finds what the first run found.
 #[test]
-fn prepare_run_again_keeps_the_instances_it_chose() {
+fn prepare_run_again_with_nothing_started_chooses_the_same_instances() {
     let fake = SystemdFake::installed();
     let p = params(NEW, Some(OLD));
     assert_ok(&fake.run(Prepare, &p));
     let first = fake.record();
-    let before = fake.log().len();
+    assert_eq!(first.live, Some(Instance::A));
+    assert_eq!(first.next, Some(Instance::B));
     assert_ok(&fake.run(Prepare, &p));
     assert_eq!(fake.record(), first);
-    assert!(
-        !fake.log()[before..]
-            .iter()
-            .any(|line| line.starts_with("units.state"))
+}
+
+/// Asserts that `prepare` of an update over the record of an earlier update that never reached
+/// `swapped` (its `cutover` started b, gave up before b took the sockets, and its `rollback` was
+/// left waiting while b went on to take them) takes the instances from systemd: while both run
+/// it defers (`host_not_ready`) and records nothing; once only b runs, b is live and a is next,
+/// and the update cuts over to a and commits. Catches the `prepare` that kept the earlier
+/// record's `live` a and `next` b, after which `cutover` started the b that already ran the
+/// earlier release and failed with `probe_failed` without starting anything.
+#[test]
+fn prepare_over_a_halted_update_takes_the_instances_from_systemd() {
+    let fake = SystemdFake::installed();
+    let halted = params(NEW, Some(OLD));
+    fake.drive(&halted, &[Prepare]);
+    fake.set_takeover_looks(READY_ATTEMPTS);
+    assert_failed(
+        &fake.run_as_hostkeeper(Cutover, &halted),
+        Reason::ProbeFailed,
     );
+    assert_deferred(
+        &fake.run_as_hostkeeper(Rollback, &halted),
+        Reason::Draining,
+        10,
+    );
+    let stale = fake.record();
+    assert!(stale.updating);
+    assert!(stale.markers.is_empty());
+    assert_eq!(stale.live, Some(Instance::A));
+    assert_eq!(stale.next, Some(Instance::B));
+
+    let p = params(NEWER, Some(OLD));
+    assert_deferred(&fake.run(Prepare, &p), Reason::HostNotReady, 30);
+    assert_eq!(fake.record(), stale);
+
+    // b took the sockets and a drained and exited, the earlier update still on record.
+    fake.set_takeover_looks(0);
+    fake.set_unit(Instance::A, UnitState::Inactive, None, false);
+    fake.set_unit(Instance::B, UnitState::Active, Some(NEW), true);
+    assert_ok(&fake.run(Prepare, &p));
+    let record = fake.record();
+    assert_eq!(record.live, Some(Instance::B));
+    assert_eq!(record.next, Some(Instance::A));
+    assert_eq!(record.to.as_deref(), Some(std::path::Path::new(NEWER)));
+
+    let done = fake.run_as_hostkeeper(Cutover, &p);
+    assert_ok(&done);
+    assert_eq!(
+        detail(&done),
+        format!("tierstore@a serves {} (hand-over)", version_of(NEWER))
+    );
+    fake.drive(&p, &[Verify, Cleanup]);
+    let finished = fake.record();
+    assert!(!finished.updating);
+    assert_eq!(finished.live, Some(Instance::A));
+    assert_eq!(fake.running(), [Instance::A]);
 }
 
 /// Asserts that when no instance runs, an update goes on from the instance the record says

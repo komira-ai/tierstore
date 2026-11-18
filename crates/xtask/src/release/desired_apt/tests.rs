@@ -192,10 +192,10 @@ fn expected_entry(arch: &str) -> Value {
                 "command": ["/usr/libexec/tierstore/tierstore", "update-hook"],
                 "boot": "restore",
                 "timeoutSecs": {
-                    "prepare": "0", "cutover": "300", "verify": "1000",
-                    "rollback": "600", "cleanup": "1300", "uninstall": "300",
+                    "prepare": "0", "cutover": "1500", "verify": "1000",
+                    "rollback": "1500", "cleanup": "1300", "uninstall": "300",
                 },
-                "verifyDeadlineSecs": "1600",
+                "verifyDeadlineSecs": "2500",
                 "promotionCeilingSecs": "3600",
                 "cleanupRetries": 3,
             },
