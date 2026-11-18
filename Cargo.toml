@@ -60,6 +60,8 @@ hyper-util = { version = "0.1.21", default-features = false }
 # `kill` and the descriptor calls of the test helpers (tierstore-testkit), and the `PROT_*`/`MAP_*`
 # constants of the memfd mappings of the Linux entry store (tierstore-entry).
 libc = "0.2.190"
+# The exhaustive interleaving checker of the models of tierstore-harness (tests only). MIT.
+loom = "0.7.2"
 md-5 = "0.11.0"
 # The NFSv3 and MOUNT protocol of `tierstore fs` on macOS (BSD-3-Clause), `nfsserve` 0.11.0 from
 # crates.io plus one commit on the branch `komira-0.11` of our fork: the transaction tracker
@@ -133,6 +135,8 @@ tierstore-testkit = { path = "crates/tierstore-testkit" }
 tierstore-format = { path = "crates/tierstore-format" }
 # The frozen interfaces of the read path on a build node, and their fakes.
 tierstore-fetch-api = { path = "crates/tierstore-fetch-api" }
+# The breadth-first explorer of the protocol models (its `explore` module).
+tierstore-model = { path = "crates/tierstore-model" }
 # The frozen interfaces of the storage tier, the peer protocol, and a fake storage node.
 tierstore-store-api = { path = "crates/tierstore-store-api" }
 # The FUSE library: dispatch with replies bound to their originating device.
@@ -200,4 +204,19 @@ incremental = false
 opt-level = 3
 
 [profile.test.package.tierstore-model]
+opt-level = 3
+
+# The models of tierstore-harness (loom and the breadth-first explorer) explore every
+# interleaving of their scenarios: optimise that crate in dev and test builds too.
+[profile.dev.package.tierstore-harness]
+opt-level = 3
+
+[profile.test.package.tierstore-harness]
+opt-level = 3
+
+# loom runs every execution of those models: optimised, they take seconds rather than minutes.
+[profile.dev.package.loom]
+opt-level = 3
+
+[profile.test.package.loom]
 opt-level = 3
