@@ -306,12 +306,20 @@ impl Core {
     /// the attachment, under the lock of the key's pins, which an idle detach gives holds back
     /// under (`Core::free_tree`): held again if the tree is attached (a detach between the
     /// lookup's `place` and its attach gave it back), given back if it is not (the lookup failed,
-    /// or the tree went idle since). The lookups of other paths do not wait for it.
+    /// or the tree went idle since). The `place` is made under the lock of the placement, as an
+    /// `unplace` is (`core/pins.rs`). The lookups of other paths do not wait for it. A settling
+    /// in progress is waited for by `Core::hold`, and none is made after it: the successor
+    /// settles the holds.
     fn settle_hold(&self, key: &TreeDigest, path: &str) {
+        let _freeing = self.freeing();
+        if self.is_held() {
+            return;
+        }
         let _settling = self.pins.unpin(key);
         let number = self.table.find(key);
         let attached = number.is_some_and(|n| self.attached(n));
         if attached {
+            let _placing = self.pins.placement(key);
             let _ = self.fills.place(&self.settings.mount_id, path);
         } else {
             self.let_go(key);
@@ -392,10 +400,12 @@ impl Core {
 
     /// Gives back the hold of the node's tree store on the placement whose tree at a location has
     /// the key `digest`, unless the tree of another of its locations is attached still; a tree of
-    /// manifests is unpinned instead.
+    /// manifests is unpinned instead. The look at the other locations and the `unplace` are made
+    /// under the lock of the placement (`core/pins.rs`).
     pub(in crate::server::treefs) fn let_go(&self, digest: &TreeDigest) {
         match placement_of(digest) {
             Some((id, _)) => {
+                let _unplacing = self.pins.unplace(digest);
                 let trees = self.state().attachments.trees();
                 let held = trees
                     .iter()

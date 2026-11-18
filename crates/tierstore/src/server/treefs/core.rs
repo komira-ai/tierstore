@@ -225,7 +225,7 @@ pub(in crate::server) struct Core {
     /// numbers or the attachments (and their file), and by a lookup that attaches a tree: so that
     /// `Core::hold` waits for that work and none starts after it, and two of them never write the
     /// attachments file at once. Not held across a round trip on the fill socket, nor while a
-    /// manifest is read.
+    /// manifest is read, but by the restore at a start, before any request is served.
     lifecycle: Mutex<()>,
     /// The locks of the pins and unpins of the trees (`core/pins.rs`): a pin is never made after the
     /// unpin of a tree it saw attached, and a tree attached again is not unpinned.

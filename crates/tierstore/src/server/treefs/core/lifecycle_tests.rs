@@ -225,8 +225,8 @@ fn a_tree_attached_again_before_its_unpin_is_not_unpinned() {
     assert_eq!(loaded.pinned.len(), 1);
     let digest = TreeDigest::from_hex(&t.busy).unwrap();
     // The detach has decided and waits for the lock of the tree's pins, which this holds.
-    let held = core.pins.unpin(&digest);
     std::thread::scope(|scope| {
+        let held = core.pins.unpin(&digest);
         let detach = scope.spawn(|| core.detach(RUN));
         until(|| core.pins.unpins_asked() == 2);
         assert!(core.attachments().is_empty());
@@ -343,10 +343,68 @@ fn the_hold_of_a_path_is_settled_under_the_lock_of_its_tree() {
     let rig = placed("tfs-life-settle", &["jobs", "jobs2"]);
     let core = &rig.core;
     let key = key_of("0123456789abcdef0123456789abcdef", "jobs").unwrap();
-    let held = core.pins.unpin(&key);
     std::thread::scope(|scope| {
+        let held = core.pins.unpin(&key);
         let lookup = scope.spawn(|| core.lookup(ino::ROOT, "jobs"));
         until(|| core.pins.unpins_asked() == 2);
+        // Asked: the first `place` and the attach are done, and the settling waits.
+        assert_eq!(rig.upstream.asked("place").len(), 1);
+        drop(held);
+        assert!(matches!(lookup.join().unwrap(), Ok(Looked::Found(_))));
+    });
+    assert_eq!(rig.upstream.asked("place").len(), 2);
+}
+
+/// Asserts that a hold waits for the settling of the hold of a placed path in progress (its
+/// `place` round trip in flight), and that a lookup after the hold settles nothing: the successor
+/// does.
+#[test]
+fn a_hold_waits_for_a_settling_in_progress_and_none_is_settled_after_it() {
+    let rig = placed("tfs-life-hold-place", &["jobs", "jobs2"]);
+    let core = &rig.core;
+    rig.upstream.gate_verb("place");
+    std::thread::scope(|scope| {
+        let _go = OnDrop(|| rig.upstream.permit_verb("place", 1_000));
+        let lookup = scope.spawn(|| core.lookup(ino::ROOT, "jobs"));
+        rig.upstream.wait_for_verb("place", 1);
+        rig.upstream.permit_verb("place", 1);
+        // The settling's own `place` is in flight.
+        until(|| rig.upstream.received("place") == 2);
+        let hold = scope.spawn(|| {
+            core.hold(true);
+            rig.upstream.in_flight("place")
+        });
+        until(|| core.is_held());
+        assert!(
+            !hold.is_finished(),
+            "the hold returned with a settling in flight"
+        );
+        rig.upstream.permit_verb("place", 1);
+        assert_eq!(hold.join().unwrap(), 0);
+        assert!(matches!(lookup.join().unwrap(), Ok(Looked::Found(_))));
+        // After the hold, a lookup asks where its path is and settles nothing: it takes no lock
+        // of a tree's pins and sends no second `place`.
+        rig.upstream.permit_verb("place", 1_000);
+        let settles = core.pins.unpins_asked();
+        let _ = core.lookup(ino::ROOT, "jobs2");
+        assert_eq!(core.pins.unpins_asked(), settles);
+    });
+    assert_eq!(rig.upstream.asked("place").len(), 3);
+    core.hold(false);
+}
+
+/// Asserts that the `place` of a settling is made under the lock of its placement, which every
+/// location of the placement shares: it waits while an `unplace` decided for another location
+/// holds the lock.
+#[test]
+fn the_hold_of_a_placement_is_placed_under_the_lock_of_the_placement() {
+    let rig = placed("tfs-life-placement", &["jobs", "jobs2"]);
+    let core = &rig.core;
+    let other = key_of("0123456789abcdef0123456789abcdef", "jobs2").unwrap();
+    std::thread::scope(|scope| {
+        let held = core.pins.unplace(&other);
+        let lookup = scope.spawn(|| core.lookup(ino::ROOT, "jobs"));
+        until(|| core.pins.placements_asked() == 1);
         // Asked: the first `place` and the attach are done, and the settling waits.
         assert_eq!(rig.upstream.asked("place").len(), 1);
         drop(held);
@@ -401,8 +459,8 @@ fn an_open_that_waited_for_an_unpin_finds_the_blob_pinned_and_pins_nothing() {
     let core = &t.rig.core;
     let digest = TreeDigest::from_hex(&t.busy).unwrap();
     let loaded = core.tree(1).unwrap();
-    let held = core.pins.unpin(&digest);
     std::thread::scope(|scope| {
+        let held = core.pins.unpin(&digest);
         let open = scope.spawn(|| open_cached(core, t.busy_file, false));
         until(|| core.pins.pins_asked() == 1);
         // The blob is pinned by another open while this one waits.

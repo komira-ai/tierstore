@@ -14,6 +14,14 @@
 //! manifests, and for the key of a placed tree, whose last eight bytes are the start of the hash of
 //! its location, so the trees at different locations of one placement are in different sets
 //! (nearly always). Trees of different sets never wait for each other.
+//!
+//! The trees at the locations of one placement share the node's hold of the placement, which the
+//! last of them to be let go gives back (`unplace`). The look at whether another location's tree
+//! is attached and the `unplace` that follows it are made with the lock of the placement written
+//! ([`PinLocks::unplace`], one of 64, by the first byte of the placement's id), and the `place` of
+//! a settling with it read ([`PinLocks::placement`]), so that an `unplace` decided while no other
+//! location was attached never follows the `place` of a location attached since, and the
+//! `place`s of the locations of one placement run at once.
 
 use std::sync::{PoisonError, RwLock, RwLockReadGuard, RwLockWriteGuard};
 
@@ -22,12 +30,17 @@ use crate::tree_manifest::TreeDigest;
 /// The locks of the sets of trees.
 pub(super) struct PinLocks {
     sets: [RwLock<()>; 256],
+    /// The locks of the holds of the placements.
+    places: [RwLock<()>; 64],
     /// The times a lock was asked for an unpin, counted before the wait.
     #[cfg(test)]
     unpins: std::sync::atomic::AtomicUsize,
     /// The times a lock was asked for a pin, counted before the wait.
     #[cfg(test)]
     pins: std::sync::atomic::AtomicUsize,
+    /// The times the lock of a placement was asked for, counted before the wait.
+    #[cfg(test)]
+    placements: std::sync::atomic::AtomicUsize,
 }
 
 impl PinLocks {
@@ -35,10 +48,13 @@ impl PinLocks {
     pub(super) fn new() -> Self {
         Self {
             sets: std::array::from_fn(|_| RwLock::new(())),
+            places: std::array::from_fn(|_| RwLock::new(())),
             #[cfg(test)]
             unpins: std::sync::atomic::AtomicUsize::new(0),
             #[cfg(test)]
             pins: std::sync::atomic::AtomicUsize::new(0),
+            #[cfg(test)]
+            placements: std::sync::atomic::AtomicUsize::new(0),
         }
     }
 
@@ -65,6 +81,38 @@ impl PinLocks {
         self.of(digest)
             .write()
             .unwrap_or_else(PoisonError::into_inner)
+    }
+
+    /// Takes the lock of the hold of the placement whose tree at a location has the key `digest`
+    /// (its first sixteen bytes are the placement's id, the same for every location of it) for a
+    /// `place`, together with the `place`s of its other locations.
+    pub(super) fn placement(&self, digest: &TreeDigest) -> RwLockReadGuard<'_, ()> {
+        #[cfg(test)]
+        let _ = self
+            .placements
+            .fetch_add(1, std::sync::atomic::Ordering::AcqRel);
+        self.place_of(digest)
+            .read()
+            .unwrap_or_else(PoisonError::into_inner)
+    }
+
+    /// Takes the lock of the hold of the placement of `digest` for the look at its other
+    /// locations and the `unplace` that follows, with no `place` of it in flight.
+    pub(super) fn unplace(&self, digest: &TreeDigest) -> RwLockWriteGuard<'_, ()> {
+        self.place_of(digest)
+            .write()
+            .unwrap_or_else(PoisonError::into_inner)
+    }
+
+    /// The lock of the hold of the placement of `digest`.
+    fn place_of(&self, digest: &TreeDigest) -> &RwLock<()> {
+        &self.places[usize::from(digest.as_bytes()[0]) % 64]
+    }
+
+    /// The times the lock of a placement was asked for.
+    #[cfg(test)]
+    pub(super) fn placements_asked(&self) -> usize {
+        self.placements.load(std::sync::atomic::Ordering::Acquire)
     }
 
     /// The number of the set that the tree `digest` is in.

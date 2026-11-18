@@ -2,9 +2,11 @@
 //! calls a frontend makes on them (see the module above).
 //!
 //! One lock, `table`, holds the names, the numbers of the files, the open handles, the use of each
-//! directory and the journal. It is held for short work on the maps only; the one file write under
-//! it is the append of a journal line (a single `write(2)`, no `fsync`), which the order of the
-//! lines needs, and the rewrite of the journal (`compact.rs`) is done outside it. Each staged file has a lock of its own, `body`, over its file and its
+//! directory and the journal. It is held for short work on the maps only; the file write under it
+//! on a request is the append of a journal line (a single `write(2)`, no `fsync`), which the order
+//! of the lines needs. The sweep's rewrite of the journal (`compact.rs`) is done outside it; the
+//! rewrite at a hand-over ([`StagedStore::reopen_journal`], once, while the sweep is held) is done
+//! under it. Each staged file has a lock of its own, `body`, over its file and its
 //! inline hash, held for the whole of a write (so the write and the hash agree) and for the hash at
 //! a commit. A thread that holds a body may take the table; no thread takes a body while it holds
 //! the table.
