@@ -84,12 +84,39 @@ fn lists_a_bucket_and_runs_cells_against_it() {
     );
     let f = Fake::new("silo", &["sdb"]);
     let out = f.path().join("list.tsv");
-    assert_eq!(rt.block_on(list(&s, "", &out)).unwrap(), 3);
-    assert_eq!(
-        std::fs::read_to_string(&out).unwrap(),
-        "cas/p1\t2097152\ncas/p2\t2097152\nx/small\t10\n"
+    assert_eq!(rt.block_on(list(&s, "", None, &out)).unwrap(), 3);
+    let all = "cas/p1\t2097152\ncas/p2\t2097152\nx/small\t10\n";
+    assert_eq!(std::fs::read_to_string(&out).unwrap(), all);
+    // A listing that stopped after cas/p1 resumes after it and appends the rest: the file is
+    // the whole listing again.
+    let part = f.path().join("part.tsv");
+    std::fs::write(&part, "cas/p1\t2097152\n").unwrap();
+    assert_eq!(rt.block_on(list(&s, "", Some("cas/p1"), &part)).unwrap(), 2);
+    assert_eq!(std::fs::read_to_string(&part).unwrap(), all);
+    // Without `after`, an existing file is replaced, not appended to.
+    assert_eq!(rt.block_on(list(&s, "x/", None, &part)).unwrap(), 1);
+    assert_eq!(std::fs::read_to_string(&part).unwrap(), "x/small\t10\n");
+    assert!(
+        rt.block_on(list(&s, "", None, &f.path().join("none/x")))
+            .is_err()
     );
-    assert!(rt.block_on(list(&s, "", &f.path().join("none/x"))).is_err());
+    assert!(matches!(
+        rt.block_on(list(&s, "", Some(""), &part)),
+        Err(Error::Invalid(_))
+    ));
+    // A store nobody answers fails the listing with a network error, after the file is made.
+    let dead = store(
+        &format!("http://{}", tierstore_testkit::port::dead_addr()),
+        "tierstore-dead",
+        Credentials::new("k", "s"),
+    )
+    .unwrap();
+    let gone = f.path().join("dead.tsv");
+    assert!(matches!(
+        rt.block_on(list(&dead, "", None, &gone)),
+        Err(Error::Net(_))
+    ));
+    assert_eq!(std::fs::read_to_string(&gone).unwrap(), "");
     let cfg = Config {
         parts_mib: vec![1],
         conc: vec![1, 2],

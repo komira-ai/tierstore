@@ -13,7 +13,7 @@ use std::time::Duration;
 
 use futures::StreamExt as _;
 use objstore_s3::s3::{Credentials, S3Config, S3Store};
-use objstore_s3::{ByteRange, Capabilities, KeyPrefix, ObjectKey, PageSize};
+use objstore_s3::{ByteRange, Capabilities, KeyPrefix, ListToken, ObjectKey, PageSize};
 use serde::Serialize;
 
 use crate::Error;
@@ -64,27 +64,51 @@ pub fn store(endpoint: &str, bucket: &str, creds: Credentials) -> Result<S3Store
 }
 
 /// Writes every object under `prefix` as `key<TAB>size` lines to `out`; returns the count.
+/// With `after`, the listing starts after that key and the lines are appended to `out`, so a
+/// listing that failed part-way resumes from the last key it wrote.
 ///
 /// # Errors
-/// When the listing or the write fails.
-pub async fn list(store: &S3Store, prefix: &str, out: &Path) -> Result<u64, Error> {
+/// When the listing or the write fails (the lines written so far stay in `out`).
+pub async fn list(
+    store: &S3Store,
+    prefix: &str,
+    after: Option<&str>,
+    out: &Path,
+) -> Result<u64, Error> {
     let p = KeyPrefix::new(prefix).map_err(|e| Error::Invalid(e.to_string()))?;
-    let mut f =
-        std::io::BufWriter::new(std::fs::File::create(out).map_err(Error::io("create", out))?);
+    let from = after
+        .map(|k| ObjectKey::new(k).map_err(|e| Error::Invalid(e.to_string())))
+        .transpose()?
+        .map(|k| ListToken::after(&k));
+    let file = std::fs::OpenOptions::new()
+        .create(true)
+        .write(true)
+        .append(from.is_some())
+        .truncate(from.is_none())
+        .open(out)
+        .map_err(Error::io("create", out))?;
+    let mut f = std::io::BufWriter::new(file);
     let mut s = std::pin::pin!(objstore_s3::listing::objects(
         store,
         &p,
-        None,
+        from,
         PageSize::MAX
     ));
     let mut n = 0;
-    while let Some(o) = s.next().await {
-        let o = o.map_err(Error::net)?;
-        writeln!(f, "{}\t{}", o.key.as_str(), o.size).map_err(Error::io("write", out))?;
-        n += 1;
-    }
+    let r = loop {
+        let Some(o) = s.next().await else {
+            break Ok(n);
+        };
+        match o {
+            Ok(o) => {
+                writeln!(f, "{}\t{}", o.key.as_str(), o.size).map_err(Error::io("write", out))?;
+                n += 1;
+            }
+            Err(e) => break Err(Error::net(e)),
+        }
+    };
     f.flush().map_err(Error::io("write", out))?;
-    Ok(n)
+    r
 }
 
 /// The ranges a run reads: each `part` bytes of each pack once, packs in turn.

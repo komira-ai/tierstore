@@ -158,6 +158,9 @@ enum Verb {
         /// Silo's environment file with its root credentials.
         #[arg(long)]
         credentials: PathBuf,
+        /// Resume a listing that stopped: list after this key and append to the listing file.
+        #[arg(long)]
+        after: Option<String>,
     },
     /// C-1: ranged GETs through the local silo.
     SiloGet {
@@ -769,12 +772,18 @@ pub fn run(cli: Cli, env: &Env<'_>, stdout: &mut dyn Write) -> Result<(), Error>
             endpoint,
             bucket,
             credentials,
+            after,
         } => {
             let store =
                 crate::silo::store(&endpoint, &bucket, crate::silo::credentials(&credentials)?)?;
             let out = Out::new(&common.out, &format!("silo-list-{bucket}"))?;
             let rt = runtime()?;
-            let n = rt.block_on(crate::silo::list(&store, "", &out.path("tsv")))?;
+            let n = rt.block_on(crate::silo::list(
+                &store,
+                "",
+                after.as_deref(),
+                &out.path("tsv"),
+            ))?;
             writeln!(stdout, "{n} objects").map_err(Error::io("write", Path::new("stdout")))?;
         }
         Verb::SiloGet {

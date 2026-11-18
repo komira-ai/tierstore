@@ -289,6 +289,21 @@ fn silo_list_get_and_analyse() {
     let out = ok(&f, &format!("silo-list {base}"), &s);
     assert_eq!(out, "2 objects\n");
     let listing = f.path().join("out/silo-list-tierstore-fake.tsv");
+    // Resuming after the first key appends the second: the file then names it twice.
+    let first = std::fs::read_to_string(&listing).unwrap();
+    let k1 = first
+        .lines()
+        .next()
+        .unwrap()
+        .split('\t')
+        .next()
+        .unwrap()
+        .to_string();
+    let out = ok(&f, &format!("silo-list {base} --after {k1}"), &s);
+    assert_eq!(out, "1 objects\n");
+    let both = std::fs::read_to_string(&listing).unwrap();
+    assert_eq!(both, format!("{first}{}\n", first.lines().nth(1).unwrap()));
+    std::fs::write(&listing, &first).unwrap();
     ok(
         &f,
         &format!(
