@@ -25,7 +25,7 @@ use std::path::{Path, PathBuf};
 #[cfg(any(target_os = "linux", test))]
 use std::sync::OnceLock;
 use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
-use std::sync::{Arc, Mutex, mpsc};
+use std::sync::{Arc, Mutex, PoisonError, RwLock, mpsc};
 use std::time::Duration;
 
 use crate::Clock;
@@ -238,11 +238,12 @@ pub(in crate::server) struct Core {
     /// Held by an attach, a restore and a detach for all of their work, so that a detach cannot
     /// unpin a tree that an attach has just taken.
     lifecycle: Mutex<()>,
-    /// Held by an open's pin of a blob, from its look at whether the tree is attached to its record
-    /// of the pin, and by a detach from the end of the attachments to the unpin: a pin is never
-    /// made after the unpin of a tree it saw attached. (Not the lifecycle lock, which an attach
-    /// holds while it reads manifests.)
-    pinning: Mutex<()>,
+    /// Read by an open's pin of a blob, from its look at whether the tree is attached to its record
+    /// of the pin, and written by a detach from the end of the attachments to the unpin: a pin is
+    /// never made after the unpin of a tree it saw attached. The pins of opens hold it together,
+    /// so that their round trips on the fill socket run at once. (Not the lifecycle lock, which
+    /// an attach holds while it reads manifests.)
+    pinning: RwLock<()>,
     /// Whether a successor is taking over: no attach or detach is done, so that this process
     /// writes neither the table of tree numbers nor the attachments file (`Core::hold`).
     held: AtomicBool,
@@ -292,7 +293,7 @@ impl Core {
                 dirs: HashMap::new(),
             }),
             lifecycle: Mutex::new(()),
-            pinning: Mutex::new(()),
+            pinning: RwLock::new(()),
             held: AtomicBool::new(false),
             prefetching: Mutex::new(HashMap::new()),
             reads: Reads::default(),
@@ -449,7 +450,7 @@ impl Core {
     /// when the kernel forgets its inodes.
     pub(super) fn detach(&self, run: &str) -> Option<Vec<Failure>> {
         let _lifecycle = locked(&self.lifecycle);
-        let _pinning = locked(&self.pinning);
+        let _pinning = self.no_pins();
         if self.is_held() {
             return None;
         }
@@ -798,9 +799,13 @@ impl Core {
 
     /// Asks the cache to keep the blob for `loaded`, the tree `number`, the first time it is opened
     /// under it while the tree is attached: a tree no run and no lookup has attached is kept by
-    /// recency alone, since nothing would take its pins away.
+    /// recency alone, since nothing would take its pins away. A blob pinned already is seen without
+    /// any lock the core shares; the pins of different opens are asked at once.
     fn pin_once(&self, (loaded, number): (&Loaded, u64), digest: &TreeDigest) {
-        let _pinning = locked(&self.pinning);
+        if locked(&loaded.pinned).contains(digest) {
+            return;
+        }
+        let _pinning = self.pinning.read().unwrap_or_else(PoisonError::into_inner);
         if locked(&loaded.pinned).contains(digest) || !self.attached(number) {
             return;
         }
@@ -812,6 +817,11 @@ impl Core {
         if pinned.is_ok_and(|answer| answer.starts_with("ok")) {
             let _ = locked(&loaded.pinned).insert(*digest);
         }
+    }
+
+    /// Holds off every pin of an open: for a detach, from the end of the attachments to the unpin.
+    fn no_pins(&self) -> std::sync::RwLockWriteGuard<'_, ()> {
+        self.pinning.write().unwrap_or_else(PoisonError::into_inner)
     }
 
     /// The bytes of a file: the cache file of its blob, filled if it must be, which is pinned for

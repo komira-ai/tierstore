@@ -2,11 +2,12 @@
 //! lookups, listings and opens below a tree's root, the failures an open records, and the tree
 //! leaving memory when nothing holds it.
 
+use std::sync::Arc;
 use std::time::Duration;
 
 use super::{AttachError, Attr, Core, DirItem, Entry, Errno, Failure, Kind, Looked, TREE_TTL};
 use crate::server::treefs::ino;
-use crate::server::treefs::testing::{Built, OWNER, Rig, file, open_cached, sample, sha};
+use crate::server::treefs::testing::{Built, OWNER, Rig, file, open_cached, sample, sha, until};
 
 const RUN: &str = "run-1";
 
@@ -717,6 +718,39 @@ fn a_refused_pin_is_asked_again_by_the_next_open() {
     let third = open_cached(core, ino::of(1, 3), false).unwrap();
     assert_eq!(rig.upstream.asked("pin").len(), 2);
     for fh in [first, second, third] {
+        core.release(fh);
+    }
+}
+
+/// Asserts that the first opens of two blobs of an attached tree have their pins in flight on the
+/// fill socket at once, and that a later open of a pinned blob asks nothing while those pins are
+/// still unanswered. Catches pins that hold one lock of the core across their round trip, which
+/// makes every open of the mount wait for each other open's pin in turn.
+#[test]
+fn the_pins_of_two_opens_are_asked_at_once_and_an_open_of_a_pinned_blob_waits_for_neither() {
+    let rig = attached("tfs-core-pins-at-once");
+    let core = &rig.core;
+    let pinned = open_cached(core, ino::of(1, 3), false).unwrap();
+    assert_eq!(rig.upstream.pins_received(), 1);
+    rig.upstream.gate_pins();
+    let opening: Vec<_> = [4, 7]
+        .into_iter()
+        .map(|index| {
+            let core = Arc::clone(core);
+            std::thread::spawn(move || open_cached(&core, ino::of(1, index), false).unwrap())
+        })
+        .collect();
+    until(|| rig.upstream.pins_received() == 3);
+    let again = open_cached(core, ino::of(1, 3), false).unwrap();
+    assert_eq!(rig.upstream.pins_received(), 3);
+    rig.upstream.permit_pins(2);
+    let handles: Vec<u64> = opening
+        .into_iter()
+        .map(|thread| thread.join().unwrap())
+        .collect();
+    assert_eq!(rig.upstream.most_pins(), 2);
+    assert_eq!(rig.upstream.asked("pin").len(), 3);
+    for fh in handles.into_iter().chain([pinned, again]) {
         core.release(fh);
     }
 }

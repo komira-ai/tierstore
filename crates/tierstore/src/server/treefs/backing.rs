@@ -10,13 +10,21 @@
 //! drops the id, which closes it.
 //!
 //! The table is written to `<runtime dir>/backing`, one line `<sha256> <id> <opens>` for each live
-//! blob, by a rename, at each first open and each last release and without `fsync`: it has to
-//! outlive the process and not the machine. The file is written outside the lock of the table, so
-//! that an open or a release that changes no line never waits for it: each change is numbered, a
-//! first open or last release returns once the file holds its change or a later one, and the
-//! changes made while one write is in progress are written together by the next. A successor that
-//! takes over the connection needs it before its first open (an inode open across the hand-over would otherwise get a new id and the
-//! open would fail with `EIO`; linux E6, case 3b), and reads it ([`saved`], [`BackingTable::adopt`]).
+//! blob, by a rename, after each first open and each last release and without `fsync`: it has to
+//! outlive the process and not the machine. Each change is numbered, and the file is written by a
+//! thread of the table's own (`fs-backing`), outside the lock of the table and outside every lock a
+//! request waits on: a write takes every change made before it, and the changes made while one
+//! write is in progress are written together by the next. A first open returns once the file holds
+//! its change or a later one: the kernel then has an open with that id, which a successor must know
+//! (an inode open across the hand-over would otherwise get a new id and the open would fail with
+//! `EIO`; linux E6, case 3b), and a process that stops before the write never answered the open,
+//! which the kernel sends to the successor again. A last release does not wait for the write: its
+//! id is closed before any write, so its wait would change nothing a successor reads. Every open
+//! that waits for a write is woken by the end of that write, all at once, and none of them waits
+//! for another's turn at a lock; so the requests of the mount do not queue behind the file. A
+//! successor that takes over the connection needs the file before its first open, and reads it
+//! ([`saved`], [`BackingTable::adopt`]). A table whose thread could not be started writes the file
+//! in the thread of the open or release that changed it, before it returns.
 //! The `opens` of a line is the count at that write, which is a lower bound of the opens there are
 //! (an open of a blob that has an id is not written). A process that stops reading to hand the
 //! connection over writes every line again with the exact count and a fourth word, `exact`
@@ -40,7 +48,7 @@ use std::collections::{HashMap, HashSet};
 use std::fs::File;
 use std::io;
 use std::path::{Path, PathBuf};
-use std::sync::{Arc, Condvar, Mutex, PoisonError};
+use std::sync::{Arc, Condvar, Mutex, PoisonError, Weak};
 
 use crate::tree_manifest::TreeDigest;
 
@@ -176,9 +184,36 @@ pub(super) struct BackingTable {
     most: usize,
     inner: Mutex<Inner>,
     changed: Condvar,
-    /// Held by the thread that writes the file, never while `inner` is held; the number of the
-    /// latest change the file holds.
-    written: Mutex<u64>,
+    /// Held by the one thread that writes the file, never while `inner` is held.
+    writing: Mutex<()>,
+    /// The changes asked to be in the file and the ones it holds, which the writer thread shares.
+    writes: Arc<Writes>,
+}
+
+/// The changes asked to be in the file and written there, shared by the table and its writer thread.
+#[derive(Default)]
+struct Writes {
+    progress: Mutex<Progress>,
+    /// Told when a change is asked to be written, and when the table is dropped.
+    asked: Condvar,
+    /// Told when a write ends.
+    wrote: Condvar,
+}
+
+/// The state of the writes.
+#[derive(Default)]
+struct Progress {
+    /// The number of the latest change asked to be in the file.
+    asked: u64,
+    /// The number of the latest change the file holds.
+    written: u64,
+    /// Whether the writer thread runs; if not, the thread that asks writes.
+    writer: bool,
+    /// Whether the table was dropped, which ends the writer thread.
+    gone: bool,
+    /// The writes made since the table was made, the first one included.
+    #[cfg(test)]
+    count: u64,
 }
 
 /// What an open of a blob is told to do.
@@ -202,21 +237,78 @@ pub(super) struct Ticket {
 impl BackingTable {
     /// An empty table, at most `most` ids, kept in `file`, which is written empty now.
     pub(super) fn new(file: PathBuf, most: usize) -> Arc<Self> {
-        let table = Arc::new(Self {
+        Self::made(file, most, Inner::default()).started()
+    }
+
+    /// A table that holds `inner`, its file not written yet and no writer thread started.
+    fn made(file: PathBuf, most: usize, inner: Inner) -> Arc<Self> {
+        Arc::new(Self {
             file,
             most,
-            inner: Mutex::new(Inner::default()),
+            inner: Mutex::new(inner),
             changed: Condvar::new(),
-            written: Mutex::new(0),
-        });
-        table.write(false);
-        table
+            writing: Mutex::new(()),
+            writes: Arc::default(),
+        })
+    }
+
+    /// Writes the file as the table is now, and starts the writer thread.
+    fn started(self: Arc<Self>) -> Arc<Self> {
+        self.started_by(|write| {
+            std::thread::Builder::new()
+                .name("fs-backing".to_owned())
+                .spawn(write)
+                .map(drop)
+        })
+    }
+
+    /// Writes the file as the table is now, and has `spawn` start the writer thread. A thread that
+    /// cannot be started is said, and the table writes the file in the thread that changes it.
+    fn started_by(
+        self: Arc<Self>,
+        spawn: impl FnOnce(Box<dyn FnOnce() + Send>) -> io::Result<()>,
+    ) -> Arc<Self> {
+        self.write(false);
+        let writes = Arc::clone(&self.writes);
+        let table = Arc::downgrade(&self);
+        match spawn(Box::new(move || writer(&writes, &table))) {
+            Ok(()) => locked(&self.writes.progress).writer = true,
+            Err(why) => {
+                let file = self.file.display();
+                tracing::warn!(
+                    "tierstore fs: no thread writes the backing table {file}, each change does: {why}"
+                );
+            }
+        }
+        self
+    }
+
+    /// A table as [`BackingTable::adopt`] makes it when its writer thread cannot be started.
+    #[cfg(test)]
+    pub(super) fn without_writer(
+        file: PathBuf,
+        most: usize,
+        saved: &[Saved],
+        wrap: &dyn Fn(u32) -> Guard,
+    ) -> Arc<Self> {
+        Self::adopted(file, most, saved, wrap)
+            .started_by(|_| Err(io::Error::other("no thread for a test")))
     }
 
     /// A table of the ids an earlier process of this connection registered, `saved` (the lines of
     /// its file), at most `most` ids; `wrap` makes the guard that closes an id when it is dropped.
     /// More lines than `most` are all kept: they are open in the kernel.
     pub(super) fn adopt(
+        file: PathBuf,
+        most: usize,
+        saved: &[Saved],
+        wrap: &dyn Fn(u32) -> Guard,
+    ) -> Arc<Self> {
+        Self::adopted(file, most, saved, wrap).started()
+    }
+
+    /// A table of the ids `saved`, its file not written yet and no writer thread started.
+    fn adopted(
         file: PathBuf,
         most: usize,
         saved: &[Saved],
@@ -239,18 +331,11 @@ impl BackingTable {
                 (line.blob, live)
             })
             .collect();
-        let table = Arc::new(Self {
-            file,
-            most,
-            inner: Mutex::new(Inner {
-                live,
-                ..Inner::default()
-            }),
-            changed: Condvar::new(),
-            written: Mutex::new(0),
-        });
-        table.write(false);
-        table
+        let inner = Inner {
+            live,
+            ..Inner::default()
+        };
+        Self::made(file, most, inner)
     }
 
     /// Counts an open of `blob`: on its live id, or, if it has none and there is room for one, by
@@ -343,11 +428,11 @@ impl BackingTable {
         Some(inner.changes)
     }
 
-    /// Writes the file for the change [`BackingTable::drop_if_unused`] made, if it made one, with
-    /// the lock of the table not held.
+    /// Asks for the file to hold the change [`BackingTable::drop_if_unused`] made, if it made one,
+    /// and does not wait for it: the id is closed already.
     fn dropped(&self, change: Option<u64>) {
         if let Some(change) = change {
-            self.persist(change);
+            self.ask(change, false);
         }
     }
 
@@ -371,22 +456,61 @@ impl BackingTable {
         }
     }
 
-    /// Returns once the file holds the change numbered `change` or a later one: writes it unless
-    /// a write that started after the change has done so.
-    fn persist(&self, change: u64) {
-        let mut written = locked(&self.written);
-        if *written < change {
-            *written = self.write_held(false);
+    /// Asks for the file to hold the change numbered `change` or a later one, and with `wait`
+    /// returns once it does. The writer thread writes it; a waiting thread holds no lock while it
+    /// waits, and every thread that waits for a write is woken at its end. A table with no writer
+    /// thread writes it here, unless a write that started after the change has done so.
+    fn ask(&self, change: u64, wait: bool) {
+        let mut progress = locked(&self.writes.progress);
+        progress.asked = progress.asked.max(change);
+        if !progress.writer {
+            drop(progress);
+            self.write_asked();
+            return;
+        }
+        self.writes.asked.notify_one();
+        if wait {
+            let _written = self
+                .writes
+                .wrote
+                .wait_while(progress, |progress| progress.written < change)
+                .unwrap_or_else(PoisonError::into_inner);
+        }
+    }
+
+    /// Writes the file if a change asked to be in it is not.
+    fn write_asked(&self) {
+        let _writing = locked(&self.writing);
+        let behind = {
+            let progress = locked(&self.writes.progress);
+            progress.asked > progress.written
+        };
+        if behind {
+            self.wrote(self.write_held(false));
         }
     }
 
     /// Writes the file as the table is now.
     fn write(&self, exact: bool) {
-        let mut written = locked(&self.written);
-        *written = self.write_held(exact);
+        let _writing = locked(&self.writing);
+        self.wrote(self.write_held(exact));
     }
 
-    /// Writes the file as the table is now, with `written` held, and gives the number of the
+    /// Records that the file holds the change numbered `change`, and wakes the threads that wait
+    /// for it.
+    fn wrote(&self, change: u64) {
+        {
+            let mut progress = locked(&self.writes.progress);
+            progress.written = progress.written.max(change);
+            #[cfg(test)]
+            {
+                progress.count += 1;
+            }
+        }
+        self.writes.wrote.notify_all();
+    }
+
+    /// Writes the file as the table is now, with `writing` held, and gives the number of the
     /// change it holds; a file that cannot be written is said and the table goes on. With `exact`
     /// the lines whose count is known say so. The lock of the table is held only to copy the lines.
     fn write_held(&self, exact: bool) -> u64 {
@@ -454,6 +578,25 @@ impl BackingTable {
         locked(&self.inner).waiting
     }
 
+    /// Returns once the file holds every change made so far.
+    #[cfg(test)]
+    pub(super) fn flushed(&self) {
+        let change = locked(&self.inner).changes;
+        self.ask(change, true);
+    }
+
+    /// The writes of the file made since the table was made, the first one included.
+    #[cfg(test)]
+    pub(super) fn writes_made(&self) -> u64 {
+        locked(&self.writes.progress).count
+    }
+
+    /// What the table shares with its writer thread: held by the thread for as long as it runs.
+    #[cfg(test)]
+    pub(super) fn shared(&self) -> Weak<impl Sized + use<>> {
+        Arc::downgrade(&self.writes)
+    }
+
     /// The opens counted on `blob`.
     #[cfg(test)]
     pub(super) fn opens(&self, blob: &TreeDigest) -> u32 {
@@ -488,7 +631,7 @@ impl Ticket {
         };
         // The opens that wait for this blob find its id now, before the file is written.
         self.table.changed.notify_all();
-        self.table.persist(change);
+        self.table.ask(change, true);
         backing
     }
 }
@@ -498,6 +641,35 @@ impl Drop for Ticket {
     fn drop(&mut self) {
         let _ = locked(&self.table.inner).registering.remove(&self.blob);
         self.table.changed.notify_all();
+    }
+}
+
+impl Drop for BackingTable {
+    /// Ends the writer thread.
+    fn drop(&mut self) {
+        locked(&self.writes.progress).gone = true;
+        self.writes.asked.notify_all();
+    }
+}
+
+/// The writer thread of the table `table`: writes the file each time a change is asked to be in
+/// it and is not, every change made by then at once, until the table is dropped.
+fn writer(writes: &Writes, table: &Weak<BackingTable>) {
+    loop {
+        {
+            let progress = locked(&writes.progress);
+            let progress = writes
+                .asked
+                .wait_while(progress, |progress| {
+                    progress.asked <= progress.written && !progress.gone
+                })
+                .unwrap_or_else(PoisonError::into_inner);
+            if progress.gone {
+                return;
+            }
+        }
+        // A table dropped since has said so: the next wait ends the thread.
+        let _ = table.upgrade().map(|table| table.write_asked());
     }
 }
 

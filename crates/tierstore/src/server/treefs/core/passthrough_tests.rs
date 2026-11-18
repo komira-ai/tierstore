@@ -220,8 +220,9 @@ fn passthrough_is_chosen_once_and_a_core_without_it_opens_cached() {
     assert!(rig.core.passthrough());
 }
 
-/// Asserts that the table file is made at the choice, names the blob, id and opens while the blob
-/// is open, and is empty after the last release.
+/// Asserts that the table file is made at the choice, names the blob, id and opens once the first
+/// open returns, and is empty once the write after the last release is made (the release does not
+/// wait for it).
 #[test]
 fn the_backing_table_file_follows_the_first_open_and_the_last_release() {
     let rig = passthrough("tfs-pt-file");
@@ -235,6 +236,7 @@ fn the_backing_table_file_follows_the_first_open_and_the_last_release() {
         format!("{sha} 100 1\n")
     );
     rig.core.release(fh);
+    rig.core.backing_table().unwrap().flushed();
     assert_eq!(std::fs::read_to_string(&file).unwrap(), "");
 }
 

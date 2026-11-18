@@ -130,7 +130,7 @@ impl Core {
     /// leaves memory too (`core/memory.rs`).
     pub(in crate::server::treefs) fn detach_idle(&self) -> usize {
         let _lifecycle = locked(&self.lifecycle);
-        let _pinning = locked(&self.pinning);
+        let _pinning = self.no_pins();
         if self.is_held() {
             return 0;
         }
