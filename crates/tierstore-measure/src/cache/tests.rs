@@ -27,6 +27,7 @@ fn config(f: &Fake) -> Config {
         tests: ["write", "fdatasync", "mixed", "punch", "dontneed"]
             .map(String::from)
             .to_vec(),
+        meminfo: f.meminfo(),
     }
 }
 
@@ -192,21 +193,23 @@ fn dontneed_policies_drop_what_they_say() {
     let f = Fake::new("cache", &["sda"]);
     let cfg = config(&f);
     let t = &cfg.targets[0];
-    let calls = Mutex::new(0);
-    let resident = |_: &Path| {
-        *calls.lock().unwrap() += 1;
-        Ok(5 * MIB)
+    // The page cache reads 0 before the writes and 5 MiB after them, at every call pair.
+    let calls = Mutex::new(0u64);
+    let resident = || {
+        let mut n = calls.lock().unwrap();
+        *n += 1;
+        Ok(if *n % 2 == 1 { 0 } else { 5 * MIB })
     };
     for p in [Policy::Never, Policy::AtCommit, Policy::Cap] {
         let r = dontneed_test(&cfg, t, p, &resident, &clock()).unwrap();
         assert_eq!(r.lat.unwrap().n, 40, "{p:?}");
-        assert!((r.extra["cached_mib_after_write"] - 5.0).abs() < 1e-9);
+        assert!((r.extra["cache_grew_mib"] - 5.0).abs() < 1e-9);
         assert!(
             r.params
                 .starts_with(&format!("policy={p:?} bytes=40MiB cap=8MiB"))
         );
     }
-    assert_eq!(*calls.lock().unwrap(), 3);
+    assert_eq!(*calls.lock().unwrap(), 6);
     // A cap under one commit batch drops only what was written (no step past the end).
     let tight = Config {
         dontneed_bytes: 4 * MIB,
@@ -221,29 +224,24 @@ fn dontneed_policies_drop_what_they_say() {
             .n,
         4
     );
-    let failing = |_: &Path| Err(Error::Invalid("no fincore".into()));
+    let failing = || Err(Error::Invalid("no meminfo".into()));
     assert!(dontneed_test(&cfg, t, Policy::Never, &failing, &clock()).is_err());
 }
 
 #[test]
-fn fincore_parses_a_count_and_refuses_other_text() {
-    let ok = Script {
-        answers: vec![("fincore", "1048576\n".into())],
-        ..Script::default()
-    };
-    assert_eq!(fincore(&ok, Path::new("/f")).unwrap(), MIB);
-    assert_eq!(
-        ok.seen.lock().unwrap()[0],
-        "fincore --bytes --noheadings --output RES /f"
+fn cached_bytes_reads_meminfo_and_refuses_a_file_without_it() {
+    let f = Fake::new("cache", &[]);
+    let p = f.path().join("meminfo");
+    std::fs::write(&p, "MemTotal: 100 kB\nCached:          2048 kB\n").unwrap();
+    assert_eq!(cached_bytes(&p).unwrap(), 2048 * 1024);
+    std::fs::write(&p, "MemTotal: 100 kB\n").unwrap();
+    assert!(
+        cached_bytes(&p)
+            .unwrap_err()
+            .to_string()
+            .ends_with("has no Cached: line")
     );
-    let bad = Script {
-        answers: vec![("fincore", "lots\n".into())],
-        ..Script::default()
-    };
-    assert_eq!(
-        fincore(&bad, Path::new("/f")).unwrap_err().to_string(),
-        "fincore printed \"lots\""
-    );
+    assert!(cached_bytes(&f.path().join("none")).is_err());
 }
 
 #[test]
@@ -253,10 +251,7 @@ fn run_covers_every_test_and_writes_a_table_per_test() {
     cfg.blocks_kib = vec![1024];
     cfg.jobs = vec![1];
     cfg.modes = vec![WriteMode::Direct];
-    let script = Script {
-        answers: vec![("fincore", "0\n".into())],
-        ..Script::default()
-    };
+    let script = Script::default();
     let out = Out::new(&f.path().join("out"), "b").unwrap();
     let rows = run(&cfg, &[], &script, &coarse(), &out, None).unwrap();
     let tests: Vec<&str> = rows.iter().map(|r| r.test.as_str()).collect();
@@ -282,15 +277,14 @@ fn run_covers_every_test_and_writes_a_table_per_test() {
     }
     assert!(md.contains("| rootfs | jobs=8 read=70%x128KiB-random-direct"));
     assert_eq!(std::fs::read_dir(&cfg.targets[0].dir).unwrap().count(), 0);
-    let failing = Script {
-        fail: vec!["fincore"],
-        ..Script::default()
-    };
+    // Without a meminfo the DONTNEED tests fail, and with them the run.
+    let mut gone = cfg.clone();
+    gone.meminfo = f.path().join("none");
     let extras = [Extras {
         image: None,
         fstrim: None,
     }];
-    assert!(run(&cfg, &extras, &failing, &coarse(), &out, None).is_err());
+    assert!(run(&gone, &extras, &script, &coarse(), &out, None).is_err());
     assert!(tables(&[]).is_empty());
 }
 

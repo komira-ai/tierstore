@@ -191,6 +191,8 @@ pub struct Config {
     pub diskstats: PathBuf,
     /// The tests to run: `write`, `fdatasync`, `mixed`, `punch`, `dontneed`.
     pub tests: Vec<String>,
+    /// `/proc/meminfo`.
+    pub meminfo: PathBuf,
 }
 
 fn row(target: &Target, test: &str, params: String) -> Row {
@@ -482,7 +484,8 @@ pub enum Policy {
 
 /// One `DONTNEED` policy on a read-after-serve pattern: `dontneed_bytes` written in 1 MiB cells,
 /// committed (`fdatasync`) per 32 MiB, pages dropped per the policy; then every cell read back.
-/// `resident` reads how many bytes of the file are in the page cache (`fincore` in a run).
+/// `cached` reads the bytes in the page cache of the whole machine (`Cached:` of `/proc/meminfo`
+/// in a run); the row reports how much it grew over the writes.
 ///
 /// # Errors
 /// When a step fails.
@@ -490,11 +493,12 @@ pub fn dontneed_test(
     cfg: &Config,
     t: &Target,
     policy: Policy,
-    resident: &dyn Fn(&Path) -> Result<u64, Error>,
+    cached: &dyn Fn() -> Result<u64, Error>,
     clock: &dyn Clock,
 ) -> Result<Row, Error> {
     let p = t.dir.join("b-dontneed");
     let _ = std::fs::remove_file(&p);
+    let before = cached()?;
     let f = create(&p, Mode::Buffered)?;
     let mut cell = vec![0u8; 1 << 20];
     let (mut off, mut kept_from) = (0u64, 0u64);
@@ -522,7 +526,7 @@ pub fn dontneed_test(
         }
     }
     let write_secs = (clock.now() - t0).as_secs_f64();
-    let cached = resident(&p)?;
+    let grew = cached()?.saturating_sub(before);
     let r = File::open(&p).map_err(Error::io("open", &p))?;
     let (mut lat, mut roff) = (Vec::new(), 0u64);
     let r0 = clock.now();
@@ -547,28 +551,23 @@ pub fn dontneed_test(
     out.extra
         .insert("write_mb_s".into(), mb_per_s(off, write_secs));
     out.extra
-        .insert("cached_mib_after_write".into(), cached as f64 / MIB as f64);
+        .insert("cache_grew_mib".into(), grew as f64 / MIB as f64);
     drop((f, r));
     let _ = std::fs::remove_file(&p);
     Ok(out)
 }
 
-/// `fincore`'s count of a file's resident bytes.
+/// The `Cached:` bytes of a `/proc/meminfo` at `path`.
 ///
 /// # Errors
-/// When `fincore` fails or prints something else.
-pub fn fincore(run: &dyn Runner, path: &Path) -> Result<u64, Error> {
-    let out = run.run(&[
-        "fincore",
-        "--bytes",
-        "--noheadings",
-        "--output",
-        "RES",
-        &path.to_string_lossy(),
-    ])?;
-    out.trim()
-        .parse()
-        .map_err(|_| Error::Invalid(format!("fincore printed {:?}", out.trim())))
+/// When it cannot be read or has no such line.
+pub fn cached_bytes(path: &Path) -> Result<u64, Error> {
+    let text = std::fs::read_to_string(path).map_err(Error::io("read", path))?;
+    text.lines()
+        .find_map(|l| l.strip_prefix("Cached:"))
+        .and_then(|v| v.trim().trim_end_matches("kB").trim().parse::<u64>().ok())
+        .map(|kb| kb * 1024)
+        .ok_or_else(|| Error::Invalid(format!("{} has no Cached: line", path.display())))
 }
 
 /// What a target needs beyond its directory: the loop image behind it (for the punch test) and
@@ -601,7 +600,7 @@ pub fn run(
     for (i, t) in cfg.targets.iter().enumerate() {
         let x = extras.get(i).unwrap_or(&none);
         let trim = x.fstrim.as_deref().map(|m| (runner, m));
-        let resident = |p: &Path| fincore(runner, p);
+        let resident = || cached_bytes(&cfg.meminfo);
         let mut tests: Vec<(&str, Test<'_>)> = Vec::new();
         for kib in &cfg.blocks_kib {
             for jobs in &cfg.jobs {

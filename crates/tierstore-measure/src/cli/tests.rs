@@ -143,7 +143,6 @@ fn cache_on_a_target() {
     let d = f.drive("root");
     f.link_dev(&d, "sda");
     let s = Script {
-        answers: vec![("fincore", "0\n".into())],
         ..Script::default()
     };
     ok(
@@ -173,7 +172,6 @@ fn cache_on_a_loop_target_samples_the_disk_under_the_image() {
     std::fs::create_dir_all(&back).unwrap();
     std::fs::write(back.join("backing_file"), format!("{}\n", img.display())).unwrap();
     let s = Script {
-        answers: vec![("fincore", "0\n".into())],
         ..Script::default()
     };
     ok(

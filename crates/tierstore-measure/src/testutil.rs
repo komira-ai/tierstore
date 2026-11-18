@@ -23,11 +23,16 @@ impl Fake {
         }
         std::fs::write(dir.path().join("diskstats"), stats).unwrap();
         std::fs::write(dir.path().join("loadavg"), "0.10 0.10 0.10 1/100 1\n").unwrap();
+        std::fs::write(dir.path().join("meminfo"), "Cached:  1024 kB\n").unwrap();
         Self { dir }
     }
 
     pub fn sys(&self) -> PathBuf {
         self.dir.path().join("sys")
+    }
+
+    pub fn meminfo(&self) -> PathBuf {
+        self.dir.path().join("meminfo")
     }
 
     pub fn diskstats(&self) -> PathBuf {

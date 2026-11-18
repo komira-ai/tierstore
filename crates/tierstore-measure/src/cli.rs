@@ -702,6 +702,7 @@ pub fn run(cli: Cli, env: &Env<'_>, stdout: &mut dyn Write) -> Result<(), Error>
                 dontneed_cap: c.dontneed_cap_mib * MIB,
                 diskstats: c.common.diskstats(),
                 tests: c.tests.clone(),
+                meminfo: c.common.proc_root.join("meminfo"),
             };
             let out = Out::new(&c.common.out, "b")?;
             let guard = c.common.guard();
