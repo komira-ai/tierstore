@@ -16,8 +16,11 @@
 //! max_readahead 131072
 //! max_write 1048576
 //! time_gran_ns 1
-//! max_stack_depth 1
+//! max_stack_depth 0
 //! ```
+//!
+//! (`max_stack_depth` is 0 on a connection this release set up, which never asks for passthrough;
+//! a connection an earlier release answered with passthrough has 1.)
 //!
 //! The first line names the format and its version. The format changes only by adding (AGENTS.md
 //! B8): a reader takes the keys it knows, ignores the others and ignores the version, so a record

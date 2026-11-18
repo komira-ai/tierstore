@@ -510,7 +510,7 @@ prefixes = ["cas/b/"]
 stage_dir = "/var/cache/tierstore/put-stage"
 ```
 
-`fs.passthrough` and `fs.max_backing_ids` were removed with passthrough after tierstore 0.3.121: a file that still has them starts, and the start says on stderr that each is ignored and why.
+The keys `passthrough` and `max_backing_ids` of `[fs]` were removed with passthrough after tierstore 0.3.121: a file that still has them starts, and the start says on stderr that each is ignored and why.
 
 The mount is made with `allow_other` and `default_permissions` (the kernel checks the modes, which are 0644, 0755 for an executable file or a directory, and 0777 for a link), `max_background` 1024, no passthrough (so a stack depth of 0, on which a job's overlay stacks), and, where the kernel offers them, `FUSE_CACHE_SYMLINKS`, `FUSE_PARALLEL_DIROPS`, `FUSE_DO_READDIRPLUS` and `FUSE_READDIRPLUS_AUTO`. An example:
 

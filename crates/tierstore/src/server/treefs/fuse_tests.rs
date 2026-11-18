@@ -8,6 +8,8 @@ use std::path::Path;
 
 use fuser::{BackgroundSession, InitFlags, InitOutcome, Session};
 
+use super::super::fakedev;
+
 use super::{Frontend, config};
 use crate::server::treefs::backing::{FILE, Saved};
 use crate::server::treefs::core::FIXED_MTIME;
@@ -439,6 +441,31 @@ fn a_mount_does_not_ask_for_passthrough_and_its_reads_reach_the_core() {
         assert!(m.served("read") > 0);
         assert!(!m.rig.runtime.join(FILE).exists());
     });
+}
+
+/// Asserts, with a stand-in for the kernel that offers passthrough (and resend), that the answer to
+/// `INIT` asks for resend and not for passthrough, and declares a stack depth of 0: whatever the
+/// kernel the test runs on offers, and whatever capability the test process holds.
+#[test]
+fn init_asks_for_no_passthrough_where_the_kernel_offers_it() {
+    let rig = Rig::new("tfs-fuse-init-offered", sample());
+    let (device, kernel) = fakedev::pair();
+    kernel.init(1, InitFlags::FUSE_PASSTHROUGH | InitFlags::FUSE_HAS_RESEND);
+    let config = config(1, false);
+    let frontend = Frontend::new(rig.core.clone());
+    let session = Session::from_fd(frontend, device, config.acl, config).unwrap();
+    let reply = kernel.reply();
+    assert_eq!((reply.unique, reply.error), (1, 0));
+    let outcome = session.init_outcome().unwrap();
+    assert!(outcome.capabilities.contains(InitFlags::FUSE_PASSTHROUGH));
+    assert!(!outcome.flags.contains(InitFlags::FUSE_PASSTHROUGH));
+    assert!(outcome.flags.contains(InitFlags::FUSE_HAS_RESEND));
+    assert_eq!(outcome.max_stack_depth, 0);
+    // The reply itself: `flags2` (bytes 32 to 36) without bit 37 of the flags, a depth of 0.
+    let word = |at: usize| u32::from_ne_bytes(reply.body[at..at + 4].try_into().unwrap());
+    let replied = u64::from(word(12)) | (u64::from(word(32)) << 32);
+    assert_eq!(replied & InitFlags::FUSE_PASSTHROUGH.bits(), 0);
+    assert_eq!(word(36), 0);
 }
 
 /// Asserts that an open of a blob the core holds an adopted id for, whose handle is not one the
