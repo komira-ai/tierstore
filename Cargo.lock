@@ -3325,6 +3325,26 @@ dependencies = [
 ]
 
 [[package]]
+name = "tierstore-measure"
+version = "0.1.0"
+dependencies = [
+ "blake3",
+ "bytes",
+ "clap",
+ "crc32c",
+ "futures",
+ "objstore-s3 0.1.0",
+ "ring",
+ "rustix",
+ "serde",
+ "serde_json",
+ "sha2 0.11.0",
+ "thiserror",
+ "tierstore-testkit",
+ "tokio",
+]
+
+[[package]]
 name = "tierstore-metrics"
 version = "0.1.0"
 dependencies = [
@@ -3339,6 +3359,25 @@ dependencies = [
 [[package]]
 name = "tierstore-model"
 version = "0.1.0"
+
+[[package]]
+name = "tierstore-mount-client"
+version = "0.1.0"
+dependencies = [
+ "arc-swap",
+ "async-trait",
+ "futures",
+ "libc",
+ "rustix",
+ "thiserror",
+ "tierstore-entry",
+ "tierstore-fetch-api",
+ "tierstore-mount-server",
+ "tierstore-testkit",
+ "tokio",
+ "tracing",
+ "vm-memory",
+]
 
 [[package]]
 name = "tierstore-mount-server"
