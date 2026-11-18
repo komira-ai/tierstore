@@ -374,3 +374,40 @@ async fn the_limit_is_the_last_size_of_obj_and_one_more_byte_goes_alone() {
     let counts = rig.large.counters().counts();
     assert_eq!((counts.small, counts.routed, counts.alone), (1, 1, 1));
 }
+
+/// Asserts that a first part whose body ends cleanly before the bytes the read wants (no error,
+/// just too few bytes) fails the read with `Error::Unavailable` naming where it ended, after
+/// serving only a prefix of the object.
+#[tokio::test]
+async fn a_first_part_that_ends_cleanly_short_fails_the_read() {
+    let key = "cas/alone/short";
+    let (rig, bytes) = silo_rig("alone-short", key, SIZE, 0xb5);
+    rig.upstream.short_next(1000);
+    let (served, error) = match rig.open(key, span(0, 4999)).await {
+        Ok(opened) => drain(opened.body).await,
+        Err(error) => (Vec::new(), Some(error)),
+    };
+    let Some(Error::Unavailable(text)) = error else {
+        panic!("a short first part fails the read: {error:?}");
+    };
+    assert_eq!(text, format!("{key}: the first part ended at byte 1000"));
+    assert_eq!(served, bytes[..1000]);
+}
+
+/// Asserts that a read starting inside its first part, whose body comes in small pieces, skips
+/// the pieces before its start whole and serves exactly its bytes.
+#[tokio::test]
+async fn a_read_inside_a_first_part_of_small_pieces_skips_the_pieces_before_it() {
+    let key = "cas/alone/pieces";
+    let (rig, bytes) = silo_rig("alone-pieces", key, SIZE, 0xb6);
+    rig.upstream.fake.script_part(PartScript::Serve {
+        chunk: 1000,
+        signals: DriveSignals::default(),
+    });
+    let start = 3 * MIB + 5500;
+    let (_, _, served) = rig.read(key, span(start, start + 2999)).await.unwrap();
+    assert_eq!(served, bytes[start as usize..(start + 3000) as usize]);
+    let gets = rig.gets();
+    assert_eq!(gets.len(), 1);
+    assert_eq!((gets[0].range.offset, gets[0].generation), (3 * MIB, None));
+}

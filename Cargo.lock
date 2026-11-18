@@ -3156,6 +3156,7 @@ dependencies = [
  "tierstore-fetch",
  "tierstore-fetch-api",
  "tierstore-format",
+ "tierstore-hashpool",
  "tierstore-testkit",
  "tierstore-trees-api",
  "tokio",

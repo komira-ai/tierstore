@@ -165,8 +165,9 @@ objstore-s3 = { workspace = true, features = ["testkit"] }
 objstore-conformance.workspace = true
 # Encodes the messages the tests of the trees front send.
 prost.workspace = true
-# The fetch engine the tests of the S3 front's large objects attach to a cache.
+# The fetch engine the tests of the S3 front's large objects attach to a cache, and its verifier.
 tierstore-fetch.workspace = true
+tierstore-hashpool.workspace = true
 # Scratch directories and key files of the tests of the binary.
 tierstore-testkit.workspace = true
 # A test CA and a leaf with IP subjectAltNames, for the tests of the OCI read front.

@@ -108,16 +108,8 @@ pub struct LargeParts {
     pub holder: HolderId,
 }
 
-impl std::fmt::Debug for LargeParts {
-    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
-        f.debug_struct("LargeParts")
-            .field("holder", &self.holder)
-            .finish_non_exhaustive()
-    }
-}
-
 /// What the large-object path did, counted.
-#[derive(Debug, Default)]
+#[derive(Default)]
 pub(crate) struct LargeCounters {
     routed: AtomicU64,
     small: AtomicU64,
@@ -187,16 +179,7 @@ pub struct LargeObjects {
     counters: LargeCounters,
 }
 
-impl std::fmt::Debug for LargeObjects {
-    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
-        f.debug_struct("LargeObjects")
-            .field("parts", &self.parts)
-            .finish_non_exhaustive()
-    }
-}
-
 /// What the front found an object to be.
-#[derive(Debug, Clone, PartialEq, Eq)]
 enum Identity {
     /// Its generation and size.
     Known(Known),

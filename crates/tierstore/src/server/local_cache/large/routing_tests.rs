@@ -12,7 +12,8 @@ use tierstore_fetch_api::upstream::{DeviceRef, Located, Location, NotDefinitive,
 
 use super::testing::{HOLDER, LIMIT, LargeRig, MIB, generation, hot, object, span};
 use super::{LargeCounts, LargeObjects, LargeParts, MISS_TTL, S3_JOB};
-use crate::server::local_cache::testing::{Rig, pattern};
+use crate::server::local_cache::RangeWant;
+use crate::server::local_cache::testing::{Rig, digest, pattern};
 use crate::{Backend as _, Error, Op};
 
 /// The key of a large object.
@@ -410,14 +411,44 @@ async fn a_put_during_a_locate_keeps_its_miss_out_of_the_book() {
     );
     let bytes = object(3 * MIB, 15);
     let gate = rig.upstream.hold_locates();
-    let (read, ()) = tokio::join!(rig.open(BIG, None), async {
-        rig.upstream.located(1).await;
-        rig.rig.cache.put(BIG, bytes.clone()).await.unwrap();
-        gate.add_permits(64);
-    });
+    // The waiter is polled first, so it waits for the `LOCATE` to arrive.
+    let ((), read) = tokio::join!(
+        async {
+            rig.upstream.located(1).await;
+            rig.rig.cache.put(BIG, bytes.clone()).await.unwrap();
+            gate.add_permits(64);
+        },
+        rig.open(BIG, None)
+    );
     assert!(matches!(read, Err(Error::NotFound(_))));
     rig.stored(BIG, &bytes, generation(15));
     let (_, _, served) = rig.read(BIG, None).await.unwrap();
     assert_eq!(served, bytes.to_vec());
     assert_eq!(asked(&rig), 2);
+}
+
+/// Asserts that a key held by an entry by extents (a range of a pack that a fill of ranges
+/// kept) is not routed to the engine: a read inside that range asks no `LOCATE`, counts nothing
+/// in the path, and is served from the extent with no GET of the cache's upstream.
+#[tokio::test]
+async fn a_key_held_by_an_entry_by_extents_is_not_located() {
+    let rig = LargeRig::new("routing-extents");
+    let bytes = object(3 * MIB, 16);
+    rig.rig.put(BIG, &bytes).await;
+    rig.stored(BIG, &bytes, generation(16));
+    let sha256 = digest(&bytes[..1000]);
+    let want = RangeWant {
+        pack: BIG,
+        known: None,
+        offset: 0,
+        len: 1000,
+        sha256: &sha256,
+    };
+    rig.rig.cache.fill_range(&want).await.unwrap();
+    let gets = rig.rig.calls(Op::Get);
+    let (_, _, served) = rig.read(BIG, span(100, 199)).await.unwrap();
+    assert_eq!(served, bytes[100..200]);
+    assert_eq!(rig.rig.calls(Op::Get), gets);
+    assert_eq!(counts(&rig), LargeCounts::default());
+    assert_eq!(rig.locates(), 0);
 }

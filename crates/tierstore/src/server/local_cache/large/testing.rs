@@ -6,6 +6,7 @@
 //! answers `412` to an `If-Match` other than the object's generation, and a GET with none with
 //! the object's bytes, whatever they are now.
 
+use std::num::NonZeroUsize;
 use std::sync::atomic::{AtomicUsize, Ordering};
 use std::sync::{Arc, Mutex};
 
@@ -23,8 +24,8 @@ use tierstore_fetch_api::upstream::{
     DeviceRef, GetRequest, Located, Location, PartResponse, Report, Source, SourceKind, Upstream,
     UpstreamError,
 };
-use tierstore_fetch_api::verify::{CellJob, Verdict, Verifier};
 use tierstore_format::ids::{Generation, NodeId};
+use tierstore_hashpool::HashPool;
 use tokio::sync::{Notify, Semaphore};
 
 use super::super::CacheConfig;
@@ -42,7 +43,6 @@ pub(in crate::server::local_cache) const LIMIT: u64 = MIB;
 pub(in crate::server::local_cache) const HOLDER: HolderId = HolderId(7);
 
 /// A budget that grants every part at once, with the parts of 32 MiB of 4.4.
-#[derive(Debug, Default)]
 pub(in crate::server::local_cache) struct Unlimited;
 
 #[async_trait::async_trait]
@@ -58,21 +58,6 @@ impl Budget for Unlimited {
     }
 }
 
-/// A verifier that no test reaches: an object of the S3 front has no cell digests, so the engine
-/// never asks for a verdict (section 9).
-#[derive(Debug, Default)]
-pub(in crate::server::local_cache) struct Unverified;
-
-#[async_trait::async_trait]
-impl Verifier for Unverified {
-    async fn verify(&self, job: CellJob) -> (Verdict, Bytes) {
-        panic!(
-            "a digest=none cell was sent to the verifier: cell {}",
-            job.cell
-        )
-    }
-}
-
 /// The fake upstream, with every GET recorded in order and an optional gate that holds GETs
 /// until the test lets them go.
 pub(in crate::server::local_cache) struct Gated {
@@ -82,6 +67,8 @@ pub(in crate::server::local_cache) struct Gated {
     gate: Mutex<Option<Arc<Semaphore>>>,
     /// The GETs that have reached the upstream (answered or waiting).
     entered: AtomicUsize,
+    /// When set, the next GET's body ends cleanly after this many bytes.
+    short: Mutex<Option<usize>>,
     /// Woken at each GET that reaches the upstream.
     arrived: Notify,
     /// `LOCATE` answers to give before the fake's own, in order.
@@ -98,6 +85,7 @@ impl Gated {
             fake: FakeUpstream::new(),
             gate: Mutex::new(None),
             entered: AtomicUsize::new(0),
+            short: Mutex::new(None),
             arrived: Notify::new(),
             locates: Mutex::new(Vec::new()),
             locate_gate: Mutex::new(None),
@@ -146,6 +134,11 @@ impl Gated {
         self.entered.load(Ordering::SeqCst)
     }
 
+    /// The next GET's body ends, with no error, after `len` bytes.
+    pub(in crate::server::local_cache) fn short_next(&self, len: usize) {
+        *self.short.lock().unwrap() = Some(len);
+    }
+
     /// The next `LOCATE` (of any key) answers `answer`.
     pub(in crate::server::local_cache) fn script_locate(
         &self,
@@ -185,7 +178,22 @@ impl Upstream for Gated {
         if let Some(gate) = gate {
             gate.acquire().await.unwrap().forget();
         }
-        self.fake.get(req).await
+        let short = self.short.lock().unwrap().take();
+        let mut response = self.fake.get(req).await?;
+        if let Some(len) = short {
+            let mut left = len;
+            response.body = response
+                .body
+                .map(move |piece| {
+                    piece.map(|bytes| {
+                        let keep = bytes.slice(..left.min(bytes.len()));
+                        left -= keep.len();
+                        keep
+                    })
+                })
+                .boxed();
+        }
+        Ok(response)
     }
 
     async fn report(&self, key: &PackKey, source: &Source, range: PackRange, report: Report) {
@@ -243,7 +251,10 @@ impl LargeRig {
             store: store.clone(),
             upstream: upstream.clone(),
             budget: Arc::new(Unlimited),
-            verifier: Arc::new(Unverified),
+            // An object of the S3 front has no cell digests: the engine never asks the pool.
+            verifier: Arc::new(
+                HashPool::start(NonZeroUsize::MIN, Arc::new(clock.clone())).unwrap(),
+            ),
             // No test moves the engine's clock: no timer of the engine fires.
             timer: Arc::new(ManualTimer::new(clock)),
         };

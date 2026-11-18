@@ -639,3 +639,28 @@ async fn an_overwrite_after_the_book_learned_the_object_serves_no_byte_of_the_ne
             .all(|get| get.generation == Some(generation(20)))
     );
 }
+
+/// Asserts that a read around present cells asks the engine for the absent cells on both sides
+/// of them and not for the present ones: no GET covers cells 2 and 3, the bytes are the object's,
+/// and every cell of the read is present after it.
+#[tokio::test]
+async fn a_read_around_present_cells_fetches_the_absent_cells_on_both_sides_only() {
+    let rig = LargeRig::new("cells-around");
+    let (g, bytes) = (generation(17), object(8 * MIB, 17));
+    rig.stored("cas/eight", &bytes, g);
+    rig.read("cas/eight", span(2 * MIB, 4 * MIB - 1))
+        .await
+        .unwrap();
+    let before = rig.gets().len();
+    let (_, _, served) = rig.read("cas/eight", span(0, 6 * MIB - 1)).await.unwrap();
+    assert_eq!(served, bytes[..(6 * MIB) as usize]);
+    let new = asked(&rig, before);
+    assert!(new.iter().any(|&(from, _)| from < 2 * MIB));
+    assert!(new.iter().any(|&(_, to)| to > 4 * MIB));
+    assert!(
+        new.iter()
+            .all(|&(from, to)| to <= 2 * MIB || from >= 4 * MIB)
+    );
+    let entry = rig.entry("cas/eight", g).unwrap();
+    assert_eq!(servable(&entry), (0..6).collect::<Vec<u32>>());
+}
