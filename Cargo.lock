@@ -3321,6 +3321,26 @@ dependencies = [
 ]
 
 [[package]]
+name = "tierstore-measure"
+version = "0.1.0"
+dependencies = [
+ "blake3",
+ "bytes",
+ "clap",
+ "crc32c",
+ "futures",
+ "objstore-s3 0.1.0",
+ "ring",
+ "rustix",
+ "serde",
+ "serde_json",
+ "sha2 0.11.0",
+ "thiserror",
+ "tierstore-testkit",
+ "tokio",
+]
+
+[[package]]
 name = "tierstore-metrics"
 version = "0.1.0"
 dependencies = [
