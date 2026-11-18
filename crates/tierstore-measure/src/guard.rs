@@ -17,6 +17,10 @@ use crate::clock::Clock;
 pub struct Seen {
     /// MB/s read and written to disk by the guarded processes during the cell.
     pub foreign_mb_s: f64,
+    /// Write requests per second on the watched drives during the cell (foreign for a cell that
+    /// only reads them).
+    #[serde(default)]
+    pub foreign_w_s: f64,
     /// The one-minute load average at the cell's end.
     pub load1: f64,
     /// Attempts the cell took (1 when the first was clean).
@@ -40,6 +44,18 @@ pub struct Guard {
     pub quiet_window: Duration,
     /// The longest a cell waits for quiet before it runs anyway.
     pub max_wait: Duration,
+    /// Drives whose write requests are foreign (a read-only arm's drives; empty: none).
+    pub write_devs: Vec<String>,
+    /// The most write requests per second on them a clean cell may see.
+    pub max_w_s: f64,
+}
+
+/// Foreign activity so far: the guarded processes' disk bytes and the watched drives' writes.
+#[derive(Debug, Clone, Copy)]
+struct Mark {
+    bytes: u64,
+    writes: u64,
+    at: Duration,
 }
 
 fn io_bytes(dir: &Path) -> u64 {
@@ -57,8 +73,41 @@ fn io_bytes(dir: &Path) -> u64 {
 impl Guard {
     /// Whether foreign MB/s and load are both within the limits.
     #[must_use]
-    pub fn quiet(&self, mb_s: f64, load: f64) -> bool {
-        mb_s <= self.max_mb_s && load <= self.max_load
+    pub fn quiet(&self, seen: &Seen) -> bool {
+        seen.foreign_mb_s <= self.max_mb_s
+            && seen.foreign_w_s <= self.max_w_s
+            && seen.load1 <= self.max_load
+    }
+
+    /// Write requests so far on the watched drives (from `diskstats` in the proc root).
+    ///
+    /// # Errors
+    /// When `diskstats` cannot be read or lacks a drive.
+    pub fn writes(&self) -> Result<u64, Error> {
+        if self.write_devs.is_empty() {
+            return Ok(0);
+        }
+        let s = crate::diskstats::Sampler::new(&self.proc_root.join("diskstats"), &self.write_devs);
+        Ok(s.snapshot()?.values().map(|c| c.writes).sum())
+    }
+
+    fn mark(&self, clock: &dyn Clock) -> Result<Mark, Error> {
+        Ok(Mark {
+            bytes: self.foreign_bytes()?,
+            writes: self.writes()?,
+            at: clock.now(),
+        })
+    }
+
+    fn since(&self, a: Mark, clock: &dyn Clock, attempts: u32) -> Result<Seen, Error> {
+        let b = self.mark(clock)?;
+        let secs = (b.at - a.at).as_secs_f64();
+        Ok(Seen {
+            foreign_mb_s: crate::stats::mb_per_s(b.bytes.saturating_sub(a.bytes), secs),
+            foreign_w_s: b.writes.saturating_sub(a.writes) as f64 / secs.max(1e-9),
+            load1: self.load1()?,
+            attempts,
+        })
     }
 
     /// The disk bytes so far of every guarded process.
@@ -91,17 +140,12 @@ impl Guard {
             .ok_or_else(|| Error::Invalid(format!("{} holds {t:?}", p.display())))
     }
 
-    fn rate(&self, clock: &dyn Clock, window: Duration) -> Result<f64, Error> {
-        let a = self.foreign_bytes()?;
-        let t0 = clock.now();
-        while clock.now() - t0 < window {
+    fn window(&self, clock: &dyn Clock, window: Duration) -> Result<Seen, Error> {
+        let a = self.mark(clock)?;
+        while clock.now() - a.at < window {
             clock.sleep(Duration::from_millis(250));
         }
-        let secs = (clock.now() - t0).as_secs_f64();
-        Ok(crate::stats::mb_per_s(
-            self.foreign_bytes()?.saturating_sub(a),
-            secs,
-        ))
+        self.since(a, clock, 0)
     }
 
     /// Waits until a quiet window (foreign MB/s and load under the limits), or `max_wait`.
@@ -112,8 +156,8 @@ impl Guard {
     pub fn wait_quiet(&self, clock: &dyn Clock) -> Result<bool, Error> {
         let t0 = clock.now();
         loop {
-            let rate = self.rate(clock, self.quiet_window)?;
-            if self.quiet(rate, self.load1()?) {
+            let seen = self.window(clock, self.quiet_window)?;
+            if self.quiet(&seen) {
                 return Ok(true);
             }
             if clock.now() - t0 >= self.max_wait {
@@ -136,16 +180,10 @@ impl Guard {
         loop {
             attempt += 1;
             self.wait_quiet(clock)?;
-            let a = self.foreign_bytes()?;
-            let t0 = clock.now();
+            let a = self.mark(clock)?;
             let r = cell()?;
-            let secs = (clock.now() - t0).as_secs_f64();
-            let seen = Seen {
-                foreign_mb_s: crate::stats::mb_per_s(self.foreign_bytes()?.saturating_sub(a), secs),
-                load1: self.load1()?,
-                attempts: attempt,
-            };
-            if self.quiet(seen.foreign_mb_s, seen.load1) || attempt >= self.attempts {
+            let seen = self.since(a, clock, attempt)?;
+            if self.quiet(&seen) || attempt >= self.attempts {
                 return Ok((r, seen));
             }
         }

@@ -34,6 +34,8 @@ fn guard(proc_root: PathBuf) -> Guard {
         attempts: 3,
         quiet_window: Duration::from_millis(10),
         max_wait: Duration::from_millis(100),
+        write_devs: Vec::new(),
+        max_w_s: 5.0,
     }
 }
 
@@ -101,7 +103,36 @@ fn guarded_without_a_guard_runs_once() {
 fn quiet_needs_both_limits() {
     let f = Fake::new("guard", &[]);
     let g = guard(proc_with(&f, 0, "1.0"));
-    assert!(g.quiet(1.0, 10.0));
-    assert!(!g.quiet(1.1, 1.0));
-    assert!(!g.quiet(0.0, 10.1));
+    let seen = |foreign_mb_s, foreign_w_s, load1| Seen {
+        foreign_mb_s,
+        foreign_w_s,
+        load1,
+        attempts: 1,
+    };
+    assert!(g.quiet(&seen(1.0, 5.0, 10.0)));
+    assert!(!g.quiet(&seen(1.1, 0.0, 1.0)));
+    assert!(!g.quiet(&seen(0.0, 5.1, 1.0)));
+    assert!(!g.quiet(&seen(0.0, 0.0, 10.1)));
+}
+
+#[test]
+fn writes_on_the_watched_drives_make_a_cell_noisy() {
+    let f = Fake::new("guard", &["sdb"]);
+    let mut g = guard(proc_with(&f, 0, "1.0"));
+    g.write_devs = vec!["sdb".into()];
+    std::fs::copy(f.diskstats(), g.proc_root.join("diskstats")).unwrap();
+    let c = StepClock::new(Duration::from_millis(1), 0);
+    let stats = g.proc_root.join("diskstats");
+    let n = Cell::new(0u64);
+    let (_, seen) = g
+        .run(&c, || {
+            n.set(n.get() + 1000);
+            std::fs::write(&stats, format!("8 0 sdb 0 0 0 0 {} 0 0 0 0 0 0\n", n.get())).unwrap();
+            Ok(())
+        })
+        .unwrap();
+    assert_eq!(seen.attempts, 3);
+    assert!(seen.foreign_w_s > 5.0);
+    g.write_devs = vec!["sdq".into()];
+    assert!(g.writes().is_err());
 }

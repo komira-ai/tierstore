@@ -57,6 +57,12 @@ pub struct Common {
     /// The quiet check's window in ms.
     #[arg(long, default_value_t = 10_000)]
     pub guard_quiet_ms: u64,
+    /// A drive whose write requests are foreign work (repeat): the drives a read-only arm reads.
+    #[arg(long)]
+    pub guard_write_dev: Vec<String>,
+    /// The most write requests per second on those drives a clean cell sees.
+    #[arg(long, default_value_t = 5.0)]
+    pub guard_max_w_s: f64,
     /// The longest wait for quiet in ms.
     #[arg(long, default_value_t = 900_000)]
     pub guard_max_wait_ms: u64,
@@ -76,6 +82,8 @@ impl Common {
             attempts: self.guard_attempts,
             quiet_window: ms(self.guard_quiet_ms),
             max_wait: ms(self.guard_max_wait_ms),
+            write_devs: self.guard_write_dev.clone(),
+            max_w_s: self.guard_max_w_s,
         })
     }
 }

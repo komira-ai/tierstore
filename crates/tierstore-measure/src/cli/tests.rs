@@ -115,7 +115,9 @@ fn hdd_prep_and_grid() {
     ok(&f, &format!("hdd-prep {flags}"), &s);
     ok(
         &f,
-        &format!("hdd {flags} --guard-comm silo --guard-quiet-ms 1 --guard-max-wait-ms 1"),
+        &format!(
+            "hdd {flags} --guard-comm silo --guard-write-dev sdb --guard-quiet-ms 1 --guard-max-wait-ms 1"
+        ),
         &s,
     );
     assert!(md(&f, "a").contains("### A, raw HDD reads, drives: one"));

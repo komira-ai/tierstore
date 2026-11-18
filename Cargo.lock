@@ -2915,6 +2915,7 @@ dependencies = [
  "crc32c",
  "futures",
  "objstore-s3 0.1.0",
+ "ring",
  "rustix",
  "serde",
  "serde_json",

@@ -15,8 +15,10 @@ use crate::stats::mb_per_s;
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize)]
 #[serde(rename_all = "lowercase")]
 pub enum Hash {
-    /// SHA-256 of 1 MiB cells.
+    /// SHA-256 of 1 MiB cells (the `sha2` crate, portable code).
     Sha256,
+    /// SHA-256 by `ring` (assembly with AVX2/SHA extensions where the CPU has them).
+    Sha256Ring,
     /// BLAKE3.
     Blake3,
     /// CRC-32C.
@@ -25,13 +27,14 @@ pub enum Hash {
 
 impl Hash {
     /// Every hash, in table order.
-    pub const ALL: [Self; 3] = [Self::Sha256, Self::Blake3, Self::Crc32c];
+    pub const ALL: [Self; 4] = [Self::Sha256, Self::Sha256Ring, Self::Blake3, Self::Crc32c];
 
     /// The name used in tables.
     #[must_use]
     pub fn name(self) -> &'static str {
         match self {
             Self::Sha256 => "sha256",
+            Self::Sha256Ring => "sha256-ring",
             Self::Blake3 => "blake3",
             Self::Crc32c => "crc32c",
         }
@@ -42,6 +45,7 @@ impl Hash {
     pub fn digest(self, buf: &[u8]) -> u8 {
         match self {
             Self::Sha256 => sha2::Sha256::digest(buf)[0],
+            Self::Sha256Ring => ring::digest::digest(&ring::digest::SHA256, buf).as_ref()[0],
             Self::Blake3 => blake3::hash(buf).as_bytes()[0],
             Self::Crc32c => crc32c::crc32c(buf).to_le_bytes()[0],
         }
@@ -140,7 +144,7 @@ mod tests {
     fn every_hash_runs_on_one_and_many_threads() {
         let c = StepClock::new(Duration::from_millis(1), 0);
         let rows = run(&c, Duration::from_millis(3), 2);
-        assert_eq!(rows.len(), 6);
+        assert_eq!(rows.len(), 8);
         assert!(rows.iter().all(|r| r.total > 0.0));
         assert_eq!(rows[1].threads, 2);
         let t = table("n3", true, &rows).markdown();
