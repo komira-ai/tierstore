@@ -1,6 +1,6 @@
 //! The S3 front's book of large objects: the generation and size of each object it has met, and
 //! the definitive misses it remembers (10.6 step 4). Both are bounded: past the limit, the least
-//! recently used is forgotten, and a forgotten object costs one `LOCATE` (or one first part alone)
+//! recently used is forgotten, and a forgotten object costs one `LOCATE`
 //! when it is read again.
 
 use std::collections::BTreeMap;
