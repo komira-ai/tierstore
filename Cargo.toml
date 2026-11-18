@@ -101,6 +101,10 @@ toml = { version = "1.1.8", default-features = false, features = ["display", "pa
 tokio = "1.53.3"
 tokio-rustls = { version = "0.26.6", default-features = false, features = ["ring"] }
 tracing = "0.1.44"
+# Shared mappings of a memfd with atomic references into them, behind a safe interface: the state
+# memfd and the holders' counter memfds of the Linux entry store (tierstore-entry). The rust-vmm
+# project's guest-memory crate; only its `backend-mmap` feature is used. Apache-2.0 OR BSD-3-Clause.
+vm-memory = { version = "0.18.0", default-features = false }
 # Reads the fields of a client certificate (IP subjectAltNames) that the OCI front's start checks.
 x509-parser = "0.18.1"
 

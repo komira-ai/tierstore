@@ -1,0 +1,33 @@
+[package]
+name = "tierstore-entry"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+repository.workspace = true
+publish.workspace = true
+description = "The node cache's entry store on Linux (docs/design/fetch-cache-serve.md, T1): a sparse data file per pack under flock, the sealed state memfd mounts map read-only, the holders' counter memfds the server maps read-only and remaps as they grow, lifelines, claim CAS and hold refcounts, behind the Entry and EntryStore traits of tierstore-fetch-api."
+
+# Linux only: the crate is empty elsewhere (macOS has the in-process store of T-M1).
+[target.'cfg(target_os = "linux")'.dependencies]
+# The record checksum of the journal.
+crc32c.workspace = true
+# The PROT_* and MAP_* constants of the mappings (no libc call is made).
+libc.workspace = true
+# memfd_create, seals, ftruncate, fallocate (punch), flock, fstat and poll, all safe calls.
+rustix = { workspace = true, features = ["event", "fs"] }
+# The data file's name: the sha256 of the pack id.
+sha2.workspace = true
+thiserror.workspace = true
+tierstore-fetch-api.workspace = true
+# Shared mappings of the state memfd and of the holders' counter memfds, with atomic references
+# into them, through a safe interface (the crate forbids `unsafe`).
+vm-memory = { workspace = true, features = ["backend-mmap"] }
+
+[target.'cfg(target_os = "linux")'.dev-dependencies]
+# The data model's ids of an etag-rooted pack.
+tierstore-format.workspace = true
+tierstore-testkit.workspace = true
+
+[lints]
+workspace = true
