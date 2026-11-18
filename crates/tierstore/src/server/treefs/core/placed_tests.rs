@@ -8,10 +8,11 @@ use super::{dir_ino, key_of};
 use crate::server::local_cache::blob_path;
 use crate::server::local_cache::trees::testing::{built, fs_at};
 use crate::server::local_cache::trees::{CreateRequest, Created};
+use crate::server::treefs::backing::{FILE, Saved};
 use crate::server::treefs::core::{AttachError, Core, Entry, Errno, Kind, Looked, Opened};
 use crate::server::treefs::ino;
 use crate::server::treefs::live_testing::{Live, MOUNT};
-use crate::server::treefs::testing::{TREE_IDLE, open_cached};
+use crate::server::treefs::testing::{FakeKernel, TREE_IDLE, open_cached};
 use crate::{NewKind, Op, TreeDigest};
 
 fn found(core: &Core, parent: u64, name: &str) -> Entry {
@@ -118,24 +119,28 @@ async fn fs_core_reads_created_tree_without_manifest() {
     }
 }
 
-/// Asserts that with passthrough chosen, the open of a file of a placed tree is a cached open, not
-/// a backed one, since the kernel would map the whole pack onto the file; no id is registered, and
+/// Asserts that the open of a file of a placed tree is a cached open even where an earlier release
+/// registered a backing id for its blob, since the kernel would map the whole pack onto the file;
 /// the file reads as its member of the pack.
 #[tokio::test(flavor = "multi_thread")]
 async fn mount_reads_pack_member_without_passthrough() {
     let live = Live::new("tfs-placed-pass").await;
     let _ = live.place(vec![fs_at("jobs/1f3a/root")]);
-    live.core.enable_passthrough();
+    let saved = Saved {
+        blob: TreeDigest::from_hex(&live.bench.pack.blobs[1].0).unwrap(),
+        id: 7,
+        opens: 1,
+        exact: false,
+    };
+    let kernel = FakeKernel::new();
+    live.core
+        .adopt_backing(&live.runtime.join(FILE), &[saved], &|id| kernel.wrap(id));
     let want = live.bench.pack.content(1).to_vec();
     live.on_core(move |core| {
         let file = walk(core, &["jobs", "1f3a", "root", "bin", "other"]);
-        let opened = core
-            .open(file.attr.ino, false, &mut |_| {
-                Err(std::io::Error::other("no id is to be registered"))
-            })
-            .unwrap();
+        let opened = core.open(file.attr.ino, false).unwrap();
         let Opened::Cached(fh) = opened else {
-            panic!("a backed open of a placed file: {opened:?}");
+            panic!("an adopted id for a placed file: {opened:?}");
         };
         assert_eq!(core.read(fh, 0, 5000).unwrap(), want);
     })
@@ -264,10 +269,7 @@ async fn a_directory_above_a_location_is_a_namespace_directory() {
         let at = jobs.attr.ino;
         assert_eq!(core.opendir(at), Err(Errno::Acces));
         assert_eq!(core.readlink(at), Err(Errno::Inval));
-        assert_eq!(
-            core.open(at, false, &mut |_| unreachable!()).unwrap_err(),
-            Errno::IsDir
-        );
+        assert_eq!(core.open(at, false).unwrap_err(), Errno::IsDir);
         assert_eq!(core.blob_file(at).unwrap_err(), Errno::IsDir);
         assert_eq!(core.getattr(at), Ok(jobs));
         assert_eq!(jobs.attr.perm, 0o711);

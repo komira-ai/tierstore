@@ -69,7 +69,6 @@ impl Live {
                 cache_path: bench.rig.config.path.clone(),
                 mountpoint: mountpoint.clone(),
                 mount_id: MOUNT.to_owned(),
-                max_backing_ids: 100,
                 generation: 1,
                 count_lookups: true,
                 tree_idle: TREE_IDLE,

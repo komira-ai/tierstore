@@ -431,7 +431,7 @@ The file of `tierstore fs`, the virtual build file system of a build node (see [
 | Key | Type, default | What |
 |---|---|---|
 | `fs.mountpoint` | path, `/run/tierstore/fs` (absolute) | where the one FUSE mount is made, before the job runtime starts; made if it is not there. Jobs are given `<mountpoint>/trees/<digest>` |
-| `fs.runtime_dir` | path, `/run/tierstore-fs` (absolute) | the state that outlives the process: the table of tree numbers, the attachments, the record of the kernel's handshake (`init`), the backing table (`backing`) and, across a hand-over, what the kernel holds of `put/` (`put-handover`). The unit's `RuntimeDirectory=`, kept across restarts |
+| `fs.runtime_dir` | path, `/run/tierstore-fs` (absolute) | the state that outlives the process: the table of tree numbers, the attachments, the record of the kernel's handshake (`init`), the backing table an earlier release kept (`backing`, read at a take-over) and, across a hand-over, what the kernel holds of `put/` (`put-handover`). The unit's `RuntimeDirectory=`, kept across restarts |
 | `fs.control_socket` | path, `control.sock` in `fs.runtime_dir` (absolute, at most 103 bytes) | the Unix socket clients attach and detach on; mode 0660 |
 | `fs.client_group` | group name or number, required | the group of the control socket. The process must be a member of it |
 | `fs.owner` | `"uid:gid"`, required | the user and group id every entry of every tree reports: the host id of the user the jobs run as, so that a job may change what it copies up |
@@ -439,8 +439,6 @@ The file of `tierstore fs`, the virtual build file system of a build node (see [
 | `fs.cache_path` | path, required (absolute) | the cache directory of the node's `tierstore`: its `local_cache.path`. It must not be on a stacked file system (overlayfs, eCryptfs) |
 | `fs.fetch_timeout` | duration, `60s` (1ms to 1h) | how long an answer of the fill socket is waited for, and, in whole seconds, how long a closed fill socket is retried (the node's `tierstore` is being updated) before the open fails |
 | `fs.threads` | count, 16 (1 to 1024) | the threads that serve the kernel's requests, which read one `/dev/fuse` descriptor between them; an open that waits for a fill holds one |
-| `fs.passthrough` | `true` or `false`, `true` | whether to ask the kernel for passthrough (reads go from the cache file to the job inside the kernel) when it offers it and the process holds `CAP_SYS_ADMIN`. `false` forces the mode of Linux 6.8: cached opens, every read the page cache misses answered by the process. See [operations](operations.md#the-virtual-build-file-system) |
-| `fs.max_backing_ids` | count, 65536 (1 to 1048576) | the most backing ids live at once, one for each blob that some open file is served from; an open of a blob that has none, while this many are live, is a cached open (reads reach the process) and so is every open of that blob until those are closed; no open waits for a release, which needs a free worker. Only passthrough uses them |
 | `fs.handoff_socket` | path, `handoff.sock` in `fs.runtime_dir` (absolute, at most 103 bytes) | the Unix socket the running instance offers its mount on (mode 0600, its user only), and a new instance asks on at its start. See [crash recovery and the hand-over](operations.md#crash-recovery-and-the-hand-over-of-the-mount) |
 | `fs.handoff_wait` | duration, `120s` (1s to 1h) | how long a hand-over may last: for the new instance, from its connect to the running instance's `done`; for the running instance, the time it gives the new one to ask, to say `ack` and, once it has stopped, to say `ready` before it reads requests again. The wait for `ready` starts at `done` and covers the new instance's whole start (it makes its attachments again, reading the manifests through the fill socket), so set it above that time on a node with many attached trees: a new instance still starting when it ends is not the one that serves, and its `ready` fails |
 | `fs.reattach_concurrency` | integer, `16` (1 to 1024) | how many trees a start reads the manifests of at once when it makes the attachments in the `attachments` file again, before it serves; each tree is read once however many runs attach it, and 1 reads them one after the other. A fill that has to fetch from the store is one request of the fill socket, so a larger number shortens a start on a cold cache until the fill socket's own limit of fills is reached |
@@ -512,7 +510,9 @@ prefixes = ["cas/b/"]
 stage_dir = "/var/cache/tierstore/put-stage"
 ```
 
-The mount is made with `allow_other` and `default_permissions` (the kernel checks the modes, which are 0644, 0755 for an executable file or a directory, and 0777 for a link), `max_background` 1024 and, with passthrough, `max_stack_depth` 1, and, where the kernel offers them, `FUSE_CACHE_SYMLINKS`, `FUSE_PARALLEL_DIROPS`, `FUSE_DO_READDIRPLUS` and `FUSE_READDIRPLUS_AUTO`. An example:
+`fs.passthrough` and `fs.max_backing_ids` were removed with passthrough after tierstore 0.3.121: a file that still has them starts, and the start says on stderr that each is ignored and why.
+
+The mount is made with `allow_other` and `default_permissions` (the kernel checks the modes, which are 0644, 0755 for an executable file or a directory, and 0777 for a link), `max_background` 1024, no passthrough (so a stack depth of 0, on which a job's overlay stacks), and, where the kernel offers them, `FUSE_CACHE_SYMLINKS`, `FUSE_PARALLEL_DIROPS`, `FUSE_DO_READDIRPLUS` and `FUSE_READDIRPLUS_AUTO`. An example:
 
 ```toml
 [fs]

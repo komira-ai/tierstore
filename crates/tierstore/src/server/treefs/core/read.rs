@@ -1,9 +1,9 @@
 //! Reads by inode (`docs/design/virtual-build-fs.md` section 6): for a frontend whose protocol has
 //! no open and no release, as NFS has none. [`Core::blob_file`] gives a file's blob as the cache
-//! file, filled first if the cache does not hold it, and keeps nothing open: no handle, no
-//! backing id; the frontend keeps the descriptor as long as it likes and reads it with
-//! [`read_file`]. [`Core::readdir_after`] lists a directory from the last inode a client saw.
-//! FUSE's opens, handles and passthrough stay in `core.rs` and `core/passthrough.rs`.
+//! file, filled first if the cache does not hold it, and keeps nothing open: no handle; the
+//! frontend keeps the descriptor as long as it likes and reads it with [`read_file`].
+//! [`Core::readdir_after`] lists a directory from the last inode a client saw. FUSE's opens and
+//! handles stay in `core.rs` and `core/adopt.rs`.
 
 use std::fs::File;
 use std::os::unix::fs::FileExt as _;

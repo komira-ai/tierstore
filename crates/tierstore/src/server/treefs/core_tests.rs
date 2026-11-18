@@ -2,8 +2,9 @@
 //! lookups, listings and opens below a tree's root, the failures an open records, and the tree
 //! leaving memory when nothing holds it.
 
+use std::os::unix::fs::MetadataExt as _;
 use std::sync::Arc;
-use std::time::Duration;
+use std::time::{Duration, SystemTime};
 
 use super::{AttachError, Attr, Core, DirItem, Entry, Errno, Failure, Kind, Looked, TREE_TTL};
 use crate::server::treefs::ino;
@@ -753,6 +754,66 @@ fn the_pins_of_two_opens_are_asked_at_once_and_an_open_of_a_pinned_blob_waits_fo
     for fh in handles.into_iter().chain([pinned, again]) {
         core.release(fh);
     }
+}
+
+/// Every name in the runtime directory of `rig` with its inode and modification time, and the
+/// directory's own modification time: a file written, or replaced by a rename, changes it.
+fn runtime_state(rig: &Rig) -> (Vec<(String, u64, SystemTime)>, SystemTime) {
+    let mut names: Vec<_> = std::fs::read_dir(&rig.runtime)
+        .unwrap()
+        .map(|entry| {
+            let entry = entry.unwrap();
+            let meta = entry.metadata().unwrap();
+            let name = entry.file_name().into_string().unwrap();
+            (name, meta.ino(), meta.modified().unwrap())
+        })
+        .collect();
+    names.sort();
+    let dir = std::fs::metadata(&rig.runtime).unwrap().modified().unwrap();
+    (names, dir)
+}
+
+/// Asserts that the first opens of four different blobs, from four threads, are all inside their
+/// pin at once, past their fill, with none finished (a lock shared by the opens and held to their
+/// end would let one through at a time); and that those opens and their last releases, also from
+/// four threads, write nothing to the runtime directory: no table of opens is rewritten at a first
+/// open or a last release under a lock every open shares.
+#[test]
+fn first_opens_and_last_releases_of_different_blobs_run_at_once_and_write_nothing() {
+    let rig = attached("tfs-core-opens-at-once");
+    let core = &rig.core;
+    let before = runtime_state(&rig);
+    rig.upstream.gate_pins();
+    let blobs = [1, 3, 4, 7];
+    let opening: Vec<_> = blobs
+        .into_iter()
+        .map(|index| {
+            let core = Arc::clone(core);
+            std::thread::spawn(move || open_cached(&core, ino::of(1, index), false).unwrap())
+        })
+        .collect();
+    until(|| rig.upstream.pins_received() == blobs.len());
+    assert_eq!(core.open_files(), 0);
+    rig.upstream.permit_pins(blobs.len());
+    let handles: Vec<u64> = opening
+        .into_iter()
+        .map(|thread| thread.join().unwrap())
+        .collect();
+    assert_eq!(rig.upstream.most_pins(), blobs.len());
+    assert_eq!(core.open_files(), blobs.len());
+    let releasing: Vec<_> = handles
+        .into_iter()
+        .map(|fh| {
+            let core = Arc::clone(core);
+            std::thread::spawn(move || core.release(fh))
+        })
+        .collect();
+    for thread in releasing {
+        thread.join().unwrap();
+    }
+    assert_eq!(core.open_files(), 0);
+    assert_eq!(runtime_state(&rig), before);
+    assert!(!rig.runtime.join("backing").exists());
 }
 
 /// Asserts that an attach whose attachments file cannot be written takes back only the attachment

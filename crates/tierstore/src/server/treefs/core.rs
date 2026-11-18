@@ -35,7 +35,7 @@ use crate::tree_manifest::{BlobSource, EntryKind, TreeDigest, TreeEntry};
 
 use super::attach::{Attachments, Failure, is_run};
 #[cfg(any(target_os = "linux", test))]
-use super::backing::{self, Backing, BackingTable, Registrar};
+use super::backing::{Adopted, Guard};
 use super::fill_client::FillClient;
 #[cfg(any(target_os = "linux", test))]
 use super::handle;
@@ -147,12 +147,9 @@ enum Handle {
     Empty,
     /// The cache file of a blob, or the span of a pack that a file of a placed tree is.
     Cached(FileBytes),
-    /// The cache file of a blob that got no backing id because `fs.max_backing_ids` were live; the
-    /// release is counted on the blob in the backing table.
-    Spilled(FileBytes, TreeDigest),
-    /// A blob served by kernel passthrough: reads never reach this process, and the release is
-    /// counted on the blob's backing id.
-    Backed(TreeDigest),
+    /// A blob the kernel reads itself, from the backing id an earlier release registered on this
+    /// connection (`backing.rs`): reads never reach this process.
+    Adopted,
 }
 
 /// What an open is answered with.
@@ -161,12 +158,13 @@ enum Handle {
 pub(super) enum Opened {
     /// A cached open: the page cache is kept, and every read it misses reaches [`Core::read`].
     Cached(u64),
-    /// An open served by passthrough from the blob's backing id.
-    Backed {
+    /// An open of a blob that has a backing id from an earlier release (`backing.rs`): answered
+    /// with that id.
+    Adopted {
         /// The handle of the open.
         fh: u64,
-        /// The id to answer with.
-        backing: Backing,
+        /// The frontend's handle on the id.
+        id: Guard,
     },
 }
 
@@ -211,9 +209,6 @@ pub(super) struct Settings {
     pub mountpoint: PathBuf,
     /// The id of this mount, which the pins are made under.
     pub mount_id: String,
-    /// The most backing ids the kernel is given at once (`fs.max_backing_ids`).
-    #[cfg(any(target_os = "linux", test))]
-    pub max_backing_ids: usize,
     /// How many processes have served this connection, this one included (`init_record`): in the
     /// numbers of the file handles this core gives out.
     #[cfg(any(target_os = "linux", test))]
@@ -257,15 +252,13 @@ pub(in crate::server) struct Core {
     /// The end of the channel the thread that detaches idle trees waits on: dropped with the
     /// core, which ends the thread (`core/implicit.rs`).
     sweeper: Mutex<Option<mpsc::Sender<()>>>,
-    /// The backing table, once the kernel offered passthrough and it was chosen.
+    /// The backing ids an earlier release left on the connection, where this process took over
+    /// one that has them (`backing.rs`). Set once, before the first request; read with no lock.
     #[cfg(any(target_os = "linux", test))]
-    backing: OnceLock<Arc<BackingTable>>,
+    adopted: OnceLock<Adopted>,
     /// The put directory the frontend serves as `put/`, where `fs.put` is enabled.
     #[cfg(any(target_os = "linux", test))]
     put: OnceLock<Arc<PutSpace>>,
-    /// Where the backing table is kept.
-    #[cfg(any(target_os = "linux", test))]
-    backing_file: PathBuf,
     #[cfg(any(target_os = "linux", test))]
     handles: Mutex<HashMap<u64, Arc<Handle>>>,
     #[cfg(any(target_os = "linux", test))]
@@ -299,11 +292,9 @@ impl Core {
             reads: Reads::default(),
             sweeper: Mutex::new(None),
             #[cfg(any(target_os = "linux", test))]
-            backing: OnceLock::new(),
+            adopted: OnceLock::new(),
             #[cfg(any(target_os = "linux", test))]
             put: OnceLock::new(),
-            #[cfg(any(target_os = "linux", test))]
-            backing_file: runtime_dir.join(backing::FILE),
             #[cfg(any(target_os = "linux", test))]
             handles: Mutex::new(HashMap::new()),
             #[cfg(any(target_os = "linux", test))]
@@ -699,21 +690,15 @@ impl Core {
     /// does not hold it. A fill that fails fails the open (`Errno::Io`) and is recorded on the
     /// attachments of the tree.
     ///
-    /// Where passthrough was chosen (`Core::enable_passthrough`), a non-empty file is answered
-    /// with its blob's backing id: the live one, or one that `register` makes from the cache
-    /// file. Otherwise, for an empty file, and for a blob that has no id when `fs.max_backing_ids`
-    /// are live, the open is a cached one.
+    /// Every open is a cached one, but that of a blob an earlier release registered a backing id
+    /// for on this connection (`Core::adopt_backing`), which is answered with that id. No lock the
+    /// opens of other files take is held across a fill or a pin.
     ///
     /// # Errors
     /// [`Errno::RoFs`] for an open for writing, [`Errno::IsDir`] for a directory, [`Errno::Inval`]
-    /// for a link, [`Errno::Io`] for a blob that cannot be had or an id that cannot be registered.
+    /// for a link, [`Errno::Io`] for a blob that cannot be had.
     #[cfg(any(target_os = "linux", test))]
-    pub(super) fn open(
-        &self,
-        ino: u64,
-        writing: bool,
-        register: &mut Registrar<'_>,
-    ) -> Result<Opened, Errno> {
+    pub(super) fn open(&self, ino: u64, writing: bool) -> Result<Opened, Errno> {
         #[cfg(test)]
         self.note("open");
         if writing {
@@ -726,8 +711,8 @@ impl Core {
         let loaded = self.tree(number)?;
         let entry = loaded.tree.entry(index).ok_or(Errno::NoEnt)?;
         // A file of a placed tree is a span of a pack: never opened by passthrough.
-        let backing = self
-            .backing
+        let adopted = self
+            .adopted
             .get()
             .filter(|_| loaded.tree.location().is_none());
         let handle = match &entry.kind {
@@ -740,10 +725,13 @@ impl Core {
                 source,
                 ..
             } => {
-                let blob = (digest, *size, source.as_ref());
-                if let Some(table) = backing {
-                    return self.open_backed(table, (&loaded, number, &entry), blob, register);
+                if let Some(id) = adopted.and_then(|adopted| adopted.get(digest)) {
+                    self.pin_once((&loaded, number), digest);
+                    let fh = self.new_handle(Handle::Adopted);
+                    let id = Arc::clone(id);
+                    return Ok(Opened::Adopted { fh, id });
                 }
+                let blob = (digest, *size, source.as_ref());
                 Handle::Cached(self.blob(&loaded, number, &entry, blob)?)
             }
         };
@@ -754,11 +742,7 @@ impl Core {
     #[cfg(any(target_os = "linux", test))]
     fn new_handle(&self, handle: Handle) -> u64 {
         let count = self.next_handle.fetch_add(1, Ordering::AcqRel);
-        let fh = handle::make(
-            self.settings.generation,
-            count,
-            matches!(handle, Handle::Backed(_)),
-        );
+        let fh = handle::make(self.settings.generation, count);
         let _ = locked(&self.handles).insert(fh, Arc::new(handle));
         fh
     }
@@ -864,10 +848,10 @@ impl Core {
             .cloned()
             .ok_or(Errno::Inval)?;
         let bytes = match handle.as_ref() {
-            Handle::Cached(bytes) | Handle::Spilled(bytes, _) => bytes,
+            Handle::Cached(bytes) => bytes,
             Handle::Empty => return Ok(Vec::new()),
             // The kernel reads a passthrough file itself: a request for one is a fault.
-            Handle::Backed(_) => return Err(Errno::Io),
+            Handle::Adopted => return Err(Errno::Io),
         };
         bytes.read(offset, size as usize)
     }
@@ -875,12 +859,7 @@ impl Core {
     /// Closes the open file `fh`.
     #[cfg(any(target_os = "linux", test))]
     pub(super) fn release(&self, fh: u64) {
-        let handle = locked(&self.handles).remove(&fh);
-        if let (Some(Handle::Backed(blob) | Handle::Spilled(_, blob)), Some(table)) =
-            (handle.as_deref(), self.backing.get())
-        {
-            table.release(blob);
-        }
+        let _ = locked(&self.handles).remove(&fh);
     }
 
     /// The number of files open now.
@@ -914,8 +893,6 @@ fn path_of(tree: &Tree, index: u32) -> String {
 mod adopt;
 mod implicit;
 mod memory;
-#[cfg(any(target_os = "linux", test))]
-mod passthrough;
 mod placed;
 mod prefetch;
 mod read;

@@ -555,6 +555,13 @@ so that its dentries and inodes are shared across actions (6.7).
 
 ### 6.4 Opens: lazy fetch and passthrough
 
+**Passthrough was removed after tierstore 0.3.121** ([fetch-cache-serve.md](fetch-cache-serve.md)): a file of a placed tree is a
+span of a pack, which passthrough cannot serve, and the backing table of 7.1, rewritten under one lock at every first open and
+last release, held every open of a loaded node behind it. Every open is now a cached open (`FOPEN_KEEP_CACHE`) and no `INIT` asks
+for passthrough. Because of the `EIO` rule below, a process that takes over a connection that a release up to 0.3.121 answered
+with passthrough still answers the opens of the blobs in that release's `backing` file with their ids, read once and never
+closed (`crates/tierstore/docs/operations.md`). The rest of this section and of 7.1 records the design as it was built.
+
 The kernel's rules for passthrough (`fs/fuse/iomode.c` and `fs/fuse/passthrough.c` at v6.17 [S2]) decide the Linux half
 of this section: an inode with an open passthrough file is bound to that one backing file, and a passthrough open with
 another backing id fails `EBUSY`; a non-passthrough open of an inode with a backing file fails `EIO`; a passthrough open

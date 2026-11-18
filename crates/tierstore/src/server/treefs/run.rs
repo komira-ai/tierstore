@@ -136,8 +136,8 @@ fn check_cache(path: &Path) -> Result<(), StartError> {
 }
 
 /// What a process that takes over a connection reads before it takes it: the record of the `INIT`
-/// handshake (with the generation this process will have), the backing ids the process before
-/// registered, and the table of tree numbers. Nothing is changed by reading it, so a failure
+/// handshake (with the generation this process will have), the backing ids an earlier release
+/// registered on the connection (`backing.rs`), and the table of tree numbers. Nothing is changed by reading it, so a failure
 /// leaves the process before in charge.
 pub(super) struct Prepared {
     record: Record,
@@ -328,9 +328,8 @@ impl Running {
         Ok((parts.serving.device()?, parts.control.listener_fd()?))
     }
 
-    /// Stops answering for a hand-over: the control socket stops, the readers answer the request
-    /// each holds and stop, and the backing table is written with its counts exact. Blocks until
-    /// then.
+    /// Stops answering for a hand-over: the control socket stops, and the readers answer the
+    /// request each holds and stop. Blocks until then.
     pub(super) fn quiesce(&self) {
         let mut parts = locked(&self.parts);
         parts.control.pause();
@@ -338,7 +337,6 @@ impl Running {
         // From here the successor numbers trees and owns the pins of this mount: no idle tree is
         // detached (an unpin of a tree the successor pinned again) until a resume.
         self.core.hold(true);
-        self.core.write_backing_exact();
         hand_put(&self.core, &self.settings.runtime_dir);
     }
 
@@ -357,16 +355,12 @@ impl Running {
         }
         self.core.hold(false);
         parts.serving.restart(&self.core, &self.settings)?;
-        // The counts written exact at the pause are a lower bound again once opens go on.
-        self.core.write_backing_inexact();
         parts.control.resume()
     }
 
-    /// The mount is the successor's: the control socket's file is its too, and is not removed, and
-    /// the backing ids are its too: they stay open in the kernel when this process ends.
+    /// The mount is the successor's: the control socket's file is its too, and is not removed.
     pub(super) fn give_up(&self) {
         locked(&self.parts).control.leave_path();
-        self.core.abandon_backing();
     }
 
     /// Ends the process's service of the mount and leaves the mount for the service manager's
@@ -374,11 +368,7 @@ impl Running {
     /// unmounted.
     pub(super) fn leave(self) {
         locked(&self.parts).serving.stop_reading();
-        // The successor of a restart adopts the ids, and trusts the counts of a line that says
-        // they are exact; the ids must stay open in the kernel when this process's table goes.
-        self.core.write_backing_exact();
         hand_put(&self.core, &self.settings.runtime_dir);
-        self.core.abandon_backing();
     }
 
     /// Unmounts and waits for the threads of the mount to end. A mount this process did not make

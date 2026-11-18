@@ -31,11 +31,10 @@
 //! [`core::Core::blob_file`] and no count, so that a tree leaves memory when it is detached (a
 //! protocol with no open and no forget, as NFS).
 //!
-//! Two modes, chosen at start from what the kernel's `INIT` offers (`fuse`): with passthrough
-//! (kernel 6.9 and later, `CAP_SYS_ADMIN`, `fs.passthrough` not false) every non-empty file is
-//! opened by the kernel from the cache file, under one backing id per blob (`backing`); without,
-//! the mode of kernel 6.8: cached opens, and every read the page cache misses is answered by
-//! `pread` of the cache file.
+//! Every open is a cached open: every read the page cache misses is answered by a `pread` of the
+//! cache file, or of the span of the pack a file of a placed tree is. There is no passthrough; a
+//! process that takes over a connection an earlier release answered with passthrough answers the
+//! opens of the blobs that release registered a backing id for with that id (`backing`).
 
 mod attach;
 #[cfg(any(target_os = "linux", test))]

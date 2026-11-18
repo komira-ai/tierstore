@@ -19,7 +19,7 @@ use std::sync::mpsc::{Receiver, channel};
 
 use fuser::{BackgroundSession, InitFlags, InitOutcome, Session, SessionStopper};
 
-use super::backing::{Guard, Saved};
+use super::backing::{self, Guard, Saved};
 use super::config::FsSettings;
 use super::core::Core;
 use super::fuse::{self, Frontend};
@@ -42,9 +42,9 @@ pub(super) struct Serving {
 }
 
 /// A frontend over `core`, and the channel it tells when the session ends.
-fn frontend(core: &Arc<Core>, settings: &FsSettings) -> (Frontend, Receiver<()>) {
+fn frontend(core: &Arc<Core>) -> (Frontend, Receiver<()>) {
     let (ended, hear) = channel();
-    let frontend = Frontend::new(Arc::clone(core), settings.passthrough).telling(ended);
+    let frontend = Frontend::new(Arc::clone(core)).telling(ended);
     (frontend, hear)
 }
 
@@ -54,7 +54,7 @@ impl Serving {
     /// # Errors
     /// What the system said when the mount, the handshake or the threads fail.
     pub(super) fn mount(core: &Arc<Core>, settings: &FsSettings) -> io::Result<Self> {
-        let (frontend, ended) = frontend(core, settings);
+        let (frontend, ended) = frontend(core);
         let config = fuse::config(settings.threads, settings.allow_other);
         let session = Session::new(frontend, &settings.mountpoint, &config)?;
         let outcome = session
@@ -63,9 +63,10 @@ impl Serving {
         Self::start(session, ended, (outcome, true), false)
     }
 
-    /// Serves the connection of `device`, which the kernel set up with `outcome`. Where the
-    /// connection has passthrough, the core takes over `saved`, the backing ids of the process
-    /// before this one; `None` leaves the core's table as it is (it already has the ids). With
+    /// Serves the connection of `device`, which the kernel set up with `outcome`. Where an earlier
+    /// release answered the connection's `INIT` with passthrough, the core answers the opens of the
+    /// blobs of `saved` with the backing ids that release registered (`backing.rs`); `None` leaves
+    /// the core as it is (it already has them, if there are any). With
     /// `resend`, where the connection can, the kernel is asked to send again the requests the
     /// process before read and did not answer: before the first reader starts, since the kernel
     /// puts back every request that is being processed, those the new readers have taken too.
@@ -79,13 +80,13 @@ impl Serving {
         outcome: InitOutcome,
         (saved, resend): (Option<&[Saved]>, bool),
     ) -> io::Result<Self> {
-        let (frontend, ended) = frontend(core, settings);
+        let (frontend, ended) = frontend(core);
         let config = fuse::config(settings.threads, settings.allow_other);
         let session = Session::from_fd_initialized(frontend, device, config.acl, config, outcome);
         if let (Some(saved), true) = (saved, outcome.flags.contains(InitFlags::FUSE_PASSTHROUGH)) {
             let notifier = session.notifier();
             let wrap = move |id| -> Guard { Arc::new(notifier.backing_id_from_raw(id)) };
-            core.adopt_passthrough(saved, &wrap);
+            core.adopt_backing(&settings.runtime_dir.join(backing::FILE), saved, &wrap);
         }
         let resend_failed = resend
             && outcome.flags.contains(InitFlags::FUSE_HAS_RESEND)

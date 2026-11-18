@@ -503,7 +503,7 @@ impl PutSpace {
         let (id, attr) = self.store.find(&dir, name).ok_or(Errno::NOENT)?;
         let mut state = locked(&self.state);
         state.opens += 1;
-        let fh = handle::make(self.generation, state.opens, false);
+        let fh = handle::make(self.generation, state.opens);
         let _ = state.handles.insert(fh, handle);
         Ok((self.file_attr(id, attr), fh))
     }

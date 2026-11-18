@@ -11,7 +11,7 @@ use super::init_record::{self, Record, RecordError};
 use super::ino;
 use super::run::{Prepared, Running};
 use super::start::StartError;
-use super::testing::{FakeKernel, Rig, sample, sha};
+use super::testing::{Rig, sample, sha};
 
 /// The rig and its settings, with the record the process that mounted left.
 fn left_behind(name: &str, resend: bool) -> (Rig, FsSettings) {
@@ -233,73 +233,65 @@ fn a_takeover_that_cannot_read_the_state_says_what_and_serves_nothing() {
     assert!(error.to_string().contains("fs.cache_path"), "{error}");
 }
 
-/// Asserts that the table of backing ids the process before wrote is adopted where the connection
-/// has passthrough, and left alone where it does not.
-#[test]
-fn the_backing_ids_of_the_process_before_are_adopted_where_the_connection_has_passthrough() {
-    let (rig, settings) = left_behind("tfs-rec-backing", false);
-    let table = format!("{} 7 2 exact\n{} 8 1\n", sha(b"tool bytes"), sha(b"int a;"));
-    std::fs::write(rig.runtime.join("backing"), &table).unwrap();
-    let (device, _kernel) = fakedev::pair();
-    let plain = adopt(&settings, device, false);
-    assert!(plain.core().backing_table().is_none());
-    drop(plain);
-
+/// Writes the record of a connection whose `INIT` an earlier release answered with passthrough,
+/// and the file of the ids it kept.
+fn with_passthrough(rig: &Rig, table: &str) {
     let mut with = Record::first(fakedev::outcome(false), "mount-1".to_owned());
     with.outcome.flags |= InitFlags::FUSE_PASSTHROUGH;
     with.outcome.capabilities |= InitFlags::FUSE_PASSTHROUGH;
     with.outcome.max_stack_depth = 1;
     init_record::write(&rig.runtime, &with).unwrap();
+    std::fs::write(rig.runtime.join(backing::FILE), table).unwrap();
+}
+
+/// Asserts that the backing ids an earlier release kept are adopted where the connection has
+/// passthrough, the file written again with no count marked exact; and that where the connection
+/// has none they are not, and the file is left as it is.
+#[test]
+fn the_backing_ids_of_an_earlier_release_are_adopted_where_the_connection_has_passthrough() {
+    let (rig, settings) = left_behind("tfs-rec-backing", false);
+    let table = format!("{} 7 2 exact\n{} 8 1\n", sha(b"tool bytes"), sha(b"int a;"));
+    std::fs::write(rig.runtime.join(backing::FILE), &table).unwrap();
+    let (device, _kernel) = fakedev::pair();
+    let plain = adopt(&settings, device, false);
+    assert_eq!(plain.core().adopted_ids(), 0);
+    assert_eq!(
+        std::fs::read_to_string(rig.runtime.join(backing::FILE)).unwrap(),
+        table
+    );
+    drop(plain);
+
+    with_passthrough(&rig, &table);
     let (device, _kernel) = fakedev::pair();
     let backed = adopt(&settings, device, false);
-    assert_eq!(backed.core().backing_table().unwrap().live(), 2);
-    // The table was written again as it was read.
-    let kept = std::fs::read_to_string(rig.runtime.join("backing")).unwrap();
-    assert_eq!(kept.lines().count(), 2);
-    assert!(kept.contains(" 7 2"), "{kept}");
+    assert_eq!(backed.core().adopted_ids(), 2);
+    let kept = std::fs::read_to_string(rig.runtime.join(backing::FILE)).unwrap();
+    let mut want = [
+        format!("{} 7 2\n", sha(b"tool bytes")),
+        format!("{} 8 1\n", sha(b"int a;")),
+    ];
+    want.sort();
+    assert_eq!(kept, want.concat());
 }
 
-/// The process of `left_behind`, over a connection that has passthrough with the ids of `table`
-/// adopted, and the file of the ids as the process before left it.
-fn with_ids(name: &str, table: &str) -> (Running, Rig, FakeKernel) {
-    let (rig, settings) = left_behind(name, false);
-    std::fs::write(rig.runtime.join("backing"), table).unwrap();
+/// Asserts that a process that serves adopted ids writes the file of them at no pause, resume or
+/// leave, and keeps the ids through a hand-over that does not complete: the ids are the
+/// connection's, and the file is the one the next process reads.
+#[test]
+fn a_pause_a_resume_and_a_leave_write_no_backing_table_and_keep_the_ids() {
+    let (rig, settings) = left_behind("tfs-rec-leave", false);
+    let table = format!("{} 7 2\n", sha(b"tool bytes"));
+    with_passthrough(&rig, &table);
     let (device, _kernel) = fakedev::pair();
     let running = adopt(&settings, device, false);
-    let kernel = FakeKernel::new();
-    let saved = backing::saved(&rig.runtime.join("backing")).unwrap();
-    running
-        .core()
-        .adopt_passthrough(&saved, &|id| kernel.wrap(id));
-    (running, rig, kernel)
-}
-
-/// Asserts that a process that leaves the connection at a signal writes the counts of the backing
-/// table exact (so that its successor closes the ids when the last open of each is released), and
-/// closes no id.
-#[test]
-fn a_process_that_leaves_the_connection_writes_the_counts_exact_and_closes_no_id() {
-    let table = format!("{} 7 2 exact\n", sha(b"tool bytes"));
-    let (running, rig, kernel) = with_ids("tfs-rec-leave", &table);
-    running.leave();
-    let kept = std::fs::read_to_string(rig.runtime.join("backing")).unwrap();
-    assert_eq!(kept, table);
-    assert!(super::locked(&kernel.closed).is_empty());
-}
-
-/// Asserts that a hand-over which does not complete, after the counts were written exact, writes
-/// the table again with no mark: the process serves on, and its successor after a crash must not
-/// trust the counts.
-#[test]
-fn a_hand_over_that_does_not_complete_leaves_the_counts_unmarked() {
-    let table = format!("{} 7 2 exact\n", sha(b"tool bytes"));
-    let (running, rig, _kernel) = with_ids("tfs-rec-resumed", &table);
+    let file = || std::fs::read_to_string(rig.runtime.join(backing::FILE)).unwrap();
     running.quiesce();
-    let paused = std::fs::read_to_string(rig.runtime.join("backing")).unwrap();
-    assert!(paused.ends_with(" exact\n"), "{paused}");
+    assert_eq!(file(), table);
     running.resume().unwrap();
-    let kept = std::fs::read_to_string(rig.runtime.join("backing")).unwrap();
-    assert!(!kept.contains("exact"), "{kept}");
+    assert_eq!(file(), table);
+    assert_eq!(running.core().adopted_ids(), 1);
+    running.leave();
+    assert_eq!(file(), table);
 }
 
 /// Asserts that a takeover asks nothing of the mount point: it is the live mount, whose root the
