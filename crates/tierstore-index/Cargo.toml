@@ -1,0 +1,26 @@
+[package]
+name = "tierstore-index"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+repository.workspace = true
+publish.workspace = true
+description = "A storage node's key index and block table (docs/design/fetch-cache-serve.md 10.2, T-S3): the Index of tierstore-store-api in an embedded ordered store (fjall, or redb as the measured alternative), the liveness rule, the replay mark and replay, the tombstone log and its drop rule, recovery from segments, trailers, blk/*.idx files and cold shard trailers, index-sync, the LIST merge with prefix seek, and per-block live counts."
+
+[dependencies]
+# The embedded ordered stores behind the `Backend` trait.
+fjall.workspace = true
+redb.workspace = true
+thiserror.workspace = true
+# The record, trailer, footer, descriptor, tomb log and name formats this crate reads and writes.
+tierstore-format.workspace = true
+# The frozen `Index` trait and its types.
+tierstore-store-api.workspace = true
+
+[dev-dependencies]
+# Scratch directories for the stores of the fjall and redb tests.
+tierstore-testkit.workspace = true
+
+[lints]
+workspace = true
