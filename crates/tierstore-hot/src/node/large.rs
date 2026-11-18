@@ -361,25 +361,31 @@ pub(crate) async fn put_file<B: Backend + 'static>(
         });
     }
     let stream = async {
-        while let Some(piece) = body.next().await {
-            let bytes = piece.map_err(io_err("large body"))?;
-            n.feed_upload(&mut up, &bytes).await?;
-            tee(n, nonce, &mut outs, &LargeChunk::Data(bytes)).await;
+        let streamed = async {
+            while let Some(piece) = body.next().await {
+                let bytes = piece.map_err(io_err("large body"))?;
+                n.feed_upload(&mut up, &bytes).await?;
+                tee(n, nonce, &mut outs, &LargeChunk::Data(bytes)).await;
+            }
+            if size.is_some_and(|s| s != up.size) {
+                return Err(io_err("large body")(std::io::Error::new(
+                    std::io::ErrorKind::UnexpectedEof,
+                    "the body is not its Content-Length",
+                )));
+            }
+            let generation = up.hasher.finish();
+            let header = up.header(generation, stamp, &key);
+            n.finish_upload(&mut up, header).await?;
+            tee(n, nonce, &mut outs, &LargeChunk::Trailer(generation)).await;
+            Ok(generation)
         }
-        if size.is_some_and(|s| s != up.size) {
-            return Err(io_err("large body")(std::io::Error::new(
-                std::io::ErrorKind::UnexpectedEof,
-                "the body is not its Content-Length",
-            )));
-        }
-        let generation = up.hasher.finish();
-        let header = up.header(generation, stamp, &key);
-        n.finish_upload(&mut up, header).await?;
-        tee(n, nonce, &mut outs, &LargeChunk::Trailer(generation)).await;
+        .await;
+        // Whether the body ended or failed, the replica streams end with it: a replica that got
+        // no trailer abandons its copy, and the PUT does not wait for it forever.
         for out in &mut outs {
             out.tx = None;
         }
-        Ok(generation)
+        streamed
     };
     let (streamed, answers) = futures::join!(stream, join_all(calls));
     n.lock().large.remove(&nonce);
@@ -427,18 +433,24 @@ pub(crate) async fn put_file<B: Backend + 'static>(
             holders.push(target);
         }
     }
+    // The create-only check comes first: a used key answers 412 even when the replicas, which
+    // hold the other bytes too, refused the copy and left the PUT short.
+    let commit = match n.large_check(&key, generation, stamp) {
+        Ok(commit) => commit,
+        Err(e) => {
+            n.unlink(&up.path).await;
+            return Err(e);
+        }
+    };
     let copies = 1 + holders.len();
     if copies < usize::from(n.cfg.min_acks) {
         n.unlink(&up.path).await;
         return Err(unavailable(Unavailable::TooFewCopies));
     }
-    match n.large_check(&key, generation, stamp) {
-        Ok(true) => n.commit_large(&up.path, &key, file, stamp).await?,
-        Ok(false) => n.unlink(&up.path).await,
-        Err(e) => {
-            n.unlink(&up.path).await;
-            return Err(e);
-        }
+    if commit {
+        n.commit_large(&up.path, &key, file, stamp).await?;
+    } else {
+        n.unlink(&up.path).await;
     }
     Ok(Acked {
         generation,

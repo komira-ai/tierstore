@@ -39,7 +39,9 @@ use tierstore_index::blocks::{BlockInfo, BlockState};
 use tierstore_store_api::hot::{
     Acked, AppendRecord, HotError, ReplicaBatch, SealReason, Unavailable,
 };
-use tierstore_store_api::index::{EntryLocation, Index, IndexEntry, IndexError, Lookup};
+use tierstore_store_api::index::{
+    EntryLocation, Index, IndexEntry, IndexError, Lookup, PutOutcome,
+};
 use tierstore_store_api::proto::ReplicaAnswer;
 use tierstore_store_api::sched::DriveClass;
 use tokio::sync::{oneshot, watch};
@@ -582,8 +584,10 @@ impl<B: Backend + 'static> Node<B> {
                 prior_blocks: Vec::new(),
                 promoted: None,
             };
+            // The key may already hold this very record: an earlier segment of the same PUT,
+            // sealed early, made it visible. The answer then names the entry the index holds.
             let out = match self.index.put_if_absent(&p.rec.key, entry) {
-                Ok(_) => Outcome::Acked(Acked {
+                Ok(PutOutcome::Created) => Outcome::Acked(Acked {
                     generation: p.rec.generation,
                     location: EntryLocation::Block {
                         block: seg.id,
@@ -592,6 +596,18 @@ impl<B: Backend + 'static> Node<B> {
                     length: p.rec.data.len() as u64,
                     copies,
                 }),
+                Ok(PutOutcome::Identical(held)) => Outcome::Acked(Acked {
+                    generation: held.generation,
+                    location: held.location,
+                    length: held.length,
+                    copies,
+                }),
+                Ok(PutOutcome::Conflict(held)) => Outcome::Failed(HotError::Conflict {
+                    existing: held.generation,
+                }),
+                Ok(PutOutcome::Stale(_)) => {
+                    Outcome::Failed(unavailable(Unavailable::NotDefinitive))
+                }
                 Err(e) => Outcome::Failed(other_err("index")(e)),
             };
             acks.push((p.tx, out));

@@ -71,15 +71,25 @@ impl<B: Backend + 'static> HotNode<B> {
                 .map(|(id, _)| *id),
         );
         for seg in &open {
-            let (stalled, written) = {
+            let (silent, stalled, written) = {
                 let s = seg.lock();
-                let stalled = s.links.iter().any(|(node, l)| {
-                    gone.contains(node)
-                        || l.since
+                let silent: Vec<NodeId> = s
+                    .links
+                    .iter()
+                    .filter(|(_, l)| {
+                        l.since
                             .is_some_and(|t| now.saturating_sub(t) >= cfg.replica_stall_ms)
-                });
-                (stalled, s.written)
+                    })
+                    .map(|(node, _)| *node)
+                    .collect();
+                let stalled = !silent.is_empty() || s.links.keys().any(|node| gone.contains(node));
+                (silent, stalled, s.written)
             };
+            // A replica silent for `replica_stall` stays out of the next replica sets for as
+            // long (a `down` or `out` one is out of the view's live nodes already).
+            for node in silent {
+                n.mark_suspect(node);
+            }
             let age = now.saturating_sub(seg.created_ms);
             if stalled {
                 n.roll(seg, Close::Early);
