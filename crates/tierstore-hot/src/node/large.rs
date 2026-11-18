@@ -169,14 +169,13 @@ impl<B: Backend + 'static> Node<B> {
         generation: Generation,
         stamp: tierstore_format::stamp::Stamp,
     ) -> Result<bool, HotError> {
-        match self.index.get(key) {
-            Ok(Lookup::Live(e)) if e.generation == generation => Ok(false),
-            Ok(Lookup::Live(e)) => Err(HotError::Conflict {
+        match self.index.get(key).map_err(other_err("index"))? {
+            Lookup::Live(e) if e.generation == generation => Ok(false),
+            Lookup::Live(e) => Err(HotError::Conflict {
                 existing: e.generation,
             }),
-            Ok(Lookup::Deleted(t)) if t > stamp => Err(unavailable(Unavailable::NotDefinitive)),
-            Ok(_) => Ok(true),
-            Err(e) => Err(other_err("index")(e)),
+            Lookup::Deleted(t) if t > stamp => Err(unavailable(Unavailable::NotDefinitive)),
+            _ => Ok(true),
         }
     }
 
@@ -241,15 +240,17 @@ impl<B: Backend + 'static> Node<B> {
         data_at: u64,
         size: u64,
         generation: Generation,
-    ) -> bool {
-        let Ok(env) = self.env(offer) else {
-            return false;
-        };
+    ) -> Result<bool, HotError> {
+        let env = self.env(offer)?;
         let (mut tx, rx) = mpsc::channel::<LargeChunk>(1);
-        let send = async {
+        // `move`: the sender is dropped when this ends, so a stream cut short ends for the
+        // replica too (it abandons the copy) instead of waiting for chunks that never come.
+        let send = async move {
             let mut at = 0u64;
             while at < size {
-                let Ok(bytes) = self
+                // A file that cannot be read, or is shorter than it should be, ends the stream
+                // without its trailer: the replica abandons the copy.
+                let Some(bytes) = self
                     .read(
                         DriveClass::Write,
                         path,
@@ -257,23 +258,21 @@ impl<B: Backend + 'static> Node<B> {
                         (CHUNK as u64).min(size - at),
                     )
                     .await
+                    .ok()
+                    .filter(|b| !b.is_empty())
                 else {
                     return;
                 };
-                if bytes.is_empty()
-                    || tx
-                        .send(LargeChunk::Data(Bytes::from(bytes.clone())))
-                        .await
-                        .is_err()
-                {
+                let len = bytes.len() as u64;
+                if tx.send(LargeChunk::Data(Bytes::from(bytes))).await.is_err() {
                     return;
                 }
-                at += bytes.len() as u64;
+                at += len;
             }
             let _ = tx.send(LargeChunk::Trailer(generation)).await;
         };
         let (_, answer) = futures::join!(send, self.peers.put_large(node, env, rx.boxed()));
-        matches!(answer.map(|a| a.body), Ok(LargeAnswer::Committed))
+        Ok(matches!(answer.map(|a| a.body), Ok(LargeAnswer::Committed)))
     }
 }
 
@@ -307,9 +306,12 @@ async fn tee<B: Backend + 'static>(n: &Node<B>, nonce: u64, outs: &mut [Out], ch
                 }
             }
         };
-        if let Some(t) = n.lock().large.get_mut(&nonce) {
-            t.blocked.remove(&out.node);
-        }
+        n.lock()
+            .large
+            .entry(nonce)
+            .or_default()
+            .blocked
+            .remove(&out.node);
         if !sent {
             out.tx = None;
         }
@@ -428,7 +430,7 @@ pub(crate) async fn put_file<B: Backend + 'static>(
             up.size,
             generation,
         )
-        .await
+        .await?
         {
             holders.push(target);
         }
