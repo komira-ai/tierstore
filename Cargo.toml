@@ -39,6 +39,11 @@ crc = "3.4.0"
 crc32c = "0.6.8"
 crc32fast = "1.5.2"
 futures = "0.3.34"
+# The embedded ordered store of a storage node's key index and block table (tierstore-index,
+# docs/design/fetch-cache-serve.md 10.2): an LSM-tree, with its journal persisted only at the
+# replay mark. MIT OR Apache-2.0; two of its dependencies are BSL-1.0 and 0BSD (deny.toml names
+# them as exceptions).
+fjall = "3.1.13"
 # The FUSE protocol of `tierstore fs` (Linux only; the crate's `server` feature). It mounts as
 # root through mount(2), and as another user through `fusermount3`. MIT.
 # This is `fuser` 0.18.0 plus two commits, on the branch `komira-0.18-resume` of our fork: a session
@@ -80,6 +85,9 @@ prost-types = "0.14.1"
 protox = "0.10.0"
 # Test certificates only. ring is the crypto provider the rustls below uses too.
 rcgen = { version = "0.14", default-features = false, features = ["crypto", "pem", "ring"] }
+# The measured alternative to fjall behind the same `Index` (tierstore-index, 10.2): a
+# copy-on-write B-tree. MIT OR Apache-2.0.
+redb = "4.6.0"
 # Plain HTTP only: TLS brings a crypto provider, added with the first TLS endpoint.
 reqwest = { version = "0.13.5", default-features = false }
 ring = "0.17.14"
