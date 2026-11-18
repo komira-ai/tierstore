@@ -9,9 +9,10 @@ use tierstore_fetch_api::clock::Clock;
 /// `verify` that finds the pool full waits: that wait is the receive pause.
 pub const QUEUE_CELLS: usize = 32;
 
-/// The most of [`QUEUE_CELLS`] that `recheck` cells may hold [D]. Half the bound: a recheck
-/// sweep alone never fills the pool, so it never pauses a fill's receive, and it still keeps
-/// every thread busy when no fill is waiting.
+/// The most of [`QUEUE_CELLS`] that `recheck` cells may hold [D]. Half the bound: whatever a
+/// recheck sweep does, fills keep at least the other 16 slots (a sweep cannot fill the pool on
+/// its own), and a sweep still keeps every thread busy when no fill is waiting. The cost: while a
+/// sweep holds its 16, a 17th fill in the pool waits where it would not without the sweep.
 pub const RECHECK_CELLS: usize = QUEUE_CELLS / 2;
 
 /// A rate in bytes per second.

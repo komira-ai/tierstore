@@ -238,7 +238,7 @@ fn a_waiting_fill_is_handed_the_slot_before_a_recheck_cell_that_waited_longer() 
 }
 
 #[test]
-fn recheck_cells_hold_at_most_half_the_slots_so_they_never_pause_a_fill() {
+fn recheck_cells_hold_at_most_half_the_slots_and_fills_keep_the_other_half() {
     let rig = Rig::new();
     let _rechecks = hold(&rig, 0, RECHECK_CELLS, RECHECK);
     let mut extra = rig.pending(16, RECHECK);

@@ -8,8 +8,9 @@
 //! each cell is judged alone, in any order, before it touches the cache file (3.3). The pool holds
 //! at most [`QUEUE_CELLS`] cells (32 MiB of buffers) at once; a `verify` that finds it full waits,
 //! and that wait is the receive pause of 4.7, which the serving drive's read-ahead buffer and slot
-//! release absorb (10.7). Fills go before `recheck` cells, which hold at most [`RECHECK_CELLS`]
-//! of the slots, so a recheck sweep never pauses a fill.
+//! release absorb (10.7). Fills are hashed and handed freed slots before `recheck` cells,
+//! which hold at most [`RECHECK_CELLS`] of the slots, so fills always keep at least the other
+//! half.
 //!
 //! How many threads: [`hash_threads`] of the node's cache write ceiling and of the core's sha256
 //! rate, which [`measure_core_sha_rate`] measures at startup ([`HashPool::start_measured`] does
