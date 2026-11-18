@@ -180,7 +180,8 @@ impl Provider {
             let why = "tierstore makes read-only trees: the mode must be READ_ONLY";
             return Err(ProviderError::Refused(why.to_owned()));
         }
-        // The first `Prepare` of the run stamps it; a source held already had its run stamped.
+        // The first `Prepare` of the run stamps it; a later one keeps the stamp while the cache
+        // keeps the run (until a release or a sweep of a source of it, or the cache's bound).
         self.shared.cache.run_requested(&id.run_dir());
         let mut sources = self.lock();
         if let Some(held) = sources.get(&id) {

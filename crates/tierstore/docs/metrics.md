@@ -427,6 +427,9 @@ What it does not count:
   once, when the fill socket is away, or when the node is of a release before this one.
 - A tree placed through the trees API rather than the provider.
 
+A report that waits while the fill socket is away (an update of the node's tierstore) ends its
+span when the node takes it, so such a span is longer than the job's real start.
+
 The span is on the node's wall clock: a span across a step of the clock back is 0. Fraction of
 runs within the budget, over a day:
 

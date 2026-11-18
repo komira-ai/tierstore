@@ -315,7 +315,10 @@ impl Core {
         let Some(path) = loaded.tree.location() else {
             return;
         };
-        if !loaded.looked_into.swap(true, Ordering::AcqRel) {
+        // Read first, so that every request after the first only reads the flag.
+        let first = !loaded.looked_into.load(Ordering::Acquire)
+            && !loaded.looked_into.swap(true, Ordering::AcqRel);
+        if first {
             self.fills.report_started(path);
         }
     }
