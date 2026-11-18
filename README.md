@@ -172,8 +172,8 @@ Where the machine has drives for a hot tier of their own, the file can have all 
   [limits](crates/tierstore/docs/limits.md), [metrics](crates/tierstore/docs/metrics.md).
 - [CI and releases](docs/ci-and-release.md).
 - Design documents are in [docs/design](docs/design). The read path of build nodes (per-cell pack fetch, the `tsfuse`
-  mount, and a cold tier on the nodes' own drives) is designed in [fetch-cache-serve.md](docs/design/fetch-cache-serve.md);
-  it is proposed and not built.
+  mount) and the storage tier behind it (a replicated NVMe hot tier and an erasure-coded hard-drive cold tier on storage
+  nodes) are designed in [fetch-cache-serve.md](docs/design/fetch-cache-serve.md); it is proposed and not built.
 - The same guide is on the website under `crates/tierstore/site`.
 
 ## Contributing
