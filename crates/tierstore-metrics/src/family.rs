@@ -196,7 +196,8 @@ pub(crate) fn pair(out: &mut String, name: &str, value: &str) {
 /// [`crate::Histogram`] or [`crate::StateCell`]), one per value of `L`.
 ///
 /// A series is made the first time its labels are used, and the seeded ones (every value of a
-/// closed label, the configured drives and peers) exist from the start, at zero. A series is
+/// closed label, the drives and peers of the configuration of each component that registers
+/// the family) exist from its registration, at zero. A series is
 /// never removed. [`Family::with`] returns the series itself, which a hot path may keep and
 /// update without the family's lock.
 pub struct Family<L: Labels, C: Cell> {
@@ -205,15 +206,18 @@ pub struct Family<L: Labels, C: Cell> {
 }
 
 impl<L: Labels, C: Cell> Family<L, C> {
-    /// The family of `spec`, with a series at zero for each seeded label value.
-    pub(crate) fn new(spec: Spec, seed: &seal::Seed<'_>) -> Self {
-        let series = L::seed_all(seed)
-            .into_iter()
-            .map(|labels| (labels, Arc::new(C::new(&spec))))
-            .collect();
+    /// The family of `spec`, with no series yet.
+    pub(crate) fn new(spec: Spec) -> Self {
         Self {
             spec,
-            series: RwLock::new(series),
+            series: RwLock::new(BTreeMap::new()),
+        }
+    }
+
+    /// Makes a series at zero for each seeded label value that has none yet.
+    pub(crate) fn seed(&self, seed: &seal::Seed<'_>) {
+        for labels in L::seed_all(seed) {
+            let _ = self.with(labels);
         }
     }
 

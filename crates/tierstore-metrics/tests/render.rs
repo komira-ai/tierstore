@@ -9,12 +9,16 @@
 
 use std::thread;
 
+use std::ops::Deref;
+use std::sync::Arc;
 use tierstore_fetch_api::clock::{Clock, ManualClock};
 use tierstore_fetch_api::ids::Class;
 use tierstore_format::ids::DriveId;
 use tierstore_metrics::labels::{BudgetReason, DriveState, FuseOp, SizeClass};
-use tierstore_metrics::{Kind, Metrics, Topology};
-use tierstore_store_api::view::Role;
+
+use tierstore_metrics::{
+    Cache, ColdStoreConfig, Drives, Fetch, FetchEngineConfig, Fuse, Kind, Metrics,
+};
 
 fn drive(n: u8) -> DriveId {
     let mut id = [0; 16];
@@ -22,16 +26,40 @@ fn drive(n: u8) -> DriveId {
     DriveId(id)
 }
 
-fn metrics(version: &'static str) -> Metrics {
-    Metrics::new(&Topology {
-        role: Role::Combined,
-        version,
-        cluster_drives: vec![drive(1)],
-        local_drives: vec![drive(1)],
-        peers: Vec::new(),
-        hot_replicas: 2,
+/// A registry with the fetch engine, the node cache, the FUSE front and a cold store of one
+/// drive, and the families each registered.
+struct Rig {
+    metrics: Metrics,
+    fetch: Arc<Fetch>,
+    cache: Arc<Cache>,
+    fuse: Arc<Fuse>,
+    drives: Arc<Drives>,
+}
+
+impl Deref for Rig {
+    type Target = Metrics;
+
+    fn deref(&self) -> &Metrics {
+        &self.metrics
+    }
+}
+
+fn metrics(version: &'static str) -> Rig {
+    let metrics = Metrics::new(version);
+    let fetch = metrics.fetch_engine(&FetchEngineConfig {
+        drives: vec![drive(1)],
+    });
+    let cold = metrics.cold_store(&ColdStoreConfig {
+        drives: vec![drive(1)],
         codes: Vec::new(),
-    })
+    });
+    Rig {
+        fetch: fetch.fetch,
+        cache: metrics.node_cache().cache,
+        fuse: metrics.fuse_front().fuse,
+        drives: cold.drives,
+        metrics,
+    }
 }
 
 /// The `# HELP`, `# TYPE` and sample lines of the family exported as `name`.
@@ -146,7 +174,7 @@ fn a_duration_from_the_injected_clock_lands_in_its_bucket_under_its_labels() {
 #[test]
 fn a_gauge_writes_each_value_as_the_text_format_reads_it() {
     let m = metrics("v");
-    let value = |m: &Metrics| block(&m.render(), "tierstore_amplification")[2].clone();
+    let value = |m: &Rig| block(&m.render(), "tierstore_amplification")[2].clone();
     for (set, text) in [
         (3.0, "3"),
         (1.5, "1.5"),
@@ -200,7 +228,7 @@ fn a_counter_renders_its_count_with_and_without_labels() {
 #[test]
 fn a_state_set_has_exactly_its_current_state_at_one() {
     let m = metrics("v");
-    let ones = |m: &Metrics| -> Vec<String> {
+    let ones = |m: &Rig| -> Vec<String> {
         block(&m.render(), "tierstore_budget_reason")
             .into_iter()
             .filter(|l| l.ends_with(" 1"))

@@ -1,5 +1,5 @@
-//! The storage side of a node: the hot tier (10.3), and the S3 front, index, audit and migration
-//! (10.2, 10.6, 10.9 to 10.11).
+//! The components of the storage tier that hold and answer for keys: the hot store (10.3), the S3
+//! front (10.2, 10.6, 10.10) and the peer service with its index (10.6, 10.8, 10.9).
 
 use tierstore_format::ids::NodeId;
 
@@ -13,7 +13,7 @@ use crate::{CounterVec, GaugeVec, HistogramVec};
 group! {
     /// The hot tier (10.3): load, replication health and backpressure. `{node}` is a peer of
     /// the node's replica sets.
-    Hot (Storage) {
+    Hot {
         hot_dirty_bytes: GaugeVec<()> = "hot_dirty_bytes",
             "Bytes of the hot tier not yet destaged.";
         hot_fill_ratio: GaugeVec<()> = "hot_fill_ratio",
@@ -56,13 +56,14 @@ group! {
             "Bytes the hot tier reclaimed, by kind.";
         hot_scrub_bad_total: CounterVec<()> = "hot_scrub_bad_total",
             "Hot records a scrub found bad.";
+        store_evicted_bytes_total: CounterVec<()> = "store_evicted_bytes_total",
+            "Bytes evicted in the hot-only evict mode.";
     }
 }
 
 group! {
-    /// The S3 front, the index and its recovery, the live-key audit, and the migration from silo
-    /// (10.2, 10.6, 10.9, 10.10).
-    Front (Storage) {
+    /// The S3 front: PUTs and their copies, LIST, and the imports from silo (10.2, 10.6, 10.10).
+    S3Front {
         store_puts_total: CounterVec<PutOutcome> = "store_puts_total",
             "PUTs, by outcome.";
         store_put_copies_committed: HistogramVec<()> = "store_put_copies_committed",
@@ -74,16 +75,27 @@ group! {
             "PUTs that raced another PUT of the same key.";
         store_key_conflict_total: CounterVec<()> = "store_key_conflict_total",
             "PUTs refused because the key holds other bytes.";
+        store_list_total: CounterVec<()> = "store_list_total",
+            "LIST requests.";
+        store_list_keys_total: CounterVec<()> = "store_list_keys_total",
+            "Keys returned by LIST requests.";
+        import_bytes_total: CounterVec<()> = "import_bytes_total",
+            "Bytes imported from silo on a read.";
+        legacy_mover_bytes_total: CounterVec<()> = "legacy_mover_bytes_total",
+            "Bytes the bulk mover copied from silo.";
+    }
+}
+
+group! {
+    /// The peer service: `LOCATE` answers, the index it reads and its recovery, tombstones, the
+    /// cluster stamp, and the live-key audit (10.6, 10.8, 10.9).
+    Peer {
         store_locate_total: CounterVec<LocateResult> = "store_locate_total",
             "LOCATE requests answered, by result.";
         store_definitive_miss_total: CounterVec<()> = "store_definitive_miss_total",
             "Definitive misses.";
         store_negative_cache_hits_total: CounterVec<()> = "store_negative_cache_hits_total",
             "Misses answered from the negative cache.";
-        store_list_total: CounterVec<()> = "store_list_total",
-            "LIST requests.";
-        store_list_keys_total: CounterVec<()> = "store_list_keys_total",
-            "Keys returned by LIST requests.";
         index_keys: GaugeVec<()> = "index_keys",
             "Keys in the index.";
         index_bytes: GaugeVec<()> = "index_bytes",
@@ -97,15 +109,9 @@ group! {
             "Tombstones not yet dropped.";
         cluster_stamp_wall_skew_seconds: GaugeVec<()> = "cluster_stamp_wall_skew_seconds",
             "The node's cluster stamp minus its wall clock, in seconds.";
-        store_evicted_bytes_total: CounterVec<()> = "store_evicted_bytes_total",
-            "Bytes evicted in the hot-only evict mode.";
         store_audit_live_unreadable_ratio: GaugeVec<()> = "store_audit_live_unreadable_ratio",
             "Fraction of the last audit's sample of live keys that could not be read.";
         store_audit_keys_total: CounterVec<()> = "store_audit_keys_total",
             "Live keys the audit read.";
-        import_bytes_total: CounterVec<()> = "import_bytes_total",
-            "Bytes imported from silo on a read.";
-        legacy_mover_bytes_total: CounterVec<()> = "legacy_mover_bytes_total",
-            "Bytes the bulk mover copied from silo.";
     }
 }

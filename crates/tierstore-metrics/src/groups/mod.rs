@@ -1,4 +1,4 @@
-//! The families of section 12, in groups by the part of tierstore that updates them.
+//! The families of section 12, in groups by the component of tierstore that registers them.
 //!
 //! Each group is declared once, by [`group!`]: a field per family with its type (which fixes its
 //! kind and its labels), its name in section 12, its exported name when that differs from
@@ -7,14 +7,14 @@
 mod client;
 mod cold;
 mod drive;
-mod node;
+mod shared;
 mod store;
 
-pub use client::{Cache, Fetch, Fuse};
+pub use client::{Cache, Fetch, Fuse, Prepare, ReadReply};
 pub use cold::{Cold, Movement};
 pub use drive::Drives;
-pub use node::Node;
-pub use store::{Front, Hot};
+pub use shared::{CopyGeneration, Disks, Durability, Process};
+pub use store::{Hot, Peer, S3Front};
 
 /// The bucket bounds of a duration, in seconds: 0.5 ms to 5 minutes.
 pub(crate) const SECONDS: &[f64] = &[
@@ -58,7 +58,7 @@ macro_rules! group {
     };
     (
         $(#[$meta:meta])*
-        $name:ident ($side:ident) {
+        $name:ident {
             $(
                 $field:ident: $ty:ty = $design:literal $(as $exported:literal)?,
                     $help:literal $(, $buckets:ident)?;
@@ -74,24 +74,23 @@ macro_rules! group {
         }
 
         impl $name {
-            /// The side of the node that renders the group.
-            pub(crate) const SIDE: $crate::topology::Side = $crate::topology::Side::$side;
-
-            /// The group, with the seeded series of each family at zero.
-            pub(crate) fn new(seed: &$crate::family::seal::Seed<'_>) -> Self {
+            /// The group, with no series yet.
+            pub(crate) fn new() -> Self {
                 Self {
                     $(
-                        $field: <$ty>::new(
-                            $crate::family::Spec {
-                                design: $design,
-                                name: $crate::groups::group!(@name $design $(, $exported)?),
-                                help: $help,
-                                buckets: $crate::groups::group!(@buckets $($buckets)?),
-                            },
-                            seed,
-                        ),
+                        $field: <$ty>::new($crate::family::Spec {
+                            design: $design,
+                            name: $crate::groups::group!(@name $design $(, $exported)?),
+                            help: $help,
+                            buckets: $crate::groups::group!(@buckets $($buckets)?),
+                        }),
                     )+
                 }
+            }
+
+            /// Makes the seeded series of each family that it has not yet.
+            pub(crate) fn seed(&self, seed: &$crate::family::seal::Seed<'_>) {
+                $( self.$field.seed(seed); )+
             }
 
             /// Every family of the group, in the order they render.

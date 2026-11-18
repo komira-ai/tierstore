@@ -12,7 +12,7 @@ use crate::{CounterVec, GaugeVec, HistogramVec, StateSetVec};
 group! {
     /// The cold tier: redundancy margin, degraded service, rebuild and scrub. `{drive}` is a
     /// drive of the node.
-    Cold (Storage) {
+    Cold {
         cold_stripes: GaugeVec<(StripeCode, StripeState)> = "cold_stripes",
             "Stripes, by code and state.";
         cold_stripe_margin: GaugeVec<Margin> = "cold_stripe_margin",
@@ -55,7 +55,7 @@ group! {
 
 group! {
     /// Destage from the hot tier to the cold tier, promotion back, and garbage collection.
-    Movement (Storage) {
+    Movement {
         destage_bytes_total: CounterVec<()> = "destage_bytes_total",
             "Bytes destaged.";
         destage_stripes_total: CounterVec<DestageOutcome> = "destage_stripes_total",

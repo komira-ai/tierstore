@@ -2,12 +2,14 @@
 //! `docs/design/fetch-cache-serve.md` (revision 7) lists them: every wait observable, and no
 //! label a pack or a key.
 //!
-//! [`Metrics`] holds every family of section 12, in groups by the part of tierstore that updates
-//! it ([`Metrics::node`], [`Metrics::fetch`], [`Metrics::cache`], [`Metrics::fuse`],
-//! [`Metrics::hot`], [`Metrics::front`], [`Metrics::cold`], [`Metrics::movement`],
-//! [`Metrics::drives`]). It is made from a [`Topology`], the part of the node's configuration
-//! its labels take values from, so one registry serves both deployment profiles of section 21;
-//! [`Metrics::render`] writes the families of the node's role in the Prometheus text format.
+//! [`Metrics`] is a process's registry. Each component the process enables registers its own
+//! families, with its own configuration, when it is configured: [`Metrics::hot_store`],
+//! [`Metrics::cold_store`], [`Metrics::peer_service`], [`Metrics::s3_front`],
+//! [`Metrics::node_cache`], [`Metrics::fetch_engine`], [`Metrics::fuse_front`],
+//! [`Metrics::nfs_front`], [`Metrics::prepare_provider`]. Nothing in the code knows a node's role
+//! or a deployment profile: the profiles of section 21 are example sets of components, whose
+//! output the tests check. [`Metrics::render`] writes every registered family in the Prometheus
+//! text format.
 //!
 //! **Labels.** A family's label values are typed ([`Labels`]): the closed enums of [`labels`],
 //! the frozen enums that already name a set of values (the class of a fetch, the drive
@@ -31,13 +33,19 @@ mod cell;
 mod family;
 mod groups;
 pub mod labels;
-mod topology;
+mod registry;
 pub mod trace;
 
 pub use cell::{Counter, Gauge, Histogram, StateCell};
 pub use family::{Family, FamilyInfo, Kind, LabelValue, Labels, State};
-pub use groups::{Cache, Cold, Drives, Fetch, Front, Fuse, Hot, Movement, Node};
-pub use topology::{Metrics, Topology};
+pub use groups::{
+    Cache, Cold, CopyGeneration, Disks, Drives, Durability, Fetch, Fuse, Hot, Movement, Peer,
+    Prepare, Process, ReadReply, S3Front,
+};
+pub use registry::{
+    ColdStoreConfig, ColdStoreMetrics, FetchEngineConfig, FetchEngineMetrics, FuseFrontMetrics,
+    HotStoreConfig, HotStoreMetrics, Metrics, NodeCacheMetrics, S3FrontMetrics,
+};
 
 /// A family of counters, one per value of `L`.
 pub type CounterVec<L> = Family<L, Counter>;

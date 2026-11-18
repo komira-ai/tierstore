@@ -14,7 +14,7 @@ description = "The metrics and the demand-read trace of tierstore (docs/design/f
 tierstore-fetch-api.workspace = true
 # The drive and node ids of the `{drive}` and `{node}` labels, and the stripe code.
 tierstore-format.workspace = true
-# The node's role (which families it renders), the drive scheduler's classes and seal reasons.
+# The drive scheduler's classes and refusals, seal reasons, and the PUT and LOCATE answers.
 tierstore-store-api.workspace = true
 # The FUSE opcode of `fuse_requests_total{op}` and `fuse_request_seconds{op}`.
 tsfuse.workspace = true

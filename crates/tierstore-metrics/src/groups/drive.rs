@@ -8,8 +8,9 @@ use crate::labels::{Dir, Drive503, DriveState};
 use crate::{CounterVec, GaugeVec, HistogramVec, StateSetVec};
 
 group! {
-    /// Per drive of the node (its hard drives and its hot device): scheduling and liveness.
-    Drives (Storage) {
+    /// Per drive of the node, scheduling and liveness: the cold store registers its hard drives
+    /// and the hot store its device.
+    Drives {
         drive_state: StateSetVec<DriveId, DriveState> = "drive_state",
             "A drive's state: 1 for the state, 0 for the others.";
         drive_streams_active: GaugeVec<DriveId> = "drive_streams_active",

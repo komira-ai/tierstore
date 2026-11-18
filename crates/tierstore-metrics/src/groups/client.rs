@@ -1,5 +1,6 @@
-//! The build side of a node: the fetch engine and its budget (section 4), the node cache and its
-//! journal (sections 7, 8, 11), and the FUSE layer and mount protocol (section 5).
+//! The components of the read path: the fetch engine and its budget (section 4), the node cache
+//! and its journal (sections 7, 8, 11), the FUSE front and the read replies of the fronts
+//! (section 5), and the Prepare provider (sections 3, 6).
 
 use tierstore_fetch_api::ids::Class;
 use tierstore_fetch_api::verify::VerifyPriority;
@@ -14,9 +15,9 @@ use crate::{CounterVec, GaugeVec, HistogramVec, StateSetVec};
 
 group! {
     /// The fetch engine and its budget (section 4): waits, load, controller state, tail control,
-    /// GET counts, efficiency, read waits and end-to-end times. `{drive}` is any drive of the
-    /// cluster the engine reads from.
-    Fetch (Build) {
+    /// GET counts, efficiency, read waits, lost fills and reads from silo. `{drive}` is any drive
+    /// of the cluster the engine reads from.
+    Fetch {
         part_permit_wait_seconds: HistogramVec<Class> = "part_permit_wait_seconds",
             "Time a part waited for its budget permits (drive, storage node and client ceiling).",
             SECONDS;
@@ -91,12 +92,6 @@ group! {
         fill_wait_seconds: HistogramVec<()> = "fill_wait_seconds",
             "Time a wait for a fill took, from the mount's wait to its answer.",
             SECONDS;
-        tree_ready_seconds: HistogramVec<()> = "tree_ready_seconds",
-            "Time from Prepare to every planned cell of a tree being present.",
-            SECONDS;
-        request_to_start_seconds: HistogramVec<()> = "request_to_start_seconds",
-            "Time from the job's request to its start, across the scheduler and the mount.",
-            SECONDS;
         launch_before_ready_total: CounterVec<()> = "launch_before_ready_total",
             "Reads of cells not yet present because the job launched before Prepare was done.";
         store_pack_lost_total: CounterVec<PackLostPhase> = "store_pack_lost_total",
@@ -109,7 +104,7 @@ group! {
 group! {
     /// The node cache (sections 4.7, 7, 8, 11): verification, the journal, holds and eviction,
     /// and the cache device.
-    Cache (Build) {
+    Cache {
         verify_seconds: HistogramVec<VerifyPriority> = "verify_seconds",
             "Time to hash and check one cell.",
             SECONDS;
@@ -154,9 +149,9 @@ group! {
 }
 
 group! {
-    /// The FUSE layer, the mount protocol's restarts, and the list format's rollout (sections 3,
-    /// 5).
-    Fuse (Build) {
+    /// The FUSE front: requests, transport, parking, blocked threads and the mount protocol's
+    /// restarts (section 5).
+    Fuse {
         fuse_transport_mode: StateSetVec<(), TransportMode> = "fuse_transport_mode",
             "The FUSE transport the mounts run: 1 for the mode, 0 for the other.";
         fuse_requests_total: CounterVec<FuseOp> = "fuse_requests_total",
@@ -174,12 +169,6 @@ group! {
             "io_uring entries parked with a request.";
         uring_registered_bytes: GaugeVec<()> = "uring_registered_bytes",
             "Bytes of buffers registered with the io_uring queues.";
-        splice_bytes_total: CounterVec<()> = "splice_bytes_total",
-            "Bytes of read replies sent by splice.";
-        pread_bytes_total: CounterVec<()> = "pread_bytes_total",
-            "Bytes of read replies sent from a pread buffer.";
-        fadvise_dontneed_bytes_total: CounterVec<()> = "fadvise_dontneed_bytes_total",
-            "Bytes dropped from the page cache with POSIX_FADV_DONTNEED.";
         fuse_d_state_threads: GaugeVec<()> = "fuse_d_state_threads",
             "Threads of the process blocked in uninterruptible sleep.";
         mount_reconnects_total: CounterVec<()> = "mount_reconnects_total",
@@ -188,9 +177,35 @@ group! {
             "Takeovers of mounts by a new tierstore process.";
         stale_epoch_replies_dropped_total: CounterVec<()> = "stale_epoch_replies_dropped_total",
             "Replies of an earlier epoch dropped by a mount.";
+    }
+}
+
+group! {
+    /// The Prepare provider: tree readiness, request to start, and the list format's rollout
+    /// (sections 3, 6).
+    Prepare {
+        tree_ready_seconds: HistogramVec<()> = "tree_ready_seconds",
+            "Time from Prepare to every planned cell of a tree being present.",
+            SECONDS;
+        request_to_start_seconds: HistogramVec<()> = "request_to_start_seconds",
+            "Time from the job's request to its start, across the scheduler and the mount.",
+            SECONDS;
         list_refused_total: CounterVec<ListRefusal> = "list_refused_total",
             "Tree lists refused, by reason.";
         l2_sidecar_missing_total: CounterVec<()> = "l2_sidecar_missing_total",
             "Trees refused because they have no L2 sidecar.";
+    }
+}
+
+group! {
+    /// How the read replies of a front were sent: the FUSE front and the NFS front both register
+    /// it (5.2, 5.6).
+    ReadReply {
+        splice_bytes_total: CounterVec<()> = "splice_bytes_total",
+            "Bytes of read replies sent by splice.";
+        pread_bytes_total: CounterVec<()> = "pread_bytes_total",
+            "Bytes of read replies sent from a pread buffer.";
+        fadvise_dontneed_bytes_total: CounterVec<()> = "fadvise_dontneed_bytes_total",
+            "Bytes dropped from the page cache with POSIX_FADV_DONTNEED.";
     }
 }

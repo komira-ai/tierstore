@@ -13,9 +13,11 @@
 
 use std::collections::{BTreeMap, BTreeSet};
 
-use tierstore_fetch_api::ids::Class;
-use tierstore_metrics::{FamilyInfo, Kind, Metrics, Topology};
-use tierstore_store_api::view::Role;
+use tierstore_format::descriptor::Code;
+use tierstore_format::ids::{DriveId, NodeId};
+use tierstore_metrics::{
+    ColdStoreConfig, FamilyInfo, FetchEngineConfig, HotStoreConfig, Kind, Metrics,
+};
 
 const DESIGN: &str = include_str!("../../../docs/design/fetch-cache-serve.md");
 
@@ -132,16 +134,29 @@ fn differences(table: &BTreeMap<String, Row>, families: &[FamilyInfo]) -> Vec<St
     out
 }
 
+/// A registry with every component registered, with a hot device, one hard drive, one peer
+/// and one stripe code.
 fn combined() -> Metrics {
-    Metrics::new(&Topology {
-        role: Role::Combined,
-        version: "0.0.0-test",
-        cluster_drives: Vec::new(),
-        local_drives: Vec::new(),
-        peers: Vec::new(),
-        hot_replicas: 2,
-        codes: Vec::new(),
-    })
+    let metrics = Metrics::new("0.0.0-test");
+    let _ = metrics.hot_store(&HotStoreConfig {
+        device: DriveId([9; 16]),
+        replicas: 2,
+        peers: vec![NodeId(2)],
+    });
+    let _ = metrics.cold_store(&ColdStoreConfig {
+        drives: vec![DriveId([1; 16])],
+        codes: vec![Code::Ec { k: 4, m: 2 }],
+    });
+    let _ = metrics.peer_service();
+    let _ = metrics.s3_front();
+    let _ = metrics.node_cache();
+    let _ = metrics.fetch_engine(&FetchEngineConfig {
+        drives: vec![DriveId([1; 16]), DriveId([2; 16])],
+    });
+    let _ = metrics.fuse_front();
+    let _ = metrics.nfs_front();
+    let _ = metrics.prepare_provider();
+    metrics
 }
 
 /// Asserts that the registry and the table of section 12 have the same names, that each family
@@ -257,30 +272,12 @@ fn no_family_is_labelled_with_a_pack_a_key_or_another_unbounded_value() {
     }
 }
 
-/// Asserts that every rendered label of a combined node with a drive, a peer and a stripe code,
-/// so that every family has a series, is one of the allowed labels or `le`: the text, not only
+/// Asserts that every rendered label of a registry with every component, a drive, a peer and a
+/// stripe code, so that every family has a series, is one of the allowed labels or `le`: the text, not only
 /// the declared names, carries no other label; and that every family has a series there.
 #[test]
 fn every_rendered_label_is_an_allowed_label() {
-    use tierstore_format::descriptor::Code;
-    use tierstore_format::ids::{DriveId, NodeId};
-    let metrics = Metrics::new(&Topology {
-        role: Role::Combined,
-        version: "0.0.0-test",
-        cluster_drives: vec![DriveId([1; 16]), DriveId([2; 16])],
-        local_drives: vec![DriveId([1; 16])],
-        peers: vec![NodeId(2)],
-        hot_replicas: 2,
-        codes: vec![Code::Ec { k: 4, m: 2 }],
-    });
-    metrics.fetch.read_wait_seconds.observe(
-        tierstore_metrics::labels::ReadWaitCause::LaunchBeforePrepare,
-        0.5,
-    );
-    metrics
-        .fetch
-        .part_permit_wait_seconds
-        .observe(Class::Demand, 0.1);
+    let metrics = combined();
     let text = metrics.render();
     for family in metrics.families() {
         let has_series = text.lines().any(|l| {
@@ -339,10 +336,10 @@ fn the_exported_names_are_distinct_prefixed_and_follow_the_design() {
     }
 }
 
-/// Asserts that a combined node's text has the `# HELP` and `# TYPE` lines of every family, in
+/// Asserts that the text of a registry with every component has the `# HELP` and `# TYPE` lines of every family, in
 /// the order of `families`, and at least one series of each family whose labels are all closed.
 #[test]
-fn a_combined_node_renders_every_family() {
+fn a_registry_with_every_component_renders_every_family() {
     let metrics = combined();
     let text = metrics.render();
     let types: Vec<String> = text
@@ -356,7 +353,6 @@ fn a_combined_node_renders_every_family() {
         .map(|f| format!("{} {}", f.name, f.kind.as_str()))
         .collect();
     assert_eq!(types, expected);
-    assert_eq!(metrics.rendered_families(), metrics.families());
     for family in metrics.families() {
         let closed = family
             .labels
