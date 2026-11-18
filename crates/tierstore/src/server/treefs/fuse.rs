@@ -16,17 +16,15 @@
 //! out is the core's to make sense of (`core/adopt.rs`), and `destroy` tells the process that the
 //! readers have stopped.
 //!
-//! Two modes, chosen in `init` from what the kernel offers (D20). With passthrough (the kernel
-//! offers `FUSE_PASSTHROUGH`, the process holds `CAP_SYS_ADMIN` in the initial namespace, and
-//! `fs.passthrough` is not false) the connection's `max_stack_depth` is 1, so that the job's
-//! overlay can stack on the mount, and an open of a non-empty file registers the cache file with
-//! the kernel (`FUSE_DEV_IOC_BACKING_OPEN`) and answers `FOPEN_PASSTHROUGH` with the blob's one
-//! id: reads then never reach this process. Without it (the 6.8 mode) opens are cached opens
-//! (`FOPEN_KEEP_CACHE`) and every read the page cache misses is answered here from the cache
-//! file. An empty file is a cached open in both.
+//! Every open is a cached open (`FOPEN_KEEP_CACHE`): every read the page cache misses is answered
+//! here, from the cache file of the blob or the span of the pack. `init` does not ask for
+//! passthrough: the kernel would map a whole backing file at the file's own offsets, which cannot
+//! serve a span of a pack. With no passthrough the mount's stack depth is 0, and the job's overlay
+//! stacks on it. On a connection an earlier release answered with passthrough, which a process of
+//! this one takes over, the opens of the blobs that release registered a backing id for are
+//! answered `FOPEN_PASSTHROUGH` with that id (`backing.rs`).
 
 use std::ffi::OsStr;
-use std::fs::File;
 use std::io;
 use std::path::Path;
 use std::sync::Arc;
@@ -41,7 +39,6 @@ use fuser::{
     WriteFlags,
 };
 
-use super::backing::Registered;
 use super::core::{self, Attr, Core, Kind, Looked, Opened};
 use super::fuse_put;
 use super::ino;
@@ -124,93 +121,21 @@ pub(super) fn config(threads: usize, allow_other: bool) -> Config {
     config
 }
 
-/// How the bytes of the files are served, as `INIT` decided.
-#[derive(Clone, Copy, Debug, PartialEq, Eq)]
-pub(super) enum Mode {
-    /// The kernel reads the cache files itself.
-    Passthrough,
-    /// Cached opens; reads reach this process. The words say why not passthrough.
-    Cached(&'static str),
-}
-
-impl Mode {
-    /// The mode for a kernel that offers passthrough or not, a setting that asks for it or not,
-    /// and a process that may register backing files or not. A server that asks for passthrough
-    /// without `CAP_SYS_ADMIN` would fail every open with `EIO`, so it does not ask.
-    pub(super) fn chosen(offered: bool, wanted: bool, privileged: bool) -> Self {
-        if !wanted {
-            Self::Cached("fs.passthrough is false")
-        } else if !offered {
-            Self::Cached("the kernel does not offer passthrough")
-        } else if !privileged {
-            Self::Cached("the process lacks CAP_SYS_ADMIN")
-        } else {
-            Self::Passthrough
-        }
-    }
-}
-
-/// Whether this process holds `CAP_SYS_ADMIN` in the initial user namespace, which is what
-/// `FUSE_DEV_IOC_BACKING_OPEN` asks: the capability in the effective set, and a user namespace
-/// that is the initial one. A process that cannot read either holds none.
-fn privileged() -> bool {
-    let capable = rustix::thread::capabilities(None).is_ok_and(|sets| {
-        sets.effective
-            .contains(rustix::thread::CapabilitySet::SYS_ADMIN)
-    });
-    capable
-        && std::fs::read_to_string("/proc/self/uid_map")
-            .is_ok_and(|map| initial_user_namespace(&map))
-}
-
-/// Whether the text of `/proc/self/uid_map` is that of the initial user namespace, which maps the
-/// whole range of ids to themselves in one line. A namespace of a container or of `unshare -U`
-/// maps less, or elsewhere, and its `CAP_SYS_ADMIN` is not the one the kernel asks for.
-fn initial_user_namespace(uid_map: &str) -> bool {
-    let mut lines = uid_map.lines();
-    let first = lines
-        .next()
-        .map(|line| line.split_whitespace().collect::<Vec<_>>());
-    lines.next().is_none() && first.is_some_and(|fields| fields == ["0", "0", "4294967295"])
-}
-
-/// The number in the text `{:?}` makes of a [`BackingId`] (`... backing_id: 7 }`): `fuser` 0.18
-/// has no other way to read it, and the backing table records it.
-fn id_in(debug: &str) -> Option<u32> {
-    let (_, after) = debug.split_once("backing_id: ")?;
-    let digits: String = after.chars().take_while(char::is_ascii_digit).collect();
-    digits.parse().ok()
-}
-
-/// Registers `file` with the kernel as a backing file, in answer to the open `reply` is for.
-fn register(reply: &ReplyOpen, file: &File) -> io::Result<Registered> {
-    let id = reply.open_backing(file)?;
-    let raw = id_in(&format!("{id:?}"))
-        .ok_or_else(|| io::Error::other("fuser does not print the backing id as it did"))?;
-    Ok(Registered {
-        id: raw,
-        guard: Arc::new(id),
-    })
-}
-
 /// The filesystem the kernel sees.
 pub(super) struct Frontend {
     core: Arc<Core>,
     /// The put directory, where it is served (the core's).
     put: Option<Arc<PutSpace>>,
-    /// Whether to ask for passthrough if the kernel offers it (`fs.passthrough`).
-    passthrough: bool,
     /// Told when the session ends and the kernel's requests are no longer read.
     ended: Option<Sender<()>>,
 }
 
 impl Frontend {
     /// A frontend over `core`.
-    pub(super) fn new(core: Arc<Core>, passthrough: bool) -> Self {
+    pub(super) fn new(core: Arc<Core>) -> Self {
         Self {
             put: core.put().cloned(),
             core,
-            passthrough,
             ended: None,
         }
     }
@@ -289,21 +214,12 @@ impl Filesystem for Frontend {
             let _ = config.add_capabilities(flag);
         }
         let _ = config.set_max_background(MAX_BACKGROUND);
-        let offered = config.capabilities();
-        let passthrough = offered.contains(InitFlags::FUSE_PASSTHROUGH);
-        let resend = offered.contains(InitFlags::FUSE_HAS_RESEND);
+        let resend = config.capabilities().contains(InitFlags::FUSE_HAS_RESEND);
         // So that a process that takes the connection over can have the requests the one before it
         // had read and not answered sent again (kernel 6.9 and later; a kernel that does not offer
         // it is not asked).
         let _ = config.add_capabilities(InitFlags::FUSE_HAS_RESEND);
-        let mode = Mode::chosen(passthrough, self.passthrough, privileged());
-        if mode == Mode::Passthrough {
-            // Offered, so these succeed; a stack depth of 1 lets the job's overlay stack on the mount.
-            let _ = config.add_capabilities(InitFlags::FUSE_PASSTHROUGH);
-            let _ = config.set_max_stack_depth(1);
-            self.core.enable_passthrough();
-        }
-        tracing::info!(passthrough, resend, ?mode, "tierstore fs: kernel offers");
+        tracing::info!(resend, "tierstore fs: kernel offers");
         Ok(())
     }
 
@@ -367,18 +283,15 @@ impl Filesystem for Frontend {
             return fuse_put::open(put.open(ino.0), reply);
         }
         let writing = flags.acc_mode() != OpenAccMode::O_RDONLY;
-        let opened = self
-            .core
-            .open(ino.0, writing, &mut |file| register(&reply, file));
-        match opened {
+        match self.core.open(ino.0, writing) {
             Err(error) => reply.error(errno(error)),
             Ok(Opened::Cached(fh)) => {
                 reply.opened(FileHandle(fh), FopenFlags::FOPEN_KEEP_CACHE);
             }
-            Ok(Opened::Backed { fh, backing }) => match backing.guard::<BackingId>() {
+            Ok(Opened::Adopted { fh, id }) => match id.downcast_ref::<BackingId>() {
                 Some(id) => reply.opened_passthrough(FileHandle(fh), FopenFlags::empty(), id),
                 None => {
-                    // Only this frontend registers ids, so this is not seen.
+                    // Only `serving.rs` makes the handles of ids, of this type: not seen.
                     self.core.release(fh);
                     reply.error(Errno::EIO);
                 }
@@ -421,7 +334,7 @@ impl Filesystem for Frontend {
             put.release(fh.0);
             return reply.ok();
         }
-        self.core.release_open(ino.0, fh.0);
+        self.core.release(fh.0);
         reply.ok();
     }
 

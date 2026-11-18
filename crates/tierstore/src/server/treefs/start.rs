@@ -4,7 +4,7 @@
 //!
 //! A start, in order: the runtime directory and the mount point are made; the runtime directory
 //! gets a table of tree numbers (afresh, or, for an NFS mount that outlives the server, the one the
-//! mount of this boot left, see [`Identity`]); the backing table of an earlier mount is removed; the
+//! mount of this boot left, see [`Identity`]); the backing table an earlier release kept for a mount that is gone is removed; the
 //! core is made over the fill socket; the attachments the file holds are made again (the manifests
 //! are read through the fill socket); the cache is told which trees are attached, so that it
 //! drops the pins of any other; and the control socket is bound.
@@ -164,8 +164,6 @@ pub(super) fn core_of(
             cache_path: settings.cache_path.clone(),
             mountpoint: settings.mountpoint.clone(),
             mount_id,
-            #[cfg(any(target_os = "linux", test))]
-            max_backing_ids: settings.max_backing_ids,
             #[cfg(any(target_os = "linux", test))]
             generation,
             count_lookups,

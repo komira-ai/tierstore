@@ -3,9 +3,7 @@
 use std::sync::Arc;
 
 use super::BATCH;
-use crate::server::treefs::testing::{
-    Built, FakeKernel, Rig, file, open_cached, sample, sha, until,
-};
+use crate::server::treefs::testing::{Built, Rig, file, open_cached, sample, sha, until};
 
 const RUN: &str = "run-1";
 
@@ -254,22 +252,16 @@ fn a_missing_tree_is_not_prefetched_and_cached_blobs_are_not_filled() {
     assert_eq!(pinned(&rig).len(), 4);
 }
 
-/// Asserts that a prefetched blob is opened under passthrough with no fill, and registered.
+/// Asserts that a prefetched blob is opened with no fill, and reads its bytes from the cache.
 #[test]
-fn a_prefetched_blob_is_opened_by_passthrough_with_no_fill() {
-    let rig = Rig::new("tfs-prefetch-passthrough", sample());
-    rig.core.enable_passthrough();
+fn a_prefetched_blob_is_opened_with_no_fill() {
+    let rig = Rig::new("tfs-prefetch-open", sample());
     let _ = rig.core.attach_asking(&root(&rig), RUN, true).unwrap();
     until(|| rig.core.prefetching() == 0);
     let fills = blob_fills(&rig).len();
-    let kernel = FakeKernel::new();
-    assert!(
-        kernel
-            .open(&rig.core, crate::server::treefs::ino::of(1, 3))
-            .is_ok()
-    );
+    let fh = open_cached(&rig.core, crate::server::treefs::ino::of(1, 4), false).unwrap();
+    assert_eq!(rig.core.read(fh, 0, 100).unwrap(), b"tool bytes");
     assert_eq!(blob_fills(&rig).len(), fills);
-    assert_eq!(kernel.registered.lock().unwrap().len(), 1);
 }
 
 /// Asserts that a prefetch whose tree was detached and attached again with prefetch is replaced:

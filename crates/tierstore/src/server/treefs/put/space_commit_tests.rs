@@ -225,8 +225,8 @@ fn a_commit_of_a_file_still_open_is_ebusy_at_once() {
     space.flush(fh);
     let _ = space.write((attr.ino, fh), 4, b"!").unwrap();
     assert_eq!(commit(), Err(Errno::BUSY));
-    space.flush(crate::server::treefs::handle::make(1, 999, false));
-    let other = crate::server::treefs::handle::make(7, 1, false);
+    space.flush(crate::server::treefs::handle::make(1, 999));
+    let other = crate::server::treefs::handle::make(7, 1);
     let _ = space.write((attr.ino, other), 5, b"?").unwrap();
     space.flush(fh);
     assert_eq!(commit(), Err(Errno::BUSY));
@@ -455,7 +455,7 @@ fn a_successor_takes_over_the_directories_and_the_opens_it_is_handed() {
     assert_eq!(handed.opens.len(), 2);
     handed
         .opens
-        .push((crate::server::treefs::handle::make(1, 999, false), 12345));
+        .push((crate::server::treefs::handle::make(1, 999), 12345));
     handed.dirs.push(HeldDir {
         lookups: Some(1),
         made: false,
@@ -530,7 +530,7 @@ fn a_start_handed_nothing_finds_the_directories_of_the_names() {
         next.puts.object(&format!("{DIR}/open")).unwrap(),
         b"onetwo!"
     );
-    let old = crate::server::treefs::handle::make(1, 50, false);
+    let old = crate::server::treefs::handle::make(1, 50);
     assert_eq!(space.write((open.ino, old), 0, b"x"), Err(Errno::BADF));
 }
 

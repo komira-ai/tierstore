@@ -25,7 +25,7 @@ use tierstore_testkit::dir::TestDir;
 
 use crate::{Clock, Mono};
 
-use super::backing::{Guard, Registered};
+use super::backing::Guard;
 use super::config::FsSettings;
 use super::core::{Core, Errno, Opened, Settings};
 use super::fill_client::FillClient;
@@ -442,8 +442,6 @@ impl Rig {
             cache_path: self.cache.clone(),
             fetch_timeout: Duration::from_secs(5),
             threads: 4,
-            passthrough: true,
-            max_backing_ids: 100,
             handoff_socket: self.dir.path().join("handoff.sock"),
             handoff_wait: Duration::from_secs(30),
             recover_wait: Duration::from_secs(30),
@@ -492,22 +490,12 @@ impl Rig {
 
     /// A rig whose entries report `owner`.
     pub(in crate::server) fn owned(name: &str, built: Built, owner: (u32, u32)) -> Self {
-        Self::limited(name, built, owner, 100)
-    }
-
-    /// A rig whose entries report `owner` and whose core gives at most `most` backing ids.
-    pub(in crate::server) fn limited(
-        name: &str,
-        built: Built,
-        owner: (u32, u32),
-        most: usize,
-    ) -> Self {
-        Self::made(name, built, (owner, most), true)
+        Self::made(name, built, owner, true)
     }
 
     /// A rig whose core does not count lookups: a frontend with no forget.
     pub(in crate::server) fn uncounted(name: &str, built: Built) -> Self {
-        Self::made(name, built, (OWNER, 100), false)
+        Self::made(name, built, OWNER, false)
     }
 
     /// A second core over the same cache and fill socket, with a table of tree numbers and a
@@ -523,7 +511,6 @@ impl Rig {
                 cache_path: self.cache.clone(),
                 mountpoint: self.mountpoint.clone(),
                 mount_id: "mount-2".to_owned(),
-                max_backing_ids: 100,
                 generation: 1,
                 count_lookups: false,
                 tree_idle: TREE_IDLE,
@@ -535,12 +522,7 @@ impl Rig {
         ))
     }
 
-    fn made(
-        name: &str,
-        built: Built,
-        (owner, most): ((u32, u32), usize),
-        count_lookups: bool,
-    ) -> Self {
+    fn made(name: &str, built: Built, owner: (u32, u32), count_lookups: bool) -> Self {
         let dir = TestDir::under(std::env::temp_dir(), name);
         let cache = dir.path().join("cache");
         let runtime = dir.path().join("run");
@@ -573,7 +555,6 @@ impl Rig {
                 cache_path: cache.clone(),
                 mountpoint: mountpoint.clone(),
                 mount_id: "mount-1".to_owned(),
-                max_backing_ids: most,
                 generation: 1,
                 count_lookups,
                 tree_idle: TREE_IDLE,
@@ -596,14 +577,9 @@ impl Rig {
     }
 }
 
-/// The kernel's backing ids, as the tests of the core have them: numbers it gives, the files it was
-/// asked to register, and the ids closed (an id is closed when its guard is dropped).
+/// The kernel's backing ids, as the tests of the core have them: the ids an earlier release
+/// registered, each closed when the last reference to its handle is dropped.
 pub(in crate::server::treefs) struct FakeKernel {
-    next: AtomicU32,
-    /// Whether the next registrations are refused (`EPERM`).
-    pub refusing: AtomicBool,
-    /// The registrations, as the length of each file registered.
-    pub registered: Mutex<Vec<u64>>,
     /// The ids closed, in order.
     pub closed: Arc<Mutex<Vec<u32>>>,
 }
@@ -623,26 +599,11 @@ impl Drop for Closes {
 impl FakeKernel {
     pub(in crate::server::treefs) fn new() -> Self {
         Self {
-            next: AtomicU32::new(100),
-            refusing: AtomicBool::new(false),
-            registered: Mutex::new(Vec::new()),
             closed: Arc::new(Mutex::new(Vec::new())),
         }
     }
 
-    /// Registers `file`: the next number, or the refusal of a process without the capability.
-    pub(in crate::server::treefs) fn register(
-        &self,
-        file: &std::fs::File,
-    ) -> std::io::Result<Registered> {
-        if self.refusing.load(Ordering::Acquire) {
-            return Err(std::io::Error::from_raw_os_error(1));
-        }
-        locked(&self.registered).push(file.metadata()?.len());
-        Ok(self.registration())
-    }
-
-    /// The guard that closes the id `id`, which an earlier process registered.
+    /// The handle on the id `id`, which an earlier release registered.
     pub(in crate::server::treefs) fn wrap(&self, id: u32) -> Guard {
         Arc::new(Closes {
             id,
@@ -650,31 +611,20 @@ impl FakeKernel {
         })
     }
 
-    /// The next number, as a registration: closed when its guard is dropped.
-    pub(in crate::server::treefs) fn registration(&self) -> Registered {
-        let id = self.next.fetch_add(1, Ordering::AcqRel);
-        let closed = Arc::clone(&self.closed);
-        Registered {
-            id,
-            guard: Arc::new(Closes { id, closed }),
-        }
-    }
-
-    /// An open of `ino` on `core`, registering with this kernel.
-    pub(in crate::server::treefs) fn open(&self, core: &Core, ino: u64) -> Result<Opened, Errno> {
-        core.open(ino, false, &mut |file| self.register(file))
+    /// The id a handle of a [`FakeKernel`] is on; none for a handle of another kind.
+    pub(in crate::server::treefs) fn id_of(guard: &Guard) -> Option<u32> {
+        guard.downcast_ref::<Closes>().map(|closes| closes.id)
     }
 }
 
-/// A cached open of `ino` on a core that has not chosen passthrough: the handle.
+/// An open of `ino` on `core`: its handle, whether it is cached or answered with an adopted id.
 pub(in crate::server::treefs) fn open_cached(
     core: &Core,
     ino: u64,
     writing: bool,
 ) -> Result<u64, Errno> {
-    match core.open(ino, writing, &mut |file| FakeKernel::new().register(file)) {
-        Ok(Opened::Cached(fh) | Opened::Backed { fh, .. }) => Ok(fh),
-        Err(error) => Err(error),
+    match core.open(ino, writing)? {
+        Opened::Cached(fh) | Opened::Adopted { fh, .. } => Ok(fh),
     }
 }
 

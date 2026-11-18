@@ -45,12 +45,12 @@ fn start_and_stop() {
     let rig = Rig::new("tfs-run-start", sample());
     let root = rig.upstream.built.lock().unwrap().root.clone();
     let settings = settings(&rig);
-    // The backing table of a mount that is gone belongs to a connection that is gone.
+    // The backing table an earlier release kept for a mount that is gone belongs to a connection
+    // that is gone; a fresh mount has no backing id and writes no table.
     std::fs::write(rig.runtime.join("backing"), "stale\n").unwrap();
     let running = Running::start(&settings).unwrap();
     assert!(mounted(&rig.mountpoint));
-    let table = std::fs::read_to_string(rig.runtime.join("backing")).unwrap_or_default();
-    assert!(!table.contains("stale"), "{table}");
+    assert!(!rig.runtime.join("backing").exists());
     let answer = ask(
         &settings.control_socket,
         &format!("attach {root} for run-1"),

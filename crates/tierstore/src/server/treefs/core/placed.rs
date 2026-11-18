@@ -24,8 +24,8 @@
 //!
 //! A file of a placed tree is a span of a cached pack: an open asks the fill socket for the span
 //! (`span`), which fills it if the cache does not hold it, and reads the pack's own file at the
-//! span's offset. It is never opened by passthrough, since the kernel would map the whole pack onto
-//! the file, and the core pins nothing for it: the tree store pins the packs of its trees.
+//! span's offset. It is never answered with a backing id an earlier release registered
+//! (`backing.rs`), since the kernel would map the whole pack onto the file, and the core pins nothing for it: the tree store pins the packs of its trees.
 
 use std::fs::File;
 use std::sync::Arc;

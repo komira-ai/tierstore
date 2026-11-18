@@ -378,7 +378,7 @@ fn writes_reach_the_store_through_an_open_of_this_process_alone() {
     assert_eq!(space.write((file.ino, fh), 0, b"abc"), Ok(3));
     assert_eq!(space.write((file.ino, fh), 3, b"de"), Ok(2));
     assert_eq!(space.getattr(file.ino).unwrap().size, 5);
-    let foreign = crate::server::treefs::handle::make(1, 77, false);
+    let foreign = crate::server::treefs::handle::make(1, 77);
     assert_eq!(space.write((file.ino, foreign), 0, b"x"), Err(Errno::BADF));
     assert_eq!(space.write((nonce, foreign), 0, b"x"), Err(Errno::BADF));
     space.release(fh);

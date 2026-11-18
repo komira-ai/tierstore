@@ -6,12 +6,16 @@ use std::io::Read as _;
 use std::os::unix::fs::{MetadataExt as _, PermissionsExt as _};
 use std::path::Path;
 
-use fuser::{BackgroundSession, Session};
+use fuser::{BackgroundSession, InitFlags, InitOutcome, Session};
 
-use super::{Frontend, Mode, config, id_in, initial_user_namespace, privileged};
+use super::super::fakedev;
+
+use super::{Frontend, config};
+use crate::server::treefs::backing::{FILE, Saved};
 use crate::server::treefs::core::FIXED_MTIME;
 use crate::server::treefs::ino;
-use crate::server::treefs::testing::{Built, Rig, file, sample, sha, skipped, until, with_fuse};
+use crate::server::treefs::testing::{Built, FakeKernel, Rig, file, sample, sha, until, with_fuse};
+use crate::tree_manifest::TreeDigest;
 
 /// A rig, and its core served on a mount of its mountpoint.
 struct Mounted {
@@ -19,15 +23,12 @@ struct Mounted {
     session: BackgroundSession,
     rig: Rig,
     root: String,
+    /// What the kernel's `INIT` and the frontend's answer settled.
+    outcome: InitOutcome,
 }
 
 /// The mount of the sample tree, attached for one run, in the 6.8 mode.
 fn mounted(name: &str, built: Built) -> Mounted {
-    mounted_asking(name, built, false)
-}
-
-/// The mount of `built`, attached for one run, asking for passthrough or not.
-fn mounted_asking(name: &str, built: Built, passthrough: bool) -> Mounted {
     let me = (
         rustix::process::geteuid().as_raw(),
         rustix::process::getegid().as_raw(),
@@ -35,10 +36,16 @@ fn mounted_asking(name: &str, built: Built, passthrough: bool) -> Mounted {
     let rig = Rig::owned(name, built, me);
     let root = rig.upstream.built.lock().unwrap().root.clone();
     let _ = rig.core.attach(&root, "run-1").unwrap();
-    let frontend = Frontend::new(rig.core.clone(), passthrough);
+    let frontend = Frontend::new(rig.core.clone());
     let session = Session::new(frontend, &rig.mountpoint, &config(4, false)).unwrap();
+    let outcome = session.init_outcome().unwrap();
     let session = session.spawn().unwrap();
-    Mounted { session, rig, root }
+    Mounted {
+        session,
+        rig,
+        root,
+        outcome,
+    }
 }
 
 /// Runs `test` over the mount of the sample tree where a mount can be made.
@@ -420,124 +427,69 @@ fn each_refusal_of_the_core_is_an_errno_of_the_kernel() {
     }
 }
 
-/// Asserts the choice of the mode for every combination of what the kernel offers, what the
-/// settings ask and whether the process holds the capability: passthrough only when all three
-/// hold, and the reason otherwise.
+/// Asserts that a mount never asks the kernel for passthrough, whatever the kernel offers, and so
+/// leaves the stack depth 0, on which the job's overlay stacks; and that every open is a cached
+/// one: the reads of a file reach the core.
 #[test]
-fn passthrough_is_chosen_only_where_offered_asked_for_and_privileged() {
-    for offered in [false, true] {
-        for wanted in [false, true] {
-            for held in [false, true] {
-                let mode = Mode::chosen(offered, wanted, held);
-                if offered && wanted && held {
-                    assert_eq!(mode, Mode::Passthrough);
-                    continue;
-                }
-                let Mode::Cached(why) = mode else {
-                    panic!("passthrough chosen for {offered} {wanted} {held}");
-                };
-                // The setting is named first, then the kernel, then the capability.
-                let want = if !wanted {
-                    "fs.passthrough is false"
-                } else if !offered {
-                    "the kernel does not offer passthrough"
-                } else {
-                    "the process lacks CAP_SYS_ADMIN"
-                };
-                assert_eq!(why, want);
-            }
-        }
-    }
-}
-
-/// Asserts that only the identity map of the whole range is the initial user namespace: the map of
-/// a container, of a namespace made by `unshare -U`, one with a second line, or text that is not a
-/// map is not, so that a `CAP_SYS_ADMIN` held there does not make a process ask for passthrough.
-#[test]
-fn only_the_whole_identity_map_is_the_initial_user_namespace() {
-    assert!(initial_user_namespace("         0          0 4294967295\n"));
-    for map in [
-        "         0       1000          1\n",
-        "         0          0       4096\n",
-        "         0          0 4294967295\n      5000       5000          1\n",
-        "         1          0 4294967295\n",
-        "",
-        "not a map",
-    ] {
-        assert!(!initial_user_namespace(map), "{map:?}");
-    }
-}
-
-/// Asserts that the capability is read as the kernel's status of the process says (bit 21 of the
-/// effective set, in the initial user namespace), and that a process without it does not ask for
-/// passthrough.
-#[test]
-fn the_capability_is_read_from_the_effective_set_of_the_process() {
-    let status = std::fs::read_to_string("/proc/self/status").unwrap();
-    let effective = status
-        .lines()
-        .find_map(|line| line.strip_prefix("CapEff:"))
-        .unwrap();
-    let bits = u64::from_str_radix(effective.trim(), 16).unwrap();
-    let map = std::fs::read_to_string("/proc/self/uid_map").unwrap();
-    assert_eq!(
-        privileged(),
-        bits & (1 << 21) != 0 && initial_user_namespace(&map)
-    );
-}
-
-/// Asserts that the backing id is read from the text `fuser` prints for it, and that text without
-/// one has none.
-#[test]
-fn the_backing_id_is_read_from_the_text_fuser_prints() {
-    assert_eq!(
-        id_in("BackingId { channel: (Weak), backing_id: 7 }"),
-        Some(7)
-    );
-    assert_eq!(
-        id_in("BackingId { backing_id: 4294967295 }"),
-        Some(u32::MAX)
-    );
-    assert_eq!(id_in("BackingId { backing_id: 4294967296 }"), None);
-    assert_eq!(id_in("BackingId { backing_id: x }"), None);
-    assert_eq!(id_in("BackingId { channel: (Weak) }"), None);
-}
-
-/// Asserts, where the kernel and the process allow passthrough, that a mount in that mode serves
-/// the bytes of a file to the reader with no read reaching the core, that opens of one blob are
-/// counted on its one id, and that the table is empty when they are closed. Where either is
-/// missing the test says which and ends.
-#[test]
-fn a_passthrough_mount_serves_reads_without_the_core() {
-    with_fuse(|| {
-        let m = mounted_asking("tfs-fuse-passthrough", sample(), true);
-        // The first request of the mount has been answered after INIT, which decided the mode.
-        let _ = std::fs::metadata(m.at("bin/cc")).unwrap();
-        let Some(table) = m.rig.core.backing_table() else {
-            let why = if privileged() {
-                "the kernel does not offer passthrough"
-            } else {
-                "the test process lacks CAP_SYS_ADMIN"
-            };
-            return skipped(why);
-        };
+fn a_mount_does_not_ask_for_passthrough_and_its_reads_reach_the_core() {
+    with_mount("tfs-fuse-no-passthrough", |m| {
+        assert!(!m.outcome.flags.contains(InitFlags::FUSE_PASSTHROUGH));
+        assert_eq!(m.outcome.max_stack_depth, 0);
         let blobs = m.rig.upstream.built.lock().unwrap().blobs.clone();
-        let cc = std::fs::File::open(m.at("bin/cc")).unwrap();
-        let again = std::fs::File::open(m.at("bin/cc")).unwrap();
-        let mut bytes = Vec::new();
-        (&cc).read_to_end(&mut bytes).unwrap();
+        let bytes = std::fs::read(m.at("bin/cc")).unwrap();
         assert_eq!(bytes, blobs[&sha(&bytes)]);
-        assert_eq!(bytes.len(), 3000);
-        let digest = crate::tree_manifest::TreeDigest::from_hex(&sha(&bytes)).unwrap();
-        assert_eq!(table.opens(&digest), 2);
-        assert_eq!(std::fs::read(m.at("include/a.h")).unwrap(), b"int a;");
-        assert!(std::fs::read(m.at("empty.h")).unwrap().is_empty());
-        assert_eq!(m.served("read"), 0);
-        drop((cc, again));
-        until(|| table.live() == 0);
-        assert_eq!(
-            std::fs::read_to_string(m.rig.runtime.join("backing")).unwrap(),
-            ""
-        );
+        assert!(m.served("read") > 0);
+        assert!(!m.rig.runtime.join(FILE).exists());
+    });
+}
+
+/// Asserts, with a stand-in for the kernel that offers passthrough (and resend), that the answer to
+/// `INIT` asks for resend and not for passthrough, and declares a stack depth of 0: whatever the
+/// kernel the test runs on offers, and whatever capability the test process holds.
+#[test]
+fn init_asks_for_no_passthrough_where_the_kernel_offers_it() {
+    let rig = Rig::new("tfs-fuse-init-offered", sample());
+    let (device, kernel) = fakedev::pair();
+    kernel.init(1, InitFlags::FUSE_PASSTHROUGH | InitFlags::FUSE_HAS_RESEND);
+    let config = config(1, false);
+    let frontend = Frontend::new(rig.core.clone());
+    let session = Session::from_fd(frontend, device, config.acl, config).unwrap();
+    let reply = kernel.reply();
+    assert_eq!((reply.unique, reply.error), (1, 0));
+    let outcome = session.init_outcome().unwrap();
+    assert!(outcome.capabilities.contains(InitFlags::FUSE_PASSTHROUGH));
+    assert!(!outcome.flags.contains(InitFlags::FUSE_PASSTHROUGH));
+    assert!(outcome.flags.contains(InitFlags::FUSE_HAS_RESEND));
+    assert_eq!(outcome.max_stack_depth, 0);
+    // The reply itself: `flags2` (bytes 32 to 36) without bit 37 of the flags, a depth of 0.
+    let word = |at: usize| u32::from_ne_bytes(reply.body[at..at + 4].try_into().unwrap());
+    let replied = u64::from(word(12)) | (u64::from(word(32)) << 32);
+    assert_eq!(replied & InitFlags::FUSE_PASSTHROUGH.bits(), 0);
+    assert_eq!(word(36), 0);
+}
+
+/// Asserts that an open of a blob the core holds an adopted id for, whose handle is not one the
+/// frontend can answer with (here the test kernel's, not `fuser`'s), fails with `EIO` and ends
+/// the open the core made, rather than answering a cached open on an inode the kernel serves by
+/// passthrough; and that the opens of other files are cached opens as before.
+#[test]
+fn an_adopted_id_the_frontend_cannot_answer_with_fails_the_open() {
+    with_fuse(|| {
+        let m = mounted("tfs-fuse-adopted", sample());
+        let cc: Vec<u8> = (0..3000u32).map(|i| (i % 241) as u8).collect();
+        let saved = Saved {
+            blob: TreeDigest::from_hex(&sha(&cc)).unwrap(),
+            id: 9,
+            opens: 1,
+            exact: false,
+        };
+        let kernel = FakeKernel::new();
+        m.rig
+            .core
+            .adopt_backing(&m.rig.runtime.join(FILE), &[saved], &|id| kernel.wrap(id));
+        let refused = std::fs::File::open(m.at("bin/cc")).unwrap_err();
+        assert_eq!(errno_of(&refused), rustix::io::Errno::IO.raw_os_error());
+        assert_eq!(m.rig.core.open_files(), 0);
+        assert_eq!(std::fs::read(m.at("bin/tool")).unwrap(), b"tool bytes");
     });
 }
