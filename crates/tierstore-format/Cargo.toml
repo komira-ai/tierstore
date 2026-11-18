@@ -1,0 +1,26 @@
+[package]
+name = "tierstore-format"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+repository.workspace = true
+publish.workspace = true
+description = "The on-disk and on-wire formats of the tierstore storage tier (docs/design/fetch-cache-serve.md, section 10): ids, the cluster stamp, record, tombstone log, block trailer, shard footer, stripe descriptor, seal and stripe-free records, file names and identity files."
+
+# Pure: no I/O, no clock, no async. Bytes in, bytes out; every multi-byte integer is
+# little-endian and every record carries a crc32c, so a torn or flipped byte is an error, never
+# a different answer.
+[dependencies]
+# The crc32c of every header, body and table (hardware SSE4.2 / ARMv8 with a portable fallback).
+crc32c.workspace = true
+# The ids travel in the JSON bodies of the peer protocol (tierstore-store-api) in their text form
+# (hex digits, as in file names); the stamp as its `u64`.
+serde.workspace = true
+thiserror.workspace = true
+
+[dev-dependencies]
+serde_json.workspace = true
+
+[lints]
+workspace = true
