@@ -153,7 +153,8 @@ impl Provider {
 
     /// `Prepare`: checks the source, the ref and the mode, and begins the preparation in the
     /// background. A source prepared before with the same ref is a success, and its preparation is
-    /// begun again if it failed.
+    /// begun again if it failed. The first `Prepare` of a run is the request of
+    /// `tierstore_request_to_start_seconds` (`local_cache/starts.rs`).
     ///
     /// # Errors
     /// [`ProviderError::Invalid`] for a source or a ref that is not well formed;
@@ -179,6 +180,8 @@ impl Provider {
             let why = "tierstore makes read-only trees: the mode must be READ_ONLY";
             return Err(ProviderError::Refused(why.to_owned()));
         }
+        // The first `Prepare` of the run stamps it; a source held already had its run stamped.
+        self.shared.cache.run_requested(&id.run_dir());
         let mut sources = self.lock();
         if let Some(held) = sources.get(&id) {
             if held.key != reference {
@@ -290,8 +293,8 @@ impl Provider {
         }
     }
 
-    /// `Release`: stops the source's preparation and removes its placement. A source that is not
-    /// known is a success.
+    /// `Release`: stops the source's preparation and removes its placement, and forgets the request
+    /// of its run. A source that is not known is a success.
     ///
     /// # Errors
     /// [`ProviderError::Invalid`] for a source that is not well formed;
@@ -303,6 +306,7 @@ impl Provider {
 
     /// Releases `id`: whether there was anything to release.
     fn release_id(&self, id: &SourceId) -> Result<bool, ProviderError> {
+        self.shared.cache.run_forgotten(&id.run_dir());
         let held = self.lock().remove(id);
         let mut released = false;
         if let Some(held) = held {

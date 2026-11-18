@@ -126,7 +126,7 @@ impl Rig {
         let mut settings = settings();
         change(&mut settings);
         let provider = Provider::with(bench.store.clone(), bench.rig.cache.clone(), settings);
-        let key = put(&bench, &list_of(&bench.pack).encode()).await;
+        let key = put_pack_list(&bench).await;
         Self {
             bench,
             key,
@@ -191,6 +191,11 @@ impl Rig {
         })
         .await;
     }
+}
+
+/// Puts the list of [`list_of`] of `bench`'s pack in its upstream, under its key; the key.
+pub(super) async fn put_pack_list(bench: &Bench) -> String {
+    put(bench, &list_of(&bench.pack).encode()).await
 }
 
 /// Puts `bytes` under their tree list key; the key.

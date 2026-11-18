@@ -182,6 +182,35 @@ async fn a_touch_is_not_answered_and_counts_as_a_use() {
     served.stop().await;
 }
 
+/// Asserts that a `started` is answered `ok` by a node with no tree store, and ends the span of
+/// the run the path is a source of, that the cache stamped when it was requested: 70 ms on the
+/// cache's clock. A second `started` of the run is answered `ok` too and adds nothing.
+#[tokio::test]
+async fn a_started_is_answered_ok_and_ends_the_span_of_its_run() {
+    let rig = Rig::new("tfs-started");
+    let place = Place::new("tfs-started");
+    rig.cache.run_requested("mount-provider/61/6a73");
+    rig.clock.advance(70);
+    let served = Served::start(&rig.cache, &place.path);
+    let mut client = Client::connect(&place.path).await;
+    assert_eq!(client.ask("started mount-provider/61/6a73/0").await, "ok");
+    assert_eq!(client.ask("started mount-provider/61/6a73/1").await, "ok");
+    assert_eq!(
+        client.ask("started trees/x").await,
+        "refused not a path of the mount"
+    );
+    let metrics = rig.cache.metrics();
+    assert!(
+        metrics.contains("tierstore_request_to_start_seconds_sum 0.07\n"),
+        "{metrics}"
+    );
+    assert!(
+        metrics.contains("tierstore_request_to_start_seconds_count 1\n"),
+        "{metrics}"
+    );
+    served.stop().await;
+}
+
 /// Asserts that a peer that is not the user of the instance is told so, in one line, and
 /// disconnected, without being asked for a request.
 #[tokio::test]
