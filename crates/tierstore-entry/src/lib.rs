@@ -34,6 +34,7 @@
 
 #![cfg(target_os = "linux")]
 #![forbid(unsafe_code)]
+#![deny(missing_docs)]
 
 mod counters;
 mod entry;
