@@ -310,9 +310,9 @@ async fn a_whole_read_of_a_stored_object_matches_its_generation_on_every_get() {
     assert_eq!(meta.tag, g.to_string());
     let gets = rig.gets();
     assert!(!gets.is_empty());
-    assert!(gets.iter().all(|get| get.generation == Some(g)));
+    assert!(gets.iter().all(|get| get.generation == g));
     let counts = rig.large.counters().counts();
-    assert_eq!((counts.locates, counts.alone, counts.routed), (1, 0, 1));
+    assert_eq!((counts.locates, counts.routed), (1, 1));
     let engine_locates = rig.engine.stats().locates;
     assert_eq!(rig.locates() as u64, counts.locates + engine_locates);
 }
@@ -377,11 +377,7 @@ async fn a_read_over_present_and_absent_cells_fetches_only_the_absent_ones() {
         new.iter()
             .all(|&(from, to)| from >= 4 * MIB && to <= 5 * MIB)
     );
-    assert!(
-        rig.gets()[before..]
-            .iter()
-            .all(|get| get.generation == Some(g))
-    );
+    assert!(rig.gets()[before..].iter().all(|get| get.generation == g));
     let entry = rig.entry("cas/ten", g).unwrap();
     assert_eq!(servable(&entry), vec![2, 3, 4]);
 }
@@ -521,7 +517,7 @@ async fn a_fill_whose_copies_hold_another_generation_fails_and_the_book_forgets(
     let rig = LargeRig::new("cells-mismatch");
     let bytes = object(3 * MIB, 11);
     let located = Location {
-        generation: Some(generation(1)),
+        generation: generation(1),
         size: Some(bytes.len() as u64),
         sources: vec![hot(bytes.len() as u64)],
         conflicts: Vec::new(),
@@ -549,7 +545,7 @@ async fn a_lost_fill_fails_the_read_and_the_book_forgets() {
     let rig = LargeRig::new("cells-lost");
     let size = 3 * MIB;
     let located = Location {
-        generation: Some(generation(13)),
+        generation: generation(13),
         size: Some(size),
         sources: vec![hot(size)],
         conflicts: Vec::new(),
@@ -636,7 +632,7 @@ async fn an_overwrite_after_the_book_learned_the_object_serves_no_byte_of_the_ne
     assert!(
         rig.gets()
             .iter()
-            .all(|get| get.generation == Some(generation(20)))
+            .all(|get| get.generation == generation(20))
     );
 }
 
