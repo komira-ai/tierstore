@@ -450,3 +450,31 @@ async fn a_key_held_by_an_entry_by_extents_is_not_located() {
     assert_eq!(counts(&rig), LargeCounts::default());
     assert_eq!(rig.locates(), 0);
 }
+
+/// Asserts that `whole_fill_limit` is the last size of the path of `obj/`: an object of exactly
+/// that many bytes is served from the cache's own upstream with no GET of the engine, and one of
+/// a byte more is routed, served from the engine's upstream with its generation as `If-Match`.
+#[tokio::test]
+async fn the_limit_is_the_last_size_of_obj_and_one_more_byte_is_routed() {
+    let rig = LargeRig::new("routing-limit");
+    let at = object(LIMIT, 17);
+    rig.stored("cas/at", &at, generation(17));
+    rig.rig.put("cas/at", &at).await;
+    let (_, _, served) = rig.read("cas/at", None).await.unwrap();
+    assert_eq!(served, at.to_vec());
+    assert!(rig.gets().is_empty());
+    assert_eq!((counts(&rig).small, counts(&rig).routed), (1, 0));
+
+    let over = object(LIMIT + 1, 18);
+    rig.stored("cas/over", &over, generation(18));
+    let (meta, _, served) = rig.read("cas/over", None).await.unwrap();
+    assert_eq!(served, over.to_vec());
+    assert_eq!(meta.tag, generation(18).to_string());
+    assert!(!rig.gets().is_empty());
+    assert!(
+        rig.gets()
+            .iter()
+            .all(|get| get.generation == generation(18))
+    );
+    assert_eq!((counts(&rig).small, counts(&rig).routed), (1, 1));
+}
