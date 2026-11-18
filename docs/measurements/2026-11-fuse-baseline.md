@@ -14,12 +14,13 @@ that open, read and close the files of a real tree over and over, beside 176 CPU
   `fuser` commit with the same thread and mount settings, and does nothing else per request:
   the cost of the transport alone.
 
-**In short.** At the settings `tierstore fs` ships with (16 threads), 0.3.120 and 0.3.121 are the
-same within the spread of their runs: 5,147 and 4,780 opens/s, open p50 24.8 and 26.6 ms, p99
-48.5 and 51.1 ms, 285 and 291 ms of server CPU per 1000 cycles. The null file system, on the same
-library with the same timeouts and an answered `OPEN`, makes 238,428 opens/s at an open p50 of
-0.94 ms: the transport is not what costs `tierstore fs` its 25 ms. All figures are medians of
-five runs; the tables below give the least and the most.
+**In short.** At the settings `tierstore fs` ships with (16 threads), 0.3.121 makes 5,088 opens/s
+against 4,137 for 0.3.120 (+23%; the least run of 0.3.121 is above the most of 0.3.120), at an open
+p50 of 25.0 against 30.0 ms and a p99 of 45.9 against 60.0 ms, for the same server CPU per 1000
+cycles (285 and 286 ms). The null file system, on the same library with the same timeouts and an
+answered `OPEN`, makes 255,927 opens/s at an open p50 of 0.87 ms: the transport is not what costs
+`tierstore fs` its 25 to 30 ms. All figures are medians of five runs; the tables below give the
+least and the most.
 
 ## Setup
 
@@ -62,30 +63,30 @@ Median of the runs kept (least-most); the first 1 run(s) of each series left out
 
 | variant | regime | opens/s | stat p50 ms | stat p99 ms | stat max ms | open p50 ms | open p99 ms | open max ms |
 |---|---|---|---|---|---|---|---|---|
-| v1 | caches-on | 5147 (4990-5377) | 23.7 (22.7-24.2) | 39.1 (37.5-41.2) | 87.0 (86.1-90.7) | 24.8 (23.7-25.3) | 48.5 (44.3-51.1) | 143 (115-152) |
-| v2 | caches-on | 4780 (4249-5801) | 25.6 (21.1-29.0) | 42.2 (32.9-46.9) | 150 (86.9-226) | 26.6 (22.2-30.0) | 51.1 (37.0-60.0) | 127 (113-149) |
-| null | caches-off | 7650 (7552-7933) | 16.6 (15.9-16.9) | 25.6 (25.0-26.1) | 155 (126-191) | 17.2 (16.4-17.4) | 26.3 (25.6-26.9) | 147 (114-224) |
-| null | caches-on | 238428 (216957-245839) | 0.01 (0.01-0.01) | 0.03 (0.03-0.04) | 26.1 (11.2-33.2) | 0.94 (0.86-1.00) | 3.19 (2.93-3.56) | 79.9 (55.8-88.4) |
+| v1 | caches-on | 4137 (4021-4265) | 30.0 (29.0-31.1) | 44.8 (43.3-45.9) | 76.0 (75.0-82.7) | 30.0 (30.0-31.1) | 60.0 (58.5-61.6) | 154 (127-170) |
+| v2 | caches-on | 5088 (4829-5276) | 24.0 (22.9-25.0) | 39.1 (37.0-42.2) | 85.5 (76.9-114) | 25.0 (24.2-26.3) | 45.9 (43.8-51.1) | 122 (99.1-128) |
+| null | caches-off | 7299 (7034-8031) | 17.4 (15.7-18.0) | 28.2 (26.9-29.2) | 122 (117-175) | 18.0 (16.1-18.5) | 29.0 (27.7-30.0) | 158 (118-181) |
+| null | caches-on | 255927 (221259-267845) | 0.01 (0.01-0.01) | 0.02 (0.02-0.04) | 28.1 (19.6-57.0) | 0.87 (0.82-0.99) | 2.70 (2.67-3.72) | 83.8 (74.5-101) |
 | null | no-open | 1002042 (953562-1022046) | 0.01 (0.01-0.01) | 0.02 (0.02-0.03) | 95.3 (64.0-164) | 0.01 (0.01-0.01) | 0.03 (0.02-0.04) | 87.0 (60.0-107) |
 | v1-t64 | caches-on | 3297 (3228-3408) | 33.2 (32.4-33.8) | 51.1 (49.5-52.2) | 93.1 (85.4-98.0) | 33.8 (33.8-34.9) | 190 (181-202) | 710 (641-766) |
 | v2-t64 | caches-on | 3658 (3355-4106) | 30.3 (27.1-32.9) | 46.4 (41.2-50.1) | 87.2 (75.1-94.1) | 32.1 (30.0-33.8) | 150 (101-181) | 499 (363-654) |
 
 | variant | regime | cold MB/s | warm MB/s | server CPU ms/1k | cgroup kernel ms/1k | node CPU ms/1k | D mean | D max | waiting mean | waiting max |
 |---|---|---|---|---|---|---|---|---|---|---|
-| v1 | caches-on | 5079 (4694-6865) | 5455 (5063-6887) | 285 (280-287) | 165 (161-166) | 17091 (16359-17612) | 0.04 (0.02-0.09) | 1.00 (1.00-2.00) | 281 (276-284) | 324 (317-337) |
-| v2 | caches-on | 6110 (5304-6390) | 6187 (5529-6545) | 291 (283-296) | 165 (164-168) | 18398 (15157-20655) | 0.09 (0.02-6.55) | 1.00 (1.00-110) | 280 (273-284) | 316 (315-332) |
-| null | caches-off | 1268 (1161-1278) | 4697 (4497-5196) | 2065 (2004-2105) | 1941 (1900-1988) | 11503 (11092-11653) | 0.06 (0.02-0.13) | 1.00 (1.00-2.00) | 254 (249-254) | 263 (262-265) |
-| null | caches-on | 1274 (1247-1309) | 7369 (7189-7528) | 65.3 (63.5-66.0) | 62.4 (60.5-63.2) | 369 (358-405) | 0.04 (0.00-0.07) | 1.00 (0.00-2.00) | 438 (430-443) | 480 (471-487) |
+| v1 | caches-on | 6085 (4898-7761) | 6206 (5209-7871) | 286 (285-294) | 159 (157-164) | 21253 (20621-21865) | 0.21 (0.15-0.32) | 2.00 (1.00-2.00) | 282 (280-284) | 317 (311-334) |
+| v2 | caches-on | 5066 (4727-7420) | 5416 (5006-7802) | 285 (283-292) | 161 (161-169) | 17289 (16661-18216) | 0.27 (0.24-0.37) | 2.00 (2.00-3.00) | 281 (280-282) | 316 (311-319) |
+| null | caches-off | 1211 (1152-1271) | 4996 (4644-5513) | 2086 (1936-2144) | 1966 (1830-2027) | 12056 (10956-12508) | 0.11 (0.04-0.22) | 1.00 (1.00-2.00) | 253 (249-254) | 263 (262-264) |
+| null | caches-on | 1276 (1213-1387) | 7211 (5801-7503) | 60.4 (57.8-66.6) | 57.6 (54.9-63.8) | 344 (328-398) | 0.17 (0.07-0.28) | 2.00 (1.00-2.00) | 417 (414-443) | 473 (465-476) |
 | null | no-open | 1393 (1375-1407) | 7285 (5391-7936) | 0.00 (0.00-0.00) | 0.00 (0.00-0.00) | 87.8 (86.1-92.3) | 0.35 (0.16-0.56) | 2.00 (1.00-4.00) | 0.00 (0.00-0.00) | 0.00 (0.00-0.00) |
 | v1-t64 | caches-on | 4899 (4109-5390) | 6020 (4595-6483) | 343 (336-348) | 166 (164-174) | 26680 (25799-27250) | 0.12 (0.07-0.16) | 1.00 (1.00-2.00) | 300 (296-302) | 336 (331-350) |
 | v2-t64 | caches-on | 4597 (4571-5709) | 5335 (4638-6343) | 331 (322-347) | 165 (159-173) | 24050 (21423-26218) | 0.07 (0.04-0.16) | 1.00 (1.00-2.00) | 299 (297-302) | 331 (327-344) |
 
 | variant | regime | runs kept | errors | load at start | file list | server executable | settings |
 |---|---|---|---|---|---|---|---|
-| v1 | caches-on | 5 of 6 | 0 | 202 (150-210) | a01bea3dceeb | e2be16acf886 | attr_timeout=32000000s, entry_timeout=32000000s, library=komira-ai/fuser 0d8f5da (fuser 0.18.0 + 2 commits), open=explicit, FOPEN_KEEP_CACHE; passthrough when offered, server=tierstore 0.3.120, threads=16 |
-| v2 | caches-on | 5 of 6 | 0 | 218 (193-257) | a01bea3dceeb | 79f1fdaa8f82 | attr_timeout=32000000s, entry_timeout=32000000s, library=komira-ai/fuser 0d8f5da (fuser 0.18.0 + 2 commits), open=explicit, FOPEN_KEEP_CACHE; passthrough when offered, server=tierstore 0.3.121, threads=16 |
-| null | caches-off | 5 of 6 | 0 | 228 (217-247) | a01bea3dceeb | 4bdbd5094dec | attr_timeout=0ms, entry_timeout=0ms, library=komira-ai/fuser 0d8f5da (fuser 0.18.0 + 2 commits), open=explicit, server=fsbench null-fs, threads=16 |
-| null | caches-on | 5 of 6 | 0 | 260 (249-264) | a01bea3dceeb | 4bdbd5094dec | attr_timeout=32000000000ms, entry_timeout=32000000000ms, library=komira-ai/fuser 0d8f5da (fuser 0.18.0 + 2 commits), open=explicit, server=fsbench null-fs, threads=16 |
+| v1 | caches-on | 5 of 6 | 0 | 214 (148-230) | a01bea3dceeb | e2be16acf886 | attr_timeout=32000000s, entry_timeout=32000000s, library=komira-ai/fuser 0d8f5da (fuser 0.18.0 + 2 commits), open=explicit, FOPEN_KEEP_CACHE; passthrough when offered, server=tierstore 0.3.120, threads=16 |
+| v2 | caches-on | 5 of 6 | 0 | 215 (209-219) | a01bea3dceeb | 79f1fdaa8f82 | attr_timeout=32000000s, entry_timeout=32000000s, library=komira-ai/fuser 0d8f5da (fuser 0.18.0 + 2 commits), open=explicit, FOPEN_KEEP_CACHE; passthrough when offered, server=tierstore 0.3.121, threads=16 |
+| null | caches-off | 5 of 6 | 0 | 260 (220-286) | a01bea3dceeb | 4bdbd5094dec | attr_timeout=0ms, entry_timeout=0ms, library=komira-ai/fuser 0d8f5da (fuser 0.18.0 + 2 commits), open=explicit, server=fsbench null-fs, threads=16 |
+| null | caches-on | 5 of 6 | 0 | 275 (252-283) | a01bea3dceeb | 4bdbd5094dec | attr_timeout=32000000000ms, entry_timeout=32000000000ms, library=komira-ai/fuser 0d8f5da (fuser 0.18.0 + 2 commits), open=explicit, server=fsbench null-fs, threads=16 |
 | null | no-open | 5 of 6 | 0 | 410 (361-430) | a01bea3dceeb | 4bdbd5094dec | attr_timeout=32000000000ms, entry_timeout=32000000000ms, library=komira-ai/fuser 0d8f5da (fuser 0.18.0 + 2 commits), open=none, server=fsbench null-fs, threads=16 |
 | v1-t64 | caches-on | 5 of 6 | 0 | 229 (205-277) | a01bea3dceeb | e2be16acf886 | attr_timeout=32000000s, entry_timeout=32000000s, library=komira-ai/fuser 0d8f5da (fuser 0.18.0 + 2 commits), open=explicit, FOPEN_KEEP_CACHE; passthrough when offered, server=tierstore 0.3.120, threads=64 |
 | v2-t64 | caches-on | 5 of 6 | 0 | 210 (208-218) | a01bea3dceeb | 79f1fdaa8f82 | attr_timeout=32000000s, entry_timeout=32000000s, library=komira-ai/fuser 0d8f5da (fuser 0.18.0 + 2 commits), open=explicit, FOPEN_KEEP_CACHE; passthrough when offered, server=tierstore 0.3.121, threads=64 |
@@ -102,13 +103,12 @@ Median of the runs kept (least-most); the first 1 run(s) of each series left out
 
 ### Reading
 
-- **V1 against V2.** komira-ai/tierstore#343 takes away a lock that an open held across its
-  round trip to the fill socket while it pinned a blob. Here every blob of the tree is pinned in
-  the first run of a series (the one left out), so in the runs kept no open of V1 waits on that
-  round trip, and the two releases measure the same at 16 threads. At 64 threads V2 is ahead
-  (3,658 against 3,297 opens/s, open p99 150 against 190 ms), and both are below their own
-  16-thread figures: more threads queue on the same locks (the backing table of passthrough,
-  rewritten whole at each first open and last release, is one; see komira-ai/tierstore#343).
+- **V1 against V2.** komira-ai/tierstore#343 takes away a lock that an open of a blob not yet
+  pinned held across its round trip to the fill socket, and the shared lock an open of a pinned
+  blob took. V2 is ahead at both thread counts: +23% opens/s at 16 threads, +11% at 64 (3,658
+  against 3,297, open p99 150 against 190 ms). Both releases are slower at 64 threads than at
+  16: more threads queue on the locks that remain (the backing table of passthrough, rewritten
+  whole at each first open and last release, is one; see komira-ai/tierstore#343).
 - **The earlier figures.** The synthetic measurement that found the stall gave 2,769 opens/s for
   0.3.119 and 28,199 for the fix, on a node that was running builds, through the node's own
   instance (with its whole backing table), at 64 threads and with a cycle of `open`, a 1-byte
@@ -116,22 +116,26 @@ Median of the runs kept (least-most); the first 1 run(s) of each series left out
   from one thread outside the request locks; that change was taken out of
   komira-ai/tierstore#343 before it merged, so 0.3.121 is not that build. The series here are
   the baseline to compare with from now on.
-- **Where the time goes.** With the same timeouts, a `stat` costs 23.7 ms (median) on
-  `tierstore fs` and 0.01 ms on the null file system, and an `open` 24.8 ms against 0.94 ms; the
+- **Where the time goes.** With the same timeouts, a `stat` costs 24.0 ms (median) on
+  `tierstore fs` 0.3.121 and 0.01 ms on the null file system, and an `open` 25.0 ms against
+  0.87 ms; the
   requests waiting on the connection stay near 280, so about 256 readers are queued on the
-  server at any moment. The null file system's `caches-off` series (7,650 opens/s, open p50
-  17.2 ms, 2 s of server CPU per 1000 cycles) shows what a `LOOKUP`, a `GETATTR` and an `OPEN`
+  server at any moment. The null file system's `caches-off` series (7,299 opens/s, open p50
+  18.0 ms, 2.1 s of server CPU per 1000 cycles) shows what a `LOOKUP`, a `GETATTR` and an `OPEN`
   per file cost through this library with 16 threads; `no-open` (1,002,042 opens/s, no server
   CPU) is the cost of a cycle that never reaches the server.
 - **Reads.** `tierstore fs` reads whole blobs by passthrough here (kernel 7.0 offers it), so its
-  cold reads (5,079 and 6,110 MB/s) are the kernel reading the node's cache files, and are not
+  cold reads (6,085 and 5,066 MB/s) are the kernel reading the node's cache files, and are not
   comparable with the null file system's (about 1,300 MB/s), whose every read reaches the server.
 - **D state.** D state stays near zero in every series: under this load the readers wait for
   the server interruptibly (they show as `S`); the D counts of the loaded nodes are not
   reproduced by this load, which is one reason the measurement under a real build is still to do.
 - **Load at start.** The one-minute load average when a run starts is the tail of the run before
-  it (176 burners); no job ran on the node during any series (the runner counted the job
-  processes before and after each).
+  it (176 burners). No farm job ran on the node during any series kept here: the node's job
+  agent was stopped before these series ran, and the runner counted no job process before or
+  after each. A first collection of the four series `v1`, `v2`, `null caches-off` and
+  `null caches-on`, which ran while the agent could still place jobs, was set aside and run
+  again; it had put 0.3.120 and 0.3.121 level at 16 threads.
 
 ## How to run it again
 
