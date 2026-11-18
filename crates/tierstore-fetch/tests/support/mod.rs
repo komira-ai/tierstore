@@ -81,7 +81,6 @@ impl ListL2 for TestList {
             cell_count: self.digests.len() as u32,
             cell_shift: 20,
             pack_flags: 1,
-            upload_part_size: 0,
         })
     }
 
@@ -127,7 +126,6 @@ impl Pack {
                 },
                 size,
                 digests: Some(PackDigests { list, pack: 0 }),
-                upload_part_size: 0,
             },
             bytes,
         }
@@ -146,7 +144,6 @@ impl Pack {
                 },
                 size,
                 digests: None,
-                upload_part_size: 0,
             },
             bytes,
         }
@@ -222,15 +219,7 @@ pub fn degraded(node: u8, sources: &[DeviceRef], offset: u64, len: u64) -> Sourc
     }
 }
 
-pub fn legacy(len: u64) -> Source {
-    Source {
-        device: DeviceRef::Legacy,
-        kind: SourceKind::Legacy,
-        extent: ByteRange { offset: 0, len },
-    }
-}
-
-pub fn location(g: Option<Generation>, size: u64, sources: Vec<Source>) -> Location {
+pub fn location(g: Generation, size: u64, sources: Vec<Source>) -> Location {
     Location {
         generation: g,
         size: Some(size),
@@ -291,12 +280,12 @@ impl TestUpstream {
         Self::default()
     }
 
-    /// Adds `pack` with `location`; every copy holds `g` (or the location's generation, or
-    /// generation 1).
+    /// Adds `pack` with `location`; every copy holds the pack id's ETag, or the location's
+    /// generation.
     pub fn add(&self, pack: &Pack, location: Location) {
         let g = match pack.spec.id.root {
             PackRoot::Etag(g) => g,
-            PackRoot::Digest(_) => location.generation.unwrap_or(generation(1)),
+            PackRoot::Digest(_) => location.generation,
         };
         let mut bytes = BTreeMap::new();
         bytes.insert(g, pack.bytes.clone());
@@ -398,8 +387,7 @@ impl Upstream for TestUpstream {
                     .held
                     .get(&req.source.device)
                     .copied()
-                    .or(o.location.generation)
-                    .unwrap_or_else(|| *o.bytes.keys().next().expect("bytes"));
+                    .unwrap_or(o.location.generation);
                 (g, o.bytes.get(&g).cloned().expect("bytes of g"))
             });
             (script, served)
@@ -410,7 +398,7 @@ impl Upstream for TestUpstream {
             device: req.source.device,
         })?;
         let bytes = || {
-            if req.generation.is_some_and(|w| w != g) {
+            if req.generation != g {
                 return Err(UpstreamError::PreconditionFailed {
                     key: req.key.clone(),
                     device: req.source.device,

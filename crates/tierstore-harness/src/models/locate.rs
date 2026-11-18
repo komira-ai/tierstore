@@ -161,7 +161,7 @@ pub fn sample_copy(node: NodeId) -> HotCopy {
 #[must_use]
 pub fn sample_hit(node: NodeId) -> Location {
     Location {
-        generation: Some(sample_generation()),
+        generation: sample_generation(),
         size: Some(1),
         sources: vec![Source {
             device: DeviceRef::Hot(node),
@@ -454,7 +454,7 @@ pub fn node_answer(result: Result<Envelope<LocateResponse>, PeerError>) -> NodeA
 
 fn location(generation: Generation, size: u64, sources: Vec<Source>) -> Location {
     Location {
-        generation: Some(generation),
+        generation,
         size: Some(size),
         sources,
         conflicts: Vec::new(),

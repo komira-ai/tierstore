@@ -119,6 +119,8 @@ pub(crate) struct FillSched {
     /// Incremented when the fill fails or is lost: an op of an older life stops.
     pub life: u64,
     pub location: Option<Location>,
+    /// The generation the fill takes: the pack id's (an S3-front object), else its location's.
+    /// Set whenever the fill is ready.
     pub pinned: Option<Generation>,
     /// Copies that hold another generation or are gone (a promoted copy).
     pub excluded: Vec<Source>,
@@ -288,8 +290,7 @@ impl FillSched {
     /// a demand sub-range of its demanded cells when they span at most `sub_range_max_cells` and
     /// less than the whole piece,
     /// and the piece's other pending cells at their best class. Items being dispatched at the
-    /// same or a higher class are left out. Nothing while the fill is not ready, and nothing more
-    /// while a fill with no pinned generation has its first part in flight (section 9).
+    /// same or a higher class are left out. Nothing while the fill is not ready.
     pub(crate) fn items(&mut self, config: &EngineConfig) -> Vec<(Class, Queued)> {
         self.subs.clear();
         let Some(entry) = self.fill.entry.get().cloned() else {
@@ -297,8 +298,7 @@ impl FillSched {
         };
         let view = entry.state();
         self.prune(view);
-        let alone = self.pinned.is_none() && !(self.ops.is_empty() && self.dispatching.is_empty());
-        if self.phase != Phase::Ready || alone {
+        if self.phase != Phase::Ready {
             return Vec::new();
         }
         let mut out = Vec::new();

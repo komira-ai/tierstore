@@ -16,11 +16,11 @@ use std::sync::Arc;
 use futures::FutureExt;
 use tierstore_fetch_api::entry::EntrySpec;
 use tierstore_fetch_api::ids::PackRoot;
-use tierstore_fetch_api::upstream::{Located, Location, SourceKind};
+use tierstore_fetch_api::upstream::{Located, Location};
 
 use crate::engine::{Armed, Inner, State};
 use crate::fill::{Fill, FillSched, Phase, Resolved, Resolving};
-use crate::plan::{CELL_BYTES, PlanInput, plan, upload_cuts};
+use crate::plan::{CELL_BYTES, PlanInput, plan};
 use crate::stats::TimerKind;
 
 /// Starts fill `seq`: `Idle -> Starting`, and its first resolve.
@@ -136,27 +136,14 @@ async fn locate(inner: &Arc<Inner>, fill: &Arc<Fill>) -> Found {
 /// Takes a found location into the fill: the pinned generation, the copies, the plan.
 fn accept(inner: &Inner, fs: &mut FillSched, location: Location, part_size: u64) -> Resolved {
     let size_ok = location.size.is_none_or(|s| s == fs.fill.spec.size);
-    let pinned = fs.pinned.or(location.generation);
-    let held = match (pinned, location.generation) {
-        (Some(p), Some(g)) => p == g || location.conflicts.contains(&p),
-        _ => true,
-    };
+    let pinned = fs.pinned.unwrap_or(location.generation);
+    let held = pinned == location.generation || location.conflicts.contains(&pinned);
     if !(size_ok && held) {
         return Resolved::Failed;
     }
-    fs.pinned = pinned;
+    fs.pinned = Some(pinned);
     if fs.pieces.is_empty() {
-        let legacy = location
-            .sources
-            .iter()
-            .all(|s| matches!(s.kind, SourceKind::Legacy));
-        let upload = if legacy {
-            fs.fill.spec.upload_part_size
-        } else {
-            0
-        };
-        let mut cuts = upload_cuts(fs.fill.spec.size, upload);
-        cuts.extend(extent_cuts(&location));
+        let cuts = extent_cuts(&location);
         let (first_touch, first_touch_cells) = fs.first_touch.unwrap_or((0, 0));
         fs.pieces = plan(
             &inner.config,

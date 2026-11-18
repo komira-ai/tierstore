@@ -15,10 +15,10 @@ use tierstore_format::descriptor::Code;
 use tierstore_format::ids::{DriveId, Generation, NodeId};
 use tierstore_metrics::labels::{
     AbandonReason, AdmissionReason, BudgetReason, Copies, DegradedCause, DestageOutcome,
-    DestagePriority, Dir, Disk, Drive503, DriveState, FreeOutcome, FuseOp, GetKind, LegacyOutcome,
-    ListRefusal, LocateResult, Margin, PackLostPhase, PromoteOutcome, PutOutcome, ReadWaitCause,
-    RebuildKind, ReclaimKind, RecoveryPhase, SealReason, SealRound, SizeClass, StripeCode,
-    StripeState, TransportMode,
+    DestagePriority, Dir, Disk, Drive503, DriveState, FreeOutcome, FuseOp, GetKind, ListRefusal,
+    LocateResult, Margin, PackLostPhase, PromoteOutcome, PutOutcome, ReadWaitCause, RebuildKind,
+    ReclaimKind, RecoveryPhase, SealReason, SealRound, SizeClass, StripeCode, StripeState,
+    TransportMode,
 };
 use tierstore_metrics::{LabelValue, State};
 use tierstore_store_api::hot::{self, Unavailable};
@@ -91,10 +91,6 @@ fn every_closed_label_has_distinct_texts_indexed_by_position() {
     assert_eq!(
         check::<PackLostPhase>(PackLostPhase::as_str),
         ["before_job", "mid_job"]
-    );
-    assert_eq!(
-        check::<LegacyOutcome>(LegacyOutcome::as_str),
-        ["ok", "error", "hint_hit"]
     );
     assert_eq!(check::<SealReason>(SealReason::as_str).len(), 4);
     assert_eq!(
