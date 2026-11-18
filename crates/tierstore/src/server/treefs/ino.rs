@@ -25,6 +25,7 @@ pub(super) const ROOT: u64 = 1;
 pub(super) const TREES: u64 = 2;
 
 /// The inode number of `put/`.
+#[cfg(any(target_os = "linux", test))]
 pub(super) const PUT: u64 = 4;
 
 /// The top two bits, set in the inode number of every directory and file below `put/`: a part of
@@ -33,9 +34,11 @@ const PUT_RANGE: u64 = 0b11 << 62;
 
 /// Set, below [`PUT_RANGE`], in the inode number of a file of the put directory, and clear in that
 /// of a directory.
+#[cfg(any(target_os = "linux", test))]
 const PUT_FILE: u64 = 1 << 61;
 
 /// The bits below [`PUT_FILE`]: a directory's hash, or a file's number.
+#[cfg(any(target_os = "linux", test))]
 const PUT_LOW: u64 = PUT_FILE - 1;
 
 /// The top two bits of the inode number of a directory above the fs location of a placement.
@@ -55,17 +58,20 @@ pub(super) fn is_placed_dir(ino: u64) -> bool {
 }
 
 /// The inode number of the put directory's directory whose path hashes to `hash`.
+#[cfg(any(target_os = "linux", test))]
 pub(super) fn put_dir(hash: u64) -> u64 {
     PUT_RANGE | (hash & PUT_LOW)
 }
 
 /// The inode number of the put directory's file numbered `id` in the stage, for the whole of its
 /// life: staged, renamed, committed.
+#[cfg(any(target_os = "linux", test))]
 pub(super) fn put_file(id: u64) -> u64 {
     PUT_RANGE | PUT_FILE | (id & PUT_LOW)
 }
 
 /// What an inode number of the put directory is.
+#[cfg(any(target_os = "linux", test))]
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub(super) enum PutIno {
     /// `put/` itself.
@@ -77,6 +83,7 @@ pub(super) enum PutIno {
 }
 
 /// What `ino` is in the put directory, or none for an inode number outside it.
+#[cfg(any(target_os = "linux", test))]
 pub(super) fn put_of(ino: u64) -> Option<PutIno> {
     if ino == PUT {
         Some(PutIno::Root)

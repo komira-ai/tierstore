@@ -17,6 +17,11 @@
 //!   steady-state churn with eviction ([`write`], [`churn`]); C-6, drive facts and the object-size
 //!   distribution ([`facts`], [`sizes`]); C-7, placement ([`placement`]).
 //! - D, CPU rates of the hashes ([`cpu`]); E, node facts ([`facts`]).
+//!
+//! The crate is Linux only (it reads block devices, /proc and /sys, and uses `O_DIRECT`,
+//! `posix_fadvise`, `fdatasync`, hole punching and `sendfile`); on another system it is empty.
+
+#![cfg(target_os = "linux")]
 
 pub mod blockdev;
 pub mod cache;

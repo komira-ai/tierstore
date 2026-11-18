@@ -33,6 +33,7 @@ const REMOVED: u64 = 1 << 63;
 const UNCOUNTED: u64 = 1 << 62;
 
 /// The bits of a [`Lookups`] that hold the count.
+#[cfg(any(target_os = "linux", test))]
 const COUNT: u64 = UNCOUNTED - 1;
 
 /// How many sets the blobs of a tree that are pinned are split in.
@@ -82,6 +83,7 @@ impl Lookups {
     /// Takes away `nlookup` lookups. With `counting`, a forget of more than were counted marks the
     /// tree uncounted. Nothing is done to a tree marked as removed, which a forget that follows
     /// its removal does not find either; whether anything was.
+    #[cfg(any(target_os = "linux", test))]
     pub(super) fn forget(&self, nlookup: u64, counting: bool) -> bool {
         self.0
             .fetch_update(Ordering::AcqRel, Ordering::Acquire, |now| {
