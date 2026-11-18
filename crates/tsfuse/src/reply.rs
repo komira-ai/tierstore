@@ -21,6 +21,8 @@ impl Errno {
     pub const EAGAIN: Self = Self(11);
     /// `ENOSYS`: an opcode the library does not implement.
     pub const ENOSYS: Self = Self(38);
+    /// `EPROTO`: an INIT of a protocol version the library does not support.
+    pub const EPROTO: Self = Self(71);
 }
 
 /// The 16 bytes of `fuse_out_header` for a reply of `payload_len` bytes to `unique`, with

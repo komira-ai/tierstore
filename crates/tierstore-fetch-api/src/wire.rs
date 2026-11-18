@@ -8,12 +8,17 @@
 //! count is not the kind's.
 //!
 //! **Epoch.** The server stamps every connection and reply with a random `u64` epoch; the mount
-//! drops replies of any other epoch ([`Epoch::accepts`]). On reconnect the mount re-handshakes
-//! with the same holder id (its counter memfd and lifeline are unchanged and are sent again),
-//! re-sends `open-pack` and re-issues every parked `wait`, which is idempotent.
+//! drops replies of any other epoch ([`Epoch::accepts`]). Every request but the handshake carries
+//! the epoch the mount was handshaken under; the server refuses one of another epoch (`wait` and
+//! `ensure` with [`RefusalCode::UnknownHandle`], `open-pack` and `release` with
+//! [`RefusalCode::NotHandshaken`]), since handles are numbered per server. On reconnect the mount
+//! re-handshakes with the same holder id (its counter memfd and lifeline are unchanged and are
+//! sent again), re-sends `open-pack` and re-issues every parked `wait`, which is idempotent.
 //!
-//! **Handshake.** The mount sends its counter memfd (one for its whole life) and one end of a
-//! socketpair it keeps open for its whole life, the lifeline. The server ends a holder only on the
+//! **Handshake.** The mount sends its counter memfd (one for its whole life, created with
+//! `MFD_ALLOW_SEALING` and sealed with `F_SEAL_SHRINK`, never `F_SEAL_GROW`, so it can only grow
+//! and the server's read-only mapping of it can never fault) and one end of a socketpair it keeps
+//! open for its whole life, the lifeline. The server ends a holder only on the
 //! lifeline's `POLLHUP`, never because the protocol connection dropped (5.1).
 
 use crate::engine::WaitOutcome;

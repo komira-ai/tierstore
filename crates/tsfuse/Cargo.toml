@@ -6,14 +6,23 @@ rust-version.workspace = true
 license.workspace = true
 repository.workspace = true
 publish.workspace = true
-description = "The FUSE library of tierstore (docs/design/fetch-cache-serve.md, 5.2): the dispatch interface `Fs`/`Handled`/`Replier` with replies bound to their originating device, cancel tokens registered at read time and an atomic complete. The ABI (T-F1) and the transports (T-F2, T-F5) build on it."
+description = "The FUSE library of tierstore (docs/design/fetch-cache-serve.md, 5.2): the dispatch interface `Fs`/`Handled`/`Replier` with replies bound to their originating device, cancel tokens registered at read time and an atomic complete, and the kernel ABI (`abi`: wire structs, per-opcode parse, reply payloads, INIT negotiation). The transports (T-F2, T-F5) build on them."
 
 # No dependency on a FUSE crate: the library speaks the protocol itself (5.2).
 [dependencies]
 # The waker of a cancel token.
 futures.workspace = true
+# The typed errors of the ABI's parse and INIT negotiation (AGENTS.md R3).
+thiserror.workspace = true
+# The wire structs of the ABI: derives that refuse a struct with implicit padding and read and
+# write it as bytes with no `unsafe` here.
+zerocopy.workspace = true
 
 [dev-dependencies]
+# The digest of the pinned uapi header, checked by `tests/abi_layout.rs`.
+sha2.workspace = true
+# The scratch directory `tests/abi_probe.rs` compiles the layout probe into.
+tierstore-testkit.workspace = true
 tokio = { workspace = true, features = ["macros", "rt", "rt-multi-thread", "sync"] }
 
 [lints]

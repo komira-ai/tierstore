@@ -54,7 +54,7 @@ impl RequestHeader {
 }
 
 /// A request read from a device: its header and its body, parsed in place in the reader's pooled
-/// buffer (T-F1 parses the body per opcode).
+/// buffer ([`crate::abi::Operation::parse`] parses the body per opcode).
 #[derive(Debug, Clone, Copy)]
 pub struct Request<'a> {
     /// The header.
