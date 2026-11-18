@@ -153,6 +153,9 @@ hmac.workspace = true
 # S3 service of the tests of `S3Backend`. A dev-dependency is built for every test build, with
 # the `s3` feature or without it, though only the `s3` tests use the service.
 objstore-s3 = { workspace = true, features = ["testkit"] }
+# The `ObjectStore` conformance suite, which tests/s3_front/conformance.rs runs against the S3
+# front: the tierstore target of the suite.
+objstore-conformance.workspace = true
 # Encodes the messages the tests of the trees front send.
 prost.workspace = true
 # Scratch directories and key files of the tests of the binary.
