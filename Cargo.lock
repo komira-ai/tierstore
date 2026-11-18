@@ -3269,7 +3269,10 @@ name = "tsfuse"
 version = "0.1.0"
 dependencies = [
  "futures",
+ "sha2 0.11.0",
+ "thiserror",
  "tokio",
+ "zerocopy",
 ]
 
 [[package]]
