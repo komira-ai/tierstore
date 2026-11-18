@@ -10,8 +10,10 @@
     reason = "an integration test: a failed unwrap is the failure it reports"
 )]
 
-use std::collections::BTreeMap;
+use std::collections::{BTreeMap, BTreeSet};
 use std::io::{BufRead as _, BufReader};
+use std::mem::MaybeUninit;
+use std::os::fd::OwnedFd;
 use std::path::{Path, PathBuf};
 use std::process::{Command, Stdio};
 use std::time::Duration;
@@ -19,6 +21,7 @@ use std::time::Duration;
 use fsbench::host::Host;
 use fsbench::record::RunRecord;
 use fsbench::run::{Plan, run};
+use rustix::fs::inotify;
 use tierstore_testkit::dir::TestDir;
 
 /// A tree of 40 files of 1 to 40 KiB below `dir/tree`, and its list at `dir/list`.
@@ -320,9 +323,70 @@ fn readers_of(list: &Path) -> Vec<i32> {
         .collect()
 }
 
+/// The opens of the files one directory below a tree's root, as inotify reports them.
+struct Opens {
+    inotify: OwnedFd,
+    /// The name of the directory of each watch.
+    dirs: BTreeMap<i32, String>,
+}
+
+impl Opens {
+    /// Watches the opens of the files in each directory of `root` (the files of `tree()` are one
+    /// directory below it).
+    fn watch(root: &Path) -> Self {
+        let flags = inotify::CreateFlags::CLOEXEC | inotify::CreateFlags::NONBLOCK;
+        let inotify = inotify::init(flags).unwrap();
+        let mut dirs = BTreeMap::new();
+        for entry in std::fs::read_dir(root).unwrap() {
+            let entry = entry.unwrap();
+            let wd = inotify::add_watch(&inotify, entry.path(), inotify::WatchFlags::OPEN).unwrap();
+            dirs.insert(wd, entry.file_name().into_string().unwrap());
+        }
+        Self { inotify, dirs }
+    }
+
+    /// Waits until, for each of `readers` readers, a file of its share of `list` was opened, or
+    /// until `ended`; returns the readers a file of whose share was opened. Reader `i`'s share is
+    /// every `readers`-th file of the list from the `i`-th, and a reader opens a file of the tree
+    /// only in its cycles, so an open of a file of its share means its go was written to it.
+    fn wait_for_shares(
+        &self,
+        list: &Path,
+        readers: usize,
+        ended: impl Fn() -> bool,
+    ) -> BTreeSet<usize> {
+        let files = fsbench::list::read(list).unwrap().files;
+        let share: BTreeMap<&str, usize> = files
+            .iter()
+            .enumerate()
+            .map(|(i, entry)| (entry.path.as_str(), i % readers))
+            .collect();
+        let mut opened = BTreeSet::new();
+        let mut buf = [MaybeUninit::uninit(); 4096];
+        let mut events = inotify::Reader::new(&self.inotify, &mut buf);
+        while opened.len() < readers && !ended() {
+            match events.next() {
+                Ok(event) => {
+                    let dir = self.dirs.get(&event.wd());
+                    let name = event.file_name().and_then(|n| n.to_str().ok());
+                    if let (Some(dir), Some(name)) = (dir, name)
+                        && let Some(&reader) = share.get(format!("{dir}/{name}").as_str())
+                    {
+                        opened.insert(reader);
+                    }
+                }
+                Err(rustix::io::Errno::AGAIN) => std::thread::yield_now(),
+                Err(e) => panic!("read the opens: {e}"),
+            }
+        }
+        opened
+    }
+}
+
 /// A reader that dies during its cycles ends the run with an error that names it, and leaves no
 /// reader or burner behind. The readers have no limit on their cycles and an hour to make them,
-/// so they are killed while they cycle.
+/// and they are killed only once each has opened a file of its share, that is once each has its
+/// go: a reader killed before its go was written would end the run in the write of the go.
 #[test]
 fn a_reader_that_dies_ends_the_run_with_an_error() {
     let dir = TestDir::under(env!("CARGO_TARGET_TMPDIR"), "fsbench-run-killed");
@@ -330,13 +394,13 @@ fn a_reader_that_dies_ends_the_run_with_an_error() {
     let mut plan = plan(&list, &root, std::process::id());
     plan.max_cycles = 0;
     plan.runs = 1;
+    let opens = Opens::watch(&root);
     let running = std::thread::spawn(move || run(&plan, std::io::sink(), std::io::sink()));
-    // The readers are this process's children once they are started; wait for all three.
-    let mut readers = readers_of(&list);
-    while readers.len() < 3 && !running.is_finished() {
-        std::thread::yield_now();
-        readers = readers_of(&list);
-    }
+    let cycling = opens.wait_for_shares(&list, 3, || running.is_finished());
+    assert_eq!(cycling, BTreeSet::from([0, 1, 2]), "every reader cycles");
+    // Each reader opened a file, so each is this process's child, running `fsbench reader`.
+    let readers = readers_of(&list);
+    assert_eq!(readers.len(), 3);
     for pid in readers {
         let pid = rustix::process::Pid::from_raw(pid).unwrap();
         rustix::process::kill_process(pid, rustix::process::Signal::KILL).unwrap();
