@@ -32,7 +32,9 @@
 //!   entry is older than it: then one HEAD checks the entry first (module `revalidate`).
 //! - A miss on a whole GET fills the object. A miss on a ranged GET fills the whole object if it
 //!   is at most 64 MiB, and otherwise passes the range through and keeps nothing. A HEAD of an
-//!   object that is not kept goes to the upstream and fills nothing.
+//!   object that is not kept goes to the upstream and fills nothing. With the fetch engine
+//!   attached ([`LocalCache::route_large`], module [`large`]), a GET through the S3 front of an
+//!   object over `whole_fill_limit` that misses is served through the engine instead.
 //! - The misses of one key fill it once: the first starts the fill on a task of its own, the
 //!   others wait for it. A fill that no reader waits for any more still ends.
 //!
