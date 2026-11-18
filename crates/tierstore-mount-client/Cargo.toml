@@ -1,0 +1,52 @@
+[package]
+name = "tierstore-mount-client"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+repository.workspace = true
+publish.workspace = true
+description = "The mount's side of the mount-to-tierstore protocol (docs/design/fetch-cache-serve.md, 5.1 and 5.4; Linux only): PackClient, with wait coalescing per 8 cells, the table of open packs and their descriptors, read-only state reads, counter regions in one counter memfd, reconnect under the server's epoch, and a runtime of its own apart from the reader threads."
+
+# Linux only: the protocol passes descriptors with SCM_RIGHTS and maps memfds; the crate is empty
+# elsewhere (macOS serves through the in-process store, 5.6).
+[target.'cfg(target_os = "linux")'.dependencies]
+# The current view of a pack (its state page and data fd), swapped whole when a reconnect re-opens
+# the pack, and loaded with no lock by every read. MIT OR Apache-2.0.
+arc-swap.workspace = true
+# The connector is used as `dyn` and has an async method, boxed as the traits of
+# tierstore-fetch-api are.
+async-trait.workspace = true
+# The one-shot channels that hand a wait's outcome to a reader thread (completed from the client's
+# runtime, received by a plain thread or a task) and the boxed sleep of the timer.
+futures.workspace = true
+# The PROT_* and MAP_* constants of the mappings (no libc call is made).
+libc.workspace = true
+# memfd_create, seals, ftruncate, fstat and pread of the descriptors; sendmsg and recvmsg with
+# SCM_RIGHTS; socketpair of the lifeline; getrandom for the jitter's seed. All without `unsafe`.
+rustix = { workspace = true, features = ["fs", "net", "rand"] }
+thiserror.workspace = true
+# The frozen protocol (frames, messages, epoch), the state page layout and the reader counters.
+tierstore-fetch-api.workspace = true
+# The client's own runtime (a current-thread runtime on a thread of its own), its socket, its
+# channels and the production timer.
+tokio = { workspace = true, features = ["macros", "net", "rt", "sync", "time"] }
+# Connections lost and requests refused, for the operator.
+tracing.workspace = true
+# Shared mappings of the counter memfd (read-write) and of a pack's state memfd (read-only), with
+# atomic references into them, through a safe interface.
+vm-memory = { workspace = true, features = ["backend-mmap"] }
+
+[target.'cfg(target_os = "linux")'.dev-dependencies]
+# The test's side of the sockets: polls of the lifeline, seals and inodes of what was passed.
+rustix = { workspace = true, features = ["event", "fs", "net"] }
+# The integration tests run the client against the real server of T5, the real entry store of T1
+# (its sealed state memfd and data file) and its mapping of the mount's counter memfd.
+tierstore-entry.workspace = true
+tierstore-mount-server.workspace = true
+# The scratch directory of the entry store and of the listening socket.
+tierstore-testkit.workspace = true
+tokio = { workspace = true, features = ["macros", "net", "rt", "rt-multi-thread", "sync", "time"] }
+
+[lints]
+workspace = true

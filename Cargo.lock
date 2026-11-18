@@ -2999,6 +2999,25 @@ name = "tierstore-model"
 version = "0.1.0"
 
 [[package]]
+name = "tierstore-mount-client"
+version = "0.1.0"
+dependencies = [
+ "arc-swap",
+ "async-trait",
+ "futures",
+ "libc",
+ "rustix",
+ "thiserror",
+ "tierstore-entry",
+ "tierstore-fetch-api",
+ "tierstore-mount-server",
+ "tierstore-testkit",
+ "tokio",
+ "tracing",
+ "vm-memory",
+]
+
+[[package]]
 name = "tierstore-mount-server"
 version = "0.1.0"
 dependencies = [
