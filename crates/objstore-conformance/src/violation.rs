@@ -210,9 +210,11 @@ pub enum Violation {
         /// The keys on the page.
         got: usize,
     },
-    /// Concurrent writers of one key: another number of them succeeded than the contract says.
+    /// Concurrent writers of one key: more succeeded than the contract allows, or fewer than it
+    /// requires even counting those answered `409`.
     #[error(
-        "{case}: {created} of {writers} concurrent writers of {key} succeeded, expected {want}"
+        "{case}: {created} of {writers} concurrent writers of {key} succeeded and {conflicted} were \
+         answered 409, expected {want}"
     )]
     Race {
         /// The case.
@@ -223,6 +225,8 @@ pub enum Violation {
         writers: usize,
         /// The writers that succeeded.
         created: usize,
+        /// The writers answered `409` (`ConditionalRequestConflict`).
+        conflicted: usize,
         /// The number that had to succeed.
         want: usize,
     },

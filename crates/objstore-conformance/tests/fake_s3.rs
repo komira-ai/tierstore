@@ -56,7 +56,7 @@ async fn a_wrong_declaration_of_the_identical_answer_fails_two_cases() {
             "identical-put: put_new of conformance/run-2/identical-put/object failed: object \
              conformance/run-2/identical-put/object already exists",
             "create-race: 1 of 8 concurrent writers of conformance/run-2/create-race/same \
-             succeeded, expected 8",
+             succeeded and 0 were answered 409, expected 8",
         ]
     );
 }

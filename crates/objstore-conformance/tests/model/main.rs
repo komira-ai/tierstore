@@ -129,7 +129,7 @@ async fn an_identical_write_answered_otherwise_than_declared_is_found() {
     let found = Case::CreateRace.check(&refuses, &prefix, IdenticalPut::Accepted);
     assert_eq!(
         found.await.unwrap_err().to_string(),
-        "create-race: 1 of 8 concurrent writers of t/same succeeded, expected 8"
+        "create-race: 1 of 8 concurrent writers of t/same succeeded and 0 were answered 409, expected 8"
     );
 }
 
@@ -141,12 +141,33 @@ async fn the_race_case_finds_a_check_then_write() {
     let refused = IdenticalPut::Refused;
     assert_eq!(
         found(Defect::RacyCheck, Case::CreateRace, refused).await,
-        "create-race: 8 of 8 concurrent writers of t/different succeeded, expected 1"
+        "create-race: 8 of 8 concurrent writers of t/different succeeded and 0 were answered 409, expected 1"
     );
     assert_eq!(
         found(Defect::PutFails, Case::CreateRace, refused).await,
         "create-race: put_new of t/different was refused with \"store answered 503 SlowDown: \
          the model is down\"; AlreadyExists was required"
+    );
+}
+
+/// Asserts that the race case passes a store that answers the losers of a race `409`
+/// (`ConditionalRequestConflict`, as S3 may), declared either way; and that it finds a store that
+/// answers every writer `409` and keeps none, and one that refuses a loser but keeps its bytes.
+#[tokio::test]
+async fn the_race_case_takes_a_409_for_a_loser_but_not_a_lost_write() {
+    let p = prefix("t/");
+    for identical in [IdenticalPut::Accepted, IdenticalPut::Refused] {
+        let store = Model::new(identical, Some(Defect::LosersConflict));
+        Case::CreateRace.check(&store, &p, identical).await.unwrap();
+    }
+    let refused = IdenticalPut::Refused;
+    assert_eq!(
+        found(Defect::VanishingConflict, Case::CreateRace, refused).await,
+        "create-race: get_range of t/different failed: object t/different not found"
+    );
+    assert_eq!(
+        found(Defect::StoresLoser, Case::CreateRace, refused).await,
+        "create-race: t/different [0, 257): read 256 bytes, expected 256, first difference at 0"
     );
 }
 
@@ -297,7 +318,8 @@ async fn a_run_reports_each_case_and_the_violations_of_its_clean_up() {
         [
             "create-only: put_new of r/create-only/object succeeded; AlreadyExists was required",
             "identical-put: put_new of r/identical-put/object succeeded; AlreadyExists was required",
-            "create-race: 8 of 8 concurrent writers of r/create-race/different succeeded, expected 1",
+            "create-race: 8 of 8 concurrent writers of r/create-race/different succeeded and 0 were answered \
+             409, expected 1",
         ]
     );
     assert!(report.to_string().starts_with(

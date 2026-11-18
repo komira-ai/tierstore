@@ -32,6 +32,13 @@ pub enum Defect {
     PutFails,
     /// `put_new` checks the key, yields, and then writes: concurrent writers all succeed.
     RacyCheck,
+    /// Not a defect: of concurrent writers of a key, those that find it written while they waited
+    /// are answered `409 ConditionalRequestConflict`, as S3 may answer them.
+    LosersConflict,
+    /// Every concurrent writer is answered `409` and none of them is stored.
+    VanishingConflict,
+    /// A refused write of different bytes is stored all the same.
+    StoresLoser,
     /// A streamed body that ends short is stored as far as it went.
     KeepsShortBody,
     /// A streamed body that runs long is cut and stored.
@@ -101,7 +108,12 @@ impl Model {
             Some(held) if !replace && *held == body && self.identical == IdenticalPut::Accepted => {
                 Ok(())
             }
-            Some(_) if !replace => Err(ObjectStoreError::AlreadyExists(key.clone())),
+            Some(_) if !replace => {
+                if self.has(Defect::StoresLoser) {
+                    objects.insert(key.clone(), body);
+                }
+                Err(ObjectStoreError::AlreadyExists(key.clone()))
+            }
             _ => {
                 objects.insert(key.clone(), body);
                 self.deleted.lock().unwrap().retain(|k| k != key);
@@ -137,6 +149,18 @@ impl ObjectStore for Model {
         }
         if retain_until.is_some() && !self.has(Defect::KeepsRetention) {
             return Err(ObjectStoreError::Unsupported("Object Lock"));
+        }
+        if self.has(Defect::LosersConflict) || self.has(Defect::VanishingConflict) {
+            let held = self.objects.lock().unwrap().contains_key(key);
+            tokio::task::yield_now().await;
+            let now = self.objects.lock().unwrap().contains_key(key);
+            if self.has(Defect::VanishingConflict) || (!held && now) {
+                return Err(ObjectStoreError::Service {
+                    status: 409,
+                    code: "ConditionalRequestConflict".to_owned(),
+                    message: String::new(),
+                });
+            }
         }
         if self.has(Defect::RacyCheck) {
             let held = self.objects.lock().unwrap().contains_key(key);

@@ -8,11 +8,13 @@ a single-node SeaweedFS `weed server -s3`, with the result read against 10.12.
 **In short.** The suite checks what 10.9 asks of the store's S3 subset: create-only writes, `412` on
 different bytes, ranges, HEAD, DELETE and LIST. Four targets run it. The in-memory model and the
 loopback fake S3 run it in `objstore-conformance`'s tests. tierstore's current S3 front runs it in
-`tierstore`'s tests, and its LIST is checked again after a restart. SeaweedFS 4.54 ran it once on a
-farm node. Every CI target passes every case. SeaweedFS passes 9 of 10 cases, among them create-only
-under 8 concurrent writers. It fails LIST, and the cause is not LIST. A conditional PUT of key `a`
-is refused with `412` when no object `a` exists but a key `a/b` does: SeaweedFS's filer reads `a`
-as a directory. Its LIST is exact before and after a restart.
+`tierstore`'s tests, and its LIST is checked again after a restart. SeaweedFS 4.54 ran it three times on one farm node. Every CI target passes every case. With
+`--identical refused`, the answer SeaweedFS gives, SeaweedFS passes 9 of 10 cases, among them
+create-only under 8 concurrent writers. With `accepted` it passes 7. It fails the `list` case at the
+case's seed step, so none of that case's listing checks ran against it. The failing step is a
+conditional PUT: a PUT of key `a` is refused with `412` when no object `a` exists but a key `a/b`
+does, because SeaweedFS's filer reads `a` as a directory. Separate `curl` probes of LIST, on a
+smaller set of keys, gave exactly the live keys, before and after a restart.
 
 ## The suite
 
@@ -29,7 +31,7 @@ prefix and checks that the prefix then lists nothing.
 | `claims` | The store claims conditional writes and not Object Lock. A retention date is refused (`Unsupported`), and the refusal leaves no object. |
 | `create-only` | A write of different bytes to a used key is refused (`AlreadyExists`, which is `412`), whether the bytes are the same length, one byte longer or one byte shorter, and whether written whole or streamed. The key keeps its first bytes. |
 | `identical-put` | A write of the bytes the key holds gets the declared answer, whole or streamed, and the bytes stay. |
-| `create-race` | 8 concurrent writers of different bytes to one key: exactly one succeeds, the other 7 get `AlreadyExists`, and a read gives the winner's bytes. 8 concurrent writers of the same bytes: all 8 succeed (`accepted`) or exactly 1 (`refused`). |
+| `create-race` | 8 concurrent writers of different bytes to one key: at most one succeeds. Each of the others gets `AlreadyExists`, or `409 ConditionalRequestConflict`, which S3 may give racing writers and which does not say whether the write landed. A read gives the winner's bytes, or, if no writer succeeded, the bytes of a writer answered `409`. 8 concurrent writers of the same bytes: all 8 succeed (`accepted`) or one (`refused`), counting `409` answers as possibly successful. |
 | `streamed` | A streamed write stores exactly its bytes. A body that ends short, runs long or fails is refused (`Body`), and the key is then absent from both HEAD and GET. |
 | `range` | Reads of 8 windows of a 1000-byte object are byte-exact, and a window that runs past the end is cut there. A range that starts at or past the end is `InvalidRange`. An absent key is `NotFound`. |
 | `head` | HEAD gives the lengths 0, 1 and 4096. An absent key is `None`. A read of the empty object is `InvalidRange`. |
@@ -41,7 +43,7 @@ prefix and checks that the prefix then lists nothing.
 writes and the check. That is the check 10.9 asks for "across a node restart".
 
 **The suite is checked by its own negative cases.** `crates/objstore-conformance/tests/model` breaks
-an in-memory store in 23 ways, one at a time: a store that overwrites a used key, that checks and
+an in-memory store in 25 ways, one at a time: a store that overwrites a used key, that checks and
 then writes (so all 8 concurrent writers win), that keeps a short streamed body, that cuts a read one
 byte short, that lists a deleted key, that ignores `max_keys`, that never ends a listing, and more.
 For each one the test asserts the whole text of the violation the matching case reports.
@@ -97,7 +99,8 @@ wrong declaration both behaved as follows.
 | ETag | `"abb51e32e3af80762d4685f5829d79ef"`, the MD5 of the body | the same |
 
 **The LIST failure, isolated.** The probes below used `curl --aws-sigv4` against a fresh data
-directory. Each line is one request and its answer, measured.
+directory. Each row is a short sequence of requests and the answer to the last request (or to each
+request, where several answers are listed), measured once.
 
 | Probe | Answer |
 |---|---|
@@ -113,8 +116,9 @@ directory. Each line is one request and its answer, measured.
 | restart the process on the same data directory, LIST `z/`, GET `e` | `e`, `k1`, `k10`, `k2`, `x y/café`; `e` gives the new bytes |
 
 The cause is the conditional PUT. SeaweedFS's filer keeps keys as paths, and its `If-None-Match: *`
-check counts the implicit directory `x/a/` as an existing `x/a`. LIST itself, a re-PUT after a
-DELETE, and LIST after a restart all matched the suite.
+check counts the implicit directory `x/a/` as an existing `x/a`. In these probes LIST itself, a
+re-PUT after a DELETE, and LIST after a restart gave the live keys. The probes did not cover the
+whole `list` case: no empty object, and no listing with sizes.
 
 **Not run.** These parts of 17.2 item 6 were not run, and the reasons follow.
 

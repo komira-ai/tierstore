@@ -189,8 +189,12 @@ pub(crate) async fn identical_put<S: ObjectStore>(
     sized(case, store, &k, 100).await
 }
 
-/// Writes each of `bodies` under `key` at once and checks that `want` writers succeeded, the
-/// others were refused as `AlreadyExists`, and the key holds the bytes of a writer that succeeded.
+/// Writes each of `bodies` under `key` at once and checks the answers and the bytes the key then
+/// holds. A writer that lost is refused as `AlreadyExists`, or answered `409`
+/// (`ConditionalRequestConflict`, which S3 may give the writers of one key that race and which
+/// does not say whether the write landed). At most `want` writers succeed, and at least `want`
+/// succeed or were answered `409`. The key holds the bytes of a writer that succeeded or, if none
+/// did, of one that was answered `409`.
 async fn race<S: ObjectStore>(
     store: &S,
     key: &ObjectKey,
@@ -200,25 +204,51 @@ async fn race<S: ObjectStore>(
     let case = Case::CreateRace;
     let writes = bodies.iter().map(|b| store.put_new(key, b.clone(), None));
     let answers = join_all(writes).await;
-    for answer in &answers {
-        if let Err(error) = answer {
-            let answer = Err::<(), _>(error.clone());
-            refused(case, Call::PutNew, key, Refusal::AlreadyExists, answer)?;
+    let mut created = Vec::new();
+    let mut conflicted = Vec::new();
+    for (answer, body) in answers.into_iter().zip(bodies) {
+        match answer {
+            Ok(()) => created.push(body),
+            Err(ObjectStoreError::Service { status: 409, .. }) => conflicted.push(body),
+            refusal => refused(case, Call::PutNew, key, Refusal::AlreadyExists, refusal)?,
         }
     }
-    let created = answers.iter().filter(|a| a.is_ok()).count();
-    if created != want {
+    if created.len() > want || created.len() + conflicted.len() < want {
         return Err(Violation::Race {
             case,
             key: key.clone(),
             writers: bodies.len(),
-            created,
+            created: created.len(),
+            conflicted: conflicted.len(),
             want,
         });
     }
-    // A writer succeeded (`want` is at least 1): the key holds its bytes.
-    let winner = answers.iter().position(Result::is_ok).unwrap_or_default();
-    holds(case, store, key, &bodies[winner]).await
+    let candidates = if created.is_empty() {
+        conflicted
+    } else {
+        created
+    };
+    holds_one_of(case, store, key, &candidates).await
+}
+
+/// Checks that `key` holds exactly one of `candidates` (bodies of one length, at least one).
+async fn holds_one_of<S: ObjectStore>(
+    case: Case,
+    store: &S,
+    key: &ObjectKey,
+    candidates: &[&Bytes],
+) -> Result<(), Violation> {
+    let first = candidates.first().copied().cloned().unwrap_or_default();
+    for range in span(0, first.len() as u64 + 1) {
+        let got = store
+            .get_range(key, range)
+            .await
+            .map_err(failed(case, Call::GetRange, key))?;
+        if !candidates.iter().any(|c| **c == got) {
+            same_bytes(case, key, range, &first, &got)?;
+        }
+    }
+    Ok(())
 }
 
 /// Of concurrent writers of different bytes exactly one succeeds, and every read gives its bytes;
