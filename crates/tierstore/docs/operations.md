@@ -447,7 +447,7 @@ After that the hot bucket and the marks bucket are read by nothing; delete them 
 
 ## Metrics
 
-`GET /metricz` on the S3 listener (unsigned) answers 200 in the Prometheus text format. It has the hit, miss, byte and cold-read counters of the hot and cold tiers, the counters of the OCI read front, such as `tierstore_oci_requests_total`, and the counters of the cache of a build node, all named `tierstore_` and a word; without an `oci` interface it says the front is not enabled, and a node with no cache says so on a line of its own. The full list of metric names, their labels and queries to alert on is in [metrics](metrics.md).
+`GET /metricz` on the S3 listener (unsigned) answers 200 in the Prometheus text format. It has the hit, miss, byte and cold-read counters of the hot and cold tiers, the counters of the OCI read front, such as `tierstore_oci_requests_total`, and the counters of the cache of a build node with, on a node that serves jobscheduler's mount provider, the histogram of each job's time from its request to its start (`tierstore_request_to_start_seconds`, not in a release yet), all named `tierstore_` and a word; without an `oci` interface it says the front is not enabled, and a node with no cache says so on a line of its own. The full list of metric names, their labels and queries to alert on is in [metrics](metrics.md).
 
 ## Handing out read URLs
 

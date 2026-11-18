@@ -409,22 +409,13 @@ every process with a cache, and stays at zero on one that serves no provider.
 
 The two ends:
 
-- **Request.** jobscheduler's agent sends `Prepare` for a job's sources the moment it has the job.
-  The first `Prepare` of a run that the process takes starts its span; a `Prepare` of another
-  source of the run, or the same one again, does not move it.
-- **Start.** The agent opens each tree's root, and the kernel looks the roots up when it mounts
-  the job's overlay; neither reads below a root. The first lookup in a directory of one of the
-  run's trees, or listing of one, is the container runtime making the job's root, or the command
-  itself. `tierstore fs` reports it to the node on the fill socket, from a thread of its own, so
-  the request it serves does not wait for the report.
+- **Request.** jobscheduler's agent sends `Prepare` for a job's sources the moment it has the job. The first `Prepare` of a run that the process takes starts its span; a `Prepare` of another source of the run, or the same one again, does not move it.
+- **Start.** The agent opens each tree's root, and the kernel looks the roots up when it mounts the job's overlay; neither reads below a root. The first lookup in a directory of one of the run's trees, or listing of one, is the container runtime making the job's root, or the command itself. `tierstore fs` reports it to the node on the fill socket, from a thread of its own, so the request it serves does not wait for the report.
 
 What it does not count:
 
 - A run whose command never looks inside its trees, and a run released or swept first.
-- A run whose `Prepare` this process did not take. This happens when the process started after
-  it, when the run's request was forgotten because 4096 runs were kept at once (the oldest is
-  forgotten first), or when an `fs` report was lost. A report is lost when 1024 reports wait at
-  once, when the fill socket is away, or when the node is of a release before this one.
+- A run whose `Prepare` this process did not take. This happens when the process started after it, when the run's request was forgotten because 4096 runs were kept at once (the oldest is forgotten first), or when an `fs` report was lost. A report is lost when 1024 reports wait at once, when the fill socket is away, or when the node is of a release before this one.
 - A tree placed through the trees API rather than the provider.
 
 A report that waits while the fill socket is away (an update of the node's tierstore) ends its
@@ -434,8 +425,7 @@ The span is on the node's wall clock: a span across a step of the clock back is 
 runs within the budget, over a day:
 
 ```promql
-sum(increase(tierstore_request_to_start_seconds_bucket{le="0.2"}[1d]))
-  / sum(increase(tierstore_request_to_start_seconds_count[1d]))
+sum(increase(tierstore_request_to_start_seconds_bucket{le="0.2"}[1d])) / sum(increase(tierstore_request_to_start_seconds_count[1d]))
 ```
 
 The 99th percentile, over an hour:
