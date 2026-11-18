@@ -152,6 +152,7 @@ impl Inner {
     /// looks for the mark (see `fetch`), so whichever comes first, either the fill sees the mark
     /// and removes its own entry, or the entry is in the index when it is dropped here.
     pub(super) fn forget(&self, key: &str) {
+        self.forget_large(key);
         let Some(name) = self.cacheable(key) else {
             return;
         };

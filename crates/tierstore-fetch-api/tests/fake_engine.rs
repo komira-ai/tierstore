@@ -31,7 +31,6 @@ fn spec(s: &str) -> PackSpec {
         id: pack_id(s),
         size: 1 << 21,
         digests: None,
-        upload_part_size: 0,
     }
 }
 

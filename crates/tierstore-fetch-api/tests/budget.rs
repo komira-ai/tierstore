@@ -63,7 +63,7 @@ fn a_charge_compares_by_class_parts_devices_and_node() {
     let c = Charge {
         class: Class::Demand,
         parts: 4,
-        devices: vec![DeviceRef::Hot(NodeId(1)), DeviceRef::Legacy],
+        devices: vec![DeviceRef::Hot(NodeId(1)), DeviceRef::Hot(NodeId(2))],
         node: Some(NodeId(1)),
     };
     let mut other = c.clone();
@@ -75,7 +75,7 @@ fn a_charge_compares_by_class_parts_devices_and_node() {
 #[test]
 fn observations_compare_by_what_they_carry() {
     let resp = Observation::Response {
-        device: DeviceRef::Legacy,
+        device: DeviceRef::Hot(NodeId(3)),
         size_class: 3,
         first_byte_ms: Some(12),
         signals: DriveSignals::default(),
@@ -85,7 +85,7 @@ fn observations_compare_by_what_they_carry() {
     assert_ne!(
         resp,
         Observation::Response {
-            device: DeviceRef::Legacy,
+            device: DeviceRef::Hot(NodeId(3)),
             size_class: 3,
             first_byte_ms: None,
             signals: DriveSignals::default(),

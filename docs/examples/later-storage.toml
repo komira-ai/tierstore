@@ -15,11 +15,6 @@ backend = "store"                   # "store": this store's door, requires [hot]
 [store]
 kind = "tiered"
 unavailable_wait = "10m"            # 4.6
-legacy_upstream = ""                # silo endpoint during migration, read-only (10.10)
-legacy_hint_ttl = "10m"             # how long the engine remembers "this pack was last found in silo"
-
-[import]                            # migration mover and lazy import (10.10)
-bytes_per_hour = "200GiB"
 
 [metadata]                          # the metadata store (10.16): a replicated Postgres on the three storage nodes; [hot] requires it
 hosts = ["192.0.2.11:5432", "192.0.2.12:5432", "192.0.2.13:5432"]   # every member; tried in turn, the one that accepts writes is used

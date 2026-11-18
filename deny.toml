@@ -23,6 +23,15 @@ allow = [
 ]
 confidence-threshold = 0.93
 
+# Two permissive licences outside the list, each allowed for the one crate that carries it, which
+# fjall (the embedded store of tierstore-index) depends on with no feature to turn it off:
+# xxhash-rust (BSL-1.0, the Boost licence: use, copy and modify with the notice kept) and
+# varint-rs (0BSD: no condition at all).
+exceptions = [
+    { crate = "xxhash-rust", allow = ["BSL-1.0"] },
+    { crate = "varint-rs", allow = ["0BSD"] },
+]
+
 [licenses.private]
 # Workspace crates are not published; their licence is the workspace's Apache-2.0.
 ignore = true

@@ -8,14 +8,14 @@ use tierstore_format::ids::DriveId;
 
 use crate::groups::group;
 use crate::labels::{
-    AdmissionReason, BudgetReason, FuseOp, GetKind, LegacyOutcome, ListRefusal, PackLostPhase,
-    ReadWaitCause, SizeClass, TransportMode,
+    AdmissionReason, BudgetReason, FuseOp, GetKind, ListRefusal, PackLostPhase, ReadWaitCause,
+    SizeClass, TransportMode,
 };
 use crate::{CounterVec, GaugeVec, HistogramVec, StateSetVec};
 
 group! {
     /// The fetch engine and its budget (section 4): waits, load, controller state, tail control,
-    /// GET counts, efficiency, read waits, lost fills and reads from silo. `{drive}` is any drive
+    /// GET counts, efficiency, read waits and lost fills. `{drive}` is any drive
     /// of the cluster the engine reads from.
     Fetch {
         part_permit_wait_seconds: HistogramVec<Class> = "part_permit_wait_seconds",
@@ -96,8 +96,6 @@ group! {
             "Reads of cells not yet present because the job launched before Prepare was done.";
         store_pack_lost_total: CounterVec<PackLostPhase> = "store_pack_lost_total",
             "Fills found lost (no copy readable), by when.";
-        legacy_reads_total: CounterVec<LegacyOutcome> = "legacy_reads_total",
-            "Reads from silo, by outcome.";
     }
 }
 

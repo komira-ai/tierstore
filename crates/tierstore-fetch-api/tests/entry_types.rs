@@ -242,7 +242,7 @@ fn pack_digests_debug_shows_the_pack_index_and_not_the_list() {
 }
 
 #[test]
-fn a_pack_spec_debug_shows_its_id_size_digests_and_part_size() {
+fn a_pack_spec_debug_shows_its_id_size_and_digests() {
     let with = PackSpec {
         id: pack(),
         size: 5,
@@ -250,16 +250,14 @@ fn a_pack_spec_debug_shows_its_id_size_digests_and_part_size() {
             list: Arc::new(OnePack),
             pack: 3,
         }),
-        upload_part_size: 8,
     };
     let text = format!("{with:?}");
     assert!(text.starts_with("PackSpec { id: PackId {"), "{text}");
     assert!(text.contains("size: 5"), "{text}");
     assert!(
-        text.contains("digests: Some(PackDigests { pack: 3, .. })"),
+        text.ends_with("digests: Some(PackDigests { pack: 3, .. }) }"),
         "{text}"
     );
-    assert!(text.ends_with("upload_part_size: 8 }"), "{text}");
     let none = PackSpec {
         digests: None,
         ..with.clone()

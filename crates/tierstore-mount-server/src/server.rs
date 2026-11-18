@@ -515,7 +515,6 @@ impl Shared {
             },
             size: record.pack_size,
             digests: Some(PackDigests { list, pack }),
-            upload_part_size: record.upload_part_size,
         };
         let (store, entry_spec) = (
             self.parts.store.clone(),

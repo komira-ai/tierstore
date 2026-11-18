@@ -23,7 +23,6 @@ root = "/var/lib/tierstore-cache"     # the SSD cache partition (section 11)
 
 [store]
 kind = "tiered"
-legacy_upstream = "<silo S3 endpoint>"      # read-only, during the migration (10.10)
 
 [metadata]                            # the metadata store (10.16): Postgres on three of the six nodes, each on a 64 GiB partition of its SATA SSD
 hosts = ["192.0.2.21:5432", "192.0.2.22:5432", "192.0.2.23:5432"]   # the same list on all six nodes
@@ -50,7 +49,7 @@ dirty_reject = 0.90
 promo_share = 0.10                    # the build cache beside it absorbs most repeat reads
 
 [cold]
-drives = ["/mnt/hdd1", "/mnt/hdd2"]   # silo's xfs; the tier writes under ts-cold/
+drives = ["/mnt/hdd1", "/mnt/hdd2"]   # the SMR drives' xfs; the tier writes under ts-cold/
 block_bytes = "1GiB"
 failure_domain = "node"
 ec = { k = 4, m = 2 }
@@ -77,6 +76,6 @@ executor_wait = "30s"                 # a job not leased by its first-ranked nod
 [health]                            # settings of the hot store: the health facts (24.2)
 report_after = "30s"                # a node unreachable for this long is reported unreachable by its peers (24.2)
 
-[drive]                               # SMR, shared with silo: one stream until T0-F says otherwise
+[drive]                               # SMR: one stream until T0-F says otherwise
 streams = 1
 write_streams = 1

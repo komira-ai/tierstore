@@ -5,7 +5,7 @@
 //! - a gap rule that rounds down, so a cold drive pays a positioning to save less than one;
 //! - a gap rule that merges on a hot device, where seeks cost nothing;
 //! - a profile whose drives the schema cannot describe;
-//! - a degraded or legacy source planned as if it were a hot copy.
+//! - a degraded source planned as if it were a hot copy.
 
 use tierstore_fetch_api::upstream::DeviceRef;
 use tierstore_format::ids::{DriveId, NodeId};
@@ -125,12 +125,11 @@ fn a_gap_wider_than_u32_cells_saturates() {
 }
 
 #[test]
-fn a_hot_copy_is_hot_and_a_drive_or_the_legacy_upstream_is_cold() {
+fn a_hot_copy_is_hot_and_a_drive_is_cold() {
     let node = NodeId(2);
     assert_eq!(Medium::of(DeviceRef::Hot(node)), Medium::Hot);
     assert_eq!(
         Medium::of(DeviceRef::Drive(node, DriveId([7; 16]))),
         Medium::Cold
     );
-    assert_eq!(Medium::of(DeviceRef::Legacy), Medium::Cold);
 }
