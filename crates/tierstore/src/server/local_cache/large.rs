@@ -8,13 +8,18 @@
 //! call of the engine's [`Upstream`]):
 //! - **Small** (at most `whole_fill_limit`, [`CacheConfig::whole_limit`]): nothing changes; the
 //!   read takes the path of `obj/`.
-//! - **Large** (the book holds it, or `LOCATE` names it: every location names its generation,
-//!   10.6): the object is the pack `PackId = (key, ETag)` with no cell digests, and the read is
+//! - **Large, generation known** (the book holds it, or `LOCATE` names it, as the storage tier's
+//!   does): the object is the pack `PackId = (key, ETag)` with no cell digests, and the read is
 //!   served from that pack's entry through the [`Engine`], which sends the generation as
-//!   `If-Match` on every part from the first: no part starts without it. An overwrite between the
-//!   `LOCATE` and a part is a `412` to the engine's parts: the fill fails and no byte of the other
-//!   object is served.
-//! - **Not routable**: a location without a size. The read takes the path of `obj/`, as before.
+//!   `If-Match` on every part from the first: no part starts without it.
+//! - **Large, generation unknown** (a location without one: an object of the legacy upstream,
+//!   silo): the front sends **the first part alone**, a GET of the first cells of the read with no
+//!   `If-Match`. Its `ETag` is the generation; from then on the object is the pack `(key, ETag)`
+//!   as above, so every later part carries `If-Match`. The first part's bytes are the head of the
+//!   answer, and the rest comes from the entry. An overwrite on silo between the two is a `412` to
+//!   the engine's parts: the fill fails and no byte of the other object is served.
+//! - **Not routable**: a location without a size, or with no source. The read takes the path of
+//!   `obj/`, as before.
 //!
 //! A ranged GET is served from the `present` cells of the pack's entry, which may be partial (a
 //! `Partial` entry of section 9). A cell that is present is read at once, and the engine is not
@@ -34,6 +39,8 @@ mod book;
 mod cells;
 
 #[cfg(test)]
+mod alone_tests;
+#[cfg(test)]
 mod book_tests;
 #[cfg(test)]
 mod cells_tests;
@@ -51,13 +58,15 @@ use std::time::Duration;
 use futures::stream::{self, StreamExt as _};
 use tierstore_fetch_api::engine::{Engine, PackSpec};
 use tierstore_fetch_api::entry::EntryStore;
-use tierstore_fetch_api::ids::{HolderId, JobId, PackId, PackKey, PackRoot};
+use tierstore_fetch_api::ids::{ByteRange as PackRange, Class, HolderId, JobId, PackId, PackKey};
+use tierstore_fetch_api::ids::{PackRoot, Rank};
 use tierstore_fetch_api::page::CELL_SHIFT;
-use tierstore_fetch_api::upstream::{Located, Upstream};
+use tierstore_fetch_api::upstream::UpstreamError;
+use tierstore_fetch_api::upstream::{GetRequest, Located, PartStream, Source, Upstream};
 
 use super::stream::eager;
 use super::{Inner, LocalCache, locked};
-use crate::{Error, Meta, Opened, Span, Window};
+use crate::{Error, Meta, Opened, ReadBody, Span, Window};
 
 pub(crate) use book::KNOWN_LIMIT;
 use book::{Book, Known};
@@ -65,6 +74,9 @@ use cells::Cells;
 
 /// The bytes of a cell (1 MiB).
 const CELL: u64 = 1 << CELL_SHIFT;
+
+/// The most cells the first part alone asks for: the engine's largest first piece, 4 MiB (4.4).
+pub(crate) const ALONE_CELLS: u64 = 4;
 
 /// How many cells of a read are ensured ahead of the one being served: a read of a whole object
 /// of many GiB asks the engine for 64 MiB at a time, so a slow client does not pull the object
@@ -85,9 +97,10 @@ const READ_TRIES: u32 = 3;
 /// entry store it fills.
 #[derive(Clone)]
 pub struct LargeParts {
-    /// The fetch engine: every part of a large object goes through it.
+    /// The fetch engine: every part of a large object but the first part alone goes through it.
     pub engine: Arc<dyn Engine>,
-    /// The engine's upstream, for `LOCATE`.
+    /// The engine's upstream: `LOCATE`, and the first part alone of an object with no known
+    /// generation.
     pub upstream: Arc<dyn Upstream>,
     /// The engine's entry store, from which the front reads the `present` cells.
     pub store: Arc<dyn EntryStore>,
@@ -103,6 +116,7 @@ pub(crate) struct LargeCounters {
     unroutable: AtomicU64,
     known: AtomicU64,
     locates: AtomicU64,
+    alone: AtomicU64,
     misses: AtomicU64,
     unavailable: AtomicU64,
     fill_failures: AtomicU64,
@@ -122,10 +136,12 @@ pub(crate) struct LargeCounts {
     pub known: u64,
     /// `LOCATE` calls.
     pub locates: u64,
+    /// First parts sent alone.
+    pub alone: u64,
     /// Reads answered `404` from a definitive miss, asked or remembered.
     pub misses: u64,
     /// Reads answered `503` before their first byte: a miss that is not definitive, or an error
-    /// of the upstream.
+    /// of the upstream (a first part alone that its source does not hold among them).
     pub unavailable: u64,
     /// Reads whose fill failed or was lost while they waited.
     pub fill_failures: u64,
@@ -143,6 +159,7 @@ impl LargeCounters {
             unroutable: get(&self.unroutable),
             known: get(&self.known),
             locates: get(&self.locates),
+            alone: get(&self.alone),
             misses: get(&self.misses),
             unavailable: get(&self.unavailable),
             fill_failures: get(&self.fill_failures),
@@ -166,7 +183,14 @@ pub struct LargeObjects {
 enum Identity {
     /// Its generation and size.
     Known(Known),
-    /// No size: not for the engine.
+    /// Its size, and the source its first part alone is read from: no generation is known.
+    Unpinned {
+        /// The size.
+        size: u64,
+        /// The location's first source.
+        source: Source,
+    },
+    /// No size, or no source: not for the engine.
     Unroutable,
 }
 
@@ -248,12 +272,16 @@ impl LargeObjects {
         let Some(size) = location.size else {
             return Ok((Identity::Unroutable, epoch));
         };
-        let known = Known {
-            generation: location.generation,
-            size,
-            modified: now,
+        let identity = match (location.generation, location.sources.into_iter().next()) {
+            (Some(generation), _) => Identity::Known(Known {
+                generation,
+                size,
+                modified: now,
+            }),
+            (None, Some(source)) => Identity::Unpinned { size, source },
+            (None, None) => Identity::Unroutable,
         };
-        Ok((Identity::Known(known), epoch))
+        Ok((identity, epoch))
     }
 
     /// The read of `span` of `key` through the engine, or `None` when the object is not one for
@@ -266,14 +294,14 @@ impl LargeObjects {
         now: u64,
     ) -> Result<Option<Opened>, Error> {
         let (identity, epoch) = self.identify(key, now).await?;
-        let known = match identity {
-            Identity::Known(known) => known,
+        let (size, pinned) = match identity {
+            Identity::Known(known) => (known.size, Ok(known)),
+            Identity::Unpinned { size, source } => (size, Err(source)),
             Identity::Unroutable => {
                 bump(&self.counters.unroutable);
                 return Ok(None);
             }
         };
-        let size = known.size;
         if size <= limit {
             bump(&self.counters.small);
             return Ok(None);
@@ -286,11 +314,24 @@ impl LargeObjects {
             Window::Unsatisfiable => (0, 0),
         };
         let job = self.job();
+        let (known, head, from) = match pinned {
+            Ok(known) => (known, None, start),
+            Err(source) => {
+                let alone = self.alone(key, (size, source), (start, end), now, job);
+                let (known, head, from) = alone.await?;
+                (known, Some(head), from)
+            }
+        };
         locked(&self.book).learn_at(key, known.clone(), epoch);
-        let body = if start < end {
-            Cells::new(self.clone(), known.spec(key), (start, end), job).stream()
+        // The rest is ensured now, so the engine fetches it while the head is sent.
+        let rest = if from < end {
+            Cells::new(self.clone(), known.spec(key), (from, end), job).stream()
         } else {
             stream::empty().boxed()
+        };
+        let body: ReadBody = match head {
+            Some(head) => head.chain(rest).boxed(),
+            None => rest,
         };
         let body = if matches!(window, Window::Unsatisfiable) {
             stream::empty().boxed()
@@ -303,6 +344,98 @@ impl LargeObjects {
             body,
         }))
     }
+
+    /// The first part alone of `key`, an object of `size` bytes from `source` with no known
+    /// generation, for a read of `start..end` (`0..0` for none): a GET of its first cells (at most
+    /// [`ALONE_CELLS`], to the end of the read) with no `If-Match`. Gives what the object is (the
+    /// part's `ETag` is its generation), the part's bytes that the read wants, and where the read
+    /// goes on from.
+    async fn alone(
+        &self,
+        key: &str,
+        (size, source): (u64, Source),
+        (start, end): (u64, u64),
+        now: u64,
+        job: JobId,
+    ) -> Result<(Known, ReadBody, u64), Error> {
+        let first = start - start % CELL;
+        // A read of no bytes (an unsatisfiable range) asks for one, for the `ETag` alone.
+        let stop = if end > start {
+            end.div_ceil(CELL)
+                .saturating_mul(CELL)
+                .min(first + ALONE_CELLS * CELL)
+                .min(size)
+        } else {
+            first + 1
+        };
+        bump(&self.counters.alone);
+        let request = GetRequest {
+            key: PackKey(key.to_owned()),
+            source,
+            range: PackRange {
+                offset: first,
+                len: stop - first,
+            },
+            generation: None,
+            class: Class::Demand,
+            job,
+            rank: Rank(0),
+        };
+        let response = self.parts.upstream.get(request).await.map_err(|error| {
+            bump(&self.counters.unavailable);
+            upstream_error(key, &error)
+        })?;
+        let known = Known {
+            generation: response.generation,
+            size,
+            modified: now,
+        };
+        let take = stop.min(end).saturating_sub(start);
+        let head = cut(key, response.body, start - first, take);
+        Ok((known, head, stop.max(start)))
+    }
+}
+
+/// The bytes `skip..skip + take` of a part's `body`, as the front's chunks: the read ends with an
+/// error when the body fails or ends before them.
+fn cut(key: &str, body: PartStream, skip: u64, take: u64) -> ReadBody {
+    struct Cut {
+        key: String,
+        body: PartStream,
+        at: u64,
+        skip: u64,
+        end: u64,
+    }
+    let cut = Cut {
+        key: key.to_owned(),
+        body,
+        at: 0,
+        skip,
+        end: skip + take,
+    };
+    stream::unfold(Some(cut), |state| async move {
+        let mut cut = state?;
+        while cut.at < cut.end {
+            let piece = match cut.body.next().await {
+                Some(Ok(piece)) => piece,
+                Some(Err(error)) => return Some((Err(upstream_error(&cut.key, &error)), None)),
+                None => {
+                    let text = format!("{}: the first part ended at byte {}", cut.key, cut.at);
+                    return Some((Err(Error::Unavailable(text)), None));
+                }
+            };
+            let (low, high) = (cut.at, cut.at + piece.len() as u64);
+            cut.at = high;
+            let (from, to) = (cut.skip.max(low), cut.end.min(high));
+            if from < to {
+                // Both are inside the piece, whose length is a `usize`.
+                let piece = piece.slice((from - low) as usize..(to - low) as usize);
+                return Some((Ok(piece), Some(cut)));
+            }
+        }
+        None
+    })
+    .boxed()
 }
 
 /// `duration` in milliseconds.
@@ -320,6 +453,7 @@ impl Known {
             },
             size: self.size,
             digests: None,
+            upload_part_size: 0,
         }
     }
 
@@ -331,6 +465,13 @@ impl Known {
             modified: self.modified,
         }
     }
+}
+
+/// An upstream's error as the front's: a `503`, whatever it is. A source that does not hold the
+/// object after `LOCATE` named it is a lost location (4.6), not a definitive miss (10.6 step 3),
+/// so it is never a `404`.
+fn upstream_error(key: &str, error: &UpstreamError) -> Error {
+    Error::Unavailable(format!("{key}: {error}"))
 }
 
 impl LocalCache {

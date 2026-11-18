@@ -79,6 +79,12 @@ impl Front {
             body,
         }
     }
+
+    /// How many of the upstream's GETs carried no `If-Match`.
+    fn unpinned_gets(&self) -> usize {
+        let gets = self.rig.gets();
+        gets.iter().filter(|get| get.generation.is_none()).count()
+    }
 }
 
 /// The ETag header a client sees for `generation`.
@@ -103,7 +109,7 @@ async fn get_of_a_large_stored_object_is_served_whole_with_its_generation_as_eta
     assert_eq!(reply.body, bytes.to_vec());
     let gets = front.rig.gets();
     assert!(!gets.is_empty());
-    assert!(gets.iter().all(|get| get.generation == g));
+    assert!(gets.iter().all(|get| get.generation == Some(g)));
     assert_eq!(front.rig.large.counters().counts().routed, 1);
 }
 
@@ -126,7 +132,29 @@ async fn ranged_get_of_a_large_object_is_partial_content_with_the_range_bytes() 
     assert_eq!(reply.body.len(), 60);
     assert_eq!(reply.header("etag"), quoted(g));
     assert_eq!(reply.body, bytes[a as usize..=b as usize].to_vec());
-    assert!(front.rig.gets().iter().all(|get| get.generation == g));
+    assert!(front.rig.gets().iter().all(|get| get.generation == Some(g)));
+}
+
+/// Asserts that a GET of a large silo-origin object is 200 with the first part's ETag, exactly
+/// the object's bytes, that the first upstream GET carried no `If-Match` and that every later
+/// one carried that ETag.
+#[tokio::test]
+async fn get_of_a_large_silo_object_takes_its_etag_from_the_first_part() {
+    let front = Front::new("tscache-lfront-silo");
+    let bytes = object(6 * MIB, 3);
+    let etag = generation(0x5e);
+    front.rig.silo(KEY, &bytes, etag);
+    let reply = front.get(KEY, &[]).await;
+    assert_eq!(reply.status, StatusCode::OK);
+    assert_eq!(reply.header("etag"), quoted(etag));
+    assert_eq!(reply.body.len(), bytes.len());
+    assert_eq!(reply.body, bytes.to_vec());
+    let gets = front.rig.gets();
+    assert_eq!(gets[0].generation, None);
+    assert!(gets.len() >= 2);
+    assert_eq!(front.unpinned_gets(), 1);
+    assert!(gets[1..].iter().all(|get| get.generation == Some(etag)));
+    assert_eq!(front.rig.large.counters().counts().alone, 1);
 }
 
 /// Asserts that a key the storage tier definitively does not hold is 404 with the S3 code
@@ -209,7 +237,7 @@ async fn fill_failure_on_the_first_cell_is_503_with_none_of_the_other_bytes() {
     let named = generation(0x01);
     let other_bytes = object(3 * MIB, 7);
     let location = Location {
-        generation: named,
+        generation: Some(named),
         size: Some(other_bytes.len() as u64),
         sources: vec![hot(other_bytes.len() as u64)],
         conflicts: Vec::new(),
@@ -228,7 +256,7 @@ async fn fill_failure_on_the_first_cell_is_503_with_none_of_the_other_bytes() {
     assert_eq!(reply.body, expected.into_bytes());
     let gets = front.rig.gets();
     assert!(!gets.is_empty());
-    assert!(gets.iter().all(|get| get.generation == named));
+    assert!(gets.iter().all(|get| get.generation == Some(named)));
     let counts = front.rig.large.counters().counts();
     assert_eq!((counts.routed, counts.fill_failures), (1, 1));
 }
