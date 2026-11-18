@@ -1,0 +1,171 @@
+header-fnv1a64 4ef6fa7e7ac9198f
+version 7 45
+struct fuse_in_header 40 8
+field fuse_in_header len 0 4
+field fuse_in_header opcode 4 4
+field fuse_in_header unique 8 8
+field fuse_in_header nodeid 16 8
+field fuse_in_header uid 24 4
+field fuse_in_header gid 28 4
+field fuse_in_header pid 32 4
+field fuse_in_header total_extlen 36 2
+field fuse_in_header padding 38 2
+struct fuse_out_header 16 8
+field fuse_out_header len 0 4
+field fuse_out_header error 4 4
+field fuse_out_header unique 8 8
+struct fuse_attr 88 8
+field fuse_attr ino 0 8
+field fuse_attr size 8 8
+field fuse_attr blocks 16 8
+field fuse_attr atime 24 8
+field fuse_attr mtime 32 8
+field fuse_attr ctime 40 8
+field fuse_attr atimensec 48 4
+field fuse_attr mtimensec 52 4
+field fuse_attr ctimensec 56 4
+field fuse_attr mode 60 4
+field fuse_attr nlink 64 4
+field fuse_attr uid 68 4
+field fuse_attr gid 72 4
+field fuse_attr rdev 76 4
+field fuse_attr blksize 80 4
+field fuse_attr flags 84 4
+struct fuse_kstatfs 80 8
+field fuse_kstatfs blocks 0 8
+field fuse_kstatfs bfree 8 8
+field fuse_kstatfs bavail 16 8
+field fuse_kstatfs files 24 8
+field fuse_kstatfs ffree 32 8
+field fuse_kstatfs bsize 40 4
+field fuse_kstatfs namelen 44 4
+field fuse_kstatfs frsize 48 4
+field fuse_kstatfs padding 52 4
+field fuse_kstatfs spare 56 24
+struct fuse_entry_out 128 8
+field fuse_entry_out nodeid 0 8
+field fuse_entry_out generation 8 8
+field fuse_entry_out entry_valid 16 8
+field fuse_entry_out attr_valid 24 8
+field fuse_entry_out entry_valid_nsec 32 4
+field fuse_entry_out attr_valid_nsec 36 4
+field fuse_entry_out attr 40 88
+struct fuse_forget_in 8 8
+field fuse_forget_in nlookup 0 8
+struct fuse_forget_one 16 8
+field fuse_forget_one nodeid 0 8
+field fuse_forget_one nlookup 8 8
+struct fuse_batch_forget_in 8 4
+field fuse_batch_forget_in count 0 4
+field fuse_batch_forget_in dummy 4 4
+struct fuse_getattr_in 16 8
+field fuse_getattr_in getattr_flags 0 4
+field fuse_getattr_in dummy 4 4
+field fuse_getattr_in fh 8 8
+struct fuse_attr_out 104 8
+field fuse_attr_out attr_valid 0 8
+field fuse_attr_out attr_valid_nsec 8 4
+field fuse_attr_out dummy 12 4
+field fuse_attr_out attr 16 88
+struct fuse_mkdir_in 8 4
+field fuse_mkdir_in mode 0 4
+field fuse_mkdir_in umask 4 4
+struct fuse_rename_in 8 8
+field fuse_rename_in newdir 0 8
+struct fuse_setattr_in 88 8
+field fuse_setattr_in valid 0 4
+field fuse_setattr_in padding 4 4
+field fuse_setattr_in fh 8 8
+field fuse_setattr_in size 16 8
+field fuse_setattr_in lock_owner 24 8
+field fuse_setattr_in atime 32 8
+field fuse_setattr_in mtime 40 8
+field fuse_setattr_in ctime 48 8
+field fuse_setattr_in atimensec 56 4
+field fuse_setattr_in mtimensec 60 4
+field fuse_setattr_in ctimensec 64 4
+field fuse_setattr_in mode 68 4
+field fuse_setattr_in unused4 72 4
+field fuse_setattr_in uid 76 4
+field fuse_setattr_in gid 80 4
+field fuse_setattr_in unused5 84 4
+struct fuse_open_in 8 4
+field fuse_open_in flags 0 4
+field fuse_open_in open_flags 4 4
+struct fuse_create_in 16 4
+field fuse_create_in flags 0 4
+field fuse_create_in mode 4 4
+field fuse_create_in umask 8 4
+field fuse_create_in open_flags 12 4
+struct fuse_open_out 16 8
+field fuse_open_out fh 0 8
+field fuse_open_out open_flags 8 4
+field fuse_open_out backing_id 12 4
+struct fuse_release_in 24 8
+field fuse_release_in fh 0 8
+field fuse_release_in flags 8 4
+field fuse_release_in release_flags 12 4
+field fuse_release_in lock_owner 16 8
+struct fuse_flush_in 24 8
+field fuse_flush_in fh 0 8
+field fuse_flush_in unused 8 4
+field fuse_flush_in padding 12 4
+field fuse_flush_in lock_owner 16 8
+struct fuse_read_in 40 8
+field fuse_read_in fh 0 8
+field fuse_read_in offset 8 8
+field fuse_read_in size 16 4
+field fuse_read_in read_flags 20 4
+field fuse_read_in lock_owner 24 8
+field fuse_read_in flags 32 4
+field fuse_read_in padding 36 4
+struct fuse_write_in 40 8
+field fuse_write_in fh 0 8
+field fuse_write_in offset 8 8
+field fuse_write_in size 16 4
+field fuse_write_in write_flags 20 4
+field fuse_write_in lock_owner 24 8
+field fuse_write_in flags 32 4
+field fuse_write_in padding 36 4
+struct fuse_write_out 8 4
+field fuse_write_out size 0 4
+field fuse_write_out padding 4 4
+struct fuse_statfs_out 80 8
+field fuse_statfs_out st 0 80
+struct fuse_fsync_in 16 8
+field fuse_fsync_in fh 0 8
+field fuse_fsync_in fsync_flags 8 4
+field fuse_fsync_in padding 12 4
+struct fuse_init_in 64 4
+field fuse_init_in major 0 4
+field fuse_init_in minor 4 4
+field fuse_init_in max_readahead 8 4
+field fuse_init_in flags 12 4
+field fuse_init_in flags2 16 4
+field fuse_init_in unused 20 44
+struct fuse_init_out 64 4
+field fuse_init_out major 0 4
+field fuse_init_out minor 4 4
+field fuse_init_out max_readahead 8 4
+field fuse_init_out flags 12 4
+field fuse_init_out max_background 16 2
+field fuse_init_out congestion_threshold 18 2
+field fuse_init_out max_write 20 4
+field fuse_init_out time_gran 24 4
+field fuse_init_out max_pages 28 2
+field fuse_init_out map_alignment 30 2
+field fuse_init_out flags2 32 4
+field fuse_init_out max_stack_depth 36 4
+field fuse_init_out request_timeout 40 2
+field fuse_init_out unused 42 22
+struct fuse_interrupt_in 8 8
+field fuse_interrupt_in unique 0 8
+struct fuse_dirent 24 8
+field fuse_dirent ino 0 8
+field fuse_dirent off 8 8
+field fuse_dirent namelen 16 4
+field fuse_dirent type 20 4
+field fuse_dirent name 24 0
+struct fuse_direntplus 152 8
+field fuse_direntplus entry_out 0 128
+field fuse_direntplus dirent 128 24
