@@ -2,9 +2,7 @@
 //! [`FetchEngine`] attached, over the in-memory entry store and the fake upstream of
 //! `tierstore-fetch-api`, on an injected clock that no test moves. The fake
 //! upstream holds every object: a stored one has a location that names its generation and a hot
-//! copy; a silo-origin one has a location with no generation and one legacy source. Its `get`
-//! answers `412` to an `If-Match` other than the object's generation, and a GET with none with
-//! the object's bytes, whatever they are now.
+//! copy. Its `get` answers `412` to an `If-Match` other than the object's generation.
 
 use std::num::NonZeroUsize;
 use std::sync::atomic::{AtomicUsize, Ordering};
@@ -58,18 +56,12 @@ impl Budget for Unlimited {
     }
 }
 
-/// The fake upstream, with every GET recorded in order and an optional gate that holds GETs
-/// until the test lets them go.
+/// The fake upstream, with every GET recorded in order, scripted `LOCATE` answers, and an
+/// optional gate that holds `LOCATE`s until the test lets them go.
 pub(in crate::server::local_cache) struct Gated {
     /// The fake that answers.
     pub fake: FakeUpstream,
-    /// When set, every GET waits for a permit of it before it is answered.
-    gate: Mutex<Option<Arc<Semaphore>>>,
-    /// The GETs that have reached the upstream (answered or waiting).
-    entered: AtomicUsize,
-    /// When set, the next GET's body ends cleanly after this many bytes.
-    short: Mutex<Option<usize>>,
-    /// Woken at each GET that reaches the upstream.
+    /// Woken at each `LOCATE` that reaches the upstream.
     arrived: Notify,
     /// `LOCATE` answers to give before the fake's own, in order.
     locates: Mutex<Vec<Result<Located, UpstreamError>>>,
@@ -83,21 +75,11 @@ impl Gated {
     fn new() -> Self {
         Self {
             fake: FakeUpstream::new(),
-            gate: Mutex::new(None),
-            entered: AtomicUsize::new(0),
-            short: Mutex::new(None),
             arrived: Notify::new(),
             locates: Mutex::new(Vec::new()),
             locate_gate: Mutex::new(None),
             locating: AtomicUsize::new(0),
         }
-    }
-
-    /// Holds every GET from now until a permit of the semaphore returned is added for it.
-    pub(in crate::server::local_cache) fn hold(&self) -> Arc<Semaphore> {
-        let gate = Arc::new(Semaphore::new(0));
-        *self.gate.lock().unwrap() = Some(gate.clone());
-        gate
     }
 
     /// Holds every `LOCATE` from now until a permit of the semaphore returned is added for it.
@@ -116,27 +98,6 @@ impl Gated {
             }
             arrived.await;
         }
-    }
-
-    /// Waits until `n` GETs have reached the upstream (answered or held).
-    pub(in crate::server::local_cache) async fn entered(&self, n: usize) {
-        loop {
-            let arrived = self.arrived.notified();
-            if self.entered.load(Ordering::SeqCst) >= n {
-                return;
-            }
-            arrived.await;
-        }
-    }
-
-    /// The GETs that have reached the upstream.
-    pub(in crate::server::local_cache) fn count(&self) -> usize {
-        self.entered.load(Ordering::SeqCst)
-    }
-
-    /// The next GET's body ends, with no error, after `len` bytes.
-    pub(in crate::server::local_cache) fn short_next(&self, len: usize) {
-        *self.short.lock().unwrap() = Some(len);
     }
 
     /// The next `LOCATE` (of any key) answers `answer`.
@@ -172,28 +133,7 @@ impl Upstream for Gated {
     }
 
     async fn get(&self, req: GetRequest) -> Result<PartResponse, UpstreamError> {
-        let gate = self.gate.lock().unwrap().clone();
-        self.entered.fetch_add(1, Ordering::SeqCst);
-        self.arrived.notify_waiters();
-        if let Some(gate) = gate {
-            gate.acquire().await.unwrap().forget();
-        }
-        let short = self.short.lock().unwrap().take();
-        let mut response = self.fake.get(req).await?;
-        if let Some(len) = short {
-            let mut left = len;
-            response.body = response
-                .body
-                .map(move |piece| {
-                    piece.map(|bytes| {
-                        let keep = bytes.slice(..left.min(bytes.len()));
-                        left -= keep.len();
-                        keep
-                    })
-                })
-                .boxed();
-        }
-        Ok(response)
+        self.fake.get(req).await
     }
 
     async fn report(&self, key: &PackKey, source: &Source, range: PackRange, report: Report) {
@@ -291,25 +231,12 @@ impl LargeRig {
     ) {
         let size = bytes.len() as u64;
         let location = Location {
-            generation: Some(generation),
+            generation,
             size: Some(size),
             sources: vec![hot(size)],
             conflicts: Vec::new(),
         };
         self.insert(key, bytes, generation, location);
-    }
-
-    /// Puts a silo-origin object: its location has no generation and one legacy source, and its
-    /// GETs answer with `etag`.
-    pub(in crate::server::local_cache) fn silo(&self, key: &str, bytes: &Bytes, etag: Generation) {
-        let size = bytes.len() as u64;
-        let location = Location {
-            generation: None,
-            size: Some(size),
-            sources: vec![legacy(size)],
-            conflicts: Vec::new(),
-        };
-        self.insert(key, bytes, etag, location);
     }
 
     /// Puts `key` in the fake upstream with `location`.
@@ -410,15 +337,6 @@ pub(in crate::server::local_cache) fn hot(len: u64) -> Source {
             file: "seg-1".to_owned(),
             offset: 0,
         },
-        extent: PackRange { offset: 0, len },
-    }
-}
-
-/// The legacy upstream's source of an object of `len` bytes.
-pub(in crate::server::local_cache) fn legacy(len: u64) -> Source {
-    Source {
-        device: DeviceRef::Legacy,
-        kind: SourceKind::Legacy,
         extent: PackRange { offset: 0, len },
     }
 }

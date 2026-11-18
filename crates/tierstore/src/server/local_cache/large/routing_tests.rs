@@ -9,6 +9,7 @@ use std::sync::Arc;
 use tierstore_fetch::EngineConfig;
 use tierstore_fetch_api::ids::PackKey;
 use tierstore_fetch_api::upstream::{DeviceRef, Located, Location, NotDefinitive, UpstreamError};
+use tierstore_format::ids::NodeId;
 
 use super::testing::{HOLDER, LIMIT, LargeRig, MIB, generation, hot, object, span};
 use super::{LargeCounts, LargeObjects, LargeParts, MISS_TTL, S3_JOB};
@@ -39,7 +40,7 @@ fn asked(rig: &LargeRig) -> u64 {
 fn failure() -> UpstreamError {
     UpstreamError::NotFound {
         key: PackKey(BIG.to_owned()),
-        device: DeviceRef::Legacy,
+        device: DeviceRef::Hot(NodeId(1)),
     }
 }
 
@@ -115,7 +116,7 @@ async fn a_location_without_a_size_is_unroutable_and_served_as_before() {
     let rig = LargeRig::new("routing-no-size");
     let bytes = object(1000, 4);
     let location = Location {
-        generation: Some(generation(4)),
+        generation: generation(4),
         size: None,
         sources: vec![hot(1000)],
         conflicts: Vec::new(),
@@ -123,33 +124,6 @@ async fn a_location_without_a_size_is_unroutable_and_served_as_before() {
     rig.insert("cas/nosize", &bytes, generation(4), location);
     rig.rig.put("cas/nosize", &bytes).await;
     let (_, _, got) = rig.read("cas/nosize", None).await.unwrap();
-    assert_eq!(got, bytes.to_vec());
-    assert_eq!(
-        counts(&rig),
-        LargeCounts {
-            locates: 1,
-            unroutable: 1,
-            ..LargeCounts::default()
-        }
-    );
-    assert!(rig.gets().is_empty());
-}
-
-/// Asserts that a location with neither a generation nor a source is not routable either, even
-/// when it names a size over the limit.
-#[tokio::test]
-async fn a_location_with_no_generation_and_no_source_is_unroutable() {
-    let rig = LargeRig::new("routing-no-source");
-    let bytes = object(1000, 5);
-    let location = Location {
-        generation: None,
-        size: Some(3 * MIB),
-        sources: Vec::new(),
-        conflicts: Vec::new(),
-    };
-    rig.insert("cas/nosource", &bytes, generation(5), location);
-    rig.rig.put("cas/nosource", &bytes).await;
-    let (_, _, got) = rig.read("cas/nosource", None).await.unwrap();
     assert_eq!(got, bytes.to_vec());
     assert_eq!(
         counts(&rig),
@@ -340,19 +314,15 @@ async fn a_cache_with_no_large_path_serves_a_ranged_read_as_before() {
 }
 
 /// Asserts that each read is a job of its own with the S3 bit set: the GETs of two large stored
-/// objects and of the first part alone of a silo object carry three different jobs, each with
-/// bit 63.
+/// objects carry three different jobs, each with bit 63.
 #[tokio::test]
 async fn every_read_is_its_own_job_with_the_s3_bit() {
     let rig = LargeRig::new("routing-jobs");
-    for (key, seed) in [("cas/j1", 14), ("cas/j2", 15)] {
+    for (key, seed) in [("cas/j1", 14), ("cas/j2", 15), ("cas/j3", 16)] {
         let bytes = object(2 * MIB, seed);
         rig.stored(key, &bytes, generation(seed));
         rig.read(key, None).await.unwrap();
     }
-    let bytes = object(2 * MIB, 16);
-    rig.silo("cas/j3", &bytes, generation(16));
-    rig.read("cas/j3", None).await.unwrap();
     let gets = rig.gets();
     assert!(gets.len() >= 3);
     assert!(gets.iter().all(|get| get.job.0 & S3_JOB == S3_JOB));
