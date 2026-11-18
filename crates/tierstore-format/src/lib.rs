@@ -7,7 +7,14 @@
 //! - [`ids`]: node, block, stripe, drive and cluster ids, the generation (the 128-bit blake3 of
 //!   an object's bytes, its ETag), the key hash and the expiry class (10.2).
 //! - [`stamp`]: the cluster stamp, a hybrid logical clock value of 48 bits of wall-clock
-//!   milliseconds and 16 bits of counter (10.2). The clock that advances and merges it is T-S2's.
+//!   milliseconds and 16 bits of counter (10.2).
+//! - [`hlc`]: the hybrid logical clock that assigns stamps, advanced on every local event and
+//!   merged with the stamp of every peer message, on an injected wall clock (10.2).
+//! - [`alloc`]: the per-node allocation of block and stripe ids, one at a time or as a run of
+//!   consecutive ids for a chain (10.2).
+//! - [`digest`]: the blake3 helpers (an object's generation, a key hash, the rendezvous hash `H`,
+//!   a region's cell crc table and blake3 in one pass) beside the crc32c helpers of this module
+//!   (10.2, 10.3, 10.4).
 //! - [`record`]: the 64-byte record header, the record framing of a segment and the scan that
 //!   stops at the last valid record (10.2).
 //! - [`tomb`]: the tombstone log of `tomb/<origin>/<first_seq>.log`: tombstones, block drops and
@@ -17,6 +24,9 @@
 //! - [`trailer`]: the block trailer (sorted entries with stamps, a crc32c per 1 MiB cell, the
 //!   block's blake3), which is also the content of `seg/<block_id>.idx` and `blk/<block_id>.idx`
 //!   (10.2).
+//! - [`block`]: the geometry of a block (`block_bytes`, `block_reserve`), the building of a
+//!   segment, pack block or chain slice and its trailer from the block's bytes, and chains
+//!   (10.2, 10.5).
 //! - [`footer`]: the footer of a cold shard file or copy file (10.4).
 //! - [`descriptor`]: the stripe descriptor and the code of a stripe (10.2, 10.4).
 //! - [`seal`]: the ballot and the durable seal state of a segment (10.3).
@@ -34,16 +44,20 @@
 //! - an encode of the same value gives the same bytes (the trailer sorts its entries), so two
 //!   copies of the same block have byte-identical trailers.
 //!
-//! The blake3 values the formats carry (the generation, the block and shard digests) are stored
-//! as bytes here; computing them is T-S2's (`format` helpers), as is the hybrid logical clock.
+//! Nothing here reads a clock, a file or the network: the wall clock of [`hlc`] is a parameter of
+//! every call, and the bytes of a block stream through [`block`] and [`digest`] without being held.
 
 #![forbid(unsafe_code)]
 
+pub mod alloc;
+pub mod block;
 mod codec;
 pub mod descriptor;
+pub mod digest;
 mod error;
 pub mod footer;
 pub mod free;
+pub mod hlc;
 pub mod identity;
 pub mod ids;
 pub mod names;
@@ -73,4 +87,11 @@ pub fn cells_for(len: u64) -> u64 {
 #[must_use]
 pub fn crc32c(bytes: &[u8]) -> u32 {
     crc32c::crc32c(bytes)
+}
+
+/// The crc32c of the bytes whose crc32c is `crc` followed by `bytes`: `crc32c_append(crc32c(a), b)`
+/// equals `crc32c(a ++ b)`. It continues the running crc of a segment (10.3) and a cell's crc.
+#[must_use]
+pub fn crc32c_append(crc: u32, bytes: &[u8]) -> u32 {
+    crc32c::crc32c_append(crc, bytes)
 }

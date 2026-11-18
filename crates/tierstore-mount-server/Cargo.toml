@@ -1,0 +1,41 @@
+[package]
+name = "tierstore-mount-server"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+repository.workspace = true
+publish.workspace = true
+description = "The server side of the mount-to-tierstore protocol (docs/design/fetch-cache-serve.md, 5.1 and 5.4; Linux only): one multiplexed unix-socket connection per mount, a task per request, the server's epoch, descriptors passed with SCM_RIGHTS, the holder's counter memfd and its lifeline."
+
+[dependencies]
+# `Trees` is used as `dyn` and has an async method, boxed as the traits of tierstore-fetch-api are.
+async-trait.workspace = true
+# The frozen protocol (frames, messages, epoch), and the entry store and engine the server drives.
+tierstore-fetch-api.workspace = true
+thiserror.workspace = true
+# The sockets, the per-request tasks, the lifeline's readiness and the blocking calls of the entry
+# store, which run on blocking threads.
+tokio = { workspace = true, features = ["net", "rt", "sync"] }
+# The refusals and the ends of connections and holders, for the operator.
+tracing.workspace = true
+
+# `sendmsg`/`recvmsg` with SCM_RIGHTS, `poll` of the lifeline, `fstat` and `F_GET_SEALS` of the
+# descriptors a mount sends, the pipe that stops a lifeline's watch, and `getrandom` for the epoch;
+# all of it without `unsafe`.
+[target.'cfg(target_os = "linux")'.dependencies]
+rustix = { workspace = true, features = ["event", "fs", "net", "pipe", "rand"] }
+
+[dev-dependencies]
+# The fake tree lists of the tests implement `Trees`.
+async-trait.workspace = true
+# The scratch directory of the listening socket's test.
+tierstore-testkit.workspace = true
+tokio = { workspace = true, features = ["macros", "net", "rt", "rt-multi-thread", "sync"] }
+
+[target.'cfg(target_os = "linux")'.dev-dependencies]
+# The mount's side in the tests: its memfds, socketpairs and the frames' descriptors.
+rustix = { workspace = true, features = ["fs", "net"] }
+
+[lints]
+workspace = true

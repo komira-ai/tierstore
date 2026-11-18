@@ -158,6 +158,33 @@ impl Harness {
         }
     }
 
+    /// Drains this server and starts another on a new loopback port over the same tiers, as a
+    /// restart of the node does: what the tiers hold stays, nothing the process held does. For a
+    /// harness made by [`Harness::start`] (a store that runs on entries).
+    pub async fn restart(self) -> Self {
+        self.server.begin_drain();
+        self.served.await.expect("the server drained");
+        let mut proxy_config = ProxyConfig::new("p1", 1 << 30, Arc::new(SystemClock));
+        proxy_config.usage_refresh = Duration::ZERO;
+        let hot: Arc<dyn Backend> = self.hot.clone();
+        let cold: Arc<dyn Backend> = self.cold.clone();
+        let opened = live_proxy(hot, cold, proxy_config, ENTRIES_FORMAT).await;
+        let mut config = ServerConfig::new(BUCKET, KEY_ID, SECRET, Arc::new(SystemClock));
+        config.drain_lb_wait = Duration::from_millis(100);
+        config.drain_deadline = Duration::from_secs(10);
+        let server = Server::new(Arc::new(opened.expect("a proxy")), config);
+        let listener = TcpListener::bind("127.0.0.1:0").await.expect("bound");
+        let addr = listener.local_addr().expect("an address");
+        let serving = Arc::clone(&server);
+        let served = tokio::spawn(async move { serving.serve(listener).await });
+        Self {
+            addr,
+            server,
+            served,
+            ..self
+        }
+    }
+
     /// Runs the entry reconciler over the tiers until a step changes nothing, as the reconciler of
     /// the node would between two requests: it removes the entries that a delete handed over, which
     /// releases what waits for them.
@@ -167,6 +194,19 @@ impl Harness {
         let mut reconciler = EntryReconciler::new(self.hot.clone(), self.cold.clone(), config);
         while reconciler.step().await.progress() {}
         reconciler.stop().await;
+    }
+
+    /// Runs the entry reconciler over the tiers for as long as it is polled, as the node runs it
+    /// beside the front: a step whenever the step before changed something, and otherwise once
+    /// the other tasks have had their turn. It never returns; a test races it with its work.
+    pub async fn reconcile_forever(&self) {
+        let base = ReconcilerConfig::new("harness/beside", 1 << 30, Arc::new(SystemClock));
+        let config = EntryReconcilerConfig::new(base);
+        let mut reconciler = EntryReconciler::new(self.hot.clone(), self.cold.clone(), config);
+        loop {
+            while reconciler.step().await.progress() {}
+            tokio::task::yield_now().await;
+        }
     }
 
     /// The `S3Store` client, with the key of the server.

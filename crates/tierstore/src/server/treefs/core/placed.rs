@@ -29,6 +29,7 @@
 
 use std::fs::File;
 use std::sync::Arc;
+use std::sync::atomic::Ordering;
 use std::time::Duration;
 
 use sha2::{Digest as _, Sha256};
@@ -42,6 +43,7 @@ use crate::{MAX_TREE_LIST_BYTES, TreeImage};
 use super::super::fill_client::{Place, PlacedTree};
 use super::super::ino;
 use super::super::tree::Tree;
+use super::loaded::Loaded;
 use super::read::FileBytes;
 use super::{Core, Errno, Looked, locked};
 use crate::server::local_cache::manifest_path;
@@ -299,6 +301,25 @@ impl Core {
                 Ok(Looked::Found(self.namespace(ino)))
             }
             Place::Nothing => Err(Errno::NoEnt),
+        }
+    }
+
+    /// Tells the node, the first time while the tree `loaded` is in memory, that a lookup in one
+    /// of its directories or a listing of one was served, if it is the tree of a placement: the
+    /// start of the command of the run whose source it is (`tierstore_request_to_start_seconds`).
+    /// Neither the agent that opens the tree's root nor the kernel that mounts it under the job's
+    /// overlay reads below the root, so the first such request is the container runtime making the
+    /// job's root, or the command itself. The report leaves on a thread of its own: this does not
+    /// wait for it.
+    pub(super) fn looked_into(&self, loaded: &Loaded) {
+        let Some(path) = loaded.tree.location() else {
+            return;
+        };
+        // Read first, so that every request after the first only reads the flag.
+        let first = !loaded.looked_into.load(Ordering::Acquire)
+            && !loaded.looked_into.swap(true, Ordering::AcqRel);
+        if first {
+            self.fills.report_started(path);
         }
     }
 

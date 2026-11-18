@@ -12,6 +12,8 @@ description = "The on-disk and on-wire formats of the tierstore storage tier (do
 # little-endian and every record carries a crc32c, so a torn or flipped byte is an error, never
 # a different answer.
 [dependencies]
+# The blake3 of a generation, a key hash, the rendezvous hash and a block's or shard's digest.
+blake3.workspace = true
 # The crc32c of every header, body and table (hardware SSE4.2 / ARMv8 with a portable fallback).
 crc32c.workspace = true
 # The ids travel in the JSON bodies of the peer protocol (tierstore-store-api) in their text form

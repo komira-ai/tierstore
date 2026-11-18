@@ -26,6 +26,10 @@
 //! - **`Sweep(agent, keep)`** releases every source of the agent whose run is not in `keep`, both
 //!   those this process prepared and the placements it finds under the agent's path.
 //!
+//! The first `Prepare` of a run stamps it in the cache, and a `Release` or a `Sweep` of a source of
+//! it forgets it: the request end of `tierstore_request_to_start_seconds`, whose other end is the
+//! first look of `tierstore fs` inside one of the run's trees (`local_cache/starts.rs`).
+//!
 //! Every call is idempotent by its source. Every read of the store has a bound,
 //! `params.fetch_timeout`; a read that passes it fails that file (an open reads it again) or, for
 //! the tree list, the preparation, which the next `Mount` starts again. A placement lasts
@@ -56,6 +60,8 @@ mod serve_tests;
 mod service_tests;
 #[cfg(test)]
 mod sources_tests;
+#[cfg(test)]
+mod start_tests;
 #[cfg(test)]
 mod testing;
 

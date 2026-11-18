@@ -1,0 +1,63 @@
+# docs/examples/now-combined.toml: components: hot store, cold store, peer service, S3 front,
+# node cache, fetch engine, FUSE front, Prepare provider
+[node]
+id = 1
+membership = "/etc/tierstore/membership.toml"      # six nodes, failure domain = node
+token_file = "/etc/tierstore/cluster.token"
+
+[peer]
+listen = "192.0.2.21:7480"
+
+[s3]
+listen = "192.0.2.21:7481"
+backend = "store"
+
+[cache]
+root = "/var/lib/tierstore-cache"     # the SSD cache partition (section 11)
+
+[fetch]                               # finds the storage nodes through this process's own membership file
+
+[fuse]
+
+[prepare]
+
+[store]
+kind = "tiered"
+legacy_upstream = "<silo S3 endpoint>"      # read-only, during the migration (10.10)
+
+[hot]                                 # SATA SSD partition
+dir = "/var/lib/ts-hot"
+replicas = 2
+min_acks = 2
+failure_domain = "node"
+seal_bytes = "1023MiB"
+seal_min_bytes = "256MiB"
+dirty_destage_start = 0.40
+dirty_destage_stop  = 0.25
+dirty_urgent = 0.60
+dirty_slow   = 0.80
+dirty_reject = 0.90
+promo_share = 0.10                    # the build cache beside it absorbs most repeat reads
+
+[cold]
+drives = ["/mnt/hdd1", "/mnt/hdd2"]   # silo's xfs; the tier writes under ts-cold/
+block_bytes = "1GiB"
+failure_domain = "node"
+ec = { k = 4, m = 2 }
+max_shards_per_domain = 2             # one per node at write time; two allowed after a node-loss rebuild
+fill_limit = 0.85
+node_loss_reserve = true
+reserve_drives = 1
+
+[destage]
+min_age = "1h"
+max_age = "1d"                        # short: the hot tier is two consumer SSD copies
+partial_after = "3d"
+
+[rebuild]
+node_down_after = "24h"
+share = 0.25
+
+[drive]                               # SMR, shared with silo: one stream until T0-F says otherwise
+streams = 1
+write_streams = 1
