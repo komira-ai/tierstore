@@ -142,3 +142,25 @@ fn a_journal_that_cannot_be_read_or_written_is_an_error() {
     assert!(Journal::read(dir.path()).is_err());
     assert!(Journal::rewrite(&dir.path().join("gone"), &fixture_records()).is_err());
 }
+
+/// Asserts that a rewrite begun and finished apart leaves `journal` as it was until the finish,
+/// then holds its records and the extra ones in order, appended to after; and that a finish whose
+/// extra record cannot be written is an error that leaves `journal` as it was.
+#[test]
+fn a_rewrite_begun_replaces_the_journal_only_at_its_finish() {
+    let dir = TestDir::under(std::env::temp_dir(), "put-journal-begin");
+    let records = fixture_records();
+    std::fs::write(dir.path().join(FILE), "old\n").unwrap();
+    let mut new = Journal::begin_rewrite(dir.path(), &records[..2]).unwrap();
+    assert_eq!(Journal::read(dir.path()).unwrap(), b"old\n");
+    new.finish_rewrite(&records[2..4]).unwrap();
+    assert_eq!(new.lines(), 4);
+    new.append(&records[4]).unwrap();
+    let text = Journal::read(dir.path()).unwrap();
+    assert_eq!(decode(&text), (records[..5].to_vec(), 0));
+    assert!(!dir.path().join(NEW_FILE).exists());
+    let mut broken = Journal::begin_rewrite(dir.path(), &records[..1]).unwrap();
+    broken.break_appends();
+    assert!(broken.finish_rewrite(&records[1..2]).is_err());
+    assert_eq!(Journal::read(dir.path()).unwrap(), text);
+}

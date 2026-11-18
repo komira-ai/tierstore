@@ -15,7 +15,7 @@
 //! - The next staged file is numbered after every number a line of the journal or a file of the
 //!   stage names, so no number is used twice.
 
-use std::collections::BTreeMap;
+use std::collections::{BTreeMap, BTreeSet};
 use std::fs::DirBuilder;
 use std::io;
 use std::os::fd::OwnedFd;
@@ -270,12 +270,15 @@ impl StagedStore {
             names: BTreeMap::new(),
             bodies,
             handles: BTreeMap::new(),
+            open_by_file: BTreeMap::new(),
             uploading: BTreeMap::new(),
+            uploading_keys: BTreeSet::new(),
             dirs: BTreeMap::<String, DirUse>::new(),
             orphans,
             next_id: most.map_or(0, |most| most + 1),
             next_handle: 0,
             journal,
+            captured: None,
         };
         for (id, entry) in kept {
             table.insert(id, entry);
@@ -287,6 +290,9 @@ impl StagedStore {
             clock,
             disk,
             table: Mutex::new(table),
+            rewriting: Mutex::new(()),
+            #[cfg(test)]
+            while_rewriting: Mutex::new(None),
         };
         Ok((store, replayed))
     }
