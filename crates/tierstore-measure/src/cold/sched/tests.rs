@@ -239,3 +239,18 @@ fn a_parked_waiter_is_no_rival_at_a_slice_end_and_unpark_picks_its_own() {
     s.unpark(b, T);
     assert!(s.is_active(b) && !s.is_active(a));
 }
+
+#[test]
+fn a_demand_never_preempts_another_demand() {
+    let mut s = State::new(Params {
+        preempt_max_per_s: 100,
+        ..p(1)
+    });
+    let d1 = s.enqueue(Class::Demand, false, T).unwrap();
+    s.admit_ready(T);
+    let d2 = s.enqueue(Class::Demand, false, T).unwrap();
+    s.admit_ready(T);
+    assert_eq!(s.counts.preemptions, 0);
+    assert_eq!(s.boundary(d1, 1, T), Boundary::Continue);
+    assert!(!s.is_active(d2));
+}

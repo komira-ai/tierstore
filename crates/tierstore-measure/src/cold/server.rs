@@ -157,22 +157,21 @@ impl<'c> Server<'c> {
         sock.set_nodelay(true).map_err(net)?;
         let mut r = BufReader::new(sock.try_clone().map_err(net)?);
         let mut w = sock;
-        loop {
+        // Wait for each request, looking at the stop flag every 100 ms; a closed connection ends.
+        while !stop.load(Ordering::SeqCst) {
             w.set_read_timeout(Some(Duration::from_millis(100)))
                 .map_err(net)?;
             let mut probe = [0u8; 1];
-            // Wait for the next request, looking at the stop flag every 100 ms; a closed or
-            // failed connection ends.
             match w.peek(&mut probe) {
                 Ok(0) => return Ok(()),
                 Ok(_) => {}
-                Err(_) if !stop.load(Ordering::SeqCst) => continue,
-                Err(_) => return Ok(()),
+                Err(_) => continue,
             }
             w.set_read_timeout(None).map_err(net)?;
             let req = read_request(&mut r)?.ok_or(Error::Net("the client left".into()))?;
             self.handle(&mut w, &req)?;
         }
+        Ok(())
     }
 
     fn handle(&self, w: &mut TcpStream, req: &Request) -> Result<(), Error> {

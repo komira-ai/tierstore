@@ -290,3 +290,48 @@ fn sweeps_are_named() {
     let e = cells_for(&["c9".to_string()], "a", "b").unwrap_err();
     assert_eq!(e.to_string(), "arm c9: want c2, c3, c4, mixed or slow");
 }
+
+#[test]
+fn slow_reads_and_writes_that_end_inside_the_window_are_counted() {
+    let f = Fake::new("arms", &[]);
+    let ds = drives(&f);
+    let packs = Packs {
+        count: 1,
+        size: MIB,
+    };
+    prepare(&ds.values().cloned().collect::<Vec<_>>(), &packs).unwrap();
+    // A write cell whose window is long beside one 1 MiB pack: written packs are counted.
+    let mut w = shrink(base("hdd1"));
+    w.writes = true;
+    w.load.background = 0;
+    w.load.demand = 0;
+    let clock = StepClock::new(Duration::from_millis(1), 0);
+    let r = local_cell(
+        &w,
+        &ds,
+        &packs,
+        &clock,
+        None,
+        Duration::ZERO,
+        Duration::from_secs(2),
+    )
+    .unwrap();
+    assert!(r.write_mb_s > 0.0);
+    // A slow consumer whose rate is far above what the window needs: its parts are counted.
+    let mut s = shrink(base("hdd1"));
+    s.load.background = 0;
+    s.load.demand = 0;
+    s.load.slow = 1;
+    s.load.slow_mb_s = 1e6;
+    let r = local_cell(
+        &s,
+        &ds,
+        &packs,
+        &clock,
+        None,
+        Duration::ZERO,
+        Duration::from_millis(300),
+    )
+    .unwrap();
+    assert!(r.slow_mb_s > 0.0);
+}
