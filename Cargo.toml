@@ -56,6 +56,8 @@ hyper = { version = "1.12.0", default-features = false }
 hyper-util = { version = "0.1.21", default-features = false }
 # `kill` and the descriptor calls of the test helpers (tierstore-testkit).
 libc = "0.2.190"
+# The exhaustive interleaving checker of the models of tierstore-harness (tests only). MIT.
+loom = "0.7.2"
 md-5 = "0.11.0"
 # The NFSv3 and MOUNT protocol of `tierstore fs` on macOS (BSD-3-Clause), `nfsserve` 0.11.0 from
 # crates.io plus one commit on the branch `komira-0.11` of our fork: the transaction tracker
@@ -122,6 +124,8 @@ tierstore-fetch-api = { path = "crates/tierstore-fetch-api" }
 tierstore-store-api = { path = "crates/tierstore-store-api" }
 # The FUSE library: dispatch with replies bound to their originating device.
 tsfuse = { path = "crates/tsfuse" }
+# The breadth-first explorer of the protocol models (its `explore` module).
+tierstore-model = { path = "crates/tierstore-model" }
 # The previous release: `v0.3.17`, the tag of the commit below, taken from the public repository
 # at that commit alone (the `rev` is what pins it; a tag can be moved). Used only by the
 # dev-dependencies of `crates/compat`. When a release is made, move both to the new release's
