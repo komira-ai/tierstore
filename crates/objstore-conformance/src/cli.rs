@@ -141,12 +141,30 @@ pub fn main(args: impl IntoIterator<Item = OsString>) -> ExitCode {
 /// # Errors
 /// [`CliError`] when the suite could not run.
 pub async fn run(flags: Flags, out: &mut impl Write) -> Result<bool, CliError> {
-    let path = flags.secret_access_key_file;
+    let path = flags.secret_access_key_file.clone();
     let secret =
         std::fs::read_to_string(&path).map_err(|source| CliError::Secret { path, source })?;
-    let root = KeyPrefix::new(flags.prefix).map_err(CliError::Prefix)?;
+    let root = KeyPrefix::new(flags.prefix.clone()).map_err(CliError::Prefix)?;
+    let create_bucket = flags.create_bucket;
+    let identical = flags.identical.into();
+    let config = s3_config(flags, &secret);
+    let store = S3Store::new(config).map_err(CliError::Client)?;
+    if create_bucket {
+        store.create_bucket().await.map_err(CliError::Bucket)?;
+    }
+    let report = crate::run(&store, &root, identical).await;
+    write!(out, "{report}").map_err(CliError::Output)?;
+    let tag = etag(&store, &root).await;
+    writeln!(out, "{tag}").map_err(CliError::Output)?;
+    Ok(report.passed())
+}
+
+/// The client's configuration from `flags` and the secret read from its file (a trailing newline
+/// dropped): conditional writes claimed, Object Lock not, and `--timeout-secs` as the limit on
+/// opening a connection and on each request.
+fn s3_config(flags: Flags, secret: &str) -> S3Config {
     let timeout = Duration::from_secs(flags.timeout_secs);
-    let config = S3Config {
+    S3Config {
         endpoint: flags.endpoint,
         region: flags.region,
         bucket: flags.bucket,
@@ -158,16 +176,7 @@ pub async fn run(flags: Flags, out: &mut impl Write) -> Result<bool, CliError> {
         connect_timeout: timeout,
         request_timeout: timeout,
         min_body_rate: None,
-    };
-    let store = S3Store::new(config).map_err(CliError::Client)?;
-    if flags.create_bucket {
-        store.create_bucket().await.map_err(CliError::Bucket)?;
     }
-    let report = crate::run(&store, &root, flags.identical.into()).await;
-    write!(out, "{report}").map_err(CliError::Output)?;
-    let tag = etag(&store, &root).await;
-    writeln!(out, "{tag}").map_err(CliError::Output)?;
-    Ok(report.passed())
 }
 
 /// The `ETAG` line: writes an object under `<root>etag`, reads its entity tag, deletes it, and
@@ -192,3 +201,7 @@ async fn etag(store: &S3Store, root: &KeyPrefix) -> String {
         Err(e) => format!("ETAG unknown: {e}"),
     }
 }
+
+#[cfg(test)]
+#[path = "cli_tests.rs"]
+mod tests;

@@ -195,3 +195,23 @@ async fn a_root_with_no_room_and_a_bad_endpoint_are_reported() {
             .starts_with("the S3 client: ")
     );
 }
+
+/// Asserts that a run signs every request for the region `--region` names, and only that one, and
+/// still passes every case (the fake service takes any region, and keeps the ones it was given).
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn a_run_signs_for_the_region_named() {
+    let (s3, _dir, secret) = service().await;
+    let more = [
+        "--prefix",
+        "runs/4/",
+        "--identical",
+        "refused",
+        "--region",
+        "eu-west-3",
+    ];
+    let args = flags(s3.endpoint(), &secret, &more);
+    let mut out = Vec::new();
+    let passed = cli::run(Flags::parse_from(args), &mut out).await.unwrap();
+    assert!(passed, "{}", String::from_utf8_lossy(&out));
+    assert_eq!(s3.regions(), ["eu-west-3"]);
+}
