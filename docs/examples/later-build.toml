@@ -1,0 +1,30 @@
+# docs/examples/later-build.toml: one of the 31 build nodes of LATER; they differ only in addresses.
+# Components: node cache, fetch engine, FUSE front, S3 front (caching proxy), Prepare provider.
+# No [node] section: a node that runs no store component has no node id.
+[client]                              # how tierstore-client finds the storage nodes (10.8)
+seeds = ["192.0.2.11:7480", "192.0.2.12:7480", "192.0.2.13:7480"]   # or: membership = "<file>"
+token_file = "/etc/tierstore/cluster.token"
+
+[cache]                               # tierstore-cache (sections 5, 7, 8, 11)
+root = "/var/lib/tierstore-cache"     # the SSD cache partition (section 11)
+budget = "185GiB"                     # section 7
+shared_socket = "/run/tierstore/cache.sock"   # the default; FUSE mount processes and other processes attach here (5.4, 23)
+
+[fetch]                               # the fetch engine (section 4); its constants are frozen by T10b
+
+[fuse]                                # tsfuse (5.2); the transport follows fuse.enable_uring, read at startup
+
+[s3]
+listen = "127.0.0.1:7481"
+backend = "cache"                     # a caching proxy of the storage cluster (section 9)
+
+[prepare]                             # the jobscheduler mount provider (section 6)
+socket = "/run/tierstore/provider.sock"
+
+[profile]                             # learned access profiles (6.1)
+s3_key_file = "/etc/tierstore/profiles.key"   # an S3 key that may write and delete only under _profiles/
+max_entries = 65536
+min_session = "1s"
+fetch_deadline = "50ms"
+max_age = "30d"
+keep = 3
