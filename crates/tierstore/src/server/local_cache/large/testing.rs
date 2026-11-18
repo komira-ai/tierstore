@@ -1,6 +1,6 @@
 //! The rig of the large-object tests: a cache (`super::super::testing::Rig`) with a real
 //! [`FetchEngine`] attached, over the in-memory entry store and the fake upstream of
-//! `tierstore-fetch-api`, on an injected clock that no test moves unless it says so. The fake
+//! `tierstore-fetch-api`, on an injected clock that no test moves. The fake
 //! upstream holds every object: a stored one has a location that names its generation and a hot
 //! copy; a silo-origin one has a location with no generation and one legacy source. Its `get`
 //! answers `412` to an `If-Match` other than the object's generation, and a GET with none with
@@ -86,6 +86,10 @@ pub(in crate::server::local_cache) struct Gated {
     arrived: Notify,
     /// `LOCATE` answers to give before the fake's own, in order.
     locates: Mutex<Vec<Result<Located, UpstreamError>>>,
+    /// When set, every `LOCATE` waits for a permit of it before it is answered.
+    locate_gate: Mutex<Option<Arc<Semaphore>>>,
+    /// The `LOCATE`s that have reached the upstream (answered or waiting).
+    locating: AtomicUsize,
 }
 
 impl Gated {
@@ -96,6 +100,8 @@ impl Gated {
             entered: AtomicUsize::new(0),
             arrived: Notify::new(),
             locates: Mutex::new(Vec::new()),
+            locate_gate: Mutex::new(None),
+            locating: AtomicUsize::new(0),
         }
     }
 
@@ -104,6 +110,24 @@ impl Gated {
         let gate = Arc::new(Semaphore::new(0));
         *self.gate.lock().unwrap() = Some(gate.clone());
         gate
+    }
+
+    /// Holds every `LOCATE` from now until a permit of the semaphore returned is added for it.
+    pub(in crate::server::local_cache) fn hold_locates(&self) -> Arc<Semaphore> {
+        let gate = Arc::new(Semaphore::new(0));
+        *self.locate_gate.lock().unwrap() = Some(gate.clone());
+        gate
+    }
+
+    /// Waits until `n` `LOCATE`s have reached the upstream (answered or held).
+    pub(in crate::server::local_cache) async fn located(&self, n: usize) {
+        loop {
+            let arrived = self.arrived.notified();
+            if self.locating.load(Ordering::SeqCst) >= n {
+                return;
+            }
+            arrived.await;
+        }
     }
 
     /// Waits until `n` GETs have reached the upstream (answered or held).
@@ -134,6 +158,12 @@ impl Gated {
 #[async_trait::async_trait]
 impl Upstream for Gated {
     async fn locate(&self, key: &PackKey) -> Result<Located, UpstreamError> {
+        let gate = self.locate_gate.lock().unwrap().clone();
+        self.locating.fetch_add(1, Ordering::SeqCst);
+        self.arrived.notify_waiters();
+        if let Some(gate) = gate {
+            gate.acquire().await.unwrap().forget();
+        }
         let scripted = {
             let mut locates = self.locates.lock().unwrap();
             (!locates.is_empty()).then(|| locates.remove(0))
@@ -167,8 +197,6 @@ impl Upstream for Gated {
 pub(in crate::server::local_cache) struct LargeRig {
     /// The cache, its memory upstream (for the small objects of `obj/`) and its clock.
     pub rig: Rig,
-    /// The engine's clock: moved by hand only.
-    pub clock: ManualClock,
     /// The engine's upstream.
     pub upstream: Arc<Gated>,
     /// The engine's entry store.
@@ -216,7 +244,8 @@ impl LargeRig {
             upstream: upstream.clone(),
             budget: Arc::new(Unlimited),
             verifier: Arc::new(Unverified),
-            timer: Arc::new(ManualTimer::new(clock.clone())),
+            // No test moves the engine's clock: no timer of the engine fires.
+            timer: Arc::new(ManualTimer::new(clock)),
         };
         let engine = Arc::new(FetchEngine::new(
             parts,
@@ -235,7 +264,6 @@ impl LargeRig {
         assert!(rig.cache.route_large(large.clone()));
         Self {
             rig,
-            clock,
             upstream,
             store,
             engine,

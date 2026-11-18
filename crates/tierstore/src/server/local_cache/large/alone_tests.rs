@@ -235,10 +235,10 @@ async fn a_second_read_knows_the_generation_and_sends_no_part_without_if_match()
 
 /// Asserts that a span starting past the end of a silo object opens as `Window::Unsatisfiable`
 /// with an empty body and the object's size and `ETag`; that the first such read costs one GET
-/// (the first cell, alone, as any first read of an object with no known generation does) and no
-/// fill; and that the next one, the object being known, costs no GET at all.
+/// of one byte (alone, for the `ETag`) and no fill; and that the next one, the object being
+/// known, costs no GET at all.
 #[tokio::test]
-async fn an_unsatisfiable_range_of_a_silo_object_costs_one_part_alone_once() {
+async fn an_unsatisfiable_range_of_a_silo_object_costs_one_byte_alone_once() {
     let key = "cas/alone/unsatisfiable";
     let (rig, _) = silo_rig("alone-unsatisfiable", key, 3 * MIB, 0xb1);
     let past = Some(Span::From {
@@ -253,7 +253,7 @@ async fn an_unsatisfiable_range_of_a_silo_object_costs_one_part_alone_once() {
         let gets = rig.gets();
         assert_eq!(gets.len(), 1, "round {round}");
         assert_eq!(if_match(&gets[0]), None);
-        assert_eq!((gets[0].range.offset, gets[0].range.len), (0, MIB));
+        assert_eq!((gets[0].range.offset, gets[0].range.len), (0, 1));
         assert_eq!(rig.engine.stats().fills, 0);
     }
     assert_eq!(rig.large.counters().counts().alone, 1);
@@ -269,10 +269,11 @@ fn silo_location(size: u64) -> Location {
     }
 }
 
-/// Asserts that a first part alone whose source does not hold the object is a not-found error
-/// and counted as a miss (not as unavailable), with the engine never asked.
+/// Asserts that a first part alone whose source does not hold the object, after `LOCATE` named
+/// it, is `Error::Unavailable` (a `503`: a lost location is not a definitive miss, 10.6 step 3),
+/// counted as unavailable and not as a miss, not remembered, and with the engine never asked.
 #[tokio::test]
-async fn a_first_part_that_the_source_does_not_hold_is_not_found() {
+async fn a_first_part_that_the_source_does_not_hold_is_unavailable_not_a_miss() {
     let key = "cas/alone/gone";
     let rig = LargeRig::new("alone-gone");
     rig.upstream
@@ -280,11 +281,15 @@ async fn a_first_part_that_the_source_does_not_hold_is_not_found() {
     let Err(error) = rig.read(key, None).await else {
         panic!("a read of an object the source lacks");
     };
-    assert!(matches!(error, Error::NotFound(_)), "{error:?}");
+    assert!(matches!(error, Error::Unavailable(_)), "{error:?}");
     let counts = rig.large.counters().counts();
-    assert_eq!((counts.misses, counts.unavailable, counts.alone), (1, 0, 1));
+    assert_eq!((counts.misses, counts.unavailable, counts.alone), (0, 1, 1));
     assert_eq!(rig.upstream.count(), 1);
     assert_eq!(rig.engine.stats().fills, 0);
+    let (rig_bytes, etag) = (object(3 * MIB, 0xb4), generation(0xb4));
+    rig.silo(key, &rig_bytes, etag);
+    let (meta, _, served) = rig.read(key, None).await.expect("served once there");
+    assert_eq!((meta.tag, served), (etag.to_string(), rig_bytes.to_vec()));
 }
 
 /// Asserts that a transport error and a `503` of the first part alone are `Error::Unavailable`,

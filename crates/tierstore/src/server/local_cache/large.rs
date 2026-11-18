@@ -68,7 +68,7 @@ use super::stream::eager;
 use super::{Inner, LocalCache, locked};
 use crate::{Error, Meta, Opened, ReadBody, Span, Window};
 
-pub use book::KNOWN_LIMIT;
+pub(crate) use book::KNOWN_LIMIT;
 use book::{Book, Known};
 use cells::Cells;
 
@@ -76,19 +76,19 @@ use cells::Cells;
 const CELL: u64 = 1 << CELL_SHIFT;
 
 /// The most cells the first part alone asks for: the engine's largest first piece, 4 MiB (4.4).
-pub const ALONE_CELLS: u64 = 4;
+pub(crate) const ALONE_CELLS: u64 = 4;
 
 /// How many cells of a read are ensured ahead of the one being served: a read of a whole object
 /// of many GiB asks the engine for 64 MiB at a time, so a slow client does not pull the object
 /// into the cache much faster than it reads it.
-pub const AHEAD_CELLS: u32 = 64;
+pub(crate) const AHEAD_CELLS: u32 = 64;
 
 /// How long a definitive miss is answered `404` without asking again (10.6 step 4).
-pub const MISS_TTL: Duration = Duration::from_secs(5);
+pub(crate) const MISS_TTL: Duration = Duration::from_secs(5);
 
 /// The bit every job of the S3 front has set, so that none of its jobs is a mount's (4.5: the
 /// deficit round robin runs across jobs).
-pub const S3_JOB: u64 = 1 << 63;
+pub(crate) const S3_JOB: u64 = 1 << 63;
 
 /// How many times a cell is waited for when it went away between its wait and its read.
 const READ_TRIES: u32 = 3;
@@ -118,7 +118,7 @@ impl std::fmt::Debug for LargeParts {
 
 /// What the large-object path did, counted.
 #[derive(Debug, Default)]
-pub struct LargeCounters {
+pub(crate) struct LargeCounters {
     routed: AtomicU64,
     small: AtomicU64,
     unroutable: AtomicU64,
@@ -131,8 +131,9 @@ pub struct LargeCounters {
 }
 
 /// The counts of [`LargeCounters`] at one moment.
+#[cfg(test)]
 #[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
-pub struct LargeCounts {
+pub(crate) struct LargeCounts {
     /// Reads served through the engine.
     pub routed: u64,
     /// Reads of small objects, sent to the path of `obj/`.
@@ -145,20 +146,20 @@ pub struct LargeCounts {
     pub locates: u64,
     /// First parts sent alone.
     pub alone: u64,
-    /// Reads answered `404` from a definitive miss, asked or remembered, or from a first part
-    /// whose source did not hold the object.
+    /// Reads answered `404` from a definitive miss, asked or remembered.
     pub misses: u64,
     /// Reads answered `503` before their first byte: a miss that is not definitive, or an error
-    /// of the upstream.
+    /// of the upstream (a first part alone that its source does not hold among them).
     pub unavailable: u64,
     /// Reads whose fill failed or was lost while they waited.
     pub fill_failures: u64,
 }
 
+#[cfg(test)]
 impl LargeCounters {
     /// The counts now.
     #[must_use]
-    pub fn counts(&self) -> LargeCounts {
+    pub(crate) fn counts(&self) -> LargeCounts {
         let get = |c: &AtomicU64| c.load(Ordering::Relaxed);
         LargeCounts {
             routed: get(&self.routed),
@@ -221,7 +222,7 @@ impl LargeObjects {
     /// The path over `parts`, with a book of at most `limit` objects and as many misses (at
     /// least one of each): past it, the least recently used is forgotten.
     #[must_use]
-    pub fn with_limit(parts: LargeParts, limit: usize) -> Self {
+    pub(crate) fn with_limit(parts: LargeParts, limit: usize) -> Self {
         Self {
             parts,
             book: Mutex::new(Book::new(limit)),
@@ -231,8 +232,9 @@ impl LargeObjects {
     }
 
     /// What the path did.
+    #[cfg(test)]
     #[must_use]
-    pub fn counters(&self) -> &LargeCounters {
+    pub(crate) fn counters(&self) -> &LargeCounters {
         &self.counters
     }
 
@@ -247,25 +249,29 @@ impl LargeObjects {
     }
 
     /// What `key` is, at `now` (milliseconds of the cache's clock).
-    async fn identify(&self, key: &str, now: u64) -> Result<Identity, Error> {
-        {
+    /// Also the book's epoch before any call: what the call finds is put in the book only if no
+    /// write forgot anything meanwhile.
+    async fn identify(&self, key: &str, now: u64) -> Result<(Identity, u64), Error> {
+        let epoch = {
             let mut book = locked(&self.book);
+            let epoch = book.epoch();
             if let Some(known) = book.known(key) {
                 bump(&self.counters.known);
-                return Ok(Identity::Known(known));
+                return Ok((Identity::Known(known), epoch));
             }
             if book.missed(key, now) {
                 bump(&self.counters.misses);
                 return Err(Error::NotFound(key.to_owned()));
             }
-        }
+            epoch
+        };
         bump(&self.counters.locates);
         let answer = self.parts.upstream.locate(&PackKey(key.to_owned())).await;
         let location = match answer {
             Ok(Located::Found(location)) => location,
             Ok(Located::DefinitiveMiss) => {
                 let until = now.saturating_add(millis(MISS_TTL));
-                locked(&self.book).miss(key, until);
+                locked(&self.book).miss_at(key, until, epoch);
                 bump(&self.counters.misses);
                 return Err(Error::NotFound(key.to_owned()));
             }
@@ -281,19 +287,18 @@ impl LargeObjects {
             }
         };
         let Some(size) = location.size else {
-            return Ok(Identity::Unroutable);
+            return Ok((Identity::Unroutable, epoch));
         };
-        Ok(
-            match (location.generation, location.sources.into_iter().next()) {
-                (Some(generation), _) => Identity::Known(Known {
-                    generation,
-                    size,
-                    modified: now,
-                }),
-                (None, Some(source)) => Identity::Unpinned { size, source },
-                (None, None) => Identity::Unroutable,
-            },
-        )
+        let identity = match (location.generation, location.sources.into_iter().next()) {
+            (Some(generation), _) => Identity::Known(Known {
+                generation,
+                size,
+                modified: now,
+            }),
+            (None, Some(source)) => Identity::Unpinned { size, source },
+            (None, None) => Identity::Unroutable,
+        };
+        Ok((identity, epoch))
     }
 
     /// The read of `span` of `key` through the engine, or `None` when the object is not one for
@@ -305,7 +310,8 @@ impl LargeObjects {
         limit: u64,
         now: u64,
     ) -> Result<Option<Opened>, Error> {
-        let (size, pinned) = match self.identify(key, now).await? {
+        let (identity, epoch) = self.identify(key, now).await?;
+        let (size, pinned) = match identity {
             Identity::Known(known) => (known.size, Ok(known)),
             Identity::Unpinned { size, source } => (size, Err(source)),
             Identity::Unroutable => {
@@ -333,7 +339,7 @@ impl LargeObjects {
                 (known, Some(head), from)
             }
         };
-        locked(&self.book).learn(key, known.clone());
+        locked(&self.book).learn_at(key, known.clone(), epoch);
         // The rest is ensured now, so the engine fetches it while the head is sent.
         let rest = if from < end {
             Cells::new(self.clone(), known.spec(key), (from, end), job).stream()
@@ -370,12 +376,15 @@ impl LargeObjects {
         job: JobId,
     ) -> Result<(Known, ReadBody, u64), Error> {
         let first = start - start % CELL;
-        let stop = end
-            .max(first + 1)
-            .div_ceil(CELL)
-            .saturating_mul(CELL)
-            .min(first + ALONE_CELLS * CELL)
-            .min(size);
+        // A read of no bytes (an unsatisfiable range) asks for one, for the `ETag` alone.
+        let stop = if end > start {
+            end.div_ceil(CELL)
+                .saturating_mul(CELL)
+                .min(first + ALONE_CELLS * CELL)
+                .min(size)
+        } else {
+            first + 1
+        };
         bump(&self.counters.alone);
         let request = GetRequest {
             key: PackKey(key.to_owned()),
@@ -390,12 +399,8 @@ impl LargeObjects {
             rank: Rank(0),
         };
         let response = self.parts.upstream.get(request).await.map_err(|error| {
-            let error = upstream_error(key, &error);
-            match error {
-                Error::NotFound(_) => bump(&self.counters.misses),
-                _ => bump(&self.counters.unavailable),
-            }
-            error
+            bump(&self.counters.unavailable);
+            upstream_error(key, &error)
         })?;
         let known = Known {
             generation: response.generation,
@@ -479,13 +484,11 @@ impl Known {
     }
 }
 
-/// An upstream's error as the front's: a `404` for an object the source does not hold, else a
-/// `503`.
+/// An upstream's error as the front's: a `503`, whatever it is. A source that does not hold the
+/// object after `LOCATE` named it is a lost location (4.6), not a definitive miss (10.6 step 3),
+/// so it is never a `404`.
 fn upstream_error(key: &str, error: &UpstreamError) -> Error {
-    match error {
-        UpstreamError::NotFound { .. } => Error::NotFound(key.to_owned()),
-        other => Error::Unavailable(format!("{key}: {other}")),
-    }
+    Error::Unavailable(format!("{key}: {error}"))
 }
 
 impl LocalCache {
@@ -496,8 +499,9 @@ impl LocalCache {
     }
 
     /// The large-object path, if one is attached.
+    #[cfg(test)]
     #[must_use]
-    pub fn large(&self) -> Option<&Arc<LargeObjects>> {
+    pub(crate) fn large(&self) -> Option<&Arc<LargeObjects>> {
         self.inner.large.get()
     }
 }

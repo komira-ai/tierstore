@@ -29,6 +29,9 @@ pub(in crate::server::local_cache) struct Book {
     known: Recent<Known>,
     /// Until when each miss is answered without asking.
     misses: Recent<u64>,
+    /// How many times anything was forgotten: an answer asked for before a forget is not put in
+    /// the book after it.
+    epoch: u64,
 }
 
 impl Book {
@@ -37,6 +40,7 @@ impl Book {
         Self {
             known: Recent::new(limit),
             misses: Recent::new(limit),
+            epoch: 0,
         }
     }
 
@@ -45,16 +49,31 @@ impl Book {
         self.known.get(key).cloned()
     }
 
-    /// Learns `known` for `key`: a miss of it is forgotten.
-    pub fn learn(&mut self, key: &str, known: Known) {
-        self.misses.remove(key);
-        self.known.insert(key, known);
+    /// The epoch now: it moves at every [`forget`](Self::forget).
+    pub fn epoch(&self) -> u64 {
+        self.epoch
     }
 
-    /// Remembers a definitive miss of `key` until `until`: what was known of it is forgotten.
-    pub fn miss(&mut self, key: &str, until: u64) {
+    /// Learns `known` for `key` (a miss of it is forgotten), if the epoch is still `epoch`;
+    /// whether it did.
+    pub fn learn_at(&mut self, key: &str, known: Known, epoch: u64) -> bool {
+        if epoch != self.epoch {
+            return false;
+        }
+        self.misses.remove(key);
+        self.known.insert(key, known);
+        true
+    }
+
+    /// Remembers a definitive miss of `key` until `until` (what was known of it is forgotten), if
+    /// the epoch is still `epoch`; whether it did.
+    pub fn miss_at(&mut self, key: &str, until: u64, epoch: u64) -> bool {
+        if epoch != self.epoch {
+            return false;
+        }
         self.known.remove(key);
         self.misses.insert(key, until);
+        true
     }
 
     /// Whether a definitive miss of `key` is remembered at `now`; one that ran out is forgotten.
@@ -69,8 +88,9 @@ impl Book {
         }
     }
 
-    /// Forgets `key`: what was known of it, and a miss.
+    /// Forgets `key`: what was known of it, and a miss; the epoch moves.
     pub fn forget(&mut self, key: &str) {
+        self.epoch += 1;
         self.known.remove(key);
         self.misses.remove(key);
     }

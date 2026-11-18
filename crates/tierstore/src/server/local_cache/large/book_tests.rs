@@ -21,7 +21,7 @@ fn the_default_limit_is_sixty_five_thousand_five_hundred_thirty_six() {
 #[test]
 fn a_learned_object_is_known() {
     let mut book = Book::new(4);
-    book.learn("a", known(1, 100));
+    assert!(book.learn_at("a", known(1, 100), book.epoch()));
     assert_eq!(book.known("a"), Some(known(1, 100)));
 }
 
@@ -29,7 +29,7 @@ fn a_learned_object_is_known() {
 #[test]
 fn an_unknown_key_is_none() {
     let mut book = Book::new(4);
-    book.learn("a", known(1, 100));
+    assert!(book.learn_at("a", known(1, 100), book.epoch()));
     assert_eq!(book.known("b"), None);
 }
 
@@ -37,8 +37,8 @@ fn an_unknown_key_is_none() {
 #[test]
 fn learning_again_replaces_what_was_known() {
     let mut book = Book::new(4);
-    book.learn("a", known(1, 100));
-    book.learn("a", known(2, 200));
+    assert!(book.learn_at("a", known(1, 100), book.epoch()));
+    assert!(book.learn_at("a", known(2, 200), book.epoch()));
     assert_eq!(book.known("a"), Some(known(2, 200)));
     assert_eq!(book.len(), (1, 0));
 }
@@ -47,7 +47,7 @@ fn learning_again_replaces_what_was_known() {
 #[test]
 fn a_miss_holds_before_its_deadline_and_not_at_or_after_it() {
     let mut book = Book::new(4);
-    book.miss("a", 100);
+    assert!(book.miss_at("a", 100, book.epoch()));
     assert!(book.missed("a", 0));
     assert!(book.missed("a", 99));
     assert!(!book.missed("a", 100));
@@ -58,7 +58,7 @@ fn a_miss_holds_before_its_deadline_and_not_at_or_after_it() {
 #[test]
 fn an_expired_miss_is_dropped() {
     let mut book = Book::new(4);
-    book.miss("a", 100);
+    assert!(book.miss_at("a", 100, book.epoch()));
     assert_eq!(book.len(), (0, 1));
     assert!(!book.missed("a", 100));
     assert_eq!(book.len(), (0, 0));
@@ -69,7 +69,7 @@ fn an_expired_miss_is_dropped() {
 #[test]
 fn a_live_miss_stays_when_asked() {
     let mut book = Book::new(4);
-    book.miss("a", 100);
+    assert!(book.miss_at("a", 100, book.epoch()));
     assert!(book.missed("a", 50));
     assert_eq!(book.len(), (0, 1));
 }
@@ -78,7 +78,7 @@ fn a_live_miss_stays_when_asked() {
 #[test]
 fn an_unmissed_key_is_not_missed() {
     let mut book = Book::new(4);
-    book.miss("a", 100);
+    assert!(book.miss_at("a", 100, book.epoch()));
     assert!(!book.missed("b", 0));
 }
 
@@ -86,8 +86,8 @@ fn an_unmissed_key_is_not_missed() {
 #[test]
 fn learning_forgets_a_miss() {
     let mut book = Book::new(4);
-    book.miss("a", 100);
-    book.learn("a", known(1, 10));
+    assert!(book.miss_at("a", 100, book.epoch()));
+    assert!(book.learn_at("a", known(1, 10), book.epoch()));
     assert!(!book.missed("a", 0));
     assert_eq!(book.known("a"), Some(known(1, 10)));
     assert_eq!(book.len(), (1, 0));
@@ -97,8 +97,8 @@ fn learning_forgets_a_miss() {
 #[test]
 fn a_miss_forgets_what_was_known() {
     let mut book = Book::new(4);
-    book.learn("a", known(1, 10));
-    book.miss("a", 100);
+    assert!(book.learn_at("a", known(1, 10), book.epoch()));
+    assert!(book.miss_at("a", 100, book.epoch()));
     assert_eq!(book.known("a"), None);
     assert!(book.missed("a", 0));
     assert_eq!(book.len(), (0, 1));
@@ -108,9 +108,9 @@ fn a_miss_forgets_what_was_known() {
 #[test]
 fn forget_removes_known_and_miss_of_that_key_only() {
     let mut book = Book::new(4);
-    book.learn("a", known(1, 10));
-    book.learn("b", known(2, 20));
-    book.miss("c", 100);
+    assert!(book.learn_at("a", known(1, 10), book.epoch()));
+    assert!(book.learn_at("b", known(2, 20), book.epoch()));
+    assert!(book.miss_at("c", 100, book.epoch()));
     book.forget("a");
     book.forget("c");
     assert_eq!(book.known("a"), None);
@@ -125,10 +125,10 @@ fn forget_removes_known_and_miss_of_that_key_only() {
 #[test]
 fn the_least_recently_used_object_is_forgotten_past_the_limit() {
     let mut book = Book::new(2);
-    book.learn("a", known(1, 1));
-    book.learn("b", known(2, 2));
+    assert!(book.learn_at("a", known(1, 1), book.epoch()));
+    assert!(book.learn_at("b", known(2, 2), book.epoch()));
     assert_eq!(book.known("a"), Some(known(1, 1)));
-    book.learn("c", known(3, 3));
+    assert!(book.learn_at("c", known(3, 3), book.epoch()));
     assert_eq!(book.known("b"), None);
     assert_eq!(book.known("a"), Some(known(1, 1)));
     assert_eq!(book.known("c"), Some(known(3, 3)));
@@ -139,9 +139,9 @@ fn the_least_recently_used_object_is_forgotten_past_the_limit() {
 #[test]
 fn the_oldest_learned_object_goes_first_without_lookups() {
     let mut book = Book::new(2);
-    book.learn("a", known(1, 1));
-    book.learn("b", known(2, 2));
-    book.learn("c", known(3, 3));
+    assert!(book.learn_at("a", known(1, 1), book.epoch()));
+    assert!(book.learn_at("b", known(2, 2), book.epoch()));
+    assert!(book.learn_at("c", known(3, 3), book.epoch()));
     assert_eq!(book.known("a"), None);
     assert_eq!(book.known("b"), Some(known(2, 2)));
     assert_eq!(book.known("c"), Some(known(3, 3)));
@@ -151,9 +151,9 @@ fn the_oldest_learned_object_goes_first_without_lookups() {
 #[test]
 fn the_miss_table_forgets_the_oldest_miss_past_the_limit() {
     let mut book = Book::new(2);
-    book.miss("a", 100);
-    book.miss("b", 100);
-    book.miss("c", 100);
+    assert!(book.miss_at("a", 100, book.epoch()));
+    assert!(book.miss_at("b", 100, book.epoch()));
+    assert!(book.miss_at("c", 100, book.epoch()));
     assert!(!book.missed("a", 0));
     assert!(book.missed("b", 0));
     assert!(book.missed("c", 0));
@@ -164,10 +164,10 @@ fn the_miss_table_forgets_the_oldest_miss_past_the_limit() {
 #[test]
 fn asking_for_a_miss_counts_as_a_use() {
     let mut book = Book::new(2);
-    book.miss("a", 100);
-    book.miss("b", 100);
+    assert!(book.miss_at("a", 100, book.epoch()));
+    assert!(book.miss_at("b", 100, book.epoch()));
     assert!(book.missed("a", 0));
-    book.miss("c", 100);
+    assert!(book.miss_at("c", 100, book.epoch()));
     assert!(book.missed("a", 0));
     assert!(!book.missed("b", 0));
     assert!(book.missed("c", 0));
@@ -177,16 +177,16 @@ fn asking_for_a_miss_counts_as_a_use() {
 #[test]
 fn the_tables_are_bounded_independently() {
     let mut book = Book::new(2);
-    book.learn("a", known(1, 1));
-    book.learn("b", known(2, 2));
-    book.miss("x", 100);
-    book.miss("y", 100);
+    assert!(book.learn_at("a", known(1, 1), book.epoch()));
+    assert!(book.learn_at("b", known(2, 2), book.epoch()));
+    assert!(book.miss_at("x", 100, book.epoch()));
+    assert!(book.miss_at("y", 100, book.epoch()));
     assert_eq!(book.len(), (2, 2));
-    book.miss("z", 100);
+    assert!(book.miss_at("z", 100, book.epoch()));
     assert_eq!(book.len(), (2, 2));
     assert_eq!(book.known("a"), Some(known(1, 1)));
     assert_eq!(book.known("b"), Some(known(2, 2)));
-    book.learn("c", known(3, 3));
+    assert!(book.learn_at("c", known(3, 3), book.epoch()));
     assert_eq!(book.len(), (2, 2));
     assert!(book.missed("y", 0));
     assert!(book.missed("z", 0));
@@ -196,12 +196,12 @@ fn the_tables_are_bounded_independently() {
 #[test]
 fn a_limit_of_zero_is_taken_as_one() {
     let mut book = Book::new(0);
-    book.learn("a", known(1, 1));
-    book.learn("b", known(2, 2));
+    assert!(book.learn_at("a", known(1, 1), book.epoch()));
+    assert!(book.learn_at("b", known(2, 2), book.epoch()));
     assert_eq!(book.known("a"), None);
     assert_eq!(book.known("b"), Some(known(2, 2)));
-    book.miss("x", 100);
-    book.miss("y", 100);
+    assert!(book.miss_at("x", 100, book.epoch()));
+    assert!(book.miss_at("y", 100, book.epoch()));
     assert!(!book.missed("x", 0));
     assert!(book.missed("y", 0));
     assert_eq!(book.len(), (1, 1));
@@ -211,11 +211,11 @@ fn a_limit_of_zero_is_taken_as_one() {
 #[test]
 fn relearning_does_not_grow_and_refreshes_use() {
     let mut book = Book::new(2);
-    book.learn("a", known(1, 1));
-    book.learn("b", known(2, 2));
-    book.learn("a", known(3, 3));
+    assert!(book.learn_at("a", known(1, 1), book.epoch()));
+    assert!(book.learn_at("b", known(2, 2), book.epoch()));
+    assert!(book.learn_at("a", known(3, 3), book.epoch()));
     assert_eq!(book.len(), (2, 0));
-    book.learn("c", known(4, 4));
+    assert!(book.learn_at("c", known(4, 4), book.epoch()));
     assert_eq!(book.known("b"), None);
     assert_eq!(book.known("a"), Some(known(3, 3)));
     assert_eq!(book.known("c"), Some(known(4, 4)));
@@ -225,11 +225,11 @@ fn relearning_does_not_grow_and_refreshes_use() {
 #[test]
 fn remissing_does_not_grow_and_replaces_the_deadline() {
     let mut book = Book::new(2);
-    book.miss("a", 10);
-    book.miss("b", 100);
-    book.miss("a", 200);
+    assert!(book.miss_at("a", 10, book.epoch()));
+    assert!(book.miss_at("b", 100, book.epoch()));
+    assert!(book.miss_at("a", 200, book.epoch()));
     assert_eq!(book.len(), (0, 2));
-    book.miss("c", 100);
+    assert!(book.miss_at("c", 100, book.epoch()));
     assert!(!book.missed("b", 0));
     assert!(book.missed("a", 150));
     assert!(book.missed("c", 0));
@@ -240,8 +240,27 @@ fn remissing_does_not_grow_and_replaces_the_deadline() {
 fn len_counts_objects_and_misses() {
     let mut book = Book::new(8);
     assert_eq!(book.len(), (0, 0));
-    book.learn("a", known(1, 1));
-    book.learn("b", known(2, 2));
-    book.miss("c", 100);
+    assert!(book.learn_at("a", known(1, 1), book.epoch()));
+    assert!(book.learn_at("b", known(2, 2), book.epoch()));
+    assert!(book.miss_at("c", 100, book.epoch()));
     assert_eq!(book.len(), (2, 1));
+}
+
+/// Asserts that a forget, of any key, moves the epoch, and that an answer asked for at the epoch
+/// before it is not learned and not remembered as a miss, while one at the new epoch is.
+#[test]
+fn an_answer_from_before_a_forget_is_not_put_in_the_book() {
+    let mut book = Book::new(8);
+    let before = book.epoch();
+    book.forget("other");
+    assert_eq!(book.epoch(), before + 1);
+    assert!(!book.learn_at("a", known(1, 10), before));
+    assert!(!book.miss_at("b", 100, before));
+    assert_eq!(book.known("a"), None);
+    assert!(!book.missed("b", 0));
+    assert_eq!(book.len(), (0, 0));
+    let now = book.epoch();
+    assert!(book.learn_at("a", known(1, 10), now));
+    assert!(book.miss_at("b", 100, now));
+    assert_eq!(book.len(), (1, 1));
 }

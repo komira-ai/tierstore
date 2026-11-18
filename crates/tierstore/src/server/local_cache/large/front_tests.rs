@@ -15,6 +15,7 @@ use super::testing::{LargeRig, MIB, generation, hot, object};
 use crate::Backend;
 use crate::server::auth::sign;
 use crate::server::testing::{BUCKET, KEY_ID, NOW, SECRET};
+use crate::server::xml::error_body;
 use crate::server::{Server, ServerConfig};
 
 /// A key under the cache's policy.
@@ -228,8 +229,8 @@ async fn client_conditionals_are_judged_against_the_generation() {
 }
 
 /// Asserts that when every copy holds another generation than the location names, so the first
-/// cell cannot be filled, the client is told 503 `ServiceUnavailable` and the answer holds not
-/// one byte of the other object.
+/// cell cannot be filled, the client is told 503 `ServiceUnavailable` and the answer is exactly
+/// the error's body, with not one byte of the other object.
 #[tokio::test]
 async fn fill_failure_on_the_first_cell_is_503_with_none_of_the_other_bytes() {
     let front = Front::new("tscache-lfront-fail");
@@ -247,9 +248,12 @@ async fn fill_failure_on_the_first_cell_is_503_with_none_of_the_other_bytes() {
     assert_eq!(reply.status, StatusCode::SERVICE_UNAVAILABLE);
     assert!(reply.has_code("ServiceUnavailable"));
     assert_ne!(reply.header("etag"), quoted(held));
-    assert!(reply.body.len() < 1024);
-    let sample = &other_bytes[MIB as usize..MIB as usize + 64];
-    assert!(!reply.body.windows(64).any(|window| window == sample));
+    // The whole answer is the error's text: no byte of the other object.
+    let request_id = reply.header("x-amz-request-id");
+    let resource = format!("/{BUCKET}/{KEY}");
+    let message = "The store did not answer.";
+    let expected = error_body("ServiceUnavailable", message, &resource, request_id);
+    assert_eq!(reply.body, expected.into_bytes());
     let gets = front.rig.gets();
     assert!(!gets.is_empty());
     assert!(gets.iter().all(|get| get.generation == Some(named)));

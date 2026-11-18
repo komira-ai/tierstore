@@ -368,3 +368,56 @@ async fn every_read_is_its_own_job_with_the_s3_bit() {
     let jobs = [job_of("cas/j1"), job_of("cas/j2"), job_of("cas/j3")];
     assert!(jobs[0] != jobs[1] && jobs[1] != jobs[2] && jobs[0] != jobs[2]);
 }
+
+/// Asserts that a delete through the cache while a read's `LOCATE` is out keeps that read's
+/// answer out of the book: the read is served, and the next read asks `LOCATE` again, where it
+/// would otherwise take the generation learned before the delete.
+#[tokio::test]
+async fn a_delete_during_a_locate_keeps_its_answer_out_of_the_book() {
+    let rig = LargeRig::build(
+        "routing-delete-race",
+        usize::MAX,
+        EngineConfig::default(),
+        |config| config.write_through = true,
+        |store| store,
+    );
+    let bytes = object(3 * MIB, 14);
+    rig.stored(BIG, &bytes, generation(14));
+    rig.rig.put(BIG, &bytes).await;
+    let gate = rig.upstream.hold_locates();
+    let (read, ()) = tokio::join!(rig.read(BIG, None), async {
+        rig.upstream.located(1).await;
+        rig.rig.cache.delete(BIG).await.unwrap();
+        gate.add_permits(64);
+    });
+    assert_eq!(read.unwrap().2, bytes.to_vec());
+    assert_eq!((asked(&rig), counts(&rig).known), (1, 0));
+    rig.read(BIG, None).await.unwrap();
+    assert_eq!((asked(&rig), counts(&rig).known), (2, 0));
+}
+
+/// Asserts that a put through the cache while a read's `LOCATE` is out keeps that read's
+/// definitive miss out of the book: the read is `NotFound`, and the next read, inside the TTL,
+/// asks `LOCATE` again and finds the object the put wrote.
+#[tokio::test]
+async fn a_put_during_a_locate_keeps_its_miss_out_of_the_book() {
+    let rig = LargeRig::build(
+        "routing-put-race",
+        usize::MAX,
+        EngineConfig::default(),
+        |config| config.write_through = true,
+        |store| store,
+    );
+    let bytes = object(3 * MIB, 15);
+    let gate = rig.upstream.hold_locates();
+    let (read, ()) = tokio::join!(rig.open(BIG, None), async {
+        rig.upstream.located(1).await;
+        rig.rig.cache.put(BIG, bytes.clone()).await.unwrap();
+        gate.add_permits(64);
+    });
+    assert!(matches!(read, Err(Error::NotFound(_))));
+    rig.stored(BIG, &bytes, generation(15));
+    let (_, _, served) = rig.read(BIG, None).await.unwrap();
+    assert_eq!(served, bytes.to_vec());
+    assert_eq!(asked(&rig), 2);
+}
