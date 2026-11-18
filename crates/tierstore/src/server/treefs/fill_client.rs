@@ -3,7 +3,7 @@
 //! upstream object, or the whole object `cas/l/<sha256>` of a manifest), `touch` (not answered),
 //! the pin requests, `put` (a staged file of the put directory, answered in JSON), and the
 //! questions about the placements of the node (`place`, `mounted`, `image`, `flat`, `span`,
-//! `unplace`).
+//! `unplace`), and `started`, which a thread of its own sends (see [`FillClient::report_started`]).
 //!
 //! A request that meets a closed socket, or a connection that went away (the S3 instance of the
 //! node is being updated: the old instance keeps answering through its drain, and the new one
@@ -17,7 +17,8 @@ use std::path::PathBuf;
 
 use crate::TreeDigest;
 use crate::server::local_cache::trees::FlatTree;
-use std::sync::{Arc, Mutex};
+use std::sync::mpsc::{SyncSender, sync_channel};
+use std::sync::{Arc, Mutex, OnceLock};
 use std::time::Duration;
 
 use super::locked;
@@ -30,6 +31,9 @@ const PAUSE: Duration = Duration::from_secs(1);
 
 /// The most connections kept for the next request.
 const KEPT: usize = 64;
+
+/// The most `started` reports that wait for the thread that sends them; one more is dropped.
+pub(super) const STARTS_QUEUED: usize = 1024;
 
 /// Why a request did not get its answer.
 #[derive(Debug, PartialEq, Eq, thiserror::Error)]
@@ -93,6 +97,9 @@ pub(super) struct FillClient {
     answer_timeout: Duration,
     idle: Mutex<Vec<Connection>>,
     pause: Arc<dyn Fn(Duration) + Send + Sync>,
+    /// The queue of the thread that sends the `started` reports, made with the first; none if the
+    /// thread could not be started.
+    starts: OnceLock<Option<SyncSender<String>>>,
 }
 
 impl FillClient {
@@ -117,6 +124,7 @@ impl FillClient {
             answer_timeout,
             idle: Mutex::new(Vec::new()),
             pause,
+            starts: OnceLock::new(),
         }
     }
 
@@ -355,6 +363,35 @@ impl FillClient {
             Some((Ok(base), path)) => Ok((base, PathBuf::from(path))),
             _ => Err(answer),
         }
+    }
+
+    /// Tells the node that the mount first looked into the tree at the fs location `path`
+    /// (`started <path>`), for `tierstore_request_to_start_seconds`; the caller does not wait. The
+    /// report is sent by a thread of its own, over connections of its own, so that the request
+    /// that looked into the tree, the first of a job's command, never waits on the socket. A
+    /// report that finds [`STARTS_QUEUED`] reports waiting is dropped, and one the socket does not
+    /// take is lost, as is one a node of the release before refuses: the metric is advice.
+    pub(super) fn report_started(&self, path: &str) {
+        let queue = self.starts.get_or_init(|| self.start_reporting());
+        if let Some(queue) = queue {
+            let _ = queue.try_send(path.to_owned());
+        }
+    }
+
+    /// Starts the thread that sends the `started` reports, with a client of the same socket and
+    /// times; its queue. The thread ends when this client is dropped.
+    fn start_reporting(&self) -> Option<SyncSender<String>> {
+        let (queue, reports) = sync_channel::<String>(STARTS_QUEUED);
+        let pause = Arc::clone(&self.pause);
+        let sender = Self::pausing(self.path.clone(), self.tries, self.answer_timeout, pause);
+        let thread = std::thread::Builder::new()
+            .name("fs-starts".to_owned())
+            .spawn(move || {
+                while let Ok(path) = reports.recv() {
+                    let _ = sender.ask_line(&format!("started {path}"), true);
+                }
+            });
+        thread.ok().map(|_| queue)
     }
 
     /// Ends the hold of `mount` on the placement `id`; nothing is lost if the socket is away.
