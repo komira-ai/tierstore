@@ -506,7 +506,7 @@ fn a_read_that_the_system_fails_is_an_io_error() {
     let handle = open_cached(core, ino::of(1, 3), false).unwrap();
     // Replace the open file with a directory: reading it fails.
     let directory = std::fs::File::open(&rig.cache).unwrap();
-    let _ = super::locked(&core.handles).insert(
+    core.handles.insert(
         handle,
         std::sync::Arc::new(super::Handle::Cached(super::FileBytes::whole(
             directory, 10,

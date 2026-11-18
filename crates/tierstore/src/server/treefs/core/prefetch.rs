@@ -80,7 +80,7 @@ impl Core {
             else {
                 continue;
             };
-            if *size == 0 || !seen.insert(*digest) || locked(&loaded.pinned).contains(digest) {
+            if *size == 0 || !seen.insert(*digest) || loaded.pinned.contains(digest) {
                 continue;
             }
             if !self.current(number, token) {
@@ -99,19 +99,19 @@ impl Core {
 
     /// Whether any run has the tree `number`, or a lookup attached it.
     pub(super) fn attached(&self, number: u64) -> bool {
-        locked(&self.state).attachments.is_attached(number)
+        self.state().attachments.is_attached(number)
     }
 
-    /// Pins `batch` for the tree, and empties it. Under the lifecycle lock and only while the tree
-    /// is attached and this thread is its prefetch: a detach that has unpinned the tree is never
-    /// followed by a pin.
+    /// Pins `batch` for the tree, and empties it. Under the lock of the tree's pins and only while
+    /// the tree is attached and this thread is its prefetch: a detach that has unpinned the tree
+    /// is never followed by a pin (`core/pins.rs`). No attach, detach or lookup waits for it.
     fn pin_batch(
         &self,
         (number, token): (u64, &Arc<()>),
         loaded: &Loaded,
         batch: &mut Vec<TreeDigest>,
     ) {
-        let _lifecycle = locked(&self.lifecycle);
+        let _pinning = self.pins.pin(&loaded.digest);
         if !batch.is_empty() && self.current(number, token) {
             let shas: Vec<String> = batch.iter().map(ToString::to_string).collect();
             let named: Vec<&str> = shas.iter().map(String::as_str).collect();
@@ -120,7 +120,9 @@ impl Core {
                 self.fills
                     .pin(&self.settings.mount_id, &loaded.digest.to_string(), &named);
             if pinned.is_ok_and(|answer| answer.starts_with("ok")) {
-                locked(&loaded.pinned).extend(batch.iter().copied());
+                batch
+                    .iter()
+                    .for_each(|digest| loaded.pinned.insert(*digest));
             }
         }
         batch.clear();

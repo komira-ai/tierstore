@@ -26,6 +26,7 @@ s3 = ["dep:objstore-s3"]
 # on, since the binary's tiers may be S3 buckets; that is why the dependencies of the crate
 # without features, and not those of the whole workspace, are what layering.rs checks.
 server = [
+    "dep:arc-swap",
     "dep:base64",
     "dep:clap",
     "dep:crc",
@@ -63,6 +64,8 @@ path = "src/main.rs"
 required-features = ["server"]
 
 [dependencies]
+# The map of the trees in memory in `tierstore fs`, read with no lock (`server`).
+arc-swap = { workspace = true, optional = true }
 # The backend trait is used as `dyn Backend`, so its async methods are boxed.
 async-trait.workspace = true
 # The checksums a client sends in the headers of a request are base64 (`server`).

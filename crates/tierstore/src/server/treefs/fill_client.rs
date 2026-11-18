@@ -137,10 +137,17 @@ impl FillClient {
 
     /// Keeps `connection` for the next request.
     fn keep(&self, connection: Connection) {
-        let mut idle = locked(&self.idle);
-        if idle.len() < KEPT {
-            idle.push(connection);
-        }
+        let surplus = {
+            let mut idle = locked(&self.idle);
+            if idle.len() < KEPT {
+                idle.push(connection);
+                None
+            } else {
+                Some(connection)
+            }
+        };
+        // A connection that is not kept is closed with the lock of the idle ones released.
+        drop(surplus);
     }
 
     /// Sends `line` and reads one line back, waiting `wait` for it where given; with `answered`

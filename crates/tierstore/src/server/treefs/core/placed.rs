@@ -295,7 +295,7 @@ impl Core {
             }
             Place::Dir => {
                 let ino = dir_ino(&path);
-                let _ = locked(&self.state).dirs.insert(ino, path);
+                let _ = locked(&self.dirs).insert(ino, path);
                 Ok(Looked::Found(self.namespace(ino)))
             }
             Place::Nothing => Err(Errno::NoEnt),
@@ -303,14 +303,23 @@ impl Core {
     }
 
     /// Makes the node's hold of the placement whose tree at `path` has the key `key` agree with
-    /// the attachment, under the lock an idle detach gives holds back under: held again if the
-    /// tree is attached (a detach between the lookup's `place` and its attach gave it back), given
-    /// back if it is not (the lookup failed, or the tree went idle since).
+    /// the attachment, under the lock of the key's pins, which an idle detach gives holds back
+    /// under (`Core::free_tree`): held again if the tree is attached (a detach between the
+    /// lookup's `place` and its attach gave it back), given back if it is not (the lookup failed,
+    /// or the tree went idle since). The `place` is made under the lock of the placement, as an
+    /// `unplace` is (`core/pins.rs`). The lookups of other paths do not wait for it. A settling
+    /// in progress is waited for by `Core::hold`, and none is made after it: the successor
+    /// settles the holds.
     fn settle_hold(&self, key: &TreeDigest, path: &str) {
-        let _lifecycle = locked(&self.lifecycle);
+        let _freeing = self.freeing();
+        if self.is_held() {
+            return;
+        }
+        let _settling = self.pins.unpin(key);
         let number = self.table.find(key);
-        let attached = number.is_some_and(|n| locked(&self.state).attachments.is_attached(n));
+        let attached = number.is_some_and(|n| self.attached(n));
         if attached {
+            let _placing = self.pins.placement(key);
             let _ = self.fills.place(&self.settings.mount_id, path);
         } else {
             self.let_go(key);
@@ -335,18 +344,18 @@ impl Core {
     /// [`Errno::NoEnt`] for a number that is no such directory now, [`Errno::Io`] for a fill
     /// socket that does not answer.
     pub(in crate::server::treefs) fn dir_path(&self, dir: u64) -> Result<String, Errno> {
-        if let Some(path) = locked(&self.state).dirs.get(&dir) {
+        if let Some(path) = locked(&self.dirs).get(&dir) {
             return Ok(path.clone());
         }
         let paths = self.fills.mounted().map_err(|why| asked("", &why))?;
-        let mut state = locked(&self.state);
+        let mut dirs = locked(&self.dirs);
         for path in &paths {
             for (at, _) in path.match_indices('/') {
                 let above = &path[..at];
-                let _ = state.dirs.insert(dir_ino(above), above.to_owned());
+                let _ = dirs.insert(dir_ino(above), above.to_owned());
             }
         }
-        state.dirs.get(&dir).cloned().ok_or(Errno::NoEnt)
+        dirs.get(&dir).cloned().ok_or(Errno::NoEnt)
     }
 
     /// The inode of the directory that holds the root of `tree`: `trees/` for a tree of manifests;
@@ -359,8 +368,9 @@ impl Core {
             return ino::ROOT;
         };
         let ino = dir_ino(above);
-        let mut state = locked(&self.state);
-        let _ = state.dirs.entry(ino).or_insert_with(|| above.to_owned());
+        let _ = locked(&self.dirs)
+            .entry(ino)
+            .or_insert_with(|| above.to_owned());
         ino
     }
 
@@ -390,11 +400,13 @@ impl Core {
 
     /// Gives back the hold of the node's tree store on the placement whose tree at a location has
     /// the key `digest`, unless the tree of another of its locations is attached still; a tree of
-    /// manifests is unpinned instead.
+    /// manifests is unpinned instead. The look at the other locations and the `unplace` are made
+    /// under the lock of the placement (`core/pins.rs`).
     pub(in crate::server::treefs) fn let_go(&self, digest: &TreeDigest) {
         match placement_of(digest) {
             Some((id, _)) => {
-                let trees = locked(&self.state).attachments.trees();
+                let _unplacing = self.pins.unplace(digest);
+                let trees = self.state().attachments.trees();
                 let held = trees
                     .iter()
                     .any(|other| placement_of(other).is_some_and(|(other, _)| other == id));

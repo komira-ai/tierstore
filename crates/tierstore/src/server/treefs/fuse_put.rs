@@ -3,13 +3,15 @@
 //! what FUSE alone has: every answer has a timeout of zero (the store changes under the kernel); a
 //! create is answered with `FOPEN_DIRECT_IO`, so that each write reaches the store with its offset,
 //! no page of a staged file is cached, and a file is never mapped; `rename` takes only
-//! `RENAME_NOREPLACE` of its flags; `flush` tells the put directory that a descriptor was closed
-//! and `fsync` does nothing (the commit is the rename); `statfs` is the stage's volume; and what
-//! the put directory does not do (`link`, `symlink`, `mknod`, `rmdir`, setting or removing an
-//! extended attribute) is `EPERM`, while reading the extended attributes is `ENOSYS`, as on the
-//! trees (the kernel then answers `EOPNOTSUPP` without asking again).
+//! `RENAME_NOREPLACE` of its flags, and answers a commit from the thread that runs it, so that a
+//! commit that waits holds no thread that serves requests; `flush` tells the put directory that a
+//! descriptor was closed and `fsync` does nothing (the commit is the rename); `statfs` is the
+//! stage's volume; and what the put directory does not do (`link`, `symlink`, `mknod`, `rmdir`,
+//! setting or removing an extended attribute) is `EPERM`, while reading the extended attributes is
+//! `ENOSYS`, as on the trees (the kernel then answers `EOPNOTSUPP` without asking again).
 
 use std::ffi::OsStr;
+use std::sync::Arc;
 use std::time::{Duration, UNIX_EPOCH};
 
 use fuser::{
@@ -144,9 +146,10 @@ pub(super) fn write(
     }
 }
 
-/// Answers a rename: `RENAME_NOREPLACE` is the only flag taken.
+/// Answers a rename: `RENAME_NOREPLACE` is the only flag taken. A commit is answered from the
+/// thread that runs it (`PutSpace::rename_with`), so this returns at once while it waits.
 pub(super) fn rename(
-    space: &PutSpace,
+    space: &Arc<PutSpace>,
     from: (u64, &OsStr),
     to: (u64, &OsStr),
     flags: RenameFlags,
@@ -156,14 +159,19 @@ pub(super) fn rename(
         return reply.error(Errno::EPERM);
     }
     let names = text(from.1).and_then(|old| Ok((old, text(to.1)?)));
-    let renamed = names.and_then(|(old, new)| {
-        let noreplace = flags.contains(RenameFlags::RENAME_NOREPLACE);
-        space
-            .rename((from.0, old), (to.0, new), noreplace)
-            .map_err(errno)
-    });
-    match renamed {
-        Ok(()) => reply.ok(),
+    match names {
+        Ok((old, new)) => {
+            let noreplace = flags.contains(RenameFlags::RENAME_NOREPLACE);
+            space.rename_with(
+                (from.0, old),
+                (to.0, new),
+                noreplace,
+                move |result| match result {
+                    Ok(()) => reply.ok(),
+                    Err(error) => reply.error(errno(error)),
+                },
+            );
+        }
         Err(error) => reply.error(error),
     }
 }

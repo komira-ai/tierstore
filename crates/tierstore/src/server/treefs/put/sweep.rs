@@ -8,12 +8,11 @@
 //!   process that handed the mount over may still write the line of a file it made);
 //!
 //! and rewrites the journal with the live entries alone once it has more than twice as many lines,
-//! plus [`COMPACT_SLACK`].
+//! plus [`COMPACT_SLACK`] (`compact.rs`, which does the file work outside the table's lock).
 
 use std::time::Duration;
 
-use super::journal::{Journal, Record};
-use super::replay::live_records;
+use super::journal::Record;
 use super::store::StagedStore;
 use crate::server::treefs::locked;
 
@@ -85,20 +84,11 @@ impl StagedStore {
         table.orphans = young;
         report.orphans = old.len() as u64;
         files.extend(old.iter().map(|orphan| orphan.id));
-        let live = table.entries.len() as u64;
-        if table.journal.lines() > 2 * live + COMPACT_SLACK {
-            match Journal::rewrite(&self.stage, &live_records(&table.entries)) {
-                Ok(journal) => table.journal = journal,
-                Err(error) => tracing::warn!(
-                    "tierstore fs: the put journal in {} is not rewritten: {error}",
-                    self.stage.display()
-                ),
-            }
-        }
         drop(table);
         for id in files {
             self.remove_stage_file(id);
         }
+        self.compact_journal();
         report
     }
 }
