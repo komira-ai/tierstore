@@ -47,9 +47,9 @@ fn a_counter_memfd_that_can_shrink_is_refused() {
 
 #[test]
 fn a_descriptor_that_is_not_a_sealable_memfd_is_refused() {
-    let dir = scratch("counters-not-memfd");
-    let file = std::fs::File::create(dir.join("f")).unwrap();
-    let err = MemfdCounters::new(file.into()).unwrap_err();
+    // A pipe is not shared memory on any host (a regular file would be on a tmpfs /tmp).
+    let (reader, _writer) = std::io::pipe().unwrap();
+    let err = MemfdCounters::new(reader.into()).unwrap_err();
     assert!(matches!(err, CountersError::Seals { .. }), "{err}");
     assert_eq!(
         err.to_string(),
@@ -185,6 +185,29 @@ fn a_region_past_the_end_of_the_memfd_is_refused_with_no_hold_and_no_region() {
         .unwrap();
     assert_eq!(entry.holders(), 1);
     assert_eq!(counters.len(), 8192);
+}
+
+#[test]
+fn a_region_at_the_top_of_the_offset_range_is_refused_and_never_overflows() {
+    let dir = scratch("counters-top");
+    let store = FileEntryStore::new(dir.path()).unwrap();
+    let entry = store.open(&spec("a", MIB)).unwrap();
+    let mount = MountCounters::new(4096);
+    let counters = Arc::new(MemfdCounters::new(mount.fd()).unwrap());
+    store
+        .register_holder(HolderId(8), counters.clone())
+        .unwrap();
+    // Aligned and not overflowing (its end is u64::MAX - 7), so it passes the region check; its
+    // end rounded up to a page would overflow.
+    let top = region(0xFFFF_FFFF_FFFF_FFF0, 1);
+    assert!(top.is_valid());
+    let err = store.attach(&pack("a"), HolderId(8), top).unwrap_err();
+    assert!(
+        matches!(err, EntryError::CountersMap { len, .. } if len == u64::MAX - 7),
+        "{err}"
+    );
+    assert_eq!(entry.holders(), 0);
+    assert_eq!(counters.maps(), 0);
 }
 
 #[test]

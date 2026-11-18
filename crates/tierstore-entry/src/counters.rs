@@ -11,7 +11,9 @@
 //! a page of the mapping past the end of the file would fault (`SIGBUS`) when the evictor reads
 //! it and take the whole server down. With `F_SEAL_SHRINK` the memfd can only grow, and the
 //! server maps at most its length at the time of the remap, so a read inside the mapping is always
-//! inside the file. [`MemfdCounters::new`] refuses a memfd without the seal.
+//! inside the file. [`MemfdCounters::new`] refuses a memfd without the seal. The mount therefore
+//! creates its counter memfd with `MFD_ALLOW_SEALING` and adds `F_SEAL_SHRINK` (and not
+//! `F_SEAL_GROW`) before the handshake; design 5.1 and the handshake's documentation say so.
 
 use std::fmt;
 use std::fs::File;
@@ -110,13 +112,14 @@ impl HolderCounters for MemfdCounters {
             .map_err(io::Error::from)
             .map_err(failed)?;
         let size = u64::try_from(size.st_size).unwrap_or(0);
-        let want = len.next_multiple_of(PAGE_BYTES).min(size);
-        if want < len {
+        if len > size {
             return Err(failed(io::Error::new(
                 io::ErrorKind::UnexpectedEof,
                 format!("the counter memfd has {size} bytes"),
             )));
         }
+        // `len <= size <= i64::MAX`: the rounding cannot overflow.
+        let want = len.next_multiple_of(PAGE_BYTES).min(size);
         *map = Some(map_shared(&self.file, want, libc::PROT_READ).map_err(failed)?);
         self.maps.fetch_add(1, SEQ);
         Ok(())

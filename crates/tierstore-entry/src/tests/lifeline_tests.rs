@@ -145,6 +145,21 @@ fn a_mount_whose_protocol_connection_flaps_keeps_its_counters_regions_and_holds(
     assert_eq!(entry.group_readers(0), 1);
     assert_eq!(second.maps(), 0);
     assert_eq!(entry.holders(), 1);
+    // A pack opened after the reconnect is read from the first memfd too, remapped as it grew.
+    let mut mount = mount;
+    let q = store.open(&super::spec("q", 3 * MIB)).unwrap();
+    mount.grow(2 * 4096);
+    let region_q = CounterRegion {
+        offset: 4096,
+        groups: 1,
+    };
+    store.attach(&pack("q"), HolderId(2), region_q).unwrap();
+    mount.enter(4096);
+    mount.enter(4096);
+    other.enter(4096 - 8);
+    assert_eq!(q.group_readers(0), 2);
+    assert_eq!(first.maps(), 2);
+    assert_eq!(second.maps(), 0);
     assert!(lines.reap(&store).unwrap().is_empty());
     assert!(!store.remove(&pack("p")).unwrap());
 }

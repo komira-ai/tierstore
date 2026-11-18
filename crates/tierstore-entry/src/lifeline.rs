@@ -87,34 +87,33 @@ impl Lifelines {
         lines.keys().copied().collect()
     }
 
-    /// Polls every lifeline once, without waiting; for each that hung up, forgets it and calls
-    /// [`EntryStore::drop_holder`]. The holders that ended, in ascending order.
+    /// Polls every lifeline once, without waiting; for each that hung up, calls
+    /// [`EntryStore::drop_holder`] and forgets the lifeline. The holders that ended, in ascending
+    /// order.
+    ///
+    /// The lifelines stay locked until every ended holder is dropped from the store, so a
+    /// re-handshake with the same holder id cannot add a lifeline (and be taken for live) while
+    /// the store still has the old holder's counters. The store never calls back into the
+    /// lifelines, so the lock order is the lifelines, then the store.
     pub fn reap(&self, store: &dyn EntryStore) -> io::Result<Vec<HolderId>> {
-        let ended: Vec<(HolderId, Lifeline)> = {
-            let mut lines = self.lines.lock().unwrap_or_else(PoisonError::into_inner);
-            let mut fds: Vec<PollFd<'_>> = lines
-                .values()
-                .map(|l| PollFd::new(&l.fd, PollFlags::empty()))
-                .collect();
-            rustix::event::poll(&mut fds, Some(&NOW))?;
-            let hung: Vec<HolderId> = lines
-                .keys()
-                .zip(&fds)
-                .filter(|(_, fd)| fd.revents().contains(PollFlags::HUP))
-                .map(|(h, _)| *h)
-                .collect();
-            drop(fds);
-            hung.into_iter()
-                .filter_map(|h| lines.remove(&h).map(|l| (h, l)))
-                .collect()
-        };
-        // The store is called with the lifelines unlocked; each lifeline closes as it drops.
-        Ok(ended
-            .into_iter()
-            .map(|(holder, _line)| {
-                store.drop_holder(holder);
-                holder
-            })
-            .collect())
+        let mut lines = self.lines.lock().unwrap_or_else(PoisonError::into_inner);
+        let mut fds: Vec<PollFd<'_>> = lines
+            .values()
+            .map(|l| PollFd::new(&l.fd, PollFlags::empty()))
+            .collect();
+        rustix::event::poll(&mut fds, Some(&NOW))?;
+        let hung: Vec<HolderId> = lines
+            .keys()
+            .zip(&fds)
+            .filter(|(_, fd)| fd.revents().contains(PollFlags::HUP))
+            .map(|(h, _)| *h)
+            .collect();
+        drop(fds);
+        for holder in &hung {
+            store.drop_holder(*holder);
+            // The lifeline closes as it drops.
+            lines.remove(holder);
+        }
+        Ok(hung)
     }
 }

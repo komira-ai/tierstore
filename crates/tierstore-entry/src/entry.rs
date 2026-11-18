@@ -304,9 +304,12 @@ impl Entry for FileEntry {
             self.cas(c, Transition::Abandon);
             return Err(e);
         }
-        // The cell was claimed and only its token, consumed here, leaves that state.
+        // The cell was claimed and only its token, consumed here, leaves that state. The CAS and
+        // the insert happen under the lock a commit holds while it marks cells durable, so a commit
+        // never sees this cell present without seeing it pending.
+        let mut pending = lock(&self.undurable);
         self.cas(c, Transition::Publish);
-        lock(&self.undurable).insert(c);
+        pending.insert(c);
         Ok(())
     }
 
@@ -459,8 +462,11 @@ impl Entry for FileEntry {
     }
 
     /// One `fdatasync` of the data file for the cells published since the last commit, then the
-    /// `durable` bit on each that is still `present` (a cell evicted meanwhile loses the CAS), then
-    /// one `ADD` record per run of them and one journal sync.
+    /// `durable` bit on each that is still `present`, then one `ADD` record per run of them and one
+    /// journal sync. A cell published again after the commit took its cells (evicted and fetched
+    /// again during the sync) is left for the next commit, since its new bytes may postdate the
+    /// sync; so is a cell the evictor holds (`evicting`), which an abort may return to `present`. A
+    /// cell evicted to `absent` is dropped: its bytes are gone.
     ///
     /// A failed `fdatasync` is returned and its cells are never marked durable, not even by a later
     /// commit: after a failed sync Linux may have dropped the dirty pages and cleared the error, so
@@ -474,10 +480,16 @@ impl Entry for FileEntry {
         self.data
             .sync_data()
             .map_err(io_err(&self.pack, "fdatasync"))?;
-        let durable: Vec<u32> = cells
+        let mut pending = lock(&self.undurable);
+        let (durable, lost): (Vec<u32>, Vec<u32>) = cells
             .into_iter()
-            .filter(|c| self.cas(*c, Transition::Durable))
-            .collect();
+            .filter(|c| !pending.contains(c))
+            .partition(|c| self.cas(*c, Transition::Durable));
+        pending.extend(
+            lost.into_iter()
+                .filter(|c| self.state_of(*c) == Some(CellState::Evicting)),
+        );
+        drop(pending);
         let records = lock(&self.journal)
             .append(Op::Add, &Self::runs_of(&durable))
             .map_err(io_err(&self.pack, "journal ADD"))?;

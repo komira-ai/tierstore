@@ -4,11 +4,14 @@
 //! journal) beside it, where `<hash>` is the hex sha256 of the pack id and `aa`, `bb` its first two
 //! bytes. The id includes `pack_root`, so a changed pack never reuses a file (8).
 //!
-//! **Locks.** The store's map of entries is locked while an entry is opened or removed (creating
-//! or unlinking its files: metadata, no data I/O) and while a holder attaches (which may remap the
-//! holder's counter memfd: an `mmap`, no disk I/O). It is never locked across a read, a write, a
-//! sync or a punch of an entry, and the FUSE path never takes it (5.5). The order is: the map of
-//! entries, then the map of holders, then an entry's own locks.
+//! **Locks.** The store's map of entries is locked while an entry is opened or removed, across
+//! that entry's file work: making its directory, opening, locking and truncating its data file
+//! (which frees the blocks a file left on disk had: on a large file this is not instant) and
+//! creating its journal, or unlinking both. It is also locked while a holder attaches (which may
+//! remap the holder's counter memfd: an `mmap`, no disk I/O). It is never locked across a read, a
+//! write, a sync or a punch of a cell, and the FUSE path never takes it (5.5): an open that
+//! truncates delays other opens, removals, attaches and the evictor's `entries`, not a reader. The
+//! order is: the map of entries, then the map of holders, then an entry's own locks.
 
 use std::collections::BTreeMap;
 use std::fmt::Write as _;
@@ -52,6 +55,17 @@ pub struct FileEntryStore {
 
 fn lock<T>(m: &Mutex<T>) -> MutexGuard<'_, T> {
     m.lock().unwrap_or_else(PoisonError::into_inner)
+}
+
+/// Unlinks `path`; a path that is already gone is not an error.
+fn unlink(path: &Path) -> io::Result<()> {
+    std::fs::remove_file(path).or_else(|e| {
+        if e.kind() == io::ErrorKind::NotFound {
+            Ok(())
+        } else {
+            Err(e)
+        }
+    })
 }
 
 /// The hex sha256 that names `pack`'s files: of a version tag, the key's length and bytes, and
@@ -163,14 +177,16 @@ impl EntryStore for FileEntryStore {
             return Ok(false);
         }
         let paths = entry.paths().clone();
-        entries.remove(pack);
+        // Both files are unlinked before the entry leaves the store, so a failure leaves it listed
+        // and a retry unlinks what is left; a file already gone counts as unlinked.
         for path in [&paths.data, &paths.journal] {
-            std::fs::remove_file(path).map_err(|source| EntryError::Io {
+            unlink(path).map_err(|source| EntryError::Io {
                 pack: pack.clone(),
                 op: "unlink entry file",
                 source,
             })?;
         }
+        entries.remove(pack);
         Ok(true)
     }
 

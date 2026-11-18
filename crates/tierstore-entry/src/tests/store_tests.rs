@@ -156,10 +156,22 @@ fn a_held_or_unknown_entry_is_not_removed() {
 }
 
 #[test]
-fn a_removal_whose_file_is_already_gone_reports_the_unlink() {
+fn a_removal_whose_data_file_is_already_gone_still_unlinks_the_journal() {
     let dir = scratch("store-remove-gone");
     let (store, e) = open(&dir, "p", MIB);
     std::fs::remove_file(e.data_path()).unwrap();
+    assert!(store.remove(&pack("p")).unwrap());
+    assert!(!e.journal_path().exists());
+    assert!(store.packs().is_empty());
+}
+
+#[test]
+fn a_failed_unlink_keeps_the_entry_listed_and_a_retry_finishes_the_removal() {
+    let dir = scratch("store-remove-fail");
+    let (store, e) = open(&dir, "p", MIB);
+    // A directory where the journal was: unlink(2) of it fails (EISDIR), even as root.
+    std::fs::remove_file(e.journal_path()).unwrap();
+    std::fs::create_dir(e.journal_path()).unwrap();
     let err = store.remove(&pack("p")).unwrap_err();
     assert!(
         matches!(
@@ -171,6 +183,11 @@ fn a_removal_whose_file_is_already_gone_reports_the_unlink() {
         ),
         "{err}"
     );
+    assert_eq!(store.packs(), vec![pack("p")]);
+    assert!(!e.data_path().exists());
+    std::fs::remove_dir(e.journal_path()).unwrap();
+    assert!(store.remove(&pack("p")).unwrap());
+    assert!(store.packs().is_empty());
 }
 
 #[test]

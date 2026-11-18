@@ -22,7 +22,7 @@ use std::sync::{Arc, Barrier};
 
 use tierstore_fetch_api::cell::{CellByte, CellState};
 use tierstore_fetch_api::entry::{
-    CellCounts, ClaimedCell, CommitReport, Entry, EntryError, EvictStep, PunchReport,
+    CellCounts, ClaimedCell, CommitReport, Entry, EntryError, EntryStore, EvictStep, PunchReport,
     ReaderCounters, Settle, StateView,
 };
 use tierstore_fetch_api::ids::HolderId;
@@ -301,6 +301,7 @@ fn a_batch_punch_journals_every_run_with_one_sync_then_releases_the_blocks() {
         6 * MIB + 100
     );
     assert_eq!(mount_read(&e, 0, 2 * MIB), bytes(0, 2 * MIB));
+    assert_eq!(mount_read(&e, 3 * MIB, MIB), bytes(0, MIB));
     assert_eq!(mount_read(&e, 6 * MIB, 100), bytes(0, 100));
     assert_eq!(e.read_cell(4).unwrap(), bytes(8, MIB));
     // The punch did not change a state: the evictor finishes each cell.
@@ -405,6 +406,60 @@ fn a_cell_evicted_before_the_commit_is_not_marked_durable_or_journaled() {
 }
 
 #[test]
+fn a_cell_evicting_at_a_commit_and_then_aborted_is_made_durable_by_the_next_commit() {
+    let dir = scratch("entry-commit-abort");
+    let (_store, e) = open(&dir, "p", 2 * MIB);
+    publish(&e, 0, 1);
+    assert!(e.evict_cell_cas(0, EvictStep::Begin));
+    assert_eq!(e.commit_batch().unwrap().cells_durable, 0);
+    assert!(e.evict_cell_cas(0, EvictStep::Abort));
+    assert_eq!(
+        e.commit_batch().unwrap(),
+        CommitReport {
+            data_syncs: 1,
+            cells_durable: 1,
+            records: 1,
+        }
+    );
+    assert_eq!(e.load(0), Some(CellByte(0x82)));
+    assert_eq!(journal(&e), record(Op::Add, run(0, 1)).to_vec());
+}
+
+#[test]
+fn a_cell_evicted_to_absent_is_dropped_from_the_commits() {
+    let dir = scratch("entry-commit-absent");
+    let (_store, e) = open(&dir, "p", 2 * MIB);
+    publish(&e, 0, 1);
+    assert!(e.evict_cell_cas(0, EvictStep::Begin));
+    assert_eq!(e.commit_batch().unwrap().cells_durable, 0);
+    e.punch(&[run(0, 1)]).unwrap();
+    assert!(e.evict_cell_cas(0, EvictStep::Finish));
+    // Still pending at this commit (it was evicting at the last), then gone for good.
+    assert_eq!(e.commit_batch().unwrap().data_syncs, 1);
+    assert_eq!(e.commit_batch().unwrap(), CommitReport::default());
+    // Published again, it is committed as a new cell.
+    publish(&e, 0, 2);
+    assert_eq!(e.commit_batch().unwrap().cells_durable, 1);
+}
+
+#[test]
+fn the_data_descriptor_a_mount_is_passed_is_read_only() {
+    let dir = scratch("entry-data-ro");
+    let (_store, e) = open(&dir, "p", 2 * MIB);
+    let fd = e.fds().unwrap().data.try_clone_to_owned().unwrap();
+    let file = std::fs::File::from(fd);
+    let err = file.write_all_at(&[1], 0).unwrap_err();
+    assert_eq!(err.raw_os_error(), Some(libc::EBADF));
+    let file = Arc::new(file);
+    let err = crate::map::map_shared(&file, 4096, libc::PROT_READ | libc::PROT_WRITE).unwrap_err();
+    assert_eq!(
+        err.to_string(),
+        std::io::Error::from_raw_os_error(libc::EACCES).to_string()
+    );
+    assert_eq!(blocks(&e), 0);
+}
+
+#[test]
 fn journal_records_have_their_golden_bytes() {
     assert_eq!(
         record(Op::Punch, run(3, 2)),
@@ -483,6 +538,34 @@ fn holds_are_refcounts_per_holder() {
     assert!(!e.release(HolderId(3)));
     assert!(e.release(HolderId(2)));
     assert_eq!(e.holders(), 0);
+}
+
+#[test]
+fn group_readers_sums_in_process_readers_and_every_attached_holder() {
+    let dir = scratch("entry-readers-sum");
+    let (store, e) = open(&dir, "p", 20 * MIB);
+    let mount = super::MountCounters::new(4096);
+    let counters = Arc::new(crate::MemfdCounters::new(mount.fd()).unwrap());
+    store.register_holder(HolderId(1), counters).unwrap();
+    store
+        .attach(
+            &super::pack("p"),
+            HolderId(1),
+            tierstore_fetch_api::page::CounterRegion {
+                offset: 0,
+                groups: 2,
+            },
+        )
+        .unwrap();
+    e.enter(1);
+    mount.enter(2);
+    mount.enter(2);
+    assert_eq!(e.group_readers(1), 3);
+    e.leave(1);
+    assert_eq!(e.group_readers(1), 2);
+    mount.leave(2);
+    assert_eq!(e.group_readers(1), 1);
+    assert_eq!(e.group_readers(0), 0);
 }
 
 #[test]
