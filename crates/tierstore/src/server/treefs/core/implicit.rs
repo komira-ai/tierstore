@@ -132,11 +132,12 @@ impl Core {
     pub(in crate::server::treefs) fn detach_idle(&self) -> usize {
         let now = self.now();
         let idle = u64::try_from(self.settings.tree_idle.as_millis()).unwrap_or(u64::MAX);
-        let freed: Vec<(u64, TreeDigest)> = {
+        let (freed, _freeing): (Vec<(u64, TreeDigest)>, _) = {
             let _lifecycle = locked(&self.lifecycle);
             if self.is_held() {
                 return 0;
             }
+            let freeing = self.freeing();
             let mut state = self.state();
             let ended: Vec<(u64, TreeDigest)> = state
                 .attachments
@@ -151,10 +152,11 @@ impl Core {
             for (number, _) in &ended {
                 state.attachments.remove_implicit(*number);
             }
-            ended
+            let freed = ended
                 .into_iter()
                 .filter(|(number, _)| !state.attachments.has_run(*number))
-                .collect()
+                .collect();
+            (freed, freeing)
         };
         for (number, digest) in &freed {
             self.free_tree(*number, digest);

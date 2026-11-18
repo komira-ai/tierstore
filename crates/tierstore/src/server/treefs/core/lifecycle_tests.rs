@@ -135,6 +135,37 @@ fn a_detach_holds_no_lock_but_its_trees_while_its_unpin_is_in_flight() {
     assert!(unpins[0].ends_with(&t.other), "{unpins:?}");
 }
 
+/// Asserts that a hold waits for the unpin of a detach decided before it, which runs with the
+/// lifecycle lock released: the hold returns only after that unpin was let through, so no unpin
+/// of this process follows the pins of a successor.
+#[test]
+fn a_hold_waits_for_the_unpin_of_a_detach_decided_before_it() {
+    let t = trees("tfs-life-hold");
+    let core = &t.rig.core;
+    let _ = core.attach(&t.other, "run-2").unwrap();
+    t.rig.upstream.gate_verb("unpin");
+    let let_through = std::sync::atomic::AtomicBool::new(false);
+    std::thread::scope(|scope| {
+        let _go = OnDrop(|| t.rig.upstream.permit_verb("unpin", 1_000));
+        let detach = scope.spawn(|| core.detach("run-2"));
+        t.rig.upstream.wait_for_verb("unpin", 1);
+        let hold = scope.spawn(|| {
+            core.hold(true);
+            let_through.load(std::sync::atomic::Ordering::SeqCst)
+        });
+        until(|| core.is_held());
+        let_through.store(true, std::sync::atomic::Ordering::SeqCst);
+        t.rig.upstream.permit_verb("unpin", 1);
+        assert!(
+            hold.join().unwrap(),
+            "the hold returned before the unpin was let through"
+        );
+        assert!(detach.join().unwrap().is_some());
+    });
+    core.hold(false);
+    assert_eq!(t.rig.upstream.asked("unpin").len(), 1);
+}
+
 /// Asserts that a detach takes the lock of the pins of each tree it frees and of no other: a run
 /// that attached nothing takes none, and a tree that another run still has takes none.
 #[test]

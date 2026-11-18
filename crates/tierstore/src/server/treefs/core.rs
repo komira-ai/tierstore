@@ -25,7 +25,7 @@ use std::path::{Path, PathBuf};
 #[cfg(any(target_os = "linux", test))]
 use std::sync::OnceLock;
 use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
-use std::sync::{Arc, Mutex, MutexGuard, mpsc};
+use std::sync::{Arc, Mutex, MutexGuard, PoisonError, RwLock, RwLockReadGuard, mpsc};
 use std::time::Duration;
 
 use crate::Clock;
@@ -230,6 +230,11 @@ pub(in crate::server) struct Core {
     /// The locks of the pins and unpins of the trees (`core/pins.rs`): a pin is never made after the
     /// unpin of a tree it saw attached, and a tree attached again is not unpinned.
     pins: PinLocks,
+    /// Read by a detach from its decision under the lifecycle lock to the end of its unpins,
+    /// which it makes after it released that lock, and written by `Core::hold`: so a hold waits
+    /// for the unpins of the detaches already decided, and no unpin of this process follows the
+    /// pins of a successor. Only the threads that detach and hold take it.
+    freeing: RwLock<()>,
     /// Whether a successor is taking over: no attach or detach is done, so that this process
     /// writes neither the table of tree numbers nor the attachments file (`Core::hold`).
     held: AtomicBool,
@@ -300,6 +305,7 @@ impl Core {
             dirs: Mutex::new(HashMap::new()),
             lifecycle: Mutex::new(()),
             pins: PinLocks::new(),
+            freeing: RwLock::new(()),
             held: AtomicBool::new(false),
             prefetching: Mutex::new(HashMap::new()),
             reads: Reads::default(),
@@ -488,11 +494,12 @@ impl Core {
     /// the core's held but that of its pins (`Core::free_tree`), and left memory when the kernel
     /// forgets its inodes.
     pub(super) fn detach(&self, run: &str) -> Option<Vec<Failure>> {
-        let (freed, failures) = {
+        let (freed, failures, _freeing) = {
             let _lifecycle = locked(&self.lifecycle);
             if self.is_held() {
                 return None;
             }
+            let freeing = self.freeing();
             let (freed, failures, snapshot) = {
                 let mut state = self.state();
                 let trees = state.attachments.remove(run)?;
@@ -510,7 +517,7 @@ impl Core {
             for (number, _) in &freed {
                 let _ = locked(&self.prefetching).remove(number);
             }
-            (freed, failures)
+            (freed, failures, freeing)
         };
         for (number, digest) in freed {
             self.free_tree(number, &digest);
@@ -540,12 +547,19 @@ impl Core {
     /// Stops this process from changing the table of tree numbers and the attachments file
     /// (`on`), or lets it do so again. A successor that takes over reads both once it has taken
     /// the sockets, and this process must have written its last by then: the call waits for the
-    /// attach or detach that is changing them (the unpin that a detach makes after it is not
-    /// that), and every later one is refused (`AttachError::Replaced`, and, for a detach, an
+    /// attach or detach that is changing them, and for the unpins of the detaches decided
+    /// before it, and every later one is refused (`AttachError::Replaced`, and, for a detach, an
     /// answer of none; ask `Core::is_held`).
     pub(super) fn hold(&self, on: bool) {
         let _lifecycle = locked(&self.lifecycle);
         self.held.store(on, Ordering::SeqCst);
+        // The unpins of the detaches decided before, which run with the lifecycle lock released.
+        drop(self.freeing.write().unwrap_or_else(PoisonError::into_inner));
+    }
+
+    /// Marks a detach whose unpins are to come, until the guard is dropped (`Core::hold`).
+    pub(super) fn freeing(&self) -> RwLockReadGuard<'_, ()> {
+        self.freeing.read().unwrap_or_else(PoisonError::into_inner)
     }
 
     /// Whether [`Core::hold`] is on.
