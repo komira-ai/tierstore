@@ -139,6 +139,8 @@ tsfuse = { path = "crates/tsfuse" }
 tierstore-metrics = { path = "crates/tierstore-metrics" }
 # The hash pool: the `Verifier` of the read path (bounded, sha256 on dedicated threads).
 tierstore-hashpool = { path = "crates/tierstore-hashpool" }
+# The journal and snapshot of a node-cache entry (section 8), shared by the entry stores.
+tierstore-journal = { path = "crates/tierstore-journal" }
 # The previous release: `v0.3.17`, the tag of the commit below, taken from the public repository
 # at that commit alone (the `rev` is what pins it; a tag can be moved). Used only by the
 # dev-dependencies of `crates/compat`. When a release is made, move both to the new release's

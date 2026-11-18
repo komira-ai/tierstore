@@ -1,0 +1,33 @@
+[package]
+name = "tierstore-journal"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+repository.workspace = true
+publish.workspace = true
+description = "The journal and snapshot of a node-cache entry (docs/design/fetch-cache-serve.md, section 8): commit ordering, batched commits with one fdatasync, batched PUNCH with one journal fsync, replay, boot_id and recheck, shared by the Linux and in-process entry stores, with a crash-modelling fake file system."
+
+[dependencies]
+# The crc32c of every journal record, journal header and snapshot.
+crc32c.workspace = true
+# The cell byte, cell runs, pack identity and the reports and errors of the frozen `Entry` trait,
+# which this crate's journal returns so an entry forwards them unchanged.
+tierstore-fetch-api.workspace = true
+# The generation of an S3-front pack's root (`PackRoot::Etag`), stored in the snapshot.
+tierstore-format.workspace = true
+thiserror.workspace = true
+
+# `fallocate(PUNCH_HOLE | KEEP_SIZE)` of the directory-backed entry files (Linux only; this crate
+# has no macOS file implementation, which the macOS store is to supply).
+[target.'cfg(target_os = "linux")'.dependencies]
+rustix = { workspace = true, features = ["fs"] }
+
+[dev-dependencies]
+# The digest a recheck re-hashes a cell with in the tests (the list's cell digest is sha256, 3.1).
+sha2.workspace = true
+# Scratch directories for the tests of the directory-backed files.
+tierstore-testkit.workspace = true
+
+[lints]
+workspace = true

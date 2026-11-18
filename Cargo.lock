@@ -2983,6 +2983,19 @@ dependencies = [
 ]
 
 [[package]]
+name = "tierstore-journal"
+version = "0.1.0"
+dependencies = [
+ "crc32c",
+ "rustix",
+ "sha2 0.11.0",
+ "thiserror",
+ "tierstore-fetch-api",
+ "tierstore-format",
+ "tierstore-testkit",
+]
+
+[[package]]
 name = "tierstore-metrics"
 version = "0.1.0"
 dependencies = [
