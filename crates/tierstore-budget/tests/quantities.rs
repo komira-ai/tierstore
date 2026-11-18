@@ -97,12 +97,12 @@ fn an_install_without_a_cold_tier_shares_its_hot_queue_depth() {
     };
     let q = Quantities::compute(&BudgetConfig::new(hot_only), 31, 64 * MIB);
     assert_eq!((q.stream_capacity, q.share, q.ceiling_parts), (192, 7, 14));
-    // No device at all (a legacy-only reader): the share is still one part.
-    let legacy_only = Topology {
+    // No device at all: the share is still one part.
+    let no_device = Topology {
         hot_devices: 0,
         ..hot_only
     };
-    let q = Quantities::compute(&BudgetConfig::new(legacy_only), 31, 64 * MIB);
+    let q = Quantities::compute(&BudgetConfig::new(no_device), 31, 64 * MIB);
     assert_eq!((q.stream_capacity, q.share, q.ceiling_parts), (0, 1, 2));
 }
 

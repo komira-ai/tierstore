@@ -41,9 +41,6 @@ pub struct BudgetConfig {
     /// `per_drive_max` of a hot device (4.3: a larger value for an NVMe; its queue depth by
     /// default).
     pub hot_permits: u32,
-    /// `per_drive_max` of the legacy upstream, one device for the budget; `None` bounds it by the
-    /// client ceiling only.
-    pub legacy_permits: Option<u32>,
     /// The steady part size `P` of each size class of `tierstore_fetch::plan::size_class` (4.4:
     /// packs up to 32 MiB take no grid, up to 512 MiB 32 MiB, above 64 MiB).
     pub part_sizes: [u64; 3],
@@ -88,7 +85,6 @@ impl BudgetConfig {
             // A hot-only install has no stream count; its (unused) drive permits are one.
             drive_permits: topology.drive_streams.max(1),
             hot_permits: topology.hot_queue_depth,
-            legacy_permits: None,
             part_sizes: [32 * MIB, 32 * MIB, 64 * MIB],
             part_floor: 16 * MIB,
             window_parts: 16,
@@ -123,7 +119,7 @@ impl BudgetConfig {
                     .filter(|&p| !whole(p) || p < self.part_floor),
             )
             .next();
-        let checks: [(bool, ConfigError); 11] = [
+        let checks: [(bool, ConfigError); 10] = [
             (t.clients == 0, ConfigError::NoClients),
             (
                 t.cold_drives > 0 && t.drive_streams == 0,
@@ -136,10 +132,6 @@ impl BudgetConfig {
             (
                 self.hot_permits == 0,
                 ConfigError::ZeroPermits("hot_permits"),
-            ),
-            (
-                self.legacy_permits == Some(0),
-                ConfigError::ZeroPermits("legacy_permits"),
             ),
             (
                 self.node_permits == Some(0),

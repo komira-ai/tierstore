@@ -177,7 +177,7 @@ pub fn part(class: Class, device: DeviceRef) -> Charge {
         class,
         parts: 1,
         devices: vec![device],
-        node: device.node(),
+        node: Some(device.node()),
     }
 }
 

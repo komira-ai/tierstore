@@ -63,10 +63,6 @@ fn each_unrunnable_configuration_is_refused_by_name() {
             "budget: hot_permits is 0; a device or node admits at least one part",
         ),
         (
-            refused(|c| c.legacy_permits = Some(0)),
-            "budget: legacy_permits is 0; a device or node admits at least one part",
-        ),
-        (
             refused(|c| c.node_permits = Some(0)),
             "budget: node_permits is 0; a device or node admits at least one part",
         ),

@@ -172,7 +172,6 @@ impl Controller {
         match d {
             DeviceRef::Drive(..) => self.cfg.drive_permits,
             DeviceRef::Hot(_) => self.cfg.hot_permits,
-            DeviceRef::Legacy => self.cfg.legacy_permits.unwrap_or(u32::MAX),
         }
     }
 
@@ -417,7 +416,7 @@ impl Controller {
         let with: Vec<&Device> = self
             .devices
             .iter()
-            .filter(|(d, _)| node.is_none() || d.node() == node)
+            .filter(|(d, _)| node.is_none_or(|n| d.node() == n))
             .filter(|(_, dev)| {
                 dev.last_traffic
                     .is_some_and(|t| t.saturating_add(traffic) >= now)
@@ -434,11 +433,9 @@ impl Controller {
     }
 
     /// The drive evidence of the node and client levels, after a drive's decrease state changed.
-    fn evidence(&mut self, node: Option<NodeId>, now: u64) {
-        if let Some(n) = node
-            && self.drives_over_third(Some(n), now)
-        {
-            self.decrease_node(n, BudgetReason::NodeDrives, now);
+    fn evidence(&mut self, node: NodeId, now: u64) {
+        if self.drives_over_third(Some(node), now) {
+            self.decrease_node(node, BudgetReason::NodeDrives, now);
         }
         if self.drives_over_third(None, now) {
             self.decrease_client(BudgetReason::ClientDrives, now);

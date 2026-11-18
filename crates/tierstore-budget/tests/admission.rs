@@ -217,13 +217,13 @@ fn one_storage_node_down_doubles_drive_reads_and_triples_them_per_surviving_driv
     );
     let surviving: u32 = down
         .iter()
-        .filter(|(d, _)| d.node() != Some(NodeId(3)))
+        .filter(|(d, _)| d.node() != NodeId(3))
         .map(|(_, n)| n)
         .sum();
     assert_eq!(surviving, 180);
     // Per surviving drive: 6 against 2, three times the healthy load.
     for (d, n) in &down {
-        if d.node() != Some(NodeId(3)) {
+        if d.node() != NodeId(3) {
             assert_eq!(*n, 6, "{d:?}");
         }
     }

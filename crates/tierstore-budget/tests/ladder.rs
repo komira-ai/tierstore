@@ -145,13 +145,6 @@ fn a_hot_device_steps_down_from_what_the_ceiling_lets_it_use() {
     rig.busy(hot);
     let v = rig.budget.snapshot().devices[&hot];
     assert_eq!((v.max, v.permits, v.step), (64, 2, DriveStep::Permits));
-    // The legacy upstream likewise (a fresh client: the hot device's decrease moved this one's
-    // ceiling).
-    let rig = Rig::later();
-    let legacy = tierstore_fetch_api::upstream::DeviceRef::Legacy;
-    rig.busy(legacy);
-    let v = rig.budget.snapshot().devices[&legacy];
-    assert_eq!((v.max, v.permits), (u32::MAX, 2));
 }
 
 #[test]
