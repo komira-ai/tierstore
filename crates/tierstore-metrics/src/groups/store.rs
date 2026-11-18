@@ -62,7 +62,7 @@ group! {
 }
 
 group! {
-    /// The S3 front: PUTs and their copies, LIST, and the imports from silo (10.2, 10.6, 10.10).
+    /// The S3 front: PUTs and their copies, and LIST (10.2, 10.6).
     S3Front {
         store_puts_total: CounterVec<PutOutcome> = "store_puts_total",
             "PUTs, by outcome.";
@@ -79,10 +79,6 @@ group! {
             "LIST requests.";
         store_list_keys_total: CounterVec<()> = "store_list_keys_total",
             "Keys returned by LIST requests.";
-        import_bytes_total: CounterVec<()> = "import_bytes_total",
-            "Bytes imported from silo on a read.";
-        legacy_mover_bytes_total: CounterVec<()> = "legacy_mover_bytes_total",
-            "Bytes the bulk mover copied from silo.";
     }
 }
 

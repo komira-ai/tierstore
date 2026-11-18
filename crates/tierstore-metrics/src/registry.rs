@@ -81,7 +81,7 @@ pub struct ColdStoreMetrics {
 /// The families of the S3 front.
 #[derive(Clone)]
 pub struct S3FrontMetrics {
-    /// PUTs, LIST and imports.
+    /// PUTs and LIST.
     pub front: Arc<S3Front>,
     /// `store_copy_generation_mismatch_total`.
     pub copy_generation: Arc<CopyGeneration>,

@@ -50,11 +50,7 @@ fn pack6() -> Pack {
 
 /// One hot copy of the whole pack, generation 1.
 fn one_hot(pack: &Pack) -> Location {
-    location(
-        Some(generation(1)),
-        pack.spec.size,
-        vec![hot(1, pack.spec.size)],
-    )
+    location(generation(1), pack.spec.size, vec![hot(1, pack.spec.size)])
 }
 
 async fn wait_cells(rig: &Rig, pack: &Pack, first: u64, count: u64) -> WaitOutcome {
@@ -96,7 +92,7 @@ async fn an_object_removed_after_some_cells_landed_loses_the_missing_cells_and_k
     let pack = pack6();
     let size = pack.spec.size;
     let two_extents = location(
-        Some(generation(1)),
+        generation(1),
         size,
         vec![cold(1, 1, 0, 2 * MIB), cold(2, 2, 2 * MIB, 4 * MIB)],
     );
@@ -261,7 +257,7 @@ async fn a_locate_error_waits_like_a_miss_that_is_not_definitive_and_resumes() {
         &pack.key(),
         Err(UpstreamError::Transport {
             key: pack.key(),
-            device: DeviceRef::Legacy,
+            device: DeviceRef::Hot(NodeId(1)),
             reason: "the index node is down".to_owned(),
         }),
     );
@@ -348,11 +344,7 @@ async fn a_404_from_a_promoted_copy_excludes_it_and_the_part_goes_to_the_hot_cop
     let hot_copy = DeviceRef::Hot(NodeId(2));
     rig.upstream.add(
         &pack,
-        location(
-            Some(generation(1)),
-            size,
-            vec![hot_clean(1, size), hot(2, size)],
-        ),
+        location(generation(1), size, vec![hot_clean(1, size), hot(2, size)]),
     );
     rig.upstream
         .script(promoted, Script::Fail(not_found(&pack, promoted)));
@@ -393,8 +385,8 @@ async fn a_404_on_a_cold_source_asks_locate_again_and_retries_on_the_new_locatio
     let rig = Rig::default_rig();
     let pack = Pack::new("lost/four", 4 * MIB, 5);
     let size = pack.spec.size;
-    let before = location(Some(generation(1)), size, vec![cold(1, 1, 0, size)]);
-    let after = location(Some(generation(1)), size, vec![cold(2, 2, 0, size)]);
+    let before = location(generation(1), size, vec![cold(1, 1, 0, size)]);
+    let after = location(generation(1), size, vec![cold(2, 2, 0, size)]);
     rig.upstream.add(&pack, before.clone());
     rig.upstream
         .script_locate(&pack.key(), Ok(Located::Found(before)));

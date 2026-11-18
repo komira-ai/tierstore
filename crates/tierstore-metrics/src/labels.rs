@@ -318,19 +318,6 @@ closed! {
 }
 
 closed! {
-    /// Where a read from silo went (10.10).
-    LegacyOutcome = "outcome" {
-        /// After a definitive miss in the store, silo served it.
-        Served = "ok",
-        /// Silo failed it.
-        Failed = "error",
-        /// The pack's legacy hint (`store.legacy_hint_ttl`) sent it straight to silo, with no
-        /// `LOCATE`, and silo served it.
-        HintHit = "hint_hit",
-    }
-}
-
-closed! {
     /// Why a segment was sealed (10.3 step 6): the values of the frozen [`hot::SealReason`].
     SealReason = "reason" {
         /// It reached `hot.seal_bytes`, or a record did not fit.

@@ -4,10 +4,10 @@
 //!
 //! Catches: an unhealthy copy chosen over a healthy one; a state (`up`, `drain`, unknown) treated
 //! as unhealthy or a decrease state treated as healthy; tiers out of order (promoted copy, hot,
-//! cold or legacy, degraded); the queue wait or the location order ignored among equals; a
+//! cold, degraded); the queue wait or the location order ignored among equals; a
 //! source chosen for a byte its extent does not cover; an excluded source chosen; a retry sent
 //! to the failed device while another exists, or no retry target when only one source exists; a
-//! hedge during a decrease state, to a busier or unhealthy copy, to a cold or legacy source, to
+//! hedge during a decrease state, to a busier or unhealthy copy, to a cold source, to
 //! the same device, of a hot read to a degraded read, of a long range to a degraded read, or to
 //! a degraded read whose source drives are not known to be idle; signals that overwrite what an
 //! answer left out; a busy deadline that moves backward.
@@ -22,7 +22,7 @@ mod support;
 
 use std::collections::BTreeSet;
 
-use support::{MIB, cold, degraded, drive, hot, hot_clean, legacy, location};
+use support::{MIB, cold, degraded, drive, generation, hot, hot_clean, location};
 use tierstore_fetch::route::{DeviceBook, DeviceInfo, Routing};
 use tierstore_fetch_api::ids::ByteRange;
 use tierstore_fetch_api::upstream::{DeviceRef, DriveSignals, DriveState, Location, Source};
@@ -36,7 +36,7 @@ fn hot_dev(node: u8) -> DeviceRef {
 }
 
 fn loc(sources: Vec<Source>) -> Location {
-    location(None, LEN, sources)
+    location(generation(1), LEN, sources)
 }
 
 fn wait(ms: u32) -> DriveSignals {
@@ -196,21 +196,6 @@ fn the_tiers_are_promoted_then_hot_then_cold_then_degraded() {
         first(&l, &[3, 2, 1, 0], &book, 0, 0),
     ];
     assert_eq!(chosen, [Some(3), Some(2), Some(1), Some(0), None]);
-}
-
-/// A cold extent and the legacy upstream are one tier: the location's order decides between them.
-#[test]
-fn cold_and_legacy_share_a_tier_and_the_location_order_decides() {
-    let book = DeviceBook::default();
-    let legacy_first = loc(vec![legacy(LEN), cold(1, 1, 0, LEN)]);
-    let cold_first = loc(vec![cold(1, 1, 0, LEN), legacy(LEN)]);
-    assert_eq!(
-        [
-            first(&legacy_first, &[], &book, 0, 0),
-            first(&cold_first, &[], &book, 0, 0)
-        ],
-        [Some(0), Some(0)]
-    );
 }
 
 /// A cold shard on a stalled drive goes to the degraded source (the reconstructor).
@@ -439,12 +424,12 @@ fn a_hedge_never_goes_to_an_unhealthy_excluded_or_non_covering_copy() {
     );
 }
 
-/// A cold or legacy source is never a hedge target of a hot read, and a hot copy is not offered
-/// as a hedge to a cold read.
+/// A cold source is never a hedge target of a hot read, and a hot copy is not offered as a hedge
+/// to a cold read.
 #[test]
 fn a_hot_read_is_not_hedged_to_cold_and_a_cold_read_is_not_hedged_to_hot() {
     let book = DeviceBook::default();
-    let hot_then_cold = loc(vec![hot(1, LEN), cold(2, 1, 0, LEN), legacy(LEN)]);
+    let hot_then_cold = loc(vec![hot(1, LEN), cold(2, 1, 0, LEN), cold(3, 1, 0, LEN)]);
     let cold_then_hot = loc(vec![cold(2, 1, 0, LEN), hot(1, LEN)]);
     assert_eq!(
         [
@@ -530,26 +515,15 @@ fn a_degraded_hedge_is_not_made_to_an_unhealthy_excluded_or_the_same_device() {
     );
 }
 
-/// A degraded read is offered as a hedge only to a cold read: not to a hot read, nor to the
-/// legacy upstream.
+/// A degraded read is offered as a hedge only to a cold read, not to a hot read.
 #[test]
 fn a_degraded_hedge_is_offered_only_to_a_cold_read() {
     let hot_read = loc(vec![
         hot(1, LEN),
         degraded(5, &[drive(2, 1), drive(3, 1)], 0, LEN),
     ]);
-    let legacy_read = loc(vec![
-        legacy(LEN),
-        degraded(5, &[drive(2, 1), drive(3, 1)], 0, LEN),
-    ]);
     let book = idle_sources();
-    assert_eq!(
-        [
-            hedge(&hot_read, &[], &book, 0, MIB, 0),
-            hedge(&legacy_read, &[], &book, 0, MIB, 0),
-        ],
-        [None, None]
-    );
+    assert_eq!(hedge(&hot_read, &[], &book, 0, MIB, 0), None);
 }
 
 /// A later answer that leaves a field out keeps the earlier value of that field; a field it
@@ -597,7 +571,7 @@ fn an_unheard_device_reads_as_the_empty_record() {
     let mut book = DeviceBook::default();
     book.signals(hot_dev(1), wait(5));
     assert_eq!(
-        [book.get(hot_dev(2)), book.get(DeviceRef::Legacy)],
+        [book.get(hot_dev(2)), book.get(drive(1, 1))],
         [DeviceInfo::default(), DeviceInfo::default()]
     );
 }

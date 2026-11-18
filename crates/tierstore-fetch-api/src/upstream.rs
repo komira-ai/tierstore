@@ -3,9 +3,9 @@
 //! The engine asks an upstream for a pack's location once per fill (`locate`, the `LOCATE` step
 //! of 10.6) and then for parts (`get`), each a contiguous byte range from one source on one
 //! device. The storage tier's implementation is T-S6's `StoreUpstream` over the peer protocol;
-//! the legacy upstream (silo, 10.10) has no location (`generation` unknown until the first part
-//! answers). Single flight, claims, verification, the controller and hedging are the engine's
-//! and do not change with the upstream.
+//! every location carries the generation, so every part carries `If-Match` from the first.
+//! Single flight, claims, verification, the controller and hedging are the engine's and do not
+//! change with the upstream.
 
 use bytes::Bytes;
 use futures::stream::BoxStream;
@@ -20,17 +20,14 @@ pub enum DeviceRef {
     Hot(NodeId),
     /// One hard drive of a storage node.
     Drive(NodeId, DriveId),
-    /// The legacy upstream (silo), one device for the budget.
-    Legacy,
 }
 
 impl DeviceRef {
-    /// The storage node of the device; none for the legacy upstream.
+    /// The storage node of the device.
     #[must_use]
-    pub fn node(self) -> Option<NodeId> {
+    pub fn node(self) -> NodeId {
         match self {
-            Self::Hot(n) | Self::Drive(n, _) => Some(n),
-            Self::Legacy => None,
+            Self::Hot(n) | Self::Drive(n, _) => n,
         }
     }
 }
@@ -73,8 +70,6 @@ pub enum SourceKind {
         /// The `k` drives the reconstructor would read.
         sources: Vec<DeviceRef>,
     },
-    /// The legacy upstream (silo): the object by key.
-    Legacy,
 }
 
 /// One place the bytes of an object, or of one extent of it, can be read from.
@@ -105,9 +100,9 @@ impl Source {
 /// Where an object is: its generation and size and every source of it.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct Location {
-    /// The generation, known before the first byte for a stored object (10.6); `None` for the
-    /// legacy upstream, where the first part is issued alone and its response gives it (section 9).
-    pub generation: Option<Generation>,
+    /// The generation, known before the first byte (10.6): every part of the fill carries it as
+    /// `If-Match` (section 9).
+    pub generation: Generation,
     /// The object's size, if known.
     pub size: Option<u64>,
     /// The sources, best first (a promoted copy first, then hot copies, then cold extents).
@@ -222,9 +217,8 @@ pub struct GetRequest {
     pub source: Source,
     /// The bytes of the object wanted (inside the source's extent).
     pub range: ByteRange,
-    /// `If-Match`: the fill's pinned generation; `None` only for the first part of a
-    /// legacy-origin object (section 9).
-    pub generation: Option<Generation>,
+    /// `If-Match`: the fill's pinned generation (section 9).
+    pub generation: Generation,
     /// `x-ts-class`.
     pub class: Class,
     /// `x-ts-job`.
@@ -331,10 +325,9 @@ pub enum UpstreamError {
 /// Where the engine's bytes come from.
 ///
 /// Section 14 rows: "A copy answers 412 to its generation"; "S3-front object: a stored object's
-/// parts all carry `If-Match` from `LOCATE`; a silo-origin object's first part goes alone";
-/// "Pinned generation"; "Pack lost mid-job"; "Definitive miss (rule `N - min_acks + 1`) ... one
-/// `LOCATE` per key per fill"; "Corrupt bytes in one cell"; "`digest=none` object"; "Migration:
-/// ... read from the legacy upstream on a definitive miss".
+/// parts all carry `If-Match` from `LOCATE`"; "Pinned generation"; "Pack lost mid-job";
+/// "Definitive miss (rule `N - min_acks + 1`) ... one `LOCATE` per key per fill"; "Corrupt bytes
+/// in one cell"; "`digest=none` object".
 #[async_trait::async_trait]
 pub trait Upstream: Send + Sync {
     /// The object's location (`LOCATE`, 10.6), asked once per fill and again, bypassing every

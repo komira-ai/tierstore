@@ -43,7 +43,7 @@ fn hot_dev(node: u8) -> DeviceRef {
 
 /// Two hot replicas (nodes 1 and 2) of a pack of `size` bytes.
 fn replicas(size: u64) -> Location {
-    location(Some(generation(1)), size, vec![hot(1, size), hot(2, size)])
+    location(generation(1), size, vec![hot(1, size), hot(2, size)])
 }
 
 fn queue_wait(ms: u32) -> DriveSignals {
@@ -214,7 +214,7 @@ async fn a_demand_with_only_one_copy_is_never_hedged() {
     let pack = Pack::new("hot/single", 4 * MIB, 6);
     rig.upstream.add(
         &pack,
-        location(Some(generation(1)), 4 * MIB, vec![hot(1, 4 * MIB)]),
+        location(generation(1), 4 * MIB, vec![hot(1, 4 * MIB)]),
     );
     let outcome = first_cell_with_silent_first_choice(&rig, &pack).await;
     assert_eq!(outcome, WaitOutcome::Ready);
@@ -296,10 +296,8 @@ async fn one_device_answers_503_while_a_part_is_silent(busy_node: u8) -> (Rig, W
     let a = Pack::new("hot/a", MIB, 1);
     let b = Pack::new("hot/b", MIB, 2);
     rig.upstream.add(&a, replicas(MIB));
-    rig.upstream.add(
-        &b,
-        location(Some(generation(1)), MIB, vec![hot(busy_node, MIB)]),
-    );
+    rig.upstream
+        .add(&b, location(generation(1), MIB, vec![hot(busy_node, MIB)]));
     rig.upstream.script(hot_dev(1), Script::NoAnswer);
     rig.upstream
         .script(hot_dev(busy_node), unavailable(&b, busy_node));
@@ -457,7 +455,7 @@ fn cold_with_degraded_read(size: u64, config: EngineConfig) -> (Rig, Pack, [Devi
     rig.upstream.add(
         &pack,
         location(
-            Some(generation(1)),
+            generation(1),
             size,
             vec![cold(1, 1, 0, size), degraded(2, &sources, 0, size)],
         ),

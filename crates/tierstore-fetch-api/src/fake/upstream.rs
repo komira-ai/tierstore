@@ -128,7 +128,7 @@ fn transport(req: &GetRequest, reason: &str) -> UpstreamError {
 /// The bytes of the request's range, after the `If-Match` rule: a request that names another
 /// generation is `412`, a range outside the object a transport error.
 fn range_of(req: &GetRequest, object: &FakeObject) -> Result<Vec<u8>, UpstreamError> {
-    if req.generation.is_some_and(|g| g != object.generation) {
+    if req.generation != object.generation {
         return Err(UpstreamError::PreconditionFailed {
             key: req.key.clone(),
             device: req.source.device,

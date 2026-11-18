@@ -1,12 +1,11 @@
 //! The one `EngineConfig::default()` serves both deployment profiles of section 21: what differs
-//! between NOW (six combined nodes, two hot replicas, cold `4+2`, a legacy upstream with recorded
-//! upload parts) and LATER (three storage nodes, three hot replicas, cold `4+4`) reaches the
-//! engine as data, in the locations the upstream answers.
+//! between NOW (six combined nodes, two hot replicas, cold `4+2`) and LATER (three storage nodes,
+//! three hot replicas, cold `4+4`) reaches the engine as data, in the locations the upstream
+//! answers.
 //!
 //! Catches: a hot read that ignores the second replica or sends every part to one copy; a stall
-//! that is not failed over to the other copy; a legacy pack not cut at its recorded upload parts,
-//! a first legacy part that does not go alone, or a cut applied to a pack read from the storage
-//! tier; a degraded read charged as one part instead of `k`; a hot read that does not go to the
+//! that is not failed over to the other copy; a NOW pack cut anywhere but at its first-touch
+//! piece; a degraded read charged as one part instead of `k`; a hot read that does not go to the
 //! least-loaded copy of three; a chain object whose part crosses the boundary between its blocks
 //! or goes to the block that does not cover it; a node that is down not routed around by a
 //! degraded read.
@@ -19,7 +18,7 @@
 
 mod support;
 
-use support::{MIB, Pack, Rig, Script, cold, degraded, drive, generation, hot, legacy, location};
+use support::{MIB, Pack, Rig, Script, cold, degraded, drive, generation, hot, location};
 use tierstore_fetch::{GetKind, TimerKind};
 use tierstore_fetch_api::cell::CellState;
 use tierstore_fetch_api::engine::Engine;
@@ -90,7 +89,7 @@ async fn a_now_hot_pack_with_two_replicas_fills_from_one_replica_with_one_charge
     let size = pack.spec.size;
     rig.upstream.add(
         &pack,
-        location(Some(generation(1)), size, vec![hot(1, size), hot(2, size)]),
+        location(generation(1), size, vec![hot(1, size), hot(2, size)]),
     );
     fill(&rig, &pack).await;
     assert_eq!(get_devices(&rig), vec![hot_node(1)]);
@@ -108,7 +107,7 @@ async fn a_now_stall_on_one_hot_replica_fails_over_to_the_other_replica() {
     let size = pack.spec.size;
     rig.upstream.add(
         &pack,
-        location(Some(generation(1)), size, vec![hot(1, size), hot(2, size)]),
+        location(generation(1), size, vec![hot(1, size), hot(2, size)]),
     );
     rig.upstream.script(hot_node(1), Script::NoAnswer);
     prepare(&rig, &pack);
@@ -122,59 +121,16 @@ async fn a_now_stall_on_one_hot_replica_fails_over_to_the_other_replica() {
     assert_eq!(rig.entry_bytes(&pack, 0, size), pack.bytes.to_vec());
 }
 
-/// NOW: a legacy pack with a recorded upload part size is cut at those boundaries (no GET crosses
-/// 8 MiB or 16 MiB), and its first part goes alone: the part that stalls is the only GET until
-/// its answer pins the generation, and every later GET carries the pinned generation.
+/// NOW: a 20 MiB pack read from its two hot replicas is the first-touch piece and the rest, with
+/// no other cut.
 #[tokio::test]
-async fn a_now_legacy_pack_is_cut_at_its_upload_parts_and_its_first_part_goes_alone() {
+async fn a_now_stored_pack_is_read_as_its_first_touch_piece_and_the_rest() {
     let rig = Rig::default_rig();
-    let mut pack = Pack::new("now-legacy", 20 * MIB, 3);
-    pack.spec.upload_part_size = 8 * MIB;
-    let size = pack.spec.size;
-    rig.upstream
-        .add(&pack, location(None, size, vec![legacy(size)]));
-    rig.upstream.script(DeviceRef::Legacy, Script::NoAnswer);
-    prepare(&rig, &pack);
-    rig.until(|s| s.armed(TimerKind::FirstByte) == 1).await;
-    rig.clock.advance(2_000);
-    rig.until(|s| s.cells_published == 20).await;
-    let mut ranges = rig.get_ranges(&pack);
-    ranges.sort_unstable();
-    assert_eq!(
-        ranges,
-        vec![
-            (0, 4 * MIB),
-            (0, 4 * MIB),
-            (4 * MIB, 4 * MIB),
-            (8 * MIB, 8 * MIB),
-            (16 * MIB, 4 * MIB),
-        ]
-    );
-    let generations: Vec<_> = rig.upstream.gets().iter().map(|g| g.generation).collect();
-    assert_eq!(
-        generations,
-        vec![
-            None,
-            None,
-            Some(generation(1)),
-            Some(generation(1)),
-            Some(generation(1)),
-        ]
-    );
-    assert_eq!(rig.entry_bytes(&pack, 0, size), pack.bytes.to_vec());
-}
-
-/// The same recorded upload part size is ignored when the pack is read from the storage tier:
-/// the parts are the first-touch piece and the rest, with no cut at 8 MiB or 16 MiB.
-#[tokio::test]
-async fn a_pack_with_an_upload_part_size_read_from_the_storage_tier_is_not_cut() {
-    let rig = Rig::default_rig();
-    let mut pack = Pack::new("now-stored", 20 * MIB, 4);
-    pack.spec.upload_part_size = 8 * MIB;
+    let pack = Pack::new("now-stored", 20 * MIB, 4);
     let size = pack.spec.size;
     rig.upstream.add(
         &pack,
-        location(Some(generation(1)), size, vec![hot(1, size), hot(2, size)]),
+        location(generation(1), size, vec![hot(1, size), hot(2, size)]),
     );
     fill(&rig, &pack).await;
     let mut ranges = rig.get_ranges(&pack);
@@ -194,7 +150,7 @@ async fn a_now_cold_pack_with_a_stalled_data_shard_drive_is_read_degraded_at_fou
     rig.upstream.add(
         &pack,
         location(
-            Some(generation(1)),
+            generation(1),
             size,
             vec![cold(1, 1, 0, size), degraded(6, &shards, 0, size)],
         ),
@@ -227,7 +183,7 @@ async fn a_now_healthy_cold_pack_is_read_from_its_drive_at_one_part() {
     rig.upstream.add(
         &pack,
         location(
-            Some(generation(1)),
+            generation(1),
             size,
             vec![degraded(6, &shards, 0, size), cold(1, 1, 0, size)],
         ),
@@ -249,7 +205,7 @@ async fn a_later_hot_pack_with_three_replicas_goes_to_the_least_loaded_copy() {
         rig.upstream.add(
             pack,
             location(
-                Some(generation(1)),
+                generation(1),
                 size,
                 vec![hot(1, size), hot(2, size), hot(3, size)],
             ),
@@ -275,7 +231,7 @@ async fn a_later_stall_on_the_least_loaded_copy_fails_over_to_the_next_least_loa
     rig.upstream.add(
         &pack,
         location(
-            Some(generation(1)),
+            generation(1),
             size,
             vec![hot(1, size), hot(2, size), hot(3, size)],
         ),
@@ -303,7 +259,7 @@ async fn a_later_chain_object_is_fetched_without_a_get_crossing_its_block_bounda
     rig.upstream.add(
         &pack,
         location(
-            Some(generation(1)),
+            generation(1),
             size,
             vec![cold(1, 1, 0, x), cold(2, 2, x, size - x)],
         ),
@@ -338,7 +294,7 @@ async fn a_later_degraded_read_serves_a_pack_whose_data_shard_node_is_down() {
     rig.upstream.add(
         &pack,
         location(
-            Some(generation(1)),
+            generation(1),
             size,
             vec![cold(2, 2, 0, size), degraded(1, &shards, 0, size)],
         ),

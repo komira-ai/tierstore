@@ -46,10 +46,8 @@ fn node(n: u8) -> DeviceRef {
 fn rig_with(key: &str, size: u64) -> (Rig, Pack) {
     let rig = Rig::default_rig();
     let pack = Pack::new(key, size, 3);
-    rig.upstream.add(
-        &pack,
-        location(Some(generation(1)), size, vec![hot(1, size)]),
-    );
+    rig.upstream
+        .add(&pack, location(generation(1), size, vec![hot(1, size)]));
     (rig, pack)
 }
 
@@ -257,7 +255,7 @@ async fn observed_signals_change_which_copy_serves_a_part() {
         let size = pack.spec.size;
         rig.upstream.add(
             pack,
-            location(Some(generation(1)), size, vec![hot(1, size), hot(2, size)]),
+            location(generation(1), size, vec![hot(1, size), hot(2, size)]),
         );
     }
     let state = |s| DriveSignals {

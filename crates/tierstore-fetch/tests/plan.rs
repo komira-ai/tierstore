@@ -1,6 +1,6 @@
 //! Proves the part plan of one fill (design 4.4): which cells each part covers, for small and
-//! large packs, first touches at the start and in the middle, odd part sizes and legacy upload
-//! cuts, plus the size helpers around it.
+//! large packs, first touches at the start and in the middle, odd part sizes and cuts, plus the
+//! size helpers around it.
 //!
 //! Catches: a small pack whose first piece is shorter than two or longer than four cells; a ramp
 //! that does not double, ignores the P/2 cap or is not trimmed at the grid boundary; a runt after
@@ -18,9 +18,7 @@
 use std::collections::BTreeSet;
 
 use tierstore_fetch::EngineConfig;
-use tierstore_fetch::plan::{
-    CELL_BYTES, Piece, PlanInput, cell_count, piece_of, plan, size_class, upload_cuts,
-};
+use tierstore_fetch::plan::{CELL_BYTES, Piece, PlanInput, cell_count, piece_of, plan, size_class};
 
 const MIB: u64 = 1 << 20;
 
@@ -300,38 +298,6 @@ fn no_piece_of_a_large_pack_is_longer_than_the_part_size() {
     }
 }
 
-/// Cells at which 5 MiB upload parts begin, inside a 20 MiB pack.
-#[test]
-fn upload_cuts_of_5_mib_parts_are_every_fifth_cell_inside_the_pack() {
-    assert_eq!(upload_cuts(20 * MIB, 5 * MIB), BTreeSet::from([5, 10, 15]));
-}
-
-/// Cells at which 8 MiB upload parts begin, inside a 20 MiB pack.
-#[test]
-fn upload_cuts_of_8_mib_parts_are_every_eighth_cell_inside_the_pack() {
-    assert_eq!(upload_cuts(20 * MIB, 8 * MIB), BTreeSet::from([8, 16]));
-}
-
-/// An upload part size that is not a whole number of cells begins its parts in the cell that holds
-/// the boundary.
-#[test]
-fn upload_cuts_of_a_part_size_between_cells_fall_in_the_cell_holding_the_boundary() {
-    assert_eq!(upload_cuts(5 * MIB, 3 * MIB / 2), BTreeSet::from([1, 3, 4]));
-}
-
-/// An upload part size of 0 gives no cut.
-#[test]
-fn an_upload_part_size_of_zero_gives_no_cuts() {
-    assert_eq!(upload_cuts(20 * MIB, 0), BTreeSet::new());
-}
-
-/// An upload part at least as large as the pack gives no cut.
-#[test]
-fn an_upload_part_size_as_large_as_the_pack_gives_no_cuts() {
-    assert_eq!(upload_cuts(20 * MIB, 20 * MIB), BTreeSet::new());
-    assert_eq!(upload_cuts(20 * MIB, u64::MAX), BTreeSet::new());
-}
-
 /// Pieces are split at the cut cells only: a cut inside a piece splits it.
 #[test]
 fn a_cut_inside_a_piece_splits_it_there() {
@@ -370,19 +336,17 @@ fn cuts_split_the_ramp_and_the_grid_parts_of_a_large_pack() {
     );
 }
 
-/// With cuts from a legacy upload part size, every piece starts at or after, and no piece spans,
-/// a cut cell.
+/// With a cut every 3, 5 or 8 cells, every cut cell starts a piece, so no piece spans one.
 #[test]
-fn no_piece_spans_a_legacy_upload_part_boundary() {
-    for upload in [3_u64, 5, 8] {
-        let size = 150 * MIB;
-        let cuts = upload_cuts(size, upload * MIB);
+fn no_piece_spans_a_cut_cell() {
+    for every in [3_u32, 5, 8] {
+        let cuts: BTreeSet<u32> = (1..150).filter(|c| c % every == 0).collect();
         let got = plan(&EngineConfig::default(), input(150, 64, 70, 3), &cuts);
         let covered: Vec<u32> = got.iter().flat_map(|x| x.first..x.end).collect();
         assert_eq!(covered, (0..150).collect::<Vec<u32>>());
         for &c in &cuts {
             let i = piece_of(&got, c).unwrap();
-            assert_eq!(got[i].first, c, "upload={upload} cut={c}");
+            assert_eq!(got[i].first, c, "every={every} cut={c}");
         }
     }
 }

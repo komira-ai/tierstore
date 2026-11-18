@@ -187,7 +187,7 @@ fn the_table_of_section_12_is_read_with_its_braces_and_by_phrases() {
     assert_eq!(labels("admission_refusals_total"), ["reason"]);
     assert_eq!(labels("drive_state"), ["drive", "state"]);
     assert_eq!(labels("cold_stripes"), ["code", "state"]);
-    assert!(table.contains_key("legacy_mover_bytes_total"));
+    assert!(table.contains_key("store_audit_keys_total"));
     assert!(table.contains_key("r_await"));
 }
 

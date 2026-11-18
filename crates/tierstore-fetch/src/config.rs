@@ -1,8 +1,7 @@
 //! The engine's constants (4.4 to 4.6). Every value is the design's starting value; T0-F and
 //! T10b replace them with measured ones. The same values serve both deployment profiles of
-//! section 21: what differs between NOW and LATER (two or three hot replicas, `4+2` or `4+4`, a
-//! legacy upstream with recorded upload parts) reaches the engine as data, in the locations the
-//! upstream answers, never as configuration.
+//! section 21: what differs between NOW and LATER (two or three hot replicas, `4+2` or `4+4`)
+//! reaches the engine as data, in the locations the upstream answers, never as configuration.
 
 /// The engine's configuration.
 #[derive(Debug, Clone, PartialEq, Eq)]
