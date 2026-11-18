@@ -1,7 +1,8 @@
 //! The node's periodic step, on the injected clock (the daemon runs it every second; a test
 //! moves the clock and runs it): the device watchdog, seal-and-roll on a stalled, `down` or
 //! `out` replica (10.3 step 5), the seal triggers (step 6), seals that did not commit retried,
-//! and large-PUT replicas lagging past `hot.put_copy_stall` abandoned.
+//! a copy whose writer is `down` or `out` taken over, and large-PUT replicas lagging past
+//! `hot.put_copy_stall` abandoned.
 //!
 //! **Seal triggers.** A segment seals by size when the next record does not fit (the
 //! committer's own check), and by age: past `hot.seal_max_age` only if it holds at least
@@ -29,7 +30,8 @@ pub struct TickReport {
     pub early: Vec<BlockId>,
     /// Segments sealed by age.
     pub aged: Vec<BlockId>,
-    /// Closed segments whose seal had not committed, sealed again.
+    /// Closed segments whose seal had not committed, sealed again, and copies of a writer that
+    /// is `down` or `out`, taken over.
     pub retried: Vec<BlockId>,
     /// Large-PUT replicas abandoned for lagging.
     pub abandoned: Vec<NodeId>,
@@ -52,7 +54,7 @@ impl<B: Backend + 'static> HotNode<B> {
             .filter(|v| v.state == NodeState::Down || v.hot == Admin::Out)
             .map(|v| v.id)
             .collect();
-        let (open, writing, unsealed): (Vec<Arc<Seg>>, Vec<Arc<Seg>>, Vec<BlockId>) = {
+        let (open, writing, mut unsealed): (Vec<Arc<Seg>>, Vec<Arc<Seg>>, Vec<BlockId>) = {
             let st = n.lock();
             (
                 st.open.values().cloned().collect(),
@@ -60,6 +62,14 @@ impl<B: Backend + 'static> HotNode<B> {
                 st.unsealed.iter().copied().collect(),
             )
         };
+        // Take-over: a copy whose writer is `down` or `out` is sealed by this replica.
+        unsealed.extend(
+            n.lock()
+                .copies
+                .iter()
+                .filter(|(_, c)| gone.contains(&c.writer))
+                .map(|(id, _)| *id),
+        );
         for seg in &open {
             let (stalled, written) = {
                 let s = seg.lock();

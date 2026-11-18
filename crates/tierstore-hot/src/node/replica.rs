@@ -38,6 +38,8 @@ pub(crate) struct CopySt {
     pending: Vec<(u64, Vec<u8>, IndexEntry)>,
     /// Every record before this offset is acknowledged and indexed here.
     pub(crate) noticed: u64,
+    /// The node that opened the segment and writes it.
+    pub(crate) writer: NodeId,
 }
 
 /// `PUT /store/v1/hot/replica`: one batch.
@@ -152,6 +154,7 @@ async fn open_copy<B: Backend + 'static>(
         crc: 0,
         pending: Vec::new(),
         noticed: 0,
+        writer,
     })
 }
 
