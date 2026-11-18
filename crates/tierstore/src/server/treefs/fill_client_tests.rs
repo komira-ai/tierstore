@@ -10,8 +10,9 @@ use std::time::Duration;
 
 use tierstore_testkit::dir::TestDir;
 
-use super::{AskError, FillClient, Place, PlacedTree};
+use super::{AskError, FillClient, Place, PlacedTree, STARTS_QUEUED};
 use crate::TreeDigest;
+use crate::server::treefs::testing::until;
 
 /// A client that pauses `tries` times at most, counting the pauses instead of taking them.
 fn client(path: &Path, tries: u32, wait: Duration) -> (FillClient, Arc<AtomicUsize>) {
@@ -489,4 +490,51 @@ fn image_gives_the_error_of_a_socket_that_does_not_answer() {
         Err("the fill socket is not answering".to_owned())
     );
     assert_eq!(pauses.load(Ordering::Acquire), 2);
+}
+
+/// Asserts that a `started` report is sent by a thread of its own and is never waited for: with
+/// that thread stuck on a socket that has not answered its first report, [`STARTS_QUEUED`] more
+/// are queued and the next ones are dropped, all without the caller waiting. Once the socket
+/// answers, every queued report is sent, in order, over the one connection, although the socket
+/// answers each as a node of the release before does (`refused unknown request`): an answer is
+/// read for each, so none is left on the connection for a later request.
+#[test]
+fn started_reports_leave_on_a_thread_of_their_own_and_past_the_queue_are_dropped() {
+    let (_dir, path) = place("tfs-fc-started");
+    let lines = Arc::new(Mutex::new(Vec::new()));
+    let gate = Arc::new((Mutex::new(false), std::sync::Condvar::new()));
+    let held = Arc::clone(&gate);
+    serve(
+        UnixListener::bind(&path).unwrap(),
+        Arc::clone(&lines),
+        move |_| {
+            let (open, opened) = &*held;
+            let open = opened.wait_while(open.lock().unwrap(), |open| !*open);
+            drop(open);
+            Some("refused unknown request".to_owned())
+        },
+    );
+    let (client, _) = client(&path, 3, Duration::from_secs(30));
+    let received = |text: &str| lines.lock().unwrap().iter().any(|line| line == text);
+    client.report_started("p/0");
+    until(|| received("started p/0"));
+    for n in 1..=STARTS_QUEUED + 3 {
+        client.report_started(&format!("p/{n}"));
+    }
+    {
+        let (open, opened) = &*gate;
+        *open.lock().unwrap() = true;
+        opened.notify_all();
+    }
+    let last = STARTS_QUEUED;
+    until(|| received(&format!("started p/{last}")));
+    client.report_started("p/last");
+    until(|| received("started p/last"));
+    let mut want: Vec<String> = (0..=STARTS_QUEUED)
+        .map(|n| format!("started p/{n}"))
+        .collect();
+    want.push("started p/last".to_owned());
+    assert_eq!(*lines.lock().unwrap(), want);
+    // The caller's own requests use connections of their own: none was made for the reports.
+    assert!(client.idle.lock().unwrap().is_empty());
 }

@@ -3068,6 +3068,23 @@ dependencies = [
 ]
 
 [[package]]
+name = "tierstore-harness"
+version = "0.1.0"
+dependencies = [
+ "async-trait",
+ "bytes",
+ "crc32c",
+ "futures",
+ "loom",
+ "thiserror",
+ "tierstore-fetch-api",
+ "tierstore-format",
+ "tierstore-model",
+ "tierstore-store-api",
+ "tokio",
+]
+
+[[package]]
 name = "tierstore-hashpool"
 version = "0.1.0"
 dependencies = [

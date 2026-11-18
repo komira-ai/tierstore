@@ -623,6 +623,7 @@ impl Core {
             };
         }
         let loaded = self.tree(number)?;
+        self.looked_into(&loaded);
         let dir = loaded.tree.entry(index).ok_or(Errno::NoEnt)?;
         if !matches!(dir.kind, EntryKind::Dir { .. }) {
             return Err(Errno::NotDir);
@@ -726,6 +727,7 @@ impl Core {
         self.opendir(ino)?;
         let (number, index) = ino::split(ino);
         let loaded = self.tree(number)?;
+        self.looked_into(&loaded);
         let parent = loaded.tree.entry(index).and_then(|entry| entry.parent);
         let parent_ino = parent.map_or_else(
             || self.root_parent(&loaded.tree),

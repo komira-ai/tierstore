@@ -1,0 +1,33 @@
+[package]
+name = "tierstore-harness"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+repository.workspace = true
+publish = false
+description = "The shared fakes and protocol models of section 14 of docs/design/fetch-cache-serve.md: progress barriers, a simulated network, a per-cell gated upstream, a crash-point disk and a scripted drive, the EntryStore conformance suite, and exhaustive models of the 5.1 eviction protocol and the storage tier's coordinator protocols."
+
+# Test support: a dev-dependency of the crates that implement the frozen traits, and of nothing
+# that ships.
+[dependencies]
+async-trait.workspace = true
+bytes.workspace = true
+# The running crc32c of a hot segment in the seal and replication models (10.3).
+crc32c.workspace = true
+futures.workspace = true
+# The exhaustive interleaving checker of the 5.1 reader/evictor protocol and of the claim and
+# publish of a cell (the loom row of section 14). MIT.
+loom.workspace = true
+thiserror.workspace = true
+tierstore-fetch-api.workspace = true
+# The breadth-first explorer the coordinator models run on.
+tierstore-model.workspace = true
+tierstore-format.workspace = true
+tierstore-store-api.workspace = true
+
+[dev-dependencies]
+tokio = { workspace = true, features = ["macros", "rt", "rt-multi-thread", "sync"] }
+
+[lints]
+workspace = true

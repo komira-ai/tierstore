@@ -1055,7 +1055,7 @@ The device is the build node's local SSD that holds the cache (on the farm's six
 | `store_audit_live_unreadable_ratio`, `store_audit_keys_total` | gauge, counter | Measured readability of live keys |
 | `legacy_reads_total{outcome}`, `import_bytes_total`, `legacy_mover_bytes_total` | counter | Silo migration progress |
 
-`{drive}` is the drive id (45 hard drives and 3 NVMe devices), never a key. Trace each demand read end to end: handler, wait sent, budget acquired, `LOCATE`, device chosen, GET start, device queue wait, first byte, cell received, hash done, write, reply.
+`request_to_start_seconds` (tierstore's `tierstore_request_to_start_seconds`, T14) is one sample per run, on the build node's clock: from the first `Prepare` of the run that the mount provider takes (the scheduler's agent sends it the moment it has the job) to the first lookup or listing the mount serves inside one of the run's trees (the agent and the overlay's mount touch only the roots, so that is the container runtime making the job's root or the command itself), which the mount reports on the fill socket off the request's path. `{drive}` is the drive id (45 hard drives and 3 NVMe devices), never a key. Trace each demand read end to end: handler, wait sent, budget acquired, `LOCATE`, device chosen, GET start, device queue wait, first byte, cell received, hash done, write, reply.
 
 ## 13. Deleted code and migration of the cache
 **Deleted**
