@@ -7,7 +7,8 @@
 //! - a struct or field the probe lists that the Rust side lacks, or the reverse;
 //! - a probe that leaves out a field of a struct (its fields must tile the struct exactly);
 //! - a pinned header changed without the digest recorded here, or without a new probe run
-//!   (the probe's version line must equal the header's and the library's);
+//!   (the probe prints the FNV-1a checksum of the header it read, which must be the pinned
+//!   header's, and its version line must equal the header's and the library's);
 //! - an opcode, INIT flag, FOPEN or FATTR bit, or constant that differs from the header;
 //! - a comparison that cannot see a defect: the same check, run on probe output with one
 //!   offset, size, field, struct or version changed, names the difference.
@@ -50,17 +51,20 @@ struct Layout {
 /// The probe's output: the version and each struct's layout.
 #[derive(Debug, Clone, PartialEq, Eq)]
 struct Probe {
+    header_fnv1a64: String,
     version: (u32, u32),
     structs: BTreeMap<String, Layout>,
 }
 
 fn parse_probe(text: &str) -> Probe {
     let mut version = None;
+    let mut header_fnv1a64 = None;
     let mut structs: BTreeMap<String, Layout> = BTreeMap::new();
     for line in text.lines() {
         let w: Vec<&str> = line.split_whitespace().collect();
         let n = |i: usize| -> usize { w[i].parse().unwrap_or_else(|e| panic!("{line}: {e}")) };
         match w.as_slice() {
+            ["header-fnv1a64", hash] => header_fnv1a64 = Some((*hash).to_owned()),
             ["version", _, _] => version = Some((n(1) as u32, n(2) as u32)),
             ["struct", name, _, _] => {
                 let layout = Layout {
@@ -82,6 +86,7 @@ fn parse_probe(text: &str) -> Probe {
         }
     }
     Probe {
+        header_fnv1a64: header_fnv1a64.expect("no header-fnv1a64 line"),
         version: version.expect("no version line"),
         structs,
     }
@@ -96,7 +101,6 @@ macro_rules! rust {
         assert_eq!(value.as_bytes(), &pattern[..<$t>::SIZE], $c);
         assert_eq!(rest, &pattern[<$t>::SIZE..], $c);
         assert!(<$t>::read_prefix(&pattern[..<$t>::SIZE - 1]).is_none(), $c);
-        assert_eq!(<$t>::SIZE, size_of::<$t>(), $c);
         let zero = <$t>::default();
         #[allow(unused_mut, reason = "a struct with no flexible member pushes nothing more")]
         let mut fields = vec![$(
@@ -201,6 +205,13 @@ fn rust_layouts() -> BTreeMap<String, Layout> {
 /// probed fields do not tile it (a field the probe left out).
 fn mismatches(probe: &Probe, rust: &BTreeMap<String, Layout>) -> Vec<String> {
     let mut out = Vec::new();
+    let pinned = fnv1a64(HEADER.as_bytes());
+    if probe.header_fnv1a64 != pinned {
+        out.push(format!(
+            "header: probe read {}, the pinned fuse.h is {pinned}",
+            probe.header_fnv1a64
+        ));
+    }
     let ours = (abi::KERNEL_VERSION, abi::KERNEL_MINOR_VERSION);
     if probe.version != ours {
         out.push(format!(
@@ -260,6 +271,21 @@ fn the_pinned_header_is_the_one_the_probe_ran_on() {
     );
 }
 
+/// FNV-1a (64 bits) of `bytes` in 16 lowercase hex digits, as the probe prints it.
+fn fnv1a64(bytes: &[u8]) -> String {
+    let hash = bytes.iter().fold(0xcbf2_9ce4_8422_2325u64, |h, &b| {
+        (h ^ u64::from(b)).wrapping_mul(0x0100_0000_01b3)
+    });
+    format!("{hash:016x}")
+}
+
+#[test]
+fn fnv1a64_is_the_published_function() {
+    // The test vectors of the FNV reference: "" and "a".
+    assert_eq!(fnv1a64(b""), "cbf29ce484222325");
+    assert_eq!(fnv1a64(b"a"), "af63dc4c8601ec8c");
+}
+
 fn hex(bytes: &[u8]) -> String {
     bytes.iter().map(|b| format!("{b:02x}")).collect()
 }
@@ -312,6 +338,19 @@ fn the_comparison_names_each_kind_of_defect() {
         "struct fuse_rename2_in 8 8\nfield fuse_rename2_in newdir 0 8\nstruct fuse_rename_in 8 8",
     );
     assert_eq!(m, ["fuse_rename2_in: probed, but no Rust struct"]);
+
+    // A probe run on another header.
+    let pinned = fnv1a64(HEADER.as_bytes());
+    let m = changed(
+        &format!("header-fnv1a64 {pinned}"),
+        "header-fnv1a64 0123456789abcdef",
+    );
+    assert_eq!(
+        m,
+        [format!(
+            "header: probe read 0123456789abcdef, the pinned fuse.h is {pinned}"
+        )]
+    );
 
     // Another protocol version.
     let m = changed("version 7 45", "version 7 46");

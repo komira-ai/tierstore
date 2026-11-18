@@ -3,7 +3,7 @@
 //! BATCH_FORGET, and INIT from an old kernel's 16 bytes; and the error, with its errno and
 //! message, for an unimplemented opcode, a short body and a name with no NUL.
 //!
-//! Ports the tests of `src/ll/request.rs` of fuser 0.18.0 (MIT): a short header, a short body,
+//! Ports the tests of `src/ll/request.rs` of fuser 0.18.0 (MIT; notice in `crates/tsfuse/FUSER-LICENSE.md`): a short header, a short body,
 //! and INIT (its MKNOD test is dropped: MKNOD is not implemented).
 //!
 //! Catches:
@@ -115,6 +115,8 @@ fn a_name_ends_at_its_nul_and_one_without_is_refused() {
             _ => Operation::Unlink { name },
         };
         assert_eq!(parse(&request(op.code(), b"foo\0")), Ok(want(b"foo")));
+        // An empty name is a name: the kernel's to refuse, not the parse's.
+        assert_eq!(parse(&request(op.code(), b"\0")), Ok(want(b"")));
         // Padding after the NUL is not part of the name.
         assert_eq!(
             parse(&request(op.code(), b"a.c\0\0\0\0\0")),
@@ -184,6 +186,15 @@ fn rename_reads_both_names() {
             arg,
             name: b"old",
             newname: b"new"
+        })
+    );
+    let empty_second = [arg.as_bytes(), b"old\0\0"].concat();
+    assert_eq!(
+        parse(&request(12, &empty_second)),
+        Ok(Operation::Rename {
+            arg,
+            name: b"old",
+            newname: b""
         })
     );
     let no_second_nul = [arg.as_bytes(), b"old\0new"].concat();
@@ -266,6 +277,16 @@ fn batch_forget_yields_count_nodes_and_refuses_fewer() {
         format!("{nodes:?}"),
         "[ForgetOne { nodeid: 5, nlookup: 2 }, ForgetOne { nodeid: 9, nlookup: 1 }]"
     );
+
+    // Bytes after `count` nodes are not nodes.
+    let first_only = BatchForgetIn { count: 1, dummy: 0 };
+    let body = [first_only.as_bytes(), one.as_bytes(), two.as_bytes()].concat();
+    let buf = request(42, &body);
+    let Ok(Operation::BatchForget { nodes, .. }) = parse(&buf) else {
+        panic!("not a BATCH_FORGET");
+    };
+    assert_eq!(nodes.len(), 1);
+    assert_eq!(nodes.collect::<Vec<_>>(), [one]);
 
     let three = BatchForgetIn { count: 3, dummy: 0 };
     let body = [three.as_bytes(), one.as_bytes(), two.as_bytes()].concat();

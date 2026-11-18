@@ -66,7 +66,7 @@ impl Timestamp {
     }
 }
 
-/// The tests of `src/time.rs` of fuser 0.18.0 (MIT), ported, and the conversion back, which
+/// The tests of `src/time.rs` of fuser 0.18.0 (MIT; notice in `crates/tsfuse/FUSER-LICENSE.md`), ported, and the conversion back, which
 /// the fork leaves wrong for a negative time with nanoseconds.
 #[cfg(test)]
 mod tests {

@@ -100,6 +100,10 @@ fn the_required_flags_are_the_list_of_5_2() {
         InitFlags::SPLICE_READ
     );
     assert!(!MountKind::Tree.required().contains(InitFlags::SPLICE_READ));
+    assert_eq!(
+        format!("{:?}", InitFlags::SPLICE_READ.union(InitFlags::INIT_EXT)),
+        "InitFlags(SPLICE_READ | INIT_EXT)"
+    );
 }
 
 #[test]
@@ -265,9 +269,10 @@ fn an_init_request_is_parsed_negotiated_and_answered_on_its_device() {
     };
     let tokens = Tokens::new();
     let device = FakeDevice::new();
-    let _ = tokens
+    let done = tokens
         .register(req.header.unique, device.clone())
         .ok(&[n.reply.as_bytes()]);
+    assert!(matches!(done, tsfuse::Completion::Written), "{done:?}");
     let msgs = device.msgs();
     assert_eq!(msgs.len(), 1);
     assert_eq!((msgs[0].len, msgs[0].error, msgs[0].unique), (80, 0, 1));

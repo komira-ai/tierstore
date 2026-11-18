@@ -6,19 +6,24 @@
  * of each of its fields, as the C compiler of a farm node lays them out. Its output, verbatim,
  * is `layout.txt`, which `tests/abi_layout.rs` compares with the Rust structs.
  *
- * Run on a farm node, from the repository root, in the Rust image CI builds with (it has the C
- * compiler the nodes themselves lack):
+ * `fuse.h` is the uapi header of the farm's kernel (Linux 7.0), used under its BSD-2-Clause
+ * licence. The probe is run on a farm node, from the repository root, inside the
+ * `docker.io/library/rust:1.95.0-trixie` container (the nodes have no C compiler of their own;
+ * the container's is gcc 14.2):
  *
  *   cc -std=c11 -Wall -Wextra -Werror -o target/tsfuse-abi-probe crates/tsfuse/abi/probe.c
- *   target/tsfuse-abi-probe > crates/tsfuse/abi/layout.txt
+ *   target/tsfuse-abi-probe crates/tsfuse/abi/fuse.h > crates/tsfuse/abi/layout.txt
  *
  * Output lines:
+ *   header-fnv1a64 <16 hex digits>   (FNV-1a of the bytes of the header file named by argv[1],
+ *                                     which must be the `fuse.h` this probe was compiled with)
  *   version <major> <minor>
  *   struct <name> <sizeof> <alignof>
  *   field <struct> <field> <offsetof> <sizeof>   (sizeof 0: a flexible array member)
  */
 
 #include <stddef.h>
+#include <stdint.h>
 #include <stdio.h>
 
 #include "fuse.h"
@@ -28,8 +33,23 @@
 	printf("field %s %s %zu %zu\n", #T, #f, offsetof(struct T, f), sizeof(((struct T *)0)->f));
 #define FLEX(T, f) printf("field %s %s %zu 0\n", #T, #f, offsetof(struct T, f));
 
-int main(void)
+int main(int argc, char **argv)
 {
+	if (argc != 2) {
+		fprintf(stderr, "usage: %s <path of fuse.h>\n", argv[0]);
+		return 2;
+	}
+	FILE *header = fopen(argv[1], "rb");
+	if (!header) {
+		perror(argv[1]);
+		return 1;
+	}
+	uint64_t hash = 0xcbf29ce484222325ULL;
+	int c;
+	while ((c = fgetc(header)) != EOF)
+		hash = (hash ^ (uint64_t)(unsigned char)c) * 0x100000001b3ULL;
+	fclose(header);
+	printf("header-fnv1a64 %016llx\n", (unsigned long long)hash);
 	printf("version %d %d\n", FUSE_KERNEL_VERSION, FUSE_KERNEL_MINOR_VERSION);
 
 	S(fuse_in_header)

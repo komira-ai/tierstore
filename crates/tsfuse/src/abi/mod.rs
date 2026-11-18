@@ -4,8 +4,8 @@
 //! negotiation ([`InitConfig::negotiate`]) with the flag list of 5.2.
 //!
 //! **Pinned header and layout probe.** `crates/tsfuse/abi/fuse.h` is the uapi header of the
-//! farm kernel (Linux 7.0, protocol 7.45), byte for byte. `crates/tsfuse/abi/probe.c`, run on a
-//! farm node, prints the protocol version and the size, alignment and field offsets of every
+//! farm kernel (Linux 7.0, protocol 7.45), byte for byte (used under its BSD-2-Clause licence). `crates/tsfuse/abi/probe.c`, run on a
+//! farm node, prints a checksum of that header, the protocol version and the size, alignment and field offsets of every
 //! struct here as the C compiler lays them out; its output is `crates/tsfuse/abi/layout.txt`.
 //! `tests/abi_layout.rs` compares each Rust struct with it, and the opcode and flag values with
 //! the header. A new farm kernel is a new pinned header and a new probe run, in one change.

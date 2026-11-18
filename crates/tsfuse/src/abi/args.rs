@@ -36,7 +36,7 @@ impl<'a> Args<'a> {
     }
 }
 
-/// The tests of `src/ll/argument.rs` of fuser 0.18.0 (MIT), ported: a fixed struct, a
+/// The tests of `src/ll/argument.rs` of fuser 0.18.0 (MIT; notice in `crates/tsfuse/FUSER-LICENSE.md`), ported: a fixed struct, a
 /// NUL-terminated name, the rest bytes, a short buffer and a missing NUL.
 #[cfg(test)]
 mod tests {

@@ -3,7 +3,7 @@
 //! Proves that the READDIR and READDIRPLUS lists pad each record to 8 bytes, stop at the
 //! request's size, and refuse a name the kernel would refuse.
 //!
-//! Ports the tests of `src/ll/reply.rs` of fuser 0.18.0 (MIT) byte for byte, with their Linux
+//! Ports the tests of `src/ll/reply.rs` of fuser 0.18.0 (MIT; notice in `crates/tsfuse/FUSER-LICENSE.md`) byte for byte, with their Linux
 //! vectors: empty, error, data, entry, attr, open, write, statfs, create and directory (its
 //! lock, bmap, xattr_size and xattr_data tests are dropped: those opcodes are not implemented).
 //!

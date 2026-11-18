@@ -1,3 +1,4 @@
+header-fnv1a64 4ef6fa7e7ac9198f
 version 7 45
 struct fuse_in_header 40 8
 field fuse_in_header len 0 4
