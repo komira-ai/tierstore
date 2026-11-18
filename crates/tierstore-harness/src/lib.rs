@@ -65,6 +65,10 @@
 //!   explorer the models here run on;
 //! - the format rows (T-FMT, T-S2), the FUSE rows (T-F1 to T-F7, which need the kernel), the
 //!   CAS service rows (T-K1a) and the macOS run (T-M2) need no fake of this crate.
+//!
+//! A few small functions carry `#[inline(never)]`: the crate is optimised in test builds (its
+//! models explore every interleaving), and inlined into the test binaries their library copy
+//! would count as never run in the coverage report.
 
 #![forbid(unsafe_code)]
 

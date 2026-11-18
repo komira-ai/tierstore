@@ -120,12 +120,12 @@ tierstore-testkit = { path = "crates/tierstore-testkit" }
 tierstore-format = { path = "crates/tierstore-format" }
 # The frozen interfaces of the read path on a build node, and their fakes.
 tierstore-fetch-api = { path = "crates/tierstore-fetch-api" }
+# The breadth-first explorer of the protocol models (its `explore` module).
+tierstore-model = { path = "crates/tierstore-model" }
 # The frozen interfaces of the storage tier, the peer protocol, and a fake storage node.
 tierstore-store-api = { path = "crates/tierstore-store-api" }
 # The FUSE library: dispatch with replies bound to their originating device.
 tsfuse = { path = "crates/tsfuse" }
-# The breadth-first explorer of the protocol models (its `explore` module).
-tierstore-model = { path = "crates/tierstore-model" }
 # The previous release: `v0.3.17`, the tag of the commit below, taken from the public repository
 # at that commit alone (the `rev` is what pins it; a tag can be moved). Used only by the
 # dev-dependencies of `crates/compat`. When a release is made, move both to the new release's

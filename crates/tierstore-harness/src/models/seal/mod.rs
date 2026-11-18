@@ -288,6 +288,7 @@ impl SealModel {
     }
 
     /// The scenario.
+    #[inline(never)]
     #[must_use]
     pub fn config(&self) -> &Config {
         &self.cfg
@@ -586,6 +587,7 @@ impl Model for SealModel {
         None
     }
 
+    #[inline(never)]
     fn terminal(&self, _: &World) -> Option<String> {
         None
     }

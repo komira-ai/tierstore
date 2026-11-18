@@ -151,6 +151,7 @@ impl FakeDrive {
     }
 
     /// The events `"start"` and `"done"`, marked once per request.
+    #[inline(never)]
     #[must_use]
     pub fn progress(&self) -> &Progress {
         &self.progress

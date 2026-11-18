@@ -93,6 +93,12 @@ pub struct Protocol {
     pub wait_before_journal: bool,
     /// A hedge and its original share one token slot. When `false`, each has its own token.
     pub hedge_shares_token: bool,
+    /// Evictor step 3: on a timeout, CAS the group's won cells `evicting -> present`. When
+    /// `false`, they are left `evicting`.
+    pub restore_on_timeout: bool,
+    /// Publish is the CAS `claimed -> present`, which one deliverer wins. When `false`, a plain
+    /// store of `present` that every deliverer makes.
+    pub publish_is_cas: bool,
 }
 
 impl Protocol {
@@ -106,6 +112,8 @@ impl Protocol {
             evictor_per_cell_cas: true,
             wait_before_journal: true,
             hedge_shares_token: true,
+            restore_on_timeout: true,
+            publish_is_cas: true,
         }
     }
 }
@@ -162,6 +170,7 @@ pub struct Scenario {
 impl Scenario {
     /// A scenario of `cells` cells in groups of `group_size` for `holders` holders, with no cell
     /// present and no actor; the preemption bound is 3.
+    #[inline(never)]
     #[must_use]
     pub fn new(cells: usize, group_size: usize, holders: usize) -> Self {
         Self {
@@ -360,11 +369,16 @@ impl Model {
         self.counters.iter().map(|h| h[group].load(SeqCst)).sum()
     }
 
-    fn write_and_publish(&self, token: &ClaimedCell) {
+    fn write_and_publish(&self, token: &ClaimedCell, publish_is_cas: bool) {
         let cell = token.cell() as usize;
         self.writes.fetch_add(1, Relaxed);
         self.data[cell].store(1, SeqCst);
-        let won = self.cas(cell, Transition::Publish);
+        let won = if publish_is_cas {
+            self.cas(cell, Transition::Publish)
+        } else {
+            self.states[cell].store(CellByte::new(CellState::Present, false).0, SeqCst);
+            true
+        };
         self.published.fetch_add(usize::from(won), Relaxed);
     }
 }
@@ -474,7 +488,7 @@ fn evictor(m: &Model, p: &Protocol, e: &EvictorSpec) -> Vec<usize> {
     }
     let (late, clear): (Vec<usize>, Vec<usize>) =
         won.iter().partition(|&&c| timed_out.contains(&m.group(c)));
-    for &c in &late {
+    for &c in late.iter().filter(|_| p.restore_on_timeout) {
         m.cas(c, Transition::AbortEvict);
     }
     if p.wait_before_journal {
@@ -488,9 +502,9 @@ fn evictor(m: &Model, p: &Protocol, e: &EvictorSpec) -> Vec<usize> {
     late
 }
 
-fn filler(m: &Model, cell: usize) {
+fn filler(m: &Model, p: &Protocol, cell: usize) {
     if let Some(t) = token(m, cell) {
-        m.write_and_publish(&t);
+        m.write_and_publish(&t, p.publish_is_cas);
     }
 }
 
@@ -508,7 +522,7 @@ fn run_once(sc: &Arc<Scenario>, p: Protocol, shared: &Arc<Shared>) {
     }
     for &c in &sc.fillers {
         let m = Arc::clone(&m);
-        go(&mut handles, move || filler(&m, c));
+        go(&mut handles, move || filler(&m, &p, c));
     }
     if let Some((h, g)) = sc.forced_clear {
         let m = Arc::clone(&m);
@@ -531,7 +545,7 @@ fn run_once(sc: &Arc<Scenario>, p: Protocol, shared: &Arc<Shared>) {
             go(&mut handles, move || {
                 let taken = slots[slot].lock().map(|mut s| s.take()).ok().flatten();
                 if let Some(t) = taken {
-                    m.write_and_publish(&t);
+                    m.write_and_publish(&t, p.publish_is_cas);
                 }
             });
         }
@@ -540,11 +554,12 @@ fn run_once(sc: &Arc<Scenario>, p: Protocol, shared: &Arc<Shared>) {
         let m = Arc::clone(&m);
         thread::spawn(move || evictor(&m, &p, &e))
     });
+    // A panic of an actor (a bug of the scenario) fails the check rather than hiding a property.
     for h in handles {
-        let _ = h.join();
+        h.join().unwrap_or_else(|e| std::panic::resume_unwind(e));
     }
     let restored = evict
-        .map(|h| h.join().unwrap_or_default())
+        .map(|h| h.join().unwrap_or_else(|e| std::panic::resume_unwind(e)))
         .unwrap_or_default();
     for c in restored {
         m.ensure(m.servable(c), Violation::WonCellNotRestored);

@@ -250,3 +250,32 @@ fn a_hedge_with_two_tokens_is_caught() {
     let r = check(&hedge(), &p);
     assert_eq!(r.violations, vec![Violation::CellWrittenNotOnce], "{r:?}");
 }
+
+/// An evictor that leaves its won cells `evicting` when a reader outstays the wait is caught: the
+/// explorer reports the won cells not restored.
+#[test]
+fn an_evictor_that_does_not_restore_on_timeout_is_caught() {
+    let mut p = Protocol::design();
+    p.restore_on_timeout = false;
+    let r = check(&stuck(false), &p);
+    assert_eq!(r.violations, vec![Violation::WonCellNotRestored], "{r:?}");
+}
+
+/// A publish that is a plain store rather than the CAS `claimed -> present` lets both deliverers
+/// of a hedge with two tokens publish: the explorer reports the cell published twice, beside the
+/// data written twice.
+#[test]
+fn a_publish_without_the_cas_is_caught() {
+    let mut p = Protocol::design();
+    p.hedge_shares_token = false;
+    p.publish_is_cas = false;
+    let r = check(&hedge(), &p);
+    assert_eq!(
+        r.violations,
+        vec![
+            Violation::CellWrittenNotOnce,
+            Violation::CellPublishedNotOnce
+        ],
+        "{r:?}"
+    );
+}

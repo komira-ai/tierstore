@@ -242,6 +242,7 @@ impl CellUpstream {
     }
 
     /// The progress events: `"get"` once per request, `"piece"` once per piece yielded.
+    #[inline(never)]
     #[must_use]
     pub fn progress(&self) -> Progress {
         self.progress.clone()

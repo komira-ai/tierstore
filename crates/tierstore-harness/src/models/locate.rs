@@ -13,8 +13,8 @@
 //! - [`check_rule`]: an exhaustive check of a rule over every [`Scenario`] of a [`Config`]: every
 //!   assignment of node conditions (up, `indexing`, down) against every truth (no acknowledged
 //!   copy, or a copy on any set of at least `min_acks` nodes). The bound is `3^N` condition
-//!   assignments times at most `2^N - N` truths (`N = 6`, `min_acks = 2`: 729 * 58 = 42282
-//!   scenarios). It states four properties: a hit is final and only a hit is `Found`; safety (no
+//!   assignments times at most `2^N` truths (`2^N - N` for `min_acks = 2`; `N = 6`, `min_acks = 2`:
+//!   729 * 58 = 42282 scenarios). It states four properties: a hit is final and only a hit is `Found`; safety (no
 //!   definitive miss while a copy exists); decisiveness (no copy and enough absent answers is a
 //!   miss); and the reason of a non-definitive answer matches the answers.
 //! - [`Locator`] and [`Fill`]: the coordinator over a `PeerClient`. It asks the nodes in the
@@ -129,6 +129,7 @@ pub enum Fate {
 }
 
 /// The fate of a fill whose `LOCATE` answered `located`.
+#[inline(never)]
 #[must_use]
 pub fn fate(located: Located) -> Fate {
     match located {
