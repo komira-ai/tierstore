@@ -188,3 +188,16 @@ pub(crate) fn records_of(
         })
         .collect()
 }
+
+impl<B: Backend + 'static> super::HotNode<B> {
+    /// Whether this node holds a durable record of `key` in a copy it mirrors that its writer
+    /// has not yet said is acknowledged: the key's answer here is then not a definitive miss
+    /// (the record may be acknowledged already, and a seal would adopt it).
+    pub fn pending(&self, key: &[u8]) -> bool {
+        self.n
+            .lock()
+            .copies
+            .values()
+            .any(|c| c.pending.iter().any(|(_, k, _)| k == key))
+    }
+}
