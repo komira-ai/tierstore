@@ -1,0 +1,27 @@
+[package]
+name = "tierstore-metrics"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+repository.workspace = true
+publish.workspace = true
+description = "The metrics and the demand-read trace of tierstore (docs/design/fetch-cache-serve.md, section 12): every family of section 12 registered with closed label sets or drive and node ids, never a pack or a key, rendered in the Prometheus text format for the node's role."
+
+[dependencies]
+# The class label (`Class`), the injected clock histograms and traces are timed with, the verify
+# priority and the list refusal reasons, and the drive state a storage node reports.
+tierstore-fetch-api.workspace = true
+# The drive and node ids of the `{drive}` and `{node}` labels, and the stripe code.
+tierstore-format.workspace = true
+# The drive scheduler's classes and refusals, seal reasons, and the PUT and LOCATE answers.
+tierstore-store-api.workspace = true
+# The FUSE opcode of `fuse_requests_total{op}` and `fuse_request_seconds{op}`.
+tsfuse.workspace = true
+# The error of a trace's out-of-order mark.
+thiserror.workspace = true
+# The event each finished demand-read trace emits.
+tracing.workspace = true
+
+[lints]
+workspace = true
