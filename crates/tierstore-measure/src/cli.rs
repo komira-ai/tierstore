@@ -874,7 +874,7 @@ pub fn run(cli: Cli, env: &Env<'_>, stdout: &mut dyn Write) -> Result<(), Error>
             let packs = drives.packs();
             let mut rows = Vec::new();
             for c in &cells {
-                let (r, _) = crate::guard::guarded(guard.as_ref(), env.clock, || {
+                let (mut r, seen) = crate::guard::guarded(guard.as_ref(), env.clock, || {
                     crate::cold::arms::local_cell(
                         c,
                         &map,
@@ -885,6 +885,7 @@ pub fn run(cli: Cli, env: &Env<'_>, stdout: &mut dyn Write) -> Result<(), Error>
                         ms(measure_ms),
                     )
                 })?;
+                r.seen = seen;
                 out.record(&r)?;
                 rows.push(r);
             }

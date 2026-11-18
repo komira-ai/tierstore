@@ -18,6 +18,7 @@ use crate::cold::client::{Conn, Got};
 use crate::cold::sched::{Class, Counts, Params};
 use crate::cold::server::{Config, ReadPath, Served, Server};
 use crate::diskstats::{IoStat, Sampler};
+use crate::guard::Seen;
 use crate::io::{MIB, write_data_file};
 use crate::report::{Table, num};
 use crate::run::{Span, measure};
@@ -173,10 +174,12 @@ fn background(
                             if g.status != 206 {
                                 keep(out, |o| o.refused += 1);
                                 clock.sleep(Duration::from_millis(100));
-                            } else if span.holds(t0, t1) {
+                            } else {
                                 keep(out, |o| {
-                                    o.bg_bytes += g.bytes;
-                                    o.bg_ms.push(g.total_ms);
+                                    o.bg_bytes += span.share(t0, t1, g.bytes);
+                                    if span.holds(t0, t1) {
+                                        o.bg_ms.push(g.total_ms);
+                                    }
                                 });
                             }
                             i += n;
@@ -215,9 +218,8 @@ fn slow(
             clock,
             Some(load.slow_mb_s),
         )?;
-        if span.holds(t0, clock.now()) {
-            keep(out, |o| o.slow_bytes += g.bytes);
-        }
+        let share = span.share(t0, clock.now(), g.bytes);
+        keep(out, |o| o.slow_bytes += share);
         i += 1;
     }
     Ok(())
@@ -408,6 +410,8 @@ pub struct Row {
     pub demand_wait: Option<Summary>,
     /// The drives' `iostat`.
     pub io: std::collections::BTreeMap<String, IoStat>,
+    /// What the guard saw during the cell (silo's disk bytes, foreign writes, attempts).
+    pub seen: Seen,
 }
 
 /// The outcome of a load as a row.
@@ -440,6 +444,7 @@ pub fn row(
         counts,
         demand_wait: summarize(&waits),
         io: std::collections::BTreeMap::new(),
+        seen: Seen::default(),
     }
 }
 
@@ -482,9 +487,10 @@ pub fn local_cell(
                                 let name = format!("w{k}.pack");
                                 let t0 = clock.now();
                                 server.write_pack(&cell.load.drive, &name, packs.size)?;
-                                if span.holds(t0, clock.now()) {
-                                    written.fetch_add(packs.size, Ordering::SeqCst);
-                                }
+                                written.fetch_add(
+                                    span.share(t0, clock.now(), packs.size),
+                                    Ordering::SeqCst,
+                                );
                                 k += 1;
                             }
                             for i in 0..k {
@@ -741,7 +747,10 @@ pub fn tables(rows: &[Row]) -> Vec<Table> {
                 "yields",
                 "preempts",
                 "parks",
-                "util %",
+                "drive read MB/s / util % (per device)",
+                "silo MB/s",
+                "fw/s",
+                "attempts",
             ],
         );
         for r in rows.iter().filter(|r| r.arm == arm) {
@@ -749,7 +758,13 @@ pub fn tables(rows: &[Row]) -> Vec<Table> {
                 |s: Option<Summary>, g: fn(Summary) -> f64| s.map_or("-".into(), |s| num(g(s), 1));
             let util: Vec<String> =
                 r.io.iter()
-                    .map(|(k, v)| format!("{k}:{}", num(v.util, 0)))
+                    .map(|(k, v)| {
+                        format!(
+                            "{k}:{}/{}",
+                            num(v.rkb_s * 1.024 / 1000.0, 0),
+                            num(v.util, 0)
+                        )
+                    })
                     .collect();
             t.row(vec![
                 r.label.clone(),
@@ -767,6 +782,9 @@ pub fn tables(rows: &[Row]) -> Vec<Table> {
                 r.counts.preemptions.to_string(),
                 r.counts.parks.to_string(),
                 util.join(" "),
+                num(r.seen.foreign_mb_s, 1),
+                num(r.seen.foreign_w_s, 1),
+                r.seen.attempts.to_string(),
             ]);
         }
         out.push(t);

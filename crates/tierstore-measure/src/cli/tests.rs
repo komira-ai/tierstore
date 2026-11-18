@@ -345,6 +345,14 @@ fn cold_prep_local_serve_and_load() {
     );
     let m = md(&f, "cold-local");
     assert!(m.contains("### C-4, cold-tier prototype"));
+    assert!(m.contains("| silo MB/s | fw/s | attempts |"));
+    // Every row records what the guard saw: here one clean attempt per cell.
+    let rows = std::fs::read_to_string(f.path().join("out").join("cold-local.jsonl")).unwrap();
+    assert_eq!(rows.lines().count(), 4);
+    for l in rows.lines() {
+        let v: serde_json::Value = serde_json::from_str(l).unwrap();
+        assert_eq!(v["seen"]["attempts"], 1, "{l}");
+    }
     let (code, _, err) = cli(
         &args(&format!("cold-local {drives} --arms c9 {}", common(&f))),
         &s,

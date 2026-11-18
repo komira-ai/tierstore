@@ -41,6 +41,25 @@ impl Span {
     pub fn holds(&self, t0: Duration, t1: Duration) -> bool {
         t0 >= self.from && t1 <= self.end
     }
+
+    /// The part of `bytes`, moved evenly from `t0` to `t1`, that falls inside the span: a long
+    /// request that straddles an edge counts for its overlap, not for all or nothing.
+    #[must_use]
+    pub fn share(&self, t0: Duration, t1: Duration, bytes: u64) -> u64 {
+        if t1 <= t0 {
+            return if self.from <= t0 && t0 <= self.end {
+                bytes
+            } else {
+                0
+            };
+        }
+        let lo = t0.max(self.from);
+        let hi = t1.min(self.end);
+        if hi <= lo {
+            return 0;
+        }
+        (bytes as f64 * (hi - lo).as_secs_f64() / (t1 - t0).as_secs_f64()).round() as u64
+    }
 }
 
 /// Waits until `t`, or until `done` is set. A watcher of work (`done` given) only peeks at the
@@ -195,6 +214,29 @@ mod tests {
         let p = d.path().join("diskstats");
         std::fs::write(&p, format!("8 16 sdb 0 0 0 0 0 0 0 0 0 {io_ms} 0\n")).unwrap();
         p
+    }
+
+    #[test]
+    fn share_counts_the_overlap_of_a_request_with_the_span() {
+        let s = Span {
+            from: Duration::from_secs(10),
+            end: Duration::from_secs(30),
+        };
+        let at = Duration::from_secs;
+        // Inside, outside before and after, and touching an edge.
+        assert_eq!(s.share(at(12), at(20), 800), 800);
+        assert_eq!(s.share(at(0), at(10), 800), 0);
+        assert_eq!(s.share(at(30), at(40), 800), 0);
+        // Straddling the start or the end: the part inside, pro rata.
+        assert_eq!(s.share(at(6), at(14), 800), 400);
+        assert_eq!(s.share(at(25), at(35), 800), 400);
+        // Longer than the span on both sides.
+        assert_eq!(s.share(at(0), at(40), 800), 400);
+        // A request of no duration counts whole inside the span (edges included) and not outside.
+        assert_eq!(s.share(at(10), at(10), 800), 800);
+        assert_eq!(s.share(at(30), at(30), 800), 800);
+        assert_eq!(s.share(at(31), at(31), 800), 0);
+        assert_eq!(s.share(at(9), at(9), 800), 0);
     }
 
     #[test]
