@@ -8,7 +8,9 @@
 //! hand-over (the configuration names `server.handoff_socket` and both releases have the
 //! capabilities, and for a `[local_cache]` table the cache one too) makes the new one serve and the old one drain, which is running without
 //! serving for a chosen number of `state` looks and then inactive (exit 0, not restarted); with
-//! no hand-over the new instance cannot bind and fails. The instances answer `/readyz` and
+//! no hand-over the new instance cannot bind and fails. `set_takeover_looks(n)` makes a hand-over
+//! slow: the new instance runs without serving, the old one answering, for `n` looks at `/readyz`
+//! (a stop of either during them is not modelled). The instances answer `/readyz` and
 //! `/metricz` of port 9300 from the serving one. The clock is a number that `pause` moves on.
 //!
 //! Every call of a port except the clock and `Markers::present` is counted and logged.
@@ -167,6 +169,12 @@ struct World {
     /// How many of the next looks at `/readyz` the old instance answers, still draining on the
     /// same sockets.
     draining_looks: u32,
+    /// How many looks at `/readyz` a new instance of a hand-over takes to open its cache and
+    /// take the sockets; the old instance answers them.
+    takeover_looks: u32,
+    /// A hand-over under way: the new instance, the old one, and the looks left before the new
+    /// one takes the sockets.
+    taking: Option<(Instance, Instance, u32)>,
 }
 
 impl World {
@@ -197,6 +205,36 @@ impl World {
         self.config.is_some() && [old, Some(new)].into_iter().all(|r| r.is_some_and(capable))
     }
 
+    /// `old` gives its sockets away and drains.
+    fn hand_over(&mut self, old: Instance) {
+        let drain = self.drain_looks;
+        let old_release = self.units[&old].release.clone();
+        self.units.insert(
+            old,
+            Unit {
+                state: UnitState::Deactivating,
+                release: old_release,
+                serving: false,
+                left: drain,
+            },
+        );
+    }
+
+    /// One look at `/readyz` during a hand-over under way: the old instance answers the looks
+    /// left, and the first look after them finds the new instance holding the sockets.
+    fn tick_takeover(&mut self) {
+        let Some((new, old, left)) = self.taking else {
+            return;
+        };
+        if left > 0 {
+            self.taking = Some((new, old, left - 1));
+            return;
+        }
+        self.taking = None;
+        self.units.get_mut(&new).expect("both instances").serving = true;
+        self.hand_over(old);
+    }
+
     /// systemd starting `instance`.
     fn start_unit(&mut self, instance: Instance) {
         if !self.markers.contains(&World::condition_path(instance)) {
@@ -224,17 +262,20 @@ impl World {
         };
         let old_release = self.units[&old].release.clone();
         if self.can_hand_over(old_release.as_deref(), &release) {
-            let drain = self.drain_looks;
-            self.units.insert(
-                old,
-                Unit {
-                    state: UnitState::Deactivating,
-                    release: old_release,
-                    serving: false,
-                    left: drain,
-                },
-            );
-            self.units.insert(instance, started);
+            if self.takeover_looks > 0 {
+                // Still opening its cache: running, not serving; the old instance answers.
+                self.units.insert(
+                    instance,
+                    Unit {
+                        serving: false,
+                        ..started
+                    },
+                );
+                self.taking = Some((instance, old, self.takeover_looks));
+            } else {
+                self.units.insert(instance, started);
+                self.hand_over(old);
+            }
         } else {
             self.units.insert(
                 instance,
@@ -286,6 +327,8 @@ impl SystemdFake {
                 late_prefix: None,
                 drain_looks: 0,
                 draining_looks: 0,
+                takeover_looks: 0,
+                taking: None,
             }),
         }
     }
@@ -423,6 +466,12 @@ impl SystemdFake {
         self.w.borrow_mut().draining_looks = looks;
     }
 
+    /// A new instance of a hand-over opens its cache and takes the sockets after `looks` looks at
+    /// `/readyz`, which the old instance answers; 0 (the default) is at once.
+    pub fn set_takeover_looks(&self, looks: u32) {
+        self.w.borrow_mut().takeover_looks = looks;
+    }
+
     /// The instance of `release` reports `version` instead of its own.
     pub fn lie(&self, release: &str, version: &str) {
         self.w
@@ -441,7 +490,8 @@ impl SystemdFake {
         self.w.borrow_mut().read_only = read_only;
     }
 
-    /// Puts `instance` in a state, running `release` and serving or not.
+    /// Puts `instance` in a state, running `release` and serving or not; a hand-over under way ends
+    /// there.
     pub fn set_unit(
         &self,
         instance: Instance,
@@ -449,7 +499,10 @@ impl SystemdFake {
         release: Option<&str>,
         serving: bool,
     ) {
-        self.w.borrow_mut().units.insert(
+        let mut w = self.w.borrow_mut();
+        // The state set is the end of any hand-over under way.
+        w.taking = None;
+        w.units.insert(
             instance,
             Unit {
                 state,
@@ -656,6 +709,9 @@ impl Instances for SystemdFake {
     fn get(&self, _port: u16, path: &str) -> Result<Reply, PortError> {
         self.count(format!("get {path}"), PortKind::Instances)?;
         let mut w = self.w.borrow_mut();
+        if path == "/readyz" {
+            w.tick_takeover();
+        }
         if path == "/readyz" && w.draining_looks > 0 {
             w.draining_looks -= 1;
             return Ok(Reply {
