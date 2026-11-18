@@ -192,3 +192,10 @@ opt-level = 3
 
 [profile.test.package.tierstore-harness]
 opt-level = 3
+
+# loom runs every execution of those models: optimised, they take seconds rather than minutes.
+[profile.dev.package.loom]
+opt-level = 3
+
+[profile.test.package.loom]
+opt-level = 3

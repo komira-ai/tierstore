@@ -49,7 +49,7 @@
 //! - Liveness: from every state in which some node has committed, delivery, pull and converge
 //!   steps reach a state in which every running node that a chain of working links connects
 //!   to a node that knows the commit has learned it and holds exactly `[0, length)`. The
-//!   explorer reports a liveness failure under its own rule id `A4`. A seal whose bytes no
+//!   explorer reports a liveness failure under its rule id `A4`, with this model's message. A seal whose bytes no
 //!   undamaged copy holds any more (damage after the seal was chosen, on the only copy of a tail
 //!   that was never acknowledged) is excused.
 //!
@@ -616,6 +616,12 @@ impl Model for SealModel {
 
     fn show_act(&self, a: &Act) -> String {
         format!("{a:?}")
+    }
+
+    fn liveness_violation(&self) -> String {
+        "A4 liveness: from a committed seal, delivery, pull and converge steps cannot bring every \
+         connected running copy to the committed length"
+            .into()
     }
 
     fn show_state(&self, s: &World) -> String {

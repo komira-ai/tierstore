@@ -563,6 +563,11 @@ fn without_converge_the_copies_never_equal_the_seal() {
     );
     let trace = violation(run(cfg));
     assert_eq!(trace.rule(), "A4");
+    assert_eq!(
+        trace.message,
+        "A4 liveness: from a committed seal, delivery, pull and converge steps cannot bring \
+         every connected running copy to the committed length"
+    );
 }
 
 /// A trace reads as steps: each names the action and shows the state after it.
