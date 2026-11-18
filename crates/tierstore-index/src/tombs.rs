@@ -300,9 +300,9 @@ impl<B: Backend> KvIndex<B> {
         }
     }
 
-    /// Deletes the tombstone at `(origin, seq)`: its row, its names, its position, and the key's
-    /// tombstone entry when it is this tombstone's (the key is then absent). Whether a tombstone
-    /// was there.
+    /// Deletes the tombstone at `(origin, seq)`: its row, its names and its position. When the key's
+    /// tombstone entry is this tombstone's, the key falls back to the newest tombstone of it still
+    /// held, or is absent when none is. Whether a tombstone was there.
     pub fn drop_tombstone(&self, origin: NodeId, seq: u64) -> Result<bool, IndexError> {
         let _w = self.lock_write();
         let mut txn = self.txn();
@@ -317,7 +317,12 @@ impl<B: Backend> KvIndex<B> {
         put_rows(&mut txn, &key, &rows);
         txn.delete(Space::TombPos, codec::pos_key(origin, seq));
         if txn.held(&key)? == Some(Held::Tomb(stamp)) {
-            txn.delete(Space::Entries, key.clone());
+            // An older tombstone of the key that is still held keeps the key deleted at its
+            // stamp; with none left the key is absent.
+            match rows.last() {
+                Some((older, _)) => txn.set_held(&key, &Held::Tomb(*older)),
+                None => txn.delete(Space::Entries, key.clone()),
+            }
         }
         txn.commit()?;
         Ok(true)

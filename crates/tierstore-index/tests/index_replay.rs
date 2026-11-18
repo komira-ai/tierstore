@@ -51,7 +51,14 @@ fn replay_stats_count_every_fact_and_those_that_changed_an_entry() {
             // The record the relocate moved, seen again after it, and an older other generation.
             record(b"k", e1),
             record(b"k", entry(2, 9, 0, 3, 7)),
-            log(2, 1, LogEntry::Unknown { kind: 200, body: vec![1] }),
+            log(
+                2,
+                1,
+                LogEntry::Unknown {
+                    kind: 200,
+                    body: vec![1],
+                },
+            ),
         ],
     );
     assert_eq!((stats.facts, stats.applied), (7, 2));
@@ -85,8 +92,8 @@ fn record_relocate_and_tombstone_of_one_key_give_one_result_in_every_order() {
     }
     assert_eq!(results.len(), 6);
     for got in &results {
-        assert_eq!(got.0 .0, Lookup::Deleted(stamp(9)));
-        assert_eq!(got.0 .1, vec![(0, 0); 5]);
+        assert_eq!(got.0.0, Lookup::Deleted(stamp(9)));
+        assert_eq!(got.0.1, vec![(0, 0); 5]);
         assert_eq!(got.1, vec![Named::Block(block(5)), Named::Block(block(6))]);
     }
 }
@@ -170,10 +177,7 @@ fn a_relocate_flagged_record_wins_at_equal_stamp_over_a_larger_generation() {
     ];
     for order in permutations(&facts) {
         let index = run_in_order(&order);
-        assert_eq!(
-            live_entry(&index, b"k"),
-            flagged(entry(1, 5, 0, 5, 10))
-        );
+        assert_eq!(live_entry(&index, b"k"), flagged(entry(1, 5, 0, 5, 10)));
         assert_eq!(count(&index, 7), lc(0, 0));
         assert_eq!(count(&index, 5), lc(1, 10));
     }
@@ -244,7 +248,10 @@ fn stamp_row_b_delete_then_reput_of_the_same_generation_is_live_at_the_new_recor
         DeleteOutcome::Deleted(_)
     ));
     let new = entry(1, 6, 0, 8, 10);
-    assert_eq!(index.put_if_absent(b"k", new.clone()).unwrap(), PutOutcome::Created);
+    assert_eq!(
+        index.put_if_absent(b"k", new.clone()).unwrap(),
+        PutOutcome::Created
+    );
     assert_eq!(index.get(b"k").unwrap(), Lookup::Live(new.clone()));
     let before = index.backend().dump();
     // The old record seen again (a recovery scan of its block) changes nothing.
@@ -265,7 +272,14 @@ fn a_tomb_log_cursor_moves_with_each_entry_and_a_sequence_at_or_below_it_is_skip
     assert_eq!((stats.facts, stats.applied), (1, 1));
     assert_eq!(index.tomb_cursor(NodeId(2)).unwrap(), 5);
     assert_eq!(index.tomb_cursor(NodeId(3)).unwrap(), 0);
-    let stats = replay(&index, vec![log_tomb(2, 6, t(6)), log_tomb(2, 6, t(8)), log_tomb(2, 3, t(9))]);
+    let stats = replay(
+        &index,
+        vec![
+            log_tomb(2, 6, t(6)),
+            log_tomb(2, 6, t(8)),
+            log_tomb(2, 3, t(9)),
+        ],
+    );
     assert_eq!((stats.facts, stats.applied), (3, 1));
     assert_eq!(index.tomb_cursor(NodeId(2)).unwrap(), 6);
     // The skipped entries did not apply.
@@ -282,7 +296,13 @@ fn a_gap_in_a_tomb_log_is_an_error_naming_the_origin_and_the_batch_is_not_applie
     let index = ready();
     replay(&index, vec![log_tomb(2, 1, tomb(b"a", 0, 4, vec![]))]);
     let err = index
-        .replay(&mut vec![log_tomb(2, 2, tomb(b"b", 0, 4, vec![])), log_tomb(2, 4, tomb(b"c", 0, 4, vec![]))].into_iter())
+        .replay(
+            &mut vec![
+                log_tomb(2, 2, tomb(b"b", 0, 4, vec![])),
+                log_tomb(2, 4, tomb(b"c", 0, 4, vec![])),
+            ]
+            .into_iter(),
+        )
         .unwrap_err();
     let IndexError::Store { op, reason } = err else {
         panic!("not a store error");
@@ -305,7 +325,14 @@ fn an_entry_of_an_unknown_kind_moves_the_cursor_and_nothing_else() {
         .collect();
     let stats = replay(
         &index,
-        vec![log(2, 1, LogEntry::Unknown { kind: 77, body: vec![1, 2] })],
+        vec![log(
+            2,
+            1,
+            LogEntry::Unknown {
+                kind: 77,
+                body: vec![1, 2],
+            },
+        )],
     );
     assert_eq!((stats.facts, stats.applied), (1, 0));
     assert_eq!(index.tomb_cursor(NodeId(2)).unwrap(), 1);
@@ -326,8 +353,13 @@ fn a_block_drop_hides_the_keys_of_the_block_and_a_later_put_creates() {
     index.put_if_absent(b"c", entry(1, 6, 0, 5, 10)).unwrap();
     index.put_if_absent(b"d", large_entry(2, 5, 4096)).unwrap();
     let len = 2 * MAX_OBJECT + 1;
-    index.put_if_absent(b"e", chain_entry(3, 7, 5, len)).unwrap();
-    let stats = replay(&index, vec![log_drop(2, 1, 5), log_drop(2, 2, 5), log_drop(2, 3, 8)]);
+    index
+        .put_if_absent(b"e", chain_entry(3, 7, 5, len))
+        .unwrap();
+    let stats = replay(
+        &index,
+        vec![log_drop(2, 1, 5), log_drop(2, 2, 5), log_drop(2, 3, 8)],
+    );
     assert_eq!((stats.facts, stats.applied), (3, 2));
     assert_eq!(index.get(b"a").unwrap(), Lookup::Absent);
     assert_eq!(index.get(b"b").unwrap(), Lookup::Absent);
@@ -343,7 +375,10 @@ fn a_block_drop_hides_the_keys_of_the_block_and_a_later_put_creates() {
         .collect();
     assert_eq!(listed, vec![b"c".to_vec(), b"d".to_vec()]);
     assert_eq!(count(&index, 5), lc(0, 0));
-    assert_eq!(index.block(block(5)).unwrap().unwrap().state, BlockState::Dropped);
+    assert_eq!(
+        index.block(block(5)).unwrap().unwrap().state,
+        BlockState::Dropped
+    );
     assert!(index.is_freed(&Named::Block(block(5))).unwrap());
     // A later put of a hidden key is a create, not an identical or a conflict.
     assert_eq!(
@@ -450,7 +485,10 @@ fn live_counts_are_kept_per_block_id_of_any_node() {
     let index = ready();
     let other = BlockId::new(NodeId(4), 1).unwrap();
     let mut e = entry(1, 5, 0, 5, 10);
-    e.location = tierstore_store_api::index::EntryLocation::Block { block: other, offset: 0 };
+    e.location = tierstore_store_api::index::EntryLocation::Block {
+        block: other,
+        offset: 0,
+    };
     replay(&index, vec![record(b"k", e)]);
     assert_eq!(index.live(other).unwrap(), lc(1, 10));
     assert_eq!(index.live(block(5)).unwrap(), lc(0, 0));

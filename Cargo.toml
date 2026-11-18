@@ -149,9 +149,6 @@ tierstore-model = { path = "crates/tierstore-model" }
 tierstore-store-api = { path = "crates/tierstore-store-api" }
 # The FUSE library: dispatch with replies bound to their originating device.
 tsfuse = { path = "crates/tsfuse" }
-# A storage node's key index and block table in an embedded store (fjall, or redb), recovery,
-# the tombstone log and the LIST merge (T-S3).
-tierstore-index = { path = "crates/tierstore-index" }
 # The metrics of section 12 of the fetch-cache-serve design and the demand-read trace.
 tierstore-metrics = { path = "crates/tierstore-metrics" }
 # The hash pool: the `Verifier` of the read path (bounded, sha256 on dedicated threads).

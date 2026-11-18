@@ -164,7 +164,11 @@ pub(crate) fn record(
 /// the entry was relocated out of, met after the relocate): the blocks of that record join
 /// `prior_blocks`, so a tombstone of the key names them whatever the order the facts came in.
 /// `None` when they were all known already.
-fn remember_blocks(geometry: BlockGeometry, cur: &IndexEntry, old: &IndexEntry) -> Option<IndexEntry> {
+fn remember_blocks(
+    geometry: BlockGeometry,
+    cur: &IndexEntry,
+    old: &IndexEntry,
+) -> Option<IndexEntry> {
     let here: Vec<BlockId> = contrib(geometry, cur).into_iter().map(|(b, _)| b).collect();
     let mut prior = cur.prior_blocks.clone();
     prior.extend(contrib(geometry, old).into_iter().map(|(b, _)| b));
@@ -193,7 +197,13 @@ pub(crate) fn relocate(
         Some(Held::Live(cur))
             if cur.generation == generation && cur.stamp == stamp && cur.location != to =>
         {
-            let next = moved(geometry, cur, to, cur.flags.with(RecordFlags::RELOCATE), &[]);
+            let next = moved(
+                geometry,
+                cur,
+                to,
+                cur.flags.with(RecordFlags::RELOCATE),
+                &[],
+            );
             Some((cur.clone(), next))
         }
         _ => None,

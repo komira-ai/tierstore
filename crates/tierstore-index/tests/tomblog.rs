@@ -652,9 +652,33 @@ fn a_failed_append_is_an_io_error_and_the_next_append_takes_the_same_sequence() 
         "tomb log: append tomb/1/1.log: injected Append failure on tomb/1/1.log"
     );
     assert_eq!(log.last(NodeId(1)), 0);
-    assert_eq!(fs.calls(FsOp::Truncate), 1, "the file is cut back");
+    assert_eq!(
+        fs.calls(FsOp::Remove),
+        1,
+        "the file the append started is removed"
+    );
+    assert_eq!(fs.list("tomb/1").unwrap(), Vec::<String>::new());
     assert_eq!(log.append(entry(1)).unwrap().seq, 1);
     assert_eq!(fs.bytes("tomb/1/1.log").unwrap(), frames(1, 1..=1));
+}
+
+#[test]
+fn a_failed_sync_of_a_file_the_append_started_leaves_no_file_under_its_sequence() {
+    // Catches: an empty `<seq>.log` left behind after a failed rollover; once that sequence was
+    // written into an earlier file, the next open refused the log with a gap.
+    let fs = fake();
+    let log = open(&fs, 1, 2 * frame()).unwrap();
+    log.append(entry(1)).unwrap();
+    log.append(entry(2)).unwrap();
+    fs.fail(FsOp::Sync, "tomb/1/3.log", 1);
+    let err = log.append(entry(3)).err().unwrap();
+    assert_eq!(io_of(&err), ("sync", "tomb/1/3.log"));
+    assert_eq!(fs.list("tomb/1").unwrap(), ["1.log"]);
+    assert_eq!(log.last(NodeId(1)), 2);
+    drop(log);
+    let log = open(&fs, 1, 2 * frame()).unwrap();
+    assert_eq!(log.append(entry(3)).unwrap().seq, 3);
+    assert_eq!(seqs(&log.read_all(NodeId(1)).unwrap()), [1, 2, 3]);
 }
 
 #[test]

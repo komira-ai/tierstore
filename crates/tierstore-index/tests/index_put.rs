@@ -28,10 +28,7 @@ fn put_on_an_empty_key_creates_and_the_entry_is_read_back() {
     );
     assert_eq!(index.get(b"k").unwrap(), Lookup::Live(e.clone()));
     assert_eq!(count(&index, 5), lc(1, 100));
-    assert_eq!(
-        index.list(b"", None, 10).unwrap(),
-        vec![(b"k".to_vec(), e)]
-    );
+    assert_eq!(index.list(b"", None, 10).unwrap(), vec![(b"k".to_vec(), e)]);
 }
 
 #[test]
@@ -42,9 +39,7 @@ fn put_of_the_same_generation_is_identical_at_any_stamp_and_changes_nothing() {
     let before = index.backend().dump();
     for (s, b) in [(10, 5), (3, 6), (99, 7)] {
         assert_eq!(
-            index
-                .put_if_absent(b"k", entry(1, b, 0, s, 100))
-                .unwrap(),
+            index.put_if_absent(b"k", entry(1, b, 0, s, 100)).unwrap(),
             PutOutcome::Identical(first.clone())
         );
     }
@@ -59,9 +54,7 @@ fn put_of_another_generation_conflicts_and_keeps_the_held_entry() {
     let first = entry(1, 5, 64, 10, 100);
     index.put_if_absent(b"k", first.clone()).unwrap();
     assert_eq!(
-        index
-            .put_if_absent(b"k", entry(2, 6, 0, 50, 7))
-            .unwrap(),
+        index.put_if_absent(b"k", entry(2, 6, 0, 50, 7)).unwrap(),
         PutOutcome::Conflict(first.clone())
     );
     assert_eq!(index.get(b"k").unwrap(), Lookup::Live(first));
@@ -202,7 +195,10 @@ fn open_refuses_a_version_value_that_does_not_decode() {
 
 #[test]
 fn open_refuses_a_boot_epoch_and_a_block_row_that_do_not_decode() {
-    for (space, key) in [(Space::Meta, b"boot/\x02".to_vec()), (Space::Blocks, vec![0; 8])] {
+    for (space, key) in [
+        (Space::Meta, b"boot/\x02".to_vec()),
+        (Space::Blocks, vec![0; 8]),
+    ] {
         let backend = MemBackend::new();
         backend
             .commit(vec![Op::Put {
@@ -257,9 +253,7 @@ fn put_over_an_entry_in_a_dropped_block_creates_and_releases_the_counts_of_its_o
     // The drop took block 11's row with it; blocks 10 and 12 still count the hidden entry.
     assert_eq!(count(&index, 10), lc(1, MAX_OBJECT));
     assert_eq!(
-        index
-            .put_if_absent(b"k", entry(2, 20, 0, 6, 9))
-            .unwrap(),
+        index.put_if_absent(b"k", entry(2, 20, 0, 6, 9)).unwrap(),
         PutOutcome::Created
     );
     assert_eq!(live_entry(&index, b"k").generation, generation(2));

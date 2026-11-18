@@ -190,9 +190,23 @@ fn walk(nodes: &[&Node], prefix: &str, delim: Option<&str>, max: usize) -> Vec<V
     let mut after: Option<Vec<u8>> = None;
     loop {
         let page = merge(nodes, &req(prefix, delim, max, after.as_deref())).expect("list");
+        assert!(
+            page.keys.windows(2).all(|w| w[0] < w[1]),
+            "the keys of a page are strictly ascending"
+        );
+        assert!(
+            page.common_prefixes.windows(2).all(|w| w[0] < w[1]),
+            "the common prefixes of a page are strictly ascending"
+        );
         let mut entries: Vec<Vec<u8>> = page.keys.clone();
         entries.extend(page.common_prefixes.clone());
         entries.sort();
+        if let (Some(last), Some(first)) = (out.last(), entries.first()) {
+            assert!(
+                last < first,
+                "a page starts after everything the pages before it held"
+            );
+        }
         assert!(entries.len() <= cap);
         if page.next.is_some() {
             assert_eq!(entries.len(), cap, "only a full page has a next");

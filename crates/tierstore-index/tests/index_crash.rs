@@ -80,7 +80,10 @@ fn workload(seed: u64, len: usize) -> Vec<Fact> {
                         key,
                         g,
                         s,
-                        blocks_of[ki].iter().map(|n| Named::Block(block(*n))).collect(),
+                        blocks_of[ki]
+                            .iter()
+                            .map(|n| Named::Block(block(*n)))
+                            .collect(),
                     ),
                 )
             }
@@ -90,13 +93,25 @@ fn workload(seed: u64, len: usize) -> Vec<Fact> {
                 if rng.below(2) == 0 {
                     log_drop(2 + o as u8, seqs[o], b)
                 } else {
-                    log_report(2 + o as u8, seqs[o], 2 + rng.below(3) as u8, 1 + rng.below(3))
+                    log_report(
+                        2 + o as u8,
+                        seqs[o],
+                        2 + rng.below(3) as u8,
+                        1 + rng.below(3),
+                    )
                 }
             }
             _ => {
                 let o = rng.below(3) as usize;
                 seqs[o] += 1;
-                log(2 + o as u8, seqs[o], LogEntry::Unknown { kind: 200, body: vec![1] })
+                log(
+                    2 + o as u8,
+                    seqs[o],
+                    LogEntry::Unknown {
+                        kind: 200,
+                        body: vec![1],
+                    },
+                )
             }
         };
         facts.push(fact);
@@ -154,7 +169,10 @@ fn run(seed: u64, len: usize) {
     }
     let final_dump = live.backend().dump();
     let final_view = view(&live);
-    assert!(snapshots.len() > len / 4, "every group has at least the persisted state");
+    assert!(
+        snapshots.len() > len / 4,
+        "every group has at least the persisted state"
+    );
     for (n, (backend, mark)) in snapshots.into_iter().enumerate() {
         let restarted = KvIndex::open(backend, config()).unwrap();
         let rest = facts[applied_by(&mark)..].to_vec();
@@ -197,7 +215,10 @@ fn crashed_stores_keep_the_whole_batches_before_the_cut_and_nothing_after() {
     let index = ready();
     index.flush_mark(&mark_of(0)).unwrap();
     for i in 0..4u64 {
-        replay(&index, vec![record(format!("k{i}").as_bytes(), entry(1, 5, i, 5, 1))]);
+        replay(
+            &index,
+            vec![record(format!("k{i}").as_bytes(), entry(1, 5, i, 5, 1))],
+        );
     }
     for keep in 0..=4 {
         let crashed = KvIndex::open(index.backend().crashed(keep as usize), config()).unwrap();

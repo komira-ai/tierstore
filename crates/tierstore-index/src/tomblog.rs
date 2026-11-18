@@ -298,7 +298,12 @@ impl TombLog {
                 for (path, len) in &before {
                     // Best effort: if the cut fails too, the file is longer than the log knows and the
                     // log must be reopened (open cuts what does not decode as the log's next entry).
-                    let _ = self.fs.truncate(path, *len);
+                    // A file this call created is removed, so no empty file is left under a
+                    // sequence the log does not hold.
+                    let _ = match len {
+                        Some(len) => self.fs.truncate(path, *len),
+                        None => self.fs.remove(path),
+                    };
                 }
                 Err(e)
             }
@@ -307,11 +312,11 @@ impl TombLog {
 
     /// Appends each record that continues its origin to the origin's current file, starting a new
     /// file when the current one would pass the limit; `before` gets each file's length before
-    /// the first write to it.
+    /// the first write to it, or `None` for a file this call started.
     fn write(
         &self,
         origins: &mut BTreeMap<NodeId, Origin>,
-        before: &mut BTreeMap<String, u64>,
+        before: &mut BTreeMap<String, Option<u64>>,
         records: &[LogRecord],
         from_outside: bool,
     ) -> Result<u64, LogError> {
@@ -337,7 +342,8 @@ impl TombLog {
                 .files
                 .last()
                 .is_some_and(|s| s.len == 0 || s.len + size <= self.max_file_bytes);
-            if !fits {
+            let started = !fits;
+            if started {
                 o.files.push(Segment {
                     first: record.seq,
                     len: 0,
@@ -345,7 +351,9 @@ impl TombLog {
             }
             let seg = o.files.len() - 1;
             let path = path_of(record.origin, o.files[seg].first);
-            before.entry(path.clone()).or_insert(o.files[seg].len);
+            before
+                .entry(path.clone())
+                .or_insert((!started).then_some(o.files[seg].len));
             io("append", &path, self.fs.append(&path, &bytes))?;
             o.files[seg].len += size;
             o.last = record.seq;

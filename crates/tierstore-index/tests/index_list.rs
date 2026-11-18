@@ -15,7 +15,12 @@ use tierstore_index::KvIndex;
 use tierstore_index::backend::MemBackend;
 use tierstore_store_api::index::Index;
 
-fn keys(index: &KvIndex<MemBackend>, prefix: &[u8], after: Option<&[u8]>, limit: usize) -> Vec<String> {
+fn keys(
+    index: &KvIndex<MemBackend>,
+    prefix: &[u8],
+    after: Option<&[u8]>,
+    limit: usize,
+) -> Vec<String> {
     index
         .list(prefix, after, limit)
         .unwrap()
@@ -47,10 +52,15 @@ fn index_with_long_dead_runs(n: usize) -> KvIndex<MemBackend> {
 fn list_returns_the_live_keys_with_the_prefix_in_key_order() {
     let index = ready();
     for k in ["b/2", "a/1", "b/1", "c/1", "b/3"] {
-        index.put_if_absent(k.as_bytes(), entry(1, 5, 0, 5, 1)).unwrap();
+        index
+            .put_if_absent(k.as_bytes(), entry(1, 5, 0, 5, 1))
+            .unwrap();
     }
     assert_eq!(keys(&index, b"b/", None, 10), ["b/1", "b/2", "b/3"]);
-    assert_eq!(keys(&index, b"", None, 10), ["a/1", "b/1", "b/2", "b/3", "c/1"]);
+    assert_eq!(
+        keys(&index, b"", None, 10),
+        ["a/1", "b/1", "b/2", "b/3", "c/1"]
+    );
     assert_eq!(keys(&index, b"x", None, 10), Vec::<String>::new());
     assert_eq!(keys(&index, b"b/", None, 2), ["b/1", "b/2"]);
 }
@@ -66,7 +76,9 @@ fn list_with_limit_zero_returns_nothing() {
 fn list_after_a_key_inside_the_prefix_continues_strictly_after_it() {
     let index = ready();
     for k in ["b/1", "b/2", "b/3"] {
-        index.put_if_absent(k.as_bytes(), entry(1, 5, 0, 5, 1)).unwrap();
+        index
+            .put_if_absent(k.as_bytes(), entry(1, 5, 0, 5, 1))
+            .unwrap();
     }
     assert_eq!(keys(&index, b"b/", Some(b"b/1"), 10), ["b/2", "b/3"]);
     assert_eq!(keys(&index, b"b/", Some(b"b/3"), 10), Vec::<String>::new());
@@ -80,7 +92,9 @@ fn list_after_a_key_inside_the_prefix_continues_strictly_after_it() {
 fn list_after_a_key_before_the_prefix_starts_at_the_prefix() {
     let index = ready();
     for k in ["a/1", "b/1", "b/2"] {
-        index.put_if_absent(k.as_bytes(), entry(1, 5, 0, 5, 1)).unwrap();
+        index
+            .put_if_absent(k.as_bytes(), entry(1, 5, 0, 5, 1))
+            .unwrap();
     }
     assert_eq!(keys(&index, b"b/", Some(b"a/9"), 10), ["b/1", "b/2"]);
     assert_eq!(keys(&index, b"b/", Some(b""), 10), ["b/1", "b/2"]);
@@ -90,7 +104,9 @@ fn list_after_a_key_before_the_prefix_starts_at_the_prefix() {
 fn list_after_a_key_past_the_prefix_returns_nothing() {
     let index = ready();
     for k in ["b/1", "b/2", "c/1"] {
-        index.put_if_absent(k.as_bytes(), entry(1, 5, 0, 5, 1)).unwrap();
+        index
+            .put_if_absent(k.as_bytes(), entry(1, 5, 0, 5, 1))
+            .unwrap();
     }
     assert!(keys(&index, b"b/", Some(b"b/9"), 10).is_empty());
     assert!(keys(&index, b"b/", Some(b"c/0"), 10).is_empty());
@@ -131,7 +147,9 @@ fn list_pages_past_more_tombstones_and_hidden_keys_than_one_scan_page() {
 fn list_of_a_prefix_that_ends_the_keyspace_with_a_full_page_of_dead_keys_ends_cleanly() {
     let index = ready();
     for i in 0..16 {
-        index.delete(&tomb(format!("t/{i:02}").as_bytes(), 0, 4, vec![])).unwrap();
+        index
+            .delete(&tomb(format!("t/{i:02}").as_bytes(), 0, 4, vec![]))
+            .unwrap();
     }
     assert!(keys(&index, b"t/", None, 1).is_empty());
 }
@@ -146,7 +164,10 @@ fn list_of_a_run_of_live_keys_longer_than_a_page_returns_them_all_in_order() {
     let all = keys(&index, b"k", None, 10_000);
     assert_eq!(all.len(), 2500);
     assert!(all.windows(2).all(|w| w[0] < w[1]));
-    assert_eq!(keys(&index, b"k", Some(b"k02497"), 10), ["k02498", "k02499"]);
+    assert_eq!(
+        keys(&index, b"k", Some(b"k02497"), 10),
+        ["k02498", "k02499"]
+    );
     // Pages of 700: each continues after the last key returned.
     let mut after: Option<Vec<u8>> = None;
     let mut seen = 0;

@@ -234,7 +234,9 @@ pub fn fjall_store() -> OnDisk<tierstore_index::backend::fjall::FjallBackend> {
 pub fn redb_store() -> OnDisk<tierstore_index::backend::redb::RedbBackend> {
     OnDisk {
         dir: tierstore_testkit::dir::TestDir::under(env!("CARGO_TARGET_TMPDIR"), "recover-redb"),
-        open: |p| tierstore_index::backend::redb::RedbBackend::open(p, &Default::default()).unwrap(),
+        open: |p| {
+            tierstore_index::backend::redb::RedbBackend::open(p, &Default::default()).unwrap()
+        },
     }
 }
 

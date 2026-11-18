@@ -752,3 +752,51 @@ fn a_name_in_blk_that_is_not_an_index_file_is_ignored() {
     assert_eq!(report.idx_files, 1);
     assert!(matches!(index.get(b"k").unwrap(), Lookup::Live(_)));
 }
+
+/// A rebuild into `stores`' store from the hot `.idx` files (`cold` false) or from the cold shard
+/// trailers alone (`cold` true) gives the never-restarted index, and so does the store reopened
+/// after the rebuild's mark is flushed.
+fn rebuilt_index_matches_and_survives_a_restart<S: Stores>(stores: &S, cold: bool) {
+    let node = workload();
+    let disks = if cold {
+        cold_disks(&node, true).0
+    } else {
+        Disks::hot_only(files(&node))
+    };
+    let index = stores.fresh();
+    let report = disks.recover(&index).unwrap();
+    assert_eq!(report.mode, Mode::Rebuild);
+    assert_matches_never_restarted(&node, &index);
+    index
+        .flush_mark(&tierstore_store_api::index::ReplayMark::default())
+        .unwrap();
+    let index = stores.restart(index);
+    index.set_ready(true);
+    assert_matches_never_restarted(&node, &index);
+}
+
+#[test]
+fn a_rebuild_from_hot_idx_files_on_fjall_matches_and_survives_a_restart() {
+    rebuilt_index_matches_and_survives_a_restart(&fjall_store(), false);
+}
+
+#[test]
+fn a_rebuild_from_cold_shard_trailers_on_fjall_matches_and_survives_a_restart() {
+    rebuilt_index_matches_and_survives_a_restart(&fjall_store(), true);
+}
+
+#[test]
+fn a_rebuild_from_hot_idx_files_on_redb_matches_and_survives_a_restart() {
+    rebuilt_index_matches_and_survives_a_restart(&redb_store(), false);
+}
+
+#[test]
+fn a_rebuild_from_cold_shard_trailers_on_redb_matches_and_survives_a_restart() {
+    rebuilt_index_matches_and_survives_a_restart(&redb_store(), true);
+}
+
+#[test]
+fn a_rebuild_on_the_memory_store_matches_and_survives_a_restart() {
+    rebuilt_index_matches_and_survives_a_restart(&Mem, false);
+    rebuilt_index_matches_and_survives_a_restart(&Mem, true);
+}

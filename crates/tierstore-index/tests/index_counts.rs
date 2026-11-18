@@ -34,7 +34,9 @@ fn entries_of_one_block_add_up_and_a_delete_takes_only_its_own() {
 fn a_chain_counts_one_entry_and_its_slice_in_each_of_its_blocks() {
     let index = ready();
     let len = 2 * MAX_OBJECT + 100;
-    index.put_if_absent(b"k", chain_entry(1, 10, 5, len)).unwrap();
+    index
+        .put_if_absent(b"k", chain_entry(1, 10, 5, len))
+        .unwrap();
     assert_eq!(count(&index, 10), lc(1, MAX_OBJECT));
     assert_eq!(count(&index, 11), lc(1, MAX_OBJECT));
     assert_eq!(count(&index, 12), lc(1, 100));
@@ -58,10 +60,17 @@ fn a_chain_counts_one_entry_and_its_slice_in_each_of_its_blocks() {
 fn a_chain_relocated_to_another_chain_moves_its_counts_block_by_block() {
     let index = ready();
     let len = 2 * MAX_OBJECT + 100;
-    index.put_if_absent(b"k", chain_entry(1, 10, 5, len)).unwrap();
+    index
+        .put_if_absent(b"k", chain_entry(1, 10, 5, len))
+        .unwrap();
     assert!(
         index
-            .relocate(b"k", generation(1), stamp(5), EntryLocation::Chain { first: block(11) })
+            .relocate(
+                b"k",
+                generation(1),
+                stamp(5),
+                EntryLocation::Chain { first: block(11) }
+            )
             .unwrap()
     );
     // The new chain is 11, 12, 13: block 10 is left, block 13 is joined.
@@ -76,8 +85,12 @@ fn a_chain_relocated_to_another_chain_moves_its_counts_block_by_block() {
 fn a_chain_relocated_to_a_block_counts_the_whole_length_in_that_block() {
     let index = ready();
     let len = 2 * MAX_OBJECT + 100;
-    index.put_if_absent(b"k", chain_entry(1, 10, 5, len)).unwrap();
-    index.relocate(b"k", generation(1), stamp(5), at(20, 0)).unwrap();
+    index
+        .put_if_absent(b"k", chain_entry(1, 10, 5, len))
+        .unwrap();
+    index
+        .relocate(b"k", generation(1), stamp(5), at(20, 0))
+        .unwrap();
     for b in 10..=12 {
         assert_eq!(count(&index, b), lc(0, 0));
     }
@@ -92,7 +105,9 @@ fn a_chain_relocated_to_a_block_counts_the_whole_length_in_that_block() {
 fn an_entry_the_geometry_does_not_see_as_a_chain_counts_on_its_first_block_alone() {
     let index = ready();
     // A chain location of a size that fits one block.
-    index.put_if_absent(b"small", chain_entry(1, 30, 5, 500)).unwrap();
+    index
+        .put_if_absent(b"small", chain_entry(1, 30, 5, 500))
+        .unwrap();
     assert_eq!(count(&index, 30), lc(1, 500));
     assert_eq!(count(&index, 31), lc(0, 0));
     // A chain whose later block ids would pass the node's counter.
@@ -108,8 +123,18 @@ fn an_entry_the_geometry_does_not_see_as_a_chain_counts_on_its_first_block_alone
 #[test]
 fn a_large_file_counts_in_no_block_and_a_tombstone_names_the_file() {
     let index = ready();
-    index.put_if_absent(b"k", large_entry(4, 5, 1 << 30)).unwrap();
-    assert_eq!(index.backend().dump().iter().filter(|(s, _, _)| *s == tierstore_index::backend::Space::Live).count(), 0);
+    index
+        .put_if_absent(b"k", large_entry(4, 5, 1 << 30))
+        .unwrap();
+    assert_eq!(
+        index
+            .backend()
+            .dump()
+            .iter()
+            .filter(|(s, _, _)| *s == tierstore_index::backend::Space::Live)
+            .count(),
+        0
+    );
     index.delete(&tomb(b"k", 4, 9, vec![])).unwrap();
     assert_eq!(
         index.tombstones().unwrap()[0].names,
@@ -117,12 +142,11 @@ fn a_large_file_counts_in_no_block_and_a_tombstone_names_the_file() {
     );
     // A large file relocated into a block starts counting there.
     index.put_if_absent(b"j", large_entry(5, 10, 4096)).unwrap();
-    index.relocate(b"j", generation(5), stamp(10), at(6, 0)).unwrap();
+    index
+        .relocate(b"j", generation(5), stamp(10), at(6, 0))
+        .unwrap();
     assert_eq!(count(&index, 6), lc(1, 4096));
-    assert_eq!(
-        live_entry(&index, b"j").prior_blocks,
-        Vec::<BlockId>::new()
-    );
+    assert_eq!(live_entry(&index, b"j").prior_blocks, Vec::<BlockId>::new());
 }
 
 #[test]
@@ -163,5 +187,13 @@ fn a_delete_of_a_hidden_entry_after_its_block_drop_leaves_no_count_behind() {
     replay(&index, vec![log_drop(2, 1, 5)]);
     index.delete(&tomb(b"a", 1, 9, vec![])).unwrap();
     assert_eq!(count(&index, 5), lc(0, 0));
-    assert_eq!(index.backend().dump().iter().filter(|(s, _, _)| *s == tierstore_index::backend::Space::Live).count(), 0);
+    assert_eq!(
+        index
+            .backend()
+            .dump()
+            .iter()
+            .filter(|(s, _, _)| *s == tierstore_index::backend::Space::Live)
+            .count(),
+        0
+    );
 }

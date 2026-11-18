@@ -633,6 +633,29 @@ fn drop_tombstone_keeps_a_newer_tombstone_entry_of_the_key() {
 }
 
 #[test]
+fn dropping_the_newer_of_two_tombstones_keeps_the_key_deleted_at_the_older_one() {
+    // Catches: the key's entry deleted while an older tombstone that names an unfreed block is
+    // still held, so an older record of that block replayed afterwards came back live.
+    let ix = index();
+    replay(
+        &ix,
+        vec![
+            tomb_at(PEER, 1, b"k", 20, vec![nb(1)]),
+            tomb_at(PEER, 2, b"k", 30, Vec::new()),
+        ],
+    );
+    assert!(ix.drop_tombstone(PEER, 2).expect("drop the newer"));
+    assert_eq!(ix.get(b"k").expect("get"), Lookup::Deleted(st(20)));
+    replay(&ix, vec![record(b"k", at(1), 10)]);
+    assert_eq!(ix.get(b"k").expect("get"), Lookup::Deleted(st(20)));
+    let t = tombs(&ix);
+    assert_eq!(t.len(), 1);
+    assert_eq!((t[0].stamp, t[0].names.clone()), (st(20), vec![nb(1)]));
+    assert!(ix.drop_tombstone(PEER, 1).expect("drop the older"));
+    assert_eq!(ix.get(b"k").expect("get"), Lookup::Absent);
+}
+
+#[test]
 fn drop_tombstone_keeps_a_live_entry_written_after_the_delete() {
     let ix = index();
     replay(&ix, vec![tomb_at(PEER, 1, b"k", 20, Vec::new())]);

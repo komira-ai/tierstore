@@ -15,9 +15,7 @@ use tierstore_format::ids::NodeId;
 use tierstore_index::KvIndex;
 use tierstore_index::backend::mem::Call;
 use tierstore_index::backend::{Backend, MemBackend, Op, Space};
-use tierstore_store_api::index::{
-    Fact, HotClean, Index, IndexError, ReplayMark,
-};
+use tierstore_store_api::index::{Fact, HotClean, Index, IndexError, ReplayMark};
 
 const FAIL: &str = "memory: ";
 
@@ -29,7 +27,9 @@ fn prepared() -> KvIndex<MemBackend> {
     index
         .put_if_absent(b"ch", chain_entry(2, 10, 5, 2 * MAX_OBJECT + 100))
         .unwrap();
-    index.put_if_absent(b"big", large_entry(3, 5, 1 << 30)).unwrap();
+    index
+        .put_if_absent(b"big", large_entry(3, 5, 1 << 30))
+        .unwrap();
     replay(
         &index,
         vec![
@@ -95,8 +95,17 @@ fn a_failing_store_fails_put_if_absent_and_leaves_the_state_unchanged() {
     assert!(sweep(&ALL, true, |i| i.put_if_absent(b"t", entry(5, 6, 0, 9, 3))) >= 3);
     assert!(sweep(&ALL, true, |i| i.put_if_absent(b"k", entry(1, 6, 0, 9, 3))) >= 1);
     assert!(sweep(&ALL, true, |i| i.put_if_absent(b"k", entry(2, 6, 0, 9, 3))) >= 1);
-    assert!(sweep(&ALL, true, |i| i.put_if_absent(b"hidden", entry(6, 6, 0, 9, 3))) >= 3);
-    assert!(sweep(&ALL, true, |i| i.put_if_absent(b"cn", chain_entry(7, 30, 6, 2 * MAX_OBJECT + 1))) >= 3);
+    assert!(
+        sweep(&ALL, true, |i| i
+            .put_if_absent(b"hidden", entry(6, 6, 0, 9, 3)))
+            >= 3
+    );
+    assert!(
+        sweep(&ALL, true, |i| i.put_if_absent(
+            b"cn",
+            chain_entry(7, 30, 6, 2 * MAX_OBJECT + 1)
+        )) >= 3
+    );
 }
 
 #[test]
@@ -110,17 +119,52 @@ fn a_failing_store_fails_delete_and_leaves_the_state_unchanged() {
 
 #[test]
 fn a_failing_store_fails_relocate_and_promote_and_leaves_the_state_unchanged() {
-    assert!(sweep(&ALL, true, |i| i.relocate(b"k", generation(1), stamp(5), at(6, 0))) >= 4);
-    assert!(sweep(&ALL, true, |i| i.relocate(b"ch", generation(2), stamp(5), at(6, 0))) >= 4);
-    assert!(sweep(&ALL, true, |i| i.relocate(b"nope", generation(1), stamp(5), at(6, 0))) >= 1);
+    assert!(
+        sweep(&ALL, true, |i| i.relocate(
+            b"k",
+            generation(1),
+            stamp(5),
+            at(6, 0)
+        )) >= 4
+    );
+    assert!(
+        sweep(&ALL, true, |i| i.relocate(
+            b"ch",
+            generation(2),
+            stamp(5),
+            at(6, 0)
+        )) >= 4
+    );
+    assert!(
+        sweep(&ALL, true, |i| i.relocate(
+            b"nope",
+            generation(1),
+            stamp(5),
+            at(6, 0)
+        )) >= 1
+    );
     let copy = HotClean {
         node: NodeId(3),
         boot: 1,
         seq: 1,
         offset: 1,
     };
-    assert!(sweep(&ALL, true, |i| i.promote(b"k", generation(1), stamp(5), copy)) >= 2);
-    assert!(sweep(&ALL, true, |i| i.promote(b"nope", generation(1), stamp(5), copy)) >= 1);
+    assert!(
+        sweep(&ALL, true, |i| i.promote(
+            b"k",
+            generation(1),
+            stamp(5),
+            copy
+        )) >= 2
+    );
+    assert!(
+        sweep(&ALL, true, |i| i.promote(
+            b"nope",
+            generation(1),
+            stamp(5),
+            copy
+        )) >= 1
+    );
 }
 
 #[test]
@@ -128,7 +172,13 @@ fn a_failing_store_fails_replay_of_each_kind_of_fact_and_leaves_the_state_unchan
     let one = |f: Fact| move |i: &KvIndex<MemBackend>| i.replay(&mut vec![f.clone()].into_iter());
     assert!(sweep(&ALL, true, one(record(b"k", entry(2, 6, 0, 9, 3)))) >= 4);
     assert!(sweep(&ALL, true, one(record(b"t", entry(2, 6, 0, 2, 3)))) >= 3);
-    assert!(sweep(&ALL, true, one(record(b"new", chain_entry(2, 40, 9, 2 * MAX_OBJECT + 1)))) >= 3);
+    assert!(
+        sweep(
+            &ALL,
+            true,
+            one(record(b"new", chain_entry(2, 40, 9, 2 * MAX_OBJECT + 1)))
+        ) >= 3
+    );
     assert!(sweep(&ALL, true, one(relocate(b"k", 1, 5, at(6, 0)))) >= 4);
     assert!(sweep(&ALL, true, one(log_tomb(2, 3, tomb(b"k", 1, 9, vec![])))) >= 4);
     assert!(sweep(&ALL, true, one(log_tomb(3, 1, tomb(b"k", 1, 9, vec![])))) >= 4);
@@ -232,12 +282,17 @@ fn an_entry_that_does_not_decode_is_a_store_error_for_every_method_that_reads_it
         bad
     );
     assert_eq!(
-        store_error(index.promote(b"k", generation(1), stamp(5), HotClean {
-            node: NodeId(2),
-            boot: 7,
-            seq: 1,
-            offset: 1
-        })),
+        store_error(index.promote(
+            b"k",
+            generation(1),
+            stamp(5),
+            HotClean {
+                node: NodeId(2),
+                boot: 7,
+                seq: 1,
+                offset: 1
+            }
+        )),
         bad
     );
     assert_eq!(
@@ -310,9 +365,9 @@ fn a_failing_scan_of_the_cursors_fails_replay_mark_after_a_flush() {
     let index = prepared();
     index.flush_mark(&ReplayMark::default()).unwrap();
     index.backend().fail_next(Call::Scan, 0, 1);
-    assert!(matches!(
-        index.replay_mark(),
-        Err(IndexError::Store { .. })
-    ));
-    assert_eq!(index.replay_mark().unwrap().unwrap().tomb_cursors, vec![(NodeId(2), 2)]);
+    assert!(matches!(index.replay_mark(), Err(IndexError::Store { .. })));
+    assert_eq!(
+        index.replay_mark().unwrap().unwrap().tomb_cursors,
+        vec![(NodeId(2), 2)]
+    );
 }
