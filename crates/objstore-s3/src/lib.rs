@@ -21,8 +21,8 @@ use bytes::Bytes;
 
 pub use body::{BodyStream, gather, too_long, too_short};
 pub use types::{
-    ByteRange, Capabilities, KeyError, KeyPrefix, ListPage, ListToken, ObjectInfo, ObjectKey,
-    ObjectStoreError, PageSize,
+    ByteRange, Capabilities, ContentBoundPut, KeyError, KeyPrefix, ListPage, ListToken, ObjectInfo,
+    ObjectKey, ObjectStoreError, PageSize,
 };
 
 /// An object store bucket, as the store's callers use it.
@@ -61,6 +61,13 @@ pub trait ObjectStore: Send + Sync + 'static {
     /// object as one streamed PUT up to [`s3::S3Tuning::single_put_max`] (5 GiB by default) and
     /// as a multipart upload, a part at a time, above it, aborting it on any failure; the local-directory store writes the pieces to its
     /// file as they come.
+    ///
+    /// A store that keeps the bytes of a PUT whose body was cut short breaks this contract, and
+    /// the S3 store cannot keep it there: SeaweedFS 4.54 can keep a PUT without `Content-Type`
+    /// whose body carries no checksum as an object of the bytes that came, 0 of them when the
+    /// body failed before its first byte (see `s3/bound.rs`). A write whose key names the SHA-256
+    /// of the bytes is [`ObjectStore::put_stream_content_bound`], which sends the digest for the
+    /// store to check.
     fn put_stream(
         &self,
         key: &ObjectKey,
@@ -70,6 +77,51 @@ pub trait ObjectStore: Send + Sync + 'static {
         async move {
             let bytes = gather(body, len).await?;
             self.put_new(key, bytes, None).await
+        }
+    }
+
+    /// Writes the object of exactly `len` bytes whose SHA-256 is `sha256` under a key bound to
+    /// that content (the key names the digest, so whoever writes it means these bytes), from
+    /// `body` as it is sent, as [`ObjectStore::put_stream`] does, and repairs a damaged object
+    /// under the key.
+    ///
+    /// An object already under the key that is `len` bytes and names no other digest (or none:
+    /// one written without it) is kept and `body` is not sent ([`ContentBoundPut::Existed`]).
+    /// One of another length, or one whose stored checksum (or, where the store keeps none for
+    /// it, whose recorded digest) is another, is damaged: it is replaced by the object written, on the condition that it is still the
+    /// object that was judged ([`ContentBoundPut::Replaced`]). The key is not checked against
+    /// `sha256`: binding the two is the caller's.
+    ///
+    /// The default is [`ObjectStore::put_stream`], whose create-only refusal is
+    /// [`ContentBoundPut::Existed`]: it sends no digest and replaces nothing, for a store that
+    /// never keeps a write cut short (the in-memory fake, the local-directory store). The S3
+    /// store sends the digest as `x-amz-checksum-sha256`, which a store that does flexible
+    /// checksums checks against the bytes it took before it keeps the object, and records it as
+    /// the metadata `x-amz-meta-sha256`.
+    ///
+    /// # Errors
+    /// As [`ObjectStore::put_stream`]. The S3 store: [`ObjectStoreError::Unsupported`] unless
+    /// it claims [`Capabilities::conditional_put`]; a [`ObjectStoreError::Service`] error 412
+    /// if the damaged object changed between the HEAD that judged it and the write that
+    /// replaces it, and [`ObjectStoreError::NotFound`] if it was deleted in between (nothing is
+    /// written; the next write judges again); [`ObjectStoreError::Protocol`] if the HEAD of a
+    /// damaged object gives no entity tag to make the replacement conditional on (nothing is
+    /// written); a [`ObjectStoreError::Service`] error 400 (code `BadDigest` among others) for a
+    /// body the store found not to be `sha256`.
+    fn put_stream_content_bound(
+        &self,
+        key: &ObjectKey,
+        len: u64,
+        body: BodyStream,
+        sha256: [u8; 32],
+    ) -> impl Future<Output = Result<ContentBoundPut, ObjectStoreError>> + Send {
+        let _ = sha256;
+        async move {
+            match self.put_stream(key, len, body).await {
+                Ok(()) => Ok(ContentBoundPut::Created),
+                Err(ObjectStoreError::AlreadyExists(_)) => Ok(ContentBoundPut::Existed),
+                Err(error) => Err(error),
+            }
         }
     }
 

@@ -207,8 +207,11 @@ impl S3Store {
     /// `condition` (`If-Match` or `If-None-Match`) if given. Gives the `ETag` of the answer, quotes
     /// included, if it has one. Sent once. The request is signed `UNSIGNED-PAYLOAD` (see
     /// `parts.rs`, whose watchdog and rules for the body it shares): a body that fails or has
-    /// another length than `len` stores nothing, since the store takes a request whose body has
-    /// its `Content-Length` bytes as whole.
+    /// another length than `len` stores nothing on a store that takes a request as whole only
+    /// when its body has its `Content-Length` bytes. A store may keep the bytes that came of a
+    /// body cut short, as SeaweedFS 4.54 can (see `bound.rs`); there only a checksum of the body
+    /// sent with it ([`put_whole_with`](Self::put_whole_with)'s headers, as
+    /// [`put_stream_new_sha256`](Self::put_stream_new_sha256) sends) refuses it.
     pub(super) async fn put_whole(
         &self,
         key: &ObjectKey,
