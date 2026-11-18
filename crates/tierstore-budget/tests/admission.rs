@@ -335,3 +335,101 @@ fn a_budget_is_shared_by_its_clones_and_debugs_by_name() {
     drop(p);
     assert_eq!(format!("{:?}", rig.budget), "ClientBudget { .. }");
 }
+
+#[test]
+fn a_charge_larger_than_a_drive_or_node_runs_alone_there() {
+    // A drive at one permit (after a 503) takes a charge naming it twice when idle, and nothing
+    // beside it.
+    let rig = Rig::new(BudgetConfig::new(Topology {
+        clients: 1,
+        ..support::later()
+    }));
+    let d = drive(1, 0);
+    rig.busy(d);
+    assert_eq!(rig.budget.snapshot().devices[&d].permits, 1);
+    let twice = Charge {
+        class: Class::Demand,
+        parts: 2,
+        devices: vec![d, d],
+        node: Some(NodeId(1)),
+    };
+    let one = rig.acquire(part(Class::Demand, d));
+    assert!(
+        rig.try_acquire(twice.clone()).is_none(),
+        "not beside another part"
+    );
+    drop(one);
+    let p = rig.acquire(twice);
+    assert!(rig.try_acquire(part(Class::Demand, d)).is_none());
+    drop(p);
+    // A node limited to one part takes a `k = 4` degraded part when idle, and nothing beside it.
+    let mut config = BudgetConfig::new(Topology {
+        clients: 1,
+        ..support::later()
+    });
+    config.node_permits = Some(1);
+    let rig = Rig::new(config);
+    let sources = [drive(1, 0), drive(1, 1), drive(2, 0), drive(2, 1)];
+    let p = rig.acquire(degraded(Class::Demand, 3, &sources));
+    assert_eq!(rig.budget.snapshot().nodes[&NodeId(3)].in_flight, 4);
+    assert!(rig.try_acquire(part(Class::Demand, drive(3, 0))).is_none());
+    drop(p);
+    assert!(rig.try_acquire(part(Class::Demand, drive(3, 0))).is_some());
+}
+
+#[test]
+fn with_a_node_down_its_failures_move_nothing_and_degraded_parts_meet_the_default_limits() {
+    let rig = Rig::later();
+    // Every drive of node 3 fails at the transport for several windows.
+    for _ in 0..3 {
+        for d in support::drives_of(3) {
+            for _ in 0..16 {
+                rig.observe(support::response(
+                    d,
+                    None,
+                    signals(None, None),
+                    tierstore_fetch_api::budget::Outcome::Transport,
+                ));
+            }
+        }
+        rig.advance(PAST_COOLDOWN);
+    }
+    let s = rig.budget.snapshot();
+    assert!(
+        s.devices.is_empty() && s.nodes.is_empty(),
+        "no state from failures"
+    );
+    assert_eq!(
+        (s.ceiling, s.ceiling_step),
+        (3, tierstore_budget::LevelStep::None)
+    );
+    // Its data shards are read degraded from four drives of nodes 1 and 2: each is charged four
+    // parts, so one runs at a time under LATER's ceiling of 3, with one permit on each source.
+    let a = [drive(1, 0), drive(1, 1), drive(2, 0), drive(2, 1)];
+    let b = [drive(1, 2), drive(1, 3), drive(2, 2), drive(2, 3)];
+    let pa = rig.acquire(degraded(Class::Demand, 1, &a));
+    assert!(rig.try_acquire(degraded(Class::Demand, 2, &b)).is_none());
+    assert!(rig.try_acquire(part(Class::Demand, drive(1, 9))).is_none());
+    let s = rig.budget.snapshot();
+    assert_eq!(s.parts_in_flight, 4);
+    for d in a {
+        assert_eq!(s.devices[&d].in_flight, 1, "{d:?}");
+    }
+    drop(pa);
+    let pb = rig.acquire(degraded(Class::Demand, 2, &b));
+    drop(pb);
+}
+
+#[tokio::test(flavor = "current_thread")]
+async fn a_demand_waiting_at_the_ceiling_registers_on_a_device_new_to_the_client() {
+    let rig = Rig::later();
+    let held: Vec<Permit> = (0..3).map(|_| rig.acquire(bare(Class::Demand))).collect();
+    let d = drive(2, 9);
+    {
+        let mut demand = pin!(rig.budget.acquire(part(Class::Demand, d)));
+        assert!(poll!(demand.as_mut()).is_pending());
+        assert_eq!(rig.budget.snapshot().devices[&d].demand_waiting, 1);
+    }
+    assert_eq!(rig.budget.snapshot().devices[&d].demand_waiting, 0);
+    drop(held);
+}

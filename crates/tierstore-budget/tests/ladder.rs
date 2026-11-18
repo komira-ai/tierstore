@@ -393,3 +393,75 @@ fn a_configured_node_limit_comes_back_to_its_value() {
         "back to the configured value, and not above it"
     );
 }
+
+#[test]
+fn parts_in_flight_above_the_new_permits_finish_and_no_new_one_starts_beside_them() {
+    let rig = Rig::new(BudgetConfig::new(Topology {
+        clients: 1,
+        ..support::later()
+    }));
+    for i in 0..15 {
+        rig.served(drive(1, i), 20, 10);
+    }
+    let d = drive(1, 4);
+    let a = rig.acquire(part(Class::Demand, d));
+    let b = rig.acquire(part(Class::Demand, d));
+    rig.busy(d);
+    let v = rig.budget.snapshot().devices[&d];
+    assert_eq!((v.permits, v.in_flight), (1, 2), "nothing is revoked");
+    assert!(rig.try_acquire(part(Class::Demand, d)).is_none());
+    drop(a);
+    assert!(
+        rig.try_acquire(part(Class::Demand, d)).is_none(),
+        "one in flight, one permit"
+    );
+    drop(b);
+    let c = rig.acquire(part(Class::Demand, d));
+    assert!(rig.try_acquire(part(Class::Demand, d)).is_none());
+    drop(c);
+    // Each later decrease also holds through at least 1 s and ends by 3 s.
+    for (before, after) in [(0, 250), (250, 500)] {
+        rig.advance(999);
+        rig.busy(d);
+        assert_eq!(
+            rig.budget.snapshot().devices[&d].pace_ms,
+            before,
+            "held at +999 ms"
+        );
+        rig.advance(2_002);
+        rig.busy(d);
+        assert_eq!(
+            rig.budget.snapshot().devices[&d].pace_ms,
+            after,
+            "taken by +3001 ms"
+        );
+    }
+}
+
+#[test]
+fn a_node_restores_the_part_size_from_its_own_backlog() {
+    // Fifteen clients: share 6. Node 2 alone is slow until its ladder reaches `P`; the client's
+    // median stays at the other nodes'.
+    let rig = Rig::new(BudgetConfig::new(Topology {
+        clients: 15,
+        ..support::later()
+    }));
+    node_windows(&rig, 2, 10);
+    for _ in 0..5 {
+        node_windows(&rig, 2, 40);
+        node_windows(&rig, 2, 40);
+    }
+    let s = rig.budget.snapshot();
+    assert_eq!(s.nodes[&NodeId(2)].limit, Some(1));
+    assert_eq!(s.ceiling_step, LevelStep::None, "the client is not slow");
+    assert_eq!(rig.budget.part_size(u64::MAX), 32 * MIB);
+    // Node 2 is quick again and its one part is always taken: `P` comes back first, then its
+    // parts, without the client's ceiling ever filling.
+    drop(backlog_at_node(&rig, 2, 1));
+    node_windows(&rig, 2, 10);
+    assert_eq!(rig.budget.part_size(u64::MAX), 64 * MIB);
+    assert_eq!(rig.budget.snapshot().nodes[&NodeId(2)].limit, Some(1));
+    drop(backlog_at_node(&rig, 2, 1));
+    node_windows(&rig, 2, 10);
+    assert_eq!(rig.budget.snapshot().nodes[&NodeId(2)].limit, Some(2));
+}

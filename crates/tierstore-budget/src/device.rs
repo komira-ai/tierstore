@@ -55,7 +55,8 @@ pub(crate) struct Device {
     pub window: Window,
     pub first_byte: BTreeMap<u8, Series>,
     pub queue_wait: Series,
-    pub last_traffic: u64,
+    /// When the device last gave a load answer; `None` until its first.
+    pub last_traffic: Option<u64>,
 }
 
 impl Device {
@@ -73,7 +74,7 @@ impl Device {
             window: Window::at(now),
             first_byte: BTreeMap::new(),
             queue_wait: Series::default(),
-            last_traffic: now,
+            last_traffic: None,
         }
     }
 

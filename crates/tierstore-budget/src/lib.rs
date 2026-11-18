@@ -27,7 +27,7 @@
 //! By module:
 //! - [`config`]: the topology and the constants, and their validation.
 //! - [`quantities`]: the table of 4.3, pure.
-//! - [`signal`]: windows, medians and windowed-minimum baselines, pure.
+//! - `signal` (private): windows, medians and windowed-minimum baselines, pure.
 //! - `controller`, `device`, `level` (private): the three levels, their ladders and the admission
 //!   rule, a pure state machine fed the time.
 //! - [`ClientBudget`]: the controller behind a lock and the injected timer, as `Budget`.
@@ -40,7 +40,7 @@ mod controller;
 mod device;
 mod level;
 pub mod quantities;
-pub mod signal;
+mod signal;
 mod snapshot;
 
 pub use budget::ClientBudget;

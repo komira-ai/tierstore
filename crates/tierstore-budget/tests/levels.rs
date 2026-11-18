@@ -316,3 +316,49 @@ fn a_first_byte_doubling_in_one_size_class_lowers_the_drive() {
     assert_eq!(s.devices[&other].permits, 2);
     assert_eq!(s.reason, BudgetReason::DriveFirstByte);
 }
+
+#[test]
+fn one_slow_drive_among_fourteen_answering_together_is_found() {
+    let rig = lone_client();
+    let drives = drives_of(1);
+    let slow = drives[7];
+    let round = |rig: &Rig, slow_wait: u32| {
+        for _ in 0..15 {
+            for d in &drives {
+                rig.served(*d, 20, if *d == slow { slow_wait } else { 10 });
+            }
+        }
+        rig.advance(PAST_COOLDOWN);
+        for d in &drives {
+            rig.served(*d, 20, if *d == slow { slow_wait } else { 10 });
+        }
+    };
+    round(&rig, 10);
+    round(&rig, 40);
+    round(&rig, 40);
+    let s = rig.budget.snapshot();
+    for d in &drives {
+        let v = s.devices[d];
+        if *d == slow {
+            assert_eq!((v.permits, v.decrease), (1, true));
+        } else {
+            assert_eq!((v.permits, v.decrease), (2, false), "{d:?}");
+        }
+    }
+}
+
+#[test]
+fn a_drive_that_never_answered_is_not_traffic() {
+    let rig = lone_client();
+    // Two drives of node 1 answered; four more were sent parts that never answered.
+    rig.served(drive(1, 0), 20, 10);
+    rig.served(drive(1, 1), 20, 10);
+    let _held: Vec<Permit> = (2..6)
+        .map(|i| rig.acquire(part(Class::Prepare, drive(1, i))))
+        .collect();
+    rig.busy(drive(1, 0));
+    // One of the two that answered is over a third; counted with the silent four it would not be.
+    let s = rig.budget.snapshot();
+    assert_eq!(s.nodes[&NodeId(1)].step, LevelStep::FewerParts);
+    assert_eq!(s.reason, BudgetReason::ClientDrives);
+}

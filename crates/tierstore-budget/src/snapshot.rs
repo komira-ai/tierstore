@@ -54,6 +54,8 @@ pub struct DeviceView {
     pub max: u32,
     /// Parts in flight on it.
     pub in_flight: u32,
+    /// Demand charges waiting with it among their devices (one of its permits is held for them).
+    pub demand_waiting: u32,
     /// The pacing gap between part starts, 0 when not paced.
     pub pace_ms: u64,
     /// Whether it is in a decrease state.

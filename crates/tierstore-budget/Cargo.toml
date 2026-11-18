@@ -18,6 +18,7 @@ tierstore-fetch-api.workspace = true
 # The engine's size classes (`plan::size_class`) and its timer (`timer::Timer`), so the budget
 # and the engine agree on both.
 tierstore-fetch.workspace = true
+# The `NodeId` of a storage node.
 tierstore-format.workspace = true
 # The closed set of reasons a controller move is reported with (`budget_reason`, section 12).
 tierstore-metrics.workspace = true

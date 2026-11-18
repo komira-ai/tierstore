@@ -195,6 +195,12 @@ impl Controller {
     pub fn try_take(&mut self, charge: &Charge, now: u64) -> Result<(), Blocked> {
         let parts = charge.parts.max(1);
         let demand = charge.class == Class::Demand;
+        let counts = multiplicity(&charge.devices);
+        // Every device of the charge has state from here on, so a waiting demand's registration
+        // (`rewait`) always finds the devices it reserves on.
+        for &d in counts.keys() {
+            self.device(d, now);
+        }
         let ceiling = self.ceiling(now);
         let cap = match demand {
             true => ceiling,
@@ -213,7 +219,6 @@ impl Controller {
                 return Err(Blocked::Node);
             }
         }
-        let counts = multiplicity(&charge.devices);
         for (&d, &m) in &counts {
             let dev = self.device(d, now);
             let limit = match !demand && dev.demand_waiting > 0 {
@@ -270,13 +275,14 @@ impl Controller {
             };
         }
         if from.devices != to.devices {
+            // `try_take` gave every device of the charge state before the charge first waited.
             for d in multiplicity(&charge.devices).into_keys() {
-                if let Some(dev) = self.devices.get_mut(&d) {
+                self.devices.entry(d).and_modify(|dev| {
                     dev.demand_waiting = match to.devices {
                         true => dev.demand_waiting + 1,
                         false => dev.demand_waiting.saturating_sub(1),
                     };
-                }
+                });
             }
         }
     }
@@ -310,7 +316,7 @@ impl Controller {
             return;
         }
         let dev = self.device(d, now);
-        dev.last_traffic = now;
+        dev.last_traffic = Some(now);
         dev.window.parts += 1;
         if outcome == Outcome::Busy {
             self.decrease_drive(d, BudgetReason::Drive503, now);
@@ -412,7 +418,10 @@ impl Controller {
             .devices
             .iter()
             .filter(|(d, _)| node.is_none() || d.node() == node)
-            .filter(|(_, dev)| dev.last_traffic.saturating_add(traffic) >= now)
+            .filter(|(_, dev)| {
+                dev.last_traffic
+                    .is_some_and(|t| t.saturating_add(traffic) >= now)
+            })
             .map(|(_, dev)| dev)
             .collect();
         let dec = with.iter().filter(|dev| dev.decrease).count();
@@ -507,6 +516,11 @@ impl Controller {
         let drives = self.drives_over_third(Some(n), now);
         let rule = WindowRule::network(&self.cfg);
         let node_permits = self.cfg.node_permits;
+        // `P` comes back from a node's own backlog too (its parts are what the node's limit
+        // holds, so the ceiling may never fill), once nothing else is in decrease.
+        let others_clear =
+            !self.client.decrease && self.nodes.iter().all(|(m, l)| *m == n || !l.decrease);
+        let restore_part = self.part_steps > 0 && others_clear;
         let lvl = self.node(n, now);
         let Some((v, backlog)) = Self::close_level(rule, lvl, now) else {
             return;
@@ -520,7 +534,10 @@ impl Controller {
             lvl.decrease = false;
             lvl.stepped_part = false;
             // A backlog at a node means its limit was full: an unbounded node has none.
-            if backlog {
+            if backlog && restore_part {
+                self.part_steps -= 1;
+                self.reason = BudgetReason::Increase;
+            } else if backlog {
                 lvl.limit = lvl.limit.and_then(|l| {
                     let next = l.saturating_add(1);
                     match node_permits {
@@ -600,6 +617,7 @@ impl Controller {
                         permits: dev.permits,
                         max: dev.max,
                         in_flight: dev.in_flight,
+                        demand_waiting: dev.demand_waiting,
                         pace_ms: dev.pace_ms,
                         decrease: dev.decrease,
                         step: dev.step(),
