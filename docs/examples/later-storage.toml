@@ -2,7 +2,7 @@
 # they differ only in node.id and addresses. Components: hot store, cold store, peer service, S3 front.
 [node]
 id = 1
-membership = "/etc/tierstore/membership.toml"   # nodes that run the hot store read the file (10.8)
+membership = "/etc/tierstore/membership.toml"   # optional after `store init`: read only by `store init` on the node that creates the cluster, ignored on every later start (10.8)
 token_file = "/etc/tierstore/cluster.token"
 
 [peer]                              # the peer service (10.6); requires [hot]
@@ -21,7 +21,17 @@ legacy_hint_ttl = "10m"             # how long the engine remembers "this pack w
 [import]                            # migration mover and lazy import (10.10)
 bytes_per_hour = "200GiB"
 
-[hot]                               # NVMe, replication only
+[metadata]                          # the metadata store (10.16): a replicated Postgres on the three storage nodes; [hot] requires it
+hosts = ["192.0.2.11:5432", "192.0.2.12:5432", "192.0.2.13:5432"]   # every member; tried in turn, the one that accepts writes is used
+database = "tierstore"
+user = "ts_rw"                      # data changes in schema ts only, no schema changes (10.16)
+password_file = "/etc/tierstore/metadata.password"   # secret material, not readable by group or others
+statement_timeout = "100ms"         # per statement of a hot-path transaction
+txn_timeout = "2s"                  # per hot-path transaction
+retry_window = "45s"                # how long one operation retries across a failover before it answers 503 Retry-After
+tomb_poll = "2s"                    # how often nodes pull new tombstones and changed block and stripe rows; bounds immutable-bucket staleness after DELETE (10.9)
+
+[hot]                               # the hot partition of the NVMe (the rest is the metadata partition, 10.16); replication only
 dir = "/mnt/nvme/ts-hot"
 replicas = 3                        # 1 .. number of failure domains (Q2: every node holds every hot object)
 min_acks = 2                        # acknowledged on two durable copies; the third follows in the stream
@@ -86,6 +96,15 @@ classes_max = 8
 drive_delay = "10m"
 node_down_after = "24h"
 share = 0.25
+
+[reconcile]                         # settings of the hot store: the reconciler (24.5)
+interval = "10s"                    # desired versus actual redundancy is compared this often, and on events
+lease = "15s"                       # the reconciler lease in the metadata store; the database clock judges it
+lease_renew = "5s"
+executor_wait = "30s"               # a job not leased by its first-ranked node within this is taken by the next rank (24.1)
+
+[health]                            # settings of the hot store: the health facts (24.2)
+report_after = "30s"                # a node unreachable for this long is reported unreachable by its peers (24.2)
 
 [index]
 engine = "fjall"                    # "fjall" | "redb" (10.2)

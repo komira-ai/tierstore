@@ -2,7 +2,7 @@
 # node cache, fetch engine, FUSE front, Prepare provider
 [node]
 id = 1
-membership = "/etc/tierstore/membership.toml"      # six nodes, failure domain = node
+membership = "/etc/tierstore/membership.toml"      # six nodes, failure domain = node; read only by `store init` on the node that creates the cluster, ignored on every later start (10.8)
 token_file = "/etc/tierstore/cluster.token"
 
 [peer]
@@ -24,6 +24,16 @@ root = "/var/lib/tierstore-cache"     # the SSD cache partition (section 11)
 [store]
 kind = "tiered"
 legacy_upstream = "<silo S3 endpoint>"      # read-only, during the migration (10.10)
+
+[metadata]                            # the metadata store (10.16): Postgres on three of the six nodes, each on a 64 GiB partition of its SATA SSD
+hosts = ["192.0.2.21:5432", "192.0.2.22:5432", "192.0.2.23:5432"]   # the same list on all six nodes
+database = "tierstore"
+user = "ts_rw"
+password_file = "/etc/tierstore/metadata.password"
+statement_timeout = "100ms"
+txn_timeout = "2s"
+retry_window = "45s"
+tomb_poll = "2s"
 
 [hot]                                 # SATA SSD partition
 dir = "/var/lib/ts-hot"
@@ -57,6 +67,15 @@ partial_after = "3d"
 [rebuild]
 node_down_after = "24h"
 share = 0.25
+
+[reconcile]                           # settings of the hot store: the reconciler (24.5)
+interval = "10s"
+lease = "15s"
+lease_renew = "5s"
+executor_wait = "30s"                 # a job not leased by its first-ranked node within this is taken by the next rank (24.1)
+
+[health]                            # settings of the hot store: the health facts (24.2)
+report_after = "30s"                # a node unreachable for this long is reported unreachable by its peers (24.2)
 
 [drive]                               # SMR, shared with silo: one stream until T0-F says otherwise
 streams = 1
