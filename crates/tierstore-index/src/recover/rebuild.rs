@@ -94,8 +94,11 @@ impl Recovery<'_> {
 
     /// Notes the blocks named by a block drop in any origin's tomb log.
     fn note_drops(&self, skips: &mut Skips) -> Result<(), RecoverError> {
-        for origin in self.tomb.origins() {
-            for record in self.tomb.read_all(origin)? {
+        let Some(tomb) = self.tomb else {
+            return Ok(());
+        };
+        for origin in tomb.origins() {
+            for record in tomb.read_all(origin)? {
                 if let LogEntry::BlockDrop(drop) = record.entry {
                     skips.drop_block(drop.block);
                 }

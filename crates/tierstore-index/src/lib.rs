@@ -13,7 +13,9 @@
 //! - [`tombs`]: the tombstones a node holds until their drop, what each names, and the one drop
 //!   rule (10.2).
 //! - [`blocks`]: the block table: block rows and stripe descriptors and frees.
-//! - [`tomblog`]: the tombstone log files `tomb/<origin>/<first_seq>.log`: appends, pulls after a
+//! - [`ledger`] and [`tomblog`]: the parts of the majority-ledger coordination model of 10.2, kept
+//!   apart so that another model replaces them alone: per-origin tomb log cursors and applying log
+//!   entries ([`ledger`]), and the tombstone log files `tomb/<origin>/<first_seq>.log`: appends, pulls after a
 //!   cursor, compaction.
 //! - [`fs`]: the file access recovery and the tomb log use, on a real directory or on a fake file
 //!   system that crashes on demand.
@@ -33,6 +35,7 @@ pub mod blocks;
 mod codec;
 pub mod fs;
 pub mod kv;
+pub mod ledger;
 pub mod list;
 pub mod measure;
 pub mod recover;

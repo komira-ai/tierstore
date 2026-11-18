@@ -168,8 +168,11 @@ pub struct Recovery<'a> {
     pub hot: &'a dyn Fs,
     /// Each drive's `ts-cold` directory.
     pub cold: Vec<&'a dyn Fs>,
-    /// The tomb log files under `hot`, opened by the caller (which cut a torn tail on opening).
-    pub tomb: &'a TombLog,
+    /// The tomb log files under `hot`, opened by the caller (which cut a torn tail on opening),
+    /// under the majority-ledger coordination model ([`crate::ledger`]); `None` under a model
+    /// without them: recovery then reads no log, and tombstones and block drops come from the
+    /// model's own source (applied as facts or with `delete`).
+    pub tomb: Option<&'a TombLog>,
     /// The block geometry, to check a chain's slices.
     pub geometry: BlockGeometry,
     /// The bytes read per step of the scan of an open segment.

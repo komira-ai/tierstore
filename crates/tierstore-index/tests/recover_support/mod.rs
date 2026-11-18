@@ -161,7 +161,7 @@ impl Disks {
         Recovery {
             hot: &*self.hot,
             cold: self.cold.iter().map(|c| &**c as &dyn Fs).collect(),
-            tomb: &self.tomb,
+            tomb: Some(&self.tomb),
             geometry: geometry(),
             window: WINDOW,
         }

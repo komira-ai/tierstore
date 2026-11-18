@@ -800,3 +800,37 @@ fn a_rebuild_on_the_memory_store_matches_and_survives_a_restart() {
     rebuilt_index_matches_and_survives_a_restart(&Mem, false);
     rebuilt_index_matches_and_survives_a_restart(&Mem, true);
 }
+
+#[test]
+fn without_a_tomb_log_recovery_reads_only_the_data_and_the_tombstone_comes_from_the_caller() {
+    // Under a coordination model with no replicated tomb logs, recovery reads segments and
+    // trailers alone; the model applies its own tombstones afterwards.
+    let mut node = Node::new(false);
+    node.put(b"k", b"v", 10);
+    node.seal();
+    node.delete(b"k", 20);
+    let disks = Disks::hot_only(files(&node));
+    let mut recovery = disks.recovery();
+    recovery.tomb = None;
+    let index = index_on(tierstore_index::backend::MemBackend::new());
+    let report = recovery.run(&index).unwrap();
+    assert_eq!((report.mode, report.log_entries), (Mode::Rebuild, 0));
+    index.set_ready(true);
+    assert!(matches!(index.get(b"k").unwrap(), Lookup::Live(_)));
+    index
+        .delete(&Tombstone {
+            key: b"k".to_vec(),
+            generation: gen_of(b"v"),
+            stamp: stamp(20),
+            names: Vec::new(),
+        })
+        .unwrap();
+    assert_eq!(index.get(b"k").unwrap(), Lookup::Deleted(stamp(20)));
+    // A restart from the mark also reads no log.
+    index
+        .flush_mark(&tierstore_store_api::index::ReplayMark::default())
+        .unwrap();
+    let report = recovery.run(&index).unwrap();
+    assert_eq!((report.mode, report.log_entries), (Mode::Replay, 0));
+    assert_eq!(index.get(b"k").unwrap(), Lookup::Deleted(stamp(20)));
+}

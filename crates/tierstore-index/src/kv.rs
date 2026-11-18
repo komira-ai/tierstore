@@ -17,7 +17,7 @@ use std::sync::{Mutex, MutexGuard, PoisonError, RwLock};
 use tierstore_format::block::BlockGeometry;
 use tierstore_format::ids::{BlockId, NodeId};
 use tierstore_format::stamp::Stamp;
-use tierstore_format::tomb::{LogEntry, LogRecord, Tombstone};
+use tierstore_format::tomb::{LogEntry, Tombstone};
 use tierstore_store_api::index::{
     DeleteOutcome, EntryLocation, Fact, Index, IndexEntry, IndexError, LiveCount, Lookup,
     PutOutcome, ReplayMark, ReplayStats,
@@ -32,7 +32,6 @@ pub const STORE_VERSION: u64 = 1;
 
 const META_VERSION: &[u8] = b"version";
 const META_MARK: &[u8] = b"mark";
-const META_CURSOR: &[u8] = b"cursor/";
 const META_BOOT: &[u8] = b"boot/";
 
 /// Facts applied per batch of the store during a replay.
@@ -335,27 +334,6 @@ impl<B: Backend> KvIndex<B> {
         }
     }
 
-    /// The tomb log cursor of `origin`: the last sequence applied, 0 for none.
-    pub fn tomb_cursor(&self, origin: NodeId) -> Result<u64, IndexError> {
-        self.backend
-            .get(Space::Meta, &cursor_key(origin))
-            .map_err(store_err)?
-            .map_or(Ok(0), |v| codec::decode_u64(&v, "decode tomb cursor"))
-    }
-
-    /// Every tomb log cursor the index holds.
-    pub fn tomb_cursors(&self) -> Result<Vec<(NodeId, u64)>, IndexError> {
-        self.scan_prefix(Space::Meta, META_CURSOR)?
-            .into_iter()
-            .map(|(k, v)| {
-                Ok((
-                    NodeId(*k.last().unwrap_or(&0)),
-                    codec::decode_u64(&v, "decode tomb cursor")?,
-                ))
-            })
-            .collect()
-    }
-
     /// Applies a record fact: the newest record wins, and a record older than a tombstone of the
     /// key extends that tombstone to name the record's blocks (10.2).
     pub(crate) fn apply_record(
@@ -423,45 +401,6 @@ impl<B: Backend> KvIndex<B> {
         }
         changed |= self.record_tombstone(txn, &t.key, t.stamp, t.generation, &names, position)?;
         Ok((outcome, changed))
-    }
-
-    /// Applies one entry of a tomb log, after checking its position against the origin's cursor.
-    pub(crate) fn apply_log(
-        &self,
-        txn: &mut Txn<'_>,
-        rec: &LogRecord,
-    ) -> Result<Applied, IndexError> {
-        let ckey = cursor_key(rec.origin);
-        let cursor = match txn.get(Space::Meta, &ckey)? {
-            Some(v) => codec::decode_u64(&v, "decode tomb cursor")?,
-            None => 0,
-        };
-        if rec.seq <= cursor {
-            return Ok(Applied::Unchanged);
-        }
-        if cursor != 0 && rec.seq != cursor + 1 {
-            return Err(IndexError::Store {
-                op: "replay tomb log",
-                reason: format!(
-                    "origin {} jumps from sequence {cursor} to {}",
-                    rec.origin, rec.seq
-                ),
-            });
-        }
-        txn.put(Space::Meta, ckey, codec::encode_u64(rec.seq));
-        let changed = match &rec.entry {
-            LogEntry::Tombstone(t) => self.apply_tombstone(txn, t, Some((rec.origin, rec.seq)))?.1,
-            LogEntry::BlockDrop(d) => self.apply_block_drop(txn, d.block)?,
-            LogEntry::TombDrop(d) => {
-                self.apply_tomb_report(txn, d.target_origin, d.target_seq, rec.origin)?
-            }
-            LogEntry::Unknown { .. } => false,
-        };
-        Ok(if changed {
-            Applied::Changed
-        } else {
-            Applied::Unchanged
-        })
     }
 
     /// Applies facts in batches of [`REPLAY_BATCH`], each batch one commit.
@@ -561,13 +500,6 @@ impl<B: Backend> KvIndex<B> {
         let mut d = self.dropped.write().unwrap_or_else(PoisonError::into_inner);
         d.extend(blocks.iter().copied());
     }
-}
-
-/// The meta key of `origin`'s tomb log cursor.
-fn cursor_key(origin: NodeId) -> Vec<u8> {
-    let mut k = META_CURSOR.to_vec();
-    k.push(origin.0);
-    k
 }
 
 impl<B: Backend> Index for KvIndex<B> {
@@ -687,12 +619,7 @@ impl<B: Backend> Index for KvIndex<B> {
             return Ok(None);
         };
         let mut mark = codec::decode_mark(&v)?;
-        let mut cursors: BTreeMap<NodeId, u64> = mark.tomb_cursors.iter().copied().collect();
-        for (origin, seq) in self.tomb_cursors()? {
-            let c = cursors.entry(origin).or_insert(0);
-            *c = (*c).max(seq);
-        }
-        mark.tomb_cursors = cursors.into_iter().collect();
+        mark.tomb_cursors = self.merged_cursors(&mark.tomb_cursors)?;
         Ok(Some(mark))
     }
 

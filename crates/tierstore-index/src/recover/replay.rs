@@ -125,10 +125,13 @@ impl Recovery<'_> {
         index: &KvIndex<B>,
         report: &mut RecoveryReport,
     ) -> Result<(), RecoverError> {
-        for origin in self.tomb.origins() {
+        let Some(tomb) = self.tomb else {
+            return Ok(());
+        };
+        for origin in tomb.origins() {
             let mut after = index.tomb_cursor(origin)?;
             loop {
-                let (records, more) = self.tomb.read(origin, after, LOG_PAGE)?;
+                let (records, more) = tomb.read(origin, after, LOG_PAGE)?;
                 after = records.last().map_or(after, |r| r.seq);
                 report.log_entries += records.len() as u64;
                 self.apply(index, records.into_iter().map(Fact::Log), report)?;

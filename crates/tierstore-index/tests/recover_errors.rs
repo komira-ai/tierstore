@@ -189,7 +189,7 @@ impl Case {
         Recovery {
             hot: &*self.hot,
             cold: vec![&*self.cold],
-            tomb: &self.tomb,
+            tomb: Some(&self.tomb),
             geometry: geometry(),
             window: WINDOW,
         }
