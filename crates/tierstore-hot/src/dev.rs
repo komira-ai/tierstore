@@ -148,9 +148,10 @@ impl HotDev for DirDev {
             Err(e) if e.kind() == io::ErrorKind::NotFound => return Ok(Vec::new()),
             Err(e) => return Err(e),
         };
-        let mut names = entries
+        let names = entries
             .map(|e| e.map(|e| e.file_name().to_string_lossy().into_owned()))
-            .collect::<io::Result<Vec<_>>>()?;
+            .collect::<io::Result<Vec<_>>>();
+        let mut names = names?;
         names.sort();
         Ok(names)
     }

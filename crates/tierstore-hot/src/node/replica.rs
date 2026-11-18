@@ -69,9 +69,15 @@ pub(crate) async fn replicate<B: Backend + 'static>(
     let copy = n.lock().copies.get(&segment).cloned();
     let copy = match copy {
         Some(c) => c,
-        None if batch.start == 0 => open_copy(n, segment, batch.ballot.node)
-            .await
-            .map_err(|()| offset)?,
+        None if batch.start == 0 => {
+            let opened = open_copy(n, segment, batch.ballot.node)
+                .await
+                .map_err(|()| offset)?;
+            // Kept from here on: a write that fails below leaves the file, and the retry must
+            // find the copy rather than try to create the file again.
+            n.lock().copies.insert(segment, opened.clone());
+            opened
+        }
         None => return Err(offset),
     };
     if batch.start != copy.committed {
@@ -91,14 +97,16 @@ pub(crate) async fn replicate<B: Backend + 'static>(
             batch.bytes.clone(),
             batch.start,
         );
-        n.sched
+        let wrote = n
+            .sched
             .run(DriveClass::Write, move || {
                 dev.write_at(&path, at, &bytes)?;
                 dev.fdatasync(&path)
             })
-            .await
-            .map_err(|_| offset)?
-            .map_err(|_| offset)?;
+            .await;
+        if !matches!(wrote, Ok(Ok(()))) {
+            return Err(offset);
+        }
     }
     let end = batch.start + batch.bytes.len() as u64;
     let records = records_of(segment, batch.start, &batch.bytes);

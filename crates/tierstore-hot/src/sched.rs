@@ -163,10 +163,10 @@ impl HotSched {
         let tx: Slot<T> = Arc::new(Mutex::new(Some(tx)));
         let fail_tx = Arc::clone(&tx);
         let send = move |tx: &Slot<T>, r| {
-            if let Some(tx) = tx.lock().unwrap_or_else(PoisonError::into_inner).take() {
-                // The caller may have gone away; nobody then waits for the answer.
-                let _ = tx.send(r);
-            }
+            // The job and the stall are exclusive, so the slot is full here; the caller may have
+            // gone away, and nobody then waits for the answer.
+            let sender = tx.lock().unwrap_or_else(PoisonError::into_inner).take();
+            drop(sender.map(|tx| tx.send(r)));
         };
         let queued = Queued {
             job: Box::new(move || send(&tx, Ok(op()))),
