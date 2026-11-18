@@ -442,7 +442,8 @@ async fn a_stall_after_the_first_byte_retries_after_the_stall_timeout_for_the_mi
         vec![(0, 4 * MIB), (MIB, 3 * MIB)],
         "the retry begins at the first missing cell"
     );
-    let stats = rig.engine.stats();
+    // A wait is ready once its cells are present; the op counts them just after (`until`).
+    let stats = rig.until(|s| s.cells_published >= 4).await;
     assert_eq!(stats.stall_retries, 1);
     assert_eq!(stats.cells_published, 4, "no cell was published twice");
     assert_eq!(
@@ -478,7 +479,8 @@ async fn a_truncated_body_is_retried_at_once_for_the_missing_cells() {
     assert_pack_present(&rig, &pack);
     assert_eq!(devices(&rig), vec![h1(), h2()]);
     assert_eq!(rig.get_ranges(&pack), vec![(0, 4 * MIB), (MIB, 3 * MIB)]);
-    let stats = rig.engine.stats();
+    // A wait is ready once its cells are present; the op counts them just after (`until`).
+    let stats = rig.until(|s| s.cells_published >= 4).await;
     assert_eq!(stats.bytes_wasted, 1_000, "the half cell was dropped");
     assert_eq!(stats.cells_published, 4);
     assert_eq!(rig.clock.now_ms(), 0, "the clock never moved");
