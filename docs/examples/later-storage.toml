@@ -1,0 +1,106 @@
+# docs/examples/later-storage.toml: one of the three storage nodes of LATER (section 21.2);
+# they differ only in node.id and addresses. Components: hot store, cold store, peer service, S3 front.
+[node]
+id = 1
+membership = "/etc/tierstore/membership.toml"   # nodes that run the hot store read the file (10.8)
+token_file = "/etc/tierstore/cluster.token"
+
+[peer]                              # the peer service (10.6); requires [hot]
+listen = "192.0.2.11:7480"          # private network only (documentation address)
+
+[s3]                                # the S3 front (10.9)
+listen = "192.0.2.11:7481"
+backend = "store"                   # "store": this store's door, requires [hot]; "cache": requires [cache] and [fetch]
+
+[store]
+kind = "tiered"
+unavailable_wait = "10m"            # 4.6
+legacy_upstream = ""                # silo endpoint during migration, read-only (10.10)
+legacy_hint_ttl = "10m"             # how long the engine remembers "this pack was last found in silo"
+
+[import]                            # migration mover and lazy import (10.10)
+bytes_per_hour = "200GiB"
+
+[hot]                               # NVMe, replication only
+dir = "/mnt/nvme/ts-hot"
+replicas = 3                        # 1 .. number of failure domains (Q2: every node holds every hot object)
+min_acks = 2                        # acknowledged on two durable copies; the third follows in the stream
+failure_domain = "node"             # "node" | "drive"
+large_min = "4MiB"                  # above: a whole file; at or below: a record in a segment
+seal_bytes = "1023MiB"              # default = cold.block_bytes - cold.block_reserve
+seal_max_age = "24h"                # age seal, only at or above seal_min_bytes
+seal_min_bytes = "256MiB"           # below it, the age seal waits until destage.max_age
+batch_max = "4MiB"
+replica_stall = "5s"
+put_copy_stall = "10s"
+queue_depth = 64
+dirty_destage_start = 0.50          # also: no promotion above this mark
+dirty_destage_stop  = 0.35
+dirty_urgent = 0.75
+dirty_slow   = 0.85
+dirty_reject = 0.90                 # also applies to total filesystem fill after reclaim
+keep_clean = true                   # keep destaged copies as a read cache until space is needed
+promo_share = 0.20                  # cache segments
+gc_live_below = 0.5
+scrub_period = "7d"
+# on_full = "reject"                # "reject" | "evict"; only without a [cold] section (hot-only)
+
+[cold]                              # 15 HDD per node
+drives = ["/mnt/hdd01", "/mnt/hdd02", "...", "/mnt/hdd15"]
+block_bytes = "1GiB"
+block_reserve = "1MiB"              # header, alignment and trailer room; larger objects are chains
+failure_domain = "node"
+ec = { k = 4, m = 4 }               # exactly one of `ec` and `replicas` (Q1)
+# replicas = 2
+max_shards_per_domain = 3           # default ceil((k+m) / domains)
+fill_limit = 0.85                   # no new stripe on a drive above it
+rebuild_fill_ceiling = 0.92         # rebuild writes only, while a stripe is below tolerance
+node_loss_reserve = true            # keep one node's raw free ...
+reserve_drives = 2                  # ... plus this many drives (default: one per remaining node)
+scrub_period = "30d"
+deep_scrub_fraction = 0.01
+parked_buffer_max = "256MiB"        # 10.7
+
+[destage]
+min_age = "1h"
+max_age = "3d"                      # "0s" with min_age "0s": destage as soon as a block seals
+partial_after = "7d"                # a stripe from fewer than k blocks (10.5)
+bytes_per_hour = "2TiB"             # background rate; urgent destage is not capped
+pack_window = 64                    # large files considered together for first-fit decreasing
+verify = "tail"                     # "none" | "tail" | "full"
+orphan_age = "1d"
+
+[promote]
+reads = 2
+window = "1h"
+max_object = "256MiB"
+bytes_per_hour = "100GiB"
+
+[gc]
+rewrite_below = 0.30
+rewrite_fill = 0.60
+rewrite_bytes_per_hour = "50GiB"
+classes_max = 8
+
+[rebuild]
+drive_delay = "10m"
+node_down_after = "24h"
+share = 0.25
+
+[index]
+engine = "fjall"                    # "fjall" | "redb" (10.2)
+flush_interval = "1m"               # flush with the replay mark
+
+[drive]                             # per-HDD scheduler, 10.7
+streams = 2
+write_streams = 1
+depth = 2
+chunk = "4MiB"
+slice_bytes = "32MiB"
+queue_max = 8
+write_min_share = 0.25
+slot_release_after = "1s"
+parked_max = 16
+demand_preempt_max = 4              # per second per drive
+stall_after = "10s"
+eio_limit = 3

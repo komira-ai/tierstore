@@ -18,6 +18,7 @@ mod client;
 mod cold_node;
 mod combined_node;
 mod config_file;
+mod conformance;
 mod drain;
 mod files;
 mod handoff;

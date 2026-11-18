@@ -39,7 +39,8 @@
 //! plain words; a `put` line that is not a request is answered `refused <why>` as any other.
 //! The mount's requests about the placements of the node (`place`, `mounted`, `flat`, `image`,
 //! `span`, `unplace`, `places-live`) are answered from the node's tree store, `mounted` and `flat`
-//! in one line of JSON (see [`mount`]).
+//! in one line of JSON (see [`mount`]). A `started` (the mount first looked into a tree, see
+//! `local_cache/starts.rs`) is answered `ok`, by a node with no tree store too.
 
 mod mount;
 mod put;
@@ -283,6 +284,10 @@ async fn session((cache, trees): (LocalCache, Option<TreeStore>), stream: UnixSt
                 path,
             }) => put::answer(&cache, &key, sha256, size, &path).await,
             Ok(Request::Mount(request)) => mount::answer(trees.as_ref(), request).await,
+            Ok(Request::Started { path }) => {
+                let _ = cache.run_started(&path);
+                "ok".to_owned()
+            }
             Err(refusal) => format!("refused {refusal}"),
         };
         if write

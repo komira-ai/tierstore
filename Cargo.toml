@@ -61,6 +61,8 @@ hyper-util = { version = "0.1.21", default-features = false }
 # `kill` and the descriptor calls of the test helpers (tierstore-testkit), and the `PROT_*`/`MAP_*`
 # constants of the memfd mappings of the Linux entry store (tierstore-entry).
 libc = "0.2.190"
+# The exhaustive interleaving checker of the models of tierstore-harness (tests only). MIT.
+loom = "0.7.2"
 md-5 = "0.11.0"
 # The NFSv3 and MOUNT protocol of `tierstore fs` on macOS (BSD-3-Clause), `nfsserve` 0.11.0 from
 # crates.io plus one commit on the branch `komira-0.11` of our fork: the transaction tracker
@@ -122,6 +124,8 @@ zerocopy = { version = "0.8.60", features = ["derive"] }
 # The workspace's own crates.
 # The object store trait and the S3 client, with no dependency on another workspace crate.
 objstore-s3 = { path = "crates/objstore-s3" }
+# The `ObjectStore` conformance suite, and its runner for an S3 endpoint (tests and reference runs).
+objstore-conformance = { path = "crates/objstore-conformance" }
 # The hot/cold object store library; it depends on no other workspace crate unless its `s3`
 # feature is on.
 tierstore = { path = "crates/tierstore" }
@@ -133,6 +137,8 @@ tierstore-testkit = { path = "crates/tierstore-testkit" }
 tierstore-format = { path = "crates/tierstore-format" }
 # The frozen interfaces of the read path on a build node, and their fakes.
 tierstore-fetch-api = { path = "crates/tierstore-fetch-api" }
+# The breadth-first explorer of the protocol models (its `explore` module).
+tierstore-model = { path = "crates/tierstore-model" }
 # The frozen interfaces of the storage tier, the peer protocol, and a fake storage node.
 tierstore-store-api = { path = "crates/tierstore-store-api" }
 # The FUSE library: dispatch with replies bound to their originating device.
@@ -141,6 +147,8 @@ tsfuse = { path = "crates/tsfuse" }
 tierstore-metrics = { path = "crates/tierstore-metrics" }
 # The hash pool: the `Verifier` of the read path (bounded, sha256 on dedicated threads).
 tierstore-hashpool = { path = "crates/tierstore-hashpool" }
+# The journal and snapshot of a node-cache entry (section 8), shared by the entry stores.
+tierstore-journal = { path = "crates/tierstore-journal" }
 # The node cache's entry store on Linux (T1); the mount client's tests serve from it.
 tierstore-entry = { path = "crates/tierstore-entry" }
 # The server side of the mount protocol (T5); the mount client's tests run against it.
@@ -202,4 +210,19 @@ incremental = false
 opt-level = 3
 
 [profile.test.package.tierstore-model]
+opt-level = 3
+
+# The models of tierstore-harness (loom and the breadth-first explorer) explore every
+# interleaving of their scenarios: optimise that crate in dev and test builds too.
+[profile.dev.package.tierstore-harness]
+opt-level = 3
+
+[profile.test.package.tierstore-harness]
+opt-level = 3
+
+# loom runs every execution of those models: optimised, they take seconds rather than minutes.
+[profile.dev.package.loom]
+opt-level = 3
+
+[profile.test.package.loom]
 opt-level = 3
