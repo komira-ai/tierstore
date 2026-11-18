@@ -125,7 +125,7 @@ fn a_crash_before_the_sync_leaves_none_of_the_batch_visible_after_restart() {
     let also = sim.append(1, "also", b"also lost");
     sim.run();
     assert!(lost.take().unwrap().is_err());
-    assert!(also.take().map_or(true, |r| r.is_err()));
+    assert!(also.take().is_none_or(|r| r.is_err()));
     sim.crash(1);
     sim.restart(1);
     let index = sim.node(1).index().clone();
