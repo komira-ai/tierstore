@@ -579,6 +579,9 @@ pub struct Extras {
     pub fstrim: Option<PathBuf>,
 }
 
+/// One test of a target, run under the guard.
+type Test<'a> = Box<dyn FnMut() -> Result<Vec<Row>, Error> + 'a>;
+
 /// Every test on every target, recording each row as it ends.
 ///
 /// # Errors
@@ -597,7 +600,7 @@ pub fn run(
         let x = extras.get(i).unwrap_or(&none);
         let trim = x.fstrim.as_deref().map(|m| (runner, m));
         let resident = |p: &Path| fincore(runner, p);
-        let mut tests: Vec<Box<dyn FnMut() -> Result<Vec<Row>, Error> + '_>> = Vec::new();
+        let mut tests: Vec<Test<'_>> = Vec::new();
         for kib in &cfg.blocks_kib {
             for jobs in &cfg.jobs {
                 for mode in &cfg.modes {
