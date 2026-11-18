@@ -1,7 +1,8 @@
-//! A read of a large object served from the cells of its pack's entry (section 9): the cells are
-//! ensured at `demand` class a window ahead of the read, and each is waited for, read and checked
-//! again after the read, in order (the reader protocol of 5.1). The entry is held while the read
-//! runs, and one cell is in memory at a time.
+//! A read of a large object served from the cells of its pack's entry (section 9). A present
+//! cell is read at once; the others are ensured at `demand` class a window ahead of the read and
+//! waited for. Each cell is checked again after its read (the reader protocol of 5.1), and the
+//! cells go out in order. The entry is held while the read runs, and one cell is in memory at a
+//! time.
 
 use std::sync::Arc;
 
@@ -69,23 +70,48 @@ impl Cells {
         .boxed()
     }
 
-    /// Asks the engine for the cells up to [`AHEAD_CELLS`] past `cell` once the read is within
-    /// half a window of the cells it asked for.
+    /// Asks the engine for the cells up to [`AHEAD_CELLS`] past `cell` that are not `present`,
+    /// once the read is within half a window of the cells it looked at: cells already present
+    /// cost the engine nothing (no fill starts for them, and no `LOCATE`).
     fn ensure_ahead(&mut self, cell: u32) {
         if cell.saturating_add(AHEAD_CELLS / 2) < self.ensured {
             return;
         }
         let from = self.ensured.max(cell);
         let to = cell.saturating_add(AHEAD_CELLS).min(self.last);
-        if from < to {
-            let run = CellRun {
-                first: from,
-                count: to - from,
-            };
-            let engine = &self.large.parts.engine;
-            engine.ensure(&self.spec, &[run], Class::Demand, self.job, Rank(0));
-            self.ensured = to;
+        self.ensured = self.ensured.max(to);
+        let entry = self.entry();
+        let present = |c: u32| {
+            let state = entry.as_ref().and_then(|entry| entry.state().load(c));
+            state.is_some_and(CellByte::servable)
+        };
+        let mut runs: Vec<CellRun> = Vec::new();
+        for c in (from..to).filter(|&c| !present(c)) {
+            match runs.last_mut() {
+                Some(run) if run.first + run.count == c => run.count += 1,
+                _ => runs.push(CellRun { first: c, count: 1 }),
+            }
         }
+        if !runs.is_empty() {
+            let engine = &self.large.parts.engine;
+            engine.ensure(&self.spec, &runs, Class::Demand, self.job, Rank(0));
+        }
+    }
+
+    /// The entry, held by the front's holder from the first time it is found open.
+    fn entry(&mut self) -> Option<Arc<dyn Entry>> {
+        if self.entry.is_none() {
+            let entry = self.large.parts.store.get(&self.spec.id)?;
+            entry.hold(self.large.parts.holder);
+            self.entry = Some(entry);
+        }
+        self.entry.clone()
+    }
+
+    /// Whether `cell` is `present` in the entry now.
+    fn present(&mut self, cell: u32) -> bool {
+        self.entry()
+            .is_some_and(|entry| entry.state().load(cell).is_some_and(CellByte::servable))
     }
 
     /// The bytes of `cell` in the pack.
@@ -106,13 +132,16 @@ impl Cells {
         self.ensure_ahead(cell);
         let range = self.range_of(cell);
         for _ in 0..READ_TRIES {
-            let engine = &self.large.parts.engine;
-            match engine.wait(&self.spec, range, self.job).await {
-                WaitOutcome::Ready => {}
-                WaitOutcome::Eio { cell } => {
-                    return Some(Err(self.failed(&format!("cell {cell} failed"))));
+            // A present cell is read at once; any other is waited for (a `demand` of it).
+            if !self.present(cell) {
+                let engine = self.large.parts.engine.clone();
+                match engine.wait(&self.spec, range, self.job).await {
+                    WaitOutcome::Ready => {}
+                    WaitOutcome::Eio { cell } => {
+                        return Some(Err(self.failed(&format!("cell {cell} failed"))));
+                    }
+                    WaitOutcome::Lost => return Some(Err(self.failed("the fill is lost"))),
                 }
-                WaitOutcome::Lost => return Some(Err(self.failed("the fill is lost"))),
             }
             let Some(bytes) = self.read(cell, range.len).await else {
                 continue;
@@ -135,15 +164,7 @@ impl Cells {
         reason = "a blocking task's panic is a bug, passed on"
     )]
     async fn read(&mut self, cell: u32, len: u64) -> Option<Bytes> {
-        let entry = match &self.entry {
-            Some(entry) => entry.clone(),
-            None => {
-                let entry = self.large.parts.store.get(&self.spec.id)?;
-                entry.hold(self.large.parts.holder);
-                self.entry = Some(entry.clone());
-                entry
-            }
-        };
+        let entry = self.entry()?;
         let reading = tokio::task::spawn_blocking(move || {
             let bytes = entry.read_cell(cell).ok()?;
             let still = entry.state().load(cell).is_some_and(CellByte::servable);

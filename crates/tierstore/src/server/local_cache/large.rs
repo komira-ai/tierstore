@@ -22,10 +22,11 @@
 //!   `obj/`, as before.
 //!
 //! A ranged GET is served from the `present` cells of the pack's entry, which may be partial (a
-//! `Partial` entry of section 9): the cells of the read are ensured at `demand` class a window at
-//! a time ([`AHEAD_CELLS`]), and each is waited for, read, and checked again after the read (the
-//! reader protocol of 5.1), in order, one cell in memory at a time. A cell that went away between
-//! its wait and its read is waited for again.
+//! `Partial` entry of section 9). A cell that is present is read at once, and the engine is not
+//! asked for it. The cells of the read that are not present are ensured at `demand` class a
+//! window at a time ([`AHEAD_CELLS`]) and waited for. Every cell is checked again after its read
+//! (the reader protocol of 5.1), and the cells go out in order, one in memory at a time. A cell
+//! that went away between its look and its read is waited for again.
 //!
 //! What the client is told: the object's size and `ETag` (the generation, 32 lowercase hex
 //! digits) come from the same answer as the bytes, before the first byte. A definitive miss is a
