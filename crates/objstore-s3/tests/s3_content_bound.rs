@@ -298,9 +298,12 @@ async fn an_object_naming_another_digest_is_replaced() {
     assert_eq!(stored.recorded, Some(sha256(b"abc")));
 }
 
-/// Asserts that an object longer than one PUT replaces a damaged one by a multipart upload whose
-/// parts carry their checksums and whose completion carries the condition: one upload completed,
-/// the object is the bytes, and the digest is recorded.
+/// Asserts that an object longer than one PUT replaces a damaged one by a multipart upload: one
+/// upload completed, the object is the bytes and the digest is recorded; and that the next write
+/// finds it whole and sends nothing, though the store keeps for it only a checksum of its parts
+/// (`COMPOSITE`), so the recorded digest is what judges it.
+/// Catches: a large object replaced again on every write because its composite checksum is taken
+/// for another digest.
 #[tokio::test]
 async fn a_damaged_object_is_replaced_by_a_multipart_upload() {
     let s3 = FakeS3::start().await;
@@ -317,6 +320,14 @@ async fn a_damaged_object_is_replaced_by_a_multipart_upload() {
     assert_eq!(s3.stats().completed, 1);
     assert_eq!(s3.object_len(&k), Some(SIX_MIB as u64));
     assert_eq!(store.head_sha256(&k).await.unwrap().recorded, Some(digest));
+
+    let (puts, posts) = (taken(&s3, "PUT"), taken(&s3, "POST"));
+    let again = store
+        .put_stream_content_bound(&k, SIX_MIB as u64, unread(), digest)
+        .await;
+    assert_eq!(again.unwrap(), ContentBoundPut::Existed);
+    assert_eq!((taken(&s3, "PUT"), taken(&s3, "POST")), (puts, posts));
+    assert_eq!(s3.stats().completed, 1);
 }
 
 /// Asserts that the write is refused before anything is sent on a store that does not claim
