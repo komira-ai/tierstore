@@ -25,6 +25,9 @@ aws-sdk-s3 = { version = "=1.96.0", default-features = false, features = ["behav
 # endpoint. Apache-2.0.
 aws-smithy-http-client = { version = "1.1.4", default-features = false, features = ["default-client"] }
 base64 = "0.23.1"
+# The placement hash of the cold-tier design (weighted rendezvous over blake3), used by the farm
+# measurement of placement (crates/tierstore-measure). CC0-1.0 OR Apache-2.0.
+blake3 = "1.8.2"
 bytes = "1.12.1"
 clap = { version = "4.6.7", features = ["derive"] }
 # CRC-64/NVMe, the checksum that the AWS SDKs send by default (MIT or Apache-2.0).

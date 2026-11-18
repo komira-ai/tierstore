@@ -1,0 +1,35 @@
+[package]
+name = "tierstore-measure"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+repository.workspace = true
+publish = false
+description = "The farm measurements that set the constants of the fetch, cache and cold-tier design: HDDs, the cache device, silo ranged GETs, a cold-tier prototype, writes and churn, CPU, node facts."
+
+[[bin]]
+name = "ts-measure"
+path = "src/main.rs"
+
+[dependencies]
+blake3.workspace = true
+clap.workspace = true
+crc32c.workspace = true
+futures.workspace = true
+objstore-s3.workspace = true
+rustix = { workspace = true, features = ["fs", "net", "pipe"] }
+serde.workspace = true
+serde_json.workspace = true
+sha2.workspace = true
+thiserror.workspace = true
+tokio = { workspace = true, features = ["rt", "rt-multi-thread", "time"] }
+
+[dev-dependencies]
+bytes.workspace = true
+objstore-s3 = { workspace = true, features = ["testkit"] }
+tierstore-testkit.workspace = true
+tokio = { workspace = true, features = ["macros"] }
+
+[lints]
+workspace = true
