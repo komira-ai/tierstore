@@ -198,7 +198,7 @@ fn a_three_block_chain_needs_two_counters_after_the_first() {
 }
 
 #[test]
-fn a_chain_with_more_blocks_than_the_counter_space_is_refused_from_every_first_block() {
+fn a_chain_is_refused_exactly_when_its_last_block_would_pass_the_node_s_counters() {
     // The default geometry with the largest object: about 2^34 blocks, which still fit counter 0.
     let g = BlockGeometry::DEFAULT;
     let c = g.chain(id(0), u64::MAX).unwrap();
@@ -215,6 +215,44 @@ fn a_chain_with_more_blocks_than_the_counter_space_is_refused_from_every_first_b
         ))
     );
     assert!(tiny.chain(id(1), COUNTER_MAX).is_ok());
+    // More blocks than there are counters (2^64 - 1 one-byte slices): refused from any first
+    // block, counter 0 included, never wrapped into an accepted chain.
+    let past = block_err("the chain's blocks pass the node's last block id");
+    for first in [0, 1, COUNTER_MAX] {
+        assert_eq!(tiny.chain(id(first), u64::MAX), Err(past.clone()));
+    }
+    // The default geometry near the last counter: the largest object's chain fits exactly when
+    // its last block is counter COUNTER_MAX.
+    let last_first = COUNTER_MAX - (c.blocks() - 1);
+    assert!(g.chain(id(last_first), u64::MAX).is_ok());
+    assert_eq!(g.chain(id(last_first + 1), u64::MAX), Err(past.clone()));
+    assert_eq!(g.chain(id(COUNTER_MAX), u64::MAX), Err(past));
+}
+
+#[test]
+fn a_range_at_the_end_of_an_object_of_u64_max_bytes_is_covered_without_overflow() {
+    // The slice grid passes u64::MAX in the last slice: `covering` must clip to the object.
+    let g = BlockGeometry::DEFAULT;
+    let c = g.chain(id(0), u64::MAX).unwrap();
+    let last = c.blocks() - 1;
+    let start = last * g.max_object();
+    let got = c.covering(u64::MAX - 5, 5).unwrap();
+    assert_eq!(
+        got,
+        vec![Slice {
+            index: last,
+            block: id(last),
+            object_offset: u64::MAX - 5,
+            slice_offset: u64::MAX - 5 - start,
+            len: 5,
+        }]
+    );
+    let whole_last = c.slice(last).unwrap();
+    assert_eq!(whole_last.len, u64::MAX - start);
+    assert_eq!(
+        c.covering(start, u64::MAX - start).unwrap(),
+        vec![whole_last]
+    );
 }
 
 // ---- blocks and slices ----

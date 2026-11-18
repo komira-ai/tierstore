@@ -162,8 +162,9 @@ impl BlockGeometry {
         }
         let slice = self.max_object();
         let blocks = size.div_ceil(slice);
-        // `blocks >= 2`, and the last block's counter must stay a counter.
-        if first.counter() > COUNTER_MAX - (blocks - 1) {
+        // `blocks >= 2`, and the last block's counter must stay a counter. `first.counter()` is
+        // at most `COUNTER_MAX`, so the subtraction does not underflow.
+        if blocks - 1 > COUNTER_MAX - first.counter() {
             return Err(invalid("the chain's blocks pass the node's last block id"));
         }
         Ok(Chain { first, size, slice })
@@ -254,7 +255,8 @@ impl Chain {
         while at < end {
             let index = at / self.slice;
             let start = index * self.slice;
-            let slice_end = (start + self.slice).min(end);
+            // The last slice of an object near `u64::MAX` bytes may end past `u64::MAX` on the grid.
+            let slice_end = start.saturating_add(self.slice).min(end);
             out.push(Slice {
                 index,
                 block: BlockId::from_raw(self.first.raw() + index),
