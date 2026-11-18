@@ -16,8 +16,8 @@ use std::time::SystemTime;
 use bytes::Bytes;
 use futures::{StreamExt as _, stream};
 use objstore_s3::{
-    BodyStream, ByteRange, Capabilities, KeyPrefix, ListPage, ListToken, ObjectInfo, ObjectKey,
-    ObjectStore, ObjectStoreError, PageSize, listing,
+    BodyStream, ByteRange, Capabilities, ContentBoundPut, KeyPrefix, ListPage, ListToken,
+    ObjectInfo, ObjectKey, ObjectStore, ObjectStoreError, PageSize, listing,
 };
 
 /// A store with only the required methods: objects in a map, and `list` answering the
@@ -27,6 +27,8 @@ struct MapStore {
     objects: Mutex<BTreeMap<String, Bytes>>,
     pages: Mutex<VecDeque<ListPage>>,
     asked: Mutex<Vec<Option<ListToken>>>,
+    /// `put_new` refuses a key that has an object, as a store with conditional writes does.
+    create_only: bool,
 }
 
 impl ObjectStore for MapStore {
@@ -40,10 +42,11 @@ impl ObjectStore for MapStore {
         body: Bytes,
         _retain_until: Option<SystemTime>,
     ) -> Result<(), ObjectStoreError> {
-        self.objects
-            .lock()
-            .unwrap()
-            .insert(key.as_str().to_owned(), body);
+        let mut objects = self.objects.lock().unwrap();
+        if self.create_only && objects.contains_key(key.as_str()) {
+            return Err(ObjectStoreError::AlreadyExists(key.clone()));
+        }
+        objects.insert(key.as_str().to_owned(), body);
         Ok(())
     }
 
@@ -146,6 +149,28 @@ async fn the_default_put_stream_gathers_the_body_into_put_new() {
         "the body of a streamed write failed: the body ended after 2 of its 5 bytes"
     );
     assert!(store.objects.lock().unwrap().get("seg/short").is_none());
+}
+
+/// Asserts that the default `put_stream_content_bound` is `put_stream`: a new key is `Created`
+/// with the body's bytes, a key a create-only store refuses is `Existed` and keeps its object
+/// (nothing is replaced), and a body of the wrong length fails as `put_stream` does.
+#[tokio::test]
+async fn the_default_content_bound_put_is_put_stream() {
+    let store = MapStore {
+        create_only: true,
+        ..MapStore::default()
+    };
+    let (k, digest) = (key("cas/l/one"), [7u8; 32]);
+    let made = store.put_stream_content_bound(&k, 5, pieces(&["he", "llo"]), digest);
+    assert_eq!(made.await.unwrap(), ContentBoundPut::Created);
+    let again = store.put_stream_content_bound(&k, 5, pieces(&["other"]), digest);
+    assert_eq!(again.await.unwrap(), ContentBoundPut::Existed);
+    let all = ByteRange::new(0, 5).unwrap();
+    assert_eq!(store.get_range(&k, all).await.unwrap(), "hello");
+    let short = store
+        .put_stream_content_bound(&key("cas/l/two"), 5, pieces(&["he"]), digest)
+        .await;
+    assert!(matches!(short.unwrap_err(), ObjectStoreError::Body(_)));
 }
 
 /// Asserts that the default `may_hold` answers `true` for any key, present or not: a

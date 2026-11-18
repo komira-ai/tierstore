@@ -37,6 +37,16 @@ pub struct StoredSha256 {
     pub recorded: Option<[u8; 32]>,
 }
 
+/// The headers of a single PUT that names the SHA-256 of its body: the checksum for the store to
+/// check (`x-amz-checksum-sha256`, base64) and the digest for it to record (`x-amz-meta-sha256`,
+/// hex).
+pub(super) fn digest_headers(sha256: &[u8; 32]) -> [(&'static str, String); 2] {
+    [
+        ("x-amz-checksum-sha256", base64_of(sha256)),
+        (SHA256_META, hex::encode(sha256)),
+    ]
+}
+
 /// The 32 bytes `text` is the base64 of, if it is.
 fn from_base64(text: &str) -> Option<[u8; 32]> {
     use base64::Engine as _;
@@ -88,11 +98,8 @@ impl S3Store {
             ));
         }
         if self.sends_whole(len) {
-            let headers = vec![
-                ("if-none-match", "*".to_owned()),
-                ("x-amz-checksum-sha256", base64_of(sha256)),
-                (SHA256_META, hex::encode(sha256)),
-            ];
+            let mut headers = vec![("if-none-match", "*".to_owned())];
+            headers.extend(digest_headers(sha256));
             return self.put_whole_with(key, len, body, headers, true).await;
         }
         let rule = Rule::Create;
@@ -111,10 +118,23 @@ impl S3Store {
     /// [`ObjectStoreError::NotFound`] if no object has the key.
     /// [`ObjectStoreError::Protocol`] if the answer lacks a size.
     pub async fn head_sha256(&self, key: &ObjectKey) -> Result<StoredSha256, ObjectStoreError> {
+        let (stored, _) = self.head_sha256_tagged(key).await?;
+        Ok(stored)
+    }
+
+    /// [`head_sha256`](Self::head_sha256), with the entity tag of the answer as the store sends it
+    /// (quotes included), if it sends one: the tag of the object judged.
+    pub(super) async fn head_sha256_tagged(
+        &self,
+        key: &ObjectKey,
+    ) -> Result<(StoredSha256, Option<String>), ObjectStoreError> {
         retrying(&self.conn.tuning, move || self.head_sha256_once(key)).await
     }
 
-    async fn head_sha256_once(&self, key: &ObjectKey) -> Result<StoredSha256, ObjectStoreError> {
+    async fn head_sha256_once(
+        &self,
+        key: &ObjectKey,
+    ) -> Result<(StoredSha256, Option<String>), ObjectStoreError> {
         let headers = vec![("x-amz-checksum-mode", "ENABLED".to_owned())];
         let resp = self
             .conn
@@ -136,11 +156,13 @@ impl S3Store {
             .filter(|_| whole)
             .and_then(from_base64);
         let recorded = header(&resp, SHA256_META).and_then(from_hex);
-        Ok(StoredSha256 {
+        let etag = header(&resp, "etag").map(str::to_owned);
+        let stored = StoredSha256 {
             size,
             checksum,
             recorded,
-        })
+        };
+        Ok((stored, etag))
     }
 }
 
