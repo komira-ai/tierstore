@@ -330,10 +330,11 @@ impl<B: Backend> KvIndex<B> {
             .transpose()
     }
 
-    /// Records a committed stripe free: the stripe's data blocks are `Freed`. Whether the table
-    /// held the stripe (a free of a stripe it never saw is recorded once its descriptor arrives:
-    /// the descriptor is then refused, so the caller keeps the free and retries). The unlink of
-    /// each shard is the caller's, which then calls [`KvIndex::apply_free`] for each data block.
+    /// Records a committed stripe free: the stripe's data blocks are `Freed`, and a descriptor of
+    /// the stripe is refused from then on. Whether the table held the stripe: for a stripe it
+    /// never saw nothing is recorded and the answer is `false`, so the caller keeps the free and
+    /// applies it again once the descriptor has arrived. The unlink of each shard is the caller's,
+    /// which then calls [`KvIndex::apply_free`] for each data block.
     pub fn apply_stripe_free(&self, free: &StripeFree) -> Result<bool, IndexError> {
         let _w = self.lock_write();
         let mut txn = self.txn();

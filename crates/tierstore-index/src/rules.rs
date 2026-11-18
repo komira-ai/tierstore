@@ -11,6 +11,8 @@
 //!   key under membership views that differ (10.5 step 4), and either answer is a defect the
 //!   conflict counter reports.
 //! - A relocate applies only while the entry holds the generation and stamp it moves.
+//! - Of one record seen at several places (the record, then its relocate), the blocks the entry is
+//!   not in are kept in `prior_blocks` whichever was seen first.
 
 use tierstore_format::block::BlockGeometry;
 use tierstore_format::ids::BlockId;
@@ -135,10 +137,15 @@ pub(crate) fn record(
         None => Some(new.clone()),
         Some(Held::Tomb(t)) => (new.stamp >= *t).then(|| new.clone()),
         Some(Held::Live(cur)) => {
+            let same_record = cur.generation == new.generation && cur.stamp == new.stamp;
             if !supersedes(new, cur) {
-                return None;
+                return if same_record {
+                    remember_blocks(geometry, cur, new)
+                } else {
+                    None
+                };
             }
-            if cur.generation == new.generation && cur.stamp == new.stamp {
+            if same_record {
                 Some(moved(
                     geometry,
                     cur,
@@ -153,8 +160,27 @@ pub(crate) fn record(
     }
 }
 
-/// A relocate of `(generation, stamp)` to `to`: the entry it makes, or `None` when the key does
-/// not hold that record (deleted, replaced) or already points at `to`.
+/// `cur` after a record of its own generation and stamp that it supersedes (the record of a block
+/// the entry was relocated out of, met after the relocate): the blocks of that record join
+/// `prior_blocks`, so a tombstone of the key names them whatever the order the facts came in.
+/// `None` when they were all known already.
+fn remember_blocks(geometry: BlockGeometry, cur: &IndexEntry, old: &IndexEntry) -> Option<IndexEntry> {
+    let here: Vec<BlockId> = contrib(geometry, cur).into_iter().map(|(b, _)| b).collect();
+    let mut prior = cur.prior_blocks.clone();
+    prior.extend(contrib(geometry, old).into_iter().map(|(b, _)| b));
+    prior.extend_from_slice(&old.prior_blocks);
+    prior.retain(|b| !here.contains(b));
+    prior.sort();
+    prior.dedup();
+    (prior != cur.prior_blocks).then(|| IndexEntry {
+        prior_blocks: prior,
+        ..cur.clone()
+    })
+}
+
+/// A relocate of `(generation, stamp)` to `to`: the entry the key holds and the entry the relocate
+/// makes of it, or `None` when the key does not hold that record (deleted, replaced) or already
+/// points at `to`.
 #[must_use]
 pub(crate) fn relocate(
     geometry: BlockGeometry,
@@ -162,18 +188,13 @@ pub(crate) fn relocate(
     generation: tierstore_format::ids::Generation,
     stamp: Stamp,
     to: EntryLocation,
-) -> Option<IndexEntry> {
+) -> Option<(IndexEntry, IndexEntry)> {
     match held {
         Some(Held::Live(cur))
             if cur.generation == generation && cur.stamp == stamp && cur.location != to =>
         {
-            Some(moved(
-                geometry,
-                cur,
-                to,
-                cur.flags.with(RecordFlags::RELOCATE),
-                &[],
-            ))
+            let next = moved(geometry, cur, to, cur.flags.with(RecordFlags::RELOCATE), &[]);
+            Some((cur.clone(), next))
         }
         _ => None,
     }

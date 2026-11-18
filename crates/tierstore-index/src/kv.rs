@@ -393,10 +393,8 @@ impl<B: Backend> KvIndex<B> {
         let geometry = self.cfg.geometry;
         match rules::relocate(geometry, held.as_ref(), generation, stamp, to) {
             None => Ok(Applied::Unchanged),
-            Some(next) => {
-                if let Some(Held::Live(cur)) = &held {
-                    txn.count(geometry, cur, false)?;
-                }
+            Some((cur, next)) => {
+                txn.count(geometry, &cur, false)?;
                 txn.count(geometry, &next, true)?;
                 txn.set_held(key, &Held::Live(next));
                 Ok(Applied::Changed)
@@ -594,11 +592,11 @@ impl<B: Backend> Index for KvIndex<B> {
         let _w = self.lock_write();
         let mut txn = self.txn();
         let held = txn.held(key)?;
-        let held = match held {
-            Some(Held::Live(e)) if self.in_dropped(&e) => None,
-            other => other,
+        let visible = match &held {
+            Some(Held::Live(e)) if self.in_dropped(e) => None,
+            other => other.as_ref(),
         };
-        let outcome = rules::put(held.as_ref(), &entry);
+        let outcome = rules::put(visible, &entry);
         if outcome == PutOutcome::Created {
             if let Some(Held::Live(cur)) = &held {
                 txn.count(self.cfg.geometry, cur, false)?;

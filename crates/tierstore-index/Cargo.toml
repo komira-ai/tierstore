@@ -24,3 +24,7 @@ tierstore-testkit.workspace = true
 
 [lints]
 workspace = true
+
+[[bin]]
+name = "tierstore-index-measure"
+path = "src/bin/tierstore-index-measure.rs"

@@ -540,3 +540,453 @@ pub(crate) fn decode_pos(buf: &[u8]) -> Result<PosRow, IndexError> {
     d.end()?;
     Ok(PosRow { target, reports })
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn generation_of(b: u8) -> Generation {
+        Generation([b; 16])
+    }
+
+    fn large() -> LargeFile {
+        LargeFile {
+            key_hash: KeyHash([3; 16]),
+            generation: generation_of(4),
+            size: 5_000_000_000,
+        }
+    }
+
+    fn entry(location: EntryLocation, prior: &[u64], promoted: Option<HotClean>) -> IndexEntry {
+        IndexEntry {
+            generation: generation_of(7),
+            location,
+            length: 1234,
+            stamp: Stamp::from_raw(0x0102_0304_0506),
+            flags: RecordFlags(3),
+            prior_blocks: prior.iter().map(|b| BlockId::from_raw(*b)).collect(),
+            promoted,
+        }
+    }
+
+    fn hot() -> HotClean {
+        HotClean {
+            node: NodeId(9),
+            boot: 11,
+            seq: 12,
+            offset: 13,
+        }
+    }
+
+    fn block_loc() -> EntryLocation {
+        EntryLocation::Block {
+            block: BlockId::from_raw(0x0100_0000_0000_0002),
+            offset: 4096,
+        }
+    }
+
+    fn row(position: Option<(NodeId, u64)>, names: Vec<Named>) -> TombRow {
+        TombRow {
+            generation: generation_of(1),
+            names,
+            position,
+        }
+    }
+
+    /// The operation and the reason of a store error, read from its message.
+    fn store_reason<T: std::fmt::Debug>(r: Result<T, IndexError>) -> (String, String) {
+        let text = r.expect_err("an error").to_string();
+        let (op, reason) = text
+            .strip_prefix("index store: ")
+            .and_then(|rest| rest.split_once(": "))
+            .expect("the message of a store error");
+        (op.to_string(), reason.to_string())
+    }
+
+    fn truncations_fail<T: std::fmt::Debug>(
+        bytes: &[u8],
+        decode: impl Fn(&[u8]) -> Result<T, IndexError>,
+    ) {
+        for n in 0..bytes.len() {
+            let (_, reason) = store_reason(decode(&bytes[..n]));
+            assert_eq!(
+                reason,
+                "value is truncated",
+                "cut at {n} of {}",
+                bytes.len()
+            );
+        }
+        decode(bytes).expect("the whole value decodes");
+    }
+
+    fn trailing_fails<T: std::fmt::Debug>(
+        bytes: &[u8],
+        decode: impl Fn(&[u8]) -> Result<T, IndexError>,
+    ) {
+        let mut longer = bytes.to_vec();
+        longer.push(0);
+        assert_eq!(store_reason(decode(&longer)).1, "trailing bytes");
+    }
+
+    fn version_fails<T: std::fmt::Debug>(
+        bytes: &[u8],
+        decode: impl Fn(&[u8]) -> Result<T, IndexError>,
+    ) {
+        let mut other = bytes.to_vec();
+        other[0] = VALUE_VERSION + 1;
+        assert_eq!(store_reason(decode(&other)).1, "unknown value version");
+    }
+
+    fn all_entries() -> Vec<Held> {
+        vec![
+            Held::Live(entry(block_loc(), &[], None)),
+            Held::Live(entry(block_loc(), &[5, 6], Some(hot()))),
+            Held::Live(entry(EntryLocation::Large(large()), &[8], None)),
+            Held::Live(entry(
+                EntryLocation::Chain {
+                    first: BlockId::from_raw(77),
+                },
+                &[],
+                Some(hot()),
+            )),
+            Held::Tomb(Stamp::from_raw(99)),
+        ]
+    }
+
+    #[test]
+    fn held_values_of_every_kind_round_trip() {
+        for h in all_entries() {
+            assert_eq!(decode_held(&encode_held(&h)).expect("decodes"), h);
+        }
+    }
+
+    #[test]
+    fn every_truncation_of_a_held_value_is_an_error() {
+        for h in all_entries() {
+            truncations_fail(&encode_held(&h), decode_held);
+        }
+    }
+
+    #[test]
+    fn held_value_with_unknown_version_or_trailing_bytes_is_an_error() {
+        for h in all_entries() {
+            let bytes = encode_held(&h);
+            version_fails(&bytes, decode_held);
+            trailing_fails(&bytes, decode_held);
+        }
+    }
+
+    #[test]
+    fn held_value_with_unknown_entry_tag_is_an_error() {
+        let mut bytes = encode_held(&Held::Tomb(Stamp::from_raw(1)));
+        bytes[1] = 9;
+        let (op, reason) = store_reason(decode_held(&bytes));
+        assert_eq!(
+            (op.as_str(), reason.as_str()),
+            ("decode entry", "unknown entry tag")
+        );
+    }
+
+    #[test]
+    fn held_value_with_unknown_location_tag_is_an_error() {
+        let mut bytes = encode_held(&Held::Live(entry(block_loc(), &[], None)));
+        bytes[36] = 9;
+        assert_eq!(store_reason(decode_held(&bytes)).1, "unknown location kind");
+    }
+
+    #[test]
+    fn held_value_with_unknown_promoted_tag_is_an_error() {
+        let mut bytes = encode_held(&Held::Live(entry(block_loc(), &[], None)));
+        let last = bytes.len() - 1;
+        bytes[last] = 9;
+        assert_eq!(store_reason(decode_held(&bytes)).1, "unknown promoted tag");
+    }
+
+    #[test]
+    fn live_counts_round_trip_and_reject_damage() {
+        let c = LiveCount {
+            entries: 3,
+            bytes: 1 << 40,
+        };
+        let bytes = encode_live(c);
+        assert_eq!(decode_live(&bytes).expect("decodes"), c);
+        truncations_fail(&bytes, decode_live);
+        trailing_fails(&bytes, decode_live);
+        version_fails(&bytes, decode_live);
+    }
+
+    #[test]
+    fn replay_marks_round_trip_and_reject_damage() {
+        let empty = ReplayMark::default();
+        assert_eq!(decode_mark(&encode_mark(&empty)).expect("decodes"), empty);
+        let m = ReplayMark {
+            open_segments: vec![(BlockId::from_raw(1), 10), (BlockId::from_raw(2), 20)],
+            tomb_cursors: vec![(NodeId(0), 5), (NodeId(255), 6)],
+        };
+        let bytes = encode_mark(&m);
+        assert_eq!(decode_mark(&bytes).expect("decodes"), m);
+        truncations_fail(&bytes, decode_mark);
+        trailing_fails(&bytes, decode_mark);
+        version_fails(&bytes, decode_mark);
+    }
+
+    #[test]
+    fn u64_values_round_trip_and_name_the_value_in_errors() {
+        let bytes = encode_u64(u64::MAX);
+        assert_eq!(decode_u64(&bytes, "decode x").expect("decodes"), u64::MAX);
+        truncations_fail(&bytes, |b| decode_u64(b, "decode x"));
+        let mut longer = bytes;
+        longer.push(1);
+        let (op, reason) = store_reason(decode_u64(&longer, "decode x"));
+        assert_eq!(
+            (op.as_str(), reason.as_str()),
+            ("decode x", "trailing bytes")
+        );
+    }
+
+    #[test]
+    fn id_keys_are_big_endian_and_decode_back() {
+        assert_eq!(id_key(0x0102), vec![0, 0, 0, 0, 0, 0, 1, 2]);
+        assert_eq!(id_of(&id_key(u64::MAX - 1)).expect("an id"), u64::MAX - 1);
+        assert_eq!(block_key(BlockId::from_raw(5)), id_key(5));
+        assert_eq!(stripe_key(StripeId::from_raw(6)), id_key(6));
+        assert!(block_key(BlockId::from_raw(1)) < block_key(BlockId::from_raw(256)));
+    }
+
+    #[test]
+    fn id_of_a_key_that_is_not_8_bytes_is_an_error() {
+        for key in [&[][..], &[1; 7][..], &[1; 9][..]] {
+            let (op, reason) = store_reason(id_of(key));
+            assert_eq!(
+                (op.as_str(), reason.as_str()),
+                ("decode id key", "key is not 8 bytes")
+            );
+        }
+    }
+
+    fn names() -> Vec<Named> {
+        vec![
+            Named::Block(BlockId::from_raw(0x0200_0000_0000_0001)),
+            Named::LargeFile(large()),
+            Named::Unknown {
+                kind: 9,
+                bytes: vec![1, 2, 3],
+            },
+            Named::Unknown {
+                kind: 200,
+                bytes: Vec::new(),
+            },
+        ]
+    }
+
+    #[test]
+    fn names_of_every_kind_round_trip_through_their_key_form() {
+        for n in names() {
+            let key = named_key(&n);
+            assert_eq!(named_of(&key).expect("decodes"), (n, key.len()));
+        }
+    }
+
+    #[test]
+    fn name_keys_carry_kind_and_big_endian_length_and_none_is_a_prefix_of_another() {
+        let key = named_key(&Named::Block(BlockId::from_raw(1)));
+        assert_eq!(key, vec![1, 0, 8, 0, 0, 0, 0, 0, 0, 0, 1]);
+        assert_eq!(named_key(&Named::LargeFile(large())).len(), 3 + 40);
+        let all: Vec<Vec<u8>> = names().iter().map(named_key).collect();
+        for (i, a) in all.iter().enumerate() {
+            for (j, b) in all.iter().enumerate().filter(|(j, _)| *j != i) {
+                assert!(!b.starts_with(a), "{i} is a prefix of {j}");
+            }
+        }
+    }
+
+    #[test]
+    fn name_of_the_wrong_length_for_its_kind_is_an_error() {
+        let short_block = named_key(&Named::Unknown {
+            kind: NAMED_BLOCK,
+            bytes: vec![0; 7],
+        });
+        let long_large = named_key(&Named::Unknown {
+            kind: NAMED_LARGE,
+            bytes: vec![0; 41],
+        });
+        for key in [short_block, long_large] {
+            let (op, reason) = store_reason(named_of(&key));
+            assert_eq!(
+                (op.as_str(), reason.as_str()),
+                ("decode name", "name has the wrong length")
+            );
+        }
+    }
+
+    #[test]
+    fn truncated_name_is_an_error() {
+        let key = named_key(&Named::Block(BlockId::from_raw(1)));
+        for n in 0..key.len() {
+            let (op, reason) = store_reason(named_of(&key[..n]));
+            assert_eq!(
+                (op.as_str(), reason.as_str()),
+                ("decode name", "name is truncated")
+            );
+        }
+    }
+
+    #[test]
+    fn name_decoding_stops_after_its_own_bytes() {
+        let mut key = named_key(&Named::Block(BlockId::from_raw(1)));
+        let used = key.len();
+        key.extend_from_slice(&[9, 9]);
+        assert_eq!(
+            named_of(&key).expect("decodes"),
+            (Named::Block(BlockId::from_raw(1)), used)
+        );
+    }
+
+    #[test]
+    fn tomb_position_keys_round_trip_and_sort_by_origin_then_sequence() {
+        let k = pos_key(NodeId(7), 0x0102);
+        assert_eq!(k, vec![7, 0, 0, 0, 0, 0, 0, 1, 2]);
+        assert_eq!(pos_of(&k).expect("decodes"), (NodeId(7), 0x0102));
+        assert!(pos_key(NodeId(1), 9) < pos_key(NodeId(2), 1));
+        assert!(pos_key(NodeId(1), 255) < pos_key(NodeId(1), 256));
+    }
+
+    #[test]
+    fn tomb_position_key_of_the_wrong_length_is_an_error() {
+        for key in [&[][..], &[0; 8][..], &[0; 10][..]] {
+            let (op, reason) = store_reason(pos_of(key));
+            assert_eq!(
+                (op.as_str(), reason.as_str()),
+                ("decode tomb position", "key is not 9 bytes")
+            );
+        }
+    }
+
+    fn tomb_rows() -> Vec<(Stamp, TombRow)> {
+        vec![
+            (Stamp::from_raw(10), row(None, Vec::new())),
+            (Stamp::from_raw(20), row(Some((NodeId(3), 44)), names())),
+            (Stamp::from_raw(30), row(None, names())),
+        ]
+    }
+
+    #[test]
+    fn tombstone_rows_round_trip_with_names_of_every_kind_and_positions() {
+        assert_eq!(
+            decode_tombs(&encode_tombs(&[])).expect("decodes"),
+            Vec::new()
+        );
+        let rows = tomb_rows();
+        assert_eq!(decode_tombs(&encode_tombs(&rows)).expect("decodes"), rows);
+    }
+
+    #[test]
+    fn every_truncation_of_tombstone_rows_is_an_error() {
+        truncations_fail(&encode_tombs(&tomb_rows()), decode_tombs);
+    }
+
+    #[test]
+    fn tombstone_rows_with_unknown_version_or_trailing_bytes_are_an_error() {
+        let bytes = encode_tombs(&tomb_rows());
+        version_fails(&bytes, decode_tombs);
+        trailing_fails(&bytes, decode_tombs);
+    }
+
+    #[test]
+    fn tombstone_row_with_unknown_position_tag_is_an_error() {
+        let mut bytes = encode_tombs(&[(Stamp::from_raw(1), row(None, Vec::new()))]);
+        let last = bytes.len() - 1;
+        bytes[last] = 9;
+        assert_eq!(store_reason(decode_tombs(&bytes)).1, "unknown position tag");
+    }
+
+    #[test]
+    fn tombstone_row_with_a_name_that_does_not_decode_is_an_error() {
+        let mut e = Enc::new();
+        e.u32(1).u64(5).bytes(&generation_of(1).0).u32(1);
+        e.blob(&named_key(&Named::Unknown {
+            kind: NAMED_BLOCK,
+            bytes: vec![0; 3],
+        }));
+        e.u8(0);
+        assert_eq!(
+            store_reason(decode_tombs(&e.finish())).1,
+            "name has the wrong length"
+        );
+    }
+
+    #[test]
+    fn tombstone_row_with_bytes_after_a_name_is_an_error() {
+        let mut blob = named_key(&Named::Block(BlockId::from_raw(1)));
+        blob.push(0);
+        let mut e = Enc::new();
+        e.u32(1)
+            .u64(5)
+            .bytes(&generation_of(1).0)
+            .u32(1)
+            .blob(&blob)
+            .u8(0);
+        let (op, reason) = store_reason(decode_tombs(&e.finish()));
+        assert_eq!(
+            (op.as_str(), reason.as_str()),
+            ("decode tombstones", "name has trailing bytes")
+        );
+    }
+
+    fn pos_rows() -> Vec<PosRow> {
+        let mut with_reports = PosRow {
+            target: Some((b"key/one".to_vec(), Stamp::from_raw(77))),
+            reports: [0; 32],
+        };
+        with_reports.add(NodeId(0));
+        with_reports.add(NodeId(255));
+        vec![PosRow::default(), with_reports]
+    }
+
+    #[test]
+    fn position_rows_round_trip_with_and_without_a_target() {
+        for p in pos_rows() {
+            assert_eq!(decode_pos(&encode_pos(&p)).expect("decodes"), p);
+        }
+    }
+
+    #[test]
+    fn every_truncation_of_a_position_row_is_an_error() {
+        for p in pos_rows() {
+            truncations_fail(&encode_pos(&p), decode_pos);
+        }
+    }
+
+    #[test]
+    fn position_row_with_unknown_version_or_trailing_bytes_is_an_error() {
+        for p in pos_rows() {
+            let bytes = encode_pos(&p);
+            version_fails(&bytes, decode_pos);
+            trailing_fails(&bytes, decode_pos);
+        }
+    }
+
+    #[test]
+    fn position_row_with_unknown_target_tag_is_an_error() {
+        let mut bytes = encode_pos(&PosRow::default());
+        bytes[1] = 9;
+        assert_eq!(store_reason(decode_pos(&bytes)).1, "unknown target tag");
+    }
+
+    #[test]
+    fn position_row_reports_are_one_bit_per_node_id_at_the_edges_of_a_byte() {
+        for id in [0u8, 7, 8, 255] {
+            let mut p = PosRow::default();
+            assert!(!p.has(NodeId(id)));
+            assert!(p.add(NodeId(id)), "first report of {id} is new");
+            assert!(!p.add(NodeId(id)), "second report of {id} is not new");
+            assert!(p.has(NodeId(id)));
+            let set: Vec<usize> = (0..32).filter(|i| p.reports[*i] != 0).collect();
+            assert_eq!(set, vec![usize::from(id / 8)]);
+            assert_eq!(p.reports[usize::from(id / 8)], 1 << (id % 8));
+            for other in 0..=u8::MAX {
+                assert_eq!(p.has(NodeId(other)), other == id);
+            }
+        }
+    }
+}
