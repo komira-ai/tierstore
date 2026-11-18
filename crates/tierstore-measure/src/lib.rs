@@ -17,30 +17,61 @@
 //!   steady-state churn with eviction ([`write`], [`churn`]); C-6, drive facts and the object-size
 //!   distribution ([`facts`], [`sizes`]); C-7, placement ([`placement`]).
 //! - D, CPU rates of the hashes ([`cpu`]); E, node facts ([`facts`]).
+//!
+//! The arms are Linux only (they read block devices, /proc and /sys, and use `O_DIRECT`,
+//! `posix_fadvise`, `fdatasync`, hole punching and `sendfile`). On another system the crate has
+//! only [`cli::main`], which says so and exits 2 (`src/unsupported.rs`).
 
+#[cfg(target_os = "linux")]
 pub mod blockdev;
+#[cfg(target_os = "linux")]
 pub mod cache;
+#[cfg(target_os = "linux")]
 pub mod churn;
+#[cfg(target_os = "linux")]
 pub mod cli;
+#[cfg(not(target_os = "linux"))]
+#[path = "unsupported.rs"]
+pub mod cli;
+#[cfg(target_os = "linux")]
 pub mod clock;
+#[cfg(target_os = "linux")]
 pub mod cold;
+#[cfg(target_os = "linux")]
 pub mod cpu;
+#[cfg(target_os = "linux")]
 pub mod diskstats;
+#[cfg(target_os = "linux")]
 pub mod error;
+#[cfg(target_os = "linux")]
 pub mod facts;
+#[cfg(target_os = "linux")]
 pub mod guard;
+#[cfg(target_os = "linux")]
 pub mod hdd;
+#[cfg(target_os = "linux")]
 pub mod io;
+#[cfg(target_os = "linux")]
 pub mod loopfs;
+#[cfg(target_os = "linux")]
 pub mod placement;
+#[cfg(target_os = "linux")]
 pub mod report;
+#[cfg(target_os = "linux")]
 pub mod run;
+#[cfg(target_os = "linux")]
 pub mod silo;
+#[cfg(target_os = "linux")]
 pub mod sizes;
+#[cfg(target_os = "linux")]
 pub mod stats;
+#[cfg(target_os = "linux")]
 #[cfg(test)]
 mod testutil;
+#[cfg(target_os = "linux")]
 pub mod workload;
+#[cfg(target_os = "linux")]
 pub mod write;
 
+#[cfg(target_os = "linux")]
 pub use error::Error;

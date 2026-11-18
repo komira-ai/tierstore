@@ -54,12 +54,12 @@ mod sweep;
 #[cfg(any(target_os = "linux", test))]
 mod upload;
 
-#[cfg(any(target_os = "linux", test))]
+#[cfg(target_os = "linux")]
 pub(in crate::server) use error::OpenError;
 pub(in crate::server) use store::PutSettings;
-#[cfg(any(target_os = "linux", test))]
+#[cfg(target_os = "linux")]
 pub(in crate::server) use store::StagedStore;
-#[cfg(any(target_os = "linux", test))]
+#[cfg(target_os = "linux")]
 pub(in crate::server) use upload::Uploader;
 
 #[cfg(test)]

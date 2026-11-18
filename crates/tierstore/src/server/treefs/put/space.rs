@@ -70,6 +70,7 @@ const STAGED_MODE: u16 = 0o600;
 const COMMITTED_MODE: u16 = 0o400;
 
 /// How often the sweep of the store runs.
+#[cfg(target_os = "linux")]
 pub(in crate::server) const SWEEP_EVERY: Duration = Duration::from_secs(60);
 
 /// The attributes of an inode of the put directory, as a frontend tells them.
@@ -221,6 +222,7 @@ impl PutSpace {
     }
 
     /// The store.
+    #[cfg(target_os = "linux")]
     pub(in crate::server) fn store(&self) -> &StagedStore {
         &self.store
     }

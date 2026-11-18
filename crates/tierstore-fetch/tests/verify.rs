@@ -96,7 +96,8 @@ async fn a_corrupt_cell_is_refetched_once_from_the_other_hot_replica() {
         vec![(H1, 0, 4 * MIB), (H2, 2 * MIB, MIB)],
         "one part, then the refetch of exactly the corrupt cell from the other replica"
     );
-    let stats = rig.engine.stats();
+    // A wait is ready once its cells are present; the op counts them just after (`until`).
+    let stats = rig.until(|s| s.bytes_published >= size).await;
     assert_eq!(stats.cells_mismatched, 1);
     assert_eq!(stats.cells_bad, 0);
     assert_eq!(stats.gets(tierstore_fetch::GetKind::Retry), 1);
@@ -398,7 +399,9 @@ async fn a_recheck_cell_with_wrong_bytes_is_fetched_again() {
         rig.entry_bytes(&pack, 0, MIB),
         pack.bytes[..MIB as usize].to_vec()
     );
-    assert_eq!(rig.engine.stats().cells_published, 1);
+    // A wait is ready once its cells are present; the op counts them just after (`until`).
+    let stats = rig.until(|s| s.cells_published >= 1).await;
+    assert_eq!(stats.cells_published, 1);
 }
 
 /// A `digest=none` pack has nothing to re-hash against: a `recheck` cell is fetched again even

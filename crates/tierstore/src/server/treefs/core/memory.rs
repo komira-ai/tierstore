@@ -36,8 +36,10 @@ use std::sync::{Arc, Condvar, Mutex};
 
 use crate::tree_manifest::TreeDigest;
 
+#[cfg(any(target_os = "linux", test))]
+use super::ino;
 use super::placed::Unread;
-use super::{Core, Errno, Loaded, ino, locked};
+use super::{Core, Errno, Loaded, locked};
 
 /// A read that took at least this long, in milliseconds of the core's clock, is said at warn.
 const SLOW_READ_MS: u64 = 1_000;

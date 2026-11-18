@@ -272,6 +272,7 @@ impl FillClient {
     /// Asks for the `size` bytes of the file at `path`, which hash to `sha256`, to be put as the
     /// object `key`, create-only, waiting at most `wait` for the answer; the answer is the line of
     /// JSON the socket gives.
+    #[cfg(any(target_os = "linux", test))]
     pub(super) fn put(
         &self,
         (key, sha256, size): (&str, &str, u64),
