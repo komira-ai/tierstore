@@ -1,0 +1,31 @@
+[package]
+name = "tierstore-hashpool"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+repository.workspace = true
+publish.workspace = true
+description = "The hash pool of the tierstore read path (docs/design/fetch-cache-serve.md, 3.3 and 4.7): the Verifier of tierstore-fetch-api, a bounded queue of 32 cells hashed with ring's sha256 on dedicated threads, fills before recheck cells."
+
+[dependencies]
+# `Verifier` is used as `dyn`, so its async method is boxed (as tierstore-fetch-api declares it).
+async-trait.workspace = true
+# A cell's bytes, handed back to the caller after the verdict.
+bytes.workspace = true
+# The one-shot channel a worker thread answers a cell on; runtime-agnostic, like the trait.
+futures.workspace = true
+# sha256, about twice the `sha2` crate on the build nodes' CPUs, which have no SHA-NI (4.7).
+ring.workspace = true
+# The frozen `Verifier` trait and its types, and the injected clock.
+tierstore-fetch-api.workspace = true
+thiserror.workspace = true
+
+[dev-dependencies]
+# An independent sha256, so the per-cell tests do not check ring against itself.
+sha2.workspace = true
+# Runs the pool's futures in the tests of the threads.
+tokio = { workspace = true, features = ["macros", "rt", "rt-multi-thread"] }
+
+[lints]
+workspace = true

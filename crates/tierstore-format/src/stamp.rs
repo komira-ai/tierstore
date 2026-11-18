@@ -3,7 +3,8 @@
 //! A stamp is a `u64`: the high 48 bits are wall-clock milliseconds since the Unix epoch, the low
 //! 16 bits a counter. Stamps order by their `u64`, so "the newest fact about a key wins" is a
 //! comparison of two stamps. The clock that advances a stamp on every local event and merges the
-//! stamp of every peer message (`max`, then increment) is T-S2's; this module fixes the layout.
+//! stamp of every peer message (`max`, then increment) is [`crate::hlc::Hlc`]; this module fixes
+//! the layout.
 
 use crate::FormatError;
 
