@@ -60,6 +60,9 @@ hyper-util = { version = "0.1.21", default-features = false }
 # `kill` and the descriptor calls of the test helpers (tierstore-testkit), and the `PROT_*`/`MAP_*`
 # constants of the memfd mappings of the Linux entry store (tierstore-entry).
 libc = "0.2.190"
+# The exhaustive interleaving checker of the reader/evictor protocol of the node cache
+# (tierstore-evict's tests only). MIT.
+loom = "0.7.2"
 md-5 = "0.11.0"
 # The NFSv3 and MOUNT protocol of `tierstore fs` on macOS (BSD-3-Clause), `nfsserve` 0.11.0 from
 # crates.io plus one commit on the branch `komira-0.11` of our fork: the transaction tracker
@@ -143,6 +146,8 @@ tierstore-metrics = { path = "crates/tierstore-metrics" }
 tierstore-hashpool = { path = "crates/tierstore-hashpool" }
 # The journal and snapshot of a node-cache entry (section 8), shared by the entry stores.
 tierstore-journal = { path = "crates/tierstore-journal" }
+# The node cache's entry store on Linux (T1).
+tierstore-entry = { path = "crates/tierstore-entry" }
 # The previous release: `v0.3.17`, the tag of the commit below, taken from the public repository
 # at that commit alone (the `rev` is what pins it; a tag can be moved). Used only by the
 # dev-dependencies of `crates/compat`. When a release is made, move both to the new release's
