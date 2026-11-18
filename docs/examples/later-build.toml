@@ -20,11 +20,3 @@ backend = "cache"                     # a caching proxy of the storage cluster (
 
 [prepare]                             # the jobscheduler mount provider (section 6)
 socket = "/run/tierstore/provider.sock"
-
-[profile]                             # learned access profiles (6.1)
-s3_key_file = "/etc/tierstore/profiles.key"   # an S3 key that may write and delete only under _profiles/
-max_entries = 65536
-min_session = "1s"
-fetch_deadline = "50ms"
-max_age = "30d"
-keep = 3
