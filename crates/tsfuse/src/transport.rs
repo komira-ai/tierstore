@@ -146,23 +146,43 @@ impl Transport for DevReader {
     }
 }
 
+/// What one `read(2)` of a device came to.
+#[derive(Debug)]
+pub(crate) enum ReadOutcome {
+    /// A request, the end of the reader, or a read error.
+    Got(io::Result<Received>),
+    /// Nothing to read (`EAGAIN`: another clone took the request): wait for readiness again.
+    Wait,
+    /// Read again at once (`EINTR`: a signal; `ENOENT`: the request was interrupted while it
+    /// was being read).
+    Again,
+}
+
+/// The outcome of the result of one `read(2)` of a device.
+pub(crate) fn classify(read: rustix::io::Result<usize>) -> ReadOutcome {
+    match read {
+        // `/dev/fuse` never reads 0 bytes; a socket standing in for it does once its peer is
+        // gone.
+        Ok(0) => ReadOutcome::Got(Ok(Received::Ended(ReaderEnd::Unmounted))),
+        Ok(n) => ReadOutcome::Got(Ok(Received::Request(n))),
+        Err(Sys::AGAIN) => ReadOutcome::Wait,
+        Err(Sys::INTR | Sys::NOENT) => ReadOutcome::Again,
+        // The kernel's `fuse_dev_do_read`: `ENODEV` once unmounted, `ECONNABORTED` once
+        // aborted.
+        Err(Sys::NODEV) => ReadOutcome::Got(Ok(Received::Ended(ReaderEnd::Unmounted))),
+        Err(Sys::CONNABORTED) => ReadOutcome::Got(Ok(Received::Ended(ReaderEnd::Aborted))),
+        Err(e) => ReadOutcome::Got(Err(e.into())),
+    }
+}
+
 /// One read of `device`: the request or the end, or `None` to wait for readiness again.
 pub(crate) fn read_once(device: &DevFd, buf: &mut [u8]) -> Option<io::Result<Received>> {
     loop {
-        let got = match device.read(buf) {
-            // `/dev/fuse` never reads 0 bytes; a socket standing in for it does once its peer
-            // is gone.
-            Ok(0) => Some(Ok(Received::Ended(ReaderEnd::Unmounted))),
-            Ok(n) => Some(Ok(Received::Request(n))),
-            // Another clone took the request.
-            Err(Sys::AGAIN) => None,
-            // A signal, or a request interrupted while it was being read: read again.
-            Err(Sys::INTR | Sys::NOENT) => continue,
-            Err(Sys::NODEV) => Some(Ok(Received::Ended(ReaderEnd::Unmounted))),
-            Err(Sys::CONNABORTED) => Some(Ok(Received::Ended(ReaderEnd::Aborted))),
-            Err(e) => Some(Err(e.into())),
-        };
-        return got;
+        match classify(device.read(buf)) {
+            ReadOutcome::Got(received) => return Some(received),
+            ReadOutcome::Wait => return None,
+            ReadOutcome::Again => {}
+        }
     }
 }
 
@@ -299,6 +319,113 @@ mod tests {
     fn sends(d: &Arc<Dev>) -> usize {
         *d.1.lock()
             .unwrap_or_else(std::sync::PoisonError::into_inner)
+    }
+
+    #[test]
+    fn each_answer_of_a_read_is_its_outcome() {
+        use ReadOutcome::{Again, Got, Wait};
+        use Received::{Ended, Request};
+        assert!(matches!(classify(Ok(56)), Got(Ok(Request(56)))));
+        assert!(matches!(
+            classify(Ok(0)),
+            Got(Ok(Ended(ReaderEnd::Unmounted)))
+        ));
+        assert!(matches!(
+            classify(Err(Sys::NODEV)),
+            Got(Ok(Ended(ReaderEnd::Unmounted)))
+        ));
+        assert!(matches!(
+            classify(Err(Sys::CONNABORTED)),
+            Got(Ok(Ended(ReaderEnd::Aborted)))
+        ));
+        assert!(matches!(classify(Err(Sys::AGAIN)), Wait));
+        assert!(matches!(classify(Err(Sys::INTR)), Again));
+        assert!(matches!(classify(Err(Sys::NOENT)), Again));
+        let failed = format!("{:?}", classify(Err(Sys::INVAL)));
+        assert!(failed.starts_with("Got(Err("), "{failed}");
+    }
+
+    /// A transport that delivers a scripted sequence.
+    struct Scripted {
+        script: std::collections::VecDeque<io::Result<(Vec<u8>, Option<ReaderEnd>)>>,
+        device: Arc<Dev>,
+    }
+
+    impl Transport for Scripted {
+        async fn receive(&mut self, buf: &mut [u8]) -> io::Result<Received> {
+            let (bytes, end) = self.script.pop_front().unwrap_or(Ok((Vec::new(), None)))?;
+            buf[..bytes.len()].copy_from_slice(&bytes);
+            Ok(end.map_or(Received::Request(bytes.len()), Received::Ended))
+        }
+
+        fn device(&self) -> Arc<dyn ReplyDevice> {
+            self.device.clone()
+        }
+    }
+
+    /// Answers every request `ENOSYS` and counts them.
+    #[derive(Default)]
+    struct Count(Mutex<usize>);
+
+    impl Fs for Count {
+        fn handle(&self, _req: Request<'_>, replier: crate::Replier) -> crate::Handled {
+            *self
+                .0
+                .lock()
+                .unwrap_or_else(std::sync::PoisonError::into_inner) += 1;
+            let _ = replier.error(Errno::ENOSYS);
+            crate::Handled::Done
+        }
+    }
+
+    #[test]
+    fn a_reader_whose_connection_is_aborted_ends_aborted_after_serving_what_it_read() {
+        let device = Arc::new(Dev(None, Mutex::new(0)));
+        let mut getattr = vec![0u8; 56];
+        getattr[0] = 56;
+        getattr[4] = 3;
+        getattr[8] = 7;
+        let script = [
+            Ok((getattr, None)),
+            Ok((Vec::new(), Some(ReaderEnd::Aborted))),
+        ];
+        let transport = Scripted {
+            script: script.into_iter().collect(),
+            device: device.clone(),
+        };
+        let (fs, tokens, stop) = (Count::default(), Tokens::new(), Stop::default());
+        let every = Every(vec![device.clone()]);
+        let mut buf = vec![0u8; 8192];
+        let end =
+            futures::executor::block_on(serve(transport, &fs, &tokens, &stop, &every, &mut buf));
+        assert_eq!(end.unwrap(), ReaderEnd::Aborted);
+        assert_eq!(
+            *fs.0
+                .lock()
+                .unwrap_or_else(std::sync::PoisonError::into_inner),
+            1
+        );
+        assert_eq!(
+            sends(&device),
+            1,
+            "the request read before the abort was answered"
+        );
+    }
+
+    #[test]
+    fn a_read_error_of_the_transport_ends_the_reader_with_it() {
+        let device = Arc::new(Dev(None, Mutex::new(0)));
+        let script = [Err(io::Error::from_raw_os_error(5))];
+        let transport = Scripted {
+            script: script.into_iter().collect(),
+            device,
+        };
+        let (fs, tokens, stop) = (Count::default(), Tokens::new(), Stop::default());
+        let every = Every(Vec::new());
+        let mut buf = vec![0u8; 8192];
+        let end =
+            futures::executor::block_on(serve(transport, &fs, &tokens, &stop, &every, &mut buf));
+        assert_eq!(end.unwrap_err().raw_os_error(), Some(5));
     }
 
     #[test]
