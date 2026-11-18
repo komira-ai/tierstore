@@ -512,6 +512,49 @@ impl<B: Backend> KvIndex<B> {
         }
     }
 
+    /// A relocate (a GC rewrite, the relocate of a pack block's entries at its descriptor commit,
+    /// 10.5): the entry of `key` moves to `to` only while it holds `generation` at `stamp`; a key
+    /// deleted or replaced meanwhile is skipped. Whether the entry moved.
+    pub fn relocate(
+        &self,
+        key: &[u8],
+        generation: tierstore_format::ids::Generation,
+        stamp: Stamp,
+        to: EntryLocation,
+    ) -> Result<bool, IndexError> {
+        let _w = self.lock_write();
+        let mut txn = self.txn();
+        let applied = self.apply_relocate(&mut txn, key, generation, stamp, to)?;
+        txn.commit()?;
+        Ok(matches!(applied, Applied::Changed))
+    }
+
+    /// A promoted copy (10.5): the entry of `key` gets the hint `copy` only while it holds
+    /// `generation` at `stamp` (a tombstone or a newer record that raced the promotion wins).
+    /// Whether the hint was set.
+    pub fn promote(
+        &self,
+        key: &[u8],
+        generation: tierstore_format::ids::Generation,
+        stamp: Stamp,
+        copy: tierstore_store_api::index::HotClean,
+    ) -> Result<bool, IndexError> {
+        let _w = self.lock_write();
+        let mut txn = self.txn();
+        match txn.held(key)? {
+            Some(Held::Live(mut e)) if e.generation == generation && e.stamp == stamp => {
+                if e.promoted == Some(copy) {
+                    return Ok(false);
+                }
+                e.promoted = Some(copy);
+                txn.set_held(key, &Held::Live(e));
+                txn.commit()?;
+                Ok(true)
+            }
+            _ => Ok(false),
+        }
+    }
+
     /// Adds blocks to the in-memory set of dropped blocks once their drop is committed.
     pub(crate) fn note_dropped(&self, blocks: &[BlockId]) {
         if blocks.is_empty() {
