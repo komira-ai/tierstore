@@ -29,7 +29,7 @@ use tierstore_format::tomb::LargeFile;
 use tierstore_format::{crc32c, crc32c_append};
 use tierstore_index::backend::Backend;
 use tierstore_store_api::hot::{Acked, HotError, LargePut, Unavailable};
-use tierstore_store_api::index::{Index, EntryLocation, Fact, IndexEntry, Lookup};
+use tierstore_store_api::index::{EntryLocation, Fact, Index, IndexEntry, Lookup};
 use tierstore_store_api::proto::Envelope;
 use tierstore_store_api::sched::DriveClass;
 use tokio::sync::Notify;
@@ -58,7 +58,12 @@ struct Upload {
 }
 
 impl Upload {
-    fn header(&self, generation: Generation, stamp: tierstore_format::stamp::Stamp, key: &[u8]) -> RecordHeader {
+    fn header(
+        &self,
+        generation: Generation,
+        stamp: tierstore_format::stamp::Stamp,
+        key: &[u8],
+    ) -> RecordHeader {
         RecordHeader {
             flags: RecordFlags::default(),
             key_len: self.key_len,
@@ -150,12 +155,20 @@ impl<B: Backend + 'static> Node<B> {
     async fn unlink(&self, path: &str) {
         let (dev, p) = (Arc::clone(&self.dev), path.to_owned());
         // A file that cannot be removed now is removed by the next startup sweep.
-        let _ = self.sched.run(DriveClass::Write, move || dev.unlink(&p)).await;
+        let _ = self
+            .sched
+            .run(DriveClass::Write, move || dev.unlink(&p))
+            .await;
     }
 
     /// The create-only check of a large object under its key lock: `Ok(true)` to commit, `Ok(false)`
     /// when the key already holds this generation (identical).
-    fn large_check(&self, key: &[u8], generation: Generation, stamp: tierstore_format::stamp::Stamp) -> Result<bool, HotError> {
+    fn large_check(
+        &self,
+        key: &[u8],
+        generation: Generation,
+        stamp: tierstore_format::stamp::Stamp,
+    ) -> Result<bool, HotError> {
         match self.index.get(key) {
             Ok(Lookup::Live(e)) if e.generation == generation => Ok(false),
             Ok(Lookup::Live(e)) => Err(HotError::Conflict {
@@ -169,7 +182,13 @@ impl<B: Backend + 'static> Node<B> {
 
     /// Renames `up` to the object's name (never over an existing file: the same name is the
     /// same bytes), `fsync`s the directory and publishes the index entry.
-    async fn commit_large(&self, up: &str, key: &[u8], file: LargeFile, stamp: tierstore_format::stamp::Stamp) -> Result<(), HotError> {
+    async fn commit_large(
+        &self,
+        up: &str,
+        key: &[u8],
+        file: LargeFile,
+        stamp: tierstore_format::stamp::Stamp,
+    ) -> Result<(), HotError> {
         let name = HotName::Large(file).path();
         let (dev, from, to) = (Arc::clone(&self.dev), up.to_owned(), name.clone());
         self.sched
@@ -196,9 +215,7 @@ impl<B: Backend + 'static> Node<B> {
             key: key.to_vec(),
             entry,
         });
-        self.index
-            .replay(&mut facts)
-            .map_err(other_err("index"))?;
+        self.index.replay(&mut facts).map_err(other_err("index"))?;
         let now = self.clock.now_ms();
         let bytes = RECORD_HEADER_LEN as u64 + key.len() as u64 + file.size;
         self.lock().files.insert(
@@ -216,7 +233,15 @@ impl<B: Backend + 'static> Node<B> {
     }
 
     /// Sends the finished local file `path` (data from `data_at`, `size` bytes) to `node`.
-    async fn resend(&self, node: NodeId, offer: LargeOffer, path: &str, data_at: u64, size: u64, generation: Generation) -> bool {
+    async fn resend(
+        &self,
+        node: NodeId,
+        offer: LargeOffer,
+        path: &str,
+        data_at: u64,
+        size: u64,
+        generation: Generation,
+    ) -> bool {
         let Ok(env) = self.env(offer) else {
             return false;
         };
@@ -225,12 +250,22 @@ impl<B: Backend + 'static> Node<B> {
             let mut at = 0u64;
             while at < size {
                 let Ok(bytes) = self
-                    .read(DriveClass::Write, path, data_at + at, (CHUNK as u64).min(size - at))
+                    .read(
+                        DriveClass::Write,
+                        path,
+                        data_at + at,
+                        (CHUNK as u64).min(size - at),
+                    )
                     .await
                 else {
                     return;
                 };
-                if bytes.is_empty() || tx.send(LargeChunk::Data(Bytes::from(bytes.clone()))).await.is_err() {
+                if bytes.is_empty()
+                    || tx
+                        .send(LargeChunk::Data(Bytes::from(bytes.clone())))
+                        .await
+                        .is_err()
+                {
                     return;
                 }
                 at += bytes.len() as u64;
@@ -282,7 +317,10 @@ async fn tee<B: Backend + 'static>(n: &Node<B>, nonce: u64, outs: &mut [Out], ch
 }
 
 /// `HotStore::put_file`.
-pub(crate) async fn put_file<B: Backend + 'static>(n: &Arc<Node<B>>, put: LargePut) -> Result<Acked, HotError> {
+pub(crate) async fn put_file<B: Backend + 'static>(
+    n: &Arc<Node<B>>,
+    put: LargePut,
+) -> Result<Acked, HotError> {
     n.admit_put().await?;
     let LargePut {
         key,
@@ -376,7 +414,16 @@ pub(crate) async fn put_file<B: Backend + 'static>(n: &Arc<Node<B>>, put: LargeP
             .filter(|c| *c != n.id && !holders.contains(c) && view.live_nodes().any(|l| l.id == *c))
             .find(|c| *c != lagged)
             .unwrap_or(lagged);
-        if n.resend(target, offer.clone(), &up.path, data_at, up.size, generation).await {
+        if n.resend(
+            target,
+            offer.clone(),
+            &up.path,
+            data_at,
+            up.size,
+            generation,
+        )
+        .await
+        {
             holders.push(target);
         }
     }

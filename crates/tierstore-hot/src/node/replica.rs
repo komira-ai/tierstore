@@ -22,7 +22,7 @@ use tierstore_format::record::{decode_record, scan};
 use tierstore_index::backend::Backend;
 use tierstore_index::blocks::{BlockInfo, BlockState};
 use tierstore_store_api::hot::{ReplicaAck, ReplicaBatch, ReplicaReject};
-use tierstore_store_api::index::{Index, EntryLocation, Fact, IndexEntry};
+use tierstore_store_api::index::{EntryLocation, Fact, Index, IndexEntry};
 use tierstore_store_api::sched::DriveClass;
 
 use super::Node;
@@ -158,7 +158,11 @@ async fn open_copy<B: Backend + 'static>(
 /// The records of a batch that starts at `start` of `segment`, each with its end offset and the
 /// index entry it makes. A batch holds whole records; anything after the last one that decodes
 /// is not a record.
-pub(crate) fn records_of(segment: BlockId, start: u64, bytes: &[u8]) -> Vec<(u64, Vec<u8>, IndexEntry)> {
+pub(crate) fn records_of(
+    segment: BlockId,
+    start: u64,
+    bytes: &[u8],
+) -> Vec<(u64, Vec<u8>, IndexEntry)> {
     let found = scan(bytes);
     found
         .records

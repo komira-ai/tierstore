@@ -56,7 +56,11 @@ impl<B: Backend + 'static> HotNode<B> {
     }
 
     /// The key and data of the record at `offset` of segment `block`, its crcs checked.
-    pub async fn read_record(&self, block: BlockId, offset: u64) -> Result<(Vec<u8>, Bytes), ReadError> {
+    pub async fn read_record(
+        &self,
+        block: BlockId,
+        offset: u64,
+    ) -> Result<(Vec<u8>, Bytes), ReadError> {
         let file = HotName::Segment(block);
         let head = self
             .serve(

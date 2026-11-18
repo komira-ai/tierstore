@@ -41,10 +41,12 @@ impl<B: Backend + 'static> Node<B> {
         let dev = Arc::clone(&self.dev);
         let bytes = self
             .sched
-            .run(DriveClass::Write, move || match dev.read_at(&path, 0, 1 << 16) {
-                Ok(b) => Ok(Some(b)),
-                Err(e) if e.kind() == std::io::ErrorKind::NotFound => Ok(None),
-                Err(e) => Err(e),
+            .run(DriveClass::Write, move || {
+                match dev.read_at(&path, 0, 1 << 16) {
+                    Ok(b) => Ok(Some(b)),
+                    Err(e) if e.kind() == std::io::ErrorKind::NotFound => Ok(None),
+                    Err(e) => Err(e),
+                }
             })
             .await?
             .map_err(io_err("read seal state"))?;

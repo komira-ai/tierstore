@@ -31,7 +31,7 @@ use tierstore_index::KvIndex;
 use tierstore_index::backend::Backend;
 use tierstore_metrics::Hot;
 use tierstore_store_api::hot::{
-    AppendRecord, Acked, Committed, HotError, HotStore, LargePut, Promise, ReplicaAck,
+    Acked, AppendRecord, Committed, HotError, HotStore, LargePut, Promise, ReplicaAck,
     ReplicaBatch, ReplicaReject, SealReason, SealRefused, Unavailable,
 };
 use tierstore_store_api::index::Index;

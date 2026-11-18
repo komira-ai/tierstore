@@ -25,7 +25,7 @@ use tierstore_format::{FormatError, crc32c, crc32c_append};
 use tierstore_index::backend::Backend;
 use tierstore_index::blocks::{BlockInfo, BlockState};
 use tierstore_store_api::hot::{HotError, Unavailable};
-use tierstore_store_api::index::{Index, EntryLocation, Fact, IndexEntry};
+use tierstore_store_api::index::{EntryLocation, Fact, Index, IndexEntry};
 use tierstore_store_api::sched::DriveClass;
 
 use super::{FileInfo, FileKind, Node, io_err, other_err, unavailable};
@@ -141,7 +141,11 @@ impl<B: Backend + 'static> Node<B> {
             return Ok(());
         }
         let (dev, p) = (Arc::clone(&self.dev), path.clone());
-        let len = match self.sched.run(DriveClass::Write, move || dev.len(&p)).await? {
+        let len = match self
+            .sched
+            .run(DriveClass::Write, move || dev.len(&p))
+            .await?
+        {
             Ok(len) => len,
             Err(e) if e.kind() == std::io::ErrorKind::NotFound => return Ok(()),
             Err(e) => return Err(io_err("segment length")(e)),
@@ -240,9 +244,14 @@ impl<B: Backend + 'static> Node<B> {
 
     /// Appends the trailer of `[0, length)` to the copy, writes `blk/<id>.idx`, records the
     /// block as sealed and indexes its records.
-    async fn seal_here(self: &Arc<Self>, segment: BlockId, path: &str, length: u64) -> Result<(), HotError> {
-        let mut builder =
-            BlockBuilder::new(self.cfg.geometry, BlockKind::Segment).map_err(other_err("segment"))?;
+    async fn seal_here(
+        self: &Arc<Self>,
+        segment: BlockId,
+        path: &str,
+        length: u64,
+    ) -> Result<(), HotError> {
+        let mut builder = BlockBuilder::new(self.cfg.geometry, BlockKind::Segment)
+            .map_err(other_err("segment"))?;
         let mut at = 0u64;
         while at < length {
             let got = self
@@ -258,8 +267,11 @@ impl<B: Backend + 'static> Node<B> {
         let total = length + sealed.bytes.len() as u64;
         self.write_sync(path, length, Bytes::from(sealed.bytes.clone()))
             .await?;
-        self.replace(&HotName::BlockIndex(segment).path(), Bytes::from(sealed.bytes))
-            .await?;
+        self.replace(
+            &HotName::BlockIndex(segment).path(),
+            Bytes::from(sealed.bytes),
+        )
+        .await?;
         let hot_copies = match self.index.block(segment) {
             Ok(Some(info)) => info.hot_copies,
             _ => vec![self.id],
@@ -314,6 +326,9 @@ impl<B: Backend + 'static> Node<B> {
         }
         st.copies.remove(&segment);
         st.unsealed.remove(&segment);
+        // The seal state stays in `seals/`; a later prepare or batch reads it from there.
+        st.votes.remove(&segment);
+        st.rounds.remove(&segment);
         st.files.insert(
             path.to_owned(),
             FileInfo {

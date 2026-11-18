@@ -67,7 +67,10 @@ impl DirDev {
     }
 
     fn open_rw(&self, path: &str) -> io::Result<File> {
-        OpenOptions::new().read(true).write(true).open(self.at(path))
+        OpenOptions::new()
+            .read(true)
+            .write(true)
+            .open(self.at(path))
     }
 }
 

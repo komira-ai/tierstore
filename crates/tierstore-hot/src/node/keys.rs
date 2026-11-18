@@ -43,7 +43,10 @@ impl Locks {
     /// Names with a holder or a waiter (tests: the map does not grow).
     #[cfg(test)]
     pub(crate) fn len(&self) -> usize {
-        self.map.lock().unwrap_or_else(PoisonError::into_inner).len()
+        self.map
+            .lock()
+            .unwrap_or_else(PoisonError::into_inner)
+            .len()
     }
 }
 
@@ -52,7 +55,10 @@ impl Drop for Held {
         drop(self.guard.take());
         let mut map = self.map.lock().unwrap_or_else(PoisonError::into_inner);
         // The map's own handle is the last one: no holder and no waiter is left.
-        if map.get(&self.name).is_some_and(|e| Arc::strong_count(e) == 1) {
+        if map
+            .get(&self.name)
+            .is_some_and(|e| Arc::strong_count(e) == 1)
+        {
             map.remove(&self.name);
         }
     }

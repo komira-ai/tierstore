@@ -15,7 +15,12 @@ use tierstore_store_api::hot::Promise;
 
 /// The proposal for `promises`, or `None` when the sealer must not propose.
 #[must_use]
-pub fn choose(promises: &[Promise], replicas: u8, min_acks: u8, floor: u64) -> Option<SealProposal> {
+pub fn choose(
+    promises: &[Promise],
+    replicas: u8,
+    min_acks: u8,
+    floor: u64,
+) -> Option<SealProposal> {
     let accepted = promises
         .iter()
         .filter_map(|p| p.accepted)
@@ -36,10 +41,7 @@ pub fn choose(promises: &[Promise], replicas: u8, min_acks: u8, floor: u64) -> O
     let r = (copies.len() + usize::from(min_acks))
         .saturating_sub(usize::from(replicas))
         .max(1);
-    copies
-        .get(r - 1)
-        .copied()
-        .filter(|p| p.length >= floor)
+    copies.get(r - 1).copied().filter(|p| p.length >= floor)
 }
 
 #[cfg(test)]
@@ -80,9 +82,21 @@ mod tests {
     #[test]
     fn the_highest_accepted_proposal_wins_over_every_copy() {
         let mut a = copy(90, 90, 9);
-        a.accepted = Some((Ballot { round: 2, node: NodeId(2) }, prop(40, 4)));
+        a.accepted = Some((
+            Ballot {
+                round: 2,
+                node: NodeId(2),
+            },
+            prop(40, 4),
+        ));
         let mut b = voter();
-        b.accepted = Some((Ballot { round: 3, node: NodeId(1) }, prop(70, 7)));
+        b.accepted = Some((
+            Ballot {
+                round: 3,
+                node: NodeId(1),
+            },
+            prop(70, 7),
+        ));
         let c = copy(100, 100, 10);
         assert_eq!(choose(&[a, b, c], 3, 3, 0), Some(prop(70, 7)));
     }

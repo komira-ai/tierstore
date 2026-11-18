@@ -7,11 +7,11 @@
 use bytes::Bytes;
 use tierstore_fetch_api::ids::ByteRange;
 use tierstore_format::block::BlockBuilder;
+use tierstore_format::crc32c;
 use tierstore_format::digest::GenerationHasher;
 use tierstore_format::names::HotName;
 use tierstore_format::record::{RECORD_HEADER_LEN, RecordHeader};
 use tierstore_format::trailer::BlockKind;
-use tierstore_format::crc32c;
 use tierstore_index::backend::Backend;
 use tierstore_store_api::hot::HotError;
 use tierstore_store_api::sched::DriveClass;
@@ -49,7 +49,9 @@ fn good(f: &FileInfo, bytes: &[u8], geometry: tierstore_format::block::BlockGeom
             body.is_some_and(|data| {
                 let mut g = GenerationHasher::new();
                 g.update(data);
-                h.data_len == file.size && crc32c(data) == h.data_crc && g.finish() == file.generation
+                h.data_len == file.size
+                    && crc32c(data) == h.data_crc
+                    && g.finish() == file.generation
             })
         }),
     }

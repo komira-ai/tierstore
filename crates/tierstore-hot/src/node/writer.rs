@@ -36,8 +36,10 @@ use tierstore_format::seal::Ballot;
 use tierstore_format::trailer::BlockKind;
 use tierstore_index::backend::Backend;
 use tierstore_index::blocks::{BlockInfo, BlockState};
-use tierstore_store_api::hot::{Acked, AppendRecord, HotError, ReplicaBatch, SealReason, Unavailable};
-use tierstore_store_api::index::{Index, EntryLocation, IndexEntry, IndexError, Lookup};
+use tierstore_store_api::hot::{
+    Acked, AppendRecord, HotError, ReplicaBatch, SealReason, Unavailable,
+};
+use tierstore_store_api::index::{EntryLocation, Index, IndexEntry, IndexError, Lookup};
 use tierstore_store_api::proto::ReplicaAnswer;
 use tierstore_store_api::sched::DriveClass;
 use tokio::sync::{oneshot, watch};
@@ -334,12 +336,19 @@ impl<B: Backend + 'static> Node<B> {
         let mut st = self.lock();
         st.open.insert(k, Arc::clone(&seg));
         st.writing.insert(id, Arc::clone(&seg));
-        self.metrics.hot_open_segments.with(()).set(st.open.len() as f64);
+        self.metrics
+            .hot_open_segments
+            .with(())
+            .set(st.open.len() as f64);
         Ok(seg)
     }
 
     /// Queues `rec` on `seg` and starts its committer if none runs; `None` if `seg` is closed.
-    fn enqueue(self: &Arc<Self>, seg: &Arc<Seg>, rec: AppendRecord) -> Option<oneshot::Receiver<Outcome>> {
+    fn enqueue(
+        self: &Arc<Self>,
+        seg: &Arc<Seg>,
+        rec: AppendRecord,
+    ) -> Option<oneshot::Receiver<Outcome>> {
         let (tx, rx) = oneshot::channel();
         let start = {
             let mut s = seg.lock();
@@ -351,7 +360,8 @@ impl<B: Backend + 'static> Node<B> {
         };
         if start {
             let (n, seg) = (Arc::clone(self), Arc::clone(seg));
-            self.spawn.spawn(async move { n.commit_loop(seg).await }.boxed());
+            self.spawn
+                .spawn(async move { n.commit_loop(seg).await }.boxed());
         }
         Some(rx)
     }
@@ -363,7 +373,10 @@ impl<B: Backend + 'static> Node<B> {
         if st.open.get(&k).is_some_and(|s| s.id == seg.id) {
             st.open.remove(&k);
         }
-        self.metrics.hot_open_segments.with(()).set(st.open.len() as f64);
+        self.metrics
+            .hot_open_segments
+            .with(())
+            .set(st.open.len() as f64);
     }
 
     /// Closes `seg` for `why`, retires it, and seals it in the background unless another node
@@ -548,7 +561,13 @@ impl<B: Backend + 'static> Node<B> {
     }
 
     /// Publishes the batch's index entries and acknowledges its records.
-    fn acknowledge(self: &Arc<Self>, seg: &Arc<Seg>, taken: Vec<(Pending, u64)>, end: u64, copies: u8) {
+    fn acknowledge(
+        self: &Arc<Self>,
+        seg: &Arc<Seg>,
+        taken: Vec<(Pending, u64)>,
+        end: u64,
+        copies: u8,
+    ) {
         let mut acks = Vec::with_capacity(taken.len());
         for (p, offset) in taken {
             let entry = IndexEntry {

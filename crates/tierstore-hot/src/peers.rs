@@ -93,8 +93,12 @@ pub trait HotPeers: Send + Sync {
     ) -> Result<Envelope<LargeAnswer>, PeerError>;
 
     /// `GET /store/v1/hot/<file>` with `Range`: bytes of `node`'s copy of `file`.
-    async fn fetch(&self, node: NodeId, file: HotName, range: ByteRange)
-    -> Result<Bytes, PeerError>;
+    async fn fetch(
+        &self,
+        node: NodeId,
+        file: HotName,
+        range: ByteRange,
+    ) -> Result<Bytes, PeerError>;
 }
 
 /// Runs a background task of the hot store: a segment's committer, a replica's sender, an early

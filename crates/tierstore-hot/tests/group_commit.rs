@@ -23,7 +23,10 @@ fn records_queued_while_a_batch_syncs_go_out_together_in_the_next_one() {
     sim.net.hold(Some(1), 2, Kind::Replicate);
     let first = sim.append(1, &key, b"first");
     sim.run();
-    assert!(!first.done(), "acknowledged before the replicas made it durable");
+    assert!(
+        !first.done(),
+        "acknowledged before the replicas made it durable"
+    );
     let rest: Vec<_> = (0..5)
         .map(|i| {
             let k = sim.key_on(1, &format!("b{i}"));
@@ -42,7 +45,11 @@ fn records_queued_while_a_batch_syncs_go_out_together_in_the_next_one() {
     for h in rest {
         assert_eq!(h.take().unwrap().unwrap().copies, 3);
     }
-    assert_eq!(sim.net.batches(1, 2).len(), 2, "one batch, then one with the five queued");
+    assert_eq!(
+        sim.net.batches(1, 2).len(),
+        2,
+        "one batch, then one with the five queued"
+    );
     assert_eq!(sim.net.batches(1, 3).len(), 2);
     let seg = sim.node(1).open_segments()[0].id;
     let path = HotName::Segment(seg).path();
@@ -77,8 +84,14 @@ fn a_batch_never_exceeds_batch_max() {
         assert!(h.take().unwrap().is_ok());
     }
     let batches = sim.net.batches(1, 2);
-    assert!(batches.len() >= 5, "12 records of 3 KiB need at least 5 batches of 8 KiB");
-    assert!(batches.iter().all(|(_, len)| *len <= 8 << 10), "{batches:?}");
+    assert!(
+        batches.len() >= 5,
+        "12 records of 3 KiB need at least 5 batches of 8 KiB"
+    );
+    assert!(
+        batches.iter().all(|(_, len)| *len <= 8 << 10),
+        "{batches:?}"
+    );
 }
 
 #[test]
@@ -95,7 +108,10 @@ fn a_put_waits_for_min_acks_durable_copies_and_no_timer() {
     sim.run();
     let acked = h.take().unwrap().unwrap();
     assert_eq!(acked.copies, 2);
-    assert!(matches!(sim.node(1).index().get(key.as_bytes()).unwrap(), Lookup::Live(_)));
+    assert!(matches!(
+        sim.node(1).index().get(key.as_bytes()).unwrap(),
+        Lookup::Live(_)
+    ));
 }
 
 #[test]

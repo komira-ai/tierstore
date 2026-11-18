@@ -6,10 +6,7 @@
 //! Nothing here reads a clock or sleeps: time is a `ManualClock` the test moves, and a test
 //! waits for "nothing more can happen" ([`Sim::run`]), never for time to pass.
 
-#![allow(
-    dead_code,
-    reason = "each test binary uses part of the shared support"
-)]
+#![allow(dead_code, reason = "each test binary uses part of the shared support")]
 
 use std::collections::{BTreeMap, BTreeSet, VecDeque};
 use std::io;
@@ -18,13 +15,14 @@ use std::sync::{Arc, Mutex, MutexGuard, PoisonError};
 use std::task::Context;
 
 use bytes::Bytes;
+use futures::FutureExt;
 use futures::future::BoxFuture;
 use futures::stream::BoxStream;
 use futures::task::{ArcWake, waker_ref};
-use futures::FutureExt;
 use tierstore_fetch_api::clock::{Clock, ManualClock};
 use tierstore_fetch_api::ids::ByteRange;
 use tierstore_format::block::BlockGeometry;
+use tierstore_format::descriptor::{Code, ShardLoc};
 use tierstore_format::digest::hash64;
 use tierstore_format::ids::{DriveId, ExpiryClass, Generation, NodeId, StripeId};
 use tierstore_format::names::HotName;
@@ -44,7 +42,6 @@ use tierstore_store_api::peer::PeerError;
 use tierstore_store_api::placement::{Placement, PlacementError};
 use tierstore_store_api::proto::{CopyWire, Envelope, ReplicaAnswer, SealAnswer, SealMessage};
 use tierstore_store_api::view::{Admin, ClusterSettings, NodeState, NodeView, Role, View};
-use tierstore_format::descriptor::{Code, ShardLoc};
 
 fn lock<T>(m: &Mutex<T>) -> MutexGuard<'_, T> {
     m.lock().unwrap_or_else(PoisonError::into_inner)
@@ -120,7 +117,10 @@ impl HotDev for FakeDev {
             .0
             .list(&prefix)?
             .into_iter()
-            .filter_map(|p| p.strip_prefix(&prefix).map(|r| r.split('/').next().unwrap_or("").to_owned()))
+            .filter_map(|p| {
+                p.strip_prefix(&prefix)
+                    .map(|r| r.split('/').next().unwrap_or("").to_owned())
+            })
             .collect();
         names.dedup();
         Ok(names)
@@ -194,7 +194,10 @@ impl<T> Handle<T> {
 
 impl Exec {
     /// Spawns `fut` and returns where its result lands.
-    pub fn start<T: Send + 'static>(&self, fut: impl Future<Output = T> + Send + 'static) -> Handle<T> {
+    pub fn start<T: Send + 'static>(
+        &self,
+        fut: impl Future<Output = T> + Send + 'static,
+    ) -> Handle<T> {
         let out = Arc::new(Mutex::new(None));
         let o = Arc::clone(&out);
         self.spawn(
@@ -212,7 +215,8 @@ impl Exec {
     pub fn block<T: Send + 'static>(&self, fut: impl Future<Output = T> + Send + 'static) -> T {
         let h = self.start(fut);
         self.run();
-        h.take().expect("the future did not finish: something waits forever")
+        h.take()
+            .expect("the future did not finish: something waits forever")
     }
 }
 
@@ -273,14 +277,20 @@ impl Net {
     }
     /// Holds every message of `kind` to `to` (from `from`, or from anyone).
     pub fn hold(&self, from: Option<u8>, to: u8, kind: Kind) {
-        lock(&self.st).holds.push((from.map(NodeId), NodeId(to), kind));
+        lock(&self.st)
+            .holds
+            .push((from.map(NodeId), NodeId(to), kind));
     }
     pub fn unhold(&self) {
         lock(&self.st).holds.clear();
     }
     /// The messages held, in the order they arrived.
     pub fn held(&self) -> Vec<(NodeId, NodeId, Kind)> {
-        lock(&self.st).held.iter().map(|h| (h.from, h.to, h.kind)).collect()
+        lock(&self.st)
+            .held
+            .iter()
+            .map(|h| (h.from, h.to, h.kind))
+            .collect()
     }
     /// Delivers the `i`-th held message.
     pub fn release(&self, i: usize) {
@@ -299,7 +309,9 @@ impl Net {
     /// Loses the next `n` replies of `kind` from `from` to `to` (the message is delivered and
     /// handled; its answer never arrives).
     pub fn lose_replies(&self, from: u8, to: u8, kind: Kind, n: usize) {
-        lock(&self.st).lose.push((NodeId(from), NodeId(to), kind, n));
+        lock(&self.st)
+            .lose
+            .push((NodeId(from), NodeId(to), kind, n));
     }
     /// Messages sent so far of `kind` from `from` to `to`.
     pub fn sent(&self, from: u8, to: u8, kind: Kind) -> usize {
@@ -319,7 +331,11 @@ impl Net {
             .collect()
     }
     pub fn sent_kind(&self, kind: Kind) -> usize {
-        lock(&self.st).log.iter().filter(|(_, _, k)| *k == kind).count()
+        lock(&self.st)
+            .log
+            .iter()
+            .filter(|(_, _, k)| *k == kind)
+            .count()
     }
 
     fn add(&self, node: HotNode<MemBackend>) {
@@ -337,7 +353,12 @@ impl Net {
     }
 
     /// The target node if the request reaches it (after a hold, if one applies).
-    async fn deliver(&self, from: NodeId, to: NodeId, kind: Kind) -> Result<HotNode<MemBackend>, PeerError> {
+    async fn deliver(
+        &self,
+        from: NodeId,
+        to: NodeId,
+        kind: Kind,
+    ) -> Result<HotNode<MemBackend>, PeerError> {
         let rx = {
             let mut st = lock(&self.st);
             st.log.push((from, to, kind));
@@ -370,7 +391,10 @@ impl Net {
         if st.cuts.contains(&(from, to)) {
             return Err(Self::unreachable(to));
         }
-        st.nodes.get(&to).cloned().ok_or_else(|| Self::unreachable(to))
+        st.nodes
+            .get(&to)
+            .cloned()
+            .ok_or_else(|| Self::unreachable(to))
     }
 
     /// Whether the reply of `to` to `from` arrives.
@@ -419,18 +443,29 @@ fn env<T>(node: &HotNode<MemBackend>, body: T) -> Envelope<T> {
 
 #[async_trait::async_trait]
 impl HotPeers for SimPeers {
-    async fn replicate(&self, node: NodeId, batch: Envelope<ReplicaBatch>) -> Result<Envelope<ReplicaAnswer>, PeerError> {
+    async fn replicate(
+        &self,
+        node: NodeId,
+        batch: Envelope<ReplicaBatch>,
+    ) -> Result<Envelope<ReplicaAnswer>, PeerError> {
         self.live(node)?;
         let n = self.net.deliver(self.me, node, Kind::Replicate).await?;
-        lock(&self.net.st)
-            .batches
-            .push((self.me, node, batch.body.start, batch.body.bytes.len() as u64));
+        lock(&self.net.st).batches.push((
+            self.me,
+            node,
+            batch.body.start,
+            batch.body.bytes.len() as u64,
+        ));
         let answer = ReplicaAnswer::from(n.replicate(batch.body).await);
         self.net.reply(self.me, node, Kind::Replicate)?;
         Ok(env(&n, answer))
     }
 
-    async fn seal(&self, node: NodeId, msg: Envelope<SealMessage>) -> Result<Envelope<SealAnswer>, PeerError> {
+    async fn seal(
+        &self,
+        node: NodeId,
+        msg: Envelope<SealMessage>,
+    ) -> Result<Envelope<SealAnswer>, PeerError> {
         let kind = match msg.body {
             SealMessage::Prepare { .. } => Kind::Prepare,
             SealMessage::Accept { .. } => Kind::Accept,
@@ -484,7 +519,12 @@ impl HotPeers for SimPeers {
         Ok(env(&n, answer))
     }
 
-    async fn fetch(&self, node: NodeId, file: HotName, range: ByteRange) -> Result<Bytes, PeerError> {
+    async fn fetch(
+        &self,
+        node: NodeId,
+        file: HotName,
+        range: ByteRange,
+    ) -> Result<Bytes, PeerError> {
         self.live(node)?;
         let n = self.net.deliver(self.me, node, Kind::Fetch).await?;
         let got = n.serve(file, range).await;
@@ -517,7 +557,12 @@ impl Placement for Rendezvous {
         nodes.into_iter().map(|(_, id)| id).collect()
     }
 
-    fn stripe(&self, stripe: StripeId, _code: Code, _view: &View) -> Result<Vec<ShardLoc>, PlacementError> {
+    fn stripe(
+        &self,
+        stripe: StripeId,
+        _code: Code,
+        _view: &View,
+    ) -> Result<Vec<ShardLoc>, PlacementError> {
         Err(PlacementError::TooFewDomains { stripe, live: 0 })
     }
 }
@@ -705,7 +750,10 @@ impl Sim {
         let node = self.make(id);
         self.net.add(node.clone());
         let n = node.clone();
-        let report = self.exec.block(async move { n.start(None).await }).expect("start");
+        let report = self
+            .exec
+            .block(async move { n.start(None).await })
+            .expect("start");
         node.index().set_ready(true);
         report
     }
@@ -731,8 +779,11 @@ impl Sim {
     /// A stamp above every stamp handed out before.
     pub fn stamp(&mut self) -> Stamp {
         self.next_stamp += 1;
-        Stamp::from_parts(self.clock.now_ms() + 10_000_000, (self.next_stamp % 60_000) as u16)
-            .expect("stamp")
+        Stamp::from_parts(
+            self.clock.now_ms() + 10_000_000,
+            (self.next_stamp % 60_000) as u16,
+        )
+        .expect("stamp")
     }
 
     /// An append of `data` under `key`.
@@ -747,7 +798,12 @@ impl Sim {
     }
 
     /// Starts an append on node `id`.
-    pub fn append(&mut self, id: u8, key: &str, data: &[u8]) -> Handle<Result<tierstore_store_api::hot::Acked, tierstore_store_api::hot::HotError>> {
+    pub fn append(
+        &mut self,
+        id: u8,
+        key: &str,
+        data: &[u8],
+    ) -> Handle<Result<tierstore_store_api::hot::Acked, tierstore_store_api::hot::HotError>> {
         let rec = self.record(key, data);
         let node = self.node(id);
         self.exec.start(async move { node.append(rec).await })

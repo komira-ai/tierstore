@@ -76,9 +76,7 @@ impl<B: Backend + 'static> HotNode<B> {
             let len = self.file_len(&path).await?;
             let row = n.index.block(id).map_err(other_err("block table"))?;
             match (state.committed, row) {
-                (Some(p), Some(info))
-                    if info.state != BlockState::Open && info.length == len =>
-                {
+                (Some(p), Some(info)) if info.state != BlockState::Open && info.length == len => {
                     n.lock().files.insert(
                         path,
                         FileInfo {
@@ -99,7 +97,10 @@ impl<B: Backend + 'static> HotNode<B> {
         }
         let unsealed: Vec<_> = n.lock().unsealed.iter().copied().collect();
         for id in unsealed {
-            if sealer::seal_segment(n, id, SealReason::TakeOver).await.is_ok() {
+            if sealer::seal_segment(n, id, SealReason::TakeOver)
+                .await
+                .is_ok()
+            {
                 report.sealed += 1;
             }
         }

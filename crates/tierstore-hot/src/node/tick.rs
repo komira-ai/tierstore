@@ -65,8 +65,7 @@ impl<B: Backend + 'static> HotNode<B> {
                 let s = seg.lock();
                 let stalled = s.links.iter().any(|(node, l)| {
                     gone.contains(node)
-                        || l
-                            .since
+                        || l.since
                             .is_some_and(|t| now.saturating_sub(t) >= cfg.replica_stall_ms)
                 });
                 (stalled, s.written)

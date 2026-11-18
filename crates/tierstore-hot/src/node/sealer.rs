@@ -95,15 +95,14 @@ pub(crate) async fn seal<B: Backend + 'static>(
     let mut ballot = ballot;
     for _ in 0..SEAL_ROUNDS {
         n.saw_ballot(segment, ballot);
-        n.metrics.hot_seal_rounds_total.with(SealRound::Prepare).inc();
+        n.metrics
+            .hot_seal_rounds_total
+            .with(SealRound::Prepare)
+            .inc();
         let voters = n.voters();
         let need = majority(voters.len());
         let votes = n.ask(&voters, segment, ballot, Step::Prepare).await;
-        let floor = n
-            .lock()
-            .writing
-            .get(&segment)
-            .map_or(0, |s| s.lock().acked);
+        let floor = n.lock().writing.get(&segment).map_or(0, |s| s.lock().acked);
         let mut promises = Vec::new();
         let mut higher = None;
         for (node, v) in votes {
@@ -127,7 +126,9 @@ pub(crate) async fn seal<B: Backend + 'static>(
         let Some(proposal) = choose(&only, n.cfg.replicas, n.cfg.min_acks, floor) else {
             return Err(unavailable(Unavailable::TooFewCopies));
         };
-        let votes = n.ask(&voters, segment, ballot, Step::Accept(proposal)).await;
+        let votes = n
+            .ask(&voters, segment, ballot, Step::Accept(proposal))
+            .await;
         let mut oks = 0;
         let mut higher = None;
         for (_, v) in votes {
@@ -146,7 +147,10 @@ pub(crate) async fn seal<B: Backend + 'static>(
                 .collect();
             n.metrics.hot_seal_total.with(reason.into()).inc();
             commit(n, segment, proposal, &voters, &holders).await?;
-            n.note_copies(segment, promises.iter().filter(|(_, p)| p.copy.is_some()).count());
+            n.note_copies(
+                segment,
+                promises.iter().filter(|(_, p)| p.copy.is_some()).count(),
+            );
             return Ok(Committed {
                 segment,
                 ballot,
@@ -163,7 +167,10 @@ pub(crate) async fn seal<B: Backend + 'static>(
 
 /// A ballot of this node above `b`.
 fn above<B: Backend + 'static>(n: &Node<B>, segment: BlockId, b: Ballot) -> Ballot {
-    n.metrics.hot_seal_rounds_total.with(SealRound::Rejected).inc();
+    n.metrics
+        .hot_seal_rounds_total
+        .with(SealRound::Rejected)
+        .inc();
     n.saw_ballot(segment, b);
     n.next_ballot(segment)
 }
@@ -176,7 +183,10 @@ async fn adopt<B: Backend + 'static>(
     proposal: SealProposal,
     voters: &[NodeId],
 ) -> Result<Committed, HotError> {
-    n.metrics.hot_seal_rounds_total.with(SealRound::Adopted).inc();
+    n.metrics
+        .hot_seal_rounds_total
+        .with(SealRound::Adopted)
+        .inc();
     commit(n, segment, proposal, voters, &[]).await?;
     Ok(Committed {
         segment,
