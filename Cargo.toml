@@ -184,3 +184,11 @@ opt-level = 3
 
 [profile.test.package.tierstore-model]
 opt-level = 3
+
+# The models of tierstore-harness (loom and the breadth-first explorer) explore every
+# interleaving of their scenarios: optimise that crate in dev and test builds too.
+[profile.dev.package.tierstore-harness]
+opt-level = 3
+
+[profile.test.package.tierstore-harness]
+opt-level = 3
