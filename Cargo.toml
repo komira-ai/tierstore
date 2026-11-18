@@ -15,7 +15,8 @@ publish = false
 # those of the repository this code came from, at the moment of the import.
 [workspace.dependencies]
 # The map of the trees in memory in `tierstore fs`, which every request reads with no lock and
-# a change swaps whole (`server` feature). MIT OR Apache-2.0.
+# a change swaps whole (`server` feature); a mount's current view of a pack, swapped whole when a
+# reconnect re-opens it (tierstore-mount-client). MIT OR Apache-2.0.
 arc-swap = "1.9.3"
 # The backend trait is used as `dyn Backend`, so its async methods are boxed.
 async-trait = "0.1.92"
@@ -117,7 +118,8 @@ tokio = "1.53.3"
 tokio-rustls = { version = "0.26.6", default-features = false, features = ["ring"] }
 tracing = "0.1.44"
 # Shared mappings of a memfd with atomic references into them, behind a safe interface: the state
-# memfd and the holders' counter memfds of the Linux entry store (tierstore-entry). The rust-vmm
+# memfd and the holders' counter memfds of the Linux entry store (tierstore-entry), and a mount's
+# own mappings of its counter memfd and of the state memfds it is passed (tierstore-mount-client). The rust-vmm
 # project's guest-memory crate; only its `backend-mmap` feature is used. Apache-2.0 OR BSD-3-Clause.
 vm-memory = { version = "0.18.0", default-features = false }
 # Reads the fields of a client certificate (IP subjectAltNames) that the OCI front's start checks.
@@ -155,6 +157,10 @@ tierstore-metrics = { path = "crates/tierstore-metrics" }
 tierstore-hashpool = { path = "crates/tierstore-hashpool" }
 # The journal and snapshot of a node-cache entry (section 8), shared by the entry stores.
 tierstore-journal = { path = "crates/tierstore-journal" }
+# The node cache's entry store on Linux (T1); the mount client's tests serve from it.
+tierstore-entry = { path = "crates/tierstore-entry" }
+# The server side of the mount protocol (T5); the mount client's tests run against it.
+tierstore-mount-server = { path = "crates/tierstore-mount-server" }
 # The previous release: `v0.3.17`, the tag of the commit below, taken from the public repository
 # at that commit alone (the `rev` is what pins it; a tag can be moved). Used only by the
 # dev-dependencies of `crates/compat`. When a release is made, move both to the new release's
