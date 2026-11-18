@@ -25,9 +25,12 @@ use bytes::Bytes;
 use tierstore_fetch_api::TREE_LOST_CAUSE;
 use tierstore_fetch_api::cell::{CellByte, CellState};
 use tierstore_fetch_api::engine::{PackDigests, PackSpec, WaitOutcome};
-use tierstore_fetch_api::entry::{ClaimedCell, CommitReport, EntryError, EntrySpec, StateView};
-use tierstore_fetch_api::ids::{CellRun, PackId, PackKey, PackRoot};
+use tierstore_fetch_api::entry::{
+    CellCounts, ClaimedCell, CommitReport, EntryError, EntrySpec, PunchReport, StateView,
+};
+use tierstore_fetch_api::ids::{CellRun, HolderId, PackId, PackKey, PackRoot};
 use tierstore_fetch_api::list::{CellDigest, ListL2, NodeIndex, PackRecord};
+use tierstore_fetch_api::page::CounterRegion;
 use tierstore_fetch_api::verify::{CellJob, Verdict, VerifyPriority};
 
 /// A state view over a fixed list of bytes: only `cell_count` and `load` are its own, so `ready`
@@ -290,4 +293,81 @@ fn a_fill_cell_sorts_before_a_recheck_cell_in_the_hash_pool() {
 #[test]
 fn the_cause_reported_for_a_lost_tree_is_tree_lost() {
     assert_eq!(TREE_LOST_CAUSE, "tree-lost");
+}
+
+#[test]
+fn the_new_entry_errors_name_the_pack_the_cell_and_the_region() {
+    let p = pack();
+    let id = format!("{p:?}");
+    assert_eq!(
+        EntryError::NotEvicting {
+            pack: p.clone(),
+            cell: 4
+        }
+        .to_string(),
+        format!("{id}: cell 4 is not evicting")
+    );
+    assert_eq!(
+        EntryError::NotReadable {
+            pack: p.clone(),
+            cell: 5,
+            state: CellByte(0x84)
+        }
+        .to_string(),
+        format!("{id}: cell 5 is CellByte(132), not recheck or present")
+    );
+    assert_eq!(
+        EntryError::UnknownPack { pack: p.clone() }.to_string(),
+        format!("{id}: no such entry")
+    );
+    assert_eq!(
+        EntryError::UnknownHolder {
+            holder: HolderId(7)
+        }
+        .to_string(),
+        "holder HolderId(7) is not registered"
+    );
+    assert_eq!(
+        EntryError::BadRegion {
+            pack: p,
+            region: CounterRegion {
+                offset: 4,
+                groups: 3
+            }
+        }
+        .to_string(),
+        format!("{id}: bad counter region CounterRegion {{ offset: 4, groups: 3 }}")
+    );
+    let map = EntryError::CountersMap {
+        len: 99,
+        source: std::io::Error::other("no memory"),
+    };
+    assert_eq!(
+        map.to_string(),
+        "mapping 99 bytes of a holder's counters: no memory"
+    );
+    assert!(std::error::Error::source(&map).is_some());
+}
+
+#[test]
+fn a_punch_report_defaults_to_no_work_and_counts_default_to_zero() {
+    assert_eq!(
+        PunchReport::default(),
+        PunchReport {
+            journal_syncs: 0,
+            records: 0,
+            bytes_punched: 0
+        }
+    );
+    assert_eq!(CellCounts::default().used(), 0);
+    let counts = CellCounts {
+        absent: 9,
+        claimed: 1,
+        present: 2,
+        recheck: 3,
+        evicting: 4,
+        bad: 5,
+    };
+    // Only present, claimed and recheck cells are use (7).
+    assert_eq!(counts.used(), 6);
 }

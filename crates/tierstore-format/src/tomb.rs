@@ -1,20 +1,36 @@
-//! The tombstone log `tomb/<seq>.log` (10.2): tombstones, block drops and tomb drops.
+//! The tombstone log `tomb/<origin>/<first_seq>.log` (10.2): tombstones, block drops and tomb
+//! drops.
 //!
-//! The log of each origin node is totally ordered by `origin_seq` and replicated to every storage
-//! node; a node pulls `tomb?origin=<n>&after=<seq>` with one cursor per origin. Every entry is
-//! framed as a 16-byte header and a body:
+//! The log of each origin node is totally ordered by sequence number and replicated to every
+//! storage node; a node pulls `tomb?origin=<n>&after=<seq>` with one cursor per origin. The
+//! numbering rule: an origin numbers every entry of its log, of any kind, `1, 2, 3, ...` with no
+//! gap, and the number is part of the entry's frame, so every entry has a position whatever its
+//! kind. Sequence 0 is not a position: it is the cursor before the first entry ("nothing yet").
+//! A node stores each origin's log, its own and every pulled one, under `tomb/<origin>/`, in files
+//! that each hold consecutive entries starting at the sequence the file name carries
+//! ([`crate::names::HotName::TombLog`]).
+//!
+//! Every entry is framed as a 24-byte header and a body (little-endian):
 //!
 //! | Offset | Size | Field |
 //! |---|---|---|
 //! | 0 | 4 | magic `TSTL` |
 //! | 4 | 1 | kind (1 tombstone, 2 block drop, 3 tomb drop) |
-//! | 5 | 3 | reserved, zero |
-//! | 8 | 4 | body length |
-//! | 12 | 4 | crc32c of the body |
+//! | 5 | 1 | origin node id |
+//! | 6 | 2 | reserved, zero |
+//! | 8 | 8 | seq, the entry's position in the origin's log |
+//! | 16 | 4 | body length |
+//! | 20 | 4 | crc32c of frame bytes 0..20 followed by the body |
 //!
-//! An entry of a kind this release does not know decodes to [`LogEntry::Unknown`] with its body,
-//! so a later release may add a kind and an older node still reads, keeps and forwards its log
-//! (AGENTS.md B8).
+//! The bodies, by kind:
+//! - tombstone: key length `u16`, key, generation (16 bytes), stamp `u64`, name count `u32`, and
+//!   per name its kind `u8`, length `u16` and bytes;
+//! - block drop: block id `u64`, stamp `u64`;
+//! - tomb drop: target origin `u8`, target seq `u64`; the reporter is the frame's origin.
+//!
+//! An entry of a kind this release does not know decodes to [`LogEntry::Unknown`] with its body
+//! and keeps its frame's position, so a later release may add a kind and an older node still
+//! reads, keeps and forwards its log (AGENTS.md B8).
 
 use crate::FormatError;
 use crate::codec::{Dec, Enc, expect_crc, expect_magic};
@@ -25,7 +41,7 @@ use crate::stamp::Stamp;
 pub const TOMB_MAGIC: u32 = u32::from_le_bytes(*b"TSTL");
 
 /// The length of a log entry's frame header.
-pub const TOMB_FRAME_LEN: usize = 16;
+pub const TOMB_FRAME_LEN: usize = 24;
 
 const WHAT: &str = "tomb log entry";
 
@@ -73,10 +89,6 @@ pub struct Tombstone {
     pub generation: Generation,
     /// A stamp above every record of the key the deleting writer found.
     pub stamp: Stamp,
-    /// The node whose log holds the tombstone.
-    pub origin: NodeId,
-    /// Its position in the origin's log.
-    pub origin_seq: u64,
     /// Every block or large file that may list an older record of the key.
     pub names: Vec<Named>,
 }
@@ -87,24 +99,19 @@ pub struct Tombstone {
 pub struct BlockDrop {
     /// The block dropped.
     pub block: BlockId,
-    /// The node whose log holds the record.
-    pub origin: NodeId,
-    /// Its position in the origin's log.
-    pub origin_seq: u64,
     /// The stamp of the drop.
     pub stamp: Stamp,
 }
 
-/// A tomb drop: `reporter` has applied every free that the tombstone `(origin, origin_seq)`
-/// waits for (10.2). A node deletes a tombstone when every node not `out` has reported.
+/// A tomb drop: the node whose log holds the entry (the frame's origin) has applied every free
+/// that the tombstone `(target_origin, target_seq)` waits for (10.2). A node deletes a tombstone
+/// when every node not `out` has reported.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub struct TombDrop {
-    /// The node that reports.
-    pub reporter: NodeId,
-    /// The tombstone's origin.
-    pub origin: NodeId,
+    /// The origin of the tombstone reported on.
+    pub target_origin: NodeId,
     /// The tombstone's position in its origin's log.
-    pub origin_seq: u64,
+    pub target_seq: u64,
 }
 
 /// One entry of a tombstone log.
@@ -125,26 +132,38 @@ pub enum LogEntry {
     },
 }
 
-impl LogEntry {
-    /// The bytes of the entry, frame header and body. An [`LogEntry::Unknown`] whose kind is 1, 2
-    /// or 3 is refused: it would decode as the known entry.
+/// An entry of a tombstone log with its position: the origin whose log holds it and its sequence
+/// number there (at least 1).
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct LogRecord {
+    /// The node whose log holds the entry.
+    pub origin: NodeId,
+    /// The entry's position in the origin's log.
+    pub seq: u64,
+    /// The entry.
+    pub entry: LogEntry,
+}
+
+impl LogRecord {
+    /// The bytes of the record, frame header and body. A sequence of 0, or a [`LogEntry::Unknown`]
+    /// whose kind is 1, 2 or 3 (it would decode as the known entry), is refused.
     pub fn encode(&self) -> Result<Vec<u8>, FormatError> {
-        let (kind, body) = match self {
-            Self::Tombstone(t) => (KIND_TOMBSTONE, encode_tombstone(t)?),
-            Self::BlockDrop(b) => {
+        if self.seq == 0 {
+            return Err(invalid("sequence 0 is not a position"));
+        }
+        let (kind, body) = match &self.entry {
+            LogEntry::Tombstone(t) => (KIND_TOMBSTONE, encode_tombstone(t)?),
+            LogEntry::BlockDrop(b) => {
                 let mut e = Enc::new();
-                e.u64(b.block.raw())
-                    .u8(b.origin.0)
-                    .u64(b.origin_seq)
-                    .u64(b.stamp.raw());
+                e.u64(b.block.raw()).u64(b.stamp.raw());
                 (KIND_BLOCK_DROP, e.finish())
             }
-            Self::TombDrop(d) => {
+            LogEntry::TombDrop(d) => {
                 let mut e = Enc::new();
-                e.u8(d.reporter.0).u8(d.origin.0).u64(d.origin_seq);
+                e.u8(d.target_origin.0).u64(d.target_seq);
                 (KIND_TOMB_DROP, e.finish())
             }
-            Self::Unknown { kind, body } => {
+            LogEntry::Unknown { kind, body } => {
                 if matches!(*kind, KIND_TOMBSTONE | KIND_BLOCK_DROP | KIND_TOMB_DROP) {
                     return Err(invalid("an unknown kind uses a known code"));
                 }
@@ -155,47 +174,97 @@ impl LogEntry {
         // the line of the check runs on every encode.
         let too_long = invalid("body longer than 4 GiB");
         let len = u32::try_from(body.len()).or(Err(too_long))?;
-        let mut e = Enc::new();
-        e.u32(TOMB_MAGIC)
+        let mut head = Enc::new();
+        head.u32(TOMB_MAGIC)
             .u8(kind)
-            .bytes(&[0; 3])
-            .u32(len)
-            .u32(crate::crc32c(&body))
-            .bytes(&body);
-        Ok(e.finish())
+            .u8(self.origin.0)
+            .bytes(&[0; 2])
+            .u64(self.seq)
+            .u32(len);
+        let mut head = head.finish();
+        let crc = frame_crc(&head, &body);
+        head.extend_from_slice(&crc.to_le_bytes());
+        head.extend_from_slice(&body);
+        Ok(head)
     }
 
-    /// The entry at the start of `buf` and the bytes it takes.
+    /// The record at the start of `buf` and the bytes it takes. A sequence of 0 is refused.
     pub fn decode(buf: &[u8]) -> Result<(Self, u64), FormatError> {
         let mut d = Dec::new(buf, WHAT);
         expect_magic(WHAT, d.u32()?, TOMB_MAGIC)?;
         let kind = d.u8()?;
-        d.take(3)?;
+        let origin = NodeId(d.u8()?);
+        d.take(2)?;
+        let seq = d.u64()?;
         let len = d.u32()? as usize;
         let crc = d.u32()?;
         let body = d.take(len)?;
-        expect_crc(WHAT, body, crc)?;
+        expect_crc_of(&buf[..TOMB_FRAME_LEN - 4], body, crc)?;
+        if seq == 0 {
+            return Err(invalid("sequence 0 is not a position"));
+        }
         let mut b = Dec::new(body, WHAT);
         let entry = match kind {
-            KIND_TOMBSTONE => Self::Tombstone(decode_tombstone(&mut b)?),
-            KIND_BLOCK_DROP => Self::BlockDrop(BlockDrop {
+            KIND_TOMBSTONE => LogEntry::Tombstone(decode_tombstone(&mut b)?),
+            KIND_BLOCK_DROP => LogEntry::BlockDrop(BlockDrop {
                 block: BlockId::from_raw(b.u64()?),
-                origin: NodeId(b.u8()?),
-                origin_seq: b.u64()?,
                 stamp: Stamp::from_raw(b.u64()?),
             }),
-            KIND_TOMB_DROP => Self::TombDrop(TombDrop {
-                reporter: NodeId(b.u8()?),
-                origin: NodeId(b.u8()?),
-                origin_seq: b.u64()?,
+            KIND_TOMB_DROP => LogEntry::TombDrop(TombDrop {
+                target_origin: NodeId(b.u8()?),
+                target_seq: b.u64()?,
             }),
-            _ => Self::Unknown {
+            _ => LogEntry::Unknown {
                 kind,
                 body: body.to_vec(),
             },
         };
-        Ok((entry, (TOMB_FRAME_LEN + len) as u64))
+        Ok((Self { origin, seq, entry }, (TOMB_FRAME_LEN + len) as u64))
     }
+}
+
+/// The records of a log file's bytes, every one of `origin` and numbered consecutively: the first
+/// may carry any sequence (the file's `first_seq`), each next one is the previous plus one. A record
+/// of another origin, a gap, a repeat, or any decode error refuses the whole buffer.
+pub fn scan_log(buf: &[u8], origin: NodeId) -> Result<Vec<LogRecord>, FormatError> {
+    scan(buf, origin, None)
+}
+
+/// Like [`scan_log`], for a run that must continue a log at `after`: the first record must carry
+/// `after + 1` (`after` 0 is the cursor before the first entry).
+pub fn scan_log_after(
+    buf: &[u8],
+    origin: NodeId,
+    after: u64,
+) -> Result<Vec<LogRecord>, FormatError> {
+    scan(buf, origin, Some(after))
+}
+
+fn scan(buf: &[u8], origin: NodeId, mut prev: Option<u64>) -> Result<Vec<LogRecord>, FormatError> {
+    let mut out = Vec::new();
+    let mut rest = buf;
+    while !rest.is_empty() {
+        let (record, used) = LogRecord::decode(rest)?;
+        if record.origin != origin {
+            return Err(invalid("a record of another origin"));
+        }
+        if prev.is_some_and(|p| p.checked_add(1) != Some(record.seq)) {
+            return Err(invalid("a sequence that is not the previous plus one"));
+        }
+        prev = Some(record.seq);
+        rest = &rest[used as usize..];
+        out.push(record);
+    }
+    Ok(out)
+}
+
+/// The crc32c of a frame's first 20 bytes followed by its body.
+fn frame_crc(head: &[u8], body: &[u8]) -> u32 {
+    crate::crc32c(&[head, body].concat())
+}
+
+fn expect_crc_of(head: &[u8], body: &[u8], stored: u32) -> Result<(), FormatError> {
+    expect_crc(WHAT, &[head, body].concat(), stored)
 }
 
 fn invalid(reason: &'static str) -> FormatError {
@@ -217,8 +286,6 @@ fn encode_tombstone(t: &Tombstone) -> Result<Vec<u8>, FormatError> {
         .bytes(&t.key)
         .bytes(&t.generation.0)
         .u64(t.stamp.raw())
-        .u8(t.origin.0)
-        .u64(t.origin_seq)
         .u32(names);
     for n in &t.names {
         let (kind, bytes) = match n {
@@ -249,8 +316,6 @@ fn decode_tombstone(d: &mut Dec<'_>) -> Result<Tombstone, FormatError> {
     let key = d.take(key_len)?.to_vec();
     let generation = Generation(d.array()?);
     let stamp = Stamp::from_raw(d.u64()?);
-    let origin = NodeId(d.u8()?);
-    let origin_seq = d.u64()?;
     let count = d.u32()?;
     let mut names = Vec::new();
     for _ in 0..count {
@@ -276,8 +341,6 @@ fn decode_tombstone(d: &mut Dec<'_>) -> Result<Tombstone, FormatError> {
         key,
         generation,
         stamp,
-        origin,
-        origin_seq,
         names,
     })
 }

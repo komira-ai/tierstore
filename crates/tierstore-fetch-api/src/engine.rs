@@ -65,6 +65,8 @@ pub trait Engine: Send + Sync {
     fn ensure(&self, pack: &PackSpec, runs: &[CellRun], class: Class, job: JobId, rank: Rank);
 
     /// Waits until every cell covering `range` of the pack is present, or one fails, or the fill
-    /// is lost. A `wait` on cells nobody ensured is a `demand` of them.
+    /// is lost. A `wait` on cells nobody ensured is a `demand` of them. Cancel-safe: dropping the
+    /// future cancels nothing of the fill (the cells stay claimed and keep being fetched); the
+    /// mount re-issues a `wait` idempotently after a reconnect.
     async fn wait(&self, pack: &PackSpec, range: ByteRange, job: JobId) -> WaitOutcome;
 }

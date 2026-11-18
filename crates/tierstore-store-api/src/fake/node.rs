@@ -12,7 +12,7 @@ use tierstore_format::free::StripeFree;
 use tierstore_format::ids::{BlockId, Generation, NodeId, StripeId};
 use tierstore_format::seal::{Ballot, SealProposal};
 use tierstore_format::stamp::Stamp;
-use tierstore_format::tomb::LogEntry;
+use tierstore_format::tomb::LogRecord;
 
 use super::lock;
 use super::script::{Outcome, Route, Step};
@@ -173,19 +173,21 @@ impl FakeStorageNode {
         lock(&self.state).hot_queued = queued;
     }
 
-    /// Appends `entry` as entry `seq` of `origin`'s tombstone log, kept in the order appended.
-    pub fn append_tomb(
-        &self,
-        origin: NodeId,
-        seq: u64,
-        entry: &LogEntry,
-    ) -> Result<(), FormatError> {
-        let bytes = HexBytes(entry.encode()?);
-        lock(&self.state)
-            .logs
-            .entry(origin)
-            .or_default()
-            .push((seq, bytes));
+    /// Appends `record` to the tombstone log of `record.origin`, kept in the order appended. The
+    /// record must be the next of its origin's log: sequence 1 for an empty log, else the last
+    /// sequence number plus one.
+    pub fn append_tomb(&self, record: LogRecord) -> Result<(), FormatError> {
+        let bytes = HexBytes(record.encode()?);
+        let mut st = lock(&self.state);
+        let log = st.logs.entry(record.origin).or_default();
+        let next = log.last().map_or(1, |(seq, _)| seq + 1);
+        if record.seq != next {
+            return Err(FormatError::Invalid {
+                what: "tomb log entry",
+                reason: "not the next sequence number of its origin",
+            });
+        }
+        log.push((record.seq, bytes));
         Ok(())
     }
 

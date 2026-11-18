@@ -103,7 +103,8 @@ pub enum Observation {
 /// charges `k` parts".
 #[async_trait::async_trait]
 pub trait Budget: Send + Sync {
-    /// Waits until `charge` fits every level, and takes it.
+    /// Waits until `charge` fits every level, and takes it. Cancel-safe: dropping the future
+    /// before it completes takes no permit and leaves no reservation behind.
     async fn acquire(&self, charge: Charge) -> Permit;
 
     /// Feeds the controller.

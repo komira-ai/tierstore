@@ -19,9 +19,10 @@ use bytes::Bytes;
 use fake_node_support::*;
 use futures::FutureExt;
 use tierstore_fetch_api::upstream::{DriveSignals, Report};
+use tierstore_format::FormatError;
 use tierstore_format::ids::NodeId;
 use tierstore_format::stamp::Stamp;
-use tierstore_format::tomb::{BlockDrop, LogEntry};
+use tierstore_format::tomb::{BlockDrop, LogEntry, LogRecord};
 use tierstore_store_api::fake::{Route, Step};
 use tierstore_store_api::peer::{GetTarget, PeerError};
 use tierstore_store_api::proto::{
@@ -34,23 +35,19 @@ fn keys(names: &[&str]) -> LocateRequest {
     }
 }
 
-fn drop_entry(seq: u64) -> LogEntry {
-    LogEntry::BlockDrop(BlockDrop {
-        block: block(2, seq),
-        origin: NodeId(2),
-        origin_seq: seq,
-        stamp: Stamp::from_raw(seq),
-    })
+fn drop_record(origin: u8, seq: u64) -> LogRecord {
+    LogRecord {
+        origin: NodeId(origin),
+        seq,
+        entry: LogEntry::BlockDrop(BlockDrop {
+            block: block(2, seq),
+            stamp: Stamp::from_raw(seq),
+        }),
+    }
 }
 
-fn seqs(entries: &[LogEntry]) -> Vec<u64> {
-    entries
-        .iter()
-        .map(|e| match e {
-            LogEntry::BlockDrop(d) => d.origin_seq,
-            other => panic!("not a block drop: {other:?}"),
-        })
-        .collect()
+fn seqs(records: &[LogRecord]) -> Vec<u64> {
+    records.iter().map(|r| r.seq).collect()
 }
 
 #[tokio::test]
@@ -426,45 +423,49 @@ async fn a_key_check_reports_the_record_the_tombstone_and_the_index_state() {
 async fn a_tomb_pull_pages_by_sequence_number_with_more_and_last() {
     let (_clock, node) = node(1);
     for seq in 1..=5 {
-        node.append_tomb(NodeId(2), seq, &drop_entry(seq)).unwrap();
+        node.append_tomb(drop_record(2, seq)).unwrap();
     }
-    node.append_tomb(NodeId(3), 1, &drop_entry(1)).unwrap();
+    node.append_tomb(drop_record(3, 1)).unwrap();
     let pull = |after, limit| TombPull {
         origin: NodeId(2),
         after,
         limit,
     };
+    let page = |after, limit| {
+        let node = &node;
+        async move { node.tomb_pull(pull(after, limit)).await.unwrap().body }
+    };
 
-    let first = node.tomb_pull(pull(0, 2)).await.unwrap().body;
-    assert_eq!(seqs(&first.decode().unwrap()), vec![1, 2]);
+    let first = page(0, 2).await;
+    assert_eq!(seqs(&first.decode(&pull(0, 2)).unwrap()), vec![1, 2]);
     assert_eq!((first.last, first.more), (2, true));
 
-    let rest = node.tomb_pull(pull(first.last, 10)).await.unwrap().body;
-    assert_eq!(seqs(&rest.decode().unwrap()), vec![3, 4, 5]);
+    let rest = page(first.last, 10).await;
+    assert_eq!(
+        seqs(&rest.decode(&pull(first.last, 10)).unwrap()),
+        vec![3, 4, 5]
+    );
     assert_eq!((rest.last, rest.more), (5, false));
 
-    let exact = node.tomb_pull(pull(2, 3)).await.unwrap().body;
-    assert_eq!(seqs(&exact.decode().unwrap()), vec![3, 4, 5]);
+    let exact = page(2, 3).await;
+    assert_eq!(seqs(&exact.decode(&pull(2, 3)).unwrap()), vec![3, 4, 5]);
     assert!(!exact.more);
 
-    let drained = node.tomb_pull(pull(5, 10)).await.unwrap().body;
+    let drained = page(5, 10).await;
     assert!(drained.entries.is_empty());
     assert_eq!((drained.last, drained.more), (5, false));
 
-    let none_wanted = node.tomb_pull(pull(1, 0)).await.unwrap().body;
+    let none_wanted = page(1, 0).await;
     assert!(none_wanted.entries.is_empty());
     assert_eq!((none_wanted.last, none_wanted.more), (1, true));
 
-    let other = node
-        .tomb_pull(TombPull {
-            origin: NodeId(3),
-            after: 0,
-            limit: 10,
-        })
-        .await
-        .unwrap()
-        .body;
-    assert_eq!(other.entries.len(), 1);
+    let other_pull = TombPull {
+        origin: NodeId(3),
+        after: 0,
+        limit: 10,
+    };
+    let other = node.tomb_pull(other_pull).await.unwrap().body;
+    assert_eq!(other.decode(&other_pull).unwrap(), vec![drop_record(3, 1)]);
     let unknown = node
         .tomb_pull(TombPull {
             origin: NodeId(9),
@@ -479,23 +480,45 @@ async fn a_tomb_pull_pages_by_sequence_number_with_more_and_last() {
 }
 
 #[tokio::test]
+async fn a_tomb_log_accepts_only_the_next_sequence_number_of_its_origin() {
+    let (_clock, node) = node(1);
+    let refused = FormatError::Invalid {
+        what: "tomb log entry",
+        reason: "not the next sequence number of its origin",
+    };
+    // An empty log starts at 1.
+    assert_eq!(node.append_tomb(drop_record(2, 2)).unwrap_err(), refused);
+    assert_eq!(
+        node.append_tomb(drop_record(2, 0)).unwrap_err().to_string(),
+        "tomb log entry: sequence 0 is not a position"
+    );
+    node.append_tomb(drop_record(2, 1)).unwrap();
+    // A repeat, a gap; each origin counts alone.
+    assert_eq!(node.append_tomb(drop_record(2, 1)).unwrap_err(), refused);
+    assert_eq!(node.append_tomb(drop_record(2, 3)).unwrap_err(), refused);
+    node.append_tomb(drop_record(3, 1)).unwrap();
+    node.append_tomb(drop_record(2, 2)).unwrap();
+}
+
+#[tokio::test]
 async fn a_tomb_pull_keeps_entries_of_a_kind_it_does_not_know() {
     let (_clock, node) = node(1);
-    let unknown = LogEntry::Unknown {
-        kind: 200,
-        body: vec![1, 2, 3],
+    let unknown = LogRecord {
+        origin: NodeId(2),
+        seq: 1,
+        entry: LogEntry::Unknown {
+            kind: 200,
+            body: vec![1, 2, 3],
+        },
     };
-    node.append_tomb(NodeId(2), 1, &unknown).unwrap();
-    let page = node
-        .tomb_pull(TombPull {
-            origin: NodeId(2),
-            after: 0,
-            limit: 5,
-        })
-        .await
-        .unwrap()
-        .body;
-    assert_eq!(page.decode().unwrap(), vec![unknown]);
+    node.append_tomb(unknown.clone()).unwrap();
+    let pull = TombPull {
+        origin: NodeId(2),
+        after: 0,
+        limit: 5,
+    };
+    let page = node.tomb_pull(pull).await.unwrap().body;
+    assert_eq!(page.decode(&pull).unwrap(), vec![unknown]);
 }
 
 fn drive_ping(id: u8, state: &str, queued: u32) -> DrivePing {

@@ -6,8 +6,11 @@
 //!   (single-threaded or across threads);
 //! - a publish that makes a cell present with bytes of the wrong length, or without a claim;
 //! - an abandon or a bad mark that leaves the wrong state;
-//! - an evictor step that wins from the wrong state, loses the durable bit on an abort, or leaves
-//!   the bytes of a finished eviction;
+//! - an evictor step that wins from the wrong state, loses the durable bit on an abort, or whose
+//!   finish touches the bytes; a punch that releases a cell that is not evicting, journals more
+//!   than once per call, miscounts records or bytes, or has any effect when it fails;
+//! - counts, a last use or touch epochs that are wrong, or that go back with an older clock;
+//! - a read of a cell that is not recheck or present, or a recheck cell that settles wrongly;
 //! - a commit that syncs more than once, counts runs wrongly, or repeats work;
 //! - reader counters that count an out-of-range group, or holds that are not per holder;
 //! - a store that opens a second entry for a pack, accepts another size, allocates for a pack
@@ -23,8 +26,8 @@ use std::sync::{Arc, Barrier};
 
 use tierstore_fetch_api::cell::{CellByte, CellState};
 use tierstore_fetch_api::entry::{
-    ClaimedCell, CommitReport, Entry, EntryError, EntrySpec, EntryStore, EvictStep, ReaderCounters,
-    Settle,
+    CellCounts, ClaimedCell, CommitReport, Entry, EntryError, EntryInfo, EntrySpec, EntryStore,
+    EvictStep, PunchReport, ReaderCounters, Settle,
 };
 use tierstore_fetch_api::fake::{MemEntry, MemEntryStore};
 use tierstore_fetch_api::ids::{CellRun, HolderId, PackId, PackKey, PackRoot};
@@ -300,13 +303,22 @@ fn abort_returns_to_present_and_keeps_the_durable_bit_and_the_bytes() {
 }
 
 #[test]
-fn finish_makes_the_cell_absent_and_zeroes_its_bytes_only() {
+fn punch_then_finish_makes_the_cell_absent_and_zeroes_its_bytes_only() {
     let e = MemEntry::new(&spec("p", 2 * MIB as u64 + 10)).unwrap();
     claim_publish(&e, 0, 1);
     claim_publish(&e, 1, 2);
     assert_eq!(e.claim(run(2, 1)).len(), 1);
     e.publish(ClaimedCell::won(2), &[3; 10]).unwrap();
     assert!(e.evict_cell_cas(2, EvictStep::Begin));
+    assert_eq!(
+        e.punch(&[run(2, 1)]).unwrap(),
+        PunchReport {
+            journal_syncs: 1,
+            records: 1,
+            bytes_punched: 10
+        }
+    );
+    assert_eq!(state(&e, 2), CellState::Evicting);
     assert!(e.evict_cell_cas(2, EvictStep::Finish));
     assert_eq!(state(&e, 2), CellState::Absent);
     assert_eq!(e.bytes(2 * MIB, 2 * MIB + 10), vec![0; 10]);
@@ -317,14 +329,324 @@ fn finish_makes_the_cell_absent_and_zeroes_its_bytes_only() {
 }
 
 #[test]
-fn finish_of_a_full_cell_zeroes_the_whole_cell() {
+fn punch_of_a_full_cell_zeroes_the_whole_cell() {
     let e = entry(2);
     claim_publish(&e, 0, 9);
     claim_publish(&e, 1, 8);
     assert!(e.evict_cell_cas(0, EvictStep::Begin));
-    assert!(e.evict_cell_cas(0, EvictStep::Finish));
+    let report = e.punch(&[run(0, 1)]).unwrap();
+    assert_eq!(report.bytes_punched, MIB as u64);
     assert_eq!(e.bytes(0, MIB), cell_bytes(0));
     assert_eq!(e.bytes(MIB, 2 * MIB), cell_bytes(8));
+}
+
+#[test]
+fn one_punch_of_several_runs_is_one_journal_sync_and_one_record_per_run() {
+    let e = entry(6);
+    for c in 0..6 {
+        claim_publish(&e, c, c as u8 + 1);
+    }
+    for c in [0, 1, 3] {
+        assert!(e.evict_cell_cas(c, EvictStep::Begin));
+    }
+    let report = e.punch(&[run(0, 2), run(3, 1)]).unwrap();
+    assert_eq!(
+        report,
+        PunchReport {
+            journal_syncs: 1,
+            records: 2,
+            bytes_punched: 3 * MIB as u64
+        }
+    );
+    for c in [0, 1, 3] {
+        assert_eq!(
+            e.bytes(c as usize * MIB, (c as usize + 1) * MIB),
+            cell_bytes(0)
+        );
+        // `punch` does not change the state: the caller finishes each cell.
+        assert_eq!(state(&e, c), CellState::Evicting);
+        assert!(e.evict_cell_cas(c, EvictStep::Finish));
+    }
+    for c in [2usize, 4, 5] {
+        assert_eq!(e.bytes(c * MIB, (c + 1) * MIB), cell_bytes(c as u8 + 1));
+        assert_eq!(state(&e, c as u32), CellState::Present);
+    }
+}
+
+#[test]
+fn a_punch_with_no_cell_is_zeros_and_no_journal_sync() {
+    let e = entry(2);
+    assert_eq!(e.punch(&[]).unwrap(), PunchReport::default());
+    assert_eq!(
+        e.punch(&[run(0, 0), run(9, 0)]).unwrap(),
+        PunchReport::default()
+    );
+}
+
+#[test]
+fn a_punch_of_a_cell_that_is_not_evicting_is_refused_and_journals_and_punches_nothing() {
+    let e = entry(5);
+    for c in 0..3 {
+        claim_publish(&e, c, 5);
+    }
+    let _claimed = e.claim(run(3, 1));
+    assert!(e.evict_cell_cas(0, EvictStep::Begin));
+    // Cell 0 is evicting; cell 1 is present, 3 claimed, 4 absent: none may be punched.
+    for bad in [1u32, 3, 4] {
+        let err = e.punch(&[run(0, 1), run(bad, 1)]).unwrap_err();
+        assert!(
+            matches!(&err, EntryError::NotEvicting { pack: p, cell } if *p == pack("p") && *cell == bad),
+            "{err:?}"
+        );
+    }
+    assert_eq!(e.bytes(0, MIB), cell_bytes(5));
+    assert_eq!(e.bytes(MIB, 2 * MIB), cell_bytes(5));
+    assert_eq!(state(&e, 0), CellState::Evicting);
+    assert_eq!(state(&e, 1), CellState::Present);
+    assert_eq!(state(&e, 3), CellState::Claimed);
+}
+
+#[test]
+fn a_punch_past_the_pack_is_out_of_range_and_punches_nothing() {
+    let e = entry(2);
+    claim_publish(&e, 0, 6);
+    assert!(e.evict_cell_cas(0, EvictStep::Begin));
+    let err = e.punch(&[run(0, 1), run(5, 1)]).unwrap_err();
+    assert!(matches!(
+        &err,
+        EntryError::CellOutOfRange {
+            cell: 5,
+            cells: 2,
+            ..
+        }
+    ));
+    assert_eq!(e.bytes(0, MIB), cell_bytes(6));
+}
+
+#[test]
+fn finish_changes_the_state_and_leaves_the_bytes_to_the_punch() {
+    let e = entry(1);
+    claim_publish(&e, 0, 7);
+    assert!(e.evict_cell_cas(0, EvictStep::Begin));
+    assert!(e.evict_cell_cas(0, EvictStep::Finish));
+    assert_eq!(state(&e, 0), CellState::Absent);
+    assert_eq!(e.bytes(0, MIB), cell_bytes(7));
+}
+
+#[test]
+fn a_durable_cell_is_evicted_through_its_durable_byte_0x84() {
+    let e = entry(1);
+    claim_publish(&e, 0, 7);
+    e.commit_batch().unwrap();
+    assert_eq!(e.state().load(0), Some(CellByte(0x82)));
+    assert!(e.evict_cell_cas(0, EvictStep::Begin));
+    assert_eq!(e.state().load(0), Some(CellByte(0x84)));
+    e.punch(&[run(0, 1)]).unwrap();
+    assert!(e.evict_cell_cas(0, EvictStep::Finish));
+    assert_eq!(e.state().load(0), Some(CellByte(0)));
+}
+
+#[test]
+fn punch_zeroes_the_bytes_before_the_cell_is_claimable_so_a_later_publish_survives() {
+    let e = entry(1);
+    claim_publish(&e, 0, 7);
+    assert!(e.evict_cell_cas(0, EvictStep::Begin));
+    e.punch(&[run(0, 1)]).unwrap();
+    assert_eq!(e.bytes(0, MIB), cell_bytes(0));
+    assert!(e.evict_cell_cas(0, EvictStep::Finish));
+    claim_publish(&e, 0, 3);
+    assert_eq!(e.bytes(0, MIB), cell_bytes(3));
+    // A cell that is no longer evicting cannot be punched or finished: its new bytes stay.
+    assert!(!e.evict_cell_cas(0, EvictStep::Finish));
+    assert!(e.punch(&[run(0, 1)]).is_err());
+    assert_eq!(e.bytes(0, MIB), cell_bytes(3));
+}
+
+#[test]
+fn counts_say_how_many_cells_are_in_each_state() {
+    let e = entry(7);
+    assert_eq!(
+        e.counts(),
+        CellCounts {
+            absent: 7,
+            ..CellCounts::default()
+        }
+    );
+    claim_publish(&e, 0, 1);
+    claim_publish(&e, 1, 1);
+    claim_publish(&e, 2, 1);
+    e.commit_batch().unwrap();
+    let _claimed = e.claim(run(3, 1));
+    let bad = e.claim(run(4, 1));
+    e.mark_bad(bad.into_iter().next().unwrap());
+    e.restore_as_recheck(5, &cell_bytes(1)).unwrap();
+    assert!(e.evict_cell_cas(2, EvictStep::Begin));
+    let counts = e.counts();
+    assert_eq!(
+        counts,
+        CellCounts {
+            absent: 1,
+            claimed: 1,
+            present: 2,
+            recheck: 1,
+            evicting: 1,
+            bad: 1
+        }
+    );
+    // present + claimed + recheck is what the cache charges (7).
+    assert_eq!(counts.used(), 4);
+}
+
+#[test]
+fn an_empty_pack_counts_nothing() {
+    let e = MemEntry::new(&spec("p", 0)).unwrap();
+    assert_eq!(e.counts(), CellCounts::default());
+    assert_eq!(e.counts().used(), 0);
+}
+
+#[test]
+fn a_touch_raises_the_last_use_and_sets_the_epoch_of_the_group_in_seconds() {
+    let e = entry(40);
+    assert_eq!(e.last_use(), 0);
+    assert_eq!(e.touch_epoch(0), Some(0));
+    assert_eq!(e.touch_epoch(2), Some(0));
+    e.touch(5_999, 0);
+    assert_eq!(e.last_use(), 5_999);
+    assert_eq!(e.touch_epoch(0), Some(5));
+    assert_eq!(e.touch_epoch(1), Some(0));
+    e.touch(7_000, 2);
+    assert_eq!(e.last_use(), 7_000);
+    assert_eq!(e.touch_epoch(2), Some(7));
+    assert_eq!(e.touch_epoch(0), Some(5));
+}
+
+#[test]
+fn a_touch_with_an_older_clock_never_lowers_the_last_use_or_the_epoch_of_the_entry() {
+    let e = entry(40);
+    e.touch(9_000, 0);
+    e.touch(3_000, 1);
+    assert_eq!(e.last_use(), 9_000);
+    // The epoch is that of the entry's last use.
+    assert_eq!(e.touch_epoch(1), Some(9));
+}
+
+#[test]
+fn an_epoch_is_the_seconds_of_the_clock_truncated_to_a_u32() {
+    let e = entry(1);
+    e.touch((u64::from(u32::MAX) + 1 + 12) * 1000 + 999, 0);
+    assert_eq!(e.touch_epoch(0), Some(12));
+}
+
+#[test]
+fn a_touch_of_a_group_outside_the_pack_raises_the_last_use_only() {
+    let e = entry(2);
+    e.touch(4_000, 1);
+    assert_eq!(e.last_use(), 4_000);
+    assert_eq!(e.touch_epoch(0), Some(0));
+    assert_eq!(e.touch_epoch(1), None);
+}
+
+#[test]
+fn read_cell_returns_the_bytes_of_a_present_or_recheck_cell() {
+    let e = MemEntry::new(&spec("p", MIB as u64 + 10)).unwrap();
+    claim_publish(&e, 0, 4);
+    assert_eq!(e.read_cell(0).unwrap(), cell_bytes(4));
+    e.restore_as_recheck(1, &[9; 10]).unwrap();
+    assert_eq!(e.read_cell(1).unwrap(), vec![9; 10]);
+    // A durable present cell is readable too.
+    e.commit_batch().unwrap();
+    assert_eq!(e.read_cell(0).unwrap(), cell_bytes(4));
+}
+
+#[test]
+fn read_cell_of_any_other_state_names_the_byte_it_saw() {
+    let e = entry(5);
+    claim_publish(&e, 3, 1);
+    e.commit_batch().unwrap();
+    assert!(e.evict_cell_cas(3, EvictStep::Begin));
+    let claimed = e.claim(run(1, 1));
+    let bad = e.claim(run(2, 1));
+    e.mark_bad(bad.into_iter().next().unwrap());
+    for (cell, byte) in [(0u32, 0u8), (1, 1), (2, 5), (3, 0x84)] {
+        let err = e.read_cell(cell).unwrap_err();
+        assert!(
+            matches!(&err, EntryError::NotReadable { cell: c, state, .. } if *c == cell && state.0 == byte),
+            "{err:?}"
+        );
+    }
+    drop(claimed);
+}
+
+#[test]
+fn read_cell_outside_the_pack_is_out_of_range() {
+    let e = entry(2);
+    let err = e.read_cell(2).unwrap_err();
+    assert!(matches!(
+        &err,
+        EntryError::CellOutOfRange {
+            cell: 2,
+            cells: 2,
+            ..
+        }
+    ));
+}
+
+#[test]
+fn a_restart_in_another_boot_leaves_a_recheck_cell_that_the_mount_cannot_serve() {
+    let e = entry(2);
+    claim_publish(&e, 0, 1);
+    e.restore_as_recheck(0, &cell_bytes(2)).unwrap();
+    assert_eq!(state(&e, 0), CellState::Recheck);
+    assert!(!e.state().ready(run(0, 1)));
+    assert_eq!(e.bytes(0, MIB), cell_bytes(2));
+    // The cell was not committed durable before the restart, so a commit has nothing for it.
+    assert_eq!(e.commit_batch().unwrap(), CommitReport::default());
+}
+
+#[test]
+fn restoring_a_recheck_cell_checks_the_cell_and_the_length() {
+    let e = MemEntry::new(&spec("p", MIB as u64 + 10)).unwrap();
+    let err = e.restore_as_recheck(2, &[0; 10]).unwrap_err();
+    assert!(matches!(
+        err,
+        EntryError::CellOutOfRange {
+            cell: 2,
+            cells: 2,
+            ..
+        }
+    ));
+    let err = e.restore_as_recheck(1, &[0; 11]).unwrap_err();
+    assert!(matches!(
+        err,
+        EntryError::CellLength {
+            cell: 1,
+            expected: 10,
+            got: 11,
+            ..
+        }
+    ));
+    assert_eq!(state(&e, 1), CellState::Absent);
+}
+
+#[test]
+fn a_recheck_cell_settles_present_with_its_bytes_or_absent() {
+    let e = entry(2);
+    e.restore_as_recheck(0, &cell_bytes(5)).unwrap();
+    e.restore_as_recheck(1, &cell_bytes(6)).unwrap();
+    assert!(e.settle(0, Settle::RecheckOk));
+    assert_eq!(state(&e, 0), CellState::Present);
+    assert_eq!(e.read_cell(0).unwrap(), cell_bytes(5));
+    assert!(e.state().ready(run(0, 1)));
+    assert!(e.settle(1, Settle::RecheckFailed));
+    assert_eq!(state(&e, 1), CellState::Absent);
+    // Both settled: neither settles again.
+    assert!(!e.settle(0, Settle::RecheckOk));
+    assert!(!e.settle(1, Settle::RecheckFailed));
+}
+
+#[test]
+fn an_in_process_entry_has_no_descriptors() {
+    assert!(entry(1).fds().is_none());
 }
 
 #[test]
@@ -567,16 +889,38 @@ fn remove_drops_an_unheld_entry_and_keeps_a_held_one() {
 }
 
 #[test]
-fn finish_zeroes_the_bytes_before_the_cell_is_claimable_so_a_later_publish_survives() {
-    let e = entry(1);
-    claim_publish(&e, 0, 7);
-    assert!(e.evict_cell_cas(0, EvictStep::Begin));
-    assert!(e.evict_cell_cas(0, EvictStep::Finish));
-    // The cell is absent only once its bytes are zero; a claim and publish after that keep theirs.
-    assert_eq!(e.bytes(0, MIB), cell_bytes(0));
-    claim_publish(&e, 0, 3);
-    assert_eq!(e.bytes(0, MIB), cell_bytes(3));
-    // A finish of a cell that is no longer evicting changes no bytes.
-    assert!(!e.evict_cell_cas(0, EvictStep::Finish));
-    assert_eq!(e.bytes(0, MIB), cell_bytes(3));
+fn entries_report_size_last_use_holders_and_counts_in_pack_order() {
+    let s = MemEntryStore::new();
+    assert!(s.entries().is_empty());
+    s.open(&spec("b", 2 * MIB as u64)).unwrap();
+    let a = s.open(&spec("a", MIB as u64)).unwrap();
+    a.hold(HolderId(3));
+    a.touch(2_500, 0);
+    let won = a.claim(run(0, 1));
+    assert_eq!(won.len(), 1);
+    assert_eq!(
+        s.entries(),
+        vec![
+            EntryInfo {
+                pack: pack("a"),
+                size: MIB as u64,
+                last_use: 2_500,
+                holders: 1,
+                counts: CellCounts {
+                    claimed: 1,
+                    ..CellCounts::default()
+                }
+            },
+            EntryInfo {
+                pack: pack("b"),
+                size: 2 * MIB as u64,
+                last_use: 0,
+                holders: 0,
+                counts: CellCounts {
+                    absent: 2,
+                    ..CellCounts::default()
+                }
+            },
+        ]
+    );
 }

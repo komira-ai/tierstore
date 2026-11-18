@@ -7,7 +7,14 @@
 //! once it learns it, the committed proposal. Its bytes (little-endian): magic `TSSL`, version
 //! `u16` (1), block id `u64`, promised ballot (`round u32, node u8`), accepted flag `u8` and, when
 //! set, ballot and proposal, committed flag `u8` and, when set, the proposal, then the crc32c of
-//! the bytes before it. A proposal is `(length u64, running crc32c u32)`: the sealed length and
+//! the bytes before it.
+//!
+//! The replace rule: a `seals/<block_id>.seal` is replaced atomically before the promise or
+//! acceptance it records is answered: write a temporary name in `seals/`, fsync it, rename it over
+//! the old name, fsync the directory. A torn file is therefore never read (the rename is atomic),
+//! and a file that fails its crc is a damaged NVMe, not a lost promise.
+//!
+//! A proposal is `(length u64, running crc32c u32)`: the sealed length and
 //! the crc32c of the segment's bytes `[0, length)`.
 
 use crate::FormatError;

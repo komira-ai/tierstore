@@ -10,7 +10,7 @@
 //! - a decimal field that does not hold its range (a shard index above 255, a number above `u64`);
 //! - the fixed file names that are not the documented ones.
 
-use tierstore_format::ids::{BlockId, Generation, KeyHash, StripeId};
+use tierstore_format::ids::{BlockId, Generation, KeyHash, NodeId, StripeId};
 use tierstore_format::names::{ColdName, DRIVE_FILE, FAILED_FILE, HotName, INDEX_DIR, NODE_FILE};
 use tierstore_format::tomb::LargeFile;
 
@@ -62,7 +62,13 @@ fn every_hot_name_has_its_documented_path_and_parses_back() {
             HotName::Cache { boot: 3, seq: 17 },
             "cache/3.17.seg".to_string(),
         ),
-        (HotName::TombLog(5), "tomb/5.log".to_string()),
+        (
+            HotName::TombLog {
+                origin: NodeId(2),
+                first_seq: 5,
+            },
+            "tomb/2/5.log".to_string(),
+        ),
         (HotName::BlockIndex(block()), format!("blk/{ID}.idx")),
         (HotName::Descriptor(stripe()), format!("stripes/{ID}.desc")),
         (HotName::Free(stripe()), format!("stripes/{ID}.free")),
@@ -82,8 +88,14 @@ fn hot_names_at_the_edges_of_their_ranges_round_trip() {
             boot: u64::MAX,
             seq: u64::MAX,
         },
-        HotName::TombLog(0),
-        HotName::TombLog(u64::MAX),
+        HotName::TombLog {
+            origin: NodeId(0),
+            first_seq: 0,
+        },
+        HotName::TombLog {
+            origin: NodeId(255),
+            first_seq: u64::MAX,
+        },
         HotName::Segment(BlockId::from_raw(0)),
         HotName::Segment(BlockId::from_raw(u64::MAX)),
         HotName::Large(LargeFile {
@@ -159,15 +171,22 @@ fn a_hot_path_that_is_not_the_canonical_form_does_not_parse() {
         "seals/0102030405060708.seal.1",
         "seals/0102030405060708.SEAL",
         // tomb and cache: decimals.
-        "tomb/05.log",
-        "tomb/5.logs",
-        "tomb/5.log.gz",
-        "tomb/.log",
-        "tomb/-1.log",
-        "tomb/+1.log",
-        "tomb/1.2.log",
-        "tomb/18446744073709551616.log",
-        "tomb/a.log",
+        "tomb/5.log",
+        "tomb/2/05.log",
+        "tomb/02/5.log",
+        "tomb/2/5.logs",
+        "tomb/2/5.log.gz",
+        "tomb/2/.log",
+        "tomb/2/-1.log",
+        "tomb/2/+1.log",
+        "tomb/2/1.2.log",
+        "tomb/2/18446744073709551616.log",
+        "tomb/2/a.log",
+        "tomb/256/5.log",
+        "tomb/-1/5.log",
+        "tomb/a/5.log",
+        "tomb//5.log",
+        "tomb/2/3/5.log",
         "cache/03.17.seg",
         "cache/3.017.seg",
         "cache/3.17.seg.x",
@@ -416,4 +435,16 @@ fn a_hot_path_is_not_a_cold_name_and_the_reverse() {
         ),
         None
     );
+}
+
+#[test]
+fn tomb_log_files_of_one_origin_sort_by_first_seq_and_every_origin_parses() {
+    for origin in [0u8, 1, 9, 10, 99, 100, 255] {
+        let name = HotName::TombLog {
+            origin: NodeId(origin),
+            first_seq: 7,
+        };
+        assert_eq!(name.path(), format!("tomb/{origin}/7.log"));
+        assert_eq!(HotName::parse(&name.path()), Some(name));
+    }
 }

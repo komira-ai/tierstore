@@ -24,7 +24,7 @@ use tierstore_format::crc32c;
 use tierstore_format::ids::NodeId;
 use tierstore_format::seal::SealProposal;
 use tierstore_format::stamp::Stamp;
-use tierstore_format::tomb::{BlockDrop, LogEntry};
+use tierstore_format::tomb::{BlockDrop, LogEntry, LogRecord};
 use tierstore_store_api::fake::{FakeCluster, FakeStorageNode, Outcome, Route, Step};
 use tierstore_store_api::peer::{PeerClient, PeerError};
 use tierstore_store_api::proto::{
@@ -233,16 +233,14 @@ async fn restart_keeps_objects_copies_seal_states_commits_and_tomb_logs() {
     ))
     .await
     .unwrap();
-    node.append_tomb(
-        NodeId(2),
-        1,
-        &LogEntry::BlockDrop(BlockDrop {
+    node.append_tomb(LogRecord {
+        origin: NodeId(2),
+        seq: 1,
+        entry: LogEntry::BlockDrop(BlockDrop {
             block: seg,
-            origin: NodeId(2),
-            origin_seq: 1,
             stamp: Stamp::from_raw(9),
         }),
-    )
+    })
     .unwrap();
 
     node.crash();

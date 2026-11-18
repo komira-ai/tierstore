@@ -9,7 +9,7 @@
 //! big/<hh>/<khash>.<gen>.<size>.obj    a large object, whole file
 //! big/.<khash>.<nonce>.up              a large upload in progress
 //! cache/<boot>.<seq>.seg               a cache segment (promoted copies only)
-//! tomb/<seq>.log                       tombstone log
+//! tomb/<origin>/<first_seq>.log        a file of one origin's tombstone log
 //! blk/<block_id>.idx                   index file of a block this node indexes
 //! index/                               the embedded ordered store
 //! stripes/<stripe_id>.desc             stripe descriptor
@@ -29,14 +29,14 @@
 //! ```
 //!
 //! Block and stripe ids are 16 hex digits, key hashes and generations 32; a size, a sequence
-//! number, a boot epoch, a shard index and a nonce are decimal (a nonce is 16 hex digits). `<hh>`
+//! number, an origin node id, a boot epoch, a shard index and a nonce are decimal (a nonce is 16 hex digits). `<hh>`
 //! is the two hex digits of the low byte of the id (a cold file) or the first byte of the key hash
 //! (a large object), so a directory holds at most 1/256 of the files. A name that is not one of
 //! these parses to `None`: the startup sweep then leaves it alone.
 
 use std::str::FromStr;
 
-use crate::ids::{BlockId, Generation, KeyHash, StripeId};
+use crate::ids::{BlockId, Generation, KeyHash, NodeId, StripeId};
 use crate::tomb::LargeFile;
 
 /// The hot directory's identity file.
@@ -71,8 +71,15 @@ pub enum HotName {
         /// Its sequence number within that boot.
         seq: u64,
     },
-    /// `tomb/<seq>.log`
-    TombLog(u64),
+    /// `tomb/<origin>/<first_seq>.log`: a file of the tombstone log of `origin` (every origin's log
+    /// is stored on every node). It holds consecutive entries starting at `first_seq`; a new file
+    /// may be started at any entry, and the files of one origin sort by `first_seq`.
+    TombLog {
+        /// The node whose log the file holds, in decimal (0 to 255).
+        origin: NodeId,
+        /// The sequence number of the file's first entry, in decimal.
+        first_seq: u64,
+    },
     /// `blk/<block_id>.idx`
     BlockIndex(BlockId),
     /// `stripes/<stripe_id>.desc`
@@ -103,7 +110,9 @@ impl HotName {
             ),
             Self::LargeUpload { key_hash, nonce } => format!("big/.{key_hash}.{nonce:016x}.up"),
             Self::Cache { boot, seq } => format!("cache/{boot}.{seq}.seg"),
-            Self::TombLog(seq) => format!("tomb/{seq}.log"),
+            Self::TombLog { origin, first_seq } => {
+                format!("tomb/{}/{first_seq}.log", origin.0)
+            }
             Self::BlockIndex(b) => format!("blk/{b}.idx"),
             Self::Descriptor(s) => format!("stripes/{s}.desc"),
             Self::Free(s) => format!("stripes/{s}.free"),
@@ -127,7 +136,10 @@ impl HotName {
                     seq: decimal(seq)?,
                 }
             }
-            ["tomb", file] => Self::TombLog(decimal(file.strip_suffix(".log")?)?),
+            ["tomb", origin, file] => Self::TombLog {
+                origin: NodeId(decimal(origin)?.try_into().ok()?),
+                first_seq: decimal(file.strip_suffix(".log")?)?,
+            },
             ["blk", file] => Self::BlockIndex(file.strip_suffix(".idx")?.parse().ok()?),
             ["stripes", file] => parse_stripe_file(file)?,
             ["seals", file] => Self::Seal(file.strip_suffix(".seal")?.parse().ok()?),

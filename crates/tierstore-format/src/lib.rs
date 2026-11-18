@@ -10,9 +10,10 @@
 //!   milliseconds and 16 bits of counter (10.2). The clock that advances and merges it is T-S2's.
 //! - [`record`]: the 64-byte record header, the record framing of a segment and the scan that
 //!   stops at the last valid record (10.2).
-//! - [`tomb`]: the tombstone log of `tomb/<seq>.log`: tombstones, block drops and tomb drops,
-//!   each framed with a crc; a kind this release does not know is kept and skipped, never refused
-//!   (10.2, 10.14).
+//! - [`tomb`]: the tombstone log of `tomb/<origin>/<first_seq>.log`: tombstones, block drops and
+//!   tomb drops, each a [`tomb::LogRecord`] framed with its origin, its position in the origin's
+//!   log and a crc; a kind this release does not know is kept and skipped, never refused (10.2,
+//!   10.14).
 //! - [`trailer`]: the block trailer (sorted entries with stamps, a crc32c per 1 MiB cell, the
 //!   block's blake3), which is also the content of `seg/<block_id>.idx` and `blk/<block_id>.idx`
 //!   (10.2).

@@ -175,7 +175,7 @@ pub trait PeerClient: Send + Sync {
         record: Envelope<CommitRecord>,
     ) -> Result<Envelope<CommitAnswer>, PeerError>;
 
-    /// `GET /store/v1/tomb?origin=<n>&after=<seq>`.
+    /// `GET /store/v1/tomb?origin=<n>&after=<seq>&limit=<n>` ([`TombPull::query`]).
     async fn tomb_pull(
         &self,
         node: NodeId,

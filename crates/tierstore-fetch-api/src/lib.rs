@@ -10,7 +10,9 @@
 //!   table of section 2 allows, each a CAS from a named predecessor.
 //! - [`page`]: the layout of the state page a mount maps read-only, the seals that make it
 //!   read-only, and the counter regions of a mount's counter memfd (5.1).
-//! - [`entry`]: `StateView`, `ReaderCounters`, `Entry` and `EntryStore` (5.1, 5.6, 7, 8).
+//! - [`entry`]: `StateView`, `ReaderCounters`, `HolderCounters` (the server's view of a holder's
+//!   counter memfd), `Entry` (cells, journaled `punch`, `counts`, `touch`, `read_cell`, `fds`) and
+//!   `EntryStore` (`attach`, `register_holder`, `drop_holder`, `entries`) (5.1, 5.6, 7, 8).
 //! - [`list`]: `ListL2` and `ListVersionUnsupported` (section 3).
 //! - [`verify`]: `Verifier`, the hash pool's interface (3.3, 4.7).
 //! - [`upstream`]: `Upstream` and what a location, a part request and a part response carry
@@ -21,7 +23,7 @@
 //!   `lost`, `ensure`, `release`, epoch, the descriptors each message carries (5.4).
 //! - [`clock`]: the injected clock every timed decision reads, and its manual fake (section 14).
 //! - [`fake`]: an upstream with scripted answers, an engine with scripted waits, and an
-//!   in-memory entry store.
+//!   in-memory entry store with a holder's counters in memory (`MemCounters`).
 //!
 //! Each trait's documentation names the section 14 rows its implementations must pass.
 

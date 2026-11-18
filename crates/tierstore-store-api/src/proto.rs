@@ -7,6 +7,10 @@
 //! format of `tierstore-format` inside a JSON body (a descriptor, a free, a log entry) travels as
 //! the lowercase hex of its bytes ([`HexBytes`]); ids travel in their text form. A replication
 //! batch's bytes and every GET's bytes are the raw HTTP body, with their fields in headers.
+//!
+//! Keys are UTF-8 on the wire (they are S3 keys, carried as JSON strings in [`LocateRequest`] and
+//! [`KeyCheck`]); the formats of `tierstore-format` store a key as its bytes, so a key travels as
+//! its UTF-8 bytes and is stored as the same bytes.
 
 use serde::{Deserialize, Serialize};
 use tierstore_fetch_api::ids::{Class, JobId, Rank};
@@ -17,7 +21,7 @@ use tierstore_format::free::StripeFree;
 use tierstore_format::ids::{BlockId, DriveId, Generation, NodeId};
 use tierstore_format::seal::{Ballot, SealProposal};
 use tierstore_format::stamp::Stamp;
-use tierstore_format::tomb::LogEntry;
+use tierstore_format::tomb::{LogRecord, scan_log_after};
 
 use crate::hot::{ReplicaAck, ReplicaBatch, ReplicaReject};
 
@@ -44,7 +48,9 @@ pub mod route {
     pub const KEY: &str = "/store/v1/key";
     /// `POST`: a peer streams its index range for the keys this node should hold.
     pub const INDEX_SYNC: &str = "/store/v1/index-sync";
-    /// `GET ?origin=<node>&after=<seq>`: the tombstone log pull ([`super::TombPage`]).
+    /// `GET ?origin=<node>&after=<seq>&limit=<n>`: the tombstone log pull of one origin's log
+    /// ([`super::TombPull::query`], [`super::TombPage`]); the three parameters are decimal, in
+    /// this order.
     pub const TOMB: &str = "/store/v1/tomb";
     /// `POST`: a repair request.
     pub const REPAIR: &str = "/store/v1/repair";
@@ -104,6 +110,9 @@ pub enum ProtoError {
     /// A hex field is not lowercase hex of whole bytes.
     #[error("not lowercase hex")]
     BadHex,
+    /// A query string is not the canonical form of the message.
+    #[error("query is malformed")]
+    BadQuery,
     /// A binary format inside the message does not decode.
     #[error(transparent)]
     Format(#[from] FormatError),
@@ -152,7 +161,7 @@ pub struct Envelope<T> {
 /// A batched `LOCATE`.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct LocateRequest {
-    /// The keys, answered in order.
+    /// The keys, answered in order; UTF-8 on the wire, stored as bytes by the formats.
     pub keys: Vec<String>,
 }
 
@@ -245,7 +254,7 @@ pub struct LocateResponse {
 /// The writer's all-node key check before a PUT or DELETE (10.2).
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct KeyCheck {
-    /// The key.
+    /// The key; UTF-8 on the wire, stored as bytes by the formats.
     pub key: String,
 }
 
@@ -470,47 +479,96 @@ pub enum CommitAnswer {
 pub struct TombPull {
     /// The origin whose log is pulled.
     pub origin: NodeId,
-    /// The last sequence number the puller applied.
+    /// The last sequence number the puller applied (0: none yet).
     pub after: u64,
     /// The most entries to return.
     pub limit: u32,
 }
 
+impl TombPull {
+    /// The query string of the pull, `origin=<n>&after=<seq>&limit=<n>`, decimals in this order.
+    #[must_use]
+    pub fn query(&self) -> String {
+        format!(
+            "origin={}&after={}&limit={}",
+            self.origin.0, self.after, self.limit
+        )
+    }
+
+    /// The pull a query string names; only the exact form [`TombPull::query`] writes parses (the
+    /// three parameters in order, canonical decimals: no sign, no leading zeros), anything else is
+    /// [`ProtoError::BadQuery`].
+    pub fn from_query(query: &str) -> Result<Self, ProtoError> {
+        let mut parts = query.split('&');
+        let origin = param(parts.next(), "origin=")?;
+        let after = param(parts.next(), "after=")?;
+        let limit = param(parts.next(), "limit=")?;
+        if parts.next().is_some() {
+            return Err(ProtoError::BadQuery);
+        }
+        Ok(Self {
+            origin: NodeId(origin.try_into().map_err(|_| ProtoError::BadQuery)?),
+            after,
+            limit: limit.try_into().map_err(|_| ProtoError::BadQuery)?,
+        })
+    }
+}
+
+/// The decimal value of a `name=value` query parameter, in canonical form.
+fn param(part: Option<&str>, name: &str) -> Result<u64, ProtoError> {
+    let text = part
+        .and_then(|p| p.strip_prefix(name))
+        .ok_or(ProtoError::BadQuery)?;
+    let value: u64 = text.parse().map_err(|_| ProtoError::BadQuery)?;
+    if value.to_string() == text {
+        Ok(value)
+    } else {
+        Err(ProtoError::BadQuery)
+    }
+}
+
 /// A page of a tombstone log.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct TombPage {
-    /// The entries, encoded, in sequence order.
+    /// The entries, each an encoded [`LogRecord`] (its origin and sequence number in its frame), in
+    /// sequence order.
     pub entries: Vec<HexBytes>,
-    /// The sequence number of the last entry returned (the puller's next `after`).
+    /// The sequence number of the last entry returned (the pull's `after` when none): the puller's
+    /// next `after`.
     pub last: u64,
     /// Whether more entries follow.
     pub more: bool,
 }
 
 impl TombPage {
-    /// The page of `entries` (each with its origin sequence number).
-    pub fn new(entries: &[LogEntry], last: u64, more: bool) -> Result<Self, ProtoError> {
-        let entries = entries
+    /// The page answering a pull after `after`, of `records`; `last` is the sequence number of the
+    /// last record, or `after` when there is none.
+    pub fn new(after: u64, records: &[LogRecord], more: bool) -> Result<Self, ProtoError> {
+        let entries = records
             .iter()
-            .map(|e| e.encode().map(HexBytes))
+            .map(|r| r.encode().map(HexBytes))
             .collect::<Result<Vec<_>, _>>()?;
         Ok(Self {
             entries,
-            last,
+            last: records.last().map_or(after, |r| r.seq),
             more,
         })
     }
 
-    /// The entries, decoded.
-    pub fn decode(&self) -> Result<Vec<LogEntry>, ProtoError> {
-        self.entries
-            .iter()
-            .map(|b| {
-                LogEntry::decode(&b.0)
-                    .map(|(e, _)| e)
-                    .map_err(ProtoError::from)
-            })
-            .collect()
+    /// The records of the page answering `pull`, decoded. Every record must be of the pulled origin
+    /// and the sequence numbers must be consecutive from `pull.after + 1`; `last` must be that of
+    /// the last record (`pull.after` for an empty page). Anything else fails the page.
+    pub fn decode(&self, pull: &TombPull) -> Result<Vec<LogRecord>, ProtoError> {
+        let bytes: Vec<u8> = self.entries.iter().flat_map(|b| b.0.clone()).collect();
+        let records = scan_log_after(&bytes, pull.origin, pull.after)?;
+        let last = records.last().map_or(pull.after, |r| r.seq);
+        if last != self.last || records.len() != self.entries.len() {
+            return Err(ProtoError::Format(FormatError::Invalid {
+                what: "tomb page",
+                reason: "last or entries do not match the records",
+            }));
+        }
+        Ok(records)
     }
 }
 

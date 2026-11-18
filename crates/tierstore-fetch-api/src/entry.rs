@@ -5,11 +5,17 @@
 //! state memfd, the holders' counter memfds and lifelines, `flock`) and the in-process one of
 //! macOS (T-M1: atomics in memory, one process). The same CAS rules and the same evictor ordering
 //! hold for both; the loom model of T10a runs against the traits so it covers both.
+//!
+//! **Blocking.** The methods of [`Entry`] and [`EntryStore`] do blocking I/O on the Linux
+//! implementation (`pwrite`, `fdatasync`, `fallocate`, the journal's `fsync`, `ftruncate`, `mmap`).
+//! A caller runs them on a dedicated or blocking thread, never on an async worker.
 
+use std::os::fd::BorrowedFd;
 use std::sync::Arc;
 
 use crate::cell::{CellByte, Transition};
 use crate::ids::{CellRun, HolderId, PackId};
+use crate::page::CounterRegion;
 
 /// A read-only view of one pack's cell bytes: what a mount maps. Every load is `SeqCst` (5.1:
 /// the reader and the evictor each store to one location and then load the other's).
@@ -41,6 +47,40 @@ pub trait ReaderCounters: Send + Sync {
     fn enter(&self, group: u32);
     /// `fetch_sub(counter of group, 1, SeqCst)`.
     fn leave(&self, group: u32);
+}
+
+/// The server's read-only view of one holder's counter memfd (5.1): the `u16` reader counters of
+/// every pack the holder has open, at the offsets its regions name. On Linux it is a read-only
+/// mapping of the memfd the holder sent at handshake; in process it is the counters themselves.
+///
+/// Section 14 rows: "A mount grows its counter memfd past the server's mapping: the server remaps
+/// before acknowledging `open-pack`, and the evictor reads the new region's counters"; "Mount
+/// killed (lifeline hangup) ...".
+pub trait HolderCounters: Send + Sync + std::fmt::Debug {
+    /// The bytes of the memfd the server has mapped.
+    fn len(&self) -> u64;
+
+    /// Remaps the memfd to at least `len` bytes. [`EntryStore::attach`] calls it before it
+    /// acknowledges an `open-pack` whose region ends past [`HolderCounters::len`].
+    fn ensure_len(&self, len: u64) -> Result<(), EntryError>;
+
+    /// The counter at byte `offset` of the memfd (`SeqCst`), or `None` when the counter is not
+    /// inside the mapping.
+    fn load(&self, offset: u64) -> Option<u16>;
+
+    /// Whether nothing is mapped.
+    fn is_empty(&self) -> bool {
+        self.len() == 0
+    }
+}
+
+/// The descriptors `open-pack` sends for an entry (5.1, 5.4), borrowed from the entry.
+#[derive(Debug, Clone, Copy)]
+pub struct EntryFds<'a> {
+    /// The pack's data file.
+    pub data: BorrowedFd<'a>,
+    /// The sealed state memfd ([`crate::page::MOUNT_SEALS`]).
+    pub state: BorrowedFd<'a>,
 }
 
 /// The right to publish one claimed cell. It is neither `Clone` nor `Copy`, and publishing or
@@ -115,6 +155,58 @@ impl Settle {
     }
 }
 
+/// What one [`Entry::punch`] did (section 8).
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
+pub struct PunchReport {
+    /// `fsync`s of the journal: 0 (nothing to punch) or 1 for the whole call.
+    pub journal_syncs: u32,
+    /// `PUNCH` records appended: one per non-empty run.
+    pub records: u32,
+    /// Bytes of the pack released (the last cell of a pack may be shorter than a cell).
+    pub bytes_punched: u64,
+}
+
+/// How many cells of an entry are in each state (the `durable` bit is not a state).
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
+pub struct CellCounts {
+    /// Cells with no bytes.
+    pub absent: u32,
+    /// Cells a fetch attempt owns.
+    pub claimed: u32,
+    /// Verified cells.
+    pub present: u32,
+    /// Cells to re-hash.
+    pub recheck: u32,
+    /// Cells the evictor owns.
+    pub evicting: u32,
+    /// Cells that failed verification twice.
+    pub bad: u32,
+}
+
+impl CellCounts {
+    /// The cells that count as use in the cache's accounting: `present + claimed + recheck`
+    /// (section 7).
+    #[must_use]
+    pub fn used(&self) -> u64 {
+        u64::from(self.present) + u64::from(self.claimed) + u64::from(self.recheck)
+    }
+}
+
+/// What the evictor and the accounting of section 7 read about one entry.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct EntryInfo {
+    /// The pack.
+    pub pack: PackId,
+    /// Its size.
+    pub size: u64,
+    /// The last use, in milliseconds of the injected clock ([`Entry::last_use`]).
+    pub last_use: u64,
+    /// The number of holders.
+    pub holders: u32,
+    /// The cells by state.
+    pub counts: CellCounts,
+}
+
 /// What one commit of the journal did for one entry (section 8).
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
 pub struct CommitReport {
@@ -178,6 +270,55 @@ pub enum EntryError {
         /// Its size.
         size: u64,
     },
+    /// The cell is not `evicting`, so it must not be punched ([`Entry::punch`]).
+    #[error("{pack:?}: cell {cell} is not evicting")]
+    NotEvicting {
+        /// The entry.
+        pack: PackId,
+        /// The cell.
+        cell: u32,
+    },
+    /// The cell is neither `recheck` nor `present`, so its bytes are not read ([`Entry::read_cell`]).
+    #[error("{pack:?}: cell {cell} is {state:?}, not recheck or present")]
+    NotReadable {
+        /// The entry.
+        pack: PackId,
+        /// The cell.
+        cell: u32,
+        /// Its byte.
+        state: CellByte,
+    },
+    /// No entry is open for the pack ([`EntryStore::attach`]).
+    #[error("{pack:?}: no such entry")]
+    UnknownPack {
+        /// The pack asked for.
+        pack: PackId,
+    },
+    /// The holder never registered, or its lifeline hung up ([`EntryStore::attach`]).
+    #[error("holder {holder:?} is not registered")]
+    UnknownHolder {
+        /// The holder.
+        holder: HolderId,
+    },
+    /// The counter region is misaligned, overflows, does not count the pack's groups, or is not
+    /// the region the holder attached for this pack before ([`EntryStore::attach`]).
+    #[error("{pack:?}: bad counter region {region:?}")]
+    BadRegion {
+        /// The entry.
+        pack: PackId,
+        /// The region the holder named.
+        region: CounterRegion,
+    },
+    /// The server could not map the holder's counter memfd at `len` bytes
+    /// ([`HolderCounters::ensure_len`]).
+    #[error("mapping {len} bytes of a holder's counters: {source}")]
+    CountersMap {
+        /// The length asked.
+        len: u64,
+        /// The error.
+        #[source]
+        source: std::io::Error,
+    },
     /// The data file or the journal failed.
     #[error("{pack:?}: {op}: {source}")]
     Io {
@@ -198,7 +339,14 @@ pub enum EntryError {
 /// both deliver a cell: one publishes"; the loom row of 5.1; "Live reader stuck beyond
 /// `evict_wait`"; "Crash between `pwrite` and journal append"; "Crash after a batched PUNCH
 /// fsync"; "Process crash, same boot ... different boot"; "Journal batching"; "Eviction removes
-/// an unheld entry's path while a mount holds the data fd"; "`EntryStore` conformance suite".
+/// an unheld entry's path while a mount holds the data fd"; "`EntryStore` conformance suite";
+/// "Crash after a batched PUNCH fsync and before/after the punch: replay never marks a punched cell
+/// `present`; one fsync per batch" (`punch`); "Held-only cache: punch eviction admits a new job"
+/// (`counts`, `touch`); "Process crash, same boot ... different boot ... `recheck`" (`read_cell`);
+/// "Mount killed (lifeline hangup) ..." (`group_readers` sums every attached holder).
+///
+/// The methods do blocking I/O on the Linux implementation: call them from a dedicated or
+/// blocking thread, never from an async worker.
 pub trait Entry: Send + Sync {
     /// The pack.
     fn pack(&self) -> &PackId;
@@ -226,14 +374,63 @@ pub trait Entry: Send + Sync {
     /// `claimed -> bad`: the second verification failure of the cell (4.6).
     fn mark_bad(&self, cell: ClaimedCell);
 
-    /// One step of the evictor's protocol on one cell; whether the CAS won.
+    /// One step of the evictor's protocol on one cell; whether the CAS won. The CAS expects the
+    /// byte the implementation loaded, `durable` bit and all (see [`Transition::apply`]), not the
+    /// bare state constant. `Finish` changes the state only: the bytes were already released by
+    /// [`Entry::punch`].
     fn evict_cell_cas(&self, cell: u32, step: EvictStep) -> bool;
+
+    /// Releases the bytes of `runs`, every cell of which the caller has won with
+    /// [`EvictStep::Begin`] and holds `evicting` (5.1 step 4, section 8).
+    ///
+    /// The order is the contract: one `PUNCH` record per non-empty run is appended to the entry's
+    /// journal and the journal is `fsync`ed **once** for the whole call; only then is each run
+    /// punched (`fallocate(PUNCH_HOLE | KEEP_SIZE)`). `punch` does not change a cell's state: the
+    /// caller then CASes each cell `evicting -> absent` with [`EvictStep::Finish`], so a cell is
+    /// never claimable while its bytes are still being released.
+    ///
+    /// If a cell of `runs` is not `evicting`, the result is [`EntryError::NotEvicting`] and
+    /// nothing is journaled or punched; a cell outside the pack is
+    /// [`EntryError::CellOutOfRange`], also before any effect. No runs (or only empty runs) is a
+    /// report of zeros, with no journal sync.
+    fn punch(&self, runs: &[CellRun]) -> Result<PunchReport, EntryError>;
 
     /// A `recheck` or `bad` cell settled; whether the CAS won.
     fn settle(&self, cell: u32, how: Settle) -> bool;
 
-    /// The sum of every holder's reader counter of `group` (5.1 evictor step 2), `SeqCst`.
+    /// The sum of every reader counter of `group` (5.1 evictor step 2), `SeqCst`: the entry's
+    /// in-process counters (if it has any) and, for every holder attached with
+    /// [`EntryStore::attach`], the counter at that group's offset in the holder's region. A
+    /// group outside the pack counts 0.
     fn group_readers(&self, group: u32) -> u64;
+
+    /// The cells by state, from one pass of `SeqCst` loads (7). The pass is not a snapshot: a
+    /// cell that changes during it is counted in the state the pass saw.
+    fn counts(&self) -> CellCounts;
+
+    /// The last use of the entry, in milliseconds of the injected clock; 0 until the first
+    /// [`Entry::touch`].
+    fn last_use(&self) -> u64;
+
+    /// Records a use at `now_ms` of the 16-cell `group`: `last_use = max(last_use, now_ms)` and
+    /// the group's touch epoch (the `u32` of the state page, [`crate::page::epoch_of`]) becomes
+    /// the epoch of the new `last_use`, which is `now_ms / 1000` truncated to a `u32` when the
+    /// clock does not go back. A group outside the pack changes `last_use` only.
+    fn touch(&self, now_ms: u64, group: u32);
+
+    /// The touch epoch of `group` (0 until it is touched), or `None` outside the pack.
+    fn touch_epoch(&self, group: u32) -> Option<u32>;
+
+    /// The bytes of `cell` as they are on disk (the cell's length: the last cell of a pack may be
+    /// shorter), so a `recheck` cell can be re-hashed (section 8). A `present` cell can be read
+    /// too. Any other state is [`EntryError::NotReadable`] with the byte seen; a cell outside the
+    /// pack is [`EntryError::CellOutOfRange`].
+    fn read_cell(&self, cell: u32) -> Result<Vec<u8>, EntryError>;
+
+    /// The descriptors `open-pack` sends: the data file and the sealed state memfd. `Some` on the
+    /// Linux implementation, which T5 passes in `PackOpened` with `SCM_RIGHTS`; `None` in
+    /// process (macOS, the fake), which has neither.
+    fn fds(&self) -> Option<EntryFds<'_>>;
 
     /// Takes a hold for `holder` (a refcount per holder; 7).
     fn hold(&self, holder: HolderId);
@@ -263,7 +460,13 @@ pub struct EntrySpec {
 ///
 /// Section 14 rows: "`EntryStore` conformance suite passes on the memfd implementation (Linux)
 /// and the in-process implementation"; "No eviction before the grace window; an entry locked by
-/// a second process is never evicted"; "Layout migration".
+/// a second process is never evicted"; "Layout migration"; "A mount grows its counter memfd past
+/// the server's mapping: the server remaps before acknowledging `open-pack`" (`attach`); "Mount
+/// killed (lifeline hangup): counters dropped, eviction proceeds; mount whose protocol connection
+/// flaps keeps counters, regions and holds" (`register_holder`, `attach`, `drop_holder`).
+///
+/// The methods do blocking I/O on the Linux implementation (opening files, `mmap`, `ftruncate`):
+/// call them from a dedicated or blocking thread, never from an async worker.
 pub trait EntryStore: Send + Sync {
     /// The entry of `spec.pack`, created (`absent` cells) if there is none. Opening an existing
     /// entry with another size is an error of the caller: a `PackId` names one size.
@@ -278,4 +481,37 @@ pub trait EntryStore: Send + Sync {
 
     /// The packs of every entry.
     fn packs(&self) -> Vec<PackId>;
+
+    /// What the evictor reads about every entry, in pack order.
+    fn entries(&self) -> Vec<EntryInfo>;
+
+    /// Registers a holder's counters at handshake. A second registration of a holder id that is
+    /// still live keeps the first: a reconnect of the protocol connection does not re-register
+    /// (the counter memfd and the lifeline are unchanged), and a holder id is not live again
+    /// until [`EntryStore::drop_holder`].
+    fn register_holder(
+        &self,
+        holder: HolderId,
+        counters: Arc<dyn HolderCounters>,
+    ) -> Result<(), EntryError>;
+
+    /// `open-pack`: attaches `holder`'s counter `region` to the entry of `pack` and takes the
+    /// holder's hold. The region is checked first: [`CounterRegion::is_valid`] and `groups` equal
+    /// to the pack's group count, else [`EntryError::BadRegion`]. Then
+    /// [`HolderCounters::ensure_len`] makes the server's mapping reach [`CounterRegion::end`]
+    /// **before this returns**, so the evictor never reads past its mapping. Attaching the same
+    /// region again is idempotent (no second hold; a reconnect re-sends `open-pack`); another
+    /// region for the same `(pack, holder)` is [`EntryError::BadRegion`]. A pack with no entry is
+    /// [`EntryError::UnknownPack`], an unregistered holder [`EntryError::UnknownHolder`].
+    fn attach(
+        &self,
+        pack: &PackId,
+        holder: HolderId,
+        region: CounterRegion,
+    ) -> Result<(), EntryError>;
+
+    /// The lifeline of `holder` hung up (`POLLHUP`, and only that: a flapping protocol connection
+    /// never calls it): forgets its counters and its regions, and drops its holds on every entry.
+    /// The number of entries that were released.
+    fn drop_holder(&self, holder: HolderId) -> u32;
 }

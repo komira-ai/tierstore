@@ -6,7 +6,9 @@
 //! table; shard files are unlinked only after the commit. It is kept as
 //! `stripes/<stripe_id>.free` beside the descriptor. Its bytes (little-endian): magic `TSFR`,
 //! version `u16` (1), stripe id `u64`, the descriptor revision it frees `u32`, owner `u8`, stamp
-//! `u64`, then the crc32c of the bytes before it.
+//! `u64`, then the crc32c of the bytes before it. The file is written like a seal state (see
+//! [`crate::seal`]): a temporary name in `stripes/`, fsync, rename over the final name, fsync the
+//! directory, and only then is the write answered; a file that fails its crc is a damaged NVMe.
 
 use crate::FormatError;
 use crate::codec::{Dec, Enc, expect_magic};

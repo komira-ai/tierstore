@@ -11,7 +11,7 @@
 use tierstore_format::ids::{BlockId, Generation, NodeId};
 use tierstore_format::record::RecordFlags;
 use tierstore_format::stamp::Stamp;
-use tierstore_format::tomb::{BlockDrop, LargeFile, Tombstone};
+use tierstore_format::tomb::{LargeFile, LogRecord, Tombstone};
 
 /// Where an entry's bytes are.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
@@ -112,7 +112,9 @@ pub enum DeleteOutcome {
 pub struct ReplayMark {
     /// Per open segment, the committed length the index reflects.
     pub open_segments: Vec<(BlockId, u64)>,
-    /// Per origin, the tombstone log position applied.
+    /// Per origin, the position (sequence number) of the last entry of that origin's tombstone log
+    /// applied; 0 is none yet. Replaying a [`Fact::Log`] moves its origin's cursor to the record's
+    /// sequence number.
     pub tomb_cursors: Vec<(NodeId, u64)>,
 }
 
@@ -138,10 +140,9 @@ pub enum Fact {
         /// The new location.
         to: EntryLocation,
     },
-    /// A tombstone of the log.
-    Tombstone(Tombstone),
-    /// A block drop of the log (hot-only mode).
-    BlockDrop(BlockDrop),
+    /// An entry of a tombstone log with its position: a tombstone, a block drop (hot-only mode) or
+    /// a tomb drop is applied, an entry of an unknown kind only moves the cursor of its origin.
+    Log(LogRecord),
 }
 
 /// What a replay applied.
@@ -194,8 +195,10 @@ pub trait Index: Send + Sync {
     /// is greater than `entry.stamp` ([`PutOutcome::Stale`]); the caller holds the key lock.
     fn put_if_absent(&self, key: &[u8], entry: IndexEntry) -> Result<PutOutcome, IndexError>;
 
-    /// Applies a tombstone of `key` at `stamp` (idempotent per `(key, stamp)`).
-    fn delete(&self, key: &[u8], stamp: Stamp) -> Result<DeleteOutcome, IndexError>;
+    /// Applies a tombstone of the log (idempotent per key and stamp): the tombstone names the key,
+    /// its stamp and the blocks and large files that may list an older record of the key (10.2),
+    /// so the live counts of those blocks are decreased when a live entry is deleted.
+    fn delete(&self, tombstone: &Tombstone) -> Result<DeleteOutcome, IndexError>;
 
     /// Up to `limit` live keys with `prefix`, in key order, strictly after `after` (a seek, so a
     /// rolled-up prefix is skipped by asking after its last possible key). Tombstone entries are

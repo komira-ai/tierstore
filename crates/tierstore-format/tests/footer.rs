@@ -462,3 +462,113 @@ fn a_copy_footer_whose_stored_indexes_are_not_ascending_is_refused_on_decode() {
         );
     }
 }
+
+#[allow(
+    clippy::unwrap_used,
+    reason = "a test helper: a failed unwrap is the failure it reports"
+)]
+fn unhex(s: &str) -> Vec<u8> {
+    (0..s.len())
+        .step_by(2)
+        .map(|i| u8::from_str_radix(&s[i..i + 2], 16).unwrap())
+        .collect()
+}
+
+/// A footer's bytes must be: the body, zeros up to the tail, then footer length `u64`, magic and
+/// crc32c.
+#[allow(
+    clippy::unwrap_used,
+    reason = "a test helper: a failed unwrap is the failure it reports"
+)]
+fn assert_golden(footer: &ShardFooter, body_hex: &str, crc_hex: &str) {
+    let bytes = footer.encode().unwrap();
+    let body = unhex(body_hex);
+    assert_eq!(bytes.len(), 4096);
+    assert_eq!(&bytes[..body.len()], &body[..]);
+    assert!(bytes[body.len()..4096 - 16].iter().all(|b| *b == 0));
+    assert_eq!(&bytes[4096 - 16..4096 - 8], &4096u64.to_le_bytes());
+    assert_eq!(&bytes[4096 - 8..4096 - 4], b"TSSF");
+    assert_eq!(&bytes[4096 - 4..], &unhex(crc_hex)[..]);
+    assert_eq!(&ShardFooter::decode(&bytes).unwrap(), footer);
+}
+
+#[test]
+fn a_stripe_shard_footer_has_exactly_these_bytes() {
+    // version 1 | kind 1 | shard index 2 | code Ec k 2 m 1 | stripe id | revision 3 | expiry 4 |
+    // coordinator 5 | one block (id 0x11, length 100) | two shards (index, node, drive) |
+    // data length 5 | one cell | cell crc | blake3
+    let footer = ShardFooter {
+        subject: FooterSubject::Stripe {
+            stripe: StripeDescriptor {
+                stripe: StripeId::from_raw(0x0102_0304_0506_0708),
+                revision: 3,
+                code: Code::Ec { k: 2, m: 1 },
+                blocks: vec![(BlockId::from_raw(0x11), 100)],
+                shards: vec![
+                    PlacedShard {
+                        index: 0,
+                        loc: ShardLoc {
+                            node: NodeId(1),
+                            drive: DriveId([0xa0; 16]),
+                        },
+                    },
+                    PlacedShard {
+                        index: 2,
+                        loc: ShardLoc {
+                            node: NodeId(3),
+                            drive: DriveId([0xb0; 16]),
+                        },
+                    },
+                ],
+                expiry: ExpiryClass(4),
+                coordinator: NodeId(5),
+            },
+            index: 2,
+        },
+        data_len: 5,
+        cell_crcs: vec![0x0102_0304],
+        blake3: [0x55; 32],
+    };
+    assert_golden(
+        &footer,
+        "01000102010201080706050403020103000000040501001100000000000000640000000000000002000001a0a0a0a0a0a0a0a0a0a0a0a0a0a0a0a00203b0b0b0b0b0b0b0b0b0b0b0b0b0b0b0b005000000000000000100000000000000040302015555555555555555555555555555555555555555555555555555555555555555",
+        "5e5e30aa",
+    );
+}
+
+#[test]
+fn a_copy_footer_has_exactly_these_bytes() {
+    // version 1 | kind 2 | block id | length 5 | expiry 9 | two copies (index, node, drive) |
+    // data length 5 | one cell | cell crc | blake3
+    let footer = ShardFooter {
+        subject: FooterSubject::Copy {
+            block: BlockId::from_raw(0x0900_0000_0000_0001),
+            length: 5,
+            expiry: ExpiryClass(9),
+            copies: vec![
+                PlacedShard {
+                    index: 0,
+                    loc: ShardLoc {
+                        node: NodeId(1),
+                        drive: DriveId([0xa0; 16]),
+                    },
+                },
+                PlacedShard {
+                    index: 1,
+                    loc: ShardLoc {
+                        node: NodeId(2),
+                        drive: DriveId([0xb0; 16]),
+                    },
+                },
+            ],
+        },
+        data_len: 5,
+        cell_crcs: vec![0x0102_0304],
+        blake3: [0x66; 32],
+    };
+    assert_golden(
+        &footer,
+        "010002010000000000000905000000000000000902000001a0a0a0a0a0a0a0a0a0a0a0a0a0a0a0a00102b0b0b0b0b0b0b0b0b0b0b0b0b0b0b0b005000000000000000100000000000000040302016666666666666666666666666666666666666666666666666666666666666666",
+        "bcbc7893",
+    );
+}

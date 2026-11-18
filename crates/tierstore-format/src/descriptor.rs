@@ -7,7 +7,9 @@
 //! then `k u8, m u8` or `replicas u8`), stripe id `u64`, revision `u32`, expiry class `u8`,
 //! coordinator `u8`, block count `u16`, `(block id u64, length u64)` per data block, shard count
 //! `u16`, `(shard index u8, node u8, drive id 16 bytes)` per stored shard, then the crc32c of all
-//! the bytes before it.
+//! the bytes before it. A descriptor file is written like a seal state (see [`crate::seal`]): a
+//! temporary name in `stripes/`, fsync, rename over the final name, fsync the directory, and only
+//! then is the write answered; a file that fails its crc is a damaged NVMe.
 //!
 //! A stripe of `k + m` (10.4) has `k` data shards, indexes `0..k`, and `m` parity shards, indexes
 //! `k..k + m`. A partial stripe (10.5) has `j < k` blocks; data shards `j..k` are virtual zeros

@@ -108,7 +108,9 @@ pub enum Transition {
     MarkBad,
     /// `present -> present + durable`: the batch `fdatasync` covered the cell.
     Durable,
-    /// `present -> evicting`: the evictor won the cell (5.1 step 1).
+    /// `present -> evicting`: the evictor won the cell (5.1 step 1). The `durable` bit stays, so
+    /// the CAS expects the loaded byte (`0x02` or `0x82`) and the evicting byte is `0x04` or
+    /// `0x84`.
     BeginEvict,
     /// `evicting -> present`: a reader stayed past `evict_wait` (5.1 step 3).
     AbortEvict,
@@ -156,6 +158,10 @@ impl Transition {
     /// transition's predecessor (the CAS fails). `Durable` keeps the state and sets the bit.
     /// `BeginEvict` and `AbortEvict` keep the bit, so a cell whose eviction is aborted comes back
     /// as durable as it was (its bytes on disk did not change); every other transition clears it.
+    ///
+    /// The `durable` bit therefore stays through `evicting`: an evicting cell's byte may be
+    /// `0x84`. An implementation's CAS expects the byte it loaded (this method computes the
+    /// byte after it), never the bare state constant, or a durable cell would never be won.
     #[must_use]
     pub const fn apply(self, current: CellByte) -> Option<CellByte> {
         // The byte must be exactly the predecessor state, with or without `durable`: a byte with

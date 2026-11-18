@@ -24,7 +24,7 @@ use tierstore_fetch_api::ids::CellRun;
 use tierstore_fetch_api::page::{
     CELL_SHIFT, CounterRegion, F_SEAL_FUTURE_WRITE, F_SEAL_GROW, F_SEAL_SEAL, F_SEAL_SHRINK,
     GROUP_CELLS, MOUNT_SEALS, PAGE_BYTES, STATE_PAGE_HEADER_LEN, STATE_PAGE_MAGIC,
-    STATE_PAGE_VERSION, StatePageLayout, groups_of, sealed_for_mounts,
+    STATE_PAGE_VERSION, StatePageLayout, epoch_of, groups_of, sealed_for_mounts,
 };
 
 const CELL: u64 = 1 << 20;
@@ -422,4 +422,14 @@ fn a_counter_region_is_valid_when_aligned_and_not_overflowing() {
         }
         .is_valid()
     );
+}
+
+#[test]
+fn an_epoch_is_the_seconds_of_the_clock_truncated_to_a_u32() {
+    assert_eq!(epoch_of(0), 0);
+    assert_eq!(epoch_of(999), 0);
+    assert_eq!(epoch_of(1_000), 1);
+    assert_eq!(epoch_of(5_999), 5);
+    assert_eq!(epoch_of(u64::from(u32::MAX) * 1000), u32::MAX);
+    assert_eq!(epoch_of((u64::from(u32::MAX) + 3) * 1000), 2);
 }

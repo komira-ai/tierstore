@@ -30,7 +30,7 @@ use tierstore_format::free::StripeFree;
 use tierstore_format::ids::{BlockId, DriveId, ExpiryClass, Generation, NodeId, StripeId};
 use tierstore_format::seal::{Ballot, SealProposal};
 use tierstore_format::stamp::Stamp;
-use tierstore_format::tomb::{BlockDrop, LogEntry};
+use tierstore_format::tomb::{BlockDrop, LogEntry, LogRecord, TombDrop, Tombstone};
 use tierstore_store_api::hot::{ReplicaAck, ReplicaBatch, ReplicaReject};
 use tierstore_store_api::proto::{
     BatchHeaders, ColdExtent, CommitAnswer, CommitRecord, CopyWire, DrivePing, Envelope,
@@ -360,56 +360,177 @@ fn every_commit_answer_round_trips() {
     }
 }
 
-fn drop_entry(seq: u64) -> LogEntry {
-    LogEntry::BlockDrop(BlockDrop {
-        block: block(8),
-        origin: NodeId(2),
-        origin_seq: seq,
-        stamp: stamp(10),
-    })
+fn drop_record(origin: u8, seq: u64) -> LogRecord {
+    LogRecord {
+        origin: NodeId(origin),
+        seq,
+        entry: LogEntry::BlockDrop(BlockDrop {
+            block: block(8),
+            stamp: stamp(10),
+        }),
+    }
+}
+
+fn pull(origin: u8, after: u64) -> TombPull {
+    TombPull {
+        origin: NodeId(origin),
+        after,
+        limit: 100,
+    }
 }
 
 #[test]
-fn a_tomb_page_decodes_to_the_entries_it_was_made_from() {
-    round_trip(&TombPull {
-        origin: NodeId(2),
-        after: 5,
-        limit: 100,
-    });
-    let entries = vec![drop_entry(6), drop_entry(7)];
-    let page = TombPage::new(&entries, 7, true).unwrap();
+fn a_tomb_page_decodes_to_the_records_it_was_made_from() {
+    round_trip(&pull(2, 5));
+    let records = vec![
+        drop_record(2, 6),
+        LogRecord {
+            origin: NodeId(2),
+            seq: 7,
+            entry: LogEntry::TombDrop(TombDrop {
+                target_origin: NodeId(3),
+                target_seq: 9,
+            }),
+        },
+    ];
+    let page = TombPage::new(5, &records, true).unwrap();
     round_trip(&page);
     assert_eq!(page.last, 7);
     assert!(page.more);
-    assert_eq!(page.decode().unwrap(), entries);
-    let empty = TombPage::new(&[], 5, false).unwrap();
-    assert!(empty.decode().unwrap().is_empty());
+    assert_eq!(page.decode(&pull(2, 5)).unwrap(), records);
+    let empty = TombPage::new(5, &[], false).unwrap();
+    assert_eq!(empty.last, 5);
+    assert!(empty.decode(&pull(2, 5)).unwrap().is_empty());
+}
+
+#[test]
+fn a_tomb_page_of_another_origin_or_with_a_gap_or_a_wrong_last_fails() {
+    let ok = TombPage::new(5, &[drop_record(2, 6), drop_record(2, 7)], false).unwrap();
+    let invalid = |reason| {
+        Err(ProtoError::Format(FormatError::Invalid {
+            what: "tomb log entry",
+            reason,
+        }))
+    };
+    assert_eq!(
+        ok.decode(&pull(3, 5)),
+        invalid("a record of another origin")
+    );
+    let not_next = "a sequence that is not the previous plus one";
+    assert_eq!(ok.decode(&pull(2, 4)), invalid(not_next));
+    assert_eq!(ok.decode(&pull(2, 6)), invalid(not_next));
+    let gap = TombPage::new(5, &[drop_record(2, 6), drop_record(2, 8)], false).unwrap();
+    assert_eq!(gap.decode(&pull(2, 5)), invalid(not_next));
+    let mut wrong_last = ok.clone();
+    wrong_last.last = 8;
+    let mismatch = Err(ProtoError::Format(FormatError::Invalid {
+        what: "tomb page",
+        reason: "last or entries do not match the records",
+    }));
+    assert_eq!(wrong_last.decode(&pull(2, 5)), mismatch);
+    let mut empty_wrong_last = TombPage::new(5, &[], false).unwrap();
+    empty_wrong_last.last = 6;
+    assert_eq!(empty_wrong_last.decode(&pull(2, 5)), mismatch);
+    // One entry holding two records is not two entries.
+    let mut both = ok.entries[0].0.clone();
+    both.extend_from_slice(&ok.entries[1].0);
+    let page = TombPage {
+        entries: vec![HexBytes(both)],
+        last: 7,
+        more: false,
+    };
+    assert_eq!(page.decode(&pull(2, 5)), mismatch);
 }
 
 #[test]
 fn a_corrupt_tomb_entry_fails_the_whole_page() {
-    let mut page = TombPage::new(&[drop_entry(6)], 6, false).unwrap();
+    let mut page = TombPage::new(5, &[drop_record(2, 6)], false).unwrap();
     page.entries.push(HexBytes(vec![0, 1]));
     assert!(matches!(
-        page.decode(),
+        page.decode(&pull(2, 5)),
         Err(ProtoError::Format(FormatError::Short { .. }))
     ));
 }
 
 #[test]
-fn a_tomb_entry_that_cannot_encode_fails_the_page() {
-    let bad = LogEntry::Tombstone(tierstore_format::tomb::Tombstone {
-        key: vec![0; 70_000],
-        generation: generation(0),
-        stamp: stamp(1),
+fn a_tomb_record_that_cannot_encode_fails_the_page() {
+    let bad = LogRecord {
         origin: NodeId(1),
-        origin_seq: 1,
-        names: Vec::new(),
-    });
+        seq: 1,
+        entry: LogEntry::Tombstone(Tombstone {
+            key: vec![0; 70_000],
+            generation: generation(0),
+            stamp: stamp(1),
+            names: Vec::new(),
+        }),
+    };
     assert!(matches!(
-        TombPage::new(&[bad], 1, false),
+        TombPage::new(0, &[bad], false),
         Err(ProtoError::Format(_))
     ));
+}
+
+#[test]
+fn a_tomb_pull_is_the_query_origin_after_limit_in_that_order() {
+    let p = TombPull {
+        origin: NodeId(2),
+        after: 18_446_744_073_709_551_615,
+        limit: 4_294_967_295,
+    };
+    assert_eq!(
+        p.query(),
+        "origin=2&after=18446744073709551615&limit=4294967295"
+    );
+    assert_eq!(TombPull::from_query(&p.query()), Ok(p));
+    let zero = TombPull {
+        origin: NodeId(255),
+        after: 0,
+        limit: 0,
+    };
+    assert_eq!(zero.query(), "origin=255&after=0&limit=0");
+    assert_eq!(TombPull::from_query("origin=255&after=0&limit=0"), Ok(zero));
+}
+
+#[test]
+fn a_tomb_query_in_any_other_form_is_refused() {
+    for q in [
+        "",
+        "origin=2",
+        "origin=2&after=5",
+        "after=5&origin=2&limit=1",
+        "origin=2&limit=1&after=5",
+        "origin=2&after=5&limit=1&x=1",
+        "origin=2&after=5&limit=1&",
+        "origin=2&after=5&limit=",
+        "origin=&after=5&limit=1",
+        "origin=02&after=5&limit=1",
+        "origin=2&after=05&limit=1",
+        "origin=2&after=5&limit=01",
+        "origin=+2&after=5&limit=1",
+        "origin=-2&after=5&limit=1",
+        "origin=256&after=5&limit=1",
+        "origin=2&after=18446744073709551616&limit=1",
+        "origin=2&after=5&limit=4294967296",
+        "origin=a&after=5&limit=1",
+        "Origin=2&after=5&limit=1",
+        "origin=2&after=5&limit=1 ",
+    ] {
+        assert_eq!(TombPull::from_query(q), Err(ProtoError::BadQuery), "{q:?}");
+    }
+    assert_eq!(ProtoError::BadQuery.to_string(), "query is malformed");
+}
+
+#[test]
+fn keys_are_utf8_strings_on_the_wire() {
+    let keys = LocateRequest {
+        keys: vec!["bucket/\u{e9}t\u{e9}/\u{1f600}".to_owned()],
+    };
+    assert_eq!(
+        serde_json::to_string(&keys).unwrap(),
+        "{\"keys\":[\"bucket/\u{e9}t\u{e9}/\u{1f600}\"]}"
+    );
+    round_trip(&keys);
+    assert!(serde_json::from_slice::<KeyCheck>(b"{\"key\":\"\xff\"}").is_err());
 }
 
 #[test]

@@ -7,14 +7,18 @@
 //! - [`FakeEngine`]: waits answered from a script, or parked until the test completes them, and a
 //!   log of every `ensure`.
 //! - [`MemEntryStore`] and [`MemEntry`]: an in-memory entry store with atomic cell bytes that
-//!   follows the CAS rules of section 2.
+//!   follows the CAS rules of section 2, the journaled punch, holders with counter regions and
+//!   the lifeline's `drop_holder`.
+//! - [`MemCounters`]: a holder's counters as the server maps them, growable and counting remaps.
 //!
 //! None of them reads a clock: a test that needs time uses [`crate::clock::ManualClock`].
 
+mod counters;
 mod engine;
 mod entry;
 mod upstream;
 
+pub use counters::{DEFAULT_LIMIT, MemCounters};
 pub use engine::FakeEngine;
 pub use entry::{MemEntry, MemEntryStore};
 pub use upstream::{FakeObject, FakeUpstream, PartScript};

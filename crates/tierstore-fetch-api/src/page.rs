@@ -21,6 +21,10 @@
 //! | 64 | cell count | one [`crate::cell::CellByte`] per cell |
 //! | epochs offset | 4 x group count | `u32` touch epoch per 16-cell group, written by the server |
 //!
+//! A touch epoch is the seconds of the injected clock when the group was last touched, `now_ms /
+//! 1000` truncated to a `u32` ([`epoch_of`]); an untouched group's epoch is 0. The evictor
+//! reads the epochs to find the groups untouched longest (7).
+//!
 //! The epochs start at the next multiple of 8 after the cell bytes; the page length is a multiple
 //! of 4096.
 //!
@@ -69,6 +73,14 @@ pub const MOUNT_SEALS: u32 = F_SEAL_SEAL | F_SEAL_SHRINK | F_SEAL_GROW | F_SEAL_
 #[must_use]
 pub const fn sealed_for_mounts(seals: u32) -> bool {
     seals & MOUNT_SEALS == MOUNT_SEALS
+}
+
+/// The touch epoch of the instant `now_ms` (milliseconds of the injected clock): its seconds,
+/// truncated to a `u32`.
+#[must_use]
+pub const fn epoch_of(now_ms: u64) -> u32 {
+    // Truncation is the definition: the epoch wraps every 2^32 seconds.
+    (now_ms / 1000) as u32
 }
 
 /// The 16-cell groups that cover `cells`.
