@@ -21,6 +21,8 @@ zerocopy.workspace = true
 [dev-dependencies]
 # The digest of the pinned uapi header, checked by `tests/abi_layout.rs`.
 sha2.workspace = true
+# The scratch directory `tests/abi_probe.rs` compiles the layout probe into.
+tierstore-testkit.workspace = true
 tokio = { workspace = true, features = ["macros", "rt", "rt-multi-thread", "sync"] }
 
 [lints]
