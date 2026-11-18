@@ -143,6 +143,7 @@ fn statvfs_reads_the_real_file_system_and_summary_groups_turns() {
         write_mb_s: mb,
         read_mb_s: 0.0,
         fill: 0.0,
+        fs_fill: 0.0,
         evicted: 0,
         extents: 0,
         io: BTreeMap::new(),
@@ -203,4 +204,78 @@ fn the_reader_skips_a_pack_evicted_after_it_was_picked() {
     let read = AtomicU64::new(0);
     reader(&cfg, &store, &stop, &read, &clock).unwrap();
     assert_eq!(read.load(Ordering::SeqCst), 0);
+}
+
+/// The packs last seen with their sizes, and the frees not yet reported with the reads left.
+type Seen = (BTreeMap<PathBuf, u64>, Vec<(u64, u32)>);
+
+/// A file system that frees an unlinked pack's bytes only after `lag` more reads of its use,
+/// as xfs returns the blocks of an unlinked file a while after the unlink.
+struct LateFree {
+    inner: Packs,
+    lag: u32,
+    state: Mutex<Seen>,
+}
+
+impl Space for LateFree {
+    fn total_used(&self, dir: &Path) -> Result<(u64, u64), Error> {
+        let (total, used) = self.inner.total_used(dir)?;
+        let mut now = BTreeMap::new();
+        for d in std::fs::read_dir(dir).unwrap() {
+            let d = d.unwrap().path();
+            if d.is_dir() {
+                for f in std::fs::read_dir(&d).unwrap() {
+                    let f = f.unwrap();
+                    now.insert(f.path(), f.metadata().unwrap().len());
+                }
+            }
+        }
+        let mut st = self.state.lock().unwrap();
+        let (seen, pending) = &mut *st;
+        for (p, n) in seen.iter() {
+            if !now.contains_key(p) {
+                pending.push((*n, self.lag));
+            }
+        }
+        *seen = now;
+        pending.retain_mut(|(_, left)| {
+            *left = left.saturating_sub(1);
+            *left > 0
+        });
+        Ok((total, used + pending.iter().map(|(n, _)| n).sum::<u64>()))
+    }
+}
+
+#[test]
+fn eviction_counts_its_own_bytes_when_the_file_system_frees_late() {
+    let f = Fake::new("churn-late", &["sdb"]);
+    let cfg = config(&f);
+    let space = LateFree {
+        inner: Packs { total: 64 * MIB },
+        lag: 50,
+        state: Mutex::default(),
+    };
+    let clock = StepClock::new(Duration::from_millis(1), 0);
+    let rows = run(&cfg, &space, &script(), &clock).unwrap();
+    // The band is 50-60% of 64 MiB. With frees reported late, re-reading the file system's use
+    // after each unlink evicts far under the bottom; counting the packs' own bytes keeps every
+    // churn window within one pack (2 MiB, 3.1%) of the band, and the bytes really left on the
+    // file system agree.
+    let churn: Vec<&Row> = rows.iter().filter(|r| r.phase == "churn").collect();
+    assert!(!churn.is_empty());
+    assert!(
+        churn
+            .iter()
+            .all(|r| r.fill >= 50.0 - 3.2 && r.fill <= 60.0 + 3.2),
+        "{rows:?}"
+    );
+    let real = Packs { total: 64 * MIB }.total_used(&cfg.dir).unwrap().1;
+    assert!(
+        (30 * MIB..=40 * MIB).contains(&real),
+        "{} MiB left",
+        real / MIB
+    );
+    // The file system's own figure still counts the late frees, above the counted fill.
+    assert!(rows.iter().any(|r| r.fs_fill > r.fill + 3.2), "{rows:?}");
+    assert!(rows.iter().map(|r| r.evicted).sum::<u64>() > 0);
 }

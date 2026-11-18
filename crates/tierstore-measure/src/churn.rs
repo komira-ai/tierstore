@@ -3,7 +3,10 @@
 //! (say 84-86% or 89-91%) and then kept there for several capacities of writes: one writer adds
 //! packs as the cold tier writes them, a light reader reads packs (most often the newest) and
 //! stamps them, and whenever the fill passes the band's top the least recently read packs are
-//! unlinked until it is under the band's bottom, as the tier's eviction does. A window per
+//! unlinked until it is under the band's bottom, as the tier's eviction does. The fill is
+//! counted as the tier counts it: the file system's use at the start plus the packs' own bytes.
+//! Re-reading the file system's use instead over-evicts, because xfs frees an unlinked file's
+//! blocks a while after the unlink; each window records that use too. A window per
 //! `window` bytes written gives write MB/s, read MB/s, the fill and the evictions; the first
 //! (filling) phase is the fresh-drive rate the churn is compared with.
 
@@ -59,8 +62,10 @@ pub struct Row {
     pub write_mb_s: f64,
     /// Read MB/s over the window.
     pub read_mb_s: f64,
-    /// Fill at the window's end, percent.
+    /// Fill at the window's end, percent: the use at the start plus the packs' bytes.
     pub fill: f64,
+    /// The file system's own use at the window's end (`statvfs`), percent.
+    pub fs_fill: f64,
     /// Packs unlinked in the window.
     pub evicted: u64,
     /// Extents of the window's last pack.
@@ -81,11 +86,13 @@ struct Pack {
 struct Store {
     packs: Vec<Pack>,
     tick: u64,
+    bytes: u64,
 }
 
 impl Store {
     fn add(&mut self, name: String, bytes: u64) {
         self.tick += 1;
+        self.bytes += bytes;
         self.packs.push(Pack {
             name,
             bytes,
@@ -116,7 +123,9 @@ impl Store {
             .enumerate()
             .min_by_key(|(_, p)| p.last_read)
             .map(|(i, _)| i)?;
-        Some(self.packs.remove(i))
+        let p = self.packs.remove(i);
+        self.bytes -= p.bytes;
+        Some(p)
     }
 }
 
@@ -146,6 +155,16 @@ fn fill(space: &dyn Space, dir: &Path) -> Result<f64, Error> {
     Ok(used as f64 * 100.0 / total.max(1) as f64)
 }
 
+/// The fill as the tier counts it: `base` bytes in use at the start plus the packs' bytes, in
+/// percent of `size`.
+fn counted(base: u64, size: u64, store: &Mutex<Store>) -> f64 {
+    let packs = store
+        .lock()
+        .unwrap_or_else(std::sync::PoisonError::into_inner)
+        .bytes;
+    (base + packs) as f64 * 100.0 / size.max(1) as f64
+}
+
 fn subdir(dir: &Path, k: u64) -> PathBuf {
     dir.join(format!("{:02x}", k % 256))
 }
@@ -171,7 +190,8 @@ pub fn run(
         std::fs::create_dir_all(&d).map_err(Error::io("mkdir", &d))?;
         set_extsize(runner, &d, 64)?;
     }
-    let size = space.total_used(&cfg.dir)?.0;
+    // The file system's size, and its use before the first pack (log, directories).
+    let start = space.total_used(&cfg.dir)?;
     let store = Mutex::new(Store::default());
     let stop = AtomicBool::new(false);
     let read_bytes = AtomicU64::new(0);
@@ -186,7 +206,7 @@ pub fn run(
             &sampler,
             &store,
             &read_bytes,
-            size,
+            start,
         );
         stop.store(true, Ordering::SeqCst);
         let rd = crate::run::joined(reader.join());
@@ -236,7 +256,7 @@ fn writer(
     sampler: &Sampler,
     store: &Mutex<Store>,
     read_bytes: &AtomicU64,
-    size: u64,
+    (size, base): (u64, u64),
 ) -> Result<Vec<Row>, Error> {
     let mut rng = Rng::new(7);
     let mut rows = Vec::new();
@@ -263,9 +283,9 @@ fn writer(
             last = rel;
             wb += mib * MIB;
             k += 1;
-            if fill(space, &cfg.dir)? > cfg.hi {
+            if counted(base, size, store) > cfg.hi {
                 filling = false;
-                while fill(space, &cfg.dir)? > cfg.lo {
+                while counted(base, size, store) > cfg.lo {
                     let gone = store
                         .lock()
                         .unwrap_or_else(std::sync::PoisonError::into_inner)
@@ -291,7 +311,8 @@ fn writer(
             written_gib: written as f64 / (1u64 << 30) as f64,
             write_mb_s: mb_per_s(wb, el),
             read_mb_s: mb_per_s(read_bytes.load(Ordering::SeqCst) - r0, el),
-            fill: fill(space, &cfg.dir)?,
+            fill: counted(base, size, store),
+            fs_fill: fill(space, &cfg.dir)?,
             evicted,
             extents: ext,
             io: delta(&a, &b, el),
@@ -333,6 +354,7 @@ pub fn tables(label: &str, rows: &[Row], window_gib: f64, turn_gib: f64) -> Vec<
             "write MB/s",
             "read MB/s",
             "fill %",
+            "fs fill %",
             "evicted",
             "extents",
             "util % (per device)",
@@ -349,6 +371,7 @@ pub fn tables(label: &str, rows: &[Row], window_gib: f64, turn_gib: f64) -> Vec<
             num(r.write_mb_s, 1),
             num(r.read_mb_s, 1),
             num(r.fill, 1),
+            num(r.fs_fill, 1),
             r.evicted.to_string(),
             r.extents.to_string(),
             util.join(" "),
