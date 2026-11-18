@@ -160,6 +160,8 @@ tierstore-hashpool = { path = "crates/tierstore-hashpool" }
 tierstore-journal = { path = "crates/tierstore-journal" }
 # The node cache's entry store on Linux (T1); the mount client's tests serve from it.
 tierstore-entry = { path = "crates/tierstore-entry" }
+# The fetch engine of a build node (T3): its size classes and timer, shared with the budget.
+tierstore-fetch = { path = "crates/tierstore-fetch" }
 # The server side of the mount protocol (T5); the mount client's tests run against it.
 tierstore-mount-server = { path = "crates/tierstore-mount-server" }
 # The previous release: `v0.3.17`, the tag of the commit below, taken from the public repository

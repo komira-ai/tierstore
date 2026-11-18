@@ -3198,6 +3198,20 @@ dependencies = [
 ]
 
 [[package]]
+name = "tierstore-budget"
+version = "0.1.0"
+dependencies = [
+ "async-trait",
+ "futures",
+ "thiserror",
+ "tierstore-fetch",
+ "tierstore-fetch-api",
+ "tierstore-format",
+ "tierstore-metrics",
+ "tokio",
+]
+
+[[package]]
 name = "tierstore-compat"
 version = "0.1.0"
 dependencies = [

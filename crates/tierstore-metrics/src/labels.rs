@@ -108,7 +108,7 @@ impl SizeClass {
 closed! {
     /// Why the controller last moved a permit count or the ceiling (4.3).
     BudgetReason = "reason" {
-        /// Slow start: +1 per window from the floor.
+        /// Slow start: doubling toward the share, after a decrease took the ceiling below it.
         SlowStart = "slow_start",
         /// +1 per window while a backlog exists.
         Increase = "increase",

@@ -1,0 +1,32 @@
+[package]
+name = "tierstore-budget"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+repository.workspace = true
+publish.workspace = true
+description = "The budget of a tierstore build node (docs/design/fetch-cache-serve.md, 4.3): per-drive permits, a per-storage-node level and a client ceiling, the quantities of 4.3, the three-level controller on drive-reported signals, the ladders, the demand reserve and the jobscheduler's hint. It implements the frozen `Budget` of tierstore-fetch-api."
+
+[dependencies]
+# `Budget` is an async trait boxed by async-trait.
+async-trait.workspace = true
+# The race of a pacing deadline against a release.
+futures.workspace = true
+# The frozen interface this crate implements, and the device, class and signal types it reads.
+tierstore-fetch-api.workspace = true
+# The engine's size classes (`plan::size_class`) and its timer (`timer::Timer`), so the budget
+# and the engine agree on both.
+tierstore-fetch.workspace = true
+tierstore-format.workspace = true
+# The closed set of reasons a controller move is reported with (`budget_reason`, section 12).
+tierstore-metrics.workspace = true
+thiserror.workspace = true
+# The wake-up of the parts waiting for permits.
+tokio = { workspace = true, features = ["sync"] }
+
+[dev-dependencies]
+tokio = { workspace = true, features = ["macros", "rt", "rt-multi-thread", "sync", "time"] }
+
+[lints]
+workspace = true
