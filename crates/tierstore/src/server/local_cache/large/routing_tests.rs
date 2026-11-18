@@ -136,12 +136,13 @@ async fn a_location_without_a_size_is_unroutable_and_served_as_before() {
     assert!(rig.gets().is_empty());
 }
 
-/// Asserts that a location with no source is not routable either, even when it names a
-/// generation and a size over the limit.
+/// Asserts that a location that names a generation and a size over the limit but no source is
+/// routed to the engine, whose fill finds no copy: the read is `Unavailable` (a `503`), counted
+/// as a failed fill, and no GET is sent.
 #[tokio::test]
-async fn a_location_with_no_source_is_unroutable() {
+async fn a_location_with_no_source_is_routed_and_its_fill_fails() {
     let rig = LargeRig::new("routing-no-source");
-    let bytes = object(1000, 5);
+    let bytes = object(3 * MIB, 5);
     let location = Location {
         generation: generation(5),
         size: Some(3 * MIB),
@@ -149,14 +150,14 @@ async fn a_location_with_no_source_is_unroutable() {
         conflicts: Vec::new(),
     };
     rig.insert("cas/nosource", &bytes, generation(5), location);
-    rig.rig.put("cas/nosource", &bytes).await;
-    let (_, _, got) = rig.read("cas/nosource", None).await.unwrap();
-    assert_eq!(got, bytes.to_vec());
+    let error = rig.read("cas/nosource", None).await.unwrap_err();
+    assert!(matches!(error, Error::Unavailable(_)), "{error:?}");
     assert_eq!(
         counts(&rig),
         LargeCounts {
             locates: 1,
-            unroutable: 1,
+            routed: 1,
+            fill_failures: 1,
             ..LargeCounts::default()
         }
     );
@@ -341,7 +342,7 @@ async fn a_cache_with_no_large_path_serves_a_ranged_read_as_before() {
 }
 
 /// Asserts that each read is a job of its own with the S3 bit set: the GETs of two large stored
-/// objects, and of a third, carry three different jobs, each with bit 63.
+/// objects carry different jobs, each with bit 63, and all the GETs of one read carry one job.
 #[tokio::test]
 async fn every_read_is_its_own_job_with_the_s3_bit() {
     let rig = LargeRig::new("routing-jobs");
@@ -448,4 +449,32 @@ async fn a_key_held_by_an_entry_by_extents_is_not_located() {
     assert_eq!(rig.rig.calls(Op::Get), gets);
     assert_eq!(counts(&rig), LargeCounts::default());
     assert_eq!(rig.locates(), 0);
+}
+
+/// Asserts that `whole_fill_limit` is the last size of the path of `obj/`: an object of exactly
+/// that many bytes is served from the cache's own upstream with no GET of the engine, and one of
+/// a byte more is routed, served from the engine's upstream with its generation as `If-Match`.
+#[tokio::test]
+async fn the_limit_is_the_last_size_of_obj_and_one_more_byte_is_routed() {
+    let rig = LargeRig::new("routing-limit");
+    let at = object(LIMIT, 17);
+    rig.stored("cas/at", &at, generation(17));
+    rig.rig.put("cas/at", &at).await;
+    let (_, _, served) = rig.read("cas/at", None).await.unwrap();
+    assert_eq!(served, at.to_vec());
+    assert!(rig.gets().is_empty());
+    assert_eq!((counts(&rig).small, counts(&rig).routed), (1, 0));
+
+    let over = object(LIMIT + 1, 18);
+    rig.stored("cas/over", &over, generation(18));
+    let (meta, _, served) = rig.read("cas/over", None).await.unwrap();
+    assert_eq!(served, over.to_vec());
+    assert_eq!(meta.tag, generation(18).to_string());
+    assert!(!rig.gets().is_empty());
+    assert!(
+        rig.gets()
+            .iter()
+            .all(|get| get.generation == generation(18))
+    );
+    assert_eq!((counts(&rig).small, counts(&rig).routed), (1, 1));
 }

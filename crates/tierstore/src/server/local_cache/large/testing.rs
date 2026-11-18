@@ -1,8 +1,8 @@
 //! The rig of the large-object tests: a cache (`super::super::testing::Rig`) with a real
 //! [`FetchEngine`] attached, over the in-memory entry store and the fake upstream of
-//! `tierstore-fetch-api`, on an injected clock that no test moves. The fake
-//! upstream holds every object: a stored one has a location that names its generation and a hot
-//! copy. Its `get` answers `412` to an `If-Match` other than the object's generation.
+//! `tierstore-fetch-api`, on an injected clock that no test moves. The fake upstream holds every
+//! object, with a location that names its generation and a hot copy. Its `get` answers `412` to
+//! an `If-Match` other than the object's generation.
 
 use std::num::NonZeroUsize;
 use std::sync::atomic::{AtomicUsize, Ordering};
@@ -56,7 +56,8 @@ impl Budget for Unlimited {
     }
 }
 
-/// The fake upstream, with scripted and held `LOCATE`s.
+/// The fake upstream, with scripted `LOCATE` answers and an optional gate that holds `LOCATE`s
+/// until the test lets them go.
 pub(in crate::server::local_cache) struct Gated {
     /// The fake that answers.
     pub fake: FakeUpstream,

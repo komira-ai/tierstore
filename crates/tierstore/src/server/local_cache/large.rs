@@ -8,12 +8,13 @@
 //! call of the engine's [`Upstream`]):
 //! - **Small** (at most `whole_fill_limit`, [`CacheConfig::whole_limit`]): nothing changes; the
 //!   read takes the path of `obj/`.
-//! - **Large** (the book holds the generation, or `LOCATE` names it: every location carries one): the object is the pack `PackId = (key, ETag)` with no cell digests, and the read is
-//!   served from that pack's entry through the [`Engine`], which sends the generation as
-//!   `If-Match` on every part from the first: no part starts without it. The `ETag` the client is
-//!   told is that generation.
-//! - **Not routable**: a location without a size, or with no source. The read takes the path of
-//!   `obj/`, as before.
+//! - **Large**: the object is the pack `PackId = (key, ETag)` with no cell digests, `ETag` being
+//!   the generation the book holds or `LOCATE` names (every location carries one, 10.6). The read
+//!   is served from that pack's entry through the [`Engine`], which sends the generation as
+//!   `If-Match` on every part from the first: no part starts without it. An overwrite between two
+//!   reads is a `412` to the engine's parts: the fill fails and no byte of the other object is
+//!   served.
+//! - **Not routable**: a location without a size. The read takes the path of `obj/`, as before.
 //!
 //! A ranged GET is served from the `present` cells of the pack's entry, which may be partial (a
 //! `Partial` entry of section 9). A cell that is present is read at once, and the engine is not
@@ -56,7 +57,7 @@ use tierstore_fetch_api::upstream::{Located, Upstream};
 
 use super::stream::eager;
 use super::{Inner, LocalCache, locked};
-use crate::{Error, Meta, Opened, Span, Window};
+use crate::{Error, Meta, Opened, ReadBody, Span, Window};
 
 pub(crate) use book::KNOWN_LIMIT;
 use book::{Book, Known};
@@ -86,7 +87,7 @@ const READ_TRIES: u32 = 3;
 pub struct LargeParts {
     /// The fetch engine: every part of a large object goes through it.
     pub engine: Arc<dyn Engine>,
-    /// The engine's upstream: `LOCATE`.
+    /// The engine's upstream: the front's `LOCATE`.
     pub upstream: Arc<dyn Upstream>,
     /// The engine's entry store, from which the front reads the `present` cells.
     pub store: Arc<dyn EntryStore>,
@@ -124,7 +125,7 @@ pub(crate) struct LargeCounts {
     /// Reads answered `404` from a definitive miss, asked or remembered.
     pub misses: u64,
     /// Reads answered `503` before their first byte: a miss that is not definitive, or an error
-    /// of the upstream.
+    /// of `LOCATE`.
     pub unavailable: u64,
     /// Reads whose fill failed or was lost while they waited.
     pub fill_failures: u64,
@@ -159,14 +160,6 @@ pub struct LargeObjects {
     book: Mutex<Book>,
     jobs: AtomicU64,
     counters: LargeCounters,
-}
-
-/// What the front found an object to be.
-enum Identity {
-    /// Its generation and size.
-    Known(Known),
-    /// No size, or no source: not for the engine.
-    Unroutable,
 }
 
 impl LargeObjects {
@@ -206,16 +199,17 @@ impl LargeObjects {
         locked(&self.book).forget(key);
     }
 
-    /// What `key` is, at `now` (milliseconds of the cache's clock).
+    /// What `key` is, at `now` (milliseconds of the cache's clock): `None` for a location without
+    /// a size, which is not for the engine.
     /// Also the book's epoch before any call: what the call finds is put in the book only if no
     /// write forgot anything meanwhile.
-    async fn identify(&self, key: &str, now: u64) -> Result<(Identity, u64), Error> {
+    async fn identify(&self, key: &str, now: u64) -> Result<(Option<Known>, u64), Error> {
         let epoch = {
             let mut book = locked(&self.book);
             let epoch = book.epoch();
             if let Some(known) = book.known(key) {
                 bump(&self.counters.known);
-                return Ok((Identity::Known(known), epoch));
+                return Ok((Some(known), epoch));
             }
             if book.missed(key, now) {
                 bump(&self.counters.misses);
@@ -244,18 +238,12 @@ impl LargeObjects {
                 return Err(Error::Unavailable(format!("{key}: LOCATE failed: {error}")));
             }
         };
-        let Some(size) = location.size else {
-            return Ok((Identity::Unroutable, epoch));
-        };
-        if location.sources.is_empty() {
-            return Ok((Identity::Unroutable, epoch));
-        }
-        let known = Known {
+        let known = location.size.map(|size| Known {
             generation: location.generation,
             size,
             modified: now,
-        };
-        Ok((Identity::Known(known), epoch))
+        });
+        Ok((known, epoch))
     }
 
     /// The read of `span` of `key` through the engine, or `None` when the object is not one for
@@ -267,8 +255,8 @@ impl LargeObjects {
         limit: u64,
         now: u64,
     ) -> Result<Option<Opened>, Error> {
-        let (identity, epoch) = self.identify(key, now).await?;
-        let Identity::Known(known) = identity else {
+        let (known, epoch) = self.identify(key, now).await?;
+        let Some(known) = known else {
             bump(&self.counters.unroutable);
             return Ok(None);
         };
@@ -279,19 +267,18 @@ impl LargeObjects {
         }
         bump(&self.counters.routed);
         let window = Window::of(span, size);
-        let (start, end) = match window {
-            Window::Whole => (0, size),
-            Window::Part(range) => (range.offset(), range.offset() + range.size()),
-            Window::Unsatisfiable => (0, 0),
+        let range = match window {
+            Window::Whole => Some((0, size)),
+            Window::Part(range) => Some((range.offset(), range.offset() + range.size())),
+            Window::Unsatisfiable => None,
         };
-        let job = self.job();
         locked(&self.book).learn_at(key, known.clone(), epoch);
-        let body = if matches!(window, Window::Unsatisfiable) {
-            stream::empty().boxed()
-        } else {
-            // The cells are ensured now, so the engine fetches them while the first is sent.
-            let cells = Cells::new(self.clone(), known.spec(key), (start, end), job).stream();
-            eager(cells).await?
+        let body: ReadBody = match range {
+            Some(range) => {
+                let cells = Cells::new(self.clone(), known.spec(key), range, self.job());
+                eager(cells.stream()).await?
+            }
+            None => stream::empty().boxed(),
         };
         Ok(Some(Opened {
             meta: known.meta(),
