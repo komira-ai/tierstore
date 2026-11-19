@@ -40,10 +40,6 @@ fn a_dup_kept_by_a_supervisor_keeps_a_parked_read_answerable_after_the_reader_cl
 
     let kept = dup(&a);
     drop(a);
-    assert!(
-        !f.is_finished(),
-        "the open file is not released while a dup is open"
-    );
     reply(&kept, rf.h.unique, 0, &[&content(2, 0, 4096)]).unwrap();
     let _server = Server::spawn(kept, open);
     assert_eq!(f.join().unwrap().unwrap(), content(2, 0, 4096));

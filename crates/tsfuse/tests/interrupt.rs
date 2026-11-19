@@ -1,6 +1,6 @@
 //! Proves that an INTERRUPT answers a request exactly once, with `EINTR` on the request's own
-//! device xor the real reply, and that an unknown target is answered `EAGAIN` on the device that
-//! read the INTERRUPT.
+//! device xor the real reply, and that an unknown target is answered `EAGAIN` on the device given
+//! for the INTERRUPT (the session gives every device in turn).
 //!
 //! Catches:
 //! - `EINTR` written on the interrupting clone instead of the originating one;

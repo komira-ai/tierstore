@@ -34,8 +34,8 @@ tierstore-testkit.workspace = true
 tokio = { workspace = true, features = ["macros", "rt", "rt-multi-thread", "sync"] }
 
 # Socket pairs, `fcntl` and the device numbers of the tests; for the kernel checks
-# (`tests/kernel_*_integration.rs`) also `poll`, `splice` and pipe sizes, memfd seals, `fadvise`
-# and `preadv2`.
+# (`tests/kernel_*_integration.rs`) also `poll` and its `Timespec`, `splice` and pipe sizes, memfd seals
+# and `fadvise`.
 [target.'cfg(target_os = "linux")'.dev-dependencies]
 rustix = { workspace = true, features = ["event", "fs", "net", "pipe", "process", "time"] }
 

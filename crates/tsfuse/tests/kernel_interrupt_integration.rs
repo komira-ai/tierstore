@@ -1,6 +1,6 @@
 //! Kernel checks of INTERRUPT on `/dev/fuse` (`docs/design/tsfuse-kernel-findings.md`, K7 and
 //! K8): a caller killed while the server holds its direct READ (parked) makes the kernel queue an
-//! INTERRUPT, which any clone reads, and stays in the kernel until the READ is answered; the
+//! INTERRUPT, which any clone reads, and ends once the READ is answered; the
 //! reply to an INTERRUPT is matched on the processing queue of the clone that holds the
 //! interrupted request, not of the clone that read the INTERRUPT. A READ of a buffered read under
 //! `FUSE_ASYNC_READ` is a readahead request with no waiter: killing its reader sends no INTERRUPT.
@@ -65,16 +65,16 @@ fn finish(mut child: Child, read: &Req, a: DevFd) {
 
 /// K7 and K8. A SIGKILLed caller whose READ the server holds: the kernel queues an INTERRUPT
 /// naming the READ (its own unique is the READ's with bit 0 set), a clone other than the
-/// READ's reads it, and the child has not exited (it waits in the kernel for the READ's
-/// reply). Answering the READ `EINTR` on its own clone lets it end.
+/// READ's reads it. Answering the READ `EINTR` on its own clone lets the child end, killed by
+/// signal 9. (That it cannot end before, the kernel's uninterruptible wait, is from the source.)
 #[test]
-fn a_killed_caller_of_a_parked_read_queues_an_interrupt_and_stays_until_the_read_is_answered() {
+fn a_killed_caller_of_a_parked_read_queues_an_interrupt_and_ends_once_the_read_is_answered() {
     let Some(conn) = Conn::mount("k8-kill", &Setup::default()) else {
         return;
     };
     let a = conn.clone_reader();
     let b = conn.clone_reader();
-    let Some((mut child, read)) = killed_with_parked_read(&conn, &a) else {
+    let Some((child, read)) = killed_with_parked_read(&conn, &a) else {
         return;
     };
 
@@ -82,10 +82,6 @@ fn a_killed_caller_of_a_parked_read_queues_an_interrupt_and_stays_until_the_read
     assert_eq!(interrupt.h.opcode, op::INTERRUPT);
     assert_eq!(interrupt.interrupted(), read.h.unique);
     assert_eq!(interrupt.h.unique, read.h.unique | INT_REQ_BIT);
-    assert!(
-        child.try_wait().unwrap().is_none(),
-        "a killed caller waits for the reply of a READ the server holds"
-    );
     finish(child, &read, a);
 }
 

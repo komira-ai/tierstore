@@ -18,8 +18,8 @@ use crate::reply::Errno;
 pub struct InitFlags(pub u64);
 
 impl InitFlags {
-    /// `FUSE_ASYNC_READ`: more than one READ of a file in flight (without it the kernel
-    /// serialises reads per file).
+    /// `FUSE_ASYNC_READ`: the READs of a readahead are background requests, several in flight (without
+    /// it the reading thread sends them one at a time and waits for each).
     pub const ASYNC_READ: Self = Self(1 << 0);
     /// `FUSE_SPLICE_WRITE`: replies may be spliced into the device.
     pub const SPLICE_WRITE: Self = Self(1 << 7);
@@ -33,7 +33,8 @@ impl InitFlags {
     pub const NO_OPEN_SUPPORT: Self = Self(1 << 17);
     /// `FUSE_PARALLEL_DIROPS`: LOOKUP and READDIR of one directory run in parallel.
     pub const PARALLEL_DIROPS: Self = Self(1 << 18);
-    /// `FUSE_MAX_PAGES`: `max_pages` of the reply sets the largest request.
+    /// `FUSE_MAX_PAGES`: `max_pages` of the reply, capped by the `fs.fuse.max_pages_limit` sysctl,
+    /// sets the largest request (a buffered READ is also at most the readahead window).
     pub const MAX_PAGES: Self = Self(1 << 22);
     /// `FUSE_CACHE_SYMLINKS`: READLINK replies are cached.
     pub const CACHE_SYMLINKS: Self = Self(1 << 23);

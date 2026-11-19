@@ -39,9 +39,8 @@ Facts read on all six build nodes (read only; nothing was changed on a node):
 
 ## How the claims were checked
 
-**Source.** Each claim was traced in the Ubuntu tree, then traced again independently by a reader
-who tried to refute it and re-opened every cited line; the lines below are those that survived,
-`file:line` of the Ubuntu tree.
+**Source.** Each claim was traced twice in the Ubuntu tree, and every cited line was checked against
+it; the lines below are `file:line` of the Ubuntu tree.
 
 **Run.** The checks that can run on `/dev/fuse` with no `unsafe` code are integration tests of
 `tsfuse` that speak the protocol raw, through the harness `crates/tsfuse/tests/kernel/mod.rs`: they
@@ -50,7 +49,7 @@ write each reply to a chosen descriptor, and wait only on kernel events (a reque
 written, a caller's system call returning), never on a timer. The five targets are
 `kernel_dev_integration`, `kernel_takeover_integration`, `kernel_interrupt_integration`,
 `kernel_cache_integration` and `kernel_mm_integration` (21 tests). On a build node of each kernel
-build (`-42` and `-43`) all 21 passed 30 times in a row as root (mounts by `mount(2)`), and once as
+build (`-42` and `-43`) all 21 passed 10 times in a row as root (mounts by `mount(2)`), and once as
 an unprivileged user (mounts by `fusermount3`, the path CI's runner takes); no mount was left
 behind. To run them again on a build node:
 
@@ -77,7 +76,7 @@ itself (T-F5) needs as well ("What is left", below).
 | K5 | Closing a clone ends its requests; a kept descriptor keeps them (5.2 item 5) | confirmed | run |
 | K6 | RESEND's preconditions and exactly-once completion (5.2 item 5) | changed | run |
 | K7 | INTERRUPT delivery and the `EAGAIN` answer (5.2 item 3) | changed: `EAGAIN` goes to the clone holding the request | run |
-| K8 | A SIGKILLed build frees its parked read (5.2 item 3) | changed: not for readahead READs | run |
+| K8 | A SIGKILLed build frees its parked read (5.2 item 3) | changed: not for readahead READs | run (the uninterruptible wait: source) |
 | K9 | FORGET delivery; FORGET and INTERRUPT stay on `/dev/fuse` in io_uring mode (5.2 item 4) | confirmed | source |
 | K10 | io_uring registration, INIT-then-register order (5.2 item 4) | changed | source |
 | K11 | Hybrid delivery in io_uring mode (5.2 item 4) | changed | source |
@@ -88,14 +87,14 @@ itself (T-F5) needs as well ("What is left", below).
 | K16 | `FUSE_SPLICE_MOVE` falls back to a copy (5.3 item 2) | changed | source |
 | K17 | The default pipe and `F_SETPIPE_SZ` (5.3 item 2) | changed: a short count, not a failure | run |
 | K18 | `NO_OPEN_SUPPORT` keeps the page cache, the first handle included (5.3 Opens) | confirmed | run |
-| K19 | `FOPEN_KEEP_CACHE` across opens (5.3 Opens) | confirmed | run |
-| K20 | Without `ASYNC_READ` the kernel serialises reads (5.2 INIT flags) | changed | run |
+| K19 | `FOPEN_KEEP_CACHE` across opens (5.3 Opens) | confirmed | run (other invalidations: source) |
+| K20 | Without `ASYNC_READ` the kernel serialises reads (5.2 INIT flags) | changed | source; READ size measured |
 | K21 | A READ is at most `max_pages` pages, 1 MiB (section 2) | changed: buffered READs are at most 128 KiB | run |
 | K22 | A request timeout can abort the connection (5.2 item 4) | changed | source and node facts |
 | K23 | Background limits (5.2 INIT) | confirmed | source |
 | K24 | `F_SEAL_FUTURE_WRITE` forbids new writable mappings and `write(2)` (5.1) | changed: shared mappings only | run (writes), source (mappings) |
-| K25 | `F_SEAL_SHRINK`, `F_SEAL_GROW`, `F_SEAL_SEAL`, `MFD_ALLOW_SEALING` (5.1) | changed | run |
-| K26 | DONTNEED on a dirty page does nothing (4.8) | changed | run |
+| K25 | `F_SEAL_SHRINK`, `F_SEAL_GROW`, `F_SEAL_SEAL`, `MFD_ALLOW_SEALING` (5.1) | changed | run (`vm.memfd_noexec` 1 and 2: source) |
+| K26 | DONTNEED on a dirty page does nothing (4.8) | changed | run (synced cells); dirty cells measured |
 
 ## Go or no-go per feature
 
@@ -154,16 +153,16 @@ non-blocking clones: all four poll readable for one request, one reads it, three
 
 | Reply | `write(2)` | The request |
 |---|---|---|
-| shorter than the 16-byte header | `EINVAL` (`dev.c:2217`) | untouched |
+| shorter than the 16-byte header (source) | `EINVAL` (`dev.c:2217`) | untouched |
 | `len` field not the number of bytes written | `EINVAL` (`dev.c:2225-2226`) | untouched, answerable |
 | `error` above 0 or at most -512 | `EINVAL` (`dev.c:2238`) | untouched, answerable |
 | unique not on this clone's processing queue (unknown, already answered, another clone's) | `ENOENT` (`dev.c:2244-2247`) | untouched |
-| `error` not 0 with a payload, or a payload of the wrong size | `EINVAL` (`dev.c:2279-2290`) | **ended: its caller gets `EIO`** |
+| `error` not 0 with a payload, or (source) a payload of the wrong size | `EINVAL` (`dev.c:2279-2290`) | **ended: its caller gets `EIO`** |
 | unique 0 | a notification, code in `error` (`dev.c:2232`) | none |
 | INTERRUPT reply (unique with bit 0) | see K7 | |
 
 **Run.** `a_reply_with_a_wrong_length_or_an_errno_out_of_range_is_refused_einval_and_the_request_stays_answerable`;
-`an_error_reply_with_a_payload_is_refused_einval_and_fails_the_caller_with_eio`.
+`an_error_reply_with_a_payload_is_refused_einval_and_fails_the_caller_with_eio`. The rows marked (source) have no test; the notification row is K6's.
 
 **Design.** 5.2 states the table's two consequences: an error reply is the bare header (the `tsfuse`
 encoder already cannot build another), and a refused write is never taken to mean the request is
@@ -233,14 +232,14 @@ its request (`dev.c:567-571` against `dev.c:1529-1534`) can deliver the same INT
 **Run.** `an_interrupt_answered_eagain_is_queued_again_only_when_written_to_the_clone_holding_the_request`
 (an INTERRUPT read on clone `b` for a READ held by clone `a`: `EAGAIN` on `b` is `ENOENT` and nothing
 is queued again; on `a` it is accepted and the same INTERRUPT is read again);
-`a_killed_caller_of_a_parked_read_queues_an_interrupt_and_stays_until_the_read_is_answered` (read on
+`a_killed_caller_of_a_parked_read_queues_an_interrupt_and_ends_once_the_read_is_answered` (read on
 another clone than the READ's).
 
 **Design.** 5.2 item 3 said "an INTERRUPT that arrives before its request is answered `EAGAIN`".
 Corrected: answered `EAGAIN` on every clone in turn (only the one holding the request takes it), a
 repeated INTERRUPT is idempotent, and INTERRUPT is never answered `ENOSYS`. `tsfuse` already does
 this (`transport.rs`, `Every`); its crate documentation said "on the device that read the
-INTERRUPT", which this change corrects (`lib.rs`, `tokens.rs`).
+INTERRUPT", now corrected (`lib.rs`, `tokens.rs`).
 
 ### K8. A SIGKILLed build frees its parked read: changed (run)
 
@@ -254,17 +253,17 @@ so SIGKILL frees it at once, no INTERRUPT is sent, and the READ stays with the s
 answered. At its exit the killed process's close sends FLUSH, which is forced (`file.c:497`) and
 waits for its reply.
 
-**Run.** `a_killed_caller_of_a_parked_read_queues_an_interrupt_and_stays_until_the_read_is_answered`
-(a direct READ: the INTERRUPT names it, the child has not exited, answering the READ `EINTR` lets it
-end, killed by signal 9);
+**Run.** `a_killed_caller_of_a_parked_read_queues_an_interrupt_and_ends_once_the_read_is_answered`
+(a direct READ: the INTERRUPT names it and is read on another clone; answering the READ `EINTR`
+lets the child end, killed by signal 9; that it cannot end before is from the source above);
 `a_killed_reader_of_a_parked_readahead_read_exits_and_leaves_the_read_parked_uninterrupted` (under
 `ASYNC_READ`: no INTERRUPT names the READ up to the child's exit-time FLUSH; once the FLUSH is
 answered the child ends; the READ's reply is still accepted after).
 
 **Design.** 5.2 item 3 said "a SIGKILLed build frees its parked read". Corrected: a killed build
 waits for the server's answer to any request the server has read, which the INTERRUPT asks for; a
-READ of a buffered read (the tree mount's, under `ASYNC_READ`) gets no INTERRUPT, its reader exits
-at once, and the parked READ stays until the fill completes or fails. The server answers FLUSH at
+READ of a buffered read (the tree mount's, under `ASYNC_READ`) gets no INTERRUPT, its reader does
+not wait for it (it exits once its exit-time FLUSH is answered), and the parked READ stays until the fill completes or fails. The server answers FLUSH at
 once.
 
 ### K9. FORGET, and FORGET and INTERRUPT in io_uring mode: confirmed (source)
@@ -334,7 +333,7 @@ unpinned until touched.
 |---|---|---|
 | 256 (1 MiB, the tree mount's `InitConfig::tree`) | 88 MiB | 440 MiB |
 | 32 (128 KiB) | 11 MiB | 55 MiB |
-| 2 (8 KiB) | 0.7 MiB | 3.5 MiB |
+| 2 (8 KiB) | 0.7 MiB | 3.4 MiB |
 
 **Design.** 5.2 item 4's 64 MiB rule cannot be met with `max_pages` 256 at any depth on these nodes.
 Since a buffered READ is at most 128 KiB anyway (K21), an io_uring tree mount uses `max_pages` 32,
@@ -417,7 +416,8 @@ mount; every OPEN that arrives before the first `ENOSYS` lands is answered `ENOS
 
 **Kernel.** A successful OPEN without `FOPEN_KEEP_CACHE` drops the file's pages
 (`file.c:291-292`). Pages are also dropped when GETATTR or LOOKUP reports another size
-(`inode.c:380-382`) and, with `FUSE_AUTO_INVAL_DATA`, another mtime (`inode.c:384`).
+(`inode.c:380-382`) and, with `FUSE_AUTO_INVAL_DATA`, another mtime (`inode.c:384`); these two are
+from the source, not run.
 
 **Run.** `keep_cache_keeps_the_page_cache_across_opens_and_an_open_without_it_drops_it` (with the flag
 the second whole read sends no READ; without it, READs again).
@@ -425,7 +425,7 @@ the second whole read sends no READ; without it, READs again).
 **Design.** 5.3 adds that the tree mount returns one stable size and mtime per node and does not ask
 for `FUSE_AUTO_INVAL_DATA`.
 
-### K20. Without `ASYNC_READ` the kernel serialises reads: changed (run)
+### K20. Without `ASYNC_READ` the kernel serialises reads: changed (source; READ size measured)
 
 **Kernel.** Without `FUSE_ASYNC_READ` the READs of a readahead are sent one at a time by the reading
 thread, each waited for (`file.c:1064`): nothing is in flight when `read(2)` returns. With it they
@@ -433,9 +433,11 @@ are background requests (`file.c:1060`), counted against `max_background` (K23).
 at most the readahead window, which the kernel offers at INIT (`inode.c:1496`, 128 KiB) and the
 reply can only lower (`inode.c:1342`).
 
-**Run.** The page-cache checks of `kernel_cache_integration` count READs right after their caller's
-`read(2)` returns, which holds only because no READ is in flight then; the
-`NO_OPEN_SUPPORT` check measures the largest buffered READ: 131072 bytes on both kernel builds.
+**Run.** No test asserts the synchronous sending as such; the page-cache checks of
+`kernel_cache_integration` rely on it (they count READs right after their caller's `read(2)` returns,
+and the counts hold run after run). The `NO_OPEN_SUPPORT` check asserts that every buffered READ is at
+most the readahead window the kernel offered, and measures the largest: 131072 bytes on both kernel
+builds.
 
 **Design.** 5.2's INIT list said "`ASYNC_READ` (without it the kernel serialises reads per file)";
 corrected to the above.
@@ -456,7 +458,7 @@ into an aligned buffer: four 1 MiB READs at 256 pages, sixteen of 256 KiB at 64 
 **Design.** Section 2 ("the FUSE read size"): a READ is at most 1 MiB, so it touches at most two
 cells; the tree mount, whose reads are all buffered under `NO_OPEN_SUPPORT`, sees READs of at most
 128 KiB. `tsfuse`'s comment on `InitConfig` (it said the kernel lowers `max_write` to `max_pages`
-pages) is corrected in this change.
+pages) is corrected.
 
 ### K22. A request timeout can abort the connection: changed (source and node facts)
 
@@ -517,9 +519,10 @@ allowed; `F_SEAL_SEAL` then a seal: `EPERM`; a seal through a read-only reopen: 
 `a_memfd_made_without_allow_sealing_takes_no_seal`.
 
 **Design.** 5.1 creates the state memfd (and the counter memfd) with `MFD_ALLOW_SEALING |
-MFD_NOEXEC_SEAL`, which works at every `vm.memfd_noexec` setting, and sizes it before sealing.
+MFD_NOEXEC_SEAL`, which works at every `vm.memfd_noexec` setting (run at 0, the setting of every
+node; 1 and 2 from the source), and sizes it before sealing.
 
-### K26. DONTNEED on a dirty page does nothing: changed (run)
+### K26. DONTNEED on a dirty page does nothing: changed (run for synced cells, measured for dirty ones)
 
 **Kernel.** `posix_fadvise(DONTNEED)` first starts writeback of the range's dirty pages without
 waiting for it (`mm/fadvise.c:114`, `mm/filemap.c:437`), ignoring its result, then drops only the
@@ -545,7 +548,7 @@ nobody holds, so the server issues it only on `durable` cells, from a thread tha
 
 ## What changes in the design
 
-Applied to `docs/design/fetch-cache-serve.md` in this change: section 2 (the FUSE read size, K21),
+Applied to `docs/design/fetch-cache-serve.md`: section 2 (the FUSE read size, K21),
 4.8 (DONTNEED, K26), 5.1 (the state memfd, K24 and K25), 5.2 (INIT flags K15, K20, K23; item 2 K1 and
 K3; item 3 K7 and K8; item 4 K10 to K13 and K22; item 5 K4 to K6 and K14), 5.3 (Opens K18 and K19;
 reads K15 to K17), and the T-F0 row and the "what was not run" notes. The measurement

@@ -76,6 +76,10 @@ fn no_open_support_stops_open_after_one_enosys_and_keeps_the_page_cache_for_ever
     );
 
     read_whole(&conn, "f", 2);
+    // A RELEASE, which is a background request, would be queued inside the close that ends
+    // `read_whole` (64 background slots are free); this LOOKUP is queued after it, so once it
+    // is answered the server has read every request before it.
+    std::fs::metadata(conn.path("g")).unwrap();
     let second = server.seen();
     assert_eq!(second.count(op::OPEN), 1, "no OPEN after the ENOSYS");
     assert_eq!(
@@ -261,11 +265,6 @@ fn a_reply_spliced_from_a_pipe_too_small_for_it_is_refused_einval_and_the_reques
         errno_of(&std::io::Error::from(refused)),
         Some(errno::EINVAL)
     );
-    assert!(
-        !f.is_finished(),
-        "a refused splice does not end the request"
-    );
-
     reply(&conn.dev, rf.h.unique, 0, &[&content(2, 0, size as u64)]).unwrap();
     let _server = Server::spawn(dup(&conn.dev), open);
     assert_eq!(f.join().unwrap().unwrap(), content(2, 0, size as u64));

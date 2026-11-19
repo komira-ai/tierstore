@@ -9,7 +9,8 @@
 //! `fusermount3` (CI installs `fuse3`). Elsewhere [`Conn::mount`] says why on stderr and the
 //! check does not run. Every check blocks only on kernel events (a request read, a reply
 //! written, a caller's system call returning), never on a timer; [`Conn`]'s drop aborts the
-//! connection, so a failed check ends every blocked caller with `ECONNABORTED` instead of hanging.
+//! connection where it may (as root; the abort file is root's), so a failed check ends every blocked
+//! caller with `ECONNABORTED` instead of hanging; elsewhere they end with the test process.
 #![allow(dead_code, reason = "each test binary uses a part of the helpers")]
 #![allow(
     clippy::unwrap_used,
@@ -369,12 +370,6 @@ impl Server {
     pub fn seen(&self) -> Seen {
         self.seen.lock().unwrap().clone()
     }
-
-    /// Whether its thread has ended.
-    #[must_use]
-    pub fn ended(&self) -> bool {
-        self.handle.is_finished()
-    }
 }
 
 /// A mount of the tiny tree and its first descriptor, after INIT.
@@ -478,12 +473,6 @@ impl Conn {
     #[must_use]
     pub fn path(&self, name: &str) -> PathBuf {
         self.mp.join(name)
-    }
-
-    /// The mount, for its connection id and abort.
-    #[must_use]
-    pub fn the_mount(&self) -> &Mount {
-        self.mount.as_ref().unwrap()
     }
 }
 
