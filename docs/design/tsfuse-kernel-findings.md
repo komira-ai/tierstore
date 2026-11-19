@@ -562,5 +562,10 @@ reads K15 to K17), and the T-F0 row and the "what was not run" notes. The measur
   checks to run then: REGISTER before INIT (`EAGAIN`) and after; the ring carries nothing until every
   possible CPU's queue has an entry; one failed REGISTER turns io_uring off for the connection; a
   parked READ holds its entry and requests from that CPU wait behind it; FORGET and INTERRUPT arrive
-  on `/dev/fuse`; a server killed under load (`ECANCELED`, K14).
+  on `/dev/fuse`; a server killed under load (`ECANCELED`, K14). The io_uring transport's own
+  test, `tests/kernel_uring_integration.rs` (T-F5), runs part of this on a node with the parameter
+  on (set for the run, the kernel reads it at INIT, K10): REGISTER after INIT on every possible
+  CPU's queue (88), requests answered by COMMIT_AND_FETCH and read by the queues' threads, a parked
+  READ holding its entry until another thread completes it, and an INTERRUPT arriving on
+  `/dev/fuse` and answered by a commit of the READ's entry. The rest is still to run.
 - **The mapping half of K24**, in the conformance suite (T-F7) under the same exception.

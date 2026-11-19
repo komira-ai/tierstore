@@ -37,6 +37,20 @@ use crate::reply::{Errno, ReplyDevice, encode_out_header};
 use crate::takeover::{Handover, HandoverError};
 use crate::tokens::Tokens;
 use crate::transport::{DevReader, Every, ReaderEnd, Received, Stop, read_once, serve};
+use crate::uring::{
+    Fallback, Host, Rings, Shared, TransportMode, UringConfig, UringMemory, kernel_rings, plan,
+};
+
+/// How [`Session::init_uring`] makes the rings of a session: the real ones, or a test's.
+pub(crate) type MakeRings<'a> =
+    &'a mut dyn FnMut(&Arc<DevFd>, UringMemory) -> Result<Rings, Fallback>;
+
+/// What a session asks of io_uring at INIT.
+pub(crate) struct AskUring<'a> {
+    pub(crate) config: &'a UringConfig,
+    pub(crate) host: Host,
+    pub(crate) make: MakeRings<'a>,
+}
 
 /// `FUSE_NOTIFY_RESEND`: the notify code of [`Session::resend`].
 const NOTIFY_RESEND: i32 = 7;
@@ -109,6 +123,11 @@ pub enum SessionError {
         /// The reader's index.
         index: usize,
     },
+    /// [`Session::resume`] of a connection granted io_uring: a request a ring entry of the
+    /// previous server held is never resent (5.2 item 5, K14), so the connection cannot be taken
+    /// over.
+    #[error("a FUSE connection served on io_uring cannot be taken over")]
+    UringNotResumable,
 }
 
 /// The descriptors of one FUSE connection and the terms it was initialised with.
@@ -117,6 +136,9 @@ pub struct Session {
     devices: Vec<Arc<DevFd>>,
     negotiated: Negotiated,
     tokens: Tokens,
+    mode: TransportMode,
+    /// The rings, when INIT asked for io_uring; registered by [`Self::serve`].
+    rings: Option<Rings>,
 }
 
 impl Session {
@@ -133,6 +155,40 @@ impl Session {
     /// [`SessionError::MalformedInit`] (answered `EIO`); [`SessionError::EndedBeforeInit`];
     /// [`SessionError::Read`] or [`SessionError::Write`].
     pub fn init(device: DevFd, config: &InitConfig) -> Result<Self, SessionError> {
+        Self::init_with(device, config, None)
+    }
+
+    /// As [`Self::init`], asking the kernel for `FUSE_OVER_IO_URING` when the session can use it
+    /// (5.2 item 4): `fuse.enable_uring` is on, the kernel offers it, the possible CPUs can be
+    /// read, the entries `uring` asks for register at most [`UringConfig::memory_limit`] with the
+    /// payload the INIT terms fix, and a ring can be made for every queue; the rings are made
+    /// before INIT is answered. Otherwise the session serves on `/dev/fuse`, and
+    /// [`Self::transport`] says why ([`Fallback`]). An io_uring tree mount asks for `max_pages`
+    /// 32 in `config` (see [`UringConfig`]).
+    ///
+    /// # Errors
+    ///
+    /// As [`Self::init`]: a fallback is not an error.
+    pub fn init_uring(
+        device: DevFd,
+        config: &InitConfig,
+        uring: &UringConfig,
+    ) -> Result<Self, SessionError> {
+        let ask = AskUring {
+            config: uring,
+            host: Host::read(),
+            make: &mut kernel_rings,
+        };
+        Self::init_with(device, config, Some(ask))
+    }
+
+    /// INIT, with io_uring asked for as `uring` says.
+    pub(crate) fn init_with(
+        device: DevFd,
+        config: &InitConfig,
+        mut uring: Option<AskUring<'_>>,
+    ) -> Result<Self, SessionError> {
+        let device = Arc::new(device);
         let mut buf = vec![0u8; MIN_READ_BUFFER];
         loop {
             let len = read_blocking(&device, &mut buf)?;
@@ -166,12 +222,28 @@ impl Session {
                 });
             };
             match config.negotiate(&init) {
-                Ok(InitOutcome::Accepted(negotiated)) => {
+                Ok(InitOutcome::Accepted(mut negotiated)) => {
+                    let ready = match uring.as_mut() {
+                        None => Err(Fallback::NotAsked),
+                        Some(ask) => plan(ask.config, &ask.host, &negotiated)
+                            .and_then(|memory| (ask.make)(&device, memory)),
+                    };
+                    let (mode, rings) = match ready {
+                        Ok(rings) => {
+                            let over = InitFlags::OVER_IO_URING;
+                            negotiated.granted = negotiated.granted.union(over);
+                            negotiated.reply.flags2 |= (over.0 >> 32) as u32;
+                            (TransportMode::Uring(rings.memory), Some(rings))
+                        }
+                        Err(fallback) => (TransportMode::DevFuse(fallback), None),
+                    };
                     answer(None, negotiated.reply.as_bytes())?;
                     return Ok(Self {
-                        devices: vec![Arc::new(device)],
+                        devices: vec![device],
                         negotiated,
                         tokens: Tokens::new(),
+                        mode,
+                        rings,
                     });
                 }
                 Ok(InitOutcome::MajorAhead(ours)) => answer(None, ours.as_bytes())?,
@@ -197,12 +269,17 @@ impl Session {
     ///
     /// # Errors
     ///
-    /// [`SessionError::Resend`] when the notification cannot be written.
+    /// [`SessionError::UringNotResumable`] for a connection granted io_uring (its descriptors
+    /// are dropped, the connection is left as it is); [`SessionError::Resend`] when the
+    /// notification cannot be written.
     pub fn resume(handover: Handover) -> Result<Self, SessionError> {
         let Handover {
             negotiated,
             devices,
         } = handover;
+        if negotiated.granted.contains(InitFlags::OVER_IO_URING) {
+            return Err(SessionError::UringNotResumable);
+        }
         let session = Self {
             devices: devices
                 .into_iter()
@@ -210,6 +287,8 @@ impl Session {
                 .collect(),
             negotiated,
             tokens: Tokens::new(),
+            mode: TransportMode::DevFuse(Fallback::NotAsked),
+            rings: None,
         };
         if negotiated.granted.contains(InitFlags::HAS_RESEND) {
             session.resend().map_err(SessionError::Resend)?;
@@ -223,7 +302,14 @@ impl Session {
         &self.negotiated
     }
 
-    /// The number of descriptors, and so of readers [`Self::serve`] starts.
+    /// The transport [`Self::serve`] will use: io_uring if INIT asked for it, which a refused
+    /// REGISTER can still turn into `/dev/fuse` ([`Serving::transport`] has the outcome).
+    #[must_use]
+    pub fn transport(&self) -> TransportMode {
+        self.mode
+    }
+
+    /// The number of descriptors, and so of `/dev/fuse` readers [`Self::serve`] starts.
     #[must_use]
     pub fn readers(&self) -> usize {
         self.devices.len()
@@ -279,7 +365,10 @@ impl Session {
         self.devices[0].send(&[&header])
     }
 
-    /// Starts one reader per descriptor, each on its own thread, dispatching to `fs`.
+    /// Starts one reader per descriptor, each on its own thread, dispatching to `fs`. On
+    /// io_uring it also starts one reader per queue, after its `/dev/fuse` readers (the hybrid
+    /// delivery of 5.2 item 4), registers every queue's entries and returns once they are
+    /// registered, or once a refused REGISTER has left the session on `/dev/fuse` alone.
     ///
     /// # Errors
     ///
@@ -318,12 +407,31 @@ impl Session {
             let handle = spawned.map_err(|source| stop.failed_start(index, source))?;
             readers.push(handle);
         }
+        let (mode, queues) = match self.rings {
+            None => (self.mode, Vec::new()),
+            Some(rings) => {
+                let first = readers.len();
+                let started = crate::uring::serve::start(
+                    rings,
+                    &fs,
+                    &self.tokens,
+                    &stop,
+                    &every,
+                    buf_len,
+                    first,
+                )?;
+                readers.extend(started.handles);
+                (started.mode, started.queues)
+            }
+        };
         Ok(Serving {
             devices: self.devices,
             negotiated: self.negotiated,
             tokens: self.tokens,
             stop,
             readers,
+            mode,
+            queues,
         })
     }
 }
@@ -390,7 +498,10 @@ pub struct Serving {
     negotiated: Negotiated,
     tokens: Tokens,
     stop: Arc<Stop>,
+    /// The `/dev/fuse` readers, then (on io_uring) one per queue.
     readers: Vec<JoinHandle<io::Result<ReaderEnd>>>,
+    mode: TransportMode,
+    queues: Vec<Arc<Shared>>,
 }
 
 impl Serving {
@@ -402,7 +513,28 @@ impl Serving {
         }
     }
 
-    /// The handover a supervisor keeps, in reader order (see [`Session::handover`]).
+    /// The transport the session serves on (`fuse_transport_mode`).
+    #[must_use]
+    pub fn transport(&self) -> TransportMode {
+        self.mode
+    }
+
+    /// The session's table of registered requests.
+    #[cfg(test)]
+    pub(crate) fn tokens(&self) -> &Tokens {
+        &self.tokens
+    }
+
+    /// The ring entries holding a request the file system has not answered yet, over every
+    /// queue (`uring_entries_parked`); 0 on `/dev/fuse`.
+    #[must_use]
+    pub fn uring_entries_held(&self) -> u64 {
+        self.queues.iter().map(|q| q.held()).sum()
+    }
+
+    /// The handover a supervisor keeps, in reader order (see [`Session::handover`]). It is made
+    /// for a session on io_uring too, but [`Session::resume`] refuses it
+    /// ([`SessionError::UringNotResumable`]): io_uring has no takeover (5.2 item 5).
     ///
     /// # Errors
     ///
@@ -430,7 +562,8 @@ impl Serving {
         self.join()
     }
 
-    /// Waits for every reader to end: how each ended, in reader order.
+    /// Waits for every reader to end: how each ended, in reader order (the `/dev/fuse` readers,
+    /// then the queues).
     ///
     /// # Errors
     ///

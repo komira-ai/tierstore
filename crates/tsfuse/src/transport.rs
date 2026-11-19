@@ -277,7 +277,7 @@ pub(crate) fn route(
             // An INTERRUPT with a short body has no target to cancel, and the kernel expects
             // no reply to it.
             if let Ok(Operation::Interrupt(arg)) = Operation::parse(&req) {
-                let _ = tokens.interrupt(arg.unique, unique, every);
+                let _ = tokens.interrupt_routed(arg.unique, unique, every);
             }
             None
         }

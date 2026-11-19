@@ -45,9 +45,13 @@ impl InitFlags {
     /// `FUSE_HAS_RESEND`: the kernel resends pending requests on `FUSE_NOTIFY_RESEND`, and
     /// marks them with [`super::UNIQUE_RESEND`].
     pub const HAS_RESEND: Self = Self(1 << 39);
+    /// `FUSE_OVER_IO_URING`: requests go through io_uring rings the server registers once INIT
+    /// is answered (5.2 item 4). Offered only while `fuse.enable_uring` is on, asked for only by
+    /// [`crate::Session::init_uring`].
+    pub const OVER_IO_URING: Self = Self(1 << 41);
 
     /// The flags of this type with their header names, in bit order.
-    const NAMED: [(Self, &'static str); 12] = [
+    const NAMED: [(Self, &'static str); 13] = [
         (Self::ASYNC_READ, "ASYNC_READ"),
         (Self::SPLICE_WRITE, "SPLICE_WRITE"),
         (Self::SPLICE_READ, "SPLICE_READ"),
@@ -60,6 +64,7 @@ impl InitFlags {
         (Self::NO_OPENDIR_SUPPORT, "NO_OPENDIR_SUPPORT"),
         (Self::INIT_EXT, "INIT_EXT"),
         (Self::HAS_RESEND, "HAS_RESEND"),
+        (Self::OVER_IO_URING, "OVER_IO_URING"),
     ];
 
     /// No flag.
