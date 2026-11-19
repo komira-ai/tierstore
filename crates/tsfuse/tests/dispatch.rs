@@ -32,9 +32,7 @@ use common::fake::{Kernel, fake_device, pending, read_message, read_reply};
 use common::{getattr, init_request, request};
 use tokio::sync::oneshot;
 use tsfuse::abi::{InitConfig, InterruptIn};
-use tsfuse::{
-    Completion, DevFd, Fs, Handled, Handover, ReaderEnd, Replier, Request, Session,
-};
+use tsfuse::{Completion, DevFd, Fs, Handled, Handover, ReaderEnd, Replier, Request, Session};
 
 /// The terms of a session initialised by a 7.40 kernel.
 fn negotiated() -> tsfuse::abi::Negotiated {
