@@ -3247,6 +3247,20 @@ dependencies = [
 ]
 
 [[package]]
+name = "tierstore-evict"
+version = "0.1.0"
+dependencies = [
+ "loom",
+ "rustix",
+ "thiserror",
+ "tierstore-entry",
+ "tierstore-fetch-api",
+ "tierstore-journal",
+ "tierstore-metrics",
+ "tierstore-testkit",
+]
+
+[[package]]
 name = "tierstore-fetch"
 version = "0.1.0"
 dependencies = [
