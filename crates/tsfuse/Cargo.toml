@@ -6,7 +6,7 @@ rust-version.workspace = true
 license.workspace = true
 repository.workspace = true
 publish.workspace = true
-description = "The FUSE library of tierstore (docs/design/fetch-cache-serve.md, 5.2): the dispatch interface `Fs`/`Handled`/`Replier` with replies bound to their originating device, cancel tokens registered at read time and an atomic complete, the kernel ABI (`abi`: wire structs, per-opcode parse, reply payloads, INIT negotiation), and on Linux the `/dev/fuse` transport: mount(2) or fusermount3, cloned readers on AsyncFd, writev replies, stop and abort; the READ reply path: splice through pooled pipes sized with F_SETPIPE_SZ above a threshold, pread and writev below it, and the DONTNEED helper; and takeover: the handover a supervisor keeps (every descriptor and the INIT terms, passed by SCM_RIGHTS) and its resume without INIT after FUSE_NOTIFY_RESEND."
+description = "The FUSE library of tierstore (docs/design/fetch-cache-serve.md, 5.2): the dispatch interface `Fs`/`Handled`/`Replier` with replies bound to their originating device, cancel tokens registered at read time and an atomic complete, the kernel ABI (`abi`: wire structs, per-opcode parse, reply payloads, INIT negotiation), and on Linux the `/dev/fuse` transport: mount(2) or fusermount3, cloned readers on AsyncFd, writev replies, stop and abort; the READ reply path: splice through pooled pipes sized with F_SETPIPE_SZ above a threshold, pread and writev below it, and the DONTNEED helper; takeover: the handover a supervisor keeps (every descriptor and the INIT terms, passed by SCM_RIGHTS) and its resume without INIT after FUSE_NOTIFY_RESEND; and the io_uring transport: REGISTER of every queue, COMMIT_AND_FETCH, the hybrid /dev/fuse reader for INTERRUPT and FORGET, depth, registered-memory accounting and the fallback to /dev/fuse."
 
 # No dependency on a FUSE crate: the library speaks the protocol itself (5.2).
 [dependencies]
@@ -23,7 +23,9 @@ zerocopy.workspace = true
 # open, fcntl, statx, mount and umount2, socketpair and SCM_RIGHTS, read and writev, the
 # sealed memfd of a handover's terms, and the one ioctl (FUSE_DEV_IOC_CLONE); for the splice
 # reply path pipes, `splice`, `F_SETPIPE_SZ`, `pread`, `posix_fadvise` and the page size.
-rustix = { workspace = true, features = ["fs", "mount", "net", "param", "pipe", "process"] }
+# For the io_uring transport `io_uring_setup`, `io_uring_enter`, `mmap` and `munmap` of the rings,
+# and `sched_setaffinity` of each queue's thread.
+rustix = { workspace = true, features = ["fs", "io_uring", "mm", "mount", "net", "param", "pipe", "process", "thread"] }
 # A reader's current-thread runtime, `AsyncFd` and the stop notification.
 tokio = { workspace = true, features = ["net", "rt", "sync"] }
 
