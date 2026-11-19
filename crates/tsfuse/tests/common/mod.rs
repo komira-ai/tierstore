@@ -138,15 +138,21 @@ pub mod fake {
         (DevFd::from_fd(device), Kernel(UnixStream::from(kernel)))
     }
 
-    /// `(error, unique, len)` of the next message the session wrote.
-    pub fn read_reply(kernel: &Kernel) -> (i32, u64, usize) {
+    /// `(error, unique, payload)` of the next message the session wrote.
+    pub fn read_message(kernel: &Kernel) -> (i32, u64, Vec<u8>) {
         let mut buf = [0u8; 4096];
         let n = kernel.recv(&mut buf).unwrap();
         let len = u32::from_le_bytes(buf[0..4].try_into().unwrap());
         assert_eq!(len as usize, n, "the header's length is the message's");
         let error = i32::from_le_bytes(buf[4..8].try_into().unwrap());
         let unique = u64::from_le_bytes(buf[8..16].try_into().unwrap());
-        (error, unique, n)
+        (error, unique, buf[16..n].to_vec())
+    }
+
+    /// `(error, unique, len)` of the next message the session wrote.
+    pub fn read_reply(kernel: &Kernel) -> (i32, u64, usize) {
+        let (error, unique, payload) = read_message(kernel);
+        (error, unique, 16 + payload.len())
     }
 
     /// Whether the kernel's end has a message waiting (not the end-of-file of a device whose

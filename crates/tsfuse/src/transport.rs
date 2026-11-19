@@ -226,6 +226,12 @@ pub(crate) async fn serve<T: Transport>(
 /// with clones the target may sit in another reader's queue, read and not yet registered: of
 /// all the devices exactly that one takes the reply (the others refuse it with `ENOENT`), and
 /// the kernel queues the INTERRUPT again, to be read once the target is registered.
+///
+/// The session never remembers an INTERRUPT whose target it does not find, to cancel the target
+/// when it registers: "not found" also means "already answered", the kernel reuses a unique once
+/// its request is answered, and a remembered INTERRUPT would then cancel a later, unrelated
+/// request. The kernel's own queue keeps the INTERRUPT while its target is unanswered, which is
+/// the one case where it still matters.
 pub(crate) struct Every(pub(crate) Vec<Arc<dyn ReplyDevice>>);
 
 impl ReplyDevice for Every {

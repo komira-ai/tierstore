@@ -430,7 +430,9 @@ fn with_three_readers_a_reply_goes_to_the_reader_that_read_it_and_interrupt_to_i
     for (i, kernel) in kernels.iter().enumerate() {
         kernel.send(&request(1, 100 + i as u64, 1, b"x\0")).unwrap();
     }
-    while tokens.registered() < 3 {
+    // Registered is not yet parked: a reader registers a request before `Fs::handle` runs, so
+    // the test waits for the repliers it takes below, or it could miss one and wait for ever.
+    while tokens.registered() < 3 || fs.parked.lock().unwrap().len() < 3 {
         std::thread::yield_now();
     }
     // An INTERRUPT of reader 0's request, read by reader 2: EINTR on reader 0's device.

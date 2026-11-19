@@ -5,7 +5,10 @@
 //! [`mount`] (`mount(2)`, or `fusermount3`; unmount and abort), [`DevFd`] (a descriptor of a
 //! connection, cloned with `FUSE_DEV_IOC_CLONE`, writing each reply with one `writev`), the
 //! [`Transport`] trait and its `/dev/fuse` implementation [`DevReader`] on `AsyncFd`, and
-//! [`Session`] (INIT, clones, one reader thread per descriptor, stop), and takeover (row T-F6):
+//! [`Session`] (INIT, clones, one reader thread per descriptor, stop), whose readers route each
+//! request (row T-F3): INTERRUPT to the [`Tokens`] table, FORGET dropped, DESTROY, a second INIT
+//! and an opcode not implemented answered at once, every other request registered and handed to
+//! [`Fs::handle`]; and takeover (row T-F6):
 //! the [`Handover`] a supervisor keeps (every descriptor, the mount's and every clone, with the
 //! terms INIT agreed, passed by `SCM_RIGHTS`), [`Session::resume`] of it without INIT after
 //! `FUSE_NOTIFY_RESEND`, and [`Serving::hand_over`]. The io_uring transport (T-F5) builds on
