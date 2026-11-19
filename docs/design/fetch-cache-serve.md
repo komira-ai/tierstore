@@ -385,6 +385,8 @@ Why this is correct: reader and evictor each store to one location then load the
 9. io_uring: queues register (a REGISTER before INIT is refused with `EAGAIN`; nothing goes to the ring until every possible CPU's queue has an entry); with `enable_uring=0` the transport falls back; the storm of `depth x 1.5` parked reads from one CPU, and from every CPU at once, does not stall metadata.
 10. ABI layout probe equals our structs. 11. A `PROT_WRITE`, `MAP_SHARED` mapping of the passed state memfd fails with `EPERM`.
 
+Which test proves each item, and what waits for T-F5: `docs/design/tsfuse-conformance.md`.
+
 ### 5.3 Serving path
 **Metadata from the mapped image.** The mount `mmap`s the tree-list image read-only (`PROT_READ`, `MAP_PRIVATE`; `MADV_RANDOM` for records). LOOKUP binary-searches the sorted directory records, GETATTR reads the node record, READDIR/READDIRPLUS encodes straight from records. Entry and attribute validity are long (the tree is immutable). The image file is immutable, never punched or truncated. **Page-in on a cold page of the image is an inline stall on a reader thread:** at tree open the mount calls `MADV_WILLNEED` on the record sections and, for a hot mount, `mlock`s the directory and node sections (bounded: the image is small relative to the pack data), so a first touch does not block on the shared cache SSD during heavy writeback. **File data is not mmapped.**
 
