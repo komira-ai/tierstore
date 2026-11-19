@@ -142,11 +142,57 @@ fn the_whole_file_reads_add_up_to_a_rate() {
             },
         ],
         500_000_000,
+        None,
     );
     assert_eq!(
-        (t.files, t.bytes, t.errors, t.wall_ns, t.mb_per_s),
-        (3, 4_000_000, 1, 500_000_000, 8.0)
+        (t.files, t.bytes, t.errors, t.wall_ns, t.mb_per_s, t.cpu),
+        (3, 4_000_000, 1, 500_000_000, 8.0, None)
     );
+}
+
+/// The CPU of a whole-file phase is the server's and its control group's difference of the two
+/// readings, per 10^9 bytes read; a control group read at one end only is left out, and a
+/// phase that read nothing is held to one byte (no division by zero).
+#[test]
+fn the_cpu_of_a_whole_file_phase_is_per_gigabyte_read() {
+    let at = |user_ms, system_ms, cgroup: Option<u64>| CpuAt {
+        server: ProcessCpu { user_ms, system_ms },
+        cgroup: cgroup.map(|system_us| CgroupCpu {
+            user_us: 0,
+            system_us,
+        }),
+        node: NodeCpu {
+            user_ms: 0,
+            system_ms: 0,
+            busy_ms: 0,
+        },
+    };
+    let read = [WholeCounts {
+        files: 1,
+        bytes: 2_000_000_000,
+        errors: 0,
+    }];
+    let (from, to) = (at(10, 20, Some(1000)), at(110, 320, Some(801_000)));
+    let t = throughput(&read, 1_000_000_000, Some((&from, &to)));
+    let cpu = t.cpu.unwrap();
+    assert_eq!(
+        (cpu.server, cpu.cgroup.map(|c| c.system_us)),
+        (
+            ProcessCpu {
+                user_ms: 100,
+                system_ms: 300
+            },
+            Some(800_000)
+        )
+    );
+    assert_eq!(
+        (cpu.server_ms_per_gb, cpu.cgroup_system_ms_per_gb),
+        (200.0, Some(400.0))
+    );
+    let one_end = throughput(&read, 1, Some((&at(0, 0, None), &at(0, 0, Some(5)))));
+    assert_eq!(one_end.cpu.unwrap().cgroup_system_ms_per_gb, None);
+    let nothing = throughput(&[], 1, Some((&at(0, 0, None), &at(1, 0, None))));
+    assert_eq!(nothing.cpu.unwrap().server_ms_per_gb, 1e9);
 }
 
 /// The CPU of a run is the difference of the two readings, per 1000 cycles; a control group
@@ -216,6 +262,7 @@ fn plan(dir: &Path) -> Plan {
         read_bytes: 1,
         throughput_budget: 0,
         throughput_readers: 1,
+        throughput_rounds: 1,
         sample_every: Duration::ZERO,
         server_pid: std::process::id(),
         as_user: None,
@@ -224,17 +271,19 @@ fn plan(dir: &Path) -> Plan {
     }
 }
 
-/// A plan with no run, no reader, or more whole-file readers than readers is refused before
-/// anything starts; so is one whose list cannot be read, or whose readers cannot be started.
+/// A plan with no run, no reader, more whole-file readers than readers, or no whole-file round
+/// is refused before anything starts; so is one whose list cannot be read, or whose readers
+/// cannot be started.
 #[test]
 fn a_plan_that_cannot_run_is_refused_before_anything_starts() {
     let dir = TestDir::under(std::env::temp_dir(), "fsbench-run-refused");
-    let refused = "a run needs at least one run and one reader, and from one whole-file reader to as many as there are readers";
+    let refused = "a run needs at least one run, one reader and one whole-file round, and from one whole-file reader to as many as there are readers";
     for change in [
         |p: &mut Plan| p.runs = 0,
         |p: &mut Plan| p.readers = 0,
         |p: &mut Plan| p.throughput_readers = 2,
         |p: &mut Plan| p.throughput_readers = 0,
+        |p: &mut Plan| p.throughput_rounds = 0,
     ] {
         let mut p = plan(dir.path());
         change(&mut p);

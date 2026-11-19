@@ -53,6 +53,7 @@ fn plan(list: &Path, tree: &Path, server_pid: u32) -> Plan {
         // The five largest files: 40 + 39 + 38 + 37 + 36 KiB.
         throughput_budget: 190 * 1024,
         throughput_readers: 2,
+        throughput_rounds: 2,
         sample_every: Duration::from_millis(1),
         server_pid,
         as_user: Some((
@@ -86,8 +87,15 @@ fn check(records: &[RunRecord], plan: &Plan) {
         ] {
             assert_eq!(h.count, 75);
         }
+        assert_eq!(record.input.throughput_rounds, plan.throughput_rounds);
         for phase in [&record.cold, &record.warm] {
-            assert_eq!((phase.files, phase.bytes, phase.errors), (5, 190 * 1024, 0));
+            // Each of the rounds reads the five files.
+            let rounds = u64::from(plan.throughput_rounds);
+            assert_eq!(
+                (phase.files, phase.bytes, phase.errors),
+                (5 * rounds, 190 * 1024 * rounds, 0)
+            );
+            assert!(phase.cpu.is_some(), "the CPU of each phase is read");
         }
         assert!(record.samples.count >= 1);
         assert_eq!(record.server.pid, plan.server_pid);

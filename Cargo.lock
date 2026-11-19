@@ -1073,6 +1073,7 @@ dependencies = [
  "sha2 0.11.0",
  "thiserror",
  "tierstore-testkit",
+ "tsfuse",
 ]
 
 [[package]]
