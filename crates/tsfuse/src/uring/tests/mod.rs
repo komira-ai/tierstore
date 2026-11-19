@@ -329,6 +329,8 @@ pub(crate) struct TestFs {
     pub(super) seen: Mutex<Vec<Seen>>,
     pub(super) parked: Mutex<Vec<Replier>>,
     pub(super) inline: Mutex<Vec<Completion>>,
+    /// The `(nodeid, nlookup)` of each forget, in order.
+    pub(super) forgot: Mutex<Vec<(u64, u64)>>,
     pub(super) changed: Condvar,
 }
 
@@ -388,6 +390,10 @@ impl Fs for TestFs {
         self.seen.lock().unwrap().push(seen);
         self.changed.notify_all();
         handled
+    }
+
+    fn forget(&self, nodeid: u64, nlookup: u64) {
+        self.forgot.lock().unwrap().push((nodeid, nlookup));
     }
 }
 

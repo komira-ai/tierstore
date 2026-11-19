@@ -27,7 +27,8 @@
 //! requests forced or queued before the ring was ready, on `/dev/fuse` (K11): the session keeps its
 //! `/dev/fuse` readers serving beside the rings. An INTERRUPT whose request no `/dev/fuse` reader
 //! holds is held until the request's ring entry delivers it ([`crate::Tokens`]), and a ring entry
-//! carrying a request that takes no reply is committed at once.
+//! carrying a request that takes no reply is committed at once, then delivered (a FORGET reaches
+//! [`crate::Fs::forget`]).
 //!
 //! **No takeover.** A request held by a ring entry is not resent by `FUSE_NOTIFY_RESEND` (K14), so
 //! [`crate::Session::resume`] refuses the handover of a session granted io_uring.
