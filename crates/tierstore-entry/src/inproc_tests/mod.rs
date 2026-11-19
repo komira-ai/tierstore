@@ -21,7 +21,7 @@ use tierstore_harness::conformance::{EntryStoreFixture, MountCounters};
 use tierstore_journal::{BootId, FileKind};
 use tierstore_testkit::dir::TestDir;
 
-use crate::inproc::{InProcEntry, InProcStore};
+use crate::inproc::{InProcEntry, InProcStore, punches_inside_a_file};
 
 mod entry_tests;
 mod read_tests;
@@ -112,16 +112,32 @@ impl MountCounters for Mount {
 }
 
 /// Fresh in-process stores, each in its own scratch directory, kept so `restore_as_recheck` can
-/// reach the concrete entry.
+/// reach the concrete entry. With `no_punch` the stores evict as on a volume that cannot punch
+/// inside a file (macOS), which the suite's punch case holds to the refusal.
 #[derive(Default)]
 struct InProcFixture {
+    no_punch: bool,
     stores: Mutex<Vec<(TestDir, Arc<InProcStore>)>>,
+}
+
+impl InProcFixture {
+    /// Stores that cannot punch.
+    fn without_punch() -> Self {
+        Self {
+            no_punch: true,
+            ..Self::default()
+        }
+    }
 }
 
 impl EntryStoreFixture for InProcFixture {
     fn store(&self) -> Arc<dyn EntryStore> {
         let dir = scratch("conformance-inproc");
-        let s = Arc::new(store(&dir, Some(BOOT)));
+        let mut s = store(&dir, Some(BOOT));
+        if self.no_punch {
+            s = s.without_punch();
+        }
+        let s = Arc::new(s);
         self.stores.lock().unwrap().push((dir, s.clone()));
         s
     }
@@ -148,11 +164,24 @@ impl EntryStoreFixture for InProcFixture {
             .unwrap();
         entry.force(cell, byte(CellState::Recheck));
     }
+
+    /// What the stores' probe finds (true on a Linux scratch volume, false on macOS), unless they
+    /// were made without punch.
+    fn punches(&self) -> bool {
+        !self.no_punch && punches_inside_a_file(&std::env::temp_dir())
+    }
 }
 
-/// The suite, each case its own test.
+/// The suite, each case its own test, on stores as the volume makes them.
 mod conformance {
     use super::InProcFixture;
 
     conformance_cases!(InProcFixture::default());
+}
+
+/// The suite on stores that cannot punch: the store of macOS, run on Linux too.
+mod conformance_without_punch {
+    use super::InProcFixture;
+
+    conformance_cases!(InProcFixture::without_punch());
 }
