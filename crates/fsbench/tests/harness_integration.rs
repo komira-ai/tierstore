@@ -53,6 +53,7 @@ fn plan(list: &Path, tree: &Path, server_pid: u32) -> Plan {
         // The five largest files: 40 + 39 + 38 + 37 + 36 KiB.
         throughput_budget: 190 * 1024,
         throughput_readers: 2,
+        throughput_rounds: 2,
         sample_every: Duration::from_millis(1),
         server_pid,
         as_user: Some((
@@ -86,8 +87,15 @@ fn check(records: &[RunRecord], plan: &Plan) {
         ] {
             assert_eq!(h.count, 75);
         }
+        assert_eq!(record.input.throughput_rounds, plan.throughput_rounds);
         for phase in [&record.cold, &record.warm] {
-            assert_eq!((phase.files, phase.bytes, phase.errors), (5, 190 * 1024, 0));
+            // Each of the rounds reads the five files.
+            let rounds = u64::from(plan.throughput_rounds);
+            assert_eq!(
+                (phase.files, phase.bytes, phase.errors),
+                (5 * rounds, 190 * 1024 * rounds, 0)
+            );
+            assert!(phase.cpu.is_some(), "the CPU of each phase is read");
         }
         assert!(record.samples.count >= 1);
         assert_eq!(record.server.pid, plan.server_pid);
@@ -247,8 +255,9 @@ fn the_run_and_report_commands_append_and_read_the_results() {
             .output()
             .unwrap()
     };
-    for _ in 0..2 {
-        let done = fsbench(&[], std::process::id());
+    // The first run reads the files whole once (the default), the second twice.
+    for extra in [&[][..], &["--throughput-rounds", "2"][..]] {
+        let done = fsbench(extra, std::process::id());
         assert!(
             done.status.success(),
             "{}",
@@ -258,6 +267,19 @@ fn the_run_and_report_commands_append_and_read_the_results() {
     let records = fsbench::report::read(&results).unwrap();
     assert_eq!(records.len(), 2);
     assert_eq!(records[1].cycles.count, 75);
+    let rounds: Vec<u32> = records.iter().map(|r| r.input.throughput_rounds).collect();
+    assert_eq!(rounds, [1, 2]);
+    for (once, twice) in [
+        (&records[0].cold, &records[1].cold),
+        (&records[0].warm, &records[1].warm),
+    ] {
+        assert!(once.files > 0);
+        assert_eq!(
+            (twice.files, twice.bytes, twice.errors),
+            (2 * once.files, 2 * once.bytes, 0),
+            "--throughput-rounds 2 reads the same files twice"
+        );
+    }
     let report = Command::new(env!("CARGO_BIN_EXE_fsbench"))
         .args(["report", "--results"])
         .arg(&results)

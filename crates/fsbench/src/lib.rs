@@ -10,7 +10,13 @@
 //! its control group and the whole node spent. One JSON object per run goes to the results file
 //! ([`record`]); `fsbench report` turns a results file into the tables of a measurement
 //! document ([`report`]). `fsbench null-fs` ([`nullfs`]) serves the same list with no storage
-//! behind it, so the transport is measured apart from what `tierstore fs` does per request.
+//! behind it, so the transport is measured apart from what `tierstore fs` does per request;
+//! `fsbench tsfuse-null-fs` ([`tsnull`]) does the same on `tsfuse`, the FUSE library of the
+//! redesign, with its cloned readers and its READ reply path, on `/dev/fuse` or over io_uring.
+//! Both serve the tree of [`tree`]. `fsbench storm` ([`storm`]) is the storm test of the
+//! io_uring transport: parked reads from one CPU and from every CPU, and the latency of metadata
+//! during them, on a file system of its own ([`stormfs`]); `fsbench storm-report` makes its
+//! tables ([`stormrec`]).
 //!
 //! The processes speak one line of JSON at a time over their standard streams: a reader says it
 //! is ready, is told to go, and answers with its counts and latency histograms ([`reader`]); a
@@ -35,5 +41,10 @@ pub mod reader;
 pub mod record;
 pub mod report;
 pub mod run;
+pub mod storm;
+pub mod stormfs;
+pub mod stormrec;
+pub mod tree;
+pub mod tsnull;
 
 pub use error::Error;

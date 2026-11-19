@@ -468,6 +468,7 @@ fn every_flag_and_constant_is_the_headers() {
         (InitFlags::NO_OPENDIR_SUPPORT, "FUSE_NO_OPENDIR_SUPPORT"),
         (InitFlags::INIT_EXT, "FUSE_INIT_EXT"),
         (InitFlags::HAS_RESEND, "FUSE_HAS_RESEND"),
+        (InitFlags::OVER_IO_URING, "FUSE_OVER_IO_URING"),
     ];
     for (flag, name) in flags {
         assert_eq!(flag.0, define(HEADER, name), "{name}");

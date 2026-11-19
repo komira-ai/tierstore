@@ -40,7 +40,7 @@ use crate::tree_manifest::{
 };
 use crate::{MAX_TREE_LIST_BYTES, TreeImage};
 
-use super::super::fill_client::{Place, PlacedTree};
+use super::super::fill_client::{AskError, Place, PlacedTree};
 use super::super::ino;
 use super::super::tree::Tree;
 use super::loaded::Loaded;
@@ -284,7 +284,10 @@ impl Core {
         if path.contains('\n') || Location::fs(&path).is_err() {
             return Err(Errno::NoEnt);
         }
-        let place = self.fills.place(&self.settings.mount_id, &path);
+        let place = self
+            .settled()
+            .map_err(|why| why.to_string())
+            .and_then(|()| self.fills.place(&self.settings.mount_id, &path));
         match place.map_err(|why| asked(&path, &why))? {
             Place::Tree(id) => {
                 let key = key_of(&id, &path).ok_or_else(|| asked(&path, &id))?;
@@ -341,7 +344,9 @@ impl Core {
         let attached = number.is_some_and(|n| self.attached(n));
         if attached {
             let _placing = self.pins.placement(key);
-            let _ = self.fills.place(&self.settings.mount_id, path);
+            let _ = self
+                .settled()
+                .map(|()| self.fills.place(&self.settings.mount_id, path));
         } else {
             self.let_go(key);
         }
@@ -349,13 +354,21 @@ impl Core {
 
     /// Tells the node's tree store which placements this mount holds, those of the trees of
     /// `attached` that are placed, so that it ends the mount's other holds.
-    pub(in crate::server::treefs) fn places_live(&self, attached: &[TreeDigest]) {
+    ///
+    /// # Errors
+    /// [`AskError`]: the socket did not answer.
+    pub(in crate::server::treefs) fn places_live(
+        &self,
+        attached: &[TreeDigest],
+    ) -> Result<(), AskError> {
         let ids: Vec<String> = attached
             .iter()
             .filter_map(placement_of)
             .map(|(id, _)| id)
             .collect();
-        self.fills.places_live(&self.settings.mount_id, &ids);
+        self.fills
+            .places_live(&self.settings.mount_id, &ids)
+            .map(drop)
     }
 
     /// The path of the directory `dir` above the fs locations: from the paths this core has
@@ -432,13 +445,16 @@ impl Core {
                     .iter()
                     .any(|other| placement_of(other).is_some_and(|(other, _)| other == id));
                 if !held {
-                    self.fills.unplace(&self.settings.mount_id, &id);
+                    let _ = self
+                        .settled()
+                        .map(|()| self.fills.unplace(&self.settings.mount_id, &id));
                 }
             }
             None => {
-                let _ = self
-                    .fills
-                    .unpin(&self.settings.mount_id, &digest.to_string());
+                let _ = self.settled().and_then(|()| {
+                    self.fills
+                        .unpin(&self.settings.mount_id, &digest.to_string())
+                });
             }
         }
     }

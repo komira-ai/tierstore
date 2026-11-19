@@ -12,8 +12,16 @@
 //! registered and handed to [`Fs::handle`]; and takeover (row T-F6):
 //! the [`Handover`] a supervisor keeps (every descriptor, the mount's and every clone, with the
 //! terms INIT agreed, passed by `SCM_RIGHTS`), [`Session::resume`] of it without INIT after
-//! `FUSE_NOTIFY_RESEND`, and [`Serving::hand_over`]. The io_uring transport (T-F5) builds on
-//! them; io_uring has no takeover (5.2, item 5). [`ReplyPath`] (row T-F4) sends READ replies by
+//! `FUSE_NOTIFY_RESEND`, and [`Serving::hand_over`]. The io_uring transport (row T-F5,
+//! 5.2 item 4): [`Session::init_uring`] asks for `FUSE_OVER_IO_URING` at INIT only when the
+//! session can use it ([`UringConfig`]: `fuse.enable_uring`, the kernel's offer, the possible
+//! CPUs, the memory the entries register, [`UringMemory`], and rings made before INIT is
+//! answered), and otherwise serves on `/dev/fuse` and says why ([`Fallback`]);
+//! [`Session::serve`] then registers every queue's entries, serves one thread per queue that
+//! answers each request by COMMIT_AND_FETCH, and keeps its `/dev/fuse` readers beside the rings
+//! for the requests the kernel still sends there (INTERRUPT, FORGET, the early and forced ones);
+//! [`Serving::transport`] says which transport it serves on ([`TransportMode`]). io_uring has no
+//! takeover (5.2, item 5). [`ReplyPath`] (row T-F4) sends READ replies by
 //! splice through pooled pipes sized with `F_SETPIPE_SZ`, or below a threshold by `pread` and
 //! `writev`, and [`Dontneed`] is the server's `posix_fadvise(DONTNEED)` on whole `durable` cells
 //! (5.3 item 2, 4.8).
@@ -44,8 +52,9 @@
 //! "Takeover with N > 1 clones and parked reads on several"; "All reader threads blocked in a fake
 //! `pread` while `wait` completions still flow".
 
-// `deny`, not `forbid`: the one call the kernel offers no safe wrapper for, the
-// `FUSE_DEV_IOC_CLONE` ioctl in `dev.rs`, `expect`s it with its reason (AGENTS.md R2).
+// `deny`, not `forbid`: the calls the kernel offers no safe wrapper for, the
+// `FUSE_DEV_IOC_CLONE` ioctl in `dev.rs` and the io_uring ring in `uring/sys.rs`, each `expect` it
+// with its reason (AGENTS.md R2).
 #![deny(unsafe_code)]
 
 pub mod abi;
@@ -65,6 +74,8 @@ mod takeover;
 mod tokens;
 #[cfg(target_os = "linux")]
 mod transport;
+#[cfg(target_os = "linux")]
+mod uring;
 
 pub use fs::{Fs, Handled, Request, RequestHeader};
 pub use opcode::Opcode;
@@ -84,3 +95,5 @@ pub use session::{Serving, Session, SessionError, Stopper};
 pub use takeover::{Handover, HandoverError, MAX_DEVICES, TERMS_V1_LEN};
 #[cfg(target_os = "linux")]
 pub use transport::{DevReader, ReaderEnd, Received, Transport};
+#[cfg(target_os = "linux")]
+pub use uring::{ENABLE_URING, Fallback, POSSIBLE_CPUS, TransportMode, UringConfig, UringMemory};

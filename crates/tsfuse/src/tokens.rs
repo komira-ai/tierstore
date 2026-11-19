@@ -1,6 +1,6 @@
 //! The `unique -> token` table, registered at read time (5.2).
 
-use std::collections::HashMap;
+use std::collections::{BTreeSet, HashMap};
 use std::future::Future;
 use std::pin::Pin;
 use std::sync::atomic::{AtomicBool, Ordering};
@@ -31,12 +31,13 @@ impl Slot {
             return false;
         }
         if let Some(table) = self.table.upgrade() {
-            let mut map = table.lock();
-            if map
+            let mut inner = table.lock();
+            if inner
+                .map
                 .get(&self.unique)
                 .is_some_and(|e| Arc::ptr_eq(&e.slot, self))
             {
-                map.remove(&self.unique);
+                inner.map.remove(&self.unique);
             }
         }
         true
@@ -53,14 +54,29 @@ struct Entry {
     device: Arc<dyn ReplyDevice>,
 }
 
+/// The most INTERRUPTs held for ring requests not delivered yet (io_uring mode). Past it the
+/// oldest is dropped: the kernel's uniques only grow (`fuse_get_unique`), so the oldest is the
+/// one most likely to be of a request already answered, which no later request can match.
+pub(crate) const MAX_HELD: usize = 1024;
+
+#[derive(Default)]
+struct Inner {
+    map: HashMap<u64, Entry>,
+    /// io_uring mode: the targets of INTERRUPTs that arrived before their request (5.2 item 4).
+    held: BTreeSet<u64>,
+}
+
 #[derive(Default)]
 struct Table {
-    map: Mutex<HashMap<u64, Entry>>,
+    inner: Mutex<Inner>,
+    /// Whether the session serves on io_uring: an INTERRUPT whose target no device holds is then
+    /// held until the target's ring entry delivers it, never answered `EAGAIN`.
+    uring: AtomicBool,
 }
 
 impl Table {
-    fn lock(&self) -> std::sync::MutexGuard<'_, HashMap<u64, Entry>> {
-        self.map.lock().unwrap_or_else(PoisonError::into_inner)
+    fn lock(&self) -> std::sync::MutexGuard<'_, Inner> {
+        self.inner.lock().unwrap_or_else(PoisonError::into_inner)
     }
 }
 
@@ -152,7 +168,8 @@ impl Tokens {
 
     /// Registers request `unique`, read from `device`, before it is dispatched; the replier that
     /// answers it on that device. A `unique` still registered (the kernel reuses an id only after
-    /// its reply) is replaced.
+    /// its reply) is replaced. In io_uring mode, a request whose INTERRUPT arrived first (and was
+    /// held) is answered `EINTR` on `device` at once, and its replier is already answered.
     pub fn register(&self, unique: u64, device: Arc<dyn ReplyDevice>) -> Replier {
         let slot = Arc::new(Slot {
             answered: AtomicBool::new(false),
@@ -162,13 +179,26 @@ impl Tokens {
             unique,
             handed_over: self.handed_over.clone(),
         });
-        self.table.lock().insert(
-            unique,
-            Entry {
-                slot: slot.clone(),
-                device: device.clone(),
-            },
-        );
+        let interrupted = {
+            let mut inner = self.table.lock();
+            let interrupted = inner.held.remove(&unique);
+            if !interrupted {
+                inner.map.insert(
+                    unique,
+                    Entry {
+                        slot: slot.clone(),
+                        device: device.clone(),
+                    },
+                );
+            }
+            interrupted
+        };
+        if interrupted {
+            slot.answered.store(true, Ordering::Release);
+            slot.cancelled.store(true, Ordering::Release);
+            let h = encode_out_header(unique, Some(Errno::EINTR), 0);
+            let _ = device.send(&[&h]);
+        }
         Replier {
             unique,
             device,
@@ -185,28 +215,80 @@ impl Tokens {
         interrupt_unique: u64,
         interrupt_device: &dyn ReplyDevice,
     ) -> Interrupted {
+        match self.cancel(target) {
+            Some(cancelled) => cancelled,
+            None => {
+                let h = encode_out_header(interrupt_unique, Some(Errno::EAGAIN), 0);
+                match interrupt_device.send(&[&h]) {
+                    Ok(()) => Interrupted::Unknown,
+                    Err(e) => Interrupted::DeviceError(e),
+                }
+            }
+        }
+    }
+
+    /// [`Self::interrupt`] as the readers route an INTERRUPT; `None` when it is held. On
+    /// `/dev/fuse` it is the same as [`Self::interrupt`]. In
+    /// io_uring mode an `EAGAIN` that no device takes means the target is on no device: it is a
+    /// ring request not delivered yet (or one already answered), so the INTERRUPT is held, and
+    /// the target, once its ring entry delivers it, is answered `EINTR` as it registers
+    /// ([`Self::register`]). The kernel refuses an `EAGAIN` for a ring request (`ENOENT`), so
+    /// that answer would lose the INTERRUPT (K11).
+    pub(crate) fn interrupt_routed(
+        &self,
+        target: u64,
+        interrupt_unique: u64,
+        interrupt_device: &dyn ReplyDevice,
+    ) -> Option<Interrupted> {
+        let refused = match self.interrupt(target, interrupt_unique, interrupt_device) {
+            Interrupted::DeviceError(e) if self.table.uring.load(Ordering::Acquire) => e,
+            other => return Some(other),
+        };
+        let mut inner = self.table.lock();
+        if !inner.map.contains_key(&target) {
+            inner.held.insert(target);
+            if inner.held.len() > MAX_HELD {
+                inner.held.pop_first();
+            }
+            return None;
+        }
+        // Registered since the look above: cancel it now. If it was answered meanwhile, the
+        // INTERRUPT has nothing left to do.
+        drop(inner);
+        drop(refused);
+        Some(self.cancel(target).unwrap_or(Interrupted::Unknown))
+    }
+
+    /// Cancels `target` if it is registered and not answered: `EINTR` on its own device.
+    /// `None` if it is not registered, or is already answered or being answered.
+    fn cancel(&self, target: u64) -> Option<Interrupted> {
         let found = self
             .table
             .lock()
+            .map
             .get(&target)
             .map(|e| (e.slot.clone(), e.device.clone()));
         // Winning the take is what makes the request ours to answer; a request whose reply is
         // being written right now is as good as answered.
-        let won = found.filter(|(slot, _)| slot.take());
-        let Some((slot, device)) = won else {
-            let h = encode_out_header(interrupt_unique, Some(Errno::EAGAIN), 0);
-            return match interrupt_device.send(&[&h]) {
-                Ok(()) => Interrupted::Unknown,
-                Err(e) => Interrupted::DeviceError(e),
-            };
-        };
+        let (slot, device) = found.filter(|(slot, _)| slot.take())?;
         slot.cancelled.store(true, Ordering::Release);
         slot.waker.wake();
         let h = encode_out_header(target, Some(Errno::EINTR), 0);
-        match device.send(&[&h]) {
+        Some(match device.send(&[&h]) {
             Ok(()) => Interrupted::Cancelled,
             Err(e) => Interrupted::DeviceError(e),
-        }
+        })
+    }
+
+    /// Sets or clears io_uring mode (see [`Self::interrupt_routed`]).
+    pub(crate) fn set_uring(&self, on: bool) {
+        self.table.uring.store(on, Ordering::Release);
+    }
+
+    /// The INTERRUPTs held for ring requests not delivered yet.
+    #[cfg(test)]
+    pub(crate) fn held(&self) -> usize {
+        self.table.lock().held.len()
     }
 
     /// Marks the session handed over to another server (5.2, item 5): from now on a replier
@@ -220,6 +302,6 @@ impl Tokens {
     /// The number of requests registered and not answered.
     #[must_use]
     pub fn registered(&self) -> usize {
-        self.table.lock().len()
+        self.table.lock().map.len()
     }
 }

@@ -4,9 +4,20 @@
 //! fsbench list --tree <dir> --out <list>
 //! fsbench null-fs --list <list> --mountpoint <dir> [--entry-timeout-ms N] [--attr-timeout-ms N]
 //!                 [--open explicit|none] [--threads N] [--allow-other]
+//! fsbench tsfuse-null-fs --list <list> --mountpoint <dir> --data <file> [--entry-timeout-ms N]
+//!                 [--attr-timeout-ms N] [--open explicit|none] [--readers N]
+//!                 [--reply writev|splice] [--splice-min BYTES] [--move-pages] [--allow-other]
+//!                 [--transport dev|uring] [--uring-depth N] [--uring-memory-mib N]
 //! fsbench run --list <list> --tree <dir> --variant <label> --regime <label> --server-pid <pid>
-//!             --out <results> [--runs 6] [--readers 256] [--burners 176] [--secs 60] ...
+//!             --out <results> [--runs 6] [--readers 256] [--burners 176] [--secs 60]
+//!             [--throughput-rounds 1] ...
 //! fsbench report --results <results> [--discard 1]
+//! fsbench storm --mountpoint <dir> --out <results> --label <label> [--runs 3]
+//!               [--transport dev|uring] [--uring-depth N] [--uring-memory-mib N] [--readers 1]
+//!               [--park-us 60000] [--read buffered|direct] [--per-cpu N] [--storm-cpu 0]
+//!               [--other-cpu N] [--secs 20] [--max-probes 0] [--sample-ms 100]
+//!               [--setting KEY=VALUE]...
+//! fsbench storm-report --results <results> [--discard 0]
 //! ```
 //!
 //! `reader` and `burn` are the processes `run` starts; a person does not run them. Exit status:
@@ -16,6 +27,7 @@
 use std::collections::BTreeMap;
 use std::ffi::OsString;
 use std::io::{BufReader, Read, Write};
+use std::num::NonZeroUsize;
 use std::path::{Path, PathBuf};
 use std::process::ExitCode;
 use std::time::Duration;
@@ -25,6 +37,7 @@ use clap::{Parser, Subcommand};
 use crate::Error;
 use crate::host::Host;
 use crate::nullfs::{OpenMode, Options};
+use crate::tsnull::Reply;
 
 /// The FUSE benchmark of tierstore fs.
 #[derive(Debug, Parser)]
@@ -69,6 +82,9 @@ enum Command {
         #[arg(long)]
         allow_other: bool,
     },
+    /// Serve the files of a list from a data file on tsfuse, until standard input closes (the
+    /// null file system of the redesign's variants).
+    TsfuseNullFs(TsfuseArgs),
     /// The runs of one variant in one regime; each run's record is appended to `--out`.
     Run(RunArgs),
     /// The tables of a results file, for a measurement document.
@@ -78,6 +94,18 @@ enum Command {
         results: PathBuf,
         /// The runs of each series to leave out (the warm-up).
         #[arg(long, default_value_t = 1)]
+        discard: u32,
+    },
+    /// The storm test of the io_uring transport: parked reads from one CPU and from every CPU,
+    /// and the latency of `stat` during them; each run's record is appended to `--out`.
+    Storm(StormArgs),
+    /// The tables of a results file of the storm, for a measurement document.
+    StormReport {
+        /// The results file.
+        #[arg(long)]
+        results: PathBuf,
+        /// The runs of each label to leave out.
+        #[arg(long, default_value_t = 0)]
         discard: u32,
     },
     /// A reader process of `run` (not run by hand).
@@ -91,6 +119,156 @@ enum Command {
     /// A CPU burner of `run` (not run by hand): spins until standard input closes.
     #[command(hide = true)]
     Burn,
+}
+
+#[derive(Debug, clap::Args)]
+struct TsfuseArgs {
+    /// The list.
+    #[arg(long)]
+    list: PathBuf,
+    /// Where to mount.
+    #[arg(long)]
+    mountpoint: PathBuf,
+    /// The file READs are answered from: made, or extended with a hole, to the list's length.
+    #[arg(long)]
+    data: PathBuf,
+    /// How long the kernel may keep an entry, in milliseconds.
+    #[arg(long, default_value_t = 0)]
+    entry_timeout_ms: u64,
+    /// How long the kernel may keep attributes, in milliseconds.
+    #[arg(long, default_value_t = 0)]
+    attr_timeout_ms: u64,
+    /// How `OPEN` and `OPENDIR` are answered.
+    #[arg(long, value_enum, default_value_t = OpenMode::Explicit)]
+    open: OpenMode,
+    /// The readers: the mount's descriptor and its clones, a thread each.
+    #[arg(long, default_value_t = NonZeroUsize::MIN)]
+    readers: NonZeroUsize,
+    /// How READ replies are written.
+    #[arg(long, value_enum, default_value_t = Reply::Writev)]
+    reply: Reply,
+    /// The smallest READ reply that is spliced, in bytes (`--reply splice`).
+    #[arg(long, default_value_t = tsfuse::SPLICE_MIN)]
+    splice_min: usize,
+    /// Splice into the device with `SPLICE_F_MOVE` (`--reply splice`).
+    #[arg(long)]
+    move_pages: bool,
+    /// Let other users use the mount (`allow_other`).
+    #[arg(long)]
+    allow_other: bool,
+    #[command(flatten)]
+    transport: TransportArgs,
+}
+
+/// The transport a `tsfuse` session asks for.
+#[derive(Clone, Copy, Debug, PartialEq, Eq, clap::ValueEnum)]
+enum TransportKind {
+    /// `/dev/fuse` readers alone.
+    Dev,
+    /// io_uring (where the session cannot use it, `/dev/fuse`, and it says why).
+    Uring,
+}
+
+#[derive(Debug, clap::Args)]
+struct TransportArgs {
+    /// The transport the session asks for.
+    #[arg(long, value_enum, default_value_t = TransportKind::Dev)]
+    transport: TransportKind,
+    /// The ring entries of each queue (`--transport uring`).
+    #[arg(long, default_value_t = tsfuse::UringConfig::DEPTH)]
+    uring_depth: std::num::NonZeroU16,
+    /// The most memory the ring entries may register, MiB; past it the session serves on
+    /// `/dev/fuse` (`--transport uring`).
+    #[arg(long, default_value_t = tsfuse::UringConfig::MEMORY_LIMIT >> 20)]
+    uring_memory_mib: u64,
+}
+
+impl TransportArgs {
+    fn transport(&self) -> crate::tsnull::Transport {
+        match self.transport {
+            TransportKind::Dev => crate::tsnull::Transport::Dev,
+            TransportKind::Uring => crate::tsnull::Transport::Uring(tsfuse::UringConfig {
+                depth: self.uring_depth,
+                memory_limit: self.uring_memory_mib.saturating_mul(1 << 20),
+            }),
+        }
+    }
+}
+
+#[derive(Debug, clap::Args)]
+struct StormArgs {
+    /// Where to mount (an empty directory).
+    #[arg(long)]
+    mountpoint: PathBuf,
+    /// The results file (appended to).
+    #[arg(long)]
+    out: PathBuf,
+    /// The series' label.
+    #[arg(long)]
+    label: String,
+    /// How many runs.
+    #[arg(long, default_value_t = 3)]
+    runs: u32,
+    #[command(flatten)]
+    transport: TransportArgs,
+    /// The `/dev/fuse` readers: the mount's descriptor and its clones.
+    #[arg(long, default_value_t = NonZeroUsize::MIN)]
+    readers: NonZeroUsize,
+    /// How long a cold READ is parked before it is answered, in microseconds.
+    #[arg(long, default_value_t = 60_000)]
+    park_us: u64,
+    /// How the storm threads read their cold files.
+    #[arg(long, value_enum, default_value_t = crate::stormfs::ColdRead::Buffered)]
+    read: crate::stormfs::ColdRead,
+    /// The storm threads on each stormed CPU (default: `ceil(1.5 x --uring-depth)`).
+    #[arg(long)]
+    per_cpu: Option<u32>,
+    /// The CPU of the one-CPU storm.
+    #[arg(long, default_value_t = 0)]
+    storm_cpu: usize,
+    /// The CPU of the probe the one-CPU storm leaves alone (default: the last online CPU).
+    #[arg(long)]
+    other_cpu: Option<usize>,
+    /// How long each phase's probes run, in seconds.
+    #[arg(long, default_value_t = 20)]
+    secs: u64,
+    /// The most `stat`s of each probe in a phase (0: no limit).
+    #[arg(long, default_value_t = 0)]
+    max_probes: u64,
+    /// The interval of the samples, in milliseconds.
+    #[arg(long, default_value_t = 100)]
+    sample_ms: u64,
+    /// What to record, `KEY=VALUE` (repeat).
+    #[arg(long = "setting", value_parser = setting)]
+    settings: Vec<(String, String)>,
+}
+
+impl StormArgs {
+    /// The plan of the series on `host`.
+    fn plan(self, host: Host) -> Result<crate::storm::Plan, Error> {
+        let cpus = crate::storm::usable_cpus(&host)?;
+        let other_cpu = crate::storm::other_cpu(&cpus, self.storm_cpu, self.other_cpu)?;
+        Ok(crate::storm::Plan {
+            mountpoint: self.mountpoint,
+            label: self.label,
+            runs: self.runs,
+            transport: self.transport.transport(),
+            readers: self.readers,
+            park: Duration::from_micros(self.park_us),
+            read: self.read,
+            per_cpu: self
+                .per_cpu
+                .unwrap_or_else(|| crate::storm::storm_per_cpu(self.transport.uring_depth.get())),
+            cpus,
+            storm_cpu: self.storm_cpu,
+            other_cpu,
+            window: Duration::from_secs(self.secs),
+            max_probes: self.max_probes,
+            sample_every: Duration::from_millis(self.sample_ms),
+            settings: self.settings.into_iter().collect(),
+            host,
+        })
+    }
 }
 
 #[derive(Debug, clap::Args)]
@@ -137,6 +315,9 @@ struct RunArgs {
     /// The readers of the whole-file reads.
     #[arg(long, default_value_t = 16)]
     throughput_readers: u32,
+    /// How many times each whole-file phase (cold, then warm) reads its files.
+    #[arg(long, default_value_t = 1)]
+    throughput_rounds: u32,
     /// The interval of the samples of D state and waiting, in milliseconds.
     #[arg(long, default_value_t = 1000)]
     sample_ms: u64,
@@ -216,6 +397,27 @@ fn dispatch(
                 stdout,
             )
         }
+        Command::TsfuseNullFs(args) => {
+            let options = crate::tsnull::Options {
+                entry_timeout: Duration::from_millis(args.entry_timeout_ms),
+                attr_timeout: Duration::from_millis(args.attr_timeout_ms),
+                open: args.open,
+                readers: args.readers,
+                reply: args.reply,
+                splice_min: args.splice_min,
+                move_pages: args.move_pages,
+                allow_other: args.allow_other,
+                transport: args.transport.transport(),
+            };
+            crate::tsnull::serve(
+                &crate::list::read(&args.list)?,
+                &args.mountpoint,
+                &args.data,
+                options,
+                stdin,
+                stdout,
+            )
+        }
         Command::Run(args) => {
             let plan = crate::run::Plan {
                 exe: exe.to_path_buf(),
@@ -231,6 +433,7 @@ fn dispatch(
                 read_bytes: args.read_bytes,
                 throughput_budget: args.throughput_mib.saturating_mul(1 << 20),
                 throughput_readers: args.throughput_readers,
+                throughput_rounds: args.throughput_rounds,
                 sample_every: Duration::from_millis(args.sample_ms),
                 server_pid: args.server_pid,
                 as_user: args.as_user,
@@ -242,6 +445,15 @@ fn dispatch(
         Command::Report { results, discard } => {
             let records = crate::report::read(&results)?;
             write!(stdout, "{}", crate::report::render(&records, discard)).map_err(written)
+        }
+        Command::Storm(args) => {
+            let out = args.out.clone();
+            let plan = args.plan(Host::real())?;
+            crate::storm::run(&plan, &mut append(&out)?, stderr).map(drop)
+        }
+        Command::StormReport { results, discard } => {
+            let records = crate::stormrec::read(&results)?;
+            write!(stdout, "{}", crate::stormrec::render(&records, discard)).map_err(written)
         }
         Command::Reader { list, tree } => crate::reader::serve(
             &crate::list::read(&list)?,

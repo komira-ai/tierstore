@@ -34,10 +34,13 @@ pub enum ReaderEnd {
     /// The session was stopped ([`crate::Stopper::stop`]); the device is open and the mount
     /// stays, so another process can resume it.
     Stopped,
-    /// The file system was unmounted (`ENODEV`), or the device's other end is gone.
+    /// The connection ended (`ENODEV`): the file system was unmounted, or the connection was
+    /// aborted through `/sys/fs/fuse/connections/<n>/abort` (whose reads end with `ENODEV`
+    /// unless INIT asked for `FUSE_ABORT_ERROR`, which this library does not); or the device's
+    /// other end is gone.
     Unmounted,
-    /// The connection was aborted (`ECONNABORTED`): through
-    /// `/sys/fs/fuse/connections/<n>/abort`, or by the kernel.
+    /// A read ended with `ECONNABORTED`: it took a request while the connection was ending (an
+    /// abort, or the release of a lazily detached mount racing the reader).
     Aborted,
     /// The kernel sent DESTROY, which was answered.
     Destroyed,
@@ -168,8 +171,8 @@ pub(crate) fn classify(read: rustix::io::Result<usize>) -> ReadOutcome {
         Ok(n) => ReadOutcome::Got(Ok(Received::Request(n))),
         Err(Sys::AGAIN) => ReadOutcome::Wait,
         Err(Sys::INTR | Sys::NOENT) => ReadOutcome::Again,
-        // The kernel's `fuse_dev_do_read`: `ENODEV` once unmounted, `ECONNABORTED` once
-        // aborted.
+        // The kernel's `fuse_dev_do_read`: `ENODEV` once the connection has ended (an abort
+        // included, without `FUSE_ABORT_ERROR`), `ECONNABORTED` for a request taken as it ends.
         Err(Sys::NODEV) => ReadOutcome::Got(Ok(Received::Ended(ReaderEnd::Unmounted))),
         Err(Sys::CONNABORTED) => ReadOutcome::Got(Ok(Received::Ended(ReaderEnd::Aborted))),
         Err(e) => ReadOutcome::Got(Err(e.into())),
@@ -290,7 +293,7 @@ pub(crate) fn route(
             // An INTERRUPT with a short body has no target to cancel, and the kernel expects
             // no reply to it.
             if let Ok(Operation::Interrupt(arg)) = Operation::parse(&req) {
-                let _ = tokens.interrupt(arg.unique, unique, every);
+                let _ = tokens.interrupt_routed(arg.unique, unique, every);
             }
             None
         }

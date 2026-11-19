@@ -197,3 +197,151 @@ fn users_and_settings_are_parsed() {
     );
     assert_eq!(setting("open"), Err("not KEY=VALUE".to_owned()));
 }
+
+/// The transport flags: `/dev/fuse` by default, and `--transport uring` with the design's depth
+/// (5) and memory limit (64 MiB) unless others are given.
+#[test]
+fn the_transport_flags_make_the_transport_asked_for() {
+    use clap::Parser as _;
+
+    use crate::tsnull::Transport;
+
+    let transport = |extra: &[&str]| {
+        let args = [
+            "fsbench",
+            "tsfuse-null-fs",
+            "--list",
+            "l",
+            "--mountpoint",
+            "m",
+        ]
+        .iter()
+        .chain(["--data", "d"].iter())
+        .chain(extra.iter());
+        match super::Cli::try_parse_from(args).unwrap().command {
+            super::Command::TsfuseNullFs(a) => a.transport.transport(),
+            other => panic!("{other:?}"),
+        }
+    };
+    assert_eq!(transport(&[]), Transport::Dev);
+    assert_eq!(
+        transport(&["--transport", "uring"]),
+        Transport::Uring(tsfuse::UringConfig::default())
+    );
+    assert_eq!(
+        transport(&["--transport", "uring", "--uring-depth", "16"]),
+        Transport::Uring(tsfuse::UringConfig {
+            depth: std::num::NonZeroU16::new(16).unwrap(),
+            memory_limit: 64 << 20,
+        })
+    );
+    assert_eq!(
+        transport(&["--transport", "uring", "--uring-memory-mib", "512"]),
+        Transport::Uring(tsfuse::UringConfig {
+            depth: tsfuse::UringConfig::DEPTH,
+            memory_limit: 512 << 20,
+        })
+    );
+    assert_eq!(
+        transport(&["--uring-depth", "16"]),
+        Transport::Dev,
+        "the depth alone asks for nothing"
+    );
+}
+
+/// The storm's flags make its plan: the storm of the depth asked for unless `--per-cpu` says
+/// otherwise, the CPUs this process may run on, the other probe's CPU, and the times; a storm
+/// CPU that is not online is refused.
+#[test]
+fn the_storm_flags_make_its_plan() {
+    use clap::Parser as _;
+
+    let dir = TestDir::under(std::env::temp_dir(), "fsbench-cli-storm");
+    let sys = dir.path().join("sys");
+    std::fs::create_dir_all(sys.join("devices/system/cpu")).unwrap();
+    std::fs::write(sys.join("devices/system/cpu/online"), "0\n").unwrap();
+    let host = crate::host::Host {
+        proc: dir.path().join("proc"),
+        sys,
+    };
+    let plan = |extra: &[&str]| {
+        let args = ["fsbench", "storm", "--mountpoint", "m", "--out", "o"]
+            .iter()
+            .chain(["--label", "l"].iter())
+            .chain(extra.iter());
+        match super::Cli::try_parse_from(args).unwrap().command {
+            super::Command::Storm(a) => a.plan(host.clone()),
+            other => panic!("{other:?}"),
+        }
+    };
+    let p = plan(&[
+        "--uring-depth",
+        "4",
+        "--park-us",
+        "1500",
+        "--setting",
+        "a=b",
+    ])
+    .unwrap();
+    assert_eq!(p.per_cpu, 6, "ceil(4 x 1.5)");
+    assert_eq!(
+        (p.cpus.clone(), p.storm_cpu, p.other_cpu),
+        (vec![0], 0, None)
+    );
+    assert_eq!(p.park, std::time::Duration::from_micros(1500));
+    assert_eq!(p.window, std::time::Duration::from_secs(20));
+    assert_eq!(p.sample_every, std::time::Duration::from_millis(100));
+    assert_eq!((p.runs, p.max_probes, p.readers.get()), (3, 0, 1));
+    assert_eq!(p.transport, crate::tsnull::Transport::Dev);
+    assert_eq!(p.settings["a"], "b");
+    assert_eq!(p.read, crate::stormfs::ColdRead::Buffered);
+    let p = plan(&["--per-cpu", "3", "--read", "direct", "--secs", "2"]).unwrap();
+    assert_eq!((p.per_cpu, p.read), (3, crate::stormfs::ColdRead::Direct));
+    assert_eq!(
+        plan(&["--storm-cpu", "1"]).unwrap_err().to_string(),
+        "CPU 1 is not online"
+    );
+}
+
+/// `storm` with a results file that cannot be opened, and `storm-report` of a file that is not
+/// there or not a storm record, fail before anything is mounted, and say why.
+#[test]
+fn the_storm_commands_fail_on_files_they_cannot_use() {
+    let dir = TestDir::under(std::env::temp_dir(), "fsbench-cli-storm-files");
+    let out = dir.path().join("missing/x.jsonl");
+    let (code, _, err) = fsbench(
+        &[
+            "storm",
+            "--mountpoint",
+            "m",
+            "--label",
+            "l",
+            "--out",
+            text(&out),
+        ],
+        "",
+    );
+    assert_eq!(code, ExitCode::from(1));
+    assert!(
+        err.starts_with(&format!("fsbench: open {}: ", out.display())),
+        "{err}"
+    );
+    let missing = dir.path().join("none.jsonl");
+    let (code, _, err) = fsbench(&["storm-report", "--results", text(&missing)], "");
+    assert_eq!(code, ExitCode::from(1));
+    assert!(
+        err.starts_with(&format!("fsbench: read {}: ", missing.display())),
+        "{err}"
+    );
+    let bad = dir.path().join("bad.jsonl");
+    std::fs::write(&bad, "{}\n").unwrap();
+    let (code, _, err) = fsbench(&["storm-report", "--results", text(&bad)], "");
+    assert_eq!(code, ExitCode::from(1));
+    assert!(
+        err.starts_with(&format!(
+            "fsbench: {}:1: not a storm record: ",
+            bad.display()
+        )),
+        "{err}"
+    );
+}
