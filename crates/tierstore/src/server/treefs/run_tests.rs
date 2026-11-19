@@ -81,6 +81,7 @@ fn start_and_stop() {
         .map(|(_, run)| run)
         .collect();
     assert_eq!(left, ["run-1"]);
+    again.core().settled().unwrap();
     assert_eq!(
         rig.upstream
             .asked("pins-live")

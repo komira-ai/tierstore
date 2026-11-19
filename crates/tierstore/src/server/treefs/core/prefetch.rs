@@ -116,9 +116,10 @@ impl Core {
             let shas: Vec<String> = batch.iter().map(ToString::to_string).collect();
             let named: Vec<&str> = shas.iter().map(String::as_str).collect();
             self.fills.touch(&named);
-            let pinned =
+            let pinned = self.settled().and_then(|()| {
                 self.fills
-                    .pin(&self.settings.mount_id, &loaded.digest.to_string(), &named);
+                    .pin(&self.settings.mount_id, &loaded.digest.to_string(), &named)
+            });
             if pinned.is_ok_and(|answer| answer.starts_with("ok")) {
                 batch
                     .iter()

@@ -66,7 +66,7 @@ fn a_lookup_reads_the_tree_and_attaches_it_with_no_run() {
     assert_eq!(rig.core.implicit(), vec![1]);
     assert!(rig.core.attachments().is_empty());
     assert!(!rig.runtime.join("attachments").exists());
-    rig.core.pins_live();
+    rig.core.tell_live().unwrap();
     assert_eq!(
         rig.upstream.asked("pins-live"),
         vec![format!("pins-live mount-1 {root}")]

@@ -240,6 +240,9 @@ pub(in crate::server) struct Core {
     /// Whether a successor is taking over: no attach or detach is done, so that this process
     /// writes neither the table of tree numbers nor the attachments file (`Core::hold`).
     held: AtomicBool,
+    /// Whether the fill socket is still to be told the mount's pins and placements, or is being
+    /// told them (`core/live.rs`).
+    live: live::Announcement,
     /// The trees a thread is filling now for an attach that asked for `prefetch = "all"`, each
     /// with the token of its thread: a detach removes the entry, and a thread whose token is no
     /// longer the tree's has been replaced and stops.
@@ -309,6 +312,7 @@ impl Core {
             pins: PinLocks::new(),
             freeing: RwLock::new(()),
             held: AtomicBool::new(false),
+            live: live::Announcement::default(),
             prefetching: Mutex::new(HashMap::new()),
             reads: Reads::default(),
             sweeper: Mutex::new(None),
@@ -551,12 +555,18 @@ impl Core {
     /// the sockets, and this process must have written its last by then: the call waits for the
     /// attach or detach that is changing them, and for the unpins of the detaches decided
     /// before it, and every later one is refused (`AttachError::Replaced`, and, for a detach, an
-    /// answer of none; ask `Core::is_held`).
+    /// answer of none; ask `Core::is_held`). A hold also waits, with the lifecycle lock released,
+    /// for the announcement of the mount's pins that is being sent, and none is sent after it
+    /// (`core/live.rs`).
     pub(super) fn hold(&self, on: bool) {
-        let _lifecycle = locked(&self.lifecycle);
-        self.held.store(on, Ordering::SeqCst);
-        // The unpins of the detaches decided before, which run with the lifecycle lock released.
-        drop(self.freeing.write().unwrap_or_else(PoisonError::into_inner));
+        {
+            let _lifecycle = locked(&self.lifecycle);
+            self.held.store(on, Ordering::SeqCst);
+            // The unpins of the detaches decided before, which run with the lifecycle lock
+            // released.
+            drop(self.freeing.write().unwrap_or_else(PoisonError::into_inner));
+        }
+        self.live.wait_sent();
     }
 
     /// Marks a detach whose unpins are to come, until the guard is dropped (`Core::hold`).
@@ -581,19 +591,6 @@ impl Core {
     /// Each attachment, as a tree digest and a run.
     pub(super) fn attachments(&self) -> Vec<(TreeDigest, String)> {
         self.state().attachments.listing()
-    }
-
-    /// Tells the cache which trees are attached now, so that it drops every other pin of this
-    /// mount, and the tree store which placements, so that it ends every other hold of it.
-    pub(super) fn pins_live(&self) {
-        let attached = self.state().attachments.trees();
-        let trees: Vec<String> = attached
-            .iter()
-            .filter(|digest| placed::placement_of(digest).is_none())
-            .map(ToString::to_string)
-            .collect();
-        let _ = self.fills.pins_live(&self.settings.mount_id, &trees);
-        self.places_live(&attached);
     }
 
     /// Looks up `name` in the directory `parent`. A digest in `trees/` that no run has attached is
@@ -882,9 +879,10 @@ impl Core {
         }
         let sha = digest.to_string();
         self.fills.touch(&[&sha]);
-        let pinned = self
-            .fills
-            .pin(&self.settings.mount_id, &loaded.digest.to_string(), &[&sha]);
+        let pinned = self.settled().and_then(|()| {
+            self.fills
+                .pin(&self.settings.mount_id, &loaded.digest.to_string(), &[&sha])
+        });
         if pinned.is_ok_and(|answer| answer.starts_with("ok")) {
             loaded.pinned.insert(*digest);
         }
@@ -973,6 +971,7 @@ mod adopt;
 #[cfg(any(target_os = "linux", test))]
 mod handles;
 mod implicit;
+mod live;
 mod loaded;
 mod memory;
 mod pins;

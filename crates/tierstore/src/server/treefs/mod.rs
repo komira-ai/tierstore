@@ -13,7 +13,8 @@
 //! - [`core`]: the operations of a filesystem on inode numbers, with no protocol in them.
 //! - `start`: what a start does before a frontend serves (the runtime directory, the core, the
 //!   attachments made again, the control socket), and the signals that end the process. It has no
-//!   mount in it, so that the FUSE frontend and one without FUSE call it alike.
+//!   mount in it, so that the FUSE frontend and one without FUSE call it alike. `steps` says how
+//!   long each step of a start took.
 //! - `fuse` and `run` (Linux): the FUSE frontend and the process around it.
 //! - [`nfs`] (macOS serves it; built and tested everywhere): the NFSv3 frontend, over loopback,
 //!   and the mount around it.
@@ -80,6 +81,8 @@ mod serving;
 // neither it is built for the tests.
 #[cfg(any(target_os = "linux", target_os = "macos", test))]
 mod start;
+#[cfg(any(target_os = "linux", target_os = "macos", test))]
+mod steps;
 
 // Built on every target, so that it is tested, and measured, where the FUSE frontend is the one
 // that serves; macOS serves it.

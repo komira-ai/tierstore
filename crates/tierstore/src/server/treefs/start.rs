@@ -6,8 +6,9 @@
 //! gets a table of tree numbers (afresh, or, for an NFS mount that outlives the server, the one the
 //! mount of this boot left, see [`Identity`]); the backing table an earlier release kept for a mount that is gone is removed; the
 //! core is made over the fill socket; the attachments the file holds are made again (the manifests
-//! are read through the fill socket); the cache is told which trees are attached, so that it
-//! drops the pins of any other; and the control socket is bound.
+//! are read through the fill socket); the thread is started that tells the cache which trees are
+//! attached, so that it drops the pins of any other, once the fill socket answers (`core/live.rs`:
+//! the start does not wait for it); and the control socket is bound.
 //!
 //! The pieces a process that takes a connection over also needs (the directories, the core over a
 //! table that was read, the control socket's error) are here too: `run.rs` calls them.
@@ -27,6 +28,7 @@ use super::config::FsSettings;
 use super::control::Control;
 use super::core::{self, Core};
 use super::fill_client::FillClient;
+use super::steps::Steps;
 use super::table::{TableError, TreeTable};
 
 /// Why a start was refused.
@@ -145,8 +147,9 @@ pub(super) fn create_mount_point(settings: &FsSettings) -> Result<(), StartError
 }
 
 /// A core over `table` for the mount `mount_id`, with the attachments the file holds made again,
-/// the cache told which trees are attached, and the thread that detaches the trees a lookup
-/// attached once they are idle (`fs.tree_idle_secs`) started. `generation`, which numbers the file handles, exists
+/// the thread that tells the cache which trees are attached started (`core/live.rs`), and the
+/// thread that detaches the trees a lookup attached once they are idle (`fs.tree_idle_secs`)
+/// started. `generation`, which numbers the file handles, exists
 /// only on Linux (and in tests), since only the FUSE frontend has file handles.
 /// `count_lookups` is whether the core counts the lookups of its inodes (a frontend that is told
 /// when they are forgotten, FUSE), or drops a tree when it is detached (one that is not told).
@@ -158,6 +161,8 @@ pub(super) fn core_of(
     count_lookups: bool,
 ) -> Result<Arc<Core>, StartError> {
     let fills = FillClient::new(settings.fill_socket.clone(), settings.fetch_timeout);
+    let clock = Arc::new(MonotonicClock::new());
+    let mut steps = Steps::new(clock.clone());
     let core = Arc::new(Core::new(
         core::Settings {
             owner: settings.owner,
@@ -168,7 +173,7 @@ pub(super) fn core_of(
             generation,
             count_lookups,
             tree_idle: settings.tree_idle,
-            clock: Arc::new(MonotonicClock::new()),
+            clock,
         },
         fills,
         table,
@@ -176,8 +181,14 @@ pub(super) fn core_of(
     ));
     let saved =
         Attachments::saved(&settings.runtime_dir).map_err(io("reading the attachments file"))?;
+    let restored = saved.len();
     core.restore(saved, settings.reattach_concurrency);
-    core.pins_live();
+    let _ = steps.done(&format!(
+        "making the {restored} attachments of the file again"
+    ));
+    core.tell_live_later().map_err(io(
+        "starting the thread that tells the cache the mount's pins",
+    ))?;
     core.sweep_idle(core::look_every(settings.tree_idle))
         .map_err(io("starting the thread that detaches idle trees"))?;
     Ok(core)
