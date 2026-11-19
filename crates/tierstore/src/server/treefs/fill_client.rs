@@ -400,10 +400,15 @@ impl FillClient {
         let _ = self.ask_line(&format!("unplace {mount} {id}"), true);
     }
 
-    /// Ends the holds of `mount` on every placement but `ids`; nothing is lost if the socket is
-    /// away or the node does not know the request.
-    pub(super) fn places_live(&self, mount: &str, ids: &[String]) {
-        let _ = self.ask_line(&format!("places-live {mount} {}", ids.join(" ")), true);
+    /// Ends the holds of `mount` on every placement but `ids`; the answer is the node's words, which
+    /// a node that does not know the request gives too.
+    pub(super) fn places_live(&self, mount: &str, ids: &[String]) -> Result<String, AskError> {
+        self.ask_line(&format!("places-live {mount} {}", ids.join(" ")), true)
+    }
+
+    /// Waits as long as a request waits between two tries over a socket that is not there.
+    pub(super) fn rest(&self) {
+        (self.pause)(PAUSE);
     }
 
     /// Keeps the pins of `trees` of `mount` and takes away the others.

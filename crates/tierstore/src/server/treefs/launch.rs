@@ -17,6 +17,10 @@
 //! 3. Otherwise the mount is made, a dead mount that a process before left at the mount point is
 //!    detached first, and the descriptor is put in the manager's store.
 //!
+//! None of these waits for the node's fill socket: after a boot the node's tierstore reads its whole
+//! cache before it binds it, and the cache is told the mount's pins once it answers, by a thread
+//! of the core (`core/live.rs`). Each step's time is said as it ends (`steps.rs`).
+//!
 //! The manager is then told the unit is ready, and the process serves until SIGTERM or SIGINT
 //! (it leaves the mount for the store to keep, where there is a manager; it unmounts where there is
 //! none), until a successor has taken the mount (status 0), or until the connection had to be
@@ -33,6 +37,8 @@ use super::recover;
 use super::run::{Kernel, Prepared, Running, discard_mount};
 use super::sd::{self, FUSE_NAME, Manager, Stored};
 use super::start::{Signals, StartError, io};
+use super::steps::Steps;
+use crate::MonotonicClock;
 
 /// What the platform gives the process: the channel to the service manager and the descriptors it
 /// passed.
@@ -100,7 +106,11 @@ fn unstore(manager: &Manager) {
 }
 
 /// Makes the start's choice: take, adopt or mount.
-async fn start(settings: &FsSettings, platform: &Platform) -> Result<Started, StartError> {
+async fn start(
+    settings: &FsSettings,
+    platform: &Platform,
+    steps: &mut Steps,
+) -> Result<Started, StartError> {
     let manager = &platform.manager;
     let paths = Paths {
         socket: &settings.handoff_socket,
@@ -121,6 +131,7 @@ async fn start(settings: &FsSettings, platform: &Platform) -> Result<Started, St
         }),
     )
     .await?;
+    let _ = steps.done("asking a running instance for the mount");
     if let Some(taken) = taken {
         let handover::Taken {
             device,
@@ -129,6 +140,7 @@ async fn start(settings: &FsSettings, platform: &Platform) -> Result<Started, St
         } = taken;
         let prepared = Prepared::load(settings)?;
         let running = Running::adopt(settings, prepared, device, (Some(control), false))?;
+        let _ = steps.done("taking the mount over");
         return Ok(Started {
             running: Arc::new(running),
             notice: Some(notice),
@@ -142,6 +154,7 @@ async fn start(settings: &FsSettings, platform: &Platform) -> Result<Started, St
     {
         match adopt_stored(settings, (stored, &platform.kernel)) {
             Ok((running, hung)) => {
+                let _ = steps.done("serving the descriptor the service manager kept");
                 return Ok(Started {
                     running,
                     notice: None,
@@ -163,6 +176,7 @@ async fn start(settings: &FsSettings, platform: &Platform) -> Result<Started, St
     if let Err(why) = stored {
         tracing::warn!("tierstore fs: the descriptor is not in the manager's store: {why}");
     }
+    let _ = steps.done("making the mount");
     Ok(Started {
         running: Arc::new(running),
         notice: None,
@@ -197,11 +211,12 @@ async fn hang(hung: Option<tokio::sync::oneshot::Receiver<()>>) {
 async fn run(settings: &FsSettings, platform: Platform) -> Result<(), StartError> {
     // The handlers are in place before the mount is: a signal after it is never lost.
     let mut signals = Signals::install()?;
+    let mut steps = Steps::new(Arc::new(MonotonicClock::new()));
     let Started {
         running,
         notice,
         hung,
-    } = start(settings, &platform).await?;
+    } = start(settings, &platform, &mut steps).await?;
     let manager = &platform.manager;
     let bind = || {
         Offer::bind(
@@ -219,6 +234,7 @@ async fn run(settings: &FsSettings, platform: Platform) -> Result<(), StartError
     } else {
         None
     };
+    tracing::info!("tierstore fs: ready after {} ms", steps.total());
     if let Err(why) = manager.ready() {
         tracing::warn!("tierstore fs: cannot tell the service manager it is ready: {why}");
     }

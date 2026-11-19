@@ -420,7 +420,7 @@ async fn a_lookup_that_fails_gives_the_hold_back() {
     assert_eq!(attachments(&live, &created), 0);
 }
 
-/// Asserts that a start's `pins_live` keeps the holds of the placements whose trees are attached
+/// Asserts that a start's `tell_live` keeps the holds of the placements whose trees are attached
 /// and ends the others of the mount: a process that takes over with nothing attached ends the hold
 /// a process before it left, and one that has the tree attached keeps it.
 #[tokio::test(flavor = "multi_thread")]
@@ -430,10 +430,10 @@ async fn a_start_ends_the_holds_of_placements_it_does_not_have() {
     let _ = live
         .on_core(|core| walk(core, &["jobs", "1f3a", "root"]))
         .await;
-    live.on_core(Core::pins_live).await;
+    live.on_core(|core| core.tell_live().unwrap()).await;
     assert_eq!(attachments(&live, &created), 1);
     let successor = live.successor();
-    tokio::task::spawn_blocking(move || successor.pins_live())
+    tokio::task::spawn_blocking(move || successor.tell_live().unwrap())
         .await
         .unwrap();
     assert_eq!(attachments(&live, &created), 0);

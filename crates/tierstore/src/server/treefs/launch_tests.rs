@@ -175,6 +175,38 @@ fn a_restart_serves_the_descriptor_the_manager_kept_and_asks_for_the_requests_ag
     drop(device);
 }
 
+/// Asserts that a start tells the service manager it is ready while the node's fill socket has not
+/// answered the mount's pins (`pins-live`), as after a boot, when the node's tierstore reads its
+/// whole cache before it answers: at `READY=1` no `places-live`, which follows that answer, has
+/// been asked. Once the socket answers, the pins and then the placements reach it. Catches a
+/// start that waits for the fill socket before it says ready.
+#[test]
+fn a_start_says_ready_before_the_fill_socket_answers_the_mount_pins() {
+    let _one_at_a_time = SIGNALS
+        .lock()
+        .unwrap_or_else(std::sync::PoisonError::into_inner);
+    let rig = Rig::new("tfs-launch-ready-first", sample());
+    leave_record(&rig, true);
+    let mut settings = rig.settings();
+    // Long enough that the pins wait for the test, not for the client's own time.
+    settings.fetch_timeout = std::time::Duration::from_secs(600);
+    rig.upstream.gate_verb("pins-live");
+    let manager = FakeManager::start(&rig.dir.path().join("notify.sock"));
+    let (device, _kernel) = fakedev::pair();
+    let platform = platform(&manager, Some(device.as_raw_fd()), kernel_of(&rig, ""));
+    let mine = settings.clone();
+    let thread = std::thread::spawn(move || serve_with(&mine, platform));
+    until_ready(&manager);
+    assert!(rig.upstream.asked("places-live").is_empty());
+    rig.upstream.wait_for_verb("pins-live", 1);
+    rig.upstream.permit_verb("pins-live", 1);
+    until(|| !rig.upstream.asked("places-live").is_empty());
+    assert_eq!(rig.upstream.asked("pins-live").len(), 1);
+    sigterm();
+    thread.join().unwrap().unwrap();
+    drop(device);
+}
+
 /// Asserts the bound of a restart on a kernel that cannot send requests again: the connection is
 /// watched for `fs.recover_wait`; one that never shows nothing waiting is aborted, taken out of the
 /// store, and the process ends in failure so that the unit starts again; one that shows nothing

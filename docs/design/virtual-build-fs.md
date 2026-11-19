@@ -671,7 +671,11 @@ one writer and one budget:
 - **Pins never outlive their mount or their attachment.** At every start of either process, and after a hand-over of
   either, `tierstore fs` sends `pins-live <mount id> <trees>`, the trees attached now (by runs and by lookups), and the cache drops every pin of
   another mount id or of a tree not in the list. A reboot makes a new mount id, so the old mount's pins go at the first
-  `pins-live`.
+  `pins-live`. A start does not wait for it: after a boot the node's tierstore reads its whole cache before it binds the
+  fill socket (1:57 to 2:59 for 360,000 to 515,000 objects on the farm's nodes), longer than the unit's start timeout. A
+  thread of `tierstore fs` sends `pins-live` and then `places-live` once the socket answers, asking again until it
+  does, and every `pin`, `unpin`, `place` and `unplace` of the mount waits for those answers first, so none of them is
+  undone by a `pins-live` that comes after it (`core/live.rs`).
 - Eviction skips a pinned entry and counts it in a new counter, `tierstore_cache_pin_skips_total`; the existing
   `tierstore_cache_pinned_skips_total` counts entries passed over for their hard links and keeps that meaning
   (`crates/tierstore/docs/metrics.md`). Pinned bytes stay charged to the budget. A pin that would take pinned bytes over
