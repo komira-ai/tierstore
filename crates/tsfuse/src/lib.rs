@@ -22,8 +22,11 @@
 //! A [`Replier`] dropped without being completed answers `EIO` on its originating device (and
 //! leaves the table), so a request is never left unanswered; one already taken by an INTERRUPT
 //! or a completion writes nothing on drop. An INTERRUPT for a request that is not (or no longer)
-//! registered is answered `EAGAIN` on the device that read the INTERRUPT, which makes the kernel
-//! queue it again.
+//! registered is answered `EAGAIN` on every descriptor of the session in turn: the kernel matches
+//! that reply on the processing queue of the descriptor it is written to, so only the clone that
+//! holds the request (read, not yet registered) takes it, and the kernel queues the INTERRUPT
+//! again; on any other clone the write is refused with `ENOENT` and would lose the INTERRUPT
+//! (`docs/design/tsfuse-kernel-findings.md`, K7).
 //!
 //! Section 14 rows: "Replier: with N > 1 clones, a parked reply completed from another task is
 //! written to its originating device; INTERRUPT read by another clone is answered once (reply xor
