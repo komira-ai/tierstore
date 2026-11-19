@@ -24,7 +24,9 @@ use std::io;
 use std::path::{Path, PathBuf};
 #[cfg(any(target_os = "linux", test))]
 use std::sync::OnceLock;
-use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
+#[cfg(any(target_os = "linux", test))]
+use std::sync::atomic::AtomicU64;
+use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::{Arc, Mutex, MutexGuard, PoisonError, RwLock, RwLockReadGuard, mpsc};
 use std::time::Duration;
 
@@ -41,7 +43,7 @@ use super::fill_client::FillClient;
 use super::handle;
 use super::ino;
 use super::locked;
-#[cfg(any(target_os = "linux", test))]
+#[cfg(target_os = "linux")]
 use super::put::space::PutSpace;
 use super::table::{TableError, TreeTable};
 use super::tree::Tree;
@@ -253,7 +255,7 @@ pub(in crate::server) struct Core {
     #[cfg(any(target_os = "linux", test))]
     adopted: OnceLock<Adopted>,
     /// The put directory the frontend serves as `put/`, where `fs.put` is enabled.
-    #[cfg(any(target_os = "linux", test))]
+    #[cfg(target_os = "linux")]
     put: OnceLock<Arc<PutSpace>>,
     /// The open files, in maps split by handle (`core/handles.rs`).
     #[cfg(any(target_os = "linux", test))]
@@ -312,7 +314,7 @@ impl Core {
             sweeper: Mutex::new(None),
             #[cfg(any(target_os = "linux", test))]
             adopted: OnceLock::new(),
-            #[cfg(any(target_os = "linux", test))]
+            #[cfg(target_os = "linux")]
             put: OnceLock::new(),
             #[cfg(any(target_os = "linux", test))]
             handles: Handles::new(),
@@ -346,13 +348,13 @@ impl Core {
     }
 
     /// Serves `space` as `put/` from now on (once).
-    #[cfg(any(target_os = "linux", test))]
+    #[cfg(target_os = "linux")]
     pub(super) fn serve_put(&self, space: Arc<PutSpace>) {
         let _ = self.put.set(space);
     }
 
     /// The put directory, where it is served.
-    #[cfg(any(target_os = "linux", test))]
+    #[cfg(target_os = "linux")]
     pub(super) fn put(&self) -> Option<&Arc<PutSpace>> {
         self.put.get()
     }

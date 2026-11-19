@@ -74,15 +74,12 @@ pub(super) fn prepare(
             check_config(c, "previous", &previous.release, config)?;
         }
     }
-    // A run again keeps the instances an earlier run chose: nothing has been started since.
-    let kept = record.filter(|record| record.updating);
-    let live = match kept {
-        Some(kept) => kept.live,
-        None => serving(c, update.is_some(), record)?,
-    };
-    let next = kept
-        .and_then(|kept| kept.next)
-        .unwrap_or_else(|| live.map_or(Instance::A, Instance::other));
+    // The instances are what systemd says now, also over a record of an update in flight: a
+    // `cutover` that failed before `swapped` may have started its instance, which then took the
+    // sockets, and the record of that update still names the other one as live. A run again
+    // with nothing started since finds the same instances.
+    let live = serving(c, update.is_some(), record)?;
+    let next = live.map_or(Instance::A, Instance::other);
     let mut fresh = Record::idle(live);
     fresh.updating = true;
     fresh.from = update.map(|previous| previous.release.clone());

@@ -250,6 +250,23 @@ pub struct Capabilities {
     pub object_lock: bool,
 }
 
+/// What [`ObjectStore::put_stream_content_bound`](crate::ObjectStore::put_stream_content_bound)
+/// found under the key and did.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum ContentBoundPut {
+    /// The key had no object, and now has the one written.
+    Created,
+    /// The key had an object of the length written that names no other digest: it was left as it
+    /// is.
+    Existed,
+    /// The key had an object of `size` bytes, another length than the one written, or one that
+    /// names another digest: it was replaced by the one written.
+    Replaced {
+        /// The length of the object that was replaced.
+        size: u64,
+    },
+}
+
 /// Errors from an [`ObjectStore`](crate::ObjectStore). Cloned, so one failed write can
 /// be reported to every caller waiting on it.
 #[derive(Clone, Debug, thiserror::Error)]

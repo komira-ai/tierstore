@@ -106,7 +106,8 @@ async fn concurrent_readers_and_an_ensure_on_one_pack_start_one_fill_and_fetch_e
     }))
     .await;
     assert_eq!(outcomes, vec![WaitOutcome::Ready; spans.len()]);
-    let stats = rig.engine.stats();
+    // A wait is ready once its cells are present; the op counts them just after (`until`).
+    let stats = rig.until(|s| s.cells_published >= 12).await;
     assert_eq!(stats.fills, 1);
     assert_eq!(stats.locates, 1);
     assert_eq!(rig.upstream.locates().len(), 1);
@@ -131,7 +132,8 @@ async fn readers_on_overlapping_spans_fetch_the_union_of_their_cells_once() {
     }))
     .await;
     assert_eq!(outcomes, vec![WaitOutcome::Ready; 8]);
-    let stats = rig.engine.stats();
+    // A wait is ready once its cells are present; the op counts them just after (`until`).
+    let stats = rig.until(|s| s.cells_published >= 11).await;
     assert_eq!(stats.fills, 1);
     assert_eq!(stats.locates, 1);
     let ranges = sorted_ranges(&rig, &pack);
@@ -484,7 +486,8 @@ async fn parts_released_in_reverse_order_serve_each_read_when_its_own_part_lands
         assert_eq!(present(&rig, &pack), only(16, (offset / MIB) as usize, 16));
     }
     assert_eq!(rig.entry_bytes(&pack, 0, 16 * MIB), pack.bytes.to_vec());
-    let stats = rig.engine.stats();
+    // A wait is ready once its cells are present; the op counts them just after (`until`).
+    let stats = rig.until(|s| s.bytes_published >= 16 * MIB).await;
     assert_eq!(stats.bytes_fetched, 16 * MIB);
     assert_eq!(stats.bytes_published, 16 * MIB);
 }

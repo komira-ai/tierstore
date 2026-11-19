@@ -80,14 +80,14 @@ fn the_linux_packages_unpack_with_hostkeeper_and_their_manifest_is_the_one_the_h
             Hook {
                 command: vec!["bin/tierstore".to_owned(), "update-hook".to_owned()],
                 boot: Some("restore".to_owned()),
-                verify_deadline_secs: 1600,
+                verify_deadline_secs: 2500,
                 promotion_ceiling_secs: Some(bound(3600)),
                 cleanup_retries: 3,
                 timeout_secs: Timeouts {
                     prepare: None,
-                    cutover: bound(300),
+                    cutover: bound(1500),
                     verify: bound(1000),
-                    rollback: bound(600),
+                    rollback: bound(1500),
                     cleanup: bound(1300),
                     uninstall: Some(bound(300)),
                 },

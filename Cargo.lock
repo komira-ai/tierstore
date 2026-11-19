@@ -3202,6 +3202,20 @@ dependencies = [
 ]
 
 [[package]]
+name = "tierstore-budget"
+version = "0.1.0"
+dependencies = [
+ "async-trait",
+ "futures",
+ "thiserror",
+ "tierstore-fetch",
+ "tierstore-fetch-api",
+ "tierstore-format",
+ "tierstore-metrics",
+ "tokio",
+]
+
+[[package]]
 name = "tierstore-compat"
 version = "0.1.0"
 dependencies = [
@@ -3230,6 +3244,20 @@ dependencies = [
  "tierstore-format",
  "tierstore-testkit",
  "vm-memory",
+]
+
+[[package]]
+name = "tierstore-evict"
+version = "0.1.0"
+dependencies = [
+ "loom",
+ "rustix",
+ "thiserror",
+ "tierstore-entry",
+ "tierstore-fetch-api",
+ "tierstore-journal",
+ "tierstore-metrics",
+ "tierstore-testkit",
 ]
 
 [[package]]
@@ -3321,6 +3349,19 @@ dependencies = [
  "thiserror",
  "tierstore-fetch-api",
  "tierstore-format",
+ "tierstore-testkit",
+]
+
+[[package]]
+name = "tierstore-list"
+version = "0.1.0"
+dependencies = [
+ "crc32c",
+ "ring",
+ "sha2 0.11.0",
+ "thiserror",
+ "tierstore 0.3.0",
+ "tierstore-fetch-api",
  "tierstore-testkit",
 ]
 
@@ -3769,6 +3810,7 @@ name = "tsfuse"
 version = "0.1.0"
 dependencies = [
  "futures",
+ "rustix",
  "sha2 0.11.0",
  "thiserror",
  "tierstore-testkit",

@@ -32,6 +32,7 @@
 //!
 //! Not built yet: TLS (an `https` endpoint is refused).
 
+mod bound;
 mod checksum;
 #[cfg(feature = "testkit")]
 pub mod fake;
@@ -72,8 +73,8 @@ use tokio::time::Instant;
 
 use crate::types::Token;
 use crate::{
-    BodyStream, ByteRange, Capabilities, KeyPrefix, ListPage, ListToken, ObjectKey, ObjectStore,
-    ObjectStoreError, PageSize,
+    BodyStream, ByteRange, Capabilities, ContentBoundPut, KeyPrefix, ListPage, ListToken,
+    ObjectKey, ObjectStore, ObjectStoreError, PageSize,
 };
 use sigv4::{EMPTY_SHA256, Request, Signer, Utc};
 use streamed::{check_partial, too_long};
@@ -733,6 +734,18 @@ impl ObjectStore for S3Store {
         multipart::put(&self.conn, key, len, body, multipart::Rule::Create, None)
             .await
             .map(drop)
+    }
+
+    /// One HEAD judges the key; then a create-only write, a replacement of a damaged object on
+    /// its entity tag, or nothing, each write naming the digest (see `bound.rs`).
+    async fn put_stream_content_bound(
+        &self,
+        key: &ObjectKey,
+        len: u64,
+        body: BodyStream,
+        sha256: [u8; 32],
+    ) -> Result<ContentBoundPut, ObjectStoreError> {
+        self.put_content_bound(key, len, body, &sha256).await
     }
 
     async fn get_range(

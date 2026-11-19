@@ -12,7 +12,10 @@ description = "The farm measurements that set the constants of the fetch, cache 
 name = "ts-measure"
 path = "src/main.rs"
 
-[dependencies]
+# The arms are Linux only: they read block devices, /proc and /sys, and use `O_DIRECT`,
+# `posix_fadvise`, `fdatasync`, `fallocate` hole punching and `sendfile`. On another system the
+# library is empty and the binary says so and exits 2 (src/main.rs).
+[target.'cfg(target_os = "linux")'.dependencies]
 blake3.workspace = true
 clap.workspace = true
 crc32c.workspace = true
@@ -26,7 +29,7 @@ sha2.workspace = true
 thiserror.workspace = true
 tokio = { workspace = true, features = ["rt", "rt-multi-thread", "time"] }
 
-[dev-dependencies]
+[target.'cfg(target_os = "linux")'.dev-dependencies]
 bytes.workspace = true
 objstore-s3 = { workspace = true, features = ["testkit"] }
 tierstore-testkit.workspace = true

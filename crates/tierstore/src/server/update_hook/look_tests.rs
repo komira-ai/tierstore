@@ -125,26 +125,117 @@ fn one_look_reads_readyz_of_the_public_port() {
     assert!(clock.pauses.borrow().is_empty());
 }
 
-/// Asserts that waiting for `/readyz` pauses one interval between looks and stops at the first
-/// that answers, and that a port that never answers is looked at READY_ATTEMPTS times with a pause
-/// after each, then gives up. It would catch a wait that gives up early, or one that never does.
+/// Asserts that `serves` pauses one interval between looks and stops waiting at the first that
+/// `/readyz` answers with the version serving, and that a port that never answers is looked at
+/// READY_ATTEMPTS times with a pause after each and no request of the build, then is
+/// `not_ready`. It would catch a wait that gives up early, or one that never does.
 #[test]
-fn waiting_for_readiness_looks_until_it_answers_or_the_attempts_run_out() {
+fn serves_looks_until_it_answers_or_the_attempts_run_out() {
     let clock = CountingClock::default();
     let port = Port::new(
         Box::new(|n| if n < 3 { refused() } else { ready(n) }),
         serving("0.5.0"),
     );
-    assert_eq!(look(&port, &clock).wait_ready(), Some(CacheMode::ReadWrite));
+    assert_eq!(
+        look(&port, &clock).serves("0.5.0").unwrap(),
+        CacheMode::ReadWrite
+    );
     assert_eq!(port.count("/readyz"), 4);
-    assert_eq!(*clock.pauses.borrow(), vec![POLL_INTERVAL; 3]);
+    // Three pauses of the wait, then two between the probe's three hits.
+    assert_eq!(*clock.pauses.borrow(), vec![POLL_INTERVAL; 5]);
     assert_eq!(POLL_INTERVAL, Duration::from_secs(1));
 
     let clock = CountingClock::default();
     let port = Port::new(Box::new(|_| refused()), serving("0.5.0"));
-    assert_eq!(look(&port, &clock).wait_ready(), None);
+    let done = look(&port, &clock).serves("0.5.0").unwrap_err();
+    assert_eq!(done.report.reason, Some(Reason::NotReady));
     assert_eq!(port.count("/readyz"), READY_ATTEMPTS);
+    assert_eq!(port.count("/metricz"), 0);
     assert_eq!(clock.pauses.borrow().len(), READY_ATTEMPTS as usize);
+}
+
+/// Asserts that in a hand-over, where the old release answers `/readyz` and the build gauge until
+/// the new instance has opened its cache and taken the sockets, `serves` waits for the new
+/// version and not for any answer: a new instance that first answers at look 66 (a cache open of
+/// 65 s, as a build node took) serves, and one that first answers at the last of the
+/// READY_ATTEMPTS looks still does. Catches the wait that ended at the old release's `/readyz`
+/// and left the start only the 60 looks of the probe, which failed such a start with
+/// `probe_failed`.
+#[test]
+fn serves_waits_out_the_old_release_until_the_new_one_answers() {
+    for first in [65, READY_ATTEMPTS - 1] {
+        let clock = CountingClock::default();
+        let port = Port::new(
+            Box::new(ready),
+            Box::new(move |n| {
+                let version = if n < first { "0.4.0" } else { "0.5.0" };
+                reply(200, &gauge(version, "abc"))
+            }),
+        );
+        assert_eq!(
+            look(&port, &clock).serves("0.5.0").unwrap(),
+            CacheMode::ReadWrite,
+            "first answer at look {}",
+            first + 1
+        );
+        assert_eq!(port.count("/readyz"), first + 1);
+        // The wait's looks, the first hit among them, then the probe's own hits.
+        assert_eq!(port.count("/metricz"), first + 1 + PROBE_HITS);
+        assert_eq!(
+            clock.pauses.borrow().len(),
+            (first + PROBE_HITS - 1) as usize
+        );
+    }
+}
+
+/// Asserts the failures of `serves` once `/readyz` was answered: an old release that answers
+/// every one of READY_ATTEMPTS looks is `probe_failed` after exactly those looks; a port that
+/// answered `/readyz` once and then only 503 (draining), never with the version, is
+/// `probe_failed` and not `not_ready`; and a version seen once and then lost (another build
+/// takes the port back) fails the probe that follows with `probe_failed`.
+#[test]
+fn serves_fails_with_probe_failed_once_readyz_was_answered() {
+    let clock = CountingClock::default();
+    let port = Port::new(Box::new(ready), serving("0.4.0"));
+    let done = look(&port, &clock).serves("0.5.0").unwrap_err();
+    assert_eq!(done.report.reason, Some(Reason::ProbeFailed));
+    assert_eq!(port.count("/readyz"), READY_ATTEMPTS);
+    assert_eq!(port.count("/metricz"), READY_ATTEMPTS);
+    assert_eq!(clock.pauses.borrow().len(), READY_ATTEMPTS as usize);
+
+    let port = Port::new(
+        Box::new(|n| {
+            if n == 0 {
+                ready(n)
+            } else {
+                reply(503, "draining")
+            }
+        }),
+        serving("0.4.0"),
+    );
+    let done = look(&port, &CountingClock::default())
+        .serves("0.5.0")
+        .unwrap_err();
+    assert_eq!(done.report.reason, Some(Reason::ProbeFailed));
+    assert_eq!(
+        done.report.detail.as_deref(),
+        Some("no request to port 9300 was answered by 0.5.0")
+    );
+    assert_eq!(port.count("/metricz"), 1);
+
+    let port = Port::new(
+        Box::new(ready),
+        Box::new(|n| {
+            let version = if n == 0 { "0.5.0" } else { "0.4.0" };
+            reply(200, &gauge(version, "abc"))
+        }),
+    );
+    let done = look(&port, &CountingClock::default())
+        .serves("0.5.0")
+        .unwrap_err();
+    assert_eq!(done.report.reason, Some(Reason::ProbeFailed));
+    assert_eq!(port.count("/readyz"), 1);
+    assert_eq!(port.count("/metricz"), 1 + PROBE_ATTEMPTS);
 }
 
 /// Asserts that a probe needs PROBE_HITS answers in a row from a build of the version, as the

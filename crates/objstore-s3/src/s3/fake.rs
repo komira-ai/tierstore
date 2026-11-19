@@ -31,6 +31,10 @@
 //! asked; `x-amz-meta-*` headers are kept with the object (`fake/checksums.rs`). A test can make
 //! the service ignore checksums ([`FakeS3::ignore_checksums`]).
 //!
+//! A request whose body ends before its `Content-Length` (the client went away) reaches nothing,
+//! unless a test makes the service keep the bytes that came of a PUT cut short, as SeaweedFS 4.54
+//! can ([`FakeS3::keep_cut_bodies`], `fake/cut.rs`).
+//!
 //! It keeps what a test asks about: the uploads begun and not yet completed or aborted
 //! ([`FakeS3::incomplete_uploads`]), how many single PUTs and parts it took and the
 //! largest request body ([`FakeS3::stats`]). A test can fail any step of an upload,
@@ -53,6 +57,7 @@ use tokio::net::{TcpListener, TcpStream};
 use tokio::sync::Notify;
 
 mod checksums;
+mod cut;
 mod dates;
 mod escape;
 mod kept;
@@ -217,6 +222,10 @@ struct State {
     ignore_delete_condition: bool,
     /// Checksums are taken and neither checked nor kept ([`FakeS3::ignore_checksums`]).
     ignore_checksums: bool,
+    /// A PUT whose body was cut short is taken with the bytes that came ([`FakeS3::keep_cut_bodies`]).
+    keep_cut: bool,
+    /// How many requests had a body cut short ([`FakeS3::cut_requests`]).
+    cut: u64,
     /// How many HEADs, and how many DELETEs of a whole object, the service has taken.
     heads: u32,
     deletes: u32,
@@ -366,6 +375,21 @@ impl FakeS3 {
         self.lock().ignore_checksums = true;
     }
 
+    /// From now on takes a PUT of a whole object whose body ends before its `Content-Length`
+    /// with the bytes that came, as SeaweedFS 4.54 takes one without `Content-Type` (see
+    /// `fake/cut.rs`): its conditions and its `x-amz-checksum-sha256` decide as for any PUT, so
+    /// one that carries the checksum of the whole body is refused and one without it is kept.
+    pub fn keep_cut_bodies(&self) {
+        self.lock().keep_cut = true;
+    }
+
+    /// How many requests so far had a body that ended before its `Content-Length`, taken or not
+    /// ([`FakeS3::keep_cut_bodies`]).
+    #[must_use]
+    pub fn cut_requests(&self) -> u64 {
+        self.lock().cut
+    }
+
     /// Holds the next AbortMultipartUpload request unanswered and unhandled: the
     /// request is read, then waits for its caller to close the connection (it went
     /// away) and is dropped, never having reached the store. Once.
@@ -458,7 +482,10 @@ async fn serve(mut sock: TcpStream, state: Arc<Mutex<State>>, changed: Arc<Notif
             .unwrap_or(0);
         buf.reserve((head_end + len).saturating_sub(buf.len()));
         while buf.len() < head_end + len {
-            let n = sock.read(&mut chunk).await.ok().filter(|n| *n > 0)?;
+            let Some(n) = sock.read(&mut chunk).await.ok().filter(|n| *n > 0) else {
+                request.body = buf.split_off(head_end);
+                return cut::taken(&state, &changed, &request);
+            };
             buf.extend_from_slice(&chunk[..n]);
         }
         let rest = buf.split_off(head_end + len);

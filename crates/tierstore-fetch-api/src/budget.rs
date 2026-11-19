@@ -66,7 +66,9 @@ pub enum Outcome {
     Transport,
 }
 
-/// One observation the controller learns from.
+/// One observation the controller learns from. The load a `LOCATE` answer gives for a device
+/// (10.6) is not one of these: an implementation takes it on its own type (T4's
+/// `ClientBudget::observe_locate`).
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum Observation {
     /// A response from `device`.

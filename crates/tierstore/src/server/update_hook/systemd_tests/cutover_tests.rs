@@ -534,3 +534,65 @@ fn update_hook_cleanup_on_the_command_line_commits_past_the_draining_503() {
     assert_eq!(line["reversible"], true);
     assert!(!fake.record().committed());
 }
+
+/// Asserts that a hand-over whose new instance opens its cache for 65 looks (as a build node's
+/// read-only open of 493589 objects took 65 s), while the old instance answers `/readyz` and the
+/// build gauge with the previous version, cuts over: the new instance serves the target version,
+/// the old one drains, `swapped` is recorded, and the wait took 65 looks and the probe 3. Catches
+/// the cutover that ended its wait at the old instance's `/readyz` and gave the start only the
+/// 60 looks of the probe, which failed this start with `probe_failed`.
+#[test]
+fn a_hand_over_whose_new_instance_opens_its_cache_slowly_cuts_over() {
+    let fake = SystemdFake::installed();
+    let p = params(NEW, Some(OLD));
+    fake.drive(&p, &[Prepare]);
+    assert_eq!(fake.record().mode, Some(Mode::Handover));
+    fake.set_takeover_looks(65);
+    let done = fake.run_as_hostkeeper(Cutover, &p);
+    assert_ok(&done);
+    assert_eq!(
+        detail(&done),
+        format!("tierstore@b serves {} (hand-over)", version_of(NEW))
+    );
+    // 65 pauses of the wait, then two between the probe's three hits.
+    assert_eq!(Clock::now_ms(&fake), 67 * 1000);
+    assert_eq!(fake.peek(Instance::A), UnitState::Deactivating);
+    assert_eq!(fake.peek(Instance::B), UnitState::Active);
+    assert!(fake.record().has(Marker::Swapped));
+    fake.drive(&p, &[Verify, Cleanup]);
+    assert_eq!(fake.record().live, Some(Instance::B));
+}
+
+/// Asserts the bound of that wait: a new instance that takes the sockets after one look fewer
+/// than `READY_ATTEMPTS` (its first answer is the last look) still cuts over, and one that has not
+/// taken them after `READY_ATTEMPTS` looks fails the `cutover` with `probe_failed`, reversible,
+/// with nothing recorded, the old instance still serving and the new one still running; the
+/// `rollback` hostkeeper runs then waits (`draining`) while both run.
+#[test]
+fn cutover_waits_for_a_hand_over_at_most_ready_attempts_looks() {
+    let p = params(NEW, Some(OLD));
+    let fake = SystemdFake::installed();
+    fake.drive(&p, &[Prepare]);
+    fake.set_takeover_looks(READY_ATTEMPTS - 1);
+    assert_ok(&fake.run_as_hostkeeper(Cutover, &p));
+    assert!(fake.record().has(Marker::Swapped));
+
+    let fake = SystemdFake::installed();
+    fake.drive(&p, &[Prepare]);
+    fake.set_takeover_looks(READY_ATTEMPTS);
+    let done = fake.run_as_hostkeeper(Cutover, &p);
+    assert_failed(&done, Reason::ProbeFailed);
+    assert_eq!(
+        detail(&done),
+        format!(
+            "no request to port 9300 was answered by {}",
+            version_of(NEW)
+        )
+    );
+    assert!(done.report.reversible);
+    assert!(!fake.record().has(Marker::Swapped));
+    assert_eq!(Clock::now_ms(&fake), u64::from(READY_ATTEMPTS) * 1000);
+    assert_eq!(fake.peek(Instance::A), UnitState::Active);
+    assert_eq!(fake.peek(Instance::B), UnitState::Active);
+    assert_deferred(&fake.run_as_hostkeeper(Rollback, &p), Reason::Draining, 10);
+}

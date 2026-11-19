@@ -99,7 +99,8 @@ async fn a_copy_of_another_generation_is_excluded_and_the_part_goes_to_the_other
     );
     let out = rig.engine.wait(&pack.spec, pack.all(), JOB).await;
     assert_eq!(out, WaitOutcome::Ready);
-    let stats = rig.engine.stats();
+    // A wait is ready once its cells are present; the op counts them just after (`until`).
+    let stats = rig.until(|s| s.bytes_published >= size).await;
     assert_eq!(stats.copy_generation_mismatch, 1);
     assert_eq!(stats.fills_failed, 0);
     assert_eq!(

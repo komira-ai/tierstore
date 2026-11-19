@@ -16,10 +16,12 @@
 #   on Linux is a hand-over when both releases can do it and a restart when they cannot, and the
 #   node's configuration may leave `server.handoff_socket` out ("The hand-over socket" there).
 #
-# The bounds are the same on both systems. `cutover` (300 s) covers, on Linux, the start of the
-# idle instance and the hook's wait for readiness and for the build gauge, and, on macOS, the
-# bootout of the job (ExitTimeOut, 90 s: the 1 s settle and the 60 s drain deadline with a
-# margin), its bootstrap and the same wait; `rollback` (600 s) covers the same moves back.
+# The bounds are the same on both systems. `cutover` (1500 s) covers, on Linux, the start of the
+# idle instance and the hook's wait for the release to serve (up to 1000 looks a second apart: a
+# new instance answers only once it has opened its local cache, which took minutes on a slow
+# disk) and its probe of the build gauge (60 looks), and, on macOS, the bootout of the job
+# (ExitTimeOut, 90 s: the 1 s settle and the 60 s drain deadline with a margin), its bootstrap
+# and the same wait; `rollback` (1500 s) covers the same moves back.
 # `cleanup` (1300 s) is above the stop timeout of a Linux instance (TimeoutStopSec, 960 s: the
 # 10 s settle, the 15 min drain deadline and a margin). `prepare = 0` is unbounded.
 # `verify_deadline_secs` is at least `verify` and `rollback` together, as the loader requires.
@@ -34,15 +36,15 @@ min_hostkeeper = "@MIN_HOSTKEEPER@"
 [hook]
 command                = ["bin/tierstore", "update-hook"]
 boot                   = "restore"
-verify_deadline_secs   = 1600
+verify_deadline_secs   = 2500
 promotion_ceiling_secs = 3600
 cleanup_retries        = 3
 
 [hook.timeout_secs]
 prepare   = 0
-cutover   = 300
+cutover   = 1500
 verify    = 1000
-rollback  = 600
+rollback  = 1500
 cleanup   = 1300
 uninstall = 300
 

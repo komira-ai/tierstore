@@ -11,8 +11,15 @@ use super::report::{Done, Reason};
 
 /// The time between two looks.
 pub const POLL_INTERVAL: Duration = Duration::from_secs(1);
-/// How many looks a step gives the service to answer `/readyz`.
-pub const READY_ATTEMPTS: u32 = 120;
+/// How many looks a step gives a release it started to answer: `/readyz`, and, after a start,
+/// the build gauge naming the release. A new instance answers only once it has opened its local
+/// cache, and in a hand-over the old instance answers until then, so this is the bound of the
+/// start itself. A build node's read-only open of its cache took up to 664 s (161457 objects on
+/// a SATA SSD under constant I/O pressure) and 89 s on the other nodes of the lab; 1000 looks of
+/// a second leave a margin of half again over the slowest. The manifest's `cutover`, `rollback`
+/// and `cleanup` bounds are above this and [`PROBE_ATTEMPTS`] together
+/// (`crates/tierstore/tests/packaging_hostkeeper.rs`).
+pub const READY_ATTEMPTS: u32 = 1000;
 /// How many looks a probe of the build makes.
 pub const PROBE_ATTEMPTS: u32 = 60;
 /// How many answers in a row by the expected version a probe needs.
@@ -30,17 +37,6 @@ impl Look<'_> {
     /// One look at `/readyz` of the public port.
     pub fn ready(&self) -> Option<CacheMode> {
         readiness(&self.instances.get(PUBLIC_PORT, "/readyz"))
-    }
-
-    /// Up to [`READY_ATTEMPTS`] looks at `/readyz`, a pause between them.
-    pub fn wait_ready(&self) -> Option<CacheMode> {
-        for _ in 0..READY_ATTEMPTS {
-            if let Some(mode) = self.ready() {
-                return Some(mode);
-            }
-            self.clock.pause(POLL_INTERVAL);
-        }
-        None
     }
 
     /// Whether one request to the public port was answered by a build of `version`.
@@ -71,23 +67,44 @@ impl Look<'_> {
         false
     }
 
-    /// Waits for `/readyz`, then probes for `version`: what a step does after it started a
-    /// release, and what `cleanup` confirms before the commit. `NotReady` or `ProbeFailed` when
-    /// it does not serve.
+    /// Waits for `version` to serve, then probes for it: what a step does after it started a
+    /// release, and what `cleanup` confirms before the commit. The wait is up to
+    /// [`READY_ATTEMPTS`] looks for one that `/readyz` answers and the build gauge names
+    /// `version`: in a hand-over the old instance answers `/readyz` until the new one has
+    /// started and taken the sockets, so an answer of `/readyz` alone does not end it. Then the
+    /// probe needs [`PROBE_HITS`] answers in a row by `version`. `NotReady` when `/readyz` was
+    /// never answered, `ProbeFailed` when it was and `version` was not seen to serve.
     pub fn serves(&self, version: &str) -> Result<CacheMode, Done> {
-        let mode = self.wait_ready().ok_or_else(|| {
+        let mut answered = false;
+        for _ in 0..READY_ATTEMPTS {
+            if let Some(mode) = self.ready() {
+                answered = true;
+                if self.answered_by(version) {
+                    return if self.probe(version) {
+                        Ok(mode)
+                    } else {
+                        Err(Self::not_answered_by(version))
+                    };
+                }
+            }
+            self.clock.pause(POLL_INTERVAL);
+        }
+        Err(if answered {
+            Self::not_answered_by(version)
+        } else {
             Done::fail(
                 Reason::NotReady,
                 format!("port {PUBLIC_PORT} does not answer /readyz"),
             )
-        })?;
-        if !self.probe(version) {
-            return Err(Done::fail(
-                Reason::ProbeFailed,
-                format!("no request to port {PUBLIC_PORT} was answered by {version}"),
-            ));
-        }
-        Ok(mode)
+        })
+    }
+
+    /// The failure of a start whose release was not seen to serve.
+    fn not_answered_by(version: &str) -> Done {
+        Done::fail(
+            Reason::ProbeFailed,
+            format!("no request to port {PUBLIC_PORT} was answered by {version}"),
+        )
     }
 
     /// One look at `/readyz`, then the probe for `version`, with no wait for `/readyz`: what

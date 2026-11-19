@@ -1,0 +1,36 @@
+[package]
+name = "tierstore-evict"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+repository.workspace = true
+publish.workspace = true
+description = "Eviction and admission of the node cache (docs/design/fetch-cache-serve.md, section 7, task T8): whole unheld entries by LRU, then cell-group eviction of held entries by the per-cell CAS protocol of 5.1 with evict_wait and one batched, journaled PUNCH per entry; reserve with the 0.9 x budget rule; the 60 s grace window; the evictor lock packs-v2/.lock."
+
+[dependencies]
+# `flock` of the evictor lock and `statvfs` of the cache device's free space.
+rustix = { workspace = true, features = ["fs"] }
+thiserror.workspace = true
+# The frozen `Entry`/`EntryStore` traits, the cell byte, the page constants and the injected clock.
+tierstore-fetch-api.workspace = true
+# The node cache's families this component updates (section 12): held bytes, holds, admission
+# refusals by reason, punched bytes, evictions and evict timeouts.
+tierstore-metrics.workspace = true
+
+[dev-dependencies]
+# The exhaustive interleaving model of the reader/evictor protocol of 5.1 (section 14's loom row).
+loom.workspace = true
+# Entries over a crash-modelling file system, so the tests see the journal's records and syncs
+# and what a restart restores.
+tierstore-journal.workspace = true
+# Scratch directories for the evictor lock and the Linux entry store.
+tierstore-testkit.workspace = true
+
+# The Linux entry store (T1), for the end-to-end test on real files and the test that an entry
+# locked by a second store is never evicted.
+[target.'cfg(target_os = "linux")'.dev-dependencies]
+tierstore-entry.workspace = true
+
+[lints]
+workspace = true
