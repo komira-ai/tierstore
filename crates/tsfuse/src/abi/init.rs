@@ -159,8 +159,9 @@ impl MountKind {
 }
 
 /// The limits a session asks for at INIT. The kernel lowers some of them (`max_readahead` to
-/// what it offered, `max_pages` to its `max_pages_limit`, `max_write` to `max_pages` pages);
-/// the reply carries what was asked.
+/// what it offered, `max_pages` to its `max_pages_limit` sysctl); it keeps `max_write` (at least
+/// 4096), so a reader's buffer must hold 80 bytes more than `max_write`, but sends WRITEs of at
+/// most `max_pages` pages. The reply carries what was asked.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub struct InitConfig {
     /// The kind of mount.
