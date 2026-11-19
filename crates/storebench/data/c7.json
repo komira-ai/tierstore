@@ -1,0 +1,4009 @@
+{
+  "objects": 1526337,
+  "bytes": 1346628725788,
+  "profiles": [
+    {
+      "profile": {
+        "name": "LATER",
+        "nodes": 3,
+        "drives_per_node": 15,
+        "drive_bytes": 6000000000000,
+        "replicas": 3,
+        "k": 4,
+        "m": 4,
+        "max_shards_per_domain": 3,
+        "fill_limit": 0.85,
+        "reserve_drives": 2,
+        "shared_bytes_per_drive": 0,
+        "block_bytes": 1073741824
+      },
+      "keys": [
+        {
+          "down": [],
+          "keys": 1526337,
+          "bytes": 1346628725788,
+          "writer_keys": {
+            "min": 0.33325864471607514,
+            "max": 0.3334460214225299,
+            "mean": 0.3333333333333333
+          },
+          "writer_bytes": {
+            "min": 0.33088021243737126,
+            "max": 0.33711653870026587,
+            "mean": 0.3333333333333333
+          },
+          "replica_keys": {
+            "min": 1.0,
+            "max": 1.0,
+            "mean": 1.0
+          },
+          "replica_bytes": {
+            "min": 1.0,
+            "max": 1.0,
+            "mean": 1.0
+          },
+          "set_keys": null,
+          "set_bytes": null
+        },
+        {
+          "down": [
+            0
+          ],
+          "keys": 1526337,
+          "bytes": 1346628725788,
+          "writer_keys": {
+            "min": 0.49996036261978843,
+            "max": 0.5000396373802116,
+            "mean": 0.5
+          },
+          "writer_bytes": {
+            "min": 0.4989493128500047,
+            "max": 0.5010506871499953,
+            "mean": 0.5
+          },
+          "replica_keys": {
+            "min": 1.0,
+            "max": 1.0,
+            "mean": 1.0
+          },
+          "replica_bytes": {
+            "min": 1.0,
+            "max": 1.0,
+            "mean": 1.0
+          },
+          "set_keys": null,
+          "set_bytes": null
+        },
+        {
+          "down": [
+            1
+          ],
+          "keys": 1526337,
+          "bytes": 1346628725788,
+          "writer_keys": {
+            "min": 0.4999682245794998,
+            "max": 0.5000317754205001,
+            "mean": 0.5
+          },
+          "writer_bytes": {
+            "min": 0.4999095280223369,
+            "max": 0.5000904719776631,
+            "mean": 0.5
+          },
+          "replica_keys": {
+            "min": 1.0,
+            "max": 1.0,
+            "mean": 1.0
+          },
+          "replica_bytes": {
+            "min": 1.0,
+            "max": 1.0,
+            "mean": 1.0
+          },
+          "set_keys": null,
+          "set_bytes": null
+        },
+        {
+          "down": [
+            2
+          ],
+          "keys": 1526337,
+          "bytes": 1346628725788,
+          "writer_keys": {
+            "min": 0.49966488396730213,
+            "max": 0.5003351160326979,
+            "mean": 0.5
+          },
+          "writer_bytes": {
+            "min": 0.4998566584981417,
+            "max": 0.5001433415018584,
+            "mean": 0.5
+          },
+          "replica_keys": {
+            "min": 1.0,
+            "max": 1.0,
+            "mean": 1.0
+          },
+          "replica_bytes": {
+            "min": 1.0,
+            "max": 1.0,
+            "mean": 1.0
+          },
+          "set_keys": null,
+          "set_bytes": null
+        },
+        {
+          "down": [
+            0,
+            1
+          ],
+          "keys": 1526337,
+          "bytes": 1346628725788,
+          "writer_keys": {
+            "min": 1.0,
+            "max": 1.0,
+            "mean": 1.0
+          },
+          "writer_bytes": {
+            "min": 1.0,
+            "max": 1.0,
+            "mean": 1.0
+          },
+          "replica_keys": {
+            "min": 1.0,
+            "max": 1.0,
+            "mean": 1.0
+          },
+          "replica_bytes": {
+            "min": 1.0,
+            "max": 1.0,
+            "mean": 1.0
+          },
+          "set_keys": null,
+          "set_bytes": null
+        },
+        {
+          "down": [
+            0,
+            2
+          ],
+          "keys": 1526337,
+          "bytes": 1346628725788,
+          "writer_keys": {
+            "min": 1.0,
+            "max": 1.0,
+            "mean": 1.0
+          },
+          "writer_bytes": {
+            "min": 1.0,
+            "max": 1.0,
+            "mean": 1.0
+          },
+          "replica_keys": {
+            "min": 1.0,
+            "max": 1.0,
+            "mean": 1.0
+          },
+          "replica_bytes": {
+            "min": 1.0,
+            "max": 1.0,
+            "mean": 1.0
+          },
+          "set_keys": null,
+          "set_bytes": null
+        },
+        {
+          "down": [
+            1,
+            2
+          ],
+          "keys": 1526337,
+          "bytes": 1346628725788,
+          "writer_keys": {
+            "min": 1.0,
+            "max": 1.0,
+            "mean": 1.0
+          },
+          "writer_bytes": {
+            "min": 1.0,
+            "max": 1.0,
+            "mean": 1.0
+          },
+          "replica_keys": {
+            "min": 1.0,
+            "max": 1.0,
+            "mean": 1.0
+          },
+          "replica_bytes": {
+            "min": 1.0,
+            "max": 1.0,
+            "mean": 1.0
+          },
+          "set_keys": null,
+          "set_bytes": null
+        }
+      ],
+      "populations": [
+        {
+          "name": "L_silo",
+          "stripes": 314,
+          "scenarios": [
+            {
+              "down": [],
+              "stripes": 314,
+              "placed": 314,
+              "refused": 0,
+              "first_refusal": null,
+              "node_shards_min": 828,
+              "node_shards_max": 845,
+              "drive_shards_min": 43,
+              "drive_shards_max": 70,
+              "drive_shards_mean": 55.82222222222222,
+              "drive_shards_cv": 0.13149362012182841,
+              "fill_min": 0.007695149738666667,
+              "fill_max": 0.012526987946666667
+            },
+            {
+              "down": [
+                0
+              ],
+              "stripes": 314,
+              "placed": 314,
+              "refused": 0,
+              "first_refusal": null,
+              "node_shards_min": 1256,
+              "node_shards_max": 1256,
+              "drive_shards_min": 68,
+              "drive_shards_max": 105,
+              "drive_shards_mean": 83.73333333333333,
+              "drive_shards_cv": 0.10587675292916744,
+              "fill_min": 0.012169074005333333,
+              "fill_max": 0.01879048192
+            },
+            {
+              "down": [
+                1
+              ],
+              "stripes": 314,
+              "placed": 314,
+              "refused": 0,
+              "first_refusal": null,
+              "node_shards_min": 1256,
+              "node_shards_max": 1256,
+              "drive_shards_min": 66,
+              "drive_shards_max": 105,
+              "drive_shards_mean": 83.73333333333333,
+              "drive_shards_cv": 0.10827440036627521,
+              "fill_min": 0.011811160064,
+              "fill_max": 0.01879048192
+            },
+            {
+              "down": [
+                2
+              ],
+              "stripes": 314,
+              "placed": 314,
+              "refused": 0,
+              "first_refusal": null,
+              "node_shards_min": 1256,
+              "node_shards_max": 1256,
+              "drive_shards_min": 66,
+              "drive_shards_max": 101,
+              "drive_shards_mean": 83.73333333333333,
+              "drive_shards_cv": 0.11970244187676918,
+              "fill_min": 0.011811160064,
+              "fill_max": 0.018074654037333333
+            },
+            {
+              "down": [
+                0,
+                1
+              ],
+              "stripes": 314,
+              "placed": 0,
+              "refused": 314,
+              "first_refusal": {
+                "NodeLoss": {
+                  "per_node": 8,
+                  "m": 4
+                }
+              },
+              "node_shards_min": 0,
+              "node_shards_max": 0,
+              "drive_shards_min": 0,
+              "drive_shards_max": 0,
+              "drive_shards_mean": 0.0,
+              "drive_shards_cv": 0.0,
+              "fill_min": 0.0,
+              "fill_max": 0.0
+            },
+            {
+              "down": [
+                0,
+                2
+              ],
+              "stripes": 314,
+              "placed": 0,
+              "refused": 314,
+              "first_refusal": {
+                "NodeLoss": {
+                  "per_node": 8,
+                  "m": 4
+                }
+              },
+              "node_shards_min": 0,
+              "node_shards_max": 0,
+              "drive_shards_min": 0,
+              "drive_shards_max": 0,
+              "drive_shards_mean": 0.0,
+              "drive_shards_cv": 0.0,
+              "fill_min": 0.0,
+              "fill_max": 0.0
+            },
+            {
+              "down": [
+                1,
+                2
+              ],
+              "stripes": 314,
+              "placed": 0,
+              "refused": 314,
+              "first_refusal": {
+                "NodeLoss": {
+                  "per_node": 8,
+                  "m": 4
+                }
+              },
+              "node_shards_min": 0,
+              "node_shards_max": 0,
+              "drive_shards_min": 0,
+              "drive_shards_max": 0,
+              "drive_shards_mean": 0.0,
+              "drive_shards_cv": 0.0,
+              "fill_min": 0.0,
+              "fill_max": 0.0
+            }
+          ]
+        },
+        {
+          "name": "capacity guard",
+          "stripes": 16624,
+          "scenarios": [
+            {
+              "down": [],
+              "stripes": 16624,
+              "placed": 16624,
+              "refused": 0,
+              "first_refusal": null,
+              "node_shards_min": 44301,
+              "node_shards_max": 44377,
+              "drive_shards_min": 2878,
+              "drive_shards_max": 3030,
+              "drive_shards_mean": 2955.3777777777777,
+              "drive_shards_cv": 0.011849859743036982,
+              "fill_min": 0.5150381615786667,
+              "fill_max": 0.54223962112
+            },
+            {
+              "down": [
+                0
+              ],
+              "stripes": 16624,
+              "placed": 16624,
+              "refused": 0,
+              "first_refusal": null,
+              "node_shards_min": 66496,
+              "node_shards_max": 66496,
+              "drive_shards_min": 4382,
+              "drive_shards_max": 4504,
+              "drive_shards_mean": 4433.066666666667,
+              "drive_shards_cv": 0.005697169994317374,
+              "fill_min": 0.7841894454613333,
+              "fill_max": 0.8060221958826667
+            },
+            {
+              "down": [
+                1
+              ],
+              "stripes": 16624,
+              "placed": 16624,
+              "refused": 0,
+              "first_refusal": null,
+              "node_shards_min": 66496,
+              "node_shards_max": 66496,
+              "drive_shards_min": 4382,
+              "drive_shards_max": 4504,
+              "drive_shards_mean": 4433.066666666667,
+              "drive_shards_cv": 0.006434017344461033,
+              "fill_min": 0.7841894454613333,
+              "fill_max": 0.8060221958826667
+            },
+            {
+              "down": [
+                2
+              ],
+              "stripes": 16624,
+              "placed": 16624,
+              "refused": 0,
+              "first_refusal": null,
+              "node_shards_min": 66496,
+              "node_shards_max": 66496,
+              "drive_shards_min": 4401,
+              "drive_shards_max": 4475,
+              "drive_shards_mean": 4433.066666666667,
+              "drive_shards_cv": 0.005006916724656077,
+              "fill_min": 0.787589627904,
+              "fill_max": 0.8008324437333333
+            },
+            {
+              "down": [
+                0,
+                1
+              ],
+              "stripes": 16624,
+              "placed": 0,
+              "refused": 16624,
+              "first_refusal": {
+                "NodeLoss": {
+                  "per_node": 8,
+                  "m": 4
+                }
+              },
+              "node_shards_min": 0,
+              "node_shards_max": 0,
+              "drive_shards_min": 0,
+              "drive_shards_max": 0,
+              "drive_shards_mean": 0.0,
+              "drive_shards_cv": 0.0,
+              "fill_min": 0.0,
+              "fill_max": 0.0
+            },
+            {
+              "down": [
+                0,
+                2
+              ],
+              "stripes": 16624,
+              "placed": 0,
+              "refused": 16624,
+              "first_refusal": {
+                "NodeLoss": {
+                  "per_node": 8,
+                  "m": 4
+                }
+              },
+              "node_shards_min": 0,
+              "node_shards_max": 0,
+              "drive_shards_min": 0,
+              "drive_shards_max": 0,
+              "drive_shards_mean": 0.0,
+              "drive_shards_cv": 0.0,
+              "fill_min": 0.0,
+              "fill_max": 0.0
+            },
+            {
+              "down": [
+                1,
+                2
+              ],
+              "stripes": 16624,
+              "placed": 0,
+              "refused": 16624,
+              "first_refusal": {
+                "NodeLoss": {
+                  "per_node": 8,
+                  "m": 4
+                }
+              },
+              "node_shards_min": 0,
+              "node_shards_max": 0,
+              "drive_shards_min": 0,
+              "drive_shards_max": 0,
+              "drive_shards_mean": 0.0,
+              "drive_shards_cv": 0.0,
+              "fill_min": 0.0,
+              "fill_max": 0.0
+            }
+          ]
+        }
+      ],
+      "failures": [
+        {
+          "down": [
+            0
+          ],
+          "stripes": 314,
+          "margins": [
+            [
+              1,
+              211
+            ],
+            [
+              2,
+              103
+            ]
+          ],
+          "unreadable": 0,
+          "degraded_share": 0.33121019108280253
+        },
+        {
+          "down": [
+            1
+          ],
+          "stripes": 314,
+          "margins": [
+            [
+              1,
+              200
+            ],
+            [
+              2,
+              114
+            ]
+          ],
+          "unreadable": 0,
+          "degraded_share": 0.32802547770700635
+        },
+        {
+          "down": [
+            2
+          ],
+          "stripes": 314,
+          "margins": [
+            [
+              1,
+              217
+            ],
+            [
+              2,
+              97
+            ]
+          ],
+          "unreadable": 0,
+          "degraded_share": 0.34076433121019106
+        },
+        {
+          "down": [
+            0,
+            1
+          ],
+          "stripes": 314,
+          "margins": [
+            [
+              -2,
+              97
+            ],
+            [
+              -1,
+              217
+            ]
+          ],
+          "unreadable": 314,
+          "degraded_share": 0.6592356687898089
+        },
+        {
+          "down": [
+            0,
+            2
+          ],
+          "stripes": 314,
+          "margins": [
+            [
+              -2,
+              114
+            ],
+            [
+              -1,
+              200
+            ]
+          ],
+          "unreadable": 314,
+          "degraded_share": 0.6719745222929936
+        },
+        {
+          "down": [
+            1,
+            2
+          ],
+          "stripes": 314,
+          "margins": [
+            [
+              -2,
+              103
+            ],
+            [
+              -1,
+              211
+            ]
+          ],
+          "unreadable": 314,
+          "degraded_share": 0.6687898089171974
+        }
+      ]
+    },
+    {
+      "profile": {
+        "name": "NOW",
+        "nodes": 6,
+        "drives_per_node": 2,
+        "drive_bytes": 8000000000000,
+        "replicas": 2,
+        "k": 4,
+        "m": 2,
+        "max_shards_per_domain": 2,
+        "fill_limit": 0.85,
+        "reserve_drives": 1,
+        "shared_bytes_per_drive": 0,
+        "block_bytes": 1073741824
+      },
+      "keys": [
+        {
+          "down": [],
+          "keys": 1526337,
+          "bytes": 1346628725788,
+          "writer_keys": {
+            "min": 0.16624048293397853,
+            "max": 0.16710922948208684,
+            "mean": 0.16666666666666666
+          },
+          "writer_bytes": {
+            "min": 0.16090066896293947,
+            "max": 0.1732885954912692,
+            "mean": 0.16666666666666666
+          },
+          "replica_keys": {
+            "min": 0.33265982545139117,
+            "max": 0.33421321765769946,
+            "mean": 0.3333333333333333
+          },
+          "replica_bytes": {
+            "min": 0.32995172642481546,
+            "max": 0.3366551762392531,
+            "mean": 0.3333333333333333
+          },
+          "set_keys": {
+            "min": 0.06632938859504814,
+            "max": 0.06699044837411397,
+            "mean": 0.06666666666666667
+          },
+          "set_bytes": {
+            "min": 0.0640540240922942,
+            "max": 0.06844612600779361,
+            "mean": 0.06666666666666667
+          }
+        },
+        {
+          "down": [
+            0
+          ],
+          "keys": 1526337,
+          "bytes": 1346628725788,
+          "writer_keys": {
+            "min": 0.1996040192958698,
+            "max": 0.20063131536482443,
+            "mean": 0.2
+          },
+          "writer_bytes": {
+            "min": 0.19410544227403503,
+            "max": 0.20697974488469342,
+            "mean": 0.2
+          },
+          "replica_keys": {
+            "min": 0.399489758814731,
+            "max": 0.4004679176354894,
+            "mean": 0.4
+          },
+          "replica_bytes": {
+            "min": 0.3960665095718195,
+            "max": 0.40384672879732963,
+            "mean": 0.39999999999999997
+          },
+          "set_keys": {
+            "min": 0.09965230483176389,
+            "max": 0.10068615253381134,
+            "mean": 0.09999999999999999
+          },
+          "set_bytes": {
+            "min": 0.09745930293013917,
+            "max": 0.10222386893050094,
+            "mean": 0.09999999999999999
+          }
+        },
+        {
+          "down": [
+            1
+          ],
+          "keys": 1526337,
+          "bytes": 1346628725788,
+          "writer_keys": {
+            "min": 0.19954898557789008,
+            "max": 0.20045180061808107,
+            "mean": 0.2
+          },
+          "writer_bytes": {
+            "min": 0.19631831602753103,
+            "max": 0.20625908143572969,
+            "mean": 0.2
+          },
+          "replica_keys": {
+            "min": 0.399206728265121,
+            "max": 0.40082891261890397,
+            "mean": 0.4
+          },
+          "replica_bytes": {
+            "min": 0.396781394872099,
+            "max": 0.40331364961948873,
+            "mean": 0.4
+          },
+          "set_keys": {
+            "min": 0.09956647843824791,
+            "max": 0.10038281192161363,
+            "mean": 0.1
+          },
+          "set_bytes": {
+            "min": 0.09746465958922557,
+            "max": 0.10312466515871906,
+            "mean": 0.1
+          }
+        },
+        {
+          "down": [
+            2
+          ],
+          "keys": 1526337,
+          "bytes": 1346628725788,
+          "writer_keys": {
+            "min": 0.1995470200879622,
+            "max": 0.20040135304326634,
+            "mean": 0.2
+          },
+          "writer_bytes": {
+            "min": 0.19466264852222415,
+            "max": 0.20452553150003086,
+            "mean": 0.2
+          },
+          "replica_keys": {
+            "min": 0.3991425222608113,
+            "max": 0.4010582197771527,
+            "mean": 0.4
+          },
+          "replica_bytes": {
+            "min": 0.39797989088818214,
+            "max": 0.40231105360237945,
+            "mean": 0.4
+          },
+          "set_keys": {
+            "min": 0.09946492812530916,
+            "max": 0.1004437421093769,
+            "mean": 0.1
+          },
+          "set_bytes": {
+            "min": 0.09612308790847679,
+            "max": 0.10180283770107411,
+            "mean": 0.1
+          }
+        },
+        {
+          "down": [
+            3
+          ],
+          "keys": 1526337,
+          "bytes": 1346628725788,
+          "writer_keys": {
+            "min": 0.19966888046348874,
+            "max": 0.2003908704303178,
+            "mean": 0.2
+          },
+          "writer_bytes": {
+            "min": 0.1956421959800642,
+            "max": 0.20590610948592827,
+            "mean": 0.2
+          },
+          "replica_keys": {
+            "min": 0.39950417240753516,
+            "max": 0.40076012047142934,
+            "mean": 0.4
+          },
+          "replica_bytes": {
+            "min": 0.3980606209936063,
+            "max": 0.40253182507955554,
+            "mean": 0.4
+          },
+          "set_keys": {
+            "min": 0.09958351268428925,
+            "max": 0.10051056876692369,
+            "mean": 0.1
+          },
+          "set_bytes": {
+            "min": 0.09825328521012829,
+            "max": 0.10263018699465765,
+            "mean": 0.1
+          }
+        },
+        {
+          "down": [
+            4
+          ],
+          "keys": 1526337,
+          "bytes": 1346628725788,
+          "writer_keys": {
+            "min": 0.19931640260309486,
+            "max": 0.20057366099360757,
+            "mean": 0.2
+          },
+          "writer_bytes": {
+            "min": 0.1953584067568866,
+            "max": 0.20292420735796773,
+            "mean": 0.2
+          },
+          "replica_keys": {
+            "min": 0.39944913868955545,
+            "max": 0.4005589853354796,
+            "mean": 0.4
+          },
+          "replica_bytes": {
+            "min": 0.3953852006806378,
+            "max": 0.40194576697914025,
+            "mean": 0.39999999999999997
+          },
+          "set_keys": {
+            "min": 0.09961627084975336,
+            "max": 0.10029829585471622,
+            "mean": 0.1
+          },
+          "set_bytes": {
+            "min": 0.09653649136656374,
+            "max": 0.1025361606453193,
+            "mean": 0.1
+          }
+        },
+        {
+          "down": [
+            5
+          ],
+          "keys": 1526337,
+          "bytes": 1346628725788,
+          "writer_keys": {
+            "min": 0.19939764285344586,
+            "max": 0.20059200556626747,
+            "mean": 0.19999999999999998
+          },
+          "writer_bytes": {
+            "min": 0.19569989189395057,
+            "max": 0.20613909089794769,
+            "mean": 0.2
+          },
+          "replica_keys": {
+            "min": 0.39933120929388466,
+            "max": 0.40085708464120307,
+            "mean": 0.4
+          },
+          "replica_bytes": {
+            "min": 0.39525635785137286,
+            "max": 0.4044444517810934,
+            "mean": 0.4
+          },
+          "set_keys": {
+            "min": 0.0995520648454437,
+            "max": 0.10050467229714015,
+            "mean": 0.1
+          },
+          "set_bytes": {
+            "min": 0.09660537935716094,
+            "max": 0.10270996786442718,
+            "mean": 0.1
+          }
+        },
+        {
+          "down": [
+            0,
+            1
+          ],
+          "keys": 1526337,
+          "bytes": 1346628725788,
+          "writer_keys": {
+            "min": 0.24952025666677805,
+            "max": 0.2504492782393403,
+            "mean": 0.25
+          },
+          "writer_bytes": {
+            "min": 0.2469745000095584,
+            "max": 0.2562833699021597,
+            "mean": 0.25
+          },
+          "replica_keys": {
+            "min": 0.49935957786517654,
+            "max": 0.5004379766722552,
+            "mean": 0.5
+          },
+          "replica_bytes": {
+            "min": 0.4959871937509443,
+            "max": 0.5063836033127614,
+            "mean": 0.5
+          },
+          "set_keys": {
+            "min": 0.1661828285627617,
+            "max": 0.16701685145547804,
+            "mean": 0.16666666666666666
+          },
+          "set_bytes": {
+            "min": 0.16284995231530816,
+            "max": 0.17154818371249286,
+            "mean": 0.16666666666666666
+          }
+        },
+        {
+          "down": [
+            0,
+            2
+          ],
+          "keys": 1526337,
+          "bytes": 1346628725788,
+          "writer_keys": {
+            "min": 0.24955760097540713,
+            "max": 0.25056655247170184,
+            "mean": 0.25
+          },
+          "writer_bytes": {
+            "min": 0.24336087711943885,
+            "max": 0.25487698450896845,
+            "mean": 0.25
+          },
+          "replica_keys": {
+            "min": 0.4994434387687647,
+            "max": 0.500632560175112,
+            "mean": 0.5
+          },
+          "replica_bytes": {
+            "min": 0.49543379083540506,
+            "max": 0.5026264238273473,
+            "mean": 0.5
+          },
+          "set_keys": {
+            "min": 0.16611731223183346,
+            "max": 0.1674407421165837,
+            "mean": 0.16666666666666666
+          },
+          "set_bytes": {
+            "min": 0.16288607304930747,
+            "max": 0.16988382410907768,
+            "mean": 0.16666666666666666
+          }
+        },
+        {
+          "down": [
+            0,
+            3
+          ],
+          "keys": 1526337,
+          "bytes": 1346628725788,
+          "writer_keys": {
+            "min": 0.24972728827251126,
+            "max": 0.2505573801853719,
+            "mean": 0.25
+          },
+          "writer_bytes": {
+            "min": 0.24669047965363125,
+            "max": 0.257028212429125,
+            "mean": 0.25
+          },
+          "replica_keys": {
+            "min": 0.49949912765005366,
+            "max": 0.5002329105564498,
+            "mean": 0.5
+          },
+          "replica_bytes": {
+            "min": 0.4964487390173549,
+            "max": 0.501659618912178,
+            "mean": 0.5
+          },
+          "set_keys": {
+            "min": 0.16641999768072188,
+            "max": 0.1668825429770752,
+            "mean": 0.16666666666666666
+          },
+          "set_bytes": {
+            "min": 0.16389643281807287,
+            "max": 0.16882509525776365,
+            "mean": 0.16666666666666666
+          }
+        },
+        {
+          "down": [
+            0,
+            4
+          ],
+          "keys": 1526337,
+          "bytes": 1346628725788,
+          "writer_keys": {
+            "min": 0.24979280460343947,
+            "max": 0.25055213887889766,
+            "mean": 0.25
+          },
+          "writer_bytes": {
+            "min": 0.24547601958480791,
+            "max": 0.25292506324539826,
+            "mean": 0.25
+          },
+          "replica_keys": {
+            "min": 0.49938185341769215,
+            "max": 0.5005801471103695,
+            "mean": 0.5
+          },
+          "replica_bytes": {
+            "min": 0.4958006357300221,
+            "max": 0.5025400883803355,
+            "mean": 0.5
+          },
+          "set_keys": {
+            "min": 0.1663937911483506,
+            "max": 0.16742632852377948,
+            "mean": 0.16666666666666666
+          },
+          "set_bytes": {
+            "min": 0.16350117066763228,
+            "max": 0.17047421313373984,
+            "mean": 0.16666666666666666
+          }
+        },
+        {
+          "down": [
+            0,
+            5
+          ],
+          "keys": 1526337,
+          "bytes": 1346628725788,
+          "writer_keys": {
+            "min": 0.24949667078764387,
+            "max": 0.2507938941400228,
+            "mean": 0.25
+          },
+          "writer_bytes": {
+            "min": 0.2472950575661688,
+            "max": 0.2565973966111567,
+            "mean": 0.25
+          },
+          "replica_keys": {
+            "min": 0.4994624385047339,
+            "max": 0.5003397021758629,
+            "mean": 0.5
+          },
+          "replica_bytes": {
+            "min": 0.49575048382199677,
+            "max": 0.5072025268942072,
+            "mean": 0.5
+          },
+          "set_keys": {
+            "min": 0.1662607929965663,
+            "max": 0.1669821278000861,
+            "mean": 0.16666666666666666
+          },
+          "set_bytes": {
+            "min": 0.16346971772727176,
+            "max": 0.17156787672252016,
+            "mean": 0.16666666666666666
+          }
+        },
+        {
+          "down": [
+            1,
+            2
+          ],
+          "keys": 1526337,
+          "bytes": 1346628725788,
+          "writer_keys": {
+            "min": 0.24952287732001519,
+            "max": 0.25051807038681495,
+            "mean": 0.25
+          },
+          "writer_bytes": {
+            "min": 0.24810594478109957,
+            "max": 0.2537605448681014,
+            "mean": 0.25
+          },
+          "replica_keys": {
+            "min": 0.4989252045911224,
+            "max": 0.501124587820383,
+            "mean": 0.5
+          },
+          "replica_bytes": {
+            "min": 0.49726895952420147,
+            "max": 0.5040431266344879,
+            "mean": 0.5
+          },
+          "set_keys": {
+            "min": 0.16612189837499844,
+            "max": 0.16759732614750217,
+            "mean": 0.16666666666666666
+          },
+          "set_bytes": {
+            "min": 0.16297911362433803,
+            "max": 0.16969266141287917,
+            "mean": 0.16666666666666666
+          }
+        },
+        {
+          "down": [
+            1,
+            3
+          ],
+          "keys": 1526337,
+          "bytes": 1346628725788,
+          "writer_keys": {
+            "min": 0.2495064982372831,
+            "max": 0.25068382670406336,
+            "mean": 0.25
+          },
+          "writer_bytes": {
+            "min": 0.24596653964304702,
+            "max": 0.2552671281379725,
+            "mean": 0.25
+          },
+          "replica_keys": {
+            "min": 0.4994015083169706,
+            "max": 0.5009352456240005,
+            "mean": 0.5
+          },
+          "replica_bytes": {
+            "min": 0.49624892388208625,
+            "max": 0.5042792310661782,
+            "mean": 0.5
+          },
+          "set_keys": {
+            "min": 0.16628044789584476,
+            "max": 0.16714722895402523,
+            "mean": 0.16666666666666666
+          },
+          "set_bytes": {
+            "min": 0.16464852875929625,
+            "max": 0.16970379778158484,
+            "mean": 0.16666666666666666
+          }
+        },
+        {
+          "down": [
+            1,
+            4
+          ],
+          "keys": 1526337,
+          "bytes": 1346628725788,
+          "writer_keys": {
+            "min": 0.24931256989773556,
+            "max": 0.2506497582119807,
+            "mean": 0.25
+          },
+          "writer_bytes": {
+            "min": 0.24702856660906405,
+            "max": 0.2537057582416266,
+            "mean": 0.24999999999999997
+          },
+          "replica_keys": {
+            "min": 0.4993615433551044,
+            "max": 0.5004622177146987,
+            "mean": 0.5
+          },
+          "replica_bytes": {
+            "min": 0.4983754072120214,
+            "max": 0.5019859616216303,
+            "mean": 0.5
+          },
+          "set_keys": {
+            "min": 0.1661821733994524,
+            "max": 0.1670076791691481,
+            "mean": 0.16666666666666666
+          },
+          "set_bytes": {
+            "min": 0.16376681519618688,
+            "max": 0.16907958883601365,
+            "mean": 0.16666666666666666
+          }
+        },
+        {
+          "down": [
+            1,
+            5
+          ],
+          "keys": 1526337,
+          "bytes": 1346628725788,
+          "writer_keys": {
+            "min": 0.2493040527747149,
+            "max": 0.25056720763501117,
+            "mean": 0.25
+          },
+          "writer_bytes": {
+            "min": 0.24576673669302265,
+            "max": 0.2567798510184442,
+            "mean": 0.25
+          },
+          "replica_keys": {
+            "min": 0.49964784972126075,
+            "max": 0.5008107645952369,
+            "mean": 0.5
+          },
+          "replica_bytes": {
+            "min": 0.4970317904984085,
+            "max": 0.5032137115421087,
+            "mean": 0.5
+          },
+          "set_keys": {
+            "min": 0.16616251850017394,
+            "max": 0.16723502083746905,
+            "mean": 0.16666666666666666
+          },
+          "set_bytes": {
+            "min": 0.16526469258686832,
+            "max": 0.16949098631283177,
+            "mean": 0.16666666666666666
+          }
+        },
+        {
+          "down": [
+            2,
+            3
+          ],
+          "keys": 1526337,
+          "bytes": 1346628725788,
+          "writer_keys": {
+            "min": 0.2496290137761189,
+            "max": 0.25037065864222646,
+            "mean": 0.25
+          },
+          "writer_bytes": {
+            "min": 0.2475136603260555,
+            "max": 0.25286022742515474,
+            "mean": 0.25
+          },
+          "replica_keys": {
+            "min": 0.4993635088450323,
+            "max": 0.500637146318277,
+            "mean": 0.5
+          },
+          "replica_bytes": {
+            "min": 0.49888508106336327,
+            "max": 0.5025319745099042,
+            "mean": 0.5
+          },
+          "set_keys": {
+            "min": 0.16627782724260762,
+            "max": 0.16737457062234617,
+            "mean": 0.16666666666666666
+          },
+          "set_bytes": {
+            "min": 0.16417023357320248,
+            "max": 0.16890446041384072,
+            "mean": 0.16666666666666666
+          }
+        },
+        {
+          "down": [
+            2,
+            4
+          ],
+          "keys": 1526337,
+          "bytes": 1346628725788,
+          "writer_keys": {
+            "min": 0.2490295393481256,
+            "max": 0.25049186385444366,
+            "mean": 0.25
+          },
+          "writer_bytes": {
+            "min": 0.24654131579342736,
+            "max": 0.25190260562836336,
+            "mean": 0.25
+          },
+          "replica_keys": {
+            "min": 0.49938185341769215,
+            "max": 0.5008821773959486,
+            "mean": 0.5
+          },
+          "replica_bytes": {
+            "min": 0.49842726127815173,
+            "max": 0.5014793902393804,
+            "mean": 0.5
+          },
+          "set_keys": {
+            "min": 0.1660793127598951,
+            "max": 0.16700047237274598,
+            "mean": 0.16666666666666666
+          },
+          "set_bytes": {
+            "min": 0.16146667942254406,
+            "max": 0.1704878750508278,
+            "mean": 0.16666666666666666
+          }
+        },
+        {
+          "down": [
+            2,
+            5
+          ],
+          "keys": 1526337,
+          "bytes": 1346628725788,
+          "writer_keys": {
+            "min": 0.24946391262217976,
+            "max": 0.25068579219399123,
+            "mean": 0.25
+          },
+          "writer_bytes": {
+            "min": 0.24690932498891663,
+            "max": 0.2543898913002474,
+            "mean": 0.25
+          },
+          "replica_keys": {
+            "min": 0.49928685473784623,
+            "max": 0.5011776560484349,
+            "mean": 0.5
+          },
+          "replica_bytes": {
+            "min": 0.49782324111919957,
+            "max": 0.5027753480765925,
+            "mean": 0.5
+          },
+          "set_keys": {
+            "min": 0.1659679349973171,
+            "max": 0.1672330553475412,
+            "mean": 0.16666666666666666
+          },
+          "set_bytes": {
+            "min": 0.16429838155541562,
+            "max": 0.16927746641867406,
+            "mean": 0.16666666666666666
+          }
+        },
+        {
+          "down": [
+            3,
+            4
+          ],
+          "keys": 1526337,
+          "bytes": 1346628725788,
+          "writer_keys": {
+            "min": 0.24963622057252102,
+            "max": 0.250320866230721,
+            "mean": 0.25
+          },
+          "writer_bytes": {
+            "min": 0.24711301651854703,
+            "max": 0.2552733057523666,
+            "mean": 0.25
+          },
+          "replica_keys": {
+            "min": 0.4993877498874757,
+            "max": 0.5008395917808453,
+            "mean": 0.5
+          },
+          "replica_bytes": {
+            "min": 0.4979182798671107,
+            "max": 0.5020696419626495,
+            "mean": 0.5
+          },
+          "set_keys": {
+            "min": 0.16616251850017394,
+            "max": 0.16727891677919096,
+            "mean": 0.16666666666666666
+          },
+          "set_bytes": {
+            "min": 0.16488185006009962,
+            "max": 0.16915655754165249,
+            "mean": 0.16666666666666666
+          }
+        },
+        {
+          "down": [
+            3,
+            5
+          ],
+          "keys": 1526337,
+          "bytes": 1346628725788,
+          "writer_keys": {
+            "min": 0.24949536046102533,
+            "max": 0.2502402811436793,
+            "mean": 0.25
+          },
+          "writer_bytes": {
+            "min": 0.2449889440253465,
+            "max": 0.2550945855450881,
+            "mean": 0.25
+          },
+          "replica_keys": {
+            "min": 0.4996105054126317,
+            "max": 0.5002990820506874,
+            "mean": 0.5
+          },
+          "replica_bytes": {
+            "min": 0.4976565892152988,
+            "max": 0.5014142894760287,
+            "mean": 0.5
+          },
+          "set_keys": {
+            "min": 0.16642196317064972,
+            "max": 0.16726843416624246,
+            "mean": 0.16666666666666666
+          },
+          "set_bytes": {
+            "min": 0.16427477596287832,
+            "max": 0.16875683728640173,
+            "mean": 0.16666666666666666
+          }
+        },
+        {
+          "down": [
+            4,
+            5
+          ],
+          "keys": 1526337,
+          "bytes": 1346628725788,
+          "writer_keys": {
+            "min": 0.24942001668045785,
+            "max": 0.2505862073709803,
+            "mean": 0.25
+          },
+          "writer_bytes": {
+            "min": 0.2477690996378812,
+            "max": 0.25295523921166263,
+            "mean": 0.25
+          },
+          "replica_keys": {
+            "min": 0.49947816242415666,
+            "max": 0.500748524080855,
+            "mean": 0.5
+          },
+          "replica_bytes": {
+            "min": 0.4982651069086374,
+            "max": 0.5033463783682195,
+            "mean": 0.5
+          },
+          "set_keys": {
+            "min": 0.16605507171745165,
+            "max": 0.16731626108782005,
+            "mean": 0.16666666666666666
+          },
+          "set_bytes": {
+            "min": 0.16406184968371237,
+            "max": 0.16883069875845802,
+            "mean": 0.16666666666666666
+          }
+        }
+      ],
+      "populations": [
+        {
+          "name": "L_silo",
+          "stripes": 314,
+          "scenarios": [
+            {
+              "down": [],
+              "stripes": 314,
+              "placed": 314,
+              "refused": 0,
+              "first_refusal": null,
+              "node_shards_min": 314,
+              "node_shards_max": 314,
+              "drive_shards_min": 145,
+              "drive_shards_max": 169,
+              "drive_shards_mean": 157.0,
+              "drive_shards_cv": 0.045783139390335084,
+              "fill_min": 0.01946157056,
+              "fill_max": 0.022682796032
+            },
+            {
+              "down": [
+                0
+              ],
+              "stripes": 314,
+              "placed": 314,
+              "refused": 0,
+              "first_refusal": null,
+              "node_shards_min": 371,
+              "node_shards_max": 386,
+              "drive_shards_min": 173,
+              "drive_shards_max": 198,
+              "drive_shards_mean": 188.4,
+              "drive_shards_cv": 0.040576464657359645,
+              "fill_min": 0.023219666944,
+              "fill_max": 0.026575110144
+            },
+            {
+              "down": [
+                1
+              ],
+              "stripes": 314,
+              "placed": 314,
+              "refused": 0,
+              "first_refusal": null,
+              "node_shards_min": 370,
+              "node_shards_max": 380,
+              "drive_shards_min": 178,
+              "drive_shards_max": 198,
+              "drive_shards_mean": 188.4,
+              "drive_shards_cv": 0.03416874084804901,
+              "fill_min": 0.023890755584,
+              "fill_max": 0.026575110144
+            },
+            {
+              "down": [
+                2
+              ],
+              "stripes": 314,
+              "placed": 314,
+              "refused": 0,
+              "first_refusal": null,
+              "node_shards_min": 371,
+              "node_shards_max": 384,
+              "drive_shards_min": 177,
+              "drive_shards_max": 198,
+              "drive_shards_mean": 188.4,
+              "drive_shards_cv": 0.033670385407969655,
+              "fill_min": 0.023756537856,
+              "fill_max": 0.026575110144
+            },
+            {
+              "down": [
+                3
+              ],
+              "stripes": 314,
+              "placed": 314,
+              "refused": 0,
+              "first_refusal": null,
+              "node_shards_min": 366,
+              "node_shards_max": 388,
+              "drive_shards_min": 171,
+              "drive_shards_max": 202,
+              "drive_shards_mean": 188.4,
+              "drive_shards_cv": 0.04610201857878655,
+              "fill_min": 0.022951231488,
+              "fill_max": 0.027111981056
+            },
+            {
+              "down": [
+                4
+              ],
+              "stripes": 314,
+              "placed": 314,
+              "refused": 0,
+              "first_refusal": null,
+              "node_shards_min": 371,
+              "node_shards_max": 386,
+              "drive_shards_min": 176,
+              "drive_shards_max": 200,
+              "drive_shards_mean": 188.4,
+              "drive_shards_cv": 0.03663574082109851,
+              "fill_min": 0.023622320128,
+              "fill_max": 0.0268435456
+            },
+            {
+              "down": [
+                5
+              ],
+              "stripes": 314,
+              "placed": 314,
+              "refused": 0,
+              "first_refusal": null,
+              "node_shards_min": 371,
+              "node_shards_max": 385,
+              "drive_shards_min": 172,
+              "drive_shards_max": 200,
+              "drive_shards_mean": 188.4,
+              "drive_shards_cv": 0.043264721597271405,
+              "fill_min": 0.023085449216,
+              "fill_max": 0.0268435456
+            },
+            {
+              "down": [
+                0,
+                1
+              ],
+              "stripes": 314,
+              "placed": 314,
+              "refused": 0,
+              "first_refusal": null,
+              "node_shards_min": 463,
+              "node_shards_max": 480,
+              "drive_shards_min": 229,
+              "drive_shards_max": 246,
+              "drive_shards_mean": 235.5,
+              "drive_shards_cv": 0.021961954209742254,
+              "fill_min": 0.030735859712,
+              "fill_max": 0.033017561088
+            },
+            {
+              "down": [
+                0,
+                2
+              ],
+              "stripes": 314,
+              "placed": 314,
+              "refused": 0,
+              "first_refusal": null,
+              "node_shards_min": 463,
+              "node_shards_max": 478,
+              "drive_shards_min": 222,
+              "drive_shards_max": 245,
+              "drive_shards_mean": 235.5,
+              "drive_shards_cv": 0.0292654962889389,
+              "fill_min": 0.029796335616,
+              "fill_max": 0.03288334336
+            },
+            {
+              "down": [
+                0,
+                3
+              ],
+              "stripes": 314,
+              "placed": 314,
+              "refused": 0,
+              "first_refusal": null,
+              "node_shards_min": 459,
+              "node_shards_max": 478,
+              "drive_shards_min": 222,
+              "drive_shards_max": 246,
+              "drive_shards_mean": 235.5,
+              "drive_shards_cv": 0.028405707346623465,
+              "fill_min": 0.029796335616,
+              "fill_max": 0.033017561088
+            },
+            {
+              "down": [
+                0,
+                4
+              ],
+              "stripes": 314,
+              "placed": 314,
+              "refused": 0,
+              "first_refusal": null,
+              "node_shards_min": 465,
+              "node_shards_max": 477,
+              "drive_shards_min": 222,
+              "drive_shards_max": 249,
+              "drive_shards_mean": 235.5,
+              "drive_shards_cv": 0.03966357047190957,
+              "fill_min": 0.029796335616,
+              "fill_max": 0.033420214272
+            },
+            {
+              "down": [
+                0,
+                5
+              ],
+              "stripes": 314,
+              "placed": 314,
+              "refused": 0,
+              "first_refusal": null,
+              "node_shards_min": 459,
+              "node_shards_max": 480,
+              "drive_shards_min": 222,
+              "drive_shards_max": 246,
+              "drive_shards_mean": 235.5,
+              "drive_shards_cv": 0.030324536851561997,
+              "fill_min": 0.029796335616,
+              "fill_max": 0.033017561088
+            },
+            {
+              "down": [
+                1,
+                2
+              ],
+              "stripes": 314,
+              "placed": 314,
+              "refused": 0,
+              "first_refusal": null,
+              "node_shards_min": 462,
+              "node_shards_max": 485,
+              "drive_shards_min": 227,
+              "drive_shards_max": 246,
+              "drive_shards_mean": 235.5,
+              "drive_shards_cv": 0.024577148413567357,
+              "fill_min": 0.030467424256,
+              "fill_max": 0.033017561088
+            },
+            {
+              "down": [
+                1,
+                3
+              ],
+              "stripes": 314,
+              "placed": 314,
+              "refused": 0,
+              "first_refusal": null,
+              "node_shards_min": 460,
+              "node_shards_max": 476,
+              "drive_shards_min": 226,
+              "drive_shards_max": 243,
+              "drive_shards_mean": 235.5,
+              "drive_shards_cv": 0.02133731554378108,
+              "fill_min": 0.030333206528,
+              "fill_max": 0.032614907904
+            },
+            {
+              "down": [
+                1,
+                4
+              ],
+              "stripes": 314,
+              "placed": 314,
+              "refused": 0,
+              "first_refusal": null,
+              "node_shards_min": 463,
+              "node_shards_max": 475,
+              "drive_shards_min": 227,
+              "drive_shards_max": 247,
+              "drive_shards_mean": 235.5,
+              "drive_shards_cv": 0.033164542148223584,
+              "fill_min": 0.030467424256,
+              "fill_max": 0.033151778816
+            },
+            {
+              "down": [
+                1,
+                5
+              ],
+              "stripes": 314,
+              "placed": 314,
+              "refused": 0,
+              "first_refusal": null,
+              "node_shards_min": 466,
+              "node_shards_max": 476,
+              "drive_shards_min": 226,
+              "drive_shards_max": 242,
+              "drive_shards_mean": 235.5,
+              "drive_shards_cv": 0.022267703782805764,
+              "fill_min": 0.030333206528,
+              "fill_max": 0.032480690176
+            },
+            {
+              "down": [
+                2,
+                3
+              ],
+              "stripes": 314,
+              "placed": 314,
+              "refused": 0,
+              "first_refusal": null,
+              "node_shards_min": 466,
+              "node_shards_max": 482,
+              "drive_shards_min": 223,
+              "drive_shards_max": 246,
+              "drive_shards_mean": 235.5,
+              "drive_shards_cv": 0.028484942388532355,
+              "fill_min": 0.029930553344,
+              "fill_max": 0.033017561088
+            },
+            {
+              "down": [
+                2,
+                4
+              ],
+              "stripes": 314,
+              "placed": 314,
+              "refused": 0,
+              "first_refusal": null,
+              "node_shards_min": 464,
+              "node_shards_max": 483,
+              "drive_shards_min": 225,
+              "drive_shards_max": 253,
+              "drive_shards_mean": 235.5,
+              "drive_shards_cv": 0.03383731942783275,
+              "fill_min": 0.0301989888,
+              "fill_max": 0.033957085184
+            },
+            {
+              "down": [
+                2,
+                5
+              ],
+              "stripes": 314,
+              "placed": 314,
+              "refused": 0,
+              "first_refusal": null,
+              "node_shards_min": 466,
+              "node_shards_max": 475,
+              "drive_shards_min": 226,
+              "drive_shards_max": 242,
+              "drive_shards_mean": 235.5,
+              "drive_shards_cv": 0.019342746452535666,
+              "fill_min": 0.030333206528,
+              "fill_max": 0.032480690176
+            },
+            {
+              "down": [
+                3,
+                4
+              ],
+              "stripes": 314,
+              "placed": 314,
+              "refused": 0,
+              "first_refusal": null,
+              "node_shards_min": 464,
+              "node_shards_max": 483,
+              "drive_shards_min": 226,
+              "drive_shards_max": 250,
+              "drive_shards_mean": 235.5,
+              "drive_shards_cv": 0.028166664886245432,
+              "fill_min": 0.030333206528,
+              "fill_max": 0.033554432
+            },
+            {
+              "down": [
+                3,
+                5
+              ],
+              "stripes": 314,
+              "placed": 314,
+              "refused": 0,
+              "first_refusal": null,
+              "node_shards_min": 464,
+              "node_shards_max": 479,
+              "drive_shards_min": 227,
+              "drive_shards_max": 243,
+              "drive_shards_mean": 235.5,
+              "drive_shards_cv": 0.022166255857559554,
+              "fill_min": 0.030467424256,
+              "fill_max": 0.032614907904
+            },
+            {
+              "down": [
+                4,
+                5
+              ],
+              "stripes": 314,
+              "placed": 314,
+              "refused": 0,
+              "first_refusal": null,
+              "node_shards_min": 468,
+              "node_shards_max": 474,
+              "drive_shards_min": 223,
+              "drive_shards_max": 245,
+              "drive_shards_mean": 235.5,
+              "drive_shards_cv": 0.03738177677634609,
+              "fill_min": 0.029930553344,
+              "fill_max": 0.03288334336
+            }
+          ]
+        },
+        {
+          "name": "capacity guard",
+          "stripes": 9499,
+          "scenarios": [
+            {
+              "down": [],
+              "stripes": 9499,
+              "placed": 9499,
+              "refused": 0,
+              "first_refusal": null,
+              "node_shards_min": 9499,
+              "node_shards_max": 9499,
+              "drive_shards_min": 4697,
+              "drive_shards_max": 4802,
+              "drive_shards_mean": 4749.5,
+              "drive_shards_cv": 0.007372955593175336,
+              "fill_min": 0.630420668416,
+              "fill_max": 0.644513529856
+            },
+            {
+              "down": [
+                0
+              ],
+              "stripes": 9499,
+              "placed": 9499,
+              "refused": 0,
+              "first_refusal": null,
+              "node_shards_min": 11357,
+              "node_shards_max": 11426,
+              "drive_shards_min": 5646,
+              "drive_shards_max": 5748,
+              "drive_shards_mean": 5699.4,
+              "drive_shards_cv": 0.005876214037418844,
+              "fill_min": 0.757793292288,
+              "fill_max": 0.771483500544
+            },
+            {
+              "down": [
+                1
+              ],
+              "stripes": 9499,
+              "placed": 9499,
+              "refused": 0,
+              "first_refusal": null,
+              "node_shards_min": 11365,
+              "node_shards_max": 11474,
+              "drive_shards_min": 5648,
+              "drive_shards_max": 5774,
+              "drive_shards_mean": 5699.4,
+              "drive_shards_cv": 0.005912772950147758,
+              "fill_min": 0.758061727744,
+              "fill_max": 0.774973161472
+            },
+            {
+              "down": [
+                2
+              ],
+              "stripes": 9499,
+              "placed": 9499,
+              "refused": 0,
+              "first_refusal": null,
+              "node_shards_min": 11369,
+              "node_shards_max": 11471,
+              "drive_shards_min": 5657,
+              "drive_shards_max": 5777,
+              "drive_shards_mean": 5699.4,
+              "drive_shards_cv": 0.006609027725078619,
+              "fill_min": 0.759269687296,
+              "fill_max": 0.775375814656
+            },
+            {
+              "down": [
+                3
+              ],
+              "stripes": 9499,
+              "placed": 9499,
+              "refused": 0,
+              "first_refusal": null,
+              "node_shards_min": 11358,
+              "node_shards_max": 11490,
+              "drive_shards_min": 5644,
+              "drive_shards_max": 5782,
+              "drive_shards_mean": 5699.4,
+              "drive_shards_cv": 0.006164613526458512,
+              "fill_min": 0.757524856832,
+              "fill_max": 0.776046903296
+            },
+            {
+              "down": [
+                4
+              ],
+              "stripes": 9499,
+              "placed": 9499,
+              "refused": 0,
+              "first_refusal": null,
+              "node_shards_min": 11385,
+              "node_shards_max": 11411,
+              "drive_shards_min": 5661,
+              "drive_shards_max": 5736,
+              "drive_shards_mean": 5699.4,
+              "drive_shards_cv": 0.004564717133568903,
+              "fill_min": 0.759806558208,
+              "fill_max": 0.769872887808
+            },
+            {
+              "down": [
+                5
+              ],
+              "stripes": 9499,
+              "placed": 9499,
+              "refused": 0,
+              "first_refusal": null,
+              "node_shards_min": 11359,
+              "node_shards_max": 11474,
+              "drive_shards_min": 5640,
+              "drive_shards_max": 5774,
+              "drive_shards_mean": 5699.4,
+              "drive_shards_cv": 0.006461109660751175,
+              "fill_min": 0.75698798592,
+              "fill_max": 0.774973161472
+            },
+            {
+              "down": [
+                0,
+                1
+              ],
+              "stripes": 9499,
+              "placed": 8426,
+              "refused": 1073,
+              "first_refusal": {
+                "DriveShortage": {
+                  "node": 2,
+                  "needed": 2,
+                  "eligible": 1
+                }
+              },
+              "node_shards_min": 12623,
+              "node_shards_max": 12666,
+              "drive_shards_min": 6296,
+              "drive_shards_max": 6333,
+              "drive_shards_mean": 6319.5,
+              "drive_shards_cv": 0.0023470839424307817,
+              "fill_min": 0.845034815488,
+              "fill_max": 0.850000871424
+            },
+            {
+              "down": [
+                0,
+                2
+              ],
+              "stripes": 9499,
+              "placed": 8388,
+              "refused": 1111,
+              "first_refusal": {
+                "DriveShortage": {
+                  "node": 4,
+                  "needed": 2,
+                  "eligible": 1
+                }
+              },
+              "node_shards_min": 12535,
+              "node_shards_max": 12666,
+              "drive_shards_min": 6235,
+              "drive_shards_max": 6333,
+              "drive_shards_mean": 6291.0,
+              "drive_shards_cv": 0.005010936342758898,
+              "fill_min": 0.83684753408,
+              "fill_max": 0.850000871424
+            },
+            {
+              "down": [
+                0,
+                3
+              ],
+              "stripes": 9499,
+              "placed": 8419,
+              "refused": 1080,
+              "first_refusal": {
+                "DriveShortage": {
+                  "node": 2,
+                  "needed": 2,
+                  "eligible": 1
+                }
+              },
+              "node_shards_min": 12566,
+              "node_shards_max": 12666,
+              "drive_shards_min": 6271,
+              "drive_shards_max": 6333,
+              "drive_shards_mean": 6314.25,
+              "drive_shards_cv": 0.003662939528473518,
+              "fill_min": 0.841679372288,
+              "fill_max": 0.850000871424
+            },
+            {
+              "down": [
+                0,
+                4
+              ],
+              "stripes": 9499,
+              "placed": 8410,
+              "refused": 1089,
+              "first_refusal": {
+                "DriveShortage": {
+                  "node": 2,
+                  "needed": 2,
+                  "eligible": 1
+                }
+              },
+              "node_shards_min": 12581,
+              "node_shards_max": 12666,
+              "drive_shards_min": 6259,
+              "drive_shards_max": 6333,
+              "drive_shards_mean": 6307.5,
+              "drive_shards_cv": 0.004073002799418194,
+              "fill_min": 0.840068759552,
+              "fill_max": 0.850000871424
+            },
+            {
+              "down": [
+                0,
+                5
+              ],
+              "stripes": 9499,
+              "placed": 8423,
+              "refused": 1076,
+              "first_refusal": {
+                "DriveShortage": {
+                  "node": 2,
+                  "needed": 2,
+                  "eligible": 1
+                }
+              },
+              "node_shards_min": 12587,
+              "node_shards_max": 12666,
+              "drive_shards_min": 6262,
+              "drive_shards_max": 6333,
+              "drive_shards_mean": 6317.25,
+              "drive_shards_cv": 0.0034443181735583544,
+              "fill_min": 0.840471412736,
+              "fill_max": 0.850000871424
+            },
+            {
+              "down": [
+                1,
+                2
+              ],
+              "stripes": 9499,
+              "placed": 8408,
+              "refused": 1091,
+              "first_refusal": {
+                "DriveShortage": {
+                  "node": 4,
+                  "needed": 2,
+                  "eligible": 1
+                }
+              },
+              "node_shards_min": 12571,
+              "node_shards_max": 12632,
+              "drive_shards_min": 6277,
+              "drive_shards_max": 6333,
+              "drive_shards_mean": 6306.0,
+              "drive_shards_cv": 0.0034461328595148636,
+              "fill_min": 0.842484678656,
+              "fill_max": 0.850000871424
+            },
+            {
+              "down": [
+                1,
+                3
+              ],
+              "stripes": 9499,
+              "placed": 8434,
+              "refused": 1065,
+              "first_refusal": {
+                "DriveShortage": {
+                  "node": 4,
+                  "needed": 2,
+                  "eligible": 1
+                }
+              },
+              "node_shards_min": 12644,
+              "node_shards_max": 12659,
+              "drive_shards_min": 6313,
+              "drive_shards_max": 6333,
+              "drive_shards_mean": 6325.5,
+              "drive_shards_cv": 0.0011345111133038751,
+              "fill_min": 0.847316516864,
+              "fill_max": 0.850000871424
+            },
+            {
+              "down": [
+                1,
+                4
+              ],
+              "stripes": 9499,
+              "placed": 8425,
+              "refused": 1074,
+              "first_refusal": {
+                "DriveShortage": {
+                  "node": 3,
+                  "needed": 2,
+                  "eligible": 1
+                }
+              },
+              "node_shards_min": 12623,
+              "node_shards_max": 12645,
+              "drive_shards_min": 6290,
+              "drive_shards_max": 6333,
+              "drive_shards_mean": 6318.75,
+              "drive_shards_cv": 0.002450143494423903,
+              "fill_min": 0.84422950912,
+              "fill_max": 0.850000871424
+            },
+            {
+              "down": [
+                1,
+                5
+              ],
+              "stripes": 9499,
+              "placed": 8426,
+              "refused": 1073,
+              "first_refusal": {
+                "DriveShortage": {
+                  "node": 3,
+                  "needed": 2,
+                  "eligible": 1
+                }
+              },
+              "node_shards_min": 12604,
+              "node_shards_max": 12665,
+              "drive_shards_min": 6293,
+              "drive_shards_max": 6333,
+              "drive_shards_mean": 6319.5,
+              "drive_shards_cv": 0.002282175029963756,
+              "fill_min": 0.844632162304,
+              "fill_max": 0.850000871424
+            },
+            {
+              "down": [
+                2,
+                3
+              ],
+              "stripes": 9499,
+              "placed": 8425,
+              "refused": 1074,
+              "first_refusal": {
+                "DriveShortage": {
+                  "node": 4,
+                  "needed": 2,
+                  "eligible": 1
+                }
+              },
+              "node_shards_min": 12634,
+              "node_shards_max": 12644,
+              "drive_shards_min": 6301,
+              "drive_shards_max": 6333,
+              "drive_shards_mean": 6318.75,
+              "drive_shards_cv": 0.00216669144531641,
+              "fill_min": 0.845705904128,
+              "fill_max": 0.850000871424
+            },
+            {
+              "down": [
+                2,
+                4
+              ],
+              "stripes": 9499,
+              "placed": 8422,
+              "refused": 1077,
+              "first_refusal": {
+                "DriveShortage": {
+                  "node": 3,
+                  "needed": 2,
+                  "eligible": 1
+                }
+              },
+              "node_shards_min": 12607,
+              "node_shards_max": 12664,
+              "drive_shards_min": 6289,
+              "drive_shards_max": 6333,
+              "drive_shards_mean": 6316.5,
+              "drive_shards_cv": 0.0027964096782483487,
+              "fill_min": 0.844095291392,
+              "fill_max": 0.850000871424
+            },
+            {
+              "down": [
+                2,
+                5
+              ],
+              "stripes": 9499,
+              "placed": 8408,
+              "refused": 1091,
+              "first_refusal": {
+                "DriveShortage": {
+                  "node": 3,
+                  "needed": 2,
+                  "eligible": 1
+                }
+              },
+              "node_shards_min": 12569,
+              "node_shards_max": 12666,
+              "drive_shards_min": 6258,
+              "drive_shards_max": 6333,
+              "drive_shards_mean": 6306.0,
+              "drive_shards_cv": 0.004170812029761309,
+              "fill_min": 0.839934541824,
+              "fill_max": 0.850000871424
+            },
+            {
+              "down": [
+                3,
+                4
+              ],
+              "stripes": 9499,
+              "placed": 8428,
+              "refused": 1071,
+              "first_refusal": {
+                "DriveShortage": {
+                  "node": 0,
+                  "needed": 2,
+                  "eligible": 1
+                }
+              },
+              "node_shards_min": 12615,
+              "node_shards_max": 12665,
+              "drive_shards_min": 6282,
+              "drive_shards_max": 6333,
+              "drive_shards_mean": 6321.0,
+              "drive_shards_cv": 0.002572924532082043,
+              "fill_min": 0.843155767296,
+              "fill_max": 0.850000871424
+            },
+            {
+              "down": [
+                3,
+                5
+              ],
+              "stripes": 9499,
+              "placed": 8425,
+              "refused": 1074,
+              "first_refusal": {
+                "DriveShortage": {
+                  "node": 0,
+                  "needed": 2,
+                  "eligible": 1
+                }
+              },
+              "node_shards_min": 12613,
+              "node_shards_max": 12658,
+              "drive_shards_min": 6280,
+              "drive_shards_max": 6333,
+              "drive_shards_mean": 6318.75,
+              "drive_shards_cv": 0.0027121365921446276,
+              "fill_min": 0.84288733184,
+              "fill_max": 0.850000871424
+            },
+            {
+              "down": [
+                4,
+                5
+              ],
+              "stripes": 9499,
+              "placed": 8417,
+              "refused": 1082,
+              "first_refusal": {
+                "DriveShortage": {
+                  "node": 2,
+                  "needed": 2,
+                  "eligible": 1
+                }
+              },
+              "node_shards_min": 12567,
+              "node_shards_max": 12666,
+              "drive_shards_min": 6265,
+              "drive_shards_max": 6333,
+              "drive_shards_mean": 6312.75,
+              "drive_shards_cv": 0.00376347763259015,
+              "fill_min": 0.84087406592,
+              "fill_max": 0.850000871424
+            }
+          ]
+        }
+      ],
+      "failures": [
+        {
+          "down": [
+            0
+          ],
+          "stripes": 314,
+          "margins": [
+            [
+              1,
+              314
+            ]
+          ],
+          "unreadable": 0,
+          "degraded_share": 0.1664012738853503
+        },
+        {
+          "down": [
+            1
+          ],
+          "stripes": 314,
+          "margins": [
+            [
+              1,
+              314
+            ]
+          ],
+          "unreadable": 0,
+          "degraded_share": 0.160828025477707
+        },
+        {
+          "down": [
+            2
+          ],
+          "stripes": 314,
+          "margins": [
+            [
+              1,
+              314
+            ]
+          ],
+          "unreadable": 0,
+          "degraded_share": 0.16321656050955413
+        },
+        {
+          "down": [
+            3
+          ],
+          "stripes": 314,
+          "margins": [
+            [
+              1,
+              314
+            ]
+          ],
+          "unreadable": 0,
+          "degraded_share": 0.17595541401273884
+        },
+        {
+          "down": [
+            4
+          ],
+          "stripes": 314,
+          "margins": [
+            [
+              1,
+              314
+            ]
+          ],
+          "unreadable": 0,
+          "degraded_share": 0.1751592356687898
+        },
+        {
+          "down": [
+            5
+          ],
+          "stripes": 314,
+          "margins": [
+            [
+              1,
+              314
+            ]
+          ],
+          "unreadable": 0,
+          "degraded_share": 0.15843949044585987
+        },
+        {
+          "down": [
+            0,
+            1
+          ],
+          "stripes": 314,
+          "margins": [
+            [
+              0,
+              314
+            ]
+          ],
+          "unreadable": 0,
+          "degraded_share": 0.32722929936305734
+        },
+        {
+          "down": [
+            0,
+            2
+          ],
+          "stripes": 314,
+          "margins": [
+            [
+              0,
+              314
+            ]
+          ],
+          "unreadable": 0,
+          "degraded_share": 0.32961783439490444
+        },
+        {
+          "down": [
+            0,
+            3
+          ],
+          "stripes": 314,
+          "margins": [
+            [
+              0,
+              314
+            ]
+          ],
+          "unreadable": 0,
+          "degraded_share": 0.34235668789808915
+        },
+        {
+          "down": [
+            0,
+            4
+          ],
+          "stripes": 314,
+          "margins": [
+            [
+              0,
+              314
+            ]
+          ],
+          "unreadable": 0,
+          "degraded_share": 0.34156050955414013
+        },
+        {
+          "down": [
+            0,
+            5
+          ],
+          "stripes": 314,
+          "margins": [
+            [
+              0,
+              314
+            ]
+          ],
+          "unreadable": 0,
+          "degraded_share": 0.3248407643312102
+        },
+        {
+          "down": [
+            1,
+            2
+          ],
+          "stripes": 314,
+          "margins": [
+            [
+              0,
+              314
+            ]
+          ],
+          "unreadable": 0,
+          "degraded_share": 0.32404458598726116
+        },
+        {
+          "down": [
+            1,
+            3
+          ],
+          "stripes": 314,
+          "margins": [
+            [
+              0,
+              314
+            ]
+          ],
+          "unreadable": 0,
+          "degraded_share": 0.33678343949044587
+        },
+        {
+          "down": [
+            1,
+            4
+          ],
+          "stripes": 314,
+          "margins": [
+            [
+              0,
+              314
+            ]
+          ],
+          "unreadable": 0,
+          "degraded_share": 0.3359872611464968
+        },
+        {
+          "down": [
+            1,
+            5
+          ],
+          "stripes": 314,
+          "margins": [
+            [
+              0,
+              314
+            ]
+          ],
+          "unreadable": 0,
+          "degraded_share": 0.3192675159235669
+        },
+        {
+          "down": [
+            2,
+            3
+          ],
+          "stripes": 314,
+          "margins": [
+            [
+              0,
+              314
+            ]
+          ],
+          "unreadable": 0,
+          "degraded_share": 0.339171974522293
+        },
+        {
+          "down": [
+            2,
+            4
+          ],
+          "stripes": 314,
+          "margins": [
+            [
+              0,
+              314
+            ]
+          ],
+          "unreadable": 0,
+          "degraded_share": 0.33837579617834396
+        },
+        {
+          "down": [
+            2,
+            5
+          ],
+          "stripes": 314,
+          "margins": [
+            [
+              0,
+              314
+            ]
+          ],
+          "unreadable": 0,
+          "degraded_share": 0.321656050955414
+        },
+        {
+          "down": [
+            3,
+            4
+          ],
+          "stripes": 314,
+          "margins": [
+            [
+              0,
+              314
+            ]
+          ],
+          "unreadable": 0,
+          "degraded_share": 0.35111464968152867
+        },
+        {
+          "down": [
+            3,
+            5
+          ],
+          "stripes": 314,
+          "margins": [
+            [
+              0,
+              314
+            ]
+          ],
+          "unreadable": 0,
+          "degraded_share": 0.3343949044585987
+        },
+        {
+          "down": [
+            4,
+            5
+          ],
+          "stripes": 314,
+          "margins": [
+            [
+              0,
+              314
+            ]
+          ],
+          "unreadable": 0,
+          "degraded_share": 0.3335987261146497
+        }
+      ]
+    },
+    {
+      "profile": {
+        "name": "NOW, cold.replicas = 2",
+        "nodes": 6,
+        "drives_per_node": 2,
+        "drive_bytes": 8000000000000,
+        "replicas": 2,
+        "k": 1,
+        "m": 1,
+        "max_shards_per_domain": 1,
+        "fill_limit": 0.85,
+        "reserve_drives": 1,
+        "shared_bytes_per_drive": 0,
+        "block_bytes": 1073741824
+      },
+      "keys": [],
+      "populations": [
+        {
+          "name": "L_silo",
+          "stripes": 1255,
+          "scenarios": [
+            {
+              "down": [],
+              "stripes": 1255,
+              "placed": 1255,
+              "refused": 0,
+              "first_refusal": null,
+              "node_shards_min": 404,
+              "node_shards_max": 450,
+              "drive_shards_min": 198,
+              "drive_shards_max": 240,
+              "drive_shards_mean": 209.16666666666666,
+              "drive_shards_cv": 0.05432954241826545,
+              "fill_min": 0.026575110144,
+              "fill_max": 0.03221225472
+            },
+            {
+              "down": [
+                0
+              ],
+              "stripes": 1255,
+              "placed": 1255,
+              "refused": 0,
+              "first_refusal": null,
+              "node_shards_min": 481,
+              "node_shards_max": 536,
+              "drive_shards_min": 240,
+              "drive_shards_max": 286,
+              "drive_shards_mean": 251.0,
+              "drive_shards_cv": 0.05030028399071436,
+              "fill_min": 0.03221225472,
+              "fill_max": 0.038386270208
+            },
+            {
+              "down": [
+                1
+              ],
+              "stripes": 1255,
+              "placed": 1255,
+              "refused": 0,
+              "first_refusal": null,
+              "node_shards_min": 479,
+              "node_shards_max": 526,
+              "drive_shards_min": 230,
+              "drive_shards_max": 279,
+              "drive_shards_mean": 251.0,
+              "drive_shards_cv": 0.048435467459535086,
+              "fill_min": 0.03087007744,
+              "fill_max": 0.037446746112
+            },
+            {
+              "down": [
+                2
+              ],
+              "stripes": 1255,
+              "placed": 1255,
+              "refused": 0,
+              "first_refusal": null,
+              "node_shards_min": 484,
+              "node_shards_max": 529,
+              "drive_shards_min": 239,
+              "drive_shards_max": 280,
+              "drive_shards_mean": 251.0,
+              "drive_shards_cv": 0.0453203668543741,
+              "fill_min": 0.032078036992,
+              "fill_max": 0.03758096384
+            },
+            {
+              "down": [
+                3
+              ],
+              "stripes": 1255,
+              "placed": 1255,
+              "refused": 0,
+              "first_refusal": null,
+              "node_shards_min": 487,
+              "node_shards_max": 518,
+              "drive_shards_min": 241,
+              "drive_shards_max": 274,
+              "drive_shards_mean": 251.0,
+              "drive_shards_cv": 0.038544658557602626,
+              "fill_min": 0.032346472448,
+              "fill_max": 0.036775657472
+            },
+            {
+              "down": [
+                4
+              ],
+              "stripes": 1255,
+              "placed": 1255,
+              "refused": 0,
+              "first_refusal": null,
+              "node_shards_min": 482,
+              "node_shards_max": 537,
+              "drive_shards_min": 233,
+              "drive_shards_max": 289,
+              "drive_shards_mean": 251.0,
+              "drive_shards_cv": 0.056455743693763674,
+              "fill_min": 0.031272730624,
+              "fill_max": 0.038788923392
+            },
+            {
+              "down": [
+                5
+              ],
+              "stripes": 1255,
+              "placed": 1255,
+              "refused": 0,
+              "first_refusal": null,
+              "node_shards_min": 489,
+              "node_shards_max": 518,
+              "drive_shards_min": 234,
+              "drive_shards_max": 260,
+              "drive_shards_mean": 251.0,
+              "drive_shards_cv": 0.03590081378826712,
+              "fill_min": 0.031406948352,
+              "fill_max": 0.03489660928
+            },
+            {
+              "down": [
+                0,
+                1
+              ],
+              "stripes": 1255,
+              "placed": 1255,
+              "refused": 0,
+              "first_refusal": null,
+              "node_shards_min": 618,
+              "node_shards_max": 635,
+              "drive_shards_min": 293,
+              "drive_shards_max": 342,
+              "drive_shards_mean": 313.75,
+              "drive_shards_cv": 0.040684294537752165,
+              "fill_min": 0.039325794304,
+              "fill_max": 0.045902462976
+            },
+            {
+              "down": [
+                0,
+                2
+              ],
+              "stripes": 1255,
+              "placed": 1255,
+              "refused": 0,
+              "first_refusal": null,
+              "node_shards_min": 618,
+              "node_shards_max": 646,
+              "drive_shards_min": 305,
+              "drive_shards_max": 341,
+              "drive_shards_mean": 313.75,
+              "drive_shards_cv": 0.03633151590494979,
+              "fill_min": 0.04093640704,
+              "fill_max": 0.045768245248
+            },
+            {
+              "down": [
+                0,
+                3
+              ],
+              "stripes": 1255,
+              "placed": 1255,
+              "refused": 0,
+              "first_refusal": null,
+              "node_shards_min": 609,
+              "node_shards_max": 638,
+              "drive_shards_min": 298,
+              "drive_shards_max": 334,
+              "drive_shards_mean": 313.75,
+              "drive_shards_cv": 0.03330448532909381,
+              "fill_min": 0.039996882944,
+              "fill_max": 0.044828721152
+            },
+            {
+              "down": [
+                0,
+                4
+              ],
+              "stripes": 1255,
+              "placed": 1255,
+              "refused": 0,
+              "first_refusal": null,
+              "node_shards_min": 608,
+              "node_shards_max": 647,
+              "drive_shards_min": 294,
+              "drive_shards_max": 353,
+              "drive_shards_mean": 313.75,
+              "drive_shards_cv": 0.05482975002020326,
+              "fill_min": 0.039460012032,
+              "fill_max": 0.047378857984
+            },
+            {
+              "down": [
+                0,
+                5
+              ],
+              "stripes": 1255,
+              "placed": 1255,
+              "refused": 0,
+              "first_refusal": null,
+              "node_shards_min": 613,
+              "node_shards_max": 646,
+              "drive_shards_min": 295,
+              "drive_shards_max": 332,
+              "drive_shards_mean": 313.75,
+              "drive_shards_cv": 0.03076770450407621,
+              "fill_min": 0.03959422976,
+              "fill_max": 0.044560285696
+            },
+            {
+              "down": [
+                1,
+                2
+              ],
+              "stripes": 1255,
+              "placed": 1255,
+              "refused": 0,
+              "first_refusal": null,
+              "node_shards_min": 602,
+              "node_shards_max": 646,
+              "drive_shards_min": 293,
+              "drive_shards_max": 339,
+              "drive_shards_mean": 313.75,
+              "drive_shards_cv": 0.04227615424663684,
+              "fill_min": 0.039325794304,
+              "fill_max": 0.045499809792
+            },
+            {
+              "down": [
+                1,
+                3
+              ],
+              "stripes": 1255,
+              "placed": 1255,
+              "refused": 0,
+              "first_refusal": null,
+              "node_shards_min": 611,
+              "node_shards_max": 639,
+              "drive_shards_min": 294,
+              "drive_shards_max": 336,
+              "drive_shards_mean": 313.75,
+              "drive_shards_cv": 0.03827190425027196,
+              "fill_min": 0.039460012032,
+              "fill_max": 0.045097156608
+            },
+            {
+              "down": [
+                1,
+                4
+              ],
+              "stripes": 1255,
+              "placed": 1255,
+              "refused": 0,
+              "first_refusal": null,
+              "node_shards_min": 619,
+              "node_shards_max": 646,
+              "drive_shards_min": 297,
+              "drive_shards_max": 337,
+              "drive_shards_mean": 313.75,
+              "drive_shards_cv": 0.035874276285228456,
+              "fill_min": 0.039862665216,
+              "fill_max": 0.045231374336
+            },
+            {
+              "down": [
+                1,
+                5
+              ],
+              "stripes": 1255,
+              "placed": 1255,
+              "refused": 0,
+              "first_refusal": null,
+              "node_shards_min": 617,
+              "node_shards_max": 633,
+              "drive_shards_min": 281,
+              "drive_shards_max": 336,
+              "drive_shards_mean": 313.75,
+              "drive_shards_cv": 0.04623574207618807,
+              "fill_min": 0.037715181568,
+              "fill_max": 0.045097156608
+            },
+            {
+              "down": [
+                2,
+                3
+              ],
+              "stripes": 1255,
+              "placed": 1255,
+              "refused": 0,
+              "first_refusal": null,
+              "node_shards_min": 612,
+              "node_shards_max": 637,
+              "drive_shards_min": 304,
+              "drive_shards_max": 331,
+              "drive_shards_mean": 313.75,
+              "drive_shards_cv": 0.025831976219039564,
+              "fill_min": 0.040802189312,
+              "fill_max": 0.044426067968
+            },
+            {
+              "down": [
+                2,
+                4
+              ],
+              "stripes": 1255,
+              "placed": 1255,
+              "refused": 0,
+              "first_refusal": null,
+              "node_shards_min": 603,
+              "node_shards_max": 651,
+              "drive_shards_min": 290,
+              "drive_shards_max": 349,
+              "drive_shards_mean": 313.75,
+              "drive_shards_cv": 0.05774006697846156,
+              "fill_min": 0.03892314112,
+              "fill_max": 0.046841987072
+            },
+            {
+              "down": [
+                2,
+                5
+              ],
+              "stripes": 1255,
+              "placed": 1255,
+              "refused": 0,
+              "first_refusal": null,
+              "node_shards_min": 614,
+              "node_shards_max": 649,
+              "drive_shards_min": 296,
+              "drive_shards_max": 329,
+              "drive_shards_mean": 313.75,
+              "drive_shards_cv": 0.03726324446562525,
+              "fill_min": 0.039728447488,
+              "fill_max": 0.044157632512
+            },
+            {
+              "down": [
+                3,
+                4
+              ],
+              "stripes": 1255,
+              "placed": 1255,
+              "refused": 0,
+              "first_refusal": null,
+              "node_shards_min": 608,
+              "node_shards_max": 644,
+              "drive_shards_min": 295,
+              "drive_shards_max": 339,
+              "drive_shards_mean": 313.75,
+              "drive_shards_cv": 0.04200495730070821,
+              "fill_min": 0.03959422976,
+              "fill_max": 0.045499809792
+            },
+            {
+              "down": [
+                3,
+                5
+              ],
+              "stripes": 1255,
+              "placed": 1255,
+              "refused": 0,
+              "first_refusal": null,
+              "node_shards_min": 609,
+              "node_shards_max": 644,
+              "drive_shards_min": 293,
+              "drive_shards_max": 334,
+              "drive_shards_mean": 313.75,
+              "drive_shards_cv": 0.0376024708015838,
+              "fill_min": 0.039325794304,
+              "fill_max": 0.044828721152
+            },
+            {
+              "down": [
+                4,
+                5
+              ],
+              "stripes": 1255,
+              "placed": 1255,
+              "refused": 0,
+              "first_refusal": null,
+              "node_shards_min": 615,
+              "node_shards_max": 640,
+              "drive_shards_min": 290,
+              "drive_shards_max": 328,
+              "drive_shards_mean": 313.75,
+              "drive_shards_cv": 0.0387991356938322,
+              "fill_min": 0.03892314112,
+              "fill_max": 0.044023414784
+            }
+          ]
+        },
+        {
+          "name": "capacity guard",
+          "stripes": 28498,
+          "scenarios": [
+            {
+              "down": [],
+              "stripes": 28498,
+              "placed": 28498,
+              "refused": 0,
+              "first_refusal": null,
+              "node_shards_min": 9430,
+              "node_shards_max": 9561,
+              "drive_shards_min": 4661,
+              "drive_shards_max": 4802,
+              "drive_shards_mean": 4749.666666666667,
+              "drive_shards_cv": 0.008173376398153603,
+              "fill_min": 0.625588830208,
+              "fill_max": 0.644513529856
+            },
+            {
+              "down": [
+                0
+              ],
+              "stripes": 28498,
+              "placed": 28498,
+              "refused": 0,
+              "first_refusal": null,
+              "node_shards_min": 11324,
+              "node_shards_max": 11453,
+              "drive_shards_min": 5650,
+              "drive_shards_max": 5754,
+              "drive_shards_mean": 5699.6,
+              "drive_shards_cv": 0.00516922565824359,
+              "fill_min": 0.7583301632,
+              "fill_max": 0.772288806912
+            },
+            {
+              "down": [
+                1
+              ],
+              "stripes": 28498,
+              "placed": 28498,
+              "refused": 0,
+              "first_refusal": null,
+              "node_shards_min": 11331,
+              "node_shards_max": 11437,
+              "drive_shards_min": 5608,
+              "drive_shards_max": 5747,
+              "drive_shards_mean": 5699.6,
+              "drive_shards_cv": 0.006479913002952794,
+              "fill_min": 0.752693018624,
+              "fill_max": 0.771349282816
+            },
+            {
+              "down": [
+                2
+              ],
+              "stripes": 28498,
+              "placed": 28498,
+              "refused": 0,
+              "first_refusal": null,
+              "node_shards_min": 11274,
+              "node_shards_max": 11465,
+              "drive_shards_min": 5580,
+              "drive_shards_max": 5738,
+              "drive_shards_mean": 5699.6,
+              "drive_shards_cv": 0.007961373776344972,
+              "fill_min": 0.74893492224,
+              "fill_max": 0.770141323264
+            },
+            {
+              "down": [
+                3
+              ],
+              "stripes": 28498,
+              "placed": 28498,
+              "refused": 0,
+              "first_refusal": null,
+              "node_shards_min": 11330,
+              "node_shards_max": 11486,
+              "drive_shards_min": 5628,
+              "drive_shards_max": 5753,
+              "drive_shards_mean": 5699.6,
+              "drive_shards_cv": 0.007272731172655194,
+              "fill_min": 0.755377373184,
+              "fill_max": 0.772154589184
+            },
+            {
+              "down": [
+                4
+              ],
+              "stripes": 28498,
+              "placed": 28498,
+              "refused": 0,
+              "first_refusal": null,
+              "node_shards_min": 11325,
+              "node_shards_max": 11508,
+              "drive_shards_min": 5611,
+              "drive_shards_max": 5769,
+              "drive_shards_mean": 5699.6,
+              "drive_shards_cv": 0.007553849337178849,
+              "fill_min": 0.753095671808,
+              "fill_max": 0.774302072832
+            },
+            {
+              "down": [
+                5
+              ],
+              "stripes": 28498,
+              "placed": 28498,
+              "refused": 0,
+              "first_refusal": null,
+              "node_shards_min": 11360,
+              "node_shards_max": 11473,
+              "drive_shards_min": 5626,
+              "drive_shards_max": 5738,
+              "drive_shards_mean": 5699.6,
+              "drive_shards_cv": 0.005759601999587062,
+              "fill_min": 0.755108937728,
+              "fill_max": 0.770141323264
+            },
+            {
+              "down": [
+                0,
+                1
+              ],
+              "stripes": 28498,
+              "placed": 25331,
+              "refused": 3167,
+              "first_refusal": {
+                "DriveShortage": {
+                  "node": 2,
+                  "needed": 1,
+                  "eligible": 0
+                }
+              },
+              "node_shards_min": 12664,
+              "node_shards_max": 12666,
+              "drive_shards_min": 6331,
+              "drive_shards_max": 6333,
+              "drive_shards_mean": 6332.75,
+              "drive_shards_cv": 0.00010444717188680237,
+              "fill_min": 0.849732435968,
+              "fill_max": 0.850000871424
+            },
+            {
+              "down": [
+                0,
+                2
+              ],
+              "stripes": 28498,
+              "placed": 25295,
+              "refused": 3203,
+              "first_refusal": {
+                "DriveShortage": {
+                  "node": 4,
+                  "needed": 1,
+                  "eligible": 0
+                }
+              },
+              "node_shards_min": 12592,
+              "node_shards_max": 12666,
+              "drive_shards_min": 6262,
+              "drive_shards_max": 6333,
+              "drive_shards_mean": 6323.75,
+              "drive_shards_cv": 0.0036940035661319026,
+              "fill_min": 0.840471412736,
+              "fill_max": 0.850000871424
+            },
+            {
+              "down": [
+                0,
+                3
+              ],
+              "stripes": 28498,
+              "placed": 25280,
+              "refused": 3218,
+              "first_refusal": {
+                "DriveShortage": {
+                  "node": 1,
+                  "needed": 1,
+                  "eligible": 0
+                }
+              },
+              "node_shards_min": 12562,
+              "node_shards_max": 12666,
+              "drive_shards_min": 6263,
+              "drive_shards_max": 6333,
+              "drive_shards_mean": 6320.0,
+              "drive_shards_cv": 0.0038368214091715636,
+              "fill_min": 0.840605630464,
+              "fill_max": 0.850000871424
+            },
+            {
+              "down": [
+                0,
+                4
+              ],
+              "stripes": 28498,
+              "placed": 25331,
+              "refused": 3167,
+              "first_refusal": {
+                "DriveShortage": {
+                  "node": 2,
+                  "needed": 1,
+                  "eligible": 0
+                }
+              },
+              "node_shards_min": 12664,
+              "node_shards_max": 12666,
+              "drive_shards_min": 6331,
+              "drive_shards_max": 6333,
+              "drive_shards_mean": 6332.75,
+              "drive_shards_cv": 0.00010444717188680237,
+              "fill_min": 0.849732435968,
+              "fill_max": 0.850000871424
+            },
+            {
+              "down": [
+                0,
+                5
+              ],
+              "stripes": 28498,
+              "placed": 25322,
+              "refused": 3176,
+              "first_refusal": {
+                "DriveShortage": {
+                  "node": 2,
+                  "needed": 1,
+                  "eligible": 0
+                }
+              },
+              "node_shards_min": 12646,
+              "node_shards_max": 12666,
+              "drive_shards_min": 6313,
+              "drive_shards_max": 6333,
+              "drive_shards_mean": 6330.5,
+              "drive_shards_cv": 0.0010448429472650622,
+              "fill_min": 0.847316516864,
+              "fill_max": 0.850000871424
+            },
+            {
+              "down": [
+                1,
+                2
+              ],
+              "stripes": 28498,
+              "placed": 25306,
+              "refused": 3192,
+              "first_refusal": {
+                "DriveShortage": {
+                  "node": 3,
+                  "needed": 1,
+                  "eligible": 0
+                }
+              },
+              "node_shards_min": 12614,
+              "node_shards_max": 12666,
+              "drive_shards_min": 6281,
+              "drive_shards_max": 6333,
+              "drive_shards_mean": 6326.5,
+              "drive_shards_cv": 0.0027183092581869656,
+              "fill_min": 0.843021549568,
+              "fill_max": 0.850000871424
+            },
+            {
+              "down": [
+                1,
+                3
+              ],
+              "stripes": 28498,
+              "placed": 25331,
+              "refused": 3167,
+              "first_refusal": {
+                "DriveShortage": {
+                  "node": 2,
+                  "needed": 1,
+                  "eligible": 0
+                }
+              },
+              "node_shards_min": 12664,
+              "node_shards_max": 12666,
+              "drive_shards_min": 6331,
+              "drive_shards_max": 6333,
+              "drive_shards_mean": 6332.75,
+              "drive_shards_cv": 0.00010444717188680237,
+              "fill_min": 0.849732435968,
+              "fill_max": 0.850000871424
+            },
+            {
+              "down": [
+                1,
+                4
+              ],
+              "stripes": 28498,
+              "placed": 25289,
+              "refused": 3209,
+              "first_refusal": {
+                "DriveShortage": {
+                  "node": 2,
+                  "needed": 1,
+                  "eligible": 0
+                }
+              },
+              "node_shards_min": 12580,
+              "node_shards_max": 12666,
+              "drive_shards_min": 6257,
+              "drive_shards_max": 6333,
+              "drive_shards_mean": 6322.25,
+              "drive_shards_cv": 0.003935063392620328,
+              "fill_min": 0.839800324096,
+              "fill_max": 0.850000871424
+            },
+            {
+              "down": [
+                1,
+                5
+              ],
+              "stripes": 28498,
+              "placed": 25324,
+              "refused": 3174,
+              "first_refusal": {
+                "DriveShortage": {
+                  "node": 2,
+                  "needed": 1,
+                  "eligible": 0
+                }
+              },
+              "node_shards_min": 12650,
+              "node_shards_max": 12666,
+              "drive_shards_min": 6317,
+              "drive_shards_max": 6333,
+              "drive_shards_mean": 6331.0,
+              "drive_shards_cv": 0.0008358083434100744,
+              "fill_min": 0.847853387776,
+              "fill_max": 0.850000871424
+            },
+            {
+              "down": [
+                2,
+                3
+              ],
+              "stripes": 28498,
+              "placed": 25299,
+              "refused": 3199,
+              "first_refusal": {
+                "DriveShortage": {
+                  "node": 1,
+                  "needed": 1,
+                  "eligible": 0
+                }
+              },
+              "node_shards_min": 12600,
+              "node_shards_max": 12666,
+              "drive_shards_min": 6270,
+              "drive_shards_max": 6333,
+              "drive_shards_mean": 6324.75,
+              "drive_shards_cv": 0.0032755193447013245,
+              "fill_min": 0.84154515456,
+              "fill_max": 0.850000871424
+            },
+            {
+              "down": [
+                2,
+                4
+              ],
+              "stripes": 28498,
+              "placed": 25316,
+              "refused": 3182,
+              "first_refusal": {
+                "DriveShortage": {
+                  "node": 3,
+                  "needed": 1,
+                  "eligible": 0
+                }
+              },
+              "node_shards_min": 12634,
+              "node_shards_max": 12666,
+              "drive_shards_min": 6301,
+              "drive_shards_max": 6333,
+              "drive_shards_mean": 6329.0,
+              "drive_shards_cv": 0.0016721449272015109,
+              "fill_min": 0.845705904128,
+              "fill_max": 0.850000871424
+            },
+            {
+              "down": [
+                2,
+                5
+              ],
+              "stripes": 28498,
+              "placed": 25332,
+              "refused": 3166,
+              "first_refusal": {
+                "DriveShortage": {
+                  "node": 3,
+                  "needed": 1,
+                  "eligible": 0
+                }
+              },
+              "node_shards_min": 12666,
+              "node_shards_max": 12666,
+              "drive_shards_min": 6333,
+              "drive_shards_max": 6333,
+              "drive_shards_mean": 6333.0,
+              "drive_shards_cv": 0.0,
+              "fill_min": 0.850000871424,
+              "fill_max": 0.850000871424
+            },
+            {
+              "down": [
+                3,
+                4
+              ],
+              "stripes": 28498,
+              "placed": 25281,
+              "refused": 3217,
+              "first_refusal": {
+                "DriveShortage": {
+                  "node": 2,
+                  "needed": 1,
+                  "eligible": 0
+                }
+              },
+              "node_shards_min": 12564,
+              "node_shards_max": 12666,
+              "drive_shards_min": 6277,
+              "drive_shards_max": 6333,
+              "drive_shards_mean": 6320.25,
+              "drive_shards_cv": 0.003516428103706016,
+              "fill_min": 0.842484678656,
+              "fill_max": 0.850000871424
+            },
+            {
+              "down": [
+                3,
+                5
+              ],
+              "stripes": 28498,
+              "placed": 25326,
+              "refused": 3172,
+              "first_refusal": {
+                "DriveShortage": {
+                  "node": 2,
+                  "needed": 1,
+                  "eligible": 0
+                }
+              },
+              "node_shards_min": 12654,
+              "node_shards_max": 12666,
+              "drive_shards_min": 6321,
+              "drive_shards_max": 6333,
+              "drive_shards_mean": 6331.5,
+              "drive_shards_cv": 0.000626806754575833,
+              "fill_min": 0.848390258688,
+              "fill_max": 0.850000871424
+            },
+            {
+              "down": [
+                4,
+                5
+              ],
+              "stripes": 28498,
+              "placed": 25298,
+              "refused": 3200,
+              "first_refusal": {
+                "DriveShortage": {
+                  "node": 2,
+                  "needed": 1,
+                  "eligible": 0
+                }
+              },
+              "node_shards_min": 12598,
+              "node_shards_max": 12666,
+              "drive_shards_min": 6281,
+              "drive_shards_max": 6333,
+              "drive_shards_mean": 6324.5,
+              "drive_shards_cv": 0.0027283475257707957,
+              "fill_min": 0.843021549568,
+              "fill_max": 0.850000871424
+            }
+          ]
+        }
+      ],
+      "failures": [
+        {
+          "down": [
+            0
+          ],
+          "stripes": 1255,
+          "margins": [
+            [
+              0,
+              404
+            ],
+            [
+              1,
+              851
+            ]
+          ],
+          "unreadable": 0,
+          "degraded_share": 0.17928286852589642
+        },
+        {
+          "down": [
+            1
+          ],
+          "stripes": 1255,
+          "margins": [
+            [
+              0,
+              406
+            ],
+            [
+              1,
+              849
+            ]
+          ],
+          "unreadable": 0,
+          "degraded_share": 0.15617529880478087
+        },
+        {
+          "down": [
+            2
+          ],
+          "stripes": 1255,
+          "margins": [
+            [
+              0,
+              428
+            ],
+            [
+              1,
+              827
+            ]
+          ],
+          "unreadable": 0,
+          "degraded_share": 0.17051792828685258
+        },
+        {
+          "down": [
+            3
+          ],
+          "stripes": 1255,
+          "margins": [
+            [
+              0,
+              406
+            ],
+            [
+              1,
+              849
+            ]
+          ],
+          "unreadable": 0,
+          "degraded_share": 0.1450199203187251
+        },
+        {
+          "down": [
+            4
+          ],
+          "stripes": 1255,
+          "margins": [
+            [
+              0,
+              416
+            ],
+            [
+              1,
+              839
+            ]
+          ],
+          "unreadable": 0,
+          "degraded_share": 0.1752988047808765
+        },
+        {
+          "down": [
+            5
+          ],
+          "stripes": 1255,
+          "margins": [
+            [
+              0,
+              450
+            ],
+            [
+              1,
+              805
+            ]
+          ],
+          "unreadable": 0,
+          "degraded_share": 0.17370517928286852
+        },
+        {
+          "down": [
+            0,
+            1
+          ],
+          "stripes": 1255,
+          "margins": [
+            [
+              -1,
+              85
+            ],
+            [
+              0,
+              640
+            ],
+            [
+              1,
+              530
+            ]
+          ],
+          "unreadable": 85,
+          "degraded_share": 0.3354581673306773
+        },
+        {
+          "down": [
+            0,
+            2
+          ],
+          "stripes": 1255,
+          "margins": [
+            [
+              -1,
+              93
+            ],
+            [
+              0,
+              646
+            ],
+            [
+              1,
+              516
+            ]
+          ],
+          "unreadable": 93,
+          "degraded_share": 0.349800796812749
+        },
+        {
+          "down": [
+            0,
+            3
+          ],
+          "stripes": 1255,
+          "margins": [
+            [
+              -1,
+              80
+            ],
+            [
+              0,
+              650
+            ],
+            [
+              1,
+              525
+            ]
+          ],
+          "unreadable": 80,
+          "degraded_share": 0.3243027888446215
+        },
+        {
+          "down": [
+            0,
+            4
+          ],
+          "stripes": 1255,
+          "margins": [
+            [
+              -1,
+              68
+            ],
+            [
+              0,
+              684
+            ],
+            [
+              1,
+              503
+            ]
+          ],
+          "unreadable": 68,
+          "degraded_share": 0.3545816733067729
+        },
+        {
+          "down": [
+            0,
+            5
+          ],
+          "stripes": 1255,
+          "margins": [
+            [
+              -1,
+              78
+            ],
+            [
+              0,
+              698
+            ],
+            [
+              1,
+              479
+            ]
+          ],
+          "unreadable": 78,
+          "degraded_share": 0.3529880478087649
+        },
+        {
+          "down": [
+            1,
+            2
+          ],
+          "stripes": 1255,
+          "margins": [
+            [
+              -1,
+              77
+            ],
+            [
+              0,
+              680
+            ],
+            [
+              1,
+              498
+            ]
+          ],
+          "unreadable": 77,
+          "degraded_share": 0.32669322709163345
+        },
+        {
+          "down": [
+            1,
+            3
+          ],
+          "stripes": 1255,
+          "margins": [
+            [
+              -1,
+              74
+            ],
+            [
+              0,
+              664
+            ],
+            [
+              1,
+              517
+            ]
+          ],
+          "unreadable": 74,
+          "degraded_share": 0.301195219123506
+        },
+        {
+          "down": [
+            1,
+            4
+          ],
+          "stripes": 1255,
+          "margins": [
+            [
+              -1,
+              81
+            ],
+            [
+              0,
+              660
+            ],
+            [
+              1,
+              514
+            ]
+          ],
+          "unreadable": 81,
+          "degraded_share": 0.3314741035856574
+        },
+        {
+          "down": [
+            1,
+            5
+          ],
+          "stripes": 1255,
+          "margins": [
+            [
+              -1,
+              89
+            ],
+            [
+              0,
+              678
+            ],
+            [
+              1,
+              488
+            ]
+          ],
+          "unreadable": 89,
+          "degraded_share": 0.3298804780876494
+        },
+        {
+          "down": [
+            2,
+            3
+          ],
+          "stripes": 1255,
+          "margins": [
+            [
+              -1,
+              74
+            ],
+            [
+              0,
+              686
+            ],
+            [
+              1,
+              495
+            ]
+          ],
+          "unreadable": 74,
+          "degraded_share": 0.3155378486055777
+        },
+        {
+          "down": [
+            2,
+            4
+          ],
+          "stripes": 1255,
+          "margins": [
+            [
+              -1,
+              91
+            ],
+            [
+              0,
+              662
+            ],
+            [
+              1,
+              502
+            ]
+          ],
+          "unreadable": 91,
+          "degraded_share": 0.3458167330677291
+        },
+        {
+          "down": [
+            2,
+            5
+          ],
+          "stripes": 1255,
+          "margins": [
+            [
+              -1,
+              93
+            ],
+            [
+              0,
+              692
+            ],
+            [
+              1,
+              470
+            ]
+          ],
+          "unreadable": 93,
+          "degraded_share": 0.34422310756972113
+        },
+        {
+          "down": [
+            3,
+            4
+          ],
+          "stripes": 1255,
+          "margins": [
+            [
+              -1,
+              82
+            ],
+            [
+              0,
+              658
+            ],
+            [
+              1,
+              515
+            ]
+          ],
+          "unreadable": 82,
+          "degraded_share": 0.3203187250996016
+        },
+        {
+          "down": [
+            3,
+            5
+          ],
+          "stripes": 1255,
+          "margins": [
+            [
+              -1,
+              96
+            ],
+            [
+              0,
+              664
+            ],
+            [
+              1,
+              495
+            ]
+          ],
+          "unreadable": 96,
+          "degraded_share": 0.3187250996015936
+        },
+        {
+          "down": [
+            4,
+            5
+          ],
+          "stripes": 1255,
+          "margins": [
+            [
+              -1,
+              94
+            ],
+            [
+              0,
+              678
+            ],
+            [
+              1,
+              483
+            ]
+          ],
+          "unreadable": 94,
+          "degraded_share": 0.349003984063745
+        }
+      ]
+    }
+  ]
+}

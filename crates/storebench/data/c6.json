@@ -1,0 +1,2507 @@
+{
+  "objects": 1526337,
+  "l_silo": 1346628725788,
+  "kinds": [
+    {
+      "kind": "pack",
+      "total": {
+        "objects": 866682,
+        "bytes": 1329197244993
+      },
+      "classes": [
+        {
+          "objects": 724932,
+          "bytes": 3337615918
+        },
+        {
+          "objects": 71718,
+          "bytes": 22976471629
+        },
+        {
+          "objects": 25737,
+          "bytes": 60680295355
+        },
+        {
+          "objects": 26586,
+          "bytes": 229272539706
+        },
+        {
+          "objects": 17677,
+          "bytes": 1002096645937
+        },
+        {
+          "objects": 32,
+          "bytes": 10833676448
+        }
+      ]
+    },
+    {
+      "kind": "large-blob",
+      "total": {
+        "objects": 128,
+        "bytes": 16852649421
+      },
+      "classes": [
+        {
+          "objects": 0,
+          "bytes": 0
+        },
+        {
+          "objects": 0,
+          "bytes": 0
+        },
+        {
+          "objects": 0,
+          "bytes": 0
+        },
+        {
+          "objects": 0,
+          "bytes": 0
+        },
+        {
+          "objects": 128,
+          "bytes": 16852649421
+        },
+        {
+          "objects": 0,
+          "bytes": 0
+        }
+      ]
+    },
+    {
+      "kind": "tree-list",
+      "total": {
+        "objects": 659523,
+        "bytes": 578831370
+      },
+      "classes": [
+        {
+          "objects": 659235,
+          "bytes": 393409724
+        },
+        {
+          "objects": 256,
+          "bytes": 48875758
+        },
+        {
+          "objects": 16,
+          "bytes": 42141320
+        },
+        {
+          "objects": 16,
+          "bytes": 94404568
+        },
+        {
+          "objects": 0,
+          "bytes": 0
+        },
+        {
+          "objects": 0,
+          "bytes": 0
+        }
+      ]
+    },
+    {
+      "kind": "other",
+      "total": {
+        "objects": 4,
+        "bytes": 4
+      },
+      "classes": [
+        {
+          "objects": 4,
+          "bytes": 4
+        },
+        {
+          "objects": 0,
+          "bytes": 0
+        },
+        {
+          "objects": 0,
+          "bytes": 0
+        },
+        {
+          "objects": 0,
+          "bytes": 0
+        },
+        {
+          "objects": 0,
+          "bytes": 0
+        },
+        {
+          "objects": 0,
+          "bytes": 0
+        }
+      ]
+    }
+  ],
+  "buckets": [
+    {
+      "name": "cas-store",
+      "count": {
+        "objects": 1526333,
+        "bytes": 1346628725784
+      }
+    },
+    {
+      "name": "tierstore-cold",
+      "count": {
+        "objects": 4,
+        "bytes": 4
+      }
+    }
+  ],
+  "prefixes": [
+    {
+      "name": "cas-store/",
+      "count": {
+        "objects": 757483,
+        "bytes": 106843470648
+      }
+    },
+    {
+      "name": "cas-store/deployment 1",
+      "count": {
+        "objects": 730198,
+        "bytes": 1225390620704
+      }
+    },
+    {
+      "name": "cas-store/deployment 2",
+      "count": {
+        "objects": 8734,
+        "bytes": 5306499379
+      }
+    },
+    {
+      "name": "cas-store/deployment 3",
+      "count": {
+        "objects": 25599,
+        "bytes": 4406176823
+      }
+    },
+    {
+      "name": "cas-store/deployment 4",
+      "count": {
+        "objects": 3928,
+        "bytes": 2728984386
+      }
+    },
+    {
+      "name": "cas-store/deployment 5",
+      "count": {
+        "objects": 303,
+        "bytes": 1092326495
+      }
+    },
+    {
+      "name": "cas-store/deployment 6",
+      "count": {
+        "objects": 88,
+        "bytes": 860647349
+      }
+    },
+    {
+      "name": "tierstore-cold/deployment 7",
+      "count": {
+        "objects": 4,
+        "bytes": 4
+      }
+    }
+  ],
+  "multipart": {
+    "objects": 16272,
+    "bytes": 939678940004
+  },
+  "ingest": {
+    "first_ms": 1791845381463,
+    "last_ms": 1794994605752,
+    "per_day": [
+      {
+        "date": "2026-10-12",
+        "count": {
+          "objects": 78,
+          "bytes": 69685086
+        }
+      },
+      {
+        "date": "2026-10-13",
+        "count": {
+          "objects": 18757,
+          "bytes": 524078385
+        }
+      },
+      {
+        "date": "2026-10-14",
+        "count": {
+          "objects": 1905,
+          "bytes": 1820200246
+        }
+      },
+      {
+        "date": "2026-10-15",
+        "count": {
+          "objects": 6050,
+          "bytes": 5160419176
+        }
+      },
+      {
+        "date": "2026-10-16",
+        "count": {
+          "objects": 7737,
+          "bytes": 4894859588
+        }
+      },
+      {
+        "date": "2026-10-17",
+        "count": {
+          "objects": 8191,
+          "bytes": 2278819405
+        }
+      },
+      {
+        "date": "2026-10-18",
+        "count": {
+          "objects": 32553,
+          "bytes": 431247561
+        }
+      },
+      {
+        "date": "2026-10-19",
+        "count": {
+          "objects": 66240,
+          "bytes": 6591891670
+        }
+      },
+      {
+        "date": "2026-10-20",
+        "count": {
+          "objects": 104996,
+          "bytes": 9543548993
+        }
+      },
+      {
+        "date": "2026-10-21",
+        "count": {
+          "objects": 90007,
+          "bytes": 4609389119
+        }
+      },
+      {
+        "date": "2026-10-22",
+        "count": {
+          "objects": 94760,
+          "bytes": 10696951972
+        }
+      },
+      {
+        "date": "2026-10-23",
+        "count": {
+          "objects": 117353,
+          "bytes": 9781798207
+        }
+      },
+      {
+        "date": "2026-10-24",
+        "count": {
+          "objects": 105885,
+          "bytes": 106251902358
+        }
+      },
+      {
+        "date": "2026-10-25",
+        "count": {
+          "objects": 15718,
+          "bytes": 108148895694
+        }
+      },
+      {
+        "date": "2026-10-26",
+        "count": {
+          "objects": 11287,
+          "bytes": 78830368362
+        }
+      },
+      {
+        "date": "2026-10-27",
+        "count": {
+          "objects": 15241,
+          "bytes": 144179159223
+        }
+      },
+      {
+        "date": "2026-10-28",
+        "count": {
+          "objects": 14189,
+          "bytes": 170360801980
+        }
+      },
+      {
+        "date": "2026-10-29",
+        "count": {
+          "objects": 3166,
+          "bytes": 54260444408
+        }
+      },
+      {
+        "date": "2026-10-30",
+        "count": {
+          "objects": 12402,
+          "bytes": 246611244845
+        }
+      },
+      {
+        "date": "2026-10-31",
+        "count": {
+          "objects": 10024,
+          "bytes": 188005366890
+        }
+      },
+      {
+        "date": "2026-11-01",
+        "count": {
+          "objects": 8238,
+          "bytes": 32189508334
+        }
+      },
+      {
+        "date": "2026-11-02",
+        "count": {
+          "objects": 4415,
+          "bytes": 17122802583
+        }
+      },
+      {
+        "date": "2026-11-03",
+        "count": {
+          "objects": 2518,
+          "bytes": 10392872630
+        }
+      },
+      {
+        "date": "2026-11-04",
+        "count": {
+          "objects": 1072,
+          "bytes": 1203139238
+        }
+      },
+      {
+        "date": "2026-11-05",
+        "count": {
+          "objects": 1683,
+          "bytes": 555159154
+        }
+      },
+      {
+        "date": "2026-11-06",
+        "count": {
+          "objects": 1741,
+          "bytes": 721527929
+        }
+      },
+      {
+        "date": "2026-11-07",
+        "count": {
+          "objects": 1334,
+          "bytes": 565799447
+        }
+      },
+      {
+        "date": "2026-11-08",
+        "count": {
+          "objects": 928,
+          "bytes": 714804240
+        }
+      },
+      {
+        "date": "2026-11-09",
+        "count": {
+          "objects": 1438,
+          "bytes": 281439410
+        }
+      },
+      {
+        "date": "2026-11-10",
+        "count": {
+          "objects": 3575,
+          "bytes": 21223109914
+        }
+      },
+      {
+        "date": "2026-11-11",
+        "count": {
+          "objects": 2742,
+          "bytes": 718855000
+        }
+      },
+      {
+        "date": "2026-11-12",
+        "count": {
+          "objects": 2631,
+          "bytes": 1045164093
+        }
+      },
+      {
+        "date": "2026-11-13",
+        "count": {
+          "objects": 536,
+          "bytes": 29130072
+        }
+      },
+      {
+        "date": "2026-11-14",
+        "count": {
+          "objects": 5977,
+          "bytes": 497525274
+        }
+      },
+      {
+        "date": "2026-11-15",
+        "count": {
+          "objects": 236127,
+          "bytes": 35824423956
+        }
+      },
+      {
+        "date": "2026-11-16",
+        "count": {
+          "objects": 118248,
+          "bytes": 20221736766
+        }
+      },
+      {
+        "date": "2026-11-17",
+        "count": {
+          "objects": 271280,
+          "bytes": 34577493581
+        }
+      },
+      {
+        "date": "2026-11-18",
+        "count": {
+          "objects": 125315,
+          "bytes": 15693160999
+        }
+      }
+    ],
+    "recent_days": [
+      {
+        "date": "2026-11-12",
+        "count": {
+          "objects": 2631,
+          "bytes": 1045164093
+        }
+      },
+      {
+        "date": "2026-11-13",
+        "count": {
+          "objects": 536,
+          "bytes": 29130072
+        }
+      },
+      {
+        "date": "2026-11-14",
+        "count": {
+          "objects": 5977,
+          "bytes": 497525274
+        }
+      },
+      {
+        "date": "2026-11-15",
+        "count": {
+          "objects": 236127,
+          "bytes": 35824423956
+        }
+      },
+      {
+        "date": "2026-11-16",
+        "count": {
+          "objects": 118248,
+          "bytes": 20221736766
+        }
+      },
+      {
+        "date": "2026-11-17",
+        "count": {
+          "objects": 271280,
+          "bytes": 34577493581
+        }
+      },
+      {
+        "date": "2026-11-18",
+        "count": {
+          "objects": 125315,
+          "bytes": 15693160999
+        }
+      }
+    ],
+    "recent_total": {
+      "objects": 760114,
+      "bytes": 107888634741
+    }
+  },
+  "live": {
+    "packs_listed": 866682,
+    "pack_bytes": 1329197244993,
+    "packs_missing": 675285,
+    "packs_scanned": 191397,
+    "packs_ok": 159678,
+    "packs_bad": 31719,
+    "bad_bytes": 115769337062,
+    "statuses": [
+      {
+        "status": "get-error",
+        "packs": 27622
+      },
+      {
+        "status": "no-magic",
+        "packs": 4097
+      },
+      {
+        "status": "ok",
+        "packs": 159678
+      }
+    ],
+    "blobs": 19073478,
+    "distinct_digests": 9017047,
+    "distinct_bytes": 388194644273,
+    "live_packs": 138528,
+    "live_bytes": 1015598534851,
+    "dead_packs": 21150,
+    "dead_bytes": 194636212948,
+    "dead_fraction": 0.16082517321699463,
+    "large_blob_bytes": 16852649421,
+    "tree_list_bytes": 578831370,
+    "missing_bytes": 3193160132,
+    "missing_max": 535232515,
+    "uncertain_packs": 138528,
+    "uncertain_bytes": 1015598534851,
+    "l_live": 1151992512836,
+    "could_be_dead_bytes": 723666136766,
+    "l_live_low": 309363878876
+  },
+  "trees": {
+    "checked": 6599,
+    "json": 0,
+    "not_json": 0,
+    "errors": 6599
+  },
+  "large_min": [
+    {
+      "threshold": 262144,
+      "at_or_below": {
+        "objects": 1425236,
+        "bytes": 9459019744
+      },
+      "above": {
+        "objects": 101101,
+        "bytes": 1337169706044
+      },
+      "per_day": [
+        {
+          "date": "2026-10-12",
+          "at_or_below": {
+            "objects": 71,
+            "bytes": 1812466
+          },
+          "above": {
+            "objects": 7,
+            "bytes": 67872620
+          }
+        },
+        {
+          "date": "2026-10-13",
+          "at_or_below": {
+            "objects": 18618,
+            "bytes": 191852002
+          },
+          "above": {
+            "objects": 139,
+            "bytes": 332226383
+          }
+        },
+        {
+          "date": "2026-10-14",
+          "at_or_below": {
+            "objects": 1834,
+            "bytes": 34443556
+          },
+          "above": {
+            "objects": 71,
+            "bytes": 1785756690
+          }
+        },
+        {
+          "date": "2026-10-15",
+          "at_or_below": {
+            "objects": 5215,
+            "bytes": 187127614
+          },
+          "above": {
+            "objects": 835,
+            "bytes": 4973291562
+          }
+        },
+        {
+          "date": "2026-10-16",
+          "at_or_below": {
+            "objects": 6639,
+            "bytes": 222499579
+          },
+          "above": {
+            "objects": 1098,
+            "bytes": 4672360009
+          }
+        },
+        {
+          "date": "2026-10-17",
+          "at_or_below": {
+            "objects": 7098,
+            "bytes": 159183106
+          },
+          "above": {
+            "objects": 1093,
+            "bytes": 2119636299
+          }
+        },
+        {
+          "date": "2026-10-18",
+          "at_or_below": {
+            "objects": 32328,
+            "bytes": 279155270
+          },
+          "above": {
+            "objects": 225,
+            "bytes": 152092291
+          }
+        },
+        {
+          "date": "2026-10-19",
+          "at_or_below": {
+            "objects": 65844,
+            "bytes": 406120062
+          },
+          "above": {
+            "objects": 396,
+            "bytes": 6185771608
+          }
+        },
+        {
+          "date": "2026-10-20",
+          "at_or_below": {
+            "objects": 103667,
+            "bytes": 429972284
+          },
+          "above": {
+            "objects": 1329,
+            "bytes": 9113576709
+          }
+        },
+        {
+          "date": "2026-10-21",
+          "at_or_below": {
+            "objects": 88330,
+            "bytes": 429010658
+          },
+          "above": {
+            "objects": 1677,
+            "bytes": 4180378461
+          }
+        },
+        {
+          "date": "2026-10-22",
+          "at_or_below": {
+            "objects": 92462,
+            "bytes": 394347712
+          },
+          "above": {
+            "objects": 2298,
+            "bytes": 10302604260
+          }
+        },
+        {
+          "date": "2026-10-23",
+          "at_or_below": {
+            "objects": 115151,
+            "bytes": 440621612
+          },
+          "above": {
+            "objects": 2202,
+            "bytes": 9341176595
+          }
+        },
+        {
+          "date": "2026-10-24",
+          "at_or_below": {
+            "objects": 94653,
+            "bytes": 1125731340
+          },
+          "above": {
+            "objects": 11232,
+            "bytes": 105126171018
+          }
+        },
+        {
+          "date": "2026-10-25",
+          "at_or_below": {
+            "objects": 6225,
+            "bytes": 417096201
+          },
+          "above": {
+            "objects": 9493,
+            "bytes": 107731799493
+          }
+        },
+        {
+          "date": "2026-10-26",
+          "at_or_below": {
+            "objects": 4121,
+            "bytes": 316504147
+          },
+          "above": {
+            "objects": 7166,
+            "bytes": 78513864215
+          }
+        },
+        {
+          "date": "2026-10-27",
+          "at_or_below": {
+            "objects": 3501,
+            "bytes": 299424013
+          },
+          "above": {
+            "objects": 11740,
+            "bytes": 143879735210
+          }
+        },
+        {
+          "date": "2026-10-28",
+          "at_or_below": {
+            "objects": 2971,
+            "bytes": 253754332
+          },
+          "above": {
+            "objects": 11218,
+            "bytes": 170107047648
+          }
+        },
+        {
+          "date": "2026-10-29",
+          "at_or_below": {
+            "objects": 1203,
+            "bytes": 71648711
+          },
+          "above": {
+            "objects": 1963,
+            "bytes": 54188795697
+          }
+        },
+        {
+          "date": "2026-10-30",
+          "at_or_below": {
+            "objects": 4325,
+            "bytes": 255878291
+          },
+          "above": {
+            "objects": 8077,
+            "bytes": 246355366554
+          }
+        },
+        {
+          "date": "2026-10-31",
+          "at_or_below": {
+            "objects": 4618,
+            "bytes": 218063438
+          },
+          "above": {
+            "objects": 5406,
+            "bytes": 187787303452
+          }
+        },
+        {
+          "date": "2026-11-01",
+          "at_or_below": {
+            "objects": 5059,
+            "bytes": 249012694
+          },
+          "above": {
+            "objects": 3179,
+            "bytes": 31940495640
+          }
+        },
+        {
+          "date": "2026-11-02",
+          "at_or_below": {
+            "objects": 2673,
+            "bytes": 131851900
+          },
+          "above": {
+            "objects": 1742,
+            "bytes": 16990950683
+          }
+        },
+        {
+          "date": "2026-11-03",
+          "at_or_below": {
+            "objects": 1640,
+            "bytes": 77000898
+          },
+          "above": {
+            "objects": 878,
+            "bytes": 10315871732
+          }
+        },
+        {
+          "date": "2026-11-04",
+          "at_or_below": {
+            "objects": 753,
+            "bytes": 47869407
+          },
+          "above": {
+            "objects": 319,
+            "bytes": 1155269831
+          }
+        },
+        {
+          "date": "2026-11-05",
+          "at_or_below": {
+            "objects": 1520,
+            "bytes": 56260745
+          },
+          "above": {
+            "objects": 163,
+            "bytes": 498898409
+          }
+        },
+        {
+          "date": "2026-11-06",
+          "at_or_below": {
+            "objects": 1559,
+            "bytes": 53379183
+          },
+          "above": {
+            "objects": 182,
+            "bytes": 668148746
+          }
+        },
+        {
+          "date": "2026-11-07",
+          "at_or_below": {
+            "objects": 1191,
+            "bytes": 43427229
+          },
+          "above": {
+            "objects": 143,
+            "bytes": 522372218
+          }
+        },
+        {
+          "date": "2026-11-08",
+          "at_or_below": {
+            "objects": 683,
+            "bytes": 13758322
+          },
+          "above": {
+            "objects": 245,
+            "bytes": 701045918
+          }
+        },
+        {
+          "date": "2026-11-09",
+          "at_or_below": {
+            "objects": 1410,
+            "bytes": 49584554
+          },
+          "above": {
+            "objects": 28,
+            "bytes": 231854856
+          }
+        },
+        {
+          "date": "2026-11-10",
+          "at_or_below": {
+            "objects": 2770,
+            "bytes": 82574936
+          },
+          "above": {
+            "objects": 805,
+            "bytes": 21140534978
+          }
+        },
+        {
+          "date": "2026-11-11",
+          "at_or_below": {
+            "objects": 2470,
+            "bytes": 95199921
+          },
+          "above": {
+            "objects": 272,
+            "bytes": 623655079
+          }
+        },
+        {
+          "date": "2026-11-12",
+          "at_or_below": {
+            "objects": 2227,
+            "bytes": 76107469
+          },
+          "above": {
+            "objects": 404,
+            "bytes": 969056624
+          }
+        },
+        {
+          "date": "2026-11-13",
+          "at_or_below": {
+            "objects": 529,
+            "bytes": 16371140
+          },
+          "above": {
+            "objects": 7,
+            "bytes": 12758932
+          }
+        },
+        {
+          "date": "2026-11-14",
+          "at_or_below": {
+            "objects": 5929,
+            "bytes": 27712458
+          },
+          "above": {
+            "objects": 48,
+            "bytes": 469812816
+          }
+        },
+        {
+          "date": "2026-11-15",
+          "at_or_below": {
+            "objects": 232867,
+            "bytes": 568482108
+          },
+          "above": {
+            "objects": 3260,
+            "bytes": 35255941848
+          }
+        },
+        {
+          "date": "2026-11-16",
+          "at_or_below": {
+            "objects": 115523,
+            "bytes": 358184752
+          },
+          "above": {
+            "objects": 2725,
+            "bytes": 19863552014
+          }
+        },
+        {
+          "date": "2026-11-17",
+          "at_or_below": {
+            "objects": 265215,
+            "bytes": 908654331
+          },
+          "above": {
+            "objects": 6065,
+            "bytes": 33668839250
+          }
+        },
+        {
+          "date": "2026-11-18",
+          "at_or_below": {
+            "objects": 122344,
+            "bytes": 469341303
+          },
+          "above": {
+            "objects": 2971,
+            "bytes": 15223819696
+          }
+        }
+      ]
+    },
+    {
+      "threshold": 1048576,
+      "at_or_below": {
+        "objects": 1456145,
+        "bytes": 26756373033
+      },
+      "above": {
+        "objects": 70192,
+        "bytes": 1319872352755
+      },
+      "per_day": [
+        {
+          "date": "2026-10-12",
+          "at_or_below": {
+            "objects": 73,
+            "bytes": 3070618
+          },
+          "above": {
+            "objects": 5,
+            "bytes": 66614468
+          }
+        },
+        {
+          "date": "2026-10-13",
+          "at_or_below": {
+            "objects": 18723,
+            "bytes": 239670572
+          },
+          "above": {
+            "objects": 34,
+            "bytes": 284407813
+          }
+        },
+        {
+          "date": "2026-10-14",
+          "at_or_below": {
+            "objects": 1860,
+            "bytes": 46887480
+          },
+          "above": {
+            "objects": 45,
+            "bytes": 1773312766
+          }
+        },
+        {
+          "date": "2026-10-15",
+          "at_or_below": {
+            "objects": 5664,
+            "bytes": 411076362
+          },
+          "above": {
+            "objects": 386,
+            "bytes": 4749342814
+          }
+        },
+        {
+          "date": "2026-10-16",
+          "at_or_below": {
+            "objects": 7256,
+            "bytes": 527603868
+          },
+          "above": {
+            "objects": 481,
+            "bytes": 4367255720
+          }
+        },
+        {
+          "date": "2026-10-17",
+          "at_or_below": {
+            "objects": 7715,
+            "bytes": 519209296
+          },
+          "above": {
+            "objects": 476,
+            "bytes": 1759610109
+          }
+        },
+        {
+          "date": "2026-10-18",
+          "at_or_below": {
+            "objects": 32529,
+            "bytes": 372254813
+          },
+          "above": {
+            "objects": 24,
+            "bytes": 58992748
+          }
+        },
+        {
+          "date": "2026-10-19",
+          "at_or_below": {
+            "objects": 66054,
+            "bytes": 512917014
+          },
+          "above": {
+            "objects": 186,
+            "bytes": 6078974656
+          }
+        },
+        {
+          "date": "2026-10-20",
+          "at_or_below": {
+            "objects": 104188,
+            "bytes": 683845327
+          },
+          "above": {
+            "objects": 808,
+            "bytes": 8859703666
+          }
+        },
+        {
+          "date": "2026-10-21",
+          "at_or_below": {
+            "objects": 89338,
+            "bytes": 934815663
+          },
+          "above": {
+            "objects": 669,
+            "bytes": 3674573456
+          }
+        },
+        {
+          "date": "2026-10-22",
+          "at_or_below": {
+            "objects": 93462,
+            "bytes": 948336837
+          },
+          "above": {
+            "objects": 1298,
+            "bytes": 9748615135
+          }
+        },
+        {
+          "date": "2026-10-23",
+          "at_or_below": {
+            "objects": 116336,
+            "bytes": 1113985691
+          },
+          "above": {
+            "objects": 1017,
+            "bytes": 8667812516
+          }
+        },
+        {
+          "date": "2026-10-24",
+          "at_or_below": {
+            "objects": 98852,
+            "bytes": 3457393281
+          },
+          "above": {
+            "objects": 7033,
+            "bytes": 102794509077
+          }
+        },
+        {
+          "date": "2026-10-25",
+          "at_or_below": {
+            "objects": 8677,
+            "bytes": 1826023661
+          },
+          "above": {
+            "objects": 7041,
+            "bytes": 106322872033
+          }
+        },
+        {
+          "date": "2026-10-26",
+          "at_or_below": {
+            "objects": 5894,
+            "bytes": 1239734256
+          },
+          "above": {
+            "objects": 5393,
+            "bytes": 77590634106
+          }
+        },
+        {
+          "date": "2026-10-27",
+          "at_or_below": {
+            "objects": 6407,
+            "bytes": 2042061075
+          },
+          "above": {
+            "objects": 8834,
+            "bytes": 142137098148
+          }
+        },
+        {
+          "date": "2026-10-28",
+          "at_or_below": {
+            "objects": 5392,
+            "bytes": 1723298374
+          },
+          "above": {
+            "objects": 8797,
+            "bytes": 168637503606
+          }
+        },
+        {
+          "date": "2026-10-29",
+          "at_or_below": {
+            "objects": 1678,
+            "bytes": 348217376
+          },
+          "above": {
+            "objects": 1488,
+            "bytes": 53912227032
+          }
+        },
+        {
+          "date": "2026-10-30",
+          "at_or_below": {
+            "objects": 5604,
+            "bytes": 961936470
+          },
+          "above": {
+            "objects": 6798,
+            "bytes": 245649308375
+          }
+        },
+        {
+          "date": "2026-10-31",
+          "at_or_below": {
+            "objects": 5599,
+            "bytes": 758530467
+          },
+          "above": {
+            "objects": 4425,
+            "bytes": 187246836423
+          }
+        },
+        {
+          "date": "2026-11-01",
+          "at_or_below": {
+            "objects": 6016,
+            "bytes": 774094552
+          },
+          "above": {
+            "objects": 2222,
+            "bytes": 31415413782
+          }
+        },
+        {
+          "date": "2026-11-02",
+          "at_or_below": {
+            "objects": 3167,
+            "bytes": 395402569
+          },
+          "above": {
+            "objects": 1248,
+            "bytes": 16727400014
+          }
+        },
+        {
+          "date": "2026-11-03",
+          "at_or_below": {
+            "objects": 1861,
+            "bytes": 203744578
+          },
+          "above": {
+            "objects": 657,
+            "bytes": 10189128052
+          }
+        },
+        {
+          "date": "2026-11-04",
+          "at_or_below": {
+            "objects": 851,
+            "bytes": 96191758
+          },
+          "above": {
+            "objects": 221,
+            "bytes": 1106947480
+          }
+        },
+        {
+          "date": "2026-11-05",
+          "at_or_below": {
+            "objects": 1523,
+            "bytes": 59235577
+          },
+          "above": {
+            "objects": 160,
+            "bytes": 495923577
+          }
+        },
+        {
+          "date": "2026-11-06",
+          "at_or_below": {
+            "objects": 1576,
+            "bytes": 62187983
+          },
+          "above": {
+            "objects": 165,
+            "bytes": 659339946
+          }
+        },
+        {
+          "date": "2026-11-07",
+          "at_or_below": {
+            "objects": 1195,
+            "bytes": 44731803
+          },
+          "above": {
+            "objects": 139,
+            "bytes": 521067644
+          }
+        },
+        {
+          "date": "2026-11-08",
+          "at_or_below": {
+            "objects": 690,
+            "bytes": 16208537
+          },
+          "above": {
+            "objects": 238,
+            "bytes": 698595703
+          }
+        },
+        {
+          "date": "2026-11-09",
+          "at_or_below": {
+            "objects": 1414,
+            "bytes": 51671557
+          },
+          "above": {
+            "objects": 24,
+            "bytes": 229767853
+          }
+        },
+        {
+          "date": "2026-11-10",
+          "at_or_below": {
+            "objects": 2904,
+            "bytes": 157976255
+          },
+          "above": {
+            "objects": 671,
+            "bytes": 21065133659
+          }
+        },
+        {
+          "date": "2026-11-11",
+          "at_or_below": {
+            "objects": 2562,
+            "bytes": 140924110
+          },
+          "above": {
+            "objects": 180,
+            "bytes": 577930890
+          }
+        },
+        {
+          "date": "2026-11-12",
+          "at_or_below": {
+            "objects": 2304,
+            "bytes": 114459896
+          },
+          "above": {
+            "objects": 327,
+            "bytes": 930704197
+          }
+        },
+        {
+          "date": "2026-11-13",
+          "at_or_below": {
+            "objects": 533,
+            "bytes": 17816792
+          },
+          "above": {
+            "objects": 3,
+            "bytes": 11313280
+          }
+        },
+        {
+          "date": "2026-11-14",
+          "at_or_below": {
+            "objects": 5955,
+            "bytes": 42648605
+          },
+          "above": {
+            "objects": 22,
+            "bytes": 454876669
+          }
+        },
+        {
+          "date": "2026-11-15",
+          "at_or_below": {
+            "objects": 234301,
+            "bytes": 1474545150
+          },
+          "above": {
+            "objects": 1826,
+            "bytes": 34349878806
+          }
+        },
+        {
+          "date": "2026-11-16",
+          "at_or_below": {
+            "objects": 116348,
+            "bytes": 818126659
+          },
+          "above": {
+            "objects": 1900,
+            "bytes": 19403610107
+          }
+        },
+        {
+          "date": "2026-11-17",
+          "at_or_below": {
+            "objects": 268038,
+            "bytes": 2456956857
+          },
+          "above": {
+            "objects": 3242,
+            "bytes": 32120536724
+          }
+        },
+        {
+          "date": "2026-11-18",
+          "at_or_below": {
+            "objects": 123606,
+            "bytes": 1158581294
+          },
+          "above": {
+            "objects": 1709,
+            "bytes": 14534579705
+          }
+        }
+      ]
+    },
+    {
+      "threshold": 4194304,
+      "at_or_below": {
+        "objects": 1481898,
+        "bytes": 87478809708
+      },
+      "above": {
+        "objects": 44439,
+        "bytes": 1259149916080
+      },
+      "per_day": [
+        {
+          "date": "2026-10-12",
+          "at_or_below": {
+            "objects": 76,
+            "bytes": 7989218
+          },
+          "above": {
+            "objects": 2,
+            "bytes": 61695868
+          }
+        },
+        {
+          "date": "2026-10-13",
+          "at_or_below": {
+            "objects": 18747,
+            "bytes": 302593920
+          },
+          "above": {
+            "objects": 10,
+            "bytes": 221484465
+          }
+        },
+        {
+          "date": "2026-10-14",
+          "at_or_below": {
+            "objects": 1873,
+            "bytes": 70215223
+          },
+          "above": {
+            "objects": 32,
+            "bytes": 1749985023
+          }
+        },
+        {
+          "date": "2026-10-15",
+          "at_or_below": {
+            "objects": 5907,
+            "bytes": 1016971872
+          },
+          "above": {
+            "objects": 143,
+            "bytes": 4143447304
+          }
+        },
+        {
+          "date": "2026-10-16",
+          "at_or_below": {
+            "objects": 7583,
+            "bytes": 1357474232
+          },
+          "above": {
+            "objects": 154,
+            "bytes": 3537385356
+          }
+        },
+        {
+          "date": "2026-10-17",
+          "at_or_below": {
+            "objects": 8035,
+            "bytes": 1285378925
+          },
+          "above": {
+            "objects": 156,
+            "bytes": 993440480
+          }
+        },
+        {
+          "date": "2026-10-18",
+          "at_or_below": {
+            "objects": 32549,
+            "bytes": 403685501
+          },
+          "above": {
+            "objects": 4,
+            "bytes": 27562060
+          }
+        },
+        {
+          "date": "2026-10-19",
+          "at_or_below": {
+            "objects": 66148,
+            "bytes": 711427972
+          },
+          "above": {
+            "objects": 92,
+            "bytes": 5880463698
+          }
+        },
+        {
+          "date": "2026-10-20",
+          "at_or_below": {
+            "objects": 104659,
+            "bytes": 1846694918
+          },
+          "above": {
+            "objects": 337,
+            "bytes": 7696854075
+          }
+        },
+        {
+          "date": "2026-10-21",
+          "at_or_below": {
+            "objects": 89647,
+            "bytes": 1657084995
+          },
+          "above": {
+            "objects": 360,
+            "bytes": 2952304124
+          }
+        },
+        {
+          "date": "2026-10-22",
+          "at_or_below": {
+            "objects": 94120,
+            "bytes": 2552021739
+          },
+          "above": {
+            "objects": 640,
+            "bytes": 8144930233
+          }
+        },
+        {
+          "date": "2026-10-23",
+          "at_or_below": {
+            "objects": 116961,
+            "bytes": 2582221462
+          },
+          "above": {
+            "objects": 392,
+            "bytes": 7199576745
+          }
+        },
+        {
+          "date": "2026-10-24",
+          "at_or_below": {
+            "objects": 101916,
+            "bytes": 10483402630
+          },
+          "above": {
+            "objects": 3969,
+            "bytes": 95768499728
+          }
+        },
+        {
+          "date": "2026-10-25",
+          "at_or_below": {
+            "objects": 11453,
+            "bytes": 8264673827
+          },
+          "above": {
+            "objects": 4265,
+            "bytes": 99884221867
+          }
+        },
+        {
+          "date": "2026-10-26",
+          "at_or_below": {
+            "objects": 7706,
+            "bytes": 6079493637
+          },
+          "above": {
+            "objects": 3581,
+            "bytes": 72750874725
+          }
+        },
+        {
+          "date": "2026-10-27",
+          "at_or_below": {
+            "objects": 9230,
+            "bytes": 8356419155
+          },
+          "above": {
+            "objects": 6011,
+            "bytes": 135822740068
+          }
+        },
+        {
+          "date": "2026-10-28",
+          "at_or_below": {
+            "objects": 8419,
+            "bytes": 8603003185
+          },
+          "above": {
+            "objects": 5770,
+            "bytes": 161757798795
+          }
+        },
+        {
+          "date": "2026-10-29",
+          "at_or_below": {
+            "objects": 2026,
+            "bytes": 1107005565
+          },
+          "above": {
+            "objects": 1140,
+            "bytes": 53153438843
+          }
+        },
+        {
+          "date": "2026-10-30",
+          "at_or_below": {
+            "objects": 6726,
+            "bytes": 3781232627
+          },
+          "above": {
+            "objects": 5676,
+            "bytes": 242830012218
+          }
+        },
+        {
+          "date": "2026-10-31",
+          "at_or_below": {
+            "objects": 6435,
+            "bytes": 2708671310
+          },
+          "above": {
+            "objects": 3589,
+            "bytes": 185296695580
+          }
+        },
+        {
+          "date": "2026-11-01",
+          "at_or_below": {
+            "objects": 6954,
+            "bytes": 2935235383
+          },
+          "above": {
+            "objects": 1284,
+            "bytes": 29254272951
+          }
+        },
+        {
+          "date": "2026-11-02",
+          "at_or_below": {
+            "objects": 3640,
+            "bytes": 1574979696
+          },
+          "above": {
+            "objects": 775,
+            "bytes": 15547822887
+          }
+        },
+        {
+          "date": "2026-11-03",
+          "at_or_below": {
+            "objects": 2094,
+            "bytes": 781078973
+          },
+          "above": {
+            "objects": 424,
+            "bytes": 9611793657
+          }
+        },
+        {
+          "date": "2026-11-04",
+          "at_or_below": {
+            "objects": 981,
+            "bytes": 426360169
+          },
+          "above": {
+            "objects": 91,
+            "bytes": 776779069
+          }
+        },
+        {
+          "date": "2026-11-05",
+          "at_or_below": {
+            "objects": 1658,
+            "bytes": 293506407
+          },
+          "above": {
+            "objects": 25,
+            "bytes": 261652747
+          }
+        },
+        {
+          "date": "2026-11-06",
+          "at_or_below": {
+            "objects": 1689,
+            "bytes": 335232750
+          },
+          "above": {
+            "objects": 52,
+            "bytes": 386295179
+          }
+        },
+        {
+          "date": "2026-11-07",
+          "at_or_below": {
+            "objects": 1308,
+            "bytes": 309819795
+          },
+          "above": {
+            "objects": 26,
+            "bytes": 255979652
+          }
+        },
+        {
+          "date": "2026-11-08",
+          "at_or_below": {
+            "objects": 848,
+            "bytes": 312483580
+          },
+          "above": {
+            "objects": 80,
+            "bytes": 402320660
+          }
+        },
+        {
+          "date": "2026-11-09",
+          "at_or_below": {
+            "objects": 1420,
+            "bytes": 68548159
+          },
+          "above": {
+            "objects": 18,
+            "bytes": 212891251
+          }
+        },
+        {
+          "date": "2026-11-10",
+          "at_or_below": {
+            "objects": 3041,
+            "bytes": 533876740
+          },
+          "above": {
+            "objects": 534,
+            "bytes": 20689233174
+          }
+        },
+        {
+          "date": "2026-11-11",
+          "at_or_below": {
+            "objects": 2698,
+            "bytes": 367767693
+          },
+          "above": {
+            "objects": 44,
+            "bytes": 351087307
+          }
+        },
+        {
+          "date": "2026-11-12",
+          "at_or_below": {
+            "objects": 2605,
+            "bytes": 793550089
+          },
+          "above": {
+            "objects": 26,
+            "bytes": 251614004
+          }
+        },
+        {
+          "date": "2026-11-13",
+          "at_or_below": {
+            "objects": 535,
+            "bytes": 23286224
+          },
+          "above": {
+            "objects": 1,
+            "bytes": 5843848
+          }
+        },
+        {
+          "date": "2026-11-14",
+          "at_or_below": {
+            "objects": 5966,
+            "bytes": 61157944
+          },
+          "above": {
+            "objects": 11,
+            "bytes": 436367330
+          }
+        },
+        {
+          "date": "2026-11-15",
+          "at_or_below": {
+            "objects": 235102,
+            "bytes": 3142728071
+          },
+          "above": {
+            "objects": 1025,
+            "bytes": 32681695885
+          }
+        },
+        {
+          "date": "2026-11-16",
+          "at_or_below": {
+            "objects": 117076,
+            "bytes": 2689769349
+          },
+          "above": {
+            "objects": 1172,
+            "bytes": 17531967417
+          }
+        },
+        {
+          "date": "2026-11-17",
+          "at_or_below": {
+            "objects": 269565,
+            "bytes": 6355815762
+          },
+          "above": {
+            "objects": 1715,
+            "bytes": 28221677819
+          }
+        },
+        {
+          "date": "2026-11-18",
+          "at_or_below": {
+            "objects": 124502,
+            "bytes": 3295951011
+          },
+          "above": {
+            "objects": 813,
+            "bytes": 12397209988
+          }
+        }
+      ]
+    },
+    {
+      "threshold": 16777216,
+      "at_or_below": {
+        "objects": 1508500,
+        "bytes": 316845753982
+      },
+      "above": {
+        "objects": 17837,
+        "bytes": 1029782971806
+      },
+      "per_day": [
+        {
+          "date": "2026-10-12",
+          "at_or_below": {
+            "objects": 77,
+            "bytes": 24203462
+          },
+          "above": {
+            "objects": 1,
+            "bytes": 45481624
+          }
+        },
+        {
+          "date": "2026-10-13",
+          "at_or_below": {
+            "objects": 18752,
+            "bytes": 341651836
+          },
+          "above": {
+            "objects": 5,
+            "bytes": 182426549
+          }
+        },
+        {
+          "date": "2026-10-14",
+          "at_or_below": {
+            "objects": 1881,
+            "bytes": 163181929
+          },
+          "above": {
+            "objects": 24,
+            "bytes": 1657018317
+          }
+        },
+        {
+          "date": "2026-10-15",
+          "at_or_below": {
+            "objects": 5991,
+            "bytes": 1610834790
+          },
+          "above": {
+            "objects": 59,
+            "bytes": 3549584386
+          }
+        },
+        {
+          "date": "2026-10-16",
+          "at_or_below": {
+            "objects": 7686,
+            "bytes": 2051855157
+          },
+          "above": {
+            "objects": 51,
+            "bytes": 2843004431
+          }
+        },
+        {
+          "date": "2026-10-17",
+          "at_or_below": {
+            "objects": 8187,
+            "bytes": 2080386093
+          },
+          "above": {
+            "objects": 4,
+            "bytes": 198433312
+          }
+        },
+        {
+          "date": "2026-10-18",
+          "at_or_below": {
+            "objects": 32553,
+            "bytes": 431247561
+          },
+          "above": {
+            "objects": 0,
+            "bytes": 0
+          }
+        },
+        {
+          "date": "2026-10-19",
+          "at_or_below": {
+            "objects": 66186,
+            "bytes": 990909946
+          },
+          "above": {
+            "objects": 54,
+            "bytes": 5600981724
+          }
+        },
+        {
+          "date": "2026-10-20",
+          "at_or_below": {
+            "objects": 104894,
+            "bytes": 3663684942
+          },
+          "above": {
+            "objects": 102,
+            "bytes": 5879864051
+          }
+        },
+        {
+          "date": "2026-10-21",
+          "at_or_below": {
+            "objects": 89976,
+            "bytes": 3619282621
+          },
+          "above": {
+            "objects": 31,
+            "bytes": 990106498
+          }
+        },
+        {
+          "date": "2026-10-22",
+          "at_or_below": {
+            "objects": 94670,
+            "bytes": 6561314808
+          },
+          "above": {
+            "objects": 90,
+            "bytes": 4135637164
+          }
+        },
+        {
+          "date": "2026-10-23",
+          "at_or_below": {
+            "objects": 117274,
+            "bytes": 4855382468
+          },
+          "above": {
+            "objects": 79,
+            "bytes": 4926415739
+          }
+        },
+        {
+          "date": "2026-10-24",
+          "at_or_below": {
+            "objects": 104499,
+            "bytes": 32011567930
+          },
+          "above": {
+            "objects": 1386,
+            "bytes": 74240334428
+          }
+        },
+        {
+          "date": "2026-10-25",
+          "at_or_below": {
+            "objects": 14178,
+            "bytes": 31613879235
+          },
+          "above": {
+            "objects": 1540,
+            "bytes": 76535016459
+          }
+        },
+        {
+          "date": "2026-10-26",
+          "at_or_below": {
+            "objects": 10050,
+            "bytes": 27158608878
+          },
+          "above": {
+            "objects": 1237,
+            "bytes": 51671759484
+          }
+        },
+        {
+          "date": "2026-10-27",
+          "at_or_below": {
+            "objects": 13009,
+            "bytes": 42232880563
+          },
+          "above": {
+            "objects": 2232,
+            "bytes": 101946278660
+          }
+        },
+        {
+          "date": "2026-10-28",
+          "at_or_below": {
+            "objects": 11710,
+            "bytes": 38223006431
+          },
+          "above": {
+            "objects": 2479,
+            "bytes": 132137795549
+          }
+        },
+        {
+          "date": "2026-10-29",
+          "at_or_below": {
+            "objects": 2441,
+            "bytes": 4869216752
+          },
+          "above": {
+            "objects": 725,
+            "bytes": 49391227656
+          }
+        },
+        {
+          "date": "2026-10-30",
+          "at_or_below": {
+            "objects": 8999,
+            "bytes": 25431267634
+          },
+          "above": {
+            "objects": 3403,
+            "bytes": 221179977211
+          }
+        },
+        {
+          "date": "2026-10-31",
+          "at_or_below": {
+            "objects": 7918,
+            "bytes": 17127359163
+          },
+          "above": {
+            "objects": 2106,
+            "bytes": 170878007727
+          }
+        },
+        {
+          "date": "2026-11-01",
+          "at_or_below": {
+            "objects": 7830,
+            "bytes": 10519955926
+          },
+          "above": {
+            "objects": 408,
+            "bytes": 21669552408
+          }
+        },
+        {
+          "date": "2026-11-02",
+          "at_or_below": {
+            "objects": 4163,
+            "bytes": 6110811847
+          },
+          "above": {
+            "objects": 252,
+            "bytes": 11011990736
+          }
+        },
+        {
+          "date": "2026-11-03",
+          "at_or_below": {
+            "objects": 2381,
+            "bytes": 3260004391
+          },
+          "above": {
+            "objects": 137,
+            "bytes": 7132868239
+          }
+        },
+        {
+          "date": "2026-11-04",
+          "at_or_below": {
+            "objects": 1068,
+            "bytes": 1114269354
+          },
+          "above": {
+            "objects": 4,
+            "bytes": 88869884
+          }
+        },
+        {
+          "date": "2026-11-05",
+          "at_or_below": {
+            "objects": 1683,
+            "bytes": 555159154
+          },
+          "above": {
+            "objects": 0,
+            "bytes": 0
+          }
+        },
+        {
+          "date": "2026-11-06",
+          "at_or_below": {
+            "objects": 1739,
+            "bytes": 678983700
+          },
+          "above": {
+            "objects": 2,
+            "bytes": 42544229
+          }
+        },
+        {
+          "date": "2026-11-07",
+          "at_or_below": {
+            "objects": 1333,
+            "bytes": 544520601
+          },
+          "above": {
+            "objects": 1,
+            "bytes": 21278846
+          }
+        },
+        {
+          "date": "2026-11-08",
+          "at_or_below": {
+            "objects": 928,
+            "bytes": 714804240
+          },
+          "above": {
+            "objects": 0,
+            "bytes": 0
+          }
+        },
+        {
+          "date": "2026-11-09",
+          "at_or_below": {
+            "objects": 1436,
+            "bytes": 238900412
+          },
+          "above": {
+            "objects": 2,
+            "bytes": 42538998
+          }
+        },
+        {
+          "date": "2026-11-10",
+          "at_or_below": {
+            "objects": 3216,
+            "bytes": 2210380602
+          },
+          "above": {
+            "objects": 359,
+            "bytes": 19012729312
+          }
+        },
+        {
+          "date": "2026-11-11",
+          "at_or_below": {
+            "objects": 2742,
+            "bytes": 718855000
+          },
+          "above": {
+            "objects": 0,
+            "bytes": 0
+          }
+        },
+        {
+          "date": "2026-11-12",
+          "at_or_below": {
+            "objects": 2631,
+            "bytes": 1045164093
+          },
+          "above": {
+            "objects": 0,
+            "bytes": 0
+          }
+        },
+        {
+          "date": "2026-11-13",
+          "at_or_below": {
+            "objects": 536,
+            "bytes": 29130072
+          },
+          "above": {
+            "objects": 0,
+            "bytes": 0
+          }
+        },
+        {
+          "date": "2026-11-14",
+          "at_or_below": {
+            "objects": 5972,
+            "bytes": 99070824
+          },
+          "above": {
+            "objects": 5,
+            "bytes": 398454450
+          }
+        },
+        {
+          "date": "2026-11-15",
+          "at_or_below": {
+            "objects": 235749,
+            "bytes": 8404425500
+          },
+          "above": {
+            "objects": 378,
+            "bytes": 27419998456
+          }
+        },
+        {
+          "date": "2026-11-16",
+          "at_or_below": {
+            "objects": 117990,
+            "bytes": 10161213004
+          },
+          "above": {
+            "objects": 258,
+            "bytes": 10060523762
+          }
+        },
+        {
+          "date": "2026-11-17",
+          "at_or_below": {
+            "objects": 270917,
+            "bytes": 16803253994
+          },
+          "above": {
+            "objects": 363,
+            "bytes": 17774239587
+          }
+        },
+        {
+          "date": "2026-11-18",
+          "at_or_below": {
+            "objects": 125255,
+            "bytes": 8575129069
+          },
+          "above": {
+            "objects": 60,
+            "bytes": 7118031930
+          }
+        }
+      ]
+    }
+  ],
+  "packing": {
+    "large_min": 4194304,
+    "objects": {
+      "objects": 44439,
+      "bytes": 1259149916080
+    },
+    "mid": {
+      "objects": 1,
+      "bytes": 535232515
+    },
+    "fits": [
+      {
+        "block_bytes": 268435456,
+        "window": 16,
+        "blocks": 6282,
+        "chain_blocks": 65,
+        "chains": 32,
+        "data_bytes": 1259241119744,
+        "mean_fill": 0.7467428727804267,
+        "packed_fill": 0.7480585307808039
+      },
+      {
+        "block_bytes": 268435456,
+        "window": 64,
+        "blocks": 5260,
+        "chain_blocks": 65,
+        "chains": 32,
+        "data_bytes": 1259241119744,
+        "mean_fill": 0.8918324575678024,
+        "packed_fill": 0.89522230719235
+      },
+      {
+        "block_bytes": 268435456,
+        "window": 256,
+        "blocks": 4911,
+        "chain_blocks": 65,
+        "chains": 32,
+        "data_bytes": 1259241119744,
+        "mean_fill": 0.9552104921210834,
+        "packed_fill": 0.9596945699265905
+      },
+      {
+        "block_bytes": 536870912,
+        "window": 16,
+        "blocks": 3904,
+        "chain_blocks": 0,
+        "chains": 0,
+        "data_bytes": 1259241119744,
+        "mean_fill": 0.6007990172651948,
+        "packed_fill": 0.6007990172651948
+      },
+      {
+        "block_bytes": 536870912,
+        "window": 64,
+        "blocks": 2715,
+        "chain_blocks": 0,
+        "chains": 0,
+        "data_bytes": 1259241119744,
+        "mean_fill": 0.8639113677360296,
+        "packed_fill": 0.8639113677360296
+      },
+      {
+        "block_bytes": 536870912,
+        "window": 256,
+        "blocks": 2437,
+        "chain_blocks": 0,
+        "chains": 0,
+        "data_bytes": 1259241119744,
+        "mean_fill": 0.9624617822746493,
+        "packed_fill": 0.9624617822746493
+      },
+      {
+        "block_bytes": 1073741824,
+        "window": 16,
+        "blocks": 3046,
+        "chain_blocks": 0,
+        "chains": 0,
+        "data_bytes": 1259241119744,
+        "mean_fill": 0.38501631047329615,
+        "packed_fill": 0.38501631047329615
+      },
+      {
+        "block_bytes": 1073741824,
+        "window": 64,
+        "blocks": 1511,
+        "chain_blocks": 0,
+        "chains": 0,
+        "data_bytes": 1259241119744,
+        "mean_fill": 0.7761480355404766,
+        "packed_fill": 0.7761480355404766
+      },
+      {
+        "block_bytes": 1073741824,
+        "window": 256,
+        "blocks": 1259,
+        "chain_blocks": 0,
+        "chains": 0,
+        "data_bytes": 1259241119744,
+        "mean_fill": 0.9315009386033838,
+        "packed_fill": 0.9315009386033838
+      },
+      {
+        "block_bytes": 2147483648,
+        "window": 16,
+        "blocks": 2793,
+        "chain_blocks": 0,
+        "chains": 0,
+        "data_bytes": 1259241119744,
+        "mean_fill": 0.2099462373257537,
+        "packed_fill": 0.2099462373257537
+      },
+      {
+        "block_bytes": 2147483648,
+        "window": 64,
+        "blocks": 949,
+        "chain_blocks": 0,
+        "chains": 0,
+        "data_bytes": 1259241119744,
+        "mean_fill": 0.6178923507384932,
+        "packed_fill": 0.6178923507384932
+      },
+      {
+        "block_bytes": 2147483648,
+        "window": 256,
+        "blocks": 671,
+        "chain_blocks": 0,
+        "chains": 0,
+        "data_bytes": 1259241119744,
+        "mean_fill": 0.8738894796584651,
+        "packed_fill": 0.8738894796584651
+      }
+    ]
+  },
+  "gap": {
+    "drives": 12,
+    "data_shards": 8,
+    "parity_shards": 4,
+    "du_files": 0,
+    "l_silo": 1346628725788,
+    "expected": {
+      "bytes": 2094883258368,
+      "files": 19158456
+    },
+    "expected_ratio": 1.5556502087404587,
+    "buckets": [
+      {
+        "bucket": "cas-store",
+        "objects": 1526333,
+        "logical": 1346628725784,
+        "expected": {
+          "bytes": 2094883061760,
+          "files": 19158408
+        },
+        "measured_allocated": null
+      },
+      {
+        "bucket": "tierstore-cold",
+        "objects": 4,
+        "logical": 4,
+        "expected": {
+          "bytes": 196608,
+          "files": 48
+        },
+        "measured_allocated": null
+      }
+    ],
+    "facts": 1526337,
+    "layouts": [
+      {
+        "data": 6,
+        "parity": 6,
+        "objects": 1388,
+        "bytes": 4507691870,
+        "inline": 1174
+      },
+      {
+        "data": 7,
+        "parity": 5,
+        "objects": 2649,
+        "bytes": 315998864,
+        "inline": 2637
+      },
+      {
+        "data": 8,
+        "parity": 4,
+        "objects": 1522300,
+        "bytes": 1341805035054,
+        "inline": 1452325
+      }
+    ],
+    "measured": null
+  }
+}
