@@ -261,13 +261,15 @@ fn the_pipe_is_sized_before_use_for_the_largest_reply_at_the_worst_offset() {
     for max_data in [64 * 1024, 128 * 1024, 256 * 1024] {
         let path = path(config(max_data));
         // One buffer for the header, one more page than the data fills; the kernel rounds the
-        // size up to a power of two pages.
+        // size up to a power of two pages, and a pipe already that large is left as it is.
         let pages = 2 + max_data.div_ceil(page());
+        let default = Pipe::new(0, page()).unwrap().slots * page();
         assert_eq!(
             path.pipe_size(),
-            pages.next_power_of_two() * page(),
+            (pages.next_power_of_two() * page()).max(default),
             "max_data {max_data}"
         );
+        assert!(path.pipe_size() >= pages * page(), "max_data {max_data}");
     }
 }
 
@@ -331,9 +333,13 @@ fn a_reply_needs_a_pipe_buffer_for_the_header_and_one_per_page_it_touches() {
 
 #[test]
 fn a_reply_that_does_not_fit_the_pipe_it_got_goes_by_pread() {
-    // A path sized for small replies keeps the default pipe of 16 buffers: a reply of 15 pages
-    // at offset 0 fills it exactly, one byte more needs a 17th.
-    let path = path(config(SPLICE_MIN));
+    // A path sized for small replies keeps the default pipe (16 buffers): a reply of one page
+    // less at offset 0 fills it exactly, one byte more needs one buffer more. Every reply is
+    // spliced where it fits, whatever the default.
+    let path = path(ReplyConfig {
+        splice_min: Some(1),
+        ..config(SPLICE_MIN)
+    });
     let slots = path.pipe_size() / page();
     let data = data_file(256 * 1024);
     let fits = (slots - 1) * page();
@@ -604,6 +610,44 @@ fn moving_pages_still_sends_the_whole_reply() {
     assert!(spliced);
     assert_eq!(bytes, reply_of(&content(0, 64 * 1024)));
     assert!(path.config().move_pages);
+    assert_eq!(
+        device_flags(true),
+        SpliceFlags::NONBLOCK | SpliceFlags::MOVE
+    );
+    assert_eq!(device_flags(false), SpliceFlags::NONBLOCK);
+}
+
+#[test]
+fn a_spliced_reply_the_device_took_only_part_of_is_an_error_not_a_second_reply() {
+    // A device of one pipe buffer takes the header's buffer and no more: the rest cannot be
+    // drained whole, so no `writev` of the reply follows, and the commit is an error.
+    let (path, data, tokens) = (
+        path(config(128 * 1024)),
+        data_file(128 * 1024),
+        Tokens::new(),
+    );
+    let (read, write) = rustix::pipe::pipe_with(PipeFlags::NONBLOCK).unwrap();
+    fcntl_setpipe_size(&write, page()).unwrap();
+    let filled = path
+        .fill(
+            tokens.register(UNIQUE, Arc::new(DevFd::from_fd(write))),
+            data.as_fd(),
+            0,
+            64 * 1024,
+        )
+        .unwrap();
+    assert!(filled.is_spliced());
+    assert!(matches!(filled.commit(), Completion::DeviceError(_)));
+    let mut got = vec![0u8; 2 * OUT_HEADER_LEN + 1];
+    let n = rustix::io::read(&read, &mut got).unwrap();
+    assert_eq!(
+        &got[..OUT_HEADER_LEN],
+        &encode_out_header(UNIQUE, None, 64 * 1024),
+        "the device got the reply's header"
+    );
+    assert!(n <= 2 * OUT_HEADER_LEN, "and no data after it: {n} bytes");
+    assert_eq!(path.counts(), counts(0, 0));
+    assert_eq!(idle_pipes(&path), 0, "the pipe was closed");
 }
 
 #[test]
@@ -633,7 +677,7 @@ fn a_session_config_sizes_for_its_max_pages_or_the_kernels_default_of_32() {
 }
 
 #[test]
-fn the_header_is_never_spliced_behind_a_pipe_that_refused_it() {
+fn a_pipe_that_refuses_the_header_is_given_up_on() {
     // A pipe whose reader is gone refuses the header (`EPIPE`): no data goes in.
     let pipe = Pipe::new(0, page()).unwrap();
     let Pipe { read, write, slots } = pipe;

@@ -408,6 +408,15 @@ fn splice_in(pipe: &Pipe, unique: u64, data: BorrowedFd<'_>, offset: u64, len: u
     true
 }
 
+/// The flags of the splice of a pipe into the device: non-blocking, and `SPLICE_F_MOVE` when
+/// [`ReplyConfig::move_pages`] asks for it.
+fn device_flags(move_pages: bool) -> SpliceFlags {
+    match move_pages {
+        true => SpliceFlags::NONBLOCK | SpliceFlags::MOVE,
+        false => SpliceFlags::NONBLOCK,
+    }
+}
+
 /// The bytes of a filled reply.
 #[derive(Debug)]
 enum Bytes {
@@ -476,10 +485,7 @@ impl Filled<'_> {
             }
             Bytes::Pipe { pipe, len } => {
                 let total = OUT_HEADER_LEN + len;
-                let flags = match path.config.move_pages {
-                    true => SpliceFlags::NONBLOCK | SpliceFlags::MOVE,
-                    false => SpliceFlags::NONBLOCK,
-                };
+                let flags = device_flags(path.config.move_pages);
                 let spliced = replier
                     .device
                     .splice_target()

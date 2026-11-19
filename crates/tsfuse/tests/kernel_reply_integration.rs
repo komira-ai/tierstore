@@ -45,6 +45,8 @@ struct Answered {
     got: Vec<u8>,
     /// The bytes the reply path counted.
     counts: ReplyCounts,
+    /// The pipe size the kernel granted.
+    pipe_size: usize,
 }
 
 /// Mounts the tree, lets a caller `pread` `len` bytes of `f` at `offset`, and answers its READ
@@ -88,7 +90,16 @@ fn answer_read(name: &str, data: &OwnedFd, offset: u64, len: usize) -> Option<An
         spliced,
         got,
         counts: path.counts(),
+        pipe_size: path.pipe_size(),
     })
+}
+
+/// Whether a reply of `len` bytes at `offset` fits a pipe of `size` bytes: one buffer for the
+/// header and one per page the data touches. A server held to small pipes (an unprivileged run
+/// over the per-user pipe limit) sends the reply by `pread`, which the kernel takes just as well.
+fn fits(size: usize, offset: u64, len: usize) -> bool {
+    let page = rustix::param::page_size();
+    ((offset as usize % page) + len).div_ceil(page) < size / page
 }
 
 fn counts(splice_bytes: usize, pread_bytes: usize) -> ReplyCounts {
@@ -105,9 +116,17 @@ fn a_read_answered_by_splice_through_the_sized_pipe_reaches_the_caller() {
     let Some(read) = answer_read("t-f4-splice", &data, 0, len) else {
         return;
     };
-    assert!(read.spliced);
+    let spliced = fits(read.pipe_size, 0, len);
+    assert_eq!(read.spliced, spliced);
     assert_eq!(read.got, content(ino_of("f").unwrap(), 0, len as u64));
-    assert_eq!(read.counts, counts(len, 0));
+    assert_eq!(
+        read.counts,
+        if spliced {
+            counts(len, 0)
+        } else {
+            counts(0, len)
+        }
+    );
 }
 
 #[test]
@@ -117,9 +136,17 @@ fn a_read_at_an_unaligned_offset_answered_by_splice_reaches_the_caller() {
     let Some(read) = answer_read("t-f4-unaligned", &data, offset, len) else {
         return;
     };
-    assert!(read.spliced);
+    let spliced = fits(read.pipe_size, offset, len);
+    assert_eq!(read.spliced, spliced);
     assert_eq!(read.got, content(ino_of("f").unwrap(), offset, len as u64));
-    assert_eq!(read.counts, counts(len, 0));
+    assert_eq!(
+        read.counts,
+        if spliced {
+            counts(len, 0)
+        } else {
+            counts(0, len)
+        }
+    );
 }
 
 #[test]
