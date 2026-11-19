@@ -3,10 +3,8 @@
 //! them with several readers. Ported from the fork's `src/session.rs` (7 of its 9 tests; the two
 //! about passthrough are dropped) and extended to N readers.
 //!
-//! The device is one end of a `SOCK_SEQPACKET` socket pair: like `/dev/fuse` it delivers one
-//! request per read and takes one reply per write, and it reads end-of-file once the other end,
-//! the "kernel" the test holds, is closed. Several readers are several pairs, as clones are
-//! several descriptors of one connection.
+//! The device is one end of a `SOCK_SEQPACKET` socket pair (`common::sock`). Several readers are
+//! several pairs, as clones are several descriptors of one connection.
 #![cfg(target_os = "linux")]
 #![allow(
     clippy::unwrap_used,
@@ -16,46 +14,16 @@
 
 mod common;
 
-use std::io::{Read as _, Write as _};
 use std::os::fd::AsFd;
 use std::os::unix::net::{UnixListener, UnixStream};
 use std::sync::{Arc, Barrier, Mutex};
 
+use common::sock::{Kernel, fake_device, pending, read_reply};
 use common::{getattr, init_request, request};
 use tsfuse::abi::{InitConfig, InitFlags, InterruptIn, UNIQUE_RESEND};
 use tsfuse::{
     DevFd, Errno, Fs, Handled, ReaderEnd, Replier, Request, Session, SessionError, Stopper,
 };
-
-/// The kernel's end of a fake device.
-struct Kernel(UnixStream);
-
-impl Kernel {
-    /// Queues one request.
-    fn send(&self, bytes: &[u8]) -> std::io::Result<()> {
-        let n = (&self.0).write(bytes)?;
-        assert_eq!(n, bytes.len(), "a packet is written whole");
-        Ok(())
-    }
-
-    /// Takes the next reply.
-    fn recv(&self, buf: &mut [u8]) -> std::io::Result<usize> {
-        (&self.0).read(buf)
-    }
-}
-
-/// A device and the kernel's end of it.
-fn fake_device() -> (DevFd, Kernel) {
-    use rustix::net::{AddressFamily, SocketFlags, SocketType, socketpair};
-    let (device, kernel) = socketpair(
-        AddressFamily::UNIX,
-        SocketType::SEQPACKET,
-        SocketFlags::CLOEXEC,
-        None,
-    )
-    .unwrap();
-    (DevFd::from_fd(device), Kernel(UnixStream::from(kernel)))
-}
 
 /// A descriptor that polls readable and fails every read (`ENOTCONN`): a listening socket with a
 /// connection waiting. The listener and the connection are returned to be kept alive with it.
@@ -71,26 +39,6 @@ fn unreadable() -> (DevFd, UnixListener, UnixStream) {
     let client = UnixStream::connect_addr(&addr).unwrap();
     let fd = rustix::io::fcntl_dupfd_cloexec(&listener, 0).unwrap();
     (DevFd::from_fd(fd), listener, client)
-}
-
-/// `(error, unique, len)` of the next message the session wrote.
-fn read_reply(kernel: &Kernel) -> (i32, u64, usize) {
-    let mut buf = [0u8; 4096];
-    let n = kernel.recv(&mut buf).unwrap();
-    let len = u32::from_le_bytes(buf[0..4].try_into().unwrap());
-    assert_eq!(len as usize, n, "the header's length is the message's");
-    let error = i32::from_le_bytes(buf[4..8].try_into().unwrap());
-    let unique = u64::from_le_bytes(buf[8..16].try_into().unwrap());
-    (error, unique, n)
-}
-
-/// Whether the kernel's end has a message waiting.
-fn pending(kernel: &Kernel) -> bool {
-    kernel.0.set_nonblocking(true).unwrap();
-    let mut buf = [0u8; 64];
-    let got = kernel.recv(&mut buf).is_ok();
-    kernel.0.set_nonblocking(false).unwrap();
-    got
 }
 
 const RESEND_AND_PAGES: u64 =
@@ -460,7 +408,9 @@ fn with_three_readers_a_reply_goes_to_the_reader_that_read_it_and_interrupt_to_i
     for (i, kernel) in kernels.iter().enumerate() {
         kernel.send(&request(1, 100 + i as u64, 1, b"x\0")).unwrap();
     }
-    while tokens.registered() < 3 {
+    // Registered is not yet parked: a reader registers a request before `Fs::handle` runs, so
+    // the test waits for the repliers it takes below, or it could miss one and wait for ever.
+    while tokens.registered() < 3 || fs.parked.lock().unwrap().len() < 3 {
         std::thread::yield_now();
     }
     // An INTERRUPT of reader 0's request, read by reader 2: EINTR on reader 0's device.
@@ -582,7 +532,7 @@ fn an_interrupt_of_a_request_not_yet_registered_is_answered_on_the_first_device_
     let negotiated = *initialised(0).negotiated();
     let pairs: Vec<(DevFd, Kernel)> = (0..3).map(|_| fake_device()).collect();
     let (devices, mut kernels): (Vec<DevFd>, Vec<Kernel>) = pairs.into_iter().unzip();
-    let (stopper, joined) = serve(
+    let (_stopper, joined) = serve(
         Session::resume(devices, negotiated).unwrap(),
         Arc::new(TestFs::default()),
     );
@@ -601,9 +551,11 @@ fn an_interrupt_of_a_request_not_yet_registered_is_answered_on_the_first_device_
         "the reader that read it was not written to"
     );
 
-    stopper.stop();
+    // Every reader ends on its device's end of file: a stop could reach reader 0 before it read
+    // its own, and end it `Stopped` instead.
+    drop(kernels);
     assert_eq!(
         joined.join().unwrap().unwrap(),
-        vec![ReaderEnd::Unmounted, ReaderEnd::Stopped, ReaderEnd::Stopped]
+        vec![ReaderEnd::Unmounted; 3]
     );
 }

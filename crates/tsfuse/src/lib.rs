@@ -5,8 +5,11 @@
 //! [`mount`] (`mount(2)`, or `fusermount3`; unmount and abort), [`DevFd`] (a descriptor of a
 //! connection, cloned with `FUSE_DEV_IOC_CLONE`, writing each reply with one `writev`), the
 //! [`Transport`] trait and its `/dev/fuse` implementation [`DevReader`] on `AsyncFd`, and
-//! [`Session`] (INIT, resume without INIT, clones, one reader thread per descriptor, stop). The
-//! io_uring transport (T-F5), the splice reply path (T-F4) and takeover (T-F6) build on them.
+//! [`Session`] (INIT, resume without INIT, clones, one reader thread per descriptor, stop), whose
+//! readers route each request (row T-F3): INTERRUPT to the [`Tokens`] table, FORGET dropped,
+//! DESTROY, a second INIT and an opcode not implemented answered at once, every other request
+//! registered and handed to [`Fs::handle`]. The io_uring
+//! transport (T-F5), the splice reply path (T-F4) and takeover (T-F6) build on them.
 //!
 //! **Reply affinity.** A reply is matched by `unique` against the processing queue of the device
 //! it is written to, and every cloned `/dev/fuse` descriptor has its own processing queue, so a

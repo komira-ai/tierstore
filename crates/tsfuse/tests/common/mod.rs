@@ -13,6 +13,9 @@ use std::sync::atomic::{AtomicBool, Ordering};
 
 use tsfuse::ReplyDevice;
 
+#[cfg(target_os = "linux")]
+pub mod sock;
+
 /// A decoded reply message.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct Msg {
