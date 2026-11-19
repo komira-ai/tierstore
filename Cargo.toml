@@ -146,6 +146,8 @@ tierstore-testkit = { path = "crates/tierstore-testkit" }
 tierstore-format = { path = "crates/tierstore-format" }
 # The frozen interfaces of the read path on a build node, and their fakes.
 tierstore-fetch-api = { path = "crates/tierstore-fetch-api" }
+# The L2 tree list: its reader and writer (pure: bytes in, bytes out).
+tierstore-list = { path = "crates/tierstore-list" }
 # The fetch engine of a build node: the `Engine` of the read path.
 tierstore-fetch = { path = "crates/tierstore-fetch" }
 # The breadth-first explorer of the protocol models (its `explore` module).
