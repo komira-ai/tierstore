@@ -233,11 +233,14 @@ fn covers(mut spans: Vec<(u64, u64)>, size: u64) -> bool {
 /// ([`TreeListL2::open_sidecar`](crate::TreeListL2::open_sidecar)). It adds a PACKS record per key,
 /// in the order of the keys, and their cells, pack by pack. A pack's `pack_flags` has bit 0 when the
 /// list's files cover its bytes with no gap, bit 1 when [`PackInfo::shared`] says so. The bytes are
-/// a function of `v2` and the packs alone: the same inputs give the same sidecar.
+/// a function of `v2` and what `pack` gives: the same inputs give the same sidecar.
 ///
-/// Refuses a list that is not exactly what the version 2 writer writes ([`V2Fault`]), a key
-/// `pack` has no cells of, a pack of size 0, cells that are not those of the pack's size, and a
-/// file or range past the end of its pack.
+/// Refuses a list that is not exactly what the version 2 writer writes ([`V2Fault`]: its layout,
+/// counts, keys, key numbers and empty ranges), a key `pack` has no cells of, a pack of size 0,
+/// cells that are not those of the pack's size, and a file or range past the end of its pack. It
+/// does not walk the entries (names, parents, the order of children, the digests of empty files):
+/// a version 2 list its reader refuses makes a sidecar the L2 reader refuses for the same fault,
+/// so the caller hands it a list it has read back, as the CAS service does before it stores one.
 pub fn sidecar_from_v2(
     v2: &[u8],
     mut pack: impl FnMut(&str) -> Option<PackInfo>,
@@ -287,7 +290,11 @@ fn sidecar(
         }
     }
     for range in list.ranges.chunks_exact(RANGE_LEN) {
-        within(le_u32(range, 0), le_u64(range, 8), le_u64(range, 16))?;
+        let len = le_u64(range, 16);
+        if len == 0 {
+            return Err(WriteError::V2(V2Fault::EmptyRange));
+        }
+        within(le_u32(range, 0), le_u64(range, 8), len)?;
     }
     let mut packs = Vec::with_capacity(infos.len() * PACK_LEN);
     let mut cells = Vec::new();

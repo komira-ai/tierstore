@@ -286,6 +286,9 @@ pub enum V2Fault {
     /// A file of size above 0 whose key number is not in the keys, or a range that names no key.
     #[error("a key number past the keys")]
     KeyNumber,
+    /// A range of no bytes.
+    #[error("an empty range")]
+    EmptyRange,
 }
 
 /// `bytes` as lowercase hex.

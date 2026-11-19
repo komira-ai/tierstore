@@ -246,6 +246,22 @@ fn write_error_outside_pack_range_past_the_end() {
     assert_eq!(result, Err(WriteError::OutsidePack("out/p".into())));
 }
 
+/// An empty range is refused as the L2 reader refuses it, so no sidecar is written that a node
+/// would refuse for it; its pack is not asked about past its cells.
+#[test]
+fn v2_fault_empty_range_is_refused() {
+    let tree = one_file_tree();
+    let mut v2 = tree.v2();
+    let (ranges, _) = v2_section(&v2, 5);
+    put_u64(&mut v2, ranges + 16, 0);
+    let result = sidecar_from_v2(&v2, |key| tree.info(key));
+    assert_eq!(result, Err(WriteError::V2(V2Fault::EmptyRange)));
+    assert_eq!(
+        result.unwrap_err().to_string(),
+        "version 2 list: an empty range"
+    );
+}
+
 #[test]
 fn write_error_outside_pack_range_starting_past_the_end() {
     let tree = one_file_tree();

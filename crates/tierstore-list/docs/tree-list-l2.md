@@ -8,7 +8,7 @@ A tree is named by its version 2 list: the key `cas/l/<id>`, where `<id>` is the
 
 The L2 list of that tree is stored beside it, at **`cas/l2/<id>`** (`sidecar_key`), and its header holds the same `<id>`. It keeps the version 2 list's entries, digests, keys, names and ranges byte for byte, so the version 2 list is a function of the L2 list (its **projection**, below) and a reader checks that the projection hashes to `<id>`. That pins every path, mode, size, file digest, pack key, offset and range of the L2 list to the id the job names. What the id does not pin are the PACKS fields that the version 2 list does not have (a pack's size, cell count, flags) and the cell digests: a wrong cell digest makes a good cell fail its check (an error or a miss, never a wrong byte); a wrong cell passes only if whoever wrote the sidecar also wrote the pack.
 
-The sidecar is a function of the version 2 list and the packs' bytes alone, so a create-only PUT that finds the key written already has nothing to add.
+The sidecar is a function of the version 2 list and what its writer is told of each pack: its size and cell digests (functions of the pack's bytes, which never change), its `upload_part_size` (fixed when the pack was written) and whether it is shared. Only the last can differ between two writers of one sidecar (a pack crosses `shared_min` between the first write and a backfill): a create-only PUT that finds the key written keeps the first sidecar, whose `shared` bit may be stale. That bit only orders Prepare's fetches (design 6.1) and is never read for correctness, so a stale bit costs fetch order, never a byte.
 
 ## Layout
 
@@ -91,7 +91,7 @@ After open, every read indexes into the bytes: `node`, `children`, `file_sha256`
 
 ## Writing
 
-`sidecar_from_v2(v2, packs)` makes the L2 list of a version 2 list `v2`, asking `packs` for each key's `PackInfo` (its size and cell digests, its `upload_part_size`, whether it is shared). It takes only a version 2 list whose bytes are exactly what the version 2 writer writes (major 1, minor 0, no flags, sections at the next multiple of 8 with zeros between them, nothing after the last, sorted keys), so its projection is `v2` itself; it refuses a key it has no cells for, cells that are not those of the pack's size, and a file or range past the end of its pack. It sets `pack_flags` bit 0 where the files cover the pack. The same inputs give the same bytes: the header (192 bytes), then the sections in order, each at the next multiple of 8, zero between them, an empty extension section at the end.
+`sidecar_from_v2(v2, packs)` makes the L2 list of a version 2 list `v2`, asking `packs` for each key's `PackInfo` (its size and cell digests, its `upload_part_size`, whether it is shared). It takes only a version 2 list whose bytes are exactly what the version 2 writer writes (major 1, minor 0, no flags, sections at the next multiple of 8 with zeros between them, nothing after the last, sorted keys), so its projection is `v2` itself; it refuses a key it has no cells for, cells that are not those of the pack's size, an empty range, and a file or range past the end of its pack. It does not walk the entries: a version 2 list whose entries its own reader refuses makes a sidecar the L2 reader refuses for the same fault, so the writer is given a list that was read back. It sets `pack_flags` bit 0 where the files cover the pack. The same inputs give the same bytes: the header (192 bytes), then the sections in order, each at the next multiple of 8, zero between them, an empty extension section at the end.
 
 `CellHasher` computes a pack's cell digests as its bytes stream (one 1 MiB accumulator; the last cell hashed short), for a writer that has the pack's bytes once, as it uploads them.
 
@@ -101,7 +101,7 @@ A later writer may set a minor version, write a longer header, use the ignored f
 
 ## What it costs
 
-Measured with the crate's `l2_bench` example (`examples/l2_bench.rs` says how to run it), built for release in the `rust:1.95.0` container on a build node without SHA extensions (Xeon E5-4669 v4, lightly loaded), the medians of 25 runs from the bytes in memory, two runs alike to within 3%.
+Measured with the crate's `l2_bench` example (`examples/l2_bench.rs` says how to run it), built for release in the `rust:1.95.0` container on a build node without SHA extensions (Xeon E5-4669 v4, lightly loaded), each figure of the table below the median of 25 runs from the bytes in memory, two runs of it alike to within 3%.
 
 On the tree of the version 2 measurements of `tierstore`'s `tree-manifest.md` (a komira checkout and the 112 packages of its toolchain: 56,093 entries, 47,468 files, 4.28 GB in 65 packs of 64 MiB, 4,110 cells), read from its saved list with stand-in cell digests:
 
@@ -120,4 +120,4 @@ On the tree of the version 2 measurements of `tierstore`'s `tree-manifest.md` (a
 
 The id check costs what the SHA-256 of the version 2 list costs a node today: it hashes the same bytes. A caller that needs the tree before the hash (as the mount provider does with a version 2 list) runs `open` and `check_tree_id` on two threads.
 
-**What cell digests cost the writer of packs.** Walking the 614 MB of the Rust 1.95 toolchain (166 files in packs of 64 MiB) on the same node, ring's SHA-256 hashed the whole files at 319 MB/s and the same bytes as 1 MiB cells at 325 MB/s, each on one core: cell digests double the hashing of a writer that already hashes each file, about 3.1 s of one core per GB more. A backfill that makes the sidecars of stored trees reads each pack once and hashes it at that rate: about 0.9 core-hours per TiB, beside the read.
+**What cell digests cost the writer of packs.** Walking the 614 MB of the Rust 1.95 toolchain (166 files in packs of 64 MiB) on the same node, ring's SHA-256 hashed the whole files at 319 MB/s and the same bytes as 1 MiB cells at 325 MB/s, each on one core (one pass over the files, the time of each hash summed; not a median): cell digests double the hashing of a writer that already hashes each file, about 3.1 s of one core per GB more. A backfill that makes the sidecars of stored trees reads each pack once and hashes it at that rate: about 0.9 core-hours per TiB, beside the read.
