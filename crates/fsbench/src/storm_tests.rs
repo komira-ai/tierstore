@@ -212,6 +212,43 @@ fn the_limit_of_open_files_is_raised_to_the_hard_limit() {
     assert_eq!(raise_open_files().unwrap(), hard);
 }
 
+/// A storm thread on a file it can read counts every read answered: once its first read is in,
+/// it arrives at the gate, and it goes on reading (each 1 MiB past the last) until it is
+/// stopped, failing none.
+#[test]
+fn a_storm_thread_counts_each_read_answered_until_it_is_stopped() {
+    let dir = TestDir::under(std::env::temp_dir(), "fsbench-storm-reads");
+    let path = dir.path().join("cold");
+    // Sparse, and long enough (1 GiB) that the reads waited for are all inside it.
+    std::fs::File::create(&path)
+        .unwrap()
+        .set_len(1 << 30)
+        .unwrap();
+    let shared = StormShared::default();
+    let allowed = rustix::thread::sched_getaffinity(None).unwrap();
+    let cpu = (0..rustix::thread::CpuSet::MAX_CPU)
+        .find(|&c| allowed.is_set(c))
+        .unwrap();
+    let wanted = 64;
+    std::thread::scope(|scope| {
+        scope.spawn(|| storm_thread(&path, cpu, ColdRead::Buffered, &shared));
+        shared.started.wait_for(1);
+        assert!(shared.reads.load(std::sync::atomic::Ordering::Relaxed) >= 1);
+        while shared.reads.load(std::sync::atomic::Ordering::Relaxed) < wanted {
+            std::thread::yield_now();
+        }
+        shared
+            .stop
+            .store(true, std::sync::atomic::Ordering::Relaxed);
+    });
+    let stopped_at = shared.reads.load(std::sync::atomic::Ordering::Relaxed);
+    assert!(stopped_at >= wanted, "{stopped_at}");
+    assert_eq!(
+        shared.failures.into_inner().unwrap(),
+        std::collections::BTreeMap::new()
+    );
+}
+
 /// A storm thread that cannot pin to its CPU, or cannot open its file, counts the failure by
 /// step and error and arrives at once; one whose reads fail counts each failure and arrives
 /// after its first, and stops when told.
