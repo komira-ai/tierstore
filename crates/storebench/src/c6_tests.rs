@@ -47,6 +47,35 @@ fn obj(bucket: &str, key: &str, size: u64, modified_ms: u64, etag: &str) -> Obje
     }
 }
 
+/// Deployment prefixes are labelled by bytes, ties by name, after the keys with no prefix; a
+/// prefix's own name is not in the summary.
+#[test]
+fn prefixes_are_labelled_by_bytes_after_the_unprefixed_keys() {
+    let c = |bytes| Count { objects: 1, bytes };
+    let prefixes = BTreeMap::from([
+        (("b", "zeta/"), c(5)),
+        (("b", "alpha/"), c(5)),
+        (("a", ""), c(1)),
+        (("b", ""), c(2)),
+        (("a", "big/"), c(9)),
+    ]);
+    let names: Vec<String> = label_prefixes(prefixes)
+        .into_iter()
+        .map(|n| n.name)
+        .collect();
+    assert_eq!(
+        names,
+        [
+            "a/",
+            "b/",
+            "a/deployment 1",
+            "b/deployment 2",
+            "b/deployment 3"
+        ]
+    );
+    assert!(label_prefixes(BTreeMap::new()).is_empty());
+}
+
 /// Twelve objects across the size-class boundaries, two buckets, two prefixes, two multipart
 /// objects and days 0, 1, 2, 5 and 10 of the span (2026-11-13 to 2026-11-23).
 fn listing() -> Vec<Object> {
@@ -62,14 +91,8 @@ fn listing() -> Vec<Object> {
         obj("kbf-cas", &pk(8), 16 * MIB + 1, at(10, 8), "a"),
         obj("kbf-cas", &pk(9), 256 * MIB, at(10, 9), "c-12"),
         obj("kbf-cas", &pk(10), 256 * MIB + 1, at(10, 10), "a"),
-        obj(
-            "kbf-av2",
-            &format!("av2dev1/cas/{h}/{h}"),
-            10,
-            at(10, 11),
-            "a",
-        ),
-        obj("kbf-av2", "kbf-history/history/x", 5, at(5, 12), "a"),
+        obj("kbf-b", &format!("team1/cas/{h}/{h}"), 10, at(10, 11), "a"),
+        obj("kbf-b", "kbf-history/history/x", 5, at(5, 12), "a"),
     ]
 }
 
@@ -162,7 +185,7 @@ fn objects_are_counted_by_kind_class_bucket_and_prefix() {
         .iter()
         .map(|n| (n.name.as_str(), n.count.objects, n.count.bytes))
         .collect();
-    assert_eq!(named, [("kbf-av2", 2, 15), ("kbf-cas", 10, cas_bytes)]);
+    assert_eq!(named, [("kbf-b", 2, 15), ("kbf-cas", 10, cas_bytes)]);
     let named: Vec<(&str, u64, u64)> = s
         .prefixes
         .iter()
@@ -171,9 +194,9 @@ fn objects_are_counted_by_kind_class_bucket_and_prefix() {
     assert_eq!(
         named,
         [
-            ("kbf-av2/av2dev1/", 1, 10),
-            ("kbf-av2/kbf-history", 1, 5),
-            ("kbf-cas/", 10, cas_bytes)
+            ("kbf-cas/", 10, cas_bytes),
+            ("kbf-b/deployment 1", 1, 10),
+            ("kbf-b/deployment 2", 1, 5)
         ]
     );
     assert_eq!(
@@ -432,7 +455,7 @@ fn the_tables_carry_the_measurement() {
     assert!(kinds.contains("| all | 13 |"), "{kinds}");
     let by_bucket = table(&tables, "C-6, silo's objects by bucket");
     assert!(
-        by_bucket.contains("| kbf-av2/av2dev1/ | 1 | 10 B |"),
+        by_bucket.contains("| kbf-b/deployment 1 | 1 | 10 B |"),
         "{by_bucket}"
     );
     let ingest = table(&tables, "C-6, silo's ingest");
@@ -473,7 +496,7 @@ fn the_tables_carry_the_measurement() {
     );
     let by_gap = table(&tables, "C-6, the gap by bucket");
     assert!(by_gap.contains("| kbf-cas | 11 |"), "{by_gap}");
-    assert!(by_gap.contains("| kbf-av2 | 2 | 15 B |"), "{by_gap}");
+    assert!(by_gap.contains("| kbf-b | 2 | 15 B |"), "{by_gap}");
     let others = table(&tables, "C-6, what silo's drives hold");
     assert!(
         others.contains("| .minio.sys/tmp | 1.20 kB | 36 |"),

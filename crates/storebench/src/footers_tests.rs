@@ -487,19 +487,19 @@ fn a_footer_file_reads_back_to_what_was_written() {
             blobs: Vec::new(),
         },
         PackFooter {
-            bucket: "av2dev1".into(),
+            bucket: "team1".into(),
             key: "cas/d/n/b/0000000000000003".into(),
             status: Status::BadOrder,
             blobs: Vec::new(),
         },
         PackFooter {
-            bucket: "av2dev1".into(),
+            bucket: "team1".into(),
             key: "cas/d/n/b/0000000000000004".into(),
             status: Status::GetError("object x not found".into()),
             blobs: Vec::new(),
         },
         PackFooter {
-            bucket: "av2dev1".into(),
+            bucket: "team1".into(),
             key: "cas/d/n/b/0000000000000005".into(),
             status: Status::GetError(String::new()),
             blobs: Vec::new(),
@@ -733,14 +733,14 @@ fn run_setup() -> Run {
     ]);
     let lines = [
         ("kbf-cas", keys[0].to_owned(), small.len() as u64),
-        ("av2dev1", keys[2].to_owned(), bad.len() as u64),
+        ("team1", keys[2].to_owned(), bad.len() as u64),
         ("kbf-cas", keys[3].to_owned(), 11),
         ("kbf-cas", "cas/d/n1/b1/0000000000000005".to_owned(), 10),
         ("kbf-cas", keys[1].to_owned(), big.len() as u64),
-        ("av2dev1", "cas/d/n1/b1/0000000000000004".to_owned(), 5000),
+        ("team1", "cas/d/n1/b1/0000000000000004".to_owned(), 5000),
         ("kbf-cas", format!("cas/b/1-2/{}/L0", "ab".repeat(20)), 100),
         ("kbf-history", "history/x".to_owned(), 7),
-        ("av2dev1", keys[4].to_owned(), 2),
+        ("team1", keys[4].to_owned(), 2),
         ("kbf-cas", format!("cas/l/{}", h('c')), 9),
     ];
     let dir = TestDir::under(std::env::temp_dir(), "storebench-footers-run");
@@ -893,10 +893,10 @@ fn run_scans_the_packs_and_tree_lists_of_a_listing_in_order() {
         keys,
         [
             ("kbf-cas", "1", "ok"),
-            ("av2dev1", "3", "bad-crc"),
+            ("team1", "3", "bad-crc"),
             ("kbf-cas", "5", "too-small"),
             ("kbf-cas", "2", "ok"),
-            ("av2dev1", "4", "get-error"),
+            ("team1", "4", "get-error"),
         ]
     );
     assert_eq!(scan.packs[0].blobs, blobs_of(&run.small));
@@ -916,7 +916,7 @@ fn run_scans_the_packs_and_tree_lists_of_a_listing_in_order() {
         outcomes,
         [
             ("kbf-cas", TreeOutcome::Json),
-            ("av2dev1", TreeOutcome::NotJson),
+            ("team1", TreeOutcome::NotJson),
             ("kbf-cas", TreeOutcome::GetError),
         ]
     );

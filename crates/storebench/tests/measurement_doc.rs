@@ -37,3 +37,16 @@ fn the_document_holds_the_tables_of_every_arm() {
         );
     }
 }
+
+/// The check fails on a document that differs from the tables: a figure changed in one row is
+/// not found, so a table that is made again with other numbers fails until the document is.
+#[test]
+fn a_document_with_a_changed_figure_does_not_hold_the_tables() {
+    let data = Path::new(env!("CARGO_MANIFEST_DIR")).join("data");
+    let tables = render(&data, Arm::C6).unwrap();
+    let changed = tables.replacen("| pack | 866,682 |", "| pack | 866,683 |", 1);
+    assert_ne!(changed, tables, "the row to change is in the C-6 tables");
+    let doc = document().replace(&tables, &changed);
+    assert!(document().contains(&tables));
+    assert!(!doc.contains(&tables));
+}

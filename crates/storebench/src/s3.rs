@@ -13,11 +13,11 @@ use objstore_s3::s3::{Credentials, S3Config, S3Store};
 
 use crate::Error;
 
-/// The flags that name a silo endpoint.
+/// The flags that name the S3 store that is read.
 #[derive(Clone, Debug, Args)]
 pub struct Endpoint {
-    /// Silo's S3 endpoint, `http://host:port`.
-    #[arg(long, default_value = "http://127.0.0.1:30900")]
+    /// The store's S3 endpoint, `http://host:port` (no default: it names the store read).
+    #[arg(long)]
     pub endpoint: String,
     /// The file with `MINIO_ROOT_USER=` and `MINIO_ROOT_PASSWORD=` lines.
     #[arg(long)]
@@ -141,7 +141,7 @@ pub(crate) mod tests {
         assert!(matches!(err, Error::Usage(_)), "{err}");
         assert!(
             store(
-                "http://127.0.0.1:1",
+                "http://127.0.0.1:0",
                 "kbf-cas",
                 Credentials::new("a", "b"),
                 Duration::from_secs(1)

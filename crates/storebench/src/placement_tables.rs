@@ -36,9 +36,16 @@ pub fn tables(summary: &Summary) -> Vec<Table> {
     let mut out = Vec::new();
     for p in &summary.profiles {
         let name = &p.profile.name;
+        let layout = p.profile.layout();
+        // With a replica set smaller than the cluster the design's writer is T-S1's rule.
+        let writer_note = if p.profile.replicas < usize::from(p.profile.nodes) {
+            "; writer: the first live node of the rank, standing in for T-S1's rule"
+        } else {
+            ""
+        };
         let mut keys = Table::new(
             format!(
-                "C-7, key placement under node rank, {name} ({} objects, {})",
+                "C-7, key placement under node rank, {name} ({} objects, {}{writer_note})",
                 count(summary.objects),
                 bytes(summary.bytes)
             ),
@@ -70,16 +77,16 @@ pub fn tables(summary: &Summary) -> Vec<Table> {
                 sets.row(vec![down_label(&k.down), triple(sk), triple(sb)]);
             }
         }
-        out.push(keys);
+        if !keys.rows().is_empty() {
+            out.push(keys);
+        }
         if !sets.rows().is_empty() {
             out.push(sets);
         }
         for pop in &p.populations {
             let mut t = Table::new(
                 format!(
-                    "C-7, new stripes {}+{}, {name}, {} ({} stripes; silo's bytes per drive: {})",
-                    p.profile.k,
-                    p.profile.m,
+                    "C-7, new stripes {layout}, {name}, {} ({} stripes; other bytes per drive: {})",
                     pop.name,
                     count(pop.stripes),
                     bytes(p.profile.shared_bytes_per_drive)
@@ -117,10 +124,7 @@ pub fn tables(summary: &Summary) -> Vec<Table> {
             out.push(t);
         }
         let mut t = Table::new(
-            format!(
-                "C-7, existing {}+{} stripes under failure, {name} (stripes of L_silo)",
-                p.profile.k, p.profile.m
-            ),
+            format!("C-7, existing {layout} stripes under failure, {name} (stripes of L_silo)"),
             &[
                 "nodes down",
                 "stripes",

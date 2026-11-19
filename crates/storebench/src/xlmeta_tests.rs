@@ -160,6 +160,27 @@ fn inline_parts_versions_and_delete_markers_are_read() {
         panic!()
     };
     assert_eq!((o.inline, o.parts, o.data, o.parity), (true, 1, 4, 2));
+
+    // The flag written as bytes other than `true` is not inlined.
+    let mut e = Enc::default();
+    e.map(2).str("Type").int(1).str("V2Obj").map(6);
+    e.str("Size")
+        .int(0)
+        .str("MTime")
+        .int(0)
+        .str("EcM")
+        .int(4)
+        .str("EcN")
+        .int(2);
+    e.str("MetaSys")
+        .map(1)
+        .str("x-minio-internal-inline-data")
+        .bin(b"false");
+    e.str("MetaUsr").map(1).str("etag").str("e");
+    let Meta::Object(o) = parse(&xl(&e.0, 1), Path::new("x")).unwrap() else {
+        panic!()
+    };
+    assert!(!o.inline);
 }
 
 /// Each way a file is not a readable `xl.meta` is refused with a reason naming it.

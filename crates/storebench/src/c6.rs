@@ -198,7 +198,8 @@ pub struct Summary {
     pub kinds: Vec<KindSizes>,
     /// By bucket, in name order.
     pub buckets: Vec<Named>,
-    /// By bucket and deployment prefix (`bucket/prefix`), in name order.
+    /// By bucket and deployment prefix ([`label_prefixes`]): the keys with no prefix first, as
+    /// `bucket/`, then each prefix as `bucket/deployment N`, by bytes.
     pub prefixes: Vec<Named>,
     /// Objects written by a multipart upload.
     pub multipart: Count,
@@ -368,10 +369,7 @@ pub fn summarize_with(
             .into_iter()
             .map(|(name, count)| named(name.to_owned(), count))
             .collect(),
-        prefixes: prefixes
-            .into_iter()
-            .map(|((bucket, prefix), count)| named(format!("{bucket}/{prefix}"), count))
-            .collect(),
+        prefixes: label_prefixes(prefixes),
         multipart,
         ingest,
         live,
@@ -396,6 +394,33 @@ pub fn write_dead(path: &Path, dead: &[DeadPack]) -> Result<(), Error> {
         text.push('\n');
     }
     std::fs::write(path, text).map_err(|e| Error::io("write", path, e))
+}
+
+/// The prefixes as named counts: the keys of a bucket with no deployment prefix (the CAS service's
+/// own layout, `cas/...`) as `bucket/`, in bucket order; then every other prefix, most bytes
+/// first (ties by name), as `bucket/deployment N` from 1. A deployment's prefix is the name its
+/// operator chose, which a published summary does not carry; the count is what C-6 needs.
+#[must_use]
+pub fn label_prefixes(prefixes: BTreeMap<(&str, &str), Count>) -> Vec<Named> {
+    let (roots, mut others): (Vec<_>, Vec<_>) =
+        prefixes.into_iter().partition(|((_, p), _)| p.is_empty());
+    others.sort_by(|(a, ca), (b, cb)| cb.bytes.cmp(&ca.bytes).then(a.cmp(b)));
+    roots
+        .into_iter()
+        .map(|((bucket, _), count)| Named {
+            name: format!("{bucket}/"),
+            count,
+        })
+        .chain(
+            others
+                .into_iter()
+                .enumerate()
+                .map(|(i, ((bucket, _), count))| Named {
+                    name: format!("{bucket}/deployment {}", i + 1),
+                    count,
+                }),
+        )
+        .collect()
 }
 
 /// Runs `storebench c6`: reads the inputs, writes the summary (and the dead packs) and prints

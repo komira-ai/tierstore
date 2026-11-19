@@ -23,7 +23,8 @@ objstore-s3.workspace = true
 # The size, use and free space of the file system a drive is (`statvfs`).
 rustix = { workspace = true, features = ["fs"] }
 serde.workspace = true
-serde_json.workspace = true
+# `float_roundtrip`: a summary read back from `data/` equals the one written, to the last bit.
+serde_json = { workspace = true, features = ["float_roundtrip"] }
 thiserror.workspace = true
 tokio = { workspace = true, features = ["rt", "rt-multi-thread", "time"] }
 

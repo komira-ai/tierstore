@@ -3,19 +3,28 @@
 //!
 //! What it models, in the order an object meets it:
 //!
-//! - A **small** object (at most `large_min`) is a record appended to the open segment of its
-//!   writer and expiry class. A segment seals when the next record would pass `seal_bytes`, or
-//!   by age: past `seal_max_age` it seals only if it holds `seal_min_bytes`, else when it is
-//!   older than `destage.max_age`.
-//! - A **large** object is rounded up to the alignment and goes to the window of its writer and
-//!   class. A window of `pack_window` objects (or one whose oldest object is `seal_max_age`
-//!   old) is packed first-fit decreasing into pack blocks of `pack_block_bytes`; an object
-//!   larger than a pack block is a chain: full pack blocks of its own and the rest in the window.
-//! - A sealed block is **hot**. Once `destage.min_age` has passed, the eligible blocks of a
-//!   class are sorted by length and each `k` consecutive ones become a stripe (`k` data blocks
-//!   and `m` parity shards as long as the longest). A block still waiting `partial_after` after
-//!   it sealed makes a partial stripe of the `j < k` eligible blocks that are left. A sealed hot
-//!   block whose records are all dead is unlinked at once and never goes cold.
+//! - A **small** object (at most `large_min`) is a record, the object and a 64-byte header
+//!   (design 10.2), appended to the open segment of its writer and expiry class. A segment seals
+//!   when the next record would pass `seal_bytes`, or by age: past `seal_max_age` it seals only
+//!   if it holds `seal_min_bytes`, else when it is older than `destage.max_age`.
+//! - A **large** object is rounded up to the alignment and goes to the window of its expiry
+//!   class, one window per class whatever the writer (the coordinator packs the class's oldest
+//!   large files, 10.5). A window of `pack_window` objects, or one whose oldest object is
+//!   `destage.max_age` old, is packed first-fit decreasing into pack blocks of
+//!   `pack_block_bytes`; an object larger than a pack block is a chain: full pack blocks of its
+//!   own and the rest in the window.
+//! - A sealed block is **hot**. At today's ingest destage is driven by age, not by the dirty
+//!   marks (design 10.15): a block is due once its oldest byte is `destage.max_age` old and it
+//!   has been sealed `destage.min_age`. The due blocks of a class are sorted by length and each
+//!   `k` consecutive ones become a stripe (`k` data blocks and `m` parity shards as long as the
+//!   longest). A due block still waiting `partial_after` after it sealed makes a partial stripe
+//!   of the `j < k` due blocks that are left. A sealed hot block whose records are all dead is
+//!   unlinked and never goes cold; a sealed segment less than `gc_live_below` live is compacted
+//!   on the hot tier (its live records appended to the open segment of their class, the block
+//!   unlinked, 10.5), so its dead bytes never go cold. The dirty marks are not modelled: today's
+//!   ingest never reaches them.
+//! - `cold.replicas = 2` (NOW before erasure coding, [`Policy::now_replicas`]) is a stripe of one
+//!   block and one parity copy: each block goes cold alone as two copies.
 //! - A stripe is freed whole when every record of its data blocks is dead. The raw bytes it
 //!   holds are `sum(aligned data lengths) + m * longest aligned length` (zeros are not stored).
 //!
@@ -67,14 +76,32 @@ pub struct Policy {
     pub classes_max: u64,
     /// Hours a sealed block waits before it may go cold (`destage.min_age`).
     pub destage_min_age_h: u64,
-    /// Hours after which a short segment seals anyway (`destage.max_age`).
+    /// Hours after which a block's oldest byte is destaged, and a short segment seals anyway
+    /// (`destage.max_age`).
     pub destage_max_age_h: u64,
+    /// A sealed segment whose live fraction is below this is compacted on the hot tier
+    /// (`hot.gc_live_below`).
+    #[serde(default = "default_gc_live_below")]
+    pub gc_live_below: f64,
+    /// The header of a small record, in bytes.
+    #[serde(default = "default_record_header")]
+    pub record_header: u64,
     /// Hours after which a block left over makes a partial stripe (`destage.partial_after`).
     pub partial_after_h: u64,
     /// The `gc.rewrite_below` values the rewrite cost is reported at.
     pub rewrite_below: Vec<f64>,
     /// Days replayed after the last arrival.
     pub tail_days: u64,
+}
+
+/// `hot.gc_live_below` (design 10.14).
+fn default_gc_live_below() -> f64 {
+    0.5
+}
+
+/// The header of a record (design 10.2).
+fn default_record_header() -> u64 {
+    64
 }
 
 impl Policy {
@@ -96,6 +123,8 @@ impl Policy {
             classes_max: 8,
             destage_min_age_h: 1,
             destage_max_age_h: 24,
+            gc_live_below: default_gc_live_below(),
+            record_header: default_record_header(),
             partial_after_h: 72,
             rewrite_below: vec![0.2, 0.3, 0.5],
             tail_days: 60,
@@ -106,6 +135,18 @@ impl Policy {
     #[must_use]
     pub fn now() -> Self {
         Self::common("now")
+    }
+
+    /// NOW before erasure coding ships (milestone S2, design 21.1): `cold.replicas = 2`, a block
+    /// going cold alone as two copies, a stripe of one data block and one parity copy.
+    #[must_use]
+    pub fn now_replicas() -> Self {
+        Self {
+            name: "now-replicas".to_owned(),
+            data_blocks: 1,
+            parity_blocks: 1,
+            ..Self::common("now")
+        }
     }
 
     /// LATER (design 21): 3 nodes, 3 hot replicas, 4+4, `max_age` 3 d, `partial_after` 7 d.
@@ -193,6 +234,12 @@ pub struct Sample {
     pub partial_stripes: u64,
     /// Sealed blocks unlinked hot because they were wholly dead before destage, so far.
     pub blocks_dropped_hot: u64,
+    /// Sealed segments compacted on the hot tier (less than `gc_live_below` live), so far.
+    #[serde(default)]
+    pub blocks_compacted_hot: u64,
+    /// The live bytes those compactions wrote again on the hot tier, so far.
+    #[serde(default)]
+    pub compacted_bytes: u64,
 }
 
 /// Sealed blocks so far by size.
@@ -301,10 +348,21 @@ pub fn rewrite_costs(stripes: &[StripeView], below: &[f64]) -> Vec<Rewrite> {
 /// A block of the hot tier, then a data block of a stripe.
 struct Block {
     class: u64,
+    /// The bytes it holds: records with their headers, or pack items.
     bytes: u64,
+    /// The bytes of the objects in it.
+    data: u64,
+    /// The bytes of the objects in it that are live.
     live: u64,
+    /// When its oldest byte was written.
+    opened_h: u64,
     sealed_h: u64,
     stripe: Option<usize>,
+    /// For a segment of records: its writer, and each record's object bytes and death hour
+    /// (what a compaction appends again). `None` for a pack block.
+    records: Option<(u64, Vec<(u64, u64)>)>,
+    /// Unlinked on the hot tier (dead, or compacted): its deaths no longer count anywhere.
+    gone: bool,
 }
 
 /// A stripe of the cold tier.
@@ -319,11 +377,15 @@ struct Segment {
     block: usize,
 }
 
-/// A window of large objects waiting to be packed: `(bytes, death hour)` each.
+/// A large object (or a chain's rest) waiting to be packed: `(aligned bytes, object bytes,
+/// death hour)`.
+type PackItem = (u64, u64, u64);
+
+/// A window of large objects waiting to be packed.
 #[derive(Default)]
 struct Window {
     oldest_h: u64,
-    items: Vec<(u64, u64)>,
+    items: Vec<PackItem>,
 }
 
 /// The writer and class of a segment or window.
@@ -335,7 +397,7 @@ struct Sim<'a> {
     blocks: Vec<Block>,
     stripes: Vec<Stripe>,
     open: BTreeMap<Slot, Segment>,
-    windows: BTreeMap<Slot, Window>,
+    windows: BTreeMap<u64, Window>,
     pool: BTreeMap<u64, Vec<usize>>,
     deaths: BTreeMap<u64, Vec<(usize, u64)>>,
     cold_raw: u64,
@@ -344,6 +406,8 @@ struct Sim<'a> {
     stripes_freed: u64,
     partial_stripes: u64,
     dropped_hot: u64,
+    compacted_hot: u64,
+    compacted_bytes: u64,
     sealed: BlockSizes,
 }
 
@@ -363,29 +427,41 @@ impl<'a> Sim<'a> {
             stripes_freed: 0,
             partial_stripes: 0,
             dropped_hot: 0,
+            compacted_hot: 0,
+            compacted_bytes: 0,
             sealed: BlockSizes::default(),
         }
     }
 
-    /// A new empty block of `class`.
-    fn new_block(&mut self, class: u64) -> usize {
+    /// A new empty block of `class`, opened at hour `h`: a segment of `writer`'s records, or a
+    /// pack block when `writer` is `None`.
+    fn new_block(&mut self, class: u64, h: u64, writer: Option<u64>) -> usize {
         self.blocks.push(Block {
             class,
             bytes: 0,
+            data: 0,
             live: 0,
+            opened_h: h,
             sealed_h: 0,
             stripe: None,
+            records: writer.map(|w| (w, Vec::new())),
+            gone: false,
         });
         self.blocks.len() - 1
     }
 
-    /// Puts `bytes` that die at hour `death_h` into `block` at hour `now`.
-    fn put(&mut self, block: usize, bytes: u64, death_h: u64, now: u64) {
+    /// Puts an object of `data` bytes, stored as `stored` bytes, that dies at hour `death_h`
+    /// into `block` at hour `now`.
+    fn put(&mut self, block: usize, stored: u64, data: u64, death_h: u64, now: u64) {
         let b = &mut self.blocks[block];
-        b.bytes += bytes;
+        b.bytes += stored;
+        b.data += data;
+        if let Some((_, records)) = &mut b.records {
+            records.push((data, death_h));
+        }
         if death_h > now {
-            b.live += bytes;
-            self.deaths.entry(death_h).or_default().push((block, bytes));
+            b.live += data;
+            self.deaths.entry(death_h).or_default().push((block, data));
         }
     }
 
@@ -418,60 +494,64 @@ impl<'a> Sim<'a> {
         if item.size <= p.large_min {
             self.append_record(slot, item.size, death_h, h);
         } else {
-            self.add_large(slot, item.size, death_h, h);
+            self.add_large(class, item.size, death_h, h);
         }
     }
 
-    /// A small record of `size` bytes goes to the open segment of `slot`; a segment it would
-    /// not fit in seals first.
+    /// A small object of `size` bytes goes to the open segment of `slot` as a record with its
+    /// header; a segment it would not fit in seals first.
     fn append_record(&mut self, slot: Slot, size: u64, death_h: u64, h: u64) {
+        let stored = size + self.policy.record_header;
         let mut segment = self.open.remove(&slot);
         if let Some(s) = &segment
-            && self.blocks[s.block].bytes + size > self.policy.seal_bytes
+            && self.blocks[s.block].bytes + stored > self.policy.seal_bytes
         {
             self.seal(s.block, h);
             segment = None;
         }
         let segment = segment.unwrap_or_else(|| Segment {
             opened_h: h,
-            block: self.new_block(slot.1),
+            block: self.new_block(slot.1, h, Some(slot.0)),
         });
-        self.put(segment.block, size, death_h, h);
+        self.put(segment.block, stored, size, death_h, h);
         self.open.insert(slot, segment);
     }
 
-    /// A large object of `size` bytes goes to the window of `slot`: it takes whole pack blocks
+    /// A large object of `size` bytes goes to the window of `class`: it takes whole pack blocks
     /// of its own when it is larger than one, and the rest waits in the window, which is packed
-    /// when it is full.
-    fn add_large(&mut self, slot: Slot, size: u64, death_h: u64, h: u64) {
+    /// when it is full. Alignment counts as stored bytes, not as the object's.
+    fn add_large(&mut self, class: u64, size: u64, death_h: u64, h: u64) {
         let p = self.policy;
         let aligned = p.aligned(size);
-        for _ in 0..aligned / p.pack_block_bytes {
-            let block = self.new_block(slot.1);
-            self.put(block, p.pack_block_bytes, death_h, h);
+        let whole = aligned / p.pack_block_bytes;
+        for _ in 0..whole {
+            let block = self.new_block(class, h, None);
+            self.put(block, p.pack_block_bytes, p.pack_block_bytes, death_h, h);
             self.seal(block, h);
         }
         let rest = aligned % p.pack_block_bytes;
         if rest > 0 {
-            let w = self.windows.entry(slot).or_default();
+            let data = size - whole * p.pack_block_bytes;
+            let w = self.windows.entry(class).or_default();
             if w.items.is_empty() {
                 w.oldest_h = h;
             }
-            w.items.push((rest, death_h));
+            w.items.push((rest, data, death_h));
             if w.items.len() >= p.pack_window {
                 let full = std::mem::take(w);
-                self.pack(slot.1, full, h);
+                self.pack(class, full, h);
             }
         }
     }
 
-    /// Packs `window` (of `class`) first-fit decreasing into pack blocks and seals them.
+    /// Packs `window` (of `class`) first-fit decreasing into pack blocks and seals them; a pack
+    /// block's oldest byte is the window's.
     fn pack(&mut self, class: u64, mut window: Window, h: u64) {
         window
             .items
-            .sort_by_key(|&(bytes, _)| std::cmp::Reverse(bytes));
+            .sort_by_key(|&(bytes, _, _)| std::cmp::Reverse(bytes));
         let capacity = self.policy.pack_block_bytes;
-        let mut bins: Vec<(u64, Vec<(u64, u64)>)> = Vec::new();
+        let mut bins: Vec<(u64, Vec<PackItem>)> = Vec::new();
         for item in window.items {
             match bins.iter_mut().find(|(used, _)| *used + item.0 <= capacity) {
                 Some((used, items)) => {
@@ -482,9 +562,9 @@ impl<'a> Sim<'a> {
             }
         }
         for (_, items) in bins {
-            let block = self.new_block(class);
-            for (bytes, death_h) in items {
-                self.put(block, bytes, death_h, h);
+            let block = self.new_block(class, window.oldest_h, None);
+            for (bytes, data, death_h) in items {
+                self.put(block, bytes, data, death_h, h);
             }
             self.seal(block, h);
         }
@@ -506,12 +586,12 @@ impl<'a> Sim<'a> {
         for s in due.into_values() {
             self.seal(s.block, h);
         }
-        let (old, young): (BTreeMap<Slot, Window>, BTreeMap<Slot, Window>) =
+        let (old, young): (BTreeMap<u64, Window>, BTreeMap<u64, Window>) =
             std::mem::take(&mut self.windows)
                 .into_iter()
-                .partition(|(_, w)| h - w.oldest_h >= p.seal_max_age_h);
+                .partition(|(_, w)| h - w.oldest_h >= p.destage_max_age_h);
         self.windows = young;
-        for ((_, class), w) in old {
+        for (class, w) in old {
             self.pack(class, w, h);
         }
     }
@@ -522,6 +602,9 @@ impl<'a> Sim<'a> {
         let due = std::mem::replace(&mut self.deaths, later);
         for (block, bytes) in due.into_values().flatten() {
             let b = &mut self.blocks[block];
+            if b.gone {
+                continue;
+            }
             b.live -= bytes;
             if let Some(i) = b.stripe {
                 let s = &mut self.stripes[i];
@@ -546,7 +629,7 @@ impl<'a> Sim<'a> {
             .collect();
         let longest = lengths.iter().copied().max().unwrap_or(0);
         let raw = lengths.iter().sum::<u64>() + p.parity_blocks as u64 * longest;
-        let data = blocks.iter().map(|&b| self.blocks[b].bytes).sum();
+        let data = blocks.iter().map(|&b| self.blocks[b].data).sum();
         let live = blocks.iter().map(|&b| self.blocks[b].live).sum();
         let index = self.stripes.len();
         for &b in blocks {
@@ -562,7 +645,23 @@ impl<'a> Sim<'a> {
         self.partial_stripes += u64::from(partial);
     }
 
-    /// Unlinks the sealed hot blocks that are wholly dead and destages the eligible ones.
+    /// Compacts `block`, a sealed segment, on the hot tier at hour `h`: its live records go to
+    /// the open segment of their writer and class again, and the block is unlinked.
+    fn compact(&mut self, block: usize, h: u64) {
+        let b = &mut self.blocks[block];
+        b.gone = true;
+        let class = b.class;
+        // Only a segment is compacted (`destage` picks them), so it has records.
+        let (writer, records) = b.records.take().unwrap_or_default();
+        self.compacted_hot += 1;
+        for (size, death_h) in records.into_iter().filter(|&(_, d)| d > h) {
+            self.compacted_bytes += size;
+            self.append_record((writer, class), size, death_h, h);
+        }
+    }
+
+    /// Unlinks the sealed hot blocks that are wholly dead, compacts the segments that are mostly
+    /// dead, and destages the due ones.
     fn destage(&mut self, h: u64) {
         let p = self.policy;
         let classes: Vec<u64> = self.pool.keys().copied().collect();
@@ -571,9 +670,21 @@ impl<'a> Sim<'a> {
             let (alive, dead): (Vec<usize>, Vec<usize>) =
                 waiting.into_iter().partition(|&b| self.blocks[b].live > 0);
             self.dropped_hot += dead.len() as u64;
-            let (mut eligible, mut left): (Vec<usize>, Vec<usize>) = alive
-                .into_iter()
-                .partition(|&b| self.blocks[b].sealed_h + p.destage_min_age_h <= h);
+            for &b in &dead {
+                self.blocks[b].gone = true;
+            }
+            let (sparse, alive): (Vec<usize>, Vec<usize>) = alive.into_iter().partition(|&b| {
+                let b = &self.blocks[b];
+                b.records.is_some() && ratio(b.live, b.data) < p.gc_live_below
+            });
+            for b in sparse {
+                self.compact(b, h);
+            }
+            let (mut eligible, mut left): (Vec<usize>, Vec<usize>) =
+                alive.into_iter().partition(|&b| {
+                    let b = &self.blocks[b];
+                    b.sealed_h + p.destage_min_age_h <= h && b.opened_h + p.destage_max_age_h <= h
+                });
             eligible.sort_by_key(|&b| (self.blocks[b].bytes, b));
             let rest = eligible.split_off(eligible.len() / p.data_blocks * p.data_blocks);
             for group in eligible.chunks(p.data_blocks) {
@@ -602,6 +713,8 @@ impl<'a> Sim<'a> {
             stripes_freed: self.stripes_freed,
             partial_stripes: self.partial_stripes,
             blocks_dropped_hot: self.dropped_hot,
+            blocks_compacted_hot: self.compacted_hot,
+            compacted_bytes: self.compacted_bytes,
         }
     }
 

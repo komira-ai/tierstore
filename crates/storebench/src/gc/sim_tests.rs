@@ -1,9 +1,12 @@
 //! Tests of the model on tiny blocks: a segment holds two records of 50 bytes (`seal_bytes`
-//! 100), a stripe is two data blocks and one parity shard, and nothing is aligned.
+//! 100), a stripe is two data blocks and one parity shard, and nothing is aligned. The tiny
+//! policy destages a block an hour after its oldest byte, has no record header and compacts
+//! nothing, so each test sees one rule; the tests of `max_age`, the header and compaction set
+//! their own.
 
 use super::*;
 
-/// The policy of the tests; the alignment is 1 so that sizes are what they say.
+/// The policy of the tests; the alignment is 1 and the header 0 so that sizes are what they say.
 fn tiny() -> Policy {
     Policy {
         name: "tiny".to_owned(),
@@ -20,7 +23,9 @@ fn tiny() -> Policy {
         align: 1,
         classes_max: 8,
         destage_min_age_h: 1,
-        destage_max_age_h: 48,
+        destage_max_age_h: 1,
+        gc_live_below: 0.0,
+        record_header: 0,
         partial_after_h: 72,
         rewrite_below: vec![0.5],
         tail_days: 20,
@@ -124,7 +129,10 @@ fn a_lone_block_forms_a_partial_stripe_only_after_partial_after() {
 /// waits for `destage.max_age`.
 #[test]
 fn a_slow_class_seals_by_age_only_above_seal_min_bytes_else_at_max_age() {
-    let p = tiny();
+    let p = Policy {
+        destage_max_age_h: 48,
+        ..tiny()
+    };
     let mut sim = Sim::new(&p);
     sim.arrive(&item(0, 30, 500, 0), 0);
     sim.arrive(&item(0, 40, 500, 1), 0);
@@ -226,7 +234,19 @@ fn first_fit_decreasing_puts_600_and_400_scaled_in_one_block() {
             full: 1
         }
     );
-    assert!(sim.windows[&(0, 0)].items.is_empty());
+    assert!(sim.windows[&0].items.is_empty());
+}
+
+/// An object that fills whole pack blocks exactly leaves nothing in the window.
+#[test]
+fn an_object_of_whole_pack_blocks_leaves_nothing_in_the_window() {
+    let p = tiny();
+    let mut sim = Sim::new(&p);
+    sim.arrive(&item(0, 200, 500, 0), 0);
+    let sizes: Vec<u64> = sim.blocks.iter().map(|b| b.bytes).collect();
+    assert_eq!(sizes, [100, 100]);
+    assert!(sim.windows.is_empty());
+    assert_eq!(sim.sealed.full, 2);
 }
 
 /// Items are rounded up to the alignment inside a pack block.
@@ -247,15 +267,18 @@ fn pack_items_are_aligned() {
 }
 
 /// An object larger than a pack block is a chain: whole pack blocks of its own at once, and the
-/// rest in the window, packed when its oldest object is `seal_max_age` old. All of it dies
+/// rest in the window, packed when its oldest object is `destage.max_age` old. All of it dies
 /// together, so its stripes are freed whole.
 #[test]
 fn a_chain_takes_whole_pack_blocks_and_its_rest_waits_in_the_window() {
-    let p = tiny();
+    let p = Policy {
+        destage_max_age_h: 24,
+        ..tiny()
+    };
     let mut sim = Sim::new(&p);
     sim.arrive(&item(0, 250, 100, 0), 0);
     assert_eq!(sim.blocks.len(), 2);
-    assert_eq!(sim.windows[&(0, 0)].items, [(50, 100)]);
+    assert_eq!(sim.windows[&0].items, [(50, 50, 100)]);
     sim.seal_by_age(23);
     assert_eq!(sim.blocks.len(), 2);
     sim.seal_by_age(24);
@@ -282,10 +305,10 @@ fn raw_bytes_are_the_aligned_data_lengths_plus_parity_as_long_as_the_longest() {
         ..tiny()
     };
     let mut sim = Sim::new(&p);
-    let a = sim.new_block(0);
-    sim.put(a, 100, 500, 0);
-    let b = sim.new_block(0);
-    sim.put(b, 40, 500, 0);
+    let a = sim.new_block(0, 0, Some(0));
+    sim.put(a, 100, 100, 500, 0);
+    let b = sim.new_block(0, 0, Some(0));
+    sim.put(b, 40, 40, 500, 0);
     sim.stripe(&[a, b], false);
     assert_eq!(sim.cold_raw, 112 + 48 + 2 * 112);
     assert_eq!(sim.stripes[0].view.data, 140);
@@ -299,8 +322,8 @@ fn stripes_group_blocks_of_similar_length_and_young_blocks_wait() {
     let p = tiny();
     let mut sim = Sim::new(&p);
     for bytes in [10, 100, 20, 90] {
-        let b = sim.new_block(0);
-        sim.put(b, bytes, 500, 0);
+        let b = sim.new_block(0, 0, Some(0));
+        sim.put(b, bytes, bytes, 500, 0);
         sim.seal(b, 0);
     }
     sim.destage(0);
@@ -313,14 +336,153 @@ fn stripes_group_blocks_of_similar_length_and_young_blocks_wait() {
     assert!(sim.pool[&0].is_empty());
 }
 
+/// A block goes cold once its oldest byte is `destage.max_age` old and it has been sealed
+/// `destage.min_age`, not before: a block opened at hour 0 and sealed at once waits for hour 48,
+/// and one opened at 0 but sealed at 47 for hour 48 as well (47 + `min_age`); one sealed at 48
+/// waits for 49.
+#[test]
+fn a_block_goes_cold_at_max_age_from_its_oldest_byte_and_min_age_from_its_seal() {
+    let p = Policy {
+        data_blocks: 1,
+        destage_max_age_h: 48,
+        ..tiny()
+    };
+    let mut sim = Sim::new(&p);
+    for sealed in [0, 47, 48] {
+        let b = sim.new_block(0, 0, Some(0));
+        sim.put(b, 10, 10, 500, 0);
+        sim.seal(b, sealed);
+    }
+    sim.destage(47);
+    assert!(sim.stripes.is_empty());
+    sim.destage(48);
+    assert_eq!(sim.stripes.len(), 2);
+    sim.destage(49);
+    assert_eq!(sim.stripes.len(), 3);
+    assert_eq!(sim.partial_stripes, 0);
+}
+
+/// A sealed segment less than `gc_live_below` live is compacted on the hot tier: its live
+/// records go to the open segment of their writer and class again, the block is unlinked and
+/// never goes cold, and a later death of one of its records counts only in the new segment. A
+/// segment at exactly `gc_live_below`, and a pack block, are not compacted.
+#[test]
+fn a_mostly_dead_segment_is_compacted_on_the_hot_tier() {
+    let p = Policy {
+        gc_live_below: 0.5,
+        destage_max_age_h: 48,
+        ..tiny()
+    };
+    let mut sim = Sim::new(&p);
+    // Block 0: three records of 30 (two die at hour 5); the fourth seals it and opens block 1.
+    for death in [5, 5, 500, 500] {
+        sim.arrive(&item(0, 30, death, 0), 0);
+    }
+    assert_eq!(sim.sealed.full, 1);
+    sim.die(5);
+    sim.destage(6);
+    assert_eq!((sim.compacted_hot, sim.compacted_bytes), (1, 30));
+    assert!(sim.blocks[0].gone);
+    let open = sim.open[&(0, 0)].block;
+    assert_eq!((sim.blocks[open].bytes, sim.blocks[open].live), (60, 60));
+    sim.die(500);
+    assert_eq!(sim.blocks[open].live, 0);
+    assert_eq!(
+        sim.blocks[0].live, 30,
+        "a death in a compacted block is not counted again"
+    );
+    assert!(sim.stripes.is_empty());
+
+    // Exactly half live is not below the mark; a pack block is never compacted.
+    let mut sim = Sim::new(&p);
+    let half = sim.new_block(0, 0, Some(0));
+    sim.put(half, 50, 50, 5, 0);
+    sim.put(half, 50, 50, 500, 0);
+    let pack = sim.new_block(0, 0, None);
+    sim.put(pack, 90, 90, 5, 0);
+    sim.put(pack, 10, 10, 500, 0);
+    sim.seal(half, 0);
+    sim.seal(pack, 0);
+    sim.die(5);
+    sim.destage(6);
+    assert_eq!(sim.compacted_hot, 0);
+    assert_eq!(sim.pool[&0].len(), 2);
+}
+
+/// A record is stored with its header: two objects of 40 with a header of 10 fill a segment of
+/// 100, the stripe's raw bytes count the headers, and its data and live bytes count only the
+/// objects.
+#[test]
+fn a_record_is_stored_with_its_header_and_only_the_object_is_data() {
+    let p = Policy {
+        record_header: 10,
+        data_blocks: 1,
+        ..tiny()
+    };
+    let mut sim = Sim::new(&p);
+    for _ in 0..3 {
+        sim.arrive(&item(0, 40, 500, 0), 0);
+    }
+    assert_eq!((sim.blocks[0].bytes, sim.blocks[0].data), (100, 80));
+    assert_eq!(sim.blocks[1].bytes, 50);
+    sim.destage(1);
+    assert_eq!(sim.stripes[0].view.data, 80);
+    assert_eq!(sim.stripes[0].view.live, 80);
+    assert_eq!(sim.stripes[0].view.raw, 100 + 100);
+}
+
+/// Large objects of one class share one window whatever their writer; another class has its own.
+#[test]
+fn large_objects_of_a_class_share_one_window_whatever_the_writer() {
+    let p = Policy {
+        nodes: 3,
+        hot_replicas: 3,
+        large_min: 10,
+        ..tiny()
+    };
+    let mut sim = Sim::new(&p);
+    for (writer, class) in [(0, 0), (1, 0), (2, 0), (1, 3)] {
+        let mut it = item(0, 20, 500, class);
+        it.writer_hash = writer;
+        sim.arrive(&it, 0);
+    }
+    assert_eq!(sim.windows.len(), 2);
+    assert_eq!(sim.windows[&0].items.len(), 3);
+    assert_eq!(sim.windows[&3].items.len(), 1);
+}
+
+/// With `cold.replicas = 2` (a stripe of one block and one parity copy) every block goes cold
+/// alone at twice its length, no stripe is partial, and a block is freed when it dies.
+#[test]
+fn two_cold_copies_destage_each_block_alone_at_twice_its_length() {
+    let p = Policy {
+        data_blocks: 1,
+        parity_blocks: 1,
+        ..tiny()
+    };
+    let items = vec![
+        item(0, 50, 100, 0),
+        item(0, 50, 100, 0),
+        item(0, 30, 300, 0),
+    ];
+    let r = replay(&p, items);
+    let held = day(&r, 2);
+    assert_eq!(held.stripes_live, 2);
+    assert_eq!(held.partial_stripes, 0);
+    assert_eq!(held.cold_raw_bytes, 2 * 100 + 2 * 30);
+    let later = day(&r, 5);
+    assert_eq!((later.stripes_live, later.stripes_freed), (1, 1));
+    assert_eq!(later.cold_raw_bytes, 2 * 30);
+}
+
 /// Blocks of different classes never share a stripe.
 #[test]
 fn blocks_of_different_classes_do_not_share_a_stripe() {
     let p = tiny();
     let mut sim = Sim::new(&p);
     for class in [0, 1] {
-        let b = sim.new_block(class);
-        sim.put(b, 10, 500, 0);
+        let b = sim.new_block(class, 0, Some(0));
+        sim.put(b, 10, 10, 500, 0);
         sim.seal(b, 0);
     }
     sim.destage(1);
@@ -467,6 +629,22 @@ fn the_profiles_hold_the_designs_values() {
         (3, 3, 4, 4)
     );
     assert_eq!((later.destage_max_age_h, later.partial_after_h), (72, 168));
+    assert_eq!((now.gc_live_below, now.record_header), (0.5, 64));
+    let copies = Policy::now_replicas();
+    assert_eq!(copies.name, "now-replicas");
+    assert_eq!((copies.data_blocks, copies.parity_blocks), (1, 1));
+    assert_eq!(
+        Policy {
+            name: copies.name.clone(),
+            data_blocks: 4,
+            parity_blocks: 2,
+            ..copies
+        },
+        Policy {
+            name: "now-replicas".to_owned(),
+            ..now.clone()
+        }
+    );
     assert_eq!(now.aligned(1), 4096);
     assert_eq!(now.aligned(4096), 4096);
     assert_eq!(now.aligned(4097), 8192);

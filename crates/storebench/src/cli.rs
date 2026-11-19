@@ -1,9 +1,9 @@
 //! The command line of `storebench`.
 //!
 //! ```text
-//! storebench list --credentials <file> [--endpoint URL] --bucket <b>... --out <listing>
+//! storebench list --endpoint <url> --credentials <file> --bucket <b>... --out <listing>
 //! storebench drive-list --bucket-dir <dir> [--share i/n] --out <listing> [--meta-out <file>]
-//! storebench footers --credentials <file> --listing <listing> --out <footers> [--conc 16]
+//! storebench footers --endpoint <url> --credentials <file> --listing <listing> --out <footers> [--conc 16]
 //! storebench du --root <drive> --out <du.json> [--depth 2]
 //! storebench c6 --listing <listing> [--footers <f>] [--du <du.json>]... --out <c6.json>
 //! storebench c7 --listing <listing> --out <c7.json>

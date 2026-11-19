@@ -65,6 +65,8 @@ fn list_writes_the_listing_and_failures_exit_as_documented() {
     let absent = dir.path().join("absent.env");
     let (code, _, stderr) = storebench(&[
         "list",
+        "--endpoint",
+        "http://127.0.0.1:0",
         "--credentials",
         absent.to_str().unwrap(),
         "--bucket",
@@ -84,6 +86,7 @@ fn list_writes_the_listing_and_failures_exit_as_documented() {
     let (code, _, stderr) = storebench(&["list"]);
     assert_eq!(code, ExitCode::from(2));
     assert!(stderr.contains("--credentials"), "{stderr}");
+    assert!(stderr.contains("--endpoint"), "{stderr}");
     let (code, stdout, _) = storebench(&["--help"]);
     assert_eq!(code, ExitCode::SUCCESS);
     assert!(stdout.contains("list"), "{stdout}");
@@ -100,7 +103,17 @@ fn every_verb_is_dispatched_and_its_failure_exits_1() {
     let o = out.to_str().unwrap();
     let cases: Vec<Vec<&str>> = vec![
         vec!["drive-list", "--bucket-dir", a, "--out", o],
-        vec!["footers", "--credentials", a, "--listing", a, "--out", o],
+        vec![
+            "footers",
+            "--endpoint",
+            "http://127.0.0.1:0",
+            "--credentials",
+            a,
+            "--listing",
+            a,
+            "--out",
+            o,
+        ],
         vec!["du", "--root", a, "--out", o],
         vec!["c6", "--listing", a, "--out", o],
         vec!["c7", "--listing", a, "--out", o],

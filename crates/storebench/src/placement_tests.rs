@@ -631,10 +631,10 @@ fn the_tables_print_the_shares_placements_and_failures() {
     let tables = tables(&summary);
     assert_eq!(tables.len(), 5);
     let md: Vec<String> = tables.iter().map(Table::markdown).collect();
-    assert!(md[0].starts_with("**C-7, key placement under node rank, TINY (2 objects, 2.15 GB)**"));
+    assert!(md[0].starts_with("**C-7, key placement under node rank, TINY (2 objects, 2.15 GB; writer: the first live node of the rank, standing in for T-S1's rule)**"));
     assert!(md[1].starts_with("**C-7, replica sets of the key set, TINY**"));
     assert!(md[2].starts_with(
-        "**C-7, new stripes 2+2, TINY, L_silo (1 stripes; silo's bytes per drive: 0 B)**"
+        "**C-7, new stripes 2+2, TINY, L_silo (1 stripes; other bytes per drive: 0 B)**"
     ));
     assert!(md[4].starts_with("**C-7, existing 2+2 stripes under failure, TINY"));
     assert_eq!(tables[0].rows().len(), 7);
@@ -676,9 +676,10 @@ fn run_reads_a_listing_and_writes_the_summary_and_the_tables() {
         .iter()
         .map(|p| p.profile.name.as_str())
         .collect();
-    assert_eq!(names, ["LATER", "NOW"]);
+    assert_eq!(names, ["LATER", "NOW", "NOW, cold.replicas = 2"]);
     assert_eq!(summary.profiles[0].keys.len(), 7);
     assert_eq!(summary.profiles[1].keys.len(), 22);
+    assert!(summary.profiles[2].keys.is_empty());
     assert_eq!(summary.profiles[0].populations[0].stripes, 1);
     assert_eq!(summary.profiles[0].populations[1].stripes, LATER_GUARD);
     let printed = String::from_utf8(stdout).unwrap();
@@ -815,10 +816,63 @@ fn the_verb_sets_the_shared_bytes_on_now_only_and_the_tables_say_so() {
         .iter()
         .map(|p| p.profile.shared_bytes_per_drive)
         .collect();
-    assert_eq!(shared, [0, 1_000_000_000_000]);
+    assert_eq!(shared, [0, 1_000_000_000_000, 1_000_000_000_000]);
     assert_eq!(summary.profiles[0].populations[1].stripes, LATER_GUARD);
     assert_eq!(summary.profiles[1].populations[1].stripes, SHARED_GUARD);
     let printed = String::from_utf8(stdout).unwrap();
-    assert!(printed.contains("NOW, L_silo (1 stripes; silo's bytes per drive: 1.00 TB)"));
-    assert!(printed.contains("LATER, L_silo (1 stripes; silo's bytes per drive: 0 B)"));
+    assert!(printed.contains("4+2, NOW, L_silo (1 stripes; other bytes per drive: 1.00 TB)"));
+    assert!(printed.contains(
+        "2 copies, NOW, cold.replicas = 2, L_silo (1 stripes; other bytes per drive: 1.00 TB)"
+    ));
+    assert!(printed.contains("LATER, L_silo (1 stripes; other bytes per drive: 0 B)"));
+    // LATER's writer is the design's; NOW's key table is printed once, with the stand-in noted.
+    assert!(printed.contains("key placement under node rank, LATER (1 objects, 5 B)**"));
+    assert_eq!(
+        printed
+            .matches("key placement under node rank, NOW")
+            .count(),
+        1
+    );
+    assert_eq!(printed.matches("key placement under node rank").count(), 2);
+}
+
+/// NOW before erasure coding keeps two whole copies of a block on two nodes: a `1+1` code with
+/// one shard per node, which survives one node down (the copy on the other node) and not two
+/// when both copies' nodes are down; its layout prints as copies.
+#[test]
+fn now_before_erasure_coding_places_two_copies_on_two_nodes() {
+    let p = Profile::now_replicas();
+    assert_eq!((p.k, p.m, p.max_shards_per_domain), (1, 1, 1));
+    assert_eq!(p.check(), Ok(()));
+    assert_eq!(p.layout(), "2 copies");
+    assert_eq!(Profile::now().layout(), "4+2");
+    assert_eq!(p.stripe_bytes(), 2 * GIB);
+    let (stats, placements) = place_population(&p, &[], 50);
+    assert_eq!((stats.placed, stats.refused), (50, 0));
+    for shards in &placements {
+        assert_eq!(shards.len(), 2);
+        assert_ne!(shards[0].0, shards[1].0, "the two copies share a node");
+    }
+    // Two nodes down: the guard cannot hold everything, but each copy stays on its own node.
+    let (stats, placements) = place_population(&p, &[0, 1], 50);
+    assert_eq!(stats.placed, 50);
+    assert!(placements.iter().all(|s| s.iter().all(|(n, _)| *n > 1)));
+}
+
+/// A profile whose nodes and replicas repeat an earlier profile's has no key tally of its own,
+/// and no key table.
+#[test]
+fn a_profile_that_repeats_the_keys_of_an_earlier_one_has_no_key_tally() {
+    let objects = vec![object(1, GIB)];
+    let summary = summarize(&objects, &[Profile::now(), Profile::now_replicas()]);
+    assert!(!summary.profiles[0].keys.is_empty());
+    assert!(summary.profiles[1].keys.is_empty());
+    let titles: Vec<String> = tables(&summary).iter().map(Table::markdown).collect();
+    assert_eq!(
+        titles
+            .iter()
+            .filter(|t| t.contains("key placement under node rank"))
+            .count(),
+        1
+    );
 }

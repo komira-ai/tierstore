@@ -3,7 +3,9 @@
 //!
 //! No tier code runs: the rendezvous rank of a key, the node order and the drive choice of a
 //! stripe are computed here from the rules the design states, for both deployment profiles
-//! ([`Profile::later`], [`Profile::now`]), with zero, one and two nodes down.
+//! ([`Profile::later`], [`Profile::now`], and NOW's first state before erasure coding ships,
+//! [`Profile::now_replicas`]: two whole copies of a block, modelled as a `1+1` code), with zero,
+//! one and two nodes down.
 //!
 //! Three questions are answered per profile:
 //!
@@ -15,10 +17,11 @@
 //!    (free bytes drop by one block per shard), for each choice of nodes down: how many are placed
 //!    and refused, and how evenly the shards fill nodes and drives. Two populations: the stripes
 //!    that silo's logical bytes make ([`silo_stripes`]) and the stripes that fill the capacity
-//!    guard of design 10.15 ([`guard_stripes`]). On NOW the cold directories sit on silo's own
-//!    drives, so silo's bytes count against `fill_limit` (design 21.1):
+//!    guard of design 10.15 ([`guard_stripes`]). Fill is the file system's (design 10.4), so
+//!    bytes on a drive that are not the tier's count against `fill_limit`:
 //!    [`Profile::shared_bytes_per_drive`] seeds every drive's used bytes and is taken off the
-//!    guard; it is 0 on LATER.
+//!    guard. It is 0 by default: nothing else is on the drives of either profile now that silo
+//!    has left the NOW drives (design 21.1).
 //! 3. **Existing stripes under failure** ([`failure`]): the stripes placed with every node live,
 //!    then nodes go down: how many shards each stripe keeps beyond `k` (negative: unreadable)
 //!    and what share of the data shards sit on the down nodes (the share of cold reads that are
@@ -32,7 +35,12 @@
 //!   `stripe || node || drive`.
 //! - Node score of a key: `H(key || node)`; rank: nodes by descending score (ties, which
 //!   a 64-bit hash makes unlikely, by ascending id). The writer is the first live node of the
-//!   rank; the replica set is the first `replicas` live nodes.
+//!   rank; the replica set is the first `replicas` live nodes. When the set is smaller than the
+//!   cluster (NOW) the design's writer is a fixed rule of the set that task T-S1 defines (10.2);
+//!   the first live node of the rank stands in for it, and the tables say so.
+//! - A drive id is the node and the drive's index, where the tier's is a UUID, and a stripe id
+//!   is a counter, where the tier's carries the allocating node: the distributions are the
+//!   design's, the individual placements are not.
 //! - Node order of a stripe: live nodes by descending `H(stripe || node)`; shard `i` goes to
 //!   `order[i mod live]`, so the data shards (indexes `0..k`) rotate over the nodes with the
 //!   order.
@@ -45,7 +53,10 @@
 //! A stripe is refused ([`Refusal`]) when the code cannot survive a node loss in the profile
 //! (`m < max_shards_per_domain`), when a live node would hold more than `m` shards of it (the
 //! loss of that node would leave fewer than `k`), when no node is live, or when a node lacks
-//! drives below `fill_limit` for its shards.
+//! drives below `fill_limit` for its shards. The cap with nodes down is `m`, as the design's
+//! placement test reads it ("with one node down `4+4` places 4 + 4", section 14), not
+//! `max_shards_per_domain`, which the design also states as a write-time invariant (10.4): under
+//! that reading every new stripe is refused with a node down on both profiles.
 
 use std::cmp::Reverse;
 use std::collections::BTreeMap;
@@ -75,7 +86,8 @@ pub struct Args {
     /// Where the summary JSON is written.
     #[arg(long)]
     pub out: PathBuf,
-    /// Bytes on each drive that are not the tier's (silo's own use of the NOW drives).
+    /// Bytes on each drive that are not the tier's (none by default: nothing else is on the
+    /// drives of either profile).
     #[arg(long, default_value_t = 0)]
     pub shared_bytes_per_drive: u64,
 }
@@ -103,7 +115,7 @@ pub struct Profile {
     pub fill_limit: f64,
     /// Drives of free space held back for a rebuild (design 10.15).
     pub reserve_drives: u64,
-    /// Bytes on each drive that are not the tier's: silo's, on NOW; 0 on LATER.
+    /// Bytes on each drive that are not the tier's (0 by default).
     #[serde(default)]
     pub shared_bytes_per_drive: u64,
     /// Bytes of one shard.
@@ -149,10 +161,33 @@ impl Profile {
         }
     }
 
-    /// Both built-in profiles, LATER first.
+    /// NOW before erasure coding ships (milestone S2, design 21.1): `cold.replicas = 2`, two
+    /// whole copies of a block on two nodes, which is a `1+1` code with one shard per node.
+    #[must_use]
+    pub fn now_replicas() -> Self {
+        Self {
+            name: "NOW, cold.replicas = 2".to_owned(),
+            k: 1,
+            m: 1,
+            max_shards_per_domain: 1,
+            ..Self::now()
+        }
+    }
+
+    /// The built-in profiles: LATER, NOW, and NOW before erasure coding.
     #[must_use]
     pub fn all() -> Vec<Self> {
-        vec![Self::later(), Self::now()]
+        vec![Self::later(), Self::now(), Self::now_replicas()]
+    }
+
+    /// The cold layout as a table cell: `k+m`, or `n copies` for a `1+m` code.
+    #[must_use]
+    pub fn layout(&self) -> String {
+        if self.k == 1 {
+            format!("{} copies", self.m + 1)
+        } else {
+            format!("{}+{}", self.k, self.m)
+        }
     }
 
     /// Shards of a stripe, `k + m`.
@@ -790,16 +825,26 @@ pub fn summarize(objects: &[Object], profiles: &[Profile]) -> Summary {
     let bytes_total: u64 = objects.iter().map(|o| o.size).sum();
     let profiles = profiles
         .iter()
-        .map(|profile| {
-            let keys = tally_keys(
-                objects.iter().map(|o| (o.key.as_str(), o.size)),
-                profile.nodes,
-                profile.replicas,
-                &down_sets(profile.nodes, 2),
-            )
-            .iter()
-            .map(|t| key_scenario(profile, t))
-            .collect();
+        .enumerate()
+        .map(|(i, profile)| {
+            // The keys depend only on the nodes and the replicas: a profile that repeats an
+            // earlier one's has no key tally of its own.
+            let repeats = profiles[..i]
+                .iter()
+                .any(|p| (p.nodes, p.replicas) == (profile.nodes, profile.replicas));
+            let keys = if repeats {
+                Vec::new()
+            } else {
+                tally_keys(
+                    objects.iter().map(|o| (o.key.as_str(), o.size)),
+                    profile.nodes,
+                    profile.replicas,
+                    &down_sets(profile.nodes, 2),
+                )
+                .iter()
+                .map(|t| key_scenario(profile, t))
+                .collect()
+            };
             let downs = down_sets(profile.nodes, 2);
             let silo = silo_stripes(profile, bytes_total);
             let mut populations = Vec::new();
@@ -852,11 +897,21 @@ pub use crate::placement_tables::{down_label, tables};
 /// fails; [`Error::Parse`] for a bad listing line.
 pub fn run(args: &Args, stdout: &mut dyn Write) -> Result<(), Error> {
     let objects = crate::listing::read(&args.listing)?;
-    let now = Profile {
-        shared_bytes_per_drive: args.shared_bytes_per_drive,
-        ..Profile::now()
-    };
-    let summary = summarize(&objects, &[Profile::later(), now]);
+    // The bytes that are not the tier's are on NOW's drives, in both of its states.
+    let profiles: Vec<Profile> = Profile::all()
+        .into_iter()
+        .map(|p| {
+            if p.nodes == Profile::now().nodes {
+                Profile {
+                    shared_bytes_per_drive: args.shared_bytes_per_drive,
+                    ..p
+                }
+            } else {
+                p
+            }
+        })
+        .collect();
+    let summary = summarize(&objects, &profiles);
     let json = serde_json::to_string_pretty(&summary)
         .map_err(|e| Error::io("serialize", &args.out, e.into()))?;
     std::fs::write(&args.out, json).map_err(|e| Error::io("write", &args.out, e))?;

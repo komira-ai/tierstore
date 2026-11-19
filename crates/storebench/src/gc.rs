@@ -1,7 +1,7 @@
 //! C-10, garbage collection replayed offline (design section 16 C).
 //!
-//! The objects of the listing arrive when silo says they were written. Silo has not run the
-//! tier's garbage collection, and the CAS service's own has not yet, so when they die is
+//! The objects of the listing arrive when silo's listing says they were written. The CAS
+//! service had run no garbage collection when the listing was taken, so when they die is
 //! **synthetic**; each scenario states its rule:
 //!
 //! | scenario | an object dies at |
@@ -13,7 +13,8 @@
 //! Each scenario is replayed under two groupings of the objects into expiry classes:
 //! `arrival` (every object is class 0: blocks fill in arrival order) and `expiry` (the class is
 //! the week the object dies in, modulo 8, as the CAS service's `x-ts-expiry` hint would say it),
-//! and under the two profiles of design section 21 ([`Policy::now`] and [`Policy::later`]).
+//! and under the two profiles of design section 21 ([`Policy::now`] and [`Policy::later`]), with
+//! NOW also in its first state before erasure coding ([`Policy::now_replicas`]: two copies).
 //! The open segment an object is appended to is the first 8 bytes of blake3 of its key (little
 //! endian) modulo the number of open segments per class, with the class: an equal share of the
 //! keys to each open segment, the hash standing in for the rendezvous rank's choice of replica
@@ -254,7 +255,7 @@ pub fn summarize(arrivals: &[Arrival], footer_dead: bool) -> Summary {
     if footer_dead {
         scenarios.push(Scenario::FooterDead);
     }
-    let profiles = vec![Policy::now(), Policy::later()];
+    let profiles = vec![Policy::now(), Policy::now_replicas(), Policy::later()];
     let mut runs = Vec::new();
     for policy in &profiles {
         for &scenario in &scenarios {
@@ -314,6 +315,8 @@ pub fn tables(summary: &Summary) -> Vec<Table> {
             "freed whole",
             "partial",
             "dropped hot",
+            "compacted hot",
+            "bytes compacted",
         ],
     );
     let mut sizes = Table::new(
@@ -361,6 +364,8 @@ pub fn tables(summary: &Summary) -> Vec<Table> {
                 table::count(s.stripes_freed),
                 table::count(s.partial_stripes),
                 table::count(s.blocks_dropped_hot),
+                table::count(s.blocks_compacted_hot),
+                table::bytes(s.compacted_bytes),
             ]);
             cold.row(row);
             let mut row = head(run, at);

@@ -163,40 +163,48 @@ fn listing_text() -> (String, String) {
 }
 
 /// One object of 1 MiB at the design's values: under NOW it seals at 24 h, waits 72 h more and
-/// makes a partial stripe (1 MiB of data and two parity shards of 1 MiB), freed when the object
-/// dies; under LATER it seals at 72 h and is dead before the 168 h of `partial_after` pass, so
-/// it is unlinked hot and never goes cold.
+/// makes a partial stripe (its record of 1 MiB and a 64-byte header, aligned, and two parity
+/// shards as long), freed when the object dies; under LATER it seals at 72 h and is dead before
+/// the 168 h of `partial_after` pass, so it is unlinked hot and never goes cold.
 #[test]
 fn one_object_follows_the_two_profiles_through_seal_partial_stripe_and_death() {
     let a = [arrival(false, false)];
     let s = summarize(&a, false);
-    assert_eq!(s.runs.len(), 8);
+    assert_eq!(s.runs.len(), 12);
     assert_eq!((s.objects, s.dead_on_arrival), (1, 0));
     assert_eq!((s.first_arrival_ms, s.last_arrival_ms), (T0, T0));
     let names: Vec<&str> = s.profiles.iter().map(|p| p.name.as_str()).collect();
-    assert_eq!(names, ["now", "later"]);
+    assert_eq!(names, ["now", "now-replicas", "later"]);
     let labels: Vec<String> = s.runs.iter().map(Run::label).collect();
     assert_eq!(labels[0], "now/min-ttl/arrival");
     assert_eq!(labels[1], "now/min-ttl/expiry");
     assert_eq!(labels[2], "now/ttl-by-kind/arrival");
-    assert_eq!(labels[7], "later/ttl-by-kind/expiry");
+    assert_eq!(labels[7], "now-replicas/ttl-by-kind/expiry");
+    assert_eq!(labels[11], "later/ttl-by-kind/expiry");
 
     let now = &s.runs[0].replay;
     assert_eq!(now.samples.len(), 61);
     assert_eq!(now.samples[3].partial_stripes, 0);
     let held = &now.samples[5];
+    let record = MIB + 4096;
     assert_eq!(held.partial_stripes, 1);
-    assert_eq!(held.cold_raw_bytes, 3 * MIB);
+    assert_eq!(held.cold_raw_bytes, 3 * record);
     assert_eq!(held.live_bytes, MIB);
-    assert_eq!(held.cold_fill_efficiency, ratio(MIB, 3 * MIB));
+    assert_eq!(held.cold_fill_efficiency, ratio(MIB, 3 * record));
+
+    // Two cold copies: the block goes cold alone at twice its length, never as a partial stripe.
+    let copies = &s.runs[4].replay.samples[5];
+    assert_eq!(s.runs[4].label(), "now-replicas/min-ttl/arrival");
+    assert_eq!((copies.stripes_live, copies.partial_stripes), (1, 0));
+    assert_eq!(copies.cold_raw_bytes, 2 * record);
     assert_eq!(now.samples[7].stripes_freed, 1);
     assert_eq!(now.end_of_data.sample.stripes_live, 0);
     assert_eq!(now.end_of_replay.sample.stripes_freed, 1);
     assert_eq!(now.end_of_replay.sample.blocks_dropped_hot, 0);
     assert_eq!(now.end_of_replay.sealed_blocks.under_seal_min, 1);
 
-    let later = &s.runs[4].replay;
-    assert_eq!(s.runs[4].label(), "later/min-ttl/arrival");
+    let later = &s.runs[8].replay;
+    assert_eq!(s.runs[8].label(), "later/min-ttl/arrival");
     assert_eq!(later.end_of_replay.sample.blocks_dropped_hot, 1);
     assert_eq!(later.end_of_replay.sample.partial_stripes, 0);
     assert_eq!(later.end_of_replay.sample.stripes_freed, 0);
@@ -209,7 +217,7 @@ fn one_object_follows_the_two_profiles_through_seal_partial_stripe_and_death() {
 fn task_outputs_outlive_the_partial_wait_and_dead_keys_never_go_cold() {
     let a = [arrival(true, false), arrival(false, true)];
     let s = summarize(&a, true);
-    assert_eq!(s.runs.len(), 12);
+    assert_eq!(s.runs.len(), 18);
     assert_eq!(s.dead_on_arrival, 1);
     let find = |label: &str| s.runs.iter().find(|r| r.label() == label).unwrap();
     let ttl = &find("later/ttl-by-kind/arrival")
@@ -243,34 +251,32 @@ fn the_tables_print_each_run_at_both_moments() {
             "**C-10, rewrite cost below each rewrite_below**",
         ]
     );
-    assert_eq!(t[0].rows().len(), 16);
+    assert_eq!(t[0].rows().len(), 24);
     let md = t[0].markdown();
-    assert!(
-        md.contains(
-            "| now | min-ttl | arrival | end of data | 0 B | 0 B | 0.0 | 0 | 0 | 0 | 0 |\n"
-        )
-    );
     assert!(md.contains(
-        "| now | min-ttl | arrival | end of replay | 0 B | 0 B | 0.0 | 0 | 1 | 1 | 0 |\n"
+        "| now | min-ttl | arrival | end of data | 0 B | 0 B | 0.0 | 0 | 0 | 0 | 0 | 0 | 0 B |\n"
     ));
     assert!(md.contains(
-        "| later | ttl-by-kind | expiry | end of replay | 0 B | 0 B | 0.0 | 0 | 0 | 0 | 1 |\n"
+        "| now | min-ttl | arrival | end of replay | 0 B | 0 B | 0.0 | 0 | 1 | 1 | 0 | 0 | 0 B |\n"
+    ));
+    assert!(md.contains(
+        "| later | ttl-by-kind | expiry | end of replay | 0 B | 0 B | 0.0 | 0 | 0 | 0 | 1 | 0 | 0 B |\n"
     ));
     // Weekly: days 0, 7, ..., 56 and a column per run; a held stripe reads 33.3.
     assert_eq!(t[1].rows().len(), 9);
     assert_eq!(t[1].rows()[0][0], "0");
     assert_eq!(t[1].rows()[8][0], "56");
-    assert_eq!(t[1].rows()[0].len(), 1 + 8);
+    assert_eq!(t[1].rows()[0].len(), 1 + 12);
     // Sealed sizes: one block under seal_min_bytes in NOW at the end of the replay.
     assert!(
         t[2].markdown()
             .contains("| now | min-ttl | arrival | end of replay | 1 | 0 | 0 |\n")
     );
     // Deciles: ten bins; nothing is left in any.
-    assert_eq!(t[3].rows().len(), 16);
+    assert_eq!(t[3].rows().len(), 24);
     assert_eq!(t[3].rows()[0].len(), 4 + 10);
     // Rewrite: three thresholds per run and moment.
-    assert_eq!(t[4].rows().len(), 48);
+    assert_eq!(t[4].rows().len(), 72);
     assert_eq!(
         t[4].rows()[0],
         [
@@ -332,7 +338,7 @@ fn c10_replays_a_listing_and_writes_a_summary_that_reads_back() {
     let json = std::fs::read_to_string(dir.path().join("c10.json")).unwrap();
     let summary: Summary = serde_json::from_str(&json).unwrap();
     assert_eq!((summary.objects, summary.dead_on_arrival), (2, 1));
-    assert_eq!(summary.runs.len(), 12);
+    assert_eq!(summary.runs.len(), 18);
     let expected = summarize(
         &arrivals(
             &listing::read(&dir.path().join("listing.tsv")).unwrap(),
@@ -345,7 +351,7 @@ fn c10_replays_a_listing_and_writes_a_summary_that_reads_back() {
     assert_eq!(
         printed.lines().last().unwrap(),
         format!(
-            "2 objects replayed in 12 runs; summary in {}",
+            "2 objects replayed in 18 runs; summary in {}",
             dir.path().join("c10.json").display()
         )
     );
@@ -358,7 +364,7 @@ fn c10_without_dead_keys_runs_two_scenarios() {
     std::fs::write(dir.path().join("listing.tsv"), listing_text().0).unwrap();
     let printed = run_on(&dir, None).unwrap();
     assert!(printed.ends_with(&format!(
-        "2 objects replayed in 8 runs; summary in {}\n",
+        "2 objects replayed in 12 runs; summary in {}\n",
         dir.path().join("c10.json").display()
     )));
     assert!(!printed.contains("footer-dead"));

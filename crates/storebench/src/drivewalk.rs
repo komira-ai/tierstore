@@ -137,27 +137,31 @@ pub fn walk(
         .map_err(|e| Error::io("stat", root, e))?
         .dev();
     let mut walked = Walked::default();
+    // The bucket directory must be readable; below it, what cannot be read is counted.
+    let mut first = Some(read_dir(root).map_err(|e| Error::io("read", root, e))?);
     let mut stack = vec![Pending {
         rel: String::new(),
         owned: share.of == 1,
     }];
     while let Some(dir) = stack.pop() {
-        let path = root.join(&dir.rel);
-        let entries = match read_dir(&path) {
+        let entries = match first
+            .take()
+            .map_or_else(|| read_dir(&root.join(&dir.rel)), Ok)
+        {
             Ok(entries) => entries,
-            Err(e) if dir.rel.is_empty() => return Err(Error::io("read", root, e)),
             Err(e) => {
                 walked.errors.push((dir.rel, e.to_string()));
                 continue;
             }
         };
         walked.dirs += 1;
-        let mut subdirs = Vec::new();
-        for (name, meta) in entries {
-            if meta.is_dir() && meta.dev() == device {
-                subdirs.push(name);
-            }
-        }
+        // The directories on the bucket directory's own file system.
+        let subdirs: Vec<String> = entries
+            .into_iter()
+            .filter(|(_, meta)| meta.is_dir())
+            .filter(|(_, meta)| meta.dev() == device)
+            .map(|(name, _)| name)
+            .collect();
         let split = !dir.owned && subdirs.len() >= SPLIT_FANOUT;
         for name in subdirs {
             let rel = if dir.rel.is_empty() {
@@ -184,10 +188,14 @@ pub fn walk(
                 Err(e) if e.kind() == std::io::ErrorKind::NotFound => {
                     stack.push(Pending { rel, owned });
                 }
-                Err(e) if mine => walked
-                    .errors
-                    .push((format!("{rel}/xl.meta"), e.to_string())),
-                Err(_) => {}
+                // Another walk names an object it owns.
+                Err(e) => {
+                    if mine {
+                        walked
+                            .errors
+                            .push((format!("{rel}/xl.meta"), e.to_string()));
+                    }
+                }
             }
         }
     }

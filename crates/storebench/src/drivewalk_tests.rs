@@ -392,3 +392,65 @@ fn failing_flushes_and_a_failing_error_line_are_errors() {
     let err = walk_into(&args, &mut ok(), None, &mut one_line).unwrap_err();
     assert_eq!(err.to_string(), "write standard output: full");
 }
+
+#[cfg(target_os = "linux")]
+/// Makes a chain of directories below `root`, each name 200 bytes, until the path of
+/// `<last>/xl.meta` is longer than the system's `PATH_MAX` (4096 bytes on Linux), and returns
+/// the last directory's path relative to `root`. The chain is made one directory at a time
+/// through directory descriptors, so no call is given the long path.
+fn too_long_chain(root: &Path) -> String {
+    use rustix::fs::{Mode, OFlags, mkdirat, openat};
+    let name = "d".repeat(200);
+    let mut dir = openat(
+        rustix::fs::CWD,
+        root,
+        OFlags::DIRECTORY | OFlags::RDONLY,
+        Mode::empty(),
+    )
+    .unwrap();
+    let mut rel = String::new();
+    while root.as_os_str().len() + 1 + rel.len() + "/xl.meta".len() <= 4096 {
+        mkdirat(&dir, name.as_str(), Mode::from_raw_mode(0o755)).unwrap();
+        dir = openat(
+            &dir,
+            name.as_str(),
+            OFlags::DIRECTORY | OFlags::RDONLY,
+            Mode::empty(),
+        )
+        .unwrap();
+        rel = if rel.is_empty() {
+            name.clone()
+        } else {
+            format!("{rel}/{name}")
+        };
+    }
+    rel
+}
+
+/// A directory whose `xl.meta` cannot be looked at (here its path is too long for the system,
+/// an error other than "not found") is not walked into: the walk that owns it names it among
+/// the errors, a walk that does not own it says nothing, and the rest of the tree is listed.
+#[test]
+// Linux only: `PATH_MAX` and the error's text are Linux's (macOS has 1024 and another code).
+#[cfg(target_os = "linux")]
+fn an_object_whose_xl_meta_cannot_be_looked_at_is_named_by_its_owner_only() {
+    let dir = TestDir::under(std::env::temp_dir(), "storebench-drivewalk-long");
+    put(dir.path(), "cas/l/a", 7);
+    let deep = too_long_chain(dir.path());
+    let (listing, _, all) = walk_all(dir.path(), Share { index: 0, of: 1 });
+    assert_eq!(listing.lines().count(), 1, "{listing}");
+    assert_eq!(all.errors.len(), 1, "{:?}", all.errors);
+    assert_eq!(all.errors[0].0, format!("{deep}/xl.meta"));
+    assert_eq!(all.errors[0].1, "File name too long (os error 36)");
+
+    let named: Vec<usize> = (0..2)
+        .map(|index| walk_all(dir.path(), Share { index, of: 2 }).2.errors.len())
+        .collect();
+    let mut sorted = named.clone();
+    sorted.sort_unstable();
+    assert_eq!(
+        sorted,
+        [0, 1],
+        "exactly one of two walks names it: {named:?}"
+    );
+}
