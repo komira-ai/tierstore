@@ -1,0 +1,34 @@
+[package]
+name = "tierstore-list"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+repository.workspace = true
+publish.workspace = true
+description = "The L2 tree list of the tierstore read path (docs/design/fetch-cache-serve.md, section 3): a tree's version 2 list with a PACKS table and one sha256 per 1 MiB cell of every pack. The reader (ListL2 of tierstore-fetch-api) and the writer a CAS service uses: cell digests as a pack streams, and the L2 sidecar of a version 2 list."
+
+# Pure: no I/O, no clock, no async. Bytes in, bytes out; every multi-byte integer is
+# little-endian.
+[dependencies]
+# The CRC-32C of the header, so a torn or flipped header byte is an error, not another layout.
+crc32c.workspace = true
+# sha256 of the cells, of `pack_root` and of the version 2 projection: about twice the `sha2`
+# crate on the build nodes' CPUs, which have no SHA-NI (design 4.7).
+ring.workspace = true
+# `ListL2`, `PackRecord`, `Refusal` and `ListVersionUnsupported`: the frozen contract this crate's
+# reader implements.
+tierstore-fetch-api.workspace = true
+thiserror.workspace = true
+
+[dev-dependencies]
+# An independent sha256, so the tests do not check ring against itself.
+sha2.workspace = true
+# The version 2 writer and reader, so the tests check that an L2 list's projection is the version 2
+# list it was made from, byte for byte, and the benchmark encodes the tree it walks.
+tierstore.workspace = true
+# Scratch directories for the benchmark's test.
+tierstore-testkit.workspace = true
+
+[lints]
+workspace = true
