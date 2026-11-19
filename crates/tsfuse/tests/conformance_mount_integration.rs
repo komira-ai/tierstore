@@ -229,6 +229,17 @@ fn a_put_mount_is_writable_in_the_mount_table_and_its_unmount_removes_the_entry(
     assert_eq!(served.join(), vec![ReaderEnd::Unmounted; READERS]);
 }
 
+/// Why the FUSE control file system is not there to check, if it is not: the connections
+/// directory exists whether or not `fusectl` is mounted on it, so its listing proves nothing.
+fn no_control_file_system() -> Option<String> {
+    match mount_entry(Path::new(CONNECTIONS)) {
+        Some(entry) if entry.fstype == "fusectl" => None,
+        other => Some(format!(
+            "the FUSE control file system is not mounted at {CONNECTIONS}: {other:?}"
+        )),
+    }
+}
+
 #[test]
 fn the_connection_of_a_mount_is_a_directory_of_the_control_file_system_until_it_is_unmounted() {
     let Some((mounted, session)) = Mounted::new("t-f7-conn", READERS) else {
@@ -238,8 +249,8 @@ fn the_connection_of_a_mount_is_a_directory_of_the_control_file_system_until_it_
     let served = serve_inline(session, tree);
     let id = mounted.mount().connection().unwrap();
     let directory = Path::new(CONNECTIONS).join(id.0.to_string());
-    if let Err(e) = std::fs::read_dir(CONNECTIONS) {
-        skip(&format!("{CONNECTIONS} cannot be listed here: {e}"));
+    if let Some(why) = no_control_file_system() {
+        skip(&why);
         mounted.unmount();
         served.join();
         return;
@@ -311,6 +322,10 @@ fn an_unmount_of_a_busy_mount_fails_and_leaves_it_and_a_lazy_unmount_detaches_it
 fn an_abort_with_a_read_parked_fails_the_caller_and_the_readers_and_leaves_the_mount_to_unmount() {
     if !is_root() {
         skip("the abort file of a connection is root's: this process is not root");
+        return;
+    }
+    if let Some(why) = no_control_file_system() {
+        skip(&why);
         return;
     }
     let Some((mounted, session)) = Mounted::new("t-f7-abort", READERS) else {

@@ -41,7 +41,7 @@ use std::path::Path;
 use std::sync::Arc;
 
 use conformance::{
-    DirRead, Mounted, Open, Opendir, ROOT, Served, TreeSpec, answer_read, errno, is_root,
+    DirRead, Events, Mounted, Open, Opendir, ROOT, Served, TreeSpec, answer_read, errno, is_root,
     kernel_at_least, memfd, op, pattern, pread, serve, tree_options,
 };
 use kernel::skip;
@@ -139,6 +139,18 @@ fn expected(tree: &TreeSpec, ino: u64) -> Vec<(Vec<u8>, u64, FileType)> {
         .into_iter()
         .map(|(name, ino, kind)| (name, ino, file_type(kind)))
         .collect()
+}
+
+/// Ends the mount once every request the callers' closes queued has reached the file system, and
+/// returns what it saw. A close queues its RELEASE or RELEASEDIR (a background request) before it
+/// returns; the LOOKUP of a missing name made after it is queued behind it and answered, so the
+/// release, if there was one, has been read; joining the readers then waits until it was handled.
+fn finish_after_the_closes(mounted: Mounted, served: Served) -> Arc<Events> {
+    let missing = std::fs::symlink_metadata(mounted.path("after-every-close"));
+    assert_eq!(errno_of(missing), errno::ENOENT);
+    let events = served.events.clone();
+    finish(mounted, served);
+    events
 }
 
 fn count(served: &Served, opcode: u32) -> usize {
@@ -279,12 +291,12 @@ fn an_enosys_open_is_the_only_open_of_two_opened_and_read_files_and_no_release_i
         1,
         "the first OPEN was answered ENOSYS"
     );
+    let seen = finish_after_the_closes(mounted, served);
     assert_eq!(
-        count(&served, op::RELEASE),
+        seen.with(|s| s.count(op::RELEASE)),
         0,
         "an open that was not sent is not released"
     );
-    finish(mounted, served);
 }
 
 #[test]
@@ -313,12 +325,12 @@ fn an_enosys_opendir_is_the_only_opendir_of_two_listings_and_no_releasedir_is_se
         1,
         "the first OPENDIR was answered ENOSYS"
     );
+    let seen = finish_after_the_closes(mounted, served);
     assert_eq!(
-        count(&served, op::RELEASEDIR),
+        seen.with(|s| s.count(op::RELEASEDIR)),
         0,
         "an opendir that was not sent is not released"
     );
-    finish(mounted, served);
 }
 
 #[test]

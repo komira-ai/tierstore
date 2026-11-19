@@ -347,7 +347,11 @@ fn check_reads(killed: &Killed, served: &Served, resent: &BTreeSet<u64>) {
             ),
         }
     }
-    let completions = served.events.with(|s| s.completions.clone());
+    // `answer_read` records a completion after its reply is written, so a caller can have its
+    // bytes first: wait until every READ read has one.
+    let completions = served
+        .events
+        .wait_for(|s| (s.completions.len() >= expected.len()).then(|| s.completions.clone()));
     assert_eq!(
         completions.len(),
         expected.len(),

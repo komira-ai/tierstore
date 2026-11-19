@@ -56,8 +56,10 @@ tests assert them as found.
   connection whose INIT asked for `FUSE_ABORT_ERROR`, which `tsfuse` does not ask for [run;
   source: `fs/fuse/control.c` sets `fc->aborted` only with `fc->abort_err`, and
   `fuse_dev_do_read` returns `ECONNABORTED` only when it is set]. Every request waiting on the
-  connection still fails `ECONNABORTED` for its caller. A reader that takes a request while the
-  connection ends gets `ECONNABORTED` (`ReaderEnd::Aborted`). That was seen in about one run in
-  six when a lazily detached mount ended at its last close.
+  connection still fails `ECONNABORTED` for its caller. A reader whose read races the end of the
+  connection can get `ECONNABORTED` instead (`ReaderEnd::Aborted`). On the farm that happened on
+  some runs when a lazily detached mount ended at its last close. The abort and lazy-unmount
+  tests therefore accept either end for each reader. They assert that the kernel ended the
+  connection, and that no reader ended as stopped.
 - **A name longer than `NAME_MAX` (255 bytes) reaches the server.** The kernel does not hold FUSE
   names to it, so a LOOKUP of 256 bytes is sent and answered `ENOENT` by the tree.

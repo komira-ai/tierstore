@@ -1,13 +1,13 @@
 //! The state memfd of one entry (5.1): the page a mount maps read-only.
 //!
 //! The store creates the memfd with `MFD_ALLOW_SEALING | MFD_NOEXEC_SEAL` (not executable and
-//! sealed against becoming so, which every `vm.memfd_noexec` setting allows, K25), sizes it to
-//! the page, writes the header, maps it read-write and only then applies [`MOUNT_SEALS`]. From then on `F_SEAL_FUTURE_WRITE` refuses every new
-//! writable shared mapping and every `write(2)` of the memfd, through any descriptor, while the
-//! store's mapping, made before the seal, stays writable; `F_SEAL_SHRINK` and `F_SEAL_GROW` fix
-//! its length, and `F_SEAL_SEAL` the seals. A mount can therefore only read the cell bytes and the
-//! touch epochs, which only the server writes: it can never mark a cell `present` or change
-//! another mount's view.
+//! sealed against becoming so, which every `vm.memfd_noexec` setting allows, K25), sizes it to the
+//! page, writes the header, maps it read-write and only then applies [`MOUNT_SEALS`]. From then on
+//! `F_SEAL_FUTURE_WRITE` refuses every new writable shared mapping and every `write(2)` of the
+//! memfd, through any descriptor, while the store's mapping, made before the seal, stays writable;
+//! `F_SEAL_SHRINK` and `F_SEAL_GROW` fix its length, and `F_SEAL_SEAL` the seals. A mount can
+//! therefore only read the cell bytes and the touch epochs, which only the server writes: it can
+//! never mark a cell `present` or change another mount's view.
 
 use std::fs::File;
 use std::io;

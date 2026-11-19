@@ -204,6 +204,9 @@ fn eight_callers_making_sixteen_direct_reads_each_get_exactly_their_bytes_from_f
         }
     }
     assert_eq!(completed_parked, CALLERS * PER_CALLER / 2);
+    // An inline answer records its completion after the reply is written, so a caller can see
+    // its bytes first: wait for all 128.
+    events.wait_for(|s| (s.completions.len() >= CALLERS * PER_CALLER).then_some(()));
     let (reads, completions) = events.with(|s| (s.reads.clone(), s.completions.clone()));
     assert_eq!(events.with(|s| s.count(conformance::op::READ)), 128);
     assert_eq!(reads.len(), 128);
@@ -398,7 +401,8 @@ fn a_killed_reader_of_a_buffered_read_ends_with_no_interrupt_and_the_read_stays_
         "the child ended by SIGKILL: {status:?}"
     );
     // A round trip through the readers after the child is gone: an INTERRUPT queued by its death
-    // would be read before it.
+    // is read before it (the kernel hands out INTERRUPTs first). Another reader may still be
+    // routing that INTERRUPT, so its absence is checked once every reader has ended, below.
     rustix::fs::statfs(&mounted.mp).unwrap();
 
     let parked = events.update(|s| std::mem::take(&mut s.parked));
@@ -407,9 +411,6 @@ fn a_killed_reader_of_a_buffered_read_ends_with_no_interrupt_and_the_read_stays_
         tokens.registered() >= 1,
         "the parked request is still registered"
     );
-    for token in tokens_seen.lock().unwrap().iter() {
-        assert!(!token.is_cancelled(), "no INTERRUPT reached the session");
-    }
     for p in parked {
         let r = p.read;
         assert_eq!(r.ino, inos[0]);
@@ -424,4 +425,9 @@ fn a_killed_reader_of_a_buffered_read_ends_with_no_interrupt_and_the_read_stays_
     mounted.unmount();
     assert_eq!(served.join(), vec![ReaderEnd::Unmounted; READERS]);
     assert_eq!(tokens.registered(), 0);
+    // Every reader has ended, so every INTERRUPT the kernel queued has been routed: a cancelled
+    // token would be the one that INTERRUPT found (nothing else cancels a token).
+    for token in tokens_seen.lock().unwrap().iter() {
+        assert!(!token.is_cancelled(), "no INTERRUPT reached the session");
+    }
 }
