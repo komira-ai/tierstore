@@ -227,7 +227,8 @@ impl Handover {
             &mut control,
             SendFlags::NOSIGNAL,
         )
-        .map_err(|e| HandoverError::Socket(e.into()))?;
+        .map_err(io::Error::from)
+        .map_err(HandoverError::Socket)?;
         Ok(())
     }
 
@@ -244,7 +245,8 @@ impl Handover {
         let mut control = RecvAncillaryBuffer::new(&mut space);
         let mut iov = [IoSliceMut::new(&mut data)];
         let got = rustix::net::recvmsg(socket, &mut iov, &mut control, RecvFlags::CMSG_CLOEXEC)
-            .map_err(|e| HandoverError::Socket(e.into()))?;
+            .map_err(io::Error::from)
+            .map_err(HandoverError::Socket)?;
         // Owned at once, so every descriptor received is closed on any error below.
         let fds: Vec<OwnedFd> = control
             .drain()
@@ -269,7 +271,8 @@ fn dup_all(fds: &[OwnedFd]) -> Result<Vec<OwnedFd>, HandoverError> {
     fds.iter()
         .map(|fd| rustix::io::fcntl_dupfd_cloexec(fd, 0))
         .collect::<rustix::io::Result<_>>()
-        .map_err(|e| HandoverError::Dup(e.into()))
+        .map_err(io::Error::from)
+        .map_err(HandoverError::Dup)
 }
 
 /// The terms record, version 1, little-endian: `magic [u8; 8]`, `version u32`, `devices u32`,
@@ -337,7 +340,9 @@ fn read_terms(fd: &OwnedFd) -> Result<Vec<u8>, HandoverError> {
         _ => return Err(HandoverError::NotTerms),
     }
     let mut buf = vec![0u8; TERMS_V1_LEN];
-    let n = rustix::io::pread(fd, &mut buf, 0).map_err(|e| HandoverError::Terms(e.into()))?;
+    let n = rustix::io::pread(fd, &mut buf, 0)
+        .map_err(io::Error::from)
+        .map_err(HandoverError::Terms)?;
     buf.truncate(n);
     Ok(buf)
 }
