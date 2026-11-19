@@ -6,11 +6,15 @@
 //!   another runtime in the reverse of the order they were read. Every completion is accepted by
 //!   the kernel, which takes a reply only on the clone whose processing queue holds the request
 //!   (K1), and every caller gets its bytes.
-//! - **INTERRUPT answered once.** Two `cat`s, each with a READ parked on a reader that then waits
-//!   inside `Fs::handle` for the READ's cancellation, so that the INTERRUPT the kernel queues when
-//!   the `cat` is killed can only be read by another clone. Each `cat` ends, killed by signal 9,
-//!   which it does only once its READ is answered (K8): the `EINTR` went to the READ's own clone.
-//!   The late completion of each parked replier writes nothing.
+//! - **INTERRUPT answered once.** Two child processes, each with a READ parked on a reader that
+//!   then waits inside `Fs::handle` for the READ's cancellation, so that the INTERRUPT the kernel
+//!   queues when the child is killed can only be read by another clone. Each child ends, killed by
+//!   signal 9, which it does only once its READ is answered (K8): the `EINTR` went to the READ's
+//!   own clone. The late completion of each parked replier writes nothing. The child is this test
+//!   binary running [`child_reads_the_file_named_on_stdin`], one `pread` of its own: a tool such
+//!   as `cat` may copy by `splice`, which goes through the page cache even for an
+//!   `FOPEN_DIRECT_IO` file, and under the session's `ASYNC_READ` such a READ has no waiting
+//!   caller and gets no INTERRUPT (K8).
 //! - **Async reply while every reader is blocked.** A READ parked, then both readers blocked
 //!   inline (a stalled `pread`): the parked READ, completed by a task, reaches its caller while no
 //!   reader is free.
@@ -19,8 +23,7 @@
 //! opened with `FOPEN_DIRECT_IO` so that each `pread` is one READ with a waiting caller. Every
 //! wait is on an event (a request handled, a caller's system call returning, a child ending),
 //! never on a timer. An integration target: it mounts through `mount(2)` as root (the farm) or
-//! `fusermount3` (CI), and says on stderr why it does not run where neither can, or where `cat`
-//! cannot be started.
+//! `fusermount3` (CI), and says on stderr why it does not run where neither can.
 #![cfg(target_os = "linux")]
 #![allow(
     clippy::unwrap_used,
@@ -32,10 +35,11 @@ mod kernel;
 
 use std::collections::HashSet;
 use std::fs::File;
+use std::io::Write as _;
 use std::num::NonZeroUsize;
 use std::os::unix::fs::FileExt as _;
 use std::os::unix::process::ExitStatusExt as _;
-use std::path::PathBuf;
+use std::path::{Path, PathBuf};
 use std::process::{Child, Command, Stdio};
 use std::sync::mpsc::channel;
 use std::sync::{Arc, Barrier, Condvar, Mutex};
@@ -58,7 +62,6 @@ struct Read {
     ino: u64,
     offset: u64,
     size: u32,
-    pid: u32,
 }
 
 /// A parked READ: its replier and the reader thread that read it.
@@ -144,7 +147,6 @@ impl Fs for Tree {
                     ino: node,
                     offset: r.offset,
                     size: r.size,
-                    pid: req.header.pid,
                 };
                 return (self.on_read)(read, replier, &self.events);
             }
@@ -366,16 +368,36 @@ fn reads_parked_on_four_clones_and_completed_by_tasks_out_of_order_reach_their_c
     assert_eq!(tokens.registered(), 0);
 }
 
-/// `cat` of `path`, its output discarded; `None` (said on stderr) if `cat` cannot be started.
-fn cat(path: PathBuf) -> Option<Child> {
-    let started = Command::new("cat").arg(path).stdout(Stdio::null()).spawn();
-    match started {
-        Ok(child) => Some(child),
-        Err(e) => {
-            skip(&format!("cat cannot be started: {e}"));
-            None
-        }
-    }
+/// The name of [`child_reads_the_file_named_on_stdin`], as the child's command line gives it.
+const CHILD: &str = "child_reads_the_file_named_on_stdin";
+
+/// Not a check of its own: the child process of
+/// [`an_interrupt_read_by_another_clone_answers_each_parked_read_eintr_once`]. It reads the path
+/// of a file of the mount from its standard input, opens the file and reads 4 KiB at offset 0 with
+/// one `pread`, a direct READ whose caller waits for the answer; the parent kills it while the
+/// READ is parked.
+#[test]
+#[ignore = "the child process of an_interrupt_read_by_another_clone_answers_each_parked_read_eintr_once, which runs it with --ignored"]
+fn child_reads_the_file_named_on_stdin() {
+    let mut path = String::new();
+    std::io::stdin().read_line(&mut path).unwrap();
+    let file = File::open(path.trim_end()).unwrap();
+    let mut buf = vec![0u8; 4096];
+    let _ = file.read_at(&mut buf, 0);
+}
+
+/// A child process that reads `path` once ([`child_reads_the_file_named_on_stdin`]).
+fn child_reading(path: &Path) -> Child {
+    let mut child = Command::new(std::env::current_exe().unwrap())
+        .args(["--exact", CHILD, "--ignored", "--test-threads=1"])
+        .stdin(Stdio::piped())
+        .stdout(Stdio::null())
+        .stderr(Stdio::null())
+        .spawn()
+        .unwrap();
+    let mut stdin = child.stdin.take().unwrap();
+    writeln!(stdin, "{}", path.display()).unwrap();
+    child
 }
 
 #[test]
@@ -400,17 +422,14 @@ fn an_interrupt_read_by_another_clone_answers_each_parked_read_eintr_once() {
         Handled::Parked
     });
 
-    let Some(first) = cat(mounted.path("f")) else {
-        return;
-    };
-    let Some(second) = cat(mounted.path("g")) else {
-        return;
-    };
-    let mut children = [first, second];
+    let mut children = [
+        child_reading(&mounted.path("f")),
+        child_reading(&mounted.path("g")),
+    ];
     let parked = events.wait_for(|s| (s.parked.len() == 2).then(|| std::mem::take(&mut s.parked)));
-    let pids: HashSet<u32> = parked.iter().map(|p| p.read.pid).collect();
-    let children_pids: HashSet<u32> = children.iter().map(Child::id).collect();
-    assert_eq!(pids, children_pids, "each cat's READ is parked");
+    let files: HashSet<u64> = parked.iter().map(|p| p.read.ino).collect();
+    let both: HashSet<u64> = ["f", "g"].into_iter().filter_map(ino_of).collect();
+    assert_eq!(files, both, "each child's READ is parked");
     assert_ne!(parked[0].reader, parked[1].reader, "on two readers");
 
     for child in &mut children {
