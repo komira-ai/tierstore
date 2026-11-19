@@ -1,0 +1,38 @@
+[package]
+name = "storebench"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+repository.workspace = true
+publish = false
+description = "The storage-tier measurements that need no tier code: silo's objects (C-6), placement over the storage nodes (C-7) and a replay of garbage collection (C-10)."
+
+[dependencies]
+# The rendezvous hash of the storage tier's placement (design 10.2, 10.4): `H` is blake3.
+# CC0-1.0 OR Apache-2.0 (Apache-2.0 is taken).
+blake3.workspace = true
+clap.workspace = true
+# The checksum of a pack footer.
+crc32c.workspace = true
+futures.workspace = true
+# Digests of pack footers, written lowercase.
+hex.workspace = true
+# The S3 client silo is read with (listing, pack footers).
+objstore-s3.workspace = true
+# The size, use and free space of the file system a drive is (`statvfs`).
+rustix = { workspace = true, features = ["fs"] }
+serde.workspace = true
+serde_json.workspace = true
+thiserror.workspace = true
+tokio = { workspace = true, features = ["rt", "rt-multi-thread", "time"] }
+
+[dev-dependencies]
+bytes.workspace = true
+# An S3 service on loopback (port 0) that the tests list and read.
+objstore-s3 = { workspace = true, features = ["testkit"] }
+tierstore-testkit.workspace = true
+tokio = { workspace = true, features = ["macros"] }
+
+[lints]
+workspace = true
