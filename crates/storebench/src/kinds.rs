@@ -154,11 +154,7 @@ mod tests {
             (format!("cas/{H16}/{H16}/XYZ"), 10, Kind::Other),
             (format!("cas/l/{}", "g".repeat(64)), 10, Kind::Other),
             ("cas/b/1-2/not-a-run/pack".to_owned(), 10, Kind::Other),
-            (
-                "history/history/preflight-put-x".to_owned(),
-                1,
-                Kind::Other,
-            ),
+            ("history/history/preflight-put-x".to_owned(), 1, Kind::Other),
         ];
         for (key, size, kind) in cases {
             assert_eq!(classify(&key, size), kind, "{key}");

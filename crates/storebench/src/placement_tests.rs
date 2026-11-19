@@ -654,7 +654,11 @@ fn run_reads_a_listing_and_writes_the_summary_and_the_tables() {
     let listing = dir.path().join("listing.tsv");
     let mut text = String::new();
     for i in 0..30u64 {
-        text.push_str(&format!("cas-store\t{}\t{}\t1\tabc\n", key(i), 1_000_000 + i));
+        text.push_str(&format!(
+            "cas-store\t{}\t{}\t1\tabc\n",
+            key(i),
+            1_000_000 + i
+        ));
     }
     std::fs::write(&listing, text).unwrap();
     let out = dir.path().join("c7.json");

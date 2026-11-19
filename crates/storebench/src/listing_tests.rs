@@ -29,7 +29,9 @@ fn a_listing_holds_every_object_once_and_reads_back() {
     let dir = TestDir::under(std::env::temp_dir(), "storebench-listing");
     let path = dir.path().join("listing.tsv");
     let mut out = create(&path).unwrap();
-    let n = rt.block_on(list(&s3, "cas-store", &mut out, &path)).unwrap();
+    let n = rt
+        .block_on(list(&s3, "cas-store", &mut out, &path))
+        .unwrap();
     drop(out);
     assert_eq!(n, 1003);
     let objects = read(&path).unwrap();

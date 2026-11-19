@@ -91,7 +91,13 @@ fn listing() -> Vec<Object> {
         obj("cas-store", &pk(8), 16 * MIB + 1, at(10, 8), "a"),
         obj("cas-store", &pk(9), 256 * MIB, at(10, 9), "c-12"),
         obj("cas-store", &pk(10), 256 * MIB + 1, at(10, 10), "a"),
-        obj("store-b", &format!("team1/cas/{h}/{h}"), 10, at(10, 11), "a"),
+        obj(
+            "store-b",
+            &format!("team1/cas/{h}/{h}"),
+            10,
+            at(10, 11),
+            "a",
+        ),
         obj("store-b", "history/history/x", 5, at(5, 12), "a"),
     ]
 }

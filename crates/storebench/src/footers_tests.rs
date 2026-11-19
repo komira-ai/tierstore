@@ -738,7 +738,11 @@ fn run_setup() -> Run {
         ("cas-store", "cas/d/n1/b1/0000000000000005".to_owned(), 10),
         ("cas-store", keys[1].to_owned(), big.len() as u64),
         ("team1", "cas/d/n1/b1/0000000000000004".to_owned(), 5000),
-        ("cas-store", format!("cas/b/1-2/{}/L0", "ab".repeat(20)), 100),
+        (
+            "cas-store",
+            format!("cas/b/1-2/{}/L0", "ab".repeat(20)),
+            100,
+        ),
         ("history", "history/x".to_owned(), 7),
         ("team1", keys[4].to_owned(), 2),
         ("cas-store", format!("cas/l/{}", h('c')), 9),

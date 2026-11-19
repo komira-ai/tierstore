@@ -40,7 +40,11 @@ fn error_of(text: &str) -> String {
 
 /// A pack with its blobs (digest byte, size) as a footers-file block.
 fn block(key: u64, status: &str, blobs: &[(u8, u64)]) -> String {
-    let mut text = format!("P\tcas-store\t{}\t{status}\t{}\n", pack_key(key), blobs.len());
+    let mut text = format!(
+        "P\tcas-store\t{}\t{status}\t{}\n",
+        pack_key(key),
+        blobs.len()
+    );
     for (d, size) in blobs {
         text.push_str(&format!("B\t{}\t{size}\n", hex_of(*d)));
     }
@@ -375,7 +379,11 @@ fn an_unread_pack_of_the_same_millisecond_counts_as_written_before() {
 #[test]
 fn a_live_pack_written_before_every_unread_pack_is_certain() {
     let listing = [object(pack_key(1), 300, 1), object(pack_key(2), 900, 2)];
-    let text = format!("P\tcas-store\t{}\tok\t1\nB\t{}\t1\n", pack_key(1), hex_of(1));
+    let text = format!(
+        "P\tcas-store\t{}\tok\t1\nB\t{}\t1\n",
+        pack_key(1),
+        hex_of(1)
+    );
     let (live, _) = analyze(&listing, Some(&footers_of(&text)));
     assert_eq!((live.live_packs, live.uncertain_packs), (1, 0));
     assert_eq!(live.l_live_low, Some(300));
@@ -506,7 +514,11 @@ fn footers_files_are_read_and_merged_in_order() {
     std::fs::write(&a, format!("P\tcas-store\t{}\tno-magic\t0\n", pack_key(1))).unwrap();
     std::fs::write(
         &b,
-        format!("P\tcas-store\t{}\tok\t1\nB\t{}\t7\n", pack_key(1), hex_of(1)),
+        format!(
+            "P\tcas-store\t{}\tok\t1\nB\t{}\t7\n",
+            pack_key(1),
+            hex_of(1)
+        ),
     )
     .unwrap();
     assert_eq!(read_all_footers(&[]).unwrap(), None);
