@@ -150,3 +150,61 @@ fn digests_are_cut_and_mount_lines_lose_their_places() {
     assert_eq!(load_of("1.50 2 3 1/2 9"), Some(1.5));
     assert_eq!(load_of("busy"), None);
 }
+
+/// Records with the CPU of their whole-file phases (format 2) get a table of it: MB/s and
+/// server and kernel milliseconds per 10^9 bytes of each phase, and the rounds; a phase with no
+/// control group shows `-` there. Records without it (format 1) get no such table.
+#[test]
+fn the_cpu_of_the_whole_file_phases_has_its_own_table() {
+    let phase = |server_ms_per_gb, cgroup: Option<f64>| {
+        Some(crate::record::PhaseCpu {
+            server: crate::host::ProcessCpu {
+                user_ms: 1,
+                system_ms: 2,
+            },
+            cgroup: None,
+            server_ms_per_gb,
+            cgroup_system_ms_per_gb: cgroup,
+        })
+    };
+    let mut r = example();
+    r.input.throughput_rounds = 8;
+    r.cold.cpu = phase(250.0, Some(120.0));
+    r.warm.cpu = phase(1.5, None);
+    let text = render(&[r], 0);
+    assert!(
+        text.contains(
+            "| variant | regime | cold MB/s | cold server CPU ms/GB | cold cgroup kernel ms/GB | warm MB/s | warm server CPU ms/GB | warm cgroup kernel ms/GB | rounds |\n"
+        ),
+        "{text}"
+    );
+    assert!(
+        text.contains(
+            "| null | caches-off | 100 (100-100) | 250 (250-250) | 120 (120-120) | 400 (400-400) | 1.50 (1.50-1.50) | - | 8.00 (8.00-8.00) |\n"
+        ),
+        "{text}"
+    );
+    assert!(!render(&[example()], 0).contains("cold server CPU ms/GB"));
+}
+
+/// A record of format 1 (no rounds, no CPU of the whole-file phases) reads as one round with no
+/// phase CPU.
+#[test]
+fn a_record_of_format_1_reads_as_one_round_with_no_phase_cpu() {
+    let mut value = serde_json::to_value(example()).unwrap();
+    value["format"] = 1.into();
+    let input = value["input"].as_object_mut().unwrap();
+    assert!(input.remove("throughput_rounds").is_some());
+    for phase in ["cold", "warm"] {
+        assert!(
+            value[phase]
+                .as_object_mut()
+                .unwrap()
+                .remove("cpu")
+                .is_some()
+        );
+    }
+    let record: RunRecord = serde_json::from_value(value).unwrap();
+    assert_eq!((record.format, record.input.throughput_rounds), (1, 1));
+    assert_eq!((record.cold.cpu, record.warm.cpu), (None, None));
+}

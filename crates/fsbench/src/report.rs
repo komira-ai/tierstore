@@ -4,7 +4,8 @@
 //! `discard` runs of each group (the warm-up: the first run fills the server's cache and the
 //! kernel's) are left out, and every figure is given as the median of the runs kept, with their
 //! least and most: `median (min-max)`. A figure a run did not measure (no control group, no FUSE
-//! connection listed) is `-`.
+//! connection listed) is `-`. The table of the CPU of the whole-file phases is shown only when
+//! a record has it (format 2), so the tables of records of format 1 are as they were.
 
 use std::fmt::Write as _;
 use std::path::Path;
@@ -67,8 +68,27 @@ const LOAD: &[(&str, Figure)] = &[
     ("waiting max", |r| r.samples.waiting_max.map(|w| w as f64)),
 ];
 
+/// The columns of the table of the whole-file phases' CPU, shown when a record has it (format 2).
+const READ_CPU: &[(&str, Figure)] = &[
+    ("cold MB/s", |r| Some(r.cold.mb_per_s)),
+    ("cold server CPU ms/GB", |r| {
+        Some(r.cold.cpu.as_ref()?.server_ms_per_gb)
+    }),
+    ("cold cgroup kernel ms/GB", |r| {
+        r.cold.cpu.as_ref()?.cgroup_system_ms_per_gb
+    }),
+    ("warm MB/s", |r| Some(r.warm.mb_per_s)),
+    ("warm server CPU ms/GB", |r| {
+        Some(r.warm.cpu.as_ref()?.server_ms_per_gb)
+    }),
+    ("warm cgroup kernel ms/GB", |r| {
+        r.warm.cpu.as_ref()?.cgroup_system_ms_per_gb
+    }),
+    ("rounds", |r| Some(f64::from(r.input.throughput_rounds))),
+];
+
 /// A number as a table shows it: no decimals from 100 up, one from 10, two below.
-fn number(value: f64) -> String {
+pub(crate) fn number(value: f64) -> String {
     if value >= 100.0 {
         format!("{value:.0}")
     } else if value >= 10.0 {
@@ -79,7 +99,7 @@ fn number(value: f64) -> String {
 }
 
 /// `median (min-max)` of `values`, or `-` when there are none.
-fn cell(mut values: Vec<f64>) -> String {
+pub(crate) fn cell(mut values: Vec<f64>) -> String {
     if values.is_empty() {
         return "-".to_owned();
     }
@@ -151,6 +171,10 @@ pub fn render(records: &[RunRecord], discard: u32) -> String {
     out.push('\n');
     table(&mut out, &kept, LOAD);
     out.push('\n');
+    if records.iter().any(|r| r.cold.cpu.is_some()) {
+        table(&mut out, &kept, READ_CPU);
+        out.push('\n');
+    }
     let _ = writeln!(
         out,
         "| variant | regime | runs kept | errors | load at start | file list | server executable | settings |"

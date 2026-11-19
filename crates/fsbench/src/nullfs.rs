@@ -15,13 +15,12 @@
 //! `none` answers the first with `ENOSYS`, after which the kernel sends no `OPEN` or `RELEASE`
 //! for a file of this mount (no-open, `FUSE_NO_OPEN_SUPPORT`).
 //!
-//! The inode of the root is 1 and every other inode is its node's index in the tree plus 1.
-//! Entries report the user and group that mounted it, mode 0444 for files and 0555 for
-//! directories, and a fixed modification time of 0.
+//! The inodes are those of [`Tree`]. Entries report the user and group that mounted it, mode
+//! 0444 for files and 0555 for directories, and a fixed modification time of 0.
 
-use std::collections::BTreeMap;
 use std::ffi::OsStr;
 use std::io::{Read, Write};
+use std::os::unix::ffi::OsStrExt as _;
 use std::path::Path;
 use std::time::{Duration, UNIX_EPOCH};
 
@@ -33,6 +32,8 @@ use fuser::{
 
 use crate::Error;
 use crate::list::FileList;
+pub use crate::tree::Tree;
+use crate::tree::{Miss, Node};
 
 /// The background requests the kernel may have outstanding at once: `tierstore fs`'s value.
 const MAX_BACKGROUND: u16 = 1024;
@@ -65,128 +66,21 @@ pub struct Options {
     pub allow_other: bool,
 }
 
-/// A node of the tree.
-#[derive(Clone, Debug, PartialEq, Eq)]
-enum Node {
-    /// A directory: its parent's inode and its entries by name.
-    Dir {
-        parent: u64,
-        entries: BTreeMap<String, u64>,
-    },
-    /// A file of `size` zero bytes.
-    File { size: u64 },
-}
-
-/// The files of a list, as inodes.
-#[derive(Clone, Debug, PartialEq, Eq)]
-pub struct Tree {
-    /// The node of inode `i` is `nodes[i - 1]`.
-    nodes: Vec<Node>,
-}
-
-impl Tree {
-    /// The tree of the files of `list`, and of the directories their paths name.
-    ///
-    /// # Errors
-    /// A path that names a file as a directory (`a` and `a/b` both listed).
-    pub fn of(list: &FileList) -> Result<Self, Error> {
-        let mut nodes = vec![Node::Dir {
-            parent: 1,
-            entries: BTreeMap::new(),
-        }];
-        for file in &list.files {
-            let mut dir = 1u64;
-            let mut parts = file.path.split('/').peekable();
-            while let Some(part) = parts.next() {
-                let last = parts.peek().is_none();
-                let next = nodes.len() as u64 + 1;
-                let Node::Dir { entries, .. } = &mut nodes[(dir - 1) as usize] else {
-                    return Err(Error::Usage(format!(
-                        "{}: a file of the list is named as a directory",
-                        file.path
-                    )));
-                };
-                match entries.get(part) {
-                    Some(_) if last => {
-                        return Err(Error::Usage(format!(
-                            "{}: a directory of the list is named as a file",
-                            file.path
-                        )));
-                    }
-                    Some(&ino) => dir = ino,
-                    None => {
-                        entries.insert(part.to_owned(), next);
-                        nodes.push(if last {
-                            Node::File { size: file.size }
-                        } else {
-                            Node::Dir {
-                                parent: dir,
-                                entries: BTreeMap::new(),
-                            }
-                        });
-                        dir = next;
-                    }
-                }
-            }
-        }
-        Ok(Self { nodes })
-    }
-
-    /// The node of inode `ino`.
-    fn node(&self, ino: u64) -> Result<&Node, Errno> {
-        usize::try_from(ino)
-            .ok()
-            .and_then(|i| self.nodes.get(i.checked_sub(1)?))
-            .ok_or(Errno::ENOENT)
-    }
-
-    /// The inode and node of `name` in directory `parent`.
-    fn lookup(&self, parent: u64, name: &OsStr) -> Result<(u64, &Node), Errno> {
-        let Node::Dir { entries, .. } = self.node(parent)? else {
-            return Err(Errno::ENOTDIR);
-        };
-        let ino = *name
-            .to_str()
-            .and_then(|name| entries.get(name))
-            .ok_or(Errno::ENOENT)?;
-        Ok((ino, self.node(ino)?))
-    }
-
-    /// The bytes a read of `size` bytes at `offset` of file `ino` answers (all of them zero).
-    fn read(&self, ino: u64, offset: u64, size: u32) -> Result<usize, Errno> {
-        let Node::File { size: length } = self.node(ino)? else {
-            return Err(Errno::EISDIR);
-        };
-        let left = length.saturating_sub(offset);
-        Ok(left.min(u64::from(size)).min(ZEROS.len() as u64) as usize)
-    }
-
-    /// The entries of directory `ino`, `.` and `..` first: inode, name and kind.
-    fn entries(&self, ino: u64) -> Result<Vec<(u64, &str, FileType)>, Errno> {
-        let Node::Dir { parent, entries } = self.node(ino)? else {
-            return Err(Errno::ENOTDIR);
-        };
-        let mut all = vec![
-            (ino, ".", FileType::Directory),
-            (*parent, "..", FileType::Directory),
-        ];
-        for (name, &child) in entries {
-            let kind = match self.node(child)? {
-                Node::Dir { .. } => FileType::Directory,
-                Node::File { .. } => FileType::RegularFile,
-            };
-            all.push((child, name.as_str(), kind));
-        }
-        Ok(all)
+/// The errno of a miss.
+fn errno(miss: Miss) -> Errno {
+    match miss {
+        Miss::NotFound => Errno::ENOENT,
+        Miss::NotDir => Errno::ENOTDIR,
+        Miss::IsDir => Errno::EISDIR,
     }
 }
 
 /// Answers `reply` with `answer` when `result` is a value, and with `fail` (its error reply)
 /// when it is not.
-fn finish<R, T>(reply: R, result: Result<T, Errno>, fail: fn(R, Errno), answer: impl FnOnce(R, T)) {
+fn finish<R, T>(reply: R, result: Result<T, Miss>, fail: fn(R, Errno), answer: impl FnOnce(R, T)) {
     match result {
         Ok(value) => answer(reply, value),
-        Err(error) => fail(reply, error),
+        Err(miss) => fail(reply, errno(miss)),
     }
 }
 
@@ -212,7 +106,7 @@ impl NullFs {
     fn attr(&self, ino: u64, node: &Node) -> FileAttr {
         let (kind, perm, size, nlink) = match node {
             Node::Dir { .. } => (FileType::Directory, 0o555, 0, 2),
-            Node::File { size } => (FileType::RegularFile, 0o444, *size, 1),
+            Node::File { size, .. } => (FileType::RegularFile, 0o444, *size, 1),
         };
         FileAttr {
             ino: INodeNo(ino),
@@ -265,7 +159,7 @@ impl Filesystem for NullFs {
     fn lookup(&self, _req: &Request, parent: INodeNo, name: &OsStr, reply: ReplyEntry) {
         finish(
             reply,
-            self.tree.lookup(parent.0, name),
+            self.tree.lookup(parent.0, name.as_bytes()),
             ReplyEntry::error,
             |reply, (ino, node)| {
                 reply.entry_with_ttls(
@@ -311,7 +205,9 @@ impl Filesystem for NullFs {
             reply,
             self.tree.read(ino.0, offset, size),
             ReplyData::error,
-            |reply, n| {
+            |reply, span| {
+                // A READ asks for at most `max_pages` pages, which `ZEROS` holds.
+                let n = usize::try_from(span.len).map_or(ZEROS.len(), |n| n.min(ZEROS.len()));
                 reply.data(&ZEROS[..n]);
             },
         );
@@ -330,9 +226,13 @@ impl Filesystem for NullFs {
             self.tree.entries(ino.0),
             ReplyDirectory::error,
             |mut reply, entries| {
-                for (i, (child, name, kind)) in
+                for (i, (child, name, node)) in
                     entries.into_iter().enumerate().skip(offset as usize)
                 {
+                    let kind = match node {
+                        Node::Dir { .. } => FileType::Directory,
+                        Node::File { .. } => FileType::RegularFile,
+                    };
                     if reply.add(INodeNo(child), i as u64 + 1, kind, name) {
                         break;
                     }
