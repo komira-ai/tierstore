@@ -20,7 +20,7 @@ use std::time::Duration;
 use fsbench::list::{Entry, FileList};
 use fsbench::nullfs::OpenMode;
 use fsbench::tree::Tree;
-use fsbench::tsnull::{Options, Reply, serve};
+use fsbench::tsnull::{Options, Reply, Transport, serve};
 use tierstore_testkit::dir::TestDir;
 
 /// ENOENT.
@@ -55,6 +55,7 @@ fn options(open: OpenMode, timeout: Duration, readers: usize, reply: Reply) -> O
         splice_min: 16 * 1024,
         move_pages: false,
         allow_other: false,
+        transport: Transport::Dev,
     }
 }
 
@@ -292,4 +293,59 @@ fn the_tsfuse_null_fs_command_mounts_until_its_input_ends() {
     assert_eq!(served["readers"], 2);
     assert!(child.wait().unwrap().success());
     assert!(std::fs::metadata(mnt.join("f")).is_err(), "unmounted");
+}
+
+/// `fsbench tsfuse-null-fs --transport uring` serves its files over io_uring where
+/// `fuse.enable_uring` is on (and says what its entries registered at the depth asked for), and
+/// on `/dev/fuse` saying `Disabled` where it is off; either way the files read as their bytes.
+#[test]
+fn the_tsfuse_null_fs_asked_for_io_uring_serves_on_the_transport_the_kernel_allows() {
+    let dir = TestDir::under(env!("CARGO_TARGET_TMPDIR"), "fsbench-tsnull-uring");
+    let list = dir.path().join("list");
+    std::fs::write(&list, format!("{}\n200000\tf\n", fsbench::list::HEADER)).unwrap();
+    let mnt = dir.path().join("mnt");
+    std::fs::create_dir(&mnt).unwrap();
+    let mut child = Command::new(env!("CARGO_BIN_EXE_fsbench"))
+        .args([
+            "tsfuse-null-fs",
+            "--transport",
+            "uring",
+            "--uring-depth",
+            "2",
+            "--list",
+        ])
+        .arg(&list)
+        .arg("--mountpoint")
+        .arg(&mnt)
+        .arg("--data")
+        .arg(dir.path().join("data"))
+        .stdin(Stdio::piped())
+        .stdout(Stdio::piped())
+        .spawn()
+        .unwrap();
+    let mut output = BufReader::new(child.stdout.take().unwrap());
+    let mut said = String::new();
+    output.read_line(&mut said).unwrap();
+    assert_eq!(said, "mounted\n");
+    assert_eq!(std::fs::read(mnt.join("f")).unwrap(), vec![0u8; 200_000]);
+    drop(child.stdin.take());
+    let mut served = String::new();
+    output.read_line(&mut served).unwrap();
+    let served: serde_json::Value = serde_json::from_str(&served).unwrap();
+    assert!(child.wait().unwrap().success());
+    let enabled =
+        std::fs::read_to_string(tsfuse::ENABLE_URING).is_ok_and(|v| matches!(v.trim(), "Y" | "1"));
+    if enabled {
+        assert_eq!(served["transport"], "io_uring");
+        assert_eq!(served["uring_depth"], 2);
+        assert_eq!(served["max_pages"], 32);
+        let queues = served["uring_queues"].as_u64().unwrap();
+        assert_eq!(
+            served["uring_registered_bytes"],
+            queues * 2 * (288 + 128 * 1024)
+        );
+    } else {
+        assert_eq!(served["transport"], "dev-fuse (Disabled)");
+        assert_eq!(served["uring_registered_bytes"], serde_json::Value::Null);
+    }
 }

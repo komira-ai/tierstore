@@ -1,16 +1,20 @@
 //! The null file system on `tsfuse` (`fsbench tsfuse-null-fs`): the files of a list, served
 //! read-only by the FUSE library of the redesign (`docs/design/fetch-cache-serve.md`, 5.2), with
-//! nothing of tierstore behind it. It is the variants V3 and V4 of the benchmark (17.1):
+//! nothing of tierstore behind it. It is the variants V3, V4 and V5 of the benchmark (17.1):
 //! `tsfuse` on `/dev/fuse` with one reader or N cloned readers (one descriptor and one thread
 //! each), READ replies by `pread` and `writev` (V3) or by splice above a threshold (V4, with or
-//! without `SPLICE_F_MOVE`), in the regimes of [`crate::nullfs`]: the timeouts the kernel keeps
+//! without `SPLICE_F_MOVE`), and `tsfuse` over io_uring ([`Transport::Uring`], V5: a ring and a
+//! thread per possible CPU, `depth` entries each, beside the `/dev/fuse` readers that carry
+//! INTERRUPT and FORGET; where the session cannot use io_uring it serves on `/dev/fuse` and
+//! [`Served`] says why), in the regimes of [`crate::nullfs`]: the timeouts the kernel keeps
 //! entries and attributes for, and the open mode (`explicit` answers every `OPEN` and `OPENDIR`,
 //! with `FOPEN_KEEP_CACHE` for a file; `none` answers them `ENOSYS`, after which the kernel,
 //! which was granted `FUSE_NO_OPEN_SUPPORT` and `FUSE_NO_OPENDIR_SUPPORT`, opens without asking).
 //!
 //! Its settings of the session are those of a tree mount of the redesign
 //! ([`InitConfig::tree`]: requests of up to 1 MiB, readahead 128 KiB, 1024 background requests,
-//! the flags of 5.2) and its mount is a tree mount (`ro`, `nosuid`, `nodev`,
+//! the flags of 5.2; over io_uring, requests of up to [`URING_MAX_PAGES`] pages, as an io_uring
+//! tree mount asks for, [`tsfuse::UringConfig`]) and its mount is a tree mount (`ro`, `nosuid`, `nodev`,
 //! `default_permissions`), named `fsbench-tsfuse`.
 //!
 //! **Where the bytes come from.** A READ is answered through [`ReplyPath`] from a data file (as
@@ -42,7 +46,7 @@ use tsfuse::abi::{
 use tsfuse::mount::{Mount, MountOptions, Mounter};
 use tsfuse::{
     Completion, DevFd, Errno, Fs, Handled, Replier, ReplyConfig, ReplyCounts, ReplyPath, Request,
-    Serving, Session,
+    Serving, Session, TransportMode, UringConfig,
 };
 
 use crate::Error;
@@ -66,6 +70,46 @@ pub enum Reply {
     Splice,
 }
 
+/// The largest request of a session over io_uring, pages: 32 (128 KiB payloads, the largest
+/// buffered READ, K21), so that the default depth registers at most 64 MiB on 88 possible CPUs
+/// ([`UringConfig`], 5.2 item 4). A session on `/dev/fuse` asks for [`InitConfig::tree`]'s 256.
+pub const URING_MAX_PAGES: u16 = 32;
+
+/// The transport a session asks for.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum Transport {
+    /// `/dev/fuse` readers alone ([`Session::init`]).
+    Dev,
+    /// io_uring with `config` ([`Session::init_uring`]); `/dev/fuse` where the session cannot use
+    /// it.
+    Uring(UringConfig),
+}
+
+impl Transport {
+    /// The INIT terms of a tree session on this transport.
+    #[must_use]
+    pub fn init_config(self) -> InitConfig {
+        match self {
+            Self::Dev => InitConfig::tree(),
+            Self::Uring(_) => InitConfig {
+                max_pages: URING_MAX_PAGES,
+                ..InitConfig::tree()
+            },
+        }
+    }
+}
+
+/// What a session serves on, as [`Served`] and the storm's records say it: `io_uring`, or
+/// `dev-fuse` and why not io_uring (`dev-fuse (Disabled)`); and the queues, depth and bytes the
+/// ring entries register (`uring_registered_bytes`), on io_uring alone.
+#[must_use]
+pub fn transport_of(mode: TransportMode) -> (String, Option<tsfuse::UringMemory>) {
+    match mode {
+        TransportMode::Uring(memory) => ("io_uring".to_owned(), Some(memory)),
+        TransportMode::DevFuse(why) => (format!("dev-fuse ({why:?})"), None),
+    }
+}
+
 /// What the null file system on `tsfuse` serves with.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub struct Options {
@@ -85,6 +129,8 @@ pub struct Options {
     pub move_pages: bool,
     /// Whether users other than the one that mounted it may use it (`allow_other`).
     pub allow_other: bool,
+    /// The transport the session asks for.
+    pub transport: Transport,
 }
 
 /// The configuration of the reply path for `options`: pipes sized for the largest READ a tree
@@ -97,7 +143,8 @@ pub fn reply_config(options: &Options) -> ReplyConfig {
             Reply::Writev => None,
             Reply::Splice => Some(options.splice_min),
         },
-        max_data: usize::from(InitConfig::tree().max_pages) * rustix::param::page_size(),
+        max_data: usize::from(options.transport.init_config().max_pages)
+            * rustix::param::page_size(),
         pool: options.readers.get(),
         move_pages: options.move_pages,
     }
@@ -296,18 +343,24 @@ pub fn open_data(path: &Path, len: u64) -> Result<File, Error> {
     Ok(file)
 }
 
-/// INIT on `device` with the terms of a tree mount, `readers` descriptors, and a reader on each
-/// serving `fs`: the readers and the terms INIT agreed.
+/// INIT on `device` with the terms of a tree mount on `transport`, `readers` descriptors, and a
+/// reader on each serving `fs` (and, on io_uring, a thread per queue): the session serving and
+/// the terms INIT agreed.
 ///
 /// # Errors
 /// INIT fails, a clone cannot be bound, or a reader cannot be started.
 pub fn start(
     device: DevFd,
     readers: NonZeroUsize,
+    transport: Transport,
     fs: Arc<dyn Fs>,
 ) -> Result<(Serving, Negotiated), Error> {
-    let mut session =
-        Session::init(device, &InitConfig::tree()).map_err(Error::of(PROCESS, "init"))?;
+    let config = transport.init_config();
+    let mut session = match transport {
+        Transport::Dev => Session::init(device, &config),
+        Transport::Uring(uring) => Session::init_uring(device, &config, &uring),
+    }
+    .map_err(Error::of(PROCESS, "init"))?;
     session
         .clone_readers(readers)
         .map_err(Error::of(PROCESS, "clone the readers"))?;
@@ -321,14 +374,19 @@ pub fn start(
 /// Detaches the mount when dropped armed: a failure between the mount and its unmount leaves no
 /// mount behind. With the mount detached, the kernel ends the connection, and the readers end
 /// on their own.
-struct Detach {
+pub(crate) struct Detach {
     mount: Mount,
     armed: bool,
 }
 
 impl Detach {
+    /// Detaches `mount` when dropped, unless disarmed.
+    pub(crate) fn new(mount: Mount) -> Self {
+        Self { mount, armed: true }
+    }
+
     /// The mount was unmounted: nothing to do when dropped.
-    fn disarm(mut self) {
+    pub(crate) fn disarm(mut self) {
         self.armed = false;
     }
 }
@@ -359,6 +417,14 @@ pub struct Served {
     pub splice_bytes: u64,
     /// Data bytes of READ replies written with `writev` (`pread_bytes_total`).
     pub pread_bytes: u64,
+    /// What the session served on ([`transport_of`]).
+    pub transport: String,
+    /// The bytes the ring entries registered (`uring_registered_bytes`); `None` on `/dev/fuse`.
+    pub uring_registered_bytes: Option<u64>,
+    /// The entries of each queue; `None` on `/dev/fuse`.
+    pub uring_depth: Option<u16>,
+    /// The queues, one per possible CPU; `None` on `/dev/fuse`.
+    pub uring_queues: Option<u32>,
 }
 
 /// Mounts the null file system of `list` at `mountpoint` on `tsfuse`, reading from the data file
@@ -387,11 +453,9 @@ pub fn serve(
     let (device, mount) = Mounter::default()
         .mount(mountpoint, &mount_options(&options))
         .map_err(Error::of(PROCESS, "mount"))?;
-    let detach = Detach {
-        mount: mount.clone(),
-        armed: true,
-    };
-    let (serving, negotiated) = start(device, options.readers, fs.clone())?;
+    let detach = Detach::new(mount.clone());
+    let (serving, negotiated) = start(device, options.readers, options.transport, fs.clone())?;
+    let (transport, memory) = transport_of(serving.transport());
     writeln!(output, "mounted")
         .and_then(|()| output.flush())
         .map_err(Error::of(PROCESS, "write"))?;
@@ -411,6 +475,10 @@ pub fn serve(
         pipe_size: fs.pipe_size(),
         splice_bytes: counts.splice_bytes,
         pread_bytes: counts.pread_bytes,
+        transport,
+        uring_registered_bytes: memory.map(|m| m.bytes),
+        uring_depth: memory.map(|m| m.depth),
+        uring_queues: memory.map(|m| m.queues),
     };
     // A `Served` always encodes: it holds numbers and strings alone.
     let line = serde_json::to_string(&served).unwrap_or_default();

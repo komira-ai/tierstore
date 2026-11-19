@@ -20,17 +20,18 @@ fuser.workspace = true
 hex.workspace = true
 # `posix_fadvise` (a cold read), `stat` (the device of a mount), the clock ticks of /proc, the
 # effective user of a mount and the page size; pipes for the tests of `tsnull` (a device that
-# takes spliced replies, one that ends before INIT).
-rustix = { workspace = true, features = ["fs", "param", "pipe", "process"] }
+# takes spliced replies, one that ends before INIT); the CPU a storm thread or probe is pinned to
+# (`sched_setaffinity`, `fsbench storm`).
+rustix = { workspace = true, features = ["fs", "param", "pipe", "process", "thread"] }
 # The records of a run (one JSON object per line) and the messages between the processes.
 serde.workspace = true
 serde_json.workspace = true
 # The digest of a file list and of the server's executable, recorded with every run.
 sha2.workspace = true
 thiserror.workspace = true
-# The null file system of the redesign's variants (`fsbench tsfuse-null-fs`, V3 and V4 of
-# docs/design/fetch-cache-serve.md, 17.1): the FUSE library of tierstore, with cloned readers and
-# the splice reply path.
+# The null file system of the redesign's variants (`fsbench tsfuse-null-fs`, V3, V4 and V5 of
+# docs/design/fetch-cache-serve.md, 17.1) and the storm's (`fsbench storm`): the FUSE library of
+# tierstore, with cloned readers, the splice reply path and the io_uring transport.
 tsfuse.workspace = true
 
 [target.'cfg(target_os = "linux")'.dev-dependencies]
