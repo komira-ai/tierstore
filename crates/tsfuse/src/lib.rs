@@ -6,7 +6,10 @@
 //! connection, cloned with `FUSE_DEV_IOC_CLONE`, writing each reply with one `writev`), the
 //! [`Transport`] trait and its `/dev/fuse` implementation [`DevReader`] on `AsyncFd`, and
 //! [`Session`] (INIT, resume without INIT, clones, one reader thread per descriptor, stop). The
-//! io_uring transport (T-F5), the splice reply path (T-F4) and takeover (T-F6) build on them.
+//! io_uring transport (T-F5) and takeover (T-F6) build on them. [`ReplyPath`] (row T-F4) sends
+//! READ replies by splice through pooled pipes sized with `F_SETPIPE_SZ`, or below a threshold by
+//! `pread` and `writev`, and [`Dontneed`] is the server's `posix_fadvise(DONTNEED)` on whole
+//! `durable` cells (5.3 item 2, 4.8).
 //!
 //! **Reply affinity.** A reply is matched by `unique` against the processing queue of the device
 //! it is written to, and every cloned `/dev/fuse` descriptor has its own processing queue, so a
@@ -47,6 +50,8 @@ pub mod mount;
 mod opcode;
 mod reply;
 #[cfg(target_os = "linux")]
+mod reply_path;
+#[cfg(target_os = "linux")]
 mod session;
 mod tokens;
 #[cfg(target_os = "linux")]
@@ -59,6 +64,11 @@ pub use tokens::{CancelToken, Interrupted, Tokens};
 
 #[cfg(target_os = "linux")]
 pub use dev::{DEV_FUSE, DevFd};
+#[cfg(target_os = "linux")]
+pub use reply_path::{
+    Dontneed, DontneedError, FillFailed, Filled, ReplyConfig, ReplyCounts, ReplyPath,
+    ReplyPathError, SPLICE_MIN,
+};
 #[cfg(target_os = "linux")]
 pub use session::{Serving, Session, SessionError, Stopper};
 #[cfg(target_os = "linux")]
