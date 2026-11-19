@@ -22,7 +22,7 @@ use crate::layout::{StoreError, entry_dir, packs_dir, region_end, unlink};
 
 /// The stem of the file [`punches_inside_a_file`] tries a punch on, in the entries' directory.
 /// It is not 64 hex digits, so it never names an entry.
-pub const PROBE_STEM: &str = ".punch-probe";
+pub(crate) const PROBE_STEM: &str = ".punch-probe";
 
 /// The length of the probe file: two pages, the first of which is punched.
 const PROBE_LEN: u64 = 8192;

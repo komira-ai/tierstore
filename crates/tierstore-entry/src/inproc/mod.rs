@@ -36,7 +36,9 @@ mod store;
 
 pub use entry::InProcEntry;
 pub use read::{MAX_ROUNDS, ReadError, ReadOutcome, read};
-pub use store::{InProcStore, PROBE_STEM, punches_inside_a_file};
+#[cfg(test)]
+pub(crate) use store::PROBE_STEM;
+pub use store::{InProcStore, punches_inside_a_file};
 
 /// `SeqCst`, the one ordering of every access to a cell byte or counter (5.1: the reader and the
 /// evictor each store to one location and then load the other's).

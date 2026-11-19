@@ -302,3 +302,45 @@ fn a_read_whose_cells_never_come_gives_up_after_the_last_round() {
     assert_eq!(engine.waits().len(), MAX_ROUNDS as usize);
     assert_eq!(e.group_readers(0), 0);
 }
+
+#[test]
+fn a_recheck_cell_is_not_served_until_its_rehash_settles_it_present() {
+    let dir = scratch("inproc-read-recheck-cell");
+    {
+        let s = store(&dir, Some(BOOT));
+        let e = open(&s, "p", SIZE);
+        fill(&e, 0..2);
+        e.commit_batch().unwrap();
+        s.close().unwrap();
+    }
+    // Restored in another boot: both cells are `recheck`, their bytes not verified.
+    let s = store(&dir, Some(super::OTHER_BOOT));
+    let e = open(&s, "p", SIZE);
+    let mut buf = vec![0u8; 2 * MIB as usize];
+    let mut preads = 0;
+    let outcome = e
+        .read_with(0, &mut buf, |_, _| {
+            preads += 1;
+            Ok(())
+        })
+        .unwrap();
+    assert_eq!(
+        outcome,
+        ReadOutcome::NotReady {
+            cell: 0,
+            bad: false
+        }
+    );
+    assert_eq!(preads, 0, "unverified bytes are not read for a reader");
+    assert!(e.settle(0, tierstore_fetch_api::entry::Settle::RecheckOk));
+    assert_eq!(
+        e.read_at(0, &mut buf).unwrap(),
+        ReadOutcome::NotReady {
+            cell: 1,
+            bad: false
+        }
+    );
+    assert!(e.settle(1, tierstore_fetch_api::entry::Settle::RecheckOk));
+    assert_eq!(e.read_at(0, &mut buf).unwrap(), ReadOutcome::Read);
+    assert_eq!(buf, expected(0, 2 * MIB));
+}

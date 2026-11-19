@@ -3,8 +3,11 @@
 //! whose eviction was aborted, and the in-process reader counters the evictor sums.
 //!
 //! Section 14 rows: "Crash after a batched PUNCH fsync and before/after the punch: replay never
-//! marks a punched cell `present`; one fsync per batch" (on the in-process store); "Held-only
-//! cache: punch eviction admits a new job" (the punch half; the fallback refuses instead).
+//! marks a punched cell `present`; one fsync per batch" (the crash after the punch, on the
+//! in-process store; the crash between the fsync and the punch is tierstore-journal's
+//! `a_crash_after_the_punch_fsync_and_before_or_after_the_punch_never_restores_the_cells`);
+//! "Held-only cache: punch eviction admits a new job" (the punch half; the fallback refuses
+//! instead).
 //!
 //! Catches: a punch that does not release the blocks, that changes the size, or whose cell a
 //! restart resurrects; a store that cannot punch but journals, punches or changes a cell anyway,

@@ -26,11 +26,11 @@
 //!   [`CommitPolicy::interval_ms`] or once [`CommitPolicy::pending_bytes`] are pending.
 //!
 //! The file operations go through [`EntryFiles`], so the same journal runs on the directory of
-//! a cache on Linux or macOS ([`DirFiles`]) and on [`fake::MemFs`], a file system in memory that keeps the
-//! durable and the volatile bytes of each file apart and can crash: a process crash (the page
-//! cache survives) or a power loss (each write not yet synced survives or not, as a test
-//! chooses). [`fake::FsEntry`] is a whole `Entry` over it, for the crash tests here and for those
-//! of the evictor (section 7).
+//! a cache on Linux or macOS ([`DirFiles`]) and on [`fake::MemFs`], a file system in memory that
+//! keeps the durable and the volatile bytes of each file apart and can crash: a process crash
+//! (the page cache survives) or a power loss (each write not yet synced survives or not, as a
+//! test chooses). [`fake::FsEntry`] is a whole `Entry` over it, for the crash tests here and for
+//! those of the evictor (section 7).
 //!
 //! Formats ([`format`]) are new in this crate and versioned for additive change only.
 

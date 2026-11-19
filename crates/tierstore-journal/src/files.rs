@@ -38,9 +38,9 @@ impl FileKind {
 }
 
 /// The operations on an entry's files whose order the journal decides: what reaches the disk
-/// before what. Implementations here: [`crate::DirFiles`] (a directory of the cache partition,
-/// Linux and macOS) and [`crate::fake::MemFs`], which keeps the durable and the volatile bytes apart and
-/// can crash. The macOS store is to supply its own, with `F_FULLFSYNC` and `F_PUNCHHOLE` (5.6).
+/// before what. Implementations here: [`crate::DirFiles`] (a directory of the cache partition on
+/// Linux or macOS, where it syncs with `F_FULLFSYNC` and punches only a file's tail, 5.6) and
+/// [`crate::fake::MemFs`], which keeps the durable and the volatile bytes apart and can crash.
 ///
 /// Every method does blocking I/O on a real file system.
 pub trait EntryFiles: Send + Sync {
@@ -54,12 +54,14 @@ pub trait EntryFiles: Send + Sync {
     /// Sets the length of `file`, creating it if it does not exist (`ftruncate`).
     fn set_len(&self, file: FileKind, len: u64) -> io::Result<()>;
 
-    /// Makes the bytes and the length of `file` durable (`fdatasync`; a macOS implementation uses `F_FULLFSYNC`).
+    /// Makes the bytes and the length of `file` durable (`fdatasync`; a macOS implementation uses
+    /// `F_FULLFSYNC`).
     /// A file that does not exist is an error of kind `NotFound`.
     fn sync_data(&self, file: FileKind) -> io::Result<()>;
 
     /// Releases `len` bytes of the data file from `offset`, keeping its size
-    /// (`fallocate(PUNCH_HOLE | KEEP_SIZE)`; a macOS implementation uses `F_PUNCHHOLE`). The range reads as zeros.
+    /// (`fallocate(PUNCH_HOLE | KEEP_SIZE)`; a macOS implementation uses `F_PUNCHHOLE`). The range
+    /// reads as zeros.
     fn punch_data(&self, offset: u64, len: u64) -> io::Result<()>;
 
     /// Renames [`FileKind::SnapshotTemp`] over [`FileKind::Snapshot`], atomically (`rename`).

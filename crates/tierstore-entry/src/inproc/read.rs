@@ -50,7 +50,7 @@ pub enum ReadError {
         /// The pack.
         pack: PackId,
     },
-    /// The engine answered `Ready` [`MAX_ROUNDS`] times and each read after it found a covered
+    /// The engine answered `Ready` [`MAX_ROUNDS`] times and the read after each found a covered
     /// cell gone again (evicted between the wait and the read): the read gives up rather than
     /// loop without end.
     #[error("{pack:?}: {rounds} waits answered ready and the cells were gone each time")]
@@ -62,7 +62,8 @@ pub enum ReadError {
     },
 }
 
-/// The waits [`read`] makes before it gives up with [`ReadError::Unsettled`]. A wait answers
+/// The waits [`read`] makes before it gives up with [`ReadError::Unsettled`]; each `Ready` is
+/// followed by one more read. A wait answers
 /// `Ready` only when every covered cell is `present`, so a read after it finds a cell gone only
 /// when the evictor took the cell in between; the evictor takes the groups touched longest ago
 /// (7), and a read touches its groups, so more than a few rounds is a defect, not load.
@@ -149,8 +150,8 @@ impl InProcEntry {
 /// range (a wait on cells nobody ensured is a demand of them) and read again. On a read, every
 /// covered group is touched at `clock`'s now (7: the evictor takes the groups touched longest
 /// ago). A `bad` cell, or a wait that ends `Eio`, is [`ReadError::Eio`]; a lost fill
-/// [`ReadError::Lost`]; [`MAX_ROUNDS`] waits each followed by a cell gone again,
-/// [`ReadError::Unsettled`].
+/// [`ReadError::Lost`]; [`MAX_ROUNDS`] waits answered `Ready`, each followed by a read that found
+/// a cell gone again, [`ReadError::Unsettled`].
 ///
 /// Cancel-safe: dropping the future between waits leaves no counter raised (each
 /// [`InProcEntry::read_at`] lowers its own) and cancels nothing of the fill. The `pread`s block
@@ -166,7 +167,7 @@ pub async fn read(
 ) -> Result<Vec<u8>, ReadError> {
     let pack = entry.pack();
     let mut buf = vec![0u8; len];
-    for _ in 0..MAX_ROUNDS {
+    for round in 0..=MAX_ROUNDS {
         match entry.read_at(offset, &mut buf)? {
             ReadOutcome::Read => {
                 if let Some(run) = entry.cells_of(offset, len as u64)?.and_then(groups_of) {
@@ -182,6 +183,9 @@ pub async fn read(
                 });
             }
             ReadOutcome::NotReady { bad: false, .. } => {}
+        }
+        if round == MAX_ROUNDS {
+            break;
         }
         let range = ByteRange {
             offset,

@@ -146,8 +146,7 @@ impl InProcEntry {
     }
 
     /// The number of 16-cell groups, the length of a holder's region for this pack.
-    #[must_use]
-    pub fn group_count(&self) -> u32 {
+    pub(crate) fn group_count(&self) -> u32 {
         self.layout.group_count()
     }
 
