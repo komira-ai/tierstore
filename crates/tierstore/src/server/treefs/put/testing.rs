@@ -24,7 +24,7 @@ use crate::server::build_info::stderr_log::LineLog;
 use crate::server::local_cache::testing::FakeDisk;
 
 /// The time the clock of a rig starts at.
-pub(super) const START_MS: u64 = 1_800_000_000_000;
+pub(in crate::server::treefs) const START_MS: u64 = 1_800_000_000_000;
 
 /// The prefix the settings of a rig allow.
 pub(super) const PREFIX: &str = "cas/b/";
@@ -54,7 +54,7 @@ pub(super) fn sha(bytes: &[u8]) -> Sha256Digest {
 
 /// A scratch directory with `stage/` and `cache/`, a clock at [`START_MS`] and a disk whose free
 /// space a test sets.
-pub(super) struct Rig {
+pub(in crate::server::treefs) struct Rig {
     /// The scratch directory.
     pub root: TestDir,
     /// The clock of every store the rig opens.
@@ -184,12 +184,12 @@ pub(super) fn warnings() -> (DefaultGuard, Warnings) {
 pub(super) const DEADLINE: Duration = Duration::from_secs(30);
 
 /// The owner of the files and of the directories under a prefix of a [`SpaceRig`].
-pub(super) const OWNER: (u32, u32) = (1234, 5678);
+pub(in crate::server::treefs) const OWNER: (u32, u32) = (1234, 5678);
 
 /// A put directory over the store of a [`Rig`], uploading to a [`FakePuts`] on a socket in the
 /// scratch directory, with the rig's clock, whose pauses between tries move that clock and are
 /// recorded.
-pub(super) struct SpaceRig {
+pub(in crate::server::treefs) struct SpaceRig {
     pub space: PutSpace,
     pub puts: Arc<FakePuts>,
     /// The pauses the uploads took, in order.
@@ -201,7 +201,7 @@ pub(super) struct SpaceRig {
 
 impl SpaceRig {
     /// A put directory of generation 1 in a new scratch directory named after `name`.
-    pub(super) fn new(name: &str) -> Self {
+    pub(in crate::server::treefs) fn new(name: &str) -> Self {
         Self::of(Rig::new(name), 1, true)
     }
 

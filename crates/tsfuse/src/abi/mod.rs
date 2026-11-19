@@ -26,9 +26,9 @@ pub use op::{Forgets, INIT_IN_COMPAT_SIZE, Operation, ParseError};
 pub use time::Timestamp;
 pub use wire::{
     Attr, AttrOut, BatchForgetIn, CreateIn, Dirent, DirentPlus, EntryOut, FlushIn, ForgetIn,
-    ForgetOne, FsyncIn, GetattrIn, InHeader, InitIn, InitOut, InterruptIn, Kstatfs, MkdirIn,
-    OpenIn, OpenOut, OutHeader, ReadIn, ReleaseIn, RenameIn, SetattrIn, StatfsOut, WriteIn,
-    WriteOut,
+    ForgetOne, FsyncIn, GetattrIn, InHeader, InitIn, InitOut, InterruptIn, Kstatfs, LinkIn,
+    MkdirIn, MknodIn, OpenIn, OpenOut, OutHeader, ReadIn, ReleaseIn, Rename2In, RenameIn,
+    SetattrIn, StatfsOut, WriteIn, WriteOut,
 };
 
 /// The major version of the protocol (`FUSE_KERNEL_VERSION`).
@@ -54,13 +54,21 @@ pub const MIN_READ_BUFFER: usize = 8192;
 
 /// `FOPEN_*`: the flags of an OPEN reply ([`OpenOut::open_flags`]).
 pub mod fopen {
+    /// `FOPEN_DIRECT_IO`: bypass the page cache for this open (the put directory's creates).
+    pub const DIRECT_IO: u32 = 1 << 0;
     /// `FOPEN_KEEP_CACHE`: keep the page cache of the file across this open.
     pub const KEEP_CACHE: u32 = 1 << 1;
 }
 
-/// `FATTR_*`: the fields a SETATTR sets ([`SetattrIn::valid`]); the put directory sets the size
-/// and the times.
+/// `FATTR_*`: the fields a SETATTR sets ([`SetattrIn::valid`]); the put directory takes a change
+/// of the mode or the size that changes nothing, and refuses the rest.
 pub mod fattr {
+    /// `FATTR_MODE`.
+    pub const MODE: u32 = 1 << 0;
+    /// `FATTR_UID`.
+    pub const UID: u32 = 1 << 1;
+    /// `FATTR_GID`.
+    pub const GID: u32 = 1 << 2;
     /// `FATTR_SIZE`.
     pub const SIZE: u32 = 1 << 3;
     /// `FATTR_ATIME`.

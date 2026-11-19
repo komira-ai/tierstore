@@ -5,7 +5,7 @@ use std::fmt;
 use super::args::Args;
 use super::wire::{
     BatchForgetIn, CreateIn, FlushIn, ForgetIn, ForgetOne, FsyncIn, GetattrIn, InitIn, InterruptIn,
-    MkdirIn, OpenIn, ReadIn, ReleaseIn, RenameIn, SetattrIn, WriteIn,
+    LinkIn, MkdirIn, MknodIn, OpenIn, ReadIn, ReleaseIn, Rename2In, RenameIn, SetattrIn, WriteIn,
 };
 use crate::fs::Request;
 use crate::opcode::Opcode;
@@ -100,6 +100,50 @@ pub enum Operation<'a> {
     },
     /// READDIRPLUS.
     Readdirplus(ReadIn),
+    /// SYMLINK: the link `name` in the request's node, pointing at `target`.
+    Symlink {
+        /// The name of the new link.
+        name: &'a [u8],
+        /// What the link points at.
+        target: &'a [u8],
+    },
+    /// MKNOD of `name` in the request's node.
+    Mknod {
+        /// Mode, device number and umask.
+        arg: MknodIn,
+        /// The name.
+        name: &'a [u8],
+    },
+    /// RMDIR of `name` in the request's node.
+    Rmdir {
+        /// The name.
+        name: &'a [u8],
+    },
+    /// LINK of `arg.oldnodeid` as `newname` in the request's node.
+    Link {
+        /// The node linked.
+        arg: LinkIn,
+        /// The new name.
+        newname: &'a [u8],
+    },
+    /// SETXATTR of the request's node. Its body is not parsed: its argument struct has one of
+    /// two sizes, by whether INIT agreed `FUSE_SETXATTR_EXT` (which the library never asks for),
+    /// and a file system that serves no extended attribute refuses every SETXATTR alike.
+    Setxattr,
+    /// REMOVEXATTR of the attribute `name` of the request's node.
+    Removexattr {
+        /// The attribute's name.
+        name: &'a [u8],
+    },
+    /// RENAME2 of `name` in the request's node to `newname` in `arg.newdir`, with `arg.flags`.
+    Rename2 {
+        /// The new parent and the `RENAME_*` flags.
+        arg: Rename2In,
+        /// The old name.
+        name: &'a [u8],
+        /// The new name.
+        newname: &'a [u8],
+    },
 }
 
 /// Why a request body could not be parsed.
@@ -223,6 +267,36 @@ impl<'a> Operation<'a> {
                 }
             }
             Opcode::Readdirplus => Self::Readdirplus(fetch!(ReadIn)),
+            Opcode::Symlink => {
+                let name = name!();
+                Self::Symlink {
+                    name,
+                    target: name!(),
+                }
+            }
+            Opcode::Mknod => {
+                let arg = fetch!(MknodIn);
+                Self::Mknod { arg, name: name!() }
+            }
+            Opcode::Rmdir => Self::Rmdir { name: name!() },
+            Opcode::Link => {
+                let arg = fetch!(LinkIn);
+                Self::Link {
+                    arg,
+                    newname: name!(),
+                }
+            }
+            Opcode::Setxattr => Self::Setxattr,
+            Opcode::Removexattr => Self::Removexattr { name: name!() },
+            Opcode::Rename2 => {
+                let arg = fetch!(Rename2In);
+                let name = name!();
+                Self::Rename2 {
+                    arg,
+                    name,
+                    newname: name!(),
+                }
+            }
         })
     }
 }

@@ -224,17 +224,21 @@ fn a_parked_read_holds_its_entry_until_another_thread_completes_it() {
 }
 
 #[test]
-fn a_forget_on_the_ring_is_committed_at_once_and_never_reaches_the_file_system() {
+fn a_forget_on_the_ring_is_committed_at_once_and_reaches_only_fs_forget() {
     let r = rig(host(1), depth(1), offered_uring());
     let fs = Arc::new(TestFs::default());
     let serving = r.session.serve(fs.clone()).unwrap();
     r.kernel
         .deliver(0, 8, request(FORGET, 40, 5, &1u64.to_le_bytes()));
-    r.kernel.deliver(
-        0,
-        8,
-        request(BATCH_FORGET, 42, 0, &[1, 0, 0, 0, 0, 0, 0, 0]),
-    );
+    // A batch of one node (6, two lookups): its count in `op_in`, the node in the payload.
+    let batch = [
+        &1u32.to_le_bytes()[..],
+        &[0; 4],
+        &6u64.to_le_bytes(),
+        &2u64.to_le_bytes(),
+    ];
+    r.kernel
+        .deliver(0, 8, request(BATCH_FORGET, 42, 0, &batch.concat()));
     r.kernel.deliver(0, 16, request(GETATTR, 44, 1, &[0; 16]));
     let s = r.kernel.wait(|s| s.replies.len() == 3);
     assert_eq!(
@@ -245,9 +249,11 @@ fn a_forget_on_the_ring_is_committed_at_once_and_never_reaches_the_file_system()
         vec![(40, 0, 0), (42, 0, 0), (44, 0, 13)]
     );
     drop(s);
+    // The GETATTR is the only request handled; it was read after both forgets, on one reader.
     let seen = fs.wait_seen(1);
     assert_eq!(seen.len(), 1);
     assert_eq!(seen[0].unique, 44);
+    assert_eq!(*fs.forgot.lock().unwrap(), [(5, 1), (6, 2)]);
     serving.stopper().stop();
     serving.join().unwrap();
 }

@@ -15,7 +15,8 @@
 //!   attachments made again, the control socket), and the signals that end the process. It has no
 //!   mount in it, so that the FUSE frontend and one without FUSE call it alike. `steps` says how
 //!   long each step of a start took.
-//! - `fuse` and `run` (Linux): the FUSE frontend and the process around it.
+//! - `fuse` and `run` (Linux): the FUSE frontend and the process around it; `put_fs` (Linux): the
+//!   put directory on `tsfuse`, which answers as the put directory's part of `fuse` does.
 //! - `tree_fs` (Linux): a tree mount on `tsfuse` over `tierstore-tree` (the read path of
 //!   `docs/design/fetch-cache-serve.md`), which the mounts switch to in row T-R of its section 18.
 //! - [`nfs`] (macOS serves it; built and tested everywhere): the NFSv3 frontend, over loopback,
@@ -82,6 +83,17 @@ mod handover;
 mod init_record;
 #[cfg(target_os = "linux")]
 mod launch;
+// The put directory on `tsfuse` (section 18 of `docs/design/fetch-cache-serve.md`, row T-F9),
+// tested against the handler on fuser; `tierstore fs` serves it once it switches to `tsfuse`.
+#[cfg(target_os = "linux")]
+#[cfg_attr(
+    not(test),
+    expect(
+        dead_code,
+        reason = "served once tierstore fs switches from fuser to tsfuse (row T-R of the design)"
+    )
+)]
+mod put_fs;
 #[cfg(target_os = "linux")]
 mod recover;
 #[cfg(target_os = "linux")]

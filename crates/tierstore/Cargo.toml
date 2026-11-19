@@ -153,8 +153,8 @@ fuser = { workspace = true, optional = true }
 # mount on `tsfuse` serves (`server`, Linux; section 18 of docs/design/fetch-cache-serve.md, rows
 # T-F8 and T-R).
 tierstore-tree = { workspace = true, optional = true }
-# The FUSE library of this repository: the tree mount on it (`server`, Linux), which replaces
-# fuser's (section 18 of docs/design/fetch-cache-serve.md, rows T-F8 and T-R).
+# The FUSE library of this repository: the tree mount and the put directory on it (`server`, Linux),
+# which replace fuser's (section 18 of docs/design/fetch-cache-serve.md, rows T-F8, T-F9 and T-R).
 tsfuse = { workspace = true, optional = true }
 
 [target.'cfg(target_os = "linux")'.dev-dependencies]

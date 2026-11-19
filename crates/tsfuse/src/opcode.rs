@@ -1,16 +1,20 @@
 //! The opcodes `tsfuse` implements (5.2), with their values in the Linux uapi `fuse.h`. Every
-//! other opcode is answered `ENOSYS`.
+//! other opcode is answered `ENOSYS`. SYMLINK, MKNOD, RMDIR, LINK, SETXATTR and REMOVEXATTR are
+//! in the list so that a file system can refuse them with an errno of its own (the put directory
+//! answers `EPERM`, as its handler on fuser did): an `ENOSYS` would reach the caller as `ENOSYS`,
+//! or for an extended attribute as `EOPNOTSUPP`, and RENAME2 carries the flags of
+//! `renameat2(2)` (`RENAME_NOREPLACE`, which the put directory takes).
 
 /// An opcode the library implements.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
 pub enum Opcode {
     /// `FUSE_LOOKUP`.
     Lookup,
-    /// `FUSE_FORGET` (a no-op: inode numbers are record indexes).
+    /// `FUSE_FORGET` (never answered; handed to `Fs::forget`, a no-op by default).
     Forget,
     /// `FUSE_GETATTR`.
     Getattr,
-    /// `FUSE_SETATTR` (put directory: size, times).
+    /// `FUSE_SETATTR` (put directory: taken when it changes nothing, the mode or size the file has).
     Setattr,
     /// `FUSE_READLINK`.
     Readlink,
@@ -48,10 +52,24 @@ pub enum Opcode {
     Interrupt,
     /// `FUSE_DESTROY`.
     Destroy,
-    /// `FUSE_BATCH_FORGET` (a no-op).
+    /// `FUSE_BATCH_FORGET` (never answered; each node handed to `Fs::forget`).
     BatchForget,
     /// `FUSE_READDIRPLUS`.
     Readdirplus,
+    /// `FUSE_SYMLINK` (put directory: refused).
+    Symlink,
+    /// `FUSE_MKNOD` (put directory: refused).
+    Mknod,
+    /// `FUSE_RMDIR` (put directory: refused).
+    Rmdir,
+    /// `FUSE_LINK` (put directory: refused).
+    Link,
+    /// `FUSE_SETXATTR` (put directory: refused).
+    Setxattr,
+    /// `FUSE_REMOVEXATTR` (put directory: refused).
+    Removexattr,
+    /// `FUSE_RENAME2` (put directory: a rename with `RENAME_NOREPLACE`).
+    Rename2,
 }
 
 impl Opcode {
@@ -83,6 +101,13 @@ impl Opcode {
             Self::Destroy => 38,
             Self::BatchForget => 42,
             Self::Readdirplus => 44,
+            Self::Symlink => 6,
+            Self::Mknod => 8,
+            Self::Rmdir => 11,
+            Self::Link => 13,
+            Self::Setxattr => 21,
+            Self::Removexattr => 24,
+            Self::Rename2 => 45,
         }
     }
 
@@ -115,6 +140,13 @@ impl Opcode {
             38 => Self::Destroy,
             42 => Self::BatchForget,
             44 => Self::Readdirplus,
+            6 => Self::Symlink,
+            8 => Self::Mknod,
+            11 => Self::Rmdir,
+            13 => Self::Link,
+            21 => Self::Setxattr,
+            24 => Self::Removexattr,
+            45 => Self::Rename2,
             _ => return None,
         })
     }

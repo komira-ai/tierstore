@@ -11,7 +11,8 @@
 //! completion, [`crate::Replier`]).
 //!
 //! A request that takes no reply (a FORGET the kernel forces from `readdirplus`) is committed at
-//! once and not delivered: until it is, the entry stays out of the queue (K11). A queue ends when
+//! once, since until it is the entry stays out of the queue (K11), and then delivered, so that
+//! the router hands it to `Fs::forget`. A queue ends when
 //! the kernel tears its entries down (`ENOTCONN` at unmount or abort) or ends one with
 //! `ECANCELED`; a request whose reply is sent after that is refused, as `/dev/fuse` refuses a
 //! reply to a connection that is gone.
@@ -377,18 +378,19 @@ impl UringReader {
             let _ = reply.send(&[&encode_out_header(unique, Some(Errno::EIO), 0)]);
             return None;
         }
-        if matches!(
-            Opcode::from_code(opcode),
-            Some(Opcode::Forget | Opcode::BatchForget)
-        ) {
-            let _ = reply.send(&[&encode_out_header(unique, None, 0)]);
-            return None;
-        }
         let op_len = op_len.unwrap_or(0);
         buf[..IN_HEADER_LEN].copy_from_slice(&header);
         bufs.header
             .read(OP_IN, &mut buf[IN_HEADER_LEN..IN_HEADER_LEN + op_len]);
         bufs.payload.read(0, &mut buf[IN_HEADER_LEN + op_len..len]);
+        // A FORGET is committed once its bytes are copied out, and still delivered: the router
+        // hands it to `Fs::forget` and sends nothing on the entry.
+        if matches!(
+            Opcode::from_code(opcode),
+            Some(Opcode::Forget | Opcode::BatchForget)
+        ) {
+            let _ = reply.send(&[&encode_out_header(unique, None, 0)]);
+        }
         Some(len)
     }
 }
