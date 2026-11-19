@@ -29,7 +29,7 @@ fn a_listing_holds_every_object_once_and_reads_back() {
     let dir = TestDir::under(std::env::temp_dir(), "storebench-listing");
     let path = dir.path().join("listing.tsv");
     let mut out = create(&path).unwrap();
-    let n = rt.block_on(list(&s3, "kbf-cas", &mut out, &path)).unwrap();
+    let n = rt.block_on(list(&s3, "cas-store", &mut out, &path)).unwrap();
     drop(out);
     assert_eq!(n, 1003);
     let objects = read(&path).unwrap();
@@ -37,7 +37,7 @@ fn a_listing_holds_every_object_once_and_reads_back() {
     assert_eq!(objects[0].key, "cas/b/x/00000/pack");
     assert_eq!(objects[1002].key, "cas/b/x/01002/pack");
     assert_eq!(objects[4].size, 4);
-    assert_eq!(objects[4].bucket, "kbf-cas");
+    assert_eq!(objects[4].bucket, "cas-store");
     assert_eq!(objects[4].modified_ms, 1_790_000_000_000);
     assert!(!objects[4].etag.contains('"'));
     assert!(!objects[4].multipart());
@@ -61,9 +61,9 @@ fn a_refused_listing_and_an_unwritable_file_are_errors() {
     let path = dir.path().join("l.tsv");
     let mut sink = Vec::new();
     let err = rt
-        .block_on(list(&wrong, "kbf-cas", &mut sink, &path))
+        .block_on(list(&wrong, "cas-store", &mut sink, &path))
         .unwrap_err();
-    assert!(err.to_string().starts_with("list kbf-cas: "), "{err}");
+    assert!(err.to_string().starts_with("list cas-store: "), "{err}");
 
     let s3 = fake.store(Capabilities::default());
     fake.require_credentials("fake-key", "fake-secret");
@@ -74,7 +74,7 @@ fn a_refused_listing_and_an_unwritable_file_are_errors() {
     ))
     .unwrap();
     let err = rt
-        .block_on(list(&s3, "kbf-cas", &mut Full, &path))
+        .block_on(list(&s3, "cas-store", &mut Full, &path))
         .unwrap_err();
     assert!(matches!(err, Error::Io { what: "write", .. }), "{err}");
     assert!(matches!(

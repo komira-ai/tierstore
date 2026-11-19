@@ -20,7 +20,7 @@ fn pack_key(n: u64) -> String {
 
 fn object(key: String, size: u64, modified_ms: u64) -> Object {
     Object {
-        bucket: "kbf-cas".to_owned(),
+        bucket: "cas-store".to_owned(),
         key,
         size,
         modified_ms,
@@ -40,7 +40,7 @@ fn error_of(text: &str) -> String {
 
 /// A pack with its blobs (digest byte, size) as a footers-file block.
 fn block(key: u64, status: &str, blobs: &[(u8, u64)]) -> String {
-    let mut text = format!("P\tkbf-cas\t{}\t{status}\t{}\n", pack_key(key), blobs.len());
+    let mut text = format!("P\tcas-store\t{}\t{status}\t{}\n", pack_key(key), blobs.len());
     for (d, size) in blobs {
         text.push_str(&format!("B\t{}\t{size}\n", hex_of(*d)));
     }
@@ -55,12 +55,12 @@ fn a_footers_file_reads_packs_blobs_and_tree_checks() {
     text.push('\n');
     text.push_str(&block(2, "ok", &[]));
     text.push_str(&format!(
-        "P\tkbf-cas\t{}\tget-error\t0\ttimed out\n",
+        "P\tcas-store\t{}\tget-error\t0\ttimed out\n",
         pack_key(3)
     ));
-    text.push_str("T\tkbf-cas\tcas/l/a\tjson\nT\tkbf-cas\tcas/l/b\tnot-json\nT\tkbf-cas\tcas/l/c\tget-error\n");
+    text.push_str("T\tcas-store\tcas/l/a\tjson\nT\tcas-store\tcas/l/b\tnot-json\nT\tcas-store\tcas/l/c\tget-error\n");
     let f = footers_of(&text);
-    let key = |n| ("kbf-cas".to_owned(), pack_key(n));
+    let key = |n| ("cas-store".to_owned(), pack_key(n));
     assert_eq!(f.packs.len(), 3);
     assert_eq!(f.packs[&key(1)].status, "ok");
     assert_eq!(f.packs[&key(1)].blobs, [([1; 32], 10), ([2; 32], 20)]);
@@ -156,7 +156,7 @@ fn a_footers_file_is_read_from_disk() {
     assert!(matches!(e, Error::Io { what: "read", .. }), "{e}");
 }
 
-/// The listing and footers of the walk below: bucket `kbf-cas`, packs numbered by key.
+/// The listing and footers of the walk below: bucket `cas-store`, packs numbered by key.
 ///
 /// | pack | modified | bytes | blobs (digest: size) | ok |
 /// |---|---|---|---|---|
@@ -178,7 +178,7 @@ fn scenario() -> (Vec<Object>, String) {
         object(format!("cas/l/{}", hex_of(9)), 70 * MIB, 10),
         object(format!("cas/l/{}", hex_of(8)), 100, 10),
         object(format!("cas/l/{}", hex_of(7)), 200, 10),
-        object("kbf-history/history/x".to_owned(), 999, 10),
+        object("history/history/x".to_owned(), 999, 10),
     ];
     listing.rotate_left(3);
     let mut text = String::new();
@@ -248,7 +248,7 @@ fn a_pack_is_live_while_it_holds_the_first_location_of_a_blob() {
 fn a_pack_without_a_footer_bounds_l_live() {
     let (listing, text) = scenario();
     let mut footers = footers_of(&text);
-    footers.packs.remove(&("kbf-cas".to_owned(), pack_key(5)));
+    footers.packs.remove(&("cas-store".to_owned(), pack_key(5)));
     let (live, dead) = analyze(&listing, Some(&footers));
     assert_eq!((live.packs_missing, live.packs_scanned), (1, 5));
     let missing = listing.iter().find(|o| o.key == pack_key(5)).unwrap().size;
@@ -292,7 +292,7 @@ fn a_live_pack_is_uncertain_only_when_an_earlier_unread_pack_could_hold_its_firs
     let mut text = String::new();
     for (k, _, _, blobs) in &packs {
         if let Some(blobs) = blobs {
-            text.push_str(&format!("P\tkbf-cas\t{k}\tok\t{}\n", blobs.len()));
+            text.push_str(&format!("P\tcas-store\t{k}\tok\t{}\n", blobs.len()));
             for (d, size) in blobs {
                 text.push_str(&format!("B\t{}\t{size}\n", hex_of(*d)));
             }
@@ -327,7 +327,7 @@ fn the_unread_bytes_bound_what_they_could_make_dead() {
         .iter()
         .map(|(k, d, size)| {
             format!(
-                "P\tkbf-cas\t{}\tok\t1\nB\t{}\t{size}\n",
+                "P\tcas-store\t{}\tok\t1\nB\t{}\t{size}\n",
                 pack_key(*k),
                 hex_of(*d)
             )
@@ -362,7 +362,7 @@ fn could_be_dead_rounds_up_and_stops_at_the_uncertain_bytes() {
 fn an_unread_pack_of_the_same_millisecond_counts_as_written_before() {
     let listing = [object(pack_key(1), 300, 5), object(pack_key(2), 900, 5)];
     let text = format!(
-        "P\tkbf-cas\t{}\tok\t1\nB\t{}\t100\n",
+        "P\tcas-store\t{}\tok\t1\nB\t{}\t100\n",
         pack_key(1),
         hex_of(1)
     );
@@ -375,7 +375,7 @@ fn an_unread_pack_of_the_same_millisecond_counts_as_written_before() {
 #[test]
 fn a_live_pack_written_before_every_unread_pack_is_certain() {
     let listing = [object(pack_key(1), 300, 1), object(pack_key(2), 900, 2)];
-    let text = format!("P\tkbf-cas\t{}\tok\t1\nB\t{}\t1\n", pack_key(1), hex_of(1));
+    let text = format!("P\tcas-store\t{}\tok\t1\nB\t{}\t1\n", pack_key(1), hex_of(1));
     let (live, _) = analyze(&listing, Some(&footers_of(&text)));
     assert_eq!((live.live_packs, live.uncertain_packs), (1, 0));
     assert_eq!(live.l_live_low, Some(300));
@@ -399,10 +399,10 @@ fn a_pack_with_a_bad_footer_is_counted_as_unread() {
     let mut text = String::new();
     for (k, _, _, status, blobs) in &packs {
         if *status == "get-error" {
-            text.push_str(&format!("P\tkbf-cas\t{k}\tget-error\t0\ttimed out\n"));
+            text.push_str(&format!("P\tcas-store\t{k}\tget-error\t0\ttimed out\n"));
             continue;
         }
-        text.push_str(&format!("P\tkbf-cas\t{k}\t{status}\t{}\n", blobs.len()));
+        text.push_str(&format!("P\tcas-store\t{k}\t{status}\t{}\n", blobs.len()));
         for (d, size) in blobs {
             text.push_str(&format!("B\t{}\t{size}\n", hex_of(*d)));
         }
@@ -439,18 +439,18 @@ fn a_pack_with_a_bad_footer_is_counted_as_unread() {
 fn two_scans_merge_and_a_read_pack_counts_as_read() {
     let ok = |n: u8| {
         format!(
-            "P\tkbf-cas\t{}\tok\t1\nB\t{}\t10\n",
+            "P\tcas-store\t{}\tok\t1\nB\t{}\t10\n",
             pack_key(u64::from(n)),
             hex_of(n)
         )
     };
     let bad = |n: u8, why: &str| {
         format!(
-            "P\tkbf-cas\t{}\tget-error\t0\t{why}\n",
+            "P\tcas-store\t{}\tget-error\t0\t{why}\n",
             pack_key(u64::from(n))
         )
     };
-    let tree = |n: u8, verdict: &str| format!("T\tkbf-cas\tcas/l/{n}\t{verdict}\n");
+    let tree = |n: u8, verdict: &str| format!("T\tcas-store\tcas/l/{n}\t{verdict}\n");
     let first = footers_of(
         &[
             ok(1),
@@ -476,7 +476,7 @@ fn two_scans_merge_and_a_read_pack_counts_as_read() {
     let mut merged = first.clone();
     merged.merge(second);
     let status = |n: u8| {
-        merged.packs[&("kbf-cas".to_owned(), pack_key(u64::from(n)))]
+        merged.packs[&("cas-store".to_owned(), pack_key(u64::from(n)))]
             .status
             .clone()
     };
@@ -486,10 +486,10 @@ fn two_scans_merge_and_a_read_pack_counts_as_read() {
         ["ok", "ok", "get-error", "ok"]
     );
     assert_eq!(
-        merged.packs[&("kbf-cas".to_owned(), pack_key(2))].blobs,
+        merged.packs[&("cas-store".to_owned(), pack_key(2))].blobs,
         [([2u8; 32], 10)]
     );
-    let verdict = |n: u8| merged.trees[&("kbf-cas".to_owned(), format!("cas/l/{n}"))];
+    let verdict = |n: u8| merged.trees[&("cas-store".to_owned(), format!("cas/l/{n}"))];
     assert_eq!(
         [verdict(1), verdict(2), verdict(3)],
         [Verdict::Json, Verdict::NotJson, Verdict::GetError]
@@ -503,16 +503,16 @@ fn footers_files_are_read_and_merged_in_order() {
     let dir = TestDir::under(std::env::temp_dir(), "storebench-live-footers");
     let a = dir.path().join("a.tsv");
     let b = dir.path().join("b.tsv");
-    std::fs::write(&a, format!("P\tkbf-cas\t{}\tno-magic\t0\n", pack_key(1))).unwrap();
+    std::fs::write(&a, format!("P\tcas-store\t{}\tno-magic\t0\n", pack_key(1))).unwrap();
     std::fs::write(
         &b,
-        format!("P\tkbf-cas\t{}\tok\t1\nB\t{}\t7\n", pack_key(1), hex_of(1)),
+        format!("P\tcas-store\t{}\tok\t1\nB\t{}\t7\n", pack_key(1), hex_of(1)),
     )
     .unwrap();
     assert_eq!(read_all_footers(&[]).unwrap(), None);
     let merged = read_all_footers(&[a.clone(), b.clone()]).unwrap().unwrap();
     assert_eq!(
-        merged.packs[&("kbf-cas".to_owned(), pack_key(1))].status,
+        merged.packs[&("cas-store".to_owned(), pack_key(1))].status,
         "ok"
     );
     let missing = dir.path().join("absent.tsv");

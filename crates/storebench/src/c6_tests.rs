@@ -81,18 +81,18 @@ fn prefixes_are_labelled_by_bytes_after_the_unprefixed_keys() {
 fn listing() -> Vec<Object> {
     let h = "0000000000000041";
     vec![
-        obj("kbf-cas", &pk(1), 64 * KIB, at(0, 0), "a"),
-        obj("kbf-cas", &pk(2), 64 * KIB + 1, at(0, 1), "a"),
-        obj("kbf-cas", &pk(3), MIB, at(1, 2), "b-3"),
-        obj("kbf-cas", &pk(4), MIB + 1, at(1, 3), "a"),
-        obj("kbf-cas", &pk(5), 4 * MIB, at(2, 4), "a"),
-        obj("kbf-cas", &pk(6), 4 * MIB + 1, at(10, 6), "a"),
-        obj("kbf-cas", &pk(7), 16 * MIB, at(10, 7), "a"),
-        obj("kbf-cas", &pk(8), 16 * MIB + 1, at(10, 8), "a"),
-        obj("kbf-cas", &pk(9), 256 * MIB, at(10, 9), "c-12"),
-        obj("kbf-cas", &pk(10), 256 * MIB + 1, at(10, 10), "a"),
-        obj("kbf-b", &format!("team1/cas/{h}/{h}"), 10, at(10, 11), "a"),
-        obj("kbf-b", "kbf-history/history/x", 5, at(5, 12), "a"),
+        obj("cas-store", &pk(1), 64 * KIB, at(0, 0), "a"),
+        obj("cas-store", &pk(2), 64 * KIB + 1, at(0, 1), "a"),
+        obj("cas-store", &pk(3), MIB, at(1, 2), "b-3"),
+        obj("cas-store", &pk(4), MIB + 1, at(1, 3), "a"),
+        obj("cas-store", &pk(5), 4 * MIB, at(2, 4), "a"),
+        obj("cas-store", &pk(6), 4 * MIB + 1, at(10, 6), "a"),
+        obj("cas-store", &pk(7), 16 * MIB, at(10, 7), "a"),
+        obj("cas-store", &pk(8), 16 * MIB + 1, at(10, 8), "a"),
+        obj("cas-store", &pk(9), 256 * MIB, at(10, 9), "c-12"),
+        obj("cas-store", &pk(10), 256 * MIB + 1, at(10, 10), "a"),
+        obj("store-b", &format!("team1/cas/{h}/{h}"), 10, at(10, 11), "a"),
+        obj("store-b", "history/history/x", 5, at(5, 12), "a"),
     ]
 }
 
@@ -185,7 +185,7 @@ fn objects_are_counted_by_kind_class_bucket_and_prefix() {
         .iter()
         .map(|n| (n.name.as_str(), n.count.objects, n.count.bytes))
         .collect();
-    assert_eq!(named, [("kbf-b", 2, 15), ("kbf-cas", 10, cas_bytes)]);
+    assert_eq!(named, [("cas-store", 10, cas_bytes), ("store-b", 2, 15)]);
     let named: Vec<(&str, u64, u64)> = s
         .prefixes
         .iter()
@@ -194,9 +194,9 @@ fn objects_are_counted_by_kind_class_bucket_and_prefix() {
     assert_eq!(
         named,
         [
-            ("kbf-cas/", 10, cas_bytes),
-            ("kbf-b/deployment 1", 1, 10),
-            ("kbf-b/deployment 2", 1, 5)
+            ("cas-store/", 10, cas_bytes),
+            ("store-b/deployment 1", 1, 10),
+            ("store-b/deployment 2", 1, 5)
         ]
     );
     assert_eq!(
@@ -322,9 +322,9 @@ fn the_objects_above_four_mib_are_the_ones_packed() {
 #[test]
 fn objects_arrive_by_time_then_key() {
     let mut objects: Vec<Object> = (1..=16)
-        .map(|n| obj("kbf-cas", &pk(n), 100 * MIB, at(0, 1), "a"))
+        .map(|n| obj("cas-store", &pk(n), 100 * MIB, at(0, 1), "a"))
         .collect();
-    objects.push(obj("kbf-cas", &pk(0), 200 * MIB, at(0, 2), "a"));
+    objects.push(obj("cas-store", &pk(0), 200 * MIB, at(0, 2), "a"));
     let blocks = |objects: &[Object]| {
         let p = summarize(objects, None, &[], model()).0.packing;
         p.fits
@@ -341,13 +341,13 @@ fn objects_arrive_by_time_then_key() {
 #[test]
 fn footers_and_du_reports_reach_the_summary() {
     let listing = [
-        obj("kbf-cas", &pk(1), 1000, at(0, 1), "a"),
-        obj("kbf-cas", &pk(2), 2000, at(0, 2), "a"),
+        obj("cas-store", &pk(1), 1000, at(0, 1), "a"),
+        obj("cas-store", &pk(2), 2000, at(0, 2), "a"),
     ];
     let blob = hex::encode([7u8; 32]);
     let text = format!(
-        "P\tkbf-cas\t{}\tok\t1\nB\t{blob}\t10\nP\tkbf-cas\t{}\tok\t1\nB\t{blob}\t10\n\
-         T\tkbf-cas\tcas/l/x\tjson\n",
+        "P\tcas-store\t{}\tok\t1\nB\t{blob}\t10\nP\tcas-store\t{}\tok\t1\nB\t{blob}\t10\n\
+         T\tcas-store\tcas/l/x\tjson\n",
         pk(1),
         pk(2)
     );
@@ -398,14 +398,14 @@ fn dead_packs_are_written_one_per_line() {
 fn the_tables_carry_the_measurement() {
     let mut listing = listing();
     listing.push(obj(
-        "kbf-cas",
+        "cas-store",
         &format!("cas/l/{}", "ab".repeat(32)),
         100,
         at(3, 0),
         "a",
     ));
     let text = format!(
-        "P\tkbf-cas\t{}\tok\t1\nB\t{}\t10\nT\tkbf-cas\tcas/l/x\tjson\n",
+        "P\tcas-store\t{}\tok\t1\nB\t{}\t10\nT\tcas-store\tcas/l/x\tjson\n",
         pk(1),
         hex::encode([1u8; 32])
     );
@@ -426,7 +426,7 @@ fn the_tables_carry_the_measurement() {
             free: 400,
         },
         entries: vec![
-            e("kbf-cas", 5000),
+            e("cas-store", 5000),
             e(".minio.sys", 300),
             e(".minio.sys/tmp", 100),
         ],
@@ -455,7 +455,7 @@ fn the_tables_carry_the_measurement() {
     assert!(kinds.contains("| all | 13 |"), "{kinds}");
     let by_bucket = table(&tables, "C-6, silo's objects by bucket");
     assert!(
-        by_bucket.contains("| kbf-b/deployment 1 | 1 | 10 B |"),
+        by_bucket.contains("| store-b/deployment 1 | 1 | 10 B |"),
         "{by_bucket}"
     );
     let ingest = table(&tables, "C-6, silo's ingest");
@@ -495,8 +495,8 @@ fn the_tables_carry_the_measurement() {
         "{gap}"
     );
     let by_gap = table(&tables, "C-6, the gap by bucket");
-    assert!(by_gap.contains("| kbf-cas | 11 |"), "{by_gap}");
-    assert!(by_gap.contains("| kbf-b | 2 | 15 B |"), "{by_gap}");
+    assert!(by_gap.contains("| cas-store | 11 |"), "{by_gap}");
+    assert!(by_gap.contains("| store-b | 2 | 15 B |"), "{by_gap}");
     let others = table(&tables, "C-6, what silo's drives hold");
     assert!(
         others.contains("| .minio.sys/tmp | 1.20 kB | 36 |"),
@@ -544,13 +544,13 @@ fn inputs(name: &str) -> Inputs {
     let root = dir.path();
     let lines: Vec<String> = [(pk(1), 1000, 1), (pk(2), 2000, 2), (pk(3), 3000, 3)]
         .iter()
-        .map(|(key, size, t)| format!("kbf-cas\t{key}\t{size}\t{t}\ta\n"))
+        .map(|(key, size, t)| format!("cas-store\t{key}\t{size}\t{t}\ta\n"))
         .collect();
     std::fs::write(root.join("listing.tsv"), lines.concat()).unwrap();
     let d = |n: u8| hex::encode([n; 32]);
     let footers = format!(
-        "P\tkbf-cas\t{}\tok\t1\nB\t{}\t10\nP\tkbf-cas\t{}\tok\t1\nB\t{}\t10\n\
-         P\tkbf-cas\t{}\tok\t1\nB\t{}\t20\n",
+        "P\tcas-store\t{}\tok\t1\nB\t{}\t10\nP\tcas-store\t{}\tok\t1\nB\t{}\t10\n\
+         P\tcas-store\t{}\tok\t1\nB\t{}\t20\n",
         pk(1),
         d(1),
         pk(2),
@@ -598,7 +598,7 @@ fn run_writes_the_summary_the_dead_packs_and_the_tables() {
     assert_eq!(s.gap.measured.as_ref().unwrap().total.allocated, 8400);
     assert_eq!(
         std::fs::read_to_string(dir.path().join("dead.tsv")).unwrap(),
-        format!("kbf-cas\t{}\n", pk(2))
+        format!("cas-store\t{}\n", pk(2))
     );
     let text = String::from_utf8(stdout).unwrap();
     assert!(
@@ -657,7 +657,7 @@ fn run_fails_on_every_bad_input_and_output() {
     );
     let e = run_with(&|a| a.listing = root.join("none.tsv"));
     assert!(matches!(e, Error::Io { what: "open", .. }), "{e}");
-    std::fs::write(root.join("bad.tsv"), "kbf-cas\tonly-two-fields\n").unwrap();
+    std::fs::write(root.join("bad.tsv"), "cas-store\tonly-two-fields\n").unwrap();
     let e = run_with(&|a| a.listing = root.join("bad.tsv"));
     assert!(matches!(e, Error::Parse { line: 1, .. }), "{e}");
     let e = run_with(&|a| a.footers = vec![root.join("none.tsv")]);

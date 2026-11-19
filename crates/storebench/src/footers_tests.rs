@@ -422,7 +422,7 @@ fn a_tree_list_is_json_when_it_starts_with_a_brace() {
 fn entries_are_written_as_their_lines() {
     let pack = |status: Status, blobs: Vec<Blob>| {
         Checked::Pack(PackFooter {
-            bucket: "kbf-cas".into(),
+            bucket: "cas-store".into(),
             key: "cas/d/n/b/0000000000000001".into(),
             status,
             blobs,
@@ -430,7 +430,7 @@ fn entries_are_written_as_their_lines() {
     };
     let tree = |outcome| {
         Checked::Tree(TreeCheck {
-            bucket: "kbf-cas".into(),
+            bucket: "cas-store".into(),
             key: "cas/l/x".into(),
             outcome,
         })
@@ -452,14 +452,14 @@ fn entries_are_written_as_their_lines() {
     }
     let digest = format!("00abcdef{}", "00".repeat(28));
     let want = format!(
-        "P\tkbf-cas\tcas/d/n/b/0000000000000001\tok\t2\n\
+        "P\tcas-store\tcas/d/n/b/0000000000000001\tok\t2\n\
          B\t{digest}\t42\n\
          B\t{digest}\t42\n\
-         P\tkbf-cas\tcas/d/n/b/0000000000000001\tbad-crc\t0\n\
-         P\tkbf-cas\tcas/d/n/b/0000000000000001\tget-error\t0\ta b c\n\
-         T\tkbf-cas\tcas/l/x\tjson\n\
-         T\tkbf-cas\tcas/l/x\tnot-json\n\
-         T\tkbf-cas\tcas/l/x\tget-error\n"
+         P\tcas-store\tcas/d/n/b/0000000000000001\tbad-crc\t0\n\
+         P\tcas-store\tcas/d/n/b/0000000000000001\tget-error\t0\ta b c\n\
+         T\tcas-store\tcas/l/x\tjson\n\
+         T\tcas-store\tcas/l/x\tnot-json\n\
+         T\tcas-store\tcas/l/x\tget-error\n"
     );
     assert_eq!(String::from_utf8(out).unwrap(), want);
 }
@@ -475,13 +475,13 @@ fn a_footer_file_reads_back_to_what_was_written() {
     };
     let packs = vec![
         PackFooter {
-            bucket: "kbf-cas".into(),
+            bucket: "cas-store".into(),
             key: "cas/d/n/b/0000000000000001".into(),
             status: Status::Ok,
             blobs: vec![blob(1, 10), blob(2, 20)],
         },
         PackFooter {
-            bucket: "kbf-cas".into(),
+            bucket: "cas-store".into(),
             key: "cas/d/n/b/0000000000000002".into(),
             status: Status::Ok,
             blobs: Vec::new(),
@@ -513,7 +513,7 @@ fn a_footer_file_reads_back_to_what_was_written() {
     .into_iter()
     .enumerate()
     .map(|(i, outcome)| TreeCheck {
-        bucket: "kbf-cas".into(),
+        bucket: "cas-store".into(),
         key: format!("cas/l/{i}"),
         outcome,
     })
@@ -684,7 +684,7 @@ fn scan_fails_on_an_unwritable_file_and_on_a_refused_endpoint() {
     let err = go("not a url", &mut Vec::new()).unwrap_err();
     assert!(matches!(err, Error::Usage(_)), "{err}");
     // No pack or tree list: no client is made, so the endpoint is never looked at.
-    let none = [object("bkt", "kbf-history/x", 5)];
+    let none = [object("bkt", "history/x", 5)];
     let counts = farm
         .rt
         .block_on(scan(
@@ -732,16 +732,16 @@ fn run_setup() -> Run {
         (keys[4], b"\x01\x02".to_vec()),
     ]);
     let lines = [
-        ("kbf-cas", keys[0].to_owned(), small.len() as u64),
+        ("cas-store", keys[0].to_owned(), small.len() as u64),
         ("team1", keys[2].to_owned(), bad.len() as u64),
-        ("kbf-cas", keys[3].to_owned(), 11),
-        ("kbf-cas", "cas/d/n1/b1/0000000000000005".to_owned(), 10),
-        ("kbf-cas", keys[1].to_owned(), big.len() as u64),
+        ("cas-store", keys[3].to_owned(), 11),
+        ("cas-store", "cas/d/n1/b1/0000000000000005".to_owned(), 10),
+        ("cas-store", keys[1].to_owned(), big.len() as u64),
         ("team1", "cas/d/n1/b1/0000000000000004".to_owned(), 5000),
-        ("kbf-cas", format!("cas/b/1-2/{}/L0", "ab".repeat(20)), 100),
-        ("kbf-history", "history/x".to_owned(), 7),
+        ("cas-store", format!("cas/b/1-2/{}/L0", "ab".repeat(20)), 100),
+        ("history", "history/x".to_owned(), 7),
         ("team1", keys[4].to_owned(), 2),
-        ("kbf-cas", format!("cas/l/{}", h('c')), 9),
+        ("cas-store", format!("cas/l/{}", h('c')), 9),
     ];
     let dir = TestDir::under(std::env::temp_dir(), "storebench-footers-run");
     let listing = dir.path().join("listing.tsv");
@@ -892,10 +892,10 @@ fn run_scans_the_packs_and_tree_lists_of_a_listing_in_order() {
     assert_eq!(
         keys,
         [
-            ("kbf-cas", "1", "ok"),
+            ("cas-store", "1", "ok"),
             ("team1", "3", "bad-crc"),
-            ("kbf-cas", "5", "too-small"),
-            ("kbf-cas", "2", "ok"),
+            ("cas-store", "5", "too-small"),
+            ("cas-store", "2", "ok"),
             ("team1", "4", "get-error"),
         ]
     );
@@ -915,9 +915,9 @@ fn run_scans_the_packs_and_tree_lists_of_a_listing_in_order() {
     assert_eq!(
         outcomes,
         [
-            ("kbf-cas", TreeOutcome::Json),
+            ("cas-store", TreeOutcome::Json),
             ("team1", TreeOutcome::NotJson),
-            ("kbf-cas", TreeOutcome::GetError),
+            ("cas-store", TreeOutcome::GetError),
         ]
     );
     // Two ranged GETs for the long footer, one for each other pack, one for each tree list, per

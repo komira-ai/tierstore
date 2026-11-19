@@ -577,7 +577,7 @@ fn nodes_down_print_as_a_label() {
 
 fn object(i: u64, size: u64) -> Object {
     Object {
-        bucket: "kbf-cas".to_owned(),
+        bucket: "cas-store".to_owned(),
         key: key(i),
         size,
         modified_ms: 1,
@@ -654,7 +654,7 @@ fn run_reads_a_listing_and_writes_the_summary_and_the_tables() {
     let listing = dir.path().join("listing.tsv");
     let mut text = String::new();
     for i in 0..30u64 {
-        text.push_str(&format!("kbf-cas\t{}\t{}\t1\tabc\n", key(i), 1_000_000 + i));
+        text.push_str(&format!("cas-store\t{}\t{}\t1\tabc\n", key(i), 1_000_000 + i));
     }
     std::fs::write(&listing, text).unwrap();
     let out = dir.path().join("c7.json");
@@ -703,7 +703,7 @@ fn run_fails_with_the_file_or_stream_it_could_not_use() {
         Err(Error::Io { what: "open", .. })
     ));
     let bad = dir.path().join("bad.tsv");
-    std::fs::write(&bad, "kbf-cas\tonly\n").unwrap();
+    std::fs::write(&bad, "cas-store\tonly\n").unwrap();
     let args = Args {
         listing: bad,
         out: out.clone(),
@@ -714,7 +714,7 @@ fn run_fails_with_the_file_or_stream_it_could_not_use() {
         Err(Error::Parse { line: 1, .. })
     ));
     let good = dir.path().join("good.tsv");
-    std::fs::write(&good, format!("kbf-cas\t{}\t5\t1\tabc\n", key(1))).unwrap();
+    std::fs::write(&good, format!("cas-store\t{}\t5\t1\tabc\n", key(1))).unwrap();
     let unwritable = Args {
         listing: good.clone(),
         out: dir.path().join("no-such-dir").join("c7.json"),
@@ -798,7 +798,7 @@ fn drives_that_shared_bytes_fill_past_the_limit_are_never_chosen() {
 fn the_verb_sets_the_shared_bytes_on_now_only_and_the_tables_say_so() {
     let dir = TestDir::under(std::env::temp_dir(), "storebench-placement-shared");
     let listing = dir.path().join("listing.tsv");
-    std::fs::write(&listing, format!("kbf-cas\t{}\t5\t1\tabc\n", key(1))).unwrap();
+    std::fs::write(&listing, format!("cas-store\t{}\t5\t1\tabc\n", key(1))).unwrap();
     let out = dir.path().join("c7.json");
     let mut stdout = Vec::new();
     run(

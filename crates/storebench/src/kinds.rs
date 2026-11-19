@@ -1,7 +1,7 @@
 //! What an object of silo is, from its key and size: the CAS service's key layout.
 //!
 //! The CAS service (the build farm's frontend, storage nodes and task runners) writes under an
-//! optional deployment prefix (`kbf/<log>/`, `team1/`, ...) and then `cas/`:
+//! optional deployment prefix (`front/<log>/`, `team1/`, ...) and then `cas/`:
 //!
 //! | key after the prefix | kind |
 //! |---|---|
@@ -130,7 +130,7 @@ mod tests {
             (format!("cas/f/frontend/b2/{H16}"), 10, Kind::Pack),
             (format!("team1/cas/{H16}/{H16}/{H16}"), 10, Kind::Pack),
             (
-                format!("kbf/293299bb865ff265/cas/{H16}/{H16}"),
+                format!("front/293299bb865ff265/cas/{H16}/{H16}"),
                 10,
                 Kind::Pack,
             ),
@@ -155,7 +155,7 @@ mod tests {
             (format!("cas/l/{}", "g".repeat(64)), 10, Kind::Other),
             ("cas/b/1-2/not-a-run/pack".to_owned(), 10, Kind::Other),
             (
-                "kbf-history/history/preflight-put-x".to_owned(),
+                "history/history/preflight-put-x".to_owned(),
                 1,
                 Kind::Other,
             ),
@@ -170,8 +170,8 @@ mod tests {
     fn the_prefix_is_what_comes_before_cas() {
         assert_eq!(prefix("cas/b/x/y/pack"), "");
         assert_eq!(prefix("team1/cas/1/2/3"), "team1/");
-        assert_eq!(prefix("kbf/2932/cas/1/2"), "kbf/2932/");
-        assert_eq!(prefix("kbf-history/history/x"), "kbf-history");
+        assert_eq!(prefix("front/2932/cas/1/2"), "front/2932/");
+        assert_eq!(prefix("history/history/x"), "history");
         assert_eq!(prefix("lonely"), "lonely");
     }
 

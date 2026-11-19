@@ -133,7 +133,7 @@ pub(crate) mod tests {
     fn a_bad_endpoint_is_a_usage_error() {
         let err = store(
             "not a url",
-            "kbf-cas",
+            "cas-store",
             Credentials::new("a", "b"),
             Duration::from_secs(1),
         )
@@ -142,7 +142,7 @@ pub(crate) mod tests {
         assert!(
             store(
                 "http://127.0.0.1:0",
-                "kbf-cas",
+                "cas-store",
                 Credentials::new("a", "b"),
                 Duration::from_secs(1)
             )

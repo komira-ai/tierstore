@@ -28,7 +28,7 @@ pub enum Error {
     /// The object store refused or failed a request.
     #[error("{what}: {source}")]
     Store {
-        /// The request (`list kbf-cas`, `GET kbf-cas/cas/...`).
+        /// The request (`list cas-store`, `GET cas-store/cas/...`).
         what: String,
         /// The store's error.
         source: objstore_s3::ObjectStoreError,

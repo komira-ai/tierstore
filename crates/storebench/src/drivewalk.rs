@@ -33,7 +33,7 @@ pub const SPLIT_FANOUT: usize = 32;
 /// The flags of `drive-list`.
 #[derive(Debug, ClapArgs)]
 pub struct Args {
-    /// The directory of one bucket on one of silo's drives (`<drive>/kbf-cas`).
+    /// The directory of one bucket on one of silo's drives (`<drive>/cas-store`).
     #[arg(long)]
     pub bucket_dir: PathBuf,
     /// The bucket's name, written as the listing's first field (default: the directory's name).

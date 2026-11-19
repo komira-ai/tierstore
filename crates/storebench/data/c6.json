@@ -137,7 +137,7 @@
   ],
   "buckets": [
     {
-      "name": "kbf-cas",
+      "name": "cas-store",
       "count": {
         "objects": 1526333,
         "bytes": 1346628725784
@@ -153,49 +153,49 @@
   ],
   "prefixes": [
     {
-      "name": "kbf-cas/",
+      "name": "cas-store/",
       "count": {
         "objects": 757483,
         "bytes": 106843470648
       }
     },
     {
-      "name": "kbf-cas/deployment 1",
+      "name": "cas-store/deployment 1",
       "count": {
         "objects": 730198,
         "bytes": 1225390620704
       }
     },
     {
-      "name": "kbf-cas/deployment 2",
+      "name": "cas-store/deployment 2",
       "count": {
         "objects": 8734,
         "bytes": 5306499379
       }
     },
     {
-      "name": "kbf-cas/deployment 3",
+      "name": "cas-store/deployment 3",
       "count": {
         "objects": 25599,
         "bytes": 4406176823
       }
     },
     {
-      "name": "kbf-cas/deployment 4",
+      "name": "cas-store/deployment 4",
       "count": {
         "objects": 3928,
         "bytes": 2728984386
       }
     },
     {
-      "name": "kbf-cas/deployment 5",
+      "name": "cas-store/deployment 5",
       "count": {
         "objects": 303,
         "bytes": 1092326495
       }
     },
     {
-      "name": "kbf-cas/deployment 6",
+      "name": "cas-store/deployment 6",
       "count": {
         "objects": 88,
         "bytes": 860647349
@@ -2458,7 +2458,7 @@
     "expected_ratio": 1.5556502087404587,
     "buckets": [
       {
-        "bucket": "kbf-cas",
+        "bucket": "cas-store",
         "objects": 1526333,
         "logical": 1346628725784,
         "expected": {

@@ -23,10 +23,10 @@ figures by a rule this document states, **[I]** an inference.
 ## How the data was taken
 
 **What was read, and when.** Silo was one erasure set of 12 drives, two on each of six nodes
-(here n1 to n6), with the buckets `kbf-cas` (everything the CAS service wrote) and
+(here n1 to n6), with the buckets `cas-store` (everything the CAS service wrote) and
 `tierstore-cold`. On 2026-11-18, before silo was removed, these were read:
 - **The listing** of both buckets, 1,526,337 objects, from the drives, not from silo's S3 API.
-  Silo answered a listing of `kbf-cas` at about 14 objects a second, a day and more for the whole
+  Silo answered a listing of `cas-store` at about 14 objects a second, a day and more for the whole
   bucket, while every drive holds every object's `xl.meta` (its size, time, tag and erasure
   layout). `storebench drive-list` walked one share of the key space per drive and read only the
   `xl.meta` of the objects its share owns. The twelve walks reported no error; their counts sum
@@ -57,7 +57,7 @@ against it; they run against any S3 store holding the CAS service's packs:
 
 | step | command |
 |---|---|
-| listing | `storebench drive-list --bucket-dir <drive>/kbf-cas --share <i>/<n> --out walk-<i>.tsv --meta-out walk-<i>.meta.tsv`, one share per drive, concatenated (or `storebench list` through S3) |
+| listing | `storebench drive-list --bucket-dir <drive>/cas-store --share <i>/<n> --out walk-<i>.tsv --meta-out walk-<i>.meta.tsv`, one share per drive, concatenated (or `storebench list` through S3) |
 | footers | `storebench footers --endpoint <url> --credentials <file> --listing listing.tsv --share <i>/5 --min-pack-bytes 65537 --out footers-big-<i>.tsv` |
 | C-6 | `storebench c6 --listing listing.tsv --erasure erasure.tsv --footers <each footers file> --dead-out dead.tsv --out c6.json` |
 | C-7 | `storebench c7 --listing listing.tsv --out c7.json` |
@@ -80,15 +80,15 @@ against it; they run against any S3 store holding the CAS service's packs:
 
 | bucket or bucket/prefix | objects | bytes |
 | --- | --- | --- |
-| kbf-cas | 1,526,333 | 1.35 TB |
+| cas-store | 1,526,333 | 1.35 TB |
 | tierstore-cold | 4 | 4 B |
-| kbf-cas/ | 757,483 | 107 GB |
-| kbf-cas/deployment 1 | 730,198 | 1.23 TB |
-| kbf-cas/deployment 2 | 8,734 | 5.31 GB |
-| kbf-cas/deployment 3 | 25,599 | 4.41 GB |
-| kbf-cas/deployment 4 | 3,928 | 2.73 GB |
-| kbf-cas/deployment 5 | 303 | 1.09 GB |
-| kbf-cas/deployment 6 | 88 | 861 MB |
+| cas-store/ | 757,483 | 107 GB |
+| cas-store/deployment 1 | 730,198 | 1.23 TB |
+| cas-store/deployment 2 | 8,734 | 5.31 GB |
+| cas-store/deployment 3 | 25,599 | 4.41 GB |
+| cas-store/deployment 4 | 3,928 | 2.73 GB |
+| cas-store/deployment 5 | 303 | 1.09 GB |
+| cas-store/deployment 6 | 88 | 861 MB |
 | tierstore-cold/deployment 7 | 4 | 4 B |
 
 **C-6, silo's ingest**
@@ -242,7 +242,7 @@ against it; they run against any S3 store holding the CAS service's packs:
 
 | bucket | objects | bytes | expected raw | measured allocated |
 | --- | --- | --- | --- | --- |
-| kbf-cas | 1,526,333 | 1.35 TB | 2.09 TB | absent |
+| cas-store | 1,526,333 | 1.35 TB | 2.09 TB | absent |
 | tierstore-cold | 4 | 4 B | 197 kB | absent |
 
 
@@ -285,7 +285,7 @@ drives used 4.6 times that (9.61 TB against 2.09 TB), the design's unexplained f
 **Most of the rest is a parked bucket that no listing shows.** Silo had kept an old Bazel
 remote cache under `.minio.sys/parked-bazel-cache/` on every drive (`rbe-cas` and `bzlcache`,
 each with a content store `cas.v2` and an action cache `ac`, sharded by the first two hex digits
-of the key), outside its buckets, so neither an S3 listing nor the walk of `kbf-cas` saw it.
+of the key), outside its buckets, so neither an S3 listing nor the walk of `cas-store` saw it.
 After silo was removed it was still on the drives, and one shard of each tree was listed from
 one drive the same way (`storebench drive-list --bucket-dir <shard> --meta-out ...`, then
 `storebench c6` on that listing for the gap model):
@@ -297,12 +297,12 @@ one drive the same way (`storebench drive-list --bucket-dir <shard> --meta-out .
 | `bzlcache/cas.v2` | shard `4d` of 82 | 1,627 | 112 MB | 245 MB | 133 k objects, 20.1 GB raw |
 
 Scaled by the shards [E], the parked cache is about 37 M objects and 2.10 TB, costing 5.12 TB raw,
-426 GB a drive. With `kbf-cas`, the model gives 601 GB a drive against the 813.6 GB measured.
+426 GB a drive. With `cas-store`, the model gives 601 GB a drive against the 813.6 GB measured.
 The remaining 212 GB a drive (26%) is outside the model: it charges no inode and no directory,
 and each object is a directory and at least one file on every drive (37 M objects at two
 512-byte inodes each would be about 38 GB a drive [I]), nor the file system's own metadata.
 `bzlcache/ac` was not sampled (its shard `00` was empty). So the factor of 4.6 was the parked cache's
-bytes counted against `kbf-cas`'s alone: with it the model expects 7.21 TB (601 GB × 12), and the
+bytes counted against `cas-store`'s alone: with it the model expects 7.21 TB (601 GB × 12), and the
 drives used 1.33 times that; against everything stored, 3.45 TB, they used 2.8 times. No import
 runs, so nothing depends on this but the NOW drives' free space: the parked cache is silo's
 leftover, still on those drives (426 GB a drive, about 5% of one) when this was measured. C-7

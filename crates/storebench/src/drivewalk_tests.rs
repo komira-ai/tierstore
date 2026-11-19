@@ -26,7 +26,7 @@ fn walk_all(root: &Path, share: Share) -> (String, String, Walked) {
             listing: &mut listing,
             meta: Some(&mut meta),
         };
-        walk(root, "kbf-cas", share, &mut sinks).unwrap()
+        walk(root, "cas-store", share, &mut sinks).unwrap()
     };
     (
         String::from_utf8(listing).unwrap(),
@@ -40,9 +40,9 @@ fn walk_all(root: &Path, share: Share) -> (String, String, Walked) {
 #[test]
 fn one_walk_lists_every_object_once() {
     let dir = TestDir::under(std::env::temp_dir(), "storebench-walk-one");
-    let root = dir.path().join("kbf-cas");
+    let root = dir.path().join("cas-store");
     put(&root, "cas/b/1-2/aa/pack", 10);
-    put(&root, "kbf/2932/cas/0001/0002", 20);
+    put(&root, "front/2932/cas/0001/0002", 20);
     put(&root, "top", 30);
     let (listing, meta, walked) = walk_all(&root, Share { index: 0, of: 1 });
     let keys: Vec<&str> = listing
@@ -52,17 +52,17 @@ fn one_walk_lists_every_object_once() {
     let keys: BTreeSet<&str> = keys.into_iter().collect();
     assert_eq!(
         keys,
-        BTreeSet::from(["cas/b/1-2/aa/pack", "kbf/2932/cas/0001/0002", "top"])
+        BTreeSet::from(["cas/b/1-2/aa/pack", "front/2932/cas/0001/0002", "top"])
     );
     assert!(
-        listing.contains("kbf-cas\ttop\t30\t1790000000123\tabc-2\n"),
+        listing.contains("cas-store\ttop\t30\t1790000000123\tabc-2\n"),
         "{listing}"
     );
-    assert!(meta.contains("kbf-cas\ttop\t8\t4\t1\t0\t1\n"), "{meta}");
+    assert!(meta.contains("cas-store\ttop\t8\t4\t1\t0\t1\n"), "{meta}");
     assert_eq!((walked.objects, walked.bytes), (3, 60));
     assert_eq!((walked.deleted, walked.versioned), (0, 0));
     assert!(walked.errors.is_empty());
-    // root, cas, cas/b, cas/b/1-2, cas/b/1-2/aa, kbf, kbf/2932, kbf/2932/cas, kbf/2932/cas/0001
+    // root, cas, cas/b, cas/b/1-2, cas/b/1-2/aa, front, front/2932, front/2932/cas, front/2932/cas/0001
     assert_eq!(walked.dirs, 9);
 }
 
@@ -71,7 +71,7 @@ fn one_walk_lists_every_object_once() {
 #[test]
 fn shares_list_each_object_exactly_once() {
     let dir = TestDir::under(std::env::temp_dir(), "storebench-walk-shares");
-    let root = dir.path().join("kbf-cas");
+    let root = dir.path().join("cas-store");
     let mut all = BTreeSet::new();
     // A wide directory of builds (split), each with a narrow run directory (shared below it).
     for b in 0..40 {
@@ -81,7 +81,7 @@ fn shares_list_each_object_exactly_once() {
     }
     // A narrow tree: objects whose parents have few subdirectories stay shared to the object.
     for s in 0..5 {
-        let rel = format!("kbf/2932/cas/0001/{s:04}");
+        let rel = format!("front/2932/cas/0001/{s:04}");
         put(&root, &rel, 1);
         all.insert(rel);
     }
@@ -119,7 +119,7 @@ fn deleted_versioned_and_unreadable_objects_are_counted() {
     std::os::unix::fs::symlink(root.join("live"), root.join("link")).unwrap();
     let (listing, meta, walked) = walk_all(&root, Share { index: 0, of: 1 });
     assert_eq!(listing.lines().count(), 2, "{listing}");
-    assert!(meta.contains("kbf-cas\ttwo\t8\t4\t1\t1\t2\n"), "{meta}");
+    assert!(meta.contains("cas-store\ttwo\t8\t4\t1\t1\t2\n"), "{meta}");
     assert_eq!((walked.objects, walked.bytes), (2, 12));
     assert_eq!((walked.deleted, walked.versioned), (1, 1));
     let names: Vec<&str> = walked.errors.iter().map(|(p, _)| p.as_str()).collect();
@@ -203,7 +203,7 @@ fn a_share_is_i_of_n() {
 #[test]
 fn the_verb_writes_its_files_and_summary() {
     let dir = TestDir::under(std::env::temp_dir(), "storebench-walk-verb");
-    let root = dir.path().join("kbf-cas");
+    let root = dir.path().join("cas-store");
     put(&root, "a/k", 4);
     std::fs::create_dir_all(root.join("bad")).unwrap();
     std::fs::write(root.join("bad/xl.meta"), b"no").unwrap();
@@ -227,11 +227,11 @@ fn the_verb_writes_its_files_and_summary() {
         "{text}"
     );
     let objects = crate::listing::read(&out).unwrap();
-    assert_eq!(objects[0].bucket, "kbf-cas");
+    assert_eq!(objects[0].bucket, "cas-store");
     assert_eq!(objects[0].key, "a/k");
     assert_eq!(
         std::fs::read_to_string(&meta_out).unwrap(),
-        "kbf-cas\ta/k\t8\t4\t1\t0\t1\n"
+        "cas-store\ta/k\t8\t4\t1\t0\t1\n"
     );
 
     let named = Args {
@@ -292,11 +292,11 @@ fn a_linked_bucket_directory_is_walked() {
     let dir = TestDir::under(std::env::temp_dir(), "storebench-walk-link");
     let real = dir.path().join("real");
     put(&real, "a/k", 3);
-    let link = dir.path().join("kbf-cas");
+    let link = dir.path().join("cas-store");
     std::os::unix::fs::symlink(&real, &link).unwrap();
     let (listing, _, walked) = walk_all(&link, Share { index: 0, of: 1 });
     assert_eq!(walked.objects, 1);
-    assert!(listing.starts_with("kbf-cas\ta/k\t3\t"), "{listing}");
+    assert!(listing.starts_with("cas-store\ta/k\t3\t"), "{listing}");
 }
 
 /// A damaged object is named only by the walk it belongs to: the other walks do not read it.
@@ -356,7 +356,7 @@ impl Write for Flaky {
 #[test]
 fn failing_flushes_and_a_failing_error_line_are_errors() {
     let dir = TestDir::under(std::env::temp_dir(), "storebench-walk-flush");
-    let root = dir.path().join("kbf-cas");
+    let root = dir.path().join("cas-store");
     put(&root, "k", 1);
     std::fs::create_dir_all(root.join("bad")).unwrap();
     std::fs::write(root.join("bad/xl.meta"), b"no").unwrap();

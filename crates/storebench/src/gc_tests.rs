@@ -21,7 +21,7 @@ fn arrival(task_output: bool, dead: bool) -> Arrival {
 
 fn object(key: &str, size: u64) -> Object {
     Object {
-        bucket: "kbf-cas".to_owned(),
+        bucket: "cas-store".to_owned(),
         key: key.to_owned(),
         size,
         modified_ms: T0,
@@ -89,7 +89,7 @@ fn arrivals_leave_out_empty_objects_and_mark_task_outputs_and_dead_keys() {
     ];
     let mut dead = HashSet::new();
     dead.insert((
-        "kbf-cas".to_owned(),
+        "cas-store".to_owned(),
         "cas/d/n/b/0000000000000001".to_owned(),
     ));
     dead.insert(("other".to_owned(), "cas/b/1-2/x/pack".to_owned()));

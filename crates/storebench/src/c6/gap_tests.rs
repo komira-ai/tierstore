@@ -132,15 +132,15 @@ fn extrapolation_scales_by_drives_over_files_given() {
 #[test]
 fn the_gap_sets_the_modelled_cost_against_the_measured_drives() {
     let listing = vec![
-        object("kbf-cas", 8000),
-        object("kbf-cas", 80 * MIB),
-        object("kbf-cas", 0),
+        object("cas-store", 8000),
+        object("cas-store", 80 * MIB),
+        object("cas-store", 0),
         object("other-b", MIB),
     ];
     let one = report(
         vec![
-            entry("kbf-cas", 10, 1000),
-            entry("kbf-cas/ab", 5, 900),
+            entry("cas-store", 10, 1000),
+            entry("cas-store/ab", 5, 900),
             entry(".minio.sys", 3, 200),
             entry(".minio.sys/tmp", 1, 50),
         ],
@@ -148,7 +148,7 @@ fn the_gap_sets_the_modelled_cost_against_the_measured_drives() {
         (1000, 400, 600),
     );
     let two = report(
-        vec![entry("kbf-cas", 20, 3000), entry(".minio.sys", 3, 400)],
+        vec![entry("cas-store", 20, 3000), entry(".minio.sys", 3, 400)],
         4000,
         (1000, 500, 500),
     );
@@ -166,7 +166,7 @@ fn the_gap_sets_the_modelled_cost_against_the_measured_drives() {
     assert_eq!((gap.drives, gap.data_shards, gap.parity_shards), (12, 8, 4));
     assert_eq!(gap.du_files, 2);
     let names: Vec<&str> = gap.buckets.iter().map(|b| b.bucket.as_str()).collect();
-    assert_eq!(names, ["kbf-cas", "other-b"]);
+    assert_eq!(names, ["cas-store", "other-b"]);
     assert_eq!(gap.buckets[0].objects, 3);
     assert_eq!(gap.buckets[0].logical, 8000 + 80 * MIB);
     assert_eq!(gap.buckets[0].expected.files, 48);
@@ -199,7 +199,7 @@ fn the_gap_sets_the_modelled_cost_against_the_measured_drives() {
 /// Without du reports the expected cost is still modelled and nothing is measured.
 #[test]
 fn without_du_reports_nothing_is_measured() {
-    let gap = analyze(&[object("kbf-cas", 8000)], &[], model());
+    let gap = analyze(&[object("cas-store", 8000)], &[], model());
     assert_eq!(gap.du_files, 0);
     assert!(gap.measured.is_none());
     assert_eq!(gap.buckets[0].measured_allocated, None);
@@ -292,12 +292,12 @@ fn erasure_fact_files_are_read_and_bad_lines_refused() {
     let good = dir.path().join("m.tsv");
     std::fs::write(
         &good,
-        "kbf-cas\tk\t7\t5\t1\t0\t1\nkbf-cas\tj\t8\t4\t1\t1\t1\n",
+        "cas-store\tk\t7\t5\t1\t0\t1\ncas-store\tj\t8\t4\t1\t1\t1\n",
     )
     .unwrap();
     let facts = read_erasure(std::slice::from_ref(&good)).unwrap();
     assert_eq!(
-        facts.get(&("kbf-cas".into(), "j".into())),
+        facts.get(&("cas-store".into(), "j".into())),
         Some(&Erasure {
             data: 8,
             parity: 4,
