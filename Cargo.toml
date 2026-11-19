@@ -170,6 +170,11 @@ tierstore-entry = { path = "crates/tierstore-entry" }
 tierstore-harness = { path = "crates/tierstore-harness" }
 # The server side of the mount protocol (T5); the mount client's tests run against it.
 tierstore-mount-server = { path = "crates/tierstore-mount-server" }
+# The mount's side of the mount protocol (T6): the packs a tree mount reads.
+tierstore-mount-client = { path = "crates/tierstore-mount-client" }
+# A tree read by path from its mapped L2 list and the packs of the mount protocol: the read
+# path of the tree mount (T-F8), under the daemon's `TreeFs`.
+tierstore-tree = { path = "crates/tierstore-tree" }
 # The previous release: `v0.3.17`, the tag of the commit below, taken from the public repository
 # at that commit alone (the `rev` is what pins it; a tag can be moved). Used only by the
 # dev-dependencies of `crates/compat`. When a release is made, move both to the new release's

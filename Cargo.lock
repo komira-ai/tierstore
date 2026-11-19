@@ -3176,13 +3176,16 @@ dependencies = [
  "tierstore-fetch-api",
  "tierstore-format",
  "tierstore-hashpool",
+ "tierstore-list",
  "tierstore-testkit",
+ "tierstore-tree",
  "tierstore-trees-api",
  "tokio",
  "tokio-rustls",
  "toml",
  "tonic",
  "tracing",
+ "tsfuse",
  "x509-parser",
 ]
 
@@ -3486,6 +3489,28 @@ version = "0.1.0"
 dependencies = [
  "libc",
  "rustix",
+]
+
+[[package]]
+name = "tierstore-tree"
+version = "0.1.0"
+dependencies = [
+ "async-trait",
+ "futures",
+ "libc",
+ "rustix",
+ "sha2 0.11.0",
+ "thiserror",
+ "tierstore 0.3.0",
+ "tierstore-entry",
+ "tierstore-fetch-api",
+ "tierstore-list",
+ "tierstore-mount-client",
+ "tierstore-mount-server",
+ "tierstore-testkit",
+ "tierstore-tree",
+ "tokio",
+ "vm-memory",
 ]
 
 [[package]]

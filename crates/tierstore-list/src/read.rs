@@ -172,6 +172,16 @@ impl<B: AsRef<[u8]>> TreeListL2<B> {
         self.all()
     }
 
+    /// Where `section` is in the list, in bytes from its start: checked by the open to lie within
+    /// the list and to begin at a multiple of 8. A reader that maps the list reads records there
+    /// (an entry's at `start + index * ENTRY_LEN`, a name's at `start + name_offset` of the
+    /// names), and advises the kernel of the sections it reads most.
+    #[must_use]
+    pub fn section_range(&self, section: Section) -> Range<u64> {
+        let place = self.header.place(section);
+        place.start as u64..(place.start + place.len) as u64
+    }
+
     fn record(&self, node: NodeIndex) -> Option<Record> {
         let at = usize::try_from(node.0).ok()?.checked_mul(RECORD_LEN)?;
         let entries = self.section(Section::Entries);
