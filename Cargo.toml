@@ -163,8 +163,11 @@ tierstore-metrics = { path = "crates/tierstore-metrics" }
 tierstore-hashpool = { path = "crates/tierstore-hashpool" }
 # The journal and snapshot of a node-cache entry (section 8), shared by the entry stores.
 tierstore-journal = { path = "crates/tierstore-journal" }
-# The node cache's entry store on Linux (T1); the mount client's tests serve from it.
+# The node cache's entry stores: on Linux (T1) and in process (T-M1); the mount client's tests
+# serve from it.
 tierstore-entry = { path = "crates/tierstore-entry" }
+# The shared fakes and models of section 14 and the EntryStore conformance suite (tests only).
+tierstore-harness = { path = "crates/tierstore-harness" }
 # The server side of the mount protocol (T5); the mount client's tests run against it.
 tierstore-mount-server = { path = "crates/tierstore-mount-server" }
 # The previous release: `v0.3.17`, the tag of the commit below, taken from the public repository

@@ -56,3 +56,14 @@ that confirms it is conformance item 7 on the io_uring transport, on a node with
 - A new farm kernel reopens the question: a kernel that adds a ring-aware RESEND (walking
   `queue->fpq`, or re-sending to a newly registered entry) is a new pinned header, and this spike is
   read again against that kernel's source.
+
+## Read again on the build nodes' Ubuntu kernel (T-F0)
+
+This spike read upstream v7.0. T-F0 read the same paths in the build nodes' Ubuntu kernel
+(`7.0.0-42`, Linux 7.0.14 with Ubuntu's patches; `docs/design/tsfuse-kernel-findings.md`, K14).
+The answer stands: RESEND still walks only `/dev/fuse` devices, so a request held by a dead server's
+ring entry is not resent. Two details of points 2 and 3 differ there. When the dead server's ring is
+cancelled, Ubuntu frees the entries waiting for a request instead of keeping them, and ends a request
+caught mid-dispatch with `ECANCELED`, an error the caller sees. And a commit from another process is
+accepted if it knows the queue and the request's unique and the dead process's buffer addresses are
+valid in it: a takeover on io_uring would need the supervisor to own those buffers.

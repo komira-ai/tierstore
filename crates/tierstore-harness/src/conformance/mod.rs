@@ -67,6 +67,14 @@ pub trait EntryStoreFixture {
     /// What a restart in another boot does to `cell` of `pack` in `store` (a store this fixture
     /// made): its `bytes` (the cell's length) are on disk and the cell is `recheck`.
     fn restore_as_recheck(&self, store: &dyn EntryStore, pack: &PackId, cell: u32, bytes: &[u8]);
+
+    /// Whether the stores this fixture makes release a punched run inside a file. `false` for a
+    /// store on a volume that cannot (5.6 (b): the in-process store on macOS, where
+    /// `F_PUNCHHOLE` has no safe wrapper), which the punch case then holds to refusing the batch
+    /// with no effect; every other case is the same.
+    fn punches(&self) -> bool {
+        true
+    }
 }
 
 /// A case: runs against the fixture and panics when the contract is broken.

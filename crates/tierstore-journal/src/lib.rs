@@ -1,7 +1,8 @@
 //! The journal and snapshot of one node-cache entry (`docs/design/fetch-cache-serve.md`,
-//! revision 7, section 8; section 18 row T1b), to be shared by the Linux entry store and the
+//! revision 7, section 8; section 18 row T1b), shared by the Linux entry store and the
 //! in-process store of macOS (5.6 (e): "the journal, `recheck` and boot-id rules of section 8
-//! are shared code"). Neither calls it yet.
+//! are shared code"). The in-process store of `tierstore-entry` runs on it; the Linux store of
+//! that crate does not yet.
 //!
 //! An entry has three files besides its state page: the sparse data file, the append-only
 //! journal `<hash>.jnl` and the snapshot `<hash>.meta` (section 2). This crate owns the last two
@@ -25,11 +26,11 @@
 //!   [`CommitPolicy::interval_ms`] or once [`CommitPolicy::pending_bytes`] are pending.
 //!
 //! The file operations go through [`EntryFiles`], so the same journal runs on the directory of
-//! the Linux cache ([`DirFiles`]) and on [`fake::MemFs`], a file system in memory that keeps the
-//! durable and the volatile bytes of each file apart and can crash: a process crash (the page
-//! cache survives) or a power loss (each write not yet synced survives or not, as a test
-//! chooses). [`fake::FsEntry`] is a whole `Entry` over it, for the crash tests here and for those
-//! of the evictor (section 7).
+//! a cache on Linux or macOS ([`DirFiles`]) and on [`fake::MemFs`], a file system in memory that
+//! keeps the durable and the volatile bytes of each file apart and can crash: a process crash
+//! (the page cache survives) or a power loss (each write not yet synced survives or not, as a
+//! test chooses). [`fake::FsEntry`] is a whole `Entry` over it, for the crash tests here and for
+//! those of the evictor (section 7).
 //!
 //! Formats ([`format`]) are new in this crate and versioned for additive change only.
 
@@ -38,7 +39,7 @@
 mod boot;
 mod cells;
 mod committer;
-#[cfg(target_os = "linux")]
+#[cfg(any(target_os = "linux", target_os = "macos"))]
 mod dir;
 pub mod fake;
 mod files;
@@ -48,7 +49,7 @@ mod journal;
 pub use boot::{BootId, BootIdError, same_boot};
 pub use cells::{CellSet, CellStates, runs_of};
 pub use committer::{CommitPolicy, CommitRound, Committer};
-#[cfg(target_os = "linux")]
+#[cfg(any(target_os = "linux", target_os = "macos"))]
 pub use dir::DirFiles;
 pub use files::{EntryFiles, FileKind};
 pub use journal::{DiscardReason, EntryJournal, FOLD_EVERY, Recovery, Trust};

@@ -3236,12 +3236,15 @@ name = "tierstore-entry"
 version = "0.1.0"
 dependencies = [
  "crc32c",
+ "futures",
  "libc",
  "rustix",
  "sha2 0.11.0",
  "thiserror",
  "tierstore-fetch-api",
  "tierstore-format",
+ "tierstore-harness",
+ "tierstore-journal",
  "tierstore-testkit",
  "vm-memory",
 ]

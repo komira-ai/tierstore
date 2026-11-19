@@ -1,7 +1,7 @@
 //! The `EntryStore` conformance suite on the in-memory store of `tierstore-fetch-api`
 //! (`MemEntryStore` with `MemCounters`): every case is its own test, `run_all` covers every case,
-//! the checks panic with the messages the cases rely on, and a store that breaks one contract is
-//! caught by the case for that contract.
+//! the checks panic with the messages the cases rely on, a store that breaks one contract is
+//! caught by the case for that contract, and a store that cannot punch is held to the refusal.
 #![allow(
     clippy::unwrap_used,
     clippy::expect_used,
@@ -12,11 +12,13 @@ use std::any::Any;
 use std::panic::{AssertUnwindSafe, catch_unwind};
 use std::sync::{Arc, Mutex};
 
+use tierstore_fetch_api::cell::CellState;
 use tierstore_fetch_api::entry::{
-    Entry, EntryError, EntryInfo, EntrySpec, EntryStore, HolderCounters,
+    CellCounts, ClaimedCell, CommitReport, Entry, EntryError, EntryFds, EntryInfo, EntrySpec,
+    EntryStore, EvictStep, HolderCounters, PunchReport, Settle, StateView,
 };
 use tierstore_fetch_api::fake::{MemCounters, MemEntryStore};
-use tierstore_fetch_api::ids::{HolderId, PackId};
+use tierstore_fetch_api::ids::{CellRun, HolderId, PackId};
 use tierstore_fetch_api::page::CounterRegion;
 use tierstore_harness::conformance::check::{ensure, ensure_eq, expect_err, expect_ok};
 use tierstore_harness::conformance::{
@@ -378,5 +380,290 @@ fn a_store_that_lists_packs_out_of_order_is_caught() {
     assert!(
         message.is_some_and(|m| m.starts_with("conformance: packs in pack order: got ")),
         "the listing case names the clause"
+    );
+}
+
+/// An entry of the in-memory store on a volume that cannot punch inside a file (5.6 (b)): a
+/// non-empty punch is refused with an I/O error of the kind given (`Unsupported` for a store that
+/// keeps the contract) before any effect; every other call is the in-memory entry's.
+struct NoPunch(Arc<dyn Entry>, std::io::ErrorKind);
+
+impl Entry for NoPunch {
+    fn pack(&self) -> &PackId {
+        self.0.pack()
+    }
+
+    fn size(&self) -> u64 {
+        self.0.size()
+    }
+
+    fn state(&self) -> &dyn StateView {
+        self.0.state()
+    }
+
+    fn claim(&self, run: CellRun) -> Vec<ClaimedCell> {
+        self.0.claim(run)
+    }
+
+    fn abandon(&self, cell: ClaimedCell) {
+        self.0.abandon(cell);
+    }
+
+    fn publish(&self, cell: ClaimedCell, bytes: &[u8]) -> Result<(), EntryError> {
+        self.0.publish(cell, bytes)
+    }
+
+    fn mark_bad(&self, cell: ClaimedCell) {
+        self.0.mark_bad(cell);
+    }
+
+    fn evict_cell_cas(&self, cell: u32, step: EvictStep) -> bool {
+        self.0.evict_cell_cas(cell, step)
+    }
+
+    /// The cells are checked first, as a store that punches checks them; then a non-empty batch
+    /// is refused.
+    fn punch(&self, runs: &[CellRun]) -> Result<PunchReport, EntryError> {
+        let pack = self.0.pack().clone();
+        for cell in runs.iter().flat_map(|r| r.cells()) {
+            match self.0.state().load(cell) {
+                None => {
+                    return Err(EntryError::CellOutOfRange {
+                        pack,
+                        cell,
+                        cells: self.0.state().cell_count(),
+                    });
+                }
+                Some(b) if b.state() != Some(CellState::Evicting) => {
+                    return Err(EntryError::NotEvicting { pack, cell });
+                }
+                Some(_) => {}
+            }
+        }
+        if runs.iter().all(|r| r.count == 0) {
+            return Ok(PunchReport::default());
+        }
+        Err(EntryError::Io {
+            pack,
+            op: "punch",
+            source: std::io::Error::from(self.1),
+        })
+    }
+
+    fn settle(&self, cell: u32, how: Settle) -> bool {
+        self.0.settle(cell, how)
+    }
+
+    fn group_readers(&self, group: u32) -> u64 {
+        self.0.group_readers(group)
+    }
+
+    fn counts(&self) -> CellCounts {
+        self.0.counts()
+    }
+
+    fn last_use(&self) -> u64 {
+        self.0.last_use()
+    }
+
+    fn touch(&self, now_ms: u64, group: u32) {
+        self.0.touch(now_ms, group);
+    }
+
+    fn touch_epoch(&self, group: u32) -> Option<u32> {
+        self.0.touch_epoch(group)
+    }
+
+    fn read_cell(&self, cell: u32) -> Result<Vec<u8>, EntryError> {
+        self.0.read_cell(cell)
+    }
+
+    fn fds(&self) -> Option<EntryFds<'_>> {
+        self.0.fds()
+    }
+
+    fn hold(&self, holder: HolderId) {
+        self.0.hold(holder);
+    }
+
+    fn release(&self, holder: HolderId) -> bool {
+        self.0.release(holder)
+    }
+
+    fn holders(&self) -> u32 {
+        self.0.holders()
+    }
+
+    fn commit_batch(&self) -> Result<CommitReport, EntryError> {
+        self.0.commit_batch()
+    }
+}
+
+/// The in-memory store whose entries cannot punch ([`NoPunch`]), refusing with the kind given.
+struct NoPunchStore(Arc<MemEntryStore>, std::io::ErrorKind);
+
+impl EntryStore for NoPunchStore {
+    fn open(&self, spec: &EntrySpec) -> Result<Arc<dyn Entry>, EntryError> {
+        Ok(Arc::new(NoPunch(self.0.open(spec)?, self.1)))
+    }
+
+    fn get(&self, pack: &PackId) -> Option<Arc<dyn Entry>> {
+        self.0
+            .get(pack)
+            .map(|e| Arc::new(NoPunch(e, self.1)) as Arc<dyn Entry>)
+    }
+
+    fn remove(&self, pack: &PackId) -> Result<bool, EntryError> {
+        self.0.remove(pack)
+    }
+
+    fn packs(&self) -> Vec<PackId> {
+        self.0.packs()
+    }
+
+    fn entries(&self) -> Vec<EntryInfo> {
+        self.0.entries()
+    }
+
+    fn register_holder(
+        &self,
+        holder: HolderId,
+        counters: Arc<dyn HolderCounters>,
+    ) -> Result<(), EntryError> {
+        self.0.register_holder(holder, counters)
+    }
+
+    fn attach(
+        &self,
+        pack: &PackId,
+        holder: HolderId,
+        region: CounterRegion,
+    ) -> Result<(), EntryError> {
+        self.0.attach(pack, holder, region)
+    }
+
+    fn drop_holder(&self, holder: HolderId) -> u32 {
+        self.0.drop_holder(holder)
+    }
+}
+
+/// Stores that cannot punch, under a fixture that says they can (`says_punches`) or that they
+/// cannot.
+struct NoPunchFixture {
+    says_punches: bool,
+    refusal: std::io::ErrorKind,
+    stores: Mutex<Vec<Arc<NoPunchStore>>>,
+}
+
+impl NoPunchFixture {
+    fn new(says_punches: bool) -> Self {
+        Self::refusing(says_punches, std::io::ErrorKind::Unsupported)
+    }
+
+    fn refusing(says_punches: bool, refusal: std::io::ErrorKind) -> Self {
+        Self {
+            says_punches,
+            refusal,
+            stores: Mutex::new(Vec::new()),
+        }
+    }
+}
+
+impl EntryStoreFixture for NoPunchFixture {
+    fn store(&self) -> Arc<dyn EntryStore> {
+        let s = Arc::new(NoPunchStore(Arc::new(MemEntryStore::new()), self.refusal));
+        self.stores.lock().unwrap().push(s.clone());
+        s
+    }
+
+    fn holder(&self, len: u64) -> (Arc<dyn HolderCounters>, Arc<dyn MountCounters>) {
+        MemFixture::default().holder(len)
+    }
+
+    fn restore_as_recheck(&self, store: &dyn EntryStore, pack: &PackId, cell: u32, bytes: &[u8]) {
+        let stores = self.stores.lock().unwrap();
+        let s = stores
+            .iter()
+            .find(|s| std::ptr::addr_eq(Arc::as_ptr(s), store))
+            .expect("a store of this fixture");
+        s.0.mem_entry(pack)
+            .expect("an open pack")
+            .restore_as_recheck(cell, bytes)
+            .unwrap();
+    }
+
+    fn punches(&self) -> bool {
+        self.says_punches
+    }
+}
+
+/// A store that cannot punch and whose fixture says so passes every case: the punch case holds
+/// it to the refusal (cells left evicting with their bytes, then aborted to present).
+#[test]
+fn a_store_that_cannot_punch_and_says_so_passes_every_case() {
+    run_all(&NoPunchFixture::new(false));
+}
+
+/// A store that refuses to punch while its fixture says it punches is caught by the punch case.
+#[test]
+fn a_store_that_refuses_a_punch_it_claims_to_make_is_caught() {
+    let message = panic_of(|| {
+        entry_store::punch_releases_runs_with_one_journal_sync_per_call(&NoPunchFixture::new(true));
+    });
+    assert!(
+        message.is_some_and(|m| m.starts_with("conformance: punch of two runs: unexpected error")),
+        "the punch case names the clause"
+    );
+}
+
+/// A store that punches while its fixture says it cannot is caught by the punch case: the
+/// refusal is the contract of such a store.
+#[test]
+fn a_store_that_punches_where_it_says_it_cannot_is_caught() {
+    struct SaysNoPunch(MemFixture);
+
+    impl EntryStoreFixture for SaysNoPunch {
+        fn store(&self) -> Arc<dyn EntryStore> {
+            self.0.store()
+        }
+
+        fn holder(&self, len: u64) -> (Arc<dyn HolderCounters>, Arc<dyn MountCounters>) {
+            self.0.holder(len)
+        }
+
+        fn restore_as_recheck(&self, s: &dyn EntryStore, p: &PackId, c: u32, b: &[u8]) {
+            self.0.restore_as_recheck(s, p, c, b);
+        }
+
+        fn punches(&self) -> bool {
+            false
+        }
+    }
+
+    assert_eq!(
+        panic_of(|| {
+            entry_store::punch_releases_runs_with_one_journal_sync_per_call(&SaysNoPunch(
+                MemFixture::default(),
+            ));
+        })
+        .as_deref(),
+        Some("conformance: a punch on a store that cannot punch: expected an error, got a success")
+    );
+}
+
+/// A store that cannot punch but refuses with another error than `Unsupported` is caught: the
+/// evictor falls back to whole entries only on that refusal.
+#[test]
+fn a_store_that_refuses_a_punch_with_another_error_is_caught() {
+    let message = panic_of(|| {
+        entry_store::punch_releases_runs_with_one_journal_sync_per_call(&NoPunchFixture::refusing(
+            false,
+            std::io::ErrorKind::PermissionDenied,
+        ));
+    });
+    assert!(
+        message.is_some_and(|m| m
+            .starts_with("conformance: a punch on a store that cannot punch: wrong error: Io {")),
+        "the punch case names the clause"
     );
 }

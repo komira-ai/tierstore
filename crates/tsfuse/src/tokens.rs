@@ -114,7 +114,8 @@ pub enum Interrupted {
     Cancelled,
     /// The request is not registered, or is already answered or being answered (the INTERRUPT
     /// arrived first, or the reply already went):
-    /// `EAGAIN` was written on the device that read the INTERRUPT.
+    /// `EAGAIN` was written on the device given for the INTERRUPT (the session gives every device
+    /// in turn, since only the one holding the request takes it).
     Unknown,
     /// The device refused the `EINTR` or `EAGAIN` write.
     DeviceError(std::io::Error),
@@ -166,8 +167,9 @@ impl Tokens {
         }
     }
 
-    /// Handles `FUSE_INTERRUPT` of `target`, read as request `interrupt_unique` from
-    /// `interrupt_device` (which may be another clone than the target's).
+    /// Handles `FUSE_INTERRUPT` of `target`, read as request `interrupt_unique`; an `EAGAIN` for
+    /// a target not registered is written to `interrupt_device`, which must reach the clone
+    /// holding the target (the kernel refuses it on any other with `ENOENT`).
     pub fn interrupt(
         &self,
         target: u64,

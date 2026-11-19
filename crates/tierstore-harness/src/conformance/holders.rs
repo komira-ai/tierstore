@@ -14,7 +14,7 @@ use tierstore_fetch_api::ids::HolderId;
 use tierstore_fetch_api::page::CounterRegion;
 
 use super::check::{ensure, ensure_eq, expect_err, expect_ok};
-use super::support::{MIB, open, pack, publish, run, same, state_of};
+use super::support::{MIB, open, pack, publish, punch_as_able, run, same, state_of};
 use super::{EntryStoreFixture, MountCounters};
 
 /// The cells of the pack `p` the cases attach to: 40 cells, 3 groups.
@@ -341,7 +341,7 @@ pub fn drop_holder_forgets_counters_and_releases_holds_so_eviction_proceeds(
         "the evictor begins again",
     );
     ensure_eq(rig.p.group_readers(0), 0, "no reader is left");
-    expect_ok(rig.p.punch(&[run(0, 1)]), "punch");
+    punch_as_able(f, &*rig.p, &[run(0, 1)], "punch");
     ensure(
         rig.p.evict_cell_cas(0, EvictStep::Finish),
         "eviction proceeds",

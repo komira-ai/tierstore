@@ -5,6 +5,8 @@
 //! test reads a clock or waits for time (the clock of `touch` is a number the test passes), and
 //! the one concurrent test asserts an outcome (each cell won once), never an order or a duration.
 
+#![cfg(target_os = "linux")]
+
 use std::fs::File;
 use std::os::fd::{AsFd, OwnedFd};
 use std::sync::Arc;
@@ -19,6 +21,7 @@ use tierstore_testkit::dir::TestDir;
 use crate::map::{Mapping, SEQ, atomic, map_shared};
 use crate::{FileEntry, FileEntryStore};
 
+mod conformance_tests;
 mod counters_tests;
 mod entry_tests;
 mod lifeline_tests;
