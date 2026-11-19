@@ -71,6 +71,8 @@ pub struct PhaseRecord {
     pub storm_reads: u64,
     /// Cold reads that failed, and storm threads that could not start (open, pin).
     pub storm_errors: u64,
+    /// The same by step and error (`open: Input/output error (os error 5)`).
+    pub storm_failures: BTreeMap<String, u64>,
     /// The probes.
     pub probes: Vec<ProbeRecord>,
     /// Ring entries holding a request not answered yet (`uring_entries_parked`), sampled.
@@ -184,6 +186,9 @@ const COLUMNS: &[(&str, Figure)] = &[
     ("stat errors", |_, _, p| Some(p.errors as f64)),
     ("storm reads/s", |_, phase, _| {
         per_s(phase.storm_reads, phase.window_ns)
+    }),
+    ("storm errors", |_, phase, _| {
+        Some(phase.storm_errors as f64)
     }),
     ("held mean", |_, phase, _| Some(phase.held.mean)),
     ("held max", |_, phase, _| Some(phase.held.max as f64)),

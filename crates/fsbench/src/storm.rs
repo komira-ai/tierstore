@@ -24,7 +24,8 @@
 //! held (`uring_entries_parked`), the READs parked in the file system and the requests the
 //! kernel holds for the connection are sampled. The storm threads stop when the probes end.
 //! Each run's record ([`crate::stormrec::StormRecord`]) is appended to the results file as a
-//! line of JSON. No figure is judged here: the measurement document reads them.
+//! line of JSON. No figure is judged here: the measurement document reads them. The process's
+//! limit of open files is raised to its hard limit first ([`raise_open_files`]).
 
 use std::collections::BTreeMap;
 use std::fs::File;
@@ -274,16 +275,31 @@ struct StormShared {
     stop: AtomicBool,
     started: Gate,
     reads: AtomicU64,
-    errors: AtomicU64,
+    failures: Mutex<BTreeMap<String, u64>>,
+}
+
+impl StormShared {
+    /// Counts a failure of step `what` (`pin`, `open`, `read`) with `error`.
+    fn fail(&self, what: &str, error: &std::io::Error) {
+        *self
+            .failures
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner)
+            .entry(format!("{what}: {error}"))
+            .or_insert(0) += 1;
+    }
 }
 
 /// A storm thread: pinned to `cpu`, reads `path` at offsets it has not read until told to stop;
 /// arrives at the gate after its first read (or at once if it cannot start).
 fn storm_thread(path: &Path, cpu: usize, read: ColdRead, shared: &StormShared) {
-    let file = match pin(cpu).and_then(|()| File::open(path)) {
+    let file = match pin(cpu)
+        .map_err(|e| ("pin", e))
+        .and_then(|()| File::open(path).map_err(|e| ("open", e)))
+    {
         Ok(file) => file,
-        Err(_) => {
-            shared.errors.fetch_add(1, Ordering::Relaxed);
+        Err((what, e)) => {
+            shared.fail(what, &e);
             shared.started.arrive();
             return;
         }
@@ -299,7 +315,10 @@ fn storm_thread(path: &Path, cpu: usize, read: ColdRead, shared: &StormShared) {
     while !shared.stop.load(Ordering::Relaxed) {
         match file.read_at(&mut buf, offset) {
             Ok(_) => shared.reads.fetch_add(1, Ordering::Relaxed),
-            Err(_) => shared.errors.fetch_add(1, Ordering::Relaxed),
+            Err(e) => {
+                shared.fail("read", &e);
+                0
+            }
         };
         offset = offset.wrapping_add(STRIDE);
         if first {
@@ -405,14 +424,20 @@ fn run_phase(plan: &Plan, spec: &PhaseSpec, watch: &Watch<'_>, clock: Clock) -> 
             window_ns,
             storm_reads,
             storm_errors: 0,
+            storm_failures: BTreeMap::new(),
             probes,
             held: Sampled::of(&held),
             parked: Sampled::of(&parked),
             waiting: (!waiting.is_empty()).then(|| Sampled::of(&waiting)),
         }
     });
+    let failures = shared
+        .failures
+        .into_inner()
+        .unwrap_or_else(std::sync::PoisonError::into_inner);
     PhaseRecord {
-        storm_errors: shared.errors.load(Ordering::Relaxed),
+        storm_errors: failures.values().sum(),
+        storm_failures: failures,
         ..record
     }
 }
@@ -494,6 +519,25 @@ fn one_run(plan: &Plan, run: u32) -> Result<StormRecord, Error> {
     })
 }
 
+/// Raises this process's limit of open files to its hard limit: a storm on every CPU opens a
+/// file per thread (704 on 88 CPUs at the default depth) beside the session's descriptors
+/// (three per io_uring queue), past the usual soft limit of 1024. Returns the soft limit after.
+///
+/// # Errors
+/// The kernel refuses the new limit.
+pub fn raise_open_files() -> std::io::Result<Option<u64>> {
+    use rustix::process::{Resource, Rlimit, getrlimit, setrlimit};
+    let limit = getrlimit(Resource::Nofile);
+    setrlimit(
+        Resource::Nofile,
+        Rlimit {
+            current: limit.maximum,
+            maximum: limit.maximum,
+        },
+    )?;
+    Ok(getrlimit(Resource::Nofile).current)
+}
+
 /// The runs of `plan`: each run's record is appended to `out` as a line of JSON, and a line
 /// about it written to `log`. Returns the records.
 ///
@@ -504,6 +548,7 @@ pub fn run(
     mut out: impl Write,
     log: &mut dyn Write,
 ) -> Result<Vec<StormRecord>, Error> {
+    raise_open_files().map_err(Error::of(PROCESS, "raise the limit of open files"))?;
     let mut records = Vec::new();
     for n in 0..plan.runs {
         let record = one_run(plan, n)?;

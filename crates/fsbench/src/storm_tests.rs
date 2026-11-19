@@ -10,7 +10,8 @@ use std::time::Duration;
 use tierstore_testkit::dir::TestDir;
 
 use super::{
-    Gate, Plan, cpu_list, online_cpus, other_cpu, phases, pin, storm_per_cpu, usable_cpus,
+    Gate, Plan, cpu_list, online_cpus, other_cpu, phases, pin, raise_open_files, storm_per_cpu,
+    usable_cpus,
 };
 use crate::host::Host;
 use crate::stormfs::ColdRead;
@@ -201,4 +202,12 @@ fn a_gate_opens_when_every_thread_has_arrived() {
         t.join().unwrap();
     }
     assert_eq!(*gate.count.lock().unwrap(), 3);
+}
+
+/// The limit of open files is raised to the hard limit, and stays there when asked again.
+#[test]
+fn the_limit_of_open_files_is_raised_to_the_hard_limit() {
+    let hard = rustix::process::getrlimit(rustix::process::Resource::Nofile).maximum;
+    assert_eq!(raise_open_files().unwrap(), hard);
+    assert_eq!(raise_open_files().unwrap(), hard);
 }
