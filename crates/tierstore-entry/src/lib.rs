@@ -1,9 +1,14 @@
-//! The node cache's entry store on Linux: task T1 of `docs/design/fetch-cache-serve.md`
-//! (revision 7), behind the [`Entry`](tierstore_fetch_api::entry::Entry) and
-//! [`EntryStore`](tierstore_fetch_api::entry::EntryStore) traits that `tierstore-fetch-api`
-//! froze.
+//! The node cache's entry stores, behind the [`Entry`](tierstore_fetch_api::entry::Entry) and
+//! [`EntryStore`](tierstore_fetch_api::entry::EntryStore) traits that `tierstore-fetch-api` froze
+//! (`docs/design/fetch-cache-serve.md`, revision 7): the Linux store of task T1 and the
+//! in-process store of task T-M1 ([`inproc`]).
 //!
-//! What is here, by module:
+//! **The in-process store** ([`inproc`], Linux and macOS): the store of macOS, where the NFS
+//! server runs in the tierstore process (5.6): cells as atomics on the heap, the entry's own
+//! reader counters, the journal, restart and `recheck` of `tierstore-journal`, `F_FULLFSYNC` on
+//! macOS, and whole-entry eviction where the volume cannot punch.
+//!
+//! **The Linux store**, by module:
 //! - [`FileEntryStore`]: one entry per pack under `<cache>/packs-v2/aa/bb/<hash>.pack`, each a
 //!   **sparse** data file (`ftruncate` to the pack size, never `fallocate`) held with
 //!   `flock(LOCK_EX)` by the process that opened it (section 2, 7). A second process (or a second
@@ -30,24 +35,46 @@
 //! Every method does blocking I/O: call it from a dedicated or blocking thread, never from an
 //! async worker.
 //!
-//! The crate is Linux only (memfd seals, `fallocate` punch); on another system it is empty.
+//! The Linux store is Linux only (memfd seals, `fallocate` punch); the in-process store builds on
+//! Linux and macOS. On another system the crate is empty.
 
-#![cfg(target_os = "linux")]
 #![forbid(unsafe_code)]
 #![deny(missing_docs)]
 
+#[cfg(target_os = "linux")]
 mod counters;
+#[cfg(target_os = "linux")]
 mod entry;
+#[cfg(any(target_os = "linux", target_os = "macos"))]
+pub mod inproc;
+#[cfg(target_os = "linux")]
 mod journal;
+#[cfg(any(target_os = "linux", target_os = "macos"))]
+mod layout;
+#[cfg(target_os = "linux")]
 mod lifeline;
+#[cfg(target_os = "linux")]
 mod map;
+#[cfg(target_os = "linux")]
 mod state;
+#[cfg(target_os = "linux")]
 mod store;
 
+#[cfg(target_os = "linux")]
 pub use counters::{CountersError, MemfdCounters};
+#[cfg(target_os = "linux")]
 pub use entry::FileEntry;
+#[cfg(any(target_os = "linux", target_os = "macos"))]
+pub use layout::{PACKS_DIR, StoreError};
+#[cfg(target_os = "linux")]
 pub use lifeline::{Lifeline, Lifelines};
-pub use store::{FileEntryStore, PACKS_DIR, StoreError};
+#[cfg(target_os = "linux")]
+pub use store::FileEntryStore;
 
+#[cfg(test)]
+#[macro_use]
+mod conformance_cases;
+#[cfg(test)]
+mod inproc_tests;
 #[cfg(test)]
 mod tests;

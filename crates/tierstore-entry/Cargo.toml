@@ -6,27 +6,40 @@ rust-version.workspace = true
 license.workspace = true
 repository.workspace = true
 publish.workspace = true
-description = "The node cache's entry store on Linux (docs/design/fetch-cache-serve.md, T1): a sparse data file per pack under flock, the sealed state memfd mounts map read-only, the holders' counter memfds the server maps read-only and remaps as they grow, lifelines, claim CAS and hold refcounts, behind the Entry and EntryStore traits of tierstore-fetch-api."
+description = "The node cache's entry stores (docs/design/fetch-cache-serve.md): on Linux (T1) a sparse data file per pack under flock, the sealed state memfd mounts map read-only, the holders' counter memfds the server maps read-only and remaps as they grow, lifelines, claim CAS and hold refcounts; in process on Linux and macOS (T-M1) the same cells as heap atomics with the journal, restart and recheck of tierstore-journal and the reader protocol of the NFS front; both behind the Entry and EntryStore traits of tierstore-fetch-api."
 
-# Linux only: the crate is empty elsewhere (macOS has the in-process store of T-M1).
+# Both stores (the in-process one builds on Linux and macOS; on another system the crate is empty).
+[target.'cfg(any(target_os = "linux", target_os = "macos"))'.dependencies]
+# flock of the data file; on Linux also memfd_create, seals, ftruncate, fallocate (punch), fstat
+# and poll; all safe calls.
+rustix = { workspace = true, features = ["fs"] }
+# The data file's name: the sha256 of the pack id.
+sha2.workspace = true
+thiserror.workspace = true
+tierstore-fetch-api.workspace = true
+# The journal, snapshot, restart, boot id and recheck of the in-process store, and its files
+# (`DirFiles`: `F_FULLFSYNC` on macOS).
+tierstore-journal.workspace = true
+
+# The Linux store.
 [target.'cfg(target_os = "linux")'.dependencies]
 # The record checksum of the journal.
 crc32c.workspace = true
 # The PROT_* and MAP_* constants of the mappings (no libc call is made).
 libc.workspace = true
-# memfd_create, seals, ftruncate, fallocate (punch), flock, fstat and poll, all safe calls.
+# The lifeline's poll.
 rustix = { workspace = true, features = ["event", "fs"] }
-# The data file's name: the sha256 of the pack id.
-sha2.workspace = true
-thiserror.workspace = true
-tierstore-fetch-api.workspace = true
 # Shared mappings of the state memfd and of the holders' counter memfds, with atomic references
 # into them, through a safe interface (the crate forbids `unsafe`).
 vm-memory = { workspace = true, features = ["backend-mmap"] }
 
-[target.'cfg(target_os = "linux")'.dev-dependencies]
+[target.'cfg(any(target_os = "linux", target_os = "macos"))'.dev-dependencies]
+# The scripted engine of the read tests, run to completion with no runtime.
+futures.workspace = true
 # The data model's ids of an etag-rooted pack.
 tierstore-format.workspace = true
+# The EntryStore conformance suite, run on both stores.
+tierstore-harness.workspace = true
 tierstore-testkit.workspace = true
 
 [lints]

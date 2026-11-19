@@ -393,14 +393,8 @@ fn a_cell_evicted_before_the_commit_is_not_marked_durable_or_journaled() {
     let (_store, e) = open(&dir, "p", 2 * MIB);
     publish(&e, 0, 1);
     assert!(e.evict_cell_cas(0, EvictStep::Begin));
-    assert_eq!(
-        e.commit_batch().unwrap(),
-        CommitReport {
-            data_syncs: 1,
-            cells_durable: 0,
-            records: 0,
-        }
-    );
+    // Nothing can be made durable: no sync of the data file either.
+    assert_eq!(e.commit_batch().unwrap(), CommitReport::default());
     assert_eq!(e.load(0), Some(byte(CellState::Evicting)));
     assert!(journal(&e).is_empty());
 }
@@ -434,9 +428,15 @@ fn a_cell_evicted_to_absent_is_dropped_from_the_commits() {
     assert_eq!(e.commit_batch().unwrap().cells_durable, 0);
     e.punch(&[run(0, 1)]).unwrap();
     assert!(e.evict_cell_cas(0, EvictStep::Finish));
-    // Still pending at this commit (it was evicting at the last), then gone for good.
-    assert_eq!(e.commit_batch().unwrap().data_syncs, 1);
+    // Still pending at this commit (it was evicting at the last), but absent: dropped with no
+    // sync, and gone for good.
     assert_eq!(e.commit_batch().unwrap(), CommitReport::default());
+    assert_eq!(e.commit_batch().unwrap(), CommitReport::default());
+    assert_eq!(
+        journal(&e),
+        record(Op::Punch, run(0, 1)).to_vec(),
+        "only the punch"
+    );
     // Published again, it is committed as a new cell.
     publish(&e, 0, 2);
     assert_eq!(e.commit_batch().unwrap().cells_durable, 1);

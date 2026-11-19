@@ -1,11 +1,14 @@
-//! [`DirFiles`]: an entry's files in a directory (Linux), under a scratch directory of the test.
+//! [`DirFiles`]: an entry's files in a directory (Linux and macOS), under a scratch directory of
+//! the test. A punch inside the file is Linux only (macOS has no safe `F_PUNCHHOLE`, so there it
+//! is refused, which a macOS test asserts); a punch of the file's tail works on both.
 //!
 //! Catches: files named other than `<stem>.pack`, `.jnl`, `.meta`, `.meta.tmp`; a missing file
 //! read as an error instead of `None` (or another error read as `None`); a punch that changes the
 //! size or leaves the bytes; a rename that does not replace the snapshot; a journal that does not
-//! survive a reopen of the directory; the data descriptor lent out not being the file's.
+//! survive a reopen of the directory; the data descriptor lent out not being the file's; a
+//! journal over shared (`Arc`) files that does not reach the files it shares.
 
-#![cfg(target_os = "linux")]
+#![cfg(any(target_os = "linux", target_os = "macos"))]
 #![allow(
     clippy::unwrap_used,
     clippy::expect_used,
@@ -15,6 +18,7 @@
 mod support;
 
 use std::io::ErrorKind;
+use std::sync::Arc;
 
 use support::*;
 use tierstore_fetch_api::cell::CellState;
@@ -47,6 +51,7 @@ fn the_files_are_named_by_stem_and_kind_and_a_missing_one_reads_as_none() {
     assert!(files.read(FileKind::Snapshot).is_err());
 }
 
+#[cfg(target_os = "linux")]
 #[test]
 fn a_punch_reads_as_zeros_and_keeps_the_size_and_a_rename_replaces_the_snapshot() {
     let dir = TestDir::under(env!("CARGO_TARGET_TMPDIR"), "dir-files-punch");
@@ -76,6 +81,7 @@ fn a_punch_reads_as_zeros_and_keeps_the_size_and_a_rename_replaces_the_snapshot(
     );
 }
 
+#[cfg(target_os = "linux")]
 #[test]
 fn a_punch_the_file_system_refuses_is_an_error() {
     let dir = TestDir::under(env!("CARGO_TARGET_TMPDIR"), "dir-files-bad-punch");
@@ -97,6 +103,7 @@ fn a_missing_directory_fails_open_and_a_removed_one_fails_its_sync_and_writes() 
     assert!(files.write_at(FileKind::Journal, 0, b"x").is_err());
 }
 
+#[cfg(target_os = "linux")]
 #[test]
 fn an_entry_journaled_in_a_directory_survives_a_reopen_in_the_same_boot() {
     let dir = TestDir::under(env!("CARGO_TARGET_TMPDIR"), "dir-files-journal");
@@ -146,6 +153,78 @@ fn an_entry_journaled_in_a_directory_survives_a_reopen_in_the_same_boot() {
     let data = std::fs::read(dir.join("pack.pack")).unwrap();
     assert_eq!(&data[3 * MIB as usize..], cell_bytes(3, 1).as_slice());
     assert!(data[..MIB as usize].iter().all(|b| *b == 0));
+}
+
+#[test]
+fn a_journal_over_shared_files_commits_punches_the_tail_and_survives_a_reopen() {
+    let dir = TestDir::under(env!("CARGO_TARGET_TMPDIR"), "dir-files-shared");
+    let s = spec();
+    {
+        let files = Arc::new(DirFiles::open(&dir, "pack").unwrap());
+        files.set_len(FileKind::Data, SIZE).unwrap();
+        files.sync_dir().unwrap();
+        let (journal, rec) = EntryJournal::open(files.clone(), &s, Some(BOOT_A)).unwrap();
+        assert!(rec.fresh);
+        // The entry writes through its own reference to the files the journal syncs.
+        let cells = Cells::new();
+        files
+            .write_at(FileKind::Data, 0, &cell_bytes(0, 1))
+            .unwrap();
+        files
+            .write_at(FileKind::Data, 3 * MIB, &cell_bytes(3, 1))
+            .unwrap();
+        for c in [0, 3] {
+            cells.set(c, CellState::Present);
+            journal.published(c);
+        }
+        let report = journal.commit_batch(&cells).unwrap();
+        assert_eq!(
+            (report.data_syncs, report.cells_durable, report.records),
+            (1, 2, 2)
+        );
+        // The last cell reaches the end of the file: punched on both systems.
+        cells.set(3, CellState::Evicting);
+        let report = journal
+            .punch(&cells, &[CellRun { first: 3, count: 1 }])
+            .unwrap();
+        assert_eq!((report.journal_syncs, report.bytes_punched), (1, 1000));
+        journal.fold(0).unwrap();
+    }
+    let files = Arc::new(DirFiles::open(&dir, "pack").unwrap());
+    let (_, rec) = EntryJournal::open(files, &s, Some(BOOT_A)).unwrap();
+    assert_eq!(rec.trust, Trust::SameBoot);
+    assert_eq!(
+        restored(&rec),
+        [
+            CellState::Present,
+            CellState::Absent,
+            CellState::Absent,
+            CellState::Absent
+        ]
+    );
+    let data = std::fs::read(dir.join("pack.pack")).unwrap();
+    assert_eq!(data.len() as u64, SIZE);
+    assert_eq!(&data[..MIB as usize], cell_bytes(0, 1).as_slice());
+    assert!(data[3 * MIB as usize..].iter().all(|b| *b == 0));
+}
+
+#[cfg(target_os = "macos")]
+#[test]
+fn a_punch_inside_the_file_is_unsupported_on_macos_and_changes_nothing() {
+    let dir = TestDir::under(env!("CARGO_TARGET_TMPDIR"), "dir-files-mac-punch");
+    let files = DirFiles::open(&dir, "e").unwrap();
+    files.set_len(FileKind::Data, 3 * MIB).unwrap();
+    files
+        .write_at(FileKind::Data, 0, &vec![7; 3 * MIB as usize])
+        .unwrap();
+    assert_eq!(
+        files.punch_data(MIB, MIB).unwrap_err().kind(),
+        ErrorKind::Unsupported
+    );
+    files.punch_data(5 * MIB, MIB).unwrap();
+    let data = std::fs::read(files.path(FileKind::Data)).unwrap();
+    assert_eq!(data.len() as u64, 3 * MIB);
+    assert!(data.iter().all(|b| *b == 7));
 }
 
 /// A state table of the tests' pack in plain cells.

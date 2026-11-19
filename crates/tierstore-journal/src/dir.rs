@@ -1,10 +1,21 @@
-//! [`DirFiles`]: an entry's files in a directory of the cache partition (Linux).
+//! [`DirFiles`]: an entry's files in a directory of the cache partition (Linux and macOS).
+//!
+//! The two systems differ in two calls (5.6 (b), (c)):
+//! - **Durability.** Linux: `fdatasync`. macOS: `fcntl(F_FULLFSYNC)` (through `rustix`), since a
+//!   plain `fsync` there leaves the bytes in the drive's cache.
+//! - **Punch.** Linux: `fallocate(PUNCH_HOLE | KEEP_SIZE)`. macOS punches with
+//!   `fcntl(F_PUNCHHOLE)`, which neither `rustix` nor `std` wraps, and this workspace adds no
+//!   `unsafe` (AGENTS.md R2). So on macOS a punch that reaches the end of the file is done by
+//!   truncating to its start and extending back (the blocks are released and the range reads as
+//!   zeros), and any other punch is [`std::io::ErrorKind::Unsupported`]: the in-process store
+//!   then evicts whole entries only, the fallback 5.6 (b) names for a volume that cannot punch.
 
 use std::fs::{File, OpenOptions};
 use std::io;
 use std::os::unix::fs::FileExt;
 use std::path::{Path, PathBuf};
 
+#[cfg(target_os = "linux")]
 use rustix::fs::FallocateFlags;
 
 use crate::files::{EntryFiles, FileKind};
@@ -86,22 +97,16 @@ impl EntryFiles for DirFiles {
 
     fn sync_data(&self, file: FileKind) -> io::Result<()> {
         if file == FileKind::Data {
-            return self.data.sync_data();
+            return sync(&self.data);
         }
-        File::open(self.path(file))?.sync_data()
+        sync(&File::open(self.path(file))?)
     }
 
     fn punch_data(&self, offset: u64, len: u64) -> io::Result<()> {
         if len == 0 {
             return Ok(());
         }
-        rustix::fs::fallocate(
-            &self.data,
-            FallocateFlags::PUNCH_HOLE | FallocateFlags::KEEP_SIZE,
-            offset,
-            len,
-        )
-        .map_err(io::Error::from)
+        punch(&self.data, offset, len)
     }
 
     fn replace_snapshot(&self) -> io::Result<()> {
@@ -114,4 +119,50 @@ impl EntryFiles for DirFiles {
     fn sync_dir(&self) -> io::Result<()> {
         File::open(&self.dir)?.sync_all()
     }
+}
+
+/// Makes the bytes and the length of `file` durable: `fdatasync`.
+#[cfg(target_os = "linux")]
+fn sync(file: &File) -> io::Result<()> {
+    file.sync_data()
+}
+
+/// Makes the bytes and the length of `file` durable: `fcntl(F_FULLFSYNC)`, which also flushes
+/// the drive's cache.
+#[cfg(target_os = "macos")]
+fn sync(file: &File) -> io::Result<()> {
+    rustix::fs::fcntl_fullfsync(file).map_err(io::Error::from)
+}
+
+/// Releases `len` (more than 0) bytes of `file` from `offset`, keeping its size:
+/// `fallocate(PUNCH_HOLE | KEEP_SIZE)`.
+#[cfg(target_os = "linux")]
+fn punch(file: &File, offset: u64, len: u64) -> io::Result<()> {
+    rustix::fs::fallocate(
+        file,
+        FallocateFlags::PUNCH_HOLE | FallocateFlags::KEEP_SIZE,
+        offset,
+        len,
+    )
+    .map_err(io::Error::from)
+}
+
+/// Releases `len` (more than 0) bytes of `file` from `offset`, keeping its size, when the range
+/// reaches the end of the file: truncates to `offset` and extends back. Any other range is
+/// [`io::ErrorKind::Unsupported`] (no safe `F_PUNCHHOLE`; see the module documentation), with
+/// nothing changed.
+#[cfg(target_os = "macos")]
+fn punch(file: &File, offset: u64, len: u64) -> io::Result<()> {
+    let size = file.metadata()?.len();
+    if offset.saturating_add(len) < size {
+        return Err(io::Error::new(
+            io::ErrorKind::Unsupported,
+            "a punch inside the file needs F_PUNCHHOLE, which has no safe wrapper",
+        ));
+    }
+    if offset >= size {
+        return Ok(());
+    }
+    file.set_len(offset)?;
+    file.set_len(size)
 }
