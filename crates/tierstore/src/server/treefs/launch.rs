@@ -17,9 +17,12 @@
 //! 3. Otherwise the mount is made, a dead mount that a process before left at the mount point is
 //!    detached first, and the descriptor is put in the manager's store.
 //!
-//! None of these waits for the node's fill socket: after a boot the node's tierstore reads its whole
-//! cache before it binds it, and the cache is told the mount's pins once it answers, by a thread
-//! of the core (`core/live.rs`). Each step's time is said as it ends (`steps.rs`).
+//! None of these waits for the announcement of the mount's pins and placements to the node's fill
+//! socket: after a boot the node's tierstore reads its whole cache before it binds the socket, and
+//! a thread of the core tells it the pins once it answers (`core/live.rs`). What a start still
+//! asks of the socket before it is ready is the trees of the attachments file, which it makes
+//! again (`start.rs`): none after a boot, when the runtime directory is new. Each step's time is
+//! said as it ends (`steps.rs`), on the clock of the platform.
 //!
 //! The manager is then told the unit is ready, and the process serves until SIGTERM or SIGINT
 //! (it leaves the mount for the store to keep, where there is a manager; it unmounts where there is
@@ -38,7 +41,7 @@ use super::run::{Kernel, Prepared, Running, discard_mount};
 use super::sd::{self, FUSE_NAME, Manager, Stored};
 use super::start::{Signals, StartError, io};
 use super::steps::Steps;
-use crate::MonotonicClock;
+use crate::{Clock, MonotonicClock};
 
 /// What the platform gives the process: the channel to the service manager and the descriptors it
 /// passed.
@@ -49,6 +52,8 @@ pub(super) struct Platform {
     pub stored: Vec<Stored>,
     /// Where the kernel shows its mounts and connections.
     pub kernel: Kernel,
+    /// The clock the steps of the start are timed on.
+    pub clock: Arc<dyn Clock>,
 }
 
 /// What the start made.
@@ -211,7 +216,7 @@ async fn hang(hung: Option<tokio::sync::oneshot::Receiver<()>>) {
 async fn run(settings: &FsSettings, platform: Platform) -> Result<(), StartError> {
     // The handlers are in place before the mount is: a signal after it is never lost.
     let mut signals = Signals::install()?;
-    let mut steps = Steps::new(Arc::new(MonotonicClock::new()));
+    let mut steps = Steps::new(Arc::clone(&platform.clock));
     let Started {
         running,
         notice,
@@ -294,6 +299,7 @@ pub(in crate::server) fn serve(settings: &FsSettings) -> Result<(), StartError> 
         manager: Manager::new(env.notify_socket.as_deref()),
         stored: env.stored_here(),
         kernel: Kernel::real(),
+        clock: Arc::new(MonotonicClock::new()),
     };
     serve_with(settings, platform)
 }

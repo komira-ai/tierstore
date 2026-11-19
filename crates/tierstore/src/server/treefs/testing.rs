@@ -887,6 +887,39 @@ pub(in crate::server) fn with_fuse(test: impl FnOnce()) {
     unavailable().map_or_else(test, skipped);
 }
 
+/// The lines this crate logs on a thread while a test holds the guard of [`logged`]: the
+/// operator's stderr, as the process writes it.
+#[derive(Clone, Default)]
+pub(in crate::server) struct Logged(Arc<Mutex<Vec<u8>>>);
+
+impl Logged {
+    /// The lines written so far.
+    pub(in crate::server) fn text(&self) -> String {
+        String::from_utf8_lossy(&locked(&self.0)).into_owned()
+    }
+}
+
+impl std::io::Write for Logged {
+    fn write(&mut self, bytes: &[u8]) -> std::io::Result<usize> {
+        locked(&self.0).extend_from_slice(bytes);
+        Ok(bytes.len())
+    }
+
+    fn flush(&mut self) -> std::io::Result<()> {
+        Ok(())
+    }
+}
+
+/// Logs what this thread says at `level` and above to the [`Logged`] given, until the guard
+/// drops.
+pub(in crate::server) fn logged(
+    log: &Logged,
+    level: tracing::Level,
+) -> tracing::dispatcher::DefaultGuard {
+    let line_log = crate::server::build_info::stderr_log::LineLog::new(log.clone(), level);
+    tracing::subscriber::set_default(line_log)
+}
+
 /// Looks at `condition` again and again, yielding between looks, until it holds: for an event that
 /// another thread brings, with no clock in it. The test fails if the event never comes.
 pub(in crate::server) fn until(mut condition: impl FnMut() -> bool) {
