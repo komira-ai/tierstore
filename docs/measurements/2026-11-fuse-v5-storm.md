@@ -182,7 +182,7 @@ every column the rule names), in the library regime, where every request reaches
 
 | criterion | rule | V5 depth 5 against `v3-r8` | met |
 |---|---|---|---|
-| CPU per 1k requests | at least 20% lower | server CPU 4,002 against 889 ms (4.5 times), cgroup kernel time 2,685 against 673 ms (4.0 times); node CPU 12,188 against 14,984 ms (-19%, mostly the 176 burners divided by more cycles) | no |
+| CPU per 1k requests | at least 20% lower | server CPU 4,002 against 889 ms (4.5 times), cgroup kernel time 2,685 against 673 ms (4.0 times); node CPU 12,188 against 14,984 ms (-19%; inferred: the node is kept busy by the 176 burners either way, so this figure falls as cycles rise) | no |
 | p99 | at least 20% lower (or the CPU above) | `stat` 65.3 against 50.1 ms (+30%), `open` 65.8 against 51.6 ms (+28%) | no |
 | read MB/s | no more than 5% lower | cold 951 against 1,738 (-45%); warm 6,266 against 6,614 (-5.3%). In `no-open`: cold 1,002 against 2,156 (-54%), warm 7,949 against 8,093 (-1.8%) | no |
 | the storm | metadata p99 does not grow | the stormed CPU's `stat` p99 3,786 times its idle p99 (below) | no |
@@ -201,7 +201,7 @@ breaks the memory rule.
   meets both the memory rule and the read rule.
 - **Cycles.** V5 makes 23% more cycles than `v3-r8` with caches off (7,202 against 5,870
   cycles/s, `stat` p50 14.7 against 20.8 ms), at more server CPU and a worse tail. In `no-open`
-  a cycle does not reach the server and every series is within 4% (986,371 to 1,061,415).
+  a cycle does not reach the server, and the four series lie between 986,371 and 1,061,415 cycles/s (the most 7.6% above the least).
 
 **The storm.** A request waits for an entry of the queue of the CPU it was issued from, in order
 (K12). With 8 reads parked for 60 ms on a queue of 5 entries, 5 reads hold the entries (`held` 5
