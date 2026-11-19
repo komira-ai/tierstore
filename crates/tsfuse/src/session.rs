@@ -19,8 +19,8 @@
 //!   so a supervisor that holds them can hand them to the next process. [`Serving::hand_over`]
 //!   does that for a server about to exit: it stops and joins every reader, and from then on a
 //!   parked request whose replier is dropped is left to the next server instead of being
-//!   answered `EIO`. An unmount ends the readers with [`ReaderEnd::Unmounted`], an abort with
-//!   [`ReaderEnd::Aborted`].
+//!   answered `EIO`. An unmount or an abort ends the readers with [`ReaderEnd::Unmounted`] (one that
+//!   takes a request as the connection ends, with [`ReaderEnd::Aborted`]).
 
 use std::io;
 use std::num::NonZeroUsize;
