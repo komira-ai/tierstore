@@ -177,6 +177,25 @@ fn a_storm_asked_for_io_uring_runs_on_the_transport_the_kernel_allows() {
     }
 }
 
+/// Where the kernel lists no FUSE connection (a `sys` with none), the storm still runs every
+/// phase, and records no `waiting`: a figure not read is not made up.
+#[test]
+fn a_storm_with_no_connection_listed_records_no_waiting() {
+    let (dir, mnt) = scratch("fsbench-storm-unlisted");
+    let mut plan = plan(&mnt, Transport::Dev, ColdRead::Buffered);
+    let sys = dir.path().join("sys");
+    std::fs::create_dir(&sys).unwrap();
+    plan.host.sys = sys;
+    let record = run_once(&plan);
+    check_phases(&record, &plan);
+    assert!(
+        record.phases.iter().all(|p| p.waiting.is_none()),
+        "{:?}",
+        record.phases.iter().map(|p| p.waiting).collect::<Vec<_>>()
+    );
+    assert_eq!(record.environment.connection, BTreeMap::new());
+}
+
 /// A mount point that is not there fails the storm before any record, and says so.
 #[test]
 fn a_storm_that_cannot_mount_fails_and_writes_nothing() {
@@ -198,7 +217,7 @@ fn a_storm_that_cannot_mount_fails_and_writes_nothing() {
 fn a_storm_whose_record_cannot_be_written_fails_after_its_run() {
     let (_dir, mnt) = scratch("fsbench-storm-broken");
     let plan = plan(&mnt, Transport::Dev, ColdRead::Buffered);
-    let error = run(&plan, Broken, &mut Vec::new()).unwrap_err();
+    let error = run(&plan, &mut Broken, &mut Vec::new()).unwrap_err();
     assert_eq!(error.to_string(), "storm: write the record: refused");
     assert!(
         std::fs::read_dir(&mnt).unwrap().next().is_none(),

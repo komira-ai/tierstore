@@ -348,7 +348,7 @@ fn probe_thread(
     path: &Path,
     cpu: usize,
     clock: Clock,
-    done: impl Fn(u64) -> bool,
+    done: &dyn Fn(u64) -> bool,
 ) -> (Histogram, u64) {
     let mut hist = Histogram::default();
     let mut errors = 0;
@@ -393,7 +393,7 @@ fn run_phase(plan: &Plan, spec: &PhaseSpec, watch: &Watch<'_>, clock: Clock) -> 
             .map(|&(_, cpu, _)| {
                 let (path, live) = (plan.mountpoint.join("probe"), &live);
                 scope.spawn(move || {
-                    let ended = probe_thread(&path, cpu, clock, |made| {
+                    let ended = probe_thread(&path, cpu, clock, &|made| {
                         let elapsed = clock.ns().saturating_sub(begin);
                         probes_done(made, plan.max_probes, elapsed, duration_ns(plan.window))
                     });
@@ -560,7 +560,7 @@ pub fn raise_open_files() -> std::io::Result<Option<u64>> {
 /// A run cannot mount, start its session, or unmount, or `out` cannot be written.
 pub fn run(
     plan: &Plan,
-    mut out: impl Write,
+    out: &mut dyn Write,
     log: &mut dyn Write,
 ) -> Result<Vec<StormRecord>, Error> {
     raise_open_files().map_err(Error::of(PROCESS, "raise the limit of open files"))?;

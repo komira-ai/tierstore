@@ -449,7 +449,7 @@ fn dispatch(
         Command::Storm(args) => {
             let out = args.out.clone();
             let plan = args.plan(Host::real())?;
-            crate::storm::run(&plan, append(&out)?, stderr).map(drop)
+            crate::storm::run(&plan, &mut append(&out)?, stderr).map(drop)
         }
         Command::StormReport { results, discard } => {
             let records = crate::stormrec::read(&results)?;

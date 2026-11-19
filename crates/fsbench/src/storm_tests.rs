@@ -267,11 +267,11 @@ fn a_probe_times_its_stats_and_counts_its_failures() {
         .find(|&c| allowed.is_set(c))
         .unwrap();
     let clock = crate::clock::Clock::start();
-    let (hist, errors) = probe_thread(dir.path(), cpu, clock, |made| made >= 7);
+    let (hist, errors) = probe_thread(dir.path(), cpu, clock, &|made| made >= 7);
     assert_eq!((hist.count, errors), (7, 0));
-    let (hist, errors) = probe_thread(&dir.path().join("missing"), cpu, clock, |made| made >= 3);
+    let (hist, errors) = probe_thread(&dir.path().join("missing"), cpu, clock, &|made| made >= 3);
     assert_eq!((hist.count, errors), (0, 3));
-    let (hist, errors) = probe_thread(dir.path(), rustix::thread::CpuSet::MAX_CPU, clock, |_| {
+    let (hist, errors) = probe_thread(dir.path(), rustix::thread::CpuSet::MAX_CPU, clock, &|_| {
         false
     });
     assert_eq!((hist.count, errors), (0, 1));
