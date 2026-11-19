@@ -409,6 +409,30 @@ fn a_mostly_dead_segment_is_compacted_on_the_hot_tier() {
     assert_eq!(sim.pool[&0].len(), 2);
 }
 
+/// A compaction that fills the open segment seals it, and the sealed segment waits in the pool
+/// with the blocks that were there: none is lost.
+#[test]
+fn a_compaction_that_seals_the_open_segment_keeps_it_waiting() {
+    let p = Policy {
+        gc_live_below: 0.5,
+        destage_max_age_h: 48,
+        ..tiny()
+    };
+    let mut sim = Sim::new(&p);
+    // Block 0: 30 + 30 + 30, two dying at hour 5; block 1: 40 + 40, open.
+    for (size, death) in [(30, 5), (30, 5), (30, 500), (40, 500), (40, 500)] {
+        sim.arrive(&item(0, size, death, 0), 0);
+    }
+    assert_eq!(sim.blocks[1].bytes, 80);
+    sim.die(5);
+    sim.destage(6);
+    assert_eq!(sim.compacted_hot, 1);
+    // The 30 live bytes did not fit in block 1 (80 + 30 > 100): block 1 sealed and waits.
+    assert_eq!(sim.pool[&0], [1]);
+    let open = sim.open[&(0, 0)].block;
+    assert_eq!((open, sim.blocks[open].live), (2, 30));
+}
+
 /// A record is stored with its header: two objects of 40 with a header of 10 fill a segment of
 /// 100, the stripe's raw bytes count the headers, and its data and live bytes count only the
 /// objects.

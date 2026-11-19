@@ -13,10 +13,11 @@ three storage nodes of 15 drives).
 measurements ran (design 10.10), so there is no silo for the storage tier to be held against,
 and a baseline of a store that no longer runs decides nothing.
 
-Every figure in the tables below is printed by the tool from the summaries committed beside it
-(`crates/storebench/data/`); a test holds this document to those tables word for word
-(`cargo test -p storebench --test measurement_doc`). Figures in the prose are read from those
-tables, and each says which. **[M]** marks a measured figure, **[E]** one derived from measured
+The tables headed **C-6**, **C-7** and **C-10** are printed by the tool from the summaries
+committed beside it (`crates/storebench/data/`), and a test holds this document to them word for
+word (`cargo test -p storebench --test measurement_doc`). The other tables (the parked-cache
+sample, the constants) and the prose figures were written by hand: each says what it was read
+or derived from. **[M]** marks a measured figure, **[E]** one derived from measured
 figures by a rule this document states, **[I]** an inference.
 
 ## How the data was taken
@@ -28,7 +29,8 @@ figures by a rule this document states, **[I]** an inference.
   Silo answered a listing of `kbf-cas` at about 14 objects a second, a day and more for the whole
   bucket, while every drive holds every object's `xl.meta` (its size, time, tag and erasure
   layout). `storebench drive-list` walked one share of the key space per drive and read only the
-  `xl.meta` of the objects its share owns.
+  `xl.meta` of the objects its share owns. The twelve walks reported no error; their counts sum
+  to the listing.
 - **The pack footers**, through silo's S3 API: `storebench footers` read the footer of each pack
   (the index of its blobs: digest and size of each) in two passes, five shares on five nodes. The
   first read packs of every size and was stopped after about 50,700; the second read the 141,750
@@ -56,7 +58,7 @@ against it; they run against any S3 store holding the CAS service's packs:
 | step | command |
 |---|---|
 | listing | `storebench drive-list --bucket-dir <drive>/kbf-cas --share <i>/<n> --out walk-<i>.tsv --meta-out walk-<i>.meta.tsv`, one share per drive, concatenated (or `storebench list` through S3) |
-| footers | `storebench footers --credentials <file> --listing listing.tsv --share <i>/5 --min-pack-bytes 65537 --out footers-big-<i>.tsv` |
+| footers | `storebench footers --endpoint <url> --credentials <file> --listing listing.tsv --share <i>/5 --min-pack-bytes 65537 --out footers-big-<i>.tsv` |
 | C-6 | `storebench c6 --listing listing.tsv --erasure erasure.tsv --footers <each footers file> --dead-out dead.tsv --out c6.json` |
 | C-7 | `storebench c7 --listing listing.tsv --out c7.json` |
 | C-10 | `storebench c10 --listing listing.tsv --dead-keys dead.tsv --out c10.json` |
@@ -247,7 +249,8 @@ against it; they run against any S3 store holding the CAS service's packs:
 **Sizes [M].** 90.7% of the objects are at most 64 KiB (1,384,171 of 1,526,337: the first column
 of the kinds table), and 95.9% of `L_silo` is in packs of 1 to 256 MiB (the pack row's third to
 fifth columns). Most of the small objects are tree lists (659,235) and 724,932 small packs of
-3.34 GB in all. 32 packs are over 256 MiB; the largest object is a 535 MB pack. Ingest over the
+3.34 GB in all. 32 packs are over 256 MiB; the only object of 400 to 700 MiB is a 535 MB pack, and none needs a
+chain at 1 GiB. Ingest over the
 38 days of the bucket was 1.35 TB, about 35 GB/day; the last 7 days, 108 GB, about 15 GB/day.
 No L2 sidecar exists yet (none was written before silo was removed), so that kind has no row.
 
@@ -255,8 +258,8 @@ No L2 sidecar exists yet (none was written before silo was removed), so that kin
 location it was written to, and a pack is live while it holds the first location of at least one
 blob. Walking the read packs in write order:
 - 21,150 packs (195 GB) are **dead**: every blob they hold was written earlier in a pack that was
-  read. That is certain whatever the unread packs hold, so at least 14.6% of the pack bytes are
-  dead.
+  read. That holds whatever the unread packs hold, as long as the objects' modified times are
+  the order they were written in [I], so at least 14.6% of the pack bytes are dead.
 - 138,528 read packs (1.02 TB) hold a first location; with the unread packs counted live,
   **`L_live` is at most 1.15 TB**.
 - The unread packs (3.19 GB never read, 116 GB whose read failed) could have held some of those
@@ -273,11 +276,11 @@ packs show 16.1% and 21,150, and the range admits 38%.
 every one of those reads came after silo was removed (6,599 errors in the table).
 
 **The gap [M, E].** Silo's drives used much more than its objects need. The seven drives that held only
-silo used 813.6 to 813.8 GB each (`df`; the others held another task's scratch files or had
-less, 371 to 1,019 GB); the twelve together 9.61 TB [M]. Costing every listed object at the
+silo used 813.6 to 813.8 GB each (`df`; the others held other scratch files or had less, 371 to
+1,019 GB); the twelve together 9.61 TB [M]. Costing every listed object at the
 erasure layout its `xl.meta` states (one `xl.meta` per drive, the shard inline up to 128 KiB,
-else a part file; the gap table) gives 2.09 TB, 175 GB a drive [E]: 1.56 times `L_silo`, not the
-4.6 times the design measured.
+else a part file; the gap table) gives 2.09 TB, 175 GB a drive [E]: 1.56 times `L_silo`. The
+drives used 4.6 times that (9.61 TB against 2.09 TB), the design's unexplained factor.
 
 **Most of the rest is a parked bucket that no listing shows.** Silo had kept an old Bazel
 remote cache under `.minio.sys/parked-bazel-cache/` on every drive (`rbe-cas` and `bzlcache`,
@@ -298,9 +301,14 @@ Scaled by the shards [E], the parked cache is about 37 M objects and 2.10 TB, co
 The remaining 212 GB a drive (26%) is outside the model: it charges no inode and no directory,
 and each object is a directory and at least one file on every drive (37 M objects at two
 512-byte inodes each would be about 38 GB a drive [I]), nor the file system's own metadata.
-`bzlcache/ac` was not sampled (its shard `00` was empty). So the "4.6 times" was the parked cache
-counted against `kbf-cas` alone: against everything stored, 3.45 TB, the drives used 2.8 times.
-Nothing in the new store depends on this (nothing shares its drives, and no import runs).
+`bzlcache/ac` was not sampled (its shard `00` was empty). So the factor of 4.6 was the parked cache's
+bytes counted against `kbf-cas`'s alone: with it the model expects 7.21 TB (601 GB × 12), and the
+drives used 1.33 times that; against everything stored, 3.45 TB, they used 2.8 times. No import
+runs, so nothing depends on this but the NOW drives' free space: the parked cache is silo's
+leftover, still on those drives (426 GB a drive, about 5% of one) when this was measured. C-7
+counts no other bytes on the drives, as if it is removed before the tier's cold directories are
+made; left in place it would take 10 × 426 GB = 4.3 TB raw off NOW's guard, which would then hold
+38.0 TB logical at `4+2` and 28.5 TB at two copies [E].
 
 **The requesters [M, I].** Silo counted about 2.97 M GETs on each of its six nodes in 189.8 ks of
 uptime (about 94 GETs/s for the cluster), about 300 DELETEs on each (1,812 in all, against the
@@ -321,8 +329,9 @@ Request logs, which would name the client of each request, were not kept.
 - **`destage.pack_window` 256, not 64.** First-fit decreasing into 1 GiB blocks fills them to
   77.6% with windows of 64 and 93.2% with windows of 256 (the first-fit table). The window is a
   cap: at a class's `destage.max_age` the window packs whatever it holds, so a larger cap costs
-  nothing when a class is slow. The table assumes full windows, so it is the best each window
-  can do.
+  nothing when a class is slow. The table packs one stream of every large object in write order
+  in full windows; per expiry class at today's ingest a window may be packed before it is full,
+  and then fills less. C-10 replays the design's 64.
 - **The capacity table (10.15) holds without silo.** The guard's stripes are in C-7: 16,624 at
   `4+4` on LATER (71.4 TB logical, as 10.15 says); on NOW 9,499 at `4+2` (40.8 TB) and 28,498
   blocks at `cold.replicas = 2` (30.6 TB), where 21.1 says about 34.6 TB and about 26 TB because it
@@ -601,7 +610,7 @@ objects weigh more. NOW's writer column uses the first node of the rank: the des
 writer of a pair to task T-S1 (10.2).
 
 **New stripes [M].** Shards spread evenly over the drives: at the capacity guard the coefficient
-of variation of shards per drive is 0.005 to 0.012 on every profile with every number of nodes
+of variation of shards per drive is at most 0.012 on every profile with every number of nodes
 down. LATER places `4+4` with one node down (4 + 4 on the two survivors) and refuses every stripe
 with two down (a node would hold 8 shards, more than the 4 the code can lose). NOW places every
 stripe with one node down; **with two of its six nodes down and the drives filled to the guard,
@@ -895,10 +904,11 @@ decreasing per class in windows of 64; a block goes cold when its oldest byte is
 half live is compacted on the hot tier.
 
 **What it shows [M].**
-- **`cold_fill_efficiency` sits close to the ceiling the code allows.** At the end of the data it
-  is 59.0 to 60.9% at NOW's `4+2` (ceiling 66.7%), 49.6 to 49.8% with two copies (ceiling 50%) and
-  37.6 to 38.7% at LATER's `4+4` (ceiling 50%). LATER sits further below its ceiling because its
-  `destage.max_age` of 3 days keeps blocks hot longer, so more of the cold stripes are short ones.
+- **`cold_fill_efficiency` at the end of the data** is 59.0 to 60.9% at NOW's `4+2` (ceiling
+  66.7%), 49.6 to 49.8% with two copies (ceiling 50%) and 37.6 to 38.7% at LATER's `4+4` (ceiling
+  50%). It dips in the fourth week (day 28: 29.6 to 36.6% at `4+2`, 18.7 to 24.0% on LATER, the
+  weekly table), when the large ingest of late October dies and its stripes are partly dead [I].
+  Why LATER sits further below its ceiling is not shown by these tables.
 - **Expiry grouping changes little at today's mix.** With one TTL for everything (`min-ttl`) the
   two groupings are within 1.1 points of each other. With mixed TTLs it helps only where both
   TTLs are alive: at day 49 of `ttl-by-kind`, 61.9% against 54.6% on NOW and 44.6% against 40.0%
@@ -912,8 +922,8 @@ half live is compacted on the hot tier.
   rewrites 959 MB (NOW) and 1.66 GB (LATER) on the hot tier.
 - **Partial stripes are rare**: at most 7 in any run over the whole replay.
 
-**What C-10 decides.** `gc.rewrite_below` 0.30 stays (below it nothing is rewritten at today's
-TTLs, and the rewrite is cheap where it is); `destage.partial_after` stays (partial stripes are
+**What C-10 decides.** `gc.rewrite_below` 0.30 stays (below it at most one stripe per run is
+rewritten at today's TTLs, and the rewrite is cheap where it is); `destage.partial_after` stays (partial stripes are
 rare); expiry-class grouping stays as the design has it (it costs nothing and helps under mixed
 TTLs). The death times are synthetic: when the CAS service's GC runs, the same replay with its
 real deaths (`--dead-keys`, or a listing of real deletes) replaces them.
@@ -925,7 +935,7 @@ real deaths (`--dead-keys`, or a listing of real deletes) replaces them.
 | `hot.large_min` | 4 MiB (keep) | 4 MiB | C-6: 97.1% of objects are records, 93.5% of bytes whole files | measured |
 | `cold.block_bytes` | 1 GiB (keep) | 1 GiB | C-6: one object of 400 to 700 MiB; no chains | measured |
 | `destage.pack_window` | 256 | 64 | C-6: first-fit fill 93.2% at 256 against 77.6% at 64 | measured (full windows) |
-| `gc.rewrite_below` | 0.30 (keep) | 0.30 | C-10: almost no stripe below 0.5 | measured on synthetic deaths |
+| `gc.rewrite_below` | 0.30 (keep) | 0.30 | C-10: at most 1 stripe below 0.30 and 7 below 0.5 in a run | measured on synthetic deaths |
 | `destage.partial_after` | NOW 3 d, LATER 7 d (keep) | the same | C-10: at most 7 partial stripes in a run | measured on synthetic deaths |
 | capacity under the guard, logical | LATER 71.4 TB at `4+4`; NOW 40.8 TB at `4+2`, 30.6 TB at two copies | LATER 71.4 TB; NOW 34.6 TB and about 26 TB (with silo) | C-7 guard stripes | measured |
 | `L_live` | 309 GB to 1.15 TB (about 1.13 TB [I]) | 1.34 TB [M, as `L_silo`] | C-6 | measured range |
@@ -940,7 +950,7 @@ real deaths (`--dead-keys`, or a listing of real deletes) replaces them.
 - **"The capacity gap is unexplained."** Silo kept a parked Bazel cache of about 37 M objects and 2.10 TB
   outside its buckets; with it, the model accounts for 74% of what the drives used (C-6).
 - **"NOW holds 34.6 TB logical at `4+2` under the guard."** That counted silo's 9.3 TB; without it
-  the guard holds 40.8 TB (C-7).
+  the guard holds 40.8 TB (C-7), 38.0 TB if silo's parked cache stays on the drives (C-6).
 
 ## Decisions
 
@@ -962,6 +972,8 @@ followed.
 - **The gap was sampled, not walked:** a `du` of a silo drive did not finish in an hour, and the parked
   cache shares the drives with the store that replaced silo, so one shard of each tree was listed
   instead, read-only, and scaled by the number of shards.
+- **C-7 counts no bytes but the tier's on the NOW drives**, as if silo's parked cache is removed
+  before the tier's cold directories are made; C-6 gives the guard with it left in place.
 - **C-7 and C-10 also model NOW before erasure coding** (`cold.replicas = 2`), the state NOW runs
   in until milestone S2 (21.1).
 - **NOW's writer is the first node of the rank** (C-7, C-10's open segments), standing in for the

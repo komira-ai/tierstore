@@ -106,7 +106,8 @@ fn a_directory_on_another_device_is_not_entered() {
 #[test]
 fn an_unreadable_entry_is_counted_and_skipped() {
     let errors = Cell::new(0);
-    let missing = std::fs::read_dir(std::env::temp_dir().join("storebench-du-no-such-dir"));
+    let dir = tree("storebench-du-note");
+    let missing = std::fs::read_dir(dir.path().join("none"));
     assert!(note(missing, &errors).is_none());
     assert_eq!(errors.get(), 1);
     assert_eq!(note(Ok(7), &errors), Some(7));
@@ -116,12 +117,16 @@ fn an_unreadable_entry_is_counted_and_skipped() {
     assert_eq!(errors.get(), 1);
 }
 
-/// The file system's size is at least what is used, and a missing path is an error naming it.
+/// The file system's size is its blocks times its fragment size as `statvfs` states them, at
+/// least what is used; a missing path is an error naming it.
 #[test]
 fn the_file_system_is_measured() {
-    let fs = filesystem(&std::env::temp_dir()).unwrap();
-    assert!(fs.size > 0 && fs.size >= fs.used);
-    let missing = std::env::temp_dir().join("storebench-du-no-such-fs");
+    let dir = tree("storebench-du-fs");
+    let fs = filesystem(dir.path()).unwrap();
+    let s = rustix::fs::statvfs(dir.path()).unwrap();
+    assert_eq!(fs.size, s.f_blocks * s.f_frsize);
+    assert!(fs.size >= fs.used);
+    let missing = dir.path().join("none");
     let e = filesystem(&missing).unwrap_err();
     assert!(
         matches!(

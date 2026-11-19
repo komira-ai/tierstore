@@ -2,7 +2,7 @@
 //!
 //! Silo's listing of a bucket reads every object's `xl.meta` from the drives of its erasure set
 //! before it answers; on the farm's SMR drives that is about 14 objects a second, a day and more
-//! for silo's 1.4 M objects. Every drive of silo's one erasure set holds every object's
+//! for silo's 1.5 M objects. Every drive of silo's one erasure set holds every object's
 //! `xl.meta`, so the same facts are on each drive: this walk reads them straight from a drive's
 //! file system, read-only, and writes the same listing lines as [`crate::listing`].
 //!
@@ -33,7 +33,7 @@ pub const SPLIT_FANOUT: usize = 32;
 /// The flags of `drive-list`.
 #[derive(Debug, ClapArgs)]
 pub struct Args {
-    /// The directory of one bucket on one of silo's drives (`/mnt/hdd1/kbf-cas`).
+    /// The directory of one bucket on one of silo's drives (`<drive>/kbf-cas`).
     #[arg(long)]
     pub bucket_dir: PathBuf,
     /// The bucket's name, written as the listing's first field (default: the directory's name).
@@ -144,16 +144,20 @@ pub fn walk(
         owned: share.of == 1,
     }];
     while let Some(dir) = stack.pop() {
-        let entries = match first
+        let (entries, failed) = match first
             .take()
             .map_or_else(|| read_dir(&root.join(&dir.rel)), Ok)
         {
-            Ok(entries) => entries,
+            Ok(read) => read,
             Err(e) => {
                 walked.errors.push((dir.rel, e.to_string()));
                 continue;
             }
         };
+        // An entry that went away or cannot be looked at is counted; its siblings are walked.
+        walked
+            .errors
+            .extend(failed.into_iter().map(|e| (dir.rel.clone(), e)));
         walked.dirs += 1;
         // The directories on the bucket directory's own file system.
         let subdirs: Vec<String> = entries
@@ -203,16 +207,23 @@ pub fn walk(
     Ok(walked)
 }
 
-/// The entries of a directory with their metadata (not followed), sorted by name.
-fn read_dir(path: &Path) -> std::io::Result<Vec<(String, std::fs::Metadata)>> {
+/// The directory's entries.
+type Entries = Vec<(String, std::fs::Metadata)>;
+
+/// The entries of a directory with their metadata (not followed), sorted by name, and the
+/// errors of the entries that could not be read or looked at.
+fn read_dir(path: &Path) -> std::io::Result<(Entries, Vec<String>)> {
     let mut out = Vec::new();
+    let mut failed = Vec::new();
     for entry in std::fs::read_dir(path)? {
-        let entry = entry?;
-        let meta = entry.metadata()?;
-        out.push((entry.file_name().to_string_lossy().into_owned(), meta));
+        match entry.and_then(|e| Ok((e.file_name().to_string_lossy().into_owned(), e.metadata()?)))
+        {
+            Ok(named) => out.push(named),
+            Err(e) => failed.push(e.to_string()),
+        }
     }
     out.sort_by(|a, b| a.0.cmp(&b.0));
-    Ok(out)
+    Ok((out, failed))
 }
 
 /// Writes the lines of the object `key` whose `xl.meta` is `bytes`.

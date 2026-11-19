@@ -54,6 +54,21 @@ pub fn render(data: &Path, arm: Arm) -> Result<String, Error> {
     Ok(markdown(&tables))
 }
 
+/// The arms whose tables, as [`render`] makes them from `data`, are not in `document` word for
+/// word: empty when the document holds every arm's tables.
+///
+/// # Errors
+/// As [`render`].
+pub fn missing_arms(document: &str, data: &Path) -> Result<Vec<Arm>, Error> {
+    let mut missing = Vec::new();
+    for arm in [Arm::C6, Arm::C7, Arm::C10] {
+        if !document.contains(&render(data, arm)?) {
+            missing.push(arm);
+        }
+    }
+    Ok(missing)
+}
+
 #[cfg(test)]
 mod tests {
     use tierstore_testkit::dir::TestDir;

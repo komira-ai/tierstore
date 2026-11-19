@@ -3,10 +3,12 @@
 //! ```text
 //! storebench list --endpoint <url> --credentials <file> --bucket <b>... --out <listing>
 //! storebench drive-list --bucket-dir <dir> [--share i/n] --out <listing> [--meta-out <file>]
-//! storebench footers --endpoint <url> --credentials <file> --listing <listing> --out <footers> [--conc 16]
+//! storebench footers --endpoint <url> --credentials <file> --listing <listing> --out <footers>
+//!     [--conc 16] [--share i/n] [--min-pack-bytes 0] [--tree-every 1]
 //! storebench du --root <drive> --out <du.json> [--depth 2]
-//! storebench c6 --listing <listing> [--footers <f>] [--du <du.json>]... --out <c6.json>
-//! storebench c7 --listing <listing> --out <c7.json>
+//! storebench c6 --listing <listing> [--footers <f>]... [--du <du.json>]... [--erasure <f>]...
+//!     [--drives 12] [--data-shards 8] [--parity-shards 4] [--dead-out <file>] --out <c6.json>
+//! storebench c7 --listing <listing> [--shared-bytes-per-drive 0] --out <c7.json>
 //! storebench c10 --listing <listing> [--dead-keys <file>] --out <c10.json>
 //! storebench report --data <dir> --arm c6|c7|c10
 //! ```

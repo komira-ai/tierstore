@@ -408,8 +408,9 @@ pub fn analyze(listing: &[Object], footers: Option<&Footers>) -> (Live, Vec<Dead
     }
     ok.sort_by(|(a, _), (b, _)| order(a).cmp(&order(b)));
     unread.sort_by(|a, b| order(a).cmp(&order(b)));
-    // The unread packs written before the pack being walked, and the largest of them: only
-    // such a pack can have held one of its blobs first.
+    // The unread packs written before the pack being walked (or in its millisecond), and the
+    // largest of them: only such a pack can have held one of its blobs first. Write order is
+    // the objects' modified times, as the first-location rule takes it.
     let mut unread_before = unread.iter().peekable();
     let mut largest_unread_before: Option<u64> = None;
     let mut seen: HashSet<[u8; 32]> = HashSet::new();
@@ -417,7 +418,8 @@ pub fn analyze(listing: &[Object], footers: Option<&Footers>) -> (Live, Vec<Dead
     // The uncertain packs: their bytes, and the bytes of their first-located blobs.
     let mut uncertain: Vec<(u64, u64)> = Vec::new();
     for (pack, record) in &ok {
-        while let Some(u) = unread_before.next_if(|u| order(u) < order(pack)) {
+        // Written in the same millisecond is not known to be after: it counts as before.
+        while let Some(u) = unread_before.next_if(|u| u.modified_ms <= pack.modified_ms) {
             largest_unread_before = largest_unread_before.max(Some(u.size));
         }
         let mut first = false;

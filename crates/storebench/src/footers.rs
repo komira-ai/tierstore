@@ -64,7 +64,7 @@ pub struct Args {
     /// Silo's endpoint and credentials.
     #[command(flatten)]
     pub endpoint: crate::s3::Endpoint,
-    /// The listing (`storebench list`) whose packs and tree lists are read.
+    /// The listing (`storebench list` or `storebench drive-list`) whose packs and tree lists are read.
     #[arg(long)]
     pub listing: PathBuf,
     /// Where the footer file is written.

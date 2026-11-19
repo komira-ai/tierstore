@@ -7,7 +7,7 @@ use super::*;
 
 const MIB: u64 = 1 << 20;
 /// An arrival time that is not on an hour (milliseconds since the epoch).
-const T0: u64 = 1_700_000_000_000;
+const T0: u64 = 1_790_000_000_000;
 
 fn arrival(task_output: bool, dead: bool) -> Arrival {
     Arrival {

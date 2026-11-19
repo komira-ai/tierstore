@@ -698,7 +698,8 @@ impl<'a> Sim<'a> {
             } else {
                 left.extend(rest);
             }
-            self.pool.insert(class, left);
+            // A compaction above may have sealed a segment of this class into the pool already.
+            self.pool.entry(class).or_default().extend(left);
         }
     }
 

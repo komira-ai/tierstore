@@ -1,8 +1,9 @@
 //! C-10, garbage collection replayed offline (design section 16 C).
 //!
 //! The objects of the listing arrive when silo's listing says they were written. The CAS
-//! service had run no garbage collection when the listing was taken, so when they die is
-//! **synthetic**; each scenario states its rule:
+//! service's garbage collection (minimum TTL 7 days, action TTL 30 days) had not run when the
+//! listing was taken (silo saw only some 1,800 deletes), so when they die is **synthetic**; each
+//! scenario states its rule:
 //!
 //! | scenario | an object dies at |
 //! |---|---|

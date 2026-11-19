@@ -356,6 +356,21 @@ fn could_be_dead_rounds_up_and_stops_at_the_uncertain_bytes() {
     );
 }
 
+/// An unread pack written in the same millisecond as a live pack may have been first: the
+/// live pack is uncertain whichever key sorts first.
+#[test]
+fn an_unread_pack_of_the_same_millisecond_counts_as_written_before() {
+    let listing = [object(pack_key(1), 300, 5), object(pack_key(2), 900, 5)];
+    let text = format!(
+        "P\tkbf-cas\t{}\tok\t1\nB\t{}\t100\n",
+        pack_key(1),
+        hex_of(1)
+    );
+    let (live, _) = analyze(&listing, Some(&footers_of(&text)));
+    assert_eq!((live.live_packs, live.uncertain_packs), (1, 1));
+    assert_eq!(live.l_live_low, Some(0));
+}
+
 /// A pack written before every unread pack is never uncertain, whatever its blobs.
 #[test]
 fn a_live_pack_written_before_every_unread_pack_is_certain() {

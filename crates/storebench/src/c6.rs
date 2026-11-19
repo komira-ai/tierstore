@@ -61,7 +61,7 @@ pub const RECENT_DAYS: u64 = 7;
 /// The arguments of `storebench c6`.
 #[derive(Debug, clap::Args)]
 pub struct Args {
-    /// The listing of silo's objects (`storebench list`).
+    /// The listing of silo's objects (`storebench list` or `storebench drive-list`).
     #[arg(long)]
     pub listing: PathBuf,
     /// A footers file of the packs (`storebench footers`); repeat for several scans, which are
