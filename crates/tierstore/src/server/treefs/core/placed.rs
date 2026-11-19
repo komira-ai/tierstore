@@ -344,9 +344,9 @@ impl Core {
         let attached = number.is_some_and(|n| self.attached(n));
         if attached {
             let _placing = self.pins.placement(key);
-            if self.settled().is_ok() {
-                let _ = self.fills.place(&self.settings.mount_id, path);
-            }
+            let _ = self
+                .settled()
+                .map(|()| self.fills.place(&self.settings.mount_id, path));
         } else {
             self.let_go(key);
         }
@@ -444,8 +444,10 @@ impl Core {
                 let held = trees
                     .iter()
                     .any(|other| placement_of(other).is_some_and(|(other, _)| other == id));
-                if !held && self.settled().is_ok() {
-                    self.fills.unplace(&self.settings.mount_id, &id);
+                if !held {
+                    let _ = self
+                        .settled()
+                        .map(|()| self.fills.unplace(&self.settings.mount_id, &id));
                 }
             }
             None => {

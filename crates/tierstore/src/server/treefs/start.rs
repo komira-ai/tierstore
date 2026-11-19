@@ -20,7 +20,6 @@ use std::path::Path;
 use std::sync::Arc;
 
 use crate::MonotonicClock;
-use crate::server::treefs::steps::Steps;
 
 use super::attach::Attachments;
 #[cfg(any(target_os = "linux", test))]
@@ -29,6 +28,7 @@ use super::config::FsSettings;
 use super::control::Control;
 use super::core::{self, Core};
 use super::fill_client::FillClient;
+use super::steps::Steps;
 use super::table::{TableError, TreeTable};
 
 /// Why a start was refused.

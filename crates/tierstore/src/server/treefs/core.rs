@@ -240,9 +240,9 @@ pub(in crate::server) struct Core {
     /// Whether a successor is taking over: no attach or detach is done, so that this process
     /// writes neither the table of tree numbers nor the attachments file (`Core::hold`).
     held: AtomicBool,
-    /// Whether the fill socket is still to be told the mount's pins and placements, held while
-    /// they are told (`core/live.rs`).
-    owed: Mutex<bool>,
+    /// Whether the fill socket is still to be told the mount's pins and placements, or is being
+    /// told them (`core/live.rs`).
+    live: live::Announcement,
     /// The trees a thread is filling now for an attach that asked for `prefetch = "all"`, each
     /// with the token of its thread: a detach removes the entry, and a thread whose token is no
     /// longer the tree's has been replaced and stops.
@@ -312,7 +312,7 @@ impl Core {
             pins: PinLocks::new(),
             freeing: RwLock::new(()),
             held: AtomicBool::new(false),
-            owed: Mutex::new(false),
+            live: live::Announcement::default(),
             prefetching: Mutex::new(HashMap::new()),
             reads: Reads::default(),
             sweeper: Mutex::new(None),
@@ -555,14 +555,18 @@ impl Core {
     /// the sockets, and this process must have written its last by then: the call waits for the
     /// attach or detach that is changing them, and for the unpins of the detaches decided
     /// before it, and every later one is refused (`AttachError::Replaced`, and, for a detach, an
-    /// answer of none; ask `Core::is_held`).
+    /// answer of none; ask `Core::is_held`). A hold also waits, with the lifecycle lock released,
+    /// for the announcement of the mount's pins that is being sent, and none is sent after it
+    /// (`core/live.rs`).
     pub(super) fn hold(&self, on: bool) {
-        let _lifecycle = locked(&self.lifecycle);
-        self.held.store(on, Ordering::SeqCst);
-        // The announcement being sent, if any: none is sent after it (`core/live.rs`).
-        drop(locked(&self.owed));
-        // The unpins of the detaches decided before, which run with the lifecycle lock released.
-        drop(self.freeing.write().unwrap_or_else(PoisonError::into_inner));
+        {
+            let _lifecycle = locked(&self.lifecycle);
+            self.held.store(on, Ordering::SeqCst);
+            // The unpins of the detaches decided before, which run with the lifecycle lock
+            // released.
+            drop(self.freeing.write().unwrap_or_else(PoisonError::into_inner));
+        }
+        self.live.wait_sent();
     }
 
     /// Marks a detach whose unpins are to come, until the guard is dropped (`Core::hold`).

@@ -36,7 +36,7 @@ const KEPT: usize = 64;
 pub(super) const STARTS_QUEUED: usize = 1024;
 
 /// Why a request did not get its answer.
-#[derive(Debug, PartialEq, Eq, thiserror::Error)]
+#[derive(Clone, Copy, Debug, PartialEq, Eq, thiserror::Error)]
 pub(super) enum AskError {
     /// The socket was not there, or went away, for the whole of `fetch_timeout`.
     #[error("the fill socket is not answering")]

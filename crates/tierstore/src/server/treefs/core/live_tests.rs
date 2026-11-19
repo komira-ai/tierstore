@@ -9,7 +9,10 @@ use std::time::Duration;
 
 use super::super::super::fill_client::{AskError, FillClient};
 use super::super::super::table::TreeTable;
+use super::super::placed::key_of;
 use super::super::{Core, Errno};
+use super::announce;
+use crate::TreeDigest;
 use crate::server::treefs::ino;
 use crate::server::treefs::testing::{FakeFill, Rig, sample, until};
 
@@ -22,7 +25,17 @@ fn holds_asked(rig: &Rig) -> Vec<String> {
         .unwrap()
         .iter()
         .filter_map(|line| line.split(' ').next())
-        .filter(|verb| ["pins-live", "places-live", "place", "pin"].contains(verb))
+        .filter(|verb| {
+            [
+                "pins-live",
+                "places-live",
+                "place",
+                "unplace",
+                "pin",
+                "unpin",
+            ]
+            .contains(verb)
+        })
         .map(str::to_owned)
         .collect()
 }
@@ -89,7 +102,8 @@ fn the_thread_asks_again_until_a_fill_socket_is_bound() {
 
 /// Asserts that a request that changes a hold, while the fill socket is not there, fails as it
 /// does with no announcement owed (the lookup of a placement is `EIO`, the announcement
-/// `Unavailable`), and that nothing reaches a socket bound at another path.
+/// `Unavailable`), that the end of a tree of manifests and of a placement sends nothing, and that
+/// nothing reaches a socket bound at another path.
 #[test]
 fn a_request_that_finds_no_fill_socket_fails_and_the_announcement_stays_owed() {
     let rig = Rig::new("tfs-live-away", sample());
@@ -109,14 +123,17 @@ fn a_request_that_finds_no_fill_socket_fails_and_the_announcement_stays_owed() {
     until(|| entered.load(Ordering::SeqCst) == 1);
     assert_eq!(core.lookup(ino::ROOT, "jobs"), Err(Errno::Io));
     assert_eq!(core.settled(), Err(AskError::Unavailable));
+    // The end of a tree of manifests (`unpin`) and of a placement (`unplace`) is not sent either.
+    core.let_go(&TreeDigest::from_bytes([7; 32]));
+    core.let_go(&key_of(&"ab".repeat(16), "jobs/1/root").unwrap());
     assert!(holds_asked(&rig).is_empty());
     drop(core);
     drop(rest);
 }
 
-/// Asserts that a core whose successor is taking over sends no announcement, and that its thread
-/// ends without one: `settled` is `Unavailable` while the hold is on. A hand-over that did not
-/// complete lets the hold go, and the first request that needs it sends the announcement.
+/// Asserts that a core whose successor is taking over sends no announcement: `settled` is
+/// `Unavailable` while the hold is on. A hand-over that did not complete lets the hold go, and
+/// the thread, which rested meanwhile, sends the announcement, once.
 #[test]
 fn a_held_core_sends_no_announcement_until_the_hold_is_let_go() {
     let rig = Rig::new("tfs-live-held", sample());
@@ -125,9 +142,41 @@ fn a_held_core_sends_no_announcement_until_the_hold_is_let_go() {
     assert_eq!(rig.core.settled(), Err(AskError::Unavailable));
     assert!(holds_asked(&rig).is_empty());
     rig.core.hold(false);
-    rig.core.settled().unwrap();
+    until(|| !rig.upstream.asked("places-live").is_empty());
     rig.core.settled().unwrap();
     assert_eq!(holds_asked(&rig), ["pins-live", "places-live"]);
+}
+
+/// Asserts that the sending of the announcement ends when the core is gone, with nothing sent.
+#[test]
+fn the_announcement_of_a_dropped_core_is_not_sent() {
+    let rig = Rig::new("tfs-live-dropped", sample());
+    let core = rig.successor();
+    let gone = Arc::downgrade(&core);
+    drop(core);
+    announce(&gone);
+    assert!(holds_asked(&rig).is_empty());
+}
+
+/// Asserts that requests that find the announcement being sent wait for that attempt and take
+/// its outcome: one `pins-live` reaches the node however many wait.
+#[test]
+fn requests_that_find_the_announcement_being_sent_wait_for_it() {
+    let rig = Rig::new("tfs-live-shared", sample());
+    rig.upstream.gate_verb("pins-live");
+    rig.core.tell_live_later().unwrap();
+    rig.upstream.wait_for_verb("pins-live", 1);
+    let waiting: Vec<_> = (0..3)
+        .map(|_| {
+            let core = Arc::clone(&rig.core);
+            std::thread::spawn(move || core.settled())
+        })
+        .collect();
+    rig.upstream.permit_verb("pins-live", 1);
+    for waiter in waiting {
+        assert_eq!(waiter.join().unwrap(), Ok(()));
+    }
+    assert_eq!(rig.upstream.asked("pins-live").len(), 1);
 }
 
 /// Asserts that a hold waits for an announcement that is being sent: once the hold is on, the
