@@ -99,4 +99,13 @@ pub enum Handled {
 pub trait Fs: Send + Sync {
     /// Handles one request; answers it with `replier` now or later.
     fn handle(&self, req: Request<'_>, replier: Replier) -> Handled;
+
+    /// The kernel forgets `nlookup` lookups of `nodeid`: a FORGET, or one node of a
+    /// BATCH_FORGET. Nothing is answered (the kernel expects no reply), and it runs on the
+    /// reader's thread like [`Fs::handle`]. The default does nothing, as for a tree, whose inode
+    /// numbers are record indexes; the put directory counts the lookups of its directories and
+    /// lets one go when the kernel holds none.
+    fn forget(&self, nodeid: u64, nlookup: u64) {
+        let _ = (nodeid, nlookup);
+    }
 }

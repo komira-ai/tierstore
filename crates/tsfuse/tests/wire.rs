@@ -87,7 +87,7 @@ fn a_request_body_is_the_bytes_after_the_header_up_to_len() {
     assert!(format!("{req:?}").contains("Request"));
 }
 
-const IMPLEMENTED: [(Opcode, u32); 24] = [
+const IMPLEMENTED: [(Opcode, u32); 31] = [
     (Opcode::Lookup, 1),
     (Opcode::Forget, 2),
     (Opcode::Getattr, 3),
@@ -112,6 +112,13 @@ const IMPLEMENTED: [(Opcode, u32); 24] = [
     (Opcode::Destroy, 38),
     (Opcode::BatchForget, 42),
     (Opcode::Readdirplus, 44),
+    (Opcode::Symlink, 6),
+    (Opcode::Mknod, 8),
+    (Opcode::Rmdir, 11),
+    (Opcode::Link, 13),
+    (Opcode::Setxattr, 21),
+    (Opcode::Removexattr, 24),
+    (Opcode::Rename2, 45),
 ];
 
 #[test]
@@ -129,16 +136,10 @@ fn an_unimplemented_opcode_is_none() {
     let implemented: Vec<u32> = IMPLEMENTED.iter().map(|(_, c)| *c).collect();
     for code in [
         0,
-        6,
         7,
-        8,
-        11,
-        13,
         19,
-        21,
         22,
         23,
-        24,
         30,
         31,
         32,
@@ -149,7 +150,6 @@ fn an_unimplemented_opcode_is_none() {
         40,
         41,
         43,
-        45,
         46,
         100,
         4096,
@@ -158,7 +158,7 @@ fn an_unimplemented_opcode_is_none() {
         assert!(!implemented.contains(&code));
         assert_eq!(Opcode::from_code(code), None, "{code}");
     }
-    let h = RequestHeader::parse(&header(40, 6, 1)).unwrap();
+    let h = RequestHeader::parse(&header(40, 22, 1)).unwrap();
     assert_eq!(h.op(), None);
 }
 

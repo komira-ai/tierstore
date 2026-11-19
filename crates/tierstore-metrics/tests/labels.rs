@@ -86,7 +86,7 @@ fn every_closed_label_has_distinct_texts_indexed_by_position() {
         check::<TransportMode>(TransportMode::as_str),
         ["dev_fuse", "io_uring"]
     );
-    assert_eq!(check::<FuseOp>(FuseOp::as_str).len(), 25);
+    assert_eq!(check::<FuseOp>(FuseOp::as_str).len(), 32);
     assert_eq!(check::<ListRefusal>(ListRefusal::as_str).len(), 4);
     assert_eq!(
         check::<PackLostPhase>(PackLostPhase::as_str),
@@ -141,7 +141,7 @@ fn every_fuse_opcode_maps_to_the_operation_of_its_name() {
             None => assert_eq!(FuseOp::from_code(code), FuseOp::Other),
         }
     }
-    assert_eq!(known, 24);
+    assert_eq!(known, 31);
     assert_eq!(FuseOp::from_code(u32::MAX), FuseOp::Other);
 }
 

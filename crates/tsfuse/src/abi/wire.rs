@@ -215,6 +215,36 @@ wire! {
         pub newdir: u64,
     }
 
+    /// `fuse_rename2_in`: the argument of RENAME2 (a rename with `RENAME_*` flags), followed by
+    /// the old and the new name.
+    pub struct Rename2In {
+        /// The new parent directory.
+        pub newdir: u64,
+        /// The `RENAME_*` flags of `renameat2(2)`.
+        pub flags: u32,
+        /// Padding.
+        pub padding: u32,
+    }
+
+    /// `fuse_mknod_in`: the argument of MKNOD, followed by the name.
+    pub struct MknodIn {
+        /// The mode of the new node (its type and permission bits).
+        pub mode: u32,
+        /// The device number of a device node.
+        pub rdev: u32,
+        /// The caller's umask.
+        pub umask: u32,
+        /// Padding.
+        pub padding: u32,
+    }
+
+    /// `fuse_link_in`: the argument of LINK, followed by the new name; the request's node is the
+    /// new parent.
+    pub struct LinkIn {
+        /// The node linked.
+        pub oldnodeid: u64,
+    }
+
     /// `fuse_setattr_in`: the argument of SETATTR; `valid` says which fields are set
     /// ([`super::fattr`]).
     pub struct SetattrIn {

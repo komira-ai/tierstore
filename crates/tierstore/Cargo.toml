@@ -33,6 +33,7 @@ server = [
     "dep:crc32c",
     "dep:crc32fast",
     "dep:fuser",
+    "dep:tsfuse",
     "dep:hmac",
     "dep:http-body-util",
     "dep:hyper",
@@ -147,6 +148,9 @@ tracing = { workspace = true, optional = true }
 # their replies. The macOS build has no FUSE frontend.
 [target.'cfg(target_os = "linux")'.dependencies]
 fuser = { workspace = true, optional = true }
+# The FUSE library of this repository: the put directory on it (`server`, Linux), which replaces
+# fuser's (section 18 of docs/design/fetch-cache-serve.md, rows T-F9 and T-R).
+tsfuse = { workspace = true, optional = true }
 
 [dev-dependencies]
 # A stock S3 SDK (aws-sdk-rust) and its plain-HTTP client, which tests/s3_front/sdk.rs drives

@@ -14,7 +14,8 @@
 //! - `start`: what a start does before a frontend serves (the runtime directory, the core, the
 //!   attachments made again, the control socket), and the signals that end the process. It has no
 //!   mount in it, so that the FUSE frontend and one without FUSE call it alike.
-//! - `fuse` and `run` (Linux): the FUSE frontend and the process around it.
+//! - `fuse` and `run` (Linux): the FUSE frontend and the process around it; `put_fs` (Linux): the
+//!   put directory on `tsfuse`, which answers as the put directory's part of `fuse` does.
 //! - [`nfs`] (macOS serves it; built and tested everywhere): the NFSv3 frontend, over loopback,
 //!   and the mount around it.
 //! - `launch`, `serving`, `sd`, `init_record`, `handle`, `recover` and `handover` (Linux): crash
@@ -68,6 +69,17 @@ mod handover;
 mod init_record;
 #[cfg(target_os = "linux")]
 mod launch;
+// The put directory on `tsfuse` (section 18 of `docs/design/fetch-cache-serve.md`, row T-F9),
+// tested against the handler on fuser; `tierstore fs` serves it once it switches to `tsfuse`.
+#[cfg(target_os = "linux")]
+#[cfg_attr(
+    not(test),
+    expect(
+        dead_code,
+        reason = "served once tierstore fs switches from fuser to tsfuse (row T-R of the design)"
+    )
+)]
+mod put_fs;
 #[cfg(target_os = "linux")]
 mod recover;
 #[cfg(target_os = "linux")]

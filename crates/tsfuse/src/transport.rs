@@ -1,7 +1,8 @@
 //! The transports and the reader loop they share (5.2): a [`Transport`] delivers one request at a
 //! time into the reader's buffer and names the device its reply goes to; [`serve`] routes each
-//! request (INTERRUPT to the token table, FORGET dropped, DESTROY answered, the rest registered and
-//! handed to [`Fs::handle`]) until the transport ends or the session is stopped.
+//! request (INTERRUPT to the token table, FORGET and BATCH_FORGET to [`Fs::forget`] with no reply,
+//! DESTROY answered, the rest registered and handed to [`Fs::handle`]) until the transport ends or
+//! the session is stopped.
 //!
 //! [`DevReader`] is the `/dev/fuse` transport: one descriptor (the mount's or a clone) driven by
 //! `AsyncFd` on its reader's own current-thread runtime. Clones share the connection's pending
@@ -271,8 +272,20 @@ pub(crate) fn route(
         let _ = device.send(&[&encode_out_header(unique, Some(errno), 0)]);
     };
     match req.header.op() {
-        // Never answered: the kernel expects no reply, and inode numbers are record indexes.
-        Some(Opcode::Forget | Opcode::BatchForget) => None,
+        // Never answered: the kernel expects no reply. A body too short to name a count is
+        // nothing to forget.
+        Some(Opcode::Forget | Opcode::BatchForget) => {
+            match Operation::parse(&req) {
+                Ok(Operation::Forget(arg)) => fs.forget(req.header.nodeid, arg.nlookup),
+                Ok(Operation::BatchForget { nodes, .. }) => {
+                    for one in nodes {
+                        fs.forget(one.nodeid, one.nlookup);
+                    }
+                }
+                _ => {}
+            }
+            None
+        }
         Some(Opcode::Interrupt) => {
             // An INTERRUPT with a short body has no target to cancel, and the kernel expects
             // no reply to it.
@@ -416,6 +429,84 @@ mod tests {
             1,
             "the request read before the abort was answered"
         );
+    }
+
+    /// Records each forget it is told of, and answers every other request `ENOSYS`.
+    #[derive(Default)]
+    struct Forgotten(Mutex<Vec<(u64, u64)>>, Count);
+
+    impl Fs for Forgotten {
+        fn handle(&self, req: Request<'_>, replier: crate::Replier) -> crate::Handled {
+            self.1.handle(req, replier)
+        }
+
+        fn forget(&self, nodeid: u64, nlookup: u64) {
+            self.0
+                .lock()
+                .unwrap_or_else(std::sync::PoisonError::into_inner)
+                .push((nodeid, nlookup));
+        }
+    }
+
+    /// A request of `opcode` on `nodeid` with `body`.
+    fn raw(opcode: Opcode, nodeid: u64, body: &[u8]) -> Vec<u8> {
+        let mut bytes = vec![0u8; 40];
+        let len = u32::try_from(40 + body.len()).unwrap_or(u32::MAX);
+        bytes[0..4].copy_from_slice(&len.to_le_bytes());
+        bytes[4..8].copy_from_slice(&opcode.code().to_le_bytes());
+        bytes[8..16].copy_from_slice(&9u64.to_le_bytes());
+        bytes[16..24].copy_from_slice(&nodeid.to_le_bytes());
+        bytes.extend_from_slice(body);
+        bytes
+    }
+
+    #[test]
+    fn a_forget_reaches_the_fs_once_per_node_and_is_never_answered() {
+        let device = Arc::new(Dev(None, Mutex::new(0)));
+        let (fs, tokens) = (Forgotten::default(), Tokens::new());
+        let every = Every(vec![device.clone()]);
+        let route_one = |bytes: &[u8]| {
+            let end = route(bytes, device.clone(), &fs, &tokens, &every);
+            assert!(end.is_none());
+        };
+        route_one(&raw(Opcode::Forget, 7, &3u64.to_le_bytes()));
+        let mut batch = Vec::new();
+        batch.extend_from_slice(&2u32.to_le_bytes());
+        batch.extend_from_slice(&0u32.to_le_bytes());
+        for (nodeid, nlookup) in [(11u64, 1u64), (12, 5)] {
+            batch.extend_from_slice(&nodeid.to_le_bytes());
+            batch.extend_from_slice(&nlookup.to_le_bytes());
+        }
+        route_one(&raw(Opcode::BatchForget, 0, &batch));
+        // Bodies too short to name a count, or a batch shorter than its count: nothing to forget.
+        route_one(&raw(Opcode::Forget, 8, &[1, 2]));
+        route_one(&raw(Opcode::BatchForget, 0, &batch[..20]));
+        assert_eq!(
+            *fs.0
+                .lock()
+                .unwrap_or_else(std::sync::PoisonError::into_inner),
+            [(7, 3), (11, 1), (12, 5)]
+        );
+        assert_eq!(sends(&device), 0, "a forget is never answered");
+        assert_eq!(
+            *fs.1
+                .0
+                .lock()
+                .unwrap_or_else(std::sync::PoisonError::into_inner),
+            0,
+            "a forget is not handled as a request"
+        );
+        assert_eq!(tokens.registered(), 0);
+        // A request after them is handled, and answered, as before.
+        route_one(&raw(Opcode::Getattr, 7, &[0; 16]));
+        assert_eq!(
+            *fs.1
+                .0
+                .lock()
+                .unwrap_or_else(std::sync::PoisonError::into_inner),
+            1
+        );
+        assert_eq!(sends(&device), 1);
     }
 
     #[test]

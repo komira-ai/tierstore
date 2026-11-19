@@ -384,10 +384,13 @@ fn each_request_is_routed_by_its_opcode() {
         .send(&request(2, 20, 5, &[1, 0, 0, 0, 0, 0, 0, 0]))
         .unwrap();
     kernel.send(&request(42, 21, 0, &[0; 8])).unwrap();
-    // A second INIT is answered EIO; an opcode the library does not implement ENOSYS (SYMLINK).
+    // A second INIT is answered EIO; an opcode the library does not implement ENOSYS
+    // (GETXATTR: its size, padding and name).
     kernel.send(&init_request(7, 40, 0)).unwrap();
     assert_eq!(read_reply(&kernel), (-5, 1, 16));
-    kernel.send(&request(6, 22, 1, b"a\0b\0")).unwrap();
+    kernel
+        .send(&request(22, 22, 1, b"\0\0\0\0\0\0\0\0user.x\0"))
+        .unwrap();
     assert_eq!(read_reply(&kernel), (-38, 22, 16));
     // A header naming more bytes than were read is answered EIO under its id; fewer than 16
     // bytes have no id and are dropped.

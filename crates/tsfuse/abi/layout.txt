@@ -72,6 +72,17 @@ field fuse_mkdir_in mode 0 4
 field fuse_mkdir_in umask 4 4
 struct fuse_rename_in 8 8
 field fuse_rename_in newdir 0 8
+struct fuse_rename2_in 16 8
+field fuse_rename2_in newdir 0 8
+field fuse_rename2_in flags 8 4
+field fuse_rename2_in padding 12 4
+struct fuse_mknod_in 16 4
+field fuse_mknod_in mode 0 4
+field fuse_mknod_in rdev 4 4
+field fuse_mknod_in umask 8 4
+field fuse_mknod_in padding 12 4
+struct fuse_link_in 8 8
+field fuse_link_in oldnodeid 0 8
 struct fuse_setattr_in 88 8
 field fuse_setattr_in valid 0 4
 field fuse_setattr_in padding 4 4

@@ -99,6 +99,16 @@ int main(int argc, char **argv)
 	S(fuse_rename_in)
 	F(fuse_rename_in, newdir)
 
+	S(fuse_rename2_in)
+	F(fuse_rename2_in, newdir) F(fuse_rename2_in, flags) F(fuse_rename2_in, padding)
+
+	S(fuse_mknod_in)
+	F(fuse_mknod_in, mode) F(fuse_mknod_in, rdev) F(fuse_mknod_in, umask)
+	F(fuse_mknod_in, padding)
+
+	S(fuse_link_in)
+	F(fuse_link_in, oldnodeid)
+
 	S(fuse_setattr_in)
 	F(fuse_setattr_in, valid) F(fuse_setattr_in, padding) F(fuse_setattr_in, fh)
 	F(fuse_setattr_in, size) F(fuse_setattr_in, lock_owner) F(fuse_setattr_in, atime)

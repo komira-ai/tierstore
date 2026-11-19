@@ -219,7 +219,7 @@ fn a_counter_renders_its_count_with_and_without_labels() {
     let requests = block(&text, "tierstore_fuse_requests_total");
     assert!(requests.contains(&"tierstore_fuse_requests_total{op=\"read\"} 3".to_owned()));
     assert!(requests.contains(&"tierstore_fuse_requests_total{op=\"write\"} 0".to_owned()));
-    assert_eq!(requests.len(), 2 + 25);
+    assert_eq!(requests.len(), 2 + 32);
     assert_eq!(m.fuse.fuse_requests_total.with(FuseOp::Read).get(), 3);
 }
 

@@ -3183,6 +3183,7 @@ dependencies = [
  "toml",
  "tonic",
  "tracing",
+ "tsfuse",
  "x509-parser",
 ]
 

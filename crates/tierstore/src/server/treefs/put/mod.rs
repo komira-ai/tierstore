@@ -87,4 +87,4 @@ mod store_tests;
 #[cfg(test)]
 mod sweep_tests;
 #[cfg(test)]
-mod testing;
+pub(in crate::server::treefs) mod testing;
