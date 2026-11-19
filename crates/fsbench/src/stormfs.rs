@@ -244,10 +244,10 @@ impl<C: Clock> StormFs<C> {
     pub fn park_loop(&self) {
         loop {
             self.answer_due();
-            let guard = self.lock();
+            let mut guard = self.lock();
             if self.stopping.load(Ordering::Acquire) {
+                let rest = guard.take_all();
                 drop(guard);
-                let rest = self.lock().take_all();
                 self.answer(rest);
                 return;
             }
@@ -330,13 +330,15 @@ impl<C: Clock> StormFs<C> {
             return Handled::Done;
         }
         self.cold_reads.fetch_add(1, Ordering::Relaxed);
-        // After the stop no parker is left to answer it.
+        let mut parked = self.lock();
+        // After the stop no parker is left to answer it: the check is under the lock the
+        // parker's last take holds, so a READ is either taken there or answered here.
         if self.park_ns == 0 || self.stopping.load(Ordering::Acquire) {
+            drop(parked);
             self.answer(vec![Waiting { replier, len }]);
             return Handled::Done;
         }
         let due = self.clock.now().saturating_add(self.park_ns);
-        let mut parked = self.lock();
         let first = parked.next_due().is_none_or(|d| due < d);
         parked.push(due, Waiting { replier, len });
         if first {

@@ -212,3 +212,24 @@ fn figures_with_nothing_to_read_are_dashes() {
         .unwrap();
     assert_eq!(row.split(" | ").nth(8), Some("-"), "no idle phase: {row}");
 }
+
+/// The ratio to idle is `-` when the idle phase has no probe of that role, and when the idle
+/// probe's p99 is zero.
+#[test]
+fn the_ratio_to_idle_needs_an_idle_probe_of_the_role_with_a_p99() {
+    let ratio = |r: &StormRecord, role: &str| {
+        let out = render(std::slice::from_ref(r), 0);
+        let row = out
+            .lines()
+            .find(|l| l.starts_with(&format!("| x | one-cpu | {role} |")))
+            .unwrap()
+            .to_owned();
+        row.split(" | ").nth(8).unwrap().to_owned()
+    };
+    let mut r = record("x", 0, 10);
+    r.phases[0].probes.remove(1);
+    assert_eq!(ratio(&r, "other-cpu"), "-");
+    assert_eq!(ratio(&r, "storm-cpu"), "1.00 (1.00-1.00)");
+    r.phases[0].probes[0].stat = hist(&[0, 0]);
+    assert_eq!(ratio(&r, "storm-cpu"), "-");
+}

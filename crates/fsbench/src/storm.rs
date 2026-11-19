@@ -13,7 +13,8 @@
 //! `max_probes` `stat`s):
 //! 1. `idle`: no storm.
 //! 2. `one-cpu`: `per_cpu` storm threads pinned to `storm_cpu`.
-//! 3. `every-cpu`: `per_cpu` storm threads pinned to each online CPU.
+//! 3. `every-cpu`: `per_cpu` storm threads pinned to each CPU the process may run on
+//!    ([`usable_cpus`]).
 //!
 //! A storm thread opens its own cold file and reads 4 KiB at an offset it has not read before,
 //! over and over; the file system parks each such READ for `park` and then answers it. Two
@@ -142,11 +143,24 @@ pub fn online_cpus(host: &Host) -> Result<Vec<usize>, Error> {
 /// # Errors
 /// As [`online_cpus`].
 pub fn usable_cpus(host: &Host) -> Result<Vec<usize>, Error> {
-    let mut cpus = online_cpus(host)?;
-    if let Ok(allowed) = rustix::thread::sched_getaffinity(None) {
+    Ok(allowed_of(
+        online_cpus(host)?,
+        rustix::thread::sched_getaffinity(None).ok().as_ref(),
+    ))
+}
+
+/// The CPUs of `cpus` that `allowed` holds (all of them when the affinity is not known).
+fn allowed_of(mut cpus: Vec<usize>, allowed: Option<&rustix::thread::CpuSet>) -> Vec<usize> {
+    if let Some(allowed) = allowed {
         cpus.retain(|&cpu| cpu < rustix::thread::CpuSet::MAX_CPU && allowed.is_set(cpu));
     }
-    Ok(cpus)
+    cpus
+}
+
+/// Whether a probe has done: it has made `max_probes` `stat`s (0: no limit), or its phase has
+/// run `window_ns`.
+fn probes_done(made: u64, max_probes: u64, elapsed_ns: u64, window_ns: u64) -> bool {
+    (max_probes > 0 && made >= max_probes) || elapsed_ns >= window_ns
 }
 
 /// The CPU of the other probe: `asked` if given, else the last online CPU that is not
@@ -380,8 +394,8 @@ fn run_phase(plan: &Plan, spec: &PhaseSpec, watch: &Watch<'_>, clock: Clock) -> 
                 let (path, live) = (plan.mountpoint.join("probe"), &live);
                 scope.spawn(move || {
                     let ended = probe_thread(&path, cpu, clock, |made| {
-                        (plan.max_probes > 0 && made >= plan.max_probes)
-                            || clock.ns().saturating_sub(begin) >= duration_ns(plan.window)
+                        let elapsed = clock.ns().saturating_sub(begin);
+                        probes_done(made, plan.max_probes, elapsed, duration_ns(plan.window))
                     });
                     live.fetch_sub(1, Ordering::Release);
                     ended
@@ -407,7 +421,8 @@ fn run_phase(plan: &Plan, spec: &PhaseSpec, watch: &Watch<'_>, clock: Clock) -> 
             .into_iter()
             .zip(&spec.probes)
             .map(|(handle, &(role, cpu, stormed))| {
-                let (stat, errors) = handle.join().unwrap_or_else(|_| (Histogram::default(), 1));
+                // A probe does not panic; one that did would show as a probe of no `stat`.
+                let (stat, errors) = handle.join().unwrap_or_default();
                 ProbeRecord {
                     role: role.to_owned(),
                     cpu,

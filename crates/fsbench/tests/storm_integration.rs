@@ -192,6 +192,33 @@ fn a_storm_that_cannot_mount_fails_and_writes_nothing() {
     assert!(out.is_empty());
 }
 
+/// A results file that refuses the record fails the storm after its first run, and says so;
+/// the mount is gone.
+#[test]
+fn a_storm_whose_record_cannot_be_written_fails_after_its_run() {
+    let (_dir, mnt) = scratch("fsbench-storm-broken");
+    let plan = plan(&mnt, Transport::Dev, ColdRead::Buffered);
+    let error = run(&plan, Broken, &mut Vec::new()).unwrap_err();
+    assert_eq!(error.to_string(), "storm: write the record: refused");
+    assert!(
+        std::fs::read_dir(&mnt).unwrap().next().is_none(),
+        "unmounted"
+    );
+}
+
+/// A writer that refuses every write.
+struct Broken;
+
+impl std::io::Write for Broken {
+    fn write(&mut self, _: &[u8]) -> std::io::Result<usize> {
+        Err(std::io::Error::other("refused"))
+    }
+
+    fn flush(&mut self) -> std::io::Result<()> {
+        Ok(())
+    }
+}
+
 /// `fsbench storm` appends a record per run to its results file, and `fsbench storm-report`
 /// makes the tables of it; a storm CPU that is not online is refused before anything mounts.
 #[test]

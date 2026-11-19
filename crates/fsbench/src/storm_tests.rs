@@ -10,8 +10,8 @@ use std::time::Duration;
 use tierstore_testkit::dir::TestDir;
 
 use super::{
-    Gate, Plan, cpu_list, online_cpus, other_cpu, phases, pin, raise_open_files, storm_per_cpu,
-    usable_cpus,
+    Gate, Plan, StormShared, allowed_of, cpu_list, online_cpus, other_cpu, phases, pin,
+    probe_thread, probes_done, raise_open_files, storm_per_cpu, storm_thread, usable_cpus,
 };
 use crate::host::Host;
 use crate::stormfs::ColdRead;
@@ -210,4 +210,92 @@ fn the_limit_of_open_files_is_raised_to_the_hard_limit() {
     let hard = rustix::process::getrlimit(rustix::process::Resource::Nofile).maximum;
     assert_eq!(raise_open_files().unwrap(), hard);
     assert_eq!(raise_open_files().unwrap(), hard);
+}
+
+/// A storm thread that cannot pin to its CPU, or cannot open its file, counts the failure by
+/// step and error and arrives at once; one whose reads fail counts each failure and arrives
+/// after its first, and stops when told.
+#[test]
+fn a_storm_thread_counts_each_failure_by_step_and_error() {
+    let dir = TestDir::under(std::env::temp_dir(), "fsbench-storm-thread");
+    let shared = StormShared::default();
+    let allowed = rustix::thread::sched_getaffinity(None).unwrap();
+    let cpu = (0..rustix::thread::CpuSet::MAX_CPU)
+        .find(|&c| allowed.is_set(c))
+        .unwrap();
+    std::thread::scope(|scope| {
+        scope.spawn(|| {
+            storm_thread(
+                &dir.path().join("x"),
+                rustix::thread::CpuSet::MAX_CPU,
+                ColdRead::Buffered,
+                &shared,
+            );
+        });
+        scope.spawn(|| storm_thread(&dir.path().join("missing"), cpu, ColdRead::Direct, &shared));
+        shared.started.wait_for(2);
+        // A directory opens, and every read of it fails.
+        scope.spawn(|| storm_thread(dir.path(), cpu, ColdRead::Buffered, &shared));
+        shared.started.wait_for(3);
+        shared
+            .stop
+            .store(true, std::sync::atomic::Ordering::Relaxed);
+    });
+    let failures = shared.failures.into_inner().unwrap();
+    let keys: Vec<&String> = failures.keys().collect();
+    assert_eq!(
+        keys,
+        [
+            "open: No such file or directory (os error 2)",
+            "pin: Invalid argument (os error 22)",
+            "read: Is a directory (os error 21)",
+        ]
+    );
+    assert_eq!(failures["open: No such file or directory (os error 2)"], 1);
+    assert_eq!(failures["pin: Invalid argument (os error 22)"], 1);
+    assert!(failures["read: Is a directory (os error 21)"] >= 1);
+    assert_eq!(shared.reads.into_inner(), 0);
+}
+
+/// A probe makes as many `stat`s as it is let, timing those that succeed and counting those
+/// that fail; one that cannot pin to its CPU makes none and counts one failure.
+#[test]
+fn a_probe_times_its_stats_and_counts_its_failures() {
+    let dir = TestDir::under(std::env::temp_dir(), "fsbench-storm-probe");
+    let allowed = rustix::thread::sched_getaffinity(None).unwrap();
+    let cpu = (0..rustix::thread::CpuSet::MAX_CPU)
+        .find(|&c| allowed.is_set(c))
+        .unwrap();
+    let clock = crate::clock::Clock::start();
+    let (hist, errors) = probe_thread(dir.path(), cpu, clock, |made| made >= 7);
+    assert_eq!((hist.count, errors), (7, 0));
+    let (hist, errors) = probe_thread(&dir.path().join("missing"), cpu, clock, |made| made >= 3);
+    assert_eq!((hist.count, errors), (0, 3));
+    let (hist, errors) = probe_thread(dir.path(), rustix::thread::CpuSet::MAX_CPU, clock, |_| {
+        false
+    });
+    assert_eq!((hist.count, errors), (0, 1));
+}
+
+/// The CPUs a storm may use are the online CPUs the affinity holds, never one past the kernel's
+/// set; with no affinity known, every online CPU.
+#[test]
+fn the_usable_cpus_are_the_online_ones_the_affinity_holds() {
+    let mut allowed = rustix::thread::CpuSet::new();
+    allowed.set(1);
+    allowed.set(3);
+    let max = rustix::thread::CpuSet::MAX_CPU;
+    assert_eq!(allowed_of(vec![0, 1, 2, 3, max], Some(&allowed)), [1, 3]);
+    assert_eq!(allowed_of(vec![0, 1, max], None), [0, 1, max]);
+}
+
+/// A probe has done when it has made its count of `stat`s (a count of 0 is no limit) or its
+/// window is over, whichever comes first.
+#[test]
+fn a_probe_is_done_at_its_count_or_at_the_end_of_its_window() {
+    assert!(!probes_done(4, 5, 10, 100));
+    assert!(probes_done(5, 5, 10, 100));
+    assert!(!probes_done(1_000_000, 0, 10, 100), "0 is no limit");
+    assert!(probes_done(0, 0, 100, 100));
+    assert!(probes_done(1, 5, 101, 100));
 }

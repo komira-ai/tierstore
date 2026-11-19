@@ -302,3 +302,46 @@ fn the_storm_flags_make_its_plan() {
         "CPU 1 is not online"
     );
 }
+
+/// `storm` with a results file that cannot be opened, and `storm-report` of a file that is not
+/// there or not a storm record, fail before anything is mounted, and say why.
+#[test]
+fn the_storm_commands_fail_on_files_they_cannot_use() {
+    let dir = TestDir::under(std::env::temp_dir(), "fsbench-cli-storm-files");
+    let out = dir.path().join("missing/x.jsonl");
+    let (code, _, err) = fsbench(
+        &[
+            "storm",
+            "--mountpoint",
+            "m",
+            "--label",
+            "l",
+            "--out",
+            text(&out),
+        ],
+        "",
+    );
+    assert_eq!(code, ExitCode::from(1));
+    assert!(
+        err.starts_with(&format!("fsbench: open {}: ", out.display())),
+        "{err}"
+    );
+    let missing = dir.path().join("none.jsonl");
+    let (code, _, err) = fsbench(&["storm-report", "--results", text(&missing)], "");
+    assert_eq!(code, ExitCode::from(1));
+    assert!(
+        err.starts_with(&format!("fsbench: read {}: ", missing.display())),
+        "{err}"
+    );
+    let bad = dir.path().join("bad.jsonl");
+    std::fs::write(&bad, "{}\n").unwrap();
+    let (code, _, err) = fsbench(&["storm-report", "--results", text(&bad)], "");
+    assert_eq!(code, ExitCode::from(1));
+    assert!(
+        err.starts_with(&format!(
+            "fsbench: {}:1: not a storm record: ",
+            bad.display()
+        )),
+        "{err}"
+    );
+}
