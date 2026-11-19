@@ -146,6 +146,11 @@ impl ReplyDevice for DevFd {
             )),
         }
     }
+
+    /// The descriptor itself: `/dev/fuse` takes a whole reply spliced from a pipe in one call.
+    fn splice_target(&self) -> Option<BorrowedFd<'_>> {
+        Some(self.fd.as_fd())
+    }
 }
 
 #[cfg(test)]

@@ -50,6 +50,15 @@ pub fn encode_out_header(
 pub trait ReplyDevice: Send + Sync {
     /// Writes one reply.
     fn send(&self, parts: &[&[u8]]) -> std::io::Result<()>;
+
+    /// The descriptor a reply can be spliced into from a pipe holding all of it (5.3 item 2,
+    /// [`crate::ReplyPath`]), or `None` for a device that takes replies only through
+    /// [`Self::send`] (an io_uring queue: no splice on that transport, 5.2 item 4). `None` unless
+    /// the device says otherwise.
+    #[cfg(target_os = "linux")]
+    fn splice_target(&self) -> Option<std::os::fd::BorrowedFd<'_>> {
+        None
+    }
 }
 
 /// How a completion ended.
@@ -120,7 +129,8 @@ impl Replier {
         self.write(error, payload)
     }
 
-    fn write(&self, error: Option<Errno>, payload: &[&[u8]]) -> Completion {
+    /// Writes the reply; the caller has taken the slot.
+    pub(crate) fn write(&self, error: Option<Errno>, payload: &[&[u8]]) -> Completion {
         let len = payload.iter().map(|p| p.len()).sum();
         let header = encode_out_header(self.unique, error, len);
         let mut parts: Vec<&[u8]> = Vec::with_capacity(payload.len() + 1);
