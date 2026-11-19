@@ -389,7 +389,7 @@ pub struct Conn {
 }
 
 /// Why this machine cannot make a FUSE mount as the user of the tests, if it cannot.
-fn unavailable() -> Option<&'static str> {
+pub fn unavailable() -> Option<&'static str> {
     let device = std::fs::OpenOptions::new()
         .read(true)
         .write(true)

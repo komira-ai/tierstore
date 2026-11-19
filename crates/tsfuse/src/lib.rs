@@ -5,8 +5,11 @@
 //! [`mount`] (`mount(2)`, or `fusermount3`; unmount and abort), [`DevFd`] (a descriptor of a
 //! connection, cloned with `FUSE_DEV_IOC_CLONE`, writing each reply with one `writev`), the
 //! [`Transport`] trait and its `/dev/fuse` implementation [`DevReader`] on `AsyncFd`, and
-//! [`Session`] (INIT, resume without INIT, clones, one reader thread per descriptor, stop). The
-//! io_uring transport (T-F5), the splice reply path (T-F4) and takeover (T-F6) build on them.
+//! [`Session`] (INIT, clones, one reader thread per descriptor, stop), and takeover (row T-F6):
+//! the [`Handover`] a supervisor keeps (every descriptor, the mount's and every clone, with the
+//! terms INIT agreed, passed by `SCM_RIGHTS`), [`Session::resume`] of it without INIT after
+//! `FUSE_NOTIFY_RESEND`, and [`Serving::hand_over`]. The io_uring transport (T-F5) and the splice
+//! reply path (T-F4) build on them; io_uring has no takeover (5.2, item 5).
 //!
 //! **Reply affinity.** A reply is matched by `unique` against the processing queue of the device
 //! it is written to, and every cloned `/dev/fuse` descriptor has its own processing queue, so a
@@ -48,6 +51,8 @@ mod opcode;
 mod reply;
 #[cfg(target_os = "linux")]
 mod session;
+#[cfg(target_os = "linux")]
+mod takeover;
 mod tokens;
 #[cfg(target_os = "linux")]
 mod transport;
@@ -61,5 +66,7 @@ pub use tokens::{CancelToken, Interrupted, Tokens};
 pub use dev::{DEV_FUSE, DevFd};
 #[cfg(target_os = "linux")]
 pub use session::{Serving, Session, SessionError, Stopper};
+#[cfg(target_os = "linux")]
+pub use takeover::{Handover, HandoverError, MAX_DEVICES, TERMS_V1_LEN};
 #[cfg(target_os = "linux")]
 pub use transport::{DevReader, ReaderEnd, Received, Transport};

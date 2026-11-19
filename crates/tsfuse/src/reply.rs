@@ -69,7 +69,9 @@ pub enum Completion {
 /// A replier dropped without being completed (a handler that panics, returns early or forgets it)
 /// takes the slot and writes an `EIO` reply on its originating device (a device error is
 /// ignored), so the kernel request is never left unanswered and the table entry is never leaked.
-/// If an INTERRUPT or a completion already took the slot, the drop writes nothing.
+/// If an INTERRUPT or a completion already took the slot, the drop writes nothing; nor does it
+/// once the session is handed over (`Serving::hand_over` on Linux), since the next server
+/// answers the request after its RESEND.
 #[must_use = "a replier must be completed with ok or error; dropping it answers EIO"]
 pub struct Replier {
     pub(crate) unique: u64,
@@ -133,7 +135,7 @@ impl Replier {
 
 impl Drop for Replier {
     fn drop(&mut self) {
-        if self.slot.take() {
+        if self.slot.take() && !self.slot.handed_over() {
             // Nobody can act on a device error here: the connection is gone or the kernel
             // rejected the reply, and the request is over either way.
             let _ = self.write(Some(Errno::EIO), &[]);

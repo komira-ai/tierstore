@@ -119,6 +119,13 @@ impl AsFd for DevFd {
     }
 }
 
+/// The descriptor, for a [`crate::Handover`].
+impl From<DevFd> for OwnedFd {
+    fn from(dev: DevFd) -> Self {
+        dev.fd
+    }
+}
+
 impl AsRawFd for DevFd {
     fn as_raw_fd(&self) -> RawFd {
         self.fd.as_raw_fd()
