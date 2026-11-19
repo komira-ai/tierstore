@@ -50,6 +50,15 @@ pub fn encode_out_header(
 pub trait ReplyDevice: Send + Sync {
     /// Writes one reply.
     fn send(&self, parts: &[&[u8]]) -> std::io::Result<()>;
+
+    /// The descriptor a reply can be spliced into from a pipe holding all of it (5.3 item 2,
+    /// [`crate::ReplyPath`]), or `None` for a device that takes replies only through
+    /// [`Self::send`] (an io_uring queue: no splice on that transport, 5.2 item 4). `None` unless
+    /// the device says otherwise.
+    #[cfg(target_os = "linux")]
+    fn splice_target(&self) -> Option<std::os::fd::BorrowedFd<'_>> {
+        None
+    }
 }
 
 /// How a completion ended.
@@ -69,7 +78,9 @@ pub enum Completion {
 /// A replier dropped without being completed (a handler that panics, returns early or forgets it)
 /// takes the slot and writes an `EIO` reply on its originating device (a device error is
 /// ignored), so the kernel request is never left unanswered and the table entry is never leaked.
-/// If an INTERRUPT or a completion already took the slot, the drop writes nothing.
+/// If an INTERRUPT or a completion already took the slot, the drop writes nothing; nor does it
+/// once the session is handed over (`Serving::hand_over` on Linux), since the next server
+/// answers the request after its RESEND.
 #[must_use = "a replier must be completed with ok or error; dropping it answers EIO"]
 pub struct Replier {
     pub(crate) unique: u64,
@@ -118,7 +129,8 @@ impl Replier {
         self.write(error, payload)
     }
 
-    fn write(&self, error: Option<Errno>, payload: &[&[u8]]) -> Completion {
+    /// Writes the reply; the caller has taken the slot.
+    pub(crate) fn write(&self, error: Option<Errno>, payload: &[&[u8]]) -> Completion {
         let len = payload.iter().map(|p| p.len()).sum();
         let header = encode_out_header(self.unique, error, len);
         let mut parts: Vec<&[u8]> = Vec::with_capacity(payload.len() + 1);
@@ -133,7 +145,7 @@ impl Replier {
 
 impl Drop for Replier {
     fn drop(&mut self) {
-        if self.slot.take() {
+        if self.slot.take() && !self.slot.handed_over() {
             // Nobody can act on a device error here: the connection is gone or the kernel
             // rejected the reply, and the request is over either way.
             let _ = self.write(Some(Errno::EIO), &[]);

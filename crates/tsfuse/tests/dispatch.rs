@@ -3,7 +3,7 @@
 //! INTERRUPT read by another reader cancels the task and is answered once; a parked reply
 //! completes while every reader is blocked in an inline operation.
 //!
-//! The devices are socket pairs (`common::sock`), one per reader, as clones are several
+//! The devices are socket pairs (`common::fake`), one per reader, as clones are several
 //! descriptors of one connection; the kernel's own refusal of a reply on the wrong clone is the
 //! subject of `kernel_dispatch_integration.rs`.
 //!
@@ -24,14 +24,17 @@
 mod common;
 
 use std::collections::BTreeMap;
+use std::os::fd::OwnedFd;
 use std::sync::mpsc::{Receiver, Sender, channel};
 use std::sync::{Arc, Condvar, Mutex};
 
-use common::sock::{Kernel, fake_device, pending, read_message, read_reply};
+use common::fake::{Kernel, fake_device, pending, read_message, read_reply};
 use common::{getattr, init_request, request};
 use tokio::sync::oneshot;
 use tsfuse::abi::{InitConfig, InterruptIn};
-use tsfuse::{Completion, DevFd, Fs, Handled, ReaderEnd, Replier, Request, Session};
+use tsfuse::{
+    Completion, DevFd, Fs, Handled, Handover, ReaderEnd, Replier, Request, Session,
+};
 
 /// The terms of a session initialised by a 7.40 kernel.
 fn negotiated() -> tsfuse::abi::Negotiated {
@@ -40,6 +43,13 @@ fn negotiated() -> tsfuse::abi::Negotiated {
     let session = Session::init(device, &InitConfig::tree()).unwrap();
     assert_eq!(read_reply(&kernel).0, 0);
     *session.negotiated()
+}
+
+/// The session of `devices`, resumed with the terms of [`negotiated`] as a supervisor's handover
+/// gives them.
+fn resume(devices: Vec<DevFd>) -> Session {
+    let fds = devices.into_iter().map(OwnedFd::from).collect();
+    Session::resume(Handover::new(negotiated(), fds).unwrap()).unwrap()
 }
 
 /// `readers` devices and the kernel's end of each.
@@ -128,7 +138,7 @@ fn parked_requests_answered_by_tasks_go_to_their_readers_and_an_interrupt_is_ans
         ended: Mutex::new(ended_tx),
     });
     let (devs, kernels) = devices(3);
-    let session = Session::resume(devs, negotiated()).unwrap();
+    let session = resume(devs);
     let tokens = session.tokens().clone();
     let serving = session.serve(fs.clone()).unwrap();
 
@@ -203,7 +213,7 @@ impl Fs for BlockingFs {
 fn a_parked_reply_completes_while_every_reader_is_blocked_inline() {
     let shared: Arc<Shared<Blocking>> = Shared::new();
     let (devs, kernels) = devices(2);
-    let session = Session::resume(devs, negotiated()).unwrap();
+    let session = resume(devs);
     let serving = session.serve(Arc::new(BlockingFs(shared.clone()))).unwrap();
 
     kernels[0].send(&request(1, 10, 1, b"x\0")).unwrap();

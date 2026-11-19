@@ -119,6 +119,13 @@ impl AsFd for DevFd {
     }
 }
 
+/// The descriptor, for a [`crate::Handover`].
+impl From<DevFd> for OwnedFd {
+    fn from(dev: DevFd) -> Self {
+        dev.fd
+    }
+}
+
 impl AsRawFd for DevFd {
     fn as_raw_fd(&self) -> RawFd {
         self.fd.as_raw_fd()
@@ -138,6 +145,11 @@ impl ReplyDevice for DevFd {
                 format!("FUSE reply of {want} bytes was written short, {wrote} bytes"),
             )),
         }
+    }
+
+    /// The descriptor itself: `/dev/fuse` takes a whole reply spliced from a pipe in one call.
+    fn splice_target(&self) -> Option<BorrowedFd<'_>> {
+        Some(self.fd.as_fd())
     }
 }
 

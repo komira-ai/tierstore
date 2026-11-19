@@ -5,11 +5,17 @@
 //! [`mount`] (`mount(2)`, or `fusermount3`; unmount and abort), [`DevFd`] (a descriptor of a
 //! connection, cloned with `FUSE_DEV_IOC_CLONE`, writing each reply with one `writev`), the
 //! [`Transport`] trait and its `/dev/fuse` implementation [`DevReader`] on `AsyncFd`, and
-//! [`Session`] (INIT, resume without INIT, clones, one reader thread per descriptor, stop), whose
-//! readers route each request (row T-F3): INTERRUPT to the [`Tokens`] table, FORGET dropped,
-//! DESTROY, a second INIT and an opcode not implemented answered at once, every other request
-//! registered and handed to [`Fs::handle`]. The io_uring
-//! transport (T-F5), the splice reply path (T-F4) and takeover (T-F6) build on them.
+//! [`Session`] (INIT, clones, one reader thread per descriptor, stop), whose readers route each
+//! request (row T-F3): INTERRUPT to the [`Tokens`] table, FORGET dropped, DESTROY, a second INIT
+//! and an opcode not implemented answered at once, every other request registered and handed to
+//! [`Fs::handle`]; and takeover (row T-F6):
+//! the [`Handover`] a supervisor keeps (every descriptor, the mount's and every clone, with the
+//! terms INIT agreed, passed by `SCM_RIGHTS`), [`Session::resume`] of it without INIT after
+//! `FUSE_NOTIFY_RESEND`, and [`Serving::hand_over`]. The io_uring transport (T-F5) builds on
+//! them; io_uring has no takeover (5.2, item 5). [`ReplyPath`] (row T-F4) sends READ replies by
+//! splice through pooled pipes sized with `F_SETPIPE_SZ`, or below a threshold by `pread` and
+//! `writev`, and [`Dontneed`] is the server's `posix_fadvise(DONTNEED)` on whole `durable` cells
+//! (5.3 item 2, 4.8).
 //!
 //! **Reply affinity.** A reply is matched by `unique` against the processing queue of the device
 //! it is written to, and every cloned `/dev/fuse` descriptor has its own processing queue, so a
@@ -50,7 +56,11 @@ pub mod mount;
 mod opcode;
 mod reply;
 #[cfg(target_os = "linux")]
+mod reply_path;
+#[cfg(target_os = "linux")]
 mod session;
+#[cfg(target_os = "linux")]
+mod takeover;
 mod tokens;
 #[cfg(target_os = "linux")]
 mod transport;
@@ -63,6 +73,13 @@ pub use tokens::{CancelToken, Interrupted, Tokens};
 #[cfg(target_os = "linux")]
 pub use dev::{DEV_FUSE, DevFd};
 #[cfg(target_os = "linux")]
+pub use reply_path::{
+    Dontneed, DontneedError, FillFailed, Filled, ReplyConfig, ReplyCounts, ReplyPath,
+    ReplyPathError, SPLICE_MIN,
+};
+#[cfg(target_os = "linux")]
 pub use session::{Serving, Session, SessionError, Stopper};
+#[cfg(target_os = "linux")]
+pub use takeover::{Handover, HandoverError, MAX_DEVICES, TERMS_V1_LEN};
 #[cfg(target_os = "linux")]
 pub use transport::{DevReader, ReaderEnd, Received, Transport};
