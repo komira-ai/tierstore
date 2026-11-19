@@ -5,7 +5,8 @@
 //! the CPU times, tells every reader to go, and samples D state and the FUSE requests waiting
 //! once per interval until the last reader answers. It reads the CPU times again and stops the
 //! burners. Then the first `throughput_readers` readers read the largest files whole, cold and
-//! then warm, with no burner running. The readers are stopped (their input is closed) and the
+//! then warm, `throughput_rounds` times each, with no burner running; the CPU times of the
+//! server and its control group are read before and after each of the two phases. The readers are stopped (their input is closed) and the
 //! record is written. Every run starts new processes, so no run inherits a reader's state.
 
 use std::collections::BTreeMap;
@@ -23,7 +24,7 @@ use crate::hist::Histogram;
 use crate::host::{self, CgroupCpu, Host, NodeCpu, ProcessCpu};
 use crate::list::{self, FileList};
 use crate::reader::{Answer, CycleCounts, Go, WholeCounts};
-use crate::record::{Cpu, Cycles, FORMAT, Input, RunRecord, Samples, Server, Throughput};
+use crate::record::{Cpu, Cycles, FORMAT, Input, PhaseCpu, RunRecord, Samples, Server, Throughput};
 
 /// What to run.
 #[derive(Clone, Debug)]
@@ -54,6 +55,8 @@ pub struct Plan {
     pub throughput_budget: u64,
     /// The readers of the whole-file reads, the first of the readers.
     pub throughput_readers: u32,
+    /// How many times each whole-file phase reads its files.
+    pub throughput_rounds: u32,
     /// The interval of the samples.
     pub sample_every: Duration,
     /// The process that serves the mount.
@@ -311,8 +314,20 @@ fn merge(all: Vec<CycleCounts>, wall_ns: u64) -> Cycles {
     }
 }
 
-/// The whole-file reads of the readers, added up.
-fn throughput(all: &[WholeCounts], wall_ns: u64) -> Throughput {
+/// The CPU the server and its control group spent from `from` to `to` over `bytes` bytes read.
+fn phase_cpu(from: &CpuAt, to: &CpuAt, bytes: u64) -> PhaseCpu {
+    let spent = cpu_between(from, to, 1);
+    let per_gb = |ms: f64| ms * 1e9 / bytes.max(1) as f64;
+    PhaseCpu {
+        server: spent.server,
+        cgroup: spent.cgroup,
+        server_ms_per_gb: per_gb((spent.server.user_ms + spent.server.system_ms) as f64),
+        cgroup_system_ms_per_gb: spent.cgroup.map(|c| per_gb(c.system_us as f64 / 1000.0)),
+    }
+}
+
+/// The whole-file reads of the readers, added up, and the CPU spent on them.
+fn throughput(all: &[WholeCounts], wall_ns: u64, cpu: Option<(&CpuAt, &CpuAt)>) -> Throughput {
     let (files, bytes, errors) = all.iter().fold((0, 0, 0), |(f, b, e), c| {
         (f + c.files, b + c.bytes, e + c.errors)
     });
@@ -322,28 +337,34 @@ fn throughput(all: &[WholeCounts], wall_ns: u64) -> Throughput {
         errors,
         wall_ns,
         mb_per_s: bytes as f64 * 1e3 / wall_ns.max(1) as f64,
+        cpu: cpu.map(|(from, to)| phase_cpu(from, to, bytes)),
     }
 }
 
-/// One whole-file phase over the first `throughput_readers` readers.
+/// One whole-file phase over the first `throughput_readers` readers, `throughput_rounds` times.
 fn whole_phase(plan: &Plan, readers: &mut Kids, cold: bool) -> Result<Throughput, Error> {
+    let before = CpuAt::read(plan)?;
     let clock = Clock::start();
     let of = plan.throughput_readers;
-    for index in 0..of {
-        let go = Go::Whole {
-            index,
-            of,
-            budget: plan.throughput_budget,
-            cold,
-        };
-        readers.send(index as usize, &go)?;
-    }
     let mut all = Vec::new();
-    for index in 0..of as usize {
-        let answer = readers.answer(index)?;
-        all.push(whole_of(&readers.0[index].name, answer)?);
+    for _ in 0..plan.throughput_rounds {
+        for index in 0..of {
+            let go = Go::Whole {
+                index,
+                of,
+                budget: plan.throughput_budget,
+                cold,
+            };
+            readers.send(index as usize, &go)?;
+        }
+        for index in 0..of as usize {
+            let answer = readers.answer(index)?;
+            all.push(whole_of(&readers.0[index].name, answer)?);
+        }
     }
-    Ok(throughput(&all, clock.ns()))
+    let wall_ns = clock.ns();
+    let after = CpuAt::read(plan)?;
+    Ok(throughput(&all, wall_ns, Some((&before, &after))))
 }
 
 /// One run, number `run`.
@@ -415,6 +436,7 @@ fn one(plan: &Plan, list: &FileList, connection: u64, run: u32) -> Result<RunRec
             read_bytes: plan.read_bytes,
             throughput_budget: plan.throughput_budget,
             throughput_readers: plan.throughput_readers,
+            throughput_rounds: plan.throughput_rounds,
         },
         env,
         server: Server {
@@ -451,16 +473,17 @@ fn summary(record: &RunRecord) -> String {
     )
 }
 
-/// Refuses a plan that cannot be run: no run, no reader, no whole-file reader, or more whole-file
-/// readers than readers.
+/// Refuses a plan that cannot be run: no run, no reader, no whole-file reader, more whole-file
+/// readers than readers, or no whole-file round.
 fn check(plan: &Plan) -> Result<(), Error> {
     if plan.runs == 0
         || plan.readers == 0
         || plan.throughput_readers == 0
         || plan.throughput_readers > plan.readers
+        || plan.throughput_rounds == 0
     {
         return Err(Error::Usage(
-            "a run needs at least one run and one reader, and from one whole-file reader to as many as there are readers"
+            "a run needs at least one run, one reader and one whole-file round, and from one whole-file reader to as many as there are readers"
                 .to_owned(),
         ));
     }

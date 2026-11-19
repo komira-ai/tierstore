@@ -4,8 +4,12 @@
 //! fsbench list --tree <dir> --out <list>
 //! fsbench null-fs --list <list> --mountpoint <dir> [--entry-timeout-ms N] [--attr-timeout-ms N]
 //!                 [--open explicit|none] [--threads N] [--allow-other]
+//! fsbench tsfuse-null-fs --list <list> --mountpoint <dir> --data <file> [--entry-timeout-ms N]
+//!                 [--attr-timeout-ms N] [--open explicit|none] [--readers N]
+//!                 [--reply writev|splice] [--splice-min BYTES] [--move-pages] [--allow-other]
 //! fsbench run --list <list> --tree <dir> --variant <label> --regime <label> --server-pid <pid>
-//!             --out <results> [--runs 6] [--readers 256] [--burners 176] [--secs 60] ...
+//!             --out <results> [--runs 6] [--readers 256] [--burners 176] [--secs 60]
+//!             [--throughput-rounds 1] ...
 //! fsbench report --results <results> [--discard 1]
 //! ```
 //!
@@ -16,6 +20,7 @@
 use std::collections::BTreeMap;
 use std::ffi::OsString;
 use std::io::{BufReader, Read, Write};
+use std::num::NonZeroUsize;
 use std::path::{Path, PathBuf};
 use std::process::ExitCode;
 use std::time::Duration;
@@ -25,6 +30,7 @@ use clap::{Parser, Subcommand};
 use crate::Error;
 use crate::host::Host;
 use crate::nullfs::{OpenMode, Options};
+use crate::tsnull::Reply;
 
 /// The FUSE benchmark of tierstore fs.
 #[derive(Debug, Parser)]
@@ -69,6 +75,9 @@ enum Command {
         #[arg(long)]
         allow_other: bool,
     },
+    /// Serve the files of a list from a data file on tsfuse, until standard input closes (the
+    /// null file system of the redesign's variants).
+    TsfuseNullFs(TsfuseArgs),
     /// The runs of one variant in one regime; each run's record is appended to `--out`.
     Run(RunArgs),
     /// The tables of a results file, for a measurement document.
@@ -91,6 +100,43 @@ enum Command {
     /// A CPU burner of `run` (not run by hand): spins until standard input closes.
     #[command(hide = true)]
     Burn,
+}
+
+#[derive(Debug, clap::Args)]
+struct TsfuseArgs {
+    /// The list.
+    #[arg(long)]
+    list: PathBuf,
+    /// Where to mount.
+    #[arg(long)]
+    mountpoint: PathBuf,
+    /// The file READs are answered from: made, or extended with a hole, to the list's length.
+    #[arg(long)]
+    data: PathBuf,
+    /// How long the kernel may keep an entry, in milliseconds.
+    #[arg(long, default_value_t = 0)]
+    entry_timeout_ms: u64,
+    /// How long the kernel may keep attributes, in milliseconds.
+    #[arg(long, default_value_t = 0)]
+    attr_timeout_ms: u64,
+    /// How `OPEN` and `OPENDIR` are answered.
+    #[arg(long, value_enum, default_value_t = OpenMode::Explicit)]
+    open: OpenMode,
+    /// The readers: the mount's descriptor and its clones, a thread each.
+    #[arg(long, default_value_t = NonZeroUsize::MIN)]
+    readers: NonZeroUsize,
+    /// How READ replies are written.
+    #[arg(long, value_enum, default_value_t = Reply::Writev)]
+    reply: Reply,
+    /// The smallest READ reply that is spliced, in bytes (`--reply splice`).
+    #[arg(long, default_value_t = tsfuse::SPLICE_MIN)]
+    splice_min: usize,
+    /// Splice into the device with `SPLICE_F_MOVE` (`--reply splice`).
+    #[arg(long)]
+    move_pages: bool,
+    /// Let other users use the mount (`allow_other`).
+    #[arg(long)]
+    allow_other: bool,
 }
 
 #[derive(Debug, clap::Args)]
@@ -137,6 +183,9 @@ struct RunArgs {
     /// The readers of the whole-file reads.
     #[arg(long, default_value_t = 16)]
     throughput_readers: u32,
+    /// How many times each whole-file phase (cold, then warm) reads its files.
+    #[arg(long, default_value_t = 1)]
+    throughput_rounds: u32,
     /// The interval of the samples of D state and waiting, in milliseconds.
     #[arg(long, default_value_t = 1000)]
     sample_ms: u64,
@@ -216,6 +265,26 @@ fn dispatch(
                 stdout,
             )
         }
+        Command::TsfuseNullFs(args) => {
+            let options = crate::tsnull::Options {
+                entry_timeout: Duration::from_millis(args.entry_timeout_ms),
+                attr_timeout: Duration::from_millis(args.attr_timeout_ms),
+                open: args.open,
+                readers: args.readers,
+                reply: args.reply,
+                splice_min: args.splice_min,
+                move_pages: args.move_pages,
+                allow_other: args.allow_other,
+            };
+            crate::tsnull::serve(
+                &crate::list::read(&args.list)?,
+                &args.mountpoint,
+                &args.data,
+                options,
+                stdin,
+                stdout,
+            )
+        }
         Command::Run(args) => {
             let plan = crate::run::Plan {
                 exe: exe.to_path_buf(),
@@ -231,6 +300,7 @@ fn dispatch(
                 read_bytes: args.read_bytes,
                 throughput_budget: args.throughput_mib.saturating_mul(1 << 20),
                 throughput_readers: args.throughput_readers,
+                throughput_rounds: args.throughput_rounds,
                 sample_every: Duration::from_millis(args.sample_ms),
                 server_pid: args.server_pid,
                 as_user: args.as_user,

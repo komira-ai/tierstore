@@ -1,11 +1,13 @@
-//! The record of one run: one JSON object per line of a results file, format 1.
+//! The record of one run: one JSON object per line of a results file, format 2.
 //!
 //! A record holds what was run (the variant, the regime, the fixed inputs and the settings the
 //! operator declared), where (the environment the harness read), and what was measured: the
-//! cycles of the readers with a latency histogram per call, the cold and warm whole-file reads,
-//! the CPU time of the server, its control group and the node over the cycles, and the samples
-//! of D state and of the FUSE requests waiting. A later format only adds fields, so a reader of
-//! format 1 reads its records.
+//! cycles of the readers with a latency histogram per call, the cold and warm whole-file reads
+//! with the CPU time the server and its control group spent on each, the CPU time of the server,
+//! its control group and the node over the cycles, and the samples of D state and of the FUSE
+//! requests waiting. A later format only adds fields, so a reader of format 1 reads its records:
+//! format 2 added [`Input::throughput_rounds`] (1 in a record of format 1) and
+//! [`Throughput::cpu`] (none in a record of format 1).
 
 use std::collections::BTreeMap;
 
@@ -15,7 +17,7 @@ use crate::hist::Histogram;
 use crate::host::{CgroupCpu, Environment, NodeCpu, ProcessCpu};
 
 /// The format of the records this harness writes.
-pub const FORMAT: u32 = 1;
+pub const FORMAT: u32 = 2;
 
 /// One run.
 #[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
@@ -72,6 +74,14 @@ pub struct Input {
     pub throughput_budget: u64,
     /// The reader processes of the whole-file reads.
     pub throughput_readers: u32,
+    /// How many times each whole-file phase reads its files (1 in a record of format 1).
+    #[serde(default = "one")]
+    pub throughput_rounds: u32,
+}
+
+/// The rounds of a record that does not say.
+fn one() -> u32 {
+    1
 }
 
 /// The process that serves the mount.
@@ -119,6 +129,23 @@ pub struct Throughput {
     pub wall_ns: u64,
     /// `bytes` per second of `wall_ns`, in units of 10^6 bytes.
     pub mb_per_s: f64,
+    /// The CPU time the server and its control group spent during the phase (none in a record
+    /// of format 1).
+    #[serde(default)]
+    pub cpu: Option<PhaseCpu>,
+}
+
+/// The CPU time spent during a phase of whole-file reads.
+#[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
+pub struct PhaseCpu {
+    /// The server process's own (`utime`, `stime`).
+    pub server: ProcessCpu,
+    /// The server's control group's, when it is in one.
+    pub cgroup: Option<CgroupCpu>,
+    /// The server's user and system milliseconds per 10^9 bytes read.
+    pub server_ms_per_gb: f64,
+    /// The control group's system (kernel) milliseconds per 10^9 bytes read.
+    pub cgroup_system_ms_per_gb: Option<f64>,
 }
 
 /// The CPU time spent during the cycles.
@@ -179,6 +206,7 @@ pub(crate) fn example() -> RunRecord {
             read_bytes: 4096,
             throughput_budget: 300,
             throughput_readers: 1,
+            throughput_rounds: 1,
         },
         env: Environment {
             kernel: Some("7.0.0".to_owned()),
@@ -210,6 +238,7 @@ pub(crate) fn example() -> RunRecord {
             errors: 0,
             wall_ns: 3,
             mb_per_s: 100.0,
+            cpu: None,
         },
         warm: Throughput {
             files: 3,
@@ -217,6 +246,7 @@ pub(crate) fn example() -> RunRecord {
             errors: 0,
             wall_ns: 1,
             mb_per_s: 400.0,
+            cpu: None,
         },
         cpu: Cpu {
             server: ProcessCpu {
