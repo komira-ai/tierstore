@@ -9,8 +9,10 @@
 //! misses. `mincore` and `cachestat` would need `unsafe`, AGENTS.md R2.)
 //!
 //! The mapping half of K24 (a `PROT_WRITE` shared mapping of a sealed memfd is refused) needs
-//! `mmap`, which is `unsafe` in Rust and so not called here (AGENTS.md R2); the findings document
-//! records it from the kernel's source.
+//! `mmap`, which is `unsafe` in Rust and so not called here (AGENTS.md R2); it runs on the store's
+//! own state memfd in `tierstore-entry`
+//! (`a_writable_shared_mapping_of_the_passed_state_memfd_fails_with_eperm`, through `vm-memory`),
+//! item 11 of the conformance suite (`docs/design/tsfuse-conformance.md`).
 //!
 //! An integration target: it reads `/proc/self/fd`, `/proc/thread-self/io` and the page cache of
 //! a file in the target directory.

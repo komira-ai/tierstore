@@ -498,7 +498,8 @@ mapping made before it.
 
 **Run.** `a_future_write_sealed_memfd_refuses_every_write_and_resize_and_keeps_its_bytes` (`write`,
 `pwrite` in place and a hole punch are `EPERM`, also through a read-write reopen from
-`/proc/self/fd`; the bytes read back). The mapping cases need `mmap` (not run, see above).
+`/proc/self/fd`; the bytes read back). The mapping cases need `mmap`, not called here; they run on the store's state memfd in
+`tierstore-entry` (see "What is left").
 
 **Design.** 5.1 said "forbids new writable mappings": corrected to "new writable shared mappings";
 the server seals before the descriptor leaves it and before any other mapping of it; the conformance
@@ -563,4 +564,7 @@ reads K15 to K17), and the T-F0 row and the "what was not run" notes. The measur
   possible CPU's queue has an entry; one failed REGISTER turns io_uring off for the connection; a
   parked READ holds its entry and requests from that CPU wait behind it; FORGET and INTERRUPT arrive
   on `/dev/fuse`; a server killed under load (`ECANCELED`, K14).
-- **The mapping half of K24**, in the conformance suite (T-F7) under the same exception.
+- **The mapping half of K24** needs no exception: it runs on the store's own state memfd in
+  `tierstore-entry` (`a_writable_shared_mapping_of_the_passed_state_memfd_fails_with_eperm`, which
+  maps through `vm-memory`'s mapping and writes no `unsafe` of its own), and the conformance suite
+  (T-F7, `docs/design/tsfuse-conformance.md`, item 11) counts it there.

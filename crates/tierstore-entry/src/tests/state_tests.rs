@@ -47,6 +47,18 @@ fn the_passed_state_memfd_carries_every_mount_seal() {
 }
 
 #[test]
+fn the_passed_state_memfd_is_not_executable_and_sealed_against_becoming_so() {
+    // `MFD_NOEXEC_SEAL` (5.1, K25): creation works at every `vm.memfd_noexec` setting, where a
+    // memfd asked for without it is refused at 2.
+    let dir = scratch("state-noexec");
+    let (_store, e) = open(&dir, "p", 3 * MIB);
+    let state = e.fds().unwrap().state;
+    let seals = rustix::fs::fcntl_get_seals(state).unwrap();
+    assert!(seals.contains(SealFlags::EXEC), "{seals:?}");
+    assert_eq!(rustix::fs::fstat(state).unwrap().st_mode & 0o111, 0);
+}
+
+#[test]
 fn a_writable_shared_mapping_of_the_passed_state_memfd_fails_with_eperm() {
     let dir = scratch("state-prot-write");
     let (_store, e) = open(&dir, "p", 3 * MIB);
