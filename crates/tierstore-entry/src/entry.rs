@@ -466,7 +466,8 @@ impl Entry for FileEntry {
     /// journal sync. A cell published again after the commit took its cells (evicted and fetched
     /// again during the sync) is left for the next commit, since its new bytes may postdate the
     /// sync; so is a cell the evictor holds (`evicting`), which an abort may return to `present`. A
-    /// cell evicted to `absent` is dropped: its bytes are gone.
+    /// cell evicted to `absent` is dropped: its bytes are gone. When no pending cell is `present`
+    /// the commit does nothing (no sync, a report of zeros) and keeps the `evicting` ones pending.
     ///
     /// A failed `fdatasync` is returned and its cells are never marked durable, not even by a later
     /// commit: after a failed sync Linux may have dropped the dirty pages and cleared the error, so
@@ -474,7 +475,16 @@ impl Entry for FileEntry {
     /// them (section 8).
     fn commit_batch(&self) -> Result<CommitReport, EntryError> {
         let cells = std::mem::take(&mut *lock(&self.undurable));
-        if cells.is_empty() {
+        if !cells
+            .iter()
+            .any(|c| self.state_of(*c) == Some(CellState::Present))
+        {
+            // Nothing to make durable: no sync. The cells the evictor holds stay pending.
+            lock(&self.undurable).extend(
+                cells
+                    .into_iter()
+                    .filter(|c| self.state_of(*c) == Some(CellState::Evicting)),
+            );
             return Ok(CommitReport::default());
         }
         self.data

@@ -1,8 +1,7 @@
 //! [`FileEntryStore`]: the node cache's entries on Linux (section 2, 7).
 //!
-//! Layout: `<cache>/packs-v2/aa/bb/<hash>.pack` (the sparse data file) and `<hash>.jnl` (its
-//! journal) beside it, where `<hash>` is the hex sha256 of the pack id and `aa`, `bb` its first two
-//! bytes. The id includes `pack_root`, so a changed pack never reuses a file (8).
+//! Layout ([`crate::layout`]): `<cache>/packs-v2/aa/bb/<hash>.pack` (the sparse data file) and
+//! `<hash>.jnl` (its journal) beside it.
 //!
 //! **Locks.** The store's map of entries is locked while an entry is opened or removed, across
 //! that entry's file work: making its directory, opening, locking and truncating its data file
@@ -14,36 +13,17 @@
 //! order is: the map of entries, then the map of holders, then an entry's own locks.
 
 use std::collections::BTreeMap;
-use std::fmt::Write as _;
-use std::io;
 use std::path::{Path, PathBuf};
 use std::sync::{Arc, Mutex, MutexGuard, PoisonError};
 
-use sha2::{Digest, Sha256};
 use tierstore_fetch_api::entry::{
     Entry, EntryError, EntryInfo, EntrySpec, EntryStore, HolderCounters,
 };
-use tierstore_fetch_api::ids::{HolderId, PackId, PackRoot};
+use tierstore_fetch_api::ids::{HolderId, PackId};
 use tierstore_fetch_api::page::CounterRegion;
 
 use crate::entry::{EntryPaths, FileEntry};
-
-/// The directory of the entries under the cache directory.
-pub const PACKS_DIR: &str = "packs-v2";
-
-/// Why a store could not be opened.
-#[derive(Debug, thiserror::Error)]
-pub enum StoreError {
-    /// The entries' directory could not be made.
-    #[error("making {}: {source}", path.display())]
-    Dir {
-        /// The directory.
-        path: PathBuf,
-        /// The error.
-        #[source]
-        source: io::Error,
-    },
-}
+use crate::layout::{StoreError, entry_dir, packs_dir, region_end, unlink};
 
 /// The entries of one cache directory, each a [`FileEntry`].
 #[derive(Debug)]
@@ -57,54 +37,13 @@ fn lock<T>(m: &Mutex<T>) -> MutexGuard<'_, T> {
     m.lock().unwrap_or_else(PoisonError::into_inner)
 }
 
-/// Unlinks `path`; a path that is already gone is not an error.
-fn unlink(path: &Path) -> io::Result<()> {
-    std::fs::remove_file(path).or_else(|e| {
-        if e.kind() == io::ErrorKind::NotFound {
-            Ok(())
-        } else {
-            Err(e)
-        }
-    })
-}
-
-/// The hex sha256 that names `pack`'s files: of a version tag, the key's length and bytes, and
-/// the root's kind and bytes, so no two ids give the same input.
-#[must_use]
-pub(crate) fn file_hash(pack: &PackId) -> String {
-    let mut h = Sha256::new();
-    h.update(b"tierstore-entry/1\0");
-    h.update((pack.key.0.len() as u64).to_le_bytes());
-    h.update(pack.key.0.as_bytes());
-    match pack.root {
-        PackRoot::Digest(d) => {
-            h.update([0]);
-            h.update(d);
-        }
-        PackRoot::Etag(g) => {
-            h.update([1]);
-            h.update(g.0);
-        }
-    }
-    h.finalize().iter().fold(String::new(), |mut s, b| {
-        // Writing to a String does not fail.
-        let _ = write!(s, "{b:02x}");
-        s
-    })
-}
-
 impl FileEntryStore {
     /// The store of the cache directory `cache`: its entries live in `cache/packs-v2`, which is
     /// made if it is missing. It starts with no entry open: an entry is opened (and locked) by
     /// [`EntryStore::open`].
     pub fn new(cache: &Path) -> Result<Self, StoreError> {
-        let dir = cache.join(PACKS_DIR);
-        std::fs::create_dir_all(&dir).map_err(|source| StoreError::Dir {
-            path: dir.clone(),
-            source,
-        })?;
         Ok(Self {
-            dir,
+            dir: packs_dir(cache)?,
             entries: Mutex::new(BTreeMap::new()),
             holders: Mutex::new(BTreeMap::new()),
         })
@@ -118,8 +57,7 @@ impl FileEntryStore {
 
     /// The files of `pack`'s entry.
     fn paths(&self, pack: &PackId) -> EntryPaths {
-        let hash = file_hash(pack);
-        let dir = self.dir.join(&hash[0..2]).join(&hash[2..4]);
+        let (dir, hash) = entry_dir(&self.dir, pack);
         EntryPaths {
             data: dir.join(format!("{hash}.pack")),
             journal: dir.join(format!("{hash}.jnl")),
@@ -237,10 +175,7 @@ impl EntryStore for FileEntryStore {
             pack: pack.clone(),
             region,
         };
-        let end = region
-            .end()
-            .filter(|_| region.is_valid() && region.groups == entry.group_count())
-            .ok_or_else(bad)?;
+        let end = region_end(region, entry.group_count()).ok_or_else(bad)?;
         match entry.region_of(holder) {
             Some(known) if known == region => return Ok(()),
             Some(_) => return Err(bad()),

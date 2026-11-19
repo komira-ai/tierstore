@@ -22,7 +22,7 @@ use tierstore_fetch_api::page::CounterRegion;
 use tierstore_format::ids::Generation;
 
 use super::{MIB, bytes, open, pack, publish, scratch, spec};
-use crate::store::file_hash;
+use crate::layout::file_hash;
 use crate::{FileEntryStore, PACKS_DIR, StoreError};
 
 #[test]

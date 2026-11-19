@@ -15,7 +15,8 @@ use tierstore_fetch_api::page::epoch_of;
 use super::EntryStoreFixture;
 use super::check::{ensure, ensure_eq, expect_err, expect_ok};
 use super::support::{
-    MIB, at, bytes, cb, cell_len, cells, open, pack, publish, run, same, state_of,
+    MIB, at, bytes, cb, cell_len, cells, open, pack, publish, punch_as_able, run, same, state_of,
+    unsupported,
 };
 
 /// A new entry has every cell absent and not durable, counts them so, was never used, has no
@@ -487,7 +488,7 @@ pub fn evict_steps_keep_the_durable_bit_and_refuse_wrong_states(f: &dyn EntrySto
         e.evict_cell_cas(0, EvictStep::Begin),
         "Begin before the punch",
     );
-    expect_ok(e.punch(&[run(0, 1)]), "punch of cell 0");
+    punch_as_able(f, &*e, &[run(0, 1)], "punch of cell 0");
     ensure_eq(
         state_of(&*e, 0),
         Some(CellState::Evicting),
@@ -571,6 +572,11 @@ pub fn punch_refuses_wrong_cells_with_no_effect(f: &dyn EntryStoreFixture) {
 /// `punch` of evicting runs journals one record per non-empty run and syncs the journal once
 /// for the call, reports the bytes released (the short last cell by its length), changes no
 /// state, and after `Finish` the cells are absent, not readable and claimable again.
+///
+/// A store whose fixture says it cannot punch ([`EntryStoreFixture::punches`] is `false`: a
+/// volume that cannot release a run inside a file, 5.6 (b)) is held to the refusal instead: the
+/// batch is [`EntryError::Io`] of kind [`std::io::ErrorKind::Unsupported`] with no effect, so the
+/// cells stay `evicting` with their bytes and the evictor aborts them back to `present`.
 pub fn punch_releases_runs_with_one_journal_sync_per_call(f: &dyn EntryStoreFixture) {
     let store = f.store();
     let e = open(&*store, "p", 4 * MIB + 7);
@@ -582,6 +588,30 @@ pub fn punch_releases_runs_with_one_journal_sync_per_call(f: &dyn EntryStoreFixt
             e.evict_cell_cas(c, EvictStep::Begin),
             format_args!("Begin of cell {c}"),
         );
+    }
+    if !f.punches() {
+        expect_err(
+            e.punch(&[run(0, 2), run(2, 0), run(4, 1)]),
+            unsupported,
+            "a punch on a store that cannot punch",
+        );
+        ensure_eq(
+            e.counts().evicting,
+            3,
+            "a refused punch leaves the cells evicting",
+        );
+        for c in [0, 1, 4] {
+            ensure(
+                e.evict_cell_cas(c, EvictStep::Abort),
+                format_args!("Abort of cell {c}"),
+            );
+            ensure_eq(
+                expect_ok(e.read_cell(c), "read of a cell whose punch was refused"),
+                bytes(&*e, c, 6),
+                format_args!("cell {c} keeps its bytes"),
+            );
+        }
+        return;
     }
     let report = expect_ok(
         e.punch(&[run(0, 2), run(2, 0), run(4, 1)]),

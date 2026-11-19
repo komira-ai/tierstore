@@ -7,7 +7,8 @@ use tierstore_fetch_api::entry::{ClaimedCell, Entry, EntryError, EntrySpec, Entr
 use tierstore_fetch_api::ids::{CellRun, PackId, PackKey, PackRoot};
 use tierstore_fetch_api::page::CELL_SHIFT;
 
-use super::check::{ensure_eq, expect_ok};
+use super::EntryStoreFixture;
+use super::check::{ensure_eq, expect_err, expect_ok};
 
 /// The bytes of one cell.
 pub(super) const MIB: u64 = 1 << CELL_SHIFT;
@@ -86,4 +87,26 @@ pub(super) fn publish(e: &dyn Entry, cell: u32, fill: u8) {
 /// branch of its own).
 pub(super) fn same(got: &EntryError, want: &EntryError) -> bool {
     format!("{got:?}") == format!("{want:?}")
+}
+
+/// Whether `e` refused a punch as a store that cannot punch does: [`EntryError::Io`] of kind
+/// `Unsupported`.
+pub(super) fn unsupported(e: &EntryError) -> bool {
+    matches!(e, EntryError::Io { source, .. } if source.kind() == std::io::ErrorKind::Unsupported)
+}
+
+/// The punch of evicting `runs` that comes before the evictor's `Finish`: on a store that punches
+/// it succeeds; on one that cannot ([`EntryStoreFixture::punches`] is `false`) it is refused as
+/// [`unsupported`], and the `Finish` that follows is the state step alone.
+pub(super) fn punch_as_able(
+    f: &dyn EntryStoreFixture,
+    e: &dyn Entry,
+    runs: &[CellRun],
+    what: &str,
+) {
+    if f.punches() {
+        expect_ok(e.punch(runs), what);
+    } else {
+        expect_err(e.punch(runs), unsupported, what);
+    }
 }
