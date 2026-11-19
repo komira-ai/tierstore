@@ -525,8 +525,10 @@ impl Mount {
         ))
     }
 
-    /// Aborts the connection: every request waiting on it fails (`ECONNABORTED` for the
-    /// readers), and the mount stays until it is unmounted. Writing the `abort` file needs root.
+    /// Aborts the connection: every request waiting on it fails (its caller gets
+    /// `ECONNABORTED`), the readers end ([`crate::ReaderEnd::Unmounted`]: without
+    /// `FUSE_ABORT_ERROR` the kernel ends their reads with `ENODEV`), and the mount stays until
+    /// it is unmounted. Writing the `abort` file needs root.
     ///
     /// # Errors
     ///

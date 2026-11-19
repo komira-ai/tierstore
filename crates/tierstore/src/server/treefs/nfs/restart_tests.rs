@@ -193,6 +193,7 @@ async fn attachments_and_pins_are_restored_on_restart() {
     let (rig, digest) = attached("nfs-restart-pins");
     let (first, address, client, _, _) = started(&rig, EPOCH).await;
     drop(client);
+    first._setup.core.settled().unwrap();
     first.stop().await.unwrap();
     closed(address).await;
     let asked = rig.upstream.asked("pins-live").len();
@@ -207,6 +208,7 @@ async fn attachments_and_pins_are_restored_on_restart() {
         .map(|(tree, run)| format!("{tree} {run}"))
         .collect();
     assert_eq!(attached, [format!("{digest} run-1")]);
+    second._setup.core.settled().unwrap();
     let pins = rig.upstream.asked("pins-live");
     assert_eq!(pins.len(), asked + 1);
     let live = pins.last().unwrap();

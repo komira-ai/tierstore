@@ -8,6 +8,7 @@ use std::sync::Arc;
 use std::sync::atomic::{AtomicBool, Ordering};
 
 use super::{Platform, hang, serve, serve_with};
+use crate::Mono;
 use crate::server::handoff::testing::within;
 use crate::server::treefs::config::FsSettings;
 use crate::server::treefs::fakedev;
@@ -15,7 +16,9 @@ use crate::server::treefs::init_record::{self, Record};
 use crate::server::treefs::run::Kernel;
 use crate::server::treefs::sd::{FUSE_NAME, Manager, Stored};
 use crate::server::treefs::start::StartError;
-use crate::server::treefs::testing::{FakeManager, Rig, SIGNALS, sample, until, with_fuse};
+use crate::server::treefs::testing::{
+    FakeManager, Logged, Rig, SIGNALS, logged, sample, until, with_fuse,
+};
 
 /// The kernel's files, as a test makes them: a mount table and a directory of connections.
 fn kernel_of(rig: &Rig, mountinfo: &str) -> Kernel {
@@ -41,6 +44,7 @@ fn platform(manager: &FakeManager, stored: Option<i32>, kernel: Kernel) -> Platf
             })
             .collect(),
         kernel,
+        clock: Arc::new(Mono::new()),
     }
 }
 
@@ -131,6 +135,7 @@ fn no_manager() {
         manager: Manager::new(None),
         stored: Vec::new(),
         kernel: Kernel::real(),
+        clock: Arc::new(Mono::new()),
     };
     let mine = settings.clone();
     let thread = std::thread::spawn(move || serve_with(&mine, platform));
@@ -173,6 +178,70 @@ fn a_restart_serves_the_descriptor_the_manager_kept_and_asks_for_the_requests_ag
     sigterm();
     thread.join().unwrap().unwrap();
     drop(device);
+}
+
+/// Asserts that a start tells the service manager it is ready while the node's fill socket has not
+/// answered the mount's pins (`pins-live`), as after a boot, when the node's tierstore reads its
+/// whole cache before it answers: at `READY=1` no `places-live`, which follows that answer, has
+/// been asked. Once the socket answers, the pins and then the placements reach it. Each step of
+/// the start is said on stderr as it ends, in order, and the launch's own steps and the time to
+/// ready on the platform's clock, which the test does not move: 0 ms. Catches a start that waits
+/// for the fill socket before it says ready.
+#[test]
+fn a_start_says_ready_before_the_fill_socket_answers_the_mount_pins() {
+    let _one_at_a_time = SIGNALS
+        .lock()
+        .unwrap_or_else(std::sync::PoisonError::into_inner);
+    let rig = Rig::new("tfs-launch-ready-first", sample());
+    leave_record(&rig, true);
+    let mut settings = rig.settings();
+    // Long enough that the pins wait for the test, not for the client's own time.
+    settings.fetch_timeout = std::time::Duration::from_secs(600);
+    rig.upstream.gate_verb("pins-live");
+    let manager = FakeManager::start(&rig.dir.path().join("notify.sock"));
+    let (device, _kernel) = fakedev::pair();
+    let platform = platform(&manager, Some(device.as_raw_fd()), kernel_of(&rig, ""));
+    let mine = settings.clone();
+    let log = Logged::default();
+    let logging = log.clone();
+    let thread = std::thread::spawn(move || {
+        let _logging = logged(&logging, tracing::Level::INFO);
+        serve_with(&mine, platform)
+    });
+    until_ready(&manager);
+    assert!(rig.upstream.asked("places-live").is_empty());
+    rig.upstream.wait_for_verb("pins-live", 1);
+    rig.upstream.permit_verb("pins-live", 1);
+    until(|| !rig.upstream.asked("places-live").is_empty());
+    assert_eq!(rig.upstream.asked("pins-live").len(), 1);
+    sigterm();
+    thread.join().unwrap().unwrap();
+    drop(device);
+    let text = log.text();
+    let timed: Vec<&str> = text
+        .lines()
+        .filter(|line| line.contains(" took ") || line.contains(": ready after "))
+        .map(|line| line.split(" took ").next().unwrap_or_default())
+        .collect();
+    assert_eq!(
+        timed,
+        [
+            "tierstore fs: asking a running instance for the mount",
+            "tierstore fs: making the directories",
+            "tierstore fs: making the 0 attachments of the file again",
+            "tierstore fs: setting up the core",
+            "tierstore fs: opening the put directory",
+            "tierstore fs: serving the connection",
+            "tierstore fs: serving the descriptor the service manager kept",
+            "tierstore fs: ready after 0 ms",
+        ]
+    );
+    for line in [
+        "tierstore fs: asking a running instance for the mount took 0 ms\n",
+        "tierstore fs: serving the descriptor the service manager kept took 0 ms\n",
+    ] {
+        assert!(text.contains(line), "{line:?} in {text}");
+    }
 }
 
 /// Asserts the bound of a restart on a kernel that cannot send requests again: the connection is
@@ -221,6 +290,7 @@ fn a_restart_without_resend_aborts_a_connection_that_stays_hung() {
             fd: device.as_raw_fd(),
         }],
         kernel,
+        clock: Arc::new(Mono::new()),
     };
     let mine = settings.clone();
     let thread = std::thread::spawn(move || serve_with(&mine, platform));
@@ -259,6 +329,7 @@ fn a_restart_whose_resend_is_refused_is_watched_and_aborted_when_the_requests_st
             fd: device.as_raw_fd(),
         }],
         kernel: kernel.clone(),
+        clock: Arc::new(Mono::new()),
     };
     let error = serve_with(&settings, platform).unwrap_err();
     assert!(matches!(error, StartError::Aborted));
@@ -314,6 +385,7 @@ fn a_restart_on_a_connection_the_kernel_does_not_show_is_served_unwatched() {
             fd: device.as_raw_fd(),
         }],
         kernel,
+        clock: Arc::new(Mono::new()),
     };
     let mine = settings.clone();
     let thread = std::thread::spawn(move || serve_with(&mine, platform));
@@ -515,6 +587,7 @@ fn unreachable_manager() {
             fd: i32::MAX,
         }],
         kernel: kernel_of(&rig, ""),
+        clock: Arc::new(Mono::new()),
     };
     let mine = settings.clone();
     let thread = std::thread::spawn(move || serve_with(&mine, platform));
@@ -538,6 +611,7 @@ async fn a_start_that_cannot_store_the_descriptor_leaves_the_running_instance_se
         manager: Manager::new(Some(old.rig.dir.path().join("nobody-home").as_os_str())),
         stored: Vec::new(),
         kernel: Kernel::real(),
+        clock: Arc::new(Mono::new()),
     };
     let settings = old.settings.clone();
     let refused = tokio::task::spawn_blocking(move || serve_with(&settings, platform))

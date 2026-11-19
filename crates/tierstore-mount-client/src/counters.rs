@@ -1,6 +1,7 @@
 //! The mount's counter memfd and its regions (5.1).
 //!
-//! A mount creates **one counter memfd for its whole life** with `MFD_ALLOW_SEALING`, seals it
+//! A mount creates **one counter memfd for its whole life** with `MFD_ALLOW_SEALING |
+//! MFD_NOEXEC_SEAL` (not executable, which every `vm.memfd_noexec` setting allows, K25), seals it
 //! `F_SEAL_SHRINK` (never `F_SEAL_GROW`) and sends it at every handshake; the server maps it
 //! read-only and refuses one without that seal. Inside it the mount allocates a **region per open
 //! pack**: one `u16` reader counter per 16-cell group ([`CounterRegion`]), at an offset that is a
@@ -57,7 +58,8 @@ pub(crate) struct CounterMemfd {
 impl CounterMemfd {
     /// A new, empty counter memfd, sealed against shrinking.
     pub(crate) fn create() -> io::Result<Self> {
-        let fd = rustix::fs::memfd_create(NAME, MemfdFlags::CLOEXEC | MemfdFlags::ALLOW_SEALING)?;
+        let flags = MemfdFlags::CLOEXEC | MemfdFlags::ALLOW_SEALING | MemfdFlags::NOEXEC_SEAL;
+        let fd = rustix::fs::memfd_create(NAME, flags)?;
         rustix::fs::fcntl_add_seals(&fd, SealFlags::from_bits_retain(F_SEAL_SHRINK))?;
         Ok(Self {
             file: Arc::new(File::from(fd)),
@@ -195,10 +197,12 @@ mod tests {
     }
 
     #[test]
-    fn the_memfd_is_sealed_against_shrinking_only() {
+    fn the_memfd_is_sealed_against_shrinking_and_exec_only() {
         let m = CounterMemfd::create().unwrap();
         let seals = fcntl_get_seals(m.fd()).unwrap();
-        assert_eq!(seals, SealFlags::SHRINK);
+        // `MFD_NOEXEC_SEAL` (5.1, K25): not executable, and sealed against becoming so.
+        assert_eq!(seals, SealFlags::SHRINK | SealFlags::EXEC);
+        assert_eq!(fstat(m.fd()).unwrap().st_mode & 0o111, 0);
         assert_eq!(len(&m), 0);
         // It can grow, never shrink.
         rustix::fs::ftruncate(m.fd(), 4096).unwrap();

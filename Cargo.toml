@@ -200,8 +200,9 @@ hostkeeper-placed = { git = "https://github.com/komira-ai/hostkeeper", rev = "38
 # `coverage` is set by cargo-llvm-cov.
 unexpected_cfgs = { level = "warn", check-cfg = ["cfg(coverage)"] }
 # No unsafe code (AGENTS.md R2). `deny`, not `forbid`, so the two modules of
-# tierstore-testkit that call libc or edit the environment, and the `FUSE_DEV_IOC_CLONE` ioctl of
-# tsfuse, can each `expect` it with a reason; `tierstore` forbids it in its own `lib.rs`.
+# tierstore-testkit that call libc or edit the environment, and the `FUSE_DEV_IOC_CLONE` ioctl and
+# the io_uring ring (`src/uring/sys.rs`) of tsfuse, can each `expect` it with a reason;
+# `tierstore` forbids it in its own `lib.rs`.
 unsafe_code = "deny"
 
 [workspace.lints.clippy]
