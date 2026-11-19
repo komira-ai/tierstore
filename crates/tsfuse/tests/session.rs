@@ -16,46 +16,17 @@
 
 mod common;
 
-use std::io::{Read as _, Write as _};
-use std::os::fd::AsFd;
+use std::os::fd::{AsFd, OwnedFd};
 use std::os::unix::net::{UnixListener, UnixStream};
 use std::sync::{Arc, Barrier, Mutex};
 
+use common::fake::{Kernel, fake_device, pending, read_reply};
 use common::{getattr, init_request, request};
-use tsfuse::abi::{InitConfig, InitFlags, InterruptIn, UNIQUE_RESEND};
+use tsfuse::abi::{InitConfig, InitFlags, InterruptIn, Negotiated, UNIQUE_RESEND};
 use tsfuse::{
-    DevFd, Errno, Fs, Handled, ReaderEnd, Replier, Request, Session, SessionError, Stopper,
+    DevFd, Errno, Fs, Handled, Handover, ReaderEnd, Replier, Request, Session, SessionError,
+    Stopper,
 };
-
-/// The kernel's end of a fake device.
-struct Kernel(UnixStream);
-
-impl Kernel {
-    /// Queues one request.
-    fn send(&self, bytes: &[u8]) -> std::io::Result<()> {
-        let n = (&self.0).write(bytes)?;
-        assert_eq!(n, bytes.len(), "a packet is written whole");
-        Ok(())
-    }
-
-    /// Takes the next reply.
-    fn recv(&self, buf: &mut [u8]) -> std::io::Result<usize> {
-        (&self.0).read(buf)
-    }
-}
-
-/// A device and the kernel's end of it.
-fn fake_device() -> (DevFd, Kernel) {
-    use rustix::net::{AddressFamily, SocketFlags, SocketType, socketpair};
-    let (device, kernel) = socketpair(
-        AddressFamily::UNIX,
-        SocketType::SEQPACKET,
-        SocketFlags::CLOEXEC,
-        None,
-    )
-    .unwrap();
-    (DevFd::from_fd(device), Kernel(UnixStream::from(kernel)))
-}
 
 /// A descriptor that polls readable and fails every read (`ENOTCONN`): a listening socket with a
 /// connection waiting. The listener and the connection are returned to be kept alive with it.
@@ -73,26 +44,6 @@ fn unreadable() -> (DevFd, UnixListener, UnixStream) {
     (DevFd::from_fd(fd), listener, client)
 }
 
-/// `(error, unique, len)` of the next message the session wrote.
-fn read_reply(kernel: &Kernel) -> (i32, u64, usize) {
-    let mut buf = [0u8; 4096];
-    let n = kernel.recv(&mut buf).unwrap();
-    let len = u32::from_le_bytes(buf[0..4].try_into().unwrap());
-    assert_eq!(len as usize, n, "the header's length is the message's");
-    let error = i32::from_le_bytes(buf[4..8].try_into().unwrap());
-    let unique = u64::from_le_bytes(buf[8..16].try_into().unwrap());
-    (error, unique, n)
-}
-
-/// Whether the kernel's end has a message waiting.
-fn pending(kernel: &Kernel) -> bool {
-    kernel.0.set_nonblocking(true).unwrap();
-    let mut buf = [0u8; 64];
-    let got = kernel.recv(&mut buf).is_ok();
-    kernel.0.set_nonblocking(false).unwrap();
-    got
-}
-
 const RESEND_AND_PAGES: u64 =
     InitFlags::HAS_RESEND.0 | InitFlags::MAX_PAGES.0 | InitFlags::INIT_EXT.0;
 
@@ -103,6 +54,12 @@ fn initialised(offered: u64) -> Session {
     let session = Session::init(device, &InitConfig::tree()).unwrap();
     assert_eq!(read_reply(&kernel).0, 0);
     session
+}
+
+/// The session of `devices` resumed with `negotiated`, as a supervisor's handover gives them.
+fn resume(devices: Vec<DevFd>, negotiated: Negotiated) -> Session {
+    let fds = devices.into_iter().map(OwnedFd::from).collect();
+    Session::resume(Handover::new(negotiated, fds).unwrap()).unwrap()
 }
 
 /// Answers GETATTR with `EBADF` and records whether each was resent; parks LOOKUP for the test
@@ -287,8 +244,10 @@ fn resume_serves_a_queued_request_without_init() {
     let (device, kernel) = fake_device();
     // Queued before the session exists, as when a job calls while no server reads.
     kernel.send(&getattr(5)).unwrap();
-    let session = Session::resume(vec![device], negotiated).unwrap();
+    let session = resume(vec![device], negotiated);
     assert_eq!(session.negotiated(), &negotiated);
+    // The kernel offered HAS_RESEND, so the resume sent RESEND before any reader ran.
+    assert_eq!(read_reply(&kernel), (7, 0, 16));
     let fs = Arc::new(TestFs::default());
     let (stopper, joined) = serve(session, fs.clone());
 
@@ -299,13 +258,29 @@ fn resume_serves_a_queued_request_without_init() {
 }
 
 #[test]
-fn resume_needs_a_device() {
-    let negotiated = *initialised(0).negotiated();
-    let err = Session::resume(Vec::new(), negotiated).unwrap_err();
-    assert!(matches!(err, SessionError::NoDevice), "{err:?}");
-    assert_eq!(
-        err.to_string(),
-        "a FUSE session needs at least one device descriptor"
+fn resume_on_a_kernel_without_resend_sends_none() {
+    let negotiated = *initialised(InitFlags::MAX_PAGES.0).negotiated();
+    let (device, kernel) = fake_device();
+    let session = resume(vec![device], negotiated);
+    assert_eq!(session.readers(), 1);
+    assert!(
+        !pending(&kernel),
+        "no RESEND where the kernel did not offer it"
+    );
+}
+
+#[test]
+fn resume_whose_resend_cannot_be_written_fails_naming_it() {
+    let negotiated = *initialised(RESEND_AND_PAGES).negotiated();
+    let (device, kernel) = fake_device();
+    drop(kernel);
+    let fds = vec![OwnedFd::from(device)];
+    let err = Session::resume(Handover::new(negotiated, fds).unwrap()).unwrap_err();
+    assert!(matches!(err, SessionError::Resend(_)), "{err:?}");
+    assert!(
+        err.to_string()
+            .starts_with("sending FUSE_NOTIFY_RESEND failed: "),
+        "{err}"
     );
 }
 
@@ -314,10 +289,7 @@ fn a_resent_request_is_marked_and_answered_under_its_id() {
     let negotiated = *initialised(0).negotiated();
     let (device, kernel) = fake_device();
     let fs = Arc::new(TestFs::default());
-    let (stopper, joined) = serve(
-        Session::resume(vec![device], negotiated).unwrap(),
-        fs.clone(),
-    );
+    let (stopper, joined) = serve(resume(vec![device], negotiated), fs.clone());
 
     let unique = 7 | UNIQUE_RESEND;
     kernel.send(&getattr(unique)).unwrap();
@@ -334,7 +306,7 @@ fn a_resent_request_is_marked_and_answered_under_its_id() {
 fn resend_is_a_header_only_notification() {
     let negotiated = *initialised(0).negotiated();
     let (device, kernel) = fake_device();
-    let session = Session::resume(vec![device], negotiated).unwrap();
+    let session = resume(vec![device], negotiated);
     session.resend().unwrap();
     // Notifications have unique 0 and the notify code in the error field.
     assert_eq!(read_reply(&kernel), (7, 0, 16));
@@ -345,11 +317,12 @@ fn a_stopper_ends_every_reader_and_leaves_every_device_open() {
     let negotiated = *initialised(0).negotiated();
     let pairs: Vec<(DevFd, Kernel)> = (0..3).map(|_| fake_device()).collect();
     let (devices, kernels): (Vec<DevFd>, Vec<Kernel>) = pairs.into_iter().unzip();
-    let session = Session::resume(devices, negotiated).unwrap();
+    let session = resume(devices, negotiated);
     assert_eq!(session.readers(), 3);
-    let kept = session.dup_devices().unwrap();
+    let kept: Vec<OwnedFd> = session.handover().unwrap().into_fds().unwrap();
+    let kept = &kept[1..];
     let serving = session.serve(Arc::new(TestFs::default())).unwrap();
-    assert_eq!(serving.dup_devices().unwrap().len(), 3);
+    assert_eq!(serving.handover().unwrap().devices(), 3);
 
     let stopper = serving.stopper();
     stopper.stop();
@@ -392,7 +365,7 @@ fn a_reader_whose_kernel_is_gone_ends_unmounted() {
     let negotiated = *initialised(0).negotiated();
     let (device, kernel) = fake_device();
     let (_stopper, joined) = serve(
-        Session::resume(vec![device], negotiated).unwrap(),
+        resume(vec![device], negotiated),
         Arc::new(TestFs::default()),
     );
     drop(kernel);
@@ -404,10 +377,7 @@ fn each_request_is_routed_by_its_opcode() {
     let negotiated = *initialised(0).negotiated();
     let (device, kernel) = fake_device();
     let fs = Arc::new(TestFs::default());
-    let (stopper, joined) = serve(
-        Session::resume(vec![device], negotiated).unwrap(),
-        fs.clone(),
-    );
+    let (stopper, joined) = serve(resume(vec![device], negotiated), fs.clone());
 
     // FORGET and BATCH_FORGET are never answered.
     kernel
@@ -452,7 +422,7 @@ fn with_three_readers_a_reply_goes_to_the_reader_that_read_it_and_interrupt_to_i
     let pairs: Vec<(DevFd, Kernel)> = (0..3).map(|_| fake_device()).collect();
     let (devices, kernels): (Vec<DevFd>, Vec<Kernel>) = pairs.into_iter().unzip();
     let fs = Arc::new(TestFs::default());
-    let session = Session::resume(devices, negotiated).unwrap();
+    let session = resume(devices, negotiated);
     let tokens = session.tokens().clone();
     let (stopper, joined) = serve(session, fs.clone());
 
@@ -501,7 +471,7 @@ fn a_reader_that_panics_answers_eio_and_the_join_names_it() {
     let negotiated = *initialised(0).negotiated();
     let (device, kernel) = fake_device();
     let (_stopper, joined) = serve(
-        Session::resume(vec![device], negotiated).unwrap(),
+        resume(vec![device], negotiated),
         Arc::new(TestFs::default()),
     );
     kernel.send(&request(5, 30, 1, &[])).unwrap();
@@ -521,7 +491,7 @@ fn a_reader_that_cannot_read_its_device_fails_and_the_join_names_it() {
     let (good, kernel) = fake_device();
     drop(kernel);
     let (bad, _listener, _client) = unreadable();
-    let session = Session::resume(vec![good, bad], negotiated).unwrap();
+    let session = resume(vec![good, bad], negotiated);
     let serving = session.serve(Arc::new(TestFs::default())).unwrap();
     let err = serving.join().unwrap_err();
     assert!(
@@ -540,7 +510,7 @@ fn a_device_the_runtime_cannot_register_fails_its_reader() {
     let dir = tierstore_testkit::dir::TestDir::under(env!("CARGO_TARGET_TMPDIR"), "tsfuse-file");
     let file = std::fs::File::create(dir.path().join("not-a-device")).unwrap();
     // epoll refuses a regular file (EPERM).
-    let session = Session::resume(vec![DevFd::from_fd(file.into())], negotiated).unwrap();
+    let session = resume(vec![DevFd::from_fd(file.into())], negotiated);
     let err = session
         .serve(Arc::new(TestFs::default()))
         .unwrap()
@@ -560,10 +530,7 @@ fn two_readers_of_one_queue_answer_each_request_once() {
     let (device, kernel) = fake_device();
     let second = DevFd::from_fd(device.try_clone_fd().unwrap());
     let fs = Arc::new(TestFs::default());
-    let (stopper, joined) = serve(
-        Session::resume(vec![device, second], negotiated).unwrap(),
-        fs.clone(),
-    );
+    let (stopper, joined) = serve(resume(vec![device, second], negotiated), fs.clone());
     for unique in 40..50 {
         kernel.send(&getattr(unique)).unwrap();
         assert_eq!(read_reply(&kernel), (-9, unique, 16));
@@ -582,10 +549,7 @@ fn an_interrupt_of_a_request_not_yet_registered_is_answered_on_the_first_device_
     let negotiated = *initialised(0).negotiated();
     let pairs: Vec<(DevFd, Kernel)> = (0..3).map(|_| fake_device()).collect();
     let (devices, mut kernels): (Vec<DevFd>, Vec<Kernel>) = pairs.into_iter().unzip();
-    let (stopper, joined) = serve(
-        Session::resume(devices, negotiated).unwrap(),
-        Arc::new(TestFs::default()),
-    );
+    let (stopper, joined) = serve(resume(devices, negotiated), Arc::new(TestFs::default()));
     drop(kernels.remove(0));
     kernels[1]
         .send(&request(
@@ -601,9 +565,11 @@ fn an_interrupt_of_a_request_not_yet_registered_is_answered_on_the_first_device_
         "the reader that read it was not written to"
     );
 
-    stopper.stop();
+    // Every reader ends by its kernel end closing: a stop here could reach reader 0 before
+    // its end-of-file does.
+    drop((stopper, kernels));
     assert_eq!(
         joined.join().unwrap().unwrap(),
-        vec![ReaderEnd::Unmounted, ReaderEnd::Stopped, ReaderEnd::Stopped]
+        vec![ReaderEnd::Unmounted; 3]
     );
 }

@@ -143,12 +143,13 @@ fn a_stop_leaves_the_mount_and_a_session_resumed_on_the_kept_descriptors_serves_
         assert!(std::fs::metadata(&mp).unwrap().is_dir());
 
         // What a supervisor holds: every descriptor. The originals close when the readers end.
-        let kept = serving.dup_devices().unwrap();
+        let kept = serving.handover().unwrap();
+        assert_eq!(kept.devices(), 2);
+        assert_eq!(kept.negotiated(), &negotiated);
         serving.stopper().stop();
         assert_eq!(serving.join().unwrap(), vec![ReaderEnd::Stopped; 2]);
 
-        let devices = kept.into_iter().map(DevFd::from_fd).collect();
-        let resumed = Session::resume(devices, negotiated).unwrap();
+        let resumed = Session::resume(kept).unwrap();
         let before = fs.getattrs.load(Ordering::SeqCst);
         let serving = resumed.serve(fs.clone()).unwrap();
         assert!(std::fs::metadata(&mp).unwrap().is_dir());

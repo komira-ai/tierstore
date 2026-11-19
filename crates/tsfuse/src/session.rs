@@ -2,8 +2,12 @@
 //! INIT agreed, and the readers that serve it.
 //!
 //! - [`Session::init`] runs INIT on the descriptor a mount made; [`Session::resume`] takes the
-//!   descriptors of a connection another process initialised (takeover, T-F6), with the terms it
-//!   recorded, and runs no INIT.
+//!   [`Handover`] of a connection another process initialised (takeover, 5.2 item 5): every
+//!   descriptor and the terms it recorded. It runs no INIT, and sends `FUSE_NOTIFY_RESEND` before
+//!   any reader runs, so the requests the previous server read and did not answer come back and
+//!   are answered once.
+//! - [`Session::handover`] and [`Serving::handover`] give the [`Handover`] a supervisor keeps: a
+//!   `dup` of every descriptor, the mount's and every clone, with the terms.
 //! - [`Session::clone_readers`] binds clones (`FUSE_DEV_IOC_CLONE`) until the session has as
 //!   many descriptors as readers; each has its own processing queue.
 //! - [`Session::serve`] starts one reader per descriptor, each on a dedicated thread with its own
@@ -12,22 +16,25 @@
 //!   from the negotiated `max_write` (8 KiB for a tree mount): [`Fs::handle`] returns before the
 //!   next read, and a parked operation keeps the few fields it needs, not the buffer.
 //! - [`Stopper::stop`] ends every reader and leaves every descriptor open and the mount in place,
-//!   so a supervisor that holds them can hand them to the next process. An unmount ends the
-//!   readers with [`ReaderEnd::Unmounted`], an abort with [`ReaderEnd::Aborted`].
+//!   so a supervisor that holds them can hand them to the next process. [`Serving::hand_over`]
+//!   does that for a server about to exit: it stops and joins every reader, and from then on a
+//!   parked request whose replier is dropped is left to the next server instead of being
+//!   answered `EIO`. An unmount ends the readers with [`ReaderEnd::Unmounted`], an abort with
+//!   [`ReaderEnd::Aborted`].
 
 use std::io;
 use std::num::NonZeroUsize;
-use std::os::fd::OwnedFd;
 use std::sync::Arc;
 use std::thread::JoinHandle;
 
 use crate::abi::{
-    InitConfig, InitError, InitOutcome, MIN_READ_BUFFER, Negotiated, Operation, WriteIn,
+    InitConfig, InitError, InitFlags, InitOutcome, MIN_READ_BUFFER, Negotiated, Operation, WriteIn,
 };
 use crate::dev::DevFd;
 use crate::fs::{Fs, IN_HEADER_LEN, Request};
 use crate::opcode::Opcode;
 use crate::reply::{Errno, ReplyDevice, encode_out_header};
+use crate::takeover::{Handover, HandoverError};
 use crate::tokens::Tokens;
 use crate::transport::{DevReader, Every, ReaderEnd, Received, Stop, read_once, serve};
 
@@ -66,9 +73,9 @@ pub enum SessionError {
         /// The bytes of the body.
         body_len: usize,
     },
-    /// [`Session::resume`] was given no descriptor.
-    #[error("a FUSE session needs at least one device descriptor")]
-    NoDevice,
+    /// [`Session::resume`] could not send `FUSE_NOTIFY_RESEND` (the connection is gone).
+    #[error("sending FUSE_NOTIFY_RESEND failed: {0}")]
+    Resend(#[source] io::Error),
     /// Binding a clone failed.
     #[error("cloning the FUSE device (reader {index}) failed: {source}")]
     Clone {
@@ -176,22 +183,38 @@ impl Session {
         }
     }
 
-    /// The session of a connection an earlier process initialised: `devices` are every
-    /// descriptor it held (the first is the one [`Self::resend`] writes to) and `negotiated` the
-    /// terms its INIT agreed. No INIT is read; requests queued before the call are served.
+    /// The session of a connection an earlier process initialised, from its `handover`: every
+    /// descriptor it held, in order, and the terms its INIT agreed. No INIT is read, and the
+    /// session serves exactly these descriptors (it binds no clone of its own).
+    ///
+    /// When the kernel offered `FUSE_HAS_RESEND`, [`Self::resend`] runs here, before any reader
+    /// can read: every request a previous server read and did not answer, on any of the
+    /// descriptors, goes back to the connection's input queue marked with
+    /// [`crate::abi::UNIQUE_RESEND`], and is read and answered like a new one. A request this
+    /// session reads is never resent to it, so none is carried out twice by this server. A kernel
+    /// without it (before Linux 6.9) resends nothing: requests queued and not yet read are
+    /// served, and one the previous server read waits until the connection ends.
     ///
     /// # Errors
     ///
-    /// [`SessionError::NoDevice`] when `devices` is empty.
-    pub fn resume(devices: Vec<DevFd>, negotiated: Negotiated) -> Result<Self, SessionError> {
-        if devices.is_empty() {
-            return Err(SessionError::NoDevice);
-        }
-        Ok(Self {
-            devices: devices.into_iter().map(Arc::new).collect(),
+    /// [`SessionError::Resend`] when the notification cannot be written.
+    pub fn resume(handover: Handover) -> Result<Self, SessionError> {
+        let Handover {
+            negotiated,
+            devices,
+        } = handover;
+        let session = Self {
+            devices: devices
+                .into_iter()
+                .map(|fd| Arc::new(DevFd::from_fd(fd)))
+                .collect(),
             negotiated,
             tokens: Tokens::new(),
-        })
+        };
+        if negotiated.granted.contains(InitFlags::HAS_RESEND) {
+            session.resend().map_err(SessionError::Resend)?;
+        }
+        Ok(session)
     }
 
     /// The terms INIT agreed.
@@ -229,14 +252,17 @@ impl Session {
         Ok(())
     }
 
-    /// A `dup` of every descriptor, in order: what a supervisor holds so that a restart loses no
-    /// in-flight request (5.2, item 5).
+    /// The handover a supervisor keeps (5.2, item 5): a `dup` of every descriptor, the mount's
+    /// first and then every clone, with the terms INIT agreed. Take it after
+    /// [`Self::clone_readers`], so that it holds every clone: a request read on a clone the
+    /// supervisor does not hold ends with `ECONNABORTED` when the server dies.
     ///
     /// # Errors
     ///
-    /// The `dup` error.
-    pub fn dup_devices(&self) -> io::Result<Vec<OwnedFd>> {
-        dup_all(&self.devices)
+    /// [`HandoverError::Dup`], or [`HandoverError::TooManyDevices`] past
+    /// [`crate::MAX_DEVICES`].
+    pub fn handover(&self) -> Result<Handover, HandoverError> {
+        handover_of(&self.devices, self.negotiated)
     }
 
     /// Sends `FUSE_NOTIFY_RESEND` on the first descriptor: the kernel moves the requests in the
@@ -294,6 +320,8 @@ impl Session {
         }
         Ok(Serving {
             devices: self.devices,
+            negotiated: self.negotiated,
+            tokens: self.tokens,
             stop,
             readers,
         })
@@ -307,8 +335,13 @@ pub(crate) fn read_buffer_len(negotiated: &Negotiated) -> usize {
     MIN_READ_BUFFER.max(IN_HEADER_LEN + WriteIn::SIZE + max_write)
 }
 
-fn dup_all(devices: &[Arc<DevFd>]) -> io::Result<Vec<OwnedFd>> {
-    devices.iter().map(|d| d.try_clone_fd()).collect()
+fn handover_of(devices: &[Arc<DevFd>], negotiated: Negotiated) -> Result<Handover, HandoverError> {
+    let fds = devices
+        .iter()
+        .map(|d| d.try_clone_fd())
+        .collect::<io::Result<_>>()
+        .map_err(HandoverError::Dup)?;
+    Handover::new(negotiated, fds)
 }
 
 /// One request read from `device`, which is put in blocking mode first (INIT is read before any
@@ -354,6 +387,8 @@ impl Reader {
 #[derive(Debug)]
 pub struct Serving {
     devices: Vec<Arc<DevFd>>,
+    negotiated: Negotiated,
+    tokens: Tokens,
     stop: Arc<Stop>,
     readers: Vec<JoinHandle<io::Result<ReaderEnd>>>,
 }
@@ -367,13 +402,32 @@ impl Serving {
         }
     }
 
-    /// A `dup` of every descriptor, in reader order (see [`Session::dup_devices`]).
+    /// The handover a supervisor keeps, in reader order (see [`Session::handover`]).
     ///
     /// # Errors
     ///
-    /// The `dup` error.
-    pub fn dup_devices(&self) -> io::Result<Vec<OwnedFd>> {
-        dup_all(&self.devices)
+    /// As [`Session::handover`].
+    pub fn handover(&self) -> Result<Handover, HandoverError> {
+        handover_of(&self.devices, self.negotiated)
+    }
+
+    /// Hands the connection over to the next server (5.2, item 5): from now on a replier
+    /// dropped without being completed writes nothing (its request stays on its device's
+    /// processing queue, and the next server's [`Session::resume`] has it resent), then every
+    /// reader is stopped and joined. Call it before this server exits, with the supervisor
+    /// holding the [`Handover`]; a request read and not answered is then answered by the next
+    /// server, never `EIO` by this one. A parked operation this server completes after the call
+    /// is still written: before the next server's RESEND it answers the request, and after it
+    /// the kernel refuses the write (`ENOENT`, [`crate::Completion::DeviceError`]) and the
+    /// next server answers the resent request.
+    ///
+    /// # Errors
+    ///
+    /// As [`Self::join`].
+    pub fn hand_over(self) -> Result<Vec<ReaderEnd>, SessionError> {
+        self.tokens.hand_over();
+        self.stop.stop();
+        self.join()
     }
 
     /// Waits for every reader to end: how each ended, in reader order.

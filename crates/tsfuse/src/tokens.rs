@@ -18,6 +18,8 @@ pub(crate) struct Slot {
     waker: AtomicWaker,
     table: Weak<Table>,
     unique: u64,
+    /// Set once the session is handed over: a replier dropped then writes nothing.
+    handed_over: Arc<AtomicBool>,
 }
 
 impl Slot {
@@ -38,6 +40,11 @@ impl Slot {
             }
         }
         true
+    }
+
+    /// Whether the session was handed over ([`Tokens::hand_over`]).
+    pub(crate) fn handed_over(&self) -> bool {
+        self.handed_over.load(Ordering::Acquire)
     }
 }
 
@@ -125,6 +132,7 @@ pub enum Interrupted {
 #[derive(Clone, Default)]
 pub struct Tokens {
     table: Arc<Table>,
+    handed_over: Arc<AtomicBool>,
 }
 
 impl std::fmt::Debug for Tokens {
@@ -152,6 +160,7 @@ impl Tokens {
             waker: AtomicWaker::new(),
             table: Arc::downgrade(&self.table),
             unique,
+            handed_over: self.handed_over.clone(),
         });
         self.table.lock().insert(
             unique,
@@ -198,6 +207,14 @@ impl Tokens {
             Ok(()) => Interrupted::Cancelled,
             Err(e) => Interrupted::DeviceError(e),
         }
+    }
+
+    /// Marks the session handed over to another server (5.2, item 5): from now on a replier
+    /// dropped without being completed writes nothing, and its request stays on its device's
+    /// processing queue for the next server's RESEND. A replier completed explicitly still
+    /// writes (before that RESEND it answers the request, after it the kernel refuses it).
+    pub(crate) fn hand_over(&self) {
+        self.handed_over.store(true, Ordering::Release);
     }
 
     /// The number of requests registered and not answered.
