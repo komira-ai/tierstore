@@ -47,6 +47,7 @@ fn setup_restores_saved_attachments_and_serves_the_control_socket() {
         .map(|(_, run)| run)
         .collect();
     assert_eq!(kept, ["run-1"]);
+    setup.core.settled().unwrap();
     let pins = rig.upstream.asked("pins-live");
     assert_eq!(pins.last().unwrap().split(' ').next_back().unwrap(), root);
     let answer = ask(

@@ -559,17 +559,17 @@ fn detach_all_except_ends_the_runs_not_named() {
     assert_eq!(core.detach_all_except(&[]), 1);
 }
 
-/// Asserts that `pins_live` names the trees attached now once each, and none when there are none.
+/// Asserts that `tell_live` names the trees attached now once each, and none when there are none.
 #[test]
-fn pins_live_names_the_trees_attached_now() {
+fn tell_live_names_the_trees_attached_now() {
     let rig = attached("tfs-core-live");
     let core = &rig.core;
     let root = rig.upstream.built.lock().unwrap().root.clone();
     let _ = core.attach(&root, "run-2").unwrap();
-    core.pins_live();
+    core.tell_live().unwrap();
     let _ = core.detach("run-1");
     let _ = core.detach("run-2");
-    core.pins_live();
+    core.tell_live().unwrap();
     assert_eq!(
         rig.upstream.asked("pins-live"),
         [
