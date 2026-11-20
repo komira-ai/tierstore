@@ -75,5 +75,5 @@ The tests: `cargo test -p fsbench`. The tests that mount FUSE or read the host's
 `/sys` are the integration targets `nullfs_integration`, `harness_integration`,
 `tsnull_integration` and `storm_integration`; they need `/dev/fuse` and `fusermount3`. Their
 io_uring cases serve on io_uring where `fuse.enable_uring` is on, and check the fallback where it
-is off. `baseline_doc` and `v5_doc` hold the measurement documents to the raw records in
-[`data`](data).
+is off. `baseline_doc`, `v3_v4_doc` and `v5_doc` hold the measurement documents to the raw
+records in [`data`](data).
