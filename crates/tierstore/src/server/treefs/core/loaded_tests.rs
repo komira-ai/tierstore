@@ -7,6 +7,7 @@ use std::sync::atomic::Ordering;
 use std::time::Duration;
 
 use super::{Loaded, Lookups, Pinned, Trees};
+use crate::server::treefs::core::fetched::Fetched;
 use crate::server::treefs::core::{Core, Looked};
 use crate::server::treefs::ino;
 use crate::server::treefs::locked;
@@ -40,7 +41,8 @@ fn found(core: &Core, parent: u64, name: &str) -> u64 {
 /// The tree of the rig's attach, as a `Loaded` with nothing counted.
 fn loaded_of(rig: &Rig) -> Loaded {
     let loaded = rig.core.tree(1).unwrap();
-    let tree = rig.core.read_tree(&loaded.digest).unwrap();
+    let tree = rig.core.read_tree(&loaded.digest, &Fetched::default());
+    let tree = tree.unwrap();
     Loaded::new(loaded.digest, tree, 0)
 }
 

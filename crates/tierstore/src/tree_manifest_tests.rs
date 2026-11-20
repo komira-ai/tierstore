@@ -18,22 +18,22 @@ fn json(text: &str) -> String {
     serde_json::to_string(text).unwrap()
 }
 
-fn dir(name: &str, digest: &TreeDigest) -> String {
+pub(crate) fn dir(name: &str, digest: &TreeDigest) -> String {
     let name = json(name);
     format!(r#"{{"name":{name},"kind":"dir","sha256":"{digest}","size":1}}"#)
 }
 
-fn file(name: &str, size: u64) -> String {
+pub(crate) fn file(name: &str, size: u64) -> String {
     let name = json(name);
     format!(r#"{{"name":{name},"kind":"file","sha256":"{SHA_A}","size":{size}}}"#)
 }
 
-fn link(name: &str, target: &str) -> String {
+pub(crate) fn link(name: &str, target: &str) -> String {
     let (name, target) = (json(name), json(target));
     format!(r#"{{"name":{name},"kind":"symlink","target":{target}}}"#)
 }
 
-fn manifest(children: &[String]) -> String {
+pub(crate) fn manifest(children: &[String]) -> String {
     format!(r#"{{"v":1,"children":[{}]}}"#, children.join(","))
 }
 

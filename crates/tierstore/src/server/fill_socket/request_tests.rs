@@ -4,6 +4,7 @@ use std::path::PathBuf;
 
 use super::{MountRequest, Refusal, Request, parse};
 use crate::TreeDigest;
+use crate::server::local_cache::attaches::{Attach, Fetches, Outcome};
 use crate::server::local_cache::trees::{PlacementId, placement_id};
 
 const SHA: &str = "0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef";
@@ -471,5 +472,26 @@ fn a_started_names_the_path_and_refuses_what_a_place_refuses() {
     ];
     for text in cases {
         assert_eq!(line(text), Err(Refusal::MountPath), "{text:?}");
+    }
+}
+
+/// Asserts that an `attached` and a `fetched` are the reports they write, and that one that is
+/// not is refused as malformed.
+#[test]
+fn an_attached_and_a_fetched_are_the_reports_they_write() {
+    let attach = Attach {
+        outcome: Outcome::Absent,
+        ms: 12,
+    };
+    assert_eq!(line(&attach.line()), Ok(Request::Attached(attach)));
+    let fetches = Fetches {
+        cache: 3,
+        filled: 2,
+        fill_ms: 9,
+        ..Fetches::default()
+    };
+    assert_eq!(line(&fetches.line()), Ok(Request::Fetched(fetches)));
+    for text in ["attached", "attached gone 1", "fetched", "fetched 1 2 3 4"] {
+        assert_eq!(line(text), Err(Refusal::Malformed), "{text:?}");
     }
 }

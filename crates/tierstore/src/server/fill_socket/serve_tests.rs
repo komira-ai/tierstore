@@ -517,3 +517,32 @@ async fn a_put_over_the_socket_is_answered_in_json() {
     assert_eq!(client.ask(&request).await, r#"{"ok":true,"created":false}"#);
     served.stop().await;
 }
+
+/// Asserts that an `attached` and a `fetched` are answered `ok`, by a node with no tree store,
+/// and counted in the cache's families; one that is malformed is refused and counts nothing.
+#[tokio::test]
+async fn an_attached_and_a_fetched_are_answered_ok_and_counted() {
+    let rig = Rig::new("tfs-attached");
+    let place = Place::new("tfs-attached");
+    let served = Served::start(&rig.cache, &place.path);
+    let mut client = Client::connect(&place.path).await;
+    assert_eq!(client.ask("attached ok 245").await, "ok");
+    let fetched = format!("fetched 38 2 0 7 {}", ["1"; 17].join(" "));
+    assert_eq!(client.ask(&fetched).await, "ok");
+    assert_eq!(
+        client.ask("attached ok x").await,
+        "refused malformed request"
+    );
+    let metrics = rig.cache.metrics();
+    for line in [
+        "tierstore_fs_tree_attach_seconds_sum{outcome=\"ok\"} 0.245\n",
+        "tierstore_fs_tree_attach_seconds_count{outcome=\"ok\"} 1\n",
+        "tierstore_fs_manifest_fetch_total{result=\"cache\"} 38\n",
+        "tierstore_fs_manifest_fetch_total{result=\"fill\"} 2\n",
+        "tierstore_fs_manifest_fill_seconds_sum 0.007\n",
+        "tierstore_fs_manifest_fill_seconds_count 17\n",
+    ] {
+        assert!(metrics.contains(line), "{line}{metrics}");
+    }
+    served.stop().await;
+}

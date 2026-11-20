@@ -23,8 +23,10 @@ use std::sync::mpsc::{self, RecvTimeoutError};
 use std::sync::{Arc, Weak};
 use std::time::Duration;
 
+use crate::server::local_cache::attaches::{Attach, Outcome};
 use crate::tree_manifest::TreeDigest;
 
+use super::fetched::Fetched;
 use super::placed::{Unread, placement_of};
 use super::{Core, Errno, locked};
 
@@ -71,18 +73,52 @@ impl Core {
     /// request that asks for it at the same time (`core/memory.rs`), and is in memory when this
     /// returns; one that has none yet is read here and given back, to be kept under its number
     /// (only the request that attaches a digest can name it: the kernel makes one lookup of a
-    /// name at a time, and the control socket one attach).
-    pub(super) fn read_ahead(&self, digest: &TreeDigest) -> Result<Option<super::Tree>, Unread> {
+    /// name at a time, and the control socket one attach). The manifests this request fetches
+    /// itself are counted in `fetched`.
+    pub(super) fn read_ahead(
+        &self,
+        digest: &TreeDigest,
+        fetched: &Fetched,
+    ) -> Result<Option<super::Tree>, Unread> {
         match self.table.find(digest) {
             Some(number) => self.load(number, *digest).map(|_| None),
-            None => self.read_tree(digest).map(Some),
+            None => self.read_tree(digest, fetched).map(Some),
         }
     }
 
     /// Reads the tree `digest`, unless it is in memory, and attaches it with no run; its number.
+    /// The time from the start of the lookup to its answer, on the core's clock, is reported to the
+    /// node with the outcome (`attached`, for `tierstore_fs_tree_attach_seconds`) and said on
+    /// stderr with the manifests the read fetched.
     fn attach_implicitly(&self, digest: TreeDigest) -> Result<u64, Errno> {
+        let start = self.now();
+        let fetched = Fetched::default();
+        let attached = self.attach_read(digest, &fetched);
+        let ms = self.now().saturating_sub(start);
+        let outcome = match attached {
+            Ok(_) => Outcome::Ok,
+            Err(Errno::NoEnt) => Outcome::Absent,
+            Err(_) => Outcome::Failed,
+        };
+        self.fills.report(Attach { outcome, ms }.line());
+        let counts = fetched.counts();
+        tracing::info!(
+            "tierstore fs: lookup of {digest}: {} in {ms} ms; {} manifests: {} from the cache, \
+             {} filled, {} not had",
+            outcome.word(),
+            counts.manifests(),
+            counts.cache,
+            counts.filled,
+            counts.failed,
+        );
+        attached
+    }
+
+    /// [`Core::attach_implicitly`] but for its report: reads the tree, counting the manifests in
+    /// `fetched`, and attaches it.
+    fn attach_read(&self, digest: TreeDigest, fetched: &Fetched) -> Result<u64, Errno> {
         let tree = self
-            .read_ahead(&digest)
+            .read_ahead(&digest, fetched)
             .map_err(|why| refusal(&digest, why))?;
         let _lifecycle = locked(&self.lifecycle);
         let held = self.is_held();
@@ -223,3 +259,7 @@ fn sweep(wait: &mpsc::Receiver<()>, core: &Weak<Core>, every: Duration) {
 #[cfg(test)]
 #[path = "implicit_tests.rs"]
 mod tests;
+
+#[cfg(test)]
+#[path = "implicit_attach_tests.rs"]
+mod attach_tests;

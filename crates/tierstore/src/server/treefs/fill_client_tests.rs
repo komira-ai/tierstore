@@ -10,7 +10,7 @@ use std::time::Duration;
 
 use tierstore_testkit::dir::TestDir;
 
-use super::{AskError, FillClient, Place, PlacedTree, STARTS_QUEUED};
+use super::{AskError, FillClient, Place, PlacedTree, REPORTS_QUEUED};
 use crate::TreeDigest;
 use crate::server::treefs::testing::until;
 
@@ -493,7 +493,7 @@ fn image_gives_the_error_of_a_socket_that_does_not_answer() {
 }
 
 /// Asserts that a `started` report is sent by a thread of its own and is never waited for: with
-/// that thread stuck on a socket that has not answered its first report, [`STARTS_QUEUED`] more
+/// that thread stuck on a socket that has not answered its first report, [`REPORTS_QUEUED`] more
 /// are queued and the next ones are dropped, all without the caller waiting. Once the socket
 /// answers, every queued report is sent, in order, over the one connection, although the socket
 /// answers each as a node of the release before does (`refused unknown request`): an answer is
@@ -518,7 +518,7 @@ fn started_reports_leave_on_a_thread_of_their_own_and_past_the_queue_are_dropped
     let received = |text: &str| lines.lock().unwrap().iter().any(|line| line == text);
     client.report_started("p/0");
     until(|| received("started p/0"));
-    for n in 1..=STARTS_QUEUED + 3 {
+    for n in 1..=REPORTS_QUEUED + 3 {
         client.report_started(&format!("p/{n}"));
     }
     {
@@ -526,11 +526,11 @@ fn started_reports_leave_on_a_thread_of_their_own_and_past_the_queue_are_dropped
         *open.lock().unwrap() = true;
         opened.notify_all();
     }
-    let last = STARTS_QUEUED;
+    let last = REPORTS_QUEUED;
     until(|| received(&format!("started p/{last}")));
     client.report_started("p/last");
     until(|| received("started p/last"));
-    let mut want: Vec<String> = (0..=STARTS_QUEUED)
+    let mut want: Vec<String> = (0..=REPORTS_QUEUED)
         .map(|n| format!("started p/{n}"))
         .collect();
     want.push("started p/last".to_owned());

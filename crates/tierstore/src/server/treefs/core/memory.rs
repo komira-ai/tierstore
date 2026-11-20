@@ -36,6 +36,7 @@ use std::sync::{Arc, Condvar, Mutex};
 
 use crate::tree_manifest::TreeDigest;
 
+use super::fetched::Fetched;
 #[cfg(any(target_os = "linux", test))]
 use super::ino;
 use super::placed::Unread;
@@ -156,7 +157,7 @@ impl Core {
         };
         let start = self.now();
         let read = self
-            .read_tree(&digest)
+            .read_tree(&digest, &Fetched::default())
             .map(|tree| self.keep(number, digest, tree));
         #[cfg(test)]
         if self.reads.stop_next.swap(false, Ordering::AcqRel) {
