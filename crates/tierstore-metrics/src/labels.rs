@@ -238,6 +238,20 @@ closed! {
         BatchForget = "batch_forget",
         /// `FUSE_READDIRPLUS`.
         Readdirplus = "readdirplus",
+        /// `FUSE_SYMLINK`.
+        Symlink = "symlink",
+        /// `FUSE_MKNOD`.
+        Mknod = "mknod",
+        /// `FUSE_RMDIR`.
+        Rmdir = "rmdir",
+        /// `FUSE_LINK`.
+        Link = "link",
+        /// `FUSE_SETXATTR`.
+        Setxattr = "setxattr",
+        /// `FUSE_REMOVEXATTR`.
+        Removexattr = "removexattr",
+        /// `FUSE_RENAME2`.
+        Rename2 = "rename2",
         /// An opcode `tsfuse` does not know.
         Other = "other",
     }
@@ -278,6 +292,13 @@ impl From<Opcode> for FuseOp {
             Opcode::Destroy => Self::Destroy,
             Opcode::BatchForget => Self::BatchForget,
             Opcode::Readdirplus => Self::Readdirplus,
+            Opcode::Symlink => Self::Symlink,
+            Opcode::Mknod => Self::Mknod,
+            Opcode::Rmdir => Self::Rmdir,
+            Opcode::Link => Self::Link,
+            Opcode::Setxattr => Self::Setxattr,
+            Opcode::Removexattr => Self::Removexattr,
+            Opcode::Rename2 => Self::Rename2,
         }
     }
 }

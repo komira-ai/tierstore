@@ -170,6 +170,11 @@ tierstore-entry = { path = "crates/tierstore-entry" }
 tierstore-harness = { path = "crates/tierstore-harness" }
 # The server side of the mount protocol (T5); the mount client's tests run against it.
 tierstore-mount-server = { path = "crates/tierstore-mount-server" }
+# The mount's side of the mount protocol (T6): the packs a tree mount reads.
+tierstore-mount-client = { path = "crates/tierstore-mount-client" }
+# A tree read by path from its mapped L2 list and the packs of the mount protocol: the read
+# path of the tree mount (T-F8), under the daemon's `TreeFs`.
+tierstore-tree = { path = "crates/tierstore-tree" }
 # The previous release: `v0.3.17`, the tag of the commit below, taken from the public repository
 # at that commit alone (the `rev` is what pins it; a tag can be moved). Used only by the
 # dev-dependencies of `crates/compat`. When a release is made, move both to the new release's
@@ -195,8 +200,9 @@ hostkeeper-placed = { git = "https://github.com/komira-ai/hostkeeper", rev = "38
 # `coverage` is set by cargo-llvm-cov.
 unexpected_cfgs = { level = "warn", check-cfg = ["cfg(coverage)"] }
 # No unsafe code (AGENTS.md R2). `deny`, not `forbid`, so the two modules of
-# tierstore-testkit that call libc or edit the environment, and the `FUSE_DEV_IOC_CLONE` ioctl of
-# tsfuse, can each `expect` it with a reason; `tierstore` forbids it in its own `lib.rs`.
+# tierstore-testkit that call libc or edit the environment, and the `FUSE_DEV_IOC_CLONE` ioctl and
+# the io_uring ring (`src/uring/sys.rs`) of tsfuse, can each `expect` it with a reason;
+# `tierstore` forbids it in its own `lib.rs`.
 unsafe_code = "deny"
 
 [workspace.lints.clippy]

@@ -27,8 +27,8 @@ use tsfuse::Opcode;
 use tsfuse::abi::{
     self, Attr, AttrOut, BatchForgetIn, CreateIn, Dirent, DirentPlus, EntryOut, FlushIn, ForgetIn,
     ForgetOne, FsyncIn, GetattrIn, InHeader, InitFlags, InitIn, InitOut, InterruptIn, Kstatfs,
-    MkdirIn, OpenIn, OpenOut, OutHeader, ReadIn, ReleaseIn, RenameIn, SetattrIn, StatfsOut,
-    WriteIn, WriteOut,
+    LinkIn, MkdirIn, MknodIn, OpenIn, OpenOut, OutHeader, ReadIn, ReleaseIn, Rename2In, RenameIn,
+    SetattrIn, StatfsOut, WriteIn, WriteOut,
 };
 
 /// The pinned header: `include/uapi/linux/fuse.h` of the farm kernel, Linux 7.0.0-42 (the
@@ -149,6 +149,13 @@ fn rust_layouts() -> BTreeMap<String, Layout> {
         }),
         rust!("fuse_mkdir_in", MkdirIn, { "mode": mode, "umask": umask }),
         rust!("fuse_rename_in", RenameIn, { "newdir": newdir }),
+        rust!("fuse_rename2_in", Rename2In, {
+            "newdir": newdir, "flags": flags, "padding": padding,
+        }),
+        rust!("fuse_mknod_in", MknodIn, {
+            "mode": mode, "rdev": rdev, "umask": umask, "padding": padding,
+        }),
+        rust!("fuse_link_in", LinkIn, { "oldnodeid": oldnodeid }),
         rust!("fuse_setattr_in", SetattrIn, {
             "valid": valid, "padding": padding, "fh": fh, "size": size,
             "lock_owner": lock_owner, "atime": atime, "mtime": mtime, "ctime": ctime,
@@ -252,7 +259,7 @@ fn mismatches(probe: &Probe, rust: &BTreeMap<String, Layout>) -> Vec<String> {
 #[test]
 fn every_wire_struct_has_the_layout_of_the_farm_probe() {
     let probe = parse_probe(LAYOUT);
-    assert_eq!(probe.structs.len(), 28);
+    assert_eq!(probe.structs.len(), 31);
     assert_eq!(mismatches(&probe, &rust_layouts()), Vec::<String>::new());
 }
 
@@ -335,9 +342,10 @@ fn the_comparison_names_each_kind_of_defect() {
     assert_eq!(m, ["fuse_rename_in: a Rust struct the probe does not list"]);
     let m = changed(
         "struct fuse_rename_in 8 8",
-        "struct fuse_rename2_in 8 8\nfield fuse_rename2_in newdir 0 8\nstruct fuse_rename_in 8 8",
+        "struct fuse_setxattr_in 8 4\nfield fuse_setxattr_in size 0 4\n\
+         field fuse_setxattr_in flags 4 4\nstruct fuse_rename_in 8 8",
     );
-    assert_eq!(m, ["fuse_rename2_in: probed, but no Rust struct"]);
+    assert_eq!(m, ["fuse_setxattr_in: probed, but no Rust struct"]);
 
     // A probe run on another header.
     let pinned = fnv1a64(HEADER.as_bytes());
@@ -432,6 +440,13 @@ fn every_opcode_value_is_the_headers() {
         (Opcode::Destroy, "FUSE_DESTROY"),
         (Opcode::BatchForget, "FUSE_BATCH_FORGET"),
         (Opcode::Readdirplus, "FUSE_READDIRPLUS"),
+        (Opcode::Symlink, "FUSE_SYMLINK"),
+        (Opcode::Mknod, "FUSE_MKNOD"),
+        (Opcode::Rmdir, "FUSE_RMDIR"),
+        (Opcode::Link, "FUSE_LINK"),
+        (Opcode::Setxattr, "FUSE_SETXATTR"),
+        (Opcode::Removexattr, "FUSE_REMOVEXATTR"),
+        (Opcode::Rename2, "FUSE_RENAME2"),
     ];
     for (op, name) in names {
         assert_eq!(op.code(), enumerator(HEADER, name), "{name}");
@@ -453,12 +468,17 @@ fn every_flag_and_constant_is_the_headers() {
         (InitFlags::NO_OPENDIR_SUPPORT, "FUSE_NO_OPENDIR_SUPPORT"),
         (InitFlags::INIT_EXT, "FUSE_INIT_EXT"),
         (InitFlags::HAS_RESEND, "FUSE_HAS_RESEND"),
+        (InitFlags::OVER_IO_URING, "FUSE_OVER_IO_URING"),
     ];
     for (flag, name) in flags {
         assert_eq!(flag.0, define(HEADER, name), "{name}");
     }
     let bits = [
         (u64::from(abi::fopen::KEEP_CACHE), "FOPEN_KEEP_CACHE"),
+        (u64::from(abi::fopen::DIRECT_IO), "FOPEN_DIRECT_IO"),
+        (u64::from(abi::fattr::MODE), "FATTR_MODE"),
+        (u64::from(abi::fattr::UID), "FATTR_UID"),
+        (u64::from(abi::fattr::GID), "FATTR_GID"),
         (u64::from(abi::fattr::SIZE), "FATTR_SIZE"),
         (u64::from(abi::fattr::ATIME), "FATTR_ATIME"),
         (u64::from(abi::fattr::MTIME), "FATTR_MTIME"),

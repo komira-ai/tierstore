@@ -14,7 +14,10 @@ use tierstore_testkit::dir::TestDir;
 use tsfuse::abi::{AttrOut, EntryOut, GetattrIn, OpenIn, OpenOut, ReadIn, ReleaseIn, fopen};
 use tsfuse::{DevFd, Fs as _, Handled, ReplyDevice, Request, Tokens};
 
-use super::{Options, Reply, Served, TsNullFs, mount_options, open_data, reply_config, start};
+use super::{
+    Options, Reply, Served, Transport, TsNullFs, URING_MAX_PAGES, mount_options, open_data,
+    reply_config, start, transport_of,
+};
 use crate::list::{Entry, FileList};
 use crate::nullfs::OpenMode;
 use crate::tree::Tree;
@@ -100,6 +103,7 @@ fn options(open: OpenMode, reply: Reply) -> Options {
         splice_min: 16 * 1024,
         move_pages: false,
         allow_other: false,
+        transport: Transport::Dev,
     }
 }
 
@@ -536,10 +540,85 @@ fn a_device_that_ends_before_init_starts_no_session() {
         &sample(),
         options(OpenMode::Explicit, Reply::Writev),
     );
-    let error = start(DevFd::from_fd(read_end), NonZeroUsize::MIN, Arc::new(fs)).unwrap_err();
+    let fs: Arc<TsNullFs> = Arc::new(fs);
+    let error = start(
+        DevFd::from_fd(read_end),
+        NonZeroUsize::MIN,
+        Transport::Dev,
+        fs.clone(),
+    )
+    .unwrap_err();
     assert!(
         error.to_string().starts_with("tsfuse-null-fs: init: "),
         "{error}"
+    );
+    let (read_end, write_end) = rustix::pipe::pipe().unwrap();
+    drop(write_end);
+    let error = start(
+        DevFd::from_fd(read_end),
+        NonZeroUsize::MIN,
+        Transport::Uring(tsfuse::UringConfig::default()),
+        fs,
+    )
+    .unwrap_err();
+    assert!(
+        error.to_string().starts_with("tsfuse-null-fs: init: "),
+        "over io_uring too: {error}"
+    );
+}
+
+/// A session on `/dev/fuse` asks for the tree's 256 pages, one over io_uring for 32 (so the
+/// default depth fits 64 MiB on 88 CPUs), and the reply path's buffers follow.
+#[test]
+fn a_session_over_io_uring_asks_for_32_pages_and_its_buffers_follow() {
+    let uring = Transport::Uring(tsfuse::UringConfig::default());
+    assert_eq!(
+        Transport::Dev.init_config(),
+        tsfuse::abi::InitConfig::tree()
+    );
+    assert_eq!(
+        uring.init_config(),
+        tsfuse::abi::InitConfig {
+            max_pages: 32,
+            ..tsfuse::abi::InitConfig::tree()
+        }
+    );
+    assert_eq!(URING_MAX_PAGES, 32);
+    let page = rustix::param::page_size();
+    let mut opts = options(OpenMode::Explicit, Reply::Writev);
+    assert_eq!(reply_config(&opts).max_data, 256 * page);
+    opts.transport = uring;
+    assert_eq!(reply_config(&opts).max_data, 32 * page);
+    let payload = tsfuse::UringMemory::payload(4096, URING_MAX_PAGES, 4096);
+    assert_eq!(
+        tsfuse::UringMemory::of(88, 5, payload).bytes,
+        57_798_400,
+        "the default depth on 88 CPUs registers 55 MiB, within 64 MiB"
+    );
+}
+
+/// The transport is said as `io_uring` with what its entries register, or as `dev-fuse` with
+/// the reason the session did not use io_uring.
+#[test]
+fn the_transport_is_said_with_its_memory_or_its_reason() {
+    let memory = tsfuse::UringMemory::of(88, 5, 128 * 1024);
+    assert_eq!(
+        transport_of(tsfuse::TransportMode::Uring(memory)),
+        ("io_uring".to_owned(), Some(memory))
+    );
+    assert_eq!(
+        transport_of(tsfuse::TransportMode::DevFuse(tsfuse::Fallback::Disabled)),
+        ("dev-fuse (Disabled)".to_owned(), None)
+    );
+    assert_eq!(
+        transport_of(tsfuse::TransportMode::DevFuse(
+            tsfuse::Fallback::OverMemoryLimit {
+                memory,
+                limit: 64 << 20
+            }
+        ))
+        .0,
+        format!("dev-fuse (OverMemoryLimit {{ memory: {memory:?}, limit: 67108864 }})")
     );
 }
 
@@ -554,9 +633,36 @@ fn what_it_served_is_one_line_of_json() {
         pipe_size: 1 << 20,
         splice_bytes: 3,
         pread_bytes: 5,
+        transport: "dev-fuse (NotAsked)".to_owned(),
+        uring_registered_bytes: None,
+        uring_depth: None,
+        uring_queues: None,
     };
     assert_eq!(
         serde_json::to_string(&served).unwrap(),
-        r#"{"readers":4,"granted":"InitFlags(ASYNC_READ)","missing":"InitFlags()","max_pages":256,"pipe_size":1048576,"splice_bytes":3,"pread_bytes":5}"#
+        r#"{"readers":4,"granted":"InitFlags(ASYNC_READ)","missing":"InitFlags()","max_pages":256,"pipe_size":1048576,"splice_bytes":3,"pread_bytes":5,"transport":"dev-fuse (NotAsked)","uring_registered_bytes":null,"uring_depth":null,"uring_queues":null}"#
+    );
+    let ring = Served {
+        transport: "io_uring".to_owned(),
+        uring_registered_bytes: Some(57_798_400),
+        uring_depth: Some(5),
+        uring_queues: Some(88),
+        max_pages: 32,
+        ..served
+    };
+    let line = serde_json::to_value(&ring).unwrap();
+    assert_eq!(
+        (
+            &line["transport"],
+            &line["uring_registered_bytes"],
+            &line["uring_depth"],
+            &line["uring_queues"]
+        ),
+        (
+            &serde_json::json!("io_uring"),
+            &serde_json::json!(57_798_400),
+            &serde_json::json!(5),
+            &serde_json::json!(88)
+        )
     );
 }

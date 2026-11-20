@@ -3,9 +3,10 @@
 //!
 //! A start, in order: the cache directory must be on a file system that is not stacked (the job's
 //! overlay above this mount must stay within the kernel's depth of stacking); the neutral start is
-//! done (`Setup`: a table of tree numbers afresh, the attachments made again, the cache told
-//! which trees are attached, the control socket bound); the mount is made and the record of its
-//! `INIT` handshake written. That is [`Running::start`]. [`Running::adopt`] is the
+//! done (`Setup`: a table of tree numbers afresh, the attachments made again, the thread started
+//! that tells the cache which trees are attached once its fill socket answers, the control socket
+//! bound); the mount is made and the record of its `INIT` handshake written. Each step's time is
+//! said as it ends (`steps.rs`). That is [`Running::start`]. [`Running::adopt`] is the
 //! start of a process that takes a connection over (after a crash or a restart, with the
 //! descriptor the service manager kept, or in a hand-over from the running instance): the same
 //! state is read from the runtime directory instead of made, and nothing is mounted. What
@@ -36,6 +37,7 @@ use super::serving::Serving;
 use super::start::{
     Identity, Setup, StartError, control_error, core_of, create_mount_point, create_runtime_dir, io,
 };
+use super::steps::Steps;
 use super::table::TreeTable;
 use crate::server::local_cache::SystemDisk;
 use crate::{MonotonicClock, SystemClock};
@@ -207,6 +209,7 @@ impl Running {
     /// # Errors
     /// [`StartError`]: why nothing was mounted.
     pub(super) fn start(settings: &FsSettings) -> Result<Self, StartError> {
+        let mut steps = Steps::new(Arc::new(MonotonicClock::new()));
         begin(settings, || {
             discard_dead_mount(
                 settings,
@@ -214,20 +217,24 @@ impl Running {
                 &Kernel::real(),
             );
         })?;
+        let _ = steps.done("making the directories");
         let Setup {
             core,
             mount_id,
             _control: control,
             ..
         } = Setup::start(settings, true, Identity::Fresh)?;
+        let _ = steps.done("setting up the core and the control socket");
         // A hand-over left by an earlier mount names nothing of this one.
         carry::remove(&settings.runtime_dir)
             .map_err(io("removing the put directory's hand-over"))?;
         serve_put(settings, &core, 1, None)?;
+        let _ = steps.done("opening the put directory");
         let serving = Serving::mount(&core, settings)
             .map_err(io(format!("mounting {}", settings.mountpoint.display())))?;
         let record = Record::first(serving.outcome(), mount_id);
         init_record::write(&settings.runtime_dir, &record)?;
+        let _ = steps.done("mounting");
         Ok(Self::of(core, settings, Parts { control, serving }))
     }
 
@@ -245,7 +252,9 @@ impl Running {
         device: OwnedFd,
         (control, resend): (Option<std::os::unix::net::UnixListener>, bool),
     ) -> Result<Self, StartError> {
+        let mut steps = Steps::new(Arc::new(MonotonicClock::new()));
         make_state_directories(settings)?;
+        let _ = steps.done("making the directories");
         let Prepared {
             record,
             saved,
@@ -258,11 +267,13 @@ impl Running {
             record.generation,
             true,
         )?;
+        let _ = steps.done("setting up the core");
         let handed = carry::read(&settings.runtime_dir)
             .map_err(io("reading the put directory's hand-over"))?;
         serve_put(settings, &core, record.generation, Some(handed))?;
         // Taken over: a later start must not take it over again.
         carry::remove_or_say(&settings.runtime_dir);
+        let _ = steps.done("opening the put directory");
         let control = match control {
             Some(listener) => {
                 Control::serve_on(Arc::clone(&core), listener, &settings.control_socket)
@@ -283,6 +294,7 @@ impl Running {
             (Some(&saved), resend),
         )
         .map_err(io("serving the connection"))?;
+        let _ = steps.done("serving the connection");
         Ok(Self::of(core, settings, Parts { control, serving }))
     }
 

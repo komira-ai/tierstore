@@ -1,0 +1,66 @@
+[package]
+name = "tierstore-tree"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+repository.workspace = true
+publish.workspace = true
+description = "A tree of the tierstore read path read by path (docs/design/fetch-cache-serve.md, 5.1, 5.3 and section 23; Linux only): its L2 list mapped read-only with the record sections advised WILLNEED and, for a hot mount, locked; lookup, nodes, children and link targets copied out of the mapping; and reads of a file's bytes from the packs of the mount protocol with the reader protocol of 5.1 and its post-read recheck, parked waits, and the lost path that marks the whole tree lost."
+
+[features]
+# `testing`: a rig for the tests of this crate and of the fronts on it (the daemon's `TreeFs`): the
+# real mount server of T5 over the real entry store of T1 with a fake engine, serving one tree's
+# packs to a mount client, with the steps a test needs (publish, evict, mark bad, lose).
+testing = [
+    "dep:async-trait",
+    "dep:tierstore-entry",
+    "dep:tierstore-mount-server",
+    "dep:tierstore-testkit",
+    "tokio/rt-multi-thread",
+]
+
+# Linux only: the packs are read through the mount protocol, which passes descriptors with
+# SCM_RIGHTS and maps memfds; the crate is empty elsewhere (macOS serves through the in-process
+# store, 5.6).
+[target.'cfg(target_os = "linux")'.dependencies]
+# The rig's connector (`testing`): it is used as `dyn` and has an async method.
+async-trait = { workspace = true, optional = true }
+# Waiting for every pack's `open-pack` at once.
+futures.workspace = true
+# The PROT_* and MAP_* constants of the image's mappings (no libc call is made).
+libc.workspace = true
+# posix_fadvise(WILLNEED) on the record sections, and the page size the locked mappings round to.
+# Without `unsafe`.
+rustix = { workspace = true, features = ["fs", "param"] }
+thiserror.workspace = true
+# The rig's entry store and server (`testing`).
+tierstore-entry = { workspace = true, optional = true }
+# The ids, the wait outcomes and the cell size of the read path.
+tierstore-fetch-api.workspace = true
+# The reader of the L2 list: the checks at open, and the decoding of one record.
+tierstore-list.workspace = true
+# The packs: `open-pack`, the reader protocol's counters and state loads, and `wait`.
+tierstore-mount-client.workspace = true
+tierstore-mount-server = { workspace = true, optional = true }
+# The rig's scratch directory (`testing`).
+tierstore-testkit = { workspace = true, optional = true }
+# The lost signal a parked wait watches, and the select of a wait against it.
+tokio = { workspace = true, features = ["macros", "rt", "sync"] }
+# The image mapped read-only, and its record sections mapped locked, through a safe interface.
+vm-memory = { workspace = true, features = ["backend-mmap"] }
+
+[target.'cfg(target_os = "linux")'.dev-dependencies]
+# `setrlimit`, to lower the memlock limit in the test of a refused lock.
+rustix = { workspace = true, features = ["process"] }
+# An independent SHA-256 for the trees the tests build.
+sha2.workspace = true
+# The version 2 writer the tests build their trees' lists with (tierstore-list makes the L2
+# sidecar of it).
+tierstore.workspace = true
+tierstore-testkit.workspace = true
+tierstore-tree = { workspace = true, features = ["testing"] }
+tokio = { workspace = true, features = ["macros", "rt", "rt-multi-thread", "sync"] }
+
+[lints]
+workspace = true

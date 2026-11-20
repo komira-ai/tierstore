@@ -84,10 +84,11 @@ const READ_CPU: &[(&str, Figure)] = &[
     ("warm cgroup kernel ms/GB", |r| {
         r.warm.cpu.as_ref()?.cgroup_system_ms_per_gb
     }),
+    ("rounds", |r| Some(f64::from(r.input.throughput_rounds))),
 ];
 
 /// A number as a table shows it: no decimals from 100 up, one from 10, two below.
-fn number(value: f64) -> String {
+pub(crate) fn number(value: f64) -> String {
     if value >= 100.0 {
         format!("{value:.0}")
     } else if value >= 10.0 {
@@ -98,7 +99,7 @@ fn number(value: f64) -> String {
 }
 
 /// `median (min-max)` of `values`, or `-` when there are none.
-fn cell(mut values: Vec<f64>) -> String {
+pub(crate) fn cell(mut values: Vec<f64>) -> String {
     if values.is_empty() {
         return "-".to_owned();
     }

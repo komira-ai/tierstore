@@ -4,7 +4,7 @@
 //! message, for an unimplemented opcode, a short body and a name with no NUL.
 //!
 //! Ports the tests of `src/ll/request.rs` of fuser 0.18.0 (MIT; notice in `crates/tsfuse/FUSER-LICENSE.md`): a short header, a short body,
-//! and INIT (its MKNOD test is dropped: MKNOD is not implemented).
+//! and INIT (its MKNOD test is written new below, for the argument struct of the pinned header).
 //!
 //! Catches:
 //! - an argument struct read at the wrong offset or with fields swapped;
@@ -13,7 +13,9 @@
 //! - a name read past its NUL, a second name not split, or a missing NUL accepted;
 //! - WRITE data longer or shorter than `size`, or a BATCH_FORGET count larger than its nodes;
 //! - an old kernel's 16-byte INIT refused, or its absent `flags2` read from other bytes;
-//! - an unimplemented opcode parsed, or answered other than `ENOSYS`.
+//! - an unimplemented opcode parsed, or answered other than `ENOSYS`;
+//! - a SYMLINK's target taken for its name, a LINK's node or a RENAME2's flags read from the
+//!   wrong bytes, or a SETXATTR refused for a body the library does not read.
 
 #![allow(
     clippy::unwrap_used,
@@ -23,8 +25,8 @@
 
 use tsfuse::abi::{
     BatchForgetIn, CreateIn, FlushIn, ForgetIn, ForgetOne, FsyncIn, GetattrIn, InHeader, InitIn,
-    InterruptIn, MkdirIn, OpenIn, Operation, ParseError, ReadIn, ReleaseIn, RenameIn, SetattrIn,
-    UNIQUE_RESEND, WriteIn,
+    InterruptIn, LinkIn, MkdirIn, MknodIn, OpenIn, Operation, ParseError, ReadIn, ReleaseIn,
+    Rename2In, RenameIn, SetattrIn, UNIQUE_RESEND, WriteIn,
 };
 use tsfuse::{Errno, Opcode, Request, RequestHeader};
 
@@ -109,10 +111,17 @@ fn opcodes_without_arguments_ignore_their_body() {
 
 #[test]
 fn a_name_ends_at_its_nul_and_one_without_is_refused() {
-    for op in [Opcode::Lookup, Opcode::Unlink] {
+    for op in [
+        Opcode::Lookup,
+        Opcode::Unlink,
+        Opcode::Rmdir,
+        Opcode::Removexattr,
+    ] {
         let want = |name| match op {
             Opcode::Lookup => Operation::Lookup { name },
-            _ => Operation::Unlink { name },
+            Opcode::Unlink => Operation::Unlink { name },
+            Opcode::Rmdir => Operation::Rmdir { name },
+            _ => Operation::Removexattr { name },
         };
         assert_eq!(parse(&request(op.code(), b"foo\0")), Ok(want(b"foo")));
         // An empty name is a name: the kernel's to refuse, not the parse's.
@@ -208,6 +217,109 @@ fn rename_reads_both_names() {
         parse(&request(12, &body[..4])),
         Err(short(Opcode::Rename, 8, 4))
     );
+}
+
+#[test]
+fn rename2_reads_its_flags_then_both_names() {
+    let arg: Rename2In = distinct(Rename2In::read_prefix);
+    let body = [arg.as_bytes(), b"a.part\0a\0"].concat();
+    assert_eq!(
+        parse(&request(45, &body)),
+        Ok(Operation::Rename2 {
+            arg,
+            name: b"a.part",
+            newname: b"a"
+        })
+    );
+    // The flags are the bytes after `newdir`, in the host's order.
+    let read = Rename2In::read_prefix(&body).unwrap().0;
+    assert_eq!(read.newdir, u64::from_ne_bytes([1, 2, 3, 4, 5, 6, 7, 8]));
+    assert_eq!(read.flags, u32::from_ne_bytes([9, 10, 11, 12]));
+    let no_second_nul = [arg.as_bytes(), b"old\0new"].concat();
+    assert_eq!(
+        parse(&request(45, &no_second_nul)),
+        Err(ParseError::MissingNul {
+            opcode: Opcode::Rename2
+        })
+    );
+    assert_eq!(
+        parse(&request(45, &body[..15])),
+        Err(short(Opcode::Rename2, 16, 15))
+    );
+}
+
+#[test]
+fn symlink_reads_the_name_then_the_target() {
+    assert_eq!(
+        parse(&request(6, b"c.part\0a.part\0")),
+        Ok(Operation::Symlink {
+            name: b"c.part",
+            target: b"a.part"
+        })
+    );
+    assert_eq!(
+        parse(&request(6, b"c.part\0a.part")),
+        Err(ParseError::MissingNul {
+            opcode: Opcode::Symlink
+        })
+    );
+    assert_eq!(
+        parse(&request(6, b"")),
+        Err(ParseError::MissingNul {
+            opcode: Opcode::Symlink
+        })
+    );
+}
+
+#[test]
+fn mknod_and_link_read_their_argument_then_the_name() {
+    let mknod: MknodIn = distinct(MknodIn::read_prefix);
+    let body = [mknod.as_bytes(), b"d.part\0"].concat();
+    assert_eq!(
+        parse(&request(8, &body)),
+        Ok(Operation::Mknod {
+            arg: mknod,
+            name: b"d.part"
+        })
+    );
+    assert_eq!(
+        parse(&request(8, &body[..15])),
+        Err(short(Opcode::Mknod, 16, 15))
+    );
+    assert_eq!(
+        parse(&request(8, mknod.as_bytes())),
+        Err(ParseError::MissingNul {
+            opcode: Opcode::Mknod
+        })
+    );
+
+    let link = LinkIn { oldnodeid: 0x99 };
+    let body = [link.as_bytes(), b"b.part\0"].concat();
+    assert_eq!(
+        parse(&request(13, &body)),
+        Ok(Operation::Link {
+            arg: link,
+            newname: b"b.part"
+        })
+    );
+    assert_eq!(
+        parse(&request(13, &body[..7])),
+        Err(short(Opcode::Link, 8, 7))
+    );
+    assert_eq!(
+        parse(&request(13, link.as_bytes())),
+        Err(ParseError::MissingNul {
+            opcode: Opcode::Link
+        })
+    );
+}
+
+#[test]
+fn setxattr_is_parsed_without_reading_its_body() {
+    // The compat argument (size, flags), the name and the value; or nothing at all.
+    let body = [&[1, 0, 0, 0, 0, 0, 0, 0][..], b"user.x\0v"].concat();
+    assert_eq!(parse(&request(21, &body)), Ok(Operation::Setxattr));
+    assert_eq!(parse(&request(21, &[])), Ok(Operation::Setxattr));
 }
 
 #[test]
@@ -352,14 +464,15 @@ fn init_reads_the_full_struct_or_an_old_kernels_sixteen_bytes() {
 
 #[test]
 fn an_unimplemented_opcode_is_refused_with_enosys() {
-    for code in [6, 8, 11, 21, 45, 52, 4096] {
+    // 7 is no opcode; 22 and 23 (GETXATTR, LISTXATTR) and 46 (LSEEK) are not implemented.
+    for code in [7, 22, 23, 46, 52, 4096] {
         let err = parse(&request(code, &[0; 64])).unwrap_err();
         assert_eq!(err, ParseError::Unimplemented(code));
         assert_eq!(err.errno(), Errno::ENOSYS);
     }
     assert_eq!(
-        ParseError::Unimplemented(6).to_string(),
-        "FUSE opcode 6 is not implemented"
+        ParseError::Unimplemented(22).to_string(),
+        "FUSE opcode 22 is not implemented"
     );
 }
 
