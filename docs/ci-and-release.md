@@ -631,24 +631,29 @@ Both are off until the repository variable `TIERSTORE_SETS_DESIRED` is `true`, e
 anything else, every job of the deploy and of the workflow is skipped.
 
 The `check` job of `hostkeeper-desired.yml` (`contents: read` only) and `deploy-check` of `release.yml` (`cargo xtask release desired`, no token that writes) decides the release and
-hands on what the lab stage of `release.yml` sets for it (`release desired-apt`, above, with the
-same `--min-hostkeeper 0.1.225`): the version `X.Y.Z`, the plain version apt installs, and the
-**targets**, for `linux-x86_64` and `linux-arm64` one `apt` entry each, of the repository entry
-`komira-testing`, pinned by the `.deb`'s SHA-256. It refuses the release unless the suite
-`testing`, read through the CDN as a client reads it, lists both `.deb`s with the digests the
-release's `SHA256SUMS` lists. The same version set by both gets the same targets, so the second
-set is taken (the coordinator refuses a version set again with other targets, `release_exists`).
-A list of `hostkeeper-archive` entries alone would order none of the farm nodes: the coordinator
-holds every host that runs tierstore from apt `installer_dropped`. `targets` is
-exactly the lab's. With `--macos-pkg` the step also hands on `targets-mac`: the same targets and a
-`macos-arm64` list of one `macos-pkg` entry, `{"installer": "macos-pkg", "repository":
-"komira-testing", "packageVersion": "X.Y.Z", "digest": <SHA-256>, "bytes": <size>, "manifest":
-{...}}`, for the release's signed `tierstore-<X.Y.Z>-macos-arm64.pkg`, which the verb downloads from
-the release and holds to the digest `SHA256SUMS` lists (the coordinator turns it into the location
-`pkg/tierstore/<X.Y.Z>/` of the repository). No release index is sent.
+hands on the version `X.Y.Z`, the plain version apt installs, and the **targets**: what the lab
+stage of `release.yml` sets for it (`release desired-apt`, above, with the same
+`--min-hostkeeper 0.1.225`), for `linux-x86_64` and `linux-arm64` one `apt` entry each, of the
+repository entry `komira-testing`, pinned by the `.deb`'s SHA-256, and, with `--macos-pkg` (both
+workflows pass it), in the same targets, a `macos-arm64` list of one `macos-pkg` entry,
+`{"installer": "macos-pkg", "repository": "komira-testing", "packageVersion": "X.Y.Z", "digest":
+<SHA-256>, "bytes": <size>, "manifest": {...}}`, for the release's signed
+`tierstore-<X.Y.Z>-macos-arm64.pkg`, which the verb downloads from the release and holds to the
+digest `SHA256SUMS` lists (the coordinator turns it into the location `pkg/tierstore/<X.Y.Z>/` of
+the repository). It refuses the release unless the suite `testing`, read through the CDN as a
+client reads it, lists both `.deb`s with the digests the release's `SHA256SUMS` lists. A list of
+`hostkeeper-archive` entries alone would order none of the farm nodes: the coordinator holds every
+host that runs tierstore from apt `installer_dropped`. No release index is sent.
+
+The coordinator keeps **one release per version**, whatever the host group, and refuses the same
+version set again with other targets (`release_exists`); the same targets set again are taken. So
+the Linux build nodes' call and the Macs' call send the one `targets` output, each host is ordered
+its own platform's list and ignores the others. The lab stage, off while `TIERSTORE_LAB_INSTALL`
+is not `true`, still sends the apt lists alone (`desired-apt`, through an older pinned client): a
+lab set of a version the deploy already set is refused `release_exists`.
 
 In `hostkeeper-desired.yml` the `set-desired` job (host group `all-in-one`) and, beside it, `set-desired-mac` (host group
-`mac-build`, with `targets-mac`) then call; `deploy` and `deploy-mac` of `release.yml` do the same with the same inputs. They call hostkeeper's CI client (`set-desired.yml` of
+`mac-build`, with the same targets) then call; `deploy` and `deploy-mac` of `release.yml` do the same with the same inputs. They call hostkeeper's CI client (`set-desired.yml` of
 komira-ai/hostkeeper, pinned to v0.1.317, whose hkctl sends the targets as they are, the `apt`
 entries included; the call names the host group `all-in-one`, the Linux build nodes, so the version
 is one deployment to that group and the wait is on that group alone, and the coordinator's

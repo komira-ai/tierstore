@@ -701,10 +701,14 @@ fn a_version_with_no_published_release_or_no_sums_is_refused_before_the_suite_is
 }
 
 #[test]
-fn with_the_macos_pkg_the_targets_gain_one_macos_pkg_entry_held_to_the_sums() {
-    // Asserts: `targets` is the apt targets alone, as the lab sets them, and `targets-mac` is
-    // those plus `macos-arm64` with the exact macos-pkg entry (installer, the apt entries'
-    // repository, package version, SHA-256 and size of the signed pkg, its manifest).
+fn with_the_macos_pkg_the_one_targets_gain_one_macos_pkg_entry_held_to_the_sums() {
+    // Asserts: with --macos-pkg the output is `set`, `package-version` and one `targets`, the apt
+    // targets plus `macos-arm64` with the exact macos-pkg entry (installer, the apt entries'
+    // repository, package version, SHA-256 and size of the signed pkg, its manifest), and no
+    // second targets line.
+    // Catches: the Linux build nodes' set and the Macs' set handed two different targets for one
+    // version, which the coordinator, keeping one release per version whatever the host group,
+    // refuses for whichever call comes second (`release_exists`).
     let s = scratch("macos");
     let output = s.join("output");
     let mut gh = good();
@@ -723,19 +727,13 @@ fn with_the_macos_pkg_the_targets_gain_one_macos_pkg_entry_held_to_the_sums() {
     let printed = desired(&gh, &cdn, &request).expect("set");
     let written = std::fs::read_to_string(&output).expect("the output");
     let lines: Vec<&str> = written.lines().collect();
+    assert_eq!(lines.len(), 3, "{written}");
+    assert_eq!(lines[0], "set=true");
+    assert_eq!(lines[1], format!("package-version={VERSION}"));
     let targets: Value =
         serde_json::from_str(lines[2].strip_prefix("targets=").expect("targets")).expect("JSON");
-    let apt_only = json!({
-        "linux-x86_64": { "entries": [apt_entry(VERSION, "amd64")] },
-        "linux-arm64": { "entries": [apt_entry(VERSION, "arm64")] },
-    });
-    assert_eq!(targets, apt_only, "`targets` stays what the lab sets");
-    assert_eq!(lines.len(), 4, "{written}");
-    let mac: Value =
-        serde_json::from_str(lines[3].strip_prefix("targets-mac=").expect("targets-mac"))
-            .expect("JSON");
     assert_eq!(
-        mac,
+        targets,
         json!({
             "linux-x86_64": { "entries": [apt_entry(VERSION, "amd64")] },
             "linux-arm64": { "entries": [apt_entry(VERSION, "arm64")] },
@@ -748,6 +746,11 @@ fn with_the_macos_pkg_the_targets_gain_one_macos_pkg_entry_held_to_the_sums() {
                 "manifest": crate::release::macos_pkg::manifest_json(FLOOR),
             }] },
         })
+    );
+    assert_eq!(
+        &printed[1..],
+        &lines[..],
+        "the printed lines are the output's"
     );
     assert_eq!(
         printed[0],
