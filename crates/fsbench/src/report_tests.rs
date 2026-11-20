@@ -152,7 +152,7 @@ fn digests_are_cut_and_mount_lines_lose_their_places() {
 }
 
 /// Records with the CPU of their whole-file phases (format 2) get a table of it: MB/s and
-/// server and kernel milliseconds per 10^9 bytes of each phase, and the rounds; a phase with no
+/// server and kernel milliseconds per 10^9 bytes of each phase; a phase with no
 /// control group shows `-` there. Records without it (format 1) get no such table.
 #[test]
 fn the_cpu_of_the_whole_file_phases_has_its_own_table() {
@@ -174,13 +174,13 @@ fn the_cpu_of_the_whole_file_phases_has_its_own_table() {
     let text = render(&[r], 0);
     assert!(
         text.contains(
-            "| variant | regime | cold MB/s | cold server CPU ms/GB | cold cgroup kernel ms/GB | warm MB/s | warm server CPU ms/GB | warm cgroup kernel ms/GB | rounds |\n"
+            "| variant | regime | cold MB/s | cold server CPU ms/GB | cold cgroup kernel ms/GB | warm MB/s | warm server CPU ms/GB | warm cgroup kernel ms/GB |\n"
         ),
         "{text}"
     );
     assert!(
         text.contains(
-            "| null | caches-off | 100 (100-100) | 250 (250-250) | 120 (120-120) | 400 (400-400) | 1.50 (1.50-1.50) | - | 8.00 (8.00-8.00) |\n"
+            "| null | caches-off | 100 (100-100) | 250 (250-250) | 120 (120-120) | 400 (400-400) | 1.50 (1.50-1.50) | - |\n"
         ),
         "{text}"
     );

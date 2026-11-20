@@ -84,7 +84,6 @@ const READ_CPU: &[(&str, Figure)] = &[
     ("warm cgroup kernel ms/GB", |r| {
         r.warm.cpu.as_ref()?.cgroup_system_ms_per_gb
     }),
-    ("rounds", |r| Some(f64::from(r.input.throughput_rounds))),
 ];
 
 /// A number as a table shows it: no decimals from 100 up, one from 10, two below.
