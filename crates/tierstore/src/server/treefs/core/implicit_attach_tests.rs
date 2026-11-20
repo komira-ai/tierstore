@@ -77,8 +77,9 @@ fn a_lookup_fetches_a_level_of_manifests_at_once_and_reports_the_attach() {
         std::thread::spawn(move || {
             let opens = Opens(upstream);
             for (asked, level, ms) in [(1, 1, 5), (5, 4, 20), (13, 8, 40)] {
-                // A level is asked for whole before any of it is answered.
-                until(|| manifest_fills(&opens.0) == asked);
+                // A level is asked for whole before any of it is answered: every fill of it has
+                // entered the gate, and is counted in flight, before any is let go on.
+                opens.0.wait_for_manifest_fills(asked);
                 clock.advance(Duration::from_millis(ms));
                 opens.0.permit_manifests(level);
             }
