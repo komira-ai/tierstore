@@ -6,7 +6,9 @@
 use std::collections::BTreeMap;
 use std::fmt::Write as _;
 
-use crate::record::{ClientRun, DemandRead, DiskSample, MetricDelta, Mode, Summary};
+use crate::record::{
+    ClientRun, DemandRead, DiskSample, MetricDelta, Mode, PlanRecord, Summary, nearest_rank,
+};
 use crate::sample::to_f64;
 
 const MIB: f64 = 1_048_576.0;
@@ -300,6 +302,75 @@ pub fn metrics_table(deltas: &[MetricDelta], names: &[String]) -> String {
         })
         .collect();
     table(&["node", "series", "delta", "per second"], &rows)
+}
+
+/// `planned` over `needed` in thousandths (0 when nothing is needed).
+fn milli(planned: u64, needed: u64) -> u64 {
+    planned
+        .saturating_mul(1000)
+        .checked_div(needed)
+        .unwrap_or(0)
+}
+
+/// Thousandths as a ratio with two decimals.
+fn ratio2(milli: u64) -> String {
+    format!("{:.2}", to_f64(milli) / 1000.0)
+}
+
+/// `part` of `whole` in percent with one decimal (0.0 of nothing).
+fn percent1(part: u64, whole: u64) -> String {
+    let share = (part.saturating_mul(1000)).checked_div(whole).unwrap_or(0);
+    format!("{:.1}", to_f64(share) / 10.0)
+}
+
+/// The table of the plans: a row for each variant with its number of trees, the amplification
+/// of all its trees together (bytes planned over bytes needed), the amplification of single trees
+/// at the 50th, 90th and 99th percentile (nearest rank) and the largest, the trees above 1.50
+/// (count and percent of the trees) and the share of packs fetched whole.
+#[must_use]
+pub fn plan_table(records: &[PlanRecord]) -> String {
+    let mut groups: BTreeMap<&str, Vec<&PlanRecord>> = BTreeMap::new();
+    for r in records {
+        groups.entry(r.variant.as_str()).or_default().push(r);
+    }
+    let rows: Vec<Vec<String>> = groups
+        .iter()
+        .map(|(variant, rs)| {
+            let sum = |f: fn(&PlanRecord) -> u64| rs.iter().map(|r| f(r)).sum::<u64>();
+            let mut per_tree: Vec<u64> = rs
+                .iter()
+                .map(|r| milli(r.bytes_planned, r.bytes_needed))
+                .collect();
+            per_tree.sort_unstable();
+            let trees = per_tree.len() as u64;
+            let above = per_tree.iter().filter(|m| **m > 1500).count() as u64;
+            vec![
+                (*variant).to_owned(),
+                trees.to_string(),
+                ratio2(milli(sum(|r| r.bytes_planned), sum(|r| r.bytes_needed))),
+                ratio2(nearest_rank(&per_tree, 50)),
+                ratio2(nearest_rank(&per_tree, 90)),
+                ratio2(nearest_rank(&per_tree, 99)),
+                ratio2(per_tree[per_tree.len() - 1]),
+                format!("{above} ({}%)", percent1(above, trees)),
+                format!("{}%", percent1(sum(|r| r.packs_whole), sum(|r| r.packs))),
+            ]
+        })
+        .collect();
+    table(
+        &[
+            "variant",
+            "trees",
+            "aggregate amplification",
+            "tree p50",
+            "tree p90",
+            "tree p99",
+            "tree max",
+            "trees above 1.50",
+            "packs whole",
+        ],
+        &rows,
+    )
 }
 
 /// The four tables under their headings, for the results document.

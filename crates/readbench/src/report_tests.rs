@@ -1,9 +1,10 @@
 use std::collections::BTreeMap;
 
 use super::{
-    demand_table, disks_table, mean, metrics_table, number, percentile, render, trees_table,
+    demand_table, disks_table, mean, metrics_table, number, percentile, plan_table, render,
+    trees_table,
 };
-use crate::record::{ClientRun, DemandRead, DiskSample, MetricDelta, Mode, Summary};
+use crate::record::{ClientRun, DemandRead, DiskSample, MetricDelta, Mode, PlanRecord, Summary};
 
 const TREES_HEADER: &str = "\
 | tree | mode | clients | files | packs | manifest GETs | pack GETs (grid/sub/retry/hedge) | needed MiB | fetched MiB | amplification | ready p50 s | ready p99 s | first byte p50 ms | first byte p99 ms | errors |
@@ -317,4 +318,49 @@ fn percentiles_means_and_numbers_print_as_the_tables_need() {
     assert_eq!(mean(&[]), 0.0);
     assert_eq!(number(3.0), "3");
     assert_eq!(number(2.5), "2.500");
+}
+
+const PLANS_HEADER: &str = "\
+| variant | trees | aggregate amplification | tree p50 | tree p90 | tree p99 | tree max | trees above 1.50 | packs whole |
+| --- | --- | --- | --- | --- | --- | --- | --- | --- |
+";
+
+fn plan(variant: &str, needed: u64, planned: u64, packs: u64, whole: u64) -> PlanRecord {
+    PlanRecord {
+        run: "r".into(),
+        tree: "t".into(),
+        variant: variant.into(),
+        files: 1,
+        packs,
+        bytes_needed: needed,
+        bytes_planned: planned,
+        packs_whole: whole,
+        packs_runs: packs - whole,
+        ensures: packs,
+    }
+}
+
+#[test]
+fn the_plan_table_has_a_row_per_variant_with_the_amplification_of_its_trees() {
+    let records = [
+        plan("a", 100, 410, 2, 1),
+        plan("b", 0, 0, 0, 0),
+        plan("a", 100, 100, 2, 2),
+        plan("a", 100, 200, 2, 0),
+        plan("a", 100, 150, 2, 1),
+    ];
+    assert_eq!(
+        plan_table(&records),
+        format!(
+            "{PLANS_HEADER}\
+| a | 4 | 2.15 | 1.50 | 4.10 | 4.10 | 4.10 | 2 (50.0%) | 50.0% |
+| b | 1 | 0.00 | 0.00 | 0.00 | 0.00 | 0.00 | 0 (0.0%) | 0.0% |
+"
+        )
+    );
+}
+
+#[test]
+fn the_plan_table_of_no_plans_is_its_header() {
+    assert_eq!(plan_table(&[]), PLANS_HEADER);
 }

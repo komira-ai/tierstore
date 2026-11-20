@@ -26,10 +26,14 @@ use crate::clock::MachineClock;
 use crate::http::HttpClient;
 use crate::load::{self, LoadPlan};
 use crate::manifest::walk;
-use crate::record::{ClientRun, DemandRead, DiskSample, MetricDelta, Mode, read_lines, write_line};
+use crate::planrun::{Variant, parse_trees, plan_trees};
+use crate::record::{
+    ClientRun, DemandRead, DiskSample, MetricDelta, Mode, PlanRecord, read_lines, write_line,
+};
 use crate::replay::{self, Client, Knobs, Store};
-use crate::report::{demand_table, disks_table, metrics_table, trees_table};
+use crate::report::{demand_table, disks_table, metrics_table, plan_table, trees_table};
 use crate::sample::{Series, deltas, parse_metrics, sample_disks, to_f64};
+use crate::sampletrees::{Query, sample_trees};
 use crate::swfs::{FilerFetch, load_map, parse_server};
 
 const MIB: u64 = 1 << 20;
@@ -62,6 +66,10 @@ enum Verb {
     Audit(AuditArgs),
     /// Prints the Markdown tables of the records of a run.
     Report(ReportArgs),
+    /// Plans trees without fetching them and records how many bytes the plan would fetch.
+    Plan(PlanArgs),
+    /// Lists the store's trees and prints a sample of them.
+    SampleTrees(SampleTreesArgs),
 }
 
 #[derive(Args)]
@@ -306,6 +314,65 @@ struct ReportArgs {
     /// The drives the table keeps (all when absent).
     #[arg(long, value_delimiter = ',')]
     devices: Vec<String>,
+    /// The `plan` records: adds the table of the plans' amplification.
+    #[arg(long)]
+    plans: Option<PathBuf>,
+}
+
+#[derive(Args)]
+struct PlanArgs {
+    #[command(flatten)]
+    filer: FilerArgs,
+    /// The trees to plan (hex digests of their root manifests).
+    #[arg(long, num_args = 1..)]
+    tree: Vec<String>,
+    /// A file of trees, one per line, planned after the `--tree` ones.
+    #[arg(long)]
+    trees_file: Option<PathBuf>,
+    /// A variant of the planner's constants, `NAME=WHOLE_COV,SMALL_MIB,SMALL_COV`; without one
+    /// there is the variant `design` of the defaults.
+    #[arg(long)]
+    variant: Vec<String>,
+    /// Pack sizes read at once.
+    #[arg(long, default_value_t = 32)]
+    parallel: usize,
+    /// Manifests read at once when a tree is walked.
+    #[arg(long, default_value_t = 16)]
+    walk_parallel: usize,
+    #[arg(long)]
+    run: String,
+    #[arg(long)]
+    out: PathBuf,
+}
+
+#[derive(Args)]
+struct SampleTreesArgs {
+    #[command(flatten)]
+    filer: FilerArgs,
+    /// List the entries named after this key.
+    #[arg(long, default_value = "")]
+    after: String,
+    /// Look at this many entries of the listing at most.
+    #[arg(long, default_value_t = 100_000)]
+    scan: u64,
+    /// Keep entries modified at or after this RFC 3339 time.
+    #[arg(long, default_value = "")]
+    since: String,
+    #[arg(long, default_value_t = 0)]
+    min_bytes: u64,
+    /// Entries larger than this are not read (the default is 16 MiB: a manifest is small, a
+    /// loose blob may not be).
+    #[arg(long, default_value_t = 16 * MIB)]
+    max_bytes: u64,
+    /// Keep manifests with at least this many directories.
+    #[arg(long, default_value_t = 0)]
+    min_dirs: usize,
+    /// Stop after this many trees.
+    #[arg(long, default_value_t = 20)]
+    count: usize,
+    /// The file the roots are written to, one per line; the output stream without it.
+    #[arg(long)]
+    out: Option<PathBuf>,
 }
 
 /// Says `line` on `w`. A reader that went away (a closed pipe) is not a failure of the verb.
@@ -563,18 +630,58 @@ async fn verb(verb: Verb, out: &mut dyn Write, err: &mut dyn Write) -> Result<()
                 say(out, &format!("unreachable {}: {e}", server.addr));
             }
         }
+        Verb::Plan(a) => plan(&a, err).await?,
+        Verb::SampleTrees(a) => {
+            let fetch = filer_of(&a.filer, &HttpClient::new(a.filer.timeout_ms));
+            let query = Query {
+                after: a.after,
+                scan: a.scan,
+                since: a.since,
+                min_bytes: a.min_bytes,
+                max_bytes: a.max_bytes,
+                min_dirs: a.min_dirs,
+                count: a.count,
+            };
+            let found = sample_trees(&fetch, &query).await?;
+            let mut text = found.roots.join("\n");
+            if !found.roots.is_empty() {
+                text.push('\n');
+            }
+            match &a.out {
+                Some(path) => {
+                    std::fs::write(path, &text).map_err(|e| Error::io("write", path, e))?
+                }
+                None => {
+                    let _ = out.write_all(text.as_bytes());
+                }
+            }
+            say(
+                err,
+                &format!(
+                    "{} trees of {} entries looked at, {} not manifests",
+                    found.roots.len(),
+                    found.scanned,
+                    found.unparsed
+                ),
+            );
+        }
         Verb::Report(a) => {
             let runs: Vec<ClientRun> = read_lines(&a.runs)?;
             let reads: Vec<DemandRead> = optional(a.demand.as_deref())?;
             let samples: Vec<DiskSample> = optional(a.disks.as_deref())?;
             let changes: Vec<MetricDelta> = optional(a.metrics.as_deref())?;
-            let mut text = String::new();
-            for (heading, body) in [
+            let mut tables = vec![
                 ("Trees", trees_table(&runs)),
                 ("Demand reads", demand_table(&reads)),
                 ("Drives", disks_table(&samples, &a.devices)),
                 ("Node metrics", metrics_table(&changes, &[])),
-            ] {
+            ];
+            if let Some(path) = &a.plans {
+                let plans: Vec<PlanRecord> = read_lines(path)?;
+                tables.push(("Plans", plan_table(&plans)));
+            }
+            let mut text = String::new();
+            for (heading, body) in tables {
                 // Writing to a String does not fail.
                 let _ = write!(text, "### {heading}\n\n{body}\n");
             }
@@ -601,6 +708,59 @@ async fn read_pages(
         series.push(((*node).to_owned(), parse_metrics(&text)));
     }
     Ok(series)
+}
+
+/// Plans the trees of `a` and appends one record per tree and variant to its `--out`; a tree
+/// that fails is named on `err` and left out, and only every tree failing fails the verb.
+async fn plan(a: &PlanArgs, err: &mut dyn Write) -> Result<(), Error> {
+    let mut trees = a.tree.clone();
+    if let Some(path) = &a.trees_file {
+        let text = std::fs::read_to_string(path).map_err(|e| Error::io("read", path, e))?;
+        trees.extend(parse_trees(&text));
+    }
+    if trees.is_empty() {
+        return Err(Error::Usage(
+            "plan needs a tree: --tree or --trees-file".to_owned(),
+        ));
+    }
+    let variants = if a.variant.is_empty() {
+        vec![Variant::design()]
+    } else {
+        a.variant
+            .iter()
+            .map(|v| Variant::parse(v))
+            .collect::<Result<Vec<_>, _>>()?
+    };
+    let fetch = filer_of(&a.filer, &HttpClient::new(a.filer.timeout_ms));
+    let planned = plan_trees(
+        &fetch,
+        &a.run,
+        &trees,
+        &variants,
+        a.walk_parallel,
+        a.parallel,
+    )
+    .await;
+    write_all(&a.out, &planned.records)?;
+    for (tree, e) in &planned.failed {
+        say(err, &format!("tree {tree}: {e}"));
+    }
+    say(
+        err,
+        &format!(
+            "{} of {} trees planned, {} failed",
+            trees.len() - planned.failed.len(),
+            trees.len(),
+            planned.failed.len()
+        ),
+    );
+    if planned.failed.len() == trees.len() {
+        return Err(Error::ReadPath {
+            what: "plan",
+            why: "every tree failed".to_owned(),
+        });
+    }
+    Ok(())
 }
 
 /// Two readings of each metrics page, `window_ms` apart, and the change of each series.

@@ -25,6 +25,13 @@
 //!   `?metadata=true` and `Accept: application/json` it answers
 //!   `{"FullPath", "FileSize", "Mtime", "Md5": null, "chunks": [{"file_id", "offset", "size", ..}]}`.
 //!   A path it does not hold is `404`.
+//! - A filer answers `GET` of a directory path (one ending in `/`, under `/buckets/`) with
+//!   `Accept: application/json` as the real filer's listing: `{"Path", "Entries": [{"FullPath",
+//!   "FileSize", "Mtime"}, ..], "Limit", "LastFileName", "ShouldDisplayLoadMore"}`. The entries
+//!   are the objects directly under the directory, by name, those named after `?lastFileName=`
+//!   only, at most `?limit=` of them (default 100); `ShouldDisplayLoadMore` says whether more
+//!   follow, and `LastFileName` is the last name listed. Objects added with
+//!   [`FakeBuilder::object_at`] carry their `Mtime`, the others `2026-01-01T00:00:00Z`.
 //! - A volume server answers `GET` and `HEAD` of a needle it holds (no `ETag`), with ranges as the
 //!   filer does, and `GET /status` with `{"Version", "DiskStatuses": [{"dir", ..}], "Volumes":
 //!   [{"Collection", "Id", "DiskId", "Size"}]}` for the volumes declared on it.
@@ -78,6 +85,8 @@ pub enum Kind {
     FilerGet,
     /// A filer's `HEAD`.
     FilerHead,
+    /// A filer's `GET` of a directory path (one ending in `/`): its listing.
+    FilerList,
     /// A filer's `GET` with `?metadata=true` and `Accept: application/json`.
     FilerMetadata,
     /// A volume server's `GET` of a needle (or of any path but `/status`).
@@ -142,6 +151,7 @@ impl Gate {
 struct Object {
     data: Bytes,
     etag: String,
+    mtime: String,
     chunks: Vec<ChunkInfo>,
 }
 
@@ -152,6 +162,7 @@ struct Pending {
     key: String,
     data: Vec<u8>,
     volume: Option<u32>,
+    mtime: Option<String>,
 }
 
 /// A volume declared on some servers.
@@ -419,6 +430,7 @@ impl FakeBuilder {
             key: key.to_owned(),
             data,
             volume: None,
+            mtime: None,
         });
         self
     }
@@ -432,6 +444,21 @@ impl FakeBuilder {
             key: key.to_owned(),
             data,
             volume: Some(volume),
+            mtime: None,
+        });
+        self
+    }
+
+    /// Adds the object `key` of `bucket`, last modified at `mtime` (RFC 3339 text), its chunks
+    /// spread over the declared volumes.
+    #[must_use]
+    pub fn object_at(mut self, bucket: &str, key: &str, data: Vec<u8>, mtime: &str) -> Self {
+        self.objects.push(Pending {
+            bucket: bucket.to_owned(),
+            key: key.to_owned(),
+            data,
+            volume: None,
+            mtime: Some(mtime.to_owned()),
         });
         self
     }
@@ -503,6 +530,10 @@ impl FakeBuilder {
                 Object {
                     data: Bytes::from(pending.data.clone()),
                     etag: hex::encode(&digest.as_ref()[..16]),
+                    mtime: pending
+                        .mtime
+                        .clone()
+                        .unwrap_or_else(|| "2026-01-01T00:00:00Z".to_owned()),
                     chunks,
                 },
             );
@@ -610,6 +641,7 @@ async fn handle(
         .is_some_and(|q| q.split('&').any(|p| p == "metadata=true"))
         && header(&req, ACCEPT).is_some_and(|v| v.contains("application/json"));
     let range = header(&req, RANGE);
+    let query = req.uri().query().unwrap_or_default().to_owned();
     node.record(node.classify(head, &path, metadata), &path);
     let script = node.script(&path);
     if let Some(gate) = &script.gate {
@@ -617,7 +649,13 @@ async fn handle(
     }
     let reply = match script.fail {
         Some(status) => Reply::empty(status),
-        None => node.serve(&path, metadata, range.as_deref(), script.ignore_range),
+        None => node.serve(
+            &path,
+            &query,
+            metadata,
+            range.as_deref(),
+            script.ignore_range,
+        ),
     };
     Ok(into_response(&node, reply, head, script.cut))
 }
@@ -636,6 +674,7 @@ impl NodeState {
         match (&self.role, head) {
             (Role::Filer(_), _) if !path.starts_with("/buckets/") => Kind::Other,
             (Role::Filer(_), true) => Kind::FilerHead,
+            (Role::Filer(_), false) if path.ends_with('/') => Kind::FilerList,
             (Role::Filer(_), false) if metadata => Kind::FilerMetadata,
             (Role::Filer(_), false) => Kind::FilerGet,
             (Role::Volume(_), _) if path == "/status" => Kind::VolumeStatus,
@@ -674,15 +713,25 @@ impl NodeState {
     }
 
     /// The answer for a path the node holds, or `404`.
-    fn serve(&self, path: &str, metadata: bool, range: Option<&str>, ignore_range: bool) -> Reply {
+    fn serve(
+        &self,
+        path: &str,
+        query: &str,
+        metadata: bool,
+        range: Option<&str>,
+        ignore_range: bool,
+    ) -> Reply {
         let range = if ignore_range { None } else { range };
         match &self.role {
+            Role::Filer(objects) if path.ends_with('/') => {
+                Reply::json(&listing(objects, path, query))
+            }
             Role::Filer(objects) => match objects.get(path) {
                 None => Reply::empty(404),
                 Some(object) if metadata => Reply::json(&json!({
                     "FullPath": path,
                     "FileSize": object.data.len(),
-                    "Mtime": "2026-01-01T00:00:00Z",
+                    "Mtime": object.mtime,
                     "Md5": null,
                     "chunks": object.chunks.iter().map(|c| json!({
                         "file_id": c.fid,
@@ -713,6 +762,36 @@ impl NodeState {
             },
         }
     }
+}
+
+/// The listing of the directory `dir` (a path ending in `/`) as the filer answers it for `query`.
+fn listing(objects: &BTreeMap<String, Object>, dir: &str, query: &str) -> serde_json::Value {
+    let param = |name: &str| {
+        query
+            .split('&')
+            .find_map(|p| p.strip_prefix(name).and_then(|v| v.strip_prefix('=')))
+            .unwrap_or_default()
+    };
+    let limit: usize = param("limit").parse().unwrap_or(100);
+    let after = param("lastFileName");
+    let mut named: Vec<(&str, &Object)> = objects
+        .iter()
+        .filter_map(|(path, o)| Some((path.strip_prefix(dir)?, o)))
+        .filter(|(name, _)| !name.is_empty() && !name.contains('/') && *name > after)
+        .collect();
+    let more = named.len() > limit;
+    named.truncate(limit);
+    json!({
+        "Path": dir.trim_end_matches('/'),
+        "Entries": named.iter().map(|(name, o)| json!({
+            "FullPath": format!("{dir}{name}"),
+            "FileSize": o.data.len(),
+            "Mtime": o.mtime,
+        })).collect::<Vec<_>>(),
+        "Limit": limit,
+        "LastFileName": named.last().map_or("", |(name, _)| name),
+        "ShouldDisplayLoadMore": more,
+    })
 }
 
 /// The bytes of an object or needle: all of it, or the range asked for.

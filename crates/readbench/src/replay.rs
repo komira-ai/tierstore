@@ -171,7 +171,7 @@ pub struct Prepared {
 }
 
 /// An [`Error::ReadPath`] of `what` from any error that prints.
-fn fail<E: std::fmt::Display>(what: &'static str) -> impl FnOnce(E) -> Error {
+pub(crate) fn fail<E: std::fmt::Display>(what: &'static str) -> impl FnOnce(E) -> Error {
     move |e| Error::ReadPath {
         what,
         why: e.to_string(),
@@ -179,7 +179,7 @@ fn fail<E: std::fmt::Display>(what: &'static str) -> impl FnOnce(E) -> Error {
 }
 
 /// The pack keys of `list` in order of first use.
-fn pack_keys(list: &TreeList) -> Vec<String> {
+pub(crate) fn pack_keys(list: &TreeList) -> Vec<String> {
     let mut seen = BTreeSet::new();
     let mut keys = Vec::new();
     for entry in &list.entries {
@@ -300,7 +300,7 @@ pub fn check_outcome(pack: &PackKey, outcome: WaitOutcome) -> Result<(), Error> 
 }
 
 /// The bytes of `run` in a pack of `size` bytes (the last cell is clipped).
-fn run_bytes(run: CellRun, size: u64) -> ByteRange {
+pub(crate) fn run_bytes(run: CellRun, size: u64) -> ByteRange {
     let offset = u64::from(run.first) << CELL_SHIFT;
     let len = (u64::from(run.count) << CELL_SHIFT).min(size.saturating_sub(offset));
     ByteRange { offset, len }

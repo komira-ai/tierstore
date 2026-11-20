@@ -180,6 +180,33 @@ pub struct MetricDelta {
     pub window_ms: u64,
 }
 
+/// What the Prepare planner would fetch for one tree under one variant of its constants: the
+/// bytes the tree's files need, the bytes its ensures cover (each pack's last cell clipped to the
+/// pack's size) and how many packs the plan fetches whole or as runs.
+#[derive(Debug, PartialEq, Eq, Serialize, Deserialize)]
+pub struct PlanRecord {
+    /// The name of the run.
+    pub run: String,
+    /// The tree: the hex digest of its root manifest.
+    pub tree: String,
+    /// The name of the variant of the planner's constants.
+    pub variant: String,
+    /// Files with bytes.
+    pub files: u64,
+    /// Distinct packs the files name.
+    pub packs: u64,
+    /// The sum of the files' sizes.
+    pub bytes_needed: u64,
+    /// The bytes of the cells the plan's ensures name.
+    pub bytes_planned: u64,
+    /// Packs the plan fetches whole.
+    pub packs_whole: u64,
+    /// Packs the plan fetches as runs of cells.
+    pub packs_runs: u64,
+    /// Ensures in the plan.
+    pub ensures: u64,
+}
+
 /// Appends `record` as one line of JSON to `out`.
 ///
 /// # Errors

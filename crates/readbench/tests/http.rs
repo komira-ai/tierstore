@@ -1,6 +1,11 @@
 //! The HTTP client against the in-process fake store (`tests/support`), and the fake's own
 //! features, each read through the client.
 
+#![expect(
+    clippy::unwrap_used,
+    reason = "the helpers of this file are part of its tests: their failure is the failure reported"
+)]
+
 #[cfg(test)]
 mod support;
 
@@ -8,6 +13,7 @@ use futures::StreamExt as _;
 use futures::TryStreamExt as _;
 use readbench::Error;
 use readbench::http::{BodyStream, HttpClient};
+use serde_json::{Value, json};
 use support::{Fake, Kind, raw};
 
 const BUCKET: &str = "kbf-cas";
@@ -677,4 +683,68 @@ async fn a_fake_without_filers_still_knows_its_chunks() {
         .await;
     assert_eq!(fake.chunks(BUCKET, "missing"), Vec::new());
     assert_eq!(fake.chunks(BUCKET, KEY).len(), 1);
+}
+
+async fn listing(fake: &Fake, query: &str) -> Value {
+    let url = fake
+        .filer(0)
+        .url(&format!("/buckets/kbf-cas/cas/l/{query}"));
+    let body = client().get_bytes(&url, true).await.unwrap();
+    serde_json::from_slice(&body).unwrap()
+}
+
+#[tokio::test]
+async fn the_fake_lists_a_directory_in_pages_after_a_name() {
+    let manifest = br#"{"v":1,"children":[]}"#.to_vec();
+    let mut builder = Fake::builder();
+    for (name, mtime) in [
+        ("t01", "2026-01-01T00:00:00Z"),
+        ("t02", "2026-11-01T00:00:00Z"),
+        ("t03", "2026-11-02T00:00:00Z"),
+        ("t04", "2026-11-03T00:00:00Z"),
+        ("t05", "2026-11-04T00:00:00Z"),
+        ("t07", "2026-11-06T00:00:00Z"),
+        ("sub/t99", "2026-11-07T00:00:00Z"),
+    ] {
+        builder = builder.object_at(BUCKET, &format!("cas/l/{name}"), manifest.clone(), mtime);
+    }
+    let fake = builder.start().await;
+    let manifest_len = manifest.len();
+    let page = listing(&fake, "?limit=3&lastFileName=t02").await;
+    let names: Vec<&str> = page["Entries"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .map(|e| e["FullPath"].as_str().unwrap())
+        .collect();
+    assert_eq!(
+        names,
+        [
+            "/buckets/kbf-cas/cas/l/t03",
+            "/buckets/kbf-cas/cas/l/t04",
+            "/buckets/kbf-cas/cas/l/t05"
+        ]
+    );
+    assert_eq!(page["Entries"][0]["FileSize"], manifest_len);
+    assert_eq!(page["Entries"][0]["Mtime"], "2026-11-02T00:00:00Z");
+    assert_eq!(page["LastFileName"], "t05");
+    assert_eq!(page["ShouldDisplayLoadMore"], true);
+    assert_eq!(page["Path"], "/buckets/kbf-cas/cas/l");
+    // The rest: exactly what is left is not "more".
+    let page = listing(&fake, "?limit=2&lastFileName=t05").await;
+    assert_eq!(page["LastFileName"], "t07");
+    assert_eq!(page["ShouldDisplayLoadMore"], false);
+    // Without parameters: everything, up to 100 entries; nothing after the last name.
+    assert_eq!(
+        listing(&fake, "").await["Entries"]
+            .as_array()
+            .unwrap()
+            .len(),
+        6
+    );
+    let page = listing(&fake, "?lastFileName=t07").await;
+    assert_eq!(page["Entries"], json!([]));
+    assert_eq!(page["LastFileName"], "");
+    assert_eq!(fake.filer(0).count(Kind::FilerList), 4);
+    assert_eq!(fake.filer(0).count(Kind::FilerGet), 0);
 }

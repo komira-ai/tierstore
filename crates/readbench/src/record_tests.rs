@@ -5,8 +5,8 @@ use std::path::Path;
 use tierstore_testkit::dir::TestDir;
 
 use super::{
-    ClientRun, DemandRead, DiskSample, MetricDelta, Mode, Summary, nearest_rank, read_lines,
-    write_line,
+    ClientRun, DemandRead, DiskSample, MetricDelta, Mode, PlanRecord, Summary, nearest_rank,
+    read_lines, write_line,
 };
 
 fn run(needed: u64, fetched: u64, gets: &[(&str, u64)]) -> ClientRun {
@@ -105,6 +105,33 @@ fn records_written_as_lines_are_read_back_skipping_blank_lines() {
     let mut runs = Vec::new();
     write_line(&mut runs, &path, &run(1, 2, &[("retry", 1)])).unwrap();
     assert!(String::from_utf8(runs).unwrap().ends_with("}\n"));
+}
+
+#[test]
+fn a_plan_record_is_one_line_of_the_named_fields_and_reads_back() {
+    let record = PlanRecord {
+        run: "r".into(),
+        tree: "t".into(),
+        variant: "design".into(),
+        files: 1,
+        packs: 2,
+        bytes_needed: 3,
+        bytes_planned: 4,
+        packs_whole: 1,
+        packs_runs: 1,
+        ensures: 2,
+    };
+    let mut line = Vec::new();
+    write_line(&mut line, Path::new("plans"), &record).unwrap();
+    assert_eq!(
+        String::from_utf8(line.clone()).unwrap(),
+        "{\"run\":\"r\",\"tree\":\"t\",\"variant\":\"design\",\"files\":1,\"packs\":2,\
+         \"bytes_needed\":3,\"bytes_planned\":4,\"packs_whole\":1,\"packs_runs\":1,\"ensures\":2}\n"
+    );
+    let dir = TestDir::under(std::env::temp_dir(), "readbench-record-plan");
+    let path = dir.path().join("plans");
+    std::fs::write(&path, &line).unwrap();
+    assert_eq!(read_lines::<PlanRecord>(&path).unwrap(), [record]);
 }
 
 #[test]
