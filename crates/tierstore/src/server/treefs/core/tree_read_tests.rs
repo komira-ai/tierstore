@@ -17,7 +17,7 @@ use crate::server::local_cache::manifest_path;
 use crate::server::treefs::fill_client::FillClient;
 use crate::server::treefs::ino;
 use crate::server::treefs::table::TreeTable;
-use crate::server::treefs::testing::{FakeFill, OWNER, Rig, TREE_IDLE, sample};
+use crate::server::treefs::testing::{Built, FakeFill, OWNER, Rig, TREE_IDLE, dir, file, sample};
 
 /// What the production client of an `fs.fetch_timeout` of 60 s (the default) retries a closed
 /// socket for: 60 pauses of a second.
@@ -28,15 +28,23 @@ fn bound_ms() -> u64 {
     u64::try_from(TREE_READ.as_millis()).unwrap()
 }
 
-/// A core over the rig's cache and clock whose fill client asks the socket at `socket`, which is
-/// not there, retrying it as the production client does; each pause moves the rig's clock on by
-/// the pause, and `paused` is told how many pauses were taken so far.
+/// The name of the client's thread that sends the reports (`fetched` after a read), which pauses
+/// with the same function as the requests of a read.
+const REPORTER: &str = "fs-reports";
+
+/// A core over the rig's cache and clock whose fill client asks the socket at `socket`, retrying
+/// it as the production client does. Each pause of a request moves the rig's clock on by the
+/// pause, and `paused` is told how many such pauses were taken so far; the pauses of the thread
+/// that sends the reports move nothing, so the clock is the read's alone.
 fn core_over(rig: &Rig, socket: &Path, paused: impl Fn(u32) + Send + Sync + 'static) -> Arc<Core> {
     let runtime = rig.dir.path().join("run-bound");
     std::fs::create_dir_all(&runtime).unwrap();
     let clock = Arc::clone(&rig.clock);
     let count = Mutex::new(0u32);
     let pause = Arc::new(move |pause: Duration| {
+        if std::thread::current().name() == Some(REPORTER) {
+            return;
+        }
         clock.advance(pause);
         let mut count = count.lock().unwrap();
         *count += 1;
@@ -81,7 +89,8 @@ fn a_lookup_with_the_fill_socket_away_is_answered_by_the_bound() {
 }
 
 /// Serves fills at `socket` slowly on the rig's clock: each `fill <sha>` puts the manifest in the
-/// cache, moves the clock on by `step`, and answers `ok`. The lines are recorded.
+/// cache, moves the clock on by `step`, and answers `ok`; any other request is refused as unknown.
+/// The fill lines are recorded.
 fn slow_fills(rig: &Rig, socket: &Path, step: Duration) -> Arc<Mutex<Vec<String>>> {
     let listener = UnixListener::bind(socket).unwrap();
     let lines = Arc::new(Mutex::new(Vec::new()));
@@ -93,35 +102,41 @@ fn slow_fills(rig: &Rig, socket: &Path, step: Duration) -> Arc<Mutex<Vec<String>
     let cache = rig.cache.clone();
     let _ = std::thread::spawn(move || {
         for stream in listener.incoming().flatten() {
-            let mut reader = BufReader::new(&stream);
-            let mut line = String::new();
-            while reader.read_line(&mut line).unwrap_or(0) > 0 {
-                let text = line.trim_end_matches('\n').to_owned();
-                line.clear();
-                seen.lock().unwrap().push(text.clone());
-                let Some(sha) = text.strip_prefix("fill ") else {
-                    (&stream).write_all(b"refused unknown request\n").unwrap();
-                    continue;
-                };
-                let bytes = upstream.built.lock().unwrap().manifests[sha].clone();
-                let path = manifest_path(&cache, sha);
-                std::fs::create_dir_all(path.parent().unwrap()).unwrap();
-                std::fs::write(&path, bytes).unwrap();
-                clock.advance(step);
-                (&stream).write_all(b"ok\n").unwrap();
-            }
+            let (seen, clock) = (Arc::clone(&seen), Arc::clone(&clock));
+            let (upstream, cache) = (Arc::clone(&upstream), cache.clone());
+            let _ = std::thread::spawn(move || {
+                let mut reader = BufReader::new(&stream);
+                let mut line = String::new();
+                while reader.read_line(&mut line).unwrap_or(0) > 0 {
+                    let text = line.trim_end_matches('\n').to_owned();
+                    line.clear();
+                    let Some(sha) = text.strip_prefix("fill ") else {
+                        (&stream).write_all(b"refused unknown request\n").unwrap();
+                        continue;
+                    };
+                    seen.lock().unwrap().push(text.clone());
+                    let bytes = upstream.built.lock().unwrap().manifests[sha].clone();
+                    let path = manifest_path(&cache, sha);
+                    std::fs::create_dir_all(path.parent().unwrap()).unwrap();
+                    std::fs::write(&path, bytes).unwrap();
+                    clock.advance(step);
+                    (&stream).write_all(b"ok\n").unwrap();
+                }
+            });
         }
     });
     lines
 }
 
-/// Asserts that the fills of one tree share the one bound: with each fill answered 20 s later on
-/// the clock, the root's and the next manifest's fills are answered within 30 s of the start and
-/// the third is not asked, so the lookup is `EIO`, where a bound for each fill would have read the
-/// whole tree in 60 s.
+/// Asserts that the fills of one tree share the one bound: in a tree three levels deep, read a
+/// level at a time with one manifest at each, and each fill answered 20 s later on the clock, the
+/// fills of the root and of the level below it are answered within 30 s of the start and the third
+/// is not asked, so the lookup is `EIO`, where a bound for each fill would have read the whole
+/// tree in 60 s.
 #[test]
 fn the_manifests_of_one_tree_share_one_bound() {
-    let rig = Rig::new("tfs-bound-shared", sample());
+    let deep = Built::of(vec![("a", dir(vec![("b", dir(vec![("c", file(b"x"))]))]))]);
+    let rig = Rig::new("tfs-bound-shared", deep);
     let root = rig.upstream.built.lock().unwrap().root.clone();
     assert_eq!(rig.upstream.built.lock().unwrap().manifests.len(), 3);
     let socket = rig.dir.path().join("slow.sock");
