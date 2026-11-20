@@ -56,11 +56,12 @@ const PLACED: &[u8; 8] = b"tsplaced";
 const ABSENT: &str = "upstream 404";
 
 /// The longest one read of a tree's manifests may take, every manifest it fills through the fill
-/// socket together. A job agent gives up on a lookup of `trees/<digest>` 60 s after it asked
-/// (jobscheduler's `LOOKUP_MS`), and that time includes the wait for one of the agent's few lookup
-/// threads; a lookup that needed longer was never answered in time, and it kept the agent's thread
-/// in the kernel until it ended, so the lookups behind it timed out too. Half of that bound is
-/// the read's, so the lookup is answered, `EIO` at worst, while the agent still waits for it.
+/// socket together. A job agent gives up on a lookup of `trees/<digest>` 60 s after it asked, and
+/// that time includes the wait for one of the agent's few lookup threads; a lookup that needed
+/// longer was never answered in time, and it kept the agent's thread in the kernel until it ended,
+/// so the lookups behind it timed out too. Half of that bound is the read's, so the lookup is
+/// answered, `EIO` at worst, while the agent still waits for it. It bounds every read of a tree's
+/// manifests: a lookup's, an attach's, and a start's that makes the attachments again.
 pub(in crate::server::treefs) const TREE_READ: Duration = Duration::from_secs(30);
 
 /// The most entries a tree of the mount may have: what the index of an inode number counts.

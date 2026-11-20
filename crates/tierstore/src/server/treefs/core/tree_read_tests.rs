@@ -2,20 +2,22 @@
 //! whose fills the fill socket does not answer is answered `EIO` by that bound on the core's clock,
 //! however many manifests the tree has and however long the client would retry one alone, and a
 //! socket that comes back within the bound still serves the read. The clock is the rig's, moved
-//! only by the client's pauses, so no test waits for real time.
+//! only by the client's pauses and the slow socket's answers, so no test waits for real time.
 
+use std::io::{BufRead as _, BufReader, Write as _};
+use std::os::unix::net::UnixListener;
 use std::path::{Path, PathBuf};
 use std::sync::{Arc, Mutex};
 use std::time::Duration;
 
 use super::super::{Core, Errno, Looked, Settings};
 use super::TREE_READ;
+use crate::Clock;
 use crate::server::local_cache::manifest_path;
 use crate::server::treefs::fill_client::FillClient;
 use crate::server::treefs::ino;
 use crate::server::treefs::table::TreeTable;
 use crate::server::treefs::testing::{FakeFill, OWNER, Rig, TREE_IDLE, sample};
-use crate::{Clock, Mono};
 
 /// What the production client of an `fs.fetch_timeout` of 60 s (the default) retries a closed
 /// socket for: 60 pauses of a second.
@@ -78,23 +80,59 @@ fn a_lookup_with_the_fill_socket_away_is_answered_by_the_bound() {
     assert!(core.implicit().is_empty());
 }
 
-/// Asserts that the manifests below a cached root share the one bound with the socket away: the
-/// first takes all of it and the others take none, so the lookup is `EIO` at the bound and not at
-/// a bound for each manifest.
+/// Serves fills at `socket` slowly on the rig's clock: each `fill <sha>` puts the manifest in the
+/// cache, moves the clock on by `step`, and answers `ok`. The lines are recorded.
+fn slow_fills(rig: &Rig, socket: &Path, step: Duration) -> Arc<Mutex<Vec<String>>> {
+    let listener = UnixListener::bind(socket).unwrap();
+    let lines = Arc::new(Mutex::new(Vec::new()));
+    let (seen, clock, upstream) = (
+        Arc::clone(&lines),
+        Arc::clone(&rig.clock),
+        Arc::clone(&rig.upstream),
+    );
+    let cache = rig.cache.clone();
+    let _ = std::thread::spawn(move || {
+        for stream in listener.incoming().flatten() {
+            let mut reader = BufReader::new(&stream);
+            let mut line = String::new();
+            while reader.read_line(&mut line).unwrap_or(0) > 0 {
+                let text = line.trim_end_matches('\n').to_owned();
+                line.clear();
+                seen.lock().unwrap().push(text.clone());
+                let Some(sha) = text.strip_prefix("fill ") else {
+                    (&stream).write_all(b"refused unknown request\n").unwrap();
+                    continue;
+                };
+                let bytes = upstream.built.lock().unwrap().manifests[sha].clone();
+                let path = manifest_path(&cache, sha);
+                std::fs::create_dir_all(path.parent().unwrap()).unwrap();
+                std::fs::write(&path, bytes).unwrap();
+                clock.advance(step);
+                (&stream).write_all(b"ok\n").unwrap();
+            }
+        }
+    });
+    lines
+}
+
+/// Asserts that the fills of one tree share the one bound: with each fill answered 20 s later on
+/// the clock, the root's and the next manifest's fills are answered within 30 s of the start and
+/// the third is not asked, so the lookup is `EIO`, where a bound for each fill would have read the
+/// whole tree in 60 s.
 #[test]
 fn the_manifests_of_one_tree_share_one_bound() {
     let rig = Rig::new("tfs-bound-shared", sample());
-    let (root, bytes) = {
-        let built = rig.upstream.built.lock().unwrap();
-        (built.root.clone(), built.manifests[&built.root].clone())
-    };
-    assert!(rig.upstream.built.lock().unwrap().manifests.len() >= 3);
-    let path = manifest_path(&rig.cache, &root);
-    std::fs::create_dir_all(path.parent().unwrap()).unwrap();
-    std::fs::write(&path, bytes).unwrap();
-    let core = core_over(&rig, &away(&rig), |_| {});
+    let root = rig.upstream.built.lock().unwrap().root.clone();
+    assert_eq!(rig.upstream.built.lock().unwrap().manifests.len(), 3);
+    let socket = rig.dir.path().join("slow.sock");
+    let lines = slow_fills(&rig, &socket, Duration::from_secs(20));
+    let core = core_over(&rig, &socket, |_| {});
     assert_eq!(core.lookup(ino::TREES, &root), Err(Errno::Io));
-    assert_eq!(rig.clock.now(), bound_ms());
+    let lines = lines.lock().unwrap().clone();
+    assert_eq!(lines.len(), 2);
+    assert_eq!(lines[0], format!("fill {root}"));
+    assert_eq!(rig.clock.now(), 40_000);
+    assert!(core.implicit().is_empty());
 }
 
 /// Asserts that a fill socket that comes back within the bound (the node's tierstore is being
