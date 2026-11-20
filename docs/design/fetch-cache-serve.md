@@ -427,7 +427,7 @@ Mount provider `Prepare` at job assignment runs on the same engine.
 4. **Whole-pack rule, budget-aware.** `cov` = needed fraction of the pack's cells after merging: `cov >= 50%` fetch the whole pack; pack <= 64 MiB and `cov >= 20%` fetch the whole pack; otherwise merged runs only. If the node's queued backlog exceeds 2 s of budget throughput, a would-be-whole pack is downgraded to runs. `amplification` (bytes fetched / needed) must stay under 1.5 in T10b or the constants move. A later demand on missing cells of a `Partial` entry fills gaps; it never starts a second entry.
 5. Prepare is cancellable: a released holder demotes its unstarted parts to `background`; they are dropped only if no other holder wants them.
 6. Prepare never gates launch. Its prefetch is the default and can be configured off per node (`trees.prepare_prefetch = "none"`): Prepare then places the tree and fetches nothing, and each file is fetched on its first open.
-7. Prepare takes a hold on every pack of the tree, and that hold lasts until the job's mount session is released (one hold per tree per job), so packs the job has not opened yet stay held in the node cache (7).
+7. With its prefetch on, Prepare takes a hold on every pack of the tree (with `trees.prepare_prefetch = "none"` it takes none), and that hold lasts until the job's mount session is released (one hold per tree per job), so packs the job has not opened yet stay held in the node cache (7).
 
 This replaces the S3 hydrate queue, the FUSE `prefetch all` threads and the Prepare groups.
 

@@ -413,7 +413,7 @@ The node-local trees of a build node (designed in `docs/design/node-local-trees.
 | `trees.max_request_bytes` | size, `256MiB` (1KiB to 1GiB) | the longest call of the `trees` interface, a create's included: a longer message is refused (`OUT_OF_RANGE`) before it is read whole |
 | `trees.max_bytes` | size, `32GiB` (1MiB to 1TiB) | the file bytes of one tree |
 | `trees.max_placements` | count, 1024 (1 to 1000000) | the placements alive at once |
-| `trees.fill_concurrency` | count, 8 (1 to 1024) | the ranged reads of creates that run at once, node-wide |
+| `trees.fill_concurrency` | count, 8 (1 to 1024) | the ranged reads of creates, and of the mount provider's `Prepare`, that run at once, node-wide |
 | `trees.fill_rate` | rate, `"off"` | a size and `/s`, such as `"200MiB/s"`: the bytes a second of all creates together; `"off"` or `"0B/s"` for no limit |
 | `trees.fill_queue` | count, 16384 (1 to 10000000) | the blobs waiting to be fetched |
 | `trees.coalesce_gap` | size, `256KiB` (0 to 1GiB) | ranges of one object this near one another are one read |
