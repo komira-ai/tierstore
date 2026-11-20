@@ -15,21 +15,21 @@
 //!   its step `desired` with `VERSION` read from the input, or does not hand on that step's
 //!   outputs ([`OUTPUTS`]).
 //!   The command gives `--min-hostkeeper` [`APT_FLOOR`], the floor the workflow lint holds the lab
-//!   stage of `release.yml` to, and `--macos-pkg`, as the lab stage does: the same release set by
-//!   both gets the same targets, and the coordinator refuses a version set again with other targets
-//!   (`release_exists`);
+//!   stage of `release.yml` to, so the apt lists of a release are the lab's, and `--macos-pkg`,
+//!   so its targets also hold the Macs' list;
 //! - `set-desired` needs anything but `check`, is not hostkeeper's reusable workflow
 //!   ([`SET_DESIRED`]) pinned to [`CLIENT_COMMIT`] with the comment `# v`[`CLIENT_RELEASE`],
 //!   holds other than `contents: read` and `id-token: write`, or its inputs are not exactly those
-//!   [`with_wanted`] gives, no more: the service, the version and targets `check` handed on (no
-//!   release index, no package digest), the same targets for `set-desired-mac` as for
-//!   `set-desired` (a version is one release on the coordinator, whatever the host group, so a
-//!   second set with other targets is refused as `release_exists`), the hostkeeper release the pin
-//!   names, the coordinator's
+//!   [`with_wanted`] gives, no more: the service, the version and the one `targets` output
+//!   `check` handed on (no release index, no package digest), the hostkeeper release the pin names, the coordinator's
 //!   two repository variables, the audience, `wait: true` with `max_polls` [`MAX_POLLS`], and the
 //!   tailnet's inputs from their repository variables. The wait is what makes a set that orders
 //!   no host red: such a version never converges, and the client ends the job `not_converged`;
-//!   without it the job ends green, `not_waited`, whatever the hosts do.
+//!   without it the job ends green, `not_waited`, whatever the hosts do;
+//! - `set-desired-mac` is `set-desired` for the host group [`MAC_HOST_GROUP`], with the same
+//!   `targets`: the coordinator keeps one release per version, whatever the host group, and
+//!   refuses the version set again with other targets (`release_exists`), so the second of two
+//!   calls with different targets never sets its group.
 //!
 //! [`deploy_problems`] holds the deploy of `release.yml` to the same: `deploy-check` is `check`
 //! for the release the run published ([`deploy_command`]: `--version` from the plan's tag and
@@ -94,8 +94,8 @@ pub fn check_command() -> String {
     )
 }
 
-/// The outputs `check` hands on, each its step `desired`'s: `targets` holds the apt lists and the
-/// Macs' `macos-arm64` list, and every host group is set them.
+/// The outputs `check` hands on, each its step `desired`'s: one `targets`, with the Linux apt
+/// lists and the Macs' `macos-arm64` list, which both host groups' calls send.
 pub const OUTPUTS: [&str; 3] = ["set", "package-version", "targets"];
 
 /// hostkeeper's reusable workflow that sets the desired version (the CI client).
@@ -115,8 +115,8 @@ pub const CLIENT_RELEASE: &str = "0.1.317";
 /// group that lists tierstore.
 pub const HOST_GROUP: &str = "all-in-one";
 
-/// The host group of the Macs, to which the same version and targets are set a second time
-/// (`set-desired-mac`).
+/// The host group of the Macs, to which the same version and the same targets are set a second
+/// time (`set-desired-mac`).
 pub const MAC_HOST_GROUP: &str = "mac-build";
 
 /// The audience of the job's OIDC token, which the coordinator's allow-list entry names.
@@ -341,7 +341,8 @@ fn check_problems(
 }
 
 /// What each input of hostkeeper's workflow must be for the host group `group`, with the
-/// release the job `check` hands on, and no other input is given.
+/// release the job `check` hands on, and no other input is given. Every group is sent the same
+/// `targets`: the coordinator keeps one release per version.
 pub fn with_wanted_from(check: &str, group: &'static str) -> Vec<(&'static str, String)> {
     let output = |key: &str| format!("${{{{ needs.{check}.outputs.{key} }}}}");
     let fixed: [(&'static str, &'static str); 14] = [

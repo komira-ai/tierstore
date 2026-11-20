@@ -1,17 +1,19 @@
 //! `hostkeeper-desired.yml` ([`super::desired`]): the file of the repository passes, each way of
 //! breaking what it is held to is named, its `id-token: write` is held by `set-desired` alone and
-//! under the variable gate, it sets the lab's apt targets and waits for the fleet, and no workflow
+//! under the variable gate, it sets the lab's apt targets with the Macs' list, the same targets to
+//! both host groups, and waits for the fleet, and no workflow
 //! reads another coordinator's variable, names `deploy-farm`, or calls the run.
 
 use super::checks::APT_IF;
 use super::desired::{
     AUDIENCE, CLIENT_COMMIT, CLIENT_RELEASE, COORDINATOR_VARS, DEPLOY_CHECK_IF, DEPLOY_IF,
-    DESIRED_IF, FILE, MAX_POLLS, SET_DESIRED, SET_IF, caller_problems, check_command,
+    DESIRED_IF, FILE, MAX_POLLS, OUTPUTS, SET_DESIRED, SET_IF, caller_problems, check_command,
     coordinator_problems, deploy_command, deploy_problems, desired_problems, with_wanted,
     with_wanted_from,
 };
 use super::farm::{APT_FLOOR, farm_problems};
-use super::lint::lint;
+use super::hostkeeper::at;
+use super::lint::{entry, lint, names};
 use super::platforms_tests::in_job;
 use super::{text_of, workflows, yaml};
 
@@ -177,8 +179,6 @@ const DEFECTS: &[(&str, &str, &str, &str)] = &[
         "host_group: mac-build",
         "set-desired: with.host_group is Some(\"mac-build\"), not \"all-in-one\"",
     ),
-    // The Macs set other targets than the Linux nodes: the coordinator keeps one release per
-    // version and refuses the second set (`release_exists`), so the Macs are never ordered it.
     (
         "set-desired-mac",
         "targets: ${{ needs.check.outputs.targets }}",
@@ -188,15 +188,8 @@ const DEFECTS: &[(&str, &str, &str, &str)] = &[
     (
         "set-desired",
         "targets: ${{ needs.check.outputs.targets }}",
-        "targets: ${{ needs.check.outputs.targets-linux }}",
-        "set-desired: with.targets is Some(\"${{ needs.check.outputs.targets-linux }}\")",
-    ),
-    // The targets without the Macs' list.
-    (
-        "check",
-        " --macos-pkg",
-        "",
-        "check: the step `desired` does not run",
+        "targets: ${{ needs.check.outputs.targets-mac }}",
+        "set-desired: with.targets is Some(\"${{ needs.check.outputs.targets-mac }}\")",
     ),
     (
         "set-desired-mac",
@@ -287,8 +280,7 @@ const DEFECTS: &[(&str, &str, &str, &str)] = &[
         "--min-hostkeeper 0.1.184",
         "check: the step `desired` does not run",
     ),
-    // The verb of the apt lists alone, which never sets `set=false` after a run that published
-    // none and gives no Macs' list.
+    // The verb of the lab alone, which never sets `set=false` after a run that published none.
     (
         "check",
         "cargo xtask release desired ",
@@ -545,16 +537,18 @@ fn a_set_that_orders_no_host_ends_the_job_red_not_green_with_not_waited() {
 }
 
 #[test]
-fn the_check_gives_the_floor_and_the_macs_list_the_lab_stage_of_release_yml_is_held_to() {
+fn the_check_gives_the_floor_the_lab_stage_of_release_yml_is_held_to() {
     // Catches: hostkeeper-desired.yml and the lab stage of release.yml building the targets of
-    // the same release with two hostkeeper floors, or one with the Macs' list and one without,
-    // so that the second set of the version is refused (`release_exists`) and the fleet is not
-    // moved; and a floor that the lab's lint moves without this workflow following.
+    // the same release with two hostkeeper floors, so that the second set of the version is
+    // refused (`release_exists`) and the fleet is not moved; and a floor that the lab's lint
+    // moves without this workflow following.
     let command = check_command();
     assert!(
-        command.contains(&format!(" --min-hostkeeper {APT_FLOOR} --macos-pkg ")),
+        command.contains(&format!(" --min-hostkeeper {APT_FLOOR} ")),
         "{command}"
     );
+    // The lab sets the same targets, the Macs' list included: the coordinator refuses a version
+    // set again with other targets (`release_exists`).
     let release = text_of("release.yml");
     assert!(release.contains(&format!(
         "cargo xtask release desired --repo \"$GITHUB_REPOSITORY\" --version \"${{TAG#v}}\" --min-hostkeeper {APT_FLOOR} --macos-pkg "
@@ -783,20 +777,14 @@ const DEPLOY_DEFECTS: &[(&str, &str, &str, &str)] = &[
     (
         "deploy",
         "targets: ${{ needs.deploy-check.outputs.targets }}",
-        "targets: ${{ needs.deploy-check.outputs.targets-linux }}",
-        "deploy: with.targets is Some(\"${{ needs.deploy-check.outputs.targets-linux }}\")",
+        "targets: ${{ needs.deploy-check.outputs.targets-mac }}",
+        "deploy: with.targets is Some(\"${{ needs.deploy-check.outputs.targets-mac }}\")",
     ),
     (
         "deploy-mac",
         "targets: ${{ needs.deploy-check.outputs.targets }}",
         "targets: ${{ needs.deploy-check.outputs.targets-mac }}",
         "deploy-mac: with.targets is Some(\"${{ needs.deploy-check.outputs.targets-mac }}\")",
-    ),
-    (
-        "deploy-check",
-        " --macos-pkg",
-        "",
-        "deploy-check: the step `desired` does not run",
     ),
     (
         "deploy-mac",
@@ -904,5 +892,62 @@ fn the_deploy_check_waits_as_the_apt_install_check_does_and_sets_what_the_dispat
             .any(|p| p
                 == &format!("job deploy: `id-token: write` needs the exact `if: {DEPLOY_IF}`")),
         "deploy under another condition"
+    );
+}
+
+#[test]
+fn both_host_groups_are_sent_the_one_targets_the_check_hands_on() {
+    // Asserts: the Linux build nodes' call and the Macs' call, by hand and in the deploy, are each
+    // held to the same `targets` input, the one output of the check; the check hands on no second
+    // targets output; and a Macs' call sent another output is refused by name.
+    // Catches: the two calls of one version sent different targets, which the coordinator, keeping
+    // one release per version whatever the host group, refuses for the second (`release_exists`),
+    // so the Macs (or the Linux nodes) are never set.
+    for check in ["check", "deploy-check"] {
+        let targets = |group| {
+            with_wanted_from(check, group)
+                .into_iter()
+                .find(|(key, _)| *key == "targets")
+                .map(|(_, value)| value)
+        };
+        let want = format!("${{{{ needs.{check}.outputs.targets }}}}");
+        assert_eq!(targets("all-in-one"), Some(want.clone()), "{check}");
+        assert_eq!(targets("mac-build"), Some(want), "{check}");
+    }
+    assert_eq!(OUTPUTS, ["set", "package-version", "targets"]);
+    for (file, check, linux, mac) in [
+        (FILE, "check", "set-desired", "set-desired-mac"),
+        ("release.yml", "deploy-check", "deploy", "deploy-mac"),
+    ] {
+        let doc = yaml::load(&text_of(file)).expect("yaml");
+        let jobs = entry(&doc, "jobs").expect("jobs");
+        let sent = |job: &str| {
+            entry(jobs, job)
+                .and_then(|j| at(j, &["with", "targets"]))
+                .map(str::to_owned)
+        };
+        assert_eq!(
+            sent(linux),
+            Some(format!("${{{{ needs.{check}.outputs.targets }}}}")),
+            "{file}"
+        );
+        assert_eq!(sent(linux), sent(mac), "{file}");
+        let outputs = names(entry(jobs, check).and_then(|j| entry(j, "outputs")));
+        assert!(
+            !outputs.iter().any(|o| o.starts_with("targets-")),
+            "{file}: {outputs:?}"
+        );
+    }
+    let spoiled = in_job(
+        &text_of(FILE),
+        "set-desired-mac",
+        "targets: ${{ needs.check.outputs.targets }}",
+        "targets: ${{ needs.check.outputs.package-version }}",
+    );
+    assert_eq!(
+        desired_problems(&spoiled),
+        vec![
+            "set-desired-mac: with.targets is Some(\"${{ needs.check.outputs.package-version }}\"), not \"${{ needs.check.outputs.targets }}\"".to_owned()
+        ]
     );
 }

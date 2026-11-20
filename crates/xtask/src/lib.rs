@@ -492,7 +492,7 @@ enum ReleaseVerb {
         /// The apt repository.
         #[arg(long, default_value = "https://packages.komira.ai/apt")]
         apt_url: String,
-        /// Add the `macos-arm64` list: one `macos-pkg` entry of the release's signed `.pkg`,
+        /// Add to `targets` the `macos-arm64` list: one `macos-pkg` entry of the release's signed `.pkg`,
         /// downloaded from the release and held to the digest of its `SHA256SUMS`.
         #[arg(long)]
         macos_pkg: bool,

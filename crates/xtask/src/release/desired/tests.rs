@@ -275,9 +275,9 @@ fn a_release_by_version_is_set_as_its_plain_version_with_one_apt_entry_per_linux
     // Catches: the archive-only targets the apt hosts cannot install (every host held
     // installer_dropped and nothing updates), the package version `X.Y.Z+<commit>` that no apt
     // host runs, a release index handed on beside the apt targets, a repository entry other than
-    // the farm nodes' komira-testing, a macOS list without `--macos-pkg` (no pkg was held to
-    // the sums), and Linux lists other than those `release desired-apt` writes for the same
-    // version.
+    // the farm nodes' komira-testing, a macOS list (no package a Mac's daemon installs), and
+    // targets other than those the lab stage of release.yml sets for the same version, which the
+    // coordinator would refuse as release_exists.
     let s = scratch("by-version");
     let output = s.join("output");
     let gh = good();
@@ -315,7 +315,7 @@ fn a_release_by_version_is_set_as_its_plain_version_with_one_apt_entry_per_linux
             lines[2].to_owned(),
         ]
     );
-    // `release desired-apt`, given the same release, floor and suite, writes the same two lines.
+    // The lab's verb, given the same release, floor and suite, writes the same two lines.
     let lab_output = s.join("lab-output");
     desired_apt::desired_apt(
         &good(),
@@ -701,13 +701,14 @@ fn a_version_with_no_published_release_or_no_sums_is_refused_before_the_suite_is
 }
 
 #[test]
-fn with_the_macos_pkg_the_targets_gain_one_macos_pkg_entry_held_to_the_sums() {
-    // Asserts: `targets` is the apt targets plus `macos-arm64` with the exact macos-pkg entry
-    // (installer, the apt entries' repository, package version, SHA-256 and size of the signed
-    // pkg, its manifest), and is the one targets line: every host group is set the same targets.
-    // Catches: a Linux group set the apt lists alone and the Macs' group these plus the pkg, a
-    // version the coordinator then refuses to the second call (release_exists), so the Macs are
-    // never ordered tierstore.
+fn with_the_macos_pkg_the_one_targets_gain_one_macos_pkg_entry_held_to_the_sums() {
+    // Asserts: with --macos-pkg the output is `set`, `package-version` and one `targets`, the apt
+    // targets plus `macos-arm64` with the exact macos-pkg entry (installer, the apt entries'
+    // repository, package version, SHA-256 and size of the signed pkg, its manifest), and no
+    // second targets line.
+    // Catches: the Linux build nodes' set and the Macs' set handed two different targets for one
+    // version, which the coordinator, keeping one release per version whatever the host group,
+    // refuses for whichever call comes second (`release_exists`).
     let s = scratch("macos");
     let output = s.join("output");
     let mut gh = good();
@@ -727,7 +728,8 @@ fn with_the_macos_pkg_the_targets_gain_one_macos_pkg_entry_held_to_the_sums() {
     let written = std::fs::read_to_string(&output).expect("the output");
     let lines: Vec<&str> = written.lines().collect();
     assert_eq!(lines.len(), 3, "{written}");
-    assert_eq!(lines[..2], ["set=true", "package-version=0.4.0"]);
+    assert_eq!(lines[0], "set=true");
+    assert_eq!(lines[1], format!("package-version={VERSION}"));
     let targets: Value =
         serde_json::from_str(lines[2].strip_prefix("targets=").expect("targets")).expect("JSON");
     assert_eq!(
@@ -744,6 +746,11 @@ fn with_the_macos_pkg_the_targets_gain_one_macos_pkg_entry_held_to_the_sums() {
                 "manifest": crate::release::macos_pkg::manifest_json(FLOOR),
             }] },
         })
+    );
+    assert_eq!(
+        &printed[1..],
+        &lines[..],
+        "the printed lines are the output's"
     );
     assert_eq!(
         printed[0],

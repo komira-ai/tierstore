@@ -1,7 +1,6 @@
 //! `release desired --repo <owner/repo> (--version <X.Y.Z> | --after-run <id>) [--skip-superseded]
 //! --min-hostkeeper <x.y.z> --dir <dir> [--apt-url <url>] [--output <file>] [--gh <program>]
-//! [--curl <program>] [--macos-pkg]`: what the deploy and the lab stage of
-//! `.github/workflows/release.yml` (`deploy-check`, `farm-check`) and
+//! [--curl <program>]`: what the deploy of `.github/workflows/release.yml` (`deploy-check`) and
 //! `.github/workflows/hostkeeper-desired.yml` (by hand) set as the desired version of tierstore on
 //! the hostkeeper coordinator, or why they set nothing. It runs before any step of those workflows
 //! can hold a token, so a refusal here means the coordinator is never called.
@@ -25,20 +24,22 @@
 //! `set=false` and the verb succeeds. Release runs are one at a time, but a release made by hand
 //! runs beside them, and a run that waited behind it must not move the fleet back.
 //!
-//! The Linux lists of what is set for the release are those `release desired-apt` writes
+//! What is set for the release is what the lab stage of `release.yml` sets for it
 //! ([`super::desired_apt`], with the same `--min-hostkeeper`): the hosts install tierstore from the
 //! testing suite through hostkeeper's apt installer, so each Linux platform's list is one `apt`
 //! entry of the host's repository entry `komira-testing`, the package version `X.Y.Z` and the
 //! `.deb`'s SHA-256, held to the suite as a client reads it and to the release's `SHA256SUMS`. A
 //! list of `hostkeeper-archive` entries alone orders no host: the coordinator holds every host that
-//! runs tierstore from apt `installer_dropped`. With `--macos-pkg` (the way of every workflow
-//! that sets a version: the lab stage and the deploy of `release.yml`, and
-//! `hostkeeper-desired.yml`) `targets` also has a `macos-arm64` list of one `macos-pkg` entry of
-//! the release's signed `.pkg` ([`super::desired_macos`]), downloaded and held to the digest of
-//! `SHA256SUMS`. Every `set-desired` call of a version, whatever its host group (`all-in-one`,
-//! `mac-build`), sends these same targets: the coordinator keeps one release per version, and
-//! refuses a version set again with other targets (`release_exists`). A Linux host is ordered its
-//! `apt` entry and a Mac its `macos-pkg` entry. No release index is sent: it would list archive
+//! runs tierstore from apt `installer_dropped`. Without `--macos-pkg`, `targets` has no
+//! `macos-arm64` list: they are exactly `release desired-apt`'s. With `--macos-pkg` (the way of
+//! every workflow that sets a version, the lab stage of `release.yml` included)
+//! `targets` also has a `macos-arm64` list of one `macos-pkg` entry of the release's signed `.pkg`
+//! ([`super::desired_macos`]), downloaded and held to the digest of `SHA256SUMS`. Both
+//! `set-desired` calls, the Linux build nodes' and the Macs' (host group `mac-build`), send these
+//! same targets: the coordinator keeps one release per version, whatever the host group, and
+//! refuses the same version set again with other targets (`release_exists`), so a second call
+//! with other lists would never set the version for its group. A host is ordered its own
+//! platform's list and ignores the others. No release index is sent: it would list archive
 //! entries the targets do not have.
 //!
 //! When the run published nothing, `--output` (on Actions, `GITHUB_OUTPUT`) gets `set=false`.
@@ -78,8 +79,8 @@ pub struct Request<'a> {
     pub dir: &'a Path,
     /// The apt repository whose suite `testing` the hosts install from.
     pub apt_url: &'a str,
-    /// Give `targets` the `macos-arm64` list too, one `macos-pkg` entry of the release's signed
-    /// `.pkg`, beside the apt lists.
+    /// Add to `targets` the `macos-arm64` list, one `macos-pkg` entry of the release's signed
+    /// `.pkg`, beside the apt lists. Without it `targets` is what `release desired-apt` writes.
     pub macos_pkg: bool,
     /// Set nothing (`set=false`) when a published release is newer than the one chosen: the
     /// deploy of a release run, which must never move the fleet back to a release a newer one

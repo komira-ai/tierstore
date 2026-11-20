@@ -1088,11 +1088,9 @@ jobs:
   # `set-desired-mac` do (the same pin, audience and inputs, so the same allow-list entries of the
   # coordinator admit them: the entry is keyed on the called workflow, not the caller). Off until
   # the repository variable TIERSTORE_SETS_DESIRED is `true`, exactly, as the by-hand workflow
-  # is. The Linux nodes and the Macs are two jobs: a Mac that does not converge leaves the Linux
-  # deploy green, and the `red` job reports it. Both jobs set the same targets, the apt entries
-  # and the Macs' macos-pkg entry (`--macos-pkg`): the coordinator keeps one release per version
-  # and refuses a version set again with other targets (release_exists), so whichever of the two
-  # sets the version first, the other is taken.
+  # is. The Linux nodes and the Macs are two jobs (the `red` job reports a Mac that does not
+  # converge) sending the same `targets`, the apt lists and the Macs' list: the coordinator keeps
+  # one release per version, whatever the host group, and refuses other targets (`release_exists`).
   deploy-check:
     needs: [plan, testing-apt-write, testing-apt-write-2, testing-apt-write-3]
     if: ${{ !cancelled() && !failure() && needs.plan.outputs.release == 'true' && github.ref == 'refs/heads/main' && (needs.testing-apt-write.outputs.conflict == 'false' || needs.testing-apt-write-2.outputs.conflict == 'false' || needs.testing-apt-write-3.outputs.conflict == 'false') && vars.TIERSTORE_SETS_DESIRED == 'true' }}

@@ -305,28 +305,20 @@ fake.
 - `cargo xtask release macos-pkg --version <X.Y.Z> --binary <path> --stage <dir> --out <dir>` writes
   `<out>/tierstore-<X.Y.Z>-macos-arm64.pkg`, unsigned: a distribution pkg of one component
   (`pkgbuild`, identifier `com.komira.tierstore`, version `<X.Y.Z>`, install location `/`, ownership
-  `recommended`, the scripts directory of the one script `postinstall`) wrapped by `productbuild`.
-  `--stage` must not exist; the payload and the script are laid out in it first. The payload is exactly the binary
+  `recommended`, no scripts directory) wrapped by `productbuild`. `--stage` must not exist; the
+  payload is laid out in it first. The payload is exactly the binary
   `/Library/Application Support/tierstore/bin/tierstore` (0755, the given binary's bytes, so it keeps
   its code signature) and the job `/Library/LaunchDaemons/tierstore.plist` (0644,
   `packaging/macos-pkg/tierstore.plist`), with the directories above them (0755), everything
-  `root:wheel`. The `postinstall` (`packaging/macos-pkg/postinstall`, 0755), which the installer
-  runs as root once the payload is in place, makes the account the job runs as, `_tierstore` (a
-  group and a user with the same id, the highest from 399 down to 300 that no user and no group
-  has; an account that is there is kept), and the directories `/usr/local/tierstore` (0755
-  `root:wheel`), its `etc` (0750 `root:_tierstore`), `cache`, `log` and `run` (0700
-  `_tierstore:_tierstore`), made when missing and set to these owners and modes on every install,
-  never what they hold. It loads no job: hostkeeper's hook (`tierstore update-hook`) bootstraps
-  the job at its `cutover`. The configuration file and the key files are not the package's. The plist is the one of the hostkeeper archive
+  `root:wheel`. There is no `postinstall` and no script at all: hostkeeper's hook (`tierstore
+  update-hook`) bootstraps the job at its `cutover`. The plist is the one of the hostkeeper archive
   package (`packaging/hostkeeper/units/tierstore.plist`) but for the program path, and
   `crates/tierstore/tests/packaging_macos.rs` holds the two together.
 - `cargo xtask release check-macos-pkg <dir> --version <X.Y.Z> --binary <path>` reads the directory
   `pkgutil --expand` made of the pkg and refuses anything but what the builder writes: the
   `Distribution` names the one component with no installer script, installation check or volume
-  check; `PackageInfo` names the identifier, the version and the location `/`, the `postinstall`
-  and no other script, no action after the install and no bundle; the component holds `Bom`,
-  `PackageInfo` and `Payload` and the directory `Scripts`, which holds the `postinstall` alone,
-  mode 0755, with the bytes of the repository's file; the payload
+  check; `PackageInfo` names the identifier, the version and the location `/` and no script or
+  bundle; the component holds `Bom`, `PackageInfo` and `Payload` and no `Scripts`; the payload
   holds exactly the entries above, with their modes and bytes, each owned by root, group wheel or
   admin (so nothing is group or other writable, set-id or sticky); the plist's label is `tierstore`
   and its program is a file of the payload. Every deviation is listed.
@@ -414,7 +406,7 @@ section 5). Nobody approves a step.
    the suite `testing` as a client reads it, holds the entry of each `.deb` to the digest of the
    release's `SHA256SUMS`, and hands on the package version and the `targets` the deploy sets (the
    coordinator refuses a version set again with other targets, `release_exists`): the Macs'
-   `macos-pkg` entry (below, "The desired version") and, of hostkeeper's apt
+   `macos-pkg` entry (below) and, of hostkeeper's apt
    installer, for `linux-x86_64` and `linux-arm64` one entry that names the host's repository
    entry `komira-testing`, the package version and the `.deb`'s digest as the pin (no release
    index and no package digest: tierstore ships no archive, and a host that does not announce
@@ -642,27 +634,30 @@ Both are off until the repository variable `TIERSTORE_SETS_DESIRED` is `true`, e
 anything else, every job of the deploy and of the workflow is skipped.
 
 The `check` job of `hostkeeper-desired.yml` (`contents: read` only) and `deploy-check` of `release.yml` (`cargo xtask release desired`, no token that writes) decides the release and
-hands on what the lab stage of `release.yml` sets for it (the same command, with the same
-`--min-hostkeeper 0.1.225` and `--macos-pkg`): the version `X.Y.Z`, the plain version apt
-installs, and the **targets**, for `linux-x86_64` and `linux-arm64` one `apt` entry each, of the
-repository entry `komira-testing`, pinned by the `.deb`'s SHA-256 (`release desired-apt`, above,
-writes these two lists alone). It refuses the release unless the suite
-`testing`, read through the CDN as a client reads it, lists both `.deb`s with the digests the
-release's `SHA256SUMS` lists. The same version set by both gets the same targets, so the second
-set is taken (the coordinator refuses a version set again with other targets, `release_exists`).
-A list of `hostkeeper-archive` entries alone would order none of the farm nodes: the coordinator
-holds every host that runs tierstore from apt `installer_dropped`. With `--macos-pkg` the
-`targets` also hold a `macos-arm64` list of one `macos-pkg` entry, `{"installer": "macos-pkg", "repository":
-"komira-testing", "packageVersion": "X.Y.Z", "digest": <SHA-256>, "bytes": <size>, "manifest":
-{...}}`, for the release's signed `tierstore-<X.Y.Z>-macos-arm64.pkg`, which the verb downloads from
-the release and holds to the digest `SHA256SUMS` lists (the coordinator turns it into the location
-`pkg/tierstore/<X.Y.Z>/` of the repository). No release index is sent.
+hands on the version `X.Y.Z`, the plain version apt installs, and the **targets**: what the lab
+stage of `release.yml` sets for it (the same command, with the same `--min-hostkeeper 0.1.225`
+and `--macos-pkg`; `release desired-apt`, above, writes the apt lists alone), for `linux-x86_64` and `linux-arm64` one `apt` entry each, of the
+repository entry `komira-testing`, pinned by the `.deb`'s SHA-256, and, with `--macos-pkg` (both
+workflows pass it), in the same targets, a `macos-arm64` list of one `macos-pkg` entry,
+`{"installer": "macos-pkg", "repository": "komira-testing", "packageVersion": "X.Y.Z", "digest":
+<SHA-256>, "bytes": <size>, "manifest": {...}}`, for the release's signed
+`tierstore-<X.Y.Z>-macos-arm64.pkg`, which the verb downloads from the release and holds to the
+digest `SHA256SUMS` lists (the coordinator turns it into the location `pkg/tierstore/<X.Y.Z>/` of
+the repository). It refuses the release unless the suite `testing`, read through the CDN as a
+client reads it, lists both `.deb`s with the digests the release's `SHA256SUMS` lists. A list of
+`hostkeeper-archive` entries alone would order none of the farm nodes: the coordinator holds every
+host that runs tierstore from apt `installer_dropped`. No release index is sent.
+
+The coordinator keeps **one release per version**, whatever the host group, and refuses the same
+version set again with other targets (`release_exists`); the same targets set again are taken. So
+the Linux build nodes' call and the Macs' call send the one `targets` output, each host is ordered
+its own platform's list and ignores the others. The lab stage, off while `TIERSTORE_LAB_INSTALL`
+is not `true`, sends the same `targets` (`release desired --macos-pkg`, through its older pinned
+client, which passes the targets through as they are), so whichever of the lab and the deploy sets
+a version first, the other is taken.
 
 In `hostkeeper-desired.yml` the `set-desired` job (host group `all-in-one`) and, beside it, `set-desired-mac` (host group
-`mac-build`) then call, both with the same `targets`: the coordinator keeps one release per
-version, whatever the host group, so a Linux group set the apt lists alone and the Macs set these
-and the `.pkg` would have the second call refused (`release_exists`), and the Macs ordered
-nothing. A Linux host is ordered its `apt` entry, a Mac its `macos-pkg` entry; `deploy` and `deploy-mac` of `release.yml` do the same with the same inputs. They call hostkeeper's CI client (`set-desired.yml` of
+`mac-build`, with the same targets) then call; `deploy` and `deploy-mac` of `release.yml` do the same with the same inputs. They call hostkeeper's CI client (`set-desired.yml` of
 komira-ai/hostkeeper, pinned to v0.1.317, whose hkctl sends the targets as they are, the `apt`
 entries included; the call names the host group `all-in-one`, the Linux build nodes, so the version
 is one deployment to that group and the wait is on that group alone, and the coordinator's
