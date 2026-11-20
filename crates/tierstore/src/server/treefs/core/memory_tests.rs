@@ -104,7 +104,9 @@ fn requests_at_once_for_a_tree_out_of_memory_read_it_once() {
         assert_eq!(asked.join().unwrap(), Ok(bin));
     }
     assert_eq!(root_fills(&rig), before + 1);
-    assert_eq!(rig.upstream.most_manifest_fills(), 1);
+    // The one read asks for the two directories below the root, `bin` and `include`, at once
+    // (a level of the tree at a time); four reads would have had four roots in flight.
+    assert!(rig.upstream.most_manifest_fills() <= 2);
     assert_eq!(rig.core.waiting_for_reads(), 0);
     // Read at the attach and once again now.
     assert_eq!(rig.core.times_read(1), 2);

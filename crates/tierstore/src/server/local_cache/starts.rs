@@ -28,6 +28,7 @@ use std::collections::BTreeMap;
 use std::fmt::Write as _;
 use std::sync::Mutex;
 
+use super::attaches::Attaches;
 use super::{LocalCache, locked};
 
 /// The family, with a `# TYPE` line, and its three series, each written out for `docs/metrics.md`.
@@ -67,10 +68,12 @@ struct State {
     sum_ms: u64,
 }
 
-/// The runs and the histogram of one cache.
+/// The runs and the histogram of one cache, and what its mounts report of their attaches.
 #[derive(Debug, Default)]
 pub(super) struct Starts {
     state: Mutex<State>,
+    /// The attaches and the manifest reads the mounts report (`attaches`).
+    pub(super) attaches: Attaches,
 }
 
 impl Starts {
@@ -127,7 +130,7 @@ impl Starts {
     }
 
     /// The family in the Prometheus text format: cumulative buckets, the sum in seconds and the
-    /// count, all of one moment.
+    /// count, all of one moment; then the families of the mounts' reports (`attaches`).
     pub(super) fn render(&self) -> String {
         let state = locked(&self.state);
         let mut text = format!("# TYPE {REQUEST_TO_START} histogram\n");
@@ -140,6 +143,7 @@ impl Starts {
         let _ = writeln!(text, "{BUCKET}{{le=\"+Inf\"}} {}", state.count);
         let _ = writeln!(text, "{SUM} {}", seconds(state.sum_ms));
         let _ = writeln!(text, "{COUNT} {}", state.count);
+        text.push_str(&self.attaches.render());
         text
     }
 }

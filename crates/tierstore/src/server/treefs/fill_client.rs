@@ -3,7 +3,8 @@
 //! upstream object, or the whole object `cas/l/<sha256>` of a manifest), `touch` (not answered),
 //! the pin requests, `put` (a staged file of the put directory, answered in JSON), and the
 //! questions about the placements of the node (`place`, `mounted`, `image`, `flat`, `span`,
-//! `unplace`), and `started`, which a thread of its own sends (see [`FillClient::report_started`]).
+//! `unplace`), and the reports `started`, `attached` and `fetched`, which a thread of its own sends
+//! (see [`FillClient::report`]).
 //!
 //! A request that meets a closed socket, or a connection that went away (the S3 instance of the
 //! node is being updated: the old instance keeps answering through its drain, and the new one
@@ -32,8 +33,8 @@ const PAUSE: Duration = Duration::from_secs(1);
 /// The most connections kept for the next request.
 const KEPT: usize = 64;
 
-/// The most `started` reports that wait for the thread that sends them; one more is dropped.
-pub(super) const STARTS_QUEUED: usize = 1024;
+/// The most reports that wait for the thread that sends them; one more is dropped.
+pub(super) const REPORTS_QUEUED: usize = 1024;
 
 /// Why a request did not get its answer.
 #[derive(Clone, Copy, Debug, PartialEq, Eq, thiserror::Error)]
@@ -97,9 +98,9 @@ pub(super) struct FillClient {
     answer_timeout: Duration,
     idle: Mutex<Vec<Connection>>,
     pause: Arc<dyn Fn(Duration) + Send + Sync>,
-    /// The queue of the thread that sends the `started` reports, made with the first; none if the
-    /// thread could not be started.
-    starts: OnceLock<Option<SyncSender<String>>>,
+    /// The queue of the thread that sends the reports, made with the first; none if the thread
+    /// could not be started.
+    reports: OnceLock<Option<SyncSender<String>>>,
 }
 
 impl FillClient {
@@ -124,7 +125,7 @@ impl FillClient {
             answer_timeout,
             idle: Mutex::new(Vec::new()),
             pause,
-            starts: OnceLock::new(),
+            reports: OnceLock::new(),
         }
     }
 
@@ -367,29 +368,35 @@ impl FillClient {
     }
 
     /// Tells the node that the mount first looked into the tree at the fs location `path`
-    /// (`started <path>`), for `tierstore_request_to_start_seconds`; the caller does not wait. The
-    /// report is sent by a thread of its own, over connections of its own, so that the request
-    /// that looked into the tree, the first of a job's command, never waits on the socket. A
-    /// report that finds [`STARTS_QUEUED`] reports waiting is dropped, and one the socket does not
-    /// take is lost, as is one a node of the release before refuses: the metric is advice.
+    /// (`started <path>`), for `tierstore_request_to_start_seconds`; the caller does not wait.
     pub(super) fn report_started(&self, path: &str) {
-        let queue = self.starts.get_or_init(|| self.start_reporting());
+        self.report(format!("started {path}"));
+    }
+
+    /// Sends the report `line` to the node (`started`, `attached`, `fetched`: the node's metrics,
+    /// `local_cache/starts.rs` and `local_cache/attaches.rs`); the caller does not wait. A report
+    /// is sent by a thread of its own, over connections of its own, so that the request it tells
+    /// of, such as the first of a job's command, never waits on the socket. A report that finds
+    /// [`REPORTS_QUEUED`] reports waiting is dropped, and one the socket does not take is lost, as
+    /// is one a node of a release before it refuses: the metrics are advice.
+    pub(super) fn report(&self, line: String) {
+        let queue = self.reports.get_or_init(|| self.start_reporting());
         if let Some(queue) = queue {
-            let _ = queue.try_send(path.to_owned());
+            let _ = queue.try_send(line);
         }
     }
 
-    /// Starts the thread that sends the `started` reports, with a client of the same socket and
-    /// times; its queue. The thread ends when this client is dropped.
+    /// Starts the thread that sends the reports, with a client of the same socket and times; its
+    /// queue. The thread ends when this client is dropped.
     fn start_reporting(&self) -> Option<SyncSender<String>> {
-        let (queue, reports) = sync_channel::<String>(STARTS_QUEUED);
+        let (queue, reports) = sync_channel::<String>(REPORTS_QUEUED);
         let pause = Arc::clone(&self.pause);
         let sender = Self::pausing(self.path.clone(), self.tries, self.answer_timeout, pause);
         let thread = std::thread::Builder::new()
-            .name("fs-starts".to_owned())
+            .name("fs-reports".to_owned())
             .spawn(move || {
-                while let Ok(path) = reports.recv() {
-                    let _ = sender.ask_line(&format!("started {path}"), true);
+                while let Ok(line) = reports.recv() {
+                    let _ = sender.ask_line(&line, true);
                 }
             });
         thread.ok().map(|_| queue)

@@ -434,6 +434,50 @@ The 99th percentile, over an hour:
 histogram_quantile(0.99, sum by (le) (rate(tierstore_request_to_start_seconds_bucket[1h])))
 ```
 
+### Build node: tree attach on a lookup
+
+A lookup of `trees/<digest>` that no run has attached reads the tree's manifests and attaches it
+(see [the virtual build file system](operations.md#the-virtual-build-file-system)). `tierstore fs`
+reports to the node, on the fill socket, how long each such attach took and where the manifests of
+each read of a tree came from, and the node's cache counts the reports in its block. The families
+are on every process with a cache, with a `# TYPE` line, and stay at zero on a node whose mount
+reports nothing. The buckets of both histograms are `0.001`, `0.002`, `0.005`, `0.01`, `0.025`,
+`0.05`, `0.1`, `0.25`, `0.5`, `1`, `2.5`, `5`, `10`, `30`, `60`, `300` and `+Inf` seconds.
+
+| name | type | labels | what it says |
+|---|---|---|---|
+| `tierstore_fs_tree_attach_seconds` | histogram | `outcome`: `ok`, `absent`, `failed`; `le` on `_bucket` | one sample per lookup that attached a tree, or tried to: the seconds from the lookup's start to its answer on the mount's clock, to the millisecond. `absent` is a tree whose root manifest the upstream does not have (`ENOENT`); `failed` is any other that could not be read or numbered (`EIO`) |
+| `tierstore_fs_tree_attach_seconds_bucket` | counter | `outcome`, `le` | the attaches of that outcome at or under `le` seconds |
+| `tierstore_fs_tree_attach_seconds_sum` | counter | `outcome` | their seconds |
+| `tierstore_fs_tree_attach_seconds_count` | counter | `outcome` | the attaches of that outcome |
+| `tierstore_fs_manifest_fetch_total` | counter | `result`: `cache`, `fill`, `error` | a manifest a read of a tree fetched: read from the cache directory, filled through the fill socket and then read, or not had (the fill failed, or the file was not there after it). A read of a tree attached for a run, or read again into memory, counts too |
+| `tierstore_fs_manifest_fill_seconds` | histogram | `le` on `_bucket` | one sample per manifest a read asked the fill socket for, whatever the answer: the seconds of the round trip on the mount's clock, to the millisecond |
+| `tierstore_fs_manifest_fill_seconds_bucket` | counter | `le` | the fills at or under `le` seconds |
+| `tierstore_fs_manifest_fill_seconds_sum` | counter | none | their seconds |
+| `tierstore_fs_manifest_fill_seconds_count` | counter | none | the fills |
+
+A read fetches the manifests of a level of the tree at once, up to 16, before the level below, so
+the attach of a tree whose manifests the cache does not hold takes about one fill for each level,
+not one for each directory. The fills of a level overlap, so their seconds add up to more than the
+attach took.
+
+What they do not count: a report that was lost, as a `started` is lost (above); a lookup of a tree
+that was attached already; a placement's tree, which is read whole with no manifest. Each attach is
+also said on stderr: `tierstore fs: lookup of <digest>: ok in 12 ms; 40 manifests: 38 from the
+cache, 2 filled, 0 not had`.
+
+The share of the manifests read that needed a fill, over an hour:
+
+```promql
+sum(increase(tierstore_fs_manifest_fetch_total{result="fill"}[1h])) / sum(increase(tierstore_fs_manifest_fetch_total[1h]))
+```
+
+The median attach, over an hour:
+
+```promql
+histogram_quantile(0.5, sum by (le) (rate(tierstore_fs_tree_attach_seconds_bucket{outcome="ok"}[1h])))
+```
+
 ## Cache queries (v1)
 
 All of these use a `5m` window. Every `sum` is outside the `rate`. Shorten the window to see a

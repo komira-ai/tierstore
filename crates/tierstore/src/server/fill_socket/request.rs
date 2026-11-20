@@ -16,6 +16,8 @@
 //! unplace <mount> <placement>                  the mount no longer holds the placement
 //! places-live <mount> [<placement> ...]        the mount holds these placements and no other
 //! started <path>                              the mount first looked into the tree at <path>
+//! attached <outcome> <ms>                      the mount attached a tree on a lookup, or did not
+//! fetched <cache> <filled> <failed> <ms> <n>.. where the manifests of a read of a tree came from
 //! ```
 //!
 //! A digest is sixty-four lower-case hex digits; a number is decimal digits only; a mount and a
@@ -28,11 +30,16 @@
 //! none at either end, the first not one of the mount's own (`trees`, `views`, `put`); so is the
 //! `<path>` of a `started`, the rest of the line after the verb. A
 //! `<placement>` is thirty-two lower-case hex digits. A `span` has the words of a `fill` of a blob.
+//! The words of an `attached` and of a `fetched` are those of
+//! [`Attach`](crate::server::local_cache::attaches::Attach) and
+//! [`Fetches`](crate::server::local_cache::attaches::Fetches): an outcome (`ok`, `absent`,
+//! `failed`) and a number, and four numbers and one for each bucket of the fill histogram.
 
 use std::path::PathBuf;
 
 use crate::TreeDigest;
 use crate::journal::is_reserved;
+use crate::server::local_cache::attaches::{Attach, Fetches};
 use crate::server::local_cache::layout::is_digest;
 use crate::server::local_cache::trees::{Location, PlacementId, placement_id};
 
@@ -82,6 +89,10 @@ pub(super) enum Request {
     /// The mount first looked into the tree at the fs location `path`: the start of the command
     /// of the run the path is a source of (`local_cache/starts.rs`).
     Started { path: String },
+    /// The mount attached a tree on a lookup, or could not (`local_cache/attaches.rs`).
+    Attached(Attach),
+    /// Where the manifests of a read of a tree came from (`local_cache/attaches.rs`).
+    Fetched(Fetches),
 }
 
 /// A request of the mount about the placements of the node (module `mount`).
@@ -219,6 +230,12 @@ pub(super) fn parse(line: &[u8]) -> Result<Request, Refusal> {
                 path: rest.to_owned(),
             })
         }
+        "attached" => Attach::parse(rest)
+            .map(Request::Attached)
+            .ok_or(Refusal::Malformed),
+        "fetched" => Fetches::parse(rest)
+            .map(Request::Fetched)
+            .ok_or(Refusal::Malformed),
         "mounted" => (text == "mounted")
             .then_some(Request::Mount(MountRequest::Mounted))
             .ok_or(Refusal::Malformed),

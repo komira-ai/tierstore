@@ -38,6 +38,7 @@ use crate::tree_manifest::TreeDigest;
 
 #[cfg(any(target_os = "linux", test))]
 use super::ino;
+use super::fetched::Fetched;
 use super::placed::Unread;
 use super::{Core, Errno, Loaded, locked};
 
@@ -156,7 +157,7 @@ impl Core {
         };
         let start = self.now();
         let read = self
-            .read_tree(&digest)
+            .read_tree(&digest, &Fetched::default())
             .map(|tree| self.keep(number, digest, tree));
         #[cfg(test)]
         if self.reads.stop_next.swap(false, Ordering::AcqRel) {
