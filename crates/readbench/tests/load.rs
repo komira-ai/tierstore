@@ -38,6 +38,7 @@ fn plan(clients: u32, client_base: u32, mode: Mode) -> LoadPlan {
         mode,
         start_at_wall_ms: None,
         keep: false,
+        unverified: false,
     }
 }
 
@@ -214,6 +215,32 @@ async fn a_tree_whose_pack_the_filer_lacks_fails_the_load_before_any_client_star
 }
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn an_unverified_load_of_a_tree_whose_pack_the_filer_lacks_fails_before_any_client_starts() {
+    let dir = scratch("load-unverified-fail");
+    let lost = fake(Variant::Without(PACK_B)).await;
+    let mut plan = plan(1, 0, Mode::Engine);
+    plan.trees = vec![ROOT.to_owned()];
+    plan.unverified = true;
+    let err = run(
+        Arc::new(store(&lost).await),
+        &plan,
+        &knobs(),
+        "run1",
+        "node1",
+        &dir.path().join("cache"),
+        &dir.path().join("sidecars"),
+        MachineClock::shared(),
+        &tokio::runtime::Handle::current(),
+    )
+    .await
+    .unwrap_err();
+    assert_eq!(
+        err.to_string(),
+        format!("{PACK_B}: the filer has no such pack")
+    );
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
 async fn a_client_whose_pack_went_missing_after_the_preparation_fails_naming_itself() {
     let dir = scratch("load-gone");
     let whole = fake(Variant::Whole).await;
@@ -309,4 +336,32 @@ async fn a_tree_named_twice_is_prepared_once() {
             .path_count(&format!("/buckets/kbf-cas/cas/l/{ROOT2}")),
         1
     );
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn an_unverified_load_prepares_each_tree_without_its_packs_or_a_sidecar() {
+    let fake = fake(Variant::Whole).await;
+    let store = Arc::new(store(&fake).await);
+    let dir = scratch("load-unverified");
+    let mut plan = plan(2, 0, Mode::Engine);
+    plan.unverified = true;
+    let records = run(
+        store,
+        &plan,
+        &knobs(),
+        "run1",
+        "node1",
+        &dir.path().join("cache"),
+        &dir.path().join("sidecars"),
+        MachineClock::shared(),
+        &tokio::runtime::Handle::current(),
+    )
+    .await
+    .unwrap();
+    assert_eq!(records.len(), 2);
+    assert!(records.iter().all(|r| r.config["verified"] == "false"));
+    assert!(records.iter().all(|r| r.config["sidecar_built"] == "false"));
+    assert!(!dir.path().join("sidecars").exists());
+    // Only the trees' manifests were read through the filer's object GET.
+    assert_eq!(fake.filer(0).count(Kind::FilerGet), 3);
 }

@@ -208,6 +208,10 @@ struct ReplayArgs {
     /// Keep the clients' cache directories.
     #[arg(long)]
     keep: bool,
+    /// Prepare the tree without reading its packs and verify no cell: the first read of a tree
+    /// then reaches the store's drives (the sidecars directory is not used).
+    #[arg(long)]
+    unverified: bool,
 }
 
 #[derive(Args)]
@@ -242,6 +246,10 @@ struct DemandArgs {
     /// The file the records are appended to.
     #[arg(long)]
     out: PathBuf,
+    /// Prepare the tree without reading its packs and verify no cell: the first read of a tree
+    /// then reaches the store's drives (the sidecars directory is not used).
+    #[arg(long)]
+    unverified: bool,
 }
 
 #[derive(Args)]
@@ -539,6 +547,7 @@ async fn verb(verb: Verb, out: &mut dyn Write, err: &mut dyn Write) -> Result<()
                 mode,
                 start_at_wall_ms: a.start_at,
                 keep: a.keep,
+                unverified: a.unverified,
             };
             let runs = load::run(
                 Arc::new(store),
@@ -560,14 +569,19 @@ async fn verb(verb: Verb, out: &mut dyn Write, err: &mut dyn Write) -> Result<()
         Verb::Demand(a) => {
             let knobs = a.knobs.knobs(a.load_clients.max(1))?;
             let store = open_store(&a.filer, &a.servers, true, err).await?;
-            let p = replay::prepare(
-                &store,
-                &a.tree,
-                &a.sidecars,
-                knobs.walk_parallel,
-                clock.as_ref(),
-            )
-            .await?;
+            let p = if a.unverified {
+                replay::prepare_unverified(&store, &a.tree, knobs.walk_parallel, clock.as_ref())
+                    .await?
+            } else {
+                replay::prepare(
+                    &store,
+                    &a.tree,
+                    &a.sidecars,
+                    knobs.walk_parallel,
+                    clock.as_ref(),
+                )
+                .await?
+            };
             let client = Client {
                 run: a.run,
                 node: a.node,

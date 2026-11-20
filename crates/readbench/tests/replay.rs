@@ -18,13 +18,13 @@ use std::sync::Arc;
 use readbench::clock::{Clock, MachineClock};
 use readbench::record::Mode;
 use readbench::replay::{
-    Client, Knobs, Prepared, check_outcome, outcome_label, pack_spec, prepare, run_demand,
-    run_engine, run_shipped,
+    Client, Knobs, Prepared, check_outcome, outcome_label, pack_spec, prepare, prepare_unverified,
+    run_demand, run_engine, run_shipped,
 };
 use sha2::{Digest as _, Sha256};
 use support::Kind;
 use tierstore_fetch_api::engine::WaitOutcome;
-use tierstore_fetch_api::ids::PackKey;
+use tierstore_fetch_api::ids::{PackKey, PackRoot};
 use tierstore_testkit::dir::TestDir;
 use tree::{
     PACK_A, PACK_B, PACK_C, ROOT, ROOT_BYTES, SIZE_A, SIZE_B, SIZE_C, Variant, data, fake, store,
@@ -594,9 +594,14 @@ async fn a_demand_run_whose_cache_cannot_be_made_fails() {
 fn the_knobs_describe_themselves_as_text() {
     let knobs = Knobs::new(0);
     assert_eq!(knobs.budget.topology.clients, 1);
-    let text = knobs.describe(3, false);
+    let text = knobs.describe(Some(3), false, true);
     assert_eq!(text["hash_threads"], "3");
     assert_eq!(text["sidecar_built"], "false");
+    assert_eq!(text["verified"], "true");
+    assert_eq!(
+        Knobs::new(1).describe(None, false, false)["hash_threads"],
+        "none"
+    );
     assert_eq!(text["whole_cov_percent"], "50");
     assert_eq!(text["cold_media_mb_per_s"], "190");
     assert_eq!(text["fill_concurrency"], "16");
@@ -604,4 +609,203 @@ fn the_knobs_describe_themselves_as_text() {
 
 fn sha256(bytes: &[u8]) -> [u8; 32] {
     Sha256::digest(bytes).into()
+}
+
+#[tokio::test]
+async fn an_unverified_preparation_reads_no_pack_and_writes_no_sidecar() {
+    let fake = fake(Variant::Whole).await;
+    let store = store(&fake).await;
+    let p = prepare_unverified(&store, ROOT, 4, clock().as_ref())
+        .await
+        .unwrap();
+    assert_eq!(p.root, ROOT);
+    assert!(!p.sidecar_built);
+    assert_eq!(
+        (
+            p.walked.manifests,
+            p.walked.files,
+            p.walked.packs,
+            p.walked.bytes
+        ),
+        (2, 4, 3, ROOT_BYTES)
+    );
+    assert_eq!(
+        p.sizes,
+        [
+            (PACK_A.to_owned(), SIZE_A),
+            (PACK_B.to_owned(), SIZE_B),
+            (PACK_C.to_owned(), SIZE_C)
+        ]
+        .into_iter()
+        .collect()
+    );
+    // The two manifests were read through the filer, and each pack's entry (not its bytes).
+    assert_eq!(fake.filer(0).count(Kind::FilerGet), 2);
+    assert_eq!(fake.filer(0).count(Kind::FilerMetadata), 3);
+    assert_eq!(fake.total(Kind::VolumeGet), 0);
+    // Each pack is named by a generation, and its spec has no digests.
+    let generations = p.unverified.as_ref().unwrap();
+    assert_eq!(generations.len(), 3);
+    let spec = pack_spec(&p, 0).unwrap();
+    assert!(spec.digests.is_none());
+    assert!(matches!(spec.id.root, PackRoot::Etag(_)));
+    // The same tree prepared verified gives the same list.
+    let dir = scratch("replay-unverified-same");
+    let verified = prepare(&store, ROOT, dir.path(), 4, clock().as_ref())
+        .await
+        .unwrap();
+    assert_eq!(p.v2, verified.v2);
+    assert!(verified.unverified.is_none());
+}
+
+#[tokio::test]
+async fn an_unverified_preparation_of_a_pack_the_filer_lacks_names_it() {
+    let fake = fake(Variant::Without(PACK_C)).await;
+    let store = store(&fake).await;
+    let err = prepare_unverified(&store, ROOT, 4, clock().as_ref())
+        .await
+        .unwrap_err();
+    assert_eq!(
+        err.to_string(),
+        format!("{PACK_C}: the filer has no such pack")
+    );
+}
+
+#[tokio::test]
+async fn an_unverified_pack_without_a_generation_is_an_error() {
+    let fake = fake(Variant::Whole).await;
+    let store = store(&fake).await;
+    let mut p = prepare_unverified(&store, ROOT, 4, clock().as_ref())
+        .await
+        .unwrap();
+    p.unverified = Some(std::collections::BTreeMap::new());
+    assert_eq!(
+        pack_spec(&p, 0).unwrap_err().to_string(),
+        format!("fill: no generation of {PACK_A}")
+    );
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn an_unverified_run_fetches_every_cell_with_the_gets_of_a_verified_run() {
+    let dir = scratch("replay-unverified-run");
+    let verified_fake = fake(Variant::Whole).await;
+    let verified_store = store(&verified_fake).await;
+    let p = prepare(
+        &verified_store,
+        ROOT,
+        &dir.path().join("sidecars"),
+        4,
+        clock().as_ref(),
+    )
+    .await
+    .unwrap();
+    let verified = run_engine(
+        &verified_store,
+        &p,
+        &knobs(),
+        &client(),
+        &dir.path().join("verified"),
+        clock(),
+        &tokio::runtime::Handle::current(),
+    )
+    .await
+    .unwrap();
+    let before = verified_fake.total(Kind::VolumeGet);
+
+    let fake = fake(Variant::Whole).await;
+    let store = store(&fake).await;
+    let p = prepare_unverified(&store, ROOT, 4, clock().as_ref())
+        .await
+        .unwrap();
+    let cache = dir.path().join("unverified");
+    let run = run_engine(
+        &store,
+        &p,
+        &knobs(),
+        &client(),
+        &cache,
+        clock(),
+        &tokio::runtime::Handle::current(),
+    )
+    .await
+    .unwrap();
+    assert_eq!(run.gets, verified.gets);
+    assert_eq!(run.gets["grid_part"], 7);
+    assert_eq!(fake.total(Kind::VolumeGet), before);
+    assert_eq!(run.bytes_fetched, SIZE_A + SIZE_B + SIZE_C);
+    assert_eq!(run.bytes_fetched, verified.bytes_fetched);
+    assert_eq!(run.get_errors, 0);
+    assert_eq!(
+        pack_files(&cache),
+        vec![data(SIZE_C, 3), data(SIZE_B, 2), data(SIZE_A, 1)]
+    );
+    assert_eq!(run.config["verified"], "false");
+    assert_eq!(run.config["hash_threads"], "none");
+    assert_eq!(run.config["sidecar_built"], "false");
+    assert_eq!(verified.config["verified"], "true");
+    assert_eq!(verified.config["hash_threads"], "2");
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn a_corrupted_pack_byte_is_caught_verified_and_not_caught_unverified() {
+    let dir = scratch("replay-unverified-corrupt");
+    let p = prepared(&dir.path().join("sidecars")).await;
+    let fake = fake(Variant::Corrupt(PACK_B)).await;
+    let store = store(&fake).await;
+    let err = run_engine(
+        &store,
+        &p,
+        &knobs(),
+        &client(),
+        &dir.path().join("verified"),
+        clock(),
+        &tokio::runtime::Handle::current(),
+    )
+    .await
+    .unwrap_err();
+    assert!(err.to_string().starts_with("fill: "), "{err}");
+    // Unverified, the same bytes are taken as they come.
+    let p = prepare_unverified(&store, ROOT, 4, clock().as_ref())
+        .await
+        .unwrap();
+    let cache = dir.path().join("unverified");
+    run_engine(
+        &store,
+        &p,
+        &knobs(),
+        &client(),
+        &cache,
+        clock(),
+        &tokio::runtime::Handle::current(),
+    )
+    .await
+    .unwrap();
+    let mut bad = data(SIZE_B, 2);
+    bad[5] ^= 0xff;
+    assert!(pack_files(&cache).contains(&bad));
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn an_unverified_demand_read_is_ready_without_a_hash_pool() {
+    let fake = fake(Variant::Whole).await;
+    let store = store(&fake).await;
+    let p = prepare_unverified(&store, ROOT, 4, clock().as_ref())
+        .await
+        .unwrap();
+    let dir = scratch("replay-unverified-demand");
+    let reads = run_demand(
+        &store,
+        &p,
+        &knobs(),
+        &client(),
+        &dir.path().join("cache"),
+        2,
+        1,
+        clock(),
+        &tokio::runtime::Handle::current(),
+    )
+    .await
+    .unwrap();
+    assert_eq!(reads.len(), 2);
+    assert!(reads.iter().all(|r| r.outcome == "ready"));
 }

@@ -52,6 +52,8 @@ pub enum Variant {
     Without(&'static str),
     /// The pack is held with only this many bytes.
     Short(&'static str, u64),
+    /// The pack has the right size and one byte of its first cell changed.
+    Corrupt(&'static str),
 }
 
 fn file(name: &str, size: u64, pack: &str, offset: u64) -> serde_json::Value {
@@ -100,6 +102,11 @@ pub async fn fake(variant: Variant) -> Fake {
         let bytes = match variant {
             Variant::Without(gone) if gone == key => continue,
             Variant::Short(short, len) if short == key => data(len, salt),
+            Variant::Corrupt(bad) if bad == key => {
+                let mut bytes = data(size, salt);
+                bytes[5] ^= 0xff;
+                bytes
+            }
             _ => data(size, salt),
         };
         builder = builder.object(BUCKET, key, bytes);

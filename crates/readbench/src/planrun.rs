@@ -7,18 +7,15 @@
 
 use std::collections::BTreeMap;
 
-use futures::stream::{self, StreamExt as _, TryStreamExt as _};
-use tierstore::TreeDigest;
 use tierstore_fetch_api::ids::ByteRange;
 use tierstore_fetch_api::list::ListL2;
-use tierstore_list::{PackCells, PackInfo, TreeListL2, sidecar_from_v2};
 use tierstore_plan::config::PlanConfig;
 use tierstore_plan::plan::{Backlog, Fetch, Needed, PlanInput, plan};
 
 use crate::Error;
-use crate::manifest::{encode_v2, walk};
+use crate::manifest::walk;
 use crate::record::PlanRecord;
-use crate::replay::{fail, pack_keys, run_bytes};
+use crate::replay::{fail, placeholder_list, run_bytes};
 use crate::swfs::FilerFetch;
 
 /// One MiB, the size of a cell.
@@ -91,35 +88,6 @@ pub fn parse_trees(text: &str) -> Vec<String> {
         .collect()
 }
 
-/// The size of every pack of `list`, from the filer's entries.
-async fn pack_sizes(
-    fetch: &FilerFetch,
-    keys: Vec<String>,
-    parallel: usize,
-) -> Result<BTreeMap<String, u64>, Error> {
-    stream::iter(keys)
-        .map(|key| async move {
-            match fetch.entry(&key).await? {
-                Some(entry) => Ok((key, entry.size)),
-                None => Err(Error::parse(key, "the filer has no such pack")),
-            }
-        })
-        .buffer_unordered(parallel.max(1))
-        .try_collect()
-        .await
-}
-
-/// A pack's record for the sidecar: its size and one zeroed digest for each cell.
-fn placeholder(sizes: &BTreeMap<String, u64>, key: &str) -> Option<PackInfo> {
-    sizes.get(key).map(|size| PackInfo {
-        cells: PackCells {
-            size: *size,
-            digests: (0..size.div_ceil(MIB)).map(|_| [0; 32]).collect(),
-        },
-        ..PackInfo::default()
-    })
-}
-
 /// Plans the tree `tree` under each of `variants`, one record each.
 ///
 /// # Errors
@@ -133,11 +101,7 @@ pub async fn plan_tree(
     parallel: usize,
 ) -> Result<Vec<PlanRecord>, Error> {
     let walked = walk(tree, fetch, walk_parallel).await?;
-    let sizes = pack_sizes(fetch, pack_keys(&walked.list), parallel).await?;
-    let v2 = encode_v2(&walked.list)?;
-    let id = TreeDigest::of(&v2);
-    let sidecar = sidecar_from_v2(&v2, |key| placeholder(&sizes, key)).map_err(fail("sidecar"))?;
-    let l2 = TreeListL2::open_sidecar(Some(sidecar), id.as_bytes()).map_err(fail("sidecar"))?;
+    let l2 = placeholder_list(fetch, &walked, parallel).await?.l2;
     let needed: Vec<Needed> = l2
         .ranges()
         .map(|r| Needed {

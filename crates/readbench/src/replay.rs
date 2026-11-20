@@ -19,11 +19,13 @@ use tierstore_entry::FileEntryStore;
 use tierstore_fetch::timer::TokioTimer;
 use tierstore_fetch::{EngineConfig, EngineParts, FetchEngine};
 use tierstore_fetch_api::engine::{Engine as _, PackDigests, PackSpec, WaitOutcome};
-use tierstore_fetch_api::ids::{ByteRange, CellRun, Class, JobId, PackId, PackKey};
+use tierstore_fetch_api::ids::{ByteRange, CellRun, Class, JobId, PackId, PackKey, PackRoot};
 use tierstore_fetch_api::list::ListL2;
 use tierstore_fetch_api::page::CELL_SHIFT;
+use tierstore_fetch_api::verify::{CellJob, Verdict, Verifier};
+use tierstore_format::ids::Generation;
 use tierstore_hashpool::{DEFAULT_TARGET_RATE, HashPool};
-use tierstore_list::{CellHasher, TreeListL2};
+use tierstore_list::{CellHasher, PackCells, PackInfo, TreeListL2, sidecar_from_v2};
 use tierstore_plan::config::PlanConfig;
 use tierstore_plan::plan::{Backlog, Needed, PlanInput, plan};
 use tokio::runtime::Handle;
@@ -34,8 +36,8 @@ use crate::http::HttpClient;
 use crate::manifest::{Walked, encode_v2, walk};
 use crate::record::{ClientRun, DemandRead, Mode, Summary};
 use crate::sidecar::{build, read_or_none};
-use crate::swfs::{FilerFetch, VolumeMap};
-use crate::upstream::{Recorder, SwfsUpstream};
+use crate::swfs::{Entry, FilerFetch, VolumeMap};
+use crate::upstream::{Recorder, SwfsUpstream, entry_generation};
 
 /// One MiB.
 const MIB: u64 = 1 << 20;
@@ -95,9 +97,15 @@ impl Knobs {
     }
 
     /// The knobs as `name = value` text, the form [`ClientRun::config`] keeps. `hash_threads` is
-    /// the number of threads the pool ran (the knob may have left it to be measured).
+    /// the number of threads the pool ran (the knob may have left it to be measured), `None` when
+    /// no pool ran (written `none`); `verified` is whether the cells were checked against digests.
     #[must_use]
-    pub fn describe(&self, hash_threads: usize, sidecar_built: bool) -> BTreeMap<String, String> {
+    pub fn describe(
+        &self,
+        hash_threads: Option<usize>,
+        sidecar_built: bool,
+        verified: bool,
+    ) -> BTreeMap<String, String> {
         let t = &self.budget.topology;
         let sizes: Vec<String> = self
             .budget
@@ -125,12 +133,16 @@ impl Knobs {
                 "small_whole_cov_percent",
                 self.plan.small_whole_cov_percent.to_string(),
             ),
-            ("hash_threads", hash_threads.to_string()),
+            (
+                "hash_threads",
+                hash_threads.map_or_else(|| "none".to_owned(), |n| n.to_string()),
+            ),
             ("walk_parallel", self.walk_parallel.to_string()),
             ("fill_chunk", self.fill_chunk.to_string()),
             ("fill_concurrency", self.fill_concurrency.to_string()),
             ("window_packs", self.engine.window_packs.to_string()),
             ("sidecar_built", sidecar_built.to_string()),
+            ("verified", verified.to_string()),
         ];
         pairs.into_iter().map(|(k, v)| (k.to_owned(), v)).collect()
     }
@@ -168,6 +180,10 @@ pub struct Prepared {
     pub sizes: BTreeMap<String, u64>,
     /// Whether the sidecar was made now (its packs read), not found in the sidecar directory.
     pub sidecar_built: bool,
+    /// For a tree prepared unverified ([`prepare_unverified`]): the generation of each pack,
+    /// from its filer entry, which names the pack to the engine in place of cell digests.
+    /// `None` for a tree whose cells are verified.
+    pub unverified: Option<BTreeMap<String, Generation>>,
 }
 
 /// An [`Error::ReadPath`] of `what` from any error that prints.
@@ -219,7 +235,8 @@ pub async fn prepare(
     let (bytes, sidecar_built) = if let Some(bytes) = read_or_none(&path)? {
         (bytes, false)
     } else {
-        let sizes = pack_sizes(store, &walked.list, parallel).await?;
+        let entries = pack_entries(&store.fetch, pack_keys(&walked.list), parallel).await?;
+        let sizes = entries.iter().map(|(k, e)| (k.clone(), e.size)).collect();
         let bytes = build(&v2, &store.fetch, &sizes, parallel).await?;
         std::fs::write(&path, &bytes).map_err(|e| Error::io("write", &path, e))?;
         (bytes, true)
@@ -228,10 +245,7 @@ pub async fn prepare(
         what: "sidecar",
         why: format!("{}: {e}", path.display()),
     })?;
-    let sizes = (0..l2.pack_count())
-        .filter_map(|pack| l2.pack_record(pack))
-        .map(|r| (r.key.0, r.pack_size))
-        .collect();
+    let sizes = pack_sizes_of(&l2);
     Ok(Prepared {
         root: root.to_owned(),
         walked,
@@ -240,25 +254,111 @@ pub async fn prepare(
         l2: Arc::new(l2),
         sizes,
         sidecar_built,
+        unverified: None,
     })
 }
 
-/// The size of every pack of `list`, from the filer's entries.
-async fn pack_sizes(
-    store: &Store,
-    list: &TreeList,
+/// The filer's entry of every pack in `keys`.
+async fn pack_entries(
+    fetch: &FilerFetch,
+    keys: Vec<String>,
     parallel: usize,
-) -> Result<BTreeMap<String, u64>, Error> {
-    stream::iter(pack_keys(list))
+) -> Result<BTreeMap<String, Entry>, Error> {
+    stream::iter(keys)
         .map(|key| async move {
-            match store.fetch.entry(&key).await? {
-                Some(entry) => Ok((key, entry.size)),
+            match fetch.entry(&key).await? {
+                Some(entry) => Ok((key, entry)),
                 None => Err(Error::parse(key, "the filer has no such pack")),
             }
         })
         .buffer_unordered(parallel.max(1))
         .try_collect()
         .await
+}
+
+/// A pack's record for the sidecar: its size and one zeroed digest for each cell.
+fn placeholder(sizes: &BTreeMap<String, u64>, key: &str) -> Option<PackInfo> {
+    sizes.get(key).map(|size| PackInfo {
+        cells: PackCells {
+            size: *size,
+            digests: (0..size.div_ceil(MIB)).map(|_| [0; 32]).collect(),
+        },
+        ..PackInfo::default()
+    })
+}
+
+/// A tree's list made without reading any pack: the filer's entry of each pack gives its size and
+/// generation, and every cell digest is zero.
+pub(crate) struct Placeholder {
+    /// The version 2 list.
+    pub(crate) v2: Vec<u8>,
+    /// Its L2 sidecar of placeholder digests, opened.
+    pub(crate) l2: TreeListL2<Vec<u8>>,
+    /// The generation of each pack, by key.
+    pub(crate) generations: BTreeMap<String, Generation>,
+}
+
+/// Makes the [`Placeholder`] of a walked tree from the packs' entries on the filer.
+///
+/// # Errors
+/// A pack has no entry, or the list or its sidecar is refused.
+pub(crate) async fn placeholder_list(
+    fetch: &FilerFetch,
+    walked: &Walked,
+    parallel: usize,
+) -> Result<Placeholder, Error> {
+    let entries = pack_entries(fetch, pack_keys(&walked.list), parallel).await?;
+    let sizes: BTreeMap<String, u64> = entries.iter().map(|(k, e)| (k.clone(), e.size)).collect();
+    let generations = entries
+        .iter()
+        .map(|(k, e)| (k.clone(), entry_generation(k, e)))
+        .collect();
+    let v2 = encode_v2(&walked.list)?;
+    let id = TreeDigest::of(&v2);
+    let sidecar = sidecar_from_v2(&v2, |key| placeholder(&sizes, key)).map_err(fail("sidecar"))?;
+    let l2 = TreeListL2::open_sidecar(Some(sidecar), id.as_bytes()).map_err(fail("sidecar"))?;
+    Ok(Placeholder {
+        v2,
+        l2,
+        generations,
+    })
+}
+
+/// Reads the tree `root` like [`prepare`] but reads no pack and writes no sidecar: the list's cell
+/// digests are placeholders, and each pack is named to the engine by its filer generation (an
+/// object without digests), so a run over it verifies no cell.
+///
+/// # Errors
+/// The walk failed, a pack has no entry on the filer, or the list is refused.
+pub async fn prepare_unverified(
+    store: &Store,
+    root: &str,
+    parallel: usize,
+    clock: &dyn Clock,
+) -> Result<Prepared, Error> {
+    let began = clock.now_us();
+    let walked = walk(root, &store.fetch, parallel).await?;
+    let manifest_us = clock.now_us().saturating_sub(began);
+    let made = placeholder_list(&store.fetch, &walked, parallel).await?;
+    let sizes = pack_sizes_of(&made.l2);
+    Ok(Prepared {
+        root: root.to_owned(),
+        walked,
+        manifest_us,
+        v2: made.v2,
+        l2: Arc::new(made.l2),
+        sizes,
+        sidecar_built: false,
+        unverified: Some(made.generations),
+    })
+}
+
+/// The size of each pack of an opened list, by key.
+fn pack_sizes_of(l2: &TreeListL2<Vec<u8>>) -> BTreeMap<String, u64> {
+    (0..l2.pack_count())
+        .filter_map(|pack| l2.pack_record(pack))
+        .map(|r| (r.key.0, r.pack_size))
+        .collect()
 }
 
 /// What the engine needs to fill pack `pack` of the tree.
@@ -273,16 +373,32 @@ pub fn pack_spec(p: &Prepared, pack: u32) -> Result<PackSpec, Error> {
             why: format!("the list has no pack {pack}"),
         });
     };
+    let Some(generations) = &p.unverified else {
+        return Ok(PackSpec {
+            id: PackId {
+                key: record.key,
+                root,
+            },
+            size: record.pack_size,
+            digests: Some(PackDigests {
+                list: l2.clone(),
+                pack,
+            }),
+        });
+    };
+    let Some(generation) = generations.get(&record.key.0) else {
+        return Err(Error::ReadPath {
+            what: "fill",
+            why: format!("no generation of {}", record.key.0),
+        });
+    };
     Ok(PackSpec {
         id: PackId {
             key: record.key,
-            root,
+            root: PackRoot::Etag(*generation),
         },
         size: record.pack_size,
-        digests: Some(PackDigests {
-            list: l2.clone(),
-            pack,
-        }),
+        digests: None,
     })
 }
 
@@ -310,13 +426,26 @@ pub(crate) fn run_bytes(run: CellRun, size: u64) -> ByteRange {
 struct Rig {
     engine: FetchEngine,
     recorder: Arc<Recorder>,
-    hash_threads: usize,
+    /// The threads of the hash pool; `None` when none was started (an unverified run).
+    hash_threads: Option<usize>,
+}
+
+/// The verifier of an unverified run. An object without digests is never handed to a verifier;
+/// should one come, its cell is refused.
+struct NoVerifier;
+
+#[async_trait::async_trait]
+impl Verifier for NoVerifier {
+    async fn verify(&self, job: CellJob) -> (Verdict, bytes::Bytes) {
+        (Verdict::Mismatch, job.bytes)
+    }
 }
 
 impl Rig {
     fn start(
         store: &Store,
         knobs: &Knobs,
+        verified: bool,
         cache: &Path,
         clock: Arc<dyn Clock>,
         rt: &Handle,
@@ -333,17 +462,22 @@ impl Rig {
         let timer = Arc::new(TokioTimer::new());
         let budget =
             ClientBudget::new(knobs.budget.clone(), timer.clone()).map_err(fail("budget"))?;
-        let pool = match knobs.hash_threads {
-            Some(threads) => HashPool::start(threads, timer.clone()),
-            None => HashPool::start_measured(DEFAULT_TARGET_RATE, timer.clone()),
-        }
-        .map_err(fail("hash pool"))?;
-        let hash_threads = pool.threads();
+        let (verifier, hash_threads): (Arc<dyn Verifier>, Option<usize>) = if verified {
+            let pool = match knobs.hash_threads {
+                Some(threads) => HashPool::start(threads, timer.clone()),
+                None => HashPool::start_measured(DEFAULT_TARGET_RATE, timer.clone()),
+            }
+            .map_err(fail("hash pool"))?;
+            let threads = pool.threads();
+            (Arc::new(pool), Some(threads))
+        } else {
+            (Arc::new(NoVerifier), None)
+        };
         let parts = EngineParts {
             store: Arc::new(entries),
             upstream: Arc::new(upstream),
             budget: Arc::new(budget),
-            verifier: Arc::new(pool),
+            verifier,
             timer,
         };
         Ok(Self {
@@ -437,7 +571,14 @@ pub async fn run_engine(
     {
         specs.insert(pack, pack_spec(p, pack)?);
     }
-    let rig = Rig::start(store, knobs, cache, clock.clone(), rt)?;
+    let rig = Rig::start(
+        store,
+        knobs,
+        p.unverified.is_none(),
+        cache,
+        clock.clone(),
+        rt,
+    )?;
     let engine = &rig.engine;
     let job = JobId(client.job);
     let began = clock.now_us();
@@ -479,7 +620,7 @@ pub async fn run_engine(
         first_byte_us: parts.iter().map(|t| t.first_byte_us).collect(),
         get_us: parts.iter().map(|t| t.total_us).collect(),
         get_errors: parts.iter().filter(|t| !t.ok).count() as u64,
-        config: knobs.describe(rig.hash_threads, p.sidecar_built),
+        config: knobs.describe(rig.hash_threads, p.sidecar_built, p.unverified.is_none()),
     }
     .into_run())
 }
@@ -596,7 +737,7 @@ pub async fn run_shipped(
     }
     hashed += hasher.size();
     let tree_ready_us = clock.now_us().saturating_sub(began);
-    let mut config = knobs.describe(0, p.sidecar_built);
+    let mut config = knobs.describe(Some(0), p.sidecar_built, p.unverified.is_none());
     config.insert("hashed_bytes".to_owned(), hashed.to_string());
     Ok(Totals {
         client,
@@ -660,7 +801,14 @@ pub async fn run_demand(
     let by_key: BTreeMap<&str, u32> = (0..p.l2.pack_count())
         .filter_map(|pack| p.l2.pack_key(pack).map(|key| (key, pack)))
         .collect();
-    let rig = Rig::start(store, knobs, cache, clock.clone(), rt)?;
+    let rig = Rig::start(
+        store,
+        knobs,
+        p.unverified.is_none(),
+        cache,
+        clock.clone(),
+        rt,
+    )?;
     let mut reads = Vec::new();
     for span in probe_spans(&p.walked.list, probes) {
         let pack = by_key.get(span.key.as_str()).copied().unwrap_or(u32::MAX);
@@ -682,3 +830,7 @@ pub async fn run_demand(
     }
     Ok(reads)
 }
+
+#[cfg(test)]
+#[path = "replay_tests.rs"]
+mod tests;

@@ -17,7 +17,7 @@ use std::path::Path;
 
 use readbench::cli::{run, run_with};
 use readbench::record::{ClientRun, DemandRead, DiskSample, MetricDelta, Mode, read_lines};
-use support::Fake;
+use support::{Fake, Kind};
 use tierstore_testkit::dir::TestDir;
 use tokio::net::{TcpListener, TcpStream};
 use tree::{PACK_B, ROOT, ROOT_BYTES, ROOT2, Variant, fake};
@@ -690,4 +690,76 @@ fn a_runtime_that_does_not_start_is_exit_1_and_one_that_does_runs_the_command() 
     );
     assert_eq!(code, 0);
     assert!(String::from_utf8(out).unwrap().contains("Usage: readbench"));
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn replay_unverified_reads_no_pack_first_and_makes_no_sidecar() {
+    let fake = fake(Variant::Whole).await;
+    let dir = scratch("cli-replay-unverified");
+    let (code, _, err) = cli(&replay_args(&fake, &dir, &["--unverified"])).await;
+    assert_eq!(code, 0, "{err}");
+    assert!(!dir.path().join("sidecars").exists());
+    let runs: Vec<ClientRun> = read_lines(&dir.path().join("runs.jsonl")).unwrap();
+    assert_eq!(runs.len(), 1);
+    assert_eq!(runs[0].config["verified"], "false");
+    assert_eq!(runs[0].config["hash_threads"], "none");
+    // Each pack was read once, by the client; nothing read it before.
+    assert_eq!(runs[0].total_gets(), fake.total(Kind::VolumeGet));
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn demand_unverified_makes_no_sidecar() {
+    let fake = fake(Variant::Whole).await;
+    let dir = scratch("cli-demand-unverified");
+    let mut args = vec!["demand".to_owned()];
+    args.extend(store_args(&fake));
+    args.extend(strings(&[
+        "--tree",
+        ROOT,
+        "--sidecars",
+        &path(&dir.path().join("s")),
+        "--cache",
+        &path(&dir.path().join("c")),
+        "--node",
+        "n1",
+        "--run",
+        "r1",
+        "--out",
+        &path(&dir.path().join("o")),
+        "--probes",
+        "2",
+        "--unverified",
+    ]));
+    let (code, _, err) = cli(&args).await;
+    assert_eq!((code, err.as_str()), (0, "2 demand reads\n"));
+    assert!(!dir.path().join("s").exists());
+    let reads: Vec<DemandRead> = read_lines(&dir.path().join("o")).unwrap();
+    assert!(reads.iter().all(|r| r.outcome == "ready"));
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn demand_unverified_of_a_tree_the_store_lacks_fails_and_writes_nothing() {
+    let fake = fake(Variant::Whole).await;
+    let dir = scratch("cli-demand-unverified-missing");
+    let mut args = vec!["demand".to_owned()];
+    args.extend(store_args(&fake));
+    args.extend(strings(&[
+        "--tree",
+        &"4".repeat(64),
+        "--sidecars",
+        &path(&dir.path().join("s")),
+        "--cache",
+        &path(&dir.path().join("c")),
+        "--node",
+        "n1",
+        "--run",
+        "r1",
+        "--out",
+        &path(&dir.path().join("o")),
+        "--unverified",
+    ]));
+    let (code, out, err) = cli(&args).await;
+    assert_eq!((code, out.as_str()), (1, ""), "{err}");
+    assert!(err.contains("not found"), "{err}");
+    assert!(!dir.path().join("o").exists());
 }

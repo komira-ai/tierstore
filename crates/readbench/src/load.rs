@@ -12,7 +12,9 @@ use tokio::runtime::Handle;
 use crate::Error;
 use crate::clock::Clock;
 use crate::record::{ClientRun, Mode};
-use crate::replay::{Client, Knobs, Prepared, Store, prepare, run_engine, run_shipped};
+use crate::replay::{
+    Client, Knobs, Prepared, Store, prepare, prepare_unverified, run_engine, run_shipped,
+};
 
 /// What one node of a run does.
 #[derive(Debug, Clone)]
@@ -31,6 +33,9 @@ pub struct LoadPlan {
     pub start_at_wall_ms: Option<u64>,
     /// Whether to keep the clients' cache directories.
     pub keep: bool,
+    /// Whether to prepare the trees without reading their packs and fetch without verifying a
+    /// cell (see [`prepare_unverified`]).
+    pub unverified: bool,
 }
 
 /// Returns once the clock's wall time has reached `wall_ms`, looking again after each wait of at
@@ -76,7 +81,11 @@ pub async fn run(
     let mut prepared: BTreeMap<String, Arc<Prepared>> = BTreeMap::new();
     for tree in &plan.trees {
         if !prepared.contains_key(tree) {
-            let p = prepare(&store, tree, sidecars, knobs.walk_parallel, clock.as_ref()).await?;
+            let p = if plan.unverified {
+                prepare_unverified(&store, tree, knobs.walk_parallel, clock.as_ref()).await?
+            } else {
+                prepare(&store, tree, sidecars, knobs.walk_parallel, clock.as_ref()).await?
+            };
             prepared.insert(tree.clone(), Arc::new(p));
         }
     }

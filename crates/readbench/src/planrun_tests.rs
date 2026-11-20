@@ -63,12 +63,3 @@ fn a_trees_file_is_one_tree_per_line_without_blanks() {
     assert_eq!(parse_trees("a\n\n  b  \r\n\nc"), ["a", "b", "c"]);
     assert!(parse_trees("\n \n").is_empty());
 }
-
-#[test]
-fn a_placeholder_has_one_zero_digest_per_started_cell() {
-    let sizes = BTreeMap::from([("k".to_owned(), (2 << 20) + 1)]);
-    let info = placeholder(&sizes, "k").unwrap();
-    assert_eq!(info.cells.size, (2 << 20) + 1);
-    assert_eq!(info.cells.digests, vec![[0u8; 32]; 3]);
-    assert!(placeholder(&sizes, "other").is_none());
-}

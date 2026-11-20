@@ -22,7 +22,7 @@ use tierstore_format::ids::{BlockId, COUNTER_BITS, Generation};
 use crate::Error;
 use crate::clock::Clock;
 use crate::http::{BodyStream, HttpClient};
-use crate::swfs::{FilerFetch, VolumeMap, device, device_label};
+use crate::swfs::{Entry, FilerFetch, VolumeMap, device, device_label};
 
 /// What one part took.
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -165,6 +165,12 @@ fn generation_of(etag: &str) -> Generation {
     Generation(bytes)
 }
 
+/// The generation of a pack from its filer entry: its entity tag's, or the key's when the entry
+/// has no tag.
+pub(crate) fn entry_generation(key: &str, entry: &Entry) -> Generation {
+    generation_of(entry.etag.as_deref().unwrap_or(key))
+}
+
 /// The status a failed request names, when [`HttpClient`] failed it for its status.
 fn status_of(e: &Error) -> Option<u16> {
     match e {
@@ -208,7 +214,7 @@ impl Upstream for SwfsUpstream {
             }
         }
         Ok(Located::Found(Location {
-            generation: generation_of(entry.etag.as_deref().unwrap_or(&key.0)),
+            generation: entry_generation(&key.0, &entry),
             size: Some(entry.size),
             sources,
             conflicts: Vec::new(),
