@@ -72,8 +72,10 @@ struct RawSource {
 }
 
 /// The children of the version 1 manifest `bytes`, read from the object `key` (named in every
-/// error). Unknown fields are ignored. A file needs its size and, above size 0, its SHA-256 and
-/// its source; a directory needs its SHA-256; a link without a target has an empty one.
+/// error). Unknown fields are ignored. A file needs its size and, above size 0, its SHA-256; its
+/// `source` is optional: a file with bytes and no `source` is a loose blob, read whole from the
+/// object `cas/l/<its SHA-256>` at offset 0. A directory needs its SHA-256; a link without a
+/// target has an empty one.
 pub fn parse(key: &str, bytes: &[u8]) -> Result<Vec<Child>, Error> {
     let bad = |why: String| Error::parse(key, why);
     let raw: RawManifest = serde_json::from_slice(bytes).map_err(|e| bad(e.to_string()))?;

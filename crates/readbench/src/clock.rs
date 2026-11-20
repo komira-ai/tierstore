@@ -5,7 +5,7 @@
 
 use std::sync::Arc;
 use std::sync::atomic::{AtomicU64, Ordering};
-use std::time::{Instant, SystemTime, UNIX_EPOCH};
+use std::time::{Duration, Instant, SystemTime, SystemTimeError, UNIX_EPOCH};
 
 /// A source of time.
 pub trait Clock: Send + Sync + std::fmt::Debug {
@@ -44,7 +44,7 @@ impl MachineClock {
 
 impl Clock for MachineClock {
     fn now_us(&self) -> u64 {
-        u64::try_from(self.base.elapsed().as_micros()).unwrap_or(u64::MAX)
+        micros(self.base.elapsed())
     }
 
     #[expect(
@@ -52,10 +52,21 @@ impl Clock for MachineClock {
         reason = "the clock module of the harness: the one place that reads the machine's clock"
     )]
     fn wall_ms(&self) -> u64 {
-        SystemTime::now()
-            .duration_since(UNIX_EPOCH)
-            .map_or(0, |d| u64::try_from(d.as_millis()).unwrap_or(u64::MAX))
+        epoch_ms(SystemTime::now().duration_since(UNIX_EPOCH))
     }
+}
+
+/// The microseconds of `elapsed`, saturating at `u64::MAX` (584,542 years).
+#[must_use]
+pub fn micros(elapsed: Duration) -> u64 {
+    u64::try_from(elapsed.as_micros()).unwrap_or(u64::MAX)
+}
+
+/// The milliseconds since the Unix epoch of a reading of the wall clock, `since_epoch` being
+/// that reading less the epoch: 0 for a clock set before the epoch, saturating at `u64::MAX`.
+#[must_use]
+pub fn epoch_ms(since_epoch: Result<Duration, SystemTimeError>) -> u64 {
+    since_epoch.map_or(0, |d| u64::try_from(d.as_millis()).unwrap_or(u64::MAX))
 }
 
 /// A clock a test moves by hand.

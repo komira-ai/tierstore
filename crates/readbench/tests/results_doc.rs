@@ -6,6 +6,7 @@
 //! with no failed GET, every demand read came back ready, and the two kinds of run are told
 //! apart by their configuration.
 
+#![cfg(target_os = "linux")]
 #![expect(
     clippy::unwrap_used,
     reason = "an integration test: a failed unwrap is the failure it reports"

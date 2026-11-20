@@ -17,24 +17,60 @@
 //! Nothing here is part of tierstore: it is a measurement harness. It reads the machine's clock
 //! in [`clock`] only; every other module is handed a [`clock::Clock`], so its tests move time by
 //! hand and assert counts, never timing.
+//!
+//! The harness is Linux only; on another system the crate has only [`main`], which says so and
+//! exits 2.
 
-#![cfg(target_os = "linux")]
 #![forbid(unsafe_code)]
 
+#[cfg(target_os = "linux")]
 pub mod cli;
+#[cfg(target_os = "linux")]
 pub mod clock;
+#[cfg(target_os = "linux")]
 pub mod error;
+#[cfg(target_os = "linux")]
 pub mod http;
+#[cfg(target_os = "linux")]
 pub mod load;
+#[cfg(target_os = "linux")]
 pub mod manifest;
+#[cfg(target_os = "linux")]
 pub mod planrun;
+#[cfg(target_os = "linux")]
 pub mod record;
+#[cfg(target_os = "linux")]
 pub mod replay;
+#[cfg(target_os = "linux")]
 pub mod report;
+#[cfg(target_os = "linux")]
 pub mod sample;
+#[cfg(target_os = "linux")]
 pub mod sampletrees;
+#[cfg(target_os = "linux")]
 pub mod sidecar;
+#[cfg(target_os = "linux")]
 pub mod swfs;
+#[cfg(not(target_os = "linux"))]
+mod unsupported;
+#[cfg(target_os = "linux")]
 pub mod upstream;
 
+#[cfg(target_os = "linux")]
 pub use error::Error;
+
+/// The command line: on Linux, [`cli::main`]; elsewhere a line saying the harness is Linux only,
+/// and exit 2.
+#[cfg(target_os = "linux")]
+#[must_use]
+pub fn main() -> std::process::ExitCode {
+    cli::main()
+}
+
+/// The command line: on Linux, `cli::main`; elsewhere a line saying the harness is Linux only,
+/// and exit 2.
+#[cfg(not(target_os = "linux"))]
+#[must_use]
+pub fn main() -> std::process::ExitCode {
+    unsupported::main()
+}

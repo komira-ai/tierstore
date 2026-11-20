@@ -1,5 +1,6 @@
 //! The sidecar of a walked tree, made from packs read through the in-process fake filer.
 
+#![cfg(target_os = "linux")]
 #![expect(
     clippy::unwrap_used,
     reason = "the helpers of this file are part of its tests: their failure is the failure reported"

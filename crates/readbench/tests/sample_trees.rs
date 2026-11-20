@@ -1,6 +1,7 @@
 //! The sample of trees from the filer's listing of `cas/l/`, through the library and through
 //! `readbench sample-trees`, and the fake's listing itself, against the in-process fake store.
 
+#![cfg(target_os = "linux")]
 #![expect(
     clippy::unwrap_used,
     reason = "the helpers of this file are part of its tests: their failure is the failure reported"

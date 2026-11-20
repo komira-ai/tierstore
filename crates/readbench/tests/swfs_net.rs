@@ -1,5 +1,7 @@
 //! The filer and the volume status pages of `swfs`, against the in-process fake store.
 
+#![cfg(target_os = "linux")]
+
 #[cfg(test)]
 #[expect(dead_code, reason = "this test file uses part of the fake")]
 mod support;

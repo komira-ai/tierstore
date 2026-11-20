@@ -1,5 +1,7 @@
 //! The program itself: `main` forwards to the command line and exits with its code.
 
+#![cfg(target_os = "linux")]
+
 use std::process::Command;
 
 #[test]

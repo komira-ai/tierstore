@@ -1,5 +1,7 @@
 //! Many clients at once from one node, and the wait for their start time.
 
+#![cfg(target_os = "linux")]
+
 #[cfg(test)]
 #[expect(dead_code, reason = "this test file uses part of the fake")]
 mod support;

@@ -1,6 +1,7 @@
 //! `SwfsUpstream` against the in-process fake store: locations from the filer's entries, parts
 //! from the volume servers, and what the recorder keeps of them.
 
+#![cfg(target_os = "linux")]
 #![expect(
     clippy::unwrap_used,
     reason = "the helpers of this file are part of its tests: their failure is the failure reported"
