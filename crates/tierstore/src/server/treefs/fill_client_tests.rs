@@ -10,9 +10,24 @@ use std::time::Duration;
 
 use tierstore_testkit::dir::TestDir;
 
-use super::{AskError, FillClient, Place, PlacedTree, STARTS_QUEUED};
-use crate::TreeDigest;
+use super::{AskError, FillClient, Place, PlacedTree, STARTS_QUEUED, Until, within};
 use crate::server::treefs::testing::until;
+use crate::{Clock, Mono, TreeDigest};
+
+/// A clock that stays at zero.
+struct Still;
+
+impl Clock for Still {
+    fn now(&self) -> u64 {
+        0
+    }
+}
+
+/// An end that never comes: a request given it is asked as one given none.
+const OPEN: Until<'static> = Until {
+    clock: &Still,
+    end_ms: u64::MAX,
+};
 
 /// A client that pauses `tries` times at most, counting the pauses instead of taking them.
 fn client(path: &Path, tries: u32, wait: Duration) -> (FillClient, Arc<AtomicUsize>) {
@@ -86,7 +101,7 @@ fn a_fill_is_one_line_out_and_one_back_over_a_kept_connection() {
         },
     );
     let (client, pauses) = client(&path, 3, Duration::from_secs(30));
-    assert_eq!(client.fill_manifest("good1"), Ok(()));
+    assert_eq!(client.fill_manifest("good1", OPEN), Ok(()));
     assert_eq!(client.fill_blob("good2", 7, "packs/a b", 9), Ok(()));
     assert_eq!(
         client.fill_blob("bad", 7, "k", 0),
@@ -145,7 +160,7 @@ fn a_socket_that_is_not_there_is_waited_for_in_pauses_up_to_a_limit() {
     let (_dir, path) = place("tfs-fc-gone");
     let (client, pauses) = client(&path, 3, Duration::from_secs(30));
     assert_eq!(
-        client.fill_manifest("x"),
+        client.fill_manifest("x", OPEN),
         Err("the fill socket is not answering".to_owned())
     );
     assert_eq!(pauses.load(Ordering::Acquire), 3);
@@ -157,7 +172,7 @@ fn a_socket_that_is_not_there_is_waited_for_in_pauses_up_to_a_limit() {
     serve(listener, Arc::new(Mutex::new(Vec::new())), |_| {
         Some("ok".to_owned())
     });
-    assert_eq!(client.fill_manifest("x"), Ok(()));
+    assert_eq!(client.fill_manifest("x", OPEN), Ok(()));
 }
 
 /// Asserts that a connection kept from before the socket was replaced fails once, is dropped, and
@@ -181,7 +196,7 @@ fn a_kept_connection_to_a_replaced_socket_is_replaced_without_a_pause() {
         },
     );
     let (client, pauses) = client(&path, 3, Duration::from_secs(30));
-    assert_eq!(client.fill_manifest("first"), Ok(()));
+    assert_eq!(client.fill_manifest("first", OPEN), Ok(()));
     // The instance that answered is replaced: the connection the client kept is one whose
     // other end is closed.
     client.idle.lock().unwrap().clear();
@@ -190,7 +205,10 @@ fn a_kept_connection_to_a_replaced_socket_is_replaced_without_a_pause() {
     client.keep(super::Connection {
         reader: BufReader::new(stale),
     });
-    assert_eq!(client.fill_manifest("second"), Err("mismatch".to_owned()));
+    assert_eq!(
+        client.fill_manifest("second", OPEN),
+        Err("mismatch".to_owned())
+    );
     assert_eq!(pauses.load(Ordering::Acquire), 0);
     assert_eq!(lines.lock().unwrap().last().unwrap(), "fill second");
 }
@@ -208,7 +226,7 @@ fn a_silent_socket_times_out_and_a_closed_connection_is_asked_again() {
     );
     let (client, pauses) = client(&path, 3, Duration::from_millis(50));
     assert_eq!(
-        client.fill_manifest("x"),
+        client.fill_manifest("x", OPEN),
         Err("the fill socket gave no answer in time".to_owned())
     );
     assert_eq!(pauses.load(Ordering::Acquire), 0);
@@ -239,7 +257,7 @@ fn an_answer_without_its_end_of_line_is_not_an_answer() {
     });
     let (client, pauses) = client(&path, 2, Duration::from_secs(30));
     assert_eq!(
-        client.fill_manifest("x"),
+        client.fill_manifest("x", OPEN),
         Err("the fill socket is not answering".to_owned())
     );
     assert_eq!(pauses.load(Ordering::Acquire), 2);
@@ -537,4 +555,117 @@ fn started_reports_leave_on_a_thread_of_their_own_and_past_the_queue_are_dropped
     assert_eq!(*lines.lock().unwrap(), want);
     // The caller's own requests use connections of their own: none was made for the reports.
     assert!(client.idle.lock().unwrap().is_empty());
+}
+
+/// A client over `path` that pauses 60 times at most (an `fs.fetch_timeout` of 60 s), each pause
+/// moving `clock` on by the pause and counted.
+fn clocked(path: &Path, clock: &Arc<Mono>) -> (FillClient, Arc<AtomicUsize>) {
+    let pauses = Arc::new(AtomicUsize::new(0));
+    let (counted, moved) = (Arc::clone(&pauses), Arc::clone(clock));
+    let pause = Arc::new(move |pause: Duration| {
+        moved.advance(pause);
+        let _ = counted.fetch_add(1, Ordering::AcqRel);
+    });
+    let client = FillClient::pausing(path.to_owned(), 60, Duration::from_secs(60), pause);
+    (client, pauses)
+}
+
+/// The words of a request whose end came before its answer.
+const SPENT: &str = "the fill socket did not answer within the time the request was given";
+
+/// Asserts that a request given an end, with the socket away, takes no pause that would pass the
+/// end and fails as spent, long before the client's own 60 pauses are used; that a second request
+/// given the same end takes no pause at all; and that an end that has passed fails a request at
+/// once.
+#[test]
+fn a_request_given_an_end_takes_no_pause_past_it() {
+    let (_dir, path) = place("tfs-fc-end");
+    let clock = Arc::new(Mono::new());
+    let (client, pauses) = clocked(&path, &clock);
+    let until = Until {
+        clock: &*clock,
+        end_ms: 2_500,
+    };
+    assert_eq!(client.fill_manifest("x", until), Err(SPENT.to_owned()));
+    assert_eq!((pauses.load(Ordering::Acquire), clock.now()), (2, 2_000));
+    assert_eq!(client.fill_manifest("y", until), Err(SPENT.to_owned()));
+    assert_eq!((pauses.load(Ordering::Acquire), clock.now()), (2, 2_000));
+    clock.advance(Duration::from_millis(500));
+    assert_eq!(client.fill_manifest("z", until), Err(SPENT.to_owned()));
+    assert_eq!(pauses.load(Ordering::Acquire), 2);
+    // With no end the same client retries for all of its pauses.
+    assert_eq!(
+        client.fill_blob("b", 1, "k", 0),
+        Err("the fill socket is not answering".to_owned())
+    );
+    assert_eq!(pauses.load(Ordering::Acquire), 62);
+}
+
+/// Asserts that a request whose end has passed is not sent, and that one whose end is still to
+/// come is sent and answered as any other.
+#[test]
+fn a_request_whose_end_has_passed_is_not_sent() {
+    let (_dir, path) = place("tfs-fc-passed");
+    let lines = Arc::new(Mutex::new(Vec::new()));
+    serve(
+        UnixListener::bind(&path).unwrap(),
+        Arc::clone(&lines),
+        |_| Some("ok".to_owned()),
+    );
+    let clock = Arc::new(Mono::new());
+    let (client, pauses) = clocked(&path, &clock);
+    let until = Until {
+        clock: &*clock,
+        end_ms: 60_000,
+    };
+    assert_eq!(client.fill_manifest("early", until), Ok(()));
+    clock.advance(Duration::from_secs(60));
+    assert_eq!(client.fill_manifest("late", until), Err(SPENT.to_owned()));
+    assert_eq!(*lines.lock().unwrap(), ["fill early"]);
+    assert_eq!(pauses.load(Ordering::Acquire), 0);
+}
+
+/// Asserts that an answer is waited for the client's own time, or the time left before the
+/// request's end where that is shorter.
+#[test]
+fn an_answer_is_waited_for_no_longer_than_the_time_left() {
+    let (minute, second) = (Duration::from_secs(60), Duration::from_secs(1));
+    assert_eq!(within(minute, None), minute);
+    assert_eq!(within(minute, Some(second)), second);
+    assert_eq!(within(second, Some(minute)), second);
+    assert_eq!(within(second, Some(second)), second);
+}
+
+/// Asserts that every exchange sets how long its answer is waited for, so a kept connection waits
+/// the client's own time for the next request: not the longer wait of a `put` before it, nor the
+/// time left to a request given an end.
+#[test]
+fn a_kept_connection_waits_the_clients_own_time_for_the_next_request() {
+    let (dir, path) = place("tfs-fc-wait");
+    serve(
+        UnixListener::bind(&path).unwrap(),
+        Arc::new(Mutex::new(Vec::new())),
+        |_| Some("ok".to_owned()),
+    );
+    let (client, _) = client(&path, 3, Duration::from_secs(120));
+    let waits = |client: &FillClient| {
+        let idle = client.idle.lock().unwrap();
+        assert_eq!(idle.len(), 1);
+        idle[0].reader.get_ref().read_timeout().unwrap()
+    };
+    let staged = dir.path().join("staged");
+    let put = client.put(("k", "s", 1), &staged, Duration::from_secs(600));
+    assert_eq!(put, Ok("ok".to_owned()));
+    assert_eq!(waits(&client), Some(Duration::from_secs(600)));
+    assert_eq!(client.fill_blob("b", 1, "k", 0), Ok(()));
+    assert_eq!(waits(&client), Some(Duration::from_secs(120)));
+    let clock = Mono::new();
+    let until = Until {
+        clock: &clock,
+        end_ms: 50_000,
+    };
+    assert_eq!(client.fill_manifest("m", until), Ok(()));
+    assert_eq!(waits(&client), Some(Duration::from_secs(50)));
+    assert_eq!(client.fill_blob("b", 1, "k", 0), Ok(()));
+    assert_eq!(waits(&client), Some(Duration::from_secs(120)));
 }
