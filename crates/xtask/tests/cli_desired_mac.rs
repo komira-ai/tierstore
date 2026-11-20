@@ -91,11 +91,12 @@ fn line(d: &Path, key: &str) -> Option<Value> {
 }
 
 #[test]
-fn release_desired_with_macos_pkg_writes_targets_mac_with_the_apt_targets_and_the_pkg_entry() {
-    // Asserts: the flag reaches the verb; `targets-mac` carries the apt entries of `targets`
-    // unchanged plus a `macos-arm64` entry of installer `macos-pkg` with the version, the sha256
-    // and the size of the downloaded `.pkg` and the pkg manifest; and `targets` stays as it is
-    // without the flag.
+fn release_desired_with_macos_pkg_writes_one_targets_with_the_apt_lists_and_the_pkg_entry() {
+    // Asserts: the flag reaches the verb; the one `targets` line carries the apt entries the
+    // verb writes without the flag, unchanged, plus a `macos-arm64` entry of installer
+    // `macos-pkg` with the version, the sha256 and the size of the downloaded `.pkg` and the pkg
+    // manifest; and the output has no other targets line, so both host groups' calls are handed
+    // the same targets for the version.
     let d = prepared("with");
     let o = desired(&d, &["--macos-pkg"]);
     assert_eq!(
@@ -104,12 +105,27 @@ fn release_desired_with_macos_pkg_writes_targets_mac_with_the_apt_targets_and_th
         "{}",
         String::from_utf8_lossy(&o.stderr)
     );
-    let targets = line(&d, "targets").expect("targets");
-    let mac = line(&d, "targets-mac").expect("targets-mac");
-    assert_eq!(mac["linux-x86_64"], targets["linux-x86_64"]);
-    assert_eq!(mac["linux-arm64"], targets["linux-arm64"]);
-    assert!(targets.get("macos-arm64").is_none(), "{targets}");
+    let mac = line(&d, "targets").expect("targets");
+    let apt = prepared("with-apt-only");
+    let o = desired(&apt, &[]);
+    assert_eq!(
+        o.status.code(),
+        Some(0),
+        "{}",
+        String::from_utf8_lossy(&o.stderr)
+    );
+    let apt = line(&apt, "targets").expect("targets");
+    assert_eq!(mac["linux-x86_64"], apt["linux-x86_64"]);
+    assert_eq!(mac["linux-arm64"], apt["linux-arm64"]);
     assert_eq!(mac.as_object().expect("object").len(), 3, "{mac}");
+    let text = std::fs::read_to_string(d.join("github-output")).expect("output");
+    assert_eq!(
+        text.lines()
+            .map(|l| l.split('=').next().unwrap_or_default())
+            .collect::<Vec<_>>(),
+        ["set", "package-version", "targets"],
+        "{text}"
+    );
     let entries = mac["macos-arm64"]["entries"].as_array().expect("entries");
     assert_eq!(entries.len(), 1);
     let entry = &entries[0];
@@ -132,9 +148,10 @@ fn release_desired_with_macos_pkg_writes_targets_mac_with_the_apt_targets_and_th
 }
 
 #[test]
-fn release_desired_without_macos_pkg_writes_no_targets_mac_and_asks_for_no_pkg() {
-    // Asserts: without the flag the output has `set`, `package-version` and `targets` and no
-    // `targets-mac` line, and the `.pkg` is not downloaded.
+fn release_desired_without_macos_pkg_writes_the_apt_lists_alone_and_asks_for_no_pkg() {
+    // Asserts: without the flag the output has `set`, `package-version` and `targets`, the
+    // targets have the two Linux lists and no `macos-arm64` list, and the `.pkg` is not
+    // downloaded.
     let d = prepared("without");
     let o = desired(&d, &[]);
     assert_eq!(
@@ -146,8 +163,9 @@ fn release_desired_without_macos_pkg_writes_no_targets_mac_and_asks_for_no_pkg()
     let text = std::fs::read_to_string(d.join("github-output")).expect("output");
     assert!(text.contains("set=true\n"), "{text}");
     assert!(text.contains("package-version=1.2.3\n"), "{text}");
-    assert!(text.contains("\ntargets={"), "{text}");
-    assert!(!text.contains("targets-mac"), "{text}");
+    let targets = line(&d, "targets").expect("targets");
+    let platforms: Vec<&String> = targets.as_object().expect("object").keys().collect();
+    assert_eq!(platforms, ["linux-arm64", "linux-x86_64"], "{text}");
     assert!(
         !d.join(format!("desired/tierstore-{VERSION}-macos-arm64.pkg"))
             .exists()
@@ -211,5 +229,6 @@ fn release_desired_with_skip_superseded_sets_the_newest_release() {
         text.starts_with("set=true\npackage-version=1.2.3\n"),
         "{text}"
     );
-    assert!(line(&d, "targets-mac").is_some(), "{text}");
+    let targets = line(&d, "targets").expect("targets");
+    assert!(targets.get("macos-arm64").is_some(), "{text}");
 }

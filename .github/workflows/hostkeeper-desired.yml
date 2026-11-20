@@ -39,7 +39,7 @@
 #                 client reads it, lists both `.deb`s with the digests the release's SHA256SUMS
 #                 lists. The farm nodes install tierstore with apt, so a list of
 #                 `hostkeeper-archive` entries would order none of them (`installer_dropped`).
-#                 And, with `--macos-pkg`, the `macos-arm64` list: one `macos-pkg` entry of the
+#                 And, with `--macos-pkg`, in the same targets, the `macos-arm64` list: one `macos-pkg` entry of the
 #                 release's signed `.pkg` (`tierstore-<X.Y.Z>-macos-arm64.pkg`, downloaded from the
 #                 release and held to the digest of its SHA256SUMS), for the Macs. No release
 #                 index: it would list archive entries the targets do not have.
@@ -60,11 +60,13 @@
 #                 `not_waited`; so does a rollout still going after half an hour, a halt
 #                 (`halted`) and a newer version set meanwhile (`superseded`). The roll goes on
 #                 whatever the job says; `hkctl releases status --service tierstore` says where.
-#  - set-desired-mac  the same call a second time, for the host group `mac-build` (the Macs): same
-#                 targets, same pin, same wait. A Mac installs its `macos-pkg` entry; the Linux
-#                 entries are ignored there, as the macOS entry is on the Linux hosts. It needs an
-#                 entry of the coordinator's allow-list for the host group mac-build, as the first
-#                 call has one for all-in-one.
+#  - set-desired-mac  the same call a second time, for the host group `mac-build` (the Macs): the
+#                 same `targets` output, same pin, same wait. A Mac installs its `macos-pkg` entry;
+#                 the Linux entries are ignored there, as the macOS entry is on the Linux hosts.
+#                 The targets must be the same as the first call's: the coordinator keeps one
+#                 release per version, whatever the host group, and refuses the version set again
+#                 with other targets (`release_exists`). It needs an entry of the coordinator's
+#                 allow-list for the host group mac-build, as the first call has one for all-in-one.
 #
 # One run at a time, never cancelled (the group `hostkeeper-desired`): a second run by hand waits
 # for the first. The deploy of a release run is not in this group; a release set after a rollback
@@ -98,7 +100,6 @@ jobs:
       set: ${{ steps.desired.outputs.set }}
       package-version: ${{ steps.desired.outputs.package-version }}
       targets: ${{ steps.desired.outputs.targets }}
-      targets-mac: ${{ steps.desired.outputs.targets-mac }}
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
         with:
@@ -152,7 +153,7 @@ jobs:
       service: tierstore
       host_group: mac-build
       version: ${{ needs.check.outputs.package-version }}
-      targets: ${{ needs.check.outputs.targets-mac }}
+      targets: ${{ needs.check.outputs.targets }}
       hostkeeper_version: 0.1.317
       hostkeeper_commit: 30141591c292d8881ce5bc16c9d0b3ba7fcfdca1
       coordinator_url: ${{ vars.HOSTKEEPER_COORDINATOR_URL }}
