@@ -1,0 +1,61 @@
+#!/bin/sh
+# The postinstall of tierstore's installer package (`cargo xtask release macos-pkg`). The installer
+# runs it as root once the payload is in place, with the target volume as $3 (hostkeeper's
+# macos-pkg installer always installs on /). It makes the account the job runs as and the
+# directories under /usr/local/tierstore, and nothing else: it reads, writes and removes no file in
+# them, and it starts nothing and loads no job (hostkeeper's update hook, `tierstore update-hook`,
+# bootstraps the job at its cutover).
+#
+# - The account _tierstore, the plist's UserName and GroupName, in the directory of the running
+#   system: a group and a user with no password, the shell /usr/bin/false and the home /var/empty.
+#   A group or a user that is there is kept as it is. One that is missing gets the highest id from
+#   399 down to 300 that no user and no group has, the same id for both when both are missing; with
+#   no such id the install fails and makes nothing. Each record's id is written last, so a record
+#   left without it by an install that stopped half way is made again.
+# - On the target volume, made when missing, and set to these owners and modes on every install
+#   (the directories only, never what they hold): /usr/local/tierstore 0755 root:wheel, its etc
+#   0750 root:_tierstore (the configuration and the key files), and its cache, log and run 0700
+#   _tierstore:_tierstore.
+set -e
+PATH="$PATH:/usr/bin:/bin:/usr/sbin:/sbin"
+name=_tierstore
+gid=$(dscl . -read "/Groups/$name" PrimaryGroupID 2>/dev/null | awk '{ print $2 }')
+uid=$(dscl . -read "/Users/$name" UniqueID 2>/dev/null | awk '{ print $2 }')
+if [ -z "$gid" ] || [ -z "$uid" ]; then
+    users=$(dscl . -list /Users UniqueID)
+    groups=$(dscl . -list /Groups PrimaryGroupID)
+    id=$(printf '%s\n%s\n' "$users" "$groups" |
+        awk '{ used[$NF] = 1 } END { for (i = 399; i >= 300; i--) if (!(i in used)) { print i; exit } }')
+    if [ -z "$id" ]; then
+        echo "tierstore postinstall: no id from 399 down to 300 is free for $name" >&2
+        exit 1
+    fi
+fi
+if [ -z "$gid" ]; then
+    gid=$id
+    dscl . -create "/Groups/$name"
+    dscl . -create "/Groups/$name" RealName tierstore
+    dscl . -create "/Groups/$name" Password '*'
+    dscl . -create "/Groups/$name" PrimaryGroupID "$gid"
+fi
+if [ -z "$uid" ]; then
+    uid=$id
+    dscl . -create "/Users/$name"
+    dscl . -create "/Users/$name" RealName tierstore
+    dscl . -create "/Users/$name" Password '*'
+    dscl . -create "/Users/$name" UserShell /usr/bin/false
+    dscl . -create "/Users/$name" NFSHomeDirectory /var/empty
+    dscl . -create "/Users/$name" PrimaryGroupID "$gid"
+    dscl . -create "/Users/$name" UniqueID "$uid"
+fi
+base="${3%/}/usr/local/tierstore"
+mkdir -p "$base/etc" "$base/cache" "$base/log" "$base/run"
+chown 0:0 "$base"
+chmod 0755 "$base"
+chown "0:$gid" "$base/etc"
+chmod 0750 "$base/etc"
+for dir in cache log run; do
+    chown "$uid:$gid" "$base/$dir"
+    chmod 0700 "$base/$dir"
+done
+exit 0

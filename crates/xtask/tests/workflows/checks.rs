@@ -57,14 +57,13 @@ const STAGES: [(&str, &str); 14] = [
 ];
 
 /// The jobs and the verbs only they run.
-const VERBS: [(&str, &str); 7] = [
+const VERBS: [(&str, &str); 6] = [
     ("formula", "cargo xtask channels formula "),
     ("check-apt", "cargo xtask channels check-apt "),
     ("check-rpm", "cargo xtask channels check-rpm "),
     ("check-brew", "cargo xtask channels check-brew "),
     ("check-install-sh", "cargo xtask channels check-install-sh "),
     ("promote-check", "cargo xtask channels decide "),
-    ("farm-check", "cargo xtask release desired-apt "),
 ];
 
 /// What a job is held to.

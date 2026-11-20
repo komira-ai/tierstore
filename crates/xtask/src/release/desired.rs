@@ -31,7 +31,8 @@
 //! `.deb`'s SHA-256, held to the suite as a client reads it and to the release's `SHA256SUMS`. A
 //! list of `hostkeeper-archive` entries alone orders no host: the coordinator holds every host that
 //! runs tierstore from apt `installer_dropped`. Without `--macos-pkg`, `targets` has no
-//! `macos-arm64` list: they are exactly the lab's. With `--macos-pkg` (the workflows' way)
+//! `macos-arm64` list: they are exactly `release desired-apt`'s. With `--macos-pkg` (the way of
+//! every workflow that sets a version, the lab stage of `release.yml` included)
 //! `targets` also has a `macos-arm64` list of one `macos-pkg` entry of the release's signed `.pkg`
 //! ([`super::desired_macos`]), downloaded and held to the digest of `SHA256SUMS`. Both
 //! `set-desired` calls, the Linux build nodes' and the Macs' (host group `mac-build`), send these
@@ -79,7 +80,7 @@ pub struct Request<'a> {
     /// The apt repository whose suite `testing` the hosts install from.
     pub apt_url: &'a str,
     /// Add to `targets` the `macos-arm64` list, one `macos-pkg` entry of the release's signed
-    /// `.pkg`, beside the apt lists. Without it `targets` is what the lab sets.
+    /// `.pkg`, beside the apt lists. Without it `targets` is what `release desired-apt` writes.
     pub macos_pkg: bool,
     /// Set nothing (`set=false`) when a published release is newer than the one chosen: the
     /// deploy of a release run, which must never move the fleet back to a release a newer one
