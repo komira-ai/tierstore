@@ -1,0 +1,52 @@
+[package]
+name = "readbench"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+repository.workspace = true
+publish = false
+description = "The farm validation of tierstore's read path (docs/design/fetch-cache-serve.md, task T10b): real job trees replayed through the planner, the fetch engine, the budget, the hash pool and the file entry store against the farm's object store, with the drives and the nodes' metrics sampled."
+
+# The harness is Linux only: the file entry store it fills is (memfd seals, hole punching), and
+# it reads /proc/diskstats. On another system the binary says so and exits 2 (src/main.rs).
+[target.'cfg(target_os = "linux")'.dependencies]
+# `Upstream` and `Verifier` are async traits boxed by async-trait.
+async-trait.workspace = true
+bytes.workspace = true
+# The command line of `readbench`.
+clap.workspace = true
+# The part streams of the upstream and the bounded walks of a tree's manifests.
+futures.workspace = true
+hex.workspace = true
+# The requests to the store's filer and volume servers: HTTP/1.1, keep-alive, no TLS (the farm's
+# private network).
+http.workspace = true
+http-body-util.workspace = true
+hyper = { workspace = true, features = ["client", "http1"] }
+hyper-util = { workspace = true, features = ["client", "client-legacy", "http1", "tokio"] }
+serde.workspace = true
+serde_json.workspace = true
+thiserror.workspace = true
+# The read path under test, as the daemon will host it.
+tierstore.workspace = true
+tierstore-budget.workspace = true
+tierstore-entry.workspace = true
+tierstore-fetch.workspace = true
+tierstore-fetch-api.workspace = true
+tierstore-format.workspace = true
+tierstore-hashpool.workspace = true
+tierstore-list.workspace = true
+tierstore-plan.workspace = true
+tokio = { workspace = true, features = ["macros", "net", "rt", "rt-multi-thread", "sync", "time"] }
+
+[target.'cfg(target_os = "linux")'.dev-dependencies]
+# The loopback store of the tests: a filer and volume servers on 127.0.0.1, port 0.
+hyper = { workspace = true, features = ["client", "http1", "server"] }
+hyper-util = { workspace = true, features = ["client", "client-legacy", "http1", "server", "tokio"] }
+ring.workspace = true
+# Scratch directories of the tests.
+tierstore-testkit.workspace = true
+
+[lints]
+workspace = true

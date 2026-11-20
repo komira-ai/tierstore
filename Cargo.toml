@@ -151,6 +151,8 @@ tierstore-fetch-api = { path = "crates/tierstore-fetch-api" }
 tierstore-list = { path = "crates/tierstore-list" }
 # The fetch engine of a build node: the `Engine` of the read path.
 tierstore-fetch = { path = "crates/tierstore-fetch" }
+tierstore-budget = { path = "crates/tierstore-budget" }
+tierstore-plan = { path = "crates/tierstore-plan" }
 # The breadth-first explorer of the protocol models (its `explore` module).
 tierstore-model = { path = "crates/tierstore-model" }
 # The frozen interfaces of the storage tier, the peer protocol, and a fake storage node.
