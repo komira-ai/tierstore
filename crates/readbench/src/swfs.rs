@@ -5,11 +5,16 @@
 
 use std::collections::BTreeMap;
 
+use async_trait::async_trait;
+use bytes::Bytes;
+use futures::TryStreamExt as _;
 use serde::Deserialize;
 use tierstore_fetch_api::upstream::DeviceRef;
 use tierstore_format::ids::{DriveId, NodeId};
 
 use crate::Error;
+use crate::http::{BodyStream, HttpClient, Response};
+use crate::manifest::Fetch;
 
 /// One piece of an object, stored as one needle of one volume.
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -259,6 +264,109 @@ pub fn device_label(d: DeviceRef) -> String {
             format!("n{}d{disk}", n.0)
         }
     }
+}
+
+/// Reads the status page of every volume server in `servers` and gathers their volumes into one
+/// map.
+///
+/// A server that cannot be reached, answers anything but `200` or answers a page that is not a
+/// status page is returned with its error and leaves the map without its volumes.
+pub async fn load_map(
+    http: &HttpClient,
+    servers: &[VolumeServer],
+) -> (VolumeMap, Vec<(VolumeServer, Error)>) {
+    let pages = futures::future::join_all(servers.iter().map(|server| async move {
+        http.get_bytes(&format!("http://{}/status", server.addr), true)
+            .await
+    }))
+    .await;
+    let mut map = VolumeMap::default();
+    let mut failed = Vec::new();
+    for (server, page) in servers.iter().zip(pages) {
+        if let Err(e) = page.and_then(|json| map.add_status(server, &json)) {
+            failed.push((server.clone(), e));
+        }
+    }
+    (map, failed)
+}
+
+/// The filer of the store, asked for the objects of one bucket.
+#[derive(Debug, Clone)]
+pub struct FilerFetch {
+    /// The client the requests go through.
+    pub http: HttpClient,
+    /// The URL of the bucket, without a trailing slash: `http://<host>:8888/buckets/kbf-cas`.
+    pub base: String,
+}
+
+impl FilerFetch {
+    /// The URL of the object `key`.
+    fn url(&self, key: &str) -> String {
+        format!("{}/{key}", self.base)
+    }
+
+    /// The filer's entry of `key`: its size, entity tag and chunks. `None` when the filer does
+    /// not hold the object.
+    ///
+    /// # Errors
+    /// The request failed, or the answer is not an entry ([`parse_entry`]).
+    pub async fn entry(&self, key: &str) -> Result<Option<Entry>, Error> {
+        let url = format!("{}?metadata=true", self.url(key));
+        let answer = self.http.get(&url, None, true).await?;
+        if answer.status == 404 {
+            return Ok(None);
+        }
+        let json = collect(answer.body).await?;
+        parse_entry(key, &json).map(Some)
+    }
+
+    /// `len` bytes of the object `key` from `offset`, as the filer's ranged answer.
+    ///
+    /// # Errors
+    /// The range is empty or runs past 2^64, the object is not there (the error says `not
+    /// found`), or the request failed.
+    pub async fn read_range(&self, key: &str, offset: u64, len: u64) -> Result<Response, Error> {
+        let url = self.url(key);
+        let end = offset
+            .checked_add(len)
+            .ok_or_else(|| http_error(&url, format!("range {offset}+{len} runs past 2^64")))?;
+        let answer = self.http.get(&url, Some((offset, end)), false).await?;
+        if answer.status == 404 {
+            return Err(http_error(&url, "not found".to_owned()));
+        }
+        Ok(answer)
+    }
+}
+
+#[async_trait]
+impl Fetch for FilerFetch {
+    async fn get(&self, key: &str) -> Result<Bytes, Error> {
+        let url = self.url(key);
+        let answer = self.http.get(&url, None, false).await?;
+        if answer.status == 404 {
+            return Err(http_error(&url, "not found".to_owned()));
+        }
+        collect(answer.body).await
+    }
+}
+
+/// An [`Error::Http`] of `url`.
+fn http_error(url: &str, why: String) -> Error {
+    Error::Http {
+        url: url.to_owned(),
+        why,
+    }
+}
+
+/// The whole of a body.
+async fn collect(body: BodyStream) -> Result<Bytes, Error> {
+    let all = body
+        .try_fold(Vec::new(), |mut all, piece| async move {
+            all.extend_from_slice(&piece);
+            Ok(all)
+        })
+        .await?;
+    Ok(Bytes::from(all))
 }
 
 #[cfg(test)]

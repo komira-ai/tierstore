@@ -210,3 +210,7 @@ pub fn read_lines<T: DeserializeOwned>(path: &Path) -> Result<Vec<T>, Error> {
     }
     Ok(out)
 }
+
+#[cfg(test)]
+#[path = "record_tests.rs"]
+mod tests;

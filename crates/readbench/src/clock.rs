@@ -91,3 +91,7 @@ impl Clock for ManualClock {
         self.wall_ms.load(Ordering::SeqCst)
     }
 }
+
+#[cfg(test)]
+#[path = "clock_tests.rs"]
+mod tests;

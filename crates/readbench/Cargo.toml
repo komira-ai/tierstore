@@ -27,6 +27,8 @@ hyper = { workspace = true, features = ["client", "http1"] }
 hyper-util = { workspace = true, features = ["client", "client-legacy", "http1", "tokio"] }
 serde.workspace = true
 serde_json.workspace = true
+# The generation of an object whose entity tag is not 32 hex digits: the first 16 bytes of the tag's digest.
+sha2.workspace = true
 thiserror.workspace = true
 # The read path under test, as the daemon will host it.
 tierstore.workspace = true
