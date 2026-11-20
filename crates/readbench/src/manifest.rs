@@ -28,7 +28,8 @@ pub enum Child {
         /// Whether the file is executable.
         exec: bool,
         /// The pack key and the offset of the file's first byte in it; none for a file of
-        /// size 0 that names no pack.
+        /// size 0 that names no pack. A file with bytes and no `source` in its manifest is a
+        /// loose blob: the object `cas/l/<sha256>`, from offset 0.
         source: Option<(String, u64)>,
     },
     /// A directory.
@@ -111,7 +112,9 @@ fn parse_child(raw: RawChild) -> Result<Child, String> {
             let source = match (raw.source, size) {
                 (Some(source), _) => Some((source.key, source.offset)),
                 (None, 0) => None,
-                (None, _) => return Err(format!("file {name:?} has no source")),
+                // A file stored alone (a loose blob): its bytes are the whole object named by its
+                // digest, which is where the shipped mount reads them.
+                (None, _) => Some((manifest_key(&hex::encode(sha256)), 0)),
             };
             Ok(Child::File {
                 name,

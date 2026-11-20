@@ -246,10 +246,6 @@ fn a_defective_child_is_refused_naming_it_and_the_key() {
         "cas/l/k: file \"n\" has no sha256"
     );
     assert_eq!(
-        parse_err(json!({"name": "n", "kind": "file", "size": 3, "sha256": hex_of(1)})),
-        "cas/l/k: file \"n\" has no source"
-    );
-    assert_eq!(
         parse_err(json!({"name": "n", "kind": "file", "size": 0, "sha256": "ABC"})),
         "cas/l/k: sha256 of \"n\" is not 64 lowercase hex digits"
     );
@@ -490,4 +486,22 @@ fn a_list_the_encoder_refuses_is_an_error_naming_the_file() {
         "{err}"
     );
     assert!(err.to_string().contains("x/y"), "{err}");
+}
+
+#[test]
+fn a_file_with_bytes_and_no_source_is_the_loose_blob_of_its_digest() {
+    let manifest = json!({"v": 1, "children": [
+        {"name": "n", "kind": "file", "size": 3, "sha256": hex_of(1)}
+    ]});
+    let children = parse("cas/l/k", manifest.to_string().as_bytes()).unwrap();
+    assert_eq!(
+        children,
+        vec![Child::File {
+            name: "n".to_owned(),
+            sha256: [1; 32],
+            size: 3,
+            exec: false,
+            source: Some((format!("cas/l/{}", hex_of(1)), 0)),
+        }]
+    );
 }
