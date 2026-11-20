@@ -3,9 +3,11 @@
 //! Every key has a default and none is required. The keys that the tree store itself holds a
 //! request to are `enabled`, `ttl`, `ttl_max`, `max_placements` and `max_bytes`; `max_entries`,
 //! `max_depth` and `max_dir_entries` are the limits [`TreesConfig::limits`] hands the builder of a
-//! tree. The others (`max_request_bytes`, `fill_*`, `coalesce_gap`, `prefetch_default`,
-//! `whole_pack_percent`, `create_timeout`, `max_failures`) are read and checked at start and held
-//! here for the create call that fetches the files of a tree; nothing in this module uses them.
+//! tree. `fill_concurrency` and `prepare_prefetch` are read by the mount provider's `Prepare`
+//! (`server/provider`). The others (`max_request_bytes`, `fill_rate`, `fill_queue`, `coalesce_gap`,
+//! `prefetch_default`, `whole_pack_percent`, `create_timeout`, `max_failures`) are read and checked
+//! at start and held here for the create call that fetches the files of a tree; nothing in this
+//! module uses them.
 
 use std::time::Duration;
 
@@ -21,6 +23,37 @@ pub enum Prefetch {
     Background,
     /// The call returns when every range is in the cache, or fails whole.
     Wait,
+}
+
+/// What the mount provider's `Prepare` does about the bytes of the tree's files once the tree is
+/// placed (`trees.prepare_prefetch`). It never makes `Prepare` or `Mount` wait for them.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum PreparePrefetch {
+    /// Every file is read into the cache in the background, and the tree is pinned (and marked
+    /// ready when every file was read) once the reads end. The default.
+    Background,
+    /// No file is read: each is filled when it is first opened, and the tree is neither pinned nor
+    /// marked ready by `Prepare`.
+    None,
+}
+
+impl PreparePrefetch {
+    /// The value of the key that names this mode.
+    #[must_use]
+    pub(crate) fn name(self) -> &'static str {
+        match self {
+            Self::Background => "background",
+            Self::None => "none",
+        }
+    }
+
+    /// The mode the value `name` of the key names, or none for a value the key does not take.
+    #[must_use]
+    pub(crate) fn of_name(name: &str) -> Option<Self> {
+        [Self::Background, Self::None]
+            .into_iter()
+            .find(|mode| mode.name() == name)
+    }
 }
 
 /// The settings of a [`TreeStore`](super::TreeStore).
@@ -54,6 +87,8 @@ pub struct TreesConfig {
     pub coalesce_gap: u64,
     /// What a create with no `prefetch` does.
     pub prefetch_default: Prefetch,
+    /// What the mount provider's `Prepare` does about the bytes of the tree's files.
+    pub prepare_prefetch: PreparePrefetch,
     /// The share of a pack, in percent, the needed ranges must cover for the whole pack to be
     /// read in one request.
     pub whole_pack_percent: u8,
@@ -81,6 +116,7 @@ impl Default for TreesConfig {
             fill_queue: 16_384,
             coalesce_gap: 256 << 10,
             prefetch_default: Prefetch::Wait,
+            prepare_prefetch: PreparePrefetch::Background,
             whole_pack_percent: 50,
             create_timeout: Duration::from_secs(120),
             max_failures: 20,
