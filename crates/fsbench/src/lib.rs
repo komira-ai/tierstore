@@ -16,7 +16,10 @@
 //! Both serve the tree of [`tree`]. `fsbench storm` ([`storm`]) is the storm test of the
 //! io_uring transport: parked reads from one CPU and from every CPU, and the latency of metadata
 //! during them, on a file system of its own ([`stormfs`]); `fsbench storm-report` makes its
-//! tables ([`stormrec`]).
+//! tables ([`stormrec`]). `fsbench summary` ([`summary`]) puts the series of several results files
+//! in one table. `fsbench dstate-report` reads what a sampler of read-only tools printed on the
+//! build nodes during a real build ([`dstate`]) and makes its tables ([`dstaterep`]): D state and
+//! FUSE waiting under the farm's own jobs.
 //!
 //! The processes speak one line of JSON at a time over their standard streams: a reader says it
 //! is ready, is told to go, and answers with its counts and latency histograms ([`reader`]); a
@@ -32,6 +35,8 @@
 pub mod burn;
 pub mod cli;
 mod clock;
+pub mod dstate;
+pub mod dstaterep;
 pub mod error;
 pub mod hist;
 pub mod host;
@@ -44,6 +49,7 @@ pub mod run;
 pub mod storm;
 pub mod stormfs;
 pub mod stormrec;
+pub mod summary;
 pub mod tree;
 pub mod tsnull;
 

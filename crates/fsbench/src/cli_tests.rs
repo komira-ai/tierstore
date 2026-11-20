@@ -345,3 +345,67 @@ fn the_storm_commands_fail_on_files_they_cannot_use() {
         "{err}"
     );
 }
+
+/// `summary` puts the series of each results file in one table, each row named by its file;
+/// `dstate-report` prints the tables of the runs an index names. A file that either command
+/// cannot read fails it.
+#[test]
+fn summary_and_dstate_report_print_their_tables() {
+    let dir = TestDir::under(std::env::temp_dir(), "fsbench-cli-summary");
+    let one = dir.path().join("2026-11-one.jsonl");
+    let mut record = crate::record::example();
+    std::fs::write(&one, serde_json::to_string(&record).unwrap() + "\n").unwrap();
+    record.variant = "v3-r4".to_owned();
+    let two = dir.path().join("two.jsonl");
+    std::fs::write(&two, serde_json::to_string(&record).unwrap() + "\n").unwrap();
+    let (code, stdout, stderr) = fsbench(
+        &[
+            "summary",
+            "--results",
+            text(&one),
+            "--results",
+            text(&two),
+            "--discard",
+            "0",
+        ],
+        "",
+    );
+    assert_eq!((code, stderr.as_str()), (ExitCode::SUCCESS, ""));
+    let files = [
+        ("2026-11-one".to_owned(), crate::report::read(&one).unwrap()),
+        ("two".to_owned(), crate::report::read(&two).unwrap()),
+    ];
+    assert_eq!(stdout, crate::summary::render(&files, 0));
+    assert!(stdout.contains("| two | v3-r4 | caches-off |"), "{stdout}");
+    let missing = dir.path().join("missing.jsonl");
+    let (code, _, stderr) = fsbench(&["summary", "--results", text(&missing)], "");
+    assert_eq!(code, ExitCode::from(1));
+    assert!(stderr.starts_with("fsbench: read "), "{stderr}");
+
+    std::fs::write(
+        dir.path().join("n1.txt"),
+        "@node 7.0.0 4\n@tick 2000000000\n#count\n3 1\n@end 2000000001\n",
+    )
+    .unwrap();
+    let index = dir.path().join("runs.json");
+    std::fs::write(
+        &index,
+        r#"{"runs": [{"run": "run1", "build_start_ns": 1000000000,
+            "build_end_ns": 3000000000, "settings": {},
+            "nodes": [{"node": "n1", "raw": "n1.txt"}]}]}"#,
+    )
+    .unwrap();
+    let (code, stdout, stderr) = fsbench(&["dstate-report", "--index", text(&index)], "");
+    assert_eq!((code, stderr.as_str()), (ExitCode::SUCCESS, ""));
+    assert_eq!(
+        stdout,
+        crate::dstaterep::render(&crate::dstate::load(&index).unwrap())
+    );
+    assert!(
+        stdout.contains("| run1 | 2.00 | 1 | 7.0.0 |  |"),
+        "{stdout}"
+    );
+    let (code, _, stderr) = fsbench(&["dstate-report", "--index", text(&missing)], "");
+    assert_eq!(code, ExitCode::from(1));
+    assert!(stderr.starts_with("fsbench: read "), "{stderr}");
+}

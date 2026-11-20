@@ -23,6 +23,9 @@ hex.workspace = true
 # takes spliced replies, one that ends before INIT); the CPU a storm thread or probe is pinned to
 # (`sched_setaffinity`, `fsbench storm`).
 rustix = { workspace = true, features = ["fs", "param", "pipe", "process", "thread"] }
+# The sampler texts of the real-build run (`fsbench dstate-report`) are kept compressed in
+# `data/`: zstd, read with the pure-Rust decoder the workspace already pins.
+ruzstd.workspace = true
 # The records of a run (one JSON object per line) and the messages between the processes.
 serde.workspace = true
 serde_json.workspace = true
