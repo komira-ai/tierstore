@@ -315,8 +315,11 @@ of komira with the farm as its remote executor:
    through the nodes' `tierstore fs`), its start and end taken as Unix nanoseconds around it.
 3. 120 s after the build ends the ssh sessions are closed; each sampler ends at its next write,
    with no `@end`, so its last tick is left out.
-4. Each node's text is compressed (`zstd -19`) into `data/2026-11-real-build/`, and `runs.json`
-   names the run, the build's start and end, its settings and the nodes.
+4. Each node's text is compressed (`zstd -19 --single-thread`) into `data/2026-11-real-build/`,
+   and `runs.json` names the run, the build's start and end, its settings and the nodes. The
+   repository's banned-name test scans binary files as text too; with the default multi-threaded
+   framing one compressed file happened to hold a banned word, and the single-threaded framing
+   does not.
 
 `fsbench dstate-report --index crates/fsbench/data/2026-11-real-build/runs.json` prints the
 tables above.
