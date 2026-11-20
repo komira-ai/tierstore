@@ -4,27 +4,31 @@
 //! ([`super::pkg_signature`]) holds the signed file to its signer.
 //!
 //! The file is `tierstore-<version>-macos-arm64.pkg`, a distribution pkg: `pkgbuild` builds the
-//! component `tierstore.pkg` from the payload with no scripts directory, and `productbuild` wraps
-//! it as the one package of the product, unsigned (the release machinery signs it afterwards). The
-//! component's identifier is [`IDENTIFIER`], its version is the release's `<X.Y.Z>`, its install
-//! location is `/`, and every entry is owned by root (`--ownership recommended`). The tools run
-//! through the port [`BuildPkg`], which [`PkgTools`] implements with the three programs of macOS
-//! and tests fake, as none of them exists on Linux.
+//! component `tierstore.pkg` from the payload and a scripts directory that holds the one script
+//! `postinstall`, and `productbuild` wraps it as the one package of the product, unsigned (the
+//! release machinery signs it afterwards). The component's identifier is [`IDENTIFIER`], its
+//! version is the release's `<X.Y.Z>`, its install location is `/`, and every entry is owned by
+//! root (`--ownership recommended`). The tools run through the port [`BuildPkg`], which
+//! [`PkgTools`] implements with the three programs of macOS and tests fake, as none of them
+//! exists on Linux.
 //!
 //! The payload is exactly these entries, each owned by root and group wheel, directories 0755:
 //! the binary `/Library/Application Support/tierstore/bin/tierstore` (0755, the given binary's
 //! bytes) and the job `/Library/LaunchDaemons/tierstore.plist` (0644, the file
-//! `packaging/macos-pkg/tierstore.plist`), with the directories above them. There is no
-//! `postinstall` and no script at all: hostkeeper's update hook (`tierstore update-hook`)
-//! bootstraps the job at its `cutover`.
+//! `packaging/macos-pkg/tierstore.plist`), with the directories above them. The one script,
+//! `postinstall` ([`postinstall`], the file `packaging/macos-pkg/postinstall`), makes the account
+//! the job runs as, `_tierstore`, when it is missing, and the directories `/usr/local/tierstore`,
+//! its `etc`, `cache`, `log` and `run`, with their owners and modes; it loads no job: hostkeeper's
+//! update hook (`tierstore update-hook`) bootstraps the job at its `cutover`.
 //!
 //! The check takes the directory `pkgutil --expand` made of the product and refuses anything but
 //! what the build writes: it holds exactly the file `Distribution` (the one component, no
 //! installer script or check) and the directory `tierstore.pkg`, which holds exactly `Bom`,
-//! `PackageInfo` (the identifier, the version, the install location `/`, no script, no bundle) and
-//! `Payload` (exactly the entries above, with their modes and bytes, owned by root, group wheel
-//! or admin; the plist parses with the label `tierstore` and a program that is a file of the
-//! payload).
+//! `PackageInfo` (the identifier, the version, the install location `/`, the `postinstall` and no
+//! other script, no action after the install, no bundle), `Payload` (exactly the entries above,
+//! with their modes and bytes, owned by root, group wheel or admin; the plist parses with the
+//! label `tierstore` and a program that is a file of the payload) and the directory `Scripts`
+//! (the `postinstall` alone, 0755, its bytes).
 //!
 //! [`manifest_json`] is the hostkeeper manifest of this pkg, as the coordinator's targets name
 //! it for a Mac.
@@ -43,8 +47,12 @@ use crate::fetch::Sha256;
 use crate::package::Platform;
 
 pub(crate) mod distribution;
+pub(crate) mod postinstall;
 
 use distribution::{COMPONENT, DISTRIBUTION, open_tag, product_problems};
+use postinstall::{
+    POSTINSTALL, SCRIPT_MODE, SCRIPTS, package_info_scripts_problems, scripts_problems,
+};
 
 /// The component's package identifier: the name `pkgutil` knows the receipt by.
 pub const IDENTIFIER: &str = "com.komira.tierstore";
@@ -72,8 +80,12 @@ const PLIST_MODE: u32 = 0o644;
 /// The install location of the component.
 const INSTALL_LOCATION: &str = "/";
 
-/// The files of an expanded component: no `Scripts`.
+/// The files of an expanded component, beside its directory [`SCRIPTS`].
 const COMPONENT_FILES: [&str; 3] = ["Bom", "PackageInfo", "Payload"];
+
+/// The directories of the stage beside the component: the payload's tree and the scripts.
+const STAGE_ROOT: &str = "root";
+const STAGE_SCRIPTS: &str = "scripts";
 
 /// The groups an entry may have: wheel (0) and admin (80).
 const GROUPS: [u32; 2] = [0, 80];
@@ -154,11 +166,13 @@ fn payload(binary: Vec<u8>) -> BTreeMap<String, Want> {
 
 /// The tools that make a pkg: the port to `pkgbuild`, `productbuild` and `pkgutil`.
 pub trait BuildPkg {
-    /// `pkgbuild --root <root> --identifier <identifier> --version <version> --install-location /
-    /// --ownership recommended <pkg>`: the component pkg, with no scripts.
+    /// `pkgbuild --root <root> --scripts <scripts> --identifier <identifier> --version <version>
+    /// --install-location / --ownership recommended <pkg>`: the component pkg, with the scripts of
+    /// the directory `scripts`.
     fn build_pkg(
         &self,
         root: &Path,
+        scripts: &Path,
         identifier: &str,
         version: &str,
         pkg: &Path,
@@ -224,6 +238,7 @@ fn run(program: &Path, args: &[String]) -> Result<String, Error> {
 /// The arguments of `pkgbuild` for [`BuildPkg::build_pkg`].
 fn pkgbuild_args(
     root: &Path,
+    scripts: &Path,
     identifier: &str,
     version: &str,
     pkg: &Path,
@@ -231,6 +246,8 @@ fn pkgbuild_args(
     Ok(vec![
         "--root".to_owned(),
         utf8(root)?,
+        "--scripts".to_owned(),
+        utf8(scripts)?,
         "--identifier".to_owned(),
         identifier.to_owned(),
         "--version".to_owned(),
@@ -265,13 +282,14 @@ impl BuildPkg for PkgTools {
     fn build_pkg(
         &self,
         root: &Path,
+        scripts: &Path,
         identifier: &str,
         version: &str,
         pkg: &Path,
     ) -> Result<(), Error> {
         run(
             &self.pkgbuild,
-            &pkgbuild_args(root, identifier, version, pkg)?,
+            &pkgbuild_args(root, scripts, identifier, version, pkg)?,
         )
         .map(drop)
     }
@@ -297,8 +315,8 @@ pub struct Request<'a> {
     pub version: &'a str,
     /// The macos-arm64 tierstore binary.
     pub binary: &'a Path,
-    /// A directory to lay the payload out in (`root`) and to write the component to; it must not
-    /// exist.
+    /// A directory to lay the payload out in (`root`), the scripts (`scripts`) and to write the
+    /// component to; it must not exist.
     pub stage: &'a Path,
     /// The directory the product is written to.
     pub out: &'a Path,
@@ -326,8 +344,9 @@ fn version_usage(version: &str) -> Result<(), Error> {
     )))
 }
 
-/// Lays the payload out under `request.stage`'s `root`, builds the component from it with no
-/// scripts, and wraps it as the product in `request.out`; the lines to print.
+/// Lays the payload out under `request.stage`'s `root` and the `postinstall` under its `scripts`,
+/// builds the component from them, and wraps it as the product in `request.out`; the lines to
+/// print.
 pub fn build(tools: &dyn BuildPkg, request: &Request) -> Result<Vec<String>, Error> {
     version_usage(request.version)?;
     let binary = std::fs::read(request.binary)
@@ -340,7 +359,13 @@ pub fn build(tools: &dyn BuildPkg, request: &Request) -> Result<Vec<String>, Err
         )));
     }
     make_dir(stage)?;
-    let root = stage.join("root");
+    let scripts = stage.join(STAGE_SCRIPTS);
+    make_dir(&scripts)?;
+    let script = scripts.join(postinstall::NAME);
+    std::fs::write(&script, POSTINSTALL)
+        .map_err(Error::spawn(format!("write {}", script.display())))?;
+    set_mode(&script, SCRIPT_MODE)?;
+    let root = stage.join(STAGE_ROOT);
     // In path order, so each directory is made before what it holds; `""` is the payload's root
     // itself (the components drop the `/` that joining an empty path leaves).
     for (path, want) in payload(binary) {
@@ -361,7 +386,7 @@ pub fn build(tools: &dyn BuildPkg, request: &Request) -> Result<Vec<String>, Err
     std::fs::create_dir_all(request.out)
         .map_err(Error::spawn(format!("create {}", request.out.display())))?;
     let component = stage.join(COMPONENT);
-    tools.build_pkg(&root, IDENTIFIER, request.version, &component)?;
+    tools.build_pkg(&root, &scripts, IDENTIFIER, request.version, &component)?;
     let name = file_name(request.version);
     let product = request.out.join(&name);
     tools.build_product(&component, IDENTIFIER, request.version, &product)?;
@@ -482,13 +507,14 @@ fn package_info_problems(text: &str, version: &str, problems: &mut Vec<String>) 
             None => problems.push(format!("PackageInfo has no {name}")),
         }
     }
-    for script in ["scripts", "preinstall", "postinstall"] {
-        if text.contains(&format!("<{script}")) {
-            problems.push(format!(
-                "PackageInfo names a {script} element: tierstore's pkg has no script"
-            ));
-        }
+    let action = attributes.get("postinstall-action").map(String::as_str);
+    if let Some(action) = action.filter(|a| *a != "none") {
+        problems.push(format!(
+            "PackageInfo: postinstall-action is {action:?}, not \"none\": the install asks for no \
+             restart or logout"
+        ));
     }
+    package_info_scripts_problems(text, problems);
     for bundle in ["<bundle ", "<bundle>", "<bundle/"] {
         if text.contains(bundle) {
             problems.push("PackageInfo names a bundle: tierstore's pkg holds none".to_owned());
@@ -704,8 +730,14 @@ pub fn check(expanded: &Path, version: &str, binary: &Path) -> Result<Vec<String
     if present.iter().any(|p| p == COMPONENT) {
         let component = expanded.join(COMPONENT);
         let only = "an expanded component of tierstore's pkg holds only the files Bom, \
-                    PackageInfo and Payload: no Scripts, since it has no script";
-        let parts = layer(&component, &COMPONENT_FILES, &[], only, &mut problems)?;
+                    PackageInfo and Payload and the directory Scripts";
+        let parts = layer(
+            &component,
+            &COMPONENT_FILES,
+            &[SCRIPTS],
+            only,
+            &mut problems,
+        )?;
         if parts.iter().any(|p| p == "PackageInfo") {
             let text = read(component.join("PackageInfo"))?;
             package_info_problems(&String::from_utf8_lossy(&text), version, &mut problems);
@@ -716,15 +748,19 @@ pub fn check(expanded: &Path, version: &str, binary: &Path) -> Result<Vec<String
                 Ok(entries) => payload_problems(&entries, want, &mut problems),
             }
         }
+        if parts.iter().any(|p| p == SCRIPTS) {
+            scripts_problems(&component.join(SCRIPTS), &mut problems)?;
+        }
     }
     if !problems.is_empty() {
         return Err(Error::Refused(problems));
     }
     Ok(vec![format!(
         "check-macos-pkg: {} is a product of the one component {COMPONENT} ({IDENTIFIER} \
-         {version}), with no script, which installs exactly {BINARY_PATH} ({BINARY_MODE:o}) \
-         and {PLIST_PATH} ({PLIST_MODE:o}), owned by root",
+         {version}), with the one script {}, which installs exactly {BINARY_PATH} \
+         ({BINARY_MODE:o}) and {PLIST_PATH} ({PLIST_MODE:o}), owned by root",
         expanded.display(),
+        postinstall::NAME,
     )])
 }
 

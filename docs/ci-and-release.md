@@ -401,10 +401,13 @@ section 5). Nobody approves a step.
    and neither repository variable
    `HOSTKEEPER_COORDINATOR_URL` nor `HOSTKEEPER_COORDINATOR_CA` set it ends green with a notice,
    and the stage is skipped the same way. With the switch `true` and one
-   of them set it ends red. With both set it runs `cargo xtask release desired-apt`, which reads
+   of them set it ends red. With both set it runs `cargo xtask release desired --macos-pkg`, the
+   command of the deploy's `deploy-check`, which reads
    the suite `testing` as a client reads it, holds the entry of each `.deb` to the digest of the
-   release's `SHA256SUMS`, and hands on the package version and the `targets` of hostkeeper's apt
-   installer: for `linux-x86_64` and `linux-arm64` one entry that names the host's repository
+   release's `SHA256SUMS`, and hands on the package version and the `targets` the deploy sets (the
+   coordinator refuses a version set again with other targets, `release_exists`): the Macs'
+   `macos-pkg` entry (below) and, of hostkeeper's apt
+   installer, for `linux-x86_64` and `linux-arm64` one entry that names the host's repository
    entry `komira-testing`, the package version and the `.deb`'s digest as the pin (no release
    index and no package digest: tierstore ships no archive, and a host that does not announce
    `apt` is ordered nothing). Every entry names the update hook as its command (`/usr/libexec/tierstore/tierstore update-hook`,
@@ -632,8 +635,8 @@ anything else, every job of the deploy and of the workflow is skipped.
 
 The `check` job of `hostkeeper-desired.yml` (`contents: read` only) and `deploy-check` of `release.yml` (`cargo xtask release desired`, no token that writes) decides the release and
 hands on the version `X.Y.Z`, the plain version apt installs, and the **targets**: what the lab
-stage of `release.yml` sets for it (`release desired-apt`, above, with the same
-`--min-hostkeeper 0.1.225`), for `linux-x86_64` and `linux-arm64` one `apt` entry each, of the
+stage of `release.yml` sets for it (the same command, with the same `--min-hostkeeper 0.1.225`
+and `--macos-pkg`; `release desired-apt`, above, writes the apt lists alone), for `linux-x86_64` and `linux-arm64` one `apt` entry each, of the
 repository entry `komira-testing`, pinned by the `.deb`'s SHA-256, and, with `--macos-pkg` (both
 workflows pass it), in the same targets, a `macos-arm64` list of one `macos-pkg` entry,
 `{"installer": "macos-pkg", "repository": "komira-testing", "packageVersion": "X.Y.Z", "digest":
@@ -649,8 +652,9 @@ The coordinator keeps **one release per version**, whatever the host group, and 
 version set again with other targets (`release_exists`); the same targets set again are taken. So
 the Linux build nodes' call and the Macs' call send the one `targets` output, each host is ordered
 its own platform's list and ignores the others. The lab stage, off while `TIERSTORE_LAB_INSTALL`
-is not `true`, still sends the apt lists alone (`desired-apt`, through an older pinned client): a
-lab set of a version the deploy already set is refused `release_exists`.
+is not `true`, sends the same `targets` (`release desired --macos-pkg`, through its older pinned
+client, which passes the targets through as they are), so whichever of the lab and the deploy sets
+a version first, the other is taken.
 
 In `hostkeeper-desired.yml` the `set-desired` job (host group `all-in-one`) and, beside it, `set-desired-mac` (host group
 `mac-build`, with the same targets) then call; `deploy` and `deploy-mac` of `release.yml` do the same with the same inputs. They call hostkeeper's CI client (`set-desired.yml` of

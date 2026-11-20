@@ -547,9 +547,11 @@ fn the_check_gives_the_floor_the_lab_stage_of_release_yml_is_held_to() {
         command.contains(&format!(" --min-hostkeeper {APT_FLOOR} ")),
         "{command}"
     );
+    // The lab sets the same targets, the Macs' list included: the coordinator refuses a version
+    // set again with other targets (`release_exists`).
     let release = text_of("release.yml");
     assert!(release.contains(&format!(
-        "cargo xtask release desired-apt --repo \"$GITHUB_REPOSITORY\" --version \"${{TAG#v}}\" --min-hostkeeper {APT_FLOOR} "
+        "cargo xtask release desired --repo \"$GITHUB_REPOSITORY\" --version \"${{TAG#v}}\" --min-hostkeeper {APT_FLOOR} --macos-pkg "
     )));
     let doc = yaml::load(&release).expect("release.yml parses");
     assert_eq!(farm_problems(&doc, &release), Vec::<String>::new());

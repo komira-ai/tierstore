@@ -10,6 +10,7 @@ use crate::testdir::TestDir;
 mod check;
 mod distribution;
 mod odc;
+mod postinstall;
 
 /// The binary the pkg holds; nothing runs it.
 pub(super) const BINARY_BYTES: &[u8] = b"the macos-arm64 tierstore binary";
@@ -51,9 +52,9 @@ pub(super) fn tree_of(root: &Path) -> Vec<Seen> {
     seen
 }
 
-/// What `build_pkg` was called with: the identifier, the version, the component's path and the
-/// tree of the root at the call.
-type PkgCall = (String, String, PathBuf, Vec<Seen>);
+/// What `build_pkg` was called with: the identifier, the version, the component's path, and the
+/// trees of the root and of the scripts directory at the call.
+type PkgCall = (String, String, PathBuf, Vec<Seen>, Vec<Seen>);
 
 /// The calls a [`FakeTools`] was made.
 #[derive(Default)]
@@ -82,6 +83,7 @@ impl BuildPkg for FakeTools {
     fn build_pkg(
         &self,
         root: &Path,
+        scripts: &Path,
         identifier: &str,
         version: &str,
         pkg: &Path,
@@ -94,6 +96,7 @@ impl BuildPkg for FakeTools {
             version.to_owned(),
             pkg.to_owned(),
             tree_of(root),
+            tree_of(scripts),
         ));
         std::fs::write(pkg, b"component").expect("the component");
         Ok(())
@@ -139,10 +142,11 @@ fn request_in<'a>(binary: &'a Path, stage: &'a Path, out: &'a Path) -> Request<'
 }
 
 #[test]
-fn the_builder_lays_out_exactly_the_payload_and_builds_the_component_and_product() {
+fn the_builder_lays_out_the_payload_and_the_postinstall_and_builds_the_product() {
     // Catches: a payload with a file, mode or byte other than the binary at its path (0755) and
-    // the plist (0644) under root-readable 0755 directories, a script directory handed to
-    // pkgbuild, an identifier or version other than the release's, and a product not made of
+    // the plist (0644) under root-readable 0755 directories, a scripts directory handed to
+    // pkgbuild that holds anything but the postinstall (0755, its bytes) or a script the installer
+    // cannot run, an identifier or version other than the release's, and a product not made of
     // the component.
     let dir = scratch("builds");
     let binary = dir.join("tierstore");
@@ -177,13 +181,22 @@ fn the_builder_lays_out_exactly_the_payload_and_builds_the_component_and_product
         Some(PLIST.as_bytes().to_vec()),
     ));
     want.sort();
+    let scripts: Vec<Seen> = vec![
+        (String::new(), 0o755, None),
+        (
+            "postinstall".to_owned(),
+            0o755,
+            Some(POSTINSTALL.as_bytes().to_vec()),
+        ),
+    ];
     assert_eq!(
         *tools.pkg_calls.borrow(),
         [(
             "com.komira.tierstore".to_owned(),
             "1.2.3".to_owned(),
             stage.join("tierstore.pkg"),
-            want
+            want,
+            scripts
         )]
     );
     assert_eq!(
@@ -195,14 +208,17 @@ fn the_builder_lays_out_exactly_the_payload_and_builds_the_component_and_product
             out.join("tierstore-1.2.3-macos-arm64.pkg")
         )]
     );
-    // The stage holds the root and the component and nothing else: no scripts.
+    // The stage holds the root, the scripts and the component and nothing else.
     let names: Vec<String> = tree_of(&stage).into_iter().map(|(p, ..)| p).collect();
     assert!(
-        names
-            .iter()
-            .all(|p| p.is_empty() || p == "tierstore.pkg" || p == "root" || p.starts_with("root/"))
+        names.iter().all(|p| p.is_empty()
+            || p == "tierstore.pkg"
+            || p == "root"
+            || p.starts_with("root/")
+            || p == "scripts"
+            || p == "scripts/postinstall"),
+        "{names:?}"
     );
-    assert!(!names.iter().any(|p| p.contains("script")), "{names:?}");
 }
 
 #[test]
@@ -288,15 +304,19 @@ fn a_failure_of_either_tool_or_a_product_that_is_not_written_ends_the_build() {
 }
 
 #[test]
-fn pkgbuild_and_productbuild_get_the_identifier_version_location_and_ownership() {
-    // Catches: a pkgbuild call that gives scripts, another install location or the owner of the
-    // build machine's user, and a productbuild call that builds another component.
+fn pkgbuild_and_productbuild_get_the_scripts_identifier_version_location_and_ownership() {
+    // Catches: a pkgbuild call that leaves out the scripts (the postinstall would not be in the
+    // pkg) or gives another directory, another install location or the owner of the build
+    // machine's user, and a productbuild call that builds another component.
     let (root, pkg) = (Path::new("stage/root"), Path::new("stage/tierstore.pkg"));
+    let scripts = Path::new("stage/scripts");
     assert_eq!(
-        pkgbuild_args(root, IDENTIFIER, VERSION, pkg),
+        pkgbuild_args(root, scripts, IDENTIFIER, VERSION, pkg),
         Ok([
             "--root",
             "stage/root",
+            "--scripts",
+            "stage/scripts",
             "--identifier",
             "com.komira.tierstore",
             "--version",
@@ -333,7 +353,8 @@ fn a_path_that_is_not_utf8_is_refused_by_both_tools() {
     let bad = Path::new(std::ffi::OsStr::from_bytes(b"x/\xff"));
     let tools = PkgTools::system();
     for result in [
-        tools.build_pkg(bad, IDENTIFIER, VERSION, Path::new("a")),
+        tools.build_pkg(bad, Path::new("s"), IDENTIFIER, VERSION, Path::new("a")),
+        tools.build_pkg(Path::new("r"), bad, IDENTIFIER, VERSION, Path::new("a")),
         tools.build_product(bad, IDENTIFIER, VERSION, Path::new("a")),
     ] {
         assert!(matches!(result, Err(Error::Failed(why)) if why.ends_with("is not UTF-8")));
@@ -348,22 +369,23 @@ fn the_tools_run_their_programs_and_report_a_failure_or_a_program_that_is_absent
         productbuild: program.into(),
         pkgutil: program.into(),
     };
+    let (r, s) = (Path::new("r"), Path::new("s"));
     assert_eq!(
-        tools("true").build_pkg(Path::new("r"), IDENTIFIER, VERSION, Path::new("p")),
+        tools("true").build_pkg(r, s, IDENTIFIER, VERSION, Path::new("p")),
         Ok(())
     );
     assert_eq!(
         tools("true").build_product(Path::new("c"), IDENTIFIER, VERSION, Path::new("p")),
         Ok(())
     );
-    let args = "--root r --identifier com.komira.tierstore --version 1.2.3 --install-location / \
-                --ownership recommended p";
+    let args = "--root r --scripts s --identifier com.komira.tierstore --version 1.2.3 \
+                --install-location / --ownership recommended p";
     assert_eq!(
-        tools("false").build_pkg(Path::new("r"), IDENTIFIER, VERSION, Path::new("p")),
+        tools("false").build_pkg(r, s, IDENTIFIER, VERSION, Path::new("p")),
         Err(Error::Failed(format!("false {args}: \n")))
     );
     assert!(matches!(
-        tools("no-such-program").build_pkg(Path::new("r"), IDENTIFIER, VERSION, Path::new("p")),
+        tools("no-such-program").build_pkg(r, s, IDENTIFIER, VERSION, Path::new("p")),
         Err(Error::Spawn { what, .. }) if what == format!("no-such-program {args}")
     ));
 }
@@ -490,9 +512,14 @@ pub(super) fn package_info_with(attributes: &str, extra: &str) -> String {
 pub(super) fn package_info() -> String {
     package_info_with(
         "identifier=\"com.komira.tierstore\" version=\"1.2.3\" install-location=\"/\"",
-        "",
+        SCRIPTS_ELEMENT,
     )
 }
+
+/// The scripts element `pkgbuild` writes in `PackageInfo` for a scripts directory that holds a
+/// `postinstall`.
+pub(super) const SCRIPTS_ELEMENT: &str =
+    "<scripts>\n        <postinstall file=\"./postinstall\"/>\n    </scripts>";
 
 /// The `Distribution` `productbuild --package` writes for the component pkg of 1.2.3, with
 /// `refs` as the `<pkg-ref>` that refers to the component and `extra` among the root element's
@@ -520,7 +547,8 @@ pub(super) fn distribution_text() -> String {
 }
 
 /// A product expanded as `pkgutil --expand` leaves it (`pkg` holds the `Distribution` and the
-/// component's directory), with `entries` as the component's payload, and the binary it is
+/// component's directory, whose `Scripts` holds the postinstall), with `entries` as the
+/// component's payload, and the binary it is
 /// checked against, in a scratch directory of its own.
 pub(super) struct Expanded {
     pub(super) dir: TestDir,
@@ -538,6 +566,11 @@ impl Expanded {
         expanded.write("Bom", b"BOMStore");
         expanded.write("PackageInfo", package_info().as_bytes());
         expanded.write("Payload", &gzip(&odc(entries)));
+        let scripts = expanded.pkg().join("Scripts");
+        std::fs::create_dir(&scripts).expect("the expanded scripts");
+        let script = scripts.join("postinstall");
+        std::fs::write(&script, POSTINSTALL).expect("the postinstall");
+        std::fs::set_permissions(&script, std::fs::Permissions::from_mode(0o755)).expect("mode");
         expanded
     }
 
@@ -553,6 +586,11 @@ impl Expanded {
     /// The directory of the component in the product.
     pub(super) fn pkg(&self) -> PathBuf {
         self.product().join(COMPONENT)
+    }
+
+    /// The postinstall of the component.
+    pub(super) fn script(&self) -> PathBuf {
+        self.pkg().join("Scripts").join("postinstall")
     }
 
     pub(super) fn write(&self, file: &str, bytes: &[u8]) {

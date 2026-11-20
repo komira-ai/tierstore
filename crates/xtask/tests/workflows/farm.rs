@@ -9,8 +9,10 @@
 //!   tailnet's three. The gate is also given `--require TIERSTORE_LAB_INSTALL=...`, `true` only
 //!   when that repository variable is exactly `true`: with it off, the lab is off whatever the
 //!   other settings are (they serve `hostkeeper-desired.yml` too). Every step after the first gate runs only when it said `enabled=true`, and
-//!   one of them is `cargo xtask release desired-apt` (the testing suite lists the package), whose two outputs
-//!   (`package-version` and `targets`, the apt installer's entry per architecture) the job hands on.
+//!   one of them is `cargo xtask release desired` with `--macos-pkg` (the testing suite lists the package, and the release's `.pkg` has the
+//!   digest of its sums), whose two outputs (`package-version` and `targets`, the apt installer's entry per architecture and the Macs'
+//!   `macos-pkg` entry) the job hands on: the targets the deploy sets, since the coordinator refuses a version set again with other targets
+//!   (`release_exists`).
 //! - `farm` is hostkeeper's reusable workflow, pinned to a commit with its release as the comment
 //!   (a pin of its own: `hostkeeper-desired.yml` pins another revision of the client, and the
 //!   coordinator's allow-list has an entry for each, by its audience), called with the version and
@@ -46,7 +48,7 @@ pub const AUDIENCE: &str = "tierstore-hostkeeper-release";
 /// The first release of hostkeeper whose daemon runs the hook command of an `apt` entry (an
 /// absolute path of a program the package installs, run from the version's sealed tree): an older
 /// daemon refuses the entry, whose hook is `/usr/libexec/tierstore/tierstore update-hook`. The pin
-/// of `farm` is at this release or later, and `desired-apt` is given it as `--min-hostkeeper`.
+/// of `farm` is at this release or later, and `release desired` is given it as `--min-hostkeeper`.
 pub const APT_FLOOR: &str = "0.1.225";
 
 /// The repository variable that switches the lab stage on.
@@ -186,11 +188,17 @@ fn check_problems(check: &Node) -> Vec<String> {
     let desired = after.iter().find(|s| at(s, &["id"]) == Some("desired"));
     if !desired.is_some_and(|s| {
         text(s, "run").starts_with(
-            "cargo xtask release desired-apt --repo \"$GITHUB_REPOSITORY\" --version \"${TAG#v}\" ",
+            "cargo xtask release desired --repo \"$GITHUB_REPOSITORY\" --version \"${TAG#v}\" ",
         ) && text(s, "run").contains("--output \"$GITHUB_OUTPUT\"")
     }) {
         problems.push(
-            "farm-check: no step `desired` runs `cargo xtask release desired-apt` for the tag of this release"
+            "farm-check: no step `desired` runs `cargo xtask release desired` for the tag of this release"
+                .to_owned(),
+        );
+    }
+    if !desired.is_some_and(|s| format!("{} ", text(s, "run")).contains(" --macos-pkg ")) {
+        problems.push(
+            "farm-check: the step `desired` is not given `--macos-pkg`: the lab would set the version with other targets than the deploy, which the coordinator refuses (release_exists)"
                 .to_owned(),
         );
     }

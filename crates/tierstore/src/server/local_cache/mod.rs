@@ -131,6 +131,7 @@
 //! A background walk hashes each object again at a bounded rate and drops the ones whose bytes
 //! changed on the disk; see [`scrub`].
 
+pub(super) mod attaches;
 mod calls;
 mod disk;
 mod evict;
@@ -515,7 +516,7 @@ pub(super) struct Inner {
     /// Run by a test just before a kept object is put in the index (see `keep`).
     #[cfg(test)]
     before_insert: Mutex<Option<Box<dyn Fn() + Send + Sync>>>,
-    /// The runs between their request and their start, and `tierstore_request_to_start_seconds`.
+    /// The runs between request and start, and what the mounts report for `/metricz`.
     starts: starts::Starts,
     /// Whether a pass of the eviction is running.
     evicting: AtomicBool,

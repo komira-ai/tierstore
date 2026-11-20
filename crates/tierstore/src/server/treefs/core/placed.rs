@@ -36,17 +36,18 @@ use sha2::{Digest as _, Sha256};
 
 use crate::server::local_cache::trees::{FlatKind, FlatTree, Location, image_path};
 use crate::tree_manifest::{
-    BlobSource, EntryKind, MAX_MANIFEST_BYTES, TreeDigest, TreeEntry, TreeError, flatten,
+    BlobSource, EntryKind, MAX_MANIFEST_BYTES, TreeDigest, TreeEntry, TreeError, flatten_in_waves,
 };
 use crate::{MAX_TREE_LIST_BYTES, TreeImage};
 
 use super::super::fill_client::{AskError, Place, PlacedTree, Until};
 use super::super::ino;
 use super::super::tree::Tree;
+use super::fetched::Fetched;
 use super::loaded::Loaded;
 use super::read::FileBytes;
 use super::{Core, Errno, Looked, locked};
-use crate::server::local_cache::manifest_path;
+use crate::server::local_cache::{FILL_SOCKET_CONCURRENCY, manifest_path};
 
 /// The bytes 16 to 24 of the key a placement's tree at a location is numbered under; the first
 /// sixteen are the placement's id, the last eight the start of the SHA-256 of the location's path.
@@ -66,6 +67,12 @@ pub(in crate::server::treefs) const TREE_READ: Duration = Duration::from_secs(30
 
 /// The most entries a tree of the mount may have: what the index of an inode number counts.
 const MOST_ENTRIES: usize = 1 << 24;
+
+/// The most manifests of a tree one read fetches at once, each level of the tree before the next
+/// (`tree_manifest/waves.rs`): as many fills as the node's fill socket runs at once by default, so
+/// that a read of a tree whose manifests the cache does not hold costs a round trip for each level
+/// of the tree and not one for each directory.
+const MANIFESTS_AT_ONCE: usize = FILL_SOCKET_CONCURRENCY;
 
 /// The bytes of the manifest file at `path`, at most [`MAX_MANIFEST_BYTES`] and one more byte, so
 /// that a larger file is refused by its size and not read whole.
@@ -218,8 +225,15 @@ impl Core {
     /// Reads the tree `digest`: a placement's from the node's tree store, whole (an image from
     /// the tree's directory in the cache directory, which the placement this mount holds keeps
     /// there); any other's from its manifests, fetched through the fill socket where the cache
-    /// does not hold them, and flattened, all of them by [`TREE_READ`] after the read began.
-    pub(in crate::server::treefs) fn read_tree(&self, digest: &TreeDigest) -> Result<Tree, Unread> {
+    /// does not hold them, a level of the tree at a time and up to [`MANIFESTS_AT_ONCE`] at once,
+    /// all of them by [`TREE_READ`] after the read began, and flattened. The manifests it fetches
+    /// are counted in `fetched`, which the caller makes for this read alone, and reported to the
+    /// node (`fetched`) when the read ends.
+    pub(in crate::server::treefs) fn read_tree(
+        &self,
+        digest: &TreeDigest,
+        fetched: &Fetched,
+    ) -> Result<Tree, Unread> {
         if let Some((id, hash)) = placement_of(digest) {
             let gone = || Unread::Gone(format!("no placement {id} at that location"));
             let placed = match self.fills.image(&id) {
@@ -248,12 +262,20 @@ impl Core {
             let hex = wanted.to_string();
             let path = manifest_path(&self.settings.cache_path, &hex);
             if let Ok(bytes) = read_manifest(&path) {
+                fetched.cached();
                 return Ok(bytes);
             }
-            self.fills.fill_manifest(&hex, until)?;
-            read_manifest(&path).map_err(|error| error.to_string())
+            let read = |()| read_manifest(&path).map_err(|error| error.to_string());
+            let start = self.now();
+            let filled = self.fills.fill_manifest(&hex, until);
+            let ms = self.now().saturating_sub(start);
+            let had = filled.and_then(read);
+            fetched.filled(ms, had.is_ok());
+            had
         };
-        flatten(digest, fetch).map(Tree::new).map_err(|why| {
+        let flattened = flatten_in_waves(digest, MANIFESTS_AT_ONCE, fetch);
+        self.fills.report(fetched.counts().line());
+        flattened.map(Tree::new).map_err(|why| {
             let gone = matches!(
                 &why,
                 TreeError::Fetch { digest: missing, reason } if missing == digest && reason == ABSENT

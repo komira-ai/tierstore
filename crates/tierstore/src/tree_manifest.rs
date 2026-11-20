@@ -13,6 +13,11 @@ use std::sync::Arc;
 use serde::Deserialize;
 use sha2::{Digest as _, Sha256};
 
+#[cfg(feature = "server")]
+mod waves;
+#[cfg(feature = "server")]
+pub(crate) use waves::flatten_in_waves;
+
 /// The most entries below a tree's root, counted across all its directories. The root makes
 /// 2^24 inodes, and an index is 24 bits.
 pub const MAX_ENTRIES: u64 = (1 << 24) - 1;
@@ -427,22 +432,31 @@ struct Measured {
     entries: u64,
 }
 
-/// Fetches the manifest `digest` and opens a frame for it. Its children are at `depth`: a
-/// manifest with any is refused when that is over [`MAX_DEPTH`]. `opened` is the children of
-/// all the distinct manifests opened so far, which this one's are added to: each is held once,
-/// and every one is in the tree at least once, so a sum over [`MAX_ENTRIES`] is a tree over it
-/// and nothing more is fetched.
-fn open<E: fmt::Display>(
+/// The manifest `digest` from what its fetch gave: the bytes, read and checked, or the fetch's
+/// error by the digest.
+fn parsed<E: fmt::Display>(
     digest: &TreeDigest,
-    depth: usize,
-    opened: &mut u64,
-    fetch: &mut impl FnMut(&TreeDigest) -> Result<Vec<u8>, E>,
-) -> Result<Frame, TreeError> {
-    let bytes = fetch(digest).map_err(|e| TreeError::Fetch {
+    fetched: Result<Vec<u8>, E>,
+) -> Result<Arc<TreeManifest>, TreeError> {
+    let bytes = fetched.map_err(|e| TreeError::Fetch {
         digest: *digest,
         reason: e.to_string(),
     })?;
-    let manifest = Arc::new(parse_manifest(&bytes, digest)?);
+    parse_manifest(&bytes, digest).map(Arc::new)
+}
+
+/// Loads the manifest `digest` and opens a frame for it. Its children are at `depth`: a
+/// manifest with any is refused when that is over [`MAX_DEPTH`]. `opened` is the children of
+/// all the distinct manifests opened so far, which this one's are added to: each is held once,
+/// and every one is in the tree at least once, so a sum over [`MAX_ENTRIES`] is a tree over it
+/// and nothing more is loaded.
+fn open(
+    digest: &TreeDigest,
+    depth: usize,
+    opened: &mut u64,
+    load: &mut impl FnMut(&TreeDigest) -> Result<Arc<TreeManifest>, TreeError>,
+) -> Result<Frame, TreeError> {
+    let manifest = load(digest)?;
     let below = Below::of(&manifest);
     *opened += below.entries;
     if *opened > MAX_ENTRIES {
@@ -459,19 +473,20 @@ fn open<E: fmt::Display>(
     })
 }
 
-/// Fetches every manifest of the tree once and counts its entries and levels, refusing a tree
-/// over a limit as soon as the walk passes it. It allocates per distinct manifest, never per
-/// entry, so a tree of 2^24 entries made of shared subtrees costs a few manifests, and the
-/// children of the manifests it holds never add up to more than [`MAX_ENTRIES`]. The walk
-/// keeps its own stack, so its depth is not the thread's.
-fn measure<E: fmt::Display>(
+/// Loads every manifest of the tree once, by `load` (a fetch and a read, or a look among the
+/// manifests gathered before), and counts its entries and levels, refusing a tree over a limit as
+/// soon as the walk passes it. It allocates per distinct manifest, never per entry, so a tree of
+/// 2^24 entries made of shared subtrees costs a few manifests, and the children of the manifests
+/// it holds never add up to more than [`MAX_ENTRIES`]. The walk keeps its own stack, so its depth
+/// is not the thread's.
+fn measure(
     root: &TreeDigest,
-    mut fetch: impl FnMut(&TreeDigest) -> Result<Vec<u8>, E>,
+    mut load: impl FnMut(&TreeDigest) -> Result<Arc<TreeManifest>, TreeError>,
 ) -> Result<Measured, TreeError> {
     let mut manifests = HashMap::new();
     let mut finished: HashMap<TreeDigest, Below> = HashMap::new();
     let mut opened = 0;
-    let mut current = open(root, 1, &mut opened, &mut fetch)?;
+    let mut current = open(root, 1, &mut opened, &mut load)?;
     manifests.insert(*root, current.manifest.clone());
     let mut parents: Vec<Frame> = Vec::new();
     loop {
@@ -492,7 +507,7 @@ fn measure<E: fmt::Display>(
             }
         }
         if let Some(digest) = descend {
-            let child = open(&digest, depth + 1, &mut opened, &mut fetch)?;
+            let child = open(&digest, depth + 1, &mut opened, &mut load)?;
             manifests.insert(digest, child.manifest.clone());
             parents.push(std::mem::replace(&mut current, child));
         } else {
@@ -518,9 +533,15 @@ fn measure<E: fmt::Display>(
 /// refused before any entry is made.
 pub fn flatten<E: fmt::Display>(
     root: &TreeDigest,
-    fetch: impl FnMut(&TreeDigest) -> Result<Vec<u8>, E>,
+    mut fetch: impl FnMut(&TreeDigest) -> Result<Vec<u8>, E>,
 ) -> Result<Vec<TreeEntry>, TreeError> {
-    let measured = measure(root, fetch)?;
+    let measured = measure(root, |digest| parsed(digest, fetch(digest)))?;
+    Ok(entries_of(root, &measured))
+}
+
+/// The entries of the tree `root` that `measured` holds every manifest of: the root as index 0,
+/// then every entry below it, depth first in manifest order.
+fn entries_of(root: &TreeDigest, measured: &Measured) -> Vec<TreeEntry> {
     let mut entries = Vec::with_capacity(measured.entries as usize + 1);
     let root_manifest = measured.manifests[root].clone();
     entries.push(TreeEntry {
@@ -555,13 +576,13 @@ pub fn flatten<E: fmt::Display>(
             stack.push((manifest, 0, index));
         }
     }
-    Ok(entries)
+    entries
 }
 
 #[cfg(test)]
 pub(crate) fn count_entries<E: fmt::Display>(
     root: &TreeDigest,
-    fetch: impl FnMut(&TreeDigest) -> Result<Vec<u8>, E>,
+    mut fetch: impl FnMut(&TreeDigest) -> Result<Vec<u8>, E>,
 ) -> Result<u64, TreeError> {
-    measure(root, fetch).map(|m| m.entries)
+    measure(root, |digest| parsed(digest, fetch(digest))).map(|m| m.entries)
 }

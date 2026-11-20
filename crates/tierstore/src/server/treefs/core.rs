@@ -450,7 +450,7 @@ impl Core {
         // Read before the lifecycle lock, as a lookup that attaches a tree reads it: a slow fill
         // holds up no attach, no detach and no lookup.
         let tree = self
-            .read_ahead(&digest)
+            .read_ahead(&digest, &fetched::Fetched::default())
             .map_err(|why| AttachError::Tree(why.to_string()))?;
         let _lifecycle = locked(&self.lifecycle);
         if self.is_held() {
@@ -968,6 +968,7 @@ fn path_of(tree: &Tree, index: u32) -> String {
 
 #[cfg(any(target_os = "linux", test))]
 mod adopt;
+mod fetched;
 #[cfg(any(target_os = "linux", test))]
 mod handles;
 mod implicit;

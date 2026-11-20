@@ -148,9 +148,23 @@ const DEFECTS: &[(&str, &str, &str, &str)] = &[
     ),
     (
         "farm-check",
-        "run: cargo xtask release desired-apt --repo",
+        "run: cargo xtask release desired --repo",
         "run: echo --repo",
-        "farm-check: no step `desired` runs `cargo xtask release desired-apt` for the tag of this release",
+        "farm-check: no step `desired` runs `cargo xtask release desired` for the tag of this release",
+    ),
+    // The verb that writes the apt lists alone: the lab would set the version with other targets
+    // than the deploy, and one of the two would be refused (`release_exists`).
+    (
+        "farm-check",
+        "run: cargo xtask release desired --repo",
+        "run: cargo xtask release desired-apt --repo",
+        "farm-check: no step `desired` runs `cargo xtask release desired` for the tag of this release",
+    ),
+    (
+        "farm-check",
+        " --macos-pkg --dir \"$RUNNER_TEMP/desired\"",
+        " --dir \"$RUNNER_TEMP/desired\"",
+        "farm-check: the step `desired` is not given `--macos-pkg`: the lab would set the version with other targets than the deploy, which the coordinator refuses (release_exists)",
     ),
     (
         "farm-check",
@@ -168,7 +182,7 @@ const DEFECTS: &[(&str, &str, &str, &str)] = &[
         "farm-check",
         "--version \"${TAG#v}\" --min",
         "--version \"$TAG\" --min",
-        "farm-check: no step `desired` runs `cargo xtask release desired-apt` for the tag of this release",
+        "farm-check: no step `desired` runs `cargo xtask release desired` for the tag of this release",
     ),
     (
         "farm-check",

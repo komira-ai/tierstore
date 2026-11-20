@@ -4,7 +4,7 @@ A Mac runs one instance as a LaunchDaemon, and on a Mac tierstore is only a loca
 
 ## How a Mac gets tierstore
 
-The package is `tierstore-<version>-macos-arm64.pkg`, built by `cargo xtask release macos-pkg` and signed with a Developer ID Installer identity (see "The macOS installer package" in [`docs/ci-and-release.md`](../../docs/ci-and-release.md)). It installs exactly two files, owned by root: the binary `/Library/Application Support/tierstore/bin/tierstore` and the job `/Library/LaunchDaemons/tierstore.plist`. It has no script; hostkeeper's update hook bootstraps the job. The Mac's hostkeeper installs it with its `macos-pkg` installer:
+The package is `tierstore-<version>-macos-arm64.pkg`, built by `cargo xtask release macos-pkg` and signed with a Developer ID Installer identity (see "The macOS installer package" in [`docs/ci-and-release.md`](../../docs/ci-and-release.md)). It installs exactly two files, owned by root: the binary `/Library/Application Support/tierstore/bin/tierstore` and the job `/Library/LaunchDaemons/tierstore.plist`. Its one script, the `postinstall` (`../macos-pkg/postinstall`), makes the account the job runs as and its directories (below); it loads no job: hostkeeper's update hook bootstraps the job. The Mac's hostkeeper installs it with its `macos-pkg` installer:
 
 - The release channel holds the package as `pkg/tierstore/<version>/tierstore-<version>-macos-arm64.pkg`, and the desired version names the package by that path and its digest, with the manifest `xtask::release::macos_pkg::manifest_json` writes.
 - The Mac's signers file lists the Developer ID Installer identity the package is signed with (hostkeeper's `docs/design/packages-repositories.md`, section 4.7, says where the file is and what it holds); hostkeeper refuses a package signed by any other identity, and checks the package's shape before it installs it.
@@ -12,13 +12,14 @@ The package is `tierstore-<version>-macos-arm64.pkg`, built by `cargo xtask rele
 
 The updater declaration and the plist this directory held before (`updater.d/tierstore.toml`, `com.komira.tierstore.plist`) belonged to the earlier update path, whose hook is gone; they are removed, and nothing here installs a declaration.
 
-As root, from this directory, once the package is installed:
+The `postinstall` runs as root each time the package is installed, and makes:
+
+- the account `_tierstore`, the plist's `UserName` and `GroupName`: a group and a user with no password, the shell `/usr/bin/false` and the home `/var/empty`, with the same id, the highest from 399 down to 300 that no user and no group has (with none free the install fails and makes nothing). An account that is there is kept as it is;
+- `/usr/local/tierstore` (0755 `root:wheel`), its `etc` (0750 `root:_tierstore`) and its `cache`, `log` and `run` (0700 `_tierstore:_tierstore`), made when missing and set to these owners and modes on every install; what they hold is never touched.
+
+The configuration and the key files are not the package's. The update hook's `prepare`, which runs before the install and so before the `postinstall`, fails (`config_missing`) while `/usr/local/tierstore/etc/tierstore.toml` is missing, so the file is placed before the package's first install, owned by root and readable by every user (a config package that the host group lists before tierstore does this); the `postinstall` then gives `etc` its group. Once the account is there, as root, from this directory, the file is placed so:
 
 ```sh
-dscl . -read /Users/_tierstore >/dev/null   # the account exists (made with dscl or sysadminctl)
-install -d -m 0755 -o root -g wheel /usr/local/tierstore
-install -d -m 0750 -o root -g _tierstore /usr/local/tierstore/etc
-install -d -m 0700 -o _tierstore -g _tierstore /usr/local/tierstore/cache /usr/local/tierstore/log /usr/local/tierstore/run
 install -m 0640 -o root -g _tierstore tierstore.toml /usr/local/tierstore/etc/tierstore.toml
 ```
 
