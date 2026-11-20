@@ -11,13 +11,20 @@
 //! binds the socket when it takes the lock), is sent again over a new connection, after a pause
 //! of a second, until `fetch_timeout` of pauses has passed. The pauses are taken by `pause`, which
 //! a test replaces. An answer that does not come in `fetch_timeout` is not asked for again.
+//!
+//! A request may also be given a time to end by ([`Until`]), on a clock: the manifests of one
+//! tree are filled under one such end (`core/placed.rs`). It is then answered by that end at the
+//! latest: its answer is waited for no longer than the time left, and no pause is taken that
+//! would pass it. Every exchange sets the time its answer is waited for, so a connection kept
+//! after a request with an end of its own, or with a wait of its own (`put`), waits the client's
+//! own time for the next.
 
 use std::io::{BufRead as _, BufReader, Write as _};
 use std::os::unix::net::UnixStream;
 use std::path::PathBuf;
 
-use crate::TreeDigest;
 use crate::server::local_cache::trees::FlatTree;
+use crate::{Clock, TreeDigest};
 use std::sync::mpsc::{SyncSender, sync_channel};
 use std::sync::{Arc, Mutex, OnceLock};
 use std::time::Duration;
@@ -45,6 +52,31 @@ pub(super) enum AskError {
     /// The socket took the request and gave no answer in `fetch_timeout`.
     #[error("the fill socket gave no answer in time")]
     TimedOut,
+    /// The end the request was given passed before it was answered.
+    #[error("the fill socket did not answer within the time the request was given")]
+    Spent,
+}
+
+/// When a request is to be answered by, on a clock: what the fills of one tree's manifests share.
+#[derive(Clone, Copy)]
+pub(super) struct Until<'a> {
+    /// The clock the end is on.
+    pub clock: &'a dyn Clock,
+    /// The end, in milliseconds of `clock`.
+    pub end_ms: u64,
+}
+
+impl Until<'_> {
+    /// The time left before the end; zero once it has passed.
+    fn left(&self) -> Duration {
+        Duration::from_millis(self.end_ms.saturating_sub(self.clock.now()))
+    }
+}
+
+/// How long an answer is waited for: `wait`, or the time `left` before the request's end where
+/// that is shorter.
+fn within(wait: Duration, left: Option<Duration>) -> Duration {
+    left.map_or(wait, |left| wait.min(left))
 }
 
 /// The answer to a fill that did not put the blob in the cache: the words of the socket
@@ -159,18 +191,17 @@ impl FillClient {
         drop(surplus);
     }
 
-    /// Sends `line` and reads one line back, waiting `wait` for it where given; with `answered`
-    /// false nothing is read.
+    /// Sends `line` and reads one line back, waiting `wait` for it; with `answered` false nothing
+    /// is read. The wait is set on the connection for each exchange, so none is left over from
+    /// the one before.
     fn exchange(
         connection: &mut Connection,
         line: &str,
-        (answered, wait): (bool, Option<Duration>),
+        (answered, wait): (bool, Duration),
     ) -> Result<String, Failed> {
         let stream = connection.reader.get_mut();
-        if let Some(wait) = wait {
-            // A duration that is not zero is always taken.
-            let _ = stream.set_read_timeout(Some(wait.max(Duration::from_millis(1))));
-        }
+        // A duration that is not zero is always taken.
+        let _ = stream.set_read_timeout(Some(wait.max(Duration::from_millis(1))));
         stream
             .write_all(format!("{line}\n").as_bytes())
             .map_err(|_| Failed::Gone)?;
@@ -197,18 +228,25 @@ impl FillClient {
     /// The answer to `line`, asked again over a new connection when a connection fails, with a
     /// pause when a new connection fails too.
     fn ask_line(&self, line: &str, answered: bool) -> Result<String, AskError> {
-        self.ask(line, (answered, None))
+        self.ask(line, (answered, None), None)
     }
 
     /// [`FillClient::ask_line`], waiting `wait` for the answer where given instead of the
-    /// client's own time.
+    /// client's own time, and answered by `until` where given: [`AskError::Spent`] once it has
+    /// passed, or when a pause would pass it before the client's own pauses are used up.
     fn ask(
         &self,
         line: &str,
         (answered, wait): (bool, Option<Duration>),
+        until: Option<Until<'_>>,
     ) -> Result<String, AskError> {
         let mut paused = 0;
         loop {
+            let left = until.map(|until| until.left());
+            if left.is_some_and(|left| left.is_zero()) {
+                return Err(AskError::Spent);
+            }
+            let wait = within(wait.unwrap_or(self.answer_timeout), left);
             let (connection, kept) = self.connection();
             if let Some(mut connection) = connection {
                 match Self::exchange(&mut connection, line, (answered, wait)) {
@@ -225,14 +263,17 @@ impl FillClient {
             if paused >= self.tries {
                 return Err(AskError::Unavailable);
             }
+            if left.is_some_and(|left| left < PAUSE) {
+                return Err(AskError::Spent);
+            }
             paused += 1;
             (self.pause)(PAUSE);
         }
     }
 
-    /// Asks for the whole object `cas/l/<sha256>` to be put in the cache.
-    pub(super) fn fill_manifest(&self, sha256: &str) -> Result<(), FillFailure> {
-        self.fill(&format!("fill {sha256}"))
+    /// Asks for the whole object `cas/l/<sha256>` to be put in the cache, answered by `until`.
+    pub(super) fn fill_manifest(&self, sha256: &str, until: Until<'_>) -> Result<(), FillFailure> {
+        self.fill(&format!("fill {sha256}"), Some(until))
     }
 
     /// Asks for the blob `sha256` of `size` bytes at `offset` of the upstream object `key` to be
@@ -244,11 +285,11 @@ impl FillClient {
         key: &str,
         offset: u64,
     ) -> Result<(), FillFailure> {
-        self.fill(&format!("fill {sha256} {size} from {key} @ {offset}"))
+        self.fill(&format!("fill {sha256} {size} from {key} @ {offset}"), None)
     }
 
-    fn fill(&self, line: &str) -> Result<(), FillFailure> {
-        match self.ask_line(line, true) {
+    fn fill(&self, line: &str, until: Option<Until<'_>>) -> Result<(), FillFailure> {
+        match self.ask(line, (true, None), until) {
             Ok(answer) if answer == "ok" => Ok(()),
             Ok(answer) => Err(answer),
             Err(error) => Err(error.to_string()),
@@ -281,7 +322,7 @@ impl FillClient {
         wait: Duration,
     ) -> Result<String, AskError> {
         let line = format!("put {key} {sha256} {size} from {}", path.display());
-        self.ask(&line, (true, Some(wait)))
+        self.ask(&line, (true, Some(wait)), None)
     }
 
     /// Where the path `path` (names joined by `/`) is among the placements of the node; a

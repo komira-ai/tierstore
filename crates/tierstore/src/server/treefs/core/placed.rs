@@ -40,7 +40,7 @@ use crate::tree_manifest::{
 };
 use crate::{MAX_TREE_LIST_BYTES, TreeImage};
 
-use super::super::fill_client::{AskError, Place, PlacedTree};
+use super::super::fill_client::{AskError, Place, PlacedTree, Until};
 use super::super::ino;
 use super::super::tree::Tree;
 use super::fetched::Fetched;
@@ -55,6 +55,15 @@ const PLACED: &[u8; 8] = b"tsplaced";
 
 /// The answer of the fill socket for an object the upstream does not have.
 const ABSENT: &str = "upstream 404";
+
+/// The longest one read of a tree's manifests may take, every manifest it fills through the fill
+/// socket together. A job agent gives up on a lookup of `trees/<digest>` 60 s after it asked, and
+/// that time includes the wait for one of the agent's few lookup threads; a lookup that needed
+/// longer was never answered in time, and it kept the agent's thread in the kernel until it ended,
+/// so the lookups behind it timed out too. Half of that bound is the read's, so the lookup is
+/// answered, `EIO` at worst, while the agent still waits for it. It bounds every read of a tree's
+/// manifests: a lookup's, an attach's, and a start's that makes the attachments again.
+pub(in crate::server::treefs) const TREE_READ: Duration = Duration::from_secs(30);
 
 /// The most entries a tree of the mount may have: what the index of an inode number counts.
 const MOST_ENTRIES: usize = 1 << 24;
@@ -217,8 +226,9 @@ impl Core {
     /// the tree's directory in the cache directory, which the placement this mount holds keeps
     /// there); any other's from its manifests, fetched through the fill socket where the cache
     /// does not hold them, a level of the tree at a time and up to [`MANIFESTS_AT_ONCE`] at once,
-    /// and flattened. The manifests it fetches are counted in `fetched`, which the caller makes
-    /// for this read alone, and reported to the node (`fetched`) when the read ends.
+    /// all of them by [`TREE_READ`] after the read began, and flattened. The manifests it fetches
+    /// are counted in `fetched`, which the caller makes for this read alone, and reported to the
+    /// node (`fetched`) when the read ends.
     pub(in crate::server::treefs) fn read_tree(
         &self,
         digest: &TreeDigest,
@@ -242,6 +252,12 @@ impl Core {
                 PlacedTree::Flat(flat) => tree_of(&flat, path).map_err(Unread::Failed),
             };
         }
+        let until = Until {
+            clock: &*self.settings.clock,
+            end_ms: self
+                .now()
+                .saturating_add(u64::try_from(TREE_READ.as_millis()).unwrap_or(u64::MAX)),
+        };
         let fetch = |wanted: &TreeDigest| -> Result<Vec<u8>, String> {
             let hex = wanted.to_string();
             let path = manifest_path(&self.settings.cache_path, &hex);
@@ -251,7 +267,7 @@ impl Core {
             }
             let read = |()| read_manifest(&path).map_err(|error| error.to_string());
             let start = self.now();
-            let filled = self.fills.fill_manifest(&hex);
+            let filled = self.fills.fill_manifest(&hex, until);
             let ms = self.now().saturating_sub(start);
             let had = filled.and_then(read);
             fetched.filled(ms, had.is_ok());
@@ -499,3 +515,7 @@ mod flat_tests;
 #[cfg(test)]
 #[path = "placed_image_tests.rs"]
 mod image_tests;
+
+#[cfg(test)]
+#[path = "tree_read_tests.rs"]
+mod tree_read_tests;

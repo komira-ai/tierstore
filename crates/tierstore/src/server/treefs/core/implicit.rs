@@ -7,8 +7,10 @@
 //!
 //! A lookup of a digest whose root manifest the upstream does not have is `ENOENT`; any other
 //! tree that cannot be read (a manifest below the root missing or refused, the fill socket away)
-//! is `EIO`, said on stderr. A digest that cannot be read gets no tree number, so lookups of
-//! digests that are not trees do not fill the table of tree numbers.
+//! is `EIO`, said on stderr. The read ends 30 s after it began, all the tree's fills together
+//! (`core/placed.rs`, `TREE_READ`), so a lookup is answered while the job agent that made it still
+//! waits for it. A digest that cannot be read gets no tree number, so lookups of digests that are
+//! not trees do not fill the table of tree numbers.
 //!
 //! A placement's tree at its fs location is attached the same way (`core/placed.rs`), by its key;
 //! its idle end gives back the tree store's hold of the placement instead of unpinning it, and a
