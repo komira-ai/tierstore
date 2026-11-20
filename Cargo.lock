@@ -2485,6 +2485,37 @@ dependencies = [
 ]
 
 [[package]]
+name = "readbench"
+version = "0.1.0"
+dependencies = [
+ "async-trait",
+ "bytes",
+ "clap",
+ "futures",
+ "hex",
+ "http 1.5.0",
+ "http-body-util",
+ "hyper",
+ "hyper-util",
+ "ring",
+ "serde",
+ "serde_json",
+ "sha2 0.11.0",
+ "thiserror",
+ "tierstore 0.3.0",
+ "tierstore-budget",
+ "tierstore-entry",
+ "tierstore-fetch",
+ "tierstore-fetch-api",
+ "tierstore-format",
+ "tierstore-hashpool",
+ "tierstore-list",
+ "tierstore-plan",
+ "tierstore-testkit",
+ "tokio",
+]
+
+[[package]]
 name = "redb"
 version = "4.6.0"
 source = "registry+https://github.com/rust-lang/crates.io-index"
