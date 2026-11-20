@@ -50,7 +50,9 @@ impl Summary {
 pub fn nearest_rank(v: &[u64], pct: u64) -> u64 {
     let n = v.len() as u64;
     let rank = (pct * n).div_ceil(100).max(1);
-    v[usize::try_from(rank - 1).unwrap_or(usize::MAX).min(v.len() - 1)]
+    v[usize::try_from(rank - 1)
+        .unwrap_or(usize::MAX)
+        .min(v.len() - 1)]
 }
 
 /// How a client fetched its tree.
