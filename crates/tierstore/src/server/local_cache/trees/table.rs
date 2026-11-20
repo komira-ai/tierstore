@@ -12,7 +12,6 @@ use serde::Deserialize;
 
 use super::config::{Prefetch, TreesConfig};
 use crate::server::config::{ConfigError, invalid, within};
-use crate::server::config_cache::Rate;
 use crate::server::config_tuning::HOUR;
 use crate::server::config_units::{Dur, Size};
 
@@ -61,22 +60,9 @@ pub(in crate::server) struct TreesTable {
     /// The ranged reads of creates at once, node-wide (1 to 1024, default 8).
     #[serde(default)]
     pub fill_concurrency: Option<u32>,
-    /// The bytes a second of all creates together, such as `200MiB/s`, or `"off"` (default `off`).
-    #[serde(default)]
-    pub fill_rate: Option<Rate>,
-    /// The blobs waiting to be fetched (1 to 10000000, default 16384).
-    #[serde(default)]
-    pub fill_queue: Option<u32>,
-    /// Ranges of one object this near are one read (0 to 1GiB, default `256KiB`).
-    #[serde(default)]
-    pub coalesce_gap: Option<Size>,
     /// What a create with no `prefetch` does: `none`, `background` or `wait` (default `wait`).
     #[serde(default)]
     pub prefetch_default: Option<Prefetch>,
-    /// The share of a pack the needed ranges must cover for the whole pack to be read (1 to 100,
-    /// default 50).
-    #[serde(default)]
-    pub whole_pack_percent: Option<u8>,
     /// The longest a create that waits for its files waits (1s to 1h, default `120s`).
     #[serde(default)]
     pub create_timeout: Option<Dur>,
@@ -173,30 +159,7 @@ fn trees_config(table: &TreesTable) -> Result<TreesConfig, ConfigError> {
             base.fill_concurrency,
             (1, 1024),
         )?,
-        fill_rate: table
-            .fill_rate
-            .map_or(base.fill_rate, |rate| Some(rate.0))
-            .filter(|rate| *rate > 0),
-        fill_queue: count(
-            "fill_queue",
-            table.fill_queue,
-            base.fill_queue,
-            (1, 10_000_000),
-        )?,
-        coalesce_gap: bytes(
-            "coalesce_gap",
-            table.coalesce_gap,
-            base.coalesce_gap,
-            (0, GIB),
-        )?,
         prefetch_default: table.prefetch_default.unwrap_or(base.prefetch_default),
-        whole_pack_percent: within(
-            "trees",
-            "whole_pack_percent",
-            table.whole_pack_percent.unwrap_or(base.whole_pack_percent),
-            1,
-            100,
-        )?,
         create_timeout: time(
             "create_timeout",
             table.create_timeout,

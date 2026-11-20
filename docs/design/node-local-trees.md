@@ -378,13 +378,15 @@ A `[trees]` table of the node's file (a build node; a node with no `[local_cache
 | `trees.max_bytes` | `32GiB` | file bytes of one tree (the bound of `hydrate_max_bytes`) |
 | `trees.max_placements` | 1024 | placements alive at once; a create over it is `429` |
 | `trees.fill_concurrency` | 8 | ranged GETs of creates at once, node-wide |
-| `trees.fill_rate` | `off` | bytes a second of all creates together, or `off` |
-| `trees.fill_queue` | 16384 | blobs waiting; over it `503` |
-| `trees.coalesce_gap` | `256KiB` | ranges of one object this near are one GET |
+| `trees.fill_rate` | `off` | bytes a second of all creates together, or `off` (never used; removed, see below) |
+| `trees.fill_queue` | 16384 | blobs waiting; over it `503` (never used; removed, see below) |
+| `trees.coalesce_gap` | `256KiB` | ranges of one object this near are one GET (never used; removed, see below) |
 | `trees.prefetch_default` | `wait` | `none`, `background` or `wait`: the value of a create with no `prefetch` member |
-| `trees.whole_pack_percent` | 50 (1 to 100) | the share of a pack (at most `local_cache.whole_fill_limit`) the needed spans must cover for the whole pack to be read in one GET |
+| `trees.whole_pack_percent` | 50 (1 to 100) | the share of a pack (at most `local_cache.whole_fill_limit`) the needed spans must cover for the whole pack to be read in one GET (never used; removed, see below) |
 | `trees.create_timeout` | `120s` | the longest a `wait` create waits for ready |
 | `trees.max_failures` | 20 | entries a failure answer names |
+
+As built, `trees.fill_rate`, `trees.fill_queue`, `trees.coalesce_gap` and `trees.whole_pack_percent` were read and range-checked but used by nothing; they are removed (section 13 of [fetch-cache-serve.md](fetch-cache-serve.md)), a file that still sets them loads with a warning for each, and how a pack's reads are planned, which the read plan of section 5 above (`coalesce_gap`, `whole_pack_percent`, `fill_rate`, `fill_queue`) proposed, is now section 6 of fetch-cache-serve.md.
 
 Existing keys are reused: `local_cache.pin_limit`, `high_water`, `critical`, `prefetch_concurrency` and `prefetch_queue_ttl`.
 

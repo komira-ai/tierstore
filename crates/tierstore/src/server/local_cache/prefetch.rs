@@ -15,7 +15,7 @@
 //! high water mark, since a prefetch never evicts what may be in use for what may be read. A
 //! queued blob is in memory only: a restart forgets the queue.
 //!
-//! [`LocalCache::prefetch`] queues one blob; it answers as soon as the blob is queued, joined or
+//! [`Inner::queue_blob`] queues one blob; it answers as soon as the blob is queued, joined or
 //! turned away, and fetches nothing before it answers.
 
 use std::collections::{BTreeMap, HashMap};
@@ -64,7 +64,7 @@ pub(super) const HOLD_MAX_COUNT: usize = 256;
 #[derive(Clone, Copy, Debug)]
 pub struct PrefetchConfig {
     /// The most blobs filled at once by the queue: a pool of permits of its own, which no read
-    /// draws on. 0 turns the queue off: [`LocalCache::prefetch`] answers [`Prefetched::Off`].
+    /// draws on. 0 turns the queue off: [`Inner::queue_blob`] answers [`Prefetched::Off`].
     pub concurrency: usize,
     /// The most blobs queued, all callers together; past it a blob is turned away
     /// ([`Prefetched::Busy`]).
@@ -100,7 +100,7 @@ impl Default for PrefetchConfig {
     }
 }
 
-/// What [`LocalCache::prefetch`] did with a blob.
+/// What [`Inner::queue_blob`] did with a blob.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub(in crate::server) enum Prefetched {
     /// The cache holds it already: counted as used now, and nothing more.
@@ -391,14 +391,9 @@ impl LocalCache {
     /// entry [`fill_blob`](Self::fill_blob) makes, and the one the S3 front keeps for the object
     /// `cas/l/<sha256>`), unless the cache holds it, or a fill of it is queued or running. It
     /// answers at once, before anything is read from the upstream. A read of the blob that comes
-    /// while it waits starts it (see the module).
-    #[cfg_attr(
-        not(test),
-        expect(
-            dead_code,
-            reason = "the hydrate call that queues the blobs is a later change"
-        )
-    )]
+    /// while it waits starts it (see the module). The tests queue one blob with it; the hydrate
+    /// call queues the blobs of its trees through `Inner::queue_blob` itself.
+    #[cfg(test)]
     pub(in crate::server) fn prefetch(&self, blob: &Blob<'_>) -> Prefetched {
         self.inner.queue_blob(blob)
     }

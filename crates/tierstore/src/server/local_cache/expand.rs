@@ -5,7 +5,7 @@
 //! as the request that comes first, and the second is the one that gets here: this module reads
 //! the tree as an attach does, the root manifest (the object `cas/l/<tree>`) and the manifest of
 //! each directory below it, and hands every file with bytes to the prefetch queue
-//! ([`LocalCache::prefetch`](super::LocalCache::prefetch)'s `queue_blob`), so that the blobs are
+//! ([`Inner::queue_blob`](super::Inner::queue_blob)), so that the blobs are
 //! filled before the job opens them, and a job that opens one while it fills joins that fill.
 //!
 //! A manifest is an ordinary cache entry, filled by the fill the fill socket asks for, so an attach
