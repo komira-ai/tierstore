@@ -9,9 +9,7 @@ use std::time::Duration;
 
 use super::super::{Errno, Looked};
 use crate::server::treefs::ino;
-use crate::server::treefs::testing::{
-    Built, Logged, Rig, Upstream, dir, file, logged, sha, until,
-};
+use crate::server::treefs::testing::{Built, Logged, Rig, Upstream, dir, file, logged, sha, until};
 
 /// The inode number of the root of the tree numbered 1.
 const ROOT: u64 = 1 << 24;

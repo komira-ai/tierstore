@@ -17,8 +17,8 @@ fn families(rig: &Rig) -> Vec<String> {
 
 /// The bounds of the buckets as rendered, `+Inf` last.
 const LE: [&str; BUCKETS] = [
-    "0.001", "0.002", "0.005", "0.01", "0.025", "0.05", "0.1", "0.25", "0.5", "1", "2.5", "5", "10",
-    "30", "60", "300", "+Inf",
+    "0.001", "0.002", "0.005", "0.01", "0.025", "0.05", "0.1", "0.25", "0.5", "1", "2.5", "5",
+    "10", "30", "60", "300", "+Inf",
 ];
 
 /// The lines of the histogram `name` with `label` (`outcome="ok",` or nothing) whose cumulative
@@ -56,7 +56,9 @@ fn expected(
     }
     lines.push("# TYPE tierstore_fs_manifest_fetch_total counter".to_owned());
     for (result, n) in ["cache", "fill", "error"].iter().zip(fetches) {
-        lines.push(format!("tierstore_fs_manifest_fetch_total{{result=\"{result}\"}} {n}"));
+        lines.push(format!(
+            "tierstore_fs_manifest_fetch_total{{result=\"{result}\"}} {n}"
+        ));
     }
     let fill = "tierstore_fs_manifest_fill_seconds";
     lines.push(format!("# TYPE {fill} histogram"));
