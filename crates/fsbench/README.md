@@ -46,7 +46,25 @@ fsbench storm --mountpoint <dir> --out <results> --label <label> [--runs 3]
               [--other-cpu N] [--secs 20] [--max-probes 0] [--sample-ms 100]
               [--setting KEY=VALUE]...
 fsbench storm-report --results <results> [--discard 0]
+fsbench summary --results <results> [--results <results>]... [--discard 1]
+fsbench dstate-report --index <runs.json>
 ```
+
+`summary` puts the series of several results files in one table (the result tables of
+`docs/design/fetch-cache-serve.md`, 17.1): a row per series of each file, named by the file, with
+the figures the decision rules read, each the median of the runs kept with their least and most.
+
+`dstate-report` makes the tables of a real-build run: D state and FUSE waiting on the build nodes
+while the farm's own jobs build named targets (17.1). Nothing of `fsbench` runs on those nodes,
+which serve other work: a sampler of standard read-only tools, run as root over ssh, prints once
+a tick the load, the requests waiting on each FUSE connection, a row per thread in D state, per
+running thread of a job and per thread asleep in `request_wait_answer`, a count of the jobs'
+threads, and the stack lines that name a FUSE function, a folio wait or a page fault
+(`src/dstate.rs` has the format). The index (`runs.json`) names each run's build, its start and
+end, its settings and each node's sampler text (zstd-compressed when the name ends in `.zst`);
+the report splits each node's ticks into before, during and after the build and gives the D
+state, `fuse_d_state_threads`, the connection's `waiting` and the share of the jobs' busy threads
+that waited on FUSE.
 
 `tsfuse-null-fs --transport uring` serves over `tsfuse`'s io_uring transport (V5): a ring and a
 thread per possible CPU with `--uring-depth` entries each, and a session that asks for 32-page
@@ -75,5 +93,6 @@ The tests: `cargo test -p fsbench`. The tests that mount FUSE or read the host's
 `/sys` are the integration targets `nullfs_integration`, `harness_integration`,
 `tsnull_integration` and `storm_integration`; they need `/dev/fuse` and `fusermount3`. Their
 io_uring cases serve on io_uring where `fuse.enable_uring` is on, and check the fallback where it
-is off. `baseline_doc`, `v3_v4_doc` and `v5_doc` hold the measurement documents to the raw
-records in [`data`](data).
+is off. `baseline_doc`, `v3_v4_doc`, `v5_doc` and `results_doc` hold the measurement documents to the
+raw records in [`data`](data) (`results_doc` also to the sampler texts of the real-build run in
+`data/2026-11-real-build`).

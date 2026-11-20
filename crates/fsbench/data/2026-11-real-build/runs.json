@@ -1,0 +1,23 @@
+{
+  "runs": [
+    {
+      "run": "run2",
+      "build_start_ns": 1795186108971312291,
+      "build_end_ns": 1795190927402132783,
+      "settings": {
+        "commands": "341 (cached: 0, remote: 341, local: 0)",
+        "komira": "356b7651e",
+        "outcome": "one test action killed (exit 137), build exit 3",
+        "server": "tierstore fs 0.3.147",
+        "targets": "//src/arrow:arrow //src/bench:bench"
+      },
+      "nodes": [
+        {"node": "n1", "raw": "run2-n1.txt.zst"},
+        {"node": "n2", "raw": "run2-n2.txt.zst"},
+        {"node": "n3", "raw": "run2-n3.txt.zst"},
+        {"node": "n4", "raw": "run2-n4.txt.zst"},
+        {"node": "n5", "raw": "run2-n5.txt.zst"}
+      ]
+    }
+  ]
+}

@@ -18,6 +18,8 @@
 //!               [--other-cpu N] [--secs 20] [--max-probes 0] [--sample-ms 100]
 //!               [--setting KEY=VALUE]...
 //! fsbench storm-report --results <results> [--discard 0]
+//! fsbench summary --results <results> [--results <results>]... [--discard 1]
+//! fsbench dstate-report --index <runs.json>
 //! ```
 //!
 //! `reader` and `burn` are the processes `run` starts; a person does not run them. Exit status:
@@ -107,6 +109,21 @@ enum Command {
         /// The runs of each label to leave out.
         #[arg(long, default_value_t = 0)]
         discard: u32,
+    },
+    /// One table of the series of several results files (the result tables of the design).
+    Summary {
+        /// The results files, in the order of the table (repeat).
+        #[arg(long = "results", required = true)]
+        results: Vec<PathBuf>,
+        /// The runs of each series to leave out (the warm-up).
+        #[arg(long, default_value_t = 1)]
+        discard: u32,
+    },
+    /// The tables of a real build's D state and FUSE waiting, from the index of its runs.
+    DstateReport {
+        /// The index (`runs.json`): the runs and each node's sampler text, relative to it.
+        #[arg(long)]
+        index: PathBuf,
     },
     /// A reader process of `run` (not run by hand).
     #[command(hide = true)]
@@ -454,6 +471,20 @@ fn dispatch(
         Command::StormReport { results, discard } => {
             let records = crate::stormrec::read(&results)?;
             write!(stdout, "{}", crate::stormrec::render(&records, discard)).map_err(written)
+        }
+        Command::Summary { results, discard } => {
+            let mut files = Vec::new();
+            for path in results {
+                let name = path
+                    .file_stem()
+                    .map_or_else(String::new, |s| s.to_string_lossy().into_owned());
+                files.push((name, crate::report::read(&path)?));
+            }
+            write!(stdout, "{}", crate::summary::render(&files, discard)).map_err(written)
+        }
+        Command::DstateReport { index } => {
+            let runs = crate::dstate::load(&index)?;
+            write!(stdout, "{}", crate::dstaterep::render(&runs)).map_err(written)
         }
         Command::Reader { list, tree } => crate::reader::serve(
             &crate::list::read(&list)?,
