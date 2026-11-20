@@ -6,6 +6,8 @@
 //!   the longest length and a directory of many children;
 //! - a lookup of a name before the first child, between two, after the last, in a file, and of a
 //!   node past the end, finds nothing;
+//! - an OCI layer's whiteout names (`.wh.ssl`, `.wh..wh..opq`) are entries like any other: the
+//!   image opens and a lookup finds each with its name and kind;
 //! - a list of another tree, a version 2 list, a v1 list, a truncated list and an empty file are
 //!   refused with the error that says why; an unreadable file is an I/O error;
 //! - the advice reports the record sections' bytes advised, and with a lock whole pages locked;
@@ -24,7 +26,7 @@ mod support;
 
 use std::fs::File;
 
-use support::{Tree, find, open_image, rich_tree, small_tree, tree_id, write_image};
+use support::{Tree, find, open_image, pack_bytes, rich_tree, small_tree, tree_id, write_image};
 use tierstore_fetch_api::ids::PackId;
 use tierstore_fetch_api::list::{ListL2 as _, NodeIndex};
 use tierstore_list::{Section, TreeListL2};
@@ -104,6 +106,44 @@ fn lookup_of_every_entry_by_its_name_finds_it() {
         image.name(&image.node(NodeIndex(0)).unwrap(), &mut buf),
         Some(&b""[..])
     );
+}
+
+/// The whiteout names of an OCI layer, the files a build that makes a layer writes
+/// (`etc/.wh.ssl`, `etc/ssl/certs/.wh..wh..opq`), are entries of a tree like any other: the image
+/// of such a tree opens, a lookup finds each whiteout as the empty file it is, the names they
+/// sort beside are still found, and a whiteout name the directory does not hold is not. Catches a name check that refuses or hides a `.wh.` name.
+#[test]
+fn whiteout_names_are_entries_found_by_lookup() {
+    let dir = dir("image-whiteout-names");
+    let l2 = Tree::default()
+        .pack("out/w/0", pack_bytes(4, 10))
+        .empty_file("etc/.wh.ssl")
+        .file("etc/hosts", "out/w/0", 0, 10)
+        .empty_file("etc/ssl/certs/.wh..wh..opq")
+        .empty_file("etc/ssl/certs/ca.pem")
+        .lists()
+        .1;
+    let image = open_image(dir.path(), &l2);
+    let mut buf = [0u8; NAME_MAX];
+    for (path, name) in [
+        ("etc/.wh.ssl", &b".wh.ssl"[..]),
+        ("etc/ssl/certs/.wh..wh..opq", &b".wh..wh..opq"[..]),
+    ] {
+        let node = image.node(find(&image, path)).unwrap();
+        assert_eq!(image.name(&node, &mut buf).unwrap(), name, "{path}");
+        assert!(
+            matches!(node.kind, NodeKind::File { size: 0, .. }),
+            "{path}: {:?}",
+            node.kind
+        );
+    }
+    for path in ["etc/hosts", "etc/ssl", "etc/ssl/certs/ca.pem"] {
+        find(&image, path);
+    }
+    let etc = find(&image, "etc");
+    for absent in [&b".wh."[..], b".wh.hosts", b".wh..wh..opq"] {
+        assert_eq!(image.lookup(etc, absent), None, "{absent:?}");
+    }
 }
 
 #[test]

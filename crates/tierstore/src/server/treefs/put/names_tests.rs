@@ -45,6 +45,22 @@ fn a_component_is_one_name_of_1_to_255_bytes() {
     ));
 }
 
+/// Asserts that the whiteout names of an OCI layer, the files a build that makes a layer writes
+/// into its output (`.wh.ssl`, `.wh..wh..opq`), are names of the put directory, as a file and as a
+/// directory component, and that the bare prefix `.wh.` is a name too.
+#[test]
+fn whiteout_names_are_names_of_the_put_directory() {
+    for name in [".wh.ssl", ".wh..wh..opq", ".wh."] {
+        check_component(name).unwrap();
+    }
+    assert_eq!(
+        PutDir::new("out/etc/.wh..wh..opq/.wh.ssl", &prefixes())
+            .unwrap()
+            .as_str(),
+        "out/etc/.wh..wh..opq/.wh.ssl"
+    );
+}
+
 /// Asserts that a name with white space or a control character in it, which would split or end the
 /// line of the fill socket's `put` request, says why it is refused.
 #[test]
