@@ -10,7 +10,7 @@ use readbench::manifest::Fetch as _;
 use readbench::swfs::{FilerFetch, VolumeServer, load_map};
 use support::{Fake, Kind};
 
-const BUCKET: &str = "kbf-cas";
+const BUCKET: &str = "packs";
 const KEY: &str = "cas/b/p1/pack";
 
 fn data(n: usize) -> Vec<u8> {
@@ -20,7 +20,7 @@ fn data(n: usize) -> Vec<u8> {
 fn filer(fake: &Fake) -> FilerFetch {
     FilerFetch {
         http: HttpClient::new(10_000),
-        base: fake.filer(0).url("/buckets/kbf-cas"),
+        base: fake.filer(0).url("/buckets/packs"),
     }
 }
 

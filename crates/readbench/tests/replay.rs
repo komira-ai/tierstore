@@ -481,7 +481,7 @@ async fn a_shipped_fill_of_a_lost_cut_or_short_pack_fails_naming_it() {
     );
     let cut = fake(Variant::Whole).await;
     cut.filer(0)
-        .cut_after(&format!("/buckets/kbf-cas/{PACK_A}"), 10);
+        .cut_after(&format!("/buckets/packs/{PACK_A}"), 10);
     let err = run_shipped(&store(&cut).await, &p, &knobs, &client(), clock())
         .await
         .unwrap_err();

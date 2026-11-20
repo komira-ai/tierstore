@@ -16,9 +16,9 @@ use readbench::http::{BodyStream, HttpClient};
 use serde_json::{Value, json};
 use support::{Fake, Kind, raw};
 
-const BUCKET: &str = "kbf-cas";
+const BUCKET: &str = "packs";
 const KEY: &str = "cas/b/190405-0/pack";
-const PATH: &str = "/buckets/kbf-cas/cas/b/190405-0/pack";
+const PATH: &str = "/buckets/packs/cas/b/190405-0/pack";
 
 /// Ten bytes, `0123456789`.
 fn digits() -> Vec<u8> {
@@ -83,7 +83,7 @@ async fn etag_follows_the_bytes() {
 async fn head_of_a_missing_object_is_ok_with_status_404() {
     let fake = one_object().await;
     let head = client()
-        .head(&fake.filer(0).url("/buckets/kbf-cas/nothing"))
+        .head(&fake.filer(0).url("/buckets/packs/nothing"))
         .await
         .expect("head");
     assert_eq!(head.status, 404);
@@ -169,7 +169,7 @@ async fn a_range_that_starts_past_the_end_is_an_error() {
     assert_eq!(http_why(&past), "status 416");
     let empty = client()
         .get(
-            &fake.filer(0).url("/buckets/kbf-cas/empty"),
+            &fake.filer(0).url("/buckets/packs/empty"),
             Some((0, 1)),
             false,
         )
@@ -224,7 +224,7 @@ async fn a_server_that_ignores_ranges_is_accepted_only_when_it_sent_what_was_ask
 #[tokio::test]
 async fn a_missing_object_is_ok_with_status_404_also_for_a_ranged_read() {
     let fake = one_object().await;
-    let url = fake.filer(0).url("/buckets/kbf-cas/nothing");
+    let url = fake.filer(0).url("/buckets/packs/nothing");
     let plain = client().get(&url, None, false).await.expect("get");
     assert_eq!(plain.status, 404);
     let ranged = client().get(&url, Some((0, 4)), false).await.expect("get");
@@ -272,7 +272,7 @@ async fn get_bytes_returns_the_whole_body() {
 #[tokio::test]
 async fn get_bytes_refuses_a_missing_object_and_a_204() {
     let fake = one_object().await;
-    let missing = fake.filer(0).url("/buckets/kbf-cas/nothing");
+    let missing = fake.filer(0).url("/buckets/packs/nothing");
     let e = client().get_bytes(&missing, false).await.expect_err("404");
     assert_eq!(e.to_string(), format!("{missing}: status 404"));
     fake.filer(0).fail_status(PATH, 204, None);
@@ -686,9 +686,7 @@ async fn a_fake_without_filers_still_knows_its_chunks() {
 }
 
 async fn listing(fake: &Fake, query: &str) -> Value {
-    let url = fake
-        .filer(0)
-        .url(&format!("/buckets/kbf-cas/cas/l/{query}"));
+    let url = fake.filer(0).url(&format!("/buckets/packs/cas/l/{query}"));
     let body = client().get_bytes(&url, true).await.unwrap();
     serde_json::from_slice(&body).unwrap()
 }
@@ -720,16 +718,16 @@ async fn the_fake_lists_a_directory_in_pages_after_a_name() {
     assert_eq!(
         names,
         [
-            "/buckets/kbf-cas/cas/l/t03",
-            "/buckets/kbf-cas/cas/l/t04",
-            "/buckets/kbf-cas/cas/l/t05"
+            "/buckets/packs/cas/l/t03",
+            "/buckets/packs/cas/l/t04",
+            "/buckets/packs/cas/l/t05"
         ]
     );
     assert_eq!(page["Entries"][0]["FileSize"], manifest_len);
     assert_eq!(page["Entries"][0]["Mtime"], "2026-11-02T00:00:00Z");
     assert_eq!(page["LastFileName"], "t05");
     assert_eq!(page["ShouldDisplayLoadMore"], true);
-    assert_eq!(page["Path"], "/buckets/kbf-cas/cas/l");
+    assert_eq!(page["Path"], "/buckets/packs/cas/l");
     // The rest: exactly what is left is not "more".
     let page = listing(&fake, "?limit=2&lastFileName=t05").await;
     assert_eq!(page["LastFileName"], "t07");

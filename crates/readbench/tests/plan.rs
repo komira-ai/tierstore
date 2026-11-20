@@ -19,7 +19,7 @@ use serde_json::json;
 use support::{Fake, Kind};
 use tierstore_testkit::dir::TestDir;
 
-const BUCKET: &str = "kbf-cas";
+const BUCKET: &str = "packs";
 const MIB: u64 = 1 << 20;
 /// One file of 1 MiB at the start of a pack of 10 MiB.
 const SPARSE: &str = "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa";
@@ -80,7 +80,7 @@ async fn store() -> Fake {
 fn filer(fake: &Fake) -> FilerFetch {
     FilerFetch {
         http: HttpClient::new(10_000),
-        base: fake.filer(0).url("/buckets/kbf-cas"),
+        base: fake.filer(0).url("/buckets/packs"),
     }
 }
 

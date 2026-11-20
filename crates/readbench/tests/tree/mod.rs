@@ -23,7 +23,7 @@ use serde_json::json;
 
 use crate::support::Fake;
 
-pub const BUCKET: &str = "kbf-cas";
+pub const BUCKET: &str = "packs";
 pub const ROOT: &str = "1111111111111111111111111111111111111111111111111111111111111111";
 pub const SUB: &str = "2222222222222222222222222222222222222222222222222222222222222222";
 pub const ROOT2: &str = "3333333333333333333333333333333333333333333333333333333333333333";
@@ -139,7 +139,7 @@ pub async fn store(fake: &Fake) -> Store {
     Store {
         fetch: FilerFetch {
             http: http.clone(),
-            base: fake.filer(0).url("/buckets/kbf-cas"),
+            base: fake.filer(0).url("/buckets/packs"),
         },
         map: Arc::new(map),
         http,

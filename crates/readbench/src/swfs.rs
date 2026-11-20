@@ -134,7 +134,7 @@ pub struct VolumeServer {
     pub addr: String,
 }
 
-/// A command line argument `<node id>=<host:port>`, such as `2=10.77.0.2:8080`.
+/// A command line argument `<node id>=<host:port>`, such as `2=192.0.2.22:8080`.
 ///
 /// # Errors
 /// The argument has no `=`, the node is not a number below 256, or the address is not a host and
@@ -295,7 +295,7 @@ pub async fn load_map(
 pub struct FilerFetch {
     /// The client the requests go through.
     pub http: HttpClient,
-    /// The URL of the bucket, without a trailing slash: `http://<host>:8888/buckets/kbf-cas`.
+    /// The URL of the bucket, without a trailing slash: `http://<host>:8888/buckets/packs`.
     pub base: String,
 }
 

@@ -20,7 +20,7 @@ use support::{Fake, Kind};
 use tierstore_list::{PackCells, TreeListL2};
 use tierstore_testkit::dir::TestDir;
 
-const BUCKET: &str = "kbf-cas";
+const BUCKET: &str = "packs";
 const ROOT: &str = "1111111111111111111111111111111111111111111111111111111111111111";
 
 /// `n` bytes that differ from cell to cell.
@@ -31,7 +31,7 @@ fn data(n: usize, salt: usize) -> Vec<u8> {
 fn filer(fake: &Fake) -> FilerFetch {
     FilerFetch {
         http: HttpClient::new(10_000),
-        base: fake.filer(0).url("/buckets/kbf-cas"),
+        base: fake.filer(0).url("/buckets/packs"),
     }
 }
 
@@ -76,7 +76,7 @@ async fn pack_cells_are_the_digests_of_the_packs_bytes_read_once() {
         .unwrap();
     assert_eq!(cells, PackCells::of(&data(2_621_440, 1)));
     assert_eq!(cells.digests.len(), 3);
-    assert_eq!(fake.filer(0).path_count("/buckets/kbf-cas/cas/b/a/pack"), 1);
+    assert_eq!(fake.filer(0).path_count("/buckets/packs/cas/b/a/pack"), 1);
 }
 
 #[tokio::test]
@@ -103,7 +103,7 @@ async fn a_pack_shorter_than_its_size_is_refused_naming_it() {
 #[tokio::test]
 async fn a_pack_cut_off_mid_body_or_missing_fails_the_read() {
     let (fake, _, _) = tree().await;
-    fake.filer(0).cut_after("/buckets/kbf-cas/cas/b/a/pack", 10);
+    fake.filer(0).cut_after("/buckets/packs/cas/b/a/pack", 10);
     let err = pack_cells(&filer(&fake), "cas/b/a/pack", 2_621_440)
         .await
         .unwrap_err();
@@ -123,8 +123,8 @@ async fn the_sidecar_of_a_walked_tree_opens_with_the_cells_of_its_packs() {
     assert_eq!(l2.pack_key(1), Some("cas/b/b/pack"));
     assert_eq!(l2.pack_key(2), None);
     // Each pack was read once, whole.
-    assert_eq!(fake.filer(0).path_count("/buckets/kbf-cas/cas/b/a/pack"), 1);
-    assert_eq!(fake.filer(0).path_count("/buckets/kbf-cas/cas/b/b/pack"), 1);
+    assert_eq!(fake.filer(0).path_count("/buckets/packs/cas/b/a/pack"), 1);
+    assert_eq!(fake.filer(0).path_count("/buckets/packs/cas/b/b/pack"), 1);
 }
 
 #[tokio::test]

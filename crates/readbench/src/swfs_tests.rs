@@ -110,10 +110,10 @@ fn entry_with_a_bad_file_id_or_json_is_an_error() {
 #[test]
 fn server_argument_names_a_node_and_an_address() {
     assert_eq!(
-        parse_server("2=10.77.0.2:8080").unwrap(),
+        parse_server("2=192.0.2.22:8080").unwrap(),
         VolumeServer {
             node: 2,
-            addr: "10.77.0.2:8080".into()
+            addr: "192.0.2.22:8080".into()
         }
     );
     for (arg, part) in [

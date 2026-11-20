@@ -25,7 +25,7 @@ use tierstore_fetch_api::upstream::{
 };
 use tierstore_format::ids::{Generation, NodeId};
 
-const BUCKET: &str = "kbf-cas";
+const BUCKET: &str = "packs";
 const KEY: &str = "cas/b/p1/pack";
 
 fn data() -> Vec<u8> {
@@ -62,7 +62,7 @@ async fn rig_with(map_servers: usize) -> Rig {
     let up = SwfsUpstream::new(
         FilerFetch {
             http: http.clone(),
-            base: fake.filer(0).url("/buckets/kbf-cas"),
+            base: fake.filer(0).url("/buckets/packs"),
         },
         Arc::new(map),
         http,

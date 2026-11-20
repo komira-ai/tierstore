@@ -11,10 +11,10 @@
 //!     .volume_servers(2)             // two volume servers
 //!     .volume(7, &[0, 1], 1)         // volume 7 is on both servers, on their disk 1
 //!     .chunk_size(4)                 // the filer splits objects in chunks of 4 bytes
-//!     .object("kbf-cas", "cas/l/ab", b"hello world".to_vec())
+//!     .object("packs", "cas/l/ab", b"hello world".to_vec())
 //!     .start()
 //!     .await;
-//! let url = fake.filer(0).url("/buckets/kbf-cas/cas/l/ab");
+//! let url = fake.filer(0).url("/buckets/packs/cas/l/ab");
 //! ```
 //!
 //! What it serves:
@@ -750,7 +750,7 @@ impl NodeState {
                     "all": 1_000_000_000_u64,
                 })).collect::<Vec<_>>(),
                 "Volumes": data.volumes.iter().map(|(id, (disk, size))| json!({
-                    "Collection": "kbf-cas",
+                    "Collection": "packs",
                     "Id": id,
                     "DiskId": disk,
                     "Size": size,

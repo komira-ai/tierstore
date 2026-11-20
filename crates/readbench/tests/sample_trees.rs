@@ -18,7 +18,7 @@ use serde_json::json;
 use support::{Fake, Kind};
 use tierstore_testkit::dir::TestDir;
 
-const BUCKET: &str = "kbf-cas";
+const BUCKET: &str = "packs";
 
 fn scratch(name: &str) -> TestDir {
     TestDir::under(env!("CARGO_TARGET_TMPDIR"), name)
@@ -81,7 +81,7 @@ async fn store() -> Fake {
 fn filer(fake: &Fake) -> FilerFetch {
     FilerFetch {
         http: HttpClient::new(10_000),
-        base: fake.filer(0).url("/buckets/kbf-cas"),
+        base: fake.filer(0).url("/buckets/packs"),
     }
 }
 
@@ -223,17 +223,17 @@ async fn a_listing_or_a_manifest_that_cannot_be_read_is_an_error_naming_it() {
     let fake = store().await;
     let f = filer(&fake);
     fake.filer(0)
-        .fail_status("/buckets/kbf-cas/cas/l/t03", 500, None);
+        .fail_status("/buckets/packs/cas/l/t03", 500, None);
     let e = sample_trees(&f, &query()).await.unwrap_err().to_string();
     assert!(e.ends_with("/cas/l/t03: status 500"), "{e}");
-    fake.filer(0).clear_rules("/buckets/kbf-cas/cas/l/t03");
+    fake.filer(0).clear_rules("/buckets/packs/cas/l/t03");
     // An answer that is not a listing.
     fake.filer(0)
-        .fail_status("/buckets/kbf-cas/cas/l/", 200, None);
+        .fail_status("/buckets/packs/cas/l/", 200, None);
     let e = sample_trees(&f, &query()).await.unwrap_err().to_string();
     assert!(e.contains("/cas/l/?limit=1000&lastFileName=: "), "{e}");
     fake.filer(0)
-        .fail_status("/buckets/kbf-cas/cas/l/", 404, None);
+        .fail_status("/buckets/packs/cas/l/", 404, None);
     let e = sample_trees(&f, &query()).await.unwrap_err().to_string();
     assert!(e.ends_with("status 404") || e.ends_with("not found"), "{e}");
 }
@@ -318,7 +318,7 @@ async fn sample_trees_writes_the_roots_to_the_file_it_is_given() {
 async fn sample_trees_of_a_listing_that_fails_is_exit_1() {
     let fake = store().await;
     fake.filer(0)
-        .fail_status("/buckets/kbf-cas/cas/l/", 500, None);
+        .fail_status("/buckets/packs/cas/l/", 500, None);
     let (code, out, err) = cli(&args(&fake, &[])).await;
     assert_eq!((code, out.as_str()), (1, ""));
     assert!(err.starts_with("readbench: http://"), "{err}");

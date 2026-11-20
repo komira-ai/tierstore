@@ -1,6 +1,7 @@
 //! The planner's constants (section 6 steps 3 and 4). Every value is configuration: one schema
 //! serves both deployment profiles of section 21, and nothing here branches on which one runs.
-//! The starting values are marked [I] (section 15); T0-F, T0-S and T10b replace them.
+//! The starting values are marked [I] (section 15); T0-F, T0-S and T10b replace them, and a value
+//! a measurement stands behind is marked [M] with the report that holds it.
 
 use tierstore_fetch_api::upstream::DeviceRef;
 
@@ -85,7 +86,9 @@ impl PlanConfig {
 impl Default for PlanConfig {
     /// The starting constants of section 6: a hot device with no positioning cost [I], a cold
     /// hard drive of 12 ms and 190 MB/s [I] (3 cells of 1 MiB), whole from 50%, or from 20% up to
-    /// 64 MiB, and a 2 s backlog.
+    /// 64 MiB [M: T10b planned 300 of the farm's trees at 1.08 bytes fetched per byte needed with
+    /// these, under the 1.5 of section 6, and no stricter set moved it by more than 0.01;
+    /// `docs/measurements/2026-11-t10b.md`], and a 2 s backlog.
     fn default() -> Self {
         Self {
             hot: DriveModel {

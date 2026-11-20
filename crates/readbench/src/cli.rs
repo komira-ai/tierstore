@@ -77,11 +77,11 @@ enum Verb {
 
 #[derive(Args)]
 struct FilerArgs {
-    /// The filer's URL, such as http://10.77.0.2:8888.
+    /// The filer's URL, such as http://192.0.2.22:8888.
     #[arg(long)]
     filer: String,
     /// The bucket the trees and packs are in.
-    #[arg(long, default_value = "kbf-cas")]
+    #[arg(long, default_value = "packs")]
     bucket: String,
     /// Milliseconds a request waits for its answer's headers.
     #[arg(long, default_value_t = 30_000)]

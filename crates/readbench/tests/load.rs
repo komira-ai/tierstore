@@ -116,12 +116,12 @@ async fn clients_take_the_trees_in_turn_and_each_tree_is_prepared_once() {
     // Each tree's manifests were read once for the three clients (ROOT's two, ROOT2's one).
     assert_eq!(
         fake.filer(0)
-            .path_count(&format!("/buckets/kbf-cas/cas/l/{ROOT}")),
+            .path_count(&format!("/buckets/packs/cas/l/{ROOT}")),
         1
     );
     assert_eq!(
         fake.filer(0)
-            .path_count(&format!("/buckets/kbf-cas/cas/l/{ROOT2}")),
+            .path_count(&format!("/buckets/packs/cas/l/{ROOT2}")),
         1
     );
     // The caches are removed with the run.
@@ -333,7 +333,7 @@ async fn a_tree_named_twice_is_prepared_once() {
     assert_eq!(records.len(), 2);
     assert_eq!(
         fake.filer(0)
-            .path_count(&format!("/buckets/kbf-cas/cas/l/{ROOT2}")),
+            .path_count(&format!("/buckets/packs/cas/l/{ROOT2}")),
         1
     );
 }
