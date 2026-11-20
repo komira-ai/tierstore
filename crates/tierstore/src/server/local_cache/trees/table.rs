@@ -10,7 +10,7 @@ use std::time::Duration;
 
 use serde::Deserialize;
 
-use super::config::{Prefetch, TreesConfig};
+use super::config::{Prefetch, PreparePrefetch, TreesConfig};
 use crate::server::config::{ConfigError, invalid, within};
 use crate::server::config_cache::Rate;
 use crate::server::config_tuning::HOUR;
@@ -73,6 +73,11 @@ pub(in crate::server) struct TreesTable {
     /// What a create with no `prefetch` does: `none`, `background` or `wait` (default `wait`).
     #[serde(default)]
     pub prefetch_default: Option<Prefetch>,
+    /// What the mount provider's `Prepare` does about the files of a tree: `background` or `none`
+    /// (default `background`). Read as text and checked by `prepare_prefetch`, so that a value
+    /// it does not take is refused naming the key.
+    #[serde(default)]
+    pub prepare_prefetch: Option<String>,
     /// The share of a pack the needed ranges must cover for the whole pack to be read (1 to 100,
     /// default 50).
     #[serde(default)]
@@ -128,10 +133,31 @@ fn bytes(
     within("trees", key, got, range.0, range.1)
 }
 
+/// The mode `value` of `trees.prepare_prefetch` names; `default` if the file leaves it out.
+///
+/// # Errors
+/// A value other than `background` or `none`, naming the key and the values it takes and not
+/// repeating the value, as no message of the file does.
+fn prepare_prefetch(
+    value: Option<&str>,
+    default: PreparePrefetch,
+) -> Result<PreparePrefetch, ConfigError> {
+    let Some(value) = value else {
+        return Ok(default);
+    };
+    PreparePrefetch::of_name(value).ok_or_else(|| {
+        invalid(
+            "trees.prepare_prefetch",
+            "not a value this key takes (it is not shown); expected \"background\" or \"none\"",
+        )
+    })
+}
+
 /// The settings `table` asks for, on the defaults of [`TreesConfig`].
 ///
 /// # Errors
-/// A key out of its range, or a `ttl` above `ttl_max`; each names the key.
+/// A key out of its range, a `ttl` above `ttl_max`, or a `prepare_prefetch` it does not take;
+/// each names the key.
 fn trees_config(table: &TreesTable) -> Result<TreesConfig, ConfigError> {
     let base = TreesConfig::default();
     let ttl_range = (SECOND, WEEK);
@@ -190,6 +216,10 @@ fn trees_config(table: &TreesTable) -> Result<TreesConfig, ConfigError> {
             (0, GIB),
         )?,
         prefetch_default: table.prefetch_default.unwrap_or(base.prefetch_default),
+        prepare_prefetch: prepare_prefetch(
+            table.prepare_prefetch.as_deref(),
+            base.prepare_prefetch,
+        )?,
         whole_pack_percent: within(
             "trees",
             "whole_pack_percent",
