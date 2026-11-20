@@ -251,8 +251,10 @@ impl Core {
             }
             let read = |()| read_manifest(&path).map_err(|error| error.to_string());
             let start = self.now();
-            let had = self.fills.fill_manifest(&hex).and_then(read);
-            fetched.filled(self.now().saturating_sub(start), had.is_ok());
+            let filled = self.fills.fill_manifest(&hex);
+            let ms = self.now().saturating_sub(start);
+            let had = filled.and_then(read);
+            fetched.filled(ms, had.is_ok());
             had
         };
         let flattened = flatten_in_waves(digest, MANIFESTS_AT_ONCE, fetch);

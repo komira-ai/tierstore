@@ -176,3 +176,29 @@ fn an_absent_and_a_malformed_tree_are_reported_by_their_outcome() {
     );
     assert!(rig.core.implicit().is_empty());
 }
+
+/// Asserts that a fill the socket answers `ok` but that leaves no manifest in the cache counts
+/// that manifest as not had, its fill timed all the same, and the lookup is `EIO`, reported
+/// `failed`.
+#[test]
+fn a_fill_that_leaves_no_manifest_counts_it_as_not_had() {
+    let built = Built::of(vec![("only", dir(vec![("f", file(b"x"))]))]);
+    let rig = Rig::new("tfs-imp-unhad", built);
+    let (root, below) = {
+        let built = rig.upstream.built.lock().unwrap();
+        let mut keys = built.manifests.keys();
+        let below = keys.find(|sha| **sha != built.root).cloned();
+        (built.root.clone(), below.unwrap())
+    };
+    rig.upstream
+        .failing
+        .lock()
+        .unwrap()
+        .insert(below, "ok".to_owned());
+    assert_eq!(rig.core.lookup(ino::TREES, &root), Err(Errno::Io));
+    assert_eq!(reports(&rig, "attached", 1), ["attached failed 0"]);
+    assert_eq!(
+        reports(&rig, "fetched", 1),
+        ["fetched 0 1 1 0 2 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0"]
+    );
+}

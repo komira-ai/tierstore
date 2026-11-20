@@ -283,6 +283,28 @@ fn a_manifest_that_cannot_be_had_or_read_is_refused_as_flatten_refuses_it() {
     }
 }
 
+/// Asserts that a level with two faults, a manifest that is absent and one that is not a
+/// manifest after it, is refused for the first of them in the order of the level, as `flatten`
+/// meets it first, however many threads fetch the level.
+#[test]
+fn a_level_with_two_faults_is_refused_for_the_first_in_its_order() {
+    let mut store = Store::default();
+    let absent = TreeDigest::of(b"absent");
+    let not_json = store.put(r#"{"v":1,"children":["#.to_owned());
+    let leaf = store.put(manifest(&[file("y", 1)]));
+    let root = store.put(manifest(&[
+        dir("a", &leaf),
+        dir("b", &absent),
+        dir("c", &not_json),
+    ]));
+    let refused = store.serial(&root).unwrap_err();
+    assert!(matches!(refused, TreeError::Fetch { digest, .. } if digest == absent));
+    for width in [1, 2, WIDTH] {
+        let waves = store.waves(&root, width);
+        assert_eq!(waves.unwrap_err(), refused, "width {width}");
+    }
+}
+
 /// Asserts that the depth limit is judged as `flatten` judges it: a chain of 4096 names is
 /// accepted, one of 4097 refused and one of 4097 ending in an empty directory accepted; a chain of
 /// 6000 is refused with 4097 manifests fetched, as `flatten` fetches; and a subtree met first at a

@@ -36,9 +36,9 @@ use std::sync::{Arc, Condvar, Mutex};
 
 use crate::tree_manifest::TreeDigest;
 
+use super::fetched::Fetched;
 #[cfg(any(target_os = "linux", test))]
 use super::ino;
-use super::fetched::Fetched;
 use super::placed::Unread;
 use super::{Core, Errno, Loaded, locked};
 

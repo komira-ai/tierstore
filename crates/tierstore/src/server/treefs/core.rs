@@ -968,8 +968,8 @@ fn path_of(tree: &Tree, index: u32) -> String {
 
 #[cfg(any(target_os = "linux", test))]
 mod adopt;
-#[cfg(any(target_os = "linux", test))]
 mod fetched;
+#[cfg(any(target_os = "linux", test))]
 mod handles;
 mod implicit;
 mod live;
