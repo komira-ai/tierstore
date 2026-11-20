@@ -696,7 +696,7 @@ async fn the_fake_lists_a_directory_in_pages_after_a_name() {
     let manifest = br#"{"v":1,"children":[]}"#.to_vec();
     let mut builder = Fake::builder();
     for (name, mtime) in [
-        ("t01", "2026-01-01T00:00:00Z"),
+        ("t01", "2026-09-01T00:00:00Z"),
         ("t02", "2026-11-01T00:00:00Z"),
         ("t03", "2026-11-02T00:00:00Z"),
         ("t04", "2026-11-03T00:00:00Z"),

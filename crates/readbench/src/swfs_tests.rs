@@ -117,7 +117,7 @@ fn server_argument_names_a_node_and_an_address() {
         }
     );
     for (arg, part) in [
-        ("10.0.0.1:8080", "expected <node id>=<host:port>"),
+        ("192.0.2.11:8080", "expected <node id>=<host:port>"),
         ("256=h:1", "the node id is not a number from 0 to 255"),
         ("x=h:1", "the node id is not a number from 0 to 255"),
         ("1=h", "the address is not <host>:<port>"),
@@ -139,7 +139,7 @@ fn status(volumes: &str) -> Vec<u8> {
 fn server(node: u8) -> VolumeServer {
     VolumeServer {
         node,
-        addr: format!("10.0.0.{node}:8080"),
+        addr: format!("192.0.2.1{node}:8080"),
     }
 }
 
@@ -156,12 +156,12 @@ fn map_orders_copies_by_node_and_counts_them() {
         [
             Replica {
                 node: 1,
-                addr: "10.0.0.1:8080".into(),
+                addr: "192.0.2.11:8080".into(),
                 disk: 1
             },
             Replica {
                 node: 3,
-                addr: "10.0.0.3:8080".into(),
+                addr: "192.0.2.13:8080".into(),
                 disk: 2
             },
         ]
@@ -193,7 +193,7 @@ fn map_status_without_volumes_adds_none_and_bad_status_names_the_server() {
     assert_eq!(map.volumes(), 0);
     assert!(map.histogram().is_empty());
     let err = map.add_status(&server(2), b"[]").unwrap_err();
-    assert!(why(&err).starts_with("10.0.0.2:8080 /status: "), "{err}");
+    assert!(why(&err).starts_with("192.0.2.12:8080 /status: "), "{err}");
 }
 
 #[test]

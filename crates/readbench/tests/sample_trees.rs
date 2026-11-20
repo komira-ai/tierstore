@@ -48,7 +48,7 @@ fn size(dirs: usize) -> u64 {
 ///
 /// | name | modified   | content                     |
 /// |------|------------|-----------------------------|
-/// | t01  | 2026-01-01 | manifest, 2 directories     |
+/// | t01  | 2026-09-01 | manifest, 2 directories     |
 /// | t02  | 2026-11-01 | manifest, 0 directories     |
 /// | t03  | 2026-11-02 | manifest, 1 directory       |
 /// | t04  | 2026-11-03 | an `!<arch>` archive        |
@@ -60,7 +60,7 @@ fn size(dirs: usize) -> u64 {
 async fn store() -> Fake {
     let mut builder = Fake::builder();
     for (name, mtime, content) in [
-        ("t01", "2026-01-01T00:00:00Z", manifest(2)),
+        ("t01", "2026-09-01T00:00:00Z", manifest(2)),
         ("t02", "2026-11-01T00:00:00Z", manifest(0)),
         ("t03", "2026-11-02T00:00:00Z", manifest(1)),
         (
@@ -270,7 +270,7 @@ async fn sample_trees_prints_one_root_per_line_and_says_what_it_looked_at() {
             "--count",
             "3",
             "--since",
-            "2026-06-01T00:00:00Z",
+            "2026-10-01T00:00:00Z",
         ],
     ))
     .await;

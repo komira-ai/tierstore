@@ -31,7 +31,7 @@
 //!   are the objects directly under the directory, by name, those named after `?lastFileName=`
 //!   only, at most `?limit=` of them (default 100); `ShouldDisplayLoadMore` says whether more
 //!   follow, and `LastFileName` is the last name listed. Objects added with
-//!   [`FakeBuilder::object_at`] carry their `Mtime`, the others `2026-01-01T00:00:00Z`.
+//!   [`FakeBuilder::object_at`] carry their `Mtime`, the others `2026-09-01T00:00:00Z`.
 //! - A volume server answers `GET` and `HEAD` of a needle it holds (no `ETag`), with ranges as the
 //!   filer does, and `GET /status` with `{"Version", "DiskStatuses": [{"dir", ..}], "Volumes":
 //!   [{"Collection", "Id", "DiskId", "Size"}]}` for the volumes declared on it.
@@ -533,7 +533,7 @@ impl FakeBuilder {
                     mtime: pending
                         .mtime
                         .clone()
-                        .unwrap_or_else(|| "2026-01-01T00:00:00Z".to_owned()),
+                        .unwrap_or_else(|| "2026-09-01T00:00:00Z".to_owned()),
                     chunks,
                 },
             );
