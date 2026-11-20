@@ -8,7 +8,7 @@ const PLIST_FILE: &str = "Library/LaunchDaemons/tierstore.plist";
 
 /// What the check says of a part that is not the file or the directory it must be.
 const ONLY: &str = "an expanded component of tierstore's pkg holds only the files Bom, \
-                    PackageInfo and Payload: no Scripts, since it has no script";
+                    PackageInfo and Payload and the directory Scripts";
 
 /// A fixture whose payload is [`good_entries`] with the entry at `at` replaced by `entry`.
 fn with_entry(name: &str, at: usize, entry: Vec<u8>) -> Expanded {
@@ -26,8 +26,8 @@ fn a_good_expanded_pkg_passes_the_check() {
         expanded.check(),
         Ok(vec![format!(
             "check-macos-pkg: {} is a product of the one component tierstore.pkg \
-             (com.komira.tierstore 1.2.3), with no script, which installs exactly \
-             /Library/Application Support/tierstore/bin/tierstore (755) and \
+             (com.komira.tierstore 1.2.3), with the one script postinstall, which installs \
+             exactly /Library/Application Support/tierstore/bin/tierstore (755) and \
              /Library/LaunchDaemons/tierstore.plist (644), owned by root",
             expanded.product().display()
         )])
@@ -72,17 +72,20 @@ fn a_product_without_its_distribution_or_component_or_with_another_entry_is_refu
 }
 
 #[test]
-fn a_component_with_a_scripts_directory_or_another_file_or_without_a_part_is_refused() {
-    // Catches: a pkg that carries any script (hostkeeper's hook starts the job, so none is
-    // wanted), a stray file, and a missing bill of materials, payload or info.
-    let expanded = Expanded::good("macos-pkg-check-scripts");
-    std::fs::create_dir(expanded.pkg().join("Scripts")).expect("a directory");
-    std::fs::write(
-        expanded.pkg().join("Scripts").join("postinstall"),
-        b"#!/bin/sh\n",
-    )
-    .expect("a script");
-    assert_eq!(expanded.problems(), [format!("Scripts: {ONLY}")]);
+fn a_component_without_its_scripts_or_with_another_file_or_without_a_part_is_refused() {
+    // Catches: a pkg without the scripts directory (nothing would make the job's account and
+    // directories), one whose Scripts is a file, a stray file, and a missing bill of materials,
+    // payload or info.
+    let expanded = Expanded::good("macos-pkg-check-no-scripts");
+    std::fs::remove_dir_all(expanded.pkg().join("Scripts")).expect("remove");
+    assert_eq!(expanded.problems(), ["missing Scripts"]);
+    let expanded = Expanded::good("macos-pkg-check-scripts-file");
+    std::fs::remove_dir_all(expanded.pkg().join("Scripts")).expect("remove");
+    expanded.write("Scripts", POSTINSTALL.as_bytes());
+    assert_eq!(
+        expanded.problems(),
+        [format!("Scripts: {ONLY}"), "missing Scripts".to_owned()]
+    );
     let expanded = Expanded::good("macos-pkg-check-parts");
     expanded.write("Resources", b"x");
     std::fs::remove_file(expanded.pkg().join("Bom")).expect("remove");
@@ -106,10 +109,75 @@ fn a_component_with_a_scripts_directory_or_another_file_or_without_a_part_is_ref
 }
 
 #[test]
-fn package_info_of_another_identifier_version_or_location_or_with_a_script_or_bundle_is_refused() {
+fn scripts_of_another_file_mode_kind_or_bytes_or_without_the_postinstall_are_refused() {
+    // Catches: a pkg that carries another script beside the postinstall (a preinstall the check
+    // never read), a postinstall the installer cannot run (not executable), one that is a link
+    // (whose target the installer would run) or a directory, one whose bytes are not the
+    // repository's (another account, other directories, or a job loaded behind the update
+    // hook's back), and a Scripts directory that holds no postinstall.
+    let expanded = Expanded::good("macos-pkg-check-scripts-extra");
+    std::fs::write(expanded.pkg().join("Scripts/preinstall"), b"#!/bin/sh\n").expect("extra");
+    assert_eq!(
+        expanded.problems(),
+        ["Scripts holds \"preinstall\": tierstore's pkg has one script, its postinstall"]
+    );
+    let expanded = Expanded::good("macos-pkg-check-scripts-mode");
+    std::fs::set_permissions(expanded.script(), std::fs::Permissions::from_mode(0o644))
+        .expect("mode");
+    assert_eq!(
+        expanded.problems(),
+        ["Scripts: postinstall has mode 644, not 755"]
+    );
+    let expanded = Expanded::good("macos-pkg-check-scripts-bytes");
+    let edited = POSTINSTALL.replace("name=_tierstore", "name=_other");
+    std::fs::write(expanded.script(), edited).expect("other bytes");
+    assert_eq!(
+        expanded.problems(),
+        ["Scripts: postinstall is not the postinstall release macos-pkg writes"]
+    );
+    let expanded = Expanded::good("macos-pkg-check-scripts-link");
+    let elsewhere = Expanded::good("macos-pkg-check-scripts-link-source");
+    std::fs::remove_file(expanded.script()).expect("remove");
+    std::os::unix::fs::symlink(elsewhere.script(), expanded.script()).expect("a link");
+    assert_eq!(
+        expanded.problems(),
+        ["Scripts: postinstall is of type 120000, not a regular file"]
+    );
+    let expanded = Expanded::good("macos-pkg-check-scripts-dir");
+    std::fs::remove_file(expanded.script()).expect("remove");
+    std::fs::create_dir(expanded.script()).expect("a directory");
+    assert_eq!(
+        expanded.problems(),
+        ["Scripts: postinstall is of type 40000, not a regular file"]
+    );
+    let expanded = Expanded::good("macos-pkg-check-scripts-empty");
+    std::fs::remove_file(expanded.script()).expect("remove");
+    assert_eq!(expanded.problems(), ["Scripts holds no postinstall"]);
+}
+
+#[test]
+fn an_unreadable_scripts_directory_is_an_error_naming_it() {
+    // Catches: a check that passes a pkg whose scripts it could not read. A directory nobody may
+    // read is an I/O error naming it (a user that reads it anyway, root, finds the pkg good).
+    let expanded = Expanded::good("macos-pkg-check-scripts-unreadable");
+    let scripts = expanded.pkg().join("Scripts");
+    std::fs::set_permissions(&scripts, std::fs::Permissions::from_mode(0o000)).expect("mode");
+    let readable = std::fs::read_dir(&scripts).is_ok();
+    let result = expanded.check();
+    std::fs::set_permissions(&scripts, std::fs::Permissions::from_mode(0o755)).expect("mode");
+    match result {
+        Ok(_) => assert!(readable),
+        Err(Error::Spawn { what, .. }) => assert!(!readable && what.ends_with("Scripts")),
+        other => panic!("{other:?}"),
+    }
+}
+
+#[test]
+fn package_info_of_another_identifier_version_location_script_action_or_bundle_is_refused() {
     // Catches: a pkg installed under another receipt, of another release, relocatable to another
-    // place, naming a script or a bundle (hostkeeper's installer refuses a bundle), or whose
-    // PackageInfo cannot be read.
+    // place, naming no postinstall (the installer would not run it), a preinstall, an action
+    // after the install (a restart or logout of the Mac) or a bundle (hostkeeper's installer
+    // refuses a bundle), or whose PackageInfo cannot be read.
     let problems = |text: String| {
         let expanded = Expanded::good("macos-pkg-check-info");
         expanded.write("PackageInfo", text.as_bytes());
@@ -118,7 +186,7 @@ fn package_info_of_another_identifier_version_or_location_or_with_a_script_or_bu
     let attrs = |id: &str, version: &str, at: &str| {
         package_info_with(
             &format!("identifier=\"{id}\" version=\"{version}\" install-location=\"{at}\""),
-            "",
+            SCRIPTS_ELEMENT,
         )
     };
     assert_eq!(
@@ -130,35 +198,56 @@ fn package_info_of_another_identifier_version_or_location_or_with_a_script_or_bu
         ]
     );
     assert_eq!(
-        problems(package_info_with("", "")),
+        problems(package_info_with("", SCRIPTS_ELEMENT)),
         [
             "PackageInfo has no identifier",
             "PackageInfo has no version",
             "PackageInfo has no install-location",
         ]
     );
-    let scripts = package_info_with(
-        "identifier=\"com.komira.tierstore\" version=\"1.2.3\" install-location=\"/\"",
-        "<scripts><postinstall file=\"./postinstall\"/></scripts>",
-    );
+    let good = "identifier=\"com.komira.tierstore\" version=\"1.2.3\" install-location=\"/\"";
+    let no_postinstall = "PackageInfo names no postinstall script (<postinstall \
+                          file=\"./postinstall\"/>): nothing would make the account and the \
+                          directories of the job";
+    // pkgbuild with no scripts directory writes an empty scripts element, or none.
+    for empty in ["", "<scripts/>"] {
+        assert_eq!(problems(package_info_with(good, empty)), [no_postinstall]);
+    }
     assert_eq!(
-        problems(scripts),
-        [
-            "PackageInfo names a scripts element: tierstore's pkg has no script",
-            "PackageInfo names a postinstall element: tierstore's pkg has no script",
-        ]
+        problems(package_info_with(
+            good,
+            "<scripts><postinstall file=\"./other\"/></scripts>"
+        )),
+        [no_postinstall]
     );
     let preinstall = package_info_with(
-        "identifier=\"com.komira.tierstore\" version=\"1.2.3\" install-location=\"/\"",
-        "<preinstall file=\"./preinstall\"/><bundle path=\"./A.app\"/>",
+        good,
+        "<scripts><preinstall file=\"./preinstall\"/><postinstall \
+         file=\"./postinstall\"/></scripts><bundle path=\"./A.app\"/>",
     );
     assert_eq!(
         problems(preinstall),
         [
-            "PackageInfo names a preinstall element: tierstore's pkg has no script",
+            "PackageInfo names a preinstall element: tierstore's pkg has one script, its \
+             postinstall",
             "PackageInfo names a bundle: tierstore's pkg holds none",
         ]
     );
+    let restart = package_info().replace(
+        "postinstall-action=\"none\"",
+        "postinstall-action=\"restart\"",
+    );
+    assert_eq!(
+        problems(restart),
+        [
+            "PackageInfo: postinstall-action is \"restart\", not \"none\": the install asks for \
+          no restart or logout"
+        ]
+    );
+    let no_action = package_info().replace("postinstall-action=\"none\" ", "");
+    let expanded = Expanded::good("macos-pkg-check-info-no-action");
+    expanded.write("PackageInfo", no_action.as_bytes());
+    assert!(expanded.check().is_ok(), "no action is no action");
     assert_eq!(
         problems("not xml".to_owned()),
         ["PackageInfo has no readable <pkg-info> element"]

@@ -275,9 +275,9 @@ fn a_release_by_version_is_set_as_its_plain_version_with_one_apt_entry_per_linux
     // Catches: the archive-only targets the apt hosts cannot install (every host held
     // installer_dropped and nothing updates), the package version `X.Y.Z+<commit>` that no apt
     // host runs, a release index handed on beside the apt targets, a repository entry other than
-    // the farm nodes' komira-testing, a macOS list (no package a Mac's daemon installs), and
-    // targets other than those the lab stage of release.yml sets for the same version, which the
-    // coordinator would refuse as release_exists.
+    // the farm nodes' komira-testing, a macOS list without `--macos-pkg` (no pkg was held to
+    // the sums), and Linux lists other than those `release desired-apt` writes for the same
+    // version.
     let s = scratch("by-version");
     let output = s.join("output");
     let gh = good();
@@ -315,7 +315,7 @@ fn a_release_by_version_is_set_as_its_plain_version_with_one_apt_entry_per_linux
             lines[2].to_owned(),
         ]
     );
-    // The lab's verb, given the same release, floor and suite, writes the same two lines.
+    // `release desired-apt`, given the same release, floor and suite, writes the same two lines.
     let lab_output = s.join("lab-output");
     desired_apt::desired_apt(
         &good(),
@@ -702,9 +702,12 @@ fn a_version_with_no_published_release_or_no_sums_is_refused_before_the_suite_is
 
 #[test]
 fn with_the_macos_pkg_the_targets_gain_one_macos_pkg_entry_held_to_the_sums() {
-    // Asserts: `targets` is the apt targets alone, as the lab sets them, and `targets-mac` is
-    // those plus `macos-arm64` with the exact macos-pkg entry (installer, the apt entries'
-    // repository, package version, SHA-256 and size of the signed pkg, its manifest).
+    // Asserts: `targets` is the apt targets plus `macos-arm64` with the exact macos-pkg entry
+    // (installer, the apt entries' repository, package version, SHA-256 and size of the signed
+    // pkg, its manifest), and is the one targets line: every host group is set the same targets.
+    // Catches: a Linux group set the apt lists alone and the Macs' group these plus the pkg, a
+    // version the coordinator then refuses to the second call (release_exists), so the Macs are
+    // never ordered tierstore.
     let s = scratch("macos");
     let output = s.join("output");
     let mut gh = good();
@@ -723,19 +726,12 @@ fn with_the_macos_pkg_the_targets_gain_one_macos_pkg_entry_held_to_the_sums() {
     let printed = desired(&gh, &cdn, &request).expect("set");
     let written = std::fs::read_to_string(&output).expect("the output");
     let lines: Vec<&str> = written.lines().collect();
+    assert_eq!(lines.len(), 3, "{written}");
+    assert_eq!(lines[..2], ["set=true", "package-version=0.4.0"]);
     let targets: Value =
         serde_json::from_str(lines[2].strip_prefix("targets=").expect("targets")).expect("JSON");
-    let apt_only = json!({
-        "linux-x86_64": { "entries": [apt_entry(VERSION, "amd64")] },
-        "linux-arm64": { "entries": [apt_entry(VERSION, "arm64")] },
-    });
-    assert_eq!(targets, apt_only, "`targets` stays what the lab sets");
-    assert_eq!(lines.len(), 4, "{written}");
-    let mac: Value =
-        serde_json::from_str(lines[3].strip_prefix("targets-mac=").expect("targets-mac"))
-            .expect("JSON");
     assert_eq!(
-        mac,
+        targets,
         json!({
             "linux-x86_64": { "entries": [apt_entry(VERSION, "amd64")] },
             "linux-arm64": { "entries": [apt_entry(VERSION, "arm64")] },

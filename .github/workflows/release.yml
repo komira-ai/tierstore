@@ -1089,7 +1089,10 @@ jobs:
   # coordinator admit them: the entry is keyed on the called workflow, not the caller). Off until
   # the repository variable TIERSTORE_SETS_DESIRED is `true`, exactly, as the by-hand workflow
   # is. The Linux nodes and the Macs are two jobs: a Mac that does not converge leaves the Linux
-  # deploy green, and the `red` job reports it.
+  # deploy green, and the `red` job reports it. Both jobs set the same targets, the apt entries
+  # and the Macs' macos-pkg entry (`--macos-pkg`): the coordinator keeps one release per version
+  # and refuses a version set again with other targets (release_exists), so whichever of the two
+  # sets the version first, the other is taken.
   deploy-check:
     needs: [plan, testing-apt-write, testing-apt-write-2, testing-apt-write-3]
     if: ${{ !cancelled() && !failure() && needs.plan.outputs.release == 'true' && github.ref == 'refs/heads/main' && (needs.testing-apt-write.outputs.conflict == 'false' || needs.testing-apt-write-2.outputs.conflict == 'false' || needs.testing-apt-write-3.outputs.conflict == 'false') && vars.TIERSTORE_SETS_DESIRED == 'true' }}
@@ -1101,7 +1104,6 @@ jobs:
       set: ${{ steps.desired.outputs.set }}
       package-version: ${{ steps.desired.outputs.package-version }}
       targets: ${{ steps.desired.outputs.targets }}
-      targets-mac: ${{ steps.desired.outputs.targets-mac }}
     env:
       COMMIT: ${{ needs.plan.outputs.commit }}
       TAG: ${{ needs.plan.outputs.tag }}
@@ -1157,7 +1159,7 @@ jobs:
       service: tierstore
       host_group: mac-build
       version: ${{ needs.deploy-check.outputs.package-version }}
-      targets: ${{ needs.deploy-check.outputs.targets-mac }}
+      targets: ${{ needs.deploy-check.outputs.targets }}
       hostkeeper_version: 0.1.317
       hostkeeper_commit: 30141591c292d8881ce5bc16c9d0b3ba7fcfdca1
       coordinator_url: ${{ vars.HOSTKEEPER_COORDINATOR_URL }}
@@ -1960,12 +1962,16 @@ jobs:
   #               is exactly `true` the lab is off, a green no-op with a notice naming it, whatever
   #               the other settings are; with it `true`, none of HOSTKEEPER_COORDINATOR_URL and
   #               HOSTKEEPER_COORDINATOR_CA set is a green no-op, some is red, and the tailnet's
-  #               three variables are all or none), then `release desired-apt` for the release
-  #               just published: the testing suite, read as a client reads it, lists the
-  #               package of both architectures with the digests of the release's SHA256SUMS.
+  #               three variables are all or none), then `release desired --macos-pkg` for the
+  #               release just published: the testing suite, read as a client reads it, lists
+  #               the package of both architectures with the digests of the release's
+  #               SHA256SUMS, and the release's signed .pkg has the digest SHA256SUMS lists.
   #               Its package-version (the package's, `X.Y.Z`) and targets (one apt entry per
-  #               architecture, each pinning its .deb by that digest) are what the coordinator
-  #               is given. No release index and no package digest: tierstore ships no archive.
+  #               architecture, each pinning its .deb by that digest, and the Macs' macos-pkg
+  #               entry) are what the coordinator is given: the targets `deploy-check` hands the
+  #               deploy, since the coordinator refuses a version set again with other targets
+  #               (release_exists). No release index and no package digest: tierstore ships no
+  #               archive.
   #   farm        hostkeeper's reusable workflow set-desired.yml, pinned to a revision of its own
   #               (a job that calls a workflow has no steps, which is why the gate is the
   #               job before it): it proves the pinned hostkeeper (0.1.225 is the first release
@@ -2033,7 +2039,7 @@ jobs:
         if: ${{ steps.gate.outputs.enabled == 'true' }}
         env:
           GH_TOKEN: ${{ github.token }}
-        run: cargo xtask release desired-apt --repo "$GITHUB_REPOSITORY" --version "${TAG#v}" --min-hostkeeper 0.1.225 --dir "$RUNNER_TEMP/desired" --output "$GITHUB_OUTPUT"
+        run: cargo xtask release desired --repo "$GITHUB_REPOSITORY" --version "${TAG#v}" --min-hostkeeper 0.1.225 --macos-pkg --dir "$RUNNER_TEMP/desired" --output "$GITHUB_OUTPUT"
 
   farm:
     needs: [plan, farm-check]

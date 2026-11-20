@@ -177,23 +177,26 @@ const DEFECTS: &[(&str, &str, &str, &str)] = &[
         "host_group: mac-build",
         "set-desired: with.host_group is Some(\"mac-build\"), not \"all-in-one\"",
     ),
+    // The Macs set other targets than the Linux nodes: the coordinator keeps one release per
+    // version and refuses the second set (`release_exists`), so the Macs are never ordered it.
     (
         "set-desired-mac",
-        "targets: ${{ needs.check.outputs.targets-mac }}",
         "targets: ${{ needs.check.outputs.targets }}",
-        "set-desired-mac: with.targets is Some(\"${{ needs.check.outputs.targets }}\")",
+        "targets: ${{ needs.check.outputs.targets-mac }}",
+        "set-desired-mac: with.targets is Some(\"${{ needs.check.outputs.targets-mac }}\")",
     ),
     (
         "set-desired",
         "targets: ${{ needs.check.outputs.targets }}",
-        "targets: ${{ needs.check.outputs.targets-mac }}",
-        "set-desired: with.targets is Some(\"${{ needs.check.outputs.targets-mac }}\")",
+        "targets: ${{ needs.check.outputs.targets-linux }}",
+        "set-desired: with.targets is Some(\"${{ needs.check.outputs.targets-linux }}\")",
     ),
+    // The targets without the Macs' list.
     (
         "check",
-        "      targets-mac: ${{ steps.desired.outputs.targets-mac }}\n",
-        "      targets-mac: '{}'\n",
-        "check: output targets-mac is",
+        " --macos-pkg",
+        "",
+        "check: the step `desired` does not run",
     ),
     (
         "set-desired-mac",
@@ -284,7 +287,8 @@ const DEFECTS: &[(&str, &str, &str, &str)] = &[
         "--min-hostkeeper 0.1.184",
         "check: the step `desired` does not run",
     ),
-    // The verb of the lab alone, which never sets `set=false` after a run that published none.
+    // The verb of the apt lists alone, which never sets `set=false` after a run that published
+    // none and gives no Macs' list.
     (
         "check",
         "cargo xtask release desired ",
@@ -541,19 +545,19 @@ fn a_set_that_orders_no_host_ends_the_job_red_not_green_with_not_waited() {
 }
 
 #[test]
-fn the_check_gives_the_floor_the_lab_stage_of_release_yml_is_held_to() {
+fn the_check_gives_the_floor_and_the_macs_list_the_lab_stage_of_release_yml_is_held_to() {
     // Catches: hostkeeper-desired.yml and the lab stage of release.yml building the targets of
-    // the same release with two hostkeeper floors, so that the second set of the version is
-    // refused (`release_exists`) and the fleet is not moved; and a floor that the lab's lint
-    // moves without this workflow following.
+    // the same release with two hostkeeper floors, or one with the Macs' list and one without,
+    // so that the second set of the version is refused (`release_exists`) and the fleet is not
+    // moved; and a floor that the lab's lint moves without this workflow following.
     let command = check_command();
     assert!(
-        command.contains(&format!(" --min-hostkeeper {APT_FLOOR} ")),
+        command.contains(&format!(" --min-hostkeeper {APT_FLOOR} --macos-pkg ")),
         "{command}"
     );
     let release = text_of("release.yml");
     assert!(release.contains(&format!(
-        "cargo xtask release desired-apt --repo \"$GITHUB_REPOSITORY\" --version \"${{TAG#v}}\" --min-hostkeeper {APT_FLOOR} "
+        "cargo xtask release desired --repo \"$GITHUB_REPOSITORY\" --version \"${{TAG#v}}\" --min-hostkeeper {APT_FLOOR} --macos-pkg "
     )));
     let doc = yaml::load(&release).expect("release.yml parses");
     assert_eq!(farm_problems(&doc, &release), Vec::<String>::new());
@@ -779,8 +783,20 @@ const DEPLOY_DEFECTS: &[(&str, &str, &str, &str)] = &[
     (
         "deploy",
         "targets: ${{ needs.deploy-check.outputs.targets }}",
+        "targets: ${{ needs.deploy-check.outputs.targets-linux }}",
+        "deploy: with.targets is Some(\"${{ needs.deploy-check.outputs.targets-linux }}\")",
+    ),
+    (
+        "deploy-mac",
+        "targets: ${{ needs.deploy-check.outputs.targets }}",
         "targets: ${{ needs.deploy-check.outputs.targets-mac }}",
-        "deploy: with.targets is Some(\"${{ needs.deploy-check.outputs.targets-mac }}\")",
+        "deploy-mac: with.targets is Some(\"${{ needs.deploy-check.outputs.targets-mac }}\")",
+    ),
+    (
+        "deploy-check",
+        " --macos-pkg",
+        "",
+        "deploy-check: the step `desired` does not run",
     ),
     (
         "deploy-mac",

@@ -1,6 +1,7 @@
 //! `release desired --repo <owner/repo> (--version <X.Y.Z> | --after-run <id>) [--skip-superseded]
 //! --min-hostkeeper <x.y.z> --dir <dir> [--apt-url <url>] [--output <file>] [--gh <program>]
-//! [--curl <program>]`: what the deploy of `.github/workflows/release.yml` (`deploy-check`) and
+//! [--curl <program>] [--macos-pkg]`: what the deploy and the lab stage of
+//! `.github/workflows/release.yml` (`deploy-check`, `farm-check`) and
 //! `.github/workflows/hostkeeper-desired.yml` (by hand) set as the desired version of tierstore on
 //! the hostkeeper coordinator, or why they set nothing. It runs before any step of those workflows
 //! can hold a token, so a refusal here means the coordinator is never called.
@@ -24,24 +25,25 @@
 //! `set=false` and the verb succeeds. Release runs are one at a time, but a release made by hand
 //! runs beside them, and a run that waited behind it must not move the fleet back.
 //!
-//! What is set for the release is what the lab stage of `release.yml` sets for it
+//! The Linux lists of what is set for the release are those `release desired-apt` writes
 //! ([`super::desired_apt`], with the same `--min-hostkeeper`): the hosts install tierstore from the
 //! testing suite through hostkeeper's apt installer, so each Linux platform's list is one `apt`
 //! entry of the host's repository entry `komira-testing`, the package version `X.Y.Z` and the
 //! `.deb`'s SHA-256, held to the suite as a client reads it and to the release's `SHA256SUMS`. A
 //! list of `hostkeeper-archive` entries alone orders no host: the coordinator holds every host that
-//! runs tierstore from apt `installer_dropped`. `targets` has no `macos-arm64`
-//! list: they are exactly the lab's, so that the version the lab set is set again with equal
-//! targets. With `--macos-pkg` (the workflow's way) a fourth output, `targets-mac=<JSON>`, is the
-//! same targets with a `macos-arm64` list of one `macos-pkg` entry of the release's signed `.pkg`
-//! ([`super::desired_macos`]), downloaded and held to the digest of `SHA256SUMS`: what the
-//! second `set-desired` call sets for the host group of the Macs. No release index is sent: it would list
-//! archive entries the targets do not have.
+//! runs tierstore from apt `installer_dropped`. With `--macos-pkg` (the way of every workflow
+//! that sets a version: the lab stage and the deploy of `release.yml`, and
+//! `hostkeeper-desired.yml`) `targets` also has a `macos-arm64` list of one `macos-pkg` entry of
+//! the release's signed `.pkg` ([`super::desired_macos`]), downloaded and held to the digest of
+//! `SHA256SUMS`. Every `set-desired` call of a version, whatever its host group (`all-in-one`,
+//! `mac-build`), sends these same targets: the coordinator keeps one release per version, and
+//! refuses a version set again with other targets (`release_exists`). A Linux host is ordered its
+//! `apt` entry and a Mac its `macos-pkg` entry. No release index is sent: it would list archive
+//! entries the targets do not have.
 //!
 //! When the run published nothing, `--output` (on Actions, `GITHUB_OUTPUT`) gets `set=false`.
 //! Otherwise every problem found is reported, one line each, and when there is none `--output`
-//! gets `set=true`, `package-version=<X.Y.Z>` and `targets=<JSON>` (and `targets-mac=<JSON>` with
-//! `--macos-pkg`).
+//! gets `set=true`, `package-version=<X.Y.Z>` and `targets=<JSON>`.
 
 use std::path::Path;
 
@@ -76,8 +78,8 @@ pub struct Request<'a> {
     pub dir: &'a Path,
     /// The apt repository whose suite `testing` the hosts install from.
     pub apt_url: &'a str,
-    /// Also give `targets-mac`: the apt targets and the `macos-arm64` list, one `macos-pkg` entry
-    /// of the release's signed `.pkg`. `targets` stays what the lab sets.
+    /// Give `targets` the `macos-arm64` list too, one `macos-pkg` entry of the release's signed
+    /// `.pkg`, beside the apt lists.
     pub macos_pkg: bool,
     /// Set nothing (`set=false`) when a published release is newer than the one chosen: the
     /// deploy of a release run, which must never move the fleet back to a release a newer one
@@ -226,9 +228,8 @@ pub fn desired(gh: &dyn Gh, host: &dyn Host, request: &Request<'_>) -> Result<Ve
             apt_url: request.apt_url,
         },
     )?;
-    let [package_version, targets] = found.lines;
+    let [package_version, mut targets] = found.lines;
     let mut summary = found.summary;
-    let mut lines = vec!["set=true".to_owned(), package_version, targets];
     if request.macos_pkg {
         let entry = desired_macos::macos_entry(
             gh,
@@ -243,12 +244,13 @@ pub fn desired(gh: &dyn Gh, host: &dyn Host, request: &Request<'_>) -> Result<Ve
             desired_macos::PLATFORM.to_owned(),
             serde_json::json!({"entries": [entry]}),
         );
-        lines.push(format!("targets-mac={}", serde_json::Value::Object(all)));
+        targets = format!("targets={}", serde_json::Value::Object(all));
         summary.push_str(&format!(
             "; the release's {} has the digest {SUMS} lists",
             super::macos_pkg_name(&version)
         ));
     }
+    let lines = vec!["set=true".to_owned(), package_version, targets];
     if let Some(output) = request.output {
         append_output(output, &lines)?;
     }
