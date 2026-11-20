@@ -586,7 +586,9 @@ async fn report_makes_the_tables_of_the_files_it_is_given() {
     let runs = path(&dir.path().join("runs.jsonl"));
     let (code, out, err) = cli(&strings(&["report", "--runs", &runs])).await;
     assert_eq!((code, err.as_str()), (0, ""));
+    assert!(out.starts_with("### Runs\n\n| run | mode |"), "{out}");
     for heading in [
+        "### Runs",
         "### Trees",
         "### Demand reads",
         "### Drives",
@@ -625,6 +627,48 @@ async fn report_makes_the_tables_of_the_files_it_is_given() {
     .await;
     assert_eq!(code, 1);
     assert!(err.starts_with("readbench: open "), "{err}");
+}
+
+#[tokio::test]
+async fn report_with_classes_tables_drives_by_class() {
+    let fake = fake(Variant::Whole).await;
+    let dir = scratch("cli-report-class");
+    let (code, _, err) = cli(&replay_args(&fake, &dir, &[])).await;
+    assert_eq!(code, 0, "{err}");
+    let runs = path(&dir.path().join("runs.jsonl"));
+    let disks = dir.path().join("disks.jsonl");
+    let sample = |node: &str, dev: &str| {
+        format!(
+            "{{\"run\":\"r1\",\"node\":\"{node}\",\"device\":\"{dev}\",\"t_ms\":0,\"reads\":2,\"rkb_s\":2048.0,\"r_await_ms\":5.0,\"aqu_sz\":1.0,\"util_pct\":50.0}}\n"
+        )
+    };
+    std::fs::write(&disks, sample("n1", "sda") + &sample("n1", "sdb")).unwrap();
+    let disks = path(&disks);
+    let (code, out, err) = cli(&strings(&[
+        "report",
+        "--runs",
+        &runs,
+        "--disks",
+        &disks,
+        "--class",
+        "hdd=n1:sda",
+        "--class",
+        "other=n1:sdb",
+    ]))
+    .await;
+    assert_eq!((code, err.as_str()), (0, ""));
+    assert!(
+        out.contains("| r1 | hdd | 1 | 1 | 2.0 | 5.0 | 5.0 | 1.00 | 50.0 | 50.0 |\n"),
+        "{out}"
+    );
+    assert!(out.contains("| r1 | other | 1 | 1 | 2.0 |"), "{out}");
+    assert!(!out.contains("| node | device |"), "{out}");
+    let (code, _, err) = cli(&strings(&["report", "--runs", &runs, "--class", "hdd"])).await;
+    assert_eq!(code, 2);
+    assert!(
+        err.starts_with("readbench: --class \"hdd\": expected NAME="),
+        "{err}"
+    );
 }
 
 #[tokio::test]

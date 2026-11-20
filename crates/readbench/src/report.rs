@@ -3,15 +3,17 @@
 //! their headings. Numbers are printed with fixed decimals so the same records give the same
 //! text.
 
-use std::collections::BTreeMap;
+use std::collections::{BTreeMap, BTreeSet};
 use std::fmt::Write as _;
 
+use crate::Error;
 use crate::record::{
     ClientRun, DemandRead, DiskSample, MetricDelta, Mode, PlanRecord, Summary, nearest_rank,
 };
 use crate::sample::to_f64;
 
 const MIB: f64 = 1_048_576.0;
+const GIB: f64 = 1_073_741_824.0;
 
 /// A Markdown table: the header, the rule under it and a line per row.
 fn table(header: &[&str], rows: &[Vec<String>]) -> String {
@@ -151,23 +153,26 @@ pub fn trees_table(runs: &[ClientRun]) -> String {
     )
 }
 
-/// The table of the demand reads: a row for each number of load clients and length class (up to
-/// and including 1 MiB, or more), with the reads' count and their wait's median, 99th percentile
-/// and largest (milliseconds).
+/// The table of the demand reads: a row for each run and length class (up to and including
+/// 1 MiB, or more), with the clients loading the store during the run (the largest number its
+/// reads name), the reads' count and their wait's median, 99th percentile and largest
+/// (milliseconds).
 #[must_use]
 pub fn demand_table(reads: &[DemandRead]) -> String {
-    let mut groups: BTreeMap<(u32, bool), Vec<u64>> = BTreeMap::new();
+    let mut groups: BTreeMap<(&str, bool), (u32, Vec<u64>)> = BTreeMap::new();
     for r in reads {
-        groups
-            .entry((r.load_clients, r.len > 1_048_576))
-            .or_default()
-            .push(r.wait_us);
+        let e = groups
+            .entry((r.run.as_str(), r.len > 1_048_576))
+            .or_default();
+        e.0 = e.0.max(r.load_clients);
+        e.1.push(r.wait_us);
     }
     let rows: Vec<Vec<String>> = groups
         .iter()
-        .map(|((load, big), waits)| {
+        .map(|((run, big), (load, waits))| {
             let s = Summary::of(waits);
             vec![
+                (*run).to_owned(),
                 load.to_string(),
                 (if *big { ">1MiB" } else { "<=1MiB" }).to_owned(),
                 s.n.to_string(),
@@ -179,12 +184,90 @@ pub fn demand_table(reads: &[DemandRead]) -> String {
         .collect();
     table(
         &[
+            "run",
             "load clients",
             "read length",
             "reads",
             "wait p50 ms",
             "wait p99 ms",
             "wait max ms",
+        ],
+        &rows,
+    )
+}
+
+/// `bytes` in GiB with two decimals.
+fn gib(bytes: u64) -> String {
+    format!("{:.2}", to_f64(bytes) / GIB)
+}
+
+/// The table of the runs: a row for each run name with its mode, the `verified` and
+/// `drive_streams` of its configuration (`-` when absent, and `-` for drive streams of the shipped
+/// way), the most clients, the distinct trees, the median over its clients of the pack GETs (all
+/// kinds) and of the manifest GETs, the tree-ready time at its median and 99th percentile
+/// (seconds), the GiB needed and fetched summed over the clients, the amplification of those sums,
+/// the first-byte time (milliseconds: the median of the clients' medians and the largest of their
+/// 99th percentiles) and the sum of the failed GETs.
+#[must_use]
+pub fn runs_table(runs: &[ClientRun]) -> String {
+    let mut groups: BTreeMap<&str, Vec<&ClientRun>> = BTreeMap::new();
+    for r in runs {
+        groups.entry(r.run.as_str()).or_default().push(r);
+    }
+    let rows: Vec<Vec<String>> = groups
+        .iter()
+        .map(|(run, rs)| {
+            let first = rs[0];
+            let col = |f: fn(&ClientRun) -> u64| -> Vec<u64> { rs.iter().map(|r| f(r)).collect() };
+            let config = |key: &str| first.config.get(key).cloned().unwrap_or_else(|| "-".into());
+            let streams = match first.mode {
+                Mode::Engine => config("drive_streams"),
+                Mode::Shipped => "-".to_owned(),
+            };
+            let trees: BTreeSet<&str> = rs.iter().map(|r| r.tree.as_str()).collect();
+            let ready = Summary::of(&col(|r| r.tree_ready_us));
+            let needed: u64 = col(|r| r.bytes_needed).iter().sum();
+            let fetched: u64 = col(|r| r.bytes_fetched).iter().sum();
+            let first_p50 = median(&rs.iter().map(|r| r.first_byte_us.p50).collect::<Vec<u64>>());
+            let first_p99 = rs.iter().map(|r| r.first_byte_us.p99).max().unwrap_or(0);
+            vec![
+                (*run).to_owned(),
+                mode_name(first.mode).to_owned(),
+                config("verified"),
+                streams,
+                rs.iter().map(|r| r.clients).max().unwrap_or(0).to_string(),
+                trees.len().to_string(),
+                median(&col(ClientRun::total_gets)).to_string(),
+                median(&col(|r| r.manifests)).to_string(),
+                secs2(ready.p50),
+                secs2(ready.p99),
+                gib(needed),
+                gib(fetched),
+                ratio2(milli(fetched, needed)),
+                ms1(first_p50),
+                ms1(first_p99),
+                col(|r| r.get_errors).iter().sum::<u64>().to_string(),
+            ]
+        })
+        .collect();
+    table(
+        &[
+            "run",
+            "mode",
+            "verified",
+            "drive streams",
+            "clients",
+            "trees",
+            "pack GETs per tree p50",
+            "manifest GETs per tree p50",
+            "ready p50 s",
+            "ready p99 s",
+            "needed GiB",
+            "fetched GiB",
+            "amplification",
+            "first byte p50 ms",
+            "first byte p99 ms",
+            "errors",
         ],
         &rows,
     )
@@ -258,6 +341,113 @@ pub fn disks_table(samples: &[DiskSample], devices: &[String]) -> String {
         ],
         &rows,
     )
+}
+
+/// The table of the drive classes: a row for each run and class (the runs in order, the classes
+/// as given; a class is a name and its `(node, device)` pairs), over the intervals of the class's
+/// devices, with the devices that have samples, the intervals, the read rate of the class (MiB/s:
+/// the sum over its devices of each one's mean), the read wait's median and 99th percentile
+/// (milliseconds, over the intervals with reads; `-` when none), the queue length's 99th
+/// percentile and the utilisation's mean and 99th percentile (percent). Samples of a device in no
+/// class are left out.
+#[must_use]
+pub fn drive_classes_table(
+    samples: &[DiskSample],
+    classes: &[(String, Vec<(String, String)>)],
+) -> String {
+    let class_of = |s: &DiskSample| -> Option<usize> {
+        classes.iter().position(|(_, devices)| {
+            devices
+                .iter()
+                .any(|(node, device)| *node == s.node && *device == s.device)
+        })
+    };
+    let mut groups: BTreeMap<&str, Vec<Vec<&DiskSample>>> = BTreeMap::new();
+    for s in samples {
+        if let Some(i) = class_of(s) {
+            groups
+                .entry(s.run.as_str())
+                .or_insert_with(|| vec![Vec::new(); classes.len()])[i]
+                .push(s);
+        }
+    }
+    let mut rows: Vec<Vec<String>> = Vec::new();
+    for (run, per_class) in &groups {
+        for ((name, _), ss) in classes.iter().zip(per_class) {
+            let mut devices: BTreeMap<(&str, &str), Vec<f64>> = BTreeMap::new();
+            for s in ss {
+                devices
+                    .entry((s.node.as_str(), s.device.as_str()))
+                    .or_default()
+                    .push(s.rkb_s);
+            }
+            let rate = devices.values().fold(0.0, |sum, v| sum + mean(v) / 1024.0);
+            let waits: Vec<f64> = ss
+                .iter()
+                .filter(|s| s.reads > 0)
+                .map(|s| s.r_await_ms)
+                .collect();
+            let wait = |pct| {
+                if waits.is_empty() {
+                    "-".to_owned()
+                } else {
+                    format!("{:.1}", percentile(&waits, pct))
+                }
+            };
+            let col = |f: fn(&DiskSample) -> f64| -> Vec<f64> { ss.iter().map(|s| f(s)).collect() };
+            let util = col(|s| s.util_pct);
+            rows.push(vec![
+                (*run).to_owned(),
+                name.clone(),
+                devices.len().to_string(),
+                ss.len().to_string(),
+                format!("{rate:.1}"),
+                wait(50),
+                wait(99),
+                format!("{:.2}", percentile(&col(|s| s.aqu_sz), 99)),
+                format!("{:.1}", mean(&util)),
+                format!("{:.1}", percentile(&util, 99)),
+            ]);
+        }
+    }
+    table(
+        &[
+            "run",
+            "class",
+            "devices",
+            "intervals",
+            "read MiB/s",
+            "r_await p50 ms",
+            "r_await p99 ms",
+            "aqu-sz p99",
+            "util mean %",
+            "util p99 %",
+        ],
+        &rows,
+    )
+}
+
+/// The drive class of a `--class` argument, `NAME=node:dev,node:dev,...`.
+///
+/// # Errors
+/// [`Error::Usage`] when the argument has no name, no device, or a device that is not
+/// `<node>:<device>`.
+pub fn parse_class(arg: &str) -> Result<(String, Vec<(String, String)>), Error> {
+    let bad = |why: &str| Error::Usage(format!("--class {arg:?}: {why}"));
+    let (name, list) = arg
+        .split_once('=')
+        .filter(|(name, _)| !name.is_empty())
+        .ok_or_else(|| bad("expected NAME=node:dev,node:dev,..."))?;
+    let devices = list
+        .split(',')
+        .map(|d| {
+            d.split_once(':')
+                .filter(|(node, dev)| !node.is_empty() && !dev.is_empty())
+                .map(|(node, dev)| (node.to_owned(), dev.to_owned()))
+                .ok_or_else(|| bad("a device is not <node>:<device>"))
+        })
+        .collect::<Result<Vec<_>, _>>()?;
+    Ok((name.to_owned(), devices))
 }
 
 /// A metric's change: a whole number without decimals, anything else with three.

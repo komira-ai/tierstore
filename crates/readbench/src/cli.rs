@@ -31,7 +31,10 @@ use crate::record::{
     ClientRun, DemandRead, DiskSample, MetricDelta, Mode, PlanRecord, read_lines, write_line,
 };
 use crate::replay::{self, Client, Knobs, Store};
-use crate::report::{demand_table, disks_table, metrics_table, plan_table, trees_table};
+use crate::report::{
+    demand_table, disks_table, drive_classes_table, metrics_table, parse_class, plan_table,
+    runs_table, trees_table,
+};
 use crate::sample::{Series, deltas, parse_metrics, sample_disks, to_f64};
 use crate::sampletrees::{Query, sample_trees};
 use crate::swfs::{FilerFetch, load_map, parse_server};
@@ -322,6 +325,10 @@ struct ReportArgs {
     /// The drives the table keeps (all when absent).
     #[arg(long, value_delimiter = ',')]
     devices: Vec<String>,
+    /// A class of drives, `NAME=node:dev,node:dev,...` (repeated): the drives table is then a
+    /// row for each run and class instead of each device.
+    #[arg(long = "class")]
+    classes: Vec<String>,
     /// The `plan` records: adds the table of the plans' amplification.
     #[arg(long)]
     plans: Option<PathBuf>,
@@ -684,10 +691,21 @@ async fn verb(verb: Verb, out: &mut dyn Write, err: &mut dyn Write) -> Result<()
             let reads: Vec<DemandRead> = optional(a.demand.as_deref())?;
             let samples: Vec<DiskSample> = optional(a.disks.as_deref())?;
             let changes: Vec<MetricDelta> = optional(a.metrics.as_deref())?;
+            let classes = a
+                .classes
+                .iter()
+                .map(|c| parse_class(c))
+                .collect::<Result<Vec<_>, _>>()?;
+            let drives = if classes.is_empty() {
+                disks_table(&samples, &a.devices)
+            } else {
+                drive_classes_table(&samples, &classes)
+            };
             let mut tables = vec![
+                ("Runs", runs_table(&runs)),
                 ("Trees", trees_table(&runs)),
                 ("Demand reads", demand_table(&reads)),
-                ("Drives", disks_table(&samples, &a.devices)),
+                ("Drives", drives),
                 ("Node metrics", metrics_table(&changes, &[])),
             ];
             if let Some(path) = &a.plans {

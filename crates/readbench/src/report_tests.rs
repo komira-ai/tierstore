@@ -1,8 +1,8 @@
 use std::collections::BTreeMap;
 
 use super::{
-    demand_table, disks_table, mean, metrics_table, number, percentile, plan_table, render,
-    trees_table,
+    demand_table, disks_table, drive_classes_table, mean, metrics_table, number, parse_class,
+    percentile, plan_table, render, runs_table, trees_table,
 };
 use crate::record::{ClientRun, DemandRead, DiskSample, MetricDelta, Mode, PlanRecord, Summary};
 
@@ -11,8 +11,8 @@ const TREES_HEADER: &str = "\
 | --- | --- | --- | --- | --- | --- | --- | --- | --- | --- | --- | --- | --- | --- | --- |
 ";
 const DEMAND_HEADER: &str = "\
-| load clients | read length | reads | wait p50 ms | wait p99 ms | wait max ms |
-| --- | --- | --- | --- | --- | --- |
+| run | load clients | read length | reads | wait p50 ms | wait p99 ms | wait max ms |
+| --- | --- | --- | --- | --- | --- | --- |
 ";
 const DISKS_HEADER: &str = "\
 | run | node | device | intervals | r_await p50 ms | r_await p99 ms | aqu-sz p99 | util mean % | MiB/s mean |
@@ -151,8 +151,12 @@ fn a_table_of_nothing_is_its_header() {
 }
 
 fn read(load_clients: u32, len: u64, wait_us: u64) -> DemandRead {
+    read_of("r", load_clients, len, wait_us)
+}
+
+fn read_of(run: &str, load_clients: u32, len: u64, wait_us: u64) -> DemandRead {
     DemandRead {
-        run: "r".into(),
+        run: run.into(),
         node: "n1".into(),
         load_clients,
         len,
@@ -161,25 +165,25 @@ fn read(load_clients: u32, len: u64, wait_us: u64) -> DemandRead {
     }
 }
 
-/// Reads are grouped by the clients loading the store and by length, 1 MiB being in the short
-/// class and one byte more in the long; each row has the count and the wait's median, 99th
-/// percentile and largest in milliseconds.
+/// Reads are grouped by run and by length, 1 MiB being in the short class and one byte more in
+/// the long; each row has the run's load clients (the largest its reads name), the count and the
+/// wait's median, 99th percentile and largest in milliseconds.
 #[test]
-fn the_demand_table_groups_by_load_and_length() {
+fn the_demand_table_groups_by_run_and_length() {
     let reads = vec![
-        read(8, 1_048_577, 20_000_000),
-        read(0, 4096, 1000),
-        read(8, 1_048_576, 10_000),
-        read(0, 2_000_000, 50_000),
-        read(0, 4096, 3000),
-        read(0, 4096, 2000),
+        read_of("b", 8, 1_048_577, 20_000_000),
+        read_of("a", 0, 4096, 1000),
+        read_of("b", 8, 1_048_576, 10_000),
+        read_of("a", 0, 2_000_000, 50_000),
+        read_of("a", 2, 4096, 3000),
+        read_of("a", 0, 4096, 2000),
     ];
     let want = format!(
         "{DEMAND_HEADER}\
-| 0 | <=1MiB | 3 | 2.0 | 3.0 | 3.0 |
-| 0 | >1MiB | 1 | 50.0 | 50.0 | 50.0 |
-| 8 | <=1MiB | 1 | 10.0 | 10.0 | 10.0 |
-| 8 | >1MiB | 1 | 20000.0 | 20000.0 | 20000.0 |
+| a | 2 | <=1MiB | 3 | 2.0 | 3.0 | 3.0 |
+| a | 0 | >1MiB | 1 | 50.0 | 50.0 | 50.0 |
+| b | 8 | <=1MiB | 1 | 10.0 | 10.0 | 10.0 |
+| b | 8 | >1MiB | 1 | 20000.0 | 20000.0 | 20000.0 |
 "
     );
     assert_eq!(demand_table(&reads), want);
@@ -363,4 +367,207 @@ fn the_plan_table_has_a_row_per_variant_with_the_amplification_of_its_trees() {
 #[test]
 fn the_plan_table_of_no_plans_is_its_header() {
     assert_eq!(plan_table(&[]), PLANS_HEADER);
+}
+
+const RUNS_HEADER: &str = "\
+| run | mode | verified | drive streams | clients | trees | pack GETs per tree p50 | manifest GETs per tree p50 | ready p50 s | ready p99 s | needed GiB | fetched GiB | amplification | first byte p50 ms | first byte p99 ms | errors |
+| --- | --- | --- | --- | --- | --- | --- | --- | --- | --- | --- | --- | --- | --- | --- | --- |
+";
+const CLASSES_HEADER: &str = "\
+| run | class | devices | intervals | read MiB/s | r_await p50 ms | r_await p99 ms | aqu-sz p99 | util mean % | util p99 % |
+| --- | --- | --- | --- | --- | --- | --- | --- | --- | --- |
+";
+
+fn in_run(run: &str, config: &[(&str, &str)], mut c: ClientRun) -> ClientRun {
+    c.run = run.into();
+    c.config = config
+        .iter()
+        .map(|(k, v)| ((*k).to_owned(), (*v).to_owned()))
+        .collect();
+    c
+}
+
+/// A run's row has its mode and the `verified` and `drive_streams` of its configuration, the most
+/// clients, the distinct trees, the medians of the pack GETs (all kinds) and manifest GETs, the
+/// ready time's median and 99th percentile, the summed GiB, the amplification of the sums, the
+/// first-byte median of medians and largest 99th percentile and the summed errors. A shipped run
+/// has no drive streams and a run without the key has `-`; rows are ordered by run.
+#[test]
+fn the_runs_table_has_a_row_per_run() {
+    let ta = "a".repeat(64);
+    let tb = "b".repeat(64);
+    let mut big = client(
+        &ta,
+        Mode::Engine,
+        4,
+        3072,
+        &engine_gets(7),
+        2_000_000,
+        (3, 5000, 40_000),
+        1,
+    );
+    big.bytes_needed = 2048 * MIB;
+    big.bytes_fetched = 3072 * MIB;
+    let mut big2 = big.clone();
+    big2.tree = tb.clone();
+    big2.clients = 2;
+    big2.tree_ready_us = 9_000_000;
+    big2.first_byte_us = Summary {
+        n: 3,
+        p50: 7000,
+        p99: 90_000,
+        max: 90_000,
+    };
+    big2.gets = engine_gets(3)
+        .into_iter()
+        .map(|(k, v)| (k.to_owned(), v))
+        .collect();
+    big2.manifests = 30;
+    let engine = [
+        in_run(
+            "z-eng",
+            &[("verified", "true"), ("drive_streams", "2")],
+            big,
+        ),
+        in_run(
+            "z-eng",
+            &[("verified", "true"), ("drive_streams", "2")],
+            big2,
+        ),
+    ];
+    let shipped = in_run(
+        "a-ship",
+        &[("drive_streams", "9")],
+        client(
+            &ta,
+            Mode::Shipped,
+            1,
+            5,
+            &[("chunk", 40)],
+            1_000_000,
+            (0, 0, 0),
+            0,
+        ),
+    );
+    let bare = in_run(
+        "m-bare",
+        &[],
+        client(&tb, Mode::Engine, 1, 0, &[], 0, (0, 0, 0), 0),
+    );
+    let mut runs: Vec<ClientRun> = engine.to_vec();
+    runs.insert(0, bare);
+    runs.push(shipped);
+    let want = format!(
+        "{RUNS_HEADER}\
+| a-ship | shipped | - | - | 1 | 1 | 40 | 10 | 1.00 | 1.00 | 0.01 | 0.00 | 0.50 | 0.0 | 0.0 | 0 |
+| m-bare | engine | - | - | 1 | 1 | 0 | 10 | 0.00 | 0.00 | 0.01 | 0.00 | 0.00 | 0.0 | 0.0 | 0 |
+| z-eng | engine | true | 2 | 4 | 2 | 6 | 10 | 2.00 | 9.00 | 4.00 | 6.00 | 1.50 | 5.0 | 90.0 | 2 |
+"
+    );
+    assert_eq!(runs_table(&runs), want);
+    assert_eq!(runs_table(&[]), RUNS_HEADER);
+}
+
+#[expect(
+    clippy::too_many_arguments,
+    reason = "a fixture: every figure the tables read"
+)]
+fn dsample(
+    run: &str,
+    node: &str,
+    dev: &str,
+    reads: u64,
+    r_await: f64,
+    aqu: f64,
+    util: f64,
+    rkb_s: f64,
+) -> DiskSample {
+    DiskSample {
+        run: run.into(),
+        node: node.into(),
+        device: dev.into(),
+        t_ms: 0,
+        reads,
+        rkb_s,
+        r_await_ms: r_await,
+        aqu_sz: aqu,
+        util_pct: util,
+    }
+}
+
+fn classes() -> Vec<(String, Vec<(String, String)>)> {
+    vec![
+        (
+            "hdd".to_owned(),
+            vec![
+                ("n1".to_owned(), "sda".to_owned()),
+                ("n2".to_owned(), "sda".to_owned()),
+            ],
+        ),
+        (
+            "ssd".to_owned(),
+            vec![("n1".to_owned(), "nvme0n1".to_owned())],
+        ),
+        ("idle".to_owned(), vec![("n3".to_owned(), "sdz".to_owned())]),
+    ]
+}
+
+/// A row per run and class: devices with samples, intervals, the sum of each device's mean read
+/// rate, the wait over the intervals with reads only (`-` for a class with none), the queue's 99th
+/// percentile, the mean and 99th percentile of the utilisation; a drive in no class is ignored; a
+/// class with no sample in a run still has its row.
+#[test]
+fn the_drive_classes_table_has_a_row_per_run_and_class() {
+    let samples = vec![
+        dsample("r2", "n1", "sda", 5, 8.0, 1.0, 10.0, 2048.0),
+        dsample("r1", "n1", "sda", 1, 4.0, 2.0, 20.0, 1024.0),
+        dsample("r1", "n1", "sda", 0, 0.0, 0.5, 0.0, 3072.0),
+        dsample("r1", "n2", "sda", 3, 12.0, 4.0, 100.0, 1024.0),
+        dsample("r1", "n1", "nvme0n1", 0, 0.0, 0.0, 0.0, 0.0),
+        dsample("r1", "n1", "loop2", 9, 99.0, 9.0, 99.0, 9999.0),
+        dsample("r3", "n9", "sdq", 1, 1.0, 1.0, 1.0, 1.0),
+    ];
+    let want = format!(
+        "{CLASSES_HEADER}\
+| r1 | hdd | 2 | 3 | 3.0 | 4.0 | 12.0 | 4.00 | 40.0 | 100.0 |
+| r1 | ssd | 1 | 1 | 0.0 | - | - | 0.00 | 0.0 | 0.0 |
+| r1 | idle | 0 | 0 | 0.0 | - | - | 0.00 | 0.0 | 0.0 |
+| r2 | hdd | 1 | 1 | 2.0 | 8.0 | 8.0 | 1.00 | 10.0 | 10.0 |
+| r2 | ssd | 0 | 0 | 0.0 | - | - | 0.00 | 0.0 | 0.0 |
+| r2 | idle | 0 | 0 | 0.0 | - | - | 0.00 | 0.0 | 0.0 |
+"
+    );
+    assert_eq!(drive_classes_table(&samples, &classes()), want);
+    assert_eq!(drive_classes_table(&[], &classes()), CLASSES_HEADER);
+    assert_eq!(drive_classes_table(&samples, &[]), CLASSES_HEADER);
+}
+
+/// `NAME=node:dev,...` gives the name and its pairs; a missing `=`, an empty name, an empty list
+/// and a device without a node or a device name are usage errors naming the argument.
+#[test]
+fn a_class_argument_is_a_name_and_node_device_pairs() {
+    assert_eq!(
+        parse_class("hdd=n1:sda,n2:sdb").unwrap(),
+        (
+            "hdd".to_owned(),
+            vec![
+                ("n1".to_owned(), "sda".to_owned()),
+                ("n2".to_owned(), "sdb".to_owned())
+            ]
+        )
+    );
+    for (arg, why) in [
+        ("hdd", "expected NAME=node:dev,node:dev,..."),
+        ("=n1:sda", "expected NAME=node:dev,node:dev,..."),
+        ("hdd=", "a device is not <node>:<device>"),
+        ("hdd=n1", "a device is not <node>:<device>"),
+        ("hdd=:sda", "a device is not <node>:<device>"),
+        ("hdd=n1:", "a device is not <node>:<device>"),
+        ("hdd=n1:sda,x", "a device is not <node>:<device>"),
+    ] {
+        assert_eq!(
+            parse_class(arg).unwrap_err().to_string(),
+            format!("--class {arg:?}: {why}")
+        );
+    }
 }
