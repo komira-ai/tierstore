@@ -210,8 +210,10 @@ fn running_out_of_descriptors_fails_the_open() {
     assert_eq!(core.descriptor_failures(), 1);
     assert_eq!(
         unconnected,
-        Err("no descriptor: cannot connect to the fill socket: Too many open files (os error 24)"
-            .to_owned())
+        Err(
+            "no descriptor: cannot connect to the fill socket: Too many open files (os error 24)"
+                .to_owned()
+        )
     );
     assert_eq!(paused.load(std::sync::atomic::Ordering::SeqCst), 0);
     assert_eq!(core.read(before, 0, 3000).unwrap(), expected);

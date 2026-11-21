@@ -367,6 +367,9 @@ fn file_bytes_over_a_directory_fails_with_io() {
         size: 10,
     };
     let refused = bytes.read(0, 4).unwrap_err();
-    assert_eq!(refused.raw_os_error(), Some(rustix::io::Errno::ISDIR.raw_os_error()));
+    assert_eq!(
+        refused.raw_os_error(),
+        Some(rustix::io::Errno::ISDIR.raw_os_error())
+    );
     assert_eq!(bytes.read(10, 4).unwrap(), Vec::<u8>::new());
 }

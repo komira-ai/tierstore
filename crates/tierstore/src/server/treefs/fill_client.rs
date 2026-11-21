@@ -194,8 +194,9 @@ impl FillClient {
         let made = match UnixStream::connect(&self.path) {
             Ok(stream) => stream,
             Err(error) => {
-                return lacks_descriptors(&error)
-                    .map_or(Ok((None, false)), |errno| Err(AskError::NoDescriptor(errno)));
+                return lacks_descriptors(&error).map_or(Ok((None, false)), |errno| {
+                    Err(AskError::NoDescriptor(errno))
+                });
             }
         };
         // A duration that is not zero is always taken.
@@ -319,7 +320,10 @@ impl FillClient {
         (key, offset): (&str, u64),
         until: Option<Until<'_>>,
     ) -> Result<(), FillFailure> {
-        self.fill(&format!("fill {sha256} {size} from {key} @ {offset}"), until)
+        self.fill(
+            &format!("fill {sha256} {size} from {key} @ {offset}"),
+            until,
+        )
     }
 
     fn fill(&self, line: &str, until: Option<Until<'_>>) -> Result<(), FillFailure> {

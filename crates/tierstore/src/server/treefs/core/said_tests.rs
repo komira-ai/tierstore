@@ -12,12 +12,21 @@ fn digest(byte: u8) -> TreeDigest {
 fn a_failure_is_said_once_in_ten_seconds_and_the_next_line_carries_the_count() {
     let lines = Lines::default();
     let tree = digest(0xab);
-    assert_eq!(lines.failed((7, Failing::Open), Some(&tree), 1_000), Some(0));
+    assert_eq!(
+        lines.failed((7, Failing::Open), Some(&tree), 1_000),
+        Some(0)
+    );
     assert_eq!(lines.failed((7, Failing::Open), Some(&tree), 1_001), None);
     assert_eq!(lines.failed((7, Failing::Open), Some(&tree), 10_999), None);
-    assert_eq!(lines.failed((7, Failing::Open), Some(&tree), 11_000), Some(2));
+    assert_eq!(
+        lines.failed((7, Failing::Open), Some(&tree), 11_000),
+        Some(2)
+    );
     // Another kind, and another tree, are said at once.
-    assert_eq!(lines.failed((7, Failing::Read), Some(&tree), 11_001), Some(0));
+    assert_eq!(
+        lines.failed((7, Failing::Read), Some(&tree), 11_001),
+        Some(0)
+    );
     assert_eq!(lines.failed((8, Failing::Open), None, 11_001), Some(0));
 }
 
@@ -53,7 +62,10 @@ fn the_counts_not_said_are_said_by_the_sweep_once_the_last_line_is_ten_seconds_o
         ]
     );
     assert_eq!(lines.kept(), 0);
-    assert_eq!(lines.failed((3, Failing::Open), Some(&tree), 10_001), Some(0));
+    assert_eq!(
+        lines.failed((3, Failing::Open), Some(&tree), 10_001),
+        Some(0)
+    );
 }
 
 /// Asserts that a tree that leaves memory says its counts at once, whatever the time, and only
@@ -77,7 +89,10 @@ fn a_tree_that_leaves_memory_says_its_counts_at_once_and_only_its_own() {
     assert_eq!(lines.kept(), 1);
     assert_eq!(lines.unsaid(4, Some(5)), Vec::<String>::new());
     // The count of the tree that stayed is kept.
-    assert_eq!(lines.failed((6, Failing::Tree), Some(&tree), 10_003), Some(3));
+    assert_eq!(
+        lines.failed((6, Failing::Tree), Some(&tree), 10_003),
+        Some(3)
+    );
 }
 
 /// Asserts the words of one failure not said, of each kind.

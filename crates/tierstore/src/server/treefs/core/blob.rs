@@ -48,8 +48,8 @@ use crate::server::local_cache::blob_path;
 use crate::tree_manifest::{BlobSource, EntryKind, TreeDigest, TreeEntry};
 
 use super::super::attach::Failure;
-use super::super::ino;
 use super::super::fill_client::{NO_DESCRIPTOR, Until, lacks_descriptors};
+use super::super::ino;
 use super::super::locked;
 use super::super::tree::Tree;
 use super::read::FileBytes;
@@ -404,11 +404,9 @@ impl Core {
             let _ = self.open_files.short.fetch_add(1, Ordering::AcqRel);
         }
         let failure = self.failed((loaded, number), entry.index, blob.0, reason);
-        let unsaid = self.lines.failed(
-            (number, Failing::Open),
-            Some(&loaded.digest),
-            self.now(),
-        );
+        let unsaid = self
+            .lines
+            .failed((number, Failing::Open), Some(&loaded.digest), self.now());
         if let Some(unsaid) = unsaid {
             let line = said(
                 (&loaded.digest, number),
