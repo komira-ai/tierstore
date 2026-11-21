@@ -18,15 +18,15 @@ const READERS: usize = 16;
 const ROUNDS: usize = 400;
 
 /// The byte at `at` of a file of the test, which tells where it is: a misplaced span of the file,
-/// or a span of another file (`salt`), differs from the right one.
-fn pattern(salt: u32, at: usize) -> u8 {
-    let mixed = (at as u32).wrapping_add(salt.wrapping_mul(0x85eb_ca6b));
+/// or a span of another file (`file`), differs from the right one.
+fn pattern(file: u32, at: usize) -> u8 {
+    let mixed = (at as u32).wrapping_add(file.wrapping_mul(0x85eb_ca6b));
     (mixed.wrapping_mul(0x9e37_79b1) >> 23) as u8
 }
 
-/// `len` bytes of the file `salt`.
-pub(super) fn content(salt: u32, len: usize) -> Vec<u8> {
-    (0..len).map(|at| pattern(salt, at)).collect()
+/// `len` bytes of the file `file`.
+pub(super) fn content(file: u32, len: usize) -> Vec<u8> {
+    (0..len).map(|at| pattern(file, at)).collect()
 }
 
 /// The next of a thread's numbers, from `state`: xorshift.
