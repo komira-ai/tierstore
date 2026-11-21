@@ -327,7 +327,7 @@ fn counting_file(name: &str) -> (tierstore_testkit::dir::TestDir, std::fs::File)
 fn file_bytes_reads_are_clipped_to_the_size_at_the_base() {
     let (_dir, file) = counting_file("tfs-bytes-clip");
     let bytes = FileBytes {
-        file,
+        file: file.into(),
         base: 10,
         size: 5,
     };
@@ -345,11 +345,11 @@ fn file_bytes_reads_are_clipped_to_the_size_at_the_base() {
 #[test]
 fn file_bytes_of_a_whole_file_start_at_zero_and_end_where_the_file_ends() {
     let (_dir, file) = counting_file("tfs-bytes-whole");
-    let whole = FileBytes::whole(file.try_clone().unwrap(), 40);
+    let whole = FileBytes::whole(file.try_clone().unwrap().into(), 40);
     assert_eq!(whole.read(0, 3).unwrap(), [0, 1, 2]);
     assert_eq!(whole.read(38, 100).unwrap(), [38, 39]);
     let long = FileBytes {
-        file,
+        file: file.into(),
         base: 35,
         size: 100,
     };
@@ -362,7 +362,7 @@ fn file_bytes_of_a_whole_file_start_at_zero_and_end_where_the_file_ends() {
 fn file_bytes_over_a_directory_fails_with_io() {
     let dir = tierstore_testkit::dir::TestDir::under(std::env::temp_dir(), "tfs-bytes-dir");
     let bytes = FileBytes {
-        file: std::fs::File::open(dir.path()).unwrap(),
+        file: std::fs::File::open(dir.path()).unwrap().into(),
         base: 0,
         size: 10,
     };

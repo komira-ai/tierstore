@@ -11,7 +11,7 @@ use super::super::{Core, Errno, Looked};
 use super::{look_every, sweep};
 use crate::server::treefs::ino;
 use crate::server::treefs::testing::{
-    Built, Rig, TREE_IDLE, file, open_cached, sample, sha, until,
+    Built, Logged, Rig, TREE_IDLE, file, logged, open_cached, sample, sha, until,
 };
 
 /// The inode number of the root of the tree numbered 1.
@@ -388,4 +388,235 @@ fn idle_trees_are_looked_for_every_quarter_of_the_idle_time_within_bounds() {
     );
     assert_eq!(look_every(Duration::from_secs(40)), Duration::from_secs(10));
     assert_eq!(look_every(Duration::from_secs(1)), Duration::from_secs(1));
+}
+
+/// The digest of the blob of `content`.
+fn blob_digest(content: &[u8]) -> String {
+    sha(content)
+}
+
+/// Makes the fill of the blob of `content` fail with `words`.
+fn fail_blob(rig: &Rig, content: &[u8], words: &str) {
+    let _ = rig
+        .upstream
+        .failing
+        .lock()
+        .unwrap()
+        .insert(blob_digest(content), words.to_owned());
+}
+
+/// What `detach_idle` says at warn, with the clock past the idle time.
+fn said_at_idle_end(rig: &Rig) -> String {
+    let log = Logged::default();
+    let guard = logged(&log, tracing::Level::WARN);
+    rig.clock.advance(TREE_IDLE);
+    let _ = rig.core.detach_idle();
+    drop(guard);
+    log.text()
+}
+
+/// Asserts that a file of a tree only a lookup attached whose open fails is recorded on that
+/// implicit attachment, and that when the attachment ends one line is said at warn for the tree,
+/// whole: its digest and number, how it was attached, the count, and the path, blob and reason of
+/// the failed open. The failure was dropped before.
+#[test]
+fn a_failed_open_in_an_implicitly_attached_tree_is_said_when_the_attachment_ends() {
+    let rig = Rig::new("tfs-imp-said", sample());
+    let root = root_of(&rig);
+    assert_eq!(resolved(&rig.core, &root), ROOT);
+    let cc = {
+        let bin = child(&rig.core, ROOT, "bin");
+        child(&rig.core, bin, "cc")
+    };
+    let blob = {
+        let built = rig.upstream.built.lock().unwrap();
+        built
+            .blobs
+            .iter()
+            .find(|(_, bytes)| bytes.len() == 3000)
+            .map(|(sha, _)| sha.clone())
+            .unwrap()
+    };
+    let _ = rig
+        .upstream
+        .failing
+        .lock()
+        .unwrap()
+        .insert(blob.clone(), "mismatch".to_owned());
+    assert_eq!(open_cached(&rig.core, cc, false), Err(Errno::Io));
+    assert_eq!(
+        said_at_idle_end(&rig),
+        format!(
+            "tierstore fs: the attachment of the tree {root} (number 1) by a lookup ended with 1 \
+             failed open: /bin/cc ({blob}: mismatch)\n"
+        )
+    );
+    assert!(rig.core.implicit().is_empty());
+}
+
+/// Asserts that an implicit attachment that ended with no failed open says nothing.
+#[test]
+fn an_implicit_attachment_that_ends_with_no_failure_says_nothing() {
+    let rig = Rig::new("tfs-imp-quiet", sample());
+    let root = root_of(&rig);
+    assert_eq!(resolved(&rig.core, &root), ROOT);
+    let big = child(&rig.core, ROOT, "big.bin");
+    assert!(open_cached(&rig.core, big, false).is_ok());
+    assert_eq!(said_at_idle_end(&rig), "");
+    assert!(rig.core.implicit().is_empty());
+}
+
+/// Asserts that a path that failed twice is one failed open in the line of the end of the
+/// implicit attachment.
+#[test]
+fn a_path_that_fails_twice_is_one_failed_open_in_the_line() {
+    let rig = Rig::new("tfs-imp-twice", sample());
+    let root = root_of(&rig);
+    assert_eq!(resolved(&rig.core, &root), ROOT);
+    let bin = child(&rig.core, ROOT, "bin");
+    let tool = child(&rig.core, bin, "tool");
+    let blob = {
+        let built = rig.upstream.built.lock().unwrap();
+        built
+            .blobs
+            .iter()
+            .find(|(_, bytes)| bytes.len() == 10)
+            .map(|(sha, _)| sha.clone())
+            .unwrap()
+    };
+    let _ = rig
+        .upstream
+        .failing
+        .lock()
+        .unwrap()
+        .insert(blob.clone(), "mismatch".to_owned());
+    assert_eq!(open_cached(&rig.core, tool, false), Err(Errno::Io));
+    assert_eq!(open_cached(&rig.core, tool, false), Err(Errno::Io));
+    assert_eq!(
+        said_at_idle_end(&rig),
+        format!(
+            "tierstore fs: the attachment of the tree {root} (number 1) by a lookup ended with 1 \
+             failed open: /bin/tool ({blob}: mismatch)\n"
+        )
+    );
+}
+
+/// Asserts that a tree with more failed opens than the line names says the first eight by path
+/// order, with the count of all, and then how many more there are.
+#[test]
+fn a_line_names_eight_failed_opens_and_counts_the_rest() {
+    let names: Vec<String> = (1..=11).map(|i| format!("f{i:02}")).collect();
+    let contents: Vec<Vec<u8>> = (1..=11u8).map(|i| vec![i; 20 + usize::from(i)]).collect();
+    let built = Built::of(
+        names
+            .iter()
+            .zip(&contents)
+            .map(|(name, content)| (name.as_str(), file(content)))
+            .collect(),
+    );
+    let rig = Rig::new("tfs-imp-many", built);
+    let root = root_of(&rig);
+    assert_eq!(resolved(&rig.core, &root), ROOT);
+    for (name, content) in names.iter().zip(&contents) {
+        fail_blob(&rig, content, "mismatch");
+        let at = child(&rig.core, ROOT, name);
+        assert_eq!(open_cached(&rig.core, at, false), Err(Errno::Io));
+    }
+    let named: Vec<String> = names
+        .iter()
+        .zip(&contents)
+        .take(8)
+        .map(|(name, content)| format!("/{name} ({}: mismatch)", blob_digest(content)))
+        .collect();
+    assert_eq!(
+        said_at_idle_end(&rig),
+        format!(
+            "tierstore fs: the attachment of the tree {root} (number 1) by a lookup ended with 11 \
+             failed opens: {}; and 3 more\n",
+            named.join("; ")
+        )
+    );
+}
+
+/// Asserts that a tree with exactly eight failed opens names all eight and no "more".
+#[test]
+fn a_line_with_eight_failed_opens_names_them_all() {
+    let names: Vec<String> = (1..=8).map(|i| format!("f{i}")).collect();
+    let contents: Vec<Vec<u8>> = (1..=8u8).map(|i| vec![i; 20 + usize::from(i)]).collect();
+    let built = Built::of(
+        names
+            .iter()
+            .zip(&contents)
+            .map(|(name, content)| (name.as_str(), file(content)))
+            .collect(),
+    );
+    let rig = Rig::new("tfs-imp-eight", built);
+    let root = root_of(&rig);
+    assert_eq!(resolved(&rig.core, &root), ROOT);
+    for (name, content) in names.iter().zip(&contents) {
+        fail_blob(&rig, content, "mismatch");
+        let at = child(&rig.core, ROOT, name);
+        assert_eq!(open_cached(&rig.core, at, false), Err(Errno::Io));
+    }
+    let named: Vec<String> = names
+        .iter()
+        .zip(&contents)
+        .map(|(name, content)| format!("/{name} ({}: mismatch)", blob_digest(content)))
+        .collect();
+    assert_eq!(
+        said_at_idle_end(&rig),
+        format!(
+            "tierstore fs: the attachment of the tree {root} (number 1) by a lookup ended with 8 \
+             failed opens: {}\n",
+            named.join("; ")
+        )
+    );
+}
+
+/// Asserts that when a run and a lookup both have a tree, a failed open is answered by the run's
+/// detach, which leaves the failure of the lookup's attachment in place: it is said when the
+/// implicit attachment ends, and the run's detach said nothing.
+#[test]
+fn a_runs_detach_answers_a_failure_that_the_implicit_attachment_also_says() {
+    let rig = Rig::new("tfs-imp-both", sample());
+    let root = root_of(&rig);
+    assert_eq!(resolved(&rig.core, &root), ROOT);
+    let _ = rig.core.attach(&root, "run-1").unwrap();
+    let bin = child(&rig.core, ROOT, "bin");
+    let cc = child(&rig.core, bin, "cc");
+    let blob = {
+        let built = rig.upstream.built.lock().unwrap();
+        built
+            .blobs
+            .iter()
+            .find(|(_, bytes)| bytes.len() == 3000)
+            .map(|(sha, _)| sha.clone())
+            .unwrap()
+    };
+    let _ = rig
+        .upstream
+        .failing
+        .lock()
+        .unwrap()
+        .insert(blob.clone(), "mismatch".to_owned());
+    assert_eq!(open_cached(&rig.core, cc, false), Err(Errno::Io));
+    let log = Logged::default();
+    let guard = logged(&log, tracing::Level::WARN);
+    let failures = rig.core.detach("run-1").unwrap();
+    drop(guard);
+    assert_eq!(failures.len(), 1);
+    assert_eq!(
+        (failures[0].path.as_str(), failures[0].digest.as_str()),
+        ("/bin/cc", blob.as_str())
+    );
+    assert_eq!(failures[0].reason, "mismatch");
+    assert_eq!(log.text(), "");
+    assert_eq!(rig.core.implicit(), vec![1]);
+    assert_eq!(
+        said_at_idle_end(&rig),
+        format!(
+            "tierstore fs: the attachment of the tree {root} (number 1) by a lookup ended with 1 \
+             failed open: /bin/cc ({blob}: mismatch)\n"
+        )
+    );
 }

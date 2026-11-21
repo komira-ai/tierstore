@@ -7,6 +7,7 @@
 
 use std::fs::File;
 use std::os::unix::fs::FileExt as _;
+use std::sync::Arc;
 
 use crate::tree_manifest::EntryKind;
 
@@ -16,8 +17,8 @@ use super::{Core, DirItem, Entry, Errno, TREE_TTL, ino};
 /// of the blob, from 0, or the file of the pack the file is a span of, from the span's offset.
 #[derive(Debug)]
 pub(in crate::server::treefs) struct FileBytes {
-    /// The file that holds the bytes.
-    pub file: File,
+    /// The file that holds the bytes, shared by every handle of it (`core/blob.rs`).
+    pub file: Arc<File>,
     /// Where the first byte is in it.
     pub base: u64,
     /// How many bytes there are.
@@ -26,7 +27,7 @@ pub(in crate::server::treefs) struct FileBytes {
 
 impl FileBytes {
     /// The whole of `file`, the cache file of a blob of `size` bytes.
-    pub(in crate::server::treefs) fn whole(file: File, size: u64) -> Self {
+    pub(in crate::server::treefs) fn whole(file: Arc<File>, size: u64) -> Self {
         Self {
             file,
             base: 0,

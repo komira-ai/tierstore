@@ -8,7 +8,9 @@ use std::time::{Duration, SystemTime};
 
 use super::{AttachError, Attr, Core, DirItem, Entry, Errno, Failure, Kind, Looked, TREE_TTL};
 use crate::server::treefs::ino;
-use crate::server::treefs::testing::{Built, OWNER, Rig, file, open_cached, sample, sha, until};
+use crate::server::treefs::testing::{
+    Built, Logged, OWNER, Rig, file, logged, open_cached, sample, sha, until,
+};
 
 const RUN: &str = "run-1";
 
@@ -423,9 +425,9 @@ fn an_open_is_refused_for_writing_and_for_what_is_not_a_file() {
 
 /// Asserts that a fill that fails fails the open with `EIO`, records the path, the digest and the
 /// words of the failure on every run that has the tree, once for a path however often it is opened,
-/// and gives them at `detach`; that a fill answered `ok` that left no file is a failure `io`, and a
-/// blob the upstream does not have is `upstream 404`; and that the file opens once the upstream
-/// has it again.
+/// and gives them at `detach`; that a fill answered `ok` that left no file is a failure whose
+/// reason is `io: ` and what the system says of a file that is not there, and a blob the upstream
+/// does not have is `upstream 404`; and that the file opens once the upstream has it again.
 #[test]
 fn a_failed_fill_fails_the_open_and_is_recorded_for_every_run_of_the_tree() {
     let rig = attached("tfs-core-fail");
@@ -463,7 +465,10 @@ fn a_failed_fill_fails_the_open_and_is_recorded_for_every_run_of_the_tree() {
         Failure {
             path: "/bin/tool".into(),
             digest: tool,
-            reason: "io".into(),
+            reason: format!(
+                "io: {}",
+                std::fs::File::open(rig.cache.join("none")).unwrap_err()
+            ),
         },
         Failure {
             path: "/include/a.h".into(),
@@ -509,7 +514,8 @@ fn a_read_that_the_system_fails_is_an_io_error() {
     core.handles.insert(
         handle,
         std::sync::Arc::new(super::Handle::Cached(super::FileBytes::whole(
-            directory, 10,
+            directory.into(),
+            10,
         ))),
     );
     assert_eq!(core.read(handle, 0, 10), Err(Errno::Io));
@@ -630,10 +636,11 @@ fn an_attached_tree_is_kept_and_a_counted_listing_entry_is_a_lookup() {
     core.count(ino::of(9, 0));
 }
 
-/// Asserts that a tree whose manifests cannot be read again is `EIO` and a tree number the table
-/// does not know is `ENOENT`, and that a table that cannot be read is `EIO`.
+/// Asserts that a tree whose manifests are gone from the cache and from the upstream is `ENOENT`,
+/// a tree number the table does not know is `ENOENT`, and a table that cannot be read is `EIO`,
+/// said once at warn with the tree number and what the table says.
 #[test]
-fn a_tree_that_cannot_be_read_again_is_an_io_error() {
+fn a_tree_that_is_gone_is_no_entry_and_a_table_that_cannot_be_read_is_an_io_error() {
     let rig = attached("tfs-core-reread");
     let core = &rig.core;
     let root = rig.upstream.built.lock().unwrap().root.clone();
@@ -647,7 +654,7 @@ fn a_tree_that_cannot_be_read_again_is_an_io_error() {
         let _ = std::fs::remove_dir_all(entry.unwrap().path());
     }
     rig.upstream.built.lock().unwrap().manifests.clear();
-    assert_eq!(core.getattr(root_ino()), Err(Errno::Io));
+    assert_eq!(core.getattr(root_ino()), Err(Errno::NoEnt));
     assert_eq!(core.getattr(ino::of(5, 0)), Err(Errno::NoEnt));
     // A table that cannot be read.
     let table = std::fs::OpenOptions::new()
@@ -655,7 +662,19 @@ fn a_tree_that_cannot_be_read_again_is_an_io_error() {
         .open(rig.runtime.join("trees"))
         .unwrap();
     table.set_len(16).unwrap();
+    let log = Logged::default();
+    let guard = logged(&log, tracing::Level::WARN);
     assert_eq!(core.getattr(root_ino()), Err(Errno::Io));
+    drop(guard);
+    let text = log.text();
+    let lines: Vec<&str> = text.lines().collect();
+    assert_eq!(lines.len(), 1, "{text}");
+    assert_eq!(
+        lines[0],
+        "tierstore fs: cannot read the tree number 1 from the table: the table of tree numbers: \
+         failed to fill whole buffer",
+        "{text}"
+    );
 }
 
 /// Asserts that a manifest in the cache that is larger than a manifest may be is refused by size
@@ -678,9 +697,9 @@ fn a_manifest_file_is_read_up_to_one_byte_past_the_limit() {
 fn the_path_of_an_entry_is_its_names_from_the_root() {
     let rig = attached("tfs-core-path");
     let loaded = rig.core.tree(1).unwrap();
-    assert_eq!(super::path_of(&loaded.tree, 0), "/");
-    assert_eq!(super::path_of(&loaded.tree, 3), "/bin/cc");
-    assert_eq!(super::path_of(&loaded.tree, 7), "/include/a.h");
+    assert_eq!(super::blob::path_of(&loaded.tree, 0), "/");
+    assert_eq!(super::blob::path_of(&loaded.tree, 3), "/bin/cc");
+    assert_eq!(super::blob::path_of(&loaded.tree, 7), "/include/a.h");
 }
 
 /// Asserts that a blob pinned for a tree is pinned again when the tree is attached again after its

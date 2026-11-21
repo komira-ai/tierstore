@@ -28,7 +28,10 @@
 //!
 //! Every read of a tree after the first in this process is said on stderr at info, with its
 //! entries, its time, and the requests that waited for it. A read that took
-//! [`SLOW_READ_MS`] or more is said at warn.
+//! [`SLOW_READ_MS`] or more is said at warn, and so is a read that failed, the first too, once in
+//! `SAY_EVERY_MS` for a tree with the count of the failed reads not said (`core/blob.rs`). A
+//! request for a tree that is gone (its root manifest is not upstream, or its placement has
+//! ended) is answered `ENOENT`; one for a tree that cannot be read now, `EIO`.
 
 use std::collections::HashMap;
 use std::sync::atomic::{AtomicU64, Ordering};
@@ -36,6 +39,7 @@ use std::sync::{Arc, Condvar, Mutex};
 
 use crate::tree_manifest::TreeDigest;
 
+use super::blob::FailLog;
 use super::fetched::Fetched;
 #[cfg(any(target_os = "linux", test))]
 use super::ino;
@@ -68,6 +72,8 @@ pub(in crate::server::treefs) struct Reads {
     waiting: AtomicU64,
     /// The tree numbers read in this process at least once, and how many times.
     done: Mutex<HashMap<u64, u64>>,
+    /// The lines said about the failed reads of each tree, by number (`core/blob.rs`).
+    failed: Mutex<HashMap<u64, FailLog>>,
     /// Makes the next read that leads panic once it has read, before it ends: for the test of
     /// a read that stops.
     #[cfg(test)]
@@ -96,18 +102,28 @@ impl Core {
     /// for it while it is read.
     ///
     /// # Errors
-    /// [`Errno::NoEnt`] for a number the table does not know, [`Errno::Io`] for a table that
-    /// cannot be read or a tree that cannot be read.
+    /// [`Errno::NoEnt`] for a number the table does not know or a tree that is gone (its root
+    /// manifest is not upstream, or its placement has ended), [`Errno::Io`] for a table that
+    /// cannot be read, said on stderr, or a tree that cannot be read now, which the read says
+    /// ([`said`]).
     pub(super) fn tree(&self, number: u64) -> Result<Arc<Loaded>, Errno> {
         if let Some(loaded) = self.in_memory(number) {
             return Ok(loaded);
         }
-        let digest = self
-            .table
-            .digest_of(number)
-            .map_err(|_| Errno::Io)?
-            .ok_or(Errno::NoEnt)?;
-        self.load(number, digest).map_err(|_| Errno::Io)
+        let digest = match self.table.digest_of(number) {
+            Ok(Some(digest)) => digest,
+            Ok(None) => return Err(Errno::NoEnt),
+            Err(why) => {
+                tracing::warn!(
+                    "tierstore fs: cannot read the tree number {number} from the table: {why}"
+                );
+                return Err(Errno::Io);
+            }
+        };
+        self.load(number, digest).map_err(|why| match why {
+            Unread::Gone(_) => Errno::NoEnt,
+            Unread::Failed(_) => Errno::Io,
+        })
     }
 
     /// The tree `number` if it is in memory, as used now.
@@ -171,12 +187,21 @@ impl Core {
         *locked(&ending.flight.ended) = Some(read.clone());
         ending.flight.changed.notify_all();
         let waited = ending.flight.waited.load(Ordering::Acquire);
-        if let Some(line) = said((&digest, number), &read, (times, took, waited)) {
-            if took >= SLOW_READ_MS {
-                tracing::warn!("{line}");
-            } else {
-                tracing::info!("{line}");
+        let line = said((&digest, number), &read, (times, took, waited));
+        match line {
+            Some(line) if read.is_err() => {
+                let now = self.now();
+                let unsaid = locked(&self.reads.failed)
+                    .entry(number)
+                    .or_default()
+                    .failed(now);
+                if let Some(unsaid) = unsaid {
+                    tracing::warn!("{line}{}", unsaid_reads(unsaid));
+                }
             }
+            Some(line) if took >= SLOW_READ_MS => tracing::warn!("{line}"),
+            Some(line) => tracing::info!("{line}"),
+            None => {}
         }
         read
     }
@@ -308,20 +333,32 @@ impl Core {
     }
 }
 
+/// What the line of a failed read adds for the `unsaid` failed reads of the tree before it that
+/// were not said.
+fn unsaid_reads(unsaid: u64) -> String {
+    match unsaid {
+        0 => String::new(),
+        1 => "; 1 more failed read of this tree since the last line".to_owned(),
+        n => format!("; {n} more failed reads of this tree since the last line"),
+    }
+}
+
 /// The line said on stderr for the read `read` of the tree `digest`, numbered `number`, the
 /// `times`-th of it in this process, which took `took` milliseconds while `waited` requests
-/// waited for it: none for the first read of a tree that took less than [`SLOW_READ_MS`].
+/// waited for it: none for the first read of a tree that was read in less than
+/// [`SLOW_READ_MS`]. A read that failed is always said, at warn.
 fn said(
     (digest, number): (&TreeDigest, u64),
     read: &Read,
     (times, took, waited): (u64, u64, u64),
 ) -> Option<String> {
-    if times == 1 && took < SLOW_READ_MS {
+    if times == 1 && took < SLOW_READ_MS && read.is_ok() {
         return None;
     }
     let what = match read {
         Ok(loaded) => format!("{} entries", loaded.tree.len()),
-        Err(why) => format!("failed: {why}"),
+        Err(why @ Unread::Gone(_)) => format!("gone: {why}"),
+        Err(why @ Unread::Failed(_)) => format!("failed: {why}"),
     };
     Some(format!(
         "tierstore fs: read the tree {digest} (number {number}, read {times} times in this \

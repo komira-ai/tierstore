@@ -127,3 +127,66 @@ fn a_file_that_cannot_be_read_or_written_is_an_error() {
     // A rename of a file over a directory fails.
     assert!(Attachments::new(&missing).snapshot().write().is_err());
 }
+
+/// Asserts that a failure of a tree no run has is recorded on its implicit attachment, which
+/// gives it back by path when it ends, once: a second end gives none.
+#[test]
+fn a_failure_is_recorded_on_the_implicit_attachment_of_a_tree_no_run_has() {
+    let dir = TestDir::under(std::env::temp_dir(), "tfs-attach-imp-fail");
+    let mut attachments = Attachments::new(dir.path());
+    attachments.add_implicit(1, tree(b"a"));
+    attachments.fail(1, &failure("/bin/cc"));
+    attachments.fail(1, &failure("/bin/ar"));
+    let got = attachments.remove_implicit(1);
+    let paths: Vec<&str> = got.iter().map(|f| f.path.as_str()).collect();
+    assert_eq!(paths, ["/bin/ar", "/bin/cc"]);
+    assert_eq!(got[1], failure("/bin/cc"));
+    assert!(attachments.remove_implicit(1).is_empty());
+    assert!(attachments.implicit().is_empty());
+}
+
+/// Asserts that a failure of a tree a run and a lookup both have is recorded on both, and that
+/// ending one leaves the other's record.
+#[test]
+fn a_failure_is_recorded_on_the_run_and_the_implicit_attachment_alike() {
+    let dir = TestDir::under(std::env::temp_dir(), "tfs-attach-both-fail");
+    let mut attachments = Attachments::new(dir.path());
+    attachments.add("one", 1, tree(b"a"));
+    attachments.add_implicit(1, tree(b"a"));
+    attachments.fail(1, &failure("/bin/cc"));
+    let implicit = attachments.remove_implicit(1);
+    assert_eq!(implicit, vec![failure("/bin/cc")]);
+    let one = attachments.remove("one").unwrap();
+    assert_eq!(one[0].2, vec![failure("/bin/cc")]);
+}
+
+/// Asserts that a second failure of one path replaces the first on the implicit attachment: one
+/// record per path, the later reason.
+#[test]
+fn a_second_failure_of_a_path_replaces_the_first_on_the_implicit_attachment() {
+    let dir = TestDir::under(std::env::temp_dir(), "tfs-attach-imp-twice");
+    let mut attachments = Attachments::new(dir.path());
+    attachments.add_implicit(1, tree(b"a"));
+    attachments.fail(1, &failure("/bin/cc"));
+    let mut later = failure("/bin/cc");
+    later.reason = "mismatch".to_owned();
+    attachments.fail(1, &later);
+    assert_eq!(attachments.remove_implicit(1), vec![later]);
+}
+
+/// Asserts that attaching implicitly a tree that is already attached implicitly keeps its
+/// failures, and that a failure of a tree with no attachment records nothing.
+#[test]
+fn an_implicit_attach_again_keeps_the_failures_and_an_unattached_tree_records_none() {
+    let dir = TestDir::under(std::env::temp_dir(), "tfs-attach-imp-keep");
+    let mut attachments = Attachments::new(dir.path());
+    attachments.add_implicit(1, tree(b"a"));
+    attachments.fail(1, &failure("/bin/cc"));
+    attachments.add_implicit(1, tree(b"a"));
+    attachments.fail(2, &failure("/bin/ar"));
+    assert_eq!(attachments.implicit().len(), 1);
+    assert_eq!(attachments.remove_implicit(1), vec![failure("/bin/cc")]);
+    assert!(attachments.remove_implicit(2).is_empty());
+    attachments.add_implicit(1, tree(b"a"));
+    assert!(attachments.remove_implicit(1).is_empty());
+}

@@ -8,9 +8,10 @@ use std::time::Duration;
 use super::super::{Core, Errno, Looked};
 use super::{SLOW_READ_MS, STOPPED, said};
 use crate::server::local_cache::manifest_path;
+use crate::server::treefs::core::blob::SAY_EVERY_MS;
 use crate::server::treefs::core::placed::Unread;
 use crate::server::treefs::ino;
-use crate::server::treefs::testing::{Rig, TREE_IDLE, sample, until};
+use crate::server::treefs::testing::{Logged, Rig, TREE_IDLE, logged, sample, until};
 use std::sync::atomic::Ordering;
 
 const RUN: &str = "run-1";
@@ -339,4 +340,140 @@ fn a_stopped_read_says_why() {
         Unread::Failed(STOPPED.to_owned()).to_string(),
         "the read of the tree stopped before it ended"
     );
+}
+
+/// The line a read of the tree numbered 1 says when it ended with `how` (`failed` or `gone`) for
+/// `why`, the `times`-th read of it, on a clock that did not move and with no request waiting.
+fn read_line(rig: &Rig, times: u64, how: &str, why: &str) -> String {
+    let digest = rig.upstream.built.lock().unwrap().root.clone();
+    format!(
+        "tierstore fs: read the tree {digest} (number 1, read {times} times in this process): \
+         {how}: {why}, in 0 ms, while 0 requests waited for it"
+    )
+}
+
+/// A core that has not read the tree numbered 1 in its process (the successor of the rig's, over
+/// the same table), over a cache and an upstream that have no manifest of it, and where the
+/// upstream answers the manifest of the tree with `answer`: none to leave it with no manifest at
+/// all.
+fn unread_tree(name: &str, answer: Option<&str>) -> (Rig, Arc<Core>) {
+    let (rig, bin) = attached(name);
+    out_of_memory(&rig, bin);
+    let root = rig.upstream.built.lock().unwrap().root.clone();
+    match answer {
+        Some(answer) => {
+            rig.upstream
+                .failing
+                .lock()
+                .unwrap()
+                .insert(root, answer.to_owned());
+        }
+        None => rig.upstream.built.lock().unwrap().manifests.clear(),
+    }
+    let successor = rig.successor();
+    (rig, successor)
+}
+
+/// Asserts that a tree that cannot be read now (its root manifest refused with a 503) answers
+/// `EIO` to a `getattr` and an `open` of its inodes, reading it again for each, and that its
+/// first read in the process is said at warn with the whole reason, which it was not before; the
+/// second, at the same time, is not said.
+#[test]
+fn a_tree_that_cannot_be_read_now_is_an_io_error_and_its_first_read_is_said() {
+    let (rig, core) = unread_tree("tfs-memory-unreadable", Some("upstream 503"));
+    let why = format!(
+        "cannot fetch manifest {}: upstream 503",
+        rig.upstream.built.lock().unwrap().root
+    );
+    let log = Logged::default();
+    let guard = logged(&log, tracing::Level::WARN);
+    assert_eq!(core.getattr(root_ino()), Err(Errno::Io));
+    assert_eq!(core.times_read(1), 1);
+    assert_eq!(
+        log.text(),
+        format!("{}\n", read_line(&rig, 1, "failed", &why))
+    );
+    assert_eq!(core.open(ino::of(1, 3), false).err(), Some(Errno::Io));
+    drop(guard);
+    assert_eq!(core.times_read(1), 2);
+    assert_eq!(
+        log.text(),
+        format!("{}\n", read_line(&rig, 1, "failed", &why))
+    );
+}
+
+/// Asserts that a tree that is gone (its root manifest is not upstream) answers `ENOENT` to a
+/// `getattr`, a lookup below its root, an `open` of a file inode of it and a `readdir`, reading it
+/// again for each, and that its first read in the process is said at warn as gone, with the whole
+/// reason, and the three after it, at the same time, are not.
+#[test]
+fn a_tree_that_is_gone_is_no_entry_everywhere_and_its_first_read_is_said() {
+    let (rig, core) = unread_tree("tfs-memory-gone", None);
+    let why = format!(
+        "cannot fetch manifest {}: upstream 404",
+        rig.upstream.built.lock().unwrap().root
+    );
+    let log = Logged::default();
+    let guard = logged(&log, tracing::Level::WARN);
+    assert_eq!(core.getattr(root_ino()), Err(Errno::NoEnt));
+    assert_eq!(
+        log.text(),
+        format!("{}\n", read_line(&rig, 1, "gone", &why))
+    );
+    assert_eq!(core.lookup(root_ino(), "bin").err(), Some(Errno::NoEnt));
+    assert_eq!(core.open(ino::of(1, 3), false).err(), Some(Errno::NoEnt));
+    assert_eq!(
+        core.readdir(root_ino(), 0, &mut |_, _| true),
+        Err(Errno::NoEnt)
+    );
+    drop(guard);
+    assert_eq!(core.times_read(1), 4);
+    assert_eq!(
+        log.text(),
+        format!("{}\n", read_line(&rig, 1, "gone", &why))
+    );
+}
+
+/// Asserts that the failed reads of a tree are said at most once in `SAY_EVERY_MS` of the core's
+/// clock: the first at once; none of those within that time of it, a millisecond short of it
+/// included; the next at that time, with the count of the reads not said (three, then one); and
+/// that a read that succeeds after them says nothing at warn.
+#[test]
+fn the_failed_reads_of_a_tree_are_said_once_in_ten_seconds_with_the_count_not_said() {
+    let (rig, core) = unread_tree("tfs-memory-twice", Some("upstream 503"));
+    let why = format!(
+        "cannot fetch manifest {}: upstream 503",
+        rig.upstream.built.lock().unwrap().root
+    );
+    let every = Duration::from_millis(SAY_EVERY_MS);
+    let log = Logged::default();
+    let guard = logged(&log, tracing::Level::WARN);
+    for _ in 0..3 {
+        assert_eq!(core.getattr(root_ino()), Err(Errno::Io));
+    }
+    rig.clock.advance(every - Duration::from_millis(1));
+    assert_eq!(core.getattr(root_ino()), Err(Errno::Io));
+    assert_eq!(log.text().lines().count(), 1, "{}", log.text());
+    rig.clock.advance(Duration::from_millis(1));
+    assert_eq!(core.getattr(root_ino()), Err(Errno::Io));
+    assert_eq!(core.getattr(root_ino()), Err(Errno::Io));
+    rig.clock.advance(every);
+    assert_eq!(core.getattr(root_ino()), Err(Errno::Io));
+    let three = "; 3 more failed reads of this tree since the last line";
+    let one = "; 1 more failed read of this tree since the last line";
+    assert_eq!(
+        log.text(),
+        format!(
+            "{}\n{}{three}\n{}{one}\n",
+            read_line(&rig, 1, "failed", &why),
+            read_line(&rig, 5, "failed", &why),
+            read_line(&rig, 7, "failed", &why)
+        )
+    );
+    rig.upstream.failing.lock().unwrap().clear();
+    rig.clock.advance(every);
+    assert!(core.getattr(root_ino()).is_ok());
+    drop(guard);
+    assert_eq!(core.times_read(1), 8);
+    assert_eq!(log.text().lines().count(), 3);
 }

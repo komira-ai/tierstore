@@ -19,7 +19,6 @@
 //! locations, below the root, and are read from the node's tree store (`core/placed.rs`).
 
 use std::collections::HashMap;
-use std::fs::File;
 use std::io;
 use std::path::{Path, PathBuf};
 #[cfg(any(target_os = "linux", test))]
@@ -32,8 +31,7 @@ use std::time::Duration;
 
 use crate::Clock;
 
-use crate::server::local_cache::blob_path;
-use crate::tree_manifest::{BlobSource, EntryKind, TreeDigest, TreeEntry};
+use crate::tree_manifest::{EntryKind, TreeDigest, TreeEntry};
 
 use super::attach::{Attachments, Failure, Snapshot, is_run};
 #[cfg(any(target_os = "linux", test))]
@@ -265,6 +263,8 @@ pub(in crate::server) struct Core {
     handles: Handles,
     #[cfg(any(target_os = "linux", test))]
     next_handle: AtomicU64,
+    /// The files of the cache the handles read, one descriptor each (`core/blob.rs`).
+    open_files: blob::OpenFiles,
     /// The requests served, by name, for the tests that count what reaches the core.
     #[cfg(test)]
     pub(super) served: Mutex<Vec<&'static str>>,
@@ -324,6 +324,7 @@ impl Core {
             handles: Handles::new(),
             #[cfg(any(target_os = "linux", test))]
             next_handle: AtomicU64::new(1),
+            open_files: blob::OpenFiles::new(),
             #[cfg(test)]
             served: Mutex::new(Vec::new()),
             #[cfg(test)]
@@ -827,40 +828,6 @@ impl Core {
         fh
     }
 
-    /// The cache file of a blob, filled if the cache does not hold it; why not, in the words of
-    /// the fill socket's answer.
-    fn cache_file(
-        &self,
-        (digest, size, source): (&TreeDigest, u64, Option<&BlobSource>),
-    ) -> Result<File, String> {
-        let sha = digest.to_string();
-        let path = blob_path(&self.settings.cache_path, &sha);
-        if let Ok(file) = File::open(&path) {
-            return Ok(file);
-        }
-        let filled = match source {
-            Some(source) => self.fills.fill_blob(&sha, size, &source.key, source.offset),
-            None => self.fills.fill_blob(&sha, size, &format!("cas/l/{sha}"), 0),
-        };
-        filled.and_then(|()| File::open(&path).map_err(|_| "io".to_owned()))
-    }
-
-    /// Records that the blob of the entry `index` of the tree `number` could not be had.
-    fn failed(
-        &self,
-        (loaded, number): (&Loaded, u64),
-        index: u32,
-        digest: &TreeDigest,
-        reason: String,
-    ) {
-        let failure = Failure {
-            path: path_of(&loaded.tree, index),
-            digest: digest.to_string(),
-            reason,
-        };
-        self.state().attachments.fail(number, &failure);
-    }
-
     /// Asks the cache to keep the blob for `loaded`, the tree `number`, the first time it is opened
     /// under it while the tree is attached: a tree no run and no lookup has attached is kept by
     /// recency alone, since nothing would take its pins away. A blob pinned already is seen without
@@ -885,33 +852,6 @@ impl Core {
         });
         if pinned.is_ok_and(|answer| answer.starts_with("ok")) {
             loaded.pinned.insert(*digest);
-        }
-    }
-
-    /// The bytes of a file: the cache file of its blob, filled if it must be, which is pinned for
-    /// the tree the first time it is opened under it (`Core::pin_once`); for a placed tree, the
-    /// span of the pack, which the tree store pins.
-    fn blob(
-        &self,
-        loaded: &Loaded,
-        number: u64,
-        entry: &TreeEntry,
-        blob: (&TreeDigest, u64, Option<&BlobSource>),
-    ) -> Result<FileBytes, Errno> {
-        let got = if loaded.tree.location().is_some() {
-            self.span_file(blob)
-        } else {
-            self.cache_file(blob).map(|file| {
-                self.pin_once((loaded, number), blob.0);
-                FileBytes::whole(file, blob.1)
-            })
-        };
-        match got {
-            Ok(bytes) => Ok(bytes),
-            Err(reason) => {
-                self.failed((loaded, number), entry.index, blob.0, reason);
-                Err(Errno::Io)
-            }
         }
     }
 
@@ -952,22 +892,9 @@ impl Core {
     }
 }
 
-/// The path of the entry `index` in its tree, from the root: `/a/b/c`.
-fn path_of(tree: &Tree, index: u32) -> String {
-    let mut names = Vec::new();
-    let mut at = tree.entry(index);
-    while let Some(entry) = at {
-        if entry.parent.is_some() {
-            names.push(entry.name.to_string());
-        }
-        at = entry.parent.and_then(|parent| tree.entry(parent));
-    }
-    names.reverse();
-    format!("/{}", names.join("/"))
-}
-
 #[cfg(any(target_os = "linux", test))]
 mod adopt;
+mod blob;
 mod fetched;
 #[cfg(any(target_os = "linux", test))]
 mod handles;

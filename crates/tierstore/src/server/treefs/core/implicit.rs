@@ -28,6 +28,7 @@ use std::time::Duration;
 use crate::server::local_cache::attaches::{Attach, Outcome};
 use crate::tree_manifest::TreeDigest;
 
+use super::super::attach::Failure;
 use super::fetched::Fetched;
 use super::placed::{Unread, placement_of};
 use super::{Core, Errno, locked};
@@ -167,10 +168,12 @@ impl Core {
     /// of its pins (`Core::free_tree`), and leaves memory when the kernel holds none of its
     /// inodes, as at the detach of its last run. Nothing ends while a successor takes over. An
     /// uncounted tree that nothing has attached and no request has named for that long leaves
-    /// memory too (`core/memory.rs`).
+    /// memory too (`core/memory.rs`). The opens that failed under an implicit attachment that ends
+    /// are said on stderr, one line for the tree ([`ended_with`]).
     pub(in crate::server::treefs) fn detach_idle(&self) -> usize {
         let now = self.now();
         let idle = u64::try_from(self.settings.tree_idle.as_millis()).unwrap_or(u64::MAX);
+        let mut failed = Vec::new();
         let (freed, _freeing): (Vec<(u64, TreeDigest)>, _) = {
             let _lifecycle = locked(&self.lifecycle);
             if self.is_held() {
@@ -188,8 +191,11 @@ impl Core {
                     })
                 })
                 .collect();
-            for (number, _) in &ended {
-                state.attachments.remove_implicit(*number);
+            for (number, digest) in &ended {
+                let failures = state.attachments.remove_implicit(*number);
+                if !failures.is_empty() {
+                    failed.push((*number, *digest, failures));
+                }
             }
             let freed = ended
                 .into_iter()
@@ -197,6 +203,9 @@ impl Core {
                 .collect();
             (freed, freeing)
         };
+        for (number, digest, failures) in &failed {
+            tracing::warn!("{}", ended_with((digest, *number), failures));
+        }
         for (number, digest) in &freed {
             self.free_tree(*number, digest);
         }
@@ -248,6 +257,34 @@ fn refusal(digest: &TreeDigest, why: Unread) -> Errno {
             Errno::Io
         }
     }
+}
+
+/// The most failed opens named in the line of an implicit attachment that ended.
+const NAMED: usize = 8;
+
+/// The line said when the implicit attachment of the tree `digest`, numbered `number`, ends with
+/// `failures`: their count, and the first [`NAMED`] of them by path, each with its reason.
+fn ended_with((digest, number): (&TreeDigest, u64), failures: &[Failure]) -> String {
+    let named: Vec<String> = failures
+        .iter()
+        .take(NAMED)
+        .map(|failure| format!("{} ({}: {})", failure.path, failure.digest, failure.reason))
+        .collect();
+    let rest = failures.len().saturating_sub(NAMED);
+    let more = if rest == 0 {
+        String::new()
+    } else {
+        format!("; and {rest} more")
+    };
+    let count = match failures.len() {
+        1 => "1 failed open".to_owned(),
+        n => format!("{n} failed opens"),
+    };
+    format!(
+        "tierstore fs: the attachment of the tree {digest} (number {number}) by a lookup ended \
+         with {count}: {}{more}",
+        named.join("; "),
+    )
 }
 
 /// Detaches the idle trees of `core` every `every`, until the sender of `wait` is dropped or

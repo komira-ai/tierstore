@@ -88,7 +88,9 @@ impl Core {
             }
             match self.cache_file((digest, *size, source.as_ref())) {
                 Ok(_) => batch.push(*digest),
-                Err(reason) => self.failed((&loaded, number), entry.index, digest, reason),
+                Err(reason) => {
+                    let _ = self.failed((&loaded, number), entry.index, digest, reason);
+                }
             }
             if batch.len() >= BATCH {
                 self.pin_batch((number, token), &loaded, &mut batch);

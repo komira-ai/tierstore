@@ -5,8 +5,10 @@
 //! run are one attachment. A lookup of `trees/<digest>` that no run has attached attaches the tree
 //! with no run (an implicit attachment), which ends when the tree has been idle for
 //! `fs.tree_idle_secs`. A tree is attached while any run has it or it is attached implicitly. The
-//! file holds one line, `<digest> <run>`, for each attachment of a run; it is rewritten by a rename
-//! after every change. The implicit attachments are not in it: a start has none, and a lookup
+//! opens that failed are recorded on every attachment of the tree, a run's or the lookup's: a
+//! run's are answered by its `detach`, and the lookup's are said on stderr when the implicit
+//! attachment ends (`core/implicit.rs`). The file holds one line, `<digest> <run>`, for each
+//! attachment of a run; it is rewritten by a rename after every change. The implicit attachments are not in it: a start has none, and a lookup
 //! attaches again.
 
 use std::collections::{BTreeMap, BTreeSet};
@@ -65,7 +67,7 @@ pub(super) struct Attachments {
     /// the file so that a transient failure does not delete the record.
     kept: BTreeSet<(String, String)>,
     /// The trees a lookup attached with no run, by tree number.
-    implicit: BTreeMap<u64, TreeDigest>,
+    implicit: BTreeMap<u64, Attached>,
 }
 
 impl Attachments {
@@ -157,21 +159,28 @@ impl Attachments {
         self.implicit.contains_key(&number) || self.has_run(number)
     }
 
-    /// Records that a lookup attached the tree `number`, `digest`, with no run.
+    /// Records that a lookup attached the tree `number`, `digest`, with no run; an implicit
+    /// attachment it has already keeps its failures.
     pub(super) fn add_implicit(&mut self, number: u64, digest: TreeDigest) {
-        let _ = self.implicit.insert(number, digest);
+        let _ = self
+            .implicit
+            .entry(number)
+            .or_insert_with(|| Attached::new(digest));
     }
 
-    /// Ends the implicit attachment of the tree `number`.
-    pub(super) fn remove_implicit(&mut self, number: u64) {
-        let _ = self.implicit.remove(&number);
+    /// Ends the implicit attachment of the tree `number`; the opens that failed under it, by path.
+    pub(super) fn remove_implicit(&mut self, number: u64) -> Vec<Failure> {
+        self.implicit
+            .remove(&number)
+            .map(|got| got.failures.into_values().collect())
+            .unwrap_or_default()
     }
 
     /// The trees a lookup attached, with their digests, by number.
     pub(super) fn implicit(&self) -> Vec<(u64, TreeDigest)> {
         self.implicit
             .iter()
-            .map(|(number, digest)| (*number, *digest))
+            .map(|(number, got)| (*number, got.digest))
             .collect()
     }
 
@@ -181,7 +190,7 @@ impl Attachments {
             .runs
             .values()
             .flat_map(|trees| trees.values().map(|got| got.digest))
-            .chain(self.implicit.values().copied())
+            .chain(self.implicit.values().map(|got| got.digest))
             .collect();
         trees.sort_by_key(ToString::to_string);
         trees.dedup();
@@ -196,13 +205,14 @@ impl Attachments {
             .collect()
     }
 
-    /// Records `failure` in the attachment of every run that has the tree `number`.
+    /// Records `failure` in every attachment of the tree `number`: that of every run that has it,
+    /// and that of the lookup that attached it.
     pub(super) fn fail(&mut self, number: u64, failure: &Failure) {
-        for got in self
+        let runs = self
             .runs
             .values_mut()
-            .filter_map(|trees| trees.get_mut(&number))
-        {
+            .filter_map(|trees| trees.get_mut(&number));
+        for got in runs.chain(self.implicit.get_mut(&number)) {
             let _ = got.failures.insert(failure.path.clone(), failure.clone());
         }
     }
