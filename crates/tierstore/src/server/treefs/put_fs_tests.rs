@@ -4,8 +4,10 @@
 //! fuser frontend of `tierstore fs` (`fuse.rs` with `fuse_put.rs`), the other by a `tsfuse`
 //! `Session` serving [`PutFs`], each over a socket pair that stands in for `/dev/fuse`. Every
 //! request of the script is the same bytes to both, and each reply (its error, its unique and
-//! every byte of its body) must be the same. The script runs every opcode of the put directory,
-//! and each of its refusals.
+//! every byte of its body) must be the same, and the same as the script's golden file in
+//! `put_fs_golden/` (one line per exchange: the request's opcode and node id, the reply's error,
+//! unique and body in hex). The script runs every opcode of the put directory, and each of its
+//! refusals.
 //!
 //! The direct tests below call [`PutFs::handle`] with a replier of a recording device, for what
 //! no reply shows: whether a request was answered inline or parked, which requests the put
@@ -191,6 +193,18 @@ struct Pair<'a> {
     /// The disks of the two stages, fuser's first.
     disks: [&'a crate::server::local_cache::testing::FakeDisk; 2],
     unique: std::cell::Cell<u64>,
+    /// Every exchange answered so far, a line each (see [`said`]).
+    said: std::cell::RefCell<Vec<String>>,
+}
+
+/// One exchange as a line of a golden file: the request's opcode and node id, then the reply's
+/// error, unique and every byte of its body, in hex.
+fn said(opcode: u32, nodeid: u64, reply: &Reply) -> String {
+    let body: String = reply.body.iter().map(|b| format!("{b:02x}")).collect();
+    format!(
+        "{opcode} {nodeid:#x} {} {} {body}",
+        reply.error, reply.unique
+    )
 }
 
 impl Pair<'_> {
@@ -208,6 +222,7 @@ impl Pair<'_> {
             "opcode {opcode} on node {nodeid:#x}: tsfuse's reply, then fuser's"
         );
         assert_eq!(fuser.unique, unique);
+        self.said.borrow_mut().push(said(opcode, nodeid, &fuser));
         fuser
     }
 
@@ -274,6 +289,7 @@ fn compare(name: &str, script: impl FnOnce(&Pair<'_>)) {
         tsfuse: &tsfuse,
         disks: [&fuser_rig.rig.disk, &tsfuse_rig.rig.disk],
         unique: std::cell::Cell::new(1),
+        said: std::cell::RefCell::new(Vec::new()),
     };
     for disk in pair.disks {
         disk.set_space(1 << 30, 3 << 27);
@@ -284,6 +300,33 @@ fn compare(name: &str, script: impl FnOnce(&Pair<'_>)) {
     assert_eq!((ended.error, ended.body.len()), (0, 0));
     fuser_session.join().unwrap();
     let _ = serving.join().unwrap();
+    let said = pair.said.into_inner();
+    let golden: Vec<&str> = golden(name).lines().collect();
+    for (at, (said, golden)) in said.iter().zip(&golden).enumerate() {
+        assert_eq!(
+            said,
+            golden,
+            "{name}: exchange {} of the golden file",
+            at + 1
+        );
+    }
+    assert_eq!(
+        said.len(),
+        golden.len(),
+        "{name}: the exchanges of the golden file"
+    );
+}
+
+/// The golden file of a script: what the handler on fuser answered to each of its exchanges,
+/// recorded while both handlers answered alike (`put_fs_golden/`).
+fn golden(name: &str) -> &'static str {
+    match name {
+        "putfs-names" => include_str!("put_fs_golden/putfs-names.txt"),
+        "putfs-commit" => include_str!("put_fs_golden/putfs-commit.txt"),
+        "putfs-refused" => include_str!("put_fs_golden/putfs-refused.txt"),
+        "putfs-mkdir" => include_str!("put_fs_golden/putfs-mkdir.txt"),
+        other => panic!("no golden file for {other}"),
+    }
 }
 
 fn create_in() -> Vec<u8> {
