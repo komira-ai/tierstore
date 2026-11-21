@@ -248,6 +248,35 @@ fn a_file_of_an_image_placement_reads_as_its_span() {
     rig.core.release(fh);
 }
 
+/// Asserts that the open files of one pack share one descriptor of it, whichever of the pack's
+/// files they are, and that it is closed with the last of them; and that a span the node answers
+/// with a pack file that is not there is asked again, three times in all, and then fails the open
+/// with `EIO`.
+#[test]
+fn the_files_of_a_pack_share_its_descriptor_and_a_pack_file_that_is_gone_is_an_io_error() {
+    let (rig, _) = placed("tfs-img-shared");
+    let pack = rig.dir.path().join("pack");
+    std::fs::write(&pack, b"XXhelloabc").unwrap();
+    answer(&rig, "span", &format!("ok 2 {}", pack.display()));
+    let root = found(&rig, ino::ROOT, "jobs");
+    let bin = found(&rig, root.attr.ino, "bin");
+    let tool = found(&rig, bin.attr.ino, "tool");
+    let other = found(&rig, bin.attr.ino, "other");
+    let first = open_cached(&rig.core, tool.attr.ino, false).unwrap();
+    let second = open_cached(&rig.core, other.attr.ino, false).unwrap();
+    let third = open_cached(&rig.core, tool.attr.ino, false).unwrap();
+    assert_eq!(rig.core.open_descriptors(), 1);
+    rig.core.release(first);
+    rig.core.release(second);
+    assert_eq!(rig.core.open_descriptors(), 1);
+    rig.core.release(third);
+    assert_eq!(rig.core.open_descriptors(), 0);
+    let spans = rig.upstream.asked("span").len();
+    std::fs::remove_file(&pack).unwrap();
+    assert_eq!(open_cached(&rig.core, tool.attr.ino, false), Err(Errno::Io));
+    assert_eq!(rig.upstream.asked("span").len(), spans + 3);
+}
+
 /// Asserts that an image file that is not in the tree's directory, one that is not a tree list, one
 /// that is cut short and one a byte over the largest tree list each make the lookup an I/O error,
 /// and that the lookup succeeds once the file is the image again.

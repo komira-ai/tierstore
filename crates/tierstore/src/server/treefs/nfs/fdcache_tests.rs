@@ -7,7 +7,7 @@ use super::FdCache;
 use crate::server::treefs::core::FileBytes;
 
 fn file() -> Arc<FileBytes> {
-    Arc::new(FileBytes::whole(File::open("/dev/null").unwrap(), 0))
+    Arc::new(FileBytes::whole(File::open("/dev/null").unwrap().into(), 0))
 }
 
 /// Asserts that a file inserted is had again, as the same descriptor, and one never inserted is

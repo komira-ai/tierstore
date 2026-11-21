@@ -194,6 +194,10 @@ impl Upstream {
     /// sees a part of them, as the cache links a whole file into place.
     fn put(path: &Path, bytes: &[u8]) {
         static NEXT: AtomicU32 = AtomicU32::new(0);
+        // A node keeps the file it holds: a fill of it again is answered from it.
+        if path.exists() {
+            return;
+        }
         std::fs::create_dir_all(path.parent().unwrap()).unwrap();
         let mut beside = path.as_os_str().to_owned();
         beside.push(format!(".part-{}", NEXT.fetch_add(1, Ordering::Relaxed)));

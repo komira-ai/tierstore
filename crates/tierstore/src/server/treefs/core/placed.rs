@@ -45,7 +45,6 @@ use super::super::ino;
 use super::super::tree::Tree;
 use super::fetched::Fetched;
 use super::loaded::Loaded;
-use super::read::FileBytes;
 use super::{Core, Errno, Looked, locked};
 use crate::server::local_cache::{FILL_SOCKET_CONCURRENCY, manifest_path};
 
@@ -454,19 +453,6 @@ impl Core {
         Ok(path
             .rsplit_once('/')
             .map_or(ino::ROOT, |(up, _)| dir_ino(up)))
-    }
-
-    /// The bytes of a file of a placed tree: the span of the pack that holds them, filled first if
-    /// the cache does not hold it; why not, in the words of the fill socket's answer.
-    pub(in crate::server::treefs) fn span_file(
-        &self,
-        (digest, size, source): (&TreeDigest, u64, Option<&BlobSource>),
-    ) -> Result<FileBytes, String> {
-        let source = source.ok_or("the file has no source")?;
-        let sha = digest.to_string();
-        let (base, path) = self.fills.span(&sha, size, &source.key, source.offset)?;
-        let file = File::open(path).map_err(|_| "io".to_owned())?;
-        Ok(FileBytes { file, base, size })
     }
 
     /// Gives back the hold of the node's tree store on the placement whose tree at a location has

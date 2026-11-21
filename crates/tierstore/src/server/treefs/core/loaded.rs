@@ -25,6 +25,7 @@ use crate::tree_manifest::TreeDigest;
 
 use super::super::locked;
 use super::super::tree::Tree;
+use super::blob::FailLog;
 
 /// The mark of a tree that is being taken out of memory, in a [`Lookups`].
 const REMOVED: u64 = 1 << 63;
@@ -174,6 +175,8 @@ pub(super) struct Loaded {
     /// Whether a lookup in a directory of the tree, or a listing of one, was served while it is in
     /// memory (`Core::looked_into`).
     pub(super) looked_into: AtomicBool,
+    /// The lines said about the failed opens of its files (`core/blob.rs`).
+    pub(super) failures: Mutex<FailLog>,
 }
 
 impl Loaded {
@@ -187,6 +190,7 @@ impl Loaded {
             used: AtomicU64::new(used),
             pinned: Pinned::default(),
             looked_into: AtomicBool::new(false),
+            failures: Mutex::new(FailLog::default()),
         }
     }
 }
