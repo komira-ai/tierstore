@@ -1,10 +1,18 @@
 # tierstore (crates/tierstore) as one of the two instances of the update hook on Linux: the
 # template of tierstore@a.service and tierstore@b.service, installed by hostkeeper's package of
-# tierstore. %i is the instance's letter. Both run the binary of the release link `current`, both
+# tierstore. %i is the instance's letter. Both run /usr/local/libexec/tierstore/tierstore, both
 # serve port 9300, and the update hook (`tierstore update-hook`, crates/tierstore/docs/update-hook.md)
 # alternates between them: an update starts the idle one, which takes the listening sockets of the
 # live one over the hand-over socket, and the live one drains and exits 0, which this unit does
 # not restart (Restart=on-failure).
+#
+# The binary is not run from the package: hostkeeper keeps the package directories, and with them
+# the release link `current`, closed to every user but root, and the instance runs as the account
+# tierstore. The update hook, which runs as root, copies the binary of the release `current` names
+# to /usr/local/libexec/tierstore/tierstore (root's, mode 0755, in directories that are root's and
+# that no other user can write) before it starts an instance: in cutover the staged
+# release's, in rollback the previous release's, at boot (restore) the current release's. The copy
+# replaces the old one by a rename, so an instance that runs the old copy keeps it until it exits.
 #
 # An instance starts only when its marker file, /var/lib/tierstore/run-%i, exists
 # (ConditionPathExists= below). The hook writes the marker before it starts the instance and
@@ -49,7 +57,7 @@ Type=simple
 User=tierstore
 StateDirectory=tierstore
 StateDirectoryMode=0700
-ExecStart=/var/lib/hostkeeper/packages/tierstore/current/bin/tierstore \
+ExecStart=/usr/local/libexec/tierstore/tierstore \
   --config /etc/tierstore/config.toml
 KillSignal=SIGTERM
 TimeoutStopSec=960

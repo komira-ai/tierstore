@@ -161,7 +161,6 @@ fn a_second_cutover_leaves_a_serving_job_alone() {
 fn cutover_finding_the_target_served_records_swapped_without_a_restart() {
     let fake = Fake::new();
     fake.advance(&[Prepare]);
-    fake.switch_current(NEW);
     fake.set_job(Some(NEW));
     assert_ok(&fake.run(Cutover));
     assert_eq!(fake.launchd_calls(), [loaded()]);
@@ -194,7 +193,6 @@ fn a_first_install_bootstraps_without_any_bootout() {
 fn a_first_install_never_boots_out_a_loaded_job() {
     let fake = Fake::first_install();
     fake.advance(&[Prepare]);
-    fake.switch_current(NEW);
     fake.set_job(Some(NEW));
     fake.lie(NEW, "9.9.9");
     let done = fake.run(Cutover);

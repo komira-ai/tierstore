@@ -17,8 +17,8 @@ use xtask::package::Platform;
 use xtask::release::hostkeeper_package::{BINARY, hostkeeper_package};
 
 use crate::support::{
-    CURRENT_BINARY, LINUX, MIN_HOSTKEEPER, PACKAGES, Scratch, VERSION, binary, flag, hk_platform,
-    manifest_toml, package, text, unit_value, unpack, version_dir, write_tree,
+    LINUX, MIN_HOSTKEEPER, PACKAGES, SERVICE_BINARY, Scratch, VERSION, binary, flag, hk_platform,
+    manifest_toml, package, pinned_binary, text, unit_value, unpack, version_dir, write_tree,
 };
 
 /// The unit template of the Linux packages.
@@ -214,9 +214,10 @@ fn the_loader_refuses_an_install_bound_or_an_unknown_key_and_the_package_has_nei
 }
 
 #[test]
-fn the_unit_runs_the_binary_of_current_as_tierstore_and_its_stop_covers_the_drain() {
-    // Catches: an ExecStart through a version directory or another path (the unit would not
-    // follow the switch of `current`), a configuration file other than the manifest's
+fn the_unit_runs_the_installed_binary_as_tierstore_and_its_stop_covers_the_drain() {
+    // Catches: an ExecStart inside the package directories (the account `tierstore` cannot reach
+    // them: hostkeeper keeps them root's alone) or at another path than the copy the update hook
+    // installs, a configuration file other than the manifest's
     // `config_file`, a stop timeout or cleanup bound shorter than the drain (systemd would kill a
     // drain in progress), a unit that runs as root, a run unit hostkeeper cannot enable (no
     // WantedBy=), and instances not gated on their marker.
@@ -225,8 +226,8 @@ fn the_unit_runs_the_binary_of_current_as_tierstore_and_its_stop_covers_the_drai
         let unit = text(&archive, UNIT);
         let exec = unit_value(&unit, "[Service]", "ExecStart");
         let words: Vec<&str> = exec.split_whitespace().collect();
-        assert_eq!(words[0], CURRENT_BINARY);
-        assert!(CURRENT_BINARY.ends_with(&format!("/current/{BINARY}")));
+        assert_eq!(words[0], SERVICE_BINARY);
+        assert!(!words[0].starts_with(PACKAGES));
         assert!(through_current(Path::new(PACKAGES), "tierstore", words[0]));
         let toml = manifest_toml(&archive);
         assert_eq!(
@@ -298,7 +299,8 @@ fn placed_lint(
 fn each_run_entry_is_an_instance_of_the_linked_template_and_the_units_pass_the_placed_lint() {
     // Catches: a run entry that is not an instance of a unit file of the package, a unit that
     // names a package file other than through `current`, and a run unit with no WantedBy=. The
-    // two edited units, refused, are the control that the lint reads the package's units.
+    // two edited units (one running the binary through a version directory), refused, are the
+    // control that the lint reads the package's units.
     let scratch = Scratch::new("hostkeeper-package-placed");
     for platform in LINUX {
         let dir = scratch.path().join(platform.name());
@@ -307,7 +309,7 @@ fn each_run_entry_is_an_instance_of_the_linked_template_and_the_units_pass_the_p
             Ok(())
         );
         let pinned = placed_lint(&dir.join("pinned"), platform, |unit| {
-            unit.replace("/current/bin/", &format!("/{VERSION}/bin/"))
+            unit.replace(SERVICE_BINARY, &pinned_binary())
         });
         assert!(
             matches!(&pinned, Err(LintError::PackagePath { key, .. }) if key == "ExecStart="),

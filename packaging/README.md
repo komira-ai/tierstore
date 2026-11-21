@@ -30,8 +30,8 @@ fails a build whose binary asks for a newer `GLIBC_` symbol version (`docs/ci-an
 | `tierstore.conf` | the sysusers.d entry of the `tierstore` account (no login, no home) |
 | `tierstore-guard.service` | the nft guard the deb and rpm packages install at `/usr/lib/systemd/system`: it loads `/etc/tierstore/guard.nft` when the host has that file, and `tierstore@.service` wants it and starts after it ([The nft guard unit](#the-nft-guard-unit)) |
 | `config.toml` | the example of `/etc/tierstore/config.toml`, the configuration file of every Linux route (`tierstore.service`, `tierstore@.service`, hostkeeper's template): one `s3` interface, the keys, and an S3 bucket for each tier |
-| `hostkeeper/units/tierstore@.service` | the instance template of the update hook on Linux: `tierstore@a.service` and `tierstore@b.service`, each running `bin/tierstore` of hostkeeper's release link `current` and starting only under its marker file ([Moving to the update hook](#moving-to-the-update-hook)) |
-| `hostkeeper/units/tierstore.plist` | the LaunchDaemon of the update hook on a Mac: one job, labelled `tierstore`, running `bin/tierstore` of the same link |
+| `hostkeeper/units/tierstore@.service` | the instance template of the update hook on Linux: `tierstore@a.service` and `tierstore@b.service`, each running `/usr/local/libexec/tierstore/tierstore`, the copy the hook makes of the binary of hostkeeper's release link `current`, and starting only under its marker file ([Moving to the update hook](#moving-to-the-update-hook)) |
+| `hostkeeper/units/tierstore.plist` | the LaunchDaemon of the update hook on a Mac: one job, labelled `tierstore`, running the same copy |
 
 The values in the unit are examples (`192.0.2.10`, `s3-hot.example`, the bucket names, the
 sizes): edit them to the setup's. `crates/tierstore/tests/packaging.rs` reads `tierstore.service`
@@ -39,7 +39,8 @@ and its files and checks that the command line parses as the binary parses it an
 that the binary's loader takes, that no secret is on it or in the file (every key and credential
 names a file), that the stop timeout covers the drain, and that nothing starts the unit by itself.
 `crates/tierstore/tests/packaging_hostkeeper.rs` reads the files of `hostkeeper/units` and checks
-that the template and the plist run the binary of the release link with flags the binary parses,
+that the template and the plist run the hook's copy of the binary (`/usr/local/libexec/tierstore/tierstore`,
+never a path inside hostkeeper's package directories) with flags the binary parses,
 that the template's start condition is the marker file the hook writes, that it is enabled at
 boot, that both wait for the drain, that no secret is on the command line, and that the plist is
 the file the hook bootstraps.
@@ -136,8 +137,11 @@ no declaration file (the nft guard is the separate `tierstore-guard.service` of 
 `systemctl` or `launchctl` only.
 
 On Linux the package has one template, `tierstore@.service`, and the hook alternates between its
-two instances, `tierstore@a` and `tierstore@b`. Both run `current/bin/tierstore` and serve port
-9300. An update starts the idle instance, which takes the listening sockets of the live one over
+two instances, `tierstore@a` and `tierstore@b`. Both run `/usr/local/libexec/tierstore/tierstore`
+and serve port 9300: a copy of the binary of the release hostkeeper's link `current` names, which
+the hook makes before it starts an instance, since hostkeeper keeps its package directories closed
+to every user but root and the instances run as `tierstore`. An update starts the idle instance,
+which takes the listening sockets of the live one over
 the hand-over socket (`server.handoff_socket` in `/etc/tierstore/config.toml`, which defaults to
 `handoff.sock` in the unit's state directory, `/var/lib/tierstore/handoff.sock`, so the file need not name it), and the live one drains and exits 0. An instance starts only
 when its marker file, `/var/lib/tierstore/run-a` or `run-b`, exists, so that at boot, with both

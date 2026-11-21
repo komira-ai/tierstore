@@ -15,6 +15,7 @@ mod instances;
 mod launchd;
 mod markers;
 mod runner;
+mod service_binary;
 mod state;
 mod units;
 
@@ -78,6 +79,8 @@ mod launchd_tests;
 mod markers_tests;
 #[cfg(test)]
 mod runner_tests;
+#[cfg(test)]
+mod service_binary_tests;
 #[cfg(test)]
 mod state_tests;
 #[cfg(test)]

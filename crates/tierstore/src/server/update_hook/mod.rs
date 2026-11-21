@@ -15,7 +15,7 @@
 //!
 //! - **systemd** ([`systemd`]): the package ships one template, `tierstore@.service`, and the hook
 //!   alternates between its two instances, `tierstore@a` and `tierstore@b`. Both run
-//!   `current/bin/tierstore` and serve port 9300. In `cutover` the idle one is started and takes
+//!   [`SERVICE_BINARY`] and serve port 9300. In `cutover` the idle one is started and takes
 //!   the listening sockets of the live one over the hand-over socket (`server.handoff_socket`),
 //!   and the live one drains and exits on its own. Each instance starts only when its marker file
 //!   ([`MARKER_DIR`]) is there, so at boot only the recorded one does.
@@ -23,7 +23,11 @@
 //!   with a gap: `bootout`, then `bootstrap` of the linked plist ([`LAUNCHD_PLIST`]).
 //!
 //! hostkeeper switches the release link `current` before `cutover` and back before `rollback`;
-//! the hook never moves it. The steps keep a [`Record`] in [`STATE_DIR`], set state rather than do
+//! the hook never moves it. hostkeeper keeps every package closed to every user but root, so the
+//! units do not run the binary through that link: before `cutover`, `rollback` and `restore`
+//! start the service, the hook copies the binary of the release the link names to
+//! [`SERVICE_BINARY`] (an archive release's; the package manager places a Debian or RPM
+//! release's). The steps keep a [`Record`] in [`STATE_DIR`], set state rather than do
 //! things once, and reach the machine only through the ports of [`SystemdPorts`] and
 //! [`LaunchdPorts`]. [`Machine::system`] builds those ports from the machine's implementations
 //! ([`machine`]). Both arms are built and tested on every system: the arm is chosen by the
@@ -95,6 +99,14 @@ pub const RELEASE_BINARY: &str = "bin/tierstore";
 /// the binary at `/usr/libexec/tierstore/tierstore`, the path its unit template runs. The hook
 /// asks this one when nothing is at [`RELEASE_BINARY`].
 pub const PACKAGE_RELEASE_BINARY: &str = "tree/usr/libexec/tierstore/tierstore";
+/// Where the units of the archive package run the binary from, on Linux and on a Mac alike: a
+/// copy of the binary of the release `current` names, which the hook puts there before it starts
+/// the service ([`Host::install_binary`]). hostkeeper keeps the release itself closed to every
+/// user but root, and the service runs as its own account, which can read and run this copy: the
+/// file is root's, mode 0755, in directories that are root's and that no other user can write.
+/// Only a release of the archive package is copied; a native package's is placed by its package
+/// manager.
+pub const SERVICE_BINARY: &str = "/usr/local/libexec/tierstore/tierstore";
 /// The plist of the launchd job, as hostkeeper links it from the package's `units/`.
 pub const LAUNCHD_PLIST: &str = "/Library/LaunchDaemons/tierstore.plist";
 /// The capability (`tierstore --capabilities`) of a release that offers and takes listening

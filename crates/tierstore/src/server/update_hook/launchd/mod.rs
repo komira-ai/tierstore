@@ -1,8 +1,10 @@
 //! The steps of the launchd arm: one job, whose label is `launchd_label` of the params, and
 //! whose plist is [`LAUNCHD_PLIST`]. An update is a restart with a gap: no hand-over on a Mac.
 //!
-//! hostkeeper switches `current` before `cutover` and back before `rollback`, so booting the
-//! plist out and in again starts the release `current` names; the hook never moves the link.
+//! hostkeeper switches `current` before `cutover` and back before `rollback`; the hook never
+//! moves the link. The plist runs [`SERVICE_BINARY`](super::SERVICE_BINARY), where the hook puts
+//! the binary of the release `current` names before it loads the job (in `cutover`, `rollback`
+//! and `restore`), so booting the plist out and in again starts that release.
 //! Every step takes the lock of the state directory, reads and checks the record, and sets state
 //! rather than does things once, so that a run after a crash converges. A record that names a
 //! systemd instance (`live`, `next` or `mode`) is not this arm's and is refused.
@@ -23,9 +25,10 @@
 //!   update. There is no instance to retire. When the write of `stopping` fails, the record is
 //!   read back, so that a write that reached the disk is reported as the commit it is; a record
 //!   that cannot be read back counts as committed.
-//! - `uninstall` boots the job out and leaves the data, the cache and the configuration of the
-//!   node, and the record directory, as they are.
-//! - `restore`, the boot step, boots the job in when it is not loaded.
+//! - `uninstall` boots the job out, removes the copy of the binary, and leaves the data, the
+//!   cache and the configuration of the node, and the record directory, as they are.
+//! - `restore`, the boot step, puts the current release's binary in place and boots the job in
+//!   when it is not loaded.
 
 use std::cell::Cell;
 use std::path::Path;
@@ -135,7 +138,7 @@ fn attempt(
         Step::Rollback => rollback(&c, params, &mut record),
         Step::Cleanup => cleanup(&c, params, &mut record),
         Step::Uninstall => uninstall(&c, &mut record),
-        Step::Restore => restore(&c),
+        Step::Restore => restore(&c, params),
     }
     .unwrap_or_else(std::convert::identity);
     let mut committed = record.commits(step, params);
@@ -213,6 +216,8 @@ fn cutover(c: &Ctx<'_, '_>, params: &Params, record: &mut Record) -> Result<Done
     // serve the target, and an update restarts it only when it does not.
     let seen = loaded && c.look().observed(target).is_ok();
     if !seen {
+        // The plist runs the copy at `SERVICE_BINARY`: it becomes the staged release's first.
+        c.ports.host.install_binary(&params.staged_release)?;
         if record.from.is_some() {
             c.ports.launchd.bootout(c.label)?;
             c.bootstrap()?;
@@ -271,9 +276,10 @@ fn rollback(c: &Ctx<'_, '_>, params: &Params, record: &mut Record) -> Result<Don
     same_update(record, params)?;
     if record.from.is_none() {
         // A first install: what `cutover` started is stopped, and there is nothing to start in
-        // its place. The update stays on record, without markers, so that a re-run says the
-        // same and a later `prepare` may start afresh.
+        // its place; the copy of the binary goes too. The update stays on record, without
+        // markers, so that a re-run says the same and a later `prepare` may start afresh.
         c.ports.launchd.bootout(c.label)?;
+        c.ports.host.remove_binary()?;
         let mut cleared = record.clone();
         cleared.markers.clear();
         c.save(record, cleared)?;
@@ -288,7 +294,9 @@ fn rollback(c: &Ctx<'_, '_>, params: &Params, record: &mut Record) -> Result<Don
             "the update on record has a previous release and the params name none",
         ));
     };
-    // `current` names the previous release again, so the job that is loaded now runs it.
+    // `current` names the previous release again; its binary goes where the plist runs it, so
+    // the job that is loaded now runs it.
+    c.ports.host.install_binary(&previous.release)?;
     c.ports.launchd.bootout(c.label)?;
     c.bootstrap()?;
     c.look().serves(&previous.version)?;
@@ -334,14 +342,19 @@ fn cleanup(c: &Ctx<'_, '_>, params: &Params, record: &mut Record) -> Result<Done
 
 fn uninstall(c: &Ctx<'_, '_>, record: &mut Record) -> Result<Done, Done> {
     c.ports.launchd.bootout(c.label)?;
+    c.ports.host.remove_binary()?;
     c.save(record, Record::idle(None))?;
     Ok(Done::ok(format!("{} is stopped and unloaded", c.label)))
 }
 
-fn restore(c: &Ctx<'_, '_>) -> Result<Done, Done> {
+/// The boot step: a job that is loaded is left as it is; otherwise the binary of the release
+/// `current` names (the params' staged release, at boot) is put where the plist runs it, and the
+/// job is loaded.
+fn restore(c: &Ctx<'_, '_>, params: &Params) -> Result<Done, Done> {
     if c.ports.launchd.loaded(c.label)? {
         return Ok(Done::ok(format!("{} is loaded", c.label)));
     }
+    c.ports.host.install_binary(&params.staged_release)?;
     c.bootstrap()?;
     Ok(Done::ok(format!("{} is loaded", c.label)))
 }

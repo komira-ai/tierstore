@@ -82,6 +82,18 @@ impl Host for Files {
         }
         Ok(self.refusals.borrow().get(config).cloned())
     }
+
+    // The config hook's host never asks for these: its [`Running`] host answers them itself.
+    fn install_binary(&self, _release: &Path) -> Result<(), PortError> {
+        Err(PortError::failed(
+            PortKind::Host,
+            "no binary is put in place",
+        ))
+    }
+
+    fn remove_binary(&self) -> Result<(), PortError> {
+        Err(PortError::failed(PortKind::Host, "no binary is removed"))
+    }
 }
 
 /// A network guard that counts its reloads and can refuse them.
@@ -327,4 +339,21 @@ fn a_config_record_that_names_no_instance_writes_nothing_back() {
         super::steps::write_back(&config, &service).unwrap();
         assert_eq!(service.get(), Some(release.clone()));
     }
+}
+
+/// Asserts that the config hook's host puts no binary in place and removes none, and does not
+/// ask the host to: a config package carries no binary, so the binary that serves stays. (The
+/// fake host itself refuses both, so the answers are the config hook's own.) Catches a config
+/// update that copies a file of the config package over the service's binary, or removes it.
+#[test]
+fn the_config_hook_host_never_puts_or_removes_a_binary() {
+    let files = Files::new(&[]);
+    let running = Running {
+        host: &files,
+        release: Path::new("/"),
+    };
+    assert_eq!(running.install_binary(Path::new(PKG_NEW)), Ok(()));
+    assert_eq!(running.remove_binary(), Ok(()));
+    assert!(files.install_binary(Path::new(PKG_NEW)).is_err());
+    assert!(files.remove_binary().is_err());
 }

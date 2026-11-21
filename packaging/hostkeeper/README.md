@@ -13,9 +13,15 @@ with hostkeeper's own unpacker, manifest loader and placed-path lint.
 | `units/tierstore@.service` | `units/tierstore@.service` (Linux) | the template of the two instances `tierstore@a.service` and `tierstore@b.service`, which the update hook alternates between with a hand-over of the listening sockets; it wants and starts after `tierstore-guard.service` when the host has that unit, which this package does not ship |
 | `units/tierstore.plist` | `units/tierstore.plist` (macOS) | the one launchd job, label `tierstore`, which an update restarts |
 
-The binary is `bin/tierstore`, the exact bytes of the build. Every unit runs it as
-`/var/lib/hostkeeper/packages/tierstore/current/bin/tierstore`, through the link hostkeeper switches
-from one version to the next. The package holds nothing of a node's own: the configuration file
+The binary is `bin/tierstore`, the exact bytes of the build. No unit runs it there: hostkeeper
+keeps its package directories (`/var/lib/hostkeeper/packages`, and with them the link `current` it
+switches from one version to the next) closed to every user but root, and the units run as the
+service account. Every unit runs `/usr/local/libexec/tierstore/tierstore`, a copy of the binary of
+the release `current` names that the update hook, which hostkeeper runs as root, makes before it
+starts the service: in `cutover`, `rollback` and the boot step `restore`. The copy is root's,
+mode 0755, in directories that are root's and that no other user can write; the hook
+makes `/usr/local/libexec/tierstore` when it is absent, and removes the copy at `uninstall`. The
+package holds nothing of a node's own: the configuration file
 (`/etc/tierstore/config.toml` on Linux, `/usr/local/tierstore/etc/tierstore.toml` on a Mac), the
 key files it names and the account (`tierstore`, `_tierstore` on a Mac) are placed on the node
 beforehand.
