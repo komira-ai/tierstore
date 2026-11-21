@@ -22,12 +22,15 @@ use crate::server::treefs::backing::{BackingId, FILE, Guard, Saved};
 use crate::server::treefs::core::{self, FIXED_MTIME, Kind, TREE_TTL};
 use crate::server::treefs::put::testing::SpaceRig;
 use crate::server::treefs::serving::{init_config, mount_options};
-use crate::server::treefs::testing::{Built, FakeKernel, OWNER, Rig, file, sample, sha};
+use crate::server::treefs::testing::{Built, FakeKernel, OWNER, Rig, file, sample, sha, until};
 use crate::server::treefs::{handle, ino};
 use crate::tree_manifest::TreeDigest;
 
 /// The run the sample tree is attached for.
 const RUN: &str = "run-1";
+
+/// The threads of the fetches of the frontend, as many as the readers of the default settings.
+const FETCHERS: std::num::NonZeroUsize = std::num::NonZeroUsize::new(16).unwrap();
 
 /// The entries of the sample tree (`testing::sample`) in its tree, numbered 1: the index of each.
 const BIN: u32 = 2;
@@ -285,7 +288,7 @@ impl Wire {
             Box::new(space.rig) as Box<dyn Any>
         });
         Self {
-            fs: NodeFs::new(Arc::clone(&rig.core)),
+            fs: NodeFs::new(Arc::clone(&rig.core), FETCHERS).unwrap(),
             rig,
             device: Arc::new(Recorder::default()),
             tokens: Tokens::new(),
@@ -310,7 +313,10 @@ impl Wire {
             let interrupted = self.tokens.interrupt(unique, 0, &*self.device);
             assert!(matches!(interrupted, Interrupted::Cancelled));
         }
-        assert_eq!(self.fs.handle(req, replier), Handled::Done);
+        if self.fs.handle(req, replier) == Handled::Parked {
+            // Answered by a thread of the fetches: once it is, the reply is on the device.
+            until(|| self.fs.parked() == 0);
+        }
         std::mem::take(&mut *self.device.0.lock().unwrap())
     }
 
@@ -880,6 +886,9 @@ mod kernel;
 
 #[path = "node_fs_shared_read_tests.rs"]
 mod shared_reads;
+
+#[path = "node_fs_stall_tests.rs"]
+mod stall;
 
 #[path = "node_fs_fault_tests.rs"]
 mod faults;

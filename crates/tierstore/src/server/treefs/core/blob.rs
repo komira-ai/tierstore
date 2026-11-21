@@ -305,12 +305,13 @@ impl Core {
         self.open_files.short()
     }
 
-    /// The end every try of one open is answered by: `fs.fetch_timeout` from now.
-    pub(super) fn open_until(&self) -> Until<'_> {
+    /// The end every try of one open that began at `begun` (on the core's clock) is answered by:
+    /// `fs.fetch_timeout` after it.
+    pub(super) fn open_until(&self, begun: u64) -> Until<'_> {
         let wait = u64::try_from(self.fills.answer_timeout().as_millis()).unwrap_or(u64::MAX);
         Until {
             clock: &*self.settings.clock,
-            end_ms: self.now().saturating_add(wait),
+            end_ms: begun.saturating_add(wait),
         }
     }
 
@@ -364,24 +365,27 @@ impl Core {
     /// The bytes of a file: the cache file of its blob, filled if it must be, which is pinned for
     /// the tree the first time it is opened under it (`Core::pin_once`); for a placed tree, the
     /// span of the pack, which the tree store pins. A fill that fails for a reason that can pass
-    /// is asked again while time is left before the one end of the open (module docs).
+    /// is asked again while time is left before the one end of the open, `fs.fetch_timeout`
+    /// after `begun` (module docs). The span a placed tree is given is kept with the tree
+    /// (`Loaded::keep_span`), for the opens that follow while its pack is open.
     ///
     /// # Errors
     /// [`Errno::Io`] for bytes that cannot be had: recorded on the attachments of the tree and
     /// said on stderr.
     pub(super) fn blob(
         &self,
-        loaded: &Loaded,
-        number: u64,
+        (loaded, number): (&Loaded, u64),
         entry: &TreeEntry,
         blob: (&TreeDigest, u64, Option<&BlobSource>),
+        begun: u64,
     ) -> Result<FileBytes, Errno> {
-        let until = self.open_until();
+        let until = self.open_until(begun);
         let mut tries = 0;
         let reason = loop {
             tries += 1;
             let got = if loaded.tree.location().is_some() {
                 self.span_file(blob, until)
+                    .inspect(|bytes| loaded.keep_span(blob.0, bytes))
             } else {
                 self.cache_file(blob, until).map(|file| {
                     self.pin_once((loaded, number), blob.0);

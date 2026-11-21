@@ -418,7 +418,7 @@ impl Core {
     }
 
     /// The time on the core's clock.
-    fn now(&self) -> u64 {
+    pub(super) fn now(&self) -> u64 {
         self.settings.clock.now()
     }
 
@@ -782,8 +782,18 @@ impl Core {
     /// # Errors
     /// [`Errno::RoFs`] for an open for writing, [`Errno::IsDir`] for a directory, [`Errno::Inval`]
     /// for a link, [`Errno::Io`] for a blob that cannot be had.
-    #[cfg(any(target_os = "linux", test))]
+    #[cfg(test)]
     pub(super) fn open(&self, ino: u64, writing: bool) -> Result<Opened, Errno> {
+        self.open_from(ino, writing, self.now())
+    }
+
+    /// [`Core::open`] of a request that began at `begun` on the core's clock (it was parked, and
+    /// waited, `fetches.rs`): its fills are answered by `fs.fetch_timeout` after `begun`.
+    ///
+    /// # Errors
+    /// As [`Core::open`].
+    #[cfg(any(target_os = "linux", test))]
+    pub(super) fn open_from(&self, ino: u64, writing: bool, begun: u64) -> Result<Opened, Errno> {
         #[cfg(test)]
         self.note("open");
         if writing {
@@ -818,7 +828,7 @@ impl Core {
                 }
                 let blob = (digest, *size, source.as_ref());
                 Handle::Cached {
-                    bytes: self.blob(&loaded, number, &entry, blob)?,
+                    bytes: self.blob((&loaded, number), &entry, blob, begun)?,
                     ino,
                 }
             }
@@ -915,6 +925,8 @@ mod implicit;
 mod live;
 mod loaded;
 mod memory;
+#[cfg(any(target_os = "linux", test))]
+mod now;
 mod pins;
 mod placed;
 mod prefetch;

@@ -139,7 +139,8 @@ impl Core {
         if length == 0 {
             return Ok(None);
         }
-        let file = self.blob(&loaded, number, &entry, (digest, length, source.as_ref()))?;
+        let blob = (digest, length, source.as_ref());
+        let file = self.blob((&loaded, number), &entry, blob, self.now())?;
         Ok(Some((file, length)))
     }
 

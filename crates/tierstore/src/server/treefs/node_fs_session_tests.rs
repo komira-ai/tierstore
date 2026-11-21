@@ -106,7 +106,7 @@ fn the_kernel_forgetting_an_inode_reaches_the_core() {
     kernel.tell(op::INIT, 0, init.as_bytes());
     let session = Session::init(DevFd::from_fd(device), &init_config()).unwrap();
     assert_eq!(kernel.reply().error, 0);
-    let fs = NodeFs::new(Arc::clone(&wire.rig.core));
+    let fs = NodeFs::new(Arc::clone(&wire.rig.core), std::num::NonZeroUsize::MIN).unwrap();
     let serving = session.serve(Arc::new(fs)).unwrap();
 
     // Three lookups held: two of `cc` and one of `tool`.

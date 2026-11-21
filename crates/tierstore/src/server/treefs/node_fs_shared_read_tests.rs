@@ -25,7 +25,7 @@ fn pattern(salt: u32, at: usize) -> u8 {
 }
 
 /// `len` bytes of the file `salt`.
-fn content(salt: u32, len: usize) -> Vec<u8> {
+pub(super) fn content(salt: u32, len: usize) -> Vec<u8> {
     (0..len).map(|at| pattern(salt, at)).collect()
 }
 
@@ -138,7 +138,7 @@ fn handles_of_one_cache_file_read_their_own_offsets_at_once_on_the_shared_descri
 
 /// The names of the files of the pack of [`pack_image`], their sizes, and where each begins in the
 /// pack.
-const PACKED: [(&str, usize, u64); 4] = [
+pub(super) const PACKED: [(&str, usize, u64); 4] = [
     ("a", 170_001, 4096),
     ("b", 90_000, 200_000),
     ("c", 262_144, 300_000),
@@ -147,7 +147,7 @@ const PACKED: [(&str, usize, u64); 4] = [
 
 /// The tree list of the files of [`PACKED`] as spans of the pack `p0`, and the pack file's bytes:
 /// each file's own content at its place and the bytes of no file between.
-fn pack_image() -> (Vec<u8>, Vec<u8>) {
+pub(super) fn pack_image() -> (Vec<u8>, Vec<u8>) {
     let mut pack = content(99, 700_000);
     let entries = PACKED
         .iter()

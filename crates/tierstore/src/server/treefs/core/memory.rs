@@ -133,7 +133,7 @@ impl Core {
     }
 
     /// The tree `number` if it is in memory, as used now.
-    fn in_memory(&self, number: u64) -> Option<Arc<Loaded>> {
+    pub(super) fn in_memory(&self, number: u64) -> Option<Arc<Loaded>> {
         let loaded = self.trees.get(number)?;
         loaded.used.store(self.now(), Ordering::Release);
         Some(loaded)

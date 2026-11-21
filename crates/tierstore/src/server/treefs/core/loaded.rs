@@ -16,8 +16,9 @@
 //! ([`Pinned`]), so that the opens of one tree do not queue on one lock.
 
 use std::collections::{HashMap, HashSet};
+use std::fs::File;
 use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
-use std::sync::{Arc, Mutex};
+use std::sync::{Arc, Mutex, Weak};
 
 use arc_swap::ArcSwap;
 
@@ -25,6 +26,7 @@ use crate::tree_manifest::TreeDigest;
 
 use super::super::locked;
 use super::super::tree::Tree;
+use super::read::FileBytes;
 
 /// The mark of a tree that is being taken out of memory, in a [`Lookups`].
 const REMOVED: u64 = 1 << 63;
@@ -174,6 +176,10 @@ pub(super) struct Loaded {
     /// Whether a lookup in a directory of the tree, or a listing of one, was served while it is in
     /// memory (`Core::looked_into`).
     pub(super) looked_into: AtomicBool,
+    /// For a placed tree, the span of the pack each file it opened was given, by the file's blob:
+    /// where it begins, and the pack's file it was read from while that is open
+    /// ([`Loaded::held_span`]).
+    spans: Mutex<HashMap<TreeDigest, (u64, Weak<File>)>>,
 }
 
 impl Loaded {
@@ -187,7 +193,26 @@ impl Loaded {
             used: AtomicU64::new(used),
             pinned: Pinned::default(),
             looked_into: AtomicBool::new(false),
+            spans: Mutex::new(HashMap::new()),
         }
+    }
+
+    /// Keeps the span `bytes` the file of the blob `digest` was given, for [`Loaded::held_span`].
+    pub(super) fn keep_span(&self, digest: &TreeDigest, bytes: &FileBytes) {
+        let _ = locked(&self.spans).insert(*digest, (bytes.base, Arc::downgrade(&bytes.file)));
+    }
+
+    /// The `size` bytes of the file of the blob `digest`, from the span it was given, while the
+    /// pack's file that span was read from is open: the node said that file holds the span, and
+    /// the bytes of an open file stay as they are (a pack of the cache is filled in place, never
+    /// cut), so the node need not be asked again. None for a span never given or a file closed.
+    pub(super) fn held_span(&self, digest: &TreeDigest, size: u64) -> Option<FileBytes> {
+        let (base, file) = locked(&self.spans).get(digest).cloned()?;
+        Some(FileBytes {
+            file: file.upgrade()?,
+            base,
+            size,
+        })
     }
 }
 

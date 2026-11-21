@@ -37,7 +37,7 @@ impl Core {
     }
 
     /// Whether `fh` was given out by a process before this one.
-    fn foreign(&self, fh: u64) -> bool {
+    pub(super) fn foreign(&self, fh: u64) -> bool {
         handle::generation_of(fh) != self.settings.generation
     }
 
@@ -83,7 +83,12 @@ impl Core {
                 source,
                 ..
             } => Ok(Handle::Cached {
-                bytes: self.blob(&loaded, number, &entry, (digest, *size, source.as_ref()))?,
+                bytes: self.blob(
+                    (&loaded, number),
+                    &entry,
+                    (digest, *size, source.as_ref()),
+                    self.now(),
+                )?,
                 ino,
             }),
             _ => Err(Errno::Inval),
