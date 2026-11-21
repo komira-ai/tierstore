@@ -501,3 +501,12 @@ pub(in crate::server::treefs) fn path_of(tree: &Tree, index: u32) -> String {
 #[cfg(test)]
 #[path = "blob_tests.rs"]
 mod tests;
+
+#[cfg(test)]
+#[cfg(target_os = "linux")]
+#[path = "descriptor_tests.rs"]
+pub(in crate::server::treefs) mod descriptor_tests;
+
+#[cfg(test)]
+#[path = "blob_deadline_tests.rs"]
+mod deadline_tests;
