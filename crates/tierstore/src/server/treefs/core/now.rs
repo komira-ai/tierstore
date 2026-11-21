@@ -88,3 +88,7 @@ impl Core {
         !self.handles.contains(fh) && self.foreign(fh)
     }
 }
+
+#[cfg(test)]
+#[path = "now_tests.rs"]
+mod tests;

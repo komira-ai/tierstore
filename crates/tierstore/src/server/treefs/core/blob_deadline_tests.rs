@@ -214,6 +214,33 @@ fn a_read_of_an_open_file_that_fails_is_said_with_the_file_and_the_error() {
     assert_eq!(said, [line(10, ""), line(40, more)]);
 }
 
+/// Asserts that the line after one failed read not said carries the count in the singular.
+#[test]
+fn one_failed_read_not_said_is_counted_in_the_singular() {
+    let (rig, _) = rig_ticking("tfs-read-one-more", |path| File::open(path));
+    let core = &rig.core;
+    let fh = open_cached(core, ino::of(1, 3), false).unwrap();
+    break_handle(&rig, fh, ino::of(1, 3));
+    let log = Logged::default();
+    let guard = logged(&log, tracing::Level::WARN);
+    assert_eq!(core.read(fh, 10, 4), Err(Errno::Io));
+    assert_eq!(core.read(fh, 20, 4), Err(Errno::Io));
+    rig.clock.advance(Duration::from_millis(SAY_EVERY_MS));
+    assert_eq!(core.read(fh, 30, 4), Err(Errno::Io));
+    drop(guard);
+    let root = rig.upstream.built.lock().unwrap().root.clone();
+    let cc = blob_for(&rig, 3000);
+    let line = |offset: u64, more: &str| {
+        format!(
+            "tierstore fs: cannot read /bin/cc in the tree {root} (number 1) at {offset}: the \
+             blob {cc} of 3000 bytes from packs/one @ 4096: Is a directory (os error 21){more}"
+        )
+    };
+    let more = "; 1 more failed read of an open file of this tree since the last line";
+    let said: Vec<String> = log.text().lines().map(str::to_owned).collect();
+    assert_eq!(said, [line(10, ""), line(30, more)]);
+}
+
 /// Asserts that a read of an open file of a tree that has left memory names the inode, and that
 /// a read of a handle the kernel should read itself (an adopted backing id) is `EIO` and says why.
 #[test]
