@@ -259,11 +259,12 @@ pub trait Host {
     /// [`SERVICE_BINARY`](super::SERVICE_BINARY), when the release has a binary of its own there to
     /// put (an archive release's `bin/tierstore`): a copy owned by root and readable by every
     /// user, which replaces what was there in one rename, so that a process running the old copy
-    /// keeps it. A release of the Debian or RPM package has its binary put in place by the package
-    /// manager: nothing is done.
+    /// keeps it. Any other release (of the Debian or RPM package, or of the macOS installer
+    /// package) has its binary put in place by its package manager: nothing is done.
     ///
     /// # Errors
-    /// The release has no binary, its binary is not one to run, or the copy cannot be made.
+    /// The archive binary is not one to run (a link, a directory, or not root's alone), or the
+    /// copy cannot be made.
     fn install_binary(&self, release: &Path) -> Result<(), PortError>;
 
     /// Removes the copy [`Host::install_binary`] made; one that is not there is fine.

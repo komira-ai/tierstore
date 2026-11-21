@@ -162,45 +162,36 @@ fn a_second_copy_replaces_the_first_by_a_rename() {
     assert_eq!(names(&root), ["tierstore"]);
 }
 
-/// Asserts that a release of the Debian or RPM package puts nothing in place and makes no
-/// directory: its package manager installs its binary. Catches a hook that copies a native
-/// package's binary over what the package manager placed, or that fails on such a release.
+/// Asserts that a release that is not the archive package's (nothing at `bin`) puts nothing in
+/// place and makes no directory: a release of the Debian or RPM package, one of the macOS
+/// installer package (whose job runs the binary the installer placed), and one with no binary at
+/// all. Catches a hook that copies a native package's binary over what its package manager
+/// placed, or that fails the update of a host that installs one.
 #[test]
-fn a_release_of_the_package_puts_nothing_in_place() {
-    let (_guard, root) = scratch("binary-package");
-    let binary = at(&root, RELEASE).join("tree/usr/libexec/tierstore/tierstore");
-    fs::create_dir_all(binary.parent().unwrap()).unwrap();
-    fs::write(&binary, "binary of the package").unwrap();
+fn a_release_that_is_not_the_archive_s_puts_nothing_in_place() {
+    let (_guard, root) = scratch("binary-native");
     let runner = FakeRunner::replying(vec![]);
-    host(&root, &runner)
-        .install_binary(Path::new(RELEASE))
-        .unwrap();
-    assert!(!root.join("usr").exists());
-}
-
-/// Asserts that a release with neither binary is refused, naming both paths it looked at and
-/// where the copy was to go, and that nothing is made. Catches a step that starts an instance on
-/// whatever copy was there before.
-#[test]
-fn a_release_with_no_binary_is_refused_naming_both_paths() {
-    let (_guard, root) = scratch("binary-none");
-    fs::create_dir_all(at(&root, RELEASE)).unwrap();
-    let runner = FakeRunner::replying(vec![]);
-    let error = host(&root, &runner)
-        .install_binary(Path::new(RELEASE))
-        .unwrap_err();
-    let release = at(&root, RELEASE);
-    assert_eq!(
-        message(error),
-        format!(
-            "the binary of {RELEASE} cannot be put at {SERVICE_BINARY}: {} is not there, nor {}",
-            release.join("bin/tierstore").display(),
-            release
-                .join("tree/usr/libexec/tierstore/tierstore")
-                .display()
-        )
-    );
-    assert!(!root.join("usr").exists());
+    let host = host(&root, &runner);
+    for (release, binary) in [
+        (
+            "/packages/tierstore/deb",
+            Some("tree/usr/libexec/tierstore/tierstore"),
+        ),
+        (
+            "/packages/tierstore/pkg",
+            Some("tree/Library/Application Support/tierstore/bin/tierstore"),
+        ),
+        ("/packages/tierstore/none", None),
+    ] {
+        fs::create_dir_all(at(&root, release)).unwrap();
+        if let Some(binary) = binary {
+            let path = at(&root, release).join(binary);
+            fs::create_dir_all(path.parent().unwrap()).unwrap();
+            fs::write(&path, "binary of a native package").unwrap();
+        }
+        host.install_binary(Path::new(release)).unwrap();
+        assert!(!root.join("usr").exists(), "{release}");
+    }
 }
 
 /// Asserts that a binary that is a link, that a group or others can write, that sits in a `bin`
@@ -259,6 +250,29 @@ fn a_binary_that_is_not_root_s_alone_is_not_copied() {
     assert_eq!(fs::read_to_string(copy(&root)).unwrap(), "binary of 0.4.0");
 }
 
+/// Asserts that a `/usr/local` its group can write (root:staff, mode 2775, as some hosts have
+/// it) takes the copy, made in directories of mode 0755 that the group cannot write, and that
+/// removing from a host that has no copy looks at nothing and succeeds. Catches a hook that
+/// refuses such a host, and an uninstall that fails on a host that never had a copy.
+#[test]
+fn a_local_directory_its_group_can_write_takes_the_copy() {
+    let (_guard, root) = scratch("binary-staff");
+    let runner = FakeRunner::replying(vec![]);
+    let host = host(&root, &runner);
+    fs::create_dir_all(root.join("usr/local")).unwrap();
+    mode(&root.join("usr"), 0o755);
+    mode(&root.join("usr/local"), 0o2775);
+    host.remove_binary().unwrap();
+    assert!(!root.join("usr/local/libexec").exists());
+    archive_release(&root, RELEASE, "binary of 0.5.0");
+    host.install_binary(Path::new(RELEASE)).unwrap();
+    assert_eq!(fs::read_to_string(copy(&root)).unwrap(), "binary of 0.5.0");
+    assert_eq!(mode_of(&root.join("usr/local/libexec")), 0o755);
+    assert_eq!(mode_of(&copy_dir(&root)), 0o755);
+    host.remove_binary().unwrap();
+    assert!(!copy(&root).exists());
+}
+
 /// Asserts that a link at the copy's path or at its temporary name is replaced, never written
 /// through: the file a link names keeps its bytes, and the copy is a regular file. Catches a copy
 /// that writes the binary into whatever file a link there names.
@@ -281,9 +295,10 @@ fn a_link_where_the_copy_goes_is_replaced_and_not_followed() {
     assert_eq!(names(&root), ["tierstore"]);
 }
 
-/// Asserts that a directory on the way to the copy that is a link, that a group or others can
-/// write, or that another user owns refuses the copy, naming it, and that nothing is written
-/// under it. Catches a copy that a user other than root could swap for a binary of their own.
+/// Asserts that a directory on the way to the copy that is a link, that others can write, or that
+/// another user owns, and a directory of the copy that its group can write, refuse the copy,
+/// naming it, and that nothing is written under it. Catches a copy that a user other than root
+/// could swap for a binary of their own.
 #[test]
 fn a_directory_on_the_way_that_is_not_root_s_alone_refuses_the_copy() {
     let (_guard, root) = scratch("binary-dirs");
@@ -309,17 +324,25 @@ fn a_directory_on_the_way_that_is_not_root_s_alone_refuses_the_copy() {
 
     fs::remove_file(root.join("usr/local")).unwrap();
     copy_dirs(&root);
-    mode(&root.join("usr/local/libexec"), 0o777);
+    mode(&root.join("usr/local/libexec"), 0o757);
     assert_eq!(
         message(host.install_binary(Path::new(RELEASE)).unwrap_err()),
         format!(
-            "{prefix}: {} can be written by a group or others",
+            "{prefix}: {} can be written by others",
             root.join("usr/local/libexec").display()
         )
     );
-    assert!(!copy(&root).exists());
-
     mode(&root.join("usr/local/libexec"), 0o755);
+    mode(&copy_dir(&root), 0o775);
+    assert_eq!(
+        message(host.install_binary(Path::new(RELEASE)).unwrap_err()),
+        format!(
+            "{prefix}: {} can be written by its group",
+            copy_dir(&root).display()
+        )
+    );
+    assert!(!copy(&root).exists());
+    mode(&copy_dir(&root), 0o755);
     let mut source = fs::File::open(at(&root, RELEASE).join("bin/tierstore")).unwrap();
     let Err(fault) = ServiceBinary::new(&root, me() + 1).install(&mut source) else {
         panic!("a copy under directories of another owner");

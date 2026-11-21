@@ -13,7 +13,7 @@
   hostkeeper keeps the package directories, and with them the release link `current`, closed to
   every user but root, and the job runs as _tierstore. The update hook, which runs as root, copies
   the binary of the release `current` names there (root's, mode 0755, in directories that are
-  root's and that no group or other user can write) before it loads the job: in cutover the staged
+  root's and that no other user can write) before it loads the job: in cutover the staged
   release's, in rollback the previous release's, at boot (restore) the current release's. The hook
   never moves the link.
 

@@ -10,7 +10,7 @@
 # the release link `current`, closed to every user but root, and the instance runs as the account
 # tierstore. The update hook, which runs as root, copies the binary of the release `current` names
 # to /usr/local/libexec/tierstore/tierstore (root's, mode 0755, in directories that are root's and
-# that no group or other user can write) before it starts an instance: in cutover the staged
+# that no other user can write) before it starts an instance: in cutover the staged
 # release's, in rollback the previous release's, at boot (restore) the current release's. The copy
 # replaces the old one by a rename, so an instance that runs the old copy keeps it until it exits.
 #

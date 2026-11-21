@@ -4,8 +4,11 @@
 //! puts a copy where the account can.
 //!
 //! Every directory from the root down to the copy's is made when it is absent (mode 0755) and
-//! must be a directory, not a link, owned by the owner (root on a host) and not writable by a
-//! group or others: nobody but root can then replace the copy, or a directory above it. The copy
+//! must be a directory, not a link, owned by the owner (root on a host) and not writable by
+//! others; the copy's own directory, which the hook makes, not by its group either. A directory
+//! above it may be writable by its group, as `/usr/local` is (root:staff, mode 2775) on a host
+//! that gives the group `staff` the right to install there: that group can put programs in root's
+//! way anyway. Nobody else can replace the copy, or a directory above it. The copy
 //! is written to a temporary file beside it (one a crash left, or a link put there, is removed
 //! first, and the new one is made with `O_EXCL | O_NOFOLLOW`), given mode 0755, synced and renamed
 //! over the copy, and the directory is synced. A process that runs the old copy keeps it: the
@@ -61,9 +64,9 @@ impl<'a> ServiceBinary<'a> {
         self.root.join(SERVICE_BINARY.trim_start_matches('/'))
     }
 
-    /// Whether `path` is a directory, not a link, owned by the owner and not writable by a group
-    /// or others.
-    fn check(&self, path: &Path) -> Result<(), Fault> {
+    /// Whether `path` is a directory, not a link, owned by the owner and not writable by others,
+    /// nor by its group when `own` (the copy's own directory).
+    fn check(&self, path: &Path, own: bool) -> Result<(), Fault> {
         let meta = fs::symlink_metadata(path)
             .map_err(|error| Fault(format!("{}: {error}", path.display())))?;
         if !meta.file_type().is_dir() {
@@ -78,8 +81,11 @@ impl<'a> ServiceBinary<'a> {
             )
             .into());
         }
-        if meta.mode() & 0o022 != 0 {
-            return Err(format!("{} can be written by a group or others", path.display()).into());
+        if meta.mode() & 0o002 != 0 {
+            return Err(format!("{} can be written by others", path.display()).into());
+        }
+        if own && meta.mode() & 0o020 != 0 {
+            return Err(format!("{} can be written by its group", path.display()).into());
         }
         Ok(())
     }
@@ -102,30 +108,19 @@ impl<'a> ServiceBinary<'a> {
             .map_err(|error| Fault(format!("{}: {error}", path.display())))
     }
 
-    /// The directory of the copy, every directory from the root down to it made when it is
-    /// absent and checked.
-    fn made_dir(&self) -> Result<OwnedFd, Fault> {
+    /// The directory of the copy, every directory from the root down to it checked, and made
+    /// first when `make` and it is absent.
+    fn dir(&self, make: bool) -> Result<OwnedFd, Fault> {
+        let components = parts().0;
         let mut path = self.root.to_path_buf();
-        for component in parts().0 {
+        for (n, component) in components.iter().enumerate() {
             path.push(component);
-            ServiceBinary::make(&path)?;
-            self.check(&path)?;
+            if make {
+                ServiceBinary::make(&path)?;
+            }
+            self.check(&path, n + 1 == components.len())?;
         }
         ServiceBinary::open_dir(&path)
-    }
-
-    /// The directory of the copy, every directory from the root down to it checked; `None` when
-    /// one of them is not there.
-    fn found_dir(&self) -> Result<Option<OwnedFd>, Fault> {
-        let mut path = self.root.to_path_buf();
-        for component in parts().0 {
-            path.push(component);
-            if fs::symlink_metadata(&path).is_err_and(|e| e.kind() == ErrorKind::NotFound) {
-                return Ok(None);
-            }
-            self.check(&path)?;
-        }
-        ServiceBinary::open_dir(&path).map(Some)
     }
 
     /// Writes the temporary file in `dir` anew from `source`, mode [`MODE`], synced.
@@ -147,7 +142,7 @@ impl<'a> ServiceBinary<'a> {
     /// Replaces the copy with the bytes of `source`, read from where it stands to its end.
     pub(super) fn install(&self, source: &mut File) -> Result<(), Fault> {
         let (_, name) = parts();
-        let dir = self.made_dir()?;
+        let dir = self.dir(true)?;
         let replaced = ServiceBinary::write_temp(&dir, source)
             .and_then(|()| renameat(&dir, TEMP, &dir, name).map_err(io_error))
             .and_then(|()| fsync(&dir).map_err(io_error));
@@ -157,14 +152,18 @@ impl<'a> ServiceBinary<'a> {
         })
     }
 
-    /// Removes the copy and a temporary file beside it; neither being there is fine, and so is a
-    /// directory above it that is not there. A directory that is there is checked as for
-    /// [`Self::install`] first.
+    /// Removes the copy and a temporary file beside it. When neither is there (a host that never
+    /// had a copy: one of the Debian or RPM package, say) nothing is looked at or done; otherwise
+    /// the directories are checked as for [`Self::install`] first.
     pub(super) fn remove(&self) -> Result<(), Fault> {
         let (_, name) = parts();
-        let Some(dir) = self.found_dir()? else {
-            return Ok(());
+        let absent = |path: &Path| {
+            fs::symlink_metadata(path).is_err_and(|error| error.kind() == ErrorKind::NotFound)
         };
+        if absent(&self.path()) && absent(&self.path().with_file_name(TEMP)) {
+            return Ok(());
+        }
+        let dir = self.dir(false)?;
         for file in [TEMP, name] {
             match unlinkat(&dir, file, AtFlags::empty()) {
                 Ok(()) | Err(Errno::NOENT) => {}

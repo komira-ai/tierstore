@@ -19,7 +19,7 @@ switches from one version to the next) closed to every user but root, and the un
 service account. Every unit runs `/usr/local/libexec/tierstore/tierstore`, a copy of the binary of
 the release `current` names that the update hook, which hostkeeper runs as root, makes before it
 starts the service: in `cutover`, `rollback` and the boot step `restore`. The copy is root's,
-mode 0755, in directories that are root's and that no group or other user can write; the hook
+mode 0755, in directories that are root's and that no other user can write; the hook
 makes `/usr/local/libexec/tierstore` when it is absent, and removes the copy at `uninstall`. The
 package holds nothing of a node's own: the configuration file
 (`/etc/tierstore/config.toml` on Linux, `/usr/local/tierstore/etc/tierstore.toml` on a Mac), the

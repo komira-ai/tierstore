@@ -103,8 +103,9 @@ pub const PACKAGE_RELEASE_BINARY: &str = "tree/usr/libexec/tierstore/tierstore";
 /// copy of the binary of the release `current` names, which the hook puts there before it starts
 /// the service ([`Host::install_binary`]). hostkeeper keeps the release itself closed to every
 /// user but root, and the service runs as its own account, which can read and run this copy: the
-/// file is root's, mode 0755, in directories that are root's and that no group or other user can
-/// write.
+/// file is root's, mode 0755, in directories that are root's and that no other user can write.
+/// Only a release of the archive package is copied; a native package's is placed by its package
+/// manager.
 pub const SERVICE_BINARY: &str = "/usr/local/libexec/tierstore/tierstore";
 /// The plist of the launchd job, as hostkeeper links it from the package's `units/`.
 pub const LAUNCHD_PLIST: &str = "/Library/LaunchDaemons/tierstore.plist";

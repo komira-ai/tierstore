@@ -305,11 +305,9 @@ impl<'a> SystemHost<'a> {
     /// package's when nothing is at either and something is at the package's path, and neither is
     /// an error naming both.
     fn layout_of(&self, release: &Path) -> Result<(PathBuf, bool), Fault> {
-        let archive = under(&self.root, &release.join(RELEASE_BINARY));
+        let (archive, archive_there) = self.archive_of(release);
         let package = under(&self.root, &release.join(PACKAGE_RELEASE_BINARY));
-        let there = |path: &Path| fs::symlink_metadata(path).is_ok();
-        let archive_there = there(&archive) || archive.parent().is_some_and(there);
-        match (archive_there, there(&package)) {
+        match (archive_there, fs::symlink_metadata(&package).is_ok()) {
             (false, true) => Ok((package, false)),
             (false, false) => Err(Fault(format!(
                 "{} is not there, nor {}",
@@ -320,10 +318,21 @@ impl<'a> SystemHost<'a> {
         }
     }
 
+    /// The path of the archive binary of `release` under the root, and whether anything is at it
+    /// or at its `bin`.
+    fn archive_of(&self, release: &Path) -> (PathBuf, bool) {
+        let archive = under(&self.root, &release.join(RELEASE_BINARY));
+        let there = |path: &Path| fs::symlink_metadata(path).is_ok();
+        let archive_there = there(&archive) || archive.parent().is_some_and(there);
+        (archive, archive_there)
+    }
+
     /// Puts the archive binary of `release` at [`SERVICE_BINARY`] under the root
-    /// ([`ServiceBinary`]); a release of the Debian or RPM package has none to put.
+    /// ([`ServiceBinary`]). A release that is not the archive's (nothing at `bin/tierstore` or
+    /// `bin`: a release of the Debian or RPM package, or of the macOS installer package) has none
+    /// to put, and its package manager puts its binary in place.
     fn install_from(&self, release: &Path) -> Result<(), Fault> {
-        let (binary, archive) = self.layout_of(release)?;
+        let (binary, archive) = self.archive_of(release);
         if !archive {
             return Ok(());
         }
@@ -618,8 +627,9 @@ impl Host for SystemHost<'_> {
 
     /// Copies the archive binary of `release` (its `bin/tierstore`, checked as for a check of
     /// the configuration, and read through a descriptor opened without following a link) to
-    /// [`SERVICE_BINARY`] under the root; a release of the Debian or RPM package is left to its
-    /// package manager. The copy's directories must be the release owner's (root on a host).
+    /// [`SERVICE_BINARY`] under the root; any other release (of the Debian or RPM package, or of
+    /// the macOS installer package) is left to its package manager. The copy's directories must
+    /// be the release owner's (root on a host).
     fn install_binary(&self, release: &Path) -> Result<(), PortError> {
         self.install_from(release).map_err(|fault| {
             PortError::failed(
