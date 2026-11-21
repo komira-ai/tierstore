@@ -513,10 +513,10 @@ fn a_read_that_the_system_fails_is_an_io_error() {
     let directory = std::fs::File::open(&rig.cache).unwrap();
     core.handles.insert(
         handle,
-        std::sync::Arc::new(super::Handle::Cached(super::FileBytes::whole(
-            directory.into(),
-            10,
-        ))),
+        std::sync::Arc::new(super::Handle::Cached {
+            bytes: super::FileBytes::whole(directory.into(), 10),
+            ino: ino::of(1, 3),
+        }),
     );
     assert_eq!(core.read(handle, 0, 10), Err(Errno::Io));
 }

@@ -86,7 +86,7 @@ impl Core {
             if !self.current(number, token) {
                 return;
             }
-            match self.cache_file((digest, *size, source.as_ref())) {
+            match self.cache_file((digest, *size, source.as_ref()), self.open_until()) {
                 Ok(_) => batch.push(*digest),
                 Err(reason) => {
                     let _ = self.failed((&loaded, number), entry.index, digest, reason);

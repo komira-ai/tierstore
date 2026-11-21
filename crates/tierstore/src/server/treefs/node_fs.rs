@@ -51,7 +51,7 @@ use tsfuse::abi::{
 use tsfuse::{Completion, Errno, Fs, Handled, Replier, Request};
 
 use super::backing::BackingId;
-use super::core::{self, Core, FIXED_MTIME, Kind, Looked, Opened};
+use super::core::{self, Core, FIXED_MTIME, Failing, Kind, Looked, Opened};
 use super::ino;
 use super::put_fs::PutFs;
 
@@ -211,6 +211,13 @@ impl NodeFs {
                 let Some(backing_id) = backing else {
                     // Only `serving.rs` makes the handles of ids, of this type: not seen.
                     self.core.release(fh);
+                    let number = ino::split(node).0;
+                    self.core.say_failed((number, Failing::Other), None, &|| {
+                        format!(
+                            "tierstore fs: cannot open the inode {node}: its backing id of an \
+                             earlier release is not one this process can answer with"
+                        )
+                    });
                     send(replier, Err(Errno::EIO));
                     return;
                 };
@@ -271,6 +278,13 @@ impl NodeFs {
         }
         if unnamed {
             // No entry the core lists has such a name; the kernel would refuse the listing.
+            let number = ino::split(node).0;
+            self.core.say_failed((number, Failing::Other), None, &|| {
+                format!(
+                    "tierstore fs: cannot list the directory of the inode {node}: an entry has a \
+                     name the kernel refuses"
+                )
+            });
             send(replier, Err(Errno::EIO));
             return;
         }

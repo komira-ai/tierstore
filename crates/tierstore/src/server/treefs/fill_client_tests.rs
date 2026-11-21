@@ -102,9 +102,9 @@ fn a_fill_is_one_line_out_and_one_back_over_a_kept_connection() {
     );
     let (client, pauses) = client(&path, 3, Duration::from_secs(30));
     assert_eq!(client.fill_manifest("good1", OPEN), Ok(()));
-    assert_eq!(client.fill_blob("good2", 7, "packs/a b", 9), Ok(()));
+    assert_eq!(client.fill_blob(("good2", 7), ("packs/a b", 9), None), Ok(()));
     assert_eq!(
-        client.fill_blob("bad", 7, "k", 0),
+        client.fill_blob(("bad", 7), ("k", 0), None),
         Err("mismatch".to_owned())
     );
     assert_eq!(
@@ -364,7 +364,7 @@ fn flat_reads_the_tree_of_a_placement_and_gives_other_answers_as_errors() {
 fn a_span_reads_the_offset_and_path_and_refuses_other_answers() {
     let (client, lines, _dir) = replying("tfs-fc-span", "ok 4096 /cache/a dir/pack 1");
     assert_eq!(
-        client.span("ab", 12, "cas/pack/one", 100),
+        client.span(("ab", 12), ("cas/pack/one", 100), None),
         Ok((4096, PathBuf::from("/cache/a dir/pack 1")))
     );
     assert_eq!(
@@ -374,7 +374,7 @@ fn a_span_reads_the_offset_and_path_and_refuses_other_answers() {
     for reply in ["fill: mismatch", "ok x /p", "ok 5", "ok"] {
         let (client, _, _dir) = replying("tfs-fc-span-bad", reply);
         assert_eq!(
-            client.span("ab", 12, "k", 0),
+            client.span(("ab", 12), ("k", 0), None),
             Err(reply.to_owned()),
             "{reply}"
         );
@@ -595,7 +595,7 @@ fn a_request_given_an_end_takes_no_pause_past_it() {
     assert_eq!(pauses.load(Ordering::Acquire), 2);
     // With no end the same client retries for all of its pauses.
     assert_eq!(
-        client.fill_blob("b", 1, "k", 0),
+        client.fill_blob(("b", 1), ("k", 0), None),
         Err("the fill socket is not answering".to_owned())
     );
     assert_eq!(pauses.load(Ordering::Acquire), 62);
@@ -657,7 +657,7 @@ fn a_kept_connection_waits_the_clients_own_time_for_the_next_request() {
     let put = client.put(("k", "s", 1), &staged, Duration::from_secs(600));
     assert_eq!(put, Ok("ok".to_owned()));
     assert_eq!(waits(&client), Some(Duration::from_secs(600)));
-    assert_eq!(client.fill_blob("b", 1, "k", 0), Ok(()));
+    assert_eq!(client.fill_blob(("b", 1), ("k", 0), None), Ok(()));
     assert_eq!(waits(&client), Some(Duration::from_secs(120)));
     let clock = Mono::new();
     let until = Until {
@@ -666,6 +666,6 @@ fn a_kept_connection_waits_the_clients_own_time_for_the_next_request() {
     };
     assert_eq!(client.fill_manifest("m", until), Ok(()));
     assert_eq!(waits(&client), Some(Duration::from_secs(50)));
-    assert_eq!(client.fill_blob("b", 1, "k", 0), Ok(()));
+    assert_eq!(client.fill_blob(("b", 1), ("k", 0), None), Ok(()));
     assert_eq!(waits(&client), Some(Duration::from_secs(120)));
 }

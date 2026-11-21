@@ -6,6 +6,7 @@
 //! handles stay in `core.rs` and `core/adopt.rs`.
 
 use std::fs::File;
+use std::io;
 use std::os::unix::fs::FileExt as _;
 use std::sync::Arc;
 
@@ -35,15 +36,12 @@ impl FileBytes {
         }
     }
 
-    /// Reads up to `size` bytes at `offset`; fewer at the end, none past it.
+    /// Reads up to `size` bytes at `offset`; fewer at the end, none past it. The read names its
+    /// offset (`pread`): the handles that share the descriptor share no position in it.
     ///
     /// # Errors
-    /// [`Errno::Io`] for a read that fails.
-    pub(in crate::server::treefs) fn read(
-        &self,
-        offset: u64,
-        size: usize,
-    ) -> Result<Vec<u8>, Errno> {
+    /// What the system said of a read that fails.
+    pub(in crate::server::treefs) fn read(&self, offset: u64, size: usize) -> io::Result<Vec<u8>> {
         // At most `size`, a `usize`.
         let wanted = self.size.saturating_sub(offset).min(size as u64) as usize;
         read_file(&self.file, self.base.saturating_add(offset), wanted)
@@ -53,18 +51,16 @@ impl FileBytes {
 /// Reads up to `size` bytes of `file` at `offset`; fewer at the end of the file.
 ///
 /// # Errors
-/// [`Errno::Io`] for a read that fails.
+/// What the system said of a read that fails.
 pub(in crate::server::treefs) fn read_file(
     file: &File,
     offset: u64,
     size: usize,
-) -> Result<Vec<u8>, Errno> {
+) -> io::Result<Vec<u8>> {
     let mut data = vec![0u8; size];
     let mut have = 0;
     while have < data.len() {
-        let got = file
-            .read_at(&mut data[have..], offset + have as u64)
-            .map_err(|_| Errno::Io)?;
+        let got = file.read_at(&mut data[have..], offset + have as u64)?;
         if got == 0 {
             break;
         }
@@ -106,7 +102,9 @@ impl Core {
         }
         let (bytes, _) = self.blob_file(ino)?.ok_or(Errno::Io)?;
         // `wanted` is at most `size`, a `u32`.
-        bytes.read(offset, wanted as usize)
+        bytes
+            .read(offset, wanted as usize)
+            .map_err(|error| self.unreadable(ino, offset, &error.to_string()))
     }
 
     /// The bytes of the file `ino` and its length, filled first through the fill socket if the

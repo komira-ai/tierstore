@@ -85,8 +85,8 @@ fn a_read_of_a_handle_an_earlier_process_gave_makes_the_open_again() {
 }
 
 /// Asserts that the handle of an empty file is made again as an empty open, that a name that is not
-/// a file is `EINVAL` and one that is not there `ENOENT`, and that a handle of this process that
-/// is not open is `EINVAL` as before.
+/// a file is `EINVAL` and one that is not there `EIO` (a read is never answered `ENOENT`), and that
+/// a handle of this process that is not open is `EINVAL` as before.
 #[test]
 fn a_foreign_handle_of_something_that_is_not_a_readable_file_is_refused() {
     let rig = rig("tfs-adopt-refused");
@@ -102,7 +102,7 @@ fn a_foreign_handle_of_something_that_is_not_a_readable_file_is_refused() {
     );
     assert_eq!(
         next.read_open(ino::of(1, 99), foreign + 2, 0, 10),
-        Err(Errno::NoEnt)
+        Err(Errno::Io)
     );
     let own = handle::make(2, 9);
     assert_eq!(next.read_open(header(), own, 0, 10), Err(Errno::Inval));

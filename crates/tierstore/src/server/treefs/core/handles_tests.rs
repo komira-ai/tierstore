@@ -24,9 +24,9 @@ fn two_handles_in_one_map_are_kept_and_released_separately() {
     handles.remove(1);
     assert!(!handles.contains(1));
     assert!(handles.get(65).is_some());
-    handles.insert(65, Arc::new(Handle::Adopted));
+    handles.insert(65, Arc::new(Handle::Adopted { ino: 1 }));
     assert_eq!(handles.len(), 1);
-    assert!(matches!(handles.get(65).as_deref(), Some(Handle::Adopted)));
+    assert!(matches!(handles.get(65).as_deref(), Some(Handle::Adopted { .. })));
 }
 
 /// Asserts that a handle put in only if absent leaves the file that is open as the number.
@@ -34,7 +34,7 @@ fn two_handles_in_one_map_are_kept_and_released_separately() {
 fn a_handle_put_in_if_absent_leaves_the_open_one() {
     let handles = Handles::new();
     handles.insert_if_absent(7, Handle::Empty);
-    handles.insert_if_absent(7, Handle::Adopted);
+    handles.insert_if_absent(7, Handle::Adopted { ino: 1 });
     assert!(matches!(handles.get(7).as_deref(), Some(Handle::Empty)));
     assert_eq!(handles.len(), 1);
 }

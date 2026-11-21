@@ -15,10 +15,11 @@ const RUN: &str = "run-1";
 /// `EMFILE`: the process has no descriptor left.
 const EMFILE: i32 = 24;
 
-/// What the system says for `EMFILE`, as a failed open is recorded.
-fn emfile_reason() -> String {
-    format!("io: {}", io::Error::from_raw_os_error(EMFILE))
-}
+/// `ENFILE`: the system has no descriptor left.
+const ENFILE: i32 = 23;
+
+/// `EACCES`: a file that may not be opened.
+const EACCES: i32 = 13;
 
 /// The pauses a fill client took, in order.
 type Pauses = Arc<std::sync::Mutex<Vec<Duration>>>;
@@ -354,34 +355,102 @@ fn a_failed_open_is_said_once_in_ten_seconds_for_each_tree() {
     );
 }
 
-/// Asserts that an open whose cache file cannot be opened fails with `EIO`, recorded as `io: `
-/// and what the system said, and is tried `FILL_TRIES` times: the fill is asked each time, and
-/// the file is opened twice for each (the look at the cache first, then after the fill; none
-/// before the first fill, which finds no file).
+/// Asserts that an open whose cache file cannot be opened for lack of descriptors (`EMFILE`, and
+/// `ENFILE`) fails with `EIO` at once: recorded as `no descriptor: ` and what the system said,
+/// counted, asked of the fill socket once for a blob the cache does not hold (the look at the
+/// cache finds no file, so the opener runs only after the fill) and never again, with no pause.
 #[test]
-fn a_cache_file_that_cannot_be_opened_is_an_io_failure_tried_three_times() {
+fn a_cache_file_that_cannot_be_opened_for_lack_of_descriptors_fails_at_once_as_such() {
+    for (errno, name) in [(EMFILE, "emfile"), (ENFILE, "enfile")] {
+        let calls = Arc::new(AtomicUsize::new(0));
+        let seen = Arc::clone(&calls);
+        let (rig, pauses) = rig_pausing(&format!("tfs-blob-{name}"), move |_| {
+            let _ = seen.fetch_add(1, Ordering::SeqCst);
+            Err(io::Error::from_raw_os_error(errno))
+        });
+        let core = &rig.core;
+        let cc = blob_for(&rig, 3000);
+        assert_eq!(open_cached(core, ino::of(1, 3), false), Err(Errno::Io));
+        assert_eq!(blob_fills(&rig, &cc), 1, "{name}");
+        assert_eq!(calls.load(Ordering::SeqCst), 1, "{name}");
+        assert_eq!(pauses.lock().unwrap().len(), 0, "{name}");
+        assert_eq!(core.descriptor_failures(), 1, "{name}");
+        assert_eq!(core.open_descriptors(), 0);
+        let reason = format!("no descriptor: {}", io::Error::from_raw_os_error(errno));
+        let failures = core.detach(RUN).unwrap();
+        assert_eq!(
+            failures,
+            [Failure {
+                path: "/bin/cc".into(),
+                digest: cc,
+                reason,
+            }],
+            "{name}"
+        );
+    }
+    assert_eq!(
+        format!("no descriptor: {}", io::Error::from_raw_os_error(EMFILE)),
+        "no descriptor: Too many open files (os error 24)"
+    );
+}
+
+/// Asserts that a blob the cache holds whose file cannot be opened for lack of descriptors is not
+/// filled at all: the fill would find it there. The open is `EIO`, counted, and the next open,
+/// once a descriptor is had again, succeeds and reads the blob.
+#[test]
+fn a_cached_blob_that_cannot_be_opened_for_lack_of_descriptors_is_not_filled_and_recovers() {
+    let short = Arc::new(std::sync::atomic::AtomicBool::new(false));
+    let refusing = Arc::clone(&short);
+    let rig = rig_opening("tfs-blob-emfile-cached", move |path| {
+        if refusing.load(Ordering::SeqCst) {
+            return Err(io::Error::from_raw_os_error(EMFILE));
+        }
+        File::open(path)
+    });
+    let core = &rig.core;
+    let cc = blob_for(&rig, 3000);
+    let warm = open_cached(core, ino::of(1, 3), false).unwrap();
+    core.release(warm);
+    assert_eq!(blob_fills(&rig, &cc), 1);
+    short.store(true, Ordering::SeqCst);
+    assert_eq!(open_cached(core, ino::of(1, 3), false), Err(Errno::Io));
+    assert_eq!(blob_fills(&rig, &cc), 1);
+    assert_eq!(core.descriptor_failures(), 1);
+    short.store(false, Ordering::SeqCst);
+    let fh = open_cached(core, ino::of(1, 3), false).unwrap();
+    assert_eq!(core.read(fh, 0, 4).unwrap().len(), 4);
+    assert_eq!(blob_fills(&rig, &cc), 1);
+    assert_eq!(core.descriptor_failures(), 1);
+}
+
+/// Asserts that an open whose cache file cannot be opened for another reason (`EACCES`) fails with
+/// `EIO`, recorded as `io: ` and what the system said, after `FILL_TRIES` tries: the fill is asked
+/// each time, and the file is opened twice for each (the look at the cache first, then after the
+/// fill; none before the first fill, which finds no file). It is not counted as a lack of
+/// descriptors.
+#[test]
+fn a_cache_file_that_cannot_be_opened_otherwise_is_an_io_failure_tried_three_times() {
     let calls = Arc::new(AtomicUsize::new(0));
     let seen = Arc::clone(&calls);
-    let rig = rig_opening("tfs-blob-emfile", move |_| {
+    let rig = rig_opening("tfs-blob-eacces", move |_| {
         let _ = seen.fetch_add(1, Ordering::SeqCst);
-        Err(io::Error::from_raw_os_error(EMFILE))
+        Err(io::Error::from_raw_os_error(EACCES))
     });
     let core = &rig.core;
     let cc = blob_for(&rig, 3000);
     assert_eq!(open_cached(core, ino::of(1, 3), false), Err(Errno::Io));
     assert_eq!(blob_fills(&rig, &cc), 3);
     assert_eq!(calls.load(Ordering::SeqCst), 5);
-    assert_eq!(core.open_descriptors(), 0);
+    assert_eq!(core.descriptor_failures(), 0);
     let failures = core.detach(RUN).unwrap();
     assert_eq!(
         failures,
         [Failure {
             path: "/bin/cc".into(),
             digest: cc,
-            reason: emfile_reason(),
+            reason: "io: Permission denied (os error 13)".into(),
         }]
     );
-    assert_eq!(emfile_reason(), "io: Too many open files (os error 24)");
 }
 
 /// Asserts that the paths of closed files are dropped from the maps of the shared descriptors once
