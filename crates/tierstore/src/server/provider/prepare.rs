@@ -1,6 +1,10 @@
 //! The preparation of one source, on a task of its own: the tree list read and checked, the tree
 //! built and placed at the source's path, and the bytes of its files read into the cache.
 //!
+//! The reads are made unless `trees.prepare_prefetch` is `none` ([`PreparePrefetch::None`]): the
+//! queue of reads is then closed before the list is read, so no read is queued or made, and the
+//! tree, once placed, is neither pinned nor marked ready; each file is filled by its first open.
+//!
 //! The placement and the reads run together, joined by a queue of reads ([`Group`]). A version 2
 //! list ([`TreeImage`]) is walked once on a blocking thread while another thread hashes it; as
 //! soon as the walk has checked it, its spans are grouped by the list's pack ranges and queued, and
@@ -35,7 +39,8 @@ use super::groups::{Group, alone, groups};
 use super::names::SourceId;
 use super::sources::{Owner, Shared, Stage};
 use crate::server::local_cache::trees::{
-    CreateError, CreateRequest, Created, FetchError, FileSpan, ImageRequest, StagedImage, TreeStore,
+    CreateError, CreateRequest, Created, FetchError, FileSpan, ImageRequest, PreparePrefetch,
+    StagedImage, TreeStore,
 };
 use crate::{
     Backend as _, BuiltFile, BuiltTree, Error, TreeDigest, TreeImage, TreeLimits, TreeListError,
@@ -70,7 +75,12 @@ pub(super) fn report(stage: &watch::Sender<Stage>, now: Stage) {
 
 /// Prepares the source of `job`, reporting each stage it reaches.
 pub(super) async fn run(shared: Arc<Shared>, job: Job) {
-    let (spans, queued) = unbounded();
+    let lazy = shared.store.config().prepare_prefetch == PreparePrefetch::None;
+    let (spans, mut queued) = unbounded();
+    if lazy {
+        // Nothing is read: every send of a read fails, and the fill below ends at once.
+        queued.close();
+    }
     let refused = AtomicBool::new(false);
     let placing = async {
         let placed = place(&shared, &job, spans).await;
@@ -95,6 +105,14 @@ pub(super) async fn run(shared: Arc<Shared>, job: Job) {
     let Ok(made) = placed else {
         return;
     };
+    if lazy {
+        tracing::info!(
+            "tierstore: mount provider: {} of {}: placed; its files are read when first opened",
+            job.id.path(),
+            job.key
+        );
+        return;
+    }
     tracing::info!(
         "tierstore: mount provider: {} of {}: {fetched} spans in the cache, {failed} not read",
         job.id.path(),
@@ -156,8 +174,10 @@ async fn place(shared: &Shared, job: &Job, reads: UnboundedSender<Group>) -> Res
         .map_err(|why| Stage::Failed(format!("the tree was not made: {why}")))??;
     match shared.owner(&job.id, &job.released) {
         Owner::Ours => {
-            for group in alone(&files) {
-                let _ = reads.unbounded_send(group);
+            if !reads.is_closed() {
+                for group in alone(&files) {
+                    let _ = reads.unbounded_send(group);
+                }
             }
             Ok(Made { tree: created.tree })
         }
@@ -199,7 +219,9 @@ fn image_v2(
         let staging = scope.spawn(|| store.stage_image(bytes.clone()).ok());
         let mut spans = Vec::new();
         let walked = TreeImage::open(bytes.clone(), limits, |span| spans.push(span));
-        if let Ok(image) = &walked {
+        if let Ok(image) = &walked
+            && !reads.is_closed()
+        {
             for group in groups(image.keys(), spans, image.ranges()) {
                 let _ = reads.unbounded_send(group);
             }
