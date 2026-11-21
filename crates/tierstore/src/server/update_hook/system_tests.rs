@@ -15,7 +15,9 @@ use super::machine::{Call, Output, RunError, Runner, SystemRunner};
 use super::system::{
     LAUNCHCTL_PROGRAM, SYSTEMCTL_PROGRAM, SystemConfig, on_this_machine, run_on, system_config,
 };
-use super::{Done, Invocation, LAUNCHD_PLIST, Outcome, Params, Reason, STATE_DIR, Step};
+use super::{
+    Done, Invocation, LAUNCHD_PLIST, Outcome, Params, Reason, SERVICE_BINARY, STATE_DIR, Step,
+};
 
 const STAGED: &str = "/packages/tierstore/versions/0.5.0+0123456789ab";
 const LABEL: &str = "com.example.tierstore";
@@ -195,11 +197,13 @@ fn the_systemctl_of_the_configuration_is_the_program_called() {
 }
 
 /// Asserts that launchd params run the launchd arm: a `restore` of a job the domain does not
-/// have asks `launchctl` about `system/<label from the params>` and bootstraps the plist, every
-/// call goes to `launchctl` and names that label or the plist, and `systemctl` is never called.
+/// have asks `launchctl` about `system/<label from the params>`, puts the staged release's binary
+/// at `SERVICE_BINARY` under the root and bootstraps the plist, every call goes to `launchctl`
+/// and names that label or the plist, and `systemctl` is never called.
 #[test]
 fn launchd_params_issue_launchctl_calls_for_their_label_only() {
     let host = new_host("system-launchd");
+    host.release();
     let runner = ByProgram::default();
     let params = params(&format!(
         "service_manager = \"launchd\"\nlaunchd_label = \"{LABEL}\"\nconfig_file = \"/etc/tierstore.toml\"\n"
@@ -218,6 +222,8 @@ fn launchd_params_issue_launchctl_calls_for_their_label_only() {
             .iter()
             .any(|call| call.args == ["bootstrap", "system", LAUNCHD_PLIST])
     );
+    let copy = host.root.join(SERVICE_BINARY.trim_start_matches('/'));
+    assert_eq!(fs::read_to_string(copy).unwrap(), "#!");
 }
 
 /// Asserts that the `launchctl` the configuration names is the program called by the launchd

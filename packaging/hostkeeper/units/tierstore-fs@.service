@@ -25,7 +25,8 @@
 # state and /run/tierstore, the parent of its mount point (the process makes
 # /run/tierstore/fs). What changes: RestrictAddressFamilies is AF_UNIX alone. What stays: User,
 # NoNewPrivileges, MemoryDenyWriteExecute, UMask, and the marker file, restart settings and
-# release link of the template. The hand-over between the two instances is done by the processes
+# binary of the template (the copy the update hook puts at /usr/local/libexec/tierstore/tierstore,
+# which the account can run: the release inside hostkeeper's package directory is root's alone). The hand-over between the two instances is done by the processes
 # themselves (`handoff-fs-v1`, on fs.handoff_socket in the runtime directory): a new instance
 # asks the running one for the mount before it says READY=1.
 #
@@ -51,7 +52,7 @@ NotifyAccess=main
 User=tierstore
 RuntimeDirectory=tierstore-fs tierstore
 RuntimeDirectoryPreserve=yes
-ExecStart=/var/lib/hostkeeper/packages/tierstore/current/bin/tierstore fs \
+ExecStart=/usr/local/libexec/tierstore/tierstore fs \
   --config /etc/tierstore/fs.toml
 KillSignal=SIGTERM
 TimeoutStopSec=30

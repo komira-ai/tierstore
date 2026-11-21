@@ -1,12 +1,14 @@
 //! The steps of a host whose service runs as two instances of one systemd template,
 //! `tierstore@a.service` and `tierstore@b.service`, over the ports of [`SystemdPorts`].
 //!
-//! Both instances run `current/bin/tierstore` and serve port 9300; an instance starts only when
-//! its marker file is there (`ConditionPathExists=` of the template), so at boot only the
-//! recorded one does. The hook alternates: the instance that serves is `live`, the other is
-//! `next`, and an update starts `next`. hostkeeper moves the link `current` before `cutover`
-//! and back before `rollback`; the hook never moves it, so an instance that starts runs
-//! whichever release `current` names at that moment.
+//! Both instances run [`SERVICE_BINARY`](super::SERVICE_BINARY) and serve port 9300; an instance
+//! starts only when its marker file is there (`ConditionPathExists=` of the template), so at boot
+//! only the recorded one does. The hook alternates: the instance that serves is `live`, the other
+//! is `next`, and an update starts `next`. hostkeeper moves the link `current` before `cutover`
+//! and back before `rollback`; the hook never moves it, and puts the binary of the release it
+//! names at `SERVICE_BINARY` before it starts an instance (in `cutover`, `rollback` and
+//! `restore`; [`Host::install_binary`](super::Host::install_binary)), so an instance that starts
+//! runs whichever release `current` names at that moment.
 //!
 //! - `prepare` checks that the node can take the update (a configuration that names
 //!   `server.handoff_socket`, unless the params force a restart), asks the staged and the
@@ -23,7 +25,8 @@
 //! - `cleanup` confirms afresh (it waits for `/readyz`, which the old instance, still draining
 //!   on the same sockets, answers 503), records `stopping` (the commit), waits for the old
 //!   instance to have exited, removes its marker and records that `next` is now `live`.
-//! - `uninstall` stops both instances and removes both markers; the data stays.
+//! - `uninstall` stops both instances and removes both markers and the copy of the binary; the
+//!   data stays.
 //! - `restore`, the boot step, makes the markers say what the record says and starts that
 //!   instance.
 //!
@@ -175,7 +178,7 @@ fn dispatch(
 ) -> Result<Done, Done> {
     match (step, record) {
         (Step::Prepare, record) => prepare::prepare(c, params, record),
-        (Step::Restore, record) => boot::restore(c, record),
+        (Step::Restore, record) => boot::restore(c, params, record),
         (Step::Uninstall, _) => boot::uninstall(c),
         (Step::Rollback, None) => Ok(Done::ok("nothing to roll back: no update is recorded")),
         (_, None) => Err(Done::fail(

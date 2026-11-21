@@ -1,4 +1,5 @@
-//! `cutover`: starts the instance `prepare` chose, and waits for the staged release to serve.
+//! `cutover`: puts the staged release's binary where the units run it, starts the instance
+//! `prepare` chose, and waits for the staged release to serve.
 
 use super::super::params::Params;
 use super::super::record::{Marker, Mode, Record};
@@ -22,6 +23,10 @@ pub(super) fn cutover(c: &Ctx<'_, '_>, params: &Params, record: &Record) -> Resu
             unit_name(next)
         )));
     }
+    // The units run the copy at `SERVICE_BINARY`, which becomes the staged release's before
+    // anything is stopped or started: a failure here leaves `live` serving. A `live` that runs
+    // the old copy keeps it, and drains on it.
+    c.ports.host.install_binary(&params.staged_release)?;
     let how = match (record.live, record.mode) {
         // The new instance takes the sockets; the live one drains and exits by itself.
         (Some(_), Some(Mode::Handover)) => "hand-over",

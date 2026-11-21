@@ -364,7 +364,8 @@ fn both_plists_allow_1048576_open_files() {
 
 /// Asserts that the plist of the installer package is the plist of hostkeeper's archive package
 /// but for the program: every key is the same, and the first of `ProgramArguments` is the
-/// package's binary instead of the release link's, the rest of the command line unchanged. It
+/// package's binary instead of the copy the update hook installs for the archive, the rest of the
+/// command line unchanged. It
 /// would catch a change to one plist that the other does not follow, which would run a Mac with
 /// another account, limit or drain than the archive's.
 #[test]
@@ -377,7 +378,7 @@ fn the_package_plist_differs_from_the_archive_plist_only_in_the_program() {
     };
     assert_eq!(
         program[0],
-        Value::Text("/var/lib/hostkeeper/packages/tierstore/current/bin/tierstore".to_owned())
+        Value::Text("/usr/local/libexec/tierstore/tierstore".to_owned())
     );
     program[0] = Value::Text(PACKAGE_PROGRAM.to_owned());
     assert_eq!(package, changed);
