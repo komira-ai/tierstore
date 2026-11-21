@@ -877,3 +877,6 @@ mod session;
 
 #[path = "node_fs_kernel_tests.rs"]
 mod kernel;
+
+#[path = "node_fs_shared_read_tests.rs"]
+mod shared_reads;
