@@ -9,6 +9,7 @@ use std::time::Duration;
 
 use tierstore_testkit::dir::TestDir;
 
+use super::super::machine::DSCL_PROGRAM;
 use super::super::machine::testing::me;
 use super::super::machine::{Call, Output, RunError, Runner};
 use super::super::system::{
@@ -21,8 +22,8 @@ const STAGED: &str = "/packages/tierstore-config-g/0.4.0";
 const BINARY: &str = "/usr/libexec/tierstore/tierstore";
 
 /// Answers `systemctl show` with `inactive`, `launchctl print` with "not loaded", a `start` with
-/// a failure (so no step goes on to look at a port), and every other call with success and no
-/// output; keeps the calls.
+/// a failure (so no step goes on to look at a port), `dscl` with the ids 398 and 397, and every
+/// other call with success and no output; keeps the calls.
 #[derive(Default)]
 struct Calls {
     calls: RefCell<Vec<Call>>,
@@ -42,6 +43,7 @@ impl Runner for Calls {
     fn run(&self, call: &Call) -> Result<Output, RunError> {
         self.calls.borrow_mut().push(call.clone());
         let (code, stdout) = match call.args.first().map(String::as_str) {
+            _ if call.program == DSCL_PROGRAM => (0, "UniqueID: 398\nPrimaryGroupID: 397\n"),
             Some("show") => (0, "inactive\n"),
             Some("print") => (113, ""),
             Some("start") => (1, ""),
@@ -99,6 +101,7 @@ impl Node {
             root: self.root.clone(),
             owner: me(),
             release_owner: me(),
+            hook_uid: me(),
             systemctl: SYSTEMCTL_PROGRAM,
             launchctl: LAUNCHCTL_PROGRAM,
             poll: Duration::from_millis(1),
@@ -111,12 +114,30 @@ impl Node {
     }
 
     fn run(&self, runner: &dyn Runner, step: Step, params: &Params) -> super::super::Done {
+        self.run_with(&self.config(runner), step, params)
+    }
+
+    /// The same, as a hook that runs as root.
+    fn run_as_root(&self, runner: &dyn Runner, step: Step, params: &Params) -> super::super::Done {
+        let config = SystemConfig {
+            hook_uid: 0,
+            ..self.config(runner)
+        };
+        self.run_with(&config, step, params)
+    }
+
+    fn run_with(
+        &self,
+        config: &SystemConfig<'_>,
+        step: Step,
+        params: &Params,
+    ) -> super::super::Done {
         let invocation = Invocation {
             step,
             artifact: None,
             params: PathBuf::from("/params.toml"),
         };
-        config_run_on(&self.config(runner), Path::new(BINARY), &invocation, params)
+        config_run_on(config, Path::new(BINARY), &invocation, params)
     }
 }
 
@@ -218,6 +239,58 @@ fn a_mac_prepares_through_launchd() {
         calls.lines()
     );
     assert!(node.state("config-state.json").is_file());
+}
+
+/// The call of the serving binary in `calls`.
+fn binary_call(node: &Node, calls: &Calls) -> Call {
+    let binary = node.at(BINARY).display().to_string();
+    calls
+        .calls
+        .borrow()
+        .iter()
+        .find(|call| call.program == binary)
+        .cloned()
+        .expect("the serving binary ran")
+}
+
+/// Asserts that on a Mac a config hook that runs as root has `prepare` ask the directory service
+/// for `_tierstore`, before it runs anything else, and run the check of the staged file as its
+/// ids, though the root's `etc/passwd` has a `tierstore`. Catches the launchd arm of the config
+/// hook looking up the Linux account in `etc/passwd`, which fails every Mac's config package.
+#[test]
+fn a_root_mac_hook_checks_as_the_directory_service_account() {
+    let node = node("config-hook-system-mac-root");
+    node.write("/etc/passwd", "tierstore:x:991:992::/:/bin/false\n");
+    let calls = Calls::default();
+    let done = node.run_as_root(
+        &calls,
+        Step::Prepare,
+        &params("service_manager = \"launchd\"\nlaunchd_label = \"tierstore\"\n"),
+    );
+    assert_eq!(done.outcome, Outcome::Success, "{done:?}");
+    let dscl = format!("{DSCL_PROGRAM} . -read /Users/_tierstore UniqueID PrimaryGroupID");
+    assert_eq!(calls.lines().first(), Some(&dscl), "{:?}", calls.lines());
+    assert_eq!(binary_call(&node, &calls).run_as, Some((398, 397)));
+}
+
+/// Asserts that on Linux a config hook that runs as root runs the check as `tierstore` of
+/// `etc/passwd` under the root, and asks no directory service.
+#[test]
+fn a_root_linux_hook_checks_as_the_passwd_account() {
+    let node = node("config-hook-system-linux-root");
+    node.write("/etc/passwd", "tierstore:x:991:992::/:/bin/false\n");
+    let calls = Calls::default();
+    let done = node.run_as_root(&calls, Step::Prepare, &params(""));
+    assert_eq!(done.outcome, Outcome::Success, "{done:?}");
+    assert_eq!(binary_call(&node, &calls).run_as, Some((991, 992)));
+    assert!(
+        calls
+            .lines()
+            .iter()
+            .all(|line| !line.starts_with(DSCL_PROGRAM)),
+        "{:?}",
+        calls.lines()
+    );
 }
 
 /// Asserts that a service manager the hook does not know refuses the step and touches nothing.

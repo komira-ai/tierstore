@@ -80,10 +80,14 @@ pub const MARKER_DIR: &str = "/var/lib/tierstore";
 pub fn marker_path(instance: Instance) -> PathBuf {
     PathBuf::from(MARKER_DIR).join(format!("run-{}", instance.letter()))
 }
-/// The account the service runs as: the template's `User=`. A check of the configuration by a
-/// release runs as this account when the hook runs as root, so that the release judges the files
-/// as the unit will.
+/// The account the service runs as on Linux: the template's `User=`, in `/etc/passwd`. A check
+/// of the configuration by a release runs as this account when a hook of the systemd arm runs as
+/// root, so that the release judges the files as the unit will.
 pub const SERVICE_ACCOUNT: &str = "tierstore";
+/// The account the service runs as on a Mac: the launchd job's `UserName`, which the macOS
+/// package's postinstall makes in the directory service. A root hook of the launchd arm runs a
+/// check of the configuration as this account, as [`SERVICE_ACCOUNT`] on Linux.
+pub(crate) const MACOS_SERVICE_ACCOUNT: &str = "_tierstore";
 /// The binary of a release, under its version directory (hostkeeper's archive package layout).
 pub const RELEASE_BINARY: &str = "bin/tierstore";
 /// The binary of a release of the Debian or RPM package, under its version directory: hostkeeper

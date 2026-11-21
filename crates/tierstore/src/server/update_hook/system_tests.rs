@@ -97,6 +97,7 @@ impl Host {
             root: self.root.clone(),
             owner: me(),
             release_owner: me(),
+            hook_uid: me(),
             systemctl: SYSTEMCTL_PROGRAM,
             launchctl: LAUNCHCTL_PROGRAM,
             poll: Duration::from_millis(1),
