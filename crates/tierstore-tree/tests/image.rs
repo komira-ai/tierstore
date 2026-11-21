@@ -16,6 +16,8 @@
 //! Catches: a lookup that compares names as strings or off by one at either end of the children;
 //! a node decoded with the wrong record field; a version this release cannot read opened anyway.
 
+// Linux only, as the crate is (its library and its dependencies are `cfg(target_os = "linux")`).
+#![cfg(target_os = "linux")]
 #![allow(
     clippy::unwrap_used,
     clippy::expect_used,

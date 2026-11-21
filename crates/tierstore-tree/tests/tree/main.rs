@@ -4,6 +4,8 @@
 //! generic function covered by different test binaries count as missed (the coverage gate counts
 //! each instantiation).
 
+// Linux only, as the crate is (its library and its dependencies are `cfg(target_os = "linux")`).
+#![cfg(target_os = "linux")]
 #![allow(
     clippy::unwrap_used,
     clippy::expect_used,
