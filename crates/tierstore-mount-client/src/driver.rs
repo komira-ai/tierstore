@@ -830,21 +830,22 @@ impl Driver {
         let Some(slot) = self.slots.get_mut(id) else {
             return;
         };
+        // The pack is broken before any wait or read of it is answered, so that a caller woken
+        // by the answer finds it broken.
+        if let Some(pack) = &slot.pack {
+            pack.break_with(err.clone());
+        }
         for answer in slot.waiters.drain(..) {
             let _ = answer.send(Err(err.clone()));
         }
         for joiner in slot.windows.drain() {
             joiner.read.part_done(Err(err.clone()));
         }
-        match &slot.pack {
-            Some(pack) => {
-                pack.break_with(err.clone());
-                slot.handle = None;
-                slot.broken = Some(err);
-            }
-            None => {
-                self.slots.remove(id);
-            }
+        if slot.pack.is_some() {
+            slot.handle = None;
+            slot.broken = Some(err);
+        } else {
+            self.slots.remove(id);
         }
     }
 
@@ -912,14 +913,15 @@ impl Driver {
         self.end = Some(err.clone());
         self.wire.set(Link::Idle);
         for slot in self.slots.values_mut() {
+            // Broken before its waits and reads are answered, as in `fail_slot`.
+            if let Some(pack) = &slot.pack {
+                pack.break_with(err.clone());
+            }
             for answer in slot.waiters.drain(..) {
                 let _ = answer.send(Err(err.clone()));
             }
             for joiner in slot.windows.drain() {
                 joiner.read.part_done(Err(err.clone()));
-            }
-            if let Some(pack) = &slot.pack {
-                pack.break_with(err.clone());
             }
             slot.handle = None;
             slot.broken = Some(err.clone());
