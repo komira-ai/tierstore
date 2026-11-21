@@ -2,6 +2,7 @@
 //! workflow step is one command.
 //!
 //! - [`fetch`]: download a pinned tool, check its SHA-256, install it.
+//! - [`farm`]: the farm lane's Buck2 build, which must run every action on the build farm.
 //! - [`package`]: one binary and its SBOM as release assets, with their `SHA256SUMS` lines.
 //! - [`licenses`]: the third-party licence notice of a binary, which `package` puts in its tarball.
 //! - [`sums`]: assemble `SHA256SUMS` and check the files and their attestations against it.
@@ -21,6 +22,7 @@ pub mod advisories;
 pub mod build_commit;
 pub mod bundles;
 pub mod channels;
+pub mod farm;
 pub mod fetch;
 pub mod licenses;
 pub mod package;
@@ -55,6 +57,8 @@ pub enum Error {
     Refused(Vec<String>),
     #[error(transparent)]
     Fetch(#[from] fetch::Error),
+    #[error(transparent)]
+    Farm(#[from] farm::Error),
     /// Flags that do not fit together (exit status 2, like a clap error).
     #[error("{0}")]
     Usage(String),
@@ -120,6 +124,16 @@ enum Verb {
         /// without the archive's top directory.
         #[arg(long)]
         tree: bool,
+    },
+    /// Build a target with Buck2 on the build farm: refused without the farm's worker property
+    /// set, and failed unless the summary line says `local: 0` (docs/farm.md).
+    FarmBuild {
+        /// The buck2 binary.
+        #[arg(long)]
+        buck2: PathBuf,
+        /// The target, such as `//:ci`.
+        #[arg(long)]
+        target: String,
     },
     /// The third-party licence notice of the crates a binary is built from, from the output of
     /// `cargo metadata`.
@@ -629,6 +643,9 @@ fn run(cli: Cli) -> Result<Vec<String>, Error> {
             let unpack = fetch::Unpack::new(extract, member, tree).map_err(Error::Usage)?;
             let roots = fetch::host_roots();
             Ok(vec![fetch::fetch(&url, &sha256, &unpack, &out, &roots)?])
+        }
+        Verb::FarmBuild { buck2, target } => {
+            Ok(vec![farm::build(&buck2, &target, &mut std::io::stderr())?])
         }
         Verb::Licenses {
             metadata,

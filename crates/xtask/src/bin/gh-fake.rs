@@ -45,7 +45,12 @@
 //! - `deny ...` (the `cargo deny` of the advisories verb) exits with the number in `deny.code`
 //!   of the working directory (0 when there is none) and prints `deny.stderr` on stderr;
 //! - `print <text>` and `fail <text>` print on stdout and exit 0, and print on stderr and
-//!   exit 1.
+//!   exit 1;
+//! - `audit ...`, `build ...` and `kill` (the `buck2` of `farm-build`) append their arguments,
+//!   joined by spaces, as one line to `buck2.calls` of the working directory; `audit` and `build`
+//!   then print `buck2-<verb>.stdout` (for `audit`, `{}` when there is none: buck2's answer for a
+//!   key that is not set) and `buck2-<verb>.stderr` (on stderr) and exit with the number in
+//!   `buck2-<verb>.status` (0 when there is none); `kill` exits 0.
 
 #![expect(
     clippy::disallowed_macros,
@@ -78,6 +83,7 @@ fn main() -> ExitCode {
         Some("release") => release(&args[1..]),
         Some("--proto") => curl(&args),
         Some("deny") => deny(),
+        Some(verb @ ("audit" | "build" | "kill")) => buck2(verb, &args),
         Some("print") => {
             println!("{}", args[1..].join(" "));
             ExitCode::SUCCESS
@@ -88,6 +94,29 @@ fn main() -> ExitCode {
         }
         _ => attestation(&args),
     }
+}
+
+/// The `buck2` of `farm-build`: see the header.
+fn buck2(verb: &str, args: &[String]) -> ExitCode {
+    let calls = std::fs::OpenOptions::new()
+        .create(true)
+        .append(true)
+        .open("buck2.calls");
+    let _ = calls.and_then(|mut f| writeln!(f, "{}", args.join(" ")));
+    if verb == "kill" {
+        return ExitCode::SUCCESS;
+    }
+    let read = |suffix: &str, default: &str| {
+        std::fs::read_to_string(format!("buck2-{verb}.{suffix}"))
+            .unwrap_or_else(|_| default.to_owned())
+    };
+    print!(
+        "{}",
+        read("stdout", if verb == "audit" { "{}" } else { "" })
+    );
+    eprint!("{}", read("stderr", ""));
+    let status = read("status", "0").trim().parse().unwrap_or(2);
+    ExitCode::from(status)
 }
 
 /// `api [-X <method>] <path> [--input -]`: see the header.
