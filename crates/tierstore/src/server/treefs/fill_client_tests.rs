@@ -673,10 +673,11 @@ fn a_kept_connection_waits_the_clients_own_time_for_the_next_request() {
     assert_eq!(waits(&client), Some(Duration::from_secs(120)));
 }
 
-/// Asserts that a rest before an end is taken only while a second is left before it: with less
-/// than a second left none is taken and it says so; with a second or more one pause is taken.
+/// Asserts that a rest before an end is taken only while more than a second is left before it:
+/// with a second or less left none is taken and it says so (the try after it could not be sent);
+/// with more, one pause is taken.
 #[test]
-fn a_rest_before_an_end_is_taken_only_with_a_second_left() {
+fn a_rest_before_an_end_is_taken_only_with_more_than_a_second_left() {
     let (_dir, path) = place("tfs-fc-rest");
     let clock = Arc::new(Mono::new());
     let (client, pauses) = client(&path, 3, Duration::from_secs(30));
@@ -687,7 +688,9 @@ fn a_rest_before_an_end_is_taken_only_with_a_second_left() {
     assert!(!client.rest_before(at(0)));
     assert!(!client.rest_before(at(999)));
     assert_eq!(pauses.load(Ordering::Acquire), 0);
-    assert!(client.rest_before(at(1_000)));
+    assert!(!client.rest_before(at(1_000)));
+    assert_eq!(pauses.load(Ordering::Acquire), 0);
+    assert!(client.rest_before(at(1_001)));
     assert_eq!(pauses.load(Ordering::Acquire), 1);
     assert!(client.rest_before(at(60_000)));
     assert_eq!(pauses.load(Ordering::Acquire), 2);

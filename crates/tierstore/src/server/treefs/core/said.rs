@@ -141,13 +141,15 @@ impl Core {
 
     /// What the thread that detaches idle trees does at each look besides (`core/implicit.rs`):
     /// tells the node how many files of the cache this process holds open and how many opens
-    /// failed for lack of descriptors since the last look (`descriptors`, for the node's metrics),
-    /// and says the counts of failures not said whose last line is [`SAY_EVERY_MS`] old.
+    /// failed for lack of descriptors since it started (`descriptors`, for the node's metrics: a
+    /// total, so a report lost loses nothing the next one carries), and says the counts of
+    /// failures not said whose last line is [`SAY_EVERY_MS`] old.
     pub(in crate::server::treefs) fn look_around(&self) {
         let report = Descriptors {
             mount: self.settings.mount_id.clone(),
+            process: u64::from(std::process::id()),
             held: self.open_descriptors() as u64,
-            short: self.open_files.short_since_reported(),
+            short: self.open_files.short(),
         };
         self.fills.report(report.line());
         for line in self.lines.unsaid(self.now(), None) {

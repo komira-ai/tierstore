@@ -2,24 +2,31 @@
 //! `/metricz`: how many it holds now, and how many opens found no descriptor.
 //!
 //! The mount process shares one descriptor per cache file (a blob or a pack) across all its open
-//! handles. About once a minute it sends, from the thread that sends `started`
-//! (`fill_client.rs`), `descriptors <mount> <held> <short>`:
+//! handles. At each look for idle trees (every quarter of `fs.tree_idle_secs`, at most a minute
+//! apart) it sends, from the thread that sends `started` (`fill_client.rs`),
+//! `descriptors <mount> <process> <held> <short>`:
 //!
 //! - `<mount>`: the id of the mount, the name it uses in `pin <mount> ...`;
+//! - `<process>`: the id of the mount process (its pid);
 //! - `<held>`: the cache files the mount process holds open now;
 //! - `<short>`: the opens of files of the mount that failed for lack of descriptors (`EMFILE`,
-//!   `ENFILE`) since the mount's previous report.
+//!   `ENFILE`) since that process started: a running total, so that a report lost (which a
+//!   process short of descriptors is likely to lose) loses no failure the next one carries.
 //!
 //! The node keeps, for each mount, the last `held` (the gauge `tierstore_fs_cache_descriptors`)
-//! and the sum of every `short` (the counter `tierstore_fs_open_descriptor_failures_total`, which
-//! so goes on counting across restarts of the mount process). It keeps at most [`MOST_MOUNTS`]
-//! mounts: a report of another mount, when that many are kept, is answered `ok` and counted
-//! nowhere, so a client that makes up mount ids cannot grow the node's memory.
+//! and the counter `tierstore_fs_open_descriptor_failures_total`, which grows by what each
+//! process's total grew by since its report before, and by the whole total of a process it has
+//! not seen (or whose total went down: a new process given the same id), so it goes on counting
+//! across restarts and hand-overs of the mount process. The last total of the [`PROCESSES`] latest
+//! processes of a mount is kept, so the two processes of a hand-over, reporting in turns, are
+//! counted apart. It keeps at most [`MOST_MOUNTS`] mounts: a report of another mount, when that
+//! many are kept, is answered `ok` and counted nowhere, so a client that makes up mount ids cannot
+//! grow the node's memory.
 //!
 //! The report is advice, like the others of the mount: one is lost when the thread that sends it
-//! has a queue of 1024, when the fill socket is away, or when the node is of a release before this
-//! one (it answers `refused unknown request`, which the mount ignores). A report this node cannot
-//! read is refused and adds nothing.
+//! has a queue of 1024, when the fill socket is away or no connection to it can be made, or when
+//! the node is of a release before this one (it answers `refused unknown request`, which the mount
+//! ignores). A report this node cannot read is refused and adds nothing.
 
 use std::collections::BTreeMap;
 use std::fmt::Write as _;
@@ -35,34 +42,44 @@ const SHORT: &str = "tierstore_fs_open_descriptor_failures_total";
 /// The most mounts the node keeps the reports of.
 pub(in crate::server) const MOST_MOUNTS: usize = 64;
 
+/// The most processes of one mount whose last total is kept.
+pub(in crate::server) const PROCESSES: usize = 2;
+
 /// The cache files a mount holds open, and the opens short of descriptors. The report
 /// `descriptors`.
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub(in crate::server) struct Descriptors {
     /// The id of the mount.
     pub mount: String,
+    /// The id of the mount process.
+    pub process: u64,
     /// The cache files the mount process holds open now.
     pub held: u64,
-    /// The opens that failed for lack of descriptors since the previous report.
+    /// The opens that failed for lack of descriptors since the mount process started.
     pub short: u64,
 }
 
 impl Descriptors {
     /// The line of the report.
     pub(in crate::server) fn line(&self) -> String {
-        format!("descriptors {} {} {}", self.mount, self.held, self.short)
+        format!(
+            "descriptors {} {} {} {}",
+            self.mount, self.process, self.held, self.short
+        )
     }
 
-    /// The report whose words after `descriptors` are `rest`: a mount name and two numbers; none
-    /// for anything else.
+    /// The report whose words after `descriptors` are `rest`: a mount name and three numbers;
+    /// none for anything else.
     pub(in crate::server) fn parse(rest: &str) -> Option<Self> {
         let mut words = rest.split(' ');
-        let (mount, held, short) = (words.next()?, words.next()?, words.next()?);
+        let mount = words.next()?;
+        let (process, held, short) = (words.next()?, words.next()?, words.next()?);
         if words.next().is_some() || !is_name(mount) {
             return None;
         }
         Some(Self {
             mount: mount.to_owned(),
+            process: number(process)?,
             held: number(held)?,
             short: number(short)?,
         })
@@ -87,8 +104,10 @@ fn escaped(name: &str) -> String {
 struct Mount {
     /// `held` of the last report.
     held: u64,
-    /// The sum of `short` of every report.
+    /// What the totals of its processes grew by, in all.
     short: u64,
+    /// The last total of each of its latest processes, the latest last.
+    processes: Vec<(u64, u64)>,
 }
 
 /// The reports of the mounts of one cache.
@@ -98,7 +117,8 @@ pub(super) struct Held {
 }
 
 impl Held {
-    /// Takes the report: the last `held` of its mount, and its `short` added.
+    /// Takes the report: the last `held` of its mount, and what the total of its process grew by
+    /// added (module docs).
     fn reported(&self, report: Descriptors) {
         let mut mounts = locked(&self.mounts);
         if !mounts.contains_key(&report.mount) && mounts.len() >= MOST_MOUNTS {
@@ -106,7 +126,20 @@ impl Held {
         }
         let mount = mounts.entry(report.mount).or_default();
         mount.held = report.held;
-        mount.short = mount.short.saturating_add(report.short);
+        let seen = mount
+            .processes
+            .iter()
+            .position(|(process, _)| *process == report.process);
+        let before = seen.map(|at| mount.processes.remove(at).1);
+        let grew = match before {
+            Some(before) if report.short >= before => report.short - before,
+            _ => report.short,
+        };
+        mount.short = mount.short.saturating_add(grew);
+        mount.processes.push((report.process, report.short));
+        if mount.processes.len() > PROCESSES {
+            let _ = mount.processes.remove(0);
+        }
     }
 
     /// The two families in the Prometheus text format, the mounts in the order of their ids.

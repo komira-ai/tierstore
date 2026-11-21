@@ -499,9 +499,10 @@ impl FillClient {
         (self.pause)(PAUSE);
     }
 
-    /// [`FillClient::rest`], if that leaves time before `until`; whether it did.
+    /// [`FillClient::rest`], if that leaves time before `until` for another try; whether it did.
     pub(super) fn rest_before(&self, until: Until<'_>) -> bool {
-        if until.left() < PAUSE {
+        // A pause that leaves no time would be followed by a try that is not sent.
+        if until.left() <= PAUSE {
             return false;
         }
         (self.pause)(PAUSE);

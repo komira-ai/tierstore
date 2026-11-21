@@ -548,7 +548,7 @@ async fn an_attached_and_a_fetched_are_answered_ok_and_counted() {
 }
 
 /// Asserts that a `descriptors` is answered `ok`, by a node with no tree store, and shows in the
-/// cache's families, the gauge at the last report and the counter summed; a malformed one is
+/// cache's families, the gauge at the last report and the counter at the process's total; a malformed one is
 /// refused and counts nothing.
 #[tokio::test]
 async fn a_descriptors_is_answered_ok_and_counted() {
@@ -556,10 +556,10 @@ async fn a_descriptors_is_answered_ok_and_counted() {
     let place = Place::new("tfs-descriptors");
     let served = Served::start(&rig.cache, &place.path);
     let mut client = Client::connect(&place.path).await;
-    assert_eq!(client.ask("descriptors boot-1 40 2").await, "ok");
-    assert_eq!(client.ask("descriptors boot-1 35 3").await, "ok");
+    assert_eq!(client.ask("descriptors boot-1 7 40 2").await, "ok");
+    assert_eq!(client.ask("descriptors boot-1 7 35 5").await, "ok");
     assert_eq!(
-        client.ask("descriptors boot-1 x 3").await,
+        client.ask("descriptors boot-1 7 x 3").await,
         "refused malformed request"
     );
     let metrics = rig.cache.metrics();

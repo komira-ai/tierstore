@@ -18,7 +18,7 @@
 //! started <path>                              the mount first looked into the tree at <path>
 //! attached <outcome> <ms>                      the mount attached a tree on a lookup, or did not
 //! fetched <cache> <filled> <failed> <ms> <n>.. where the manifests of a read of a tree came from
-//! descriptors <mount> <held> <short>           the cache files the mount holds open; opens short of descriptors
+//! descriptors <mount> <process> <held> <short> the cache files the mount holds open; its opens short of descriptors
 //! ```
 //!
 //! A digest is sixty-four lower-case hex digits; a number is decimal digits only; a mount and a

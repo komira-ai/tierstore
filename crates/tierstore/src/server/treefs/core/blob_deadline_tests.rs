@@ -115,32 +115,35 @@ fn a_fill_that_took_the_whole_fetch_timeout_is_not_asked_again() {
     }
 }
 
-/// Asserts the boundary of the pause before another try: with less than a second left before the
-/// open's end no pause is taken and no fill asked again; with a second left the pause is taken,
-/// and the try after it, which finds the end passed, is not sent and fails with the words of an
-/// end that passed.
+/// Asserts the boundary of the pause before another try: with a second or less left before the
+/// open's end no pause is taken (the try after it could not be sent) and no fill asked again, and
+/// the open fails with the last real answer; with a millisecond more than a second left the pause
+/// is taken and the fill asked again.
 #[test]
-fn a_pause_is_taken_only_while_a_second_is_left_before_the_end() {
+fn a_pause_is_taken_only_while_more_than_a_second_is_left_before_the_end() {
     let second = Duration::from_secs(1);
-    let (short, pauses) = rig_ticking("tfs-deadline-short", |path| File::open(path));
-    let cc = blob_for(&short, 3000);
-    fail_with(&short, &cc, "busy");
-    let taken = WAIT - second + Duration::from_millis(1);
-    assert_eq!(open_taking(&short, taken), Err(Errno::Io));
-    assert_eq!(blob_fills(&short, &cc), 1);
-    assert_eq!(pauses.lock().unwrap().len(), 0);
-    assert_eq!(short.core.detach(RUN).unwrap()[0].reason, "busy");
-
-    let (exact, pauses) = rig_ticking("tfs-deadline-exact", |path| File::open(path));
-    let cc = blob_for(&exact, 3000);
-    fail_with(&exact, &cc, "busy");
-    assert_eq!(open_taking(&exact, WAIT - second), Err(Errno::Io));
-    assert_eq!(blob_fills(&exact, &cc), 1);
+    for (name, taken) in [
+        (
+            "tfs-deadline-short",
+            WAIT - second + Duration::from_millis(1),
+        ),
+        ("tfs-deadline-exact", WAIT - second),
+    ] {
+        let (rig, pauses) = rig_ticking(name, |path| File::open(path));
+        let cc = blob_for(&rig, 3000);
+        fail_with(&rig, &cc, "busy");
+        assert_eq!(open_taking(&rig, taken), Err(Errno::Io), "{name}");
+        assert_eq!(blob_fills(&rig, &cc), 1, "{name}");
+        assert_eq!(pauses.lock().unwrap().len(), 0, "{name}");
+        assert_eq!(rig.core.detach(RUN).unwrap()[0].reason, "busy", "{name}");
+    }
+    let (rig, pauses) = rig_ticking("tfs-deadline-over", |path| File::open(path));
+    let cc = blob_for(&rig, 3000);
+    fail_with(&rig, &cc, "busy");
+    let taken = WAIT - second - Duration::from_millis(1);
+    assert_eq!(open_taking(&rig, taken), Err(Errno::Io));
     assert_eq!(*pauses.lock().unwrap(), [second]);
-    assert_eq!(
-        exact.core.detach(RUN).unwrap()[0].reason,
-        "the fill socket did not answer within the time the request was given"
-    );
+    assert_eq!(blob_fills(&rig, &cc), 2);
 }
 
 /// Asserts that with time left a fill that can pass is asked again after a pause, and the open
@@ -247,9 +250,9 @@ fn a_failed_read_of_a_tree_not_in_memory_names_the_inode_and_an_adopted_read_say
     );
 }
 
-/// Asserts what a look of the sweep tells the node: `descriptors <mount> <held> <short>`, with
-/// the cache files open now and the opens that failed for lack of descriptors since the look
-/// before (none at the next look); and that it says the counts of failed opens not said once
+/// Asserts what a look of the sweep tells the node: `descriptors <mount> <process> <held>
+/// <short>`, with the cache files open now and the opens that failed for lack of descriptors
+/// since the process started (the same total at the next looks, with none since); and that it says the counts of failed opens not said once
 /// their last line is ten seconds old, and not before.
 #[test]
 fn a_look_reports_the_descriptors_and_says_the_counts_not_said() {
@@ -277,6 +280,7 @@ fn a_look_reports_the_descriptors_and_says_the_counts_not_said() {
         assert_eq!(open_cached(core, header, false), Err(Errno::Io));
     }
     let reports = || rig.upstream.asked("descriptors");
+    let process = std::process::id();
     core.look_around();
     until(|| reports().len() == 1);
     rig.clock.advance(Duration::from_millis(SAY_EVERY_MS - 1));
@@ -289,9 +293,9 @@ fn a_look_reports_the_descriptors_and_says_the_counts_not_said() {
     assert_eq!(
         reports(),
         [
-            "descriptors mount-1 2 3",
-            "descriptors mount-1 2 0",
-            "descriptors mount-1 2 0"
+            format!("descriptors mount-1 {process} 2 3"),
+            format!("descriptors mount-1 {process} 2 3"),
+            format!("descriptors mount-1 {process} 2 3"),
         ]
     );
     let header_blob = testing_sha(b"int a;");

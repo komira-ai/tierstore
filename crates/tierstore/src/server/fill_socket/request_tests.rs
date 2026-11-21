@@ -503,17 +503,18 @@ fn an_attached_and_a_fetched_are_the_reports_they_write() {
 fn a_descriptors_is_the_report_it_writes() {
     let report = Descriptors {
         mount: "boot-1".to_owned(),
+        process: 77,
         held: 12,
         short: 3,
     };
     assert_eq!(line(&report.line()), Ok(Request::Descriptors(report)));
     for text in [
         "descriptors",
-        "descriptors boot-1 1",
-        "descriptors boot-1 1 2 3",
-        "descriptors boot-1 -1 2",
-        "descriptors boot-1 1 x",
-        "descriptors  1 2",
+        "descriptors boot-1 7 1",
+        "descriptors boot-1 7 1 2 3",
+        "descriptors boot-1 7 -1 2",
+        "descriptors boot-1 7 1 x",
+        "descriptors  7 1 2",
     ] {
         assert_eq!(line(text), Err(Refusal::Malformed), "{text:?}");
     }

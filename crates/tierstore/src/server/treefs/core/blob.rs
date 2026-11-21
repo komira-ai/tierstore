@@ -128,8 +128,6 @@ pub(in crate::server::treefs) struct OpenFiles {
     open: Opener,
     /// The opens of the core that failed for lack of descriptors, in all.
     short: AtomicU64,
-    /// Of those, the count when the mount last reported them to the node.
-    reported: AtomicU64,
 }
 
 /// One map of the shared descriptors, and how large it may grow before the closed are dropped.
@@ -151,7 +149,6 @@ impl OpenFiles {
             shards: std::array::from_fn(|_| Mutex::new(Shard::default())),
             open,
             short: AtomicU64::new(0),
-            reported: AtomicU64::new(0),
         }
     }
 
@@ -223,10 +220,9 @@ impl OpenFiles {
             .sum()
     }
 
-    /// The opens that failed for lack of descriptors since the last call (the last report).
-    pub(super) fn short_since_reported(&self) -> u64 {
-        let all = self.short.load(Ordering::Acquire);
-        all.saturating_sub(self.reported.swap(all, Ordering::AcqRel))
+    /// The opens of the core that failed for lack of descriptors since it was made.
+    pub(super) fn short(&self) -> u64 {
+        self.short.load(Ordering::Acquire)
     }
 }
 
@@ -306,7 +302,7 @@ impl Core {
     /// The opens that failed for lack of descriptors since this process started.
     #[cfg(test)]
     pub(in crate::server::treefs) fn descriptor_failures(&self) -> u64 {
-        self.open_files.short.load(Ordering::Acquire)
+        self.open_files.short()
     }
 
     /// The end every try of one open is answered by: `fs.fetch_timeout` from now.

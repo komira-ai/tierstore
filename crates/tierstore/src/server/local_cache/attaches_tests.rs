@@ -10,7 +10,11 @@ fn families(rig: &Rig) -> Vec<String> {
     rig.cache
         .metrics()
         .lines()
-        .filter(|line| line.contains("tierstore_fs_"))
+        .filter(|line| {
+            ["tierstore_fs_tree_attach_", "tierstore_fs_manifest_"]
+                .iter()
+                .any(|family| line.contains(family))
+        })
         .map(str::to_owned)
         .collect()
 }
