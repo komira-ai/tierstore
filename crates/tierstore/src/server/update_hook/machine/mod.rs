@@ -22,6 +22,9 @@ use std::fmt;
 use std::io;
 
 pub use clock::MonotonicClock;
+// The config hook's tests answer the `dscl` call by its program.
+#[cfg(test)]
+pub(crate) use host::DSCL_PROGRAM;
 pub use host::{CONFIG_MAX, SystemHost};
 pub use instances::LoopbackInstances;
 pub use launchd::{

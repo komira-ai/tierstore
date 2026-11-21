@@ -50,6 +50,9 @@ pub(super) struct SystemConfig<'a> {
     pub owner: u32,
     /// The user id that must own the binary of a staged release.
     pub release_owner: u32,
+    /// The user id the hook runs as: a root hook (0) runs a release's check of the configuration
+    /// as the service account of the arm.
+    pub hook_uid: u32,
     /// The `systemctl` program.
     pub systemctl: &'a str,
     /// The `launchctl` program.
@@ -65,13 +68,24 @@ fn under(root: &Path, absolute: &str) -> PathBuf {
     root.join(absolute.trim_start_matches('/'))
 }
 
+/// The host of `config` for the arm `manager` names: on launchd (a Mac) the service account is
+/// `_tierstore` in the directory service, on systemd `tierstore` in `etc/passwd`.
+fn host_for<'a>(config: &SystemConfig<'a>, manager: &ServiceManager) -> SystemHost<'a> {
+    let host = SystemHost::new(config.root.clone(), config.runner, CAPABILITIES_TIMEOUT)
+        .with_release_owner(config.release_owner)
+        .with_hook_user(config.hook_uid);
+    match manager {
+        ServiceManager::Launchd { .. } => host.with_directory_service(),
+        ServiceManager::Systemd | ServiceManager::Unknown(_) => host,
+    }
+}
+
 /// Runs the step on the machine described by `config`: the ports are the machine's, and the
 /// arm is the one the params name. A service manager that is none of the two refuses every
 /// step, `prepare` included, before anything is touched.
 pub(super) fn run_on(config: &SystemConfig<'_>, invocation: &Invocation, params: &Params) -> Done {
     let runner = config.runner;
-    let host = SystemHost::new(config.root.clone(), runner, CAPABILITIES_TIMEOUT)
-        .with_release_owner(config.release_owner);
+    let host = host_for(config, &params.service_manager);
     let instances = LoopbackInstances::new(CONNECT_TIMEOUT, READ_TIMEOUT);
     let clock = MonotonicClock::new().with_pause(config.poll);
     let state = StateFiles::new(under(&config.root, STATE_DIR), config.owner);
@@ -124,9 +138,7 @@ pub(super) fn config_run_on(
     params: &Params,
 ) -> Done {
     let runner = config.runner;
-    let host = SystemHost::new(config.root.clone(), runner, CAPABILITIES_TIMEOUT)
-        .with_release_owner(config.release_owner)
-        .with_binary(binary.to_path_buf());
+    let host = host_for(config, &params.service_manager).with_binary(binary.to_path_buf());
     let release = Path::new("/");
     let running = Running {
         host: &host,
@@ -214,10 +226,12 @@ pub(super) fn config_run_as(
 /// the user the hook runs as, a staged release owned by root, and the host's own `systemctl`
 /// and `launchctl`.
 pub(super) fn system_config(runner: &dyn Runner) -> SystemConfig<'_> {
+    let uid = geteuid().as_raw();
     SystemConfig {
         root: PathBuf::from("/"),
-        owner: geteuid().as_raw(),
+        owner: uid,
         release_owner: 0,
+        hook_uid: uid,
         systemctl: SYSTEMCTL_PROGRAM,
         launchctl: LAUNCHCTL_PROGRAM,
         poll: POLL_INTERVAL,

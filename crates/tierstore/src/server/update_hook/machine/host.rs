@@ -13,7 +13,9 @@ use std::time::Duration;
 use rustix::process::geteuid;
 
 use super::super::ports::{Host, PortError, PortKind};
-use super::super::{PACKAGE_RELEASE_BINARY, RELEASE_BINARY, SERVICE_ACCOUNT};
+use super::super::{
+    MACOS_SERVICE_ACCOUNT, PACKAGE_RELEASE_BINARY, RELEASE_BINARY, SERVICE_ACCOUNT,
+};
 use super::Fault;
 use super::runner::{Call, Runner, checked, run};
 
@@ -25,6 +27,60 @@ pub const CONFIG_MAX: u64 = 1 << 20;
 const UNKNOWN_FLAG: i32 = 2;
 /// The exit status of a release that refuses the configuration it was asked to check.
 const CONFIG_REFUSED: i32 = 2;
+
+/// Where macOS has `dscl`, the command line of the directory service.
+pub(crate) const DSCL_PROGRAM: &str = "/usr/bin/dscl";
+
+/// Where a hook that runs as root finds the user and group ids of the service account.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+enum Accounts {
+    /// `etc/passwd` under the root: a Linux node, whose unit runs as [`SERVICE_ACCOUNT`].
+    PasswdFile,
+    /// The local directory service of a Mac, through `dscl`: its job runs as
+    /// [`MACOS_SERVICE_ACCOUNT`], which the package's postinstall makes there and not in
+    /// `/etc/passwd`.
+    DirectoryService,
+}
+
+/// The arguments of `dscl` that read the user id and the primary group id of the user `name`
+/// from the local directory (`.`, where the package's postinstall makes the account).
+fn dscl_args(name: &str) -> [String; 5] {
+    [
+        ".".to_owned(),
+        "-read".to_owned(),
+        format!("/Users/{name}"),
+        "UniqueID".to_owned(),
+        "PrimaryGroupID".to_owned(),
+    ]
+}
+
+/// The value of the attribute `key` in what `dscl -read` printed: `key: value` on one line, or
+/// `key:` with the value on the next line (as `dscl` prints a long value).
+fn dscl_value<'t>(text: &'t str, key: &str) -> Option<&'t str> {
+    let mut lines = text.lines();
+    while let Some(line) = lines.next() {
+        let Some(rest) = line
+            .strip_prefix(key)
+            .and_then(|rest| rest.strip_prefix(':'))
+        else {
+            continue;
+        };
+        let rest = rest.trim();
+        return Some(if rest.is_empty() {
+            lines.next()?.trim()
+        } else {
+            rest
+        });
+    }
+    None
+}
+
+/// The user and group ids in what `dscl . -read /Users/<name> UniqueID PrimaryGroupID` printed.
+fn dscl_ids(text: &str) -> Option<(u32, u32)> {
+    let uid = dscl_value(text, "UniqueID")?.parse().ok()?;
+    let gid = dscl_value(text, "PrimaryGroupID")?.parse().ok()?;
+    Some((uid, gid))
+}
 
 /// The user and group ids of the account `name` in the text of a password file: the third and
 /// fourth fields of its line.
@@ -48,6 +104,7 @@ pub struct SystemHost<'a> {
     release_owner: u32,
     hook_uid: u32,
     account: String,
+    accounts: Accounts,
     /// The one binary every release is answered by, when set: the config hook's.
     binary: Option<PathBuf>,
 }
@@ -69,6 +126,7 @@ impl<'a> SystemHost<'a> {
             release_owner: 0,
             hook_uid: geteuid().as_raw(),
             account: SERVICE_ACCOUNT.to_owned(),
+            accounts: Accounts::PasswdFile,
             binary: None,
         }
     }
@@ -88,6 +146,17 @@ impl<'a> SystemHost<'a> {
     #[must_use]
     pub fn with_hook_user(mut self, uid: u32) -> SystemHost<'a> {
         self.hook_uid = uid;
+        self
+    }
+
+    /// The same, for a Mac: a root hook runs the checks as [`MACOS_SERVICE_ACCOUNT`], the
+    /// launchd job's `UserName`, whose ids it asks the directory service for with
+    /// `dscl . -read /Users/_tierstore UniqueID PrimaryGroupID` (through the runner, within the
+    /// host's time limit). Without this the account is [`SERVICE_ACCOUNT`] in `etc/passwd`.
+    #[must_use]
+    pub(crate) fn with_directory_service(mut self) -> SystemHost<'a> {
+        self.account = MACOS_SERVICE_ACCOUNT.to_owned();
+        self.accounts = Accounts::DirectoryService;
         self
     }
 
@@ -161,24 +230,61 @@ impl<'a> SystemHost<'a> {
         Ok(binary)
     }
 
-    /// The user and group ids of the service account, from `etc/passwd` under the root; `None`
-    /// when the hook does not run as root, whose checks run as the hook itself.
+    /// The user and group ids of the service account: from `etc/passwd` under the root, or from
+    /// the directory service of a Mac ([`Self::with_directory_service`]). `None` when the hook
+    /// does not run as root, whose checks run as the hook itself. An account that is not there
+    /// is an error naming it and where it was looked for.
     fn run_as(&self) -> Result<Option<(u32, u32)>, Fault> {
         if self.hook_uid != 0 {
             return Ok(None);
         }
+        match self.accounts {
+            Accounts::PasswdFile => self.passwd_ids().map(Some),
+            Accounts::DirectoryService => self.directory_ids().map(Some),
+        }
+    }
+
+    /// The ids of the service account in `etc/passwd` under the root.
+    fn passwd_ids(&self) -> Result<(u32, u32), Fault> {
         let path = self.root.join("etc/passwd");
         let text = self
             .read_config(&path)
             .map_err(|fault| Fault(format!("{}: {fault}", path.display())))?
             .unwrap_or_default();
-        account_ids(&text, &self.account).map(Some).ok_or_else(|| {
+        account_ids(&text, &self.account).ok_or_else(|| {
             Fault(format!(
                 "{} has no account {}",
                 path.display(),
                 self.account
             ))
         })
+    }
+
+    /// The ids of the service account in the local directory service, as `dscl` reads them.
+    fn directory_ids(&self) -> Result<(u32, u32), Fault> {
+        let args = dscl_args(&self.account);
+        let args: Vec<&str> = args.iter().map(String::as_str).collect();
+        let call = Call::new(DSCL_PROGRAM, &args, self.timeout);
+        let missing = |how: String| {
+            Fault(format!(
+                "the directory service has no account {} ({}: {how})",
+                self.account,
+                call.describe()
+            ))
+        };
+        let output = self
+            .runner
+            .run(&call)
+            .map_err(|error| missing(error.to_string()))?;
+        match output.code {
+            Some(0) => {}
+            Some(code) => {
+                return Err(missing(format!("exited {code}: {}", output.stderr_text())));
+            }
+            None => return Err(missing("ended by a signal".to_owned())),
+        }
+        dscl_ids(&String::from_utf8_lossy(&output.stdout))
+            .ok_or_else(|| missing("no numeric UniqueID and PrimaryGroupID".to_owned()))
     }
 
     fn read_config(&self, path: &Path) -> Result<Option<String>, Fault> {
@@ -242,9 +348,10 @@ impl Host for SystemHost<'_> {
     /// refuses.
     ///
     /// The binary is held to the same checks as for `--capabilities`. When the hook runs as
-    /// root it runs as the service account, found in `etc/passwd` under the root (an account
-    /// that is not there is an error): the check refuses key files the user it runs as does not
-    /// own, and the unit does not run as root. A hook that is not root runs it as itself.
+    /// root it runs as the service account: `tierstore`, found in `etc/passwd` under the root,
+    /// or on a Mac `_tierstore`, found in the directory service (an account that is not there is
+    /// an error): the check refuses key files the user it runs as does not own, and the service
+    /// does not run as root. A hook that is not root runs it as itself.
     fn check_config(&self, release: &Path, config: &Path) -> Result<Option<String>, PortError> {
         let binary = self
             .binary_of(release)

@@ -34,7 +34,7 @@ A key file:
 <flag> <path>: is a symbolic link; name the file itself
 ```
 
-Run `chown tierstore` and `chmod 0600` on the file. The process refuses a file that its group can access too. For an unreadable or malformed file the message names the flag and the file and says what form it expects, never the content.
+Run `chown` to the account the server runs as (`tierstore` on Linux, `_tierstore` on a Mac) and `chmod 0600` on the file. The process refuses a file that its group can access too. For an unreadable or malformed file the message names the flag and the file and says what form it expects, never the content.
 
 The same access key id on two keys: `the access key id "<id>" is used twice among server.access_key_file and server.read_only_key_files` (the flags it names are those of the keys that clash). Give each key an id of its own.
 

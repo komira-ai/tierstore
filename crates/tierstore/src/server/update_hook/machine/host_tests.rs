@@ -5,7 +5,7 @@ use std::os::unix::fs::{PermissionsExt, symlink};
 use std::path::{Path, PathBuf};
 
 use super::super::ports::{Host, PortError, PortKind};
-use super::host::CONFIG_MAX;
+use super::host::{CONFIG_MAX, DSCL_PROGRAM};
 use super::testing::{FakeRunner, LIMIT, exit, me, scratch, signalled};
 use super::{Call, RunError, SystemHost};
 
@@ -459,6 +459,154 @@ fn the_service_account_is_the_user_of_the_unit_file() {
         .find_map(|line| line.strip_prefix("User="))
         .expect("the unit file has a User=");
     assert_eq!(user, super::super::SERVICE_ACCOUNT);
+}
+
+/// The call that reads the Mac service account's ids from the directory service.
+fn dscl_call() -> Call {
+    Call::new(
+        DSCL_PROGRAM,
+        &[
+            ".",
+            "-read",
+            "/Users/_tierstore",
+            "UniqueID",
+            "PrimaryGroupID",
+        ],
+        LIMIT,
+    )
+}
+
+/// The host of a Mac over `root`: the service account is looked up in the directory service.
+fn mac_host<'a>(root: &Path, runner: &'a FakeRunner) -> SystemHost<'a> {
+    host(root, runner).with_directory_service()
+}
+
+/// Asserts that on a Mac a hook that runs as root asks the directory service for `_tierstore`
+/// (`dscl . -read /Users/_tierstore UniqueID PrimaryGroupID`, within the host's time limit) and
+/// runs the check as the user and group ids it prints, in either order and with a value on the
+/// line after its key, not as the `tierstore` of `etc/passwd` (which the root has here too).
+/// Catches the check of a Mac's config hook looked up as `tierstore` in `etc/passwd`, which a
+/// Mac does not have, and so failing `host_failed` on every Mac.
+#[test]
+fn a_check_by_a_root_mac_hook_runs_as_the_directory_service_account() {
+    let (_guard, root) = scratch("host-check-mac-root");
+    release_with(&root, 0o755);
+    passwd_with_account(&root);
+    let config = Path::new("/usr/local/tierstore/etc/tierstore.toml");
+    for (printed, ids) in [
+        ("PrimaryGroupID: 397\nUniqueID: 398\n", (398, 397)),
+        ("UniqueID: 301\nPrimaryGroupID: 302\n", (301, 302)),
+        (
+            "UniqueIDs: 5\nUniqueID:\n 303\nPrimaryGroupID:\n  304\n",
+            (303, 304),
+        ),
+    ] {
+        let runner = FakeRunner::replying(vec![exit(0, printed, ""), exit(0, "", "")]);
+        let got = mac_host(&root, &runner)
+            .with_hook_user(0)
+            .check_config(Path::new(RELEASE), config)
+            .unwrap();
+        assert_eq!(got, None);
+        let calls = runner.calls();
+        assert_eq!(calls.len(), 2, "{printed:?}: {calls:?}");
+        assert_eq!(calls[0], dscl_call(), "{printed:?}");
+        let binary = release_dir(&root).join("bin/tierstore");
+        assert_eq!(calls[1].program, binary.to_str().unwrap());
+        assert_eq!(calls[1].run_as, Some(ids), "{printed:?}");
+    }
+}
+
+/// Asserts that on a Mac a hook that is not root runs the check as itself and asks the
+/// directory service nothing.
+#[test]
+fn a_check_by_a_mac_hook_that_is_not_root_runs_as_the_hook() {
+    let (_guard, root) = scratch("host-check-mac-user");
+    release_with(&root, 0o755);
+    let runner = FakeRunner::replying(vec![exit(0, "", "")]);
+    mac_host(&root, &runner)
+        .with_hook_user(1000)
+        .check_config(Path::new(RELEASE), Path::new("/c"))
+        .unwrap();
+    let calls = runner.calls();
+    assert_eq!(calls.len(), 1, "{calls:?}");
+    assert_eq!(calls[0].run_as, None);
+    assert_ne!(calls[0].program, DSCL_PROGRAM);
+}
+
+/// Asserts that on a Mac a root hook whose directory service has no `_tierstore` (`dscl` exits
+/// non-zero), prints no numeric ids for it (an id missing, empty or not a number), is ended by
+/// a signal, cannot be started or does not end, fails the check with an error that names the
+/// account and the `dscl` call that looked for it, and runs no release.
+#[test]
+fn a_check_by_a_root_mac_hook_without_the_account_is_an_error() {
+    let (_guard, root) = scratch("host-check-mac-noaccount");
+    release_with(&root, 0o755);
+    let config = Path::new("/usr/local/tierstore/etc/tierstore.toml");
+    let call = "/usr/bin/dscl . -read /Users/_tierstore UniqueID PrimaryGroupID";
+    let lead = "the directory service has no account _tierstore";
+    let unparsed = "no numeric UniqueID and PrimaryGroupID";
+    let cases = [
+        (
+            exit(56, "", "<dscl_cmd> DS Error: -14136 (eDSRecordNotFound)\n"),
+            "exited 56: <dscl_cmd> DS Error: -14136 (eDSRecordNotFound)".to_owned(),
+        ),
+        (exit(0, "PrimaryGroupID: 397\n", ""), unparsed.to_owned()),
+        (exit(0, "UniqueID: 398\n", ""), unparsed.to_owned()),
+        (
+            exit(0, "UniqueID: x\nPrimaryGroupID: 397\n", ""),
+            unparsed.to_owned(),
+        ),
+        (
+            exit(0, "UniqueID: 398\nPrimaryGroupID: -1\n", ""),
+            unparsed.to_owned(),
+        ),
+        (
+            exit(0, "PrimaryGroupID: 397\nUniqueID:\n", ""),
+            unparsed.to_owned(),
+        ),
+        (exit(0, "", ""), unparsed.to_owned()),
+        (signalled(), "ended by a signal".to_owned()),
+        (
+            Err(RunError::Spawn("no such file".to_owned())),
+            "cannot run: no such file".to_owned(),
+        ),
+        (
+            Err(RunError::Timeout(LIMIT)),
+            format!("no end after {LIMIT:?}, killed"),
+        ),
+    ];
+    for (reply, how) in cases {
+        let runner = FakeRunner::replying(vec![reply]);
+        let text = message(
+            mac_host(&root, &runner)
+                .with_hook_user(0)
+                .check_config(Path::new(RELEASE), config)
+                .unwrap_err(),
+        );
+        assert_eq!(text, format!("{lead} ({call}: {how})"));
+        assert_eq!(runner.calls(), vec![dscl_call()]);
+    }
+}
+
+/// Asserts that the account a Mac's check runs as is the `UserName` and `GroupName` of the
+/// launchd plist the package ships. Catches a plist whose account is renamed and a hook that
+/// still looks up the old one.
+#[test]
+fn the_mac_service_account_is_the_user_of_the_plist() {
+    const PLIST: &str =
+        include_str!("../../../../../../packaging/hostkeeper/units/tierstore.plist");
+    for key in ["UserName", "GroupName"] {
+        let after = PLIST
+            .split_once(&format!("<key>{key}</key>"))
+            .map(|(_, after)| after.trim_start())
+            .expect("the plist has the key");
+        let value = after
+            .strip_prefix("<string>")
+            .and_then(|rest| rest.split_once("</string>"))
+            .map(|(value, _)| value)
+            .expect("a string value");
+        assert_eq!(value, super::super::MACOS_SERVICE_ACCOUNT, "{key}");
+    }
 }
 
 /// A release under `root` laid out as hostkeeper stages the Debian or RPM package: the package's
