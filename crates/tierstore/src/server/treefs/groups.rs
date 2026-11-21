@@ -4,8 +4,9 @@
 //!
 //! The process asks the system's own tool for the group, since a call of `getgrnam` itself would
 //! need unsafe code: `dscacheutil -q group -a name <name>` on macOS (Open Directory, the search
-//! `getgrnam` makes there) and `getent group <name>` elsewhere (the name service switch). What the
-//! tool said is read by [`answer`], which needs no system and is what the tests run.
+//! `getgrnam` makes there) and `getent group <name>` elsewhere (the name service switch). The tool is
+//! run through a runner ([`lookup`]) and what it said is read by [`answer`], so the tests run both
+//! with no system.
 
 use std::process::Output;
 
@@ -18,13 +19,27 @@ pub(in crate::server) type Found = Result<Option<u32>, String>;
 
 /// The id of the group `name` as this system knows it.
 pub(in crate::server) fn system(name: &str) -> Found {
-    let tool = Tool::of_this_system();
-    let ran = std::process::Command::new(tool.program())
-        .args(tool.arguments())
-        .arg(name)
+    lookup(std::env::consts::OS, name, &spawn)
+}
+
+/// What runs a program with its arguments and gives its output.
+type Run<'a> = &'a dyn Fn(&str, &[&str]) -> std::io::Result<Output>;
+
+/// The id of the group `name` on the system `os` (as `std::env::consts::OS` names it), asked of its
+/// tool through `run`.
+fn lookup(os: &str, name: &str, run: Run<'_>) -> Found {
+    let tool = Tool::of(os);
+    let mut arguments = tool.arguments().to_vec();
+    arguments.push(name);
+    answer(tool, tool.program(), run(tool.program(), &arguments))
+}
+
+/// Runs `program` with `arguments`, with no standard input, and gives its output.
+fn spawn(program: &str, arguments: &[&str]) -> std::io::Result<Output> {
+    std::process::Command::new(program)
+        .args(arguments)
         .stdin(std::process::Stdio::null())
-        .output();
-    answer(tool, tool.program(), ran)
+        .output()
 }
 
 /// The tool a lookup runs: its output is read by the rules of that tool.
@@ -38,9 +53,9 @@ enum Tool {
 }
 
 impl Tool {
-    /// The tool of the system this process runs on.
-    fn of_this_system() -> Self {
-        if cfg!(target_os = "macos") {
+    /// The tool of the system `os`.
+    fn of(os: &str) -> Self {
+        if os == "macos" {
             Self::Dscacheutil
         } else {
             Self::Getent

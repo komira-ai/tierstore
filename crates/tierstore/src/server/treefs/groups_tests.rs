@@ -5,7 +5,7 @@
 use std::os::unix::process::ExitStatusExt as _;
 use std::process::{ExitStatus, Output};
 
-use super::{Found, Tool, answer};
+use super::{Found, Tool, answer, lookup, spawn};
 
 /// An output with the exit status `code` and the two texts.
 fn said(code: i32, stdout: &str, stderr: &str) -> std::io::Result<Output> {
@@ -35,6 +35,46 @@ fn each_tool_asks_for_a_group_by_name() {
         "/usr/bin/dscacheutil -q group -a name"
     );
     assert_eq!(command(Tool::Getent), "/usr/bin/getent group");
+}
+
+/// Asserts that a lookup runs the tool of the system with the name last, and reads its output by
+/// that tool's rules: `dscacheutil` on macOS, `getent` on Linux and any other system.
+#[test]
+fn a_lookup_runs_the_tool_of_its_system() {
+    let ran = std::cell::RefCell::new(Vec::new());
+    let run = |program: &str, arguments: &[&str]| {
+        ran.borrow_mut()
+            .push([&[program][..], arguments].concat().join(" "));
+        match program {
+            "/usr/bin/dscacheutil" => said(0, "name: _tierstore\npassword: *\ngid: 394\n\n", ""),
+            _ => said(2, "", ""),
+        }
+    };
+    assert_eq!(lookup("macos", "_tierstore", &run), Ok(Some(394)));
+    assert_eq!(lookup("linux", "_tierstore", &run), Ok(None));
+    assert_eq!(lookup("freebsd", "builders", &run), Ok(None));
+    assert_eq!(
+        ran.into_inner(),
+        [
+            "/usr/bin/dscacheutil -q group -a name _tierstore",
+            "/usr/bin/getent group _tierstore",
+            "/usr/bin/getent group builders",
+        ]
+    );
+}
+
+/// Asserts the runner of the lookup: a program's status and both outputs, with no standard input
+/// (a `cat` of it ends at once), and a program that is not there.
+#[test]
+fn the_runner_gives_what_a_program_said() {
+    let ran = spawn("/bin/sh", &["-c", "cat; echo out; echo err >&2; exit 2"]).unwrap();
+    assert_eq!(ran.status.code(), Some(2));
+    assert_eq!(
+        (&ran.stdout[..], &ran.stderr[..]),
+        (&b"out\n"[..], &b"err\n"[..])
+    );
+    let missing = spawn("/nonexistent/program", &[]).unwrap_err();
+    assert_eq!(missing.kind(), std::io::ErrorKind::NotFound);
 }
 
 /// Asserts that a group `dscacheutil` prints is its `gid` line, with or without a `users` line,

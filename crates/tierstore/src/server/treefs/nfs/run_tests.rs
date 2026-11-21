@@ -17,6 +17,9 @@ use crate::server::treefs::locked;
 use crate::server::treefs::testing::SIGNALS;
 use crate::server::treefs::testing::until;
 
+/// A check a runner makes when it runs `umount`.
+type Check = Box<dyn FnOnce() -> bool + Send>;
+
 /// Records the commands, answers every one with success unless told to fail the mount, `umount` or
 /// the forced unmount, and keeps a listing of the mounts that a mount adds its line to and an
 /// unmount empties.
@@ -31,10 +34,9 @@ pub(super) struct Recorder {
     panics: Option<&'static str>,
     /// What the listing of the mounts says.
     listing: Mutex<String>,
-    /// A connection to the server, on which `umount` makes a call of NFS's NULL procedure, and
-    /// whether the server answered it.
-    probe: Mutex<Option<std::net::TcpStream>>,
-    answered_at_umount: Mutex<Option<bool>>,
+    /// What `umount` checks before it runs, and what the check found.
+    check: Mutex<Option<Check>>,
+    checked: Mutex<Option<bool>>,
 }
 
 impl Recorder {
@@ -52,8 +54,8 @@ impl Recorder {
             force_works: true,
             panics: None,
             listing: Mutex::new(listing),
-            probe: Mutex::new(None),
-            answered_at_umount: Mutex::new(None),
+            check: Mutex::new(None),
+            checked: Mutex::new(None),
         })
     }
 
@@ -91,15 +93,20 @@ impl Recorder {
             .collect()
     }
 
-    /// Makes `umount` call NFS's NULL procedure on `connection` first, and note whether the
-    /// server answered.
-    pub(super) fn probe_at_umount(&self, connection: std::net::TcpStream) {
-        *locked(&self.probe) = Some(connection);
+    /// Makes `umount` run `check` first, and note what it found.
+    pub(super) fn check_at_umount(&self, check: impl FnOnce() -> bool + Send + 'static) {
+        *locked(&self.check) = Some(Box::new(check));
     }
 
-    /// Whether the server answered the call `umount` made: none if it made none.
-    pub(super) fn answered_at_umount(&self) -> Option<bool> {
-        *locked(&self.answered_at_umount)
+    /// Makes `umount` call NFS's NULL procedure on `connection` first, and note whether the
+    /// server answered.
+    pub(super) fn probe_at_umount(&self, mut connection: std::net::TcpStream) {
+        self.check_at_umount(move || null_answered(&mut connection));
+    }
+
+    /// What the check `umount` ran found: none if it ran none.
+    pub(super) fn checked_at_umount(&self) -> Option<bool> {
+        *locked(&self.checked)
     }
 
     /// Empties the listing of the mounts, as an unmount by hand does.
@@ -149,9 +156,9 @@ impl Runner for Recorder {
         locked(&self.calls).push(argv.to_vec());
         assert_ne!(self.panics, Some(argv[0].as_str()), "the command dies");
         if argv[0] == "/sbin/umount"
-            && let Some(mut connection) = locked(&self.probe).take()
+            && let Some(check) = locked(&self.check).take()
         {
-            *locked(&self.answered_at_umount) = Some(null_answered(&mut connection));
+            *locked(&self.checked) = Some(check());
         }
         let (success, stderr) = match argv[0].as_str() {
             "/sbin/mount_nfs" if self.mount_works => {
@@ -327,7 +334,7 @@ async fn a_stop_unmounts_while_the_server_still_answers() {
     let connection = std::net::TcpStream::connect(running.address).unwrap();
     runner.probe_at_umount(connection);
     running.stop().await.unwrap();
-    assert_eq!(runner.answered_at_umount(), Some(true));
+    assert_eq!(runner.checked_at_umount(), Some(true));
 }
 
 /// Asserts that a stop finds the mount already gone (unmounted by hand while the process served)

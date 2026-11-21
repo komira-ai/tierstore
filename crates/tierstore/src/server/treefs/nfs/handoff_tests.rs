@@ -457,3 +457,22 @@ async fn a_client_that_never_closes_is_let_go_when_the_drain_wait_has_passed() {
     drop((stubborn, later));
     new.stop().await.unwrap();
 }
+
+/// Asserts that a stop ends the offer of the listening socket before it unmounts: while `umount`
+/// runs, a successor's connect to the hand-off socket is refused, so no successor can take the
+/// socket (and keep the mount it found at its start) while the stop removes that mount. Catches a
+/// stop whose unmount races a hand-over.
+#[tokio::test]
+async fn a_stop_ends_the_offer_before_it_unmounts() {
+    let (rig, _) = attached("nfs-handoff-stop-fence");
+    let settings = handing(&rig, 0);
+    let runner = Recorder::new(true);
+    let running = Running::start(&settings, runner.clone(), euid(), None, EPOCH)
+        .await
+        .unwrap();
+    let socket = rig.dir.path().join("handoff.sock");
+    assert!(socket.exists());
+    runner.check_at_umount(move || std::os::unix::net::UnixStream::connect(&socket).is_err());
+    running.stop().await.unwrap();
+    assert_eq!(runner.checked_at_umount(), Some(true));
+}
