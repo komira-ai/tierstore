@@ -45,6 +45,7 @@ use super::super::ino;
 use super::super::tree::Tree;
 use super::fetched::Fetched;
 use super::loaded::Loaded;
+use super::said::Failing;
 use super::{Core, Errno, Looked, locked};
 use crate::server::local_cache::{FILL_SOCKET_CONCURRENCY, manifest_path};
 
@@ -324,9 +325,9 @@ impl Core {
             .settled()
             .map_err(|why| why.to_string())
             .and_then(|()| self.fills.place(&self.settings.mount_id, &path));
-        match place.map_err(|why| asked(&path, &why))? {
+        match place.map_err(|why| self.asked(&path, &why))? {
             Place::Tree(id) => {
-                let key = key_of(&id, &path).ok_or_else(|| asked(&path, &id))?;
+                let key = key_of(&id, &path).ok_or_else(|| self.asked(&path, &id))?;
                 let found = self.resolve_digest(key).and_then(|number| {
                     let loaded = self.counted(number)?;
                     self.root_entry(number, &loaded, Duration::ZERO)
@@ -417,7 +418,7 @@ impl Core {
         if let Some(path) = locked(&self.dirs).get(&dir) {
             return Ok(path.clone());
         }
-        let paths = self.fills.mounted().map_err(|why| asked("", &why))?;
+        let paths = self.fills.mounted().map_err(|why| self.asked("", &why))?;
         let mut dirs = locked(&self.dirs);
         for path in &paths {
             for (at, _) in path.match_indices('/') {
@@ -483,11 +484,15 @@ impl Core {
     }
 }
 
-/// What a question to the fill socket about `path` that was not answered is: `EIO`, said on
-/// stderr.
-fn asked(path: &str, why: &str) -> Errno {
-    tracing::warn!("tierstore fs: cannot look up the placement at {path:?}: {why}");
-    Errno::Io
+impl Core {
+    /// What a question to the fill socket about `path` that was not answered is: `EIO`, said on
+    /// stderr (`Core::say_failed`).
+    fn asked(&self, path: &str, why: &str) -> Errno {
+        self.say_failed((0, Failing::Other), None, &|| {
+            format!("tierstore fs: cannot look up the placement at {path:?}: {why}")
+        });
+        Errno::Io
+    }
 }
 
 #[cfg(test)]

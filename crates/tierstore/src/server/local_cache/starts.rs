@@ -29,6 +29,7 @@ use std::fmt::Write as _;
 use std::sync::Mutex;
 
 use super::attaches::Attaches;
+use super::descriptors::Held;
 use super::{LocalCache, locked};
 
 /// The family, with a `# TYPE` line, and its three series, each written out for `docs/metrics.md`.
@@ -74,6 +75,8 @@ pub(super) struct Starts {
     state: Mutex<State>,
     /// The attaches and the manifest reads the mounts report (`attaches`).
     pub(super) attaches: Attaches,
+    /// The descriptors the mounts report (`descriptors`).
+    pub(super) descriptors: Held,
 }
 
 impl Starts {
@@ -144,6 +147,7 @@ impl Starts {
         let _ = writeln!(text, "{SUM} {}", seconds(state.sum_ms));
         let _ = writeln!(text, "{COUNT} {}", state.count);
         text.push_str(&self.attaches.render());
+        text.push_str(&self.descriptors.render());
         text
     }
 }

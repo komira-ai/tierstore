@@ -42,11 +42,12 @@
 //! in one line of JSON (see [`mount`]). A `started` (the mount first looked into a tree, see
 //! `local_cache/starts.rs`) is answered `ok`, by a node with no tree store too, and so are an
 //! `attached` and a `fetched` (what the mount reports of its attaches, see
-//! `local_cache/attaches.rs`).
+//! `local_cache/attaches.rs`), and a `descriptors` (what it reports of its open cache files, see
+//! `local_cache/descriptors.rs`).
 
 mod mount;
 mod put;
-mod request;
+pub(in crate::server) mod request;
 
 use std::os::unix::fs::{MetadataExt as _, PermissionsExt as _};
 use std::path::{Path, PathBuf};
@@ -296,6 +297,10 @@ async fn session((cache, trees): (LocalCache, Option<TreeStore>), stream: UnixSt
             }
             Ok(Request::Fetched(fetches)) => {
                 cache.manifests_fetched(&fetches);
+                "ok".to_owned()
+            }
+            Ok(Request::Descriptors(report)) => {
+                cache.descriptors_reported(report);
                 "ok".to_owned()
             }
             Err(refusal) => format!("refused {refusal}"),

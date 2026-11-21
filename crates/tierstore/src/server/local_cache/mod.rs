@@ -133,6 +133,7 @@
 
 pub(super) mod attaches;
 mod calls;
+pub(super) mod descriptors;
 mod disk;
 mod evict;
 pub(super) mod expand;

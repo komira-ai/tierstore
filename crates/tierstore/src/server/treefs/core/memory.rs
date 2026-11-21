@@ -29,7 +29,9 @@
 //! Every read of a tree after the first in this process is said on stderr at info, with its
 //! entries, its time, and the requests that waited for it. A read that took
 //! [`SLOW_READ_MS`] or more is said at warn, and so is a read that failed, the first too, once in
-//! `SAY_EVERY_MS` for a tree with the count of the failed reads not said (`core/blob.rs`). A
+//! `SAY_EVERY_MS` for a tree with the count of the failed reads not said (`core/said.rs`), as is
+//! a table of tree numbers that cannot be read. A tree that leaves memory says the counts of its
+//! failures not said yet. A
 //! request for a tree that is gone (its root manifest is not upstream, or its placement has
 //! ended) is answered `ENOENT`; one for a tree that cannot be read now, `EIO`.
 
@@ -39,11 +41,11 @@ use std::sync::{Arc, Condvar, Mutex};
 
 use crate::tree_manifest::TreeDigest;
 
-use super::blob::FailLog;
 use super::fetched::Fetched;
 #[cfg(any(target_os = "linux", test))]
 use super::ino;
 use super::placed::Unread;
+use super::said::Failing;
 use super::{Core, Errno, Loaded, locked};
 
 /// A read that took at least this long, in milliseconds of the core's clock, is said at warn.
@@ -72,8 +74,6 @@ pub(in crate::server::treefs) struct Reads {
     waiting: AtomicU64,
     /// The tree numbers read in this process at least once, and how many times.
     done: Mutex<HashMap<u64, u64>>,
-    /// The lines said about the failed reads of each tree, by number (`core/blob.rs`).
-    failed: Mutex<HashMap<u64, FailLog>>,
     /// Makes the next read that leads panic once it has read, before it ends: for the test of
     /// a read that stops.
     #[cfg(test)]
@@ -114,9 +114,15 @@ impl Core {
             Ok(Some(digest)) => digest,
             Ok(None) => return Err(Errno::NoEnt),
             Err(why) => {
-                tracing::warn!(
-                    "tierstore fs: cannot read the tree number {number} from the table: {why}"
-                );
+                let now = self.now();
+                // The table is the process's, not the tree's: its lines are counted under no tree.
+                if let Some(unsaid) = self.lines.failed((0, Failing::Tree), None, now) {
+                    tracing::warn!(
+                        "tierstore fs: cannot read the tree number {number} from the table: \
+                         {why}{}",
+                        unsaid_reads(unsaid)
+                    );
+                }
                 return Err(Errno::Io);
             }
         };
@@ -127,7 +133,7 @@ impl Core {
     }
 
     /// The tree `number` if it is in memory, as used now.
-    fn in_memory(&self, number: u64) -> Option<Arc<Loaded>> {
+    pub(super) fn in_memory(&self, number: u64) -> Option<Arc<Loaded>> {
         let loaded = self.trees.get(number)?;
         loaded.used.store(self.now(), Ordering::Release);
         Some(loaded)
@@ -191,10 +197,9 @@ impl Core {
         match line {
             Some(line) if read.is_err() => {
                 let now = self.now();
-                let unsaid = locked(&self.reads.failed)
-                    .entry(number)
-                    .or_default()
-                    .failed(now);
+                let unsaid = self
+                    .lines
+                    .failed((number, Failing::Tree), Some(&digest), now);
                 if let Some(unsaid) = unsaid {
                     tracing::warn!("{line}{}", unsaid_reads(unsaid));
                 }
@@ -274,6 +279,11 @@ impl Core {
         let taken = gone.is_some();
         drop(gone);
         drop(loaded);
+        if taken {
+            for line in self.lines.unsaid(self.now(), Some(number)) {
+                tracing::warn!("{line}");
+            }
+        }
         taken
     }
 

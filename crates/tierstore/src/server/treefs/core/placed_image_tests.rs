@@ -5,6 +5,8 @@
 use super::{Errno, key_of};
 use crate::TreeDigest;
 use crate::server::local_cache::trees::image_path;
+#[cfg(target_os = "linux")]
+use crate::server::treefs::core::blob::descriptor_tests::descriptors_on;
 use crate::server::treefs::core::{Entry, Kind, Looked};
 use crate::server::treefs::ino;
 use crate::server::treefs::testing::{Built, Rig, image_bytes, open_cached};
@@ -275,6 +277,34 @@ fn the_files_of_a_pack_share_its_descriptor_and_a_pack_file_that_is_gone_is_an_i
     std::fs::remove_file(&pack).unwrap();
     assert_eq!(open_cached(&rig.core, tool.attr.ino, false), Err(Errno::Io));
     assert_eq!(rig.upstream.asked("span").len(), spans + 3);
+}
+
+/// Asserts that three thousand handles of the two files of one pack, all open at once, hold one
+/// real descriptor of the pack file (counted in `/proc/self/fd`), read the size of their spans, and
+/// leave none once the last is released.
+#[cfg(target_os = "linux")]
+#[test]
+fn three_thousand_handles_of_the_files_of_a_pack_hold_one_real_descriptor() {
+    let (rig, _) = placed("tfs-img-fds");
+    let pack = rig.dir.path().join("pack");
+    std::fs::write(&pack, b"XXhelloabc").unwrap();
+    answer(&rig, "span", &format!("ok 2 {}", pack.display()));
+    let root = found(&rig, ino::ROOT, "jobs");
+    let bin = found(&rig, root.attr.ino, "bin");
+    let tool = found(&rig, bin.attr.ino, "tool").attr.ino;
+    let other = found(&rig, bin.attr.ino, "other").attr.ino;
+    assert_eq!(descriptors_on(&pack), 0);
+    let handles: Vec<u64> = (0..3000)
+        .map(|i| open_cached(&rig.core, [tool, other][i % 2], false).unwrap())
+        .collect();
+    assert_eq!(descriptors_on(&pack), 1);
+    assert_eq!(rig.core.read(handles[0], 0, 100).unwrap(), b"hello");
+    // (The fake answers one base for every span, so the other file reads from it too.)
+    assert_eq!(rig.core.read(handles[2999], 0, 100).unwrap().len(), 3);
+    for fh in handles {
+        rig.core.release(fh);
+    }
+    assert_eq!(descriptors_on(&pack), 0);
 }
 
 /// Asserts that an image file that is not in the tree's directory, one that is not a tree list, one

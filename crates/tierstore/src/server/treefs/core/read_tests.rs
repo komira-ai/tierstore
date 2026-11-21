@@ -356,8 +356,8 @@ fn file_bytes_of_a_whole_file_start_at_zero_and_end_where_the_file_ends() {
     assert_eq!(long.read(0, 100).unwrap(), [35, 36, 37, 38, 39]);
 }
 
-/// Asserts that a read of a descriptor that is a directory is `EIO`, and that a read past the
-/// size of the bytes is empty and asks nothing of it.
+/// Asserts that a read of a descriptor that is a directory fails with what the system said
+/// (`EISDIR`), and that a read past the size of the bytes is empty and asks nothing of it.
 #[test]
 fn file_bytes_over_a_directory_fails_with_io() {
     let dir = tierstore_testkit::dir::TestDir::under(std::env::temp_dir(), "tfs-bytes-dir");
@@ -366,6 +366,10 @@ fn file_bytes_over_a_directory_fails_with_io() {
         base: 0,
         size: 10,
     };
-    assert_eq!(bytes.read(0, 4), Err(Errno::Io));
+    let refused = bytes.read(0, 4).unwrap_err();
+    assert_eq!(
+        refused.raw_os_error(),
+        Some(rustix::io::Errno::ISDIR.raw_os_error())
+    );
     assert_eq!(bytes.read(10, 4).unwrap(), Vec::<u8>::new());
 }

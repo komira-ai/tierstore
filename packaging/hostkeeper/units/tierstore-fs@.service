@@ -58,7 +58,8 @@ TimeoutStopSec=30
 Restart=on-failure
 RestartSec=2
 RestartPreventExitStatus=2 3
-LimitNOFILE=65536
+# Jobs' overlays keep files of the mount open as long as a job runs; one descriptor per distinct cache file is held, however many handles, so this bounds distinct files held open.
+LimitNOFILE=1048576
 UMask=0077
 NoNewPrivileges=yes
 DeviceAllow=/dev/fuse rw

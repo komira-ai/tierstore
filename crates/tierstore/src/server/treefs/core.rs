@@ -132,11 +132,12 @@ pub(super) struct DirItem {
 enum Handle {
     /// A file of no bytes: nothing to read.
     Empty,
-    /// The cache file of a blob, or the span of a pack that a file of a placed tree is.
-    Cached(FileBytes),
+    /// The cache file of a blob, or the span of a pack that a file of a placed tree is, of the
+    /// file `ino`.
+    Cached { bytes: FileBytes, ino: u64 },
     /// A blob the kernel reads itself, from the backing id an earlier release registered on this
-    /// connection (`backing.rs`): reads never reach this process.
-    Adopted,
+    /// connection (`backing.rs`), of the file `ino`: reads never reach this process.
+    Adopted { ino: u64 },
 }
 
 /// What an open is answered with.
@@ -265,6 +266,8 @@ pub(in crate::server) struct Core {
     next_handle: AtomicU64,
     /// The files of the cache the handles read, one descriptor each (`core/blob.rs`).
     open_files: blob::OpenFiles,
+    /// The lines said about the requests that failed, and the counts not said (`core/said.rs`).
+    lines: said::Lines,
     /// The requests served, by name, for the tests that count what reaches the core.
     #[cfg(test)]
     pub(super) served: Mutex<Vec<&'static str>>,
@@ -325,6 +328,7 @@ impl Core {
             #[cfg(any(target_os = "linux", test))]
             next_handle: AtomicU64::new(1),
             open_files: blob::OpenFiles::new(),
+            lines: said::Lines::default(),
             #[cfg(test)]
             served: Mutex::new(Vec::new()),
             #[cfg(test)]
@@ -414,7 +418,7 @@ impl Core {
     }
 
     /// The time on the core's clock.
-    fn now(&self) -> u64 {
+    pub(super) fn now(&self) -> u64 {
         self.settings.clock.now()
     }
 
@@ -778,8 +782,18 @@ impl Core {
     /// # Errors
     /// [`Errno::RoFs`] for an open for writing, [`Errno::IsDir`] for a directory, [`Errno::Inval`]
     /// for a link, [`Errno::Io`] for a blob that cannot be had.
-    #[cfg(any(target_os = "linux", test))]
+    #[cfg(test)]
     pub(super) fn open(&self, ino: u64, writing: bool) -> Result<Opened, Errno> {
+        self.open_from(ino, writing, self.now())
+    }
+
+    /// [`Core::open`] of a request that began at `begun` on the core's clock (it was parked, and
+    /// waited, `fetches.rs`): its fills are answered by `fs.fetch_timeout` after `begun`.
+    ///
+    /// # Errors
+    /// As [`Core::open`].
+    #[cfg(any(target_os = "linux", test))]
+    pub(super) fn open_from(&self, ino: u64, writing: bool, begun: u64) -> Result<Opened, Errno> {
         #[cfg(test)]
         self.note("open");
         if writing {
@@ -808,12 +822,15 @@ impl Core {
             } => {
                 if let Some(id) = adopted.and_then(|adopted| adopted.get(digest)) {
                     self.pin_once((&loaded, number), digest);
-                    let fh = self.new_handle(Handle::Adopted);
+                    let fh = self.new_handle(Handle::Adopted { ino });
                     let id = Arc::clone(id);
                     return Ok(Opened::Adopted { fh, id });
                 }
                 let blob = (digest, *size, source.as_ref());
-                Handle::Cached(self.blob(&loaded, number, &entry, blob)?)
+                Handle::Cached {
+                    bytes: self.blob((&loaded, number), &entry, blob, begun)?,
+                    ino,
+                }
             }
         };
         Ok(Opened::Cached(self.new_handle(handle)))
@@ -858,19 +875,25 @@ impl Core {
     /// Reads up to `size` bytes at `offset` of the open file `fh`; fewer at the end of the file.
     ///
     /// # Errors
-    /// [`Errno::Inval`] for a handle that is not open, [`Errno::Io`] for a read that fails.
+    /// [`Errno::Inval`] for a handle that is not open, [`Errno::Io`] for a read that fails, said
+    /// on stderr (`Core::unreadable`).
     #[cfg(any(target_os = "linux", test))]
     pub(super) fn read(&self, fh: u64, offset: u64, size: u32) -> Result<Vec<u8>, Errno> {
         #[cfg(test)]
         self.note("read");
         let handle = self.handles.get(fh).ok_or(Errno::Inval)?;
-        let bytes = match handle.as_ref() {
-            Handle::Cached(bytes) => bytes,
+        let (bytes, ino) = match handle.as_ref() {
+            Handle::Cached { bytes, ino } => (bytes, *ino),
             Handle::Empty => return Ok(Vec::new()),
             // The kernel reads a passthrough file itself: a request for one is a fault.
-            Handle::Adopted => return Err(Errno::Io),
+            Handle::Adopted { ino } => {
+                let why = "the kernel reads this file itself (a backing id of an earlier release)";
+                return Err(self.unreadable(*ino, offset, why));
+            }
         };
-        bytes.read(offset, size as usize)
+        bytes
+            .read(offset, size as usize)
+            .map_err(|error| self.unreadable(ino, offset, &error.to_string()))
     }
 
     /// Closes the open file `fh`.
@@ -902,14 +925,18 @@ mod implicit;
 mod live;
 mod loaded;
 mod memory;
+#[cfg(any(target_os = "linux", test))]
+mod now;
 mod pins;
 mod placed;
 mod prefetch;
 mod read;
 mod restore;
+mod said;
 
 pub(super) use implicit::look_every;
 pub(super) use read::FileBytes;
+pub(super) use said::Failing;
 
 #[cfg(test)]
 #[path = "core_tests.rs"]

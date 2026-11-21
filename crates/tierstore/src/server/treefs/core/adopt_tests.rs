@@ -85,8 +85,8 @@ fn a_read_of_a_handle_an_earlier_process_gave_makes_the_open_again() {
 }
 
 /// Asserts that the handle of an empty file is made again as an empty open, that a name that is not
-/// a file is `EINVAL` and one that is not there `ENOENT`, and that a handle of this process that
-/// is not open is `EINVAL` as before.
+/// a file is `EINVAL` and one that is not there `EIO` (a read is never answered `ENOENT`), and that
+/// a handle of this process that is not open is `EINVAL` as before.
 #[test]
 fn a_foreign_handle_of_something_that_is_not_a_readable_file_is_refused() {
     let rig = rig("tfs-adopt-refused");
@@ -102,7 +102,7 @@ fn a_foreign_handle_of_something_that_is_not_a_readable_file_is_refused() {
     );
     assert_eq!(
         next.read_open(ino::of(1, 99), foreign + 2, 0, 10),
-        Err(Errno::NoEnt)
+        Err(Errno::Io)
     );
     let own = handle::make(2, 9);
     assert_eq!(next.read_open(header(), own, 0, 10), Err(Errno::Inval));
@@ -280,4 +280,33 @@ async fn a_foreign_handle_of_a_placed_empty_file_or_link_is_as_for_a_manifest_tr
     .unwrap();
     assert_eq!(empty, Ok(Vec::new()));
     assert_eq!(linked, Err(Errno::Inval));
+}
+
+/// Asserts that a read of a handle the process before gave out, of a tree that is gone since (no
+/// manifest of it in the cache or upstream), is `EIO` said on stderr, never `ENOENT`; while an
+/// open of the same inode, which may say the file is not there, is still `ENOENT`.
+#[test]
+fn a_read_of_an_earlier_processs_handle_whose_tree_is_gone_is_an_io_error_said() {
+    use crate::server::treefs::testing::{Logged, logged};
+    let rig = rig("tfs-adopt-gone");
+    let fh = open_cached(&rig.core, header(), false).unwrap();
+    assert!(rig.core.detach("run-1").is_some());
+    for entry in std::fs::read_dir(&rig.cache).unwrap() {
+        let _ = std::fs::remove_dir_all(entry.unwrap().path());
+    }
+    rig.upstream.built.lock().unwrap().manifests.clear();
+    let next = rig.successor();
+    let log = Logged::default();
+    let guard = logged(&log, tracing::Level::WARN);
+    assert_eq!(next.read_open(header(), fh, 0, 6), Err(Errno::Io));
+    drop(guard);
+    let want = format!(
+        "tierstore fs: cannot read the inode {} at 0: the file was opened by the process before \
+         this one, and its tree is gone",
+        header()
+    );
+    let said: Vec<String> = log.text().lines().map(str::to_owned).collect();
+    assert_eq!(said.last(), Some(&want), "{}", log.text());
+    assert_eq!(next.open_files(), 0);
+    assert_eq!(next.open(header(), false).map(|_| ()), Err(Errno::NoEnt));
 }

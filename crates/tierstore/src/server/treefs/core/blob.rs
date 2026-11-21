@@ -19,10 +19,18 @@
 //!
 //! A fill that fails for a reason that can pass (the node's permits are busy, the upstream
 //! answered 5xx, the answer did not come in `fs.fetch_timeout`, the node is being replaced, a file
-//! could not be opened) is asked again, after a pause of a second, [`FILL_TRIES`] times in all:
-//! the longest an open waits for its bytes is three times `fs.fetch_timeout` and two seconds. A
-//! fill that still fails, or fails for a reason that does not pass (the upstream has no such
-//! object, the bytes do not hash to the digest), fails the open with `EIO`. It is recorded on the
+//! could not be opened) is asked again, after a pause of a second, [`FILL_TRIES`] times in all,
+//! while time is left: every try of one open is answered by one end, `fs.fetch_timeout` after the
+//! open began, and no pause is taken that would pass it. So an open holds a reader thread of the
+//! mount no longer than one `fs.fetch_timeout` and its last open of the file, however many tries it
+//! makes. A fill that still fails, or fails for a reason that does not pass (the upstream has no
+//! such object, the bytes do not hash to the digest), fails the open with `EIO`.
+//!
+//! A file of the cache that cannot be opened for lack of descriptors (`EMFILE`, `ENFILE`) is not
+//! filled (the cache holds it; a fill would find it there) and not tried again: the open fails at
+//! once with `EIO`, its reason is `no descriptor: ` and what the system said, and it is counted
+//! ([`Core::descriptor_failures`]), as is a fill that could not connect to the fill socket for the
+//! same lack. A failed open is recorded on the
 //! attachments of the tree, the runs' and the lookup's (`attach.rs`), and said on stderr at warn:
 //! the tree, the path of the file in it, the blob and where it is read from, and the last answer.
 //! The lines of one tree are said at most once in [`SAY_EVERY_MS`], each with the count of the
@@ -33,15 +41,19 @@ use std::fs::File;
 use std::io;
 use std::os::unix::fs::MetadataExt as _;
 use std::path::{Path, PathBuf};
+use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::{Arc, Mutex, Weak};
 
 use crate::server::local_cache::blob_path;
-use crate::tree_manifest::{BlobSource, TreeDigest, TreeEntry};
+use crate::tree_manifest::{BlobSource, EntryKind, TreeDigest, TreeEntry};
 
 use super::super::attach::Failure;
+use super::super::fill_client::{NO_DESCRIPTOR, Until, lacks_descriptors};
+use super::super::ino;
 use super::super::locked;
 use super::super::tree::Tree;
 use super::read::FileBytes;
+use super::said::Failing;
 use super::{Core, Errno, Loaded};
 
 /// How many times a fill that fails for a reason that can pass is asked, the first time included.
@@ -77,7 +89,8 @@ const NO_ANSWER: &str = "the fill socket gave no answer in time";
 
 /// Whether a fill that ended with `reason` may succeed if it is asked again: see [`PASSING`];
 /// an upstream that answered a status of 500 or above but 501 (which is not implemented, and
-/// stays so); no answer in time; and a file of the cache that could not be opened (`io: ...`).
+/// stays so); no answer in time; and a file of the cache that could not be opened (`io: ...`). A
+/// lack of descriptors (`no descriptor: ...`) does not pass.
 pub(in crate::server::treefs) fn passes(reason: &str) -> bool {
     let words = reason.strip_prefix("fill: ").unwrap_or(reason);
     if let Some(status) = words.strip_prefix("upstream ") {
@@ -88,9 +101,14 @@ pub(in crate::server::treefs) fn passes(reason: &str) -> bool {
     words == NO_ANSWER || words.starts_with("io: ") || PASSING.contains(&words)
 }
 
-/// What a failed open of a file of the cache is recorded as: `io: ` and what the system said.
+/// What a failed open of a file of the cache is recorded as: `no descriptor: ` and what the system
+/// said, for a lack of descriptors; `io: ` and what it said, for any other failure.
 fn unopened(error: &io::Error) -> String {
-    format!("io: {error}")
+    if lacks_descriptors(error).is_some() {
+        format!("{NO_DESCRIPTOR}{error}")
+    } else {
+        format!("io: {error}")
+    }
 }
 
 /// What opens a file of the cache: `File::open`, or what a test puts in its place.
@@ -108,6 +126,8 @@ pub(in crate::server::treefs) struct OpenFiles {
     shards: [Mutex<Shard>; SHARDS],
     /// Opens a file of the cache.
     open: Opener,
+    /// The opens of the core that failed for lack of descriptors, in all.
+    short: AtomicU64,
 }
 
 /// One map of the shared descriptors, and how large it may grow before the closed are dropped.
@@ -128,6 +148,7 @@ impl OpenFiles {
         Self {
             shards: std::array::from_fn(|_| Mutex::new(Shard::default())),
             open,
+            short: AtomicU64::new(0),
         }
     }
 
@@ -183,8 +204,8 @@ impl OpenFiles {
             .sum()
     }
 
-    /// The number of files open now, shared or not.
-    #[cfg(test)]
+    /// The number of files of the cache open now, each one descriptor, however many handles share
+    /// it.
     pub(in crate::server::treefs) fn len(&self) -> usize {
         self.shards
             .iter()
@@ -197,6 +218,11 @@ impl OpenFiles {
                     .count()
             })
             .sum()
+    }
+
+    /// The opens of the core that failed for lack of descriptors since it was made.
+    pub(super) fn short(&self) -> u64 {
+        self.short.load(Ordering::Acquire)
     }
 }
 
@@ -221,6 +247,16 @@ impl FailLog {
         }
         self.said = Some(now);
         Some(std::mem::take(&mut self.unsaid))
+    }
+
+    /// How long before `now` the last line was said; all of `now` if none was.
+    pub(in crate::server::treefs) fn quiet_for(&self, now: u64) -> u64 {
+        now.saturating_sub(self.said.unwrap_or(0))
+    }
+
+    /// The failures not said, which are not counted from now on.
+    pub(in crate::server::treefs) fn take_unsaid(&mut self) -> u64 {
+        std::mem::take(&mut self.unsaid)
     }
 }
 
@@ -257,26 +293,52 @@ impl Core {
         self
     }
 
-    /// The files of the cache open for the handles now, each one descriptor.
-    #[cfg(test)]
+    /// The files of the cache open for the handles now, each one descriptor: what the mount
+    /// reports to the node as `held` (`tierstore_fs_cache_descriptors`).
     pub(in crate::server::treefs) fn open_descriptors(&self) -> usize {
         self.open_files.len()
     }
 
-    /// The cache file of a blob, filled if the cache does not hold it; why not, in the words of
-    /// the fill socket's answer, or `io: ` and what the system said.
+    /// The opens that failed for lack of descriptors since this process started.
+    #[cfg(test)]
+    pub(in crate::server::treefs) fn descriptor_failures(&self) -> u64 {
+        self.open_files.short()
+    }
+
+    /// The end every try of one open that began at `begun` (on the core's clock) is answered by:
+    /// `fs.fetch_timeout` after it.
+    pub(super) fn open_until(&self, begun: u64) -> Until<'_> {
+        let wait = u64::try_from(self.fills.answer_timeout().as_millis()).unwrap_or(u64::MAX);
+        Until {
+            clock: &*self.settings.clock,
+            end_ms: begun.saturating_add(wait),
+        }
+    }
+
+    /// The cache file of a blob, filled by `until` if the cache does not hold it; why not, in the
+    /// words of the fill socket's answer, or `io: ` (`no descriptor: `) and what the system said.
+    /// A file that cannot be opened for lack of descriptors is not filled.
     pub(super) fn cache_file(
         &self,
         (digest, size, source): (&TreeDigest, u64, Option<&BlobSource>),
+        until: Until<'_>,
     ) -> Result<Arc<File>, String> {
         let sha = digest.to_string();
         let path = blob_path(&self.settings.cache_path, &sha);
-        if let Ok(file) = self.open_files.get(&path) {
-            return Ok(file);
+        match self.open_files.get(&path) {
+            Ok(file) => return Ok(file),
+            Err(error) if lacks_descriptors(&error).is_some() => return Err(unopened(&error)),
+            Err(_) => {}
         }
         let filled = match source {
-            Some(source) => self.fills.fill_blob(&sha, size, &source.key, source.offset),
-            None => self.fills.fill_blob(&sha, size, &format!("cas/l/{sha}"), 0),
+            Some(source) => {
+                self.fills
+                    .fill_blob((&sha, size), (&source.key, source.offset), Some(until))
+            }
+            None => {
+                let whole = format!("cas/l/{sha}");
+                self.fills.fill_blob((&sha, size), (&whole, 0), Some(until))
+            }
         };
         filled.and_then(|()| self.open_files.get(&path).map_err(|error| unopened(&error)))
     }
@@ -286,10 +348,13 @@ impl Core {
     fn span_file(
         &self,
         (digest, size, source): (&TreeDigest, u64, Option<&BlobSource>),
+        until: Until<'_>,
     ) -> Result<FileBytes, String> {
         let source = source.ok_or("the file has no source")?;
         let sha = digest.to_string();
-        let (base, path) = self.fills.span(&sha, size, &source.key, source.offset)?;
+        let (base, path) =
+            self.fills
+                .span((&sha, size), (&source.key, source.offset), Some(until))?;
         let file = self
             .open_files
             .get(&path)
@@ -300,37 +365,48 @@ impl Core {
     /// The bytes of a file: the cache file of its blob, filled if it must be, which is pinned for
     /// the tree the first time it is opened under it (`Core::pin_once`); for a placed tree, the
     /// span of the pack, which the tree store pins. A fill that fails for a reason that can pass
-    /// is asked again (module docs).
+    /// is asked again while time is left before the one end of the open, `fs.fetch_timeout`
+    /// after `begun` (module docs). The span a placed tree is given is kept with the tree
+    /// (`Loaded::keep_span`), for the opens that follow while its pack is open.
     ///
     /// # Errors
     /// [`Errno::Io`] for bytes that cannot be had: recorded on the attachments of the tree and
     /// said on stderr.
     pub(super) fn blob(
         &self,
-        loaded: &Loaded,
-        number: u64,
+        (loaded, number): (&Loaded, u64),
         entry: &TreeEntry,
         blob: (&TreeDigest, u64, Option<&BlobSource>),
+        begun: u64,
     ) -> Result<FileBytes, Errno> {
+        let until = self.open_until(begun);
         let mut tries = 0;
         let reason = loop {
             tries += 1;
             let got = if loaded.tree.location().is_some() {
-                self.span_file(blob)
+                self.span_file(blob, until)
+                    .inspect(|bytes| loaded.keep_span(blob.0, bytes))
             } else {
-                self.cache_file(blob).map(|file| {
+                self.cache_file(blob, until).map(|file| {
                     self.pin_once((loaded, number), blob.0);
                     FileBytes::whole(file, blob.1)
                 })
             };
-            match got {
+            let reason = match got {
                 Ok(bytes) => return Ok(bytes),
-                Err(reason) if tries < FILL_TRIES && passes(&reason) => self.fills.rest(),
-                Err(reason) => break reason,
+                Err(reason) => reason,
+            };
+            if !(tries < FILL_TRIES && passes(&reason) && self.fills.rest_before(until)) {
+                break reason;
             }
         };
+        if reason.starts_with(NO_DESCRIPTOR) {
+            let _ = self.open_files.short.fetch_add(1, Ordering::AcqRel);
+        }
         let failure = self.failed((loaded, number), entry.index, blob.0, reason);
-        let unsaid = locked(&loaded.failures).failed(self.now());
+        let unsaid = self
+            .lines
+            .failed((number, Failing::Open), Some(&loaded.digest), self.now());
         if let Some(unsaid) = unsaid {
             let line = said(
                 (&loaded.digest, number),
@@ -341,6 +417,50 @@ impl Core {
             tracing::warn!("{line}");
         }
         Err(Errno::Io)
+    }
+
+    /// What a read of the file `ino` at `offset` that failed for `why` is answered: `EIO`, said on
+    /// stderr at warn, once in [`SAY_EVERY_MS`] for a tree (`core/said.rs`), with the tree, the
+    /// path of the file in it, its blob and where it is read from, where the tree is in memory, and
+    /// the inode alone where it is not.
+    pub(in crate::server::treefs) fn unreadable(&self, ino: u64, offset: u64, why: &str) -> Errno {
+        let (number, index) = ino::split(ino);
+        let loaded = self.trees.get(number);
+        let digest = loaded.as_ref().map(|loaded| loaded.digest);
+        let key = (number, Failing::Read);
+        let Some(unsaid) = self.lines.failed(key, digest.as_ref(), self.now()) else {
+            return Errno::Io;
+        };
+        let more = match unsaid {
+            0 => String::new(),
+            1 => "; 1 more failed read of an open file of this tree since the last line".to_owned(),
+            n => format!("; {n} more failed reads of open files of this tree since the last line"),
+        };
+        let file = loaded.as_ref().and_then(|loaded| {
+            let entry = loaded.tree.entry(index)?;
+            let EntryKind::File {
+                digest: blob,
+                size,
+                source,
+                ..
+            } = &entry.kind
+            else {
+                return None;
+            };
+            let from = source.as_ref().map_or_else(
+                || format!("cas/l/{blob}"),
+                |source| format!("{} @ {}", source.key, source.offset),
+            );
+            Some(format!(
+                "{} in the tree {} (number {number}) at {offset}: the blob {blob} of {size} bytes \
+                 from {from}",
+                path_of(&loaded.tree, index),
+                loaded.digest,
+            ))
+        });
+        let file = file.unwrap_or_else(|| format!("the inode {ino} at {offset}"));
+        tracing::warn!("tierstore fs: cannot read {file}: {why}{more}");
+        Errno::Io
     }
 
     /// Records that the blob of the entry `index` of the tree `number` could not be had, on every
@@ -379,3 +499,12 @@ pub(in crate::server::treefs) fn path_of(tree: &Tree, index: u32) -> String {
 #[cfg(test)]
 #[path = "blob_tests.rs"]
 mod tests;
+
+#[cfg(test)]
+#[cfg(target_os = "linux")]
+#[path = "descriptor_tests.rs"]
+pub(in crate::server::treefs) mod descriptor_tests;
+
+#[cfg(test)]
+#[path = "blob_deadline_tests.rs"]
+mod deadline_tests;

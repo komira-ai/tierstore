@@ -763,3 +763,76 @@ fn dontneed_on_a_pipe_fails_and_counts_nothing() {
     );
     assert_eq!(helper.asked_bytes(), 0);
 }
+
+/// Asserts that threads sending replies from one shared descriptor of a data file, each at
+/// offsets of its own, a byte to 128 KiB (above and below the splice threshold, within the file
+/// and across its end), each put exactly the bytes at their own offset on their device: the
+/// descriptor is shared, so a reply that went through its file position, by the splice or by the
+/// `pread`, would carry the bytes another thread moved it to.
+#[test]
+fn replies_sent_at_once_from_one_shared_descriptor_hold_the_bytes_at_their_own_offsets() {
+    const THREADS: usize = 16;
+    const ROUNDS: usize = 300;
+    const FILE_LEN: usize = 1024 * 1024 + 777;
+    let hashed = |at: usize| ((at as u32).wrapping_mul(0x9e37_79b1) >> 23) as u8;
+    let bytes: Vec<u8> = (0..FILE_LEN).map(hashed).collect();
+    let data = memfd_create("tsfuse-reply-shared", MemfdFlags::CLOEXEC).unwrap();
+    assert_eq!(rustix::io::write(&data, &bytes).unwrap(), FILE_LEN);
+    let path = path(ReplyConfig {
+        pool: THREADS,
+        ..config(128 * 1024)
+    });
+    let start = std::sync::Barrier::new(THREADS);
+    let (path, data, bytes, start) = (&path, &data, &bytes, &start);
+    let (mut spliced_replies, mut pread_replies) = (0, 0);
+    std::thread::scope(|scope| {
+        let threads: Vec<_> = (0..THREADS)
+            .map(|n| {
+                scope.spawn(move || {
+                    let mut state =
+                        0x9e37_79b9_7f4a_7c15u64 ^ (n as u64 + 1).wrapping_mul(0xff51_afd7);
+                    let mut next = move || {
+                        state ^= state << 13;
+                        state ^= state >> 7;
+                        state ^= state << 17;
+                        state
+                    };
+                    let (mut spliced_here, mut pread_here) = (0, 0);
+                    start.wait();
+                    for round in 0..ROUNDS {
+                        let len = match next() % 4 {
+                            0 => 1 + next() as usize % 64,
+                            1 => 1 + next() as usize % (SPLICE_MIN - 1),
+                            2 => SPLICE_MIN + next() as usize % (128 * 1024 - SPLICE_MIN + 1),
+                            _ => 128 * 1024,
+                        };
+                        let offset = match next() % 8 {
+                            0 => FILE_LEN - next() as usize % len.min(FILE_LEN),
+                            _ => next() as usize % FILE_LEN,
+                        };
+                        let (spliced, device) = send(path, data, offset as u64, len);
+                        let want = &bytes[offset..(offset + len).min(FILE_LEN)];
+                        assert!(
+                            device == reply_of(want),
+                            "thread {n} round {round}: {len} bytes at {offset} are not the file's",
+                        );
+                        let whole = offset + len <= FILE_LEN;
+                        assert_eq!(spliced, whole && len >= SPLICE_MIN);
+                        if spliced {
+                            spliced_here += 1;
+                        } else {
+                            pread_here += 1;
+                        }
+                    }
+                    (spliced_here, pread_here)
+                })
+            })
+            .collect();
+        for thread in threads {
+            let (spliced, pread) = thread.join().unwrap();
+            spliced_replies += spliced;
+            pread_replies += pread;
+        }
+    });
+    assert!(spliced_replies > 0 && pread_replies > 0);
+}

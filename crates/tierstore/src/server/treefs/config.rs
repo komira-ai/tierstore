@@ -11,7 +11,7 @@
 //! | `fs.fill_socket` | the fill socket of the node's tierstore | needed |
 //! | `fs.cache_path` | the node's `local_cache.path` | needed |
 //! | `fs.fetch_timeout` | how long a fill, or a closed fill socket, is waited for | `60s` |
-//! | `fs.threads` | threads that serve the kernel's requests (a fill blocks one), at most 252 | `16` |
+//! | `fs.threads` | threads that serve the kernel's requests, and as many that make the opens that wait on a fill (`fetches.rs`), at most 252 | `16` |
 //! | `[fs.nfs]` | the settings of the NFS frontend (macOS), see `nfs/config.rs` | its defaults |
 //! | `fs.handoff_socket` | the socket a new instance asks the running one for the mount on (`handoff-fs-v1`) | `<runtime_dir>/handoff.sock` |
 //! | `fs.handoff_wait` | how long the hand-over of the mount may last, from the connect to the end | `120s` |
