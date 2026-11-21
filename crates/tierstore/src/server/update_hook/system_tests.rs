@@ -358,3 +358,38 @@ fn the_machine_of_the_verb_refuses_an_unknown_service_manager() {
         "{done:?}"
     );
 }
+
+/// Asserts that the systemd arm of a hook on this machine reaches the units of `tierstore-fs`
+/// through `systemctl` (`uninstall` looks at both instances, with `show`, and stops neither of
+/// them, as both are inactive) and the markers of `run-fs-<letter>` in the markers' directory.
+/// Catches a hook whose fs ports were left out of its wiring.
+#[test]
+fn the_systemd_arm_is_wired_to_the_fs_units_and_markers() {
+    let host = new_host("system-fs-wiring");
+    let markers = host.root.join("var/lib/tierstore");
+    fs::create_dir_all(&markers).unwrap();
+    fs::write(markers.join("run-fs-b"), "").unwrap();
+    let runner = ByProgram::default();
+    let done = run(&host, &runner, Step::Uninstall, &params(""));
+    assert_eq!(done.outcome, Outcome::Success, "{done:?}");
+    let calls = runner.calls();
+    for unit in ["tierstore-fs@a.service", "tierstore-fs@b.service"] {
+        assert!(
+            calls
+                .iter()
+                .any(|call| call.args.first().map(String::as_str) == Some("show")
+                    && call.args.last().map(String::as_str) == Some(unit)),
+            "{unit}: {calls:?}"
+        );
+    }
+    assert!(
+        calls
+            .iter()
+            .all(|call| call.args.first().map(String::as_str) != Some("stop")
+                || call.args.last().is_some_and(|unit| !unit.contains("-fs@")))
+    );
+    assert!(
+        !markers.join("run-fs-b").exists(),
+        "the fs marker is removed"
+    );
+}

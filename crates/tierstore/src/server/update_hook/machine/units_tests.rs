@@ -2,7 +2,7 @@
 
 use std::time::Duration;
 
-use super::super::ports::{Instance, PortError, PortKind, UnitState, Units};
+use super::super::ports::{Family, Instance, PortError, PortKind, UnitState, Units};
 use super::testing::{FakeRunner, exit, signalled};
 use super::{Call, RunError, SystemdUnits};
 
@@ -201,4 +201,49 @@ fn a_guard_file_that_cannot_be_looked_at_is_reloaded_not_skipped() {
         .reload()
         .unwrap();
     assert_eq!(runner.calls().len(), 1);
+}
+
+/// Asserts that units of the fs family run the same three `systemctl` calls on
+/// `tierstore-fs@<letter>.service`, with the same time limits and the same reading of the state,
+/// and that the default family is the store's. Catches an fs instance that is started under the
+/// name of a store instance.
+#[test]
+fn the_fs_family_names_the_fs_template() {
+    let runner = FakeRunner::replying(vec![
+        exit(0, "", ""),
+        exit(0, "", ""),
+        exit(0, "activating\n", ""),
+    ]);
+    let fs = units(&runner).of(Family::Fs);
+    fs.start(Instance::B).unwrap();
+    fs.stop(Instance::A).unwrap();
+    assert_eq!(fs.state(Instance::A).unwrap(), UnitState::Activating);
+    assert_eq!(
+        runner.calls(),
+        vec![
+            Call::new(
+                "/usr/bin/systemctl",
+                &["start", "--", "tierstore-fs@b.service"],
+                START
+            ),
+            Call::new(
+                "/usr/bin/systemctl",
+                &["stop", "--", "tierstore-fs@a.service"],
+                STOP
+            ),
+            Call::new(
+                "/usr/bin/systemctl",
+                &[
+                    "show",
+                    "--property=ActiveState",
+                    "--value",
+                    "--",
+                    "tierstore-fs@a.service"
+                ],
+                SHOW
+            ),
+        ]
+    );
+    assert_eq!(Family::Store.unit(Instance::B), "tierstore@b.service");
+    assert_eq!(Family::Fs.unit(Instance::B), "tierstore-fs@b.service");
 }

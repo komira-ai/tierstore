@@ -167,3 +167,48 @@ fn the_page_states_the_order_of_releases_and_the_configuration_check() {
     assert!(PAGE.contains("--check-config"));
     assert!(PAGE.contains("A Mac never hands over"));
 }
+
+/// The operator's page of the file system process and the unit file of its template.
+const OPERATIONS: &str = include_str!("../../../docs/operations.md");
+const FS_UNIT: &str =
+    include_str!("../../../../../packaging/hostkeeper/units/tierstore-fs@.service");
+
+/// Asserts that the page, the operations page and the header of the fs unit file describe the
+/// second unit as the hook acts on it: the page names the record keys, the marker, the rule that
+/// the instance that holds the mount is never stopped and the capability both releases need, and
+/// none of the three says any longer that the hook does not act on the unit or that nothing writes
+/// its marker. Catches a page left behind when the code learned the unit.
+#[test]
+fn the_pages_describe_the_second_unit_as_the_hook_acts_on_it() {
+    for needle in [
+        "`fs_live`",
+        "`fs_next`",
+        "run-fs-<instance>`",
+        "never stopped",
+        "`handoff-fs-v1`",
+        "left on its release",
+        "`tierstore-fs@<fs_next>`",
+    ] {
+        assert!(
+            PAGE.contains(needle),
+            "update-hook.md does not name {needle}"
+        );
+    }
+    for stale in [
+        "does not act on the unit yet",
+        "does not act on this unit yet",
+        "which nothing writes yet",
+        "Nothing writes it yet",
+        "until the update hook learns the unit",
+        "chooses a restart, which the store carries across, when either release",
+    ] {
+        for (name, text) in [
+            ("update-hook.md", PAGE),
+            ("operations.md", OPERATIONS),
+            ("tierstore-fs@.service", FS_UNIT),
+        ] {
+            assert!(!text.contains(stale), "{name} still says {stale:?}");
+        }
+    }
+    assert!(FS_UNIT.contains("hook writes and removes it"));
+}

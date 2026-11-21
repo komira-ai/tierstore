@@ -1,5 +1,6 @@
-//! The start markers of the two instances: a file per instance in the service's state
-//! directory, which the template's `ConditionPathExists=` names.
+//! The start markers of the two instances of a template: a file per instance in the service's
+//! state directory, which the template's `ConditionPathExists=` names (`run-a`, or `run-fs-a`
+//! for `tierstore-fs@.service`).
 //!
 //! A marker is a regular file; the hook looks at its name with `lstat` and never follows a link.
 //! It is laid down with `O_NOFOLLOW`, and the directory is synced after a marker is made or
@@ -12,8 +13,7 @@ use std::path::{Path, PathBuf};
 
 use rustix::fs::{Mode, OFlags, open};
 
-use super::super::marker_path;
-use super::super::ports::{Instance, Markers, PortError, PortKind};
+use super::super::ports::{Family, Instance, Markers, PortError, PortKind};
 use super::Fault;
 
 const KIND: PortKind = PortKind::Markers;
@@ -22,22 +22,34 @@ const DIR_MODE: u32 = 0o700;
 /// The mode of a marker.
 const FILE_MODE: Mode = Mode::from_bits_truncate(0o644);
 
-/// The markers in the directory `dir`.
+/// The markers of one template's instances in the directory `dir`.
 pub struct MarkerFiles {
     dir: PathBuf,
+    family: Family,
 }
 
 impl MarkerFiles {
-    /// The markers in `dir`: [`MARKER_DIR`](super::super::MARKER_DIR) under the host's root.
+    /// The markers of `tierstore@.service` in `dir`: [`MARKER_DIR`](super::super::MARKER_DIR)
+    /// under the host's root.
     #[must_use]
     pub fn new(dir: PathBuf) -> MarkerFiles {
-        MarkerFiles { dir }
+        MarkerFiles {
+            dir,
+            family: Family::Store,
+        }
     }
 
-    /// The path of the instance's marker: the name [`marker_path`] gives, in this directory.
+    /// The same, for the instances of the template of `family`.
+    #[must_use]
+    pub fn of(mut self, family: Family) -> MarkerFiles {
+        self.family = family;
+        self
+    }
+
+    /// The path of the instance's marker: the name [`Family::marker_file`] gives, in this
+    /// directory.
     fn path(&self, instance: Instance) -> PathBuf {
-        self.dir
-            .join(marker_path(instance).file_name().unwrap_or_default())
+        self.dir.join(self.family.marker_file(instance))
     }
 
     /// Makes the directory when it is absent.

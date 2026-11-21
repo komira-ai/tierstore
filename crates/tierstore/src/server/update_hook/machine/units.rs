@@ -1,4 +1,5 @@
-//! The units of the two instances, through `systemctl`.
+//! The units of the two instances of a template (`tierstore@` or `tierstore-fs@`), through
+//! `systemctl`.
 //!
 //! A unit whose `ConditionPathExists=` fails is skipped by `systemctl start`: systemd.unit(5)
 //! says a failing condition leaves the unit out of the `failed` state and the start "(mostly
@@ -10,16 +11,17 @@ use std::time::Duration;
 
 use std::path::PathBuf;
 
-use super::super::ports::{Guard, Instance, PortError, PortKind, UnitState, Units};
+use super::super::ports::{Family, Guard, Instance, PortError, PortKind, UnitState, Units};
 use super::runner::{Call, Runner, checked, run};
 
 /// Where the Debian and Ubuntu package puts `systemctl`.
 pub const DEFAULT_PROGRAM: &str = super::SYSTEMCTL_PROGRAM;
 const KIND: PortKind = PortKind::Units;
 
-/// `systemctl`, called through a [`Runner`].
+/// `systemctl`, called through a [`Runner`], for the instances of one template.
 pub struct SystemdUnits<'a> {
     runner: &'a dyn Runner,
+    family: Family,
     start_timeout: Duration,
     stop_timeout: Duration,
     show_timeout: Duration,
@@ -27,7 +29,8 @@ pub struct SystemdUnits<'a> {
 }
 
 impl<'a> SystemdUnits<'a> {
-    /// Calls `systemctl` through `runner`. A start that runs past `start_timeout`, a stop
+    /// Calls `systemctl` through `runner`, for the instances of `tierstore@.service`
+    /// ([`SystemdUnits::of`] changes the template). A start that runs past `start_timeout`, a stop
     /// (which waits for the drain) past `stop_timeout` and a look at the state past
     /// `show_timeout` are killed and fail.
     #[must_use]
@@ -39,11 +42,19 @@ impl<'a> SystemdUnits<'a> {
     ) -> SystemdUnits<'a> {
         SystemdUnits {
             runner,
+            family: Family::Store,
             start_timeout,
             stop_timeout,
             show_timeout,
             program: DEFAULT_PROGRAM.to_owned(),
         }
+    }
+
+    /// The same, for the instances of the template of `family`.
+    #[must_use]
+    pub fn of(mut self, family: Family) -> SystemdUnits<'a> {
+        self.family = family;
+        self
     }
 
     /// The same, calling `program` (an absolute path) instead of the default.
@@ -69,7 +80,7 @@ fn state_of(text: &str) -> Option<UnitState> {
 
 impl Units for SystemdUnits<'_> {
     fn start(&self, instance: Instance) -> Result<(), PortError> {
-        let unit = instance.unit();
+        let unit = self.family.unit(instance);
         let call = Call::new(
             &self.program,
             &["start", "--", unit.as_str()],
@@ -79,7 +90,7 @@ impl Units for SystemdUnits<'_> {
     }
 
     fn stop(&self, instance: Instance) -> Result<(), PortError> {
-        let unit = instance.unit();
+        let unit = self.family.unit(instance);
         let call = Call::new(
             &self.program,
             &["stop", "--", unit.as_str()],
@@ -89,7 +100,7 @@ impl Units for SystemdUnits<'_> {
     }
 
     fn state(&self, instance: Instance) -> Result<UnitState, PortError> {
-        let unit = instance.unit();
+        let unit = self.family.unit(instance);
         let call = Call::new(
             &self.program,
             &[

@@ -1,6 +1,6 @@
-//! What the steps do to the machine, as ports: the two systemd instances and their start
-//! markers, the launchd job, the instances' HTTP answers, what the host says of itself, the
-//! clock and the state directory.
+//! What the steps do to the machine, as ports: the two systemd instances of each of the two
+//! templates and their start markers, the launchd job, the instances' HTTP answers, what the host
+//! says of itself, the clock and the state directory.
 //!
 //! Each port is a small trait; the steps take a [`SystemdPorts`] or a [`LaunchdPorts`] and never
 //! reach for the machine themselves. Tests keep the machine's world in a fake. Nothing here reads
@@ -73,7 +73,38 @@ impl PortError {
     }
 }
 
-/// One of the two instances of the systemd template `tierstore@.service`.
+/// One of the two systemd templates the hook drives. Each has the instances `a` and `b`.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum Family {
+    /// `tierstore@.service`, the S3 process.
+    Store,
+    /// `tierstore-fs@.service`, `tierstore fs`.
+    Fs,
+}
+
+impl Family {
+    /// The unit of `instance`: `tierstore@a.service` or `tierstore-fs@a.service`.
+    #[must_use]
+    pub fn unit(self, instance: Instance) -> String {
+        match self {
+            Family::Store => format!("tierstore@{}.service", instance.letter()),
+            Family::Fs => format!("tierstore-fs@{}.service", instance.letter()),
+        }
+    }
+
+    /// The file name of `instance`'s start marker: the name the template's
+    /// `ConditionPathExists=` gives with `%i`, `run-a` or `run-fs-a`.
+    #[must_use]
+    pub fn marker_file(self, instance: Instance) -> String {
+        match self {
+            Family::Store => format!("run-{}", instance.letter()),
+            Family::Fs => format!("run-fs-{}", instance.letter()),
+        }
+    }
+}
+
+/// One of the two instances of a systemd template, `tierstore@.service` or
+/// `tierstore-fs@.service`.
 #[derive(Clone, Copy, Debug, PartialEq, Eq, PartialOrd, Ord, Hash, Deserialize)]
 #[serde(rename_all = "lowercase")]
 pub enum Instance {
@@ -103,12 +134,6 @@ impl Instance {
             Instance::A => Instance::B,
             Instance::B => Instance::A,
         }
-    }
-
-    /// The unit's name: `tierstore@a.service` or `tierstore@b.service`.
-    #[must_use]
-    pub fn unit(self) -> String {
-        format!("tierstore@{}.service", self.letter())
     }
 }
 
@@ -144,7 +169,7 @@ impl UnitState {
     }
 }
 
-/// The systemd units of the two instances.
+/// The systemd units of the two instances of one template.
 pub trait Units {
     /// Starts the instance's unit and returns when systemd has started it. A start whose
     /// `ConditionPathExists=` fails (no marker) is not an error: the unit stays inactive.
@@ -335,10 +360,14 @@ pub trait Guard {
 
 /// Everything a step of the systemd arm may touch.
 pub struct SystemdPorts<'a> {
-    /// The two instances' units.
+    /// The two instances' units of `tierstore@.service`.
     pub units: &'a dyn Units,
     /// Their start markers.
     pub markers: &'a dyn Markers,
+    /// The two instances' units of `tierstore-fs@.service`.
+    pub fs_units: &'a dyn Units,
+    /// Their start markers.
+    pub fs_markers: &'a dyn Markers,
     /// The instances' answers.
     pub instances: &'a dyn Instances,
     /// The host.

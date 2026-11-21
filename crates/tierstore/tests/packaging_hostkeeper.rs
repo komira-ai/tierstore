@@ -407,6 +407,15 @@ fn the_fs_template_differs_from_the_s3_template_as_the_design_lists() {
     for (key, want) in added {
         assert_eq!(value(&fs, key), want, "{key}");
     }
+    // The default of `fs.handoff_wait` is 120 s (`DEFAULT_HANDOFF_WAIT` in the crate, not public
+    // to this test): a start that takes the mount over must not be cut by the unit's timeout.
+    let start_secs: u64 = value(&fs, "TimeoutStartSec")
+        .parse()
+        .expect("TimeoutStartSec is whole seconds");
+    assert!(
+        start_secs > 120,
+        "TimeoutStartSec is above the default fs.handoff_wait"
+    );
     assert_ne!(value(&s3, "RestrictAddressFamilies"), "AF_UNIX");
     for key in [
         "User",

@@ -1,6 +1,6 @@
 //! The update hook's `state.json`: one record for both service managers. The launchd arm writes
 //! the keys of the single-instance record of the release before; the systemd arm adds `live`,
-//! `next` and `mode`.
+//! `next` and `mode`, and, on a node with an fs process, `fs_live` and `fs_next`.
 
 use std::collections::BTreeSet;
 use std::path::PathBuf;
@@ -9,6 +9,7 @@ use tierstore::server::update_hook::{Instance, Kind, Marker, Mode, Record, Recor
 
 const SINGLE: &[u8] = include_bytes!("fixtures/hook_record_single.json");
 const SYSTEMD: &[u8] = include_bytes!("fixtures/hook_record_systemd.json");
+const SYSTEMD_FS: &[u8] = include_bytes!("fixtures/hook_record_systemd_fs.json");
 const REST: &[u8] = include_bytes!("fixtures/hook_record_systemd_rest.json");
 const NEWER: &[u8] = include_bytes!("fixtures/hook_record_systemd_newer.json");
 
@@ -25,6 +26,8 @@ fn single() -> Record {
         live: None,
         next: None,
         mode: None,
+        fs_live: None,
+        fs_next: None,
     }
 }
 
@@ -45,6 +48,18 @@ fn systemd() -> Record {
         live: Some(Instance::A),
         next: Some(Instance::B),
         mode: Some(Mode::Handover),
+        fs_live: None,
+        fs_next: None,
+    }
+}
+
+/// The record of the systemd arm on a node with an fs process: the same update, and the fs
+/// process handed over from `a` to `b` too.
+fn systemd_fs() -> Record {
+    Record {
+        fs_live: Some(Instance::A),
+        fs_next: Some(Instance::B),
+        ..systemd()
     }
 }
 
@@ -68,6 +83,20 @@ fn the_systemd_record_fixture_reads_and_is_written_as_the_fixture() {
     assert_eq!(systemd().check(), Ok(()));
 }
 
+/// Asserts that the record of the systemd arm on a node with an fs process reads as its value and
+/// is written as the fixture, with `fs_live` and `fs_next` among the keys in order and the schema
+/// still 1, and that the fixture of the record without those keys reads with both absent. Catches
+/// a renamed or removed fs key, and a raised schema, which the previous release's hook would
+/// refuse.
+#[test]
+fn the_fs_record_fixture_reads_and_is_written_as_the_fixture() {
+    assert_eq!(Record::decode(SYSTEMD_FS).unwrap(), systemd_fs());
+    assert_eq!(systemd_fs().encode(), SYSTEMD_FS);
+    assert_eq!(systemd_fs().check(), Ok(()));
+    let without = Record::decode(SYSTEMD).unwrap();
+    assert_eq!((without.fs_live, without.fs_next), (None, None));
+}
+
 /// Asserts that the record of a systemd host at rest reads as `Record::idle` of the live instance
 /// and that `Record::idle` is written as the fixture, with the keys it has nothing to say for left
 /// out.
@@ -84,7 +113,11 @@ fn the_record_fixture_of_a_host_at_rest_is_the_idle_record_both_ways() {
 /// optional one and this one still reads the record.
 #[test]
 fn the_record_ignores_a_key_added_later() {
-    for (fixture, want) in [(SINGLE, single()), (SYSTEMD, systemd())] {
+    for (fixture, want) in [
+        (SINGLE, single()),
+        (SYSTEMD, systemd()),
+        (SYSTEMD_FS, systemd_fs()),
+    ] {
         let text = String::from_utf8(fixture.to_vec()).unwrap();
         let added = text.replace("\"kind\"", "\"added_later\": 1,\n  \"kind\"");
         assert_ne!(added, text);

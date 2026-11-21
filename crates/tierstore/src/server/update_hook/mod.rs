@@ -19,6 +19,9 @@
 //!   the listening sockets of the live one over the hand-over socket (`server.handoff_socket`),
 //!   and the live one drains and exits on its own. Each instance starts only when its marker file
 //!   ([`MARKER_DIR`]) is there, so at boot only the recorded one does.
+//!   On a node with a `tierstore fs` process, the second template `tierstore-fs@.service` (the
+//!   instances `a` and `b`, the markers `run-fs-a` and `run-fs-b`) is handed over in the same steps
+//!   between releases that both list [`HANDOFF_FS_CAPABILITY`], and left alone otherwise.
 //! - **launchd** ([`launchd`]): one job, the label in `launchd_label`, and an update is a restart
 //!   with a gap: `bootout`, then `bootstrap` of the linked plist ([`LAUNCHD_PLIST`]).
 //!
@@ -60,8 +63,8 @@ pub use params::{
     SERVICE_MANAGER_KEY, STAGED_RELEASE_KEY, SYSTEMD, ServiceManager, TARGET_VERSION_KEY,
 };
 pub use ports::{
-    Clock, Host, Instance, Instances, Launchd, LaunchdPorts, Lock, Markers, PortError, PortKind,
-    Reply, StateDir, SystemdPorts, UnitState, Units,
+    Clock, Family, Host, Instance, Instances, Launchd, LaunchdPorts, Lock, Markers, PortError,
+    PortKind, Reply, StateDir, SystemdPorts, UnitState, Units,
 };
 pub use probe::{Build, CacheMode, build_of, readiness};
 pub use record::{Invalid, Kind, Marker, Mode, RECORD_MAX, Record, RecordError, SCHEMA};
@@ -82,7 +85,7 @@ pub const MARKER_DIR: &str = "/var/lib/tierstore";
 /// `ConditionPathExists=` names with `%i`.
 #[must_use]
 pub fn marker_path(instance: Instance) -> PathBuf {
-    PathBuf::from(MARKER_DIR).join(format!("run-{}", instance.letter()))
+    PathBuf::from(MARKER_DIR).join(Family::Store.marker_file(instance))
 }
 /// The account the service runs as on Linux: the template's `User=`, in `/etc/passwd`. A check
 /// of the configuration by a release runs as this account when a hook of the systemd arm runs as
@@ -122,6 +125,10 @@ pub const CACHE_HANDOFF_CAPABILITY: &str = crate::server::build_info::HANDOFF_CA
 /// configuration leaves the key out.
 pub const HANDOFF_STATE_DIR_CAPABILITY: &str =
     crate::server::build_info::HANDOFF_STATE_DIR_CAPABILITY;
+/// The capability of a release whose `tierstore fs` takes the mount from a running instance of
+/// the other letter and offers it on `fs.handoff_socket`. Both releases need it for the hook to
+/// hand the fs process over.
+pub const HANDOFF_FS_CAPABILITY: &str = crate::server::build_info::HANDOFF_FS_CAPABILITY;
 /// The table of the configuration that holds the hot tier.
 pub const HOT_STORE_TABLE: &str = "hot_store";
 /// The `kind` of a tier that is a directory of the file system.

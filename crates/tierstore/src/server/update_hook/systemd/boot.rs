@@ -4,12 +4,13 @@ use super::super::params::Params;
 use super::super::ports::Instance;
 use super::super::record::{Marker, Record};
 use super::super::report::Done;
-use super::{Ctx, unit_name};
+use super::{Ctx, fs, unit_name};
 
 /// Stops both instances, removes both markers and the copy of the binary the units run. The data
 /// directory, the configuration and the record directory stay; the record says nothing is in
 /// flight and nothing serves.
 pub(super) fn uninstall(c: &Ctx<'_, '_>) -> Result<Done, Done> {
+    fs::uninstall(c)?;
     for instance in Instance::ALL {
         c.ports.units.stop(instance)?;
     }
@@ -53,5 +54,6 @@ pub(super) fn restore(
     c.ports.markers.set(desired)?;
     c.ports.host.install_binary(&params.staged_release)?;
     c.ports.units.start(desired)?;
-    Ok(Done::ok(format!("{} started", unit_name(desired))))
+    let fs = fs::restore(c, record)?;
+    Ok(Done::ok(format!("{} started{fs}", unit_name(desired))))
 }

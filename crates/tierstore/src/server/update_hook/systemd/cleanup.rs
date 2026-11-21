@@ -4,7 +4,7 @@ use super::super::params::Params;
 use super::super::ports::{Instance, UnitState};
 use super::super::record::{Marker, Record};
 use super::super::report::{Done, Reason};
-use super::{Ctx, DRAIN_RETRY_SECS, next_of, unit_name};
+use super::{Ctx, DRAIN_RETRY_SECS, fs, next_of, unit_name};
 
 pub(super) fn cleanup(c: &Ctx<'_, '_>, params: &Params, record: &Record) -> Result<Done, Done> {
     if !record.updating {
@@ -29,7 +29,7 @@ pub(super) fn cleanup(c: &Ctx<'_, '_>, params: &Params, record: &Record) -> Resu
     let committed = if record.committed() {
         record.clone()
     } else {
-        confirm(c, next, &params.target_version)?;
+        confirm(c, record, next, &params.target_version)?;
         // `stopping` precedes its act: from here on nothing is reversible.
         let committed = record.with(Marker::Stopping);
         c.commit_written.set(true);
@@ -46,12 +46,16 @@ pub(super) fn cleanup(c: &Ctx<'_, '_>, params: &Params, record: &Record) -> Resu
         }
         c.ports.markers.clear(live)?;
     }
+    // The old fs instance of a hand-over ends by itself, and is never stopped here.
+    fs::retire(c, &committed)?;
     let mut finished = committed;
     finished.updating = false;
     finished.from = None;
     finished.live = Some(next);
     finished.next = None;
     finished.mode = None;
+    finished.fs_live = finished.fs_next.or(finished.fs_live);
+    finished.fs_next = None;
     c.save(&finished)?;
     Ok(Done::ok(format!(
         "committed: {} serves, the old instance is retired",
@@ -63,7 +67,7 @@ pub(super) fn cleanup(c: &Ctx<'_, '_>, params: &Params, record: &Record) -> Resu
 /// hand-over the old instance still drains on the same listening sockets and answers `/readyz`
 /// with 503 until it exits, so a look that reaches it is no verdict: `confirm` waits for
 /// `/readyz` as `cutover` does, then probes for the build.
-fn confirm(c: &Ctx<'_, '_>, next: Instance, target: &str) -> Result<(), Done> {
+fn confirm(c: &Ctx<'_, '_>, record: &Record, next: Instance, target: &str) -> Result<(), Done> {
     let not_confirmed = |why: String| Done::fail(Reason::NotConfirmed, why);
     let state = c.ports.units.state(next)?;
     if state != UnitState::Active {
@@ -71,6 +75,16 @@ fn confirm(c: &Ctx<'_, '_>, next: Instance, target: &str) -> Result<(), Done> {
             "{} is {state:?}, not active",
             unit_name(next)
         )));
+    }
+    // The fs instance the update started, too: active is a mount it has taken.
+    if let Some(fs_next) = record.fs_next {
+        let state = c.ports.fs_units.state(fs_next)?;
+        if state != UnitState::Active {
+            return Err(not_confirmed(format!(
+                "{} is {state:?}, not active",
+                fs::fs_name(fs_next)
+            )));
+        }
     }
     c.look().serves(target).map(|_| ()).map_err(|failed| {
         not_confirmed(format!(

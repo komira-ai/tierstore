@@ -446,3 +446,62 @@ fn verify_fails_when_the_installed_file_cannot_be_checked() {
     lin::assert_failed(&node.step(Verify, &p), Reason::HostFailed);
     assert!(!node.fake.record().has(Marker::Verified));
 }
+
+/// Asserts that a config update on a node with an fs process leaves the fs process alone (the
+/// instance a keeps the mount, with no fs unit started or stopped and no fs hand-over planned),
+/// and that `cleanup` writes the store's new letter and the fs letter a into the release's
+/// record. Catches a hand-over of the fs process on an edit of the store's configuration.
+#[test]
+fn a_config_update_leaves_the_fs_process_alone_and_writes_its_letter_back() {
+    let node = Linux::with_fs();
+    let p = update();
+    node.go(&p, &[Prepare]);
+    let prepared = node.fake.record();
+    assert_eq!(
+        (prepared.fs_live, prepared.fs_next),
+        (Some(Instance::A), None)
+    );
+    node.go(&p, &[Cutover, Verify, Cleanup]);
+    assert_eq!(node.fake.fs_running(), [Instance::A]);
+    assert_eq!(node.fake.fs_markers(), [Instance::A]);
+    assert!(node.fake.fs_actions().is_empty());
+    let mut want = release_record(Instance::B);
+    want.fs_live = Some(Instance::A);
+    assert_eq!(node.service.get(), Some(want));
+}
+
+/// Asserts that a config update of a node with no fs process leaves the `fs_live` the release's
+/// record holds as it is. Catches a write-back that forgets the fs process of the release.
+#[test]
+fn a_config_update_without_an_fs_process_keeps_the_release_records_fs_letter() {
+    let node = Linux::alike();
+    let held = Record {
+        fs_live: Some(Instance::A),
+        ..release_record(Instance::A)
+    };
+    node.service.set(&held);
+    node.go(&update(), &[Prepare, Cutover, Verify, Cleanup]);
+    let want = Record {
+        fs_live: Some(Instance::A),
+        ..release_record(Instance::B)
+    };
+    assert_eq!(node.service.get(), Some(want));
+}
+
+/// Asserts that `cleanup` writes the fs letter into a release record that already names the
+/// store's new instance but not the fs process's, with a write (the record is not left alone
+/// because the store's letter agrees). Catches a write-back that compares the store's letter
+/// alone.
+#[test]
+fn cleanup_writes_the_fs_letter_into_a_release_record_that_names_the_store_instance() {
+    let node = Linux::with_fs();
+    let p = update();
+    node.go(&p, &[Prepare, Cutover, Verify]);
+    node.service.set(&release_record(Instance::B));
+    node.go(&p, &[Cleanup]);
+    let want = Record {
+        fs_live: Some(Instance::A),
+        ..release_record(Instance::B)
+    };
+    assert_eq!(node.service.get(), Some(want));
+}

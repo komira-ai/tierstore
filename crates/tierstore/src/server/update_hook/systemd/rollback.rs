@@ -6,7 +6,7 @@ use super::super::params::Params;
 use super::super::ports::Instance;
 use super::super::record::{Mode, Record};
 use super::super::report::{Done, Reason};
-use super::{Ctx, DRAIN_RETRY_SECS, next_of, unit_name};
+use super::{Ctx, DRAIN_RETRY_SECS, fs, next_of, unit_name};
 
 pub(super) fn rollback(c: &Ctx<'_, '_>, params: &Params, record: &Record) -> Result<Done, Done> {
     if record.committed() {
@@ -33,6 +33,11 @@ pub(super) fn rollback(c: &Ctx<'_, '_>, params: &Params, record: &Record) -> Res
     // Before any start: the instance that comes back runs the previous release's binary. The new
     // instance, if it runs, keeps the copy it started from.
     c.ports.host.install_binary(&previous.release)?;
+    // The fs process first, the reverse of `cutover`: the store then starts beside the old fs
+    // instance, which is the pair the previous release is tested as.
+    if let Some(fs_next) = record.fs_next {
+        fs::give_back(c, fs_next)?;
+    }
     if record.mode == Some(Mode::Handover) {
         hand_back(c, back, next, version)?;
     } else {
@@ -43,7 +48,9 @@ pub(super) fn rollback(c: &Ctx<'_, '_>, params: &Params, record: &Record) -> Res
         return Err(draining(back, next));
     }
     c.ports.markers.clear(next)?;
-    c.save(&Record::idle(Some(back)))?;
+    let mut idle = Record::idle(Some(back));
+    idle.fs_live = record.fs_live;
+    c.save(&idle)?;
     Ok(Done::ok(format!(
         "rolled back: {} serves {version}",
         unit_name(back)

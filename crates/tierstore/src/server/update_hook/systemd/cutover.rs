@@ -4,7 +4,7 @@
 use super::super::params::Params;
 use super::super::record::{Marker, Mode, Record};
 use super::super::report::{Done, Reason};
-use super::{Ctx, next_of, unit_name};
+use super::{Ctx, fs, next_of, unit_name};
 
 pub(super) fn cutover(c: &Ctx<'_, '_>, params: &Params, record: &Record) -> Result<Done, Done> {
     if !record.updating || record.committed() {
@@ -17,12 +17,30 @@ pub(super) fn cutover(c: &Ctx<'_, '_>, params: &Params, record: &Record) -> Resu
     let target = &params.target_version;
     let swapped = record.has(Marker::Swapped);
     // A run again after `swapped` looks first: when the new instance serves, nothing is left.
-    if swapped && c.ports.units.state(next)?.running() && c.look().observed(target).is_ok() {
+    if swapped
+        && c.ports.units.state(next)?.running()
+        && c.look().observed(target).is_ok()
+        && fs::is_active(c, record)?
+    {
         return Ok(Done::ok(format!(
-            "{} already serves {target}",
-            unit_name(next)
+            "{} already serves {target}{}",
+            unit_name(next),
+            fs::cutover_note(record),
         )));
     }
+    // A record that `prepare` of the previous release's hook wrote has no plan of the fs process:
+    // it is made here, before the first act of the step, and saved, so that a rollback and a run
+    // again see it. The plan is not an act: a failure of it changes nothing.
+    let planned = fs::plan_late(c, params, record)?;
+    let (record, plan_note) = match &planned {
+        Some((fresh, note)) => {
+            if fresh != record {
+                c.save(fresh)?;
+            }
+            (fresh, note.as_str())
+        }
+        None => (record, ""),
+    };
     // The units run the copy at `SERVICE_BINARY`, which becomes the staged release's before
     // anything is stopped or started: a failure here leaves `live` serving. A `live` that runs
     // the old copy keeps it, and drains on it.
@@ -39,12 +57,22 @@ pub(super) fn cutover(c: &Ctx<'_, '_>, params: &Params, record: &Record) -> Resu
     c.ports.markers.set(next)?;
     c.ports.units.start(next)?;
     c.look().serves(target)?;
-    // `swapped` follows its act: the probe above saw the new release serve.
+    // The fs process after the store, as the unit orders itself: the new fs instance talks to the
+    // new store, the pair a release is tested as.
+    let mut take_note = String::new();
+    if let Some(fs_next) = record.fs_next {
+        take_note = fs::take(c, fs_next)?;
+        // Both markers coexist only during the take.
+        c.ports.fs_markers.clear(fs_next.other())?;
+    }
+    // `swapped` follows its acts: the probe above saw the new release serve, and the unit of
+    // the fs process is active.
     if !swapped {
         c.save(&record.with(Marker::Swapped))?;
     }
     Ok(Done::ok(format!(
-        "{} serves {target} ({how})",
-        unit_name(next)
+        "{} serves {target} ({how}){}{plan_note}{take_note}",
+        unit_name(next),
+        fs::cutover_note(record),
     )))
 }

@@ -11,6 +11,7 @@ use super::super::params::{Params, Previous};
 use super::super::ports::{Guard, Host, Instance, LaunchdPorts, PortError, StateDir, SystemdPorts};
 use super::super::record::{Marker, Record};
 use super::super::report::{Done, Reason};
+use super::super::systemd::FsPolicy;
 use super::super::{DIR_TIER_KIND, HANDOFF_SOCKET_KEY, HOT_STORE_TABLE};
 use super::staged_copy;
 
@@ -218,7 +219,10 @@ fn systemd_attempt(
     common: &Common<'_>,
 ) -> Result<Done, Done> {
     let config = config_file(params)?.to_path_buf();
-    let arm = |step: Step, params: &Params| super::super::systemd::run_step(step, params, ports);
+    // A configuration update leaves the fs process alone: its own file is not in that package.
+    let arm = |step: Step, params: &Params| {
+        super::super::systemd::run_step_with(step, params, ports, FsPolicy::LeftAlone)
+    };
     let plain = arm_params(params, common.build, &config, false);
     match step {
         Step::Restore => Err(not_a_step()),
@@ -300,17 +304,18 @@ fn systemd_first_back(ports: &SystemdPorts<'_>, plain: &Params) -> Result<Done, 
     Err(no_previous(serving))
 }
 
-/// Writes the instance the config hook's record says serves into the release's record, which
-/// the boot step reads; a release's record that is absent, or in an update, is left as it is.
-/// The config hook's own record was written by the arm's `cleanup` just before; one that cannot
-/// be decoded names no instance, and nothing is written back (the boot step then starts the
-/// instance the release's record names, which serves the same files).
+/// Writes the instances the config hook's record says serve (the S3 process, and the fs process
+/// when the record names one) into the release's record, which the boot step reads; a release's
+/// record that is absent, or in an update, is left as it is. The config hook's own record was
+/// written by the arm's `cleanup` just before; one that cannot be decoded names no instance, and
+/// nothing is written back (the boot step then starts the instance the release's record names,
+/// which serves the same files).
 pub(super) fn write_back(config: &dyn StateDir, service: &dyn StateDir) -> Result<(), Done> {
     let _lock = config.lock()?;
-    let Some(live) = config
+    let Some((live, fs_live)) = config
         .load()?
         .and_then(|bytes| Record::decode(&bytes).ok())
-        .and_then(|record| record.live)
+        .and_then(|record| record.live.map(|live| (live, record.fs_live)))
     else {
         return Ok(());
     };
@@ -318,10 +323,13 @@ pub(super) fn write_back(config: &dyn StateDir, service: &dyn StateDir) -> Resul
         return Ok(());
     };
     let mut release = Record::decode(&bytes)?;
-    if release.updating || release.live == Some(live) {
+    // A node with no fs process leaves the release's `fs_live` as it is.
+    let fs_live = fs_live.or(release.fs_live);
+    if release.updating || (release.live == Some(live) && release.fs_live == fs_live) {
         return Ok(());
     }
     release.live = Some(live);
+    release.fs_live = fs_live;
     release.check()?;
     service.save(&release.encode())?;
     Ok(())
