@@ -1,4 +1,4 @@
-//! The put directory, `<mountpoint>/put/`: the core that the FUSE frontend (Linux, `fuse_put.rs`)
+//! The put directory, `<mountpoint>/put/`: the core that the FUSE frontend (Linux, `put_fs.rs`)
 //! serves and the NFS frontend (macOS) will share, with no protocol in it. A file a job writes under
 //! `put/<key prefix>/` is staged in the staged-file store ([`store`]), and its commit, a `rename` of
 //! a `.part` name to a final name, hands over the staged file, its key and its SHA-256, which are put

@@ -6,7 +6,7 @@
 //! without `SPLICE_F_MOVE`), and `tsfuse` over io_uring ([`Transport::Uring`], V5: a ring and a
 //! thread per possible CPU, `depth` entries each, beside the `/dev/fuse` readers that carry
 //! INTERRUPT and FORGET; where the session cannot use io_uring it serves on `/dev/fuse` and
-//! [`Served`] says why), in the regimes of [`crate::nullfs`]: the timeouts the kernel keeps
+//! [`Served`] says why), in the regimes of the benchmark: the timeouts the kernel keeps
 //! entries and attributes for, and the open mode (`explicit` answers every `OPEN` and `OPENDIR`,
 //! with `FOPEN_KEEP_CACHE` for a file; `none` answers them `ENOSYS`, after which the kernel,
 //! which was granted `FUSE_NO_OPEN_SUPPORT` and `FUSE_NO_OPENDIR_SUPPORT`, opens without asking).
@@ -25,8 +25,8 @@
 //!
 //! **Requests.** `LOOKUP`, `GETATTR`, `OPEN`, `READ`, `OPENDIR`, `READDIR`, `READDIRPLUS`,
 //! `RELEASE` and `RELEASEDIR` are answered inline on the reader that read them; every other
-//! request `tsfuse` implements (`FLUSH`, `STATFS`, writes) is answered `ENOSYS`, as `fuser`'s
-//! defaults answer `FLUSH` for [`crate::nullfs`], and a body too short for its opcode `EIO`.
+//! request `tsfuse` implements (`FLUSH`, `STATFS`, writes) is answered `ENOSYS`, and a body too
+//! short for its opcode `EIO`.
 //! `tsfuse` answers `INIT`, `INTERRUPT`, `FORGET`, `DESTROY` and the opcodes it does not
 //! implement itself.
 
@@ -51,7 +51,6 @@ use tsfuse::{
 
 use crate::Error;
 use crate::list::FileList;
-use crate::nullfs::OpenMode;
 use crate::tree::{Miss, Node, Span, Tree};
 
 /// The name of the process in its errors.
@@ -108,6 +107,16 @@ pub fn transport_of(mode: TransportMode) -> (String, Option<tsfuse::UringMemory>
         TransportMode::Uring(memory) => ("io_uring".to_owned(), Some(memory)),
         TransportMode::DevFuse(why) => (format!("dev-fuse ({why:?})"), None),
     }
+}
+
+/// How `OPEN` is answered.
+#[derive(Clone, Copy, Debug, PartialEq, Eq, clap::ValueEnum)]
+pub enum OpenMode {
+    /// Every `OPEN` is answered, with `FOPEN_KEEP_CACHE`.
+    Explicit,
+    /// `ENOSYS`: the kernel opens files of the mount without asking from then on.
+    #[value(name = "none")]
+    NoOpen,
 }
 
 /// What the null file system on `tsfuse` serves with.

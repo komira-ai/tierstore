@@ -11,7 +11,7 @@
 //! | `fs.fill_socket` | the fill socket of the node's tierstore | needed |
 //! | `fs.cache_path` | the node's `local_cache.path` | needed |
 //! | `fs.fetch_timeout` | how long a fill, or a closed fill socket, is waited for | `60s` |
-//! | `fs.threads` | threads that serve the kernel's requests (a fill blocks one) | `16` |
+//! | `fs.threads` | threads that serve the kernel's requests (a fill blocks one), at most 252 | `16` |
 //! | `[fs.nfs]` | the settings of the NFS frontend (macOS), see `nfs/config.rs` | its defaults |
 //! | `fs.handoff_socket` | the socket a new instance asks the running one for the mount on (`handoff-fs-v1`) | `<runtime_dir>/handoff.sock` |
 //! | `fs.handoff_wait` | how long the hand-over of the mount may last, from the connect to the end | `120s` |
@@ -57,6 +57,11 @@ const DEFAULT_FETCH_TIMEOUT: Duration = Duration::from_secs(60);
 
 /// The threads that serve the kernel's requests when the file leaves out `fs.threads`.
 const DEFAULT_THREADS: u32 = 16;
+
+/// The most threads `fs.threads` may name: each reads its own copy of the connection's descriptor,
+/// and a `tsfuse` session holds at most `tsfuse::MAX_DEVICES` (the descriptors one `SCM_RIGHTS`
+/// message carries, less one).
+const MOST_THREADS: u32 = 252;
 
 /// The name of the hand-over socket in the runtime directory when the file leaves out
 /// `fs.handoff_socket`.
@@ -261,7 +266,7 @@ impl FsSettings {
             "threads",
             table.threads.unwrap_or(DEFAULT_THREADS),
             1,
-            1024,
+            MOST_THREADS,
         )?;
         let reattach_concurrency = within(
             "fs",

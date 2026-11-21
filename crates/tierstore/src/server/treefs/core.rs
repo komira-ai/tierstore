@@ -1,5 +1,5 @@
 //! The core of `tierstore fs`: the operations of a filesystem on inode numbers, answered from the
-//! attached trees, with no protocol in it. The FUSE frontend (`fuse.rs`) decodes the kernel's
+//! attached trees, with no protocol in it. The FUSE frontend (`node_fs.rs`) decodes the kernel's
 //! requests into these calls; a test makes them directly.
 //!
 //! A frontend uses the core in one of two ways. With opens: [`Core::open`] gives a handle that

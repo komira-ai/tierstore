@@ -149,6 +149,8 @@ pub enum Interrupted {
 pub struct Tokens {
     table: Arc<Table>,
     handed_over: Arc<AtomicBool>,
+    /// Set when the session leaves every INTERRUPT unanswered ([`Tokens::ignore_interrupts`]).
+    ignoring: Arc<AtomicBool>,
 }
 
 impl std::fmt::Debug for Tokens {
@@ -297,6 +299,21 @@ impl Tokens {
     /// writes (before that RESEND it answers the request, after it the kernel refuses it).
     pub(crate) fn hand_over(&self) {
         self.handed_over.store(true, Ordering::Release);
+    }
+
+    /// Leaves every INTERRUPT the readers route from now on unanswered and cancels nothing: an
+    /// interrupted request is answered by its file system alone, as if no INTERRUPT had come.
+    /// The kernel expects no reply to an INTERRUPT, and its caller goes on waiting for the
+    /// request's own (uapi `fuse.h`: the file system may ignore an interrupt). For a file system
+    /// whose requests run to an answer that must not be replaced by `EINTR`, such as a commit that
+    /// has begun.
+    pub(crate) fn ignore_interrupts(&self) {
+        self.ignoring.store(true, Ordering::Release);
+    }
+
+    /// Whether the readers leave INTERRUPTs unanswered ([`Self::ignore_interrupts`]).
+    pub(crate) fn interrupts_ignored(&self) -> bool {
+        self.ignoring.load(Ordering::Acquire)
     }
 
     /// The number of requests registered and not answered.

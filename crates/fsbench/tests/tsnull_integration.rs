@@ -18,9 +18,8 @@ use std::process::{Command, Stdio};
 use std::time::Duration;
 
 use fsbench::list::{Entry, FileList};
-use fsbench::nullfs::OpenMode;
 use fsbench::tree::Tree;
-use fsbench::tsnull::{Options, Reply, Transport, serve};
+use fsbench::tsnull::{OpenMode, Options, Reply, Transport, serve};
 use tierstore_testkit::dir::TestDir;
 
 /// ENOENT.

@@ -285,6 +285,37 @@ fn resume_whose_resend_cannot_be_written_fails_naming_it() {
 }
 
 #[test]
+fn attach_serves_a_queued_request_and_sends_no_resend_where_the_kernel_offers_it() {
+    let negotiated = *initialised(RESEND_AND_PAGES).negotiated();
+    assert!(negotiated.granted.contains(InitFlags::HAS_RESEND));
+    let (device, kernel) = fake_device();
+    kernel.send(&getattr(5)).unwrap();
+    let fds = vec![OwnedFd::from(device)];
+    let session = Session::attach(Handover::new(negotiated, fds).unwrap()).unwrap();
+    assert_eq!(session.negotiated(), &negotiated);
+    let fs = Arc::new(TestFs::default());
+    let (stopper, joined) = serve(session, fs.clone());
+
+    // The first message the kernel's end reads is the answer to the queued request: no RESEND
+    // came before it.
+    assert_eq!(read_reply(&kernel), (-9, 5, 16));
+    stopper.stop();
+    assert_eq!(joined.join().unwrap().unwrap(), vec![ReaderEnd::Stopped]);
+    assert!(!pending(&kernel), "no RESEND after the answer either");
+    assert_eq!(*fs.resends.lock().unwrap(), vec![false]);
+}
+
+#[test]
+fn attach_of_a_connection_whose_kernel_end_is_gone_still_attaches_and_a_resend_then_fails() {
+    let negotiated = *initialised(RESEND_AND_PAGES).negotiated();
+    let (device, kernel) = fake_device();
+    drop(kernel);
+    let fds = vec![OwnedFd::from(device)];
+    let session = Session::attach(Handover::new(negotiated, fds).unwrap()).unwrap();
+    assert!(session.resend().is_err());
+}
+
+#[test]
 fn a_resent_request_is_marked_and_answered_under_its_id() {
     let negotiated = *initialised(0).negotiated();
     let (device, kernel) = fake_device();
@@ -414,6 +445,45 @@ fn each_request_is_routed_by_its_opcode() {
         !pending(&kernel),
         "FORGET, BATCH_FORGET and the dropped messages got no reply"
     );
+
+    stopper.stop();
+    assert_eq!(joined.join().unwrap().unwrap(), vec![ReaderEnd::Stopped]);
+}
+
+#[test]
+fn a_session_that_ignores_interrupts_answers_none_and_the_request_keeps_its_own_answer() {
+    let negotiated = *initialised(0).negotiated();
+    let (device, kernel) = fake_device();
+    let fs = Arc::new(TestFs::default());
+    let session = resume(vec![device], negotiated);
+    session.ignore_interrupts();
+    let tokens = session.tokens().clone();
+    let (stopper, joined) = serve(session, fs.clone());
+
+    kernel.send(&request(1, 100, 1, b"x\0")).unwrap();
+    while tokens.registered() == 0 || fs.parked.lock().unwrap().is_empty() {
+        std::thread::yield_now();
+    }
+    // An INTERRUPT of the parked request, and one of a request that is not there: neither is
+    // answered, and the parked request is not cancelled.
+    for (unique, target) in [(201, 100), (203, 99)] {
+        kernel
+            .send(&request(
+                36,
+                unique,
+                0,
+                InterruptIn { unique: target }.as_bytes(),
+            ))
+            .unwrap();
+    }
+    // A GETATTR after them is answered: the INTERRUPTs were read, and wrote nothing.
+    kernel.send(&getattr(7)).unwrap();
+    assert_eq!(read_reply(&kernel), (-9, 7, 16));
+    let parked = fs.parked.lock().unwrap().pop().unwrap();
+    assert!(!parked.cancel_token().is_cancelled());
+    assert!(matches!(parked.ok(&[b"done"]), tsfuse::Completion::Written));
+    assert_eq!(read_reply(&kernel), (0, 100, 20));
+    assert!(!pending(&kernel));
 
     stopper.stop();
     assert_eq!(joined.join().unwrap().unwrap(), vec![ReaderEnd::Stopped]);

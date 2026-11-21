@@ -1,10 +1,11 @@
-//! The put directory over a real mount: what a job sees through the kernel, made by a whole start
-//! of the process (`run.rs`) with `fs.put` enabled. A job writes, closes and commits; what the put
-//! directory does not do is refused by its errno; a writer killed mid-write leaves its file staged
-//! and uploads nothing; concurrent commits each upload their own bytes; and a restart that hands
-//! the mount over, or leaves it to the service manager, keeps the job's files, its open file and
-//! the directory it holds. A mount needs `/dev/fuse` and `fusermount3` (the mounting user is not
-//! root); where either is missing the test says so on stderr and ends.
+//! The put directory through [`NodeFs`](super::NodeFs) on `tsfuse`, over a real mount: what a job
+//! sees through the kernel, made by a whole start of the process (`run.rs`) with `fs.put`
+//! enabled. A job writes, closes and commits; what the put directory does not do is refused by its
+//! errno; a writer killed mid-write leaves its file staged and uploads nothing; concurrent commits
+//! each upload their own bytes; and a restart that hands the mount over, or leaves it to the
+//! service manager, keeps the job's files, its open file and the directory it holds. A mount needs
+//! `/dev/fuse` and `fusermount3` (the mounting user is not root); where either is missing the test
+//! says so on stderr and ends.
 
 use std::fs::OpenOptions;
 use std::io::{BufRead as _, Write as _};
@@ -17,11 +18,11 @@ use std::time::Duration;
 
 use rustix::fs::{CWD, FileType, Mode, OFlags, XattrFlags};
 
-use super::{absent, file_attr};
 use crate::server::treefs::config::FsSettings;
 use crate::server::treefs::put::PutSettings;
 use crate::server::treefs::put::config::PutConfig;
 use crate::server::treefs::put::space::{PutAttr, PutSpace};
+use crate::server::treefs::put_fs::{absent, attr, entry};
 use crate::server::treefs::run::{Prepared, Running};
 use crate::server::treefs::testing::{Rig, sample, until, with_fuse};
 
@@ -32,7 +33,7 @@ const JOB: &str = "cas/b/build/nonce";
 const WRITER: &str = "put-writer=";
 
 /// The full name of the writer process's test.
-const WRITER_TEST: &str = "server::treefs::fuse_put::tests::writer_process";
+const WRITER_TEST: &str = "server::treefs::node_fs::put_tests::writer_process";
 
 /// Settings of a rig with the put directory enabled, its stage beside the cache.
 fn settings(rig: &Rig) -> FsSettings {
@@ -578,11 +579,17 @@ fn a_restart_keeps_the_staged_files_with_or_without_the_hand_over_file() {
     });
 }
 
-/// Asserts the attributes the kernel is told: a directory, a file with its blocks and one link,
-/// the time in milliseconds, and the inode number 0 of a name that is not there.
+/// Asserts the attributes the kernel is told, on the `tsfuse` encoders of the put directory: a
+/// directory is `S_IFDIR` with its permission bits and two links; a file is `S_IFREG` with its
+/// permission bits, one link, its size and its blocks of 512 bytes; the time is sent in seconds and
+/// nanoseconds of the millisecond count (the access, modification and change times alike); the
+/// lookup reply carries the inode number and a validity of zero; and a name that is not there has
+/// the inode number 0 and no link.
 #[test]
 fn the_kernel_is_told_the_attributes_of_the_space() {
-    let dir = file_attr(&PutAttr {
+    const S_IFDIR: u32 = 0o040_000;
+    const S_IFREG: u32 = 0o100_000;
+    let dir = attr(&PutAttr {
         ino: 9,
         dir: true,
         size: 0,
@@ -592,14 +599,13 @@ fn the_kernel_is_told_the_attributes_of_the_space() {
         ms: 1_500,
     });
     assert_eq!(
-        (dir.kind, dir.nlink, dir.perm, dir.uid, dir.gid),
-        (fuser::FileType::Directory, 2, 0o700, 1, 2)
+        (dir.ino, dir.mode, dir.nlink, dir.uid, dir.gid),
+        (9, S_IFDIR | 0o700, 2, 1, 2)
     );
-    assert_eq!(
-        dir.mtime,
-        std::time::UNIX_EPOCH + Duration::from_millis(1_500)
-    );
-    let file = file_attr(&PutAttr {
+    assert_eq!((dir.mtime, dir.mtimensec), (1, 500_000_000));
+    assert_eq!((dir.atime, dir.atimensec), (1, 500_000_000));
+    assert_eq!((dir.ctime, dir.ctimensec), (1, 500_000_000));
+    let file = attr(&PutAttr {
         ino: 10,
         dir: false,
         size: 513,
@@ -609,9 +615,28 @@ fn the_kernel_is_told_the_attributes_of_the_space() {
         ms: 0,
     });
     assert_eq!(
-        (file.kind, file.nlink, file.blocks, file.size),
-        (fuser::FileType::RegularFile, 1, 2, 513)
+        (file.mode, file.nlink, file.blocks, file.size),
+        (S_IFREG | 0o600, 1, 2, 513)
+    );
+    assert_eq!((file.mtime, file.mtimensec), (0, 0));
+    let looked_up = entry(&PutAttr {
+        ino: 10,
+        dir: false,
+        size: 513,
+        perm: 0o600,
+        uid: 1,
+        gid: 2,
+        ms: 0,
+    });
+    assert_eq!(
+        (
+            looked_up.nodeid,
+            looked_up.attr.ino,
+            looked_up.entry_valid,
+            looked_up.attr_valid
+        ),
+        (10, 10, 0, 0)
     );
     let none = absent();
-    assert_eq!((none.ino.0, none.nlink), (0, 0));
+    assert_eq!((none.nodeid, none.attr.ino, none.attr.nlink), (0, 0, 0));
 }

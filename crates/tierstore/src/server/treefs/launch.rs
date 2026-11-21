@@ -32,7 +32,7 @@
 use std::os::fd::AsFd as _;
 use std::sync::Arc;
 
-use fuser::InitFlags;
+use tsfuse::abi::InitFlags;
 
 use super::config::FsSettings;
 use super::handover::{self, Offer, Paths};
@@ -80,13 +80,12 @@ fn adopt_stored(
     let running = Running::adopt(settings, prepared, device, (None, true))?;
     // A kernel that can send the requests again and refused to has left them as unanswered as
     // one that cannot.
-    let hung = if running.outcome().flags.contains(InitFlags::FUSE_HAS_RESEND)
-        && !running.resend_failed()
-    {
-        None
-    } else {
-        watch(settings, kernel)
-    };
+    let hung =
+        if running.outcome().flags.contains(InitFlags::HAS_RESEND) && !running.resend_failed() {
+            None
+        } else {
+            watch(settings, kernel)
+        };
     Ok((Arc::new(running), hung))
 }
 

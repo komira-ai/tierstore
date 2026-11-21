@@ -1,8 +1,8 @@
 //! Whole runs: readers and burners started from the `fsbench` executable, over a plain directory
-//! and over the null file system mounted by `fsbench null-fs`, measured with this machine's
-//! `/proc` and `/sys`. Integration target: it reads the host's `/proc` and `/sys`, mounts FUSE and
-//! runs the system's `fusermount3`. No figure of time is asserted; the counts are exact, because
-//! every reader is given a number of cycles.
+//! and over the null file system mounted by `fsbench tsfuse-null-fs`, measured with this
+//! machine's `/proc` and `/sys`. Integration target: it reads the host's `/proc` and `/sys`,
+//! mounts FUSE and runs the system's `fusermount3`. No figure of time is asserted; the counts are
+//! exact, because every reader is given a number of cycles.
 
 #![cfg(target_os = "linux")]
 #![allow(
@@ -137,9 +137,9 @@ fn a_run_over_a_directory_writes_a_record_per_run() {
     assert_eq!(records[0].samples.waiting_mean, None);
 }
 
-/// A run over the null file system that `fsbench null-fs` serves, measured as its server: the
-/// same counts, the server's executable is the harness's, and the mount's line is recorded. The
-/// requests waiting are counted when the machine lists its FUSE connections.
+/// A run over the null file system that `fsbench tsfuse-null-fs` serves, measured as its server:
+/// the same counts, the server's executable is the harness's, and the mount's line is recorded.
+/// The requests waiting are counted when the machine lists its FUSE connections.
 #[test]
 fn a_run_over_the_null_file_system_measures_its_server() {
     let dir = TestDir::under(env!("CARGO_TARGET_TMPDIR"), "fsbench-run-null");
@@ -147,18 +147,20 @@ fn a_run_over_the_null_file_system_measures_its_server() {
     let mnt = dir.path().join("mnt");
     std::fs::create_dir(&mnt).unwrap();
     let mut server = Command::new(env!("CARGO_BIN_EXE_fsbench"))
-        .args(["null-fs", "--list"])
+        .args(["tsfuse-null-fs", "--list"])
         .arg(&list)
         .arg("--mountpoint")
         .arg(&mnt)
+        .arg("--data")
+        .arg(dir.path().join("data"))
         .stdin(Stdio::piped())
         .stdout(Stdio::piped())
         .spawn()
         .unwrap();
     let mut said = String::new();
-    BufReader::new(server.stdout.take().unwrap())
-        .read_line(&mut said)
-        .unwrap();
+    // Kept open until the server has exited: it reports what it served when it unmounts.
+    let mut output = BufReader::new(server.stdout.take().unwrap());
+    output.read_line(&mut said).unwrap();
     assert_eq!(
         said, "mounted\n",
         "the null file system could not mount (needs /dev/fuse and fusermount3)"
@@ -181,9 +183,14 @@ fn a_run_over_the_null_file_system_measures_its_server() {
             .mountinfo
             .as_deref()
             .unwrap()
-            .contains(" - fuse.fsbench-null fsbench-null ")
+            .contains(" - fuse.fsbench-tsfuse fsbench-tsfuse ")
     );
-    let listed = Path::new("/sys/fs/fuse/connections").is_dir();
+    // The waiting count is sampled where the FUSE control file system is mounted: the directory
+    // of its mount point is there in a container that has not mounted it.
+    let listed = std::fs::read_to_string("/proc/self/mountinfo")
+        .unwrap()
+        .lines()
+        .any(|line| line.contains(" /sys/fs/fuse/connections ") && line.contains(" - fusectl "));
     assert_eq!(record.samples.waiting_mean.is_some(), listed);
 }
 

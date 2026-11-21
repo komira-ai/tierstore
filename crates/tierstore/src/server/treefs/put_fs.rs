@@ -1,13 +1,13 @@
 //! `PutFs`: the put directory on `tsfuse` (`docs/design/fetch-cache-serve.md`, 5.2, section 18
 //! row T-F9), the adapter of [`PutSpace`] onto [`tsfuse::Fs`]. It answers what the handler on
-//! fuser (`fuse_put.rs` and the put arms of `fuse.rs`) answers, byte for byte, so that the switch
-//! of `tierstore fs` from fuser to `tsfuse` (row T-R) changes no answer a job sees; the tests
-//! send the same requests to both and compare the replies.
+//! fuser that served the put directory before it answered, byte for byte, so that the switch of
+//! `tierstore fs` from fuser to `tsfuse` (row T-R) changed no answer a job sees; the tests check
+//! its replies against the golden files of that handler's (`put_fs_golden/`).
 //!
 //! It serves the inodes of `put/` in the numbering of the mount (`ino.rs`: `put/` is index 4 of
 //! the namespace, every inode below it is in the put range) and the lookup of `put` in the
 //! mount's root; [`PutFs::owns`] says which requests those are, for the frontend that serves the
-//! trees beside it (row T-R). A request it does not own is answered `ENOENT`.
+//! trees beside it (`node_fs.rs`). A request it does not own is answered `ENOENT`.
 //!
 //! The opcodes (5.2, "Put directory mount", fixed here from the handler on fuser):
 //! - LOOKUP, GETATTR, OPENDIR, READDIR, READDIRPLUS, RELEASEDIR, STATFS, as on fuser: every
@@ -80,7 +80,7 @@ fn text(name: &[u8]) -> Result<&str, Errno> {
 }
 
 /// The attributes the kernel is sent.
-fn attr(attr: &PutAttr) -> Attr {
+pub(super) fn attr(attr: &PutAttr) -> Attr {
     let (secs, nsecs) = (attr.ms / 1000, (attr.ms % 1000) as u32 * 1_000_000);
     let kind = if attr.dir { S_IFDIR } else { S_IFREG };
     Attr {
@@ -104,13 +104,13 @@ fn attr(attr: &PutAttr) -> Attr {
 }
 
 /// The lookup reply of `put_attr`.
-fn entry(put_attr: &PutAttr) -> EntryOut {
+pub(super) fn entry(put_attr: &PutAttr) -> EntryOut {
     EntryOut::new(put_attr.ino, 0, NOW, NOW, attr(put_attr))
 }
 
 /// The lookup reply of a name that is not there: an inode number of 0, which the kernel takes as
 /// `ENOENT` and keeps for no time.
-fn absent() -> EntryOut {
+pub(super) fn absent() -> EntryOut {
     let mut out = entry(&PutAttr {
         ino: 0,
         dir: false,

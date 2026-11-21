@@ -32,7 +32,6 @@ server = [
     "dep:crc",
     "dep:crc32c",
     "dep:crc32fast",
-    "dep:fuser",
     "dep:tierstore-tree",
     "dep:tsfuse",
     "dep:hmac",
@@ -145,16 +144,16 @@ x509-parser = { workspace = true, optional = true }
 # is the subscriber the binary installs (`server`).
 tracing = { workspace = true, optional = true }
 
-# The FUSE protocol of `tierstore fs` (`server`, Linux): the mount, the requests of the kernel and
-# their replies. The macOS build has no FUSE frontend.
+# The Linux-only dependencies of `server`. The macOS build has no FUSE frontend.
 [target.'cfg(target_os = "linux")'.dependencies]
-fuser = { workspace = true, optional = true }
-# A tree read by path from its mapped list and the packs of the mount protocol: what the tree
-# mount on `tsfuse` serves (`server`, Linux; section 18 of docs/design/fetch-cache-serve.md, rows
-# T-F8 and T-R).
+# A tree read by path from its mapped list and the packs of the mount protocol: what the mount of
+# one tree on `tsfuse` serves (`server`, Linux; section 18 of docs/design/fetch-cache-serve.md,
+# row T-F8).
 tierstore-tree = { workspace = true, optional = true }
-# The FUSE library of this repository: the tree mount and the put directory on it (`server`, Linux),
-# which replace fuser's (section 18 of docs/design/fetch-cache-serve.md, rows T-F8, T-F9 and T-R).
+# The FUSE protocol of `tierstore fs` (`server`, Linux): the FUSE library of this repository, with
+# the mount, the requests of the kernel and their replies, and the takeover of a connection. It
+# serves the node's mount and the put directory on it, and the mount of one tree (section 18 of
+# docs/design/fetch-cache-serve.md, rows T-F8, T-F9 and T-R).
 tsfuse = { workspace = true, optional = true }
 
 [target.'cfg(target_os = "linux")'.dev-dependencies]

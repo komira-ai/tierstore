@@ -1,12 +1,11 @@
-//! The tree of a file list, as the null file systems serve it ([`crate::nullfs`] on `fuser`,
-//! [`crate::tsnull`] on `tsfuse`): inodes, lookups, directory listings and the span of a read.
+//! The tree of a file list, as the null file system serves it ([`crate::tsnull`] on `tsfuse`):
+//! inodes, lookups, directory listings and the span of a read.
 //!
 //! The inode of the root is 1 and every other inode is its node's index in the tree plus 1.
 //! Each file also has a place in a *data file*, the file [`crate::tsnull`] reads its replies
 //! from: the files of the list one after another in list order, each starting on a 4 KiB
 //! boundary (as the files of a pack sit in one file of the node cache), so the data file is
-//! [`Tree::data_len`] bytes long. [`crate::nullfs`] answers from zeros in memory and does not
-//! use the places.
+//! [`Tree::data_len`] bytes long.
 
 use std::collections::BTreeMap;
 

@@ -113,7 +113,7 @@ fn every_refusal_names_its_key() {
         (fs("fetch_timeout = \"0ms\"\n"), "fs.fetch_timeout"),
         (fs("fetch_timeout = \"2h\"\n"), "fs.fetch_timeout"),
         (fs("threads = 0\n"), "fs.threads"),
-        (fs("threads = 1025\n"), "fs.threads"),
+        (fs("threads = 253\n"), "fs.threads"),
         (
             "[fs]\nowner = \"1:2\"\nfill_socket = \"/f\"\ncache_path = \"/c\"\n".to_owned(),
             "fs.client_group",
@@ -210,4 +210,14 @@ fn a_file_is_read_from_its_path() {
     assert_eq!(load(&path).unwrap().client_group, 4242);
     let missing = load(&dir.path().join("none.toml")).unwrap_err().to_string();
     assert!(missing.contains("none.toml"), "{missing}");
+}
+
+/// Asserts that `fs.threads` takes the most readers a `tsfuse` session holds, and that the bound
+/// is that library's: each thread reads its own copy of the connection's descriptor.
+#[test]
+fn the_most_threads_are_the_descriptors_a_session_holds() {
+    let got = from_text(&fs("threads = 252\n"), GROUPS).unwrap();
+    assert_eq!(got.threads, 252);
+    #[cfg(target_os = "linux")]
+    assert_eq!(super::MOST_THREADS as usize, tsfuse::MAX_DEVICES);
 }

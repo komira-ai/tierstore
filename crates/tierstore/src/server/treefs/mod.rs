@@ -15,10 +15,12 @@
 //!   attachments made again, the control socket), and the signals that end the process. It has no
 //!   mount in it, so that the FUSE frontend and one without FUSE call it alike. `steps` says how
 //!   long each step of a start took.
-//! - `fuse` and `run` (Linux): the FUSE frontend and the process around it; `put_fs` (Linux): the
-//!   put directory on `tsfuse`, which answers as the put directory's part of `fuse` does.
-//! - `tree_fs` (Linux): a tree mount on `tsfuse` over `tierstore-tree` (the read path of
-//!   `docs/design/fetch-cache-serve.md`), which the mounts switch to in row T-R of its section 18.
+//! - `node_fs` and `run` (Linux): the FUSE frontend on `tsfuse` and the process around it;
+//!   `put_fs` (Linux): the put directory on `tsfuse`, to which `node_fs` passes the requests of
+//!   `put/`.
+//! - `tree_fs` (Linux): a mount of one tree on `tsfuse` over `tierstore-tree` (the read path of
+//!   `docs/design/fetch-cache-serve.md`), which a mount process serves once it attaches to the
+//!   node's shared cache (section 23 of that design).
 //! - [`nfs`] (macOS serves it; built and tested everywhere): the NFSv3 frontend, over loopback,
 //!   and the mount around it.
 //! - `launch`, `serving`, `sd`, `init_record`, `handle`, `recover` and `handover` (Linux): crash
@@ -61,38 +63,29 @@ mod ino;
 mod put;
 mod table;
 mod tree;
-// The tree mount on `tsfuse`: built and tested here; a mount process serves it once the tree
-// mounts switch from fuser to `tsfuse` (row T-R of docs/design/fetch-cache-serve.md).
+// The mount of one tree on `tsfuse`: built and tested here; a mount process serves it once it
+// attaches to the node's shared cache (section 23 of docs/design/fetch-cache-serve.md).
 #[cfg(target_os = "linux")]
 #[cfg_attr(
     not(test),
     expect(
         dead_code,
-        reason = "served once the tree mounts switch from fuser to tsfuse (row T-R of the design)"
+        reason = "served once a mount process attaches to the node's shared cache (section 23 of the design)"
     )
 )]
 mod tree_fs;
 
-#[cfg(target_os = "linux")]
-mod fuse;
-#[cfg(target_os = "linux")]
-mod fuse_put;
 #[cfg(target_os = "linux")]
 mod handover;
 #[cfg(target_os = "linux")]
 mod init_record;
 #[cfg(target_os = "linux")]
 mod launch;
-// The put directory on `tsfuse` (section 18 of `docs/design/fetch-cache-serve.md`, row T-F9),
-// tested against the handler on fuser; `tierstore fs` serves it once it switches to `tsfuse`.
 #[cfg(target_os = "linux")]
-#[cfg_attr(
-    not(test),
-    expect(
-        dead_code,
-        reason = "served once tierstore fs switches from fuser to tsfuse (row T-R of the design)"
-    )
-)]
+mod node_fs;
+// The put directory on `tsfuse` (section 18 of `docs/design/fetch-cache-serve.md`, row T-F9),
+// checked against what the handler on fuser answered.
+#[cfg(target_os = "linux")]
 mod put_fs;
 #[cfg(target_os = "linux")]
 mod recover;

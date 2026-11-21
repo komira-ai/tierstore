@@ -2,8 +2,6 @@
 //!
 //! ```text
 //! fsbench list --tree <dir> --out <list>
-//! fsbench null-fs --list <list> --mountpoint <dir> [--entry-timeout-ms N] [--attr-timeout-ms N]
-//!                 [--open explicit|none] [--threads N] [--allow-other]
 //! fsbench tsfuse-null-fs --list <list> --mountpoint <dir> --data <file> [--entry-timeout-ms N]
 //!                 [--attr-timeout-ms N] [--open explicit|none] [--readers N]
 //!                 [--reply writev|splice] [--splice-min BYTES] [--move-pages] [--allow-other]
@@ -38,8 +36,7 @@ use clap::{Parser, Subcommand};
 
 use crate::Error;
 use crate::host::Host;
-use crate::nullfs::{OpenMode, Options};
-use crate::tsnull::Reply;
+use crate::tsnull::{OpenMode, Reply};
 
 /// The FUSE benchmark of tierstore fs.
 #[derive(Debug, Parser)]
@@ -59,30 +56,6 @@ enum Command {
         /// Where the list is written.
         #[arg(long)]
         out: PathBuf,
-    },
-    /// Serve the files of a list, all zeros, until standard input closes (the null file system).
-    NullFs {
-        /// The list.
-        #[arg(long)]
-        list: PathBuf,
-        /// Where to mount.
-        #[arg(long)]
-        mountpoint: PathBuf,
-        /// How long the kernel may keep an entry, in milliseconds.
-        #[arg(long, default_value_t = 0)]
-        entry_timeout_ms: u64,
-        /// How long the kernel may keep attributes, in milliseconds.
-        #[arg(long, default_value_t = 0)]
-        attr_timeout_ms: u64,
-        /// How `OPEN` is answered.
-        #[arg(long, value_enum, default_value_t = OpenMode::Explicit)]
-        open: OpenMode,
-        /// The threads that read requests (`tierstore fs`'s default is 16).
-        #[arg(long, default_value_t = 16)]
-        threads: usize,
-        /// Let other users use the mount (`allow_other`).
-        #[arg(long)]
-        allow_other: bool,
     },
     /// Serve the files of a list from a data file on tsfuse, until standard input closes (the
     /// null file system of the redesign's variants).
@@ -389,30 +362,6 @@ fn dispatch(
                 list.sha256
             )
             .map_err(written)
-        }
-        Command::NullFs {
-            list,
-            mountpoint,
-            entry_timeout_ms,
-            attr_timeout_ms,
-            open,
-            threads,
-            allow_other,
-        } => {
-            let options = Options {
-                entry_timeout: Duration::from_millis(entry_timeout_ms),
-                attr_timeout: Duration::from_millis(attr_timeout_ms),
-                open,
-                threads,
-                allow_other,
-            };
-            crate::nullfs::serve(
-                &crate::list::read(&list)?,
-                &mountpoint,
-                options,
-                stdin,
-                stdout,
-            )
         }
         Command::TsfuseNullFs(args) => {
             let options = crate::tsnull::Options {

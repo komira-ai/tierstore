@@ -192,6 +192,10 @@ On a Linux node with `/dev/fuse`, as a user with `sudo`, from a build of this re
    (`caches-on`: `--entry-timeout-ms 32000000000 --attr-timeout-ms 32000000000`; `no-open`:
    the same and `--open none`.)
 
+   The `null-fs` verb was removed from `fsbench` together with the `fuser` dependency; these
+   commands run only with an `fsbench` built at the commit this report was made at, which still
+   has it.
+
 6. `fsbench report --results results.jsonl` prints the tables above.
 
 ## What this does not measure yet

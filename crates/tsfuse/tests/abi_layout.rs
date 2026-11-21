@@ -467,6 +467,7 @@ fn every_flag_and_constant_is_the_headers() {
         (InitFlags::CACHE_SYMLINKS, "FUSE_CACHE_SYMLINKS"),
         (InitFlags::NO_OPENDIR_SUPPORT, "FUSE_NO_OPENDIR_SUPPORT"),
         (InitFlags::INIT_EXT, "FUSE_INIT_EXT"),
+        (InitFlags::PASSTHROUGH, "FUSE_PASSTHROUGH"),
         (InitFlags::HAS_RESEND, "FUSE_HAS_RESEND"),
         (InitFlags::OVER_IO_URING, "FUSE_OVER_IO_URING"),
     ];
@@ -476,6 +477,8 @@ fn every_flag_and_constant_is_the_headers() {
     let bits = [
         (u64::from(abi::fopen::KEEP_CACHE), "FOPEN_KEEP_CACHE"),
         (u64::from(abi::fopen::DIRECT_IO), "FOPEN_DIRECT_IO"),
+        (u64::from(abi::fopen::CACHE_DIR), "FOPEN_CACHE_DIR"),
+        (u64::from(abi::fopen::PASSTHROUGH), "FOPEN_PASSTHROUGH"),
         (u64::from(abi::fattr::MODE), "FATTR_MODE"),
         (u64::from(abi::fattr::UID), "FATTR_UID"),
         (u64::from(abi::fattr::GID), "FATTR_GID"),

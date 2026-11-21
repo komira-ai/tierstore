@@ -33,8 +33,10 @@ the median of its runs and their least and most, the first run (the warm-up) lef
 
 ```text
 fsbench list --tree <dir> --out <list>          # the fixed input: the regular files of a tree
-fsbench null-fs --list <list> --mountpoint <dir> [--entry-timeout-ms N] [--attr-timeout-ms N]
-                [--open explicit|none] [--threads N] [--allow-other]
+fsbench tsfuse-null-fs --list <list> --mountpoint <dir> --data <file> [--entry-timeout-ms N]
+                [--attr-timeout-ms N] [--open explicit|none] [--readers N]
+                [--reply writev|splice] [--splice-min BYTES] [--move-pages] [--allow-other]
+                [--transport dev|uring] [--uring-depth N] [--uring-memory-mib N]
 fsbench run --list <list> --tree <dir> --variant <label> --regime <label> --server-pid <pid>
             --out <results> [--runs 6] [--readers 256] [--burners 176] [--secs 60]
             [--max-cycles 0] [--read-bytes 4096] [--throughput-mib 256] [--throughput-readers 16]
@@ -83,14 +85,16 @@ run on. Two probe threads, on `--storm-cpu` and on `--other-cpu`, `stat` a file 
 held, the READs parked and the requests waiting on the connection are sampled. One JSON record
 per run is appended to `--out` (`src/stormrec.rs`); `storm-report` prints its tables.
 
-`null-fs` serves the files of a list as zeros on the FUSE library of `tierstore fs` with its
-transport settings (same `fuser` commit, worker threads on one descriptor, `max_background`
-1024, `FUSE_PARALLEL_DIROPS`), so the transport is measured apart from what `tierstore fs` does
-per request. It has no passthrough, `READDIRPLUS` or negative entries. It mounts when it starts,
-prints `mounted`, and unmounts when its standard input closes.
+`tsfuse-null-fs` serves the files of a list on `tsfuse`, the FUSE library of `tierstore fs`, with
+the settings of a tree mount (`max_background` 1024, the INIT flags of the design), reading their
+bytes from the `--data` file (made, as a hole, when it is not there), so the transport is
+measured apart from what `tierstore fs` does per request. It has no passthrough or negative
+entries. It mounts when it starts, prints `mounted`, and unmounts when its standard input
+closes. The `fuser` null file system the first measurements used (`fsbench null-fs`) was removed
+with `fuser`; it runs only from a commit before that removal, as the measurement documents say.
 
 The tests: `cargo test -p fsbench`. The tests that mount FUSE or read the host's `/proc` and
-`/sys` are the integration targets `nullfs_integration`, `harness_integration`,
+`/sys` are the integration targets `harness_integration`,
 `tsnull_integration` and `storm_integration`; they need `/dev/fuse` and `fusermount3`. Their
 io_uring cases serve on io_uring where `fuse.enable_uring` is on, and check the fallback where it
 is off. `baseline_doc`, `v3_v4_doc`, `v5_doc` and `results_doc` hold the measurement documents to the

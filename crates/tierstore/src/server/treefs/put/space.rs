@@ -1,6 +1,6 @@
 //! The put directory as a namespace of inode numbers, `<mountpoint>/put/`: what a frontend answers
 //! for each request below it, from the staged-file store, with no protocol in it. The FUSE frontend
-//! (`fuse_put.rs`) decodes the kernel's requests into these calls; a test makes them directly.
+//! (`put_fs.rs`) decodes the kernel's requests into these calls; a test makes them directly.
 //!
 //! **Directories.** No directory is made or kept: a path is one if it leads to an allowed prefix
 //! (`put/`, `put/cas` for the prefix `cas/b/`: mode 0711, owned by root, never listed) or is at or

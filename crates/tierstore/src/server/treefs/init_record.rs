@@ -20,7 +20,11 @@
 //! ```
 //!
 //! (`max_stack_depth` is 0 on a connection this release set up, which never asks for passthrough;
-//! a connection an earlier release answered with passthrough has 1.)
+//! a connection an earlier release answered with passthrough has 1.) `kernel_abi` is the protocol
+//! version the connection speaks; `capabilities` are the flags the kernel offered and `flags`
+//! those the reply granted, without `FUSE_INIT_EXT` (which only says that the reply carries the
+//! high half, and which a reader adds back where the kernel offered it). The bits are the kernel's,
+//! so a release on fuser and this one on `tsfuse` read each other's records.
 //!
 //! The first line names the format and its version. The format changes only by adding (AGENTS.md
 //! B8): a reader takes the keys it knows, ignores the others and ignores the version, so a record
@@ -33,7 +37,7 @@ use std::io;
 use std::path::Path;
 use std::time::Duration;
 
-use fuser::{InitFlags, InitOutcome, Version};
+use tsfuse::abi::{InitFlags, InitOut, KERNEL_MINOR_VERSION, KERNEL_VERSION, Negotiated};
 
 /// The name of the file in the runtime directory.
 pub(super) const FILE: &str = "init";
@@ -66,12 +70,76 @@ pub(in crate::server) enum RecordError {
     Malformed(&'static str),
 }
 
+/// What the handshake set up, as the record keeps it.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub(super) struct Outcome {
+    /// The protocol version the connection speaks: 7 and the minor the reply agreed.
+    pub kernel_abi: (u32, u32),
+    /// The flags the kernel offered.
+    pub capabilities: InitFlags,
+    /// The flags the reply granted, without `FUSE_INIT_EXT`.
+    pub flags: InitFlags,
+    /// The reply's `max_readahead`.
+    pub max_readahead: u32,
+    /// The reply's `max_write`.
+    pub max_write: u32,
+    /// The reply's `time_gran`.
+    pub time_gran: Duration,
+    /// The reply's `max_stack_depth`: 0 but on a connection set up with passthrough.
+    pub max_stack_depth: u32,
+}
+
+impl Outcome {
+    /// The outcome of the handshake whose terms are `negotiated`.
+    pub(super) fn of(negotiated: &Negotiated) -> Self {
+        let reply = &negotiated.reply;
+        Self {
+            kernel_abi: (reply.major, reply.minor),
+            capabilities: negotiated.offered,
+            flags: negotiated.granted.difference(InitFlags::INIT_EXT),
+            max_readahead: reply.max_readahead,
+            max_write: reply.max_write,
+            time_gran: Duration::from_nanos(u64::from(reply.time_gran)),
+            max_stack_depth: reply.max_stack_depth,
+        }
+    }
+
+    /// The terms a session that takes the connection over serves it with: what the reply of the
+    /// handshake said, rebuilt from the record. The minor is at most this library's, and
+    /// `FUSE_INIT_EXT` is granted where the kernel offered it, as every reply of either library
+    /// granted it. What the record does not keep (`max_background`, `congestion_threshold`,
+    /// `max_pages`) matters to the kernel only at the handshake, and is 0.
+    pub(super) fn negotiated(&self) -> Negotiated {
+        let minor = self.kernel_abi.1.min(KERNEL_MINOR_VERSION);
+        let granted = self
+            .flags
+            .union(self.capabilities.intersection(InitFlags::INIT_EXT));
+        Negotiated {
+            minor,
+            offered: self.capabilities,
+            granted,
+            missing: InitFlags::EMPTY,
+            reply: InitOut {
+                major: KERNEL_VERSION,
+                minor,
+                max_readahead: self.max_readahead,
+                flags: (granted.0 & u64::from(u32::MAX)) as u32,
+                max_write: self.max_write,
+                time_gran: u32::try_from(self.time_gran.as_nanos()).unwrap_or(u32::MAX),
+                flags2: (granted.0 >> 32) as u32,
+                max_stack_depth: self.max_stack_depth,
+                ..InitOut::default()
+            },
+        }
+    }
+}
+
 /// What is recorded: the outcome of the handshake, and how many processes have served the
 /// connection before this one (1 for the one that mounted).
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub(super) struct Record {
     /// What the handshake set up.
-    pub outcome: InitOutcome,
+    pub outcome: Outcome,
     /// The count of processes that have served the connection, this one included. It is in the
     /// file handles this process hands out, so that a release or a read of a handle an earlier
     /// process gave out is told from one of this process's.
@@ -83,7 +151,7 @@ pub(super) struct Record {
 
 impl Record {
     /// The record of a connection a process has just set up.
-    pub(super) fn first(outcome: InitOutcome, mount_id: String) -> Self {
+    pub(super) fn first(outcome: Outcome, mount_id: String) -> Self {
         Self {
             outcome,
             generation: 1,
@@ -119,8 +187,8 @@ impl Record {
             self.mount_id,
             outcome.kernel_abi.0,
             outcome.kernel_abi.1,
-            outcome.capabilities.bits(),
-            outcome.flags.bits(),
+            outcome.capabilities.0,
+            outcome.flags.0,
             outcome.max_readahead,
             outcome.max_write,
             outcome.time_gran.as_nanos(),
@@ -159,14 +227,14 @@ impl Record {
                 .strip_prefix("0x")
                 .ok_or(RecordError::Malformed(key))?;
             let bits = u64::from_str_radix(digits, 16).map_err(|_| RecordError::Malformed(key))?;
-            Ok(InitFlags::from_bits_retain(bits))
+            Ok(InitFlags(bits))
         };
         let abi = find("kernel_abi")?
             .split_once('.')
-            .and_then(|(major, minor)| Some(Version(major.parse().ok()?, minor.parse().ok()?)))
+            .and_then(|(major, minor)| Some((major.parse().ok()?, minor.parse().ok()?)))
             .ok_or(RecordError::Malformed("kernel_abi"))?;
         Ok(Self {
-            outcome: InitOutcome {
+            outcome: Outcome {
                 kernel_abi: abi,
                 capabilities: bits("capabilities")?,
                 flags: bits("flags")?,

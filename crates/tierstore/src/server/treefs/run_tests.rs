@@ -227,12 +227,10 @@ fn records_the_handshake() {
     assert_eq!(record.outcome, running.outcome());
     // Where the kernel offers resend the process asks for it, so that a takeover can use it.
     let offered = record.outcome.capabilities;
+    let resend = tsfuse::abi::InitFlags::HAS_RESEND;
     assert_eq!(
-        record
-            .outcome
-            .flags
-            .contains(fuser::InitFlags::FUSE_HAS_RESEND),
-        offered.contains(fuser::InitFlags::FUSE_HAS_RESEND)
+        record.outcome.flags.contains(resend),
+        offered.contains(resend)
     );
     assert!(record.outcome.max_write > 0);
     running.stop().unwrap();

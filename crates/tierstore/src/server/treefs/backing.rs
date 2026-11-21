@@ -32,6 +32,12 @@ pub(super) const FILE: &str = "backing";
 /// The frontend's handle on a backing id: what an open of the blob is answered with.
 pub(super) type Guard = Arc<dyn Any + Send + Sync>;
 
+/// A backing id an earlier release registered on the connection, as the guard the FUSE frontend
+/// answers an open with holds it: the id alone, since the kernel closes it when the connection
+/// ends and this process never does.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub(super) struct BackingId(pub u32);
+
 /// A line of the file: a blob with a live id in an earlier process.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub(super) struct Saved {

@@ -291,8 +291,10 @@ pub(crate) fn route(
         }
         Some(Opcode::Interrupt) => {
             // An INTERRUPT with a short body has no target to cancel, and the kernel expects
-            // no reply to it.
-            if let Ok(Operation::Interrupt(arg)) = Operation::parse(&req) {
+            // no reply to it; a session that ignores INTERRUPTs answers none.
+            if let (Ok(Operation::Interrupt(arg)), false) =
+                (Operation::parse(&req), tokens.interrupts_ignored())
+            {
                 let _ = tokens.interrupt_routed(arg.unique, unique, every);
             }
             None

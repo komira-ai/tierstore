@@ -15,11 +15,10 @@ use tsfuse::abi::{AttrOut, EntryOut, GetattrIn, OpenIn, OpenOut, ReadIn, Release
 use tsfuse::{DevFd, Fs as _, Handled, ReplyDevice, Request, Tokens};
 
 use super::{
-    Options, Reply, Served, Transport, TsNullFs, URING_MAX_PAGES, mount_options, open_data,
-    reply_config, start, transport_of,
+    OpenMode, Options, Reply, Served, Transport, TsNullFs, URING_MAX_PAGES, mount_options,
+    open_data, reply_config, start, transport_of,
 };
 use crate::list::{Entry, FileList};
-use crate::nullfs::OpenMode;
 use crate::tree::Tree;
 
 const LOOKUP: u32 = 1;
