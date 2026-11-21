@@ -40,6 +40,8 @@ use std::path::PathBuf;
 use serde::Deserialize;
 use serde_json::json;
 
+use super::args::Step;
+use super::params::Params;
 use super::ports::Instance;
 
 /// The schema this hook writes and reads.
@@ -203,6 +205,45 @@ impl Record {
     #[must_use]
     pub fn committed(&self) -> bool {
         self.markers.contains(&Marker::Stopping)
+    }
+
+    /// Whether the record is of the update `params` name: its `to` and `version` are theirs.
+    pub(super) fn is_of(&self, params: &Params) -> bool {
+        self.to.as_deref() == Some(params.staged_release.as_path())
+            && self.version.as_deref() == Some(params.target_version.as_str())
+    }
+
+    /// Whether the record, as a step of the update `params` name finds or leaves it, is that
+    /// update's commit. A record at rest is the last update's: a `prepare` starts another one,
+    /// which nothing has committed yet, and a `rollback` of an update that was never recorded
+    /// (its `prepare` failed) finds nothing of it committed.
+    pub(super) fn commits(&self, step: Step, params: &Params) -> bool {
+        self.committed()
+            && (self.updating
+                || match step {
+                    Step::Prepare => false,
+                    Step::Rollback => self.is_of(params),
+                    _ => true,
+                })
+    }
+
+    /// The success of a `rollback` whose update was never recorded: a `prepare` that failed
+    /// records nothing, and the record is at rest on the last update, which the params do not
+    /// name. `None` when the record is of an update in flight, of the one `params` name, or of
+    /// none (a record at rest with no update on it says so itself).
+    pub(super) fn nothing_to_roll_back(&self, params: &Params) -> Option<String> {
+        let last = self
+            .to
+            .as_ref()
+            .filter(|_| !self.updating && !self.is_of(params))?;
+        Some(format!(
+            "nothing to roll back: the update to {} {} was never recorded (its prepare failed \
+             or never ran); the record is at rest on the last update ({} {})",
+            params.staged_release.display(),
+            params.target_version,
+            last.display(),
+            self.version.as_deref().unwrap_or("of no version"),
+        ))
     }
 
     /// Whether `marker` is set.

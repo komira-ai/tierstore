@@ -138,7 +138,7 @@ fn attempt(
         Step::Restore => restore(&c),
     }
     .unwrap_or_else(std::convert::identity);
-    let mut committed = record.committed();
+    let mut committed = record.commits(step, params);
     // Not committed after the write of `stopping` began means the write failed, and so did the
     // step: a write that succeeds commits the record.
     if c.commit_written.get() && !committed {
@@ -256,6 +256,9 @@ fn verify(c: &Ctx<'_, '_>, params: &Params, record: &mut Record) -> Result<Done,
 }
 
 fn rollback(c: &Ctx<'_, '_>, params: &Params, record: &mut Record) -> Result<Done, Done> {
+    if let Some(detail) = record.nothing_to_roll_back(params) {
+        return Ok(Done::ok(detail));
+    }
     if record.committed() {
         return Err(Done::fail(
             Reason::Committed,

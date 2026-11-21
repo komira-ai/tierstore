@@ -9,7 +9,7 @@ use std::time::Duration;
 
 use tierstore_testkit::dir::TestDir;
 
-use super::super::machine::testing::me;
+use super::super::machine::testing::{OWN_DESCRIPTOR, as_executed, handed, me};
 use super::super::machine::{Call, Output, RunError, Runner};
 use super::super::machine::{DSCL_PROGRAM, SUDO_PROGRAM};
 use super::super::system::{
@@ -27,6 +27,8 @@ const BINARY: &str = "/usr/libexec/tierstore/tierstore";
 #[derive(Default)]
 struct Calls {
     calls: RefCell<Vec<Call>>,
+    /// What each call was handed as its configuration ([`handed`]).
+    handed: RefCell<Vec<Option<Vec<u8>>>>,
 }
 
 impl Calls {
@@ -41,7 +43,8 @@ impl Calls {
 
 impl Runner for Calls {
     fn run(&self, call: &Call) -> Result<Output, RunError> {
-        self.calls.borrow_mut().push(call.clone());
+        self.calls.borrow_mut().push(as_executed(call));
+        self.handed.borrow_mut().push(handed(call));
         let (code, stdout) = match call.args.first().map(String::as_str) {
             _ if call.program == DSCL_PROGRAM => (0, "UniqueID: 398\nPrimaryGroupID: 397\n"),
             Some("show") => (0, "inactive\n"),
@@ -156,7 +159,10 @@ fn params(extra: &str) -> Params {
 }
 
 /// Asserts that `prepare` has the service's own binary check the staged copy of the file, under
-/// the package's tree, and writes the config hook's record, never the release's.
+/// the package's tree, and writes the config hook's record, never the release's. The staged
+/// package is closed to every user but root, so the hook reads the copy and hands its text to the
+/// check (on Linux in a file in memory the child inherits). Catches a check that names the
+/// staged copy by its path, which the service account cannot reach.
 #[test]
 fn prepare_checks_the_staged_file_with_the_serving_binary_and_keeps_its_own_record() {
     let node = node("config-hook-system-prepare");
@@ -165,8 +171,22 @@ fn prepare_checks_the_staged_file_with_the_serving_binary_and_keeps_its_own_reco
     assert_eq!(done.outcome, Outcome::Success, "{done:?}");
     let binary = node.at(BINARY).display().to_string();
     let staged = node.at(&format!("{STAGED}/tree{LINUX_CONFIG_FILE}"));
-    let check = format!("{binary} --config {} --check-config", staged.display());
-    assert!(calls.lines().contains(&check), "{:?}", calls.lines());
+    let checks: Vec<(Call, Option<Vec<u8>>)> = calls
+        .calls
+        .borrow()
+        .iter()
+        .cloned()
+        .zip(calls.handed.borrow().iter().cloned())
+        .filter(|(call, _)| call.args.last().map(String::as_str) == Some("--check-config"))
+        .collect();
+    assert!(!checks.is_empty(), "{:?}", calls.lines());
+    let text = fs::read(&staged).unwrap();
+    for (check, given) in &checks {
+        assert_eq!(check.program, binary);
+        assert_eq!(check.args[0], "--config");
+        assert_ne!(check.args[1], staged.display().to_string());
+        assert_eq!(given.as_deref(), Some(&text[..]), "{check:?}");
+    }
     assert!(
         calls
             .lines()
@@ -283,6 +303,15 @@ fn a_root_mac_hook_checks_as_the_directory_service_account() {
     assert_eq!(check.run_as, None);
     assert_eq!(check.args[..5], ["-n", "-u", "#398", "--", binary.as_str()]);
     assert_eq!(check.args[5], "--config");
+    if cfg!(target_os = "linux") {
+        assert!(
+            check.args[6].starts_with(OWN_DESCRIPTOR),
+            "{:?}",
+            check.args
+        );
+    } else {
+        assert_eq!(check.args[6], "/dev/stdin");
+    }
     assert_eq!(
         check.args.last().map(String::as_str),
         Some("--check-config")

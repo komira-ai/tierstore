@@ -138,7 +138,11 @@ pub(super) fn config_run_on(
     params: &Params,
 ) -> Done {
     let runner = config.runner;
-    let host = host_for(config, &params.service_manager).with_binary(binary.to_path_buf());
+    // The staged package is closed to every user but root: its copy of the configuration goes
+    // to the check on standard input.
+    let host = host_for(config, &params.service_manager)
+        .with_binary(binary.to_path_buf())
+        .with_root_only(params.staged_release.clone());
     let release = Path::new("/");
     let running = Running {
         host: &host,

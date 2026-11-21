@@ -140,13 +140,9 @@ pub(super) fn run_step(step: Step, params: &Params, ports: &SystemdPorts<'_>) ->
     };
     let c = Ctx {
         ports,
-        // The record as it stands says whether the update is committed, at rest included; only a
-        // `prepare` on a record at rest starts a new update, which nothing has committed yet.
-        committed: Cell::new(
-            record
-                .as_ref()
-                .is_some_and(|r| r.committed() && (r.updating || step != Step::Prepare)),
-        ),
+        // The record as it stands says whether the update is committed, at rest included
+        // ([`Record::commits`]).
+        committed: Cell::new(record.as_ref().is_some_and(|r| r.commits(step, params))),
         commit_written: Cell::new(false),
     };
     let mut done = dispatch(&c, step, params, record.as_ref()).unwrap_or_else(identity);
@@ -195,6 +191,9 @@ fn dispatch(
             verify::verify(c, params, record)
         }
         (Step::Rollback, Some(record)) => {
+            if let Some(detail) = record.nothing_to_roll_back(params) {
+                return Ok(Done::ok(detail));
+            }
             of_this_update(record, params)?;
             rollback::rollback(c, params, record)
         }

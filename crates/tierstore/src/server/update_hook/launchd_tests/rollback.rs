@@ -4,7 +4,8 @@
 use std::collections::BTreeSet;
 
 use super::fake::{
-    Fake, LABEL, NEW, NEW_VERSION, OLD, assert_failed, assert_ok, in_flight, params_for, path,
+    CONFIG, Fake, LABEL, NEW, NEW_VERSION, OLD, assert_failed, assert_ok, in_flight, params_for,
+    path,
 };
 use crate::server::update_hook::{LAUNCHD_PLIST, Marker, Reason, Record, Step};
 
@@ -159,4 +160,45 @@ fn a_first_install_can_start_again_after_its_rollback() {
         fake.record().markers,
         BTreeSet::from([Marker::Swapped, Marker::Verified, Marker::Stopping])
     );
+}
+
+/// Asserts that after an update has finished (the record at rest, committed), a `prepare` of the
+/// next update that fails before it records anything (here the configuration file is gone) is
+/// reversible, and that the `rollback` hostkeeper runs next succeeds, says there was nothing to
+/// roll back, is reversible, calls launchd not at all and leaves the record as it was. Catches a
+/// rollback that fails such params as `committed` irreversibly, and a failed `prepare` reported
+/// irreversible, either of which hostkeeper reports as an update failed after its commit.
+#[test]
+fn a_rollback_after_a_prepare_that_failed_has_nothing_to_roll_back() {
+    let fake = Fake::new();
+    fake.advance(&[Prepare, Cutover, Verify, Cleanup]);
+    let at_rest = fake.record();
+    assert_eq!(
+        (at_rest.committed(), at_rest.updating),
+        (true, false),
+        "{at_rest:?}"
+    );
+    let newer = "/var/lib/hostkeeper/packages/tierstore/0.5.0+000000000005";
+    let next = params_for(newer, "0.5.0+000000000005", Some((NEW, NEW_VERSION)));
+    fake.set_config(CONFIG, None);
+    let prepare = fake.run_with(Prepare, &next, LABEL);
+    assert_failed(&prepare, Reason::ConfigMissing);
+    assert!(prepare.report.reversible);
+    let before = fake.launchd_calls().len();
+    let rollback = fake.run_with(Rollback, &next, LABEL);
+    assert_ok(&rollback);
+    assert!(rollback.report.reversible);
+    assert_eq!(
+        rollback.report.detail.as_deref(),
+        Some(
+            format!(
+                "nothing to roll back: the update to {newer} 0.5.0+000000000005 was never \
+                 recorded (its prepare failed or never ran); the record is at rest on the last \
+                 update ({NEW} {NEW_VERSION})"
+            )
+            .as_str()
+        )
+    );
+    assert_eq!(fake.launchd_calls().len(), before);
+    assert_eq!(fake.record(), at_rest);
 }
