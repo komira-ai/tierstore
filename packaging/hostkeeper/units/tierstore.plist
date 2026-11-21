@@ -52,15 +52,16 @@
   <string>Standard</string>
   <key>Umask</key>
   <integer>63</integer>
+  <!-- The same value as tierstore-fs.plist: this process serves the node's cache and the fill socket for the mount, whose jobs keep files of it open as long as they run. -->
   <key>SoftResourceLimits</key>
   <dict>
     <key>NumberOfFiles</key>
-    <integer>65536</integer>
+    <integer>1048576</integer>
   </dict>
   <key>HardResourceLimits</key>
   <dict>
     <key>NumberOfFiles</key>
-    <integer>65536</integer>
+    <integer>1048576</integer>
   </dict>
   <key>StandardOutPath</key>
   <string>/usr/local/tierstore/log/tierstore.out.log</string>
