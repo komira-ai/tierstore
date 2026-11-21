@@ -282,3 +282,44 @@ fn a_mac_cutover_boots_nothing_out_without_an_update_on_record_or_a_record_it_ca
     lin::assert_failed(&node.step(Cutover, &p), Reason::StateInvalid);
     assert!(!node.fake.launchd_calls().contains(&bootout()));
 }
+
+/// The config package after `PKG_NEW`.
+const PKG_NEWER: &str = "/var/lib/hostkeeper/packages/tierstore-config/1.2.0";
+
+/// What a rollback of the update to `PKG_NEWER` says when its prepare recorded nothing and the
+/// record is at rest on the update to `PKG_NEW`.
+fn nothing_after_failed_prepare() -> String {
+    format!(
+        "nothing to roll back: the update to {PKG_NEWER} {v} was never recorded (its prepare \
+         failed or never ran); the record is at rest on the last update ({PKG_NEW} {v})",
+        v = mac::OLD_VERSION
+    )
+}
+
+/// Asserts the sequence a Mac ran in production: a config update finished (the record at rest,
+/// committed), the next package's `prepare` fails before it records anything (here its staged
+/// file is not there), and the `rollback` hostkeeper runs next succeeds, says there was nothing to
+/// roll back, is reversible (before the commit), calls launchd not at all and leaves the record as
+/// it was; for a next package with a previous one and for one without. Catches the rollback that
+/// failed `committed` ("cleanup has begun: nothing can be undone") and irreversibly, which
+/// hostkeeper reported as a config update failed after its commit.
+#[test]
+fn a_mac_rollback_after_the_next_packages_prepare_failed_has_nothing_to_roll_back() {
+    for previous in [Some((PKG_NEW, "1.1.0")), None] {
+        let node = Mac::new();
+        node.go(&mac_update(), &[Prepare, Cutover, Verify, Cleanup]);
+        let at_rest = node.fake.record();
+        assert!(at_rest.committed() && !at_rest.updating, "{at_rest:?}");
+        let next = mac::params_for(PKG_NEWER, "1.2.0", previous);
+        let prepare = node.step(Prepare, &next);
+        lin::assert_failed(&prepare, Reason::ConfigMissing);
+        assert!(prepare.report.reversible);
+        let before = node.fake.launchd_calls().len();
+        let rollback = node.step(Rollback, &next);
+        lin::assert_ok(&rollback);
+        assert!(rollback.report.reversible, "{previous:?}");
+        assert_eq!(lin::detail(&rollback), nothing_after_failed_prepare());
+        assert_eq!(node.fake.launchd_calls().len(), before);
+        assert_eq!(node.fake.record(), at_rest);
+    }
+}

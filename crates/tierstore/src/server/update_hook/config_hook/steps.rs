@@ -222,7 +222,7 @@ fn systemd_attempt(
             checked(ports.host, common.release, "installed", &config)?;
             Ok(arm(step, &plain))
         }
-        Step::Rollback if params.previous.is_none() => systemd_first_back(ports),
+        Step::Rollback if params.previous.is_none() => systemd_first_back(ports, &plain),
         Step::Rollback => {
             guard.reload()?;
             Ok(arm(step, &plain))
@@ -239,7 +239,7 @@ fn systemd_attempt(
 
 /// The rollback of a node's first config package on systemd: the instance that runs serves,
 /// the other one's marker goes, and the record says nothing is in flight.
-fn systemd_first_back(ports: &SystemdPorts<'_>) -> Result<Done, Done> {
+fn systemd_first_back(ports: &SystemdPorts<'_>, plain: &Params) -> Result<Done, Done> {
     let _lock = ports.state.lock()?;
     let Some(bytes) = ports.state.load()? else {
         return Ok(Done::ok(
@@ -248,6 +248,11 @@ fn systemd_first_back(ports: &SystemdPorts<'_>) -> Result<Done, Done> {
     };
     let record = Record::decode(&bytes)?;
     record.check()?;
+    // A record at rest on another config package: this package's update was never recorded (its
+    // prepare failed), and there is nothing to roll back.
+    if let Some(detail) = record.nothing_to_roll_back(plain) {
+        return Ok(Done::ok(detail));
+    }
     if record.committed() {
         return Err(Done::fail(
             Reason::Committed,
@@ -343,7 +348,7 @@ fn launchd_attempt(
             checked(ports.host, common.release, "installed", &config)?;
             Ok(arm(step, &plain))
         }
-        Step::Rollback if params.previous.is_none() => launchd_first_back(ports),
+        Step::Rollback if params.previous.is_none() => launchd_first_back(ports, &plain),
         Step::Cutover => {
             stop_for_new_file(label, ports)?;
             Ok(arm(step, &plain))
@@ -371,7 +376,7 @@ fn stop_for_new_file(label: &str, ports: &LaunchdPorts<'_>) -> Result<(), Done> 
 
 /// The rollback of a Mac's first config package: the job runs on what it read, and the record
 /// says nothing is in flight.
-fn launchd_first_back(ports: &LaunchdPorts<'_>) -> Result<Done, Done> {
+fn launchd_first_back(ports: &LaunchdPorts<'_>, plain: &Params) -> Result<Done, Done> {
     let _lock = ports.state.lock()?;
     let Some(bytes) = ports.state.load()? else {
         return Ok(Done::ok(
@@ -380,6 +385,11 @@ fn launchd_first_back(ports: &LaunchdPorts<'_>) -> Result<Done, Done> {
     };
     let record = Record::decode(&bytes)?;
     record.check()?;
+    // A record at rest on another config package: this package's update was never recorded (its
+    // prepare failed), and there is nothing to roll back.
+    if let Some(detail) = record.nothing_to_roll_back(plain) {
+        return Ok(Done::ok(detail));
+    }
     if record.committed() {
         return Err(Done::fail(
             Reason::Committed,

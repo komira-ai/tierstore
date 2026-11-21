@@ -3,8 +3,8 @@
 use std::collections::BTreeSet;
 
 use super::super::super::{Instance, Marker, Reason, Record, Step, UnitState};
-use super::{Linux, committed_record, first, in_flight, lin, update};
-use Step::{Cutover, Prepare, Rollback, Uninstall};
+use super::{Linux, PKG_NEW, committed_record, first, in_flight, lin, update};
+use Step::{Cleanup, Cutover, Prepare, Rollback, Uninstall, Verify};
 
 /// Asserts that the rollback of a config package that has a previous one reloads the guard and
 /// hands back to the instance that served, which is then alone.
@@ -200,4 +200,36 @@ fn restore_is_refused_as_not_a_step() {
     lin::assert_failed(&done, Reason::BadArgs);
     assert!(lin::detail(&done).contains("restore is not a step of config-hook"));
     assert_eq!(node.fake.snapshot(), before);
+}
+
+/// Asserts that on systemd too, after a config update finished, the `rollback` that follows a
+/// `prepare` of the next package that failed before it recorded anything (its staged file is not
+/// there) succeeds, says there was nothing to roll back, is reversible, starts or stops nothing
+/// and leaves the record as it was; for a next package with a previous one and for one without.
+/// Catches a rollback that fails such an update as `bad_params` or `committed`.
+#[test]
+fn a_rollback_after_the_next_packages_prepare_failed_has_nothing_to_roll_back() {
+    let newer = "/var/lib/hostkeeper/packages/tierstore-config/1.2.0";
+    for previous in [Some(PKG_NEW), None] {
+        let node = Linux::alike();
+        node.go(&update(), &[Prepare, Cutover, Verify, Cleanup]);
+        let at_rest = node.fake.record();
+        assert!(at_rest.committed() && !at_rest.updating, "{at_rest:?}");
+        let next = lin::params(newer, previous);
+        let prepare = node.step(Prepare, &next);
+        lin::assert_failed(&prepare, Reason::ConfigMissing);
+        assert!(prepare.report.reversible);
+        let before = node.fake.actions().len();
+        let rollback = node.step(Rollback, &next);
+        lin::assert_ok(&rollback);
+        assert!(rollback.report.reversible, "{previous:?}");
+        assert!(
+            lin::detail(&rollback)
+                .starts_with(&format!("nothing to roll back: the update to {newer} ")),
+            "{}",
+            lin::detail(&rollback)
+        );
+        assert_eq!(node.fake.actions().len(), before);
+        assert_eq!(node.fake.record(), at_rest);
+    }
 }
