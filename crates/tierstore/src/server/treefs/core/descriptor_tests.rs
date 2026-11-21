@@ -7,6 +7,7 @@ use std::process::Command;
 
 use super::*;
 use crate::server::treefs::attach::Failure;
+use crate::server::treefs::fill_client::FillClient;
 use crate::server::treefs::ino;
 use crate::server::treefs::testing::{Logged, Rig, logged, open_cached, sample};
 
@@ -187,6 +188,19 @@ fn running_out_of_descriptors_fails_the_open() {
     };
     assert_eq!(refused.raw_os_error(), Some(24), "{refused}");
     let failed = open_cached(core, target, false);
+    // A client of the fill socket with no connection kept cannot make one either: it says why at
+    // once, and pauses for nothing.
+    let paused = std::sync::Arc::new(std::sync::atomic::AtomicUsize::new(0));
+    let pauses = std::sync::Arc::clone(&paused);
+    let client = FillClient::pausing(
+        rig.dir.path().join("fill.sock"),
+        3,
+        std::time::Duration::from_secs(30),
+        std::sync::Arc::new(move |_| {
+            let _ = pauses.fetch_add(1, std::sync::atomic::Ordering::SeqCst);
+        }),
+    );
+    let unconnected = client.fill_blob(("ab", 1), ("k", 0), None);
     // Descriptors free again: the same open succeeds.
     drop(held);
     setrlimit(Resource::Nofile, was).unwrap();
@@ -194,6 +208,12 @@ fn running_out_of_descriptors_fails_the_open() {
     drop(guard);
     assert_eq!(failed, Err(Errno::Io), "{}", log.text());
     assert_eq!(core.descriptor_failures(), 1);
+    assert_eq!(
+        unconnected,
+        Err("no descriptor: cannot connect to the fill socket: Too many open files (os error 24)"
+            .to_owned())
+    );
+    assert_eq!(paused.load(std::sync::atomic::Ordering::SeqCst), 0);
     assert_eq!(core.read(before, 0, 3000).unwrap(), expected);
     assert!(after.is_ok(), "{after:?}");
     let failures = core.detach(RUN).unwrap();
