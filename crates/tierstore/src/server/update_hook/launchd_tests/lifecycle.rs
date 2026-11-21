@@ -3,17 +3,18 @@
 
 use std::path::Path;
 
-use super::fake::{Fake, LABEL, NEW, OLD, assert_failed, assert_ok, path};
+use super::fake::{Fake, LABEL, NEW, OLD, OLD_VERSION, assert_failed, assert_ok, params_for, path};
 use crate::server::update_hook::{
     Host, Instances, LAUNCHD_PLIST, Launchd, PortError, Reason, Record, Step,
 };
 
 use Step::{Cleanup, Cutover, Prepare, Restore, Uninstall, Verify};
 
-/// Asserts that `uninstall` boots the job out and replaces the record with one at rest, and does
-/// nothing else: the host is asked nothing (the fake's host has no call that changes a file, and
-/// none was made), and the lock is released. The data, cache and configuration of the node are
-/// the host's and are never named. Catches an uninstall that reads or removes a path of the node.
+/// Asserts that `uninstall` boots the job out, removes the copy of the binary the plist runs,
+/// replaces the record with one at rest, and does nothing else: the host is asked nothing more,
+/// and the lock is released. The data, cache and configuration of the node are the host's and
+/// are never named. Catches an uninstall that reads or removes another path of the node, or that
+/// leaves the binary behind.
 #[test]
 fn uninstall_boots_the_job_out_and_touches_nothing_else() {
     let fake = Fake::new();
@@ -27,10 +28,12 @@ fn uninstall_boots_the_job_out_and_touches_nothing_else() {
             "state.lock".to_owned(),
             "state.load".to_owned(),
             format!("launchd.bootout {LABEL}"),
+            "host.remove_binary".to_owned(),
             "state.save".to_owned(),
         ]
     );
     assert_eq!(fake.snapshot().job, None);
+    assert_eq!(fake.snapshot().installed, None);
     assert_eq!(fake.record(), Record::idle(None));
     assert!(fake.strays().is_empty());
     assert_eq!(fake.live_locks(), 0);
@@ -46,8 +49,9 @@ fn uninstall_of_a_host_with_nothing_recorded_succeeds() {
 }
 
 /// Asserts that the boot step loads the job when it is not loaded, and with the plist hostkeeper
-/// links; a host with a record or none alike. Catches a restore that leaves a rebooted Mac
-/// without its job.
+/// links, after it has put the binary of the release its params name (the current one) where
+/// the plist runs it; a host with a record or none alike. Catches a restore that leaves a
+/// rebooted Mac without its job, or with a job whose program is not the current release's.
 #[test]
 fn restore_bootstraps_an_unloaded_job() {
     let fake = Fake::new();
@@ -63,10 +67,18 @@ fn restore_bootstraps_an_unloaded_job() {
         ]
     );
     assert_eq!(fake.snapshot().job, path(NEW));
+    assert_eq!(
+        fake.binary_acts()[fake.binary_acts().len() - 2..],
+        [
+            format!("host.install_binary {NEW}"),
+            format!("launchd.bootstrap {LAUNCHD_PLIST}")
+        ]
+    );
     let bare = Fake::first_install();
-    bare.switch_current(OLD);
-    assert_ok(&bare.run(Restore));
+    let current = params_for(OLD, OLD_VERSION, None);
+    assert_ok(&bare.run_with(Restore, &current, LABEL));
     assert_eq!(bare.snapshot().job, path(OLD));
+    assert_eq!(bare.snapshot().installed, path(OLD));
 }
 
 /// Asserts that the boot step does nothing to a job that is loaded: one question to launchd and

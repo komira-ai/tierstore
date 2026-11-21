@@ -1,5 +1,6 @@
 //! `rollback`: puts the previous release back, before the commit. hostkeeper has moved `current`
-//! back to it already, so an instance that starts runs it.
+//! back to it already; the hook puts its binary back where the units run it, so an instance that
+//! starts runs it.
 
 use super::super::params::Params;
 use super::super::ports::Instance;
@@ -29,6 +30,9 @@ pub(super) fn rollback(c: &Ctx<'_, '_>, params: &Params, record: &Record) -> Res
     })?;
     let back = record.live.unwrap_or_else(|| next.other());
     let version = previous.version.as_str();
+    // Before any start: the instance that comes back runs the previous release's binary. The new
+    // instance, if it runs, keeps the copy it started from.
+    c.ports.host.install_binary(&previous.release)?;
     if record.mode == Some(Mode::Handover) {
         hand_back(c, back, next, version)?;
     } else {
@@ -49,13 +53,14 @@ pub(super) fn rollback(c: &Ctx<'_, '_>, params: &Params, record: &Record) -> Res
 /// A first install has no release to go back to: what `cutover` started is stopped (an instance
 /// that is not running is left alone: hostkeeper takes the package, and with it the unit file,
 /// off the host before `rollback`, and `systemctl stop` of a unit that is no longer loaded
-/// fails), and the failure says so. The update stays on record with nothing done, so that a run again says the
+/// fails), the copy of the binary `cutover` put in place is removed, and the failure says so. The update stays on record with nothing done, so that a run again says the
 /// same and a later `prepare` may start afresh.
 fn first_install(c: &Ctx<'_, '_>, record: &Record, next: Instance) -> Result<Done, Done> {
     if c.ports.units.state(next)?.running() {
         c.ports.units.stop(next)?;
     }
     c.ports.markers.clear(next)?;
+    c.ports.host.remove_binary()?;
     if !record.markers.is_empty() {
         let mut bare = record.clone();
         bare.markers.clear();

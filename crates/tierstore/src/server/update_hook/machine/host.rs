@@ -14,10 +14,11 @@ use rustix::process::geteuid;
 
 use super::super::ports::{Host, PortError, PortKind};
 use super::super::{
-    MACOS_SERVICE_ACCOUNT, PACKAGE_RELEASE_BINARY, RELEASE_BINARY, SERVICE_ACCOUNT,
+    MACOS_SERVICE_ACCOUNT, PACKAGE_RELEASE_BINARY, RELEASE_BINARY, SERVICE_ACCOUNT, SERVICE_BINARY,
 };
 use super::Fault;
 use super::runner::{Call, Runner, checked, run};
+use super::service_binary::ServiceBinary;
 
 const KIND: PortKind = PortKind::Host;
 /// The most of a configuration file that is read; a larger one is an error.
@@ -278,12 +279,6 @@ impl<'a> SystemHost<'a> {
     }
 
     /// The binary of `release`, checked, and the directory it is in, checked too: neither a link.
-    ///
-    /// An archive release has it at [`RELEASE_BINARY`], a release of the Debian or RPM package at
-    /// [`PACKAGE_RELEASE_BINARY`]. The archive's path is taken when anything is at it or at its
-    /// `bin` (so a link, a directory or a missing file there is refused, never passed over), the
-    /// package's when nothing is at either and something is at the package's path, and neither is
-    /// an error naming both.
     fn binary_of(&self, release: &Path) -> Result<PathBuf, Fault> {
         if let Some(binary) = &self.binary {
             let binary = under(&self.root, binary);
@@ -295,25 +290,59 @@ impl<'a> SystemHost<'a> {
             self.check(&binary, fs::FileType::is_file, "regular file")?;
             return Ok(binary);
         }
-        let archive = under(&self.root, &release.join(RELEASE_BINARY));
-        let package = under(&self.root, &release.join(PACKAGE_RELEASE_BINARY));
-        let there = |path: &Path| fs::symlink_metadata(path).is_ok();
-        let archive_there = there(&archive) || archive.parent().is_some_and(there);
-        let binary = match (archive_there, there(&package)) {
-            (false, true) => package,
-            (false, false) => {
-                return Err(Fault(format!(
-                    "{} is not there, nor {}",
-                    archive.display(),
-                    package.display()
-                )));
-            }
-            (true, _) => archive,
-        };
+        let (binary, _) = self.layout_of(release)?;
         let bin_dir = binary.parent().unwrap_or(&binary);
         self.check(bin_dir, fs::FileType::is_dir, "directory")?;
         self.check(&binary, fs::FileType::is_file, "regular file")?;
         Ok(binary)
+    }
+
+    /// Where the binary of `release` is, unchecked, and whether it is the archive's.
+    ///
+    /// An archive release has it at [`RELEASE_BINARY`], a release of the Debian or RPM package at
+    /// [`PACKAGE_RELEASE_BINARY`]. The archive's path is taken when anything is at it or at its
+    /// `bin` (so a link, a directory or a missing file there is refused, never passed over), the
+    /// package's when nothing is at either and something is at the package's path, and neither is
+    /// an error naming both.
+    fn layout_of(&self, release: &Path) -> Result<(PathBuf, bool), Fault> {
+        let (archive, archive_there) = self.archive_of(release);
+        let package = under(&self.root, &release.join(PACKAGE_RELEASE_BINARY));
+        match (archive_there, fs::symlink_metadata(&package).is_ok()) {
+            (false, true) => Ok((package, false)),
+            (false, false) => Err(Fault(format!(
+                "{} is not there, nor {}",
+                archive.display(),
+                package.display()
+            ))),
+            (true, _) => Ok((archive, true)),
+        }
+    }
+
+    /// The path of the archive binary of `release` under the root, and whether anything is at it
+    /// or at its `bin`.
+    fn archive_of(&self, release: &Path) -> (PathBuf, bool) {
+        let archive = under(&self.root, &release.join(RELEASE_BINARY));
+        let there = |path: &Path| fs::symlink_metadata(path).is_ok();
+        let archive_there = there(&archive) || archive.parent().is_some_and(there);
+        (archive, archive_there)
+    }
+
+    /// Puts the archive binary of `release` at [`SERVICE_BINARY`] under the root
+    /// ([`ServiceBinary`]). A release that is not the archive's (nothing at `bin/tierstore` or
+    /// `bin`: a release of the Debian or RPM package, or of the macOS installer package) has none
+    /// to put, and its package manager puts its binary in place.
+    fn install_from(&self, release: &Path) -> Result<(), Fault> {
+        let (binary, archive) = self.archive_of(release);
+        if !archive {
+            return Ok(());
+        }
+        self.check(
+            binary.parent().unwrap_or(&binary),
+            fs::FileType::is_dir,
+            "directory",
+        )?;
+        let mut file = self.open_held(&binary)?;
+        ServiceBinary::new(&self.root, self.release_owner).install(&mut file)
     }
 
     /// The user and group ids of the service account: from `etc/passwd` under the root, or from
@@ -373,21 +402,30 @@ impl<'a> SystemHost<'a> {
             .ok_or_else(|| missing("no numeric UniqueID and PrimaryGroupID".to_owned()))
     }
 
-    /// Opens `binary` for a child to execute, and holds what was opened to the checks of
-    /// [`Self::binary_of`]: a regular file (the open follows no link), owned by the release owner
-    /// and not writable by a group or others. The descriptor is at least 3, so that the child's
-    /// standard streams never take its place.
-    #[cfg(target_os = "linux")]
-    fn open_binary(&self, binary: &Path) -> Result<Opened, Fault> {
+    /// Opens `binary` for reading, without following a link, and holds what was opened to the
+    /// checks of [`Self::binary_of`]: a regular file, owned by the release owner and not writable
+    /// by a group or others.
+    fn open_held(&self, binary: &Path) -> Result<fs::File, Fault> {
         use rustix::fs::{Mode, OFlags, open};
-        use std::os::fd::AsRawFd;
         let fault = |error: &dyn std::fmt::Display| Fault(format!("{}: {error}", binary.display()));
         let flags = OFlags::RDONLY | OFlags::CLOEXEC | OFlags::NOFOLLOW;
-        let fd = open(binary, flags, Mode::empty()).map_err(|error| fault(&error))?;
-        let fd = rustix::io::fcntl_dupfd_cloexec(&fd, 3).map_err(|error| fault(&error))?;
-        let file = fs::File::from(fd);
+        let file =
+            fs::File::from(open(binary, flags, Mode::empty()).map_err(|error| fault(&error))?);
         let meta = file.metadata().map_err(|error| fault(&error))?;
         self.held_to(&meta, binary, fs::FileType::is_file, "regular file")?;
+        Ok(file)
+    }
+
+    /// Opens `binary` for a child to execute, and holds what was opened to the checks of
+    /// [`Self::binary_of`] ([`Self::open_held`]: the open follows no link). The descriptor is at
+    /// least 3, so that the child's standard streams never take its place.
+    #[cfg(target_os = "linux")]
+    fn open_binary(&self, binary: &Path) -> Result<Opened, Fault> {
+        use std::os::fd::AsRawFd;
+        let fault = |error: &dyn std::fmt::Display| Fault(format!("{}: {error}", binary.display()));
+        let held = self.open_held(binary)?;
+        let fd = rustix::io::fcntl_dupfd_cloexec(&held, 3).map_err(|error| fault(&error))?;
+        let file = fs::File::from(fd);
         Ok(Opened {
             exec: format!("/proc/self/fd/{}", file.as_raw_fd()),
             _file: file,
@@ -585,6 +623,31 @@ impl Host for SystemHost<'_> {
             KIND,
             format!("{shown}: {how}: {}", output.stderr_text()),
         ))
+    }
+
+    /// Copies the archive binary of `release` (its `bin/tierstore`, checked as for a check of
+    /// the configuration, and read through a descriptor opened without following a link) to
+    /// [`SERVICE_BINARY`] under the root; any other release (of the Debian or RPM package, or of
+    /// the macOS installer package) is left to its package manager. The copy's directories must
+    /// be the release owner's (root on a host).
+    fn install_binary(&self, release: &Path) -> Result<(), PortError> {
+        self.install_from(release).map_err(|fault| {
+            PortError::failed(
+                KIND,
+                format!(
+                    "the binary of {} cannot be put at {SERVICE_BINARY}: {fault}",
+                    release.display()
+                ),
+            )
+        })
+    }
+
+    fn remove_binary(&self) -> Result<(), PortError> {
+        ServiceBinary::new(&self.root, self.release_owner)
+            .remove()
+            .map_err(|fault| {
+                PortError::failed(KIND, format!("{SERVICE_BINARY} cannot be removed: {fault}"))
+            })
     }
 }
 

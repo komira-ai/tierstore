@@ -1,10 +1,14 @@
-//! The fake machine of the systemd arm: both instances, their start markers, the release link
-//! `current`, the node's configuration, the releases' capabilities, the record and the clock, in
-//! one world in memory.
+//! The fake machine of the systemd arm: both instances, their start markers, the copy of a
+//! release's binary the units run, the node's configuration, the releases' capabilities, the
+//! record and the clock, in one world in memory. hostkeeper's link `current` is not in it: the
+//! hook never reads the link, only the releases the params name.
 //!
 //! `start(x)` models systemd and the binary: without the marker the template's
 //! `ConditionPathExists=` names (read from the packaged unit file) the unit stays inactive;
-//! otherwise the instance runs the release `current` names. When the other instance serves, a
+//! otherwise the instance runs the program of the template's `ExecStart=` as its `User=`. When
+//! that program is [`SERVICE_BINARY`], it runs the release whose binary the hook put there
+//! (`install_binary`); with none there, or with any other program (the binary inside a release,
+//! which hostkeeper keeps closed to every user but root), the unit fails. When the other instance serves, a
 //! hand-over (the configuration names `server.handoff_socket` and both releases have the
 //! capabilities, and for a `[local_cache]` table the cache one too) makes the new one serve and the old one drain, which is running without
 //! serving for a chosen number of `state` looks and then inactive (exit 0, not restarted); with
@@ -28,7 +32,8 @@ use crate::server::update_hook::systemd::run_step;
 use crate::server::update_hook::{
     CACHE_HANDOFF_CAPABILITY, Clock, Done, HANDOFF_CAPABILITY, HANDOFF_STATE_DIR_CAPABILITY, Host,
     Instance, Instances, LOCAL_CACHE_TABLE, Lock, Markers, Outcome, Params, PortError, PortKind,
-    Reason, Record, Reply, StateDir, Step, SystemdPorts, UnitState, Units, marker_path,
+    Reason, Record, Reply, SERVICE_BINARY, StateDir, Step, SystemdPorts, UnitState, Units,
+    marker_path,
 };
 
 /// The release that runs at first.
@@ -60,6 +65,15 @@ pub fn unit_condition() -> &'static str {
         .lines()
         .find_map(|line| line.strip_prefix("ConditionPathExists="))
         .expect("the unit file has a ConditionPathExists")
+}
+
+/// The program of the unit file's `ExecStart=`.
+pub fn unit_program() -> &'static str {
+    TEMPLATE
+        .lines()
+        .find_map(|line| line.strip_prefix("ExecStart="))
+        .and_then(|command| command.split_whitespace().next())
+        .expect("the unit file has an ExecStart")
 }
 
 /// The version of a release: its directory is named after the crate version.
@@ -125,6 +139,8 @@ pub struct Snapshot {
     pub record: Option<Record>,
     pub units: Vec<(Instance, UnitState, Option<PathBuf>)>,
     pub markers: Vec<Instance>,
+    /// The release whose binary is at [`SERVICE_BINARY`].
+    pub installed: Option<PathBuf>,
 }
 
 #[derive(Clone)]
@@ -150,7 +166,8 @@ impl Unit {
 struct World {
     units: BTreeMap<Instance, Unit>,
     markers: BTreeSet<PathBuf>,
-    current: PathBuf,
+    /// The release whose binary the hook put at [`SERVICE_BINARY`].
+    installed: Option<PathBuf>,
     config: Option<String>,
     capabilities: BTreeMap<PathBuf, Vec<String>>,
     refusals: BTreeMap<PathBuf, String>,
@@ -244,7 +261,23 @@ impl World {
         if self.units[&instance].state == UnitState::Active {
             return;
         }
-        let release = self.current.clone();
+        // The service account runs the program; only the copy at `SERVICE_BINARY` is one it can
+        // reach.
+        let reached = (unit_program() == SERVICE_BINARY)
+            .then(|| self.installed.clone())
+            .flatten();
+        let Some(release) = reached else {
+            self.log
+                .push(format!("failed {instance}: {} not run", unit_program()));
+            self.units.insert(
+                instance,
+                Unit {
+                    state: UnitState::Failed,
+                    ..Unit::off()
+                },
+            );
+            return;
+        };
         let serving = Instance::ALL.into_iter().find(|other| {
             *other != instance
                 && self.units[other].serving
@@ -294,7 +327,7 @@ pub struct SystemdFake {
 }
 
 impl SystemdFake {
-    fn world(current: &str) -> SystemdFake {
+    fn world() -> SystemdFake {
         let capable = vec![
             HANDOFF_CAPABILITY.to_owned(),
             CACHE_HANDOFF_CAPABILITY.to_owned(),
@@ -307,7 +340,7 @@ impl SystemdFake {
                     .map(|i| (i, Unit::off()))
                     .collect(),
                 markers: BTreeSet::new(),
-                current: PathBuf::from(current),
+                installed: None,
                 config: Some(WITH_SOCKET.to_owned()),
                 capabilities: [OLD, NEW, NEWER]
                     .into_iter()
@@ -333,16 +366,17 @@ impl SystemdFake {
         }
     }
 
-    /// A host with nothing installed: no instance, no marker, no record. `current` names `NEW`.
+    /// A host with nothing installed: no instance, no marker, no binary, no record.
     pub fn empty() -> SystemdFake {
-        SystemdFake::world(NEW)
+        SystemdFake::world()
     }
 
     /// A host that runs `OLD` on instance a, with nothing in flight.
     pub fn installed() -> SystemdFake {
-        let fake = SystemdFake::world(OLD);
+        let fake = SystemdFake::world();
         {
             let mut w = fake.w.borrow_mut();
+            w.installed = Some(PathBuf::from(OLD));
             w.markers.insert(World::condition_path(Instance::A));
             w.start_unit(Instance::A);
             w.record = Some(Record::idle(Some(Instance::A)).encode());
@@ -368,8 +402,7 @@ impl SystemdFake {
         run_step(step, params, &self.ports())
     }
 
-    /// Runs `steps` in order as hostkeeper does: it moves `current` to the staged release before
-    /// `cutover` and back to the previous one before `rollback`. Each must succeed.
+    /// Runs `steps` in order as hostkeeper does. Each must succeed.
     pub fn drive(&self, params: &Params, steps: &[Step]) {
         for step in steps {
             let done = self.run_as_hostkeeper(*step, params);
@@ -385,21 +418,11 @@ impl SystemdFake {
         );
     }
 
-    /// Runs `step` as `drive` does, and gives its result.
+    /// Runs `step` as `drive` does, and gives its result. hostkeeper moves `current` to the
+    /// staged release before `cutover` and back to the previous one before `rollback`; the
+    /// world has no link to move, since the hook reads the releases from the params alone.
     pub fn run_as_hostkeeper(&self, step: Step, params: &Params) -> Done {
-        match (step, &params.previous) {
-            (Step::Cutover, _) => self.switch_current(&params.staged_release.to_string_lossy()),
-            (Step::Rollback, Some(previous)) => {
-                self.switch_current(&previous.release.to_string_lossy());
-            }
-            _ => {}
-        }
         self.run(step, params)
-    }
-
-    /// hostkeeper moves the link `current`.
-    pub fn switch_current(&self, release: &str) {
-        self.w.borrow_mut().current = PathBuf::from(release);
     }
 
     /// The node's configuration; `None` is no file.
@@ -577,7 +600,25 @@ impl SystemdFake {
                 .into_iter()
                 .filter(|i| w.markers.contains(&marker_path(*i)))
                 .collect(),
+            installed: w.installed.clone(),
         }
+    }
+
+    /// The release whose binary is at [`SERVICE_BINARY`], as a person or an old run left it.
+    pub fn set_installed(&self, release: Option<&str>) {
+        self.w.borrow_mut().installed = release.map(PathBuf::from);
+    }
+
+    /// The calls that put a binary in place, remove it, or start an instance, in order.
+    pub fn binary_acts(&self) -> Vec<String> {
+        self.log()
+            .into_iter()
+            .filter(|line| {
+                ["host.install_binary", "host.remove_binary", "units.start"]
+                    .iter()
+                    .any(|prefix| line.starts_with(prefix))
+            })
+            .collect()
     }
 
     /// Every call so far, in order.
@@ -769,6 +810,21 @@ impl Host for SystemdFake {
 
     fn check_config(&self, release: &Path, config: &Path) -> Result<Option<String>, PortError> {
         self.check_config_of(release, config)
+    }
+
+    fn install_binary(&self, release: &Path) -> Result<(), PortError> {
+        let late = self.count(
+            format!("host.install_binary {}", release.display()),
+            PortKind::Host,
+        )?;
+        self.w.borrow_mut().installed = Some(release.to_path_buf());
+        SystemdFake::after(late, PortKind::Host)
+    }
+
+    fn remove_binary(&self) -> Result<(), PortError> {
+        let late = self.count("host.remove_binary".to_owned(), PortKind::Host)?;
+        self.w.borrow_mut().installed = None;
+        SystemdFake::after(late, PortKind::Host)
     }
 }
 

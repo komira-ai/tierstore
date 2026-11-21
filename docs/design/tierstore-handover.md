@@ -128,8 +128,9 @@ that starts the two processes by hand.
 ### The hook on top of it
 
 The package ships one unit template, `tierstore@.service`, and the hook alternates between its two instances, `tierstore@a` and
-`tierstore@b`, both running `current/bin/tierstore` and serving the public port 9300. hostkeeper switches the link `current` before
-`cutover` and back before `rollback`; the hook never does. An instance starts only when its marker file `/var/lib/tierstore/run-<i>`
+`tierstore@b`, both running `/usr/local/libexec/tierstore/tierstore` (the hook's copy of the binary of the release the link `current`
+names: hostkeeper keeps its packages closed to every user but root) and serving the public port 9300. hostkeeper switches the link
+`current` before `cutover` and back before `rollback`; the hook never does. An instance starts only when its marker file `/var/lib/tierstore/run-<i>`
 is there (`ConditionPathExists=`), so at boot only the recorded one runs.
 
 - `prepare` reads the node's configuration (`config_file`), requires `server.handoff_socket` for an update, asks both releases for

@@ -148,11 +148,12 @@ fn restore_repairs_a_marker_that_disagrees_with_the_record() {
     assert_eq!(fake.peek(Instance::A), UnitState::Active);
 }
 
-/// Asserts that `uninstall` stops both instances and removes both markers, makes no other call
-/// than those and the record's (the data directory, the configuration and the record directory
-/// are out of its reach), and leaves a record that says nothing is in flight and nothing serves.
+/// Asserts that `uninstall` stops both instances and removes both markers and the binary the
+/// units run, makes no other call than those and the record's (the data directory, the
+/// configuration and the record directory are out of its reach), and leaves a record that says
+/// nothing is in flight and nothing serves.
 #[test]
-fn uninstall_stops_both_instances_and_removes_only_the_markers() {
+fn uninstall_stops_both_instances_and_removes_only_the_markers_and_the_binary() {
     let fake = SystemdFake::installed();
     let p = params(NEW, Some(OLD));
     fake.drive(&p, &[Prepare, Cutover]);
@@ -170,7 +171,9 @@ fn uninstall_stops_both_instances_and_removes_only_the_markers() {
     let calls = &fake.log()[before..];
     assert!(calls.iter().all(|line| line.starts_with("units.")
         || line.starts_with("markers.")
+        || line == "host.remove_binary"
         || line.starts_with("state.")));
+    assert!(calls.iter().any(|line| line == "host.remove_binary"));
     assert!(fake.running().is_empty());
     assert!(fake.markers().is_empty());
     assert_eq!(fake.record(), Record::idle(None));

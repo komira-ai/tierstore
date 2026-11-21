@@ -1,8 +1,9 @@
 //! The files hostkeeper's package of tierstore installs (`packaging/hostkeeper/units`) against
-//! the binary and the update hook: the systemd template `tierstore@.service` runs the binary of the
-//! release link `current` with flags the binary parses, starts only under the marker file the hook
-//! writes (`marker_path`), is enabled at boot, and waits for the drain; the launchd plist
-//! `tierstore.plist` runs the same binary as `_tierstore`, is installed under the name the hook
+//! the binary and the update hook: the systemd template `tierstore@.service` runs the copy of the
+//! release's binary the hook puts in place (`SERVICE_BINARY`, outside hostkeeper's package
+//! directories, which only root may enter) with flags the binary parses, starts only under the
+//! marker file the hook writes (`marker_path`), is enabled at boot, and waits for the drain; the
+//! launchd plist `tierstore.plist` runs the same binary as `_tierstore`, is installed under the name the hook
 //! bootstraps (`LAUNCHD_PLIST`), and lets launchd wait for the drain. The template the deb and rpm
 //! packages install (`packaging/tierstore@.service`) is held to this one but for the binary, which
 //! is the package's, at the path the hook finds in a staged release of the package.
@@ -21,14 +22,15 @@ use clap::Parser;
 use tierstore::server::cli::{Args, Cli};
 use tierstore::server::update_hook::{
     Instance, LAUNCHD_PLIST, PACKAGE_RELEASE_BINARY, POLL_INTERVAL, PROBE_ATTEMPTS, READY_ATTEMPTS,
-    RELEASE_BINARY, marker_path,
+    SERVICE_BINARY, marker_path,
 };
 
 /// The words in the name of a flag that say it holds a secret.
 const SECRET_WORDS: [&str; 5] = ["key", "secret", "credential", "token", "password"];
 
-/// The release link of hostkeeper's package, which both files run the binary of.
-const CURRENT: &str = "/var/lib/hostkeeper/packages/tierstore/current";
+/// The directory hostkeeper keeps its packages in, which only root may enter: no unit runs a
+/// program under it, since every unit runs as an account of its own.
+const PACKAGES: &str = "/var/lib/hostkeeper/packages/";
 
 /// The drain of a process that is not on macOS and is given no part of it: the defaults of
 /// `server.drain_lb_wait` and `server.drain_deadline`, which the xtask test of the package holds
@@ -172,16 +174,17 @@ fn arguments() -> Vec<String> {
     }
 }
 
-/// Asserts that the template runs `bin/tierstore` of the release link `current` of hostkeeper's
-/// package (the path the hook's `RELEASE_BINARY` names under a release), and that the flags parse
-/// as the binary parses them: `--config` is a file under `/etc/tierstore`, and the two flags of
-/// the drain are given. It would catch a template that runs a binary no release provides, or a
-/// flag the binary refuses, which would leave the instance restarting for ever.
+/// Asserts that the template runs the copy the hook puts at `SERVICE_BINARY` (not the binary
+/// inside hostkeeper's package, which its account `tierstore` cannot reach), and that the flags
+/// parse as the binary parses them: `--config` is a file under `/etc/tierstore`, and the two flags
+/// of the drain are given. It would catch a template that runs a binary its account cannot run,
+/// or a flag the binary refuses, either of which would leave the instance failing at every start.
 #[test]
-fn the_template_runs_the_current_release_with_flags_the_binary_parses() {
+fn the_template_runs_the_installed_binary_with_flags_the_binary_parses() {
     let unit = read(TEMPLATE);
     let words = exec_start(&unit);
-    assert_eq!(words[0], format!("{CURRENT}/{RELEASE_BINARY}"));
+    assert_eq!(words[0], SERVICE_BINARY);
+    assert_eq!(value(&unit, "User"), "tierstore");
     let args = Args::try_parse_from(&words).expect("the template's flags");
     assert_eq!(
         args.config.as_deref(),
@@ -308,12 +311,12 @@ fn the_template_is_hardened() {
 }
 
 /// Asserts that the plist is a LaunchDaemon of the one job the hook boots out and bootstraps: it
-/// is a file named as the hook's `LAUNCHD_PLIST` names it, its program is the binary of the
-/// release link `current`, its flags parse as the binary parses them, it runs as `_tierstore`, and
+/// is a file named as the hook's `LAUNCHD_PLIST` names it, its program is the copy the hook puts at
+/// `SERVICE_BINARY`, its flags parse as the binary parses them, it runs as `_tierstore`, and
 /// launchd starts it at load and keeps it alive. It would catch a plist the hook cannot find by
-/// name, one that runs a binary no release provides, and one that launchd does not restart.
+/// name, one that runs a binary `_tierstore` cannot reach, and one that launchd does not restart.
 #[test]
-fn the_plist_runs_the_current_release_as_the_service_account_kept_alive() {
+fn the_plist_runs_the_installed_binary_as_the_service_account_kept_alive() {
     let installed = Path::new(LAUNCHD_PLIST).file_name().unwrap();
     assert_eq!(installed, "tierstore.plist");
     assert!(dir().join(installed).is_file());
@@ -324,7 +327,7 @@ fn the_plist_runs_the_current_release_as_the_service_account_kept_alive() {
     assert_eq!(dict.get("RunAtLoad"), Some(&Plist::Bool(true)));
     assert_eq!(dict.get("KeepAlive"), Some(&Plist::Bool(true)));
     let words = arguments();
-    assert_eq!(words[0], format!("{CURRENT}/{RELEASE_BINARY}"));
+    assert_eq!(words[0], SERVICE_BINARY);
     let args = Args::try_parse_from(&words).expect("the plist's flags");
     assert!(args.config.is_some_and(|file| file.is_absolute()));
     for key in dict.keys() {
@@ -446,16 +449,16 @@ fn every_unit_and_job_allows_1048576_open_files() {
     }
 }
 
-/// Asserts that the unit of `tierstore fs` runs the `fs` verb of the binary of the release link with
+/// Asserts that the unit of `tierstore fs` runs the `fs` verb of the installed binary with
 /// a `--config` the binary reads (a file that is not there is status 2, naming it, which a flag the
 /// binary did not parse would not be), starts only under a marker of its own after the S3
 /// instances, and is enabled at boot. It would catch a verb or a flag that is renamed under the
 /// unit, which would leave the instance failing at every start.
 #[test]
-fn the_fs_template_runs_the_fs_verb_of_the_current_release() {
+fn the_fs_template_runs_the_fs_verb_of_the_installed_binary() {
     let unit = read(FS_TEMPLATE);
     let words = exec_start(&unit);
-    assert_eq!(words[0], format!("{CURRENT}/{RELEASE_BINARY}"));
+    assert_eq!(words[0], SERVICE_BINARY);
     assert_eq!(words[1..], ["fs", "--config", "/etc/tierstore/fs.toml"]);
     assert_eq!(
         value(&unit, "ConditionPathExists"),
@@ -492,12 +495,12 @@ fn the_fs_marker_is_not_a_marker_of_the_s3_instances() {
 }
 
 /// Asserts the launchd job of `tierstore fs`: its label is its file's name, it runs the `fs` verb of
-/// the binary of the release link with a `--config` the binary reads (a file that is not there is
+/// the installed binary with a `--config` the binary reads (a file that is not there is
 /// status 2, naming it), it is restarted when it exits, it has time to unmount, it sets no
 /// environment variable, and no word of it names a secret. It would catch a verb or a flag renamed
 /// under the job.
 #[test]
-fn the_fs_launchd_job_runs_the_fs_verb_of_the_current_release() {
+fn the_fs_launchd_job_runs_the_fs_verb_of_the_installed_binary() {
     let job = plist_of("tierstore-fs.plist");
     assert_eq!(
         job.get("Label"),
@@ -513,7 +516,7 @@ fn the_fs_launchd_job_runs_the_fs_verb_of_the_current_release() {
             other => panic!("an argument is {other:?}"),
         })
         .collect();
-    assert_eq!(words[0], format!("{CURRENT}/{RELEASE_BINARY}"));
+    assert_eq!(words[0], SERVICE_BINARY);
     assert_eq!(
         words[1..],
         ["fs", "--config", "/usr/local/tierstore/etc/fs.toml"]
@@ -561,7 +564,7 @@ fn the_package_template_is_the_archive_template_but_for_the_binary() {
     let package_binary = format!("/{}", PACKAGE_RELEASE_BINARY.trim_start_matches("tree/"));
     let as_archive: Vec<String> = package
         .iter()
-        .map(|line| line.replace(&package_binary, &format!("{CURRENT}/{RELEASE_BINARY}")))
+        .map(|line| line.replace(&package_binary, SERVICE_BINARY))
         .collect();
     assert_eq!(as_archive, archive);
     assert_ne!(
@@ -661,4 +664,31 @@ fn the_manifests_step_bounds_are_above_the_hooks_looks() {
         assert!(above_the_looks(secs), "{step} = {secs} s");
     }
     assert!(!above_the_looks(300));
+}
+
+/// Asserts that no unit and no launchd job of hostkeeper's package names a path inside
+/// hostkeeper's package directories: each runs the copy at `SERVICE_BINARY`, as an account that
+/// is not root (but the job of `tierstore fs` on a Mac, which runs as root to mount). hostkeeper
+/// keeps its packages closed to every user but root, so it would catch a unit or a job that runs
+/// the binary through the release link `current`, which its account cannot reach.
+#[test]
+fn no_unit_or_job_runs_a_program_inside_the_package_directories() {
+    for file in [TEMPLATE, FS_TEMPLATE] {
+        let unit = read(file);
+        assert_eq!(exec_start(&unit)[0], SERVICE_BINARY, "{file}");
+        assert_eq!(value(&unit, "User"), "tierstore", "{file}");
+        assert!(!unit.contains(PACKAGES), "{file}");
+    }
+    for file in ["tierstore.plist", "tierstore-fs.plist"] {
+        let job = plist_of(file);
+        let Some(Plist::Array(words)) = job.get("ProgramArguments") else {
+            panic!("{file}: ProgramArguments is an array");
+        };
+        assert_eq!(
+            words.first(),
+            Some(&Plist::Text(SERVICE_BINARY.to_owned())),
+            "{file}"
+        );
+        assert!(!read(file).contains(PACKAGES), "{file}");
+    }
 }

@@ -9,11 +9,12 @@ use hostkeeper_config::manifest::{Expected, HostkeeperVersion, Manifest, Manifes
 use hostkeeper_config::names::{ServiceName, Version};
 use hostkeeper_placed::lint::{LintError, check_unit_text};
 use xtask::package::Platform;
-use xtask::release::hostkeeper_package::{BINARY, LAUNCHD_LABEL};
+use xtask::release::hostkeeper_package::LAUNCHD_LABEL;
 
 use crate::support::{
-    CURRENT_BINARY, LINUX, MIN_HOSTKEEPER, PACKAGES, Scratch, VERSION, Value, hk_platform, integer,
-    listing, manifest_toml, package, plist, string, text, unpack, version_dir, write_tree,
+    LINUX, MIN_HOSTKEEPER, PACKAGES, SERVICE_BINARY, Scratch, VERSION, Value, hk_platform, integer,
+    listing, manifest_toml, package, pinned_binary, plist, string, text, unpack, version_dir,
+    write_tree,
 };
 
 /// The drain a Mac process has with the plist giving no flag for it: the macOS defaults of
@@ -101,9 +102,10 @@ fn the_macos_manifest_differs_from_the_linux_one_only_in_platform_run_and_params
 }
 
 #[test]
-fn the_plist_runs_the_binary_of_current_as_tierstore_and_its_exit_timeout_covers_the_drain() {
-    // Catches: a program other than the package's binary through `current` (the job would not
-    // follow the switch), another configuration file than the manifest's, a job that runs as
+fn the_plist_runs_the_installed_binary_as_tierstore_and_its_exit_timeout_covers_the_drain() {
+    // Catches: a program inside the package directories (`_tierstore` cannot reach them:
+    // hostkeeper keeps them root's alone) or at another path than the copy the update hook
+    // installs, another configuration file than the manifest's, a job that runs as
     // root or is not started and kept alive, an ExitTimeOut shorter than the drain (launchd would
     // kill a drain in progress), and cutover or rollback bounds shorter than ExitTimeOut.
     let archive = mac();
@@ -114,8 +116,8 @@ fn the_plist_runs_the_binary_of_current_as_tierstore_and_its_exit_timeout_covers
     let words: Vec<&str> = arguments.iter().map(string).collect();
     let toml = manifest_toml(&archive);
     let config = toml["params"]["config_file"].as_str().expect("a string");
-    assert_eq!(words, [CURRENT_BINARY, "--config", config]);
-    assert!(CURRENT_BINARY.ends_with(&format!("/current/{BINARY}")));
+    assert_eq!(words, [SERVICE_BINARY, "--config", config]);
+    assert!(!SERVICE_BINARY.starts_with(PACKAGES));
     assert_eq!(string(&job["UserName"]), "_tierstore");
     assert_eq!(string(&job["GroupName"]), "_tierstore");
     assert_eq!(job["RunAtLoad"], Value::Bool(true));
@@ -141,14 +143,15 @@ fn the_plist_runs_the_binary_of_current_as_tierstore_and_its_exit_timeout_covers
 #[test]
 fn the_plist_keeps_hostkeepers_rule_for_the_program_of_a_unit() {
     // Catches: a plist whose program names a version directory, which hostkeeper's placed-path
-    // lint refuses for a plist as for ExecStart=. The edited plist, refused, is the control.
+    // lint refuses for a plist as for ExecStart=. The edited plist (its program the package's
+    // binary through a version directory), refused, is the control.
     let plist = text(&mac(), PLIST);
     let packages = Path::new(PACKAGES);
     assert_eq!(
         check_unit_text(packages, "tierstore", "tierstore.plist", &plist),
         Ok(())
     );
-    let pinned = plist.replace("/current/bin/", &format!("/{VERSION}/bin/"));
+    let pinned = plist.replace(SERVICE_BINARY, &pinned_binary());
     let refused = check_unit_text(packages, "tierstore", "tierstore.plist", &pinned);
     assert!(
         matches!(&refused, Err(LintError::PackagePath { key, .. }) if key == "ProgramArguments"),

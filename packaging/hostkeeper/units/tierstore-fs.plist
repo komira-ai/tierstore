@@ -13,6 +13,9 @@
   file; no environment variable is set, the process reads none, and launchd needs no
   notification of readiness.
 
+  The program is the copy of the current release's binary that the update hook puts at
+  /usr/local/libexec/tierstore/tierstore for tierstore.plist, the same binary as that job's.
+
   This job is not in hostkeeper's package yet, as tierstore-fs@.service is not for Linux: the
   update hook learns it with the two alternating jobs that the hand-over of the NFS socket
   (`fs.nfs.handoff_socket`) needs. Until then an operator installs the file, and it restarts in
@@ -31,7 +34,7 @@
   <string>tierstore-fs</string>
   <key>ProgramArguments</key>
   <array>
-    <string>/var/lib/hostkeeper/packages/tierstore/current/bin/tierstore</string>
+    <string>/usr/local/libexec/tierstore/tierstore</string>
     <string>fs</string>
     <string>--config</string>
     <string>/usr/local/tierstore/etc/fs.toml</string>

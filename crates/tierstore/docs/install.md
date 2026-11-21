@@ -157,12 +157,12 @@ The unit restarts a failed start after 30 seconds. It does not restart exit stat
 
 ## Updates through hostkeeper
 
-A host can instead let hostkeeper update tierstore through `tierstore update-hook` ([The update hook](update-hook.md)). hostkeeper's package of tierstore places the files that are in `packaging/hostkeeper/units` of the repository, and the release is reached through the link `current` of the package, which hostkeeper switches and the hook never moves:
+A host can instead let hostkeeper update tierstore through `tierstore update-hook` ([The update hook](update-hook.md)). hostkeeper's package of tierstore (the archive package, `tierstore-<version>-<platform>.tar.zst`) places the files that are in `packaging/hostkeeper/units` of the repository. hostkeeper keeps the package's directories, and the link `current` to the release in use, closed to every user but root, so the units do not run the binary inside the package: the hook, which runs as root, copies the binary of the release `current` names to `/usr/local/libexec/tierstore/tierstore` before it starts the service (in `cutover`, `rollback` and the boot step `restore`), and the units run that copy as the service account. The copy is root's, mode 0755; the hook makes the directories `/usr/local/libexec` and `/usr/local/libexec/tierstore` (mode 0755) when they are absent, and refuses to copy when one of them, `/usr/local` or `/usr` is a link, is not root's, or can be written by others (and `/usr/local/libexec/tierstore` by its group). Nothing of it is placed by hand:
 
 | file | for |
 |---|---|
-| `tierstore@.service`, the instance template | Linux: the units `tierstore@a` and `tierstore@b`, both run `current/bin/tierstore` and both serve port 9300 |
-| `tierstore.plist` | macOS: the one LaunchDaemon `/Library/LaunchDaemons/tierstore.plist` |
+| `tierstore@.service`, the instance template | Linux: the units `tierstore@a` and `tierstore@b`, both run `/usr/local/libexec/tierstore/tierstore` as `tierstore` and both serve port 9300 |
+| `tierstore.plist` | macOS: the one LaunchDaemon `/Library/LaunchDaemons/tierstore.plist`, which runs `/usr/local/libexec/tierstore/tierstore` as `_tierstore` |
 
 On Linux an instance starts only when its marker file, `/var/lib/tierstore/run-a` or `run-b`, exists: the hook writes the marker before it starts the instance and removes it when it retires it, and at boot only the instance the hook's record names starts. The hook's record and its lock are in `/var/lib/tierstore-hook`. With the archive package both units are enabled; with the Debian or RPM package hostkeeper starts the run units at its own start and the boot step `restore` starts the recorded one. A standby instance is inactive by design. On a Mac the update is a restart with a gap.
 

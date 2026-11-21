@@ -33,7 +33,6 @@ fn a_wrong_build_fails_verify_and_rollback_restores_the_previous_release() {
     assert_failed(&verify, Reason::WrongBuild);
     assert!(!fake.record().has(Marker::Verified));
     let before = fake.launchd_calls().len();
-    fake.switch_current(OLD);
     let done = fake.run(Rollback);
     assert_ok(&done);
     assert_eq!(fake.launchd_calls()[before..], [bootout(), bootstrap()]);

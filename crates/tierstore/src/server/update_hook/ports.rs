@@ -254,6 +254,24 @@ pub trait Host {
     /// The release's binary is missing, is not one to run, cannot be run at all, or ended any way
     /// but accepting or refusing; or the service account is not known to the host.
     fn check_config(&self, release: &Path, config: &Path) -> Result<Option<String>, PortError>;
+
+    /// Puts the binary of the release in `release` where the units run it,
+    /// [`SERVICE_BINARY`](super::SERVICE_BINARY), when the release has a binary of its own there to
+    /// put (an archive release's `bin/tierstore`): a copy owned by root and readable by every
+    /// user, which replaces what was there in one rename, so that a process running the old copy
+    /// keeps it. Any other release (of the Debian or RPM package, or of the macOS installer
+    /// package) has its binary put in place by its package manager: nothing is done.
+    ///
+    /// # Errors
+    /// The archive binary is not one to run (a link, a directory, or not root's alone), or the
+    /// copy cannot be made.
+    fn install_binary(&self, release: &Path) -> Result<(), PortError>;
+
+    /// Removes the copy [`Host::install_binary`] made; one that is not there is fine.
+    ///
+    /// # Errors
+    /// It is there and cannot be removed.
+    fn remove_binary(&self) -> Result<(), PortError>;
 }
 
 /// Time, and waiting for it to pass.

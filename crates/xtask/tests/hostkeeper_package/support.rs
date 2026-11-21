@@ -23,12 +23,20 @@ pub const VERSION: &str = "0.4.0+0123456789ab";
 /// read them with, so their loader takes it.
 pub const MIN_HOSTKEEPER: &str = "0.1.0";
 
-/// Where hostkeeper keeps every package on a host; a unit names the package's files only through
-/// `<PACKAGES>/tierstore/current/`.
+/// Where hostkeeper keeps every package on a host, closed to every user but root; a unit may name
+/// the package's files only through `<PACKAGES>/tierstore/current/`, and the package's units name
+/// none.
 pub const PACKAGES: &str = "/var/lib/hostkeeper/packages";
 
-/// The program every unit runs: the package's binary through hostkeeper's `current` link.
-pub const CURRENT_BINARY: &str = "/var/lib/hostkeeper/packages/tierstore/current/bin/tierstore";
+/// The program every unit runs: the copy of the release's binary that the update hook puts
+/// outside [`PACKAGES`], where the service account can run it (`SERVICE_BINARY` of the hook).
+pub const SERVICE_BINARY: &str = "/usr/local/libexec/tierstore/tierstore";
+
+/// The program of a unit edited to run the package's binary through a version directory, which
+/// hostkeeper's placed-path lint refuses: the control that the lint reads the unit.
+pub fn pinned_binary() -> String {
+    format!("{PACKAGES}/tierstore/{VERSION}/bin/tierstore")
+}
 
 /// The two Linux platforms.
 pub const LINUX: [Platform; 2] = [Platform::LinuxX86_64, Platform::LinuxArm64];

@@ -20,7 +20,7 @@ pub const GUARD_UNIT: &str = "tierstore-guard.service";
 pub const GUARD_FILE: &str = "/etc/tierstore/guard.nft";
 
 /// The host as the config hook asks it: every release is the one that serves, `release`, since
-/// a config package carries no binary.
+/// a config package carries no binary, and no binary is ever put in place or removed.
 pub struct Running<'a> {
     /// The host.
     pub host: &'a dyn Host,
@@ -39,6 +39,16 @@ impl Host for Running<'_> {
 
     fn check_config(&self, _release: &Path, config: &Path) -> Result<Option<String>, PortError> {
         self.host.check_config(self.release, config)
+    }
+
+    /// Nothing: the binary that serves stays, as the release does.
+    fn install_binary(&self, _release: &Path) -> Result<(), PortError> {
+        Ok(())
+    }
+
+    /// Nothing: the config hook never removes the binary that serves.
+    fn remove_binary(&self) -> Result<(), PortError> {
+        Ok(())
     }
 }
 

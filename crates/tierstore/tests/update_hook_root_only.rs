@@ -1,14 +1,17 @@
 //! The update hook's check of the configuration (`--check-config`) run by the real binary through
 //! the real runner, from a staged release that only root may enter, as hostkeeper keeps every
 //! staged package: the service account cannot search the directories above the binary, and the
-//! check runs all the same, and still refuses a key file the account cannot read, naming it.
+//! check runs all the same, and still refuses a key file the account cannot read, naming it. And
+//! the copy the hook makes of an archive release's binary at `SERVICE_BINARY`, which the units run:
+//! the account runs it, and cannot start the binary inside the release.
 //!
 //! The tests that need a second user run only when the test process is root, and the others only
 //! when it is not (each says so on standard error and passes otherwise). In the first, the hook
 //! is root and the check runs as the account of `etc/passwd` under the test's root, mapped to the
 //! user and group `nobody` (65534). In the others the runner closes the release's directory
-//! (mode 0) between the hook's open of the binary and the child's start, so the child cannot
-//! search it, as the account cannot search a root-only tree.
+//! (mode 0) between the hook's open of the binary and the child's start (for the copy, the
+//! packages directory while the binary runs), so the child cannot search it, as the account
+//! cannot search a root-only tree.
 
 #![cfg(target_os = "linux")]
 #![allow(
@@ -21,12 +24,13 @@ use std::fs;
 use std::io::{self, Write};
 use std::os::unix::fs::{MetadataExt, PermissionsExt, chown};
 use std::path::{Path, PathBuf};
+use std::sync::{Mutex, MutexGuard, PoisonError};
 use std::time::Duration;
 
-use tierstore::server::update_hook::Host;
 use tierstore::server::update_hook::machine::{
     Call, Output, RunError, Runner, SystemHost, SystemRunner,
 };
+use tierstore::server::update_hook::{Host, SERVICE_BINARY};
 use tierstore_testkit::dir::TestDir;
 
 /// The staged release, as hostkeeper names it, under the test's root.
@@ -119,6 +123,17 @@ impl Runner for Closing {
     }
 }
 
+/// Held by every test for the whole of it: the tests write binaries and run binaries, and a child
+/// that another thread forks while a binary is open for writing holds it open until it executes,
+/// so that a run of that binary meanwhile fails with "Text file busy". One test at a time, no
+/// test writes while another runs a program.
+static ONE_AT_A_TIME: Mutex<()> = Mutex::new(());
+
+/// Waits for the other tests of this file to end; a test that failed does not stop the rest.
+fn one_at_a_time() -> MutexGuard<'static, ()> {
+    ONE_AT_A_TIME.lock().unwrap_or_else(PoisonError::into_inner)
+}
+
 /// Says why a test does not run here, on standard error.
 fn say(line: &str) {
     let _ = writeln!(io::stderr(), "{line}");
@@ -136,6 +151,7 @@ fn me() -> u32 {
 /// that `prepare` fails `host_failed` and no release can be installed.
 #[test]
 fn a_check_runs_the_staged_binary_when_its_directories_cannot_be_searched() {
+    let _serial = one_at_a_time();
     let node = Node::new(
         Path::new(env!("CARGO_TARGET_TMPDIR")),
         "hook-root-only-runs",
@@ -158,6 +174,7 @@ fn a_check_runs_the_staged_binary_when_its_directories_cannot_be_searched() {
 /// Catches a check that passes by not reading the key files, or that fails before it reads them.
 #[test]
 fn a_check_from_a_closed_release_names_the_key_file_it_cannot_read() {
+    let _serial = one_at_a_time();
     let node = Node::new(
         Path::new(env!("CARGO_TARGET_TMPDIR")),
         "hook-root-only-key",
@@ -217,6 +234,7 @@ fn root_node(name: &str) -> Option<Node> {
 /// account, which cannot search the release (`Permission denied`, `prepare` fails `host_failed`).
 #[test]
 fn a_root_hook_checks_as_the_account_from_a_release_only_root_may_enter() {
+    let _serial = one_at_a_time();
     let Some(node) = root_node("hook-root-only-as-root") else {
         return;
     };
@@ -235,6 +253,7 @@ fn a_root_hook_checks_as_the_account_from_a_release_only_root_may_enter() {
 /// with.
 #[test]
 fn a_root_hook_check_names_the_key_file_the_account_cannot_read() {
+    let _serial = one_at_a_time();
     let Some(node) = root_node("hook-root-only-as-root-key") else {
         return;
     };
@@ -246,4 +265,142 @@ fn a_root_hook_check_names_the_key_file_the_account_cannot_read() {
         node.key().display()
     );
     assert_eq!(got, Ok(Some(line)));
+}
+
+/// A release of hostkeeper's archive package, as hostkeeper names it, under a node's root.
+const ARCHIVE_RELEASE: &str = "/var/lib/hostkeeper/packages/tierstore/0.5.0";
+/// The release before it.
+const ARCHIVE_PREVIOUS: &str = "/var/lib/hostkeeper/packages/tierstore/0.4.0";
+/// The directory hostkeeper keeps its packages in, under a node's root.
+const PACKAGES: &str = "var/lib/hostkeeper/packages";
+
+/// A scratch root, searchable by every user, holding two releases of the archive package whose
+/// `bin/tierstore` is the binary of this build (the newer one with `trailer` after it, which the
+/// binary never reads, so the two copies differ), each directory from the packages directory down
+/// to a version mode 0700, as hostkeeper keeps them.
+fn archive_root(name: &str, trailer: &[u8]) -> TestDir {
+    let dir = TestDir::under(std::env::temp_dir(), name);
+    mode(dir.path(), 0o755);
+    let built = fs::read(env!("CARGO_BIN_EXE_tierstore")).unwrap();
+    for (release, extra) in [(ARCHIVE_PREVIOUS, &b""[..]), (ARCHIVE_RELEASE, trailer)] {
+        let bin = dir.path().join(release.trim_start_matches('/')).join("bin");
+        fs::create_dir_all(&bin).unwrap();
+        let mut bytes = built.clone();
+        bytes.extend_from_slice(extra);
+        fs::write(bin.join("tierstore"), bytes).unwrap();
+        mode(&bin.join("tierstore"), 0o755);
+        mode(&bin, 0o755);
+        mode(bin.parent().unwrap(), 0o700);
+    }
+    for (path, bits) in [
+        ("var", 0o755),
+        ("var/lib", 0o755),
+        ("var/lib/hostkeeper", 0o755),
+        (PACKAGES, 0o700),
+        ("var/lib/hostkeeper/packages/tierstore", 0o700),
+    ] {
+        mode(&dir.path().join(path), bits);
+    }
+    dir
+}
+
+/// The bytes of `release`'s binary under `root`.
+fn release_bytes(root: &Path, release: &str) -> Vec<u8> {
+    fs::read(
+        root.join(release.trim_start_matches('/'))
+            .join("bin/tierstore"),
+    )
+    .unwrap()
+}
+
+/// `<program> --version`, run as `ids` (none: as this process).
+fn version_as(program: &Path, ids: Option<(u32, u32)>) -> Result<Output, RunError> {
+    let call = Call::new(&program.to_string_lossy(), &["--version"], LIMIT);
+    SystemRunner.run(&match ids {
+        Some((uid, gid)) => call.running_as(uid, gid),
+        None => call,
+    })
+}
+
+/// Asserts what an archive install, an update and a rollback leave of the binary the units run,
+/// with the packages directory closed while the binary runs: the copy the hook made of the
+/// staged release's binary runs, and the binary inside the release cannot even be started; the
+/// copy of the update is the new release's bytes, and the rollback's the previous release's
+/// again. Catches units that run the binary inside the package, and a hook that copies the wrong
+/// release or none.
+#[test]
+fn the_copy_of_an_archive_release_runs_where_the_package_cannot_be_searched() {
+    let _serial = one_at_a_time();
+    let dir = archive_root("hook-archive-copy", b"\n0.5.0 trailer\n");
+    let root = dir.path();
+    if me() == 0 {
+        say("skipped: root searches a directory of mode 0; the root test runs this case");
+        return;
+    }
+    let host = SystemHost::new(root.to_path_buf(), &SystemRunner, LIMIT).with_release_owner(me());
+    let copy = root.join(SERVICE_BINARY.trim_start_matches('/'));
+    let packages = root.join(PACKAGES);
+    for release in [ARCHIVE_PREVIOUS, ARCHIVE_RELEASE, ARCHIVE_PREVIOUS] {
+        host.install_binary(Path::new(release)).unwrap();
+        assert_eq!(fs::read(&copy).unwrap(), release_bytes(root, release));
+        mode(&packages, 0o000);
+        let ran = version_as(&copy, None);
+        let inside = version_as(
+            &root
+                .join(release.trim_start_matches('/'))
+                .join("bin/tierstore"),
+            None,
+        );
+        mode(&packages, 0o700);
+        let ran = ran.unwrap();
+        assert_eq!(ran.code, Some(0), "{}", ran.stderr_text());
+        assert!(String::from_utf8_lossy(&ran.stdout).starts_with("tierstore "));
+        assert!(matches!(inside, Err(RunError::Spawn(_))), "{inside:?}");
+    }
+}
+
+/// Asserts that a root hook copies the binary of a release that only root may enter to a file
+/// that is root's, mode 0755, in directories that are root's and mode 0755, which the service
+/// account (`nobody` here) runs, while the account cannot start the binary inside the release;
+/// and that a rollback puts the previous release's bytes back, which the account runs too.
+/// Catches units that run the binary inside the package, which no instance can start on a host
+/// whose packages only root may enter, and a copy the account cannot run.
+#[test]
+fn a_root_hook_s_copy_runs_as_the_account_that_cannot_enter_the_release() {
+    let _serial = one_at_a_time();
+    if me() != 0 {
+        say("skipped: a copy owned by root, run as another user, needs the test to be root");
+        return;
+    }
+    let dir = archive_root("hook-archive-copy-as-root", b"\n0.5.0 trailer\n");
+    let root = dir.path();
+    let host = SystemHost::new(root.to_path_buf(), &SystemRunner, LIMIT);
+    let copy = root.join(SERVICE_BINARY.trim_start_matches('/'));
+    let account = Some((NOBODY, NOBODY));
+    host.install_binary(Path::new(ARCHIVE_RELEASE)).unwrap();
+    let mut path = copy.clone();
+    while path != root {
+        let meta = fs::metadata(&path).unwrap();
+        assert_eq!(
+            (meta.uid(), meta.mode() & 0o7777),
+            (0, 0o755),
+            "{}",
+            path.display()
+        );
+        path.pop();
+    }
+    let inside = root
+        .join(ARCHIVE_RELEASE.trim_start_matches('/'))
+        .join("bin/tierstore");
+    let refused = version_as(&inside, account);
+    assert!(matches!(refused, Err(RunError::Spawn(_))), "{refused:?}");
+    let ran = version_as(&copy, account).unwrap();
+    assert_eq!(ran.code, Some(0), "{}", ran.stderr_text());
+    host.install_binary(Path::new(ARCHIVE_PREVIOUS)).unwrap();
+    assert_eq!(
+        fs::read(&copy).unwrap(),
+        release_bytes(root, ARCHIVE_PREVIOUS)
+    );
+    let ran = version_as(&copy, account).unwrap();
+    assert_eq!(ran.code, Some(0), "{}", ran.stderr_text());
 }

@@ -1,7 +1,11 @@
 //! The fake of the launchd arm's ports, in one world: the one job of the system domain (loaded
-//! or not, and the release it runs), the release link `current` that hostkeeper moves, the
-//! node's configuration files, the record and its lock. The job runs the release `current` named
-//! when it was loaded, and answers `/readyz` and `/metricz` on the public port from what runs.
+//! or not, and the release it runs), the copy of a release's binary the plist runs, the node's
+//! configuration files, the record and its lock. A job that is loaded runs the program of the
+//! plist's `ProgramArguments` as its `UserName`: when that program is [`SERVICE_BINARY`] it runs
+//! the release whose binary the hook put there (`install_binary`); with none there, or with any
+//! other program (the binary inside a release, which hostkeeper keeps closed to every user but
+//! root), the job is loaded and runs nothing. It answers `/readyz` and `/metricz` on the public
+//! port from what runs. hostkeeper's link `current` is not in the world: the hook never reads it.
 //! The clock is a number that `pause` moves on; nothing sleeps.
 //!
 //! Every call of a port except the clock is counted and logged. `fail_at(n)` makes the n-th call
@@ -19,7 +23,7 @@ use std::time::Duration;
 use crate::server::update_hook::launchd::run_step;
 use crate::server::update_hook::{
     Clock, Done, Host, Instances, LAUNCHD_PLIST, Launchd, LaunchdPorts, Lock, Outcome, Params,
-    PortError, PortKind, Reason, Record, Reply, StateDir, Step,
+    PortError, PortKind, Reason, Record, Reply, SERVICE_BINARY, StateDir, Step,
 };
 
 /// The label of the job, as the params name it.
@@ -35,6 +39,19 @@ pub const OLD_VERSION: &str = "0.3.0+000000000003";
 /// The version of `NEW`.
 pub const NEW_VERSION: &str = "0.4.0+000000000004";
 
+/// The plist the package ships.
+const PLIST: &str = include_str!("../../../../../../packaging/hostkeeper/units/tierstore.plist");
+
+/// The program of the plist: the first string of its `ProgramArguments`.
+pub fn plist_program() -> &'static str {
+    PLIST
+        .split("<key>ProgramArguments</key>")
+        .nth(1)
+        .and_then(|rest| rest.split("<string>").nth(1))
+        .and_then(|rest| rest.split("</string>").next())
+        .expect("the plist has a program")
+}
+
 /// A failure picked by what a call's log line starts with.
 struct Fault {
     prefix: String,
@@ -47,8 +64,11 @@ struct Fault {
 struct World {
     record: Option<Vec<u8>>,
     busy: bool,
-    current: Option<PathBuf>,
+    /// The release whose binary the hook put at [`SERVICE_BINARY`].
+    installed: Option<PathBuf>,
     job: Option<PathBuf>,
+    /// The job is loaded, and its program cannot be run.
+    broken: bool,
     versions: BTreeMap<PathBuf, String>,
     lies: BTreeMap<PathBuf, String>,
     mute: BTreeSet<PathBuf>,
@@ -69,7 +89,8 @@ struct World {
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub struct Snapshot {
     pub record: Option<Record>,
-    pub current: Option<PathBuf>,
+    /// The release whose binary is at [`SERVICE_BINARY`].
+    pub installed: Option<PathBuf>,
     pub job: Option<PathBuf>,
 }
 
@@ -108,12 +129,13 @@ pub fn params_for(release: &str, version: &str, previous: Option<(&str, &str)>) 
 }
 
 impl Fake {
-    fn world(record: Option<Vec<u8>>, current: Option<&str>, job: Option<&str>) -> World {
+    fn world(record: Option<Vec<u8>>, installed: Option<&str>, job: Option<&str>) -> World {
         World {
             record,
             busy: false,
-            current: current.map(PathBuf::from),
+            installed: installed.map(PathBuf::from),
             job: job.map(PathBuf::from),
+            broken: false,
             versions: BTreeMap::from([
                 (PathBuf::from(OLD), OLD_VERSION.to_owned()),
                 (PathBuf::from(NEW), NEW_VERSION.to_owned()),
@@ -147,7 +169,7 @@ impl Fake {
         }
     }
 
-    /// A host with nothing installed: no record, no release linked, no job; `NEW` is staged.
+    /// A host with nothing installed: no record, no binary, no job; `NEW` is staged.
     pub fn first_install() -> Fake {
         Fake {
             w: RefCell::new(Fake::world(None, None, None)),
@@ -183,14 +205,10 @@ impl Fake {
         run_step(step, params, label, &self.ports())
     }
 
-    /// Runs `step` as hostkeeper does: `current` is moved to the staged release before
-    /// `cutover` and back to the previous one before `rollback`.
+    /// Runs `step` as hostkeeper does. hostkeeper moves `current` to the staged release before
+    /// `cutover` and back to the previous one before `rollback`; the world has no link to move,
+    /// since the hook reads the releases from the params alone.
     pub fn host_run(&self, step: Step) -> Done {
-        match step {
-            Step::Cutover => self.switch_current(NEW),
-            Step::Rollback if !self.first => self.switch_current(OLD),
-            _ => {}
-        }
         self.run(step)
     }
 
@@ -210,7 +228,7 @@ impl Fake {
                 .record
                 .as_ref()
                 .map(|b| Record::decode(b).expect("a record")),
-            current: w.current.clone(),
+            installed: w.installed.clone(),
             job: w.job.clone(),
         }
     }
@@ -345,17 +363,37 @@ impl Fake {
 
     /// The job is loaded, running `release`, or is not loaded.
     pub fn set_job(&self, release: Option<&str>) {
-        self.w.borrow_mut().job = release.map(PathBuf::from);
+        let mut w = self.w.borrow_mut();
+        w.job = release.map(PathBuf::from);
+        w.broken = false;
     }
 
-    /// hostkeeper moves the link `current`.
-    pub fn switch_current(&self, release: &str) {
-        self.w.borrow_mut().current = Some(PathBuf::from(release));
+    /// The release whose binary is at [`SERVICE_BINARY`], as a person or an old run left it.
+    pub fn set_installed(&self, release: Option<&str>) {
+        self.w.borrow_mut().installed = release.map(PathBuf::from);
+    }
+
+    /// The calls that put a binary in place, remove it, or load the job, in order.
+    pub fn binary_acts(&self) -> Vec<String> {
+        self.log()
+            .into_iter()
+            .filter(|line| {
+                [
+                    "host.install_binary",
+                    "host.remove_binary",
+                    "launchd.bootstrap",
+                ]
+                .iter()
+                .any(|prefix| line.starts_with(prefix))
+            })
+            .collect()
     }
 
     /// The host has booted, and launchd has not loaded the job yet.
     pub fn reboot(&self) {
-        self.w.borrow_mut().job = None;
+        let mut w = self.w.borrow_mut();
+        w.job = None;
+        w.broken = false;
     }
 
     /// Counts one call and fails it if it is the chosen one.
@@ -411,7 +449,8 @@ impl Launchd for Fake {
         if label != LABEL {
             self.stray(label);
         }
-        Ok(label == LABEL && self.w.borrow().job.is_some())
+        let w = self.w.borrow();
+        Ok(label == LABEL && (w.job.is_some() || w.broken))
     }
 
     fn bootstrap(&self, plist: &Path) -> Result<(), PortError> {
@@ -423,14 +462,18 @@ impl Launchd for Fake {
             self.stray(&plist.display().to_string());
         }
         let mut w = self.w.borrow_mut();
-        if w.job.is_some() {
+        if w.job.is_some() || w.broken {
             return Err(PortError::failed(
                 PortKind::Launchd,
                 "Bootstrap failed: 5: Input/output error (the job is loaded)",
             ));
         }
-        let current = w.current.clone();
-        w.job = current;
+        // The job's account reaches only the copy at `SERVICE_BINARY`.
+        let reached = (plist_program() == SERVICE_BINARY)
+            .then(|| w.installed.clone())
+            .flatten();
+        w.broken = reached.is_none();
+        w.job = reached;
         drop(w);
         Fake::after(late, PortKind::Launchd)
     }
@@ -438,7 +481,9 @@ impl Launchd for Fake {
     fn bootout(&self, label: &str) -> Result<(), PortError> {
         let late = self.tick_changing(format!("launchd.bootout {label}"), PortKind::Launchd)?;
         if label == LABEL {
-            self.w.borrow_mut().job = None;
+            let mut w = self.w.borrow_mut();
+            w.job = None;
+            w.broken = false;
         } else {
             self.stray(label);
         }
@@ -507,6 +552,21 @@ impl Host for Fake {
 
     fn check_config(&self, release: &Path, config: &Path) -> Result<Option<String>, PortError> {
         self.no_check(release, config)
+    }
+
+    fn install_binary(&self, release: &Path) -> Result<(), PortError> {
+        let late = self.tick_changing(
+            format!("host.install_binary {}", release.display()),
+            PortKind::Host,
+        )?;
+        self.w.borrow_mut().installed = Some(release.to_path_buf());
+        Fake::after(late, PortKind::Host)
+    }
+
+    fn remove_binary(&self) -> Result<(), PortError> {
+        let late = self.tick_changing("host.remove_binary".to_owned(), PortKind::Host)?;
+        self.w.borrow_mut().installed = None;
+        Fake::after(late, PortKind::Host)
     }
 }
 
