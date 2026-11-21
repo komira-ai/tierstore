@@ -5,6 +5,7 @@ use std::path::PathBuf;
 use super::{MountRequest, Refusal, Request, parse};
 use crate::TreeDigest;
 use crate::server::local_cache::attaches::{Attach, Fetches, Outcome};
+use crate::server::local_cache::descriptors::Descriptors;
 use crate::server::local_cache::trees::{PlacementId, placement_id};
 
 const SHA: &str = "0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef";
@@ -492,6 +493,28 @@ fn an_attached_and_a_fetched_are_the_reports_they_write() {
     };
     assert_eq!(line(&fetches.line()), Ok(Request::Fetched(fetches)));
     for text in ["attached", "attached gone 1", "fetched", "fetched 1 2 3 4"] {
+        assert_eq!(line(text), Err(Refusal::Malformed), "{text:?}");
+    }
+}
+
+/// Asserts that a `descriptors` is the report it writes, and that one that is not, a bad mount
+/// name included, is refused as malformed.
+#[test]
+fn a_descriptors_is_the_report_it_writes() {
+    let report = Descriptors {
+        mount: "boot-1".to_owned(),
+        held: 12,
+        short: 3,
+    };
+    assert_eq!(line(&report.line()), Ok(Request::Descriptors(report)));
+    for text in [
+        "descriptors",
+        "descriptors boot-1 1",
+        "descriptors boot-1 1 2 3",
+        "descriptors boot-1 -1 2",
+        "descriptors boot-1 1 x",
+        "descriptors  1 2",
+    ] {
         assert_eq!(line(text), Err(Refusal::Malformed), "{text:?}");
     }
 }

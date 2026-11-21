@@ -478,6 +478,38 @@ The median attach, over an hour:
 histogram_quantile(0.5, sum by (le) (rate(tierstore_fs_tree_attach_seconds_bucket{outcome="ok"}[1h])))
 ```
 
+### Build node: the mount's descriptors
+
+`tierstore fs` shares one descriptor per cache file (a blob or a pack) across all its open handles,
+and about once a minute reports to the node, on the fill socket, how many cache files it holds open
+and how many opens failed for lack of descriptors since its previous report. The families are on
+every process with a cache, with a `# TYPE` line, and have no series until a mount reports. The
+node keeps at most 64 mounts; a report of a 65th mount is answered `ok` and dropped, so a client
+that makes up mount ids cannot grow the node's memory. The fs unit's descriptor limit is 1,048,576.
+
+| name | type | labels | what it says |
+|---|---|---|---|
+| `tierstore_fs_cache_descriptors` | gauge | `mount`: the mount's id | the cache files that mount's fs process held open at its last report |
+| `tierstore_fs_open_descriptor_failures_total` | counter | `mount` | opens of files of that mount that failed for lack of descriptors (`EMFILE`, `ENFILE`), summed over its reports. It keeps counting across restarts of the mount process, since each report carries only the failures since the previous one |
+
+What they do not count: a report that was lost, as a `started` is lost (above), so the gauge may be
+a minute old and a failure whose report was lost is never counted; the store process's own
+descriptors; descriptors that are not cache files, such as the copies of the FUSE device, the
+splice pipes and the fill-socket connections. A node of an earlier release answers the report
+`refused unknown request`, which the mount ignores, so these families stay empty there.
+
+An alert when a mount holds more than nine tenths of the limit:
+
+```promql
+tierstore_fs_cache_descriptors > 0.9 * 1048576
+```
+
+Any open that found no descriptor in the last hour:
+
+```promql
+increase(tierstore_fs_open_descriptor_failures_total[1h]) > 0
+```
+
 ## Cache queries (v1)
 
 All of these use a `5m` window. Every `sum` is outside the `rate`. Shorten the window to see a
