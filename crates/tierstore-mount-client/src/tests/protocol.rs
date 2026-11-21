@@ -8,9 +8,11 @@
 //! `open-pack` reaches the reader, and a later open asks again with the same region; an
 //! `open-pack` refused for the holder, and a `wait` refused for its handle, make the client
 //! handshake again, re-open and re-issue; a `PackOpened` with another size, another region, an
-//! unsealed state memfd or a header of another pack is refused; a refused re-open breaks the pack and ends its waits; a reply of another kind than its
-//! request's, bytes that are not a frame, a frame with too few or too many descriptors, a stream
-//! that ends inside a frame, and a write that fails each end the connection, and the client
+//! unsealed state memfd or a header of another pack is refused; a refused re-open breaks the pack
+//! and ends its waits; a wait ended by a refused re-open or by the client's end wakes its reader
+//! with the pack already broken; a reply of another kind than its request's, bytes that are not a
+//! frame, a frame with too few or too many descriptors, a stream that ends inside a frame, and a
+//! write that fails each end the connection, and the client
 //! connects again; a reply to no request is dropped; credentials the kernel adds to a read are
 //! ignored; an `open-pack` too large for a frame (a tree reference of more than 65535 bytes) is
 //! refused before it is sent; a `wait` asked while the connection is down is sent once the pack
@@ -20,11 +22,14 @@
 //! refused one is reported, an accepted one ends the client, and one outstanding when a handshake
 //! is refused answers that refusal.
 
+use std::future::Future as _;
 use std::net::Shutdown;
 use std::os::fd::{AsFd, OwnedFd};
-use std::sync::Arc;
+use std::pin::Pin;
+use std::sync::{Arc, mpsc};
+use std::task::{Context, Wake, Waker};
 
-use crate::{Attempt, BadPackFds, ClientError, OpenSpec, Pack, PackClient};
+use crate::{Attempt, BadPackFds, ClientError, OpenSpec, Pack, PackClient, Ticket};
 use rustix::event::{PollFd, PollFlags, Timespec, poll};
 use rustix::fs::{FileType, SealFlags, fcntl_get_seals, fstat};
 use tierstore_fetch_api::clock::ManualClock;
@@ -286,6 +291,81 @@ fn a_refused_reopen_breaks_the_pack_and_ends_its_waits() {
     pack.ensure(&[run(0, 1)], Class::Demand, JobId(1), Rank(0));
     let stats = stats_until(&client, |s| s.ensures_dropped == 1);
     assert_eq!(stats.windows_outstanding, 0);
+}
+
+/// What a reader woken by a ticket's answer finds: the waker runs inside the client's send of the
+/// answer, on the client's runtime, so what it sends is the pack's `broken()` at the moment the
+/// answer was given, with nothing scheduled between the two.
+struct BrokenAtWake {
+    pack: Arc<Pack>,
+    seen: mpsc::Sender<Option<ClientError>>,
+}
+
+impl Wake for BrokenAtWake {
+    fn wake(self: Arc<Self>) {
+        self.wake_by_ref();
+    }
+
+    fn wake_by_ref(self: &Arc<Self>) {
+        // The test receives the first; a receiver already gone has nothing to learn.
+        let _ = self.seen.send(self.pack.broken().cloned());
+    }
+}
+
+/// Polls `ticket` once (it is not answered yet) with a waker that, when the answer wakes it,
+/// sends what `pack.broken()` says then. The ticket must not be polled again before that: a
+/// second poll would replace the waker.
+fn watch<T>(ticket: &mut Ticket<T>, pack: &Arc<Pack>) -> mpsc::Receiver<Option<ClientError>> {
+    let (tx, rx) = mpsc::channel();
+    let watcher = Arc::new(BrokenAtWake {
+        pack: Arc::clone(pack),
+        seen: tx,
+    });
+    let waker = Waker::from(watcher);
+    let polled = Pin::new(ticket).poll(&mut Context::from_waker(&waker));
+    assert!(
+        polled.is_pending(),
+        "the ticket was answered before the test"
+    );
+    rx
+}
+
+#[test]
+fn a_wait_ended_by_a_refused_reopen_wakes_its_reader_with_the_pack_already_broken() {
+    let (script, clock, client, peer) = connected();
+    let pack = opened(&client, &peer, 1, 1);
+    let mut wait = pack.wait(bytes(0, 1), PACKS[1].1, JobId(1));
+    let seen = watch(&mut wait, &pack);
+    let (w, _) = peer.next();
+    assert!(matches!(w.message, Message::Wait { .. }));
+    drop(peer);
+    let peer = reconnect(&script, &clock, 2);
+    let (f, _) = peer.next();
+    peer.reply(f.id, 2, refused(RefusalCode::UnknownPack), &[]);
+    let err = ClientError::OpenRefused {
+        pack: pack_id(1),
+        code: RefusalCode::UnknownPack,
+    };
+    assert_eq!(seen.recv().unwrap(), Some(err.clone()));
+    assert_eq!(wait.try_take(), Some(Err(err)));
+}
+
+#[test]
+fn a_wait_ended_by_the_client_ending_wakes_its_reader_with_the_pack_already_broken() {
+    let (script, clock, client, peer) = connected();
+    let pack = opened(&client, &peer, 1, 1);
+    let mut wait = pack.wait(bytes(0, 1), PACKS[1].1, JobId(1));
+    let seen = watch(&mut wait, &pack);
+    let (w, _) = peer.next();
+    assert!(matches!(w.message, Message::Wait { .. }));
+    drop(peer);
+    wake(&clock);
+    let peer = script.accept();
+    let (hs, _) = peer.next();
+    peer.reply(hs.id, 2, refused(RefusalCode::Version), &[]);
+    let err = ClientError::HandshakeRefused(RefusalCode::Version);
+    assert_eq!(seen.recv().unwrap(), Some(err.clone()));
+    assert_eq!(wait.try_take(), Some(Err(err)));
 }
 
 #[test]

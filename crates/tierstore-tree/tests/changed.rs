@@ -12,6 +12,8 @@
 //! Catches: an allocation sized by a changed record; an index past the mapping; a lookup loop that
 //! does not end on a count that is out of range.
 
+// Linux only, as the crate is (its library and its dependencies are `cfg(target_os = "linux")`).
+#![cfg(target_os = "linux")]
 #![allow(
     clippy::unwrap_used,
     clippy::expect_used,
