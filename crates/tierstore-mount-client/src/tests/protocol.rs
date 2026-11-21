@@ -2,25 +2,24 @@
 //! frame.
 //!
 //! Proves: the handshake carries the counter memfd, sealed against shrinking and not against
-//! growing, and the lifeline, and every reconnect sends the same two; the lifeline stays open
-//! while the client lives and hangs up when it is dropped; a refused handshake ends the client
-//! (every outstanding and later request answers why, and it never connects again); each refusal of
-//! `open-pack` reaches the reader, and a later open asks again with the same region; an
-//! `open-pack` refused for the holder, and a `wait` refused for its handle, make the client
-//! handshake again, re-open and re-issue; a `PackOpened` with another size, another region, an
-//! unsealed state memfd or a header of another pack is refused; a refused re-open breaks the pack
-//! and ends its waits; a wait ended by a refused re-open or by the client's end wakes its reader
-//! with the pack already broken; a reply of another kind than its request's, bytes that are not a
-//! frame, a frame with too few or too many descriptors, a stream that ends inside a frame, and a
-//! write that fails each end the connection, and the client
-//! connects again; a reply to no request is dropped; credentials the kernel adds to a read are
-//! ignored; an `open-pack` too large for a frame (a tree reference of more than 65535 bytes) is
-//! refused before it is sent; a `wait` asked while the connection is down is sent once the pack
-//! is open again; an `eio` of a cell another joined read does not need re-queues that read on its
-//! own cells; `ensure` is sent while the pack is open and dropped otherwise; `release` asked while
-//! the connection is down is sent after the next handshake, a second one joins the first, a
-//! refused one is reported, an accepted one ends the client, and one outstanding when a handshake
-//! is refused answers that refusal.
+//! growing, and the lifeline, and every reconnect sends the same two; the lifeline stays open while
+//! the client lives and hangs up when it is dropped; a refused handshake ends the client (every
+//! outstanding and later request answers why, and it never connects again); each refusal of
+//! `open-pack` reaches the reader, and a later open asks again with the same region; an `open-pack`
+//! refused for the holder, and a `wait` refused for its handle, make the client handshake again,
+//! re-open and re-issue; a `PackOpened` with another size, another region, an unsealed state memfd
+//! or a header of another pack is refused; a refused re-open breaks the pack and ends its waits; a
+//! wait ended by a refused re-open or by the client's end wakes its reader with the pack already
+//! broken; a reply of another kind than its request's, bytes that are not a frame, a frame with too
+//! few or too many descriptors, a stream that ends inside a frame, and a write that fails each end
+//! the connection, and the client connects again; a reply to no request is dropped; credentials the
+//! kernel adds to a read are ignored; an `open-pack` too large for a frame (a tree reference of
+//! more than 65535 bytes) is refused before it is sent; a `wait` asked while the connection is down
+//! is sent once the pack is open again; an `eio` of a cell another joined read does not need
+//! re-queues that read on its own cells; `ensure` is sent while the pack is open and dropped
+//! otherwise; `release` asked while the connection is down is sent after the next handshake, a
+//! second one joins the first, a refused one is reported, an accepted one ends the client, and one
+//! outstanding when a handshake is refused answers that refusal.
 
 use std::future::Future as _;
 use std::net::Shutdown;

@@ -23,7 +23,9 @@
 //! - a walk that sees nothing: the workspace has gated libraries, and the test names one;
 //! - a discovery that misses roots or counts files that are not roots: `tests/support/mod.rs`
 //!   and `tests/a/b.rs` are not roots, `tests/a/main.rs` and an explicit `path` are, and
-//!   `autotests = false` drops the discovered tests and keeps the explicit ones.
+//!   `autotests = false` drops the discovered tests and keeps the explicit ones; a listed target
+//!   with no `path` is the file Cargo takes by its name;
+//! - a library gate written over several lines, which would otherwise read as no gate.
 
 use std::collections::{BTreeMap, BTreeSet};
 use std::path::PathBuf;
@@ -60,10 +62,15 @@ fn tracked() -> Vec<String> {
 
 /// The crate-level `#![cfg(...)]` line of a library root (unindented, so not one of an inline
 /// module), if it has one.
+/// A crate-level `#![cfg(` written over several lines cannot be compared and is a panic, never
+/// read as no gate.
 fn gate(lib: &str) -> Option<&str> {
-    lib.lines()
-        .find(|l| l.starts_with("#![cfg(") && l.trim_end().ends_with(")]"))
-        .map(str::trim_end)
+    let line = lib.lines().find(|l| l.starts_with("#![cfg("))?.trim_end();
+    assert!(
+        line.ends_with(")]"),
+        "`{line}`: write a library's crate-level gate on one line"
+    );
+    Some(line)
 }
 
 /// The predicate `P` of a gate `#![cfg(P)]`.
@@ -122,12 +129,33 @@ fn roots(files: &[&str], manifest: &toml::Table) -> BTreeMap<String, Kind> {
     ] {
         let listed = manifest.get(table).and_then(toml::Value::as_array);
         for target in listed.into_iter().flatten() {
-            if let Some(path) = target.get("path").and_then(toml::Value::as_str) {
-                found.insert(path.trim_start_matches("./").to_owned(), kind);
-            }
+            let path = target.get("path").and_then(toml::Value::as_str);
+            let name = target.get("name").and_then(toml::Value::as_str);
+            let package = manifest
+                .get("package")
+                .and_then(|p| p.get("name"))
+                .and_then(toml::Value::as_str);
+            // Without a `path`, Cargo takes the target's file by its name.
+            let path = match (path, name, table) {
+                (Some(path), _, _) => path.trim_start_matches("./").to_owned(),
+                (None, Some(name), "bin") if Some(name) == package => "src/main.rs".to_owned(),
+                (None, Some(name), "bin") => format!("src/bin/{name}.rs"),
+                (None, Some(name), _) => format!("{}/{name}.rs", dir_of(table)),
+                (None, None, _) => continue,
+            };
+            found.insert(path, kind);
         }
     }
     found
+}
+
+/// The directory of a target kind's files.
+fn dir_of(table: &str) -> &'static str {
+    match table {
+        "bench" => "benches",
+        "example" => "examples",
+        _ => "tests",
+    }
 }
 
 /// What is wrong with the roots of crate `name` whose library carries `gate`, one finding each.
@@ -262,6 +290,11 @@ fn an_ungated_test_an_indented_gate_and_a_binary_with_no_other_main_are_named() 
     );
     assert_eq!(gate("#![cfg_attr(test, allow(dead_code))]\n"), None);
     assert_eq!(gate("//! #![cfg(target_os = \"linux\")]\n"), None);
+    let split = std::panic::catch_unwind(|| gate("#![cfg(any(\n    target_os = \"linux\"\n))]\n"));
+    assert!(
+        split.is_err(),
+        "a gate over several lines was read as {split:?}"
+    );
 }
 
 /// Asserts the roots Cargo would build: one file or a directory's `main.rs` under each target
@@ -312,6 +345,23 @@ fn the_discovered_roots_are_cargos_and_an_auto_key_set_false_keeps_only_listed_o
             ("benches/bench.rs", Kind::Gated),
             ("examples/ex.rs", Kind::Gated),
             ("other/listed.rs", Kind::Gated),
+        ])
+    );
+    let unpathed: toml::Table = "[package]\nname = \"c\"\nautotests = false\nautobins = false\n\
+        autobenches = false\nautoexamples = false\n\
+        [[test]]\nname = \"t\"\n[[bench]]\nname = \"b\"\n[[example]]\nname = \"e\"\n\
+        [[bin]]\nname = \"c\"\n[[bin]]\nname = \"tool\"\n[[bin]]\npath = \"x/main.rs\"\n[[test]]\n"
+        .parse()
+        .unwrap_or_else(|e| panic!("parse: {e}"));
+    assert_eq!(
+        roots(&files, &unpathed),
+        all(&[
+            ("benches/b.rs", Kind::Gated),
+            ("examples/e.rs", Kind::Gated),
+            ("src/bin/tool.rs", Kind::Bin),
+            ("src/main.rs", Kind::Bin),
+            ("tests/t.rs", Kind::Gated),
+            ("x/main.rs", Kind::Bin),
         ])
     );
 }
