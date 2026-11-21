@@ -6,7 +6,9 @@
 //! - its `on` names `pull_request_target` (it runs with the base repository's token and
 //!   secrets on code from a fork), or any key or value names `self-hosted`;
 //! - a step's (or a job's) `uses:` is not an action pinned to a full 40-character commit SHA
-//!   followed on the same line by a version comment (`# v1.2.3`), or names a local path;
+//!   followed on the same line by a version comment (`# v1.2.3`), or names a local path. In
+//!   [`farm_lane::FILE`] alone, [`farm_lane::FARM_CONNECT`] is pinned by commit with no version
+//!   comment: komira tags no release of it;
 //! - a job's `permissions` is not a mapping, or grants `write` for a scope that is not in
 //!   [`WRITE_ALLOWED`] for that workflow file and job, or grants it under another `if:` than
 //!   the one the table gives. So `id-token` and `attestations` (the scopes that sign) are
@@ -17,14 +19,20 @@
 //!   for the farm), and by the release's `testing-upload` and `promote-latest` jobs (the
 //!   token the release-files role admits) and its twelve apt jobs that read and write the
 //!   repository (the token the apt role admits), six for the suite `testing` and six for `stable`, and the same twelve for the rpm tree, and by the release's `deploy` and `deploy-mac`
-//!   jobs (the token the hostkeeper coordinator admits, as for `set-desired`); `contents: write`
+//!   jobs (the token the hostkeeper coordinator admits, as for `set-desired`), and by the `build`
+//!   job of the farm lane's `farm.yml`, the one job a pull request starts that holds a write scope
+//!   (the token the farm's network trusts, for farm-connect's join); `contents: write`
 //!   by the release's `publish` job alone; `issues` by `advisories.yml` and by the `red` job of
 //!   `release.yml` and of `beta.yml` (the issue `RELEASE-RED: tierstore <stage>`).
+//!
+//! - it is [`farm_lane::FILE`] and breaks a rule of its own ([`farm_lane::problems`]: its
+//!   triggers, its one job, its rights, farm-connect's inputs, and the `local: 0` build after it).
 //!
 //! Keys are matched exactly. What this does not evaluate it refuses: a YAML tag, a second
 //! document, an alias to an unfinished node, a document that does not parse.
 
 use super::desired::SET_IF as DESIRED_SET_IF;
+use super::farm_lane;
 use super::yaml::{self, Node, Value};
 
 /// A write permission a job may hold: the workflow file, the job, the scope, and the `if:` of
@@ -264,6 +272,12 @@ pub const WRITE_ALLOWED: &[Allowed] = &[
         condition: MAIN_ONLY,
     },
     Allowed {
+        file: farm_lane::FILE,
+        job: farm_lane::JOB,
+        scope: "id-token",
+        condition: farm_lane::JOB_IF,
+    },
+    Allowed {
         file: "release.yml",
         job: "deploy",
         scope: "id-token",
@@ -351,8 +365,9 @@ fn uses<'a>(node: &'a Node, out: &mut Vec<(usize, &'a str)>) {
     }
 }
 
-/// What is wrong with the `uses:` value `value` on `line` of `text`, if anything.
-fn pin_problem(text: &str, line: usize, value: &str) -> Option<String> {
+/// What is wrong with the `uses:` value `value` on `line` of `text`, the workflow `file`, if
+/// anything.
+fn pin_problem(file: &str, text: &str, line: usize, value: &str) -> Option<String> {
     let Some((action, rest)) = value.split_once('@') else {
         return Some(format!(
             "line {line}: `uses: {value}` is not pinned (owner/repo@<40 hex digits>)"
@@ -373,7 +388,7 @@ fn pin_problem(text: &str, line: usize, value: &str) -> Option<String> {
         c.strip_prefix('v')
             .is_some_and(|v| v.starts_with(|ch: char| ch.is_ascii_digit()))
     });
-    if versioned {
+    if versioned || farm_lane::unversioned_pin_allowed(file, value) {
         None
     } else {
         Some(format!(
@@ -412,12 +427,15 @@ pub fn lint(file: &str, text: &str) -> Vec<String> {
     uses(&doc, &mut pinned);
     problems.extend(super::allowed_actions::action_problems(&pinned));
     for (line, value) in pinned {
-        problems.extend(pin_problem(text, line, value));
+        problems.extend(pin_problem(file, text, line, value));
     }
     let jobs = entry(&doc, "jobs").map_or(&[][..], entries);
     for (name, job) in jobs {
         let name = name.as_str().unwrap_or_default();
         problems.extend(permission_problems(file, name, job));
+    }
+    if file == farm_lane::FILE {
+        problems.extend(farm_lane::problems(&doc));
     }
     problems
 }

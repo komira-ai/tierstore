@@ -1,0 +1,91 @@
+# The farm lane: `buck2 build //:ci` of the Cargo workspace through buildrules (BUCK,
+# buildrules.bzl, .buckconfig), with every action run on the build farm or taken from its cache
+# (docs/farm.md). `//:ci` is every member's `:fmt` (rustfmt), `:lint` (clippy with `-D warnings`)
+# and `:test` (each test target run as a build action), but for the members whose
+# `[package.metadata.buildrules]` keeps their tests in ci.yml (among them every member with FUSE
+# tests); docs/farm.md says which and why.
+#
+# It is additive and advisory. ci.yml stays the pull-request gate: its tests run under coverage,
+# the 99% gate is there, and so are the tests the farm cannot run (FUSE mounts, the tests that read
+# the git checkout or run cargo, git or a shell). A farm outage turns this check red and blocks
+# nothing; a fix to the farm itself is built and tested by ci.yml alone.
+#
+# The farm is reached through komira's farm-connect action, pinned by commit (komira tags no
+# release of it). It joins the farm's private network with this job's OIDC token (workload identity
+# federation: the farm trusts a token GitHub issues to this repository, and nothing is stored),
+# refuses to go on unless the farm answers, and writes the farm's buckconfig under ~/.buckconfig.d.
+# Its inputs are the organisation's variables TS_CLIENT_ID and TS_AUDIENCE (the tailnet identity),
+# FARM_ADDRESS, FARM_INSTANCE, FARM_LINUX_X86_64_PROPERTIES and FARM_TLS; this repository holds no
+# endpoint and no worker property set. That is why the one job holds `id-token: write` on a pull
+# request, which the workflow lint allows to this job alone, under its exact `if:`
+# (crates/xtask/tests/workflows/farm_lane.rs): a push to main, or a pull request from a branch of
+# this repository that is not Dependabot's. A fork's pull request gets no OIDC token, and is skipped.
+#
+# buck2 is the release buildrules is tested with (its tools/buck2), installed by `cargo xtask
+# fetch` only once its SHA-256 matches.
+name: farm
+
+on:
+  pull_request:
+  push:
+    branches: [main]
+
+permissions: {}
+
+# A pull request's newer run replaces its older one; a push to main always runs to its end.
+concurrency:
+  group: farm-${{ github.event_name == 'pull_request' && github.ref || github.run_id }}
+  cancel-in-progress: ${{ github.event_name == 'pull_request' }}
+
+jobs:
+  build:
+    if: ${{ github.event_name == 'push' || (github.event.pull_request.head.repo.full_name == github.repository && !startsWith(github.head_ref, 'dependabot/')) }}
+    runs-on: ubuntu-24.04
+    timeout-minutes: 150
+    permissions:
+      contents: read
+      # For farm-connect's tailnet join alone: the OIDC token the farm's network trusts.
+      id-token: write
+    env:
+      BUCK2_VERSION: 2026-09-15
+      BUCK2_SHA256: 1268fce33fb61273091dd5dd8c60b65de1521a3caa36b88983813e882b7ffd89
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+      - run: rustup toolchain install
+      # xtask is built on the runner (the one cargo build of this job); its own cache.
+      - uses: actions/cache/restore@55cc8345863c7cc4c66a329aec7e433d2d1c52a9 # v6.1.0
+        id: cargo-cache
+        with:
+          path: |
+            ~/.cargo/registry
+            ~/.cargo/git
+            target
+          key: cargo-${{ runner.os }}-${{ runner.arch }}-${{ github.job }}-farm-${{ hashFiles('Cargo.lock', 'rust-toolchain.toml') }}
+          restore-keys: cargo-${{ runner.os }}-${{ runner.arch }}-${{ github.job }}-farm-
+      - name: Install buck2 (pinned version and checksum)
+        run: cargo xtask fetch --url "https://github.com/facebook/buck2/releases/download/$BUCK2_VERSION/buck2-x86_64-unknown-linux-gnu.zst" --sha256 "$BUCK2_SHA256" --out "$RUNNER_TEMP/bin/buck2" --extract zst
+      - uses: actions/cache/save@55cc8345863c7cc4c66a329aec7e433d2d1c52a9 # v6.1.0
+        if: ${{ github.event_name == 'push' && steps.cargo-cache.outputs.cache-hit != 'true' }}
+        with:
+          path: |
+            ~/.cargo/registry
+            ~/.cargo/git
+            target
+          key: ${{ steps.cargo-cache.outputs.cache-primary-key }}
+      - name: Connect to the farm
+        uses: komira-ai/komira/.github/actions/farm-connect@a26616d62db17ee8aff67ee9c12d411c2fad7609
+        with:
+          ts-client-id: ${{ vars.TS_CLIENT_ID }}
+          ts-audience: ${{ vars.TS_AUDIENCE }}
+          farm-address: ${{ vars.FARM_ADDRESS }}
+          farm-instance: ${{ vars.FARM_INSTANCE }}
+          farm-properties: ${{ vars.FARM_LINUX_X86_64_PROPERTIES }}
+          tls: ${{ vars.FARM_TLS || 'false' }}
+      # One command (crates/xtask/src/farm.rs): it refuses to build unless .buckconfig handed
+      # farm-connect's worker property set to buildrules, builds //:ci with buck2's progress in this
+      # log, fails unless the summary line says `local: 0` (every action ran on the farm or came
+      # from its cache), and stops buck2's daemon however the build ended.
+      - name: buck2 build //:ci on the farm, local 0
+        run: cargo xtask farm-build --buck2 "$RUNNER_TEMP/bin/buck2" --target //:ci
