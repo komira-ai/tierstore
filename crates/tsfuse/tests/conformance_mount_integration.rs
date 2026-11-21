@@ -254,8 +254,8 @@ fn no_control_file_system() -> Option<String> {
 /// it then returns nothing.
 struct ControlEntry {
     /// Read once, after the unmount: the file cannot seek (`pread` fails `ESPIPE`) and a second
-    /// read of a descriptor is past the count's end.
-    waiting: File,
+    /// read of a descriptor is at end of file.
+    unread: File,
     path: PathBuf,
 }
 
@@ -272,14 +272,14 @@ impl ControlEntry {
             "{} reads a count while mounted",
             path.display()
         );
-        let waiting = File::open(&path).unwrap();
-        Self { waiting, path }
+        let unread = File::open(&path).unwrap();
+        Self { unread, path }
     }
 
     /// The connection's count of waiting requests, or `None` once the kernel removed the
     /// directory and the read returns nothing.
     fn waiting(self) -> Option<u64> {
-        read_count(&self.waiting, &self.path)
+        read_count(&self.unread, &self.path)
     }
 }
 
@@ -287,12 +287,12 @@ impl ControlEntry {
 fn read_count(mut file: &File, path: &Path) -> Option<u64> {
     let mut buf = [0u8; 32];
     let n = io::Read::read(&mut file, &mut buf).unwrap();
+    if n == 0 {
+        return None;
+    }
     let text = std::str::from_utf8(&buf[..n]).unwrap();
-    (n > 0).then(|| {
-        text.strip_suffix('\n')
-            .and_then(|count| count.parse().ok())
-            .unwrap_or_else(|| panic!("{}: {text:?} is not a count", path.display()))
-    })
+    let count = text.strip_suffix('\n').and_then(|count| count.parse().ok());
+    Some(count.unwrap_or_else(|| panic!("{}: {text:?} is not a count", path.display())))
 }
 
 #[test]
@@ -748,7 +748,7 @@ fn the_abort_of_a_mount_that_is_gone_is_an_error_naming_the_abort_file_and_write
         "nothing was created at {}",
         abort.display()
     );
-    // The old connection's directory is gone, so no abort file of it was there to write.
+    // The old connection's directory was removed: its control files are detached from it.
     if let Some(control) = control {
         let path = control.path.clone();
         assert_eq!(
