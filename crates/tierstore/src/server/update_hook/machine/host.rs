@@ -110,6 +110,66 @@ pub struct SystemHost<'a> {
     accounts: Accounts,
     /// The one binary every release is answered by, when set: the config hook's.
     binary: Option<PathBuf>,
+    /// A directory on the host that only root may enter, when set: a configuration file under
+    /// it is read by the hook and handed over to a check ([`handed_over`]).
+    root_only: Option<PathBuf>,
+}
+
+/// A configuration file the hook read, handed to a check that cannot reach its path.
+struct Handed {
+    /// On Linux, a file in memory holding the text, which the child inherits.
+    #[cfg(target_os = "linux")]
+    _file: fs::File,
+    /// The path the check reads it at.
+    path: String,
+    /// What the check is given on its standard input, if that is the way.
+    stdin: Option<Vec<u8>>,
+}
+
+/// On Linux, `text` in a file in memory (`memfd_create`) that the child of the next call
+/// inherits (the descriptor alone is not closed on exec, and is at least 3), read by the check
+/// at `/proc/self/fd/<n>`. A file in memory is open to every user (the kernel makes it mode
+/// 0777), so the check reads it after it has taken the service account's ids; standard input
+/// would not do, as a reopen of `/dev/stdin` under the account's ids is refused for a pipe that
+/// root made. The descriptor reaches only that child: the hook starts one program at a time.
+#[cfg(target_os = "linux")]
+fn handed_over(text: &str) -> Result<Handed, Fault> {
+    use rustix::fs::{MemfdFlags, memfd_create};
+    use rustix::io::{FdFlags, fcntl_dupfd_cloexec, fcntl_setfd};
+    use std::io::Write;
+    use std::os::fd::AsRawFd;
+    let fault = |error: &dyn std::fmt::Display| {
+        Fault(format!("a file in memory for the configuration: {error}"))
+    };
+    let fd = memfd_create("tierstore-config", MemfdFlags::CLOEXEC).map_err(|e| fault(&e))?;
+    let mut file = fs::File::from(fcntl_dupfd_cloexec(&fd, 3).map_err(|e| fault(&e))?);
+    file.write_all(text.as_bytes()).map_err(|e| fault(&e))?;
+    fcntl_setfd(&file, FdFlags::empty()).map_err(|e| fault(&e))?;
+    Ok(Handed {
+        path: format!("/proc/self/fd/{}", file.as_raw_fd()),
+        _file: file,
+        stdin: None,
+    })
+}
+
+/// Elsewhere (a Mac), `text` on the check's standard input, read at `/dev/stdin`: there that
+/// is the descriptor itself, whoever the check runs as, and `sudo` hands its input on.
+#[cfg(not(target_os = "linux"))]
+fn handed_over(text: &str) -> Result<Handed, Fault> {
+    Ok(Handed {
+        path: "/dev/stdin".to_owned(),
+        stdin: Some(text.as_bytes().to_vec()),
+    })
+}
+
+/// The binary of a check as the child executes it: on Linux an open file of the hook's, which
+/// the child reaches as `/proc/self/fd/<n>` without searching the directories above the file.
+struct Opened {
+    /// The open binary, held until the child has executed it.
+    #[cfg(target_os = "linux")]
+    _file: fs::File,
+    /// The path the child executes.
+    exec: String,
 }
 
 /// `path` below `root`: an absolute path is taken as if the root were `/`.
@@ -131,6 +191,7 @@ impl<'a> SystemHost<'a> {
             account: SERVICE_ACCOUNT.to_owned(),
             accounts: Accounts::PasswdFile,
             binary: None,
+            root_only: None,
         }
     }
 
@@ -140,6 +201,16 @@ impl<'a> SystemHost<'a> {
     #[must_use]
     pub fn with_binary(mut self, binary: PathBuf) -> SystemHost<'a> {
         self.binary = Some(binary);
+        self
+    }
+
+    /// The same, with `dir` (an absolute path on the host) as a directory that only root may
+    /// enter: the config hook's staged package, whose copy of the configuration file the service
+    /// account cannot read. A check of a file under it is handed the file's text, read by the
+    /// hook ([`handed_over`]).
+    #[must_use]
+    pub(crate) fn with_root_only(mut self, dir: PathBuf) -> SystemHost<'a> {
+        self.root_only = Some(dir);
         self
     }
 
@@ -176,6 +247,18 @@ impl<'a> SystemHost<'a> {
     fn check(&self, path: &Path, want: fn(&fs::FileType) -> bool, noun: &str) -> Result<(), Fault> {
         let meta = fs::symlink_metadata(path)
             .map_err(|error| Fault(format!("{}: {error}", path.display())))?;
+        self.held_to(&meta, path, want, noun)
+    }
+
+    /// Whether `meta`, of `path`, is of the kind `want`, owned by the release owner and not
+    /// writable by a group or others.
+    fn held_to(
+        &self,
+        meta: &fs::Metadata,
+        path: &Path,
+        want: fn(&fs::FileType) -> bool,
+        noun: &str,
+    ) -> Result<(), Fault> {
         if !want(&meta.file_type()) {
             return Err(format!("{} is not a {noun}", path.display()).into());
         }
@@ -290,6 +373,54 @@ impl<'a> SystemHost<'a> {
             .ok_or_else(|| missing("no numeric UniqueID and PrimaryGroupID".to_owned()))
     }
 
+    /// Opens `binary` for a child to execute, and holds what was opened to the checks of
+    /// [`Self::binary_of`]: a regular file (the open follows no link), owned by the release owner
+    /// and not writable by a group or others. The descriptor is at least 3, so that the child's
+    /// standard streams never take its place.
+    #[cfg(target_os = "linux")]
+    fn open_binary(&self, binary: &Path) -> Result<Opened, Fault> {
+        use rustix::fs::{Mode, OFlags, open};
+        use std::os::fd::AsRawFd;
+        let fault = |error: &dyn std::fmt::Display| Fault(format!("{}: {error}", binary.display()));
+        let flags = OFlags::RDONLY | OFlags::CLOEXEC | OFlags::NOFOLLOW;
+        let fd = open(binary, flags, Mode::empty()).map_err(|error| fault(&error))?;
+        let fd = rustix::io::fcntl_dupfd_cloexec(&fd, 3).map_err(|error| fault(&error))?;
+        let file = fs::File::from(fd);
+        let meta = file.metadata().map_err(|error| fault(&error))?;
+        self.held_to(&meta, binary, fs::FileType::is_file, "regular file")?;
+        Ok(Opened {
+            exec: format!("/proc/self/fd/{}", file.as_raw_fd()),
+            _file: file,
+        })
+    }
+
+    /// Elsewhere the child executes `binary` by its path, checked again as it is now.
+    #[cfg(not(target_os = "linux"))]
+    fn open_binary(&self, binary: &Path) -> Result<Opened, Fault> {
+        self.check(binary, fs::FileType::is_file, "regular file")?;
+        Ok(Opened {
+            exec: binary.to_string_lossy().into_owned(),
+        })
+    }
+
+    /// The text of the configuration file `config` (`file` under the root) when it is under the
+    /// directory of [`Self::with_root_only`], read by the hook; `None` for a file the check is to
+    /// read itself. A file that is not there, or cannot be read, is an error naming it.
+    fn root_only_text(&self, config: &Path, file: &Path) -> Result<Option<String>, Fault> {
+        if !self
+            .root_only
+            .as_ref()
+            .is_some_and(|dir| config.starts_with(dir))
+        {
+            return Ok(None);
+        }
+        let text = self
+            .read_config(file)
+            .map_err(|fault| Fault(format!("{}: {fault}", file.display())))?;
+        text.map(Some)
+            .ok_or_else(|| Fault(format!("{} is not there", file.display())))
+    }
+
     fn read_config(&self, path: &Path) -> Result<Option<String>, Fault> {
         let mut file = match fs::File::open(path) {
             Ok(file) => file,
@@ -348,7 +479,7 @@ impl Host for SystemHost<'_> {
     /// as for `--capabilities`): exit 0 is a configuration it accepts, exit 2 one it refuses (its
     /// standard error is the line). Any other status, a binary that cannot be started and one
     /// that does not end are errors, so that a release that cannot say is not taken for one that
-    /// refuses.
+    /// refuses. An error names the command, the user it ran as and how it failed.
     ///
     /// The binary is held to the same checks as for `--capabilities`. When the hook runs as
     /// root it runs as the service account: `tierstore`, found in `etc/passwd` under the root,
@@ -356,45 +487,107 @@ impl Host for SystemHost<'_> {
     /// an error): the check refuses key files the user it runs as does not own, and the service
     /// does not run as root. A hook that is not root runs it as itself.
     ///
-    /// On Linux the child is started under the account's user and group ids. On a Mac it is
-    /// started as `sudo -n -u #<uid> -- <binary> ...`, which gives it the account's primary
-    /// group and its other groups from the directory service, as launchd gives the job. Setting
-    /// the ids on the child directly does not work there: the standard library clears the
-    /// supplementary groups (`setgroups(0, NULL)`) after it sets the group id, and on macOS that
-    /// also resets the effective group to 0, so the check could not enter
+    /// hostkeeper keeps a staged package closed to every user but root (it may hold a secret),
+    /// so the service account cannot reach a binary or a file under it by its path. On Linux the
+    /// hook opens the binary itself, checks what it opened as it checked the path, and the child
+    /// is started under the account's user and group ids and executes that open file
+    /// (`/proc/self/fd/<n>`, which needs no search of the directories above it): the account
+    /// needs only the right to execute the file. A configuration file under the directory of
+    /// [`Self::with_root_only`] (the copy a config package stages) is read by the hook and
+    /// handed over in a file in memory the child inherits (`--config /proc/self/fd/<n>`, see
+    /// [`handed_over`]); any other one is named by its path, so that the check still proves the
+    /// account can read it, and every key file it names.
+    ///
+    /// On a Mac it is started as `sudo -n -u #<uid> -- <binary> ...`, which gives it the
+    /// account's primary group and its other groups from the directory service, as launchd gives
+    /// the job. Setting the ids on the child directly does not work there: the standard library
+    /// clears the supplementary groups (`setgroups(0, NULL)`) after it sets the group id, and on
+    /// macOS that also resets the effective group to 0, so the check could not enter
     /// `/usr/local/tierstore/etc` (root:_tierstore, 0750) and refused every configuration with
-    /// "Permission denied".
+    /// "Permission denied". The binary a Mac checks with is the installed one, outside every
+    /// staged package (`sudo` closes every descriptor but the standard three, so a descriptor
+    /// could not be handed on); a configuration file under the root-only directory goes on its
+    /// standard input (`--config /dev/stdin`), which on macOS is the descriptor itself.
     fn check_config(&self, release: &Path, config: &Path) -> Result<Option<String>, PortError> {
-        let binary = self
-            .binary_of(release)
-            .map_err(|fault| PortError::failed(KIND, fault.to_string()))?;
-        let run_as = self
-            .run_as()
-            .map_err(|fault| PortError::failed(KIND, fault.to_string()))?;
-        let program = binary.to_string_lossy();
+        let failed = |fault: Fault| PortError::failed(KIND, fault.to_string());
+        let binary = self.binary_of(release).map_err(failed)?;
+        let run_as = self.run_as().map_err(failed)?;
         let file = under(&self.root, config);
-        let file = file.to_string_lossy();
-        let check = ["--config", file.as_ref(), "--check-config"];
-        let call = match (run_as, self.accounts) {
-            (None, _) => Call::new(&program, &check, self.timeout),
-            (Some((uid, gid)), Accounts::PasswdFile) => {
-                Call::new(&program, &check, self.timeout).running_as(uid, gid)
-            }
+        let text = self.root_only_text(config, &file).map_err(failed)?;
+        let handed = text
+            .as_deref()
+            .map(handed_over)
+            .transpose()
+            .map_err(failed)?;
+        let shown_config = file.to_string_lossy().into_owned();
+        let named = handed
+            .as_ref()
+            .map_or(shown_config.as_str(), |handed| handed.path.as_str());
+        let check = ["--config", named, "--check-config"];
+        let who = match run_as {
+            None => format!("the hook's own user (uid {})", self.hook_uid),
+            Some((uid, gid)) => format!("{} (uid {uid}, gid {gid})", self.account),
+        };
+        let program = binary.to_string_lossy().into_owned();
+        let opened;
+        let (call, by_descriptor) = match (run_as, self.accounts) {
             // `sudo` takes the primary group from the account record itself; the
             // `PrimaryGroupID` read above is still required, so that an account record
             // without one fails as a missing account rather than at the check.
             (Some((uid, _)), Accounts::DirectoryService) => {
                 let user = format!("#{uid}");
-                let mut args = vec!["-n", "-u", user.as_str(), "--", program.as_ref()];
+                let mut args = vec!["-n", "-u", user.as_str(), "--", program.as_str()];
                 args.extend(check);
-                Call::new(SUDO_PROGRAM, &args, self.timeout)
+                (Call::new(SUDO_PROGRAM, &args, self.timeout), false)
+            }
+            (run_as, _) => {
+                opened = self.open_binary(&binary).map_err(failed)?;
+                let call = Call::new(&opened.exec, &check, self.timeout);
+                let call = match run_as {
+                    Some((uid, gid)) => call.running_as(uid, gid),
+                    None => call,
+                };
+                (call, cfg!(target_os = "linux"))
             }
         };
-        let output = run(self.runner, &call, KIND)?;
-        if output.code == Some(CONFIG_REFUSED) {
-            return Ok(Some(output.stderr_text()));
+        // What was run and as whom, for every message: the binary by the path it was found at
+        // (also when the child executed the file the hook opened), and a configuration the hook
+        // handed over by its own path.
+        let mut shown = if by_descriptor {
+            format!(
+                "{program} --config {shown_config} --check-config (executed from the file the \
+                 hook opened)"
+            )
+        } else {
+            call.describe()
+        };
+        if handed.is_some() {
+            shown.push_str(&format!(
+                ", {shown_config} read by the hook and handed over"
+            ));
         }
-        checked(output, &call, KIND)?;
-        Ok(None)
+        shown.push_str(&format!(", as {who}"));
+        let call = match handed.as_ref().and_then(|handed| handed.stdin.as_deref()) {
+            Some(bytes) => call.with_stdin(bytes),
+            None => call,
+        };
+        let output = self
+            .runner
+            .run(&call)
+            .map_err(|error| PortError::failed(KIND, format!("{shown}: {error}")))?;
+        let how = match output.code {
+            Some(0) => return Ok(None),
+            Some(CONFIG_REFUSED) => return Ok(Some(output.stderr_text())),
+            Some(code) => format!("exited {code}"),
+            None => "ended by a signal".to_owned(),
+        };
+        Err(PortError::failed(
+            KIND,
+            format!("{shown}: {how}: {}", output.stderr_text()),
+        ))
     }
 }
+
+#[cfg(test)]
+#[path = "host_root_only_tests.rs"]
+mod root_only_tests;

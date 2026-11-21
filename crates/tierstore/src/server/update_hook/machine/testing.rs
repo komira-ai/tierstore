@@ -13,9 +13,41 @@ use super::{Call, Output, RunError, Runner, StateFiles};
 /// The time limit the tests give calls they do not time.
 pub const LIMIT: Duration = Duration::from_secs(7);
 
-/// Answers the calls in order and keeps them.
+/// The prefix of a program that is a descriptor of the hook's own (`/proc/self/fd/<n>`).
+pub const OWN_DESCRIPTOR: &str = "/proc/self/fd/";
+
+/// `call` as it executes: a program that is a descriptor of this process is the file it was
+/// opened from, read while the call runs (the descriptor is closed after it). Every other call is
+/// itself.
+pub fn as_executed(call: &Call) -> Call {
+    let mut call = call.clone();
+    if call.program.starts_with(OWN_DESCRIPTOR) {
+        let file = std::fs::read_link(&call.program).expect("the descriptor is open");
+        call.program = file.to_string_lossy().into_owned();
+    }
+    call
+}
+
+/// What `call` is handed as its configuration, read while it runs: the file a `--config` of a
+/// descriptor of this process names (a file in memory the hook made), or else its standard input.
+pub fn handed(call: &Call) -> Option<Vec<u8>> {
+    let config = call
+        .args
+        .iter()
+        .skip_while(|arg| *arg != "--config")
+        .nth(1)
+        .filter(|path| path.starts_with(OWN_DESCRIPTOR));
+    match config {
+        Some(path) => Some(std::fs::read(path).expect("the descriptor is open")),
+        None => call.stdin.clone(),
+    }
+}
+
+/// Answers the calls in order and keeps them, each as it executes ([`as_executed`]), and what
+/// each was handed ([`handed`]).
 pub struct FakeRunner {
     calls: RefCell<Vec<Call>>,
+    handed: RefCell<Vec<Option<Vec<u8>>>>,
     replies: RefCell<VecDeque<Result<Output, RunError>>>,
 }
 
@@ -24,6 +56,7 @@ impl FakeRunner {
     pub fn replying(replies: Vec<Result<Output, RunError>>) -> FakeRunner {
         FakeRunner {
             calls: RefCell::new(Vec::new()),
+            handed: RefCell::new(Vec::new()),
             replies: RefCell::new(replies.into()),
         }
     }
@@ -32,11 +65,17 @@ impl FakeRunner {
     pub fn calls(&self) -> Vec<Call> {
         self.calls.borrow().clone()
     }
+
+    /// What each call so far was handed as its configuration ([`handed`]).
+    pub fn handed(&self) -> Vec<Option<Vec<u8>>> {
+        self.handed.borrow().clone()
+    }
 }
 
 impl Runner for FakeRunner {
     fn run(&self, call: &Call) -> Result<Output, RunError> {
-        self.calls.borrow_mut().push(call.clone());
+        self.calls.borrow_mut().push(as_executed(call));
+        self.handed.borrow_mut().push(handed(call));
         self.replies
             .borrow_mut()
             .pop_front()

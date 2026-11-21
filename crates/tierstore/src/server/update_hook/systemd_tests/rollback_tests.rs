@@ -3,8 +3,8 @@
 use crate::server::update_hook::{Instance, Reason, Record, Step, UnitState};
 
 use super::fake::{
-    CONFIG, NEW, OLD, SystemdFake, assert_deferred, assert_failed, assert_ok, detail, params,
-    params_with,
+    CONFIG, NEW, NEWER, OLD, SystemdFake, assert_deferred, assert_failed, assert_ok, detail,
+    params, params_with, version_of,
 };
 
 use Step::{Cutover, Prepare, Rollback, Verify};
@@ -209,4 +209,40 @@ fn a_rollback_of_an_update_that_began_with_no_live_instance_starts_the_other_let
     assert_eq!(fake.record(), Record::idle(Some(Instance::B)));
     assert_eq!(fake.running(), [Instance::B]);
     assert_eq!(fake.markers(), [Instance::B]);
+}
+
+/// Asserts that after an update has finished (the record at rest, committed), a `prepare` of the
+/// next update that fails before it records anything (here its check of the configuration cannot
+/// be run) is reversible, and that the `rollback` hostkeeper runs next succeeds, says there was
+/// nothing to roll back, is reversible, starts or stops nothing and leaves the record as it was.
+/// Catches a rollback that holds such params to the finished update on record and fails
+/// `bad_params` irreversibly, which hostkeeper reports as an update failed after its commit.
+#[test]
+fn a_rollback_after_a_prepare_that_failed_has_nothing_to_roll_back() {
+    let fake = SystemdFake::installed();
+    let config = format!("config_file = \"{CONFIG}\"\n");
+    fake.complete(&params_with(NEW, Some(OLD), &config));
+    let at_rest = fake.record();
+    assert!(at_rest.committed() && !at_rest.updating, "{at_rest:?}");
+    let next = params_with(NEWER, Some(NEW), &config);
+    fake.fail_on(Some("host.check_config"));
+    let prepare = fake.run_as_hostkeeper(Prepare, &next);
+    assert_failed(&prepare, Reason::HostFailed);
+    assert!(prepare.report.reversible);
+    fake.fail_on(None);
+    let before = fake.actions().len();
+    let rollback = fake.run_as_hostkeeper(Rollback, &next);
+    assert_ok(&rollback);
+    assert!(rollback.report.reversible);
+    assert_eq!(
+        detail(&rollback),
+        format!(
+            "nothing to roll back: the update to {NEWER} {} was never recorded (its prepare \
+             failed or never ran); the record is at rest on the last update ({NEW} {})",
+            version_of(NEWER),
+            version_of(NEW)
+        )
+    );
+    assert_eq!(fake.actions()[before..], [] as [String; 0]);
+    assert_eq!(fake.record(), at_rest);
 }
