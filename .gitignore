@@ -1,1 +1,3 @@
 /target
+.buckconfig.local
+buck-out/

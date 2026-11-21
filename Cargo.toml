@@ -241,3 +241,16 @@ opt-level = 3
 
 [profile.test.package.loom]
 opt-level = 3
+
+# The policy of the Buck2 build through buildrules (docs/farm.md): `//:ci` is every member's
+# rustfmt check (`:fmt`, with rustfmt.toml), its clippy (`:lint`, warnings as errors, as ci.yml's)
+# and its tests (`:test`), but where a member's own `[package.metadata.buildrules]` keeps its tests
+# in ci.yml. Cargo ignores this table.
+[workspace.metadata.buildrules]
+default-action = "ci"
+
+[workspace.metadata.buildrules.actions]
+ci = ["fmt", "lint", "test"]
+
+[workspace.metadata.buildrules.lint]
+deny-warnings = true

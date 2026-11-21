@@ -1,0 +1,10 @@
+load("//:buildrules.bzl", "cargo_package")
+
+# What this package reads beyond src/, tests/ and build.rs, which a Buck2 action sees only when
+# declared: the stored-format fixtures of tierstore's tests.
+cargo_package(
+    path = ".",
+    extra_srcs = [
+        "//crates/tierstore:tests/stored_formats/fixtures",
+    ],
+)

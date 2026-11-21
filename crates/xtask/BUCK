@@ -1,0 +1,13 @@
+load("//:buildrules.bzl", "cargo_package")
+
+# What this package reads beyond src/, tests/ and build.rs, which a Buck2 action sees only when
+# declared: the release code includes the licence and the packaging it ships, and a test target
+# includes the install pages' module of src/.
+cargo_package(
+    path = ".",
+    extra_srcs = [
+        "src/install_pages.rs",
+        "//:LICENSE",
+        "//:packaging",
+    ],
+)

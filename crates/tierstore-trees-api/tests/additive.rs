@@ -21,7 +21,11 @@ const GOLDEN: &[u8] = include_bytes!("golden/trees.v1.fds");
 
 /// The descriptor of the proto of this tree, compiled as `build.rs` compiles it.
 fn current() -> FileDescriptorSet {
-    protox::compile(["tierstore/trees/v1/trees.proto"], ["proto"]).expect("the proto compiles")
+    protox::compile(
+        ["tierstore/trees/v1/trees.proto"],
+        [concat!(env!("CARGO_MANIFEST_DIR"), "/proto")],
+    )
+    .expect("the proto compiles")
 }
 
 fn golden() -> FileDescriptorSet {

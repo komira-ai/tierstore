@@ -1,0 +1,25 @@
+load("//:buildrules.bzl", "cargo_package")
+
+# What this package reads beyond src/, tests/ and build.rs, which a Buck2 action sees only when
+# declared (a unit sees its own src/, tests/ or build.rs alone). The library's tests include the
+# stored-format fixtures of tests/ and read the crate's docs, the handover design and the packaging
+# they are held to; the integration tests include the two benchmarks of examples/ and read the
+# packaging.
+cargo_package(
+    path = ".",
+    extra_srcs = [
+        "docs",
+        "examples",
+        "tests/stored_formats/fixtures",
+        "//:docs/design/tierstore-handover.md",
+        "//:packaging",
+    ],
+)
+
+# Read by other members (their extra_srcs); exported by reference, so it stays at its path.
+export_file(
+    name = "tests/stored_formats/fixtures",
+    src = "tests/stored_formats/fixtures",
+    mode = "reference",
+    visibility = ["PUBLIC"],
+)

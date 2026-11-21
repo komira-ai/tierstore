@@ -1,0 +1,12 @@
+load("//:buildrules.bzl", "cargo_package")
+
+# What this package reads beyond src/, tests/ and build.rs, which a Buck2 action sees only when
+# declared. The benchmark test includes examples/l2_bench.rs; the golden test reads the tree-list
+# fixtures of the stored formats, which live in tierstore's tests.
+cargo_package(
+    path = ".",
+    extra_srcs = [
+        "examples",
+        "//crates/tierstore:tests/stored_formats/fixtures",
+    ],
+)

@@ -205,3 +205,14 @@ toml.workspace = true
 
 [lints]
 workspace = true
+
+[package.metadata.buildrules]
+# The farm lane's `//:ci` (docs/farm.md) checks the format of, builds and lints this package but does
+# not run its tests. They mount FUSE file systems through /dev/fuse and fusermount3; bind Unix sockets
+# under the test's TMPDIR, which on the farm is too deep for a socket's path
+# (komira-ai/buildrules#170); and some re-run their own binary with an `#[ignore]`d helper test
+# selected, or need a MinIO server (ignored), and tests/fs_macos.rs has no test on Linux, either of
+# which buildrules' test gate refuses. They run in ci.yml alone.
+
+[package.metadata.buildrules.actions]
+ci = ["fmt", "lint"]
