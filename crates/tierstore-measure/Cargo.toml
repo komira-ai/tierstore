@@ -37,3 +37,12 @@ tokio = { workspace = true, features = ["macros"] }
 
 [lints]
 workspace = true
+
+[package.metadata.buildrules]
+# The farm lane's `//:ci` (docs/farm.md) checks the format of, builds and lints this package but does
+# not run its tests: its one integration test, tests/unsupported.rs, is for systems other than
+# Linux, so on Linux its target lists no test, which buildrules' test gate refuses; and its
+# measurements read block devices, /proc and /sys. They run in ci.yml alone.
+
+[package.metadata.buildrules.actions]
+ci = ["fmt", "lint"]

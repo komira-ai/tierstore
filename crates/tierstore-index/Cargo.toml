@@ -28,3 +28,7 @@ workspace = true
 [[bin]]
 name = "tierstore-index-measure"
 path = "src/bin/tierstore-index-measure.rs"
+
+[package.metadata.buildrules]
+# Policy only: `actions = { name = ["lint", "test"] }`, `default-action`, `[package.metadata.buildrules.lint]`.
+# Absent keys inherit [workspace.metadata.buildrules]. See docs/contract.md.

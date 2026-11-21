@@ -45,3 +45,12 @@ rustix = { workspace = true, features = ["event", "fs", "net", "pipe", "process"
 
 [lints]
 workspace = true
+
+[package.metadata.buildrules]
+# The farm lane's `//:ci` (docs/farm.md) checks the format of, builds and lints this package but does
+# not run its tests: they mount FUSE file systems through /dev/fuse and fusermount3, and re-run
+# themselves as `#[ignore]`d child tests, none of which a farm action has or buildrules' test gate
+# accepts. They run in ci.yml alone.
+
+[package.metadata.buildrules.actions]
+ci = ["fmt", "lint"]

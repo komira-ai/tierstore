@@ -11,6 +11,9 @@
 # outgrows a runner would split it into parts of the tests (nextest's `--partition`) whose raw
 # profiles one job merges.
 #
+# farm.yml builds the same workspace a second way, with Buck2 through buildrules on the build farm;
+# it is advisory, and this workflow stays the gate (docs/farm.md).
+#
 # The pull request and the push to main run the same jobs. A push to main also saves the Cargo
 # cache; a pull request only restores it. Artifacts.yml builds and signs the release files on
 # the same push, and release.yml refuses a commit that has no green run of this workflow.

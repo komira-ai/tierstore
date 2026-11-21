@@ -40,3 +40,11 @@ tierstore-testkit.workspace = true
 
 [lints]
 workspace = true
+
+[package.metadata.buildrules]
+# The farm lane's `//:ci` (docs/farm.md) checks the format of, builds and lints this package but does
+# not run its tests: its benchmark tests mount FUSE file systems through /dev/fuse and fusermount3,
+# which a farm action has not. They run in ci.yml alone.
+
+[package.metadata.buildrules.actions]
+ci = ["fmt", "lint"]

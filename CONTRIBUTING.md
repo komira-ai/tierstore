@@ -25,6 +25,11 @@ Workflow and `AGENTS.md` checks are tests of the `xtask` crate (`cargo test -p x
 cargo-deny, as CI runs it: `cargo deny --all-features check bans licenses sources`. Advisories are not part of the pull request
 check: they are reported separately and never block a pull request. See [docs/ci-and-release.md](docs/ci-and-release.md).
 
+The same workspace also builds with Buck2 through buildrules on the build farm (`farm.yml`, advisory; [docs/farm.md](docs/farm.md)).
+Cargo stays the build of record and ignores what buildrules adds. After a change to a `Cargo.toml` or `Cargo.lock`, run
+`buildrules sync` and commit what it writes (`buildrules.lock.bzl`, `buildrules.bzl`, `third_party/buildrules/`): the farm
+lane's `//:check` fails while those files no longer match the manifests.
+
 ## Coverage
 
 CI measures every crate of the workspace with `cargo-llvm-cov` and fails a crate below 99.00% of its lines or 99.00% of its

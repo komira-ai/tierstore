@@ -16,3 +16,12 @@ rustix = { workspace = true, features = ["net", "process"] }
 
 [lints]
 workspace = true
+
+[package.metadata.buildrules]
+# The farm lane's `//:ci` (docs/farm.md) checks the format of, builds and lints this package but does
+# not run its tests: the tests of its socket directories bind a Unix socket under the test's TMPDIR,
+# which on the farm is too deep for a socket's path (komira-ai/buildrules#170). They run in ci.yml
+# alone.
+
+[package.metadata.buildrules.actions]
+ci = ["fmt", "lint"]

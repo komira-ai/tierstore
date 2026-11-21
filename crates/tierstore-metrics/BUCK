@@ -1,0 +1,10 @@
+load("//:buildrules.bzl", "cargo_package")
+
+# What this package reads beyond src/, tests/ and build.rs, which a Buck2 action sees only when
+# declared: a test holds the metric names to the design they come from.
+cargo_package(
+    path = ".",
+    extra_srcs = [
+        "//:docs/design/fetch-cache-serve.md",
+    ],
+)

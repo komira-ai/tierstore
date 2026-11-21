@@ -1,0 +1,12 @@
+load("//:buildrules.bzl", "cargo_package")
+
+# What this package reads beyond src/, tests/ and build.rs, which a Buck2 action sees only when
+# declared: the document tests read the recorded runs of data/ and hold the measurement page of
+# docs/measurements to them.
+cargo_package(
+    path = ".",
+    extra_srcs = [
+        "data",
+        "//:docs/measurements",
+    ],
+)

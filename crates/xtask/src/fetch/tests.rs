@@ -49,6 +49,17 @@ fn xz(bytes: &[u8]) -> Vec<u8> {
     out
 }
 
+fn zst(bytes: &[u8]) -> Vec<u8> {
+    ruzstd::encoding::compress_to_vec(bytes, ruzstd::encoding::CompressionLevel::Fastest)
+}
+
+/// The first half of a zstd frame of 4 KiB that does not repeat, so the cut falls inside a block.
+fn cut_zst() -> Vec<u8> {
+    let data: Vec<u8> = (0..4096u32).map(|i| (i * 31 % 251) as u8).collect();
+    let full = zst(&data);
+    full[..full.len() / 2].to_vec()
+}
+
 fn member(path: &str) -> PathBuf {
     PathBuf::from(path)
 }
@@ -161,6 +172,7 @@ fn each_format_yields_the_tool() {
     for (name, bytes, unpack) in [
         ("tar-gz", gzip(&tar()), tar_gz("tool-1.0/tool")),
         ("tar-xz", xz(&tar()), xz_tar),
+        ("zst", zst(TOOL), Unpack::Zst),
     ] {
         let (result, out, _own) = install_own(name, &bytes, &unpack);
         result.expect(name);
@@ -171,7 +183,8 @@ fn each_format_yields_the_tool() {
 #[test]
 fn an_archive_that_does_not_decode_is_an_unpack_error_with_nothing_written() {
     // Catches: a decode failure that installs the raw bytes (or an empty file) instead
-    // of failing; one case per decoder, and a tar whose header is not a tar's.
+    // of failing; one case per decoder, a tar whose header is not a tar's, and a zstd
+    // download that is empty or cut short.
     let not_tar = [1u8; 1024];
     let xz_garbage = Unpack::Tar {
         xz: true,
@@ -181,6 +194,9 @@ fn an_archive_that_does_not_decode_is_an_unpack_error_with_nothing_written() {
         ("gz", b"not gzip".to_vec(), tar_gz("x")),
         ("xz", b"not xz".to_vec(), xz_garbage),
         ("tar", gzip(&not_tar), tar_gz("x")),
+        ("zst", b"not zstd".to_vec(), Unpack::Zst),
+        ("zst-empty", Vec::new(), Unpack::Zst),
+        ("zst-cut", cut_zst(), Unpack::Zst),
     ] {
         // Not `name` alone: each_format_yields_the_tool installs under other names, in the
         // same process.
@@ -285,6 +301,14 @@ fn extract_and_member_must_agree() {
     assert!(e.contains("takes no --member"), "{e}");
     let e = Unpack::new(None, None, true).expect_err("tree without a tar");
     assert!(e.contains("needs --extract tar.gz or tar.xz"), "{e}");
+    assert_eq!(Unpack::new(Some(Format::Zst), None, false), Ok(Unpack::Zst));
+    for (member, tree) in [(m(), false), (None, true), (m(), true)] {
+        let e = Unpack::new(Some(Format::Zst), member, tree).expect_err("zst takes neither");
+        assert_eq!(
+            e,
+            "--extract zst is one compressed file: it takes no --member and no --tree"
+        );
+    }
 }
 
 #[test]

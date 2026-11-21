@@ -7,8 +7,11 @@ use tierstore_trees_api::{METHODS, PACKAGE, SERVICE, path};
 /// the generated stubs serve and call.
 #[test]
 fn names_are_the_ones_of_the_proto() {
-    let set =
-        protox::compile(["tierstore/trees/v1/trees.proto"], ["proto"]).expect("the proto compiles");
+    let set = protox::compile(
+        ["tierstore/trees/v1/trees.proto"],
+        [concat!(env!("CARGO_MANIFEST_DIR"), "/proto")],
+    )
+    .expect("the proto compiles");
     let file = &set.file[0];
     assert_eq!(file.package(), PACKAGE);
     assert_eq!(file.service.len(), 1);

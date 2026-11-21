@@ -9,8 +9,11 @@ use tierstore_trees_api::provider::{METHODS, PACKAGE, SERVICE, path};
 /// path the generated server serves.
 #[test]
 fn names_are_the_ones_of_the_provider_proto() {
-    let set = protox::compile(["jobscheduler/provider/v1/provider.proto"], ["proto"])
-        .expect("the proto compiles");
+    let set = protox::compile(
+        ["jobscheduler/provider/v1/provider.proto"],
+        [concat!(env!("CARGO_MANIFEST_DIR"), "/proto")],
+    )
+    .expect("the proto compiles");
     let file = &set.file[0];
     assert_eq!(file.package(), PACKAGE);
     assert_eq!(file.service.len(), 1);
