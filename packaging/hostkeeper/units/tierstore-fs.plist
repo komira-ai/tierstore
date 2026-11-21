@@ -48,15 +48,16 @@
   <string>Standard</string>
   <key>Umask</key>
   <integer>63</integer>
+  <!-- Jobs' overlays keep files of the mount open as long as a job runs; the limit bounds the distinct cache files held open, which the process shares across handles. -->
   <key>SoftResourceLimits</key>
   <dict>
     <key>NumberOfFiles</key>
-    <integer>65536</integer>
+    <integer>1048576</integer>
   </dict>
   <key>HardResourceLimits</key>
   <dict>
     <key>NumberOfFiles</key>
-    <integer>65536</integer>
+    <integer>1048576</integer>
   </dict>
   <key>StandardOutPath</key>
   <string>/usr/local/tierstore/log/tierstore-fs.out.log</string>

@@ -339,6 +339,29 @@ fn words(dict: &BTreeMap<String, Value>) -> Vec<String> {
     }
 }
 
+/// Asserts that the plist of the installer package, and the plist of hostkeeper's archive package,
+/// set the soft and the hard `NumberOfFiles` to exactly 1048576. It would catch either plist going
+/// back to a smaller limit, with which the open files of a build's jobs would run the process out
+/// of descriptors.
+#[test]
+fn both_plists_allow_1048576_open_files() {
+    for (name, plist) in [
+        ("archive", plist()),
+        ("package", plist_in(&package_plist_text())),
+    ] {
+        for limits in ["SoftResourceLimits", "HardResourceLimits"] {
+            let Some(Value::Dict(limit)) = plist.get(limits) else {
+                panic!("{name}: {limits} is a dictionary");
+            };
+            assert_eq!(
+                limit.get("NumberOfFiles"),
+                Some(&Value::Integer(1_048_576)),
+                "{name}: {limits}"
+            );
+        }
+    }
+}
+
 /// Asserts that the plist of the installer package is the plist of hostkeeper's archive package
 /// but for the program: every key is the same, and the first of `ProgramArguments` is the
 /// package's binary instead of the release link's, the rest of the command line unchanged. It

@@ -9,9 +9,9 @@ use std::time::Duration;
 
 use tierstore_testkit::dir::TestDir;
 
-use super::super::machine::DSCL_PROGRAM;
 use super::super::machine::testing::me;
 use super::super::machine::{Call, Output, RunError, Runner};
+use super::super::machine::{DSCL_PROGRAM, SUDO_PROGRAM};
 use super::super::system::{
     LAUNCHCTL_PROGRAM, SYSTEMCTL_PROGRAM, SystemConfig, config_run_as, config_run_on,
 };
@@ -255,8 +255,10 @@ fn binary_call(node: &Node, calls: &Calls) -> Call {
 
 /// Asserts that on a Mac a config hook that runs as root has `prepare` ask the directory service
 /// for `_tierstore`, before it runs anything else, and run the check of the staged file as its
-/// ids, though the root's `etc/passwd` has a `tierstore`. Catches the launchd arm of the config
-/// hook looking up the Linux account in `etc/passwd`, which fails every Mac's config package.
+/// user id through `sudo -n -u #<uid> --` (started as root, no ids set on the child), though the
+/// root's `etc/passwd` has a `tierstore`. Catches the launchd arm of the config hook looking up
+/// the Linux account in `etc/passwd`, and a check started under the account's ids set on the
+/// child, which on macOS has the effective group 0: both fail every Mac's config package.
 #[test]
 fn a_root_mac_hook_checks_as_the_directory_service_account() {
     let node = node("config-hook-system-mac-root");
@@ -270,7 +272,31 @@ fn a_root_mac_hook_checks_as_the_directory_service_account() {
     assert_eq!(done.outcome, Outcome::Success, "{done:?}");
     let dscl = format!("{DSCL_PROGRAM} . -read /Users/_tierstore UniqueID PrimaryGroupID");
     assert_eq!(calls.lines().first(), Some(&dscl), "{:?}", calls.lines());
-    assert_eq!(binary_call(&node, &calls).run_as, Some((398, 397)));
+    let binary = node.at(BINARY).display().to_string();
+    let check = calls
+        .calls
+        .borrow()
+        .iter()
+        .find(|call| call.program == SUDO_PROGRAM)
+        .cloned()
+        .expect("the check ran through sudo");
+    assert_eq!(check.run_as, None);
+    assert_eq!(check.args[..5], ["-n", "-u", "#398", "--", binary.as_str()]);
+    assert_eq!(check.args[5], "--config");
+    assert_eq!(
+        check.args.last().map(String::as_str),
+        Some("--check-config")
+    );
+    assert_eq!(check.args.len(), 8, "{:?}", check.args);
+    assert!(
+        calls
+            .calls
+            .borrow()
+            .iter()
+            .all(|call| call.program != binary),
+        "{:?}",
+        calls.lines()
+    );
 }
 
 /// Asserts that on Linux a config hook that runs as root runs the check as `tierstore` of

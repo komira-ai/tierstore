@@ -422,6 +422,30 @@ fn the_fs_template_differs_from_the_s3_template_as_the_design_lists() {
     }
 }
 
+/// Asserts that the units of `tierstore fs` and of the store process set `LimitNOFILE` to exactly
+/// 1048576, and that the launchd jobs of both set the soft and the hard `NumberOfFiles` to the
+/// same. It would catch any one of the four files going back to a smaller limit, with which a
+/// build's open files run the process out of descriptors and every open after them fails.
+#[test]
+fn every_unit_and_job_allows_1048576_open_files() {
+    for file in ["tierstore@.service", "tierstore-fs@.service"] {
+        assert_eq!(value(&read(file), "LimitNOFILE"), "1048576", "{file}");
+    }
+    for file in ["tierstore.plist", "tierstore-fs.plist"] {
+        let job = plist_of(file);
+        for limits in ["SoftResourceLimits", "HardResourceLimits"] {
+            let Some(Plist::Dict(limit)) = job.get(limits) else {
+                panic!("{file}: {limits} is a dictionary");
+            };
+            assert_eq!(
+                limit.get("NumberOfFiles"),
+                Some(&Plist::Integer(1_048_576)),
+                "{file}: {limits}"
+            );
+        }
+    }
+}
+
 /// Asserts that the unit of `tierstore fs` runs the `fs` verb of the binary of the release link with
 /// a `--config` the binary reads (a file that is not there is status 2, naming it, which a flag the
 /// binary did not parse would not be), starts only under a marker of its own after the S3

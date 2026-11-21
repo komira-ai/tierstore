@@ -186,6 +186,16 @@ fn the_unit_runs_as_the_account_the_sysusers_entry_makes() {
     assert_eq!(words.last(), Some(&"/usr/sbin/nologin"));
 }
 
+/// Asserts that the unit and the template of the deb and rpm packages set `LimitNOFILE` to exactly
+/// 1048576. It would catch either going back to a smaller limit, with which the open files of a
+/// build's jobs would run the process out of descriptors.
+#[test]
+fn the_units_allow_1048576_open_files() {
+    for file in ["tierstore.service", "tierstore@.service"] {
+        assert_eq!(value(&read(file), "LimitNOFILE"), "1048576", "{file}");
+    }
+}
+
 /// Asserts that the unit keeps the hardening of the repository's other example units that this
 /// process can run under: no new privileges, a read-only file system, a private `/tmp`, and no
 /// capability.

@@ -93,4 +93,7 @@ which also enforces R2 (`unsafe_code` in `[workspace.lints]`) and the environmen
 each allowed read carries an `#[expect(..., reason = "...")]`); the formatting options are in `rustfmt.toml`;
 coverage (T1, T3) by `coverage-gate` in CI's `test` job, which judges every crate of the workspace at 99.00% of its lines and of its
 branches with no exclusion; workflow runners, triggers, permissions and action pins (B10), and the Linux-x86_64-only runners of a pull request
-(B9 of this repository), by the workflow lint, `cargo test -p xtask --test workflows`; this file and `CLAUDE.md` by `cargo test -p xtask --test agents_md`.
+(B9 of this repository), by the workflow lint, `cargo test -p xtask --test workflows`; that every test, bench and example of a crate whose
+library is gated to Linux (`#![cfg(target_os = "linux")]`) is gated too, and every binary of it has a `main` for other systems, so that
+it compiles on macOS, which no pull request builds, by `cargo test -p xtask --test linux_only`; this file and `CLAUDE.md` by
+`cargo test -p xtask --test agents_md`.

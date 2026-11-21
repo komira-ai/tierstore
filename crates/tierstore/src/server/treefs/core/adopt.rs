@@ -37,7 +37,7 @@ impl Core {
     }
 
     /// Whether `fh` was given out by a process before this one.
-    fn foreign(&self, fh: u64) -> bool {
+    pub(super) fn foreign(&self, fh: u64) -> bool {
         handle::generation_of(fh) != self.settings.generation
     }
 
@@ -46,7 +46,9 @@ impl Core {
     /// is kept, and a read it misses reaches this process.
     ///
     /// # Errors
-    /// As [`Core::read`]; and those of an open for the handle that is made again.
+    /// As [`Core::read`]; and those of an open for the handle that is made again, but that a read
+    /// is never answered `ENOENT`: a handle whose tree is gone (its placement ended while the
+    /// process was replaced) is `EIO`, said on stderr, as a read of an open file that fails.
     pub(in crate::server::treefs) fn read_open(
         &self,
         ino: u64,
@@ -55,7 +57,14 @@ impl Core {
         size: u32,
     ) -> Result<Vec<u8>, Errno> {
         if !self.handles.contains(fh) && self.foreign(fh) {
-            let handle = self.reopen(ino)?;
+            let handle = self.reopen(ino).map_err(|error| match error {
+                Errno::NoEnt => {
+                    let why = "the file was opened by the process before this one, and its tree \
+                               is gone";
+                    self.unreadable(ino, offset, why)
+                }
+                error => error,
+            })?;
             self.handles.insert_if_absent(fh, handle);
         }
         self.read(fh, offset, size)
@@ -73,12 +82,15 @@ impl Core {
                 size,
                 source,
                 ..
-            } => Ok(Handle::Cached(self.blob(
-                &loaded,
-                number,
-                &entry,
-                (digest, *size, source.as_ref()),
-            )?)),
+            } => Ok(Handle::Cached {
+                bytes: self.blob(
+                    (&loaded, number),
+                    &entry,
+                    (digest, *size, source.as_ref()),
+                    self.now(),
+                )?,
+                ino,
+            }),
             _ => Err(Errno::Inval),
         }
     }

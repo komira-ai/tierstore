@@ -9,6 +9,8 @@
 //! Catches: a refused lock that fails the open, leaves a half-locked image, or reports bytes
 //! locked that are not.
 
+// Linux only, as the crate is (its library and its dependencies are `cfg(target_os = "linux")`).
+#![cfg(target_os = "linux")]
 #![allow(
     clippy::unwrap_used,
     clippy::expect_used,

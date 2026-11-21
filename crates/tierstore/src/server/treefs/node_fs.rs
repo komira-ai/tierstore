@@ -33,8 +33,11 @@
 //!   answers them `ENOSYS`, and the kernel stops asking after the first.
 //! - FORGET and BATCH_FORGET reach the core (or the put directory) through [`Fs::forget`].
 //!
-//! Every request of the core is answered on the reader that read it, inline: a fill of the core
-//! blocks that reader alone, as `fs.threads` readers read the connection. (A rename of the put
+//! Every request of the core is answered on the reader that read it, inline, but those that may
+//! wait on the fill socket: an open whose bytes the core cannot have without asking the node
+//! (`core/now.rs`), a read of a handle an earlier process gave out, and a lookup in the namespace
+//! are parked and answered by the fetches' threads (`fetches.rs`), so that a node that takes fills
+//! and does not answer holds none of the readers. (A rename of the put
 //! directory whose commit waits or uploads is parked and answered from the commit's thread,
 //! `put_fs.rs`.) The session leaves INTERRUPTs unanswered (`serving.rs`), so every request gets
 //! its own answer; where the kernel does not take one (the connection is gone, or a session that
@@ -42,16 +45,19 @@
 //! a READDIRPLUS's entries, the open of an OPEN) is given back, so that no tree is held in memory
 //! by a lookup the kernel never forgets.
 
+use std::io;
+use std::num::NonZeroUsize;
 use std::sync::Arc;
 
 use tsfuse::abi::{
-    Attr, AttrOut, DirPushError, DirentBuf, DirentPlusBuf, EntryKind, EntryOut, Kstatfs, OpenIn,
-    OpenOut, Operation, ReadIn, StatfsOut, fopen,
+    Attr, AttrOut, DirPushError, DirentBuf, DirentPlusBuf, EntryKind, EntryOut, Kstatfs, OpenOut,
+    Operation, ReadIn, StatfsOut, fopen,
 };
 use tsfuse::{Completion, Errno, Fs, Handled, Replier, Request};
 
 use super::backing::BackingId;
-use super::core::{self, Core, FIXED_MTIME, Kind, Looked, Opened};
+use super::core::{self, Core, FIXED_MTIME, Failing, Kind, Looked, Opened};
+use super::fetches::Fetches;
 use super::ino;
 use super::put_fs::PutFs;
 
@@ -155,78 +161,116 @@ pub(super) struct NodeFs {
     core: Arc<Core>,
     /// The put directory, where it is served (the core's).
     put: Option<PutFs>,
+    /// The threads that answer the requests that may wait on the fill socket (`fetches.rs`).
+    fetches: Fetches,
 }
 
-impl NodeFs {
-    /// A frontend over `core`.
-    pub(super) fn new(core: Arc<Core>) -> Self {
-        Self {
-            put: core.put().cloned().map(PutFs::new),
-            core,
+/// Whether a LOOKUP of `name` in `parent` may ask the fill socket: one in the namespace (a tree
+/// of `trees/` resolved, a placement looked up), but that of `trees` in the root.
+fn lookup_asks(parent: u64, name: &[u8]) -> bool {
+    let namespace = ino::split(parent).0 == 0 || ino::is_placed_dir(parent);
+    namespace && !(parent == ino::ROOT && name == b"trees")
+}
+
+/// LOOKUP of `name` in `parent`, answered from `core`.
+fn lookup(core: &Core, parent: u64, name: &[u8], replier: Replier) {
+    let Ok(name) = std::str::from_utf8(name) else {
+        send(replier, Err(ENOENT));
+        return;
+    };
+    match core.lookup(parent, name) {
+        Ok(Looked::Found(found)) => {
+            if !send(replier, Ok(entry(&found).as_bytes())) {
+                core.forget(found.attr.ino, 1);
+            }
+        }
+        Ok(Looked::Absent(ttl)) => {
+            let absent = EntryOut::new(0, 0, ttl, ttl, attr(&ABSENT));
+            send(replier, Ok(absent.as_bytes()));
+        }
+        Err(error) => {
+            send(replier, Err(errno(error)));
         }
     }
+}
 
-    /// LOOKUP of `name` in `parent`.
-    fn lookup(&self, parent: u64, name: &[u8], replier: Replier) {
-        let Ok(name) = std::str::from_utf8(name) else {
-            send(replier, Err(ENOENT));
+/// Answers the OPEN of `node` with what `core` opened.
+fn answer_open(core: &Core, node: u64, opened: Result<Opened, core::Errno>, replier: Replier) {
+    let (fh, out) = match opened {
+        Err(error) => {
+            send(replier, Err(errno(error)));
             return;
-        };
-        match self.core.lookup(parent, name) {
-            Ok(Looked::Found(found)) => {
-                if !send(replier, Ok(entry(&found).as_bytes())) {
-                    self.core.forget(found.attr.ino, 1);
-                }
-            }
-            Ok(Looked::Absent(ttl)) => {
-                let absent = EntryOut::new(0, 0, ttl, ttl, attr(&ABSENT));
-                send(replier, Ok(absent.as_bytes()));
-            }
-            Err(error) => {
-                send(replier, Err(errno(error)));
-            }
         }
-    }
-
-    /// OPEN of `node`.
-    fn open(&self, node: u64, arg: &OpenIn, replier: Replier) {
-        let writing = arg.flags & O_ACCMODE != 0;
-        let (fh, out) = match self.core.open(node, writing) {
-            Err(error) => {
-                send(replier, Err(errno(error)));
+        Ok(Opened::Cached(fh)) => (
+            fh,
+            OpenOut {
+                fh,
+                open_flags: fopen::KEEP_CACHE,
+                backing_id: 0,
+            },
+        ),
+        Ok(Opened::Adopted { fh, id }) => {
+            let backing = id
+                .downcast_ref::<BackingId>()
+                .and_then(|id| i32::try_from(id.0).ok());
+            let Some(backing_id) = backing else {
+                // Only `serving.rs` makes the handles of ids, of this type: not seen.
+                core.release(fh);
+                let number = ino::split(node).0;
+                core.say_failed((number, Failing::Other), None, &|| {
+                    format!(
+                        "tierstore fs: cannot open the inode {node}: its backing id of an \
+                         earlier release is not one this process can answer with"
+                    )
+                });
+                send(replier, Err(Errno::EIO));
                 return;
-            }
-            Ok(Opened::Cached(fh)) => (
+            };
+            (
                 fh,
                 OpenOut {
                     fh,
-                    open_flags: fopen::KEEP_CACHE,
-                    backing_id: 0,
+                    open_flags: fopen::PASSTHROUGH,
+                    backing_id,
                 },
-            ),
-            Ok(Opened::Adopted { fh, id }) => {
-                let backing = id
-                    .downcast_ref::<BackingId>()
-                    .and_then(|id| i32::try_from(id.0).ok());
-                let Some(backing_id) = backing else {
-                    // Only `serving.rs` makes the handles of ids, of this type: not seen.
-                    self.core.release(fh);
-                    send(replier, Err(Errno::EIO));
-                    return;
-                };
-                (
-                    fh,
-                    OpenOut {
-                        fh,
-                        open_flags: fopen::PASSTHROUGH,
-                        backing_id,
-                    },
-                )
-            }
-        };
-        if !send(replier, Ok(out.as_bytes())) {
-            self.core.release(fh);
+            )
         }
+    };
+    if !send(replier, Ok(out.as_bytes())) {
+        core.release(fh);
+    }
+}
+
+impl NodeFs {
+    /// A frontend over `core`, whose requests that may wait on the fill socket are answered by
+    /// `fetchers` threads of their own (`fetches.rs`).
+    ///
+    /// # Errors
+    /// What the system said when a thread cannot be started.
+    pub(super) fn new(core: Arc<Core>, fetchers: NonZeroUsize) -> io::Result<Self> {
+        Ok(Self {
+            put: core.put().cloned().map(PutFs::new),
+            fetches: Fetches::start(fetchers)?,
+            core,
+        })
+    }
+
+    /// Waits until every request parked on the fetches is answered (`Fetches::drain`).
+    pub(super) fn drain(&self) {
+        self.fetches.drain();
+    }
+
+    /// The requests parked on the fetches and not answered yet.
+    #[cfg(test)]
+    pub(super) fn parked(&self) -> usize {
+        self.fetches.busy()
+    }
+
+    /// Answers `job` on a thread of the fetches (`fetches.rs`).
+    fn park(&self, job: impl FnOnce(&Core) + Send + 'static) -> Handled {
+        let core = Arc::clone(&self.core);
+        self.fetches.park(Box::new(move || job(&core)));
+        Handled::Parked
     }
 
     /// READDIR, or READDIRPLUS with `plus`, of `node` from the offset of `arg`.
@@ -271,6 +315,13 @@ impl NodeFs {
         }
         if unnamed {
             // No entry the core lists has such a name; the kernel would refuse the listing.
+            let number = ino::split(node).0;
+            self.core.say_failed((number, Failing::Other), None, &|| {
+                format!(
+                    "tierstore fs: cannot list the directory of the inode {node}: an entry has a \
+                     name the kernel refuses"
+                )
+            });
             send(replier, Err(Errno::EIO));
             return;
         }
@@ -306,7 +357,11 @@ impl Fs for NodeFs {
             }
         };
         match op {
-            Operation::Lookup { name } => self.lookup(node, name, replier),
+            Operation::Lookup { name } if lookup_asks(node, name) => {
+                let name = name.to_vec();
+                return self.park(move |core| lookup(core, node, &name, replier));
+            }
+            Operation::Lookup { name } => lookup(&self.core, node, name, replier),
             Operation::Getattr(_) => {
                 let got = self.core.getattr(node).map_err(errno);
                 let out = got.map(|found| AttrOut::new(found.ttl, attr(&found.attr)));
@@ -319,7 +374,24 @@ impl Fs for NodeFs {
                     target.as_deref().map(str::as_bytes).map_err(|&e| e),
                 );
             }
-            Operation::Open(arg) => self.open(node, &arg, replier),
+            Operation::Open(arg) => {
+                let writing = arg.flags & O_ACCMODE != 0;
+                let Some(opened) = self.core.open_now(node, writing) else {
+                    // Parked, and answered by `fs.fetch_timeout` from now.
+                    let begun = self.core.now();
+                    return self.park(move |core| {
+                        let opened = core.open_from(node, writing, begun);
+                        answer_open(core, node, opened, replier);
+                    });
+                };
+                answer_open(&self.core, node, opened, replier);
+            }
+            Operation::Read(arg) if self.core.read_reopens(arg.fh) => {
+                return self.park(move |core| {
+                    let read = core.read_open(node, arg.fh, arg.offset, arg.size);
+                    send(replier, read.as_deref().map_err(|&error| errno(error)));
+                });
+            }
             Operation::Read(arg) => {
                 let read = self.core.read_open(node, arg.fh, arg.offset, arg.size);
                 send(replier, read.as_deref().map_err(|&error| errno(error)));

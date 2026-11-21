@@ -76,6 +76,8 @@ mod tree;
 mod tree_fs;
 
 #[cfg(target_os = "linux")]
+mod fetches;
+#[cfg(target_os = "linux")]
 mod handover;
 #[cfg(target_os = "linux")]
 mod init_record;

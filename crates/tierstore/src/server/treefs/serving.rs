@@ -23,7 +23,7 @@ use std::sync::Arc;
 
 use tsfuse::abi::{InitConfig, InitFlags, Negotiated};
 use tsfuse::mount::{Mount, MountOptions, Mounter};
-use tsfuse::{DevFd, Handover, Session};
+use tsfuse::{DevFd, Fs, Handover, Session};
 
 use super::backing::{self, BackingId, Guard, Saved};
 use super::config::FsSettings;
@@ -67,6 +67,8 @@ fn system(error: impl std::error::Error + Send + Sync + 'static) -> io::Error {
 pub(super) struct Serving {
     /// The readers; none once they have stopped.
     readers: Option<tsfuse::Serving>,
+    /// The frontend the readers serve, whose parked requests a stop waits for.
+    fs: Arc<NodeFs>,
     /// This process's own copy of the descriptor, to store, to hand over and to serve again.
     device: OwnedFd,
     /// The terms the connection was set up with.
@@ -135,7 +137,7 @@ impl Serving {
         let session = attach(&kept, negotiated, readers(settings))?;
         Self::start(
             session,
-            core,
+            (core, readers(settings)),
             (kept, negotiated),
             (Some(mount.clone()), false),
         )
@@ -180,21 +182,28 @@ impl Serving {
                     true
                 }
             };
-        Self::start(session, core, (device, negotiated), (None, resend_failed))
+        Self::start(
+            session,
+            (core, readers(settings)),
+            (device, negotiated),
+            (None, resend_failed),
+        )
     }
 
     /// Starts the readers of `session`, which serve `core`.
     fn start(
         session: Session,
-        core: &Arc<Core>,
+        (core, fetchers): (&Arc<Core>, NonZeroUsize),
         (device, negotiated): (OwnedFd, Negotiated),
         (mount, resend_failed): (Option<Mount>, bool),
     ) -> io::Result<Self> {
+        let fs = Arc::new(NodeFs::new(Arc::clone(core), fetchers)?);
         let readers = session
-            .serve(Arc::new(NodeFs::new(Arc::clone(core))))
+            .serve(Arc::clone(&fs) as Arc<dyn Fs>)
             .map_err(system)?;
         Ok(Self {
             readers: Some(readers),
+            fs,
             device,
             negotiated,
             mount,
@@ -221,7 +230,9 @@ impl Serving {
         self.resend_failed
     }
 
-    /// Stops the readers and returns when each has answered the request it held and stopped. The
+    /// Stops the readers and returns when each has answered the request it held and stopped, and
+    /// every request they parked on the fetches is answered (by `fs.fetch_timeout` after it was
+    /// parked, for an open). The
     /// connection stays open. Calling it again, with no restart between, does nothing. The stop is
     /// a hand-over of `tsfuse`: a request the file system had not answered when its reader stopped
     /// (a commit of the put directory still running) is answered when it ends, and is never
@@ -233,6 +244,8 @@ impl Serving {
         // A reader that failed has stopped too; the error is said.
         let ended = readers.hand_over();
         let _ = ended.inspect_err(|why| tracing::warn!("tierstore fs: a reader failed: {why}"));
+        // The requests the readers parked are answered too (`fetches.rs`), each by its time.
+        self.fs.drain();
     }
 
     /// Serves the connection again after [`Serving::stop_reading`], from the same descriptor and
@@ -247,7 +260,12 @@ impl Serving {
         let session = attach(&device, self.negotiated, readers(settings))?;
         // The new readers have no handle on the mount, if there was one: a later `unmount` leaves
         // the mount, as the successor that was to take it over would have.
-        *self = Self::start(session, core, (device, self.negotiated), (None, false))?;
+        *self = Self::start(
+            session,
+            (core, readers(settings)),
+            (device, self.negotiated),
+            (None, false),
+        )?;
         Ok(())
     }
 

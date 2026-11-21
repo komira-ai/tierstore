@@ -31,6 +31,7 @@ use crate::tree_manifest::TreeDigest;
 use super::super::attach::Failure;
 use super::fetched::Fetched;
 use super::placed::{Unread, placement_of};
+use super::said::Failing;
 use super::{Core, Errno, locked};
 
 /// The shortest and the longest time between two looks for idle trees.
@@ -122,14 +123,24 @@ impl Core {
     fn attach_read(&self, digest: TreeDigest, fetched: &Fetched) -> Result<u64, Errno> {
         let tree = self
             .read_ahead(&digest, fetched)
-            .map_err(|why| refusal(&digest, why))?;
+            .map_err(|why| self.refusal(&digest, why))?;
         let _lifecycle = locked(&self.lifecycle);
         let held = self.is_held();
         let number = if held {
-            self.table.find(&digest).ok_or(Errno::Io)?
+            self.table.find(&digest).ok_or_else(|| {
+                self.say_failed((0, Failing::Other), None, &|| {
+                    format!(
+                        "tierstore fs: cannot attach {digest} on a lookup: a successor is taking \
+                         over, and only it may number a tree"
+                    )
+                });
+                Errno::Io
+            })?
         } else {
             self.table.number_of(&digest).map_err(|why| {
-                tracing::warn!("tierstore fs: cannot number {digest} on a lookup: {why}");
+                self.say_failed((0, Failing::Other), None, &|| {
+                    format!("tierstore fs: cannot number {digest} on a lookup: {why}")
+                });
                 Errno::Io
             })?
         };
@@ -246,15 +257,19 @@ impl Core {
     }
 }
 
-/// What a lookup of the tree `digest` that could not be read is answered: `ENOENT` when there is
-/// no such tree (the upstream does not have its root manifest, or the placement has ended), else
-/// `EIO`, said on stderr.
-fn refusal(digest: &TreeDigest, why: Unread) -> Errno {
-    match why {
-        Unread::Gone(_) => Errno::NoEnt,
-        Unread::Failed(why) => {
-            tracing::warn!("tierstore fs: cannot attach {digest} on a lookup: {why}");
-            Errno::Io
+impl Core {
+    /// What a lookup of the tree `digest` that could not be read is answered: `ENOENT` when there
+    /// is no such tree (the upstream does not have its root manifest, or the placement has
+    /// ended), else `EIO`, said on stderr (`Core::say_failed`).
+    fn refusal(&self, digest: &TreeDigest, why: Unread) -> Errno {
+        match why {
+            Unread::Gone(_) => Errno::NoEnt,
+            Unread::Failed(why) => {
+                self.say_failed((0, Failing::Other), Some(digest), &|| {
+                    format!("tierstore fs: cannot attach {digest} on a lookup: {why}")
+                });
+                Errno::Io
+            }
         }
     }
 }
@@ -287,11 +302,14 @@ fn ended_with((digest, number): (&TreeDigest, u64), failures: &[Failure]) -> Str
     )
 }
 
-/// Detaches the idle trees of `core` every `every`, until the sender of `wait` is dropped or
-/// sends.
+/// Detaches the idle trees of `core` every `every`, and looks around (`Core::look_around`), until
+/// the sender of `wait` is dropped or sends.
 fn sweep(wait: &mpsc::Receiver<()>, core: &Weak<Core>, every: Duration) {
     while matches!(wait.recv_timeout(every), Err(RecvTimeoutError::Timeout)) {
-        let _ = core.upgrade().map(|core| core.detach_idle());
+        let _ = core.upgrade().map(|core| {
+            let _ = core.detach_idle();
+            core.look_around();
+        });
     }
 }
 

@@ -10,10 +10,13 @@
 //! node is being updated: the old instance keeps answering through its drain, and the new one
 //! binds the socket when it takes the lock), is sent again over a new connection, after a pause
 //! of a second, until `fetch_timeout` of pauses has passed. The pauses are taken by `pause`, which
-//! a test replaces. An answer that does not come in `fetch_timeout` is not asked for again.
+//! a test replaces. An answer that does not come in `fetch_timeout` is not asked for again. A
+//! connection that cannot be made for lack of descriptors (`EMFILE`, `ENFILE`) is not tried again:
+//! the request fails at once with [`AskError::NoDescriptor`], whose words say so.
 //!
 //! A request may also be given a time to end by ([`Until`]), on a clock: the manifests of one
-//! tree are filled under one such end (`core/placed.rs`). It is then answered by that end at the
+//! tree are filled under one such end (`core/placed.rs`), and so are the fills of one open of a
+//! file, its tries together (`core/blob.rs`). It is then answered by that end at the
 //! latest: its answer is waited for no longer than the time left, and no pause is taken that
 //! would pass it. Every exchange sets the time its answer is waited for, so a connection kept
 //! after a request with an end of its own, or with a wait of its own (`put`), waits the client's
@@ -55,6 +58,25 @@ pub(super) enum AskError {
     /// The end the request was given passed before it was answered.
     #[error("the fill socket did not answer within the time the request was given")]
     Spent,
+    /// No connection could be made: the process, or the system, has no descriptor left. The
+    /// number is the errno the system gave (`EMFILE` or `ENFILE`).
+    #[error(
+        "{NO_DESCRIPTOR}cannot connect to the fill socket: {}",
+        std::io::Error::from_raw_os_error(*.0)
+    )]
+    NoDescriptor(i32),
+}
+
+/// What the words of a failure for lack of descriptors begin with, here and in `core/blob.rs`.
+pub(super) const NO_DESCRIPTOR: &str = "no descriptor: ";
+
+/// Whether `error` is a call that failed for lack of descriptors, of the process (`EMFILE`) or of
+/// the system (`ENFILE`); its errno if so.
+pub(super) fn lacks_descriptors(error: &std::io::Error) -> Option<i32> {
+    let errno = rustix::io::Errno::from_io_error(error)?;
+    [rustix::io::Errno::MFILE, rustix::io::Errno::NFILE]
+        .contains(&errno)
+        .then(|| errno.raw_os_error())
 }
 
 /// When a request is to be answered by, on a clock: what the fills of one tree's manifests share.
@@ -68,7 +90,7 @@ pub(super) struct Until<'a> {
 
 impl Until<'_> {
     /// The time left before the end; zero once it has passed.
-    fn left(&self) -> Duration {
+    pub(super) fn left(&self) -> Duration {
         Duration::from_millis(self.end_ms.saturating_sub(self.clock.now()))
     }
 }
@@ -161,19 +183,33 @@ impl FillClient {
         }
     }
 
-    /// A connection: one kept, or a new one.
-    fn connection(&self) -> (Option<Connection>, bool) {
+    /// A connection: one kept, or a new one; none where the socket is not there.
+    ///
+    /// # Errors
+    /// [`AskError::NoDescriptor`] for a connection that cannot be made for lack of descriptors.
+    fn connection(&self) -> Result<(Option<Connection>, bool), AskError> {
         if let Some(kept) = locked(&self.idle).pop() {
-            return (Some(kept), true);
+            return Ok((Some(kept), true));
         }
-        let made = UnixStream::connect(&self.path).ok().map(|stream| {
-            // A duration that is not zero is always taken.
-            let _ = stream.set_read_timeout(Some(self.answer_timeout));
-            Connection {
-                reader: BufReader::new(stream),
+        let made = match UnixStream::connect(&self.path) {
+            Ok(stream) => stream,
+            Err(error) => {
+                return lacks_descriptors(&error).map_or(Ok((None, false)), |errno| {
+                    Err(AskError::NoDescriptor(errno))
+                });
             }
-        });
-        (made, false)
+        };
+        // A duration that is not zero is always taken.
+        let _ = made.set_read_timeout(Some(self.answer_timeout));
+        let made = Connection {
+            reader: BufReader::new(made),
+        };
+        Ok((Some(made), false))
+    }
+
+    /// The time an answer is waited for: `fs.fetch_timeout`.
+    pub(super) fn answer_timeout(&self) -> Duration {
+        self.answer_timeout
     }
 
     /// Keeps `connection` for the next request.
@@ -247,7 +283,7 @@ impl FillClient {
                 return Err(AskError::Spent);
             }
             let wait = within(wait.unwrap_or(self.answer_timeout), left);
-            let (connection, kept) = self.connection();
+            let (connection, kept) = self.connection()?;
             if let Some(mut connection) = connection {
                 match Self::exchange(&mut connection, line, (answered, wait)) {
                     Ok(answer) => {
@@ -277,15 +313,17 @@ impl FillClient {
     }
 
     /// Asks for the blob `sha256` of `size` bytes at `offset` of the upstream object `key` to be
-    /// put in the cache.
+    /// put in the cache, answered by `until` where given.
     pub(super) fn fill_blob(
         &self,
-        sha256: &str,
-        size: u64,
-        key: &str,
-        offset: u64,
+        (sha256, size): (&str, u64),
+        (key, offset): (&str, u64),
+        until: Option<Until<'_>>,
     ) -> Result<(), FillFailure> {
-        self.fill(&format!("fill {sha256} {size} from {key} @ {offset}"), None)
+        self.fill(
+            &format!("fill {sha256} {size} from {key} @ {offset}"),
+            until,
+        )
     }
 
     fn fill(&self, line: &str, until: Option<Until<'_>>) -> Result<(), FillFailure> {
@@ -389,16 +427,18 @@ impl FillClient {
 
     /// The file of the cache that holds the `size` bytes at `offset` of the pack `pack`, which
     /// hash to `sha256`, and the offset of their first byte in it: filled first if the cache does
-    /// not hold them. The error is the words of the answer, or that nobody answered.
+    /// not hold them, answered by `until` where given. The error is the words of the answer, or
+    /// that nobody answered.
     pub(super) fn span(
         &self,
-        sha256: &str,
-        size: u64,
-        pack: &str,
-        offset: u64,
+        (sha256, size): (&str, u64),
+        (pack, offset): (&str, u64),
+        until: Option<Until<'_>>,
     ) -> Result<(u64, PathBuf), String> {
         let line = format!("span {sha256} {size} from {pack} @ {offset}");
-        let answer = self.ask_line(&line, true).map_err(|e| e.to_string())?;
+        let answer = self
+            .ask(&line, (true, None), until)
+            .map_err(|e| e.to_string())?;
         let held = answer
             .strip_prefix("ok ")
             .and_then(|rest| rest.split_once(' '));
@@ -457,6 +497,16 @@ impl FillClient {
     /// Waits as long as a request waits between two tries over a socket that is not there.
     pub(super) fn rest(&self) {
         (self.pause)(PAUSE);
+    }
+
+    /// [`FillClient::rest`], if that leaves time before `until` for another try; whether it did.
+    pub(super) fn rest_before(&self, until: Until<'_>) -> bool {
+        // A pause that leaves no time would be followed by a try that is not sent.
+        if until.left() <= PAUSE {
+            return false;
+        }
+        (self.pause)(PAUSE);
+        true
     }
 
     /// Keeps the pins of `trees` of `mount` and takes away the others.

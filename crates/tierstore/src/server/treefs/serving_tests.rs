@@ -166,7 +166,9 @@ fn the_readers_are_as_many_copies_of_the_descriptor_as_the_settings_say() {
     let session = attach(&device, outcome.negotiated(), readers(&three)).unwrap();
     assert_eq!(session.readers(), 3);
     let serving = session
-        .serve(std::sync::Arc::new(super::NodeFs::new(rig.core.clone())))
+        .serve(std::sync::Arc::new(
+            super::NodeFs::new(rig.core.clone(), std::num::NonZeroUsize::MIN).unwrap(),
+        ))
         .unwrap();
     kernel.getattr(1, ino::ROOT);
     assert_eq!(kernel.reply().unique, 1);

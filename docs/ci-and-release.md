@@ -308,20 +308,23 @@ fake.
 - `cargo xtask release macos-pkg --version <X.Y.Z> --binary <path> --stage <dir> --out <dir>` writes
   `<out>/tierstore-<X.Y.Z>-macos-arm64.pkg`, unsigned: a distribution pkg of one component
   (`pkgbuild`, identifier `com.komira.tierstore`, version `<X.Y.Z>`, install location `/`, ownership
-  `recommended`, no scripts directory) wrapped by `productbuild`. `--stage` must not exist; the
+  `recommended`, with a scripts directory that holds the one script `postinstall`) wrapped by
+  `productbuild`. `--stage` must not exist; the
   payload is laid out in it first. The payload is exactly the binary
   `/Library/Application Support/tierstore/bin/tierstore` (0755, the given binary's bytes, so it keeps
   its code signature) and the job `/Library/LaunchDaemons/tierstore.plist` (0644,
   `packaging/macos-pkg/tierstore.plist`), with the directories above them (0755), everything
-  `root:wheel`. There is no `postinstall` and no script at all: hostkeeper's hook (`tierstore
-  update-hook`) bootstraps the job at its `cutover`. The plist is the one of the hostkeeper archive
+  `root:wheel`. The `postinstall` (`packaging/macos-pkg/postinstall`, 0755) makes the account
+  `_tierstore` and the directories under `/usr/local/tierstore`, and starts nothing:
+  hostkeeper's hook (`tierstore update-hook`) bootstraps the job at its `cutover`. The plist is the one of the hostkeeper archive
   package (`packaging/hostkeeper/units/tierstore.plist`) but for the program path, and
   `crates/tierstore/tests/packaging_macos.rs` holds the two together.
 - `cargo xtask release check-macos-pkg <dir> --version <X.Y.Z> --binary <path>` reads the directory
   `pkgutil --expand` made of the pkg and refuses anything but what the builder writes: the
   `Distribution` names the one component with no installer script, installation check or volume
-  check; `PackageInfo` names the identifier, the version and the location `/` and no script or
-  bundle; the component holds `Bom`, `PackageInfo` and `Payload` and no `Scripts`; the payload
+  check; `PackageInfo` names the identifier, the version, the location `/` and the `postinstall`,
+  and no other script and no bundle; the component holds `Bom`, `PackageInfo`, `Payload` and
+  `Scripts`, which holds the `postinstall` alone (0755, its bytes); the payload
   holds exactly the entries above, with their modes and bytes, each owned by root, group wheel or
   admin (so nothing is group or other writable, set-id or sticky); the plist's label is `tierstore`
   and its program is a file of the payload. Every deviation is listed.

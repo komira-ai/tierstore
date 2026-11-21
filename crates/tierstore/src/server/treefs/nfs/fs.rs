@@ -305,7 +305,9 @@ impl NFSFileSystem for TreeNfs {
         }
         let file = self.file(id).await?;
         // `wanted` is at most `count`, a `u32`.
-        let data = file.read(offset, wanted as usize).map_err(status)?;
+        let data = file
+            .read(offset, wanted as usize)
+            .map_err(|error| status(self.core.unreadable(id, offset, &error.to_string())))?;
         let end = offset + data.len() as u64 >= attr.size;
         Ok((data, end))
     }

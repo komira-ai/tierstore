@@ -18,6 +18,7 @@
 //! started <path>                              the mount first looked into the tree at <path>
 //! attached <outcome> <ms>                      the mount attached a tree on a lookup, or did not
 //! fetched <cache> <filled> <failed> <ms> <n>.. where the manifests of a read of a tree came from
+//! descriptors <mount> <process> <held> <short> the cache files the mount holds open; its opens short of descriptors
 //! ```
 //!
 //! A digest is sixty-four lower-case hex digits; a number is decimal digits only; a mount and a
@@ -33,13 +34,17 @@
 //! The words of an `attached` and of a `fetched` are those of
 //! [`Attach`](crate::server::local_cache::attaches::Attach) and
 //! [`Fetches`](crate::server::local_cache::attaches::Fetches): an outcome (`ok`, `absent`,
-//! `failed`) and a number, and four numbers and one for each bucket of the fill histogram.
+//! `failed`) and a number, and four numbers and one for each bucket of the fill histogram. The words
+//! of a `descriptors` are those of
+//! [`Descriptors`](crate::server::local_cache::descriptors::Descriptors): a mount name and two
+//! numbers.
 
 use std::path::PathBuf;
 
 use crate::TreeDigest;
 use crate::journal::is_reserved;
 use crate::server::local_cache::attaches::{Attach, Fetches};
+use crate::server::local_cache::descriptors::Descriptors;
 use crate::server::local_cache::layout::is_digest;
 use crate::server::local_cache::trees::{Location, PlacementId, placement_id};
 
@@ -93,6 +98,9 @@ pub(super) enum Request {
     Attached(Attach),
     /// Where the manifests of a read of a tree came from (`local_cache/attaches.rs`).
     Fetched(Fetches),
+    /// The cache files the mount holds open, and the opens short of descriptors since its last
+    /// report (`local_cache/descriptors.rs`).
+    Descriptors(Descriptors),
 }
 
 /// A request of the mount about the placements of the node (module `mount`).
@@ -184,10 +192,17 @@ fn digest(text: &str) -> Result<String, Refusal> {
 
 /// The mount or tree name `text`, or why it is not one.
 fn name(text: &str) -> Result<String, Refusal> {
-    if text.is_empty() || text.len() > MAX_NAME || !text.bytes().all(|b| b.is_ascii_graphic()) {
-        return Err(Refusal::Name);
+    if is_name(text) {
+        Ok(text.to_owned())
+    } else {
+        Err(Refusal::Name)
     }
-    Ok(text.to_owned())
+}
+
+/// Whether `text` is a usable name of a mount or a tree: one to [`MAX_NAME`] visible ASCII
+/// characters.
+pub(in crate::server) fn is_name(text: &str) -> bool {
+    !text.is_empty() && text.len() <= MAX_NAME && text.bytes().all(|b| b.is_ascii_graphic())
 }
 
 /// The number `text` writes in decimal digits (no sign, no space).
@@ -235,6 +250,9 @@ pub(super) fn parse(line: &[u8]) -> Result<Request, Refusal> {
             .ok_or(Refusal::Malformed),
         "fetched" => Fetches::parse(rest)
             .map(Request::Fetched)
+            .ok_or(Refusal::Malformed),
+        "descriptors" => Descriptors::parse(rest)
+            .map(Request::Descriptors)
             .ok_or(Refusal::Malformed),
         "mounted" => (text == "mounted")
             .then_some(Request::Mount(MountRequest::Mounted))
