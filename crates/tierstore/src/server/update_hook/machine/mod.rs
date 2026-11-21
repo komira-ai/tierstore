@@ -23,9 +23,9 @@ use std::io;
 
 pub use clock::MonotonicClock;
 // The config hook's tests answer the `dscl` call by its program.
-#[cfg(test)]
-pub(crate) use host::DSCL_PROGRAM;
 pub use host::{CONFIG_MAX, SystemHost};
+#[cfg(test)]
+pub(crate) use host::{DSCL_PROGRAM, SUDO_PROGRAM};
 pub use instances::LoopbackInstances;
 pub use launchd::{
     LAUNCHCTL_PROGRAM, LaunchctlJobs, LaunchdTimes, NOT_FOUND as LAUNCHCTL_NOT_FOUND, bootout_args,
