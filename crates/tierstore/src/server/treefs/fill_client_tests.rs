@@ -102,7 +102,10 @@ fn a_fill_is_one_line_out_and_one_back_over_a_kept_connection() {
     );
     let (client, pauses) = client(&path, 3, Duration::from_secs(30));
     assert_eq!(client.fill_manifest("good1", OPEN), Ok(()));
-    assert_eq!(client.fill_blob(("good2", 7), ("packs/a b", 9), None), Ok(()));
+    assert_eq!(
+        client.fill_blob(("good2", 7), ("packs/a b", 9), None),
+        Ok(())
+    );
     assert_eq!(
         client.fill_blob(("bad", 7), ("k", 0), None),
         Err("mismatch".to_owned())
@@ -668,4 +671,74 @@ fn a_kept_connection_waits_the_clients_own_time_for_the_next_request() {
     assert_eq!(waits(&client), Some(Duration::from_secs(50)));
     assert_eq!(client.fill_blob(("b", 1), ("k", 0), None), Ok(()));
     assert_eq!(waits(&client), Some(Duration::from_secs(120)));
+}
+
+/// Asserts that a rest before an end is taken only while a second is left before it: with less
+/// than a second left none is taken and it says so; with a second or more one pause is taken.
+#[test]
+fn a_rest_before_an_end_is_taken_only_with_a_second_left() {
+    let (_dir, path) = place("tfs-fc-rest");
+    let clock = Arc::new(Mono::new());
+    let (client, pauses) = client(&path, 3, Duration::from_secs(30));
+    let at = |end_ms| Until {
+        clock: &*clock,
+        end_ms,
+    };
+    assert!(!client.rest_before(at(0)));
+    assert!(!client.rest_before(at(999)));
+    assert_eq!(pauses.load(Ordering::Acquire), 0);
+    assert!(client.rest_before(at(1_000)));
+    assert_eq!(pauses.load(Ordering::Acquire), 1);
+    assert!(client.rest_before(at(60_000)));
+    assert_eq!(pauses.load(Ordering::Acquire), 2);
+}
+
+/// Asserts that a span asked with an end that has passed is not sent and fails with the words of
+/// an end that passed, and that with time left it is sent and answered as any other.
+#[test]
+fn a_span_whose_end_has_passed_is_not_sent() {
+    let (_dir, path) = place("tfs-fc-span-end");
+    let lines = Arc::new(Mutex::new(Vec::new()));
+    serve(
+        UnixListener::bind(&path).unwrap(),
+        Arc::clone(&lines),
+        |_| Some("ok 7 /p".to_owned()),
+    );
+    let clock = Arc::new(Mono::new());
+    let (client, _) = clocked(&path, &clock);
+    let until = Until {
+        clock: &*clock,
+        end_ms: 1_000,
+    };
+    assert_eq!(
+        client.span(("ab", 1), ("k", 0), Some(until)),
+        Ok((7, PathBuf::from("/p")))
+    );
+    clock.advance(Duration::from_secs(1));
+    assert_eq!(
+        client.span(("cd", 1), ("k", 0), Some(until)),
+        Err(SPENT.to_owned())
+    );
+    assert_eq!(*lines.lock().unwrap(), ["span ab 1 from k @ 0"]);
+}
+
+/// Asserts the words of a connection that could not be made for lack of descriptors, whole, and
+/// which errors are such a lack: `EMFILE` and `ENFILE`, not `EACCES` nor an error of no errno.
+#[test]
+fn a_lack_of_descriptors_is_named_as_such() {
+    assert_eq!(
+        AskError::NoDescriptor(24).to_string(),
+        "no descriptor: cannot connect to the fill socket: Too many open files (os error 24)"
+    );
+    assert_eq!(
+        AskError::NoDescriptor(23).to_string(),
+        "no descriptor: cannot connect to the fill socket: Too many open files in system (os \
+         error 23)"
+    );
+    let raw = std::io::Error::from_raw_os_error;
+    assert_eq!(super::lacks_descriptors(&raw(24)), Some(24));
+    assert_eq!(super::lacks_descriptors(&raw(23)), Some(23));
+    assert_eq!(super::lacks_descriptors(&raw(13)), None);
+    let plain = std::io::Error::other("no errno");
+    assert_eq!(super::lacks_descriptors(&plain), None);
 }

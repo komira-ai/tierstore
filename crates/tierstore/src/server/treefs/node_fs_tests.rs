@@ -880,3 +880,6 @@ mod kernel;
 
 #[path = "node_fs_shared_read_tests.rs"]
 mod shared_reads;
+
+#[path = "node_fs_fault_tests.rs"]
+mod faults;

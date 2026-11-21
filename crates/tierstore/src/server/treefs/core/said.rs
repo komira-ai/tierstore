@@ -159,3 +159,7 @@ impl Core {
 #[cfg(test)]
 #[path = "said_tests.rs"]
 mod tests;
+
+#[cfg(test)]
+#[path = "said_core_tests.rs"]
+mod core_tests;
