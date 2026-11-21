@@ -116,3 +116,15 @@ every repository on the farm does: a result one writes, the other reads. The far
 keyed by the action's digest, so a result is reused only for byte-identical inputs and command.
 
 ## Measured
+
+The first measurements of the lane, of `//:ci` as it is here (buildrules at a693e5c). Wall times
+are buck2's or the shell's, on a machine that ran no action itself.
+
+| build | `Commands:` line | wall |
+|---|---|---|
+| `//:ci`, after earlier runs of the same day had put most units in the farm's cache | `130 (cached: 9, remote: 121, local: 0)`, BUILD SUCCEEDED | 12 min |
+| the same, again, daemon kept | no action looked up | 0.04 s |
+| the same, again, buck2's daemon restarted (nothing in its memory) | `2001 (cached: 2001, remote: 0, local: 0)` | 1.6 s |
+
+Every git dependency (hostkeeper's crates, the nfsserve fork, the previous tierstore) is built from
+GitHub's archive of its pinned commit, and its units are cached like a crates.io crate's.
