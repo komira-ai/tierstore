@@ -5,7 +5,7 @@ use std::os::unix::fs::{PermissionsExt, symlink};
 use std::path::{Path, PathBuf};
 
 use super::super::ports::{Host, PortError, PortKind};
-use super::host::{CONFIG_MAX, DSCL_PROGRAM};
+use super::host::{CONFIG_MAX, DSCL_PROGRAM, SUDO_PROGRAM};
 use super::testing::{FakeRunner, LIMIT, exit, me, scratch, signalled};
 use super::{Call, RunError, SystemHost};
 
@@ -481,12 +481,37 @@ fn mac_host<'a>(root: &Path, runner: &'a FakeRunner) -> SystemHost<'a> {
     host(root, runner).with_directory_service()
 }
 
+/// The call a root hook on a Mac makes to check `config` (a path under the root) as the user
+/// `uid`: the release's binary through `sudo -n -u #<uid> --`, within the host's time limit, and
+/// started as root (no ids of its own), so that `sudo` gives it the account's groups.
+fn mac_check_call(root: &Path, uid: u32, config: &str) -> Call {
+    let binary = release_dir(root).join("bin/tierstore");
+    let file = root.join(config.trim_start_matches('/'));
+    Call::new(
+        SUDO_PROGRAM,
+        &[
+            "-n",
+            "-u",
+            &format!("#{uid}"),
+            "--",
+            binary.to_str().unwrap(),
+            "--config",
+            file.to_str().unwrap(),
+            "--check-config",
+        ],
+        LIMIT,
+    )
+}
+
 /// Asserts that on a Mac a hook that runs as root asks the directory service for `_tierstore`
 /// (`dscl . -read /Users/_tierstore UniqueID PrimaryGroupID`, within the host's time limit) and
-/// runs the check as the user and group ids it prints, in either order and with a value on the
-/// line after its key, not as the `tierstore` of `etc/passwd` (which the root has here too).
-/// Catches the check of a Mac's config hook looked up as `tierstore` in `etc/passwd`, which a
-/// Mac does not have, and so failing `host_failed` on every Mac.
+/// runs the check as the user id it prints, in either order and with a value on the line after
+/// its key, through `sudo -n -u #<uid> --` and not under ids set on the child, and not as the
+/// `tierstore` of `etc/passwd` (which the root has here too). Catches the check of a Mac's
+/// config hook looked up as `tierstore` in `etc/passwd`, which a Mac does not have, and a check
+/// started under the account's ids by the standard library, which on macOS leaves it with the
+/// effective group 0 and so unable to enter `/usr/local/tierstore/etc` (root:_tierstore, 0750):
+/// every configuration was refused with "Permission denied".
 #[test]
 fn a_check_by_a_root_mac_hook_runs_as_the_directory_service_account() {
     let (_guard, root) = scratch("host-check-mac-root");
@@ -510,9 +535,61 @@ fn a_check_by_a_root_mac_hook_runs_as_the_directory_service_account() {
         let calls = runner.calls();
         assert_eq!(calls.len(), 2, "{printed:?}: {calls:?}");
         assert_eq!(calls[0], dscl_call(), "{printed:?}");
-        let binary = release_dir(&root).join("bin/tierstore");
-        assert_eq!(calls[1].program, binary.to_str().unwrap());
-        assert_eq!(calls[1].run_as, Some(ids), "{printed:?}");
+        assert_eq!(
+            calls[1],
+            mac_check_call(&root, ids.0, "/usr/local/tierstore/etc/tierstore.toml"),
+            "{printed:?}"
+        );
+    }
+}
+
+/// Asserts that on a Mac the check run through `sudo` by a root hook is read as the release's
+/// own answer: exit 0 accepts, exit 2 refuses with its standard error as the line, and any other
+/// end (exit 1, which is also how `sudo` itself fails, as when it may not run as the account, a
+/// signal, a `sudo` that cannot be started or does not end) is an error naming the whole call,
+/// not a refusal.
+#[test]
+fn a_check_through_sudo_on_a_mac_refuses_on_2_and_fails_on_any_other_end() {
+    let (_guard, root) = scratch("host-check-mac-sudo-ends");
+    release_with(&root, 0o755);
+    let config = Path::new("/usr/local/tierstore/etc/tierstore.toml");
+    let ids = || exit(0, "UniqueID: 394\nPrimaryGroupID: 394\n", "");
+    let line = "tierstore: reading the config file x: Permission denied (os error 13)";
+    let call = mac_check_call(&root, 394, "/usr/local/tierstore/etc/tierstore.toml");
+    let said = call.describe();
+    let runner = FakeRunner::replying(vec![
+        ids(),
+        exit(0, "", ""),
+        ids(),
+        exit(2, "", &format!("{line}\n")),
+        ids(),
+        exit(1, "", "sudo: a password is required\n"),
+        ids(),
+        signalled(),
+        ids(),
+        Err(RunError::Spawn("no such file".to_owned())),
+        ids(),
+        Err(RunError::Timeout(LIMIT)),
+    ]);
+    let host = mac_host(&root, &runner).with_hook_user(0);
+    let check = || host.check_config(Path::new(RELEASE), config);
+    assert_eq!(check().unwrap(), None);
+    assert_eq!(check().unwrap(), Some(line.to_owned()));
+    let failed = [
+        "exited 1: sudo: a password is required",
+        "ended by a signal",
+        "cannot run: no such file",
+        "killed",
+    ];
+    for how in failed {
+        let text = message(check().unwrap_err());
+        assert!(text.contains(&said), "{how}: {text}");
+        assert!(text.contains(how), "{how}: {text}");
+    }
+    let calls = runner.calls();
+    assert_eq!(calls.len(), 12);
+    for pair in calls.chunks(2) {
+        assert_eq!(pair, [dscl_call(), call.clone()]);
     }
 }
 

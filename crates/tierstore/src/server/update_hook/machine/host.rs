@@ -30,6 +30,9 @@ const CONFIG_REFUSED: i32 = 2;
 
 /// Where macOS has `dscl`, the command line of the directory service.
 pub(crate) const DSCL_PROGRAM: &str = "/usr/bin/dscl";
+/// Where macOS has `sudo`, through which a root hook on a Mac runs a program as the service
+/// account (see [`SystemHost::check_config`]).
+pub(crate) const SUDO_PROGRAM: &str = "/usr/bin/sudo";
 
 /// Where a hook that runs as root finds the user and group ids of the service account.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -352,6 +355,15 @@ impl Host for SystemHost<'_> {
     /// or on a Mac `_tierstore`, found in the directory service (an account that is not there is
     /// an error): the check refuses key files the user it runs as does not own, and the service
     /// does not run as root. A hook that is not root runs it as itself.
+    ///
+    /// On Linux the child is started under the account's user and group ids. On a Mac it is
+    /// started as `sudo -n -u #<uid> -- <binary> ...`, which gives it the account's primary
+    /// group and its other groups from the directory service, as launchd gives the job. Setting
+    /// the ids on the child directly does not work there: the standard library clears the
+    /// supplementary groups (`setgroups(0, NULL)`) after it sets the group id, and on macOS that
+    /// also resets the effective group to 0, so the check could not enter
+    /// `/usr/local/tierstore/etc` (root:_tierstore, 0750) and refused every configuration with
+    /// "Permission denied".
     fn check_config(&self, release: &Path, config: &Path) -> Result<Option<String>, PortError> {
         let binary = self
             .binary_of(release)
@@ -362,14 +374,19 @@ impl Host for SystemHost<'_> {
         let program = binary.to_string_lossy();
         let file = under(&self.root, config);
         let file = file.to_string_lossy();
-        let mut call = Call::new(
-            &program,
-            &["--config", &file, "--check-config"],
-            self.timeout,
-        );
-        if let Some((uid, gid)) = run_as {
-            call = call.running_as(uid, gid);
-        }
+        let check = ["--config", file.as_ref(), "--check-config"];
+        let call = match (run_as, self.accounts) {
+            (None, _) => Call::new(&program, &check, self.timeout),
+            (Some((uid, gid)), Accounts::PasswdFile) => {
+                Call::new(&program, &check, self.timeout).running_as(uid, gid)
+            }
+            (Some((uid, _)), Accounts::DirectoryService) => {
+                let user = format!("#{uid}");
+                let mut args = vec!["-n", "-u", user.as_str(), "--", program.as_ref()];
+                args.extend(check);
+                Call::new(SUDO_PROGRAM, &args, self.timeout)
+            }
+        };
         let output = run(self.runner, &call, KIND)?;
         if output.code == Some(CONFIG_REFUSED) {
             return Ok(Some(output.stderr_text()));
