@@ -481,8 +481,10 @@ histogram_quantile(0.5, sum by (le) (rate(tierstore_fs_tree_attach_seconds_bucke
 ### Build node: the mount's descriptors
 
 `tierstore fs` shares one descriptor per cache file (a blob or a pack) across all its open handles,
-and about once a minute reports to the node, on the fill socket, how many cache files it holds open
-and how many opens failed for lack of descriptors since its previous report. The families are on
+and at each look for idle trees (every quarter of `fs.tree_idle_secs`, at most a minute apart: a
+minute by default) reports to the node, on the fill socket, how many cache files it holds open and
+how many opens failed for lack of descriptors since its previous report (the cache file could not
+be opened, or no connection to the fill socket could be made). The families are on
 every process with a cache, with a `# TYPE` line, and have no series until a mount reports. The
 node keeps at most 64 mounts; a report of a 65th mount is answered `ok` and dropped, so a client
 that makes up mount ids cannot grow the node's memory. The fs unit's descriptor limit is 1,048,576.
