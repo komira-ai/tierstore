@@ -8,7 +8,10 @@
 //!   block options, no `allow_other`; a put mount is `rw`. After the unmount the entry is gone and
 //!   every reader ended `Unmounted`.
 //! - **Connection directory.** The mount's [`ConnectionId`](tsfuse::mount::ConnectionId) names a
-//!   directory of the FUSE control file system while mounted and none after the unmount.
+//!   directory of the FUSE control file system while mounted, and the unmount removes it: a file
+//!   of it opened while mounted reads nothing after the unmount. The check does not look the name
+//!   up again: the kernel gives the number to the next mount made on the host, so a directory of
+//!   that name may by then be another mount's.
 //! - **Unmount while busy.** With a file of the mount held open, an unmount fails and leaves the
 //!   mount: `EBUSY` from `umount2` (`MountError::Unmount`), a failed helper
 //!   (`MountError::Helper`) through `fusermount3`; a lazy unmount then detaches it, the held file
@@ -34,8 +37,9 @@
 //!   an unmount through `fusermount3 -u` removes the entry, and a lazy unmount through
 //!   `fusermount3 -u -z` detaches a busy mount.
 //! - **A mount that is gone.** `Mount::adopt` on the unmounted directory: `abort` is an error that
-//!   names the `abort` file and writes nowhere (it creates nothing); `connection` reads the device
-//!   number of whatever is mounted there now, which is not the old connection's.
+//!   names the `abort` file and writes nowhere (it creates nothing, and the old connection's
+//!   directory is removed, as above); `connection` reads the device number of whatever is
+//!   mounted there now, which is not the old connection's.
 //!
 //! Every wait is on an event (a request parked, a caller's system call returning, a reader
 //! joining, a child ending or writing a line), never on a timer. An integration target: it mounts
@@ -71,7 +75,7 @@ use rustix::fs::{AtFlags, CWD, Mode, OFlags, StatxFlags};
 use tierstore_testkit::dir::TestDir;
 use tsfuse::abi::InitConfig;
 use tsfuse::mount::{
-    CONNECTIONS, FUSERMOUNT, Mount, MountError, MountMethod, MountOptions, Mounter,
+    CONNECTIONS, ConnectionId, FUSERMOUNT, Mount, MountError, MountMethod, MountOptions, Mounter,
 };
 use tsfuse::{Handled, ReaderEnd, ReplyConfig, ReplyPath};
 
@@ -240,6 +244,57 @@ fn no_control_file_system() -> Option<String> {
     }
 }
 
+/// The `waiting` file of one connection's directory in the FUSE control file system, opened while
+/// the connection is mounted. The directory's name is not enough to tell after the unmount
+/// whether the directory is gone: the name is the super block's device number, which the kernel
+/// gives to the next mount made anywhere on the host once this one is gone (the lowest free
+/// number), so a directory of that name may by then be another, concurrent mount's. The open
+/// file stays this connection's: when the kernel removes the directory (`fuse_ctl_remove_conn`,
+/// as the unmount ends the super block) it detaches the file from the connection, and a read of
+/// it then returns nothing.
+struct ControlEntry {
+    /// Read once, after the unmount: the file cannot seek (`pread` fails `ESPIPE`) and a second
+    /// read of a descriptor is at end of file.
+    unread: File,
+    path: PathBuf,
+}
+
+impl ControlEntry {
+    /// Opens the `waiting` file of `id`'s directory twice: one descriptor is read now and reads
+    /// a count (the connection is mounted), the other is kept for [`Self::waiting`].
+    fn open(id: ConnectionId) -> Self {
+        let path = Path::new(CONNECTIONS)
+            .join(id.0.to_string())
+            .join("waiting");
+        let now = File::open(&path).unwrap();
+        assert!(
+            read_count(&now, &path).is_some(),
+            "{} reads a count while mounted",
+            path.display()
+        );
+        let unread = File::open(&path).unwrap();
+        Self { unread, path }
+    }
+
+    /// The connection's count of waiting requests, or `None` once the kernel removed the
+    /// directory and the read returns nothing.
+    fn waiting(self) -> Option<u64> {
+        read_count(&self.unread, &self.path)
+    }
+}
+
+/// One read of a `waiting` file at its start: the count and a newline, or nothing.
+fn read_count(mut file: &File, path: &Path) -> Option<u64> {
+    let mut buf = [0u8; 32];
+    let n = io::Read::read(&mut file, &mut buf).unwrap();
+    if n == 0 {
+        return None;
+    }
+    let text = std::str::from_utf8(&buf[..n]).unwrap();
+    let count = text.strip_suffix('\n').and_then(|count| count.parse().ok());
+    Some(count.unwrap_or_else(|| panic!("{}: {text:?} is not a count", path.display())))
+}
+
 #[test]
 fn the_connection_of_a_mount_is_a_directory_of_the_control_file_system_until_it_is_unmounted() {
     let Some((mounted, session)) = Mounted::new("t-f7-conn", READERS) else {
@@ -257,11 +312,13 @@ fn the_connection_of_a_mount_is_a_directory_of_the_control_file_system_until_it_
     }
     assert!(directory.is_dir(), "{} while mounted", directory.display());
     assert!(directory.join("abort").exists());
+    let control = ControlEntry::open(id);
 
     mounted.unmount();
-    assert!(
-        !directory.exists(),
-        "{} after the unmount",
+    assert_eq!(
+        control.waiting(),
+        None,
+        "{} is removed by the unmount",
         directory.display()
     );
     assert_eq!(served.join(), vec![ReaderEnd::Unmounted; READERS]);
@@ -662,6 +719,15 @@ fn the_abort_of_a_mount_that_is_gone_is_an_error_naming_the_abort_file_and_write
     let (tree, _) = tree();
     let served = serve_inline(session, tree);
     let before = mounted.mount().connection().unwrap();
+    let control = match no_control_file_system() {
+        None => Some(ControlEntry::open(before)),
+        Some(why) => {
+            skip(&format!(
+                "the removal of the old connection's directory: {why}"
+            ));
+            None
+        }
+    };
     let mp = mounted.mp.clone();
     mounted.take().unmount(false).unwrap();
     assert_eq!(served.join(), vec![ReaderEnd::Unmounted; READERS]);
@@ -682,7 +748,16 @@ fn the_abort_of_a_mount_that_is_gone_is_an_error_naming_the_abort_file_and_write
         "nothing was created at {}",
         abort.display()
     );
-    assert!(!Path::new(CONNECTIONS).join(before.0.to_string()).exists());
+    // The old connection's directory was removed: its control files are detached from it.
+    if let Some(control) = control {
+        let path = control.path.clone();
+        assert_eq!(
+            control.waiting(),
+            None,
+            "{} after the unmount",
+            path.display()
+        );
+    }
 
     // And with the directory itself removed, the connection cannot be read at all.
     std::fs::remove_dir(&mp).unwrap();
