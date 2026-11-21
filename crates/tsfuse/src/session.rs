@@ -273,6 +273,24 @@ impl Session {
     /// are dropped, the connection is left as it is); [`SessionError::Resend`] when the
     /// notification cannot be written.
     pub fn resume(handover: Handover) -> Result<Self, SessionError> {
+        let session = Self::attach(handover)?;
+        if session.negotiated.granted.contains(InitFlags::HAS_RESEND) {
+            session.resend().map_err(SessionError::Resend)?;
+        }
+        Ok(session)
+    }
+
+    /// As [`Self::resume`], but sends no `FUSE_NOTIFY_RESEND`: for a server that knows no
+    /// request of the connection is held unanswered by a server that is gone (the one it takes
+    /// over from answered all it read before it let go, or this process itself stopped its
+    /// readers and serves again), or that sends [`Self::resend`] itself and goes on when the
+    /// kernel refuses it.
+    ///
+    /// # Errors
+    ///
+    /// [`SessionError::UringNotResumable`] for a connection granted io_uring (its descriptors
+    /// are dropped, the connection is left as it is).
+    pub fn attach(handover: Handover) -> Result<Self, SessionError> {
         let Handover {
             negotiated,
             devices,
@@ -280,7 +298,7 @@ impl Session {
         if negotiated.granted.contains(InitFlags::OVER_IO_URING) {
             return Err(SessionError::UringNotResumable);
         }
-        let session = Self {
+        Ok(Self {
             devices: devices
                 .into_iter()
                 .map(|fd| Arc::new(DevFd::from_fd(fd)))
@@ -289,11 +307,7 @@ impl Session {
             tokens: Tokens::new(),
             mode: TransportMode::DevFuse(Fallback::NotAsked),
             rings: None,
-        };
-        if negotiated.granted.contains(InitFlags::HAS_RESEND) {
-            session.resend().map_err(SessionError::Resend)?;
-        }
-        Ok(session)
+        })
     }
 
     /// The terms INIT agreed.
@@ -313,6 +327,16 @@ impl Session {
     #[must_use]
     pub fn readers(&self) -> usize {
         self.devices.len()
+    }
+
+    /// Leaves every INTERRUPT unanswered from now on: no request of the session is answered
+    /// `EINTR`, and each is answered by the file system alone, as when the kernel's interrupts
+    /// are off. For a file system that answers its requests inline and whose answers must not be
+    /// replaced (a commit an INTERRUPT would report as not made while it goes on); a file system
+    /// that parks its requests until a wait ends keeps INTERRUPT (5.2 item 3). Call it before
+    /// [`Self::serve`].
+    pub fn ignore_interrupts(&self) {
+        self.tokens.ignore_interrupts();
     }
 
     /// The session's table of registered requests.

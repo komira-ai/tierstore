@@ -244,8 +244,12 @@ fn init_flags_set_operations_and_debug() {
         "InitFlags(ASYNC_READ | HAS_RESEND)"
     );
     assert_eq!(
-        format!("{:?}", a.union(InitFlags(1 << 2 | 1 << 37))),
-        "InitFlags(ASYNC_READ | 0x2000000004)"
+        format!("{:?}", a.union(InitFlags(1 << 2 | 1 << 36))),
+        "InitFlags(ASYNC_READ | 0x1000000004)"
+    );
+    assert_eq!(
+        format!("{:?}", InitFlags::PASSTHROUGH.union(InitFlags(1 << 2))),
+        "InitFlags(PASSTHROUGH | 0x4)"
     );
     assert_eq!(format!("{:?}", InitFlags(1 << 16)), "InitFlags(0x10000)");
 }

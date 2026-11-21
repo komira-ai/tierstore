@@ -13,9 +13,6 @@ description = "The FUSE benchmark of tierstore fs: open/read/close processes ove
 [target.'cfg(target_os = "linux")'.dependencies]
 # The command line of `fsbench`.
 clap.workspace = true
-# The null file system (`fsbench null-fs`): the same FUSE library, at the same commit, as
-# `tierstore fs`, so the control differs from tierstore in what it serves alone.
-fuser.workspace = true
 # The digest of a file list, written lowercase.
 hex.workspace = true
 # `posix_fadvise` (a cold read), `stat` (the device of a mount), the clock ticks of /proc, the

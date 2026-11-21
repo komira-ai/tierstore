@@ -40,6 +40,10 @@ impl InitFlags {
     pub const CACHE_SYMLINKS: Self = Self(1 << 23);
     /// `FUSE_NO_OPENDIR_SUPPORT`: an OPENDIR answered `ENOSYS` is not sent again.
     pub const NO_OPENDIR_SUPPORT: Self = Self(1 << 24);
+    /// `FUSE_PASSTHROUGH`: opens may be answered `FOPEN_PASSTHROUGH` with a backing id. Never
+    /// asked for by this library; named so that a server taking over a connection an earlier
+    /// server set up with it can tell.
+    pub const PASSTHROUGH: Self = Self(1 << 37);
     /// `FUSE_INIT_EXT`: the INIT messages carry `flags2`.
     pub const INIT_EXT: Self = Self(1 << 30);
     /// `FUSE_HAS_RESEND`: the kernel resends pending requests on `FUSE_NOTIFY_RESEND`, and
@@ -51,7 +55,7 @@ impl InitFlags {
     pub const OVER_IO_URING: Self = Self(1 << 41);
 
     /// The flags of this type with their header names, in bit order.
-    const NAMED: [(Self, &'static str); 13] = [
+    const NAMED: [(Self, &'static str); 14] = [
         (Self::ASYNC_READ, "ASYNC_READ"),
         (Self::SPLICE_WRITE, "SPLICE_WRITE"),
         (Self::SPLICE_READ, "SPLICE_READ"),
@@ -63,6 +67,7 @@ impl InitFlags {
         (Self::CACHE_SYMLINKS, "CACHE_SYMLINKS"),
         (Self::NO_OPENDIR_SUPPORT, "NO_OPENDIR_SUPPORT"),
         (Self::INIT_EXT, "INIT_EXT"),
+        (Self::PASSTHROUGH, "PASSTHROUGH"),
         (Self::HAS_RESEND, "HAS_RESEND"),
         (Self::OVER_IO_URING, "OVER_IO_URING"),
     ];

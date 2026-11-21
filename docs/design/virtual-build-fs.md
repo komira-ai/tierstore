@@ -9,6 +9,8 @@ the owner's decisions and sets out the macOS frontend (C9, decided 2026-11-10: N
 
 **Passthrough was removed after tierstore 0.3.121** (see the note at the head of section 6.4): every open is a cached open, `INIT` asks for no passthrough and declares no stack depth, and the process needs `CAP_SYS_ADMIN` for the mount alone. Where this document speaks of passthrough, backing ids, the backing table or `max_stack_depth` 1 as what the process does, it records the design as built before that change.
 
+**The `fuser` crate was replaced by `tsfuse`** (row T-R of `docs/design/fetch-cache-serve.md`): the Linux frontend speaks the FUSE protocol through `tsfuse`, the FUSE library of this repository, which serves an initialised connection without a handshake and sends `FUSE_NOTIFY_RESEND` itself, and the `fuser` fork is retired. Where this document speaks of the `fuser` crate or its patch (sections 3, 6.2, 7.1 and the plan of section 12), it records the design as built before that change.
+
 **What this document starts from.** An earlier proposal, built on researched findings, preceded it and recommended: one tierstore
 filesystem core in Rust with thin frontends (FUSE with passthrough on Linux, an NFSv4.0 loopback server on macOS, FSKit
 later); the per-job writable layer, copy-up included, in that core; pinning of a job's tree in the local cache; and three

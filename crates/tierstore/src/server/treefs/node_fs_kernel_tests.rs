@@ -1,33 +1,30 @@
-//! The FUSE frontend over a real mount: what a process sees through `std::fs`, and what reaches the
-//! core. A mount needs `/dev/fuse` and `fusermount3` (the mounting user is not root); where either
-//! is missing the test says so on stderr and ends.
+//! `NodeFs` over a real mount: what a process sees through `std::fs`, and what reaches the core.
+//! A mount needs `/dev/fuse` and `fusermount3` (the mounting user is not root); where either is
+//! missing the test says so on stderr and ends.
 
 use std::io::Read as _;
 use std::os::unix::fs::{MetadataExt as _, PermissionsExt as _};
 use std::path::Path;
 
-use fuser::{BackgroundSession, InitFlags, InitOutcome, Session};
+use tsfuse::abi::InitFlags;
 
-use super::super::fakedev;
-
-use super::{Frontend, config};
+use super::RUN;
 use crate::server::treefs::backing::{FILE, Saved};
 use crate::server::treefs::core::FIXED_MTIME;
 use crate::server::treefs::ino;
-use crate::server::treefs::testing::{Built, FakeKernel, Rig, file, sample, sha, until, with_fuse};
+use crate::server::treefs::serving::Serving;
+use crate::server::treefs::testing::{Built, FakeKernel, Rig, file, sample, sha, with_fuse};
 use crate::tree_manifest::TreeDigest;
 
 /// A rig, and its core served on a mount of its mountpoint.
 struct Mounted {
-    // The mount ends before the directories go.
-    session: BackgroundSession,
+    /// Ended first: the mount goes before the directories do.
+    serving: Option<Serving>,
     rig: Rig,
     root: String,
-    /// What the kernel's `INIT` and the frontend's answer settled.
-    outcome: InitOutcome,
 }
 
-/// The mount of the sample tree, attached for one run, in the 6.8 mode.
+/// The mount of `built`, attached for one run, with the owner of the entries the test's user.
 fn mounted(name: &str, built: Built) -> Mounted {
     let me = (
         rustix::process::geteuid().as_raw(),
@@ -35,16 +32,20 @@ fn mounted(name: &str, built: Built) -> Mounted {
     );
     let rig = Rig::owned(name, built, me);
     let root = rig.upstream.built.lock().unwrap().root.clone();
-    let _ = rig.core.attach(&root, "run-1").unwrap();
-    let frontend = Frontend::new(rig.core.clone());
-    let session = Session::new(frontend, &rig.mountpoint, &config(4, false)).unwrap();
-    let outcome = session.init_outcome().unwrap();
-    let session = session.spawn().unwrap();
+    let _ = rig.core.attach(&root, RUN).unwrap();
+    let serving = Serving::mount(&rig.core, &rig.settings()).unwrap();
     Mounted {
-        session,
+        serving: Some(serving),
         rig,
         root,
-        outcome,
+    }
+}
+
+impl Drop for Mounted {
+    fn drop(&mut self) {
+        if let Some(serving) = self.serving.take() {
+            let _ = serving.unmount();
+        }
     }
 }
 
@@ -79,6 +80,9 @@ impl Mounted {
 fn errno_of(error: &std::io::Error) -> i32 {
     error.raw_os_error().unwrap()
 }
+
+const EACCES: i32 = 13;
+const ENOENT: i32 = 2;
 
 /// Asserts that a tree reads as the manifests say through a real mount: the names, the contents of
 /// a small and a large file, an empty file, a link, the modes, sizes, owner, link counts and the
@@ -325,7 +329,7 @@ fn a_file_whose_fill_fails_is_an_io_error_until_the_blob_can_be_had() {
             errno_of(&directory),
             rustix::io::Errno::ISDIR.raw_os_error()
         );
-        let failures = m.rig.core.detach("run-1").unwrap();
+        let failures = m.rig.core.detach(RUN).unwrap();
         assert_eq!(failures.len(), 1);
         assert_eq!(failures[0].path, "/include/a.h");
         assert_eq!(failures[0].reason, "upstream 503");
@@ -340,30 +344,6 @@ fn a_name_that_is_not_text_is_not_there() {
         let odd = m.at("").join(std::ffi::OsStr::from_bytes(b"caf\xe9"));
         assert_eq!(errno_of(&std::fs::metadata(odd).unwrap_err()), ENOENT);
     });
-}
-
-const EACCES: i32 = 13;
-const ENOENT: i32 = 2;
-
-/// Asserts the options of the mount: the kernel checks the modes, one descriptor is read by every
-/// thread, and other users are let in only where the settings say so.
-#[test]
-fn the_mount_options_let_others_in_only_where_the_settings_say_so() {
-    use fuser::{MountOption, SessionACL};
-    let shared = config(16, true);
-    assert_eq!(shared.acl, SessionACL::All);
-    assert_eq!((shared.n_threads, shared.clone_fd), (Some(16), false));
-    assert!(
-        shared
-            .mount_options
-            .contains(&MountOption::DefaultPermissions)
-    );
-    assert!(
-        shared
-            .mount_options
-            .contains(&MountOption::FSName("tierstore-fs".to_owned()))
-    );
-    assert_eq!(config(1, false).acl, SessionACL::Owner);
 }
 
 /// Asserts that a directory too large for one reply is listed whole: the first reply is made with
@@ -390,51 +370,15 @@ fn a_directory_too_large_for_one_reply_is_listed_whole() {
     });
 }
 
-/// Asserts that the kernel forgetting an inode reaches the core: a name the kernel is told to drop
-/// is forgotten, and the core still answers for it afterwards.
-#[test]
-fn the_kernel_forgetting_an_inode_reaches_the_core() {
-    with_mount("tfs-fuse-forget", |m| {
-        let cc = m.at("bin/cc");
-        let _ = std::fs::metadata(&cc).unwrap();
-        assert_eq!(m.served("forget"), 0);
-        let bin = fuser::INodeNo(ino::of(1, 2));
-        m.session
-            .notifier()
-            .inval_entry(bin, std::ffi::OsStr::new("cc"))
-            .unwrap();
-        until(|| m.served("forget") > 0);
-        assert_eq!(std::fs::metadata(&cc).unwrap().size(), 3000);
-    });
-}
-
-/// Asserts that each refusal of the core is the errno the kernel is told: a listing of the
-/// namespace by root is `EACCES` (the kernel refuses everyone else before the request is sent).
-#[test]
-fn each_refusal_of_the_core_is_an_errno_of_the_kernel() {
-    use crate::server::treefs::core::Errno as Core;
-    let cases = [
-        (Core::NoEnt, fuser::Errno::ENOENT),
-        (Core::Acces, fuser::Errno::EACCES),
-        (Core::NotDir, fuser::Errno::ENOTDIR),
-        (Core::IsDir, fuser::Errno::EISDIR),
-        (Core::Inval, fuser::Errno::EINVAL),
-        (Core::Io, fuser::Errno::EIO),
-        (Core::RoFs, fuser::Errno::EROFS),
-    ];
-    for (core, kernel) in cases {
-        assert_eq!(super::errno(core), kernel, "{core:?}");
-    }
-}
-
 /// Asserts that a mount never asks the kernel for passthrough, whatever the kernel offers, and so
 /// leaves the stack depth 0, on which the job's overlay stacks; and that every open is a cached
 /// one: the reads of a file reach the core.
 #[test]
 fn a_mount_does_not_ask_for_passthrough_and_its_reads_reach_the_core() {
     with_mount("tfs-fuse-no-passthrough", |m| {
-        assert!(!m.outcome.flags.contains(InitFlags::FUSE_PASSTHROUGH));
-        assert_eq!(m.outcome.max_stack_depth, 0);
+        let outcome = m.serving.as_ref().unwrap().outcome();
+        assert!(!outcome.flags.contains(InitFlags::PASSTHROUGH));
+        assert_eq!(outcome.max_stack_depth, 0);
         let blobs = m.rig.upstream.built.lock().unwrap().blobs.clone();
         let bytes = std::fs::read(m.at("bin/cc")).unwrap();
         assert_eq!(bytes, blobs[&sha(&bytes)]);
@@ -443,35 +387,10 @@ fn a_mount_does_not_ask_for_passthrough_and_its_reads_reach_the_core() {
     });
 }
 
-/// Asserts, with a stand-in for the kernel that offers passthrough (and resend), that the answer to
-/// `INIT` asks for resend and not for passthrough, and declares a stack depth of 0: whatever the
-/// kernel the test runs on offers, and whatever capability the test process holds.
-#[test]
-fn init_asks_for_no_passthrough_where_the_kernel_offers_it() {
-    let rig = Rig::new("tfs-fuse-init-offered", sample());
-    let (device, kernel) = fakedev::pair();
-    kernel.init(1, InitFlags::FUSE_PASSTHROUGH | InitFlags::FUSE_HAS_RESEND);
-    let config = config(1, false);
-    let frontend = Frontend::new(rig.core.clone());
-    let session = Session::from_fd(frontend, device, config.acl, config).unwrap();
-    let reply = kernel.reply();
-    assert_eq!((reply.unique, reply.error), (1, 0));
-    let outcome = session.init_outcome().unwrap();
-    assert!(outcome.capabilities.contains(InitFlags::FUSE_PASSTHROUGH));
-    assert!(!outcome.flags.contains(InitFlags::FUSE_PASSTHROUGH));
-    assert!(outcome.flags.contains(InitFlags::FUSE_HAS_RESEND));
-    assert_eq!(outcome.max_stack_depth, 0);
-    // The reply itself: `flags2` (bytes 32 to 36) without bit 37 of the flags, a depth of 0.
-    let word = |at: usize| u32::from_ne_bytes(reply.body[at..at + 4].try_into().unwrap());
-    let replied = u64::from(word(12)) | (u64::from(word(32)) << 32);
-    assert_eq!(replied & InitFlags::FUSE_PASSTHROUGH.bits(), 0);
-    assert_eq!(word(36), 0);
-}
-
 /// Asserts that an open of a blob the core holds an adopted id for, whose handle is not one the
-/// frontend can answer with (here the test kernel's, not `fuser`'s), fails with `EIO` and ends
-/// the open the core made, rather than answering a cached open on an inode the kernel serves by
-/// passthrough; and that the opens of other files are cached opens as before.
+/// frontend can answer with (here the test kernel's, not a [`BackingId`]), fails with `EIO` and
+/// ends the open the core made, rather than answering a cached open on an inode the kernel serves
+/// by passthrough; and that the opens of other files are cached opens as before.
 #[test]
 fn an_adopted_id_the_frontend_cannot_answer_with_fails_the_open() {
     with_fuse(|| {

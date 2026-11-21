@@ -58,6 +58,11 @@ pub mod fopen {
     pub const DIRECT_IO: u32 = 1 << 0;
     /// `FOPEN_KEEP_CACHE`: keep the page cache of the file across this open.
     pub const KEEP_CACHE: u32 = 1 << 1;
+    /// `FOPEN_CACHE_DIR`: keep the cached listing of the directory across this OPENDIR.
+    pub const CACHE_DIR: u32 = 1 << 3;
+    /// `FOPEN_PASSTHROUGH`: reads and writes of this open go to the backing file of
+    /// [`super::OpenOut::backing_id`], an id the server registered on the connection.
+    pub const PASSTHROUGH: u32 = 1 << 7;
 }
 
 /// `FATTR_*`: the fields a SETATTR sets ([`SetattrIn::valid`]); the put directory takes a change

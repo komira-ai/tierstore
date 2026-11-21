@@ -8,11 +8,11 @@ use std::os::unix::net::UnixDatagram;
 use std::sync::Arc;
 use std::time::Duration;
 
-use fuser::{InitFlags, InitOutcome, Version};
+use tsfuse::abi::InitFlags;
 
 use super::config::FsSettings;
 use super::handover::{HandoverError, Offer, Paths};
-use super::init_record::{self, Record};
+use super::init_record::{self, Outcome, Record};
 use super::ino;
 use super::run::{Prepared, Running};
 use super::testing::{Rig, sample};
@@ -58,14 +58,14 @@ pub(in crate::server::treefs) fn pair() -> (OwnedFd, FakeDevice) {
 }
 
 /// What a handshake of a kernel of Linux 6.9 or later, which offers `resend`, set up.
-pub(in crate::server::treefs) fn outcome(resend: bool) -> InitOutcome {
+pub(in crate::server::treefs) fn outcome(resend: bool) -> Outcome {
     let flags = if resend {
-        InitFlags::FUSE_HAS_RESEND
+        InitFlags::HAS_RESEND
     } else {
-        InitFlags::empty()
+        InitFlags::EMPTY
     };
-    InitOutcome {
-        kernel_abi: Version(7, 40),
+    Outcome {
+        kernel_abi: (7, 40),
         capabilities: flags,
         flags,
         max_readahead: 131_072,
@@ -96,7 +96,7 @@ impl FakeDevice {
 
     /// `INIT` of a kernel of protocol 7.40 that offers `offered`.
     pub(in crate::server::treefs) fn init(&self, unique: u64, offered: InitFlags) {
-        let flags = offered.bits() | InitFlags::FUSE_INIT_EXT.bits();
+        let flags = offered.0 | InitFlags::INIT_EXT.0;
         let mut body = Vec::new();
         let words = [7, 40, 131_072, flags as u32, (flags >> 32) as u32];
         for word in words {

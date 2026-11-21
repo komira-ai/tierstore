@@ -308,7 +308,8 @@ wire! {
         pub fh: u64,
         /// `FOPEN_*` flags ([`super::fopen`]).
         pub open_flags: u32,
-        /// The passthrough backing id; always 0 (passthrough is not implemented).
+        /// The passthrough backing id, with [`super::fopen::PASSTHROUGH`]; otherwise 0. This
+        /// library registers no backing id.
         pub backing_id: i32,
     }
 

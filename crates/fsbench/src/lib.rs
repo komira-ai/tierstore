@@ -9,15 +9,16 @@
 //! (`/sys/fs/fuse/connections/<n>/waiting`), and it measures the CPU time the server process,
 //! its control group and the whole node spent. One JSON object per run goes to the results file
 //! ([`record`]); `fsbench report` turns a results file into the tables of a measurement
-//! document ([`report`]). `fsbench null-fs` ([`nullfs`]) serves the same list with no storage
-//! behind it, so the transport is measured apart from what `tierstore fs` does per request;
-//! `fsbench tsfuse-null-fs` ([`tsnull`]) does the same on `tsfuse`, the FUSE library of the
-//! redesign, with its cloned readers and its READ reply path, on `/dev/fuse` or over io_uring.
-//! Both serve the tree of [`tree`]. `fsbench storm` ([`storm`]) is the storm test of the
-//! io_uring transport: parked reads from one CPU and from every CPU, and the latency of metadata
-//! during them, on a file system of its own ([`stormfs`]); `fsbench storm-report` makes its
-//! tables ([`stormrec`]). `fsbench summary` ([`summary`]) puts the series of several results files
-//! in one table. `fsbench dstate-report` reads what a sampler of read-only tools printed on the
+//! document ([`report`]). `fsbench tsfuse-null-fs` ([`tsnull`]) serves the same list with no
+//! storage behind it, on `tsfuse`, the FUSE library of `tierstore fs`, with its cloned readers
+//! and its READ reply path, on `/dev/fuse` or over io_uring, so the transport is measured apart
+//! from what `tierstore fs` does per request. It serves the tree of [`tree`]. (The `fuser` null
+//! file system, `fsbench null-fs`, was removed with `fuser`; it runs only from a commit before
+//! that removal, and the recorded measurements that used it say so.) `fsbench storm` ([`storm`])
+//! is the storm test of the io_uring transport: parked reads from one CPU and from every CPU,
+//! and the latency of metadata during them, on a file system of its own ([`stormfs`]);
+//! `fsbench storm-report` makes its tables ([`stormrec`]). `fsbench summary` ([`summary`]) puts
+//! the series of several results files in one table. `fsbench dstate-report` reads what a sampler of read-only tools printed on the
 //! build nodes during a real build ([`dstate`]) and makes its tables ([`dstaterep`]): D state and
 //! FUSE waiting under the farm's own jobs.
 //!
@@ -41,7 +42,6 @@ pub mod error;
 pub mod hist;
 pub mod host;
 pub mod list;
-pub mod nullfs;
 pub mod reader;
 pub mod record;
 pub mod report;

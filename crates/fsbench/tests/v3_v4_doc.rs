@@ -12,10 +12,11 @@
 use std::path::Path;
 
 /// The document holds the report of its records, and the records are its series in the order
-/// they ran: in each regime the same-day control on `fuser`, then V3 (`tsfuse` on `/dev/fuse`,
-/// replies by `writev`) at 1, 2, 4, 8 and 22 readers, then, in the two regimes of the design, V4
-/// (replies by splice) at the same reader counts and V4 with `SPLICE_F_MOVE` at 8; six runs each,
-/// none of whose cycles or reads failed, every one with the CPU of its whole-file phases.
+/// they ran: in each regime the same-day control recorded on `fuser` (since removed), then V3
+/// (`tsfuse` on `/dev/fuse`, replies by `writev`) at 1, 2, 4, 8 and 22 readers, then, in the two
+/// regimes of the design, V4 (replies by splice) at the same reader counts and V4 with
+/// `SPLICE_F_MOVE` at 8; six runs each, none of whose cycles or reads failed, every one with the
+/// CPU of its whole-file phases.
 #[test]
 fn the_document_holds_the_report_of_the_v3_v4_records() {
     let crate_dir = Path::new(env!("CARGO_MANIFEST_DIR"));

@@ -1,18 +1,19 @@
-//! The put directory on `tsfuse` against the handler on fuser (section 18, row T-F9: "put-directory
-//! opcodes against the current handler"). Two put directories are made alike (the same settings,
-//! a test clock at the same time, a fake disk and a fake upload socket each); one is served by the
-//! fuser frontend of `tierstore fs` (`fuse.rs` with `fuse_put.rs`), the other by a `tsfuse`
-//! `Session` serving [`PutFs`], each over a socket pair that stands in for `/dev/fuse`. Every
-//! request of the script is the same bytes to both, and each reply (its error, its unique and
-//! every byte of its body) must be the same. The script runs every opcode of the put directory,
-//! and each of its refusals.
+//! The put directory on `tsfuse` against what the handler on fuser answered (section 18, row
+//! T-F9: "put-directory opcodes against the current handler"; row T-R removed that handler with
+//! fuser). A put directory is served by a `tsfuse` `Session` serving [`PutFs`] over a socket pair
+//! that stands in for `/dev/fuse`, and each script's exchanges are checked against the script's
+//! golden file in `put_fs_golden/` (one line per exchange: the request's opcode and node id, the
+//! reply's error, unique and every byte of its body, in hex). The golden files were written by the
+//! comparison of the two handlers while both served the put directory and answered every exchange
+//! alike, so they are fuser's answers. The script runs every opcode of the put directory, and each
+//! of its refusals.
 //!
 //! The direct tests below call [`PutFs::handle`] with a replier of a recording device, for what
 //! no reply shows: whether a request was answered inline or parked, which requests the put
 //! directory owns, and the answers to what the session never hands a file system.
 //!
 //! Catches:
-//! - a reply of `PutFs` that differs from fuser's in any byte: attributes (mode bits, link count,
+//! - a reply of `PutFs` that differs from what fuser answered in any byte: attributes (mode bits, link count,
 //!   times, blocks, block size), validity, an absent name's entry, the open of a create
 //!   (`FOPEN_DIRECT_IO` and its handle), a listing's records and where a short buffer cuts it,
 //!   `statfs`, a write's count, or any errno;
@@ -39,10 +40,8 @@ use tsfuse::{DevFd, Fs, Handled, ReplyDevice, Request, Session, Tokens};
 
 use super::PutFs;
 use crate::server::local_cache::testing::Quirk;
-use crate::server::treefs::fuse::{Frontend, config};
 use crate::server::treefs::ino;
 use crate::server::treefs::put::testing::SpaceRig;
-use crate::server::treefs::testing::{Rig, sample};
 
 /// Opcodes of the uapi `fuse.h` the script sends.
 mod op {
@@ -184,50 +183,54 @@ fn init() -> Vec<u8> {
     request(op::INIT, 1, 0, init.as_bytes())
 }
 
-/// The two put directories, served, and the kernel's end of each.
-struct Pair<'a> {
-    fuser: &'a Kernel,
-    tsfuse: &'a Kernel,
-    /// The disks of the two stages, fuser's first.
-    disks: [&'a crate::server::local_cache::testing::FakeDisk; 2],
+/// The put directory, served, and the kernel's end of its device.
+struct Script<'a> {
+    kernel: &'a Kernel,
+    /// The disk of the stage.
+    disk: &'a crate::server::local_cache::testing::FakeDisk,
     unique: std::cell::Cell<u64>,
+    /// Every exchange answered so far, a line each (see [`said`]).
+    said: std::cell::RefCell<Vec<String>>,
 }
 
-impl Pair<'_> {
-    /// Sends `opcode` on `nodeid` with `body` to both and returns the reply, after asserting that
-    /// both replies are the same, byte for byte.
-    fn both(&self, opcode: u32, nodeid: u64, body: &[u8]) -> Reply {
+/// One exchange as a line of a golden file: the request's opcode and node id, then the reply's
+/// error, unique and every byte of its body, in hex.
+fn said(opcode: u32, nodeid: u64, reply: &Reply) -> String {
+    let body: String = reply.body.iter().map(|b| format!("{b:02x}")).collect();
+    format!(
+        "{opcode} {nodeid:#x} {} {} {body}",
+        reply.error, reply.unique
+    )
+}
+
+impl Script<'_> {
+    /// Sends `opcode` on `nodeid` with `body` and returns the reply, after asserting that it
+    /// answers the request.
+    fn ask(&self, opcode: u32, nodeid: u64, body: &[u8]) -> Reply {
         let unique = self.unique.get() + 1;
         self.unique.set(unique);
-        let bytes = request(opcode, unique, nodeid, body);
-        self.fuser.send(&bytes);
-        self.tsfuse.send(&bytes);
-        let (fuser, tsfuse) = (self.fuser.reply(), self.tsfuse.reply());
-        assert_eq!(
-            tsfuse, fuser,
-            "opcode {opcode} on node {nodeid:#x}: tsfuse's reply, then fuser's"
-        );
-        assert_eq!(fuser.unique, unique);
-        fuser
+        self.kernel.send(&request(opcode, unique, nodeid, body));
+        let reply = self.kernel.reply();
+        assert_eq!(reply.unique, unique);
+        self.said.borrow_mut().push(said(opcode, nodeid, &reply));
+        reply
     }
 
-    /// Sends a request that takes no reply to both.
+    /// Sends a request that takes no reply.
     fn unanswered(&self, opcode: u32, nodeid: u64, body: &[u8]) {
         let unique = self.unique.get() + 1;
         self.unique.set(unique);
-        let bytes = request(opcode, unique, nodeid, body);
-        self.fuser.send(&bytes);
-        self.tsfuse.send(&bytes);
+        self.kernel.send(&request(opcode, unique, nodeid, body));
     }
 
-    /// The error of the reply to `opcode`, the same on both.
+    /// The error of the reply to `opcode`.
     fn error(&self, opcode: u32, nodeid: u64, body: &[u8]) -> i32 {
-        self.both(opcode, nodeid, body).error
+        self.ask(opcode, nodeid, body).error
     }
 
     /// LOOKUP of `name` in `parent`.
     fn lookup(&self, parent: u64, child: &[u8]) -> Reply {
-        self.both(op::LOOKUP, parent, &name(child))
+        self.ask(op::LOOKUP, parent, &name(child))
     }
 
     /// The node id of `path` below `put/`, looked up name by name.
@@ -240,50 +243,59 @@ impl Pair<'_> {
     }
 }
 
-/// Serves two put directories alike, one on fuser and one on `tsfuse`, and runs `script` over
-/// them; then ends both sessions with a DESTROY, whose replies are compared too.
-fn compare(name: &str, script: impl FnOnce(&Pair<'_>)) {
-    let tree = Rig::new(&format!("{name}-tree"), sample());
-    let fuser_rig = SpaceRig::new(&format!("{name}-fuser"));
-    let tsfuse_rig = SpaceRig::new(&format!("{name}-tsfuse"));
-    tree.core.serve_put(Arc::new(fuser_rig.space));
-
-    let (device, fuser) = Kernel::pair();
-    fuser.send(&init());
-    let settings = config(1, false);
-    let session = fuser::Session::from_fd(
-        Frontend::new(tree.core.clone()),
-        device,
-        settings.acl,
-        settings,
-    )
-    .unwrap();
-    assert_eq!(fuser.reply().error, 0);
-    let fuser_session = session.spawn().unwrap();
-
-    let (device, tsfuse) = Kernel::pair();
-    tsfuse.send(&init());
+/// Serves a put directory on `tsfuse` and runs `script` over it; then ends the session with a
+/// DESTROY. Every exchange, the DESTROY's included, must be the next line of the script's golden
+/// file, and every line of it must have been exchanged.
+fn compare(name: &str, script: impl FnOnce(&Script<'_>)) {
+    let rig = SpaceRig::new(name);
+    let (device, kernel) = Kernel::pair();
+    kernel.send(&init());
     let session = Session::init(DevFd::from_fd(device), &InitConfig::put()).unwrap();
-    assert_eq!(tsfuse.reply().error, 0);
+    assert_eq!(kernel.reply().error, 0);
     let serving = session
-        .serve(Arc::new(PutFs::new(Arc::new(tsfuse_rig.space))))
+        .serve(Arc::new(PutFs::new(Arc::new(rig.space))))
         .unwrap();
 
-    let pair = Pair {
-        fuser: &fuser,
-        tsfuse: &tsfuse,
-        disks: [&fuser_rig.rig.disk, &tsfuse_rig.rig.disk],
+    let served = Script {
+        kernel: &kernel,
+        disk: &rig.rig.disk,
         unique: std::cell::Cell::new(1),
+        said: std::cell::RefCell::new(Vec::new()),
     };
-    for disk in pair.disks {
-        disk.set_space(1 << 30, 3 << 27);
-    }
-    script(&pair);
+    served.disk.set_space(1 << 30, 3 << 27);
+    script(&served);
 
-    let ended = pair.both(op::DESTROY, 0, &[]);
+    let ended = served.ask(op::DESTROY, 0, &[]);
     assert_eq!((ended.error, ended.body.len()), (0, 0));
-    fuser_session.join().unwrap();
     let _ = serving.join().unwrap();
+    let said = served.said.into_inner();
+    let golden: Vec<&str> = golden(name).lines().collect();
+    for (at, (said, golden)) in said.iter().zip(&golden).enumerate() {
+        assert_eq!(
+            said,
+            golden,
+            "{name}: exchange {} of the golden file",
+            at + 1
+        );
+    }
+    assert_eq!(
+        said.len(),
+        golden.len(),
+        "{name}: the exchanges of the golden file"
+    );
+}
+
+/// The golden file of a script: what the handler on fuser answered to each of its exchanges,
+/// recorded while it and `PutFs` both served the put directory and answered alike
+/// (`put_fs_golden/`).
+fn golden(name: &str) -> &'static str {
+    match name {
+        "putfs-names" => include_str!("put_fs_golden/putfs-names.txt"),
+        "putfs-commit" => include_str!("put_fs_golden/putfs-commit.txt"),
+        "putfs-refused" => include_str!("put_fs_golden/putfs-refused.txt"),
+        "putfs-mkdir" => include_str!("put_fs_golden/putfs-mkdir.txt"),
+        other => panic!("no golden file for {other}"),
+    }
 }
 
 fn create_in() -> Vec<u8> {
@@ -377,7 +389,7 @@ const OPEN_RDONLY: [u8; OpenIn::SIZE] = [0; OpenIn::SIZE];
 /// that is not UTF-8, a listing whole, from a position, past its end and cut by a short buffer,
 /// with and without attributes, and `statfs` (and its failure).
 #[test]
-fn the_namespace_and_listings_are_answered_as_on_fuser() {
+fn the_namespace_and_listings_are_answered_as_fuser_answered() {
     compare("putfs-names", |p| {
         let put = p.lookup(ino::ROOT, b"put");
         assert_eq!((put.error, put.nodeid()), (0, ino::PUT));
@@ -400,39 +412,35 @@ fn the_namespace_and_listings_are_answered_as_on_fuser() {
         assert_eq!(p.error(op::OPENDIR, nonce, &OPEN_RDONLY), 0);
 
         // A file in the directory, so that a listing has more than `.` and `..`.
-        let made = p.both(op::CREATE, nonce, &create(b"a.part"));
+        let made = p.ask(op::CREATE, nonce, &create(b"a.part"));
         assert_eq!(made.error, 0);
         assert_eq!(p.error(op::RELEASE, made.nodeid(), &release(made.fh())), 0);
         for opcode in [op::READDIR, op::READDIRPLUS] {
-            let whole = p.both(opcode, nonce, &read_in(0, 0, 4096));
+            let whole = p.ask(opcode, nonce, &read_in(0, 0, 4096));
             assert_eq!(whole.error, 0);
             assert!(!whole.body.is_empty());
             // From the second entry, past the end, a buffer that holds one record (a dirent of
             // `.` is 32 bytes, with its entry 160) and a buffer one record cannot fill.
-            assert!(p.both(opcode, nonce, &read_in(0, 1, 4096)).body.len() < whole.body.len());
-            assert!(p.both(opcode, nonce, &read_in(0, 9, 4096)).body.is_empty());
+            assert!(p.ask(opcode, nonce, &read_in(0, 1, 4096)).body.len() < whole.body.len());
+            assert!(p.ask(opcode, nonce, &read_in(0, 9, 4096)).body.is_empty());
             let (size, record) = if opcode == op::READDIRPLUS {
                 (200, 160)
             } else {
                 (40, 32)
             };
             assert_eq!(
-                p.both(opcode, nonce, &read_in(0, 0, size)).body.len(),
+                p.ask(opcode, nonce, &read_in(0, 0, size)).body.len(),
                 record
             );
-            assert!(p.both(opcode, nonce, &read_in(0, 0, 8)).body.is_empty());
+            assert!(p.ask(opcode, nonce, &read_in(0, 0, 8)).body.is_empty());
         }
         assert_eq!(p.error(op::RELEASEDIR, nonce, &release(0)), 0);
 
-        let statfs = p.both(op::STATFS, nonce, &[]);
+        let statfs = p.ask(op::STATFS, nonce, &[]);
         assert_eq!((statfs.error, statfs.body.len()), (0, 80));
-        for disk in p.disks {
-            disk.set(Quirk::SpaceFails);
-        }
+        p.disk.set(Quirk::SpaceFails);
         assert_eq!(p.error(op::STATFS, nonce, &[]), errno::EIO);
-        for disk in p.disks {
-            disk.set(Quirk::None);
-        }
+        p.disk.set(Quirk::None);
 
         // A file that is gone, and a directory this process was never told of.
         assert_eq!(
@@ -454,7 +462,7 @@ fn the_namespace_and_listings_are_answered_as_on_fuser() {
 /// flags refused, the commit (answered from the commit's thread on `tsfuse`), what is refused of a
 /// committed name, an unlink that aborts, and a rename across directories.
 #[test]
-fn a_staged_file_is_created_written_and_committed_as_on_fuser() {
+fn a_staged_file_is_created_written_and_committed_as_fuser_answered() {
     compare("putfs-commit", |p| {
         let cas = p.walk("cas");
         let nonce = p.walk("cas/b/build-1/nonce-1");
@@ -471,10 +479,10 @@ fn a_staged_file_is_created_written_and_committed_as_on_fuser() {
         );
         assert_eq!(p.error(op::CREATE, cas, &create(b"x.part")), errno::EPERM);
 
-        let made = p.both(op::CREATE, nonce, &create(b"a.part"));
+        let made = p.ask(op::CREATE, nonce, &create(b"a.part"));
         assert_eq!(made.error, 0);
         let (file, fh) = (made.nodeid(), made.fh());
-        let written = p.both(op::WRITE, file, &write(fh, 0, b"hello"));
+        let written = p.ask(op::WRITE, file, &write(fh, 0, b"hello"));
         assert_eq!((written.error, written.body.len()), (0, 8));
         assert_eq!(p.error(op::WRITE, file, &write(fh, 5, b" world")), 0);
         assert_eq!(
@@ -570,10 +578,7 @@ fn a_staged_file_is_created_written_and_committed_as_on_fuser() {
         );
         let committed = p.lookup(nonce, b"b");
         assert_eq!((committed.error, committed.nodeid()), (0, file));
-        assert_eq!(
-            p.both(op::READDIRPLUS, nonce, &read_in(0, 0, 4096)).error,
-            0
-        );
+        assert_eq!(p.ask(op::READDIRPLUS, nonce, &read_in(0, 0, 4096)).error, 0);
         assert_eq!(p.error(op::OPEN, file, &OPEN_RDONLY), errno::EACCES);
         assert_eq!(
             p.error(op::RENAME, nonce, &rename(nonce, b"b", b"c")),
@@ -582,7 +587,7 @@ fn a_staged_file_is_created_written_and_committed_as_on_fuser() {
         assert_eq!(p.error(op::UNLINK, nonce, &name(b"b")), errno::EPERM);
 
         // A second staged file: `RENAME_NOREPLACE` onto the committed name, then the abort.
-        let second = p.both(op::CREATE, nonce, &create(b"d.part"));
+        let second = p.ask(op::CREATE, nonce, &create(b"d.part"));
         assert_eq!(second.error, 0);
         assert_eq!(
             p.error(op::RELEASE, second.nodeid(), &release(second.fh())),
@@ -608,10 +613,10 @@ fn a_staged_file_is_created_written_and_committed_as_on_fuser() {
 /// attributes (`ENOSYS`, so that the kernel stops asking); a link's target (`EINVAL` of `put/`);
 /// and an opcode neither implements.
 #[test]
-fn what_the_put_directory_does_not_do_is_refused_as_on_fuser() {
+fn what_the_put_directory_does_not_do_is_refused_as_fuser_refused_it() {
     compare("putfs-refused", |p| {
         let nonce = p.walk("cas/b/build-1/nonce-1");
-        let made = p.both(op::CREATE, nonce, &create(b"a.part"));
+        let made = p.ask(op::CREATE, nonce, &create(b"a.part"));
         let file = made.nodeid();
         let symlink = [name(b"c.part"), name(b"a.part")].concat();
         assert_eq!(p.error(op::SYMLINK, nonce, &symlink), errno::EPERM);
@@ -646,21 +651,21 @@ fn what_the_put_directory_does_not_do_is_refused_as_on_fuser() {
 /// a made directory let go once the kernel forgets every lookup of it, by FORGET or by
 /// BATCH_FORGET, and kept while it holds one.
 #[test]
-fn made_directories_are_forgotten_as_on_fuser() {
+fn made_directories_are_forgotten_as_fuser_answered() {
     compare("putfs-mkdir", |p| {
         let cas = p.walk("cas");
         let nonce = p.walk("cas/b/build-1/nonce-1");
-        let staged = p.both(op::CREATE, nonce, &create(b"a.part"));
+        let staged = p.ask(op::CREATE, nonce, &create(b"a.part"));
         assert_eq!(
             p.error(op::RELEASE, staged.nodeid(), &release(staged.fh())),
             0
         );
         // With a file in it, a free name in the directory is not there: `mkdir` makes it.
-        let sub = p.both(op::MKDIR, nonce, &mkdir(b"sub"));
+        let sub = p.ask(op::MKDIR, nonce, &mkdir(b"sub"));
         assert_eq!(sub.error, 0);
-        let kept = p.both(op::MKDIR, nonce, &mkdir(b"kept"));
+        let kept = p.ask(op::MKDIR, nonce, &mkdir(b"kept"));
         assert_eq!(kept.error, 0);
-        let third = p.both(op::MKDIR, nonce, &mkdir(b"third"));
+        let third = p.ask(op::MKDIR, nonce, &mkdir(b"third"));
         assert_eq!(third.error, 0);
         assert_eq!(p.error(op::MKDIR, nonce, &mkdir(b"sub")), errno::EEXIST);
         assert_eq!(p.error(op::MKDIR, nonce, &mkdir(b"x.part")), errno::EPERM);

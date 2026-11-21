@@ -29,7 +29,7 @@ pub enum Error {
     /// ended without its answer.
     #[error("{process}: {why}")]
     Child {
-        /// The child (`reader 3`, `burner 0`, `null-fs`).
+        /// The child (`reader 3`, `burner 0`, `tsfuse-null-fs`).
         process: String,
         /// What went wrong.
         why: String,

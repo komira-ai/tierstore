@@ -326,7 +326,7 @@ impl Running {
     }
 
     /// The outcome of the handshake the connection was set up with.
-    pub(super) fn outcome(&self) -> fuser::InitOutcome {
+    pub(super) fn outcome(&self) -> super::init_record::Outcome {
         locked(&self.parts).serving.outcome()
     }
 

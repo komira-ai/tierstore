@@ -2,7 +2,7 @@
 //! test (`fakedev.rs`): no mount, no privilege. The connection was set up by an earlier process,
 //! which left its state in the runtime directory.
 
-use fuser::InitFlags;
+use tsfuse::abi::InitFlags;
 
 use super::backing;
 use super::config::FsSettings;
@@ -75,7 +75,7 @@ fn a_takeover_asks_for_the_requests_again_only_where_the_kernel_can_send_them() 
     let running = adopt(&settings, device, true);
     let note = kernel.reply();
     assert_eq!((note.unique, note.error, note.body.len()), (0, 7, 0));
-    assert!(running.outcome().flags.contains(InitFlags::FUSE_HAS_RESEND));
+    assert!(running.outcome().flags.contains(InitFlags::HAS_RESEND));
     // A request the kernel sent again carries the resend bit and is answered under its id.
     let again = 9 | (1 << 63);
     kernel.getattr(again, ino::ROOT);
@@ -237,8 +237,8 @@ fn a_takeover_that_cannot_read_the_state_says_what_and_serves_nothing() {
 /// and the file of the ids it kept.
 fn with_passthrough(rig: &Rig, table: &str) {
     let mut with = Record::first(fakedev::outcome(false), "mount-1".to_owned());
-    with.outcome.flags |= InitFlags::FUSE_PASSTHROUGH;
-    with.outcome.capabilities |= InitFlags::FUSE_PASSTHROUGH;
+    with.outcome.flags = with.outcome.flags.union(InitFlags::PASSTHROUGH);
+    with.outcome.capabilities = with.outcome.capabilities.union(InitFlags::PASSTHROUGH);
     with.outcome.max_stack_depth = 1;
     init_record::write(&rig.runtime, &with).unwrap();
     std::fs::write(rig.runtime.join(backing::FILE), table).unwrap();

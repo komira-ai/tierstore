@@ -330,7 +330,9 @@ tables above.
   tested, but no mount process serves it until the tree mounts switch from `fuser` (row T-R of
   the design), and a job of the farm can only read a mount its node's `tierstore fs` serves. The
   real-build run therefore measures the shipped mount; the same run once T-R has switched a
-  node is the comparison, and T10b's D-state figures cover it.
+  node is the comparison, and T10b's D-state figures cover it. (T-R then moved the node's mount
+  onto `tsfuse` with the core's read path; `TreeFs` is served once a mount process attaches to
+  the node's shared cache, section 23 of the design.)
 - **`tsfuse` on the real core in the harness of 17.1.** Running `TreeFs` beside the node's own
   mount in `fsbench run` needs a node drained of jobs (a mount by hand on a serving node is not
   done); no node was drained for this report. The null-file-system series (V3 to V5) are what
