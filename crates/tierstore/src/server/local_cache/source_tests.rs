@@ -14,6 +14,7 @@ use super::pack_testing::Pack;
 use super::source::{Blob, FillError, blob_path, status_of};
 use super::testing::{Quirk, Rig, digest, pattern, until};
 use super::{Mode, Tick, locked};
+use crate::server::treefs::testing::{Logged, logged};
 use crate::{Backend, Error, Op};
 
 /// The number of entries in the stage directory of the rig.
@@ -149,6 +150,43 @@ async fn the_failures_of_the_upstream_are_answered_with_their_status() {
     assert_eq!((staged(&rig), rig.cache.held()), (0, (0, 0)));
 }
 
+/// Asserts that a fill the upstream refuses (an answer 403: the store does not accept this node's
+/// key) is `upstream 403`, not a server error, is counted as an upstream error, leaves nothing, and
+/// is logged once with the object read and the store's own answer, its code included: for a blob
+/// the pack it lies in, for a manifest its own key. Catches a refusal answered `upstream 500`.
+#[tokio::test]
+async fn a_fill_the_upstream_refuses_is_upstream_403_and_logs_the_store_code() {
+    let rig = Rig::new("tsrc-refused");
+    let pack = Pack::put(&rig, "packs/five", &[500]).await;
+    let said = "store answered 403 InvalidAccessKeyId: not a key of this store";
+    rig.upstream
+        .fail_next_with(Op::Get, Error::Denied(said.to_owned()));
+    let log = Logged::default();
+    let guard = logged(&log, tracing::Level::WARN);
+    let filled = rig.cache.fill_blob(&pack.blob(0)).await;
+    assert_eq!(filled, Err(FillError::Upstream(403)));
+    assert_eq!(filled.unwrap_err().to_string(), "upstream 403");
+    // A whole object (a tree's manifest) is read under its own key, which the line names.
+    let manifest = digest(b"a manifest");
+    rig.upstream
+        .fail_next_with(Op::Head, Error::Denied(said.to_owned()));
+    assert_eq!(
+        rig.cache.fill_manifest(&manifest).await,
+        Err(FillError::Upstream(403))
+    );
+    drop(guard);
+    assert_eq!(rig.cache.counters().failures(FailedFill::UpstreamError), 2);
+    assert_eq!((staged(&rig), rig.cache.held()), (0, (0, 0)));
+    let lines: Vec<String> = log.text().lines().map(str::to_owned).collect();
+    assert_eq!(
+        lines,
+        [
+            format!("tierstore: the upstream refused the read of packs/five: {said}"),
+            format!("tierstore: the upstream refused the read of cas/l/{manifest}: {said}"),
+        ]
+    );
+}
+
 /// Asserts the status each failure of the upstream stands for.
 #[test]
 fn each_failure_of_the_upstream_has_its_status() {
@@ -156,6 +194,7 @@ fn each_failure_of_the_upstream_has_its_status() {
     let table = [
         (named(Error::NotFound), 404),
         (named(Error::Reserved), 403),
+        (named(Error::Denied), 403),
         (named(Error::InvalidKey), 400),
         (named(Error::InvalidSegment), 400),
         (named(Error::Unsupported), 501),

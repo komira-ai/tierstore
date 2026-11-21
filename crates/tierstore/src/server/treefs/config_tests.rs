@@ -5,9 +5,7 @@ use std::time::Duration;
 
 use tierstore_testkit::dir::TestDir;
 
-use super::{FsSettings, from_text, ignored, load};
-
-const GROUPS: &str = "root:x:0:\nbad line\nbuilders:x:2001:alice\nodd:x:notanumber:\n";
+use super::{FsSettings, builders, from_text, ignored, load, load_with};
 
 /// The keys every file needs.
 const NEEDED: &str = "client_group = \"builders\"\nowner = \"1000:1001\"\n\
@@ -18,14 +16,14 @@ fn fs(extra: &str) -> String {
 }
 
 fn refused(text: &str) -> String {
-    from_text(text, GROUPS).unwrap_err().to_string()
+    from_text(text, &builders).unwrap_err().to_string()
 }
 
 /// Asserts that a file with only the needed keys gets the defaults of the table, and the group by
-/// name from the group file.
+/// name from the lookup of group names.
 #[test]
 fn the_needed_keys_alone_give_the_defaults() {
-    let got = from_text(&fs(""), GROUPS).unwrap();
+    let got = from_text(&fs(""), &builders).unwrap();
     let want = FsSettings {
         mountpoint: PathBuf::from("/run/tierstore/fs"),
         runtime_dir: PathBuf::from("/run/tierstore-fs"),
@@ -57,7 +55,7 @@ fn every_key_is_taken_when_it_is_set() {
         threads = 3\n\
         handoff_socket = \"/h.sock\"\nhandoff_wait = \"5s\"\nrecover_wait = \"2m\"\nreattach_concurrency = 3\n\
         tree_idle_secs = 604800\n";
-    let got = from_text(text, "").unwrap();
+    let got = from_text(text, &builders).unwrap();
     assert_eq!(got.mountpoint, PathBuf::from("/m"));
     assert_eq!(got.control_socket, PathBuf::from("/r/control.sock"));
     assert_eq!((got.client_group, got.owner), (77, (5, 6)));
@@ -76,12 +74,12 @@ fn every_key_is_taken_when_it_is_set() {
     let text = "[fs]\nruntime_dir = \"/r\"\nclient_group = \"77\"\nowner = \"5:6\"\n\
         fill_socket = \"/f\"\ncache_path = \"/c\"\n";
     assert_eq!(
-        from_text(text, "").unwrap().handoff_socket,
+        from_text(text, &builders).unwrap().handoff_socket,
         PathBuf::from("/r/handoff.sock")
     );
     let own = fs("control_socket = \"/elsewhere.sock\"\n");
     assert_eq!(
-        from_text(&own, GROUPS).unwrap().control_socket,
+        from_text(&own, &builders).unwrap().control_socket,
         PathBuf::from("/elsewhere.sock")
     );
 }
@@ -144,7 +142,6 @@ fn every_refusal_names_its_key() {
         (fs("").replace("1000:1001", "a:b"), "fs.owner"),
         (fs("").replace("1000:1001", "1:-2"), "fs.owner"),
         (fs("").replace("builders", "nobody-here"), "fs.client_group"),
-        (fs("").replace("builders", "odd"), "fs.client_group"),
     ];
     for (text, key) in cases {
         let why = refused(&text);
@@ -169,7 +166,7 @@ fn a_file_that_is_not_the_table_is_a_syntax_error_without_values() {
 #[test]
 fn a_key_of_a_later_release_is_ignored() {
     let text = fs("future_knob = 3\n");
-    assert!(from_text(&text, GROUPS).is_ok());
+    assert!(from_text(&text, &builders).is_ok());
     assert_eq!(
         ignored("future_knob"),
         "tierstore fs: fs.future_knob is not a key of this release and is ignored"
@@ -181,12 +178,16 @@ fn a_key_of_a_later_release_is_ignored() {
 /// them, and that the warning of each names the release that removed it and why.
 #[test]
 fn the_keys_of_passthrough_are_ignored_with_a_warning_that_names_the_release() {
-    let plain = from_text(&fs(""), GROUPS).unwrap();
+    let plain = from_text(&fs(""), &builders).unwrap();
     for removed in [
         "passthrough = false\nmax_backing_ids = 7\n",
         "passthrough = \"yes\"\nmax_backing_ids = 0\n",
     ] {
-        assert_eq!(from_text(&fs(removed), GROUPS).unwrap(), plain, "{removed}");
+        assert_eq!(
+            from_text(&fs(removed), &builders).unwrap(),
+            plain,
+            "{removed}"
+        );
     }
     assert_eq!(
         ignored("passthrough"),
@@ -200,8 +201,8 @@ fn the_keys_of_passthrough_are_ignored_with_a_warning_that_names_the_release() {
     );
 }
 
-/// Asserts that a file is read from a path, a missing one is an error naming it, and the group file
-/// of the host is read (a group by number needs none).
+/// Asserts that a file is read from a path, a missing one is an error naming it, a group by number
+/// asks no lookup, and a group by name is the one the lookup given finds.
 #[test]
 fn a_file_is_read_from_its_path() {
     let dir = TestDir::under(std::env::temp_dir(), "tfs-config");
@@ -210,13 +211,47 @@ fn a_file_is_read_from_its_path() {
     assert_eq!(load(&path).unwrap().client_group, 4242);
     let missing = load(&dir.path().join("none.toml")).unwrap_err().to_string();
     assert!(missing.contains("none.toml"), "{missing}");
+    std::fs::write(&path, fs("")).unwrap();
+    assert_eq!(load_with(&path, &builders).unwrap().client_group, 2001);
+}
+
+/// Asserts that a group given by name is the id the system's lookup gives for it, though no group
+/// file lists it (a Mac keeps its service account's group in the directory service alone, which
+/// the group file of an earlier release did not see); that a name the lookup does not find, and a
+/// lookup that fails, are refusals of `fs.client_group` with their exact words; and that a group
+/// given by number asks the lookup nothing. Catches a name read from a group file only.
+#[test]
+fn a_group_name_is_looked_up_through_the_system() {
+    let directory = |name: &str| Ok((name == "_tierstore").then_some(394));
+    let text = fs("").replace("builders", "_tierstore");
+    assert_eq!(from_text(&text, &directory).unwrap().client_group, 394);
+
+    let absent = from_text(&fs(""), &directory).unwrap_err().to_string();
+    assert_eq!(
+        absent,
+        "fs.client_group: is neither a group id nor the name of a group of this system"
+    );
+    let down = |_: &str| Err("/usr/bin/getent could not be run: gone".to_owned());
+    assert_eq!(
+        from_text(&fs(""), &down).unwrap_err().to_string(),
+        "fs.client_group: the group builders could not be looked up: /usr/bin/getent could not \
+         be run: gone"
+    );
+    let asked = std::cell::Cell::new(0);
+    let counting = |_: &str| {
+        asked.set(asked.get() + 1);
+        Ok(None)
+    };
+    let by_number = fs("").replace("builders", "77");
+    assert_eq!(from_text(&by_number, &counting).unwrap().client_group, 77);
+    assert_eq!(asked.get(), 0);
 }
 
 /// Asserts that `fs.threads` takes the most readers a `tsfuse` session holds, and that the bound
 /// is that library's: each thread reads its own copy of the connection's descriptor.
 #[test]
 fn the_most_threads_are_the_descriptors_a_session_holds() {
-    let got = from_text(&fs("threads = 252\n"), GROUPS).unwrap();
+    let got = from_text(&fs("threads = 252\n"), &builders).unwrap();
     assert_eq!(got.threads, 252);
     #[cfg(target_os = "linux")]
     assert_eq!(super::MOST_THREADS as usize, tsfuse::MAX_DEVICES);

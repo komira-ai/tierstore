@@ -123,7 +123,8 @@
 //!   nameable (`a/`, say) is refused although another backend takes any string.
 //! - A request that did not complete, and the statuses 408, 429 and every 5xx but 501 and 507,
 //!   are [`Error::Unavailable`] (a server error may be gone on the next try). 507
-//!   (Insufficient Storage, which is how MinIO reports a full drive) is [`Error::Full`]. 501 (Not
+//!   (Insufficient Storage, which is how MinIO reports a full drive) is [`Error::Full`]. 403 (the
+//!   store refused the request's credentials) is [`Error::Denied`], with the store's code. 501 (Not
 //!   Implemented: the store does not do what was asked) and anything else that is not a success
 //!   is [`Error::Other`]. A 409 `ConditionalRequestConflict` (two writers racing a conditional
 //!   write of one key; the store does not say which won) is [`Error::Unavailable`]: the write may
@@ -424,6 +425,7 @@ fn map_error(error: ObjectStoreError, key: &str) -> Error {
 fn by_status(status: u16, key: String, message: String) -> Error {
     match status {
         412 => Error::PreconditionFailed(key),
+        403 => Error::Denied(message),
         507 => Error::Full(message),
         501 => Error::Other(message),
         408 | 429 | 500..=599 => Error::Unavailable(message),

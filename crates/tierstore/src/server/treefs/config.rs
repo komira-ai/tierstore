@@ -35,8 +35,18 @@ use crate::server::config_tuning::{HOUR, MS};
 use crate::server::config_units::Dur;
 use crate::server::config_unknown::fields_of;
 
+use super::groups::{self, Found};
 use super::nfs::config::{NfsSettings, NfsTable};
 use super::put::config::{self as put_config, PutConfig, PutTable};
+
+/// The lookup of a group name: [`groups::system`], or a test's table.
+pub(in crate::server) type Groups<'a> = &'a dyn Fn(&str) -> Found;
+
+/// The lookup of a system whose one group by name is `builders`, id 2001: the tests' table.
+#[cfg(test)]
+pub(in crate::server) fn builders(name: &str) -> Found {
+    Ok((name == "builders").then_some(2001))
+}
 
 /// The mount point when the file leaves out `fs.mountpoint`.
 const DEFAULT_MOUNTPOINT: &str = "/run/tierstore/fs";
@@ -48,9 +58,6 @@ const DEFAULT_RUNTIME_DIR: &str = "/run/tierstore-fs";
 /// The name of the control socket in the runtime directory when the file leaves out
 /// `fs.control_socket`.
 const DEFAULT_CONTROL_SOCKET: &str = "control.sock";
-
-/// The groups of the host, where a group name is looked up.
-pub(super) const GROUP_FILE: &str = "/etc/group";
 
 /// The most time a fill is waited for by default: a fill that fails sooner is not waited for.
 const DEFAULT_FETCH_TIMEOUT: Duration = Duration::from_secs(60);
@@ -195,33 +202,32 @@ fn owner_of(text: &str) -> Result<(u32, u32), ConfigError> {
     numbers.ok_or_else(|| invalid("fs.owner", "must be uid:gid, two numbers"))
 }
 
-/// The group id `group` names: a number, or a name in the lines `name:x:gid:...` of `groups`.
-fn group_of(group: &str, groups: &str) -> Result<u32, ConfigError> {
+/// The group id `group` names: a number, or a name that `groups`, the system's lookup of group
+/// names, finds.
+fn group_of(group: &str, groups: Groups<'_>) -> Result<u32, ConfigError> {
     if let Ok(gid) = group.parse() {
         return Ok(gid);
     }
-    let found = groups.lines().find_map(|line| {
-        let fields: Vec<&str> = line.split(':').collect();
-        match fields[..] {
-            [name, _, gid, ..] if name == group => gid.parse().ok(),
-            _ => None,
-        }
-    });
-    found.ok_or_else(|| {
-        invalid(
+    match groups(group) {
+        Ok(Some(gid)) => Ok(gid),
+        Ok(None) => Err(invalid(
             "fs.client_group",
-            "is neither a group id nor a name in the group file",
-        )
-    })
+            "is neither a group id nor the name of a group of this system",
+        )),
+        Err(why) => Err(invalid(
+            "fs.client_group",
+            format!("the group {group} could not be looked up: {why}"),
+        )),
+    }
 }
 
 impl FsSettings {
-    /// The settings of `table`; `groups` is the text of the group file.
+    /// The settings of `table`; `groups` looks a group name up.
     ///
     /// # Errors
     /// A [`ConfigError`] that names the key: one needed and left out, a path that is not
     /// absolute, an owner or a group that is not one, a value out of its range.
-    pub(super) fn of(table: FsTable, groups: &str) -> Result<Self, ConfigError> {
+    pub(super) fn of(table: FsTable, groups: Groups<'_>) -> Result<Self, ConfigError> {
         let mountpoint = table
             .mountpoint
             .unwrap_or_else(|| PathBuf::from(DEFAULT_MOUNTPOINT));
@@ -320,7 +326,10 @@ impl FsSettings {
 /// # Errors
 /// [`ConfigError::Syntax`] for a file that is not TOML or has no `[fs]` table or a value of the
 /// wrong type, and those of [`FsSettings::of`].
-pub(in crate::server) fn from_text(text: &str, groups: &str) -> Result<FsSettings, ConfigError> {
+pub(in crate::server) fn from_text(
+    text: &str,
+    groups: Groups<'_>,
+) -> Result<FsSettings, ConfigError> {
     let file: File = toml::from_str(text).map_err(|error| syntax(text, &error))?;
     let whole = text.parse::<toml::Table>().unwrap_or_default();
     let known = fields_of::<FsTable>();
@@ -354,15 +363,26 @@ pub(in crate::server) fn from_text(text: &str, groups: &str) -> Result<FsSetting
 /// The settings of the file at `path`.
 ///
 /// # Errors
-/// [`ConfigError::Read`] for a file that cannot be read, and those of [`from_text`]; a group file
-/// that cannot be read is an empty one (a group given by number needs none).
+/// [`ConfigError::Read`] for a file that cannot be read, and those of [`from_text`]. A group given
+/// by name is looked up through the system ([`groups::system`]); one given by number needs no
+/// lookup.
 pub(in crate::server) fn load(path: &Path) -> Result<FsSettings, ConfigError> {
+    load_with(path, &groups::system)
+}
+
+/// [`load`] with `groups` as the lookup of group names.
+///
+/// # Errors
+/// Those of [`load`].
+pub(in crate::server) fn load_with(
+    path: &Path,
+    groups: Groups<'_>,
+) -> Result<FsSettings, ConfigError> {
     let text = std::fs::read_to_string(path).map_err(|source| ConfigError::Read {
         path: path.to_owned(),
         source,
     })?;
-    let groups = std::fs::read_to_string(GROUP_FILE).unwrap_or_default();
-    from_text(&text, &groups)
+    from_text(&text, groups)
 }
 
 #[cfg(test)]

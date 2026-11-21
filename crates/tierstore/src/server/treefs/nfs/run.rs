@@ -7,8 +7,10 @@
 //! control socket bound), with a core that counts no lookups, since NFS never forgets; the socket
 //! is the running instance's or is bound; the protocols are served; and the export is mounted at
 //! `fs.mountpoint`, as the mount user, unless something is mounted there already (a mount outlives
-//! the server: a restart, or the instance this one replaces, left it, and its clients wait).
-//! SIGTERM and SIGINT unmount it and end the process with status 0. launchd needs no notification
+//! the server: a restart, or the instance this one replaces, left it, and its clients wait); a mount
+//! there that was made from another address than this instance serves on reaches no one, and is
+//! unmounted first. SIGTERM and SIGINT unmount it (by force if `umount` refuses, see `mount.rs`)
+//! and end the process with status 0. launchd needs no notification
 //! of readiness.
 //!
 //! An instance with a control socket offers its listening socket to the next instance. When that
@@ -188,8 +190,19 @@ impl Running {
             let runtime_dir = settings.runtime_dir.clone();
             let made = tokio::task::spawn_blocking(move || -> Result<bool, NfsError> {
                 if task.is_mounted()? {
-                    task.agrees(&runtime_dir, address)?;
-                    return Ok(false);
+                    match Mounter::made_from(&runtime_dir) {
+                        // A hard mount of an address no one serves: everything that touches it
+                        // waits forever. It is cleared, and the export mounted afresh.
+                        Some(was) if was != address.to_string() => {
+                            tracing::warn!(
+                                "tierstore fs: {} is mounted from {was}, and this instance \
+                                 serves on {address}: unmounting it",
+                                task.mountpoint().display()
+                            );
+                            task.unmount()?;
+                        }
+                        _ => return Ok(false),
+                    }
                 }
                 task.mount(address.ip(), address.port())?;
                 Mounter::record(&runtime_dir, address)?;
@@ -219,26 +232,30 @@ impl Running {
         }
     }
 
-    /// Stops serving, and unmounts: unless the sockets were handed over, when the mount is the
-    /// successor's.
+    /// Unmounts, then stops serving: unless the sockets were handed over, when the mount is the
+    /// successor's. The unmount comes first, while the server still answers the clients: a server
+    /// that has stopped leaves a busy mount that only a forced unmount clears, after Disk
+    /// Arbitration has waited for the server to answer.
     ///
     /// # Errors
-    /// [`NfsError::Unmount`] for an unmount that failed.
+    /// [`NfsError::Unmount`] for an unmount that failed; the server is stopped all the same.
     pub(super) async fn stop(mut self) -> Result<(), NfsError> {
+        let unmounted = match self.mounted.take() {
+            Some(mounter) if !self.handed.load(Ordering::SeqCst) => {
+                match tokio::task::spawn_blocking(move || mounter.unmount()).await {
+                    Ok(unmounted) => unmounted,
+                    Err(why) => Err(io("waiting for the unmount")(std::io::Error::other(
+                        why.to_string(),
+                    ))
+                    .into()),
+                }
+            }
+            _ => Ok(()),
+        };
         if let Some(stopping) = self.stopping.take() {
             let _ = stopping.send(());
         }
-        if self.handed.load(Ordering::SeqCst) {
-            return Ok(());
-        }
-        match self.mounted.take() {
-            Some(mounter) => tokio::task::spawn_blocking(move || mounter.unmount())
-                .await
-                .map_err(|why| {
-                    io("waiting for the unmount")(std::io::Error::other(why.to_string()))
-                })?,
-            None => Ok(()),
-        }
+        unmounted
     }
 }
 

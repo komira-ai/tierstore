@@ -496,9 +496,11 @@ fn the_fs_marker_is_not_a_marker_of_the_s3_instances() {
 
 /// Asserts the launchd job of `tierstore fs`: its label is its file's name, it runs the `fs` verb of
 /// the installed binary with a `--config` the binary reads (a file that is not there is
-/// status 2, naming it), it is restarted when it exits, it has time to unmount, it sets no
-/// environment variable, and no word of it names a secret. It would catch a verb or a flag renamed
-/// under the job.
+/// status 2, naming it), as the user and group of the store's job (the fill socket answers only a
+/// peer of its own user, so a job of any other user, root included, has every fill refused), it is
+/// restarted when it exits, it has time to unmount, it sets no environment variable, and no word of
+/// it names a secret. It would catch a verb or a flag renamed under the job, and a job that runs as
+/// root.
 #[test]
 fn the_fs_launchd_job_runs_the_fs_verb_of_the_installed_binary() {
     let job = plist_of("tierstore-fs.plist");
@@ -506,6 +508,11 @@ fn the_fs_launchd_job_runs_the_fs_verb_of_the_installed_binary() {
         job.get("Label"),
         Some(&Plist::Text("tierstore-fs".to_owned()))
     );
+    let store = plist();
+    for key in ["UserName", "GroupName"] {
+        assert_eq!(text(&job, key), "_tierstore", "{key}");
+        assert_eq!(text(&job, key), text(&store, key), "{key}");
+    }
     let Some(Plist::Array(words)) = job.get("ProgramArguments") else {
         panic!("ProgramArguments is an array");
     };

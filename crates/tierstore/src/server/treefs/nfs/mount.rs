@@ -1,6 +1,13 @@
-//! The mount of the export, and its unmount, by the commands of macOS (`mount_nfs`, `umount`), run
-//! as the user the mount is made as. The commands go through a [`Runner`], so that a test runs
-//! none.
+//! The mount of the export, and its unmount, by the commands of macOS (`mount_nfs`, `umount`,
+//! `diskutil`), run as the user the mount is made as. The commands go through a [`Runner`], so that
+//! a test runs none.
+//!
+//! An unmount is `umount`, and `diskutil unmount force` when `umount` fails. `umount` refuses a
+//! mount that a process still uses (`Resource busy`), and once the server of a busy mount is gone
+//! even `umount -f`, which is the `unmount(2)` with `MNT_FORCE` of any program, is refused
+//! (`Operation not permitted`, to root as well); `diskutil` asks Disk Arbitration, which forces the
+//! unmount of the mount user's own mount in either case (measured on macOS 27). A mount left in
+//! place would be a hard mount to a server that is gone: every process that touches it waits.
 //!
 //! `mount_nfs` of a loopback export needs no root when the mount point belongs to the user who
 //! runs it (`docs/design/virtual-build-fs.md` section 8), so the process checks, before it mounts,
@@ -26,6 +33,9 @@ const MOUNT_NFS: &str = "/sbin/mount_nfs";
 
 /// The program that unmounts.
 const UMOUNT: &str = "/sbin/umount";
+
+/// The program that forces an unmount `umount` cannot make.
+const DISKUTIL: &str = "/usr/sbin/diskutil";
 
 /// The program that lists the mounts.
 const MOUNT: &str = "/sbin/mount";
@@ -117,6 +127,11 @@ impl Mounter {
             tries: u32::try_from(tries).unwrap_or(u32::MAX).max(1),
             retry: settings.mount_retry,
         }
+    }
+
+    /// The mount point.
+    pub(super) fn mountpoint(&self) -> &Path {
+        &self.mountpoint
     }
 
     /// Runs `argv`, and gives what it said.
@@ -212,21 +227,13 @@ impl Mounter {
         Ok(())
     }
 
-    /// Checks that the mount that is at the mount point was made from `address`, as the file of
-    /// [`Mounter::record`] says. A mount with no such file (made by a release that did not write
-    /// it) is taken to be this one's.
-    ///
-    /// # Errors
-    /// [`NfsError::MountedFrom`] for a mount made from another address.
-    pub(super) fn agrees(&self, runtime_dir: &Path, address: SocketAddr) -> Result<(), NfsError> {
-        match std::fs::read_to_string(runtime_dir.join(MOUNTED)) {
-            Ok(was) if was.trim() != address.to_string() => Err(NfsError::MountedFrom {
-                path: self.mountpoint.clone(),
-                was: was.trim().to_owned(),
-                now: address,
-            }),
-            _ => Ok(()),
-        }
+    /// The address the mount at the mount point was made from, as the file of [`Mounter::record`]
+    /// says; none for a mount with no such file (made by hand, or by a release that did not write
+    /// it), which is taken to be this instance's.
+    pub(super) fn made_from(runtime_dir: &Path) -> Option<String> {
+        std::fs::read_to_string(runtime_dir.join(MOUNTED))
+            .ok()
+            .map(|was| was.trim().to_owned())
     }
 
     /// Mounts the export served on `host:port` at the mount point, as the mount user, trying again
@@ -269,24 +276,49 @@ impl Mounter {
         })
     }
 
-    /// Unmounts the mount point, as the mount user.
+    /// Unmounts the mount point, as the mount user: by `umount`, and by force if `umount` fails
+    /// (see the module's text). Nothing mounted there is nothing to do.
     ///
     /// # Errors
-    /// [`NfsError::Unmount`] for an unmount that failed.
+    /// [`NfsError::Unmount`] with what both commands said, when neither unmounted.
     pub(super) fn unmount(&self) -> Result<(), NfsError> {
+        if !self.is_mounted()? {
+            return Ok(());
+        }
         let uid = self.user_id()?;
-        let command = self.as_user(
-            uid,
-            vec![UMOUNT.to_owned(), self.mountpoint.display().to_string()],
-        )?;
-        let ran = self.run(&command)?;
-        if ran.success {
+        let path = self.mountpoint.display().to_string();
+        let plain = self.as_user(uid, vec![UMOUNT.to_owned(), path.clone()])?;
+        let first = self.run(&plain)?;
+        if first.success {
+            return Ok(());
+        }
+        let force = [DISKUTIL, "unmount", "force", &path].map(str::to_owned);
+        let forced = self.run(&self.as_user(uid, force.to_vec())?)?;
+        let why = first.said();
+        if forced.success {
+            tracing::warn!(
+                "tierstore fs: umount of {path} failed ({why}); unmounted by force, so what still \
+                 reads the mount gets an error, not a wait"
+            );
             return Ok(());
         }
         Err(NfsError::Unmount {
             path: self.mountpoint.clone(),
-            said: ran.stderr.trim().to_owned(),
+            said: format!("{why}; diskutil unmount force: {}", forced.said()),
         })
+    }
+}
+
+impl Ran {
+    /// What the command said: its standard error, or its standard output if it wrote no error
+    /// (`diskutil` says why it failed on its standard output).
+    fn said(&self) -> String {
+        let error = self.stderr.trim();
+        if error.is_empty() {
+            self.stdout.trim().to_owned()
+        } else {
+            error.to_owned()
+        }
     }
 }
 

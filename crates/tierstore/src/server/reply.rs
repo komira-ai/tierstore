@@ -399,13 +399,18 @@ impl From<Error> for S3Error {
             Error::TooLarge(_) => (StatusCode::BAD_REQUEST, "EntityTooLarge"),
             Error::Unsupported(_) => (StatusCode::NOT_IMPLEMENTED, "NotImplemented"),
             Error::Unavailable(_) => (StatusCode::SERVICE_UNAVAILABLE, "ServiceUnavailable"),
-            Error::Other(_) => (StatusCode::INTERNAL_SERVER_ERROR, "InternalError"),
+            // The upstream refused this server's own key: not the client's doing, so not the
+            // client's 403; the log names the store's code.
+            Error::Denied(_) | Error::Other(_) => {
+                (StatusCode::INTERNAL_SERVER_ERROR, "InternalError")
+            }
         };
         let generic = match &error {
             Error::Full(_) => Some("The store has no room for this request."),
             Error::SlowDown(_) => Some("The key is being changed by another request; retry."),
             Error::Unsupported(_) => Some("The store does not do this call."),
             Error::Unavailable(_) => Some("The store did not answer."),
+            Error::Denied(_) => Some("The upstream store refused this server's request."),
             Error::Other(_) => Some("We encountered an internal error."),
             _ => None,
         };

@@ -23,13 +23,17 @@ fn said(success: bool, stdout: &str, stderr: &str) -> Ran {
 }
 
 /// A runner that records the commands and the pauses, and answers `id -u` with `user_id`, a mount
-/// with the next of `mounts` (success when there are none left), and everything else with success.
+/// with the next of `mounts` (success when there are none left), `umount` with `umount`,
+/// `diskutil` with `force`, the listing of the mounts with `listing`, and everything else with
+/// success.
 struct Fake {
     calls: Mutex<Vec<Vec<String>>>,
     pauses: Mutex<Vec<Duration>>,
     user_id: Ran,
     mounts: Mutex<VecDeque<Ran>>,
     umount: Ran,
+    force: Ran,
+    listing: String,
     refuse_to_run: bool,
 }
 
@@ -41,6 +45,26 @@ impl Fake {
             user_id: said(true, &format!("{user_id}\n"), ""),
             mounts: Mutex::new(VecDeque::new()),
             umount: said(true, "", ""),
+            force: said(true, "", ""),
+            listing: String::new(),
+            refuse_to_run: false,
+        })
+    }
+
+    /// A runner of user id 0 whose listing has an NFS mount at `path`, and whose `umount` and
+    /// `diskutil` answer `umount` and `force`.
+    fn mounted(path: &std::path::Path, umount: Ran, force: Ran) -> Arc<Self> {
+        Arc::new(Self {
+            calls: Mutex::new(Vec::new()),
+            pauses: Mutex::new(Vec::new()),
+            user_id: said(true, "0", ""),
+            mounts: Mutex::new(VecDeque::new()),
+            umount,
+            force,
+            listing: format!(
+                "127.0.0.1:/ on {} (nfs, nodev, read-only)\n",
+                path.display()
+            ),
             refuse_to_run: false,
         })
     }
@@ -52,6 +76,8 @@ impl Fake {
             user_id,
             mounts: Mutex::new(mounts.into()),
             umount,
+            force: said(true, "", ""),
+            listing: String::new(),
             refuse_to_run: false,
         })
     }
@@ -63,6 +89,8 @@ impl Fake {
             user_id: said(true, "0", ""),
             mounts: Mutex::new(VecDeque::new()),
             umount: said(true, "", ""),
+            force: said(true, "", ""),
+            listing: String::new(),
             refuse_to_run: true,
         })
     }
@@ -78,12 +106,19 @@ impl Runner for Fake {
             return Err(std::io::Error::from(std::io::ErrorKind::NotFound));
         }
         locked(&self.calls).push(argv.to_vec());
-        Ok(match argv[0].as_str() {
+        // A command run through sudo is the one after its `--`.
+        let program = argv
+            .iter()
+            .position(|word| word == "--")
+            .map_or(&argv[0], |end| &argv[end + 1]);
+        Ok(match program.as_str() {
             "/usr/bin/id" => self.user_id.clone(),
             "/sbin/mount_nfs" => locked(&self.mounts)
                 .pop_front()
                 .unwrap_or_else(|| said(true, "", "")),
             "/sbin/umount" => self.umount.clone(),
+            "/usr/sbin/diskutil" => self.force.clone(),
+            "/sbin/mount" => said(true, &self.listing, ""),
             _ => said(true, "", ""),
         })
     }
@@ -293,30 +328,88 @@ fn mount_retries_until_the_server_listens_then_stops() {
     );
 }
 
-/// Asserts that an unmount runs `umount` on the mount point, and that its failure is an error with
-/// what it said.
+/// Asserts that an unmount of a mount that is there runs `umount` on the mount point and nothing
+/// else when `umount` works, and that a mount point with nothing mounted is left alone (a stop after
+/// someone unmounted it by hand succeeds, running only the listing).
 #[test]
 fn unmount_runs_on_shutdown() {
     let (_dir, path, owner) = mountpoint("nfs-mount-umount");
-    let runner = Fake::new(0);
+    let listing = vec!["/sbin/mount".to_owned()];
+    let umount = vec!["/sbin/umount".to_owned(), path.display().to_string()];
+    let runner = Fake::mounted(&path, said(true, "", ""), said(true, "", ""));
     mounter(Arc::clone(&runner), &loopback(), &path, owner)
         .unmount()
         .unwrap();
+    assert_eq!(runner.calls(), [listing.clone(), umount]);
+
+    let none = Fake::new(0);
+    mounter(Arc::clone(&none), &loopback(), &path, owner)
+        .unmount()
+        .unwrap();
+    assert_eq!(none.calls(), [listing]);
+}
+
+/// Asserts that a mount `umount` cannot unmount (busy, or busy with its server gone: the words macOS
+/// says for each) is unmounted by `diskutil unmount force` on the mount point, as the mount user
+/// (through `sudo -n -u` for a root process), and that when that fails too the error has what both
+/// said, `diskutil`'s words from its standard output. Catches a stop that leaves the mount behind.
+#[test]
+fn an_unmount_umount_refuses_is_forced() {
+    let (_dir, path, owner) = mountpoint("nfs-mount-forced");
+    let shown = path.display().to_string();
+    let force = vec![
+        "/usr/sbin/diskutil".to_owned(),
+        "unmount".to_owned(),
+        "force".to_owned(),
+        shown.clone(),
+    ];
+    let busy = format!("umount({shown}): Resource busy -- try 'diskutil unmount'\n");
+    let gone = format!("umount: unmount({shown}): Operation not permitted\n");
+    for refusal in [&busy, &gone] {
+        let runner = Fake::mounted(&path, said(false, "", refusal), said(true, "", ""));
+        mounter(Arc::clone(&runner), &loopback(), &path, owner)
+            .unmount()
+            .unwrap();
+        assert_eq!(runner.calls().last(), Some(&force));
+        assert_eq!(runner.calls().len(), 3, "{:?}", runner.calls());
+    }
+
+    let nfs = NfsSettings {
+        mount_user: Some("builder".to_owned()),
+        ..loopback()
+    };
+    let as_root = Arc::new(Fake {
+        user_id: said(true, "501\n", ""),
+        ..Arc::into_inner(Fake::mounted(
+            &path,
+            said(false, "", &busy),
+            said(true, "", ""),
+        ))
+        .unwrap()
+    });
+    mounter(Arc::clone(&as_root), &nfs, &path, 0)
+        .unmount()
+        .unwrap();
+    let sudo = ["/usr/bin/sudo", "-n", "-u", "builder", "--"].map(str::to_owned);
     assert_eq!(
-        runner.calls(),
-        [vec!["/sbin/umount".to_owned(), path.display().to_string()]]
+        as_root.calls().last().unwrap()[..],
+        [&sudo[..], &force[..]].concat()[..]
     );
-    let busy = Fake::with(
-        said(true, "0", ""),
-        vec![],
-        said(false, "", "umount: Resource busy\n"),
+
+    let stuck = Fake::mounted(
+        &path,
+        said(false, "", &gone),
+        said(false, &format!("Unmount failed for {shown}\n"), ""),
     );
-    let why = mounter(busy, &loopback(), &path, owner)
+    let why = mounter(stuck, &loopback(), &path, owner)
         .unmount()
         .unwrap_err();
     assert_eq!(
         why.to_string(),
-        format!("unmounting {}: umount: Resource busy", path.display())
+        format!(
+            "unmounting {shown}: umount: unmount({shown}): Operation not permitted; diskutil \
+             unmount force: Unmount failed for {shown}"
+        )
     );
 }
 
@@ -398,29 +491,21 @@ fn a_mount_at_the_mount_point_is_found_in_the_listing() {
 }
 
 /// Asserts the note of the address a mount was made from: written next to the runtime directory's
-/// files, an error that names the directory when it cannot be written, and read back by `agrees`,
-/// which accepts the address it names and a mount with no note, and refuses another address with
-/// both in the message.
+/// files, an error that names the directory when it cannot be written, and read back by
+/// `made_from`, which gives none for a mount with no note.
 #[test]
-fn the_address_of_a_mount_is_noted_and_checked() {
+fn the_address_of_a_mount_is_noted_and_read() {
     let dir = TestDir::under(std::env::temp_dir(), "nfs-mount-note");
-    let mounter = Mounter::new(Fake::new(501), &loopback(), dir.path().join("mnt"), 501);
     let here: std::net::SocketAddr = "127.0.0.1:12049".parse().unwrap();
-    mounter.agrees(dir.path(), here).unwrap();
+    assert_eq!(Mounter::made_from(dir.path()), None);
     Mounter::record(dir.path(), here).unwrap();
     assert_eq!(
         std::fs::read_to_string(dir.path().join("nfs-mounted")).unwrap(),
         "127.0.0.1:12049"
     );
-    mounter.agrees(dir.path(), here).unwrap();
-    let there: std::net::SocketAddr = "127.0.0.1:12050".parse().unwrap();
-    let why = mounter.agrees(dir.path(), there).unwrap_err();
-    assert!(matches!(why, NfsError::MountedFrom { .. }), "{why}");
-    assert!(
-        why.to_string().contains(
-            "is mounted from 127.0.0.1:12049, and this instance serves on 127.0.0.1:12050"
-        ),
-        "{why}"
+    assert_eq!(
+        Mounter::made_from(dir.path()),
+        Some("127.0.0.1:12049".to_owned())
     );
     let missing = dir.path().join("none");
     let why = Mounter::record(&missing, here).unwrap_err().to_string();

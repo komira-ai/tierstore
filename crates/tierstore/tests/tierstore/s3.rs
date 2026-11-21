@@ -76,6 +76,11 @@ fn assert_refused<T: std::fmt::Debug>(key: &str, result: Result<T, Error>) {
     assert_eq!(result.unwrap_err(), expected);
 }
 
+/// Asserts that a call failed with `Error::Denied`: the store refused it, an answer 403.
+fn assert_denied<T: std::fmt::Debug>(result: Result<T, Error>) {
+    assert!(matches!(result, Err(Error::Denied(_))), "{result:?}");
+}
+
 /// Asserts that a call failed with `Error::Other`.
 fn assert_other<T: std::fmt::Debug>(result: Result<T, Error>) {
     assert!(matches!(result, Err(Error::Other(_))), "{result:?}");
@@ -536,8 +541,8 @@ async fn the_s3_backend_follows_the_pages_of_a_listing_of_uploads() {
     assert!(heads[1].contains("upload-id-marker=u"), "{}", heads[1]);
 }
 
-/// Asserts that a listing of uploads that the service refuses, or answers with something that is
-/// not a listing of uploads is an `Other` error, that one with a marker or a prefix the client cannot
+/// Asserts that a listing of uploads that the service refuses (403) is a `Denied` error, one it
+/// answers with something that is not a listing of uploads an `Other` error, that one with a marker or a prefix the client cannot
 /// name (an empty marker, a prefix over 1024 bytes) is `InvalidKey`, as the other calls of the backend give for it, and that the last of these asks
 /// nothing of the service.
 #[tokio::test]
@@ -549,7 +554,7 @@ async fn a_listing_of_uploads_that_fails_is_an_error() {
     let refusal = "HTTP/1.1 403 Forbidden\r\nconnection: close\r\ncontent-length: 0\r\n\r\n";
     let (endpoint, _) = scripted(vec![refusal]);
     let store = S3Backend::new(config(&endpoint)).unwrap();
-    assert_other(store.list_uploads("", None, 10).await);
+    assert_denied(store.list_uploads("", None, 10).await);
 
     let (endpoint, seen) = scripted(vec![]);
     let store = S3Backend::new(config(&endpoint)).unwrap();
@@ -632,8 +637,8 @@ async fn the_s3_backend_follows_the_pages_of_a_listing_of_parts() {
     assert_eq!(seen.lock().unwrap().len(), 2);
 }
 
-/// Asserts that a listing of parts that the service refuses, or answers with something that is
-/// not a listing of parts, is an `Other` error, that an upload the service does not hold is
+/// Asserts that a listing of parts that the service refuses (403) is a `Denied` error, one it
+/// answers with something that is not a listing of parts an `Other` error, that an upload the service does not hold is
 /// `NotFound`, that a key the client cannot name (a `.` or `..` segment, since S3's own rules take
 /// `//`) asks nothing of the service, and that a page
 /// size above what S3 serves is asked for as the most S3 serves.
@@ -646,7 +651,7 @@ async fn a_listing_of_parts_that_fails_is_an_error() {
     let refusal = "HTTP/1.1 403 Forbidden\r\nconnection: close\r\ncontent-length: 0\r\n\r\n";
     let (endpoint, _) = scripted(vec![refusal]);
     let store = S3Backend::new(config(&endpoint)).unwrap();
-    assert_other(store.list_parts("k", "u", None, 10).await);
+    assert_denied(store.list_parts("k", "u", None, 10).await);
 
     const MISSING: &str = "HTTP/1.1 404 Not Found\r\nconnection: close\r\n\r\n\
                            <Error><Code>NoSuchUpload</Code><Message>m</Message></Error>";

@@ -8,7 +8,8 @@
 //!
 //! The socket is mode 0600 and its peer's user id must be the instance's own, checked on every
 //! connection as the hand-off socket checks its taker (see [`handoff`](super::handoff)); any other
-//! peer is answered `refused` and disconnected.
+//! peer is answered `refused` and disconnected. So `tierstore fs` runs as the node's tierstore
+//! does: on a Mac its launchd job runs as `_tierstore`, not as root.
 //!
 //! # When it is bound
 //!

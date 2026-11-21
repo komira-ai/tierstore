@@ -65,7 +65,9 @@ fn check(error: Error, status: u16, code: &str, fixed: Option<&str>) {
 /// Asserts the status and the S3 code of each failure of the store: a key that is not there,
 /// one that is, a condition that does not hold, no room, a reserved key, a part a completion
 /// names wrongly, a body that is not its digest, an object too large, a call the store does not
-/// do, a store that does not answer, and any other failure.
+/// do, a store that does not answer, an upstream that refused this server's key (the server's
+/// failure, not the client's: no 403, and the store's own answer goes to the log only), and any
+/// other failure.
 #[test]
 fn each_failure_of_the_store_has_its_status_and_code() {
     let k = || "k".to_owned();
@@ -112,6 +114,12 @@ fn each_failure_of_the_store_has_its_status_and_code() {
         503,
         "ServiceUnavailable",
         Some("The store did not answer."),
+    );
+    check(
+        Error::Denied("store answered 403 AccessDenied: no".to_owned()),
+        500,
+        "InternalError",
+        Some("The upstream store refused this server's request."),
     );
     check(
         Error::Other(k()),

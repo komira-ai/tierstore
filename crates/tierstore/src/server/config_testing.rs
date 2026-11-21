@@ -14,7 +14,7 @@ pub(crate) const DEFAULTS: PerRun = PerRun {
 /// its own, with an `[fs]` table, and the group `builders` that the examples name.
 pub(crate) fn loads(body: &str, per_run: PerRun) -> Result<(), String> {
     if body.contains("[fs]") {
-        let loaded = super::treefs::from_text(body, "builders:x:1000:\n");
+        let loaded = super::treefs::from_text(body, &super::treefs::builders);
         return loaded.map(drop).map_err(|why| why.to_string());
     }
     settings_from_text(body, per_run)
