@@ -5,7 +5,8 @@ use it, on GitHub-hosted runners, and that does not change. The farm lane builds
 workspace a second way: with Buck2, through [buildrules](https://github.com/komira-ai/buildrules)'
 Rust rules, every action on a remote-execution build farm or taken from its cache. It is
 additive and advisory: `.github/workflows/farm.yml` runs it on every push to `main` and every pull
-request from a branch of this repository, and no check of it is required.
+request from a branch of this repository (not a fork's, not Dependabot's), and no check of it is
+required.
 
 ## What it builds
 
@@ -93,8 +94,9 @@ Read the summary line: `local` must be 0.
 ## How the job reaches the farm
 
 The farm is on a private network. komira's farm-connect action, pinned by commit, joins it with
-the job's OIDC token (workload identity federation: no secret is stored), refuses to go on unless
-the farm answers (it masks the address in the log), and writes the farm's buckconfig under
+the job's OIDC token (workload identity federation: no secret is stored) and, as that action
+documents, checks that the farm answers and masks its address in the log; it writes the farm's
+buckconfig under
 `~/.buckconfig.d`, where buck2 reads it. Its inputs are the organisation's variables `TS_CLIENT_ID`
 and `TS_AUDIENCE` (the tailnet identity), `FARM_ADDRESS`, `FARM_INSTANCE`,
 `FARM_LINUX_X86_64_PROPERTIES` and `FARM_TLS`. farm-connect writes the worker property set under
@@ -117,8 +119,10 @@ keyed by the action's digest, so a result is reused only for byte-identical inpu
 
 ## Measured
 
-The first measurements of the lane, of `//:ci` as it is here (buildrules at a693e5c). Wall times
-are buck2's or the shell's, on a machine that ran no action itself.
+The first measurements of the lane: `buck2 build //:ci` of this branch (buildrules at a693e5c),
+run by hand from a development machine against the farm, one run each, the second and third
+immediately after the first. Every action ran on the farm or came from its cache; the machine ran
+none. The first wall time is from the run's start and end, the others the shell's.
 
 | build | `Commands:` line | wall |
 |---|---|---|

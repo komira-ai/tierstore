@@ -218,7 +218,7 @@ fn fetch_with_zst_and_a_member_or_a_tree_is_a_usage_error_with_status_2() {
         let mut args = vec![
             "fetch",
             "--url",
-            "http://127.0.0.1:9/buck2.zst",
+            "https://example.invalid/buck2.zst",
             "--sha256",
             "0000000000000000000000000000000000000000000000000000000000000000",
             "--out",

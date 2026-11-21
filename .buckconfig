@@ -1,7 +1,8 @@
 # Written by `buildrules init`. buildrules is the cell `buildrules`; the cell name is
 # part of every output path, so it is not renamed. Where actions run is NOT here: a
-# remote-execution endpoint lives in .buckconfig.local (gitignored); see
-# .buckconfig.local.example.
+# remote-execution endpoint lives in .buckconfig.local (gitignored; see
+# .buckconfig.local.example) or, in CI, in the buckconfig farm-connect writes under
+# ~/.buckconfig.d (docs/farm.md), which also gives the worker property set below.
 
 [cells]
   tierstore = .

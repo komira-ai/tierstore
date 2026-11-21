@@ -123,3 +123,25 @@ fn every_line_goes_to_the_log_and_is_kept_even_when_the_log_refuses_it() {
     assert_eq!(tee(from.as_bytes(), &mut Refusing), from.as_bytes());
     assert_eq!(tee(&b""[..], &mut Vec::new()), b"");
 }
+
+/// A stream that gives one line and then fails.
+struct Broken(bool);
+
+impl std::io::Read for Broken {
+    fn read(&mut self, buf: &mut [u8]) -> std::io::Result<usize> {
+        if std::mem::replace(&mut self.0, true) {
+            return Err(std::io::Error::other("the pipe broke"));
+        }
+        let line = b"[t] Waiting\n";
+        buf[..line.len()].copy_from_slice(line);
+        Ok(line.len())
+    }
+}
+
+#[test]
+fn a_read_that_fails_ends_the_log_with_what_came_before() {
+    // Catches: a failed read of buck2's stderr that loses the lines already read, or that loops.
+    let mut log = Vec::new();
+    assert_eq!(tee(Broken(false), &mut log), b"[t] Waiting\n");
+    assert_eq!(log, b"[t] Waiting\n");
+}

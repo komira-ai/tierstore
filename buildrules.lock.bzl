@@ -37,7 +37,7 @@ MANIFEST_SHA256 = {
     "crates/tierstore-trees-api/Cargo.toml": "984ceddf87975a4e7c61a5757131bd1565d8e1f8db202a3dc3761f8a315abfcb",
     "crates/tierstore/Cargo.toml": "d642810a1249f640c63cd59dfb645a514f7ae59b06c9ad2304048092f1570c37",
     "crates/tsfuse/Cargo.toml": "14e6506fc7c08fe6821f97d381f45b78987ba43c73452bf4992226097c73ebf3",
-    "crates/xtask/Cargo.toml": "68265da75609a9d5c5633d8d4a57cef50ae3f8cb80af464213080c8fd78e9ea5",
+    "crates/xtask/Cargo.toml": "9f8f2796f4195da61a71f1884cceaa2cd39681cbda774ea94795a39360522e6f",
     "rust-toolchain.toml": "e3a213e0d222e94d213cafbc20932eb3f76c643b4dd63756acf95192df2aa310",
 }
 
@@ -1024,9 +1024,9 @@ MEMBERS = {
             "roots": ["xtask-0.1.0:0ec902ad0d", "xtask-0.1.0:bd26bf225c", "xtask-0.1.0:dd76370a01"],
         },
         "test": {
-            "units": 182,
-            "graph_units": 182,
-            "roots": ["xtask-0.1.0:04530c0ac7", "xtask-0.1.0:20eea6a98e", "xtask-0.1.0:2624a50244", "xtask-0.1.0:2a6ec34dd4", "xtask-0.1.0:304f076b8c", "xtask-0.1.0:39213a52a7", "xtask-0.1.0:39d322b5c7", "xtask-0.1.0:3ea80f0ed1", "xtask-0.1.0:5f5ef7953f", "xtask-0.1.0:62fe660808", "xtask-0.1.0:6d7e3c9e82", "xtask-0.1.0:8179517277", "xtask-0.1.0:aaefa4129c", "xtask-0.1.0:b7ba2b5f66", "xtask-0.1.0:d71ebb465b", "xtask-0.1.0:de7e9432bd", "xtask-0.1.0:e3f226a8ed", "xtask-0.1.0:e450ec2f5a", "xtask-0.1.0:e91d71e943", "xtask-0.1.0:e982cdc2a0", "xtask-0.1.0:ebaf0cc66b", "xtask-0.1.0:ed551b5c64", "xtask-0.1.0:eea5893f40"],
+            "units": 183,
+            "graph_units": 183,
+            "roots": ["xtask-0.1.0:04530c0ac7", "xtask-0.1.0:20eea6a98e", "xtask-0.1.0:2624a50244", "xtask-0.1.0:2a6ec34dd4", "xtask-0.1.0:304f076b8c", "xtask-0.1.0:39213a52a7", "xtask-0.1.0:39d322b5c7", "xtask-0.1.0:3ea80f0ed1", "xtask-0.1.0:5099136deb", "xtask-0.1.0:5f5ef7953f", "xtask-0.1.0:62fe660808", "xtask-0.1.0:6d7e3c9e82", "xtask-0.1.0:8179517277", "xtask-0.1.0:aaefa4129c", "xtask-0.1.0:b7ba2b5f66", "xtask-0.1.0:d71ebb465b", "xtask-0.1.0:de7e9432bd", "xtask-0.1.0:e3f226a8ed", "xtask-0.1.0:e450ec2f5a", "xtask-0.1.0:e91d71e943", "xtask-0.1.0:e982cdc2a0", "xtask-0.1.0:ebaf0cc66b", "xtask-0.1.0:ed551b5c64", "xtask-0.1.0:eea5893f40"],
         },
         "release": {
             "units": 155,
@@ -30954,6 +30954,24 @@ UNITS = {
         "deps": [["base64", "base64-0.23.1:8d223d0254"], ["clap", "clap-4.6.7:b981954de6"], ["flate2", "flate2-1.1.10:68195b21c2"], ["hex", "hex-0.4.3:40d02ced6b"], ["hostkeeper_config", "hostkeeper-config-0.1.0:8da351b81d"], ["hostkeeper_placed", "hostkeeper-placed-0.1.0:b32798cf49"], ["hostkeeper_unpack", "hostkeeper-unpack-0.1.0:d1c5e5fe3e"], ["lzma_rs", "lzma-rs-0.3.0:f546d9eb51"], ["md5", "md-5-0.11.0:4c28e92bde"], ["roxmltree", "roxmltree-0.21.1:d0956532b6"], ["rpm", "rpm-0.30.2:0e7eb3c6c5"], ["rustls", "rustls-0.23.46:6e1b4068dc"], ["rustls_native_certs", "rustls-native-certs-0.8.4:a34d2982e8"], ["ruzstd", "ruzstd-0.9.1:de90e87ca2"], ["saphyr_parser", "saphyr-parser-0.1.0:c64b73b246"], ["serde_json", "serde_json-1.0.151:4e085d7166"], ["sha2", "sha2-0.11.0:796dbddb0f"], ["tar", "tar-0.4.46:50f583c2ab"], ["thiserror", "thiserror-2.0.21:e38026f70b"], ["tierstore_testkit", "tierstore-testkit-0.1.0:b1340ac253"], ["toml", "toml-1.1.8+spec-1.1.0:d4fc73ee94"], ["ureq", "ureq-3.4.2:5f7970e7d7"]],
         "path": "crates/xtask",
         "test_flags": {"test": True, "doctest": True},
+    },
+    "xtask-0.1.0:5099136deb": {
+        "crate": "xtask",
+        "version": "0.1.0",
+        "source": "path",
+        "target_kind": ["test"],
+        "crate_types": ["bin"],
+        "target_name": "linux_only",
+        "mode": "test",
+        "side": "target",
+        "edition": "2024",
+        "crate_root": "tests/linux_only.rs",
+        "features": [],
+        "cfgs": [],
+        "profile": {"opt_level": "0", "lto": "false", "codegen_backend": None, "codegen_units": None, "debuginfo": "line-tables-only", "split_debuginfo": None, "debug_assertions": True, "overflow_checks": True, "rpath": False, "incremental": False, "panic": "unwind", "strip": {"deferred": "None"}},
+        "deps": [["base64", "base64-0.23.1:8d223d0254"], ["clap", "clap-4.6.7:b981954de6"], ["flate2", "flate2-1.1.10:68195b21c2"], ["gh_fake", "xtask-0.1.0:577eae6cfa"], ["hex", "hex-0.4.3:40d02ced6b"], ["hostkeeper_config", "hostkeeper-config-0.1.0:8da351b81d"], ["hostkeeper_placed", "hostkeeper-placed-0.1.0:b32798cf49"], ["hostkeeper_unpack", "hostkeeper-unpack-0.1.0:d1c5e5fe3e"], ["lzma_rs", "lzma-rs-0.3.0:f546d9eb51"], ["md5", "md-5-0.11.0:4c28e92bde"], ["roxmltree", "roxmltree-0.21.1:d0956532b6"], ["rpm", "rpm-0.30.2:0e7eb3c6c5"], ["rustls", "rustls-0.23.46:6e1b4068dc"], ["rustls_native_certs", "rustls-native-certs-0.8.4:a34d2982e8"], ["ruzstd", "ruzstd-0.9.1:de90e87ca2"], ["saphyr_parser", "saphyr-parser-0.1.0:c64b73b246"], ["serde_json", "serde_json-1.0.151:4e085d7166"], ["sha2", "sha2-0.11.0:796dbddb0f"], ["tar", "tar-0.4.46:50f583c2ab"], ["thiserror", "thiserror-2.0.21:e38026f70b"], ["tierstore_testkit", "tierstore-testkit-0.1.0:b1340ac253"], ["toml", "toml-1.1.8+spec-1.1.0:d4fc73ee94"], ["ureq", "ureq-3.4.2:5f7970e7d7"], ["xtask", "xtask-0.1.0:782c81f0ac"], ["xtask", "xtask-0.1.0:ef78e86c63"]],
+        "path": "crates/xtask",
+        "test_flags": {"test": True, "doctest": False},
     },
     "xtask-0.1.0:577eae6cfa": {
         "crate": "xtask",

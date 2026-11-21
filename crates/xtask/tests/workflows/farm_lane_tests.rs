@@ -162,7 +162,7 @@ fn only_farm_connect_goes_without_a_version_comment_and_only_pinned_by_commit() 
         "{problems:?}"
     );
     for at in ["main", "a26616d"] {
-        let moved = format!("uses: {FARM_CONNECT}@{at}");
+        let moved = format!("{FARM_CONNECT}@{at}");
         let problems = problems_with(&pin, &moved);
         assert!(
             problems.contains(&format!(
@@ -181,7 +181,7 @@ fn exactly_one_step_uses_farm_connect() {
     let lookalike = pin.replace(FARM_CONNECT, &format!("{FARM_CONNECT}-v2"));
     assert!(problems_with(&pin, &lookalike).contains(&format!(
         "job build: exactly one step must use {FARM_CONNECT}"
-    )),);
+    )));
     let twice = with(
         "      - name: Connect to the farm\n",
         &format!(
