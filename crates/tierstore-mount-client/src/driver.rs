@@ -824,16 +824,17 @@ impl Driver {
 
     /// The pack cannot be served: its opens and waits end with `err`. A pack never opened is
     /// forgotten (a later open tries again, with the same region); an open pack is broken for the
-    /// client's life.
+    /// client's life, before any of them is answered, so a reader woken by its answer finds the
+    /// pack broken.
     fn fail_slot(&mut self, id: &PackId, err: ClientError) {
         tracing::warn!(pack = ?id, error = %err, "a pack cannot be served");
         let Some(slot) = self.slots.get_mut(id) else {
             return;
         };
-        // The pack is broken before any wait or read of it is answered, so that a caller woken
-        // by the answer finds it broken.
         if let Some(pack) = &slot.pack {
             pack.break_with(err.clone());
+            slot.handle = None;
+            slot.broken = Some(err.clone());
         }
         for answer in slot.waiters.drain(..) {
             let _ = answer.send(Err(err.clone()));
@@ -841,10 +842,7 @@ impl Driver {
         for joiner in slot.windows.drain() {
             joiner.read.part_done(Err(err.clone()));
         }
-        if slot.pack.is_some() {
-            slot.handle = None;
-            slot.broken = Some(err);
-        } else {
+        if slot.pack.is_none() {
             self.slots.remove(id);
         }
     }
@@ -907,24 +905,26 @@ impl Driver {
         }
     }
 
-    /// The client ends with `err`: every request is answered with it, every pack is broken, and
-    /// no connection is made again. Releases are answered `Ok` when the end is the release.
+    /// The client ends with `err`: every pack is broken, then every request is answered with it
+    /// (a reader woken by its answer finds its pack broken), and no connection is made again.
+    /// Releases are answered `Ok` when the end is the release.
     fn finish(&mut self, err: ClientError) {
         self.end = Some(err.clone());
         self.wire.set(Link::Idle);
         for slot in self.slots.values_mut() {
-            // Broken before its waits and reads are answered, as in `fail_slot`.
             if let Some(pack) = &slot.pack {
                 pack.break_with(err.clone());
             }
+            slot.handle = None;
+            slot.broken = Some(err.clone());
+        }
+        for slot in self.slots.values_mut() {
             for answer in slot.waiters.drain(..) {
                 let _ = answer.send(Err(err.clone()));
             }
             for joiner in slot.windows.drain() {
                 joiner.read.part_done(Err(err.clone()));
             }
-            slot.handle = None;
-            slot.broken = Some(err.clone());
         }
         let released = err == ClientError::Released;
         for answer in self.releases.drain(..) {
