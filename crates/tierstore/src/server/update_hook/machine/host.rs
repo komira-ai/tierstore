@@ -380,6 +380,9 @@ impl Host for SystemHost<'_> {
             (Some((uid, gid)), Accounts::PasswdFile) => {
                 Call::new(&program, &check, self.timeout).running_as(uid, gid)
             }
+            // `sudo` takes the primary group from the account record itself; the
+            // `PrimaryGroupID` read above is still required, so that an account record
+            // without one fails as a missing account rather than at the check.
             (Some((uid, _)), Accounts::DirectoryService) => {
                 let user = format!("#{uid}");
                 let mut args = vec!["-n", "-u", user.as_str(), "--", program.as_ref()];
