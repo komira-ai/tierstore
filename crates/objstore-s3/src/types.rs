@@ -292,8 +292,9 @@ pub enum ObjectStoreError {
     /// date on a store without Object Lock). Refused rather than silently weakened.
     #[error("the store does not support {0}")]
     Unsupported(&'static str),
-    /// The store answered with an S3 error.
-    #[error("store answered {status} {code}: {message}")]
+    /// The store answered with an S3 error. An answer with neither a code nor a message (the
+    /// answer to a `HEAD` has no body) says so instead of ending in an empty `: `.
+    #[error("store answered {status} {}", Said(code, message))]
     Service {
         /// The HTTP status.
         status: u16,
@@ -321,6 +322,18 @@ pub enum ObjectStoreError {
 
 /// An error and each of its sources, joined by `: `.
 struct Causes<'a>(&'a (dyn std::error::Error + 'static));
+
+/// What a store's error answer said: `<code>: <message>`, or that it named no error.
+struct Said<'a>(&'a str, &'a str);
+
+impl fmt::Display for Said<'_> {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        match self {
+            Said("", "") => f.write_str("with no S3 error code (no error body)"),
+            Said(code, message) => write!(f, "{code}: {message}"),
+        }
+    }
+}
 
 impl fmt::Display for Causes<'_> {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
@@ -406,6 +419,36 @@ mod tests {
         assert_eq!(p.key("../x"), Err(KeyError::Segment("run/1/../x".into())));
         assert_eq!(p.child("a b/").unwrap().as_str(), "run/1/a b/");
         assert_eq!(p.child(&"a".repeat(1024)), Err(KeyError::TooLong(1030)));
+    }
+
+    /// Asserts the text of a store's error answer: `store answered <status> <code>: <message>`
+    /// when it names a code or a message (either may be empty), and, when it names neither (the
+    /// body of a `HEAD` answer is empty), that it said no error code, not a bare `403 : `.
+    /// Catches an operator's log line "store answered 403 : " that does not say the store gave
+    /// no reason.
+    #[test]
+    fn a_service_answer_says_what_the_store_said_or_that_it_said_nothing() {
+        let said = |status, code: &str, message: &str| {
+            ObjectStoreError::Service {
+                status,
+                code: code.to_owned(),
+                message: message.to_owned(),
+            }
+            .to_string()
+        };
+        assert_eq!(
+            said(403, "InvalidAccessKeyId", "not one this server accepts."),
+            "store answered 403 InvalidAccessKeyId: not one this server accepts."
+        );
+        assert_eq!(
+            said(403, "AccessDenied", ""),
+            "store answered 403 AccessDenied: "
+        );
+        assert_eq!(said(500, "", "boom"), "store answered 500 : boom");
+        assert_eq!(
+            said(403, "", ""),
+            "store answered 403 with no S3 error code (no error body)"
+        );
     }
 
     /// Catches a transport failure whose text drops its cause, or the cause's own
