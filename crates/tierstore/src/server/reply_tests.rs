@@ -9,9 +9,10 @@ use http_body_util::BodyExt as _;
 use hyper::StatusCode;
 use hyper::body::Body as _;
 
-use crate::{Error, ReadBody};
+use crate::{Error, Op, ReadBody};
 
 use super::reply::{AnswerBody, S3Error, answer, header_text, header_value, streamed_answer};
+use super::testing::{Rig, texts};
 
 /// Asserts that printable ASCII is kept, including the space, and everything else becomes `?`.
 #[test]
@@ -244,4 +245,25 @@ async fn a_streamed_answer_that_is_short_long_or_failed_ends_with_an_error() {
     let after = chunks(vec![Ok(b"ab"), Err(failed.clone())]);
     let seen = frames(streamed_answer(StatusCode::OK, &[], 2, after).into_body()).await;
     assert_eq!(seen, vec![Err(failed)]);
+}
+
+/// Asserts, through the S3 handler, how a store that refuses this server's own key (an answer 403,
+/// `Error::Denied`) is answered: `InternalError` (500), not the client's `AccessDenied`, with the
+/// fixed message, and with nothing of the store's answer (its status, code or text) in the body,
+/// which the log alone gets.
+#[tokio::test(start_paused = true)]
+async fn a_store_that_refuses_this_servers_key_is_an_internal_error_without_its_words() {
+    let rig = Rig::new(1 << 20).await;
+    rig.put("d", b"x").await;
+    let refused =
+        Error::Denied("store answered 403 InvalidAccessKeyId: key k-secret-id".to_owned());
+    rig.hot.fail_next_with(Op::Get, refused);
+    let failed = rig.get("d", None).await;
+    assert_eq!(failed.status, StatusCode::INTERNAL_SERVER_ERROR);
+    assert_eq!(failed.code(), "InternalError");
+    let message = texts(&failed.body, "Message").concat();
+    assert_eq!(message, "The upstream store refused this server's request.");
+    for word in ["403", "InvalidAccessKeyId", "k-secret-id", "AccessDenied"] {
+        assert!(!failed.body.contains(word), "{word}: {}", failed.body);
+    }
 }
