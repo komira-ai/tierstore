@@ -25,9 +25,9 @@
 //! - [`LocalCache::span_of`] says which file holds a range and where: the pack's own file, in
 //!   `obj/` if the pack is whole and in `extents-v1/` if not. Nothing is copied: the span is a
 //!   range of the pack's file.
-//! - [`LocalCache::pin_packs`] pins packs for a tree (the pins of module `pins`, which are per
-//!   object and count the object's bytes once however many trees pin it). An entry by extents
-//!   is pinned for the bytes it has filled, and the pin grows when the entry does.
+//! - A pin of a pack's name ([`LocalCache::pin`], the pins of module `pins`, which are per object
+//!   and count the object's bytes once however many trees pin it) pins an entry by extents for
+//!   the bytes it has filled, and the pin grows when the entry does.
 //! - An ordinary ranged read of the pack's key is served from the entry if the range is held
 //!   (and `revalidate_after` is not set), and is otherwise a miss, filled or passed through as it
 //!   is today; the entry is never read for a range it does not hold.

@@ -413,16 +413,13 @@ The node-local trees of a build node (designed in `docs/design/node-local-trees.
 | `trees.max_request_bytes` | size, `256MiB` (1KiB to 1GiB) | the longest call of the `trees` interface, a create's included: a longer message is refused (`OUT_OF_RANGE`) before it is read whole |
 | `trees.max_bytes` | size, `32GiB` (1MiB to 1TiB) | the file bytes of one tree |
 | `trees.max_placements` | count, 1024 (1 to 1000000) | the placements alive at once |
-| `trees.fill_concurrency` | count, 8 (1 to 1024) | the ranged reads of creates that run at once, node-wide |
-| `trees.fill_rate` | rate, `"off"` | a size and `/s`, such as `"200MiB/s"`: the bytes a second of all creates together; `"off"` or `"0B/s"` for no limit |
-| `trees.fill_queue` | count, 16384 (1 to 10000000) | the blobs waiting to be fetched |
-| `trees.coalesce_gap` | size, `256KiB` (0 to 1GiB) | ranges of one object this near one another are one read |
+| `trees.fill_concurrency` | count, 8 (1 to 1024) | the ranged reads of creates, and of the mount provider's `Prepare`, that run at once, node-wide |
 | `trees.prefetch_default` | `"none"`, `"background"` or `"wait"`, `"wait"` | what a create with no `prefetch` does |
-| `trees.whole_pack_percent` | percent, 50 (1 to 100) | the share of a pack the needed ranges must cover for the whole pack to be read in one request |
+| `trees.prepare_prefetch` | `"background"` or `"none"`, `"background"` | what the [mount provider](operations.md#the-mount-provider)'s `Prepare` does about the files of a tree once it is placed. `"background"`: it reads every file into the cache in the background, and pins the tree's packs when the reads end. `"none"`: it reads no file and pins nothing; each file is read into the cache when it is first opened, and an open of a file another open is filling waits for that fill. Neither makes `Prepare` or `Mount` wait for the files. Another value is refused at the start, naming the key and the two values. Not `prefetch_default`, which is the default of a create's own `prefetch` and whose `"wait"` `Prepare` does not have |
 | `trees.create_timeout` | duration, `120s` (1s to 1h) | the longest a create that waits for its files waits |
 | `trees.max_failures` | count, 20 (1 to 1000) | the failed entries an answer names |
 
-The store answers where a key or a path falls, and what a path is, from memory, one directory record at a time; `ttl`, `ttl_max`, `enabled`, `max_entries`, `max_depth`, `max_dir_entries`, `max_bytes` and `max_placements` are what this release holds a create to. The other keys are read and checked at the start and take effect with the create call that fetches the files of a tree. A start drops a tree that is short, whose record does not hash to its name, whose bytes the cache lost or whose placement's lease has ended, and removes its files; a cache that does not hold the lock of its directory removes nothing.
+The store answers where a key or a path falls, and what a path is, from memory, one directory record at a time; `ttl`, `ttl_max`, `enabled`, `max_entries`, `max_depth`, `max_dir_entries`, `max_bytes` and `max_placements` are what this release holds a create to; `fill_concurrency` and `prepare_prefetch` are what the mount provider's `Prepare` reads by. The other keys are read and checked at the start and take effect with the create call that fetches the files of a tree. A start drops a tree that is short, whose record does not hash to its name, whose bytes the cache lost or whose placement's lease has ended, and removes its files; a cache that does not hold the lock of its directory removes nothing.
 
 ## `[fs]`
 

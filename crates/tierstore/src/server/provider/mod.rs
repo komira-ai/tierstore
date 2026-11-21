@@ -16,7 +16,9 @@
 //!   into the cache (a version 2 list's as its walk meets them, before the tree is placed; a
 //!   version 1 list's once it is placed), at most `trees.fill_concurrency` files at once across
 //!   the node, each with the call an open of the mount makes for it (`TreeStore::fetch_span`), so that an open of
-//!   a file still being read waits for that one read instead of starting another.
+//!   a file still being read waits for that one read instead of starting another. With
+//!   `trees.prepare_prefetch = "none"` it reads no file and pins nothing: each file is read on its
+//!   first open.
 //! - **`Mount(source)`** answers the tree's directory once it is placed (its files may still be
 //!   filling), or `UNAVAILABLE` "not ready" after [`MOUNT_WAIT`], and the agent asks again; a ref
 //!   the provider cannot use (no such object, a malformed list, a tree the store refuses) is
@@ -50,6 +52,8 @@ mod groups_tests;
 mod names_tests;
 #[cfg(test)]
 mod prepare_image_tests;
+#[cfg(test)]
+mod prepare_lazy_tests;
 #[cfg(test)]
 mod prepare_tests;
 #[cfg(test)]

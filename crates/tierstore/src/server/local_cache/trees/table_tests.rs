@@ -2,7 +2,7 @@
 
 use std::time::Duration;
 
-use super::{Prefetch, TreesConfig, TreesTable};
+use super::{Prefetch, PreparePrefetch, TreesConfig, TreesTable};
 use crate::server::config::settings_from_text;
 use crate::server::config_cache::CacheSettings;
 use crate::server::config_testing::{DEFAULTS, MINIMAL};
@@ -68,17 +68,9 @@ fn a_build_node_has_the_default_trees_with_no_table_and_with_an_empty_one() {
         (256 << 20, 32 << 30)
     );
     assert_eq!(default.max_placements, 1024);
-    assert_eq!(
-        (
-            default.fill_concurrency,
-            default.fill_rate,
-            default.fill_queue
-        ),
-        (8, None, 16_384)
-    );
-    assert_eq!(default.coalesce_gap, 256 << 10);
+    assert_eq!(default.fill_concurrency, 8);
     assert_eq!(default.prefetch_default, Prefetch::Wait);
-    assert_eq!(default.whole_pack_percent, 50);
+    assert_eq!(default.prepare_prefetch, PreparePrefetch::Background);
     assert_eq!(default.create_timeout, Duration::from_secs(120));
     assert_eq!(default.max_failures, 20);
 }
@@ -99,11 +91,8 @@ max_request_bytes = "1MiB"
 max_bytes = "2GiB"
 max_placements = 7
 fill_concurrency = 3
-fill_rate = "200MiB/s"
-fill_queue = 99
-coalesce_gap = "64KiB"
 prefetch_default = "background"
-whole_pack_percent = 75
+prepare_prefetch = "none"
 create_timeout = "30s"
 max_failures = 5
 "#,
@@ -121,11 +110,8 @@ max_failures = 5
             max_bytes: 2 << 30,
             max_placements: 7,
             fill_concurrency: 3,
-            fill_rate: Some(200 << 20),
-            fill_queue: 99,
-            coalesce_gap: 64 << 10,
             prefetch_default: Prefetch::Background,
-            whole_pack_percent: 75,
+            prepare_prefetch: PreparePrefetch::None,
             create_timeout: Duration::from_secs(30),
             max_failures: 5,
         }
@@ -139,8 +125,10 @@ max_failures = 5
         trees(r#"prefetch_default = "none""#).prefetch_default,
         Prefetch::None
     );
-    assert_eq!(trees(r#"fill_rate = "off""#).fill_rate, None);
-    assert_eq!(trees("coalesce_gap = 0").coalesce_gap, 0);
+    assert_eq!(
+        trees(r#"prepare_prefetch = "background""#).prepare_prefetch,
+        PreparePrefetch::Background
+    );
 }
 
 /// Asserts that a key out of its range is refused naming the key and the range, at each end, and
@@ -178,11 +166,6 @@ fn a_key_out_of_its_range_is_refused_by_name() {
         ("max_placements = 1000001", "trees.max_placements:"),
         ("fill_concurrency = 0", "trees.fill_concurrency:"),
         ("fill_concurrency = 1025", "trees.fill_concurrency:"),
-        ("fill_queue = 0", "trees.fill_queue:"),
-        ("fill_queue = 10000001", "trees.fill_queue:"),
-        ("coalesce_gap = \"2GiB\"", "trees.coalesce_gap:"),
-        ("whole_pack_percent = 0", "trees.whole_pack_percent:"),
-        ("whole_pack_percent = 101", "trees.whole_pack_percent:"),
         ("create_timeout = \"0s\"", "trees.create_timeout:"),
         ("create_timeout = \"2h\"", "trees.create_timeout:"),
         ("max_failures = 0", "trees.max_failures:"),
@@ -192,18 +175,18 @@ fn a_key_out_of_its_range_is_refused_by_name() {
         let why = refusal(&file(&format!("[trees]\n{more}")));
         assert!(why.contains(said), "{more}: {why}");
     }
-    let edges = "ttl = \"1s\"\nttl_max = \"168h\"\nmax_entries = 1\nmax_depth = 4096\nmax_failures = 1000\nwhole_pack_percent = 100";
+    let edges =
+        "ttl = \"1s\"\nttl_max = \"168h\"\nmax_entries = 1\nmax_depth = 4096\nmax_failures = 1000";
     assert_eq!(trees(edges).ttl, Duration::from_secs(1));
 }
 
-/// Asserts that a value of the wrong kind is refused without showing it, for a duration, a size,
-/// a rate and a prefetch mode.
+/// Asserts that a value of the wrong kind is refused without showing it, for a duration, a size
+/// and a prefetch mode.
 #[test]
 fn a_value_of_the_wrong_kind_is_refused_and_not_shown() {
     for more in [
         "ttl = \"soon\"",
         "max_bytes = \"lots\"",
-        "fill_rate = \"fast\"",
         "prefetch_default = \"sometimes\"",
         "enabled = \"yes\"",
     ] {
@@ -229,10 +212,49 @@ fn only_a_build_node_has_the_table_and_an_unknown_key_is_a_warning() {
     );
     assert!(refusal(&combined).starts_with("trees: only a build node has trees"));
     let known = fields_of::<TreesTable>();
-    assert_eq!(known.len(), 17);
+    assert_eq!(known.len(), 14);
     let table: toml::Table = toml::from_str("[trees]\nttl = \"1h\"\nnew_knob = 1\n").unwrap();
     assert_eq!(
         unknown_key_warnings(&table),
         ["tierstore: config key trees.new_knob is not known to this release and is ignored"]
     );
+}
+
+/// Asserts that a file written for an earlier release, which sets the four keys that release read
+/// and nothing used (`fill_rate`, `fill_queue`, `coalesce_gap`, `whole_pack_percent`), still
+/// loads: each key is warned about by name and ignored, the settings are the defaults, and a
+/// value that release refused as out of range is no longer refused.
+#[test]
+fn a_file_with_the_removed_fill_keys_loads_with_a_warning_for_each() {
+    let old = "fill_rate = \"200MiB/s\"\nfill_queue = 99\ncoalesce_gap = \"64KiB\"\nwhole_pack_percent = 75\n";
+    assert_eq!(trees(old), TreesConfig::default());
+    assert_eq!(
+        trees("whole_pack_percent = 101\nfill_queue = 0"),
+        TreesConfig::default()
+    );
+    let table: toml::Table = toml::from_str(&format!("[trees]\n{old}")).unwrap();
+    assert_eq!(
+        unknown_key_warnings(&table),
+        [
+            "tierstore: config key trees.coalesce_gap is not known to this release and is ignored",
+            "tierstore: config key trees.fill_queue is not known to this release and is ignored",
+            "tierstore: config key trees.fill_rate is not known to this release and is ignored",
+            "tierstore: config key trees.whole_pack_percent is not known to this release and is ignored",
+        ]
+    );
+}
+
+/// Asserts that `prepare_prefetch` takes `background` and `none` alone: `wait` (a value of
+/// `prefetch_default`, which `Prepare` has not), a misspelling, another case, an empty string and
+/// a value of another type are refused, naming the key, and for a string the values it takes,
+/// without repeating the value.
+#[test]
+fn prepare_prefetch_refuses_a_value_it_does_not_take_by_name() {
+    let said = "trees.prepare_prefetch: not a value this key takes (it is not shown); expected \"background\" or \"none\"";
+    for value in ["wait", "lazy", "None", "Background", "background ", ""] {
+        let why = refusal(&file(&format!("[trees]\nprepare_prefetch = \"{value}\"")));
+        assert_eq!(why, said, "{value:?}");
+    }
+    let why = refusal(&file("[trees]\nprepare_prefetch = true"));
+    assert!(why.starts_with("line "), "{why}");
 }

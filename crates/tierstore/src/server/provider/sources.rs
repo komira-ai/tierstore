@@ -18,7 +18,7 @@ use super::names::{SourceId, check_name, source_of};
 use super::prepare::{Job, run};
 use super::{MOUNT_WAIT, ProviderError, ProviderFlags};
 use crate::server::local_cache::LocalCache;
-use crate::server::local_cache::trees::{LifeError, PlacementId, TreeStore};
+use crate::server::local_cache::trees::{LifeError, PlacementId, PreparePrefetch, TreeStore};
 use crate::{MAX_TREE_LIST_BYTES, TreeDigest, tree_list_digest};
 
 /// Where the preparation of a source is.
@@ -105,15 +105,28 @@ impl Shared {
     }
 }
 
+/// The line the log has at the start of a provider: the mode of its `Prepare`.
+pub(super) fn mode_line(mode: PreparePrefetch) -> String {
+    let what = match mode {
+        PreparePrefetch::Background => "Prepare reads every file of a tree in the background",
+        PreparePrefetch::None => "Prepare reads no file: each is read when first opened",
+    };
+    format!(
+        "tierstore: mount provider: trees.prepare_prefetch = \"{}\": {what}",
+        mode.name()
+    )
+}
+
 impl Provider {
     /// The provider of the node whose trees are `store`, over `cache`, as the interface's `flags`
     /// say: its placements last `trees.ttl_max`, and it reads at most `trees.fill_concurrency`
-    /// files at once.
+    /// files at once, or none if `trees.prepare_prefetch` is `none`, which the log says once here.
     pub(in crate::server) fn new(
         store: TreeStore,
         cache: LocalCache,
         flags: &ProviderFlags,
     ) -> Self {
+        tracing::info!("{}", mode_line(store.config().prepare_prefetch));
         let settings = Settings {
             mountpoint: flags.mountpoint.clone(),
             list_timeout: flags.fetch_timeout,
