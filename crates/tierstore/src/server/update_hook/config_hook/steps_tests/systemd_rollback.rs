@@ -214,7 +214,11 @@ fn a_rollback_after_the_next_packages_prepare_failed_has_nothing_to_roll_back() 
         let node = Linux::alike();
         node.go(&update(), &[Prepare, Cutover, Verify, Cleanup]);
         let at_rest = node.fake.record();
-        assert!(at_rest.committed() && !at_rest.updating, "{at_rest:?}");
+        assert_eq!(
+            (at_rest.committed(), at_rest.updating),
+            (true, false),
+            "{at_rest:?}"
+        );
         let next = lin::params(newer, previous);
         let prepare = node.step(Prepare, &next);
         lin::assert_failed(&prepare, Reason::ConfigMissing);

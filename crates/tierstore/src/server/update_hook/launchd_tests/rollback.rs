@@ -173,7 +173,11 @@ fn a_rollback_after_a_prepare_that_failed_has_nothing_to_roll_back() {
     let fake = Fake::new();
     fake.advance(&[Prepare, Cutover, Verify, Cleanup]);
     let at_rest = fake.record();
-    assert!(at_rest.committed() && !at_rest.updating, "{at_rest:?}");
+    assert_eq!(
+        (at_rest.committed(), at_rest.updating),
+        (true, false),
+        "{at_rest:?}"
+    );
     let newer = "/var/lib/hostkeeper/packages/tierstore/0.5.0+000000000005";
     let next = params_for(newer, "0.5.0+000000000005", Some((NEW, NEW_VERSION)));
     fake.set_config(CONFIG, None);

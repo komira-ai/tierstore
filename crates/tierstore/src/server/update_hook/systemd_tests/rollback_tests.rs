@@ -223,7 +223,11 @@ fn a_rollback_after_a_prepare_that_failed_has_nothing_to_roll_back() {
     let config = format!("config_file = \"{CONFIG}\"\n");
     fake.complete(&params_with(NEW, Some(OLD), &config));
     let at_rest = fake.record();
-    assert!(at_rest.committed() && !at_rest.updating, "{at_rest:?}");
+    assert_eq!(
+        (at_rest.committed(), at_rest.updating),
+        (true, false),
+        "{at_rest:?}"
+    );
     let next = params_with(NEWER, Some(NEW), &config);
     fake.fail_on(Some("host.check_config"));
     let prepare = fake.run_as_hostkeeper(Prepare, &next);

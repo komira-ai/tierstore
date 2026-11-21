@@ -309,7 +309,11 @@ fn a_mac_rollback_after_the_next_packages_prepare_failed_has_nothing_to_roll_bac
         let node = Mac::new();
         node.go(&mac_update(), &[Prepare, Cutover, Verify, Cleanup]);
         let at_rest = node.fake.record();
-        assert!(at_rest.committed() && !at_rest.updating, "{at_rest:?}");
+        assert_eq!(
+            (at_rest.committed(), at_rest.updating),
+            (true, false),
+            "{at_rest:?}"
+        );
         let next = mac::params_for(PKG_NEWER, "1.2.0", previous);
         let prepare = node.step(Prepare, &next);
         lin::assert_failed(&prepare, Reason::ConfigMissing);
