@@ -387,3 +387,31 @@ fn a_binary_whose_path_cannot_be_read_fails_the_step() {
     );
     assert!(calls.lines().is_empty());
 }
+
+/// Asserts that the config hook's `prepare` of an update on a systemd node looks at the units of
+/// both templates through `systemctl show`, `tierstore-fs@a` and `tierstore-fs@b` as well as the
+/// store's, since its steps are those of an update of the release. Catches a config hook wired to
+/// ports with no fs units.
+#[test]
+fn a_config_update_looks_at_the_fs_units_too() {
+    let node = node("config-hook-system-fs-units");
+    let calls = Calls::default();
+    let extra = "\"updater.previous_release\" = \"/packages/tierstore-config-g/0.3.0\"\n\
+                 \"updater.previous_version\" = \"0.3.0\"\n";
+    let done = node.run(&calls, Step::Prepare, &params(extra));
+    assert_eq!(done.outcome, Outcome::Success, "{done:?}");
+    let lines = calls.lines();
+    for unit in [
+        "tierstore@a.service",
+        "tierstore@b.service",
+        "tierstore-fs@a.service",
+        "tierstore-fs@b.service",
+    ] {
+        assert!(
+            lines
+                .iter()
+                .any(|line| line.contains("show") && line.ends_with(unit)),
+            "{unit}: {lines:?}"
+        );
+    }
+}

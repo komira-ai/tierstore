@@ -220,21 +220,45 @@ impl Linux {
     /// A node serving with the file `serving` (none: the file is missing) and a config package
     /// that stages `staged_text`.
     fn new(serving: Option<&str>, staged_text: &str) -> Linux {
-        let files = Files::new(&[
+        Linux::on(lin::SystemdFake::installed(), &[], serving, staged_text)
+    }
+
+    /// The same on the machine `fake`, whose running release lists `extra` words besides the
+    /// three of the hand-over of the store.
+    fn on(
+        fake: lin::SystemdFake,
+        extra: &[&str],
+        serving: Option<&str>,
+        staged_text: &str,
+    ) -> Linux {
+        let mut words = vec![
             HANDOFF_CAPABILITY,
             CACHE_HANDOFF_CAPABILITY,
             HANDOFF_STATE_DIR_CAPABILITY,
-        ]);
+        ];
+        words.extend_from_slice(extra);
+        let files = Files::new(&words);
         if let Some(text) = serving {
             files.put(Path::new(lin::CONFIG), text);
         }
         files.put(&staged(lin::CONFIG), staged_text);
         Linux {
-            fake: lin::SystemdFake::installed(),
+            fake,
             files,
             guard: CountingGuard::new(),
             service: Mem::holding(Some(&release_record(Instance::A))),
         }
+    }
+
+    /// A node like [`Linux::alike`] that also has an fs process, instance `A`, and whose running
+    /// release lists `handoff-fs-v1`.
+    fn with_fs() -> Linux {
+        Linux::on(
+            lin::SystemdFake::fs_installed(),
+            &[crate::server::update_hook::HANDOFF_FS_CAPABILITY],
+            Some(lin::WITH_SOCKET),
+            &format!("{}proxy_id = \"p2\"\n", lin::WITH_SOCKET),
+        )
     }
 
     /// A node whose config package changes nothing a hand-over cares about.
@@ -254,6 +278,8 @@ impl Linux {
         let ports = SystemdPorts {
             units: &self.fake,
             markers: &self.fake,
+            fs_units: self.fake.fs_ports(),
+            fs_markers: self.fake.fs_ports(),
             instances: &self.fake,
             host: &running,
             clock: &self.fake,

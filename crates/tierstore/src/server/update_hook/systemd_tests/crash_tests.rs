@@ -17,6 +17,15 @@ enum Kind {
     Restart,
     /// A first install on a host with nothing.
     FirstInstall,
+    /// An update from a to b with a hand-over, on a node whose fs process hands over too.
+    FsHandover,
+    /// An update with a restart of the store, on a node whose fs process hands over.
+    FsAndRestart,
+    /// An update whose previous release lacks `handoff-fs-v1`: the fs process is left alone.
+    FsLeftAlone,
+    /// An update of a node whose fs process hands over, with the `prepare` of a hook that does not
+    /// know the fs unit (the previous release's): the record has no fs keys until `cutover`.
+    FsPreviousHook,
 }
 
 struct Scenario {
@@ -119,6 +128,21 @@ fn world(kind: Kind) -> (SystemdFake, Params) {
             ),
         ),
         Kind::FirstInstall => (SystemdFake::empty(), params(NEW, None)),
+        Kind::FsHandover => (SystemdFake::fs_installed(), params(NEW, Some(OLD))),
+        Kind::FsAndRestart => (
+            SystemdFake::fs_installed(),
+            params_with(
+                NEW,
+                Some(OLD),
+                &format!("config_file = \"{CONFIG}\"\nmode = \"restart\"\n"),
+            ),
+        ),
+        Kind::FsPreviousHook => (SystemdFake::fs_installed(), params(NEW, Some(OLD))),
+        Kind::FsLeftAlone => {
+            let fake = SystemdFake::fs_installed();
+            fake.list_fs_hand_over(OLD, false);
+            (fake, params(NEW, Some(OLD)))
+        }
     }
 }
 
@@ -127,6 +151,12 @@ fn set_up(kind: Kind, scenario: &Scenario) -> (SystemdFake, Params) {
     let (fake, p) = world(kind);
     for step in scenario.setup {
         assert_ok(&fake.run_as_hostkeeper(*step, &p));
+        if matches!(kind, Kind::FsPreviousHook) && *step == Prepare {
+            let mut record = fake.record();
+            record.fs_live = None;
+            record.fs_next = None;
+            fake.set_record(&record);
+        }
     }
     if scenario.reboot {
         fake.reboot();
@@ -143,13 +173,23 @@ fn finish(fake: &SystemdFake, p: &Params, scenario: &Scenario) -> Vec<Outcome> {
         .collect()
 }
 
-/// Asserts that, for an update with a hand-over, one with a restart and a first install, a step
+/// Asserts that, for an update with a hand-over, one with a restart, a first install and four
+/// updates of a node with an fs process (handed over, handed over beside a restart of the store,
+/// left alone, and prepared by a hook that does not know the fs unit), a step
 /// halted at any of its calls and run again with the steps that follow ends where an
 /// uninterrupted run ends: the same record, units and markers, and the same outcomes. Catches a
 /// step whose second run depends on what its first left half done.
 #[test]
 fn every_step_run_again_after_a_halt_at_any_call_converges() {
-    for kind in [Kind::Handover, Kind::Restart, Kind::FirstInstall] {
+    for kind in [
+        Kind::Handover,
+        Kind::Restart,
+        Kind::FirstInstall,
+        Kind::FsHandover,
+        Kind::FsAndRestart,
+        Kind::FsLeftAlone,
+        Kind::FsPreviousHook,
+    ] {
         for scenario in SCENARIOS {
             let (fake, p) = set_up(kind, scenario);
             let expected_outcomes = finish(&fake, &p, scenario);

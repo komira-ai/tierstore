@@ -171,6 +171,9 @@ fn uninstall_stops_both_instances_and_removes_only_the_markers_and_the_binary() 
     let calls = &fake.log()[before..];
     assert!(calls.iter().all(|line| line.starts_with("units.")
         || line.starts_with("markers.")
+        // The fs unit of a node with none is looked at, and its markers removed.
+        || line.starts_with("fs_units.state")
+        || line.starts_with("fs_markers.clear")
         || line == "host.remove_binary"
         || line.starts_with("state.")));
     assert!(calls.iter().any(|line| line == "host.remove_binary"));

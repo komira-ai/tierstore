@@ -311,3 +311,83 @@ fn a_record_that_breaks_a_rule_fails_the_check() {
         "live and next are the same instance"
     );
 }
+
+/// An update in flight of a node with an fs process: `a` serves both units, `b` is next for both.
+fn updating_with_fs() -> Record {
+    Record {
+        fs_live: Some(Instance::A),
+        fs_next: Some(Instance::B),
+        ..updating()
+    }
+}
+
+/// Asserts that the keys of the fs process are written after the others' letters, only when they
+/// are set, and read back; and that a record written before the fs keys existed (none of them)
+/// decodes with both absent. Catches a format change the previous release's record cannot be read
+/// across: the keys are additive, the schema stays 1.
+#[test]
+fn the_fs_keys_are_additive_and_read_back() {
+    let record = updating_with_fs();
+    let text = String::from_utf8(record.encode()).unwrap();
+    assert!(text.contains("\"fs_live\": \"a\""), "{text}");
+    assert!(text.contains("\"fs_next\": \"b\""), "{text}");
+    assert!(text.contains("\"schema\": 1"), "{text}");
+    assert_eq!(Record::decode(text.as_bytes()).unwrap(), record);
+
+    let without = String::from_utf8(updating().encode()).unwrap();
+    assert!(!without.contains("fs_"), "{without}");
+    let old = Record::decode(without.as_bytes()).unwrap();
+    assert_eq!((old.fs_live, old.fs_next), (None, None));
+    let idle = String::from_utf8(Record::idle(Some(Instance::A)).encode()).unwrap();
+    assert!(!idle.contains("fs_"), "{idle}");
+}
+
+/// Asserts that a record of the fs process at rest and one in flight pass `check`, and that the
+/// fs keys break the rules they must: `fs_next` only while updating and only beside `fs_live`, and
+/// never the same instance as `fs_live`. Catches a record that names an fs instance to start
+/// from nowhere, which a step would act on.
+#[test]
+fn the_fs_keys_hold_to_their_rules() {
+    let at_rest = Record {
+        fs_live: Some(Instance::B),
+        ..Record::idle(Some(Instance::A))
+    };
+    assert_eq!(at_rest.check(), Ok(()));
+    assert_eq!(updating_with_fs().check(), Ok(()));
+    assert_eq!(
+        Record {
+            fs_next: None,
+            ..updating_with_fs()
+        }
+        .check(),
+        Ok(())
+    );
+    assert_eq!(
+        Record {
+            fs_next: Some(Instance::B),
+            ..at_rest.clone()
+        }
+        .check(),
+        marks("fs_next", "updating")
+    );
+    assert_eq!(
+        Record {
+            fs_live: None,
+            ..updating_with_fs()
+        }
+        .check(),
+        marks("fs_next", "fs_live")
+    );
+    assert_eq!(
+        Record {
+            fs_next: Some(Instance::A),
+            ..updating_with_fs()
+        }
+        .check(),
+        Err(Invalid::FsSame)
+    );
+    assert_eq!(
+        Invalid::FsSame.to_string(),
+        "fs_live and fs_next are the same instance"
+    );
+}

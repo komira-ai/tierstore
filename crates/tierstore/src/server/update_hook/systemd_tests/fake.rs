@@ -25,6 +25,7 @@
 use std::cell::RefCell;
 use std::collections::{BTreeMap, BTreeSet};
 use std::path::{Path, PathBuf};
+use std::rc::Rc;
 use std::time::Duration;
 
 use crate::server::build_info::gauge;
@@ -139,9 +140,16 @@ pub struct Snapshot {
     pub record: Option<Record>,
     pub units: Vec<(Instance, UnitState, Option<PathBuf>)>,
     pub markers: Vec<Instance>,
+    /// The units and markers of `tierstore-fs`.
+    pub fs_units: Vec<(Instance, UnitState, Option<PathBuf>)>,
+    pub fs_markers: Vec<Instance>,
     /// The release whose binary is at [`SERVICE_BINARY`].
     pub installed: Option<PathBuf>,
 }
+
+#[path = "fake_fs.rs"]
+mod fake_fs;
+pub use fake_fs::{FsTake, fs_marker_path, fs_unit_condition, fs_unit_program};
 
 #[derive(Clone)]
 struct Unit {
@@ -192,6 +200,8 @@ struct World {
     /// A hand-over under way: the new instance, the old one, and the looks left before the new
     /// one takes the sockets.
     taking: Option<(Instance, Instance, u32)>,
+    /// The second unit, `tierstore-fs`: see [`fake_fs`].
+    fs: fake_fs::FsWorld,
 }
 
 impl World {
@@ -323,7 +333,9 @@ impl World {
 
 /// The world, and every port over it.
 pub struct SystemdFake {
-    w: RefCell<World>,
+    w: Rc<RefCell<World>>,
+    /// The ports of the second unit, over the same world.
+    fs: fake_fs::FsPorts,
 }
 
 impl SystemdFake {
@@ -333,36 +345,39 @@ impl SystemdFake {
             CACHE_HANDOFF_CAPABILITY.to_owned(),
             HANDOFF_STATE_DIR_CAPABILITY.to_owned(),
         ];
+        let w = Rc::new(RefCell::new(World {
+            units: Instance::ALL
+                .into_iter()
+                .map(|i| (i, Unit::off()))
+                .collect(),
+            markers: BTreeSet::new(),
+            installed: None,
+            config: Some(WITH_SOCKET.to_owned()),
+            capabilities: [OLD, NEW, NEWER]
+                .into_iter()
+                .map(|release| (PathBuf::from(release), capable.clone()))
+                .collect(),
+            refusals: BTreeMap::new(),
+            lies: BTreeMap::new(),
+            mute: BTreeSet::new(),
+            read_only: false,
+            record: None,
+            busy: false,
+            now: 0,
+            log: Vec::new(),
+            calls: 0,
+            halt_from: None,
+            fail_prefix: None,
+            late_prefix: None,
+            drain_looks: 0,
+            draining_looks: 0,
+            takeover_looks: 0,
+            taking: None,
+            fs: fake_fs::FsWorld::new(),
+        }));
         SystemdFake {
-            w: RefCell::new(World {
-                units: Instance::ALL
-                    .into_iter()
-                    .map(|i| (i, Unit::off()))
-                    .collect(),
-                markers: BTreeSet::new(),
-                installed: None,
-                config: Some(WITH_SOCKET.to_owned()),
-                capabilities: [OLD, NEW, NEWER]
-                    .into_iter()
-                    .map(|release| (PathBuf::from(release), capable.clone()))
-                    .collect(),
-                refusals: BTreeMap::new(),
-                lies: BTreeMap::new(),
-                mute: BTreeSet::new(),
-                read_only: false,
-                record: None,
-                busy: false,
-                now: 0,
-                log: Vec::new(),
-                calls: 0,
-                halt_from: None,
-                fail_prefix: None,
-                late_prefix: None,
-                drain_looks: 0,
-                draining_looks: 0,
-                takeover_looks: 0,
-                taking: None,
-            }),
+            fs: fake_fs::FsPorts::new(Rc::clone(&w)),
+            w,
         }
     }
 
@@ -390,6 +405,8 @@ impl SystemdFake {
         SystemdPorts {
             units: self,
             markers: self,
+            fs_units: &self.fs,
+            fs_markers: &self.fs,
             instances: self,
             host: self,
             clock: self,
@@ -557,6 +574,7 @@ impl SystemdFake {
         for instance in Instance::ALL {
             w.start_unit(instance);
         }
+        w.reboot_fs();
     }
 
     /// The state of `instance`, without a look that counts.
@@ -601,6 +619,8 @@ impl SystemdFake {
                 .filter(|i| w.markers.contains(&marker_path(*i)))
                 .collect(),
             installed: w.installed.clone(),
+            fs_units: w.fs_snapshot(),
+            fs_markers: w.fs_marker_set(),
         }
     }
 
@@ -672,22 +692,7 @@ impl SystemdFake {
     /// Counts and logs one call, and says whether it is to fail after its effect. A call that is
     /// to fail without effect is the error.
     fn count(&self, what: String, kind: PortKind) -> Result<bool, PortError> {
-        let mut w = self.w.borrow_mut();
-        w.calls += 1;
-        let n = w.calls;
-        let matches = |prefix: &Option<String>| {
-            prefix
-                .as_deref()
-                .is_some_and(|prefix| what.starts_with(prefix))
-        };
-        let refused = w.halt_from.is_some_and(|from| n >= from) || matches(&w.fail_prefix);
-        let late = matches(&w.late_prefix);
-        w.log.push(what);
-        if refused {
-            Err(PortError::failed(kind, "injected failure"))
-        } else {
-            Ok(late)
-        }
+        count_in(&self.w, what, kind)
     }
 
     /// The failure of a call whose effect has happened, if it is to fail.
@@ -697,6 +702,26 @@ impl SystemdFake {
         } else {
             Ok(())
         }
+    }
+}
+
+/// Counts and logs one call of the world `w`; see [`SystemdFake::count`].
+fn count_in(w: &RefCell<World>, what: String, kind: PortKind) -> Result<bool, PortError> {
+    let mut w = w.borrow_mut();
+    w.calls += 1;
+    let n = w.calls;
+    let matches = |prefix: &Option<String>| {
+        prefix
+            .as_deref()
+            .is_some_and(|prefix| what.starts_with(prefix))
+    };
+    let refused = w.halt_from.is_some_and(|from| n >= from) || matches(&w.fail_prefix);
+    let late = matches(&w.late_prefix);
+    w.log.push(what);
+    if refused {
+        Err(PortError::failed(kind, "injected failure"))
+    } else {
+        Ok(late)
     }
 }
 

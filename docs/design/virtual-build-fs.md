@@ -1003,9 +1003,9 @@ new (tierstore-fs@b)                                    old (tierstore-fs@a, run
 - Control requests in the gap wait in the listening socket's backlog, as S3 connections do in today's hand-off.
 - Backing ids belong to the connection, so the kernel keeps every one across the hand-over; the new instance learns them
   from the backing table in the runtime directory.
-- Capability: a release that can do this lists `handoff-fs-v1` in `tierstore --capabilities`, and the hook's `prepare`
-  chooses a restart when either release lacks it, or when the two releases' layouts differ (section 10). A restart of
-  `tierstore fs` is 7.2 without the crash: the descriptor store carries the session across it.
+- Capability: a release that can do this lists `handoff-fs-v1` in `tierstore --capabilities`; the hook hands the process
+  over only when both releases list it, and otherwise leaves it on its release (a restart without `FUSE_HAS_RESEND` can fail
+  jobs). A restart of `tierstore fs` is 7.2 without the crash: the descriptor store carries the session across it.
 - **The S3 instance's update** does not interrupt fills: the fill socket is bound only by the instance that holds the
   cache lock (6.2), so the old instance answers fills through its drain, and the new one binds the socket in the tick (one
   second, `local_cache/hold.rs`) in which it takes the lock after the old one exits. `tierstore fs` retries a fill that
@@ -1406,7 +1406,7 @@ SP4 and SP5:
    `"fs"` row of `configuration.md`; the terms of the table at the top added to the glossary of tierstore-design.md.
 6. tierstore: passthrough, the mandatory backing table, the `fs.passthrough` switch and `prefetch` (arms C and D need them; the kernel to run them on is C8).
 7. tierstore: crash recovery (descriptor store, recorded `INIT` through the `fuser` patch of 6.2, the bounded abort of 7.2 for 6.8, and resend where the kernel has it) and the hand-over (`handoff-fs-v1`); the hook
-   learns the second unit; the cross-release layout test.
+   updates the second unit (`crates/tierstore/docs/update-hook.md`); the cross-release layout test.
 8. The executor: the Q-A instruments, reduced to the input root's total bytes in the `inputs:` line, since an external observer took the open counts (11). It needs none of the above and may land at any time.
 9. jobscheduler: the tree input kind, its capability, attach and detach in the `crun` runtime, the cache budget in the
    disk offer (its own design document first, B22).

@@ -30,6 +30,13 @@
 //! - `restore`, the boot step, makes the markers say what the record says and starts that
 //!   instance.
 //!
+//! The second unit, `tierstore-fs@a` and `tierstore-fs@b` ([`fs`]), is handed over in the same
+//! steps on a node where an instance of it runs, between releases that both list
+//! `handoff-fs-v1`: `cutover` starts it after the store (the new instance takes the mount from the
+//! old one), `verify` and `cleanup` need it active, `cleanup` waits for the old instance to exit
+//! and never stops it, `rollback` puts it back before the store, `restore` starts the recorded
+//! instance after the store and `uninstall` stops the instances that run.
+//!
 //! Every step holds the lock of the state directory, holds the record to its rules before it
 //! acts, and sets state rather than doing things once, so a step run again after a crash
 //! converges. `swapped` and `verified` follow their acts; `stopping` precedes its act.
@@ -37,6 +44,7 @@
 mod boot;
 mod cleanup;
 mod cutover;
+mod fs;
 mod prepare;
 mod rollback;
 mod verify;
@@ -51,9 +59,21 @@ use super::ports::{Instance, Lock, SystemdPorts};
 use super::record::Record;
 use super::report::{Done, Reason};
 
+/// Whether the steps hand the fs process over to the other instance with the store.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub(super) enum FsPolicy {
+    /// The fs process is handed over when both releases list `handoff-fs-v1`.
+    Managed,
+    /// The fs process is left alone, running the release it runs: the update is of the store's
+    /// configuration, and the fs process's own file is not in that package.
+    LeftAlone,
+}
+
 /// What a step works with.
 struct Ctx<'a, 'b> {
     ports: &'b SystemdPorts<'a>,
+    /// What the steps do to the fs process.
+    fs: FsPolicy,
     /// Whether the record as it is on disk, as far as this step knows, says `stopping`.
     committed: Cell<bool>,
     /// Whether this step began to write `stopping`: from then on, a failure leaves the commit
@@ -137,12 +157,23 @@ fn open(step: Step, ports: &SystemdPorts<'_>) -> Result<(Lock, Option<Record>), 
 
 /// Runs `step`. `params` is the parsed params file.
 pub(super) fn run_step(step: Step, params: &Params, ports: &SystemdPorts<'_>) -> Done {
+    run_step_with(step, params, ports, FsPolicy::Managed)
+}
+
+/// Runs `step` with `fs` saying what it does to the fs process.
+pub(super) fn run_step_with(
+    step: Step,
+    params: &Params,
+    ports: &SystemdPorts<'_>,
+    fs: FsPolicy,
+) -> Done {
     let (_lock, record) = match open(step, ports) {
         Ok(opened) => opened,
         Err(done) => return done,
     };
     let c = Ctx {
         ports,
+        fs,
         // The record as it stands says whether the update is committed, at rest included
         // ([`Record::commits`]).
         committed: Cell::new(record.as_ref().is_some_and(|r| r.commits(step, params))),

@@ -49,10 +49,11 @@ fn prev_words(record: &SingleRecord) -> Vec<&'static str> {
 }
 
 /// Asserts that the previous release's hook reads the record of an update in flight on systemd,
-/// with `live`, `next` and `mode` set, at each stage of the update: it decodes, passes its own
-/// `check`, and sees the same update (in flight, the same releases, version and markers), the
-/// three new keys ignored. Catches a key of the new record that the previous hook reads wrongly
-/// or refuses, which would break a rollback of the package in the middle of an update.
+/// with `live`, `next` and `mode` set, and with `fs_live` and `fs_next` set too, at each stage of
+/// the update: it decodes, passes its own `check`, and sees the same update (in flight, the same
+/// releases, version and markers), the new keys ignored. Catches a key of the new record that the
+/// previous hook reads wrongly or refuses, which would break a rollback of the package in the
+/// middle of an update.
 #[test]
 fn the_previous_hook_reads_a_systemd_update_in_flight() {
     let stages: [&[Marker]; 4] = [
@@ -62,11 +63,18 @@ fn the_previous_hook_reads_a_systemd_update_in_flight() {
         &[Marker::Swapped, Marker::Verified, Marker::Stopping],
     ];
     for markers in stages {
-        for mode in [Mode::Handover, Mode::Restart] {
+        for (mode, fs) in [
+            (Mode::Handover, None),
+            (Mode::Restart, None),
+            (Mode::Handover, Some(Instance::B)),
+            (Mode::Restart, Some(Instance::B)),
+        ] {
             let record = Record {
                 live: Some(Instance::A),
                 next: Some(Instance::B),
                 mode: Some(mode),
+                fs_live: fs.map(Instance::other),
+                fs_next: fs,
                 ..updating(markers)
             };
             assert_eq!(record.check(), Ok(()));
@@ -138,7 +146,10 @@ fn this_hook_reads_what_the_previous_hook_wrote() {
         assert_eq!(read.to, record.to);
         assert_eq!(read.version, record.version);
         assert_eq!(words(&read), prev_words(&record));
-        assert_eq!((read.live, read.next, read.mode), (None, None, None));
+        assert_eq!(
+            (read.live, read.next, read.mode, read.fs_live, read.fs_next),
+            (None, None, None, None, None)
+        );
     }
     let read = Record::decode(&SingleRecord::idle().encode()).unwrap();
     assert_eq!(read, Record::idle(None));

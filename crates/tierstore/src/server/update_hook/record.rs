@@ -3,14 +3,14 @@
 //! ```json
 //! {"schema":1,"kind":"single","updating":true,"markers":["swapped"],
 //!  "from":"/var/lib/hostkeeper/packages/tierstore/0.4.0","to":"/var/lib/hostkeeper/packages/tierstore/0.5.0",
-//!  "version":"0.5.0","live":"a","next":"b","mode":"handover"}
+//!  "version":"0.5.0","live":"a","next":"b","mode":"handover","fs_live":"a","fs_next":"b"}
 //! ```
 //!
 //! One record for both service managers: the launchd arm writes the keys of the previous
-//! release's single-instance record and nothing else, and the systemd arm adds three optional
-//! keys. A key this hook does not know is ignored, as the previous release ignored them, so a
-//! record of this hook is read by the previous release's hook and the other way round (the
-//! design's rule that a hook's record is readable one version back).
+//! release's single-instance record and nothing else, and the systemd arm adds optional keys. A
+//! key this hook does not know is ignored, as the previous release ignored them, so a record of
+//! this hook is read by the previous release's hook and the other way round (the design's rule
+//! that a hook's record is readable one version back).
 //!
 //! - `kind`: always `single`, the tag the previous release gave this record.
 //! - `updating`: an update is in flight: `prepare` recorded it. `rollback` and the end of
@@ -30,6 +30,13 @@
 //! - `next` (systemd only, while an update is in flight): the instance `cutover` starts.
 //! - `mode` (systemd only, while an update is in flight): `handover` (the new instance takes the
 //!   listening sockets of the old) or `restart` (the old one is stopped first: a gap).
+//!
+//! - `fs_live` (systemd only): the instance of `tierstore-fs@.service` that serves the mount when
+//!   no update is in flight; while one is, the one that served before it. Absent on a node that
+//!   has none and never had one.
+//! - `fs_next` (systemd only, while an update is in flight that hands the fs process over): the
+//!   instance of `tierstore-fs@.service` `cutover` starts. Absent when the update leaves the fs
+//!   process on its release, and on a node with none.
 //!
 //! An absent `live` with no update in flight means no instance is known to serve: launchd's one
 //! job has no letter, and a systemd host that was never installed has none.
@@ -143,6 +150,9 @@ pub enum Invalid {
     /// `live` and `next` name the same instance.
     #[error("live and next are the same instance")]
     Same,
+    /// `fs_live` and `fs_next` name the same instance.
+    #[error("fs_live and fs_next are the same instance")]
+    FsSame,
 }
 
 /// Only the schema of a record, read before the rest is trusted.
@@ -180,6 +190,13 @@ pub struct Record {
     /// systemd: how the update in flight takes over.
     #[serde(default)]
     pub mode: Option<Mode>,
+    /// systemd: the `tierstore-fs` instance that serves the mount at rest, or that served it
+    /// before the update in flight.
+    #[serde(default)]
+    pub fs_live: Option<Instance>,
+    /// systemd: the `tierstore-fs` instance the update in flight starts.
+    #[serde(default)]
+    pub fs_next: Option<Instance>,
 }
 
 impl Record {
@@ -198,6 +215,8 @@ impl Record {
             live,
             next: None,
             mode: None,
+            fs_live: None,
+            fs_next: None,
         }
     }
 
@@ -279,7 +298,12 @@ impl Record {
         if let Some(version) = &self.version {
             value["version"] = json!(version);
         }
-        for (key, instance) in [("live", self.live), ("next", self.next)] {
+        for (key, instance) in [
+            ("live", self.live),
+            ("next", self.next),
+            ("fs_live", self.fs_live),
+            ("fs_next", self.fs_next),
+        ] {
             if let Some(instance) = instance {
                 value[key] = json!(instance.letter());
             }
@@ -317,7 +341,7 @@ impl Record {
 
     /// Holds the record to the order of its markers and to what it must name: an update in
     /// flight names `to` and `version`; a committed one too; a record at rest names neither,
-    /// nor `from`, `next` or `mode`.
+    /// nor `from`, `next`, `mode` or `fs_next`.
     ///
     /// # Errors
     /// The first [`Invalid`] rule the record breaks.
@@ -348,11 +372,20 @@ impl Record {
         if !self.updating && self.mode.is_some() {
             return marks("mode", "updating");
         }
+        if !self.updating && self.fs_next.is_some() {
+            return marks("fs_next", "updating");
+        }
+        if self.fs_next.is_some() && self.fs_live.is_none() {
+            return marks("fs_next", "fs_live");
+        }
         if !self.updating && !self.committed() && (self.to.is_some() || self.version.is_some()) {
             return marks("to or version", "updating or stopping");
         }
         if self.live.is_some() && self.live == self.next {
             return Err(Invalid::Same);
+        }
+        if self.fs_live.is_some() && self.fs_live == self.fs_next {
+            return Err(Invalid::FsSame);
         }
         Ok(())
     }

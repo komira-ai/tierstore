@@ -51,8 +51,8 @@ pub const RELEASE_VERSION: &str = concat!(
 /// [`HANDOFF_FS_CAPABILITY`] says `tierstore fs` hands its mount over to a successor and takes
 /// one over (`server::treefs`), keeping the mount's descriptor in the service manager's store. It
 /// is about the unit `tierstore-fs@.service`, not the S3 unit: the hook that updates that unit
-/// needs both releases to list it, and chooses a restart (the descriptor store carrying the mount
-/// across it) when either does not, or when the layouts of their runtime directories differ.
+/// hands it over only when both releases list it, and leaves it running on its release when either
+/// does not (a restart of the process can fail jobs on a kernel without `FUSE_HAS_RESEND`).
 /// This list is all `--capabilities` prints.
 pub const CAPABILITIES: &[&str] = &[
     "handover-v1",

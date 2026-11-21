@@ -4,7 +4,7 @@ use std::fs;
 use std::os::unix::fs::{PermissionsExt, symlink};
 
 use super::super::marker_path;
-use super::super::ports::{Instance, Markers, PortError, PortKind};
+use super::super::ports::{Family, Instance, Markers, PortError, PortKind};
 use super::MarkerFiles;
 use super::testing::scratch;
 
@@ -109,4 +109,29 @@ fn a_marker_that_cannot_be_made_looked_at_or_removed_is_an_error() {
     fs::set_permissions(&dir, fs::Permissions::from_mode(0o700)).unwrap();
     assert!(message(removed.unwrap_err()).starts_with("remove "));
     assert!(markers.present(Instance::A).unwrap());
+}
+
+/// Asserts that markers of the fs family are the files `run-fs-a` and `run-fs-b` (the names of
+/// [`Family::Fs`]) beside the store's `run-a`, that setting and clearing one does not touch
+/// the other family's, and that a marker is present only in its own family. Catches an fs marker
+/// that collides with the store's, which would start the wrong unit.
+#[test]
+fn the_fs_markers_are_their_own_files() {
+    let (_guard, root) = scratch("markers-fs");
+    let store = MarkerFiles::new(root.clone());
+    let fs = MarkerFiles::new(root.clone()).of(Family::Fs);
+    store.set(Instance::A).unwrap();
+    fs.set(Instance::B).unwrap();
+    assert!(root.join("run-a").is_file() && root.join("run-fs-b").is_file());
+    assert!(!root.join("run-b").exists() && !root.join("run-fs-a").exists());
+    assert_eq!(
+        root.join("run-fs-b")
+            .file_name()
+            .and_then(|name| name.to_str()),
+        Some(Family::Fs.marker_file(Instance::B).as_str())
+    );
+    assert!(!fs.present(Instance::A).unwrap() && !store.present(Instance::B).unwrap());
+    assert!(fs.present(Instance::B).unwrap() && store.present(Instance::A).unwrap());
+    fs.clear(Instance::B).unwrap();
+    assert!(!root.join("run-fs-b").exists() && root.join("run-a").is_file());
 }

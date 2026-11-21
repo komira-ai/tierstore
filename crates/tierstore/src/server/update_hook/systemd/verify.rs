@@ -5,7 +5,7 @@ use super::super::params::Params;
 use super::super::ports::UnitState;
 use super::super::record::{Marker, Record};
 use super::super::report::{Done, Reason};
-use super::{Ctx, next_of, unit_name};
+use super::{Ctx, fs, next_of, unit_name};
 
 pub(super) fn verify(c: &Ctx<'_, '_>, params: &Params, record: &Record) -> Result<Done, Done> {
     let target = &params.target_version;
@@ -40,6 +40,7 @@ pub(super) fn verify(c: &Ctx<'_, '_>, params: &Params, record: &Record) -> Resul
             ));
         }
     }
+    fs::check_active(c, record, params.verify_retry_secs)?;
     let mode = c.look().observed(target).map_err(|done| {
         if done.report.reason == Some(Reason::NotReady) {
             Done::deferred(
