@@ -412,13 +412,18 @@ async fn a_404_on_a_cold_source_asks_locate_again_and_retries_on_the_new_locatio
 }
 
 /// Many ensures and waits of one pack, from several jobs and over different cells, ask one
-/// LOCATE and make one fill.
+/// LOCATE and make one fill. The fill's first part is held at a gate until every call has been
+/// made, so the fill is still in flight when each later call arrives whatever the scheduling: a
+/// call after a fill has ended starts a new fill (and a new LOCATE) by design.
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn many_concurrent_ensures_and_waits_of_one_pack_cause_exactly_one_locate() {
     let rig = Rig::default_rig();
     let pack = pack6();
     rig.upstream.add(&pack, one_hot(&pack));
-    for job in 10..13u64 {
+    let gate = Arc::new(Semaphore::new(0));
+    rig.upstream
+        .script(DeviceRef::Hot(NodeId(1)), Script::Gated(gate.clone()));
+    let ensure = |job: u64| {
         rig.engine.ensure(
             &pack.spec,
             &[CellRun {
@@ -429,12 +434,20 @@ async fn many_concurrent_ensures_and_waits_of_one_pack_cause_exactly_one_locate(
             JobId(job),
             Rank(0),
         );
-    }
-    let outcomes = join_all((0..6u64).map(|c| {
+    };
+    ensure(10);
+    // The fill has located and its first part is held: the later calls find it running.
+    rig.until(|s| s.total_gets() >= 1).await;
+    ensure(11);
+    ensure(12);
+    let mut waits = Box::pin(join_all((0..6u64).map(|c| {
         rig.engine
             .wait(&pack.spec, pack.range(c * MIB, MIB), JobId(c))
-    }))
-    .await;
+    })));
+    // One poll makes every wait attach; the cells of the held part are not present yet.
+    assert!(futures::poll!(&mut waits).is_pending());
+    gate.add_permits(1);
+    let outcomes = waits.await;
 
     assert_eq!(outcomes, vec![WaitOutcome::Ready; 6]);
     assert_eq!(rig.upstream.locates(), vec![pack.key()]);
