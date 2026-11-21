@@ -4,10 +4,9 @@
 //! request to are `enabled`, `ttl`, `ttl_max`, `max_placements` and `max_bytes`; `max_entries`,
 //! `max_depth` and `max_dir_entries` are the limits [`TreesConfig::limits`] hands the builder of a
 //! tree. `fill_concurrency` and `prepare_prefetch` are read by the mount provider's `Prepare`
-//! (`server/provider`). The others (`max_request_bytes`, `fill_rate`, `fill_queue`, `coalesce_gap`,
-//! `prefetch_default`, `whole_pack_percent`, `create_timeout`, `max_failures`) are read and checked
-//! at start and held here for the create call that fetches the files of a tree; nothing in this
-//! module uses them.
+//! (`server/provider`). The others (`max_request_bytes`, `prefetch_default`, `create_timeout`,
+//! `max_failures`) are read and checked at start and held here for the create call that fetches
+//! the files of a tree; nothing in this module uses them.
 
 use std::time::Duration;
 
@@ -79,19 +78,10 @@ pub struct TreesConfig {
     pub max_placements: usize,
     /// The most ranged reads of creates that run at once, node-wide.
     pub fill_concurrency: usize,
-    /// The bytes a second of all creates together, or none for no limit.
-    pub fill_rate: Option<u64>,
-    /// The most blobs waiting to be fetched.
-    pub fill_queue: usize,
-    /// Ranges of one object this near one another are one read.
-    pub coalesce_gap: u64,
     /// What a create with no `prefetch` does.
     pub prefetch_default: Prefetch,
     /// What the mount provider's `Prepare` does about the bytes of the tree's files.
     pub prepare_prefetch: PreparePrefetch,
-    /// The share of a pack, in percent, the needed ranges must cover for the whole pack to be
-    /// read in one request.
-    pub whole_pack_percent: u8,
     /// The longest a create that waits for its files waits.
     pub create_timeout: Duration,
     /// The most failed entries an answer names.
@@ -112,12 +102,8 @@ impl Default for TreesConfig {
             max_bytes: 32 << 30,
             max_placements: 1024,
             fill_concurrency: 8,
-            fill_rate: None,
-            fill_queue: 16_384,
-            coalesce_gap: 256 << 10,
             prefetch_default: Prefetch::Wait,
             prepare_prefetch: PreparePrefetch::Background,
-            whole_pack_percent: 50,
             create_timeout: Duration::from_secs(120),
             max_failures: 20,
         }

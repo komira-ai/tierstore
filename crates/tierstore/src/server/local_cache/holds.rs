@@ -576,7 +576,7 @@ impl LocalCache {
     }
 
     /// Hands `blob`, a blob of `tree` of the hold `id`, to the prefetch queue (see
-    /// [`prefetch`](Self::prefetch)) and remembers that the hold wants it: when it is in the cache
+    /// [`Inner::queue_blob`](super::Inner::queue_blob)) and remembers that the hold wants it: when it is in the cache
     /// the hold pins it. Says what the queue did with it.
     ///
     /// # Errors

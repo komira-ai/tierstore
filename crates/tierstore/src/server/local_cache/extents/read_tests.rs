@@ -90,12 +90,12 @@ async fn span_of_cached_pack_is_not_copied() {
 async fn a_pack_is_pinned_once_for_every_tree_and_the_pin_follows_its_bytes() {
     let rig = Rig::new("tsext-pins");
     let pack = pack_in(&rig).await;
-    let key = [pack.key.as_str()];
-    let answer = rig.cache.pin_packs("m", "t1", &key).unwrap();
+    let key = [name_of(&pack.key).hex];
+    let answer = rig.cache.pin("m", "t1", &key).unwrap();
     assert_eq!((answer.pinned, answer.absent), (0, 1));
     fill(&rig, &pack, 0, 1000).await.unwrap();
-    assert_eq!(rig.cache.pin_packs("m", "t1", &key).unwrap().pinned, 1);
-    assert_eq!(rig.cache.pin_packs("m", "t2", &key).unwrap().pinned, 1);
+    assert_eq!(rig.cache.pin("m", "t1", &key).unwrap().pinned, 1);
+    assert_eq!(rig.cache.pin("m", "t2", &key).unwrap().pinned, 1);
     assert_eq!(rig.cache.pinned_bytes(), 1000);
     fill(&rig, &pack, 1000, 3000).await.unwrap();
     assert_eq!(rig.cache.pinned_bytes(), 3000);
@@ -115,7 +115,7 @@ async fn an_entry_over_the_pin_limit_is_not_pinned() {
     let rig = Rig::with("tsext-pin-limit", |config| config.pin_limit = 500);
     let pack = pack_in(&rig).await;
     fill(&rig, &pack, 0, 1000).await.unwrap();
-    let answer = rig.cache.pin_packs("m", "t", &[pack.key.as_str()]).unwrap();
+    let answer = rig.cache.pin("m", "t", &[name_of(&pack.key).hex]).unwrap();
     assert_eq!((answer.pinned, answer.refused), (0, 1));
     assert_eq!(rig.cache.pinned_bytes(), 0);
 }
@@ -129,7 +129,7 @@ async fn an_ordinary_read_never_serves_a_hole() {
     let rig = Rig::new("tsext-read");
     let pack = pack_in(&rig).await;
     fill(&rig, &pack, 1000, 3000).await.unwrap();
-    rig.cache.pin_packs("m", "t", &[pack.key.as_str()]).unwrap();
+    rig.cache.pin("m", "t", &[name_of(&pack.key).hex]).unwrap();
     let gets = rig.calls(Op::Get);
     let held = rig
         .cache
@@ -247,7 +247,7 @@ async fn a_delete_through_the_cache_removes_the_entry() {
     let rig = Rig::writing("tsext-delete");
     let pack = pack_in(&rig).await;
     fill(&rig, &pack, 1000, 3000).await.unwrap();
-    rig.cache.pin_packs("m", "t", &[pack.key.as_str()]).unwrap();
+    rig.cache.pin("m", "t", &[name_of(&pack.key).hex]).unwrap();
     rig.cache.delete(&pack.key).await.unwrap();
     assert_eq!(rig.cache.extents_held(), (0, 0));
     assert!(!data(&rig, &pack).exists());
@@ -371,7 +371,7 @@ async fn a_pinned_entry_or_one_being_filled_is_not_evicted() {
     rig.disk.set_space(1_000_000, 1_000_000);
     let pack = pack_in(&rig).await;
     fill(&rig, &pack, 0, 1000).await.unwrap();
-    rig.cache.pin_packs("m", "t", &[pack.key.as_str()]).unwrap();
+    rig.cache.pin("m", "t", &[name_of(&pack.key).hex]).unwrap();
     let pass = rig.cache.evict();
     assert_eq!((pass.evicted, pass.pin_skips), (0, 1));
     assert_eq!(rig.cache.extents_held(), (1, 1000));

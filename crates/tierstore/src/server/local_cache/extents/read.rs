@@ -1,14 +1,13 @@
 //! What a cache with entries by extents answers: the start-up read of the directory, the span a
-//! range is in, the pins of packs, and the window of an ordinary read that an entry serves.
+//! range is in, and the window of an ordinary read that an entry serves.
 
 use std::path::{Path, PathBuf};
 
 use crate::ByteRange;
 
 use super::super::index::Index;
-use super::super::layout::{Found, Name, data_path, name_of};
+use super::super::layout::{Found, Name, data_path};
 use super::super::metrics::{Counters, add};
-use super::super::pins::{PinAnswer, PinError};
 use super::super::stream::window;
 use super::super::{CacheConfig, Inner, LocalCache, locked};
 use super::files;
@@ -139,23 +138,6 @@ impl LocalCache {
             offset,
             whole: false,
         })
-    }
-
-    /// Pins the packs, named by their keys, for `tree` of the mount `mount`: the pins of
-    /// [`LocalCache::pin`], by the packs' names. A pack that is whole is pinned for its size, an
-    /// entry by extents for the bytes it has filled (its pin grows as it fills), and a pack the
-    /// cache holds nothing of is counted absent.
-    ///
-    /// # Errors
-    /// What [`LocalCache::pin`] gives.
-    pub fn pin_packs(
-        &self,
-        mount: &str,
-        tree: &str,
-        packs: &[&str],
-    ) -> Result<PinAnswer, PinError> {
-        let names: Vec<String> = packs.iter().map(|pack| name_of(pack).hex).collect();
-        self.pin(mount, tree, &names)
     }
 
     /// The number of entries by extents, and the bytes they have filled.

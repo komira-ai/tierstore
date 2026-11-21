@@ -414,12 +414,8 @@ The node-local trees of a build node (designed in `docs/design/node-local-trees.
 | `trees.max_bytes` | size, `32GiB` (1MiB to 1TiB) | the file bytes of one tree |
 | `trees.max_placements` | count, 1024 (1 to 1000000) | the placements alive at once |
 | `trees.fill_concurrency` | count, 8 (1 to 1024) | the ranged reads of creates, and of the mount provider's `Prepare`, that run at once, node-wide |
-| `trees.fill_rate` | rate, `"off"` | a size and `/s`, such as `"200MiB/s"`: the bytes a second of all creates together; `"off"` or `"0B/s"` for no limit |
-| `trees.fill_queue` | count, 16384 (1 to 10000000) | the blobs waiting to be fetched |
-| `trees.coalesce_gap` | size, `256KiB` (0 to 1GiB) | ranges of one object this near one another are one read |
 | `trees.prefetch_default` | `"none"`, `"background"` or `"wait"`, `"wait"` | what a create with no `prefetch` does |
 | `trees.prepare_prefetch` | `"background"` or `"none"`, `"background"` | what the [mount provider](operations.md#the-mount-provider)'s `Prepare` does about the files of a tree once it is placed. `"background"`: it reads every file into the cache in the background, and pins the tree's packs when the reads end. `"none"`: it reads no file and pins nothing; each file is read into the cache when it is first opened, and an open of a file another open is filling waits for that fill. Neither makes `Prepare` or `Mount` wait for the files. Another value is refused at the start, naming the key and the two values. Not `prefetch_default`, which is the default of a create's own `prefetch` and whose `"wait"` `Prepare` does not have |
-| `trees.whole_pack_percent` | percent, 50 (1 to 100) | the share of a pack the needed ranges must cover for the whole pack to be read in one request |
 | `trees.create_timeout` | duration, `120s` (1s to 1h) | the longest a create that waits for its files waits |
 | `trees.max_failures` | count, 20 (1 to 1000) | the failed entries an answer names |
 
