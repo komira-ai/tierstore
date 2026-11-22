@@ -48,7 +48,6 @@ fn nfs_table_defaults() {
     assert_eq!(nfs.mount_wait, Duration::from_secs(30));
     assert_eq!(nfs.mount_retry, Duration::from_millis(500));
     assert_eq!((nfs.fd_cache_shards, nfs.fd_cache_per_shard), (64, 64));
-    assert_eq!(nfs.allowed_uids, None);
     assert_eq!(nfs.jukebox_after, Duration::from_secs(5));
 }
 
@@ -58,7 +57,7 @@ fn every_nfs_key_is_taken_when_it_is_set() {
     let text = with(
         "listen = \"127.0.0.2:9999\"\nmount = false\nmount_user = \"build.user-1\"\n\
          mount_wait = \"2m\"\nmount_retry = \"1s\"\nfd_cache_shards = 8\nfd_cache_per_shard = 9\n\
-         allowed_uids = [501, 502]\njukebox_after = \"750ms\"\n",
+         jukebox_after = \"750ms\"\n",
     );
     let nfs = from_text(&text, &builders).unwrap().nfs;
     assert_eq!(nfs.listen, "127.0.0.2:9999".parse::<SocketAddr>().unwrap());
@@ -69,7 +68,6 @@ fn every_nfs_key_is_taken_when_it_is_set() {
         (Duration::from_secs(120), Duration::from_secs(1))
     );
     assert_eq!((nfs.fd_cache_shards, nfs.fd_cache_per_shard), (8, 9));
-    assert_eq!(nfs.allowed_uids, Some(vec![501, 502]));
     assert_eq!(nfs.jukebox_after, Duration::from_millis(750));
 }
 
@@ -88,7 +86,6 @@ fn each_nfs_key_rejects_out_of_range_values_by_name() {
         ("mount_retry = \"2m\"", "fs.nfs.mount_retry"),
         ("jukebox_after = \"0ms\"", "fs.nfs.jukebox_after"),
         ("jukebox_after = \"11m\"", "fs.nfs.jukebox_after"),
-        ("allowed_uids = []", "fs.nfs.allowed_uids"),
         ("mount_user = \"\"", "fs.nfs.mount_user"),
         ("mount_user = \"-o\"", "fs.nfs.mount_user"),
         ("mount_user = \"a b\"", "fs.nfs.mount_user"),
@@ -159,6 +156,34 @@ fn an_unknown_nfs_key_is_ignored_and_the_file_loads() {
         said,
         "tierstore fs: fs.nfs.futuristic is not a key of this release; ignored\n"
     );
+}
+
+/// Asserts that a file that still sets `fs.nfs.allowed_uids`, the key of the releases up to
+/// 0.3.166, loads whatever its value (a list, the empty list that release refused, a value of
+/// another type) to the settings the file has without it, and that the start says so in one line,
+/// exact, that names the key and why it is ignored. Catches a release that refuses, or that stops,
+/// on a file written for the release before it.
+#[test]
+fn a_file_that_still_sets_allowed_uids_loads_with_one_warning() {
+    let plain = from_text(&with("mount_wait = \"3s\"\n"), &builders)
+        .unwrap()
+        .nfs;
+    for value in ["[501]", "[501, 502, 0]", "[]", "\"501\"", "true"] {
+        let stderr = Stderr::default();
+        let text = with(&format!("allowed_uids = {value}\nmount_wait = \"3s\"\n"));
+        let nfs = with_default(LineLog::new(stderr.clone(), Level::WARN), || {
+            from_text(&text, &builders).unwrap().nfs
+        });
+        assert_eq!(nfs, plain, "{value}");
+        let said = String::from_utf8(stderr.0.lock().unwrap().clone()).unwrap();
+        assert_eq!(
+            said,
+            "tierstore fs: fs.nfs.allowed_uids is ignored: removed after tierstore 0.3.166: the \
+             file service answers every local user, as the S3 front answers every client that \
+             holds a key\n",
+            "{value}"
+        );
+    }
 }
 
 /// Asserts the keys of the hand-off: none by default (an update is a restart), a control socket
