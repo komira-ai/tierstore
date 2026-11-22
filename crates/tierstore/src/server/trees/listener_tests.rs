@@ -847,3 +847,28 @@ async fn a_listener_binds_beside_a_running_one() {
     stop.send(true).expect("a listener");
     assert_eq!(serving.await.expect("the listener ended"), 0);
 }
+
+/// TEMPORARY CHECK, reverted in the next commit: the stop test's old proof, with another listener
+/// on the port the stop freed. Expected to fail at the connect.
+#[tokio::test]
+async fn the_old_proof_with_another_listener_on_the_freed_port() {
+    let (_core, wanted) = recording();
+    let running = run(wanted).await;
+    let mut sender = running.client().await;
+    let answer = running
+        .call(
+            &mut sender,
+            FULL,
+            "GetPlacement",
+            &GetPlacementRequest::default(),
+        )
+        .await;
+    assert_eq!(answer.status.code(), Code::Ok);
+    let addr = running.addr;
+    assert_eq!(running.stopped().await, 0);
+    let thief = listen::bind_sharing(addr, ListenTuning::default().backlog, true)
+        .expect("the freed port bound by another listener");
+    assert!(TcpStream::connect(addr).await.is_err());
+    assert!(sender.ready().await.is_err());
+    drop(thief);
+}
