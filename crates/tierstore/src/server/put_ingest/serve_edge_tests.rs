@@ -1,7 +1,8 @@
 //! The edges of the put ingest's serve loop: a root that is made after the start, names the
 //! ingest passes over, a link, an unreadable file and a file that goes before its put, a put that
-//! is running at a scan and at the halt, a directory that cannot be removed, the loss of the lock,
-//! and a declaration that arrives after the committed file.
+//! is running at a scan and at the halt, a directory that cannot be removed, the loss of the lock
+//! (with a put dropped before the upstream has its object, and after), and a declaration that
+//! arrives after the committed file.
 
 use std::os::unix::fs::PermissionsExt;
 use std::path::{Path, PathBuf};
@@ -15,7 +16,7 @@ use super::testing::{Bench, commit, sha};
 use super::{ABANDONED_MS, PutIngest, Report};
 use crate::Clock;
 use crate::server::local_cache::Tick;
-use crate::server::local_cache::testing::wait_until;
+use crate::server::local_cache::testing::{TURNS, wait_until};
 
 /// Lets the tasks of the runtime run until all of them wait.
 async fn idle() {
@@ -459,22 +460,41 @@ async fn a_file_put_at_the_path_during_its_put_is_not_removed_with_it() {
     bench.stop().await;
 }
 
-/// Asserts that an instance that loses the lock while a put runs, and takes it again, keeps the
-/// declaration it saw: the file left by the dropped put is stored by the scan of the new run, not
-/// refused for want of a digest.
+/// Waits until the upstream holds the object `key`, giving up the thread between two looks; fails
+/// the test if it has not after [`TURNS`] turns.
+async fn wait_stored(bench: &Bench, key: &str) {
+    for _ in 0..TURNS {
+        if bench.object(key).await.is_some() {
+            return;
+        }
+        tokio::task::yield_now().await;
+    }
+    panic!("after {TURNS} turns of the scheduler, the upstream does not hold {key}");
+}
+
+/// Asserts that an instance that loses the lock while a put waits before the upstream, and takes it
+/// again, drops that put (nothing of it is stored) and keeps the declaration it saw: the file left
+/// is stored by the scan of the new run, which makes the object, not refused for want of a digest.
 #[tokio::test]
-async fn a_declaration_outlives_the_loss_and_return_of_the_lock() {
-    let mut bench = Bench::new("ingest-edge-flip");
+async fn a_put_dropped_before_the_upstream_is_stored_by_the_next_run() {
+    let mut bench = Bench::new("ingest-edge-flip-before");
     let dir = bench.job("b1", "n1");
     bench.start().await;
-    let held = bench.rig.disk.hold_writes();
+    let gate = bench.rig.tamper.hold_puts();
     let bytes = b"put across a flip".to_vec();
     commit(&dir, "pack", &bytes, sha(&bytes));
     bench.putting("cas/b/b1/n1/pack").await;
+    let tamper = Arc::clone(&bench.rig.tamper);
+    wait_until("the put waits at the upstream", || tamper.at_puts() == 1).await;
     std::fs::remove_file(bench.rig.config.path.join(".lock")).unwrap();
     assert_eq!(bench.cache.tick().unwrap(), Tick::Lost);
-    idle().await;
-    held.add_permits(1000);
+    wait_until("the put of the lost run is dropped", || {
+        tamper.at_puts() == 0
+    })
+    .await;
+    assert_eq!(bench.object("cas/b/b1/n1/pack").await, None);
+    assert!(dir.join("pack").exists());
+    gate.add_permits(1000);
     assert_eq!(bench.cache.tick().unwrap(), Tick::Took);
     bench.wait(|report| *report == Report::Watching).await;
     assert_eq!(
@@ -484,5 +504,38 @@ async fn a_declaration_outlives_the_loss_and_return_of_the_lock() {
             created: true
         }
     );
+    assert_eq!(bench.object("cas/b/b1/n1/pack").await, Some(bytes));
+    assert!(!dir.join("pack").exists());
+    bench.stop().await;
+}
+
+/// Asserts that an instance that loses the lock after a put has stored its object at the upstream
+/// (the put still waits for the cache's copy), and takes it again, keeps the declaration it saw:
+/// the file the dropped put left is stored by the scan of the new run, which finds the object
+/// there (`created: false`), not refused for want of a digest; the dropped put reports nothing.
+#[tokio::test]
+async fn a_put_dropped_after_the_upstream_stored_is_found_stored_by_the_next_run() {
+    let mut bench = Bench::new("ingest-edge-flip-after");
+    let dir = bench.job("b1", "n1");
+    bench.start().await;
+    let held = bench.rig.disk.hold_writes();
+    let bytes = b"put across a flip".to_vec();
+    commit(&dir, "pack", &bytes, sha(&bytes));
+    bench.putting("cas/b/b1/n1/pack").await;
+    wait_stored(&bench, "cas/b/b1/n1/pack").await;
+    std::fs::remove_file(bench.rig.config.path.join(".lock")).unwrap();
+    assert_eq!(bench.cache.tick().unwrap(), Tick::Lost);
+    held.add_permits(1000);
+    assert_eq!(bench.cache.tick().unwrap(), Tick::Took);
+    bench.wait(|report| *report == Report::Watching).await;
+    assert_eq!(
+        bench.outcome().await,
+        Report::Stored {
+            key: "cas/b/b1/n1/pack".to_owned(),
+            created: false
+        }
+    );
+    assert_eq!(bench.object("cas/b/b1/n1/pack").await, Some(bytes));
+    assert!(!dir.join("pack").exists());
     bench.stop().await;
 }
