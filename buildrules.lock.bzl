@@ -4,9 +4,9 @@
 SCHEMA = 2
 RUSTC = "1.95.0"
 TARGET = "x86_64-unknown-linux-gnu"
-CARGO_LOCK_SHA256 = "05850b563a62d4145eeb52dbc000f96714f94d2be06e622d67d3adab2b53abdc"
+CARGO_LOCK_SHA256 = "8de313d4bb8afa968fee17525cb992e0b2ee036cc91dab897e75e5d75f282c25"
 MANIFEST_SHA256 = {
-    "Cargo.toml": "491574090cade22a493890e5c90ed1b98520d215c577eeab3e8e40d03a2ff54d",
+    "Cargo.toml": "95533920404a9a6f23af2967d3339eff0dce5803a2aa790a5ee9ee866daf0b35",
     "crates/compat/Cargo.toml": "79560335d2ce3a4555b17e47494f0e4912ee0ca492d2d2904f8bcf9b333684b8",
     "crates/coverage-gate/Cargo.toml": "bb00915e8794b425cba2f2a40d749eecc891c65939d260904969d052ac138b95",
     "crates/fsbench/Cargo.toml": "e6b927e5ad2d2127014fb0e339f0eeb4c854ff4a846ab16680cdca255aeba75e",
@@ -35,7 +35,7 @@ MANIFEST_SHA256 = {
     "crates/tierstore-testkit/Cargo.toml": "8015d823e3536725f2b9ac817c7a58aa048b0b570c8f15c36756dc2fea9102b8",
     "crates/tierstore-tree/Cargo.toml": "39fc0c1be597d7a56e98dcc08bc554283553e33365f8fcab2e1b56be4050cf37",
     "crates/tierstore-trees-api/Cargo.toml": "984ceddf87975a4e7c61a5757131bd1565d8e1f8db202a3dc3761f8a315abfcb",
-    "crates/tierstore/Cargo.toml": "5d46853e212399238a962ab5e0f60e045f8e900ff90665b294b0cbdef110e4b7",
+    "crates/tierstore/Cargo.toml": "b6b43fca79db48670e5672256767bdccd7086075e44897fcf092e904b523520c",
     "crates/tsfuse/Cargo.toml": "14e6506fc7c08fe6821f97d381f45b78987ba43c73452bf4992226097c73ebf3",
     "crates/xtask/Cargo.toml": "9f8f2796f4195da61a71f1884cceaa2cd39681cbda774ea94795a39360522e6f",
     "rust-toolchain.toml": "e3a213e0d222e94d213cafbc20932eb3f76c643b4dd63756acf95192df2aa310",
