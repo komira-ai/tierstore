@@ -157,20 +157,13 @@ where
             () = stopped(&mut stop) => break,
         }
     }
-    // TEMPORARY CHECK, reverted in the next commit: with room for one connection the sockets
-    // are never closed; otherwise they are closed after the drain, not before it.
-    let keep = limits.max_connections == 1;
+    drop(incoming);
     let _ = shutdown.send(true);
     let finished = async { while connections.join_next().await.is_some() {} };
-    let drained = tokio::time::timeout(limits.drain_deadline, finished)
+    if tokio::time::timeout(limits.drain_deadline, finished)
         .await
-        .is_ok();
-    if keep {
-        std::mem::forget(incoming);
-    } else {
-        drop(incoming);
-    }
-    if drained {
+        .is_ok()
+    {
         return 0;
     }
     let cut = connections.len();
