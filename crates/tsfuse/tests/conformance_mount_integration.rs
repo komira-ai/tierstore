@@ -385,7 +385,8 @@ fn a_failed_unmount_of_the_guard_leaves_the_mount_to_its_drop_which_detaches_it(
     let served = serve_inline(session, tree);
     let file = File::open(mounted.path("f")).unwrap();
     assert_eq!(read_all(&file), bytes);
-    let real_mp = mounted.real_mp.clone();
+    let (mp, real_mp) = (mounted.mp.clone(), mounted.real_mp.clone());
+    let method = mounted.mount().method();
 
     // The held file keeps the mount busy: the unmount fails, and the guard, dropped as the
     // failure unwinds, detaches the mount.
@@ -396,7 +397,12 @@ fn a_failed_unmount_of_the_guard_leaves_the_mount_to_its_drop_which_detaches_it(
         message.starts_with("called `Result::unwrap()` on an `Err` value: "),
         "{message}"
     );
-    assert_eq!(mount_entry(&real_mp), None, "the guard detached the mount");
+    let left = mount_entry(&real_mp);
+    // A guard that let go of the mount would leave it mounted: detach it here either way (an
+    // error when the guard did), so a failed check leaves nothing behind.
+    let adopted = Mount::adopt(&mp, method, &Mounter::default());
+    let _ = one_at_a_time(|| adopted.unmount(true));
+    assert_eq!(left, None, "the guard detached the mount");
 
     drop(file);
     ended_by_the_kernel(&served.join());
