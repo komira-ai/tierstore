@@ -23,6 +23,7 @@
 //! # fill_socket        = "/var/lib/tierstore/fill.sock"   # default: fill.sock in the state dir
 //! # fill_socket_concurrency = 16
 //! # fill_socket_wait        = "60s"
+//! # put_ingest              = "/usr/local/tierstore/put"   # a Mac's: needs write_through = true
 //! # prefetch_concurrency    = 2
 //! # prefetch_queue          = 16384
 //! # prefetch_queue_ttl      = "120s"
@@ -79,6 +80,7 @@ use super::config::{
 };
 use super::config_cache_tuning;
 use super::config_fill::{check_fill_outside_cache, fill_socket_of};
+use super::config_put_ingest::put_ingest_of;
 use super::config_handoff::{check_outside_cache, handoff_of};
 use super::config_hot_only::refuse_hot_keys;
 use super::config_interface::Interfaces;
@@ -230,6 +232,10 @@ pub(super) struct LocalCacheTable {
     /// 1h, default `60s`).
     #[serde(default)]
     pub fill_socket_wait: Option<Dur>,
+    /// The root of the put ingest: an absolute path, under which the jobs' put directories are
+    /// plain directories `cas/b/<build>/<nonce>` (a Mac's). Left out, nothing is ingested.
+    #[serde(default)]
+    pub put_ingest: Option<std::path::PathBuf>,
     /// The blobs the prefetch queue fills at once (0 to 64, default 2; 0 turns the queue off).
     #[serde(default)]
     pub prefetch_concurrency: Option<u32>,
@@ -288,6 +294,8 @@ pub(super) struct CacheSettings {
     pub trees: TreesConfig,
     /// The mount provider, as the `mount-provider` interface makes it; none without one.
     pub provider: Option<ProviderFlags>,
+    /// The root of the put ingest (`local_cache.put_ingest`), or none.
+    pub put_ingest: Option<std::path::PathBuf>,
 }
 
 /// The percent in `value`, or `default`, from `low` to `high`.
@@ -465,6 +473,7 @@ impl CacheSettings {
         refuse("cold_store", "not for a build node", &skipping)?;
         let upstream = tier("cold_store", &cold)?;
         let fill_socket = fill_socket_of(&table, handoff.as_ref(), per_run.state_dir.as_deref())?;
+        let put_ingest = put_ingest_of(&table)?;
         let part = CachePart::new(table, policy)?;
         check_outside_cache(handoff.as_ref(), &part.config.path)?;
         if let Some(socket) = &fill_socket {
@@ -500,6 +509,7 @@ impl CacheSettings {
             fill_socket,
             trees,
             provider,
+            put_ingest,
         })
     }
 }

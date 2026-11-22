@@ -54,6 +54,7 @@ const LOCAL_CACHE_KEYS: &[&str] = &[
     "fill_socket",
     "fill_socket_concurrency",
     "fill_socket_wait",
+    "put_ingest",
     "prefetch_concurrency",
     "prefetch_queue",
     "prefetch_queue_ttl",

@@ -275,6 +275,20 @@ fn the_mac_runs_the_mount_provider_on_its_socket() {
     );
 }
 
+/// Asserts that the Mac ingests the put directories of its jobs: `local_cache.put_ingest` is the
+/// put root under the Mac's tierstore directory that the installer package makes, and the node takes
+/// writes, which the ingest's puts need. It would catch a Mac whose jobs' outputs are never stored.
+#[test]
+fn the_mac_ingests_its_jobs_put_directories() {
+    let file = config();
+    let cache = table(&file, "local_cache");
+    assert_eq!(
+        cache["put_ingest"].as_str(),
+        Some(format!("{LAUNCHD_LINKS_DIR}/put").as_str())
+    );
+    assert_eq!(cache["write_through"].as_bool(), Some(true));
+}
+
 /// Asserts that the binary itself takes the plist's command line and the shipped file: the
 /// file, copied into a scratch directory with its key files and its cache there (keys of the
 /// form the process reads, mode 0600), is checked by the binary run with the plist's own
@@ -285,7 +299,7 @@ fn the_mac_runs_the_mount_provider_on_its_socket() {
 fn the_binary_accepts_the_plists_command_line_and_file() {
     let scratch = TestDir::under(std::env::temp_dir(), "packaging-macos-check");
     let mut text = read("tierstore.toml");
-    for name in ["access.key", "daemons.key", "upstream-read.key"] {
+    for name in ["access.key", "daemons.key", "upstream-write.key"] {
         let key = scratch.path().join(name);
         std::fs::write(
             &key,

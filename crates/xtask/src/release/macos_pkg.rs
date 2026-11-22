@@ -18,8 +18,8 @@
 //! `packaging/macos-pkg/tierstore.plist`), with the directories above them. The one script,
 //! `postinstall` ([`postinstall`], the file `packaging/macos-pkg/postinstall`), makes the account
 //! the job runs as, `_tierstore`, when it is missing, and the directories `/usr/local/tierstore`,
-//! its `etc`, `cache`, `log` and `run`, with their owners and modes; it loads no job: hostkeeper's
-//! update hook (`tierstore update-hook`) bootstraps the job at its `cutover`.
+//! its `etc`, `cache`, `log`, `run` and `put`, with their owners and modes; it loads no job:
+//! hostkeeper's update hook (`tierstore update-hook`) bootstraps the job at its `cutover`.
 //!
 //! The check takes the directory `pkgutil --expand` made of the product and refuses anything but
 //! what the build writes: it holds exactly the file `Distribution` (the one component, no

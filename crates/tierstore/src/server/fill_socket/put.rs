@@ -86,8 +86,8 @@ fn open(path: &Path, size: u64) -> Result<File, Unfit> {
 }
 
 /// The bytes of `file` as a body, read once in chunks of [`CHUNK`]. A read that fails ends the
-/// body with an error and sets `broken`.
-fn chunks<'a, R>(file: R, broken: &'a AtomicBool) -> PartBody<'a>
+/// body with an error and sets `broken`. The put ingest reads its files so too.
+pub(in crate::server) fn chunks<'a, R>(file: R, broken: &'a AtomicBool) -> PartBody<'a>
 where
     R: AsyncRead + Unpin + Send + 'a,
 {

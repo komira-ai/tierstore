@@ -333,6 +333,7 @@ mod config_interface;
 mod config_io;
 mod config_load;
 mod config_policy;
+mod config_put_ingest;
 mod config_reconcile;
 mod config_syntax;
 #[cfg(test)]
@@ -433,6 +434,7 @@ mod presign_get_tests;
 #[cfg(test)]
 mod presign_server_tests;
 mod provider;
+mod put_ingest;
 #[cfg(test)]
 mod ready_tests;
 #[cfg(test)]

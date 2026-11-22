@@ -14,8 +14,9 @@
 #   left without it by an install that stopped half way is made again.
 # - On the target volume, made when missing, and set to these owners and modes on every install
 #   (the directories only, never what they hold): /usr/local/tierstore 0755 root:wheel, its etc
-#   0750 root:_tierstore (the configuration and the key files), and its cache, log and run 0700
-#   _tierstore:_tierstore.
+#   0750 root:_tierstore (the configuration and the key files), its cache, log and run 0700
+#   _tierstore:_tierstore, and its put 0755 _tierstore:_tierstore (the root of the put ingest,
+#   under which the job runtime makes each job's put directory).
 set -e
 PATH="$PATH:/usr/bin:/bin:/usr/sbin:/sbin"
 name=_tierstore
@@ -49,7 +50,7 @@ if [ -z "$uid" ]; then
     dscl . -create "/Users/$name" UniqueID "$uid"
 fi
 base="${3%/}/usr/local/tierstore"
-mkdir -p "$base/etc" "$base/cache" "$base/log" "$base/run"
+mkdir -p "$base/etc" "$base/cache" "$base/log" "$base/run" "$base/put"
 chown 0:0 "$base"
 chmod 0755 "$base"
 chown "0:$gid" "$base/etc"
@@ -58,4 +59,6 @@ for dir in cache log run; do
     chown "$uid:$gid" "$base/$dir"
     chmod 0700 "$base/$dir"
 done
+chown "$uid:$gid" "$base/put"
+chmod 0755 "$base/put"
 exit 0
