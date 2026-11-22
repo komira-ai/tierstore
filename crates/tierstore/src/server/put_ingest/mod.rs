@@ -227,6 +227,8 @@ impl<'a> Run<'a> {
     async fn run(&mut self, halt: &Notify, modes: &mut watch::Receiver<Mode>) -> bool {
         self.watcher = self.watch();
         self.scan().await;
+        let shown = self.ingest.root.display();
+        tracing::info!("tierstore: the put ingest watches {shown}");
         self.ingest.report(Report::Watching);
         let mut every = tokio::time::interval(SCAN_EVERY);
         every.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Delay);
