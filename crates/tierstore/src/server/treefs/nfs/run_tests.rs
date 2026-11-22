@@ -389,7 +389,8 @@ async fn a_start_on_a_file_that_still_lists_users_serves_every_user() {
 
     let mut client = Client::connect(running.address).await;
     let handle = client.mount("/").await;
-    for uid in [listed, default_user, other] {
+    // Each case is named by its place: the listed user, the user of the process, another.
+    for (case, uid) in [listed, default_user, other].into_iter().enumerate() {
         let reply = client
             .call(
                 NFS,
@@ -399,8 +400,8 @@ async fn a_start_on_a_file_that_still_lists_users_serves_every_user() {
             )
             .await;
         let mut body = Dec::new(&reply.body);
-        assert_eq!(body.u32(), 0, "user {uid} is served");
-        assert_eq!(body.attr().fileid, ino::ROOT, "user {uid}");
+        assert_eq!(body.u32(), 0, "case {case} is served");
+        assert_eq!(body.attr().fileid, ino::ROOT, "case {case}");
     }
     drop(client);
 

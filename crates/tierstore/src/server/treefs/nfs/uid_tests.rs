@@ -55,15 +55,16 @@ async fn lookup(client: &mut Client, cred: Cred, dir: &[u8], name: &str) -> Vec<
 async fn rpc_from_any_uid_is_served() {
     let (mut client, root, digest, task, rig) = connected("nfs-uid-any").await;
     let fills = rig.upstream.asked("fill").len();
-    for (uid, gid) in USERS {
+    // Each case is named by its place in USERS.
+    for (case, (uid, gid)) in USERS.into_iter().enumerate() {
         let cred = Cred::Sys(uid, gid);
         let reply = client
             .call(NFS, GETATTR, cred, Enc::default().opaque(&root))
             .await;
         let mut body = Dec::new(&reply.body);
-        assert_eq!(body.u32(), 0, "user {uid}");
-        assert_eq!(body.attr().fileid, ino::ROOT, "user {uid}");
-        assert!(body.done(), "user {uid}");
+        assert_eq!(body.u32(), 0, "case {case}");
+        assert_eq!(body.attr().fileid, ino::ROOT, "case {case}");
+        assert!(body.done(), "case {case}");
 
         let trees = lookup(&mut client, cred, &root, "trees").await;
         let tree = lookup(&mut client, cred, &trees, &digest).await;
@@ -78,10 +79,10 @@ async fn rpc_from_any_uid_is_served() {
             )
             .await;
         let mut body = Dec::new(&reply.body);
-        assert_eq!(body.u32(), 0, "user {uid}");
+        assert_eq!(body.u32(), 0, "case {case}");
         let _ = body.post_op_attr();
-        assert_eq!((body.u32(), body.u32()), (10, 1), "user {uid}");
-        assert_eq!(body.opaque(), blob_of(&rig, 10), "user {uid}");
+        assert_eq!((body.u32(), body.u32()), (10, 1), "case {case}");
+        assert_eq!(body.opaque(), blob_of(&rig, 10), "case {case}");
     }
     assert_eq!(rig.upstream.asked("fill").len(), fills + 1);
     task.abort();

@@ -67,8 +67,8 @@ md-5 = "0.11.0"
 # The NFSv3 and MOUNT protocol of `tierstore fs` on macOS (BSD-3-Clause), `nfsserve` 0.11.0 from
 # crates.io plus one commit on the branch `komira-0.11` of our fork: the transaction tracker
 # sweeps its map once a second and not on every request (the largest single factor of a cold walk
-# of a tree, about 3x), `NFSFileSystem::authorize` and `NFSFileSystem::access` hooks (the refusal
-# of a call that names no user, and execute that follows the mode bits), and `NFSTcpListener::from_listener` (a socket
+# of a tree, about 3x), `NFSFileSystem::authorize` and `NFSFileSystem::access` hooks (the uid
+# fence, and execute that follows the mode bits), and `NFSTcpListener::from_listener` (a socket
 # handed over by the instance a new one replaces). An upstream pull request is not opened. This
 # returns to crates.io once upstream releases such a change.
 nfsserve = { git = "https://github.com/komira-ai/nfsserve", rev = "f2665dd518e1b32f85cd457fef75fffe6d8a61b3", default-features = false }
