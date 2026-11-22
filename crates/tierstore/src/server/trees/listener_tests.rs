@@ -32,6 +32,7 @@ use super::rig::{
 };
 use super::service::{Served, TreesFront};
 use super::{Caller, Reason, Refusal, TreeCore, TreesFlags, trees_setup_of};
+use crate::server::listen::{self, Listeners};
 use crate::server::oci::test_pki::{ca, ip, leaf};
 use crate::server::{Incoming, ListenTuning, ServerConfig};
 
@@ -476,12 +477,83 @@ async fn a_signed_head_with_another_body_is_refused() {
     assert_eq!(running.stopped().await, 0);
 }
 
-/// Asserts that after a stop the listener's sockets are closed, a connection that is idle is
-/// closed, and nothing was cut.
+/// The sockets of a listener, which say when they are closed: the flag of `closes` turns true
+/// once they are (the fields are dropped in order, the sockets first).
+struct Watched {
+    listeners: Listeners,
+    _closes: Closes,
+}
+
+/// Turns its flag true when it is dropped.
+struct Closes(watch::Sender<bool>);
+
+impl Drop for Closes {
+    fn drop(&mut self) {
+        self.0.send_replace(true);
+    }
+}
+
+impl Incoming for Watched {
+    type Stream = TcpStream;
+
+    fn poll_incoming(&mut self, cx: &mut Context<'_>) -> Poll<io::Result<(TcpStream, SocketAddr)>> {
+        self.listeners.poll_incoming(cx)
+    }
+}
+
+/// A plain listener on a port the system picks, served by [`accept_loop`] over sockets bound as
+/// [`super::listener::TreesListener::bind_all`] binds them, with room for `max_connections`; and
+/// the flag that turns true once its sockets are closed.
+async fn run_watched(
+    core: Arc<dyn TreeCore>,
+    max_connections: usize,
+) -> (Running, watch::Receiver<bool>) {
+    let limits = TreesLimits {
+        max_connections,
+        handshake_timeout: Duration::from_secs(10),
+        lifetime: Duration::from_secs(3600),
+        drain_deadline: Duration::from_secs(60),
+        listen: ListenTuning::default(),
+    };
+    let any: SocketAddr = "127.0.0.1:0".parse().expect("an address");
+    let socket = listen::bind_sharing(any, limits.listen.backlog, true).expect("bound");
+    let listeners = Listeners::new(vec![socket]);
+    let addr = listeners.local_addrs().expect("addresses")[0];
+    let (closes, closed) = watch::channel(false);
+    let watched = Watched {
+        listeners,
+        _closes: Closes(closes),
+    };
+    let server = config();
+    let served = Served::new(
+        Arc::new(server.clone()),
+        TreesFront::new(Some(core)),
+        256 << 20,
+    );
+    let (stop, stopped) = watch::channel(false);
+    let task = tokio::spawn(accept_loop(watched, None, served, limits, stopped));
+    let running = Running {
+        addr,
+        stop,
+        task,
+        server,
+        connector: None,
+        _dir: TestDir::under(std::env::temp_dir(), "trees-listener"),
+    };
+    (running, closed)
+}
+
+/// Asserts that a stop closes the listener's sockets and a connection that is idle, and cuts
+/// nothing, and that this is seen while another listener owns the port the stop freed (when the
+/// port can be bound). The sockets are seen closed by what they do, not by connecting to their
+/// old port, which any other socket may be given once it is free: their flag turns true when
+/// they are dropped, and a client waiting in the backlog (the one slot is held by the idle
+/// connection) has its connection ended by the kernel, which only the close of the listening
+/// socket does.
 #[tokio::test]
 async fn a_stop_closes_the_sockets_and_the_idle_connections() {
-    let (_core, wanted) = recording();
-    let running = run(wanted).await;
+    let core = Arc::new(FakeCore::default());
+    let (running, closed) = run_watched(core, 1).await;
     let mut sender = running.client().await;
     let answer = running
         .call(
@@ -492,10 +564,22 @@ async fn a_stop_closes_the_sockets_and_the_idle_connections() {
         )
         .await;
     assert_eq!(answer.status.code(), Code::Ok);
+    let mut waiting = TcpStream::connect(running.addr)
+        .await
+        .expect("a connection in the backlog");
     let addr = running.addr;
+    assert!(!*closed.borrow());
     assert_eq!(running.stopped().await, 0);
-    assert!(TcpStream::connect(addr).await.is_err());
+    // Another listener on the freed port, as another test of the binary may bind it. The bind
+    // is not asserted: a connection of another test may hold the port by then, which refuses it,
+    // and what follows holds whoever owns the port.
+    let thief = listen::bind_sharing(addr, ListenTuning::default().backlog, true).ok();
+    assert!(*closed.borrow());
+    let mut nothing = Vec::new();
+    let _ = waiting.read_to_end(&mut nothing).await;
+    assert!(nothing.is_empty());
     assert!(sender.ready().await.is_err());
+    drop(thief);
 }
 
 /// A core whose create call waits until it is told to go on.
@@ -586,6 +670,41 @@ async fn a_call_in_flight_at_the_stop_is_finished() {
     let calling = tokio::spawn(async move { send(&mut sender, request).await });
     core.started.notified().await;
     running.stop.send(true).expect("a listener");
+    core.release.notify_one();
+    let answer = calling.await.expect("the call ended");
+    assert_eq!(answer.status.code(), Code::Ok);
+    assert_eq!(running.task.await.expect("the listener ended"), 0);
+}
+
+/// Asserts that a stop closes the listener's sockets before it waits for the calls in flight: the
+/// sockets are closed while a call is still held in the core, before the listener ends, and the
+/// call is then finished with nothing cut.
+#[tokio::test]
+async fn a_stop_closes_the_sockets_before_the_calls_in_flight_end() {
+    let core = Arc::new(Blocking {
+        started: Notify::new(),
+        release: Notify::new(),
+    });
+    let (mut running, mut closed) = run_watched(Arc::clone(&core) as Arc<dyn TreeCore>, 4).await;
+    let mut sender = running.client().await;
+    let authority = running.addr.to_string();
+    let request = signed_request(
+        &running.server,
+        FULL,
+        &authority,
+        "CreateTree",
+        framed(&create_request()),
+    );
+    let calling = tokio::spawn(async move { send(&mut sender, request).await });
+    core.started.notified().await;
+    running.stop.send(true).expect("a listener");
+    tokio::select! {
+        biased;
+        seen = closed.wait_for(|closed| *closed) => {
+            seen.expect("the flag");
+        }
+        cut = &mut running.task => panic!("the listener ended with its sockets open: {cut:?}"),
+    }
     core.release.notify_one();
     let answer = calling.await.expect("the call ended");
     assert_eq!(answer.status.code(), Code::Ok);
