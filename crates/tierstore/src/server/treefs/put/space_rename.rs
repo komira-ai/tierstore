@@ -14,7 +14,9 @@
 //! so the stop of the readers does not wait for it. A hand-over does ([`PutSpace::drain_commits`]):
 //! the request is this process's to answer, the kernel does not send it again to the successor,
 //! and the commit writes the journal and the stage, which the successor reads once it serves. Each
-//! commit ends by its deadline (`fs.put.commit_deadline_secs`), the upload included.
+//! commit ends by its deadline (`fs.put.commit_deadline_secs`), the upload included; one that waits
+//! for the release of its file ends at once, `EBUSY`, when the hand-over holds the space
+//! ([`PutSpace::hold`]): the release goes to the successor and would never reach it.
 
 use std::sync::{Arc, Condvar, Mutex};
 
@@ -166,6 +168,12 @@ impl PutSpace {
         why != HANDLE_OPEN || self.closing(plan.id)
     }
 
+    /// Whether a commit busy for `why` waits for a release this process will not be sent: the
+    /// space is held for a successor, which reads every request from the stop of the readers on.
+    fn release_never_comes(&self, why: &str) -> bool {
+        why == HANDLE_OPEN && self.held.load(std::sync::atomic::Ordering::Acquire)
+    }
+
     /// The answer for a rename refused as busy at once.
     fn refuse(plan: &Plan, why: &str) -> Errno {
         tracing::warn!(
@@ -240,7 +248,7 @@ impl PutSpace {
                 Ok(Rename::Renamed) => return Ok(()),
                 Ok(Rename::Commit(commit)) => break commit,
                 Err(PutError::Busy(why)) => {
-                    if !self.waits_for(plan, why) {
+                    if !self.waits_for(plan, why) || self.release_never_comes(why) {
                         return Err(Self::refuse(plan, why));
                     }
                     let topic = if why == KEY_RUNNING {

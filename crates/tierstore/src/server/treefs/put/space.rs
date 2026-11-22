@@ -639,9 +639,15 @@ impl PutSpace {
     }
 
     /// Stops the sweep, for a successor that takes over (`true`), or starts it again (`false`).
+    /// A hold also ends the commits that wait for the release of their file: this process reads
+    /// no request from here on, so the release goes to the successor and never reaches them, and
+    /// each answers `EBUSY` at once rather than at its deadline (`space_rename.rs`).
     pub(in crate::server) fn hold(&self, on: bool) {
         let _sweeping = locked(&self.sweeping);
         self.held.store(on, Ordering::Release);
+        if on {
+            self.changes.notify_every();
+        }
     }
 
     /// Runs the sweep of the store, unless held.

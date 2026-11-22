@@ -389,3 +389,29 @@ fn a_drain_returns_at_once_when_no_commit_runs() {
     space.drain_commits();
     assert_eq!(waited.load(Ordering::Acquire), 0);
 }
+
+/// A hold for a hand-over ends at once a commit that waits for the release of its file, `EBUSY`:
+/// the readers have stopped and the release goes to the successor, so it would never reach this
+/// process, and the drain of the commits, which the successor's start waits for, would otherwise
+/// last the whole commit deadline. Catches a hand-over held up by a commit that cannot end before
+/// its deadline.
+#[test]
+fn a_hold_ends_a_commit_that_waits_for_a_release_at_once() {
+    let rig = SpaceRig::new("put-rename-held");
+    let space = Arc::new(rig.space);
+    let dir = nonce(&space);
+    let (_, _fh) = closing(&space, dir, "pack.part", b"never released");
+    let answers = rename(&space, dir, "pack.part", "pack");
+    until(|| space.changes.waits.load(Ordering::Acquire) > 0);
+    assert_eq!(answers.try_recv().unwrap_err(), TryRecvError::Empty);
+    space.hold(true);
+    assert_eq!(answers.recv().unwrap().0, Err(Errno::BUSY));
+    space.drain_commits();
+    assert_eq!(space.commits_running(), 0);
+    // While held, a new commit of a file still being closed does not wait either.
+    let (_, _other) = closing(&space, dir, "late.part", b"late");
+    assert_eq!(
+        rename(&space, dir, "late.part", "late").recv().unwrap().0,
+        Err(Errno::BUSY)
+    );
+}
