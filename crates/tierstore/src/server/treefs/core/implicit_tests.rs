@@ -166,8 +166,9 @@ fn lookups_of_one_tree_at_once_attach_it_once() {
 
 /// Asserts the idle time of an implicit attachment, on the rig's clock: a tree is not detached
 /// before `fs.tree_idle_secs` with no use; a request on one of its inodes is a use that starts the
-/// time again; at the full time the tree is detached and unpinned, and leaves memory once the
-/// kernel forgets its inodes; and a lookup attaches it again, under the same number.
+/// time again; at the full time the tree is detached and unpinned, and leaves memory at that
+/// sweep though the kernel holds its root, whose forget then changes nothing; and a lookup
+/// attaches it again, under the same number.
 #[test]
 fn an_implicit_attachment_ends_after_the_idle_time_with_no_use() {
     let rig = Rig::new("tfs-imp-idle", sample());
@@ -190,8 +191,8 @@ fn an_implicit_attachment_ends_after_the_idle_time_with_no_use() {
         rig.upstream.asked("unpin"),
         vec![format!("unpin mount-1 {root}")]
     );
-    // The kernel holds the root: the tree stays in memory until it is forgotten.
-    assert_eq!(rig.core.trees_in_memory(), 1);
+    // The kernel holds the root; the tree leaves all the same, and the forget finds nothing.
+    assert_eq!(rig.core.trees_in_memory(), 0);
     rig.core.forget(ROOT, 1);
     assert_eq!(rig.core.trees_in_memory(), 0);
     assert_eq!(rig.core.detach_idle(), 0);
@@ -199,16 +200,17 @@ fn an_implicit_attachment_ends_after_the_idle_time_with_no_use() {
     assert_eq!(rig.core.implicit(), vec![1]);
 }
 
-/// Asserts that a tree a lookup attached again while it was still in memory (the kernel held its
-/// inodes) is not read again: its manifests are gone from the cache and the upstream, and the
-/// lookup still answers it.
+/// Asserts that a tree a lookup attaches while it is still in memory (its run detached, the kernel
+/// holds an inode of it, and it is not idle yet) is not read again: its manifests are gone from
+/// the cache and the upstream, and the lookup still answers it.
 #[test]
 fn a_tree_in_memory_is_attached_again_without_a_read() {
     let rig = Rig::new("tfs-imp-again", sample());
     let root = root_of(&rig);
-    assert_eq!(resolved(&rig.core, &root), ROOT);
-    rig.clock.advance(TREE_IDLE);
-    assert_eq!(rig.core.detach_idle(), 1);
+    let _ = rig.core.attach(&root, "run-1").unwrap();
+    let _ = child(&rig.core, ROOT, "bin");
+    assert!(rig.core.detach("run-1").is_some());
+    assert_eq!(rig.core.trees_in_memory(), 1);
     rig.upstream.built.lock().unwrap().manifests.clear();
     std::fs::remove_dir_all(&rig.cache).unwrap();
     std::fs::create_dir_all(&rig.cache).unwrap();
@@ -405,7 +407,9 @@ fn fail_blob(rig: &Rig, content: &[u8], words: &str) {
         .insert(blob_digest(content), words.to_owned());
 }
 
-/// What `detach_idle` says at warn, with the clock past the idle time.
+/// What `detach_idle` says at warn, with the clock past the idle time: the failures of the
+/// attachments that end, and the counts of the failed opens not said yet of the trees that leave
+/// memory with them.
 fn said_at_idle_end(rig: &Rig) -> String {
     let log = Logged::default();
     let guard = logged(&log, tracing::Level::WARN);
@@ -496,7 +500,9 @@ fn a_path_that_fails_twice_is_one_failed_open_in_the_line() {
         said_at_idle_end(&rig),
         format!(
             "tierstore fs: the attachment of the tree {root} (number 1) by a lookup ended with 1 \
-             failed open: /bin/tool ({blob}: mismatch)\n"
+             failed open: /bin/tool ({blob}: mismatch)\n\
+             tierstore fs: 1 more failed open of the tree {root} (number 1) since the last line, \
+             not said\n"
         )
     );
 }
@@ -532,7 +538,9 @@ fn a_line_names_eight_failed_opens_and_counts_the_rest() {
         said_at_idle_end(&rig),
         format!(
             "tierstore fs: the attachment of the tree {root} (number 1) by a lookup ended with 11 \
-             failed opens: {}; and 3 more\n",
+             failed opens: {}; and 3 more\n\
+             tierstore fs: 10 more failed opens of the tree {root} (number 1) since the last \
+             line, not said\n",
             named.join("; ")
         )
     );
@@ -567,7 +575,9 @@ fn a_line_with_eight_failed_opens_names_them_all() {
         said_at_idle_end(&rig),
         format!(
             "tierstore fs: the attachment of the tree {root} (number 1) by a lookup ended with 8 \
-             failed opens: {}\n",
+             failed opens: {}\n\
+             tierstore fs: 7 more failed opens of the tree {root} (number 1) since the last \
+             line, not said\n",
             named.join("; ")
         )
     );

@@ -223,8 +223,8 @@ fn no_forget_core_does_not_count_lookups() {
     assert_eq!(core.trees_in_memory(), 0);
 }
 
-/// Asserts that a core that counts lookups, as FUSE's does, keeps a detached tree in memory until
-/// the last lookup is forgotten.
+/// Asserts that a core that counts lookups, as FUSE's does, keeps a detached tree that is not idle
+/// in memory until the last lookup is forgotten.
 #[test]
 fn forget_core_keeps_a_tree_until_forgotten_after_detach_unchanged() {
     let rig = attached("tfs-read-forget");

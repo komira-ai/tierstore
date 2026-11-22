@@ -89,8 +89,8 @@ impl Socket {
 }
 
 /// Asserts, with a kernel that sends FORGET and BATCH_FORGET over a `tsfuse` session, that each
-/// forgotten lookup reaches the core (the tree stays in memory while a lookup of it is held and
-/// leaves when the last is forgotten), and that the core still answers a LOOKUP and a GETATTR of
+/// forgotten lookup reaches the core (the tree stays in memory while a lookup of it is held, and
+/// is not idle, and leaves when the last is forgotten), and that the core still answers a LOOKUP and a GETATTR of
 /// the inodes afterwards. The test sends the FORGET that a kernel sends when it drops an inode.
 #[test]
 fn the_kernel_forgetting_an_inode_reaches_the_core() {

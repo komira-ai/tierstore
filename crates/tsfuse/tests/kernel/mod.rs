@@ -11,6 +11,10 @@
 //! written, a caller's system call returning), never on a timer; [`Conn`]'s drop aborts the
 //! connection where it may (as root; the abort file is root's), so a failed check ends every blocked
 //! caller with `ECONNABORTED` instead of hanging; elsewhere they end with the test process.
+//!
+//! The checks run every fork (a child, `fusermount3`, a mount or unmount that may go through it)
+//! and every unmount through [`one_at_a_time`], so an unmount never meets a child of another
+//! check that still holds a descriptor of its mount (`tierstore_testkit::forks`).
 #![allow(dead_code, reason = "each test binary uses a part of the helpers")]
 #![allow(
     clippy::unwrap_used,
@@ -27,6 +31,7 @@ use std::thread::JoinHandle;
 use std::time::Duration;
 
 use tierstore_testkit::dir::TestDir;
+pub use tierstore_testkit::forks::one_at_a_time;
 use tsfuse::abi::{
     Attr, AttrOut, EntryOut, InHeader, InitIn, InitOut, InterruptIn, OpenOut, OutHeader, ReadIn,
     StatfsOut,
@@ -396,10 +401,12 @@ pub fn unavailable() -> Option<&'static str> {
         .open(tsfuse::DEV_FUSE)
         .is_ok();
     let root = rustix::process::geteuid().is_root();
-    let helper = std::process::Command::new(tsfuse::mount::FUSERMOUNT)
-        .arg("--version")
-        .output()
-        .is_ok();
+    let helper = one_at_a_time(|| {
+        std::process::Command::new(tsfuse::mount::FUSERMOUNT)
+            .arg("--version")
+            .output()
+    })
+    .is_ok();
     match (device, root || helper) {
         (false, _) => Some("/dev/fuse cannot be opened for reading and writing"),
         (true, false) => Some("not root and fusermount3 is not installed"),
@@ -428,7 +435,7 @@ impl Conn {
             allow_other: false,
             ..MountOptions::tree("tsfuse-kernel")
         };
-        let (dev, mount) = Mounter::default().mount(&mp, &options).unwrap();
+        let (dev, mount) = one_at_a_time(|| Mounter::default().mount(&mp, &options)).unwrap();
         let req = read_req(&dev).unwrap();
         assert_eq!(req.h.opcode, op::INIT, "the first request is INIT");
         let (init, _) = InitIn::read_prefix(&req.body).expect("INIT carries fuse_init_in");
@@ -482,7 +489,7 @@ impl Drop for Conn {
             // Abort first: a caller still blocked on a request ends with ECONNABORTED, so the
             // unmount (and a failed check) never waits on it.
             let _ = mount.abort();
-            let _ = mount.unmount(true);
+            let _ = one_at_a_time(|| mount.unmount(true));
         }
     }
 }

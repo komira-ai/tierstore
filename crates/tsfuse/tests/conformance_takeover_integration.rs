@@ -64,7 +64,7 @@ use conformance::{
     Caller, Done, FOPEN_DIRECT_IO, Mounted, Open, Opendir, ROOT, Read, Served, TreeSpec,
     answer_read, memfd, park, pattern, pread, reader_name, serve,
 };
-use kernel::skip;
+use kernel::{one_at_a_time, skip};
 use tsfuse::abi::{InitFlags, UNIQUE_RESEND};
 use tsfuse::{Handled, Handover, ReaderEnd, ReplyConfig, ReplyPath, Session};
 
@@ -111,11 +111,9 @@ struct ServerProcess {
 impl ServerProcess {
     /// Runs the child with `stdin` as its standard input.
     fn spawn(stdin: OwnedFd) -> Self {
-        let mut child = conformance::child("child_resumes_the_handover_on_stdin")
-            .stdin(Stdio::from(stdin))
-            .stdout(Stdio::piped())
-            .spawn()
-            .unwrap();
+        let mut command = conformance::child("child_resumes_the_handover_on_stdin");
+        command.stdin(Stdio::from(stdin)).stdout(Stdio::piped());
+        let mut child = one_at_a_time(|| command.spawn()).unwrap();
         let out = BufReader::new(child.stdout.take().unwrap());
         Self { child, out }
     }

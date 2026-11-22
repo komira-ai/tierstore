@@ -10,8 +10,8 @@ use crate::server::treefs::testing::{Logged, logged};
 fn an_adopted_id_this_process_cannot_answer_with_is_said() {
     let wire = Wire::new("nodefs-adopted-said");
     wire.adopt(u32::MAX, &|id| -> Guard { Arc::new(BackingId(id)) });
-    // The tree stays in memory with no run (the kernel holds a lookup of it), so the open asks no
-    // pin and is answered on the reader, whose lines the log takes.
+    // The tree stays in memory with no run (the kernel holds a lookup of it and it is not idle),
+    // so the open asks no pin and is answered on the reader, whose lines the log takes.
     let _ = entry_out(&wire.ask(op::LOOKUP, node(0), &cstr(b"bin")));
     assert_eq!(wire.kept_after_detach(), 1);
     let log = Logged::default();
