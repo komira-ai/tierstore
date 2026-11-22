@@ -15,8 +15,8 @@ fn digest() -> (String, TreeDigest) {
 }
 
 /// The directory of `build` and `nonce`, which are components.
-fn job(build: &str, nonce: &str) -> JobDir {
-    JobDir::new(build, nonce).unwrap()
+fn job(build: &str, job_name: &str) -> JobDir {
+    JobDir::new(build, job_name).unwrap()
 }
 
 /// Asserts that an ordinary name, a name of one byte, and names with dots and unicode letters

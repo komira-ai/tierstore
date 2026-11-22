@@ -45,8 +45,8 @@ impl Bench {
     }
 
     /// The job's directory `cas/b/<build>/<nonce>`, made with its parents.
-    pub(super) fn job(&self, build: &str, nonce: &str) -> PathBuf {
-        let dir = self.root.join("cas/b").join(build).join(nonce);
+    pub(super) fn job(&self, build: &str, job_name: &str) -> PathBuf {
+        let dir = self.root.join("cas/b").join(build).join(job_name);
         std::fs::create_dir_all(&dir).unwrap();
         dir
     }

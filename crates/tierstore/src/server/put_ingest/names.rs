@@ -35,15 +35,15 @@ pub(super) fn is_component(name: &str) -> bool {
 #[derive(Clone, Debug, PartialEq, Eq, PartialOrd, Ord)]
 pub(super) struct JobDir {
     build: String,
-    nonce: String,
+    job_name: String,
 }
 
 impl JobDir {
     /// The directory of `build` and `nonce`, or none when either is not a component.
-    pub(super) fn new(build: &str, nonce: &str) -> Option<Self> {
-        (is_component(build) && is_component(nonce)).then(|| Self {
+    pub(super) fn new(build: &str, job_name: &str) -> Option<Self> {
+        (is_component(build) && is_component(job_name)).then(|| Self {
             build: build.to_owned(),
-            nonce: nonce.to_owned(),
+            job_name: job_name.to_owned(),
         })
     }
 
@@ -55,7 +55,7 @@ impl JobDir {
 
     /// The directory under the root: `cas/b/<build>/<nonce>`.
     pub(super) fn rel(&self) -> PathBuf {
-        self.build_dir().join(&self.nonce)
+        self.build_dir().join(&self.job_name)
     }
 
     /// The key of the file `name` of the directory, `cas/b/<build>/<nonce>/<name>`: at most 773
@@ -68,7 +68,7 @@ impl JobDir {
 impl fmt::Display for JobDir {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         let [cas, b] = PREFIX;
-        write!(f, "{cas}/{b}/{}/{}", self.build, self.nonce)
+        write!(f, "{cas}/{b}/{}/{}", self.build, self.job_name)
     }
 }
 
@@ -103,7 +103,7 @@ pub(super) fn place(rel: &Path) -> Place {
     // Every part is a component already.
     let job = || JobDir {
         build: parts[2].to_owned(),
-        nonce: parts[3].to_owned(),
+        job_name: parts[3].to_owned(),
     };
     match parts.len() {
         depth @ 0..=3 => Place::Above(depth),

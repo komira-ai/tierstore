@@ -317,13 +317,13 @@ async fn a_declaration_that_comes_after_the_pack_stores_it() {
 #[tokio::test]
 async fn the_longest_names_are_stored_under_their_whole_key() {
     let mut bench = Bench::new("ingest-edge-long");
-    let (build, nonce) = ("b".repeat(255), "n".repeat(255));
-    let dir = bench.job(&build, &nonce);
+    let (build, job_name) = ("b".repeat(255), "n".repeat(255));
+    let dir = bench.job(&build, &job_name);
     bench.start().await;
     let name = "p".repeat(178);
     let bytes = b"a long way down".to_vec();
     commit(&dir, &name, &bytes, sha(&bytes));
-    let key = format!("cas/b/{build}/{nonce}/{name}");
+    let key = format!("cas/b/{build}/{job_name}/{name}");
     assert_eq!(
         bench.outcome().await,
         Report::Stored {

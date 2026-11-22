@@ -91,8 +91,11 @@ pub(super) fn scan(root: &Path) -> Found {
     let mut found = Found::default();
     for build in dirs_in(&root.join(&rel)) {
         let build_rel = rel.join(&build);
-        let nonces = dirs_in(&root.join(&build_rel));
-        for dir in nonces.iter().filter_map(|nonce| JobDir::new(&build, nonce)) {
+        let job_names = dirs_in(&root.join(&build_rel));
+        for dir in job_names
+            .iter()
+            .filter_map(|job_name| JobDir::new(&build, job_name))
+        {
             if let Some(job) = job_at(&root.join(dir.rel())) {
                 let _ = found.jobs.insert(dir, job);
             }

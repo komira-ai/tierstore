@@ -32,8 +32,8 @@ fn mtime(path: &Path) -> u64 {
 }
 
 /// The job directory of `build` and `nonce`.
-fn job_dir(build: &str, nonce: &str) -> JobDir {
-    JobDir::new(build, nonce).unwrap()
+fn job_dir(build: &str, job_name: &str) -> JobDir {
+    JobDir::new(build, job_name).unwrap()
 }
 
 /// Asserts that a root with no `cas/b` directory, and one whose `cas/b` is empty, scan to nothing.
