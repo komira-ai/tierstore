@@ -4,9 +4,9 @@
 SCHEMA = 2
 RUSTC = "1.95.0"
 TARGET = "x86_64-unknown-linux-gnu"
-CARGO_LOCK_SHA256 = "c33cc9f0d3b957cbf3a6f6c13082e69616f47a4283f2f9d18d256cf43c10f7e6"
+CARGO_LOCK_SHA256 = "05850b563a62d4145eeb52dbc000f96714f94d2be06e622d67d3adab2b53abdc"
 MANIFEST_SHA256 = {
-    "Cargo.toml": "27e7a93e5ac2495cf78d0d90dad81b551a0872b16e078282d2ec23b18877a107",
+    "Cargo.toml": "491574090cade22a493890e5c90ed1b98520d215c577eeab3e8e40d03a2ff54d",
     "crates/compat/Cargo.toml": "79560335d2ce3a4555b17e47494f0e4912ee0ca492d2d2904f8bcf9b333684b8",
     "crates/coverage-gate/Cargo.toml": "bb00915e8794b425cba2f2a40d749eecc891c65939d260904969d052ac138b95",
     "crates/fsbench/Cargo.toml": "e6b927e5ad2d2127014fb0e339f0eeb4c854ff4a846ab16680cdca255aeba75e",
@@ -35,7 +35,7 @@ MANIFEST_SHA256 = {
     "crates/tierstore-testkit/Cargo.toml": "8015d823e3536725f2b9ac817c7a58aa048b0b570c8f15c36756dc2fea9102b8",
     "crates/tierstore-tree/Cargo.toml": "39fc0c1be597d7a56e98dcc08bc554283553e33365f8fcab2e1b56be4050cf37",
     "crates/tierstore-trees-api/Cargo.toml": "984ceddf87975a4e7c61a5757131bd1565d8e1f8db202a3dc3761f8a315abfcb",
-    "crates/tierstore/Cargo.toml": "d642810a1249f640c63cd59dfb645a514f7ae59b06c9ad2304048092f1570c37",
+    "crates/tierstore/Cargo.toml": "5d46853e212399238a962ab5e0f60e045f8e900ff90665b294b0cbdef110e4b7",
     "crates/tsfuse/Cargo.toml": "14e6506fc7c08fe6821f97d381f45b78987ba43c73452bf4992226097c73ebf3",
     "crates/xtask/Cargo.toml": "9f8f2796f4195da61a71f1884cceaa2cd39681cbda774ea94795a39360522e6f",
     "rust-toolchain.toml": "e3a213e0d222e94d213cafbc20932eb3f76c643b4dd63756acf95192df2aa310",
@@ -616,9 +616,9 @@ MEMBERS = {
             "roots": ["tierstore-0.3.0:035e17c762"],
         },
         "test": {
-            "units": 397,
-            "graph_units": 397,
-            "roots": ["tierstore-0.3.0:121d55a200", "tierstore-0.3.0:357b8dcc6c", "tierstore-0.3.0:437dd6fc90", "tierstore-0.3.0:526ca0d63e", "tierstore-0.3.0:6398dab5f1", "tierstore-0.3.0:72c2289948", "tierstore-0.3.0:75d4ea8ec8", "tierstore-0.3.0:8f993549cb", "tierstore-0.3.0:96260c7ed2", "tierstore-0.3.0:a14c3ce6e8", "tierstore-0.3.0:adf29d8d74", "tierstore-0.3.0:b4844e71d9", "tierstore-0.3.0:e96b524eb7", "tierstore-0.3.0:eb7129e9a9", "tierstore-0.3.0:edafc8b387", "tierstore-0.3.0:ff6fdc9ec9"],
+            "units": 399,
+            "graph_units": 399,
+            "roots": ["tierstore-0.3.0:121d55a200", "tierstore-0.3.0:357b8dcc6c", "tierstore-0.3.0:437dd6fc90", "tierstore-0.3.0:526ca0d63e", "tierstore-0.3.0:6398dab5f1", "tierstore-0.3.0:72c2289948", "tierstore-0.3.0:75d4ea8ec8", "tierstore-0.3.0:8f993549cb", "tierstore-0.3.0:96260c7ed2", "tierstore-0.3.0:a14c3ce6e8", "tierstore-0.3.0:adf29d8d74", "tierstore-0.3.0:b4478baf69", "tierstore-0.3.0:b4844e71d9", "tierstore-0.3.0:cec67fa745", "tierstore-0.3.0:e96b524eb7", "tierstore-0.3.0:eb7129e9a9", "tierstore-0.3.0:edafc8b387", "tierstore-0.3.0:ff6fdc9ec9"],
         },
         "release": {
             "units": 54,
@@ -20747,6 +20747,24 @@ UNITS = {
         "path": "crates/tierstore",
         "test_flags": {"test": True, "doctest": False},
     },
+    "tierstore-0.3.0:b4478baf69": {
+        "crate": "tierstore",
+        "version": "0.3.0",
+        "source": "path",
+        "target_kind": ["test"],
+        "crate_types": ["bin"],
+        "target_name": "update_hook_root_only",
+        "mode": "test",
+        "side": "target",
+        "edition": "2024",
+        "crate_root": "tests/update_hook_root_only.rs",
+        "features": ["s3", "server"],
+        "cfgs": ["feature=\"s3\"", "feature=\"server\""],
+        "profile": {"opt_level": "0", "lto": "false", "codegen_backend": None, "codegen_units": None, "debuginfo": "line-tables-only", "split_debuginfo": None, "debug_assertions": True, "overflow_checks": True, "rpath": False, "incremental": False, "panic": "unwind", "strip": {"deferred": "None"}},
+        "deps": [["arc_swap", "arc-swap-1.9.3:2d1933e6d2"], ["async_trait", "async-trait-0.1.92:6b15272eec"], ["aws_sdk_s3", "aws-sdk-s3-1.96.0:38a0795344"], ["aws_smithy_http_client", "aws-smithy-http-client-1.5.2:fe5dd55775"], ["base64", "base64-0.23.1:8d223d0254"], ["build_script_build", "tierstore-0.3.0:91ca44011f"], ["bytes", "bytes-1.12.1:b6878f8100"], ["clap", "clap-4.6.7:8a60358b22"], ["crc", "crc-3.4.0:551314d865"], ["crc32c", "crc32c-0.6.8:03d511b56f"], ["crc32fast", "crc32fast-1.5.2:201dcdb227"], ["futures", "futures-0.3.34:83d0f2862b"], ["hex", "hex-0.4.3:40d02ced6b"], ["hmac", "hmac-0.13.0:c5117876d2"], ["http_body_util", "http-body-util-0.1.5:853e9c6492"], ["hyper", "hyper-1.12.0:c35ae536bd"], ["hyper_util", "hyper-util-0.1.21:debadc14b5"], ["md5", "md-5-0.11.0:5ba434dd21"], ["nfsserve", "nfsserve-0.11.0:53975e7c93"], ["objstore_conformance", "objstore-conformance-0.1.0:39afe94ba5"], ["objstore_s3", "objstore-s3-0.1.0:5d051ca978"], ["percent_encoding", "percent-encoding-2.3.2:5d11f2cce8"], ["prost", "prost-0.14.6:019e29a078"], ["rcgen", "rcgen-0.14.10:0dee32e495"], ["reqwest", "reqwest-0.13.5:f2a178de4e"], ["ring", "ring-0.17.14:819f3dfde0"], ["roxmltree", "roxmltree-0.21.1:d0956532b6"], ["rustix", "rustix-1.1.5:1b23940afa"], ["rustls", "rustls-0.23.46:330fd754ac"], ["rustls_native_certs", "rustls-native-certs-0.8.4:a34d2982e8"], ["serde", "serde-1.0.229:5a775da5d0"], ["serde_json", "serde_json-1.0.151:4e085d7166"], ["sha2", "sha2-0.11.0:e2096870d2"], ["thiserror", "thiserror-2.0.21:c826f66dcf"], ["tierstore", "tierstore-0.3.0:4894bb0177"], ["tierstore", "tierstore-0.3.0:4894bb0177"], ["tierstore", "tierstore-0.3.0:f1cd1e0a5e"], ["tierstore_fetch", "tierstore-fetch-0.1.0:2a7af3f3b9"], ["tierstore_fetch_api", "tierstore-fetch-api-0.1.0:9744bdf2c6"], ["tierstore_format", "tierstore-format-0.1.0:0fb2bc2513"], ["tierstore_hashpool", "tierstore-hashpool-0.1.0:aaa1136e30"], ["tierstore_list", "tierstore-list-0.1.0:ada6351403"], ["tierstore_testkit", "tierstore-testkit-0.1.0:d8efd55d94"], ["tierstore_tree", "tierstore-tree-0.1.0:05e2278fff"], ["tierstore_trees_api", "tierstore-trees-api-0.1.0:6d68f77b70"], ["tokio", "tokio-1.53.3:000391e2b4"], ["tokio_rustls", "tokio-rustls-0.26.6:c90206c8a4"], ["toml", "toml-1.1.8+spec-1.1.0:d4fc73ee94"], ["tonic", "tonic-0.14.9:011cab8db1"], ["tracing", "tracing-0.1.44:3a53bb6951"], ["tsfuse", "tsfuse-0.1.0:e486044257"], ["x509_parser", "x509-parser-0.18.1:992aecd88a"]],
+        "path": "crates/tierstore",
+        "test_flags": {"test": True, "doctest": False},
+    },
     "tierstore-0.3.0:b4844e71d9": {
         "crate": "tierstore",
         "version": "0.3.0",
@@ -20818,6 +20836,24 @@ UNITS = {
         "deps": [["async_trait", "async-trait-0.1.92:6825a3f7fe"], ["build_script_build", "tierstore-0.3.0:d2e789abea"], ["bytes", "bytes-1.12.1:3f1048489a"], ["futures", "futures-0.3.34:fea00c7f9c"], ["hex", "hex-0.4.3:ca202ae025"], ["serde", "serde-1.0.229:c482af4a9c"], ["serde_json", "serde_json-1.0.151:79261ca242"], ["sha2", "sha2-0.11.0:75d733815e"], ["thiserror", "thiserror-2.0.21:50ad34553c"], ["tokio", "tokio-1.53.3:e165c2215e"]],
         "path": "crates/tierstore",
         "test_flags": {"test": True, "doctest": True},
+    },
+    "tierstore-0.3.0:cec67fa745": {
+        "crate": "tierstore",
+        "version": "0.3.0",
+        "source": "path",
+        "target_kind": ["test"],
+        "crate_types": ["bin"],
+        "target_name": "fs_launchd_integration",
+        "mode": "test",
+        "side": "target",
+        "edition": "2024",
+        "crate_root": "tests/fs_launchd_integration.rs",
+        "features": ["s3", "server"],
+        "cfgs": ["feature=\"s3\"", "feature=\"server\""],
+        "profile": {"opt_level": "0", "lto": "false", "codegen_backend": None, "codegen_units": None, "debuginfo": "line-tables-only", "split_debuginfo": None, "debug_assertions": True, "overflow_checks": True, "rpath": False, "incremental": False, "panic": "unwind", "strip": {"deferred": "None"}},
+        "deps": [["arc_swap", "arc-swap-1.9.3:2d1933e6d2"], ["async_trait", "async-trait-0.1.92:6b15272eec"], ["aws_sdk_s3", "aws-sdk-s3-1.96.0:38a0795344"], ["aws_smithy_http_client", "aws-smithy-http-client-1.5.2:fe5dd55775"], ["base64", "base64-0.23.1:8d223d0254"], ["build_script_build", "tierstore-0.3.0:91ca44011f"], ["bytes", "bytes-1.12.1:b6878f8100"], ["clap", "clap-4.6.7:8a60358b22"], ["crc", "crc-3.4.0:551314d865"], ["crc32c", "crc32c-0.6.8:03d511b56f"], ["crc32fast", "crc32fast-1.5.2:201dcdb227"], ["futures", "futures-0.3.34:83d0f2862b"], ["hex", "hex-0.4.3:40d02ced6b"], ["hmac", "hmac-0.13.0:c5117876d2"], ["http_body_util", "http-body-util-0.1.5:853e9c6492"], ["hyper", "hyper-1.12.0:c35ae536bd"], ["hyper_util", "hyper-util-0.1.21:debadc14b5"], ["md5", "md-5-0.11.0:5ba434dd21"], ["nfsserve", "nfsserve-0.11.0:53975e7c93"], ["objstore_conformance", "objstore-conformance-0.1.0:39afe94ba5"], ["objstore_s3", "objstore-s3-0.1.0:5d051ca978"], ["percent_encoding", "percent-encoding-2.3.2:5d11f2cce8"], ["prost", "prost-0.14.6:019e29a078"], ["rcgen", "rcgen-0.14.10:0dee32e495"], ["reqwest", "reqwest-0.13.5:f2a178de4e"], ["ring", "ring-0.17.14:819f3dfde0"], ["roxmltree", "roxmltree-0.21.1:d0956532b6"], ["rustix", "rustix-1.1.5:1b23940afa"], ["rustls", "rustls-0.23.46:330fd754ac"], ["rustls_native_certs", "rustls-native-certs-0.8.4:a34d2982e8"], ["serde", "serde-1.0.229:5a775da5d0"], ["serde_json", "serde_json-1.0.151:4e085d7166"], ["sha2", "sha2-0.11.0:e2096870d2"], ["thiserror", "thiserror-2.0.21:c826f66dcf"], ["tierstore", "tierstore-0.3.0:4894bb0177"], ["tierstore", "tierstore-0.3.0:4894bb0177"], ["tierstore", "tierstore-0.3.0:f1cd1e0a5e"], ["tierstore_fetch", "tierstore-fetch-0.1.0:2a7af3f3b9"], ["tierstore_fetch_api", "tierstore-fetch-api-0.1.0:9744bdf2c6"], ["tierstore_format", "tierstore-format-0.1.0:0fb2bc2513"], ["tierstore_hashpool", "tierstore-hashpool-0.1.0:aaa1136e30"], ["tierstore_list", "tierstore-list-0.1.0:ada6351403"], ["tierstore_testkit", "tierstore-testkit-0.1.0:d8efd55d94"], ["tierstore_tree", "tierstore-tree-0.1.0:05e2278fff"], ["tierstore_trees_api", "tierstore-trees-api-0.1.0:6d68f77b70"], ["tokio", "tokio-1.53.3:000391e2b4"], ["tokio_rustls", "tokio-rustls-0.26.6:c90206c8a4"], ["toml", "toml-1.1.8+spec-1.1.0:d4fc73ee94"], ["tonic", "tonic-0.14.9:011cab8db1"], ["tracing", "tracing-0.1.44:3a53bb6951"], ["tsfuse", "tsfuse-0.1.0:e486044257"], ["x509_parser", "x509-parser-0.18.1:992aecd88a"]],
+        "path": "crates/tierstore",
+        "test_flags": {"test": True, "doctest": False},
     },
     "tierstore-0.3.0:d2e789abea": {
         "crate": "tierstore",

@@ -47,7 +47,7 @@
 //! `local_cache/descriptors.rs`).
 
 mod mount;
-mod put;
+pub(in crate::server) mod put;
 pub(in crate::server) mod request;
 
 use std::os::unix::fs::{MetadataExt as _, PermissionsExt as _};

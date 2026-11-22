@@ -180,6 +180,7 @@ fn chown_calls(mac: &Mac, uid: &str, gid: &str) -> Vec<String> {
         format!("chown {uid}:{gid} {}", at("log")),
         format!("chown {uid}:{gid} {}", at("run")),
         format!("chown {uid}:{gid} {}", at("job-trees")),
+        format!("chown {uid}:{gid} {}", at("put")),
     ]
 }
 
@@ -200,6 +201,7 @@ fn assert_directories(mac: &Mac) {
         assert_eq!(mac.mode(sub), Some(0o700), "{sub}");
     }
     assert_eq!(mac.mode("job-trees"), Some(0o755));
+    assert_eq!(mac.mode("put"), Some(0o755));
 }
 
 #[test]
@@ -242,6 +244,7 @@ fn on_a_fresh_mac_it_makes_the_account_with_the_highest_free_id_and_the_director
             "usr/local/tierstore/etc",
             "usr/local/tierstore/job-trees",
             "usr/local/tierstore/log",
+            "usr/local/tierstore/put",
             "usr/local/tierstore/run",
         ]
     );

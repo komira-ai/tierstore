@@ -4,10 +4,13 @@
 //!
 //! A frontend uses the core in one of two ways. With opens: [`Core::open`] gives a handle that
 //! [`Core::read`] reads and [`Core::release`] closes, and every lookup the kernel makes is counted
-//! until it is forgotten ([`Core::forget`]), so that a detached tree stays in memory while the
-//! kernel holds one of its inodes. By inode alone ([`Core::read_ino`], in `core/read.rs`): no
+//! until it is forgotten ([`Core::forget`]), so that a detached tree leaves memory as soon as the
+//! kernel holds none of its inodes. By inode alone ([`Core::read_ino`], in `core/read.rs`): no
 //! handle, no open and no count, because the protocol has no open, release or forget; a tree
-//! leaves memory when it is detached. `Settings::count_lookups` chooses.
+//! leaves memory when it is detached. `Settings::count_lookups` chooses. Either way a detached
+//! tree that no request has named for `fs.tree_idle_secs` leaves memory at the sweep for idle
+//! trees, whatever inodes of it the kernel holds, and is read again when one is named
+//! (`core/memory.rs`): the trees in memory are those attached and those detached lately.
 //!
 //! The namespace is the mount's root (`ino::ROOT`), `trees/` (`ino::TREES`) and the directories
 //! above the fs locations of the node's placements (`core/placed.rs`); below `trees/`
@@ -199,9 +202,9 @@ pub(super) struct Settings {
     /// numbers of the file handles this core gives out.
     #[cfg(any(target_os = "linux", test))]
     pub generation: u32,
-    /// Whether the lookups of a tree's inodes are counted and a detached tree stays in memory
-    /// until they are forgotten (a frontend that is told of forgets). If not, a tree is dropped
-    /// when it is detached.
+    /// Whether the lookups of a tree's inodes are counted, so that a detached tree leaves memory
+    /// when they are all forgotten (a frontend that is told of forgets), or else at the sweep for
+    /// idle trees. If not, a tree is dropped when it is detached.
     pub count_lookups: bool,
     /// How long a tree a lookup attached stays attached with no request naming it
     /// (`fs.tree_idle_secs`).
@@ -268,6 +271,8 @@ pub(in crate::server) struct Core {
     open_files: blob::OpenFiles,
     /// The lines said about the requests that failed, and the counts not said (`core/said.rs`).
     lines: said::Lines,
+    /// What the trees in memory held at the last line that said it (`Core::say_memory`).
+    memory_said: Mutex<Option<memory::Footprint>>,
     /// The requests served, by name, for the tests that count what reaches the core.
     #[cfg(test)]
     pub(super) served: Mutex<Vec<&'static str>>,
@@ -329,6 +334,7 @@ impl Core {
             next_handle: AtomicU64::new(1),
             open_files: blob::OpenFiles::new(),
             lines: said::Lines::default(),
+            memory_said: Mutex::new(None),
             #[cfg(test)]
             served: Mutex::new(Vec::new()),
             #[cfg(test)]
@@ -502,8 +508,8 @@ impl Core {
 
     /// Ends every attachment of `run`: the failures its attachments recorded, or none if it
     /// attached nothing. A tree no run has now and no lookup attached is unpinned, with no lock of
-    /// the core's held but that of its pins (`Core::free_tree`), and left memory when the kernel
-    /// forgets its inodes.
+    /// the core's held but that of its pins (`Core::free_tree`), and leaves memory when the kernel
+    /// forgets its inodes, or at the sweep once no request has named it for `fs.tree_idle_secs`.
     pub(super) fn detach(&self, run: &str) -> Option<Vec<Failure>> {
         let (freed, failures, _freeing) = {
             let _lifecycle = locked(&self.lifecycle);

@@ -202,10 +202,10 @@ fn an_uncounted_tree_that_is_attached_stays() {
     let core = &rig.core;
     core.forget(bin, 2);
     rig.clock.advance(TREE_IDLE * 2);
-    assert_eq!(core.drop_idle_uncounted(1), 0);
+    assert_eq!(core.drop_idle(1), 0);
     assert_eq!(core.trees_in_memory(), 1);
     assert!(core.detach(RUN).is_some());
-    assert_eq!(core.drop_idle_uncounted(1), 1);
+    assert_eq!(core.drop_idle(1), 1);
     assert_eq!(core.trees_in_memory(), 0);
 }
 

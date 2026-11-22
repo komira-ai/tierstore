@@ -19,12 +19,27 @@
 //! left memory would otherwise be gone with it, and the tree would leave at a later forget while
 //! the kernel still held its inodes.
 //!
+//! The count is a hint of when a tree may leave, not a hold on it: the kernel forgets inodes only
+//! under memory pressure, so a tree whose inodes it keeps would stay in memory as long as the
+//! process lives, and the process would grow with every tree any job ever named. So a tree that
+//! no run and no lookup has attached, and that no request has named for `fs.tree_idle_secs`,
+//! leaves memory at the sweep for idle trees whatever its count ([`Core::drop_idle`]). Every
+//! inode number of a tree is derivable (`ino.rs`): a request that names one of its inodes after
+//! that reads the tree again and is answered as before, while the tree can be read (a tree that
+//! is gone by then, its root manifest no longer upstream or its placement ended, is `ENOENT`, as
+//! after a restart), and a forget of a tree that is not in memory changes nothing. The trees in memory are therefore those attached, by a run or by a
+//! lookup, and those detached that a request named within `fs.tree_idle_secs` and the time
+//! between two sweeps (a quarter of it, at most a minute).
+//!
 //! A forget of more lookups than the tree has counted means that this process did not count
-//! every lookup the kernel holds. That is the case after a restart or a hand-over, since
-//! the kernel keeps its inodes and the counts start at zero again. Such a tree is
-//! *uncounted*: no forget takes it out of memory. It leaves when no run and no lookup has it
-//! attached and no request has named it for `fs.tree_idle_secs`, at the sweep for idle trees
-//! ([`Core::drop_idle_uncounted`]).
+//! every lookup the kernel holds. That is the case after a restart or a hand-over, since the
+//! kernel keeps its inodes and the counts start at zero again, and for a tree read again after
+//! the sweep took it out. Such a tree is *uncounted*: no forget takes it out of memory, and it
+//! leaves at the sweep as any other idle tree does.
+//!
+//! At each look for idle trees the trees in memory are said on stderr at info, when they have
+//! changed since the line before: how many, how many of them attached, their entries and an
+//! estimate of the bytes they hold ([`Core::say_memory`]).
 //!
 //! Every read of a tree after the first in this process is said on stderr at info, with its
 //! entries, its time, and the requests that waited for it. A read that took
@@ -56,6 +71,27 @@ const STOPPED: &str = "the read of the tree stopped before it ended";
 
 /// What a read of a tree ended with: the tree, now in memory, or why it was not read.
 type Read = Result<Arc<Loaded>, Unread>;
+
+/// What the trees in memory hold, as a look says it ([`Core::say_memory`]).
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
+pub(super) struct Footprint {
+    /// The trees in memory.
+    trees: usize,
+    /// Those of them a run or a lookup has attached.
+    attached: usize,
+    /// Their entries.
+    entries: u64,
+    /// The bytes they hold on the heap, estimated (`Tree::heap_bytes`).
+    bytes: u64,
+}
+
+/// A tree taken out of memory, and the map it was taken out of, which [`Core::free`] frees after
+/// every lock is released.
+struct Gone {
+    number: u64,
+    map: Arc<HashMap<u64, Arc<Loaded>>>,
+    loaded: Arc<Loaded>,
+}
 
 /// A read of a tree that is running, and its end, which the requests that wait for it take.
 #[derive(Default)]
@@ -269,22 +305,42 @@ impl Core {
     }
 
     /// Takes out of the map the tree `number`, which the caller has marked as removed, and frees
-    /// it after every lock is released, unless a lookup has put it back since; whether it did.
-    fn take_out(&self, number: u64, loaded: Arc<Loaded>) -> bool {
+    /// it, unless a lookup has put it back since.
+    fn take_out(&self, number: u64, loaded: Arc<Loaded>) {
+        if let Some(gone) = self.unmap(number, loaded) {
+            self.free(gone);
+        }
+    }
+
+    /// Takes out of the map the tree `number`, which the caller has marked as removed, unless a
+    /// lookup has put it back since: what is to be freed after every lock is released
+    /// ([`Core::free`]).
+    fn unmap(&self, number: u64, loaded: Arc<Loaded>) -> Option<Gone> {
         #[cfg(test)]
         if let Some(hook) = locked(&self.hooks.marked).as_ref() {
             hook(self);
         }
-        let gone = self.trees.take_out(number, &loaded);
-        let taken = gone.is_some();
-        drop(gone);
+        let map = self.trees.take_out(number, &loaded)?;
+        Some(Gone {
+            number,
+            map,
+            loaded,
+        })
+    }
+
+    /// Frees the tree `gone`, with no lock of the core held, and says the counts of its failures
+    /// not said yet.
+    fn free(&self, gone: Gone) {
+        let Gone {
+            number,
+            map,
+            loaded,
+        } = gone;
+        drop(map);
         drop(loaded);
-        if taken {
-            for line in self.lines.unsaid(self.now(), Some(number)) {
-                tracing::warn!("{line}");
-            }
+        for line in self.lines.unsaid(self.now(), Some(number)) {
+            tracing::warn!("{line}");
         }
-        taken
     }
 
     /// The tree in memory, read if it is not, counting one more lookup of it.
@@ -328,19 +384,69 @@ impl Core {
         }
     }
 
-    /// Takes out of memory every uncounted tree that no run and no lookup has attached and that
-    /// no request has named for `idle` milliseconds of the core's clock; how many.
-    pub(super) fn drop_idle_uncounted(&self, idle: u64) -> usize {
-        let now = self.now();
-        let mut dropped = 0;
-        for (number, loaded) in self.trees.all() {
-            let idle_now = now.saturating_sub(loaded.used.load(Ordering::Acquire)) >= idle;
-            if idle_now && !self.attached(number) && loaded.lookups.remove_if_uncounted() {
-                dropped += usize::from(self.take_out(number, loaded));
-            }
+    /// What the trees in memory hold now.
+    pub(super) fn footprint(&self) -> Footprint {
+        let trees = self.trees.all();
+        let state = self.state();
+        trees
+            .iter()
+            .fold(Footprint::default(), |sum, (number, loaded)| Footprint {
+                trees: sum.trees + 1,
+                attached: sum.attached + usize::from(state.attachments.is_attached(*number)),
+                entries: sum.entries + loaded.tree.len() as u64,
+                bytes: sum.bytes + loaded.tree.heap_bytes(),
+            })
+    }
+
+    /// Says on stderr at info what the trees in memory hold, unless it is what the line before
+    /// said.
+    pub(super) fn say_memory(&self) {
+        let now = self.footprint();
+        let mut said = locked(&self.memory_said);
+        if *said != Some(now) {
+            *said = Some(now);
+            tracing::info!("{}", memory_line(now));
         }
+    }
+
+    /// Takes out of memory every tree that no run and no lookup has attached and that no request
+    /// has named for `idle` milliseconds of the core's clock, whatever lookups of it the kernel
+    /// holds (module docs); how many. The trees are chosen and taken out of the map under the
+    /// lifecycle lock, under which every attach attaches, so that no tree attached since it was
+    /// found detached leaves; they are freed after it is released.
+    pub(super) fn drop_idle(&self, idle: u64) -> usize {
+        // Every tree in memory is held here until the lock is released, so that none is freed
+        // under it, the trees that stay included.
+        let all = self.trees.all();
+        let gone: Vec<Gone> = {
+            let _lifecycle = locked(&self.lifecycle);
+            let now = self.now();
+            all.iter()
+                .filter(|(number, loaded)| {
+                    now.saturating_sub(loaded.used.load(Ordering::Acquire)) >= idle
+                        && !self.attached(*number)
+                        && loaded.lookups.remove()
+                })
+                .filter_map(|(number, loaded)| self.unmap(*number, Arc::clone(loaded)))
+                .collect()
+        };
+        drop(all);
+        let dropped = gone.len();
+        gone.into_iter().for_each(|gone| self.free(gone));
         dropped
     }
+}
+
+/// The line that says what the trees in memory hold: their bytes in MiB, rounded up.
+fn memory_line(now: Footprint) -> String {
+    format!(
+        "tierstore fs: {} {} in memory, {} of them attached: {} entries, about {} MiB",
+        now.trees,
+        if now.trees == 1 { "tree" } else { "trees" },
+        now.attached,
+        now.entries,
+        now.bytes.div_ceil(1 << 20),
+    )
 }
 
 /// What the line of a failed read adds for the `unsaid` failed reads of the tree before it that
@@ -379,3 +485,7 @@ fn said(
 #[cfg(test)]
 #[path = "memory_tests.rs"]
 mod tests;
+
+#[cfg(test)]
+#[path = "memory_idle_tests.rs"]
+mod idle_tests;

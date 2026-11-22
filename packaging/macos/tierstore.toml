@@ -1,9 +1,11 @@
 # /usr/local/tierstore/etc/tierstore.toml: tierstore on a Mac, as hostkeeper/units/tierstore.plist
 # starts it. root:_tierstore, mode 0640. crates/tierstore/docs/configuration.md says what every key does.
 #
-# On a Mac tierstore is only a local read cache on loopback: no hot tier, no server role, no hand-off
-# socket and no firewall redirect. Reads that miss the cache go to the tierstore S3 servers of the
-# storage nodes, port 9300.
+# On a Mac tierstore is a local cache on loopback: no hot tier, no server role, no hand-off socket and
+# no firewall redirect. Reads that miss the cache go to the tierstore S3 servers of the storage
+# nodes, port 9300. It writes one kind of object there: the objects the Mac's jobs commit into their
+# put directories under the put ingest's root (crates/tierstore/docs/operations.md, "The put
+# ingest"), so the node takes writes (write_through) and its upstream key may write cas/b/.
 #
 # Edit before use: replace the six addresses in [cold_store] (documentation addresses here) with
 # the addresses of the storage nodes, and set the bucket and the cache budget. Keep the s3 interface as
@@ -42,6 +44,10 @@ read_only_key_files = ["/usr/local/tierstore/etc/daemons.key"]
 path             = "/usr/local/tierstore/cache"
 budget           = "200GiB"
 whole_fill_limit = "128MiB"
+write_through    = true
+# The root of the jobs' put directories, made by the installer package (_tierstore, 0755);
+# jobscheduler's agent makes each job's cas/b/<build>/<nonce> under it.
+put_ingest       = "/usr/local/tierstore/put"
 
 [cold_store]
 kind             = "s3"
@@ -56,7 +62,8 @@ endpoints        = [
     "http://192.0.2.5:9300",
     "http://192.0.2.6:9300",
 ]
-credentials_file = "/usr/local/tierstore/etc/upstream-read.key"
+# A key of the storage nodes that may read cas/ and write cas/b/: the put ingest's objects.
+credentials_file = "/usr/local/tierstore/etc/upstream-write.key"
 
 [[policy]]
 prefix = "cas/"

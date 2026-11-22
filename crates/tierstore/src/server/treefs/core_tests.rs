@@ -585,8 +585,8 @@ fn tell_live_names_the_trees_attached_now() {
     );
 }
 
-/// Asserts that a tree stays in memory while the kernel holds an inode of it, however the runs
-/// went, leaves memory at the last forget, and is read again, with the same inode numbers, when a
+/// Asserts that a tree that is not idle stays in memory while the kernel holds an inode of it,
+/// however the runs went, leaves memory at the last forget, and is read again, with the same inode numbers, when a
 /// request names one of its inodes; that the forget of a lookup this process did not count (the
 /// one that request stands for) keeps the tree, uncounted (`core/memory.rs`); and that a forget
 /// of a tree not in memory, or of the namespace, changes nothing.

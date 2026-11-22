@@ -177,10 +177,11 @@ impl Core {
     /// Ends the implicit attachment of every tree no request has named for `fs.tree_idle_secs`;
     /// how many ended. A tree no run has is then unpinned, with no lock of the core held but that
     /// of its pins (`Core::free_tree`), and leaves memory when the kernel holds none of its
-    /// inodes, as at the detach of its last run. Nothing ends while a successor takes over. An
-    /// uncounted tree that nothing has attached and no request has named for that long leaves
-    /// memory too (`core/memory.rs`). The opens that failed under an implicit attachment that ends
-    /// are said on stderr, one line for the tree ([`ended_with`]).
+    /// inodes, as at the detach of its last run. Nothing ends while a successor takes over. Then
+    /// every tree that nothing has attached and no request has named for that long leaves memory,
+    /// whatever lookups of it the kernel holds (`Core::drop_idle`, `core/memory.rs`). The opens
+    /// that failed under an implicit attachment that ends are said on stderr, one line for the
+    /// tree ([`ended_with`]).
     pub(in crate::server::treefs) fn detach_idle(&self) -> usize {
         let now = self.now();
         let idle = u64::try_from(self.settings.tree_idle.as_millis()).unwrap_or(u64::MAX);
@@ -220,7 +221,7 @@ impl Core {
         for (number, digest) in &freed {
             self.free_tree(*number, digest);
         }
-        let _ = self.drop_idle_uncounted(idle);
+        let _ = self.drop_idle(idle);
         freed.len()
     }
 

@@ -613,6 +613,7 @@ async fn a_name_that_is_no_version_is_refused_and_the_last_version_cannot_be_mov
         ("junk", "oci/tags/app/junk/junk"),
         ("letters", "oci/tags/app/letters/abcdefghijklmnopqrst"),
         ("big", "oci/tags/app/big/99999999999999999999"),
+        ("short", "oci/tags/app/short/12"),
     ];
     for (tag, key) in odd {
         rig.memory

@@ -46,6 +46,9 @@ futures = "0.3.34"
 # replay mark. MIT OR Apache-2.0; two of its dependencies are BSL-1.0 and 0BSD (deny.toml names
 # them as exceptions).
 fjall = "3.1.13"
+# The FSEvents stream the put ingest of `tierstore` watches its root with on macOS (MIT): a safe
+# API over the CoreServices calls, which need `unsafe` in any crate.
+fsevent = "2.3.0"
 hex = "0.4.3"
 # Header maps; already in the tree through hyper.
 http = "1.5.0"

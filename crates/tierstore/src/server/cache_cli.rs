@@ -70,6 +70,7 @@ use super::local_cache::trees::{TreeStore, TreesConfig};
 use super::local_cache::{CacheConfig, Disk, Every, LocalCache, Mode, SystemDisk, check_local};
 use super::oci::OciListener;
 use super::provider::{self, Provider, ProviderFlags};
+use super::put_ingest::PutIngest;
 use super::stop_watcher::{
     oci_cut_note, serve_fronts, serve_oci, serve_trees, stop_watcher, trees_cut_note,
 };
@@ -253,6 +254,7 @@ pub(super) async fn serve_cache(
         trees: Some(settings.trees.clone()),
         trees_front,
         provider: settings.provider.as_ref(),
+        put_ingest: settings.put_ingest.as_deref(),
     };
     serve_front(
         cache,
@@ -297,6 +299,9 @@ pub(super) struct Fronts<'a> {
     /// node's trees, while the cache holds the lock of its directory (see
     /// [`provider`](super::provider)).
     pub(super) provider: Option<&'a ProviderFlags>,
+    /// The root of the put ingest (`local_cache.put_ingest`), ingested while the cache holds the
+    /// lock of its directory (see [`put_ingest`](super::put_ingest)); none for a node without one.
+    pub(super) put_ingest: Option<&'a std::path::Path>,
 }
 
 /// Serves the S3 front (and the OCI front, if there is a setup) over `cache`, with the loops of
@@ -374,7 +379,8 @@ pub(super) async fn serve_front(
     let trees_stopped = oci_stopped.clone();
     // One Notify for each loop: `notify_one` wakes one waiter, and keeps the wake for a loop that
     // is not waiting just now.
-    let halts: [Arc<Notify>; 8] = [
+    let halts: [Arc<Notify>; 9] = [
+        Arc::new(Notify::new()),
         Arc::new(Notify::new()),
         Arc::new(Notify::new()),
         Arc::new(Notify::new()),
@@ -392,6 +398,7 @@ pub(super) async fn serve_front(
         trees_halt,
         provider_halt,
         watch_halt,
+        ingest_halt,
         _,
     ] = halts.clone();
     let beating = fronts.beating.clone();
@@ -459,7 +466,14 @@ pub(super) async fn serve_front(
             tracing::debug!("tierstore: mount provider ended");
         }
     };
-    let ((drained, (oci_cut, trees_cut)), (), (), (), (), (), (), (), ()) = tokio::join!(
+    let ingesting = async {
+        if let Some(root) = fronts.put_ingest {
+            let ingest = PutIngest::new(cache.clone(), root.to_owned());
+            ingest.serve(ingest_halt).await;
+            tracing::debug!("tierstore: put ingest ended");
+        }
+    };
+    let ((drained, (oci_cut, trees_cut)), (), (), (), (), (), (), (), (), ()) = tokio::join!(
         serving,
         beside,
         maintaining,
@@ -468,7 +482,8 @@ pub(super) async fn serve_front(
         filling,
         sweeping,
         providing,
-        watching
+        watching,
+        ingesting
     );
     watcher.abort();
     super::build_info::stderr_log::notes(&cut_note(drained));

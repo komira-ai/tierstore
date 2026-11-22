@@ -13,6 +13,11 @@
 //! unmounts lazily, and [`Served`]'s drop drops every parked replier (each answers `EIO`) and
 //! stops the readers, so a failed check never leaves a caller of this process waiting in the
 //! kernel.
+//!
+//! Every fork of a check (a [`child`], `fusermount3`, a mount or unmount that may go through it)
+//! and every unmount runs through [`one_at_a_time`]: a child of another check holds every
+//! descriptor of this process until it execs, so an unmount that met one could find its mount
+//! busy (`tierstore_testkit::forks`).
 #![allow(dead_code, reason = "each test binary uses a part of the helpers")]
 #![allow(
     clippy::unwrap_used,
@@ -45,7 +50,7 @@ use tsfuse::{
     Session, Tokens,
 };
 
-use crate::kernel::{skip, unavailable};
+use crate::kernel::{one_at_a_time, skip, unavailable};
 
 /// The root's inode.
 pub const ROOT: u64 = 1;
@@ -640,7 +645,7 @@ impl Mounted {
         let mp = dir.path().join("mnt");
         std::fs::create_dir(&mp).unwrap();
         let real_mp = std::fs::canonicalize(&mp).unwrap();
-        let (device, made) = mount(&Mounter::default(), &mp, options).unwrap();
+        let (device, made) = one_at_a_time(|| mount(&Mounter::default(), &mp, options)).unwrap();
         let mounted = Self {
             mount: Some(made),
             mp,
@@ -685,9 +690,12 @@ impl Mounted {
         self.mount.take().unwrap()
     }
 
-    /// Unmounts (not lazily); the readers then end.
+    /// Unmounts (not lazily); the readers then end. A failed unmount leaves the mount in the
+    /// guard, whose drop then detaches it.
     pub fn unmount(mut self) {
-        self.take().unmount(false).unwrap();
+        let mount = self.mount().clone();
+        one_at_a_time(|| mount.unmount(false)).unwrap();
+        self.mount = None;
     }
 
     /// The mount's entry in `/proc/self/mountinfo`.
@@ -701,7 +709,7 @@ impl Drop for Mounted {
     fn drop(&mut self) {
         if let Some(mount) = self.mount.take() {
             let _ = mount.abort();
-            let _ = mount.unmount(true);
+            let _ = one_at_a_time(|| mount.unmount(true));
         }
     }
 }
@@ -821,7 +829,7 @@ pub fn pread(path: PathBuf, offset: u64, len: usize) -> Caller {
 }
 
 /// The command that runs the test `name` of this binary alone, as a child process (the test is
-/// `#[ignore]`d, so only a parent that asks for it runs it).
+/// `#[ignore]`d, so only a parent that asks for it runs it). Spawn it inside [`one_at_a_time`].
 #[must_use]
 pub fn child(name: &str) -> Command {
     let mut command = Command::new(std::env::current_exe().unwrap());

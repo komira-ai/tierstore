@@ -240,22 +240,31 @@ fn refused_background_reads_are_counted_and_rows_summarise() {
     assert!(
         md.contains("| y | 0.0 | - | 1.0 | 1.0 | 1.0 | - | 2.0 | 0/0 | 0.0 | 2.0 | 0 | 0 | 0 |  |")
     );
-    // A local cell whose drives do not exist fails in its load.
+    // A local cell whose drive does not exist fails in its writes. Reads of a missing drive are
+    // answered (refused), so the cell runs no reads: they would share the step clock with the
+    // writes and could spend the whole window before the writes first read it.
     let mut bad = ds.clone();
     bad.insert("hdd1".into(), f.path().join("none"));
     let mut w = shrink(base("hdd1"));
     w.writes = true;
-    assert!(
-        local_cell(
-            &w,
-            &bad,
-            &small(),
-            &clock,
-            None,
-            Duration::ZERO,
-            Duration::from_millis(10)
+    w.load.background = 0;
+    w.load.demand = 0;
+    let e = local_cell(
+        &w,
+        &bad,
+        &small(),
+        &clock,
+        None,
+        Duration::ZERO,
+        Duration::from_millis(10),
+    )
+    .unwrap_err();
+    assert_eq!(
+        e.to_string(),
+        format!(
+            "create {}: No such file or directory (os error 2)",
+            f.path().join("none/w0.pack").display()
         )
-        .is_err()
     );
 }
 
