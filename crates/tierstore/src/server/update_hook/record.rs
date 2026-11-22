@@ -234,30 +234,40 @@ impl Record {
     }
 
     /// Whether the record, as a step of the update `params` name finds or leaves it, is that
-    /// update's commit. A committed record a `prepare` finds is the last update's, at rest or
-    /// left in flight by a `cleanup` that did not finish: the `prepare` starts another update,
-    /// which nothing has committed yet. A `rollback` of an update that was never recorded (its
-    /// `prepare` failed or was deferred) finds nothing of it committed.
+    /// update's commit. A record at rest is the last update's: a `prepare` starts another one,
+    /// which nothing has committed yet, and a `rollback` of an update that was never recorded
+    /// (its `prepare` failed) finds nothing of it committed.
     pub(super) fn commits(&self, step: Step, params: &Params) -> bool {
         self.committed()
-            && match step {
-                // A committed record a `prepare` finds is an earlier update's, which it finishes.
-                Step::Prepare => false,
-                Step::Rollback => self.is_of(params),
-                _ => true,
-            }
+            && (self.updating
+                || match step {
+                    Step::Prepare => false,
+                    Step::Rollback => self.is_of(params),
+                    _ => true,
+                })
     }
 
     /// The success of a `rollback` whose update was never recorded: a `prepare` that failed
-    /// records nothing, and the record is on the last update, which the params do not name: at
-    /// rest, or committed and left in flight by a `cleanup` that did not finish. `None` when the
-    /// record is of an update in flight that is not committed, of the one `params` name, or of
+    /// records nothing, and the record is at rest on the last update, which the params do not
+    /// name. `None` when the record is of an update in flight, of the one `params` name, or of
     /// none (a record at rest with no update on it says so itself).
     pub(super) fn nothing_to_roll_back(&self, params: &Params) -> Option<String> {
+        self.nothing_to_roll_back_over(params, false)
+    }
+
+    /// [`Record::nothing_to_roll_back`], and, when `finished_by_prepare`, also over a record that
+    /// is committed and still in flight on the last update, which a `prepare` of the systemd arm
+    /// finishes before it records its own.
+    pub(super) fn nothing_to_roll_back_over(
+        &self,
+        params: &Params,
+        finished_by_prepare: bool,
+    ) -> Option<String> {
+        let at_rest = !self.updating || (finished_by_prepare && self.committed());
         let last = self
             .to
             .as_ref()
-            .filter(|_| (!self.updating || self.committed()) && !self.is_of(params))?;
+            .filter(|_| at_rest && !self.is_of(params))?;
         let how = if self.updating {
             "committed, and still in flight,"
         } else {

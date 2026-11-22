@@ -171,7 +171,7 @@ A release of the Debian or RPM package is updated the same way: its units are th
 ### What this does not do yet
 
 - An update is a hand-over only when both releases list `handoff-socket-v1` in `tierstore --capabilities` (and `handoff-cache-v1` too, for a configuration with a `[local_cache]` table) and the hot tier is not a directory; otherwise it is a restart, with a gap. The configuration need not name a `handoff_socket`: a release that lists `handoff-state-dir-v1` defaults it to `handoff.sock` in the unit's state directory, and an update from one that does not is a restart. This binary lists `handoff-socket-v1`, so the first update that hands over is the one from this release to a later one; the update to this release from one that does not list the words is a restart, which the hook chooses itself ([the hand-over socket](update-hook.md#the-hand-over-socket)).
-- An instance stops in at most 975 s (the 70 s `server.drain_lb_wait`, the 900 s drain and 5 s for the lease); the unit's `TimeoutStopSec=` is above it, so a `cleanup` that finds the old instance still draining is deferred and run again.
+- An instance stops in at most 975 s (the 70 s `server.drain_lb_wait`, the 900 s drain and 5 s for the lease); the unit's `TimeoutStopSec=` is above it, so systemd does not kill a drain in progress. `cleanup` does not wait for the old instance's drain: it finishes the update at once and the old instance ends by itself ([an old instance that drains](update-hook.md#an-old-instance-that-drains)).
 
 ## Other ways to take it
 

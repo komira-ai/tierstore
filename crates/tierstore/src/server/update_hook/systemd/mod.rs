@@ -39,8 +39,8 @@
 //! steps on a node where an instance of it runs, between releases that both list
 //! `handoff-fs-v1`: `cutover` starts it after the store (the new instance takes the mount from the
 //! old one), `verify` and `cleanup` need it active, `cleanup` removes the old instance's marker
-//! and neither waits for it nor stops it, `rollback` puts it back before the store, `restore` starts the recorded
-//! instance after the store and `uninstall` stops the instances that run.
+//! and neither waits for it nor stops it, `rollback` puts it back before the store, `restore`
+//! starts the recorded instance after the store and `uninstall` stops the instances that run.
 //!
 //! Every step holds the lock of the state directory, holds the record to its rules before it
 //! acts, and sets state rather than doing things once, so a step run again after a crash
@@ -145,6 +145,18 @@ fn of_this_update(record: &Record, params: &Params) -> Result<(), Done> {
     Ok(())
 }
 
+/// Whether the record, as a step of the update `params` name finds or leaves it, is that update's
+/// commit ([`Record::commits`]), with the two cases this arm adds: a committed record still in
+/// flight that a `prepare` finds is the last update's, which it finishes before it records its
+/// own, and a `rollback` of another update finds nothing of that one committed.
+fn commits(record: &Record, step: Step, params: &Params) -> bool {
+    match step {
+        Step::Prepare => false,
+        Step::Rollback => record.committed() && record.is_of(params),
+        _ => record.commits(step, params),
+    }
+}
+
 /// Takes the lock and reads the record, which holds to its rules. `uninstall` reads none: it
 /// replaces the record whatever it says.
 fn open(step: Step, ports: &SystemdPorts<'_>) -> Result<(Lock, Option<Record>), Done> {
@@ -181,7 +193,7 @@ pub(super) fn run_step_with(
         fs,
         // The record as it stands says whether the update is committed, at rest included
         // ([`Record::commits`]).
-        committed: Cell::new(record.as_ref().is_some_and(|r| r.commits(step, params))),
+        committed: Cell::new(record.as_ref().is_some_and(|r| commits(r, step, params))),
         commit_written: Cell::new(false),
     };
     let mut done = dispatch(&c, step, params, record.as_ref()).unwrap_or_else(identity);
@@ -230,7 +242,7 @@ fn dispatch(
             verify::verify(c, params, record)
         }
         (Step::Rollback, Some(record)) => {
-            if let Some(detail) = record.nothing_to_roll_back(params) {
+            if let Some(detail) = record.nothing_to_roll_back_over(params, true) {
                 return Ok(Done::ok(detail));
             }
             of_this_update(record, params)?;
