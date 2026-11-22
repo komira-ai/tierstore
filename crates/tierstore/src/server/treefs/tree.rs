@@ -14,12 +14,17 @@ use crate::tree_image::ImageKind;
 use crate::tree_manifest::{BlobSource, EntryKind, TreeEntry};
 use crate::{Mode, TreeDigest, TreeImage};
 
+/// What the allocation of an `Arc<str>` holds besides the text: its two counts.
+const ARC_HEADER: usize = 2 * size_of::<usize>();
+
 /// The entries of one tree.
 #[derive(Debug)]
 pub(super) struct Tree {
     body: Body,
     /// The fs location of a placed tree: names joined by `/`.
     location: Option<String>,
+    /// The bytes the tree holds on the heap, estimated when it is made ([`Tree::heap_bytes`]).
+    heap: u64,
 }
 
 /// How the entries of a tree are held.
@@ -107,6 +112,15 @@ impl Tree {
                 next[parent as usize] += 1;
             }
         }
+        let names: usize = entries
+            .iter()
+            .map(|entry| entry.name.len() + ARC_HEADER)
+            .sum();
+        let heap = size_of::<TreeEntry>() * entries.capacity()
+            + names
+            + size_of::<u32>() * (starts.capacity() + kids.capacity())
+            + size_of::<u16>() * modes.capacity()
+            + location.as_ref().map_or(0, String::capacity);
         Self {
             body: Body::Listed {
                 entries,
@@ -115,6 +129,7 @@ impl Tree {
                 modes,
             },
             location,
+            heap: heap as u64,
         }
     }
 
@@ -126,10 +141,26 @@ impl Tree {
 
     /// The tree a placement shows at the fs location `location` that is the image `image`.
     pub(super) fn image(image: TreeImage, location: String) -> Self {
+        let keys: usize = image
+            .keys()
+            .iter()
+            .map(|key| size_of::<Arc<str>>() + key.len() + ARC_HEADER)
+            .sum();
+        let heap = image.bytes().len() + keys + location.capacity();
         Self {
             body: Body::Image(image),
             location: Some(location),
+            heap: heap as u64,
         }
+    }
+
+    /// The bytes the tree holds on the heap, an estimate made when it was made: for a flattened
+    /// tree its entries, their names, the tables of children and modes, and its location; for an
+    /// image the list's bytes, the keys of its packs and its location. The targets of links and
+    /// the keys of the packs a flattened tree's files are read from are shared by the entries
+    /// that name them and are not counted, nor is what the allocator adds to each block.
+    pub(super) fn heap_bytes(&self) -> u64 {
+        self.heap
     }
 
     /// The stored mode of the entry `index` of a placed tree; none for a tree of manifests.
