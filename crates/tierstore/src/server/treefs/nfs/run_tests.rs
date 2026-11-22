@@ -653,18 +653,18 @@ async fn dies() -> std::io::Result<()> {
 }
 
 /// A server that fails at once, as one whose accept failed.
-fn failing(
-    _listener: &NFSTcpListener<TreeNfs>,
+fn failing<'a>(
+    _listener: &'a NFSTcpListener<TreeNfs>,
     _ending: BoxFuture<'static, ()>,
-) -> BoxFuture<'_, std::io::Result<()>> {
+) -> BoxFuture<'a, std::io::Result<()>> {
     Box::pin(accept_fails())
 }
 
 /// A server that panics at once.
-fn panicking(
-    _listener: &NFSTcpListener<TreeNfs>,
+fn panicking<'a>(
+    _listener: &'a NFSTcpListener<TreeNfs>,
     _ending: BoxFuture<'static, ()>,
-) -> BoxFuture<'_, std::io::Result<()>> {
+) -> BoxFuture<'a, std::io::Result<()>> {
     Box::pin(dies())
 }
 

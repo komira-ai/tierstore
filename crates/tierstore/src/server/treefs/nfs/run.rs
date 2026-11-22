@@ -67,10 +67,10 @@ pub(super) type Serve = for<'a> fn(
 ) -> BoxFuture<'a, std::io::Result<()>>;
 
 /// The server of the protocol.
-fn handle(
-    listener: &NFSTcpListener<TreeNfs>,
+fn handle<'a>(
+    listener: &'a NFSTcpListener<TreeNfs>,
     ending: BoxFuture<'static, ()>,
-) -> BoxFuture<'_, std::io::Result<()>> {
+) -> BoxFuture<'a, std::io::Result<()>> {
     listener.handle_until(ending)
 }
 
