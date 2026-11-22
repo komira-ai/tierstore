@@ -866,7 +866,11 @@ fn a_command_killed_at_its_limit_is_a_failure_that_says_so() {
         "running /sbin/mount: did not end in 20000ms and was killed"
     );
     late.unmount().unwrap();
-    assert_eq!(listing_late.programs(), ["/sbin/mount", "/sbin/umount"]);
+    // The look above, then the unmount's own look and its first step.
+    assert_eq!(
+        listing_late.programs(),
+        ["/sbin/mount", "/sbin/mount", "/sbin/umount"]
+    );
 
     let nfs = NfsSettings {
         mount_user: Some("builder".to_owned()),

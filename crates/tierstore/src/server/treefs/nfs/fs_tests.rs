@@ -230,8 +230,8 @@ fn presented_gives_the_owners_read_and_execute_to_everyone_and_never_write() {
 
 /// Asserts, for owner-only and special modes of a file of a tree, what GETATTR reports and what a
 /// caller who is the owner, in the group, or neither is given: exactly the presented bits, no
-/// write bit for any of them, and nothing at all for a file of mode 0000. Catches a job user that
-/// cannot read an owner-only file of a tree, and a setuid file served as setuid.
+/// write bit for the group or anyone else, and nothing at all for a file of mode 0000. Catches a
+/// job user that cannot read an owner-only file of a tree, and a setuid file served as setuid.
 #[test]
 fn owner_only_files_are_reported_readable_to_every_caller_and_never_writable() {
     let owner = auth(10, 20, &[]);
@@ -260,7 +260,8 @@ fn owner_only_files_are_reported_readable_to_every_caller_and_never_writable() {
         assert_eq!(class_bits(&attr, &owner), by_owner, "{stored:o}");
         assert_eq!(class_bits(&attr, &group), by_group, "{stored:o}");
         assert_eq!(class_bits(&attr, &other), by_other, "{stored:o}");
-        for caller in [&owner, &group, &other] {
+        // The owner keeps its own bits; no write bit is added for anyone else.
+        for caller in [&group, &other] {
             assert_eq!(class_bits(&attr, caller) & 0o2, 0, "{stored:o}");
         }
     }

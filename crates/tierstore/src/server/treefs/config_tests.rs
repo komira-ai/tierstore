@@ -266,9 +266,12 @@ fn service_account(database: Database, name: &str) -> super::Found {
     }))
 }
 
-/// The needed keys with `owner` as the value of `fs.owner`.
+/// The needed keys with `owner` as the value of `fs.owner`, and the client group by number, so that
+/// only the owner is looked up.
 fn owned_by(owner: &str) -> String {
-    fs("").replace("1000:1001", owner)
+    fs("")
+        .replace("1000:1001", owner)
+        .replace("client_group = \"builders\"", "client_group = \"77\"")
 }
 
 /// Asserts that `fs.owner` takes a user and a group by name, each from its own database, and a
