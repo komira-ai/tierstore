@@ -6,8 +6,8 @@ use std::io::{BufRead as _, BufReader, Write as _};
 use std::os::unix::fs::MetadataExt as _;
 use std::os::unix::net::UnixStream as StdStream;
 
-use super::Running;
 use super::handoff_tests::{WAIT, getattr, handing, running, taking_over};
+use super::{Leaving, Running};
 use crate::server::handoff::testing::{ask, connect, send, within};
 use crate::server::handoff::{Handoff, Want, take_with_ready};
 use crate::server::treefs::nfs::fixtures::attached;
@@ -93,9 +93,9 @@ async fn a_successor_killed_at_each_step_leaves_the_old_instance_serving() {
     }
     let (new, _) = taking_over(&rig, &old).await;
     drop(client);
-    old.handed_over().await;
-    old.stop().await.unwrap();
-    new.stop().await.unwrap();
+    assert_eq!(old.ended().await, Leaving::Ended);
+    old.leave(Leaving::Signal).await.unwrap();
+    new.leave(Leaving::Signal).await.unwrap();
 }
 
 /// Asserts that a successor whose start fails after it has taken the socket and the running
@@ -126,9 +126,9 @@ async fn a_successor_whose_start_fails_after_done_leaves_the_old_instance_servin
     serves(&old, &mut client, &root, &digest, "later-run").await;
     let (new, _) = taking_over(&rig, &old).await;
     drop(client);
-    old.handed_over().await;
-    old.stop().await.unwrap();
-    new.stop().await.unwrap();
+    assert_eq!(old.ended().await, Leaving::Ended);
+    old.leave(Leaving::Signal).await.unwrap();
+    new.leave(Leaving::Signal).await.unwrap();
 }
 
 /// Asserts that a successor that has replaced the running process's control socket (as its start
@@ -212,8 +212,8 @@ async fn the_old_instance_ends_when_the_successor_says_ready_and_not_before() {
     let listener = taken.nfs.pop().unwrap();
     taken.ready.take().unwrap().send().await.unwrap();
     drop(client);
-    old.handed_over().await;
-    old.stop().await.unwrap();
+    assert_eq!(old.ended().await, Leaving::Ended);
+    old.leave(Leaving::Signal).await.unwrap();
     assert!(runner.calls().iter().all(|call| call[0] != "/sbin/umount"));
     drop(listener);
 }

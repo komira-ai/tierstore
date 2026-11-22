@@ -35,6 +35,9 @@ pub(crate) const DSCL_PROGRAM: &str = "/usr/bin/dscl";
 /// account (see [`SystemHost::check_config`]).
 pub(crate) const SUDO_PROGRAM: &str = "/usr/bin/sudo";
 
+/// Where macOS has `mount`, whose listing names every mount.
+pub(crate) const MOUNT_PROGRAM: &str = "/sbin/mount";
+
 /// Where a hook that runs as root finds the user and group ids of the service account.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 enum Accounts {
@@ -475,6 +478,24 @@ impl<'a> SystemHost<'a> {
 }
 
 impl Host for SystemHost<'_> {
+    /// Runs [`MOUNT_PROGRAM`] without arguments and looks for a line that has ` on <path> (`, as
+    /// `mount` prints a mount, for `path` as given and for the path it resolves to under the root
+    /// (a Mac's `/var` is a link to `/private/var`, and `mount` prints the resolved path). Any
+    /// status but 0 and a program that cannot be run are errors.
+    fn mounted(&self, path: &Path) -> Result<bool, PortError> {
+        let call = Call::new(MOUNT_PROGRAM, &[], self.timeout);
+        let output = checked(run(self.runner, &call, KIND)?, &call, KIND)?;
+        let listing = String::from_utf8_lossy(&output.stdout);
+        let real = fs::canonicalize(under(&self.root, path)).unwrap_or_else(|_| path.to_path_buf());
+        let marks = [
+            format!(" on {} (", path.display()),
+            format!(" on {} (", real.display()),
+        ];
+        Ok(listing
+            .lines()
+            .any(|line| marks.iter().any(|mark| line.contains(mark.as_str()))))
+    }
+
     /// Reads the node's configuration file `path` under the root: at most [`CONFIG_MAX`] bytes of
     /// UTF-8. A file that is not there is `None`.
     fn config(&self, path: &Path) -> Result<Option<String>, PortError> {

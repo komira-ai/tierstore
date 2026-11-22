@@ -4,8 +4,8 @@
 use super::config::NfsSettings;
 use super::fixtures::{UID, attached, blob_of, endless, fs_of};
 use super::wire_client::{
-    Client, Cred, Dec, Enc, GETATTR, LINK, LOOKUP, MKNOD, NFS, READ, REMOVE, RENAME, SETATTR,
-    WRITE, serve,
+    ACCESS, Client, Cred, Dec, Enc, GETATTR, LINK, LOOKUP, MKNOD, NFS, READ, REMOVE, RENAME,
+    SETATTR, WRITE, serve,
 };
 use crate::server::treefs::ino;
 
@@ -193,5 +193,38 @@ async fn rpc_with_auth_none_is_denied() {
     let null = client.call(NFS, 0, Cred::None, Enc::default()).await;
     assert_eq!((null.accepted, null.body.len()), (0, 0));
     assert_eq!(client.mount("/").await, root);
+    task.abort();
+}
+
+/// Asserts that ACCESS over the wire as a user who is neither the owner nor in the group is read
+/// and execute on an executable file of a tree, read alone on a plain one, and lookup alone on the
+/// mount's root, and that GETATTR of the root reports 0711. The mode of a tree entry is the one NFS
+/// presents, and the namespace's is its own.
+#[tokio::test]
+async fn access_and_getattr_over_the_wire_give_the_presented_modes() {
+    let (mut client, root, digest, task, _rig) = connected("nfs-uid-access").await;
+    let cred = Cred::Sys(UID + 1, 99);
+    let trees = lookup(&mut client, cred, &root, "trees").await;
+    let tree = lookup(&mut client, cred, &trees, &digest).await;
+    let bin = lookup(&mut client, cred, &tree, "bin").await;
+    let cc = lookup(&mut client, cred, &bin, "cc").await;
+    let big = lookup(&mut client, cred, &tree, "big.bin").await;
+    // ACCESS3_READ, ACCESS3_LOOKUP, ACCESS3_MODIFY, ACCESS3_EXTEND, ACCESS3_DELETE, ACCESS3_EXECUTE.
+    let (read, lookup_bit, execute) = (0x01, 0x02, 0x20);
+    for (handle, expected) in [(&cc, read | execute), (&big, read), (&root, lookup_bit)] {
+        let reply = client
+            .call(NFS, ACCESS, cred, Enc::default().opaque(handle).u32(0x3f))
+            .await;
+        let mut body = Dec::new(&reply.body);
+        assert_eq!(body.u32(), 0);
+        let _ = body.post_op_attr();
+        assert_eq!(body.u32(), expected);
+    }
+    let reply = client
+        .call(NFS, GETATTR, cred, Enc::default().opaque(&root))
+        .await;
+    let mut body = Dec::new(&reply.body);
+    assert_eq!(body.u32(), 0);
+    assert_eq!(body.attr().mode, 0o711);
     task.abort();
 }

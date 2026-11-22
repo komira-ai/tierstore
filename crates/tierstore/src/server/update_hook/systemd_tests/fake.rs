@@ -820,6 +820,12 @@ impl Host for SystemdFake {
         Ok(self.w.borrow().config.clone())
     }
 
+    // The systemd arm lists no mounts.
+    fn mounted(&self, path: &Path) -> Result<bool, PortError> {
+        self.count(format!("host.mounted {}", path.display()), PortKind::Host)?;
+        Ok(false)
+    }
+
     fn capabilities(&self, release: &Path) -> Result<Vec<String>, PortError> {
         self.count(
             format!("host.capabilities {}", release.display()),

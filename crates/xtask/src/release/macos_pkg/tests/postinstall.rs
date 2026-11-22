@@ -1,7 +1,8 @@
 //! The pkg's `postinstall` run as the installer runs it, by `sh` with the installer's four
 //! arguments, on a scratch target volume, with stand-ins of `dscl` (a directory of users and
-//! groups kept in files), `chown` (which needs root) and `launchctl` first on `PATH`; each records
-//! its calls. `mkdir`, `chmod`, `awk` and the shell are the system's.
+//! groups kept in files), `chown` (which needs root), `launchctl` and `mount` first on `PATH`;
+//! each but `mount` records its calls. `mkdir`, `chmod`, `awk`, `grep` and the shell are the
+//! system's.
 
 use super::*;
 
@@ -33,6 +34,15 @@ esac
 /// The stand-in of `chown` and `launchctl`: it records itself.
 const STUB: &str = "#!/bin/sh\nprintf '%s\\n' \"${0##*/} $*\" >> \"$STUB_LOG\"\n";
 
+/// The stand-in of `mount`: it lists a mounted file system, and the file `mounts` of `$STUB_DIR`
+/// when there is one (the lines of the mounts the test adds).
+const STUB_MOUNT: &str = r#"#!/bin/sh
+echo "map auto_home on /System/Volumes/Data/home (autofs, automounted, nobrowse)"
+if [ -e "$STUB_DIR/mounts" ]; then
+    cat "$STUB_DIR/mounts"
+fi
+"#;
+
 /// The users and the groups of a stock Mac near the range the script takes ids from: the
 /// highest free id is 397 (398 is a user's, 399 a group's).
 const USERS: &str = "root 0\n_mds_stores 308\n_spare 398\n_oahd 441\nnobody -2\n";
@@ -57,7 +67,12 @@ impl Mac {
         let dir = scratch(name);
         let stubs = dir.join("stubs");
         std::fs::create_dir_all(&stubs).expect("stubs");
-        for (program, text) in [("dscl", STUB_DSCL), ("chown", STUB), ("launchctl", STUB)] {
+        for (program, text) in [
+            ("dscl", STUB_DSCL),
+            ("chown", STUB),
+            ("launchctl", STUB),
+            ("mount", STUB_MOUNT),
+        ] {
             let path = stubs.join(program);
             std::fs::write(&path, text).expect("a stand-in");
             std::fs::set_permissions(&path, std::fs::Permissions::from_mode(0o755))
@@ -83,6 +98,21 @@ impl Mac {
     fn base(&self, sub: &str) -> PathBuf {
         let base = self.volume().join("usr/local/tierstore");
         if sub.is_empty() { base } else { base.join(sub) }
+    }
+
+    /// `/private/var/tierstore` on the target volume, and the directory `sub` of it.
+    fn fs_base(&self, sub: &str) -> PathBuf {
+        let base = self.volume().join("private/var/tierstore");
+        if sub.is_empty() { base } else { base.join(sub) }
+    }
+
+    /// The mount listing says a file system is mounted on `path`.
+    fn mounted(&self, path: &Path) {
+        let line = format!(
+            "127.0.0.1:/ on {} (nfs, nodev, nosuid, read-only)\n",
+            path.display()
+        );
+        std::fs::write(self.dir.join("mounts"), line).expect("a mount");
     }
 
     /// The id the stand-in recorded for the account's group or user, if any.
@@ -170,8 +200,16 @@ fn user_calls(uid: &str, gid: &str) -> Vec<String> {
     ]
 }
 
-/// The `chown` calls of the directories for the account `uid`:`gid`.
+/// The `chown` calls of the directories for the account `uid`:`gid`, the mount point's last.
 fn chown_calls(mac: &Mac, uid: &str, gid: &str) -> Vec<String> {
+    let mut calls = chown_calls_mounted(mac, uid, gid);
+    calls.push(format!("chown {uid}:{gid} {}", mac.fs_base("fs").display()));
+    calls
+}
+
+/// The `chown` calls of a run that finds the mount point mounted: those of [`chown_calls`] but the
+/// mount point's.
+fn chown_calls_mounted(mac: &Mac, uid: &str, gid: &str) -> Vec<String> {
     let at = |sub: &str| mac.base(sub).display().to_string();
     vec![
         format!("chown 0:0 {}", at("")),
@@ -180,6 +218,8 @@ fn chown_calls(mac: &Mac, uid: &str, gid: &str) -> Vec<String> {
         format!("chown {uid}:{gid} {}", at("log")),
         format!("chown {uid}:{gid} {}", at("run")),
         format!("chown {uid}:{gid} {}", at("put")),
+        format!("chown {uid}:{gid} {}", at("run/fs")),
+        format!("chown 0:0 {}", mac.fs_base("").display()),
     ]
 }
 
@@ -200,6 +240,16 @@ fn assert_directories(mac: &Mac) {
         assert_eq!(mac.mode(sub), Some(0o700), "{sub}");
     }
     assert_eq!(mac.mode("put"), Some(0o755));
+    assert_eq!(mac.mode("run/fs"), Some(0o700));
+    assert_eq!(mode_of(&mac.fs_base("")), Some(0o755));
+}
+
+/// The mode of the directory `path`, if it is there.
+fn mode_of(path: &Path) -> Option<u32> {
+    std::fs::symlink_metadata(path)
+        .ok()
+        .filter(std::fs::Metadata::is_dir)
+        .map(|m| m.permissions().mode() & 0o7777)
 }
 
 #[test]
@@ -227,6 +277,7 @@ fn on_a_fresh_mac_it_makes_the_account_with_the_highest_free_id_and_the_director
     assert_eq!(mac.id("gid").as_deref(), Some("397"));
     assert_eq!(mac.id("uid").as_deref(), Some("397"));
     assert_directories(&mac);
+    assert_eq!(mode_of(&mac.fs_base("fs")), Some(0o755));
     let seen: Vec<String> = tree_of(&mac.volume())
         .into_iter()
         .map(|(p, ..)| p)
@@ -235,6 +286,10 @@ fn on_a_fresh_mac_it_makes_the_account_with_the_highest_free_id_and_the_director
         seen,
         [
             "",
+            "private",
+            "private/var",
+            "private/var/tierstore",
+            "private/var/tierstore/fs",
             "usr",
             "usr/local",
             "usr/local/tierstore",
@@ -243,6 +298,7 @@ fn on_a_fresh_mac_it_makes_the_account_with_the_highest_free_id_and_the_director
             "usr/local/tierstore/log",
             "usr/local/tierstore/put",
             "usr/local/tierstore/run",
+            "usr/local/tierstore/run/fs",
         ]
     );
 }
@@ -251,15 +307,19 @@ fn on_a_fresh_mac_it_makes_the_account_with_the_highest_free_id_and_the_director
 fn on_a_mac_with_the_account_it_keeps_it_and_sets_the_directories_again_keeping_their_files() {
     // Catches: a postinstall that makes the account again or changes its ids on an update or a
     // second install, one that leaves a directory made earlier with another mode (the etc a
-    // config package laid down 0755) or owner, and one that changes, removes or chmods the
+    // config package laid down 0755, the mount point made 0700) or owner, and one that changes, removes or chmods the
     // configuration, a key file or the cache in them.
     let mac = Mac::new("postinstall-there", USERS, GROUPS)
         .with("gid", "250")
         .with("uid", "251");
-    for (sub, mode) in [("etc", 0o755), ("cache", 0o777), ("log", 0o700)] {
-        std::fs::create_dir_all(mac.base(sub)).expect("a directory there");
-        std::fs::set_permissions(mac.base(sub), std::fs::Permissions::from_mode(mode))
-            .expect("mode");
+    for (dir, mode) in [
+        (mac.base("etc"), 0o755),
+        (mac.base("cache"), 0o777),
+        (mac.base("log"), 0o700),
+        (mac.fs_base("fs"), 0o700),
+    ] {
+        std::fs::create_dir_all(&dir).expect("a directory there");
+        std::fs::set_permissions(&dir, std::fs::Permissions::from_mode(mode)).expect("mode");
     }
     let config = mac.base("etc").join("tierstore.toml");
     std::fs::write(&config, b"# the Mac's\n").expect("the configuration");
@@ -278,6 +338,7 @@ fn on_a_mac_with_the_account_it_keeps_it_and_sets_the_directories_again_keeping_
         assert_eq!(mac.id("gid").as_deref(), Some("250"));
         assert_eq!(mac.id("uid").as_deref(), Some("251"));
         assert_directories(&mac);
+        assert_eq!(mode_of(&mac.fs_base("fs")), Some(0o755));
         assert_eq!(std::fs::read(&config).expect("kept"), b"# the Mac's\n");
         assert_eq!(std::fs::read(&pack).expect("kept"), b"cached");
         let mode = |p: &Path| std::fs::metadata(p).expect("stat").permissions().mode() & 0o7777;
@@ -355,4 +416,50 @@ fn a_directory_service_that_refuses_a_record_fails_the_install_before_any_direct
         ])
     );
     assert!(!mac.volume().join("usr").exists());
+}
+
+#[test]
+fn a_mounted_mount_point_is_left_as_it_is_and_the_install_succeeds() {
+    // Catches: a postinstall that chowns or chmods the mount point while the file service's
+    // read-only NFS mount is on it (those fail there, and `set -e` would fail the upgrade), or
+    // that skips the rest of the directories because the mount point is mounted.
+    let mac = Mac::new("postinstall-mounted", USERS, GROUPS)
+        .with("gid", "250")
+        .with("uid", "251");
+    let mount_point = mac.fs_base("fs");
+    std::fs::create_dir_all(&mount_point).expect("the mount point");
+    std::fs::set_permissions(&mount_point, std::fs::Permissions::from_mode(0o700)).expect("mode");
+    mac.mounted(&mount_point);
+    let ran = mac.run();
+    assert!(ran.ok, "{}", ran.stderr);
+    assert_eq!(
+        ran.calls,
+        calls(&[&strings(&READS), &chown_calls_mounted(&mac, "251", "250")])
+    );
+    assert_eq!(mode_of(&mount_point), Some(0o700));
+    assert_directories(&mac);
+}
+
+#[test]
+fn a_mount_on_another_path_is_not_the_mount_point() {
+    // Catches: a postinstall that takes any mount whose path begins with the mount point's (here
+    // one on a directory of it, and one on a path that continues its name) for the mount point,
+    // and so leaves the mount point it should set to its owner and mode.
+    let mac = Mac::new("postinstall-other-mount", USERS, GROUPS)
+        .with("gid", "250")
+        .with("uid", "251");
+    let mount_point = mac.fs_base("fs");
+    let others = format!(
+        "x on {}/trees (nfs)\ny on {}2 (nfs)\n",
+        mount_point.display(),
+        mount_point.display()
+    );
+    std::fs::write(mac.dir.join("mounts"), others).expect("mounts");
+    let ran = mac.run();
+    assert!(ran.ok, "{}", ran.stderr);
+    assert_eq!(
+        ran.calls,
+        calls(&[&strings(&READS), &chown_calls(&mac, "251", "250")])
+    );
+    assert_eq!(mode_of(&mount_point), Some(0o755));
 }

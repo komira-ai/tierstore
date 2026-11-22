@@ -8,6 +8,10 @@
 //! port from what runs. hostkeeper's link `current` is not in the world: the hook never reads it.
 //! The clock is a number that `pause` moves on; nothing sleeps.
 //!
+//! The job of `tierstore fs` is a second job of the domain (`FS_LABEL`, plist `FS_LAUNCHD_PLIST`)
+//! that makes a mount (`FS_MOUNT`) when it is loaded and ends it when it is booted out, unless
+//! `keep_mount` says the mount stays; `mounted` lists it.
+//!
 //! Every call of a port except the clock is counted and logged. `fail_at(n)` makes the n-th call
 //! fail without effect (a failure the step sees and may recover from); `halt_at(n)` makes that
 //! call and every later one fail (a crash: no recovery code of the step gets through);
@@ -22,12 +26,17 @@ use std::time::Duration;
 
 use crate::server::update_hook::launchd::run_step;
 use crate::server::update_hook::{
-    Clock, Done, Host, Instances, LAUNCHD_PLIST, Launchd, LaunchdPorts, Lock, Outcome, Params,
-    PortError, PortKind, Reason, Record, Reply, SERVICE_BINARY, StateDir, Step,
+    Clock, Done, FS_CONFIG_FILE, FS_LAUNCHD_PLIST, Host, Instances, LAUNCHD_PLIST, Launchd,
+    LaunchdPorts, Lock, Outcome, Params, PortError, PortKind, Reason, Record, Reply,
+    SERVICE_BINARY, StateDir, Step,
 };
 
 /// The label of the job, as the params name it.
 pub const LABEL: &str = "com.komira.tierstore";
+/// The label of the job of `tierstore fs`, as the params name it.
+pub const FS_LABEL: &str = "tierstore-fs";
+/// The mount point the fs job's configuration names.
+pub const FS_MOUNT: &str = "/private/var/tierstore/fs";
 /// The node's configuration file, as the params name it.
 pub const CONFIG: &str = "/usr/local/tierstore/etc/tierstore.toml";
 /// The release that runs at first (0.3.0).
@@ -69,6 +78,16 @@ struct World {
     job: Option<PathBuf>,
     /// The job is loaded, and its program cannot be run.
     broken: bool,
+    /// The params name the fs job.
+    fs_named: bool,
+    /// The fs job is loaded.
+    fs_job: bool,
+    /// Where a mount is listed, if any.
+    mount: Option<PathBuf>,
+    /// The mount stays when the fs job is booted out.
+    mount_stays: bool,
+    /// The bounds each `bootout_within` was given: label, call, looks.
+    bounds: Vec<(String, Duration, u32)>,
     versions: BTreeMap<PathBuf, String>,
     lies: BTreeMap<PathBuf, String>,
     mute: BTreeSet<PathBuf>,
@@ -92,6 +111,10 @@ pub struct Snapshot {
     /// The release whose binary is at [`SERVICE_BINARY`].
     pub installed: Option<PathBuf>,
     pub job: Option<PathBuf>,
+    /// The fs job is loaded.
+    pub fs_job: bool,
+    /// A mount is listed.
+    pub mounted: bool,
 }
 
 /// Counts the locks that are held; the lock is released when this is dropped.
@@ -112,9 +135,20 @@ pub struct Fake {
 
 /// The params of an update to `release` (`version`), from `previous` when there is one.
 pub fn params_for(release: &str, version: &str, previous: Option<(&str, &str)>) -> Params {
+    params_with(release, version, previous, "")
+}
+
+/// [`params_for`], with `extra` lines of params.
+pub fn params_with(
+    release: &str,
+    version: &str,
+    previous: Option<(&str, &str)>,
+    extra: &str,
+) -> Params {
     let mut text = format!(
         "service_manager = \"launchd\"\n\
          launchd_label = \"{LABEL}\"\n\
+         {extra}\
          config_file = \"{CONFIG}\"\n\
          \"updater.staged_release\" = \"{release}\"\n\
          \"updater.target_version\" = \"{version}\"\n"
@@ -136,6 +170,11 @@ impl Fake {
             installed: installed.map(PathBuf::from),
             job: job.map(PathBuf::from),
             broken: false,
+            fs_named: false,
+            fs_job: false,
+            mount: None,
+            mount_stays: false,
+            bounds: Vec::new(),
             versions: BTreeMap::from([
                 (PathBuf::from(OLD), OLD_VERSION.to_owned()),
                 (PathBuf::from(NEW), NEW_VERSION.to_owned()),
@@ -192,7 +231,35 @@ impl Fake {
     /// The params of the update to `NEW`: from `OLD`, or of a first install.
     pub fn params(&self) -> Params {
         let previous = (!self.first).then_some((OLD, OLD_VERSION));
-        params_for(NEW, NEW_VERSION, previous)
+        let extra = if self.w.borrow().fs_named {
+            format!("fs_launchd_label = \"{FS_LABEL}\"\n")
+        } else {
+            String::new()
+        };
+        params_with(NEW, NEW_VERSION, previous, &extra)
+    }
+
+    /// The params of this host's update name the fs job, whose configuration names the mount
+    /// point [`FS_MOUNT`]; `loaded` says whether the fs job is loaded and has made its mount.
+    pub fn with_fs(&self, loaded: bool) {
+        let mut w = self.w.borrow_mut();
+        w.fs_named = true;
+        w.fs_job = loaded;
+        w.mount = loaded.then(|| PathBuf::from(FS_MOUNT));
+        w.configs.insert(
+            PathBuf::from(FS_CONFIG_FILE),
+            format!("[fs]\nmountpoint = \"{FS_MOUNT}\"\n"),
+        );
+    }
+
+    /// Whether the mount stays listed after the fs job is booted out.
+    pub fn keep_mount(&self, stays: bool) {
+        self.w.borrow_mut().mount_stays = stays;
+    }
+
+    /// The bounds of each `bootout_within` call so far: label, call time and looks.
+    pub fn bootout_bounds(&self) -> Vec<(String, Duration, u32)> {
+        self.w.borrow().bounds.clone()
     }
 
     /// Runs `step` as it is, with the params of this host's update.
@@ -230,6 +297,8 @@ impl Fake {
                 .map(|b| Record::decode(b).expect("a record")),
             installed: w.installed.clone(),
             job: w.job.clone(),
+            fs_job: w.fs_job,
+            mounted: w.mount.is_some(),
         }
     }
 
@@ -389,11 +458,14 @@ impl Fake {
             .collect()
     }
 
-    /// The host has booted, and launchd has not loaded the job yet.
+    /// The host has booted, and launchd has not loaded the job, or the fs job, yet; no mount is
+    /// listed.
     pub fn reboot(&self) {
         let mut w = self.w.borrow_mut();
         w.job = None;
         w.broken = false;
+        w.fs_job = false;
+        w.mount = None;
     }
 
     /// Counts one call and fails it if it is the chosen one.
@@ -446,11 +518,15 @@ impl Fake {
 impl Launchd for Fake {
     fn loaded(&self, label: &str) -> Result<bool, PortError> {
         self.tick(format!("launchd.loaded {label}"), PortKind::Launchd)?;
-        if label != LABEL {
+        if label != LABEL && label != FS_LABEL {
             self.stray(label);
         }
         let w = self.w.borrow();
-        Ok(label == LABEL && (w.job.is_some() || w.broken))
+        Ok(match label {
+            LABEL => w.job.is_some() || w.broken,
+            FS_LABEL => w.fs_job,
+            _ => false,
+        })
     }
 
     fn bootstrap(&self, plist: &Path) -> Result<(), PortError> {
@@ -458,6 +534,19 @@ impl Launchd for Fake {
             format!("launchd.bootstrap {}", plist.display()),
             PortKind::Launchd,
         )?;
+        if plist == Path::new(FS_LAUNCHD_PLIST) {
+            let mut w = self.w.borrow_mut();
+            if w.fs_job {
+                return Err(PortError::failed(
+                    PortKind::Launchd,
+                    "Bootstrap failed: 5: Input/output error (the fs job is loaded)",
+                ));
+            }
+            w.fs_job = true;
+            w.mount = Some(PathBuf::from(FS_MOUNT));
+            drop(w);
+            return Fake::after(late, PortKind::Launchd);
+        }
         if plist != Path::new(LAUNCHD_PLIST) {
             self.stray(&plist.display().to_string());
         }
@@ -484,10 +573,29 @@ impl Launchd for Fake {
             let mut w = self.w.borrow_mut();
             w.job = None;
             w.broken = false;
+        } else if label == FS_LABEL {
+            let mut w = self.w.borrow_mut();
+            w.fs_job = false;
+            if !w.mount_stays {
+                w.mount = None;
+            }
         } else {
             self.stray(label);
         }
         Fake::after(late, PortKind::Launchd)
+    }
+
+    fn bootout_within(
+        &self,
+        label: &str,
+        call: Duration,
+        gone_attempts: u32,
+    ) -> Result<(), PortError> {
+        self.w
+            .borrow_mut()
+            .bounds
+            .push((label.to_owned(), call, gone_attempts));
+        self.bootout(label)
     }
 }
 
@@ -532,6 +640,11 @@ impl Instances for Fake {
 }
 
 impl Host for Fake {
+    fn mounted(&self, path: &Path) -> Result<bool, PortError> {
+        self.tick(format!("host.mounted {}", path.display()), PortKind::Host)?;
+        Ok(self.w.borrow().mount.as_deref() == Some(path))
+    }
+
     fn config(&self, path: &Path) -> Result<Option<String>, PortError> {
         self.tick(format!("host.config {}", path.display()), PortKind::Host)?;
         Ok(self.w.borrow().configs.get(path).cloned())

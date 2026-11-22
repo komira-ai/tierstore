@@ -7,6 +7,7 @@ mod binary;
 mod crash;
 pub(in crate::server::update_hook) mod fake;
 mod flow;
+mod fs_job;
 mod lifecycle;
 mod refusals;
 mod rollback;

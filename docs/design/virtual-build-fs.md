@@ -510,7 +510,13 @@ passthrough and the mount declares no `max_stack_depth` (6.4). On macOS the moun
   0777. The action can therefore change and create anything (the overlay or the view copies up), as in a copy it owns, and
   every other user can read and traverse a tree, as the executor's cache files and tree store already allow (the executor's fast-sandbox.md
   section 4.4). mtime is fixed, the same value the executor's materialisation uses (D10). `nlink` is 1 for files, and 2 plus the
-  subdirectories for a directory. `st_ino` is the inode number.
+  subdirectories for a directory. `st_ino` is the inode number. A placed tree's entries report their stored modes. On macOS
+  the NFS frontend reports, and answers `ACCESS` for, every mode with the owner's read and execute given to group and other
+  too, without setuid, setgid and sticky and with no write bit added (0600 shows 0644, 0700 shows 0755, 0400 shows 0444):
+  a job runs as a user of its own (a slot user), never `fs.owner`, and the server knows no job user, so an owner-only file
+  would be unreadable to every job; the export is read-only and a tree is readable by anyone who knows its digest (D6), so
+  nothing is opened that was closed; and a setuid file owned by the service account must not run as it. The namespace
+  directories keep 0711.
 
 **Inode numbers are derivable (invariant I1).** The kernel names every inode by a 64-bit number it got from a lookup
 reply (an NFS client by the handle it got), and keeps using it until it sends `FORGET` (NFS never does). The 64 bits are
@@ -1170,7 +1176,7 @@ So the core's views (6.6) move out of the Linux design altogether and stay on ma
   was owned by that user (the mount shows `nodev, nosuid, mounted by <user>`) and failed `Operation not permitted` on a root-owned one; a root mount has no `nodev,nosuid`, so a root-run mount gives setuid binaries a chance (Measured: macos E14, where the unprivileged test was run as the admin user `adi` only). Per-user mounts get `nosuid`, which suits a build tree.
   **Who mounts at boot is a config key.** A boot mount made by root loses `nosuid`, so the mount is made by the user the launchd job of `tierstore fs` runs as, which owns the mount point. That user is `fs.nfs.mount_user` (default: the user of the process; a name or a number); the job runs as
   `_tierstore`, the store's account (the fill socket answers only its own user), and its file leaves the key out, so the
-  mount user is `_tierstore`. The mount point must be owned by it, which the process checks at start and refuses with the owner it found. A root-run process mounts as that user, not as root. The mount helper runs `mount_nfs -o vers=3,tcp,ro,rdirplus,locallocks,actimeo=3600,hard,port=<fs.nfs.port>,mountport=<fs.nfs.port>`
+  mount user is `_tierstore`. The mount point must be owned by it, which the process checks at start and refuses with the owner it found. A root-run process mounts as that user, not as root. The mount helper runs `mount_nfs -o vers=3,tcp,ro,rdirplus,locallocks,actimeo=3600,hard,deadtimeout=<fs.nfs.dead_timeout>,port=<fs.nfs.port>,mountport=<fs.nfs.port>` (`deadtimeout`, more than `fs.fetch_timeout`, so that a mount whose server is gone ends instead of making everything that touches it wait; operations.md, "The Mac's mount")
   against `127.0.0.1` once the server listens, and is a retry loop bounded by `fs.nfs.mount_wait`; the key names, defaults and the mount at login-less boot are settled by the pull request that builds them and the farm Mac smoke test (Unmeasured: a boot mount without a login session).
 - **Attribute caching.** The macOS client does not take cache times from replies (Buildbarn's mount code notes that NFSv4
   has no per-reply way to give them [S5]). Within the mount's minimum and maximum, it caches a node's attributes for one
@@ -1579,7 +1585,8 @@ owner has not confirmed them.** Two decisions are open and new: the Linux kernel
   is in its runtime directory, and the views' state in their upper directories, written in order and never `fsync`ed.
   Why: it must outlive the process, not the machine; a reboot takes the mount and the runs too.
 - **D6.** Attached trees are readable by host users who know the digest, as the executor's cache is today; views only by their
-  run's user. Why: parity; a deployment can narrow it with the mountpoint's parent directory.
+  run's user. Why: parity; a deployment can narrow it with the mountpoint's parent directory. On macOS the modes the NFS
+  frontend reports give group and other the owner's read and execute (6.3), which follows from this.
 - **D7.** Metadata eager per tree, data lazy (6.3). Why: inode numbers must be derivable for crash and update.
 - **D8.** If Q-B finds laziness does not pay on Linux, the next candidate is composefs (L4), not more FUSE.
 - **D9.** Pins are kept by the cache's writer, per attached tree, over the blobs opened (all blobs with prefetch), capped

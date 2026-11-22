@@ -1,6 +1,7 @@
 //! The pkg's one script, `postinstall` ([`POSTINSTALL`], the file
-//! `packaging/macos-pkg/postinstall`), which makes the account the job runs as, `_tierstore`, and
-//! the directories under `/usr/local/tierstore`; the file says what it does, and the tests of
+//! `packaging/macos-pkg/postinstall`), which makes the account the jobs run as, `_tierstore`, the
+//! directories under `/usr/local/tierstore` and the mount point of `tierstore fs` (which it leaves
+//! as it is while it is mounted); the file says what it does, and the tests of
 //! `tests/postinstall.rs` run it.
 //!
 //! `release macos-pkg` writes it into the scripts directory it hands `pkgbuild` (`--scripts`),

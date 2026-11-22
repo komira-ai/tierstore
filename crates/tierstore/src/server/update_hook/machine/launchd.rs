@@ -10,6 +10,8 @@
 //! - `bootout`: nothing when the job is not loaded; otherwise `launchctl bootout system/<label>`
 //!   (launchd sends SIGTERM, the process drains and exits), then `print` until the domain no
 //!   longer has the job. A `launchctl` call that fails is a failure, never a success.
+//!   `bootout_within` is the same with the time of the call and the number of looks given by
+//!   the caller instead of by [`LaunchdTimes`].
 
 use std::path::Path;
 use std::time::Duration;
@@ -134,11 +136,20 @@ impl Launchd for LaunchctlJobs<'_> {
     }
 
     fn bootout(&self, label: &str) -> Result<(), PortError> {
+        self.bootout_within(label, self.times.bootout, self.times.gone_attempts)
+    }
+
+    fn bootout_within(
+        &self,
+        label: &str,
+        call: Duration,
+        gone_attempts: u32,
+    ) -> Result<(), PortError> {
         if !self.loaded(label)? {
             return Ok(());
         }
-        self.must(&bootout_args(label), self.times.bootout)?;
-        for _ in 0..self.times.gone_attempts {
+        self.must(&bootout_args(label), call)?;
+        for _ in 0..gone_attempts {
             if !self.loaded(label)? {
                 return Ok(());
             }
@@ -149,7 +160,7 @@ impl Launchd for LaunchctlJobs<'_> {
             format!(
                 "{} is still loaded after bootout and {} looks",
                 service_target(label),
-                self.times.gone_attempts
+                gone_attempts
             ),
         ))
     }

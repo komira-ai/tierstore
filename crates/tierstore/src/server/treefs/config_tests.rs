@@ -1,11 +1,11 @@
-//! The `[fs]` table: defaults, every refusal, and the group lookup.
+//! The `[fs]` table: defaults, every refusal, and the lookup of group and user names.
 
 use std::path::PathBuf;
 use std::time::Duration;
 
 use tierstore_testkit::dir::TestDir;
 
-use super::{FsSettings, builders, from_text, ignored, load, load_with};
+use super::{Database, FsSettings, builders, from_text, ignored, load, load_with};
 
 /// The keys every file needs.
 const NEEDED: &str = "client_group = \"builders\"\nowner = \"1000:1001\"\n\
@@ -222,23 +222,23 @@ fn a_file_is_read_from_its_path() {
 /// given by number asks the lookup nothing. Catches a name read from a group file only.
 #[test]
 fn a_group_name_is_looked_up_through_the_system() {
-    let directory = |name: &str| Ok((name == "_tierstore").then_some(394));
+    let directory = |_: Database, name: &str| Ok((name == "_tierstore").then_some(394));
     let text = fs("").replace("builders", "_tierstore");
     assert_eq!(from_text(&text, &directory).unwrap().client_group, 394);
 
     let absent = from_text(&fs(""), &directory).unwrap_err().to_string();
     assert_eq!(
         absent,
-        "fs.client_group: is neither a group id nor the name of a group of this system"
+        "fs.client_group: \"builders\" is neither a group id nor the name of a group of this system"
     );
-    let down = |_: &str| Err("/usr/bin/getent could not be run: gone".to_owned());
+    let down = |_: Database, _: &str| Err("/usr/bin/getent could not be run: gone".to_owned());
     assert_eq!(
         from_text(&fs(""), &down).unwrap_err().to_string(),
         "fs.client_group: the group builders could not be looked up: /usr/bin/getent could not \
          be run: gone"
     );
     let asked = std::cell::Cell::new(0);
-    let counting = |_: &str| {
+    let counting = |_: Database, _: &str| {
         asked.set(asked.get() + 1);
         Ok(None)
     };
@@ -255,4 +255,119 @@ fn the_most_threads_are_the_descriptors_a_session_holds() {
     assert_eq!(got.threads, 252);
     #[cfg(target_os = "linux")]
     assert_eq!(super::MOST_THREADS as usize, tsfuse::MAX_DEVICES);
+}
+
+/// A lookup of a system with the user `_tierstore` (id 394) and the group `_tierstore` (id 395),
+/// and no other name.
+fn service_account(database: Database, name: &str) -> super::Found {
+    Ok((name == "_tierstore").then_some(match database {
+        Database::User => 394,
+        Database::Group => 395,
+    }))
+}
+
+/// The needed keys with `owner` as the value of `fs.owner`, and the client group by number, so that
+/// only the owner is looked up.
+fn owned_by(owner: &str) -> String {
+    fs("")
+        .replace("1000:1001", owner)
+        .replace("client_group = \"builders\"", "client_group = \"77\"")
+}
+
+/// Asserts that `fs.owner` takes a user and a group by name, each from its own database, and a
+/// number on either side: `name:name`, `number:name`, `name:number` and `number:number`. Catches a
+/// shipped file that needs the numeric id of the service account of each Mac, and a user name
+/// looked up as a group.
+#[test]
+fn an_owner_is_a_user_and_a_group_by_name_or_number() {
+    let owner = |text: &str| from_text(&owned_by(text), &service_account).unwrap().owner;
+    assert_eq!(owner("_tierstore:_tierstore"), (394, 395));
+    assert_eq!(owner("7:_tierstore"), (7, 395));
+    assert_eq!(owner("_tierstore:8"), (394, 8));
+    assert_eq!(owner("0:0"), (0, 0));
+}
+
+/// Asserts that an owner given by two numbers asks the lookup nothing, and that one by name asks
+/// the user database for the user and the group database for the group, each once.
+#[test]
+fn an_owner_by_number_asks_nothing_and_one_by_name_asks_each_database() {
+    let asked = std::cell::RefCell::new(Vec::new());
+    let recording = |database: Database, name: &str| {
+        asked.borrow_mut().push((database, name.to_owned()));
+        Ok(Some(5))
+    };
+    let numbers = from_text(&owned_by("12:34"), &recording).unwrap();
+    assert_eq!(numbers.owner, (12, 34));
+    assert!(asked.borrow().is_empty());
+    let names = from_text(&owned_by("alice:staff"), &recording).unwrap();
+    assert_eq!(names.owner, (5, 5));
+    assert_eq!(
+        *asked.borrow(),
+        [
+            (Database::User, "alice".to_owned()),
+            (Database::Group, "staff".to_owned())
+        ]
+    );
+}
+
+/// Asserts the refusal of each wrong `fs.owner`, by its exact words: not two parts (no colon, an
+/// empty side, three parts, nothing), a user that is not one, a group that is not one, a lookup
+/// that failed (with what the tool said), and an id too large for a number. Catches a typo'd name
+/// taken as some default owner.
+#[test]
+fn a_wrong_owner_is_refused_with_its_key_and_what_was_wrong() {
+    let not_two = |text: &str| {
+        format!(
+            "fs.owner: must be user:group, two parts joined by one colon, each a number or a name \
+             of this system, not {text:?}"
+        )
+    };
+    for text in ["1000", ":1", "1:", ":", "1:2:3", ""] {
+        let why = from_text(&owned_by(text), &service_account).unwrap_err();
+        assert_eq!(why.to_string(), not_two(text), "{text:?}");
+    }
+    let refuse = |text: &str, lookup: super::Lookup<'_>| {
+        from_text(&owned_by(text), lookup).unwrap_err().to_string()
+    };
+    assert_eq!(
+        refuse("typo:_tierstore", &service_account),
+        "fs.owner: \"typo\" is neither a user id nor the name of a user of this system"
+    );
+    assert_eq!(
+        refuse("_tierstore:typo", &service_account),
+        "fs.owner: \"typo\" is neither a group id nor the name of a group of this system"
+    );
+    let down = |database: Database, _: &str| match database {
+        Database::User => Ok(Some(1)),
+        Database::Group => Err("/usr/bin/getent could not be run: gone".to_owned()),
+    };
+    assert_eq!(
+        refuse("a:b", &down),
+        "fs.owner: the group b could not be looked up: /usr/bin/getent could not be run: gone"
+    );
+    let all_down = |_: Database, _: &str| Err("dscacheutil failed (exit status: 1): x".to_owned());
+    assert_eq!(
+        refuse("a:1", &all_down),
+        "fs.owner: the user a could not be looked up: dscacheutil failed (exit status: 1): x"
+    );
+    assert_eq!(
+        refuse("99999999999:1", &service_account),
+        "fs.owner: the user id 99999999999 is too large"
+    );
+    assert_eq!(
+        refuse("1:99999999999", &service_account),
+        "fs.owner: the group id 99999999999 is too large"
+    );
+}
+
+/// Asserts that an empty `fs.client_group` is a name to look up, which the system does not have,
+/// not a number: it is refused naming the key.
+#[test]
+fn an_empty_client_group_is_refused() {
+    let text = fs("").replace("\"builders\"", "\"\"");
+    let why = from_text(&text, &builders).unwrap_err().to_string();
+    assert_eq!(
+        why,
+        "fs.client_group: \"\" is neither a group id nor the name of a group of this system"
+    );
 }

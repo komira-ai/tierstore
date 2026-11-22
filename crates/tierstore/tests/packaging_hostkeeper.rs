@@ -507,9 +507,11 @@ fn the_fs_marker_is_not_a_marker_of_the_s3_instances() {
 /// the installed binary with a `--config` the binary reads (a file that is not there is
 /// status 2, naming it), as the user and group of the store's job (the fill socket answers only a
 /// peer of its own user, so a job of any other user, root included, has every fill refused), it is
-/// restarted when it exits, it has time to unmount, it sets no environment variable, and no word of
-/// it names a secret. It would catch a verb or a flag renamed under the job, and a job that runs as
-/// root.
+/// restarted when it exits, launchd waits 150 seconds after SIGTERM (the process's unmount is at
+/// most 120) before it kills it and kills the whole process group (no `AbandonProcessGroup`), it
+/// sets no environment variable, and no word of it names a secret. It would catch a verb or a flag
+/// renamed under the job, a job that runs as root, and a stop time that kills an unmount in
+/// progress.
 #[test]
 fn the_fs_launchd_job_runs_the_fs_verb_of_the_installed_binary() {
     let job = plist_of("tierstore-fs.plist");
@@ -539,7 +541,8 @@ fn the_fs_launchd_job_runs_the_fs_verb_of_the_installed_binary() {
     );
     assert_eq!(job.get("KeepAlive"), Some(&Plist::Bool(true)));
     assert_eq!(job.get("RunAtLoad"), Some(&Plist::Bool(true)));
-    assert!(matches!(job.get("ExitTimeOut"), Some(Plist::Integer(seconds)) if *seconds >= 10));
+    assert_eq!(job.get("ExitTimeOut"), Some(&Plist::Integer(150)));
+    assert!(!job.contains_key("AbandonProcessGroup"));
     for key in job.keys() {
         assert!(!key.contains("Environment"), "{key}");
     }
@@ -684,7 +687,7 @@ fn the_manifests_step_bounds_are_above_the_hooks_looks() {
 
 /// Asserts that no unit and no launchd job of hostkeeper's package names a path inside
 /// hostkeeper's package directories: each runs the copy at `SERVICE_BINARY`, as an account that
-/// is not root (but the job of `tierstore fs` on a Mac, which runs as root to mount). hostkeeper
+/// is not root (the units' `tierstore` and the jobs' `_tierstore`). hostkeeper
 /// keeps its packages closed to every user but root, so it would catch a unit or a job that runs
 /// the binary through the release link `current`, which its account cannot reach.
 #[test]

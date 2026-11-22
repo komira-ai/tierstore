@@ -9,7 +9,7 @@ use nfsserve::vfs::{NFSFileSystem as _, VFSCapabilities};
 
 use std::sync::Arc;
 
-use super::{TreeNfs, class_bits, fattr, handled, status};
+use super::{TreeNfs, class_bits, fattr, handled, presented, status};
 use crate::server::local_cache::trees::testing::fs_at;
 use crate::server::treefs::core::{Attr, Errno, Kind};
 use crate::server::treefs::ino;
@@ -179,11 +179,12 @@ async fn getattr_reports_the_fixed_mtime_and_manifest_mode_and_owner() {
 }
 
 /// Asserts how a caller is put in a class of the mode bits: the owner, then the group (as the
-/// primary group or one of the others), then everyone else.
+/// primary group or one of the others), then everyone else; the bits are those of the presented
+/// mode, so a caller of no class of a 0640 file still reads it.
 #[test]
 fn a_caller_gets_the_bits_of_the_first_class_it_is_in() {
     let attr = Attr {
-        ino: 9,
+        ino: ino::of(1, 9),
         kind: Kind::File,
         size: 1,
         perm: 0o640,
@@ -194,8 +195,101 @@ fn a_caller_gets_the_bits_of_the_first_class_it_is_in() {
     assert_eq!(class_bits(&attr, &auth(10, 99, &[])), 0o6);
     assert_eq!(class_bits(&attr, &auth(11, 20, &[])), 0o4);
     assert_eq!(class_bits(&attr, &auth(11, 99, &[5, 20])), 0o4);
-    assert_eq!(class_bits(&attr, &auth(11, 99, &[5])), 0);
-    assert_eq!(fattr(&attr).mode, 0o640);
+    assert_eq!(class_bits(&attr, &auth(11, 99, &[5])), 0o4);
+    assert_eq!(fattr(&attr).mode, 0o644);
+}
+
+/// Asserts the presented mode of every kind of stored mode: the owner's read and execute are set for
+/// the group and for everyone else, the write bits are never added, and setuid, setgid and sticky
+/// are dropped. Catches a job user that cannot read an owner-only file of a tree, and a setuid file
+/// served as setuid.
+#[test]
+fn presented_gives_the_owners_read_and_execute_to_everyone_and_never_write() {
+    let cases = [
+        (0o600, 0o644),
+        (0o700, 0o755),
+        (0o400, 0o444),
+        (0o500, 0o555),
+        (0o200, 0o200),
+        (0o100, 0o111),
+        (0o640, 0o644),
+        (0o750, 0o755),
+        (0o4755, 0o755),
+        (0o2755, 0o755),
+        (0o1777, 0o777),
+        (0o6000, 0o000),
+        (0o000, 0o000),
+        (0o644, 0o644),
+        (0o755, 0o755),
+        (0o777, 0o777),
+    ];
+    for (stored, shown) in cases {
+        assert_eq!(presented(stored), shown, "{stored:o}");
+    }
+}
+
+/// Asserts, for owner-only and special modes of a file of a tree, what GETATTR reports and what a
+/// caller who is the owner, in the group, or neither is given: exactly the presented bits, no
+/// write bit for the group or anyone else, and nothing at all for a file of mode 0000. Catches a
+/// job user that cannot read an owner-only file of a tree, and a setuid file served as setuid.
+#[test]
+fn owner_only_files_are_reported_readable_to_every_caller_and_never_writable() {
+    let owner = auth(10, 20, &[]);
+    let group = auth(11, 20, &[]);
+    let other = auth(11, 99, &[]);
+    // (stored, reported, bits of the owner, of the group, of everyone else)
+    let cases = [
+        (0o600, 0o644, 0o6, 0o4, 0o4),
+        (0o700, 0o755, 0o7, 0o5, 0o5),
+        (0o400, 0o444, 0o4, 0o4, 0o4),
+        (0o640, 0o644, 0o6, 0o4, 0o4),
+        (0o4755, 0o755, 0o7, 0o5, 0o5),
+        (0o000, 0o000, 0, 0, 0),
+    ];
+    for (stored, reported, by_owner, by_group, by_other) in cases {
+        let attr = Attr {
+            ino: ino::of(1, 9),
+            kind: Kind::File,
+            size: 1,
+            perm: stored,
+            nlink: 1,
+            uid: 10,
+            gid: 20,
+        };
+        assert_eq!(fattr(&attr).mode, reported, "{stored:o}");
+        assert_eq!(class_bits(&attr, &owner), by_owner, "{stored:o}");
+        assert_eq!(class_bits(&attr, &group), by_group, "{stored:o}");
+        assert_eq!(class_bits(&attr, &other), by_other, "{stored:o}");
+        // The owner keeps its own bits; no write bit is added for anyone else.
+        for caller in [&group, &other] {
+            assert_eq!(class_bits(&attr, caller) & 0o2, 0, "{stored:o}");
+        }
+    }
+}
+
+/// Asserts that the directories of the namespace keep the mode they have, whatever it is, in what
+/// GETATTR reports and in what a caller is given: a root-owned 0711 is not made 0755, so it still
+/// does not look listable. Catches a namespace directory that looks readable.
+#[test]
+fn the_namespace_keeps_its_mode_where_a_tree_entry_is_presented() {
+    let dir = |ino, perm| Attr {
+        ino,
+        kind: Kind::Dir,
+        size: 0,
+        perm,
+        nlink: 2,
+        uid: 0,
+        gid: 0,
+    };
+    let other = auth(11, 99, &[]);
+    for namespace in [ino::ROOT, ino::TREES, ino::placed_dir(7)] {
+        let attr = dir(namespace, 0o711);
+        assert_eq!(fattr(&attr).mode, 0o711, "{namespace}");
+        assert_eq!(class_bits(&attr, &other), 0o1, "{namespace}");
+    }
+    let attr = dir(ino::of(1, 2), 0o700);
+    assert_eq!(fattr(&attr).mode, 0o755);
+    assert_eq!(class_bits(&attr, &other), 0o5);
 }
 
 /// Asserts that execute follows the mode bits: granted on an executable file and denied on a plain
@@ -775,4 +869,28 @@ async fn dot_dot_of_a_placed_tree_leads_up_through_the_directories_to_the_root()
     let lib = at(&fs, &["jobs", "1f3a", "root", "lib"]).await;
     assert_eq!(fs.lookup(deep, &name("..")).await.unwrap(), lib);
     assert_eq!(fs.lookup(lib, &name("..")).await.unwrap(), root);
+}
+
+/// Asserts, on a placed tree whose file `bin/tool` is stored with mode 04755, that GETATTR reports
+/// 0755 (no setuid bit), that a caller who is neither the owner nor in the group is granted read
+/// and execute and never modify, extend or delete, that the placed directories above the location
+/// keep 0711 and are not readable, and that every write procedure on the file is
+/// `NFS3ERR_ROFS`. Catches a setuid file served as setuid.
+#[tokio::test(flavor = "multi_thread")]
+async fn a_placed_setuid_file_is_presented_without_the_setuid_bit_and_stays_read_only() {
+    let (_live, fs) = placed("nfs-placed-presented").await;
+    let tool = at(&fs, &["jobs", "1f3a", "root", "bin", "tool"]).await;
+    let attr = fs.getattr(tool).await.unwrap();
+    assert_eq!(attr.mode, 0o755);
+    let jobs = at(&fs, &["jobs"]).await;
+    assert_eq!(fs.getattr(jobs).await.unwrap().mode, 0o711);
+    let other = auth(UID, 99, &[]);
+    let write = ACCESS3_MODIFY | ACCESS3_EXTEND | ACCESS3_DELETE;
+    let granted = fs.access(tool, Some(&other), 0x3f).await.unwrap();
+    assert_eq!(granted, ACCESS3_READ | ACCESS3_EXECUTE);
+    assert_eq!(granted & write, 0);
+    let rofs = code(nfsstat3::NFS3ERR_ROFS);
+    assert_eq!(failed(fs.setattr(tool, sattr3::default()).await), rofs);
+    assert_eq!(failed(fs.write(tool, 0, b"x").await), rofs);
+    assert_eq!(failed(fs.remove(tool, &name("n")).await), rofs);
 }

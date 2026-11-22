@@ -8,8 +8,8 @@ use std::net::SocketAddr;
 use super::super::config::NfsSettings;
 use super::super::fixtures::{EPOCH, attached, loopback, settings};
 use super::super::wire_client::{Client, Cred, Dec, Enc, GETATTR, LOOKUP, NFS, READ};
-use super::Running;
 use super::tests::{Recorder, closed, euid};
+use super::{Leaving, Running};
 use crate::server::treefs::testing::Rig;
 
 fn me() -> Cred {
@@ -86,7 +86,7 @@ async fn handles_issued_before_a_restart_are_answered_after_it_with_the_same_ent
     let before = attrs_and_bytes(&mut client, &tool).await;
     assert_eq!(before.0.0, 0);
     drop(client);
-    first.stop().await.unwrap();
+    first.leave(Leaving::Signal).await.unwrap();
     closed(address).await;
 
     let (second, _, mut again, new_root, _) = started(&rig, EPOCH).await;
@@ -94,7 +94,7 @@ async fn handles_issued_before_a_restart_are_answered_after_it_with_the_same_ent
     assert_eq!(attrs_and_bytes(&mut again, &tool).await, before);
     assert_eq!(tool_of(&mut again, &root, &digest).await, tool);
     drop(again);
-    second.stop().await.unwrap();
+    second.leave(Leaving::Signal).await.unwrap();
 }
 
 /// Asserts that a handle of a mount of another epoch (a boot that is gone) is `NFS3ERR_STALE`
@@ -105,7 +105,7 @@ async fn a_handle_of_another_mount_id_is_stale() {
     let (first, address, mut client, root, _) = started(&rig, EPOCH).await;
     let tool = tool_of(&mut client, &root, &digest).await;
     drop(client);
-    first.stop().await.unwrap();
+    first.leave(Leaving::Signal).await.unwrap();
     closed(address).await;
 
     let (second, _, mut again, new_root, _) = started(&rig, EPOCH + 1).await;
@@ -122,7 +122,7 @@ async fn a_handle_of_another_mount_id_is_stale() {
         0
     );
     drop(again);
-    second.stop().await.unwrap();
+    second.leave(Leaving::Signal).await.unwrap();
 }
 
 /// Asserts that the table of tree numbers is reopened and not made again when the epoch matches,
@@ -136,7 +136,7 @@ async fn the_table_of_tree_numbers_is_reopened_not_recreated_when_it_matches() {
     let (first, address, mut client, root, _) = started(&rig, EPOCH).await;
     let tool = tool_of(&mut client, &root, &digest).await;
     drop(client);
-    first.stop().await.unwrap();
+    first.leave(Leaving::Signal).await.unwrap();
     closed(address).await;
     std::fs::remove_file(rig.runtime.join("attachments")).unwrap();
 
@@ -145,12 +145,12 @@ async fn the_table_of_tree_numbers_is_reopened_not_recreated_when_it_matches() {
     assert!(second._setup.core.attachments().is_empty());
     assert_eq!(attrs_and_bytes(&mut again, &tool).await.1.0, 0);
     drop(again);
-    second.stop().await.unwrap();
+    second.leave(Leaving::Signal).await.unwrap();
     closed(address).await;
 
     let (third, _, _, _, _) = started(&rig, EPOCH + 1).await;
     assert!(!third._setup.reopened);
-    third.stop().await.unwrap();
+    third.leave(Leaving::Signal).await.unwrap();
 }
 
 /// Asserts that a request the client sends again after a restart (its reply was lost with the old
@@ -174,7 +174,7 @@ async fn a_resent_lookup_or_read_after_restart_is_answered_identically() {
     .await;
     assert_eq!(first_read.0, 0);
     drop(client);
-    first.stop().await.unwrap();
+    first.leave(Leaving::Signal).await.unwrap();
     closed(address).await;
 
     let (second, _, mut again, _, _) = started(&rig, EPOCH).await;
@@ -182,7 +182,7 @@ async fn a_resent_lookup_or_read_after_restart_is_answered_identically() {
     let resent = call(&mut again, READ, Enc::default().opaque(&tool).u64(2).u32(5)).await;
     assert_eq!(resent, first_read);
     drop(again);
-    second.stop().await.unwrap();
+    second.leave(Leaving::Signal).await.unwrap();
 }
 
 /// Asserts that the attachments are restored by a restart from the file, the pins are asserted
@@ -194,7 +194,7 @@ async fn attachments_and_pins_are_restored_on_restart() {
     let (first, address, client, _, _) = started(&rig, EPOCH).await;
     drop(client);
     first._setup.core.settled().unwrap();
-    first.stop().await.unwrap();
+    first.leave(Leaving::Signal).await.unwrap();
     closed(address).await;
     let asked = rig.upstream.asked("pins-live").len();
 
@@ -214,7 +214,7 @@ async fn attachments_and_pins_are_restored_on_restart() {
     let live = pins.last().unwrap();
     assert!(live.contains(&format!("nfs-{EPOCH:08x}")), "{live}");
     assert!(live.ends_with(&digest), "{live}");
-    second.stop().await.unwrap();
+    second.leave(Leaving::Signal).await.unwrap();
 }
 
 /// Asserts that a start finds the mount a restart's predecessor left and makes none, and that a
@@ -238,7 +238,7 @@ async fn a_mount_that_is_there_is_not_made_again() {
         .map(|call| call[0].clone())
         .collect();
     assert_eq!(programs, ["/sbin/mount"]);
-    running.stop().await.unwrap();
+    running.leave(Leaving::Signal).await.unwrap();
     let last = runner.calls().pop().unwrap();
     assert_eq!(last[0], "/sbin/umount");
 
@@ -258,7 +258,7 @@ async fn a_mount_that_is_there_is_not_made_again() {
         .map(|call| call[0].clone())
         .collect();
     assert_eq!(programs, ["/sbin/mount", "/sbin/mount_nfs"]);
-    running.stop().await.unwrap();
+    running.leave(Leaving::Signal).await.unwrap();
 }
 
 /// Asserts that a mount is noted with the address it was made from; that a start on the same
@@ -266,7 +266,7 @@ async fn a_mount_that_is_there_is_not_made_again() {
 /// address than the mount at the mount point was made from (a hard mount no one serves, which every
 /// process that touches it would wait on forever) unmounts it, by force when it is busy, mounts
 /// the export afresh and notes the new address. A start whose clearing fails is refused with what
-/// both unmounts said. Catches a start that keeps, or refuses to replace, a mount to a server that
+/// the three steps of the unmount said. Catches a start that keeps, or refuses to replace, a mount to a server that
 /// is gone.
 #[tokio::test]
 async fn a_mount_made_from_another_address_is_cleared_and_made_again() {
@@ -283,7 +283,7 @@ async fn a_mount_made_from_another_address_is_cleared_and_made_again() {
     let was = first.address;
     let noted = std::fs::read_to_string(rig.runtime.join("nfs-mounted")).unwrap();
     assert_eq!(noted, was.to_string());
-    first.stop().await.unwrap();
+    first.leave(Leaving::Signal).await.unwrap();
     // The server the stop ended closes its socket when the runtime drops its task.
     while std::net::TcpListener::bind(was).is_err() {
         tokio::task::yield_now().await;
@@ -298,7 +298,7 @@ async fn a_mount_made_from_another_address_is_cleared_and_made_again() {
         .await
         .unwrap();
     assert_eq!(kept.programs(), ["/sbin/mount"]);
-    again.stop().await.unwrap();
+    again.leave(Leaving::Signal).await.unwrap();
 
     // Port 0 binds another port than `was`, which the stopped server has released.
     let stale = Recorder::mounted_at(&rig.mountpoint);
@@ -324,7 +324,7 @@ async fn a_mount_made_from_another_address_is_cleared_and_made_again() {
     let noted = std::fs::read_to_string(rig.runtime.join("nfs-mounted")).unwrap();
     assert_eq!(noted, other.address.to_string());
     let now = other.address;
-    other.stop().await.unwrap();
+    other.leave(Leaving::Signal).await.unwrap();
 
     let busy = Recorder::busy_at(&rig.mountpoint, true);
     let forced = Running::start(
@@ -365,7 +365,7 @@ async fn a_mount_made_from_another_address_is_cleared_and_made_again() {
         why,
         format!(
             "unmounting {point}: umount(mnt): Resource busy -- try 'diskutil unmount'; diskutil \
-             unmount force: Unmount failed for mnt"
+             unmount force: Unmount failed for mnt; unmount(2) with MNT_FORCE: refused"
         )
     );
     assert!(stuck.has_mount());

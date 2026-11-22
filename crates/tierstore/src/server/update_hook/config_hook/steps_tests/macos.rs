@@ -5,7 +5,7 @@ use std::path::{Path, PathBuf};
 
 use super::super::super::launchd_tests::fake as mac;
 use super::super::super::{
-    Done, LAUNCHD_PLIST, LaunchdPorts, Marker, Params, Reason, Record, Step,
+    Done, FS_CONFIG_FILE, LAUNCHD_PLIST, LaunchdPorts, Marker, Params, Reason, Record, Step,
 };
 use super::super::{Common, Running, launchd_step};
 use super::{Files, Mem, PKG_NEW, PKG_OLD, in_flight, lin, staged};
@@ -326,4 +326,40 @@ fn a_mac_rollback_after_the_next_packages_prepare_failed_has_nothing_to_roll_bac
         assert_eq!(node.fake.launchd_calls().len(), before);
         assert_eq!(node.fake.record(), at_rest);
     }
+}
+
+/// Asserts that a Mac config package whose params name the fs job drives it through the update
+/// hook's arm, with the mount list read through the host the config hook gives the arm: with no
+/// mount listed the update ends with both jobs loaded, and with a mount still listed after the fs
+/// job went the cutover fails with `not_ready` and the fs job is loaded again. Catches a config
+/// hook host that does not forward the mount list.
+#[test]
+fn a_mac_config_update_that_names_the_fs_job_checks_its_mount_through_the_host() {
+    let p = mac::params_with(
+        PKG_NEW,
+        "1.1.0",
+        Some((PKG_OLD, "1.0.0")),
+        "fs_launchd_label = \"tierstore-fs\"\n",
+    );
+    let fs_config = format!("[fs]\nmountpoint = \"{}\"\n", mac::FS_MOUNT);
+
+    let node = Mac::new();
+    node.fake.with_fs(true);
+    node.files.put(Path::new(FS_CONFIG_FILE), &fs_config);
+    node.go(&p, &[Prepare, Cutover]);
+    let end = node.fake.snapshot();
+    assert_eq!((end.job, end.fs_job), (Some(PathBuf::from(mac::OLD)), true));
+
+    let stuck = Mac::new();
+    stuck.fake.with_fs(true);
+    stuck.files.put(Path::new(FS_CONFIG_FILE), &fs_config);
+    stuck
+        .files
+        .mounts
+        .borrow_mut()
+        .insert(PathBuf::from(mac::FS_MOUNT));
+    stuck.go(&p, &[Prepare]);
+    let done = stuck.step(Cutover, &p);
+    assert_eq!(done.report.reason, Some(Reason::NotReady), "{done:?}");
+    assert!(stuck.fake.snapshot().fs_job);
 }

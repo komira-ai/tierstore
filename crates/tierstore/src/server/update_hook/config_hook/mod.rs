@@ -71,6 +71,7 @@ pub fn this_system() -> Defaults {
             config_file: MACOS_CONFIG_FILE,
             service_manager: ServiceManager::Launchd {
                 label: MACOS_LABEL.to_owned(),
+                fs_label: None,
             },
         }
     } else {

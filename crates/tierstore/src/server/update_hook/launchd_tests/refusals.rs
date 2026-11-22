@@ -247,6 +247,8 @@ fn a_failure_after_the_commit_is_irreversible_and_cleanup_finishes_it() {
 struct Case {
     name: &'static str,
     first: bool,
+    /// The params name the fs job, loaded on an update and not on a first install.
+    fs: bool,
     setup: &'static [Step],
     reboot: bool,
     act: Step,
@@ -264,6 +266,7 @@ const fn case(
     Case {
         name,
         first: false,
+        fs: false,
         setup,
         reboot: false,
         act,
@@ -275,6 +278,10 @@ const fn case(
 fn cases() -> Vec<Case> {
     let installing = |c: Case| Case { first: true, ..c };
     let rebooted = |c: Case| Case { reboot: true, ..c };
+    let with_fs = |c: Case| Case { fs: true, ..c };
+    let fs_job = "launchd.loaded tierstore-fs";
+    let fs_out = "launchd.bootout tierstore-fs";
+    let fs_in = "launchd.bootstrap /Library/LaunchDaemons/tierstore-fs.plist";
     let up: &'static [Step] = &[Prepare];
     let cut: &'static [Step] = &[Prepare, Cutover];
     let ver: &'static [Step] = &[Prepare, Cutover, Verify];
@@ -404,6 +411,118 @@ fn cases() -> Vec<Case> {
             "launchd.bootstrap",
             Reason::UnitFailed,
         )),
+        with_fs(case(
+            "fs cutover loaded",
+            up,
+            Cutover,
+            fs_job,
+            Reason::UnitFailed,
+        )),
+        with_fs(case(
+            "fs cutover config",
+            up,
+            Cutover,
+            "host.config",
+            Reason::HostFailed,
+        )),
+        with_fs(case(
+            "fs cutover bootout",
+            up,
+            Cutover,
+            fs_out,
+            Reason::UnitFailed,
+        )),
+        with_fs(case(
+            "fs cutover mounted",
+            up,
+            Cutover,
+            "host.mounted",
+            Reason::HostFailed,
+        )),
+        with_fs(case(
+            "fs cutover bootstrap",
+            up,
+            Cutover,
+            fs_in,
+            Reason::UnitFailed,
+        )),
+        installing(with_fs(case(
+            "first fs cutover bootstrap",
+            up,
+            Cutover,
+            fs_in,
+            Reason::UnitFailed,
+        ))),
+        with_fs(case(
+            "fs rollback loaded",
+            cut,
+            Rollback,
+            fs_job,
+            Reason::UnitFailed,
+        )),
+        with_fs(case(
+            "fs rollback config",
+            cut,
+            Rollback,
+            "host.config",
+            Reason::HostFailed,
+        )),
+        with_fs(case(
+            "fs rollback bootout",
+            cut,
+            Rollback,
+            fs_out,
+            Reason::UnitFailed,
+        )),
+        with_fs(case(
+            "fs rollback mounted",
+            cut,
+            Rollback,
+            "host.mounted",
+            Reason::HostFailed,
+        )),
+        with_fs(case(
+            "fs rollback bootstrap",
+            cut,
+            Rollback,
+            fs_in,
+            Reason::UnitFailed,
+        )),
+        installing(with_fs(case(
+            "first fs rollback bootout",
+            cut,
+            Rollback,
+            fs_out,
+            Reason::UnitFailed,
+        ))),
+        with_fs(case(
+            "fs uninstall config",
+            cut,
+            Uninstall,
+            "host.config",
+            Reason::HostFailed,
+        )),
+        with_fs(case(
+            "fs uninstall bootout",
+            cut,
+            Uninstall,
+            fs_out,
+            Reason::UnitFailed,
+        )),
+        rebooted(with_fs(case(
+            "fs restore loaded",
+            &[],
+            Restore,
+            fs_job,
+            Reason::UnitFailed,
+        ))),
+        rebooted(with_fs(case(
+            "fs restore bootstrap",
+            &[],
+            Restore,
+            fs_in,
+            Reason::UnitFailed,
+        ))),
     ]
 }
 
@@ -419,6 +538,9 @@ fn a_failing_port_call_is_reported_with_its_reason() {
         } else {
             Fake::new()
         };
+        if case.fs {
+            fake.with_fs(!case.first);
+        }
         fake.advance(case.setup);
         if case.reboot {
             fake.reboot();

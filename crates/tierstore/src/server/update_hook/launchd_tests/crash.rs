@@ -11,6 +11,8 @@ use Step::{Cleanup, Cutover, Prepare, Restore, Rollback, Uninstall, Verify};
 struct Scenario {
     name: &'static str,
     first: bool,
+    /// The params name the fs job, loaded on an update and not on a first install.
+    fs: bool,
     setup: &'static [Step],
     act: Step,
 }
@@ -19,9 +21,14 @@ const fn scenario(name: &'static str, first: bool, setup: &'static [Step], act: 
     Scenario {
         name,
         first,
+        fs: false,
         setup,
         act,
     }
+}
+
+const fn with_fs(s: Scenario) -> Scenario {
+    Scenario { fs: true, ..s }
 }
 
 const SCENARIOS: &[Scenario] = &[
@@ -61,6 +68,21 @@ const SCENARIOS: &[Scenario] = &[
     scenario("first verify", true, &[Prepare, Cutover], Verify),
     scenario("first cleanup", true, &[Prepare, Cutover, Verify], Cleanup),
     scenario("first uninstall", true, &[Prepare, Cutover], Uninstall),
+    with_fs(scenario("fs cutover", false, &[Prepare], Cutover)),
+    with_fs(scenario(
+        "fs rollback after cutover",
+        false,
+        &[Prepare, Cutover],
+        Rollback,
+    )),
+    with_fs(scenario("fs restore", false, &[Prepare, Cutover], Restore)),
+    with_fs(scenario(
+        "fs uninstall",
+        false,
+        &[Prepare, Cutover],
+        Uninstall,
+    )),
+    with_fs(scenario("first fs cutover", true, &[Prepare], Cutover)),
 ];
 
 fn start(s: &Scenario) -> Fake {
@@ -69,6 +91,9 @@ fn start(s: &Scenario) -> Fake {
     } else {
         Fake::new()
     };
+    if s.fs {
+        fake.with_fs(!s.first);
+    }
     fake.advance(s.setup);
     if s.act == Restore {
         fake.reboot();
@@ -215,29 +240,35 @@ fn a_failed_cutover_interrupted_anywhere_is_finished_by_rollback() {
 }
 
 /// Asserts that the rollback of a first install, with each of its calls failing in turn, says
-/// `no_previous_release` when it is run again, and ends with no job loaded and the update on
-/// record without markers. Catches a first-install rollback that a crash leaves with a job
-/// loaded.
+/// `no_previous_release` when it is run again, and ends with no job loaded (the fs job included,
+/// when the params name one) and the update on record without markers. Catches a first-install
+/// rollback that a crash leaves with a job loaded.
 #[test]
 fn the_rollback_of_a_first_install_converges_after_a_failure_at_every_call() {
-    let setup = || {
-        let fake = Fake::first_install();
-        fake.advance(&[Prepare, Cutover, Verify]);
-        fake
-    };
-    let clean = setup();
-    let from = clean.calls();
-    assert_failed(&clean.host_run(Rollback), Reason::NoPreviousRelease);
-    let calls = clean.calls() - from;
-    let end = clean.snapshot();
-    for n in 1..=calls {
-        let fake = setup();
-        fake.halt_at(n);
-        let first = fake.host_run(Rollback);
-        assert_eq!(first.outcome, Outcome::Failure, "at {n}");
-        fake.heal();
-        assert_failed(&fake.host_run(Rollback), Reason::NoPreviousRelease);
-        assert_eq!(fake.snapshot(), end, "at {n}");
-        assert!(fake.strays().is_empty(), "at {n}");
+    for fs in [false, true] {
+        let setup = || {
+            let fake = Fake::first_install();
+            if fs {
+                fake.with_fs(false);
+            }
+            fake.advance(&[Prepare, Cutover, Verify]);
+            fake
+        };
+        let clean = setup();
+        let from = clean.calls();
+        assert_failed(&clean.host_run(Rollback), Reason::NoPreviousRelease);
+        let calls = clean.calls() - from;
+        let end = clean.snapshot();
+        assert!(!end.fs_job, "fs {fs}");
+        for n in 1..=calls {
+            let fake = setup();
+            fake.halt_at(n);
+            let first = fake.host_run(Rollback);
+            assert_eq!(first.outcome, Outcome::Failure, "at {n}");
+            fake.heal();
+            assert_failed(&fake.host_run(Rollback), Reason::NoPreviousRelease);
+            assert_eq!(fake.snapshot(), end, "at {n}, fs {fs}");
+            assert!(fake.strays().is_empty(), "at {n}, fs {fs}");
+        }
     }
 }

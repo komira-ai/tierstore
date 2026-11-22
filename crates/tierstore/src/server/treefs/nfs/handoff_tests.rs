@@ -10,9 +10,9 @@ use super::super::boot::BootSource;
 use super::super::config::NfsSettings;
 use super::super::fixtures::{EPOCH, attached, endless, loopback, settings};
 use super::super::wire_client::{Client, Cred, Dec, Enc, GETATTR, LOOKUP, NFS, READ};
-use super::Running;
 use super::serve_with;
 use super::tests::{Recorder, closed, euid};
+use super::{Leaving, Running};
 use crate::server::handoff::Handoff;
 use crate::server::handoff::testing::within;
 use crate::server::treefs::core::AttachError;
@@ -108,8 +108,8 @@ async fn the_listening_socket_passes_with_the_offer_and_the_new_instance_accepts
     assert_eq!(programs, ["/sbin/mount"], "the new process mounts nothing");
 
     drop(client);
-    old.handed_over().await;
-    old.stop().await.unwrap();
+    assert_eq!(old.ended().await, Leaving::Ended);
+    old.leave(Leaving::Signal).await.unwrap();
     assert!(
         old_runner
             .calls()
@@ -123,7 +123,7 @@ async fn the_listening_socket_passes_with_the_offer_and_the_new_instance_accepts
     let tree = lookup(&mut later, &trees, &digest).await;
     assert_eq!(getattr(&mut later, &tree).await, 0);
     drop(later);
-    new.stop().await.unwrap();
+    new.leave(Leaving::Signal).await.unwrap();
     assert_eq!(new_runner.calls().last().unwrap()[0], "/sbin/umount");
 }
 
@@ -178,9 +178,9 @@ async fn the_old_instance_stops_accepting_at_ack_and_answers_every_owed_reply_be
         "and then the connection is shut down, not reset"
     );
     drop(client);
-    old.handed_over().await;
-    old.stop().await.unwrap();
-    new.stop().await.unwrap();
+    assert_eq!(old.ended().await, Leaving::Ended);
+    old.leave(Leaving::Signal).await.unwrap();
+    new.leave(Leaving::Signal).await.unwrap();
 }
 
 /// Asserts that an idle connection of the old process ends with the shutdown of its write side
@@ -196,9 +196,9 @@ async fn the_write_side_of_each_connection_is_shut_down_before_exit() {
     assert!(busy.ended_cleanly().await);
     drop((idle, busy));
     let mut old = old;
-    old.handed_over().await;
-    old.stop().await.unwrap();
-    new.stop().await.unwrap();
+    assert_eq!(old.ended().await, Leaving::Ended);
+    old.leave(Leaving::Signal).await.unwrap();
+    new.leave(Leaving::Signal).await.unwrap();
 }
 
 /// Asserts that a taker whose settings name another address than the running process serves on is
@@ -233,9 +233,9 @@ async fn a_failed_ack_leaves_the_old_instance_serving() {
     assert_eq!(new.address, old.address);
     drop((client, fresh));
     let mut old = old;
-    old.handed_over().await;
-    old.stop().await.unwrap();
-    new.stop().await.unwrap();
+    assert_eq!(old.ended().await, Leaving::Ended);
+    old.leave(Leaving::Signal).await.unwrap();
+    new.leave(Leaving::Signal).await.unwrap();
 }
 
 /// Asserts that a process with a hand-off socket that no one else holds binds the address itself
@@ -249,7 +249,7 @@ async fn a_cold_start_binds_its_own_socket_and_a_bad_control_path_is_refused() {
     assert!(socket.exists());
     drop(client);
     let address = old.address;
-    old.stop().await.unwrap();
+    old.leave(Leaving::Signal).await.unwrap();
     // The server task is gone, and its control socket with it, once nothing listens.
     closed(address).await;
     assert!(!socket.exists());
@@ -301,7 +301,7 @@ fn the_process_ends_by_itself_when_its_socket_is_taken_and_leaves_the_mount() {
         .unwrap();
     thread.join().unwrap().unwrap();
     assert!(runner.calls().iter().all(|call| call[0] != "/sbin/umount"));
-    runtime.block_on(new.stop()).unwrap();
+    runtime.block_on(new.leave(Leaving::Signal)).unwrap();
     assert_eq!(next.calls().last().unwrap()[0], "/sbin/umount");
 }
 
@@ -383,9 +383,9 @@ async fn the_old_instance_writes_no_state_once_the_new_one_has_the_socket() {
     let _ = new._setup.core.attach(&digest, "late-run").unwrap();
     drop(client);
     let mut old = old;
-    old.handed_over().await;
-    old.stop().await.unwrap();
-    new.stop().await.unwrap();
+    assert_eq!(old.ended().await, Leaving::Ended);
+    old.leave(Leaving::Signal).await.unwrap();
+    new.leave(Leaving::Signal).await.unwrap();
 }
 
 /// Asserts that a start whose runtime directory cannot be used (the file of the table of tree
@@ -422,14 +422,14 @@ async fn a_start_that_cannot_work_is_refused_before_the_running_instance_gives_u
     assert_eq!(new.address, old.address);
     drop((client, fresh));
     let mut old = old;
-    old.handed_over().await;
-    old.stop().await.unwrap();
-    new.stop().await.unwrap();
+    assert_eq!(old.ended().await, Leaving::Ended);
+    old.leave(Leaving::Signal).await.unwrap();
+    new.leave(Leaving::Signal).await.unwrap();
 }
 
 /// Asserts that a client that sees the end of the stream and never closes its side does not keep
 /// the old process: once `fs.nfs.drain_wait` has passed after the hand-over it ends without the
-/// client having closed (`handed_over` returns while the client is still held), without an
+/// client having closed (`ended` returns while the client is still held), without an
 /// unmount, and the new process serves. The wait is set to a millisecond; the test asserts that
 /// the process ends, not how long that took.
 #[tokio::test]
@@ -445,17 +445,18 @@ async fn a_client_that_never_closes_is_let_go_when_the_drain_wait_has_passed() {
     let root = stubborn.mount("/").await;
     let (new, _) = taking_over(&rig, &old).await;
     assert!(stubborn.ended_cleanly().await);
-    within(
+    let ended = within(
         "the old process ends without the client closing",
-        old.handed_over(),
+        old.ended(),
     )
     .await;
-    old.stop().await.unwrap();
+    assert_eq!(ended, Leaving::Ended);
+    old.leave(Leaving::Signal).await.unwrap();
     assert!(runner.calls().iter().all(|call| call[0] != "/sbin/umount"));
     let mut later = Client::connect(new.address).await;
     assert_eq!(later.mount("/").await, root);
     drop((stubborn, later));
-    new.stop().await.unwrap();
+    new.leave(Leaving::Signal).await.unwrap();
 }
 
 /// Asserts that a stop ends the offer of the listening socket before it unmounts: while `umount`
@@ -473,6 +474,6 @@ async fn a_stop_ends_the_offer_before_it_unmounts() {
     let socket = rig.dir.path().join("handoff.sock");
     assert!(socket.exists());
     runner.check_at_umount(move || std::os::unix::net::UnixStream::connect(&socket).is_err());
-    running.stop().await.unwrap();
+    running.leave(Leaving::Signal).await.unwrap();
     assert_eq!(runner.checked_at_umount(), Some(true));
 }

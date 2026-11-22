@@ -3,8 +3,13 @@
 //!
 //! ```text
 //! tierstore fs --config <file>                serve the mount (FUSE on Linux, NFS on macOS), until SIGTERM or SIGINT
+//! tierstore fs --config <file> --check-config load the file as a start does and say nothing: status 0 if it loads, 2 and the reason if not
 //! tierstore fs attachments --config <file>    list the attachments: `<tree digest> <run>`
 //! ```
+//!
+//! `--check-config` serves nothing, mounts nothing and touches no socket; names in `fs.owner` and
+//! `fs.client_group` are looked up through the system, as a start does. It does not go with
+//! `attachments`: that is status 2.
 //!
 //! The file has an `[fs]` table (see the `treefs` module); it is not the file of the S3 instance.
 
@@ -30,6 +35,10 @@ struct Args {
     /// The configuration file, which has an `[fs]` table (needed).
     #[arg(long, global = true)]
     config: Option<PathBuf>,
+    /// Load the file as a start does, write nothing and serve nothing: status 0 if it loads, 2 and
+    /// the reason if not.
+    #[arg(long)]
+    check_config: bool,
     #[command(subcommand)]
     command: Option<Command>,
 }
@@ -113,6 +122,13 @@ pub(super) fn run(args: &[OsString], out: &mut dyn Write, err: &mut dyn Write) -
         let _ = writeln!(err, "tierstore fs: --config is needed");
         return ExitCode::from(2);
     };
+    if args.check_config && args.command.is_some() {
+        let _ = writeln!(
+            err,
+            "tierstore fs: --check-config does not go with attachments"
+        );
+        return ExitCode::from(2);
+    }
     let settings = match load(&config) {
         Ok(settings) => settings,
         Err(why) => {
@@ -121,6 +137,7 @@ pub(super) fn run(args: &[OsString], out: &mut dyn Write, err: &mut dyn Write) -
         }
     };
     match args.command {
+        None if args.check_config => ExitCode::SUCCESS,
         None => serve(&settings, err),
         Some(Command::Attachments) => match attachments(&settings, out) {
             Ok(()) => ExitCode::SUCCESS,

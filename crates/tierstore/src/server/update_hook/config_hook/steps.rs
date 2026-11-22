@@ -34,6 +34,10 @@ impl Host for Running<'_> {
         self.host.config(path)
     }
 
+    fn mounted(&self, path: &Path) -> Result<bool, PortError> {
+        self.host.mounted(path)
+    }
+
     fn capabilities(&self, _release: &Path) -> Result<Vec<String>, PortError> {
         self.host.capabilities(self.release)
     }

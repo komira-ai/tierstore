@@ -5,7 +5,7 @@ use std::os::unix::fs::{PermissionsExt, symlink};
 use std::path::{Path, PathBuf};
 
 use super::super::ports::{Host, PortError, PortKind};
-use super::host::{CONFIG_MAX, DSCL_PROGRAM, SUDO_PROGRAM};
+use super::host::{CONFIG_MAX, DSCL_PROGRAM, MOUNT_PROGRAM, SUDO_PROGRAM};
 use super::testing::{FakeRunner, LIMIT, exit, me, scratch, signalled};
 use super::{Call, RunError, SystemHost};
 
@@ -849,4 +849,76 @@ fn a_host_given_one_binary_asks_it_for_every_release() {
     mode(&bin, 0o777);
     let text = message(one.capabilities(Path::new("/r")).unwrap_err());
     assert!(text.contains("usr/libexec/tierstore"), "{text}");
+}
+
+const LISTING: &str = "/dev/disk3s1s1 on / (apfs, sealed, local, read-only, journaled)\n\
+127.0.0.1:/ on /private/var/tierstore/fs (nfs, nodev, nosuid, mounted by build)\n\
+map auto_home on /System/Volumes/Data/home (autofs, automounted, nobrowse)\n";
+
+/// Asserts that the mount list is read by running `mount` with no argument, and that a line with
+/// ` on <path> (` is a mount at the path, while a path that is only a prefix of a mounted one, a
+/// path the listing names as a source and a listing without it are not. Catches a check that
+/// takes a neighbour's mount for the file service's, or one that reads the wrong command.
+#[test]
+fn the_mount_list_says_whether_a_path_is_mounted() {
+    let (_guard, root) = scratch("host-mounted");
+    let runner = FakeRunner::replying(vec![
+        exit(0, LISTING, ""),
+        exit(0, LISTING, ""),
+        exit(0, LISTING, ""),
+        exit(0, "", ""),
+    ]);
+    let host = host(&root, &runner);
+    assert_eq!(
+        host.mounted(Path::new("/private/var/tierstore/fs")),
+        Ok(true)
+    );
+    assert_eq!(host.mounted(Path::new("/private/var/tierstore")), Ok(false));
+    assert_eq!(host.mounted(Path::new("/System/Volumes/Data")), Ok(false));
+    assert_eq!(
+        host.mounted(Path::new("/private/var/tierstore/fs")),
+        Ok(false)
+    );
+    assert_eq!(runner.calls()[0], Call::new(MOUNT_PROGRAM, &[], LIMIT));
+    assert_eq!(MOUNT_PROGRAM, "/sbin/mount");
+}
+
+/// Asserts that a mount is found under the path the listing prints when the path given resolves
+/// to it through a link (a Mac's `/var` is a link to `/private/var`, and `mount` prints the
+/// resolved path). Catches a check that misses the file service's mount because its configuration
+/// names the path by the link.
+#[test]
+fn a_mount_is_found_under_the_path_a_link_resolves_to() {
+    let (_guard, root) = scratch("host-mounted-link");
+    fs::create_dir_all(root.join("private/var/tierstore/fs")).unwrap();
+    symlink("private/var", root.join("var")).unwrap();
+    let real = fs::canonicalize(root.join("var/tierstore/fs")).unwrap();
+    let listing = format!("127.0.0.1:/ on {} (nfs, nodev)\n", real.display());
+    let runner = FakeRunner::replying(vec![exit(0, &listing, "")]);
+    assert_eq!(
+        host(&root, &runner).mounted(Path::new("/var/tierstore/fs")),
+        Ok(true)
+    );
+}
+
+/// Asserts that a mount list that cannot be had is an error naming the command and how it failed,
+/// for a program that cannot be run, one that exits with a status and one that a signal ends, and
+/// is not taken for "nothing is mounted". Catches a check that reads a failed `mount` as a mount
+/// that is gone.
+#[test]
+fn a_mount_list_that_cannot_be_had_is_an_error() {
+    let (_guard, root) = scratch("host-mounted-fails");
+    let runner = FakeRunner::replying(vec![
+        Err(RunError::Spawn("no such file".to_owned())),
+        exit(1, "", "mount: broken"),
+        signalled(),
+    ]);
+    let host = host(&root, &runner);
+    let path = Path::new("/private/var/tierstore/fs");
+    let spawn = message(host.mounted(path).unwrap_err());
+    assert_eq!(spawn, "/sbin/mount: cannot run: no such file");
+    let exited = message(host.mounted(path).unwrap_err());
+    assert_eq!(exited, "/sbin/mount: exited 1: mount: broken");
+    let ended = message(host.mounted(path).unwrap_err());
+    assert_eq!(ended, "/sbin/mount: ended by a signal: ");
 }

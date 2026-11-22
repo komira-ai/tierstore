@@ -236,6 +236,19 @@ pub trait Launchd {
     /// # Errors
     /// `launchctl` failed, or the domain still has the job when its time is up.
     fn bootout(&self, label: &str) -> Result<(), PortError>;
+
+    /// [`Launchd::bootout`] with bounds of its own, for a job that takes longer to exit than the
+    /// service does: `launchctl bootout` may run `call` (it returns when the process has
+    /// exited), and the domain is then looked at up to `gone_attempts` times.
+    ///
+    /// # Errors
+    /// As for [`Launchd::bootout`].
+    fn bootout_within(
+        &self,
+        label: &str,
+        call: Duration,
+        gone_attempts: u32,
+    ) -> Result<(), PortError>;
 }
 
 /// An answer to a GET.
@@ -263,6 +276,13 @@ pub trait Host {
     /// # Errors
     /// The path exists and cannot be read.
     fn config(&self, path: &Path) -> Result<Option<String>, PortError>;
+
+    /// Whether the host's list of mounts has one at `path` (the mount point as the file service's
+    /// configuration names it, or the path it resolves to).
+    ///
+    /// # Errors
+    /// The list cannot be had.
+    fn mounted(&self, path: &Path) -> Result<bool, PortError>;
 
     /// The capabilities (`bin/tierstore --capabilities`) of the release in `release`. A release
     /// that does not know the flag has none.

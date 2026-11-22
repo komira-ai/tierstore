@@ -76,7 +76,8 @@ pub enum Reason {
     HostNotReady,
     /// An instance that gave its sockets away is still draining (exit 75): try again soon.
     Draining,
-    /// No instance answered `/readyz` with 200 on the public port.
+    /// No instance answered `/readyz` with 200 on the public port. On a Mac that names the fs job:
+    /// the fs job's mount is still listed after the job was booted out.
     NotReady,
     /// The public port was never answered by the release with the version it must report.
     ProbeFailed,
@@ -85,10 +86,13 @@ pub enum Reason {
     /// `prepare`: the node's configuration has no `server.handoff_socket`, so the new instance
     /// could not take the old one's sockets.
     HandoffNotConfigured,
-    /// `prepare`: there is no configuration file at the path `config_file` names.
+    /// `prepare`: there is no configuration file at the path `config_file` names. On a Mac that
+    /// names the fs job: there is none at the fs job's configuration, which a step that stops the
+    /// fs job reads first for its mount point.
     ConfigMissing,
     /// `prepare`: the staged release or the previous one refuses the node's configuration when
-    /// it checks it (`--check-config`), so a start or a rollback onto it would fail.
+    /// it checks it (`--check-config`), so a start or a rollback onto it would fail. On a Mac that
+    /// names the fs job: the fs job's configuration is not TOML or names no absolute mount point.
     ConfigRefused,
     /// The params name a service manager this hook does not drive.
     ServiceManagerUnknown,

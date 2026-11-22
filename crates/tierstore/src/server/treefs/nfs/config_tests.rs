@@ -247,3 +247,66 @@ fn the_handoff_keys_are_taken_and_each_refusal_names_its_key() {
         assert!(why.contains(key), "{text}: {why}");
     }
 }
+
+/// Asserts the dead timeout of the mount: by default `fs.fetch_timeout` (rounded up to whole
+/// seconds) and 30 s, so it follows a file's own fetch timeout; a value given is taken when it is
+/// more than `fs.fetch_timeout`; one at or below it, or above two hours, is refused at load with
+/// the key's name and why. Catches a mount that the client gives up on during a fill the server
+/// still waits for, and two settings that can be set against each other.
+#[test]
+fn the_dead_timeout_is_more_than_the_fetch_timeout() {
+    assert_eq!(NfsSettings::default().dead_timeout, Duration::from_secs(90));
+    let fetch = |fetch: &str, nfs: &str| {
+        let text = format!("[fs]\n{NEEDED}fetch_timeout = \"{fetch}\"\n\n[fs.nfs]\n{nfs}");
+        from_text(&text, &builders).map(|settings| settings.nfs.dead_timeout)
+    };
+    let without_table = format!("[fs]\n{NEEDED}fetch_timeout = \"2m\"\n");
+    assert_eq!(
+        from_text(&without_table, &builders)
+            .unwrap()
+            .nfs
+            .dead_timeout,
+        Duration::from_secs(150)
+    );
+    assert_eq!(fetch("2m", "").unwrap(), Duration::from_secs(150));
+    assert_eq!(fetch("1500ms", "").unwrap(), Duration::from_secs(32));
+    assert_eq!(
+        fetch("60s", "dead_timeout = \"61s\"").unwrap(),
+        Duration::from_secs(61)
+    );
+    assert_eq!(
+        fetch("60s", "dead_timeout = \"60s\"")
+            .unwrap_err()
+            .to_string(),
+        "fs.nfs.dead_timeout: 60000ms is not more than fs.fetch_timeout (60000ms): a fill that \
+         the server still waits for would end the mount"
+    );
+    assert!(
+        fetch("2m", "dead_timeout = \"90s\"")
+            .unwrap_err()
+            .to_string()
+            .starts_with("fs.nfs.dead_timeout: 90000ms is not more than fs.fetch_timeout"),
+    );
+    assert_eq!(
+        fetch("60s", "dead_timeout = \"3h\"")
+            .unwrap_err()
+            .to_string(),
+        "fs.nfs.dead_timeout: 10800000ms is more than 7200000ms"
+    );
+}
+
+/// Asserts the limit of each command of the mount and the unmount: 20 s by default, a value in
+/// range taken, and one below 1 s or above 25 s (four steps of 25 s, and the wait to collect a
+/// killed command, are what the package's `ExitTimeOut` covers) refused by name.
+#[test]
+fn the_unmount_wait_is_taken_in_its_range() {
+    assert_eq!(NfsSettings::default().unmount_wait, Duration::from_secs(20));
+    let nfs = from_text(&with("unmount_wait = \"5s\""), &builders)
+        .unwrap()
+        .nfs;
+    assert_eq!(nfs.unmount_wait, Duration::from_secs(5));
+    for line in ["unmount_wait = \"500ms\"", "unmount_wait = \"26s\""] {
+        let why = refused(line);
+        assert!(why.starts_with("fs.nfs.unmount_wait: "), "{line}: {why}");
+    }
+}

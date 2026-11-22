@@ -6,8 +6,8 @@
 //! | `fs.mountpoint` | where the one FUSE mount is made | `/run/tierstore/fs` |
 //! | `fs.runtime_dir` | the state that outlives the process | `/run/tierstore-fs` |
 //! | `fs.control_socket` | the socket clients attach on | `<runtime_dir>/control.sock` |
-//! | `fs.client_group` | the group (name or number) that may use that socket | needed |
-//! | `fs.owner` | `uid:gid` every entry of every tree reports | needed |
+//! | `fs.client_group` | the group (a name of this system, or a number) that may use that socket | needed |
+//! | `fs.owner` | `user:group` every entry of every tree reports, each side a name of this system or a number | needed |
 //! | `fs.fill_socket` | the fill socket of the node's tierstore | needed |
 //! | `fs.cache_path` | the node's `local_cache.path` | needed |
 //! | `fs.fetch_timeout` | how long a fill, or a closed fill socket, is waited for | `60s` |
@@ -35,16 +35,17 @@ use crate::server::config_tuning::{HOUR, MS};
 use crate::server::config_units::Dur;
 use crate::server::config_unknown::fields_of;
 
-use super::groups::{self, Found};
+use super::groups::{self, Database, Found};
 use super::nfs::config::{NfsSettings, NfsTable, ignored as nfs_ignored};
 use super::put::config::{self as put_config, PutConfig, PutTable};
 
-/// The lookup of a group name: [`groups::system`], or a test's table.
-pub(in crate::server) type Groups<'a> = &'a dyn Fn(&str) -> Found;
+/// The lookup of a group or user name: [`groups::system`], or a test's table.
+pub(in crate::server) type Lookup<'a> = &'a dyn Fn(Database, &str) -> Found;
 
-/// The lookup of a system whose one group by name is `builders`, id 2001: the tests' table.
+/// The lookup of a system whose one name is `builders`, id 2001, as a group and as a user: the
+/// tests' table.
 #[cfg(test)]
-pub(in crate::server) fn builders(name: &str) -> Found {
+pub(in crate::server) fn builders(_database: Database, name: &str) -> Found {
     Ok((name == "builders").then_some(2001))
 }
 
@@ -60,7 +61,7 @@ const DEFAULT_RUNTIME_DIR: &str = "/run/tierstore-fs";
 const DEFAULT_CONTROL_SOCKET: &str = "control.sock";
 
 /// The most time a fill is waited for by default: a fill that fails sooner is not waited for.
-const DEFAULT_FETCH_TIMEOUT: Duration = Duration::from_secs(60);
+pub(super) const DEFAULT_FETCH_TIMEOUT: Duration = Duration::from_secs(60);
 
 /// The threads that serve the kernel's requests when the file leaves out `fs.threads`.
 const DEFAULT_THREADS: u32 = 16;
@@ -194,40 +195,66 @@ fn bounded(key: &str, wait: Duration) -> Result<Duration, ConfigError> {
     Ok(wait)
 }
 
-/// `uid:gid` as two numbers.
-fn owner_of(text: &str) -> Result<(u32, u32), ConfigError> {
-    let numbers = text
-        .split_once(':')
-        .and_then(|(uid, gid)| Some((uid.parse().ok()?, gid.parse().ok()?)));
-    numbers.ok_or_else(|| invalid("fs.owner", "must be uid:gid, two numbers"))
-}
-
-/// The group id `group` names: a number, or a name that `groups`, the system's lookup of group
-/// names, finds.
-fn group_of(group: &str, groups: Groups<'_>) -> Result<u32, ConfigError> {
-    if let Ok(gid) = group.parse() {
-        return Ok(gid);
+/// The id that `text`, the value of `key`, names in `database`: a number, or a name that `lookup`,
+/// the system's lookup of names, finds.
+fn id_of(
+    key: &str,
+    database: Database,
+    text: &str,
+    lookup: Lookup<'_>,
+) -> Result<u32, ConfigError> {
+    let noun = database.noun();
+    if !text.is_empty() && text.bytes().all(|byte| byte.is_ascii_digit()) {
+        return text
+            .parse()
+            .map_err(|_| invalid(key, format!("the {noun} id {text} is too large")));
     }
-    match groups(group) {
-        Ok(Some(gid)) => Ok(gid),
+    match lookup(database, text) {
+        Ok(Some(id)) => Ok(id),
         Ok(None) => Err(invalid(
-            "fs.client_group",
-            "is neither a group id nor the name of a group of this system",
+            key,
+            format!("{text:?} is neither a {noun} id nor the name of a {noun} of this system"),
         )),
         Err(why) => Err(invalid(
-            "fs.client_group",
-            format!("the group {group} could not be looked up: {why}"),
+            key,
+            format!("the {noun} {text} could not be looked up: {why}"),
         )),
     }
+}
+
+/// `user:group`, each a number or a name of this system, as two ids.
+fn owner_of(text: &str, lookup: Lookup<'_>) -> Result<(u32, u32), ConfigError> {
+    let mut parts = text.split(':');
+    let (Some(user), Some(group), None) = (parts.next(), parts.next(), parts.next()) else {
+        return Err(not_two_parts(text));
+    };
+    if user.is_empty() || group.is_empty() {
+        return Err(not_two_parts(text));
+    }
+    Ok((
+        id_of("fs.owner", Database::User, user, lookup)?,
+        id_of("fs.owner", Database::Group, group, lookup)?,
+    ))
+}
+
+/// The refusal of an `fs.owner` that is not a user and a group joined by one colon.
+fn not_two_parts(text: &str) -> ConfigError {
+    invalid(
+        "fs.owner",
+        format!(
+            "must be user:group, two parts joined by one colon, each a number or a name of this \
+             system, not {text:?}"
+        ),
+    )
 }
 
 impl FsSettings {
-    /// The settings of `table`; `groups` looks a group name up.
+    /// The settings of `table`; `lookup` looks a group or user name up.
     ///
     /// # Errors
     /// A [`ConfigError`] that names the key: one needed and left out, a path that is not
     /// absolute, an owner or a group that is not one, a value out of its range.
-    pub(super) fn of(table: FsTable, groups: Groups<'_>) -> Result<Self, ConfigError> {
+    pub(super) fn of(table: FsTable, lookup: Lookup<'_>) -> Result<Self, ConfigError> {
         let mountpoint = table
             .mountpoint
             .unwrap_or_else(|| PathBuf::from(DEFAULT_MOUNTPOINT));
@@ -296,8 +323,8 @@ impl FsSettings {
             mountpoint: absolute("fs.mountpoint", mountpoint)?,
             runtime_dir: absolute("fs.runtime_dir", runtime_dir)?,
             control_socket: absolute("fs.control_socket", control_socket)?,
-            client_group: group_of(&group, groups)?,
-            owner: owner_of(&owner)?,
+            client_group: id_of("fs.client_group", Database::Group, &group, lookup)?,
+            owner: owner_of(&owner, lookup)?,
             fill_socket: absolute(
                 "fs.fill_socket",
                 require("fs", "fill_socket", table.fill_socket)?,
@@ -314,7 +341,7 @@ impl FsSettings {
             reattach_concurrency: reattach_concurrency as usize,
             tree_idle: Duration::from_secs(tree_idle_secs),
             allow_other: true,
-            nfs: NfsSettings::of(table.nfs)?,
+            nfs: NfsSettings::of(table.nfs, timeout)?,
             put: put_config::of(table.put)?,
         })
     }
@@ -328,7 +355,7 @@ impl FsSettings {
 /// wrong type, and those of [`FsSettings::of`].
 pub(in crate::server) fn from_text(
     text: &str,
-    groups: Groups<'_>,
+    lookup: Lookup<'_>,
 ) -> Result<FsSettings, ConfigError> {
     let file: File = toml::from_str(text).map_err(|error| syntax(text, &error))?;
     let whole = text.parse::<toml::Table>().unwrap_or_default();
@@ -357,32 +384,32 @@ pub(in crate::server) fn from_text(
             tracing::warn!("tierstore fs: fs.put.{key} is not a key of this release; ignored");
         }
     }
-    FsSettings::of(file.fs, groups)
+    FsSettings::of(file.fs, lookup)
 }
 
 /// The settings of the file at `path`.
 ///
 /// # Errors
 /// [`ConfigError::Read`] for a file that cannot be read, and those of [`from_text`]. A group given
-/// by name is looked up through the system ([`groups::system`]); one given by number needs no
-/// lookup.
+/// by name (`fs.client_group`, and each side of `fs.owner`) is looked up through the system
+/// ([`groups::system`]); one given by number needs no lookup.
 pub(in crate::server) fn load(path: &Path) -> Result<FsSettings, ConfigError> {
     load_with(path, &groups::system)
 }
 
-/// [`load`] with `groups` as the lookup of group names.
+/// [`load`] with `lookup` as the lookup of group and user names.
 ///
 /// # Errors
 /// Those of [`load`].
 pub(in crate::server) fn load_with(
     path: &Path,
-    groups: Groups<'_>,
+    lookup: Lookup<'_>,
 ) -> Result<FsSettings, ConfigError> {
     let text = std::fs::read_to_string(path).map_err(|source| ConfigError::Read {
         path: path.to_owned(),
         source,
     })?;
-    from_text(&text, groups)
+    from_text(&text, lookup)
 }
 
 #[cfg(test)]
