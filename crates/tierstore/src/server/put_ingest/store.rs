@@ -12,6 +12,7 @@ use std::sync::atomic::{AtomicBool, Ordering};
 
 use rustix::fs::{CWD, Mode, OFlags, openat};
 use rustix::io::Errno;
+use tokio::io::AsyncRead;
 
 use crate::server::fill_socket::put::chunks;
 use crate::server::local_cache::LocalCache;
@@ -30,8 +31,6 @@ pub(in crate::server) enum Refusal {
     TooLarge,
     /// A symbolic link, a hard link or not a regular file.
     NotPlain(&'static str),
-    /// Its key would be over the limit of a key.
-    KeyTooLong,
 }
 
 impl fmt::Display for Refusal {
@@ -42,7 +41,6 @@ impl fmt::Display for Refusal {
             Self::OtherBytes => f.write_str("the key holds other bytes"),
             Self::TooLarge => f.write_str("the upstream refused it for its size"),
             Self::NotPlain(what) => write!(f, "it is {what}"),
-            Self::KeyTooLong => f.write_str("its key is over 1024 bytes"),
         }
     }
 }
@@ -94,12 +92,27 @@ pub(super) async fn put_file(
     sha256: TreeDigest,
     path: &Path,
 ) -> Outcome {
-    let (file, size) = match open(path) {
-        Ok(opened) => opened,
-        Err(outcome) => return outcome,
-    };
+    match open(path) {
+        Ok((file, size)) => {
+            put_body(cache, key, sha256, tokio::fs::File::from_std(file), size).await
+        }
+        Err(outcome) => outcome,
+    }
+}
+
+/// Puts the `size` bytes `file` gives as the object `key`, whose bytes must hash to `sha256`.
+pub(super) async fn put_body<R>(
+    cache: &LocalCache,
+    key: &str,
+    sha256: TreeDigest,
+    file: R,
+    size: u64,
+) -> Outcome
+where
+    R: AsyncRead + Unpin + Send,
+{
     let broken = AtomicBool::new(false);
-    let body = chunks(tokio::fs::File::from_std(file), &broken);
+    let body = chunks(file, &broken);
     match cache.put_stream_sha256(key, size, body, sha256).await {
         Ok(outcome) => Outcome::Stored(outcome),
         Err(error) if broken.load(Ordering::Relaxed) => Outcome::Unreadable(error.to_string()),

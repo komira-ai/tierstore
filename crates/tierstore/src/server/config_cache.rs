@@ -80,11 +80,11 @@ use super::config::{
 };
 use super::config_cache_tuning;
 use super::config_fill::{check_fill_outside_cache, fill_socket_of};
-use super::config_put_ingest::put_ingest_of;
 use super::config_handoff::{check_outside_cache, handoff_of};
 use super::config_hot_only::refuse_hot_keys;
 use super::config_interface::Interfaces;
 use super::config_policy::{Policy, check_policies, require_keeping};
+use super::config_put_ingest::put_ingest_of;
 use super::config_tuning::S3Client;
 use super::config_units::{Dur, Size, parse_size};
 use super::front::FrontSettings;

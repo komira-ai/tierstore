@@ -4,7 +4,7 @@
 
 use std::collections::{BTreeMap, BTreeSet};
 
-use super::GRACE;
+use super::GRACE_MS;
 use super::names::JobDir;
 use crate::TreeDigest;
 
@@ -20,7 +20,7 @@ pub(super) enum Verdict {
     Running,
     /// No digest was declared for it yet: look again later.
     Wait,
-    /// No digest was declared for it within [`GRACE`] of its first finding: refuse it.
+    /// No digest was declared for it within [`GRACE_MS`] of its first finding: refuse it.
     Refuse,
 }
 
@@ -56,8 +56,7 @@ impl Ledger {
             return Verdict::Store(*sha256);
         }
         let first = *self.undeclared.entry(id.clone()).or_insert(now);
-        let waited = u64::try_from(GRACE.as_millis()).unwrap_or(u64::MAX);
-        if now.saturating_sub(first) >= waited {
+        if now.saturating_sub(first) >= GRACE_MS {
             let _ = self.undeclared.remove(id);
             Verdict::Refuse
         } else {

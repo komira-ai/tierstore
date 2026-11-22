@@ -99,17 +99,15 @@ fn a_job_dir_has_its_build_dir_relative_path_and_display() {
     assert_eq!(dir.to_string(), "cas/b/b1/n1");
 }
 
-/// Asserts that the key of a file is `cas/b/<build>/<nonce>/<name>` when it has exactly 1024
-/// bytes, and none when it has 1025.
+/// Asserts that the key of a file is `cas/b/<build>/<nonce>/<name>`, and that the longest one
+/// three components make (each 255 bytes) is 773 bytes, within the 1024 of an S3 key.
 #[test]
-fn a_key_of_1024_bytes_is_made_and_one_of_1025_is_not() {
-    let dir = job("b1", "n1");
-    let fixed = "cas/b/b1/n1/".len();
-    let key = dir.key(&"x".repeat(1024 - fixed)).unwrap();
-    assert_eq!(key.len(), 1024);
-    assert!(key.starts_with("cas/b/b1/n1/xx"));
-    assert_eq!(dir.key(&"x".repeat(1025 - fixed)), None);
-    assert_eq!(dir.key("pack").as_deref(), Some("cas/b/b1/n1/pack"));
+fn a_key_is_the_files_path_and_the_longest_fits_a_key() {
+    assert_eq!(job("b1", "n1").key("pack"), "cas/b/b1/n1/pack");
+    let long = "x".repeat(255);
+    let key = job(&long, &long).key(&long);
+    assert_eq!(key.len(), 773);
+    assert!(key.len() <= 1024);
 }
 
 /// Asserts that a path with fewer than four components is above the jobs' directories and

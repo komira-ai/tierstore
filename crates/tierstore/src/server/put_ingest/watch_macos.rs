@@ -8,16 +8,31 @@
 //! The stream and its run loop are not `Send`, so they never leave the thread that makes them: that
 //! thread starts the stream (the crate runs it on a thread of its own), hands its events to the
 //! ingest's task, and stops it when the watcher is dropped.
+//!
+//! The crate answers before the stream has started, and what changes in between is never told. So
+//! the watcher is in place only once the stream has told a change: the thread writes the file
+//! [`PROBE`] in the root, which no job's directory is, until an event names it (at most
+//! [`PROBE_TRIES`] times, [`PROBE_WAIT`] apart), and then removes it.
 
 use std::io;
 use std::path::{Path, PathBuf};
 use std::sync::mpsc;
+use std::time::Duration;
 
 use fsevent::{Event, FsEvent, StreamFlags};
 use tokio::sync::mpsc::{UnboundedReceiver, UnboundedSender, unbounded_channel};
 
 use super::Seen;
 use super::names::{Place, place};
+
+/// The file the stream is probed with, in the root: outside `cas/b`, so the ingest passes it over.
+const PROBE: &str = ".put-ingest-probe";
+
+/// The most writes of [`PROBE`] before the stream is taken as it is.
+const PROBE_TRIES: u32 = 50;
+
+/// How long one write of [`PROBE`] waits for its event.
+const PROBE_WAIT: Duration = Duration::from_millis(100);
 
 /// The flags of an event that says the events of some paths were not delivered.
 fn lost() -> StreamFlags {
@@ -36,21 +51,52 @@ pub(super) struct Watcher {
     root: PathBuf,
 }
 
-/// The thread of the stream of `root`: starts it, says whether it started on `started`, passes its
-/// events to `events` until `stop` is dropped, and stops it.
+/// Writes [`PROBE`] in `root` until `events` names it (the events before it are kept in `early`),
+/// then removes it; whether an event named it.
+fn probe(root: &Path, events: &mpsc::Receiver<Event>, early: &mut Vec<Event>) -> bool {
+    let path = root.join(PROBE);
+    let mut seen = false;
+    for _ in 0..PROBE_TRIES {
+        if std::fs::write(&path, b"").is_err() {
+            break;
+        }
+        while let Ok(event) = events.recv_timeout(PROBE_WAIT) {
+            if Path::new(&event.path) == path {
+                seen = true;
+                break;
+            }
+            early.push(event);
+        }
+        if seen {
+            break;
+        }
+    }
+    let _ = std::fs::remove_file(&path);
+    seen
+}
+
+/// The thread of the stream of `root`: starts it, probes it, says whether it started on
+/// `started`, passes its events to `events` until `stop` is dropped, and stops it.
 fn stream(
     root: String,
     started: mpsc::Sender<io::Result<()>>,
     events: UnboundedSender<Event>,
     stop: mpsc::Receiver<()>,
 ) {
-    let mut stream = FsEvent::new(vec![root]);
+    let mut stream = FsEvent::new(vec![root.clone()]);
     let (to_bridge, from_stream) = mpsc::channel();
     if let Err(why) = stream.observe_async(to_bridge) {
         let _ = started.send(Err(io::Error::other(why.to_string())));
         return;
     }
+    let mut early = Vec::new();
+    if !probe(Path::new(&root), &from_stream, &mut early) {
+        tracing::warn!("tierstore: the put ingest's FSEvents stream of {root} told no probe");
+    }
     let _ = started.send(Ok(()));
+    for event in early {
+        let _ = events.send(event);
+    }
     let bridge = std::thread::Builder::new()
         .name("tierstore-put-ingest-events".to_owned())
         .spawn(move || {
@@ -85,9 +131,9 @@ impl Watcher {
         let _ = std::thread::Builder::new()
             .name("tierstore-put-ingest-stream".to_owned())
             .spawn(move || stream(shown, started, to_task, stopping))?;
-        starting
-            .recv()
-            .map_err(|_| io::Error::other("the FSEvents thread ended before its stream started"))??;
+        starting.recv().map_err(|_| {
+            io::Error::other("the FSEvents thread ended before its stream started")
+        })??;
         Ok(Self {
             _stop: stop,
             events,

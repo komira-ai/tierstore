@@ -101,8 +101,19 @@ impl Bench {
 
     /// Waits for the next report that is not of a scan or of the start: what was done to a file.
     pub(super) async fn outcome(&mut self) -> Report {
-        self.wait(|report| !matches!(report, Report::Scanned | Report::Watching))
-            .await
+        self.wait(|report| {
+            !matches!(
+                report,
+                Report::Scanned | Report::Watching | Report::Putting { .. }
+            )
+        })
+        .await
+    }
+
+    /// Waits for the put of `key` to start.
+    pub(super) async fn putting(&mut self, key: &str) {
+        self.wait(|report| matches!(report, Report::Putting { key: got } if got == key))
+            .await;
     }
 
     /// Makes a whole scan run, and waits for its end: a directory appears under `cas/b`, which the

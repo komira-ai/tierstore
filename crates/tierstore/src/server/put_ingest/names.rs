@@ -13,9 +13,6 @@ pub(super) const PREFIX: [&str; 2] = ["cas", "b"];
 /// The most bytes of one component (`NAME_MAX`).
 const MAX_NAME_BYTES: usize = 255;
 
-/// The most bytes of a key (the limit of S3).
-const MAX_KEY_BYTES: usize = 1024;
-
 /// The ending of a name that is not committed.
 const PART: &str = ".part";
 
@@ -61,11 +58,10 @@ impl JobDir {
         self.build_dir().join(&self.nonce)
     }
 
-    /// The key of the file `name` of the directory, `cas/b/<build>/<nonce>/<name>`, or none when it
-    /// is over [`MAX_KEY_BYTES`].
-    pub(super) fn key(&self, name: &str) -> Option<String> {
-        let key = format!("{self}/{name}");
-        (key.len() <= MAX_KEY_BYTES).then_some(key)
+    /// The key of the file `name` of the directory, `cas/b/<build>/<nonce>/<name>`: at most 773
+    /// bytes, three components and the prefix, so within the 1024 bytes of an S3 key.
+    pub(super) fn key(&self, name: &str) -> String {
+        format!("{self}/{name}")
     }
 }
 
@@ -104,11 +100,15 @@ pub(super) fn place(rel: &Path) -> Place {
     if parts.iter().zip(PREFIX).any(|(part, want)| *part != want) {
         return Place::Elsewhere;
     }
-    let job = || JobDir::new(parts[2], parts[3]);
+    // Every part is a component already.
+    let job = || JobDir {
+        build: parts[2].to_owned(),
+        nonce: parts[3].to_owned(),
+    };
     match parts.len() {
         depth @ 0..=3 => Place::Above(depth),
-        4 => job().map_or(Place::Elsewhere, Place::Job),
-        5 => job().map_or(Place::Elsewhere, |dir| Place::File(dir, parts[4].to_owned())),
+        4 => Place::Job(job()),
+        5 => Place::File(job(), parts[4].to_owned()),
         _ => Place::Elsewhere,
     }
 }

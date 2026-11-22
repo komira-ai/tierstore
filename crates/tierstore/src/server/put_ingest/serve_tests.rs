@@ -4,13 +4,13 @@
 
 use super::store::Refusal;
 use super::testing::{Bench, commit, sha};
-use super::{GRACE, Report};
+use super::{GRACE_MS, Report};
 use crate::server::local_cache::Tick;
 use crate::{Backend as _, Op};
 
 /// The milliseconds of the grace.
 fn grace() -> u64 {
-    u64::try_from(GRACE.as_millis()).unwrap()
+    GRACE_MS
 }
 
 /// Asserts that an object committed as kbf-task commits it (`pack.part`, `pack.sha256-<hex>.part`,
@@ -242,7 +242,9 @@ async fn an_abandoned_directory_is_removed() {
     let changed = std::fs::metadata(&dir).unwrap().modified().unwrap();
     let changed = changed.duration_since(std::time::UNIX_EPOCH).unwrap();
     let day = 24 * 60 * 60 * 1000;
-    bench.clock.set(u64::try_from(changed.as_millis()).unwrap() + day + 1000);
+    bench
+        .clock
+        .set(u64::try_from(changed.as_millis()).unwrap() + day + 1000);
     bench.start().await;
     assert!(!dir.exists());
     assert!(!bench.root.join("cas/b/b1").exists());
@@ -275,7 +277,10 @@ async fn more_packs_than_run_at_once_are_all_stored() {
     }
     for n in 0..count {
         let key = format!("cas/b/b1/n{n}/pack");
-        assert_eq!(bench.object(&key).await, Some(format!("pack {n}").into_bytes()));
+        assert_eq!(
+            bench.object(&key).await,
+            Some(format!("pack {n}").into_bytes())
+        );
     }
     bench.stop().await;
 }

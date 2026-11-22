@@ -4,7 +4,7 @@
 
 use std::collections::BTreeSet;
 
-use super::GRACE;
+use super::GRACE_MS;
 use super::ledger::{FileId, Ledger, Verdict};
 use super::names::JobDir;
 use crate::TreeDigest;
@@ -26,7 +26,7 @@ fn sha(text: &str) -> TreeDigest {
 
 /// The milliseconds of the grace.
 fn grace() -> u64 {
-    u64::try_from(GRACE.as_millis()).unwrap()
+    GRACE_MS
 }
 
 /// Asserts that declaring a name nobody waited for says no, and that declaring one whose

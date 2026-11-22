@@ -120,9 +120,11 @@ fn names_that_are_not_components_are_ignored() {
     std::fs::create_dir_all(base.join("b1/n 2")).unwrap();
     std::fs::write(job.join("has space"), b"x").unwrap();
     std::fs::write(job.join("fine"), b"x").unwrap();
+    // APFS refuses a name that is not UTF-8 (EILSEQ), so on macOS there is none to pass over.
     let raw = std::ffi::OsStr::from_bytes(b"bad-\xff-name");
-    std::fs::write(job.join(raw), b"x").unwrap();
-    std::fs::create_dir_all(base.join(raw)).unwrap();
+    if std::fs::write(job.join(raw), b"x").is_ok() {
+        std::fs::create_dir_all(base.join(raw)).unwrap();
+    }
     let found = scan(dir.path());
     let keys: Vec<&JobDir> = found.jobs.keys().collect();
     assert_eq!(keys, [&job_dir("b1", "n1")]);

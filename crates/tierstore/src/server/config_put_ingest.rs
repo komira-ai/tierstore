@@ -58,7 +58,11 @@ fn check_apart(root: &Path, cache: &Path) -> Result<(), ConfigError> {
 /// The key, when it is given.
 pub(super) fn refuse_put_ingest(table: &LocalCacheTable) -> Result<(), ConfigError> {
     let why = "only a build node ingests put directories";
-    refuse("local_cache", why, &[("put_ingest", table.put_ingest.is_some())])
+    refuse(
+        "local_cache",
+        why,
+        &[("put_ingest", table.put_ingest.is_some())],
+    )
 }
 
 #[cfg(test)]

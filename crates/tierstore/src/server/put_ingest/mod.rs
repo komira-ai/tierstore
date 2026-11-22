@@ -25,11 +25,11 @@
 //!   whose digest was declared, is put ([`store`]); its key is its path under the root.
 //! - Bytes that are not the declared digest (truncated, longer or changed), a key that holds other
 //!   bytes, a size the upstream refuses, a link and a hard link are refused: nothing is stored,
-//!   and the file is removed. So is a committed file whose digest was not declared within [`GRACE`]
+//!   and the file is removed. So is a committed file whose digest was not declared within [`GRACE_MS`]
 //!   of its first finding (one committed while no instance watched, or whose events were lost).
 //! - A file that cannot be opened or read, and a put the upstream did not take, are left as they
 //!   are and tried again at the next scan.
-//! - `.part` names are never stored. A job's directory unchanged for [`ABANDONED`] (a job that
+//! - `.part` names are never stored. A job's directory unchanged for a day ([`ABANDONED_MS`]) (a job that
 //!   ended without committing) is removed with what it holds, and a build's directory left empty
 //!   for as long.
 //!
@@ -86,13 +86,13 @@ use watch_macos::Watcher;
 
 /// How long a committed file whose digest was not declared waits for its declaration before it is
 /// refused: far longer than an event takes to arrive.
-pub(super) const GRACE: Duration = Duration::from_secs(60);
+pub(super) const GRACE_MS: u64 = 60_000;
 
 /// The time between two whole scans of the root.
 const SCAN_EVERY: Duration = Duration::from_secs(30);
 
 /// How long a job's directory, and a build's, stays unchanged before it is removed.
-const ABANDONED: Duration = Duration::from_secs(24 * 60 * 60);
+const ABANDONED_MS: u64 = 24 * 60 * 60 * 1000;
 
 /// The most puts that run at once.
 const MOST_PUTS: usize = 8;
@@ -117,6 +117,8 @@ pub(in crate::server) enum Report {
     Watching,
     /// A whole scan of the root is done.
     Scanned,
+    /// The put of the object `key` started.
+    Putting { key: String },
     /// The object `key` is stored: `created` when this put made it.
     Stored { key: String, created: bool },
     /// The file of `key` is refused and removed.
@@ -206,11 +208,6 @@ async fn next_seen(watcher: Option<&mut Watcher>, seen: &mut Vec<Seen>) -> io::R
         Some(watcher) => watcher.next(seen).await,
         None => std::future::pending().await,
     }
-}
-
-/// The milliseconds of `duration`.
-fn millis(duration: Duration) -> u64 {
-    u64::try_from(duration.as_millis()).unwrap_or(u64::MAX)
 }
 
 impl<'a> Run<'a> {
@@ -327,7 +324,7 @@ impl<'a> Run<'a> {
         match self.ledger.verdict(&id, self.ingest.clock.now()) {
             Verdict::Store(sha256) => self.start(id, sha256),
             Verdict::Refuse => {
-                let key = id.0.key(&id.1).unwrap_or_default();
+                let key = id.0.key(&id.1);
                 self.refused(&id, &key, &Refusal::NoDigest);
             }
             Verdict::Running | Verdict::Wait => {}
@@ -336,11 +333,8 @@ impl<'a> Run<'a> {
 
     /// Starts the put of `id`.
     fn start(&mut self, id: FileId, sha256: TreeDigest) {
-        let Some(key) = id.0.key(&id.1) else {
-            self.ledger.done(&id, true);
-            self.refused(&id, "", &Refusal::KeyTooLong);
-            return;
-        };
+        let key = id.0.key(&id.1);
+        self.ingest.report(Report::Putting { key: key.clone() });
         let cache = self.ingest.cache.clone();
         let path = self.path_of(&id);
         let _ = self.puts.spawn(async move {
@@ -408,7 +402,7 @@ impl<'a> Run<'a> {
         let found = tokio::task::spawn_blocking(move || scan::scan(&root)).await;
         let found = found.unwrap_or_default();
         let now = self.ingest.clock.now();
-        let old = |changed: u64| now.saturating_sub(changed) >= millis(ABANDONED);
+        let old = |changed: u64| now.saturating_sub(changed) >= ABANDONED_MS;
         let live = found.jobs.keys().cloned().collect();
         self.ledger.keep_only(&live);
         for (dir, job) in found.jobs {

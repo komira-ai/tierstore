@@ -1,14 +1,17 @@
 //! The put of one committed file: what it stores, and every reason it refuses a file, leaves it
 //! to be tried again, or finds it gone; and how each refusal reads.
 
+use std::io;
 use std::os::unix::fs::PermissionsExt as _;
-use std::path::{Path, PathBuf};
+use std::path::PathBuf;
+use std::pin::Pin;
+use std::task::{Context, Poll};
 
-use rustix::fs::{CWD, FileType, Mode, mknodat};
+use tokio::io::{AsyncRead, ReadBuf};
 use tracing::Level;
 use tracing::subscriber::{DefaultGuard, set_default};
 
-use super::store::{Outcome, Refusal, put_file};
+use super::store::{Outcome, Refusal, put_body, put_file};
 use super::testing::sha;
 use crate::server::build_info::stderr_log::LineLog;
 use crate::server::local_cache::testing::Rig;
@@ -133,16 +136,25 @@ async fn a_symbolic_link_is_refused() {
     assert!(rig.tamper.get(KEY, None).await.is_err());
 }
 
-/// Asserts that a FIFO (which is opened without blocking) and a directory are refused as `not a
-/// regular file`.
+/// Asserts that a FIFO, which is opened without blocking, is refused as `not a regular file`. Linux
+/// only: the call that makes one is not in `rustix` for macOS.
+#[cfg(target_os = "linux")]
 #[tokio::test]
-async fn a_fifo_or_a_directory_is_not_a_regular_file() {
-    let rig = Rig::writing("store-not-regular");
+async fn a_fifo_is_not_a_regular_file() {
+    use rustix::fs::{CWD, FileType, Mode, mknodat};
+    let rig = Rig::writing("store-fifo");
     let cache = rig.locked();
     let fifo = rig.dir.path().join("fifo");
     mknodat(CWD, &fifo, FileType::Fifo, Mode::RUSR | Mode::WUSR, 0).unwrap();
     let outcome = put_file(&cache, KEY, sha(b"abc"), &fifo).await;
     assert_eq!(refused(outcome), Refusal::NotPlain("not a regular file"));
+}
+
+/// Asserts that a directory is refused as `not a regular file`.
+#[tokio::test]
+async fn a_directory_is_not_a_regular_file() {
+    let rig = Rig::writing("store-not-regular");
+    let cache = rig.locked();
     let dir = rig.dir.path().join("a-directory");
     std::fs::create_dir(&dir).unwrap();
     let outcome = put_file(&cache, KEY, sha(b"abc"), &dir).await;
@@ -182,29 +194,48 @@ async fn a_file_that_cannot_be_opened_is_unreadable() {
     assert!(path.exists());
 }
 
-/// Asserts that a file that opens as a regular file but fails when read (the memory file of this
-/// process, a regular file of one link that reads as an I/O error at offset 0) is `Unreadable`
-/// with the read's reason, not a refusal of the digest. Skipped, with its reason printed, where
-/// that file reads without an error.
+/// A reader that gives `first` and then fails.
+struct Failing {
+    first: Option<&'static [u8]>,
+}
+
+impl AsyncRead for Failing {
+    fn poll_read(
+        mut self: Pin<&mut Self>,
+        _cx: &mut Context<'_>,
+        buf: &mut ReadBuf<'_>,
+    ) -> Poll<io::Result<()>> {
+        match self.first.take() {
+            Some(first) => {
+                buf.put_slice(first);
+                Poll::Ready(Ok(()))
+            }
+            None => Poll::Ready(Err(io::Error::other("the disk failed"))),
+        }
+    }
+}
+
+/// Asserts that a file whose read fails part way is `Unreadable` with the read's reason, not a
+/// refusal of its digest, and that nothing is stored.
 #[tokio::test]
-#[expect(
-    clippy::disallowed_macros,
-    reason = "a skipped test says why on standard error (AGENTS.md T12)"
-)]
 async fn a_read_that_fails_in_the_body_is_unreadable() {
     let rig = Rig::writing("store-read-fails");
     let cache = rig.locked();
-    let path = Path::new("/proc/self/mem");
-    if std::fs::read(path).is_ok() {
-        eprintln!("skipped: the memory file of this process reads without an error");
-        return;
-    }
     let _log = quiet();
-    let outcome = put_file(&cache, KEY, sha(b"abc"), path).await;
+    let file = Failing {
+        first: Some(b"abc"),
+    };
+    let outcome = put_body(&cache, KEY, sha(b"abcdef"), file, 6).await;
     match outcome {
-        Outcome::Unreadable(why) => assert!(why.contains("cannot be read"), "{why}"),
+        Outcome::Unreadable(why) => {
+            assert_eq!(
+                why,
+                "backend error: the staged file cannot be read: the disk failed"
+            )
+        }
         other => panic!("expected Unreadable, got {other:?}"),
     }
+    assert!(rig.tamper.get(KEY, None).await.is_err());
 }
 
 /// Asserts the words of every refusal, by exact equality.
@@ -219,7 +250,6 @@ fn every_refusal_reads_as_its_words() {
         (Refusal::OtherBytes, "the key holds other bytes"),
         (Refusal::TooLarge, "the upstream refused it for its size"),
         (Refusal::NotPlain("a hard link"), "it is a hard link"),
-        (Refusal::KeyTooLong, "its key is over 1024 bytes"),
     ];
     for (refusal, text) in words {
         assert_eq!(refusal.to_string(), text);

@@ -12,7 +12,7 @@ use tokio::sync::Notify;
 
 use super::store::Refusal;
 use super::testing::{Bench, commit, sha};
-use super::{ABANDONED, PutIngest, Report};
+use super::{ABANDONED_MS, PutIngest, Report};
 use crate::Clock;
 use crate::server::local_cache::Tick;
 use crate::server::local_cache::testing::wait_until;
@@ -41,7 +41,7 @@ fn modes_do_not_bind(name: &str, why: &str) -> bool {
 fn a_day_after(dir: &Path) -> u64 {
     let changed = std::fs::metadata(dir).unwrap().modified().unwrap();
     let changed = changed.duration_since(std::time::UNIX_EPOCH).unwrap();
-    let day = u64::try_from(ABANDONED.as_millis()).unwrap();
+    let day = ABANDONED_MS;
     u64::try_from(changed.as_millis()).unwrap() + day + 1000
 }
 
@@ -211,6 +211,7 @@ async fn a_scan_leaves_a_running_put_and_its_directory_alone() {
     let held = bench.rig.disk.hold_writes();
     let bytes = b"held in its put".to_vec();
     commit(&dir, "pack", &bytes, sha(&bytes));
+    bench.putting("cas/b/b1/n1/pack").await;
     bench.clock.set(a_day_after(&dir));
     bench.scan("mark").await;
     idle().await;
@@ -238,7 +239,7 @@ async fn a_halt_lets_a_running_put_finish() {
     let held = bench.rig.disk.hold_writes();
     let bytes = b"finished after the halt".to_vec();
     commit(&dir, "pack", &bytes, sha(&bytes));
-    bench.scan("mark").await;
+    bench.putting("cas/b/b1/n1/pack").await;
     bench.halt();
     idle().await;
     assert!(!bench.ended());
@@ -383,6 +384,7 @@ async fn a_refusal_beside_a_running_put_leaves_it_to_finish() {
     let held = bench.rig.disk.hold_writes();
     let bytes = b"put while the other is refused".to_vec();
     commit(&dir, "pack", &bytes, sha(&bytes));
+    bench.putting("cas/b/b1/n1/pack").await;
     let declaration = format!("link.sha256-{}.part", sha(&bytes));
     std::fs::write(dir.join(declaration), b"declaration").unwrap();
     std::os::unix::fs::symlink(bench.root.join("nowhere"), dir.join("link")).unwrap();
