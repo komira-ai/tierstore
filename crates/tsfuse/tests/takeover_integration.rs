@@ -29,7 +29,8 @@ use std::sync::mpsc::{Sender, channel};
 use std::sync::{Arc, Barrier, Mutex};
 
 use kernel::{
-    FILES, FOPEN_DIRECT_IO, VALID, attr, caller, content, errno, ino_of, pread, skip, unavailable,
+    FILES, FOPEN_DIRECT_IO, VALID, attr, caller, content, errno, ino_of, one_at_a_time, pread,
+    skip, unavailable,
 };
 use tierstore_testkit::dir::TestDir;
 use tsfuse::abi::{
@@ -51,7 +52,7 @@ impl Drop for Mounted {
     fn drop(&mut self) {
         if let Some(mount) = self.0.take() {
             let _ = mount.abort();
-            let _ = mount.unmount(true);
+            let _ = one_at_a_time(|| mount.unmount(true));
         }
     }
 }
@@ -150,7 +151,7 @@ fn takeover_with_a_read_parked_on_every_clone_answers_each_once_and_no_caller_se
         allow_other: false,
         ..MountOptions::tree("tsfuse-takeover")
     };
-    let (device, mount) = Mounter::default().mount(&mp, &options).unwrap();
+    let (device, mount) = one_at_a_time(|| Mounter::default().mount(&mp, &options)).unwrap();
     let mut mounted = Mounted(Some(mount));
     let mut session = Session::init(device, &InitConfig::tree()).unwrap();
     if !session.negotiated().granted.contains(InitFlags::HAS_RESEND) {
@@ -244,7 +245,9 @@ fn takeover_with_a_read_parked_on_every_clone_answers_each_once_and_no_caller_se
         "{reads:?}"
     );
 
-    mounted.0.take().unwrap().unmount(false).unwrap();
+    let mount = mounted.0.clone().unwrap();
+    one_at_a_time(|| mount.unmount(false)).unwrap();
+    mounted.0 = None;
     assert_eq!(serving.join().unwrap(), vec![ReaderEnd::Unmounted; READERS]);
     drop(kept);
 }

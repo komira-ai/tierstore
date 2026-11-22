@@ -70,7 +70,7 @@ use conformance::{
     Done, FOPEN_DIRECT_IO, Mounted, Open, Opendir, ROOT, TreeSpec, answer_read, child, errno,
     is_root, memfd, mount_entry, park, pattern, pread, serve, tree_options,
 };
-use kernel::skip;
+use kernel::{one_at_a_time, skip};
 use rustix::fs::{AtFlags, CWD, Mode, OFlags, StatxFlags};
 use tierstore_testkit::dir::TestDir;
 use tsfuse::abi::InitConfig;
@@ -334,7 +334,7 @@ fn busy_mount_is_unmounted_lazily_only(mut mounted: Mounted, session: tsfuse::Se
     assert_eq!(read_all(&file), bytes);
 
     let mount = mounted.mount().clone();
-    let err = mount.clone().unmount(false).unwrap_err();
+    let err = one_at_a_time(|| mount.clone().unmount(false)).unwrap_err();
     match mount.method() {
         MountMethod::Syscall => {
             let MountError::Unmount { mountpoint, source } = &err else {
@@ -353,7 +353,8 @@ fn busy_mount_is_unmounted_lazily_only(mut mounted: Mounted, session: tsfuse::Se
     );
     assert_eq!(read_all(&file), bytes, "and still served");
 
-    mounted.take().unmount(true).unwrap();
+    let lazy = mounted.take();
+    one_at_a_time(|| lazy.unmount(true)).unwrap();
     assert_eq!(mounted.entry(), None, "a lazy unmount detaches it");
     assert_eq!(
         read_all(&file),
@@ -373,6 +374,38 @@ fn an_unmount_of_a_busy_mount_fails_and_leaves_it_and_a_lazy_unmount_detaches_it
         return;
     };
     busy_mount_is_unmounted_lazily_only(mounted, session);
+}
+
+#[test]
+fn a_failed_unmount_of_the_guard_leaves_the_mount_to_its_drop_which_detaches_it() {
+    let Some((mounted, session)) = Mounted::new("t-f7-guard", READERS) else {
+        return;
+    };
+    let (tree, bytes) = tree();
+    let served = serve_inline(session, tree);
+    let file = File::open(mounted.path("f")).unwrap();
+    assert_eq!(read_all(&file), bytes);
+    let (mp, real_mp) = (mounted.mp.clone(), mounted.real_mp.clone());
+    let method = mounted.mount().method();
+
+    // The held file keeps the mount busy: the unmount fails, and the guard, dropped as the
+    // failure unwinds, detaches the mount.
+    let failed = std::panic::catch_unwind(std::panic::AssertUnwindSafe(move || mounted.unmount()))
+        .unwrap_err();
+    let message = failed.downcast_ref::<String>().unwrap();
+    assert!(
+        message.starts_with("called `Result::unwrap()` on an `Err` value: "),
+        "{message}"
+    );
+    let left = mount_entry(&real_mp);
+    // A guard that let go of the mount would leave it mounted: detach it here either way (an
+    // error when the guard did), so a failed check leaves nothing behind.
+    let adopted = Mount::adopt(&mp, method, &Mounter::default());
+    let _ = one_at_a_time(|| adopted.unmount(true));
+    assert_eq!(left, None, "the guard detached the mount");
+
+    drop(file);
+    ended_by_the_kernel(&served.join());
 }
 
 #[test]
@@ -440,9 +473,9 @@ fn child_mounts_and_serves_a_tree_until_its_stdin_ends() {
     let mut line = String::new();
     io::stdin().read_line(&mut line).unwrap();
     let mp = PathBuf::from(line.trim_end());
-    let (device, mount) = Mounter::default()
-        .mount(&mp, &tree_options("tsfuse-conformance-child"))
-        .unwrap();
+    let (device, mount) =
+        one_at_a_time(|| Mounter::default().mount(&mp, &tree_options("tsfuse-conformance-child")))
+            .unwrap();
     let mut session = tsfuse::Session::init(device, &InitConfig::tree()).unwrap();
     session
         .clone_readers(NonZeroUsize::new(READERS).unwrap())
@@ -458,7 +491,7 @@ fn child_mounts_and_serves_a_tree_until_its_stdin_ends() {
     writeln!(io::stdout(), "serving {:?}", mount.method()).unwrap();
     io::copy(&mut io::stdin(), &mut io::sink()).unwrap();
     drop(served);
-    let _ = mount.unmount(true);
+    let _ = one_at_a_time(|| mount.unmount(true));
 }
 
 /// The child server and the mount it made; dropped without [`Self::done`] (a failed check), it is
@@ -475,7 +508,8 @@ impl Drop for Orphan {
         let _ = self.child.wait();
         if self.live {
             for method in [MountMethod::Syscall, MountMethod::Fusermount] {
-                let _ = Mount::adopt(&self.mp, method, &Mounter::default()).unmount(true);
+                let adopted = Mount::adopt(&self.mp, method, &Mounter::default());
+                let _ = one_at_a_time(|| adopted.unmount(true));
             }
         }
     }
@@ -504,11 +538,8 @@ fn a_killed_server_leaves_a_mount_that_answers_enotconn_and_unmounts() {
     let real_mp = std::fs::canonicalize(&mp).unwrap();
 
     let mut command = child(MOUNTING_CHILD);
-    let mut spawned = command
-        .stdin(Stdio::piped())
-        .stdout(Stdio::piped())
-        .spawn()
-        .unwrap();
+    command.stdin(Stdio::piped()).stdout(Stdio::piped());
+    let mut spawned = one_at_a_time(|| command.spawn()).unwrap();
     let mut stdin = spawned.stdin.take().unwrap();
     let mut stdout = BufReader::new(spawned.stdout.take().unwrap());
     let mut orphan = Orphan {
@@ -557,9 +588,8 @@ fn a_killed_server_leaves_a_mount_that_answers_enotconn_and_unmounts() {
         "the mount outlives the process that served it"
     );
 
-    Mount::adopt(&mp, method, &Mounter::default())
-        .unmount(false)
-        .unwrap();
+    let adopted = Mount::adopt(&mp, method, &Mounter::default());
+    one_at_a_time(|| adopted.unmount(false)).unwrap();
     assert_eq!(mount_entry(&real_mp), None);
     orphan.live = false;
     drop(stdin);
@@ -652,9 +682,7 @@ fn without_allow_other_another_user_is_refused_with_eacces_on_the_root_and_on_a_
 
 /// Why `fusermount3` cannot run here, if it cannot.
 fn no_fusermount() -> Option<String> {
-    Command::new(FUSERMOUNT)
-        .arg("--version")
-        .output()
+    one_at_a_time(|| Command::new(FUSERMOUNT).arg("--version").output())
         .err()
         .map(|e| format!("{FUSERMOUNT} cannot be run: {e}"))
 }
@@ -729,7 +757,8 @@ fn the_abort_of_a_mount_that_is_gone_is_an_error_naming_the_abort_file_and_write
         }
     };
     let mp = mounted.mp.clone();
-    mounted.take().unmount(false).unwrap();
+    let mount = mounted.take();
+    one_at_a_time(|| mount.unmount(false)).unwrap();
     assert_eq!(served.join(), vec![ReaderEnd::Unmounted; READERS]);
 
     let gone = Mount::adopt(&mp, MountMethod::Syscall, &Mounter::default());

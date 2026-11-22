@@ -9,9 +9,9 @@
 //! lock open on descriptor 9 (the build box's slot lock does) hands the lock to every child
 //! it starts, and a leaked child holds the lock for as long as it lives.
 //!
-//! See also [`crate::spawn`] (a start retried while the program is busy) and
-//! [`crate::forked`] (a child held between `fork` and `exec`): they cover the other ways a
-//! forked child touches a test's descriptors.
+//! See also [`crate::forks`]: a child between `fork` and `exec` holds every descriptor of the
+//! test process, and running the forks one at a time keeps such a child from making another
+//! test's mount busy.
 
 #![expect(
     unsafe_code,
