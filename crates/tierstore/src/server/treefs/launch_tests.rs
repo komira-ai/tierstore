@@ -7,7 +7,7 @@ use std::path::Path;
 use std::sync::Arc;
 use std::sync::atomic::{AtomicBool, Ordering};
 
-use super::{Platform, hang, serve, serve_with};
+use super::{End, Platform, ended, hang, serve, serve_with};
 use crate::Mono;
 use crate::server::handoff::testing::within;
 use crate::server::treefs::config::FsSettings;
@@ -488,6 +488,49 @@ async fn a_start_takes_the_mount_from_the_running_instance() {
     thread.join().unwrap().unwrap();
     assert!(ended.load(Ordering::Acquire));
     drop(old.running);
+}
+
+/// Asserts that a process whose mount a successor took ends with success and leaves its state
+/// whole, for the end of the process to release: the core is not taken apart (a weak reference to
+/// it still reaches it after the end), and a part of it still held elsewhere (by the session of a
+/// control client) is no reason to fail, as it is for the end at a signal, which takes the state
+/// apart. Catches an end that frees the whole state one allocation
+/// at a time, which took minutes on a node whose process held tens of gigabytes, and one that
+/// ends with an error because a client was connected.
+#[tokio::test]
+async fn after_a_hand_over_the_state_is_left_whole_to_the_end_of_the_process() {
+    let fakedev::Instance {
+        rig: _rig,
+        running,
+        serving,
+        kernel: _kernel,
+        ..
+    } = fakedev::instance(
+        "tfs-launch-left",
+        std::time::Duration::from_secs(3600),
+        None,
+    );
+    serving.abort();
+    let _ = serving.await;
+    let state = Arc::downgrade(&running);
+    let manager = Manager::new(None);
+
+    // A signal, unlike a hand-over, takes the state apart, and needs it whole.
+    let session = Arc::clone(&running);
+    let error = ended(End::Signal, Arc::clone(&running), &manager).unwrap_err();
+    assert!(
+        error
+            .to_string()
+            .contains("a hand-over is still being answered"),
+        "{error}"
+    );
+    drop(session);
+
+    ended(End::Handed, running, &manager).unwrap();
+    let left = state.upgrade();
+    assert!(left.is_some(), "the state was taken apart");
+    ended(End::Handed, state.upgrade().unwrap(), &manager).unwrap();
+    drop(left);
 }
 
 /// Asserts that the wait for a hang is over when the watch reports one, and goes on for ever when it

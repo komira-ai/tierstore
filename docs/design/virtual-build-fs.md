@@ -998,8 +998,15 @@ new (tierstore-fs@b)                                    old (tierstore-fs@a, run
   one keeps its own until it exits after `ready`. If the new instance fails before `ready`, the old one resumes reading;
   nothing was released.
 - No request is lost or answered twice: each request is read by exactly one process; the old one answers every request it
-  read before `done`; the kernel queues the rest for the new one. This does not need `FUSE_NOTIFY_RESEND`, so it holds on 6.8 as
+  read before `done` (the opens and reads it parked on its fetch threads, and the commits of the put directory that run on
+  threads of their own, each by its deadline: a commit answers a rename the kernel does not send again, and writes the
+  journal the new one reads); the kernel queues the rest for the new one. This does not need `FUSE_NOTIFY_RESEND`, so it holds on 6.8 as
   designed (Inferred from the 6.8 queued-request result of 7.2; the hand-over itself has not been run, SP2).
+- After `ready` nothing a job does depends on the old process: it reads no request, holds no request unanswered, and holds
+  nothing the new one needs (open files are reopened by the new one from the inode, the put directory's state is in the
+  runtime directory and the stage). So it exits at once, without taking its state apart: the end of the process releases
+  its memory and closes its files. Freeing a state of tens of gigabytes one allocation at a time, part of it swapped out,
+  took minutes on a build node.
 - Control requests in the gap wait in the listening socket's backlog, as S3 connections do in today's hand-off.
 - Backing ids belong to the connection, so the kernel keeps every one across the hand-over; the new instance learns them
   from the backing table in the runtime directory.

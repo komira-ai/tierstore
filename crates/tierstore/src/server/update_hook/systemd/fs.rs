@@ -301,8 +301,8 @@ pub(super) fn check_active(c: &Ctx<'_, '_>, record: &Record, retry: u64) -> Resu
 
 /// The end of a committed update that handed the fs process over: the old fs instance (the other
 /// letter of `fs_next`) has its marker removed, whether it still drains or has exited, and is
-/// never stopped. Returns it when it still runs: it drains for as long as its longest open file
-/// and ends by itself.
+/// never stopped. Returns it when it still runs: it ends by itself (an fs process of a release
+/// that frees its whole state before it ends can take minutes).
 pub(super) fn retire(c: &Ctx<'_, '_>, record: &Record) -> Result<Option<Instance>, Done> {
     let Some(next) = record.fs_next else {
         return Ok(None);

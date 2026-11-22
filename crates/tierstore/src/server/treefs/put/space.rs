@@ -148,9 +148,14 @@ pub(in crate::server) struct PutSpace {
     /// Called by a commit that is about to wait, for the tests that act in that gap.
     #[cfg(test)]
     pub(super) before_wait: Mutex<Option<Arc<dyn Fn() + Send + Sync>>>,
+    /// Called by a drain of the commits that is about to wait, for the tests that act in that gap.
+    #[cfg(test)]
+    pub(in crate::server) before_drain: Mutex<Option<Arc<dyn Fn() + Send + Sync>>>,
     /// Whether a commit's thread is not made (set only by the tests of the fallback to the
     /// request's thread).
     no_threads: AtomicBool,
+    /// The commits running, which a hand-over waits for (`space_rename.rs`).
+    commits: Arc<rename::Commits>,
 }
 
 impl std::fmt::Debug for PutSpace {
@@ -217,7 +222,10 @@ impl PutSpace {
             tries: std::sync::atomic::AtomicU64::new(0),
             #[cfg(test)]
             before_wait: Mutex::new(None),
+            #[cfg(test)]
+            before_drain: Mutex::new(None),
             no_threads: AtomicBool::new(false),
+            commits: Arc::default(),
         }
     }
 

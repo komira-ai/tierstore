@@ -48,8 +48,9 @@ pub(super) fn cleanup(c: &Ctx<'_, '_>, params: &Params, record: &Record) -> Resu
 /// instances go and the record is saved at rest, `next` as `live` and `fs_next` as `fs_live`.
 /// Returns the record at rest, and the names of the old units that still run.
 ///
-/// An old instance of a hand-over drains for as long as its longest request or open file, and it
-/// is never stopped here: it ends by itself. Nothing waits for it, since nothing of the update is
+/// An old instance of a hand-over is never stopped here: it ends by itself, in a time the hook
+/// does not know (the store's within its drain deadline; an fs process of a release that frees
+/// its whole state before it ends can take minutes). Nothing waits for it, since nothing of the update is
 /// left to do once the new instances serve and the commit is written. Its marker goes while it
 /// runs: systemd reads `ConditionPathExists=` only when it starts a unit, so a process that runs
 /// is not touched, and without the marker the unit is never started again, by a boot or by

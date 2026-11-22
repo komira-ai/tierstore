@@ -91,10 +91,13 @@ fn serve_put(
 }
 
 /// What the kernel holds of the put directory of `core`, written for the successor; a failure is
-/// said, and the successor then finds what the store holds.
+/// said, and the successor then finds what the store holds. The commits still running are waited
+/// for first: each answers a request this process read, which the kernel does not send again, and
+/// writes the journal and the stage the successor reads (`put/space_rename.rs`).
 fn hand_put(core: &Core, runtime_dir: &Path) {
     if let Some(put) = core.put() {
         put.hold(true);
+        put.drain_commits();
         carry::write_or_say(runtime_dir, &put.handed());
     }
 }

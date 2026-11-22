@@ -257,23 +257,46 @@ async fn run(settings: &FsSettings, platform: Platform) -> Result<(), StartError
         }
         () = hang(hung) => End::Hung,
     };
+    ended(end, running, manager)
+}
+
+/// What the process does once it stops serving for `end`.
+///
+/// After a hand-over nothing of this process's state is needed: the successor serves the mount,
+/// answers every request from here on, and reads what it needs from the runtime directory, all of
+/// it written before `done` (`Running::quiesce`). The state is left to the end of the process
+/// ([`leave_to_kernel`]) rather than taken apart, so the process ends at once after `ready`.
+fn ended(end: End, running: Arc<Running>, manager: &Manager) -> Result<(), StartError> {
+    let hung = match end {
+        End::Handed => {
+            leave_to_kernel(running);
+            return Ok(());
+        }
+        End::Signal => false,
+        End::Hung => true,
+    };
     let busy = || std::io::Error::other("a hand-over is still being answered");
     let alone = Arc::try_unwrap(running).map_err(|_| io("ending")(busy()))?;
-    match end {
-        End::Signal if manager.present() => {
-            alone.leave();
-            Ok(())
-        }
-        End::Signal => alone.stop(),
-        End::Handed => {
-            drop(alone);
-            Ok(())
-        }
-        End::Hung => {
-            unstore(manager);
-            Err(StartError::Aborted)
-        }
+    if hung {
+        unstore(manager);
+        drop(alone);
+        return Err(StartError::Aborted);
     }
+    if manager.present() {
+        alone.leave();
+        return Ok(());
+    }
+    alone.stop()
+}
+
+/// Leaves the state of a process that handed its mount over to the end of the process, which
+/// releases its memory and closes its descriptors all at once. Taking it apart here would free
+/// each of its loaded trees, tables and open files one by one: on a node whose process holds tens
+/// of gigabytes, some of it swapped out, that took minutes, which the process spent doing nothing
+/// for anyone. Nothing else holds it up: the threads still running (the announcer, the sweeps,
+/// the sessions of control clients) are detached, and they end with the process.
+fn leave_to_kernel(running: Arc<Running>) {
+    std::mem::forget(running);
 }
 
 /// Serves with `platform`.

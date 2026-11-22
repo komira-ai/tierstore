@@ -25,7 +25,7 @@
 //! - `cleanup` confirms afresh (it waits for `/readyz`, which the old instance, still draining
 //!   on the same sockets, answers 503), records `stopping` (the commit), removes the old
 //!   instance's marker and records that `next` is now `live`, in the same run: it does not wait
-//!   for the old instance to drain, which lasts as long as its longest request or open file.
+//!   for the old instance to end, which it does by itself, in a time the hook does not know.
 //! - `uninstall` stops both instances and removes both markers and the copy of the binary; the
 //!   data stays.
 //! - `restore`, the boot step, makes the markers say what the record says and starts that

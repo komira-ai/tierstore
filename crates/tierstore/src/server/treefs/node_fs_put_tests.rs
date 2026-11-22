@@ -528,6 +528,42 @@ fn a_hand_over_that_does_not_complete_leaves_the_instance_serving() {
     });
 }
 
+/// Asserts that a commit still uploading when a hand-over begins is finished and answered by the
+/// running instance before its quiesce returns, so before the successor is told `done`: the job's
+/// rename succeeds and the object is uploaded. The upload is let go from the gap where the quiesce
+/// is about to wait for it. Catches a hand-over that leaves a job's commit to a process that ends
+/// at `ready`, whose rename the kernel does not send again.
+#[test]
+fn a_commit_uploading_at_a_hand_over_is_answered_before_the_quiesce_returns() {
+    with_fuse(|| {
+        let mut served = Served::start("put-mount-commit-at-handover");
+        let job = served.at(JOB);
+        write_file(&job.join("pack.part"), b"uploading");
+        let puts = std::sync::Arc::clone(&served.rig.upstream.puts);
+        puts.hold();
+        let first = served.running.take().unwrap();
+        let gate = std::sync::Arc::clone(&puts);
+        *first.core().put().unwrap().before_drain.lock().unwrap() =
+            Some(std::sync::Arc::new(move || gate.let_go()));
+        let (device, control) = first.share().unwrap();
+        std::thread::scope(|scope| {
+            let rename = scope.spawn(|| std::fs::rename(job.join("pack.part"), job.join("pack")));
+            puts.wait_for_held(1);
+            first.quiesce();
+            assert_eq!(
+                served.object(&format!("{JOB}/pack")).as_deref(),
+                Some(&b"uploading"[..]),
+                "the commit was not finished before the quiesce returned"
+            );
+            puts.let_go();
+            rename.join().unwrap().unwrap();
+            served.adopt(device, Some(UnixListener::from(control)));
+            first.give_up();
+        });
+        drop(first);
+    });
+}
+
 /// Asserts that a rename made while no process reads the connection (between the quiesce of the
 /// running instance and the successor's start) is answered by the successor and commits.
 #[test]
