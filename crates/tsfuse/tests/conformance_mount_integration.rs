@@ -377,6 +377,32 @@ fn an_unmount_of_a_busy_mount_fails_and_leaves_it_and_a_lazy_unmount_detaches_it
 }
 
 #[test]
+fn a_failed_unmount_of_the_guard_leaves_the_mount_to_its_drop_which_detaches_it() {
+    let Some((mounted, session)) = Mounted::new("t-f7-guard", READERS) else {
+        return;
+    };
+    let (tree, bytes) = tree();
+    let served = serve_inline(session, tree);
+    let file = File::open(mounted.path("f")).unwrap();
+    assert_eq!(read_all(&file), bytes);
+    let real_mp = mounted.real_mp.clone();
+
+    // The held file keeps the mount busy: the unmount fails, and the guard, dropped as the
+    // failure unwinds, detaches the mount.
+    let failed = std::panic::catch_unwind(std::panic::AssertUnwindSafe(move || mounted.unmount()))
+        .unwrap_err();
+    let message = failed.downcast_ref::<String>().unwrap();
+    assert!(
+        message.starts_with("called `Result::unwrap()` on an `Err` value: "),
+        "{message}"
+    );
+    assert_eq!(mount_entry(&real_mp), None, "the guard detached the mount");
+
+    drop(file);
+    ended_by_the_kernel(&served.join());
+}
+
+#[test]
 fn an_abort_with_a_read_parked_fails_the_caller_and_the_readers_and_leaves_the_mount_to_unmount() {
     if !is_root() {
         skip("the abort file of a connection is root's: this process is not root");
