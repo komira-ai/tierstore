@@ -23,8 +23,7 @@
 //!   request names their `Content-MD5` or `x-amz-checksum-sha256`, and, when the hot tier has no
 //!   room, is 503 `SlowDown` or, with `hot_store.emergency_cold_landing`, lands in the cold tier
 //!   (`docs/design/put-without-lock.md`, 5.3 to 5.5). A scoped key and a presigned URL only create
-//!   under every format. A key that
-//!   exists is `PreconditionFailed`, except that under the format phase `active-marks`
+//!   under every format. A key that exists is `PreconditionFailed`, except that under the format phase `active-marks`
 //!   (`docs/design/put-without-lock.md`, 5.1) a key that a delete is removing, or has just
 //!   removed, is 409 `ConditionalRequestConflict`. `If-Match` is answered `PreconditionFailed` for
 //!   another content tag and `NotImplemented` for the right one (an immutable object cannot be
@@ -333,7 +332,6 @@ mod config_interface;
 mod config_io;
 mod config_load;
 mod config_policy;
-mod config_put_ingest;
 mod config_reconcile;
 mod config_syntax;
 #[cfg(test)]

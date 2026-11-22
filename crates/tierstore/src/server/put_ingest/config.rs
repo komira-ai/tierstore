@@ -1,5 +1,5 @@
 //! `local_cache.put_ingest`: the root of the put ingest of a build node (see
-//! [`put_ingest`](super::put_ingest)), the directory under which the jobs of a Mac commit their
+//! [`put_ingest`](super)), the directory under which the jobs of a Mac commit their
 //! objects into plain directories. Left out, the node ingests nothing.
 //!
 //! The root is an absolute path; it must not be the cache directory, inside it or around it, and
@@ -9,9 +9,9 @@
 
 use std::path::{Path, PathBuf};
 
-use super::config::{ConfigError, invalid, refuse};
-use super::config_cache::LocalCacheTable;
-use super::config_combined::normalised;
+use crate::server::config::{ConfigError, invalid, refuse};
+use crate::server::config_cache::LocalCacheTable;
+use crate::server::config_combined::normalised;
 
 /// The name of the key.
 const KEY: &str = "local_cache.put_ingest";
@@ -21,7 +21,9 @@ const KEY: &str = "local_cache.put_ingest";
 /// # Errors
 /// A root that is not an absolute path, that is the cache directory, inside it or around it, or
 /// that is given while `write_through` is not `true`; each names the key.
-pub(super) fn put_ingest_of(table: &LocalCacheTable) -> Result<Option<PathBuf>, ConfigError> {
+pub(in crate::server) fn put_ingest_of(
+    table: &LocalCacheTable,
+) -> Result<Option<PathBuf>, ConfigError> {
     let Some(root) = &table.put_ingest else {
         return Ok(None);
     };
@@ -56,7 +58,7 @@ fn check_apart(root: &Path, cache: &Path) -> Result<(), ConfigError> {
 ///
 /// # Errors
 /// The key, when it is given.
-pub(super) fn refuse_put_ingest(table: &LocalCacheTable) -> Result<(), ConfigError> {
+pub(in crate::server) fn refuse_put_ingest(table: &LocalCacheTable) -> Result<(), ConfigError> {
     let why = "only a build node ingests put directories";
     refuse(
         "local_cache",
@@ -66,5 +68,5 @@ pub(super) fn refuse_put_ingest(table: &LocalCacheTable) -> Result<(), ConfigErr
 }
 
 #[cfg(test)]
-#[path = "config_put_ingest_tests.rs"]
+#[path = "config_tests.rs"]
 mod tests;

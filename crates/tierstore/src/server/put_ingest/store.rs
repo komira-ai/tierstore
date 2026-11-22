@@ -7,6 +7,7 @@
 
 use std::fmt;
 use std::fs::File;
+use std::os::unix::fs::MetadataExt as _;
 use std::path::Path;
 use std::sync::atomic::{AtomicBool, Ordering};
 
@@ -61,9 +62,18 @@ pub(super) enum Outcome {
     Again(Error),
 }
 
+/// A file as the system knows it: its device and inode numbers.
+pub(super) type Identity = (u64, u64);
+
+/// The identity of the file at `path`, not following a link; none if there is none.
+pub(super) fn identity_of(path: &Path) -> Option<Identity> {
+    let meta = std::fs::symlink_metadata(path).ok()?;
+    Some((meta.dev(), meta.ino()))
+}
+
 /// The file at `path`, opened without following a link and checked to be a regular file with
-/// one link, and its size; or the outcome that ends its put.
-fn open(path: &Path) -> Result<(File, u64), Outcome> {
+/// one link, its size and its identity; or the outcome that ends its put.
+fn open(path: &Path) -> Result<(File, u64, Identity), Outcome> {
     // `NONBLOCK` so that a FIFO put in its place does not hold the ingest; a regular file reads
     // as it would without it.
     let flags = OFlags::RDONLY | OFlags::NOFOLLOW | OFlags::CLOEXEC | OFlags::NONBLOCK;
@@ -79,24 +89,30 @@ fn open(path: &Path) -> Result<(File, u64), Outcome> {
     if !meta.is_file() {
         return Err(Outcome::Refused(Refusal::NotPlain("not a regular file")));
     }
-    if std::os::unix::fs::MetadataExt::nlink(&meta) != 1 {
+    if meta.nlink() != 1 {
         return Err(Outcome::Refused(Refusal::NotPlain("a hard link")));
     }
-    Ok((file, meta.len()))
+    Ok((file, meta.len(), (meta.dev(), meta.ino())))
 }
 
-/// Puts the file at `path` as the object `key`, whose bytes must hash to `sha256`.
+/// Puts the file at `path` as the object `key`, whose bytes must hash to `sha256`; and the
+/// identity of the file it opened, if it opened one: the file a store or a refusal removes, not
+/// one put at the path since.
 pub(super) async fn put_file(
     cache: &LocalCache,
     key: &str,
     sha256: TreeDigest,
     path: &Path,
-) -> Outcome {
+) -> (Outcome, Option<Identity>) {
     match open(path) {
-        Ok((file, size)) => {
-            put_body(cache, key, sha256, tokio::fs::File::from_std(file), size).await
+        Ok((file, size, identity)) => {
+            let file = tokio::fs::File::from_std(file);
+            (
+                put_body(cache, key, sha256, file, size).await,
+                Some(identity),
+            )
         }
-        Err(outcome) => outcome,
+        Err(outcome) => (outcome, None),
     }
 }
 

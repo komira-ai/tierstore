@@ -1,8 +1,8 @@
 //! A whole look at the put root: every build's directory `cas/b/<build>` and every job's directory
 //! `cas/b/<build>/<nonce>`, with the time each was last changed, and the committed files of a job's
-//! directory and the digests its `.part` names declare. Only
-//! directories are walked, never a link to one, and only the files directly in a job's directory
-//! are looked at. It reads the disk: it runs on a blocking thread.
+//! directory and the digests its `.part` names declare. Only directories are walked, never a link
+//! to one, and only the files directly in a job's directory are looked at. It reads the disk: it
+//! runs on a blocking thread.
 
 use std::collections::BTreeMap;
 use std::fs;

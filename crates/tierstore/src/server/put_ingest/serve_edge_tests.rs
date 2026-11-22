@@ -429,3 +429,60 @@ async fn an_ingest_that_reports_to_nobody_still_stores() {
     task.await.unwrap();
     assert_eq!(bench.object("cas/b/b1/n1/pack").await, Some(bytes));
 }
+
+/// Asserts that a file the job put at the path while the put of the file before it ran is not
+/// removed with it: the stored file's own inode is what goes, and the new file is taken by the
+/// next scan (refused here, since the key holds the first bytes).
+#[tokio::test]
+async fn a_file_put_at_the_path_during_its_put_is_not_removed_with_it() {
+    let mut bench = Bench::new("ingest-edge-replaced");
+    let dir = bench.job("b1", "n1");
+    bench.start().await;
+    let held = bench.rig.disk.hold_writes();
+    let first = b"the first pack".to_vec();
+    commit(&dir, "pack", &first, sha(&first));
+    bench.putting("cas/b/b1/n1/pack").await;
+    let second = b"the second pack".to_vec();
+    let staged = dir.join("pack.new");
+    std::fs::write(&staged, &second).unwrap();
+    std::fs::rename(&staged, dir.join("pack")).unwrap();
+    held.add_permits(1000);
+    assert_eq!(
+        bench.outcome().await,
+        Report::Stored {
+            key: "cas/b/b1/n1/pack".to_owned(),
+            created: true
+        }
+    );
+    assert_eq!(std::fs::read(dir.join("pack")).unwrap(), second);
+    assert_eq!(bench.object("cas/b/b1/n1/pack").await, Some(first));
+    bench.stop().await;
+}
+
+/// Asserts that an instance that loses the lock while a put runs, and takes it again, keeps the
+/// declaration it saw: the file left by the dropped put is stored by the scan of the new run, not
+/// refused for want of a digest.
+#[tokio::test]
+async fn a_declaration_outlives_the_loss_and_return_of_the_lock() {
+    let mut bench = Bench::new("ingest-edge-flip");
+    let dir = bench.job("b1", "n1");
+    bench.start().await;
+    let held = bench.rig.disk.hold_writes();
+    let bytes = b"put across a flip".to_vec();
+    commit(&dir, "pack", &bytes, sha(&bytes));
+    bench.putting("cas/b/b1/n1/pack").await;
+    std::fs::remove_file(bench.rig.config.path.join(".lock")).unwrap();
+    assert_eq!(bench.cache.tick().unwrap(), Tick::Lost);
+    idle().await;
+    held.add_permits(1000);
+    assert_eq!(bench.cache.tick().unwrap(), Tick::Took);
+    bench.wait(|report| *report == Report::Watching).await;
+    assert_eq!(
+        bench.outcome().await,
+        Report::Stored {
+            key: "cas/b/b1/n1/pack".to_owned(),
+            created: true
+        }
+    );
+    bench.stop().await;
+}

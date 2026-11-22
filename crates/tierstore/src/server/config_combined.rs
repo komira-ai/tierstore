@@ -55,7 +55,7 @@ use super::config_cache::{CachePart, LocalCacheTable, check_oci_is_kept};
 use super::config_fill::{check_fill_outside_cache, fill_socket_of, refuse_prefetch_keys};
 use super::config_interface::Interfaces;
 use super::config_policy::{Policy, check_policies, require_keeping};
-use super::config_put_ingest::refuse_put_ingest;
+use super::put_ingest::config::refuse_put_ingest;
 
 /// What a file with all three tables stands for.
 #[derive(Debug)]

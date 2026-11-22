@@ -73,13 +73,19 @@ impl Ledger {
         }
     }
 
+    /// Forgets every running put: their run ended, and its puts with it.
+    pub(super) fn drop_running(&mut self) {
+        self.running.clear();
+    }
+
     /// Whether a put of a file of `dir` is running.
     pub(super) fn busy(&self, dir: &JobDir) -> bool {
         self.running.iter().any(|(of, _)| of == dir)
     }
 
     /// Keeps only what concerns the directories of `live` (the directories a whole scan found), and
-    /// the files whose put is running.
+    /// the files whose put is running. An entry of a file that went from a live directory stays
+    /// until its directory goes: a few names of each job at most.
     pub(super) fn keep_only(&mut self, live: &BTreeSet<JobDir>) {
         let running = &self.running;
         let kept = |id: &FileId| live.contains(&id.0) || running.contains(id);

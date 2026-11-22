@@ -29,14 +29,18 @@
 //!   of its first finding (one committed while no instance watched, or whose events were lost).
 //! - A file that cannot be opened or read, and a put the upstream did not take, are left as they
 //!   are and tried again at the next scan.
-//! - `.part` names are never stored. A job's directory unchanged for a day ([`ABANDONED_MS`]) (a job that
-//!   ended without committing) is removed with what it holds, and a build's directory left empty
-//!   for as long.
+//! - `.part` names are never stored. A job's directory that has not changed for a day
+//!   ([`ABANDONED_MS`]: no name made, renamed or removed in it; a write into a file it holds does
+//!   not change it) is taken for a job that ended without a commit and removed with what it holds,
+//!   and a build's directory left empty for as long.
 //!
 //! Only the instance that holds the lock of the cache directory ingests, as only it binds the fill
-//! socket: one that loses the lock stops, and its successor finds the files with its first scan.
-//! At the halt the puts that are running are let finish; none is started.
+//! socket: one that loses the lock stops (its running puts are dropped, their files left) and keeps
+//! the declarations it saw for when it takes the lock again; its successor finds the files with its
+//! first scan, and refuses those whose declaration it did not see. At the halt the puts that are
+//! running are let finish; none is started.
 
+pub(in crate::server) mod config;
 mod ledger;
 mod names;
 mod scan;
@@ -64,21 +68,21 @@ mod testing;
 #[cfg(test)]
 mod watch_linux_tests;
 
-use std::collections::BTreeSet;
+use std::collections::{BTreeMap, BTreeSet};
 use std::io;
 use std::path::{Path, PathBuf};
 use std::sync::Arc;
 use std::time::Duration;
 
 use tokio::sync::{Notify, mpsc, watch};
-use tokio::task::JoinSet;
+use tokio::task::{self, JoinSet};
 
 use super::local_cache::{LocalCache, Mode};
 use crate::{Clock, PutOutcome, SystemClock, TreeDigest};
 use ledger::{FileId, Ledger, Verdict};
 use names::{JobDir, Name, Place, name_of, place};
 pub(in crate::server) use store::Refusal;
-use store::{Outcome, put_file};
+use store::{Identity, Outcome, identity_of, put_file};
 #[cfg(target_os = "linux")]
 use watch_linux::Watcher;
 #[cfg(target_os = "macos")]
@@ -165,13 +169,19 @@ impl PutIngest {
     /// Ingests until `halt` is notified, while the cache holds the lock of its directory.
     pub(in crate::server) async fn serve(self, halt: Arc<Notify>) {
         let mut modes = self.cache.watch_mode();
+        let mut ledger = Ledger::default();
         loop {
             let writable = *modes.borrow_and_update() == Mode::ReadWrite;
             if writable {
-                let mut run = Run::new(&self);
-                if run.run(&halt, &mut modes).await {
+                let mut run = Run::new(&self, std::mem::take(&mut ledger));
+                let halted = run.run(&halt, &mut modes).await;
+                ledger = run.ledger;
+                if halted {
                     break;
                 }
+                // The puts that ran were dropped with the run, and their files left; the
+                // declarations are kept for the next run.
+                ledger.drop_running();
                 continue;
             }
             tokio::select! {
@@ -189,17 +199,34 @@ impl PutIngest {
     }
 }
 
-/// What a put that ended came to: the file, its key and the outcome.
-type Ended = (FileId, String, Outcome);
+/// What a put that ended came to: the file, its key, the outcome and the identity of the file it
+/// opened.
+type Ended = (FileId, String, Outcome, Option<Identity>);
 
 /// One run of the ingest, while the cache holds the lock.
 struct Run<'a> {
     ingest: &'a PutIngest,
     ledger: Ledger,
     puts: JoinSet<Ended>,
+    /// The file of each running put, by its task.
+    tasks: BTreeMap<task::Id, FileId>,
     /// The files to put when a put comes free.
     queue: BTreeSet<FileId>,
     watcher: Option<Watcher>,
+}
+
+/// The watcher of `root`. On macOS it is made on a blocking thread: it waits for its stream to
+/// tell a probe.
+async fn make_watcher(root: PathBuf) -> io::Result<Watcher> {
+    #[cfg(target_os = "macos")]
+    {
+        let made = tokio::task::spawn_blocking(move || Watcher::new(&root)).await;
+        made.map_err(io::Error::other)?
+    }
+    #[cfg(target_os = "linux")]
+    {
+        Watcher::new(&root)
+    }
 }
 
 /// The next events of `watcher`, or never without one.
@@ -211,11 +238,12 @@ async fn next_seen(watcher: Option<&mut Watcher>, seen: &mut Vec<Seen>) -> io::R
 }
 
 impl<'a> Run<'a> {
-    fn new(ingest: &'a PutIngest) -> Self {
+    fn new(ingest: &'a PutIngest, ledger: Ledger) -> Self {
         Self {
             ingest,
-            ledger: Ledger::default(),
+            ledger,
             puts: JoinSet::new(),
+            tasks: BTreeMap::new(),
             queue: BTreeSet::new(),
             watcher: None,
         }
@@ -224,10 +252,12 @@ impl<'a> Run<'a> {
     /// Runs until the halt (true, once the running puts have ended) or a change of the mode
     /// (false: the puts are dropped, and the files left).
     async fn run(&mut self, halt: &Notify, modes: &mut watch::Receiver<Mode>) -> bool {
-        self.watcher = self.watch();
+        self.watcher = self.watch().await;
         self.scan().await;
-        let shown = self.ingest.root.display();
-        tracing::info!("tierstore: the put ingest watches {shown}");
+        if self.watcher.is_some() {
+            let shown = self.ingest.root.display();
+            tracing::info!("tierstore: the put ingest watches {shown}");
+        }
         self.ingest.report(Report::Watching);
         let mut every = tokio::time::interval(SCAN_EVERY);
         every.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Delay);
@@ -237,13 +267,13 @@ impl<'a> Run<'a> {
             tokio::select! {
                 biased;
                 () = halt.notified() => {
-                    while let Some(ended) = self.puts.join_next().await {
+                    while let Some(ended) = self.puts.join_next_with_id().await {
                         self.ended(ended);
                     }
                     return true;
                 }
                 _ = modes.changed() => return false,
-                Some(ended) = self.puts.join_next() => self.ended(ended),
+                Some(ended) = self.puts.join_next_with_id() => self.ended(ended),
                 got = next_seen(self.watcher.as_mut(), &mut seen) => match got {
                     Ok(()) => self.take(seen).await,
                     Err(why) => {
@@ -253,7 +283,7 @@ impl<'a> Run<'a> {
                 },
                 _ = every.tick() => {
                     if self.watcher.is_none() {
-                        self.watcher = self.watch();
+                        self.watcher = self.watch().await;
                     }
                     self.scan().await;
                 }
@@ -262,9 +292,9 @@ impl<'a> Run<'a> {
     }
 
     /// The watcher of the root, or none, said, when it cannot be made.
-    fn watch(&self) -> Option<Watcher> {
+    async fn watch(&self) -> Option<Watcher> {
         let root = &self.ingest.root;
-        match Watcher::new(root) {
+        match make_watcher(root.clone()).await {
             Ok(watcher) => Some(watcher),
             Err(why) => {
                 let shown = root.display();
@@ -325,7 +355,7 @@ impl<'a> Run<'a> {
             Verdict::Store(sha256) => self.start(id, sha256),
             Verdict::Refuse => {
                 let key = id.0.key(&id.1);
-                self.refused(&id, &key, &Refusal::NoDigest);
+                self.refused(&id, &key, &Refusal::NoDigest, None);
             }
             Verdict::Running | Verdict::Wait => {}
         }
@@ -337,28 +367,53 @@ impl<'a> Run<'a> {
         self.ingest.report(Report::Putting { key: key.clone() });
         let cache = self.ingest.cache.clone();
         let path = self.path_of(&id);
-        let _ = self.puts.spawn(async move {
-            let outcome = put_file(&cache, &key, sha256, &path).await;
-            (id, key, outcome)
+        let file = id.clone();
+        let task = self.puts.spawn(async move {
+            let (outcome, identity) = put_file(&cache, &key, sha256, &path).await;
+            (file, key, outcome, identity)
         });
+        let _ = self.tasks.insert(task.id(), id);
     }
 
     /// Takes the end of a put, and starts the next one waiting.
-    fn ended(&mut self, ended: Result<Ended, tokio::task::JoinError>) {
-        let Ok((id, key, outcome)) = ended else {
-            return;
-        };
+    fn ended(&mut self, ended: Result<(task::Id, Ended), task::JoinError>) {
+        match ended {
+            Ok((task, ended)) => {
+                let _ = self.tasks.remove(&task);
+                self.outcome(ended);
+            }
+            Err(failed) => {
+                // The put's task ended without an outcome: its file is left to be put again.
+                if let Some(id) = self.tasks.remove(&failed.id()) {
+                    self.ledger.done(&id, false);
+                    tracing::warn!(
+                        "tierstore: the put ingest's put of {} failed: {failed}",
+                        id.1
+                    );
+                }
+            }
+        }
+        while self.puts.len() < MOST_PUTS {
+            let Some(next) = self.queue.pop_first() else {
+                break;
+            };
+            self.consider(next);
+        }
+    }
+
+    /// Takes the outcome of a put.
+    fn outcome(&mut self, (id, key, outcome, identity): Ended) {
         match outcome {
             Outcome::Stored(outcome) => {
                 self.ledger.done(&id, true);
-                self.remove(&id);
+                self.remove(&id, identity);
                 let created = outcome == PutOutcome::Created;
                 tracing::info!("tierstore: the put ingest stored {key}");
                 self.ingest.report(Report::Stored { key, created });
             }
             Outcome::Refused(why) => {
                 self.ledger.done(&id, true);
-                self.refused(&id, &key, &why);
+                self.refused(&id, &key, &why, identity);
             }
             Outcome::Gone => self.ledger.done(&id, true),
             Outcome::Unreadable(why) => {
@@ -372,14 +427,12 @@ impl<'a> Run<'a> {
                 self.ingest.report(Report::Left { key });
             }
         }
-        if let Some(next) = self.queue.pop_first() {
-            self.consider(next);
-        }
     }
 
-    /// Refuses the file `id` (of `key`) for `why`: removes it, and says so.
-    fn refused(&mut self, id: &FileId, key: &str, why: &Refusal) {
-        self.remove(id);
+    /// Refuses the file `id` (of `key`) for `why`: removes it (the file of `identity` only, if
+    /// given), and says so.
+    fn refused(&mut self, id: &FileId, key: &str, why: &Refusal, identity: Option<Identity>) {
+        self.remove(id, identity);
         let shown = self.path_of(id);
         let shown = shown.display();
         tracing::warn!("tierstore: the put ingest refused {shown}: {why}");
@@ -388,9 +441,13 @@ impl<'a> Run<'a> {
         self.ingest.report(Report::Refused { key, why });
     }
 
-    /// Removes the file `id`, and its directory if that is empty now.
-    fn remove(&self, id: &FileId) {
-        let _ = std::fs::remove_file(self.path_of(id));
+    /// Removes the file `id` (if `identity` is given, only while the path leads to that file: one
+    /// the job put there since is left for the next scan), and its directory if that is empty now.
+    fn remove(&self, id: &FileId, identity: Option<Identity>) {
+        let path = self.path_of(id);
+        if identity.is_none_or(|identity| identity_of(&path) == Some(identity)) {
+            let _ = std::fs::remove_file(&path);
+        }
         if !self.ledger.busy(&id.0) {
             let _ = std::fs::remove_dir(self.ingest.root.join(id.0.rel()));
         }

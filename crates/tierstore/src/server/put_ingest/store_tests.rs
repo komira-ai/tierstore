@@ -47,12 +47,12 @@ async fn a_file_of_the_declared_bytes_is_stored_and_stored_again() {
     let rig = Rig::writing("store-stored");
     let cache = rig.locked();
     let path = staged(&rig, "pack", b"pack bytes");
-    let made = put_file(&cache, KEY, sha(b"pack bytes"), &path).await;
+    let made = put_file(&cache, KEY, sha(b"pack bytes"), &path).await.0;
     assert!(
         matches!(made, Outcome::Stored(PutOutcome::Created)),
         "{made:?}"
     );
-    let again = put_file(&cache, KEY, sha(b"pack bytes"), &path).await;
+    let again = put_file(&cache, KEY, sha(b"pack bytes"), &path).await.0;
     assert!(
         matches!(again, Outcome::Stored(PutOutcome::Existed)),
         "{again:?}"
@@ -73,7 +73,7 @@ async fn bytes_that_are_not_the_declared_digest_are_refused_and_not_stored() {
     longer.push(b'!');
     for bytes in [whole[..5].to_vec(), longer, b"the whole pacK".to_vec()] {
         let path = staged(&rig, "pack", &bytes);
-        let outcome = put_file(&cache, KEY, sha(&whole), &path).await;
+        let outcome = put_file(&cache, KEY, sha(&whole), &path).await.0;
         assert_eq!(refused(outcome), Refusal::NotItsDigest);
         assert!(rig.tamper.get(KEY, None).await.is_err());
     }
@@ -87,10 +87,10 @@ async fn a_key_that_holds_other_bytes_refuses_the_file() {
     let cache = rig.locked();
     let _log = quiet();
     let first = staged(&rig, "first", b"pack bytes");
-    let made = put_file(&cache, KEY, sha(b"pack bytes"), &first).await;
+    let made = put_file(&cache, KEY, sha(b"pack bytes"), &first).await.0;
     assert!(matches!(made, Outcome::Stored(PutOutcome::Created)));
     let second = staged(&rig, "second", b"pack bytez");
-    let outcome = put_file(&cache, KEY, sha(b"pack bytez"), &second).await;
+    let outcome = put_file(&cache, KEY, sha(b"pack bytez"), &second).await.0;
     assert_eq!(refused(outcome), Refusal::OtherBytes);
     assert_eq!(rig.tamper.get(KEY, None).await.unwrap(), "pack bytes");
 }
@@ -105,10 +105,10 @@ async fn an_upstream_that_refuses_for_size_is_refused_and_another_error_is_again
     let path = staged(&rig, "pack", b"abc");
     let too_large = Error::TooLarge(KEY.to_owned());
     rig.upstream.fail_next_with(Op::Put, too_large);
-    let outcome = put_file(&cache, KEY, sha(b"abc"), &path).await;
+    let outcome = put_file(&cache, KEY, sha(b"abc"), &path).await.0;
     assert_eq!(refused(outcome), Refusal::TooLarge);
     rig.upstream.fail_next(Op::Put, 1);
-    let outcome = put_file(&cache, KEY, sha(b"abc"), &path).await;
+    let outcome = put_file(&cache, KEY, sha(b"abc"), &path).await.0;
     assert!(matches!(outcome, Outcome::Again(_)), "{outcome:?}");
 }
 
@@ -118,7 +118,7 @@ async fn a_missing_path_is_gone() {
     let rig = Rig::writing("store-gone");
     let cache = rig.locked();
     let path = rig.dir.path().join("nothing");
-    let outcome = put_file(&cache, KEY, sha(b"abc"), &path).await;
+    let outcome = put_file(&cache, KEY, sha(b"abc"), &path).await.0;
     assert!(matches!(outcome, Outcome::Gone), "{outcome:?}");
 }
 
@@ -131,7 +131,7 @@ async fn a_symbolic_link_is_refused() {
     let target = staged(&rig, "target", b"abc");
     let link = rig.dir.path().join("link");
     std::os::unix::fs::symlink(&target, &link).unwrap();
-    let outcome = put_file(&cache, KEY, sha(b"abc"), &link).await;
+    let outcome = put_file(&cache, KEY, sha(b"abc"), &link).await.0;
     assert_eq!(refused(outcome), Refusal::NotPlain("a symbolic link"));
     assert!(rig.tamper.get(KEY, None).await.is_err());
 }
@@ -146,7 +146,7 @@ async fn a_fifo_is_not_a_regular_file() {
     let cache = rig.locked();
     let fifo = rig.dir.path().join("fifo");
     mknodat(CWD, &fifo, FileType::Fifo, Mode::RUSR | Mode::WUSR, 0).unwrap();
-    let outcome = put_file(&cache, KEY, sha(b"abc"), &fifo).await;
+    let outcome = put_file(&cache, KEY, sha(b"abc"), &fifo).await.0;
     assert_eq!(refused(outcome), Refusal::NotPlain("not a regular file"));
 }
 
@@ -157,7 +157,7 @@ async fn a_directory_is_not_a_regular_file() {
     let cache = rig.locked();
     let dir = rig.dir.path().join("a-directory");
     std::fs::create_dir(&dir).unwrap();
-    let outcome = put_file(&cache, KEY, sha(b"abc"), &dir).await;
+    let outcome = put_file(&cache, KEY, sha(b"abc"), &dir).await.0;
     assert_eq!(refused(outcome), Refusal::NotPlain("not a regular file"));
 }
 
@@ -168,7 +168,7 @@ async fn a_file_with_two_links_is_refused() {
     let cache = rig.locked();
     let path = staged(&rig, "pack", b"abc");
     std::fs::hard_link(&path, rig.dir.path().join("second")).unwrap();
-    let outcome = put_file(&cache, KEY, sha(b"abc"), &path).await;
+    let outcome = put_file(&cache, KEY, sha(b"abc"), &path).await.0;
     assert_eq!(refused(outcome), Refusal::NotPlain("a hard link"));
     assert!(rig.tamper.get(KEY, None).await.is_err());
 }
@@ -189,7 +189,7 @@ async fn a_file_that_cannot_be_opened_is_unreadable() {
         eprintln!("skipped: a file of mode 000 can be opened by this process");
         return;
     }
-    let outcome = put_file(&cache, KEY, sha(b"abc"), &path).await;
+    let outcome = put_file(&cache, KEY, sha(b"abc"), &path).await.0;
     assert!(matches!(outcome, Outcome::Unreadable(_)), "{outcome:?}");
     assert!(path.exists());
 }

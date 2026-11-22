@@ -31,6 +31,10 @@ const PROBE: &str = ".put-ingest-probe";
 /// The most writes of [`PROBE`] before the stream is taken as it is.
 const PROBE_TRIES: u32 = 50;
 
+/// The most events of other paths the probe keeps waiting through, all writes together: a root
+/// that changes all the time cannot hold the start longer than that.
+const PROBE_MOST_EVENTS: usize = 10_000;
+
 /// How long one write of [`PROBE`] waits for its event.
 const PROBE_WAIT: Duration = Duration::from_millis(100);
 
@@ -66,8 +70,11 @@ fn probe(root: &Path, events: &mpsc::Receiver<Event>, early: &mut Vec<Event>) ->
                 break;
             }
             early.push(event);
+            if early.len() >= PROBE_MOST_EVENTS {
+                break;
+            }
         }
-        if seen {
+        if seen || early.len() >= PROBE_MOST_EVENTS {
             break;
         }
     }

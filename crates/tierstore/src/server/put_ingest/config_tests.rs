@@ -4,8 +4,8 @@
 
 use std::path::PathBuf;
 
-use super::super::config::settings_from_text;
-use super::super::config_testing::DEFAULTS;
+use crate::server::config::settings_from_text;
+use crate::server::config_testing::DEFAULTS;
 
 /// A build node's file with `more` lines in `[local_cache]`, whose cache is `cache`.
 fn file(cache: &str, more: &str) -> String {
