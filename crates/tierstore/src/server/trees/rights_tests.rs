@@ -252,7 +252,12 @@ fn a_scoped_key_may_not_place_a_tree_by_digest() {
 #[test]
 fn a_scoped_key_may_not_write_through_a_dot_segment_or_to_a_reserved_prefix() {
     let source = vec![file("a", vec![1], Some("cas/x/1"))];
-    for prefix in ["jobs/../_journal/", "jobs/1/../../builds/", "jobs/./1/"] {
+    for prefix in [
+        "jobs/../_journal/",
+        "jobs/1/../../builds/",
+        "jobs/./1/",
+        "_journal/1/",
+    ] {
         let request = create(source.clone(), vec![s3(prefix)]);
         let refused = permit_create(&caller(SCOPED), &request).expect_err(prefix);
         assert_refused(
