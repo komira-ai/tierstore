@@ -48,6 +48,7 @@ fn the_arguments_of_the_verb_are_parsed() {
     assert_eq!(code, status(0));
     assert!(out.contains("--config"), "{out}");
     assert!(out.contains("attachments"), "{out}");
+    assert!(out.contains("--check-config"), "{out}");
     let (code, _, err) = fs(&["--bogus"]);
     assert_eq!(code, status(2));
     assert!(err.contains("--bogus"), "{err}");
@@ -181,5 +182,66 @@ fn the_status_of_a_serve_is_the_status_of_its_error() {
     assert!(
         text.contains("tierstore fs: fs.cache_path /c") && text.contains("mounting: busy"),
         "{text}"
+    );
+}
+
+/// Asserts that `--check-config` of a file that loads is status 0 with nothing on stdout or stderr,
+/// and that it serves nothing: no control socket is made, though the file names one. Catches a check
+/// that starts the mount, or one that reports a good file.
+#[test]
+fn check_config_of_a_good_file_says_nothing_and_serves_nothing() {
+    let rig = Rig::new("tfs-verb-check", sample());
+    let path = config(&rig, "");
+    let (code, out, err) = fs(&["--config", path.to_str().unwrap(), "--check-config"]);
+    assert_eq!(code, status(0));
+    assert!(out.is_empty(), "{out}");
+    assert!(err.is_empty(), "{err}");
+    assert!(!rig.dir.path().join("control.sock").exists());
+}
+
+/// Asserts that `--check-config` of a file that is refused is status 2 with the line a start prints
+/// (`tierstore fs: ` and the reason), whichever side of `--config` the flag is on, and that a
+/// missing file is the same. Catches a check that loads less than a start does.
+#[test]
+fn check_config_of_a_refused_file_is_status_two_with_the_reason_of_a_start() {
+    let dir = TestDir::under(std::env::temp_dir(), "tfs-verb-check-bad");
+    let bad = dir.path().join("bad.toml");
+    std::fs::write(&bad, "[fs]\nclient_group = \"1\"\nowner = \"1\"\n").unwrap();
+    let bad = bad.to_str().unwrap();
+    let (code, out, err) = fs(&["--check-config", "--config", bad]);
+    assert_eq!(code, status(2));
+    assert!(out.is_empty(), "{out}");
+    assert!(
+        err.starts_with("tierstore fs: fs.owner: must be user:group"),
+        "{err}"
+    );
+    let (_, _, start) = fs(&["--config", bad]);
+    assert_eq!(err, start);
+    let missing = dir.path().join("none.toml");
+    let (code, _, err) = fs(&["--config", missing.to_str().unwrap(), "--check-config"]);
+    assert_eq!(code, status(2));
+    assert!(
+        err.starts_with("tierstore fs: ") && err.contains("none.toml"),
+        "{err}"
+    );
+}
+
+/// Asserts that `--check-config` with `attachments` is refused with status 2 and a line that says
+/// so, before the file is read or the socket asked. Catches a check that lists attachments.
+#[test]
+fn check_config_does_not_go_with_attachments() {
+    let rig = Rig::new("tfs-verb-check-list", sample());
+    let path = config(&rig, "");
+    let (code, out, err) = fs(&[
+        "--check-config",
+        "--config",
+        path.to_str().unwrap(),
+        "attachments",
+    ]);
+    assert_eq!(code, status(2));
+    assert!(out.is_empty(), "{out}");
+    assert_eq!(
+        err,
+        "tierstore fs: --check-config does not go with attachments\n"
     );
 }

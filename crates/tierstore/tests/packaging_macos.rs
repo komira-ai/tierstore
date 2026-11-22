@@ -2,6 +2,9 @@
 //! launchd plist of hostkeeper's package (`packaging/hostkeeper/units/tierstore.plist`): the plist
 //! names the file, the binary accepts that command line and that
 //! file, and the file serves `[local_cache]` on loopback only, on the port the update hook probes.
+//! And the file service's job of the installer package (`packaging/macos-pkg/tierstore-fs.plist`)
+//! against the plist of the hostkeeper unit and the file `packaging/macos/fs.toml` its command
+//! line names: the binary accepts that file, and it repeats what `tierstore.toml` says.
 
 #![allow(
     clippy::unwrap_used,
@@ -443,4 +446,161 @@ fn the_binary_accepts_the_package_plists_command_line() {
     assert!(!out.status.success());
     assert!(!said.contains("unexpected argument"), "{said}");
     assert!(said.contains("tierstore.toml"), "{said}");
+}
+
+/// The path of the file `name` in the directory `packaging/<dir>`.
+fn packaging_file(dir: &str, name: &str) -> PathBuf {
+    Path::new(env!("CARGO_MANIFEST_DIR"))
+        .join("../../packaging")
+        .join(dir)
+        .join(name)
+}
+
+/// The property list of the file service's job in `packaging/<dir>`.
+fn fs_plist(dir: &str) -> BTreeMap<String, Value> {
+    let file = packaging_file(dir, "tierstore-fs.plist");
+    let text = std::fs::read_to_string(&file).unwrap_or_else(|e| panic!("{}: {e}", file.display()));
+    plist_in(&text)
+}
+
+/// The file service's configuration, as shipped.
+fn fs_config() -> toml::Table {
+    read("fs.toml").parse().expect("TOML")
+}
+
+/// The file service's `ProgramArguments` in the installer package.
+const FS_WORDS: [&str; 3] = ["fs", "--config", "/usr/local/tierstore/etc/fs.toml"];
+
+/// Asserts that the file service's plist of the installer package is the plist of the hostkeeper
+/// unit but for the program: every key is the same, and the first of `ProgramArguments` is the
+/// package's binary instead of the copy the update hook installs, the rest of the command line
+/// (`fs --config /usr/local/tierstore/etc/fs.toml`) unchanged. It would catch a change to one
+/// plist that the other does not follow, which would run the file service of a Mac with another
+/// account, limit or stop time than the unit's, and a package whose job runs a program the
+/// package does not install.
+#[test]
+fn the_package_fs_plist_differs_from_the_hostkeeper_unit_only_in_the_program() {
+    let unit = fs_plist("hostkeeper/units");
+    let package = fs_plist("macos-pkg");
+    let mut changed = unit.clone();
+    let Some(Value::Array(program)) = changed.get_mut("ProgramArguments") else {
+        panic!("ProgramArguments is an array");
+    };
+    assert_eq!(
+        program[0],
+        Value::Text("/usr/local/libexec/tierstore/tierstore".to_owned())
+    );
+    program[0] = Value::Text(PACKAGE_PROGRAM.to_owned());
+    assert_eq!(package, changed);
+    let words = words(&package);
+    assert_eq!(words[0], PACKAGE_PROGRAM);
+    assert_eq!(words[1..], FS_WORDS);
+    assert_eq!(
+        package.get("Label"),
+        Some(&Value::Text("tierstore-fs".to_owned()))
+    );
+}
+
+/// Asserts that both file service plists give launchd 150 seconds after SIGTERM (`ExitTimeOut`)
+/// and leave `AbandonProcessGroup` out: the process's unmount is four steps of at most 25 seconds
+/// each and 5 seconds to collect a killed command, 120 seconds, so launchd must not kill it before
+/// that, and the kill of the job must take a helper command the process left with it. It would
+/// catch a stop time launchd ends in the middle of an unmount (leaving a mount with no server),
+/// and a job whose kill leaves a stray `umount` or `diskutil` running.
+#[test]
+fn the_fs_plists_wait_150_seconds_for_the_unmount_and_kill_the_whole_process_group() {
+    for dir in ["hostkeeper/units", "macos-pkg"] {
+        let job = fs_plist(dir);
+        assert_eq!(job.get("ExitTimeOut"), Some(&Value::Integer(150)), "{dir}");
+        assert!(!job.contains_key("AbandonProcessGroup"), "{dir}");
+    }
+}
+
+/// Asserts that the shipped `fs.toml` is the file the job's command line names and that it agrees
+/// with `tierstore.toml`: its `fs.fill_socket` is `local_cache.fill_socket`, its `fs.mountpoint` is
+/// the mount provider's `mountpoint`, its `fs.cache_path` is `local_cache.path`, its runtime
+/// directory is under `run` beside the sockets, the account it names is `_tierstore`, the job's,
+/// and its NFS socket is on loopback. It would catch a file service that reads the fill socket,
+/// cache or mount point of another place than the node's, so that the mount cannot fill a file or
+/// the provider's trees appear where no job looks.
+#[test]
+fn the_fs_file_repeats_the_nodes_fill_socket_cache_and_mountpoint() {
+    let node = config();
+    let file = fs_config();
+    assert_eq!(file.keys().collect::<Vec<_>>(), ["fs"]);
+    let fs = table(&file, "fs");
+    let cache = table(&node, "local_cache");
+    assert_eq!(fs["fill_socket"], cache["fill_socket"]);
+    assert_eq!(fs["cache_path"], cache["path"]);
+    let providers = interfaces(&node, "mount-provider");
+    assert_eq!(fs["mountpoint"], providers[0]["params"]["mountpoint"]);
+    assert_eq!(
+        fs["runtime_dir"].as_str(),
+        Some(format!("{LAUNCHD_LINKS_DIR}/run/fs").as_str())
+    );
+    assert_eq!(fs["owner"].as_str(), Some("_tierstore:_tierstore"));
+    assert_eq!(fs["client_group"].as_str(), Some("_tierstore"));
+    let nfs = table(fs, "nfs");
+    assert_eq!(nfs["listen"].as_str(), Some("127.0.0.1:12049"));
+    assert!(!nfs.contains_key("mount_user"), "the process's own user");
+    for key in fs.keys() {
+        assert!(!SECRET_WORDS.iter().any(|word| key.contains(word)), "{key}");
+    }
+}
+
+/// Asserts that the binary accepts the job's command line and the shipped `fs.toml`: the file, with
+/// its two account names replaced by the numbers of the user and group of this process (a unit test
+/// has no `_tierstore` to look up) and its three directories by directories of a scratch
+/// directory, is checked by `tierstore fs --config <file> --check-config`, which exits 0 and says
+/// nothing. It would catch a key or a value of the file the binary refuses, which would leave the
+/// job restarting for ever.
+#[test]
+fn the_binary_accepts_the_fs_plists_command_line_and_file() {
+    let scratch = TestDir::under(std::env::temp_dir(), "packaging-macos-fs-check");
+    let mut text = read("fs.toml");
+    let (uid, gid) = (
+        rustix::process::geteuid().as_raw(),
+        rustix::process::getegid().as_raw(),
+    );
+    for (shipped, own) in [
+        (
+            "owner = \"_tierstore:_tierstore\"",
+            format!("owner = \"{uid}:{gid}\""),
+        ),
+        (
+            "client_group = \"_tierstore\"",
+            format!("client_group = \"{gid}\""),
+        ),
+    ] {
+        assert!(text.contains(shipped), "{shipped}");
+        text = text.replace(shipped, &own);
+    }
+    for (shipped, name) in [
+        ("/usr/local/tierstore/cache", "cache"),
+        ("/private/var/tierstore/fs", "mount"),
+        ("/usr/local/tierstore/run/fs", "runtime"),
+    ] {
+        let own = scratch.path().join(name);
+        std::fs::create_dir(&own).unwrap();
+        assert!(text.contains(shipped), "{shipped}");
+        text = text.replace(shipped, &own.display().to_string());
+    }
+    let file = scratch.path().join("fs.toml");
+    std::fs::write(&file, text).unwrap();
+    let mut words = words(&fs_plist("macos-pkg"));
+    assert_eq!(words[1..], FS_WORDS);
+    words[3] = file.display().to_string();
+    words.push("--check-config".to_owned());
+    let out = Command::new(env!("CARGO_BIN_EXE_tierstore"))
+        .args(&words[1..])
+        .output()
+        .expect("the binary runs");
+    assert_eq!(
+        (
+            out.status.code(),
+            String::from_utf8_lossy(&out.stdout).into_owned(),
+            String::from_utf8_lossy(&out.stderr).into_owned()
+        ),
+        (Some(0), String::new(), String::new())
+    );
 }

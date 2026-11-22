@@ -9,26 +9,39 @@
 //! rather than does things once, so that a run after a crash converges. A record that names a
 //! systemd instance (`live`, `next` or `mode`) is not this arm's and is refused.
 //!
+//! When the params name the job of `tierstore fs` (`fs_launchd_label`), the arm drives it too, as
+//! [`fs`] describes: every boot-out of the main job (`cutover` of an update, `rollback`,
+//! `uninstall`) is preceded by the boot-out of the fs job and a check that its mount is gone, and
+//! the fs job is booted in after the main job serves (`cutover`, `rollback`) or after it is
+//! loaded (`restore`). A mount that stays ends the step with `not_ready`, with the main job
+//! untouched.
+//!
 //! - `prepare` needs the node's configuration file to exist (it does not need a hand-over
 //!   socket), and records the update: `from` the previous release (none on a first install),
 //!   `to` the staged release and its `version`. Nothing is started or stopped.
-//! - `cutover` boots the job out (an update only) and in, waits for `/readyz` and for the build
-//!   of the target version, and records `swapped`. A first install never boots out: it
-//!   boots in when the job is not loaded. A run that finds the job loaded and serving the target
-//!   only records `swapped`. A failure is reported; hostkeeper then runs `rollback`.
+//! - `cutover` boots the fs job out first when there is one (an update only), boots the job out
+//!   (an update only) and in, waits for `/readyz` and for the build of the target version, boots
+//!   the fs job in when there is one and it is not loaded, and records `swapped`. A first
+//!   install never boots out: it boots in when the job is not loaded. A run that finds the job
+//!   loaded and serving the target only records `swapped`. A failure is reported; hostkeeper
+//!   then runs `rollback`.
 //! - `verify` observes the target version served by the loaded job and records `verified`. After
 //!   the commit it only observes.
-//! - `rollback` boots the job out and, for an update, in again, and waits for the previous
-//!   version; a first install has nothing to go back to: the job stays out and the step fails
-//!   with `no_previous_release`, again on every re-run.
+//! - `rollback` boots the fs job out first when there is one, boots the job out and, for an
+//!   update, in again, waits for the previous version and boots the fs job in; a first install
+//!   has nothing to go back to: the jobs stay out and the step fails with `no_previous_release`,
+//!   again on every re-run.
 //! - `cleanup` confirms afresh what `verify` saw, writes `stopping` (the commit) and ends the
 //!   update. There is no instance to retire. When the write of `stopping` fails, the record is
 //!   read back, so that a write that reached the disk is reported as the commit it is; a record
 //!   that cannot be read back counts as committed.
-//! - `uninstall` boots the job out, removes the copy of the binary, and leaves the data, the
-//!   cache and the configuration of the node, and the record directory, as they are.
+//! - `uninstall` boots the fs job out first when there is one, boots the job out, removes the
+//!   copy of the binary, and leaves the data, the cache and the configuration of the node, and
+//!   the record directory, as they are.
 //! - `restore`, the boot step, puts the current release's binary in place and boots the job in
-//!   when it is not loaded.
+//!   when it is not loaded, then boots the fs job in when there is one and it is not loaded.
+
+pub(super) mod fs;
 
 use std::cell::Cell;
 use std::path::Path;
@@ -45,6 +58,8 @@ use super::report::{Done, Reason};
 struct Ctx<'a, 'b> {
     ports: &'b LaunchdPorts<'a>,
     label: &'b str,
+    /// The label of the job of `tierstore fs`, when the params name one.
+    fs: Option<&'b str>,
     /// Whether this step began to write `stopping`: from then on, a failure leaves the commit
     /// undecided until the record on disk says otherwise.
     commit_written: Cell<bool>,
@@ -129,6 +144,7 @@ fn attempt(
     let c = Ctx {
         ports,
         label,
+        fs: params.fs_launchd_label(),
         commit_written: Cell::new(false),
     };
     let done = match step {
@@ -216,9 +232,14 @@ fn cutover(c: &Ctx<'_, '_>, params: &Params, record: &mut Record) -> Result<Done
     // serve the target, and an update restarts it only when it does not.
     let seen = loaded && c.look().observed(target).is_ok();
     if !seen {
+        let update = record.from.is_some();
+        // The file service goes first, and the update goes no further while its mount stays.
+        if update {
+            c.stop_fs()?;
+        }
         // The plist runs the copy at `SERVICE_BINARY`: it becomes the staged release's first.
         c.ports.host.install_binary(&params.staged_release)?;
-        if record.from.is_some() {
+        if update {
             c.ports.launchd.bootout(c.label)?;
             c.bootstrap()?;
         } else if !loaded {
@@ -226,6 +247,7 @@ fn cutover(c: &Ctx<'_, '_>, params: &Params, record: &mut Record) -> Result<Done
         }
         c.look().serves(target)?;
     }
+    c.start_fs()?;
     if !record.has(Marker::Swapped) {
         let swapped = record.with(Marker::Swapped);
         c.save(record, swapped)?;
@@ -278,6 +300,7 @@ fn rollback(c: &Ctx<'_, '_>, params: &Params, record: &mut Record) -> Result<Don
         // A first install: what `cutover` started is stopped, and there is nothing to start in
         // its place; the copy of the binary goes too. The update stays on record, without
         // markers, so that a re-run says the same and a later `prepare` may start afresh.
+        c.stop_fs()?;
         c.ports.launchd.bootout(c.label)?;
         c.ports.host.remove_binary()?;
         let mut cleared = record.clone();
@@ -296,10 +319,12 @@ fn rollback(c: &Ctx<'_, '_>, params: &Params, record: &mut Record) -> Result<Don
     };
     // `current` names the previous release again; its binary goes where the plist runs it, so
     // the job that is loaded now runs it.
+    c.stop_fs()?;
     c.ports.host.install_binary(&previous.release)?;
     c.ports.launchd.bootout(c.label)?;
     c.bootstrap()?;
     c.look().serves(&previous.version)?;
+    c.start_fs()?;
     c.save(record, Record::idle(None))?;
     Ok(Done::ok(format!(
         "rolled back: {} serves {}",
@@ -341,6 +366,7 @@ fn cleanup(c: &Ctx<'_, '_>, params: &Params, record: &mut Record) -> Result<Done
 }
 
 fn uninstall(c: &Ctx<'_, '_>, record: &mut Record) -> Result<Done, Done> {
+    c.stop_fs()?;
     c.ports.launchd.bootout(c.label)?;
     c.ports.host.remove_binary()?;
     c.save(record, Record::idle(None))?;
@@ -349,12 +375,13 @@ fn uninstall(c: &Ctx<'_, '_>, record: &mut Record) -> Result<Done, Done> {
 
 /// The boot step: a job that is loaded is left as it is; otherwise the binary of the release
 /// `current` names (the params' staged release, at boot) is put where the plist runs it, and the
-/// job is loaded.
+/// job is loaded. The fs job, when the params name one and it is not loaded, is loaded after the
+/// main job.
 fn restore(c: &Ctx<'_, '_>, params: &Params) -> Result<Done, Done> {
-    if c.ports.launchd.loaded(c.label)? {
-        return Ok(Done::ok(format!("{} is loaded", c.label)));
+    if !c.ports.launchd.loaded(c.label)? {
+        c.ports.host.install_binary(&params.staged_release)?;
+        c.bootstrap()?;
     }
-    c.ports.host.install_binary(&params.staged_release)?;
-    c.bootstrap()?;
+    c.start_fs()?;
     Ok(Done::ok(format!("{} is loaded", c.label)))
 }

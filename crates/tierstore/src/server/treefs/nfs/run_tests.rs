@@ -8,20 +8,24 @@ use std::time::Duration;
 
 use super::super::boot::BootSource;
 use super::super::fixtures::{EPOCH, attached, handle_of, loopback, settings};
+use super::super::fs::TreeNfs;
 use super::super::mount::{Ran, Runner};
 use super::super::wire_client::{Client, Cred, Dec, Enc, GETATTR, NFS};
-use super::{Running, serve, serve_with, timer};
+use super::{Leaving, Running, Serve, serve, serve_with, timer};
 use crate::server::treefs::config::{FsSettings, builders, from_text};
 use crate::server::treefs::ino;
 use crate::server::treefs::locked;
 use crate::server::treefs::testing::SIGNALS;
 use crate::server::treefs::testing::until;
+use futures::future::BoxFuture;
+use nfsserve::tcp::NFSTcpListener;
 
 /// A check a runner makes when it runs `umount`.
 type Check = Box<dyn FnOnce() -> bool + Send>;
 
-/// Records the commands, answers every one with success unless told to fail the mount, `umount` or
-/// the forced unmount, and keeps a listing of the mounts that a mount adds its line to and an
+/// Records the commands (and the process's own `unmount(2)`, as the call `unmount(2) <path>`),
+/// answers every one with success unless told to fail the mount, `umount`, the forced unmount or
+/// the `unmount(2)`, and keeps a listing of the mounts that a mount adds its line to and an
 /// unmount empties.
 pub(super) struct Recorder {
     calls: Mutex<Vec<Vec<String>>>,
@@ -30,6 +34,13 @@ pub(super) struct Recorder {
     umount_works: bool,
     /// Whether `diskutil unmount force` unmounts.
     force_works: bool,
+    /// Whether the `unmount(2)` unmounts; if not it says `refused`.
+    syscall_works: bool,
+    /// The rounds of an unmount in which the forced unmount and the `unmount(2)` fail whatever
+    /// the two above say; one is spent at each `unmount(2)`.
+    failing_rounds: Mutex<u32>,
+    /// The pauses asked for.
+    pauses: Mutex<Vec<Duration>>,
     /// The program whose run panics.
     panics: Option<&'static str>,
     /// What the listing of the mounts says.
@@ -52,6 +63,9 @@ impl Recorder {
             mount_works,
             umount_works: true,
             force_works: true,
+            syscall_works: true,
+            failing_rounds: Mutex::new(0),
+            pauses: Mutex::new(Vec::new()),
             panics: None,
             listing: Mutex::new(listing),
             check: Mutex::new(None),
@@ -65,13 +79,33 @@ impl Recorder {
     }
 
     /// A runner with an NFS mount at `path` that `umount` finds busy, and that the forced unmount
-    /// unmounts if `forced`.
+    /// unmounts if `forced`; if not, the `unmount(2)` fails too.
     pub(super) fn busy_at(path: &std::path::Path, forced: bool) -> Arc<Self> {
         Arc::new(Self {
             umount_works: false,
             force_works: forced,
+            syscall_works: forced,
             ..Arc::into_inner(Self::mounted_at(path)).unwrap()
         })
+    }
+
+    /// A runner with an NFS mount at `path` that `umount` finds busy, and whose forced unmount and
+    /// `unmount(2)` both fail for `rounds` rounds of an unmount; then the forced unmount works.
+    pub(super) fn stuck_for(path: &std::path::Path, rounds: u32) -> Arc<Self> {
+        Arc::new(Self {
+            failing_rounds: Mutex::new(rounds),
+            ..Arc::into_inner(Self::busy_at(path, true)).unwrap()
+        })
+    }
+
+    /// The pauses asked for.
+    pub(super) fn pauses(&self) -> Vec<Duration> {
+        locked(&self.pauses).clone()
+    }
+
+    /// Whether this round of an unmount still fails.
+    fn failing(&self) -> bool {
+        *locked(&self.failing_rounds) > 0
     }
 
     fn panicking(program: &'static str) -> Arc<Self> {
@@ -152,7 +186,7 @@ fn line_of(path: &std::path::Path) -> String {
 }
 
 impl Runner for Recorder {
-    fn run(&self, argv: &[String]) -> std::io::Result<Ran> {
+    fn run_within(&self, argv: &[String], _limit: Duration) -> std::io::Result<Ran> {
         locked(&self.calls).push(argv.to_vec());
         assert_ne!(self.panics, Some(argv[0].as_str()), "the command dies");
         if argv[0] == "/sbin/umount"
@@ -174,7 +208,7 @@ impl Runner for Recorder {
                 false,
                 "umount(mnt): Resource busy -- try 'diskutil unmount'",
             ),
-            "/usr/sbin/diskutil" if self.force_works => {
+            "/usr/sbin/diskutil" if self.force_works && !self.failing() => {
                 locked(&self.listing).clear();
                 (true, "")
             }
@@ -189,10 +223,24 @@ impl Runner for Recorder {
                 String::new()
             },
             stderr: stderr.to_owned(),
+            timed_out: false,
         })
     }
 
-    fn pause(&self, _how_long: Duration) {}
+    fn force_unmount(&self, path: &std::path::Path, _limit: Duration) -> std::io::Result<()> {
+        locked(&self.calls).push(vec!["unmount(2)".to_owned(), path.display().to_string()]);
+        let mut rounds = locked(&self.failing_rounds);
+        if *rounds > 0 || !self.syscall_works {
+            *rounds = rounds.saturating_sub(1);
+            return Err(std::io::Error::other("refused"));
+        }
+        locked(&self.listing).clear();
+        Ok(())
+    }
+
+    fn pause(&self, how_long: Duration) {
+        locked(&self.pauses).push(how_long);
+    }
 }
 
 pub(super) fn ask(path: &std::path::Path, request: &str) -> serde_json::Value {
@@ -233,7 +281,10 @@ async fn a_start_serves_mounts_and_a_stop_unmounts() {
     assert_ne!(port, 0);
     assert_eq!(
         runner.calls()[1][2],
-        format!("vers=3,tcp,ro,rdirplus,locallocks,actimeo=3600,hard,port={port},mountport={port}")
+        format!(
+            "vers=3,tcp,ro,rdirplus,locallocks,actimeo=3600,hard,deadtimeout=90,port={port},\
+             mountport={port}"
+        )
     );
 
     let answer = ask(
@@ -265,7 +316,7 @@ async fn a_start_serves_mounts_and_a_stop_unmounts() {
         .await;
     assert_eq!(Dec::new(&other.body).u32(), 0);
 
-    running.stop().await.unwrap();
+    running.leave(Leaving::Signal).await.unwrap();
     let calls = runner.calls();
     assert_eq!(
         calls.last().unwrap(),
@@ -279,8 +330,9 @@ async fn a_start_serves_mounts_and_a_stop_unmounts() {
 
 /// Asserts what a stop does with a mount `umount` refuses (a job still has a file of it open): it
 /// unmounts it by force, `diskutil unmount force` on the mount point, and the mount is gone; and
-/// that a stop whose forced unmount fails too is an error with what both said, the mount left
-/// listed. Catches a stop that leaves a hard mount to a server that is about to exit.
+/// that a stop whose every step fails (`umount`, `diskutil`, the `unmount(2)`) does not end: it
+/// pauses `LEAVE_RETRY` and unmounts again, round after round, while the mount stays listed, and
+/// returns once a round unmounts. Catches a stop that leaves a mount without its server.
 #[tokio::test]
 async fn a_stop_unmounts_a_busy_mount_by_force() {
     let (rig, _) = attached("nfs-run-stop-forced");
@@ -289,7 +341,7 @@ async fn a_stop_unmounts_a_busy_mount_by_force() {
     let running = Running::start(&settings, busy.clone(), euid(), None, EPOCH)
         .await
         .unwrap();
-    running.stop().await.unwrap();
+    running.leave(Leaving::Signal).await.unwrap();
     let point = settings.mountpoint.display().to_string();
     let calls = busy.calls();
     assert_eq!(
@@ -303,19 +355,29 @@ async fn a_stop_unmounts_a_busy_mount_by_force() {
     );
     assert!(!busy.has_mount());
 
-    let stuck = Recorder::busy_at(&settings.mountpoint, false);
+    let stuck = Recorder::stuck_for(&settings.mountpoint, 2);
     let running = Running::start(&settings, stuck.clone(), euid(), None, EPOCH)
         .await
         .unwrap();
-    let why = running.stop().await.unwrap_err();
+    let before = stuck.calls().len();
+    running.leave(Leaving::Signal).await.unwrap();
+    let rounds: Vec<String> = stuck.programs()[before..].to_vec();
+    let round = [
+        "/sbin/mount",
+        "/sbin/umount",
+        "/usr/sbin/diskutil",
+        "unmount(2)",
+    ];
     assert_eq!(
-        why.to_string(),
-        format!(
-            "unmounting {point}: umount(mnt): Resource busy -- try 'diskutil unmount'; diskutil \
-             unmount force: Unmount failed for mnt"
-        )
+        rounds,
+        [&round[..], &round[..], &round[..3]]
+            .concat()
+            .iter()
+            .map(|word| (*word).to_owned())
+            .collect::<Vec<_>>()
     );
-    assert!(stuck.has_mount());
+    assert_eq!(stuck.pauses(), [super::super::mount::LEAVE_RETRY; 2]);
+    assert!(!stuck.has_mount());
 }
 
 /// Asserts that a stop unmounts while the server still answers the clients, and stops the server
@@ -333,7 +395,7 @@ async fn a_stop_unmounts_while_the_server_still_answers() {
         .unwrap();
     let connection = std::net::TcpStream::connect(running.address).unwrap();
     runner.probe_at_umount(connection);
-    running.stop().await.unwrap();
+    running.leave(Leaving::Signal).await.unwrap();
     assert_eq!(runner.checked_at_umount(), Some(true));
 }
 
@@ -350,7 +412,7 @@ async fn a_stop_after_the_mount_is_gone_succeeds_without_an_unmount() {
         .unwrap();
     assert!(runner.has_mount());
     runner.unmounted_by_hand();
-    running.stop().await.unwrap();
+    running.leave(Leaving::Signal).await.unwrap();
     assert_eq!(
         runner.programs(),
         ["/sbin/mount", "/sbin/mount_nfs", "/sbin/mount"]
@@ -405,7 +467,7 @@ async fn a_start_on_a_file_that_still_lists_users_serves_every_user() {
     }
     drop(client);
 
-    running.stop().await.unwrap();
+    running.leave(Leaving::Signal).await.unwrap();
     assert!(runner.calls().is_empty());
 }
 
@@ -462,12 +524,16 @@ async fn a_start_as_the_wrong_user_makes_nothing() {
     };
     struct Ids;
     impl Runner for Ids {
-        fn run(&self, _argv: &[String]) -> std::io::Result<Ran> {
+        fn run_within(&self, _argv: &[String], _limit: Duration) -> std::io::Result<Ran> {
             Ok(Ran {
                 success: false,
                 stdout: String::new(),
                 stderr: "no such user".to_owned(),
+                timed_out: false,
             })
+        }
+        fn force_unmount(&self, _path: &std::path::Path, _limit: Duration) -> std::io::Result<()> {
+            unreachable!("a start that finds no user unmounts nothing")
         }
         fn pause(&self, _how_long: Duration) {}
     }
@@ -569,9 +635,123 @@ async fn a_command_that_dies_fails_the_start_or_the_stop() {
     )
     .await
     .unwrap();
-    let why = running.stop().await.unwrap_err();
+    let why = running.leave(Leaving::Signal).await.unwrap_err();
     assert!(
         why.to_string().starts_with("waiting for the unmount: "),
         "{why}"
+    );
+}
+
+/// What a server whose accept failed gives.
+async fn accept_fails() -> std::io::Result<()> {
+    Err(std::io::Error::other("accept failed"))
+}
+
+/// What a server that panics gives.
+async fn dies() -> std::io::Result<()> {
+    panic!("the server dies")
+}
+
+/// A server that fails at once, as one whose accept failed.
+fn failing(
+    _listener: &NFSTcpListener<TreeNfs>,
+    _ending: BoxFuture<'static, ()>,
+) -> BoxFuture<'_, std::io::Result<()>> {
+    Box::pin(accept_fails())
+}
+
+/// A server that panics at once.
+fn panicking(
+    _listener: &NFSTcpListener<TreeNfs>,
+    _ending: BoxFuture<'static, ()>,
+) -> BoxFuture<'_, std::io::Result<()>> {
+    Box::pin(dies())
+}
+
+/// Makes `runner`'s `umount` note whether the listening socket of the mount it made still takes
+/// a connection.
+fn listening_at_umount(runner: &Arc<Recorder>) {
+    let me = Arc::clone(runner);
+    runner.check_at_umount(move || {
+        let port = me.mounted_port().expect("the mount came first");
+        std::net::TcpStream::connect(std::net::SocketAddr::from(([127, 0, 0, 1], port))).is_ok()
+    });
+}
+
+/// Asserts that a server that stops by itself (it failed, or it panicked) ends the serving with
+/// that reason, and that the leave unmounts while the listening socket still takes connections and
+/// closes the socket only after: the unmount comes before the socket goes. Catches a process whose
+/// server died and that leaves its mount without a server, or unmounts after its socket closed.
+#[tokio::test]
+async fn a_server_that_stops_by_itself_is_unmounted_before_its_socket_closes() {
+    let cases = [
+        (failing as Serve, "accept failed"),
+        (panicking as Serve, "it panicked"),
+    ];
+    for (serve, said) in cases {
+        let (rig, _) = attached("nfs-run-server-stops");
+        let settings = settings(&rig, loopback());
+        let runner = Recorder::new(true);
+        let mut running =
+            Running::start_serving(&settings, runner.clone(), euid(), None, EPOCH, serve)
+                .await
+                .unwrap();
+        let address = running.address;
+        listening_at_umount(&runner);
+        let leaving = running.ended().await;
+        assert_eq!(leaving, Leaving::ServerStopped(said.to_owned()), "{said}");
+        running.leave(leaving).await.unwrap();
+        assert_eq!(runner.checked_at_umount(), Some(true), "{said}");
+        assert!(!runner.has_mount(), "{said}");
+        closed(address).await;
+    }
+}
+
+/// Asserts that a start that fails after it made the mount (the note of the mount's address cannot
+/// be written: a directory is where the file goes) unmounts while its socket still takes
+/// connections, and then fails with why it failed. Catches a failed start that leaves its mount
+/// without a server.
+#[tokio::test]
+async fn a_start_that_fails_after_its_mount_unmounts_before_its_socket_closes() {
+    let (rig, _) = attached("nfs-run-start-fails-late");
+    let settings = settings(&rig, loopback());
+    std::fs::create_dir_all(settings.runtime_dir.join("nfs-mounted")).unwrap();
+    let runner = Recorder::new(true);
+    listening_at_umount(&runner);
+    let why = Running::start(&settings, runner.clone(), euid(), None, EPOCH)
+        .await
+        .err()
+        .unwrap();
+    assert!(
+        why.to_string()
+            .starts_with("writing the address of the mount:"),
+        "{why}"
+    );
+    assert_eq!(runner.checked_at_umount(), Some(true));
+    assert!(!runner.has_mount());
+    let port = runner.mounted_port().unwrap();
+    closed(std::net::SocketAddr::from(([127, 0, 0, 1], port))).await;
+}
+
+/// Asserts what each reason of a leave says in the log line of the leave.
+#[test]
+fn each_reason_of_a_leave_is_said() {
+    let said: Vec<String> = [
+        Leaving::Signal,
+        Leaving::ServerStopped("accept failed".to_owned()),
+        Leaving::StartFailed("no note".to_owned()),
+        Leaving::Ended,
+    ]
+    .iter()
+    .map(ToString::to_string)
+    .collect();
+    assert_eq!(
+        said,
+        [
+            "a signal to stop",
+            "the NFS server stopped (accept failed)",
+            "the start failed after the mount (no note)",
+            "the listening socket was handed over",
+        ]
     );
 }

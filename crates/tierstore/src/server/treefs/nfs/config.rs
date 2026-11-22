@@ -15,6 +15,8 @@
 //! | `fs.nfs.handoff_ready_wait` | how long the running instance gives the new one after `done` to say `ready` (it covers the new one's whole start) before it serves on | `120s` |
 //! | `fs.nfs.drain_wait` | how long an instance that handed over waits for the clients to close their connections before it ends | `10s` |
 //! | `fs.nfs.jukebox_after` | how long a read waits for a fill before the client is told to ask again | `5s` |
+//! | `fs.nfs.dead_timeout` | how long the mount may be unresponsive before the kernel marks it dead and every call on it fails (`deadtimeout` of `mount_nfs`); more than `fs.fetch_timeout`, so that a fill the server still waits for never ends the mount | `fs.fetch_timeout` and `30s` |
+//! | `fs.nfs.unmount_wait` | the most time each command of the mount and the unmount (`mount_nfs`, `umount`, `diskutil`, `mount`, `id`) and the process's own `unmount(2)` may take; at most `25s`, so that the four steps of an unmount fit in the `ExitTimeOut` of the package's job | `20s` |
 //!
 //! A key an earlier release read and this one does not is in [`REMOVED`]: a file that still sets it
 //! loads, whatever its value, and the start says once that it is ignored and why.
@@ -60,6 +62,21 @@ const DEFAULT_READY_WAIT: Duration = Duration::from_secs(120);
 /// The wait for the clients when the file leaves out `fs.nfs.drain_wait`.
 const DEFAULT_DRAIN_WAIT: Duration = Duration::from_secs(10);
 
+/// How much longer than `fs.fetch_timeout` the mount may be unresponsive, when the file leaves out
+/// `fs.nfs.dead_timeout`: a fill that takes `fs.fetch_timeout` is answered with JUKEBOX until then,
+/// which the client counts as unresponsive, and the margin covers the answer after it.
+const DEAD_TIMEOUT_MARGIN: Duration = Duration::from_secs(30);
+
+/// The most `fs.nfs.dead_timeout` may be.
+const MOST_DEAD_TIMEOUT: Duration = Duration::from_secs(2 * 3600);
+
+/// The limit of each command when the file leaves out `fs.nfs.unmount_wait`.
+const DEFAULT_UNMOUNT_WAIT: Duration = Duration::from_secs(20);
+
+/// The most `fs.nfs.unmount_wait` may be: four steps of an unmount, each this long and the wait
+/// for a killed command, stay below the `ExitTimeOut` of the package's job (150 s).
+pub(super) const MOST_UNMOUNT_WAIT: Duration = Duration::from_secs(25);
+
 /// The longest a name of a user may be.
 const MOST_USER_NAME: usize = 64;
 
@@ -94,6 +111,8 @@ pub(in crate::server) struct NfsTable {
     handoff_wait: Option<Dur>,
     handoff_ready_wait: Option<Dur>,
     drain_wait: Option<Dur>,
+    dead_timeout: Option<Dur>,
+    unmount_wait: Option<Dur>,
 }
 
 /// What the NFS frontend runs with.
@@ -116,6 +135,11 @@ pub(in crate::server) struct NfsSettings {
     pub ready_wait: Duration,
     /// How long an instance that handed over waits for the clients to close their connections.
     pub drain_wait: Duration,
+    /// How long the mount may be unresponsive before the kernel marks it dead: the mount option
+    /// `deadtimeout`, more than `fs.fetch_timeout`.
+    pub dead_timeout: Duration,
+    /// The most time each command of the mount and the unmount may take.
+    pub unmount_wait: Duration,
 }
 
 impl Default for NfsSettings {
@@ -132,8 +156,42 @@ impl Default for NfsSettings {
             handoff: None,
             ready_wait: DEFAULT_READY_WAIT,
             drain_wait: DEFAULT_DRAIN_WAIT,
+            dead_timeout: dead_timeout_after(super::super::config::DEFAULT_FETCH_TIMEOUT),
+            unmount_wait: DEFAULT_UNMOUNT_WAIT,
         }
     }
+}
+
+/// The dead timeout of a file that leaves it out: `fetch_timeout` in whole seconds, rounded up, and
+/// the margin.
+fn dead_timeout_after(fetch_timeout: Duration) -> Duration {
+    let seconds = fetch_timeout.as_secs() + u64::from(fetch_timeout.subsec_nanos() > 0);
+    Duration::from_secs(seconds) + DEAD_TIMEOUT_MARGIN
+}
+
+/// `fs.nfs.dead_timeout`: the value given, or the default after `fetch_timeout`; one that is not
+/// more than `fetch_timeout` is refused, since the client would give up on the mount while the
+/// server still waits for a fill it may answer.
+fn dead_timeout_of(given: Option<Dur>, fetch_timeout: Duration) -> Result<Duration, ConfigError> {
+    let value = given.map_or_else(|| dead_timeout_after(fetch_timeout), |dur| dur.0);
+    if value <= fetch_timeout {
+        let why = format!(
+            "{}ms is not more than fs.fetch_timeout ({}ms): a fill that the server still waits \
+             for would end the mount",
+            value.as_millis(),
+            fetch_timeout.as_millis()
+        );
+        return Err(invalid("fs.nfs.dead_timeout", why));
+    }
+    if value > MOST_DEAD_TIMEOUT {
+        let why = format!(
+            "{}ms is more than {}ms",
+            value.as_millis(),
+            MOST_DEAD_TIMEOUT.as_millis()
+        );
+        return Err(invalid("fs.nfs.dead_timeout", why));
+    }
+    Ok(value)
 }
 
 /// The address `text` names, which must be on loopback.
@@ -221,14 +279,21 @@ fn handoff_of(
 }
 
 impl NfsSettings {
-    /// The settings of `table`, or the defaults where the file has none.
+    /// The settings of `table`, or the defaults where the file has none; `fetch_timeout` is the
+    /// file's `fs.fetch_timeout`, which the dead timeout must be more than.
     ///
     /// # Errors
     /// A [`ConfigError`] that names the key: an address that is not on loopback, a user name that
     /// is not one, a value out of its range.
-    pub(in crate::server) fn of(table: Option<NfsTable>) -> Result<Self, ConfigError> {
+    pub(in crate::server) fn of(
+        table: Option<NfsTable>,
+        fetch_timeout: Duration,
+    ) -> Result<Self, ConfigError> {
         let Some(table) = table else {
-            return Ok(Self::default());
+            return Ok(Self {
+                dead_timeout: dead_timeout_after(fetch_timeout),
+                ..Self::default()
+            });
         };
         let shards = within(
             "fs.nfs",
@@ -287,6 +352,13 @@ impl NfsSettings {
                 table.drain_wait,
                 DEFAULT_DRAIN_WAIT,
                 (MS, HOUR),
+            )?,
+            dead_timeout: dead_timeout_of(table.dead_timeout, fetch_timeout)?,
+            unmount_wait: span(
+                "unmount_wait",
+                table.unmount_wait,
+                DEFAULT_UNMOUNT_WAIT,
+                (Duration::from_secs(1), MOST_UNMOUNT_WAIT),
             )?,
         })
     }

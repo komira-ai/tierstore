@@ -6,9 +6,10 @@ use tierstore_testkit::dir::TestDir;
 
 use super::params::{MAX_LABEL_LEN, MAX_VERSION_LEN, is_label, is_version};
 use super::{
-    CONFIG_FILE_KEY, LAUNCHD, LAUNCHD_LABEL_KEY, MODE_KEY, PREVIOUS_RELEASE_KEY,
-    PREVIOUS_VERSION_KEY, PROMOTION_CEILING_KEY, Params, ParamsError, Previous, RESTART_MODE,
-    SERVICE_MANAGER_KEY, STAGED_RELEASE_KEY, SYSTEMD, ServiceManager, TARGET_VERSION_KEY,
+    CONFIG_FILE_KEY, FS_LAUNCHD_LABEL_KEY, LAUNCHD, LAUNCHD_LABEL_KEY, MODE_KEY,
+    PREVIOUS_RELEASE_KEY, PREVIOUS_VERSION_KEY, PROMOTION_CEILING_KEY, Params, ParamsError,
+    Previous, RESTART_MODE, SERVICE_MANAGER_KEY, STAGED_RELEASE_KEY, SYSTEMD, ServiceManager,
+    TARGET_VERSION_KEY,
 };
 
 const GOOD: &str = "\"updater.staged_release\" = \"/var/lib/hostkeeper/packages/tierstore/0.5.0\"\n\
@@ -36,6 +37,7 @@ fn the_keys_are_spelt_as_hostkeeper_writes_them() {
     assert_eq!(PROMOTION_CEILING_KEY, "updater.promotion_ceiling_secs");
     assert_eq!(SERVICE_MANAGER_KEY, "service_manager");
     assert_eq!(LAUNCHD_LABEL_KEY, "launchd_label");
+    assert_eq!(FS_LAUNCHD_LABEL_KEY, "fs_launchd_label");
     assert_eq!(CONFIG_FILE_KEY, "config_file");
     assert_eq!((MODE_KEY, RESTART_MODE), ("mode", "restart"));
     assert_eq!((SYSTEMD, LAUNCHD), ("systemd", "launchd"));
@@ -128,7 +130,8 @@ fn the_service_manager_is_read_from_its_key() {
     assert_eq!(
         manager("service_manager = \"launchd\"\nlaunchd_label = \"com.komira.tierstore\"\n"),
         ServiceManager::Launchd {
-            label: "com.komira.tierstore".to_owned()
+            label: "com.komira.tierstore".to_owned(),
+            fs_label: None,
         }
     );
     assert_eq!(
@@ -351,5 +354,48 @@ fn the_verify_retry_is_a_positive_whole_number_of_seconds_and_defaults_to_five()
             matches!(why, ParamsError::NotNumber("verify_retry_secs")),
             "{bad}: {why}"
         );
+    }
+}
+
+/// Asserts that `fs_launchd_label` is read with the launchd manager only: absent is none, a plain
+/// label is kept beside the main one and is what `Params::fs_launchd_label` returns, a label of
+/// the wrong kind or a value that is not text is refused with the key named, and systemd params
+/// (or an unknown manager) ignore the key whatever it holds. Catches an fs job label that
+/// reaches `launchctl` unchecked, and a systemd update refused over a key it does not read.
+#[test]
+fn the_fs_launchd_label_is_read_for_launchd_alone() {
+    let launchd = |extra: &str| {
+        format!("service_manager = \"launchd\"\nlaunchd_label = \"com.komira.tierstore\"\n{extra}")
+    };
+    let params = Params::parse(&with(&launchd(""))).unwrap();
+    assert_eq!(params.fs_launchd_label(), None);
+    let params = Params::parse(&with(&launchd("fs_launchd_label = \"tierstore-fs\"\n"))).unwrap();
+    assert_eq!(params.fs_launchd_label(), Some("tierstore-fs"));
+    assert_eq!(
+        params.service_manager,
+        ServiceManager::Launchd {
+            label: "com.komira.tierstore".to_owned(),
+            fs_label: Some("tierstore-fs".to_owned()),
+        }
+    );
+    for bad in ["", "-x", "a b", "a/b", ".hidden"] {
+        let why = refused(&with(&launchd(&format!("fs_launchd_label = \"{bad}\"\n"))));
+        assert!(
+            matches!(why, ParamsError::BadLabel(FS_LAUNCHD_LABEL_KEY)),
+            "{bad}: {why}"
+        );
+    }
+    let why = refused(&with(&launchd("fs_launchd_label = 5\n")));
+    assert!(
+        matches!(why, ParamsError::NotText(FS_LAUNCHD_LABEL_KEY)),
+        "{why}"
+    );
+    for manager in [
+        "",
+        "service_manager = \"systemd\"\n",
+        "service_manager = \"runit\"\n",
+    ] {
+        let params = Params::parse(&with(&format!("{manager}fs_launchd_label = 5\n"))).unwrap();
+        assert_eq!(params.fs_launchd_label(), None, "{manager}");
     }
 }

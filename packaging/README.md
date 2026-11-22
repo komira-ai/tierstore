@@ -32,6 +32,7 @@ fails a build whose binary asks for a newer `GLIBC_` symbol version (`docs/ci-an
 | `config.toml` | the example of `/etc/tierstore/config.toml`, the configuration file of every Linux route (`tierstore.service`, `tierstore@.service`, hostkeeper's template): one `s3` interface, the keys, and an S3 bucket for each tier |
 | `hostkeeper/units/tierstore@.service` | the instance template of the update hook on Linux: `tierstore@a.service` and `tierstore@b.service`, each running `/usr/local/libexec/tierstore/tierstore`, the copy the hook makes of the binary of hostkeeper's release link `current`, and starting only under its marker file ([Moving to the update hook](#moving-to-the-update-hook)) |
 | `hostkeeper/units/tierstore.plist` | the LaunchDaemon of the update hook on a Mac: one job, labelled `tierstore`, running the same copy |
+| `hostkeeper/units/tierstore-fs.plist` | the LaunchDaemon of `tierstore fs` on a Mac, labelled `tierstore-fs`, running the same copy; the Mac's installer package installs it (`macos-pkg/tierstore-fs.plist`, the same file with the package's binary as the program) |
 
 The values in the unit are examples (`192.0.2.10`, `s3-hot.example`, the bucket names, the
 sizes): edit them to the setup's. `crates/tierstore/tests/packaging.rs` reads `tierstore.service`
@@ -155,7 +156,7 @@ bootout`, then `launchctl bootstrap`.
 The edits of the host's configuration file (the bucket, the tiers, the endpoints, `hot_store.budget`)
 go into `/etc/tierstore/config.toml` on Linux and `/usr/local/tierstore/etc/tierstore.toml` on a
 Mac, the files the two units name. `packaging/macos/tierstore.toml` is the example of that
-file for a Mac (only a read cache on loopback, its proxy id from hostkeeper's facts file, its upstream the storage nodes' S3 servers); the declaration and plist that directory held for the earlier update path are removed.
+file for a Mac (only a read cache on loopback, its proxy id from hostkeeper's facts file, its upstream the storage nodes' S3 servers); `packaging/macos/fs.toml` is the example of `/usr/local/tierstore/etc/fs.toml`, the file of the `tierstore-fs` job; the declaration and plist that directory held for the earlier update path are removed.
 
 ## Presigned PUT URLs
 

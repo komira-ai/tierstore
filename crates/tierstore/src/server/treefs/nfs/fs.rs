@@ -85,7 +85,7 @@ fn fattr(attr: &Attr) -> fattr3 {
     let time = fixed_time();
     fattr3 {
         ftype,
-        mode: u32::from(attr.perm),
+        mode: u32::from(shown(attr)),
         nlink: attr.nlink,
         uid: attr.uid,
         gid: attr.gid,
@@ -100,16 +100,39 @@ fn fattr(attr: &Attr) -> fattr3 {
     }
 }
 
-/// The permission bits of `attr` for a caller who says it is `auth`: the owner's, the group's, or
-/// everyone else's, as a file system picks them.
+/// The mode of a tree entry as NFS presents it: the permission bits with the owner's read and
+/// execute also set for the group and for everyone else, and no setuid, setgid or sticky bit; the
+/// write bits are never added. The mount is read-only and refuses every write; a tree is readable
+/// by anyone who knows its digest; the server knows no job user (a job's user changes from job to
+/// job), so an allow list or a per-user owner would put users into the server; and a setuid file
+/// owned by the service account must not run as it.
+fn presented(perm: u16) -> u16 {
+    let owner_rx = (perm >> 6) & 0o5;
+    (perm & 0o777) | (owner_rx << 3) | owner_rx
+}
+
+/// The mode `attr` is served with: the namespace's directories (the mount's root, `trees/` and the
+/// directories above the fs locations of the placements) as they are, so that they do not look
+/// listable, and every entry of a tree as [`presented`].
+fn shown(attr: &Attr) -> u16 {
+    if namespace(attr.ino) {
+        attr.perm
+    } else {
+        presented(attr.perm)
+    }
+}
+
+/// The permission bits of `attr`, as [`shown`], for a caller who says it is `auth`: the owner's, the
+/// group's, or everyone else's, as a file system picks them.
 fn class_bits(attr: &Attr, auth: &auth_unix) -> u16 {
+    let perm = shown(attr);
     let in_group = auth.gid() == attr.gid || auth.gids().contains(&attr.gid);
     if auth.uid() == attr.uid {
-        (attr.perm >> 6) & 0o7
+        (perm >> 6) & 0o7
     } else if in_group {
-        (attr.perm >> 3) & 0o7
+        (perm >> 3) & 0o7
     } else {
-        attr.perm & 0o7
+        perm & 0o7
     }
 }
 

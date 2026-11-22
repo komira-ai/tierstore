@@ -72,6 +72,10 @@ md-5 = "0.11.0"
 # handed over by the instance a new one replaces). An upstream pull request is not opened. This
 # returns to crates.io once upstream releases such a change.
 nfsserve = { git = "https://github.com/komira-ai/nfsserve", rev = "f2665dd518e1b32f85cd457fef75fffe6d8a61b3", default-features = false }
+# The `unmount(2)` with `MNT_FORCE` of `tierstore fs` on macOS (MIT), its last step of an unmount,
+# which runs no program; a safe wrapper of the call, which no other crate of the workspace offers
+# for macOS (rustix has it for Linux only). Only its `mount` feature.
+nix = { version = "0.31.4", default-features = false, features = ["mount"] }
 percent-encoding = "2.3.2"
 # The protobuf runtime of the trees API (Apache-2.0), and its descriptor types, which the test
 # of the proto's additivity reads the golden descriptor with.

@@ -9,9 +9,18 @@
 //! `fs.mountpoint`, as the mount user, unless something is mounted there already (a mount outlives
 //! the server: a restart, or the instance this one replaces, left it, and its clients wait); a mount
 //! there that was made from another address than this instance serves on reaches no one, and is
-//! unmounted first. SIGTERM and SIGINT unmount it (by force if `umount` refuses, see `mount.rs`)
-//! and end the process with status 0. launchd needs no notification
-//! of readiness.
+//! unmounted first. launchd needs no notification of readiness.
+//!
+//! The process unmounts before it stops serving, on every way out it controls, by one function,
+//! [`Running::leave`]: SIGTERM and SIGINT (the process then ends with status 0); a start that fails
+//! after the mount was made; and a server that stops by itself (its accept failed, or it
+//! panicked: the task that serves catches the panic and keeps the listening socket until the
+//! unmount is done). The leave ends the offer of the listening socket, so no successor takes the
+//! mount while it is unmounted; unmounts (`umount`, `diskutil unmount force`, `unmount(2)` with
+//! `MNT_FORCE`, each within `fs.nfs.unmount_wait`, see `mount.rs`) while the server still answers;
+//! and only then ends the serving. If every step fails, the process says why, goes on serving and
+//! tries again: it never exits while its mount is up (if launchd kills it, the mount's dead
+//! timeout ends the mount). A hand-over ends without unmounting: the mount is the successor's.
 //!
 //! An instance with a control socket offers its listening socket to the next instance. When that
 //! has taken it and says `ready` (the next instance does so when its start is done and it is about
@@ -28,6 +37,8 @@ use std::sync::Arc;
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::time::Duration;
 
+use futures::FutureExt as _;
+use futures::future::BoxFuture;
 use nfsserve::tcp::{NFSTcp as _, NFSTcpListener};
 use tokio::sync::{Notify, oneshot};
 
@@ -48,17 +59,58 @@ fn timer(after: Duration) -> Patience {
     Arc::new(move || Box::pin(tokio::time::sleep(after)))
 }
 
+/// What serves the listening socket until the future it is given resolves: [`handle`] (the
+/// protocol's `NFSTcp::handle_until`), or a test's server that fails or panics.
+pub(super) type Serve = for<'a> fn(
+    &'a NFSTcpListener<TreeNfs>,
+    BoxFuture<'static, ()>,
+) -> BoxFuture<'a, std::io::Result<()>>;
+
+/// The server of the protocol.
+fn handle(
+    listener: &NFSTcpListener<TreeNfs>,
+    ending: BoxFuture<'static, ()>,
+) -> BoxFuture<'_, std::io::Result<()>> {
+    listener.handle_until(ending)
+}
+
+/// Why a serving instance leaves.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub(super) enum Leaving {
+    /// SIGTERM or SIGINT.
+    Signal,
+    /// The server stopped by itself, for this reason.
+    ServerStopped(String),
+    /// A start failed after it made the mount, for this reason.
+    StartFailed(String),
+    /// The serving ended: a successor took the listening socket.
+    Ended,
+}
+
+impl std::fmt::Display for Leaving {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        match self {
+            Self::Signal => write!(f, "a signal to stop"),
+            Self::ServerStopped(why) => write!(f, "the NFS server stopped ({why})"),
+            Self::StartFailed(why) => write!(f, "the start failed after the mount ({why})"),
+            Self::Ended => write!(f, "the listening socket was handed over"),
+        }
+    }
+}
+
 /// A started NFS frontend: the core, the socket it serves on, and the mount.
 pub(super) struct Running {
     _setup: Setup,
     /// What the hold of a hand-off does, and the control socket it made again.
     _keeper: Arc<Keeper>,
     server: tokio::task::JoinHandle<()>,
-    /// Ends the offer of the listening socket, the first step of a stop; answered once no
+    /// Ends the offer of the listening socket, the first step of a leave; answered once no
     /// successor can take the socket.
     closing: Option<oneshot::Sender<oneshot::Sender<()>>>,
-    /// Ends the server: a stop. A hand-over ends it by itself.
-    stopping: Option<oneshot::Sender<()>>,
+    /// Ends the serving, the last step of a leave. A hand-over ends it by itself.
+    stopping: Arc<Notify>,
+    /// Says why the server stopped by itself; it keeps the listening socket until `stopping`.
+    failed: oneshot::Receiver<String>,
     /// Whether a successor took the listening socket, which ended the server.
     handed: Arc<AtomicBool>,
     /// Where the protocols are served.
@@ -80,6 +132,21 @@ impl Running {
         euid: u32,
         patience: Option<Patience>,
         epoch: u32,
+    ) -> Result<Self, NfsError> {
+        Self::start_serving(settings, runner, euid, patience, epoch, handle).await
+    }
+
+    /// [`Running::start`], with `serve` as what serves the listening socket.
+    ///
+    /// # Errors
+    /// As [`Running::start`].
+    pub(super) async fn start_serving(
+        settings: &FsSettings,
+        runner: Arc<dyn Runner>,
+        euid: u32,
+        patience: Option<Patience>,
+        epoch: u32,
+        serve: Serve,
     ) -> Result<Self, NfsError> {
         let nfs = &settings.nfs;
         let mounter = Mounter::new(runner, nfs, settings.mountpoint.clone(), euid);
@@ -159,13 +226,19 @@ impl Running {
             ),
             _ => None,
         };
-        let (stopping, stop) = oneshot::channel();
+        let stopping = Arc::new(Notify::new());
         let (closing, closed) = oneshot::channel();
+        let (failing, failed) = oneshot::channel();
         let handed = Arc::new(AtomicBool::new(false));
         let server = tokio::spawn(serve_until(
-            listener,
+            Served {
+                listener,
+                serve,
+                closing: closed,
+                stop: Arc::clone(&stopping),
+                failed: failing,
+            },
             offer,
-            (closed, stop),
             Arc::clone(&handed),
             nfs.drain_wait,
         ));
@@ -173,12 +246,21 @@ impl Running {
         tracing::info!(
             "tierstore fs: serving NFS on {address}, epoch {epoch:08x}, tree numbers {numbers}"
         );
+        // The command, whether this process runs it or not: a mount made by hand (with
+        // `fs.nfs.mount = false`) uses the same options.
+        tracing::info!(
+            "tierstore fs: the mount command is {}",
+            mounter
+                .mount_command(address.ip(), address.port())
+                .join(" ")
+        );
         let mut running = Self {
             _setup: setup,
             _keeper: keeper,
             server,
             closing: Some(closing),
-            stopping: Some(stopping),
+            stopping,
+            failed,
             handed,
             #[cfg(test)]
             address,
@@ -187,7 +269,7 @@ impl Running {
         if nfs.mount {
             let task = mounter.clone();
             let runtime_dir = settings.runtime_dir.clone();
-            let made = tokio::task::spawn_blocking(move || -> Result<bool, NfsError> {
+            let joined = tokio::task::spawn_blocking(move || -> Result<bool, NfsError> {
                 if task.is_mounted()? {
                     match Mounter::made_from(&runtime_dir) {
                         // A hard mount of an address no one serves: everything that touches it
@@ -204,51 +286,82 @@ impl Running {
                     }
                 }
                 task.mount(address.ip(), address.port())?;
-                Mounter::record(&runtime_dir, address)?;
                 Ok(true)
             })
-            .await
-            .map_err(|why| io("waiting for the mount")(std::io::Error::other(why.to_string())))?;
+            .await;
+            let made = match joined {
+                // A mount that failed, or a mount of another address that would not go: nothing
+                // of this instance is mounted.
+                Ok(made) => made?,
+                // The command died: whether it mounted is not known, so the leave looks.
+                Err(why) => {
+                    let why = io("waiting for the mount")(std::io::Error::other(why.to_string()));
+                    running.mounted = Some(mounter);
+                    return Err(running.failed_start(why.into()).await);
+                }
+            };
+            running.mounted = Some(mounter);
             let point = settings.mountpoint.display().to_string();
-            if made? {
+            if made {
+                if let Err(why) = Mounter::record(&settings.runtime_dir, address) {
+                    return Err(running.failed_start(why).await);
+                }
                 tracing::info!("tierstore fs: mounted at {point}");
             } else {
                 tracing::info!(
                     "tierstore fs: {point} is mounted already: the clients' mount goes on"
                 );
             }
-            running.mounted = Some(mounter);
         }
         Ok(running)
     }
 
-    /// Resolves once a successor has taken the listening socket and this instance has answered
-    /// what it owed; never if the server ended otherwise.
-    pub(super) async fn handed_over(&mut self) {
-        let _ = (&mut self.server).await;
-        if !self.handed.load(Ordering::SeqCst) {
-            std::future::pending::<()>().await;
+    /// Leaves after a start that failed once the mount may be there, and gives why it failed
+    /// (or why the leave did, which is worse).
+    async fn failed_start(self, why: NfsError) -> NfsError {
+        self.leave(Leaving::StartFailed(why.to_string()))
+            .await
+            .err()
+            .unwrap_or(why)
+    }
+
+    /// Resolves when the serving ends by itself: [`Leaving::Ended`] when a successor has taken
+    /// the listening socket and this instance has answered what it owed, and
+    /// [`Leaving::ServerStopped`] when the server stopped (it keeps the listening socket until
+    /// [`Running::leave`] has unmounted). Awaited once.
+    pub(super) async fn ended(&mut self) -> Leaving {
+        tokio::select! {
+            Ok(why) = &mut self.failed => Leaving::ServerStopped(why),
+            _ = &mut self.server => Leaving::Ended,
         }
     }
 
-    /// Ends the offer of the listening socket, unmounts, then stops serving: unless the sockets
-    /// were handed over before the offer ended, when the mount is the successor's. The unmount
-    /// comes after the offer has ended, so that no successor takes the socket (and the mount it
-    /// found) while it runs, and before the serving stops, while the server still answers the
-    /// clients: a server that has stopped leaves a busy mount that only a forced unmount clears,
-    /// after Disk Arbitration has waited for the server to answer.
+    /// How the process leaves, whatever the reason: ends the offer of the listening socket,
+    /// unmounts, then ends the serving; unless the sockets were handed over before the offer
+    /// ended, when the mount is the successor's. The unmount comes after the offer has ended, so
+    /// that no successor takes the socket (and the mount it found) while it runs, and before the
+    /// serving ends, while the server still answers the clients: a server that has stopped leaves
+    /// a busy mount that only a forced unmount clears. An unmount whose every step fails is said
+    /// and tried again ([`Mounter::unmount_or_retry`]) while the process serves on: this returns
+    /// only once the mount is gone.
     ///
     /// # Errors
-    /// [`NfsError::Unmount`] for an unmount that failed; the server is stopped all the same.
-    pub(super) async fn stop(mut self) -> Result<(), NfsError> {
+    /// [`NfsError::Start`] if the unmount itself died (its command panicked); the serving is ended
+    /// all the same.
+    pub(super) async fn leave(mut self, leaving: Leaving) -> Result<(), NfsError> {
+        tracing::info!("tierstore fs: leaving: {leaving}");
         let (ack, acked) = oneshot::channel();
-        // A server that has ended (handed over) drops the answer unsent.
+        // A server that has ended (handed over, or stopped) drops the answer unsent.
         let _ = self.closing.take().map(|closing| closing.send(ack));
         let _ = acked.await;
         let unmounted = match self.mounted.take() {
             Some(mounter) if !self.handed.load(Ordering::SeqCst) => {
-                match tokio::task::spawn_blocking(move || mounter.unmount()).await {
-                    Ok(unmounted) => unmounted,
+                tracing::info!(
+                    "tierstore fs: unmounting {} before the serving ends",
+                    mounter.mountpoint().display()
+                );
+                match tokio::task::spawn_blocking(move || mounter.unmount_or_retry()).await {
+                    Ok(()) => Ok(()),
                     Err(why) => Err(io("waiting for the unmount")(std::io::Error::other(
                         why.to_string(),
                     ))
@@ -257,9 +370,7 @@ impl Running {
             }
             _ => Ok(()),
         };
-        if let Some(stopping) = self.stopping.take() {
-            let _ = stopping.send(());
-        }
+        self.stopping.notify_one();
         unmounted
     }
 }
@@ -352,22 +463,39 @@ fn offer_after_takeover(
         .ok()
 }
 
-/// Serves on `listener` until `stop` resolves or `offer` is taken by a successor, then lets the
-/// connections finish (`NFSTcp::handle_until`), for at most `drain_wait` after that. `closing`
-/// comes first in a stop: it drops the offer, and is answered once no successor can take the
-/// socket any more.
-async fn serve_until(
+/// What the task that serves holds.
+struct Served {
     listener: NFSTcpListener<TreeNfs>,
+    serve: Serve,
+    /// Comes first in a leave: it drops the offer, and is answered once no successor can take
+    /// the socket any more.
+    closing: oneshot::Receiver<oneshot::Sender<()>>,
+    /// Comes last in a leave: it ends the serving.
+    stop: Arc<Notify>,
+    /// Told why the server stopped by itself.
+    failed: oneshot::Sender<String>,
+}
+
+/// Serves on the listener until `stop` is notified or `offer` is taken by a successor, then lets
+/// the connections finish (`NFSTcp::handle_until`), for at most `drain_wait` after that. A server
+/// that fails or panics is caught: the task says why on `failed` and keeps the listening socket
+/// until `stop`, so that the leave unmounts before the socket closes.
+async fn serve_until(
+    served: Served,
     offer: Option<Offer>,
-    (closing, stop): (
-        oneshot::Receiver<oneshot::Sender<()>>,
-        oneshot::Receiver<()>,
-    ),
     handed: Arc<AtomicBool>,
     drain_wait: Duration,
 ) {
+    let Served {
+        listener,
+        serve,
+        closing,
+        stop,
+        failed,
+    } = served;
     let stopped = Arc::new(Notify::new());
     let signal = Arc::clone(&stopped);
+    let ending_stop = Arc::clone(&stop);
     let ending = async move {
         let closed = match offer {
             Some(offer) => tokio::select! {
@@ -383,7 +511,7 @@ async fn serve_until(
                 if let Ok(ack) = closed {
                     let _ = ack.send(());
                 }
-                let _ = stop.await;
+                ending_stop.notified().await;
             }
             None => {
                 handed.store(true, Ordering::SeqCst);
@@ -392,25 +520,34 @@ async fn serve_until(
         }
         signal.notify_one();
     };
-    let serving = listener.handle_until(ending);
+    let serving = std::panic::AssertUnwindSafe(serve(&listener, Box::pin(ending))).catch_unwind();
     let patience = async {
         stopped.notified().await;
         tokio::time::sleep(drain_wait).await;
     };
-    tokio::select! {
-        served = serving => {
-            if let Err(why) = served {
-                tracing::error!("tierstore fs: the NFS server stopped: {why}");
-            }
-        }
-        () = patience => {}
+    let why = tokio::select! {
+        served = serving => match served {
+            Ok(Ok(())) => None,
+            Ok(Err(why)) => Some(why.to_string()),
+            Err(_) => Some("it panicked".to_owned()),
+        },
+        () = patience => None,
+    };
+    if let Some(why) = why {
+        tracing::error!(
+            "tierstore fs: the NFS server stopped: {why}; the mount is unmounted before the \
+             listening socket closes"
+        );
+        let _ = failed.send(why);
+        stop.notified().await;
     }
 }
 
-/// Starts over `runner`, in the boot `boot` names, and waits for SIGTERM or SIGINT; then unmounts.
+/// Starts over `runner`, in the boot `boot` names, and serves until SIGTERM or SIGINT, a hand-over,
+/// or a server that stops by itself; then leaves ([`Running::leave`]).
 ///
 /// # Errors
-/// [`NfsError`]: why nothing was mounted, or why the mount could not be unmounted.
+/// [`NfsError`]: why nothing was mounted, or why the unmount died.
 pub(super) fn serve_with(
     settings: &FsSettings,
     runner: Arc<dyn Runner>,
@@ -426,11 +563,11 @@ pub(super) fn serve_with(
         // The handlers are in place before the mount is: a signal after it is never lost.
         let mut signals = Signals::install()?;
         let mut running = Running::start(settings, runner, euid, None, epoch).await?;
-        tokio::select! {
-            () = signals.wait() => {}
-            () = running.handed_over() => {}
-        }
-        running.stop().await
+        let leaving = tokio::select! {
+            () = signals.wait() => Leaving::Signal,
+            leaving = running.ended() => leaving,
+        };
+        running.leave(leaving).await
     })
 }
 

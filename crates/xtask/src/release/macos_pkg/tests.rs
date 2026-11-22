@@ -144,7 +144,7 @@ fn request_in<'a>(binary: &'a Path, stage: &'a Path, out: &'a Path) -> Request<'
 #[test]
 fn the_builder_lays_out_the_payload_and_the_postinstall_and_builds_the_product() {
     // Catches: a payload with a file, mode or byte other than the binary at its path (0755) and
-    // the plist (0644) under root-readable 0755 directories, a scripts directory handed to
+    // the two plists (0644) under root-readable 0755 directories, a scripts directory handed to
     // pkgbuild that holds anything but the postinstall (0755, its bytes) or a script the installer
     // cannot run, an identifier or version other than the release's, and a product not made of
     // the component.
@@ -179,6 +179,11 @@ fn the_builder_lays_out_the_payload_and_the_postinstall_and_builds_the_product()
         "Library/LaunchDaemons/tierstore.plist".to_owned(),
         0o644,
         Some(PLIST.as_bytes().to_vec()),
+    ));
+    want.push((
+        "Library/LaunchDaemons/tierstore-fs.plist".to_owned(),
+        0o644,
+        Some(FS_PLIST.as_bytes().to_vec()),
     ));
     want.sort();
     let scripts: Vec<Seen> = vec![
@@ -399,7 +404,7 @@ fn the_file_is_named_for_the_version_and_the_macos_arm64_platform() {
 #[test]
 fn the_manifest_is_the_archive_manifests_bounds_with_the_launchd_job_and_the_installed_hook() {
     // Catches: a hook command that is not the installed binary's update-hook, a run entry that
-    // is not the job's label, params that do not name launchd, and bounds or deadlines that
+    // is not the job's label, params that do not name launchd and both jobs' labels, and bounds or deadlines that
     // drift from the apt entry's (which a test holds to the archive manifest).
     let manifest = manifest_json("0.1.225");
     let apt = crate::release::desired_apt::entry("1.2.3", "d", "0.1.225")["manifest"].clone();
@@ -416,7 +421,11 @@ fn the_manifest_is_the_archive_manifests_bounds_with_the_launchd_job_and_the_ins
     assert_eq!(manifest["params"]["config_file"]["text"], CONFIG_FILE);
     assert_eq!(manifest["params"]["service_manager"]["text"], "launchd");
     assert_eq!(manifest["params"]["launchd_label"]["text"], "tierstore");
-    assert_eq!(manifest["params"].as_object().map(|o| o.len()), Some(3));
+    assert_eq!(
+        manifest["params"]["fs_launchd_label"]["text"],
+        "tierstore-fs"
+    );
+    assert_eq!(manifest["params"].as_object().map(|o| o.len()), Some(4));
     assert_eq!(manifest["minHostkeeper"], "0.1.225");
     assert_eq!(manifest["hook"]["boot"], "restore");
     for key in [
@@ -489,12 +498,20 @@ pub(super) fn good_entries(binary: &[u8]) -> Vec<Vec<u8>> {
             0,
             PLIST.as_bytes(),
         ),
+        odc_entry(
+            "./Library/LaunchDaemons/tierstore-fs.plist",
+            0o100_644,
+            0,
+            0,
+            FS_PLIST.as_bytes(),
+        ),
     ]
 }
 
-/// The index of the binary's and the plist's entry in [`good_entries`].
+/// The index of the binary's, the plist's and the file service plist's entry in [`good_entries`].
 pub(super) const BIN_AT: usize = 5;
 pub(super) const PLIST_AT: usize = 7;
+pub(super) const FS_PLIST_AT: usize = 8;
 
 /// `PackageInfo` as `pkgbuild` writes it for the pkg of 1.2.3, with `attributes` in place of the
 /// identifier, version and install location and `extra` among the root's children.
@@ -503,7 +520,7 @@ pub(super) fn package_info_with(attributes: &str, extra: &str) -> String {
         "<?xml version=\"1.0\" encoding=\"utf-8\"?>\n<pkg-info overwrite-permissions=\"true\" \
          relocatable=\"false\" {attributes} postinstall-action=\"none\" format-version=\"2\" \
          generator-version=\"InstallCmds-845 (24A335)\" auth=\"root\">\n    <payload \
-         numberOfFiles=\"8\" installKBytes=\"1\"/>\n    <bundle-version/>\n    \
+         numberOfFiles=\"9\" installKBytes=\"1\"/>\n    <bundle-version/>\n    \
          <upgrade-bundle/>\n    <update-bundle/>\n    <atomic-update-bundle/>\n    \
          <strict-identifier/>\n    <relocate/>\n    {extra}\n</pkg-info>\n"
     )

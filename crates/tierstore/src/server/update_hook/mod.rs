@@ -23,7 +23,10 @@
 //!   instances `a` and `b`, the markers `run-fs-a` and `run-fs-b`) is handed over in the same steps
 //!   between releases that both list [`HANDOFF_FS_CAPABILITY`], and left alone otherwise.
 //! - **launchd** ([`launchd`]): one job, the label in `launchd_label`, and an update is a restart
-//!   with a gap: `bootout`, then `bootstrap` of the linked plist ([`LAUNCHD_PLIST`]).
+//!   with a gap: `bootout`, then `bootstrap` of the linked plist ([`LAUNCHD_PLIST`]). When the
+//!   params name the job of `tierstore fs` (`fs_launchd_label`, plist [`FS_LAUNCHD_PLIST`]), that
+//!   job is booted out before the main one, the update goes on only when its mount is gone, and
+//!   it is booted in after the main job serves.
 //!
 //! hostkeeper switches the release link `current` before `cutover` and back before `rollback`;
 //! the hook never moves it. hostkeeper keeps every package closed to every user but root, so the
@@ -58,9 +61,10 @@ use std::process::ExitCode;
 pub use args::{ArgsError, Invocation, Step};
 pub use look::{POLL_INTERVAL, PROBE_ATTEMPTS, PROBE_HITS, READY_ATTEMPTS};
 pub use params::{
-    CONFIG_FILE_KEY, LAUNCHD, LAUNCHD_LABEL_KEY, MODE_KEY, PREVIOUS_RELEASE_KEY,
-    PREVIOUS_VERSION_KEY, PROMOTION_CEILING_KEY, Params, ParamsError, Previous, RESTART_MODE,
-    SERVICE_MANAGER_KEY, STAGED_RELEASE_KEY, SYSTEMD, ServiceManager, TARGET_VERSION_KEY,
+    CONFIG_FILE_KEY, FS_LAUNCHD_LABEL_KEY, LAUNCHD, LAUNCHD_LABEL_KEY, MODE_KEY,
+    PREVIOUS_RELEASE_KEY, PREVIOUS_VERSION_KEY, PROMOTION_CEILING_KEY, Params, ParamsError,
+    Previous, RESTART_MODE, SERVICE_MANAGER_KEY, STAGED_RELEASE_KEY, SYSTEMD, ServiceManager,
+    TARGET_VERSION_KEY,
 };
 pub use ports::{
     Clock, Family, Host, Instance, Instances, Launchd, LaunchdPorts, Lock, Markers, PortError,
@@ -112,6 +116,11 @@ pub const PACKAGE_RELEASE_BINARY: &str = "tree/usr/libexec/tierstore/tierstore";
 pub const SERVICE_BINARY: &str = "/usr/local/libexec/tierstore/tierstore";
 /// The plist of the launchd job, as hostkeeper links it from the package's `units/`.
 pub const LAUNCHD_PLIST: &str = "/Library/LaunchDaemons/tierstore.plist";
+/// The plist of the launchd job of `tierstore fs`, as the macOS package installs it.
+pub const FS_LAUNCHD_PLIST: &str = "/Library/LaunchDaemons/tierstore-fs.plist";
+/// The configuration of `tierstore fs` on a Mac, whose `[fs] mountpoint` names the mount the
+/// launchd arm checks after it boots the fs job out.
+pub const FS_CONFIG_FILE: &str = "/usr/local/tierstore/etc/fs.toml";
 /// The capability (`tierstore --capabilities`) of a release that offers and takes listening
 /// sockets over `server.handoff_socket`. Both releases need it for a hand-over.
 pub const HANDOFF_CAPABILITY: &str = crate::server::build_info::HANDOFF_SOCKET_CAPABILITY;

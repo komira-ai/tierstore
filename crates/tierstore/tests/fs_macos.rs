@@ -1,8 +1,7 @@
 //! `tierstore fs` on macOS as a process: the command line is parsed, the file is loaded (a group
-//! named by name is looked up through the system), the NFS frontend serves on a loopback port, and
-//! SIGTERM ends it with status 0. Nothing is mounted
-//! (`fs.nfs.mount = false`), so the test runs without a mount command, and no assertion is about
-//! time.
+//! named by name, and an owner by names, are looked up through the system), the NFS frontend serves
+//! on a loopback port, and SIGTERM ends it with status 0. Nothing is mounted (`fs.nfs.mount =
+//! false`), so the test runs without a mount command, and no assertion is about time.
 
 #![cfg(target_os = "macos")]
 #![allow(
@@ -153,4 +152,55 @@ fn fs_serves_nfs_and_ends_with_success_on_sigterm() {
     assert_eq!(words[..6], [7, 1, 0, 0, 0, 0], "{words:?}");
     drop(stream);
     stop(started);
+}
+
+/// Runs `tierstore fs --config <file> --check-config` over a file whose `fs.owner` is `owner` and
+/// whose other keys are valid, and gives the process's output.
+fn check(name: &str, owner: &str) -> (std::process::Output, TestDir) {
+    let dir = TestDir::under(std::env::temp_dir(), name);
+    let gid = std::fs::metadata(dir.path()).unwrap().gid();
+    let text = format!(
+        "[fs]\nclient_group = \"{gid}\"\nowner = \"{owner}\"\n\
+         fill_socket = {:?}\ncache_path = {:?}\n",
+        dir.path().join("fill.sock"),
+        dir.path().join("cache"),
+    );
+    let file = dir.path().join("fs.toml");
+    std::fs::write(&file, text).unwrap();
+    let output = Command::new(env!("CARGO_BIN_EXE_tierstore"))
+        .arg("fs")
+        .arg("--config")
+        .arg(&file)
+        .arg("--check-config")
+        .output()
+        .expect("the binary runs");
+    (output, dir)
+}
+
+/// Asserts that `fs.owner` given as `<user>:<group>` by the names of the user of this test (their
+/// accounts of Open Directory, looked up by `dscacheutil`) is taken: `--check-config` exits 0 and
+/// says nothing.
+#[test]
+fn fs_takes_its_owner_by_names_from_the_system() {
+    let owner = format!("{}:{}", id("-un"), id("-gn"));
+    let (output, _dir) = check("fs-macos-owner", &owner);
+    assert_eq!(output.status.code(), Some(0), "{owner}: {output:?}");
+    assert!(
+        output.stdout.is_empty() && output.stderr.is_empty(),
+        "{output:?}"
+    );
+}
+
+/// Asserts that an `fs.owner` whose user is a name the system does not have is refused: status 2
+/// and a line that names `fs.owner` and the name. Catches a name taken as some default user.
+#[test]
+fn fs_refuses_an_owner_whose_user_the_system_does_not_have() {
+    let owner = format!("no-such-user-tierstore:{}", id("-gn"));
+    let (output, _dir) = check("fs-macos-owner-absent", &owner);
+    assert_eq!(output.status.code(), Some(2), "{output:?}");
+    let said = String::from_utf8(output.stderr).unwrap();
+    assert!(
+        said.starts_with("tierstore fs: fs.owner: \"no-such-user-tierstore\" is neither a user id"),
+        "{said}"
+    );
 }

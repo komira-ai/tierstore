@@ -120,7 +120,7 @@ pub(super) fn run_on(config: &SystemConfig<'_>, invocation: &Invocation, params:
             };
             super::systemd::run_step(invocation.step, params, &ports)
         }
-        ServiceManager::Launchd { label } => {
+        ServiceManager::Launchd { label, .. } => {
             let times = LaunchdTimes {
                 call: LAUNCHCTL_TIMEOUT,
                 bootout: BOOTOUT_TIMEOUT,
@@ -196,7 +196,7 @@ pub(super) fn config_run_on(
             };
             systemd_step(invocation.step, params, &ports, &guard, &common)
         }
-        ServiceManager::Launchd { label } => {
+        ServiceManager::Launchd { label, .. } => {
             let times = LaunchdTimes {
                 call: LAUNCHCTL_TIMEOUT,
                 bootout: BOOTOUT_TIMEOUT,

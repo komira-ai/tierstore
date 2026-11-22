@@ -24,6 +24,7 @@ fn mac() -> Defaults {
         config_file: MACOS_CONFIG_FILE,
         service_manager: ServiceManager::Launchd {
             label: MACOS_LABEL.to_owned(),
+            fs_label: None,
         },
     }
 }
@@ -52,7 +53,8 @@ fn params_that_name_no_file_get_the_macs_file_and_job() {
     assert_eq!(
         params.service_manager,
         ServiceManager::Launchd {
-            label: "tierstore".to_owned()
+            label: "tierstore".to_owned(),
+            fs_label: None,
         }
     );
 }
@@ -71,7 +73,8 @@ fn what_the_params_name_is_kept() {
     assert_eq!(
         params.service_manager,
         ServiceManager::Launchd {
-            label: "dev.tierstore".to_owned()
+            label: "dev.tierstore".to_owned(),
+            fs_label: None,
         }
     );
     let systemd = format!("{STAGED}service_manager = \"systemd\"\n");

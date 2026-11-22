@@ -1,10 +1,10 @@
 #!/bin/sh
 # The postinstall of tierstore's installer package (`cargo xtask release macos-pkg`). The installer
 # runs it as root once the payload is in place, with the target volume as $3 (hostkeeper's
-# macos-pkg installer always installs on /). It makes the account the job runs as and the
-# directories under /usr/local/tierstore, and nothing else: it reads, writes and removes no file in
-# them, and it starts nothing and loads no job (hostkeeper's update hook, `tierstore update-hook`,
-# bootstraps the job at its cutover).
+# macos-pkg installer always installs on /). It makes the account the jobs run as, the
+# directories under /usr/local/tierstore and the mount point of `tierstore fs`, and nothing else: it
+# reads, writes and removes no file in them, and it starts nothing and loads no job (hostkeeper's
+# update hook, `tierstore update-hook`, bootstraps the jobs at its cutover).
 #
 # - The account _tierstore, the plist's UserName and GroupName, in the directory of the running
 #   system: a group and a user with no password, the shell /usr/bin/false and the home /var/empty.
@@ -16,7 +16,13 @@
 #   (the directories only, never what they hold): /usr/local/tierstore 0755 root:wheel, its etc
 #   0750 root:_tierstore (the configuration and the key files), its cache, log and run 0700
 #   _tierstore:_tierstore, and its put 0755 _tierstore:_tierstore (the root of the put ingest,
-#   under which the job runtime makes each job's put directory).
+#   under which the job runtime makes each job's put directory), and its run/fs 0700
+#   _tierstore:_tierstore (the runtime directory of `tierstore fs`).
+# - On the target volume, the mount point of `tierstore fs`, /private/var/tierstore/fs: made when
+#   missing, with its parent /private/var/tierstore 0755 root:wheel, and set to _tierstore:_tierstore
+#   0755 on every install unless it is a mount point at that moment (a line of the listing
+#   `mount` has " on <path> ("). An upgrade runs while the file service's NFS mount is there, a
+#   read-only file system on which chown and chmod fail, so a mounted mount point is left as it is.
 set -e
 PATH="$PATH:/usr/bin:/bin:/usr/sbin:/sbin"
 name=_tierstore
@@ -50,7 +56,8 @@ if [ -z "$uid" ]; then
     dscl . -create "/Users/$name" UniqueID "$uid"
 fi
 base="${3%/}/usr/local/tierstore"
-mkdir -p "$base/etc" "$base/cache" "$base/log" "$base/run" "$base/put"
+fsbase="${3%/}/private/var/tierstore"
+mkdir -p "$base/etc" "$base/cache" "$base/log" "$base/run" "$base/put" "$base/run/fs" "$fsbase/fs"
 chown 0:0 "$base"
 chmod 0755 "$base"
 chown "0:$gid" "$base/etc"
@@ -61,4 +68,13 @@ for dir in cache log run; do
 done
 chown "$uid:$gid" "$base/put"
 chmod 0755 "$base/put"
+chown "$uid:$gid" "$base/run/fs"
+chmod 0700 "$base/run/fs"
+chown 0:0 "$fsbase"
+chmod 0755 "$fsbase"
+mounts=$(mount)
+if ! printf '%s\n' "$mounts" | grep -F -q " on $fsbase/fs ("; then
+    chown "$uid:$gid" "$fsbase/fs"
+    chmod 0755 "$fsbase/fs"
+fi
 exit 0

@@ -1,0 +1,87 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
+<!--
+  /Library/LaunchDaemons/tierstore-fs.plist: `tierstore fs` as a LaunchDaemon on a Mac, the virtual
+  build file system's NFSv3 frontend (docs/design/virtual-build-fs.md section 8). It serves the NFS
+  and MOUNT protocols on loopback only (`fs.nfs.listen`), mounts the export read-only at
+  `fs.mountpoint` as `fs.nfs.mount_user`, and unmounts on SIGTERM. root:wheel, mode 0644.
+
+  The job runs as _tierstore, the user and group of tierstore.plist, because the fill socket of the
+  store answers only a peer of its own user: a job of any other user, root included, has every fill
+  refused. Nothing of it needs root: the NFS socket is on an unprivileged loopback port, and
+  `mount_nfs`, `umount` and `diskutil unmount force` of a loopback export need none when the mount
+  user owns the mount point. `fs.nfs.mount_user` is left out of the file (the user of the process
+  is the default), and the mount point, `fs.mountpoint`, is a directory _tierstore owns, which the
+  installer package makes. The file is /usr/local/tierstore/etc/fs.toml (packaging/macos/fs.toml
+  is its example), which has the `[fs]` table and holds no secret and no key file (its directory is
+  root:_tierstore, mode 0750); no environment variable is set, the process reads none, and launchd
+  needs no notification of readiness.
+
+  The program is the binary the installer package lays down,
+  /Library/Application Support/tierstore/bin/tierstore, the same binary as tierstore.plist's. The
+  installer package (`cargo xtask release macos-pkg`) installs this file. It is
+  packaging/hostkeeper/units/tierstore-fs.plist with one difference, the program, which that file
+  has at /usr/local/libexec/tierstore/tierstore. Nothing loads the job but the update hook
+  (`tierstore update-hook`, param fs_launchd_label). A restart of the process leaves a gap in
+  serving: the mount is hard, its clients wait, and the restarted process finds the mount, reopens
+  its table of tree numbers and serves on the same port.
+
+  The mount is hard with the mount option deadtimeout: a client waits for a server that is only
+  restarting, and gives up on one that has been gone for the whole of that time. launchd sends
+  SIGTERM on bootout. The process unmounts first: `umount`, then `diskutil unmount force`, then its
+  own unmount(2) with MNT_FORCE, each bounded by `fs.nfs.unmount_wait`, and exits 0 once the mount
+  is gone. If all three fail it keeps serving and logs why, and launchd kills it at ExitTimeOut;
+  the mount option deadtimeout then ends the mount that has no server. ExitTimeOut (150 s) is more
+  than the unmount takes at its longest: four steps of at most 25 s each and 5 s to collect a killed
+  command, 120 s, so launchd never kills the process in the middle of an unmount. AbandonProcessGroup
+  is not set, so launchd's kill of the job also kills a helper command the process left. KeepAlive
+  starts the process again whenever it exits while the job is loaded, at most once in
+  ThrottleInterval (10 s).
+
+  crates/tierstore/tests/packaging_macos.rs holds this file to the other plist and the binary to
+  its command line.
+-->
+<plist version="1.0">
+<dict>
+  <key>Label</key>
+  <string>tierstore-fs</string>
+  <key>ProgramArguments</key>
+  <array>
+    <string>/Library/Application Support/tierstore/bin/tierstore</string>
+    <string>fs</string>
+    <string>--config</string>
+    <string>/usr/local/tierstore/etc/fs.toml</string>
+  </array>
+  <key>UserName</key>
+  <string>_tierstore</string>
+  <key>GroupName</key>
+  <string>_tierstore</string>
+  <key>RunAtLoad</key>
+  <true/>
+  <key>KeepAlive</key>
+  <true/>
+  <key>ThrottleInterval</key>
+  <integer>10</integer>
+  <key>ExitTimeOut</key>
+  <integer>150</integer>
+  <key>ProcessType</key>
+  <string>Standard</string>
+  <key>Umask</key>
+  <integer>63</integer>
+  <!-- Jobs' overlays keep files of the mount open as long as a job runs; the limit bounds the distinct cache files held open, which the process shares across handles. -->
+  <key>SoftResourceLimits</key>
+  <dict>
+    <key>NumberOfFiles</key>
+    <integer>1048576</integer>
+  </dict>
+  <key>HardResourceLimits</key>
+  <dict>
+    <key>NumberOfFiles</key>
+    <integer>1048576</integer>
+  </dict>
+  <key>StandardOutPath</key>
+  <string>/usr/local/tierstore/log/tierstore-fs.out.log</string>
+  <key>StandardErrorPath</key>
+  <string>/usr/local/tierstore/log/tierstore-fs.err.log</string>
+</dict>
+</plist>

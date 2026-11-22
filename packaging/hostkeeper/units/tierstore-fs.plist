@@ -11,24 +11,32 @@
   refused. Nothing of it needs root: the NFS socket is on an unprivileged loopback port, and
   `mount_nfs`, `umount` and `diskutil unmount force` of a loopback export need none when the mount
   user owns the mount point. `fs.nfs.mount_user` is left out of the file (the user of the process
-  is the default), and the mount point, `fs.mountpoint`, is a directory _tierstore owns, which an
-  operator makes with the file. The file is /usr/local/tierstore/etc/fs.toml, which has the `[fs]`
-  table and holds no secret and no key file (its directory is root:_tierstore, mode 0750); no
-  environment variable is set, the process reads none, and launchd needs no notification of
-  readiness.
+  is the default), and the mount point, `fs.mountpoint`, is a directory _tierstore owns, which the
+  installer package makes. The file is /usr/local/tierstore/etc/fs.toml (packaging/macos/fs.toml
+  is its example), which has the `[fs]` table and holds no secret and no key file (its directory is
+  root:_tierstore, mode 0750); no environment variable is set, the process reads none, and launchd
+  needs no notification of readiness.
 
   The program is the copy of the current release's binary that the update hook puts at
   /usr/local/libexec/tierstore/tierstore for tierstore.plist, the same binary as that job's.
+  packaging/macos-pkg/tierstore-fs.plist is this file with the program of the installer package,
+  which installs that file as /Library/LaunchDaemons/tierstore-fs.plist; hostkeeper's archive
+  package ships only tierstore.plist. Nothing loads the job but the update hook (`tierstore
+  update-hook`, param fs_launchd_label). A restart of the process leaves a gap in serving: the mount
+  is hard, its clients wait, and the restarted process finds the mount, reopens its table of tree
+  numbers and serves on the same port.
 
-  This job is not in hostkeeper's package yet, as tierstore-fs@.service is not for Linux: the
-  update hook learns it with the two alternating jobs that the hand-over of the NFS socket
-  (`fs.nfs.handoff_socket`) needs. Until then an operator installs the file, and it restarts in
-  place with a gap in serving: a hard mount makes the clients wait, and the restarted process
-  finds the mount, reopens its table of tree numbers and serves on the same port.
-
-  launchd sends SIGTERM on bootout. The process unmounts, by force if a job still uses the mount,
-  and exits 0; ExitTimeOut (30 s) is far more than that takes. KeepAlive starts the process again whenever it exits while the job is
-  loaded, at most once in ThrottleInterval (10 s).
+  The mount is hard with the mount option deadtimeout: a client waits for a server that is only
+  restarting, and gives up on one that has been gone for the whole of that time. launchd sends
+  SIGTERM on bootout. The process unmounts first: `umount`, then `diskutil unmount force`, then its
+  own unmount(2) with MNT_FORCE, each bounded by `fs.nfs.unmount_wait`, and exits 0 once the mount
+  is gone. If all three fail it keeps serving and logs why, and launchd kills it at ExitTimeOut;
+  the mount option deadtimeout then ends the mount that has no server. ExitTimeOut (150 s) is more
+  than the unmount takes at its longest: four steps of at most 25 s each and 5 s to collect a killed
+  command, 120 s, so launchd never kills the process in the middle of an unmount. AbandonProcessGroup
+  is not set, so launchd's kill of the job also kills a helper command the process left. KeepAlive
+  starts the process again whenever it exits while the job is loaded, at most once in
+  ThrottleInterval (10 s).
 
   crates/tierstore/tests/packaging_hostkeeper.rs parses this file and checks it against the binary.
 -->
@@ -54,7 +62,7 @@
   <key>ThrottleInterval</key>
   <integer>10</integer>
   <key>ExitTimeOut</key>
-  <integer>30</integer>
+  <integer>150</integer>
   <key>ProcessType</key>
   <string>Standard</string>
   <key>Umask</key>

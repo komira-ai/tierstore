@@ -14,6 +14,9 @@
 //!   kept as [`ServiceManager::Unknown`], which every step refuses with the reason
 //!   `service_manager_unknown`;
 //! - `launchd_label` (required with `service_manager = "launchd"`): the label of the one job;
+//! - `fs_launchd_label` (optional, read only with `service_manager = "launchd"`; with systemd it
+//!   is ignored like any other scalar key): the label of the launchd job of `tierstore fs`, which
+//!   the steps boot out before the main job and boot in after it;
 //! - `config_file` (optional here, required by the `prepare` that reads it): the path of the
 //!   node's tierstore configuration;
 //! - `verify_retry_secs` (optional, default [`DEFAULT_VERIFY_RETRY_SECS`]): the seconds
@@ -46,6 +49,8 @@ pub const PROMOTION_CEILING_KEY: &str = "updater.promotion_ceiling_secs";
 pub const SERVICE_MANAGER_KEY: &str = "service_manager";
 /// The key of the label of the launchd job.
 pub const LAUNCHD_LABEL_KEY: &str = "launchd_label";
+/// The key of the label of the launchd job of `tierstore fs`.
+pub const FS_LAUNCHD_LABEL_KEY: &str = "fs_launchd_label";
 /// The key of the node's configuration file.
 pub const CONFIG_FILE_KEY: &str = "config_file";
 /// The key that forces a plain restart.
@@ -111,10 +116,12 @@ pub enum ParamsError {
 pub enum ServiceManager {
     /// systemd: two instances of one template, `tierstore@a` and `tierstore@b`.
     Systemd,
-    /// launchd: one job.
+    /// launchd: one job, and the job of `tierstore fs` when the params name it.
     Launchd {
         /// Its label (`launchd_label`).
         label: String,
+        /// The label of the job of `tierstore fs` (`fs_launchd_label`).
+        fs_label: Option<String>,
     },
     /// A value this hook does not know, as the file spells it: every step refuses it.
     Unknown(String),
@@ -208,7 +215,11 @@ impl Params {
                 if !is_label(&label) {
                     return Err(ParamsError::BadLabel(LAUNCHD_LABEL_KEY));
                 }
-                ServiceManager::Launchd { label }
+                let fs_label = text_of(&table, FS_LAUNCHD_LABEL_KEY)?;
+                if fs_label.as_deref().is_some_and(|fs| !is_label(fs)) {
+                    return Err(ParamsError::BadLabel(FS_LAUNCHD_LABEL_KEY));
+                }
+                ServiceManager::Launchd { label, fs_label }
             }
             Some(toml::Value::String(word)) => ServiceManager::Unknown(word.clone()),
             Some(other) => ServiceManager::Unknown(other.to_string()),
@@ -239,6 +250,16 @@ impl Params {
             declared_restart,
             verify_retry_secs,
         })
+    }
+
+    /// The label of the job of `tierstore fs` that a launchd update drives; none for systemd, or
+    /// when the params do not name one.
+    #[must_use]
+    pub fn fs_launchd_label(&self) -> Option<&str> {
+        match &self.service_manager {
+            ServiceManager::Launchd { fs_label, .. } => fs_label.as_deref(),
+            ServiceManager::Systemd | ServiceManager::Unknown(_) => None,
+        }
     }
 
     /// Whether this is a first install: no previous release.

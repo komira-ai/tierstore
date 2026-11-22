@@ -29,6 +29,7 @@ struct Files {
     unreadable: RefCell<BTreeSet<PathBuf>>,
     checks_fail: Cell<bool>,
     checked: RefCell<Vec<(PathBuf, PathBuf)>>,
+    mounts: RefCell<BTreeSet<PathBuf>>,
     capabilities: Vec<String>,
 }
 
@@ -40,6 +41,7 @@ impl Files {
             unreadable: RefCell::new(BTreeSet::new()),
             checks_fail: Cell::new(false),
             checked: RefCell::new(Vec::new()),
+            mounts: RefCell::new(BTreeSet::new()),
             capabilities: capabilities.iter().map(|word| (*word).to_owned()).collect(),
         }
     }
@@ -67,6 +69,10 @@ impl Host for Files {
             return Err(PortError::failed(PortKind::Host, "unreadable"));
         }
         Ok(self.texts.borrow().get(path).cloned())
+    }
+
+    fn mounted(&self, path: &Path) -> Result<bool, PortError> {
+        Ok(self.mounts.borrow().contains(path))
     }
 
     fn capabilities(&self, _release: &Path) -> Result<Vec<String>, PortError> {

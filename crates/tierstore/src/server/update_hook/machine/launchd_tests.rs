@@ -264,3 +264,37 @@ fn the_program_can_be_named() {
         assert_eq!(made.program, "/opt/fake/launchctl");
     }
 }
+
+/// Asserts that `bootout_within` runs `bootout` with the time limit it is given and not the
+/// configured one, takes as many looks as it is given and no more, and says that number when the
+/// job stays loaded; and that it ends as soon as a look finds the job gone. Catches a job with a
+/// long exit time that is cut short by the service's bounds, or waited for by them for too long.
+#[test]
+fn bootout_within_uses_the_bounds_it_is_given() {
+    let long = Duration::from_secs(180);
+    let clock = Pauses::default();
+    let runner = FakeRunner::replying(vec![loaded(), ok(), loaded(), loaded()]);
+    let error = jobs(&runner, &clock)
+        .bootout_within(LABEL, long, 2)
+        .unwrap_err();
+    assert_eq!(
+        launchd_message(error),
+        "system/com.example.tierstore is still loaded after bootout and 2 looks"
+    );
+    assert_eq!(
+        runner.calls(),
+        [
+            call(&["print", TARGET], CALL),
+            call(&["bootout", TARGET], long),
+            call(&["print", TARGET], CALL),
+            call(&["print", TARGET], CALL),
+        ]
+    );
+    assert_eq!(clock.count.get(), 2);
+
+    let runner = FakeRunner::replying(vec![loaded(), ok(), absent()]);
+    jobs(&runner, &clock)
+        .bootout_within(LABEL, long, 2)
+        .unwrap();
+    assert_eq!(runner.calls().len(), 3);
+}
