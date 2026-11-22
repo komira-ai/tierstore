@@ -1,7 +1,9 @@
 //! The tree of the mount, flattened or an image: children by name, in the order of the manifest
 //! or of the image, and the link count.
 
-use super::{Kids, Tree};
+use std::sync::Arc;
+
+use super::{ARC_HEADER, Kids, Tree};
 use crate::TreeImage;
 use crate::server::treefs::testing::{Built, Node, dir, file, image_bytes};
 use crate::tree_manifest::{EntryKind, TreeDigest, flatten};
@@ -229,4 +231,43 @@ fn kids_partition_point_counts_the_children_before_a_boundary() {
     assert_eq!(in_range, [0, 0, 2, 4]);
     assert_eq!(point(&Kids::Listed(&[]), 5), 0);
     assert_eq!(point(&Kids::Range(5..5), 9), 0);
+}
+
+/// Asserts the heap estimate of a flattened tree: its entries, their names, the tables of
+/// children (one start more than the entries, one child fewer) and, for a placed tree, its modes
+/// and its location.
+#[test]
+fn a_flattened_tree_estimates_its_entries_names_and_tables() {
+    let plain = tree_of(vec![
+        ("ab", file(b"1")),
+        ("c", dir(vec![("def", file(b"2"))])),
+    ]);
+    let mut entries: Vec<_> = (0..4).map(|index| plain.entry(index).unwrap()).collect();
+    entries.shrink_to_fit();
+    let names = ("ab".len() + "c".len() + "def".len()) + 4 * ARC_HEADER;
+    let tables = size_of::<u32>() * (5 + 3);
+    let listed = size_of::<crate::tree_manifest::TreeEntry>() * 4 + names + tables;
+    assert_eq!(Tree::new(entries.clone()).heap_bytes(), listed as u64);
+    let placed = Tree::placed(entries, vec![0o755; 4], "jobs/1".to_owned());
+    let modes = size_of::<u16>() * 4;
+    assert_eq!(
+        placed.heap_bytes(),
+        (listed + modes + "jobs/1".len()) as u64
+    );
+}
+
+/// Asserts the heap estimate of a tree over an image: the bytes of the list, each key of its
+/// packs, and its location.
+#[test]
+fn an_image_tree_estimates_its_bytes_keys_and_location() {
+    let image = TreeImage::checked(image_bytes().into()).unwrap();
+    let list = image.bytes().len();
+    let keys: usize = image
+        .keys()
+        .iter()
+        .map(|key| size_of::<Arc<str>>() + key.len() + ARC_HEADER)
+        .sum();
+    assert_eq!(image.keys().len(), 1);
+    let tree = Tree::image(image, "jobs/1".to_owned());
+    assert_eq!(tree.heap_bytes(), (list + keys + "jobs/1".len()) as u64);
 }

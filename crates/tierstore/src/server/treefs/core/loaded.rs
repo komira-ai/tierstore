@@ -9,8 +9,9 @@
 //! is a compare-and-swap of: the count, whether a forget has outrun it (the tree is *uncounted*,
 //! `core/memory.rs`), and a mark that the tree is being taken out of memory. A forget that takes
 //! a tree out first sets the mark, only if the count is zero and the tree is not uncounted, and
-//! then removes the tree from the map. A lookup that finds the mark does not count: it puts the
-//! tree back under the lock of the changes (`Trees::put_back`), so that a lookup is never lost.
+//! then removes the tree from the map; the sweep for idle trees sets it whatever the count
+//! (`core/memory.rs`). A lookup that finds the mark does not count: it puts the tree back under
+//! the lock of the changes (`Trees::put_back`), so that a lookup is never lost.
 //!
 //! The blobs a tree has asked the cache to pin are a set split by the blob's digest
 //! ([`Pinned`]), so that the opens of one tree do not queue on one lock.
@@ -116,12 +117,13 @@ impl Lookups {
             .is_ok()
     }
 
-    /// Marks the tree as removed if it is uncounted, whatever it has counted since; whether it
-    /// did.
-    pub(super) fn remove_if_uncounted(&self) -> bool {
+    /// Marks the tree as removed whatever it has counted, counted or uncounted, unless it is
+    /// marked already; whether it did. The count is kept: a lookup that puts the tree back adds
+    /// to it.
+    pub(super) fn remove(&self) -> bool {
         self.0
             .fetch_update(Ordering::AcqRel, Ordering::Acquire, |now| {
-                (now & (REMOVED | UNCOUNTED) == UNCOUNTED).then_some(now | REMOVED)
+                (now & REMOVED == 0).then_some(now | REMOVED)
             })
             .is_ok()
     }

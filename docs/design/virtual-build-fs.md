@@ -541,8 +541,12 @@ So any instance of `tierstore fs`, given the table and the manifests (which are 
 upstream), can answer any request about any inode number this mount ever handed out, without having seen the lookup that
 created it. This is Buildbarn's resolvable handle [S5] made total: nothing about a tree's inode depends on the process
 that first answered for it. File handles are derivable too: `fh` carries the inode number and, for a passthrough open,
-the backing id (6.4). Lookup counts from `FORGET` are kept only to drop a flattened tree from memory; a dropped tree
-needed again is flattened again. Sections 7 and 8 stand on this. The layout is a format between releases while a mount
+the backing id (6.4). Lookup counts from `FORGET` are kept only to drop a flattened tree from memory early; a dropped tree
+needed again is flattened again. They are a hint, not a hold: the kernel sends `FORGET` only under memory pressure, so a
+tree kept until its inodes are forgotten stays as long as the process does, and the process grew with every tree any job
+named (the fs process's anonymous memory grew by 2 to 3 GB an hour on the build nodes, to 40 to 84 GB after one to three days; read from the fs units' memory accounting, not a recorded experiment). So a tree that no run and no
+lookup has attached, and that no request has named for `fs.tree_idle_secs`, also leaves memory at the sweep for idle trees
+whatever the kernel holds of it; a `FORGET` of a tree not in memory changes nothing. A request that names it later reads it again and is answered as before while the tree can be read; a tree gone by then (its root manifest no longer upstream, its placement ended) is `ENOENT`, as after a restart. 6.9 says what this bounds. Sections 7 and 8 stand on this. The layout is a format between releases while a mount
 lives; section 10 says how it is versioned.
 
 The cost of I1 is that a tree's manifests are all read and flattened when it is first attached: metadata is fetched
@@ -896,6 +900,15 @@ There is no per-job disk quota (CEO, 2026-11-09). The node's disk is one pool, a
   job that reads it (inferred from the kernel's rule that a page is charged to the cgroup that brings it in). On macOS the
   NFS client caches pages of its own on top of the server's reads of the cache file, so a blob is cached twice: reading 1.5 GiB through
   NFSv3 grew file-backed pages by about 3.0 GiB (+3,108, +3,098 and +3,089 MiB in three runs), 2.02 times the bytes, against about 1.5 GiB (+1,537 MiB) natively (Measured: macos E17; idle drift measured before the runs was 37 to 41 MiB in two runs and 346 MiB in the first, where builds were running; reclaimability not measured; FSKit not measured). A cost in cache capacity, not committed memory (Inferred).
+- **The fs process's own memory** is mostly its flattened trees (about 110 bytes per entry, Inferred in 6.3 from Measured: linux E8). The trees in memory are
+  those attached, by a run or by a lookup, and those detached that a request named within `fs.tree_idle_secs` and the
+  time between two sweeps (a quarter of it, at most a minute): a detached tree leaves at the sweep that finds it idle,
+  whatever lookups of it the kernel holds, and is read again (about 1.7 µs per entry to flatten, Measured: linux E8, and its manifests, from the cache)
+  if a request names it later. With the default of 900 s, that is the trees of the last 16 minutes of jobs beyond those
+  attached. The fs unit has no memory limit: killing the process that holds every job's mount is worse than its size.
+  At each look for idle trees the process says on stderr, when they changed, how many trees it holds, how many of them
+  attached, their entries and an estimate of their bytes (`tierstore fs: 12 trees in memory, 3 of them attached:
+  412000 entries, about 46 MiB`).
 
 ## 7. Failure, crash and live update
 

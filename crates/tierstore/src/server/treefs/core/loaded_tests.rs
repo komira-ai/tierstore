@@ -90,20 +90,32 @@ fn a_tree_is_marked_removed_only_at_zero_and_a_mark_refuses_counts_and_forgets()
     assert!(!uncounted.remove_if_forgotten());
 }
 
-/// Asserts that an uncounted tree is marked as removed whatever it has counted since, keeping the
-/// count, and that a tree that is not uncounted, or is marked already, is not.
+/// Asserts that the sweep's mark is set on a tree whatever it has counted, counted or uncounted,
+/// keeping the count and the mark of an uncounted tree, that it is not set twice, and that a
+/// lookup that puts the tree back clears it and adds to the count.
 #[test]
-fn an_uncounted_tree_is_marked_removed_with_its_count_kept() {
-    let lookups = Lookups::default();
-    assert!(!lookups.remove_if_uncounted());
-    assert!(lookups.forget(1, true));
-    assert!(lookups.raise() && lookups.raise());
-    assert!(lookups.remove_if_uncounted());
-    assert_eq!((lookups.count(), lookups.removed()), (2, true));
-    assert!(!lookups.remove_if_uncounted());
-    lookups.raise_and_keep();
+fn the_sweeps_mark_is_set_whatever_the_count_and_keeps_it() {
+    let counted = Lookups::default();
+    assert!(counted.raise() && counted.raise());
+    assert!(counted.remove());
     assert_eq!(
-        (lookups.count(), lookups.removed(), lookups.uncounted()),
+        (counted.count(), counted.removed(), counted.uncounted()),
+        (2, true, false)
+    );
+    assert!(!counted.remove());
+    let uncounted = Lookups::default();
+    assert!(uncounted.forget(1, true));
+    assert!(uncounted.raise() && uncounted.raise());
+    assert!(uncounted.remove());
+    assert_eq!((uncounted.count(), uncounted.removed()), (2, true));
+    assert!(!uncounted.remove());
+    uncounted.raise_and_keep();
+    assert_eq!(
+        (
+            uncounted.count(),
+            uncounted.removed(),
+            uncounted.uncounted()
+        ),
         (3, false, true)
     );
 }
@@ -221,7 +233,7 @@ fn a_lookup_counted_between_the_mark_and_the_removal_puts_the_tree_back() {
     assert_eq!(core.trees_in_memory(), 0);
 }
 
-/// Asserts the same for the sweep of the uncounted trees: a lookup counted between its mark and its
+/// Asserts the same for the sweep for idle trees: a lookup counted between its mark and its
 /// removal keeps the tree, uncounted, with the count; the next sweep that finds it idle takes it.
 #[test]
 fn a_lookup_counted_between_the_sweeps_mark_and_removal_keeps_the_tree() {
@@ -234,11 +246,11 @@ fn a_lookup_counted_between_the_sweeps_mark_and_removal_keeps_the_tree() {
     let counted = Arc::clone(&held);
     rig.clock.advance(TREE_IDLE + Duration::from_millis(1));
     *locked(&core.hooks.marked) = Some(Box::new(move |core| core.count_lookup(1, &counted)));
-    assert_eq!(core.drop_idle_uncounted(1), 0);
+    assert_eq!(core.drop_idle(1), 0);
     *locked(&core.hooks.marked) = None;
     assert_eq!(core.trees_in_memory(), 1);
     assert_eq!((held.lookups.count(), held.lookups.uncounted()), (1, true));
-    assert_eq!(core.drop_idle_uncounted(1), 1);
+    assert_eq!(core.drop_idle(1), 1);
     assert_eq!(core.trees_in_memory(), 0);
 }
 
