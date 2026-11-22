@@ -1,9 +1,9 @@
 //! The watcher of the put root on macOS: one FSEvents stream of the root with the events of each
-//! file (`kFSEventStreamCreateFlagFileEvents`, no latency), which is recursive by itself. Every path
-//! an event names is a [`Seen::Path`] (a rename names both the old and the new path, so the
-//! `.sha256-<hex>.part` name between kbf-task's two renames is seen though it is gone by then); a
-//! directory is a [`Seen::Dir`]; an event that says events were dropped, or that the root changed,
-//! is [`Seen::Lost`].
+//! file (`kFSEventStreamCreateFlagFileEvents`, no latency), which is recursive by itself. Every
+//! path an event names is a [`Seen::Path`] (a rename names both the old and the new path, so the
+//! `.sha256-<hex>.part` name between the task program's two renames is seen though it is gone by
+//! then); a directory is a [`Seen::Dir`]; an event that says events were dropped, or that the root
+//! changed, is [`Seen::Lost`].
 //!
 //! The stream and its run loop are not `Send`, so they never leave the thread that makes them: that
 //! thread starts the stream (the crate runs it on a thread of its own), hands its events to the

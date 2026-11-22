@@ -1,6 +1,6 @@
-//! The put ingest as it serves a root: an object committed in kbf-task's rename sequence becomes
-//! the object of its key with the declared digest and its file goes; a truncated, changed or
-//! undeclared file is refused and nothing is stored; what a scan finds; and when it runs.
+//! The put ingest as it serves a root: an object committed in the task program's rename sequence
+//! becomes the object of its key with the declared digest and its file goes; a truncated, changed
+//! or undeclared file is refused and nothing is stored; what a scan finds; and when it runs.
 
 use super::store::Refusal;
 use super::testing::{Bench, commit, sha};
@@ -13,9 +13,9 @@ fn grace() -> u64 {
     GRACE_MS
 }
 
-/// Asserts that an object committed as kbf-task commits it (`pack.part`, `pack.sha256-<hex>.part`,
-/// `pack`) is stored as `cas/b/<build>/<nonce>/pack` with exactly its bytes, readable through the
-/// cache, and that its file and its emptied directory are removed.
+/// Asserts that an object committed as the job's task program commits it (`pack.part`,
+/// `pack.sha256-<hex>.part`, `pack`) is stored as `cas/b/<build>/<nonce>/pack` with exactly its
+/// bytes, readable through the cache, and that its file and its emptied directory are removed.
 #[tokio::test]
 async fn a_pack_committed_in_the_rename_sequence_becomes_its_object() {
     let mut bench = Bench::new("ingest-stored");

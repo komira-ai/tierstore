@@ -1,31 +1,32 @@
 //! The put ingest of a Mac (`local_cache.put_ingest`): the put directory of a job made of a plain
 //! local directory, with no file system of tierstore's under it. A job's put directory is
-//! `<root>/cas/b/<build>/<nonce>`; kbf-task commits its object there as it does into the put
-//! directory of Linux, `pack.part` renamed to `pack.sha256-<hex>.part` (which declares the SHA-256
-//! the object's bytes must have), and that renamed to `pack`. The ingest watches the root, and for
-//! each committed name whose digest was declared it puts the file's bytes, read once and hashed as
-//! they pass, as the create-only object `cas/b/<build>/<nonce>/<name>` that names that digest (the
-//! put the Linux put directory's commit makes, through the cache), then removes the file and, when
-//! it is empty, the job's directory. What an operator sets, and what the job runtime must do, is in
-//! the operations document (`crates/tierstore/docs/operations.md`, "The put ingest").
+//! `<root>/cas/b/<build>/<nonce>`; the job's task program commits its object there as it does into
+//! the put directory of Linux, `pack.part` renamed to `pack.sha256-<hex>.part` (which declares the
+//! SHA-256 the object's bytes must have), and that renamed to `pack`. The ingest watches the root,
+//! and for each committed name whose digest was declared it puts the file's bytes, read once and
+//! hashed as they pass, as the create-only object `cas/b/<build>/<nonce>/<name>` that names that
+//! digest (the put the Linux put directory's commit makes, through the cache), then removes the
+//! file and, when it is empty, the job's directory. What an operator sets, and what the job runtime
+//! must do, is in the operations document (`crates/tierstore/docs/operations.md`, "The put
+//! ingest").
 //!
 //! # What is seen, and when
 //!
-//! A plain directory keeps no record of the name between kbf-task's two renames, so the watcher
-//! ([`Watcher`]: FSEvents on macOS, inotify on Linux) is what sees it: every path an event names is
-//! looked at, and a `.sha256-<hex>.part` name is recorded as the declaration of the committed name
-//! before it ([`ledger`]). A whole scan of the root ([`scan`]) runs at the start, every
-//! [`SCAN_EVERY`], and whenever the watcher says it lost events or a directory appeared: it finds
-//! the committed files no event led to, the declarations of `.part` names still there, and the
-//! puts to try again.
+//! A plain directory keeps no record of the name between the task program's two renames, so the
+//! watcher ([`Watcher`]: FSEvents on macOS, inotify on Linux) is what sees it: every path an event
+//! names is looked at, and a `.sha256-<hex>.part` name is recorded as the declaration of the
+//! committed name before it ([`ledger`]). A whole scan of the root ([`scan`]) runs at the start,
+//! every [`SCAN_EVERY`], and whenever the watcher says it lost events or a directory appeared: it
+//! finds the committed files no event led to, the declarations of `.part` names still there, and
+//! the puts to try again.
 //!
 //! # What is stored, and what is refused
 //!
 //! - Only a regular file with one link directly in a job's directory, under a name without `.part`,
 //!   whose digest was declared, is put ([`store`]); its key is its path under the root.
 //! - Bytes that are not the declared digest (truncated, longer or changed), a key that holds other
-//!   bytes, a size the upstream refuses, a link and a hard link are refused: nothing is stored,
-//!   and the file is removed. So is a committed file whose digest was not declared within [`GRACE_MS`]
+//!   bytes, a size the upstream refuses, a link and a hard link are refused: nothing is stored, and
+//!   the file is removed. So is a committed file whose digest was not declared within [`GRACE_MS`]
 //!   of its first finding (one committed while no instance watched, or whose events were lost).
 //! - A file that cannot be opened or read, and a put the upstream did not take, are left as they
 //!   are and tried again at the next scan.

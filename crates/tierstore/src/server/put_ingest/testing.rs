@@ -1,6 +1,7 @@
 //! The bench of the put ingest's tests: a cache that takes writes over a tamper upstream, a put
 //! root in its scratch directory, the ingest serving them on a task of its own with a clock the
-//! test sets, and the reports it makes; and the commit of an object as kbf-task makes it.
+//! test sets, and the reports it makes; and the commit of an object as the job's task program makes
+//! it.
 
 use std::path::{Path, PathBuf};
 use std::sync::Arc;
@@ -153,8 +154,9 @@ pub(super) fn sha(bytes: &[u8]) -> TreeDigest {
     TreeDigest::of(bytes)
 }
 
-/// Writes `bytes` into `dir` and commits it as `name`, as kbf-task commits its object: created as
-/// `<name>.part`, renamed to `<name>.sha256-<hex of declared>.part`, and that renamed to `name`.
+/// Writes `bytes` into `dir` and commits it as `name`, as the job's task program commits its
+/// object: created as `<name>.part`, renamed to `<name>.sha256-<hex of declared>.part`, and that
+/// renamed to `name`.
 pub(super) fn commit(dir: &Path, name: &str, bytes: &[u8], declared: TreeDigest) {
     let part = dir.join(format!("{name}.part"));
     std::fs::write(&part, bytes).unwrap();
