@@ -544,11 +544,12 @@ async fn run_watched(
 }
 
 /// Asserts that a stop closes the listener's sockets and a connection that is idle, and cuts
-/// nothing, and that this is seen while another listener owns the port the stop freed. The
-/// sockets are seen closed by what they do, not by connecting to their old port, which any other
-/// socket may be given once it is free (here one is): their flag turns true when they are
-/// dropped, and a client waiting in the backlog (the one slot is held by the idle connection) has
-/// its connection ended by the kernel, which only the close of the listening socket does.
+/// nothing, and that this is seen while another listener owns the port the stop freed (when the
+/// port can be bound). The sockets are seen closed by what they do, not by connecting to their
+/// old port, which any other socket may be given once it is free: their flag turns true when
+/// they are dropped, and a client waiting in the backlog (the one slot is held by the idle
+/// connection) has its connection ended by the kernel, which only the close of the listening
+/// socket does.
 #[tokio::test]
 async fn a_stop_closes_the_sockets_and_the_idle_connections() {
     let core = Arc::new(FakeCore::default());
@@ -569,8 +570,10 @@ async fn a_stop_closes_the_sockets_and_the_idle_connections() {
     let addr = running.addr;
     assert!(!*closed.borrow());
     assert_eq!(running.stopped().await, 0);
-    let thief = listen::bind_sharing(addr, ListenTuning::default().backlog, true)
-        .expect("the freed port bound by another listener");
+    // Another listener on the freed port, as another test of the binary may bind it. The bind
+    // is not asserted: a connection of another test may hold the port by then, which refuses it,
+    // and what follows holds whoever owns the port.
+    let thief = listen::bind_sharing(addr, ListenTuning::default().backlog, true).ok();
     assert!(*closed.borrow());
     let mut nothing = Vec::new();
     let _ = waiting.read_to_end(&mut nothing).await;
