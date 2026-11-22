@@ -32,6 +32,7 @@ server = [
     "dep:crc",
     "dep:crc32c",
     "dep:crc32fast",
+    "dep:fsevent",
     "dep:tierstore-tree",
     "dep:tsfuse",
     "dep:hmac",
@@ -155,6 +156,11 @@ tierstore-tree = { workspace = true, optional = true }
 # serves the node's mount and the put directory on it, and the mount of one tree (section 18 of
 # docs/design/fetch-cache-serve.md, rows T-F8, T-F9 and T-R).
 tsfuse = { workspace = true, optional = true }
+
+# The macOS-only dependency of `server`: the FSEvents stream the put ingest watches its root with
+# (`server::put_ingest`). On Linux it watches with inotify, through `rustix`.
+[target.'cfg(target_os = "macos")'.dependencies]
+fsevent = { workspace = true, optional = true }
 
 [target.'cfg(target_os = "linux")'.dev-dependencies]
 # The tests of the tree mount serve a tree from the rig of `tierstore-tree`: the real mount server

@@ -15,7 +15,7 @@ The updater declaration and the plist this directory held before (`updater.d/tie
 The `postinstall` runs as root each time the package is installed, and makes:
 
 - the account `_tierstore`, the plist's `UserName` and `GroupName`: a group and a user with no password, the shell `/usr/bin/false` and the home `/var/empty`, with the same id, the highest from 399 down to 300 that no user and no group has (with none free the install fails and makes nothing). An account that is there is kept as it is;
-- `/usr/local/tierstore` (0755 `root:wheel`), its `etc` (0750 `root:_tierstore`) and its `cache`, `log` and `run` (0700 `_tierstore:_tierstore`), made when missing and set to these owners and modes on every install; what they hold is never touched.
+- `/usr/local/tierstore` (0755 `root:wheel`), its `etc` (0750 `root:_tierstore`), its `cache`, `log` and `run` (0700 `_tierstore:_tierstore`) and its `put` (0755 `_tierstore:_tierstore`, the root of the put ingest), made when missing and set to these owners and modes on every install; what they hold is never touched.
 
 The configuration and the key files are not the package's. The update hook's `prepare`, which runs before the install and so before the `postinstall`, fails (`config_missing`) while `/usr/local/tierstore/etc/tierstore.toml` is missing, so the file is placed before the package's first install, owned by root and readable by every user (a config package that the host group lists before tierstore does this); the `postinstall` then gives `etc` its group. Once the account is there, as root, from this directory, the file is placed so:
 

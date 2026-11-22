@@ -111,6 +111,7 @@ pub(super) async fn serve_combined(
         trees: None,
         trees_front: None,
         provider: None,
+        put_ingest: None,
     };
     let (server, oci) = (built.server, built.oci);
     serve_front(cache, server, oci, fronts, stop, ready, reconciling).await

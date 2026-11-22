@@ -55,6 +55,7 @@ use super::config_cache::{CachePart, LocalCacheTable, check_oci_is_kept};
 use super::config_fill::{check_fill_outside_cache, fill_socket_of, refuse_prefetch_keys};
 use super::config_interface::Interfaces;
 use super::config_policy::{Policy, check_policies, require_keeping};
+use super::put_ingest::config::refuse_put_ingest;
 
 /// What a file with all three tables stands for.
 #[derive(Debug)]
@@ -84,6 +85,7 @@ pub(super) fn combined(
         return Err(invalid("local_cache.write_through", why));
     }
     refuse_prefetch_keys(&table)?;
+    refuse_put_ingest(&table)?;
     let state_dir = per_run.state_dir.clone();
     let node = storage(server, tiers, fronts, per_run)?;
     overlap(&table.path, &node)?;

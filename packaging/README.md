@@ -589,6 +589,7 @@ put 403.
 | `local_cache.fill_socket` | the Unix socket over which the node's filesystem process asks it to put blobs in the cache; default `fill.sock` in the service's state directory; a build node's key (not in a release yet; see crates/tierstore/docs/configuration.md) |
 | `local_cache.fill_socket_concurrency` | the most fills the fill socket runs at once (1 to 1024, default 16), a pool apart from `max_concurrent_fills` |
 | `local_cache.fill_socket_wait` | the longest a request of the fill socket waits for a permit of that pool (1ms to 1h, default `60s`) |
+| `local_cache.put_ingest` | a Mac's: the root of the jobs' put directories (`cas/b/<build>/<nonce>`), whose committed objects the node stores and removes; an absolute path apart from the cache, and it needs `write_through = true` (default none: nothing is ingested; see `crates/tierstore/docs/operations.md`, "The put ingest") |
 | `local_cache.prefetch_concurrency` | the blobs the prefetch queue fills at once (0 to 64, default 2; 0 turns the queue off), a pool apart from the pools of the reads; a build node's key (not in a release yet) |
 | `local_cache.prefetch_queue` | the most blobs that may wait in the prefetch queue (1 to 1000000, default 16384); past it a blob is turned away |
 | `local_cache.prefetch_queue_ttl` | the longest a blob waits in the prefetch queue (1s to 1h, default `120s`); older, it is dropped when its turn comes |
