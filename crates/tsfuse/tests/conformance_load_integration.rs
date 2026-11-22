@@ -65,7 +65,7 @@ use conformance::{
 use tsfuse::abi::InitFlags;
 use tsfuse::{CancelToken, Completion, Handled, ReaderEnd};
 
-use kernel::skip;
+use kernel::{one_at_a_time, skip};
 
 /// The readers (descriptors) of every session here: the mount's and three clones.
 const READERS: usize = 4;
@@ -383,12 +383,12 @@ fn a_killed_reader_of_a_buffered_read_ends_with_no_interrupt_and_the_read_stays_
     let events = served.events.clone();
     let tokens = served.tokens.clone();
 
-    let mut child = child(BUFFERED_CHILD)
+    let mut command = child(BUFFERED_CHILD);
+    command
         .stdin(Stdio::piped())
         .stdout(Stdio::null())
-        .stderr(Stdio::null())
-        .spawn()
-        .unwrap();
+        .stderr(Stdio::null());
+    let mut child = one_at_a_time(|| command.spawn()).unwrap();
     let path: PathBuf = mounted.path("a");
     writeln!(child.stdin.take().unwrap(), "{}", path.display()).unwrap();
     events.wait_for(|s| (!s.parked.is_empty()).then_some(()));

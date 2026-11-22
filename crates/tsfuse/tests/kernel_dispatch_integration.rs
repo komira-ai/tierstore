@@ -45,7 +45,9 @@ use std::sync::mpsc::channel;
 use std::sync::{Arc, Barrier, Condvar, Mutex};
 use std::thread::{self, ThreadId};
 
-use kernel::{FOPEN_DIRECT_IO, ROOT, VALID, attr, content, ino_of, skip, unavailable};
+use kernel::{
+    FOPEN_DIRECT_IO, ROOT, VALID, attr, content, ino_of, one_at_a_time, skip, unavailable,
+};
 use tierstore_testkit::dir::TestDir;
 use tokio::sync::oneshot;
 use tsfuse::abi::{AttrOut, EntryOut, InitConfig, OpenOut, Operation};
@@ -180,7 +182,7 @@ impl Mounted {
             allow_other: false,
             ..MountOptions::tree("tsfuse-dispatch")
         };
-        let (device, mount) = Mounter::default().mount(&mp, &options).unwrap();
+        let (device, mount) = one_at_a_time(|| Mounter::default().mount(&mp, &options)).unwrap();
         let mut session = Session::init(device, &InitConfig::tree()).unwrap();
         session
             .clone_readers(NonZeroUsize::new(READERS).unwrap())
@@ -198,9 +200,11 @@ impl Mounted {
         self.mp.join(name)
     }
 
-    /// Unmounts; the readers then end.
+    /// Unmounts; the readers then end. A failed unmount leaves the mount to the drop.
     fn unmount(mut self) {
-        self.mount.take().unwrap().unmount(false).unwrap();
+        let mount = self.mount.clone().unwrap();
+        one_at_a_time(|| mount.unmount(false)).unwrap();
+        self.mount = None;
     }
 }
 
@@ -208,7 +212,7 @@ impl Drop for Mounted {
     fn drop(&mut self) {
         if let Some(mount) = self.mount.take() {
             let _ = mount.abort();
-            let _ = mount.unmount(true);
+            let _ = one_at_a_time(|| mount.unmount(true));
         }
     }
 }
@@ -388,13 +392,13 @@ fn child_reads_the_file_named_on_stdin() {
 
 /// A child process that reads `path` once ([`child_reads_the_file_named_on_stdin`]).
 fn child_reading(path: &Path) -> Child {
-    let mut child = Command::new(std::env::current_exe().unwrap())
+    let mut command = Command::new(std::env::current_exe().unwrap());
+    command
         .args(["--exact", CHILD, "--ignored", "--test-threads=1"])
         .stdin(Stdio::piped())
         .stdout(Stdio::null())
-        .stderr(Stdio::null())
-        .spawn()
-        .unwrap();
+        .stderr(Stdio::null());
+    let mut child = one_at_a_time(|| command.spawn()).unwrap();
     let mut stdin = child.stdin.take().unwrap();
     writeln!(stdin, "{}", path.display()).unwrap();
     child

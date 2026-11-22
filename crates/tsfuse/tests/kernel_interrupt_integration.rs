@@ -24,17 +24,19 @@ use std::process::{Child, Command, Stdio};
 
 use kernel::{
     Conn, FOPEN_DIRECT_IO, INT_REQ_BIT, Open, Req, Server, Setup, errno, errno_of, flag,
-    is_read_of, op, read_req, reply, serve_until, set_nonblocking, skip,
+    is_read_of, one_at_a_time, op, read_req, reply, serve_until, set_nonblocking, skip,
 };
 use tsfuse::DevFd;
 
 /// `cat` of the mount's file `f`, its output discarded; `None` (said on stderr) if `cat` cannot
 /// be started.
 fn cat(conn: &Conn) -> Option<Child> {
-    let started = Command::new("cat")
-        .arg(conn.path("f"))
-        .stdout(Stdio::null())
-        .spawn();
+    let started = one_at_a_time(|| {
+        Command::new("cat")
+            .arg(conn.path("f"))
+            .stdout(Stdio::null())
+            .spawn()
+    });
     match started {
         Ok(child) => Some(child),
         Err(e) => {
