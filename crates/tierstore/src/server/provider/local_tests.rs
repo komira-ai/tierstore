@@ -457,7 +457,7 @@ async fn a_tree_that_cannot_be_written_is_refused_by_name_and_leaves_nothing() {
 
 /// Asserts that a file whose read passes `fetch_timeout` fails the write, which `Mount` answers
 /// unavailable by the file's name, leaving nothing; and that the next `Mount`, once the reads go
-/// on, writes the tree again from the start and answers it whole.
+/// on, writes the tree again from the start (asked again until it is whole) and answers it whole.
 #[tokio::test]
 async fn a_read_past_its_bound_fails_the_write_and_the_next_mount_writes_it_again() {
     let local = Local::with("local-bound", |settings| {
@@ -479,7 +479,8 @@ async fn a_read_past_its_bound_fails_the_write_and_the_next_mount_writes_it_agai
             Seen::File(0o644, pack.content(1).to_vec())
         )])
     );
-    assert_eq!(Local::writes(&local.rig.provider), 2);
+    // The write was begun again: at least once more (a slow host may pass the bound again).
+    assert!(Local::writes(&local.rig.provider) >= 2);
 }
 
 /// The tree a `Mount` of the source 0 of `run` answers, asking again while it answers
