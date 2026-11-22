@@ -403,32 +403,39 @@ fn steps_run_on_a_finished_update_report_it_irreversible() {
     assert!(!rollback.report.reversible);
 }
 
-/// Asserts that while the old instance still drains `cleanup` defers (exit 75, reason draining,
-/// not reversible) and a later run finishes. Catches a cleanup that removes the marker of an
-/// instance that still runs.
+/// Asserts that while the old instance still drains `cleanup` commits and finishes at once (exit
+/// 0, not reversible): the record is at rest with b live, the marker of a is gone while a drains
+/// on, a is never stopped, a `rollback` is refused, and a run again has nothing left to clean.
+/// Catches a `cleanup` whose verdict waits for the drain, which hostkeeper retries only
+/// `cleanup_retries` times and then reports as a failed update.
 #[test]
-fn cleanup_defers_while_the_old_instance_drains_and_a_later_run_finishes() {
+fn cleanup_finishes_while_the_old_instance_drains_and_never_stops_it() {
     let fake = SystemdFake::installed();
-    fake.set_drain_looks(2);
+    fake.set_drain_looks(50);
     let p = params(NEW, Some(OLD));
     fake.drive(&p, &[Prepare, Cutover, Verify]);
 
     let first = fake.run(Cleanup, &p);
-    assert_deferred(&first, Reason::Draining, 10);
+    assert_ok(&first);
+    assert_eq!(
+        detail(&first),
+        "committed: tierstore@b serves; tierstore@a still drains and ends by itself"
+    );
     assert!(!first.report.reversible);
-    assert!(fake.record().committed());
-    assert!(fake.record().updating);
-    assert_eq!(fake.markers(), [Instance::A, Instance::B]);
-    assert_failed(&fake.run(Rollback, &p), Reason::Committed);
-
-    let second = fake.run(Cleanup, &p);
-    assert_deferred(&second, Reason::Draining, 10);
-    assert_ok(&fake.run(Cleanup, &p));
     let finished = fake.record();
+    assert!(finished.committed());
     assert!(!finished.updating);
     assert_eq!(finished.live, Some(Instance::B));
+    assert_eq!(finished.next, None);
     assert_eq!(fake.markers(), [Instance::B]);
-    assert_eq!(fake.running(), [Instance::B]);
+    assert_eq!(fake.peek(Instance::A), UnitState::Deactivating);
+    assert!(!fake.actions().iter().any(|a| a.starts_with("units.stop")));
+    assert_failed(&fake.run(Rollback, &p), Reason::Committed);
+    assert_eq!(
+        detail(&fake.run(Cleanup, &p)),
+        "nothing left to clean: the update is committed and finished"
+    );
+    assert_eq!(fake.record(), finished);
 }
 
 /// Asserts that `cleanup` confirms past the old instance of a hand-over, which still drains on

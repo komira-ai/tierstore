@@ -299,22 +299,18 @@ pub(super) fn check_active(c: &Ctx<'_, '_>, record: &Record, retry: u64) -> Resu
     }
 }
 
-/// `cleanup` after the commit: the old fs instance of a hand-over (the other letter of `next`) has
-/// exited by itself (it is never stopped here), and its marker goes.
-pub(super) fn retire(c: &Ctx<'_, '_>, record: &Record) -> Result<(), Done> {
+/// The end of a committed update that handed the fs process over: the old fs instance (the other
+/// letter of `fs_next`) has its marker removed, whether it still drains or has exited, and is
+/// never stopped. Returns it when it still runs: it drains for as long as its longest open file
+/// and ends by itself.
+pub(super) fn retire(c: &Ctx<'_, '_>, record: &Record) -> Result<Option<Instance>, Done> {
     let Some(next) = record.fs_next else {
-        return Ok(());
+        return Ok(None);
     };
     let old = next.other();
-    if c.ports.fs_units.state(old)?.running() {
-        return Err(Done::deferred(
-            Reason::Draining,
-            format!("{} still drains: cleanup runs again", fs_name(old)),
-            DRAIN_RETRY_SECS,
-        ));
-    }
+    let drains = c.ports.fs_units.state(old)?.running();
     c.ports.fs_markers.clear(old)?;
-    Ok(())
+    Ok(drains.then_some(old))
 }
 
 /// The fs part of `rollback`, before the store's: the instance that served before the update, the
@@ -385,24 +381,30 @@ fn desired(record: &Record) -> Option<Instance> {
 }
 
 /// The fs part of `restore`, after the store's: the instance the record names runs, with its
-/// marker, and the other does not. The other is stopped when it is active or deactivating, as it
-/// would race the first for the mount; one that is only activating is left, with its marker
-/// removed (it may be taking the mount).
+/// marker, and the other does not start again. The other is stopped when it is active or
+/// deactivating while the one the record names is not active, as it would race the first for the
+/// mount. It is left running, with its marker removed, when it is only activating (it may be
+/// taking the mount), and when the one the record names is active: that one holds the mount, and
+/// the other is the old instance of a hand-over, which drains and ends by itself (the boot step
+/// runs at every start of hostkeeper, not only after a reboot).
 pub(super) fn restore(c: &Ctx<'_, '_>, record: Option<&Record>) -> Result<String, Done> {
     let Some(wanted) = record.and_then(desired) else {
         return Ok(String::new());
     };
     let other = wanted.other();
-    // One that is only activating may be taking the mount: it is not stopped, its marker goes
-    // and it ends by itself.
     let state = c.ports.fs_units.state(other)?;
+    let mut drains = String::new();
     if state.running() && state != UnitState::Activating {
-        c.ports.fs_units.stop(other)?;
+        if c.ports.fs_units.state(wanted)? == UnitState::Active {
+            drains = format!("; {} still drains and ends by itself", fs_name(other));
+        } else {
+            c.ports.fs_units.stop(other)?;
+        }
     }
     c.ports.fs_markers.clear(other)?;
     c.ports.fs_markers.set(wanted)?;
     c.ports.fs_units.start(wanted)?;
-    Ok(format!("; {} started", fs_name(wanted)))
+    Ok(format!("; {} started{drains}", fs_name(wanted)))
 }
 
 /// The fs part of `uninstall`: each instance that runs is stopped, and both markers go.

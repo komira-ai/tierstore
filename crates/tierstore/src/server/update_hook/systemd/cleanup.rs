@@ -1,10 +1,10 @@
-//! `cleanup`: the commit, and the retirement of the old instance.
+//! `cleanup`: the commit, and the end of the update on record.
 
 use super::super::params::Params;
 use super::super::ports::{Instance, UnitState};
 use super::super::record::{Marker, Record};
 use super::super::report::{Done, Reason};
-use super::{Ctx, DRAIN_RETRY_SECS, fs, next_of, unit_name};
+use super::{Ctx, fs, next_of, unit_name};
 
 pub(super) fn cleanup(c: &Ctx<'_, '_>, params: &Params, record: &Record) -> Result<Done, Done> {
     if !record.updating {
@@ -36,19 +36,41 @@ pub(super) fn cleanup(c: &Ctx<'_, '_>, params: &Params, record: &Record) -> Resu
         c.save(&committed)?;
         committed
     };
+    let (_, drains) = finish(c, &committed)?;
+    Ok(Done::ok(format!(
+        "committed: {} serves{}",
+        unit_name(next),
+        drain_note(&drains)
+    )))
+}
+
+/// The end of a committed update, whatever its old instances are doing: the markers of the old
+/// instances go and the record is saved at rest, `next` as `live` and `fs_next` as `fs_live`.
+/// Returns the record at rest, and the names of the old units that still run.
+///
+/// An old instance of a hand-over drains for as long as its longest request or open file, and it
+/// is never stopped here: it ends by itself. Nothing waits for it, since nothing of the update is
+/// left to do once the new instances serve and the commit is written. Its marker goes while it
+/// runs: systemd reads `ConditionPathExists=` only when it starts a unit, so a process that runs
+/// is not touched, and without the marker the unit is never started again, by a boot or by
+/// `Restart=`. Every later step looks at the units themselves: a `prepare` that finds both
+/// instances of a template running waits for the drain, and the boot step leaves the old instance
+/// to end. A crash in here leaves the record committed and in flight, which the next `cleanup`,
+/// `prepare` or boot step finishes the same way.
+pub(super) fn finish(c: &Ctx<'_, '_>, committed: &Record) -> Result<(Record, Vec<String>), Done> {
+    let next = next_of(committed)?;
+    let mut drains = Vec::new();
     if let Some(live) = committed.live {
         if c.ports.units.state(live)?.running() {
-            return Err(Done::deferred(
-                Reason::Draining,
-                format!("{} still drains: cleanup runs again", unit_name(live)),
-                DRAIN_RETRY_SECS,
-            ));
+            drains.push(unit_name(live));
         }
         c.ports.markers.clear(live)?;
     }
     // The old fs instance of a hand-over ends by itself, and is never stopped here.
-    fs::retire(c, &committed)?;
-    let mut finished = committed;
+    if let Some(old) = fs::retire(c, committed)? {
+        drains.push(fs::fs_name(old));
+    }
+    let mut finished = committed.clone();
     finished.updating = false;
     finished.from = None;
     finished.live = Some(next);
@@ -57,10 +79,16 @@ pub(super) fn cleanup(c: &Ctx<'_, '_>, params: &Params, record: &Record) -> Resu
     finished.fs_live = finished.fs_next.or(finished.fs_live);
     finished.fs_next = None;
     c.save(&finished)?;
-    Ok(Done::ok(format!(
-        "committed: {} serves, the old instance is retired",
-        unit_name(next)
-    )))
+    Ok((finished, drains))
+}
+
+/// What a step that finished an update says of the old instances that still drain.
+pub(super) fn drain_note(drains: &[String]) -> String {
+    match drains {
+        [] => ", the old instance is retired".to_owned(),
+        [one] => format!("; {one} still drains and ends by itself"),
+        many => format!("; {} still drain and end by themselves", many.join(" and ")),
+    }
 }
 
 /// Looks afresh at what `verify` saw: `next` runs and the staged release answers. In a

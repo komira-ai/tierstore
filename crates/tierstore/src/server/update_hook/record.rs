@@ -14,7 +14,8 @@
 //!
 //! - `kind`: always `single`, the tag the previous release gave this record.
 //! - `updating`: an update is in flight: `prepare` recorded it. `rollback` and the end of
-//!   `cleanup` clear it.
+//!   `cleanup` clear it; so do `prepare` and the boot step, for an update that is committed
+//!   and that a `cleanup` did not finish.
 //! - `from`: while an update is in flight, the release the host ran before
 //!   (`updater.previous_release`); absent on a first install.
 //! - `to` and `version`: the staged release and the version it must report. Every later step
@@ -233,31 +234,38 @@ impl Record {
     }
 
     /// Whether the record, as a step of the update `params` name finds or leaves it, is that
-    /// update's commit. A record at rest is the last update's: a `prepare` starts another one,
-    /// which nothing has committed yet, and a `rollback` of an update that was never recorded
-    /// (its `prepare` failed) finds nothing of it committed.
+    /// update's commit. A committed record a `prepare` finds is the last update's, at rest or
+    /// left in flight by a `cleanup` that did not finish: the `prepare` starts another update,
+    /// which nothing has committed yet. A `rollback` of an update that was never recorded (its
+    /// `prepare` failed or was deferred) finds nothing of it committed.
     pub(super) fn commits(&self, step: Step, params: &Params) -> bool {
         self.committed()
-            && (self.updating
-                || match step {
-                    Step::Prepare => false,
-                    Step::Rollback => self.is_of(params),
-                    _ => true,
-                })
+            && match step {
+                // A committed record a `prepare` finds is an earlier update's, which it finishes.
+                Step::Prepare => false,
+                Step::Rollback => self.is_of(params),
+                _ => true,
+            }
     }
 
     /// The success of a `rollback` whose update was never recorded: a `prepare` that failed
-    /// records nothing, and the record is at rest on the last update, which the params do not
-    /// name. `None` when the record is of an update in flight, of the one `params` name, or of
+    /// records nothing, and the record is on the last update, which the params do not name: at
+    /// rest, or committed and left in flight by a `cleanup` that did not finish. `None` when the
+    /// record is of an update in flight that is not committed, of the one `params` name, or of
     /// none (a record at rest with no update on it says so itself).
     pub(super) fn nothing_to_roll_back(&self, params: &Params) -> Option<String> {
         let last = self
             .to
             .as_ref()
-            .filter(|_| !self.updating && !self.is_of(params))?;
+            .filter(|_| (!self.updating || self.committed()) && !self.is_of(params))?;
+        let how = if self.updating {
+            "committed, and still in flight,"
+        } else {
+            "at rest"
+        };
         Some(format!(
             "nothing to roll back: the update to {} {} was never recorded (its prepare failed \
-             or never ran); the record is at rest on the last update ({} {})",
+             or never ran); the record is {how} on the last update ({} {})",
             params.staged_release.display(),
             params.target_version,
             last.display(),

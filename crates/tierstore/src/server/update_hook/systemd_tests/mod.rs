@@ -7,6 +7,7 @@ mod binary_tests;
 mod boot_tests;
 mod crash_tests;
 mod cutover_tests;
+mod drain_tests;
 pub(in crate::server::update_hook) mod fake;
 mod fs_failure_tests;
 mod fs_tests;

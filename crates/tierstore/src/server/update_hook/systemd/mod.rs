@@ -23,18 +23,23 @@
 //! - `rollback` brings the previous release back on the instance that served it (or stops the
 //!   only instance of a first install) and records nothing in flight. Before the commit only.
 //! - `cleanup` confirms afresh (it waits for `/readyz`, which the old instance, still draining
-//!   on the same sockets, answers 503), records `stopping` (the commit), waits for the old
-//!   instance to have exited, removes its marker and records that `next` is now `live`.
+//!   on the same sockets, answers 503), records `stopping` (the commit), removes the old
+//!   instance's marker and records that `next` is now `live`, in the same run: it does not wait
+//!   for the old instance to drain, which lasts as long as its longest request or open file.
 //! - `uninstall` stops both instances and removes both markers and the copy of the binary; the
 //!   data stays.
 //! - `restore`, the boot step, makes the markers say what the record says and starts that
-//!   instance.
+//!   instance; the old instance of a hand-over that still drains beside it is left to end.
+//!
+//! A record committed and still in flight (a `cleanup` that ended before it finished, or one of
+//! an earlier release that gave up while the old instance drained) is finished by the next
+//! `cleanup`, `prepare` or `restore`, whichever comes first.
 //!
 //! The second unit, `tierstore-fs@a` and `tierstore-fs@b` ([`fs`]), is handed over in the same
 //! steps on a node where an instance of it runs, between releases that both list
 //! `handoff-fs-v1`: `cutover` starts it after the store (the new instance takes the mount from the
-//! old one), `verify` and `cleanup` need it active, `cleanup` waits for the old instance to exit
-//! and never stops it, `rollback` puts it back before the store, `restore` starts the recorded
+//! old one), `verify` and `cleanup` need it active, `cleanup` removes the old instance's marker
+//! and neither waits for it nor stops it, `rollback` puts it back before the store, `restore` starts the recorded
 //! instance after the store and `uninstall` stops the instances that run.
 //!
 //! Every step holds the lock of the state directory, holds the record to its rules before it
