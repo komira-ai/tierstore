@@ -11,7 +11,7 @@ use super::super::fixtures::{EPOCH, attached, handle_of, loopback, settings};
 use super::super::mount::{Ran, Runner};
 use super::super::wire_client::{Client, Cred, Dec, Enc, GETATTR, NFS};
 use super::{Running, serve, serve_with, timer};
-use crate::server::treefs::config::FsSettings;
+use crate::server::treefs::config::{FsSettings, builders, from_text};
 use crate::server::treefs::ino;
 use crate::server::treefs::locked;
 use crate::server::treefs::testing::SIGNALS;
@@ -245,7 +245,7 @@ async fn a_start_serves_mounts_and_a_stop_unmounts() {
     let mut client = Client::connect(address).await;
     let handle = client.mount("/").await;
     assert_eq!(handle, handle_of(ino::ROOT));
-    // The owner of the entries is the user of the process, so that user is served by default.
+    // The user of the process, and any other user, is served.
     let reply = client
         .call(
             NFS,
@@ -255,7 +255,7 @@ async fn a_start_serves_mounts_and_a_stop_unmounts() {
         )
         .await;
     assert_eq!(Dec::new(&reply.body).u32(), 0);
-    let denied = client
+    let other = client
         .call(
             NFS,
             GETATTR,
@@ -263,7 +263,7 @@ async fn a_start_serves_mounts_and_a_stop_unmounts() {
             Enc::default().opaque(&handle),
         )
         .await;
-    assert_eq!(Dec::new(&denied.body).u32(), 13);
+    assert_eq!(Dec::new(&other.body).u32(), 0);
 
     running.stop().await.unwrap();
     let calls = runner.calls();
@@ -357,23 +357,30 @@ async fn a_stop_after_the_mount_is_gone_succeeds_without_an_unmount() {
     );
 }
 
-/// Asserts that `fs.nfs.allowed_uids` replaces the default list, over the wire: a user in the
-/// configured list is served, and a user of the default list (the one of the process, the mount
-/// user) that the configured list leaves out is answered `NFS3ERR_ACCES`; and that
-/// `fs.nfs.mount = false` serves without running any command, then stops without one.
+/// The `[fs.nfs]` table of a file written for tierstore 0.3.166, which read `fs.nfs.allowed_uids`
+/// and served only the users it listed; serving only (`mount = false`) on any free loopback port.
+const NFS_TABLE_OF_0_3_166: &str = "[fs.nfs]\nlisten = \"127.0.0.1:0\"\nmount = false\n\
+    allowed_uids = [9999]\n";
+
+/// Asserts that this release starts on a file written for tierstore 0.3.166 that sets
+/// `fs.nfs.allowed_uids`, read by the loader of the process, and serves every user over the wire:
+/// the one the file listed, the user of the process (the mount user, which that release served by
+/// default), and one that neither names; and that `fs.nfs.mount = false` serves without running
+/// any command, then stops without one. Catches a release that stops on such a file, or that
+/// still refuses a user the file leaves out.
 #[tokio::test]
-async fn a_start_without_a_mount_serves_only_and_the_list_of_users_is_taken() {
+async fn a_start_on_a_file_that_still_lists_users_serves_every_user() {
     let (rig, _) = attached("nfs-run-nomount");
-    let listed = 9_999;
+    let (listed, other) = (9_999, 7_777);
     let default_user = euid();
-    assert_ne!(listed, default_user);
-    let nfs = super::super::config::NfsSettings {
-        mount: false,
-        allowed_uids: Some(vec![listed]),
-        ..loopback()
-    };
-    let mut settings = settings(&rig, nfs);
-    settings.nfs.listen = "127.0.0.1:0".parse().unwrap();
+    assert!(![listed, other].contains(&default_user));
+    let text = format!(
+        "[fs]\nclient_group = \"77\"\nowner = \"1000:1001\"\n\
+         fill_socket = \"/run/tierstore/fill.sock\"\ncache_path = \"/var/cache/tierstore\"\n\
+         {NFS_TABLE_OF_0_3_166}"
+    );
+    let loaded = from_text(&text, &builders).unwrap();
+    let settings = settings(&rig, loaded.nfs);
     let runner = Recorder::new(true);
     let running = Running::start(&settings, runner.clone(), default_user, None, EPOCH)
         .await
@@ -382,27 +389,19 @@ async fn a_start_without_a_mount_serves_only_and_the_list_of_users_is_taken() {
 
     let mut client = Client::connect(running.address).await;
     let handle = client.mount("/").await;
-    let status_of = |uid: u32| {
-        let handle = handle.clone();
-        async move {
-            let mut client = Client::connect(running.address).await;
-            let reply = client
-                .call(
-                    NFS,
-                    GETATTR,
-                    Cred::Sys(uid, 0),
-                    Enc::default().opaque(&handle),
-                )
-                .await;
-            Dec::new(&reply.body).u32()
-        }
-    };
-    assert_eq!(status_of(listed).await, 0, "the configured user is served");
-    assert_eq!(
-        status_of(default_user).await,
-        13,
-        "the default user, left out of the configured list, is NFS3ERR_ACCES"
-    );
+    for uid in [listed, default_user, other] {
+        let reply = client
+            .call(
+                NFS,
+                GETATTR,
+                Cred::Sys(uid, 0),
+                Enc::default().opaque(&handle),
+            )
+            .await;
+        let mut body = Dec::new(&reply.body);
+        assert_eq!(body.u32(), 0, "user {uid} is served");
+        assert_eq!(body.attr().fileid, ino::ROOT, "user {uid}");
+    }
     drop(client);
 
     running.stop().await.unwrap();

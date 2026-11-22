@@ -1,7 +1,6 @@
 //! What the tests of the NFS frontend share: a rig with the sample tree attached, a file system
 //! over its core, and credentials.
 
-use std::collections::HashSet;
 use std::io::Cursor;
 use std::sync::Arc;
 
@@ -44,15 +43,9 @@ pub(super) fn attached(name: &str) -> (Rig, String) {
     (rig, root)
 }
 
-/// A file system over the core of `rig`, for the user [`UID`].
+/// A file system over the core of `rig`.
 pub(super) fn fs_of(rig: &Rig, settings: &NfsSettings, patience: Patience) -> TreeNfs {
-    TreeNfs::new(
-        Arc::clone(&rig.core),
-        settings,
-        HashSet::from([UID]),
-        patience,
-        EPOCH,
-    )
+    TreeNfs::new(Arc::clone(&rig.core), settings, patience, EPOCH)
 }
 
 /// The credential of a call by `uid` and `gid`, and the groups `gids`, as the client sends it.
@@ -75,15 +68,9 @@ pub(super) fn failed<T: std::fmt::Debug>(result: Result<T, nfsserve::nfs::nfssta
     result.expect_err("the call fails") as u32
 }
 
-/// A file system over `core`, for the user [`UID`].
+/// A file system over `core`.
 pub(super) fn fs_over(core: Arc<crate::server::treefs::core::Core>, patience: Patience) -> TreeNfs {
-    TreeNfs::new(
-        core,
-        &NfsSettings::default(),
-        HashSet::from([UID]),
-        patience,
-        EPOCH,
-    )
+    TreeNfs::new(core, &NfsSettings::default(), patience, EPOCH)
 }
 
 /// The bytes of the blob of `length` bytes that the rig's upstream holds.
