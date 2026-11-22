@@ -23,7 +23,6 @@
 //! `fs.nfs.handoff_ready_wait` after `done`, this one has handed nothing over: it serves on, takes
 //! attaches again, and binds its control socket again where the next had replaced it.
 
-use std::collections::HashSet;
 use std::os::fd::AsFd as _;
 use std::sync::Arc;
 use std::sync::atomic::{AtomicBool, Ordering};
@@ -84,7 +83,9 @@ impl Running {
     ) -> Result<Self, NfsError> {
         let nfs = &settings.nfs;
         let mounter = Mounter::new(runner, nfs, settings.mountpoint.clone(), euid);
-        let user = mounter.user_id()?;
+        // A mount user the machine does not know fails the start here, before a running instance
+        // gives up its socket.
+        mounter.user_id()?;
         let handoff = nfs.handoff.as_ref();
         if let Some(handoff) = handoff {
             check_control_path(&handoff.socket)?;
@@ -110,12 +111,6 @@ impl Running {
         };
         let setup = Setup::start(settings, false, Identity::Boot(epoch))?;
         let reopened = setup.reopened;
-        let allowed: HashSet<u32> = nfs
-            .allowed_uids
-            .clone()
-            .unwrap_or_else(|| vec![user, settings.owner.0])
-            .into_iter()
-            .collect();
         let listen = |source| NfsError::Listen {
             address: nfs.listen,
             source,
@@ -139,7 +134,6 @@ impl Running {
         let fs = TreeNfs::new(
             Arc::clone(&setup.core),
             nfs,
-            allowed,
             patience.unwrap_or_else(|| timer(nfs.jukebox_after)),
             epoch,
         );

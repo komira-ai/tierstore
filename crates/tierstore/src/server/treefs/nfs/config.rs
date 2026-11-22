@@ -10,12 +10,14 @@
 //! | `fs.nfs.mount_retry` | the pause between two tries | `500ms` |
 //! | `fs.nfs.fd_cache_shards` | shards of the cache of open cache files | `64` |
 //! | `fs.nfs.fd_cache_per_shard` | open cache files kept in one shard | `64` |
-//! | `fs.nfs.allowed_uids` | the user ids whose requests are served (`AUTH_SYS`); a fence against other local users, not authentication | the mount user and the owner (`fs.owner`) |
 //! | `fs.nfs.handoff_socket` | the control socket on which a running instance hands its listening socket to the next one (a file in a directory only the user of the process may write); none: no hand-off, an update is a restart | none |
 //! | `fs.nfs.handoff_wait` | how long a new instance waits for the running one's `done` | `10s` |
 //! | `fs.nfs.handoff_ready_wait` | how long the running instance gives the new one after `done` to say `ready` (it covers the new one's whole start) before it serves on | `120s` |
 //! | `fs.nfs.drain_wait` | how long an instance that handed over waits for the clients to close their connections before it ends | `10s` |
 //! | `fs.nfs.jukebox_after` | how long a read waits for a fill before the client is told to ask again | `5s` |
+//!
+//! A key an earlier release read and this one does not is in [`REMOVED`]: a file that still sets it
+//! loads, whatever its value, and the start says once that it is ignored and why.
 
 use std::net::{IpAddr, Ipv4Addr, SocketAddr};
 use std::time::Duration;
@@ -61,6 +63,22 @@ const DEFAULT_DRAIN_WAIT: Duration = Duration::from_secs(10);
 /// The longest a name of a user may be.
 const MOST_USER_NAME: usize = 64;
 
+/// The keys of `[fs.nfs]` that an earlier release read and this one does not, each with why: a
+/// file written for that release starts with them, and each is said.
+const REMOVED: [(&str, &str); 1] = [(
+    "allowed_uids",
+    "removed after tierstore 0.3.166: the file service answers every local user, as the S3 front \
+     answers every client that holds a key",
+)];
+
+/// The warning for the key `key` of `[fs.nfs]` that this release does not read.
+pub(in crate::server) fn ignored(key: &str) -> String {
+    match REMOVED.iter().find(|(removed, _)| *removed == key) {
+        Some((_, why)) => format!("tierstore fs: fs.nfs.{key} is ignored: {why}"),
+        None => format!("tierstore fs: fs.nfs.{key} is not a key of this release; ignored"),
+    }
+}
+
 /// `[fs.nfs]`.
 #[derive(Debug, Deserialize)]
 pub(in crate::server) struct NfsTable {
@@ -71,7 +89,6 @@ pub(in crate::server) struct NfsTable {
     mount_retry: Option<Dur>,
     fd_cache_shards: Option<u32>,
     fd_cache_per_shard: Option<u32>,
-    allowed_uids: Option<Vec<u32>>,
     jukebox_after: Option<Dur>,
     handoff_socket: Option<std::path::PathBuf>,
     handoff_wait: Option<Dur>,
@@ -92,8 +109,6 @@ pub(in crate::server) struct NfsSettings {
     pub mount_retry: Duration,
     pub fd_cache_shards: usize,
     pub fd_cache_per_shard: usize,
-    /// The user ids that are served; none is the mount user and the owner of the entries.
-    pub allowed_uids: Option<Vec<u32>>,
     pub jukebox_after: Duration,
     /// The hand-off of the listening socket to a successor, if the file names a control socket.
     pub handoff: Option<Handoff>,
@@ -113,7 +128,6 @@ impl Default for NfsSettings {
             mount_retry: DEFAULT_MOUNT_RETRY,
             fd_cache_shards: DEFAULT_SHARDS as usize,
             fd_cache_per_shard: DEFAULT_PER_SHARD as usize,
-            allowed_uids: None,
             jukebox_after: DEFAULT_JUKEBOX_AFTER,
             handoff: None,
             ready_wait: DEFAULT_READY_WAIT,
@@ -211,7 +225,7 @@ impl NfsSettings {
     ///
     /// # Errors
     /// A [`ConfigError`] that names the key: an address that is not on loopback, a user name that
-    /// is not one, an empty list of users, a value out of its range.
+    /// is not one, a value out of its range.
     pub(in crate::server) fn of(table: Option<NfsTable>) -> Result<Self, ConfigError> {
         let Some(table) = table else {
             return Ok(Self::default());
@@ -230,12 +244,6 @@ impl NfsSettings {
             1,
             65_536,
         )?;
-        if table.allowed_uids.as_ref().is_some_and(Vec::is_empty) {
-            return Err(invalid(
-                "fs.nfs.allowed_uids",
-                "is empty: no request would be served",
-            ));
-        }
         Ok(Self {
             listen: table
                 .listen
@@ -257,7 +265,6 @@ impl NfsSettings {
             )?,
             fd_cache_shards: shards as usize,
             fd_cache_per_shard: per_shard as usize,
-            allowed_uids: table.allowed_uids,
             jukebox_after: span(
                 "jukebox_after",
                 table.jukebox_after,

@@ -457,12 +457,13 @@ On a Mac `tierstore fs` has no FUSE: it serves the same trees read-only over NFS
 | `fs.nfs.mount_retry` | duration, `500ms` (1ms to 1m) | the pause between two tries |
 | `fs.nfs.fd_cache_shards` | count, 64 (1 to 4096) | the shards of the cache of open cache files, each with a lock of its own |
 | `fs.nfs.fd_cache_per_shard` | count, 64 (1 to 65536) | the open files one shard keeps; the oldest is closed first. Shards times this is the most descriptors the cache holds, and the process needs a limit of open files above that (the launchd job sets 1048576; with the default 256 of a shell, a read that cannot open a cache file is `NFS3ERR_IO`) |
-| `fs.nfs.allowed_uids` | list of user ids, the mount user and the user of `fs.owner` | the users whose requests (`AUTH_SYS`) are served; any other, and a request with no user, is `NFS3ERR_ACCES`. This is a fence against other local users, not authentication: any local process can send any user id to the loopback socket |
 | `fs.nfs.jukebox_after` | duration, `5s` (1ms to 10m) | how long a read waits for a fill before the client is told to ask again (`NFS3ERR_JUKEBOX`); the fill goes on |
 | `fs.nfs.handoff_socket` | path (absolute, at most 103 bytes), none | the Unix socket on which a running process hands its listening socket to the next one. With it, a process that starts asks a running one for the socket before it does anything else, and serves on the one it is given; without it, an update is a restart. The two processes of an update are given the same path and the same `fs.nfs.listen` |
 | `fs.nfs.handoff_wait` | duration, `10s` (1ms to 1h) | how long a new process waits for the running process's `done`, from its connect. Needs `fs.nfs.handoff_socket` |
 | `fs.nfs.handoff_ready_wait` | duration, `120s` (1ms to 1h) | the time the running process gives the new one after `done` to say `ready`; the new one answers only after the running process has replied `bye`. The wait covers the new process's whole start, including the attachments it makes again (the manifests are read through the fill socket), so set it above that time on a node with many attached trees: a new process still starting when it ends is not the one that serves (its `ready` gets no `bye` and it exits), and the running process serves on. Needs `fs.nfs.handoff_socket` |
 | `fs.nfs.drain_wait` | duration, `10s` (1ms to 1h) | how long a process whose socket was taken waits for its clients to close their connections (it has shut down its side of each) before it ends |
+
+Who is served: every call that names a user (`AUTH_SYS`, as `mount_nfs` sends), whichever user it names, the way the S3 front serves every client that holds a key; a call that names no user is `NFS3ERR_ACCES`. What fences the service is that it listens on loopback only, so only a process of this machine reaches it, and that the export is read-only for every user, root included: a call that would change a tree is `NFS3ERR_ROFS`. Any local user can therefore read an attached tree: through the mount as far as the entries' modes and the directories above the mount point let it, and through the socket whatever the modes say (a `READ` is not checked against them; `ACCESS` is). No user can change a tree. The key `fs.nfs.allowed_uids`, the users the releases up to tierstore 0.3.166 served, was removed after that release: a file that still has it starts, whatever its value, and the start says once on stderr, `tierstore fs: fs.nfs.allowed_uids is ignored: removed after tierstore 0.3.166: the file service answers every local user, as the S3 front answers every client that holds a key`.
 
 A restart and a hand-over keep the mount: a process that finds something mounted at `fs.mountpoint` (the `mount` listing names it) makes no mount, whatever `fs.nfs.mount` says, and its clients' hard mount waits for the socket, which must be the same address, so `fs.nfs.listen` needs a fixed port (the default is one). A mount that the runtime directory notes was made from another address reaches no one: the process unmounts it (by force if it is busy) and mounts afresh. A stop unmounts, by `diskutil unmount force` when `umount` refuses. A restart of the process in the same boot reopens the table of tree numbers, so the handles clients hold name the same entries; a start after a reboot makes it afresh, and a handle of the earlier boot is `NFS3ERR_STALE`.
 
@@ -476,7 +477,6 @@ mountpoint = "/Volumes/tierstore"
 
 [fs.nfs]
 mount_user = "builder"
-allowed_uids = [501]
 ```
 
 ### `[fs.put]`

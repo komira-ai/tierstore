@@ -8,7 +8,7 @@
 //! `fs.nfs.jukebox_after` for a fill is answered `NFS3ERR_JUKEBOX`, which has the client ask
 //! again, while the fill goes on.
 
-use std::collections::{HashMap, HashSet};
+use std::collections::HashMap;
 use std::future::Future;
 use std::pin::Pin;
 use std::sync::{Arc, Mutex};
@@ -117,7 +117,6 @@ fn class_bits(attr: &Attr, auth: &auth_unix) -> u16 {
 pub(super) struct TreeNfs {
     core: Arc<Core>,
     fds: Arc<FdCache>,
-    allowed: HashSet<u32>,
     patience: Patience,
     /// The epoch of the mount, which its handles carry.
     epoch: u32,
@@ -126,11 +125,10 @@ pub(super) struct TreeNfs {
 }
 
 impl TreeNfs {
-    /// The file system of `core`, the mount of `epoch`, which serves the users `allowed`.
+    /// The file system of `core`, the mount of `epoch`.
     pub(super) fn new(
         core: Arc<Core>,
         settings: &NfsSettings,
-        allowed: HashSet<u32>,
         patience: Patience,
         epoch: u32,
     ) -> Self {
@@ -140,7 +138,6 @@ impl TreeNfs {
                 settings.fd_cache_shards,
                 settings.fd_cache_per_shard,
             )),
-            allowed,
             patience,
             epoch,
             filling: Arc::default(),
@@ -223,11 +220,12 @@ impl NFSFileSystem for TreeNfs {
         ino::ROOT
     }
 
+    /// A call that names a user (`AUTH_SYS`) is served, whichever user it names: the service
+    /// listens on loopback only and serves a read-only tree, so any local user may read it, as any
+    /// client that holds a key may read through the S3 front. A call that names no user is
+    /// `NFS3ERR_ACCES`: `ACCESS` and the client's own checks of the mode bits need a user.
     fn authorize(&self, auth: Option<&auth_unix>) -> Result<(), nfsstat3> {
-        match auth {
-            Some(auth) if self.allowed.contains(&auth.uid()) => Ok(()),
-            _ => Err(nfsstat3::NFS3ERR_ACCES),
-        }
+        auth.map(|_| ()).ok_or(nfsstat3::NFS3ERR_ACCES)
     }
 
     async fn access(

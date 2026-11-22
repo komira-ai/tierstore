@@ -36,7 +36,7 @@ use crate::server::config_units::Dur;
 use crate::server::config_unknown::fields_of;
 
 use super::groups::{self, Found};
-use super::nfs::config::{NfsSettings, NfsTable};
+use super::nfs::config::{NfsSettings, NfsTable, ignored as nfs_ignored};
 use super::put::config::{self as put_config, PutConfig, PutTable};
 
 /// The lookup of a group name: [`groups::system`], or a test's table.
@@ -345,7 +345,7 @@ pub(in crate::server) fn from_text(
         .and_then(toml::Value::as_table);
     for key in nfs.into_iter().flat_map(|table| table.keys()) {
         if !nfs_known.contains(&key.as_str()) {
-            tracing::warn!("tierstore fs: fs.nfs.{key} is not a key of this release; ignored");
+            tracing::warn!("{}", nfs_ignored(key));
         }
     }
     let put_known = fields_of::<PutTable>();

@@ -291,6 +291,31 @@ fn the_mac_ingests_its_jobs_put_directories() {
     assert_eq!(cache["write_through"].as_bool(), Some(true));
 }
 
+/// Asserts that the Mac's node binds the fill socket `tierstore fs` reads every file through: the
+/// file names `local_cache.fill_socket` itself, in the directory the installer package makes
+/// (`run`, beside the provider's socket and apart from it, outside the cache), because launchd
+/// sets no `STATE_DIRECTORY` for either plist (neither has `EnvironmentVariables`), and the
+/// default socket is made only in that directory. It would catch a Mac whose node binds no fill
+/// socket, so that its mount cannot fill one file of a tree, of a job's input or of a placement.
+#[test]
+fn the_mac_names_its_fill_socket_since_launchd_gives_no_state_directory() {
+    for dict in [plist(), plist_in(&package_plist_text())] {
+        assert!(!dict.contains_key("EnvironmentVariables"), "{dict:?}");
+    }
+    let file = config();
+    let cache = table(&file, "local_cache");
+    let socket = format!("{LAUNCHD_LINKS_DIR}/run/fill.sock");
+    assert_eq!(
+        cache.get("fill_socket").and_then(toml::Value::as_str),
+        Some(socket.as_str()),
+        "local_cache.fill_socket"
+    );
+    let provider = interfaces(&file, "mount-provider")[0]["params"]["socket"].as_str();
+    assert_ne!(provider, Some(socket.as_str()));
+    let path = cache["path"].as_str().expect("local_cache.path");
+    assert!(!Path::new(&socket).starts_with(path), "{socket} in {path}");
+}
+
 /// Asserts that the binary itself takes the plist's command line and the shipped file: the
 /// file, copied into a scratch directory with its key files and its cache there (keys of the
 /// form the process reads, mode 0600), is checked by the binary run with the plist's own
