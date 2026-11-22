@@ -3,14 +3,18 @@
 //! an event names is a [`Seen::Path`] (a rename names both the old and the new path, so the
 //! `.sha256-<hex>.part` name between kbf-task's two renames is seen though it is gone by then); a
 //! directory is a [`Seen::Dir`]; an event that says events were dropped, or that the root changed,
-//! is [`Seen::Lost`]. The stream runs on a thread of its own, the crate's, whose events a second
-//! thread hands to the ingest's task.
+//! is [`Seen::Lost`].
+//!
+//! The stream and its run loop are not `Send`, so they never leave the thread that makes them: that
+//! thread starts the stream (the crate runs it on a thread of its own), hands its events to the
+//! ingest's task, and stops it when the watcher is dropped.
 
 use std::io;
 use std::path::{Path, PathBuf};
+use std::sync::mpsc;
 
 use fsevent::{Event, FsEvent, StreamFlags};
-use tokio::sync::mpsc::{UnboundedReceiver, unbounded_channel};
+use tokio::sync::mpsc::{UnboundedReceiver, UnboundedSender, unbounded_channel};
 
 use super::Seen;
 use super::names::{Place, place};
@@ -25,10 +29,43 @@ fn lost() -> StreamFlags {
 
 /// The watcher of one root.
 pub(super) struct Watcher {
-    stream: FsEvent,
+    /// Dropped with the watcher, which ends the thread of the stream, and the stream with it.
+    _stop: mpsc::Sender<()>,
     events: UnboundedReceiver<Event>,
     /// The root as the events name it: with its links resolved.
     root: PathBuf,
+}
+
+/// The thread of the stream of `root`: starts it, says whether it started on `started`, passes its
+/// events to `events` until `stop` is dropped, and stops it.
+fn stream(
+    root: String,
+    started: mpsc::Sender<io::Result<()>>,
+    events: UnboundedSender<Event>,
+    stop: mpsc::Receiver<()>,
+) {
+    let mut stream = FsEvent::new(vec![root]);
+    let (to_bridge, from_stream) = mpsc::channel();
+    if let Err(why) = stream.observe_async(to_bridge) {
+        let _ = started.send(Err(io::Error::other(why.to_string())));
+        return;
+    }
+    let _ = started.send(Ok(()));
+    let bridge = std::thread::Builder::new()
+        .name("tierstore-put-ingest-events".to_owned())
+        .spawn(move || {
+            while let Ok(event) = from_stream.recv() {
+                if events.send(event).is_err() {
+                    break;
+                }
+            }
+        });
+    // Returns when the watcher is dropped.
+    let _ = stop.recv();
+    stream.shutdown_observe();
+    if let Ok(bridge) = bridge {
+        let _ = bridge.join();
+    }
 }
 
 impl Watcher {
@@ -38,26 +75,21 @@ impl Watcher {
     /// The root cannot be resolved, or the stream cannot be started.
     pub(super) fn new(root: &Path) -> io::Result<Self> {
         let root = std::fs::canonicalize(root)?;
-        let shown = root.to_str().ok_or_else(|| {
-            io::Error::new(io::ErrorKind::InvalidInput, "the root is not UTF-8")
-        })?;
-        let mut stream = FsEvent::new(vec![shown.to_owned()]);
-        let (to_bridge, from_stream) = std::sync::mpsc::channel();
-        stream
-            .observe_async(to_bridge)
-            .map_err(|why| io::Error::other(why.to_string()))?;
+        let shown = root
+            .to_str()
+            .ok_or_else(|| io::Error::new(io::ErrorKind::InvalidInput, "the root is not UTF-8"))?
+            .to_owned();
+        let (started, starting) = mpsc::channel();
         let (to_task, events) = unbounded_channel();
+        let (stop, stopping) = mpsc::channel();
         let _ = std::thread::Builder::new()
-            .name("tierstore-put-ingest-events".to_owned())
-            .spawn(move || {
-                while let Ok(event) = from_stream.recv() {
-                    if to_task.send(event).is_err() {
-                        break;
-                    }
-                }
-            })?;
+            .name("tierstore-put-ingest-stream".to_owned())
+            .spawn(move || stream(shown, started, to_task, stopping))?;
+        starting
+            .recv()
+            .map_err(|_| io::Error::other("the FSEvents thread ended before its stream started"))??;
         Ok(Self {
-            stream,
+            _stop: stop,
             events,
             root,
         })
@@ -96,11 +128,5 @@ impl Watcher {
         } else {
             seen.push(Seen::Path(rel));
         }
-    }
-}
-
-impl Drop for Watcher {
-    fn drop(&mut self) {
-        self.stream.shutdown_observe();
     }
 }
