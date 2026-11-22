@@ -52,8 +52,13 @@ impl Bench {
 
     /// Starts the ingest of the root into `cache`, and does not wait.
     pub(super) fn spawn_on(&mut self, cache: LocalCache) {
-        let (tell, reports) = mpsc::unbounded_channel();
         let clock: Arc<dyn crate::Clock> = self.clock.clone();
+        self.spawn_clocked(cache, clock);
+    }
+
+    /// Starts the ingest of the root into `cache` on `clock`, and does not wait.
+    pub(super) fn spawn_clocked(&mut self, cache: LocalCache, clock: Arc<dyn crate::Clock>) {
+        let (tell, reports) = mpsc::unbounded_channel();
         let ingest = PutIngest::new(cache, self.root.clone()).telling(clock, tell);
         let halt = Arc::clone(&self.halt);
         self.task = Some(tokio::spawn(ingest.serve(halt)));
@@ -111,6 +116,16 @@ impl Bench {
     pub(super) async fn object(&self, key: &str) -> Option<Vec<u8>> {
         let got = self.rig.tamper.get(key, None).await.ok()?;
         Some(got.to_vec())
+    }
+
+    /// Tells the ingest to halt, and does not wait.
+    pub(super) fn halt(&self) {
+        self.halt.notify_one();
+    }
+
+    /// Whether the ingest has ended.
+    pub(super) fn ended(&self) -> bool {
+        self.task.as_ref().is_none_or(JoinHandle::is_finished)
     }
 
     /// Halts the ingest and waits for it to end.

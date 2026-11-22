@@ -53,6 +53,8 @@ mod names_tests;
 #[cfg(test)]
 mod scan_tests;
 #[cfg(test)]
+mod serve_edge_tests;
+#[cfg(test)]
 mod serve_tests;
 #[cfg(test)]
 mod store_tests;
