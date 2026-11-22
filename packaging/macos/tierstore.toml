@@ -45,8 +45,8 @@ whole_fill_limit = "128MiB"
 # The fill socket tierstore fs reads every file of a tree through (crates/tierstore/docs/operations.md,
 # "The fill socket"), named here because launchd gives the job no state directory, the only place
 # the default socket is made: without it the node binds no fill socket and the mount cannot fill a
-# file. In the directory the installer package makes (_tierstore, 0700); the Mac's fs.toml names
-# the same path as fs.fill_socket.
+# file. In the directory the installer package makes (_tierstore, 0700). The operator's
+# /usr/local/tierstore/etc/fs.toml, which no package ships, must set fs.fill_socket to the same path.
 fill_socket      = "/usr/local/tierstore/run/fill.sock"
 write_through    = true
 # The root of the jobs' put directories, made by the installer package (_tierstore, 0755);
