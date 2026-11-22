@@ -114,6 +114,7 @@ fn a_mount_provider_interface_with_its_socket_alone_takes_the_defaults() {
         socket: PathBuf::from(SOCKET),
         mountpoint: PathBuf::from("/run/tierstore/fs"),
         fetch_timeout: Duration::from_secs(60),
+        local_trees: None,
     };
     assert_eq!(provider_of(&[s3(), with_socket("")]), Some(wanted));
 }
@@ -127,8 +128,52 @@ fn the_params_of_a_mount_provider_interface_are_the_provider() {
         socket: PathBuf::from(SOCKET),
         mountpoint: PathBuf::from("/mnt/tierstore"),
         fetch_timeout: Duration::from_secs(5),
+        local_trees: None,
     };
     assert_eq!(provider_of(&[given.clone(), s3()]), Some(wanted));
+}
+
+/// Asserts an interface with `local_trees` gives the provider that directory to write whole trees
+/// into, with the other params at their defaults.
+#[test]
+fn a_mount_provider_interface_with_local_trees_writes_them_there() {
+    let given = with_socket(", local_trees = \"/usr/local/tierstore/job-trees\"");
+    let wanted = ProviderFlags {
+        socket: PathBuf::from(SOCKET),
+        mountpoint: PathBuf::from("/run/tierstore/fs"),
+        fetch_timeout: Duration::from_secs(60),
+        local_trees: Some(PathBuf::from("/usr/local/tierstore/job-trees")),
+    };
+    assert_eq!(provider_of(&[s3(), given]), Some(wanted));
+}
+
+/// Asserts the refusals of `local_trees`, each by its exact message: a path that is not absolute,
+/// the root, a `mountpoint` beside it, and the cache directory or a path inside it.
+#[test]
+fn local_trees_is_refused_where_it_is_wrong() {
+    let check = |more: &str| refusal(&build_node("", ""), &[s3(), with_socket(more)]);
+    assert_eq!(
+        check(", local_trees = \"job-trees\""),
+        "interface[1].params.local_trees: \"job-trees\" must be an absolute path"
+    );
+    assert_eq!(
+        check(", local_trees = \"/\""),
+        "interface[1].params.local_trees: \"/\" is the root: the trees need a directory of their own"
+    );
+    assert_eq!(
+        check(", local_trees = \"/trees\", mountpoint = \"/run/tierstore/fs\""),
+        "interface[1].params.local_trees: not with mountpoint: the provider answers either directories it writes or directories of tierstore fs"
+    );
+    for inside in ["/var/lib/tierstore-cache", "/var/lib/tierstore-cache/trees"] {
+        assert_eq!(
+            check(&format!(", local_trees = \"{inside}\"")),
+            format!(
+                "mount-provider interface params.local_trees: \"{inside}\" is local_cache.path or inside it: it is not a place for the cache's files"
+            )
+        );
+    }
+    let beside = ", local_trees = \"/var/lib/tierstore-cache-trees\"";
+    assert!(provider_of(&[s3(), with_socket(beside)]).is_some());
 }
 
 /// Asserts the refusals of the params of a `mount-provider` interface, each by its exact message:
@@ -221,6 +266,7 @@ fn the_providers_params_are_not_the_other_types() {
             format!("socket = \"{SOCKET}\""),
             "mountpoint = \"/run/tierstore/fs\"".to_owned(),
             "fetch_timeout = \"5s\"".to_owned(),
+            "local_trees = \"/trees\"".to_owned(),
         ] {
             let name = param.split(' ').next().expect("a name");
             let entries = [s3(), entry(kind, &format!("{listen}, {param}"))];

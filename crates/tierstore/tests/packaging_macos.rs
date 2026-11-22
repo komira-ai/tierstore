@@ -256,8 +256,10 @@ fn the_file_is_a_cache_of_the_storage_nodes_with_a_proxy_id_from_the_facts_file(
 
 /// Asserts that the Mac runs the mount provider jobscheduler's agent asks for a job's tree: one
 /// `mount-provider` interface, on a socket in a directory of its own under the Mac's tierstore
-/// directory, answering trees under the Mac's mount of `tierstore fs`. It would catch a Mac whose
-/// jobs cannot have their inputs made local before they start.
+/// directory, writing each tree whole into `job-trees` there (which the package's postinstall
+/// makes) rather than answering a directory of `tierstore fs`, whose network volume a Mac's jobs
+/// cannot read. It would catch a Mac whose jobs cannot have their inputs made local before they
+/// start, or are answered a directory they cannot read.
 #[test]
 fn the_mac_runs_the_mount_provider_on_its_socket() {
     let file = config();
@@ -270,8 +272,8 @@ fn the_mac_runs_the_mount_provider_on_its_socket() {
         Some(format!("{LAUNCHD_LINKS_DIR}/run/provider.sock").as_str())
     );
     assert_eq!(
-        params["mountpoint"].as_str(),
-        Some("/private/var/tierstore/fs")
+        params["local_trees"].as_str(),
+        Some(format!("{LAUNCHD_LINKS_DIR}/job-trees").as_str())
     );
 }
 

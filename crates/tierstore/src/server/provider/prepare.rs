@@ -256,7 +256,7 @@ fn stage_of(why: CreateError) -> Stage {
 }
 
 /// The bytes of the tree list `key`, read through the cache within the list's bound.
-async fn read_list(shared: &Shared, key: &str) -> Result<Vec<u8>, Stage> {
+pub(super) async fn read_list(shared: &Shared, key: &str) -> Result<Vec<u8>, Stage> {
     let bound = shared.settings.list_timeout;
     match tokio::time::timeout(bound, read_whole(shared, key)).await {
         Err(_) => Err(Stage::Failed(format!(

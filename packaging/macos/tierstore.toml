@@ -24,10 +24,12 @@ params = { addresses = ["127.0.0.1:9300"] }
 
 # The mount provider jobscheduler's agent on this Mac asks for a job's input tree
 # (crates/tierstore/docs/operations.md, "The mount provider"): a Unix socket only, mode 0600, in a
-# directory _tierstore owns; `mountpoint` is the Mac's `fs.mountpoint` of tierstore fs.
+# directory _tierstore owns. A job on a Mac cannot read a network volume, so the provider writes
+# each tree whole, as plain files, into `local_trees` (made by the package's postinstall,
+# _tierstore 0755) and answers that directory; the agent takes it as a read-only mount root.
 [[interface]]
 type   = "mount-provider"
-params = { socket = "/usr/local/tierstore/run/provider.sock", mountpoint = "/private/var/tierstore/fs" }
+params = { socket = "/usr/local/tierstore/run/provider.sock", local_trees = "/usr/local/tierstore/job-trees" }
 
 [server]
 proxy_id_from_facts = { path = "/var/lib/hostkeeper/facts.json", prefix = "tierstore-cache-" }

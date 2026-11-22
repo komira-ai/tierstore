@@ -14,6 +14,7 @@ use std::time::Duration;
 use tierstore_trees_api::provider::v1::{MountMode, Source};
 use tokio::sync::{Semaphore, watch};
 
+use super::local::{self, LocalTrees};
 use super::names::{SourceId, check_name, source_of};
 use super::prepare::{Job, run};
 use super::{MOUNT_WAIT, ProviderError, ProviderFlags};
@@ -72,6 +73,9 @@ pub(super) struct Settings {
     pub ttl: Duration,
     /// The largest tree list read.
     pub max_list_bytes: usize,
+    /// The directory whole trees are written into and answered from; none answers directories of
+    /// `tierstore fs` under `mountpoint`.
+    pub local_trees: Option<PathBuf>,
 }
 
 /// What the preparations share.
@@ -84,6 +88,8 @@ pub(super) struct Shared {
     /// The reads of files of every source together: `trees.fill_concurrency` at once. Closed when
     /// the process stops, and the reads not begun are then not made.
     pub fills: Semaphore,
+    /// The whole trees, when the provider writes them (`local_trees`).
+    pub local: Option<Arc<LocalTrees>>,
     sources: Mutex<BTreeMap<SourceId, Held>>,
 }
 
@@ -120,13 +126,18 @@ pub(super) fn mode_line(mode: PreparePrefetch) -> String {
 impl Provider {
     /// The provider of the node whose trees are `store`, over `cache`, as the interface's `flags`
     /// say: its placements last `trees.ttl_max`, and it reads at most `trees.fill_concurrency`
-    /// files at once, or none if `trees.prepare_prefetch` is `none`, which the log says once here.
+    /// files at once, or none if `trees.prepare_prefetch` is `none`; or, with `local_trees`, it
+    /// writes whole trees there, reading every file. The log says which once here.
     pub(in crate::server) fn new(
         store: TreeStore,
         cache: LocalCache,
         flags: &ProviderFlags,
     ) -> Self {
-        tracing::info!("{}", mode_line(store.config().prepare_prefetch));
+        let line = match &flags.local_trees {
+            Some(root) => local::mode_line(root),
+            None => mode_line(store.config().prepare_prefetch),
+        };
+        tracing::info!("{line}");
         let settings = Settings {
             mountpoint: flags.mountpoint.clone(),
             list_timeout: flags.fetch_timeout,
@@ -134,19 +145,26 @@ impl Provider {
             mount_wait: MOUNT_WAIT,
             ttl: store.config().ttl_max,
             max_list_bytes: MAX_TREE_LIST_BYTES,
+            local_trees: flags.local_trees.clone(),
         };
         Self::with(store, cache, settings)
     }
 
-    /// The same, with `settings`.
+    /// The same, with `settings`. With `local_trees`, the partial trees a process before this one
+    /// left there are removed ([`LocalTrees::open`]).
     pub(super) fn with(store: TreeStore, cache: LocalCache, settings: Settings) -> Self {
         let fills = Semaphore::new(store.config().fill_concurrency);
+        let local = settings
+            .local_trees
+            .clone()
+            .map(|root| Arc::new(LocalTrees::open(root)));
         Self {
             shared: Arc::new(Shared {
                 store,
                 cache,
                 settings,
                 fills,
+                local,
                 sources: Mutex::new(BTreeMap::new()),
             }),
         }
@@ -246,7 +264,9 @@ impl Provider {
         }
     }
 
-    /// Begins the preparation of the source `id`, held as `held`, on a task of its own.
+    /// Begins the preparation of the source `id`, held as `held`, on a task of its own: the write
+    /// of its whole tree with `local_trees`, its placement under the mount of `tierstore fs`
+    /// without.
     fn start(&self, id: &SourceId, held: &Held) {
         held.stage.send_replace(Stage::Preparing);
         let job = Job {
@@ -256,30 +276,41 @@ impl Provider {
             stage: Arc::clone(&held.stage),
             released: Arc::clone(&held.released),
         };
-        tokio::spawn(run(Arc::clone(&self.shared), job));
+        let shared = Arc::clone(&self.shared);
+        match &self.shared.local {
+            Some(trees) => tokio::spawn(local::run(shared, Arc::clone(trees), job)),
+            None => tokio::spawn(run(shared, job)),
+        };
     }
 
-    /// `Mount`: the directory of the source's tree, once it is placed.
+    /// `Mount`: the directory of the source's tree, once it is placed; with `local_trees`, the
+    /// directory of the whole tree its key names, once it is written.
     ///
     /// # Errors
     /// [`ProviderError::Unavailable`] if the tree is not placed within the wait, or its
-    /// preparation failed (and is begun again), or the source was never prepared here;
+    /// preparation failed (and is begun again), or the source was never prepared here (with
+    /// `local_trees`, by this process);
     /// [`ProviderError::Refused`] if the ref cannot be used, or the source was released.
     pub(super) async fn mount(&self, source: Option<Source>) -> Result<PathBuf, ProviderError> {
         let id = SourceId::of(source)?;
-        let path = self.shared.settings.mountpoint.join(id.path());
-        let mut stage = {
+        let fs_path = self.shared.settings.mountpoint.join(id.path());
+        let (mut stage, path) = {
             let sources = self.lock();
             let Some(held) = sources.get(&id) else {
+                // A placement outlasts this process; a source of local trees is known by its table.
                 return match self.placement_at(&id) {
-                    Some(_) => Ok(path),
-                    None => Err(ProviderError::Unavailable(
+                    Some(_) if self.shared.local.is_none() => Ok(fs_path),
+                    _ => Err(ProviderError::Unavailable(
                         "the source is not prepared here".to_owned(),
                     )),
                 };
             };
             self.again_if_failed(&id, held);
-            held.stage.subscribe()
+            let path = match &self.shared.local {
+                Some(trees) => trees.path_of(&held.digest),
+                None => fs_path,
+            };
+            (held.stage.subscribe(), path)
         };
         let waited = tokio::time::timeout(
             self.shared.settings.mount_wait,
@@ -291,8 +322,8 @@ impl Provider {
         let now = waited.map_or(Stage::Released, |now| (*now).clone());
         match now {
             // A placement whose lease ended without a release (a run longer than `trees.ttl_max`,
-            // or a clock that moved) is made again.
-            Stage::Preparing | Stage::Placed if self.placement_at(&id).is_none() => {
+            // or a clock that moved), or a whole tree removed from `local_trees`, is made again.
+            Stage::Preparing | Stage::Placed if !self.still_there(&id, &path) => {
                 if let Some(held) = self.lock().get(&id) {
                     self.start(&id, held);
                 }
@@ -345,6 +376,15 @@ impl Provider {
             released = true;
         }
         Ok(released)
+    }
+
+    /// Whether what `Mount` answers for `id` at `path` is still there: the whole tree's directory
+    /// with `local_trees`, the source's placement without.
+    fn still_there(&self, id: &SourceId, path: &std::path::Path) -> bool {
+        match self.shared.local {
+            Some(_) => path.is_dir(),
+            None => self.placement_at(id).is_some(),
+        }
     }
 
     /// The placement whose location is exactly the path of `id`.

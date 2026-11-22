@@ -32,6 +32,12 @@
 //! it forgets it: the request end of `tierstore_request_to_start_seconds`, whose other end is the
 //! first look of `tierstore fs` inside one of the run's trees (`local_cache/starts.rs`).
 //!
+//! With the interface's `local_trees` (a Mac's: a job's programs there cannot read the network
+//! volume `tierstore fs` serves), a `Prepare` writes the tree whole, as plain files, into that
+//! directory, once per tree list key and shared by every source that names it, and `Mount` answers
+//! `<local_trees>/<64 hex>` once it is whole (module `local`); no placement is made, and a tree
+//! stays when its sources are released.
+//!
 //! Every call is idempotent by its source. Every read of the store has a bound,
 //! `params.fetch_timeout`; a read that passes it fails that file (an open reads it again) or, for
 //! the tree list, the preparation, which the next `Mount` starts again. A placement lasts
@@ -41,6 +47,7 @@
 pub(super) mod config;
 mod groups;
 mod listener;
+mod local;
 mod names;
 mod prepare;
 mod service;
@@ -48,6 +55,8 @@ mod sources;
 
 #[cfg(test)]
 mod groups_tests;
+#[cfg(test)]
+mod local_tests;
 #[cfg(test)]
 mod names_tests;
 #[cfg(test)]
@@ -97,6 +106,9 @@ pub(super) struct ProviderFlags {
     pub mountpoint: PathBuf,
     /// How long one read of the store may take.
     pub fetch_timeout: Duration,
+    /// The directory the provider writes whole trees into and answers, instead of directories of
+    /// `tierstore fs`; none answers under `mountpoint`.
+    pub local_trees: Option<PathBuf>,
 }
 
 /// Why a call is not answered with success: the three other answers of the contract.

@@ -107,6 +107,7 @@ pub(super) struct Params {
     pub socket: Option<PathBuf>,
     pub mountpoint: Option<PathBuf>,
     pub fetch_timeout: Option<Dur>,
+    pub local_trees: Option<PathBuf>,
 }
 
 /// `[oci]`, the table of the release before: the registry front, which is an `oci` interface.
@@ -227,6 +228,7 @@ fn refuse_provider_params(place: &str, kind: &str, params: &Params) -> Result<()
         ("socket", params.socket.is_some()),
         ("mountpoint", params.mountpoint.is_some()),
         ("fetch_timeout", params.fetch_timeout.is_some()),
+        ("local_trees", params.local_trees.is_some()),
     ];
     refuse(place, &format!("not for type \"{kind}\""), &theirs)
 }
