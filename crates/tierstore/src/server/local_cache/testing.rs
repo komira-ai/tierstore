@@ -196,6 +196,11 @@ pub(in crate::server) struct Tamper {
     replacing: Mutex<Option<Arc<Semaphore>>>,
     /// The plain puts that wait at `replacing`, counted when they arrive.
     replaced: AtomicU64,
+    /// The gate that holds a streamed put before it reads its body.
+    puts: Mutex<Option<Arc<Semaphore>>>,
+    /// The streamed puts at `puts`: counted when they arrive, and no longer once they pass it or
+    /// are dropped.
+    at_puts: Arc<AtomicU64>,
 }
 
 /// A semaphore that reads wait on, and the key whose reads wait (every key if none).
@@ -225,7 +230,23 @@ impl Tamper {
             heading: AtomicU64::new(0),
             replacing: Mutex::new(None),
             replaced: AtomicU64::new(0),
+            puts: Mutex::new(None),
+            at_puts: Arc::new(AtomicU64::new(0)),
         }
+    }
+
+    /// Holds every streamed put from now on, before it reads its body (nothing of it is stored),
+    /// until a permit is added to the gate that is returned.
+    pub(in crate::server) fn hold_puts(&self) -> Arc<Semaphore> {
+        let gate = Arc::new(Semaphore::new(0));
+        *self.puts.lock().unwrap_or_else(PoisonError::into_inner) = Some(Arc::clone(&gate));
+        gate
+    }
+
+    /// How many streamed puts wait at the gate of [`hold_puts`](Self::hold_puts) now: one that
+    /// is dropped while it waits is no longer counted.
+    pub(in crate::server) fn at_puts(&self) -> u64 {
+        self.at_puts.load(Ordering::SeqCst)
     }
 
     /// Holds every plain put from now on, after it has replaced the object and before it
@@ -326,6 +347,15 @@ impl Backend for Tamper {
         _len: Option<u64>,
         mut body: PartBody<'_>,
     ) -> Result<(), Error> {
+        let gate = self
+            .puts
+            .lock()
+            .unwrap_or_else(PoisonError::into_inner)
+            .clone();
+        if let Some(gate) = gate {
+            let _waiting = Waiting::arrive(&self.at_puts);
+            gate.acquire().await.expect("the gate stays open").forget();
+        }
         let stop = self.stop_after.load(Ordering::SeqCst);
         let (mut whole, mut chunks) = (BytesMut::new(), 0);
         while let Some(chunk) = body.next().await {
@@ -511,6 +541,23 @@ impl Backend for Tamper {
         max_parts: usize,
     ) -> Result<Vec<UploadedPart>, Error> {
         self.memory.list_parts(key, id, after, max_parts).await
+    }
+}
+
+/// A call counted in a number of calls that wait at a gate, until it passes the gate or is
+/// dropped.
+struct Waiting(Arc<AtomicU64>);
+
+impl Waiting {
+    fn arrive(count: &Arc<AtomicU64>) -> Self {
+        let _ = count.fetch_add(1, Ordering::SeqCst);
+        Self(Arc::clone(count))
+    }
+}
+
+impl Drop for Waiting {
+    fn drop(&mut self) {
+        let _ = self.0.fetch_sub(1, Ordering::SeqCst);
     }
 }
 
