@@ -62,8 +62,8 @@ fn a_depth_of_zero_chunks_waiting_is_one() {
 /// Asserts that each answer of the client is the error of this crate the trait documents
 /// for it: not found, already exists and a failed precondition name the key, a request
 /// that did not complete and the statuses 408, 429 and every 5xx but 501 and 507 are
-/// unavailable, 507 is full, and any other answer (501 among them) is an other error that
-/// says what it was.
+/// unavailable, 507 is full, 403 is a refusal that keeps the store's own code, and any other
+/// answer (501 among them) is an other error that says what it was.
 #[test]
 fn answers_of_the_client_are_the_errors_the_trait_documents() {
     let key = ObjectKey::new("k").unwrap();
@@ -84,7 +84,16 @@ fn answers_of_the_client_are_the_errors_the_trait_documents() {
     }
     let full = map_error(service(507), "k");
     assert!(matches!(full, Error::Full(_)), "{full}");
-    for status in [400, 403, 409, 501] {
+    let refused = ObjectStoreError::Service {
+        status: 403,
+        code: "InvalidAccessKeyId".to_owned(),
+        message: "not a key of this store".to_owned(),
+    };
+    assert_eq!(
+        map_error(refused, "k"),
+        Error::Denied("store answered 403 InvalidAccessKeyId: not a key of this store".to_owned())
+    );
+    for status in [400, 409, 501] {
         let other = map_error(service(status), "k");
         assert!(matches!(other, Error::Other(_)), "{status}: {other}");
     }

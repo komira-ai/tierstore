@@ -7,8 +7,10 @@
 //! control socket bound), with a core that counts no lookups, since NFS never forgets; the socket
 //! is the running instance's or is bound; the protocols are served; and the export is mounted at
 //! `fs.mountpoint`, as the mount user, unless something is mounted there already (a mount outlives
-//! the server: a restart, or the instance this one replaces, left it, and its clients wait).
-//! SIGTERM and SIGINT unmount it and end the process with status 0. launchd needs no notification
+//! the server: a restart, or the instance this one replaces, left it, and its clients wait); a mount
+//! there that was made from another address than this instance serves on reaches no one, and is
+//! unmounted first. SIGTERM and SIGINT unmount it (by force if `umount` refuses, see `mount.rs`)
+//! and end the process with status 0. launchd needs no notification
 //! of readiness.
 //!
 //! An instance with a control socket offers its listening socket to the next instance. When that
@@ -53,6 +55,9 @@ pub(super) struct Running {
     /// What the hold of a hand-off does, and the control socket it made again.
     _keeper: Arc<Keeper>,
     server: tokio::task::JoinHandle<()>,
+    /// Ends the offer of the listening socket, the first step of a stop; answered once no
+    /// successor can take the socket.
+    closing: Option<oneshot::Sender<oneshot::Sender<()>>>,
     /// Ends the server: a stop. A hand-over ends it by itself.
     stopping: Option<oneshot::Sender<()>>,
     /// Whether a successor took the listening socket, which ended the server.
@@ -161,11 +166,12 @@ impl Running {
             _ => None,
         };
         let (stopping, stop) = oneshot::channel();
+        let (closing, closed) = oneshot::channel();
         let handed = Arc::new(AtomicBool::new(false));
         let server = tokio::spawn(serve_until(
             listener,
             offer,
-            stop,
+            (closed, stop),
             Arc::clone(&handed),
             nfs.drain_wait,
         ));
@@ -177,6 +183,7 @@ impl Running {
             _setup: setup,
             _keeper: keeper,
             server,
+            closing: Some(closing),
             stopping: Some(stopping),
             handed,
             #[cfg(test)]
@@ -188,8 +195,19 @@ impl Running {
             let runtime_dir = settings.runtime_dir.clone();
             let made = tokio::task::spawn_blocking(move || -> Result<bool, NfsError> {
                 if task.is_mounted()? {
-                    task.agrees(&runtime_dir, address)?;
-                    return Ok(false);
+                    match Mounter::made_from(&runtime_dir) {
+                        // A hard mount of an address no one serves: everything that touches it
+                        // waits forever. It is cleared, and the export mounted afresh.
+                        Some(was) if was != address.to_string() => {
+                            tracing::warn!(
+                                "tierstore fs: {} is mounted from {was}, and this instance \
+                                 serves on {address}: unmounting it",
+                                task.mountpoint().display()
+                            );
+                            task.unmount()?;
+                        }
+                        _ => return Ok(false),
+                    }
                 }
                 task.mount(address.ip(), address.port())?;
                 Mounter::record(&runtime_dir, address)?;
@@ -219,26 +237,36 @@ impl Running {
         }
     }
 
-    /// Stops serving, and unmounts: unless the sockets were handed over, when the mount is the
-    /// successor's.
+    /// Ends the offer of the listening socket, unmounts, then stops serving: unless the sockets
+    /// were handed over before the offer ended, when the mount is the successor's. The unmount
+    /// comes after the offer has ended, so that no successor takes the socket (and the mount it
+    /// found) while it runs, and before the serving stops, while the server still answers the
+    /// clients: a server that has stopped leaves a busy mount that only a forced unmount clears,
+    /// after Disk Arbitration has waited for the server to answer.
     ///
     /// # Errors
-    /// [`NfsError::Unmount`] for an unmount that failed.
+    /// [`NfsError::Unmount`] for an unmount that failed; the server is stopped all the same.
     pub(super) async fn stop(mut self) -> Result<(), NfsError> {
+        let (ack, acked) = oneshot::channel();
+        // A server that has ended (handed over) drops the answer unsent.
+        let _ = self.closing.take().map(|closing| closing.send(ack));
+        let _ = acked.await;
+        let unmounted = match self.mounted.take() {
+            Some(mounter) if !self.handed.load(Ordering::SeqCst) => {
+                match tokio::task::spawn_blocking(move || mounter.unmount()).await {
+                    Ok(unmounted) => unmounted,
+                    Err(why) => Err(io("waiting for the unmount")(std::io::Error::other(
+                        why.to_string(),
+                    ))
+                    .into()),
+                }
+            }
+            _ => Ok(()),
+        };
         if let Some(stopping) = self.stopping.take() {
             let _ = stopping.send(());
         }
-        if self.handed.load(Ordering::SeqCst) {
-            return Ok(());
-        }
-        match self.mounted.take() {
-            Some(mounter) => tokio::task::spawn_blocking(move || mounter.unmount())
-                .await
-                .map_err(|why| {
-                    io("waiting for the unmount")(std::io::Error::other(why.to_string()))
-                })?,
-            None => Ok(()),
-        }
+        unmounted
     }
 }
 
@@ -331,27 +359,41 @@ fn offer_after_takeover(
 }
 
 /// Serves on `listener` until `stop` resolves or `offer` is taken by a successor, then lets the
-/// connections finish (`NFSTcp::handle_until`), for at most `drain_wait` after that.
+/// connections finish (`NFSTcp::handle_until`), for at most `drain_wait` after that. `closing`
+/// comes first in a stop: it drops the offer, and is answered once no successor can take the
+/// socket any more.
 async fn serve_until(
     listener: NFSTcpListener<TreeNfs>,
     offer: Option<Offer>,
-    stop: oneshot::Receiver<()>,
+    (closing, stop): (
+        oneshot::Receiver<oneshot::Sender<()>>,
+        oneshot::Receiver<()>,
+    ),
     handed: Arc<AtomicBool>,
     drain_wait: Duration,
 ) {
     let stopped = Arc::new(Notify::new());
     let signal = Arc::clone(&stopped);
     let ending = async move {
-        match offer {
+        let closed = match offer {
             Some(offer) => tokio::select! {
-                _ = stop => {}
-                () = offer.serve() => {
-                    handed.store(true, Ordering::SeqCst);
-                    tracing::info!("tierstore fs: the listening socket was taken");
-                }
+                closed = closing => Some(closed),
+                () = offer.serve() => None,
             },
-            None => {
+            None => Some(closing.await),
+        };
+        match closed {
+            // The offer is gone (its socket closed with it): no successor takes the socket from
+            // here on, so the stop may unmount; the stop is told so, and then ends the serving.
+            Some(closed) => {
+                if let Ok(ack) = closed {
+                    let _ = ack.send(());
+                }
                 let _ = stop.await;
+            }
+            None => {
+                handed.store(true, Ordering::SeqCst);
+                tracing::info!("tierstore fs: the listening socket was taken");
             }
         }
         signal.notify_one();

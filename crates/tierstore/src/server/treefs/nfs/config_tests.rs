@@ -9,7 +9,7 @@ use tracing::Level;
 use tracing::subscriber::with_default;
 
 use crate::server::build_info::stderr_log::LineLog;
-use crate::server::treefs::config::from_text;
+use crate::server::treefs::config::{builders, from_text};
 
 use super::NfsSettings;
 
@@ -22,7 +22,7 @@ fn with(nfs: &str) -> String {
 }
 
 fn refused(nfs: &str) -> String {
-    from_text(&with(nfs), "").unwrap_err().to_string()
+    from_text(&with(nfs), &builders).unwrap_err().to_string()
 }
 
 /// Asserts that a file without `[fs.nfs]` loads (B8: a file written before the table existed), with
@@ -30,10 +30,10 @@ fn refused(nfs: &str) -> String {
 #[test]
 fn a_config_without_the_nfs_table_still_loads() {
     let text = format!("[fs]\n{NEEDED}");
-    let settings = from_text(&text, "").unwrap();
+    let settings = from_text(&text, &builders).unwrap();
     assert_eq!(settings.nfs, NfsSettings::default());
     assert_eq!(
-        from_text(&with(""), "").unwrap().nfs,
+        from_text(&with(""), &builders).unwrap().nfs,
         NfsSettings::default()
     );
 }
@@ -60,7 +60,7 @@ fn every_nfs_key_is_taken_when_it_is_set() {
          mount_wait = \"2m\"\nmount_retry = \"1s\"\nfd_cache_shards = 8\nfd_cache_per_shard = 9\n\
          allowed_uids = [501, 502]\njukebox_after = \"750ms\"\n",
     );
-    let nfs = from_text(&text, "").unwrap().nfs;
+    let nfs = from_text(&text, &builders).unwrap().nfs;
     assert_eq!(nfs.listen, "127.0.0.2:9999".parse::<SocketAddr>().unwrap());
     assert!(!nfs.mount);
     assert_eq!(nfs.mount_user.as_deref(), Some("build.user-1"));
@@ -122,7 +122,7 @@ fn nfs_listen_must_be_loopback() {
             "{address}: {why}"
         );
     }
-    let nfs = from_text(&with("listen = \"127.0.0.1:0\""), "")
+    let nfs = from_text(&with("listen = \"127.0.0.1:0\""), &builders)
         .unwrap()
         .nfs;
     assert_eq!(nfs.listen.port(), 0);
@@ -151,7 +151,7 @@ fn an_unknown_nfs_key_is_ignored_and_the_file_loads() {
     let stderr = Stderr::default();
     let text = with("futuristic = 3\nmount_wait = \"3s\"\n");
     let nfs = with_default(LineLog::new(stderr.clone(), Level::WARN), || {
-        from_text(&text, "").unwrap().nfs
+        from_text(&text, &builders).unwrap().nfs
     });
     assert_eq!(nfs.mount_wait, Duration::from_secs(3));
     let said = String::from_utf8(stderr.0.lock().unwrap().clone()).unwrap();
@@ -171,7 +171,7 @@ fn the_handoff_keys_are_taken_and_each_refusal_names_its_key() {
     assert_eq!(defaults.drain_wait, Duration::from_secs(10));
     let set = from_text(
         &with("handoff_socket = \"/var/run/tierstore/fs-handoff.sock\"\nhandoff_wait = \"3s\"\ndrain_wait = \"2s\"\n"),
-        "",
+        &builders,
     )
     .unwrap()
     .nfs;
@@ -182,14 +182,14 @@ fn the_handoff_keys_are_taken_and_each_refusal_names_its_key() {
     );
     assert_eq!(handoff.wait, Duration::from_secs(3));
     assert_eq!(set.drain_wait, Duration::from_secs(2));
-    let waits = from_text(&with("handoff_socket = \"/run/x.sock\""), "")
+    let waits = from_text(&with("handoff_socket = \"/run/x.sock\""), &builders)
         .unwrap()
         .nfs;
     assert_eq!(waits.ready_wait, Duration::from_secs(120));
     assert_eq!(waits.handoff.unwrap().wait, Duration::from_secs(10));
     let ready = from_text(
         &with("handoff_socket = \"/run/x.sock\"\nhandoff_ready_wait = \"7s\""),
-        "",
+        &builders,
     )
     .unwrap()
     .nfs;

@@ -14,7 +14,7 @@ use super::super::store::PutSettings;
 use super::super::testing::Warnings;
 use super::PutConfig;
 use crate::server::build_info::stderr_log::LineLog;
-use crate::server::treefs::config::from_text;
+use crate::server::treefs::config::{builders, from_text};
 
 /// A file with the needed keys of `[fs]` and the table `[fs.put]` of `put`.
 fn file(put: &str) -> String {
@@ -27,12 +27,12 @@ fn file(put: &str) -> String {
 
 /// The put directory of the file with the table `put`.
 fn put_of(put: &str) -> Option<PutConfig> {
-    from_text(&file(put), "").unwrap().put
+    from_text(&file(put), &builders).unwrap().put
 }
 
 /// The words of the refusal of the file with the table `put`.
 fn refused(put: &str) -> String {
-    from_text(&file(put), "").unwrap_err().to_string()
+    from_text(&file(put), &builders).unwrap_err().to_string()
 }
 
 /// What an enabled table needs.
@@ -45,7 +45,7 @@ const ENABLED: &str =
 fn the_put_directory_is_not_served_unless_enabled() {
     let none =
         "[fs]\nclient_group = \"7\"\nowner = \"1:2\"\nfill_socket = \"/f\"\ncache_path = \"/c\"\n";
-    assert_eq!(from_text(none, "").unwrap().put, None);
+    assert_eq!(from_text(none, &builders).unwrap().put, None);
     assert_eq!(put_of(""), None);
     assert_eq!(put_of("enabled = false\nprefixes = [\"cas/b/\"]\n"), None);
 }
@@ -197,7 +197,7 @@ fn each_number_out_of_its_range_is_refused_by_its_key() {
 fn an_unknown_put_key_is_ignored_and_the_file_loads() {
     let warnings = Warnings::default();
     let put = with_default(LineLog::new(warnings.clone(), Level::WARN), || {
-        from_text(&file("futuristic = 3\n"), "").unwrap().put
+        from_text(&file("futuristic = 3\n"), &builders).unwrap().put
     });
     assert_eq!(put, None);
     assert_eq!(

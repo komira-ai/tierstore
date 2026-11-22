@@ -130,6 +130,35 @@ async fn a_fill_over_the_socket_puts_the_blob_in_the_cache() {
     served.stop().await;
 }
 
+/// Asserts, over the socket, that a fill whose upstream refuses this node's key (an answer 403,
+/// `Error::Denied`) is answered with exactly the line `upstream 403`, for a blob and for a
+/// manifest, and that the connection goes on answering. Catches a refusal answered `upstream 500`.
+#[tokio::test]
+async fn a_fill_the_upstream_refuses_is_answered_upstream_403() {
+    let rig = Rig::new("tfs-refused");
+    let place = Place::new("tfs-refused");
+    let pack = Pack::put(&rig, "packs/refused", &[500]).await;
+    let served = Served::start(&rig.cache, &place.path);
+    let mut client = Client::connect(&place.path).await;
+    let refused = || crate::Error::Denied("store answered 403 AccessDenied: no".to_owned());
+    rig.upstream.fail_next_with(Op::Get, refused());
+    let (sha, offset, size) = &pack.blobs[0];
+    client
+        .send(&format!("fill {sha} {size} from {} @ {offset}\n", pack.key))
+        .await;
+    let mut line = String::new();
+    client.read.read_line(&mut line).await.unwrap();
+    assert_eq!(line, "upstream 403\n");
+    rig.upstream.fail_next_with(Op::Head, refused());
+    assert_eq!(
+        client.ask(&format!("fill {}", digest(b"a manifest"))).await,
+        "upstream 403"
+    );
+    let fill = format!("fill {sha} {size} from {} @ {offset}", pack.key);
+    assert_eq!(client.ask(&fill).await, "ok");
+    served.stop().await;
+}
+
 /// Asserts that the answers of one connection come in the order of its requests, each the words
 /// of what happened: a mismatch, a missing source, a blob too large for the budget, a line that is
 /// not a request, and then a fill that works.

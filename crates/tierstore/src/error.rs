@@ -63,6 +63,12 @@ pub enum Error {
     /// (`docs/design/put-without-lock.md`, 5.2).
     #[error("busy: {0}")]
     SlowDown(String),
+    /// The store refused the call for the credentials it was signed with (an S3 answer 403: a key
+    /// the store does not accept, or one without the right for the call). The text is the store's
+    /// answer, with its own code (`AccessDenied`, `InvalidAccessKeyId`, `SignatureDoesNotMatch`);
+    /// a retry is refused the same way.
+    #[error("refused: {0}")]
+    Denied(String),
     /// The backend did not answer (down, timed out, refused the connection). Retrying later
     /// may succeed.
     #[error("backend unavailable: {0}")]

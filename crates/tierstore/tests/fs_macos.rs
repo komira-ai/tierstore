@@ -1,5 +1,6 @@
-//! `tierstore fs` on macOS as a process: the command line is parsed, the file is loaded, the NFS
-//! frontend serves on a loopback port, and SIGTERM ends it with status 0. Nothing is mounted
+//! `tierstore fs` on macOS as a process: the command line is parsed, the file is loaded (a group
+//! named by name is looked up through the system), the NFS frontend serves on a loopback port, and
+//! SIGTERM ends it with status 0. Nothing is mounted
 //! (`fs.nfs.mount = false`), so the test runs without a mount command, and no assertion is about
 //! time.
 
@@ -36,12 +37,20 @@ fn call(program: u32, procedure: u32) -> Vec<u8> {
     [header.to_be_bytes().as_slice(), &body].concat()
 }
 
-/// Asserts the command end to end: `tierstore fs --config <file>` with a valid file and
-/// `fs.nfs.mount = false` says on which loopback port it serves, answers a call of the NFS
-/// protocol on it (accepted, with the xid of the call), and on SIGTERM ends with status 0.
-#[test]
-fn fs_serves_nfs_and_ends_with_success_on_sigterm() {
-    let dir = TestDir::under(std::env::temp_dir(), "fs-macos-cli");
+/// A started `tierstore fs`: the process, what it said up to the line that it serves, the address
+/// it serves on, and its scratch directory.
+struct Started {
+    child: std::process::Child,
+    said: String,
+    address: String,
+    dir: TestDir,
+}
+
+/// Starts `tierstore fs --config <file>` with a valid file whose `fs.client_group` is `group` (the
+/// group id of the scratch directory when none), and `fs.nfs.mount = false`, and reads its stderr
+/// up to the line that it serves.
+fn start(name: &str, group: Option<&str>) -> Started {
+    let dir = TestDir::under(std::env::temp_dir(), name);
     let (cache, runtime, mountpoint) = (
         dir.path().join("cache"),
         dir.path().join("run"),
@@ -52,9 +61,10 @@ fn fs_serves_nfs_and_ends_with_success_on_sigterm() {
     }
     let gid = std::fs::metadata(&runtime).unwrap().gid();
     let uid = rustix::process::geteuid().as_raw();
+    let client_group = group.map_or_else(|| gid.to_string(), str::to_owned);
     let text = format!(
         "[fs]\nmountpoint = {mountpoint:?}\nruntime_dir = {runtime:?}\n\
-         control_socket = {:?}\nclient_group = \"{gid}\"\nowner = \"{uid}:{gid}\"\n\
+         control_socket = {:?}\nclient_group = \"{client_group}\"\nowner = \"{uid}:{gid}\"\n\
          fill_socket = {:?}\ncache_path = {cache:?}\n\
          [fs.nfs]\nlisten = \"127.0.0.1:0\"\nmount = false\n",
         dir.path().join("control.sock"),
@@ -85,7 +95,49 @@ fn fs_serves_nfs_and_ends_with_success_on_sigterm() {
             break rest[..end].to_owned();
         }
     };
+    Started {
+        child,
+        said,
+        address,
+        dir,
+    }
+}
 
+/// Ends `started` with SIGTERM, and asserts it ends with status 0.
+fn stop(mut started: Started) {
+    let pid = Pid::from_raw(i32::try_from(started.child.id()).unwrap()).unwrap();
+    kill_process(pid, Signal::TERM).unwrap();
+    let status = started.child.wait().unwrap();
+    assert_eq!(status.code(), Some(0), "{status}: {}", started.said);
+}
+
+/// What `/usr/bin/id` says with `flag` of the user of this test, without the newline.
+fn id(flag: &str) -> String {
+    let out = Command::new("/usr/bin/id").arg(flag).output().unwrap();
+    assert!(out.status.success(), "id {flag}");
+    String::from_utf8(out.stdout).unwrap().trim().to_owned()
+}
+
+/// Asserts that `fs.client_group` given by name is looked up through the system (Open Directory,
+/// by `dscacheutil`), not read from `/etc/group`: the process starts, and its control socket has
+/// the group id the system gives the name (the primary group of the user of the test).
+#[test]
+fn fs_takes_its_client_group_by_name_from_the_system() {
+    let name = id("-gn");
+    let gid: u32 = id("-g").parse().unwrap();
+    let started = start("fs-macos-group", Some(&name));
+    let socket = started.dir.path().join("control.sock");
+    assert_eq!(std::fs::metadata(&socket).unwrap().gid(), gid, "{name}");
+    stop(started);
+}
+
+/// Asserts the command end to end: `tierstore fs --config <file>` with a valid file and
+/// `fs.nfs.mount = false` says on which loopback port it serves, answers a call of the NFS
+/// protocol on it (accepted, with the xid of the call), and on SIGTERM ends with status 0.
+#[test]
+fn fs_serves_nfs_and_ends_with_success_on_sigterm() {
+    let started = start("fs-macos-cli", None);
+    let address = started.address.clone();
     let mut stream = std::net::TcpStream::connect(&address).unwrap();
     stream.write_all(&call(NFS, NULL)).unwrap();
     let mut header = [0u8; 4];
@@ -100,9 +152,5 @@ fn fs_serves_nfs_and_ends_with_success_on_sigterm() {
     // xid, REPLY, MSG_ACCEPTED, the verifier (flavor, length), SUCCESS.
     assert_eq!(words[..6], [7, 1, 0, 0, 0, 0], "{words:?}");
     drop(stream);
-
-    let pid = Pid::from_raw(i32::try_from(child.id()).unwrap()).unwrap();
-    kill_process(pid, Signal::TERM).unwrap();
-    let status = child.wait().unwrap();
-    assert_eq!(status.code(), Some(0), "{status}: {said}");
+    stop(started);
 }

@@ -667,6 +667,15 @@ impl Inner {
         let ended = self.carry_out(key, name, plan, live).await;
         if let Err(stop) = &ended {
             self.count(stop);
+            if let Stop::Upstream(Error::Denied(said)) = stop {
+                // The store's own answer (its code first) is what tells an operator whether the
+                // upstream does not know this node's key or does not let it read the object.
+                let object = match plan {
+                    Plan::Blob { from, .. } => from.as_str(),
+                    Plan::Object | Plan::Manifest => key,
+                };
+                tracing::warn!("tierstore: the upstream refused the read of {object}: {said}");
+            }
         }
         ended
     }

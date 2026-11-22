@@ -49,6 +49,7 @@ mod config;
 pub(in crate::server) mod control;
 pub(in crate::server) mod core;
 mod fill_client;
+mod groups;
 #[cfg(any(target_os = "linux", test))]
 mod handle;
 mod ino;
@@ -117,7 +118,7 @@ mod nfs;
 
 pub(super) use config::{FsSettings, load};
 #[cfg(test)]
-pub(super) use config::{FsTable, from_text};
+pub(super) use config::{FsTable, builders, from_text};
 #[cfg(target_os = "linux")]
 pub(super) use launch::serve;
 #[cfg(not(target_os = "linux"))]

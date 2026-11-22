@@ -52,8 +52,8 @@ pub(in crate::server) struct Blob<'a> {
 /// the socket gives.
 #[derive(Clone, Debug, PartialEq, Eq, thiserror::Error)]
 pub(in crate::server) enum FillError {
-    /// The upstream failed or has no such object; the number is the HTTP status that stands for
-    /// the failure.
+    /// The upstream failed, refused the request (403: it does not accept this node's key) or has
+    /// no such object; the number is the HTTP status that stands for the failure.
     #[error("upstream {0}")]
     Upstream(u16),
     /// The bytes do not hash to the digest they were asked under.
@@ -89,7 +89,7 @@ pub(in crate::server) enum FillError {
 pub(super) fn status_of(error: &Error) -> u16 {
     match error {
         Error::NotFound(_) => 404,
-        Error::Reserved(_) => 403,
+        Error::Reserved(_) | Error::Denied(_) => 403,
         Error::InvalidKey(_) | Error::InvalidSegment(_) => 400,
         Error::Unsupported(_) => 501,
         Error::Unavailable(_) | Error::SlowDown(_) => 503,

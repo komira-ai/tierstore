@@ -261,12 +261,15 @@ async fn a_mount_that_is_there_is_not_made_again() {
     running.stop().await.unwrap();
 }
 
-/// Asserts that a mount is noted with the address it was made from, and that a start in the same
-/// boot that serves on another address than the mount at the mount point was made from is refused
-/// by name with both addresses, since that mount would reach nothing; and that a start on the same
-/// address goes on with the mount.
+/// Asserts that a mount is noted with the address it was made from; that a start on the same
+/// address goes on with the mount; and that a start in the same boot that serves on another
+/// address than the mount at the mount point was made from (a hard mount no one serves, which every
+/// process that touches it would wait on forever) unmounts it, by force when it is busy, mounts
+/// the export afresh and notes the new address. A start whose clearing fails is refused with what
+/// both unmounts said. Catches a start that keeps, or refuses to replace, a mount to a server that
+/// is gone.
 #[tokio::test]
-async fn a_mount_made_from_another_address_is_refused_by_name() {
+async fn a_mount_made_from_another_address_is_cleared_and_made_again() {
     let (rig, _) = attached("nfs-restart-mounted-from");
     let first = Running::start(
         &settings(&rig, loopback()),
@@ -281,40 +284,90 @@ async fn a_mount_made_from_another_address_is_refused_by_name() {
     let noted = std::fs::read_to_string(rig.runtime.join("nfs-mounted")).unwrap();
     assert_eq!(noted, was.to_string());
     first.stop().await.unwrap();
+    // The server the stop ended closes its socket when the runtime drops its task.
+    while std::net::TcpListener::bind(was).is_err() {
+        tokio::task::yield_now().await;
+    }
 
     let same = NfsSettings {
         listen: was,
         ..loopback()
     };
-    let again = Running::start(
-        &settings(&rig, same),
-        Recorder::mounted_at(&rig.mountpoint),
+    let kept = Recorder::mounted_at(&rig.mountpoint);
+    let again = Running::start(&settings(&rig, same), kept.clone(), euid(), None, EPOCH)
+        .await
+        .unwrap();
+    assert_eq!(kept.programs(), ["/sbin/mount"]);
+    again.stop().await.unwrap();
+
+    // Port 0 binds another port than `was`, which the stopped server has released.
+    let stale = Recorder::mounted_at(&rig.mountpoint);
+    let other = Running::start(
+        &settings(&rig, loopback()),
+        stale.clone(),
         euid(),
         None,
         EPOCH,
     )
     .await
     .unwrap();
-    again.stop().await.unwrap();
+    assert_eq!(
+        stale.programs(),
+        [
+            "/sbin/mount",
+            "/sbin/mount",
+            "/sbin/umount",
+            "/sbin/mount_nfs"
+        ]
+    );
+    assert_ne!(other.address, was);
+    let noted = std::fs::read_to_string(rig.runtime.join("nfs-mounted")).unwrap();
+    assert_eq!(noted, other.address.to_string());
+    let now = other.address;
+    other.stop().await.unwrap();
 
-    // Port 0 binds another port than `was`, which the stopped server has released.
-    let other = Running::start(
+    let busy = Recorder::busy_at(&rig.mountpoint, true);
+    let forced = Running::start(
         &settings(&rig, loopback()),
-        Recorder::mounted_at(&rig.mountpoint),
+        busy.clone(),
+        euid(),
+        None,
+        EPOCH,
+    )
+    .await
+    .unwrap();
+    let cleared = &busy.programs()[..4];
+    assert_eq!(
+        cleared,
+        [
+            "/sbin/mount",
+            "/sbin/mount",
+            "/sbin/umount",
+            "/usr/sbin/diskutil"
+        ]
+    );
+    assert_eq!(busy.mounted_port(), Some(forced.address.port()));
+    assert_ne!(forced.address, now);
+    drop(forced);
+
+    let stuck = Recorder::busy_at(&rig.mountpoint, false);
+    let refused = Running::start(
+        &settings(&rig, loopback()),
+        stuck.clone(),
         euid(),
         None,
         EPOCH,
     )
     .await;
-    let why = other.err().unwrap().to_string();
-    assert!(
-        why.contains(&format!(
-            "is mounted from {was}, and this instance serves on 127.0.0.1:"
-        )),
-        "{why}"
+    let why = refused.err().unwrap().to_string();
+    let point = rig.mountpoint.display();
+    assert_eq!(
+        why,
+        format!(
+            "unmounting {point}: umount(mnt): Resource busy -- try 'diskutil unmount'; diskutil \
+             unmount force: Unmount failed for mnt"
+        )
     );
-    assert!(
-        why.contains(&format!("set fs.nfs.listen back to {was}")),
-        "{why}"
-    );
+    assert!(stuck.has_mount());
+    assert!(!stuck.programs().contains(&"/sbin/mount_nfs".to_owned()));
 }

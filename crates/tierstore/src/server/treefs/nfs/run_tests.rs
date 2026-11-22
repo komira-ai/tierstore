@@ -17,50 +17,106 @@ use crate::server::treefs::locked;
 use crate::server::treefs::testing::SIGNALS;
 use crate::server::treefs::testing::until;
 
-/// Records the commands, answers every one with success unless told to fail the mount.
+/// A check a runner makes when it runs `umount`.
+type Check = Box<dyn FnOnce() -> bool + Send>;
+
+/// Records the commands, answers every one with success unless told to fail the mount, `umount` or
+/// the forced unmount, and keeps a listing of the mounts that a mount adds its line to and an
+/// unmount empties.
 pub(super) struct Recorder {
     calls: Mutex<Vec<Vec<String>>>,
     mount_works: bool,
+    /// Whether `umount` unmounts; if not it says `Resource busy`.
+    umount_works: bool,
+    /// Whether `diskutil unmount force` unmounts.
+    force_works: bool,
     /// The program whose run panics.
     panics: Option<&'static str>,
     /// What the listing of the mounts says.
-    listing: String,
+    listing: Mutex<String>,
+    /// What `umount` checks before it runs, and what the check found.
+    check: Mutex<Option<Check>>,
+    checked: Mutex<Option<bool>>,
 }
 
 impl Recorder {
+    /// A runner with nothing mounted, whose every command works but, unless `mount_works`, the
+    /// mount.
     pub(super) fn new(mount_works: bool) -> Arc<Self> {
+        Self::made(mount_works, String::new())
+    }
+
+    fn made(mount_works: bool, listing: String) -> Arc<Self> {
         Arc::new(Self {
             calls: Mutex::new(Vec::new()),
             mount_works,
+            umount_works: true,
+            force_works: true,
             panics: None,
-            listing: String::new(),
+            listing: Mutex::new(listing),
+            check: Mutex::new(None),
+            checked: Mutex::new(None),
         })
     }
 
     /// A runner whose listing of the mounts has an NFS mount at `path`.
     pub(super) fn mounted_at(path: &std::path::Path) -> Arc<Self> {
+        Self::made(true, line_of(path))
+    }
+
+    /// A runner with an NFS mount at `path` that `umount` finds busy, and that the forced unmount
+    /// unmounts if `forced`.
+    pub(super) fn busy_at(path: &std::path::Path, forced: bool) -> Arc<Self> {
         Arc::new(Self {
-            calls: Mutex::new(Vec::new()),
-            mount_works: true,
-            panics: None,
-            listing: format!(
-                "127.0.0.1:/ on {} (nfs, nodev, nosuid, read-only)\n",
-                path.display()
-            ),
+            umount_works: false,
+            force_works: forced,
+            ..Arc::into_inner(Self::mounted_at(path)).unwrap()
         })
     }
 
     fn panicking(program: &'static str) -> Arc<Self> {
         Arc::new(Self {
-            calls: Mutex::new(Vec::new()),
-            mount_works: true,
             panics: Some(program),
-            listing: String::new(),
+            ..Arc::into_inner(Self::new(true)).unwrap()
         })
     }
 
     pub(super) fn calls(&self) -> Vec<Vec<String>> {
         locked(&self.calls).clone()
+    }
+
+    /// The programs run, in order.
+    pub(super) fn programs(&self) -> Vec<String> {
+        self.calls()
+            .into_iter()
+            .map(|call| call[0].clone())
+            .collect()
+    }
+
+    /// Makes `umount` run `check` first, and note what it found.
+    pub(super) fn check_at_umount(&self, check: impl FnOnce() -> bool + Send + 'static) {
+        *locked(&self.check) = Some(Box::new(check));
+    }
+
+    /// Makes `umount` call NFS's NULL procedure on `connection` first, and note whether the
+    /// server answered.
+    pub(super) fn probe_at_umount(&self, mut connection: std::net::TcpStream) {
+        self.check_at_umount(move || null_answered(&mut connection));
+    }
+
+    /// What the check `umount` ran found: none if it ran none.
+    pub(super) fn checked_at_umount(&self) -> Option<bool> {
+        *locked(&self.checked)
+    }
+
+    /// Empties the listing of the mounts, as an unmount by hand does.
+    pub(super) fn unmounted_by_hand(&self) {
+        locked(&self.listing).clear();
+    }
+
+    /// Whether the listing of the mounts has a mount now.
+    pub(super) fn has_mount(&self) -> bool {
+        !locked(&self.listing).is_empty()
     }
 
     /// The port the mount command named.
@@ -74,23 +130,65 @@ impl Recorder {
     }
 }
 
+/// Whether the server on `connection` answers a call of NFS's NULL procedure: a server that is
+/// ending its connections reads no more requests and shuts its side, so the read ends with nothing.
+fn null_answered(connection: &mut std::net::TcpStream) -> bool {
+    use std::io::Read as _;
+    // xid 7, CALL, RPC version 2, NFS version 3, NULL, no credential, no verifier.
+    let words = [7u32, 0, 2, 100_003, 3, 0, 0, 0, 0, 0];
+    let body: Vec<u8> = words.iter().flat_map(|word| word.to_be_bytes()).collect();
+    let header = (1u32 << 31) | u32::try_from(body.len()).unwrap();
+    let record = [header.to_be_bytes().as_slice(), &body].concat();
+    let mut answer = [0u8; 8];
+    connection.write_all(&record).is_ok() && connection.read_exact(&mut answer).is_ok()
+}
+
+/// The line of the listing of the mounts for an NFS mount at `path`.
+fn line_of(path: &std::path::Path) -> String {
+    format!(
+        "127.0.0.1:/ on {} (nfs, nodev, nosuid, read-only)\n",
+        path.display()
+    )
+}
+
 impl Runner for Recorder {
     fn run(&self, argv: &[String]) -> std::io::Result<Ran> {
         locked(&self.calls).push(argv.to_vec());
         assert_ne!(self.panics, Some(argv[0].as_str()), "the command dies");
-        let fails = argv[0] == "/sbin/mount_nfs" && !self.mount_works;
+        if argv[0] == "/sbin/umount"
+            && let Some(check) = locked(&self.check).take()
+        {
+            *locked(&self.checked) = Some(check());
+        }
+        let (success, stderr) = match argv[0].as_str() {
+            "/sbin/mount_nfs" if self.mount_works => {
+                *locked(&self.listing) = line_of(std::path::Path::new(&argv[4]));
+                (true, "")
+            }
+            "/sbin/mount_nfs" => (false, "refused"),
+            "/sbin/umount" if self.umount_works => {
+                locked(&self.listing).clear();
+                (true, "")
+            }
+            "/sbin/umount" => (
+                false,
+                "umount(mnt): Resource busy -- try 'diskutil unmount'",
+            ),
+            "/usr/sbin/diskutil" if self.force_works => {
+                locked(&self.listing).clear();
+                (true, "")
+            }
+            "/usr/sbin/diskutil" => (false, "Unmount failed for mnt"),
+            _ => (true, ""),
+        };
         Ok(Ran {
-            success: !fails,
+            success,
             stdout: if argv[0] == "/sbin/mount" {
-                self.listing.clone()
+                locked(&self.listing).clone()
             } else {
                 String::new()
             },
-            stderr: if fails {
-                "refused".to_owned()
-            } else {
-                String::new()
-            },
+            stderr: stderr.to_owned(),
         })
     }
 
@@ -177,6 +275,86 @@ async fn a_start_serves_mounts_and_a_stop_unmounts() {
         ]
     );
     closed(address).await;
+}
+
+/// Asserts what a stop does with a mount `umount` refuses (a job still has a file of it open): it
+/// unmounts it by force, `diskutil unmount force` on the mount point, and the mount is gone; and
+/// that a stop whose forced unmount fails too is an error with what both said, the mount left
+/// listed. Catches a stop that leaves a hard mount to a server that is about to exit.
+#[tokio::test]
+async fn a_stop_unmounts_a_busy_mount_by_force() {
+    let (rig, _) = attached("nfs-run-stop-forced");
+    let settings = settings(&rig, loopback());
+    let busy = Recorder::busy_at(&settings.mountpoint, true);
+    let running = Running::start(&settings, busy.clone(), euid(), None, EPOCH)
+        .await
+        .unwrap();
+    running.stop().await.unwrap();
+    let point = settings.mountpoint.display().to_string();
+    let calls = busy.calls();
+    assert_eq!(
+        calls[calls.len() - 2..],
+        [
+            vec!["/sbin/umount".to_owned(), point.clone()],
+            ["/usr/sbin/diskutil", "unmount", "force", &point]
+                .map(str::to_owned)
+                .to_vec(),
+        ]
+    );
+    assert!(!busy.has_mount());
+
+    let stuck = Recorder::busy_at(&settings.mountpoint, false);
+    let running = Running::start(&settings, stuck.clone(), euid(), None, EPOCH)
+        .await
+        .unwrap();
+    let why = running.stop().await.unwrap_err();
+    assert_eq!(
+        why.to_string(),
+        format!(
+            "unmounting {point}: umount(mnt): Resource busy -- try 'diskutil unmount'; diskutil \
+             unmount force: Unmount failed for mnt"
+        )
+    );
+    assert!(stuck.has_mount());
+}
+
+/// Asserts that a stop unmounts while the server still answers the clients, and stops the server
+/// after: at the moment `umount` runs, a client's call is answered. A server stopped first ends
+/// every connection, so the unmount meets a server that is gone (macOS then refuses `umount` even of
+/// a mount no one uses, and the forced unmount waits for the server first). Catches a stop that
+/// ends the server before it unmounts.
+#[tokio::test]
+async fn a_stop_unmounts_while_the_server_still_answers() {
+    let (rig, _) = attached("nfs-run-stop-order");
+    let settings = settings(&rig, loopback());
+    let runner = Recorder::new(true);
+    let running = Running::start(&settings, runner.clone(), euid(), None, EPOCH)
+        .await
+        .unwrap();
+    let connection = std::net::TcpStream::connect(running.address).unwrap();
+    runner.probe_at_umount(connection);
+    running.stop().await.unwrap();
+    assert_eq!(runner.checked_at_umount(), Some(true));
+}
+
+/// Asserts that a stop finds the mount already gone (unmounted by hand while the process served)
+/// and succeeds without an unmount, where `umount` would say `not currently mounted` and the
+/// process would end with status 1.
+#[tokio::test]
+async fn a_stop_after_the_mount_is_gone_succeeds_without_an_unmount() {
+    let (rig, _) = attached("nfs-run-stop-gone");
+    let settings = settings(&rig, loopback());
+    let runner = Recorder::new(true);
+    let running = Running::start(&settings, runner.clone(), euid(), None, EPOCH)
+        .await
+        .unwrap();
+    assert!(runner.has_mount());
+    runner.unmounted_by_hand();
+    running.stop().await.unwrap();
+    assert_eq!(
+        runner.programs(),
+        ["/sbin/mount", "/sbin/mount_nfs", "/sbin/mount"]
+    );
 }
 
 /// Asserts that `fs.nfs.allowed_uids` replaces the default list, over the wire: a user in the

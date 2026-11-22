@@ -6,12 +6,16 @@
   and MOUNT protocols on loopback only (`fs.nfs.listen`), mounts the export read-only at
   `fs.mountpoint` as `fs.nfs.mount_user`, and unmounts on SIGTERM. root:wheel, mode 0644.
 
-  The job runs as root, because it makes the mount as another user: the mount user is the key
-  `fs.nfs.mount_user` of the file, not of this plist (a plist cannot read the file), and the process
-  runs `mount_nfs` as that user through sudo. Nothing else of it is privileged. The file is
-  /usr/local/tierstore/etc/fs.toml, which has the `[fs]` table and holds no secret and no key
-  file; no environment variable is set, the process reads none, and launchd needs no
-  notification of readiness.
+  The job runs as _tierstore, the user and group of tierstore.plist, because the fill socket of the
+  store answers only a peer of its own user: a job of any other user, root included, has every fill
+  refused. Nothing of it needs root: the NFS socket is on an unprivileged loopback port, and
+  `mount_nfs`, `umount` and `diskutil unmount force` of a loopback export need none when the mount
+  user owns the mount point. `fs.nfs.mount_user` is left out of the file (the user of the process
+  is the default), and the mount point, `fs.mountpoint`, is a directory _tierstore owns, which an
+  operator makes with the file. The file is /usr/local/tierstore/etc/fs.toml, which has the `[fs]`
+  table and holds no secret and no key file (its directory is root:_tierstore, mode 0750); no
+  environment variable is set, the process reads none, and launchd needs no notification of
+  readiness.
 
   The program is the copy of the current release's binary that the update hook puts at
   /usr/local/libexec/tierstore/tierstore for tierstore.plist, the same binary as that job's.
@@ -22,8 +26,8 @@
   place with a gap in serving: a hard mount makes the clients wait, and the restarted process
   finds the mount, reopens its table of tree numbers and serves on the same port.
 
-  launchd sends SIGTERM on bootout. The process unmounts and exits 0; ExitTimeOut (30 s) is far
-  more than that takes. KeepAlive starts the process again whenever it exits while the job is
+  launchd sends SIGTERM on bootout. The process unmounts, by force if a job still uses the mount,
+  and exits 0; ExitTimeOut (30 s) is far more than that takes. KeepAlive starts the process again whenever it exits while the job is
   loaded, at most once in ThrottleInterval (10 s).
 
   crates/tierstore/tests/packaging_hostkeeper.rs parses this file and checks it against the binary.
@@ -39,6 +43,10 @@
     <string>--config</string>
     <string>/usr/local/tierstore/etc/fs.toml</string>
   </array>
+  <key>UserName</key>
+  <string>_tierstore</string>
+  <key>GroupName</key>
+  <string>_tierstore</string>
   <key>RunAtLoad</key>
   <true/>
   <key>KeepAlive</key>
