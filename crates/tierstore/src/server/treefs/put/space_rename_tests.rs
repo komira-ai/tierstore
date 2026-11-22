@@ -320,3 +320,98 @@ fn a_commit_that_ends_in_an_error_answers_once() {
     assert_eq!(answers.recv().unwrap().0, Err(Errno::BADMSG));
     assert_eq!(answers.recv().unwrap_err(), mpsc::RecvError);
 }
+
+/// A hand-over's drain of the commits waits for a commit whose upload is still running, and
+/// returns only once the commit has answered its request and uploaded the file: the request is
+/// this process's to answer, and the journal the commit writes is what the successor reads. The
+/// upload is let go from the gap where the drain is about to wait. Catches a hand-over that leaves
+/// a job's commit to a process that is about to end.
+#[test]
+fn a_drain_waits_for_a_commit_that_uploads_and_its_answer() {
+    let rig = SpaceRig::new("put-rename-drain");
+    let puts = Arc::clone(&rig.puts);
+    let space = Arc::new(rig.space);
+    let dir = nonce(&space);
+    staged(&space, dir, "pack.part", b"in flight");
+    puts.hold();
+    let answers = rename(&space, dir, "pack.part", "pack");
+    puts.wait_for_held(1);
+    assert_eq!(space.commits_running(), 1);
+    let waited = Arc::new(std::sync::atomic::AtomicUsize::new(0));
+    let (gate, count) = (Arc::clone(&puts), Arc::clone(&waited));
+    *space.before_drain.lock().unwrap() = Some(Arc::new(move || {
+        let _ = count.fetch_add(1, Ordering::AcqRel);
+        gate.let_go();
+    }));
+    space.drain_commits();
+    assert_eq!(waited.load(Ordering::Acquire), 1);
+    assert_eq!(space.commits_running(), 0);
+    let (result, _, name) = answers.try_recv().unwrap();
+    assert_eq!(result, Ok(()));
+    assert_eq!(name.as_deref(), Some("fs-commit"));
+    assert_eq!(puts.object(&format!("{DIR}/pack")).unwrap(), b"in flight");
+}
+
+/// A drain with no commit running returns at once, without waiting; a commit answered at once on
+/// the calling thread, one that ran there because its thread could not be made, and one that ended
+/// in an error are not left counted. Catches a count that a commit not run on a thread of its own
+/// leaves behind, which would hold every later hand-over for ever.
+#[test]
+fn a_drain_returns_at_once_when_no_commit_runs() {
+    let rig = SpaceRig::new("put-rename-drain-none");
+    let space = Arc::new(rig.space);
+    let dir = nonce(&space);
+    let waited = Arc::new(std::sync::atomic::AtomicUsize::new(0));
+    let count = Arc::clone(&waited);
+    *space.before_drain.lock().unwrap() = Some(Arc::new(move || {
+        let _ = count.fetch_add(1, Ordering::AcqRel);
+    }));
+    space.drain_commits();
+    staged(&space, dir, "a.part", b"a");
+    let renamed = rename(&space, dir, "a.part", "b.part");
+    assert_eq!(renamed.try_recv().unwrap().0, Ok(()));
+    let name = format!(
+        "bad.sha256-{}.part",
+        super::super::super::testing::sha(b"x")
+    );
+    staged(&space, dir, &name, b"bytes");
+    assert_eq!(
+        rename(&space, dir, &name, "bad").recv().unwrap().0,
+        Err(Errno::BADMSG)
+    );
+    staged(&space, dir, "c.part", b"inline");
+    space.no_threads.store(true, Ordering::Release);
+    assert_eq!(
+        rename(&space, dir, "c.part", "c").try_recv().unwrap().0,
+        Ok(())
+    );
+    until(|| space.commits_running() == 0);
+    space.drain_commits();
+    assert_eq!(waited.load(Ordering::Acquire), 0);
+}
+
+/// A hold for a hand-over ends at once a commit that waits for the release of its file, `EBUSY`:
+/// the readers have stopped and the release goes to the successor, so it would never reach this
+/// process, and the drain of the commits, which the successor's start waits for, would otherwise
+/// last the whole commit deadline. Catches a hand-over held up by a commit that cannot end before
+/// its deadline.
+#[test]
+fn a_hold_ends_a_commit_that_waits_for_a_release_at_once() {
+    let rig = SpaceRig::new("put-rename-held");
+    let space = Arc::new(rig.space);
+    let dir = nonce(&space);
+    let (_, _fh) = closing(&space, dir, "pack.part", b"never released");
+    let answers = rename(&space, dir, "pack.part", "pack");
+    until(|| space.changes.waits.load(Ordering::Acquire) > 0);
+    assert_eq!(answers.try_recv().unwrap_err(), TryRecvError::Empty);
+    space.hold(true);
+    assert_eq!(answers.recv().unwrap().0, Err(Errno::BUSY));
+    space.drain_commits();
+    assert_eq!(space.commits_running(), 0);
+    // While held, a new commit of a file still being closed does not wait either.
+    let (_, _other) = closing(&space, dir, "late.part", b"late");
+    assert_eq!(
+        rename(&space, dir, "late.part", "late").recv().unwrap().0,
+        Err(Errno::BUSY)
+    );
+}

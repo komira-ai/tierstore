@@ -37,8 +37,9 @@
 # docs/update-hook.md "The second unit"): it starts the instance of the other letter, which takes
 # the mount from the running one, and never stops the one that holds the mount. On a node where
 # none runs, an operator creates the marker for instance a once /etc/tierstore/fs.toml is there.
-# The mount must be made before the job runtime starts: the runtime's unit orders itself After=
-# this one.
+# The mount must be made before the job runtime starts: the runtime's unit names both letters,
+# Wants= and After= tierstore-fs@a.service tierstore-fs@b.service (packaging/README.md "A unit
+# that needs the mount"), as only the letter with its marker starts.
 #
 # /etc/tierstore/fs.toml has the `[fs]` table; the cache directory and the fill socket it names
 # are those of the node's tierstore (`local_cache.path`, `local_cache.fill_socket`). It holds no

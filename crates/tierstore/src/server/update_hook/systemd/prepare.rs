@@ -11,6 +11,7 @@ use super::super::{
     CACHE_HANDOFF_CAPABILITY, DIR_TIER_KIND, HANDOFF_CAPABILITY, HANDOFF_SOCKET_KEY,
     HANDOFF_STATE_DIR_CAPABILITY, HOT_STORE_TABLE, LOCAL_CACHE_TABLE,
 };
+use super::cleanup::{drain_note, finish};
 use super::{Ctx, fs, unit_name};
 
 /// How long hostkeeper waits before it asks again when both instances run.
@@ -21,6 +22,26 @@ pub(super) fn prepare(
     params: &Params,
     record: Option<&Record>,
 ) -> Result<Done, Done> {
+    // A committed update still in flight is an earlier one whose `cleanup` did not finish (one of
+    // an earlier release gave up while the old instance drained): nothing of it can be undone, and
+    // it is finished first, as `cleanup` finishes it. The update is then prepared from the record
+    // at rest, on what the units say now.
+    let finished;
+    let (record, done_note) = match record {
+        Some(earlier) if earlier.updating && earlier.committed() => {
+            let (at_rest, drains) = finish(c, earlier)?;
+            finished = at_rest;
+            (
+                Some(&finished),
+                format!(
+                    "finished the committed update to {}{}; ",
+                    earlier.version.as_deref().unwrap_or("an unknown version"),
+                    drain_note(&drains)
+                ),
+            )
+        }
+        other => (other, String::new()),
+    };
     if let Some(record) = record
         && record.updating
         && !record.markers.is_empty()
@@ -97,7 +118,7 @@ pub(super) fn prepare(
     fresh.fs_next = fs.next;
     c.save(&fresh)?;
     Ok(Done::ok(format!(
-        "prepared {}: {}, serving {}, next {}{}",
+        "{done_note}prepared {}: {}, serving {}, next {}{}",
         params.target_version,
         mode.map_or("first install", Mode::as_str),
         live.map_or_else(|| "none".to_owned(), unit_name),

@@ -111,6 +111,18 @@ impl Changes {
         }
     }
 
+    /// Tells every wait that something changed: each tries again (a hand-over that ends the waits
+    /// for a release, which this process will not be sent).
+    pub(super) fn notify_every(&self) {
+        let _ = self.count.fetch_add(1, Ordering::SeqCst);
+        for shard in &self.shards {
+            if shard.waiters.load(Ordering::SeqCst) > 0 {
+                let _held = locked(&shard.lock);
+                shard.wake.notify_all();
+            }
+        }
+    }
+
     /// Waits until a change is told for `topic` after the count was `seen`, or `deadline` on
     /// `clock`; whether a change came first (a change of another thing that shares the shard
     /// counts: the caller tries again).

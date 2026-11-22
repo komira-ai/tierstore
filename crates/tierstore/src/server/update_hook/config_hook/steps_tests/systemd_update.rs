@@ -4,7 +4,7 @@
 use std::collections::BTreeSet;
 use std::path::{Path, PathBuf};
 
-use super::super::super::{Instance, Marker, Mode, Params, Reason, Record, Step};
+use super::super::super::{Instance, Marker, Mode, Params, Reason, Record, Step, UnitState};
 use super::{
     Linux, PKG_NEW, PKG_OLD, assert_restarts, build, first, in_flight, lin, release_record, staged,
     update, with_interface, with_socket,
@@ -324,18 +324,31 @@ fn cleanup_before_verify_fails_and_writes_nothing_back() {
     assert_eq!(node.service.get(), Some(release_record(Instance::A)));
 }
 
-/// Asserts that a `cleanup` that finds the old instance still draining is deferred and leaves
-/// the release's record alone, and that a run again retires it and writes the letter back.
+/// Asserts that a `cleanup` that finds the old instance still draining commits, finishes and writes
+/// the new letter into the release's record at once, without stopping or waiting for the old
+/// instance, which drains on and ends by itself. Catches a config update reported failed because
+/// the old instance drained longer than hostkeeper's retries of `cleanup`.
 #[test]
-fn cleanup_waits_for_the_drain_before_it_writes_the_instance_back() {
+fn cleanup_writes_the_instance_back_while_the_old_one_still_drains() {
     let node = Linux::alike();
     let p = update();
-    node.fake.set_drain_looks(1);
+    node.fake.set_drain_looks(50);
     node.go(&p, &[Prepare, Cutover, Verify]);
-    lin::assert_deferred(&node.step(Cleanup, &p), Reason::Draining, 10);
-    assert_eq!(node.service.get(), Some(release_record(Instance::A)));
-    node.go(&p, &[Cleanup]);
+    let done = node.step(Cleanup, &p);
+    lin::assert_ok(&done);
+    assert_eq!(
+        lin::detail(&done),
+        "committed: tierstore@b serves; tierstore@a still drains and ends by itself"
+    );
     assert_eq!(node.service.get(), Some(release_record(Instance::B)));
+    assert_eq!(node.fake.peek(Instance::A), UnitState::Deactivating);
+    assert!(
+        !node
+            .fake
+            .actions()
+            .iter()
+            .any(|a| a.starts_with("units.stop"))
+    );
 }
 
 /// Asserts that `cleanup` leaves a release record that is absent as it is.

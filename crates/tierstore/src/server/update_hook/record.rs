@@ -14,7 +14,8 @@
 //!
 //! - `kind`: always `single`, the tag the previous release gave this record.
 //! - `updating`: an update is in flight: `prepare` recorded it. `rollback` and the end of
-//!   `cleanup` clear it.
+//!   `cleanup` clear it; so do `prepare` and the boot step, for an update that is committed
+//!   and that a `cleanup` did not finish.
 //! - `from`: while an update is in flight, the release the host ran before
 //!   (`updater.previous_release`); absent on a first install.
 //! - `to` and `version`: the staged release and the version it must report. Every later step
@@ -251,13 +252,30 @@ impl Record {
     /// name. `None` when the record is of an update in flight, of the one `params` name, or of
     /// none (a record at rest with no update on it says so itself).
     pub(super) fn nothing_to_roll_back(&self, params: &Params) -> Option<String> {
+        self.nothing_to_roll_back_over(params, false)
+    }
+
+    /// [`Record::nothing_to_roll_back`], and, when `finished_by_prepare`, also over a record that
+    /// is committed and still in flight on the last update, which a `prepare` of the systemd arm
+    /// finishes before it records its own.
+    pub(super) fn nothing_to_roll_back_over(
+        &self,
+        params: &Params,
+        finished_by_prepare: bool,
+    ) -> Option<String> {
+        let at_rest = !self.updating || (finished_by_prepare && self.committed());
         let last = self
             .to
             .as_ref()
-            .filter(|_| !self.updating && !self.is_of(params))?;
+            .filter(|_| at_rest && !self.is_of(params))?;
+        let how = if self.updating {
+            "committed, and still in flight,"
+        } else {
+            "at rest"
+        };
         Some(format!(
             "nothing to roll back: the update to {} {} was never recorded (its prepare failed \
-             or never ran); the record is at rest on the last update ({} {})",
+             or never ran); the record is {how} on the last update ({} {})",
             params.staged_release.display(),
             params.target_version,
             last.display(),

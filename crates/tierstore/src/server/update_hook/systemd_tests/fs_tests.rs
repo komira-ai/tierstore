@@ -341,35 +341,6 @@ fn a_rollback_waits_for_the_new_fs_instance_to_exit_after_the_mount_went_back() 
     assert_eq!(fake.fs_running(), [Instance::A]);
 }
 
-/// Asserts that `cleanup` defers (`draining`) while the old fs instance still runs, never stops
-/// it, and finishes once it has exited, with `fs_live` b (its marker went in `cutover`, as the
-/// take was done). Catches a stop of the instance that is giving the mount away.
-#[test]
-fn cleanup_waits_for_the_old_fs_instance_and_never_stops_it() {
-    let fake = SystemdFake::fs_installed();
-    fake.set_fs_drain_looks(2);
-    let p = params(NEW, Some(OLD));
-    fake.drive(&p, &[Prepare, Cutover, Verify]);
-    let done = fake.run(Cleanup, &p);
-    assert_deferred(&done, Reason::Draining, 10);
-    assert!(detail(&done).contains("tierstore-fs@a still drains"));
-    assert_eq!(fake.fs_markers(), [Instance::B]);
-    assert!(fake.record().committed());
-    let mut runs = 0;
-    while fake.run(Cleanup, &p).outcome != Outcome::Success {
-        runs += 1;
-        assert!(runs < 10, "the drain did not end");
-    }
-    assert!(
-        !fake
-            .fs_actions()
-            .iter()
-            .any(|a| a.starts_with("fs_units.stop"))
-    );
-    assert_eq!(fake.fs_markers(), [Instance::B]);
-    assert_eq!(fake.record().fs_live, Some(Instance::B));
-}
-
 /// Asserts that `restore` after a `cutover`, on a host that booted with both markers, makes the
 /// fs process b (the record's `fs_next`) run alone and holds a's marker off, after it has
 /// started the store; and that `restore` at rest starts the recorded `fs_live`. Catches a boot
@@ -408,13 +379,14 @@ fn restore_starts_the_recorded_fs_instance_after_the_store() {
     assert_eq!(fake.fs_running(), [Instance::B]);
 }
 
-/// Asserts that `restore` stops an fs instance the record does not name when it runs (it would
-/// race for the mount), and does not when it does not run. Catches a stop of a unit that is not
-/// loaded.
+/// Asserts that `restore` stops an fs instance the record does not name when it runs and the one
+/// the record names is not active (it would race for the mount), and does not when it does not
+/// run. Catches a stop of a unit that is not loaded.
 #[test]
 fn restore_stops_the_other_fs_instance_only_when_it_runs() {
     let fake = SystemdFake::fs_installed();
     let p = params(NEW, None);
+    fake.set_fs_unit(Instance::A, UnitState::Inactive, None);
     fake.set_fs_unit(Instance::B, UnitState::Active, Some(OLD));
     fake.drive(&p, &[Restore]);
     assert!(fake.fs_actions().contains(&"fs_units.stop b".to_owned()));

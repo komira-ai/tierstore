@@ -9,8 +9,16 @@
 //!   uploads the file (up to the commit deadline), runs on a thread of its own, `fs-commit`, so
 //!   that it holds none of the threads that serve the requests it waits for; if that thread cannot
 //!   be made, it runs on the calling thread.
+//!
+//! A commit's thread answers its request itself, after the readers that read it may have stopped,
+//! so the stop of the readers does not wait for it. A hand-over does ([`PutSpace::drain_commits`]):
+//! the request is this process's to answer, the kernel does not send it again to the successor,
+//! and the commit writes the journal and the stage, which the successor reads once it serves. Each
+//! commit ends by its deadline (`fs.put.commit_deadline_secs`), the upload included; one that waits
+//! for the release of its file ends at once, `EBUSY`, when the hand-over holds the space
+//! ([`PutSpace::hold`]): the release goes to the successor and would never reach it.
 
-use std::sync::{Arc, Mutex};
+use std::sync::{Arc, Condvar, Mutex};
 
 use rustix::io::Errno;
 
@@ -21,6 +29,34 @@ use super::super::names::{PutDir, is_part};
 use super::super::store::{Rename, StagedStore};
 use super::PutSpace;
 use crate::server::treefs::locked;
+
+/// The count of the commits whose thread runs, and what wakes a wait for none.
+#[derive(Default)]
+pub(super) struct Commits {
+    count: Mutex<usize>,
+    idle: Condvar,
+}
+
+/// A commit counted in [`Commits`] until it is dropped: after its answer, or when its thread could
+/// not be made.
+struct Counted(Arc<Commits>);
+
+impl Counted {
+    fn begin(commits: &Arc<Commits>) -> Self {
+        *locked(&commits.count) += 1;
+        Self(Arc::clone(commits))
+    }
+}
+
+impl Drop for Counted {
+    fn drop(&mut self) {
+        let mut count = locked(&self.0.count);
+        *count = count.saturating_sub(1);
+        if *count == 0 {
+            self.0.idle.notify_all();
+        }
+    }
+}
 
 /// A rename that passed the checks that need no wait.
 #[derive(Debug)]
@@ -132,6 +168,12 @@ impl PutSpace {
         why != HANDLE_OPEN || self.closing(plan.id)
     }
 
+    /// Whether a commit busy for `why` waits for a release this process will not be sent: the
+    /// space is held for a successor, which reads every request from the stop of the readers on.
+    fn release_never_comes(&self, why: &str) -> bool {
+        why == HANDLE_OPEN && self.held.load(std::sync::atomic::Ordering::Acquire)
+    }
+
     /// The answer for a rename refused as busy at once.
     fn refuse(plan: &Plan, why: &str) -> Errno {
         tracing::warn!(
@@ -150,12 +192,15 @@ impl PutSpace {
         // The job stays here until a thread takes it, so that a thread that is not made leaves it.
         let job = Arc::new(Mutex::new(Some((plan, done))));
         let (space, slot) = (Arc::clone(self), Arc::clone(&job));
+        let counted = Counted::begin(&self.commits);
         let spawned = if self.no_threads.load(std::sync::atomic::Ordering::Acquire) {
             Err(std::io::Error::other("no thread was made"))
         } else {
             std::thread::Builder::new()
                 .name("fs-commit".to_owned())
                 .spawn(move || {
+                    // Counted until the answer is written.
+                    let _counted = counted;
                     let _ = locked(&slot)
                         .take()
                         .map(|(plan, done)| done(space.run(&plan)));
@@ -171,6 +216,27 @@ impl PutSpace {
         }
     }
 
+    /// Waits until every commit that runs on a thread of its own has answered its request: for a
+    /// hand-over, before the state the successor reads is written. Each ends by its deadline.
+    pub(in crate::server) fn drain_commits(&self) {
+        #[cfg(test)]
+        if *locked(&self.commits.count) > 0 {
+            let hook = locked(&self.before_drain).clone();
+            let _ = hook.map(|hook| hook());
+        }
+        let _idle = self
+            .commits
+            .idle
+            .wait_while(locked(&self.commits.count), |count| *count > 0)
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
+    }
+
+    /// The commits that run on a thread of their own and have not answered yet.
+    #[cfg(test)]
+    pub(in crate::server) fn commits_running(&self) -> usize {
+        *locked(&self.commits.count)
+    }
+
     /// Renames until it is done: waits while the file or the key is busy for a while, then
     /// uploads the file and records the answer.
     fn run(&self, plan: &Plan) -> Result<(), Errno> {
@@ -182,7 +248,7 @@ impl PutSpace {
                 Ok(Rename::Renamed) => return Ok(()),
                 Ok(Rename::Commit(commit)) => break commit,
                 Err(PutError::Busy(why)) => {
-                    if !self.waits_for(plan, why) {
+                    if !self.waits_for(plan, why) || self.release_never_comes(why) {
                         return Err(Self::refuse(plan, why));
                     }
                     let topic = if why == KEY_RUNNING {

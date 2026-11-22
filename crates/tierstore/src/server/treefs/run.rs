@@ -91,10 +91,17 @@ fn serve_put(
 }
 
 /// What the kernel holds of the put directory of `core`, written for the successor; a failure is
-/// said, and the successor then finds what the store holds.
-fn hand_put(core: &Core, runtime_dir: &Path) {
+/// said, and the successor then finds what the store holds. For a hand-over (`handing`) the
+/// commits still running are waited for first: each answers a request this process read, which
+/// the kernel does not send again to the successor, and writes the journal and the stage the
+/// successor reads (`put/space_rename.rs`). A restart does not wait: the unit's stop timeout is
+/// short, and the next process is asked for the requests again where the kernel can send them.
+fn hand_put(core: &Core, runtime_dir: &Path, handing: bool) {
     if let Some(put) = core.put() {
         put.hold(true);
+        if handing {
+            put.drain_commits();
+        }
         carry::write_or_say(runtime_dir, &put.handed());
     }
 }
@@ -340,8 +347,10 @@ impl Running {
         Ok((parts.serving.device()?, parts.control.listener_fd()?))
     }
 
-    /// Stops answering for a hand-over: the control socket stops, and the readers answer the
-    /// request each holds and stop. Blocks until then.
+    /// Stops answering for a hand-over: the control socket stops, the readers answer the request
+    /// each holds and stop, and the commits of the put directory still running answer theirs (a
+    /// commit waiting for a release ends at once; one that uploads, by its deadline). Blocks until
+    /// then.
     pub(super) fn quiesce(&self) {
         let mut parts = locked(&self.parts);
         parts.control.pause();
@@ -349,7 +358,7 @@ impl Running {
         // From here the successor numbers trees and owns the pins of this mount: no idle tree is
         // detached (an unpin of a tree the successor pinned again) until a resume.
         self.core.hold(true);
-        hand_put(&self.core, &self.settings.runtime_dir);
+        hand_put(&self.core, &self.settings.runtime_dir, true);
     }
 
     /// Answers again after [`Running::quiesce`]: a hand-over that did not complete.
@@ -380,7 +389,7 @@ impl Running {
     /// unmounted.
     pub(super) fn leave(self) {
         locked(&self.parts).serving.stop_reading();
-        hand_put(&self.core, &self.settings.runtime_dir);
+        hand_put(&self.core, &self.settings.runtime_dir, false);
     }
 
     /// Unmounts and waits for the threads of the mount to end. A mount this process did not make

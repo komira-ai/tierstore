@@ -113,10 +113,10 @@ fn cutover_after_the_commit_is_out_of_order() {
     fake.complete(&p);
     assert_failed(&fake.run(Cutover, &p), Reason::OutOfOrder);
 
+    // Committed and still in flight: a `cleanup` that ended between its commit and its end.
     let fake = SystemdFake::installed();
-    fake.set_drain_looks(1);
     fake.drive(&p, &[Prepare, Cutover, Verify]);
-    assert_eq!(fake.run(Cleanup, &p).outcome.code(), 75);
+    fake.set_record(&fake.record().with(Marker::Stopping));
     assert_failed(&fake.run(Cutover, &p), Reason::OutOfOrder);
 }
 

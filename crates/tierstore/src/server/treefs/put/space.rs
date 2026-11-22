@@ -148,9 +148,14 @@ pub(in crate::server) struct PutSpace {
     /// Called by a commit that is about to wait, for the tests that act in that gap.
     #[cfg(test)]
     pub(super) before_wait: Mutex<Option<Arc<dyn Fn() + Send + Sync>>>,
+    /// Called by a drain of the commits that is about to wait, for the tests that act in that gap.
+    #[cfg(test)]
+    pub(in crate::server) before_drain: Mutex<Option<Arc<dyn Fn() + Send + Sync>>>,
     /// Whether a commit's thread is not made (set only by the tests of the fallback to the
     /// request's thread).
     no_threads: AtomicBool,
+    /// The commits running, which a hand-over waits for (`space_rename.rs`).
+    commits: Arc<rename::Commits>,
 }
 
 impl std::fmt::Debug for PutSpace {
@@ -217,7 +222,10 @@ impl PutSpace {
             tries: std::sync::atomic::AtomicU64::new(0),
             #[cfg(test)]
             before_wait: Mutex::new(None),
+            #[cfg(test)]
+            before_drain: Mutex::new(None),
             no_threads: AtomicBool::new(false),
+            commits: Arc::default(),
         }
     }
 
@@ -631,9 +639,15 @@ impl PutSpace {
     }
 
     /// Stops the sweep, for a successor that takes over (`true`), or starts it again (`false`).
+    /// A hold also ends the commits that wait for the release of their file: this process reads
+    /// no request from here on, so the release goes to the successor and never reaches them, and
+    /// each answers `EBUSY` at once rather than at its deadline (`space_rename.rs`).
     pub(in crate::server) fn hold(&self, on: bool) {
         let _sweeping = locked(&self.sweeping);
         self.held.store(on, Ordering::Release);
+        if on {
+            self.changes.notify_every();
+        }
     }
 
     /// Runs the sweep of the store, unless held.

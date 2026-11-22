@@ -664,6 +664,34 @@ old instance answers until it exits, and the new one binds when it takes the loc
 (`macos/tierstore.toml`) has the entry with its own paths. What the provider does, and what each of
 its answers means to a job, is in `crates/tierstore/docs/operations.md`, "The mount provider".
 
+### A unit that needs the mount
+
+The mount at `/run/tierstore/fs` is held by one of two instances, `tierstore-fs@a` or
+`tierstore-fs@b`, and every update that hands the fs process over moves it to the other letter. A
+unit that needs the mount (jobscheduler's agent on a build node, say) names both letters, in a
+drop-in of its own:
+
+```ini
+[Unit]
+Wants=tierstore-fs@a.service tierstore-fs@b.service
+After=tierstore-fs@a.service tierstore-fs@b.service
+```
+
+This is right for either letter, at boot and after any number of updates, with nothing to edit:
+each instance starts only when its marker (`/var/lib/tierstore/run-fs-<letter>`) is there, and
+only the letter that holds the mount has one, so the `Wants=` starts that one and the other is
+skipped (a start whose condition fails is not a failure, and it fails nothing that wants it). The
+unit is `Type=notify` and says `READY=1` only once it has made or taken the mount, so `After=`
+orders the unit after the mount is there. A unit that names one letter is right only until the
+next hand-over: after it, its `Wants=` starts nothing and its `After=` orders it after nothing.
+
+Use `Wants=`, not `Requires=` or `BindsTo=`: after a hand-over the old instance ends by itself, and
+a unit bound to it would be stopped with it. Do not name the mount point instead
+(`RequiresMountsFor=/run/tierstore/fs`): the fs process makes the mount itself, through
+`/dev/fuse`, so systemd knows `run-tierstore-fs.mount` only while the mount exists, and at boot
+there is no such unit to order after. The package ships no target of its own for the same reason
+the two letters are enough: a target would only collect the same two `Wants=`.
+
 ### The registry front
 
 The registry front (see The OCI read front) is an `[[interface]]` of type `oci` in a storage

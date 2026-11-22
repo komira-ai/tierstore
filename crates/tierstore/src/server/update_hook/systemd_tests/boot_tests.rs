@@ -101,6 +101,7 @@ fn restore_reports_the_port_that_fails() {
         assert_failed(&fake.run(Restore, &params(NEW, None)), reason);
     }
     let fake = SystemdFake::installed();
+    fake.set_unit(Instance::A, UnitState::Inactive, None, false);
     fake.set_unit(Instance::B, UnitState::Active, Some(OLD), true);
     fake.fail_on(Some("units.stop"));
     assert_failed(&fake.run(Restore, &params(NEW, None)), Reason::UnitFailed);
