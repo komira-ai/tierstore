@@ -1199,7 +1199,7 @@ So the core's views (6.6) move out of the Linux design altogether and stay on ma
   `NFS_MFLAG_NOCALLBACK` and calls `mount(2)` itself) [S5], is reported buggy by EdenFS [S10] and, by an unconfirmed
   report, failing on macOS 26 [S29]. **Measured: `mount_nfs` refused all 15 spellings tried** (v3 and v4, `ticotsord` netid, the socket path as host, as root and as user), each with
   "no usable addresses for host"; the client has the strings for local transports, and a direct `mount(2)` with an XDR `nfs_mattr` was not tried (Measured: macos E14). The verified transport is loopback TCP. A Unix socket would
-  be preferred, because a job's profile can deny its path, which makes the server's uid check a real fence (6.8); with loopback TCP only, runs whose network is above `Off`
+  be preferred, because a job's profile can deny its path, which would keep a job's process off the server itself (the uid check this once relied on was removed, 6.8); with loopback TCP only, runs whose network is above `Off`
   keep today's copy.
 - **Isolation**: 6.8.
 - **OCI jobs in a Linux VM on a Mac** (if the farm runs any): the VM shares the tree from the host over VirtioFS or NFS and

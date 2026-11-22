@@ -4,8 +4,8 @@
 use super::config::NfsSettings;
 use super::fixtures::{UID, attached, blob_of, endless, fs_of};
 use super::wire_client::{
-    Client, Cred, Dec, Enc, GETATTR, LOOKUP, MKNOD, NFS, READ, REMOVE, RENAME, SETATTR, WRITE,
-    serve,
+    Client, Cred, Dec, Enc, GETATTR, LINK, LOOKUP, MKNOD, NFS, READ, REMOVE, RENAME, SETATTR,
+    WRITE, serve,
 };
 use crate::server::treefs::ino;
 
@@ -156,14 +156,41 @@ async fn no_uid_changes_a_tree() {
     task.abort();
 }
 
-/// Asserts that a call with `AUTH_NONE`, which names no user, is `NFS3ERR_ACCES` with no body: the
-/// mode bits that `ACCESS` and the client check need a user to be read against.
+/// Asserts that a call with `AUTH_NONE`, which names no user, is `NFS3ERR_ACCES` for a procedure of
+/// each shape of failure, MKNOD's wcc_data among them (the reply is the status and the empty
+/// failure body the procedure has, as exact bytes); that the procedure did not run (a READ of a
+/// cold blob asks for no fill); and that NULL, which carries nothing, is answered, and so is
+/// MOUNT, which hands out the root's handle that any process can derive. `ACCESS` and the
+/// client's checks of the mode bits need a user to be read against.
 #[tokio::test]
 async fn rpc_with_auth_none_is_denied() {
-    let (mut client, root, _digest, task, _rig) = connected("nfs-uid-none").await;
-    let reply = client
-        .call(NFS, GETATTR, Cred::None, Enc::default().opaque(&root))
-        .await;
-    assert_eq!(reply.body, ACCES.to_be_bytes());
+    let (mut client, root, _digest, task, rig) = connected("nfs-uid-none").await;
+    let words = |count: usize| {
+        std::iter::once(ACCES)
+            .chain(std::iter::repeat_n(0, count))
+            .flat_map(u32::to_be_bytes)
+            .collect::<Vec<u8>>()
+    };
+    let fh = || Enc::default().opaque(&root);
+    let denied = [
+        (GETATTR, fh(), 0),
+        (LOOKUP, fh().opaque(b"trees"), 1),
+        (READ, fh().u64(0).u32(10), 1),
+        (WRITE, fh().u64(0).u32(1).u32(0).opaque(b"x"), 2),
+        (MKNOD, fh().opaque(b"x").u32(1), 2),
+        (LINK, fh().opaque(&root).opaque(b"x"), 3),
+        (RENAME, fh().opaque(b"a").opaque(&root).opaque(b"b"), 4),
+    ];
+    let fills = rig.upstream.asked("fill").len();
+    for (procedure, args, empty_words) in denied {
+        let reply = client.call(NFS, procedure, Cred::None, args).await;
+        assert_eq!(reply.accepted, 0, "procedure {procedure}");
+        assert_eq!(reply.body, words(empty_words), "procedure {procedure}");
+    }
+    assert_eq!(rig.upstream.asked("fill").len(), fills);
+
+    let null = client.call(NFS, 0, Cred::None, Enc::default()).await;
+    assert_eq!((null.accepted, null.body.len()), (0, 0));
+    assert_eq!(client.mount("/").await, root);
     task.abort();
 }
