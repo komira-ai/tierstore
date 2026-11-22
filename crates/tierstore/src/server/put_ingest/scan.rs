@@ -100,9 +100,9 @@ pub(super) fn scan(root: &Path) -> Found {
                 let _ = found.jobs.insert(dir, job);
             }
         }
-        if let Some(when) = changed(&root.join(&build_rel)) {
-            found.builds.push((build_rel, when));
-        }
+        // None when the directory went since it was listed.
+        let when = changed(&root.join(&build_rel));
+        found.builds.extend(when.map(|when| (build_rel, when)));
     }
     found
 }

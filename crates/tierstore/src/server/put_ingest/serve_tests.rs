@@ -2,11 +2,17 @@
 //! becomes the object of its key with the declared digest and its file goes; a truncated, changed
 //! or undeclared file is refused and nothing is stored; what a scan finds; and when it runs.
 
+use std::sync::Arc;
+
 use super::store::Refusal;
 use super::testing::{Bench, commit, sha};
 use super::{GRACE_MS, Report};
+use crate::server::Drained;
+use crate::server::cache_cli_tests::{Node, serving};
 use crate::server::local_cache::Tick;
-use crate::{Backend as _, Op};
+use crate::server::local_cache::testing::wait_until;
+use crate::server::local_cache::{Disk, SystemDisk};
+use crate::{Backend, FaultyBackend, MemoryBackend, Op};
 
 /// The milliseconds of the grace.
 fn grace() -> u64 {
@@ -314,4 +320,43 @@ async fn only_the_holder_of_the_lock_ingests() {
         }
     );
     bench.stop().await;
+}
+
+/// Asserts that a build node whose file names `local_cache.put_ingest` ingests while it serves: a
+/// pack committed into a job's directory under the root is stored in the node's upstream with its
+/// bytes, and its file is removed. The file is read, the node started and stopped, as the binary
+/// does.
+#[tokio::test]
+async fn a_build_node_with_the_key_ingests_while_it_serves() {
+    let node = Node::new("ingest-node");
+    let root = node.cache_dir().with_file_name("put");
+    let dir = root.join("cas/b/b1/n1");
+    std::fs::create_dir_all(&dir).unwrap();
+    let local = format!("write_through = true\nput_ingest = \"{}\"", root.display());
+    let settings = node.settings("", &local);
+    let memory = Arc::new(MemoryBackend::new());
+    let upstream: Arc<dyn Backend> = Arc::new(FaultyBackend::new(memory.clone()));
+    let disk: Arc<dyn Disk> = Arc::new(SystemDisk);
+    let bytes = b"committed while the node serves".to_vec();
+    let staged = dir.join(format!("pack.sha256-{}.part", sha(&bytes)));
+    std::fs::write(&staged, &bytes).unwrap();
+    let pack = dir.join("pack");
+    // A job's directory last changed at the epoch: the ingest's first scan removes it, which says
+    // the watcher is in place.
+    let old = root.join("cas/b/old/n0");
+    std::fs::create_dir_all(&old).unwrap();
+    let epoch = std::time::SystemTime::UNIX_EPOCH + std::time::Duration::from_secs(1);
+    std::fs::File::open(&old)
+        .unwrap()
+        .set_modified(epoch)
+        .unwrap();
+    let work = |_| async {
+        wait_until("the first scan removes the old directory", || !old.exists()).await;
+        std::fs::rename(&staged, &pack).unwrap();
+        wait_until("the pack is stored and its file removed", || !pack.exists()).await;
+    };
+    let drained = serving(&settings, upstream, disk, work).await.unwrap();
+    assert_eq!(drained, Drained { abandoned: 0 });
+    let got = memory.get("cas/b/b1/n1/pack", None).await.unwrap();
+    assert_eq!(got.to_vec(), bytes);
 }

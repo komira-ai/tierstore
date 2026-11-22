@@ -69,17 +69,19 @@ mod testing;
 #[cfg(test)]
 mod watch_linux_tests;
 
-use std::collections::{BTreeMap, BTreeSet};
+use std::collections::BTreeSet;
 use std::io;
+use std::panic::AssertUnwindSafe;
 use std::path::{Path, PathBuf};
 use std::sync::Arc;
 use std::time::Duration;
 
+use futures::FutureExt as _;
 use tokio::sync::{Notify, mpsc, watch};
 use tokio::task::{self, JoinSet};
 
 use super::local_cache::{LocalCache, Mode};
-use crate::{Clock, PutOutcome, SystemClock, TreeDigest};
+use crate::{Clock, Error, PutOutcome, SystemClock, TreeDigest};
 use ledger::{FileId, Ledger, Verdict};
 use names::{JobDir, Name, Place, name_of, place};
 pub(in crate::server) use store::Refusal;
@@ -209,8 +211,6 @@ struct Run<'a> {
     ingest: &'a PutIngest,
     ledger: Ledger,
     puts: JoinSet<Ended>,
-    /// The file of each running put, by its task.
-    tasks: BTreeMap<task::Id, FileId>,
     /// The files to put when a put comes free.
     queue: BTreeSet<FileId>,
     watcher: Option<Watcher>,
@@ -244,7 +244,6 @@ impl<'a> Run<'a> {
             ingest,
             ledger,
             puts: JoinSet::new(),
-            tasks: BTreeMap::new(),
             queue: BTreeSet::new(),
             watcher: None,
         }
@@ -268,13 +267,13 @@ impl<'a> Run<'a> {
             tokio::select! {
                 biased;
                 () = halt.notified() => {
-                    while let Some(ended) = self.puts.join_next_with_id().await {
+                    while let Some(ended) = self.puts.join_next().await {
                         self.ended(ended);
                     }
                     return true;
                 }
                 _ = modes.changed() => return false,
-                Some(ended) = self.puts.join_next_with_id() => self.ended(ended),
+                Some(ended) = self.puts.join_next() => self.ended(ended),
                 got = next_seen(self.watcher.as_mut(), &mut seen) => match got {
                     Ok(()) => self.take(seen).await,
                     Err(why) => {
@@ -368,31 +367,25 @@ impl<'a> Run<'a> {
         self.ingest.report(Report::Putting { key: key.clone() });
         let cache = self.ingest.cache.clone();
         let path = self.path_of(&id);
-        let file = id.clone();
-        let task = self.puts.spawn(async move {
-            let (outcome, identity) = put_file(&cache, &key, sha256, &path).await;
-            (file, key, outcome, identity)
+        let _ = self.puts.spawn(async move {
+            // A put that panics ends as one the upstream did not take: its file is left, and its
+            // entry in the ledger freed, to be put again.
+            let put = AssertUnwindSafe(put_file(&cache, &key, sha256, &path)).catch_unwind();
+            let (outcome, identity) = put.await.unwrap_or_else(|_| {
+                let why = Error::Other("the put panicked".to_owned());
+                (Outcome::Again(why), None)
+            });
+            (id, key, outcome, identity)
         });
-        let _ = self.tasks.insert(task.id(), id);
     }
 
     /// Takes the end of a put, and starts the next one waiting.
-    fn ended(&mut self, ended: Result<(task::Id, Ended), task::JoinError>) {
+    fn ended(&mut self, ended: Result<Ended, task::JoinError>) {
         match ended {
-            Ok((task, ended)) => {
-                let _ = self.tasks.remove(&task);
-                self.outcome(ended);
-            }
-            Err(failed) => {
-                // The put's task ended without an outcome: its file is left to be put again.
-                if let Some(id) = self.tasks.remove(&failed.id()) {
-                    self.ledger.done(&id, false);
-                    tracing::warn!(
-                        "tierstore: the put ingest's put of {} failed: {failed}",
-                        id.1
-                    );
-                }
-            }
+            Ok(ended) => self.outcome(ended),
+            // Only a task that is aborted ends so (a panic is its outcome, above), and the puts
+            // are aborted only with their run.
+            Err(failed) => tracing::warn!("tierstore: a put of the put ingest ended: {failed}"),
         }
         while self.puts.len() < MOST_PUTS {
             let Some(next) = self.queue.pop_first() else {

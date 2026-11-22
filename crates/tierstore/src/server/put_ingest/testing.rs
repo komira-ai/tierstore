@@ -72,10 +72,13 @@ impl Bench {
         self.wait(|report| *report == Report::Watching).await;
     }
 
-    /// Whether the ingest has reported nothing that was not taken yet.
+    /// Whether the ingest has reported nothing, since the reports taken, but scans: no put, store,
+    /// refusal or removal. (A watcher may tell one directory in more than one batch, and each is a
+    /// scan.) The reports are taken.
     pub(super) fn quiet(&mut self) -> bool {
         let reports = self.reports.as_mut().expect("a started ingest");
-        reports.try_recv().is_err()
+        std::iter::from_fn(|| reports.try_recv().ok())
+            .all(|report| matches!(report, Report::Scanned | Report::Watching))
     }
 
     /// Starts the ingest of the root into the bench's cache.
@@ -113,8 +116,10 @@ impl Bench {
 
     /// Waits for the put of `key` to start.
     pub(super) async fn putting(&mut self, key: &str) {
-        self.wait(|report| matches!(report, Report::Putting { key: got } if got == key))
-            .await;
+        let want = Report::Putting {
+            key: key.to_owned(),
+        };
+        self.wait(|report| *report == want).await;
     }
 
     /// Makes a whole scan run, and waits for its end: a directory appears under `cas/b`, which the
@@ -143,9 +148,8 @@ impl Bench {
     /// Halts the ingest and waits for it to end.
     pub(super) async fn stop(&mut self) {
         self.halt.notify_one();
-        if let Some(task) = self.task.take() {
-            task.await.unwrap();
-        }
+        let task = self.task.take().expect("a started ingest");
+        task.await.unwrap();
     }
 }
 

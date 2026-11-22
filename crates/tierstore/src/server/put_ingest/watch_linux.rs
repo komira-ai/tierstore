@@ -75,9 +75,8 @@ impl Watcher {
     /// Watches the directories under `rel` that are watched, and the ones under them; one that
     /// cannot be watched (gone already) is left.
     fn watch_below(&mut self, rel: &Path) {
-        let Ok(entries) = std::fs::read_dir(self.root.join(rel)) else {
-            return;
-        };
+        // A directory that cannot be read (gone already) lists nothing.
+        let entries = std::fs::read_dir(self.root.join(rel)).into_iter().flatten();
         for entry in entries.flatten() {
             let child = rel.join(entry.file_name());
             let is_dir = entry.file_type().is_ok_and(|kind| kind.is_dir());
@@ -141,8 +140,9 @@ impl Watcher {
         }
         if flags.contains(ReadFlags::IGNORED) {
             let _ = self.dirs.remove(&wd);
-            return;
         }
+        // An event of no name (the end of a watch, just above) or of a watch dropped is nothing
+        // seen.
         let (Some(dir), Some(name)) = (self.dirs.get(&wd), name) else {
             return;
         };
