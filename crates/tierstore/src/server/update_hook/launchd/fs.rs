@@ -4,8 +4,9 @@
 //! left without its server blocks every process that touches it. So the steps that restart the
 //! main job never leave the file service stopped with its mount in place: the fs job is booted out
 //! first (its process unmounts as it ends), the mount list is read, and only a mount that is gone
-//! lets the step go on. A mount that is still listed ends the step, and the fs job is booted in
-//! again, which takes the mount over. After the main job serves, the fs job is booted in.
+//! lets the step go on. A mount that is still listed ends the step, with the main job left as it
+//! is, and the fs job is booted in again, which takes the mount over. After the main job serves,
+//! the fs job is booted in.
 //!
 //! The mount point is read from [`FS_CONFIG_FILE`]. Everything here is idle when the params name
 //! no fs job.
@@ -98,7 +99,7 @@ impl Ctx<'_, '_> {
             Ok(_) => Err(Done::fail(
                 Reason::NotReady,
                 format!(
-                    "{} is still mounted after {fs} stopped: {} keeps running, and {fs} is \
+                    "{} is still mounted after {fs} stopped: {} is left as it is, and {fs} is \
                      loaded again",
                     mountpoint.display(),
                     self.label

@@ -437,6 +437,14 @@ impl Fake {
         w.broken = false;
     }
 
+    /// The job is loaded and runs nothing: its program exited and launchd has not started it
+    /// again, or cannot.
+    pub fn set_job_idle(&self) {
+        let mut w = self.w.borrow_mut();
+        w.job = None;
+        w.broken = true;
+    }
+
     /// The release whose binary is at [`SERVICE_BINARY`], as a person or an old run left it.
     pub fn set_installed(&self, release: Option<&str>) {
         self.w.borrow_mut().installed = release.map(PathBuf::from);

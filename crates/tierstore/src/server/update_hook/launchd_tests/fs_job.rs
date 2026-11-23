@@ -257,8 +257,9 @@ fn an_fs_job_that_is_not_loaded_is_booted_in_after_the_main_job() {
     assert!(fake.snapshot().fs_job);
 }
 
-/// Asserts that a first install loads the main job and then the fs job, with no boot-out and no
-/// look at the mounts. Catches a first install that stops what is not there.
+/// Asserts that a first install on a host where neither job is loaded asks whether the fs job is
+/// loaded, then loads the main job and then the fs job, with no boot-out and no look at the
+/// mounts. Catches a first install that stops what is not there.
 #[test]
 fn a_first_install_boots_the_fs_job_in_after_the_main_job() {
     let fake = Fake::first_install();
@@ -270,6 +271,7 @@ fn a_first_install_boots_the_fs_job_in_after_the_main_job() {
         acts(&fake)[before..],
         [
             loaded(),
+            fs_loaded(),
             install(NEW),
             bootstrap(),
             fs_loaded(),

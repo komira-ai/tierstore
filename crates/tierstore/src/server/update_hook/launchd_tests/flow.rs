@@ -185,21 +185,6 @@ fn a_first_install_bootstraps_without_any_bootout() {
     assert!(!fake.record().updating);
 }
 
-/// Asserts that a first install whose job is already loaded but does not serve the target is
-/// neither booted out nor booted in again: the step waits on what is there and reports that no
-/// request is answered by the target. Catches a first install that restarts a job it did not
-/// load.
-#[test]
-fn a_first_install_never_boots_out_a_loaded_job() {
-    let fake = Fake::first_install();
-    fake.advance(&[Prepare]);
-    fake.set_job(Some(NEW));
-    fake.lie(NEW, "9.9.9");
-    let done = fake.run(Cutover);
-    assert_failed(&done, Reason::ProbeFailed);
-    assert_eq!(fake.launchd_calls(), [loaded()]);
-}
-
 /// Asserts that a `cutover` whose job never answers `/readyz` fails with `not_ready` and leaves
 /// the update on record without `swapped`, the job as it is (the hook does not roll back
 /// there), and the lock released. Catches a cutover that records a swap it did not see or that

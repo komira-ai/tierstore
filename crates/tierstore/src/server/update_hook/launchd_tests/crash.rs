@@ -11,8 +11,12 @@ use Step::{Cleanup, Cutover, Prepare, Restore, Rollback, Uninstall, Verify};
 struct Scenario {
     name: &'static str,
     first: bool,
-    /// The params name the fs job, loaded on an update and not on a first install.
+    /// The params name the fs job, loaded on an update and not on a first install (except over
+    /// a copy installed by hand).
     fs: bool,
+    /// A first install over a copy installed by hand that runs `OLD` under the job's label, and
+    /// whose fs job, when `fs` says so, is loaded with its mount.
+    copy: bool,
     setup: &'static [Step],
     act: Step,
 }
@@ -22,6 +26,7 @@ const fn scenario(name: &'static str, first: bool, setup: &'static [Step], act: 
         name,
         first,
         fs: false,
+        copy: false,
         setup,
         act,
     }
@@ -29,6 +34,10 @@ const fn scenario(name: &'static str, first: bool, setup: &'static [Step], act: 
 
 const fn with_fs(s: Scenario) -> Scenario {
     Scenario { fs: true, ..s }
+}
+
+const fn over_a_copy(s: Scenario) -> Scenario {
+    Scenario { copy: true, ..s }
 }
 
 const SCENARIOS: &[Scenario] = &[
@@ -83,6 +92,24 @@ const SCENARIOS: &[Scenario] = &[
         Uninstall,
     )),
     with_fs(scenario("first fs cutover", true, &[Prepare], Cutover)),
+    over_a_copy(scenario(
+        "first cutover over a copy",
+        true,
+        &[Prepare],
+        Cutover,
+    )),
+    over_a_copy(with_fs(scenario(
+        "first fs cutover over a copy",
+        true,
+        &[Prepare],
+        Cutover,
+    ))),
+    over_a_copy(with_fs(scenario(
+        "first fs verify over a copy",
+        true,
+        &[Prepare, Cutover],
+        Verify,
+    ))),
 ];
 
 fn start(s: &Scenario) -> Fake {
@@ -92,7 +119,10 @@ fn start(s: &Scenario) -> Fake {
         Fake::new()
     };
     if s.fs {
-        fake.with_fs(!s.first);
+        fake.with_fs(!s.first || s.copy);
+    }
+    if s.copy {
+        fake.set_job(Some(super::fake::OLD));
     }
     fake.advance(s.setup);
     if s.act == Restore {

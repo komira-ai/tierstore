@@ -10,21 +10,23 @@
 //! systemd instance (`live`, `next` or `mode`) is not this arm's and is refused.
 //!
 //! When the params name the job of `tierstore fs` (`fs_launchd_label`), the arm drives it too, as
-//! [`fs`] describes: every boot-out of the main job (`cutover` of an update, `rollback`,
-//! `uninstall`) is preceded by the boot-out of the fs job and a check that its mount is gone, and
-//! the fs job is booted in after the main job serves (`cutover`, `rollback`) or after it is
-//! loaded (`restore`). A mount that stays ends the step with `not_ready`, with the main job
-//! untouched.
+//! [`fs`] describes: every boot-out of the main job (`cutover` of an update or of a first install
+//! over a loaded job, `rollback`, `uninstall`) is preceded by the boot-out of the fs job and a
+//! check that its mount is gone (a first install looks at the fs job even when the main job is
+//! not loaded), and the fs job is booted in after the main job serves (`cutover`, `rollback`) or
+//! after it is loaded (`restore`). A mount that stays ends the step with `not_ready`, with the
+//! main job untouched.
 //!
 //! - `prepare` needs the node's configuration file to exist (it does not need a hand-over
 //!   socket), and records the update: `from` the previous release (none on a first install),
 //!   `to` the staged release and its `version`. Nothing is started or stopped.
-//! - `cutover` boots the fs job out first when there is one (an update only), boots the job out
-//!   (an update only) and in, waits for `/readyz` and for the build of the target version, boots
-//!   the fs job in when there is one and it is not loaded, and records `swapped`. A first
-//!   install never boots out: it boots in when the job is not loaded. A run that finds the job
-//!   loaded and serving the target only records `swapped`. A failure is reported; hostkeeper
-//!   then runs `rollback`.
+//! - `cutover` boots the fs job out first when there is one and it is loaded, boots the job out
+//!   and in, waits for `/readyz` and for the build of the target version, boots the fs job in
+//!   when there is one and it is not loaded, and records `swapped`. A first install boots the
+//!   job out only when it is loaded: a copy installed by hand, whose job serves another version
+//!   or nothing, is taken over as an update would take it over. A run that finds the job loaded
+//!   and serving the target only records `swapped`. A failure is reported; hostkeeper then runs
+//!   `rollback`.
 //! - `verify` observes the target version served by the loaded job and records `verified`. After
 //!   the commit it only observes.
 //! - `rollback` boots the fs job out first when there is one, boots the job out and, for an
@@ -232,19 +234,19 @@ fn cutover(c: &Ctx<'_, '_>, params: &Params, record: &mut Record) -> Result<Done
     // serve the target, and an update restarts it only when it does not.
     let seen = loaded && c.look().observed(target).is_ok();
     if !seen {
-        let update = record.from.is_some();
-        // The file service goes first, and the update goes no further while its mount stays.
-        if update {
-            c.stop_fs()?;
-        }
+        // The file service goes first, and the step goes no further while its mount stays: on
+        // an update, and on a first install, which takes over a copy installed by hand that
+        // left its jobs loaded. Nothing is stopped when the fs job is not loaded.
+        c.stop_fs()?;
         // The plist runs the copy at `SERVICE_BINARY`: it becomes the staged release's first.
         c.ports.host.install_binary(&params.staged_release)?;
-        if update {
+        // A loaded job that does not serve the target runs another copy (on a first install,
+        // one installed by hand), or none: it is booted out, so that the bootstrap reads the
+        // plist that is in place now.
+        if record.from.is_some() || loaded {
             c.ports.launchd.bootout(c.label)?;
-            c.bootstrap()?;
-        } else if !loaded {
-            c.bootstrap()?;
         }
+        c.bootstrap()?;
         c.look().serves(target)?;
     }
     c.start_fs()?;
