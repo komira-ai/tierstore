@@ -3,6 +3,8 @@
 //!
 //! - [`fetch`]: download a pinned tool, check its SHA-256, install it.
 //! - [`farm`]: the farm lane's Buck2 build, which must run every action on the build farm.
+//! - [`mac_farm`]: one Cargo command on a Mac of the build farm, as one remote action, and the
+//!   files it makes brought back.
 //! - [`package`]: one binary and its SBOM as release assets, with their `SHA256SUMS` lines.
 //! - [`licenses`]: the third-party licence notice of a binary, which `package` puts in its tarball.
 //! - [`sums`]: assemble `SHA256SUMS` and check the files and their attestations against it.
@@ -25,6 +27,7 @@ pub mod channels;
 pub mod farm;
 pub mod fetch;
 pub mod licenses;
+pub mod mac_farm;
 pub mod package;
 pub mod release;
 pub mod sums;
@@ -135,6 +138,9 @@ enum Verb {
         #[arg(long)]
         target: String,
     },
+    /// Run one Cargo command of this workspace on a Mac of the build farm, as one remote action,
+    /// and write the files it makes (`--output`) below the checkout.
+    MacFarm(mac_farm::Args),
     /// The third-party licence notice of the crates a binary is built from, from the output of
     /// `cargo metadata`.
     Licenses {
@@ -412,6 +418,9 @@ enum ReleaseVerb {
         #[arg(long)]
         out: PathBuf,
     },
+    /// Build, package and check the macOS release files of a commit into `dist/` and `pkg/`, as
+    /// artifacts.yml's macOS job does, in one command (run on a farm Mac by `mac-farm`).
+    MacosAssets(release::macos_assets::Args),
     /// The installer pkg of the macOS binary, `<out>/tierstore-<version>-macos-arm64.pkg`
     /// (unsigned; run on macOS, where `pkgbuild` and `productbuild` are).
     MacosPkg {
@@ -647,6 +656,7 @@ fn run(cli: Cli) -> Result<Vec<String>, Error> {
         Verb::FarmBuild { buck2, target } => {
             Ok(vec![farm::build(&buck2, &target, &mut std::io::stderr())?])
         }
+        Verb::MacFarm(args) => mac_farm::run(&args, &root),
         Verb::Licenses {
             metadata,
             package,
@@ -828,6 +838,9 @@ fn run(cli: Cli) -> Result<Vec<String>, Error> {
                 out: &out,
             },
         ),
+        Verb::Release(ReleaseVerb::MacosAssets(args)) => {
+            release::macos_assets::macos_assets(&args, &root, Path::new(&cargo_program()))
+        }
         Verb::Release(ReleaseVerb::CheckMacosPkg {
             expanded,
             version,

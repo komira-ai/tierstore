@@ -240,8 +240,8 @@ pub fn download_from(
     body.read_to_vec().map_err(failed)
 }
 
-/// Checks `bytes` against `sha256`, unpacks them and installs the file at `out`.
-pub fn install(bytes: &[u8], sha256: &Sha256, unpack: &Unpack, out: &Path) -> Result<(), Error> {
+/// `bytes` when their SHA-256 is `sha256`.
+fn pinned(bytes: &[u8], sha256: &Sha256) -> Result<(), Error> {
     let actual = Sha256::of(bytes);
     if actual != *sha256 {
         return Err(Error::Mismatch {
@@ -249,16 +249,38 @@ pub fn install(bytes: &[u8], sha256: &Sha256, unpack: &Unpack, out: &Path) -> Re
             actual,
         });
     }
-    let file = match unpack {
-        Unpack::Tree { xz } => return install_tree(&decompress(bytes, *xz)?, out),
-        Unpack::Raw => bytes.to_vec(),
-        Unpack::Zst => decompress_zst(bytes)?,
-        Unpack::Tar { xz, member } => tar_member(&decompress(bytes, *xz)?, member)?,
-    };
+    Ok(())
+}
+
+/// Checks `bytes` against `sha256`, unpacks them and installs the file at `out`.
+pub fn install(bytes: &[u8], sha256: &Sha256, unpack: &Unpack, out: &Path) -> Result<(), Error> {
+    if let Unpack::Tree { xz } = unpack {
+        pinned(bytes, sha256)?;
+        return install_tree(&decompress(bytes, *xz)?, out);
+    }
+    let file = file_of(bytes, sha256, unpack)?;
     write_executable(out, &file).map_err(|e| Error::Install {
         path: out.to_owned(),
         why: e.to_string(),
     })
+}
+
+/// Checks `bytes` against `sha256` and takes out of them the one file `unpack` names, as
+/// [`install`] would install it (`mac-farm` sends it to a farm Mac instead).
+///
+/// # Errors
+/// [`Error::Mismatch`] for bytes that are not the pin, [`Error::Unpack`] for `Unpack::Tree`
+/// (a directory, not one file) or bytes that do not decode, and the errors of a missing member.
+pub fn file_of(bytes: &[u8], sha256: &Sha256, unpack: &Unpack) -> Result<Vec<u8>, Error> {
+    pinned(bytes, sha256)?;
+    match unpack {
+        Unpack::Raw => Ok(bytes.to_vec()),
+        Unpack::Zst => decompress_zst(bytes),
+        Unpack::Tar { xz, member } => tar_member(&decompress(bytes, *xz)?, member),
+        Unpack::Tree { .. } => Err(Error::Unpack(
+            "a whole archive is a directory, not one file".to_owned(),
+        )),
+    }
 }
 
 /// [`download`]s `url` and [`install`]s it at `out`: the line to print.

@@ -26,7 +26,9 @@
 //! - a Linux build job is not built and checked against glibc 2.28 as [`super::glibc_floor`] says;
 //! - a job other than `attest` has an `if:`, `attest` has another than the
 //!   signing condition, any job or step has `continue-on-error`, or a step that is not a cache
-//!   save has an `if:` (a required step that can be skipped or fail unseen is no gate);
+//!   save has an `if:` (a required step that can be skipped or fail unseen is no gate); the macOS
+//!   jobs have the conditions [`super::macos_farm`] gives them (the hosted job, the farm job and
+//!   `sign-pkg`, which takes whichever of the two ran);
 //! - `sums` does not need every build job; a download of `sums` or `attest` does not
 //!   take every platform's `assets-<platform>` into `dist` merged, or takes `sha256sums` or
 //!   `bundles` with them; `attest` does not take the sums into `dist`;
@@ -41,7 +43,9 @@
 //!   upload; runs a command other than [`attest_commands`] (nothing built in this repository runs
 //!   while it holds `id-token: write`); runs on another runner than ubuntu; or does not upload the
 //!   bundles as `bundles`;
-//! - any job but `attest` holds `id-token: write`;
+//! - any job but `attest` and `macos-arm64-farm` holds `id-token: write` (the farm job grants it to
+//!   the workflow it calls, macos-farm.yml, whose tokens name that file; [`super::macos_farm`]
+//!   holds the call and that workflow to their shape), or `sums` does not need the farm job;
 //! - the artifacts the jobs upload are not exactly `xtask::release::ARTIFACTS`.
 //!
 //! [`release_platform_problems`] refuses `release.yml` when its `verify` job does not download
@@ -54,6 +58,7 @@
 
 use super::glibc_floor::{self, Zig};
 use super::lint::{SIGN_IF, entries, entry, names, runs};
+use super::macos_farm;
 use super::pkg::{
     MACOS_PKG_COMMANDS, PKG_JOB_IF, PKG_SIGNED, PKG_UNSIGNED, assets_of, pkg_attest_problems,
     pkg_copy, pkg_jobs_problems,
@@ -84,12 +89,13 @@ pub struct Build {
 /// never for a pull request (those platforms are the beta stage of the release).
 pub const NOT_FOR_A_PULL_REQUEST: &str = "${{ github.event_name != 'pull_request' }}";
 
-/// The `if:` of `sums`: for a pull request the beta jobs (linux-arm64, macos-arm64) are skipped and
-/// the linux-x86_64 files are summed; for a push or a run by hand every build job must have succeeded.
-/// The signed macOS installer is a file of every release a push builds: `sums` waits for
-/// `check-pkg`, which runs on a push alone, so it must have succeeded on a push and be skipped
-/// on a pull request and on a run by hand, which sign nothing.
-pub const SUMS_IF: &str = "${{ !cancelled() && needs.linux-x86_64.result == 'success' && ((needs.linux-arm64.result == 'success' && needs.macos-arm64.result == 'success') || (github.event_name == 'pull_request' && needs.linux-arm64.result == 'skipped' && needs.macos-arm64.result == 'skipped')) && (needs.check-pkg.result == 'success' || (github.event_name != 'push' && needs.check-pkg.result == 'skipped')) }}";
+/// The `if:` of `sums`: for a pull request the beta jobs (linux-arm64, macos-arm64 and its farm
+/// build, macos-arm64-farm) are skipped and the linux-x86_64 files are summed; for a push or a run
+/// by hand every build job must have succeeded, the macOS files being the hosted job's or the farm
+/// job's (one of the two runs). The signed macOS installer is a file of every release a push
+/// builds: `sums` waits for `check-pkg`, which runs on a push alone, so it must have succeeded on a
+/// push and be skipped on a pull request and on a run by hand, which sign nothing.
+pub const SUMS_IF: &str = "${{ !cancelled() && needs.linux-x86_64.result == 'success' && ((needs.linux-arm64.result == 'success' && (needs.macos-arm64.result == 'success' || needs.macos-arm64-farm.result == 'success')) || (github.event_name == 'pull_request' && needs.linux-arm64.result == 'skipped' && needs.macos-arm64.result == 'skipped' && needs.macos-arm64-farm.result == 'skipped')) && (needs.check-pkg.result == 'success' || (github.event_name != 'push' && needs.check-pkg.result == 'skipped')) }}";
 
 /// The triggers of `artifacts.yml`: a pull request, a push to main, and by hand (the macOS build
 /// of a branch, tried before it merges).
@@ -137,7 +143,7 @@ pub const BUILDS: &[Build] = &[
         runner: "macos-15",
         target: "aarch64-apple-darwin",
         pin: "CYCLONEDX_SHA256_AARCH64_MACOS",
-        job_if: Some(NOT_FOR_A_PULL_REQUEST),
+        job_if: Some(macos_farm::HOSTED_IF),
         tap: "macos-arm64",
         deb: None,
         rpm: None,
@@ -670,7 +676,9 @@ pub fn artifacts_platform_problems(
         let name = name.as_str().unwrap_or_default();
         let job_if = match name {
             "attest" => Some(SIGN_IF),
-            "sign-pkg" | "check-pkg" => Some(PKG_JOB_IF),
+            "sign-pkg" => Some(macos_farm::SIGN_PKG_IF),
+            "check-pkg" => Some(PKG_JOB_IF),
+            macos_farm::CALLER => Some(macos_farm::FARM_IF),
             "sums" => Some(SUMS_IF),
             _ => BUILDS
                 .iter()
@@ -690,6 +698,12 @@ pub fn artifacts_platform_problems(
             problems.push(format!("sums: does not need {platform}"));
         }
     }
+    if platforms.contains(&"macos-arm64") {
+        if !needs.iter().any(|n| n == macos_farm::CALLER) {
+            problems.push(format!("sums: does not need {}", macos_farm::CALLER));
+        }
+        problems.extend(macos_farm::caller_problems(jobs));
+    }
     problems.extend(pkg_jobs_problems(platforms, jobs, &needs));
     let with_pkg = assets_of(platforms);
     problems.extend(download_problems("sums", job("sums"), &with_pkg, &[]));
@@ -702,13 +716,17 @@ pub fn artifacts_platform_problems(
     problems.extend(release_path_problems(jobs));
     problems.extend(attest_problems(job("attest"), platforms));
 
+    // `attest` holds `id-token: write`, and the call of the farm build grants it to the workflow it
+    // calls, whose tokens name that file (macos_farm.rs); no other job of this file holds it.
     for (name, body) in jobs {
         let name = name.as_str().unwrap_or_default();
         let signs = at(body, &["permissions", "id-token"]) == Some("write");
-        if signs != (name == "attest") {
+        let holder = name == "attest" || name == macos_farm::CALLER;
+        if signs != holder {
             problems.push(format!(
-                "{name}: id-token: write is {}; attest alone holds it",
-                if signs { "held" } else { "not held" }
+                "{name}: id-token: write is {}; attest alone holds it, and {} for the workflow it calls",
+                if signs { "held" } else { "not held" },
+                macos_farm::CALLER
             ));
         }
     }

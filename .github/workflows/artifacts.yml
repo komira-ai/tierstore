@@ -25,6 +25,11 @@
 # macOS job checks the code signature of the binary it unpacked (`codesign --verify --strict`).
 # SHA256SUMS lists the packages and the index; the attest job signs them as it signs the tarballs.
 #
+# The macOS files are built on a GitHub-hosted macOS runner (`macos-arm64`), or, on a push to main
+# once the variable MACOS_PACKAGE_ON_FARM is `true`, on a Mac of the build farm by the same steps
+# (`macos-arm64-farm`, which calls macos-farm.yml; docs/mac-farm.md), which uploads the same
+# artifacts; one of the two runs.
+#
 # And the macOS installer, `tierstore-<version>-macos-arm64.pkg` (`cargo xtask release macos-pkg`,
 # `<version>` the release's `X.Y.Z`), which hostkeeper installs on the Macs of a host group. The
 # macos-arm64 job builds it unsigned and reads it back (`pkgutil --expand`, `release
@@ -61,9 +66,11 @@
 # The attest job is in THIS file for one reason: the signer identity of an attestation is the
 # workflow file that ran the signing step, and the host installer verifies exactly
 # `.github/workflows/artifacts.yml`. Do not move or rename it. Only `attest` may hold
-# `id-token: write` and `attestations: write`, and only under its exact `if:` (the workflow
-# lint, crates/xtask/tests/workflows, requires both): no pull request holds a token that can
-# sign, and every attestation this repository signs names refs/heads/main.
+# `attestations: write`, and of the jobs of this file only `attest` may hold `id-token: write`,
+# each under its exact `if:` (the workflow lint, crates/xtask/tests/workflows, requires both): no
+# pull request holds a token that can sign, and every attestation this repository signs names
+# refs/heads/main. `macos-arm64-farm` grants `id-token: write` to the workflow it calls
+# (macos-farm.yml), whose tokens name that file and so cannot sign as this one.
 #
 # The attest job signs and does nothing else: while it holds `id-token: write` no repository code
 # runs and nothing is built, only the pinned actions below, two `sha256sum --check` commands that
@@ -422,9 +429,11 @@ jobs:
   # hand. Its files reach `sums` and are signed only when its build and checks pass; the tests of
   # the workspace on macOS (the update hook's launchd steps, the listener hand-off, packaging/macos
   # and the xtask verbs among them) are beta.yml's and do not hold the release.
+  # On a push to main once the variable MACOS_PACKAGE_ON_FARM is `true`, this job is skipped and
+  # `macos-arm64-farm` below makes the same files on a farm Mac; a run by hand stays here.
   macos-arm64:
     needs: [version]
-    if: ${{ github.event_name != 'pull_request' }}
+    if: ${{ github.event_name != 'pull_request' && !(github.event_name == 'push' && github.ref == 'refs/heads/main' && vars.MACOS_PACKAGE_ON_FARM == 'true') }}
     runs-on: macos-15
     timeout-minutes: 45
     permissions:
@@ -539,6 +548,24 @@ jobs:
             target
           key: ${{ steps.cargo-cache.outputs.cache-primary-key }}
 
+  # The macOS job above on a Mac of the build farm (docs/mac-farm.md): on a push to main once the
+  # variable MACOS_PACKAGE_ON_FARM is `true`, in place of the hosted job. It calls macos-farm.yml,
+  # whose one job, on a hosted Linux runner, sends `cargo xtask release macos-assets` (the hosted
+  # job's steps, in order) to a farm Mac as one remote action and uploads the same two artifacts,
+  # `pkg-unsigned-macos-arm64` and `assets-macos-arm64`. It holds `id-token: write` for the join to
+  # the farm's network, in a workflow of its own: a token issued there names macos-farm.yml, not
+  # this file, so nothing it runs can sign as artifacts.yml (the workflow lint holds both jobs to
+  # their exact `if:`).
+  macos-arm64-farm:
+    needs: [version]
+    if: ${{ github.event_name == 'push' && github.ref == 'refs/heads/main' && vars.MACOS_PACKAGE_ON_FARM == 'true' }}
+    permissions:
+      contents: read
+      id-token: write
+    uses: ./.github/workflows/macos-farm.yml
+    with:
+      version: ${{ needs.version.outputs.version }}
+
   # Push to main only: the installer pkg signed with the Developer ID Installer identity, which a
   # host's macos-pkg installer requires (it stages only a signed pkg). Not notarized: a pkg a
   # host's installer installs needs no notarization. This job runs no repository code (no
@@ -549,9 +576,11 @@ jobs:
   # which is the user's only keychain while productsign runs; the keychain and the PKCS#12 file
   # are deleted whether or not the signing worked. The keychain's password is the PKCS#12's, a
   # secret the log masks. The signed pkg goes to `pkg-signed-macos-arm64`, which check-pkg checks.
+  # The unsigned pkg is the hosted job's or the farm job's, whichever ran and passed (one of the
+  # two is skipped on every run).
   sign-pkg:
-    needs: [version, macos-arm64]
-    if: ${{ github.event_name == 'push' && github.ref == 'refs/heads/main' }}
+    needs: [version, macos-arm64, macos-arm64-farm]
+    if: ${{ !cancelled() && github.event_name == 'push' && github.ref == 'refs/heads/main' && (needs.macos-arm64.result == 'success' || needs.macos-arm64-farm.result == 'success') }}
     runs-on: macos-15
     timeout-minutes: 15
     environment: pkg-signing
@@ -655,10 +684,11 @@ jobs:
   # one list of what a release holds.
   # For a pull request the linux-arm64 and macos-arm64 jobs are skipped, the sums are those
   # of the linux-x86_64 files, and no index is written (an index lists every platform); for a push or a run by hand every build job
-  # must have succeeded, and the index is refused without the macOS package.
+  # must have succeeded (the macOS files are the hosted job's or the farm job's), and the index is
+  # refused without the macOS package.
   sums:
-    needs: [linux-x86_64, linux-arm64, macos-arm64, check-pkg]
-    if: ${{ !cancelled() && needs.linux-x86_64.result == 'success' && ((needs.linux-arm64.result == 'success' && needs.macos-arm64.result == 'success') || (github.event_name == 'pull_request' && needs.linux-arm64.result == 'skipped' && needs.macos-arm64.result == 'skipped')) && (needs.check-pkg.result == 'success' || (github.event_name != 'push' && needs.check-pkg.result == 'skipped')) }}
+    needs: [linux-x86_64, linux-arm64, macos-arm64, macos-arm64-farm, check-pkg]
+    if: ${{ !cancelled() && needs.linux-x86_64.result == 'success' && ((needs.linux-arm64.result == 'success' && (needs.macos-arm64.result == 'success' || needs.macos-arm64-farm.result == 'success')) || (github.event_name == 'pull_request' && needs.linux-arm64.result == 'skipped' && needs.macos-arm64.result == 'skipped' && needs.macos-arm64-farm.result == 'skipped')) && (needs.check-pkg.result == 'success' || (github.event_name != 'push' && needs.check-pkg.result == 'skipped')) }}
     runs-on: ubuntu-24.04
     timeout-minutes: 15
     permissions:
