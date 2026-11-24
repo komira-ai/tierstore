@@ -643,10 +643,10 @@ jobs:
           if-no-files-found: error
 
   # Push to main only, once sign-pkg passed, with no secret: the signed pkg is checked and only
-  # then becomes a release file. `release check-pkg-signature` refuses it unless pkgutil says the Mac trusts its
-  # signature, signed with a trusted timestamp by exactly the identity under Apple's Developer ID
-  # intermediate and root; the signed and the unsigned pkg must expand to the same files, so
-  # signing changed nothing that check-macos-pkg checked in macos-arm64. The pkg is uploaded as
+  # then becomes a release file. `release check-pkg-signature` refuses it unless pkgutil says the
+  # Mac trusts its signature, signed with a trusted timestamp by exactly the identity under Apple's
+  # Developer ID intermediate and root; the signed and the unsigned pkg must expand to the same
+  # files, so signing changed nothing that check-macos-pkg checked in macos-arm64. The pkg is uploaded as
   # `assets-pkg-macos-arm64`, the one `assets-*` artifact that holds it, so SHA256SUMS, the
   # attestation and the release name the signed bytes.
   check-pkg:

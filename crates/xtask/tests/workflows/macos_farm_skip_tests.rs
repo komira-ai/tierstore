@@ -166,8 +166,7 @@ fn a_push_to_main_skips_only_the_macos_job_that_is_not_used() {
 }
 
 /// The simulation shows the defect it guards: under the old `if:` of check-pkg and attest, a push
-/// to main skips check-pkg, sums and attest behind the skipped macOS job (as artifacts run
-/// 45343212448 did), while sign-pkg, whose `if:` had `!cancelled()`, still succeeds; and the lint
+/// to main skips check-pkg, sums and attest behind the skipped macOS job, while sign-pkg, whose `if:` had `!cancelled()`, still succeeds; and the lint
 /// refuses the file with exactly the two problems of each of the two jobs.
 #[test]
 fn the_old_conditions_skip_the_checked_installer_the_sums_and_the_signing_and_are_refused() {

@@ -609,13 +609,14 @@ macos-pkg` builds it with `pkgbuild` and `productbuild`, so only on the macOS ru
    in `$RUNNER_TEMP`, signs with `productsign --timestamp` as `Developer ID Installer: Komira AI,
    Inc. (U7RTX4XD3X)`, deletes the keychain and the PKCS#12 file whether or not it worked, and
    uploads `pkg-signed-macos-arm64`. Not notarized: a host's installer takes a signed package.
-3. `check-pkg` (a push to `main` only, once `sign-pkg` passed; no secret) runs `release check-pkg-signature` (pkgutil must
-   trust the signature, timestamped, by exactly that identity under Apple's chain), checks that the
-   signed and the unsigned package expand to the same files, and uploads the signed one as
-   `assets-pkg-macos-arm64`. `sums` waits for it (skipped, as it is for a pull request or a run by
-   hand, which sign nothing, it holds nothing back), `sums assemble` lists every `.pkg` of the
-   directory, and `attest` (once `sums` passed) signs it as a subject of its own with its `.pkg.sigstore.json`: the
-   release carries the signed bytes.
+3. `check-pkg` (a push to `main` only, once `sign-pkg` passed; no secret) runs
+   `release check-pkg-signature` (pkgutil must trust the signature, timestamped, by exactly that
+   identity under Apple's chain), checks that the signed and the unsigned package expand to the
+   same files, and uploads the signed one as `assets-pkg-macos-arm64`. `sums` waits for it
+   (skipped, as it is for a pull request or a run by hand, which sign nothing, it holds nothing
+   back), `sums assemble` lists every `.pkg` of the directory, and `attest` (once `sums` passed)
+   signs it as a subject of its own with its `.pkg.sigstore.json`: the release carries the signed
+   bytes.
 
 `release.yml` publishes it to `packages.komira.ai` with the apt jobs' environment (`apt-publish`)
 and role: `testing-pkg-upload` (after `publish`) puts the package, its bundle and a `SHA256SUMS`
