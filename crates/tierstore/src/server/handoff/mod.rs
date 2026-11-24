@@ -55,6 +55,12 @@
 //!   taker's lock path, the device passes the taker's check). `ready` is a hand-over for good:
 //!   the instance does not resume after it, even if its `bye` cannot be sent.
 //!
+//! On macOS, whose one launchd job has one process and so no second instance to take over, the
+//! same offer is handed to the next image of the process instead (`exec.rs`, one-service.md
+//! section 3.4): written into one end of a `socketpair` that becomes the new image's standard
+//! input across an exec of its own program, and read there with the taker's checks, with no
+//! conversation around it.
+//!
 //! No port is added, no packet is redirected and no right beyond the user's own is needed. The
 //! control socket is mode 0600 and a peer of another user is refused, by either side. Where
 //! nothing answers (no file, or a file no one listens on) the taker starts cold, binding its
@@ -67,6 +73,7 @@
 //!
 //! The same code runs on Linux and macOS: `SCM_RIGHTS` and Unix sockets are POSIX.
 
+mod exec;
 mod mount;
 mod offer;
 mod take;
@@ -81,6 +88,8 @@ pub(crate) use offer::{Hold, Offer, Socket, check_control_path};
 
 /// The most listening sockets one instance can hand over: what one message carries.
 pub(crate) const MAX_SOCKETS: usize = wire::MAX_FDS;
+pub(crate) use exec::read as read_handed;
+pub(crate) use exec::{Handed, Handing, Image, Own, handed_input};
 pub(crate) use mount::{Mount, check_control};
 #[cfg(test)]
 pub(crate) use mount::{MountWant, Prepare};

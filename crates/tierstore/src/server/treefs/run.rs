@@ -232,7 +232,7 @@ impl Running {
             mount_id,
             _control: control,
             ..
-        } = Setup::start(settings, true, Identity::Fresh)?;
+        } = Setup::start(settings, true, Identity::Fresh, None)?;
         let _ = steps.done("setting up the core and the control socket");
         // A hand-over left by an earlier mount names nothing of this one.
         carry::remove(&settings.runtime_dir)

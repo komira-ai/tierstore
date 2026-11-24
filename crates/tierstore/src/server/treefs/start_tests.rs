@@ -39,7 +39,7 @@ fn setup_restores_saved_attachments_and_serves_the_control_socket() {
     )
     .unwrap();
     let settings = settings(&rig);
-    let setup = Setup::start(&settings, true, Identity::Fresh).unwrap();
+    let setup = Setup::start(&settings, true, Identity::Fresh, None).unwrap();
     let kept: Vec<String> = setup
         .core
         .attachments()
@@ -92,14 +92,16 @@ fn setup_refuses_an_unwritable_runtime_dir_with_its_key_name() {
         ),
     ];
     for (settings, what) in cases {
-        let error = Setup::start(&settings, true, Identity::Fresh)
+        let error = Setup::start(&settings, true, Identity::Fresh, None)
             .err()
             .unwrap();
         assert!(error.to_string().contains(what), "{what}: {error}");
         assert_eq!(error.status(), 1);
     }
     std::fs::create_dir_all(rig.runtime.join("backing/inside")).unwrap();
-    let error = Setup::start(&base, true, Identity::Fresh).err().unwrap();
+    let error = Setup::start(&base, true, Identity::Fresh, None)
+        .err()
+        .unwrap();
     assert!(error.to_string().contains("removing"), "{error}");
     assert!(matches!(error, StartError::Io { .. }));
 }
@@ -119,14 +121,14 @@ fn setup_creates_a_fresh_table_of_tree_numbers() {
         .add_tree(vec![("only.txt", file(b"only"))]);
     let settings = settings(&rig);
     {
-        let first = Setup::start(&settings, true, Identity::Fresh).unwrap();
+        let first = Setup::start(&settings, true, Identity::Fresh, None).unwrap();
         let _ = first.core.attach(&first_root, "run-1").unwrap();
         let _ = first.core.attach(&second_root, "run-2").unwrap();
         assert!(first.core.getattr(ino::of(2, 0)).is_ok());
         assert!(first.core.detach("run-1").is_some());
         assert!(first.core.detach("run-2").is_some());
     }
-    let second = Setup::start(&settings, true, Identity::Fresh).unwrap();
+    let second = Setup::start(&settings, true, Identity::Fresh, None).unwrap();
     assert!(second.core.attachments().is_empty());
     assert_eq!(second.core.getattr(ino::of(1, 0)), Err(Errno::NoEnt));
     let _ = second.core.attach(&second_root, "run-3").unwrap();
@@ -141,7 +143,7 @@ fn setup_passes_the_lookup_choice_to_the_core() {
     let rig = Rig::new("tfs-start-lookups", sample());
     let root = rig.upstream.built.lock().unwrap().root.clone();
     let settings = settings(&rig);
-    let setup = Setup::start(&settings, false, Identity::Fresh).unwrap();
+    let setup = Setup::start(&settings, false, Identity::Fresh, None).unwrap();
     let _ = setup.core.attach(&root, "run-1").unwrap();
     let ino = ino::of(1, 0);
     setup.core.count(ino);

@@ -297,19 +297,19 @@ fn capabilities_prints_the_names_one_to_a_line_and_exits_0() {
 /// list it), the fourth that the socket defaults to the state directory (a node whose configuration
 /// leaves the key out is handed over only between releases that list it), the fifth that
 /// `tierstore fs` hands its mount over (the second unit is handed over only between releases that
-/// list it). Catches: any capability left out of the list (for `handover-v1`, every update is a
-/// restart), a misspelled name the updater would not find, and a sixth name nothing promises.
+/// list it); on macOS, sixth, `handoff-exec-v1`, that a build node hands over to its next image on
+/// SIGUSR2. Catches: any capability left out of the list (for `handover-v1`, every update is a
+/// restart), a misspelled name the updater would not find, and a name nothing here promises.
 #[test]
-fn capabilities_lists_the_five_hand_over_words() {
+fn capabilities_lists_the_hand_over_words() {
     let (code, out, err) = run(&["--capabilities".to_owned()]);
-    assert_eq!(
-        (code, out.as_str(), err.as_str()),
-        (
-            0,
-            "handover-v1\nhandoff-socket-v1\nhandoff-cache-v1\nhandoff-state-dir-v1\nhandoff-fs-v1\n",
-            ""
-        )
-    );
+    let mut words =
+        "handover-v1\nhandoff-socket-v1\nhandoff-cache-v1\nhandoff-state-dir-v1\nhandoff-fs-v1\n"
+            .to_owned();
+    if cfg!(target_vendor = "apple") {
+        words.push_str("handoff-exec-v1\n");
+    }
+    assert_eq!((code, out.as_str(), err.as_str()), (0, words.as_str(), ""));
 }
 
 /// Starts the binary with `flags` and the variable `STATE_DIRECTORY` set to `state` as systemd

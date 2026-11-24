@@ -38,6 +38,12 @@
 //! answers the fill socket (see [`fill_socket`](super::fill_socket)): bound while the process holds the
 //! lock of the cache directory, through the drain of the S3 front, and closed when the drain ends.
 //!
+//! On a Mac, SIGUSR2 hands the process over to the next image of its own program instead of a stop
+//! (see [`next_image`]): the fronts drain as on SIGTERM with their listening sockets kept open, the
+//! cache's writes end, and the process executes its program path with the offer of the sockets and
+//! the cache lock on its standard input (`--handed 0`), which the new image takes as it would from a
+//! running instance.
+//!
 //! On SIGTERM or SIGINT the process drains as a storage node does; the eviction pass, the lock
 //! task, the scrub and the fill socket are the only things running beside the server, and they stop
 //! with it. Nothing is owed to the upstream: no journal, no lease, no copy in flight.
@@ -56,16 +62,16 @@ use tokio::sync::Notify;
 use crate::{Backend, Clock, Proxy, SystemClock};
 
 use super::build_info::{COMMIT, VERSION};
-use super::cli::{
-    Addresses, Error, OciSetup, S3Flags, oci_setup_of, open_tier, probe_run_id, signals,
+use super::cli::{Addresses, Error, OciSetup, S3Flags, oci_setup_of, open_tier, probe_run_id};
+use super::cli_serve::{
+    Bound, HandedOffer, bind_fronts, bind_s3, cut_note, sockets_of, stopped_by,
 };
-use super::cli_serve::{Bound, bind_fronts, bind_s3, cut_note, stopped_by};
 use super::config::fs::not_served;
 use super::config_cache::CacheSettings;
 use super::drain::late_of;
 use super::fill_socket;
 use super::front::{InvalidFlags, server_config};
-use super::handoff::Handoff;
+use super::handoff::{Handoff, Image};
 use super::listen::{LoopbackBind, bind_set, bind_with, joined};
 use super::local_cache::trees::{TreeStore, TreesConfig};
 use super::local_cache::{CacheConfig, Disk, Every, LocalCache, Mode, SystemDisk, check_local};
@@ -77,6 +83,7 @@ use super::stop_watcher::{
 };
 use super::trees::{TreesSetup, trees_setup_of};
 use super::{Drained, Server, ServerConfig};
+use next_image::{NextImage, stop_or_next, take_write_role};
 
 /// The times of the loops that run beside the server of a cache, from its settings.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -215,17 +222,46 @@ pub(super) async fn open(
     Ok(cache)
 }
 
-/// Serves `cache` until `stop` resolves, and then drains.
+/// Serves `cache` until `stop` resolves, and then drains: a start with no hand-over to a next
+/// image (the tests').
 ///
 /// # Errors
 /// A file system or an upstream that fails the check of the start, or an address that cannot be
 /// bound.
+#[cfg(test)]
 pub(super) async fn serve_cache(
     settings: &CacheSettings,
     upstream: Arc<dyn Backend>,
     disk: Arc<dyn Disk>,
     stop: impl Future<Output = ()> + Send + 'static,
     ready: impl FnOnce(Addresses),
+) -> Result<Drained, Error> {
+    let imaging = Imaging::default();
+    serve_cache_imaging(settings, (upstream, disk), stop, ready, imaging).await
+}
+
+/// What a start of a build node has of the hand-over to the next image of its program
+/// ([`next_image`]): where a stop that hands over leaves what it hands over, and the offer this
+/// start was handed, if the image before it executed it.
+#[derive(Default)]
+pub(super) struct Imaging<'a> {
+    /// Told by SIGUSR2 that the stop is a hand-over; the drain then leaves the sockets and the
+    /// cache lock to it.
+    pub(super) next: Option<&'a NextImage>,
+    /// The offer this start was handed (`--handed 0`): its standard input, as it found it.
+    pub(super) handed: Option<std::os::fd::OwnedFd>,
+}
+
+/// [`serve_cache`], with the hand-over to the next image of `imaging`.
+///
+/// # Errors
+/// As [`serve_cache`], and a handed offer this start refuses (its addresses are not the file's).
+pub(super) async fn serve_cache_imaging(
+    settings: &CacheSettings,
+    (upstream, disk): (Arc<dyn Backend>, Arc<dyn Disk>),
+    stop: impl Future<Output = ()> + Send + 'static,
+    ready: impl FnOnce(Addresses),
+    imaging: Imaging<'_>,
 ) -> Result<Drained, Error> {
     let clock: Arc<dyn Clock> = Arc::new(SystemClock);
     let mut config = server_config(&settings.front, Arc::clone(&clock), true)?;
@@ -259,6 +295,7 @@ pub(super) async fn serve_cache(
         trees_front,
         provider: settings.provider.as_ref(),
         put_ingest: settings.put_ingest.as_deref(),
+        imaging,
     };
     serve_front(
         cache,
@@ -306,6 +343,8 @@ pub(super) struct Fronts<'a> {
     /// The root of the put ingest (`local_cache.put_ingest`), ingested while the cache holds the
     /// lock of its directory (see [`put_ingest`](super::put_ingest)); none for a node without one.
     pub(super) put_ingest: Option<&'a std::path::Path>,
+    /// The hand-over to the next image of the program, of a build node ([`next_image`]).
+    pub(super) imaging: Imaging<'a>,
 }
 
 /// Serves the S3 front (and the OCI front, if there is a setup) over `cache`, with the loops of
@@ -321,6 +360,12 @@ pub(super) struct Fronts<'a> {
 /// it is offered the lock too, waited for until `server.handoff_wait` after `done`, and this
 /// cache starts no write from its `ready` on and says `written` once its writes in flight have
 /// ended (`handoff/written.rs`). A request for a mount is refused: this instance holds none.
+///
+/// With `fronts.imaging.handed` the sockets and the cache lock are those the image this process
+/// executed from handed over: the cache takes the write role with the lock ([`take_write_role`])
+/// beside the serving. With `fronts.imaging.next`, a stop it was told is a hand-over leaves a copy
+/// of each listening socket and the cache lock to it, once the fronts have drained and the cache's
+/// writes have ended ([`NextImage::hand`]).
 ///
 /// # Errors
 /// An address that cannot be bound, or a hand-off that is refused, mismatched or not ended within
@@ -361,13 +406,21 @@ pub(super) async fn serve_front(
         Some(front) => front.local_addrs()?,
         None => Vec::new(),
     };
+    let Imaging { next, handed } = fronts.imaging;
+    let lock_path = cache.lock_path();
+    let handed = handed.map(|fd| HandedOffer {
+        fd,
+        lock: Some(&lock_path),
+    });
     let Bound {
         s3: listeners,
         oci,
         addresses,
         offer,
+        lock,
     } = bind_fronts(
         fronts.handoff,
+        handed,
         &bind_set(fronts.listen, true),
         || bind_cache_s3(fronts.listen, listen.backlog),
         oci,
@@ -375,6 +428,13 @@ pub(super) async fn serve_front(
     )
     .await
     .map_err(super::cli::HandingError::into_boxed)?;
+    if let Some(received) = lock {
+        drop(tokio::spawn(take_write_role(cache.clone(), received)));
+    }
+    // The copies the drain does not close: the next image gets them.
+    let kept = next
+        .map(|_| sockets_of(&listeners, oci.as_ref()))
+        .transpose()?;
     let offer = offer.zip(fronts.handoff).map(|(offer, handoff)| {
         offer
             .with_accept_pause(listen.accept_pause)
@@ -498,6 +558,11 @@ pub(super) async fn serve_front(
         ingesting
     );
     watcher.abort();
+    if let (Some(next), Some(kept)) = (next, kept)
+        && next.asked()
+    {
+        next.hand(kept, &cache).await?;
+    }
     super::build_info::stderr_log::notes(&cut_note(drained));
     super::build_info::stderr_log::notes(&oci_cut_note(oci_cut));
     super::build_info::stderr_log::notes(&trees_cut_note(trees_cut));
@@ -506,14 +571,28 @@ pub(super) async fn serve_front(
 }
 
 /// Opens the upstream the settings name and serves the cache in front of it until `stop`
-/// resolves.
+/// resolves: a start with no hand-over to a next image (the tests').
 ///
 /// # Errors
 /// As [`serve_cache`], and an upstream the settings do not make.
+#[cfg(test)]
 pub(super) async fn run_cache(
     settings: &CacheSettings,
     stop: impl Future<Output = ()> + Send + 'static,
     ready: impl FnOnce(Addresses),
+) -> Result<Drained, Error> {
+    run_cache_imaging(settings, stop, ready, Imaging::default()).await
+}
+
+/// [`run_cache`], with the hand-over to the next image of `imaging`.
+///
+/// # Errors
+/// As [`serve_cache_imaging`].
+async fn run_cache_imaging(
+    settings: &CacheSettings,
+    stop: impl Future<Output = ()> + Send + 'static,
+    ready: impl FnOnce(Addresses),
+    imaging: Imaging<'_>,
 ) -> Result<Drained, Error> {
     if settings.s3_request_timeout.is_zero() {
         return Err("--s3-request-timeout must be longer than zero".into());
@@ -534,12 +613,18 @@ pub(super) async fn run_cache(
         &settings.s3_client,
     )?;
     let disk: Arc<dyn Disk> = Arc::new(SystemDisk);
-    serve_cache(settings, upstream, disk, stop, ready).await
+    serve_cache_imaging(settings, (upstream, disk), stop, ready, imaging).await
 }
 
-/// Runs the cache until SIGTERM or SIGINT.
-pub(super) async fn serve_cache_until_signalled(settings: CacheSettings) -> Result<(), Error> {
-    let stop = signals()?;
+/// Runs the cache until SIGTERM or SIGINT, or, on a Mac, SIGUSR2: then it gives back the next image
+/// of the program, its offer written, for the caller to execute once the runtime is gone. `handed`
+/// is the offer this start was handed (`--handed 0`).
+pub(super) async fn serve_cache_until_signalled(
+    settings: CacheSettings,
+    handed: Option<std::os::fd::OwnedFd>,
+) -> Result<Option<Image>, Error> {
+    let next = Arc::new(NextImage::default());
+    let stop = stop_or_next(Arc::clone(&next))?;
     let mode = if settings.cache.write_through {
         "write-through-cache"
     } else {
@@ -557,6 +642,15 @@ pub(super) async fn serve_cache_until_signalled(settings: CacheSettings) -> Resu
         }
         super::build_info::stderr_log::answer(&format!("{line} commit={COMMIT}\n"));
     };
-    run_cache(&settings, stop, announce).await?;
-    Ok(())
+    let imaging = Imaging {
+        // Elsewhere no copy of the sockets is kept: a drain closes them, as it did.
+        next: next_image::HANDS_TO_NEXT_IMAGE.then_some(&*next),
+        handed,
+    };
+    run_cache_imaging(&settings, stop, announce, imaging).await?;
+    let program = std::env::current_exe;
+    Ok(next.image(program, std::env::args_os()).await?)
 }
+
+#[path = "next_image.rs"]
+pub(super) mod next_image;

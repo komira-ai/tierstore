@@ -276,11 +276,11 @@ impl Control {
         Ok(())
     }
 
-    /// A copy of the listening socket's descriptor, for the successor of a hand-over.
+    /// A copy of the listening socket's descriptor, for the successor of a hand-over (or, on a
+    /// Mac, for the next image of the process).
     ///
     /// # Errors
     /// What the system said.
-    #[cfg(any(target_os = "linux", test))]
     pub(in crate::server) fn listener_fd(&self) -> std::io::Result<OwnedFd> {
         self.listener.as_fd().try_clone_to_owned()
     }
@@ -288,7 +288,6 @@ impl Control {
     /// Stops answering: no connection is accepted from here on (one that comes waits in the
     /// socket's backlog), the request being answered is finished, and the next request of a
     /// connection that is open is refused. The socket's file stays.
-    #[cfg(any(target_os = "linux", test))]
     pub(in crate::server) fn pause(&mut self) {
         self.gate.close_and_drain();
         if let Some(Acceptor { stop, thread }) = self.acceptor.take() {
@@ -309,7 +308,6 @@ impl Control {
     }
 
     /// Gives up the socket's file to a successor: it is not removed when this is dropped.
-    #[cfg(any(target_os = "linux", test))]
     pub(in crate::server) fn leave_path(&mut self) {
         self.owns_path = false;
     }
