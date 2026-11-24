@@ -133,7 +133,7 @@ owner        = { subids_of = "<job user>", id = 1000 }
 [interface.params.put]
 enabled              = true
 prefixes             = ["cas/b/"]
-stage_dir            = "/var/lib/tierstore-cache/kbf-cas/put-stage"
+stage_dir            = "/var/lib/tierstore-cache/cas/put-stage"
 stage_ttl_secs       = 86400
 commit_deadline_secs = 120
 min_free_bytes       = 21474836480
@@ -141,18 +141,18 @@ min_free_bytes       = 21474836480
 [server]
 handoff_socket      = "/var/lib/tierstore/handoff.sock"
 proxy_id_from_facts = { path = "/var/lib/hostkeeper/facts.json", prefix = "tierstore-" }
-bucket              = "kbf-cas"
+bucket              = "cas"
 # ... the other [server] keys as today
 
 [local_cache]
-path          = "/var/lib/tierstore-cache/kbf-cas"
+path          = "/var/lib/tierstore-cache/cas"
 budget        = "185GiB"
 write_through = true
 # ... the other [local_cache] keys as today; no fill_socket
 
 [cold_store]
 kind             = "s3"
-bucket           = "kbf-cas"
+bucket           = "cas"
 endpoint         = "http://127.0.0.1:8333"
 credentials_file = "/etc/tierstore/cold.credentials"
 
@@ -185,13 +185,13 @@ listen = "127.0.0.1:12049"
 
 [server]
 proxy_id_from_facts  = { path = "/var/lib/hostkeeper/facts.json", prefix = "tierstore-cache-" }
-bucket               = "kbf-cas"
+bucket               = "cas"
 access_key_file      = "/usr/local/tierstore/etc/access.key"
 read_only_key_files  = ["/usr/local/tierstore/etc/daemons.key"]
 s3_endpoint_attempts = 6
 
 [local_cache]
-path             = "/usr/local/tierstore/cache/kbf-cas"
+path             = "/usr/local/tierstore/cache/cas"
 budget           = "200GiB"
 whole_fill_limit = "128MiB"
 write_through    = true
@@ -200,7 +200,7 @@ put_ingest       = "/usr/local/tierstore/put"
 
 [cold_store]
 kind             = "s3"
-bucket           = "kbf-cas"
+bucket           = "cas"
 endpoints        = ["http://192.0.2.1:9300", "http://192.0.2.2:9300", "http://192.0.2.3:9300",
                     "http://192.0.2.4:9300", "http://192.0.2.5:9300", "http://192.0.2.6:9300"]
 credentials_file = "/usr/local/tierstore/etc/upstream.key"
