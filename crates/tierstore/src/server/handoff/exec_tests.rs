@@ -298,11 +298,12 @@ async fn what_is_no_offer_is_refused() {
         matches!(refused, Some(HandoffError::Io { .. })),
         "{refused:?}"
     );
+    // An empty file: macOS would let the read wait for it, and it is never ready.
     let file = std::fs::File::create(dir.path().join("not-a-socket")).unwrap();
     let refused = within("a file", read(file.into(), &none, &own)).await.err();
-    assert!(
-        matches!(refused, Some(HandoffError::Io { .. })),
-        "{refused:?}"
+    assert_eq!(
+        refused.map(|error| error.to_string()).as_deref(),
+        Some("hand-off: reading the handed offer: the handed descriptor is not a stream socket")
     );
 }
 
@@ -353,7 +354,11 @@ fn is_open(n: i32) -> bool {
 /// command the exec runs, which carries the same descriptors) none of the old image's descriptors
 /// of the hand-over survives (the listening socket, its copy in the offer, the lock's copy, the
 /// image's end of the pair under its own number) but the one at descriptor 0, the handed one: the
-/// new image finds it a socket, and reads the offer from it with the sockets and the lock in it.
+/// new image finds it a socket, and reads the offer from it with the sockets and the lock in it;
+/// and that after the offer comes the frame `keep` with one descriptor, descriptor 0's own socket,
+/// which keeps the offer's sockets reachable for macOS's collector of descriptors in flight while
+/// nothing else holds them (without it a Mac's next image serves sockets whose accepted
+/// connections cannot receive).
 #[tokio::test]
 async fn only_the_handed_descriptor_survives_the_exec() {
     let (dir, _) = scratch();
@@ -398,6 +403,7 @@ async fn only_the_handed_descriptor_survives_the_exec() {
         "standard input is a socket: true".to_owned(),
         format!("offer: offer | s3 {s3_addr} | lock {}", lock_path.display()),
         "descriptors in it: 2".to_owned(),
+        "after it: keep, with its own socket: true".to_owned(),
     ];
     for line in lines {
         // The first line follows the name of the test, on the same line.
@@ -436,14 +442,27 @@ fn the_image_side_of_the_exec() {
         .enable_all()
         .build()
         .unwrap();
-    let frame = runtime.block_on(async {
+    let (frame, after) = runtime.block_on(async {
         let stream = UnixStream::from(handed);
         stream.set_nonblocking(true).unwrap();
-        wire::recv(&tokio::net::UnixStream::from_std(stream).unwrap()).await
+        let stream = tokio::net::UnixStream::from_std(stream).unwrap();
+        (wire::recv(&stream).await, wire::recv(&stream).await)
     });
     let frame = frame.unwrap();
     println!("offer: {}", frame.lines.join(" | "));
     println!("descriptors in it: {}", frame.fds.len());
+    let after = after.unwrap();
+    let input = identity(std::io::stdin().as_fd());
+    let own: Vec<bool> = after
+        .fds
+        .iter()
+        .map(|fd| identity(fd.as_fd()) == input)
+        .collect();
+    println!(
+        "after it: {}, with its own socket: {}",
+        after.lines.join(" | "),
+        own == [true]
+    );
 }
 
 /// Asserts that the frame grows as the conversation does (B8): a line whose name this release does
@@ -474,6 +493,86 @@ async fn a_line_this_release_does_not_know_is_skipped_and_its_descriptor_closed(
     assert_eq!(taken.inherited.s3_addrs, [s3_addr]);
     let closed = || std::net::TcpStream::connect(later_addr).is_err();
     once_no_fork_holds("the unknown line's socket is closed", closed).await;
+}
+
+/// The test the child process of [`an_exec_that_fails_closes_what_the_offer_held`] runs.
+const FAILED_EXEC: &str = "server::handoff::exec::tests::the_process_whose_exec_fails";
+
+/// Asserts that an exec that fails (the program is not there) returns why, and leaves nothing in
+/// the end of the pair: the offer and the frame `keep` were taken out and what they carried closed,
+/// so the lock is free at once and the end is at its end. Without that, the end, which `keep` holds
+/// in a message of its own, would keep the offer and its lock until the collector of descriptors in
+/// flight next runs, while the process exits and launchd starts the job again to take that lock.
+/// The exec runs in a process of its own: `Command::exec` restores SIGPIPE's default before it
+/// tries, which this test binary, which writes to closed sockets, would not survive.
+#[tokio::test]
+async fn an_exec_that_fails_closes_what_the_offer_held() {
+    let program = std::env::current_exe().unwrap();
+    let mut command = std::process::Command::new(program);
+    command.args([
+        "--exact",
+        FAILED_EXEC,
+        "--ignored",
+        "--nocapture",
+        "--test-threads=1",
+    ]);
+    let ran = tokio::task::spawn_blocking(move || command.output());
+    let ran = within("the process", ran).await.unwrap().unwrap();
+    let said = String::from_utf8_lossy(&ran.stdout);
+    assert!(
+        ran.status.success(),
+        "{said}{}",
+        String::from_utf8_lossy(&ran.stderr)
+    );
+    for line in [
+        "the exec failed: NotFound",
+        "left in the end: 0 bytes",
+        "the lock is free: true",
+    ] {
+        assert!(said.contains(&format!("{line}\n")), "{line:?} in {said}");
+    }
+}
+
+/// The process of [`an_exec_that_fails_closes_what_the_offer_held`]: it prepares an image of a
+/// program that is not there with an offer of a socket and the lock, closes its own copies (as the
+/// exec would), keeps a copy of the image's end, executes the image, and says why the exec failed,
+/// what is left in the end, and whether the lock can be taken.
+#[test]
+#[ignore = "the process of an_exec_that_fails_closes_what_the_offer_held, which runs it in a process of its own"]
+#[expect(
+    clippy::disallowed_macros,
+    reason = "the process reports to the test that runs it on standard output"
+)]
+fn the_process_whose_exec_fails() {
+    let (dir, _) = scratch();
+    let (s3, _) = listening();
+    let lock_path = dir.path().join(".lock");
+    let mut held = try_take(&lock_path).unwrap().unwrap();
+    let handing = Handing {
+        sockets: vec![socket(Front::S3, &s3)],
+        control: None,
+        lock: Some((lock_path.clone(), held.share().unwrap())),
+    };
+    let runtime = tokio::runtime::Builder::new_current_thread()
+        .enable_all()
+        .build()
+        .unwrap();
+    let missing = dir.path().join("not-there");
+    let prepared = Image::prepare(&handing, missing, words(&["tierstore"]));
+    let image = runtime.block_on(prepared).unwrap();
+    held.disarm();
+    drop((handing, held, s3));
+    let looked = UnixStream::from(image.handed_copy());
+    let why = image.exec();
+    println!("the exec failed: {:?}", why.kind());
+    looked.set_nonblocking(true).unwrap();
+    let mut byte = [0_u8; 1];
+    let left = std::io::Read::read(&mut &looked, &mut byte).map_err(|error| error.kind());
+    println!("left in the end: {} bytes", left.unwrap());
+    println!(
+        "the lock is free: {}",
+        try_take(&lock_path).unwrap().is_some()
+    );
 }
 
 /// Asserts that an offer of more descriptors than one message carries is not written: the image
