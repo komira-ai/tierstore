@@ -32,6 +32,16 @@ use super::table::Object;
 /// still hashed and written in order, and a fill holds at most this many chunks in memory.
 pub(super) const CHUNKS_AT_ONCE: usize = 4;
 
+/// The task of a read of one chunk, aborted when it is dropped before it ends: a fill that stops
+/// leaves no read of its running.
+struct Aborting<T>(JoinHandle<T>);
+
+impl<T> Drop for Aborting<T> {
+    fn drop(&mut self) {
+        self.0.abort();
+    }
+}
+
 /// A range of a pack, and the SHA-256 its bytes must have.
 #[derive(Clone, Copy, Debug)]
 pub struct RangeWant<'a> {
@@ -428,16 +438,31 @@ impl Inner {
         let file = self.extent_file(hex, object.size).await?;
         let mut hashers: Vec<Sha256> = wanted.parts.iter().map(|_| Sha256::new()).collect();
         let step = self.config.fill_chunk.max(1);
-        let (inner, key) = (&**self, wanted.key.as_str());
-        // The chunks in order, up to `CHUNKS_AT_ONCE` asked at once; a failure drops the others.
+        // The chunks in order, up to `CHUNKS_AT_ONCE` asked at once, each read on a task of its
+        // own so that it goes on while a chunk before it is hashed and written; a failure drops
+        // the others, which aborts their reads.
         let (start, end) = (wanted.start, wanted.end);
         let starts = std::iter::successors(Some(start), |at| at.checked_add(step))
             .take_while(move |at| *at < end);
         let mut chunks = futures::stream::iter(starts)
-            .map(|at| async move {
+            .map(|at| {
                 let want = step.min(end - at);
-                let got = inner.upstream_get(key, ByteRange::new(at, want)).await;
-                (at, want, got)
+                let (inner, key) = (Arc::clone(self), wanted.key.clone());
+                let mut read = Aborting(tokio::spawn(async move {
+                    inner.upstream_get(&key, ByteRange::new(at, want)).await
+                }));
+                async move {
+                    // A read that panicked is the fill's panic, as it was when the fill read
+                    // itself; nothing but this future aborts the task, and only by its drop.
+                    let got = (&mut read.0).await.unwrap_or_else(|ended| {
+                        std::panic::resume_unwind(
+                            ended
+                                .try_into_panic()
+                                .unwrap_or_else(|e| Box::new(e.to_string())),
+                        )
+                    });
+                    (at, want, got)
+                }
             })
             .buffered(CHUNKS_AT_ONCE);
         while let Some((at, want, chunk)) = chunks.next().await {

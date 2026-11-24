@@ -89,3 +89,43 @@ async fn a_chunk_that_fails_ends_the_fill_and_keeps_nothing() {
     fill(&rig, &pack, 0, 5000).await.unwrap();
     assert_eq!(rig.cache.extents_held(), (1, 5000));
 }
+
+/// Asserts that a chunk the upstream gives short while later chunks are in flight ends the fill as
+/// `short`: four chunks are asked, the first comes back one byte short, the fill is `Short`, no
+/// fifth chunk is asked, and nothing is kept.
+#[tokio::test]
+async fn a_short_chunk_among_chunks_in_flight_ends_the_fill() {
+    let rig = Rig::with("tsext-chunks-short", |config| config.fill_chunk = 500);
+    let pack = pack_of(&rig).await;
+    let gate = rig.tamper.hold_key(&pack.key);
+    let filling = spawn_fill(&rig, &pack);
+    until("four chunks asked", || rig.calls(Op::Get) == 4).await;
+    rig.tamper.short.store(true, Ordering::SeqCst);
+    gate.add_permits(1);
+    assert_eq!(filling.await.unwrap(), Err(RangeError::Short));
+    assert_eq!(rig.calls(Op::Get), 4);
+    assert_eq!(rig.cache.extents_held(), (0, 0));
+}
+
+/// Asserts that a range that starts inside a chunk and is not a whole number of chunks is asked
+/// from its own first byte in chunks of the size, the last one what is left, and is kept with the
+/// pack's bytes: 4500 bytes from 250 in chunks of 1000 are five GETs, the last of 500 bytes.
+#[tokio::test]
+async fn a_range_from_inside_the_pack_ends_with_a_shorter_chunk() {
+    let rig = Rig::with("tsext-chunks-offset", |config| config.fill_chunk = 1000);
+    let pack = pack_of(&rig).await;
+    fill(&rig, &pack, 250, 4750).await.unwrap();
+    assert_eq!(
+        rig.upstream.get_ranges(),
+        [
+            Some((250, 1000)),
+            Some((1250, 1000)),
+            Some((2250, 1000)),
+            Some((3250, 1000)),
+            Some((4250, 500))
+        ]
+    );
+    let file = std::fs::read(data(&rig, &pack)).unwrap();
+    assert_eq!(file[250..4750], pack.bytes()[250..4750]);
+    assert_eq!(rig.cache.extents_held(), (1, 4500));
+}
