@@ -9,6 +9,7 @@ use std::sync::atomic::Ordering;
 use std::sync::{Arc, Mutex};
 
 use futures::FutureExt as _;
+use futures::StreamExt as _;
 use futures::future::{BoxFuture, OptionFuture, Shared};
 use sha2::{Digest, Sha256};
 use tokio::sync::oneshot;
@@ -24,6 +25,12 @@ use super::counts::ExtentCounters;
 use super::error::RangeError;
 use super::files::{self, ExtentSidecar};
 use super::table::Object;
+
+/// The most chunks of one range fill asked of the upstream at once. A range of several chunks (a
+/// large file's span, a group of a tree's spans) is read by that many ranged GETs at a time, taken
+/// in the order of their offsets, so that one stream's rate does not bound the fill; the bytes are
+/// still hashed and written in order, and a fill holds at most this many chunks in memory.
+pub(super) const CHUNKS_AT_ONCE: usize = 4;
 
 /// A range of a pack, and the SHA-256 its bytes must have.
 #[derive(Clone, Copy, Debug)]
@@ -420,12 +427,21 @@ impl Inner {
         }
         let file = self.extent_file(hex, object.size).await?;
         let mut hashers: Vec<Sha256> = wanted.parts.iter().map(|_| Sha256::new()).collect();
-        let mut at = wanted.start;
-        while at < wanted.end {
-            let want = self.config.fill_chunk.max(1).min(wanted.end - at);
-            let chunk = self
-                .upstream_get(&wanted.key, ByteRange::new(at, want))
-                .await?;
+        let step = self.config.fill_chunk.max(1);
+        let (inner, key) = (&**self, wanted.key.as_str());
+        // The chunks in order, up to `CHUNKS_AT_ONCE` asked at once; a failure drops the others.
+        let (start, end) = (wanted.start, wanted.end);
+        let starts = std::iter::successors(Some(start), |at| at.checked_add(step))
+            .take_while(move |at| *at < end);
+        let mut chunks = futures::stream::iter(starts)
+            .map(|at| async move {
+                let want = step.min(end - at);
+                let got = inner.upstream_get(key, ByteRange::new(at, want)).await;
+                (at, want, got)
+            })
+            .buffered(CHUNKS_AT_ONCE);
+        while let Some((at, want, chunk)) = chunks.next().await {
+            let chunk = chunk?;
             if chunk.len() as u64 != want {
                 return Err(RangeError::Short);
             }
@@ -441,7 +457,6 @@ impl Inner {
             }
             let piece = (Arc::clone(&file), gaps.clone(), at, chunk);
             blocking(move || write_gaps(&piece.0, &piece.1, piece.2, &piece.3)).await?;
-            at += want;
         }
         let checked: Vec<(u64, u64)> = wanted
             .parts
