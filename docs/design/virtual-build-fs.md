@@ -425,6 +425,10 @@ text, and the `fs` front of `docs/design/pluggable-interfaces.md` section 4 is a
 launchd job (`tierstore-fs`), its own file (`fs.toml`, the `[fs]` table), holding `CAP_SYS_ADMIN` as its only capability
 with `RestrictAddressFamilies=AF_UNIX`, and talking to the node's `tierstore` over the fill socket (`local_cache.fill_socket`,
 a Unix socket, mode 0600, its own user only, bound only by the instance that holds the cache lock: `server/fill_socket/`).
+The core asks through one internal trait (`Fills`, `server/treefs/fills.rs`) with two implementations: the fill socket's
+client (`server/treefs/fill_client.rs`), which `tierstore fs` uses, and the calls in process (`server/treefs/in_process.rs`),
+which answer each request as the socket does and wait for the write role as above; the start of the one process's `fs`
+interface (one-service.md section 6, P3) is what will use them.
 `crates/tierstore/docs/configuration.md` and `operations.md` describe it as it runs.
 
 **The FUSE protocol** is spoken through the `fuser` crate (MIT; kernel passthrough since 0.16, `BackingId::into_raw`,

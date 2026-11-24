@@ -160,7 +160,10 @@ pub(super) fn core_of(
     #[cfg(any(target_os = "linux", test))] generation: u32,
     count_lookups: bool,
 ) -> Result<Arc<Core>, StartError> {
-    let fills = FillClient::new(settings.fill_socket.clone(), settings.fetch_timeout);
+    let fills = Arc::new(FillClient::new(
+        settings.fill_socket.clone(),
+        settings.fetch_timeout,
+    ));
     let clock = Arc::new(MonotonicClock::new());
     let mut steps = Steps::new(clock.clone());
     let core = Arc::new(Core::new(

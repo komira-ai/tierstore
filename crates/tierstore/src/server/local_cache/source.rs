@@ -287,4 +287,11 @@ impl LocalCache {
     pub(in crate::server) fn watch_mode(&self) -> watch::Receiver<Mode> {
         self.inner.hold.subscribe()
     }
+
+    /// The receivers [`LocalCache::watch_mode`] made that are not dropped: for a test that waits
+    /// for a request to watch the mode.
+    #[cfg(test)]
+    pub(in crate::server) fn mode_watchers(&self) -> usize {
+        self.inner.hold.watchers()
+    }
 }

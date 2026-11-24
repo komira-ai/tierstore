@@ -13,7 +13,7 @@ use super::{TreeNfs, class_bits, fattr, handled, presented, status};
 use crate::server::local_cache::trees::testing::fs_at;
 use crate::server::treefs::core::{Attr, Errno, Kind};
 use crate::server::treefs::ino;
-use crate::server::treefs::live_testing::Live;
+use crate::server::treefs::live_testing::{Live, Over, over_both};
 use crate::server::treefs::locked;
 use crate::server::treefs::nfs::config::NfsSettings;
 use crate::server::treefs::nfs::fixtures::{
@@ -719,10 +719,11 @@ fn each_failure_of_the_core_has_its_nfs_status() {
     }
 }
 
-/// A file system over the core of a live node, with one placement at `jobs/1f3a/root`; the live
-/// node must be kept for as long as the file system is used.
-async fn placed(name: &str) -> (Live, TreeNfs) {
-    let live = Live::new(name).await;
+/// A file system over the core of a live node, reached `over` the fill socket or in process, with
+/// one placement at `jobs/1f3a/root`; the live node must be kept for as long as the file system is
+/// used.
+async fn placed(name: &str, over: Over) -> (Live, TreeNfs) {
+    let live = Live::over(name, over).await;
     let _ = live.place(vec![fs_at("jobs/1f3a/root")]);
     let fs = fs_over(Arc::clone(&live.core), endless());
     (live, fs)
@@ -737,12 +738,12 @@ async fn at(fs: &TreeNfs, path: &[&str]) -> u64 {
     here
 }
 
+over_both!(lookup_walks_the_names_of_a_location_down_to_a_file_of_its_tree);
 /// Asserts that the names of a location are found one after the other: the first two are placed
 /// directories, the last is the root of a tree and not a placed directory, and the files below it
 /// are found by name with the sizes of their members of the pack.
-#[tokio::test(flavor = "multi_thread")]
-async fn lookup_walks_the_names_of_a_location_down_to_a_file_of_its_tree() {
-    let (live, fs) = placed("nfs-placed-lookup").await;
+async fn lookup_walks_the_names_of_a_location_down_to_a_file_of_its_tree(over: Over) {
+    let (live, fs) = placed("nfs-placed-lookup", over).await;
     let jobs = at(&fs, &["jobs"]).await;
     let hash = at(&fs, &["jobs", "1f3a"]).await;
     let root = at(&fs, &["jobs", "1f3a", "root"]).await;
@@ -763,13 +764,13 @@ async fn lookup_walks_the_names_of_a_location_down_to_a_file_of_its_tree() {
     );
 }
 
+over_both!(read_of_a_placed_file_gives_its_member_and_stops_at_its_end);
 /// Asserts that a file of a placed tree is read as exactly the bytes of its member of the pack,
 /// whole, in the middle, and from the last bytes, that a read that runs past the member's end
 /// stops at it with the end of file set and never gives the next member's bytes, and that a read
 /// at or past the end is empty with the end of file set.
-#[tokio::test(flavor = "multi_thread")]
-async fn read_of_a_placed_file_gives_its_member_and_stops_at_its_end() {
-    let (live, fs) = placed("nfs-placed-read").await;
+async fn read_of_a_placed_file_gives_its_member_and_stops_at_its_end(over: Over) {
+    let (live, fs) = placed("nfs-placed-read", over).await;
     let other = at(&fs, &["jobs", "1f3a", "root", "bin", "other"]).await;
     let bytes = live.bench.pack.content(1).to_vec();
     let end = bytes.len() as u64;
@@ -795,11 +796,11 @@ async fn read_of_a_placed_file_gives_its_member_and_stops_at_its_end() {
     assert_eq!(fs.read(tool, 0, u32::MAX).await.unwrap(), (first, true));
 }
 
+over_both!(access_of_a_placed_directory_grants_lookup_and_not_read);
 /// Asserts that a placed directory grants lookup and not read, whoever asks, because the names of
 /// the namespace are not listed, and that a read of it is `NFS3ERR_ISDIR`.
-#[tokio::test(flavor = "multi_thread")]
-async fn access_of_a_placed_directory_grants_lookup_and_not_read() {
-    let (_live, fs) = placed("nfs-placed-access").await;
+async fn access_of_a_placed_directory_grants_lookup_and_not_read(over: Over) {
+    let (_live, fs) = placed("nfs-placed-access", over).await;
     let everything = ACCESS3_READ | ACCESS3_LOOKUP | ACCESS3_EXECUTE | ACCESS3_MODIFY;
     let owner = auth(UID, 5678, &[]);
     let other = auth(UID, 99, &[]);
@@ -817,12 +818,12 @@ async fn access_of_a_placed_directory_grants_lookup_and_not_read() {
     );
 }
 
+over_both!(lookup_of_a_missing_name_in_a_placed_tree_is_noent);
 /// Asserts that a name that is not there is `NFS3ERR_NOENT` at the root of the mount, in the
 /// placed directories, and in the root of the tree, that a location's first name is not found
 /// before the placement exists, and that a name below a file is `NFS3ERR_NOTDIR`.
-#[tokio::test(flavor = "multi_thread")]
-async fn lookup_of_a_missing_name_in_a_placed_tree_is_noent() {
-    let live = Live::new("nfs-placed-missing").await;
+async fn lookup_of_a_missing_name_in_a_placed_tree_is_noent(over: Over) {
+    let live = Live::over("nfs-placed-missing", over).await;
     let fs = fs_over(Arc::clone(&live.core), endless());
     assert_eq!(
         failed(fs.lookup(ino::ROOT, &name("jobs")).await),
@@ -850,12 +851,12 @@ async fn lookup_of_a_missing_name_in_a_placed_tree_is_noent() {
     );
 }
 
+over_both!(dot_dot_of_a_placed_tree_leads_up_through_the_directories_to_the_root);
 /// Asserts that the parent of the root of a placed tree is the directory above its location, that
 /// the parent of each directory above it is the one above that, up to the root of the mount, and
 /// that `.` is the directory itself.
-#[tokio::test(flavor = "multi_thread")]
-async fn dot_dot_of_a_placed_tree_leads_up_through_the_directories_to_the_root() {
-    let (_live, fs) = placed("nfs-placed-parent").await;
+async fn dot_dot_of_a_placed_tree_leads_up_through_the_directories_to_the_root(over: Over) {
+    let (_live, fs) = placed("nfs-placed-parent", over).await;
     let jobs = at(&fs, &["jobs"]).await;
     let hash = at(&fs, &["jobs", "1f3a"]).await;
     let root = at(&fs, &["jobs", "1f3a", "root"]).await;
@@ -871,14 +872,14 @@ async fn dot_dot_of_a_placed_tree_leads_up_through_the_directories_to_the_root()
     assert_eq!(fs.lookup(lib, &name("..")).await.unwrap(), root);
 }
 
+over_both!(a_placed_setuid_file_is_presented_without_the_setuid_bit_and_stays_read_only);
 /// Asserts, on a placed tree whose file `bin/tool` is stored with mode 04755, that GETATTR reports
 /// 0755 (no setuid bit), that a caller who is neither the owner nor in the group is granted read
 /// and execute and never modify, extend or delete, that the placed directories above the location
 /// keep 0711 and are not readable, and that every write procedure on the file is
 /// `NFS3ERR_ROFS`. Catches a setuid file served as setuid.
-#[tokio::test(flavor = "multi_thread")]
-async fn a_placed_setuid_file_is_presented_without_the_setuid_bit_and_stays_read_only() {
-    let (_live, fs) = placed("nfs-placed-presented").await;
+async fn a_placed_setuid_file_is_presented_without_the_setuid_bit_and_stays_read_only(over: Over) {
+    let (_live, fs) = placed("nfs-placed-presented", over).await;
     let tool = at(&fs, &["jobs", "1f3a", "root", "bin", "tool"]).await;
     let attr = fs.getattr(tool).await.unwrap();
     assert_eq!(attr.mode, 0o755);

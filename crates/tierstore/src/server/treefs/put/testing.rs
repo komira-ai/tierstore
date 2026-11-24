@@ -22,6 +22,7 @@ use super::upload::Uploader;
 use crate::TestClock;
 use crate::server::build_info::stderr_log::LineLog;
 use crate::server::local_cache::testing::FakeDisk;
+use crate::server::treefs::fill_client::FillClient;
 
 /// The time the clock of a rig starts at.
 pub(in crate::server::treefs) const START_MS: u64 = 1_800_000_000_000;
@@ -217,7 +218,8 @@ impl SpaceRig {
             taken.lock().unwrap().push(pause);
             clock.advance(u64::try_from(pause.as_millis()).unwrap());
         });
-        let uploader = Uploader::new(&path, DEADLINE, rig.clock.clone(), pause);
+        let client = Arc::new(FillClient::for_puts(path, DEADLINE));
+        let uploader = Uploader::new(client, DEADLINE, rig.clock.clone(), pause);
         let space = PutSpace::new(
             rig.open(),
             uploader,

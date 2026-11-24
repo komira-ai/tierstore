@@ -8,7 +8,7 @@ use crate::server::local_cache::trees::testing::fs_at;
 use crate::server::treefs::backing::{self, Saved};
 use crate::server::treefs::handle;
 use crate::server::treefs::ino;
-use crate::server::treefs::live_testing::{Live, walk};
+use crate::server::treefs::live_testing::{Live, Over, over_both, walk};
 use crate::server::treefs::locked;
 use crate::server::treefs::testing::open_cached;
 use crate::server::treefs::testing::{FakeKernel, Rig, sample, sha};
@@ -216,13 +216,13 @@ fn a_core_with_no_adopted_ids_opens_every_file_cached() {
     assert!(matches!(next.open(tool(), false), Ok(Opened::Cached(_))));
 }
 
+over_both!(a_foreign_handle_of_a_placed_file_is_made_again_as_its_span);
 /// Asserts that a read of a handle of a placed file that the process before gave out makes the
 /// open again as the file's span of the pack: the bytes are the file's, not the first bytes of the
 /// pack, a read from the middle and one past the end are clipped to the file, and the release ends
 /// the open.
-#[tokio::test(flavor = "multi_thread")]
-async fn a_foreign_handle_of_a_placed_file_is_made_again_as_its_span() {
-    let live = Live::new("tfs-adopt-placed").await;
+async fn a_foreign_handle_of_a_placed_file_is_made_again_as_its_span(over: Over) {
+    let live = Live::over("tfs-adopt-placed", over).await;
     let _ = live.place(vec![fs_at("jobs/1f3a/root")]);
     let (ino, fh) = live
         .on_core(|core| {
@@ -253,12 +253,12 @@ async fn a_foreign_handle_of_a_placed_file_is_made_again_as_its_span() {
     assert_eq!((open, closed), (1, 0));
 }
 
+over_both!(a_foreign_handle_of_a_placed_empty_file_or_link_is_as_for_a_manifest_tree);
 /// Asserts that the handles of the other kinds of member of a placed tree that an earlier process
 /// gave out are treated as those of a tree of manifests: the handle of the empty file is made
 /// again as an empty open, and that of a symbolic link is `EINVAL`.
-#[tokio::test(flavor = "multi_thread")]
-async fn a_foreign_handle_of_a_placed_empty_file_or_link_is_as_for_a_manifest_tree() {
-    let live = Live::new("tfs-adopt-placed-kinds").await;
+async fn a_foreign_handle_of_a_placed_empty_file_or_link_is_as_for_a_manifest_tree(over: Over) {
+    let live = Live::over("tfs-adopt-placed-kinds", over).await;
     let _ = live.place(vec![fs_at("jobs/1f3a/root")]);
     let (zero, link) = live
         .on_core(|core| {
