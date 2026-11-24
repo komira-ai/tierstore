@@ -264,6 +264,7 @@ fn a_discarded_mount_is_aborted_if_asked_and_detached() {
     let kernel = Kernel {
         mountinfo: table,
         connections: connections.clone(),
+        device: |_| Ok(()),
     };
     let detached = RefCell::new(Vec::new());
     let detach = |path: &std::path::Path| {
@@ -297,6 +298,7 @@ fn a_discarded_mount_is_aborted_if_asked_and_detached() {
     let none = Kernel {
         mountinfo: rig.dir.path().join("none"),
         connections,
+        device: |_| Ok(()),
     };
     assert_eq!(none.connection_of(&rig.mountpoint), None);
 }
@@ -316,6 +318,7 @@ fn a_mount_that_cannot_be_detached_is_said_and_the_start_goes_on() {
     let kernel = Kernel {
         mountinfo: table,
         connections: rig.dir.path().join("connections"),
+        device: |_| Ok(()),
     };
     discard_mount(&settings(&rig), true, &kernel);
     assert!(!mounted(&rig.mountpoint));
@@ -338,6 +341,7 @@ fn only_a_mount_point_that_answers_not_connected_is_discarded() {
     let kernel = Kernel {
         mountinfo: table,
         connections: connections.clone(),
+        device: |_| Ok(()),
     };
     let settings = settings(&rig);
     let dead = Err(std::io::Error::from_raw_os_error(107));

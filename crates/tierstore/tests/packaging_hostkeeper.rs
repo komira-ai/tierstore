@@ -444,6 +444,9 @@ fn launchd_waits_for_the_drain() {
 /// The systemd template of `tierstore fs`.
 const FS_TEMPLATE: &str = "tierstore-fs@.service";
 
+/// The check of the marker of the unit of `tierstore fs`, the one command of it that runs as root.
+const FS_MARKER_CHECK: &str = "ExecCondition=+/usr/bin/test -e /var/lib/tierstore/run-fs-%i\n";
+
 /// Every systemd unit that makes or will make the node's FUSE mount: the template of hostkeeper's
 /// package, the template of the deb and rpm packages, and the unit of `tierstore fs`.
 fn mounting_units() -> [(&'static str, String); 3] {
@@ -493,11 +496,28 @@ fn the_unit_sets_no_option_that_makes_a_mount_namespace() {
 /// privileges (`+`, `!`, `!!`, alone or after other prefixes), but not a `+` in an argument. It
 /// would catch a capability added to the template beyond the one the mount needs, and the
 /// capability dropped, with which the process cannot mount.
+///
+/// The unit of `tierstore fs` has one command that runs with raised privileges: the check of its
+/// marker, `test -e` as root, so that the marker is seen whoever owns `/var/lib/tierstore` (the
+/// unit's own comment). It grants the process nothing; that one line, once, is left out of the
+/// judgement, and any other raised command in the unit still fails it.
 #[test]
 fn the_unit_grants_cap_sys_admin_and_no_other() {
     for (name, unit) in mounting_units() {
-        assert_eq!(grants_cap_sys_admin_alone(&unit), Ok(()), "{name}");
+        let judged = if name == FS_TEMPLATE {
+            assert_eq!(unit.matches(FS_MARKER_CHECK).count(), 1, "{name}");
+            unit.replace(FS_MARKER_CHECK, "")
+        } else {
+            unit
+        };
+        assert_eq!(grants_cap_sys_admin_alone(&judged), Ok(()), "{name}");
     }
+    let fs = read(FS_TEMPLATE).replace(FS_MARKER_CHECK, "");
+    assert_eq!(
+        grants_cap_sys_admin_alone(&with_service_line(&fs, "ExecStartPre=+/usr/bin/true")),
+        Err("ExecStartPre=+/usr/bin/true runs with raised privileges".to_owned()),
+        "another raised command of the fs unit"
+    );
     let template = read(TEMPLATE);
     let bounding = "CapabilityBoundingSet=CAP_SYS_ADMIN\n";
     let ambient = "AmbientCapabilities=CAP_SYS_ADMIN\n";

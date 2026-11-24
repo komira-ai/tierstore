@@ -317,7 +317,10 @@ pub(super) struct Fronts<'a> {
 /// [`bind_fronts`]): taken from the instance that answers on the control socket, or bound where
 /// none answers, and then offered there; when a successor takes them it stops as if `stop` had
 /// resolved, and drains. The cache directory lock keeps the successor read-only until this
-/// process has exited.
+/// process has exited, but for a successor that asks for the `ready` step (`take 1`, `ready`):
+/// it is offered the lock too, waited for until `server.handoff_wait` after `done`, and this
+/// cache starts no write from its `ready` on and says `written` once its writes in flight have
+/// ended (`handoff/written.rs`). A request for a mount is refused: this instance holds none.
 ///
 /// # Errors
 /// An address that cannot be bound, or a hand-off that is refused, mismatched or not ended within
@@ -372,7 +375,12 @@ pub(super) async fn serve_front(
     )
     .await
     .map_err(super::cli::HandingError::into_boxed)?;
-    let offer = offer.map(|offer| offer.with_accept_pause(listen.accept_pause));
+    let offer = offer.zip(fronts.handoff).map(|(offer, handoff)| {
+        offer
+            .with_accept_pause(listen.accept_pause)
+            .with_ready_wait(handoff.wait)
+            .with_lock(cache.clone())
+    });
     let stop = stopped_by(stop, offer);
     let mut addresses = addresses;
     addresses.trees_all = trees_all;

@@ -110,6 +110,19 @@ Each step at which the taker may die is a test (`a_successor_killed_at_each_step
 `a_taker_gone_after_done_before_ready_leaves_the_instance_serving`, `a_taker_silent_for_the_wait_after_done_is_given_up`,
 `a_taker_asks_again_without_ready_of_an_instance_that_does_not_know_it`).
 
+The one hand-over of `docs/design/one-service.md` (section 3.1) adds to the same conversation, additively. The request may
+have a third line, `mount`: an instance that holds the mount offers it after the sockets (`fuse <mountpoint>` with the
+`/dev/fuse` descriptor, `control <path>` with the control socket), quiesces it at `ack` (`Mount::quiesce`), resumes it when the
+taker goes before `ready`, and gives it up at `ready` (its store entry removed) before it says `bye`; an instance that holds
+none refuses the line (`this instance holds no mount`) and the taker asks again without it, and an instance that holds one
+refuses a taker that does not ask for it. A cache instance offers its lock (`lock <path>`, a descriptor of `<cache>/.lock`) to a
+taker that asked for `ready`, starts no cache write from `ready` on, and says `written` after `bye` once its writes in flight
+have ended; the taker takes the write role then, or when the connection ends (`handoff/written.rs`). The taker checks that
+the running instance is its own user and the kind of each descriptor (the sockets listen, the lock is the regular file at
+its path) before `ack`. A build node's instance takes part in all but the mount today (`serve_front`); the start of the one
+process asks for the mount and the lock (P3 of the design's build plan). The frames are read one at a time
+(`frames_sent_together_are_read_one_at_a_time`), as `bye` and `written` may come back to back.
+
 Two processes must not write the table of tree numbers and the attachments file, which the taker reads after `done`. The offer
 therefore calls a hold when a taker answers `ack`, before `done` is sent (`the_hold_is_told_before_the_taker_has_its_done`), and
 releases it if that taker does not complete (`the_hold_is_released_when_the_taker_does_not_complete`); the hold waits for the attach

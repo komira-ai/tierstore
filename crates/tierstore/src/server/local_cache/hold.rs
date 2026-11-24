@@ -103,6 +103,10 @@ pub(super) enum Standing {
     Waiting,
     /// The cache holds the lock and is read-write.
     Holding(LockFile),
+    /// The cache handed its writes to a successor (`handing.rs`): it is read-only for good and
+    /// never tries the lock again. A lock it held is kept, disarmed, so that it is closed and not
+    /// unlocked when the cache is dropped.
+    Handed(Option<LockFile>),
 }
 
 /// The objects a read-only cache was told, by a write-through delete or put, are gone or
@@ -163,6 +167,9 @@ pub(super) struct Hold {
     /// The mode, for whoever acts when it changes (the fill socket is bound while the cache is
     /// read-write): set by the tick that changes `read_write`.
     mode: watch::Sender<Mode>,
+    /// Whether the process this cache's lock was handed over from still holds a descriptor of
+    /// it: until it is gone the lock is offered to no successor (`handing.rs`).
+    inherited: AtomicBool,
     /// Calls a test makes at fixed points of the take and of a delete, to order them.
     #[cfg(test)]
     pub(super) trace: Mutex<Trace>,
@@ -214,6 +221,7 @@ impl Hold {
                 Mode::ReadOnly
             })
             .0,
+            inherited: AtomicBool::new(false),
             #[cfg(test)]
             trace: Mutex::new(Trace::default()),
         }
@@ -278,8 +286,11 @@ impl Inner {
             let _ = self.hold.mode.send_replace(Mode::ReadOnly);
             return Ok(Tick::Lost);
         }
-        if matches!(*standing, Standing::Lockless) {
-            return Ok(Tick::Held);
+        match *standing {
+            Standing::Lockless => return Ok(Tick::Held),
+            // Handed over for good: the lock is the successor's.
+            Standing::Handed(_) => return Ok(Tick::Waiting),
+            Standing::Waiting | Standing::Holding(_) => {}
         }
         let Some(file) = lock::try_take(&self.lock_path())? else {
             return Ok(Tick::Waiting);
@@ -481,3 +492,6 @@ impl LocalCache {
         self.inner.save_pins(true);
     }
 }
+
+#[path = "handing.rs"]
+mod handing;

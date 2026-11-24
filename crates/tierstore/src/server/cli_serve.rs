@@ -407,6 +407,8 @@ pub(super) async fn bind_fronts(
         nfs_addrs: _,
         copies,
         ready: _,
+        mount: _,
+        lock: _,
     } = inherited;
     let oci = match (oci, front) {
         (Some(setup), Some(front)) => Some(OciListener::over(

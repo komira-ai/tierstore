@@ -35,20 +35,43 @@
 //! alone is handed over as before, with no step. So the step is additive: no release's request
 //! or answer changes meaning.
 //!
+//! The one hand-over of `docs/design/one-service.md` (section 3.1) adds to the same conversation:
+//!
+//! - **The mount** (`mount.rs`). A request may have a third line, `mount`. An instance that holds
+//!   the mount (`Offer::with_mount`) offers it after the sockets, as `fuse <mountpoint>` with the
+//!   `/dev/fuse` descriptor and `control <path>` with the control socket's listening socket; it
+//!   quiesces it at `ack`, resumes it when the taker is gone before `ready`, and gives it up at
+//!   `ready`, before its `bye`. It refuses a taker that does not ask for the mount, so that the
+//!   mount is never left with an instance about to end; an instance that holds none refuses the
+//!   line ("this instance holds no mount"), and the taker asks again without it.
+//! - **The cache lock** (`written.rs`, `local_cache/handing.rs`). An instance given its cache
+//!   (`Offer::with_lock`) offers a taker that asked for the `ready` step a descriptor of its
+//!   lock file, `lock <path>`, while it holds the lock. At `ready` its cache starts no write, and
+//!   after `bye` it says `written` once its writes in flight have ended; the successor takes the
+//!   write role then, or when the connection ends. A successor that dies after `ready` leaves the
+//!   instance the lock's last other holder: it unlocks.
+//! - **The taker's checks**: the running instance must be the taker's own user, and before `ack`
+//!   each descriptor must be of its kind (the sockets listen, the lock is the regular file at the
+//!   taker's lock path, the device passes the taker's check). `ready` is a hand-over for good:
+//!   the instance does not resume after it, even if its `bye` cannot be sent.
+//!
 //! No port is added, no packet is redirected and no right beyond the user's own is needed. The
-//! control socket is mode 0600 and a peer of another user is refused. Where nothing answers
-//! (no file, or a file no one listens on) the taker starts cold, binding its sockets itself.
-//! One that is not answered within [`Handoff::wait`] does not: the running instance may be
-//! alive, so the start fails.
+//! control socket is mode 0600 and a peer of another user is refused, by either side. Where
+//! nothing answers (no file, or a file no one listens on) the taker starts cold, binding its
+//! sockets itself. One that is not answered within [`Handoff::wait`] does not: the running
+//! instance may be alive, so the start fails.
 //!
 //! A line that names a front this release does not know is skipped, with its descriptor closed,
-//! so that a front added later (as `nfs` was) is no protocol error for a taker that predates it.
+//! so that a front added later (as `nfs` was, and as `fuse`, `control` and `lock` are for a taker
+//! of a release before them) is no protocol error for a taker that predates it.
 //!
 //! The same code runs on Linux and macOS: `SCM_RIGHTS` and Unix sockets are POSIX.
 
+mod mount;
 mod offer;
 mod take;
 pub(crate) mod wire;
+mod written;
 
 use std::net::SocketAddr;
 use std::path::PathBuf;
@@ -58,6 +81,11 @@ pub(crate) use offer::{Hold, Offer, Socket, check_control_path};
 
 /// The most listening sockets one instance can hand over: what one message carries.
 pub(crate) const MAX_SOCKETS: usize = wire::MAX_FDS;
+pub(crate) use mount::{Mount, check_control};
+#[cfg(test)]
+pub(crate) use mount::{MountWant, Prepare};
+#[cfg(test)]
+pub(crate) use take::{Ask, take_service};
 pub(crate) use take::{Inherited, Want, take, take_with_ready};
 
 /// What an instance is told to do about a hand-off: where the control socket is, and how long a

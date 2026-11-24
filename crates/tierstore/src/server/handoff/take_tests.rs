@@ -276,7 +276,16 @@ async fn a_taker_that_cannot_copy_the_sockets_refuses_before_the_running_instanc
         oci: &[],
         nfs: &[],
     };
-    let error = super::exchange(&path, &want, no_copy, false)
+    let mut ask = super::Ask {
+        mount: None,
+        lock: None,
+    };
+    let knobs = super::Knobs {
+        copy: no_copy,
+        uid: rustix::process::geteuid().as_raw(),
+    };
+    let request = super::Request::Plain;
+    let error = super::take_as(&handoff(path.clone()), &want, request, &mut ask, knobs)
         .await
         .err()
         .unwrap();
