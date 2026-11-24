@@ -177,17 +177,19 @@ async fn the_successor_takes_the_write_role_on_written_or_the_end() {
     assert_eq!(new.mode(), Mode::ReadOnly);
 }
 
-/// Asserts that a `written` that cannot be sent (the successor shut its reading side) ends the
-/// running instance's part without the unlock: the successor may still live, holding its
-/// descriptor, and a third process does not take the lock. It would catch an unlock under a
-/// successor that then takes the write role believing it holds a lock nobody holds.
+/// Asserts that a `written` that cannot be sent ends the running instance's part without the
+/// unlock: the successor may still live, holding its descriptor (its end stays open), and a third
+/// process does not take the lock. It would catch an unlock under a successor that then takes the
+/// write role believing it holds a lock nobody holds. The send fails because the instance's own
+/// end can no longer write: that fails it on Linux and macOS alike, while a successor that shut
+/// its reading side fails it on Linux only (on macOS the send goes through).
 #[tokio::test]
 async fn a_written_that_cannot_be_sent_leaves_the_lock_locked() {
     let rig = Rig::new("handoff-written-unsent");
     let lock = rig.config.path.join(".lock");
     let (old, received) = handed(&rig);
     let (a, b) = StdStream::pair().unwrap();
-    b.shutdown(std::net::Shutdown::Read).unwrap();
+    a.shutdown(std::net::Shutdown::Write).unwrap();
     a.set_nonblocking(true).unwrap();
     let near = UnixStream::from_std(a).unwrap();
     within("the end of its part", after_ready(near, old.clone())).await;

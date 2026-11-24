@@ -134,11 +134,15 @@ fn listening(fd: BorrowedFd<'_>) -> bool {
     rustix::net::sockopt::socket_acceptconn(fd).unwrap_or(false)
 }
 
-/// Whether the stream socket `fd` listens: macOS has no `SO_ACCEPTCONN`, and a stream socket that
-/// listens is the one that has no peer.
+/// Whether the stream socket `fd` listens. macOS answers no `getsockopt` of `SO_ACCEPTCONN`, so
+/// the socket's peer is asked for: a listening socket has none and was never connected, and macOS
+/// says `ENOTCONN` of it. A socket whose peer is gone (the other end of a pair closed, a
+/// connection ended) has both its sides shut, and macOS says `EINVAL` of it instead; a connected
+/// one names its peer. A stream socket that is bound and neither listens nor ever connected also
+/// says `ENOTCONN`: no image or instance offers one, as every socket of an offer is one it serves.
 #[cfg(target_vendor = "apple")]
 fn listening(fd: BorrowedFd<'_>) -> bool {
-    rustix::net::getpeername(fd).is_err()
+    rustix::net::getpeername(fd).err() == Some(rustix::io::Errno::NOTCONN)
 }
 
 #[cfg(test)]

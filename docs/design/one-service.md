@@ -549,7 +549,12 @@ close-on-exec, and the `flock` on them. So a Mac hands over to the next image of
    image's standard input, so `<n>` is `0` and `--handed` takes no other number: a descriptor number from the command line
    can be made a descriptor only by `unsafe` code, which tierstore does not have (AGENTS.md R2), while the standard
    library places a descriptor at 0 for an exec (`Command::stdin`), and the new image reads standard input without it
-   (built: `server/handoff/exec.rs`, `server/next_image.rs`).
+   (built: `server/handoff/exec.rs`, `server/next_image.rs`). After the offer it writes one more frame, `keep`, with a
+   copy of the other end: from the exec to the new image's read, nothing but the message holds the offer's descriptors,
+   and macOS's collector of descriptors in flight (`unp_gc`, run whenever a Unix socket is freed) walks only from
+   descriptors that are in a message themselves, so without it the offer's sockets are flushed and every connection the
+   new image accepts has its receiving side shut. The end in a message of its own is where the walk starts and reaches
+   the offer. No image reads `keep`: a read takes one frame and leaves the next in the socket.
 4. The new image reads the offer from that descriptor with the taker's code and checks it as a taker does (addresses cover
    its settings, paths equal, the lock is the file), reads its runtime state (the table of tree numbers is reopened for the
    same boot epoch, `nfs/boot.rs`; the mount is found and not made again, `nfs/run.rs`), and serves on the inherited

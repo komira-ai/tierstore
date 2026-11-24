@@ -20,8 +20,19 @@
 //! Descriptor 0 is where the offer rides because a descriptor number from the command line can be
 //! made a descriptor only by `unsafe` code, which this crate does not have (AGENTS.md R2); the
 //! standard library places a descriptor at 0 for an exec (`Command::stdin`), and standard input
-//! can be read without it. Descriptor 0 then stays the pair's end, read out and with its peer gone,
-//! until the next exec places another there.
+//! can be read without it. Descriptor 0 then stays the pair's end, its offer read out and its peer
+//! gone, until the next exec places another there.
+//!
+//! After the offer, the image writes one more frame into the pair: [`KEEP`], with a copy of the end
+//! the next image reads. Between the exec and the read, the descriptors of the offer are held by
+//! nothing but the message they ride in, and the collector of descriptors in flight of macOS
+//! (`unp_gc`, which runs whenever a Unix socket is freed anywhere on the system) starts its walk
+//! only from descriptors that are in a message themselves: it never looks into the pair's end,
+//! which is not, finds the offer's sockets unreachable and flushes them, so that the listening
+//! sockets give every connection they accept with its receiving side shut. The end in a message of
+//! its own is such a start, and the walk reaches the offer through it. No image reads the frame:
+//! a read takes one frame and leaves the next in the socket, and the end is freed with its
+//! message once descriptor 0 is closed.
 
 use std::ffi::OsString;
 use std::os::fd::{AsFd as _, BorrowedFd, OwnedFd};
@@ -44,6 +55,11 @@ pub(crate) const HANDED: &str = "--handed";
 
 /// The descriptor the offer is handed on: standard input. `--handed` names no other.
 pub(crate) const HANDED_FD: &str = "0";
+
+/// The frame written after the offer, with a copy of the end the next image reads: it keeps the
+/// offer's descriptors reachable for the collector of descriptors in flight of macOS (see the
+/// module's words). No image reads it.
+const KEEP: &str = "keep";
 
 /// What an image hands over to the next.
 pub(crate) struct Handing {
@@ -84,8 +100,9 @@ pub(crate) struct Image {
 }
 
 impl Image {
-    /// Writes the offer of `handing` into one end of a new `socketpair` and closes that end: the
-    /// frame and its descriptors wait in the other end, the image's, for the next image to read.
+    /// Writes the offer of `handing` into one end of a new `socketpair`, then the frame [`KEEP`]
+    /// with a copy of the other end, and closes that end: the frames and their descriptors wait in
+    /// the other end, the image's, for the next image to read.
     /// `program` is what is executed, and `args` (the program name first, as `std::env::args_os`
     /// gives them) its arguments, less a `--handed` they hold, and with `--handed 0`.
     ///
@@ -111,6 +128,9 @@ impl Image {
         wire::send(&near, &lines, &fds)
             .await
             .map_err(io("writing the offer to the next image"))?;
+        wire::send(&near, &[KEEP.to_owned()], &[far.as_fd()])
+            .await
+            .map_err(io("writing the offer to the next image"))?;
         Ok(Self {
             program,
             args: next_args(args),
@@ -120,9 +140,14 @@ impl Image {
 
     /// Executes the next image: this process's program path, with the arguments of
     /// [`prepare`](Self::prepare), and the end of the pair as its standard input. It returns only
-    /// when the exec failed.
+    /// when the exec failed, and then it has taken the frames out of the end and closed what they
+    /// carried: the end, in a message of its own, would otherwise hold the offer (the lock and the
+    /// listening sockets) until the system's collector of descriptors in flight next runs.
     pub(crate) fn exec(self) -> std::io::Error {
-        self.command().exec()
+        let kept = self.handed.try_clone();
+        let why = self.command().exec();
+        let _ = kept.map(|kept| discard(&kept));
+        why
     }
 
     /// The command [`exec`](Self::exec) executes: the program, its arguments, and the end of the
@@ -152,11 +177,38 @@ impl Image {
         self.handed
     }
 
+    /// A copy of that end, which a test keeps to look into it.
+    #[cfg(test)]
+    fn handed_copy(&self) -> OwnedFd {
+        self.handed.try_clone().expect("a copy of the end")
+    }
+
     /// The number of that end in this process.
     #[cfg(test)]
     fn handed_number(&self) -> i32 {
         use std::os::fd::AsRawFd as _;
         self.handed.as_raw_fd()
+    }
+}
+
+/// Takes every frame waiting in `handed` and closes the descriptors they carry, without waiting for
+/// more: its peer is closed, so what is there is all there is.
+fn discard(handed: &OwnedFd) {
+    use rustix::net::{RecvAncillaryBuffer, RecvAncillaryMessage, RecvFlags, recvmsg};
+    let mut buffer = [0_u8; 4096];
+    loop {
+        let mut space = [std::mem::MaybeUninit::uninit(); rustix::cmsg_space!(ScmRights(MAX_FDS))];
+        let mut control = RecvAncillaryBuffer::new(&mut space);
+        let mut iov = [std::io::IoSliceMut::new(&mut buffer)];
+        let got = recvmsg(handed, &mut iov, &mut control, RecvFlags::DONTWAIT);
+        if !got.is_ok_and(|got| got.bytes > 0) {
+            return;
+        }
+        for message in control.drain() {
+            if let RecvAncillaryMessage::ScmRights(rights) = message {
+                rights.for_each(drop);
+            }
+        }
     }
 }
 
@@ -251,7 +303,8 @@ pub(crate) fn handed_input() -> std::io::Result<OwnedFd> {
 /// What makes the image refuse the offer; every descriptor it came with is closed then:
 /// [`HandoffError::Mismatch`] for other addresses or paths, [`HandoffError::Protocol`] for a frame
 /// that is not an offer or holds a line no image is handed (a FUSE device), [`HandoffError::Io`]
-/// for a descriptor not of its kind or a frame that cannot be read.
+/// for a descriptor not of its kind, a `handed` that is not a stream socket, or a frame that cannot
+/// be read.
 pub(crate) async fn read(
     handed: OwnedFd,
     want: &Want<'_>,
@@ -260,6 +313,9 @@ pub(crate) async fn read(
     let reading = HandoffError::io("reading the handed offer");
     let frame = async {
         fcntl_setfd(&handed, FdFlags::CLOEXEC)?;
+        // Anything else is refused before the wait for the frame: macOS lets a regular file be
+        // waited on for reading, and an empty one is never ready, so the read would never end.
+        check_stream(handed.as_fd())?;
         let stream = std::os::unix::net::UnixStream::from(handed);
         stream.set_nonblocking(true)?;
         wire::recv(&UnixStream::from_std(stream)?).await
@@ -284,6 +340,23 @@ pub(crate) async fn read(
         .map_err(HandoffError::io("taking over a handed socket"))?;
     inherited.lock = lock;
     Ok(Handed { inherited, control })
+}
+
+/// Whether `fd` is a stream socket, the only kind an offer is read from.
+///
+/// # Errors
+/// `InvalidData` when it is not.
+fn check_stream(fd: BorrowedFd<'_>) -> std::io::Result<()> {
+    use rustix::net::{SocketType, sockopt};
+    // A descriptor that is no socket has no type: the same refusal.
+    if sockopt::socket_type(fd).is_ok_and(|kind| kind == SocketType::STREAM) {
+        Ok(())
+    } else {
+        Err(std::io::Error::new(
+            std::io::ErrorKind::InvalidData,
+            "the handed descriptor is not a stream socket",
+        ))
+    }
 }
 
 /// The control socket of an offer, when it holds one: it must be at `own`, the image's own, and be
