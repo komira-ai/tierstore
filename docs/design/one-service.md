@@ -1,11 +1,12 @@
 # tierstore as one service: one process, one unit, one configuration file
 
-Status: **proposal, for the owner's approval. No code changes come with this document.** It reverses decision C5 of
+Status: **approved by the owner on 2026-11-24, with the privilege design simplified to what is here (the process holds
+`CAP_SYS_ADMIN` for its life). No code changes come with this document; the build plan of section 6 builds it.** It reverses decision C5 of
 [virtual-build-fs.md](virtual-build-fs.md) (section 13.1, "a second process on Linux build nodes holding `CAP_SYS_ADMIN`,
 with no network") on the owner's instruction: tierstore is one service, one process and one configuration file, and the
 file system is an `[[interface]]` of type `fs` inside it, as section 4 of [pluggable-interfaces.md](pluggable-interfaces.md)
 first sketched it. This pull request also rewrites section 6.2 of virtual-build-fs.md and the `fs` paragraph of section 4
-of pluggable-interfaces.md to match. Nothing is built before this design is approved. What the code does today was read at
+of pluggable-interfaces.md to match. What the code does today was read at
 the commit this document lands on; each claim names the file.
 
 **Claim tags**, as in virtual-build-fs.md: **read in code** (with the file), **inferred** (reasoned here, and how), and
@@ -24,7 +25,7 @@ pull request that relies on it merges).
 | Live update, Linux | two hand-overs: `take 1` (listening sockets, `server/handoff/`) and `take-fs 1` (the FUSE descriptor and the control socket, `server/treefs/handover.rs`), on two control sockets | one hand-over on `server.handoff_socket`: listening sockets, the FUSE descriptor, the control socket and the cache lock together |
 | Live update, macOS | none: every update boots the fs job out (which unmounts) and restarts both jobs (`server/update_hook/launchd/`) | a hand-over to the next image of the same process (section 3.4): the NFS mount stays |
 | Update hook | stop order and a second arm per platform (`update_hook/systemd/fs.rs`, `update_hook/launchd/fs.rs`) | one service, no stop order |
-| Privilege, Linux | the fs process holds `CAP_SYS_ADMIN` for its whole life; the S3 process holds none | the one process holds it until the mount is made, then drops it for good, before it binds, accepts on or reads any network socket (section 2) |
+| Privilege, Linux | the fs process holds `CAP_SYS_ADMIN` for its whole life; the S3 process holds none | the one process holds it for its whole life, to mount (section 2.1) |
 
 What does not change: the mount point (`/run/tierstore/fs` on Linux, `/private/var/tierstore/fs` on a Mac), the tree layout
 under it, the mount-provider socket and its protocol, the control socket and its protocol, the runtime directory and the
@@ -219,7 +220,7 @@ left to compare: the mount-provider socket and the mountpoint against the job ag
 **Linux.** One template, `tierstore@.service` (`packaging/hostkeeper/units/`, and its copy `packaging/tierstore@.service`
 for the Debian and RPM packages, which differs only in the binary), instances `a` and `b` with the markers `run-a` and `run-b` as
 today. It gains what the file system needs from `tierstore-fs@.service`, and loses what the host mount namespace rules out
-(section 2.3 has every option with its reason):
+(section 2.2 has every option with its reason):
 
 ```ini
 [Unit]
@@ -275,8 +276,7 @@ FileDescriptorStorePreserve=restart
 - The job runtime's unit orders itself after the mount by `After=` and `Wants=` on `tierstore@a.service tierstore@b.service`
   (only the instance whose marker exists starts), instead of on `tierstore-fs@a.service`.
 
-A node with no `fs` interface runs the same template: the process drops the capability before it does anything else
-(section 2.2), and the sandbox it lost is in section 2.4. `packaging/tierstore.service`, the example unit for a host placed
+A node with no `fs` interface runs the same template. `packaging/tierstore.service`, the example unit for a host placed
 by hand, is not a copy of the template: it has no instances, no marker and no hand-over (`packaging/README.md`). It keeps
 its options and gains none, and its header says that a node with an `fs` interface runs the template, whose descriptor
 store and hand-over the file system needs.
@@ -317,115 +317,21 @@ over a method of the cache or the tree store (read in code). The file system's c
 - **What it removes:** a line parser, a listener, a connection pool, a reports thread with a queue that drops on overflow
   (`fill_client.rs`), and the two-file agreement on the socket's path.
 
-## 2. Privilege
+## 2. Privilege and the start
 
-### 2.1 The choice: mount first, then drop the capability for good
+### 2.1 Privilege
 
-Passthrough was removed after 0.3.121 (`docs/design/virtual-build-fs.md`, head note; `server/treefs/config.rs` lists
-`passthrough` and `max_backing_ids` as removed), so `CAP_SYS_ADMIN` is needed for the `mount(2)` of the FUSE file system alone
-(`crates/tsfuse/src/mount.rs`: `mount_syscall`, with `fd=N` in the options) and for the lazy detach of a dead mount at a
-fresh start (`server/treefs/run.rs`: `discard_with`, `umount2(MNT_DETACH)`). Two ways keep the network-facing process from
-holding it; this design takes the first.
+**Linux.** The process holds `CAP_SYS_ADMIN` for its whole life (the unit's `CapabilityBoundingSet` and
+`AmbientCapabilities`), because it makes the FUSE mount (`crates/tsfuse/src/mount.rs`: `mount(2)` with `fd=N` in the
+options) and detaches a dead one at a fresh start (`server/treefs/run.rs`: `discard_with`, `umount2(MNT_DETACH)`). Since
+passthrough was removed after 0.3.121 (`server/treefs/config.rs` lists `passthrough` and `max_backing_ids` as removed),
+that is all the capability is for. It is what `tierstore-fs@.service` grants today; the one process holds it instead.
 
-**A. Mount first, then drop (chosen).** The unit grants `CAP_SYS_ADMIN` (bounding and ambient sets). The process makes the
-mount, or decides to take or adopt one, as the first thing it does, then clears its effective, permitted, inheritable and
-ambient sets; a take or an adoption happens after that, and only then does it bind, accept on or read any network socket,
-or read a request of the mount. `NoNewPrivileges=yes`
-stays, so nothing the process executes later can gain a capability back.
+**macOS:** none. The process runs as `_tierstore`; the NFS listener is on an unprivileged loopback port, and `mount_nfs`,
+`umount` and `diskutil unmount force` of a loopback export need no root when the mounting user owns the mount point (read in
+`packaging/macos-pkg/tierstore-fs.plist`; Measured: macos E14 in virtual-build-fs.md).
 
-**B. Mount through `fusermount3` (rejected).** `tsfuse` already falls back to it on `EPERM` (`mount.rs`: `mount_fusermount`).
-It would keep the capability out of the process, but:
-
-- `fusermount3` is a setuid-root helper. It gains its capability from the setuid bit, which `NoNewPrivileges=yes` forbids,
-  and the bounding set caps what a setuid program can gain, so the unit would need both `NoNewPrivileges=no` and
-  `CapabilityBoundingSet=CAP_SYS_ADMIN` for the whole life of the process. An attacker who runs code in the S3 parser could
-  then run every setuid program of the host (`sudo`, `su`, `passwd`, `mount`, `fusermount3` itself), which is more attack
-  surface than option A leaves after its drop, where nothing can gain a capability at all.
-- The jobs read the mount as other users, which needs `allow_other`, which `fusermount3` grants only with `user_allow_other`
-  in `/etc/fuse.conf` (`mount.rs`, doc of `mount_fusermount`). That is a host-wide setting that lets every user of the host
-  make `allow_other` mounts, plus a dependency on the host's `fuse3` package and its version.
-- It gains back none of the hardening of section 2.3: `fusermount3` runs in the service's mount namespace like any child,
-  so a unit with a private mount namespace hides the mount from the host either way.
-- The crash path still needs an unmount of a dead mount (`fusermount3 -u -z`), so the helper is in the start path every time
-  the process starts afresh.
-
-A third way was considered and is not proposed: a privileged `ExecStartPre=+` helper of our own that mounts and puts the
-descriptor in the unit's store, so that the server holds no capability and keeps the full sandbox. It is a second process in
-all but name, it must tell a dead mount from a live one without touching it (a `stat` of a mount whose server is not reading
-blocks), and whether systemd accepts `FDSTORE=1` from a control process under `NotifyAccess=exec` is unverified. It may be
-worth a spike if the owner wants the sandbox back (section 2.4); option A does not depend on it.
-
-### 2.2 The start, step by step (Linux)
-
-Only a fresh mount needs the capability. A take (from a running instance) and an adoption (from the descriptor store) need
-none. So the process decides which of the three it will do from facts that carry no input from anyone (whether a socket
-accepts a connection, whether systemd passed a descriptor), drops the capability, and only then talks to anyone. Today the
-file system mounts late in its own start (`server/treefs/launch.rs`: `start`, after the table and the control socket) and
-reads the running instance's offer first; both orders change.
-
-Capabilities are per thread on Linux: `capset(2)` changes the calling thread only, and threads made later inherit the
-caller's sets. So steps 1 to 3 run on the main thread before any other thread exists, and the drop is the last of them.
-
-1. Read and check the configuration file, and the facts file it names (local files, root's).
-2. **If the file has an `fs` interface:**
-   1. Take the **start lock**, an exclusive `flock` on `start.lock` in the runtime directory, waiting for it (the unit's
-      start timeout bounds the wait). It is held until the process has bound its hand-over socket, so two starts never
-      decide at once: a start that finds a mount with no server (step v) knows no other start is about to serve it. In
-      release M the `tierstore fs` process takes the same lock (section 4.1).
-   2. **Connect** to `server.handoff_socket`. If a process accepts, the sockets (and, from a one-process instance, the
-      mount) will be taken from it (3.1), after the drop, on this connection; nothing is sent or read yet.
-   3. In release M only, also connect to the old layout's fs hand-over socket, `handoff.sock` in the runtime directory,
-      whether or not ii was accepted. If a process accepts, the mount will be taken from that `tierstore fs` process
-      (4.2), on this connection. When both accept (the switch of 4.2), the mount comes from the process that holds it.
-   4. Else, if no process that holds the mount accepted at ii or iii, and systemd passed a descriptor named `fuse` (`LISTEN_FDS`, `LISTEN_FDNAMES`, `LISTEN_PID`: platform markers,
-      allowed by S2; `server/treefs/sd.rs`), it will be **adopted**.
-   5. Else **mount afresh**: find any mount of type `fuse.tierstore-fs` at the mount point in `/proc/self/mountinfo` without
-      touching the mount point (a `stat` of a mount whose descriptor some process holds but does not read blocks; today's
-      `discard_dead_mount` does a `stat` and acts only on `ENOTCONN`). Such a mount has no server: no process accepted at
-      ii or iii, the store had nothing, and the start lock says no other start is between those steps. Abort its
-      connection and detach it, make the mount point, open `/dev/fuse`, `mount(2)`, and put the descriptor in the store
-      (`FDSTORE=1`, `FDNAME=fuse`, and wait for the barrier, as today).
-3. **Drop the capability**: clear the ambient set (`rustix::thread::clear_ambient_capability_set`), then set the effective,
-   permitted and inheritable sets to empty (`rustix::thread::set_capabilities`), then read them back
-   (`rustix::thread::capabilities`) and refuse to go on unless all three are empty. These are safe functions of `rustix`
-   behind its `thread` feature: no `unsafe` (R2). Before the drop the process counts its threads (`/proc/self/task`) and
-   refuses to start if there is more than one, so a later change that starts a thread earlier fails the start loudly instead
-   of leaving a thread with the capability. The bounding set is left as the unit set it (dropping from it needs
-   `CAP_SETPCAP`); with empty permitted sets and `NoNewPrivileges=yes` it grants nothing. A node with no `fs` interface does
-   this step right after step 1.
-4. Build the runtime, and do everything that needs neither the capability nor the device: open the cache (read-only until it
-   holds the lock), bind the trees sockets beside a running instance (`SO_REUSEPORT`), and, for an adoption or a fresh
-   mount, make the file system's state ready (the tree table, the attachments made again from their manifests, the control
-   socket, the put directory's stage and journal; `server/treefs/start.rs`, `run.rs`). For a take, the control socket is
-   received in the offer, not made, and the state is checked before `ack` and read again after `done`, since the running
-   instance writes it until then. A running instance waits for a connected taker's request line up to
-   `params.handoff_wait` and serves meanwhile (3.1), so this step's time costs the old instance nothing.
-5. Get the mount as decided at step 2: the take of 3.1 (or of 4.2) on the connection of step 2, the adoption, or the fresh
-   mount's `INIT` handshake. Take or bind the S3 and OCI sockets (in the same conversation, for a take). Start the session
-   (from the recorded `INIT` reply after a take or an adoption, with `FUSE_NOTIFY_RESEND` where the kernel offers it) and
-   the readers, and bind the mount-provider socket when the cache holds its lock, as today.
-6. Release the start lock once the hand-over socket is bound; `READY=1`.
-
-So the inputs read while the process holds the capability are: the configuration and facts files, the start lock, whether
-two sockets accept a connection (not a byte is read from them), the descriptor names systemd passes, and
-`/proc/self/mountinfo`. Not one byte from the network, from another process, from a job's request of the mount, from a tree
-manifest, or from the cache. A take whose running instance disappears between the connect and the offer fails the start
-(as a take that times out does today); systemd starts the unit again and step 2 decides afresh. A mount made at step 2.v
-queues the kernel's `INIT` and any request until the readers start; `mount(2)` does not wait for `INIT` (inferred from the
-kernel's `fuse_send_init`, which is asynchronous; P3's integration test `mount_returns_before_the_init_reply_is_read` checks
-it).
-
-**After the drop**, the process can no longer mount or unmount. Nothing it does later needs to: a stop leaves the mount to
-the descriptor store (section 3.5), and a recovery that gives up writes `abort` in `/sys/fs/fuse/connections/<n>/`, which is
-owned by the mount's user (inferred from the kernel's `fusectl`, which gives the files the connection's `user_id`;
-unverified, P3's integration test `a_given_up_recovery_can_write_abort_as_the_mount_user` checks it), and exits, so that the
-next start mounts afresh with the capability again.
-
-**macOS** has no privilege to drop. The process runs as `_tierstore`; the NFS listener is on an unprivileged loopback port,
-and `mount_nfs`, `umount` and `diskutil unmount force` of a loopback export need no root when the mounting user owns the mount
-point (read in `packaging/macos-pkg/tierstore-fs.plist`; Measured: macos E14 in virtual-build-fs.md).
-
-### 2.3 Unit hardening: what the host's mount namespace rules out
+### 2.2 Unit hardening: what the host's mount namespace rules out
 
 The mount must be made in the host's mount namespace, so that the job runtime sees it and the next instance can take it. Every
 systemd option that gives a service a mount namespace of its own, from which a mount does not reach the host, is therefore
@@ -438,71 +344,45 @@ drop-in that adds one is the operator's change, not the package's. The table is 
 | Option | S3 unit today | fs unit today | One unit | Why |
 |---|---|---|---|---|
 | `User=tierstore` | yes | yes | yes | |
-| `NoNewPrivileges=yes` | yes | yes | yes | what makes the drop final |
-| `CapabilityBoundingSet` | empty | `CAP_SYS_ADMIN` | `CAP_SYS_ADMIN` | the mount; cleared from the effective, permitted, inheritable and ambient sets at step 3 of 2.2; the bounding set stays and grants nothing |
-| `AmbientCapabilities` | none | `CAP_SYS_ADMIN` | `CAP_SYS_ADMIN` | how a non-root service gets it; cleared at step 3 |
+| `NoNewPrivileges=yes` | yes | yes | yes | nothing the process executes gains a privilege |
+| `CapabilityBoundingSet` | empty | `CAP_SYS_ADMIN` | `CAP_SYS_ADMIN` | the mount |
+| `AmbientCapabilities` | none | `CAP_SYS_ADMIN` | `CAP_SYS_ADMIN` | how a non-root service gets it |
 | `PrivateDevices=yes` | yes | no | **no** | makes a mount namespace; replaced by `DevicePolicy=closed` and `DeviceAllow=/dev/fuse rw`, a cgroup device filter with no namespace: the standard pseudo devices and `/dev/fuse`, nothing else |
 | `ProtectSystem=strict` | yes | no | **no** | makes a mount namespace |
 | `ProtectHome=yes` | yes | no | **no** | makes a mount namespace |
 | `PrivateTmp=yes` | yes | no | **no** | makes a mount namespace |
 | `ProtectKernelTunables`, `ProtectKernelModules`, `ProtectKernelLogs`, `ProtectControlGroups` | yes | no | **no** | each makes a mount namespace (read-only or hidden `/proc/sys`, `/sys`, module directories, cgroup tree) |
 | `PrivateMounts` | no | no | no | a mount namespace by definition |
-| `RestrictNamespaces=yes` | yes | no | **yes** | a system-call filter, not a namespace (systemd.exec); the fs unit left it out with the namespace options, but it does not keep a mount from the host. The process makes no namespace. P6's test holds the list and P3's integration test shows the mount reaching the host with it set |
+| `RestrictNamespaces=yes` | yes | no | **yes** | a system-call filter, not a namespace (systemd.exec); the fs unit left it out with the namespace options, but it does not keep a mount from the host. The process makes no namespace. |
 | `RestrictAddressFamilies` | `AF_UNIX AF_INET AF_INET6` | `AF_UNIX` | `AF_UNIX AF_INET AF_INET6` | the fronts |
 | `RestrictRealtime`, `LockPersonality`, `MemoryDenyWriteExecute`, `SystemCallArchitectures=native` | yes | yes | yes | |
-| `SystemCallFilter` | `@system-service` | `+ @mount pidfd_open pidfd_getfd` | `+ @mount pidfd_open pidfd_getfd` | the mount and the adoption of a stored descriptor without `unsafe`; after the drop the mount calls fail with `EPERM` |
+| `SystemCallFilter` | `@system-service` | `+ @mount pidfd_open pidfd_getfd` | `+ @mount pidfd_open pidfd_getfd` | the mount and the adoption of a stored descriptor without `unsafe` |
 | `FileDescriptorStoreMax=1`, `FileDescriptorStorePreserve=restart` | no | yes | yes | the mount outlives a crash |
 
-### 2.4 What is weaker than today, and by how much
+### 2.3 The start (Linux)
 
-**Linux, against today's S3 process** (the process that parses the network):
+The file system's start order of today (`server/treefs/launch.rs`: `start`) is kept; what is new is that the server's own
+start runs it, and that the take is the one hand-over of 3.1:
 
-- It gains `CAP_SYS_ADMIN` for the start, before any network input, job request, manifest or cache byte is read (2.2). After
-  that it has none, as today. What an attacker could do with a bug in the inputs read before the drop: those inputs are the
-  configuration file (root's, mode 0644 or 0640), the facts file (root's), the start lock, whether two sockets in the
-  service's own directories accept a connection, the descriptor names systemd passes, and the kernel's mount table; a bug
-  there is reachable only by someone who can already write those files. Not a byte from another process is read before the
-  drop: the frames of a hand-over, which come from the running instance, the process that parses the network, are read after
-  it.
-- It loses the eight namespace options of the table. With code running in the process, an attacker can now read every file
-  of the host that the user `tierstore` may read (world-readable files under `/etc`, `/home` where permissions allow, the
-  host's `/tmp`), where today it saw a read-only `/usr` and `/etc`, no `/home` and a private `/tmp`; it can write the host's
-  world-writable directories (`/tmp`, `/var/tmp`), where today it wrote only its state directory and its cache; it can read
-  `/proc/sys` and `/sys` (it cannot write them: those files are root's and it has no capability). It cannot open devices but
-  the pseudo devices and `/dev/fuse`, as today. Loading modules and writing sysctls needed a capability it does not have, so
-  those options protected nothing extra once the capability is gone.
-- It now serves the jobs' file system, so code running in it can answer the jobs' reads with other bytes. Today the same
-  attacker can already do that: the S3 process writes the cache the fs process serves from (it fills every blob), so this is
-  not a new reach.
-
-**Linux, against today's fs process:** it held `CAP_SYS_ADMIN` for its whole life, while it parsed FUSE requests and tree
-manifests. Now it holds it until before the first of those. Stronger. It loses `RestrictAddressFamilies=AF_UNIX`: the code
-that parses manifests now shares a process with sockets on the network.
-
-**Linux, a node with no `fs` interface** (the same template): it holds the capability from exec to step 3 of 2.2, reading only
-its configuration, and loses the namespace options above for nothing it uses. A deployment with such nodes may put the
-options back with a drop-in of its own on those nodes only; on a node with an `fs` interface a drop-in that sets any option
-that makes a mount namespace (2.3, including `ReadWritePaths=` and the other path options) hides the mount from the host.
-
-**From release M's rollout, not from the switch.** Release M ships this unit (section 4.1) and every node runs it from M's
-rollout on, including the nodes that still run the old layout until their window: their S3 process holds the capability
-until its step 3 and runs without the namespace options from then on.
-
-**Fault isolation, both systems:** one process means one crash takes the fronts and the mount down together. On Linux a crash
-of the S3 path already stopped fills (they went through it), but lookups and reads of filled blobs went on; now they wait for
-the restart (`RestartSec=2`, the mount kept by the descriptor store). On a kernel without `FUSE_HAS_RESEND` (before 6.9), a
-request the dead process had read and not answered stays blocked until `params.recover_wait` (30 s) aborts the connection
-and the jobs fail (virtual-build-fs.md 7.2), so a crash of the S3 path can now fail a job where it could not before. The lab
-kernel decision (C8, 7.0) removes that case. On a Mac a crash of the one process makes the hard mount wait for the restart
-(launchd's 10 s throttle and the start), where a crash of the S3 job did not.
-
-**macOS:** no privilege changes: both jobs ran as `_tierstore` with none. The process boundary between them was between two
-processes of one user, which protects little (inferred). What is weaker is the fault isolation above.
-
-**What could win some of it back**, not proposed now (B20): a Landlock rule set the process applies to itself after the drop
-(no namespace, no privilege; Linux 5.13 and later), allowing only the cache, state, runtime, configuration and key paths. It
-would take back most of the file-system confinement of `ProtectSystem`, `ProtectHome` and `PrivateTmp`. It is a later,
-separate design if the owner wants it.
+1. Read and check the configuration file, and the facts file it names.
+2. If the file has an `fs` interface, get the mount, in this order:
+   1. **Take** it, with the sockets, from a running instance over `server.handoff_socket` (3.1). In release M only, also
+      take it from a `tierstore fs` process of the old layout over `handoff.sock` in the runtime directory when one
+      answers there (4.2); when both answer (the switch of 4.2), the mount comes from the process that holds it.
+   2. Else **adopt** the descriptor systemd kept in the store under the name `fuse` (`LISTEN_FDS`, `LISTEN_FDNAMES`,
+      `LISTEN_PID`: platform markers, allowed by S2; `server/treefs/sd.rs`).
+   3. Else **mount afresh**: find any mount of type `fuse.tierstore-fs` at the mount point in `/proc/self/mountinfo` without
+      touching the mount point (a `stat` of a mount whose descriptor some process holds but does not read blocks; today's
+      `discard_dead_mount` does a `stat` and acts only on `ENOTCONN`). Such a mount has no server: nothing answered the
+      hand-over and the store had nothing. Abort its connection and detach it, make the mount point, open `/dev/fuse`,
+      `mount(2)`, and put the descriptor in the store (`FDSTORE=1`, `FDNAME=fuse`, and wait for the barrier, as today).
+3. Open the cache (read-only until it holds the lock), bind the trees sockets beside a running instance (`SO_REUSEPORT`),
+   take or bind the S3 and OCI sockets (in the same conversation, for a take), make the file system's state ready (the tree
+   table, the attachments made again from their manifests, the control socket or, for a take, the one received, the put
+   directory's stage and journal), start the session (the `INIT` handshake of a fresh mount, or the recorded `INIT` reply
+   after a take or an adoption, with `FUSE_NOTIFY_RESEND` where the kernel offers it) and the readers, and bind the
+   mount-provider socket when the cache holds its lock, as today.
+4. `READY=1`.
 
 ## 3. Live update: one hand-over
 
@@ -511,8 +391,7 @@ separate design if the owner wants it.
 One control socket, `server.handoff_socket` (default `handoff.sock` in the state directory, as today), and one
 conversation that carries everything a successor needs. It is the listening-socket hand-off of tierstore-handover.md
 section 0 (`take 1`, with the `ready` step of the NFS front), with the steps of the mount's hand-over (`take-fs 1`,
-`server/treefs/handover.rs`) folded into it, and the cache lock added. The new process has connected and dropped the
-capability (2.2) before the first line:
+`server/treefs/handover.rs`) folded into it, and the cache lock added. The new process opened its cache before the first line (2.3):
 
 ```
 new (tierstore@b)                                              old (tierstore@a, running)
@@ -576,8 +455,8 @@ Where each step comes from:
   other takers are refused while it waits, as while it is at any taker. `server.handoff_wait` (10 s) bounds the taker's wait for `offer`; `params.handoff_wait` of the `fs` interface
   (120 s, as `fs.handoff_wait` today) bounds the quiesce from `ack` to `done` (a reader may hold a request that waits for a
   fill, and a put commit waits up to `put.commit_deadline_secs`) and the old's wait for `ready`. Between `done` and `ready`
-  the new process does only what is left after step 4 of 2.2 (it opened its cache before it asked), so that wait is
-  seconds.
+  the new process only reads the runtime state and prepares the session (it opened its cache before it asked, 2.3), so
+  that wait is seconds.
 - **Failure at each step:** a taker that says `nak` or goes away before `ack` leaves the old as it was; one that goes away
   after `ack` and before `ready`, or is silent for the wait, leaves the old to resume reading the device, release its hold,
   make its hand-over socket again and serve on (as both protocols do today). A successor that dies after `ready` has the
@@ -694,17 +573,16 @@ close-on-exec, and the `flock` on them. So a Mac hands over to the next image of
   unmounts while it still serves NFS, then exits (`Running::leave` of `nfs/run.rs` today). The hook never stops the unit
   while the mount is in use (section 3.6); `uninstall` does.
 - **A crash** (Linux): systemd keeps the descriptor (`FileDescriptorStorePreserve=restart`), restarts the unit after 2 s, and
-  the new process decides to adopt it (step 2.iv of 2.2), drops the capability, adopts it (step 5) and reads the runtime
-  state, sends `FUSE_NOTIFY_RESEND`
+  the new process adopts it (step 2.ii of 2.3) and reads the runtime state, sends `FUSE_NOTIFY_RESEND`
   where the kernel offers it, and otherwise watches `waiting` for `params.recover_wait` and aborts if it never empties
   (today's `launch.rs` and `recover.rs`). The S3 and OCI sockets are bound again, with a gap of the restart, as a crash of
   the S3 unit has today. The cache lock is freed with the process unless an old instance of a hand-over still holds it, in
   which case that one unlocks when its connection to the crashed process ends (3.2); the new one takes it at its next tick.
 - **A crash** (macOS): launchd starts the job again after its throttle; the new start binds its sockets on the same
   addresses, finds its mount and reopens the table for the boot epoch (today's NFS restart arm).
-- **A fresh start that finds a mount at the mount point** (Linux): it gets there only when it holds the start lock, no
-  process accepted on the hand-over socket (nor, in release M, on the old layout's fs socket), and the store was empty, so
-  no process serves the mount and no other start is about to. A running instance that accepts on the hand-over socket and
+- **A fresh start that finds a mount at the mount point** (Linux): it gets there only when no process answered on the
+  hand-over socket (nor, in release M, on the old layout's fs socket) and the store was empty, so no process serves the
+  mount. The hook starts one instance at a time, as today. A running instance that accepts on the hand-over socket and
   never answers fails the start after `server.handoff_wait`, as today, and is not treated as absent. What remains is a dead
   mount: the start aborts its connection, detaches it (`MNT_DETACH`), and mounts afresh, with
   a new mount id and an empty table of tree numbers. Jobs that held clones of the dead mount see `ENOTCONN`, which the job
@@ -739,11 +617,9 @@ close-on-exec, and the `flock` on them. So a Mac hands over to the next image of
 The switch of a node from two processes to one has to move a live mount from one process to another without a gap a job
 can see. The only code that can do that is code that speaks both sides. So:
 
-- **Release M** (the build plan's phase 1) adds the `fs` interface, the one hand-over, the drop of the capability and the
-  hook's switch, and keeps everything of today: `tierstore fs`, `fs.toml`, the fill socket, `take-fs 1` on both sides, the
-  hook's fs arms. A node whose file has no `fs` interface runs as today, but under the unit of 1.4, which M ships: its S3
-  process holds the capability until step 3 of 2.2 and runs without the namespace options (2.4). M's `tierstore fs` takes
-  the start lock of 2.2, and its `take-fs 1` gets the `bye` of 3.1. M is released and reaches every node by the normal
+- **Release M** (the build plan's phase 1) adds the `fs` interface, the one hand-over and the hook's switch, and keeps everything of today: `tierstore fs`, `fs.toml`, the fill socket, `take-fs 1` on both sides, the
+  hook's fs arms. A node whose file has no `fs` interface runs as today, under the unit of 1.4, which M ships. M's
+  `take-fs 1` gets the `bye` of 3.1. M is released and reaches every node by the normal
   rollout, before any switch.
 - **The window** of a group is a configuration change, run by M's code on both sides of it (4.2, 4.3).
 - **Release M+1** (phase 2) deletes the old layout (section 5). It is merged after both groups have switched. Its `prepare`
@@ -762,11 +638,9 @@ and runs the same hook steps. Per node, canary first, one node at a time:
 
 1. **prepare**: M's `--check-config` on the new file (as today), and the record notes the switch: the file has an `fs`
    interface, and a `tierstore-fs` instance runs (`fs_live`).
-2. **cutover**: the hook starts `tierstore@<next>` on the new file. Its start (2.2) is:
-   1. Take the start lock (the old fs process does not hold it: it holds it only while it starts). Connect to
-      `server.handoff_socket` (the old S3 process accepts) and to `handoff.sock` in the runtime directory (the old fs
-      process accepts; the runtime directory is `/run/tierstore-fs` in both layouts). Drop the capability: both the mount
-      and the sockets will be taken.
+2. **cutover**: the hook starts `tierstore@<next>` on the new file. Its start (2.3) is:
+   1. Connect to `server.handoff_socket` (the old S3 process answers) and to `handoff.sock` in the runtime directory (the
+      old fs process answers; the runtime directory is `/run/tierstore-fs` in both layouts).
    2. Ask both for their offers, before it acks either: `take 1` / `ready` / `mount` to the old S3 process, which holds no
       mount and answers `refused`, then `take 1` / `ready`, which offers the S3 and OCI sockets and, as both are M, the lock;
       `take-fs 1` to the old fs process, which offers the device and the control socket. It checks both offers whole
@@ -779,7 +653,7 @@ and runs the same hook steps. Per node, canary first, one node at a time:
       the device and accepts on the sockets. Its cache is read-only until the old S3 process sends `written` (3.2); a fill
       waits for it (1.5), for the length of that process's cache writes in flight, bounded by `params.fetch_timeout`.
    If the new process dies after the first `ack`, the device is in its store and systemd starts it again; that start finds
-   whichever old process still serves (steps 2.ii and 2.iii of 2.2) and takes from it, or adopts. The hook then removes both
+   whichever old process still serves (step 2.i of 2.3) and takes from it, or adopts. The hook then removes both
    `run-fs-*` markers, so the old fs unit never starts again, and records `fs_live` as none.
 3. **verify**: `/readyz` of the new instance names the target, and the mount is served by it (`attachments` answers on the
    control socket, which moved with the mount).
@@ -828,7 +702,7 @@ postinstall removes a `tierstore-fs.plist` left by an earlier package.
 
 | Package or system | Change | When |
 |---|---|---|
-| tierstore (release M) | adds the `fs` interface, the one hand-over, the drop, the switch in the config hook, the unit and plist of 1.4; keeps the old layout | before any window, by the normal rollout |
+| tierstore (release M) | adds the `fs` interface, the one hand-over, the switch in the config hook, the unit and plist of 1.4; keeps the old layout | before any window, by the normal rollout |
 | tierstore (release M+1) | deletes the old layout (section 5) | after both windows |
 | `all-in-one`'s configuration package | `config.toml` with the `fs` interface; no `fs.toml`; needs M or later | its window |
 | `mac-build`'s configuration package | `tierstore.toml` with the `fs` interface; no `fs.toml`; params without `fs_launchd_label`; needs M or later | its window |
@@ -841,7 +715,7 @@ postinstall removes a `tierstore-fs.plist` left by an earlier package.
   `server/treefs/config.rs`). `tierstore fs` then exits 2 with "`tierstore fs` is no longer a process of its own: the file
   system is the `[[interface]]` of type `fs` of the node's file", so a unit left behind fails loudly and its
   `RestartPreventExitStatus=2` stops it from looping. `tierstore fs attachments` becomes `tierstore attachments --config
-  <file>`, which reads the control socket from the `fs` interface (decision 11).
+  <file>`, which reads the control socket from the `fs` interface (decision 8).
 - **`fs.toml`**: the packaging example `packaging/macos/fs.toml`, the copies in each group's configuration package.
 - **The units and jobs**: `packaging/hostkeeper/units/tierstore-fs@.service`, `packaging/hostkeeper/units/tierstore-fs.plist`,
   `packaging/macos-pkg/tierstore-fs.plist`, the installer package's `FS_*` entries (`crates/xtask/src/release/macos_pkg.rs`).
@@ -876,10 +750,10 @@ a phase can be written in parallel; "needs" says which must merge first.
 | P1 | The `fs` interface type: params into `FsSettings`, the rules of 1.2, `--check-config`, docs `configuration.md` | `FsSettings` (exists, `treefs/config.rs`); `Interfaces` gains `fs: Option<FsSettings>` | none | `an_fs_interface_makes_the_settings_the_fs_table_made`, `an_fs_interface_outside_a_build_node_is_refused`, `a_second_fs_interface_is_refused`, `an_fs_param_this_release_lacks_is_refused`, `fill_socket_cache_path_and_handoff_socket_are_refused_as_fs_params`, `a_provider_mountpoint_left_out_is_the_fs_mountpoint`, `a_provider_mountpoint_other_than_the_fs_one_is_refused`, `a_put_stage_off_the_cache_volume_is_refused`, `a_runtime_dir_inside_the_local_cache_is_refused`, `a_control_socket_equal_to_the_handoff_socket_is_refused`, `a_file_of_today_without_an_fs_interface_loads_as_today` |
 | P1b | `owner = { subids_of, id }` | `params.owner` | P1 | `the_owner_is_the_first_range_of_at_least_65536_plus_the_id`, `a_user_without_such_a_range_is_refused_by_name`, `ids_past_4294967294_are_refused`, `a_range_named_by_uid_is_found` (all over a fixture file, no host file: T12) |
 | P2 | The core calls the cache and the tree store (1.5); in M the socket client stays for `tierstore fs`, so the core takes either through one internal trait with these two implementations | the calls of 1.5 (exist) | none | each core test run over both implementations; `a_fill_waits_for_the_write_role_then_fills`, `a_fill_still_read_only_after_fetch_timeout_fails_with_eio`, `a_put_reads_the_staged_file_once_and_stores_it`, `the_reports_reach_the_cache_without_a_queue` |
-| P3 | The one process starts and stops the `fs` interface: the order of 2.2 (start lock, connect, drop, then everything else), the stop order of 3.5 | `serve_front` (exists); a small port for the privileged steps so the order can be tested with a fake | P1, P2 | `the_capability_is_dropped_before_a_byte_is_read_from_any_socket` (fake port records the order), `a_take_and_an_adopt_drop_without_mounting`, `a_start_with_a_second_thread_refuses_to_drop`, `a_drop_that_leaves_a_set_not_empty_fails_the_start`, `a_fresh_start_waits_for_the_start_lock_and_then_takes_instead_of_mounting`, `tierstore_fs_in_m_holds_the_start_lock_while_it_starts`, `a_switch_start_connects_to_both_old_processes_and_takes_the_mount_from_the_fs_one`, `a_fresh_start_finds_a_dead_mount_in_mountinfo_without_touching_it`, `a_start_in_m_with_a_live_old_fs_process_takes_from_it_and_never_detaches`, `a_running_instance_that_never_answers_fails_the_start_and_detaches_nothing`, `the_fronts_drain_before_the_mount_is_left`; farm integration target (`*_integration`, S-2): `the_serving_process_holds_no_capability` (`/proc/<pid>/status`: `CapEff`, `CapPrm`, `CapAmb`, `CapInh` all zero), `the_mount_reaches_the_host_namespace_from_the_unit`, `mount_returns_before_the_init_reply_is_read`, `a_given_up_recovery_can_write_abort_as_the_mount_user` |
+| P3 | The one process starts and stops the `fs` interface: the order of 2.3, the stop order of 3.5 | `serve_front` (exists) | P1, P2 | `a_start_takes_before_it_adopts_and_adopts_before_it_mounts`, `a_fresh_start_finds_a_dead_mount_in_mountinfo_without_touching_it`, `a_start_in_m_with_a_live_old_fs_process_takes_from_it_and_never_detaches`, `a_switch_start_connects_to_both_old_processes_and_takes_the_mount_from_the_fs_one`, `a_running_instance_that_never_answers_fails_the_start_and_detaches_nothing`, `the_fronts_drain_before_the_mount_is_left`; farm integration target (`*_integration`, S-2): `the_mount_reaches_the_host_namespace_from_the_unit` |
 | P4 | The one hand-over (3.1, 3.2) and the old-layout sides of 4.2 (`take 1` without `mount`; `take-fs 1` taker and offerer); `handoff-service-v1` | `server/handoff/` frames and `Offer`/`take`; `Hold` (exists) | none for the wire; P3 to wire it into the start | `an_offer_with_the_mount_hands_sockets_mount_control_and_lock_together`, `a_lock_descriptor_of_another_file_is_refused_before_ack`, `a_descriptor_of_the_wrong_kind_is_refused_before_ack`, `a_taker_refuses_an_offer_from_another_user`, `the_old_reads_no_request_after_ack_and_answers_what_it_read`, `the_new_reads_the_device_only_after_bye`, `a_taker_gone_before_ready_leaves_the_old_resuming_and_one_gone_after_ready_does_not`, `a_successor_killed_before_ready_leaves_the_old_serving` (every frame), `a_successor_killed_after_ready_is_started_again_and_adopts_from_its_store`, `the_old_removes_its_store_entry_at_ready`, `the_old_starts_no_cache_write_after_ready`, `the_new_writes_the_cache_only_after_written_or_the_end_of_the_connection`, `a_taker_that_naks_or_goes_away_leaves_the_lock_held` (a third `try_take` gets none), `the_lock_outlives_the_old_process_exit`, `the_old_unlocks_when_its_successor_dies_after_ready`, `an_instance_without_a_mount_refuses_the_mount_line_and_is_asked_again_without_it`, `an_instance_with_the_mount_refuses_a_taker_that_does_not_ask_for_it`, `take_fs_says_bye_and_the_old_fs_process_never_resumes_after_it`; B8: `a_previous_release_taker_skips_the_lock_fuse_and_control_lines_and_gets_the_sockets`, `a_taker_against_a_previous_release_offer_is_refused_the_mount_and_asks_again_without_it` (each replays the previous release's frames, kept as fixtures) |
 | P5 | macOS: the hand-over to the next image (3.4); `handoff-exec-v1` | the offer frame of P4 on a `socketpair`; `nfs/run.rs` | P4's frame | `the_next_image_reads_the_offer_from_the_handed_descriptor`, `every_owed_nfs_reply_is_sent_before_the_exec`, `only_the_handed_descriptor_survives_the_exec`, `an_offer_the_new_image_refuses_starts_it_cold_on_the_same_addresses_and_mount`, `the_cache_writes_in_flight_end_before_the_exec`, `the_new_image_takes_the_write_role_before_its_first_cache_write`; macOS integration: `a_launchd_job_keeps_its_pid_and_is_not_restarted_across_the_exec` (a real launchd job sent `SIGUSR2`: same pid, no restart, the new image serves); macOS runs these in `beta.yml`, not in the pull request's checks (B9) |
-| P6 | Packaging: the unit of 1.4 (all three copies), the plists, the postinstall, the manifest's comments and bounds | the files | none | `the_unit_sets_no_option_that_makes_a_mount_namespace` (every option of 2.3 and its path options, with a negative case: a copy with `ProtectSystem` added fails, T15), `the_unit_grants_cap_sys_admin_and_no_other` (these two replace `the_fs_template_differs_from_the_s3_template_as_the_design_lists`, whose fs template goes in P9), `the_package_template_is_the_archive_template_but_for_the_binary` (exists), `the_plist_waits_210_seconds_on_exit`, `the_binary_accepts_the_units_command_line_and_the_example_file` |
+| P6 | Packaging: the unit of 1.4 (the template and its package copy), the plists, the postinstall, the manifest's comments and bounds | the files | none | `the_unit_sets_no_option_that_makes_a_mount_namespace` (every option of 2.3 and its path options, with a negative case: a copy with `ProtectSystem` added fails, T15), `the_unit_grants_cap_sys_admin_and_no_other` (these two replace `the_fs_template_differs_from_the_s3_template_as_the_design_lists`, whose fs template goes in P9), `the_package_template_is_the_archive_template_but_for_the_binary` (exists), `the_plist_waits_210_seconds_on_exit`, `the_binary_accepts_the_units_command_line_and_the_example_file` |
 | P7 | The hook: the gating of 3.6 for both systems, the macOS hand-over arm, the switch and its rollback of 4.2 and 4.3 in the config hook | `update_hook` ports (exist) | P4, P5 capability words | `an_update_without_handoff_service_v1_in_both_is_refused_for_a_node_with_a_mount`, `mode_restart_overrides_the_refusal`, `a_config_update_that_moves_the_mount_point_is_refused`, `the_switch_checks_both_offers_before_either_ack_and_clears_the_fs_markers`, `a_switch_whose_offers_do_not_both_match_naks_both_and_changes_nothing`, `a_switch_whose_new_process_dies_after_ack_is_started_again_and_takes_or_adopts`, `the_switch_rolls_back_mount_first_then_sockets`, `the_one_process_instance_binds_the_fill_socket_while_it_is_the_writer_in_m`, `a_mac_switch_boots_out_and_disables_the_fs_job_before_the_main_job_starts`, `a_mac_update_with_handoff_exec_v1_sends_sigusr2_and_waits_for_the_target`, `a_mac_update_without_it_is_refused` |
 | P8 | The deployment's files and steps (sections 1.3, 4.2 step 5, 4.3), in the deployment's own repository | the configuration packages | M released | the deployment's own checks of its files |
 | P9 | Phase 2, M+1: the deletions of section 5 | | both windows done | `the_fs_verb_exits_2_and_names_the_interface`, `a_file_with_local_cache_fill_socket_starts_and_says_it_is_ignored`, `a_record_with_fs_live_still_decodes` (the stored-format fixture), `prepare_refuses_a_node_that_still_runs_tierstore_fs`, `attachments_reads_the_control_socket_from_the_fs_interface`; P2's trait has one implementation left and is removed (R9) |
@@ -889,44 +763,27 @@ The design documents follow the code: each pull request rewrites the sections of
 
 ## 7. Decisions made here
 
-1. **Mount first, then drop**, not `fusermount3` (2.1): the drop leaves nothing that can gain a capability; `fusermount3`
-   needs `NoNewPrivileges=no` and a host-wide `user_allow_other` for the process's whole life and wins back no hardening.
-2. **The drop is the last privileged step on the only thread**, checked by reading the sets back and counting threads (2.2):
-   capabilities are per thread.
-3. **A fresh start reads `/proc/self/mountinfo` and never `stat`s the mount point** (2.2, 3.5): a `stat` of a mount whose
+1. **The process holds `CAP_SYS_ADMIN` for its life** (2.1): it is needed to mount, as the fs unit has it today.
+2. **A fresh start reads `/proc/self/mountinfo` and never `stat`s the mount point** (2.3, 3.5): a `stat` of a mount whose
    descriptor is held but not read blocks.
-4. **The start decides by connecting, drops, and only then talks** (2.2): a take and an adoption need no capability, so
-   the frames of a hand-over, which come from the network-facing process, are never read with it.
-5. **A start lock** in the runtime directory (2.2): a fresh start may detach a mount only when no other start can be
-   about to serve it.
-6. **The new reads the device only after `bye`, and the old removes its store entry at `ready`** (3.1): no late `ready`
+3. **The new reads the device only after `bye`, and the old removes its store entry at `ready`** (3.1): no late `ready`
    lets two processes read the device, and a crash of the old in its drain does not bring it back.
-7. **The cache lock passes in the hand-over and the old stops writing at `ready`** (3.2): otherwise the file system's fills
+4. **The cache lock passes in the hand-over and the old stops writing at `ready`** (3.2): otherwise the file system's fills
    would wait for the old process's whole drain. Nobody unlocks a shared lock, but the old once its successor has died and its own writes in flight have ended.
-8. **One hand-over on `server.handoff_socket`, made of the two protocols' steps**, additive on the wire (3.1).
-9. **macOS hands over to the next image of the same process** (3.4): the one launchd job keeps one pid, and an exec keeps
+5. **One hand-over on `server.handoff_socket`, made of the two protocols' steps**, additive on the wire (3.1).
+6. **macOS hands over to the next image of the same process** (3.4): the one launchd job keeps one pid, and an exec keeps
    the descriptors and the lock.
-10. **Two releases**: M carries both layouts so that M's code is on both sides of every switch and its rollback; M+1 deletes
+7. **Two releases**: M carries both layouts so that M's code is on both sides of every switch and its rollback; M+1 deletes
    (4.1).
-11. **`tierstore attachments --config <file>`** replaces `tierstore fs attachments`: the operator's look at the attachments
+8. **`tierstore attachments --config <file>`** replaces `tierstore fs attachments`: the operator's look at the attachments
    stays, under the one process.
-12. **The `fs` params refuse unknown keys**, as every interface's params do, where `[fs]` warned: a new table has no old
+9. **The `fs` params refuse unknown keys**, as every interface's params do, where `[fs]` warned: a new table has no old
    files to keep loading.
-13. **`owner` from subordinate ids** (1.2): without it the one file is per node on Linux.
-14. **The fill-socket permit keys keep their names** (1.2): they still bound the file system's fills.
-15. **The unit takes the file system's restart values** (`RestartSec=2`, 5 in 60 s) (1.4): a hard-waiting mount needs a fast
+10. **`owner` from subordinate ids** (1.2): without it the one file is per node on Linux.
+11. **The fill-socket permit keys keep their names** (1.2): they still bound the file system's fills.
+12. **The unit takes the file system's restart values** (`RestartSec=2`, 5 in 60 s) (1.4): a hard-waiting mount needs a fast
     return, and a process that cannot return must let the kernel abort.
-16. **`RestrictNamespaces=yes` is kept** (2.3): it is a system-call filter, and the process makes no namespace.
-17. **`DevicePolicy=closed`** replaces `PrivateDevices` (2.3): the same device fence without a namespace.
-18. **An update that cannot hand the mount over is refused, not restarted**, unless `mode = "restart"` (3.6): a restart drops
+13. **`RestrictNamespaces=yes` is kept** (2.2): it is a system-call filter, and the process makes no namespace.
+14. **`DevicePolicy=closed`** replaces `PrivateDevices` (2.2): the same device fence without a namespace.
+15. **An update that cannot hand the mount over is refused, not restarted**, unless `mode = "restart"` (3.6): a restart drops
     the mount under running jobs.
-
-## 8. Questions for the owner
-
-1. **The sandbox** (2.4): is the loss of the eight namespace options for the network-facing process acceptable, with the
-   drop of 2.2, on every node from release M's rollout (not only from its window)? If not, the `ExecStartPre=+` helper or Landlock of 2.1 and 2.4 is the next design.
-2. **The Mac window** (4.3): the switch on a Mac unmounts, as every Mac update does today, so the Macs are drained for it.
-   After it, Mac updates no longer unmount.
-3. **The Mac hand-over** (3.4) has a gap (the drain and the start, seconds to a minute) and no way back to the old image
-   once it executes. Linux has neither. Is that the trade wanted for a single launchd job, or should a Mac also run two
-   alternating jobs?

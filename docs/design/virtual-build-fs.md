@@ -234,7 +234,7 @@ Non-goals:
 | Lazy Merkle expansion, one directory level on first access [S6] | **Changed: metadata eager per tree, data lazy** | A directory expanded on first access gets an inode number that depends on the order of lookups, which a restarted process cannot recover. Flattening a tree when it is first attached keeps numbers derivable; its cost is spike SP4 (6.3, D7). |
 | Pin the job's tree in the local cache; the evictor skips pinned; refcount per job tree, not per file | **Kept, designed** | Pins are kept by the cache's single writer, per attached tree, over the blobs the tree has opened, with a cap on pinned bytes (6.5). Correctness never depends on them: an evicted blob is fetched again (6.4). |
 | The per-job writable layer, copy-up included, lives in the core, so no overlayfs is needed | **Linux: changed, decided (C4 = A). macOS: kept, but possibly unnecessary** | On Linux a kernel overlayfs over a **read-only** FUSE tree keeps every job's writes on the node's disk, outside tierstore, in the directory both job runtimes already collect outputs from: tierstore holds no job data, a crash loses nothing, and the FUSE server stays read-only, which keeps its crash and update simplest (section 7). That composition works on 6.8 and on 7.0 (Measured: linux E4). The owner decided that the executor always overlays the mount and never writes into it. On macOS there is no overlay; the core's views (6.6) are the design only if a client needs a writable view that it cannot build itself, and the executor can (Measured: macos E18; 8). |
-| Linux: FUSE with passthrough (6.9+), `max_background` raised to about 1024 (the default of 12 wedged busy Buildbarn workers [S28]) | **Kept for kernels with passthrough; a mode without it for 6.8 (C8)** | Passthrough needs `CAP_SYS_ADMIN` in the initial user namespace of the calling process, not satisfied by uid 0 without the capability, by root in a user namespace, or by the opener of `/dev/fuse` (Measured: linux E10), which the network-facing tierstore process must not have, hence, in the design as first written, a separate filesystem process (6.2, C5; reversed on 2026-11-23: one process holds `CAP_SYS_ADMIN` only until it has mounted, [one-service.md](one-service.md) section 2). The kernel binds an inode to one backing file and forbids mixing passthrough and cached opens of one inode [S2], which shapes 6.4. The lab runs 6.8, which has no passthrough (the ioctl returns `ENOTTY`; Measured: linux E10): on it every read crosses the server (6.4). |
+| Linux: FUSE with passthrough (6.9+), `max_background` raised to about 1024 (the default of 12 wedged busy Buildbarn workers [S28]) | **Kept for kernels with passthrough; a mode without it for 6.8 (C8)** | Passthrough needs `CAP_SYS_ADMIN` in the initial user namespace of the calling process, not satisfied by uid 0 without the capability, by root in a user namespace, or by the opener of `/dev/fuse` (Measured: linux E10), which the network-facing tierstore process must not have, hence, in the design as first written, a separate filesystem process (6.2, C5; reversed on 2026-11-23: one process holds `CAP_SYS_ADMIN`, [one-service.md](one-service.md) section 2). The kernel binds an inode to one backing file and forbids mixing passthrough and cached opens of one inode [S2], which shapes 6.4. The lab runs 6.8, which has no passthrough (the ioctl returns `ENOTTY`; Measured: linux E10): on it every read crosses the server (6.4). |
 | macOS: one NFSv4.0 loopback server, mounted once per node at a fixed path, a per-job view per run, Seatbelt `(subpath ...)` isolation | **Kept, with two additions and the frontend still open (C9)** | 8. Additions: the server also checks the caller's uid against the run (jobscheduler gives each run its own user), and handles are derivable so a restart is a pause (Measured: macos E16, with a patched demo server). NFSv4.0 could not be measured: no server was available (Measured: macos E12c). NFSv3 was measured and is slower and chattier than native by a large factor on metadata (8). |
 | FSKit later, as a third frontend behind a flag | **Changed (C3 reframed): an open candidate, blocked on signing** | No passthrough for file-backed volumes, interactive per-user enablement, and Apple's own statement that it is not yet suited to a network-backed filesystem [S20, S25]. On the farm Mac an ad-hoc signed extension with the FSKit entitlement is killed at exec, so it needs a team with the entitlement and one click in System Settings by the console user (8; Measured: macos E13). It is not set aside on the forum posts; it is measured against NFS once signing is available (C3). |
 | APFS `clonefile` as the fallback with no server | **Kept** | It is the executor's macOS path today and stays the default and the kill-switch (8). |
@@ -398,12 +398,8 @@ macOS.
   16) and **wait** for one, up to `local_cache.fill_socket_wait`; they never take the S3 path's `max_concurrent_fills`
   permits, which skip rather than wait (`local_cache/mod.rs`). While the cache is read-only (a successor of a hand-over
   before it is the writer), a fill waits for the write role up to the interface's `fetch_timeout`.
-- **Privilege, Linux.** `CAP_SYS_ADMIN` is needed for the mount alone (passthrough is gone, head note). The unit grants it,
-  and the process makes the mount, or decides to take or adopt it, as the first thing it does, on its only thread, then
-  clears its effective, permitted, inheritable and ambient sets; it takes or adopts after that, and only then binds, accepts on or reads any network socket, or reads
-  a request of the mount; `NoNewPrivileges=yes` keeps it from coming back (one-service.md section 2.2). Mounting through
-  `fusermount3` instead was rejected: it needs `NoNewPrivileges=no` and a host-wide `user_allow_other` for the process's
-  whole life, and wins back no hardening (one-service.md section 2.1).
+- **Privilege, Linux.** `CAP_SYS_ADMIN` is needed for the mount alone (passthrough is gone, head note). The unit grants it
+  and the one process holds it for its life, as `tierstore-fs@.service` does today (one-service.md section 2.1).
 - **Privilege, macOS:** none. The NFS export is on loopback and the mount is made by the account the job runs as, which
   owns the mount point (Measured: macos E14).
 - **The unit** must make its mount in the host's mount namespace, so that the job runtime and the next instance see it.
@@ -416,14 +412,12 @@ macOS.
   `RestrictAddressFamilies=AF_UNIX AF_INET AF_INET6`. Added: the descriptor store of 7.2 (`FileDescriptorStoreMax=1`,
   `FileDescriptorStorePreserve=restart`), `Type=notify`, the runtime directories (`/run/tierstore-fs` for the state of 7.1,
   `/run/tierstore` for the mount point's parent) kept across restarts, and the restart values of 7.2 (`RestartSec=2`,
-  `StartLimitBurst=5` within `StartLimitIntervalSec=60`). One-service.md section 2.3 has the table and section 2.4 what is
-  weaker than the two processes, and by how much.
+  `StartLimitBurst=5` within `StartLimitIntervalSec=60`). One-service.md section 2.2 has the table.
 
 **Why one process.** A file system that is a second process is a second unit, a second configuration file whose keys must
 agree with the first by hand, a socket between the two, a second hand-over and a hook that stops one before the other. The
-reason for the split was to keep `CAP_SYS_ADMIN` out of the process that parses the network; with passthrough gone the
-capability is needed only to mount, so the one process holds it only until the mount is made, before it reads any input
-from the network or a job (one-service.md section 2). This replaces "Why two processes" and decision C5 of the earlier
+reason for the split was to keep `CAP_SYS_ADMIN` out of the process that parses the network; the owner judged that guard
+not worth the second process, so the one process holds the capability, which it needs to mount (one-service.md section 2). This replaces "Why two processes" and decision C5 of the earlier
 text, and the `fs` front of `docs/design/pluggable-interfaces.md` section 4 is again the design.
 
 **What is built today** is still the two-process design, until the pull requests of one-service.md section 6 land:
@@ -1505,7 +1499,7 @@ owner has not confirmed it, and on 2026-11-23 the owner reversed C5 (one process
   - Original recommendation: **(A).** (Arm E, the views on Linux, is dropped from Q-B with this decision, 11.)
   - If (B): the views move into phase 1 (pull request 11 before 5), spike SP1 shrinks to the FUSE mount alone, and arm C
     of Q-B runs on the views.
-- **C5. Status: reversed by the owner, 2026-11-23: one process, which holds `CAP_SYS_ADMIN` only until its mount is made and drops it before it reads any input from the network or a job ([one-service.md](one-service.md) section 2).** Original question: a second process on Linux build nodes holding `CAP_SYS_ADMIN`, with no network?
+- **C5. Status: reversed by the owner, 2026-11-23: one process, which holds `CAP_SYS_ADMIN` to mount ([one-service.md](one-service.md) section 2).** Original question: a second process on Linux build nodes holding `CAP_SYS_ADMIN`, with no network?
   - What an attacker who controls `tierstore fs` gains: `CAP_SYS_ADMIN` in the initial namespace is close to root. It can
     mount and bind-mount over any path of the host (a configuration file, a binary another service runs), change mount
     propagation, and use the other operations the capability gates (namespaces, some cgroup and kernel interfaces). The
