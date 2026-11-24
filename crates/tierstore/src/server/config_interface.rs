@@ -46,6 +46,7 @@ use std::time::Duration;
 use serde::Deserialize;
 use serde::de::IgnoredAny;
 
+use super::config::fs::owner::Owner;
 use super::config::fs::{FsInterface, fs_of, provider_mountpoint, refuse_fs_params};
 use super::config::{ConfigError, invalid, refuse, require, within};
 use super::config_units::Dur;
@@ -113,7 +114,7 @@ pub(super) struct Params {
     pub mountpoint: Option<PathBuf>,
     pub fetch_timeout: Option<Dur>,
     // The params of an `fs` interface alone; `mountpoint` and `fetch_timeout` are its too.
-    pub owner: Option<String>,
+    pub owner: Option<Owner>,
     pub client_group: Option<String>,
     pub runtime_dir: Option<PathBuf>,
     pub control_socket: Option<PathBuf>,

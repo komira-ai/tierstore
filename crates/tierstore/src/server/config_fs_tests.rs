@@ -42,6 +42,7 @@ fn run(volume: fn(&Path) -> io::Result<u64>) -> PerRun {
         host: Host {
             names: builders,
             volume,
+            read: super::owner::read_text,
         },
         ..DEFAULTS
     }

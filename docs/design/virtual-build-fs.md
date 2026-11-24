@@ -492,7 +492,9 @@ passthrough and the mount declares no `max_stack_depth` (6.4). On macOS the moun
   `GETXATTR` and `LISTXATTR` are answered `ENOSYS`, so the kernel stops sending them after the first (the overlay above
   asks for its own `user.overlay.*` attributes on every lower directory). The server answers every request that would change a tree `EROFS`; that answer is untested.
   With the mount made read-only, as in the test, the kernel returns `EROFS` without a request reaching the server (Measured: linux E4), and inside a job a write is a copy-up in the overlay and never reaches the tree.
-- **Attributes.** Every entry of every tree reports one owner, `fs.owner` (`uid:gid`, host ids): the host id of the
+- **Attributes.** Every entry of every tree reports one owner, `fs.owner` (`uid:gid`, host ids; an `fs` interface's
+  `params.owner` may also say it as `{ subids_of = "<job user>", id = 1000 }`, the job user's first subordinate uid and gid
+  plus 1000, read at load: one-service.md 1.2): the host id of the
   **action user** (the executor: container user 1000, `ACTION_ID`; jobscheduler: its action user), not of the container's root;
   on macOS a view reports the run's own user (8). Files report mode 0644, or 0755 when `exec`; directories 0755; symlinks
   0777. The action can therefore change and create anything (the overlay or the view copies up), as in a copy it owns, and
