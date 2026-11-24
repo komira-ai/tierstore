@@ -400,11 +400,14 @@ impl Rig {
     /// Answers every parked wait on pack `pack` with `outcome`; later waits park again, except
     /// after `Lost`, which answers every later wait too. The number answered.
     pub fn answer(&self, pack: u32, outcome: WaitOutcome) -> usize {
-        let id = self.id(pack).clone();
-        let answered = self.engine.complete(&id, outcome);
-        if outcome != WaitOutcome::Lost {
-            self.engine.park(id);
+        let id = self.id(pack);
+        // One step for the waits that stay parked: a wait the answer brings back at once (a read
+        // whose cells are still absent) parks, and is not answered by itself before the pack
+        // parks again.
+        if outcome == WaitOutcome::Lost {
+            self.engine.complete(id, outcome)
+        } else {
+            self.engine.answer_parked(id, outcome)
         }
-        answered
     }
 }

@@ -73,6 +73,23 @@ impl FakeEngine {
             .count()
     }
 
+    /// Answers every wait parked on `pack` now with `outcome` and keeps the pack parking, in one
+    /// step under the lock: a wait that comes after it parks and is never answered at once, as it
+    /// could be between a [`complete`](Self::complete) and the [`park`](Self::park) after it. The
+    /// number of waits answered.
+    pub fn answer_parked(&self, pack: &PackId, outcome: WaitOutcome) -> usize {
+        let waiters = {
+            let mut s = lock(&self.state);
+            s.outcomes.insert(pack.clone(), outcome);
+            s.parked.remove(pack).unwrap_or_default()
+        };
+        waiters
+            .into_iter()
+            .map(|w| w.send(outcome))
+            .filter(Result::is_ok)
+            .count()
+    }
+
     /// The waits parked on `pack` now: the progress event a test waits for.
     #[must_use]
     pub fn parked(&self, pack: &PackId) -> usize {
