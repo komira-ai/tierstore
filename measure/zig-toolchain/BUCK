@@ -2,7 +2,10 @@
 load("@buildrules//rules/core:platform.bzl", "MACOS_AARCH64")
 load("@buildrules//rules/coverage:zig_cover.bzl", "zig_coverage")
 load("@buildrules//rules/zig:zig.bzl", "zig_exe", "zig_test")
-load(":defs.bzl", "tree_read", "tree_write")
+load(":defs.bzl", "nonce_cases", "tree_read", "tree_write")
+
+# The nonce changes each action's key and nothing else (defs.bzl, `nonce_failures`); a unit test of both programs.
+nonce_cases(name = "nonce_unit")
 
 zig_test(
     name = "tree_copy_unit",
@@ -29,14 +32,14 @@ zig_exe(
     name = "tree_copy",
     src = "tree_copy_main.zig",
     imports = ["tree_copy.zig"],
-    unit_tests = [":tree_copy_unit"],
+    unit_tests = [":tree_copy_unit", ":nonce_unit"],
 )
 
 zig_exe(
     name = "tree_read_exe",
     src = "tree_read_main.zig",
     imports = ["tree_read.zig"],
-    unit_tests = [":tree_read_unit"],
+    unit_tests = [":tree_read_unit", ":nonce_unit"],
 )
 
 # The writer: an action whose output directory is the Zig 0.12.0 toolchain, the tree buildrules unpacks from the pinned release
@@ -65,7 +68,7 @@ zig_exe(
     src = "tree_copy_main.zig",
     imports = ["tree_copy.zig"],
     target = "aarch64-macos",
-    unit_tests = [":tree_copy_unit"],
+    unit_tests = [":tree_copy_unit", ":nonce_unit"],
 )
 
 zig_exe(
@@ -73,7 +76,7 @@ zig_exe(
     src = "tree_read_main.zig",
     imports = ["tree_read.zig"],
     target = "aarch64-macos",
-    unit_tests = [":tree_read_unit"],
+    unit_tests = [":tree_read_unit", ":nonce_unit"],
 )
 
 tree_write(
