@@ -333,3 +333,52 @@ async fn the_one_process_instance_binds_the_fill_socket_while_it_is_the_writer_i
     running.leave();
     drop(old.running);
 }
+
+/// Asserts that a start whose mount's instance gives up first (it answers `ready` with something
+/// other than `bye`, and so serves on) fails by saying so, and leaves that instance's control
+/// socket file where it is: the file is the instance's, which goes on accepting clients on it.
+/// Catches a start that removes the file as it lets the mount go, so that no client can attach a
+/// tree on the node until the running instance is restarted.
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn a_start_whose_mount_instance_gives_up_first_leaves_its_control_socket() {
+    use crate::server::treefs::fakedev;
+    use crate::server::treefs::handover::offer_lines;
+
+    let node = FsNode::new("tsfs-one-gives-up");
+    let settings = node.settings("", "", "127.0.0.1:0");
+    let fs = settings.fs.clone().unwrap();
+    super::left_state(&fs);
+    let listener = UnixListener::bind(&fs.handoff_socket).unwrap();
+    let control = std::os::unix::net::UnixListener::bind(&fs.control_socket).unwrap();
+    let (device, _kernel) = fakedev::pair();
+    let lines = offer_lines(&fs.mountpoint, &fs.control_socket);
+    let peer = tokio::spawn(async move {
+        let (stream, _) = listener.accept().await.unwrap();
+        let _ = wire::recv(&stream).await.unwrap();
+        wire::send(&stream, &lines, &[device.as_fd(), control.as_fd()])
+            .await
+            .unwrap();
+        assert_eq!(wire::recv(&stream).await.unwrap().lines, ["ack"]);
+        wire::send(&stream, &["done".to_owned()], &[])
+            .await
+            .unwrap();
+        assert_eq!(wire::recv(&stream).await.unwrap().lines, ["ready"]);
+        wire::send(&stream, &["so long".to_owned()], &[])
+            .await
+            .unwrap();
+        control
+    });
+    let manager = FakeManager::start(&node.dir.path().join("notify.sock"));
+    let on_platform = platform(&manager, None, node.kernel(true));
+    let started = start_on(settings, memory(), on_platform);
+    let error = within("the start fails", started.ended)
+        .await
+        .unwrap()
+        .unwrap_err();
+    assert_eq!(
+        error.to_string(),
+        "hand-over: the running instance sent something other than bye after ready"
+    );
+    let _control = peer.await.unwrap();
+    assert!(fs.control_socket.exists());
+}
