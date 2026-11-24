@@ -8,6 +8,11 @@
 //! port from what runs. hostkeeper's link `current` is not in the world: the hook never reads it.
 //! The clock is a number that `pause` moves on; nothing sleeps.
 //!
+//! A release lists no capabilities at first (`set_capabilities` gives it some) and accepts the
+//! node's file unless `set_refusal` says otherwise, so an update is a restart unless a test makes
+//! it a hand-over. `hand_to_next_image` models `launchctl kill SIGUSR2`: the job's process keeps
+//! its place and runs the release whose binary the hook put at [`SERVICE_BINARY`].
+//!
 //! The job of `tierstore fs` is a second job of the domain (`FS_LABEL`, plist `FS_LAUNCHD_PLIST`)
 //! that makes a mount (`FS_MOUNT`) when it is loaded and ends it when it is booted out, unless
 //! `keep_mount` says the mount stays; `mounted` lists it.
@@ -24,7 +29,7 @@ use std::path::{Path, PathBuf};
 use std::rc::Rc;
 use std::time::Duration;
 
-use crate::server::update_hook::launchd::run_step;
+use crate::server::update_hook::launchd::run_step_with;
 use crate::server::update_hook::{
     Clock, Done, FS_CONFIG_FILE, FS_LAUNCHD_PLIST, Host, Instances, LAUNCHD_PLIST, Launchd,
     LaunchdPorts, Lock, Outcome, Params, PortError, PortKind, Reason, Record, Reply,
@@ -95,6 +100,10 @@ struct World {
     mute: BTreeSet<PathBuf>,
     read_only: bool,
     configs: BTreeMap<PathBuf, String>,
+    /// The words each release lists; a release not here cannot be run.
+    capabilities: BTreeMap<PathBuf, Vec<String>>,
+    /// The releases that refuse the node's file, with the line they say.
+    refusals: BTreeMap<PathBuf, String>,
     strays: Vec<String>,
     now: u64,
     pauses: u32,
@@ -186,6 +195,11 @@ impl Fake {
             mute: BTreeSet::new(),
             read_only: false,
             configs: BTreeMap::from([(PathBuf::from(CONFIG), "[server]\n".to_owned())]),
+            capabilities: BTreeMap::from([
+                (PathBuf::from(OLD), Vec::new()),
+                (PathBuf::from(NEW), Vec::new()),
+            ]),
+            refusals: BTreeMap::new(),
             strays: Vec::new(),
             now: 0,
             pauses: 0,
@@ -272,7 +286,7 @@ impl Fake {
 
     /// Runs `step` with `params` and the job `label`.
     pub fn run_with(&self, step: Step, params: &Params, label: &str) -> Done {
-        run_step(step, params, label, &self.ports())
+        run_step_with(step, params, label, &self.ports(), true)
     }
 
     /// Runs `step` as hostkeeper does. hostkeeper moves `current` to the staged release before
@@ -441,6 +455,22 @@ impl Fake {
             Some(text) => w.configs.insert(PathBuf::from(path), text.to_owned()),
             None => w.configs.remove(Path::new(path)),
         };
+    }
+
+    /// The words `release` lists in `--capabilities`; none at first.
+    pub fn set_capabilities(&self, release: &str, words: &[&str]) {
+        self.w.borrow_mut().capabilities.insert(
+            PathBuf::from(release),
+            words.iter().map(|word| (*word).to_owned()).collect(),
+        );
+    }
+
+    /// `release` refuses the node's file when it checks it, with `line`.
+    pub fn set_refusal(&self, release: &str, line: &str) {
+        self.w
+            .borrow_mut()
+            .refusals
+            .insert(PathBuf::from(release), line.to_owned());
     }
 
     /// The job is loaded, running `release`, or is not loaded.
@@ -712,21 +742,29 @@ impl Host for Fake {
         Ok(self.w.borrow().configs.get(path).cloned())
     }
 
-    // A launchd step runs no release to ask: this fails, and is logged, so that a step that
-    // asked would fail and show it in the log.
     fn capabilities(&self, release: &Path) -> Result<Vec<String>, PortError> {
         self.tick(
             format!("host.capabilities {}", release.display()),
             PortKind::Host,
         )?;
-        Err(PortError::failed(
-            PortKind::Host,
-            "no release is run by a launchd step",
-        ))
+        self.w
+            .borrow()
+            .capabilities
+            .get(release)
+            .cloned()
+            .ok_or_else(|| PortError::failed(PortKind::Host, "not a release of this host"))
     }
 
     fn check_config(&self, release: &Path, config: &Path) -> Result<Option<String>, PortError> {
-        self.no_check(release, config)
+        self.tick(
+            format!(
+                "host.check_config {} {}",
+                release.display(),
+                config.display()
+            ),
+            PortKind::Host,
+        )?;
+        Ok(self.w.borrow().refusals.get(release).cloned())
     }
 
     fn install_binary(&self, release: &Path) -> Result<(), PortError> {
@@ -742,24 +780,6 @@ impl Host for Fake {
         let late = self.tick_changing("host.remove_binary".to_owned(), PortKind::Host)?;
         self.w.borrow_mut().installed = None;
         Fake::after(late, PortKind::Host)
-    }
-}
-
-impl Fake {
-    // A launchd step runs no release to ask, here as for the capabilities.
-    fn no_check(&self, release: &Path, config: &Path) -> Result<Option<String>, PortError> {
-        self.tick(
-            format!(
-                "host.check_config {} {}",
-                release.display(),
-                config.display()
-            ),
-            PortKind::Host,
-        )?;
-        Err(PortError::failed(
-            PortKind::Host,
-            "no release is run by a launchd step",
-        ))
     }
 }
 

@@ -13,5 +13,6 @@ mod fs_failure_tests;
 mod fs_tests;
 mod prepare_tests;
 mod rollback_tests;
+mod service_tests;
 mod session_tests;
 mod update_tests;

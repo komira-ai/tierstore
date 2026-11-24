@@ -175,7 +175,8 @@ fn the_page_states_the_order_of_releases_and_the_configuration_check() {
         assert!(order.contains(needle), "the order lacks {needle}");
     }
     assert!(PAGE.contains("--check-config"));
-    assert!(PAGE.contains("A Mac never hands over"));
+    assert!(PAGE.contains("**hand-over** when it has a previous release"));
+    assert!(!PAGE.contains("A Mac never hands over"));
 }
 
 /// The operator's page of the file system process and the unit file of its template.

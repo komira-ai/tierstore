@@ -73,9 +73,10 @@ fn an_update_boots_the_job_out_and_in_and_touches_no_other_label() {
     assert_eq!(fake.live_locks(), 0);
 }
 
-/// Asserts that `prepare` reads the one configuration file the params name, writes the record
-/// and does nothing else: no launchd call, no capability of any release asked, no instance
-/// looked at. Catches a `prepare` that starts or stops the job, or reads another path.
+/// Asserts that `prepare` reads the one configuration file the params name, asks the staged and
+/// the previous release what they list (the params name no fs job and do not say `mode =
+/// "restart"`), writes the record and does nothing else: no launchd call, no instance looked at.
+/// Catches a `prepare` that starts or stops the job, or reads another path.
 #[test]
 fn prepare_reads_only_the_configuration_file_and_records_the_update() {
     let fake = Fake::new();
@@ -86,6 +87,8 @@ fn prepare_reads_only_the_configuration_file_and_records_the_update() {
             "state.lock".to_owned(),
             "state.load".to_owned(),
             format!("host.config {}", super::fake::CONFIG),
+            format!("host.capabilities {}", super::fake::NEW),
+            format!("host.capabilities {}", super::fake::OLD),
             "state.save".to_owned(),
         ]
     );
@@ -107,12 +110,12 @@ fn prepare_succeeds_when_the_configuration_names_no_handoff_socket() {
 }
 
 /// Asserts (T23) that `prepare` of a node whose configuration has `[server] handoff_socket` and a
-/// `[local_cache]` table succeeds as a restart: no release is asked for its capabilities or to
-/// check the configuration (the fake fails any such call), the log is the read of the
-/// configuration and the save, and the record has no mode. Catches a launchd `prepare` that picks
-/// a hand-over for a cache shape, or asks a release.
+/// `[local_cache]` table succeeds as a restart when the releases list no `handoff-exec-v1`: both
+/// are asked for their capabilities and neither is asked to check the configuration, and the
+/// record has no mode. Catches a launchd `prepare` that picks a hand-over for a cache shape, or
+/// has a release check a file it will not run.
 #[test]
-fn prepare_of_a_cache_shape_with_a_handoff_socket_is_a_restart_and_asks_no_release() {
+fn prepare_of_a_cache_shape_with_a_handoff_socket_is_a_restart_and_checks_no_file() {
     let fake = Fake::new();
     fake.set_config(
         super::fake::CONFIG,
@@ -124,9 +127,24 @@ fn prepare_of_a_cache_shape_with_a_handoff_socket_is_a_restart_and_asks_no_relea
     let done = fake.run(Prepare);
     assert_ok(&done);
     assert_eq!(fake.record(), in_flight(false));
-    assert!(!fake.log().iter().any(|line| {
-        line.starts_with("host.capabilities") || line.starts_with("host.check_config")
-    }));
+    let asked: Vec<String> = fake
+        .log()
+        .into_iter()
+        .filter(|line| line.starts_with("host.capabilities"))
+        .collect();
+    assert_eq!(
+        asked,
+        [
+            format!("host.capabilities {}", super::fake::NEW),
+            format!("host.capabilities {}", super::fake::OLD)
+        ]
+    );
+    assert!(
+        !fake
+            .log()
+            .iter()
+            .any(|line| line.starts_with("host.check_config"))
+    );
 }
 
 /// Asserts that `prepare` after a finished update starts a new one: the record at rest, with its

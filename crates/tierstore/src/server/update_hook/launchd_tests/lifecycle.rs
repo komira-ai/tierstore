@@ -112,8 +112,9 @@ fn the_fake_notes_strays_and_refuses_a_second_bootstrap() {
 }
 
 /// Asserts that the fake's job answers on the public port only while it is loaded, times out when
-/// it is muted, answers 404 for a path it does not serve, and that its host refuses to run a
-/// release. Catches a fake that answers for a job that is not there.
+/// it is muted, answers 404 for a path it does not serve, and that its host lists no
+/// capabilities for the releases it knows and cannot run another. Catches a fake that answers for
+/// a job that is not there.
 #[test]
 fn the_fake_answers_only_for_a_loaded_job_on_the_public_port() {
     let fake = Fake::new();
@@ -124,7 +125,8 @@ fn the_fake_answers_only_for_a_loaded_job_on_the_public_port() {
     assert!(fake.get(9300, "/readyz").is_err());
     fake.reboot();
     assert!(fake.get(9300, "/readyz").is_err());
-    assert!(fake.capabilities(Path::new(OLD)).is_err());
+    assert_eq!(fake.capabilities(Path::new(OLD)), Ok(Vec::new()));
+    assert!(fake.capabilities(Path::new("/elsewhere")).is_err());
     assert_failed(
         &fake.run_with(Cutover, &fake.params(), LABEL),
         Reason::OutOfOrder,

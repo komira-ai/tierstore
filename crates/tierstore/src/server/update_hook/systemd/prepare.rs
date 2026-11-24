@@ -7,9 +7,10 @@ use super::super::params::{CONFIG_FILE_KEY, Params};
 use super::super::ports::Instance;
 use super::super::record::{Mode, Record};
 use super::super::report::{Done, Reason};
+use super::super::shape::fs_interface;
 use super::super::{
-    CACHE_HANDOFF_CAPABILITY, DIR_TIER_KIND, HANDOFF_CAPABILITY, HANDOFF_SOCKET_KEY,
-    HANDOFF_STATE_DIR_CAPABILITY, HOT_STORE_TABLE, LOCAL_CACHE_TABLE,
+    CACHE_HANDOFF_CAPABILITY, DIR_TIER_KIND, HANDOFF_CAPABILITY, HANDOFF_SERVICE_CAPABILITY,
+    HANDOFF_SOCKET_KEY, HANDOFF_STATE_DIR_CAPABILITY, HOT_STORE_TABLE, LOCAL_CACHE_TABLE,
 };
 use super::cleanup::{drain_note, finish};
 use super::{Ctx, fs, unit_name};
@@ -56,8 +57,15 @@ pub(super) fn prepare(
     // node whose file leaves the socket out only between releases that default it.
     let mut needed = vec![HANDOFF_CAPABILITY];
     let mut restart = params.declared_restart;
+    // The node holds a mount: its file has an `fs` interface. A restart would drop the mount
+    // under running jobs, so such an update is a hand-over or it is refused.
+    let mut mount = false;
     if update.is_some() && !params.declared_restart {
         let shape = read_shape(c, params)?;
+        if shape.fs {
+            needed.push(HANDOFF_SERVICE_CAPABILITY);
+            mount = true;
+        }
         if shape.cache {
             needed.push(CACHE_HANDOFF_CAPABILITY);
         }
@@ -74,7 +82,14 @@ pub(super) fn prepare(
     let mut before = None;
     let mode = match update {
         None => None,
-        Some(_) if restart => Some(Mode::Restart),
+        Some(_) if restart => {
+            if mount {
+                return Err(refuse_restart(
+                    "its hot tier is a directory, which two instances must not share".to_owned(),
+                ));
+            }
+            Some(Mode::Restart)
+        }
         Some(previous) => {
             let list = c.ports.host.capabilities(&previous.release)?;
             let can = |list: &[String]| {
@@ -84,6 +99,28 @@ pub(super) fn prepare(
             };
             let mode = if can(&staged) && can(&list) {
                 Mode::Handover
+            } else if mount {
+                let lacking = [
+                    ("staged", &params.staged_release, &staged),
+                    ("previous", &previous.release, &list),
+                ]
+                .into_iter()
+                .filter_map(|(which, release, words)| {
+                    let missing: Vec<&str> = needed
+                        .iter()
+                        .copied()
+                        .filter(|need| !words.iter().any(|word| word == need))
+                        .collect();
+                    (!missing.is_empty()).then(|| {
+                        format!(
+                            "the {which} release {} lacks {}",
+                            release.display(),
+                            missing.join(", ")
+                        )
+                    })
+                })
+                .collect::<Vec<_>>();
+                return Err(refuse_restart(lacking.join("; ")));
             } else {
                 Mode::Restart
             };
@@ -125,6 +162,19 @@ pub(super) fn prepare(
         unit_name(next),
         fs.note,
     )))
+}
+
+/// The refusal of an update of a node that holds a mount and would be a restart, for the
+/// reason `why`.
+fn refuse_restart(why: String) -> Done {
+    Done::fail(
+        Reason::ModeUnsupported,
+        format!(
+            "the node holds a mount (its file has an fs interface) and this update would be a \
+             restart: {why}. A restart would drop the mount under running jobs; mode = \"restart\" \
+             in the params overrides this for a node whose jobs are drained"
+        ),
+    )
 }
 
 /// Has `release` check `config`; a release that refuses it fails `prepare` with the line it said.
@@ -175,6 +225,8 @@ struct Shape {
     /// The hot tier is a directory (`[hot_store] kind = "dir"`), which two instances must not
     /// share: the update is a restart.
     dir_hot: bool,
+    /// The configuration has an `fs` interface: the node holds a mount.
+    fs: bool,
 }
 
 /// Reads the node's configuration for its shape. A `handoff_socket` that is an empty string is
@@ -223,5 +275,6 @@ fn read_shape(c: &Ctx<'_, '_>, params: &Params) -> Result<Shape, Done> {
         cache: table.contains_key(LOCAL_CACHE_TABLE),
         socket_named: socket.is_some(),
         dir_hot,
+        fs: fs_interface(&text).is_some(),
     })
 }
