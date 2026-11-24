@@ -490,6 +490,23 @@ fn the_fs_template_runs_the_fs_verb_of_the_installed_binary() {
     assert!(stderr.contains("fs.toml"), "{stderr}");
 }
 
+/// Asserts that the unit of `tierstore fs` looks at its marker at every start, its automatic
+/// restarts included: one `ExecCondition=` that tests, as root (`+`, as systemd tests the
+/// condition), for exactly the file of `ConditionPathExists=`, beside `Restart=on-failure`.
+/// systemd does not evaluate the conditions of `[Unit]` again for a restart of `Restart=`, so
+/// without it a taker whose take failed is started again after the update hook removed its
+/// marker, again and again, and the rollback, which waits for it to end, never ends. It would catch the line left out, and one that tests another file.
+#[test]
+fn the_fs_template_looks_at_its_marker_at_every_restart() {
+    let unit = read(FS_TEMPLATE);
+    let marker = value(&unit, "ConditionPathExists");
+    assert_eq!(
+        value(&unit, "ExecCondition"),
+        format!("+/usr/bin/test -e {marker}")
+    );
+    assert_eq!(value(&unit, "Restart"), "on-failure");
+}
+
 /// Asserts that the marker of the unit of `tierstore fs` is not one of the markers the update hook
 /// writes for the S3 instances, so the hook cannot start or retire a mount it does not know.
 #[test]

@@ -62,7 +62,7 @@ fn core_over(rig: &Rig, socket: &Path, paused: impl Fn(u32) + Send + Sync + 'sta
             tree_idle: TREE_IDLE,
             clock: Arc::clone(&rig.clock) as Arc<dyn Clock>,
         },
-        fills,
+        Arc::new(fills),
         TreeTable::create(&runtime).unwrap(),
         &runtime,
     ))

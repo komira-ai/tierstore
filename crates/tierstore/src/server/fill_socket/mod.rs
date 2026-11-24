@@ -46,7 +46,7 @@
 //! `local_cache/attaches.rs`), and a `descriptors` (what it reports of its open cache files, see
 //! `local_cache/descriptors.rs`).
 
-mod mount;
+pub(in crate::server) mod mount;
 pub(in crate::server) mod put;
 pub(in crate::server) mod request;
 
@@ -268,19 +268,9 @@ async fn session((cache, trees): (LocalCache, Option<TreeStore>), stream: UnixSt
                 said(cache.fill_blob(&blob).await)
             }
             Ok(Request::Manifest { sha256 }) => said(cache.fill_manifest(&sha256).await),
-            Ok(Request::Pin { mount, tree, blobs }) => pinned(
-                cache
-                    .pin(&mount, &tree, &blobs)
-                    .map(|got| format!("{} {} {}", got.pinned, got.refused, got.absent)),
-            ),
-            Ok(Request::Unpin { mount, tree }) => {
-                pinned(cache.unpin(&mount, &tree).map(|count| count.to_string()))
-            }
-            Ok(Request::PinsLive { mount, trees }) => pinned(
-                cache
-                    .pins_live(&mount, &trees)
-                    .map(|count| count.to_string()),
-            ),
+            Ok(Request::Pin { mount, tree, blobs }) => pin(&cache, (&mount, &tree), &blobs),
+            Ok(Request::Unpin { mount, tree }) => unpin(&cache, &mount, &tree),
+            Ok(Request::PinsLive { mount, trees }) => pins_live(&cache, &mount, &trees),
             Ok(Request::Put {
                 key,
                 sha256,
@@ -314,6 +304,29 @@ async fn session((cache, trees): (LocalCache, Option<TreeStore>), stream: UnixSt
             return;
         }
     }
+}
+
+/// The answer to `pin <mount> <tree> <blobs>`, which the pins made in process answer too.
+pub(in crate::server) fn pin(
+    cache: &LocalCache,
+    (mount, tree): (&str, &str),
+    blobs: &[String],
+) -> String {
+    pinned(
+        cache
+            .pin(mount, tree, blobs)
+            .map(|got| format!("{} {} {}", got.pinned, got.refused, got.absent)),
+    )
+}
+
+/// The answer to `unpin <mount> <tree>`, which the unpins made in process answer too.
+pub(in crate::server) fn unpin(cache: &LocalCache, mount: &str, tree: &str) -> String {
+    pinned(cache.unpin(mount, tree).map(|count| count.to_string()))
+}
+
+/// The answer to `pins-live <mount> <trees>`, which the requests made in process answer too.
+pub(in crate::server) fn pins_live(cache: &LocalCache, mount: &str, trees: &[String]) -> String {
+    pinned(cache.pins_live(mount, trees).map(|count| count.to_string()))
 }
 
 /// The answer to a pin request: `ok` and the numbers, or the words of the failure. Every digest

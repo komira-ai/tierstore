@@ -11,6 +11,7 @@ use std::time::Duration;
 use tierstore_testkit::dir::TestDir;
 
 use super::{AskError, FillClient, Place, PlacedTree, REPORTS_QUEUED, Until, within};
+use crate::server::treefs::fills::{Fills as _, Report};
 use crate::server::treefs::testing::until;
 use crate::{Clock, Mono, TreeDigest};
 
@@ -556,10 +557,10 @@ fn started_reports_leave_on_a_thread_of_their_own_and_past_the_queue_are_dropped
     );
     let (client, _) = client(&path, 3, Duration::from_secs(30));
     let received = |text: &str| lines.lock().unwrap().iter().any(|line| line == text);
-    client.report_started("p/0");
+    client.report(Report::Started("p/0".to_owned()));
     until(|| received("started p/0"));
     for n in 1..=REPORTS_QUEUED + 3 {
-        client.report_started(&format!("p/{n}"));
+        client.report(Report::Started(format!("p/{n}")));
     }
     {
         let (open, opened) = &*gate;
@@ -568,7 +569,7 @@ fn started_reports_leave_on_a_thread_of_their_own_and_past_the_queue_are_dropped
     }
     let last = REPORTS_QUEUED;
     until(|| received(&format!("started p/{last}")));
-    client.report_started("p/last");
+    client.report(Report::Started("p/last".to_owned()));
     until(|| received("started p/last"));
     let mut want: Vec<String> = (0..=REPORTS_QUEUED)
         .map(|n| format!("started p/{n}"))

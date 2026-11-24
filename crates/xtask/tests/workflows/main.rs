@@ -45,6 +45,8 @@ mod graph_tests;
 mod hostkeeper;
 mod hostkeeper_tests;
 mod lint;
+mod macos_farm;
+mod macos_farm_tests;
 mod pkg;
 mod pkg_tests;
 mod platforms;

@@ -718,3 +718,30 @@ fn a_tree_that_cannot_be_written_is_an_install_error_and_leaves_no_part_tree() {
     assert_eq!(std::fs::read(&out).expect("kept"), b"file");
     assert!(!part_path(&out).exists());
 }
+
+#[test]
+fn file_of_takes_the_one_file_the_unpack_names_and_refuses_a_whole_tree() {
+    // Catches: `mac-farm`'s tool inputs taking bytes that are not their pin, the member of a tar
+    // not unpacked (the tarball sent as the program), and a whole archive taken as one file.
+    let xz = xz(&tar());
+    let pin = Sha256::of(&xz);
+    let unpack = Unpack::Tar {
+        xz: true,
+        member: member("tool-1.0/tool"),
+    };
+    assert_eq!(file_of(&xz, &pin, &unpack).expect("the tool"), TOOL);
+    assert_eq!(
+        file_of(TOOL, &Sha256::of(TOOL), &Unpack::Raw).expect("raw"),
+        TOOL
+    );
+    assert!(matches!(
+        file_of(&xz, &Sha256::of(b"other"), &unpack),
+        Err(Error::Mismatch { .. })
+    ));
+    assert_eq!(
+        file_of(&xz, &pin, &Unpack::Tree { xz: true }),
+        Err(Error::Unpack(
+            "a whole archive is a directory, not one file".to_owned()
+        ))
+    );
+}

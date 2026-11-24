@@ -27,6 +27,7 @@ use super::backing::{self, Saved};
 use super::config::FsSettings;
 use super::control::Control;
 use super::core::Core;
+use super::fill_client::FillClient;
 use super::init_record::{self, Record};
 use super::locked;
 use super::put::carry;
@@ -66,8 +67,9 @@ fn serve_put(
     )?;
     tracing::info!(?replayed, "tierstore fs: the put directory's stage is open");
     let clock = Arc::new(MonotonicClock::new());
+    let client = FillClient::for_puts(settings.fill_socket.clone(), put.commit_deadline);
     let uploader = Uploader::new(
-        settings.fill_socket.as_deref(),
+        Arc::new(client),
         put.commit_deadline,
         clock.clone(),
         Arc::new(std::thread::sleep),

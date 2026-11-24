@@ -39,7 +39,7 @@ use crate::tree_manifest::{EntryKind, TreeDigest, TreeEntry};
 use super::attach::{Attachments, Failure, Snapshot, is_run};
 #[cfg(any(target_os = "linux", test))]
 use super::backing::{Adopted, Guard};
-use super::fill_client::FillClient;
+use super::fills::Fills;
 #[cfg(any(target_os = "linux", test))]
 use super::handle;
 use super::ino;
@@ -216,7 +216,7 @@ pub(super) struct Settings {
 /// The core.
 pub(in crate::server) struct Core {
     settings: Settings,
-    fills: FillClient,
+    fills: Arc<dyn Fills>,
     table: TreeTable,
     /// The attachments, for short looks and changes: never held across a write of the attachments
     /// file or a round trip on the fill socket.
@@ -237,7 +237,8 @@ pub(in crate::server) struct Core {
     /// Read by a detach from its decision under the lifecycle lock to the end of its unpins,
     /// which it makes after it released that lock, and written by `Core::hold`: so a hold waits
     /// for the unpins of the detaches already decided, and no unpin of this process follows the
-    /// pins of a successor. Only the threads that detach and hold take it.
+    /// pins of a successor. Only the threads that detach and hold take it. The lifecycle lock is
+    /// never taken while it is read: a hold keeps the lifecycle lock while it waits to write it.
     freeing: RwLock<()>,
     /// Whether a successor is taking over: no attach or detach is done, so that this process
     /// writes neither the table of tree numbers nor the attachments file (`Core::hold`).
@@ -303,7 +304,7 @@ impl Core {
     /// A core with no tree attached, whose attachments are kept in `runtime_dir`.
     pub(super) fn new(
         settings: Settings,
-        fills: FillClient,
+        fills: Arc<dyn Fills>,
         table: TreeTable,
         runtime_dir: &Path,
     ) -> Self {

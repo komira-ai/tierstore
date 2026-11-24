@@ -545,12 +545,12 @@ impl Rig {
     /// The core of the process that takes over from the one of this rig: the generation after
     /// it, over the same table, runtime directory, cache and fill socket.
     pub(in crate::server::treefs) fn successor(&self) -> Arc<Core> {
-        let fills = FillClient::pausing(
+        let fills = Arc::new(FillClient::pausing(
             self.dir.path().join("fill.sock"),
             3,
             Duration::from_secs(30),
             Arc::new(|_| {}),
-        );
+        ));
         let mut settings = self.core.settings().clone();
         settings.generation += 1;
         Arc::new(Core::new(
@@ -593,7 +593,12 @@ impl Rig {
         let runtime = self.dir.path().join("run2");
         std::fs::create_dir_all(&runtime).unwrap();
         let socket = self.dir.path().join("fill.sock");
-        let fills = FillClient::pausing(socket, 3, Duration::from_secs(30), Arc::new(|_| {}));
+        let fills = Arc::new(FillClient::pausing(
+            socket,
+            3,
+            Duration::from_secs(30),
+            Arc::new(|_| {}),
+        ));
         Arc::new(Core::new(
             Settings {
                 owner: OWNER,
@@ -638,7 +643,12 @@ impl Rig {
         });
         let socket = dir.path().join("fill.sock");
         let fill = FakeFill::start(&socket, Arc::clone(&upstream));
-        let fills = FillClient::pausing(socket, 3, Duration::from_secs(30), Arc::new(|_| {}));
+        let fills = Arc::new(FillClient::pausing(
+            socket,
+            3,
+            Duration::from_secs(30),
+            Arc::new(|_| {}),
+        ));
         let clock = Arc::new(Mono::new());
         let core = Arc::new(Core::new(
             Settings {

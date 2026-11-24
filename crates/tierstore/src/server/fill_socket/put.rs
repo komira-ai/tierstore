@@ -107,8 +107,9 @@ where
     .boxed()
 }
 
-/// Puts the file at `path` as the object `key` (module docs) and gives the answer.
-pub(super) async fn answer(
+/// Puts the file at `path` as the object `key` (module docs) and gives the answer; a put made in
+/// process is made by it too.
+pub(in crate::server) async fn answer(
     cache: &LocalCache,
     key: &str,
     sha256: TreeDigest,

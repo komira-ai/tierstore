@@ -15,6 +15,9 @@ fn platforms() -> Vec<&'static str> {
     Platform::ALL.iter().map(|p| p.name()).collect()
 }
 
+/// The `if:` line of the hosted macOS job.
+pub const HOSTED_LINE: &str = "    if: ${{ github.event_name != 'pull_request' && !(github.event_name == 'push' && github.ref == 'refs/heads/main' && vars.MACOS_PACKAGE_ON_FARM == 'true') }}\n";
+
 pub fn artifacts_problems_of(text: &str) -> Vec<String> {
     artifacts_platform_problems(text, &platforms(), &ARTIFACTS)
 }
@@ -398,15 +401,16 @@ const BUILD_DEFECTS: &[(&str, &str, &str, &str)] = &[
 const EXECUTION_DEFECTS: &[(&str, &str, &str, &str)] = &[
     (
         MAC,
-        "    if: ${{ github.event_name != 'pull_request' }}\n",
+        HOSTED_LINE,
         "    if: false\n",
         "macos-arm64: runs under `if: Some(\"false\")`",
     ),
+    (MAC, HOSTED_LINE, "", "macos-arm64: runs under `if: None`"),
     (
         MAC,
+        HOSTED_LINE,
         "    if: ${{ github.event_name != 'pull_request' }}\n",
-        "",
-        "macos-arm64: runs under `if: None`",
+        "so it and macos-arm64-farm could both run or neither",
     ),
     (
         "linux-arm64",
@@ -434,14 +438,14 @@ const EXECUTION_DEFECTS: &[(&str, &str, &str, &str)] = &[
     ),
     (
         "sums",
-        " || (github.event_name == 'pull_request' && needs.linux-arm64.result == 'skipped' && needs.macos-arm64.result == 'skipped')",
+        " || (github.event_name == 'pull_request' && needs.linux-arm64.result == 'skipped' && needs.macos-arm64.result == 'skipped' && needs.macos-arm64-farm.result == 'skipped')",
         " || needs.macos-arm64.result == 'skipped'",
         "sums: runs under",
     ),
     (
         "sums",
-        "(needs.linux-arm64.result == 'success' && needs.macos-arm64.result == 'success')",
-        "needs.macos-arm64.result == 'success'",
+        "(needs.linux-arm64.result == 'success' && (needs.macos-arm64.result == 'success' || needs.macos-arm64-farm.result == 'success'))",
+        "(needs.macos-arm64.result == 'success' || needs.macos-arm64-farm.result == 'success')",
         "sums: runs under",
     ),
     (
@@ -464,9 +468,15 @@ const EXECUTION_DEFECTS: &[(&str, &str, &str, &str)] = &[
 const CONSUMER_DEFECTS: &[(&str, &str, &str, &str)] = &[
     (
         "sums",
-        "needs: [linux-x86_64, linux-arm64, macos-arm64, check-pkg]",
-        "needs: [linux-x86_64, linux-arm64, check-pkg]",
+        "needs: [linux-x86_64, linux-arm64, macos-arm64, macos-arm64-farm, check-pkg]",
+        "needs: [linux-x86_64, linux-arm64, macos-arm64-farm, check-pkg]",
         "sums: does not need macos-arm64",
+    ),
+    (
+        "sums",
+        "needs: [linux-x86_64, linux-arm64, macos-arm64, macos-arm64-farm, check-pkg]",
+        "needs: [linux-x86_64, linux-arm64, macos-arm64, check-pkg]",
+        "sums: does not need macos-arm64-farm",
     ),
     (
         "sums",
@@ -782,13 +792,15 @@ fn a_job_off_linux_x86_64_that_a_pull_request_runs_is_named() {
         pull_request_runner_problems("ci.yml", &ci),
         [runner_line("ci.yml", "macos", "[\"macos-15\"]")]
     );
-    for (job, label) in [(MAC, "macos-15"), ("linux-arm64", "ubuntu-24.04-arm")] {
-        let artifacts = in_job(
-            &text_of("artifacts.yml"),
-            job,
+    for (job, line, label) in [
+        (MAC, HOSTED_LINE, "macos-15"),
+        (
+            "linux-arm64",
             "    if: ${{ github.event_name != 'pull_request' }}\n",
-            "",
-        );
+            "ubuntu-24.04-arm",
+        ),
+    ] {
+        let artifacts = in_job(&text_of("artifacts.yml"), job, line, "");
         assert_eq!(
             pull_request_runner_problems("artifacts.yml", &artifacts),
             [runner_line("artifacts.yml", job, &format!("[\"{label}\"]"))],

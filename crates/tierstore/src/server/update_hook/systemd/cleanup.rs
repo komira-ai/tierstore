@@ -52,9 +52,11 @@ pub(super) fn cleanup(c: &Ctx<'_, '_>, params: &Params, record: &Record) -> Resu
 /// does not know (the store's within its drain deadline; an fs process of a release that frees
 /// its whole state before it ends can take minutes). Nothing waits for it, since nothing of the update is
 /// left to do once the new instances serve and the commit is written. Its marker goes while it
-/// runs: systemd reads `ConditionPathExists=` only when it starts a unit, so a process that runs
-/// is not touched, and without the marker the unit is never started again, by a boot or by
-/// `Restart=`. Every later step looks at the units themselves: a `prepare` that finds both
+/// runs: systemd reads `ConditionPathExists=` only when it starts a unit from inactive or failed,
+/// so a process that runs is not touched, and without the marker the unit is not started again
+/// by a boot. `Restart=on-failure` does not start again one that ended with status 0, as an old
+/// instance that drained or handed the mount over does, and the fs template's `ExecCondition=`
+/// tests for the marker at an automatic restart too. Every later step looks at the units themselves: a `prepare` that finds both
 /// instances of a template running waits for the drain, and the boot step leaves the old instance
 /// to end. A crash in here leaves the record committed and in flight, which the next `cleanup`,
 /// `prepare` or boot step finishes the same way.

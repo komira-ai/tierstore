@@ -46,7 +46,7 @@ fn core_over(rig: &Rig, path: &Path, pause: Arc<dyn Fn(Duration) + Send + Sync>)
     let fills = FillClient::pausing(path.to_owned(), 0, Duration::from_secs(30), pause);
     Arc::new(Core::new(
         rig.core.settings().clone(),
-        fills,
+        Arc::new(fills),
         TreeTable::open(&rig.runtime).unwrap(),
         &rig.runtime,
     ))

@@ -3,8 +3,9 @@
 //! upstream object, or the whole object `cas/l/<sha256>` of a manifest), `touch` (not answered),
 //! the pin requests, `put` (a staged file of the put directory, answered in JSON), and the
 //! questions about the placements of the node (`place`, `mounted`, `image`, `flat`, `span`,
-//! `unplace`), and the reports `started`, `attached` and `fetched`, which a thread of its own sends
-//! (see [`FillClient::report`]).
+//! `unplace`), and the reports `started`, `attached`, `fetched` and `descriptors`, which a thread
+//! of its own sends (see [`FillClient::send_report`]). It is one of the two ways of [`Fills`]: the
+//! one of the process `tierstore fs`.
 //!
 //! A request that meets a closed socket, or a connection that went away (the S3 instance of the
 //! node is being updated: the old instance keeps answering through its drain, and the new one
@@ -32,13 +33,15 @@ use std::sync::mpsc::{SyncSender, sync_channel};
 use std::sync::{Arc, Mutex, OnceLock};
 use std::time::Duration;
 
+use super::fills::{Fills, Report};
 use super::locked;
 
 /// The answer of a fill socket to a request it does not know: a node of an earlier release.
 const UNKNOWN: &str = "refused unknown request";
 
-/// How long a request waits between two tries over a socket that is not there.
-const PAUSE: Duration = Duration::from_secs(1);
+/// How long a request waits between two tries over a socket that is not there, and the core
+/// between two tries of a fill ([`Fills::rest`]).
+pub(super) const PAUSE: Duration = Duration::from_secs(1);
 
 /// The most connections kept for the next request.
 const KEPT: usize = 64;
@@ -52,12 +55,19 @@ pub(super) enum AskError {
     /// The socket was not there, or went away, for the whole of `fetch_timeout`.
     #[error("the fill socket is not answering")]
     Unavailable,
-    /// The socket took the request and gave no answer in `fetch_timeout`.
+    /// The socket took the request and gave no answer in `fetch_timeout`; also what a request
+    /// made in process (`in_process.rs`) that did not end in that time fails with, in the same
+    /// words, which the core's `passes` reads.
     #[error("the fill socket gave no answer in time")]
     TimedOut,
-    /// The end the request was given passed before it was answered.
+    /// The end the request was given passed before it was answered, over the socket or in
+    /// process.
     #[error("the fill socket did not answer within the time the request was given")]
     Spent,
+    /// The cache of this process stayed read-only for the whole of `fetch_timeout`: another
+    /// process holds the lock of its directory (a request made in process, `in_process.rs`).
+    #[error("the cache is read-only: another process holds the lock of its directory")]
+    ReadOnly,
     /// No connection could be made: the process, or the system, has no descriptor left. The
     /// number is the errno the system gave (`EMFILE` or `ENFILE`).
     #[error(
@@ -195,6 +205,18 @@ impl FillClient {
         }
     }
 
+    /// A client for the puts of the put directory (none: a node without a fill socket, whose puts
+    /// find none), whose caller waits between its tries itself:
+    /// it pauses never, and waits `answer_timeout` for an answer.
+    pub(super) fn for_puts(path: Option<PathBuf>, answer_timeout: Duration) -> Self {
+        Self::pausing_on(
+            path,
+            0,
+            answer_timeout,
+            Arc::new(std::mem::drop::<Duration>),
+        )
+    }
+
     /// A connection: one kept, or a new one; none where the socket is not there.
     ///
     /// # Errors
@@ -220,11 +242,6 @@ impl FillClient {
             reader: BufReader::new(made),
         };
         Ok((Some(made), false))
-    }
-
-    /// The time an answer is waited for: `fs.fetch_timeout`.
-    pub(super) fn answer_timeout(&self) -> Duration {
-        self.answer_timeout
     }
 
     /// Keeps `connection` for the next request.
@@ -322,113 +339,12 @@ impl FillClient {
         }
     }
 
-    /// Asks for the whole object `cas/l/<sha256>` to be put in the cache, answered by `until`.
-    pub(super) fn fill_manifest(&self, sha256: &str, until: Until<'_>) -> Result<(), FillFailure> {
-        self.fill(&format!("fill {sha256}"), Some(until))
-    }
-
-    /// Asks for the blob `sha256` of `size` bytes at `offset` of the upstream object `key` to be
-    /// put in the cache, answered by `until` where given.
-    pub(super) fn fill_blob(
-        &self,
-        (sha256, size): (&str, u64),
-        (key, offset): (&str, u64),
-        until: Option<Until<'_>>,
-    ) -> Result<(), FillFailure> {
-        self.fill(
-            &format!("fill {sha256} {size} from {key} @ {offset}"),
-            until,
-        )
-    }
-
     fn fill(&self, line: &str, until: Option<Until<'_>>) -> Result<(), FillFailure> {
         match self.ask(line, (true, None), until) {
             Ok(answer) if answer == "ok" => Ok(()),
             Ok(answer) => Err(answer),
             Err(error) => Err(error.to_string()),
         }
-    }
-
-    /// Counts the blobs as used now; no answer is read, and none is lost if the socket is away.
-    pub(super) fn touch(&self, sha256: &[&str]) {
-        let _ = self.ask_line(&format!("touch {}", sha256.join(" ")), false);
-    }
-
-    /// Pins `blobs` for `tree` of `mount`; the answer is the numbers or the words of the refusal.
-    pub(super) fn pin(&self, mount: &str, tree: &str, blobs: &[&str]) -> Result<String, AskError> {
-        self.ask_line(&format!("pin {mount} {tree} {}", blobs.join(" ")), true)
-    }
-
-    /// Takes away the pins of `tree` of `mount`.
-    pub(super) fn unpin(&self, mount: &str, tree: &str) -> Result<String, AskError> {
-        self.ask_line(&format!("unpin {mount} {tree}"), true)
-    }
-
-    /// Asks for the `size` bytes of the file at `path`, which hash to `sha256`, to be put as the
-    /// object `key`, create-only, waiting at most `wait` for the answer; the answer is the line of
-    /// JSON the socket gives.
-    #[cfg(any(target_os = "linux", test))]
-    pub(super) fn put(
-        &self,
-        (key, sha256, size): (&str, &str, u64),
-        path: &std::path::Path,
-        wait: Duration,
-    ) -> Result<String, AskError> {
-        let line = format!("put {key} {sha256} {size} from {}", path.display());
-        self.ask(&line, (true, Some(wait)), None)
-    }
-
-    /// Where the path `path` (names joined by `/`) is among the placements of the node; a
-    /// placement found there is held for `mount` until [`FillClient::unplace`]. A node of a
-    /// release before the placements, which does not know the request, has none. The error is the
-    /// answer that is none of these, or that nobody answered.
-    pub(super) fn place(&self, mount: &str, path: &str) -> Result<Place, String> {
-        let answer = self
-            .ask_line(&format!("place {mount} {path}"), true)
-            .map_err(|error| error.to_string())?;
-        match answer.split_once(' ') {
-            Some(("tree", id)) => Ok(Place::Tree(id.to_owned())),
-            None if answer == "dir" => Ok(Place::Dir),
-            None if answer == "none" => Ok(Place::Nothing),
-            _ if answer == UNKNOWN => Ok(Place::Nothing),
-            _ => Err(answer),
-        }
-    }
-
-    /// The paths of the fs locations of the placements of the node: none from a node of a release
-    /// before the placements.
-    pub(super) fn mounted(&self) -> Result<Vec<String>, String> {
-        let answer = self
-            .ask_line("mounted", true)
-            .map_err(|error| error.to_string())?;
-        if answer == UNKNOWN {
-            return Ok(Vec::new());
-        }
-        serde_json::from_str(&answer).map_err(|_| answer)
-    }
-
-    /// Where the tree of the placement `id` is read from: the image of the tree in the cache
-    /// directory, by its digest, or the tree flattened. A node of a release before the images,
-    /// which does not know the request, is asked for the tree flattened. The error is the answer
-    /// (`none` for a placement that is gone, `damaged`, `too large`) or that nobody answered.
-    pub(super) fn image(&self, id: &str) -> Result<PlacedTree, String> {
-        let answer = self
-            .ask_line(&format!("image {id}"), true)
-            .map_err(|error| error.to_string())?;
-        if answer == UNKNOWN {
-            return self.flat(id).map(PlacedTree::Flat);
-        }
-        if let Some(rest) = answer.strip_prefix("image ") {
-            let read = rest.split_once(' ').and_then(|(tree, paths)| {
-                let tree = TreeDigest::from_hex(tree)?;
-                let paths = serde_json::from_str(paths).ok()?;
-                Some(PlacedTree::Image { tree, paths })
-            });
-            return read.ok_or(answer);
-        }
-        serde_json::from_str(&answer)
-            .map(PlacedTree::Flat)
-            .map_err(|_| answer)
     }
 
     /// The tree of the placement `id`, flattened. The error is the answer (`none` for a
@@ -440,42 +356,14 @@ impl FillClient {
         serde_json::from_str(&answer).map_err(|_| answer)
     }
 
-    /// The file of the cache that holds the `size` bytes at `offset` of the pack `pack`, which
-    /// hash to `sha256`, and the offset of their first byte in it: filled first if the cache does
-    /// not hold them, answered by `until` where given. The error is the words of the answer, or
-    /// that nobody answered.
-    pub(super) fn span(
-        &self,
-        (sha256, size): (&str, u64),
-        (pack, offset): (&str, u64),
-        until: Option<Until<'_>>,
-    ) -> Result<(u64, PathBuf), String> {
-        let line = format!("span {sha256} {size} from {pack} @ {offset}");
-        let answer = self
-            .ask(&line, (true, None), until)
-            .map_err(|e| e.to_string())?;
-        let held = answer
-            .strip_prefix("ok ")
-            .and_then(|rest| rest.split_once(' '));
-        match held.map(|(base, path)| (base.parse::<u64>(), path)) {
-            Some((Ok(base), path)) => Ok((base, PathBuf::from(path))),
-            _ => Err(answer),
-        }
-    }
-
-    /// Tells the node that the mount first looked into the tree at the fs location `path`
-    /// (`started <path>`), for `tierstore_request_to_start_seconds`; the caller does not wait.
-    pub(super) fn report_started(&self, path: &str) {
-        self.report(format!("started {path}"));
-    }
-
-    /// Sends the report `line` to the node (`started`, `attached`, `fetched`: the node's metrics,
-    /// `local_cache/starts.rs` and `local_cache/attaches.rs`); the caller does not wait. A report
-    /// is sent by a thread of its own, over connections of its own, so that the request it tells
-    /// of, such as the first of a job's command, never waits on the socket. A report that finds
-    /// [`REPORTS_QUEUED`] reports waiting is dropped, and one the socket does not take is lost, as
-    /// is one a node of a release before it refuses: the metrics are advice.
-    pub(super) fn report(&self, line: String) {
+    /// Sends the report `line` to the node (`started`, `attached`, `fetched`, `descriptors`: the
+    /// node's metrics, `local_cache/starts.rs`, `local_cache/attaches.rs` and
+    /// `local_cache/descriptors.rs`); the caller does not wait. A report is sent by a thread of its
+    /// own, over connections of its own, so that the request it tells of, such as the first of a
+    /// job's command, never waits on the socket. A report that finds [`REPORTS_QUEUED`] reports
+    /// waiting is dropped, and one the socket does not take is lost, as is one a node of a release
+    /// before it refuses: the metrics are advice.
+    pub(super) fn send_report(&self, line: String) {
         let queue = self.reports.get_or_init(|| self.start_reporting());
         if let Some(queue) = queue {
             let _ = queue.try_send(line);
@@ -497,36 +385,162 @@ impl FillClient {
             });
         thread.ok().map(|_| queue)
     }
+}
+
+impl Fills for FillClient {
+    /// The time an answer is waited for: `fs.fetch_timeout`.
+    fn answer_timeout(&self) -> Duration {
+        self.answer_timeout
+    }
+
+    /// Asks for the whole object `cas/l/<sha256>` to be put in the cache, answered by `until`.
+    fn fill_manifest(&self, sha256: &str, until: Until<'_>) -> Result<(), FillFailure> {
+        self.fill(&format!("fill {sha256}"), Some(until))
+    }
+
+    /// Asks for the blob `sha256` of `size` bytes at `offset` of the upstream object `key` to be
+    /// put in the cache, answered by `until` where given.
+    fn fill_blob(
+        &self,
+        (sha256, size): (&str, u64),
+        (key, offset): (&str, u64),
+        until: Option<Until<'_>>,
+    ) -> Result<(), FillFailure> {
+        self.fill(
+            &format!("fill {sha256} {size} from {key} @ {offset}"),
+            until,
+        )
+    }
+
+    /// Counts the blobs as used now; no answer is read, and none is lost if the socket is away.
+    fn touch(&self, sha256: &[&str]) {
+        let _ = self.ask_line(&format!("touch {}", sha256.join(" ")), false);
+    }
+
+    /// Pins `blobs` for `tree` of `mount`; the answer is the numbers or the words of the refusal.
+    fn pin(&self, mount: &str, tree: &str, blobs: &[&str]) -> Result<String, AskError> {
+        self.ask_line(&format!("pin {mount} {tree} {}", blobs.join(" ")), true)
+    }
+
+    /// Takes away the pins of `tree` of `mount`.
+    fn unpin(&self, mount: &str, tree: &str) -> Result<String, AskError> {
+        self.ask_line(&format!("unpin {mount} {tree}"), true)
+    }
+
+    /// Keeps the pins of `trees` of `mount` and takes away the others.
+    fn pins_live(&self, mount: &str, trees: &[String]) -> Result<String, AskError> {
+        self.ask_line(&format!("pins-live {mount} {}", trees.join(" ")), true)
+    }
+
+    /// Asks for the `size` bytes of the file at `path`, which hash to `sha256`, to be put as the
+    /// object `key`, create-only, waiting at most `wait` for the answer; the answer is the line of
+    /// JSON the socket gives.
+    #[cfg(any(target_os = "linux", test))]
+    fn put(
+        &self,
+        (key, sha256, size): (&str, &str, u64),
+        path: &std::path::Path,
+        wait: Duration,
+    ) -> Result<String, AskError> {
+        let line = format!("put {key} {sha256} {size} from {}", path.display());
+        self.ask(&line, (true, Some(wait)), None)
+    }
+
+    /// Where the path `path` (names joined by `/`) is among the placements of the node; a
+    /// placement found there is held for `mount` until [`Fills::unplace`]. A node of a
+    /// release before the placements, which does not know the request, has none. The error is the
+    /// answer that is none of these, or that nobody answered.
+    fn place(&self, mount: &str, path: &str) -> Result<Place, String> {
+        let answer = self
+            .ask_line(&format!("place {mount} {path}"), true)
+            .map_err(|error| error.to_string())?;
+        match answer.split_once(' ') {
+            Some(("tree", id)) => Ok(Place::Tree(id.to_owned())),
+            None if answer == "dir" => Ok(Place::Dir),
+            None if answer == "none" => Ok(Place::Nothing),
+            _ if answer == UNKNOWN => Ok(Place::Nothing),
+            _ => Err(answer),
+        }
+    }
+
+    /// The paths of the fs locations of the placements of the node: none from a node of a release
+    /// before the placements.
+    fn mounted(&self) -> Result<Vec<String>, String> {
+        let answer = self
+            .ask_line("mounted", true)
+            .map_err(|error| error.to_string())?;
+        if answer == UNKNOWN {
+            return Ok(Vec::new());
+        }
+        serde_json::from_str(&answer).map_err(|_| answer)
+    }
+
+    /// Where the tree of the placement `id` is read from: the image of the tree in the cache
+    /// directory, by its digest, or the tree flattened. A node of a release before the images,
+    /// which does not know the request, is asked for the tree flattened. The error is the answer
+    /// (`none` for a placement that is gone, `damaged`, `too large`) or that nobody answered.
+    fn image(&self, id: &str) -> Result<PlacedTree, String> {
+        let answer = self
+            .ask_line(&format!("image {id}"), true)
+            .map_err(|error| error.to_string())?;
+        if answer == UNKNOWN {
+            return self.flat(id).map(PlacedTree::Flat);
+        }
+        if let Some(rest) = answer.strip_prefix("image ") {
+            let read = rest.split_once(' ').and_then(|(tree, paths)| {
+                let tree = TreeDigest::from_hex(tree)?;
+                let paths = serde_json::from_str(paths).ok()?;
+                Some(PlacedTree::Image { tree, paths })
+            });
+            return read.ok_or(answer);
+        }
+        serde_json::from_str(&answer)
+            .map(PlacedTree::Flat)
+            .map_err(|_| answer)
+    }
+
+    /// The file of the cache that holds the `size` bytes at `offset` of the pack `pack`, which
+    /// hash to `sha256`, and the offset of their first byte in it: filled first if the cache does
+    /// not hold them, answered by `until` where given. The error is the words of the answer, or
+    /// that nobody answered.
+    fn span(
+        &self,
+        (sha256, size): (&str, u64),
+        (pack, offset): (&str, u64),
+        until: Option<Until<'_>>,
+    ) -> Result<(u64, PathBuf), String> {
+        let line = format!("span {sha256} {size} from {pack} @ {offset}");
+        let answer = self
+            .ask(&line, (true, None), until)
+            .map_err(|e| e.to_string())?;
+        let held = answer
+            .strip_prefix("ok ")
+            .and_then(|rest| rest.split_once(' '));
+        match held.map(|(base, path)| (base.parse::<u64>(), path)) {
+            Some((Ok(base), path)) => Ok((base, PathBuf::from(path))),
+            _ => Err(answer),
+        }
+    }
 
     /// Ends the hold of `mount` on the placement `id`; nothing is lost if the socket is away.
-    pub(super) fn unplace(&self, mount: &str, id: &str) {
+    fn unplace(&self, mount: &str, id: &str) {
         let _ = self.ask_line(&format!("unplace {mount} {id}"), true);
     }
 
     /// Ends the holds of `mount` on every placement but `ids`; the answer is the node's words, which
     /// a node that does not know the request gives too.
-    pub(super) fn places_live(&self, mount: &str, ids: &[String]) -> Result<String, AskError> {
+    fn places_live(&self, mount: &str, ids: &[String]) -> Result<String, AskError> {
         self.ask_line(&format!("places-live {mount} {}", ids.join(" ")), true)
     }
 
-    /// Waits as long as a request waits between two tries over a socket that is not there.
-    pub(super) fn rest(&self) {
-        (self.pause)(PAUSE);
+    /// Sends the report's line by the thread of the reports ([`FillClient::send_report`]).
+    fn report(&self, report: Report) {
+        self.send_report(report.line());
     }
 
-    /// [`FillClient::rest`], if that leaves time before `until` for another try; whether it did.
-    pub(super) fn rest_before(&self, until: Until<'_>) -> bool {
-        // A pause that leaves no time would be followed by a try that is not sent.
-        if until.left() <= PAUSE {
-            return false;
-        }
-        (self.pause)(PAUSE);
-        true
-    }
-
-    /// Keeps the pins of `trees` of `mount` and takes away the others.
-    pub(super) fn pins_live(&self, mount: &str, trees: &[String]) -> Result<String, AskError> {
-        self.ask_line(&format!("pins-live {mount} {}", trees.join(" ")), true)
+    /// Takes the client's pause (`pause` of [`FillClient::pausing`]).
+    fn pause(&self, pause: Duration) {
+        (self.pause)(pause);
     }
 }
 

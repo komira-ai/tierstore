@@ -104,9 +104,17 @@ fn image_answer(tree: Result<MountTree, FlatError>) -> String {
 fn flat_answer(flat: &Result<FlatTree, FlatError>) -> String {
     match flat {
         Ok(tree) => json(tree),
-        Err(FlatError::Read(ReadError::NoPlacement)) => "none".to_owned(),
-        Err(FlatError::Read(_)) => "damaged".to_owned(),
-        Err(FlatError::TooLarge) => "too large".to_owned(),
+        Err(why) => refusal(why).to_owned(),
+    }
+}
+
+/// The words of the answer to a `flat` or an `image` whose tree cannot be read for `why`, which
+/// the same request made in process fails with too.
+pub(in crate::server) fn refusal(why: &FlatError) -> &'static str {
+    match why {
+        FlatError::Read(ReadError::NoPlacement) => "none",
+        FlatError::Read(_) => "damaged",
+        FlatError::TooLarge => "too large",
     }
 }
 
