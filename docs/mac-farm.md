@@ -4,9 +4,8 @@ The macOS release files of a commit (artifacts.yml's `macos-arm64`: the binary's
 SBOM, its hostkeeper package, the tap tarball, `SHA256SUMS.macos-arm64` and the unsigned
 installer) can be built on a Mac of the build farm instead of a GitHub-hosted macOS runner, by
 the same steps. This page says how, what it needs, and what stays on hosted runners. The
-mechanism is the one of komira-ai/kbf's `docs/design/mac-ci-on-the-farm.md` (a REAPI action
-from a Linux runner, `cargo xtask mac-farm`), with one addition: the action's outputs are brought
-back.
+mechanism is one Remote Execution (REAPI) action sent from a Linux runner by `cargo xtask
+mac-farm`, which the farm runs as a job on one of its Macs, and whose outputs are brought back.
 
 ## Turning it on
 
@@ -43,7 +42,9 @@ endpoint and no property set.
 The inputs of the action, since a farm Mac has the Command Line Tools and no Rust, and an action
 has no network:
 
-- the checkout's tracked files, as they are on disk;
+- the checkout's tracked files, as they are on disk, and a git directory that names the
+  checkout's commit (`.git/HEAD`, the commit's object and one ref), since git tracks no `.git`
+  and `tierstore`'s build script asks git for the commit its `--version` names;
 - the crates of `Cargo.lock` for every platform (`cargo fetch` on the runner): `cargo metadata`,
   which the SBOM and the licence notice run, reads the manifest of every package of the lock,
   even with `--filter-platform`, so the Mac's crates alone are not enough. The crates are sent as
@@ -97,6 +98,14 @@ job is a workflow of its own and not a job of artifacts.yml. The workflow lint l
 `id-token: write` be held by the calling job and by this job only, each under its exact
 condition (a push to `main`; the calling job also needs the variable), and lets artifacts.yml call
 this one local workflow by its path.
+
+What the split does not change: with the switch on, the farm is inside the trust of the signed
+macOS files. The files `attest` signs are the ones the farm returned, held to the digests of the
+farm's own result, so whoever controls the farm's Macs or its action cache (an earlier result of the
+same action is used) could have a macOS binary of their making signed and released as this
+commit's. The hosted job puts the same trust in GitHub's runner. `sign-pkg` and `check-pkg` still
+run on hosted runners, and the hostkeeper package's unpack, the binary's commit and version and its
+code signature are checked on the Mac that built it, not again here.
 
 ## Failures and limits
 

@@ -6,8 +6,9 @@
 //! Command Line Tools and no Rust. So everything the command needs is an input of the action,
 //! gathered here:
 //!
-//! 1. the files git tracks in the checkout, at their paths, as they are on disk (a step before
-//!    this one may have changed one, such as the version a release build writes);
+//! 1. the files git tracks in the checkout, at their paths, as they are on disk, and a git
+//!    directory that names the checkout's commit ([`head`]), so a build that asks git for its
+//!    commit gets it;
 //! 2. the crates of `Cargo.lock`, which `cargo fetch` downloads into a Cargo home of this run's
 //!    own (in `--scratch`), below [`CARGO_HOME`];
 //! 3. the pinned Rust toolchain for `aarch64-apple-darwin` ([`toolchain`]), below [`TOOLCHAIN`];
@@ -29,13 +30,14 @@
 //! attached one).
 //!
 //! The verb's first lines mask the address in a workflow's log (`::add-mask::`), so nothing it
-//! prints after them shows it. (A workflow step's own header still shows the values of its
-//! `env:`; that is the workflow's to keep out.)
+//! prints after them shows it. A workflow step's own header still shows the values of its
+//! `env:`, the address among them: that mask covers only what the verb prints.
 //!
 //! With an empty `--address` the verb prints a notice and exits 0: a repository with no farm runs
 //! nothing and fails nothing. A workflow that needs the outputs fails at their upload.
 
 pub mod client;
+pub mod head;
 pub mod outputs;
 pub mod proto;
 pub mod toolchain;
@@ -166,7 +168,7 @@ pub enum Problem {
     )]
     Cargo(String),
     #[error(
-        "--output {0:?} is not a relative path of plain components outside {OURS}/, or is given twice"
+        "--output {0:?} is not a relative path of plain components outside {OURS}/, or is given twice or inside another --output"
     )]
     Output(String),
     #[error(
@@ -283,7 +285,11 @@ fn output_paths(args: &Args) -> Result<Vec<String>, Problem> {
     for path in &args.outputs {
         let plain = tree::components(path).is_ok();
         let ours = path == OURS || path.starts_with(&format!("{OURS}/"));
-        if !plain || ours || out.contains(path) {
+        // One output inside another would be brought back twice.
+        let nested = out
+            .iter()
+            .any(|o| outputs::within(path, o) || outputs::within(o, path));
+        if !plain || ours || nested {
             return Err(Problem::Output(path.clone()));
         }
         out.push(path.clone());
@@ -505,6 +511,8 @@ pub fn tool_entries(
 pub struct Host<'a> {
     /// The paths git tracks in the checkout.
     pub tracked: &'a mut dyn FnMut() -> Result<Vec<String>, Error>,
+    /// The commit the checkout is at and its object's body ([`head::read`]).
+    pub head: &'a mut dyn FnMut() -> Result<(String, Vec<u8>), Error>,
     /// Fetches the crates of `Cargo.lock` into the Cargo home it is given.
     pub fetch: &'a mut dyn FnMut(&Path) -> Result<(), Error>,
     /// The toolchain's pins ([`toolchain::PINS`]).
@@ -524,6 +532,8 @@ pub fn inputs(
     host: &mut Host<'_>,
 ) -> Result<(Tree, Digest), Error> {
     let mut entries = checkout(root, &(host.tracked)()?)?;
+    let (commit, body) = (host.head)()?;
+    entries.extend(head::entries(&commit, &body)?);
     let home = scratch.join("cargo-home");
     std::fs::create_dir_all(&home).map_err(Error::spawn(format!("create {}", home.display())))?;
     (host.fetch)(&home)?;
@@ -825,11 +835,13 @@ pub fn run(args: &Args, root: &Path) -> Result<Vec<String>, Error> {
     }
     let roots = crate::fetch::host_roots();
     let mut tracked = || git_files(&args.git, root);
+    let mut head = || head::read(&args.git, root);
     let mut fetch = |home: &Path| fetch_crates(&args.cargo_program, root, home);
     let mut download = |url: &str| crate::fetch::download(url, &roots).map_err(|e| e.to_string());
     let pins = toolchain::parse(toolchain::PINS).map_err(|e| Error::Failed(e.to_string()))?;
     let mut host = Host {
         tracked: &mut tracked,
+        head: &mut head,
         fetch: &mut fetch,
         pins,
         download: &mut download,

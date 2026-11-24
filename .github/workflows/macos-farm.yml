@@ -32,7 +32,8 @@
 #
 # The farm's address, instance, TLS and Mac platform are the organisation variables FARM_ADDRESS,
 # FARM_INSTANCE, FARM_TLS and FARM_DARWIN_ARM64_PROPERTIES; no repository holds an endpoint or a
-# property set. The verb masks the address in the log before it prints anything else. With
+# property set. The step's header in the log shows them (they are reachable on the farm's private
+# network alone); the verb masks the address in the lines it prints itself. With
 # FARM_ADDRESS unset it runs nothing, and the upload of the files it did not make fails the job.
 name: macos-farm
 

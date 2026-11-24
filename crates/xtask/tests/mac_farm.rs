@@ -36,12 +36,16 @@ use xtask::mac_farm::proto::reapi::{
     OutputDirectory, OutputFile,
 };
 use xtask::mac_farm::toolchain::{Pin, Pins};
+use xtask::mac_farm::tree::Entry;
 use xtask::mac_farm::tree::digest_of;
-use xtask::mac_farm::{Args, Host, Sink, fetch_crates, git_files, run_with};
+use xtask::mac_farm::{Args, Host, Sink, fetch_crates, git_files, head, run_with};
 
 use fake::{Answer, State, answered, at, done};
 
 const XTASK: &str = env!("CARGO_BIN_EXE_xtask");
+
+/// The commit the checkout of a run is at.
+const HEAD: &str = "0123456789abcdef0123456789abcdef01234567";
 
 fn scratch(name: &str) -> TestDir {
     TestDir::under(
@@ -142,6 +146,7 @@ impl Rig {
             }],
         };
         let mut tracked = || Ok(vec!["Cargo.toml".to_owned()]);
+        let mut head = || Ok((HEAD.to_owned(), b"tree t\n".to_vec()));
         let mut fetch = |home: &Path| {
             std::fs::write(home.join("config.toml"), "").expect("write");
             Ok(())
@@ -149,6 +154,7 @@ impl Rig {
         let mut download = |_: &str| Ok(xz.clone());
         let mut host = Host {
             tracked: &mut tracked,
+            head: &mut head,
             fetch: &mut fetch,
             pins,
             download: &mut download,
@@ -872,4 +878,59 @@ fn a_blob_that_cannot_be_written_fails_the_read() {
         )
     );
     let _ = std::io::Write::flush(&mut Full);
+}
+
+/// Catches a git directory that git does not take as the checkout's commit: written out as the
+/// Mac gets it, real git names the commit (as `tierstore`'s build script asks it) and prints the
+/// commit's object back byte for byte. And the commit read from a checkout that is not git's, or
+/// whose HEAD names an object it lacks, taken as one.
+#[test]
+fn the_sent_git_directory_names_the_checkouts_commit() {
+    let repo = Path::new(env!("CARGO_MANIFEST_DIR")).join("../..");
+    let (commit, body) = head::read(Path::new("git"), &repo).expect("the repository's HEAD");
+    let dir = scratch("git-head");
+    let root = dir.path();
+    for (path, entry) in head::entries(&commit, &body).expect("entries") {
+        let Entry::File { bytes, .. } = entry else {
+            panic!("a file")
+        };
+        let at = root.join(path);
+        std::fs::create_dir_all(at.parent().expect("parent")).expect("mkdir");
+        std::fs::write(at, bytes).expect("write");
+    }
+    let git = |args: &[&str]| {
+        let out = Process::new("git")
+            .args(args)
+            .current_dir(root)
+            .env("GIT_CEILING_DIRECTORIES", root.parent().expect("parent"))
+            .output()
+            .expect("run git");
+        assert!(
+            out.status.success(),
+            "{args:?}: {}",
+            String::from_utf8_lossy(&out.stderr)
+        );
+        out.stdout
+    };
+    assert_eq!(
+        git(&["rev-parse", "--short=12", "HEAD"]),
+        format!("{}\n", &commit[..12]).into_bytes()
+    );
+    assert_eq!(git(&["cat-file", "commit", "HEAD"]), body);
+    let failed = head::read(Path::new(XTASK), root).expect_err("not git");
+    assert!(
+        failed
+            .to_string()
+            .starts_with("git rev-parse HEAD failed: "),
+        "{failed}"
+    );
+    std::fs::remove_file(root.join(format!(".git/objects/{}/{}", &commit[..2], &commit[2..])))
+        .expect("remove the object");
+    let failed = head::read(Path::new("git"), root).expect_err("no object");
+    assert!(
+        failed.to_string().starts_with("git cat-file failed: "),
+        "{failed}"
+    );
+    let missing = head::read(&root.join("no-git"), root).expect_err("no program");
+    assert!(missing.to_string().starts_with("run "), "{missing}");
 }

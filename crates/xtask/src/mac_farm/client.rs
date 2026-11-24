@@ -352,7 +352,9 @@ impl Farm {
         action: &Digest,
         progress: &mut (dyn FnMut(Progress) + Send),
     ) -> Result<ExecuteResponse, FarmError> {
-        let mut client = ExecutionClient::new(self.channel.clone());
+        // A result may carry the command's output inline: as large a message as a blob read.
+        let mut client =
+            ExecutionClient::new(self.channel.clone()).max_decoding_message_size(MAX_MESSAGE_BYTES);
         let mut name = String::new();
         let mut last = None;
         let mut cuts = 0;

@@ -248,32 +248,40 @@ fn a_wrong_version_or_commit_is_refused_and_the_scratch_is_made() {
 
 /// Catches a program's exit status not read (a failed step taken as a pass), its standard output
 /// not sent to the file the step names, it started elsewhere than the checkout, and a program
-/// that cannot start or a file that cannot be made taken as a pass.
+/// that cannot start or a file that cannot be made taken as a pass. The program is this test
+/// binary, by a link in the checkout named by a relative path, which starts only from there.
 #[test]
 fn exec_runs_a_program_from_the_checkout_and_reads_its_status() {
     let dir = scratch("exec");
     let root = dir.path();
-    let sh = Path::new("sh");
-    let run = |script: &str, stdout: Option<&Path>| {
-        exec(sh, &["-c".to_owned(), script.to_owned()], stdout, root)
-    };
-    assert!(run("exit 0", None).expect("ran"));
-    assert!(!run("exit 3", None).expect("ran"));
+    let this = std::env::current_exe().expect("the test binary");
+    std::os::unix::fs::symlink(&this, root.join("prog")).expect("link");
+    let prog = Path::new("./prog");
+    let args = |a: &[&str]| a.iter().map(|s| (*s).to_owned()).collect::<Vec<_>>();
     let out = root.join("out.txt");
-    assert!(run("pwd", Some(&out)).expect("ran"));
-    let said = std::fs::read_to_string(&out).expect("the output");
-    assert_eq!(
-        std::fs::canonicalize(said.trim_end()).expect("a path"),
-        std::fs::canonicalize(root).expect("the root")
+    assert!(
+        exec(
+            prog,
+            &args(&["--list", "--exact", "no-such-test"]),
+            Some(&out),
+            root
+        )
+        .expect("ran")
     );
-    let missing = exec(&root.join("no-such-program"), &[], None, root).expect_err("no program");
-    assert!(missing.to_string().starts_with("run "), "{missing}");
-    let unmade = run("exit 0", Some(&root.join("gone/out.txt"))).expect_err("no directory");
+    let listed = std::fs::read_to_string(&out).expect("the output");
+    assert!(listed.contains("0 tests"), "{listed}");
+    assert!(!exec(prog, &args(&["--no-such-option"]), None, root).expect("ran"));
+    let elsewhere = exec(prog, &[], None, &root.join("..")).expect_err("not from the checkout");
+    assert!(
+        elsewhere.to_string().starts_with("run ./prog: "),
+        "{elsewhere}"
+    );
+    let unmade = exec(prog, &[], Some(&root.join("gone/out.txt")), root).expect_err("no directory");
     assert!(unmade.to_string().starts_with("create "), "{unmade}");
 }
 
 /// Catches the verb run with its flags unchecked, or with a Cargo other than the one it is
-/// given: a Cargo that fails ends the run at its first step.
+/// given: a Cargo that cannot start ends the run at its first step.
 #[test]
 fn the_verb_checks_its_flags_and_runs_the_cargo_it_is_given() {
     let dir = scratch("verb");
@@ -282,15 +290,17 @@ fn the_verb_checks_its_flags_and_runs_the_cargo_it_is_given() {
         commit: COMMIT.to_owned(),
         scratch: PathBuf::from("s"),
     };
-    assert!(macos_assets(&wrong, dir.path(), Path::new("false")).is_err());
+    let cargo = dir.path().join("no-cargo");
+    assert!(macos_assets(&wrong, dir.path(), &cargo).is_err());
     let args = Args {
         version: "1.2.3".to_owned(),
         ..wrong
     };
-    assert_eq!(
-        macos_assets(&args, dir.path(), Path::new("false"))
-            .expect_err("cargo fails")
-            .to_string(),
-        "`cargo cyclonedx --version` failed: it exited non-zero"
+    let failed = macos_assets(&args, dir.path(), &cargo).expect_err("no cargo");
+    assert!(
+        failed
+            .to_string()
+            .starts_with(&format!("run {}: ", cargo.display())),
+        "{failed}"
     );
 }

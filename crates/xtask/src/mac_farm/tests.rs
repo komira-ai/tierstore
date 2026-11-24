@@ -412,6 +412,7 @@ fn the_inputs_hold_every_blob_the_action_names() {
         }],
     };
     let mut tracked = || Ok(vec!["Cargo.toml".to_owned()]);
+    let mut head = || Ok(("a".repeat(40), b"tree t\n".to_vec()));
     let mut fetch = |home: &Path| {
         std::fs::write(home.join("registry"), "r").map_err(Error::spawn("write".to_owned()))
     };
@@ -425,6 +426,7 @@ fn the_inputs_hold_every_blob_the_action_names() {
     };
     let mut host = Host {
         tracked: &mut tracked,
+        head: &mut head,
         fetch: &mut fetch,
         pins,
         download: &mut download,
@@ -453,6 +455,9 @@ fn the_inputs_hold_every_blob_the_action_names() {
     assert_eq!(
         paths,
         [
+            "/.git/HEAD",
+            &format!("/.git/objects/aa/{}", "a".repeat(38)),
+            "/.git/refs/mac-farm/head",
             "/.mac-farm/cargo-home/bin/cargo-x",
             "/.mac-farm/cargo-home/registry",
             "/.mac-farm/toolchain/bin/cargo",
@@ -478,7 +483,8 @@ fn tool_tar_xz(program: &[u8]) -> Vec<u8> {
 }
 
 /// Catches an output that would write outside the checkout (`..`, absolute), into the run's
-/// own inputs, or twice; and the outputs taken unsorted (REAPI requires `output_paths` sorted).
+/// own inputs, twice, or inside another output (brought back twice, which fails only after the
+/// action ran); and the outputs taken unsorted (REAPI requires `output_paths` sorted).
 #[test]
 fn a_wrong_output_is_named() {
     for path in [
@@ -509,6 +515,17 @@ fn a_wrong_output_is_named() {
         Settings::of(&twice),
         Err(Problem::Output("dist".to_owned()))
     );
+    for (first, second) in [("dist", "dist/SHA256SUMS"), ("dist/x", "dist")] {
+        let nested = Args {
+            outputs: vec![first.to_owned(), second.to_owned()],
+            ..args()
+        };
+        assert_eq!(
+            Settings::of(&nested),
+            Err(Problem::Output(second.to_owned())),
+            "{first} and {second}"
+        );
+    }
     let none = Args {
         outputs: Vec::new(),
         ..args()
