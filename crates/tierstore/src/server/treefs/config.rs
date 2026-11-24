@@ -204,7 +204,7 @@ fn bounded(key: &str, wait: Duration) -> Result<Duration, ConfigError> {
 
 /// The id that `text`, the value of `key`, names in `database`: a number, or a name that `lookup`,
 /// the system's lookup of names, finds.
-fn id_of(
+pub(in crate::server) fn id_of(
     key: &str,
     database: Database,
     text: &str,

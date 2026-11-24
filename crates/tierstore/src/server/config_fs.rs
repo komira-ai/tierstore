@@ -36,9 +36,14 @@
 //!   `params.runtime_dir` is not inside it, and `params.control_socket` is none of the node's other
 //!   sockets ([`fs_settings`]).
 //!
+//! `params.owner` also takes the table `{ subids_of = "<job user>", id = 1000 }`, the job user's
+//! first subordinate uid and gid plus `id`, read from `/etc/subuid` and `/etc/subgid` at load
+//! ([`owner`]), so that one file serves every node of a group.
+//!
 //! Names of users and groups (`client_group`, `owner`) are looked up through the system at load, as
-//! `tierstore fs --check-config` does, and the file system of a path is the device of the nearest
-//! directory of it that is there ([`volume_of`]): both through [`Host`], which a test replaces.
+//! `tierstore fs --check-config` does, the file system of a path is the device of the nearest
+//! directory of it that is there ([`volume_of`]), and the subordinate id files are read: all
+//! through [`Host`], which a test replaces.
 
 use std::io;
 use std::os::unix::fs::MetadataExt as _;
@@ -48,6 +53,8 @@ use crate::server::config::{ConfigError, invalid, refuse};
 use crate::server::config_combined::normalised;
 use crate::server::config_interface::Params;
 use crate::server::provider::ProviderFlags;
+use owner::{Owner, Subids};
+
 use crate::server::treefs::{
     DEFAULT_MOUNTPOINT, Database, Found, FsSettings, FsTable, Lookup, system_names,
 };
@@ -60,6 +67,8 @@ pub(in crate::server) struct Host {
     pub names: fn(Database, &str) -> Found,
     /// The device number of the file system a path is on.
     pub volume: fn(&Path) -> io::Result<u64>,
+    /// The text of a file: the subordinate id files an `owner = { subids_of, id }` is read from.
+    pub read: fn(&Path) -> io::Result<String>,
 }
 
 impl Host {
@@ -67,6 +76,7 @@ impl Host {
     pub(in crate::server) const SYSTEM: Host = Host {
         names: system_names,
         volume: volume_of,
+        read: owner::read_text,
     };
 }
 
@@ -102,8 +112,11 @@ pub(in crate::server) fn volume_of(path: &Path) -> io::Result<u64> {
 pub(in crate::server) struct FsInterface {
     /// The entry's place in the list (`interface[2]`).
     at: String,
-    /// The params, as the `[fs]` table of `tierstore fs` would hold them.
+    /// The params, as the `[fs]` table of `tierstore fs` would hold them, but for an owner given as
+    /// the job user's subordinate ids, which is `subids` until it is resolved.
     table: FsTable,
+    /// `params.owner` given as `{ subids_of, id }`.
+    subids: Option<Subids>,
 }
 
 impl FsInterface {
@@ -171,12 +184,17 @@ pub(in crate::server) fn fs_of(at: &str, params: &Params) -> Result<FsInterface,
         let why = "not a param of an fs interface: the NFS front of the process has no hand-off of its own";
         refuse(&format!("{place}.nfs"), why, &table.handoff_keys())?;
     }
+    let (owner, subids) = match params.owner.clone() {
+        Some(Owner::Pair(text)) => (Some(text), None),
+        Some(Owner::Subids(subids)) => (None, Some(subids)),
+        None => (None, None),
+    };
     let table = FsTable {
         mountpoint: params.mountpoint.clone(),
         runtime_dir: params.runtime_dir.clone(),
         control_socket: params.control_socket.clone(),
         client_group: params.client_group.clone(),
-        owner: params.owner.clone(),
+        owner,
         fetch_timeout: params.fetch_timeout,
         threads: params.threads,
         nfs,
@@ -190,6 +208,7 @@ pub(in crate::server) fn fs_of(at: &str, params: &Params) -> Result<FsInterface,
     Ok(FsInterface {
         at: at.to_owned(),
         table,
+        subids,
     })
 }
 
@@ -262,7 +281,8 @@ pub(in crate::server) type Sockets<'a> = [(&'a str, Option<&'a Path>); 3];
 /// sockets, and `host` looks names and file systems up.
 ///
 /// # Errors
-/// Those of [`FsSettings::of_interface`]; a relative `local_cache.path`; a runtime directory inside
+/// Those of [`FsSettings::of_interface`]; those of an owner given as the job user's subordinate
+/// ids ([`owner::resolved`]); a relative `local_cache.path`; a runtime directory inside
 /// it; a stage directory of the put directory on another file system, or one of the two that
 /// cannot be looked at; a control socket that is another socket of the node.
 pub(in crate::server) fn fs_settings(
@@ -271,10 +291,18 @@ pub(in crate::server) fn fs_settings(
     sockets: &Sockets<'_>,
     host: Host,
 ) -> Result<Option<FsSettings>, ConfigError> {
-    let Some(FsInterface { at, table }) = fs else {
+    let Some(FsInterface {
+        at,
+        mut table,
+        subids,
+    }) = fs
+    else {
         return Ok(None);
     };
     let place = format!("{at}.params");
+    if let Some(subids) = &subids {
+        table.owner = Some(owner::resolved(&format!("{place}.owner"), subids, host)?);
+    }
     let Some(normal_cache) = normalised(cache) else {
         let why = "must be an absolute path in a file with an fs interface: the file system reads the cache's files by it";
         return Err(invalid("local_cache.path", why));
@@ -326,6 +354,9 @@ pub(in crate::server) fn not_served(fs: Option<&FsSettings>) -> Option<String> {
         )
     })
 }
+
+#[path = "config_fs_owner.rs"]
+pub(in crate::server) mod owner;
 
 #[cfg(test)]
 #[path = "config_fs_tests.rs"]
