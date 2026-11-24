@@ -237,7 +237,8 @@ pub(in crate::server) struct Core {
     /// Read by a detach from its decision under the lifecycle lock to the end of its unpins,
     /// which it makes after it released that lock, and written by `Core::hold`: so a hold waits
     /// for the unpins of the detaches already decided, and no unpin of this process follows the
-    /// pins of a successor. Only the threads that detach and hold take it.
+    /// pins of a successor. Only the threads that detach and hold take it. The lifecycle lock is
+    /// never taken while it is read: a hold keeps the lifecycle lock while it waits to write it.
     freeing: RwLock<()>,
     /// Whether a successor is taking over: no attach or detach is done, so that this process
     /// writes neither the table of tree numbers nor the attachments file (`Core::hold`).

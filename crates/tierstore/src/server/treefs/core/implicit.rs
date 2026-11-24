@@ -179,14 +179,15 @@ impl Core {
     /// of its pins (`Core::free_tree`), and leaves memory when the kernel holds none of its
     /// inodes, as at the detach of its last run. Nothing ends while a successor takes over. Then
     /// every tree that nothing has attached and no request has named for that long leaves memory,
-    /// whatever lookups of it the kernel holds (`Core::drop_idle`, `core/memory.rs`). The opens
+    /// whatever lookups of it the kernel holds (`Core::drop_idle`, `core/memory.rs`), once the
+    /// unpins are made and a hold no longer waits for them. The opens
     /// that failed under an implicit attachment that ends are said on stderr, one line for the
     /// tree ([`ended_with`]).
     pub(in crate::server::treefs) fn detach_idle(&self) -> usize {
         let now = self.now();
         let idle = u64::try_from(self.settings.tree_idle.as_millis()).unwrap_or(u64::MAX);
         let mut failed = Vec::new();
-        let (freed, _freeing): (Vec<(u64, TreeDigest)>, _) = {
+        let (freed, freeing): (Vec<(u64, TreeDigest)>, _) = {
             let _lifecycle = locked(&self.lifecycle);
             if self.is_held() {
                 return 0;
@@ -221,6 +222,9 @@ impl Core {
         for (number, digest) in &freed {
             self.free_tree(*number, digest);
         }
+        // The unpins are made: a hold waits no more. The guard goes before the drop of idle trees
+        // takes the lifecycle lock, which a hold keeps while it waits for this guard (`Core::hold`).
+        drop(freeing);
         let _ = self.drop_idle(idle);
         freed.len()
     }

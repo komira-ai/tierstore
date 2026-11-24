@@ -35,8 +35,15 @@
 # An instance starts only when its marker file, /var/lib/tierstore/run-fs-%i, exists. The update
 # hook writes and removes it on a node where an instance of this unit runs (crates/tierstore/
 # docs/update-hook.md "The second unit"): it starts the instance of the other letter, which takes
-# the mount from the running one, and never stops the one that holds the mount. On a node where
-# none runs, an operator creates the marker for instance a once /etc/tierstore/fs.toml is there.
+# the mount from the running one, and never stops the one that holds the mount. The marker is
+# looked at twice: ConditionPathExists= at a start from inactive or failed, and ExecCondition= at
+# every start, the automatic restarts of Restart=on-failure included, for which systemd does not
+# evaluate the conditions of [Unit] again (ExecCondition= is systemd 243 or later). Its `+` runs
+# the test as root, as systemd tests the condition, whoever owns /var/lib/tierstore. A taker
+# whose take failed and whose marker the hook removed is therefore not started again: the
+# restart is skipped and the unit is left inactive, not failed. An instance that holds the mount
+# keeps its marker, and its restart after a crash goes on as before. On a node where none runs,
+# an operator creates the marker for instance a once /etc/tierstore/fs.toml is there.
 # The mount must be made before the job runtime starts: the runtime's unit names both letters,
 # Wants= and After= tierstore-fs@a.service tierstore-fs@b.service (packaging/README.md "A unit
 # that needs the mount"), as only the letter with its marker starts.
@@ -58,6 +65,7 @@ NotifyAccess=main
 User=tierstore
 RuntimeDirectory=tierstore-fs tierstore
 RuntimeDirectoryPreserve=yes
+ExecCondition=+/usr/bin/test -e /var/lib/tierstore/run-fs-%i
 ExecStart=/usr/local/libexec/tierstore/tierstore fs \
   --config /etc/tierstore/fs.toml
 KillSignal=SIGTERM
