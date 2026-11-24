@@ -135,7 +135,7 @@ mod steps;
 )]
 mod nfs;
 
-pub(super) use config::{DEFAULT_MOUNTPOINT, FsSettings, FsTable, Lookup, load};
+pub(super) use config::{DEFAULT_MOUNTPOINT, FsSettings, FsTable, Lookup, id_of, load};
 #[cfg(test)]
 pub(super) use config::{builders, from_text};
 pub(super) use groups::{Database, Found, system as system_names};
