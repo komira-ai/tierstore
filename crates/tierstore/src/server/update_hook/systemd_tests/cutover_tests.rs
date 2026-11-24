@@ -519,15 +519,19 @@ fn cleanup_waits_for_readyz_at_most_ready_attempts_looks() {
     assert_eq!(fake.markers(), [Instance::A, Instance::B]);
 }
 
-/// Runs `tierstore update-hook cleanup --params <file>` as hostkeeper does, through the verb's
+/// Runs `tierstore update-hook <step> --params <file>` as hostkeeper does, through the verb's
 /// command line and params file, with the systemd steps over `fake`: the exit status and the
 /// report line.
-fn cleanup_on_the_command_line(fake: &SystemdFake, name: &str) -> (ExitCode, serde_json::Value) {
+fn on_the_command_line(
+    fake: &SystemdFake,
+    step: &str,
+    name: &str,
+) -> (ExitCode, serde_json::Value) {
     let dir = TestDir::under(std::env::temp_dir(), name);
     let file = dir.path().join("params.toml");
     let text = params_text(NEW, Some(OLD), &format!("config_file = \"{CONFIG}\"\n"));
     std::fs::write(&file, text).unwrap();
-    let mut args: Vec<OsString> = ["tierstore", "update-hook", "cleanup", "--params"]
+    let mut args: Vec<OsString> = ["tierstore", "update-hook", step, "--params"]
         .into_iter()
         .map(OsString::from)
         .collect();
@@ -551,7 +555,7 @@ fn update_hook_cleanup_on_the_command_line_commits_past_the_draining_503() {
     let fake = SystemdFake::installed();
     fake.drive(&p, &[Prepare, Cutover, Verify]);
     fake.answer_draining(2);
-    let (code, line) = cleanup_on_the_command_line(&fake, "tierstore-hook-cleanup-503");
+    let (code, line) = on_the_command_line(&fake, "cleanup", "tierstore-hook-cleanup-503");
     assert_eq!(format!("{code:?}"), format!("{:?}", ExitCode::from(0)));
     assert!(line.get("reason").is_none(), "{line}");
     assert_eq!(line["reversible"], false);
@@ -563,11 +567,56 @@ fn update_hook_cleanup_on_the_command_line_commits_past_the_draining_503() {
     let fake = SystemdFake::installed();
     fake.drive(&p, &[Prepare, Cutover, Verify]);
     fake.answer_draining(READY_ATTEMPTS);
-    let (code, line) = cleanup_on_the_command_line(&fake, "tierstore-hook-cleanup-mute");
+    let (code, line) = on_the_command_line(&fake, "cleanup", "tierstore-hook-cleanup-mute");
     assert_eq!(format!("{code:?}"), format!("{:?}", ExitCode::from(1)));
     assert_eq!(line["reason"], "not_confirmed");
     assert_eq!(line["reversible"], true);
     assert!(!fake.record().committed());
+}
+
+/// Asserts the fs hand-over of `cutover` through the verb hostkeeper runs, `update-hook cutover
+/// --params`, over the cache lock as the server holds it: with the old store draining 13 s and the
+/// new one taking the lock 28 s after it exits (node 02's times), the one run exits 0 with a
+/// reversible report and no reason, `tierstore-fs@b` is started only once the store is read-write,
+/// and the record says `swapped`; with a store that stays read-only through the wait it exits 75
+/// with `draining`, retry after 10 seconds, no fs unit touched and no `swapped`. Catches a cutover
+/// that exits 75 on the first read-only answer, which hostkeeper rolls back and never runs again.
+#[test]
+fn update_hook_cutover_on_the_command_line_waits_for_the_cache_lock_before_the_fs_take() {
+    let p = params(NEW, Some(OLD));
+    let fake = SystemdFake::fs_installed();
+    fake.drive(&p, &[Prepare]);
+    fake.set_drain_looks(13);
+    fake.hold_cache_lock(28);
+    let (code, line) = on_the_command_line(&fake, "cutover", "tierstore-hook-cutover-lock");
+    assert_eq!(format!("{code:?}"), format!("{:?}", ExitCode::from(0)));
+    assert!(line.get("reason").is_none(), "{line}");
+    assert_eq!(line["reversible"], true);
+    assert_eq!(
+        line["detail"],
+        format!(
+            "tierstore@b serves {} (hand-over); tierstore-fs@b holds the mount; the store took \
+             the cache lock after 39 s",
+            version_of(NEW)
+        )
+    );
+    assert!(!fake.fs_started_over_read_only());
+    assert_eq!(
+        fake.fs_actions(),
+        ["fs_markers.set b", "fs_units.start b", "fs_markers.clear a"]
+    );
+    assert!(fake.record().has(Marker::Swapped));
+
+    let fake = SystemdFake::fs_installed();
+    fake.drive(&p, &[Prepare]);
+    fake.set_read_only(true);
+    let (code, line) = on_the_command_line(&fake, "cutover", "tierstore-hook-cutover-read-only");
+    assert_eq!(format!("{code:?}"), format!("{:?}", ExitCode::from(75)));
+    assert_eq!(line["reason"], "draining");
+    assert_eq!(line["retry_after_secs"], 10);
+    assert_eq!(line["reversible"], true);
+    assert!(fake.fs_actions().is_empty(), "{:?}", fake.fs_actions());
+    assert!(!fake.record().has(Marker::Swapped));
 }
 
 /// Asserts that a hand-over whose new instance opens its cache for 65 looks (as a build node's

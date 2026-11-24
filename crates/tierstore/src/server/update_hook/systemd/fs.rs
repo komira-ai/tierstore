@@ -38,6 +38,7 @@
 //! `/etc/tierstore/fs.toml`.
 
 use super::super::HANDOFF_FS_CAPABILITY;
+use super::super::look::READ_WRITE_ATTEMPTS;
 use super::super::params::{Params, Previous};
 use super::super::ports::{Instance, UnitState};
 use super::super::probe::CacheMode;
@@ -249,8 +250,12 @@ pub(super) fn is_active(c: &Ctx<'_, '_>, record: &Record) -> Result<bool, Done> 
 /// read-only: it binds the fill socket only once it holds the cache lock, after the old store
 /// exited and its cache was scanned again, and until then nothing answers that socket. A hand-over
 /// in that gap waits for the old instance's uploads and unpins, each until its deadline, and on a
-/// node whose scan outlasts the taker's wait the take fails. The step defers (`draining`) and
-/// runs again; it does so also where `next` would mount afresh, for one rule in both cases.
+/// node whose scan outlasts the taker's wait the take fails. The old store exits by itself once it
+/// has drained, after the new one serves, so the step waits for that in its own run
+/// ([`Look::read_write`](super::super::look::Look::read_write)): a step that deferred instead
+/// would never see it, since hostkeeper rolls a deferred `cutover` back and does not run it
+/// again. A store still read-only after the wait defers the step (`draining`), with no fs unit
+/// touched; it waits also where `next` would mount afresh, for one rule in both cases.
 ///
 /// A start that fails, or leaves the unit anything but active, has taken nothing and the old
 /// instance resumed: `next` is not stopped (it may be a `Restart=on-failure` retry that is taking
@@ -261,17 +266,24 @@ pub(super) fn take(c: &Ctx<'_, '_>, next: Instance, mode: CacheMode) -> Result<S
     if c.ports.fs_units.state(next)? == UnitState::Active {
         return Ok(String::new());
     }
-    if mode == CacheMode::ReadOnly {
-        return Err(Done::deferred(
-            Reason::Draining,
-            format!(
-                "the store serves read-only and its fill socket is not up until it takes the \
-                 cache lock: {} is not started yet, and cutover runs again",
-                fs_name(next)
-            ),
-            DRAIN_RETRY_SECS,
-        ));
-    }
+    let waited = if mode == CacheMode::ReadOnly {
+        let since = c.ports.clock.now_ms();
+        if c.look().read_write().is_none() {
+            return Err(Done::deferred(
+                Reason::Draining,
+                format!(
+                    "the store still serves read-only after {READ_WRITE_ATTEMPTS} looks, and its \
+                     fill socket is not up until it takes the cache lock: {} is not started",
+                    fs_name(next)
+                ),
+                DRAIN_RETRY_SECS,
+            ));
+        }
+        let secs = c.ports.clock.now_ms().saturating_sub(since) / 1000;
+        format!("; the store took the cache lock after {secs} s")
+    } else {
+        String::new()
+    };
     let live = next.other();
     let note = match c.ports.fs_units.state(live)? {
         UnitState::Active => String::new(),
@@ -294,7 +306,7 @@ pub(super) fn take(c: &Ctx<'_, '_>, next: Instance, mode: CacheMode) -> Result<S
         ),
     };
     start_taking(c, next)?;
-    Ok(note)
+    Ok(format!("{waited}{note}"))
 }
 
 /// Lays the marker of `next`, starts it and requires its unit active (the take is done). A start

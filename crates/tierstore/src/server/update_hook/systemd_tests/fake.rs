@@ -182,6 +182,9 @@ struct World {
     lies: BTreeMap<PathBuf, String>,
     mute: BTreeSet<PathBuf>,
     read_only: bool,
+    /// The cache lock as the server holds it, when a test asks for it
+    /// ([`SystemdFake::hold_cache_lock`]); `read_only` then says nothing.
+    cache_lock: Option<CacheLock>,
     record: Option<Vec<u8>>,
     busy: bool,
     now: u64,
@@ -204,7 +207,72 @@ struct World {
     fs: fake_fs::FsWorld,
 }
 
+/// The lock of the local cache, as the server takes it: one instance holds it until its process
+/// ends, and an instance that serves without it is read-only. It is free once the holder's unit
+/// runs no more, and the instance that serves then takes it after `promote_secs` seconds of the
+/// clock (its next tick and a scan of the cache; at the first second for 0). The clock alone moves it: a pause of a second also
+/// counts down the drain of each old instance, as the `state` looks do.
+#[derive(Clone, Copy)]
+struct CacheLock {
+    holder: Option<Instance>,
+    promote_secs: u32,
+    /// The seconds still to go of the scan of an instance that found the lock free.
+    promoting: Option<u32>,
+}
+
 impl World {
+    /// The instance that answers on the public port.
+    fn serving(&self) -> Option<Instance> {
+        Instance::ALL.into_iter().find(|i| {
+            let unit = &self.units[i];
+            unit.serving && unit.state == UnitState::Active
+        })
+    }
+
+    /// Whether the store that answers says `ready read-only`.
+    pub(super) fn store_read_only(&self) -> bool {
+        match self.cache_lock {
+            Some(lock) => lock.holder.is_none() || lock.holder != self.serving(),
+            None => self.read_only,
+        }
+    }
+
+    /// A second of the clock under the cache lock: the old instances drain on, a holder whose
+    /// unit runs no more lets the lock go, and the instance that serves scans its cache and takes
+    /// it.
+    fn tick_second(&mut self) {
+        let Some(mut lock) = self.cache_lock else {
+            return;
+        };
+        for unit in self.units.values_mut() {
+            if unit.state == UnitState::Deactivating {
+                if unit.left == 0 {
+                    *unit = Unit::off();
+                } else {
+                    unit.left -= 1;
+                }
+            }
+        }
+        if lock.holder.is_some_and(|h| !self.units[&h].state.running()) {
+            lock.holder = None;
+        }
+        if lock.holder.is_none() {
+            let left = lock
+                .promoting
+                .unwrap_or(lock.promote_secs)
+                .saturating_sub(1);
+            lock.promoting = None;
+            if let Some(taker) = self.serving() {
+                if left == 0 {
+                    lock.holder = Some(taker);
+                } else {
+                    lock.promoting = Some(left);
+                }
+            }
+        }
+        self.cache_lock = Some(lock);
+    }
+
     /// The path of the marker the unit file's condition names for `instance`.
     fn condition_path(instance: Instance) -> PathBuf {
         PathBuf::from(unit_condition().replace("%i", instance.letter()))
@@ -361,6 +429,7 @@ impl SystemdFake {
             lies: BTreeMap::new(),
             mute: BTreeSet::new(),
             read_only: false,
+            cache_lock: None,
             record: None,
             busy: false,
             now: 0,
@@ -528,6 +597,19 @@ impl SystemdFake {
     /// Whether `/readyz` says the cache is read-only.
     pub fn set_read_only(&self, read_only: bool) {
         self.w.borrow_mut().read_only = read_only;
+    }
+
+    /// From now on `/readyz` says what the cache lock says ([`CacheLock`]): the instance that
+    /// serves now holds it, and an instance that finds it free takes it `promote_secs` seconds
+    /// later.
+    pub fn hold_cache_lock(&self, promote_secs: u32) {
+        let mut w = self.w.borrow_mut();
+        let holder = w.serving();
+        w.cache_lock = Some(CacheLock {
+            holder,
+            promote_secs,
+            promoting: None,
+        });
     }
 
     /// Puts `instance` in a state, running `release` and serving or not; a hand-over under way ends
@@ -795,7 +877,7 @@ impl Instances for SystemdFake {
             return Err(PortError::failed(PortKind::Instances, "timed out"));
         }
         let body = if path == "/readyz" {
-            if w.read_only {
+            if w.store_read_only() {
                 "ready read-only".to_owned()
             } else {
                 "ready read-write".to_owned()
@@ -879,7 +961,11 @@ impl Clock for SystemdFake {
     }
 
     fn pause(&self, span: Duration) {
-        self.w.borrow_mut().now += u64::try_from(span.as_millis()).unwrap_or(u64::MAX);
+        let mut w = self.w.borrow_mut();
+        w.now += u64::try_from(span.as_millis()).unwrap_or(u64::MAX);
+        for _ in 0..span.as_secs() {
+            w.tick_second();
+        }
     }
 }
 
