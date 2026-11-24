@@ -5,6 +5,7 @@ use std::fmt::Display;
 use std::future::Future;
 use std::net::{SocketAddr, TcpListener};
 use std::os::fd::{AsFd, BorrowedFd};
+use std::os::unix::fs::MetadataExt as _;
 use std::path::PathBuf;
 use std::time::Duration;
 
@@ -159,8 +160,10 @@ pub(crate) fn texts(lines: &[String]) -> Vec<&str> {
 
 /// The device and inode of the file a descriptor is of: two descriptors of one file have the same.
 pub(crate) fn identity(fd: BorrowedFd<'_>) -> (u64, u64) {
-    let stat = rustix::fs::fstat(fd).expect("a stat");
-    (stat.st_dev, stat.st_ino)
+    // Through std, whose numbers are `u64` on every system (macOS's `st_dev` is an `i32`).
+    let file = std::fs::File::from(fd.try_clone_to_owned().expect("a copy"));
+    let meta = file.metadata().expect("a stat");
+    (meta.dev(), meta.ino())
 }
 
 /// Yields to the other tasks a thousand times: what a test does before it asserts that something
