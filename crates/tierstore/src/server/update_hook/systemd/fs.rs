@@ -40,6 +40,7 @@
 use super::super::HANDOFF_FS_CAPABILITY;
 use super::super::params::{Params, Previous};
 use super::super::ports::{Instance, UnitState};
+use super::super::probe::CacheMode;
 use super::super::record::{Marker, Record};
 use super::super::report::{Done, Reason};
 use super::{Ctx, DRAIN_RETRY_SECS, FsPolicy};
@@ -244,14 +245,32 @@ pub(super) fn is_active(c: &Ctx<'_, '_>, record: &Record) -> Result<bool, Done> 
 /// inactive holds nothing (its unit, and with it its descriptor store, is gone) and a fresh mount
 /// is the only way, which the detail says.
 ///
+/// Nor is `next` started while the store that serves (`mode`, as its `/readyz` said it) is
+/// read-only: it binds the fill socket only once it holds the cache lock, after the old store
+/// exited and its cache was scanned again, and until then nothing answers that socket. A hand-over
+/// in that gap waits for the old instance's uploads and unpins, each until its deadline, and on a
+/// node whose scan outlasts the taker's wait the take fails. The step defers (`draining`) and
+/// runs again; it does so also where `next` would mount afresh, for one rule in both cases.
+///
 /// A start that fails, or leaves the unit anything but active, has taken nothing and the old
 /// instance resumed: `next` is not stopped (it may be a `Restart=on-failure` retry that is taking
 /// the mount), its marker is removed so that systemd does not start it again, and the step fails.
 /// A start that succeeded and a look at the unit that failed leaves the marker: the unit may hold
 /// the mount, as its only holder.
-pub(super) fn take(c: &Ctx<'_, '_>, next: Instance) -> Result<String, Done> {
+pub(super) fn take(c: &Ctx<'_, '_>, next: Instance, mode: CacheMode) -> Result<String, Done> {
     if c.ports.fs_units.state(next)? == UnitState::Active {
         return Ok(String::new());
+    }
+    if mode == CacheMode::ReadOnly {
+        return Err(Done::deferred(
+            Reason::Draining,
+            format!(
+                "the store serves read-only and its fill socket is not up until it takes the \
+                 cache lock: {} is not started yet, and cutover runs again",
+                fs_name(next)
+            ),
+            DRAIN_RETRY_SECS,
+        ));
     }
     let live = next.other();
     let note = match c.ports.fs_units.state(live)? {

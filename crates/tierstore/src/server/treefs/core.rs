@@ -237,8 +237,10 @@ pub(in crate::server) struct Core {
     /// Read by a detach from its decision under the lifecycle lock to the end of its unpins,
     /// which it makes after it released that lock, and written by `Core::hold`: so a hold waits
     /// for the unpins of the detaches already decided, and no unpin of this process follows the
-    /// pins of a successor. Only the threads that detach and hold take it. The lifecycle lock is
-    /// never taken while it is read: a hold keeps the lifecycle lock while it waits to write it.
+    /// pins of a successor. Also written, with no other lock held, by `Core::wait_freeing`, which
+    /// waits for those unpins before the readers of a hand-over stop. Only the threads that
+    /// detach, hold and quiesce take it. The lifecycle lock is never taken while it is read: a
+    /// hold keeps the lifecycle lock while it waits to write it.
     freeing: RwLock<()>,
     /// Whether a successor is taking over: no attach or detach is done, so that this process
     /// writes neither the table of tree numbers nor the attachments file (`Core::hold`).
@@ -581,9 +583,29 @@ impl Core {
         self.live.wait_sent();
     }
 
+    /// Waits, with no lock of the core held, for the unpins of the detaches decided now and for the
+    /// announcement being sent: what [`Core::hold`] waits for, waited for before the readers of a
+    /// hand-over stop (`Running::quiesce`). A detach decided after it is waited for by the hold.
+    /// While it waits, a detach that comes waits too, under the lifecycle lock, and so does what
+    /// takes that lock (a lookup that attaches a tree): the stall `Core::hold` makes as well.
+    pub(super) fn wait_freeing(&self) {
+        drop(self.freeing.write().unwrap_or_else(PoisonError::into_inner));
+        self.live.wait_sent();
+    }
+
     /// Marks a detach whose unpins are to come, until the guard is dropped (`Core::hold`).
     pub(super) fn freeing(&self) -> RwLockReadGuard<'_, ()> {
         self.freeing.read().unwrap_or_else(PoisonError::into_inner)
+    }
+
+    /// Whether a write of `freeing` is waited for (by [`Core::hold`] or [`Core::wait_freeing`]): a
+    /// read is then refused.
+    #[cfg(test)]
+    pub(super) fn freeing_awaited(&self) -> bool {
+        matches!(
+            self.freeing.try_read(),
+            Err(std::sync::TryLockError::WouldBlock)
+        )
     }
 
     /// Whether [`Core::hold`] is on.

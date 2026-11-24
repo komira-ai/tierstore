@@ -375,6 +375,16 @@ impl Running {
         locked(&self.parts).serving.reading()
     }
 
+    /// Whether readers of the device are running, or `None` while the parts are locked: a quiesce
+    /// holds them from the stop of the readers on.
+    #[cfg(test)]
+    pub(super) fn reading_now(&self) -> Option<bool> {
+        self.parts
+            .try_lock()
+            .ok()
+            .map(|parts| parts.serving.reading())
+    }
+
     /// The core the mount is served from.
     #[cfg(test)]
     pub(super) fn core(&self) -> &Arc<Core> {
@@ -413,7 +423,19 @@ impl Running {
     /// each holds and stop, and the commits of the put directory still running answer theirs (a
     /// commit waiting for a release ends at once; one that uploads, by its deadline). Blocks until
     /// then.
+    ///
+    /// What asks the node's tierstore over the fill socket is waited for first, while the readers
+    /// still serve: the uploads of the commits that run now, the unpins of the detaches decided
+    /// now, and the announcement being sent. Each lasts until its deadline while that socket does
+    /// not answer (the tierstore restarting), and with the readers stopped the mount would answer
+    /// nothing for that long. A request that takes the lifecycle lock (a lookup that attaches a
+    /// tree) can still wait for the unpins, as a detach decided in the meantime waits for them under
+    /// that lock. What begins after this first wait is waited for after the stop, as before.
     pub(super) fn quiesce(&self) {
+        if let Some(put) = self.core.put() {
+            put.drain_uploads();
+        }
+        self.core.wait_freeing();
         let mut parts = locked(&self.parts);
         parts.control.pause();
         parts.serving.stop_reading();

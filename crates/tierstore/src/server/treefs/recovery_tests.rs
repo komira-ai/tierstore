@@ -2,6 +2,8 @@
 //! test (`fakedev.rs`): no mount, no privilege. The connection was set up by an earlier process,
 //! which left its state in the runtime directory.
 
+use std::sync::Arc;
+
 use tsfuse::abi::InitFlags;
 
 use super::backing;
@@ -12,7 +14,7 @@ use super::init_record::{self, Record, RecordError};
 use super::ino;
 use super::run::{Prepared, Running};
 use super::start::StartError;
-use super::testing::{Rig, sample, sha};
+use super::testing::{Rig, sample, sha, until};
 
 /// The rig and its settings, with the record the process that mounted left.
 fn left_behind(name: &str, resend: bool) -> (Rig, FsSettings) {
@@ -145,6 +147,55 @@ fn a_quiesced_process_reads_nothing_and_a_resumed_one_answers_what_waited() {
     answered(&kernel.reply(), 2);
     kernel.getattr(3, ino::ROOT);
     answered(&kernel.reply(), 3);
+}
+
+/// Calls its function when dropped: lets a gate through when a test fails, so that it ends.
+struct OnDrop<F: FnMut()>(F);
+
+impl<F: FnMut()> Drop for OnDrop<F> {
+    fn drop(&mut self) {
+        (self.0)();
+    }
+}
+
+/// Asserts that while a hand-over waits for the unpin of a detach decided before it, which the
+/// node's tierstore does not answer (as while it restarts and its fill socket is away), the readers
+/// still answer: a request the kernel sends once the quiesce waits is answered. Once the unpin is
+/// let through the quiesce returns with the core held, reads nothing more, and a resume answers
+/// what waited. Catches a quiesce that stops the readers before it waits for the unpins, which
+/// leaves the mount answering nothing for as long as the fill socket does not answer.
+#[test]
+fn the_readers_answer_while_a_hand_over_waits_for_an_unpin() {
+    let (rig, settings) = left_behind("tfs-rec-quiesce-unpin", false);
+    let root = rig.upstream.built.lock().unwrap().root.clone();
+    let (device, kernel) = fakedev::pair();
+    let running = Arc::new(adopt(&settings, device, false));
+    let _ = running.core().attach(&root, "run-1").unwrap();
+    rig.upstream.gate_verb("unpin");
+    let _go = OnDrop(|| rig.upstream.permit_verb("unpin", 1_000));
+    let detaching = Arc::clone(&running);
+    let detach = std::thread::spawn(move || detaching.core().detach("run-1"));
+    rig.upstream.wait_for_verb("unpin", 1);
+    let quiescing = Arc::clone(&running);
+    let quiesce = std::thread::spawn(move || quiescing.quiesce());
+    // The quiesce waits for the unpin.
+    until(|| running.core().freeing_awaited());
+    assert_eq!(
+        running.reading_now(),
+        Some(true),
+        "the readers stopped before the quiesce waited for the unpin"
+    );
+    kernel.getattr(7, ino::ROOT);
+    answered(&kernel.reply(), 7);
+    assert!(!quiesce.is_finished());
+    rig.upstream.permit_verb("unpin", 1);
+    quiesce.join().unwrap();
+    assert!(detach.join().unwrap().is_some());
+    assert!(running.core().is_held());
+    kernel.getattr(8, ino::ROOT);
+    kernel.assert_silent();
+    running.resume().unwrap();
+    answered(&kernel.reply(), 8);
 }
 
 /// Asserts that the descriptor and the control socket a hand-over offers are copies of the process's

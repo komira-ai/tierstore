@@ -14,6 +14,8 @@ use std::os::unix::fs::{MetadataExt as _, PermissionsExt as _};
 use std::os::unix::net::UnixListener;
 use std::path::{Path, PathBuf};
 use std::process::{Command, Stdio};
+use std::sync::atomic::{AtomicBool, Ordering};
+use std::sync::{Arc, mpsc};
 use std::time::Duration;
 
 use rustix::fs::{CWD, FileType, Mode, OFlags, XattrFlags};
@@ -563,6 +565,59 @@ fn a_commit_uploading_at_a_hand_over_is_answered_before_the_quiesce_returns() {
                 "the commit was not finished before the quiesce returned"
             );
             puts.let_go();
+            rename.join().unwrap().unwrap();
+            served.adopt(device, Some(UnixListener::from(control)));
+            first.give_up();
+        });
+        drop(first);
+    });
+}
+
+/// Asserts that while a hand-over waits for a commit whose upload the node's tierstore does not
+/// answer (as while it restarts and its fill socket is away), the mount still answers: a `statfs`
+/// of the mount made in that wait is answered, and only then is the upload let go, so the quiesce
+/// returns with the commit uploaded. Catches a quiesce that stops the readers before it waits for
+/// the upload, which leaves the mount answering nothing until the upload's deadline: a `statfs`
+/// that never returns, and an upload never let go, which ends at its deadline unfinished.
+#[test]
+fn the_mount_answers_while_a_hand_over_waits_for_an_upload() {
+    with_fuse(|| {
+        let mut served = Served::start("put-mount-answers-in-quiesce");
+        let job = served.at(JOB);
+        write_file(&job.join("pack.part"), b"uploading");
+        let puts = Arc::clone(&served.rig.upstream.puts);
+        puts.hold();
+        let first = served.running.take().unwrap();
+        let (said, answered) = mpsc::channel();
+        let (gate, mountpoint) = (Arc::clone(&puts), served.rig.mountpoint.clone());
+        let asked = AtomicBool::new(false);
+        *first.core().put().unwrap().before_drain.lock().unwrap() = Some(Arc::new(move || {
+            if asked.swap(true, Ordering::AcqRel) {
+                return;
+            }
+            let (gate, mountpoint, said) = (Arc::clone(&gate), mountpoint.clone(), said.clone());
+            let _ = std::thread::spawn(move || {
+                let _ = said.send(rustix::fs::statfs(&mountpoint).is_ok());
+                gate.let_go();
+            });
+        }));
+        let (device, control) = first.share().unwrap();
+        std::thread::scope(|scope| {
+            let rename = scope.spawn(|| std::fs::rename(job.join("pack.part"), job.join("pack")));
+            puts.wait_for_held(1);
+            first.quiesce();
+            // An answer that did not come leaves the upload held: it is let go for the rename.
+            let heard = answered.try_recv();
+            puts.let_go();
+            assert_eq!(
+                heard,
+                Ok(true),
+                "the mount did not answer while the quiesce waited for the upload"
+            );
+            assert_eq!(
+                served.object(&format!("{JOB}/pack")).as_deref(),
+                Some(&b"uploading"[..])
+            );
             rename.join().unwrap().unwrap();
             served.adopt(device, Some(UnixListener::from(control)));
             first.give_up();
