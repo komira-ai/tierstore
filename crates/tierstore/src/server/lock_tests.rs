@@ -5,7 +5,7 @@ use std::path::Path;
 
 use tierstore_testkit::dir::TestDir;
 
-use super::lock::{NETWORK, check_lock_path, check_type, try_take};
+use super::lock::{NETWORK, Received, check_lock_path, check_type, try_take};
 
 /// Asserts that the lock is held by the one that took it until it is dropped: a second try, while
 /// the first is held, gets nothing and is not an error; the file is made with mode 0600; and a
@@ -115,4 +115,89 @@ fn a_lock_path_is_an_absolute_path_that_names_a_file() {
     assert_eq!(empty, Err("must be an absolute path"));
     let root = check_lock_path(Path::new("/"));
     assert_eq!(root, Err("must name a file, not a directory"));
+}
+
+/// Asserts that a copy of a held lock's descriptor holds the same lock: with the holder dropped
+/// disarmed (it closes, it does not unlock) a third try still finds the lock held while the copy
+/// is open, and takes it once the copy is closed too. It would catch a hand-over in which the
+/// process that gave the lock unlocks it on its way out, under its successor.
+#[test]
+fn a_shared_lock_outlives_its_disarmed_holder_and_ends_with_the_last_descriptor() {
+    let dir = TestDir::under(std::env::temp_dir(), "tierstore-lock-shared");
+    let path = dir.path().join("instance.lock");
+    let mut first = try_take(&path).unwrap().unwrap();
+    assert_eq!(first.path(), path);
+    let copy = first.share().unwrap();
+    first.disarm();
+    drop(first);
+    assert!(try_take(&path).unwrap().is_none(), "the copy holds it");
+    drop(copy);
+    assert!(
+        try_take(&path).unwrap().is_some(),
+        "the last descriptor closed"
+    );
+}
+
+/// Asserts that the one explicit unlock frees the lock for every descriptor of it: with a copy
+/// still open, a third try takes the lock once the holder unlocked. It would catch an unlock that
+/// leaves a successor that died holding nothing in the way of the one started after it.
+#[test]
+fn an_unlock_frees_the_lock_for_every_descriptor_of_it() {
+    let dir = TestDir::under(std::env::temp_dir(), "tierstore-lock-unlock");
+    let path = dir.path().join("instance.lock");
+    let first = try_take(&path).unwrap().unwrap();
+    let _copy = first.share().unwrap();
+    first.unlock().unwrap();
+    assert!(try_take(&path).unwrap().is_some());
+}
+
+/// Asserts that a received descriptor of the lock is checked against the path: the file at the
+/// path is taken, and a descriptor of another file, of a directory, or of a file that the path no
+/// longer leads to is refused with words that name the path. It would catch a successor that
+/// believes it holds the lock of a file nothing else looks at.
+#[test]
+fn a_received_lock_must_be_the_regular_file_at_the_path() {
+    let dir = TestDir::under(std::env::temp_dir(), "tierstore-lock-received");
+    let path = dir.path().join("instance.lock");
+    let held = try_take(&path).unwrap().unwrap();
+    let received = Received::of(held.share().unwrap(), &path).unwrap();
+    assert!(received.is_current());
+    let other = dir.path().join("other");
+    std::fs::write(&other, b"").unwrap();
+    let file = std::fs::File::open(&other).unwrap();
+    let refused = Received::of(file.into(), &path).unwrap_err();
+    assert_eq!(refused.kind(), std::io::ErrorKind::InvalidData);
+    let named = format!("the lock descriptor is not the file at {}", path.display());
+    assert_eq!(refused.to_string(), named);
+    let directory = std::fs::File::open(dir.path()).unwrap();
+    let refused = Received::of(directory.into(), &path).unwrap_err();
+    let named = format!(
+        "the lock descriptor for {} is not a regular file",
+        path.display()
+    );
+    assert_eq!(refused.to_string(), named);
+    std::fs::remove_file(&path).unwrap();
+    assert!(!received.is_current(), "the path leads nowhere");
+    let refused = Received::of(held.share().unwrap(), &path).unwrap_err();
+    assert_eq!(refused.kind(), std::io::ErrorKind::InvalidData);
+}
+
+/// Asserts that a received lock dropped before it is the writer's only closes, so the process it
+/// came from keeps the lock; and that the writer it becomes unlocks when it is dropped, as a lock
+/// taken does. It would catch a successor that naks or fails and frees the lock of the process
+/// that goes on writing.
+#[test]
+fn a_received_lock_only_closes_until_it_is_the_writer() {
+    let dir = TestDir::under(std::env::temp_dir(), "tierstore-lock-writer");
+    let path = dir.path().join("instance.lock");
+    let mut held = try_take(&path).unwrap().unwrap();
+    drop(Received::of(held.share().unwrap(), &path).unwrap());
+    assert!(try_take(&path).unwrap().is_none(), "still the holder's");
+    let received = Received::of(held.share().unwrap(), &path).unwrap();
+    held.disarm();
+    drop(held);
+    let writer = received.into_writer();
+    assert!(try_take(&path).unwrap().is_none(), "the writer's");
+    drop(writer);
+    assert!(try_take(&path).unwrap().is_some());
 }

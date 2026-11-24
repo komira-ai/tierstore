@@ -251,6 +251,7 @@ async fn a_taker_reads_what_it_is_told_and_refuses_what_is_not_the_protocol() {
         mountpoint: &mountpoint,
         control: &control,
         wait: Duration::from_secs(3600),
+        device: |_| Ok(()),
     };
     // Nobody there, and a file nobody listens on.
     assert!(take(&paths, Box::new(|_| Ok(()))).await.unwrap().is_none());
@@ -289,10 +290,11 @@ async fn a_taker_reads_what_it_is_told_and_refuses_what_is_not_the_protocol() {
             result.err()
         );
     }
-    // An offer and `ack`, then something that is not `done`.
+    // An offer and `ack`, then something that is not `done`. The control socket listens, as the
+    // taker checks.
     let (one, two) = (
         std::fs::File::open("/dev/null").unwrap(),
-        std::fs::File::open("/dev/null").unwrap(),
+        std::os::unix::net::UnixListener::bind(dir.path().join("offered.sock")).unwrap(),
     );
     let accepted = listener.accept();
     let lines = offer_lines(&mountpoint, &control);
@@ -327,6 +329,7 @@ async fn a_running_instance_that_never_answers_is_given_up_after_the_wait() {
         mountpoint: &mountpoint,
         control: &control,
         wait: Duration::from_secs(30),
+        device: |_| Ok(()),
     };
     let accepted = listener.accept();
     let hang = async {

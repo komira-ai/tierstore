@@ -21,8 +21,10 @@
 # new instance answers only once it has opened its local cache, which took minutes on a slow
 # disk) and its probe of the build gauge (60 looks), and, on macOS, the bootout of the file
 # service's job first (ExitTimeOut, 150 s: an unmount of at most four steps of 25 s, see
-# packaging/macos-pkg/tierstore-fs.plist), the bootout of the job (ExitTimeOut, 90 s: the 1 s
-# settle and the 60 s drain deadline with a margin), its bootstrap and the same wait;
+# packaging/macos-pkg/tierstore-fs.plist), the bootout of the job (ExitTimeOut, 210 s: the 1 s
+# settle and the 60 s drain deadline, the 120 s at most of an unmount after them, and a margin,
+# see packaging/hostkeeper/units/tierstore.plist), its bootstrap and the same wait: 150 s, 210 s
+# and 1060 looks a second apart are 1420 s, below the bound;
 # `rollback` (1500 s) covers the same moves back.
 # `cleanup` (1300 s) is above the stop timeout of a Linux instance (TimeoutStopSec, 960 s: the
 # 10 s settle, the 15 min drain deadline and a margin). `prepare = 0` is unbounded.

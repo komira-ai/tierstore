@@ -6,6 +6,13 @@
 //! finds it held goes on without and tries again later. The kernel frees the lock when the
 //! process exits or crashes, so nothing has to release it.
 //!
+//! A lock belongs to the open file description, not to the process: a descriptor of it sent to
+//! another process (`SCM_RIGHTS`, in the hand-over of `server/handoff/`) holds the same lock, and
+//! the kernel frees it only when the last descriptor of the description is closed. An unlock
+//! (`flock(LOCK_UN)`) through any of them frees it for all, so a lock whose description another
+//! process has a descriptor of too is never unlocked by a drop: [`LockFile::disarm`] for the one
+//! that handed it over, [`Received`] for the one it was handed to.
+//!
 //! A lock is on the file that was opened, not on the name. A file that is removed and made again
 //! under the same name is another file, and a second process can lock it while the first still
 //! holds the old one, so [`LockFile::is_current`] says whether the name still leads to the file
@@ -14,16 +21,20 @@
 
 use std::fs::{File, TryLockError};
 use std::io;
+use std::os::fd::{AsFd as _, OwnedFd};
 use std::os::unix::fs::MetadataExt as _;
 use std::path::{Path, PathBuf};
 
 use rustix::fs::{CWD, Mode, OFlags, openat};
 
-/// A lock file that is held. Dropping it unlocks, and closes the file.
+/// A lock file that is held. Dropping it unlocks, and closes the file, unless it was
+/// [disarmed](LockFile::disarm): then it only closes.
 #[derive(Debug)]
 pub(super) struct LockFile {
     file: File,
     path: PathBuf,
+    /// Whether the drop unlocks.
+    armed: bool,
 }
 
 /// Opens the lock file at `path` (making it, mode 0600, if it is not there) and tries the
@@ -46,6 +57,7 @@ pub(super) fn try_take(path: &Path) -> io::Result<Option<LockFile>> {
     let taken = LockFile {
         file,
         path: path.to_owned(),
+        armed: true,
     };
     // The name may have been given to another file between the open and the lock: a lock on a
     // file nothing else will look at. It is dropped, and the caller tries again.
@@ -79,15 +91,104 @@ impl LockFile {
         let named = std::fs::symlink_metadata(&self.path).ok().map(identity);
         held.is_some_and(|held| Some(held) == named)
     }
+
+    /// The path the lock was taken under.
+    pub(super) fn path(&self) -> &Path {
+        &self.path
+    }
+
+    /// A descriptor of the same open file description, which holds the same lock: what an offer
+    /// of the lock sends.
+    ///
+    /// # Errors
+    /// What the system said about the copy.
+    pub(super) fn share(&self) -> io::Result<OwnedFd> {
+        self.file.as_fd().try_clone_to_owned()
+    }
+
+    /// From here the drop only closes the file: another process holds a descriptor of the lock
+    /// too, and an unlock would free it for that one as well.
+    pub(super) fn disarm(&mut self) {
+        self.armed = false;
+    }
+
+    /// Unlocks, for every descriptor of the description: the one unlock of a lock that was handed
+    /// over, made by the process that handed it once its successor is gone.
+    ///
+    /// # Errors
+    /// What the system said.
+    pub(super) fn unlock(&self) -> io::Result<()> {
+        self.file.unlock()?;
+        tracing::debug!("tierstore: lock file unlocked: {}", self.path.display());
+        Ok(())
+    }
 }
 
 impl Drop for LockFile {
     fn drop(&mut self) {
+        if !self.armed {
+            tracing::debug!("tierstore: lock file closed: {}", self.path.display());
+            return;
+        }
         // Unlocked before the close, so a copy of the descriptor that a forked child still has
         // does not keep the lock. An error leaves the close to release it.
         let _ = self.file.unlock();
         tracing::debug!("tierstore: lock file released: {}", self.path.display());
     }
+}
+
+/// A descriptor of a lock that another process holds, received in a hand-over. Dropping it only
+/// closes it: the lock stays with the other process. It becomes a [`LockFile`] when its holder
+/// becomes the writer ([`Received::into_writer`]).
+#[derive(Debug)]
+pub(crate) struct Received(LockFile);
+
+impl Received {
+    /// The descriptor `fd`, received as the lock file at `path`.
+    ///
+    /// # Errors
+    /// `InvalidData` when the descriptor is not a regular file, or not the file at `path` (its
+    /// `fstat` is not the `lstat` of the path); what the system said when neither can be asked.
+    pub(super) fn of(fd: OwnedFd, path: &Path) -> io::Result<Self> {
+        // The kernel hands a descriptor over open on exec; a lock taken here is opened without.
+        rustix::io::fcntl_setfd(&fd, rustix::io::FdFlags::CLOEXEC)?;
+        let file = File::from(fd);
+        let received = Self(LockFile {
+            file,
+            path: path.to_owned(),
+            armed: false,
+        });
+        if !received.0.file.metadata()?.is_file() {
+            return Err(invalid(format!(
+                "the lock descriptor for {} is not a regular file",
+                path.display()
+            )));
+        }
+        if !received.0.is_current() {
+            return Err(invalid(format!(
+                "the lock descriptor is not the file at {}",
+                path.display()
+            )));
+        }
+        Ok(received)
+    }
+
+    /// Whether the path still leads to the file this descriptor is of.
+    pub(super) fn is_current(&self) -> bool {
+        self.0.is_current()
+    }
+
+    /// The lock, held by its new writer: from here its drop unlocks, as a lock taken does.
+    pub(super) fn into_writer(self) -> LockFile {
+        let Self(mut file) = self;
+        file.armed = true;
+        file
+    }
+}
+
+/// An error of the kind `InvalidData` that says `why`.
+fn invalid(why: String) -> io::Error {
+    io::Error::new(io::ErrorKind::InvalidData, why)
 }
 
 /// The file system types whose `flock` is not exclusive between processes on other hosts, or

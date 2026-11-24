@@ -5,16 +5,20 @@
 //!
 //! ```text
 //! new                                                       running
-//!  | take-fs 1 ─────────────────────────────────────────▶    |
+//!  | take-fs 1 / ready ─────────────────────────────────▶    |
 //!  | ◀── offer-fs / fuse <mountpoint> / control <path>   (+ the /dev/fuse and the control socket)
-//!  | the paths are those of its own settings?                |
+//!  | the running instance is its user? the paths are those of its own settings?
+//!  | the device is the FUSE device, the control socket listens?
 //!  | the state can be read, the descriptor is in the store   |
 //!  | ack ───────────────────────────────────────────────▶    |
 //!  |                                  each reader answers the request it holds and stops;
 //!  |                                  the control socket stops accepting; the counts are written
 //!  | ◀── done                                                |
-//!  | serves the connection from the state                    |
-//!  | ready ─────────────────────────────────────────────▶    | ends with status 0
+//!  | makes its state from the runtime directory; reads nothing of the device yet
+//!  | ready ─────────────────────────────────────────────▶    | removes its descriptor store's
+//!  |                                                          | entry; never reads the device again
+//!  | ◀── bye                                                  | ends with status 0
+//!  | reads the device, accepts on the control socket          |
 //! ```
 //!
 //! Or `refused` and a reason, for a request not understood or a taker that is not the user of the
@@ -23,13 +27,22 @@
 //! within `fs.handoff_wait`) has not taken the mount: the running instance reads requests again,
 //! accepts on its control socket again and binds its hand-over socket again. The running instance
 //! gives up nothing before `done` and the successor holds the descriptor in the service manager's
-//! store before `ack`, so at every moment someone holds the connection.
+//! store before `ack`, so at every moment someone holds the connection; the running instance reads
+//! the device until `ack` and never after `ready`, and the successor only after `bye`, so no
+//! request is read by both.
+//!
+//! The request's second line, `ready`, asks for the `bye`. A running instance of a release before
+//! it answers `refused` and "the request is not understood", and the taker asks again with
+//! `take-fs 1` alone: then the running instance ends at `ready` with no answer, as it did, and the
+//! taker reads the device once it has sent `ready`. A taker of such a release asks `take-fs 1`
+//! alone and is answered as before.
 //!
 //! The running instance's socket file is removed when it says `done`; the successor binds its own
-//! after `ready`. Mode 0600; a taker of another user is refused.
+//! after `bye`. Mode 0600; a taker of another user is refused, and a taker refuses a running
+//! instance of another user.
 
 use std::io::ErrorKind;
-use std::os::fd::{AsFd as _, OwnedFd};
+use std::os::fd::{AsFd as _, BorrowedFd, OwnedFd};
 use std::os::unix::fs::PermissionsExt as _;
 use std::os::unix::net::UnixListener as StdListener;
 use std::path::{Path, PathBuf};
@@ -39,12 +52,20 @@ use std::time::Duration;
 use tokio::net::{UnixListener, UnixStream};
 
 use crate::server::handoff::wire::{self, Frame};
+use crate::server::handoff::{Mount, check_control};
 use crate::server::{ACCEPT_PAUSE, pause_after};
 
 use super::run::Running;
+use super::sd::{FUSE_NAME, Manager};
 
 /// What the frames of a conversation are made of.
 const TAKE: &str = "take-fs 1";
+/// The request's second line, and the taker's frame once it serves.
+const READY: &str = "ready";
+/// The running instance's answer to `ready`, after which the taker reads the device.
+const BYE: &str = "bye";
+/// Why a request is refused when it is not one the running instance understands.
+const NOT_UNDERSTOOD: &str = "the request is not understood";
 
 /// Why a hand-over did not happen.
 #[derive(Debug, thiserror::Error)]
@@ -100,15 +121,92 @@ pub(super) struct Paths<'a> {
     pub control: &'a Path,
     /// `fs.handoff_wait`.
     pub wait: Duration,
+    /// The check of the offered device's kind: [`check_device`].
+    pub device: fn(BorrowedFd<'_>) -> std::io::Result<()>,
+}
+
+/// The FUSE character device (`/dev/fuse`): its major and minor numbers, which the kernel fixes
+/// (`MISC_MAJOR`, `FUSE_MINOR`).
+const FUSE_DEVICE: (u32, u32) = (10, 229);
+
+/// Whether a file of `mode` and device number `rdev` is the FUSE device.
+pub(super) fn is_fuse(mode: u32, rdev: u64) -> bool {
+    let character =
+        rustix::fs::FileType::from_raw_mode(mode) == rustix::fs::FileType::CharacterDevice;
+    character && (rustix::fs::major(rdev), rustix::fs::minor(rdev)) == FUSE_DEVICE
+}
+
+/// Checks that `fd` is the FUSE device, as the offer of a mount says it is.
+///
+/// # Errors
+/// `InvalidData` when it is not; what the system said when it cannot be asked.
+pub(in crate::server) fn check_device(fd: BorrowedFd<'_>) -> std::io::Result<()> {
+    let stat = rustix::fs::fstat(fd)?;
+    if is_fuse(stat.st_mode, stat.st_rdev) {
+        Ok(())
+    } else {
+        Err(std::io::Error::new(
+            ErrorKind::InvalidData,
+            "the offered device is not the FUSE device",
+        ))
+    }
 }
 
 /// The lines of an offer of the mount at `mountpoint` and the control socket at `control`.
-fn offer_lines(mountpoint: &Path, control: &Path) -> Vec<String> {
+pub(super) fn offer_lines(mountpoint: &Path, control: &Path) -> Vec<String> {
     vec![
         "offer-fs".to_owned(),
         format!("fuse {}", mountpoint.display()),
         format!("control {}", control.display()),
     ]
+}
+
+/// The mount of `running`, served with `settings`, as the one hand-over offers it
+/// (`server/handoff/`: `take 1`, `ready`, `mount`): shared, quiesced and resumed as `take-fs 1`
+/// does it, and at `ready` given up for good, with the descriptor's entry of `manager`'s store
+/// removed. A resume that cannot serve the mount again calls `stuck` with the error: the start
+/// passes what ends the process, so that its unit is started again and adopts the descriptor
+/// from its store.
+#[cfg_attr(
+    not(test),
+    expect(
+        dead_code,
+        reason = "the start of the fs interface offers its mount (one-service.md section 6, P3)"
+    )
+)]
+pub(in crate::server) fn offered(
+    running: &Arc<Running>,
+    settings: &super::config::FsSettings,
+    manager: Manager,
+    stuck: fn(&std::io::Error),
+) -> Mount {
+    let (sharing, quiescing, resuming, leaving) = (
+        Arc::clone(running),
+        Arc::clone(running),
+        Arc::clone(running),
+        Arc::clone(running),
+    );
+    Mount {
+        mountpoint: settings.mountpoint.clone(),
+        control: settings.control_socket.clone(),
+        share: Arc::new(move || sharing.share()),
+        quiesce: Arc::new(move || quiescing.quiesce()),
+        resume: Arc::new(move || stuck_on(resuming.resume(), stuck)),
+        give_up: Arc::new(move || {
+            leaving.give_up();
+            if let Err(why) = manager.unstore(FUSE_NAME) {
+                tracing::warn!("tierstore: the descriptor's store entry was not removed: {why}");
+            }
+        }),
+    }
+}
+
+/// Calls `stuck` with the error of a resume that failed: the mount cannot be served again.
+pub(super) fn stuck_on(resumed: std::io::Result<()>, stuck: fn(&std::io::Error)) {
+    if let Err(why) = resumed {
+        tracing::error!("tierstore: the mount cannot be served again: {why}");
+        stuck(&why);
+    }
 }
 
 /// The mount taken from a running instance: its descriptors, and the connection to it.
@@ -121,18 +219,36 @@ pub(super) struct Taken {
     pub notice: Notice,
 }
 
-/// The connection to the instance that handed the mount over.
-pub(super) struct Notice(UnixStream);
+/// The connection to the instance that handed the mount over, and whether it answers `ready` with
+/// `bye`.
+pub(super) struct Notice(UnixStream, bool);
 
 impl Notice {
-    /// Tells the running instance that this one serves the mount: it ends.
+    /// Tells the running instance that this one serves the mount: it ends. Where it answers `bye`
+    /// (it knows the step), this returns once it has: from then on it never reads the device, and
+    /// the successor may. A running instance of a release before the step ends with no answer.
     ///
     /// # Errors
-    /// What the system said.
+    /// What the system said; for an instance that answers, a connection that ended or a frame
+    /// other than `bye` (it gave up first and serves on: the successor must not serve beside it).
     pub(super) async fn ready(&self) -> Result<(), HandoverError> {
-        wire::send(&self.0, &["ready".to_owned()], &[])
+        let io = HandoverError::io;
+        wire::send(&self.0, &[READY.to_owned()], &[])
             .await
-            .map_err(HandoverError::io("telling the running instance it can end"))
+            .map_err(io("telling the running instance it can end"))?;
+        if !self.1 {
+            return Ok(());
+        }
+        let answer = wire::recv(&self.0)
+            .await
+            .map_err(io("waiting for the running instance's bye"))?;
+        if answer.lines == [BYE] {
+            Ok(())
+        } else {
+            Err(HandoverError::Protocol(
+                "something other than bye after ready",
+            ))
+        }
     }
 }
 
@@ -155,18 +271,46 @@ pub(super) async fn take(
     paths: &Paths<'_>,
     prepare: Prepare<'_>,
 ) -> Result<Option<Taken>, HandoverError> {
-    let exchanging = exchange(paths, prepare);
+    take_as(paths, prepare, rustix::process::geteuid().as_raw()).await
+}
+
+/// [`take`] from a running instance that must be the user `uid` (the tests name another).
+pub(super) async fn take_as(
+    paths: &Paths<'_>,
+    mut prepare: Prepare<'_>,
+    uid: u32,
+) -> Result<Option<Taken>, HandoverError> {
+    let exchanging = async {
+        match exchange(paths, &mut prepare, (uid, true)).await? {
+            Asked::Refused(why) if why == [NOT_UNDERSTOOD] => {
+                // A release before the `ready` line: asked as it understands.
+                exchange(paths, &mut prepare, (uid, false)).await
+            }
+            asked => Ok(asked),
+        }
+    };
     match tokio::time::timeout(paths.wait, exchanging).await {
-        Ok(taken) => taken,
+        Ok(Ok(Asked::Taken(taken))) => Ok(taken),
+        Ok(Ok(Asked::Refused(why))) => Err(HandoverError::Refused(why.join(" "))),
+        Ok(Err(why)) => Err(why),
         Err(_) => Err(HandoverError::Timeout(paths.socket.to_owned())),
     }
 }
 
-/// The whole exchange with the running instance.
+/// How one request ended: the mount taken (or none, where nothing answers), or a refusal and its
+/// reason.
+enum Asked {
+    Taken(Option<Taken>),
+    Refused(Vec<String>),
+}
+
+/// One exchange with the running instance, from a taker that requires it to be the user `uid`
+/// and, with `bye`, asks for the `bye` step.
 async fn exchange(
     paths: &Paths<'_>,
-    mut prepare: Prepare<'_>,
-) -> Result<Option<Taken>, HandoverError> {
+    prepare: &mut Prepare<'_>,
+    (uid, bye): (u32, bool),
+) -> Result<Asked, HandoverError> {
     let stream = match UnixStream::connect(paths.socket).await {
         Ok(stream) => stream,
         Err(why)
@@ -175,12 +319,24 @@ async fn exchange(
                 ErrorKind::NotFound | ErrorKind::ConnectionRefused
             ) =>
         {
-            return Ok(None);
+            return Ok(Asked::Taken(None));
         }
         Err(why) => return Err(HandoverError::io("connecting to the hand-over socket")(why)),
     };
     let io = HandoverError::io;
-    wire::send(&stream, &[TAKE.to_owned()], &[])
+    let peer = stream
+        .peer_cred()
+        .map_err(io("asking the running instance's user"))?;
+    if peer.uid() != uid {
+        let why = format!("the running instance is the user {}", peer.uid());
+        let stranger = std::io::Error::new(ErrorKind::PermissionDenied, why);
+        return Err(io("checking the running instance's user")(stranger));
+    }
+    let mut request = vec![TAKE.to_owned()];
+    if bye {
+        request.push(READY.to_owned());
+    }
+    wire::send(&stream, &request, &[])
         .await
         .map_err(io("asking for the mount"))?;
     let Frame { lines, mut fds } = wire::recv(&stream).await.map_err(io("reading the offer"))?;
@@ -188,7 +344,7 @@ async fn exchange(
         .split_first()
         .map_or(("", &[][..]), |(h, r)| (h.as_str(), r));
     if head == "refused" {
-        return Err(HandoverError::Refused(rest.join(" ")));
+        return Ok(Asked::Refused(rest.to_vec()));
     }
     if head != "offer-fs" || fds.len() != 2 {
         return Err(HandoverError::Protocol(
@@ -205,6 +361,11 @@ async fn exchange(
     }
     let control = fds.remove(1);
     let device = fds.remove(0);
+    let kinds = (paths.device)(device.as_fd()).and_then(|()| check_control(control.as_fd()));
+    if let Err(why) = kinds {
+        nak(&stream).await?;
+        return Err(HandoverError::Unprepared(why.to_string()));
+    }
     if let Err(why) = prepare(&device) {
         nak(&stream).await?;
         return Err(HandoverError::Unprepared(why));
@@ -223,9 +384,9 @@ async fn exchange(
     let taken = Taken {
         device,
         control: StdListener::from(control),
-        notice: Notice(stream),
+        notice: Notice(stream, bye),
     };
-    Ok(Some(taken))
+    Ok(Asked::Taken(Some(taken)))
 }
 
 /// Refuses the offer: the running instance goes on.
@@ -245,6 +406,8 @@ pub(super) struct Offer {
     wait: Duration,
     /// The user a taker must be.
     uid: u32,
+    /// The service manager whose store holds the descriptor: its entry is removed at `ready`.
+    manager: Manager,
 }
 
 impl Offer {
@@ -265,7 +428,16 @@ impl Offer {
             paths: (mountpoint.to_owned(), control.to_owned()),
             wait,
             uid: rustix::process::geteuid().as_raw(),
+            manager: Manager::default(),
         })
+    }
+
+    /// The same, removing the descriptor's entry of `manager`'s store at `ready`: from then on the
+    /// mount is the successor's, and a start of this unit that adopted the entry would read the
+    /// device beside it.
+    pub(super) fn with_manager(mut self, manager: Manager) -> Self {
+        self.manager = manager;
+        self
     }
 
     /// The same, for a taker of the user `uid`: the tests give another one.
@@ -309,9 +481,9 @@ impl Offer {
         running: &Arc<Running>,
     ) -> Result<bool, HandoverError> {
         let negotiated = tokio::time::timeout(self.wait, self.negotiate(stream, running)).await;
-        match negotiated {
-            Ok(Ok(true)) => {}
-            Ok(Ok(false)) => return Ok(false),
+        let bye = match negotiated {
+            Ok(Ok(Some(bye))) => bye,
+            Ok(Ok(None)) => return Ok(false),
             Ok(Err(why)) => {
                 tracing::warn!("tierstore fs: a hand-over request failed: {why}");
                 return Ok(false);
@@ -320,7 +492,7 @@ impl Offer {
                 tracing::warn!("tierstore fs: a hand-over request was not completed in time");
                 return Ok(false);
             }
-        }
+        };
         // The taker holds the descriptor in the service manager's store, and has said so.
         let quiescing = Arc::clone(running);
         tokio::task::spawn_blocking(move || quiescing.quiesce())
@@ -335,8 +507,16 @@ impl Offer {
             wire::recv(stream).await
         };
         let ready = tokio::time::timeout(self.wait, confirmed).await;
-        if matches!(ready, Ok(Ok(Frame { lines, .. })) if lines == ["ready"]) {
+        if matches!(ready, Ok(Ok(Frame { lines, .. })) if lines == [READY]) {
+            // The mount is the successor's for good: this process never reads the device again,
+            // and its unit, started again, must not adopt it from the store.
             running.give_up();
+            if let Err(why) = self.manager.unstore(FUSE_NAME) {
+                tracing::warn!("tierstore fs: the descriptor's store entry was not removed: {why}");
+            }
+            if bye && let Err(why) = wire::send(stream, &[BYE.to_owned()], &[]).await {
+                tracing::warn!("tierstore fs: bye was not sent: {why}");
+            }
             return Ok(true);
         }
         tracing::warn!("tierstore fs: the taker did not say it serves the mount; serving again");
@@ -367,25 +547,27 @@ impl Offer {
         &self,
         stream: &UnixStream,
         running: &Arc<Running>,
-    ) -> std::io::Result<bool> {
+    ) -> std::io::Result<Option<bool>> {
         let request = wire::recv(stream).await?;
-        if request.lines != [TAKE] {
-            return refuse(stream, "the request is not understood").await;
-        }
+        let bye = match request.lines.as_slice() {
+            [take] if take == TAKE => false,
+            [take, ready] if take == TAKE && ready == READY => true,
+            _ => return refuse(stream, NOT_UNDERSTOOD).await,
+        };
         if stream.peer_cred()?.uid() != self.uid {
             return refuse(stream, "the taker is not the user of this instance").await;
         }
         let (device, control) = running.share()?;
         let lines = offer_lines(&self.paths.0, &self.paths.1);
         wire::send(stream, &lines, &[device.as_fd(), control.as_fd()]).await?;
-        Ok(wire::recv(stream).await?.lines == ["ack"])
+        Ok((wire::recv(stream).await?.lines == ["ack"]).then_some(bye))
     }
 }
 
 /// Answers `refused` with `why`; the conversation is over and nothing was handed.
-async fn refuse(stream: &UnixStream, why: &str) -> std::io::Result<bool> {
+async fn refuse(stream: &UnixStream, why: &str) -> std::io::Result<Option<bool>> {
     wire::send(stream, &["refused".to_owned(), why.to_owned()], &[]).await?;
-    Ok(false)
+    Ok(None)
 }
 
 /// A socket at `path`, mode 0600; a file at the path is replaced.

@@ -252,6 +252,7 @@ fn kernel_of(rig: &Rig, info: &str) -> Kernel {
     Kernel {
         mountinfo: table,
         connections,
+        device: |_| Ok(()),
     }
 }
 
@@ -342,6 +343,7 @@ fn a_mount_that_cannot_be_aborted_or_detached_is_said_and_the_start_goes_on() {
     let none = Kernel {
         mountinfo: rig.dir.path().join("none"),
         connections: kernel.connections.clone(),
+        device: |_| Ok(()),
     };
     assert_eq!(none.connection_of(&rig.mountpoint), None);
     assert_eq!(none.tierstore_connection_of(&rig.mountpoint), None);

@@ -996,7 +996,7 @@ carries `<front> <address>` lines with one descriptor each, and a taker refuses 
 
 ```
 new (tierstore-fs@b)                                    old (tierstore-fs@a, running)
- | connect its hand-off socket, "take-fs 1" ───────▶     |
+ | connect its hand-off socket, "take-fs 1", "ready" ─▶  |
  | ◀── "offer-fs", "fuse <mountpoint>", "control <path>" + the /dev/fuse and control socket descriptors (SCM_RIGHTS)
  | mountpoint and paths match its settings?              |
  | FDSTORE=1 (FDNAME=fuse) and wait until systemd has it |
@@ -1006,9 +1006,18 @@ new (tierstore-fs@b)                                    old (tierstore-fs@a, run
  |                                                       | (readers poll the device, non-blocking, with a stop
  |                                                       | eventfd); stops accepting on the control socket
  | ◀── "done" (no thread holds a request)                |
- | reads the state (7.1), starts the session from the recorded INIT reply, serves; "ready" ─▶ |
- |                                                       | exits 0; its unit goes inactive, its store is dropped
+ | reads the state (7.1), prepares the session from the recorded INIT reply (reads nothing yet); "ready" ─▶ |
+ |                                                       | removes its store entry (FDSTOREREMOVE); never reads again
+ | ◀── "bye"                                             | exits 0; its unit goes inactive, its store is dropped
+ | starts its readers and its control socket: serves     |
 ```
+
+The second line of the request, `ready`, asks for the `bye`; a running instance of a release before it refuses the request
+as not understood, and the new one asks with `take-fs 1` alone and serves once it has sent `ready`, as before. With the
+`bye`, the old instance reads the device until `ack` and never after `ready`, and the new one only after `bye`: an old
+instance whose wait ran out and that resumed has not answered `bye`, so the two never read together. The new one also
+checks that the running instance is its own user, that the device is the FUSE character device and that the control
+socket listens, before `ack`.
 
 - No moment without a durable holder: the new instance's store has the descriptor before the old one stops, and the old
   one keeps its own until it exits after `ready`. If the new instance fails before `ready`, the old one resumes reading;

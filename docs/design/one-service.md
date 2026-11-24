@@ -498,6 +498,11 @@ long. So the lock passes in the hand-over:
   hand-over), so the restarted successor takes the lock at its next tick of
   `local_cache.lock_interval` instead of after the old one's whole drain. The connection ends only when the successor's
   process ends: the successor holds it until it exits.
+- **A lock handed on.** A successor offers the lock it received to a successor of its own only once the connection to the
+  instance it came from has ended (`LocalCache::lock_to_hand`, `predecessor_gone`): until then that instance may still
+  unlock it when its own successor's connection ends, which would free it under the third. A third instance that takes
+  over meanwhile gets the sockets alone and waits for the lock at its tick, as a taker without the lock does (read in code,
+  `server/local_cache/handing.rs`).
 - **The read-only window** is now from `ready` to `written`: the longest cache write in flight on the old process (a fill,
   bounded by its own deadline, or a put, bounded by the S3 request's), not its drain. Fills of the file system wait across
   it (1.5), up to `params.fetch_timeout`. The take of the write role does what a take does today (empty the stage, rescan,

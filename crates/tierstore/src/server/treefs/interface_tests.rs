@@ -109,6 +109,8 @@ impl FsNode {
         Kernel {
             mountinfo: table,
             connections,
+            // The stand-in for the device is a socket.
+            device: |_| Ok(()),
         }
     }
 
@@ -600,7 +602,8 @@ async fn the_fronts_drain_before_the_mount_is_left() {
 /// Asserts the update of a node of the one-process layout: a second process on the same file
 /// takes the mount from the first (on the runtime directory's hand-over socket) and then its S3
 /// sockets (on `server.handoff_socket`); the first serves S3 until then, drains and ends with
-/// success, and never serves the mount again.
+/// success, and never serves the mount again: it takes the descriptor out of its service manager's
+/// store when it gives the mount up.
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn a_second_process_takes_the_mount_then_the_sockets_of_the_first() {
     let node = FsNode::new("tsfs-one-update");
@@ -632,7 +635,8 @@ async fn a_second_process_takes_the_mount_then_the_sockets_of_the_first() {
         .unwrap()
         .unwrap();
     assert_eq!(drained, Drained { abandoned: 0 });
-    told(&first_manager, &["READY=1"]);
+    // The first gave the mount up at `ready`: its store no longer keeps the descriptor.
+    told(&first_manager, &["READY=1", "FDSTOREREMOVE=1\nFDNAME=fuse"]);
     told(
         &second_manager,
         &["FDSTORE=1\nFDNAME=fuse", "BARRIER=1", "READY=1"],

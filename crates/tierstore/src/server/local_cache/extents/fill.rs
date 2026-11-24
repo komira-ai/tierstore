@@ -111,6 +111,27 @@ pub(in crate::server::local_cache) struct ExtentState {
     writing: Mutex<()>,
 }
 
+impl ExtentState {
+    /// Whether a fill of a range is running.
+    pub(in crate::server::local_cache) fn filling(&self) -> bool {
+        !locked(&self.flights).is_empty()
+    }
+
+    /// Puts a flight of a range in the table, or takes it out: a fill of a range that is running,
+    /// for a test of what waits for the writes of the cache.
+    #[cfg(test)]
+    pub(in crate::server::local_cache) fn set_test_flight(&self, on: bool) {
+        let key = ("pack".to_owned(), 0, 1, "digest".to_owned());
+        let mut flights = locked(&self.flights);
+        if on {
+            let flight = futures::future::ready(Ok(())).boxed().shared();
+            let _ = flights.insert(key, flight);
+        } else {
+            let _ = flights.remove(&key);
+        }
+    }
+}
+
 /// What a request for a range found among the flights.
 enum Entered {
     /// A flight of the same range and digest is running: its end is the answer.

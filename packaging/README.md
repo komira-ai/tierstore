@@ -642,7 +642,7 @@ A build node that runs jobs can also serve the mount provider, which makes a job
 local while jobscheduler's agent readies the job's container. It is a `mount-provider` entry of
 `[[interface]]`, which an operator adds to `/etc/tierstore/config.toml` (the example `config.toml`
 is a storage node's and has none), on a Unix socket in the unit's `StateDirectory`
-(`/var/lib/tierstore`, writable under `ProtectSystem=strict`):
+(`/var/lib/tierstore`, the account's own, mode 0700):
 
 ```toml
 [[interface]]
@@ -757,7 +757,7 @@ instead of running with settings it did not read.
 | `server.gc_key_files` | GC keys; see GC keys |
 | `server.scoped_key_files` | scoped keys; see Scoped keys |
 | `server.grant_key_files`, `server.grant_max_lifetime` | deprecated and ignored (the read grant was removed; use a presigned GET URL, see Presigned GET URLs): accepted so that an old file starts; the server logs a warning and does not read the files |
-| `hot_store.kind`, `cold_store.kind` | the tiers: `s3` for a bucket of an S3-compatible store (also `dir` with a `path`, which must also be writable under `ProtectSystem=strict`, so add it to `ReadWritePaths=`, and `memory`) |
+| `hot_store.kind`, `cold_store.kind` | the tiers: `s3` for a bucket of an S3-compatible store (also `dir` with a `path`, owned by the account of the unit; under `ProtectSystem=strict`, which `tierstore.service` has and the template `tierstore@.service` has not, add it to `ReadWritePaths=`; and `memory`) |
 | `hot_store.endpoint`, `cold_store.endpoint` | where the tier's store is, `http://host[:port]` (TLS is not built yet); `hot_store.region` and `cold_store.region` set the signing region of a tier, `us-east-1` if not given |
 | `hot_store.budget` | the bytes the hot tier is meant to hold; the water marks are shares of it (`hot_store.high_water`, `hot_store.low_water`, `hot_store.critical`) |
 | `hot_store.usage_stale_after` | how old the usage that the reconciler publishes may be (2m by default, longer than `hot_store.lease_ttl`) before `/usagez` says 503 with the reason |
@@ -1097,8 +1097,18 @@ The deb and rpm packages install `tierstore@.service`, the a/b template of the u
 place of a single unit. It is the template of `hostkeeper/units` except that it runs
 `/usr/libexec/tierstore/tierstore --config /etc/tierstore/config.toml`. An instance starts only
 when its marker, `/var/lib/tierstore/run-a` or `run-b`, exists (`ConditionPathExists=`); the
-template has `StateDirectory=tierstore` (mode 0700, holding the markers and the hand-over socket),
-`ProtectSystem=strict` and `[Install] WantedBy=multi-user.target`. The packages write no file in
+template has `StateDirectory=tierstore` (mode 0700, holding the markers and the hand-over socket)
+and `[Install] WantedBy=multi-user.target`. It is the one unit of `docs/design/one-service.md`
+(section 1.4): it sets no option that gives the service a mount namespace of its own
+(`ProtectSystem=`, `PrivateTmp=`, `PrivateDevices=`, the path options such as `ReadWritePaths=`,
+and the others of section 2.2), so that a FUSE mount the process makes reaches the host; it limits
+the devices with `DevicePolicy=closed` and `DeviceAllow=/dev/fuse rw` instead, grants
+`CAP_SYS_ADMIN` and no other capability, has a descriptor store of one and the runtime directories
+`/run/tierstore-fs` and `/run/tierstore`, and restarts a failed start after 2 seconds, up to 5
+starts in 60 seconds. The process writes where its account may, with no path to make writable; a
+drop-in of the host's that adds a path option (`ReadWritePaths=` for a cache directory, say) gives
+the service a mount namespace again, which a node whose file system is served by this process
+cannot run under. The packages write no file in
 `/etc` (no conffile, no `%config` file) and no marker, and nothing starts or enables an instance,
 so a fresh install with no configuration starts no server. The post-install step creates the
 account and, only when nothing is at `/etc/tierstore`, that directory (mode 0750, group
@@ -1141,9 +1151,12 @@ After `apt upgrade`, `systemctl restart tierstore@a` takes the new binary, with 
 under hostkeeper the update hook hands over instead.
 
 A configuration that writes outside the state directory (a `dir` hot tier, the path of
-`[local_cache]`, `hot_store.lock_file`) needs those paths in a drop-in of the host's own,
-`/etc/systemd/system/tierstore@.service.d/*.conf`, with `ReadWritePaths=` (and
-`RequiresMountsFor=` for a path on its own mount). The package never writes there.
+`[local_cache]`, `hot_store.lock_file`) needs those paths owned by the account `tierstore`: the
+template has no `ProtectSystem=`, so the process writes wherever its account may. A path on a mount
+of its own wants `RequiresMountsFor=` in a drop-in of the host's own,
+`/etc/systemd/system/tierstore@.service.d/*.conf`; do not add `ReadWritePaths=` or another path
+option there, which gives the service a mount namespace of its own again. The package never writes
+there.
 
 An earlier package shipped `tierstore.service` and the conffile `/etc/tierstore/tierstore.toml`.
 Upgrading from it removes `tierstore.service` (a running process runs on until stopped) and keeps
@@ -1166,10 +1179,11 @@ the connections for at most `server.drain_deadline`, gives up the reconciler's l
 `TimeoutStopSec=` is set above
 the sum of the two drain keys and the lease's wait, so that systemd does not send SIGKILL to a drain
 in progress; if `server.drain_deadline` is raised, raise it too. A start that fails is tried again
-after 30 seconds; exit status 2 (a command line or a file the process refused: an unknown flag, a flag of the data
+after 30 seconds under `tierstore.service` and after 2 seconds under the template
+`tierstore@.service`, up to the unit's start limit (5 starts in an hour, and 5 in 60 seconds); exit status 2 (a command line or a file the process refused: an unknown flag, a flag of the data
 path that went, a file that does not load; or two keys with one access key id) is not, since a
 restart cannot mend it. Other combinations of settings and key files refused after parsing exit 1, and are tried again
-every 30 seconds.
+in the same way.
 
 ## What tierstore requires of a store
 
@@ -1190,7 +1204,9 @@ later, and writes no probe key: it does not verify what is said here.
   state, so a hot tier that cannot be reached fails the start (exit 1, `opening the proxy: ...`).
   That, an address in use or a key file refused exits 1 and is tried again after 30 seconds, up to
   the start limit (5 starts in an hour, then systemd gives up until
-  `systemctl reset-failed tierstore`). Exit 3 (`RestartPreventExitStatus=2 3`) is now only the file
+  `systemctl reset-failed tierstore`), under `tierstore.service`; under the template
+  `tierstore@.service`, after 2 seconds, up to 5 starts in 60 seconds
+  (`systemctl reset-failed tierstore@a`). Exit 3 (`RestartPreventExitStatus=2 3`) is now only the file
   system of a cache directory answering the cache's start-up check wrongly.
 - `conditional_delete` (`hot_store.conditional_delete`, `cold_store.conditional_delete`) says whether a
   conditional delete of an `s3` tier is sent with `If-Match` (`true`, for a store that enforces it

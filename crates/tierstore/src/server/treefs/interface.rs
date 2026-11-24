@@ -113,8 +113,15 @@ impl Service {
             notice,
             hung,
         } = started;
+        // A mount taken over is read only once the instance it came from has said `bye`, or
+        // ended (a release before the step): it reads the device no more.
         let told = match &notice {
-            Some(notice) => notice.ready().await.map_err(StartError::from),
+            Some(notice) => match notice.ready().await {
+                Ok(()) => running
+                    .start_reading()
+                    .map_err(super::start::io("reading the connection taken over")),
+                Err(why) => Err(StartError::from(why)),
+            },
             None => Ok(()),
         };
         let offer = told.and_then(|()| {
@@ -124,6 +131,7 @@ impl Service {
                 &settings.control_socket,
                 settings.handoff_wait,
             )
+            .map(|offer| offer.with_manager(manager.clone()))
             .map_err(StartError::from)
         });
         let offer = match offer {

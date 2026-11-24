@@ -129,6 +129,7 @@ pub(super) async fn start(
         mountpoint: &settings.mountpoint,
         control: &settings.control_socket,
         wait: settings.handoff_wait,
+        device: platform.kernel.device,
     };
     // The state is read to see that it can be, before the running instance is told to stop, and
     // read again once it has: it changes until then (a client attaches a tree).
@@ -151,7 +152,8 @@ pub(super) async fn start(
             notice,
         } = taken;
         let prepared = Prepared::load(settings)?;
-        let running = Running::adopt((settings, reach), prepared, device, (Some(control), false))?;
+        // Nothing reads the device until the running instance's `bye` (`run`).
+        let running = Running::take_over((settings, reach), prepared, device, control)?;
         let _ = steps.done("taking the mount over");
         return Ok(Started {
             running: Arc::new(running),
@@ -237,6 +239,7 @@ async fn run(settings: &FsSettings, platform: Platform) -> Result<(), StartError
             &settings.control_socket,
             settings.handoff_wait,
         )
+        .map(|offer| offer.with_manager(manager.clone()))
     };
     // The socket is there before the manager hears the unit is ready, so that the instance that
     // is started next (the other letter) finds it. A successor binds after it has told the
@@ -252,6 +255,11 @@ async fn run(settings: &FsSettings, platform: Platform) -> Result<(), StartError
     }
     if let Some(notice) = notice {
         notice.ready().await?;
+        // The running instance said `bye`, or ended (a release before the step): it reads the
+        // device no more.
+        running
+            .start_reading()
+            .map_err(io("reading the connection taken over"))?;
     }
     let offer = match early {
         Some(offer) => offer,
