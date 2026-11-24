@@ -179,6 +179,25 @@ fn a_socket_that_is_not_there_is_waited_for_in_pauses_up_to_a_limit() {
     assert_eq!(client.fill_manifest("x", OPEN), Ok(()));
 }
 
+/// Asserts that a client of no socket (a node that has none) fails a request as one whose socket
+/// is not there: after the pauses allowed, as unavailable, with nothing connected.
+#[test]
+fn a_client_of_no_socket_fails_as_one_whose_socket_is_not_there() {
+    let pauses = Arc::new(AtomicUsize::new(0));
+    let counted = Arc::clone(&pauses);
+    let pause = Arc::new(move |_: Duration| {
+        let _ = counted.fetch_add(1, Ordering::AcqRel);
+    });
+    let client = FillClient::pausing_on(None, 2, Duration::from_secs(30), pause);
+    assert_eq!(
+        client.fill_manifest("x", OPEN),
+        Err("the fill socket is not answering".to_owned())
+    );
+    assert_eq!(pauses.load(Ordering::Acquire), 2);
+    assert_eq!(client.pin("m", "t", &["a"]), Err(AskError::Unavailable));
+    assert!(client.idle.lock().unwrap().is_empty());
+}
+
 /// Asserts that a connection kept from before the socket was replaced fails once, is dropped, and
 /// the request is sent again over a new connection without a pause.
 #[test]
@@ -290,7 +309,7 @@ fn only_so_many_connections_are_kept() {
 #[test]
 fn the_pauses_of_a_client_are_the_whole_seconds_of_its_timeout() {
     let (_dir, path) = place("tfs-fc-new");
-    let client = FillClient::new(path, Duration::from_millis(2500));
+    let client = FillClient::new(Some(path), Duration::from_millis(2500));
     assert_eq!(client.tries, 2);
     assert_eq!(client.answer_timeout, Duration::from_millis(2500));
 }

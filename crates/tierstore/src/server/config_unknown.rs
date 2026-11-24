@@ -9,6 +9,7 @@
 use std::cell::Cell;
 use std::collections::BTreeSet;
 
+use serde::Deserialize;
 use serde::de::{self, DeserializeOwned, Deserializer, Error as _, Visitor};
 
 use super::config::{File, ServerTable, TierTable};
@@ -52,6 +53,26 @@ pub(super) fn fields_of<T: DeserializeOwned>() -> &'static [&'static str] {
     // The probe always ends in an error: what it found is in the cell.
     let _ = T::deserialize(Probe(&fields));
     fields.get()
+}
+
+/// A table read as `T` that refuses a key `T` does not read, as a table with
+/// `#[serde(deny_unknown_fields)]` does, where `T` itself, which another file reads too, only
+/// warns of one: the sub-tables of the params of an `fs` interface, which, being new, have no
+/// older file to keep loading.
+#[derive(Clone, Debug)]
+pub(super) struct Strict<T>(pub T);
+
+impl<'de, T: DeserializeOwned> Deserialize<'de> for Strict<T> {
+    fn deserialize<D: Deserializer<'de>>(deserializer: D) -> Result<Self, D::Error> {
+        let table = toml::Table::deserialize(deserializer)?;
+        let known = fields_of::<T>();
+        if let Some(key) = table.keys().find(|key| !known.contains(&key.as_str())) {
+            return Err(D::Error::unknown_field(key, known));
+        }
+        T::deserialize(toml::Value::Table(table))
+            .map(Strict)
+            .map_err(|error| D::Error::custom(error.message()))
+    }
 }
 
 /// The `table.key` of every key of `value` (a table, or an array of tables) that is not in `known`.

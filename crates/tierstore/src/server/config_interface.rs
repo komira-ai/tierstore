@@ -12,10 +12,11 @@
 //!
 //! An interface is a front over the same proxy. The types are `s3` (the S3 API, `/healthz`,
 //! `/readyz`, `/usagez` and `/metricz`), `oci` (the read-only registry front), `trees` (the
-//! gRPC API of node-local trees, see [`trees`](super::trees)) and `mount-provider` (jobscheduler's
+//! gRPC API of node-local trees, see [`trees`](super::trees)), `mount-provider` (jobscheduler's
 //! mount provider on a Unix socket, see [`provider::config`](super::provider::config), which listens
-//! on no address and takes params of its own); `fs` comes later and is refused today. Every other
-//! entry says where it listens with one of two params:
+//! on no address and takes params of its own) and `fs` (the trees as a file system, see
+//! [`config::fs`](super::config::fs), which listens on no address either and takes the params of the
+//! `[fs]` table of `tierstore fs`). Every other entry says where it listens with one of two params:
 //! `port`, the wildcard of IPv4 (`0.0.0.0:<port>`), or `addresses`, a socket address or a list
 //! of them. Both are refused, and so is neither, but for a `trees` interface, which listens on
 //! port 9600 of the wildcard when it says neither. An address that two interfaces (or one
@@ -43,12 +44,16 @@ use std::path::PathBuf;
 use std::time::Duration;
 
 use serde::Deserialize;
+use serde::de::IgnoredAny;
 
+use super::config::fs::{FsInterface, fs_of, provider_mountpoint, refuse_fs_params};
 use super::config::{ConfigError, invalid, refuse, require, within};
 use super::config_units::Dur;
+use super::config_unknown::Strict;
 use super::listen::Addrs;
 use super::provider::ProviderFlags;
 use super::provider::config::provider_of;
+use super::treefs::{NfsTable, PutTable};
 use super::trees::{DEFAULT_PORT, TreesFlags};
 
 /// `params.upstream` of an `oci` interface: the registry the front pulls an object from when its
@@ -80,7 +85,7 @@ pub(super) struct UpstreamTable {
 #[derive(Debug, Deserialize)]
 #[serde(deny_unknown_fields)]
 pub(super) struct InterfaceTable {
-    /// `s3`, `oci`, `trees` or `mount-provider`.
+    /// `s3`, `oci`, `trees`, `mount-provider` or `fs`.
     #[serde(rename = "type")]
     pub kind: String,
     #[serde(default)]
@@ -107,6 +112,22 @@ pub(super) struct Params {
     pub socket: Option<PathBuf>,
     pub mountpoint: Option<PathBuf>,
     pub fetch_timeout: Option<Dur>,
+    // The params of an `fs` interface alone; `mountpoint` and `fetch_timeout` are its too.
+    pub owner: Option<String>,
+    pub client_group: Option<String>,
+    pub runtime_dir: Option<PathBuf>,
+    pub control_socket: Option<PathBuf>,
+    pub threads: Option<u32>,
+    pub handoff_wait: Option<Dur>,
+    pub recover_wait: Option<Dur>,
+    pub reattach_concurrency: Option<u32>,
+    pub tree_idle_secs: Option<u64>,
+    pub nfs: Option<Strict<NfsTable>>,
+    pub put: Option<Strict<PutTable>>,
+    // Keys of `[fs]` that are not params, each refused by name with why, whatever its value.
+    pub fill_socket: Option<IgnoredAny>,
+    pub cache_path: Option<IgnoredAny>,
+    pub handoff_socket: Option<IgnoredAny>,
 }
 
 /// `[oci]`, the table of the release before: the registry front, which is an `oci` interface.
@@ -177,6 +198,8 @@ pub(super) struct Interfaces {
     pub trees: TreesFlags,
     /// The mount provider, if there is a `mount-provider` interface.
     pub provider: Option<ProviderFlags>,
+    /// The file system, if there is an `fs` interface; a build node's settings make it whole.
+    pub fs: Option<FsInterface>,
 }
 
 /// Where an interface listens: the wildcard of IPv4 at its `port`, or its `addresses`.
@@ -221,14 +244,16 @@ fn check_s3(at: &str, params: &Params) -> Result<(), ConfigError> {
     refuse_provider_params(&place, "s3", params)
 }
 
-/// Refuses the params of a `mount-provider` interface in an interface of type `kind`.
+/// Refuses the params of a `mount-provider` interface, and those of an `fs` interface, in an
+/// interface of type `kind`.
 fn refuse_provider_params(place: &str, kind: &str, params: &Params) -> Result<(), ConfigError> {
     let theirs = [
         ("socket", params.socket.is_some()),
         ("mountpoint", params.mountpoint.is_some()),
         ("fetch_timeout", params.fetch_timeout.is_some()),
     ];
-    refuse(place, &format!("not for type \"{kind}\""), &theirs)
+    refuse(place, &format!("not for type \"{kind}\""), &theirs)?;
+    refuse_fs_params(place, kind, params)
 }
 
 /// The settings of the front that a `trees` interface says, with `listen` its addresses: the TLS
@@ -394,12 +419,12 @@ fn differing_trees(first: &TreesFlags, next: &TreesFlags) -> Option<&'static str
     same.iter().find(|(_, same)| !same).map(|(name, _)| *name)
 }
 
-/// Refuses the `trees` interfaces of a file that is not a build node's (`node` says what it is):
-/// the tree store is a build node's, kept beside its cache by its `[trees]` table, so another
-/// node has nothing to serve the interface from.
+/// Refuses the `trees`, `mount-provider` and `fs` interfaces of a file that is not a build node's
+/// (`node` says what it is): the tree store is a build node's, kept beside its cache by its
+/// `[trees]` table, so another node has nothing to serve the interface from.
 ///
 /// # Errors
-/// A [`ConfigError`] on the key `trees interface`.
+/// A [`ConfigError`] on the key `trees interface`, `mount-provider interface` or `fs interface`.
 pub(super) fn no_trees(fronts: &Interfaces, node: &str) -> Result<(), ConfigError> {
     let build_node = "a build node ([local_cache] and [cold_store] without [hot_store]), whose [trees] keep the trees";
     if !fronts.trees.listen.is_empty() {
@@ -410,6 +435,10 @@ pub(super) fn no_trees(fronts: &Interfaces, node: &str) -> Result<(), ConfigErro
         let why =
             format!("{node} has no tree store: a mount-provider interface needs {build_node}");
         return Err(invalid("mount-provider interface", &why));
+    }
+    if fronts.fs.is_some() {
+        let why = format!("{node} has no tree store: an fs interface needs {build_node}");
+        return Err(invalid("fs interface", &why));
     }
     Ok(())
 }
@@ -464,13 +493,17 @@ pub(super) fn with_legacy(
 ///
 /// # Errors
 /// A [`ConfigError`] that names the entry by its place in the list (`interface[1]`): a type that
-/// is not `s3` or `oci`, a missing or doubled place to listen, an address in use by another
-/// entry, a param the type does not take, and `oci` entries that disagree.
+/// is not one, a missing or doubled place to listen, an address in use by another entry, a param
+/// the type does not take, `oci` or `trees` entries that disagree, a second `mount-provider` or
+/// `fs` entry, and a provider's `mountpoint` that is not the `fs` interface's.
 pub(super) fn interfaces(tables: &[InterfaceTable]) -> Result<Interfaces, ConfigError> {
     let mut s3 = Vec::new();
     let mut oci: Option<(usize, OciFlags)> = None;
     let mut trees: Option<(usize, TreesFlags)> = None;
     let mut provider: Option<ProviderFlags> = None;
+    // The provider's place, when it gives its own `mountpoint`.
+    let mut provider_given: Option<String> = None;
+    let mut fs: Option<FsInterface> = None;
     let mut taken: Vec<(SocketAddr, usize)> = Vec::new();
     for (index, table) in tables.iter().enumerate() {
         let at = format!("interface[{index}]");
@@ -482,14 +515,21 @@ pub(super) fn interfaces(tables: &[InterfaceTable]) -> Result<Interfaces, Config
             }
             "mount-provider" => {
                 provider = Some(provider_of(&at, &table.params)?);
+                if table.params.mountpoint.is_some() {
+                    provider_given = Some(at);
+                }
                 continue;
             }
-            "fs" => {
-                let why = "\"fs\" is not an interface of this process: `tierstore fs` is a process of its own, with an `[fs]` table; the types are \"s3\", \"oci\", \"trees\" and \"mount-provider\"";
+            "fs" if fs.is_some() => {
+                let why = "a second fs interface: a node has one file system";
                 return Err(invalid(&format!("{at}.type"), why));
             }
+            "fs" => {
+                fs = Some(fs_of(&at, &table.params)?);
+                continue;
+            }
             _ => {
-                let why = "not an interface type; the types are \"s3\", \"oci\", \"trees\" and \"mount-provider\"";
+                let why = "not an interface type; the types are \"s3\", \"oci\", \"trees\", \"mount-provider\" and \"fs\"";
                 return Err(invalid(&format!("{at}.type"), why));
             }
         }
@@ -551,6 +591,7 @@ pub(super) fn interfaces(tables: &[InterfaceTable]) -> Result<Interfaces, Config
         let why = "it needs at least one interface with type = \"s3\"";
         return Err(invalid("interface", why));
     }
+    provider_mountpoint(provider.as_mut(), provider_given.as_deref(), fs.as_ref())?;
     let oci = oci.map_or_else(OciFlags::none, |(_, flags)| flags);
     let trees = trees.map(|(_, flags)| flags).unwrap_or_default();
     Ok(Interfaces {
@@ -558,6 +599,7 @@ pub(super) fn interfaces(tables: &[InterfaceTable]) -> Result<Interfaces, Config
         oci,
         trees,
         provider,
+        fs,
     })
 }
 

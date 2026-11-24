@@ -74,6 +74,7 @@ use serde::de::{self, Visitor};
 use serde::{Deserialize, Deserializer};
 
 use super::cli::DEFAULT_OCI_PREFIX;
+use super::config::fs::fs_settings;
 use super::config::{
     ConfigError, OciFlags, PerRun, ServerTable, TierParts, TierTable, duration, front_of, invalid,
     refuse, require, tier, within,
@@ -93,6 +94,7 @@ use super::local_cache::{CacheConfig, SCRUB_MIN_ROUND, SCRUB_RATE};
 use super::provider::ProviderFlags;
 use super::provider::config::check_provider_socket;
 use super::put_ingest::config::put_ingest_of;
+use super::treefs::FsSettings;
 use super::trees::TreesFlags;
 
 /// The only layout of the cache directory.
@@ -294,6 +296,9 @@ pub(super) struct CacheSettings {
     pub trees: TreesConfig,
     /// The mount provider, as the `mount-provider` interface makes it; none without one.
     pub provider: Option<ProviderFlags>,
+    /// The file system, as the `fs` interface makes it; none without one. This release reads and
+    /// checks it and serves none: `tierstore fs` still serves the trees.
+    pub fs: Option<FsSettings>,
     /// The root of the put ingest (`local_cache.put_ingest`), or none.
     pub put_ingest: Option<std::path::PathBuf>,
 }
@@ -488,6 +493,16 @@ impl CacheSettings {
             ("local_cache.fill_socket", fill_socket.as_deref()),
         ];
         check_provider_socket(provider.as_ref(), &sockets, &part.config.path)?;
+        let sockets = [
+            sockets[0],
+            sockets[1],
+            (
+                "mount-provider interface params.socket",
+                provider.as_ref().map(|provider| provider.socket.as_path()),
+            ),
+        ];
+        let cache = (part.config.path.as_path(), fill_socket.as_deref());
+        let fs = fs_settings(fronts.fs, cache, &sockets, per_run.host)?;
         if oci.upstream.is_some() {
             let why =
                 "a pull is stored, and a build node takes no writes: use a storage node's file";
@@ -509,6 +524,7 @@ impl CacheSettings {
             fill_socket,
             trees,
             provider,
+            fs,
             put_ingest,
         })
     }

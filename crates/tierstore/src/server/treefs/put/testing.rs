@@ -218,7 +218,7 @@ impl SpaceRig {
             taken.lock().unwrap().push(pause);
             clock.advance(u64::try_from(pause.as_millis()).unwrap());
         });
-        let client = Arc::new(FillClient::for_puts(path, DEADLINE));
+        let client = Arc::new(FillClient::for_puts(Some(path), DEADLINE));
         let uploader = Uploader::new(client, DEADLINE, rig.clock.clone(), pause);
         let space = PutSpace::new(
             rig.open(),

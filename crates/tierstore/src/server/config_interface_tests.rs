@@ -86,22 +86,14 @@ fn an_address_listened_on_twice_is_refused() {
     );
 }
 
-/// Asserts that a type that is not `s3` or `oci` is refused naming the entry, and that `fs`,
-/// which comes later, says so.
+/// Asserts that a type that is not one is refused with the list of the types, `fs` among them.
 #[test]
-fn an_unknown_type_and_the_fs_type_are_refused() {
+fn an_unknown_type_is_refused_with_the_types() {
     let unknown = refusal(&[entry("s3", "port = 9300"), entry("ftp", "port = 21")]);
     assert_eq!(
         unknown,
-        "interface[1].type: not an interface type; the types are \"s3\", \"oci\", \"trees\" and \
-         \"mount-provider\""
-    );
-    let fs = refusal(&[entry("s3", "port = 9300"), entry("fs", "port = 21")]);
-    assert_eq!(
-        fs,
-        "interface[1].type: \"fs\" is not an interface of this process: `tierstore fs` is a process of \
-         its own, with an `[fs]` table; the types are \"s3\", \"oci\", \"trees\" and \
-         \"mount-provider\""
+        "interface[1].type: not an interface type; the types are \"s3\", \"oci\", \"trees\", \
+         \"mount-provider\" and \"fs\""
     );
 }
 

@@ -10,7 +10,7 @@ use std::path::PathBuf;
 use clap::Parser;
 
 use super::cli::Args;
-use super::config::{ConfigError, PerRun, Settings, load, removed};
+use super::config::{ConfigError, Host, PerRun, Settings, load, removed};
 
 /// What the command line made.
 #[derive(Debug)]
@@ -83,6 +83,7 @@ pub(super) fn resolve(args: Vec<OsString>) -> Result<Launch, Refused> {
         drain_lb_wait: args.drain_lb_wait,
         drain_deadline: args.drain_deadline,
         state_dir: state_dir(),
+        host: Host::SYSTEM,
     };
     let settings = load(&path, per_run).map_err(Refused::Config)?;
     Ok(Launch {

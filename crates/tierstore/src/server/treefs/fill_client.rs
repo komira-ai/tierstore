@@ -155,7 +155,8 @@ struct Connection {
 
 /// The client of one fill socket.
 pub(super) struct FillClient {
-    path: PathBuf,
+    /// The socket; none for a node that has none, which is a socket that is not there.
+    path: Option<PathBuf>,
     /// The pauses a request may take in all, in whole `PAUSE`s.
     tries: u32,
     /// The time an answer is waited for.
@@ -168,17 +169,28 @@ pub(super) struct FillClient {
 }
 
 impl FillClient {
-    /// A client of the socket at `path`, that waits `fetch_timeout` for an answer, and for a
-    /// socket to answer.
-    pub(super) fn new(path: PathBuf, fetch_timeout: Duration) -> Self {
+    /// A client of the socket at `path` (none: no socket, which is never there), that waits
+    /// `fetch_timeout` for an answer, and for a socket to answer.
+    pub(super) fn new(path: Option<PathBuf>, fetch_timeout: Duration) -> Self {
         let tries = u32::try_from(fetch_timeout.as_secs()).unwrap_or(u32::MAX);
-        Self::pausing(path, tries, fetch_timeout, Arc::new(std::thread::sleep))
+        Self::pausing_on(path, tries, fetch_timeout, Arc::new(std::thread::sleep))
     }
 
-    /// A client that pauses `tries` times at most, by `pause`, and waits `answer_timeout` for an
-    /// answer.
+    /// A client of the socket at `path` that pauses `tries` times at most, by `pause`, and waits
+    /// `answer_timeout` for an answer.
+    #[cfg(test)]
     pub(super) fn pausing(
         path: PathBuf,
+        tries: u32,
+        answer_timeout: Duration,
+        pause: Arc<dyn Fn(Duration) + Send + Sync>,
+    ) -> Self {
+        Self::pausing_on(Some(path), tries, answer_timeout, pause)
+    }
+
+    /// [`FillClient::pausing`] of the socket at `path`, if any.
+    pub(super) fn pausing_on(
+        path: Option<PathBuf>,
         tries: u32,
         answer_timeout: Duration,
         pause: Arc<dyn Fn(Duration) + Send + Sync>,
@@ -193,10 +205,11 @@ impl FillClient {
         }
     }
 
-    /// A client for the puts of the put directory, whose caller waits between its tries itself:
+    /// A client for the puts of the put directory (none: a node without a fill socket, whose puts
+    /// find none), whose caller waits between its tries itself:
     /// it pauses never, and waits `answer_timeout` for an answer.
-    pub(super) fn for_puts(path: PathBuf, answer_timeout: Duration) -> Self {
-        Self::pausing(
+    pub(super) fn for_puts(path: Option<PathBuf>, answer_timeout: Duration) -> Self {
+        Self::pausing_on(
             path,
             0,
             answer_timeout,
@@ -212,7 +225,10 @@ impl FillClient {
         if let Some(kept) = locked(&self.idle).pop() {
             return Ok((Some(kept), true));
         }
-        let made = match UnixStream::connect(&self.path) {
+        let Some(path) = &self.path else {
+            return Ok((None, false));
+        };
+        let made = match UnixStream::connect(path) {
             Ok(stream) => stream,
             Err(error) => {
                 return lacks_descriptors(&error).map_or(Ok((None, false)), |errno| {
@@ -359,7 +375,7 @@ impl FillClient {
     fn start_reporting(&self) -> Option<SyncSender<String>> {
         let (queue, reports) = sync_channel::<String>(REPORTS_QUEUED);
         let pause = Arc::clone(&self.pause);
-        let sender = Self::pausing(self.path.clone(), self.tries, self.answer_timeout, pause);
+        let sender = Self::pausing_on(self.path.clone(), self.tries, self.answer_timeout, pause);
         let thread = std::thread::Builder::new()
             .name("fs-reports".to_owned())
             .spawn(move || {

@@ -96,8 +96,8 @@ pub(in crate::server) fn ignored(key: &str) -> String {
     }
 }
 
-/// `[fs.nfs]`.
-#[derive(Debug, Deserialize)]
+/// `[fs.nfs]`, and `params.nfs` of an `fs` interface.
+#[derive(Clone, Debug, Deserialize)]
 pub(in crate::server) struct NfsTable {
     listen: Option<String>,
     mount: Option<bool>,
@@ -172,16 +172,22 @@ fn dead_timeout_after(fetch_timeout: Duration) -> Duration {
 /// `fs.nfs.dead_timeout`: the value given, or the default after `fetch_timeout`; one that is not
 /// more than `fetch_timeout` is refused, since the client would give up on the mount while the
 /// server still waits for a fill it may answer.
-fn dead_timeout_of(given: Option<Dur>, fetch_timeout: Duration) -> Result<Duration, ConfigError> {
+/// `place` is where the table's keys are (`fs.nfs`), and `fetch_key` the key of the fetch timeout.
+fn dead_timeout_of(
+    (place, fetch_key): (&str, &str),
+    given: Option<Dur>,
+    fetch_timeout: Duration,
+) -> Result<Duration, ConfigError> {
+    let key = format!("{place}.dead_timeout");
     let value = given.map_or_else(|| dead_timeout_after(fetch_timeout), |dur| dur.0);
     if value <= fetch_timeout {
         let why = format!(
-            "{}ms is not more than fs.fetch_timeout ({}ms): a fill that the server still waits \
+            "{}ms is not more than {fetch_key} ({}ms): a fill that the server still waits \
              for would end the mount",
             value.as_millis(),
             fetch_timeout.as_millis()
         );
-        return Err(invalid("fs.nfs.dead_timeout", why));
+        return Err(invalid(&key, why));
     }
     if value > MOST_DEAD_TIMEOUT {
         let why = format!(
@@ -189,30 +195,27 @@ fn dead_timeout_of(given: Option<Dur>, fetch_timeout: Duration) -> Result<Durati
             value.as_millis(),
             MOST_DEAD_TIMEOUT.as_millis()
         );
-        return Err(invalid("fs.nfs.dead_timeout", why));
+        return Err(invalid(&key, why));
     }
     Ok(value)
 }
 
-/// The address `text` names, which must be on loopback.
-fn listen_of(text: &str) -> Result<SocketAddr, ConfigError> {
-    let address: SocketAddr = text.parse().map_err(|_| {
-        invalid(
-            "fs.nfs.listen",
-            "must be an address and a port, as 127.0.0.1:12049",
-        )
-    })?;
+/// The address `text`, the value of `key`, names, which must be on loopback.
+fn listen_of(key: &str, text: &str) -> Result<SocketAddr, ConfigError> {
+    let address: SocketAddr = text
+        .parse()
+        .map_err(|_| invalid(key, "must be an address and a port, as 127.0.0.1:12049"))?;
     match address.ip() {
         IpAddr::V4(ip) if ip.is_loopback() => Ok(address),
         _ => Err(invalid(
-            "fs.nfs.listen",
+            key,
             "must be an IPv4 loopback address: the protocol has no authentication a network could rely on",
         )),
     }
 }
 
-/// `user`, if it is a name that cannot be taken for an option or a path.
-fn user_of(user: String) -> Result<String, ConfigError> {
+/// `user`, the value of `key`, if it is a name that cannot be taken for an option or a path.
+fn user_of(key: &str, user: String) -> Result<String, ConfigError> {
     let plain = |c: char| c.is_ascii_alphanumeric() || matches!(c, '_' | '.' | '-');
     if user.is_empty()
         || user.len() > MOST_USER_NAME
@@ -220,16 +223,16 @@ fn user_of(user: String) -> Result<String, ConfigError> {
         || !user.chars().all(plain)
     {
         return Err(invalid(
-            "fs.nfs.mount_user",
+            key,
             "must be a user name of letters, digits, `_`, `.` and `-`, not starting with `-`",
         ));
     }
     Ok(user)
 }
 
-/// `value` if it is between `low` and `high`.
+/// `value`, the value of `key` of the table at `place`, if it is between `low` and `high`.
 fn span(
-    key: &str,
+    (place, key): (&str, &str),
     value: Option<Dur>,
     default: Duration,
     (low, high): (Duration, Duration),
@@ -242,7 +245,7 @@ fn span(
             low.as_millis(),
             high.as_millis()
         );
-        return Err(invalid(&format!("fs.nfs.{key}"), why));
+        return Err(invalid(&format!("{place}.{key}"), why));
     }
     Ok(value)
 }
@@ -250,42 +253,63 @@ fn span(
 /// The hand-off the table asks for: a control socket that is an absolute path of a file that fits a
 /// Unix socket's address, and how long a new instance waits for the running one.
 fn handoff_of(
+    place: &str,
     socket: Option<std::path::PathBuf>,
     wait: Option<Dur>,
     ready_wait: Option<Dur>,
 ) -> Result<Option<Handoff>, ConfigError> {
+    let key = format!("{place}.handoff_socket");
     let Some(socket) = socket else {
-        for (key, given) in [("handoff_wait", wait), ("handoff_ready_wait", ready_wait)] {
+        for (name, given) in [("handoff_wait", wait), ("handoff_ready_wait", ready_wait)] {
             if given.is_some() {
                 return Err(invalid(
-                    &format!("fs.nfs.{key}"),
-                    "is a wait of the hand-off of fs.nfs.handoff_socket, which is not given",
+                    &format!("{place}.{name}"),
+                    format!("is a wait of the hand-off of {key}, which is not given"),
                 ));
             }
         }
         return Ok(None);
     };
-    let key = "fs.nfs.handoff_socket";
-    check_lock_path(&socket).map_err(|why| invalid(key, format!("{socket:?} {why}")))?;
+    check_lock_path(&socket).map_err(|why| invalid(&key, format!("{socket:?} {why}")))?;
     let length = socket.as_os_str().len();
     if length > MOST_SOCKET_PATH {
         let why = format!(
             "{socket:?} is {length} bytes; the path of a Unix socket is at most {MOST_SOCKET_PATH}"
         );
-        return Err(invalid(key, why));
+        return Err(invalid(&key, why));
     }
-    let wait = span("handoff_wait", wait, DEFAULT_HANDOFF_WAIT, (MS, HOUR))?;
+    let wait = span(
+        (place, "handoff_wait"),
+        wait,
+        DEFAULT_HANDOFF_WAIT,
+        (MS, HOUR),
+    )?;
     Ok(Some(Handoff { socket, wait }))
 }
 
+impl NfsTable {
+    /// The keys of the hand-off of the NFS front's own listening socket that the table gives, by
+    /// name.
+    pub(in crate::server) fn handoff_keys(&self) -> [(&'static str, bool); 3] {
+        [
+            ("handoff_socket", self.handoff_socket.is_some()),
+            ("handoff_wait", self.handoff_wait.is_some()),
+            ("handoff_ready_wait", self.handoff_ready_wait.is_some()),
+        ]
+    }
+}
+
 impl NfsSettings {
-    /// The settings of `table`, or the defaults where the file has none; `fetch_timeout` is the
-    /// file's `fs.fetch_timeout`, which the dead timeout must be more than.
+    /// The settings of `table`, or the defaults where the file has none; `fs` is where the keys
+    /// of the file system are (`fs`, or the params of an `fs` interface), the table's being its
+    /// `nfs`, and `fetch_timeout` is its `fetch_timeout`, which the dead timeout must be more
+    /// than.
     ///
     /// # Errors
     /// A [`ConfigError`] that names the key: an address that is not on loopback, a user name that
     /// is not one, a value out of its range.
     pub(in crate::server) fn of(
+        fs: &str,
         table: Option<NfsTable>,
         fetch_timeout: Duration,
     ) -> Result<Self, ConfigError> {
@@ -295,15 +319,18 @@ impl NfsSettings {
                 ..Self::default()
             });
         };
+        let place = format!("{fs}.nfs");
+        let place = place.as_str();
+        let key = |name: &str| format!("{place}.{name}");
         let shards = within(
-            "fs.nfs",
+            place,
             "fd_cache_shards",
             table.fd_cache_shards.unwrap_or(DEFAULT_SHARDS),
             1,
             4096,
         )?;
         let per_shard = within(
-            "fs.nfs",
+            place,
             "fd_cache_per_shard",
             table.fd_cache_per_shard.unwrap_or(DEFAULT_PER_SHARD),
             1,
@@ -313,17 +340,20 @@ impl NfsSettings {
             listen: table
                 .listen
                 .as_deref()
-                .map_or(Ok(DEFAULT_LISTEN), listen_of)?,
+                .map_or(Ok(DEFAULT_LISTEN), |text| listen_of(&key("listen"), text))?,
             mount: table.mount.unwrap_or(true),
-            mount_user: table.mount_user.map(user_of).transpose()?,
+            mount_user: table
+                .mount_user
+                .map(|user| user_of(&key("mount_user"), user))
+                .transpose()?,
             mount_wait: span(
-                "mount_wait",
+                (place, "mount_wait"),
                 table.mount_wait,
                 DEFAULT_MOUNT_WAIT,
                 (Duration::from_secs(1), HOUR),
             )?,
             mount_retry: span(
-                "mount_retry",
+                (place, "mount_retry"),
                 table.mount_retry,
                 DEFAULT_MOUNT_RETRY,
                 (MS, Duration::from_secs(60)),
@@ -331,31 +361,36 @@ impl NfsSettings {
             fd_cache_shards: shards as usize,
             fd_cache_per_shard: per_shard as usize,
             jukebox_after: span(
-                "jukebox_after",
+                (place, "jukebox_after"),
                 table.jukebox_after,
                 DEFAULT_JUKEBOX_AFTER,
                 (MS, Duration::from_secs(600)),
             )?,
             handoff: handoff_of(
+                place,
                 table.handoff_socket,
                 table.handoff_wait,
                 table.handoff_ready_wait,
             )?,
             ready_wait: span(
-                "handoff_ready_wait",
+                (place, "handoff_ready_wait"),
                 table.handoff_ready_wait,
                 DEFAULT_READY_WAIT,
                 (MS, HOUR),
             )?,
             drain_wait: span(
-                "drain_wait",
+                (place, "drain_wait"),
                 table.drain_wait,
                 DEFAULT_DRAIN_WAIT,
                 (MS, HOUR),
             )?,
-            dead_timeout: dead_timeout_of(table.dead_timeout, fetch_timeout)?,
+            dead_timeout: dead_timeout_of(
+                (place, &format!("{fs}.fetch_timeout")),
+                table.dead_timeout,
+                fetch_timeout,
+            )?,
             unmount_wait: span(
-                "unmount_wait",
+                (place, "unmount_wait"),
                 table.unmount_wait,
                 DEFAULT_UNMOUNT_WAIT,
                 (Duration::from_secs(1), MOST_UNMOUNT_WAIT),
