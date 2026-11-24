@@ -3,9 +3,14 @@
 //! the mount still answers the reads of open files, the opens of files the cache holds and the
 //! other requests of a tree in memory, however many opens wait.
 
+use std::time::Duration;
+
 use super::shared_reads::{PACKED, content, pack_image};
 use super::*;
 use crate::server::local_cache::trees::image_path;
+use crate::server::treefs::fill_client::FillClient;
+use crate::server::treefs::fills::{Fills as _, Report};
+use crate::server::treefs::testing::Upstream;
 
 /// A request as a reader hands it to the frontend: how the frontend took it, with the reply not
 /// waited for.
@@ -66,22 +71,46 @@ fn opens_that_wait_on_fills_never_hold_a_reader_and_cached_files_are_still_serve
     assert!(replies.iter().all(|reply| reply.error == 0), "{replies:?}");
 }
 
+/// The verbs of the reports (`fills.rs`, [`Report`]): sent by a thread of the fill client, after
+/// the request they tell of and whenever that thread gets to them, never by an open.
+const REPORTS: [&str; 4] = ["started", "attached", "fetched", "descriptors"];
+
+/// The requests the fill socket received, in order, but the reports.
+fn asked_but_reports(upstream: &Upstream) -> Vec<String> {
+    let requests = crate::server::treefs::locked(&upstream.requests);
+    let report = |line: &&String| REPORTS.contains(&line.split(' ').next().unwrap_or_default());
+    requests
+        .iter()
+        .filter(|line| !report(line))
+        .cloned()
+        .collect()
+}
+
 /// Asserts that an open whose blob the cache holds, pinned for its tree, is answered at once on the
-/// reader with no request of the fill socket, and one the cache does not hold is parked.
+/// reader with no request of the fill socket, and one the cache does not hold is parked. A report
+/// reaches the socket between the two counts, as the `fetched` report of the attach of
+/// [`Wire::new`] may whenever its thread is late: it is not a request of the open.
 #[test]
 fn an_open_of_a_cached_and_pinned_blob_asks_nothing_of_the_fill_socket() {
     let wire = Wire::new("nodefs-now");
     let cc = ino::of(1, CC);
     let first = open_out(&wire.ask(op::OPEN, cc, &open_in(0))).fh;
-    let asked = || crate::server::treefs::locked(&wire.rig.upstream.requests).len();
-    let before = asked();
+    let before = asked_but_reports(&wire.rig.upstream);
     let device = Arc::new(Recorder::default());
     let handled = hand(&wire, op::OPEN, cc, &open_in(0), &device);
     assert_eq!(handled, Handled::Done);
     let reply = device.0.lock().unwrap().remove(0);
     assert_eq!(reply.error, 0);
     assert_ne!(open_out(&reply).fh, first);
-    assert_eq!(asked(), before);
+    let reporter = FillClient::pausing(
+        wire.rig.dir.path().join("fill.sock"),
+        0,
+        Duration::from_secs(30),
+        Arc::new(|_| {}),
+    );
+    reporter.report(Report::Started("late".to_owned()));
+    until(|| wire.rig.upstream.asked("started") == ["started late"]);
+    assert_eq!(asked_but_reports(&wire.rig.upstream), before);
     let handled = hand(&wire, op::OPEN, ino::of(1, TOOL), &open_in(0), &device);
     assert_eq!(handled, Handled::Parked);
     until(|| wire.fs.parked() == 0);

@@ -13,6 +13,7 @@ use super::{HandoverError, Offer, Paths, offer_lines, take};
 use crate::server::handoff::testing::{ask, connect, send, within};
 use crate::server::handoff::wire;
 use crate::server::treefs::fakedev::instance;
+use crate::server::treefs::fills::Reach;
 use crate::server::treefs::init_record;
 use crate::server::treefs::ino;
 use crate::server::treefs::run::{Prepared, Running};
@@ -56,7 +57,7 @@ async fn a_taker_is_given_the_mount_and_the_running_instance_ends_when_it_is_rea
     old.kernel.assert_silent();
     assert!(!old.settings.handoff_socket.exists());
     let next = Running::adopt(
-        &old.settings,
+        (&old.settings, &Reach::Socket),
         prepared,
         taken.device,
         (Some(taken.control), false),

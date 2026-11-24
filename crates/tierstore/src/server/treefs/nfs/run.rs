@@ -62,6 +62,7 @@ use crate::server::handoff::{
 use crate::server::treefs::config::FsSettings;
 use crate::server::treefs::control::Control;
 use crate::server::treefs::core::Core;
+use crate::server::treefs::fills::Reach;
 use crate::server::treefs::start::{Identity, Setup, Signals, io};
 
 /// A patience that is a timer of `after`.
@@ -161,7 +162,7 @@ impl Running {
         not(test),
         expect(
             dead_code,
-            reason = "the start of the one process with an fs interface serves the NFS front (one-service.md section 6, P3)"
+            reason = "the one process serves the fs interface on Linux; its start on macOS serves the NFS front from a handed offer (one-service.md section 3.4)"
         )
     )]
     pub(super) async fn start_handed(
@@ -229,7 +230,12 @@ impl Running {
             }
             (None, None) => (None, None),
         };
-        let setup = Setup::start(settings, false, Identity::Boot(epoch), control)?;
+        let setup = Setup::start(
+            (settings, &Reach::Socket),
+            false,
+            Identity::Boot(epoch),
+            control,
+        )?;
         let reopened = setup.reopened;
         let listen = |source| NfsError::Listen {
             address: nfs.listen,
@@ -410,7 +416,7 @@ impl Running {
         not(test),
         expect(
             dead_code,
-            reason = "the one process with an fs interface hands its NFS front over (one-service.md section 6, P3)"
+            reason = "the one process serves the fs interface on Linux; on macOS it hands its NFS front over (one-service.md section 3.4)"
         )
     )]
     pub(super) async fn hand_to_image(mut self) -> Result<Handing, NfsError> {

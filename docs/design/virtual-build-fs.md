@@ -492,7 +492,9 @@ passthrough and the mount declares no `max_stack_depth` (6.4). On macOS the moun
   `GETXATTR` and `LISTXATTR` are answered `ENOSYS`, so the kernel stops sending them after the first (the overlay above
   asks for its own `user.overlay.*` attributes on every lower directory). The server answers every request that would change a tree `EROFS`; that answer is untested.
   With the mount made read-only, as in the test, the kernel returns `EROFS` without a request reaching the server (Measured: linux E4), and inside a job a write is a copy-up in the overlay and never reaches the tree.
-- **Attributes.** Every entry of every tree reports one owner, `fs.owner` (`uid:gid`, host ids): the host id of the
+- **Attributes.** Every entry of every tree reports one owner, `fs.owner` (`uid:gid`, host ids; an `fs` interface's
+  `params.owner` may also say it as `{ subids_of = "<job user>", id = 1000 }`, the job user's first subordinate uid and gid
+  plus 1000, read at load: one-service.md 1.2): the host id of the
   **action user** (the executor: container user 1000, `ACTION_ID`; jobscheduler: its action user), not of the container's root;
   on macOS a view reports the run's own user (8). Files report mode 0644, or 0755 when `exec`; directories 0755; symlinks
   0777. The action can therefore change and create anything (the overlay or the view copies up), as in a copy it owns, and
@@ -916,6 +918,8 @@ There is no per-job disk quota (CEO, 2026-11-09). The node's disk is one pool, a
 This is the hard part: the filesystem server is in the path of every lookup and open of every running job, and, on macOS
 and on Linux 6.8 (no passthrough), of every read; on macOS also of every write if the core's views are built. Sections 7.1 to 7.4 are Linux (FUSE); 7.5 is NFS.
 
+In the one process ([one-service.md](one-service.md) 2.3, 3.5) these are the steps of a build node's start and stop whose file has an `fs` interface (`server/treefs/interface.rs`).
+
 ### 7.1 What makes it tractable, and what it needs (Linux)
 
 - **I1, derivable inode numbers** (6.3) and derivable view handles (6.6): any instance can answer any request of the
@@ -1059,7 +1063,7 @@ infrastructure-retryable when `stall_ms` was over a tenth of the limit.
 
 ### 7.5 Crash and live update of the NFS frontend (macOS)
 
-**Status (pull request 12d, built).** The restart arm is built: the handle is the core's inode number and four bytes of the boot's epoch (a hash of the machine's boot identity; a handle of another boot is `NFS3ERR_STALE`), the table of tree numbers carries the epoch in the header word that was reserved and is reopened by a start of the same epoch, the mount is not made again when the `mount` listing shows it, and a resent READ or LOOKUP is answered as it was (no duplicate request cache: nothing a tree serves changes). The hand-over of the listening socket is built (`fs.nfs.handoff_socket`, a front kind `nfs` in the offer, a drain in the `komira-ai/nfsserve` fork). The launchd jobs `tierstore-fs@a` and `@b` (12e) are not built and will not be: under one-service.md, a Mac updates by a hand-over to the next image of the one process (section 3.4 there), whose NFS part is built (`Running::hand_to_image`, `Running::start_handed`, the offer on a `socketpair` in `server/handoff/exec.rs`) for the one process that serves the file system to use. Not built yet: that start, the hook's step that sends SIGUSR2, and the `fs.recover_wait` watchdog. The walk at start is not a cost: trees are read when a handle first names them.
+**Status (pull request 12d, built).** The restart arm is built: the handle is the core's inode number and four bytes of the boot's epoch (a hash of the machine's boot identity; a handle of another boot is `NFS3ERR_STALE`), the table of tree numbers carries the epoch in the header word that was reserved and is reopened by a start of the same epoch, the mount is not made again when the `mount` listing shows it, and a resent READ or LOOKUP is answered as it was (no duplicate request cache: nothing a tree serves changes). The hand-over of the listening socket is built (`fs.nfs.handoff_socket`, a front kind `nfs` in the offer, a drain in the `komira-ai/nfsserve` fork). The launchd jobs `tierstore-fs@a` and `@b` (12e) are not built and will not be: under one-service.md, a Mac updates by a hand-over to the next image of the one process (section 3.4 there), whose NFS part is built (`Running::hand_to_image`, `Running::start_handed`, the offer on a `socketpair` in `server/handoff/exec.rs`) for the one process to use once it serves the file system on macOS (it does on Linux). Not built yet: that start on macOS, the hook's step that sends SIGUSR2, and the `fs.recover_wait` watchdog. The walk at start is not a cost: trees are read when a handle first names them.
 
 What NFS gives: a hard mount makes the client wait and retry while the server does not answer [S22]; EdenFS reports
 exactly that, I/O hangs while its server is gone, and a dialog the client shows when the server stays unresponsive [S10].

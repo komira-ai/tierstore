@@ -44,6 +44,15 @@
 //! the cache lock on its standard input (`--handed 0`), which the new image takes as it would from a
 //! running instance.
 //!
+//! On Linux, with an `[[interface]]` of type `fs` the start serves the mount of the virtual build
+//! file system too (see [`Service`]): after the cache and the tree store are open it takes the
+//! mount from a running instance, or serves the descriptor the service manager kept, or mounts
+//! afresh, and only then binds the trees front and takes or binds the S3 and OCI sockets; a start
+//! that fails after that leaves the mount as a stop does. Every build node's start then tells the
+//! service manager `READY=1` where one listens. The mount is served while the fronts drain and is
+//! left once they have; a mount that cannot be served on stops the fronts as a signal does, and the
+//! start ends in failure.
+//!
 //! On SIGTERM or SIGINT the process drains as a storage node does; the eviction pass, the lock
 //! task, the scrub and the fill socket are the only things running beside the server, and they stop
 //! with it. Nothing is owed to the upstream: no journal, no lease, no copy in flight.
@@ -66,6 +75,7 @@ use super::cli::{Addresses, Error, OciSetup, S3Flags, oci_setup_of, open_tier, p
 use super::cli_serve::{
     Bound, HandedOffer, bind_fronts, bind_s3, cut_note, sockets_of, stopped_by,
 };
+#[cfg(not(target_os = "linux"))]
 use super::config::fs::not_served;
 use super::config_cache::CacheSettings;
 use super::drain::late_of;
@@ -81,9 +91,36 @@ use super::put_ingest::PutIngest;
 use super::stop_watcher::{
     oci_cut_note, serve_fronts, serve_oci, serve_trees, stop_watcher, trees_cut_note,
 };
+#[cfg(target_os = "linux")]
+use super::treefs::Service;
 use super::trees::{TreesSetup, trees_setup_of};
 use super::{Drained, Server, ServerConfig};
 use next_image::{NextImage, stop_or_next, take_write_role};
+
+/// What the start of a node gets from the system it runs on: on Linux, the service manager and
+/// the `fs` interface of a build node's file (see [`Service`]); none for a storage node, which has
+/// neither.
+#[derive(Default)]
+pub(super) struct OnSystem {
+    /// The service manager and the mount of the `fs` interface.
+    #[cfg(target_os = "linux")]
+    pub(super) service: Option<Service>,
+}
+
+impl OnSystem {
+    /// What the start of a build node with `settings` gets from this process's system. Off Linux
+    /// an `fs` interface is not served by this release, and the start says so on stderr.
+    fn of_process(settings: &CacheSettings) -> Self {
+        #[cfg(not(target_os = "linux"))]
+        if let Some(line) = not_served(settings.fs.as_ref()) {
+            tracing::warn!("{line}");
+        }
+        Self {
+            #[cfg(target_os = "linux")]
+            service: Some(Service::of_process(settings.fs.clone())),
+        }
+    }
+}
 
 /// The times of the loops that run beside the server of a cache, from its settings.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -236,8 +273,16 @@ pub(super) async fn serve_cache(
     stop: impl Future<Output = ()> + Send + 'static,
     ready: impl FnOnce(Addresses),
 ) -> Result<Drained, Error> {
-    let imaging = Imaging::default();
-    serve_cache_imaging(settings, (upstream, disk), stop, ready, imaging).await
+    let system = OnSystem::of_process(settings);
+    serve_cache_on(
+        settings,
+        (upstream, disk),
+        system,
+        stop,
+        ready,
+        Imaging::default(),
+    )
+    .await
 }
 
 /// What a start of a build node has of the hand-over to the next image of its program
@@ -252,13 +297,14 @@ pub(super) struct Imaging<'a> {
     pub(super) handed: Option<std::os::fd::OwnedFd>,
 }
 
-/// [`serve_cache`], with the hand-over to the next image of `imaging`.
+/// [`serve_cache`] with what `system` gives, and the hand-over to the next image of `imaging`.
 ///
 /// # Errors
 /// As [`serve_cache`], and a handed offer this start refuses (its addresses are not the file's).
-pub(super) async fn serve_cache_imaging(
+pub(super) async fn serve_cache_on(
     settings: &CacheSettings,
     (upstream, disk): (Arc<dyn Backend>, Arc<dyn Disk>),
+    system: OnSystem,
     stop: impl Future<Output = ()> + Send + 'static,
     ready: impl FnOnce(Addresses),
     imaging: Imaging<'_>,
@@ -274,9 +320,6 @@ pub(super) async fn serve_cache_imaging(
         true,
     )?;
     config.oci_metrics = oci.as_ref().map(|setup| Arc::clone(&setup.metrics));
-    if let Some(line) = not_served(settings.fs.as_ref()) {
-        tracing::warn!("{line}");
-    }
     let run = probe_run_id(&settings.front.proxy_id, clock.now(), std::process::id());
     let cache = open(&settings.cache, &upstream, &disk, &run).await?;
     if settings.cache.write_through {
@@ -295,9 +338,11 @@ pub(super) async fn serve_cache_imaging(
         trees_front,
         provider: settings.provider.as_ref(),
         put_ingest: settings.put_ingest.as_deref(),
+        system,
         imaging,
     };
-    serve_front(
+    // On the heap: the serving of a node is a large future, and a caller's stack is not.
+    Box::pin(serve_front(
         cache,
         config,
         oci,
@@ -305,7 +350,7 @@ pub(super) async fn serve_cache_imaging(
         stop,
         ready,
         std::future::ready(()),
-    )
+    ))
     .await
 }
 
@@ -343,6 +388,9 @@ pub(super) struct Fronts<'a> {
     /// The root of the put ingest (`local_cache.put_ingest`), ingested while the cache holds the
     /// lock of its directory (see [`put_ingest`](super::put_ingest)); none for a node without one.
     pub(super) put_ingest: Option<&'a std::path::Path>,
+    /// What the node gets from its system: the service manager, and the mount of the `fs`
+    /// interface, which is got before the sockets of the fronts and left after they drain.
+    pub(super) system: OnSystem,
     /// The hand-over to the next image of the program, of a build node ([`next_image`]).
     pub(super) imaging: Imaging<'a>,
 }
@@ -391,6 +439,16 @@ pub(super) async fn serve_front(
             )
         })?;
     config.trees.clone_from(&trees);
+    // The mount is got, and the instance it was taken from told that it is served, before any
+    // socket of a front is bound or taken: a start that cannot get it leaves the running
+    // instance serving everything.
+    #[cfg(not(target_os = "linux"))]
+    let OnSystem {} = fronts.system;
+    #[cfg(target_os = "linux")]
+    let served = match fronts.system.service {
+        Some(service) => Some(Box::pin(service.start((cache.clone(), trees.clone()))).await?),
+        None => None,
+    };
     let listen = config.listen;
     // The registry front reads what the S3 front reads: through the cache.
     let backend: Arc<dyn Backend> = Arc::new(cache.clone());
@@ -398,36 +456,54 @@ pub(super) async fn serve_front(
     // The trees sockets are bound beside a running instance's (`SO_REUSEPORT`, they are not handed
     // over), and before the S3 and OCI sockets are taken from it: a trees address that cannot be
     // bound fails the start while the running instance still serves.
-    let trees_front = match fronts.trees_front {
-        Some(setup) => Some(setup.bind().await?),
-        None => None,
-    };
-    let trees_all = match &trees_front {
-        Some(front) => front.local_addrs()?,
-        None => Vec::new(),
-    };
     let Imaging { next, handed } = fronts.imaging;
     let lock_path = cache.lock_path();
     let handed = handed.map(|fd| HandedOffer {
         fd,
         lock: Some(&lock_path),
     });
-    let Bound {
-        s3: listeners,
-        oci,
-        addresses,
-        offer,
-        lock,
-    } = bind_fronts(
-        fronts.handoff,
-        handed,
-        &bind_set(fronts.listen, true),
-        || bind_cache_s3(fronts.listen, listen.backlog),
-        oci,
-        backend,
-    )
-    .await
-    .map_err(super::cli::HandingError::into_boxed)?;
+    let fronts_bound = async {
+        let trees_front = match fronts.trees_front {
+            Some(setup) => Some(setup.bind().await?),
+            None => None,
+        };
+        let trees_all = match &trees_front {
+            Some(front) => front.local_addrs()?,
+            None => Vec::new(),
+        };
+        let bound = bind_fronts(
+            fronts.handoff,
+            handed,
+            &bind_set(fronts.listen, true),
+            || bind_cache_s3(fronts.listen, listen.backlog),
+            oci,
+            backend,
+        )
+        .await
+        .map_err(super::cli::HandingError::into_boxed)?;
+        Ok::<_, Error>((trees_front, trees_all, bound))
+    };
+    let (
+        trees_front,
+        trees_all,
+        Bound {
+            s3: listeners,
+            oci,
+            addresses,
+            offer,
+            lock,
+        },
+    ) = match fronts_bound.await {
+        Ok(bound) => bound,
+        Err(why) => {
+            // The mount was served: it is left, as at a stop, for the next start.
+            #[cfg(target_os = "linux")]
+            if let Some(served) = served {
+                served.abandon().await;
+            }
+            return Err(why);
+        }
+    };
     if let Some(received) = lock {
         drop(tokio::spawn(take_write_role(cache.clone(), received)));
     }
@@ -441,17 +517,31 @@ pub(super) async fn serve_front(
             .with_ready_wait(handoff.wait)
             .with_lock(cache.clone())
     });
+    // A mount that cannot be served on stops the fronts as a signal does.
+    let failed = Arc::new(Notify::new());
+    let failing = Arc::clone(&failed);
+    let stop = async move {
+        tokio::select! {
+            () = stop => {}
+            () = failing.notified() => {}
+        }
+    };
     let stop = stopped_by(stop, offer);
     let mut addresses = addresses;
     addresses.trees_all = trees_all;
     ready(addresses);
+    #[cfg(target_os = "linux")]
+    if let Some(served) = &served {
+        served.ready();
+    }
     let oci_drain = oci.as_ref().map(OciListener::drain);
     let (late_s3, late_oci) = (Arc::clone(&server), oci_drain.clone());
     let (watcher, oci_stopped) = stop_watcher(stop, Arc::clone(&server), oci_drain, fronts.lb_wait);
     let trees_stopped = oci_stopped.clone();
     // One Notify for each loop: `notify_one` wakes one waiter, and keeps the wake for a loop that
     // is not waiting just now.
-    let halts: [Arc<Notify>; 9] = [
+    let halts: [Arc<Notify>; 10] = [
+        Arc::new(Notify::new()),
         Arc::new(Notify::new()),
         Arc::new(Notify::new()),
         Arc::new(Notify::new()),
@@ -471,6 +561,7 @@ pub(super) async fn serve_front(
         provider_halt,
         watch_halt,
         ingest_halt,
+        fs_halt,
         _,
     ] = halts.clone();
     let beating = fronts.beating.clone();
@@ -545,7 +636,18 @@ pub(super) async fn serve_front(
             tracing::debug!("tierstore: put ingest ended");
         }
     };
-    let ((drained, (oci_cut, trees_cut)), (), (), (), (), (), (), (), (), ()) = tokio::join!(
+    // The mount is served while the fronts drain, and left once they have (`fs_halt`).
+    let mounting = async {
+        #[cfg(target_os = "linux")]
+        if let Some(served) = served {
+            let ended = served.serve(fs_halt, failed).await;
+            tracing::debug!("tierstore: mount ended");
+            return ended.map_err(Error::from);
+        }
+        let _unmounted = (fs_halt, failed);
+        Ok::<(), Error>(())
+    };
+    let ((drained, (oci_cut, trees_cut)), (), (), (), (), (), (), (), (), (), mounted) = tokio::join!(
         serving,
         beside,
         maintaining,
@@ -555,7 +657,8 @@ pub(super) async fn serve_front(
         sweeping,
         providing,
         watching,
-        ingesting
+        ingesting,
+        mounting
     );
     watcher.abort();
     if let (Some(next), Some(kept)) = (next, kept)
@@ -567,6 +670,7 @@ pub(super) async fn serve_front(
     super::build_info::stderr_log::notes(&oci_cut_note(oci_cut));
     super::build_info::stderr_log::notes(&trees_cut_note(trees_cut));
     super::build_info::stderr_log::notes(&late_of(&late_s3, late_oci.as_ref()));
+    mounted?;
     Ok(drained)
 }
 
@@ -587,7 +691,7 @@ pub(super) async fn run_cache(
 /// [`run_cache`], with the hand-over to the next image of `imaging`.
 ///
 /// # Errors
-/// As [`serve_cache_imaging`].
+/// As [`serve_cache_on`].
 async fn run_cache_imaging(
     settings: &CacheSettings,
     stop: impl Future<Output = ()> + Send + 'static,
@@ -613,7 +717,8 @@ async fn run_cache_imaging(
         &settings.s3_client,
     )?;
     let disk: Arc<dyn Disk> = Arc::new(SystemDisk);
-    serve_cache_imaging(settings, (upstream, disk), stop, ready, imaging).await
+    let system = OnSystem::of_process(settings);
+    serve_cache_on(settings, (upstream, disk), system, stop, ready, imaging).await
 }
 
 /// Runs the cache until SIGTERM or SIGINT, or, on a Mac, SIGUSR2: then it gives back the next image

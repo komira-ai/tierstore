@@ -1,6 +1,8 @@
 //! What a `tierstore fs` process does between its start and its end: whether to take the mount
 //! over or to make it, what to tell the service manager, and what ends it
-//! (`docs/design/virtual-build-fs.md` sections 7.2 and 7.3).
+//! (`docs/design/virtual-build-fs.md` sections 7.2 and 7.3). The choice of the start ([`start`]),
+//! and what ends a process ([`ended`]), are also those of the `fs` interface of the one process
+//! (`interface.rs`), whose core calls the node's cache instead of asking the fill socket.
 //!
 //! At a start, in order:
 //!
@@ -12,10 +14,12 @@
 //!    a process that died or was stopped: it is served from the recorded outcome, and where the
 //!    kernel can send requests again (`FUSE_HAS_RESEND`) it is asked to send those the process
 //!    before read and did not answer; where it cannot, `fs.recover_wait` bounds the wait for them
-//!    (`recover.rs`). A descriptor whose state cannot be read is dropped (the connection is
-//!    aborted, so that no job hangs on it) and the mount is made afresh.
-//! 3. Otherwise the mount is made, a dead mount that a process before left at the mount point is
-//!    detached first, and the descriptor is put in the manager's store.
+//!    (`recover.rs`). A descriptor whose state cannot be read is taken out of the store and the
+//!    mount is made afresh, which aborts its connection, so that no job hangs on it.
+//! 3. Otherwise the mount is made, and the descriptor is put in the manager's store. A mount of
+//!    this file system that the kernel's table of mounts shows at the mount point has no process
+//!    serving it by then: it is aborted and detached first, and the mount point is not looked at
+//!    (`run.rs`).
 //!
 //! None of these waits for the announcement of the mount's pins and placements to the node's fill
 //! socket: after a boot the node's tierstore reads its whole cache before it binds the socket, and
@@ -35,9 +39,10 @@ use std::sync::Arc;
 use tsfuse::abi::InitFlags;
 
 use super::config::FsSettings;
+use super::fills::Reach;
 use super::handover::{self, Offer, Paths};
 use super::recover;
-use super::run::{Kernel, Prepared, Running, discard_mount};
+use super::run::{Kernel, Prepared, Running};
 use super::sd::{self, FUSE_NAME, Manager, Stored};
 use super::start::{Signals, StartError, io};
 use super::steps::Steps;
@@ -45,6 +50,7 @@ use crate::{Clock, MonotonicClock};
 
 /// What the platform gives the process: the channel to the service manager and the descriptors it
 /// passed.
+#[derive(Clone)]
 pub(super) struct Platform {
     /// The service manager, if there is one.
     pub manager: Manager,
@@ -57,19 +63,19 @@ pub(super) struct Platform {
 }
 
 /// What the start made.
-struct Started {
-    running: Arc<Running>,
+pub(super) struct Started {
+    pub running: Arc<Running>,
     /// The connection to the instance this one took the mount from.
-    notice: Option<handover::Notice>,
+    pub notice: Option<handover::Notice>,
     /// Receives when the watch of a restart has aborted the connection.
-    hung: Option<tokio::sync::oneshot::Receiver<()>>,
+    pub hung: Option<tokio::sync::oneshot::Receiver<()>>,
 }
 
 /// Serves the connection of the descriptor the service manager kept, and starts the watch of a
 /// restart where the kernel cannot send requests again. An error means the connection cannot be
 /// served: the start goes on to make a mount.
 fn adopt_stored(
-    settings: &FsSettings,
+    (settings, reach): (&FsSettings, &Reach),
     (stored, kernel): (&Stored, &Kernel),
 ) -> Result<(Arc<Running>, Option<tokio::sync::oneshot::Receiver<()>>), StartError> {
     let device = sd::take(stored.fd).map_err(|source| StartError::Io {
@@ -77,7 +83,7 @@ fn adopt_stored(
         source,
     })?;
     let prepared = Prepared::load(settings)?;
-    let running = Running::adopt(settings, prepared, device, (None, true))?;
+    let running = Running::adopt((settings, reach), prepared, device, (None, true))?;
     // A kernel that can send the requests again and refused to has left them as unanswered as
     // one that cannot.
     let hung =
@@ -109,9 +115,11 @@ fn unstore(manager: &Manager) {
     }
 }
 
-/// Makes the start's choice: take, adopt or mount.
-async fn start(
-    settings: &FsSettings,
+/// Makes the start's choice, in this order: take the mount from a running instance, else adopt the
+/// descriptor the service manager kept, else mount afresh. The core asks the node's cache and
+/// tree store by `reach`.
+pub(super) async fn start(
+    (settings, reach): (&FsSettings, &Reach),
     platform: &Platform,
     steps: &mut Steps,
 ) -> Result<Started, StartError> {
@@ -145,7 +153,7 @@ async fn start(
         } = taken;
         let prepared = Prepared::load(settings)?;
         // Nothing reads the device until the running instance's `bye` (`run`).
-        let running = Running::take_over(settings, prepared, device, control)?;
+        let running = Running::take_over((settings, reach), prepared, device, control)?;
         let _ = steps.done("taking the mount over");
         return Ok(Started {
             running: Arc::new(running),
@@ -158,7 +166,7 @@ async fn start(
         .iter()
         .find(|stored| stored.name == FUSE_NAME)
     {
-        match adopt_stored(settings, (stored, &platform.kernel)) {
+        match adopt_stored((settings, reach), (stored, &platform.kernel)) {
             Ok((running, hung)) => {
                 let _ = steps.done("serving the descriptor the service manager kept");
                 return Ok(Started {
@@ -168,13 +176,13 @@ async fn start(
                 });
             }
             Err(why) => {
+                // The fresh start below aborts and detaches the mount of the descriptor.
                 tracing::error!("tierstore fs: kept connection not served ({why}): remounting");
                 unstore(manager);
-                discard_mount(settings, true, &platform.kernel);
             }
         }
     }
-    let running = Running::start(settings)?;
+    let running = Running::start((settings, reach), &platform.kernel)?;
     let stored = running
         .device()
         .and_then(|device| manager.store(FUSE_NAME, device.as_fd()))
@@ -191,7 +199,7 @@ async fn start(
 }
 
 /// Why the process stops serving.
-enum End {
+pub(super) enum End {
     /// SIGTERM or SIGINT.
     Signal,
     /// A successor serves the mount.
@@ -201,7 +209,7 @@ enum End {
 }
 
 /// Waits for the watch of a restart to report a hang; never, if there is none.
-async fn hang(hung: Option<tokio::sync::oneshot::Receiver<()>>) {
+pub(super) async fn hang(hung: Option<tokio::sync::oneshot::Receiver<()>>) {
     if let Some(hung) = hung
         && hung.await.is_ok()
     {
@@ -222,7 +230,7 @@ async fn run(settings: &FsSettings, platform: Platform) -> Result<(), StartError
         running,
         notice,
         hung,
-    } = start(settings, &platform, &mut steps).await?;
+    } = start((settings, &Reach::Socket), &platform, &mut steps).await?;
     let manager = &platform.manager;
     let bind = || {
         Offer::bind(
@@ -274,7 +282,7 @@ async fn run(settings: &FsSettings, platform: Platform) -> Result<(), StartError
 /// answers every request from here on, and reads what it needs from the runtime directory, all of
 /// it written before `done` (`Running::quiesce`). The state is left to the end of the process
 /// ([`leave_to_kernel`]) rather than taken apart, so the process ends at once after `ready`.
-fn ended(end: End, running: Arc<Running>, manager: &Manager) -> Result<(), StartError> {
+pub(super) fn ended(end: End, running: Arc<Running>, manager: &Manager) -> Result<(), StartError> {
     let hung = match end {
         End::Handed => {
             leave_to_kernel(running);
@@ -303,7 +311,7 @@ fn ended(end: End, running: Arc<Running>, manager: &Manager) -> Result<(), Start
 /// of gigabytes, some of it swapped out, that took minutes, which the process spent doing nothing
 /// for anyone. Nothing else holds it up: the threads still running (the announcer, the sweeps,
 /// the sessions of control clients) are detached, and they end with the process.
-fn leave_to_kernel(running: Arc<Running>) {
+pub(super) fn leave_to_kernel(running: Arc<Running>) {
     std::mem::forget(running);
 }
 
@@ -319,19 +327,26 @@ pub(super) fn serve_with(settings: &FsSettings, platform: Platform) -> Result<()
     runtime.block_on(run(settings, platform))
 }
 
+impl Platform {
+    /// The service manager this process was started by, if any, the descriptors it passed, and
+    /// the kernel's files of this machine.
+    pub(super) fn of_process() -> Self {
+        let env = sd::environment();
+        Self {
+            manager: Manager::new(env.notify_socket.as_deref()),
+            stored: env.stored_here(),
+            kernel: Kernel::real(),
+            clock: Arc::new(MonotonicClock::new()),
+        }
+    }
+}
+
 /// Serves with the service manager this process was started by, if any.
 ///
 /// # Errors
 /// As [`run`].
 pub(in crate::server) fn serve(settings: &FsSettings) -> Result<(), StartError> {
-    let env = sd::environment();
-    let platform = Platform {
-        manager: Manager::new(env.notify_socket.as_deref()),
-        stored: env.stored_here(),
-        kernel: Kernel::real(),
-        clock: Arc::new(MonotonicClock::new()),
-    };
-    serve_with(settings, platform)
+    serve_with(settings, Platform::of_process())
 }
 
 #[cfg(test)]

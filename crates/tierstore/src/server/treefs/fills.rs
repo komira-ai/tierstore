@@ -6,12 +6,85 @@
 //! both, so that the core reads them one way.
 
 use std::path::PathBuf;
+use std::sync::Arc;
 use std::time::Duration;
 
+#[cfg(any(target_os = "linux", test))]
+use tokio::runtime::Handle;
+
+#[cfg(any(target_os = "linux", test))]
+use crate::server::local_cache::LocalCache;
 use crate::server::local_cache::attaches::{Attach, Fetches};
 use crate::server::local_cache::descriptors::Descriptors;
+#[cfg(any(target_os = "linux", test))]
+use crate::server::local_cache::trees::TreeStore;
 
-use super::fill_client::{AskError, FillFailure, PAUSE, Place, PlacedTree, Until};
+use super::config::FsSettings;
+use super::fill_client::{AskError, FillClient, FillFailure, PAUSE, Place, PlacedTree, Until};
+#[cfg(any(target_os = "linux", test))]
+use super::in_process::InProcess;
+
+/// Which of the two ways a start makes its core ask: over the fill socket of its settings, or by
+/// calls of the cache and the tree store of this process.
+#[derive(Clone)]
+pub(super) enum Reach {
+    /// Over `fs.fill_socket`: the process `tierstore fs`.
+    Socket,
+    /// By calls: the `fs` interface of the one process (`docs/design/one-service.md`, section
+    /// 1.5), which serves on Linux.
+    #[cfg(any(target_os = "linux", test))]
+    Calls(Calls),
+}
+
+/// The node's cache and tree store, called in this process.
+#[cfg(any(target_os = "linux", test))]
+#[derive(Clone)]
+pub(super) struct Calls {
+    /// The node's cache.
+    pub cache: LocalCache,
+    /// The node's tree store, if it has one.
+    pub trees: Option<TreeStore>,
+    /// The runtime the cache's work runs on.
+    pub runtime: Handle,
+}
+
+#[cfg(any(target_os = "linux", test))]
+impl Calls {
+    /// The requests to these, each waiting at most `wait`, with the pauses of the core's tries
+    /// taken by `pause`.
+    fn fills(&self, wait: Duration, pause: Arc<dyn Fn(Duration) + Send + Sync>) -> Arc<dyn Fills> {
+        let reached = (self.cache.clone(), self.trees.clone());
+        Arc::new(InProcess::new(reached, self.runtime.clone(), wait, pause))
+    }
+}
+
+impl Reach {
+    /// What the core of `settings` asks through: it waits `fs.fetch_timeout` for an answer, and
+    /// pauses between its tries.
+    pub(super) fn core(&self, settings: &FsSettings) -> Arc<dyn Fills> {
+        match self {
+            Self::Socket => Arc::new(FillClient::new(
+                settings.fill_socket.clone(),
+                settings.fetch_timeout,
+            )),
+            #[cfg(any(target_os = "linux", test))]
+            Self::Calls(calls) => calls.fills(settings.fetch_timeout, Arc::new(std::thread::sleep)),
+        }
+    }
+
+    /// What the put directory of `settings` asks through, for a caller that waits between its
+    /// tries itself: it never pauses, and waits `answer_timeout` for an answer.
+    #[cfg(any(target_os = "linux", test))]
+    pub(super) fn puts(&self, settings: &FsSettings, answer_timeout: Duration) -> Arc<dyn Fills> {
+        match self {
+            Self::Socket => Arc::new(FillClient::for_puts(
+                settings.fill_socket.clone(),
+                answer_timeout,
+            )),
+            Self::Calls(calls) => calls.fills(answer_timeout, Arc::new(std::mem::drop::<Duration>)),
+        }
+    }
+}
 
 /// What the core tells the node for its metrics; the core does not wait for it to be told.
 #[derive(Clone, Debug, PartialEq, Eq)]

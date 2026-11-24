@@ -182,10 +182,8 @@ pub struct Args {
     /// of the file. Given with the key it is refused, as `--drain-lb-wait` is.
     #[arg(long, hide = true, value_parser = parse_duration)]
     pub drain_deadline: Option<Duration>,
-    /// Given by the process to itself, never by an operator: this start is the next image of a
-    /// build node that handed over to it (on a Mac, on SIGUSR2), and reads the offer of its
-    /// listening sockets and its cache lock from descriptor 0, its standard input, which is the one
-    /// value taken. Another shape of file is refused with status 2.
+    /// Given by a build node of a Mac to its next image on SIGUSR2, not by an operator: its offer
+    /// is on descriptor 0, the one value taken (`server::next_image`; another shape is status 2).
     #[arg(long, hide = true, value_name = "N", value_parser = clap::value_parser!(u8).range(0..=0))]
     pub handed: Option<u8>,
 }
@@ -901,9 +899,7 @@ pub fn main(args: Vec<OsString>) -> ExitCode {
     };
     let started = match settings {
         Settings::Storage(cli) => blocking(serve_until_signalled(*cli)),
-        Settings::Cache(cache) => {
-            blocking(serve_cache_until_signalled(*cache, handed)).and_then(exec_next)
-        }
+        Settings::Cache(c) => blocking(serve_cache_until_signalled(*c, handed)).and_then(exec_next),
         Settings::Combined(node) => blocking(serve_combined_until_signalled(*node)),
         Settings::Cold(node) => blocking(super::cli_serve::cold::serve_cold_until_signalled(*node)),
     };
@@ -976,6 +972,12 @@ pub(super) fn exit_status(why: &Error) -> u8 {
     }
     if why.downcast_ref::<LocalTierFailure>().is_some() {
         return 3;
+    }
+    // The start of the mount of a build node's `fs` interface: 3 for a cache on a stacked file
+    // system, as `tierstore fs` says.
+    #[cfg(target_os = "linux")]
+    if let Some(start) = why.downcast_ref::<super::treefs::StartError>() {
+        return start.status();
     }
     1
 }

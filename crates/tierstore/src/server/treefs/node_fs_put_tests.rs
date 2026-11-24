@@ -19,11 +19,12 @@ use std::time::Duration;
 use rustix::fs::{CWD, FileType, Mode, OFlags, XattrFlags};
 
 use crate::server::treefs::config::FsSettings;
+use crate::server::treefs::fills::Reach;
 use crate::server::treefs::put::PutSettings;
 use crate::server::treefs::put::config::PutConfig;
 use crate::server::treefs::put::space::{PutAttr, PutSpace};
 use crate::server::treefs::put_fs::{absent, attr, entry};
-use crate::server::treefs::run::{Prepared, Running};
+use crate::server::treefs::run::{Kernel, Prepared, Running};
 use crate::server::treefs::testing::{Rig, sample, until, with_fuse};
 
 /// The job's directory, below `put/`.
@@ -66,7 +67,7 @@ impl Served {
     fn start(name: &str) -> Self {
         let rig = Rig::new(name, sample());
         let settings = settings(&rig);
-        let running = Running::start(&settings).unwrap();
+        let running = Running::start((&settings, &Reach::Socket), &Kernel::real()).unwrap();
         Self {
             running: Some(running),
             settings,
@@ -113,7 +114,13 @@ impl Served {
     /// Starts the successor over `device`.
     fn adopt(&mut self, device: OwnedFd, control: Option<UnixListener>) {
         let prepared = Prepared::load(&self.settings).unwrap();
-        let next = Running::adopt(&self.settings, prepared, device, (control, false)).unwrap();
+        let next = Running::adopt(
+            (&self.settings, &Reach::Socket),
+            prepared,
+            device,
+            (control, false),
+        )
+        .unwrap();
         self.running = Some(next);
     }
 }

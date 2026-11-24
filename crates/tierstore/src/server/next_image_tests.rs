@@ -13,7 +13,7 @@ use tokio::io::{AsyncReadExt as _, AsyncWriteExt as _};
 use tokio::sync::oneshot;
 
 use super::{NextImage, exec_next, stop_or_next_on, take_write_role};
-use crate::server::cache_cli::{Imaging, serve_cache_imaging};
+use crate::server::cache_cli::{Imaging, OnSystem, serve_cache_on};
 use objstore_s3::{ByteRange, ObjectKey, ObjectStore as _};
 
 use crate::server::cache_cli_tests::{Node, client, probe};
@@ -222,9 +222,10 @@ async fn a_build_node_hands_its_sockets_and_lock_to_the_next_image() {
         handed: None,
     };
     let ways = (Arc::clone(&upstream), Arc::clone(&disk));
-    let old = serve_cache_imaging(
+    let old = serve_cache_on(
         &settings,
         ways,
+        OnSystem::default(),
         stopping,
         |at| {
             let _ = told.send(at.s3);
@@ -252,9 +253,10 @@ async fn a_build_node_hands_its_sockets_and_lock_to_the_next_image() {
     let stopping = async move {
         let _ = stopped.await;
     };
-    let new = serve_cache_imaging(
+    let new = serve_cache_on(
         &settings,
         ways,
+        OnSystem::default(),
         stopping,
         |at| {
             let _ = told.send(at.s3);

@@ -2,7 +2,9 @@
 //! (`docs/design/virtual-build-fs.md`). One FUSE mount per node, `fs.mountpoint`, shows the trees
 //! that clients attach by digest for their runs, and any tree whose digest a lookup names
 //! (`core/implicit.rs`, until it is idle for `fs.tree_idle_secs`), lazily: a file's bytes are
-//! fetched from the node's tierstore, over its fill socket, on the file's first open.
+//! fetched from the node's tierstore on the file's first open, over its fill socket, or, in the one
+//! process whose file has an `fs` interface (`interface`, Linux), by calls of its cache
+//! (`fills`, `in_process`).
 //!
 //! - [`config`]: the `[fs]` table of the file.
 //! - [`ino`], [`table`], [`tree`]: the inode numbers (invariant I1), the table of tree numbers in
@@ -23,6 +25,9 @@
 //!   node's shared cache (section 23 of that design).
 //! - [`nfs`] (macOS serves it; built and tested everywhere): the NFSv3 frontend, over loopback,
 //!   and the mount around it.
+//! - `interface` (Linux): the mount of the `fs` interface of a build node's file, served by the
+//!   node's own process: its start (as `launch`'s, before the sockets of the fronts) and its stop
+//!   (after the fronts drain).
 //! - `launch`, `serving`, `sd`, `init_record`, `handle`, `recover` and `handover` (Linux): crash
 //!   recovery and the hand-over of the mount. The mount's `/dev/fuse` descriptor is kept by the
 //!   service manager (`sd`), so the mount outlives the process; a process that takes the
@@ -51,15 +56,16 @@ pub(in crate::server) mod core;
 mod fill_client;
 mod fills;
 mod groups;
-// The core's requests as calls of the cache and the tree store of this process: made by the start
-// of the one process's `fs` interface, a later change (docs/design/one-service.md, build plan P3).
 #[cfg(any(target_os = "linux", test))]
 mod handle;
+// The core's requests as calls of the cache and the tree store of this process: made by the start
+// of the one process's `fs` interface (`interface`), which serves on Linux; the NFS frontend's
+// start in the one process is a later change.
 #[cfg_attr(
-    not(test),
+    all(not(test), not(target_os = "linux")),
     expect(
         dead_code,
-        reason = "the start of the `fs` interface in the one process, which makes it, is a later change"
+        reason = "the start of the `fs` interface in the one process off Linux is a later change"
     )
 )]
 mod in_process;
@@ -94,6 +100,8 @@ mod handover;
 #[cfg(target_os = "linux")]
 mod init_record;
 #[cfg(target_os = "linux")]
+mod interface;
+#[cfg(target_os = "linux")]
 mod launch;
 #[cfg(target_os = "linux")]
 mod node_fs;
@@ -127,10 +135,12 @@ mod steps;
 )]
 mod nfs;
 
-pub(super) use config::{DEFAULT_MOUNTPOINT, FsSettings, FsTable, Lookup, load};
+pub(super) use config::{DEFAULT_MOUNTPOINT, FsSettings, FsTable, Lookup, id_of, load};
 #[cfg(test)]
 pub(super) use config::{builders, from_text};
 pub(super) use groups::{Database, Found, system as system_names};
+#[cfg(target_os = "linux")]
+pub(super) use interface::Service;
 #[cfg(target_os = "linux")]
 pub(super) use launch::serve;
 pub(super) use nfs::config::NfsTable;
