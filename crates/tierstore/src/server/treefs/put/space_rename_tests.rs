@@ -15,6 +15,7 @@ use super::super::super::fake::failed;
 use super::super::super::testing::{DEADLINE, SpaceRig, warnings};
 use super::super::PutSpace;
 use crate::server::treefs::ino::{self, PutIno};
+use crate::server::treefs::locked;
 use crate::server::treefs::testing::until;
 
 /// The key of the directory every test writes in.
@@ -350,6 +351,33 @@ fn a_drain_waits_for_a_commit_that_uploads_and_its_answer() {
     assert_eq!(result, Ok(()));
     assert_eq!(name.as_deref(), Some("fs-commit"));
     assert_eq!(puts.object(&format!("{DIR}/pack")).unwrap(), b"in flight");
+}
+
+/// A hand-over's drain of the uploads, made while the readers still serve, waits for the uploads
+/// that run when it begins and not for one that begins after it: a node that keeps committing
+/// does not hold the hand-over for ever. With none running it returns at once. Catches a drain
+/// that waits for every upload, which a steady stream of commits never lets end.
+#[test]
+fn a_drain_of_the_uploads_waits_for_those_running_and_not_for_later_ones() {
+    let rig = SpaceRig::new("put-rename-drain-uploads");
+    let space = Arc::new(rig.space);
+    space.drain_uploads();
+    let early = space.commits.upload();
+    let (marked, began) = mpsc::channel();
+    *space.before_drain.lock().unwrap() = Some(Arc::new(move || {
+        let _ = marked.send(());
+    }));
+    let draining = Arc::clone(&space);
+    let drain = std::thread::spawn(move || draining.drain_uploads());
+    began.recv().unwrap();
+    let late = space.commits.upload();
+    assert!(!drain.is_finished());
+    drop(early);
+    until(|| drain.is_finished());
+    drain.join().unwrap();
+    assert_eq!(locked(&space.commits.uploads).running.len(), 1);
+    drop(late);
+    assert!(locked(&space.commits.uploads).running.is_empty());
 }
 
 /// A drain with no commit running returns at once, without waiting; a commit answered at once on

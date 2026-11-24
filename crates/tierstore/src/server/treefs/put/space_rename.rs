@@ -16,8 +16,13 @@
 //! and the commit writes the journal and the stage, which the successor reads once it serves. Each
 //! commit ends by its deadline (`fs.put.commit_deadline_secs`), the upload included; one that waits
 //! for the release of its file ends at once, `EBUSY`, when the hand-over holds the space
-//! ([`PutSpace::hold`]): the release goes to the successor and would never reach it.
+//! ([`PutSpace::hold`]): the release goes to the successor and would never reach it. The uploads
+//! that run when a hand-over begins are waited for first, while the readers still serve
+//! ([`PutSpace::drain_uploads`]): an upload asks the node's tierstore over the fill socket until
+//! its deadline, and while that socket does not answer (the tierstore restarting) a mount whose
+//! readers had stopped would answer nothing until then.
 
+use std::collections::BTreeSet;
 use std::sync::{Arc, Condvar, Mutex};
 
 use rustix::io::Errno;
@@ -30,11 +35,44 @@ use super::super::store::{Rename, StagedStore};
 use super::PutSpace;
 use crate::server::treefs::locked;
 
-/// The count of the commits whose thread runs, and what wakes a wait for none.
+/// The count of the commits whose thread runs, and what wakes a wait for none; and the uploads
+/// that run, and what wakes a wait for their end.
 #[derive(Default)]
 pub(super) struct Commits {
     count: Mutex<usize>,
     idle: Condvar,
+    uploads: Mutex<Uploads>,
+    uploaded: Condvar,
+}
+
+/// The uploads of the commits that run now, each by the number it was given when it began.
+#[derive(Default)]
+struct Uploads {
+    /// The number the next upload is given.
+    next: u64,
+    /// The numbers of the uploads that have not ended.
+    running: BTreeSet<u64>,
+}
+
+/// An upload of a commit, counted in [`Commits`] until it is dropped.
+struct Uploading<'a>(&'a Commits, u64);
+
+impl Commits {
+    /// Counts an upload that begins now.
+    fn upload(&self) -> Uploading<'_> {
+        let mut uploads = locked(&self.uploads);
+        let number = uploads.next;
+        uploads.next = number.saturating_add(1);
+        let _ = uploads.running.insert(number);
+        Uploading(self, number)
+    }
+}
+
+impl Drop for Uploading<'_> {
+    fn drop(&mut self) {
+        let _ = locked(&self.0.uploads).running.remove(&self.1);
+        self.0.uploaded.notify_all();
+    }
 }
 
 /// A commit counted in [`Commits`] until it is dropped: after its answer, or when its thread could
@@ -231,6 +269,27 @@ impl PutSpace {
             .unwrap_or_else(std::sync::PoisonError::into_inner);
     }
 
+    /// Waits until every upload that runs now has ended, and not for one that begins later: a
+    /// hand-over calls it before the readers stop, so that a request the mount is sent while an
+    /// upload waits on the fill socket is answered. A commit that waits for the release of its file
+    /// or for another commit is not waited for here, nor is the rest of a commit after its upload:
+    /// [`PutSpace::drain_commits`] waits for those after the stop. Each upload ends by its deadline.
+    pub(in crate::server) fn drain_uploads(&self) {
+        let mark = locked(&self.commits.uploads).next;
+        #[cfg(test)]
+        if !locked(&self.commits.uploads).running.is_empty() {
+            let hook = locked(&self.before_drain).clone();
+            let _ = hook.map(|hook| hook());
+        }
+        let _ended = self
+            .commits
+            .uploaded
+            .wait_while(locked(&self.commits.uploads), |uploads| {
+                uploads.running.first().is_some_and(|first| *first < mark)
+            })
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
+    }
+
     /// The commits that run on a thread of their own and have not answered yet.
     #[cfg(test)]
     pub(in crate::server) fn commits_running(&self) -> usize {
@@ -276,11 +335,13 @@ impl PutSpace {
                 }
             }
         };
+        let uploading = self.commits.upload();
         let outcome = self.uploader.put(
             (commit.key(), commit.sha256(), commit.size()),
             &commit.path(),
             plan.deadline,
         );
+        drop(uploading);
         let finished = commit.finish(outcome).map_err(|error| super::errno(&error));
         self.changes
             .notify(&[Topic::File(plan.id), Topic::Key(&plan.key)]);

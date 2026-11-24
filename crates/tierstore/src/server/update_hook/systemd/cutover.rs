@@ -56,17 +56,18 @@ pub(super) fn cutover(c: &Ctx<'_, '_>, params: &Params, record: &Record) -> Resu
     };
     c.ports.markers.set(next)?;
     c.ports.units.start(next)?;
-    c.look().serves(target)?;
+    let mode = c.look().serves(target)?;
     // The switch: the new process took the mount from the fs unit, which ends by itself; its
     // markers go so that it never starts again.
     if record.fs_switch {
         fs::give_up(c)?;
     }
     // The fs process after the store, as the unit orders itself: the new fs instance talks to the
-    // new store, the pair a release is tested as.
+    // new store, the pair a release is tested as. Not while that store is read-only: its fill
+    // socket is not up yet (`fs::take`).
     let mut take_note = String::new();
     if let Some(fs_next) = record.fs_next {
-        take_note = fs::take(c, fs_next)?;
+        take_note = fs::take(c, fs_next, mode)?;
         // Both markers coexist only during the take.
         c.ports.fs_markers.clear(fs_next.other())?;
     }

@@ -148,7 +148,8 @@ pub(in crate::server) struct PutSpace {
     /// Called by a commit that is about to wait, for the tests that act in that gap.
     #[cfg(test)]
     pub(super) before_wait: Mutex<Option<Arc<dyn Fn() + Send + Sync>>>,
-    /// Called by a drain of the commits that is about to wait, for the tests that act in that gap.
+    /// Called by a drain of the commits or of the uploads that is about to wait, for the tests that
+    /// act in that gap.
     #[cfg(test)]
     pub(in crate::server) before_drain: Mutex<Option<Arc<dyn Fn() + Send + Sync>>>,
     /// Whether a commit's thread is not made (set only by the tests of the fallback to the

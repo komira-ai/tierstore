@@ -91,6 +91,40 @@ fn a_hand_over_update_moves_the_store_and_the_fs_process_to_b() {
     assert_eq!(fake.running(), [Instance::B]);
 }
 
+/// Asserts that `cutover` does not start the fs instance while the new store serves read-only:
+/// it has not taken the cache lock yet, so its fill socket is not up, and a hand-over then would
+/// wait on the old fs instance's uploads and unpins that nothing answers. The step defers
+/// (`draining`, 10 seconds) with the store started, no fs unit touched and no `swapped`; the run
+/// after the store is read-write takes the mount. Catches a hook that starts the take as soon as
+/// `/readyz` answers, read-only or not.
+#[test]
+fn a_cutover_starts_the_fs_take_only_once_the_new_store_is_read_write() {
+    let fake = SystemdFake::fs_installed();
+    let p = params(NEW, Some(OLD));
+    fake.drive(&p, &[Prepare]);
+    fake.set_read_only(true);
+    let deferred = fake.run(Cutover, &p);
+    assert_deferred(&deferred, Reason::Draining, 10);
+    assert_eq!(
+        detail(&deferred),
+        "the store serves read-only and its fill socket is not up until it takes the cache lock: \
+         tierstore-fs@b is not started yet, and cutover runs again"
+    );
+    assert!(fake.fs_actions().is_empty(), "{:?}", fake.fs_actions());
+    assert_eq!(fake.peek_fs(Instance::B), UnitState::Inactive);
+    assert!(!fake.record().has(Marker::Swapped));
+
+    fake.set_read_only(false);
+    let done = fake.run(Cutover, &p);
+    assert_ok(&done);
+    assert!(detail(&done).ends_with("; tierstore-fs@b holds the mount"));
+    assert_eq!(
+        fake.fs_actions(),
+        ["fs_markers.set b", "fs_units.start b", "fs_markers.clear a"]
+    );
+    assert!(fake.record().has(Marker::Swapped));
+}
+
 /// Asserts that three updates in a row alternate the fs process a, b, a, as the store, with the
 /// record's `fs_live` following. Catches an fs process that always starts the same letter.
 #[test]
