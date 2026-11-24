@@ -58,6 +58,8 @@ mod table;
 #[cfg(test)]
 mod files_tests;
 #[cfg(test)]
+mod fill_chunks_tests;
+#[cfg(test)]
 mod fill_parts_tests;
 #[cfg(test)]
 mod fill_tests;

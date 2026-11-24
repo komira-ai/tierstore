@@ -23,7 +23,10 @@
 //! directory fills nothing ([`FillError::ReadOnly`]).
 //!
 //! The fetch is the one of every fill (`fill::fetch_from`): chunks of `fill_chunk` bytes, a staging
-//! file, the checks of the lock before each step, a create-only link into `obj/`.
+//! file, the checks of the lock before each step, a create-only link into `obj/`. A blob whose pack
+//! the cache holds whole (the copy a write-through put of the pack keeps, on the node whose job
+//! wrote it) is read from that copy and not from the upstream, and checked by its digest the same
+//! way (`fill/held.rs`).
 
 use std::sync::Arc;
 

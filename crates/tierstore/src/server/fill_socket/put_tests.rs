@@ -14,6 +14,8 @@ use tracing::subscriber::{DefaultGuard, set_default};
 
 use super::{answer, chunks, send};
 use crate::server::build_info::stderr_log::LineLog;
+use crate::server::local_cache::blob_path;
+use crate::server::local_cache::pack_testing::Pack;
 use crate::server::local_cache::testing::{Rig, until};
 use crate::{Backend as _, Error, Op, TreeDigest};
 
@@ -180,6 +182,26 @@ async fn the_put_is_sent_without_a_head_first_and_the_cache_keeps_its_copy() {
     // The copy a put that found the object began is dropped; its writer removes the stage file
     // when the runtime next runs it.
     until("the stage file was removed", || rig.staged_files() == 0).await;
+}
+
+/// Asserts that a tree read on the node that wrote it is served from the pack its job put: the
+/// pack goes through the socket's `put` (a job's commit), and each file of the tree, a span of
+/// that pack, is then filled as the socket's `fill` fills it, with exactly its bytes and no GET
+/// or HEAD at the upstream. Catches a fill that fetches the span from the upstream again although
+/// the cache kept the pack.
+#[tokio::test]
+async fn a_tree_over_the_pack_a_put_kept_is_filled_with_no_upstream_read() {
+    let rig = Rig::writing("tfs-put-tree");
+    let pack = Pack::new("cas/b/1/n/pack", &[1000, 2000, 3000]);
+    let file = staged(&rig, "pack.part", pack.bytes());
+    assert_eq!(put(&rig, &pack.key, &file, pack.bytes()).await, CREATED);
+    let before = (rig.calls(Op::Get), rig.calls(Op::Head));
+    for i in 0..3 {
+        rig.cache.fill_blob(&pack.blob(i)).await.unwrap();
+        let kept = blob_path(&rig.config.path, &pack.blobs[i].0);
+        assert_eq!(std::fs::read(kept).unwrap(), pack.content(i));
+    }
+    assert_eq!((rig.calls(Op::Get), rig.calls(Op::Head)), before);
 }
 
 /// A reader that gives `first` and then fails.
