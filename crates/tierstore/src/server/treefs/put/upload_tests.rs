@@ -93,8 +93,10 @@ fn a_try_waits_for_its_answer_no_longer_than_the_deadline_leaves() {
     let rig = super::super::testing::SpaceRig::new("put-upload-left");
     let socket = rig.rig.root.path().join("fill.sock");
     let clock = rig.rig.clock.clone();
+    let client =
+        crate::server::treefs::fill_client::FillClient::for_puts(socket, Duration::from_secs(30));
     let uploader = super::Uploader::new(
-        &socket,
+        std::sync::Arc::new(client),
         Duration::from_secs(30),
         clock.clone(),
         std::sync::Arc::new(|_| {}),

@@ -39,7 +39,7 @@ use crate::tree_manifest::{EntryKind, TreeDigest, TreeEntry};
 use super::attach::{Attachments, Failure, Snapshot, is_run};
 #[cfg(any(target_os = "linux", test))]
 use super::backing::{Adopted, Guard};
-use super::fill_client::FillClient;
+use super::fills::Fills;
 #[cfg(any(target_os = "linux", test))]
 use super::handle;
 use super::ino;
@@ -216,7 +216,7 @@ pub(super) struct Settings {
 /// The core.
 pub(in crate::server) struct Core {
     settings: Settings,
-    fills: FillClient,
+    fills: Arc<dyn Fills>,
     table: TreeTable,
     /// The attachments, for short looks and changes: never held across a write of the attachments
     /// file or a round trip on the fill socket.
@@ -304,7 +304,7 @@ impl Core {
     /// A core with no tree attached, whose attachments are kept in `runtime_dir`.
     pub(super) fn new(
         settings: Settings,
-        fills: FillClient,
+        fills: Arc<dyn Fills>,
         table: TreeTable,
         runtime_dir: &Path,
     ) -> Self {

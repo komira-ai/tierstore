@@ -138,7 +138,7 @@ pub(super) enum MountRequest {
 
 /// Why a line is not a request. The text follows `refused ` in the answer.
 #[derive(Debug, PartialEq, Eq, thiserror::Error)]
-pub(super) enum Refusal {
+pub(in crate::server) enum Refusal {
     /// The line is not text.
     #[error("the request is not text")]
     NotText,
@@ -340,16 +340,25 @@ fn put(rest: &str) -> Result<Request, Refusal> {
     let path = source.strip_prefix("from ").ok_or(Refusal::Malformed)?;
     let sha256 = TreeDigest::from_hex(sha256).ok_or(Refusal::Digest)?;
     let size = number(size)?;
-    let key = key(target)?;
-    if !path.starts_with('/') {
-        return Err(Refusal::Path);
-    }
+    let path = PathBuf::from(path);
+    check_put(target, &path)?;
     Ok(Request::Put {
-        key,
+        key: target.to_owned(),
         sha256,
         size,
-        path: PathBuf::from(path),
+        path,
     })
+}
+
+/// Why the socket refuses a put of the file at `path` as the object `target`, once its digest
+/// and size are read: a key that is not usable ([`key`]), a path that is not absolute. The puts
+/// made in process are checked so too.
+pub(in crate::server) fn check_put(target: &str, path: &std::path::Path) -> Result<(), Refusal> {
+    key(target)?;
+    if !path.is_absolute() {
+        return Err(Refusal::Path);
+    }
+    Ok(())
 }
 
 /// The placement id `text`, or why it is not one.
@@ -381,13 +390,26 @@ fn blob(rest: &str) -> Result<(String, u64, String, u64), Refusal> {
     let source = source.strip_prefix("from ").ok_or(Refusal::Malformed)?;
     let (from, offset) = source.rsplit_once(" @ ").ok_or(Refusal::Malformed)?;
     let (size, offset) = (number(size)?, number(offset)?);
+    check_blob((&sha256, size), (from, offset))?;
+    Ok((sha256, size, from.to_owned(), offset))
+}
+
+/// Why the socket refuses a fill or a span of the blob `sha256` of `size` bytes at `offset` of
+/// the object `from`, once its words are read: a digest that is not one, a blob of no bytes, one
+/// that ends past 2^64, a key that is not usable ([`key`]). The fills made in process are checked
+/// so too.
+pub(in crate::server) fn check_blob(
+    (sha256, size): (&str, u64),
+    (from, offset): (&str, u64),
+) -> Result<(), Refusal> {
+    digest(sha256)?;
     if size == 0 {
         return Err(Refusal::Empty);
     }
     if offset.checked_add(size).is_none() {
         return Err(Refusal::Overflow);
     }
-    Ok((sha256, size, key(from)?, offset))
+    key(from).map(drop)
 }
 
 #[cfg(test)]

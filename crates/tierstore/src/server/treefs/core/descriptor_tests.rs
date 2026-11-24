@@ -8,6 +8,7 @@ use std::process::Command;
 use super::*;
 use crate::server::treefs::attach::Failure;
 use crate::server::treefs::fill_client::FillClient;
+use crate::server::treefs::fills::Fills as _;
 use crate::server::treefs::ino;
 use crate::server::treefs::testing::{Logged, Rig, logged, open_cached, sample};
 

@@ -29,6 +29,7 @@ use crate::server::local_cache::attaches::{Attach, Outcome};
 use crate::tree_manifest::TreeDigest;
 
 use super::super::attach::Failure;
+use super::super::fills::Report;
 use super::fetched::Fetched;
 use super::placed::{Unread, placement_of};
 use super::said::Failing;
@@ -104,7 +105,7 @@ impl Core {
             Err(Errno::NoEnt) => Outcome::Absent,
             Err(_) => Outcome::Failed,
         };
-        self.fills.report(Attach { outcome, ms }.line());
+        self.fills.report(Report::Attached(Attach { outcome, ms }));
         let counts = fetched.counts();
         tracing::info!(
             "tierstore fs: lookup of {digest}: {} in {ms} ms; {} manifests: {} from the cache, \
